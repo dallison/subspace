@@ -1,0 +1,12 @@
+package(default_visibility = ["//visibility:public"])
+
+proto_library(
+    name = "subspace_proto",
+    srcs = ["subspace.proto"],
+)
+
+cc_proto_library(
+    name = "subspace_cc_proto",
+    deps = [":subspace_proto"],
+)
+

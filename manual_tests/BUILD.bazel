@@ -1,0 +1,113 @@
+package(default_visibility = ["//visibility:public"])
+
+cc_binary(
+    name = "pub",
+    srcs = [
+        "pub.cc",
+    ],
+    deps = [
+        "//client:subspace_client",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/flags:parse",
+ 
+    ],
+)
+
+
+
+cc_binary(
+    name = "sub",
+    srcs = [
+        "sub.cc",
+    ],
+    deps = [
+        "//client:subspace_client",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/flags:parse",
+    ],
+)
+
+
+cc_binary(
+    name = "perf_subspace_sub",
+    srcs = [
+        "perf_subspace_sub.cc",
+    ],
+    deps = [
+        "//client:subspace_client",
+        "//common:subspace_common",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/flags:parse",
+    ],
+)
+
+cc_binary(
+    name = "perf_subspace_pub",
+    srcs = [
+        "perf_subspace_pub.cc",
+    ],
+    deps = [
+        "//client:subspace_client",
+        "//common:subspace_common",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/flags:parse",
+    ],
+    )
+
+cc_binary(
+    name = "perf_tcp_recv",
+    srcs = [
+        "perf_tcp_recv.cc",
+    ],
+    deps = [
+        "//common:subspace_common",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/flags:parse",
+    ],
+)
+
+cc_binary(
+    name = "perf_tcp_send",
+    srcs = [
+        "perf_tcp_send.cc",
+    ],
+    deps = [
+        "//common:subspace_common",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/flags:parse",
+    ],
+)
+
+cc_binary(
+    name = "perf_subspace",
+    srcs = [
+        "perf_subspace.cc",
+    ],
+    deps = [
+        "//client:subspace_client",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/flags:parse",
+        "@coroutines//:co",
+    ],
+)

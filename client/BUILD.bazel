@@ -1,0 +1,37 @@
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "subspace_client",
+    srcs = [
+        "client.cc",
+    ],
+    hdrs = [
+        "client.h",
+        "client_channel.h",
+        "options.h",
+    ],
+    deps = [
+        "//common:subspace_common",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:str_format",
+        "@coroutines//:co",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
+    ],
+)
+
+cc_test(
+  name = "client_test",
+  size = "small",
+  srcs = ["client_test.cc"],
+  deps = [
+    ":subspace_client",
+    "//server:server",
+    "@com_google_googletest//:gtest_main",
+    "@com_google_absl//absl/status",
+    "@com_google_absl//absl/status:statusor",
+    "@com_google_absl//absl/hash:hash_testing",
+     "@coroutines//:co",
+  ],
+)

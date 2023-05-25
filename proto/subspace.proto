@@ -1,0 +1,183 @@
+// Copyright 2023 David Allison
+// All Rights Reserved
+// See LICENSE file for licensing information.
+
+syntax = "proto3";
+
+package subspace;
+
+message InitRequest { string client_name = 1; }
+
+// All Request and Response messages are carried over a Unix Domain
+// Socket between the client and the server.  They are followed
+// by an array of file descriptors (SCM_RIGHTS message) that
+// are duped from the server.  These fds are for shared memory
+// segments and trigger fds.  The messages contain indices into
+// the fd array.
+message InitResponse {
+  int32 scb_fd_index = 1; // Index into fds of SystemControlBlock fd.
+}
+
+message CreatePublisherRequest {
+  string channel_name = 1;
+  int32 num_slots = 2;
+  int32 slot_size = 3;
+  bool is_public = 4;
+  bool is_reliable = 5;
+  bool is_bridge = 6; // This publisher is for the bridge.
+  string type = 7;    // Type of data carried on channel.
+}
+
+message CreatePublisherResponse {
+  string error = 1;
+  int32 channel_id = 2;
+  int32 publisher_id = 3;
+  int32 ccb_fd_index = 4;
+  int32 buffers_fd_index = 5;
+  int32 pub_poll_fd_index = 6;
+  int32 pub_trigger_fd_index = 7;
+  repeated int32 sub_trigger_fd_indexes = 8;
+  int32 num_sub_updates = 9;
+  string type = 10;
+}
+
+// This is used both to create a new subscriber and to reload
+// an existing one.  If channel_id is not -1, it refers to
+// an existing subscriber to the channel.
+message CreateSubscriberRequest {
+  string channel_name = 1;
+  int32 subscriber_id = 2; // -1 if there is no existing subscriber.
+  bool is_reliable = 3;
+  bool is_bridge = 4; // This subscriber is for the bridge.
+  string type = 5;    // Type of data carried on channel.
+}
+
+message CreateSubscriberResponse {
+  string error = 1;
+  int32 channel_id = 2;
+  int32 subscriber_id = 3;
+  int32 ccb_fd_index = 4;
+  int32 buffers_fd_index = 5;
+  int32 trigger_fd_index = 6;
+  int32 poll_fd_index = 7;
+  int32 slot_size = 8; // Might be zero if no publisher.
+  int32 num_slots = 9; // Might be zero if no publisher.
+  repeated int32 reliable_pub_trigger_fd_indexes = 10;
+  int32 num_pub_updates = 11;
+  string type = 12;
+}
+
+message GetTriggersRequest { string channel_name = 1; }
+
+message GetTriggersResponse {
+  string error = 1;
+  repeated int32 reliable_pub_trigger_fd_indexes = 2;
+  repeated int32 sub_trigger_fd_indexes = 3;
+}
+
+message RemovePublisherRequest {
+  string channel_name = 1;
+  int32 publisher_id = 2;
+}
+
+message RemovePublisherResponse { string error = 1; }
+
+message RemoveSubscriberRequest {
+  string channel_name = 1;
+  int32 subscriber_id = 2;
+}
+
+message RemoveSubscriberResponse { string error = 1; }
+
+message Request {
+  oneof request {
+    InitRequest init = 1;
+    CreatePublisherRequest create_publisher = 2;
+    CreateSubscriberRequest create_subscriber = 3;
+    GetTriggersRequest get_triggers = 4;
+    RemovePublisherRequest remove_publisher = 5;
+    RemoveSubscriberRequest remove_subscriber = 6;
+  }
+}
+
+message Response {
+  oneof response {
+    InitResponse init = 1;
+    CreatePublisherResponse create_publisher = 2;
+    CreateSubscriberResponse create_subscriber = 3;
+    GetTriggersResponse get_triggers = 4;
+    RemovePublisherResponse remove_publisher = 5;
+    RemoveSubscriberResponse remove_subscriber = 6;
+  }
+}
+
+// These messages are carried on Subspace channels published by
+// the server.
+message ChannelInfo {
+  string name = 1;
+  int32 slot_size = 2;
+  int32 num_slots = 3;
+  string type = 4;
+}
+
+// This is published to the ipc/ChannelDirectory channel.
+message ChannelDirectory {
+  string server_id = 1;
+  repeated ChannelInfo channels = 2;
+}
+
+message ChannelStats {
+  string channel_name = 1;
+  int64 total_bytes = 2;
+  int64 total_messages = 3;
+}
+
+// This is published to the ipc/Statistics channel.
+message Statistics {
+  string server_id = 1;
+  int64 timestamp = 2;
+  repeated ChannelStats channels = 3;
+}
+
+message ChannelAddress {
+  bytes ip_address = 1; // In host byte order.
+  int32 port = 2;       // In host byte order.
+}
+
+// This is sent over the connected channel TCP bridge when the
+// bridged subscription is successful.
+message Subscribed {
+  string channel_name = 1;
+  int32 slot_size = 2;
+  int32 num_slots = 3;
+  bool reliable = 4;
+}
+
+// This message is sent over UDP.
+message Discovery {
+  // Ask which server is publishing the named channel.
+  message Query { string channel_name = 1; }
+
+  // Advertise that the sender is publishing a channel.
+  message Advertise {
+    string channel_name = 1;
+    bool reliable = 2;
+  }
+
+  // Subscribe to the given channel.  The sender is listening
+  // on the address specified in 'receiver'.
+  message Subscribe {
+    string channel_name = 1;
+    ChannelAddress receiver = 2;
+    bool reliable = 3;
+  }
+
+  string server_id = 1;
+  int32 port = 2; // UDP port I'm listening on.
+
+  oneof data {
+    Query query = 3;
+    Advertise advertise = 4;
+    Subscribe subscribe = 5;
+  }
+}
