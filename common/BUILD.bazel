@@ -1,0 +1,46 @@
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "subspace_common",
+    srcs = [
+        "channel.cc",
+        "sockets.cc",
+        "triggerfd.cc",
+        "hexdump.cc",
+        "logging.cc",
+    ],
+    hdrs = [
+        "channel.h",
+        "sockets.h",
+        "fd.h",
+        "triggerfd.h",
+        "mutex.h",
+        "hexdump.h",
+        "bitset.h",
+        "clock.h",
+        "logging.h",
+    ],
+    deps = [
+        "@com_google_protobuf//:protobuf",
+        "@com_google_absl//absl/strings",
+        "//proto:subspace_cc_proto",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:str_format",
+        "@coroutines//:co",
+    ],
+)
+
+cc_test(
+  name = "fd_test",
+  size = "small",
+  srcs = ["fd_test.cc"],
+  deps = [
+    ":subspace_common",
+    "@com_google_googletest//:gtest_main",
+    "@com_google_absl//absl/status",
+    "@com_google_absl//absl/status:statusor",
+    "@com_google_absl//absl/hash:hash_testing",
+     "@coroutines//:co",
+  ],
+)
