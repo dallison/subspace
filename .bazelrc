@@ -1,0 +1,14 @@
+build:asan --strip=never
+build:asan --copt -fsanitize=address
+build:asan --copt -DADDRESS_SANITIZER
+build:asan --copt -g
+build:asan --copt -fno-omit-frame-pointer
+build:asan --linkopt -fsanitize=address
+
+# For all builds, use C++17
+build --cxxopt="-std=c++17"
+
+# For Apple Silicon
+build:apple_silicon --cpu=darwin_arm64
+
+
