@@ -2,7 +2,7 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#include "common/sockets.h"
+#include "toolbelt/sockets.h"
 
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -15,17 +15,17 @@
 #include <string>
 
 #include "absl/strings/str_format.h"
-#include "common/hexdump.h"
+#include "toolbelt/hexdump.h"
 
 namespace subspace {
 
-InetAddress InetAddress::BroadcastAddress(int port) {
-  return InetAddress("255.255.255.255", port);
+toolbelt::InetAddress toolbelt::InetAddress::BroadcastAddress(int port) {
+  return toolbelt::InetAddress("255.255.255.255", port);
 }
 
-InetAddress InetAddress::AnyAddress(int port) { return InetAddress(port); }
+toolbelt::InetAddress toolbelt::InetAddress::AnyAddress(int port) { return toolbelt::InetAddress(port); }
 
-InetAddress::InetAddress(const in_addr &ip, int port) {
+toolbelt::InetAddress::toolbelt::InetAddress(const in_addr &ip, int port) {
   addr_ = {
 #if defined(_APPLE__)
     .sin_len = sizeof(int),
@@ -36,7 +36,7 @@ InetAddress::InetAddress(const in_addr &ip, int port) {
   };
 }
 
-InetAddress::InetAddress(int port) {
+toolbelt::InetAddress::toolbelt::InetAddress(int port) {
   valid_ = true;
   addr_ = {
 #if defined(_APPLE__)
@@ -48,7 +48,7 @@ InetAddress::InetAddress(int port) {
   };
 }
 
-InetAddress::InetAddress(const std::string &hostname, int port) {
+toolbelt::InetAddress::toolbelt::InetAddress(const std::string &hostname, int port) {
   struct hostent *entry = gethostbyname(hostname.c_str());
   in_addr_t ipaddr;
   if (entry != NULL) {
@@ -72,7 +72,7 @@ InetAddress::InetAddress(const std::string &hostname, int port) {
   };
 }
 
-std::string InetAddress::ToString() const {
+std::string toolbelt::InetAddress::ToString() const {
   char buf[INET_ADDRSTRLEN];
   inet_ntop(AF_INET, &addr_.sin_addr, buf, sizeof(buf));
   return absl::StrFormat("%s:%d", buf, ntohs(addr_.sin_port));
@@ -223,9 +223,9 @@ absl::StatusOr<ssize_t> Socket::SendMessage(char *buffer, size_t length,
 }
 
 // Unix Domain socket.
-UnixSocket::UnixSocket() : Socket(socket(AF_UNIX, SOCK_STREAM, 0)) {}
+toolbelt::UnixSocket::toolbelt::UnixSocket() : Socket(socket(AF_UNIX, SOCK_STREAM, 0)) {}
 
-static struct sockaddr_un BuildUnixSocketName(const std::string &pathname) {
+static struct sockaddr_un Buildtoolbelt::UnixSocketName(const std::string &pathname) {
   struct sockaddr_un addr;
   memset(reinterpret_cast<void *>(&addr), 0, sizeof(addr));
   addr.sun_family = AF_UNIX;
@@ -241,8 +241,8 @@ static struct sockaddr_un BuildUnixSocketName(const std::string &pathname) {
   return addr;
 }
 
-absl::Status UnixSocket::Bind(const std::string &pathname, bool listen) {
-  struct sockaddr_un addr = BuildUnixSocketName(pathname);
+absl::Status toolbelt::UnixSocket::Bind(const std::string &pathname, bool listen) {
+  struct sockaddr_un addr = Buildtoolbelt::UnixSocketName(pathname);
 
   int e =
       ::bind(fd_.Fd(), reinterpret_cast<const sockaddr *>(&addr), sizeof(addr));
@@ -257,9 +257,9 @@ absl::Status UnixSocket::Bind(const std::string &pathname, bool listen) {
   return absl::OkStatus();
 }
 
-absl::StatusOr<UnixSocket> UnixSocket::Accept(co::Coroutine *c) {
+absl::StatusOr<toolbelt::UnixSocket> toolbelt::UnixSocket::Accept(co::Coroutine *c) {
   if (!fd_.Valid()) {
-    return absl::InternalError("UnixSocket is not valid");
+    return absl::InternalError("toolbelt::UnixSocket is not valid");
   }
   if (c != nullptr) {
     c->Wait(fd_.Fd(), POLLIN);
@@ -273,14 +273,14 @@ absl::StatusOr<UnixSocket> UnixSocket::Accept(co::Coroutine *c) {
         absl::StrFormat("Failed to accept unix socket connection on fd %d: %s",
                         fd_.Fd(), strerror(errno)));
   }
-  return UnixSocket(new_fd, /*connected=*/true);
+  return toolbelt::UnixSocket(new_fd, /*connected=*/true);
 }
 
-absl::Status UnixSocket::Connect(const std::string &pathname) {
+absl::Status toolbelt::UnixSocket::Connect(const std::string &pathname) {
   if (!fd_.Valid()) {
-    return absl::InternalError("UnixSocket is not valid");
+    return absl::InternalError("toolbelt::UnixSocket is not valid");
   }
-  struct sockaddr_un addr = BuildUnixSocketName(pathname);
+  struct sockaddr_un addr = Buildtoolbelt::UnixSocketName(pathname);
 
   int e = ::connect(fd_.Fd(), reinterpret_cast<const sockaddr *>(&addr),
                     sizeof(addr));
@@ -292,7 +292,7 @@ absl::Status UnixSocket::Connect(const std::string &pathname) {
   return absl::OkStatus();
 }
 
-absl::Status UnixSocket::SendFds(const std::vector<FileDescriptor> &fds,
+absl::Status toolbelt::UnixSocket::SendFds(const std::vector<toolbelt::FileDescriptor> &fds,
                                  co::Coroutine *c) {
   if (!Connected()) {
     return absl::InternalError("Socket is not connected");
@@ -302,39 +302,50 @@ absl::Status UnixSocket::SendFds(const std::vector<FileDescriptor> &fds,
     char buf[CMSG_SPACE(kMaxFds * sizeof(int))];
     struct cmsghdr align;
   } u;
-  memset(u.buf, 0, sizeof(u.buf));
 
-  // Need to send at least one byte.
-  char data[1] = {0};
-  struct iovec iov = {.iov_base = reinterpret_cast<void *>(data), .iov_len = 1};
-  size_t fds_size = fds.size() * sizeof(int);
-  struct msghdr msg = {.msg_iov = &iov,
-                       .msg_iovlen = 1,
-                       .msg_control = u.buf,
-                       .msg_controllen =
-                           static_cast<socklen_t>(CMSG_SPACE(fds_size))};
+  // We send the total number file descriptors.  There is a limit to the
+  // number we can send in one message.
+  size_t remaining_fds = fds.size();
+  size_t first_fd = 0;
 
-  struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-  cmsg->cmsg_level = SOL_SOCKET;
-  cmsg->cmsg_type = SCM_RIGHTS;
-  cmsg->cmsg_len = CMSG_LEN(fds_size);
-  int *fdptr = reinterpret_cast<int *>(CMSG_DATA(cmsg));
-  for (size_t i = 0; i < fds.size(); i++) {
-    *fdptr++ = fds[i].Fd();
-  }
+  while (remaining_fds > 0) {
+    memset(u.buf, 0, sizeof(u.buf));
 
-  if (c != nullptr) {
-    c->Wait(fd_.Fd(), POLLOUT);
-  }
-  int e = ::sendmsg(fd_.Fd(), &msg, 0);
-  if (e == -1) {
-    return absl::InternalError(absl::StrFormat(
-        "Failed to write fds to unix socket: %s", strerror(errno)));
+    int32_t num_fds = static_cast<int32_t>(fds.size());
+    size_t fds_to_send = remaining_fds > kMaxFds ? kMaxFds : remaining_fds;
+    struct iovec iov = {.iov_base = reinterpret_cast<void *>(&num_fds),
+                        .iov_len = sizeof(int32_t)};
+    size_t fds_size = fds_to_send * sizeof(int);
+    struct msghdr msg = {.msg_iov = &iov,
+                         .msg_iovlen = 1,
+                         .msg_control = u.buf,
+                         .msg_controllen =
+                             static_cast<socklen_t>(CMSG_SPACE(fds_size))};
+
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(fds_size);
+    int *fdptr = reinterpret_cast<int *>(CMSG_DATA(cmsg));
+    for (size_t i = first_fd; i < first_fd + fds_to_send; i++) {
+      *fdptr++ = fds[i].Fd();
+    }
+
+    if (c != nullptr) {
+      c->Wait(fd_.Fd(), POLLOUT);
+    }
+    int e = ::sendmsg(fd_.Fd(), &msg, 0);
+    if (e == -1) {
+      return absl::InternalError(absl::StrFormat(
+          "Failed to write fds to unix socket: %s", strerror(errno)));
+    }
+    remaining_fds -= fds_to_send;
+    first_fd += fds_to_send;
   }
   return absl::OkStatus();
 }
 
-absl::Status UnixSocket::ReceiveFds(std::vector<FileDescriptor> &fds,
+absl::Status toolbelt::UnixSocket::ReceiveFds(std::vector<toolbelt::FileDescriptor> &fds,
                                     co::Coroutine *c) {
   if (!Connected()) {
     return absl::InternalError("Socket is not connected");
@@ -345,42 +356,55 @@ absl::Status UnixSocket::ReceiveFds(std::vector<FileDescriptor> &fds,
     struct cmsghdr align;
   } u;
 
-  // Need to send at least one byte.
-  char data[1] = {0};
-  struct iovec iov = {.iov_base = reinterpret_cast<void *>(data), .iov_len = 1};
+  int32_t num_fds_received = 0;
+  for (;;) {
+    // The total number of fds we need to see.  This is
+    // sent in each message, but each message contains only portion
+    // of the total (there's a limit per message).
+    int32_t total_fds; 
+    struct iovec iov = {.iov_base = reinterpret_cast<void *>(&total_fds),
+                        .iov_len = sizeof(int32_t)};
 
-  struct msghdr msg = {.msg_iov = &iov,
-                       .msg_iovlen = 1,
-                       .msg_control = u.buf,
-                       .msg_controllen = sizeof(u.buf)};
+    struct msghdr msg = {.msg_iov = &iov,
+                         .msg_iovlen = 1,
+                         .msg_control = u.buf,
+                         .msg_controllen = sizeof(u.buf)};
 
-  if (c != nullptr) {
-    c->Wait(fd_.Fd(), POLLIN);
-  }
-  ssize_t n = ::recvmsg(fd_.Fd(), &msg, 0);
-  if (n == -1) {
-    return absl::InternalError(absl::StrFormat(
-        "Failed to read fds to unix socket: %s", strerror(errno)));
-  }
-  if (n == 0) {
-    return absl::InternalError(
-        absl::StrFormat("EOF from socket while reading fds\n"));
-  }
-  struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-  if (cmsg == nullptr) {
-    // This can happen, apparently.
-    return absl::OkStatus();
-  }
-  int *fdptr = reinterpret_cast<int *>(CMSG_DATA(cmsg));
-  int num_fds = (cmsg->cmsg_len - sizeof(struct cmsghdr)) / sizeof(int);
-  for (int i = 0; i < num_fds; i++) {
-    fds.emplace_back(fdptr[i]);
+    if (c != nullptr) {
+      c->Wait(fd_.Fd(), POLLIN);
+    }
+    ssize_t n = ::recvmsg(fd_.Fd(), &msg, 0);
+    if (n == -1) {
+      return absl::InternalError(absl::StrFormat(
+          "Failed to read fds to unix socket: %s", strerror(errno)));
+    }
+    if (n == 0) {
+      return absl::InternalError(
+          absl::StrFormat("EOF from socket while reading fds\n"));
+    }
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    if (cmsg == nullptr) {
+      // This can happen, apparently.
+      return absl::OkStatus();
+    }
+    int *fdptr = reinterpret_cast<int *>(CMSG_DATA(cmsg));
+    int num_fds = (cmsg->cmsg_len - sizeof(struct cmsghdr)) / sizeof(int);
+    for (int i = 0; i < num_fds; i++) {
+      fds.emplace_back(fdptr[i]);
+    }
+    // Add the number we received in this message to the total.
+    num_fds_received += num_fds;
+
+    // Have we received all our fds?
+    if (num_fds_received >= total_fds) {
+      break;
+    }
   }
   return absl::OkStatus();
 }
 
 // Network socket.
-absl::Status NetworkSocket::Connect(const InetAddress &addr) {
+absl::Status NetworkSocket::Connect(const toolbelt::InetAddress &addr) {
   if (!fd_.Valid()) {
     return absl::InternalError("Socket is not valid");
   }
@@ -407,9 +431,9 @@ absl::Status NetworkSocket::SetReuseAddr() {
 }
 
 // TCP socket
-TCPSocket::TCPSocket() : NetworkSocket(socket(AF_INET, SOCK_STREAM, 0)) {}
+toolbelt::TCPSocket::toolbelt::TCPSocket() : NetworkSocket(socket(AF_INET, SOCK_STREAM, 0)) {}
 
-absl::Status TCPSocket::Bind(const InetAddress &addr, bool listen) {
+absl::Status toolbelt::TCPSocket::Bind(const toolbelt::InetAddress &addr, bool listen) {
   bool binding_to_zero = addr.Port() == 0;
   int e =
       ::bind(fd_.Fd(), reinterpret_cast<const sockaddr *>(&addr.GetAddress()),
@@ -439,7 +463,7 @@ absl::Status TCPSocket::Bind(const InetAddress &addr, bool listen) {
   return absl::OkStatus();
 }
 
-absl::StatusOr<TCPSocket> TCPSocket::Accept(co::Coroutine *c) {
+absl::StatusOr<toolbelt::TCPSocket> toolbelt::TCPSocket::Accept(co::Coroutine *c) {
   if (!fd_.Valid()) {
     return absl::InternalError("Socket is not valid");
   }
@@ -451,13 +475,13 @@ absl::StatusOr<TCPSocket> TCPSocket::Accept(co::Coroutine *c) {
   ;
   int new_fd = ::accept(fd_.Fd(), reinterpret_cast<struct sockaddr *>(&sender),
                         &sock_len);
-  return TCPSocket(new_fd, /*connected=*/true);
+  return toolbelt::TCPSocket(new_fd, /*connected=*/true);
 }
 
 // UDP socket
-UDPSocket::UDPSocket() : NetworkSocket(socket(AF_INET, SOCK_DGRAM, 0)) {}
+toolbelt::UDPSocket::toolbelt::UDPSocket() : NetworkSocket(socket(AF_INET, SOCK_DGRAM, 0)) {}
 
-absl::Status UDPSocket::Bind(const InetAddress &addr) {
+absl::Status toolbelt::UDPSocket::Bind(const toolbelt::InetAddress &addr) {
   int e =
       ::bind(fd_.Fd(), reinterpret_cast<const sockaddr *>(&addr.GetAddress()),
              addr.GetLength());
@@ -472,7 +496,7 @@ absl::Status UDPSocket::Bind(const InetAddress &addr) {
   return absl::OkStatus();
 }
 
-absl::Status UDPSocket::SetBroadcast() {
+absl::Status toolbelt::UDPSocket::SetBroadcast() {
   int val = 1;
   int e = setsockopt(fd_.Fd(), SOL_SOCKET, SO_BROADCAST, &val, sizeof(int));
   if (e != 0) {
@@ -482,7 +506,7 @@ absl::Status UDPSocket::SetBroadcast() {
   return absl::OkStatus();
 }
 
-absl::Status UDPSocket::SendTo(const InetAddress &addr, const void *buffer,
+absl::Status toolbelt::UDPSocket::SendTo(const toolbelt::InetAddress &addr, const void *buffer,
                                size_t length, co::Coroutine *c) {
   if (c != nullptr) {
     c->Wait(fd_.Fd(), POLLOUT);
@@ -498,7 +522,7 @@ absl::Status UDPSocket::SendTo(const InetAddress &addr, const void *buffer,
   return absl::OkStatus();
 }
 
-absl::StatusOr<ssize_t> UDPSocket::Receive(void *buffer, size_t buflen,
+absl::StatusOr<ssize_t> toolbelt::UDPSocket::Receive(void *buffer, size_t buflen,
                                            co::Coroutine *c) {
   if (c != nullptr) {
     c->Wait(fd_.Fd(), POLLIN);
@@ -510,7 +534,7 @@ absl::StatusOr<ssize_t> UDPSocket::Receive(void *buffer, size_t buflen,
   }
   return n;
 }
-absl::StatusOr<ssize_t> UDPSocket::ReceiveFrom(InetAddress &sender,
+absl::StatusOr<ssize_t> toolbelt::UDPSocket::ReceiveFrom(toolbelt::InetAddress &sender,
                                                void *buffer, size_t buflen,
                                                co::Coroutine *c) {
   if (c != nullptr) {

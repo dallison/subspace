@@ -7,8 +7,8 @@
 
 #include "client/options.h"
 #include "common/channel.h"
-#include "common/fd.h"
-#include "common/sockets.h"
+#include "toolbelt/fd.h"
+#include "toolbelt/sockets.h"
 #include "common/triggerfd.h"
 #include "coroutine.h"
 #include "proto/subspace.pb.h"
@@ -34,7 +34,7 @@
 // The naive approach to get this working is for the publisher
 // to trigger the subscribers events for every message it sends, but
 // this would mean a write to a pipe every time a message is
-// sent.  That's a system call and takes a couple of microseconds.
+// sent.  That's a system call and takes some time.
 // Instead we take the approach that the publisher only triggers when
 // it publishes a message immediately after a message that has been
 // seen by a subscriber.  In other words, if a publisher is publishing
@@ -62,9 +62,14 @@
 // system calls to write to a pipe or eventfd.
 //
 // As of time of writing, the latency for a message on the same
-// computer using shared memory is about 5 microseconds on a Mac M1.
+// computer using shared memory is about 0.25 microseconds on a Mac M1.
 
 namespace subspace {
+
+// The classes in here are mostly used for internal implementation
+// but there are a couple of const functions used outside of the
+// client.  All access to the client's functionality is through
+// the Client class.
 
 // This is a channel as seen by a client.  It's going to be either
 // a publisher or a subscriber, as defined as the subclasses.
@@ -74,31 +79,44 @@ public:
                 int channel_id, std::string type)
       : Channel(name, slot_size, num_slots, channel_id, std::move(type)) {}
   virtual ~ClientChannel() = default;
+  MessageSlot *CurrentSlot() const { return slot_; }
+  const ChannelCounters &GetCounters() const {
+    return GetScb()->counters[GetChannelId()];
+  }
+
+protected:
   virtual bool IsSubscriber() const { return false; }
   virtual bool IsPublisher() const { return false; }
 
   void SetSlot(MessageSlot *slot) { slot_ = slot; }
-  MessageSlot *CurrentSlot() const { return slot_; }
   void *GetCurrentBufferAddress() { return GetBufferAddress(slot_); }
 
   void SetMessageSize(int64_t message_size) {
     slot_->message_size = message_size;
   }
 
-  const ChannelCounters &GetCounters() const {
-    return GetScb()->counters[GetChannelId()];
-  }
+
 
 protected:
   MessageSlot *slot_ = nullptr; // Current slot.
 };
 
+// This is a publisher.  It maps in the channel's memory and allows
+// messages to be published.
 class Publisher : public ClientChannel {
 public:
   Publisher(const std::string &name, int slot_size, int num_slots,
-            int channel_id, int publisher_id, std::string type, const PublisherOptions &options)
+            int channel_id, int publisher_id, std::string type,
+            const PublisherOptions &options)
       : ClientChannel(name, slot_size, num_slots, channel_id, std::move(type)),
         publisher_id_(publisher_id), options_(options) {}
+
+  bool IsReliable() const { return options_.IsReliable(); }
+  bool IsPublic() const { return options_.IsPublic(); }
+
+private:
+  friend class Client;
+
   bool IsPublisher() const override { return true; }
 
   PublishedMessage ActivateSlotAndGetAnother(bool reliable, bool is_activation,
@@ -108,15 +126,15 @@ public:
         slot_, reliable, is_activation, publisher_id_, omit_prefix, notify);
   }
   void ClearSubscribers() { subscribers_.clear(); }
-  void AddSubscriber(FileDescriptor fd) {
-    subscribers_.emplace_back(FileDescriptor(), std::move(fd));
+  void AddSubscriber(toolbelt::FileDescriptor fd) {
+    subscribers_.emplace_back(toolbelt::FileDescriptor(), std::move(fd));
   }
   size_t NumSubscribers() { return subscribers_.size(); }
 
-  void SetTriggerFd(FileDescriptor fd) { trigger_.SetTriggerFd(std::move(fd)); }
-  void SetPollFd(FileDescriptor fd) { trigger_.SetPollFd(std::move(fd)); }
+  void SetTriggerFd(toolbelt::FileDescriptor fd) { trigger_.SetTriggerFd(std::move(fd)); }
+  void SetPollFd(toolbelt::FileDescriptor fd) { trigger_.SetPollFd(std::move(fd)); }
 
-  FileDescriptor &GetPollFd() { return trigger_.GetPollFd(); }
+  toolbelt::FileDescriptor &GetPollFd() { return trigger_.GetPollFd(); }
 
   void TriggerSubscribers() {
     for (auto &fd : subscribers_) {
@@ -125,17 +143,16 @@ public:
   }
   int GetPublisherId() const { return publisher_id_; }
 
-  bool IsReliable() const { return options_.IsReliable(); }
-  bool IsPublic() const { return options_.IsPublic(); }
   void ClearPollFd() { trigger_.Clear(); }
 
-private:
   TriggerFd trigger_;
   int publisher_id_;
   std::vector<TriggerFd> subscribers_;
   PublisherOptions options_;
 };
 
+// A subscriber reads messages from a channel.  It maps the channel
+// shared memory.
 class Subscriber : public ClientChannel {
 public:
   Subscriber(const std::string &name, int slot_size, int num_slots,
@@ -143,16 +160,28 @@ public:
              const SubscriberOptions &options)
       : ClientChannel(name, slot_size, num_slots, channel_id, std::move(type)),
         subscriber_id_(subscriber_id), options_(options) {}
+
+  int64_t CurrentOrdinal() const {
+    return CurrentSlot() == nullptr ? -1 : CurrentSlot()->ordinal;
+  }
+  int64_t Timestamp() const {
+    return CurrentSlot() == nullptr ? 0 : Prefix(CurrentSlot())->timestamp;
+  }
+  bool IsReliable() const { return options_.IsReliable(); }
+
+private:
+  friend class Client;
+
   bool IsSubscriber() const override { return true; }
 
   void ClearPublishers() { reliable_publishers_.clear(); }
-  void AddPublisher(FileDescriptor fd) {
-    reliable_publishers_.emplace_back(FileDescriptor(), std::move(fd));
+  void AddPublisher(toolbelt::FileDescriptor fd) {
+    reliable_publishers_.emplace_back(toolbelt::FileDescriptor(), std::move(fd));
   }
   size_t NumReliablePublishers() { return reliable_publishers_.size(); }
 
-  void SetTriggerFd(FileDescriptor fd) { trigger_.SetTriggerFd(std::move(fd)); }
-  void SetPollFd(FileDescriptor fd) { trigger_.SetPollFd(std::move(fd)); }
+  void SetTriggerFd(toolbelt::FileDescriptor fd) { trigger_.SetTriggerFd(std::move(fd)); }
+  void SetPollFd(toolbelt::FileDescriptor fd) { trigger_.SetPollFd(std::move(fd)); }
   int GetSubscriberId() const { return subscriber_id_; }
   void TriggerReliablePublishers() {
     for (auto &fd : reliable_publishers_) {
@@ -169,17 +198,8 @@ public:
     return Channel::LastSlot(CurrentSlot(), IsReliable(), subscriber_id_);
   }
 
-  int64_t CurrentOrdinal() const {
-    return CurrentSlot() == nullptr ? -1 : CurrentSlot()->ordinal;
-  }
-  int64_t Timestamp() const {
-    return CurrentSlot() == nullptr ? 0 : Prefix(CurrentSlot())->timestamp;
-  }
-
-  FileDescriptor &GetPollFd() { return trigger_.GetPollFd(); }
+  toolbelt::FileDescriptor &GetPollFd() { return trigger_.GetPollFd(); }
   void ClearPollFd() { trigger_.Clear(); }
-
-  bool IsReliable() const { return options_.IsReliable(); }
 
   MessageSlot *FindMessage(uint64_t timestamp) {
     MessageSlot *slot =
@@ -191,7 +211,6 @@ public:
     return slot;
   }
 
-private:
   int subscriber_id_;
   TriggerFd trigger_;
   std::vector<TriggerFd> reliable_publishers_;

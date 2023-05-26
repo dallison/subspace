@@ -13,8 +13,8 @@ ServerChannel::~ServerChannel() {
   memset(&GetScb()->counters[GetChannelId()], 0, sizeof(ChannelCounters));
 }
 
-std::vector<FileDescriptor> ServerChannel::GetSubscriberTriggerFds() const {
-  std::vector<FileDescriptor> r;
+std::vector<toolbelt::FileDescriptor> ServerChannel::GetSubscriberTriggerFds() const {
+  std::vector<toolbelt::FileDescriptor> r;
   for (auto &user : users_) {
     if (user == nullptr) {
       continue;
@@ -26,9 +26,9 @@ std::vector<FileDescriptor> ServerChannel::GetSubscriberTriggerFds() const {
   return r;
 }
 
-std::vector<FileDescriptor>
+std::vector<toolbelt::FileDescriptor>
 ServerChannel::GetReliablePublisherTriggerFds() const {
-  std::vector<FileDescriptor> r;
+  std::vector<toolbelt::FileDescriptor> r;
   for (auto &user : users_) {
     if (user == nullptr) {
       continue;

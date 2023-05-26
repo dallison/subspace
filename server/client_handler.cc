@@ -25,7 +25,7 @@ void ClientHandler::Run(co::Coroutine *c) {
     }
     subspace::Request request;
     if (request.ParseFromArray(buffer_, *n)) {
-      std::vector<FileDescriptor> fds;
+      std::vector<toolbelt::FileDescriptor> fds;
       subspace::Response response;
       if (absl::Status s = HandleMessage(request, response, fds); !s.ok()) {
         fprintf(stderr, "%s\n", s.ToString().c_str());
@@ -59,7 +59,7 @@ void ClientHandler::Run(co::Coroutine *c) {
 
 absl::Status ClientHandler::HandleMessage(const subspace::Request &req,
                                           subspace::Response &resp,
-                                          std::vector<FileDescriptor> &fds) {
+                                          std::vector<toolbelt::FileDescriptor> &fds) {
   switch (req.request_case()) {
   case subspace::Request::kInit:
     HandleInit(req.init(), resp.mutable_init(), fds);
@@ -95,7 +95,7 @@ absl::Status ClientHandler::HandleMessage(const subspace::Request &req,
 
 void ClientHandler::HandleInit(const subspace::InitRequest &req,
                                subspace::InitResponse *response,
-                               std::vector<FileDescriptor> &fds) {
+                               std::vector<toolbelt::FileDescriptor> &fds) {
   response->set_scb_fd_index(0);
   fds.push_back(server_->scb_fd_);
   client_name_ = req.client_name();
@@ -104,7 +104,7 @@ void ClientHandler::HandleInit(const subspace::InitRequest &req,
 void ClientHandler::HandleCreatePublisher(
     const subspace::CreatePublisherRequest &req,
     subspace::CreatePublisherResponse *response,
-    std::vector<FileDescriptor> &fds) {
+    std::vector<toolbelt::FileDescriptor> &fds) {
   ServerChannel *channel = server_->FindChannel(req.channel_name());
   if (channel == nullptr) {
     absl::StatusOr<ServerChannel *> ch = server_->CreateChannel(
@@ -199,7 +199,7 @@ void ClientHandler::HandleCreatePublisher(
 
   // Add subscriber trigger indexes.
   int index = 4; // First subscriber index.
-  std::vector<FileDescriptor> sub_fds = channel->GetSubscriberTriggerFds();
+  std::vector<toolbelt::FileDescriptor> sub_fds = channel->GetSubscriberTriggerFds();
   for (auto &fd : sub_fds) {
     response->add_sub_trigger_fd_indexes(index++);
     fds.push_back(fd);
@@ -216,7 +216,7 @@ void ClientHandler::HandleCreatePublisher(
 void ClientHandler::HandleCreateSubscriber(
     const subspace::CreateSubscriberRequest &req,
     subspace::CreateSubscriberResponse *response,
-    std::vector<FileDescriptor> &fds) {
+    std::vector<toolbelt::FileDescriptor> &fds) {
   ServerChannel *channel = server_->FindChannel(req.channel_name());
   if (channel == nullptr) {
     // No channel exists, map an empty channel.
@@ -289,7 +289,7 @@ void ClientHandler::HandleCreateSubscriber(
 
   // Add publisher trigger indexes.
   int index = 4; // First reliable publisher index.
-  std::vector<FileDescriptor> pub_fds =
+  std::vector<toolbelt::FileDescriptor> pub_fds =
       channel->GetReliablePublisherTriggerFds();
   for (auto &fd : pub_fds) {
     response->add_reliable_pub_trigger_fd_indexes(index++);
@@ -307,7 +307,7 @@ void ClientHandler::HandleCreateSubscriber(
 
 void ClientHandler::HandleGetTriggers(const subspace::GetTriggersRequest &req,
                                       subspace::GetTriggersResponse *response,
-                                      std::vector<FileDescriptor> &fds) {
+                                      std::vector<toolbelt::FileDescriptor> &fds) {
   ServerChannel *channel = server_->FindChannel(req.channel_name());
   if (channel == nullptr) {
     response->set_error(
@@ -315,14 +315,14 @@ void ClientHandler::HandleGetTriggers(const subspace::GetTriggersRequest &req,
     return;
   }
   int index = 0;
-  std::vector<FileDescriptor> pub_fds =
+  std::vector<toolbelt::FileDescriptor> pub_fds =
       channel->GetReliablePublisherTriggerFds();
   for (auto &fd : pub_fds) {
     response->add_reliable_pub_trigger_fd_indexes(index++);
     fds.push_back(fd);
   }
 
-  std::vector<FileDescriptor> sub_fds = channel->GetSubscriberTriggerFds();
+  std::vector<toolbelt::FileDescriptor> sub_fds = channel->GetSubscriberTriggerFds();
   for (auto &fd : sub_fds) {
     response->add_sub_trigger_fd_indexes(index++);
     fds.push_back(fd);
@@ -332,7 +332,7 @@ void ClientHandler::HandleGetTriggers(const subspace::GetTriggersRequest &req,
 void ClientHandler::HandleRemovePublisher(
     const subspace::RemovePublisherRequest &req,
     subspace::RemovePublisherResponse *response,
-    std::vector<FileDescriptor> &fds) {
+    std::vector<toolbelt::FileDescriptor> &fds) {
   ServerChannel *channel = server_->FindChannel(req.channel_name());
   if (channel == nullptr) {
     response->set_error(
@@ -345,7 +345,7 @@ void ClientHandler::HandleRemovePublisher(
 void ClientHandler::HandleRemoveSubscriber(
     const subspace::RemoveSubscriberRequest &req,
     subspace::RemoveSubscriberResponse *response,
-    std::vector<FileDescriptor> &fds) {
+    std::vector<toolbelt::FileDescriptor> &fds) {
   ServerChannel *channel = server_->FindChannel(req.channel_name());
   if (channel == nullptr) {
     response->set_error(

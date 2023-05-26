@@ -10,13 +10,18 @@
 namespace subspace {
 
 // Mutex RAII class
-class MutexLock {
+class toolbelt::MutexLock {
 public:
-  MutexLock(pthread_mutex_t *mutex) : mutex_(mutex) {
-    pthread_mutex_lock(mutex_);
-    // TODO: robust mutex in Linux.
+  toolbelt::MutexLock(pthread_mutex_t *mutex) : mutex_(mutex) {
+    int e = pthread_mutex_lock(mutex_);
+    if (e == EOWNERDEAD) {
+      // We hit the tiny race in glibc.  There's not
+      // much we can do.  The memory could be in any
+      // state.  The only safe thing to do is abort.
+      abort();
+    }
   }
-  ~MutexLock() { pthread_mutex_unlock(mutex_); }
+  ~toolbelt::MutexLock() { pthread_mutex_unlock(mutex_); }
 
 private:
   pthread_mutex_t *mutex_;

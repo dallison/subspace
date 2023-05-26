@@ -10,13 +10,16 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "common/bitset.h"
-#include "common/fd.h"
+#include "toolbelt/bitset.h"
+#include "toolbelt/fd.h"
 #include <cstdint>
 #include <pthread.h>
 #include <string>
 
 namespace subspace {
+
+// Max message size for comms with server.
+static constexpr size_t kMaxMessage = 4096;
 
 // This is stored immediately before the channel buffer in shared
 // memory.  It is transferred intact across the TCP bridges.
@@ -53,7 +56,7 @@ constexpr int kMaxChannels = 1024;
 
 // Maximum number of owners for a lot.  One per subscriber reference
 // and publisher reference.  Best if it's a multiple of 64 because
-// it's used as the size in a BitSet.
+// it's used as the size in a toolbelt::BitSet.
 constexpr int kMaxSlotOwners = 1024;
 
 // Max length of a channel name in shared memory.  A name longer
@@ -109,7 +112,7 @@ struct MessageSlot {
   int16_t reliable_ref_count; // Number of reliable subscriber references.
   int64_t ordinal;            // Message ordinal held currently in slot.
   int64_t message_size;       // Size of message held in slot.
-  BitSet<kMaxSlotOwners> owners; // One bit per publisher/subscriber.
+  toolbelt::BitSet<kMaxSlotOwners> owners; // One bit per publisher/subscriber.
 };
 
 // The control data for a channel.  This memory is
@@ -144,14 +147,14 @@ struct ChannelControlBlock {          // a.k.a CCB
 };
 
 absl::StatusOr<SystemControlBlock *>
-CreateSystemControlBlock(FileDescriptor &fd);
+CreateSystemControlBlock(toolbelt::FileDescriptor &fd);
 
 // This holds the shared memory file descriptors for a channel.
 // ccb: Channel Control Block
 // buffers: message buffer memory.
 struct SharedMemoryFds {
   SharedMemoryFds() = default;
-  SharedMemoryFds(FileDescriptor ccb, FileDescriptor buffers)
+  SharedMemoryFds(toolbelt::FileDescriptor ccb, toolbelt::FileDescriptor buffers)
       : ccb(std::move(ccb)), buffers(std::move(buffers)) {}
   SharedMemoryFds(const SharedMemoryFds &) = delete;
 
@@ -167,8 +170,8 @@ struct SharedMemoryFds {
     return *this;
   }
 
-  FileDescriptor ccb;     // Channel Control Block.
-  FileDescriptor buffers; // Message Buffers.
+  toolbelt::FileDescriptor ccb;     // Channel Control Block.
+  toolbelt::FileDescriptor buffers; // Message Buffers.
 };
 
 // Aligned to given power of 2.
@@ -209,13 +212,13 @@ public:
   // file descriptors for the allocated CCB and buffers.  The
   // SCB has already been allocated and will be mapped in for
   // this channel.  This is only used in the server.
-  absl::StatusOr<SharedMemoryFds> Allocate(const FileDescriptor &scb_fd);
+  absl::StatusOr<SharedMemoryFds> Allocate(const toolbelt::FileDescriptor &scb_fd);
 
   // Client-side channel mapping.  The SharedMemoryFds contains the
   // file descriptors for the CCB and buffers.  The num_slots_
   // and slot_size_ member variables contain either 0 or the
   // channel size parameters.
-  absl::Status Map(SharedMemoryFds fds, const FileDescriptor &scb_fd);
+  absl::Status Map(SharedMemoryFds fds, const toolbelt::FileDescriptor &scb_fd);
   void Unmap();
 
   const std::string &Name() const { return name_; }

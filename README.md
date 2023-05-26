@@ -4,7 +4,7 @@ Next Generation, sub-microsecond latency shared memory IPC.
 This is a shared-memory based pub/sub Interprocess Communication system that can be used
 in robotics and other applications.  Why *subspace*?  If your messages are transported
 between processes on the same computer, they travel through extremely low latency
-and high bandwidth shared memory shared memory buffers, kind of like they are going
+and high bandwidth shared memory buffers, kind of like they are going
 faster than light (not really, of course).  If they go between computers, they are
 transported over the network at sub-light speed.
 
@@ -15,7 +15,7 @@ It has the following features:
 1.	Publish/subscribe methodology with multiple publisher and multiple subscribers per channel.
 1.	No communication with server for message transfer.
 1.	Message type agnostic transmission – bring your own serialization.
-1.  Channel types, meaningful to user, not system.
+2.  Channel types, meaningful to user, not system.
 1.	Single lock POSIX shared memory channels
 1.	Both unreliable and reliable communications between publishers and subscribers.
 1.	Ability to read the next or newest message in a channel.
@@ -48,4 +48,19 @@ CC=clang bazel build ...
 
 It does build with *g++* but you will get some compiler warnings about different signed comparisons
 that clang doesn't care about.
+
+# Bazel WORKSPACE
+Add this to your Bazel WORKSPACE file to get access to this library without downloading it manually.
+
+```
+http_archive(
+  name = "subspace",
+  urls = ["https://github.com/dallison/subspace/archive/refs/tags/A.B.C.tar.gz"],
+  strip_prefix = "subspace-A.B.C",
+)
+
+```
+
+You can also add a sha256 field to ensure a canonical build if you like.  Bazel
+will tell you what to put in for the hash when you first build it.
 

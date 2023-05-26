@@ -5,7 +5,7 @@
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
 #include "client/client.h"
-#include "common/clock.h"
+#include "toolbelt/clock.h"
 #include <csignal>
 #include <inttypes.h>
 
@@ -52,14 +52,14 @@ int main(int argc, char **argv) {
   while (i < num_msgs) {
     uint64_t wait_start = 0;
     if (start != 0) {
-      wait_start = subspace::Now();
+      wait_start = toolbelt::Now();
     }
     if (absl::Status s = client.WaitForSubscriber(*sub); !s.ok()) {
       fprintf(stderr, "Can't wait for subscriber: %s\n", s.ToString().c_str());
       exit(1);
     }
     if (wait_start != 0) {
-      total_wait += subspace::Now() - wait_start;
+      total_wait += toolbelt::Now() - wait_start;
     }
     for (;;) {
       absl::StatusOr<subspace::Message> msg = client.ReadMessage(*sub);
@@ -72,14 +72,14 @@ int main(int argc, char **argv) {
         break;
       }
       if (start == 0) {
-        start = subspace::Now();
+        start = toolbelt::Now();
       }
       // printf("%d\n", i);
       total_bytes += msg->length;
       i++;
     }
   }
-  uint64_t end = subspace::Now();
+  uint64_t end = toolbelt::Now();
   double period = (end - start - total_wait) / 1e9;
   double msg_rate = num_msgs / period;
   double byte_rate = total_bytes / period;

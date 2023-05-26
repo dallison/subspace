@@ -4,9 +4,9 @@
 
 #include "common/channel.h"
 #include "absl/strings/str_format.h"
-#include "common/clock.h"
-#include "common/hexdump.h"
-#include "common/mutex.h"
+#include "toolbelt/clock.h"
+#include "toolbelt/hexdump.h"
+#include "toolbelt/mutex.h"
 #include <fcntl.h>
 #include <sys/mman.h>
 #if defined(__APPLE__)
@@ -18,7 +18,7 @@
 namespace subspace {
 static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
                                                  int64_t size,
-                                                 FileDescriptor &fd) {
+                                                 toolbelt::FileDescriptor &fd) {
   char shm_name[NAME_MAX];
   int pid = getpid();
   size_t len =
@@ -69,7 +69,7 @@ static void InitMutex(pthread_mutex_t &mutex) {
   pthread_mutexattr_init(&attr);
   pthread_mutexattr_setpshared(&attr, 1);
 #ifdef __linux__
-  pthread_mutexattr_setrobust(&attr, 1);
+  pthread_mutexattr_setrobust(&attr, PTHREAD_MUTEX_ROBUST);
 #endif
 
   pthread_mutex_init(&mutex, &attr);
@@ -77,7 +77,7 @@ static void InitMutex(pthread_mutex_t &mutex) {
 }
 
 absl::StatusOr<SystemControlBlock *>
-CreateSystemControlBlock(FileDescriptor &fd) {
+CreateSystemControlBlock(toolbelt::FileDescriptor &fd) {
   absl::StatusOr<void *> s =
       CreateSharedMemory(0, "scb", sizeof(SystemControlBlock), fd);
   if (!s.ok()) {
@@ -94,7 +94,7 @@ Channel::Channel(const std::string &name, int slot_size, int num_slots,
       channel_id_(channel_id), type_(std::move(type)) {}
 
 absl::StatusOr<SharedMemoryFds>
-Channel::Allocate(const FileDescriptor &scb_fd) {
+Channel::Allocate(const toolbelt::FileDescriptor &scb_fd) {
   // Map SCB into process memory.
   scb_ = reinterpret_cast<SystemControlBlock *>(
       mmap(NULL, sizeof(SystemControlBlock), PROT_READ | PROT_WRITE, MAP_SHARED,
@@ -184,7 +184,7 @@ void Channel::PrintLists() {
   PrintList(&ccb_->busy_list);
 }
 
-absl::Status Channel::Map(SharedMemoryFds fds, const FileDescriptor &scb_fd) {
+absl::Status Channel::Map(SharedMemoryFds fds, const toolbelt::FileDescriptor &scb_fd) {
   scb_ = reinterpret_cast<SystemControlBlock *>(
       mmap(NULL, sizeof(SystemControlBlock), PROT_READ | PROT_WRITE, MAP_SHARED,
            scb_fd.Fd(), 0));
@@ -243,12 +243,12 @@ void Channel::Unmap() {
 
 void Channel::Dump() {
   printf("SCB:\n");
-  Hexdump(scb_, 64);
+  toolbelt::Hexdump(scb_, 64);
 
   printf("CCB:\n");
   int64_t ccb_size =
       sizeof(ChannelControlBlock) + sizeof(MessageSlot) * num_slots_;
-  Hexdump(ccb_, ccb_size);
+  toolbelt::Hexdump(ccb_, ccb_size);
   PrintLists();
 }
 
@@ -293,12 +293,12 @@ MessageSlot *Channel::FindFreeSlotLocked(bool reliable, int owner) {
 }
 
 MessageSlot *Channel::FindFreeSlot(bool reliable, int owner) {
-  MutexLock lock(&ccb_->lock);
+  toolbelt::MutexLock lock(&ccb_->lock);
   return FindFreeSlotLocked(reliable, owner);
 }
 
 void Channel::GetCounters(int64_t &total_bytes, int64_t &total_messages) {
-  MutexLock lock(&ccb_->lock);
+  toolbelt::MutexLock lock(&ccb_->lock);
   total_bytes = ccb_->total_bytes;
   total_messages = ccb_->total_messages;
 }
@@ -307,7 +307,7 @@ Channel::PublishedMessage
 Channel::ActivateSlotAndGetAnother(MessageSlot *slot, bool reliable,
                                    bool is_activation, int owner,
                                    bool omit_prefix, bool *notify) {
-  MutexLock lock(&ccb_->lock);
+  toolbelt::MutexLock lock(&ccb_->lock);
 
   // Move slot from busy list to active list.
   ListRemove(&ccb_->busy_list, &slot->element);
@@ -335,7 +335,7 @@ Channel::ActivateSlotAndGetAnother(MessageSlot *slot, bool reliable,
     slot->ordinal = ccb_->next_ordinal++;
     prefix->message_size = slot->message_size;
     prefix->ordinal = slot->ordinal;
-    prefix->timestamp = Now();
+    prefix->timestamp = toolbelt::Now();
     prefix->flags = 0;
     if (is_activation) {
       prefix->flags |= kMessageActivate;
@@ -363,7 +363,7 @@ inline void IncDecRefCount(MessageSlot *slot, bool reliable, int inc) {
 }
 
 void Channel::CleanupSlots(int owner, bool reliable) {
-  MutexLock lock(&ccb_->lock);
+  toolbelt::MutexLock lock(&ccb_->lock);
   // Clean up active list.  Remove references for any slot owned by the
   // owner.
   void *p = FromCCBOffset(ccb_->active_list.first);
@@ -393,7 +393,7 @@ void Channel::CleanupSlots(int owner, bool reliable) {
 }
 
 MessageSlot *Channel::NextSlot(MessageSlot *slot, bool reliable, int owner) {
-  MutexLock lock(&ccb_->lock);
+  toolbelt::MutexLock lock(&ccb_->lock);
   if (slot == nullptr) {
     // No current slot, first in list.
     if (ccb_->active_list.first == 0) {
@@ -423,7 +423,7 @@ MessageSlot *Channel::NextSlot(MessageSlot *slot, bool reliable, int owner) {
 }
 
 MessageSlot *Channel::LastSlot(MessageSlot *slot, bool reliable, int owner) {
-  MutexLock lock(&ccb_->lock);
+  toolbelt::MutexLock lock(&ccb_->lock);
   if (ccb_->active_list.last == 0) {
     return nullptr;
   }
@@ -442,7 +442,7 @@ MessageSlot *
 Channel::FindActiveSlotByTimestamp(MessageSlot *old_slot, uint64_t timestamp,
                                    bool reliable, int owner,
                                    std::vector<MessageSlot *> &buffer) {
-  MutexLock lock(&ccb_->lock);
+  toolbelt::MutexLock lock(&ccb_->lock);
 
   // Copy pointers to active list slots into search buffer.  They are already
   // in timestamp order.

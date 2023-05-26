@@ -6,7 +6,7 @@
 #define __COMMON_TRIGGERFD_H
 
 #include "absl/status/status.h"
-#include "common/fd.h"
+#include "toolbelt/fd.h"
 
 namespace subspace {
 
@@ -17,7 +17,7 @@ class TriggerFd {
  public:
   TriggerFd() = default;
 
-  TriggerFd(const FileDescriptor& poll_fd, const FileDescriptor& trigger_fd)
+  TriggerFd(const toolbelt::FileDescriptor& poll_fd, const toolbelt::FileDescriptor& trigger_fd)
       : poll_fd_(poll_fd), trigger_fd_(trigger_fd) {}
   TriggerFd(const TriggerFd &f) = delete;
   TriggerFd(TriggerFd &&f)
@@ -43,22 +43,22 @@ class TriggerFd {
     trigger_fd_.Close();
   }
 
-  void SetPollFd(FileDescriptor fd) { poll_fd_ = std::move(fd); }
-  void SetTriggerFd(FileDescriptor fd) { trigger_fd_ = std::move(fd); }
+  void SetPollFd(toolbelt::FileDescriptor fd) { poll_fd_ = std::move(fd); }
+  void SetTriggerFd(toolbelt::FileDescriptor fd) { trigger_fd_ = std::move(fd); }
 
   void Trigger();
   void Clear();
 
-  FileDescriptor &GetPollFd() { return poll_fd_; }
-  FileDescriptor &GetTriggerFd() { return trigger_fd_; }
+  toolbelt::FileDescriptor &GetPollFd() { return poll_fd_; }
+  toolbelt::FileDescriptor &GetTriggerFd() { return trigger_fd_; }
 
   void AddPollFd(std::vector<struct pollfd> &fds) {
     fds.push_back({.fd = poll_fd_.Fd(), .events = 0});
   }
 
  private:
-  FileDescriptor poll_fd_;     // File descriptor to poll on.
-  FileDescriptor trigger_fd_;  // File descriptor to trigger.
+  toolbelt::FileDescriptor poll_fd_;     // File descriptor to poll on.
+  toolbelt::FileDescriptor trigger_fd_;  // File descriptor to trigger.
 };
 
 }  // namespace subspace

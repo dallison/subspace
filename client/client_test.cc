@@ -4,7 +4,7 @@
 
 #include "absl/hash/hash_testing.h"
 #include "client/client.h"
-#include "common/hexdump.h"
+#include "toolbelt/hexdump.h"
 #include "coroutine.h"
 #include "server/server.h"
 #include <gtest/gtest.h>
@@ -18,7 +18,7 @@ void SignalHandler(int sig) { printf("Signal %d", sig); }
 using Publisher = subspace::Publisher;
 using Subscriber = subspace::Subscriber;
 using Message = subspace::Message;
-using InetAddress = subspace::InetAddress;
+using InetAddress = toolbelt::InetAddress;
 
 class ClientTest : public ::testing::Test {
 public:
@@ -84,8 +84,8 @@ TEST_F(ClientTest, InetAddressSupportsAbslHash) {
   };
 
   EXPECT_TRUE(absl::VerifyTypeImplementsAbslHashCorrectly({
-      InetAddress(), InetAddress("1.2.3.4", 2), InetAddress("localhost", 3),
-      InetAddress(addr),
+      toolbelt::InetAddress(), toolbelt::InetAddress("1.2.3.4", 2), toolbelt::InetAddress("localhost", 3),
+      toolbelt::InetAddress(addr),
   }));
 }
 

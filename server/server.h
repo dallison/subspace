@@ -10,21 +10,21 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "client_handler.h"
-#include "common/bitset.h"
-#include "common/fd.h"
+#include "toolbelt/bitset.h"
+#include "toolbelt/fd.h"
 #include "coroutine.h"
 #include "proto/subspace.pb.h"
 #include "server/server_channel.h"
 #include <memory>
 #include <vector>
-#include "common/logging.h"
+#include "toolbelt/logging.h"
 
 namespace subspace {
 
 // The Subspace server.
 // This is a single-threaded, coroutine-based server that maintains shared
-// memory Subspace channels and communicates with other servers to allow from
-// cross-computer Subspace.
+// memory IPC channels and communicates with other servers to allow for
+// cross-computer IPC.
 class Server {
 public:
   Server(co::CoroutineScheduler &scheduler, const std::string &socket_name,
@@ -38,7 +38,7 @@ private:
   friend class ServerChannel;
   static constexpr size_t kDiscoveryBufferSize = 1024;
 
-  absl::Status HandleIncomingConnection(UnixSocket &listen_socket,
+  absl::Status HandleIncomingConnection(toolbelt::UnixSocket &listen_socket,
                                         co::Coroutine *c);
   absl::StatusOr<ServerChannel *> CreateChannel(const std::string &channel_name,
                                                 int slot_size, int num_slots,
@@ -49,7 +49,7 @@ private:
   void RemoveChannel(ServerChannel *channel);
   void RemoveAllUsersFor(ClientHandler *handler);
   void CloseHandler(ClientHandler *handler);
-  void ListenerCoroutine(UnixSocket listen_socket, co::Coroutine *c);
+  void ListenerCoroutine(toolbelt::UnixSocket listen_socket, co::Coroutine *c);
   void ChannelDirectoryCoroutine(co::Coroutine *c);
   void SendChannelDirectory();
   void StatisticsCoroutine(co::Coroutine *c);
@@ -58,21 +58,21 @@ private:
   void SendQuery(const std::string &channel_name);
   void SendAdvertise(const std::string &channel_name, bool reliable);
   void BridgeTransmitterCoroutine(ServerChannel *channel, bool pub_reliable,
-                                  bool sub_reliable, InetAddress subscriber,
+                                  bool sub_reliable, toolbelt::InetAddress subscriber,
                                   co::Coroutine *c);
   void BridgeReceiverCoroutine(std::string channel_name, bool sub_reliable,
-                               InetAddress publisher, co::Coroutine *c);
-  void SubscribeOverBridge(ServerChannel *channel, bool reliable, InetAddress publisher);
+                               toolbelt::InetAddress publisher, co::Coroutine *c);
+  void SubscribeOverBridge(ServerChannel *channel, bool reliable, toolbelt::InetAddress publisher);
   void IncomingQuery(const Discovery::Query &query,
-                            const InetAddress &sender);
+                            const toolbelt::InetAddress &sender);
   void IncomingAdvertise(const Discovery::Advertise &advertise,
-                        const InetAddress &sender);
+                        const toolbelt::InetAddress &sender);
   void IncomingSubscribe(const Discovery::Subscribe &subscribe,
-                         const InetAddress &sender);
+                         const toolbelt::InetAddress &sender);
   void GratuitousAdvertiseCoroutine(co::Coroutine *c);
   absl::Status SendSubscribeMessage(const std::string &channel_name,
-                                    bool reliable, InetAddress publisher,
-                                    TCPSocket &receiver_listener, char *buffer,
+                                    bool reliable, toolbelt::InetAddress publisher,
+                                    toolbelt::TCPSocket &receiver_listener, char *buffer,
                                     size_t buffer_size, co::Coroutine *c);
   std::string socket_name_;
   std::vector<std::unique_ptr<ClientHandler>> client_handlers_;
@@ -87,18 +87,18 @@ private:
   absl::flat_hash_map<std::string, std::unique_ptr<ServerChannel>> channels_;
 
   SystemControlBlock *scb_;
-  FileDescriptor scb_fd_;
-  BitSet<kMaxChannels> channel_ids_;
+  toolbelt::FileDescriptor scb_fd_;
+  toolbelt::BitSet<kMaxChannels> channel_ids_;
   co::CoroutineScheduler &co_scheduler_;
 
   // All coroutines are owned by this set.
   absl::flat_hash_set<std::unique_ptr<co::Coroutine>> coroutines_;
 
   TriggerFd channel_directory_trigger_fd_;
-  InetAddress discovery_addr_;
-  UDPSocket discovery_transmitter_;
-  UDPSocket discovery_receiver_;
-  Logger logger_;
+  toolbelt::InetAddress discovery_addr_;
+  toolbelt::UDPSocket discovery_transmitter_;
+  toolbelt::UDPSocket discovery_receiver_;
+  toolbelt::Logger logger_;
 };
 
 } // namespace subspace
