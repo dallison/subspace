@@ -22,6 +22,11 @@ public:
     reliable_ = v;
     return *this;
   }
+  // Set the type of the message to be published.  The type is
+  // not meaningful to the subspace system.  It's up to the
+  // user to figure out what it means. The same type must
+  // be used by all other subscribers and publishers.
+  // By default there is no type.
   PublisherOptions &SetType(std::string type) {
     type_ = std::move(type);
     return *this;
@@ -54,6 +59,11 @@ public:
     reliable_ = v;
     return *this;
   }
+  // Set the type of the message on the channel.  The type is
+  // not meaningful to the subspace system.  It's up to the
+  // user to figure out what it means.  The same type must
+  // be used by all other subscribers and publishers.
+  // By default there is no type.
   SubscriberOptions &SetType(std::string type) {
     type_ = std::move(type);
     return *this;

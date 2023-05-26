@@ -4,9 +4,9 @@
 
 #include "client/client.h"
 #include "absl/strings/str_format.h"
-#include "common/clock.h"
-#include "common/mutex.h"
-#include "common/sockets.h"
+#include "toolbelt/clock.h"
+#include "toolbelt/mutex.h"
+#include "toolbelt/sockets.h"
 #include "proto/subspace.pb.h"
 #include <cerrno>
 #include <inttypes.h>
@@ -35,7 +35,7 @@ absl::Status Client::Init(const std::string &server_socket,
   Request req;
   req.mutable_init()->set_client_name(client_name);
   Response resp;
-  std::vector<FileDescriptor> fds;
+  std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
   status = SendRequestReceiveResponse(req, resp, fds);
   if (!status.ok()) {
@@ -80,7 +80,7 @@ Client::CreatePublisher(const std::string &channel_name, int slot_size,
 
   // Send request to server and wait for response.
   Response resp;
-  std::vector<FileDescriptor> fds;
+  std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
   if (absl::Status status = SendRequestReceiveResponse(req, resp, fds);
       !status.ok()) {
@@ -152,7 +152,7 @@ Client::CreateSubscriber(const std::string &channel_name,
 
   // Send request to server and wait for response.
   Response resp;
-  std::vector<FileDescriptor> fds;
+  std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
   if (absl::Status status = SendRequestReceiveResponse(req, resp, fds);
       !status.ok()) {
@@ -506,7 +506,7 @@ absl::Status Client::ReloadSubscriber(Subscriber *subscriber) {
 
   // Send request to server and wait for response.
   Response resp;
-  std::vector<FileDescriptor> fds;
+  std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
   if (absl::Status status = SendRequestReceiveResponse(req, resp, fds);
       !status.ok()) {
@@ -562,7 +562,7 @@ absl::Status Client::ReloadSubscribersIfNecessary(Publisher *publisher) {
 
   // Send request to server and wait for response.
   Response resp;
-  std::vector<FileDescriptor> fds;
+  std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
   if (absl::Status status = SendRequestReceiveResponse(req, resp, fds);
       !status.ok()) {
@@ -600,7 +600,7 @@ Client::ReloadReliablePublishersIfNecessary(Subscriber *subscriber) {
 
   // Send request to server and wait for response.
   Response resp;
-  std::vector<FileDescriptor> fds;
+  std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
   if (absl::Status status = SendRequestReceiveResponse(req, resp, fds);
       !status.ok()) {
@@ -664,7 +664,7 @@ absl::Status Client::RemovePublisher(Publisher *publisher) {
 
   // Send request to server and wait for response.
   Response response;
-  std::vector<FileDescriptor> fds;
+  std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
   if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
       !status.ok()) {
@@ -689,7 +689,7 @@ absl::Status Client::RemoveSubscriber(Subscriber *subscriber) {
 
   // Send request to server and wait for response.
   Response response;
-  std::vector<FileDescriptor> fds;
+  std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
   if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
       !status.ok()) {
@@ -709,7 +709,7 @@ const ChannelCounters &Client::GetChannelCounters(ClientChannel *channel) {
 
 absl::Status
 Client::SendRequestReceiveResponse(const Request &req, Response &response,
-                                   std::vector<FileDescriptor> &fds) {
+                                   std::vector<toolbelt::FileDescriptor> &fds) {
   // SendMessage needs 4 bytes before the buffer passed to
   // use for the length.
   char *sendbuf = buffer_ + sizeof(int32_t);
@@ -727,7 +727,7 @@ Client::SendRequestReceiveResponse(const Request &req, Response &response,
   }
 
   // Wait for response and put it in the same buffer we used for send.
-  n = socket_.ReceiveMessage(buffer_, sizeof(buffer_), co_);
+ n = socket_.ReceiveMessage(buffer_, sizeof(buffer_), co_);
   if (!n.ok()) {
     socket_.Close();
     return n.status();
@@ -736,10 +736,12 @@ Client::SendRequestReceiveResponse(const Request &req, Response &response,
     socket_.Close();
     return absl::InternalError("Failed to parse response");
   }
+
   absl::Status s = socket_.ReceiveFds(fds, co_);
   if (!s.ok()) {
     socket_.Close();
   }
+
   return s;
 }
 

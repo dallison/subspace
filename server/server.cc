@@ -5,8 +5,8 @@
 #include "server/server.h"
 #include "absl/strings/str_format.h"
 #include "client/client.h"
-#include "common/clock.h"
-#include "common/sockets.h"
+#include "toolbelt/clock.h"
+#include "toolbelt/sockets.h"
 #include "proto/subspace.pb.h"
 #include <cerrno>
 #include <fcntl.h>
@@ -26,12 +26,12 @@ namespace subspace {
 // choose the first interface that supports broadcast and
 // has an IP address assigned.
 static absl::Status FindIPAddresses(const std::string &interface,
-                                    InetAddress &ipaddr,
-                                    InetAddress &broadcast_addr,
-                                    Logger &logger) {
+                                    toolbelt::InetAddress &ipaddr,
+                                    toolbelt::InetAddress &broadcast_addr,
+                                    toolbelt::Logger &logger) {
   if (interface.empty()) {
     logger.Log(
-        LogLevel::kInfo,
+        toolbelt::LogLevel::kInfo,
         "No interface supplied; will choose the first broadcast interface with "
         "an IPv4 address.\nThis may not be what you want.  Please provide a "
         "--interface argument.");
@@ -109,11 +109,11 @@ void Server::CloseHandler(ClientHandler *handler) {
 // This coroutine listens for incoming client connections on the given
 // UDS and spawns a handler coroutine to handle the communication with
 // the client.
-void Server::ListenerCoroutine(UnixSocket listen_socket, co::Coroutine *c) {
+void Server::ListenerCoroutine(toolbelt::UnixSocket listen_socket, co::Coroutine *c) {
   for (;;) {
     absl::Status status = HandleIncomingConnection(listen_socket, c);
     if (!status.ok()) {
-      logger_.Log(LogLevel::kError, "Unable to make incoming connection: %s",
+      logger_.Log(toolbelt::LogLevel::kError, "Unable to make incoming connection: %s",
                   status.ToString().c_str());
     }
   }
@@ -129,7 +129,7 @@ absl::Status Server::Run() {
   remove(socket_name_.c_str());
 #endif
 
-  UnixSocket listen_socket;
+  toolbelt::UnixSocket listen_socket;
   absl::Status status = listen_socket.Bind(socket_name_, true);
   if (!status.ok()) {
     return status;
@@ -167,14 +167,14 @@ absl::Status Server::Run() {
     // Find the IP and broadcast IPv4 addresses based on the interface supplied
     // as an argument.  If there is no interface, choose the first interface
     // with an IPv4 address that supports broadcast.
-    InetAddress ip_addr;
-    InetAddress bcast_addr;
+    toolbelt::InetAddress ip_addr;
+    toolbelt::InetAddress bcast_addr;
     if (absl::Status s =
             FindIPAddresses(interface_, ip_addr, bcast_addr, logger_);
         !s.ok()) {
       return s;
     }
-    logger_.Log(LogLevel::kInfo, "IPv4: %s, Broadcast: %s",
+    logger_.Log(toolbelt::LogLevel::kInfo, "IPv4: %s, Broadcast: %s",
                 ip_addr.ToString().c_str(), bcast_addr.ToString().c_str());
 
     // Bind the discovery transmitter to the network and any free
@@ -192,7 +192,7 @@ absl::Status Server::Run() {
 
     // Open the discovery receiver socket.
     if (absl::Status s =
-            discovery_receiver_.Bind(InetAddress::AnyAddress(discovery_port_));
+            discovery_receiver_.Bind(toolbelt::InetAddress::AnyAddress(discovery_port_));
         !s.ok()) {
       return s;
     }
@@ -241,9 +241,9 @@ absl::Status Server::Run() {
   return absl::OkStatus();
 }
 
-absl::Status Server::HandleIncomingConnection(UnixSocket &listen_socket,
+absl::Status Server::HandleIncomingConnection(toolbelt::UnixSocket &listen_socket,
                                               co::Coroutine *c) {
-  absl::StatusOr<UnixSocket> s = listen_socket.Accept(c);
+  absl::StatusOr<toolbelt::UnixSocket> s = listen_socket.Accept(c);
   if (!s.ok()) {
     return s.status();
   }
@@ -267,7 +267,7 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
   }
   ServerChannel *channel = new ServerChannel(
       *channel_id, channel_name, slot_size, num_slots, std::move(type));
-  channel->SetDebug(logger_.GetLogLevel() <= LogLevel::kVerboseDebug);
+  channel->SetDebug(logger_.GetLogLevel() <= toolbelt::LogLevel::kVerboseDebug);
 
   absl::StatusOr<SharedMemoryFds> fds = channel->Allocate(scb_fd_);
   if (!fds.ok()) {
@@ -314,7 +314,7 @@ void Server::RemoveAllUsersFor(ClientHandler *handler) {
       empty_channels.push_back(channel.second.get());
     }
   }
-  // Now remove all empty channels.
+  // toolbelt::Now remove all empty channels.
   for (auto *channel : empty_channels) {
     RemoveChannel(channel);
   }
@@ -326,7 +326,7 @@ void Server::ChannelDirectoryCoroutine(co::Coroutine *c) {
   absl::Status status = client.Init(socket_name_);
   if (!status.ok()) {
     logger_.Log(
-        LogLevel::kFatal,
+        toolbelt::LogLevel::kFatal,
         "Failed to initialize Subspace client for channel directory: %s",
         status.ToString().c_str());
   }
@@ -337,7 +337,7 @@ void Server::ChannelDirectoryCoroutine(co::Coroutine *c) {
       "/subspace/ChannelDirectory", kDirectorySlotSize, kDirectoryNumSlots,
       PublisherOptions().SetType("subspace.ChannelDirectory"));
   if (!dir.ok()) {
-    logger_.Log(LogLevel::kFatal,
+    logger_.Log(toolbelt::LogLevel::kFatal,
                 "Failed to create channel directory channel: %s",
                 dir.status().ToString().c_str());
   }
@@ -355,20 +355,20 @@ void Server::ChannelDirectoryCoroutine(co::Coroutine *c) {
     }
     absl::StatusOr<void *> buffer = client.GetMessageBuffer(channel_directory);
     if (!buffer.ok()) {
-      logger_.Log(LogLevel::kFatal,
+      logger_.Log(toolbelt::LogLevel::kFatal,
                   "Failed to get channel directory buffer: %s",
                   buffer.status().ToString().c_str());
     }
     bool ok = directory.SerializeToArray(*buffer, kDirectorySlotSize);
     if (!ok) {
-      logger_.Log(LogLevel::kError, "Failed to serialize channel directory");
+      logger_.Log(toolbelt::LogLevel::kError, "Failed to serialize channel directory");
       continue;
     }
     int64_t length = directory.ByteSizeLong();
     absl::StatusOr<const Message> s =
         client.PublishMessage(channel_directory, length);
     if (!s.ok()) {
-      logger_.Log(LogLevel::kError, "Failed to publish channel directory: %s",
+      logger_.Log(toolbelt::LogLevel::kError, "Failed to publish channel directory: %s",
                   s.status().ToString().c_str());
     }
   }
@@ -380,7 +380,7 @@ void Server::StatisticsCoroutine(co::Coroutine *c) {
   Client client(c);
   absl::Status status = client.Init(socket_name_);
   if (!status.ok()) {
-    logger_.Log(LogLevel::kFatal,
+    logger_.Log(toolbelt::LogLevel::kFatal,
                 "Failed to initialize Subspace client for statistics: %s",
                 status.ToString().c_str());
   }
@@ -391,7 +391,7 @@ void Server::StatisticsCoroutine(co::Coroutine *c) {
       "/subspace/Statistics", kStatsSlotSize, kStatsNumSlots,
       PublisherOptions().SetType("subspace.Statistics"));
   if (!stats.ok()) {
-    logger_.Log(LogLevel::kFatal, "Failed to create statistics channel: %s",
+    logger_.Log(toolbelt::LogLevel::kFatal, "Failed to create statistics channel: %s",
                 stats.status().ToString().c_str());
   }
   Publisher *pub = *stats;
@@ -400,7 +400,7 @@ void Server::StatisticsCoroutine(co::Coroutine *c) {
   for (;;) {
     c->Sleep(kPeriodSecs);
     Statistics stats;
-    stats.set_timestamp(Now());
+    stats.set_timestamp(toolbelt::Now());
     stats.set_server_id(server_id_);
     for (auto &channel : channels_) {
       auto s = stats.add_channels();
@@ -408,18 +408,18 @@ void Server::StatisticsCoroutine(co::Coroutine *c) {
     }
     absl::StatusOr<void *> buffer = client.GetMessageBuffer(pub);
     if (!buffer.ok()) {
-      logger_.Log(LogLevel::kFatal, "Failed to get channel stats buffer: %s",
+      logger_.Log(toolbelt::LogLevel::kFatal, "Failed to get channel stats buffer: %s",
                   buffer.status().ToString().c_str());
     }
     bool ok = stats.SerializeToArray(*buffer, kStatsSlotSize);
     if (!ok) {
-      logger_.Log(LogLevel::kError, "Failed to serialize channel stats");
+      logger_.Log(toolbelt::LogLevel::kError, "Failed to serialize channel stats");
       continue;
     }
     int64_t length = stats.ByteSizeLong();
     absl::StatusOr<const Message> s = client.PublishMessage(pub, length);
     if (!s.ok()) {
-      logger_.Log(LogLevel::kError, "Failed to publish statistics: %s",
+      logger_.Log(toolbelt::LogLevel::kError, "Failed to publish statistics: %s",
                   s.status().ToString().c_str());
     }
   }
@@ -435,7 +435,7 @@ void Server::SendQuery(const std::string &channel_name) {
   coroutines_.insert(std::make_unique<co::Coroutine>(
       co_scheduler_,
       [this, channel_name](co::Coroutine *c) {
-        logger_.Log(LogLevel::kDebug, "Sending Query %s", channel_name.c_str());
+        logger_.Log(toolbelt::LogLevel::kDebug, "Sending Query %s", channel_name.c_str());
         char buffer[kDiscoveryBufferSize];
         Discovery disc;
         disc.set_server_id(server_id_);
@@ -446,14 +446,14 @@ void Server::SendQuery(const std::string &channel_name) {
 
         bool ok = disc.SerializeToArray(buffer, sizeof(buffer));
         if (!ok) {
-          logger_.Log(LogLevel::kError, "Failed to serialize Query message");
+          logger_.Log(toolbelt::LogLevel::kError, "Failed to serialize Query message");
           return;
         }
         int64_t length = disc.ByteSizeLong();
         absl::Status s =
             discovery_transmitter_.SendTo(discovery_addr_, buffer, length, c);
         if (!s.ok()) {
-          logger_.Log(LogLevel::kError, "Failed to send Query: %s",
+          logger_.Log(toolbelt::LogLevel::kError, "Failed to send Query: %s",
                       s.ToString().c_str());
           return;
         }
@@ -470,7 +470,7 @@ void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
   coroutines_.insert(std::make_unique<co::Coroutine>(
       co_scheduler_,
       [this, channel_name, reliable](co::Coroutine *c) {
-        logger_.Log(LogLevel::kDebug, "Sending Advertise %s",
+        logger_.Log(toolbelt::LogLevel::kDebug, "Sending Advertise %s",
                     channel_name.c_str());
         char buffer[kDiscoveryBufferSize];
         Discovery disc;
@@ -481,7 +481,7 @@ void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
         advertise->set_reliable(reliable);
         bool ok = disc.SerializeToArray(buffer, sizeof(buffer));
         if (!ok) {
-          logger_.Log(LogLevel::kError,
+          logger_.Log(toolbelt::LogLevel::kError,
                       "Failed to serialize Advertise message");
           return;
         }
@@ -489,7 +489,7 @@ void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
         absl::Status s =
             discovery_transmitter_.SendTo(discovery_addr_, buffer, length, c);
         if (!s.ok()) {
-          logger_.Log(LogLevel::kError, "Failed to send Advertise: %s",
+          logger_.Log(toolbelt::LogLevel::kError, "Failed to send Advertise: %s",
                       s.ToString().c_str());
           return;
         }
@@ -501,24 +501,24 @@ void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
 void Server::DiscoveryReceiverCoroutine(co::Coroutine *c) {
   char buffer[kDiscoveryBufferSize];
   for (;;) {
-    InetAddress sender;
+    toolbelt::InetAddress sender;
     absl::StatusOr<ssize_t> n =
         discovery_receiver_.ReceiveFrom(sender, buffer, sizeof(buffer), c);
     if (!n.ok()) {
-      logger_.Log(LogLevel::kError, "Failed to read discovery message: %s",
+      logger_.Log(toolbelt::LogLevel::kError, "Failed to read discovery message: %s",
                   n.status().ToString().c_str());
       continue;
     }
     Discovery disc;
     if (!disc.ParseFromArray(buffer, *n)) {
-      logger_.Log(LogLevel::kError, "Failed to parse discovery message");
+      logger_.Log(toolbelt::LogLevel::kError, "Failed to parse discovery message");
       continue;
     }
     if (disc.server_id() == server_id_) {
       return;
     }
     sender.SetPort(disc.port());
-    logger_.Log(LogLevel::kDebug, "Discovery message from %s\n%s",
+    logger_.Log(toolbelt::LogLevel::kDebug, "Discovery message from %s\n%s",
                 sender.ToString().c_str(), disc.DebugString().c_str());
     switch (disc.data_case()) {
     case Discovery::kQuery:
@@ -538,24 +538,24 @@ void Server::DiscoveryReceiverCoroutine(co::Coroutine *c) {
 
 void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
                                         bool pub_reliable, bool sub_reliable,
-                                        InetAddress subscriber,
+                                        toolbelt::InetAddress subscriber,
                                         co::Coroutine *c) {
-  logger_.Log(LogLevel::kDebug, "BridgeTransmitterCoroutine running");
-  TCPSocket bridge;
+  logger_.Log(toolbelt::LogLevel::kDebug, "BridgeTransmitterCoroutine running");
+  toolbelt::TCPSocket bridge;
   if (absl::Status status = bridge.Connect(subscriber); !status.ok()) {
-    logger_.Log(LogLevel::kError, "Failed to connect to bridge subscriber: %s",
+    logger_.Log(toolbelt::LogLevel::kError, "Failed to connect to bridge subscriber: %s",
                 status.ToString().c_str());
     return;
   }
   if (absl::Status status = bridge.SetNonBlocking(); !status.ok()) {
-    logger_.Log(LogLevel::kError, "%s", status.ToString().c_str());
+    logger_.Log(toolbelt::LogLevel::kError, "%s", status.ToString().c_str());
     return;
   }
 
   const std::string &channel_name = channel->Name();
 
   // Send a Subscribed message to the transmitter.
-  logger_.Log(LogLevel::kDebug, "Sending subscribed to %s",
+  logger_.Log(toolbelt::LogLevel::kDebug, "Sending subscribed to %s",
               subscriber.ToString().c_str());
   char buffer[kDiscoveryBufferSize];
 
@@ -571,20 +571,20 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
 
   bool ok = subscribed.SerializeToArray(databuf, buflen);
   if (!ok) {
-    logger_.Log(LogLevel::kError, "Failed to serialize subscribed message");
+    logger_.Log(toolbelt::LogLevel::kError, "Failed to serialize subscribed message");
     return;
   }
   int64_t length = subscribed.ByteSizeLong();
   absl::StatusOr<ssize_t> n = bridge.SendMessage(databuf, length, c);
   if (!n.ok()) {
-    logger_.Log(LogLevel::kError, "Failed to send subscribed for %s: %s",
+    logger_.Log(toolbelt::LogLevel::kError, "Failed to send subscribed for %s: %s",
                 channel_name.c_str(), n.status().ToString().c_str());
     return;
   }
 
   Client client(c);
   if (absl::Status s = client.Init(socket_name_); !s.ok()) {
-    logger_.Log(LogLevel::kError, "Failed to connect to Subspace server: %s",
+    logger_.Log(toolbelt::LogLevel::kError, "Failed to connect to Subspace server: %s",
                 s.ToString().c_str());
     return;
   }
@@ -592,7 +592,7 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
       channel_name,
       SubscriberOptions().SetReliable(sub_reliable).SetBridge(true));
   if (!sub.ok()) {
-    logger_.Log(LogLevel::kError,
+    logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to create bridge subscriber for %s: %s",
                 channel_name.c_str(), sub.status().ToString().c_str());
     return;
@@ -601,7 +601,7 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
   bool done = false;
   while (!done) {
     if (absl::Status status = client.WaitForSubscriber(*sub); !status.ok()) {
-      logger_.Log(LogLevel::kError, "Failed to wait for subscriber: %s",
+      logger_.Log(toolbelt::LogLevel::kError, "Failed to wait for subscriber: %s",
                   status.ToString().c_str());
       break;
     }
@@ -612,7 +612,7 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
           /*clear_trigger=*/true);
       if (!msg.ok()) {
         done = true;
-        logger_.Log(LogLevel::kError,
+        logger_.Log(toolbelt::LogLevel::kError,
                     "Failed to read message from bridge subscriber for %s: %s",
                     channel_name.c_str(), msg.status().ToString().c_str());
         break;
@@ -649,14 +649,14 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
       // to network and the check for EAGAIN is in SendMessage in the
       // socket.  Since we are using coroutines, the EAGAIN will yield
       // this coroutine until POLLOUT says we can try again.
-      // re
+      //
       // The backpressure received here will be applied upwards because
       // we will stop reading the messages from the channel and thus
       // backpressure any publishers writing to that channel.
       if (absl::StatusOr<ssize_t> n = bridge.SendMessage(data_addr, msglen, c);
           !n.ok()) {
         done = true;
-        logger_.Log(LogLevel::kError,
+        logger_.Log(toolbelt::LogLevel::kError,
                     "Failed to send bridge message for %s: %s",
                     channel_name.c_str(), n.status().ToString().c_str());
 
@@ -670,25 +670,25 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
     }
   }
 
-  logger_.Log(LogLevel::kDebug, "Bridge transmitter for %s terminating",
+  logger_.Log(toolbelt::LogLevel::kDebug, "Bridge transmitter for %s terminating",
               channel_name.c_str());
   // We're done reading messages from the channel, remove the
   // bridge and subscriber.
   channel->RemoveBridgedAddress(subscriber, sub_reliable);
   if (absl::Status s = client.RemoveSubscriber(*sub); !s.ok()) {
-    logger_.Log(LogLevel::kError, "Failed to remove subscriber to %s: %s",
+    logger_.Log(toolbelt::LogLevel::kError, "Failed to remove subscriber to %s: %s",
                 channel_name.c_str(), s.ToString().c_str());
   }
 }
 
 // Send a Subscribe message over UDP.
 absl::Status Server::SendSubscribeMessage(const std::string &channel_name,
-                                          bool reliable, InetAddress publisher,
-                                          TCPSocket &receiver_listener,
+                                          bool reliable, toolbelt::InetAddress publisher,
+                                          toolbelt::TCPSocket &receiver_listener,
                                           char *buffer, size_t buffer_size,
                                           co::Coroutine *c) {
-  const InetAddress &receiver_addr = receiver_listener.BoundAddress();
-  logger_.Log(LogLevel::kDebug, "Bridge receiver socket: %s",
+  const toolbelt::InetAddress &receiver_addr = receiver_listener.BoundAddress();
+  logger_.Log(toolbelt::LogLevel::kDebug, "Bridge receiver socket: %s",
               receiver_addr.ToString().c_str());
   // Send a subscribe request to the publisher.
   Discovery disc;
@@ -706,7 +706,7 @@ absl::Status Server::SendSubscribeMessage(const std::string &channel_name,
     return absl::InternalError("Failed to serialize subscribe message");
   }
   int64_t length = disc.ByteSizeLong();
-  logger_.Log(LogLevel::kDebug, "Sending subscribe to %s: %s",
+  logger_.Log(toolbelt::LogLevel::kDebug, "Sending subscribe to %s: %s",
               publisher.ToString().c_str(), disc.DebugString().c_str());
   absl::Status s = discovery_transmitter_.SendTo(publisher, buffer, length, c);
   if (!s.ok()) {
@@ -720,37 +720,37 @@ absl::Status Server::SendSubscribeMessage(const std::string &channel_name,
 // them to a local channel.  The messages contain the prefix which
 // is sent intact to the channel.
 void Server::BridgeReceiverCoroutine(std::string channel_name,
-                                     bool sub_reliable, InetAddress publisher,
+                                     bool sub_reliable, toolbelt::InetAddress publisher,
                                      co::Coroutine *c) {
   // Open a listening TCP socket on a free port.
-  logger_.Log(LogLevel::kDebug, "BridgeReceiverCoroutine running");
+  logger_.Log(toolbelt::LogLevel::kDebug, "BridgeReceiverCoroutine running");
   char buffer[kDiscoveryBufferSize];
 
-  TCPSocket receiver_listener;
-  absl::Status s = receiver_listener.Bind(InetAddress(hostname_, 0), true);
+  toolbelt::TCPSocket receiver_listener;
+  absl::Status s = receiver_listener.Bind(toolbelt::InetAddress(hostname_, 0), true);
   if (!s.ok()) {
-    logger_.Log(LogLevel::kError,
+    logger_.Log(toolbelt::LogLevel::kError,
                 "Unable to bind socket for bridge receiver for %s: %s",
                 channel_name.c_str(), s.ToString().c_str());
     return;
   }
-  const InetAddress &receiver_addr = receiver_listener.BoundAddress();
-  logger_.Log(LogLevel::kDebug, "Bridge receiver socket: %s",
+  const toolbelt::InetAddress &receiver_addr = receiver_listener.BoundAddress();
+  logger_.Log(toolbelt::LogLevel::kDebug, "Bridge receiver socket: %s",
               receiver_addr.ToString().c_str());
 
   s = SendSubscribeMessage(channel_name, sub_reliable, publisher,
                            receiver_listener, buffer, sizeof(buffer), c);
   if (!s.ok()) {
-    logger_.Log(LogLevel::kError,
+    logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to send Subscribe message for channel %s: %s",
                 channel_name.c_str(), s.ToString().c_str());
     return;
   }
 
   // Accept connection on listen socket.
-  absl::StatusOr<TCPSocket> bridge = receiver_listener.Accept(c);
+  absl::StatusOr<toolbelt::TCPSocket> bridge = receiver_listener.Accept(c);
   if (!bridge.ok()) {
-    logger_.Log(LogLevel::kError,
+    logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to accept incoming bridge connection: %s",
                 bridge.status().ToString().c_str());
     return;
@@ -760,12 +760,12 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
   Subscribed subscribed;
   absl::StatusOr<ssize_t> n = bridge->ReceiveMessage(buffer, sizeof(buffer), c);
   if (!n.ok()) {
-    logger_.Log(LogLevel::kError, "Failed to receive Subscribed: %s",
+    logger_.Log(toolbelt::LogLevel::kError, "Failed to receive Subscribed: %s",
                 n.status().ToString().c_str());
     return;
   }
   if (!subscribed.ParseFromArray(buffer, *n)) {
-    logger_.Log(LogLevel::kError, "Failed to parse Subscribed message");
+    logger_.Log(toolbelt::LogLevel::kError, "Failed to parse Subscribed message");
     return;
   }
 
@@ -773,7 +773,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
   Client client(c);
   s = client.Init(socket_name_);
   if (!s.ok()) {
-    logger_.Log(LogLevel::kError, "Failed to connect to Subspace server: %s",
+    logger_.Log(toolbelt::LogLevel::kError, "Failed to connect to Subspace server: %s",
                 s.ToString().c_str());
     return;
   }
@@ -783,17 +783,17 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
       channel_name, subscribed.slot_size(), subscribed.num_slots(),
       PublisherOptions().SetReliable(subscribed.reliable()).SetBridge(true));
   if (!pub.ok()) {
-    logger_.Log(LogLevel::kError,
+    logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to create bridge publisher for %s: %s",
                 channel_name.c_str(), pub.status().ToString().c_str());
     return;
   }
 
-  // Now we receive messages from the bridge and send to the publisher.
+  // toolbelt::Now we receive messages from the bridge and send to the publisher.
   for (;;) {
     absl::StatusOr<void *> buf = client.GetMessageBuffer(*pub);
     if (!buf.ok()) {
-      logger_.Log(LogLevel::kError,
+      logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to get buffer for bridge subscriber %s: %s",
                   channel_name.c_str(), buf.status().ToString().c_str());
       break;
@@ -801,7 +801,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     if (*buf == nullptr) {
       // Can only happen if publisher is reliable.
       if (!(*pub)->IsReliable()) {
-        logger_.Log(LogLevel::kError,
+        logger_.Log(toolbelt::LogLevel::kError,
                     "Got null buffer for unreliable publisher");
         break;
       }
@@ -815,7 +815,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
       // chain.
       if (absl::Status status = client.WaitForReliablePublisher(*pub);
           !status.ok()) {
-        logger_.Log(LogLevel::kError,
+        logger_.Log(toolbelt::LogLevel::kError,
                     "Failed to wait for reliable publisher: %s",
                     status.ToString().c_str());
         break;
@@ -843,7 +843,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     if (!n.ok()) {
       // This will happen when the bridge transmitter on the other
       // side of the bridge terminates.
-      logger_.Log(LogLevel::kError, "Failed to read bridge message for %s: %s",
+      logger_.Log(toolbelt::LogLevel::kError, "Failed to read bridge message for %s: %s",
                   channel_name.c_str(), n.status().ToString().c_str());
       break;
     }
@@ -861,23 +861,23 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     absl::StatusOr<const Message> s =
         client.PublishMessageInternal(*pub, *n, /*omit_prefix=*/true);
     if (!s.ok()) {
-      logger_.Log(LogLevel::kError,
+      logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to publish bridge message for %s: %s",
                   channel_name.c_str(), s.status().ToString().c_str());
     }
   }
 
-  logger_.Log(LogLevel::kDebug, "Bridge receiver coroutine terminating");
+  logger_.Log(toolbelt::LogLevel::kDebug, "Bridge receiver coroutine terminating");
   // Socket has been closed, remove the publisher and we're done.
   s = client.RemovePublisher(*pub);
   if (!s.ok()) {
-    logger_.Log(LogLevel::kError, "Failed to remove publisher to %s: %s",
+    logger_.Log(toolbelt::LogLevel::kError, "Failed to remove publisher to %s: %s",
                 channel_name.c_str(), s.ToString().c_str());
   }
 }
 
 void Server::SubscribeOverBridge(ServerChannel *channel, bool reliable,
-                                 InetAddress publisher) {
+                                 toolbelt::InetAddress publisher) {
   coroutines_.insert(std::make_unique<co::Coroutine>(
       co_scheduler_,
       [this, publisher, channel, reliable](co::Coroutine *c) {
@@ -887,7 +887,7 @@ void Server::SubscribeOverBridge(ServerChannel *channel, bool reliable,
 }
 
 void Server::IncomingQuery(const Discovery::Query &query,
-                           const InetAddress &sender) {
+                           const toolbelt::InetAddress &sender) {
   // Someone is asking who publishes a channel.  Do I publish it?  If so,
   // send an Advertise out.
   auto channel = channels_.find(query.channel_name());
@@ -900,13 +900,13 @@ void Server::IncomingQuery(const Discovery::Query &query,
 }
 
 void Server::IncomingAdvertise(const Discovery::Advertise &advertise,
-                               const InetAddress &sender) {
+                               const toolbelt::InetAddress &sender) {
   // Do I want to subscribe to this channel?
   auto channel = channels_.find(advertise.channel_name());
   if (channel != channels_.end()) {
     if (channel->second->IsBridged(sender, advertise.reliable())) {
       // Already bridged to this sender.
-      logger_.Log(LogLevel::kDebug,
+      logger_.Log(toolbelt::LogLevel::kDebug,
                   "Channel %s is already bridged to this address",
                   advertise.channel_name().c_str());
       return;
@@ -926,7 +926,7 @@ void Server::IncomingAdvertise(const Discovery::Advertise &advertise,
 }
 
 void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
-                               const InetAddress &sender) {
+                               const toolbelt::InetAddress &sender) {
   bool sub_reliable = subscribe.reliable();
 
   auto channel = channels_.find(subscribe.channel_name());
@@ -936,7 +936,7 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
     }
     if (channel->second->IsBridged(sender, sub_reliable)) {
       // Already bridged to this sender.
-      logger_.Log(LogLevel::kDebug,
+      logger_.Log(toolbelt::LogLevel::kDebug,
                   "Channel %s is already bridged to this address",
                   subscribe.channel_name().c_str());
       return;
@@ -953,7 +953,7 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
     in_addr subscriber_ip;
     memcpy(&subscriber_ip, subscribe.receiver().ip_address().data(),
            sizeof(subscriber_ip));
-    InetAddress subscriber_addr(subscriber_ip, subscribe.receiver().port());
+    toolbelt::InetAddress subscriber_addr(subscriber_ip, subscribe.receiver().port());
     coroutines_.insert(std::make_unique<co::Coroutine>(
         co_scheduler_,
         [this, pub_reliable, sub_reliable, subscriber_addr,
@@ -963,7 +963,7 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
         },
         absl::StrFormat("Bridge transmitter for %s", channel->first).c_str()));
   } else {
-    logger_.Log(LogLevel::kDebug, "I don't publish channel %s",
+    logger_.Log(toolbelt::LogLevel::kDebug, "I don't publish channel %s",
                 subscribe.channel_name().c_str());
   }
 }

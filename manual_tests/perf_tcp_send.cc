@@ -1,8 +1,8 @@
-#include "common/sockets.h"
+#include "toolbelt/sockets.h"
 
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
-#include "common/clock.h"
+#include "toolbelt/clock.h"
 #include <csignal>
 #include <inttypes.h>
 
@@ -14,10 +14,10 @@ int main(int argc, char **argv) {
   absl::ParseCommandLine(argc, argv);
   signal(SIGPIPE, SIG_IGN);
 
-  subspace::TCPSocket socket;
+  toolbelt::TCPSocket socket;
   std::string hostname = absl::GetFlag(FLAGS_hostname);
 
-  absl::Status status = socket.Connect(subspace::InetAddress(hostname.c_str(), 6522));
+  absl::Status status = socket.Connect(toolbelt::InetAddress(hostname.c_str(), 6522));
   if (!status.ok()) {
     fprintf(stderr, "Failed to connect: %s\n", status.ToString().c_str());
     exit(1);

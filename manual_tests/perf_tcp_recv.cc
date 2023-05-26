@@ -1,8 +1,8 @@
-#include "common/sockets.h"
+#include "toolbelt/sockets.h"
 
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
-#include "common/clock.h"
+#include "toolbelt/clock.h"
 #include <csignal>
 #include <inttypes.h>
 
@@ -15,11 +15,11 @@ int main(int argc, char **argv) {
   absl::ParseCommandLine(argc, argv);
   signal(SIGPIPE, SIG_IGN);
 
-  subspace::TCPSocket socket;
+  toolbelt::TCPSocket socket;
   std::string hostname = absl::GetFlag(FLAGS_hostname);
 
   if (absl::Status s =
-          socket.Bind(subspace::InetAddress(hostname.c_str(), 6522), true);
+          socket.Bind(toolbelt::InetAddress(hostname.c_str(), 6522), true);
       !s.ok()) {
     fprintf(stderr, "Failed to bind to localhost: %s\n", s.ToString().c_str());
     exit(1);
@@ -28,7 +28,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "%s", status.ToString().c_str());
     exit(1);
   }
-  absl::StatusOr<subspace::TCPSocket> s = socket.Accept();
+  absl::StatusOr<toolbelt::TCPSocket> s = socket.Accept();
   if (!s.ok()) {
     fprintf(stderr, "Failed to accept: %s\n", s.status().ToString().c_str());
     exit(1);
@@ -48,13 +48,13 @@ int main(int argc, char **argv) {
       exit(1);
     }
     if (start == 0) {
-      start = subspace::Now();
+      start = toolbelt::Now();
     }
     total_bytes += *n;
   }
   free(memory);
 
-  uint64_t end = subspace::Now();
+  uint64_t end = toolbelt::Now();
   double period = (end - start) / 1e9;
   double msg_rate = num_msgs / period;
   double byte_rate = total_bytes / period;

@@ -8,10 +8,10 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "common/bitset.h"
+#include "toolbelt/bitset.h"
 #include "common/channel.h"
-#include "common/fd.h"
-#include "common/sockets.h"
+#include "toolbelt/fd.h"
+#include "toolbelt/sockets.h"
 #include "common/triggerfd.h"
 #include "proto/subspace.pb.h"
 #include <memory>
@@ -37,8 +37,8 @@ public:
   absl::Status Init() { return trigger_fd_.Open(); }
 
   int GetId() const { return id_; }
-  FileDescriptor &GetPollFd() { return trigger_fd_.GetPollFd(); }
-  FileDescriptor &GetTriggerFd() { return trigger_fd_.GetTriggerFd(); }
+  toolbelt::FileDescriptor &GetPollFd() { return trigger_fd_.GetPollFd(); }
+  toolbelt::FileDescriptor &GetTriggerFd() { return trigger_fd_.GetTriggerFd(); }
   virtual bool IsSubscriber() const { return false; }
   virtual bool IsPublisher() const { return false; }
   ClientHandler *GetHandler() const { return handler_; }
@@ -79,11 +79,11 @@ private:
 // address and whether the transmitter is or not.  It is absl hashable.
 class ChannelTransmitter {
 public:
-  ChannelTransmitter(const InetAddress &addr, bool reliable)
+  ChannelTransmitter(const toolbelt::InetAddress &addr, bool reliable)
       : addr_(addr), reliable_(reliable) {}
 
 private:
-  InetAddress addr_;
+  toolbelt::InetAddress addr_;
   bool reliable_;
 
   // Provide support for Abseil hashing.
@@ -120,10 +120,10 @@ public:
   AddSubscriber(ClientHandler *handler, bool is_reliable, bool is_bridge);
 
   // Get the file descriptors for all subscriber triggers.
-  std::vector<FileDescriptor> GetSubscriberTriggerFds() const;
+  std::vector<toolbelt::FileDescriptor> GetSubscriberTriggerFds() const;
 
   // Get the file descriptors for all reliable publisher triggers.
-  std::vector<FileDescriptor> GetReliablePublisherTriggerFds() const;
+  std::vector<toolbelt::FileDescriptor> GetReliablePublisherTriggerFds() const;
 
   // Translate a user id into a User pointer.  The pointer ownership
   // is kept by the ServerChannel.
@@ -155,15 +155,15 @@ public:
 
   // Determine if the given address is registered as a bridge
   // publisher.
-  bool IsBridged(const InetAddress &addr, bool reliable) const {
+  bool IsBridged(const toolbelt::InetAddress &addr, bool reliable) const {
     return bridged_publishers_.contains(ChannelTransmitter(addr, reliable));
   }
 
-  void AddBridgedAddress(const InetAddress &addr, bool reliable) {
+  void AddBridgedAddress(const toolbelt::InetAddress &addr, bool reliable) {
     bridged_publishers_.emplace(addr, reliable);
   }
 
-  void RemoveBridgedAddress(const InetAddress &addr, bool reliable) {
+  void RemoveBridgedAddress(const toolbelt::InetAddress &addr, bool reliable) {
     bridged_publishers_.erase(ChannelTransmitter(addr, reliable));
   }
 
@@ -178,7 +178,7 @@ public:
 
 private:
   std::vector<std::unique_ptr<User>> users_;
-  BitSet<kMaxUsers> user_ids_;
+  toolbelt::BitSet<kMaxUsers> user_ids_;
   absl::flat_hash_set<ChannelTransmitter> bridged_publishers_;
   SharedMemoryFds shared_memory_fds_;
 };

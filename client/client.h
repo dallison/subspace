@@ -11,8 +11,8 @@
 #include "client/client_channel.h"
 #include "client/options.h"
 #include "common/channel.h"
-#include "common/fd.h"
-#include "common/sockets.h"
+#include "toolbelt/fd.h"
+#include "toolbelt/sockets.h"
 #include "common/triggerfd.h"
 #include "coroutine.h"
 #include <functional>
@@ -41,12 +41,32 @@ struct Message {
   Message() = default;
   Message(size_t len, const void *buf, int64_t ordinal, int64_t timestamp)
       : length(len), buffer(buf), ordinal(ordinal), timestamp(timestamp) {}
-  size_t length = 0;
-  const void *buffer = nullptr;
-  int64_t ordinal = -1;
-  uint64_t timestamp = 0;
+  size_t length = 0;                // Length of message in bytes.
+  const void *buffer = nullptr;     // Address of message payload.
+  int64_t ordinal = -1;             // Monotonic number of message.
+  uint64_t timestamp = 0;           // Nanosecond time message was published.
 };
 
+// Shared and weak pointers to messsages as seen by subscriber.  These
+// refer to a message in a slot.  A shared_ptr maintains a reference to the
+// message until it is destructed or moved to another message.  The message
+// referred to by a shared_ptr will never be removed.  A weak_ptr
+// is a reference to a slot that might go away.  You need to lock the
+// weak_ptr, converting it to a shared_ptr before you can access the
+// message.  The lock may fail if the message slot has gone away.
+//
+// Don't hold onto shared_ptr objects for a long time.   If you do you
+// are keeping slots from being reused, thus reducing the channel
+// capacity for all other publishers and subscribers.  The best strategy
+// is to convert them to a weak_ptr before storing them and then,
+// when you want to use the message, lock it and check that it's still
+// valid.  You should design your system so that lost messages are not
+// an issue.  If you really need to see all messages on a channel, use
+// the reliable mode for the publshers and subscribers.
+//
+// The shared_ptr and weak_ptr have a very similar interface to their
+// counterparts in std.  Please see the C++ documentation for how to use
+// them.
 template <typename T> class weak_ptr;
 
 template <typename T> class shared_ptr {
@@ -207,11 +227,30 @@ inline shared_ptr<T>::shared_ptr(const weak_ptr<T> &p)
 // This is an Subspace client.  It must be initialized by calling Init() before
 // it can be used.  The Init() function connects it to an Subspace server that
 // is listening on the same Unix Domain Socket.
+//
+// This is NOT THREAD SAFE so don't use it in a multithreaded program without
+// ensuring that two threads can't access it at the same time.
+//
+// Why not thread safety?  It's really hard to guarantee it in anything
+// except trivial programs.  Even if the interface is made thread safe,
+// thus slowing everything down, you still wouldn't be able to access the
+// same channel from more than one thread at the same time.  To do that,
+// each thread would have to have its own publisher and subscriber.
+//
+// Instead, this client is aware of coroutines.  A coroutine is a way to
+// share the CPU without cloning processes that share memory.  They are
+// lightweight and very safe.  You don't need to use coroutines for
+// the client, but if your client is in a coroutine based program, you can
+// allow it to share the CPU with all other coroutines in the program.
+//
+// For information about the coroutine library used, please see
+// https://github.com/dallison/cocpp.
 class Client {
 public:
   // You can pass a Coroutine pointer to the Client and it will run inside
   // a CoroutineScheduler, sharing the CPU with all other coroutines in the
-  // same scheduler.
+  // same scheduler.  If c is nullptr, the client will not yield to
+  // other coroutines when talking to the server and will block the CPU.
   Client(co::Coroutine *c = nullptr) : co_(c) {}
   ~Client() = default;
 
@@ -303,10 +342,15 @@ public:
       std::function<void(Subscriber *, int64_t)> callback);
   absl::Status UnregisterDroppedMessageCallback(Subscriber *subscriber);
 
+  // Get the most recently received ordinal for the subscriber.
   int64_t GetCurrentOrdinal(Subscriber *sub) const;
 
+  // Get a snapshot of the current number of publishers and subscribers
+  // for the given channel (publisher or subscriber)
   const ChannelCounters &GetChannelCounters(ClientChannel *channel);
 
+  // Call with true to turn on some debug information.  Kind of meaningless
+  // information unless you know how this works in detail.
   void SetDebug(bool v) { debug_ = v; }
 
 private:
@@ -315,7 +359,7 @@ private:
   absl::Status CheckConnected() const;
   absl::Status SendRequestReceiveResponse(const Request &req,
                                           Response &response,
-                                          std::vector<FileDescriptor> &fds);
+                                          std::vector<toolbelt::FileDescriptor> &fds);
 
   absl::Status ReloadSubscriber(Subscriber *channel);
   absl::Status ReloadSubscribersIfNecessary(Publisher *publisher);
@@ -332,8 +376,8 @@ private:
                                                        int64_t message_size,
                                                        bool omit_prefix);
 
-  UnixSocket socket_;
-  FileDescriptor scb_fd_;    // System control block memory fd.
+  toolbelt::UnixSocket socket_;
+  toolbelt::FileDescriptor scb_fd_;    // System control block memory fd.
   char buffer_[kMaxMessage]; // Buffer for comms with server over UDS.
 
   // The client owns all the publishers and subscribers.

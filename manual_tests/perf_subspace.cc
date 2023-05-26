@@ -2,8 +2,8 @@
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
 #include "client/client.h"
-#include "common/clock.h"
-#include "common/hexdump.h"
+#include "toolbelt/clock.h"
+#include "toolbelt/hexdump.h"
 #include "coroutine.h"
 #include <csignal>
 #include <inttypes.h>
@@ -98,14 +98,14 @@ void SubCoroutine(co::Coroutine *c) {
   while (i < num_msgs) {
     uint64_t wait_start = 0;
     if (start != 0) {
-      wait_start = subspace::Now();
+      wait_start = toolbelt::Now();
     }
     if (absl::Status s = client.WaitForSubscriber(*sub); !s.ok()) {
       fprintf(stderr, "Can't wait for subscriber: %s\n", s.ToString().c_str());
       exit(1);
     }
     if (wait_start != 0) {
-      total_wait += subspace::Now() - wait_start;
+      total_wait += toolbelt::Now() - wait_start;
     }
     for (;;) {
       absl::StatusOr<subspace::Message> msg = client.ReadMessage(*sub);
@@ -118,14 +118,14 @@ void SubCoroutine(co::Coroutine *c) {
         break;
       }
       if (start == 0) {
-        start = subspace::Now();
+        start = toolbelt::Now();
       }
       // printf("got %d\n", i);
       total_bytes += msg->length;
       i++;
     }
   }
-  uint64_t end = subspace::Now();
+  uint64_t end = toolbelt::Now();
   double period = (end - start - total_wait) / 1e9;
   double msg_rate = num_msgs / period;
   double byte_rate = total_bytes / period;
