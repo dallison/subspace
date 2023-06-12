@@ -27,9 +27,9 @@ int main(int argc, char **argv) {
   bool reliable = absl::GetFlag(FLAGS_reliable);
   int num_slots = absl::GetFlag(FLAGS_num_slots);
 
-  absl::StatusOr<subspace::Publisher *> pub = client.CreatePublisher(
+  absl::StatusOr<subspace::Publisher> pub = client.CreatePublisher(
       "test", 256, num_slots,
-      subspace::PublisherOptions().SetPublic(true).SetReliable(reliable));
+      subspace::PublisherOptions().SetLocal(true).SetReliable(reliable));
   if (!pub.ok()) {
     fprintf(stderr, "Can't create publisher: %s\n",
             pub.status().ToString().c_str());
@@ -55,7 +55,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < num_msgs; i++) {
       void *buf = nullptr;
       for (;;) {
-        absl::StatusOr<void *> buffer = client.GetMessageBuffer(*pub);
+        absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
         if (!buffer.ok()) {
           fprintf(stderr, "Can't get publisher buffer: %s\n",
                   buffer.status().ToString().c_str());
@@ -63,7 +63,7 @@ int main(int argc, char **argv) {
         }
         if (*buffer == nullptr) {
           // Wait for publisher trigger.
-          absl::Status s = client.WaitForReliablePublisher(*pub);
+          absl::Status s = pub->Wait();
           if (!s.ok()) {
             fprintf(stderr, "Can't wait for publisher: %s",
                     s.ToString().c_str());
@@ -76,7 +76,7 @@ int main(int argc, char **argv) {
       }
       size_t len = snprintf(reinterpret_cast<char *>(buf), 256, "%s", "hello");
       absl::StatusOr<const subspace::Message> status =
-          client.PublishMessage(*pub, len);
+          pub->PublishMessage(len);
       if (!status.ok()) {
         fprintf(stderr, "Can't publish message: %s\n",
                 status.status().ToString().c_str());

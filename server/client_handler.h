@@ -6,12 +6,12 @@
 #define __SERVER_CLIENT_HANDLER_H
 
 #include "absl/status/status.h"
-#include "toolbelt/sockets.h"
+#include "common/channel.h"
 #include "coroutine.h"
 #include "proto/subspace.pb.h"
+#include "toolbelt/sockets.h"
 #include <sys/poll.h>
 #include <vector>
-#include "common/channel.h"
 
 namespace subspace {
 
@@ -28,14 +28,16 @@ public:
   void Run(co::Coroutine *c);
 
 private:
-  absl::Status HandleMessage(const subspace::Request &req, subspace::Response &resp,
+  absl::Status HandleMessage(const subspace::Request &req,
+                             subspace::Response &resp,
                              std::vector<toolbelt::FileDescriptor> &fds);
 
   // These individual handler functions set any errors in the response
   // message instead of returning them to the caller.  This allows the
   // connection to remain open to the client and the client will be
   // able to display or handle the error as appropriate.
-  void HandleInit(const subspace::InitRequest &req, subspace::InitResponse *response,
+  void HandleInit(const subspace::InitRequest &req,
+                  subspace::InitResponse *response,
                   std::vector<toolbelt::FileDescriptor> &fds);
   void HandleCreatePublisher(const subspace::CreatePublisherRequest &req,
                              subspace::CreatePublisherResponse *response,
@@ -53,6 +55,12 @@ private:
   void HandleRemoveSubscriber(const subspace::RemoveSubscriberRequest &req,
                               subspace::RemoveSubscriberResponse *response,
                               std::vector<toolbelt::FileDescriptor> &fds);
+  void HandleResize(const subspace::ResizeRequest &req,
+                    subspace::ResizeResponse *response,
+                    std::vector<toolbelt::FileDescriptor> &fds);
+  void HandleGetBuffers(const subspace::GetBuffersRequest &req,
+                        subspace::GetBuffersResponse *response,
+                        std::vector<toolbelt::FileDescriptor> &fds);
   Server *server_;
   toolbelt::UnixSocket socket_;
   char buffer_[kMaxMessage];

@@ -13,7 +13,8 @@ ServerChannel::~ServerChannel() {
   memset(&GetScb()->counters[GetChannelId()], 0, sizeof(ChannelCounters));
 }
 
-std::vector<toolbelt::FileDescriptor> ServerChannel::GetSubscriberTriggerFds() const {
+std::vector<toolbelt::FileDescriptor>
+ServerChannel::GetSubscriberTriggerFds() const {
   std::vector<toolbelt::FileDescriptor> r;
   for (auto &user : users_) {
     if (user == nullptr) {
@@ -42,13 +43,13 @@ ServerChannel::GetReliablePublisherTriggerFds() const {
 
 absl::StatusOr<PublisherUser *>
 ServerChannel::AddPublisher(ClientHandler *handler, bool is_reliable,
-                            bool is_public, bool is_bridge) {
+                            bool is_local, bool is_bridge) {
   absl::StatusOr<int> user_id = user_ids_.Allocate("publisher");
   if (!user_id.ok()) {
     return user_id.status();
   }
   std::unique_ptr<PublisherUser> pub = std::make_unique<PublisherUser>(
-      handler, *user_id, is_reliable, is_public, is_bridge);
+      handler, *user_id, is_reliable, is_local, is_bridge);
   absl::Status status = pub->Init();
   if (!status.ok()) {
     return status;
@@ -144,14 +145,14 @@ void ServerChannel::CountUsers(int &num_pubs, int &num_subs) const {
 }
 
 // Channel is public if there are any public publishers.
-bool ServerChannel::IsPublic() const {
+bool ServerChannel::IsLocal() const {
   for (auto &user : users_) {
     if (user == nullptr) {
       continue;
     }
     if (user->IsPublisher()) {
       PublisherUser *pub = static_cast<PublisherUser *>(user.get());
-      if (pub->IsPublic()) {
+      if (pub->IsLocal()) {
         return true;
       }
     }
@@ -237,7 +238,7 @@ void ServerChannel::GetChannelInfo(subspace::ChannelInfo *info) {
 void ServerChannel::GetChannelStats(subspace::ChannelStats *stats) {
   stats->set_channel_name(Name());
   int64_t total_bytes, total_messages;
-  Channel::GetCounters(total_bytes, total_messages);
+  GetStatsCounters(total_bytes, total_messages);
   stats->set_total_bytes(total_bytes);
   stats->set_total_messages(total_messages);
 }
@@ -263,4 +264,11 @@ ChannelCounters &ServerChannel::RecordUpdate(bool is_pub, bool add,
   }
   return counters;
 }
+
+void ServerChannel::AddBuffer(int slot_size, toolbelt::FileDescriptor fd) {
+  shared_memory_fds_.buffers.push_back({slot_size, std::move(fd)});
+}
+
+
+
 } // namespace subspace

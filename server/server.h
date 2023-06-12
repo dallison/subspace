@@ -10,14 +10,14 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "client_handler.h"
-#include "toolbelt/bitset.h"
-#include "toolbelt/fd.h"
 #include "coroutine.h"
 #include "proto/subspace.pb.h"
 #include "server/server_channel.h"
+#include "toolbelt/bitset.h"
+#include "toolbelt/fd.h"
+#include "toolbelt/logging.h"
 #include <memory>
 #include <vector>
-#include "toolbelt/logging.h"
 
 namespace subspace {
 
@@ -28,8 +28,9 @@ namespace subspace {
 class Server {
 public:
   Server(co::CoroutineScheduler &scheduler, const std::string &socket_name,
-         const std::string &interface, int disc_port, int peer_port, bool local);
-  void SetLogLevel(const std::string& level) { logger_.SetLogLevel(level); }
+         const std::string &interface, int disc_port, int peer_port,
+         bool local);
+  void SetLogLevel(const std::string &level) { logger_.SetLogLevel(level); }
   absl::Status Run();
   void Stop();
 
@@ -40,6 +41,10 @@ private:
 
   absl::Status HandleIncomingConnection(toolbelt::UnixSocket &listen_socket,
                                         co::Coroutine *c);
+
+  // Create a channel in both process and shared memory.  For a placeholder
+  // subscriber, the channel parameters are not known, so slot_size and
+  // num_slots will be zero.
   absl::StatusOr<ServerChannel *> CreateChannel(const std::string &channel_name,
                                                 int slot_size, int num_slots,
                                                 std::string type);
@@ -58,22 +63,27 @@ private:
   void SendQuery(const std::string &channel_name);
   void SendAdvertise(const std::string &channel_name, bool reliable);
   void BridgeTransmitterCoroutine(ServerChannel *channel, bool pub_reliable,
-                                  bool sub_reliable, toolbelt::InetAddress subscriber,
+                                  bool sub_reliable,
+                                  toolbelt::InetAddress subscriber,
                                   co::Coroutine *c);
   void BridgeReceiverCoroutine(std::string channel_name, bool sub_reliable,
-                               toolbelt::InetAddress publisher, co::Coroutine *c);
-  void SubscribeOverBridge(ServerChannel *channel, bool reliable, toolbelt::InetAddress publisher);
+                               toolbelt::InetAddress publisher,
+                               co::Coroutine *c);
+  void SubscribeOverBridge(ServerChannel *channel, bool reliable,
+                           toolbelt::InetAddress publisher);
   void IncomingQuery(const Discovery::Query &query,
-                            const toolbelt::InetAddress &sender);
+                     const toolbelt::InetAddress &sender);
   void IncomingAdvertise(const Discovery::Advertise &advertise,
-                        const toolbelt::InetAddress &sender);
+                         const toolbelt::InetAddress &sender);
   void IncomingSubscribe(const Discovery::Subscribe &subscribe,
                          const toolbelt::InetAddress &sender);
   void GratuitousAdvertiseCoroutine(co::Coroutine *c);
   absl::Status SendSubscribeMessage(const std::string &channel_name,
-                                    bool reliable, toolbelt::InetAddress publisher,
-                                    toolbelt::TCPSocket &receiver_listener, char *buffer,
-                                    size_t buffer_size, co::Coroutine *c);
+                                    bool reliable,
+                                    toolbelt::InetAddress publisher,
+                                    toolbelt::TCPSocket &receiver_listener,
+                                    char *buffer, size_t buffer_size,
+                                    co::Coroutine *c);
   std::string socket_name_;
   std::vector<std::unique_ptr<ClientHandler>> client_handlers_;
   bool running_ = false;

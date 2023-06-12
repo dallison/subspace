@@ -4,14 +4,18 @@
 
 #include "client/client.h"
 #include "absl/strings/str_format.h"
+#include "proto/subspace.pb.h"
 #include "toolbelt/clock.h"
 #include "toolbelt/mutex.h"
 #include "toolbelt/sockets.h"
-#include "proto/subspace.pb.h"
 #include <cerrno>
 #include <inttypes.h>
 
 namespace subspace {
+
+using ClientChannel = details::ClientChannel;
+using SubscriberImpl = details::SubscriberImpl;
+using PublisherImpl = details::PublisherImpl;
 
 absl::Status Client::CheckConnected() const {
   if (!socket_.Connected()) {
@@ -46,12 +50,13 @@ absl::Status Client::Init(const std::string &server_socket,
 }
 
 void Client::RegisterDroppedMessageCallback(
-    Subscriber *subscriber,
-    std::function<void(Subscriber *, int64_t)> callback) {
+    SubscriberImpl *subscriber,
+    std::function<void(SubscriberImpl *, int64_t)> callback) {
   dropped_message_callbacks_[subscriber] = std::move(callback);
 }
 
-absl::Status Client::UnregisterDroppedMessageCallback(Subscriber *subscriber) {
+absl::Status
+Client::UnregisterDroppedMessageCallback(SubscriberImpl *subscriber) {
   auto it = dropped_message_callbacks_.find(subscriber);
   if (it == dropped_message_callbacks_.end()) {
     return absl::InternalError(absl::StrFormat(
@@ -62,7 +67,18 @@ absl::Status Client::UnregisterDroppedMessageCallback(Subscriber *subscriber) {
   return absl::OkStatus();
 }
 
-absl::StatusOr<Publisher *>
+static std::vector<SlotBuffer>
+CollectBuffers(const google::protobuf::RepeatedPtrField<BufferInfo> &buffers,
+               const std::vector<toolbelt::FileDescriptor> &fds) {
+  std::vector<SlotBuffer> r;
+  r.reserve(buffers.size());
+  for (auto &buffer : buffers) {
+    r.emplace_back(buffer.slot_size(), fds[buffer.fd_index()]);
+  }
+  return r;
+}
+
+absl::StatusOr<Publisher>
 Client::CreatePublisher(const std::string &channel_name, int slot_size,
                         int num_slots, const PublisherOptions &opts) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
@@ -73,7 +89,7 @@ Client::CreatePublisher(const std::string &channel_name, int slot_size,
   cmd->set_channel_name(channel_name);
   cmd->set_slot_size(slot_size);
   cmd->set_num_slots(num_slots);
-  cmd->set_is_public(opts.IsPublic());
+  cmd->set_is_local(opts.IsLocal());
   cmd->set_is_reliable(opts.IsReliable());
   cmd->set_is_bridge(opts.IsBridge());
   cmd->set_type(opts.Type());
@@ -93,11 +109,14 @@ Client::CreatePublisher(const std::string &channel_name, int slot_size,
 
   // Make a local ClientChannel object and map in the shared memory allocated
   // by the server.
-  std::unique_ptr<Publisher> channel = std::make_unique<Publisher>(
-      channel_name, slot_size, num_slots, pub_resp.channel_id(),
-      pub_resp.publisher_id(), pub_resp.type(), opts);
+  std::unique_ptr<PublisherImpl> channel = std::make_unique<PublisherImpl>(
+      channel_name, num_slots, pub_resp.channel_id(), pub_resp.publisher_id(),
+      pub_resp.type(), opts);
+
+  std::vector<SlotBuffer> buffers = CollectBuffers(pub_resp.buffers(), fds);
+
   SharedMemoryFds channel_fds(std::move(fds[pub_resp.ccb_fd_index()]),
-                              std::move(fds[pub_resp.buffers_fd_index()]));
+                              std::move(buffers));
   if (absl::Status status = channel->Map(std::move(channel_fds), scb_fd_);
       !status.ok()) {
     return status;
@@ -131,12 +150,12 @@ Client::CreatePublisher(const std::string &channel_name, int slot_size,
   channel->TriggerSubscribers();
 
   // channel->Dump();
-  Publisher *channel_ptr = channel.get();
+  PublisherImpl *channel_ptr = channel.get();
   channels_.insert(std::move(channel));
-  return channel_ptr;
+  return Publisher(this, channel_ptr);
 }
 
-absl::StatusOr<Subscriber *>
+absl::StatusOr<Subscriber>
 Client::CreateSubscriber(const std::string &channel_name,
                          const SubscriberOptions &opts) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
@@ -166,11 +185,15 @@ Client::CreateSubscriber(const std::string &channel_name,
 
   // Make a local Subscriber object and map in the shared memory allocated
   // by the server.
-  std::unique_ptr<Subscriber> channel = std::make_unique<Subscriber>(
-      channel_name, sub_resp.slot_size(), sub_resp.num_slots(),
-      sub_resp.channel_id(), sub_resp.subscriber_id(), sub_resp.type(), opts);
+  std::unique_ptr<SubscriberImpl> channel = std::make_unique<SubscriberImpl>(
+      channel_name, sub_resp.num_slots(), sub_resp.channel_id(),
+      sub_resp.subscriber_id(), sub_resp.type(), opts);
+
+  channel->SetNumSlots(sub_resp.num_slots());
+  std::vector<SlotBuffer> buffers = CollectBuffers(sub_resp.buffers(), fds);
+
   SharedMemoryFds channel_fds(std::move(fds[sub_resp.ccb_fd_index()]),
-                              std::move(fds[sub_resp.buffers_fd_index()]));
+                              std::move(buffers));
   if (absl::Status status = channel->Map(std::move(channel_fds), scb_fd_);
       !status.ok()) {
     return status;
@@ -192,16 +215,35 @@ Client::CreateSubscriber(const std::string &channel_name,
 
   // channel->Dump();
 
-  Subscriber *channel_ptr = channel.get();
+  SubscriberImpl *channel_ptr = channel.get();
   channels_.insert(std::move(channel));
-  return channel_ptr;
+  return Subscriber(this, channel_ptr);
 }
 
-absl::StatusOr<void *> Client::GetMessageBuffer(Publisher *publisher) {
+absl::StatusOr<void *> Client::GetMessageBuffer(PublisherImpl *publisher,
+                                                int32_t max_size) {
   publisher->ClearPollFd();
+
+  int32_t slot_size = publisher->SlotSize();
+  if (max_size != -1 && max_size > slot_size) {
+    int32_t new_slot_size = slot_size;
+    assert(new_slot_size > 0);
+    while (new_slot_size <= slot_size || new_slot_size < max_size) {
+      new_slot_size *= 2;
+    }
+    if (absl::Status status = ResizeChannel(publisher, new_slot_size);
+        !status.ok()) {
+      return status;
+    }
+    publisher->SetSlotToBiggestBuffer(publisher->CurrentSlot());
+  }
 
   if (absl::Status status = ReloadSubscribersIfNecessary(publisher);
       !status.ok()) {
+    return status;
+  }
+
+  if (absl::Status status = ReloadBuffersIfNecessary(publisher); !status.ok()) {
     return status;
   }
 
@@ -225,6 +267,7 @@ absl::StatusOr<void *> Client::GetMessageBuffer(Publisher *publisher) {
     }
     publisher->SetSlot(slot);
   }
+  
   void *buffer = publisher->GetCurrentBufferAddress();
   if (buffer == nullptr) {
     return absl::InternalError(
@@ -233,13 +276,13 @@ absl::StatusOr<void *> Client::GetMessageBuffer(Publisher *publisher) {
   return buffer;
 }
 
-absl::StatusOr<const Message> Client::PublishMessage(Publisher *publisher,
+absl::StatusOr<const Message> Client::PublishMessage(PublisherImpl *publisher,
                                                      int64_t message_size) {
   return PublishMessageInternal(publisher, message_size, /*omit_prefix=*/false);
 }
 
 absl::StatusOr<const Message>
-Client::PublishMessageInternal(Publisher *publisher, int64_t message_size,
+Client::PublishMessageInternal(PublisherImpl *publisher, int64_t message_size,
                                bool omit_prefix) {
   // Check if there are any new subscribers and if so, load their trigger fds.
   if (absl::Status status = ReloadSubscribersIfNecessary(publisher);
@@ -291,7 +334,7 @@ Client::PublishMessageInternal(Publisher *publisher, int64_t message_size,
   return Message(message_size, nullptr, msg.ordinal, msg.timestamp);
 }
 
-absl::Status Client::WaitForReliablePublisher(Publisher *publisher) {
+absl::Status Client::WaitForReliablePublisher(PublisherImpl *publisher) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -321,7 +364,7 @@ absl::Status Client::WaitForReliablePublisher(Publisher *publisher) {
   return absl::OkStatus();
 }
 
-absl::Status Client::WaitForSubscriber(Subscriber *subscriber) {
+absl::Status Client::WaitForSubscriber(SubscriberImpl *subscriber) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -344,7 +387,7 @@ absl::Status Client::WaitForSubscriber(Subscriber *subscriber) {
 }
 
 absl::StatusOr<const Message>
-Client::ReadMessageInternal(Subscriber *subscriber, ReadMode mode,
+Client::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
                             bool pass_activation, bool clear_trigger) {
   if (clear_trigger) {
     subscriber->ClearPollFd();
@@ -356,7 +399,7 @@ Client::ReadMessageInternal(Subscriber *subscriber, ReadMode mode,
   if (old_slot != nullptr) {
     last_ordinal = old_slot->ordinal;
     if (debug_) {
-      printf("old slot: %d: %" PRId64 "\n", old_slot->id, last_ordinal);
+      printf("read old slot: %d: %" PRId64 "\n", old_slot->id, last_ordinal);
     }
   }
 
@@ -381,7 +424,7 @@ Client::ReadMessageInternal(Subscriber *subscriber, ReadMode mode,
   subscriber->SetSlot(new_slot);
 
   if (debug_) {
-    printf("new_slot: %d: %" PRId64 "\n", new_slot->id, new_slot->ordinal);
+    printf("read new_slot: %d: %" PRId64 "\n", new_slot->id, new_slot->ordinal);
   }
 
   if (last_ordinal != -1 && new_slot->ordinal != (last_ordinal + 1)) {
@@ -406,10 +449,11 @@ Client::ReadMessageInternal(Subscriber *subscriber, ReadMode mode,
                  subscriber->CurrentOrdinal(), subscriber->Timestamp());
 }
 
-absl::StatusOr<const Message> Client::ReadMessage(Subscriber *subscriber,
+absl::StatusOr<const Message> Client::ReadMessage(SubscriberImpl *subscriber,
                                                   ReadMode mode) {
-  // If the channel is a placeholder (no publishers present), contact the
-  // server to see if there is now a publisher.  This will reload the shared
+  // If the channel is a placeholder (no publishers present), look
+  // in the SCB to see if a new publisher has been created and if so,
+  // talk to the server to get the information to reload the shared
   // memory.  If there still isn't a publisher, we will still be a placeholder.
   if (subscriber->IsPlaceholder()) {
     absl::Status status = ReloadSubscriber(subscriber);
@@ -417,6 +461,11 @@ absl::StatusOr<const Message> Client::ReadMessage(Subscriber *subscriber,
       subscriber->ClearPollFd();
       return Message();
     }
+  }
+
+  if (absl::Status status = ReloadBuffersIfNecessary(subscriber);
+      !status.ok()) {
+    return status;
   }
 
   // Check if there are any new reliable publishers and if so, load their
@@ -431,7 +480,7 @@ absl::StatusOr<const Message> Client::ReadMessage(Subscriber *subscriber,
 }
 
 absl::StatusOr<const Message>
-Client::FindMessageInternal(Subscriber *subscriber, uint64_t timestamp) {
+Client::FindMessageInternal(SubscriberImpl *subscriber, uint64_t timestamp) {
 
   MessageSlot *new_slot = subscriber->FindMessage(timestamp);
   if (new_slot == nullptr) {
@@ -442,7 +491,7 @@ Client::FindMessageInternal(Subscriber *subscriber, uint64_t timestamp) {
                  subscriber->CurrentOrdinal(), subscriber->Timestamp());
 }
 
-absl::StatusOr<const Message> Client::FindMessage(Subscriber *subscriber,
+absl::StatusOr<const Message> Client::FindMessage(SubscriberImpl *subscriber,
                                                   uint64_t timestamp) {
   // If the channel is a placeholder (no publishers present), contact the
   // server to see if there is now a publisher.  This will reload the shared
@@ -464,12 +513,12 @@ absl::StatusOr<const Message> Client::FindMessage(Subscriber *subscriber,
   return FindMessageInternal(subscriber, timestamp);
 }
 
-struct pollfd Client::GetPollFd(Subscriber *subscriber) {
+struct pollfd Client::GetPollFd(SubscriberImpl *subscriber) {
   struct pollfd fd = {.fd = subscriber->GetPollFd().Fd(), .events = POLLIN};
   return fd;
 }
 
-struct pollfd Client::GetPollFd(Publisher *publisher) {
+struct pollfd Client::GetPollFd(PublisherImpl *publisher) {
   static struct pollfd fd { .fd = -1, .events = POLLIN };
   if (!publisher->IsReliable()) {
     return fd;
@@ -478,7 +527,7 @@ struct pollfd Client::GetPollFd(Publisher *publisher) {
   return fd;
 }
 
-int64_t Client::GetCurrentOrdinal(Subscriber *sub) const {
+int64_t Client::GetCurrentOrdinal(SubscriberImpl *sub) const {
   MessageSlot *slot = sub->CurrentSlot();
   if (slot == nullptr) {
     return -1;
@@ -486,7 +535,32 @@ int64_t Client::GetCurrentOrdinal(Subscriber *sub) const {
   return slot->ordinal;
 }
 
-absl::Status Client::ReloadSubscriber(Subscriber *subscriber) {
+absl::Status Client::ReloadBuffersIfNecessary(ClientChannel *channel) {
+  if (!channel->BuffersChanged()) {
+    return absl::OkStatus();
+  }
+  if (absl::Status status = CheckConnected(); !status.ok()) {
+    return status;
+  }
+  Request req;
+  auto *cmd = req.mutable_get_buffers();
+  cmd->set_channel_name(channel->Name());
+
+  // Send request to server and wait for response.
+  Response response;
+  std::vector<toolbelt::FileDescriptor> fds;
+  fds.reserve(100);
+  if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
+      !status.ok()) {
+    return status;
+  }
+
+  auto &resp = response.get_buffers();
+  std::vector<SlotBuffer> buffers = CollectBuffers(resp.buffers(), fds);
+  return channel->MapNewBuffers(std::move(buffers));
+}
+
+absl::Status Client::ReloadSubscriber(SubscriberImpl *subscriber) {
   // Check if there are any updates to the publishers
   // since that last time we checked.
   SystemControlBlock *scb = subscriber->GetScb();
@@ -518,12 +592,16 @@ absl::Status Client::ReloadSubscriber(Subscriber *subscriber) {
     return absl::InternalError(sub_resp.error());
   }
 
+  subscriber->SetNumSlots(sub_resp.num_slots());
+
   // Unmap the channel memory.
   subscriber->Unmap();
 
+  std::vector<SlotBuffer> buffers = CollectBuffers(sub_resp.buffers(), fds);
   SharedMemoryFds channel_fds(std::move(fds[sub_resp.ccb_fd_index()]),
-                              std::move(fds[sub_resp.buffers_fd_index()]));
-  subscriber->SetSlots(sub_resp.slot_size(), sub_resp.num_slots());
+                              std::move(buffers));
+
+  // subscriber->SetSlots(sub_resp.slot_size(), sub_resp.num_slots());
 
   if (absl::Status status = subscriber->Map(std::move(channel_fds), scb_fd_);
       !status.ok()) {
@@ -542,7 +620,7 @@ absl::Status Client::ReloadSubscriber(Subscriber *subscriber) {
   return absl::OkStatus();
 }
 
-absl::Status Client::ReloadSubscribersIfNecessary(Publisher *publisher) {
+absl::Status Client::ReloadSubscribersIfNecessary(PublisherImpl *publisher) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -579,7 +657,7 @@ absl::Status Client::ReloadSubscribersIfNecessary(Publisher *publisher) {
 }
 
 absl::Status
-Client::ReloadReliablePublishersIfNecessary(Subscriber *subscriber) {
+Client::ReloadReliablePublishersIfNecessary(SubscriberImpl *subscriber) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -619,7 +697,7 @@ Client::ReloadReliablePublishersIfNecessary(Subscriber *subscriber) {
 // A reliable publisher always sends a single activation message when it
 // is created.  This is to ensure that the reliable subscribers see
 // on message and thus keep a reference to it.
-absl::Status Client::ActivateReliableChannel(Publisher *publisher) {
+absl::Status Client::ActivateReliableChannel(PublisherImpl *publisher) {
   MessageSlot *slot =
       publisher->FindFreeSlot(/*reliable=*/true, publisher->GetPublisherId());
   if (slot == nullptr) {
@@ -653,7 +731,7 @@ absl::Status Client::RemoveChannel(ClientChannel *channel) {
   return absl::OkStatus();
 }
 
-absl::Status Client::RemovePublisher(Publisher *publisher) {
+absl::Status Client::RemovePublisher(PublisherImpl *publisher) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -678,7 +756,7 @@ absl::Status Client::RemovePublisher(Publisher *publisher) {
   return RemoveChannel(publisher);
 }
 
-absl::Status Client::RemoveSubscriber(Subscriber *subscriber) {
+absl::Status Client::RemoveSubscriber(SubscriberImpl *subscriber) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -707,6 +785,36 @@ const ChannelCounters &Client::GetChannelCounters(ClientChannel *channel) {
   return channel->GetCounters();
 }
 
+absl::Status Client::ResizeChannel(PublisherImpl *publisher,
+                                   int32_t new_slot_size) {
+  if (publisher->IsFixedSize()) {
+    return absl::InternalError(absl::StrFormat(
+        "Channel %s is fixed size at %d bytes; can't increase it to %d bytes",
+        publisher->Name(), publisher->SlotSize(), new_slot_size));
+  }
+
+  Request req;
+  auto *cmd = req.mutable_resize();
+  cmd->set_channel_name(publisher->Name());
+  cmd->set_new_slot_size(new_slot_size);
+
+  // Send request to server and wait for response.
+  Response response;
+  std::vector<toolbelt::FileDescriptor> fds;
+  fds.reserve(100);
+  if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
+      !status.ok()) {
+    return status;
+  }
+
+  auto &resp = response.resize();
+  if (!resp.error().empty()) {
+    return absl::InternalError(resp.error());
+  }
+  std::vector<SlotBuffer> buffers = CollectBuffers(resp.buffers(), fds);
+  return publisher->MapNewBuffers(std::move(buffers));
+}
+
 absl::Status
 Client::SendRequestReceiveResponse(const Request &req, Response &response,
                                    std::vector<toolbelt::FileDescriptor> &fds) {
@@ -727,7 +835,7 @@ Client::SendRequestReceiveResponse(const Request &req, Response &response,
   }
 
   // Wait for response and put it in the same buffer we used for send.
- n = socket_.ReceiveMessage(buffer_, sizeof(buffer_), co_);
+  n = socket_.ReceiveMessage(buffer_, sizeof(buffer_), co_);
   if (!n.ok()) {
     socket_.Close();
     return n.status();

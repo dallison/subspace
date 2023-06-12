@@ -112,6 +112,7 @@ struct MessageSlot {
   int16_t reliable_ref_count; // Number of reliable subscriber references.
   int64_t ordinal;            // Message ordinal held currently in slot.
   int64_t message_size;       // Size of message held in slot.
+  int32_t buffer_index;       // Index of buffer.
   toolbelt::BitSet<kMaxSlotOwners> owners; // One bit per publisher/subscriber.
 };
 
@@ -125,8 +126,9 @@ struct ChannelControlBlock {          // a.k.a CCB
   char channel_name[kMaxChannelName]; // So that you can see the name in a
                                       // debugger or hexdump.
   int num_slots;
-  int slot_size;        // Slot size not including the MessagePrefix.
   int64_t next_ordinal; // Next ordinal to use.
+  int buffer_index;     // Which buffer in buffers array to use.
+  int num_buffers;      // Size of buffers array in shared memory.
 
   // Statistics counters.
   int64_t total_bytes;
@@ -149,12 +151,20 @@ struct ChannelControlBlock {          // a.k.a CCB
 absl::StatusOr<SystemControlBlock *>
 CreateSystemControlBlock(toolbelt::FileDescriptor &fd);
 
+struct SlotBuffer {
+  SlotBuffer(int32_t slot_size) : slot_size(slot_size) {}
+  SlotBuffer(int32_t slot_size, toolbelt::FileDescriptor fd)
+      : slot_size(slot_size), fd(std::move(fd)) {}
+  int32_t slot_size;
+  toolbelt::FileDescriptor fd;
+};
+
 // This holds the shared memory file descriptors for a channel.
 // ccb: Channel Control Block
 // buffers: message buffer memory.
 struct SharedMemoryFds {
   SharedMemoryFds() = default;
-  SharedMemoryFds(toolbelt::FileDescriptor ccb, toolbelt::FileDescriptor buffers)
+  SharedMemoryFds(toolbelt::FileDescriptor ccb, std::vector<SlotBuffer> buffers)
       : ccb(std::move(ccb)), buffers(std::move(buffers)) {}
   SharedMemoryFds(const SharedMemoryFds &) = delete;
 
@@ -170,8 +180,8 @@ struct SharedMemoryFds {
     return *this;
   }
 
-  toolbelt::FileDescriptor ccb;     // Channel Control Block.
-  toolbelt::FileDescriptor buffers; // Message Buffers.
+  toolbelt::FileDescriptor ccb;    // Channel Control Block.
+  std::vector<SlotBuffer> buffers; // Message Buffers.
 };
 
 // Aligned to given power of 2.
@@ -201,8 +211,8 @@ public:
     uint64_t timestamp;
   };
 
-  Channel(const std::string &name, int slot_size, int num_slots,
-          int channel_id, std::string type);
+  Channel(const std::string &name, int num_slots, int channel_id,
+          std::string type);
   ~Channel() { Unmap(); }
 
   // Allocate the shared memory for a channel.  The num_slots_
@@ -212,11 +222,13 @@ public:
   // file descriptors for the allocated CCB and buffers.  The
   // SCB has already been allocated and will be mapped in for
   // this channel.  This is only used in the server.
-  absl::StatusOr<SharedMemoryFds> Allocate(const toolbelt::FileDescriptor &scb_fd);
+  absl::StatusOr<SharedMemoryFds>
+  Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
+           int num_slots);
 
   // Client-side channel mapping.  The SharedMemoryFds contains the
   // file descriptors for the CCB and buffers.  The num_slots_
-  // and slot_size_ member variables contain either 0 or the
+  // member variable contains either 0 or the
   // channel size parameters.
   absl::Status Map(SharedMemoryFds fds, const toolbelt::FileDescriptor &scb_fd);
   void Unmap();
@@ -234,15 +246,16 @@ public:
   // What is the address of the message buffer (after the MessagePrefix)
   // for the slot given a slot id.
   void *GetBufferAddress(int slot_id) const {
-    return buffers_ +
-           (sizeof(MessagePrefix) + Aligned<32>(slot_size_)) * slot_id +
+    return Buffer(slot_id) +
+           (sizeof(MessagePrefix) + Aligned<32>(SlotSize(slot_id))) * slot_id +
            sizeof(MessagePrefix);
   }
 
   // Gets the address for the message buffer given a slot pointer.
   void *GetBufferAddress(MessageSlot *slot) const {
-    return buffers_ +
-           (sizeof(MessagePrefix) + Aligned<32>(slot_size_)) * slot->id +
+    return Buffer(slot->id) +
+           (sizeof(MessagePrefix) + Aligned<32>(SlotSize(slot->id))) *
+               slot->id +
            sizeof(MessagePrefix);
   }
 
@@ -290,20 +303,50 @@ public:
   // Get a pointer to the MessagePrefix for a given slot.
   MessagePrefix *Prefix(MessageSlot *slot) const {
     MessagePrefix *p = reinterpret_cast<MessagePrefix *>(
-        buffers_ +
-        (sizeof(MessagePrefix) + Aligned<32>(slot_size_)) * slot->id);
+        Buffer(slot->id) +
+        (sizeof(MessagePrefix) + Aligned<32>(SlotSize(slot->id))) * slot->id);
     return p;
   }
 
+  absl::StatusOr<toolbelt::FileDescriptor> ExtendBuffers(int32_t new_slot_size);
+
   void Dump();
 
-  void SetSlots(int slot_size, int num_slots) {
-    slot_size_ = slot_size;
-    num_slots_ = num_slots;
+  // NOTE: these functions access the CCB without locking.  They only access
+  // the buffer_index member of the MessageSlot and that is only updated by the
+  // the publisher when it calls ClaimSlot and inserts the slot into the active
+  // list.
+
+  // Get the size associated with the given slot id.
+  int SlotSize(int slot_id) const {
+    return buffers_.empty()
+               ? 0
+               : buffers_[ccb_->slots[slot_id].buffer_index].slot_size;
   }
 
-  int SlotSize() const { return slot_size_; }
+ int SlotSize(MessageSlot* slot) const {
+    if (slot == nullptr) {
+      return 0;
+    }
+    return buffers_.empty()
+               ? 0
+               : buffers_[ccb_->slots[slot->id].buffer_index].slot_size;
+  }
+  // Get the biggest slot size for the channel.
+  int SlotSize() const {
+    return buffers_.empty() ? 0 : buffers_.back().slot_size;
+  }
+
+  // Get the number of slots in the channel (can't be changed)
   int NumSlots() const { return num_slots_; }
+  void SetNumSlots(int n) { num_slots_ = n; }
+
+  // Get the buffer associated with the given slot id.
+  char *Buffer(int slot_id) const {
+    return buffers_.empty()
+               ? nullptr
+               : buffers_[ccb_->slots[slot_id].buffer_index].buffer;
+  }
   void CleanupSlots(int owner, bool reliable);
 
   int GetChannelId() const { return channel_id_; }
@@ -314,7 +357,7 @@ public:
   SystemControlBlock *GetScb() const { return scb_; }
 
   // Gets the statistics counters.  Locks the CCB.
-  void GetCounters(int64_t &total_bytes, int64_t &total_messages);
+  void GetStatsCounters(int64_t &total_bytes, int64_t &total_messages);
 
   void SetDebug(bool v) { debug_ = v; }
 
@@ -322,9 +365,9 @@ public:
   // move the owner to the slot found.  Return nullptr if nothing found in which
   // no slot ownership changes are done.  This uses the memory inside buffer
   // to perform a fast search of the slots.  The caller keeps onership of the
-  // buffer, but this function will modify it.  This is to avoid memory allocation
-  // for every search or buffer allocation for every subscriber when searches
-  // are rare.
+  // buffer, but this function will modify it.  This is to avoid memory
+  // allocation for every search or buffer allocation for every subscriber when
+  // searches are rare.
   MessageSlot *FindActiveSlotByTimestamp(MessageSlot *old_slot,
                                          uint64_t timestamp, bool reliable,
                                          int owner,
@@ -333,7 +376,23 @@ public:
   void SetType(std::string type) { type_ = std::move(type); }
   const std::string Type() const { return type_; }
 
+  bool BuffersChanged() const {
+    return ccb_->num_buffers != static_cast<int>(buffers_.size());
+  }
+
+  absl::Status MapNewBuffers(std::vector<SlotBuffer> buffers);
+
+  void SetSlotToBiggestBuffer(MessageSlot* slot);
+
 private:
+  struct BufferSet {
+    BufferSet() = default;
+    BufferSet(int32_t slot_size, char *buffer)
+        : slot_size(slot_size), buffer(buffer) {}
+    int32_t slot_size = 0;
+    char *buffer = nullptr;
+  };
+
   int32_t ToCCBOffset(void *addr) {
     return (int32_t)(reinterpret_cast<char *>(addr) -
                      reinterpret_cast<char *>(ccb_));
@@ -388,9 +447,11 @@ private:
   }
   MessageSlot *FindFreeSlotLocked(bool reliable, int owner);
 
+  void ClaimPublisherSlot(MessageSlot *slot, int owner, SlotList &list);
+  
   std::string name_;
   int num_slots_;
-  int slot_size_;
+
   int channel_id_; // ID allocated from server.
   std::string type_;
 
@@ -398,7 +459,7 @@ private:
 
   SystemControlBlock *scb_;
   ChannelControlBlock *ccb_;
-  char *buffers_ = nullptr;
+  std::vector<BufferSet> buffers_;
   bool debug_ = false;
 };
 

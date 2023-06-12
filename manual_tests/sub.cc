@@ -25,7 +25,7 @@ int main(int argc, char **argv) {
   }
   bool reliable = absl::GetFlag(FLAGS_reliable);
 
-  absl::StatusOr<subspace::Subscriber *> sub = client.CreateSubscriber(
+  absl::StatusOr<subspace::Subscriber> sub = client.CreateSubscriber(
       "test", subspace::SubscriberOptions().SetReliable(reliable));
   if (!sub.ok()) {
     fprintf(stderr, "Can't create subscriber: %s\n",
@@ -33,18 +33,18 @@ int main(int argc, char **argv) {
     exit(1);
   }
 
-  client.RegisterDroppedMessageCallback(
-      *sub, [](subspace::Subscriber *s, int64_t n) {
+  sub->RegisterDroppedMessageCallback(
+      [](subspace::Subscriber *s, int64_t n) {
         printf("Dropped %" PRId64 " messages\n", n);
       });
 
   for (;;) {
-    if (absl::Status s = client.WaitForSubscriber(*sub); !s.ok()) {
+    if (absl::Status s = sub->Wait(); !s.ok()) {
       fprintf(stderr, "Can't wait for subscriber: %s\n", s.ToString().c_str());
       exit(1);
     }
     for (;;) {
-      absl::StatusOr<subspace::Message> msg = client.ReadMessage(*sub);
+      absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
       if (!msg.ok()) {
         fprintf(stderr, "Can't read message: %s\n",
                 msg.status().ToString().c_str());
@@ -53,7 +53,7 @@ int main(int argc, char **argv) {
       if (msg->length == 0) {
         break;
       }
-      int64_t ordinal = client.GetCurrentOrdinal(*sub);
+      int64_t ordinal = sub->GetCurrentOrdinal();
       printf("Message %" PRId64 ": %s\n", ordinal,
              reinterpret_cast<const char *>(msg->buffer));
     }

@@ -57,9 +57,10 @@ void ClientHandler::Run(co::Coroutine *c) {
   }
 }
 
-absl::Status ClientHandler::HandleMessage(const subspace::Request &req,
-                                          subspace::Response &resp,
-                                          std::vector<toolbelt::FileDescriptor> &fds) {
+absl::Status
+ClientHandler::HandleMessage(const subspace::Request &req,
+                             subspace::Response &resp,
+                             std::vector<toolbelt::FileDescriptor> &fds) {
   switch (req.request_case()) {
   case subspace::Request::kInit:
     HandleInit(req.init(), resp.mutable_init(), fds);
@@ -87,6 +88,15 @@ absl::Status ClientHandler::HandleMessage(const subspace::Request &req,
     HandleRemoveSubscriber(req.remove_subscriber(),
                            resp.mutable_remove_subscriber(), fds);
     break;
+
+  case subspace::Request::kResize:
+    HandleResize(req.resize(), resp.mutable_resize(), fds);
+    break;
+
+  case subspace::Request::kGetBuffers:
+    HandleGetBuffers(req.get_buffers(), resp.mutable_get_buffers(), fds);
+    break;
+
   case subspace::Request::REQUEST_NOT_SET:
     return absl::InternalError("Protocol error: unknown request");
   }
@@ -162,10 +172,10 @@ void ClientHandler::HandleCreatePublisher(
       return;
     }
 
-    if (channel->IsPublic() != req.is_public()) {
+    if (channel->IsLocal() != req.is_local()) {
       response->set_error(
           absl::StrFormat("Inconsistent publisher parameters for channel %s: "
-                          "all publishers must be either private or public",
+                          "all publishers must be either local or not",
                           req.channel_name()));
       return;
     }
@@ -173,7 +183,7 @@ void ClientHandler::HandleCreatePublisher(
 
   // Create the publisher.
   absl::StatusOr<PublisherUser *> publisher = channel->AddPublisher(
-      this, req.is_reliable(), req.is_public(), req.is_bridge());
+      this, req.is_reliable(), req.is_local(), req.is_bridge());
   if (!publisher.ok()) {
     response->set_error(publisher.status().ToString());
     return;
@@ -185,27 +195,34 @@ void ClientHandler::HandleCreatePublisher(
   response->set_publisher_id(pub->GetId());
 
   // Copy the shared memory file descriptors.
-  response->set_ccb_fd_index(0);
-  response->set_buffers_fd_index(1);
   const SharedMemoryFds &channel_fds = channel->GetFds();
+
+  response->set_ccb_fd_index(0);
   fds.push_back(channel_fds.ccb);
-  fds.push_back(channel_fds.buffers);
+
+  int fd_index = 1;
+  for (const auto &buffer : channel_fds.buffers) {
+    auto *info = response->add_buffers();
+    info->set_slot_size(buffer.slot_size);
+    info->set_fd_index(fd_index++);
+    fds.push_back(buffer.fd);
+  }
 
   // Copy the publisher poll and triggers fds.
-  response->set_pub_poll_fd_index(2);
+  response->set_pub_poll_fd_index(fd_index++);
   fds.push_back(pub->GetPollFd());
-  response->set_pub_trigger_fd_index(3);
+  response->set_pub_trigger_fd_index(fd_index++);
   fds.push_back(pub->GetTriggerFd());
 
   // Add subscriber trigger indexes.
-  int index = 4; // First subscriber index.
-  std::vector<toolbelt::FileDescriptor> sub_fds = channel->GetSubscriberTriggerFds();
+  std::vector<toolbelt::FileDescriptor> sub_fds =
+      channel->GetSubscriberTriggerFds();
   for (auto &fd : sub_fds) {
-    response->add_sub_trigger_fd_indexes(index++);
+    response->add_sub_trigger_fd_indexes(fd_index++);
     fds.push_back(fd);
   }
 
-  if (!req.is_bridge() && req.is_public()) {
+  if (!req.is_bridge() && req.is_local()) {
     server_->SendAdvertise(req.channel_name(), req.is_reliable());
   }
   ChannelCounters &counters =
@@ -272,27 +289,33 @@ void ClientHandler::HandleCreateSubscriber(
   response->set_subscriber_id(sub->GetId());
   response->set_type(channel->Type());
 
-  response->set_ccb_fd_index(0);
-  response->set_buffers_fd_index(1);
   const SharedMemoryFds &channel_fds = channel->GetFds();
-  fds.push_back(channel_fds.ccb);
-  fds.push_back(channel_fds.buffers);
 
-  response->set_trigger_fd_index(2);
+  response->set_ccb_fd_index(0);
+  fds.push_back(channel_fds.ccb);
+
+  int fd_index = 1;
+  for (const auto &buffer : channel_fds.buffers) {
+    auto *info = response->add_buffers();
+    info->set_slot_size(buffer.slot_size);
+    info->set_fd_index(fd_index++);
+    fds.push_back(buffer.fd);
+  }
+
+  response->set_trigger_fd_index(fd_index++);
   fds.push_back(sub->GetTriggerFd());
 
-  response->set_poll_fd_index(3);
+  response->set_poll_fd_index(fd_index++);
   fds.push_back(sub->GetPollFd());
 
   response->set_slot_size(channel->SlotSize());
   response->set_num_slots(channel->NumSlots());
 
   // Add publisher trigger indexes.
-  int index = 4; // First reliable publisher index.
   std::vector<toolbelt::FileDescriptor> pub_fds =
       channel->GetReliablePublisherTriggerFds();
   for (auto &fd : pub_fds) {
-    response->add_reliable_pub_trigger_fd_indexes(index++);
+    response->add_reliable_pub_trigger_fd_indexes(fd_index++);
     fds.push_back(fd);
   }
 
@@ -305,9 +328,10 @@ void ClientHandler::HandleCreateSubscriber(
   response->set_num_pub_updates(counters.num_pub_updates);
 }
 
-void ClientHandler::HandleGetTriggers(const subspace::GetTriggersRequest &req,
-                                      subspace::GetTriggersResponse *response,
-                                      std::vector<toolbelt::FileDescriptor> &fds) {
+void ClientHandler::HandleGetTriggers(
+    const subspace::GetTriggersRequest &req,
+    subspace::GetTriggersResponse *response,
+    std::vector<toolbelt::FileDescriptor> &fds) {
   ServerChannel *channel = server_->FindChannel(req.channel_name());
   if (channel == nullptr) {
     response->set_error(
@@ -322,7 +346,8 @@ void ClientHandler::HandleGetTriggers(const subspace::GetTriggersRequest &req,
     fds.push_back(fd);
   }
 
-  std::vector<toolbelt::FileDescriptor> sub_fds = channel->GetSubscriberTriggerFds();
+  std::vector<toolbelt::FileDescriptor> sub_fds =
+      channel->GetSubscriberTriggerFds();
   for (auto &fd : sub_fds) {
     response->add_sub_trigger_fd_indexes(index++);
     fds.push_back(fd);
@@ -354,4 +379,55 @@ void ClientHandler::HandleRemoveSubscriber(
   }
   channel->RemoveUser(req.subscriber_id());
 }
+
+void ClientHandler::HandleResize(const subspace::ResizeRequest &req,
+                                 subspace::ResizeResponse *response,
+                                 std::vector<toolbelt::FileDescriptor> &fds) {
+  ServerChannel *channel = server_->FindChannel(req.channel_name());
+  if (channel == nullptr) {
+    response->set_error(
+        absl::StrFormat("No such channel %s", req.channel_name()));
+    return;
+  }
+  absl::StatusOr<toolbelt::FileDescriptor> fd =
+      channel->ExtendBuffers(req.new_slot_size());
+  if (!fd.ok()) {
+    response->set_error(absl::StrFormat(
+        "Failed to resize channel %s to %d byte: %s", req.channel_name(),
+        req.new_slot_size(), fd.status().ToString()));
+    return;
+  }
+  channel->AddBuffer(req.new_slot_size(), std::move(*fd));
+  const SharedMemoryFds &channel_fds = channel->GetFds();
+
+  int fd_index = 0;
+  for (const auto &buffer : channel_fds.buffers) {
+    auto *info = response->add_buffers();
+    info->set_slot_size(buffer.slot_size);
+    info->set_fd_index(fd_index++);
+    fds.push_back(buffer.fd);
+  }
+}
+
+void ClientHandler::HandleGetBuffers(
+    const subspace::GetBuffersRequest &req,
+    subspace::GetBuffersResponse *response,
+    std::vector<toolbelt::FileDescriptor> &fds) {
+  ServerChannel *channel = server_->FindChannel(req.channel_name());
+  if (channel == nullptr) {
+    response->set_error(
+        absl::StrFormat("No such channel %s", req.channel_name()));
+    return;
+  }
+  const SharedMemoryFds &channel_fds = channel->GetFds();
+
+  int fd_index = 0;
+  for (const auto &buffer : channel_fds.buffers) {
+    auto *info = response->add_buffers();
+    info->set_slot_size(buffer.slot_size);
+    info->set_fd_index(fd_index++);
+    fds.push_back(buffer.fd);
+  }
+}
+
 } // namespace subspace

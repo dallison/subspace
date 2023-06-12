@@ -18,11 +18,16 @@ message InitResponse {
   int32 scb_fd_index = 1; // Index into fds of SystemControlBlock fd.
 }
 
+message BufferInfo {
+  int32 slot_size = 1;
+  int32 fd_index = 2;
+}
+
 message CreatePublisherRequest {
   string channel_name = 1;
   int32 num_slots = 2;
   int32 slot_size = 3;
-  bool is_public = 4;
+  bool is_local = 4;
   bool is_reliable = 5;
   bool is_bridge = 6; // This publisher is for the bridge.
   string type = 7;    // Type of data carried on channel.
@@ -33,7 +38,7 @@ message CreatePublisherResponse {
   int32 channel_id = 2;
   int32 publisher_id = 3;
   int32 ccb_fd_index = 4;
-  int32 buffers_fd_index = 5;
+  repeated BufferInfo buffers = 5;
   int32 pub_poll_fd_index = 6;
   int32 pub_trigger_fd_index = 7;
   repeated int32 sub_trigger_fd_indexes = 8;
@@ -57,7 +62,7 @@ message CreateSubscriberResponse {
   int32 channel_id = 2;
   int32 subscriber_id = 3;
   int32 ccb_fd_index = 4;
-  int32 buffers_fd_index = 5;
+  repeated BufferInfo buffers = 5;
   int32 trigger_fd_index = 6;
   int32 poll_fd_index = 7;
   int32 slot_size = 8; // Might be zero if no publisher.
@@ -89,6 +94,25 @@ message RemoveSubscriberRequest {
 
 message RemoveSubscriberResponse { string error = 1; }
 
+message ResizeRequest {
+  string channel_name = 1;
+  int32 new_slot_size = 2;
+}
+
+message ResizeResponse {
+  string error = 1;  
+  repeated BufferInfo buffers = 2;
+}
+
+message GetBuffersRequest {
+  string channel_name = 1;
+}
+
+message GetBuffersResponse {
+  string error = 1;
+  repeated BufferInfo buffers = 2;
+}
+
 message Request {
   oneof request {
     InitRequest init = 1;
@@ -97,6 +121,8 @@ message Request {
     GetTriggersRequest get_triggers = 4;
     RemovePublisherRequest remove_publisher = 5;
     RemoveSubscriberRequest remove_subscriber = 6;
+    ResizeRequest resize = 7;
+    GetBuffersRequest get_buffers = 8;
   }
 }
 
@@ -108,6 +134,8 @@ message Response {
     GetTriggersResponse get_triggers = 4;
     RemovePublisherResponse remove_publisher = 5;
     RemoveSubscriberResponse remove_subscriber = 6;
+    ResizeResponse resize = 7;
+    GetBuffersResponse get_buffers = 8;
   }
 }
 

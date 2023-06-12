@@ -266,10 +266,10 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
     return channel_id.status();
   }
   ServerChannel *channel = new ServerChannel(
-      *channel_id, channel_name, slot_size, num_slots, std::move(type));
+      *channel_id, channel_name, num_slots, std::move(type));
   channel->SetDebug(logger_.GetLogLevel() <= toolbelt::LogLevel::kVerboseDebug);
 
-  absl::StatusOr<SharedMemoryFds> fds = channel->Allocate(scb_fd_);
+  absl::StatusOr<SharedMemoryFds> fds = channel->Allocate(scb_fd_, slot_size, num_slots);
   if (!fds.ok()) {
     return fds.status();
   }
@@ -282,8 +282,7 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
 
 absl::Status Server::RemapChannel(ServerChannel *channel, int slot_size,
                                   int num_slots) {
-  channel->SetSlots(slot_size, num_slots);
-  absl::StatusOr<SharedMemoryFds> fds = channel->Allocate(scb_fd_);
+  absl::StatusOr<SharedMemoryFds> fds = channel->Allocate(scb_fd_, slot_size, num_slots);
   if (!fds.ok()) {
     return fds.status();
   }
@@ -333,16 +332,14 @@ void Server::ChannelDirectoryCoroutine(co::Coroutine *c) {
   constexpr int kDirectorySlotSize = 128 * 1024 - sizeof(MessagePrefix);
   constexpr int kDirectoryNumSlots = 32;
 
-  absl::StatusOr<Publisher *> dir = client.CreatePublisher(
+  absl::StatusOr<Publisher> channel_directory = client.CreatePublisher(
       "/subspace/ChannelDirectory", kDirectorySlotSize, kDirectoryNumSlots,
       PublisherOptions().SetType("subspace.ChannelDirectory"));
-  if (!dir.ok()) {
+  if (!channel_directory.ok()) {
     logger_.Log(toolbelt::LogLevel::kFatal,
                 "Failed to create channel directory channel: %s",
-                dir.status().ToString().c_str());
+                channel_directory.status().ToString().c_str());
   }
-  Publisher *channel_directory = *dir;
-
   for (;;) {
     c->Wait(channel_directory_trigger_fd_.GetPollFd().Fd(), POLLIN);
     channel_directory_trigger_fd_.Clear();
@@ -353,7 +350,7 @@ void Server::ChannelDirectoryCoroutine(co::Coroutine *c) {
       auto info = directory.add_channels();
       channel.second->GetChannelInfo(info);
     }
-    absl::StatusOr<void *> buffer = client.GetMessageBuffer(channel_directory);
+    absl::StatusOr<void *> buffer = channel_directory->GetMessageBuffer();
     if (!buffer.ok()) {
       logger_.Log(toolbelt::LogLevel::kFatal,
                   "Failed to get channel directory buffer: %s",
@@ -366,7 +363,7 @@ void Server::ChannelDirectoryCoroutine(co::Coroutine *c) {
     }
     int64_t length = directory.ByteSizeLong();
     absl::StatusOr<const Message> s =
-        client.PublishMessage(channel_directory, length);
+        channel_directory->PublishMessage(length);
     if (!s.ok()) {
       logger_.Log(toolbelt::LogLevel::kError, "Failed to publish channel directory: %s",
                   s.status().ToString().c_str());
@@ -387,14 +384,13 @@ void Server::StatisticsCoroutine(co::Coroutine *c) {
   constexpr int kStatsSlotSize = 8192 - sizeof(MessagePrefix);
   constexpr int kStatsNumSlots = 32;
 
-  absl::StatusOr<Publisher *> stats = client.CreatePublisher(
+  absl::StatusOr<Publisher> pub = client.CreatePublisher(
       "/subspace/Statistics", kStatsSlotSize, kStatsNumSlots,
       PublisherOptions().SetType("subspace.Statistics"));
-  if (!stats.ok()) {
+  if (!pub.ok()) {
     logger_.Log(toolbelt::LogLevel::kFatal, "Failed to create statistics channel: %s",
-                stats.status().ToString().c_str());
+                pub.status().ToString().c_str());
   }
-  Publisher *pub = *stats;
 
   constexpr int kPeriodSecs = 2;
   for (;;) {
@@ -406,7 +402,7 @@ void Server::StatisticsCoroutine(co::Coroutine *c) {
       auto s = stats.add_channels();
       channel.second->GetChannelStats(s);
     }
-    absl::StatusOr<void *> buffer = client.GetMessageBuffer(pub);
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
     if (!buffer.ok()) {
       logger_.Log(toolbelt::LogLevel::kFatal, "Failed to get channel stats buffer: %s",
                   buffer.status().ToString().c_str());
@@ -417,7 +413,7 @@ void Server::StatisticsCoroutine(co::Coroutine *c) {
       continue;
     }
     int64_t length = stats.ByteSizeLong();
-    absl::StatusOr<const Message> s = client.PublishMessage(pub, length);
+    absl::StatusOr<const Message> s = pub->PublishMessage(length);
     if (!s.ok()) {
       logger_.Log(toolbelt::LogLevel::kError, "Failed to publish statistics: %s",
                   s.status().ToString().c_str());
@@ -588,7 +584,7 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
                 s.ToString().c_str());
     return;
   }
-  absl::StatusOr<Subscriber *> sub = client.CreateSubscriber(
+  absl::StatusOr<Subscriber> sub = client.CreateSubscriber(
       channel_name,
       SubscriberOptions().SetReliable(sub_reliable).SetBridge(true));
   if (!sub.ok()) {
@@ -600,15 +596,15 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
   // Read messages from subscriber and send to bridge socket.
   bool done = false;
   while (!done) {
-    if (absl::Status status = client.WaitForSubscriber(*sub); !status.ok()) {
+    if (absl::Status status = sub->Wait(); !status.ok()) {
       logger_.Log(toolbelt::LogLevel::kError, "Failed to wait for subscriber: %s",
                   status.ToString().c_str());
       break;
     }
     // Read all available messages and send to transmitter.
     for (;;) {
-      absl::StatusOr<Message> msg = client.ReadMessageInternal(
-          *sub, ReadMode::kReadNext, /*pass_activation=*/true,
+      absl::StatusOr<Message> msg = sub->ReadMessageInternal(
+          ReadMode::kReadNext, /*pass_activation=*/true,
           /*clear_trigger=*/true);
       if (!msg.ok()) {
         done = true;
@@ -663,7 +659,7 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
         break;
       }
     }
-    const ChannelCounters &counters = (*sub)->GetCounters();
+    const ChannelCounters &counters = sub->GetCounters();
     if (counters.num_pubs == 0) {
       // No publisher left to send anything.  We're done.
       break;
@@ -675,10 +671,6 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
   // We're done reading messages from the channel, remove the
   // bridge and subscriber.
   channel->RemoveBridgedAddress(subscriber, sub_reliable);
-  if (absl::Status s = client.RemoveSubscriber(*sub); !s.ok()) {
-    logger_.Log(toolbelt::LogLevel::kError, "Failed to remove subscriber to %s: %s",
-                channel_name.c_str(), s.ToString().c_str());
-  }
 }
 
 // Send a Subscribe message over UDP.
@@ -779,7 +771,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
   }
   // For a reliable publisher, this will send an activation message
   // to the local channel.
-  absl::StatusOr<Publisher *> pub = client.CreatePublisher(
+  absl::StatusOr<Publisher> pub = client.CreatePublisher(
       channel_name, subscribed.slot_size(), subscribed.num_slots(),
       PublisherOptions().SetReliable(subscribed.reliable()).SetBridge(true));
   if (!pub.ok()) {
@@ -791,7 +783,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
 
   // toolbelt::Now we receive messages from the bridge and send to the publisher.
   for (;;) {
-    absl::StatusOr<void *> buf = client.GetMessageBuffer(*pub);
+    absl::StatusOr<void *> buf = pub->GetMessageBuffer();
     if (!buf.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to get buffer for bridge subscriber %s: %s",
@@ -800,7 +792,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     }
     if (*buf == nullptr) {
       // Can only happen if publisher is reliable.
-      if (!(*pub)->IsReliable()) {
+      if (!pub->IsReliable()) {
         logger_.Log(toolbelt::LogLevel::kError,
                     "Got null buffer for unreliable publisher");
         break;
@@ -813,7 +805,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
       // buffers fill up, it will stop sending until we can read the
       // message.  The backpressure is thus propagated up the
       // chain.
-      if (absl::Status status = client.WaitForReliablePublisher(*pub);
+      if (absl::Status status = pub->Wait();
           !status.ok()) {
         logger_.Log(toolbelt::LogLevel::kError,
                     "Failed to wait for reliable publisher: %s",
@@ -859,7 +851,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     prefix->flags |= kMessageBridged;
 
     absl::StatusOr<const Message> s =
-        client.PublishMessageInternal(*pub, *n, /*omit_prefix=*/true);
+        pub->PublishMessageInternal(*n, /*omit_prefix=*/true);
     if (!s.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to publish bridge message for %s: %s",
@@ -868,12 +860,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
   }
 
   logger_.Log(toolbelt::LogLevel::kDebug, "Bridge receiver coroutine terminating");
-  // Socket has been closed, remove the publisher and we're done.
-  s = client.RemovePublisher(*pub);
-  if (!s.ok()) {
-    logger_.Log(toolbelt::LogLevel::kError, "Failed to remove publisher to %s: %s",
-                channel_name.c_str(), s.ToString().c_str());
-  }
+  // Socket has been closed, we're done.
 }
 
 void Server::SubscribeOverBridge(ServerChannel *channel, bool reliable,
@@ -892,7 +879,7 @@ void Server::IncomingQuery(const Discovery::Query &query,
   // send an Advertise out.
   auto channel = channels_.find(query.channel_name());
   if (channel != channels_.end()) {
-    if (!channel->second->IsPublic() || channel->second->IsBridgePublisher()) {
+    if (channel->second->IsLocal() || channel->second->IsBridgePublisher()) {
       return;
     }
     SendAdvertise(query.channel_name(), channel->second->IsReliable());
@@ -931,7 +918,7 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
 
   auto channel = channels_.find(subscribe.channel_name());
   if (channel != channels_.end()) {
-    if (!channel->second->IsPublic()) {
+    if (channel->second->IsLocal()) {
       return;
     }
     if (channel->second->IsBridged(sender, sub_reliable)) {
@@ -973,7 +960,7 @@ void Server::GratuitousAdvertiseCoroutine(co::Coroutine *c) {
   for (;;) {
     c->Sleep(kPeriodSecs);
     for (auto &channel : channels_) {
-      if (channel.second->IsPublic() && !channel.second->IsBridgePublisher()) {
+      if (!channel.second->IsLocal() && !channel.second->IsBridgePublisher()) {
         SendAdvertise(channel.first, channel.second->IsReliable());
       }
     }

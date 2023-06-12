@@ -26,9 +26,9 @@ void PubCoroutine(co::Coroutine *c) {
   int num_slots = absl::GetFlag(FLAGS_num_slots);
   int slot_size = absl::GetFlag(FLAGS_slot_size);
 
-  absl::StatusOr<subspace::Publisher *> pub = client.CreatePublisher(
+  absl::StatusOr<subspace::Publisher> pub = client.CreatePublisher(
       "test", slot_size, num_slots,
-      subspace::PublisherOptions().SetPublic(true).SetReliable(true));
+      subspace::PublisherOptions().SetLocal(true).SetReliable(true));
   if (!pub.ok()) {
     fprintf(stderr, "Can't create publisher: %s\n",
             pub.status().ToString().c_str());
@@ -38,7 +38,7 @@ void PubCoroutine(co::Coroutine *c) {
 
   for (int i = 0; i < num_msgs; i++) {
     for (;;) {
-      absl::StatusOr<void *> buffer = client.GetMessageBuffer(*pub);
+      absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
       if (!buffer.ok()) {
         fprintf(stderr, "Can't get publisher buffer: %s\n",
                 buffer.status().ToString().c_str());
@@ -46,7 +46,7 @@ void PubCoroutine(co::Coroutine *c) {
       }
       if (*buffer == nullptr) {
         // Wait for publisher trigger.
-        absl::Status s = client.WaitForReliablePublisher(*pub);
+        absl::Status s = pub->Wait();
         if (!s.ok()) {
           fprintf(stderr, "Can't wait for publisher: %s", s.ToString().c_str());
           exit(1);
@@ -56,14 +56,11 @@ void PubCoroutine(co::Coroutine *c) {
       break;
     }
     // printf("publishing %d\n", i);
-    absl::StatusOr<const subspace::Message> status = client.PublishMessage(*pub, slot_size);
+    absl::StatusOr<const subspace::Message> status = pub->PublishMessage(slot_size);
     if (!status.ok()) {
       fprintf(stderr, "Can't publish message: %s\n", status.status().ToString().c_str());
       exit(1);
     }
-  }
-  if (absl::Status s = client.RemovePublisher(*pub); !s.ok()) {
-    fprintf(stderr, "Failed to remove publisher: %s\n", s.ToString().c_str());
   }
 }
 
@@ -77,7 +74,7 @@ void SubCoroutine(co::Coroutine *c) {
   }
   int slot_size = absl::GetFlag(FLAGS_slot_size);
 
-  absl::StatusOr<subspace::Subscriber *> sub = client.CreateSubscriber(
+  absl::StatusOr<subspace::Subscriber> sub = client.CreateSubscriber(
       "test", subspace::SubscriberOptions().SetReliable(true));
   if (!sub.ok()) {
     fprintf(stderr, "Can't create subscriber: %s\n",
@@ -85,8 +82,8 @@ void SubCoroutine(co::Coroutine *c) {
     exit(1);
   }
 
-  client.RegisterDroppedMessageCallback(
-      *sub, [](subspace::Subscriber *s, int64_t n) {
+  sub->RegisterDroppedMessageCallback(
+      [](subspace::Subscriber *s, int64_t n) {
         printf("Dropped %" PRId64 " messages\n", n);
       });
 
@@ -100,7 +97,7 @@ void SubCoroutine(co::Coroutine *c) {
     if (start != 0) {
       wait_start = toolbelt::Now();
     }
-    if (absl::Status s = client.WaitForSubscriber(*sub); !s.ok()) {
+    if (absl::Status s = sub->Wait(); !s.ok()) {
       fprintf(stderr, "Can't wait for subscriber: %s\n", s.ToString().c_str());
       exit(1);
     }
@@ -108,7 +105,7 @@ void SubCoroutine(co::Coroutine *c) {
       total_wait += toolbelt::Now() - wait_start;
     }
     for (;;) {
-      absl::StatusOr<subspace::Message> msg = client.ReadMessage(*sub);
+      absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
       if (!msg.ok()) {
         fprintf(stderr, "Can't read message: %s\n",
                 msg.status().ToString().c_str());
@@ -137,9 +134,6 @@ void SubCoroutine(co::Coroutine *c) {
     printf("Subspace: %d bytes, %d messages received in %gs, %g msgs/sec, "
            "latency: %gus. %g bytes/sec\n",
            slot_size, num_msgs, period, msg_rate, latency, byte_rate);
-  }
-  if (absl::Status s = client.RemoveSubscriber(*sub); !s.ok()) {
-    fprintf(stderr, "Failed to remove publisher: %s\n", s.ToString().c_str());
   }
 }
 
