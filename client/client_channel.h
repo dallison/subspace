@@ -64,8 +64,11 @@
 // As of time of writing, the latency for a message on the same
 // computer using shared memory is about 0.25 microseconds on a Mac M1.
 
-namespace subspace {
+namespace subspace{
 
+class Client;
+
+namespace details {
 // The classes in here are mostly used for internal implementation
 // but there are a couple of const functions used outside of the
 // client.  All access to the client's functionality is through
@@ -75,9 +78,9 @@ namespace subspace {
 // a publisher or a subscriber, as defined as the subclasses.
 class ClientChannel : public Channel {
 public:
-  ClientChannel(const std::string &name, int slot_size, int num_slots,
+  ClientChannel(const std::string &name,  int num_slots,
                 int channel_id, std::string type)
-      : Channel(name, slot_size, num_slots, channel_id, std::move(type)) {}
+      : Channel(name, num_slots, channel_id, std::move(type)) {}
   virtual ~ClientChannel() = default;
   MessageSlot *CurrentSlot() const { return slot_; }
   const ChannelCounters &GetCounters() const {
@@ -95,27 +98,26 @@ protected:
     slot_->message_size = message_size;
   }
 
-
-
 protected:
   MessageSlot *slot_ = nullptr; // Current slot.
 };
 
 // This is a publisher.  It maps in the channel's memory and allows
 // messages to be published.
-class Publisher : public ClientChannel {
+class PublisherImpl : public ClientChannel {
 public:
-  Publisher(const std::string &name, int slot_size, int num_slots,
+  PublisherImpl(const std::string &name, int num_slots,
             int channel_id, int publisher_id, std::string type,
             const PublisherOptions &options)
-      : ClientChannel(name, slot_size, num_slots, channel_id, std::move(type)),
+      : ClientChannel(name, num_slots, channel_id, std::move(type)),
         publisher_id_(publisher_id), options_(options) {}
 
   bool IsReliable() const { return options_.IsReliable(); }
-  bool IsPublic() const { return options_.IsPublic(); }
+  bool IsLocal() const { return options_.IsLocal(); }
+  bool IsFixedSize() const { return options_.IsFixedSize(); }
 
 private:
-  friend class Client;
+  friend class ::subspace::Client;
 
   bool IsPublisher() const override { return true; }
 
@@ -153,12 +155,12 @@ private:
 
 // A subscriber reads messages from a channel.  It maps the channel
 // shared memory.
-class Subscriber : public ClientChannel {
+class SubscriberImpl : public ClientChannel {
 public:
-  Subscriber(const std::string &name, int slot_size, int num_slots,
+  SubscriberImpl(const std::string &name, int num_slots,
              int channel_id, int subscriber_id, std::string type,
              const SubscriberOptions &options)
-      : ClientChannel(name, slot_size, num_slots, channel_id, std::move(type)),
+      : ClientChannel(name, num_slots, channel_id, std::move(type)),
         subscriber_id_(subscriber_id), options_(options) {}
 
   int64_t CurrentOrdinal() const {
@@ -169,8 +171,13 @@ public:
   }
   bool IsReliable() const { return options_.IsReliable(); }
 
+
+  int32_t SlotSize() const { 
+    return Channel::SlotSize(CurrentSlot());
+  }
+  
 private:
-  friend class Client;
+  friend class ::subspace::Client;
 
   bool IsSubscriber() const override { return true; }
 
@@ -221,6 +228,7 @@ private:
   // subscribers won't use this.
   std::vector<MessageSlot *> search_buffer_;
 };
+} // namespace details
 } // namespace subspace
 
 #endif // __CLIENT_CLIENT_CHANNEL_H

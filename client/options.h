@@ -12,8 +12,8 @@ class PublisherOptions {
 public:
   // A public publisher's messages will be seen outside of the
   // publishing computer.
-  PublisherOptions &SetPublic(bool v) {
-    public_ = v;
+  PublisherOptions &SetLocal(bool v) {
+    local_ = v;
     return *this;
   }
   // A reliable publisher's messages will never be missed by
@@ -32,8 +32,13 @@ public:
     return *this;
   }
 
-  bool IsPublic() const { return public_; }
+  PublisherOptions &SetFixedSize(bool v) {
+    fixed_size_ = v;
+    return *this;
+  }
+  bool IsLocal() const { return local_; }
   bool IsReliable() const { return reliable_; }
+  bool IsFixedSize() const { return fixed_size_; }
   const std::string &Type() const { return type_; }
 
 private:
@@ -45,9 +50,10 @@ private:
   }
   bool IsBridge() const { return bridge_; }
 
-  bool public_ = true;
+  bool local_ = false;
   bool reliable_ = false;
   bool bridge_ = false;
+  bool fixed_size_ = false;
   std::string type_;
 };
 

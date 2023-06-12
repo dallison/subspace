@@ -65,14 +65,14 @@ public:
 class PublisherUser : public User {
 public:
   PublisherUser(ClientHandler *handler, int id, bool is_reliable,
-                bool is_public, bool is_bridge)
-      : User(handler, id, is_reliable, is_bridge), is_public_(is_public) {}
+                bool is_local, bool is_bridge)
+      : User(handler, id, is_reliable, is_bridge), is_local_(is_local) {}
 
   bool IsPublisher() const override { return true; }
-  bool IsPublic() const { return is_public_; }
+  bool IsLocal() const { return is_local_; }
 
 private:
-  bool is_public_;
+  bool is_local_;
 };
 
 // This is endpoint transmitting the data for a channel.  It holds an internet
@@ -108,13 +108,13 @@ template <typename H> inline H AbslHashValue(H h, const ChannelTransmitter &a) {
 // it.
 class ServerChannel : public Channel {
 public:
-  ServerChannel(int id, const std::string &name, int slot_size, int num_slots, std::string type)
-      : Channel(name, slot_size, num_slots, id, std::move(type)) {}
+  ServerChannel(int id, const std::string &name,  int num_slots, std::string type)
+      : Channel(name, num_slots, id, std::move(type)) {}
 
   ~ServerChannel();
 
   absl::StatusOr<PublisherUser *> AddPublisher(ClientHandler *handler,
-                                               bool is_reliable, bool is_public,
+                                               bool is_reliable, bool is_local,
                                                bool is_bridge);
   absl::StatusOr<SubscriberUser *>
   AddSubscriber(ClientHandler *handler, bool is_reliable, bool is_bridge);
@@ -139,6 +139,7 @@ public:
   // add: the publisher or subscriber is being added
   // reliable: change the reliable counters.
   ChannelCounters &RecordUpdate(bool is_pub, bool add, bool reliable);
+  ChannelCounters &RecordResize();
 
   void RemoveUser(int user_id);
   void RemoveAllUsersFor(ClientHandler *handler);
@@ -167,7 +168,7 @@ public:
     bridged_publishers_.erase(ChannelTransmitter(addr, reliable));
   }
 
-  bool IsPublic() const;
+  bool IsLocal() const;
   bool IsReliable() const;
 
   void SetSharedMemoryFds(SharedMemoryFds fds) {
@@ -175,6 +176,9 @@ public:
   }
 
   const SharedMemoryFds &GetFds() { return shared_memory_fds_; }
+
+  // Add a buffer (slot size and memory fd) to the shared_memory_fds.
+  void AddBuffer(int slot_size, toolbelt::FileDescriptor fd);
 
 private:
   std::vector<std::unique_ptr<User>> users_;

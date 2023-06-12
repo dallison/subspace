@@ -12,6 +12,7 @@
 #if defined(__APPLE__)
 #include <sys/posix_shm.h>
 #endif
+#include <cassert>
 #include <inttypes.h>
 #include <unistd.h>
 
@@ -88,13 +89,30 @@ CreateSystemControlBlock(toolbelt::FileDescriptor &fd) {
   return scb;
 }
 
-Channel::Channel(const std::string &name, int slot_size, int num_slots,
-                 int channel_id, std::string type)
-    : name_(name), num_slots_(num_slots), slot_size_(slot_size),
-      channel_id_(channel_id), type_(std::move(type)) {}
+Channel::Channel(const std::string &name, int num_slots, int channel_id,
+                 std::string type)
+    : name_(name), num_slots_(num_slots), channel_id_(channel_id),
+      type_(std::move(type)) {}
 
 absl::StatusOr<SharedMemoryFds>
-Channel::Allocate(const toolbelt::FileDescriptor &scb_fd) {
+Channel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
+                  int num_slots) {
+  // If the channel is being remapped (a subscriber that existed
+  // before the first publisher), num_slots_ will be zero and we
+  // set it here now that we know it.  If num_slots_ was already
+  // set we need to make sure that the value passed here is
+  // the same as the current value.
+  if (num_slots_ != 0) {
+    assert(num_slots_ == num_slots);
+  } else {
+    num_slots_ = num_slots;
+  }
+  // Unmap existing memory.
+  Unmap();
+
+  // We are allocating a channel, so we only have one buffer.
+  buffers_.clear();
+
   // Map SCB into process memory.
   scb_ = reinterpret_cast<SystemControlBlock *>(
       mmap(NULL, sizeof(SystemControlBlock), PROT_READ | PROT_WRITE, MAP_SHARED,
@@ -105,6 +123,11 @@ Channel::Allocate(const toolbelt::FileDescriptor &scb_fd) {
   }
 
   SharedMemoryFds fds;
+
+  // One buffer.  The fd will be set when the buffers are allocated in
+  // shared memmory.
+  fds.buffers.emplace_back(slot_size);
+
   // Create CCB in shared memory and map into process memory.
   int64_t ccb_size =
       sizeof(ChannelControlBlock) + sizeof(MessageSlot) * num_slots_;
@@ -117,19 +140,21 @@ Channel::Allocate(const toolbelt::FileDescriptor &scb_fd) {
   ccb_ = reinterpret_cast<ChannelControlBlock *>(*p);
   memset(ccb_, 0, ccb_size);
 
-  // Create buffers in shared memory and map into process memory.
+  // Allocate a single buffer.
   int64_t buffers_size =
-      num_slots_ * (Aligned<32>(slot_size_) + sizeof(MessagePrefix));
+      num_slots_ * (Aligned<32>(slot_size) + sizeof(MessagePrefix));
   if (buffers_size == 0) {
     buffers_size = 256;
   }
-  p = CreateSharedMemory(channel_id_, "buffers", buffers_size, fds.buffers);
+  p = CreateSharedMemory(channel_id_, "buffers0", buffers_size,
+                         fds.buffers[0].fd);
   if (!p.ok()) {
     munmap(scb_, sizeof(SystemControlBlock));
     munmap(ccb_, ccb_size);
     return p.status();
   }
-  buffers_ = reinterpret_cast<char *>(*p);
+  buffers_.emplace_back(slot_size, reinterpret_cast<char *>(*p));
+  ccb_->num_buffers = 1;
 
   // Initialize the CCB.
   InitMutex(ccb_->lock);
@@ -139,7 +164,6 @@ Channel::Allocate(const toolbelt::FileDescriptor &scb_fd) {
   // of debugging (you can see it in all processes).
   strncpy(ccb_->channel_name, name_.c_str(), kMaxChannelName - 1);
   ccb_->num_slots = num_slots_;
-  ccb_->slot_size = slot_size_;
   ccb_->next_ordinal = 1;
 
   ListInit(&ccb_->active_list);
@@ -153,13 +177,14 @@ Channel::Allocate(const toolbelt::FileDescriptor &scb_fd) {
     slot->id = i;
     slot->ref_count = 0;
     slot->reliable_ref_count = 0;
+    slot->buffer_index = 0;
     slot->owners.Init();
     ListInsertAtEnd(&ccb_->free_list, &slot->element);
   }
 
   if (debug_) {
     printf("Channel allocated: scb: %p, ccb: %p, buffers: %p\n", scb_, ccb_,
-           buffers_);
+           buffers_[0].buffer);
     Dump();
   }
   return fds;
@@ -184,7 +209,8 @@ void Channel::PrintLists() {
   PrintList(&ccb_->busy_list);
 }
 
-absl::Status Channel::Map(SharedMemoryFds fds, const toolbelt::FileDescriptor &scb_fd) {
+absl::Status Channel::Map(SharedMemoryFds fds,
+                          const toolbelt::FileDescriptor &scb_fd) {
   scb_ = reinterpret_cast<SystemControlBlock *>(
       mmap(NULL, sizeof(SystemControlBlock), PROT_READ | PROT_WRITE, MAP_SHARED,
            scb_fd.Fd(), 0));
@@ -199,46 +225,115 @@ absl::Status Channel::Map(SharedMemoryFds fds, const toolbelt::FileDescriptor &s
       NULL, ccb_size, PROT_READ | PROT_WRITE, MAP_SHARED, fds.ccb.Fd(), 0));
   if (ccb_ == MAP_FAILED) {
     munmap(scb_, sizeof(SystemControlBlock));
-    printf("mmap failed, sleeping: %s\n", strerror(errno));
-    sleep(1000);
     return absl::InternalError(absl::StrFormat(
         "Failed to map ChannelControlBlock: %s", strerror(errno)));
   }
+  int index = 0;
+  for (const auto &buffer : fds.buffers) {
+    int64_t buffers_size =
+        num_slots_ * (Aligned<32>(buffer.slot_size) + sizeof(MessagePrefix));
+    if (buffers_size != 0) {
+      char *mem = reinterpret_cast<char *>(
+          mmap(NULL, buffers_size, PROT_READ | PROT_WRITE, MAP_SHARED,
+               fds.buffers[index].fd.Fd(), 0));
 
-  int64_t buffers_size =
-      num_slots_ * (Aligned<32>(slot_size_) + sizeof(MessagePrefix));
-  if (buffers_size != 0) {
-    buffers_ = reinterpret_cast<char *>(mmap(NULL, buffers_size,
-                                             PROT_READ | PROT_WRITE, MAP_SHARED,
-                                             fds.buffers.Fd(), 0));
-    if (buffers_ == MAP_FAILED) {
-      munmap(scb_, sizeof(SystemControlBlock));
-      munmap(ccb_, ccb_size);
-      return absl::InternalError(absl::StrFormat(
-          "Failed to map channel buffers: %s", strerror(errno)));
+      if (mem == MAP_FAILED) {
+        munmap(scb_, sizeof(SystemControlBlock));
+        munmap(ccb_, ccb_size);
+        // Unmap any previously mapped buffers.
+        for (int i = 0; i < index; i++) {
+          int64_t buffers_size =
+              num_slots_ *
+              (Aligned<32>(buffers_[i].slot_size) + sizeof(MessagePrefix));
+          if (buffers_size > 0 && buffers_[i].buffer != nullptr) {
+            munmap(buffers_[i].buffer, buffers_size);
+          }
+        }
+        return absl::InternalError(absl::StrFormat(
+            "Failed to map channel buffers: %s", strerror(errno)));
+      }
+      buffers_.emplace_back(buffer.slot_size, mem);
+      index++;
     }
   }
+
   if (debug_) {
-    printf("Channel mapped: scb: %p, ccb: %p, buffers: %p\n", scb_, ccb_,
-           buffers_);
+    printf("Channel mapped: scb: %p, ccb: %p\n", scb_, ccb_);
     Dump();
   }
   return absl::OkStatus();
 }
 
 void Channel::Unmap() {
-  // printf("Unmapping channel %s\n", Name().c_str());
   munmap(scb_, sizeof(SystemControlBlock));
+
+  for (auto &buffer : buffers_) {
+    int64_t buffers_size =
+        num_slots_ * (Aligned<32>(buffer.slot_size) + sizeof(MessagePrefix));
+    if (buffers_size > 0 && buffer.buffer != nullptr) {
+      munmap(buffer.buffer, buffers_size);
+    }
+  }
 
   int64_t ccb_size =
       sizeof(ChannelControlBlock) + sizeof(MessageSlot) * num_slots_;
   munmap(ccb_, ccb_size);
+}
+
+// Called on server to extend the allocated buffers.
+absl::StatusOr<toolbelt::FileDescriptor>
+Channel::ExtendBuffers(int32_t new_slot_size) {
+  toolbelt::MutexLock lock(&ccb_->lock);
 
   int64_t buffers_size =
-      num_slots_ * (Aligned<32>(slot_size_) + sizeof(MessagePrefix));
-  if (buffers_size > 0) {
-    munmap(buffers_, buffers_size);
+      num_slots_ * (Aligned<32>(new_slot_size) + sizeof(MessagePrefix));
+
+  char buffer_name[32];
+  snprintf(buffer_name, sizeof(buffer_name), "buffers%d\n",
+           ccb_->num_buffers - 1);
+  toolbelt::FileDescriptor fd;
+  absl::StatusOr<void *> p =
+      CreateSharedMemory(channel_id_, buffer_name, buffers_size, fd);
+
+  if (!p.ok()) {
+    return absl::InternalError(
+        absl::StrFormat("Failed to map memory for extension: %s",
+                        p.status().ToString().c_str()));
   }
+  buffers_.emplace_back(new_slot_size, reinterpret_cast<char *>(*p));
+  ccb_->num_buffers++;
+  return fd;
+}
+
+absl::Status Channel::MapNewBuffers(std::vector<SlotBuffer> buffers) {
+  size_t start = buffers_.size();
+  for (size_t i = start; i < buffers.size(); i++) {
+    const SlotBuffer &buffer = buffers[i];
+
+    int64_t buffers_size =
+        num_slots_ * (Aligned<32>(buffer.slot_size) + sizeof(MessagePrefix));
+    if (buffers_size != 0) {
+      char *mem = reinterpret_cast<char *>(mmap(NULL, buffers_size,
+                                                PROT_READ | PROT_WRITE,
+                                                MAP_SHARED, buffer.fd.Fd(), 0));
+
+      if (mem == MAP_FAILED) {
+        // Unmap any newly mapped buffers.
+        for (size_t i = start; i < buffers_.size(); i++) {
+          int64_t buffers_size =
+              num_slots_ *
+              (Aligned<32>(buffers_[i].slot_size) + sizeof(MessagePrefix));
+          if (buffers_size > 0 && buffers_[i].buffer != nullptr) {
+            munmap(buffers_[i].buffer, buffers_size);
+          }
+        }
+        return absl::InternalError(absl::StrFormat(
+            "Failed to map new channel buffers: %s", strerror(errno)));
+      }
+      buffers_.emplace_back(buffer.slot_size, mem);
+    }
+  }
+  return absl::OkStatus();
 }
 
 void Channel::Dump() {
@@ -250,6 +345,24 @@ void Channel::Dump() {
       sizeof(ChannelControlBlock) + sizeof(MessageSlot) * num_slots_;
   toolbelt::Hexdump(ccb_, ccb_size);
   PrintLists();
+  printf("Buffers:\n");
+  for (auto &buffer : buffers_) {
+    printf("  %d: %p\n", buffer.slot_size, buffer.buffer);
+  }
+}
+
+void Channel::ClaimPublisherSlot(MessageSlot *slot, int owner, SlotList &list) {
+  ListRemove(&list, &slot->element);
+  AddToBusyList(slot);
+  slot->owners.Set(owner);
+  slot->buffer_index = buffers_.size() - 1; // Use biggest buffer.
+}
+
+void Channel::SetSlotToBiggestBuffer(MessageSlot *slot) {
+  if (slot == nullptr) {
+    return;
+  }
+  slot->buffer_index = buffers_.size() - 1; // Use biggest buffer.
 }
 
 MessageSlot *Channel::FindFreeSlotLocked(bool reliable, int owner) {
@@ -257,9 +370,7 @@ MessageSlot *Channel::FindFreeSlotLocked(bool reliable, int owner) {
   if (ccb_->free_list.first != 0) {
     MessageSlot *slot =
         reinterpret_cast<MessageSlot *>(FromCCBOffset(ccb_->free_list.first));
-    ListRemove(&ccb_->free_list, &slot->element);
-    AddToBusyList(slot);
-    slot->owners.Set(owner);
+    ClaimPublisherSlot(slot, owner, ccb_->free_list);
     return slot;
   }
 
@@ -281,10 +392,8 @@ MessageSlot *Channel::FindFreeSlotLocked(bool reliable, int owner) {
       return nullptr;
     }
     if (slot->ref_count == 0) {
-      ListRemove(&ccb_->active_list, &slot->element);
-      AddToBusyList(slot);
-      slot->owners.Set(owner);
       prefix->flags = 0;
+      ClaimPublisherSlot(slot, owner, ccb_->active_list);
       return slot;
     }
     p = FromCCBOffset(slot->element.next);
@@ -297,7 +406,7 @@ MessageSlot *Channel::FindFreeSlot(bool reliable, int owner) {
   return FindFreeSlotLocked(reliable, owner);
 }
 
-void Channel::GetCounters(int64_t &total_bytes, int64_t &total_messages) {
+void Channel::GetStatsCounters(int64_t &total_bytes, int64_t &total_messages) {
   toolbelt::MutexLock lock(&ccb_->lock);
   total_bytes = ccb_->total_bytes;
   total_messages = ccb_->total_messages;
@@ -459,7 +568,7 @@ Channel::FindActiveSlotByTimestamp(MessageSlot *old_slot, uint64_t timestamp,
   if (buffer.empty() || timestamp < Prefix(buffer.front())->timestamp) {
     return nullptr;
   }
-  
+
   // Binary search the search buffer.
   auto it = std::lower_bound(
       buffer.begin(), buffer.end(), timestamp,
