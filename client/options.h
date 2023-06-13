@@ -32,10 +32,13 @@ public:
     return *this;
   }
 
+  // Set the option to allow the channel's slots to be resized
+  // if necessary.
   PublisherOptions &SetFixedSize(bool v) {
     fixed_size_ = v;
     return *this;
   }
+  
   bool IsLocal() const { return local_; }
   bool IsReliable() const { return reliable_; }
   bool IsFixedSize() const { return fixed_size_; }
