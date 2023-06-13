@@ -263,7 +263,7 @@ public:
 
   // Create a publisher for the given channel.  If the channel doesn't exit
   // it will be created with num_slots slots, each of which is slot_size
-  // bytes long.  The slots will not be resized.
+  // bytes long.
   absl::StatusOr<Publisher>
   CreatePublisher(const std::string &channel_name, int slot_size, int num_slots,
                   const PublisherOptions &opts = PublisherOptions());
@@ -299,6 +299,8 @@ private:
   // be able to get a message buffer if there are no free slots, in which
   // case nullptr is returned.  The publishers's PollFd can be used to
   // detect when another attempt can be made to get a buffer.
+  // If max_size is greater than the current buffer size, the buffers
+  // will be resized.
   absl::StatusOr<void *> GetMessageBuffer(details::PublisherImpl *publisher, int32_t max_size);
 
   // Publish the message in the publisher's buffer.  The message_size
@@ -439,10 +441,6 @@ Client::FindMessage(details::SubscriberImpl *subscriber, uint64_t timestamp) {
 // and receiving messages.  They can be moved but not copied.
 class Publisher {
 public:
-  Publisher(Client *client, details::PublisherImpl *impl)
-      : client_(client), impl_(impl) {
-  }
-
   ~Publisher() {
     if (client_ != nullptr && impl_ != nullptr) {
       (void)client_->RemovePublisher(impl_);
@@ -469,14 +467,33 @@ public:
     return client_ == p.client_ && impl_ == p.impl_;
   }
 
+  // Get a pointer to the message buffer for the publisher.  The publisher
+  // will own this buffer until you call PublishMessage.  The idea is that
+  // you fill in the buffer with the message you want to send and then
+  // call PublishMessage, at which point the message will be active and
+  // subscribers will be able to see it.  A reliable publisher may not
+  // be able to get a message buffer if there are no free slots, in which
+  // case nullptr is returned.  The publishers's PollFd can be used to
+  // detect when another attempt can be made to get a buffer.
+  // If max_size is greater than the current buffer size, the buffers
+  // will be resized. 
   absl::StatusOr<void *> GetMessageBuffer(int32_t max_size = -1) {
     return client_->GetMessageBuffer(impl_, max_size);
   }
+
+  // Publish the message in the publisher's buffer.  The message_size
+  // argument specifies the actual size of the message to send.  Returns the
+  // information about the message sent with buffer set to nullptr since
+  // the publisher cannot access the message once it's been published.
   absl::StatusOr<Message> PublishMessage(int64_t message_size) {
     return client_->PublishMessage(impl_, message_size);
   }
 
+  // Wait until a reliable publisher can try again to send a message.  If the
+  // client is coroutine-aware, the coroutine will wait.  If it's not,
+  // the function will block on a poll until the publisher is triggered.
   absl::Status Wait() { return client_->WaitForReliablePublisher(impl_); }
+
   struct pollfd GetPollFd() {
     return client_->GetPollFd(impl_);
   }
@@ -495,6 +512,11 @@ public:
 
 private:
   friend class Server;
+  friend class Client;
+
+  Publisher(Client *client, details::PublisherImpl *impl)
+      : client_(client), impl_(impl) {
+  }
 
   absl::StatusOr<const Message> PublishMessageInternal(int64_t message_size,
                                                        bool omit_prefix) {
@@ -507,8 +529,6 @@ private:
 
 class Subscriber {
 public:
-  Subscriber(Client *client, details::SubscriberImpl *impl)
-      : client_(client), impl_(impl) {}
   ~Subscriber() {
     if (client_ != nullptr && impl_ != nullptr) {
       (void)client_->RemoveSubscriber(impl_);
@@ -535,8 +555,18 @@ public:
     return client_ == s.client_ && impl_ == s.impl_;
   }
 
+  // Wait until there's a message available to be read by the
+  // subscriber.  If the client is coroutine-aware, the coroutine
+  // will wait.  If it's not, the function will block on a poll
+  // until the subscriber is triggered.
   absl::Status Wait() { return client_->WaitForSubscriber(impl_); }
 
+  // Read a message from a subscriber.  If there are no available messages
+  // the 'length' field of the returned Message will be zero.  The 'buffer'
+  // field of the Message is set to the address of the message in shared
+  // memory which is read-only.  If the read is triggered by the PollFd,
+  // you must read all the avaiable messages from the subscriber as the
+  // PollFd is only triggered when a new message is published.
   absl::StatusOr<const Message>
   ReadMessage(ReadMode mode = ReadMode::kReadNext) {
     return client_->ReadMessage(impl_, mode);
@@ -572,6 +602,9 @@ public:
 
   const std::string Type() const { return impl_->Type(); }
 
+  // Register a function to be called when a subscriber drops a message.  The
+  // function is called with the number of messages that have been missed
+  // as its second argument.
   void RegisterDroppedMessageCallback(
       std::function<void(Subscriber *, int64_t)> callback) {
     client_->RegisterDroppedMessageCallback(impl_, [
@@ -593,6 +626,10 @@ public:
 
 private:
   friend class Server;
+  friend class Client;
+
+  Subscriber(Client *client, details::SubscriberImpl *impl)
+      : client_(client), impl_(impl) {}
 
   absl::StatusOr<const Message>
   ReadMessageInternal(ReadMode mode, bool pass_activation, bool clear_trigger) {
