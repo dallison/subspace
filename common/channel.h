@@ -457,8 +457,8 @@ private:
 
   uint16_t num_updates_ = 0;
 
-  SystemControlBlock *scb_;
-  ChannelControlBlock *ccb_;
+  SystemControlBlock *scb_ = nullptr;
+  ChannelControlBlock *ccb_ = nullptr;
   std::vector<BufferSet> buffers_;
   bool debug_ = false;
 };
