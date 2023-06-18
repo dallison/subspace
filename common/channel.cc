@@ -12,13 +12,56 @@
 #if defined(__APPLE__)
 #include <sys/posix_shm.h>
 #endif
+#include "absl/container/flat_hash_map.h"
 #include <cassert>
 #include <inttypes.h>
 #include <unistd.h>
 
 namespace subspace {
+
+#ifndef NDEBUG
+static absl::flat_hash_map<void *, size_t> mapped_regions;
+#endif
+
+// Set this to 1 to print the memory mapping and unmapping calls.
+#define SHOW_MMAPS 0
+
+static void *MapMemory(int fd, size_t size, int prot, const char *purpose) {
+  void *p = mmap(NULL, size, prot, MAP_SHARED, fd, 0);
+#if SHOW_MMAPS
+  printf("mapping %s with size %zd: %p -> %p\n", purpose, size, p,
+         reinterpret_cast<char *>(p) + size);
+#endif
+#ifndef NDEBUG
+  if (mapped_regions.find(p) != mapped_regions.end()) {
+    fprintf(stderr, "Attempting to remap region at %p with size %zd\n", p,
+            size);
+  }
+  mapped_regions[p] = size;
+#endif
+  return p;
+}
+
+static void UnmapMemory(void *p, size_t size, const char *purpose) {
+#if SHOW_MMAPS
+  printf("inmapping %s with size %zd: %p -> %p\n", purpose, size, p,
+         reinterpret_cast<char *>(p) + size);
+#endif
+#ifndef NDEBUG
+  if (mapped_regions.find(p) == mapped_regions.end()) {
+    fprintf(stderr, "Attempting to unmap unknown region at %p with size %zd\n",
+            p, size);
+  }
+#endif
+  munmap(p, size);
+#ifndef NDEBUG
+
+  mapped_regions.erase(p);
+#endif
+}
+
 static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
-                                                 int64_t size,
+                                                 int64_t size, bool map,
                                                  toolbelt::FileDescriptor &fd) {
   char shm_name[NAME_MAX];
   int pid = getpid();
@@ -50,12 +93,15 @@ static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
                         shm_name, strerror(errno)));
   }
 
-  // Map it into memory.
-  void *p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-  if (p == MAP_FAILED) {
-    shm_unlink(shm_name);
-    return absl::InternalError(absl::StrFormat(
-        "Failed to map shared memory %s: %s", shm_name, strerror(errno)));
+  // Map it into memory if asked
+  void *p = nullptr;
+  if (map) {
+    p = MapMemory(shm_fd, size, PROT_READ | PROT_WRITE, suffix);
+    if (p == MAP_FAILED) {
+      shm_unlink(shm_name);
+      return absl::InternalError(absl::StrFormat(
+          "Failed to map shared memory %s: %s", shm_name, strerror(errno)));
+    }
   }
 
   // Don't need the file now.  It stays open and available to be mapped in
@@ -80,7 +126,7 @@ static void InitMutex(pthread_mutex_t &mutex) {
 absl::StatusOr<SystemControlBlock *>
 CreateSystemControlBlock(toolbelt::FileDescriptor &fd) {
   absl::StatusOr<void *> s =
-      CreateSharedMemory(0, "scb", sizeof(SystemControlBlock), fd);
+      CreateSharedMemory(0, "scb", sizeof(SystemControlBlock), /*map=*/true, fd);
   if (!s.ok()) {
     return s.status();
   }
@@ -132,25 +178,26 @@ Channel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
   int64_t ccb_size =
       sizeof(ChannelControlBlock) + sizeof(MessageSlot) * num_slots_;
   absl::StatusOr<void *> p =
-      CreateSharedMemory(channel_id_, "scb", ccb_size, fds.ccb);
+      CreateSharedMemory(channel_id_, "scb", ccb_size,  /*map=*/true, fds.ccb);
   if (!p.ok()) {
-    munmap(scb_, sizeof(SystemControlBlock));
+    UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
     return p.status();
   }
   ccb_ = reinterpret_cast<ChannelControlBlock *>(*p);
   memset(ccb_, 0, ccb_size);
 
-  // Allocate a single buffer.
+  // Create a single buffer but don't map it in.  There is no need to
+  // map in the buffers in the server since they will never be used.
   int64_t buffers_size =
       num_slots_ * (Aligned<32>(slot_size) + sizeof(MessagePrefix));
   if (buffers_size == 0) {
     buffers_size = 256;
   }
   p = CreateSharedMemory(channel_id_, "buffers0", buffers_size,
-                         fds.buffers[0].fd);
+                          /*map=*/false, fds.buffers[0].fd);
   if (!p.ok()) {
-    munmap(scb_, sizeof(SystemControlBlock));
-    munmap(ccb_, ccb_size);
+    UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+    UnmapMemory(ccb_, ccb_size, "CCB");
     return p.status();
   }
   buffers_.emplace_back(slot_size, reinterpret_cast<char *>(*p));
@@ -211,9 +258,8 @@ void Channel::PrintLists() {
 
 absl::Status Channel::Map(SharedMemoryFds fds,
                           const toolbelt::FileDescriptor &scb_fd) {
-  scb_ = reinterpret_cast<SystemControlBlock *>(
-      mmap(NULL, sizeof(SystemControlBlock), PROT_READ | PROT_WRITE, MAP_SHARED,
-           scb_fd.Fd(), 0));
+  scb_ = reinterpret_cast<SystemControlBlock *>(MapMemory(
+      scb_fd.Fd(), sizeof(SystemControlBlock), PROT_READ | PROT_WRITE, "SCB"));
   if (scb_ == MAP_FAILED) {
     return absl::InternalError(absl::StrFormat(
         "Failed to map SystemControlBlock: %s", strerror(errno)));
@@ -221,8 +267,8 @@ absl::Status Channel::Map(SharedMemoryFds fds,
 
   int64_t ccb_size =
       sizeof(ChannelControlBlock) + sizeof(MessageSlot) * num_slots_;
-  ccb_ = reinterpret_cast<ChannelControlBlock *>(mmap(
-      NULL, ccb_size, PROT_READ | PROT_WRITE, MAP_SHARED, fds.ccb.Fd(), 0));
+  ccb_ = reinterpret_cast<ChannelControlBlock *>(
+      MapMemory(fds.ccb.Fd(), ccb_size, PROT_READ | PROT_WRITE, "CCB"));
   if (ccb_ == MAP_FAILED) {
     munmap(scb_, sizeof(SystemControlBlock));
     return absl::InternalError(absl::StrFormat(
@@ -234,19 +280,19 @@ absl::Status Channel::Map(SharedMemoryFds fds,
         num_slots_ * (Aligned<32>(buffer.slot_size) + sizeof(MessagePrefix));
     if (buffers_size != 0) {
       char *mem = reinterpret_cast<char *>(
-          mmap(NULL, buffers_size, PROT_READ | PROT_WRITE, MAP_SHARED,
-               fds.buffers[index].fd.Fd(), 0));
+          MapMemory(fds.buffers[index].fd.Fd(), buffers_size,
+                    PROT_READ | PROT_WRITE, "buffers"));
 
       if (mem == MAP_FAILED) {
-        munmap(scb_, sizeof(SystemControlBlock));
-        munmap(ccb_, ccb_size);
+        UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+        UnmapMemory(ccb_, ccb_size, "CCB");
         // Unmap any previously mapped buffers.
         for (int i = 0; i < index; i++) {
           int64_t buffers_size =
               num_slots_ *
               (Aligned<32>(buffers_[i].slot_size) + sizeof(MessagePrefix));
           if (buffers_size > 0 && buffers_[i].buffer != nullptr) {
-            munmap(buffers_[i].buffer, buffers_size);
+            UnmapMemory(buffers_[i].buffer, buffers_size, "buffers");
           }
         }
         return absl::InternalError(absl::StrFormat(
@@ -265,19 +311,23 @@ absl::Status Channel::Map(SharedMemoryFds fds,
 }
 
 void Channel::Unmap() {
-  munmap(scb_, sizeof(SystemControlBlock));
+  if (scb_ == nullptr) {
+    // Not yet mapped.
+    return;
+  }
+  UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
 
   for (auto &buffer : buffers_) {
     int64_t buffers_size =
         num_slots_ * (Aligned<32>(buffer.slot_size) + sizeof(MessagePrefix));
     if (buffers_size > 0 && buffer.buffer != nullptr) {
-      munmap(buffer.buffer, buffers_size);
+      UnmapMemory(buffer.buffer, buffers_size, "buffers");
     }
   }
 
   int64_t ccb_size =
       sizeof(ChannelControlBlock) + sizeof(MessageSlot) * num_slots_;
-  munmap(ccb_, ccb_size);
+  UnmapMemory(ccb_, ccb_size, "CCB");
 }
 
 // Called on server to extend the allocated buffers.
@@ -292,8 +342,11 @@ Channel::ExtendBuffers(int32_t new_slot_size) {
   snprintf(buffer_name, sizeof(buffer_name), "buffers%d\n",
            ccb_->num_buffers - 1);
   toolbelt::FileDescriptor fd;
+  // Create the shared memory for the buffer but don't map it in.  This is
+  // in the server and it is not used here.  The result of a successful
+  // creation will be nullptr.
   absl::StatusOr<void *> p =
-      CreateSharedMemory(channel_id_, buffer_name, buffers_size, fd);
+      CreateSharedMemory(channel_id_, buffer_name, buffers_size,  /*map=*/false, fd);
 
   if (!p.ok()) {
     return absl::InternalError(
@@ -313,9 +366,8 @@ absl::Status Channel::MapNewBuffers(std::vector<SlotBuffer> buffers) {
     int64_t buffers_size =
         num_slots_ * (Aligned<32>(buffer.slot_size) + sizeof(MessagePrefix));
     if (buffers_size != 0) {
-      char *mem = reinterpret_cast<char *>(mmap(NULL, buffers_size,
-                                                PROT_READ | PROT_WRITE,
-                                                MAP_SHARED, buffer.fd.Fd(), 0));
+      char *mem = reinterpret_cast<char *>(MapMemory(
+          buffer.fd.Fd(), buffers_size, PROT_READ | PROT_WRITE, "new buffers"));
 
       if (mem == MAP_FAILED) {
         // Unmap any newly mapped buffers.

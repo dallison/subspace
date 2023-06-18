@@ -16,6 +16,7 @@
 #include <sys/resource.h>
 
 ABSL_FLAG(bool, start_server, true, "Start the subspace server");
+ABSL_FLAG(std::string, server, "", "Path to server executable");
 
 void SignalHandler(int sig) { printf("Signal %d", sig); }
 
@@ -45,7 +46,12 @@ public:
     server_pid_ = fork();
     if (server_pid_ == 0) {
       // Child.  Run the server from this directory.
-      execl("bazel-bin/server/subspace_server", "subspace_server", "--local",
+      std::string server_exe = absl::GetFlag(FLAGS_server);
+      if (server_exe.empty()) {
+        server_exe = "bazel-bin/server/subspace_server";
+      }
+
+      execl(server_exe.c_str(), "subspace_server", "--local",
             socket_arg, nullptr);
       abort();
     }
