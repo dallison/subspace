@@ -7,11 +7,11 @@
 
 #include "client/options.h"
 #include "common/channel.h"
-#include "toolbelt/fd.h"
-#include "toolbelt/sockets.h"
 #include "common/triggerfd.h"
 #include "coroutine.h"
 #include "proto/subspace.pb.h"
+#include "toolbelt/fd.h"
+#include "toolbelt/sockets.h"
 #include <sys/poll.h>
 
 // Notification strategy
@@ -64,22 +64,18 @@
 // As of time of writing, the latency for a message on the same
 // computer using shared memory is about 0.25 microseconds on a Mac M1.
 
-namespace subspace{
+namespace subspace {
 
 class Client;
 
 namespace details {
-// The classes in here are mostly used for internal implementation
-// but there are a couple of const functions used outside of the
-// client.  All access to the client's functionality is through
-// the Client class.
 
 // This is a channel as seen by a client.  It's going to be either
 // a publisher or a subscriber, as defined as the subclasses.
 class ClientChannel : public Channel {
 public:
-  ClientChannel(const std::string &name,  int num_slots,
-                int channel_id, std::string type)
+  ClientChannel(const std::string &name, int num_slots, int channel_id,
+                std::string type)
       : Channel(name, num_slots, channel_id, std::move(type)) {}
   virtual ~ClientChannel() = default;
   MessageSlot *CurrentSlot() const { return slot_; }
@@ -106,9 +102,9 @@ protected:
 // messages to be published.
 class PublisherImpl : public ClientChannel {
 public:
-  PublisherImpl(const std::string &name, int num_slots,
-            int channel_id, int publisher_id, std::string type,
-            const PublisherOptions &options)
+  PublisherImpl(const std::string &name, int num_slots, int channel_id,
+                int publisher_id, std::string type,
+                const PublisherOptions &options)
       : ClientChannel(name, num_slots, channel_id, std::move(type)),
         publisher_id_(publisher_id), options_(options) {}
 
@@ -133,8 +129,12 @@ private:
   }
   size_t NumSubscribers() { return subscribers_.size(); }
 
-  void SetTriggerFd(toolbelt::FileDescriptor fd) { trigger_.SetTriggerFd(std::move(fd)); }
-  void SetPollFd(toolbelt::FileDescriptor fd) { trigger_.SetPollFd(std::move(fd)); }
+  void SetTriggerFd(toolbelt::FileDescriptor fd) {
+    trigger_.SetTriggerFd(std::move(fd));
+  }
+  void SetPollFd(toolbelt::FileDescriptor fd) {
+    trigger_.SetPollFd(std::move(fd));
+  }
 
   toolbelt::FileDescriptor &GetPollFd() { return trigger_.GetPollFd(); }
 
@@ -157,9 +157,9 @@ private:
 // shared memory.
 class SubscriberImpl : public ClientChannel {
 public:
-  SubscriberImpl(const std::string &name, int num_slots,
-             int channel_id, int subscriber_id, std::string type,
-             const SubscriberOptions &options)
+  SubscriberImpl(const std::string &name, int num_slots, int channel_id,
+                 int subscriber_id, std::string type,
+                 const SubscriberOptions &options)
       : ClientChannel(name, num_slots, channel_id, std::move(type)),
         subscriber_id_(subscriber_id), options_(options) {}
 
@@ -171,11 +171,8 @@ public:
   }
   bool IsReliable() const { return options_.IsReliable(); }
 
+  int32_t SlotSize() const { return Channel::SlotSize(CurrentSlot()); }
 
-  int32_t SlotSize() const { 
-    return Channel::SlotSize(CurrentSlot());
-  }
-  
 private:
   friend class ::subspace::Client;
 
@@ -183,12 +180,17 @@ private:
 
   void ClearPublishers() { reliable_publishers_.clear(); }
   void AddPublisher(toolbelt::FileDescriptor fd) {
-    reliable_publishers_.emplace_back(toolbelt::FileDescriptor(), std::move(fd));
+    reliable_publishers_.emplace_back(toolbelt::FileDescriptor(),
+                                      std::move(fd));
   }
   size_t NumReliablePublishers() { return reliable_publishers_.size(); }
 
-  void SetTriggerFd(toolbelt::FileDescriptor fd) { trigger_.SetTriggerFd(std::move(fd)); }
-  void SetPollFd(toolbelt::FileDescriptor fd) { trigger_.SetPollFd(std::move(fd)); }
+  void SetTriggerFd(toolbelt::FileDescriptor fd) {
+    trigger_.SetTriggerFd(std::move(fd));
+  }
+  void SetPollFd(toolbelt::FileDescriptor fd) {
+    trigger_.SetPollFd(std::move(fd));
+  }
   int GetSubscriberId() const { return subscriber_id_; }
   void TriggerReliablePublishers() {
     for (auto &fd : reliable_publishers_) {

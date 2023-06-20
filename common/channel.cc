@@ -44,13 +44,20 @@ static void *MapMemory(int fd, size_t size, int prot, const char *purpose) {
 
 static void UnmapMemory(void *p, size_t size, const char *purpose) {
 #if SHOW_MMAPS
-  printf("inmapping %s with size %zd: %p -> %p\n", purpose, size, p,
+  printf("unmapping %s with size %zd: %p -> %p\n", purpose, size, p,
          reinterpret_cast<char *>(p) + size);
 #endif
 #ifndef NDEBUG
-  if (mapped_regions.find(p) == mapped_regions.end()) {
+  auto it = mapped_regions.find(p);
+  if (it == mapped_regions.end()) {
     fprintf(stderr, "Attempting to unmap unknown region at %p with size %zd\n",
             p, size);
+    return;
+  } else if (it->second != size) {
+    fprintf(stderr,
+            "Attempting to unmap region at %p with wrong size %zd/%zd\n", p,
+            it->second, size);
+    return;
   }
 #endif
   munmap(p, size);
@@ -125,8 +132,8 @@ static void InitMutex(pthread_mutex_t &mutex) {
 
 absl::StatusOr<SystemControlBlock *>
 CreateSystemControlBlock(toolbelt::FileDescriptor &fd) {
-  absl::StatusOr<void *> s =
-      CreateSharedMemory(0, "scb", sizeof(SystemControlBlock), /*map=*/true, fd);
+  absl::StatusOr<void *> s = CreateSharedMemory(
+      0, "scb", sizeof(SystemControlBlock), /*map=*/true, fd);
   if (!s.ok()) {
     return s.status();
   }
@@ -178,7 +185,7 @@ Channel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
   int64_t ccb_size =
       sizeof(ChannelControlBlock) + sizeof(MessageSlot) * num_slots_;
   absl::StatusOr<void *> p =
-      CreateSharedMemory(channel_id_, "scb", ccb_size,  /*map=*/true, fds.ccb);
+      CreateSharedMemory(channel_id_, "scb", ccb_size, /*map=*/true, fds.ccb);
   if (!p.ok()) {
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
     return p.status();
@@ -194,7 +201,7 @@ Channel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
     buffers_size = 256;
   }
   p = CreateSharedMemory(channel_id_, "buffers0", buffers_size,
-                          /*map=*/false, fds.buffers[0].fd);
+                         /*map=*/false, fds.buffers[0].fd);
   if (!p.ok()) {
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
     UnmapMemory(ccb_, ccb_size, "CCB");
@@ -345,8 +352,8 @@ Channel::ExtendBuffers(int32_t new_slot_size) {
   // Create the shared memory for the buffer but don't map it in.  This is
   // in the server and it is not used here.  The result of a successful
   // creation will be nullptr.
-  absl::StatusOr<void *> p =
-      CreateSharedMemory(channel_id_, buffer_name, buffers_size,  /*map=*/false, fd);
+  absl::StatusOr<void *> p = CreateSharedMemory(
+      channel_id_, buffer_name, buffers_size, /*map=*/false, fd);
 
   if (!p.ok()) {
     return absl::InternalError(

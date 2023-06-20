@@ -592,10 +592,10 @@ absl::Status Client::ReloadSubscriber(SubscriberImpl *subscriber) {
     return absl::InternalError(sub_resp.error());
   }
 
-  subscriber->SetNumSlots(sub_resp.num_slots());
-
   // Unmap the channel memory.
   subscriber->Unmap();
+
+  subscriber->SetNumSlots(sub_resp.num_slots());
 
   std::vector<SlotBuffer> buffers = CollectBuffers(sub_resp.buffers(), fds);
   SharedMemoryFds channel_fds(std::move(fds[sub_resp.ccb_fd_index()]),
