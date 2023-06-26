@@ -324,7 +324,7 @@ public:
                : buffers_[ccb_->slots[slot_id].buffer_index].slot_size;
   }
 
- int SlotSize(MessageSlot* slot) const {
+  int SlotSize(MessageSlot *slot) const {
     if (slot == nullptr) {
       return 0;
     }
@@ -382,7 +382,7 @@ public:
 
   absl::Status MapNewBuffers(std::vector<SlotBuffer> buffers);
 
-  void SetSlotToBiggestBuffer(MessageSlot* slot);
+  void SetSlotToBiggestBuffer(MessageSlot *slot);
 
 private:
   struct BufferSet {
@@ -448,7 +448,7 @@ private:
   MessageSlot *FindFreeSlotLocked(bool reliable, int owner);
 
   void ClaimPublisherSlot(MessageSlot *slot, int owner, SlotList &list);
-  
+
   std::string name_;
   int num_slots_;
 

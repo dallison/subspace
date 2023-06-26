@@ -29,7 +29,7 @@ class Server {
 public:
   Server(co::CoroutineScheduler &scheduler, const std::string &socket_name,
          const std::string &interface, int disc_port, int peer_port,
-         bool local);
+         bool local, int notify_fd = -1);
   void SetLogLevel(const std::string &level) { logger_.SetLogLevel(level); }
   absl::Status Run();
   void Stop();
@@ -93,6 +93,7 @@ private:
   int discovery_port_;
   int discovery_peer_port_;
   bool local_;
+  toolbelt::FileDescriptor notify_fd_;
 
   absl::flat_hash_map<std::string, std::unique_ptr<ServerChannel>> channels_;
 

@@ -36,6 +36,7 @@ absl::Status Client::Init(const std::string &server_socket,
     return status;
   }
 
+  name_ = client_name;
   Request req;
   req.mutable_init()->set_client_name(client_name);
   Response resp;
@@ -267,7 +268,7 @@ absl::StatusOr<void *> Client::GetMessageBuffer(PublisherImpl *publisher,
     }
     publisher->SetSlot(slot);
   }
-  
+
   void *buffer = publisher->GetCurrentBufferAddress();
   if (buffer == nullptr) {
     return absl::InternalError(
@@ -595,6 +596,9 @@ absl::Status Client::ReloadSubscriber(SubscriberImpl *subscriber) {
   // Unmap the channel memory.
   subscriber->Unmap();
 
+  if (!sub_resp.type().empty()) {
+    subscriber->SetType(sub_resp.type());
+  }
   subscriber->SetNumSlots(sub_resp.num_slots());
 
   std::vector<SlotBuffer> buffers = CollectBuffers(sub_resp.buffers(), fds);
