@@ -16,6 +16,7 @@
 #include "toolbelt/fd.h"
 #include "toolbelt/sockets.h"
 #include <functional>
+#include <string>
 #include <sys/poll.h>
 
 namespace subspace {
@@ -257,6 +258,8 @@ public:
   Client(co::Coroutine *c = nullptr) : co_(c) {}
   ~Client() = default;
 
+  const std::string &GetName() const { return name_; }
+
   // Initialize the client by connecting to the server.
   absl::Status Init(const std::string &server_socket = "/tmp/subspace",
                     const std::string &client_name = "");
@@ -301,7 +304,8 @@ private:
   // detect when another attempt can be made to get a buffer.
   // If max_size is greater than the current buffer size, the buffers
   // will be resized.
-  absl::StatusOr<void *> GetMessageBuffer(details::PublisherImpl *publisher, int32_t max_size);
+  absl::StatusOr<void *> GetMessageBuffer(details::PublisherImpl *publisher,
+                                          int32_t max_size);
 
   // Publish the message in the publisher's buffer.  The message_size
   // argument specifies the actual size of the message to send.  Returns the
@@ -389,6 +393,7 @@ private:
                              int32_t new_slot_size);
   absl::Status ReloadBuffersIfNecessary(details::ClientChannel *channel);
 
+  std::string name_;
   toolbelt::UnixSocket socket_;
   toolbelt::FileDescriptor scb_fd_; // System control block memory fd.
   char buffer_[kMaxMessage];        // Buffer for comms with server over UDS.
@@ -476,7 +481,7 @@ public:
   // case nullptr is returned.  The publishers's PollFd can be used to
   // detect when another attempt can be made to get a buffer.
   // If max_size is greater than the current buffer size, the buffers
-  // will be resized. 
+  // will be resized.
   absl::StatusOr<void *> GetMessageBuffer(int32_t max_size = -1) {
     return client_->GetMessageBuffer(impl_, max_size);
   }
@@ -515,8 +520,7 @@ private:
   friend class Client;
 
   Publisher(Client *client, details::PublisherImpl *impl)
-      : client_(client), impl_(impl) {
-  }
+      : client_(client), impl_(impl) {}
 
   absl::StatusOr<const Message> PublishMessageInternal(int64_t message_size,
                                                        bool omit_prefix) {

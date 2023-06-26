@@ -90,10 +90,10 @@ static absl::Status FindIPAddresses(const std::string &interface,
 
 Server::Server(co::CoroutineScheduler &scheduler,
                const std::string &socket_name, const std::string &interface,
-               int disc_port, int peer_port, bool local)
+               int disc_port, int peer_port, bool local, int notify_fd)
     : socket_name_(socket_name), interface_(interface),
       discovery_port_(disc_port), discovery_peer_port_(peer_port),
-      local_(local), co_scheduler_(scheduler) {}
+      local_(local), notify_fd_(notify_fd), co_scheduler_(scheduler) {}
 
 void Server::Stop() { co_scheduler_.Stop(); }
 
@@ -135,6 +135,10 @@ absl::Status Server::Run() {
     return status;
   }
 
+  // Notify listener that the server is ready.
+  if (notify_fd_.Valid()) {
+    ::write(notify_fd_.Fd(), "X", 1);
+  }
   absl::StatusOr<SystemControlBlock *> scb = CreateSystemControlBlock(scb_fd_);
   if (!scb.ok()) {
     return absl::InternalError(absl::StrFormat(
@@ -238,6 +242,11 @@ absl::Status Server::Run() {
 
   // Run the coroutine main loop.
   co_scheduler_.Run();
+
+  // Notify listener that we're shutting down.
+   if (notify_fd_.Valid()) {
+    ::write(notify_fd_.Fd(), "Y", 1);
+  }
   return absl::OkStatus();
 }
 

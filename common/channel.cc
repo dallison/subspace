@@ -20,6 +20,8 @@
 namespace subspace {
 
 #ifndef NDEBUG
+// NOTE: this is not thread safe.  If you want to use multiple
+// threads, you will have to add a mutex to access this map.
 static absl::flat_hash_map<void *, size_t> mapped_regions;
 #endif
 
@@ -50,13 +52,14 @@ static void UnmapMemory(void *p, size_t size, const char *purpose) {
 #ifndef NDEBUG
   auto it = mapped_regions.find(p);
   if (it == mapped_regions.end()) {
-    fprintf(stderr, "Attempting to unmap unknown region at %p with size %zd\n",
-            p, size);
+    fprintf(stderr,
+            "Attempting to unmap unknown region %s at %p with size %zd\n",
+            purpose, p, size);
     return;
   } else if (it->second != size) {
     fprintf(stderr,
-            "Attempting to unmap region at %p with wrong size %zd/%zd\n", p,
-            it->second, size);
+            "Attempting to unmap region %s at %p with wrong size %zd/%zd\n",
+            purpose, p, it->second, size);
     return;
   }
 #endif
@@ -150,6 +153,9 @@ Channel::Channel(const std::string &name, int num_slots, int channel_id,
 absl::StatusOr<SharedMemoryFds>
 Channel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
                   int num_slots) {
+  // Unmap existing memory.
+  Unmap();
+
   // If the channel is being remapped (a subscriber that existed
   // before the first publisher), num_slots_ will be zero and we
   // set it here now that we know it.  If num_slots_ was already
@@ -160,16 +166,13 @@ Channel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
   } else {
     num_slots_ = num_slots;
   }
-  // Unmap existing memory.
-  Unmap();
 
   // We are allocating a channel, so we only have one buffer.
   buffers_.clear();
 
   // Map SCB into process memory.
-  scb_ = reinterpret_cast<SystemControlBlock *>(
-      mmap(NULL, sizeof(SystemControlBlock), PROT_READ | PROT_WRITE, MAP_SHARED,
-           scb_fd.Fd(), 0));
+  scb_ = reinterpret_cast<SystemControlBlock *>(MapMemory(
+      scb_fd.Fd(), sizeof(SystemControlBlock), PROT_READ | PROT_WRITE, "SCB"));
   if (scb_ == MAP_FAILED) {
     return absl::InternalError(absl::StrFormat(
         "Failed to map SystemControlBlock: %s", strerror(errno)));
