@@ -124,6 +124,8 @@ public:
                : slot_->ref_count;
   }
 
+  const Message& GetMessage() const { return msg_; }
+
 private:
   friend class Client;
   void CopyFrom(const shared_ptr &p) {
