@@ -316,6 +316,7 @@ Client::PublishMessageInternal(PublisherImpl *publisher, int64_t message_size,
   // would be faster.
   if (notify) {
     publisher->TriggerSubscribers();
+    publisher->UnmapUnusedBuffers();
   }
 
   if (msg.new_slot == nullptr) {
@@ -420,6 +421,7 @@ Client::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     // I'm out of messages to read, trigger the publishers to give me
     // some more.  This is only for reliable publishers.
     subscriber->TriggerReliablePublishers();
+    subscriber->UnmapUnusedBuffers();
     return Message();
   }
   subscriber->SetSlot(new_slot);

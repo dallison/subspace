@@ -51,8 +51,8 @@ public:
         server_exe = "bazel-bin/server/subspace_server";
       }
 
-      execl(server_exe.c_str(), "subspace_server", "--local",
-            socket_arg, nullptr);
+      execl(server_exe.c_str(), "subspace_server", "--local", socket_arg,
+            nullptr);
       abort();
     }
 
@@ -476,6 +476,54 @@ TEST_F(ClientTest, PublishAndResize2) {
   ASSERT_EQ(4096, sub->SlotSize());
 }
 
+TEST_F(ClientTest, PublishAndResizeUnmapBuffers) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_TRUE(pub_client.Init(Socket()).ok());
+  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher("dave6", 256, 10);
+  ASSERT_TRUE(pub.ok());
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_TRUE(buffer.ok());
+  memcpy(*buffer, "foobar", 6);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+  ASSERT_TRUE(pub_status.ok());
+
+  // Publish bigger messages.  This will cause a resize.  We take
+  // all the slots to free up buffer index 0 and it will be
+  // unmapped
+  for (int i = 0; i < 10; i++) {
+    absl::StatusOr<void *> buffer2 = pub->GetMessageBuffer(4000);
+    ASSERT_TRUE(buffer2.ok());
+    ASSERT_EQ(4096, pub->SlotSize());
+    memcpy(*buffer2, "barfoofoobar", 12);
+
+    absl::StatusOr<const Message> pub_status2 = pub->PublishMessage(12);
+    ASSERT_TRUE(pub_status2.ok());
+  }
+
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("dave6");
+  ASSERT_TRUE(sub.ok());
+
+  // Read all messages.
+  for (int i = 0; i < 10; i++) {
+    absl::StatusOr<Message> msg = sub->ReadMessage();
+    ASSERT_TRUE(msg.ok());
+  }
+
+  // Publish one more that will check for free buffers and will unmap
+  // them.  We only check for unused buffers when we will also notify
+  // subscribers, which is done when we are publishing a message
+  // immediatly after one that has been seen by subscribers.
+  absl::StatusOr<void *> buffer3 = pub->GetMessageBuffer(4000);
+  ASSERT_TRUE(buffer3.ok());
+  ASSERT_EQ(4096, pub->SlotSize());
+  memcpy(*buffer3, "barfoofoobar", 12);
+
+  absl::StatusOr<const Message> pub_status3 = pub->PublishMessage(12);
+  ASSERT_TRUE(pub_status3.ok());
+}
+
 TEST_F(ClientTest, PublishAndResizeSubscriberFirst) {
   subspace::Client pub_client;
   subspace::Client sub_client;
@@ -485,7 +533,7 @@ TEST_F(ClientTest, PublishAndResizeSubscriberFirst) {
   // First create subscriber.
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("dave6");
   ASSERT_TRUE(sub.ok());
-  ASSERT_EQ(0, sub->SlotSize());    // No buffers yet.
+  ASSERT_EQ(0, sub->SlotSize()); // No buffers yet.
 
   absl::StatusOr<Publisher> pub = pub_client.CreatePublisher("dave6", 256, 10);
   ASSERT_TRUE(pub.ok());
@@ -514,7 +562,6 @@ TEST_F(ClientTest, PublishAndResizeSubscriberFirst) {
   ASSERT_TRUE(msg2.ok());
   ASSERT_EQ(12, msg2->length);
   ASSERT_EQ(4096, sub->SlotSize());
-
 }
 
 TEST_F(ClientTest, PublishSingleMessagePollAndReadSubscriberFirst) {
