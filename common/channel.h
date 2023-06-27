@@ -119,8 +119,8 @@ struct MessageSlot {
 // This is located just before the prefix of the first slot's buffer.  It
 // is 64 bits long to align the prefix to 64 bits.
 struct BufferHeader {
-  int32_t refs;     // Number of references to this buffer.
-  int32_t padding;  // Align to 64 bits.
+  int32_t refs;    // Number of references to this buffer.
+  int32_t padding; // Align to 64 bits.
 };
 
 // The control data for a channel.  This memory is
@@ -195,6 +195,14 @@ struct SharedMemoryFds {
 template <int64_t alignment> int64_t Aligned(int64_t v) {
   return (v + (alignment - 1)) & ~(alignment - 1);
 }
+
+struct BufferSet {
+  BufferSet() = default;
+  BufferSet(int32_t slot_size, char *buffer)
+      : slot_size(slot_size), buffer(buffer) {}
+  int32_t slot_size = 0;
+  char *buffer = nullptr;
+};
 
 // This is the representation of a channel as seen by a publisher
 // or subscriber.  There is one of these objects per publisher
@@ -353,7 +361,8 @@ public:
   char *Buffer(int slot_id) const {
     return buffers_.empty()
                ? nullptr
-               : (buffers_[ccb_->slots[slot_id].buffer_index].buffer + sizeof(BufferHeader));
+               : (buffers_[ccb_->slots[slot_id].buffer_index].buffer +
+                  sizeof(BufferHeader));
   }
   void CleanupSlots(int owner, bool reliable);
   void UnmapUnusedBuffers();
@@ -393,15 +402,9 @@ public:
 
   void SetSlotToBiggestBuffer(MessageSlot *slot);
 
-private:
-  struct BufferSet {
-    BufferSet() = default;
-    BufferSet(int32_t slot_size, char *buffer)
-        : slot_size(slot_size), buffer(buffer) {}
-    int32_t slot_size = 0;
-    char *buffer = nullptr;
-  };
+  const std::vector<BufferSet> &GetBuffers() const { return buffers_; }
 
+private:
   int32_t ToCCBOffset(void *addr) const {
     return (int32_t)(reinterpret_cast<char *>(addr) -
                      reinterpret_cast<char *>(ccb_));
@@ -460,7 +463,7 @@ private:
 
   void DecrementBufferRefs(int buffer_index);
   void IncrementBufferRefs(int buffer_index);
-  
+
   std::string name_;
   int num_slots_;
 

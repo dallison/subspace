@@ -428,6 +428,10 @@ TEST_F(ClientTest, PublishAndResize) {
   absl::StatusOr<void *> buffer2 = pub->GetMessageBuffer(4000);
   ASSERT_TRUE(buffer2.ok());
   ASSERT_EQ(4096, pub->SlotSize());
+
+  auto &pub_buffers = pub->GetBuffers();
+  ASSERT_EQ(2, pub_buffers.size());
+
   memcpy(*buffer2, "barfoofoobar", 12);
 
   absl::StatusOr<const Message> pub_status2 = pub->PublishMessage(12);
@@ -437,6 +441,9 @@ TEST_F(ClientTest, PublishAndResize) {
   ASSERT_TRUE(msg2.ok());
   ASSERT_EQ(12, msg2->length);
   ASSERT_EQ(4096, sub->SlotSize());
+
+  auto &sub_buffers = sub->GetBuffers();
+  ASSERT_EQ(2, sub_buffers.size());
 }
 
 TEST_F(ClientTest, PublishAndResize2) {
@@ -511,6 +518,19 @@ TEST_F(ClientTest, PublishAndResizeUnmapBuffers) {
     ASSERT_TRUE(msg.ok());
   }
 
+  // We won't have freed the buffers yet for the publisher, but we
+  // will have for the subscriber.  We do that when it runs out
+  // of messages to read.
+  {
+    auto &pub_buffers = pub->GetBuffers();
+    ASSERT_EQ(2, pub_buffers.size());
+    ASSERT_NE(nullptr, pub_buffers[0].buffer);
+
+    auto &sub_buffers = sub->GetBuffers();
+    ASSERT_EQ(2, sub_buffers.size());
+    ASSERT_EQ(nullptr, sub_buffers[0].buffer);
+  }
+
   // Publish one more that will check for free buffers and will unmap
   // them.  We only check for unused buffers when we will also notify
   // subscribers, which is done when we are publishing a message
@@ -522,6 +542,13 @@ TEST_F(ClientTest, PublishAndResizeUnmapBuffers) {
 
   absl::StatusOr<const Message> pub_status3 = pub->PublishMessage(12);
   ASSERT_TRUE(pub_status3.ok());
+
+  // Check that we've unmapped the unused buffer in the publisher now.
+  {
+    auto &pub_buffers = pub->GetBuffers();
+    ASSERT_EQ(2, pub_buffers.size());
+    ASSERT_EQ(nullptr, pub_buffers[0].buffer);
+  }
 }
 
 TEST_F(ClientTest, PublishAndResizeSubscriberFirst) {

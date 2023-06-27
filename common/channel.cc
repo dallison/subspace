@@ -454,13 +454,7 @@ void Channel::ClaimPublisherSlot(MessageSlot *slot, int owner, SlotList &list) {
   ListRemove(&list, &slot->element);
   AddToBusyList(slot);
   slot->owners.Set(owner);
-  if (slot->buffer_index != -1) {
-    // If the slot has a buffer (it's not in the free list), decrement the
-    // refs for the buffer.
-    DecrementBufferRefs(slot->buffer_index);
-  }
-  slot->buffer_index = buffers_.size() - 1; // Use biggest buffer.
-  IncrementBufferRefs(slot->buffer_index);
+  SetSlotToBiggestBuffer(slot);
 }
 
 void Channel::DecrementBufferRefs(int buffer_index) {
