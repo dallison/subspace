@@ -30,7 +30,7 @@ message CreatePublisherRequest {
   bool is_local = 4;
   bool is_reliable = 5;
   bool is_bridge = 6; // This publisher is for the bridge.
-  string type = 7;    // Type of data carried on channel.
+  bytes type = 7;    // Type of data carried on channel.
 }
 
 message CreatePublisherResponse {
@@ -43,7 +43,7 @@ message CreatePublisherResponse {
   int32 pub_trigger_fd_index = 7;
   repeated int32 sub_trigger_fd_indexes = 8;
   int32 num_sub_updates = 9;
-  string type = 10;
+  bytes type = 10;
 }
 
 // This is used both to create a new subscriber and to reload
@@ -54,7 +54,8 @@ message CreateSubscriberRequest {
   int32 subscriber_id = 2; // -1 if there is no existing subscriber.
   bool is_reliable = 3;
   bool is_bridge = 4; // This subscriber is for the bridge.
-  string type = 5;    // Type of data carried on channel.
+  bytes type = 5;    // Type of data carried on channel.
+  int32 max_shared_ptrs = 6;    // Max number of shared_ptr objects.
 }
 
 message CreateSubscriberResponse {
@@ -69,7 +70,7 @@ message CreateSubscriberResponse {
   int32 num_slots = 9; // Might be zero if no publisher.
   repeated int32 reliable_pub_trigger_fd_indexes = 10;
   int32 num_pub_updates = 11;
-  string type = 12;
+  bytes type = 12;
 }
 
 message GetTriggersRequest { string channel_name = 1; }
@@ -145,7 +146,7 @@ message ChannelInfo {
   string name = 1;
   int32 slot_size = 2;
   int32 num_slots = 3;
-  string type = 4;
+  bytes type = 4;
 }
 
 // This is published to the ipc/ChannelDirectory channel.

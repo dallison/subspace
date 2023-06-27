@@ -277,8 +277,8 @@ void ClientHandler::HandleCreateSubscriber(
     sub = static_cast<SubscriberUser *>(*user);
   } else {
     // Create the subscriber.
-    absl::StatusOr<SubscriberUser *> subscriber =
-        channel->AddSubscriber(this, req.is_reliable(), req.is_bridge());
+    absl::StatusOr<SubscriberUser *> subscriber = channel->AddSubscriber(
+        this, req.is_reliable(), req.is_bridge(), req.max_shared_ptrs());
     if (!subscriber.ok()) {
       response->set_error(subscriber.status().ToString());
       return;

@@ -38,7 +38,7 @@ public:
     fixed_size_ = v;
     return *this;
   }
-  
+
   bool IsLocal() const { return local_; }
   bool IsReliable() const { return reliable_; }
   bool IsFixedSize() const { return fixed_size_; }
@@ -78,8 +78,14 @@ public:
     return *this;
   }
 
+  SubscriberOptions &SetMaxSharedPtrs(int n) {
+    max_shared_ptrs_ = n;
+    return *this;
+  }
+
   bool IsReliable() const { return reliable_; }
   const std::string &Type() const { return type_; }
+  int MaxSharedPtrs() const { return max_shared_ptrs_; }
 
 private:
   friend class Server;
@@ -93,6 +99,7 @@ private:
   bool reliable_ = false;
   bool bridge_ = false;
   std::string type_;
+  int max_shared_ptrs_ = 0;
 };
 
 } // namespace subspace

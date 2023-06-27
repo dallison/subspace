@@ -15,14 +15,17 @@
 #include "absl/container/flat_hash_map.h"
 #include <cassert>
 #include <inttypes.h>
+#include <mutex>
 #include <unistd.h>
 
 namespace subspace {
 
 #ifndef NDEBUG
-// NOTE: this is not thread safe.  If you want to use multiple
-// threads, you will have to add a mutex to access this map.
-static absl::flat_hash_map<void *, size_t> mapped_regions;
+// NOTE: due to C++'s undefined initialization and destruction order
+// these can't be actual instances.  They will be allocated on the
+// first call to MapMemory and won't be deleted.
+static absl::flat_hash_map<void *, size_t> *mapped_regions;
+static std::mutex *region_lock;
 #endif
 
 // Set this to 1 to print the memory mapping and unmapping calls.
@@ -35,11 +38,16 @@ static void *MapMemory(int fd, size_t size, int prot, const char *purpose) {
          reinterpret_cast<char *>(p) + size);
 #endif
 #ifndef NDEBUG
-  if (mapped_regions.find(p) != mapped_regions.end()) {
+  if (region_lock == nullptr) {
+    region_lock = new std::mutex;
+    mapped_regions = new absl::flat_hash_map<void *, size_t>;
+  }
+  std::unique_lock l(*region_lock);
+  if (mapped_regions->find(p) != mapped_regions->end()) {
     fprintf(stderr, "Attempting to remap region at %p with size %zd\n", p,
             size);
   }
-  mapped_regions[p] = size;
+  (*mapped_regions)[p] = size;
 #endif
   return p;
 }
@@ -50,8 +58,11 @@ static void UnmapMemory(void *p, size_t size, const char *purpose) {
          reinterpret_cast<char *>(p) + size);
 #endif
 #ifndef NDEBUG
-  auto it = mapped_regions.find(p);
-  if (it == mapped_regions.end()) {
+  assert(region_lock != nullptr);
+  std::unique_lock l(*region_lock);
+
+  auto it = mapped_regions->find(p);
+  if (it == mapped_regions->end()) {
     fprintf(stderr,
             "Attempting to unmap unknown region %s at %p with size %zd\n",
             purpose, p, size);
@@ -66,7 +77,7 @@ static void UnmapMemory(void *p, size_t size, const char *purpose) {
   munmap(p, size);
 #ifndef NDEBUG
 
-  mapped_regions.erase(p);
+  mapped_regions->erase(p);
 #endif
 }
 

@@ -150,6 +150,7 @@ private:
     if (sub_->IsReliable()) {
       slot_->reliable_ref_count += inc;
     }
+    sub_->IncDecSharedPtrCount(inc);
   }
 
   details::SubscriberImpl *sub_ = nullptr;
@@ -202,7 +203,13 @@ public:
   }
 
   shared_ptr<T> lock() const {
-    return expired() ? shared_ptr<T>() : shared_ptr<T>(*this);
+    if (expired()) {
+      return shared_ptr<T>();
+    }
+    if (!sub_->CheckSharedPtrCount()) {
+      return shared_ptr<T>();
+    }
+    return shared_ptr<T>(*this);
   }
 
 private:
@@ -395,7 +402,8 @@ private:
                              int32_t new_slot_size);
   absl::Status ReloadBuffersIfNecessary(details::ClientChannel *channel);
 
-  const std::vector<BufferSet> &GetBuffers(details::ClientChannel *channel) const {
+  const std::vector<BufferSet> &
+  GetBuffers(details::ClientChannel *channel) const {
     return channel->GetBuffers();
   }
 
@@ -435,6 +443,15 @@ Client::ReadMessage(details::SubscriberImpl *subscriber, ReadMode mode) {
   if (!msg.ok()) {
     return msg.status();
   }
+  if (msg->length == 0) {
+    return ::subspace::shared_ptr<T>(subscriber, *msg);
+  }
+  if (!subscriber->CheckSharedPtrCount()) {
+    return absl::InternalError(
+        absl::StrFormat("Too many shared pointers for %s: current: %d, max: %d",
+                        subscriber->Name(), subscriber->NumSharedPtrs(),
+                        subscriber->MaxSharedPtrs()));
+  }
   return ::subspace::shared_ptr<T>(subscriber, *msg);
 }
 
@@ -444,6 +461,15 @@ Client::FindMessage(details::SubscriberImpl *subscriber, uint64_t timestamp) {
   absl::StatusOr<Message> msg = FindMessage(subscriber, timestamp);
   if (!msg.ok()) {
     return msg.status();
+  }
+  if (msg->length == 0) {
+    return ::subspace::shared_ptr<T>(subscriber, *msg);
+  }
+  if (!subscriber->CheckSharedPtrCount()) {
+    return absl::InternalError(
+        absl::StrFormat("Too many shared pointers for %s: current: %d, max: %d",
+                        subscriber->Name(), subscriber->NumSharedPtrs(),
+                        subscriber->MaxSharedPtrs()));
   }
   return ::subspace::shared_ptr<T>(subscriber, *msg);
 }

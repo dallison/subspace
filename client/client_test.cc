@@ -14,6 +14,7 @@
 #include <memory>
 #include <signal.h>
 #include <sys/resource.h>
+#include <thread>
 
 ABSL_FLAG(bool, start_server, true, "Start the subspace server");
 ABSL_FLAG(std::string, server, "", "Path to server executable");
@@ -39,28 +40,27 @@ public:
     socket_ = tmp;
     close(fd);
 
-    // Add --socket arg to allow running on shared testing infrastructure where
-    // more than one can run at once.
-    char socket_arg[32];
-    snprintf(socket_arg, sizeof(socket_arg), "--socket=%s", socket_.c_str());
-    server_pid_ = fork();
-    if (server_pid_ == 0) {
-      // Child.  Run the server from this directory.
-      std::string server_exe = absl::GetFlag(FLAGS_server);
-      if (server_exe.empty()) {
-        server_exe = "bazel-bin/server/subspace_server";
+    // The server will write to this pipe to notify us when it
+    // has started and stopped.  This end of the pipe is blocking.
+    pipe(server_pipe_);
+
+    server_ =
+        std::make_unique<subspace::Server>(scheduler_, socket_, "", 0, 0,
+                                           /*local=*/true, server_pipe_[1]);
+
+    // Start server running in a thread.
+    server_thread_ = std::thread([]() {
+      absl::Status s = server_->Run();
+      if (!s.ok()) {
+        fprintf(stderr, "Error running Subspace server: %s\n",
+                s.ToString().c_str());
+        exit(1);
       }
+    });
 
-      execl(server_exe.c_str(), "subspace_server", "--local", socket_arg,
-            nullptr);
-      abort();
-    }
-
-    // Wait until we can connect to the server.
-    subspace::Client client;
-    while (!client.Init(Socket()).ok()) {
-      usleep(10);
-    }
+    // Wait for server to tell us that it's running.
+    char buf[8];
+    ::read(server_pipe_[0], buf, 8);
   }
 
   static void TearDownTestSuite() {
@@ -68,11 +68,12 @@ public:
       return;
     }
     printf("Stopping Subspace server\n");
+    server_->Stop();
 
-    // Kill server and wait for it to stop.
-    kill(server_pid_, SIGTERM);
-    int status;
-    waitpid(server_pid_, &status, 0);
+    // Wait for server to tell us that it's stopped.
+    char buf[8];
+    ::read(server_pipe_[0], buf, 8);
+    server_thread_.join();
   }
 
   void SetUp() override { signal(SIGPIPE, SIG_IGN); }
@@ -85,12 +86,18 @@ public:
   static const std::string &Socket() { return socket_; }
 
 private:
-  static int server_pid_;
+  static co::CoroutineScheduler scheduler_;
   static std::string socket_;
+  static int server_pipe_[2];
+  static std::unique_ptr<subspace::Server> server_;
+  static std::thread server_thread_;
 };
 
-int ClientTest::server_pid_;
+co::CoroutineScheduler ClientTest::scheduler_;
 std::string ClientTest::socket_ = "/tmp/subspace";
+int ClientTest::server_pipe_[2];
+std::unique_ptr<subspace::Server> ClientTest::server_;
+std::thread ClientTest::server_thread_;
 
 TEST_F(ClientTest, InetAddressSupportsAbslHash) {
   struct sockaddr_in addr = {
@@ -529,6 +536,7 @@ TEST_F(ClientTest, PublishAndResizeUnmapBuffers) {
     auto &sub_buffers = sub->GetBuffers();
     ASSERT_EQ(2, sub_buffers.size());
     ASSERT_EQ(nullptr, sub_buffers[0].buffer);
+    ASSERT_NE(nullptr, sub_buffers[1].buffer);
   }
 
   // Publish one more that will check for free buffers and will unmap
@@ -548,6 +556,7 @@ TEST_F(ClientTest, PublishAndResizeUnmapBuffers) {
     auto &pub_buffers = pub->GetBuffers();
     ASSERT_EQ(2, pub_buffers.size());
     ASSERT_EQ(nullptr, pub_buffers[0].buffer);
+    ASSERT_NE(nullptr, pub_buffers[1].buffer);
   }
 }
 
@@ -939,7 +948,8 @@ TEST_F(ClientTest, PublishSingleMessageAndReadSharedPtr) {
   absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
   ASSERT_TRUE(pub_status.ok());
 
-  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("dave6");
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
+      "dave6", subspace::SubscriberOptions().SetMaxSharedPtrs(3));
   ASSERT_TRUE(sub.ok());
 
   absl::StatusOr<subspace::shared_ptr<const char>> p =
@@ -989,7 +999,8 @@ TEST_F(ClientTest, Publish2Message2AndReadSharedPtrs) {
     ASSERT_TRUE(pub_status.ok());
   }
 
-  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("dave6");
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
+      "dave6", subspace::SubscriberOptions().SetMaxSharedPtrs(2));
   ASSERT_TRUE(sub.ok());
 
   absl::StatusOr<subspace::shared_ptr<const char>> p =
@@ -1091,6 +1102,48 @@ TEST_F(ClientTest, FindMessage) {
     ASSERT_EQ(msgs[8].timestamp, m->timestamp);
     ASSERT_EQ(msgs[8].length, m->length);
     ASSERT_EQ(msgs[8].ordinal, m->ordinal);
+  }
+}
+
+TEST_F(ClientTest, Mikael) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_TRUE(pub_client.Init(Socket()).ok());
+  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+
+  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher("mik", 1024, 32);
+  ASSERT_TRUE(pub.ok());
+
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("mik");
+  ASSERT_TRUE(sub.ok());
+
+  std::vector<std::string> sent_msgs;
+  for (int i = 0; i < 6; i++) {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_TRUE(buffer.ok());
+    char *buf = reinterpret_cast<char *>(*buffer);
+    int len = snprintf(buf, 256, "foobar %d", i);
+
+    absl::StatusOr<const Message> pub_status = pub->PublishMessage(len + 1);
+    ASSERT_TRUE(pub_status.ok());
+    sent_msgs.push_back(std::string(buf, len + 1));
+  }
+
+  std::vector<std::string> received_msgs;
+
+  for (int i = 0; i < 6; i++) {
+    absl::StatusOr<Message> msg = sub->ReadMessage();
+    ASSERT_TRUE(msg.ok());
+    if (msg->length == 0) {
+      break;
+    }
+    received_msgs.push_back(
+        std::string(reinterpret_cast<const char *>(msg->buffer), msg->length));
+  }
+
+  ASSERT_EQ(sent_msgs.size(), received_msgs.size());
+  for (int i = 0; i < sent_msgs.size(); i++) {
+    ASSERT_EQ(sent_msgs[i], received_msgs[i]);
   }
 }
 

@@ -169,6 +169,7 @@ Client::CreateSubscriber(const std::string &channel_name,
   cmd->set_is_reliable(opts.IsReliable());
   cmd->set_is_bridge(opts.IsBridge());
   cmd->set_type(opts.Type());
+  cmd->set_max_shared_ptrs(opts.MaxSharedPtrs());
 
   // Send request to server and wait for response.
   Response resp;

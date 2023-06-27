@@ -5,9 +5,9 @@
 #include "server/server.h"
 #include "absl/strings/str_format.h"
 #include "client/client.h"
+#include "proto/subspace.pb.h"
 #include "toolbelt/clock.h"
 #include "toolbelt/sockets.h"
-#include "proto/subspace.pb.h"
 #include <cerrno>
 #include <fcntl.h>
 #include <ifaddrs.h>
@@ -109,11 +109,13 @@ void Server::CloseHandler(ClientHandler *handler) {
 // This coroutine listens for incoming client connections on the given
 // UDS and spawns a handler coroutine to handle the communication with
 // the client.
-void Server::ListenerCoroutine(toolbelt::UnixSocket listen_socket, co::Coroutine *c) {
+void Server::ListenerCoroutine(toolbelt::UnixSocket listen_socket,
+                               co::Coroutine *c) {
   for (;;) {
     absl::Status status = HandleIncomingConnection(listen_socket, c);
     if (!status.ok()) {
-      logger_.Log(toolbelt::LogLevel::kError, "Unable to make incoming connection: %s",
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Unable to make incoming connection: %s",
                   status.ToString().c_str());
     }
   }
@@ -137,7 +139,8 @@ absl::Status Server::Run() {
 
   // Notify listener that the server is ready.
   if (notify_fd_.Valid()) {
-    ::write(notify_fd_.Fd(), "X", 1);
+    int64_t val = kServerReady;
+    ::write(notify_fd_.Fd(), &val, 8);
   }
   absl::StatusOr<SystemControlBlock *> scb = CreateSystemControlBlock(scb_fd_);
   if (!scb.ok()) {
@@ -195,8 +198,8 @@ absl::Status Server::Run() {
     }
 
     // Open the discovery receiver socket.
-    if (absl::Status s =
-            discovery_receiver_.Bind(toolbelt::InetAddress::AnyAddress(discovery_port_));
+    if (absl::Status s = discovery_receiver_.Bind(
+            toolbelt::InetAddress::AnyAddress(discovery_port_));
         !s.ok()) {
       return s;
     }
@@ -243,15 +246,17 @@ absl::Status Server::Run() {
   // Run the coroutine main loop.
   co_scheduler_.Run();
 
-  // Notify listener that we're shutting down.
-   if (notify_fd_.Valid()) {
-    ::write(notify_fd_.Fd(), "Y", 1);
+  // Notify listener that we're stopped.
+  if (notify_fd_.Valid()) {
+    int64_t val = kServerStopped;
+    ::write(notify_fd_.Fd(), &val, 8);
   }
   return absl::OkStatus();
 }
 
-absl::Status Server::HandleIncomingConnection(toolbelt::UnixSocket &listen_socket,
-                                              co::Coroutine *c) {
+absl::Status
+Server::HandleIncomingConnection(toolbelt::UnixSocket &listen_socket,
+                                 co::Coroutine *c) {
   absl::StatusOr<toolbelt::UnixSocket> s = listen_socket.Accept(c);
   if (!s.ok()) {
     return s.status();
@@ -274,11 +279,12 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
   if (!channel_id.ok()) {
     return channel_id.status();
   }
-  ServerChannel *channel = new ServerChannel(
-      *channel_id, channel_name, num_slots, std::move(type));
+  ServerChannel *channel =
+      new ServerChannel(*channel_id, channel_name, num_slots, std::move(type));
   channel->SetDebug(logger_.GetLogLevel() <= toolbelt::LogLevel::kVerboseDebug);
 
-  absl::StatusOr<SharedMemoryFds> fds = channel->Allocate(scb_fd_, slot_size, num_slots);
+  absl::StatusOr<SharedMemoryFds> fds =
+      channel->Allocate(scb_fd_, slot_size, num_slots);
   if (!fds.ok()) {
     return fds.status();
   }
@@ -291,7 +297,8 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
 
 absl::Status Server::RemapChannel(ServerChannel *channel, int slot_size,
                                   int num_slots) {
-  absl::StatusOr<SharedMemoryFds> fds = channel->Allocate(scb_fd_, slot_size, num_slots);
+  absl::StatusOr<SharedMemoryFds> fds =
+      channel->Allocate(scb_fd_, slot_size, num_slots);
   if (!fds.ok()) {
     return fds.status();
   }
@@ -367,14 +374,15 @@ void Server::ChannelDirectoryCoroutine(co::Coroutine *c) {
     }
     bool ok = directory.SerializeToArray(*buffer, kDirectorySlotSize);
     if (!ok) {
-      logger_.Log(toolbelt::LogLevel::kError, "Failed to serialize channel directory");
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to serialize channel directory");
       continue;
     }
     int64_t length = directory.ByteSizeLong();
-    absl::StatusOr<const Message> s =
-        channel_directory->PublishMessage(length);
+    absl::StatusOr<const Message> s = channel_directory->PublishMessage(length);
     if (!s.ok()) {
-      logger_.Log(toolbelt::LogLevel::kError, "Failed to publish channel directory: %s",
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to publish channel directory: %s",
                   s.status().ToString().c_str());
     }
   }
@@ -397,7 +405,8 @@ void Server::StatisticsCoroutine(co::Coroutine *c) {
       "/subspace/Statistics", kStatsSlotSize, kStatsNumSlots,
       PublisherOptions().SetType("subspace.Statistics"));
   if (!pub.ok()) {
-    logger_.Log(toolbelt::LogLevel::kFatal, "Failed to create statistics channel: %s",
+    logger_.Log(toolbelt::LogLevel::kFatal,
+                "Failed to create statistics channel: %s",
                 pub.status().ToString().c_str());
   }
 
@@ -413,18 +422,21 @@ void Server::StatisticsCoroutine(co::Coroutine *c) {
     }
     absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
     if (!buffer.ok()) {
-      logger_.Log(toolbelt::LogLevel::kFatal, "Failed to get channel stats buffer: %s",
+      logger_.Log(toolbelt::LogLevel::kFatal,
+                  "Failed to get channel stats buffer: %s",
                   buffer.status().ToString().c_str());
     }
     bool ok = stats.SerializeToArray(*buffer, kStatsSlotSize);
     if (!ok) {
-      logger_.Log(toolbelt::LogLevel::kError, "Failed to serialize channel stats");
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to serialize channel stats");
       continue;
     }
     int64_t length = stats.ByteSizeLong();
     absl::StatusOr<const Message> s = pub->PublishMessage(length);
     if (!s.ok()) {
-      logger_.Log(toolbelt::LogLevel::kError, "Failed to publish statistics: %s",
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to publish statistics: %s",
                   s.status().ToString().c_str());
     }
   }
@@ -440,7 +452,8 @@ void Server::SendQuery(const std::string &channel_name) {
   coroutines_.insert(std::make_unique<co::Coroutine>(
       co_scheduler_,
       [this, channel_name](co::Coroutine *c) {
-        logger_.Log(toolbelt::LogLevel::kDebug, "Sending Query %s", channel_name.c_str());
+        logger_.Log(toolbelt::LogLevel::kDebug, "Sending Query %s",
+                    channel_name.c_str());
         char buffer[kDiscoveryBufferSize];
         Discovery disc;
         disc.set_server_id(server_id_);
@@ -451,7 +464,8 @@ void Server::SendQuery(const std::string &channel_name) {
 
         bool ok = disc.SerializeToArray(buffer, sizeof(buffer));
         if (!ok) {
-          logger_.Log(toolbelt::LogLevel::kError, "Failed to serialize Query message");
+          logger_.Log(toolbelt::LogLevel::kError,
+                      "Failed to serialize Query message");
           return;
         }
         int64_t length = disc.ByteSizeLong();
@@ -494,8 +508,8 @@ void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
         absl::Status s =
             discovery_transmitter_.SendTo(discovery_addr_, buffer, length, c);
         if (!s.ok()) {
-          logger_.Log(toolbelt::LogLevel::kError, "Failed to send Advertise: %s",
-                      s.ToString().c_str());
+          logger_.Log(toolbelt::LogLevel::kError,
+                      "Failed to send Advertise: %s", s.ToString().c_str());
           return;
         }
       },
@@ -510,13 +524,15 @@ void Server::DiscoveryReceiverCoroutine(co::Coroutine *c) {
     absl::StatusOr<ssize_t> n =
         discovery_receiver_.ReceiveFrom(sender, buffer, sizeof(buffer), c);
     if (!n.ok()) {
-      logger_.Log(toolbelt::LogLevel::kError, "Failed to read discovery message: %s",
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to read discovery message: %s",
                   n.status().ToString().c_str());
       continue;
     }
     Discovery disc;
     if (!disc.ParseFromArray(buffer, *n)) {
-      logger_.Log(toolbelt::LogLevel::kError, "Failed to parse discovery message");
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to parse discovery message");
       continue;
     }
     if (disc.server_id() == server_id_) {
@@ -548,7 +564,8 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
   logger_.Log(toolbelt::LogLevel::kDebug, "BridgeTransmitterCoroutine running");
   toolbelt::TCPSocket bridge;
   if (absl::Status status = bridge.Connect(subscriber); !status.ok()) {
-    logger_.Log(toolbelt::LogLevel::kError, "Failed to connect to bridge subscriber: %s",
+    logger_.Log(toolbelt::LogLevel::kError,
+                "Failed to connect to bridge subscriber: %s",
                 status.ToString().c_str());
     return;
   }
@@ -576,20 +593,23 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
 
   bool ok = subscribed.SerializeToArray(databuf, buflen);
   if (!ok) {
-    logger_.Log(toolbelt::LogLevel::kError, "Failed to serialize subscribed message");
+    logger_.Log(toolbelt::LogLevel::kError,
+                "Failed to serialize subscribed message");
     return;
   }
   int64_t length = subscribed.ByteSizeLong();
   absl::StatusOr<ssize_t> n = bridge.SendMessage(databuf, length, c);
   if (!n.ok()) {
-    logger_.Log(toolbelt::LogLevel::kError, "Failed to send subscribed for %s: %s",
-                channel_name.c_str(), n.status().ToString().c_str());
+    logger_.Log(toolbelt::LogLevel::kError,
+                "Failed to send subscribed for %s: %s", channel_name.c_str(),
+                n.status().ToString().c_str());
     return;
   }
 
   Client client(c);
   if (absl::Status s = client.Init(socket_name_); !s.ok()) {
-    logger_.Log(toolbelt::LogLevel::kError, "Failed to connect to Subspace server: %s",
+    logger_.Log(toolbelt::LogLevel::kError,
+                "Failed to connect to Subspace server: %s",
                 s.ToString().c_str());
     return;
   }
@@ -606,7 +626,8 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
   bool done = false;
   while (!done) {
     if (absl::Status status = sub->Wait(); !status.ok()) {
-      logger_.Log(toolbelt::LogLevel::kError, "Failed to wait for subscriber: %s",
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to wait for subscriber: %s",
                   status.ToString().c_str());
       break;
     }
@@ -675,19 +696,18 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
     }
   }
 
-  logger_.Log(toolbelt::LogLevel::kDebug, "Bridge transmitter for %s terminating",
-              channel_name.c_str());
+  logger_.Log(toolbelt::LogLevel::kDebug,
+              "Bridge transmitter for %s terminating", channel_name.c_str());
   // We're done reading messages from the channel, remove the
   // bridge and subscriber.
   channel->RemoveBridgedAddress(subscriber, sub_reliable);
 }
 
 // Send a Subscribe message over UDP.
-absl::Status Server::SendSubscribeMessage(const std::string &channel_name,
-                                          bool reliable, toolbelt::InetAddress publisher,
-                                          toolbelt::TCPSocket &receiver_listener,
-                                          char *buffer, size_t buffer_size,
-                                          co::Coroutine *c) {
+absl::Status Server::SendSubscribeMessage(
+    const std::string &channel_name, bool reliable,
+    toolbelt::InetAddress publisher, toolbelt::TCPSocket &receiver_listener,
+    char *buffer, size_t buffer_size, co::Coroutine *c) {
   const toolbelt::InetAddress &receiver_addr = receiver_listener.BoundAddress();
   logger_.Log(toolbelt::LogLevel::kDebug, "Bridge receiver socket: %s",
               receiver_addr.ToString().c_str());
@@ -721,14 +741,16 @@ absl::Status Server::SendSubscribeMessage(const std::string &channel_name,
 // them to a local channel.  The messages contain the prefix which
 // is sent intact to the channel.
 void Server::BridgeReceiverCoroutine(std::string channel_name,
-                                     bool sub_reliable, toolbelt::InetAddress publisher,
+                                     bool sub_reliable,
+                                     toolbelt::InetAddress publisher,
                                      co::Coroutine *c) {
   // Open a listening TCP socket on a free port.
   logger_.Log(toolbelt::LogLevel::kDebug, "BridgeReceiverCoroutine running");
   char buffer[kDiscoveryBufferSize];
 
   toolbelt::TCPSocket receiver_listener;
-  absl::Status s = receiver_listener.Bind(toolbelt::InetAddress(hostname_, 0), true);
+  absl::Status s =
+      receiver_listener.Bind(toolbelt::InetAddress(hostname_, 0), true);
   if (!s.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Unable to bind socket for bridge receiver for %s: %s",
@@ -766,7 +788,8 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     return;
   }
   if (!subscribed.ParseFromArray(buffer, *n)) {
-    logger_.Log(toolbelt::LogLevel::kError, "Failed to parse Subscribed message");
+    logger_.Log(toolbelt::LogLevel::kError,
+                "Failed to parse Subscribed message");
     return;
   }
 
@@ -774,7 +797,8 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
   Client client(c);
   s = client.Init(socket_name_);
   if (!s.ok()) {
-    logger_.Log(toolbelt::LogLevel::kError, "Failed to connect to Subspace server: %s",
+    logger_.Log(toolbelt::LogLevel::kError,
+                "Failed to connect to Subspace server: %s",
                 s.ToString().c_str());
     return;
   }
@@ -790,7 +814,8 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     return;
   }
 
-  // toolbelt::Now we receive messages from the bridge and send to the publisher.
+  // toolbelt::Now we receive messages from the bridge and send to the
+  // publisher.
   for (;;) {
     absl::StatusOr<void *> buf = pub->GetMessageBuffer();
     if (!buf.ok()) {
@@ -814,8 +839,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
       // buffers fill up, it will stop sending until we can read the
       // message.  The backpressure is thus propagated up the
       // chain.
-      if (absl::Status status = pub->Wait();
-          !status.ok()) {
+      if (absl::Status status = pub->Wait(); !status.ok()) {
         logger_.Log(toolbelt::LogLevel::kError,
                     "Failed to wait for reliable publisher: %s",
                     status.ToString().c_str());
@@ -844,7 +868,8 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     if (!n.ok()) {
       // This will happen when the bridge transmitter on the other
       // side of the bridge terminates.
-      logger_.Log(toolbelt::LogLevel::kError, "Failed to read bridge message for %s: %s",
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to read bridge message for %s: %s",
                   channel_name.c_str(), n.status().ToString().c_str());
       break;
     }
@@ -868,7 +893,8 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     }
   }
 
-  logger_.Log(toolbelt::LogLevel::kDebug, "Bridge receiver coroutine terminating");
+  logger_.Log(toolbelt::LogLevel::kDebug,
+              "Bridge receiver coroutine terminating");
   // Socket has been closed, we're done.
 }
 
@@ -949,7 +975,8 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
     in_addr subscriber_ip;
     memcpy(&subscriber_ip, subscribe.receiver().ip_address().data(),
            sizeof(subscriber_ip));
-    toolbelt::InetAddress subscriber_addr(subscriber_ip, subscribe.receiver().port());
+    toolbelt::InetAddress subscriber_addr(subscriber_ip,
+                                          subscribe.receiver().port());
     coroutines_.insert(std::make_unique<co::Coroutine>(
         co_scheduler_,
         [this, pub_reliable, sub_reliable, subscriber_addr,
