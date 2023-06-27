@@ -124,7 +124,7 @@ public:
                : slot_->ref_count;
   }
 
-  const Message& GetMessage() const { return msg_; }
+  const Message &GetMessage() const { return msg_; }
 
 private:
   friend class Client;
@@ -395,6 +395,10 @@ private:
                              int32_t new_slot_size);
   absl::Status ReloadBuffersIfNecessary(details::ClientChannel *channel);
 
+  const std::vector<BufferSet> &GetBuffers(details::ClientChannel *channel) const {
+    return channel->GetBuffers();
+  }
+
   std::string name_;
   toolbelt::UnixSocket socket_;
   toolbelt::FileDescriptor scb_fd_; // System control block memory fd.
@@ -517,6 +521,10 @@ public:
 
   int32_t SlotSize() const { return impl_->SlotSize(); }
 
+  const std::vector<BufferSet> &GetBuffers() const {
+    return client_->GetBuffers(impl_);
+  }
+
 private:
   friend class Server;
   friend class Client;
@@ -629,6 +637,10 @@ public:
   bool IsReliable() const { return impl_->IsReliable(); }
 
   int32_t SlotSize() const { return impl_->SlotSize(); }
+
+  const std::vector<BufferSet> &GetBuffers() const {
+    return client_->GetBuffers(impl_);
+  }
 
 private:
   friend class Server;
