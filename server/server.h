@@ -21,15 +21,25 @@
 
 namespace subspace {
 
+// Values written to the notify_fd when the server is ready and
+// is stopped.
+constexpr int64_t kServerReady = 1;
+constexpr int64_t kServerStopped = 2;
+
 // The Subspace server.
 // This is a single-threaded, coroutine-based server that maintains shared
 // memory IPC channels and communicates with other servers to allow for
 // cross-computer IPC.
 class Server {
 public:
+  // The notify_fd is a file descriptor that the server will write to
+  // when it is ready to run (after the socket has been created) and when
+  // it is shutting down.  It will write 8 bytes to it so it can be
+  // either a pipe or an eventfd.  If notify_fd is -1 then it won't be used.
+  // The values are written in host byte order.
   Server(co::CoroutineScheduler &scheduler, const std::string &socket_name,
-         const std::string &interface, int disc_port, int peer_port,
-         bool local, int notify_fd = -1);
+         const std::string &interface, int disc_port, int peer_port, bool local,
+         int notify_fd = -1);
   void SetLogLevel(const std::string &level) { logger_.SetLogLevel(level); }
   absl::Status Run();
   void Stop();

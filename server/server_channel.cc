@@ -64,13 +64,13 @@ ServerChannel::AddPublisher(ClientHandler *handler, bool is_reliable,
 
 absl::StatusOr<SubscriberUser *>
 ServerChannel::AddSubscriber(ClientHandler *handler, bool is_reliable,
-                             bool is_bridge) {
+                             bool is_bridge, int max_shared_ptrs) {
   absl::StatusOr<int> user_id = user_ids_.Allocate("subscriber");
   if (!user_id.ok()) {
     return user_id.status();
   }
   std::unique_ptr<SubscriberUser> sub = std::make_unique<SubscriberUser>(
-      handler, *user_id, is_reliable, is_bridge);
+      handler, *user_id, is_reliable, is_bridge, max_shared_ptrs);
   absl::Status status = sub->Init();
   if (!status.ok()) {
     return status;
@@ -216,16 +216,30 @@ absl::Status ServerChannel::HasSufficientCapacity() const {
   if (NumSlots() == 0) {
     return absl::OkStatus();
   }
-  // Count number of publishers
+  // Count number of publishers and subscribers.
   int num_pubs, num_subs;
   CountUsers(num_pubs, num_subs);
-  if ((num_pubs + num_subs + 1) <= (NumSlots() - 1)) {
+
+  // Add in the total shared ptr maximums.
+  int max_shared_ptrs = 0;
+  for (auto &user : users_) {
+    if (user == nullptr) {
+      continue;
+    }
+    if (user->IsSubscriber()) {
+      SubscriberUser *sub = static_cast<SubscriberUser *>(user.get());
+      max_shared_ptrs += sub->MaxSharedPtrs();
+    }
+  }
+  if ((num_pubs + num_subs + max_shared_ptrs + 1) <= (NumSlots() - 1)) {
     return absl::OkStatus();
   }
-  return absl::InternalError(absl::StrFormat(
-      "there are %d slots with %d publisher%s and %d subscriber%s", NumSlots(),
-      num_pubs, (num_pubs == 1 ? "" : "s"), num_subs,
-      (num_subs == 1 ? "" : "s")));
+  return absl::InternalError(
+      absl::StrFormat("there are %d slots with %d publisher%s and %d "
+                      "subscriber%s with %d shared pointer%s",
+                      NumSlots(), num_pubs, (num_pubs == 1 ? "" : "s"),
+                      num_subs, (num_subs == 1 ? "" : "s"), max_shared_ptrs,
+                      (max_shared_ptrs == 1 ? "" : "s")));
 }
 
 void ServerChannel::GetChannelInfo(subspace::ChannelInfo *info) {
@@ -268,7 +282,5 @@ ChannelCounters &ServerChannel::RecordUpdate(bool is_pub, bool add,
 void ServerChannel::AddBuffer(int slot_size, toolbelt::FileDescriptor fd) {
   shared_memory_fds_.buffers.push_back({slot_size, std::move(fd)});
 }
-
-
 
 } // namespace subspace

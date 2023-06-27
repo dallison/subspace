@@ -173,6 +173,13 @@ public:
 
   int32_t SlotSize() const { return Channel::SlotSize(CurrentSlot()); }
 
+  void IncDecSharedPtrCount(int inc) { num_shared_ptrs_ += inc; }
+  int NumSharedPtrs() const { return num_shared_ptrs_; }
+  int MaxSharedPtrs() const { return options_.MaxSharedPtrs(); }
+  bool CheckSharedPtrCount() const {
+    return num_shared_ptrs_ < options_.MaxSharedPtrs();
+  }
+
 private:
   friend class ::subspace::Client;
 
@@ -224,6 +231,7 @@ private:
   TriggerFd trigger_;
   std::vector<TriggerFd> reliable_publishers_;
   SubscriberOptions options_;
+  int num_shared_ptrs_ = 0;
 
   // It is rare that subscribers need to search for messges by timestamp.  This
   // will keep the memory allocation to the first search on a subscriber.  Most

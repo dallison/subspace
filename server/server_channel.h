@@ -8,12 +8,12 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "toolbelt/bitset.h"
 #include "common/channel.h"
-#include "toolbelt/fd.h"
-#include "toolbelt/sockets.h"
 #include "common/triggerfd.h"
 #include "proto/subspace.pb.h"
+#include "toolbelt/bitset.h"
+#include "toolbelt/fd.h"
+#include "toolbelt/sockets.h"
 #include <memory>
 #include <vector>
 
@@ -38,13 +38,15 @@ public:
 
   int GetId() const { return id_; }
   toolbelt::FileDescriptor &GetPollFd() { return trigger_fd_.GetPollFd(); }
-  toolbelt::FileDescriptor &GetTriggerFd() { return trigger_fd_.GetTriggerFd(); }
+  toolbelt::FileDescriptor &GetTriggerFd() {
+    return trigger_fd_.GetTriggerFd();
+  }
   virtual bool IsSubscriber() const { return false; }
   virtual bool IsPublisher() const { return false; }
   ClientHandler *GetHandler() const { return handler_; }
   bool IsReliable() const { return is_reliable_; }
   bool IsBridge() const { return is_bridge_; }
-  void Trigger() { trigger_fd_.Trigger();  }
+  void Trigger() { trigger_fd_.Trigger(); }
 
 private:
   ClientHandler *handler_;
@@ -57,15 +59,20 @@ private:
 class SubscriberUser : public User {
 public:
   SubscriberUser(ClientHandler *handler, int id, bool is_reliable,
-                 bool is_bridge)
-      : User(handler, id, is_reliable, is_bridge) {}
+                 bool is_bridge, int max_shared_ptrs)
+      : User(handler, id, is_reliable, is_bridge),
+        max_shared_ptrs_(max_shared_ptrs) {}
   bool IsSubscriber() const override { return true; }
+  int MaxSharedPtrs() const { return max_shared_ptrs_; }
+
+private:
+  int max_shared_ptrs_;
 };
 
 class PublisherUser : public User {
 public:
-  PublisherUser(ClientHandler *handler, int id, bool is_reliable,
-                bool is_local, bool is_bridge)
+  PublisherUser(ClientHandler *handler, int id, bool is_reliable, bool is_local,
+                bool is_bridge)
       : User(handler, id, is_reliable, is_bridge), is_local_(is_local) {}
 
   bool IsPublisher() const override { return true; }
@@ -108,7 +115,8 @@ template <typename H> inline H AbslHashValue(H h, const ChannelTransmitter &a) {
 // it.
 class ServerChannel : public Channel {
 public:
-  ServerChannel(int id, const std::string &name,  int num_slots, std::string type)
+  ServerChannel(int id, const std::string &name, int num_slots,
+                std::string type)
       : Channel(name, num_slots, id, std::move(type)) {}
 
   ~ServerChannel();
@@ -116,8 +124,10 @@ public:
   absl::StatusOr<PublisherUser *> AddPublisher(ClientHandler *handler,
                                                bool is_reliable, bool is_local,
                                                bool is_bridge);
-  absl::StatusOr<SubscriberUser *>
-  AddSubscriber(ClientHandler *handler, bool is_reliable, bool is_bridge);
+  absl::StatusOr<SubscriberUser *> AddSubscriber(ClientHandler *handler,
+                                                 bool is_reliable,
+                                                 bool is_bridge,
+                                                 int max_shared_ptrs);
 
   // Get the file descriptors for all subscriber triggers.
   std::vector<toolbelt::FileDescriptor> GetSubscriberTriggerFds() const;
