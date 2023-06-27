@@ -20,7 +20,14 @@
 
 namespace subspace {
 
-#ifndef NDEBUG
+// Set this to 1 to print the memory mapping and unmapping calls.
+#define SHOW_MMAPS 0
+
+// Set this to 1 to debug calls to map and unmap memory.  This
+// is only valid when NDEBUG is not defined (in debug mode).
+#define DEBUG_MMAPS 0
+
+#if !NDEBUG && DEBUG_MMAPS
 // NOTE: due to C++'s undefined initialization and destruction order
 // these can't be actual instances.  They will be allocated on the
 // first call to MapMemory and won't be deleted.
@@ -28,8 +35,7 @@ static absl::flat_hash_map<void *, size_t> *mapped_regions;
 static std::mutex *region_lock;
 #endif
 
-// Set this to 1 to print the memory mapping and unmapping calls.
-#define SHOW_MMAPS 0
+
 
 static void *MapMemory(int fd, size_t size, int prot, const char *purpose) {
   void *p = mmap(NULL, size, prot, MAP_SHARED, fd, 0);
@@ -37,7 +43,7 @@ static void *MapMemory(int fd, size_t size, int prot, const char *purpose) {
   printf("mapping %s with size %zd: %p -> %p\n", purpose, size, p,
          reinterpret_cast<char *>(p) + size);
 #endif
-#ifndef NDEBUG
+#if !NDEBUG && DEBUG_MMAPS
   if (region_lock == nullptr) {
     region_lock = new std::mutex;
     mapped_regions = new absl::flat_hash_map<void *, size_t>;
@@ -57,7 +63,7 @@ static void UnmapMemory(void *p, size_t size, const char *purpose) {
   printf("unmapping %s with size %zd: %p -> %p\n", purpose, size, p,
          reinterpret_cast<char *>(p) + size);
 #endif
-#ifndef NDEBUG
+#if !NDEBUG && DEBUG_MMAPS
   assert(region_lock != nullptr);
   std::unique_lock l(*region_lock);
 
@@ -75,7 +81,7 @@ static void UnmapMemory(void *p, size_t size, const char *purpose) {
   }
 #endif
   munmap(p, size);
-#ifndef NDEBUG
+#if !NDEBUG && DEBUG_MMAPS
 
   mapped_regions->erase(p);
 #endif
