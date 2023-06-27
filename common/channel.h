@@ -116,6 +116,13 @@ struct MessageSlot {
   toolbelt::BitSet<kMaxSlotOwners> owners; // One bit per publisher/subscriber.
 };
 
+// This is located just before the prefix of the first slot's buffer.  It
+// is 64 bits long to align the prefix to 64 bits.
+struct BufferHeader {
+  int32_t refs;     // Number of references to this buffer.
+  int32_t padding;  // Align to 64 bits.
+};
+
 // The control data for a channel.  This memory is
 // allocated by the server and mapped into the process
 // for all publishers and subscribers.  Each mapped CCB is mapped
@@ -237,7 +244,7 @@ public:
 
   // For debug, prints the contents of the three linked lists in
   // shared memory,
-  void PrintLists();
+  void PrintLists() const;
 
   // A placeholder is a channel created for a subscriber where there are
   // no publishers and thus the shared memory is not yet valid.
@@ -310,7 +317,7 @@ public:
 
   absl::StatusOr<toolbelt::FileDescriptor> ExtendBuffers(int32_t new_slot_size);
 
-  void Dump();
+  void Dump() const;
 
   // NOTE: these functions access the CCB without locking.  They only access
   // the buffer_index member of the MessageSlot and that is only updated by the
@@ -341,13 +348,15 @@ public:
   int NumSlots() const { return num_slots_; }
   void SetNumSlots(int n) { num_slots_ = n; }
 
-  // Get the buffer associated with the given slot id.
+  // Get the buffer associated with the given slot id.  The first buffer
+  // starts immediately after the buffer header.
   char *Buffer(int slot_id) const {
     return buffers_.empty()
                ? nullptr
-               : buffers_[ccb_->slots[slot_id].buffer_index].buffer;
+               : (buffers_[ccb_->slots[slot_id].buffer_index].buffer + sizeof(BufferHeader));
   }
   void CleanupSlots(int owner, bool reliable);
+  void UnmapUnusedBuffers();
 
   int GetChannelId() const { return channel_id_; }
 
@@ -393,12 +402,12 @@ private:
     char *buffer = nullptr;
   };
 
-  int32_t ToCCBOffset(void *addr) {
+  int32_t ToCCBOffset(void *addr) const {
     return (int32_t)(reinterpret_cast<char *>(addr) -
                      reinterpret_cast<char *>(ccb_));
   }
 
-  void *FromCCBOffset(int32_t offset) {
+  void *FromCCBOffset(int32_t offset) const {
     return reinterpret_cast<char *>(ccb_) + offset;
   }
 
@@ -437,7 +446,7 @@ private:
     e->prev = e->next = 0;
   }
 
-  void PrintList(const SlotList *list);
+  void PrintList(const SlotList *list) const;
 
   void AddToBusyList(MessageSlot *slot) {
     ListInsertAtEnd(&ccb_->busy_list, &slot->element);
@@ -449,6 +458,9 @@ private:
 
   void ClaimPublisherSlot(MessageSlot *slot, int owner, SlotList &list);
 
+  void DecrementBufferRefs(int buffer_index);
+  void IncrementBufferRefs(int buffer_index);
+  
   std::string name_;
   int num_slots_;
 

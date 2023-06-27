@@ -199,6 +199,7 @@ Channel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
   // Create a single buffer but don't map it in.  There is no need to
   // map in the buffers in the server since they will never be used.
   int64_t buffers_size =
+      sizeof(BufferHeader) +
       num_slots_ * (Aligned<32>(slot_size) + sizeof(MessagePrefix));
   if (buffers_size == 0) {
     buffers_size = 256;
@@ -234,7 +235,7 @@ Channel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
     slot->id = i;
     slot->ref_count = 0;
     slot->reliable_ref_count = 0;
-    slot->buffer_index = 0;
+    slot->buffer_index = -1; // No buffer in the free list.
     slot->owners.Init();
     ListInsertAtEnd(&ccb_->free_list, &slot->element);
   }
@@ -247,17 +248,18 @@ Channel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
   return fds;
 }
 
-void Channel::PrintList(const SlotList *list) {
+void Channel::PrintList(const SlotList *list) const {
   void *p = FromCCBOffset(list->first);
   while (p != FromCCBOffset(0)) {
     MessageSlot *slot = reinterpret_cast<MessageSlot *>(p);
-    printf("%d(%d/%d) ", slot->id, slot->ref_count, slot->reliable_ref_count);
+    printf("%d(%d/%d)@%d ", slot->id, slot->ref_count, slot->reliable_ref_count,
+           slot->buffer_index);
     p = FromCCBOffset(slot->element.next);
   }
   printf("\n");
 }
 
-void Channel::PrintLists() {
+void Channel::PrintLists() const {
   printf("Free list: ");
   PrintList(&ccb_->free_list);
   printf("Active list: ");
@@ -280,13 +282,14 @@ absl::Status Channel::Map(SharedMemoryFds fds,
   ccb_ = reinterpret_cast<ChannelControlBlock *>(
       MapMemory(fds.ccb.Fd(), ccb_size, PROT_READ | PROT_WRITE, "CCB"));
   if (ccb_ == MAP_FAILED) {
-    munmap(scb_, sizeof(SystemControlBlock));
+    UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
     return absl::InternalError(absl::StrFormat(
         "Failed to map ChannelControlBlock: %s", strerror(errno)));
   }
   int index = 0;
   for (const auto &buffer : fds.buffers) {
     int64_t buffers_size =
+        sizeof(BufferHeader) +
         num_slots_ * (Aligned<32>(buffer.slot_size) + sizeof(MessagePrefix));
     if (buffers_size != 0) {
       char *mem = reinterpret_cast<char *>(
@@ -299,8 +302,9 @@ absl::Status Channel::Map(SharedMemoryFds fds,
         // Unmap any previously mapped buffers.
         for (int i = 0; i < index; i++) {
           int64_t buffers_size =
+              sizeof(BufferHeader) +
               num_slots_ *
-              (Aligned<32>(buffers_[i].slot_size) + sizeof(MessagePrefix));
+                  (Aligned<32>(buffers_[i].slot_size) + sizeof(MessagePrefix));
           if (buffers_size > 0 && buffers_[i].buffer != nullptr) {
             UnmapMemory(buffers_[i].buffer, buffers_size, "buffers");
           }
@@ -329,11 +333,13 @@ void Channel::Unmap() {
 
   for (auto &buffer : buffers_) {
     int64_t buffers_size =
+        sizeof(BufferHeader) +
         num_slots_ * (Aligned<32>(buffer.slot_size) + sizeof(MessagePrefix));
     if (buffers_size > 0 && buffer.buffer != nullptr) {
       UnmapMemory(buffer.buffer, buffers_size, "buffers");
     }
   }
+  buffers_.clear();
 
   int64_t ccb_size =
       sizeof(ChannelControlBlock) + sizeof(MessageSlot) * num_slots_;
@@ -346,6 +352,7 @@ Channel::ExtendBuffers(int32_t new_slot_size) {
   toolbelt::MutexLock lock(&ccb_->lock);
 
   int64_t buffers_size =
+      sizeof(BufferHeader) +
       num_slots_ * (Aligned<32>(new_slot_size) + sizeof(MessagePrefix));
 
   char buffer_name[32];
@@ -370,10 +377,14 @@ Channel::ExtendBuffers(int32_t new_slot_size) {
 
 absl::Status Channel::MapNewBuffers(std::vector<SlotBuffer> buffers) {
   size_t start = buffers_.size();
+  if (debug_) {
+    printf("Mapping new buffers starting at %zd\n", start);
+  }
   for (size_t i = start; i < buffers.size(); i++) {
     const SlotBuffer &buffer = buffers[i];
 
     int64_t buffers_size =
+        sizeof(BufferHeader) +
         num_slots_ * (Aligned<32>(buffer.slot_size) + sizeof(MessagePrefix));
     if (buffers_size != 0) {
       char *mem = reinterpret_cast<char *>(MapMemory(
@@ -383,10 +394,11 @@ absl::Status Channel::MapNewBuffers(std::vector<SlotBuffer> buffers) {
         // Unmap any newly mapped buffers.
         for (size_t i = start; i < buffers_.size(); i++) {
           int64_t buffers_size =
+              sizeof(BufferHeader) +
               num_slots_ *
-              (Aligned<32>(buffers_[i].slot_size) + sizeof(MessagePrefix));
+                  (Aligned<32>(buffers_[i].slot_size) + sizeof(MessagePrefix));
           if (buffers_size > 0 && buffers_[i].buffer != nullptr) {
-            munmap(buffers_[i].buffer, buffers_size);
+            UnmapMemory(buffers_[i].buffer, buffers_size, "buffers");
           }
         }
         return absl::InternalError(absl::StrFormat(
@@ -398,7 +410,31 @@ absl::Status Channel::MapNewBuffers(std::vector<SlotBuffer> buffers) {
   return absl::OkStatus();
 }
 
-void Channel::Dump() {
+void Channel::UnmapUnusedBuffers() {
+  for (size_t i = 0; i < buffers_.size(); i++) {
+    if (buffers_[i].buffer == nullptr) {
+      continue;
+    }
+    BufferHeader *hdr = reinterpret_cast<BufferHeader *>(buffers_[i].buffer +
+                                                         sizeof(BufferHeader)) -
+                        1;
+    if (hdr->refs == 0) {
+      int64_t buffers_size = sizeof(BufferHeader) +
+                             num_slots_ * (Aligned<32>(buffers_[i].slot_size) +
+                                           sizeof(MessagePrefix));
+      if (buffers_size > 0) {
+        if (debug_) {
+          printf("%p: Unmapping unused buffers at index %zd\n", this, i);
+        }
+        UnmapMemory(buffers_[i].buffer, buffers_size, "buffers");
+        buffers_[i].buffer = nullptr;
+        buffers_[i].slot_size = 0;
+      }
+    }
+  }
+}
+
+void Channel::Dump() const {
   printf("SCB:\n");
   toolbelt::Hexdump(scb_, 64);
 
@@ -408,8 +444,9 @@ void Channel::Dump() {
   toolbelt::Hexdump(ccb_, ccb_size);
   PrintLists();
   printf("Buffers:\n");
+  int index = 0;
   for (auto &buffer : buffers_) {
-    printf("  %d: %p\n", buffer.slot_size, buffer.buffer);
+    printf("  (%d) %d: %p\n", index++, buffer.slot_size, buffer.buffer);
   }
 }
 
@@ -417,14 +454,51 @@ void Channel::ClaimPublisherSlot(MessageSlot *slot, int owner, SlotList &list) {
   ListRemove(&list, &slot->element);
   AddToBusyList(slot);
   slot->owners.Set(owner);
+  if (slot->buffer_index != -1) {
+    // If the slot has a buffer (it's not in the free list), decrement the
+    // refs for the buffer.
+    DecrementBufferRefs(slot->buffer_index);
+  }
   slot->buffer_index = buffers_.size() - 1; // Use biggest buffer.
+  IncrementBufferRefs(slot->buffer_index);
+}
+
+void Channel::DecrementBufferRefs(int buffer_index) {
+  BufferHeader *hdr =
+      reinterpret_cast<BufferHeader *>(buffers_[buffer_index].buffer +
+                                       sizeof(BufferHeader)) -
+      1;
+  assert(hdr->refs > 0);
+  hdr->refs--;
+  if (debug_) {
+    printf("Decremented buffers refs for buffer %d to %d\n", buffer_index,
+           hdr->refs);
+  }
+}
+
+void Channel::IncrementBufferRefs(int buffer_index) {
+  BufferHeader *hdr =
+      reinterpret_cast<BufferHeader *>(buffers_[buffer_index].buffer +
+                                       sizeof(BufferHeader)) -
+      1;
+  hdr->refs++;
+  if (debug_) {
+    printf("Incremented buffers refs for buffer %d to %d\n", buffer_index,
+           hdr->refs);
+  }
 }
 
 void Channel::SetSlotToBiggestBuffer(MessageSlot *slot) {
   if (slot == nullptr) {
     return;
   }
+  if (slot->buffer_index != -1) {
+    // If the slot has a buffer (it's not in the free list), decrement the
+    // refs for the buffer.
+    DecrementBufferRefs(slot->buffer_index);
+  }
   slot->buffer_index = buffers_.size() - 1; // Use biggest buffer.
+  IncrementBufferRefs(slot->buffer_index);
 }
 
 MessageSlot *Channel::FindFreeSlotLocked(bool reliable, int owner) {
@@ -555,6 +629,7 @@ void Channel::CleanupSlots(int owner, bool reliable) {
     p = FromCCBOffset(slot->element.next);
 
     if (slot->owners.IsSet(owner)) {
+      slot->buffer_index = -1;
       slot->owners.Clear(owner);
       // Move the slot to the free list.
       ListRemove(&ccb_->busy_list, &slot->element);
