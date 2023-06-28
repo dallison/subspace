@@ -1143,7 +1143,7 @@ TEST_F(ClientTest, Mikael) {
 
   ASSERT_EQ(sent_msgs.size(), received_msgs.size());
   for (int i = 0; i < sent_msgs.size(); i++) {
-    ASSERT_EQ(sent_msgs[i], received_msgs[i]);
+    EXPECT_EQ(sent_msgs[i], received_msgs[i]) << "i = " << i;
   }
 }
 
