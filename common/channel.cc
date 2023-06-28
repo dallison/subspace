@@ -205,7 +205,7 @@ Channel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
   int64_t ccb_size =
       sizeof(ChannelControlBlock) + sizeof(MessageSlot) * num_slots_;
   absl::StatusOr<void *> p =
-      CreateSharedMemory(channel_id_, "scb", ccb_size, /*map=*/true, fds.ccb);
+      CreateSharedMemory(channel_id_, "ccb", ccb_size, /*map=*/true, fds.ccb);
   if (!p.ok()) {
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
     return p.status();
