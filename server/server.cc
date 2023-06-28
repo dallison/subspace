@@ -224,7 +224,6 @@ absl::Status Server::Run() {
       },
       "Listener UDS"));
 
-#if 0
   // Start the channel directory coroutine.
   coroutines_.insert(std::make_unique<co::Coroutine>(
       co_scheduler_, [this](co::Coroutine *c) { ChannelDirectoryCoroutine(c); },
@@ -234,7 +233,6 @@ absl::Status Server::Run() {
   coroutines_.insert(std::make_unique<co::Coroutine>(
       co_scheduler_, [this](co::Coroutine *c) { StatisticsCoroutine(c); },
       "Channel stats"));
-#endif
 
   if (!local_) {
     // Start the discovery receiver coroutine.
