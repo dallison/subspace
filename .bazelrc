@@ -15,7 +15,7 @@ build:apple_silicon --cpu=darwin_arm64
 # Common flags for Clang
 build:clang --action_env=BAZEL_COMPILER=clang
 build:clang --action_env=CC=clang --action_env=CXX=clang++
-#build:clang --linkopt=-fuse-ld=lld
+build:clang --linkopt=-fuse-ld=lld
 
 # Clang with libc++
 build:libc++ --config=clang
