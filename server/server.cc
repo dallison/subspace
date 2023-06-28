@@ -95,6 +95,11 @@ Server::Server(co::CoroutineScheduler &scheduler,
       discovery_port_(disc_port), discovery_peer_port_(peer_port),
       local_(local), notify_fd_(notify_fd), co_scheduler_(scheduler) {}
 
+Server::~Server() {
+  // Clear this before other data members get destroyed.
+  client_handlers_.clear();
+}
+
 void Server::Stop() { co_scheduler_.Stop(); }
 
 void Server::CloseHandler(ClientHandler *handler) {

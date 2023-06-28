@@ -40,6 +40,7 @@ public:
   Server(co::CoroutineScheduler &scheduler, const std::string &socket_name,
          const std::string &interface, int disc_port, int peer_port, bool local,
          int notify_fd = -1);
+  ~Server();
   void SetLogLevel(const std::string &level) { logger_.SetLogLevel(level); }
   absl::Status Run();
   void Stop();
