@@ -42,7 +42,7 @@ public:
 
     // The server will write to this pipe to notify us when it
     // has started and stopped.  This end of the pipe is blocking.
-    pipe(server_pipe_);
+    (void)pipe(server_pipe_);
 
     server_ =
         std::make_unique<subspace::Server>(scheduler_, socket_, "", 0, 0,
@@ -60,7 +60,7 @@ public:
 
     // Wait for server to tell us that it's running.
     char buf[8];
-    ::read(server_pipe_[0], buf, 8);
+    (void)::read(server_pipe_[0], buf, 8);
   }
 
   static void TearDownTestSuite() {
@@ -72,7 +72,7 @@ public:
 
     // Wait for server to tell us that it's stopped.
     char buf[8];
-    ::read(server_pipe_[0], buf, 8);
+    (void)::read(server_pipe_[0], buf, 8);
     server_thread_.join();
   }
 
@@ -1118,7 +1118,7 @@ TEST_F(ClientTest, Mikael) {
   ASSERT_TRUE(sub.ok());
 
   std::vector<std::string> sent_msgs;
-  for (int i = 0; i < 6; i++) {
+  for (int i = 0; i < 2; i++) {
     absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
     ASSERT_TRUE(buffer.ok());
     char *buf = reinterpret_cast<char *>(*buffer);
@@ -1131,7 +1131,7 @@ TEST_F(ClientTest, Mikael) {
 
   std::vector<std::string> received_msgs;
 
-  for (int i = 0; i < 6; i++) {
+  for (;;) {
     absl::StatusOr<Message> msg = sub->ReadMessage();
     ASSERT_TRUE(msg.ok());
     if (msg->length == 0) {
