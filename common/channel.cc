@@ -91,16 +91,9 @@ static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
                                                  int64_t size, bool map,
                                                  toolbelt::FileDescriptor &fd) {
   char shm_name[NAME_MAX];
-  int pid = getpid();
-  size_t len =
-      snprintf(shm_name, sizeof(shm_name), "/%d.%s.%d", id, suffix, pid);
-  // Can't have a / in a POSIX shared memory name, so we replace them
-  // by an underscore.
-  for (size_t i = 1; i < len; i++) {
-    if (shm_name[i] == '/') {
-      shm_name[i] = '_';
-    }
-  }
+  snprintf(shm_name, sizeof(shm_name), "/%d.%s.XXXXXX", id, suffix);
+  close(mkstemp(shm_name));
+
   // Remove any existing shared memory.
   shm_unlink(shm_name);
 

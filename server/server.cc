@@ -145,7 +145,7 @@ absl::Status Server::Run() {
   // Notify listener that the server is ready.
   if (notify_fd_.Valid()) {
     int64_t val = kServerReady;
-    ::write(notify_fd_.Fd(), &val, 8);
+    (void)::write(notify_fd_.Fd(), &val, 8);
   }
   absl::StatusOr<SystemControlBlock *> scb = CreateSystemControlBlock(scb_fd_);
   if (!scb.ok()) {
@@ -224,6 +224,7 @@ absl::Status Server::Run() {
       },
       "Listener UDS"));
 
+#if 0
   // Start the channel directory coroutine.
   coroutines_.insert(std::make_unique<co::Coroutine>(
       co_scheduler_, [this](co::Coroutine *c) { ChannelDirectoryCoroutine(c); },
@@ -233,6 +234,7 @@ absl::Status Server::Run() {
   coroutines_.insert(std::make_unique<co::Coroutine>(
       co_scheduler_, [this](co::Coroutine *c) { StatisticsCoroutine(c); },
       "Channel stats"));
+#endif
 
   if (!local_) {
     // Start the discovery receiver coroutine.
@@ -254,7 +256,7 @@ absl::Status Server::Run() {
   // Notify listener that we're stopped.
   if (notify_fd_.Valid()) {
     int64_t val = kServerStopped;
-    ::write(notify_fd_.Fd(), &val, 8);
+    (void)::write(notify_fd_.Fd(), &val, 8);
   }
   return absl::OkStatus();
 }
