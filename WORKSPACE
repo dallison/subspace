@@ -92,3 +92,35 @@ http_archive(
 #     path = "../cocpp",
 # )
 
+# Bazel python rules.
+http_archive(
+  name = "rules_python",
+  sha256 = "29a801171f7ca190c543406f9894abf2d483c206e14d6acbd695623662320097",
+  strip_prefix = "rules_python-0.18.1",
+  url = "https://github.com/bazelbuild/rules_python/releases/download/0.18.1/rules_python-0.18.1.tar.gz",
+)
+
+# Python toolchains
+load("@rules_python//python:repositories.bzl", "python_register_toolchains")
+
+python_register_toolchains(
+    name = "python_default",
+    ignore_root_user_error = True,
+    # Available versions are listed in @rules_python//python:versions.bzl.
+    python_version = "3.11.1",
+)
+
+load("@python_default//:defs.bzl", "interpreter")
+load("@rules_python//python:pip.bzl", "pip_parse")
+
+pip_parse(
+  python_interpreter_target = interpreter,
+)
+
+http_archive(
+  name = "pybind11",
+  build_file = "@//bzl/third_party:pybind11.BUILD",
+  strip_prefix = "pybind11-2.10.0",
+  sha256 = "225df6e6dea7cea7c5754d4ed954e9ca7c43947b849b3795f87cb56437f1bd19",
+  urls = ["https://github.com/pybind/pybind11/archive/refs/tags/v2.10.0.zip"],
+)
