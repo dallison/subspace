@@ -68,6 +68,24 @@ Client::UnregisterDroppedMessageCallback(SubscriberImpl *subscriber) {
   return absl::OkStatus();
 }
 
+void Client::RegisterResizeCallback(
+    PublisherImpl *publisher,
+    std::function<absl::Status(PublisherImpl *, int32_t, int32_t)> callback) {
+  resize_callbacks_[publisher] = std::move(callback);
+}
+
+absl::Status
+Client::UnregisterResizeCallback(PublisherImpl *publisher) {
+  auto it = resize_callbacks_.find(publisher);
+  if (it == resize_callbacks_.end()) {
+    return absl::InternalError(absl::StrFormat(
+        "No resize callback has been registered for channel %s\n",
+        publisher->Name()));
+  }
+  resize_callbacks_.erase(it);
+  return absl::OkStatus();
+}
+
 static std::vector<SlotBuffer>
 CollectBuffers(const google::protobuf::RepeatedPtrField<BufferInfo> &buffers,
                const std::vector<toolbelt::FileDescriptor> &fds) {
@@ -800,6 +818,15 @@ absl::Status Client::ResizeChannel(PublisherImpl *publisher,
         publisher->Name(), publisher->SlotSize(), new_slot_size));
   }
 
+  // Call the resize callback if one has been registered.  If this returns
+  // an error, we don't perform the resize.
+  auto it = resize_callbacks_.find(publisher);
+  if (it != resize_callbacks_.end()) {
+    if (absl::Status s = it->second(publisher,  publisher->SlotSize(), new_slot_size); !s.ok()) {
+      return s;
+    }
+  }
+
   Request req;
   auto *cmd = req.mutable_resize();
   cmd->set_channel_name(publisher->Name());
@@ -818,6 +845,12 @@ absl::Status Client::ResizeChannel(PublisherImpl *publisher,
   if (!resp.error().empty()) {
     return absl::InternalError(resp.error());
   }
+
+  // Another publisher beat me to it.
+  if (resp.slot_size() != new_slot_size) {
+    return absl::OkStatus();
+  }
+
   std::vector<SlotBuffer> buffers = CollectBuffers(resp.buffers(), fds);
   return publisher->MapNewBuffers(std::move(buffers));
 }

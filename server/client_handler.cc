@@ -391,6 +391,12 @@ void ClientHandler::HandleResize(const subspace::ResizeRequest &req,
         absl::StrFormat("No such channel %s", req.channel_name()));
     return;
   }
+
+  // If channel is already bigger than requested, don't resize.
+  if (req.new_slot_size() <= channel->SlotSize()) {
+    response->set_slot_size(channel->SlotSize());
+    return;
+  }
   absl::StatusOr<toolbelt::FileDescriptor> fd =
       channel->ExtendBuffers(req.new_slot_size());
   if (!fd.ok()) {
@@ -399,6 +405,8 @@ void ClientHandler::HandleResize(const subspace::ResizeRequest &req,
         req.new_slot_size(), fd.status().ToString()));
     return;
   }
+  response->set_slot_size(channel->SlotSize());
+
   channel->AddBuffer(req.new_slot_size(), std::move(*fd));
   const SharedMemoryFds &channel_fds = channel->GetFds();
 

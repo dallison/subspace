@@ -376,6 +376,22 @@ private:
   absl::Status
   UnregisterDroppedMessageCallback(details::SubscriberImpl *subscriber);
 
+  // Register a callback that will be called when the publisher wants a
+  // channel to be resized.  Note that there is more than one
+  // publisher, only the one that causes the resize will cause the
+  // callback to be called.  The arguments to the callback are:
+  // 1. Publisher
+  // 2. old size (bytes)
+  // 3. new size (bytes)
+  //
+  // Returns absl::OkStatus() if resize is OK.  If the callback wants
+  // to prevent the resize from happening, return an error.
+  void RegisterResizeCallback(
+      details::PublisherImpl *publisher,
+      std::function<absl::Status(details::PublisherImpl *, int32_t, int32_t)>
+          cb);
+  absl::Status UnregisterResizeCallback(details::PublisherImpl *publisher);
+
   // Get the most recently received ordinal for the subscriber.
   int64_t GetCurrentOrdinal(details::SubscriberImpl *sub) const;
 
@@ -426,6 +442,12 @@ private:
   absl::flat_hash_map<details::SubscriberImpl *,
                       std::function<void(details::SubscriberImpl *, int64_t)>>
       dropped_message_callbacks_;
+
+  // Call the function when a publisher causes a channel to be resized.
+  absl::flat_hash_map<
+      details::PublisherImpl *,
+      std::function<absl::Status(details::PublisherImpl *, int32_t, int32_t)>>
+      resize_callbacks_;
   bool debug_ = false;
 };
 
@@ -549,6 +571,21 @@ public:
 
   const std::vector<BufferSet> &GetBuffers() const {
     return client_->GetBuffers(impl_);
+  }
+
+  // Register a function to be called when the publisher resizes
+  // the channel.
+  void RegisterResizeCallback(
+      std::function<absl::Status(Publisher *, int, int)> callback) {
+    client_->RegisterResizeCallback(
+        impl_,
+        [ this, callback = std::move(callback) ](
+            details::PublisherImpl * p, int32_t old_size, int32_t new_size)
+            ->absl::Status { return callback(this, old_size, new_size); });
+  }
+
+  absl::Status UnregisterResizeCallback() {
+    return client_->UnregisterResizeCallback(impl_);
   }
 
 private:
