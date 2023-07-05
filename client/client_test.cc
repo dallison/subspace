@@ -150,6 +150,47 @@ TEST_F(ClientTest, Resize1) {
   ASSERT_EQ(512, pub->SlotSize());
 }
 
+TEST_F(ClientTest, ResizeCallback) {
+  subspace::Client client;
+  InitClient(client);
+  // Initial slot size is 256.
+  absl::StatusOr<Publisher> pub = client.CreatePublisher("dave0", 256, 10);
+  ASSERT_TRUE(pub.ok());
+
+  int num_resizes = 0;
+  pub->RegisterResizeCallback([&num_resizes](Publisher *cb_pub,
+                                             int32_t old_size,
+                                             int32_t new_size) -> absl::Status {
+    num_resizes++;
+    if (num_resizes < 2) {
+      return absl::OkStatus();
+    }
+    return absl::InternalError("Unable to resize channel");
+  });
+
+  // No resize.
+  absl::StatusOr<void *> buffer1 = pub->GetMessageBuffer(256);
+  ASSERT_TRUE(buffer1.ok());
+  ASSERT_EQ(256, pub->SlotSize());
+
+  // Resize to new slot size is 512.
+  absl::StatusOr<void *> buffer2 = pub->GetMessageBuffer(300);
+  ASSERT_TRUE(buffer2.ok());
+  ASSERT_EQ(512, pub->SlotSize());
+
+  // Won't resize.
+  absl::StatusOr<void *> buffer3 = pub->GetMessageBuffer(512);
+  ASSERT_TRUE(buffer3.ok());
+  ASSERT_EQ(512, pub->SlotSize());
+
+  ASSERT_EQ(1, num_resizes);
+
+  // The resize callback will return an error because it only
+  // allows one resize.
+  absl::StatusOr<void *> buffer4 = pub->GetMessageBuffer(1000);
+  ASSERT_FALSE(buffer4.ok());
+}
+
 TEST_F(ClientTest, CreatePublisherWithType) {
   subspace::Client client;
   InitClient(client);

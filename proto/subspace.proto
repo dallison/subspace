@@ -103,6 +103,7 @@ message ResizeRequest {
 message ResizeResponse {
   string error = 1;  
   repeated BufferInfo buffers = 2;
+  int32 slot_size = 3;    // Will be equal to new_slot_size if success.
 }
 
 message GetBuffersRequest {
