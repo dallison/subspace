@@ -65,7 +65,7 @@ private:
   void RemoveChannel(ServerChannel *channel);
   void RemoveAllUsersFor(ClientHandler *handler);
   void CloseHandler(ClientHandler *handler);
-  void ListenerCoroutine(toolbelt::UnixSocket listen_socket, co::Coroutine *c);
+  void ListenerCoroutine(toolbelt::UnixSocket& listen_socket, co::Coroutine *c);
   void ChannelDirectoryCoroutine(co::Coroutine *c);
   void SendChannelDirectory();
   void StatisticsCoroutine(co::Coroutine *c);

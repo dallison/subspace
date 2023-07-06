@@ -81,15 +81,15 @@ http_archive(
 
 http_archive(
   name = "coroutines",
-  urls = ["https://github.com/dallison/co/archive/refs/tags/1.3.0.tar.gz"],
-  strip_prefix = "co-1.3.0",
-  sha256 = "c9e283e4cfeba2939ad724c734a3b568ef1e34b2d97ecdd26cc66dc4c4dfa5f3"
+  urls = ["https://github.com/dallison/co/archive/refs/tags/1.3.1.tar.gz"],
+  strip_prefix = "co-1.3.1",
+  sha256 = "6661713fdea9758f6dcc12ce42cad3f069a855f9757a3c027b0e3122da067c04"
 )
 
-# For local debugging of cocpp coroutine library.
+# For local debugging of co coroutine library.
 # local_repository(
 #     name = "coroutines",
-#     path = "../cocpp",
+#     path = "../co",
 # )
 
 # Bazel python rules.
