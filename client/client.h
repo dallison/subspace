@@ -367,6 +367,13 @@ private:
   struct pollfd GetPollFd(details::PublisherImpl *publisher);
   struct pollfd GetPollFd(details::SubscriberImpl *subscriber);
 
+  // Gets the FileDescriptor for a publisher and subscriber.  FileDescriptors
+  // are only available for reliable publishers.
+  toolbelt::FileDescriptor GetFileDescriptor(
+      details::PublisherImpl *publisher);
+  toolbelt::FileDescriptor GetFileDescriptor(
+      details::SubscriberImpl *subscriber);
+
   // Register a function to be called when a subscriber drops a message.  The
   // function is called with the number of messages that have been missed
   // as its second argument.
@@ -557,6 +564,10 @@ public:
     return client_->GetPollFd(impl_);
   }
 
+  toolbelt::FileDescriptor GetFileDescriptor() {
+    return client_->GetFileDescriptor(impl_);
+  }
+
   const ChannelCounters &GetChannelCounters() {
     return client_->GetChannelCounters(impl_);
   }
@@ -667,6 +678,10 @@ public:
 
   struct pollfd GetPollFd() {
     return client_->GetPollFd(impl_);
+  }
+
+  toolbelt::FileDescriptor GetFileDescriptor() {
+    return client_->GetFileDescriptor(impl_);
   }
 
   int64_t GetCurrentOrdinal() const {

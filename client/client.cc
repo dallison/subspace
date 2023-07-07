@@ -540,6 +540,11 @@ struct pollfd Client::GetPollFd(SubscriberImpl *subscriber) {
   return fd;
 }
 
+toolbelt::FileDescriptor Client::GetFileDescriptor(
+    SubscriberImpl *subscriber) {
+  return subscriber->GetPollFd();
+}
+
 struct pollfd Client::GetPollFd(PublisherImpl *publisher) {
   static struct pollfd fd { .fd = -1, .events = POLLIN };
   if (!publisher->IsReliable()) {
@@ -547,6 +552,13 @@ struct pollfd Client::GetPollFd(PublisherImpl *publisher) {
   }
   fd = {.fd = publisher->GetPollFd().Fd(), .events = POLLIN};
   return fd;
+}
+
+toolbelt::FileDescriptor Client::GetFileDescriptor(PublisherImpl *publisher) {
+  if (!publisher->IsReliable()) {
+    return toolbelt::FileDescriptor();
+  }
+  return publisher->GetPollFd();
 }
 
 int64_t Client::GetCurrentOrdinal(SubscriberImpl *sub) const {
