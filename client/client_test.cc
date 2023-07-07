@@ -339,6 +339,24 @@ TEST_F(ClientTest, CreateSubscriber) {
   ASSERT_TRUE(s.ok());
 }
 
+TEST_F(ClientTest, FileDescriptors) {
+  subspace::Client client;
+  InitClient(client);
+  absl::StatusOr<Publisher> pub1 = client.CreatePublisher(
+      "dave0", 256, 10);
+  absl::StatusOr<Publisher> pub2 = client.CreatePublisher(
+      "dave1", 256, 10, subspace::PublisherOptions().SetReliable(true));
+  absl::StatusOr<Subscriber> sub = client.CreateSubscriber("dave1");
+
+  auto pub1_fd = pub1->GetFileDescriptor();
+  auto pub2_fd = pub2->GetFileDescriptor();
+  auto sub_fd = sub->GetFileDescriptor();
+
+  ASSERT_FALSE(pub1_fd.Valid());
+  ASSERT_TRUE(pub2_fd.Valid());
+  ASSERT_TRUE(sub_fd.Valid());
+}
+
 TEST_F(ClientTest, CreateSubscriberWithType) {
   subspace::Client client;
   InitClient(client);
