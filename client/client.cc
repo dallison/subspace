@@ -535,18 +535,29 @@ absl::StatusOr<const Message> Client::FindMessage(SubscriberImpl *subscriber,
   return FindMessageInternal(subscriber, timestamp);
 }
 
-struct pollfd Client::GetPollFd(SubscriberImpl *subscriber) {
+struct pollfd Client::GetPollFd(SubscriberImpl *subscriber) const {
   struct pollfd fd = {.fd = subscriber->GetPollFd().Fd(), .events = POLLIN};
   return fd;
 }
 
-struct pollfd Client::GetPollFd(PublisherImpl *publisher) {
+struct pollfd Client::GetPollFd(PublisherImpl *publisher) const {
   static struct pollfd fd { .fd = -1, .events = POLLIN };
   if (!publisher->IsReliable()) {
     return fd;
   }
   fd = {.fd = publisher->GetPollFd().Fd(), .events = POLLIN};
   return fd;
+}
+
+toolbelt::FileDescriptor Client::GetFileDescriptor(SubscriberImpl *subscriber) const {
+  return subscriber->GetPollFd();
+}
+
+toolbelt::FileDescriptor Client::GetFileDescriptor(PublisherImpl *publisher) const {
+  if (!publisher->IsReliable()) {
+    return toolbelt::FileDescriptor();
+  }
+  return publisher->GetPollFd();
 }
 
 int64_t Client::GetCurrentOrdinal(SubscriberImpl *sub) const {

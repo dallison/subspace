@@ -364,8 +364,11 @@ private:
   // Gets the PollFd for a publisher and subscriber.  PollFds are only
   // available for reliable publishers but a valid pollfd will be returned for
   // an unreliable publisher (it will just never be ready)
-  struct pollfd GetPollFd(details::PublisherImpl *publisher);
-  struct pollfd GetPollFd(details::SubscriberImpl *subscriber);
+  struct pollfd GetPollFd(details::PublisherImpl *publisher) const ;
+  struct pollfd GetPollFd(details::SubscriberImpl *subscriber) const;
+
+  toolbelt::FileDescriptor GetFileDescriptor(details::PublisherImpl *publisher) const;
+  toolbelt::FileDescriptor GetFileDescriptor(details::SubscriberImpl *subscriber) const;
 
   // Register a function to be called when a subscriber drops a message.  The
   // function is called with the number of messages that have been missed
@@ -553,8 +556,12 @@ public:
   // the function will block on a poll until the publisher is triggered.
   absl::Status Wait() { return client_->WaitForReliablePublisher(impl_); }
 
-  struct pollfd GetPollFd() {
+  struct pollfd GetPollFd() const {
     return client_->GetPollFd(impl_);
+  }
+
+  toolbelt::FileDescriptor GetFileDescriptor() const {
+        return client_->GetFileDescriptor(impl_);
   }
 
   const ChannelCounters &GetChannelCounters() {
@@ -665,8 +672,12 @@ public:
   template <typename T>
   absl::StatusOr<shared_ptr<T>> FindMessage(uint64_t timestamp);
 
-  struct pollfd GetPollFd() {
+  struct pollfd GetPollFd() const {
     return client_->GetPollFd(impl_);
+  }
+
+ toolbelt::FileDescriptor GetFileDescriptor() const {
+        return client_->GetFileDescriptor(impl_);
   }
 
   int64_t GetCurrentOrdinal() const {
