@@ -14,6 +14,12 @@ cc_binary(
         "@com_google_absl//absl/flags:parse",
  
     ],
+    linkopts = select({
+        "//:macos_x86_64": [],
+        "//:macos_arm64": [],
+        "//:macos_default": [],
+        "//conditions:default": [ "-lrt" ],
+    }),
 )
 
 
@@ -31,6 +37,12 @@ cc_binary(
         "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/flags:parse",
     ],
+    linkopts = select({
+        "//:macos_x86_64": [],
+        "//:macos_arm64": [],
+        "//:macos_default": [],
+        "//conditions:default": [ "-lrt" ],
+    }),
 )
 
 
@@ -48,6 +60,12 @@ cc_binary(
         "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/flags:parse",
     ],
+    linkopts = select({
+        "//:macos_x86_64": [],
+        "//:macos_arm64": [],
+        "//:macos_default": [],
+        "//conditions:default": [ "-lrt" ],
+    }),
 )
 
 cc_binary(
@@ -64,7 +82,13 @@ cc_binary(
         "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/flags:parse",
     ],
-    )
+    linkopts = select({
+        "//:macos_x86_64": [],
+        "//:macos_arm64": [],
+        "//:macos_default": [],
+        "//conditions:default": [ "-lrt" ],
+    }),
+)
 
 cc_binary(
     name = "perf_tcp_recv",
@@ -79,6 +103,12 @@ cc_binary(
         "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/flags:parse",
     ],
+    linkopts = select({
+        "//:macos_x86_64": [],
+        "//:macos_arm64": [],
+        "//:macos_default": [],
+        "//conditions:default": [ "-lrt" ],
+    }),
 )
 
 cc_binary(
@@ -94,6 +124,12 @@ cc_binary(
         "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/flags:parse",
     ],
+    linkopts = select({
+        "//:macos_x86_64": [],
+        "//:macos_arm64": [],
+        "//:macos_default": [],
+        "//conditions:default": [ "-lrt" ],
+    }),
 )
 
 cc_binary(
@@ -110,4 +146,10 @@ cc_binary(
         "@com_google_absl//absl/flags:parse",
         "@coroutines//:co",
     ],
+    linkopts = select({
+        "//:macos_x86_64": [],
+        "//:macos_arm64": [],
+        "//:macos_default": [],
+        "//conditions:default": [ "-lrt" ],
+    }),
 )
