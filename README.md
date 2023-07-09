@@ -49,6 +49,19 @@ CC=clang bazel build ...
 It does build with *g++* but you will get some compiler warnings about different signed comparisons
 that clang doesn't care about.
 
+### Example: Ubuntu 20.04
+Build a minimal set of binaries:
+
+```
+CC=clang bazel build //server:subspace_server //manual_tests:{pub,sub}
+```
+
+Then run each in a separate terminal:
+
+ * `./bazel-bin/server/subspace_server`
+ * `./bazel-bin/manual_tests/sub`
+ * `./bazel-bin/manual_tests/pub`
+
 # Bazel WORKSPACE
 Add this to your Bazel WORKSPACE file to get access to this library without downloading it manually.
 

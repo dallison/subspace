@@ -34,5 +34,8 @@ cc_binary(
     deps = [
       ":server",
       "@coroutines//:co",
-    ]
+    ],
+    linkopts = [
+        "-lrt"
+    ],
 )
