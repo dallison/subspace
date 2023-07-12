@@ -154,7 +154,7 @@ public:
   void RemoveUser(int user_id);
   void RemoveAllUsersFor(ClientHandler *handler);
   bool IsEmpty() const { return user_ids_.IsEmpty(); }
-  absl::Status HasSufficientCapacity() const;
+  absl::Status HasSufficientCapacity(int new_max_ptrs) const;
   void CountUsers(int &num_pubs, int &num_subs) const;
   void GetChannelInfo(subspace::ChannelInfo *info);
   void GetChannelStats(subspace::ChannelStats *stats);
