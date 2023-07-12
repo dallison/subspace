@@ -231,15 +231,19 @@ absl::Status ServerChannel::HasSufficientCapacity(int new_max_ptrs) const {
       max_shared_ptrs += sub->MaxSharedPtrs();
     }
   }
-  if ((num_pubs + num_subs + max_shared_ptrs + 1) <= (NumSlots() - 1)) {
+  int slots_needed = num_pubs + num_subs + max_shared_ptrs + 1;
+  if (slots_needed <= (NumSlots() - 1)) {
     return absl::OkStatus();
   }
+  max_shared_ptrs -= new_max_ptrs;    // Adjust for error message.
+
   return absl::InternalError(
       absl::StrFormat("there are %d slots with %d publisher%s and %d "
-                      "subscriber%s with %d shared pointer%s",
+                      "subscriber%s with %d shared pointer%s; you need at least %d slots",
                       NumSlots(), num_pubs, (num_pubs == 1 ? "" : "s"),
                       num_subs, (num_subs == 1 ? "" : "s"), max_shared_ptrs,
-                      (max_shared_ptrs == 1 ? "" : "s")));
+                      (max_shared_ptrs == 1 ? "" : "s"),
+                      slots_needed+1));
 }
 
 void ServerChannel::GetChannelInfo(subspace::ChannelInfo *info) {
