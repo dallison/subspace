@@ -149,7 +149,7 @@ void ClientHandler::HandleCreatePublisher(
   }
 
   // Check capacity of channel.
-  absl::Status cap_ok = channel->HasSufficientCapacity();
+  absl::Status cap_ok = channel->HasSufficientCapacity(0);
   if (!cap_ok.ok()) {
     response->set_error(absl::StrFormat(
         "Insufficient capcacity to add a new publisher to channel %s: %s",
@@ -270,7 +270,7 @@ void ClientHandler::HandleCreateSubscriber(
     }
     sub = static_cast<SubscriberUser *>(*user);
   } else {
-    absl::Status cap_ok = channel->HasSufficientCapacity();
+    absl::Status cap_ok = channel->HasSufficientCapacity(req.max_shared_ptrs());
     if (!cap_ok.ok()) {
       response->set_error(absl::StrFormat(
           "Insufficient capcacity to add a new subscriber to channel %s: %s",
