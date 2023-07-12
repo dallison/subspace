@@ -212,7 +212,7 @@ bool ServerChannel::IsBridgeSubscriber() const {
   return num_subs == num_bridge_subs;
 }
 
-absl::Status ServerChannel::HasSufficientCapacity() const {
+absl::Status ServerChannel::HasSufficientCapacity(int new_max_ptrs) const {
   if (NumSlots() == 0) {
     return absl::OkStatus();
   }
@@ -221,7 +221,7 @@ absl::Status ServerChannel::HasSufficientCapacity() const {
   CountUsers(num_pubs, num_subs);
 
   // Add in the total shared ptr maximums.
-  int max_shared_ptrs = 0;
+  int max_shared_ptrs = new_max_ptrs;
   for (auto &user : users_) {
     if (user == nullptr) {
       continue;
