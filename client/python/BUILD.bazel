@@ -3,6 +3,7 @@ load("@//bzl/local_rules:pybind.bzl", "pybind_module")
 pybind_module(
     name = "subspace",
     srcs = ["client.cc"],
+    visibility = ["//visibility:public"],
     deps = [
         "//client:subspace_client",
     ],
