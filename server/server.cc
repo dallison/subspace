@@ -114,7 +114,7 @@ void Server::CloseHandler(ClientHandler *handler) {
 // This coroutine listens for incoming client connections on the given
 // UDS and spawns a handler coroutine to handle the communication with
 // the client.
-void Server::ListenerCoroutine(toolbelt::UnixSocket& listen_socket,
+void Server::ListenerCoroutine(toolbelt::UnixSocket &listen_socket,
                                co::Coroutine *c) {
   for (;;) {
     absl::Status status = HandleIncomingConnection(listen_socket, c);
@@ -217,12 +217,12 @@ absl::Status Server::Run() {
       [this](co::Coroutine *c) { coroutines_.erase(c); });
 
   // Start the listener coroutine.
-  coroutines_.insert(std::make_unique<co::Coroutine>(
-      co_scheduler_,
-      [this, &listen_socket](co::Coroutine *c) {
-        ListenerCoroutine(listen_socket, c);
-      },
-      "Listener UDS"));
+  coroutines_.insert(
+      std::make_unique<co::Coroutine>(co_scheduler_,
+                                      [this, &listen_socket](co::Coroutine *c) {
+                                        ListenerCoroutine(listen_socket, c);
+                                      },
+                                      "Listener UDS"));
 
   // Start the channel directory coroutine.
   coroutines_.insert(std::make_unique<co::Coroutine>(
@@ -270,9 +270,13 @@ Server::HandleIncomingConnection(toolbelt::UnixSocket &listen_socket,
       std::make_unique<ClientHandler>(this, std::move(*s)));
   ClientHandler *handler_ptr = client_handlers_.back().get();
 
-  coroutines_.insert(std::make_unique<co::Coroutine>(
-      co_scheduler_, [handler_ptr](co::Coroutine *c) { handler_ptr->Run(c); },
-      "Client handler"));
+  coroutines_.insert(
+      std::make_unique<co::Coroutine>(co_scheduler_,
+                                      [this, handler_ptr](co::Coroutine *c) {
+                                        handler_ptr->Run(c);
+                                        CloseHandler(handler_ptr);
+                                      },
+                                      "Client handler"));
 
   return absl::OkStatus();
 }

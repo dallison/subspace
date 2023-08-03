@@ -20,7 +20,6 @@ void ClientHandler::Run(co::Coroutine *c) {
     absl::StatusOr<ssize_t> n =
         socket_.ReceiveMessage(buffer_, sizeof(buffer_), c);
     if (!n.ok()) {
-      server_->CloseHandler(this);
       return;
     }
     subspace::Request request;
@@ -28,30 +27,25 @@ void ClientHandler::Run(co::Coroutine *c) {
       std::vector<toolbelt::FileDescriptor> fds;
       subspace::Response response;
       if (absl::Status s = HandleMessage(request, response, fds); !s.ok()) {
-        fprintf(stderr, "%s\n", s.ToString().c_str());
-        server_->CloseHandler(this);
+        server_->logger_.Log(toolbelt::LogLevel::kError, "%s\n", s.ToString().c_str());
         return;
       }
 
       if (!response.SerializeToArray(sendbuf, kSendBufLen)) {
-        fprintf(stderr, "Failed to serialize response\n");
-        server_->CloseHandler(this);
+        server_->logger_.Log(toolbelt::LogLevel::kError, "Failed to serialize response\n");
         return;
       }
       size_t msglen = response.ByteSizeLong();
       absl::StatusOr<ssize_t> n = socket_.SendMessage(sendbuf, msglen, c);
       if (!n.ok()) {
-        server_->CloseHandler(this);
         return;
       }
       if (absl::Status status = socket_.SendFds(fds, c); !status.ok()) {
-        fprintf(stderr, "%s\n", status.ToString().c_str());
-        server_->CloseHandler(this);
+        server_->logger_.Log(toolbelt::LogLevel::kError, "%s\n", status.ToString().c_str());
         return;
       }
     } else {
-      fprintf(stderr, "Failed to parse message\n");
-      server_->CloseHandler(this);
+      server_->logger_.Log(toolbelt::LogLevel::kError, "Failed to parse message\n");
       return;
     }
   }

@@ -81,9 +81,9 @@ http_archive(
 
 http_archive(
   name = "coroutines",
-  urls = ["https://github.com/dallison/co/archive/refs/tags/1.3.1.tar.gz"],
-  strip_prefix = "co-1.3.1",
-  sha256 = "6661713fdea9758f6dcc12ce42cad3f069a855f9757a3c027b0e3122da067c04"
+  urls = ["https://github.com/dallison/co/archive/refs/tags/1.3.2.tar.gz"],
+  strip_prefix = "co-1.3.2",
+  sha256 = "2a005dc6e86e2e8ac732605bf7ec464b39cb6ee64d3bbc40e3205f8348e790d1"
 )
 
 # For local debugging of co coroutine library.
