@@ -204,7 +204,6 @@ Channel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
     return p.status();
   }
   ccb_ = reinterpret_cast<ChannelControlBlock *>(*p);
-  memset(ccb_, 0, ccb_size);
 
   // Create a single buffer but don't map it in.  There is no need to
   // map in the buffers in the server since they will never be used.
