@@ -94,26 +94,26 @@ struct SystemControlBlock {
 // addresses in each client.  Instead they use an offset from the
 // start of the ChannelControlBlock (CCB) as a pointer.
 struct SlotListElement {
-  int32_t prev;
-  int32_t next;
+  int32_t prev = 0;
+  int32_t next = 0;
 };
 
 // Double linked list header in shared memory.
 struct SlotList {
-  int32_t first;
-  int32_t last;
+  int32_t first = 0;
+  int32_t last = 0;
 };
 
 // This is the meta data for a slot.  It is always in a linked list.
 struct MessageSlot {
-  SlotListElement element;
-  int32_t id;                 // Unique ID for slot (0...num_slots-1).
-  int16_t ref_count;          // Number of subscribers referring to this slot.
-  int16_t reliable_ref_count; // Number of reliable subscriber references.
-  int64_t ordinal;            // Message ordinal held currently in slot.
-  int64_t message_size;       // Size of message held in slot.
-  int32_t buffer_index;       // Index of buffer.
-  toolbelt::BitSet<kMaxSlotOwners> owners; // One bit per publisher/subscriber.
+  SlotListElement element{};
+  int32_t id = 0;                 // Unique ID for slot (0...num_slots-1).
+  int16_t ref_count = 0;          // Number of subscribers referring to this slot.
+  int16_t reliable_ref_count = 0; // Number of reliable subscriber references.
+  int64_t ordinal = 0;            // Message ordinal held currently in slot.
+  int64_t message_size = 0;       // Size of message held in slot.
+  int32_t buffer_index = 0;       // Index of buffer.
+  toolbelt::BitSet<kMaxSlotOwners> owners{}; // One bit per publisher/subscriber.
 };
 
 // This is located just before the prefix of the first slot's buffer.  It
@@ -130,29 +130,29 @@ struct BufferHeader {
 //
 // This is in shared memory so no pointers are possible.
 struct ChannelControlBlock {          // a.k.a CCB
-  char channel_name[kMaxChannelName]; // So that you can see the name in a
+  char channel_name[kMaxChannelName]{}; // So that you can see the name in a
                                       // debugger or hexdump.
-  int num_slots;
-  int64_t next_ordinal; // Next ordinal to use.
-  int buffer_index;     // Which buffer in buffers array to use.
-  int num_buffers;      // Size of buffers array in shared memory.
+  int num_slots = 0;
+  int64_t next_ordinal = 0; // Next ordinal to use.
+  int buffer_index = 0;     // Which buffer in buffers array to use.
+  int num_buffers = 0;      // Size of buffers array in shared memory.
 
   // Statistics counters.
-  int64_t total_bytes;
-  int64_t total_messages;
+  int64_t total_bytes = 0;
+  int64_t total_messages = 0;
 
   // Slot lists.
   // Active list: slots with active messages in them.
   // Busy list: slots allocated to publishers
   // Free list: slots not allocated.
-  SlotList active_list;
-  SlotList busy_list;
-  SlotList free_list;
+  SlotList active_list{};
+  SlotList busy_list{};
+  SlotList free_list{};
 
-  pthread_mutex_t lock; // Lock for this channel only.
+  pthread_mutex_t lock{}; // Lock for this channel only.
 
   // Variable number of MessageSlot structs (num_slots long).
-  MessageSlot slots[0];
+  MessageSlot slots[0]{};
 };
 
 absl::StatusOr<SystemControlBlock *>
