@@ -35,8 +35,6 @@ static absl::flat_hash_map<void *, size_t> *mapped_regions;
 static std::mutex *region_lock;
 #endif
 
-
-
 static void *MapMemory(int fd, size_t size, int prot, const char *purpose) {
   void *p = mmap(NULL, size, prot, MAP_SHARED, fd, 0);
 #if SHOW_MMAPS
@@ -90,10 +88,21 @@ static void UnmapMemory(void *p, size_t size, const char *purpose) {
 static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
                                                  int64_t size, bool map,
                                                  toolbelt::FileDescriptor &fd) {
-  char shm_name[NAME_MAX];
-  snprintf(shm_name, sizeof(shm_name), "/%d.%s.XXXXXX", id, suffix);
-  close(mkstemp(shm_name));
-
+  char shm_file[NAME_MAX];    // Unique file in file system.
+  char *shm_name;             // Name passed to shm_* (starts with /)
+  int tmpfd;
+#if defined(__linux__)
+  // On Linux we have actual files in /dev/shm so we can create a unique file.
+  snprintf(shm_file, sizeof(shm_file), "/dev/shm/%d.%s.XXXXXX", id, suffix);
+  tmpfd = mkstemp(shm_file);
+  shm_name = shm_file + 8; // After /dev/shm
+#else
+  // On other systems (BSD, MacOS, etc), we need to use a file in /tmp.
+  // This is just used to ensure uniqueness.
+  snprintf(shm_file, sizeof(shm_file), "/tmp/%d.%s.XXXXXX", id, suffix);
+  tmpfd = mkstemp(shm_file);
+  shm_name = shm_file + 4; // After /tmp
+#endif
   // Remove any existing shared memory.
   shm_unlink(shm_name);
 
@@ -128,6 +137,7 @@ static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
   // using the file descriptor.
   shm_unlink(shm_name);
   fd.SetFd(shm_fd);
+  (void)close(tmpfd);
   return p;
 }
 
