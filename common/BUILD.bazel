@@ -21,4 +21,10 @@ cc_library(
         "@coroutines//:co",
         "@toolbelt//toolbelt",
     ],
+    linkopts = select({
+        "//:macos_x86_64": [],
+        "//:macos_arm64": [],
+        "//:macos_default": [],
+        "//conditions:default": [ "-lrt" ],
+    }),
 )
