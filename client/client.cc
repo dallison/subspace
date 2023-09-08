@@ -74,8 +74,7 @@ void Client::RegisterResizeCallback(
   resize_callbacks_[publisher] = std::move(callback);
 }
 
-absl::Status
-Client::UnregisterResizeCallback(PublisherImpl *publisher) {
+absl::Status Client::UnregisterResizeCallback(PublisherImpl *publisher) {
   auto it = resize_callbacks_.find(publisher);
   if (it == resize_callbacks_.end()) {
     return absl::InternalError(absl::StrFormat(
@@ -449,7 +448,8 @@ Client::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     printf("read new_slot: %d: %" PRId64 "\n", new_slot->id, new_slot->ordinal);
   }
 
-  if (last_ordinal != -1 && new_slot->ordinal != (last_ordinal + 1)) {
+  if (mode == ReadMode::kReadNext && last_ordinal != -1 &&
+      new_slot->ordinal != (last_ordinal + 1)) {
     // We dropped a message.  If we have a callback registered for this
     // channel, call it with the number of dropped messages.
     auto it = dropped_message_callbacks_.find(subscriber);
@@ -549,11 +549,13 @@ struct pollfd Client::GetPollFd(PublisherImpl *publisher) const {
   return fd;
 }
 
-toolbelt::FileDescriptor Client::GetFileDescriptor(SubscriberImpl *subscriber) const {
+toolbelt::FileDescriptor
+Client::GetFileDescriptor(SubscriberImpl *subscriber) const {
   return subscriber->GetPollFd();
 }
 
-toolbelt::FileDescriptor Client::GetFileDescriptor(PublisherImpl *publisher) const {
+toolbelt::FileDescriptor
+Client::GetFileDescriptor(PublisherImpl *publisher) const {
   if (!publisher->IsReliable()) {
     return toolbelt::FileDescriptor();
   }
@@ -833,7 +835,9 @@ absl::Status Client::ResizeChannel(PublisherImpl *publisher,
   // an error, we don't perform the resize.
   auto it = resize_callbacks_.find(publisher);
   if (it != resize_callbacks_.end()) {
-    if (absl::Status s = it->second(publisher,  publisher->SlotSize(), new_slot_size); !s.ok()) {
+    if (absl::Status s =
+            it->second(publisher, publisher->SlotSize(), new_slot_size);
+        !s.ok()) {
       return s;
     }
   }
