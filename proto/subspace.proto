@@ -150,7 +150,7 @@ message ChannelInfo {
   bytes type = 4;
 }
 
-// This is published to the ipc/ChannelDirectory channel.
+// This is published to the /subspace/ChannelDirectory channel.
 message ChannelDirectory {
   string server_id = 1;
   repeated ChannelInfo channels = 2;
@@ -162,7 +162,7 @@ message ChannelStats {
   int64 total_messages = 3;
 }
 
-// This is published to the ipc/Statistics channel.
+// This is published to the /subspace/Statistics channel.
 message Statistics {
   string server_id = 1;
   int64 timestamp = 2;
