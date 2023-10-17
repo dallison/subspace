@@ -87,7 +87,7 @@ public:
   }
   shared_ptr(shared_ptr &&p)
       : sub_(p.sub_), msg_(p.msg_), slot_(p.slot_), ordinal_(p.ordinal_) {
-    p.reset();
+    p.ResetInternal();
   }
 
   shared_ptr &operator=(const shared_ptr &p) {
@@ -103,13 +103,15 @@ public:
       IncRefCount(-1);
     }
     CopyFrom(p);
-    p.reset();
+    p.ResetInternal();
     return *this;
   }
 
   void reset() {
-    sub_ = nullptr;
-    slot_ = nullptr;
+    if (*this) {
+      IncRefCount(-1);
+    }
+    ResetInternal();
   }
 
   T *get() const { return reinterpret_cast<T *>(msg_.buffer); }
@@ -135,11 +137,17 @@ private:
     ordinal_ = p.ordinal_;
   }
 
+  void ResetInternal() {
+    sub_ = nullptr;
+    slot_ = nullptr;
+  }
+
   shared_ptr(details::SubscriberImpl *sub, const Message &msg)
       : sub_(sub), msg_(msg), slot_(sub->CurrentSlot()),
         ordinal_(sub->CurrentOrdinal()) {
     IncRefCount(+1);
   }
+
   template <typename M>
   friend bool operator==(const shared_ptr<M> &p1, const shared_ptr<M> &p2);
 
@@ -198,18 +206,24 @@ public:
   long use_count() const { return msg_.length == 0 ? 0 : slot_->ref_count; }
 
   bool expired() const {
-    return !(sub_->CurrentSlot() == slot_ &&
-             sub_->CurrentOrdinal() == ordinal_);
+    return slot_->ordinal != ordinal_;
   }
 
   shared_ptr<T> lock() const {
-    if (expired()) {
-      return shared_ptr<T>();
-    }
     if (!sub_->CheckSharedPtrCount()) {
       return shared_ptr<T>();
     }
-    return shared_ptr<T>(*this);
+    // This returns true if the slot is still valid.  The reference
+    // counts have been incremented.
+    if (!sub_->LockForShared(slot_, ordinal_)) {
+      return shared_ptr<T>();
+    }
+
+    auto ptr = shared_ptr<T>(*this);
+    // We have incremented the ref count in LockForShared, and also
+    // in the shared_ptr constructor.  Decrement it.
+    ptr->IncDecRefCount(-1);
+    return ptr;
   }
 
 private:
