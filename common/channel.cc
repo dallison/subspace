@@ -738,4 +738,13 @@ Channel::FindActiveSlotByTimestamp(MessageSlot *old_slot, uint64_t timestamp,
   return new_slot;
 }
 
+  bool Channel::LockForSharedInternal(MessageSlot* slot, int64_t ordinal, bool reliable) {
+     toolbelt::MutexLock lock(&ccb_->lock);
+    if (slot->ordinal != ordinal) {
+      return false;
+    }
+    IncDecRefCount(slot, reliable, +1);
+    return true;
+  }
+
 } // namespace subspace
