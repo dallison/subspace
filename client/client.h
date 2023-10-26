@@ -11,7 +11,7 @@
 #include "client/client_channel.h"
 #include "client/options.h"
 #include "common/channel.h"
-#include "common/triggerfd.h"
+#include "toolbelt/triggerfd.h"
 #include "coroutine.h"
 #include "toolbelt/fd.h"
 #include "toolbelt/sockets.h"

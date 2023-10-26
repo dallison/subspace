@@ -116,7 +116,7 @@ private:
   // All coroutines are owned by this set.
   absl::flat_hash_set<std::unique_ptr<co::Coroutine>> coroutines_;
 
-  TriggerFd channel_directory_trigger_fd_;
+  toolbelt::TriggerFd channel_directory_trigger_fd_;
   toolbelt::InetAddress discovery_addr_;
   toolbelt::UDPSocket discovery_transmitter_;
   toolbelt::UDPSocket discovery_receiver_;

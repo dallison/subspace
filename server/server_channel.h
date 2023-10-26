@@ -9,7 +9,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "common/channel.h"
-#include "common/triggerfd.h"
+#include "toolbelt/triggerfd.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/bitset.h"
 #include "toolbelt/fd.h"
@@ -51,7 +51,7 @@ public:
 private:
   ClientHandler *handler_;
   int id_;
-  TriggerFd trigger_fd_;
+  toolbelt::TriggerFd trigger_fd_;
   bool is_reliable_;
   bool is_bridge_; // This is used to send or receive over a bridge.
 };

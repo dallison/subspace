@@ -7,7 +7,7 @@
 
 #include "client/options.h"
 #include "common/channel.h"
-#include "common/triggerfd.h"
+#include "toolbelt/triggerfd.h"
 #include "coroutine.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/fd.h"
@@ -147,9 +147,9 @@ private:
 
   void ClearPollFd() { trigger_.Clear(); }
 
-  TriggerFd trigger_;
+  toolbelt::TriggerFd trigger_;
   int publisher_id_;
-  std::vector<TriggerFd> subscribers_;
+  std::vector<toolbelt::TriggerFd> subscribers_;
   PublisherOptions options_;
 };
 
@@ -228,8 +228,8 @@ private:
   }
 
   int subscriber_id_;
-  TriggerFd trigger_;
-  std::vector<TriggerFd> reliable_publishers_;
+  toolbelt::TriggerFd trigger_;
+  std::vector<toolbelt::TriggerFd> reliable_publishers_;
   SubscriberOptions options_;
   int num_shared_ptrs_ = 0;
 
