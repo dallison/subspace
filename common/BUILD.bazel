@@ -4,11 +4,9 @@ cc_library(
     name = "subspace_common",
     srcs = [
         "channel.cc",
-        "triggerfd.cc",
     ],
     hdrs = [
         "channel.h",
-        "triggerfd.h",
     ],
     linkopts = select({
         "//:macos_x86_64": [],
