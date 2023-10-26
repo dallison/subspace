@@ -88,8 +88,8 @@ static void UnmapMemory(void *p, size_t size, const char *purpose) {
 static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
                                                  int64_t size, bool map,
                                                  toolbelt::FileDescriptor &fd) {
-  char shm_file[NAME_MAX];    // Unique file in file system.
-  char *shm_name;             // Name passed to shm_* (starts with /)
+  char shm_file[NAME_MAX]; // Unique file in file system.
+  char *shm_name;          // Name passed to shm_* (starts with /)
   int tmpfd;
 #if defined(__linux__)
   // On Linux we have actual files in /dev/shm so we can create a unique file.
@@ -736,6 +736,16 @@ Channel::FindActiveSlotByTimestamp(MessageSlot *old_slot, uint64_t timestamp,
   Prefix(new_slot)->flags |= kMessageSeen;
   new_slot->owners.Set(owner);
   return new_slot;
+}
+
+bool Channel::LockForSharedInternal(MessageSlot *slot, int64_t ordinal,
+                                    bool reliable) {
+  toolbelt::MutexLock lock(&ccb_->lock);
+  if (slot->ordinal != ordinal) {
+    return false;
+  }
+  IncDecRefCount(slot, reliable, +1);
+  return true;
 }
 
 } // namespace subspace

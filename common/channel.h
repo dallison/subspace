@@ -377,6 +377,7 @@ public:
   // Gets the statistics counters.  Locks the CCB.
   void GetStatsCounters(int64_t &total_bytes, int64_t &total_messages);
 
+  bool LockForSharedInternal(MessageSlot* slot, int64_t ordinal, bool reliable);
   void SetDebug(bool v) { debug_ = v; }
 
   // Search the active list for a message with the given timestamp.  If found,
