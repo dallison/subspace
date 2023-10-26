@@ -180,6 +180,10 @@ public:
     return num_shared_ptrs_ < options_.MaxSharedPtrs();
   }
 
+  bool LockForShared(MessageSlot* slot, int64_t ordinal) {
+    return LockForSharedInternal(slot, ordinal, IsReliable());
+  }
+
 private:
   friend class ::subspace::Client;
 
