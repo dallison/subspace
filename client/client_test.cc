@@ -342,8 +342,7 @@ TEST_F(ClientTest, CreateSubscriber) {
 TEST_F(ClientTest, FileDescriptors) {
   subspace::Client client;
   InitClient(client);
-  absl::StatusOr<Publisher> pub1 = client.CreatePublisher(
-      "dave0", 256, 10);
+  absl::StatusOr<Publisher> pub1 = client.CreatePublisher("dave0", 256, 10);
   absl::StatusOr<Publisher> pub2 = client.CreatePublisher(
       "dave1", 256, 10, subspace::PublisherOptions().SetReliable(true));
   absl::StatusOr<Subscriber> sub = client.CreateSubscriber("dave1");
@@ -1065,27 +1064,40 @@ TEST_F(ClientTest, Publish2Message2AndReadSharedPtrs) {
   absl::StatusOr<subspace::shared_ptr<const char>> p =
       sub->ReadMessage<const char>();
   ASSERT_TRUE(p.ok());
-  const auto &ptr = *p;
-  ASSERT_TRUE(static_cast<bool>(ptr));
-  ASSERT_STREQ("foobar", ptr.get());
+  ASSERT_TRUE(static_cast<bool>(*p));
+  ASSERT_STREQ("foobar", p->get());
 
   // Create a weak_ptr from p.
-  subspace::weak_ptr<const char> w(ptr);
+  subspace::weak_ptr<const char> w(*p);
   ASSERT_FALSE(w.expired());
 
-  // Read second message and overwrite shared_ptr.
-  p = sub->ReadMessage<const char>();
-  ASSERT_TRUE(p.ok());
-  ASSERT_TRUE(static_cast<bool>(ptr));
-  ASSERT_STREQ("foobar", ptr.get());
+  absl::StatusOr<subspace::shared_ptr<const char>> p2 = sub->ReadMessage<const char>();
+
+  ASSERT_TRUE(p2.ok());
+  ASSERT_TRUE(static_cast<bool>(*p2));
+  ASSERT_STREQ("foobar", p2->get());
+
+  p->reset();
+
+  // weak_ptr is still valid.
+  ASSERT_FALSE(w.expired());
+
+  // Publish some more messages to reuse the weak pointer's slot.
+  for (int i = 0; i < 10; i++) {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_TRUE(buffer.ok());
+    memcpy(*buffer, "foobar", 6);
+    absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+    ASSERT_TRUE(pub_status.ok());
+  }
 
   // weak_ptr will have expired.
   ASSERT_TRUE(w.expired());
 
   // Another weak ptr.
-  subspace::weak_ptr<const char> w2(ptr);
-  subspace::shared_ptr<const char> p2(w2);
-  ASSERT_EQ(3, p2.use_count());
+  subspace::weak_ptr<const char> w2(*p2);
+  subspace::shared_ptr<const char> p3(w2);
+  ASSERT_EQ(3, p3.use_count());
 }
 
 TEST_F(ClientTest, FindMessage) {
