@@ -17,13 +17,13 @@ void ClientHandler::Run(co::Coroutine *c) {
   char *sendbuf = buffer_ + sizeof(int32_t);
   constexpr size_t kSendBufLen = sizeof(buffer_) - sizeof(int32_t);
   for (;;) {
-    absl::StatusOr<ssize_t> n =
+    absl::StatusOr<ssize_t> n_recv =
         socket_.ReceiveMessage(buffer_, sizeof(buffer_), c);
-    if (!n.ok()) {
+    if (!n_recv.ok()) {
       return;
     }
     subspace::Request request;
-    if (request.ParseFromArray(buffer_, *n)) {
+    if (request.ParseFromArray(buffer_, *n_recv)) {
       std::vector<toolbelt::FileDescriptor> fds;
       subspace::Response response;
       if (absl::Status s = HandleMessage(request, response, fds); !s.ok()) {
@@ -36,8 +36,8 @@ void ClientHandler::Run(co::Coroutine *c) {
         return;
       }
       size_t msglen = response.ByteSizeLong();
-      absl::StatusOr<ssize_t> n = socket_.SendMessage(sendbuf, msglen, c);
-      if (!n.ok()) {
+      absl::StatusOr<ssize_t> n_sent = socket_.SendMessage(sendbuf, msglen, c);
+      if (!n_sent.ok()) {
         return;
       }
       if (absl::Status status = socket_.SendFds(fds, c); !status.ok()) {
