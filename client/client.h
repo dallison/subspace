@@ -40,8 +40,8 @@ enum class ReadMode {
 // message just published.
 struct Message {
   Message() = default;
-  Message(size_t len, const void *buf, int64_t ordinal, int64_t timestamp)
-      : length(len), buffer(buf), ordinal(ordinal), timestamp(timestamp) {}
+  Message(size_t length_, const void *buffer_, int64_t ordinal_, int64_t timestamp_)
+      : length(length_), buffer(buffer_), ordinal(ordinal_), timestamp(timestamp_) {}
   size_t length = 0;            // Length of message in bytes.
   const void *buffer = nullptr; // Address of message payload.
   int64_t ordinal = -1;         // Monotonic number of message.
