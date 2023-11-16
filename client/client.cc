@@ -431,6 +431,15 @@ Client::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     new_slot = subscriber->LastSlot();
     break;
   }
+
+  // If, while we were waiting for the lock, the buffers were
+  // reallocated, we need to reload them now, otherwise the slot
+  // may refer to a buffer that has not yet been mapped in.
+  if (absl::Status status = ReloadBuffersIfNecessary(subscriber);
+      !status.ok()) {
+    return status;
+  }
+  
   // At this point, old_slot may have been reused so don't reference it
   // for any data.
   old_slot = nullptr; // Prevent any accidental use.
@@ -483,11 +492,6 @@ absl::StatusOr<const Message> Client::ReadMessage(SubscriberImpl *subscriber,
       subscriber->ClearPollFd();
       return Message();
     }
-  }
-
-  if (absl::Status status = ReloadBuffersIfNecessary(subscriber);
-      !status.ok()) {
-    return status;
   }
 
   // Check if there are any new reliable publishers and if so, load their

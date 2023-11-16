@@ -582,7 +582,8 @@ public:
     return client_->GetChannelCounters(impl_);
   }
 
-  const std::string Type() const { return impl_->Type(); }
+  std::string Name() const { return impl_->Name(); }
+  std::string Type() const { return impl_->Type(); }
 
   bool IsReliable() const { return impl_->IsReliable(); }
   bool IsLocal() const { return impl_->IsLocal(); }
@@ -702,7 +703,8 @@ public:
     return client_->GetChannelCounters(impl_);
   }
 
-  const std::string Type() const { return impl_->Type(); }
+  std::string Name() const { return impl_->Name(); }
+  std::string Type() const { return impl_->Type(); }
 
   // Register a function to be called when a subscriber drops a message.  The
   // function is called with the number of messages that have been missed
