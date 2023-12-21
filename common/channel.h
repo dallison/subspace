@@ -159,9 +159,9 @@ absl::StatusOr<SystemControlBlock *>
 CreateSystemControlBlock(toolbelt::FileDescriptor &fd);
 
 struct SlotBuffer {
-  SlotBuffer(int32_t slot_size_) : slot_size(slot_size_) {}
-  SlotBuffer(int32_t slot_size_, toolbelt::FileDescriptor fd_)
-      : slot_size(slot_size_), fd(std::move(fd_)) {}
+  SlotBuffer(int32_t slot_sz) : slot_size(slot_sz) {}
+  SlotBuffer(int32_t slot_sz, toolbelt::FileDescriptor f)
+      : slot_size(slot_sz), fd(std::move(f)) {}
   int32_t slot_size;
   toolbelt::FileDescriptor fd;
 };
@@ -171,8 +171,8 @@ struct SlotBuffer {
 // buffers: message buffer memory.
 struct SharedMemoryFds {
   SharedMemoryFds() = default;
-  SharedMemoryFds(toolbelt::FileDescriptor ccb_, std::vector<SlotBuffer> buffers_)
-      : ccb(std::move(ccb_)), buffers(std::move(buffers_)) {}
+  SharedMemoryFds(toolbelt::FileDescriptor ccb_fd, std::vector<SlotBuffer> bufs)
+      : ccb(std::move(ccb_fd)), buffers(std::move(bufs)) {}
   SharedMemoryFds(const SharedMemoryFds &) = delete;
 
   SharedMemoryFds(SharedMemoryFds &&c) {
@@ -198,8 +198,8 @@ template <int64_t alignment> int64_t Aligned(int64_t v) {
 
 struct BufferSet {
   BufferSet() = default;
-  BufferSet(int32_t slot_size_, char *buffer_)
-      : slot_size(slot_size_), buffer(buffer_) {}
+  BufferSet(int32_t slot_sz, char *buf)
+      : slot_size(slot_sz), buffer(buf) {}
   int32_t slot_size = 0;
   char *buffer = nullptr;
 };
