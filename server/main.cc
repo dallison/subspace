@@ -24,6 +24,8 @@ ABSL_FLAG(int, peer_port, 6502, "Discovery peer UDP port");
 ABSL_FLAG(std::string, log_level, "info", "Log level");
 ABSL_FLAG(std::string, interface, "", "Discovery network interface");
 ABSL_FLAG(bool, local, false, "Use local computer only");
+ABSL_FLAG(int, notify_fd, -1, "File descriptor to notify of startup");
+
 int main(int argc, char **argv) {
   absl::ParseCommandLine(argc, argv);
 
@@ -36,7 +38,7 @@ int main(int argc, char **argv) {
   subspace::Server server(
       scheduler, absl::GetFlag(FLAGS_socket), absl::GetFlag(FLAGS_interface),
       absl::GetFlag(FLAGS_disc_port), absl::GetFlag(FLAGS_peer_port),
-      absl::GetFlag(FLAGS_local));
+      absl::GetFlag(FLAGS_local), absl::GetFlag(FLAGS_notify_fd));
   
   server.SetLogLevel(absl::GetFlag(FLAGS_log_level));
   absl::Status s = server.Run();

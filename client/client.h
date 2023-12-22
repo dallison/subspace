@@ -154,6 +154,9 @@ private:
   friend class weak_ptr<T>;
 
   void IncRefCount(int inc) {
+    if (slot_ == nullptr) {
+      return;
+    }
     slot_->ref_count += inc;
     if (sub_->IsReliable()) {
       slot_->reliable_ref_count += inc;
@@ -340,13 +343,13 @@ private:
   // Wait until a reliable publisher can try again to send a message.  If the
   // client is coroutine-aware, the coroutine will wait.  If it's not,
   // the function will block on a poll until the publisher is triggered.
-  absl::Status WaitForReliablePublisher(details::PublisherImpl *publisher);
+  absl::Status WaitForReliablePublisher(details::PublisherImpl *publisher, co::Coroutine* c = nullptr);
 
   // Wait until there's a message available to be read by the
   // subscriber.  If the client is coroutine-aware, the coroutine
   // will wait.  If it's not, the function will block on a poll
   // until the subscriber is triggered.
-  absl::Status WaitForSubscriber(details::SubscriberImpl *subscriber);
+  absl::Status WaitForSubscriber(details::SubscriberImpl *subscriber, co::Coroutine* c = nullptr);
 
   // Read a message from a subscriber.  If there are no available messages
   // the 'length' field of the returned Message will be zero.  The 'buffer'
@@ -568,7 +571,7 @@ public:
   // Wait until a reliable publisher can try again to send a message.  If the
   // client is coroutine-aware, the coroutine will wait.  If it's not,
   // the function will block on a poll until the publisher is triggered.
-  absl::Status Wait() { return client_->WaitForReliablePublisher(impl_); }
+  absl::Status Wait(co::Coroutine* c = nullptr) { return client_->WaitForReliablePublisher(impl_, c); }
 
   struct pollfd GetPollFd() const {
     return client_->GetPollFd(impl_);
@@ -658,7 +661,7 @@ public:
   // subscriber.  If the client is coroutine-aware, the coroutine
   // will wait.  If it's not, the function will block on a poll
   // until the subscriber is triggered.
-  absl::Status Wait() { return client_->WaitForSubscriber(impl_); }
+  absl::Status Wait(co::Coroutine* c = nullptr) { return client_->WaitForSubscriber(impl_, c); }
 
   // Read a message from a subscriber.  If there are no available messages
   // the 'length' field of the returned Message will be zero.  The 'buffer'
