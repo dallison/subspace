@@ -354,7 +354,7 @@ Client::PublishMessageInternal(PublisherImpl *publisher, int64_t message_size,
   return Message(message_size, nullptr, msg.ordinal, msg.timestamp);
 }
 
-absl::Status Client::WaitForReliablePublisher(PublisherImpl *publisher) {
+absl::Status Client::WaitForReliablePublisher(PublisherImpl *publisher, co::Coroutine* c) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -366,7 +366,9 @@ absl::Status Client::WaitForReliablePublisher(PublisherImpl *publisher) {
       !status.ok()) {
     return status;
   }
-  if (co_ != nullptr) {
+  if (c != nullptr) {
+    c->Wait(publisher->GetPollFd().Fd(), POLLIN);
+  } else if (co_ != nullptr) {
     // Coroutine aware.  Yield control back until the poll fd is triggered.
     co_->Wait(publisher->GetPollFd().Fd(), POLLIN);
   } else {
@@ -384,12 +386,15 @@ absl::Status Client::WaitForReliablePublisher(PublisherImpl *publisher) {
   return absl::OkStatus();
 }
 
-absl::Status Client::WaitForSubscriber(SubscriberImpl *subscriber) {
+absl::Status Client::WaitForSubscriber(SubscriberImpl *subscriber, co::Coroutine* c) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
 
-  if (co_ != nullptr) {
+  if (c != nullptr) {
+    // Coroutine aware.  Yield control back until the poll fd is triggered.
+    c->Wait(subscriber->GetPollFd().Fd(), POLLIN);
+  } else if (co_ != nullptr) {
     // Coroutine aware.  Yield control back until the poll fd is triggered.
     co_->Wait(subscriber->GetPollFd().Fd(), POLLIN);
   } else {
@@ -439,7 +444,7 @@ Client::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
       !status.ok()) {
     return status;
   }
-  
+
   // At this point, old_slot may have been reused so don't reference it
   // for any data.
   old_slot = nullptr; // Prevent any accidental use.

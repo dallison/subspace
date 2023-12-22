@@ -3,6 +3,7 @@
 // See LICENSE file for licensing information.
 
 #include "server/server.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_format.h"
 #include "client/client.h"
 #include "proto/subspace.pb.h"
@@ -147,6 +148,7 @@ absl::Status Server::Run() {
     int64_t val = kServerReady;
     (void)::write(notify_fd_.Fd(), &val, 8);
   }
+
   absl::StatusOr<SystemControlBlock *> scb = CreateSystemControlBlock(scb_fd_);
   if (!scb.ok()) {
     return absl::InternalError(absl::StrFormat(
