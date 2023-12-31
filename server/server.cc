@@ -541,7 +541,7 @@ void Server::DiscoveryReceiverCoroutine(co::Coroutine *c) {
       continue;
     }
     Discovery disc;
-    if (!disc.ParseFromArray(buffer, *n)) {
+    if (!disc.ParseFromArray(buffer, static_cast<int>(*n))) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to parse discovery message");
       continue;
@@ -602,18 +602,18 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
   subscribed.set_num_slots(channel->NumSlots());
   subscribed.set_reliable(pub_reliable);
 
-  bool ok = subscribed.SerializeToArray(databuf, buflen);
+  bool ok = subscribed.SerializeToArray(databuf, static_cast<int>(buflen));
   if (!ok) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to serialize subscribed message");
     return;
   }
   int64_t length = subscribed.ByteSizeLong();
-  absl::StatusOr<ssize_t> n = bridge.SendMessage(databuf, length, c);
-  if (!n.ok()) {
+  absl::StatusOr<ssize_t> n_sent_1 = bridge.SendMessage(databuf, length, c);
+  if (!n_sent_1.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to send subscribed for %s: %s", channel_name.c_str(),
-                n.status().ToString().c_str());
+                n_sent_1.status().ToString().c_str());
     return;
   }
 
@@ -690,12 +690,12 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
       // The backpressure received here will be applied upwards because
       // we will stop reading the messages from the channel and thus
       // backpressure any publishers writing to that channel.
-      if (absl::StatusOr<ssize_t> n = bridge.SendMessage(data_addr, msglen, c);
-          !n.ok()) {
+      if (absl::StatusOr<ssize_t> n_sent_2 = bridge.SendMessage(data_addr, msglen, c);
+          !n_sent_2.ok()) {
         done = true;
         logger_.Log(toolbelt::LogLevel::kError,
                     "Failed to send bridge message for %s: %s",
-                    channel_name.c_str(), n.status().ToString().c_str());
+                    channel_name.c_str(), n_sent_2.status().ToString().c_str());
 
         break;
       }
@@ -733,7 +733,7 @@ absl::Status Server::SendSubscribeMessage(
   sub_addr->set_ip_address(&ip_addr, sizeof(ip_addr));
   sub_addr->set_port(receiver_addr.Port());
 
-  bool ok = disc.SerializeToArray(buffer, buffer_size);
+  bool ok = disc.SerializeToArray(buffer, static_cast<int>(buffer_size));
   if (!ok) {
     return absl::InternalError("Failed to serialize subscribe message");
   }
@@ -792,13 +792,13 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
 
   // Wait for the Subscribed message from the server.
   Subscribed subscribed;
-  absl::StatusOr<ssize_t> n = bridge->ReceiveMessage(buffer, sizeof(buffer), c);
-  if (!n.ok()) {
+  absl::StatusOr<ssize_t> n_recv = bridge->ReceiveMessage(buffer, sizeof(buffer), c);
+  if (!n_recv.ok()) {
     logger_.Log(toolbelt::LogLevel::kError, "Failed to receive Subscribed: %s",
-                n.status().ToString().c_str());
+                n_recv.status().ToString().c_str());
     return;
   }
-  if (!subscribed.ParseFromArray(buffer, *n)) {
+  if (!subscribed.ParseFromArray(buffer, static_cast<int>(*n_recv))) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to parse Subscribed message");
     return;
