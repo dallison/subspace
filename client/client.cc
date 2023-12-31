@@ -899,7 +899,7 @@ Client::SendRequestReceiveResponse(const Request &req, Response &response,
     socket_.Close();
     return n.status();
   }
-  if (!response.ParseFromArray(buffer_, *n)) {
+  if (!response.ParseFromArray(buffer_, static_cast<int>(*n))) {
     socket_.Close();
     return absl::InternalError("Failed to parse response");
   }
