@@ -312,8 +312,8 @@ public:
   // be manipulated.  The owner is the subscriber ID.
   //
   // Locks the CCB.
-  MessageSlot *NextSlot(MessageSlot *slot, bool reliable, int owner);
-  MessageSlot *LastSlot(MessageSlot *slot, bool reliable, int owner);
+  MessageSlot *NextSlot(MessageSlot *slot, bool reliable, int owner, std::function<void()> reload);
+  MessageSlot *LastSlot(MessageSlot *slot, bool reliable, int owner, std::function<void()> reload);
 
   // Get a pointer to the MessagePrefix for a given slot.
   MessagePrefix *Prefix(MessageSlot *slot) const {
@@ -377,7 +377,7 @@ public:
   // Gets the statistics counters.  Locks the CCB.
   void GetStatsCounters(int64_t &total_bytes, int64_t &total_messages);
 
-  bool LockForSharedInternal(MessageSlot* slot, int64_t ordinal, bool reliable);
+  bool LockForSharedInternal(MessageSlot *slot, int64_t ordinal, bool reliable);
   void SetDebug(bool v) { debug_ = v; }
 
   // Search the active list for a message with the given timestamp.  If found,

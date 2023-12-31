@@ -210,12 +210,12 @@ private:
   }
   void Trigger() { trigger_.Trigger(); }
 
-  MessageSlot *NextSlot() {
-    return Channel::NextSlot(CurrentSlot(), IsReliable(), subscriber_id_);
+  MessageSlot *NextSlot(std::function<void()> reload) {
+    return Channel::NextSlot(CurrentSlot(), IsReliable(), subscriber_id_, std::move(reload));
   }
 
-  MessageSlot *LastSlot() {
-    return Channel::LastSlot(CurrentSlot(), IsReliable(), subscriber_id_);
+  MessageSlot *LastSlot(std::function<void()> reload) {
+    return Channel::LastSlot(CurrentSlot(), IsReliable(), subscriber_id_, std::move(reload));
   }
 
   toolbelt::FileDescriptor &GetPollFd() { return trigger_.GetPollFd(); }
