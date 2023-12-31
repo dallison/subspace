@@ -308,7 +308,6 @@ Client::PublishMessageInternal(PublisherImpl *publisher, int64_t message_size,
       !status.ok()) {
     return status;
   }
-
   publisher->SetMessageSize(message_size);
 
   MessageSlot *old_slot = publisher->CurrentSlot();
@@ -318,6 +317,7 @@ Client::PublishMessageInternal(PublisherImpl *publisher, int64_t message_size,
              old_slot->ordinal);
     }
   }
+
   bool notify = false;
   Channel::PublishedMessage msg = publisher->ActivateSlotAndGetAnother(
       publisher->IsReliable(), /*is_activation=*/false, omit_prefix, &notify);
@@ -430,19 +430,15 @@ Client::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
 
   switch (mode) {
   case ReadMode::kReadNext:
-    new_slot = subscriber->NextSlot();
+    new_slot = subscriber->NextSlot([this, subscriber]() {
+      (void)ReloadBuffersIfNecessary(subscriber);
+    });
     break;
   case ReadMode::kReadNewest:
-    new_slot = subscriber->LastSlot();
+    new_slot = subscriber->LastSlot([this, subscriber]() {
+      (void)ReloadBuffersIfNecessary(subscriber);
+    });
     break;
-  }
-
-  // If, while we were waiting for the lock, the buffers were
-  // reallocated, we need to reload them now, otherwise the slot
-  // may refer to a buffer that has not yet been mapped in.
-  if (absl::Status status = ReloadBuffersIfNecessary(subscriber);
-      !status.ok()) {
-    return status;
   }
 
   // At this point, old_slot may have been reused so don't reference it
@@ -654,7 +650,6 @@ absl::Status Client::ReloadSubscriber(SubscriberImpl *subscriber) {
       !status.ok()) {
     return status;
   }
-
   subscriber->SetTriggerFd(fds[sub_resp.trigger_fd_index()]);
   subscriber->SetPollFd(fds[sub_resp.poll_fd_index()]);
 
@@ -874,9 +869,9 @@ absl::Status Client::ResizeChannel(PublisherImpl *publisher,
   if (resp.slot_size() != new_slot_size) {
     return absl::OkStatus();
   }
-
   std::vector<SlotBuffer> buffers = CollectBuffers(resp.buffers(), fds);
-  return publisher->MapNewBuffers(std::move(buffers));
+  auto status = publisher->MapNewBuffers(std::move(buffers));
+  return status;
 }
 
 absl::Status

@@ -38,7 +38,7 @@ static std::mutex *region_lock;
 static void *MapMemory(int fd, size_t size, int prot, const char *purpose) {
   void *p = mmap(NULL, size, prot, MAP_SHARED, fd, 0);
 #if SHOW_MMAPS
-  printf("mapping %s with size %zd: %p -> %p\n", purpose, size, p,
+  printf("%d: mapping %s with size %zd: %p -> %p\n", getpid(), purpose, size, p,
          reinterpret_cast<char *>(p) + size);
 #endif
 #if !NDEBUG && DEBUG_MMAPS
@@ -58,8 +58,8 @@ static void *MapMemory(int fd, size_t size, int prot, const char *purpose) {
 
 static void UnmapMemory(void *p, size_t size, const char *purpose) {
 #if SHOW_MMAPS
-  printf("unmapping %s with size %zd: %p -> %p\n", purpose, size, p,
-         reinterpret_cast<char *>(p) + size);
+  printf("%d: unmapping %s with size %zd: %p -> %p\n", getpid(), purpose, size,
+         p, reinterpret_cast<char *>(p) + size);
 #endif
 #if !NDEBUG && DEBUG_MMAPS
   assert(region_lock != nullptr);
@@ -651,8 +651,9 @@ void Channel::CleanupSlots(int owner, bool reliable) {
   }
 }
 
-MessageSlot *Channel::NextSlot(MessageSlot *slot, bool reliable, int owner) {
+MessageSlot *Channel::NextSlot(MessageSlot *slot, bool reliable, int owner,  std::function<void()> reload) {
   toolbelt::MutexLock lock(&ccb_->lock);
+  reload();
   if (slot == nullptr) {
     // No current slot, first in list.
     if (ccb_->active_list.first == 0) {
@@ -681,8 +682,9 @@ MessageSlot *Channel::NextSlot(MessageSlot *slot, bool reliable, int owner) {
   return slot;
 }
 
-MessageSlot *Channel::LastSlot(MessageSlot *slot, bool reliable, int owner) {
+MessageSlot *Channel::LastSlot(MessageSlot *slot, bool reliable, int owner,  std::function<void()> reload) {
   toolbelt::MutexLock lock(&ccb_->lock);
+  reload();
   if (ccb_->active_list.last == 0) {
     return nullptr;
   }
