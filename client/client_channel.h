@@ -119,9 +119,9 @@ private:
 
   PublishedMessage ActivateSlotAndGetAnother(bool reliable, bool is_activation,
                                              bool omit_prefix,
-                                             bool *notify = nullptr) {
+                                             bool *notify, std::function<bool(ChannelLock*)> reload) {
     return Channel::ActivateSlotAndGetAnother(
-        slot_, reliable, is_activation, publisher_id_, omit_prefix, notify);
+        slot_, reliable, is_activation, publisher_id_, omit_prefix, notify, std::move(reload));
   }
   void ClearSubscribers() { subscribers_.clear(); }
   void AddSubscriber(toolbelt::FileDescriptor fd) {
@@ -210,11 +210,11 @@ private:
   }
   void Trigger() { trigger_.Trigger(); }
 
-  MessageSlot *NextSlot(std::function<void()> reload) {
+  MessageSlot *NextSlot(std::function<bool(ChannelLock*)> reload) {
     return Channel::NextSlot(CurrentSlot(), IsReliable(), subscriber_id_, std::move(reload));
   }
 
-  MessageSlot *LastSlot(std::function<void()> reload) {
+  MessageSlot *LastSlot(std::function<bool(ChannelLock*)> reload) {
     return Channel::LastSlot(CurrentSlot(), IsReliable(), subscriber_id_, std::move(reload));
   }
 
@@ -224,7 +224,7 @@ private:
   MessageSlot *FindMessage(uint64_t timestamp) {
     MessageSlot *slot =
         FindActiveSlotByTimestamp(CurrentSlot(), timestamp, IsReliable(),
-                                  GetSubscriberId(), search_buffer_);
+                                  GetSubscriberId(), search_buffer_, nullptr);
     if (slot != nullptr) {
       SetSlot(slot);
     }

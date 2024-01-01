@@ -83,6 +83,39 @@ struct ChannelCounters {
   uint16_t num_reliable_subs; // Current number of reliable subscribers.
 };
 
+// ChannelLock locks a channel and also handles reload races where
+// another client has changed the channel's buffers while we
+// were waiting for the lock.  If the 'reload' function returns
+// true, the buffers have been changed and we have mapped
+// them in.  We all reload in a loop because we need to unlock
+// the channel while we talk to the server and another client could
+// get in and change the buffers while we are not looking.
+class ChannelLock {
+public:
+  ChannelLock(pthread_mutex_t *lock,
+              std::function<bool(ChannelLock *lock)> reload = nullptr)
+      : lock_(lock), reload_(std::move(reload)) {
+    Lock();
+    if (reload != nullptr) {
+      // This will look to see if a reload is needed and if so,
+      // unlock the channel, talk to the server and map in the
+      // new buffers.  The lock is reacquired before it returns.
+      while (reload(this)) {
+        // Nothing to do, just try reloading again.
+      }
+    }
+  }
+
+  ~ChannelLock() { Unlock(); }
+
+  void Lock() { pthread_mutex_lock(lock_); }
+  void Unlock() { pthread_mutex_unlock(lock_); }
+
+private:
+  pthread_mutex_t *lock_;
+  std::function<bool(ChannelLock *)> reload_;
+};
+
 struct SystemControlBlock {
   ChannelCounters counters[kMaxChannels];
 };
@@ -198,8 +231,7 @@ template <int64_t alignment> int64_t Aligned(int64_t v) {
 
 struct BufferSet {
   BufferSet() = default;
-  BufferSet(int32_t slot_sz, char *buf)
-      : slot_size(slot_sz), buffer(buf) {}
+  BufferSet(int32_t slot_sz, char *buf) : slot_size(slot_sz), buffer(buf) {}
   int32_t slot_size = 0;
   char *buffer = nullptr;
 };
@@ -281,7 +313,8 @@ public:
   // subscriber or publisher, allocated by the server.
   //
   // This locks the CCB.
-  MessageSlot *FindFreeSlot(bool reliable, int owner);
+  MessageSlot *FindFreeSlot(bool reliable, int owner,
+                            std::function<bool(ChannelLock *)> reload);
 
   // A publisher is done with its busy slot (it now contains a message).  The
   // slot is moved from the busy list to the end of the active list and other
@@ -299,9 +332,11 @@ public:
   // notify: set to true if we should notify the subscribers.
   //
   // Locks the CCB.
-  PublishedMessage ActivateSlotAndGetAnother(MessageSlot *slot, bool reliable,
-                                             bool is_activation, int owner,
-                                             bool omit_prefix, bool *notify);
+  PublishedMessage
+  ActivateSlotAndGetAnother(MessageSlot *slot, bool reliable,
+                            bool is_activation, int owner, bool omit_prefix,
+                            bool *notify,
+                            std::function<bool(ChannelLock *)> reload);
 
   // A subscriber wants to find a slot with a message in it.  There are
   // two ways to get this:
@@ -312,8 +347,10 @@ public:
   // be manipulated.  The owner is the subscriber ID.
   //
   // Locks the CCB.
-  MessageSlot *NextSlot(MessageSlot *slot, bool reliable, int owner, std::function<void()> reload);
-  MessageSlot *LastSlot(MessageSlot *slot, bool reliable, int owner, std::function<void()> reload);
+  MessageSlot *NextSlot(MessageSlot *slot, bool reliable, int owner,
+                        std::function<bool(ChannelLock *)> reload);
+  MessageSlot *LastSlot(MessageSlot *slot, bool reliable, int owner,
+                        std::function<bool(ChannelLock *)> reload);
 
   // Get a pointer to the MessagePrefix for a given slot.
   MessagePrefix *Prefix(MessageSlot *slot) const {
@@ -370,7 +407,9 @@ public:
   int GetChannelId() const { return channel_id_; }
 
   int NumUpdates() const { return num_updates_; }
-  void SetNumUpdates(int num_updates) { num_updates_ = static_cast<uint16_t>(num_updates); }
+  void SetNumUpdates(int num_updates) {
+    num_updates_ = static_cast<uint16_t>(num_updates);
+  }
 
   SystemControlBlock *GetScb() const { return scb_; }
 
@@ -387,10 +426,11 @@ public:
   // buffer, but this function will modify it.  This is to avoid memory
   // allocation for every search or buffer allocation for every subscriber when
   // searches are rare.
-  MessageSlot *FindActiveSlotByTimestamp(MessageSlot *old_slot,
-                                         uint64_t timestamp, bool reliable,
-                                         int owner,
-                                         std::vector<MessageSlot *> &buffer);
+  MessageSlot *
+  FindActiveSlotByTimestamp(MessageSlot *old_slot, uint64_t timestamp,
+                            bool reliable, int owner,
+                            std::vector<MessageSlot *> &buffer,
+                            std::function<bool(ChannelLock *)> reload);
 
   void SetType(std::string type) { type_ = std::move(type); }
   const std::string Type() const { return type_; }
