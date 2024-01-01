@@ -153,7 +153,15 @@ Client::CreatePublisher(const std::string &channel_name, int slot_size,
 
   if (!opts.IsReliable()) {
     // A publisher needs a slot.  Allocate one.
-    MessageSlot *slot = channel->FindFreeSlot(false, channel->GetPublisherId());
+    MessageSlot *slot = channel->FindFreeSlot(
+        false, channel->GetPublisherId(),
+        [ this, channel = channel.get() ](ChannelLock * lock) {
+          absl::StatusOr<bool> ok = ReloadBuffersIfNecessary(channel, lock);
+          if (!ok.ok()) {
+            return false;
+          }
+          return *ok;
+        });
     if (slot == nullptr) {
       return absl::InternalError("No slot available for publisher");
     }
@@ -262,10 +270,6 @@ absl::StatusOr<void *> Client::GetMessageBuffer(PublisherImpl *publisher,
     return status;
   }
 
-  if (absl::Status status = ReloadBuffersIfNecessary(publisher); !status.ok()) {
-    return status;
-  }
-
   if (publisher->IsReliable() && publisher->CurrentSlot() == nullptr) {
     // We are a reliable publisher and don't have a slot yet.  Try to allocate
     // one now.  If we fail, we return nullptr so that the caller knows to try
@@ -280,7 +284,15 @@ absl::StatusOr<void *> Client::GetMessageBuffer(PublisherImpl *publisher,
       return nullptr;
     }
     MessageSlot *slot =
-        publisher->FindFreeSlot(true, publisher->GetPublisherId());
+        publisher->FindFreeSlot(true, publisher->GetPublisherId(),
+                                [this, publisher](ChannelLock *lock) {
+                                  absl::StatusOr<bool> ok =
+                                      ReloadBuffersIfNecessary(publisher, lock);
+                                  if (!ok.ok()) {
+                                    return false;
+                                  }
+                                  return *ok;
+                                });
     if (slot == nullptr) {
       return nullptr;
     }
@@ -320,7 +332,14 @@ Client::PublishMessageInternal(PublisherImpl *publisher, int64_t message_size,
 
   bool notify = false;
   Channel::PublishedMessage msg = publisher->ActivateSlotAndGetAnother(
-      publisher->IsReliable(), /*is_activation=*/false, omit_prefix, &notify);
+      publisher->IsReliable(), /*is_activation=*/false, omit_prefix, &notify,
+      [this, publisher](ChannelLock *lock) {
+        absl::StatusOr<bool> ok = ReloadBuffersIfNecessary(publisher, lock);
+        if (!ok.ok()) {
+          return false;
+        }
+        return *ok;
+      });
 
   // Prevent use of old_slot.
   old_slot = nullptr;
@@ -354,7 +373,8 @@ Client::PublishMessageInternal(PublisherImpl *publisher, int64_t message_size,
   return Message(message_size, nullptr, msg.ordinal, msg.timestamp);
 }
 
-absl::Status Client::WaitForReliablePublisher(PublisherImpl *publisher, co::Coroutine* c) {
+absl::Status Client::WaitForReliablePublisher(PublisherImpl *publisher,
+                                              co::Coroutine *c) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -386,7 +406,8 @@ absl::Status Client::WaitForReliablePublisher(PublisherImpl *publisher, co::Coro
   return absl::OkStatus();
 }
 
-absl::Status Client::WaitForSubscriber(SubscriberImpl *subscriber, co::Coroutine* c) {
+absl::Status Client::WaitForSubscriber(SubscriberImpl *subscriber,
+                                       co::Coroutine *c) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -430,13 +451,21 @@ Client::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
 
   switch (mode) {
   case ReadMode::kReadNext:
-    new_slot = subscriber->NextSlot([this, subscriber]() {
-      (void)ReloadBuffersIfNecessary(subscriber);
+    new_slot = subscriber->NextSlot([this, subscriber](ChannelLock *lock) {
+      absl::StatusOr<bool> ok = ReloadBuffersIfNecessary(subscriber, lock);
+      if (!ok.ok()) {
+        return false;
+      }
+      return *ok;
     });
     break;
   case ReadMode::kReadNewest:
-    new_slot = subscriber->LastSlot([this, subscriber]() {
-      (void)ReloadBuffersIfNecessary(subscriber);
+    new_slot = subscriber->LastSlot([this, subscriber](ChannelLock *lock) {
+      absl::StatusOr<bool> ok = ReloadBuffersIfNecessary(subscriber, lock);
+      if (!ok.ok()) {
+        return false;
+      }
+      return *ok;
     });
     break;
   }
@@ -575,9 +604,10 @@ int64_t Client::GetCurrentOrdinal(SubscriberImpl *sub) const {
   return slot->ordinal;
 }
 
-absl::Status Client::ReloadBuffersIfNecessary(ClientChannel *channel) {
+absl::StatusOr<bool> Client::ReloadBuffersIfNecessary(ClientChannel *channel,
+                                                      ChannelLock *lock) {
   if (!channel->BuffersChanged()) {
-    return absl::OkStatus();
+    return false;
   }
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
@@ -590,14 +620,23 @@ absl::Status Client::ReloadBuffersIfNecessary(ClientChannel *channel) {
   Response response;
   std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
+
+  // Unlock channel while talking to the server.
+  lock->Unlock();
   if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
       !status.ok()) {
     return status;
   }
+  // Reload the channel.
+  lock->Lock();
 
   auto &resp = response.get_buffers();
   std::vector<SlotBuffer> buffers = CollectBuffers(resp.buffers(), fds);
-  return channel->MapNewBuffers(std::move(buffers));
+  if (absl::Status status = channel->MapNewBuffers(std::move(buffers));
+      !status.ok()) {
+    return status;
+  }
+  return true;
 }
 
 absl::Status Client::ReloadSubscriber(SubscriberImpl *subscriber) {
@@ -741,7 +780,15 @@ Client::ReloadReliablePublishersIfNecessary(SubscriberImpl *subscriber) {
 // on message and thus keep a reference to it.
 absl::Status Client::ActivateReliableChannel(PublisherImpl *publisher) {
   MessageSlot *slot =
-      publisher->FindFreeSlot(/*reliable=*/true, publisher->GetPublisherId());
+      publisher->FindFreeSlot(/*reliable=*/true, publisher->GetPublisherId(),
+                              [this, publisher](ChannelLock *lock) {
+                                absl::StatusOr<bool> ok =
+                                    ReloadBuffersIfNecessary(publisher, lock);
+                                if (!ok.ok()) {
+                                  return false;
+                                }
+                                return *ok;
+                              });
   if (slot == nullptr) {
     return absl::InternalError(
         absl::StrFormat("Channel %s has no free slots", publisher->Name()));
@@ -755,9 +802,17 @@ absl::Status Client::ActivateReliableChannel(PublisherImpl *publisher) {
   }
   slot->message_size = 1;
 
-  publisher->ActivateSlotAndGetAnother(/*reliable=*/true,
-                                       /*is_activation=*/true,
-                                       /*omit_prefix=*/false);
+  publisher->ActivateSlotAndGetAnother(
+      /*reliable=*/true,
+      /*is_activation=*/true,
+      /*omit_prefix=*/false, /*notify=*/nullptr,
+      [this, publisher](ChannelLock *lock) {
+        absl::StatusOr<bool> ok = ReloadBuffersIfNecessary(publisher, lock);
+        if (!ok.ok()) {
+          return false;
+        }
+        return *ok;
+      });
   publisher->SetSlot(nullptr);
   publisher->TriggerSubscribers();
 

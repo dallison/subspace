@@ -368,7 +368,7 @@ void Channel::Unmap() {
 // Called on server to extend the allocated buffers.
 absl::StatusOr<toolbelt::FileDescriptor>
 Channel::ExtendBuffers(int32_t new_slot_size) {
-  toolbelt::MutexLock lock(&ccb_->lock);
+  ChannelLock lock(&ccb_->lock);
 
   int64_t buffers_size =
       sizeof(BufferHeader) +
@@ -550,22 +550,22 @@ MessageSlot *Channel::FindFreeSlotLocked(bool reliable, int owner) {
   return nullptr;
 }
 
-MessageSlot *Channel::FindFreeSlot(bool reliable, int owner) {
-  toolbelt::MutexLock lock(&ccb_->lock);
+MessageSlot *Channel::FindFreeSlot(bool reliable, int owner,
+                                   std::function<bool(ChannelLock *)> reload) {
+  ChannelLock lock(&ccb_->lock, std::move(reload));
   return FindFreeSlotLocked(reliable, owner);
 }
 
 void Channel::GetStatsCounters(int64_t &total_bytes, int64_t &total_messages) {
-  toolbelt::MutexLock lock(&ccb_->lock);
+  ChannelLock lock(&ccb_->lock);
   total_bytes = ccb_->total_bytes;
   total_messages = ccb_->total_messages;
 }
 
-Channel::PublishedMessage
-Channel::ActivateSlotAndGetAnother(MessageSlot *slot, bool reliable,
-                                   bool is_activation, int owner,
-                                   bool omit_prefix, bool *notify) {
-  toolbelt::MutexLock lock(&ccb_->lock);
+Channel::PublishedMessage Channel::ActivateSlotAndGetAnother(
+    MessageSlot *slot, bool reliable, bool is_activation, int owner,
+    bool omit_prefix, bool *notify, std::function<bool(ChannelLock *)> reload) {
+  ChannelLock lock(&ccb_->lock, std::move(reload));
 
   // Move slot from busy list to active list.
   ListRemove(&ccb_->busy_list, &slot->element);
@@ -621,7 +621,7 @@ inline void IncDecRefCount(MessageSlot *slot, bool reliable, int inc) {
 }
 
 void Channel::CleanupSlots(int owner, bool reliable) {
-  toolbelt::MutexLock lock(&ccb_->lock);
+  ChannelLock lock(&ccb_->lock);
   // Clean up active list.  Remove references for any slot owned by the
   // owner.
   void *p = FromCCBOffset(ccb_->active_list.first);
@@ -651,9 +651,9 @@ void Channel::CleanupSlots(int owner, bool reliable) {
   }
 }
 
-MessageSlot *Channel::NextSlot(MessageSlot *slot, bool reliable, int owner,  std::function<void()> reload) {
-  toolbelt::MutexLock lock(&ccb_->lock);
-  reload();
+MessageSlot *Channel::NextSlot(MessageSlot *slot, bool reliable, int owner,
+                               std::function<bool(ChannelLock *)> reload) {
+  ChannelLock lock(&ccb_->lock, std::move(reload));
   if (slot == nullptr) {
     // No current slot, first in list.
     if (ccb_->active_list.first == 0) {
@@ -682,9 +682,9 @@ MessageSlot *Channel::NextSlot(MessageSlot *slot, bool reliable, int owner,  std
   return slot;
 }
 
-MessageSlot *Channel::LastSlot(MessageSlot *slot, bool reliable, int owner,  std::function<void()> reload) {
-  toolbelt::MutexLock lock(&ccb_->lock);
-  reload();
+MessageSlot *Channel::LastSlot(MessageSlot *slot, bool reliable, int owner,
+                               std::function<bool(ChannelLock *)> reload) {
+  ChannelLock lock(&ccb_->lock, std::move(reload));
   if (ccb_->active_list.last == 0) {
     return nullptr;
   }
@@ -702,8 +702,9 @@ MessageSlot *Channel::LastSlot(MessageSlot *slot, bool reliable, int owner,  std
 MessageSlot *
 Channel::FindActiveSlotByTimestamp(MessageSlot *old_slot, uint64_t timestamp,
                                    bool reliable, int owner,
-                                   std::vector<MessageSlot *> &buffer) {
-  toolbelt::MutexLock lock(&ccb_->lock);
+                                   std::vector<MessageSlot *> &buffer,
+                                   std::function<bool(ChannelLock *)> reload) {
+  ChannelLock lock(&ccb_->lock, std::move(reload));
 
   // Copy pointers to active list slots into search buffer.  They are already
   // in timestamp order.
@@ -742,7 +743,7 @@ Channel::FindActiveSlotByTimestamp(MessageSlot *old_slot, uint64_t timestamp,
 
 bool Channel::LockForSharedInternal(MessageSlot *slot, int64_t ordinal,
                                     bool reliable) {
-  toolbelt::MutexLock lock(&ccb_->lock);
+  ChannelLock lock(&ccb_->lock);
   if (slot->ordinal != ordinal) {
     return false;
   }
