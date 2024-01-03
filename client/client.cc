@@ -625,6 +625,7 @@ absl::StatusOr<bool> Client::ReloadBuffersIfNecessary(ClientChannel *channel,
   lock->Unlock();
   if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
       !status.ok()) {
+    lock->Lock();
     return status;
   }
   // Reload the channel.
