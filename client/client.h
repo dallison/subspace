@@ -75,7 +75,7 @@ public:
   shared_ptr() = default;
 
   ~shared_ptr() {
-    if (*this) {
+    if (sub_ != nullptr) {
       IncRefCount(-1);
     }
   }

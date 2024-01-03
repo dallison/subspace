@@ -396,9 +396,14 @@ public:
   // Get the buffer associated with the given slot id.  The first buffer
   // starts immediately after the buffer header.
   char *Buffer(int slot_id) const {
+    int index = ccb_->slots[slot_id].buffer_index;
+    if (index < 0 || index >= buffers_.size()) {
+      std::cerr << "Invalid buffer index for slot " << slot_id << ": " << index << std::endl;
+      abort();
+    }
     return buffers_.empty()
                ? nullptr
-               : (buffers_[ccb_->slots[slot_id].buffer_index].buffer +
+               : (buffers_[index].buffer +
                   sizeof(BufferHeader));
   }
   void CleanupSlots(int owner, bool reliable);
