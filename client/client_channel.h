@@ -7,11 +7,11 @@
 
 #include "client/options.h"
 #include "common/channel.h"
-#include "toolbelt/triggerfd.h"
 #include "coroutine.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/fd.h"
 #include "toolbelt/sockets.h"
+#include "toolbelt/triggerfd.h"
 #include <sys/poll.h>
 
 // Notification strategy
@@ -117,11 +117,13 @@ private:
 
   bool IsPublisher() const override { return true; }
 
-  PublishedMessage ActivateSlotAndGetAnother(bool reliable, bool is_activation,
-                                             bool omit_prefix,
-                                             bool *notify, std::function<bool(ChannelLock*)> reload) {
-    return Channel::ActivateSlotAndGetAnother(
-        slot_, reliable, is_activation, publisher_id_, omit_prefix, notify, std::move(reload));
+  PublishedMessage
+  ActivateSlotAndGetAnother(bool reliable, bool is_activation, bool omit_prefix,
+                            bool *notify,
+                            std::function<bool(ChannelLock *)> reload) {
+    return Channel::ActivateSlotAndGetAnother(slot_, reliable, is_activation,
+                                              publisher_id_, omit_prefix,
+                                              notify, std::move(reload));
   }
   void ClearSubscribers() { subscribers_.clear(); }
   void AddSubscriber(toolbelt::FileDescriptor fd) {
@@ -161,7 +163,13 @@ public:
                  int subscriber_id, std::string type,
                  const SubscriberOptions &options)
       : ClientChannel(name, num_slots, channel_id, std::move(type)),
-        subscriber_id_(subscriber_id), options_(options) {}
+        subscriber_id_(subscriber_id), options_(options) {
+    shared_ptr_refs_ =
+        std::make_unique<std::atomic<int>[]>(options.MaxSharedPtrs());
+    for (int i = 0; i < options.MaxSharedPtrs(); ++i) {
+      shared_ptr_refs_[i] = 0;
+    }
+  }
 
   int64_t CurrentOrdinal() const {
     return CurrentSlot() == nullptr ? -1 : CurrentSlot()->ordinal;
@@ -173,14 +181,38 @@ public:
 
   int32_t SlotSize() const { return Channel::SlotSize(CurrentSlot()); }
 
-  void IncDecSharedPtrCount(int inc) { num_shared_ptrs_ += inc; }
+  // We need another shared ptr.  Find a free reference and return
+  // an index.  We have already checked that there is room so this
+  // can never fail.
+  size_t AllocateSharedPtr() {
+    for (size_t i = 0; i < size_t(MaxSharedPtrs()); ++i) {
+      if (shared_ptr_refs_[i] == 0) {
+        shared_ptr_refs_[i] = 1;
+        num_shared_ptrs_++;
+        return i;
+      }
+    }
+    // Can never get here as the limits have been checked.
+    abort();
+  }
+
+  void IncDecSharedPtrRefCount(int inc, size_t index) {
+    shared_ptr_refs_[index] += inc;
+    if (shared_ptr_refs_[index] == 0) {
+      num_shared_ptrs_--;
+    }
+  }
   int NumSharedPtrs() const { return num_shared_ptrs_; }
   int MaxSharedPtrs() const { return options_.MaxSharedPtrs(); }
   bool CheckSharedPtrCount() const {
     return num_shared_ptrs_ < options_.MaxSharedPtrs();
   }
 
-  bool LockForShared(MessageSlot* slot, int64_t ordinal) {
+  int GetSharedPtrRefCount(size_t index) const {
+    return shared_ptr_refs_[index];
+  }
+
+  bool LockForShared(MessageSlot *slot, int64_t ordinal) {
     return LockForSharedInternal(slot, ordinal, IsReliable());
   }
 
@@ -210,12 +242,14 @@ private:
   }
   void Trigger() { trigger_.Trigger(); }
 
-  MessageSlot *NextSlot(std::function<bool(ChannelLock*)> reload) {
-    return Channel::NextSlot(CurrentSlot(), IsReliable(), subscriber_id_, std::move(reload));
+  MessageSlot *NextSlot(std::function<bool(ChannelLock *)> reload) {
+    return Channel::NextSlot(CurrentSlot(), IsReliable(), subscriber_id_,
+                             std::move(reload));
   }
 
-  MessageSlot *LastSlot(std::function<bool(ChannelLock*)> reload) {
-    return Channel::LastSlot(CurrentSlot(), IsReliable(), subscriber_id_, std::move(reload));
+  MessageSlot *LastSlot(std::function<bool(ChannelLock *)> reload) {
+    return Channel::LastSlot(CurrentSlot(), IsReliable(), subscriber_id_,
+                             std::move(reload));
   }
 
   toolbelt::FileDescriptor &GetPollFd() { return trigger_.GetPollFd(); }
@@ -235,7 +269,13 @@ private:
   toolbelt::TriggerFd trigger_;
   std::vector<toolbelt::TriggerFd> reliable_publishers_;
   SubscriberOptions options_;
-  int num_shared_ptrs_ = 0;
+  std::atomic<int> num_shared_ptrs_ = 0;
+
+  // Each shared_ptr has an index into this array that holds a reference
+  // counter.  Each copy of a shared_ptr increments the reference counter
+  // and when it goes to zero, we know that there are no more copies of
+  // the shared_ptr.
+  std::unique_ptr<std::atomic<int>[]> shared_ptr_refs_;
 
   // It is rare that subscribers need to search for messges by timestamp.  This
   // will keep the memory allocation to the first search on a subscriber.  Most
