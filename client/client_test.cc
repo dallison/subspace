@@ -1017,28 +1017,26 @@ TEST_F(ClientTest, PublishSingleMessageAndReadSharedPtr) {
   ASSERT_TRUE(static_cast<bool>(ptr));
   ASSERT_STREQ("foobar", ptr.get());
 
-  // For use count, the subscriber still has a reference to the slot, so the
-  // shared_ptr use counts are one greater than you would expect.
-  ASSERT_EQ(2, ptr.use_count());
+  ASSERT_EQ(1, ptr.use_count());
 
   // Copy the shared ptr using copy constructor.
   subspace::shared_ptr<const char> p2(ptr);
-  ASSERT_EQ(3, ptr.use_count());
-  ASSERT_EQ(3, p2.use_count());
+  ASSERT_EQ(2, ptr.use_count());
+  ASSERT_EQ(2, p2.use_count());
 
   // Copy using copy operator.
   subspace::shared_ptr<const char> p3 = ptr;
-  ASSERT_EQ(4, ptr.use_count());
-  ASSERT_EQ(4, p2.use_count());
-  ASSERT_EQ(4, p3.use_count());
+  ASSERT_EQ(3, ptr.use_count());
+  ASSERT_EQ(3, p2.use_count());
+  ASSERT_EQ(3, p3.use_count());
 
   // Move p3 to p4.
   subspace::shared_ptr<const char> p4 = std::move(p3);
   ASSERT_FALSE(static_cast<bool>(p3));
-  ASSERT_EQ(4, ptr.use_count());
-  ASSERT_EQ(4, p2.use_count());
+  ASSERT_EQ(3, ptr.use_count());
+  ASSERT_EQ(3, p2.use_count());
   ASSERT_EQ(0, p3.use_count());
-  ASSERT_EQ(4, p4.use_count());
+  ASSERT_EQ(3, p4.use_count());
 }
 
 TEST_F(ClientTest, Publish2Message2AndReadSharedPtrs) {
@@ -1071,7 +1069,8 @@ TEST_F(ClientTest, Publish2Message2AndReadSharedPtrs) {
   subspace::weak_ptr<const char> w(*p);
   ASSERT_FALSE(w.expired());
 
-  absl::StatusOr<subspace::shared_ptr<const char>> p2 = sub->ReadMessage<const char>();
+  absl::StatusOr<subspace::shared_ptr<const char>> p2 =
+      sub->ReadMessage<const char>();
 
   ASSERT_TRUE(p2.ok());
   ASSERT_TRUE(static_cast<bool>(*p2));
@@ -1094,10 +1093,36 @@ TEST_F(ClientTest, Publish2Message2AndReadSharedPtrs) {
   // weak_ptr will have expired.
   ASSERT_TRUE(w.expired());
 
-  // Another weak ptr.
-  subspace::weak_ptr<const char> w2(*p2);
-  subspace::shared_ptr<const char> p3(w2);
-  ASSERT_EQ(3, p3.use_count());
+  // Number of shared pointers: 1
+  ASSERT_EQ(1, sub->NumSharedPtrs());
+  {
+    // Another weak ptr from the valid shared ptr.
+    subspace::weak_ptr<const char> w2(*p2);
+    // Shared ptr from weak ptr and destruct it.
+    subspace::shared_ptr<const char> p2(w2);
+    // Number of shared pointers: 2
+    ASSERT_EQ(2, sub->NumSharedPtrs());
+
+    ASSERT_EQ(1, p2.use_count());
+  }
+  // Number of shared pointers: 1
+
+  // Lock the weak ptr to create another shared ptr.
+  subspace::weak_ptr<const char> w3(*p2);
+  subspace::shared_ptr<const char> p3(w3.lock());
+  // Number of shared pointers: 2
+  ASSERT_EQ(1, p3.use_count());
+  ASSERT_EQ(2, sub->NumSharedPtrs());
+
+  // Lock again, this will exceed shared ptr limits.
+  subspace::shared_ptr<const char> p4(w3.lock());
+  // Number of shared pointers would be 3
+  ASSERT_EQ(0, p4.use_count());
+
+  // Create another shared ptr and check that it works - it's a copy.
+  subspace::shared_ptr<const char> p5(*p2);
+  ASSERT_EQ(2, p5.use_count());
+  ASSERT_EQ(2, sub->NumSharedPtrs());
 }
 
 TEST_F(ClientTest, FindMessage) {

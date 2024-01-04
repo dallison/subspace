@@ -82,11 +82,13 @@ public:
   shared_ptr(const weak_ptr<T> &p);
 
   shared_ptr(const shared_ptr &p)
-      : sub_(p.sub_), msg_(p.msg_), slot_(p.slot_), ordinal_(p.ordinal_) {
+      : sub_(p.sub_), index_(p.index_), msg_(p.msg_), slot_(p.slot_),
+        ordinal_(p.ordinal_) {
     IncRefCount(+1);
   }
   shared_ptr(shared_ptr &&p)
-      : sub_(p.sub_), msg_(p.msg_), slot_(p.slot_), ordinal_(p.ordinal_) {
+      : sub_(p.sub_), index_(p.index_), msg_(p.msg_), slot_(p.slot_),
+        ordinal_(p.ordinal_) {
     p.ResetInternal();
   }
 
@@ -94,6 +96,7 @@ public:
     if (*this != p) {
       IncRefCount(-1);
     }
+    IncRefCount(+1);
     CopyFrom(p);
     return *this;
   }
@@ -108,7 +111,7 @@ public:
   }
 
   void reset() {
-    if (*this) {
+    if (sub_ != nullptr) {
       IncRefCount(-1);
     }
     ResetInternal();
@@ -123,7 +126,7 @@ public:
   long use_count() const {
     return (sub_ == nullptr || slot_ == nullptr || msg_.length == 0)
                ? 0
-               : slot_->ref_count;
+               : sub_->GetSharedPtrRefCount(index_);
   }
 
   const Message &GetMessage() const { return msg_; }
@@ -132,6 +135,7 @@ private:
   friend class Client;
   void CopyFrom(const shared_ptr &p) {
     sub_ = p.sub_;
+    index_ = p.index_;
     msg_ = p.msg_;
     slot_ = p.slot_;
     ordinal_ = p.ordinal_;
@@ -145,7 +149,12 @@ private:
   shared_ptr(details::SubscriberImpl *sub, const Message &msg)
       : sub_(sub), msg_(msg), slot_(sub->CurrentSlot()),
         ordinal_(sub->CurrentOrdinal()) {
-    IncRefCount(+1);
+    if (!sub_->CheckSharedPtrCount()) {
+      ResetInternal();
+      return;
+    }
+    index_ = sub_->AllocateSharedPtr();
+    IncDecSlotRefCount(+1);
   }
 
   template <typename M>
@@ -153,7 +162,7 @@ private:
 
   friend class weak_ptr<T>;
 
-  void IncRefCount(int inc) {
+  void IncDecSlotRefCount(int inc) {
     if (slot_ == nullptr) {
       return;
     }
@@ -161,10 +170,18 @@ private:
     if (sub_->IsReliable()) {
       slot_->reliable_ref_count += inc;
     }
-    sub_->IncDecSharedPtrCount(inc);
+  }
+
+  void IncRefCount(int inc) {
+    if (slot_ == nullptr) {
+      return;
+    }
+    IncDecSlotRefCount(inc);
+    sub_->IncDecSharedPtrRefCount(inc, index_);
   }
 
   details::SubscriberImpl *sub_ = nullptr;
+  size_t index_ = 0;
   Message msg_;
   MessageSlot *slot_ = nullptr;
   int64_t ordinal_ = -1;
@@ -206,7 +223,12 @@ public:
     slot_ = nullptr;
   }
 
-  long use_count() const { return msg_.length == 0 ? 0 : slot_->ref_count; }
+  long use_count() const {
+    if (slot_ == nullptr) {
+      return 0;
+    }
+    return msg_.length == 0 ? 0 : slot_->ref_count;
+  }
 
   bool expired() const { return slot_->ordinal != ordinal_; }
 
@@ -220,11 +242,7 @@ public:
       return shared_ptr<T>();
     }
 
-    auto ptr = shared_ptr<T>(*this);
-    // We have incremented the ref count in LockForShared, and also
-    // in the shared_ptr constructor.  Decrement it.
-    ptr->IncDecRefCount(-1);
-    return ptr;
+    return shared_ptr<T>(*this);
   }
 
 private:
@@ -249,7 +267,15 @@ class Subscriber;
 template <typename T>
 inline shared_ptr<T>::shared_ptr(const weak_ptr<T> &p)
     : sub_(p.sub_), msg_(p.msg_), slot_(p.slot_), ordinal_(p.ordinal_) {
-  IncRefCount(+1);
+  if (sub_ == nullptr) {
+    return;
+  }
+  if (!sub_->CheckSharedPtrCount()) {
+    ResetInternal();
+    return;
+  }
+  index_ = sub_->AllocateSharedPtr();
+  IncDecSlotRefCount(+1);
 }
 
 // This is an Subspace client.  It must be initialized by calling Init() before
@@ -741,6 +767,8 @@ public:
   const std::vector<BufferSet> &GetBuffers() const {
     return client_->GetBuffers(impl_);
   }
+
+  int NumSharedPtrs() const { return impl_->NumSharedPtrs(); }
 
 private:
   friend class Server;
