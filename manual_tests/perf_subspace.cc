@@ -17,10 +17,10 @@ ABSL_FLAG(int, num_slots, 500, "Number of slots in channel");
 
 void PubCoroutine(co::Coroutine *c) {
   subspace::Client client(c);
-  absl::Status s = client.Init(absl::GetFlag(FLAGS_socket));
-  if (!s.ok()) {
+  absl::Status init_status = client.Init(absl::GetFlag(FLAGS_socket));
+  if (!init_status.ok()) {
     fprintf(stderr, "Can't connect to Subspace server: %s\n",
-            s.ToString().c_str());
+            init_status.ToString().c_str());
     exit(1);
   }
   int num_slots = absl::GetFlag(FLAGS_num_slots);
@@ -46,9 +46,9 @@ void PubCoroutine(co::Coroutine *c) {
       }
       if (*buffer == nullptr) {
         // Wait for publisher trigger.
-        absl::Status s = pub->Wait();
-        if (!s.ok()) {
-          fprintf(stderr, "Can't wait for publisher: %s", s.ToString().c_str());
+        absl::Status wait_status = pub->Wait();
+        if (!wait_status.ok()) {
+          fprintf(stderr, "Can't wait for publisher: %s", wait_status.ToString().c_str());
           exit(1);
         }
         continue;
@@ -66,10 +66,10 @@ void PubCoroutine(co::Coroutine *c) {
 
 void SubCoroutine(co::Coroutine *c) {
   subspace::Client client(c);
-  absl::Status s = client.Init(absl::GetFlag(FLAGS_socket));
-  if (!s.ok()) {
+  absl::Status init_status = client.Init(absl::GetFlag(FLAGS_socket));
+  if (!init_status.ok()) {
     fprintf(stderr, "Can't connect to Subspace server: %s\n",
-            s.ToString().c_str());
+            init_status.ToString().c_str());
     exit(1);
   }
   int slot_size = absl::GetFlag(FLAGS_slot_size);
@@ -97,8 +97,8 @@ void SubCoroutine(co::Coroutine *c) {
     if (start != 0) {
       wait_start = toolbelt::Now();
     }
-    if (absl::Status s = sub->Wait(); !s.ok()) {
-      fprintf(stderr, "Can't wait for subscriber: %s\n", s.ToString().c_str());
+    if (absl::Status wait_status = sub->Wait(); !wait_status.ok()) {
+      fprintf(stderr, "Can't wait for subscriber: %s\n", wait_status.ToString().c_str());
       exit(1);
     }
     if (wait_start != 0) {

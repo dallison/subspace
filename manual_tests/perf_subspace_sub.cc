@@ -21,10 +21,10 @@ int main(int argc, char **argv) {
   signal(SIGPIPE, SIG_IGN);
 
   subspace::Client client;
-  absl::Status s = client.Init(absl::GetFlag(FLAGS_socket));
-  if (!s.ok()) {
+  absl::Status init_status = client.Init(absl::GetFlag(FLAGS_socket));
+  if (!init_status.ok()) {
     fprintf(stderr, "Can't connect to Subspace server: %s\n",
-            s.ToString().c_str());
+            init_status.ToString().c_str());
     exit(1);
   }
   bool reliable = absl::GetFlag(FLAGS_reliable);
@@ -54,8 +54,8 @@ int main(int argc, char **argv) {
     if (start != 0) {
       wait_start = toolbelt::Now();
     }
-    if (absl::Status s = sub->Wait(); !s.ok()) {
-      fprintf(stderr, "Can't wait for subscriber: %s\n", s.ToString().c_str());
+    if (absl::Status wait_status = sub->Wait(); !wait_status.ok()) {
+      fprintf(stderr, "Can't wait for subscriber: %s\n", wait_status.ToString().c_str());
       exit(1);
     }
     if (wait_start != 0) {

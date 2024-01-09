@@ -18,9 +18,9 @@ int main(int argc, char **argv) {
 
   subspace::Client client;
 
-  absl::Status s = client.Init(absl::GetFlag(FLAGS_socket));
-  if (!s.ok()) {
-    fprintf(stderr, "Can't connect to Subspace server: %s\n", s.ToString().c_str());
+  absl::Status init_status = client.Init(absl::GetFlag(FLAGS_socket));
+  if (!init_status.ok()) {
+    fprintf(stderr, "Can't connect to Subspace server: %s\n", init_status.ToString().c_str());
     exit(1);
   }
   bool reliable = absl::GetFlag(FLAGS_reliable);
@@ -39,8 +39,8 @@ int main(int argc, char **argv) {
       });
 
   for (;;) {
-    if (absl::Status s = sub->Wait(); !s.ok()) {
-      fprintf(stderr, "Can't wait for subscriber: %s\n", s.ToString().c_str());
+    if (absl::Status wait_status = sub->Wait(); !wait_status.ok()) {
+      fprintf(stderr, "Can't wait for subscriber: %s\n", wait_status.ToString().c_str());
       exit(1);
     }
     for (;;) {

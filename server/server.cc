@@ -895,12 +895,12 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     }
     prefix->flags |= kMessageBridged;
 
-    absl::StatusOr<const Message> s =
+    absl::StatusOr<const Message> pub_msg =
         pub->PublishMessageInternal(*n, /*omit_prefix=*/true);
-    if (!s.ok()) {
+    if (!pub_msg.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to publish bridge message for %s: %s",
-                  channel_name.c_str(), s.status().ToString().c_str());
+                  channel_name.c_str(), pub_msg.status().ToString().c_str());
     }
   }
 
