@@ -20,9 +20,9 @@ int main(int argc, char **argv) {
   signal(SIGPIPE, SIG_IGN);
 
   subspace::Client client;
-  absl::Status s = client.Init(absl::GetFlag(FLAGS_socket));
-  if (!s.ok()) {
-    fprintf(stderr, "Can't connect to Subspace server: %s\n", s.ToString().c_str());
+  absl::Status init_status = client.Init(absl::GetFlag(FLAGS_socket));
+  if (!init_status.ok()) {
+    fprintf(stderr, "Can't connect to Subspace server: %s\n", init_status.ToString().c_str());
     exit(1);
   }
   bool reliable = absl::GetFlag(FLAGS_reliable);
@@ -49,9 +49,9 @@ int main(int argc, char **argv) {
       }
       if (*buffer == nullptr) {
         // Wait for publisher trigger.
-        absl::Status s = pub->Wait();
-        if (!s.ok()) {
-          fprintf(stderr, "Can't wait for publisher: %s", s.ToString().c_str());
+        absl::Status wait_status = pub->Wait();
+        if (!wait_status.ok()) {
+          fprintf(stderr, "Can't wait for publisher: %s", wait_status.ToString().c_str());
           exit(1);
         }
         continue;
