@@ -85,6 +85,25 @@ static void UnmapMemory(void *p, size_t size, const char *purpose) {
 #endif
 }
 
+template <typename BufferSetIter>
+static void UnmapBuffers(BufferSetIter first, BufferSetIter last, int num_slots) {
+  // Unmap any previously mapped buffers.
+  for (; first < last; ++first) {
+    int64_t buffers_size =
+        sizeof(BufferHeader) +
+        num_slots *
+            (Aligned<32>(first->slot_size) + sizeof(MessagePrefix));
+    if (buffers_size > 0 && first->buffer != nullptr) {
+      UnmapMemory(first->buffer, buffers_size, "buffers");
+      first->buffer = nullptr;
+      first->slot_size = 0;
+    }
+  }
+
+
+
+}
+
 static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
                                                  int64_t size, bool map,
                                                  toolbelt::FileDescriptor &fd) {
@@ -319,15 +338,7 @@ absl::Status Channel::Map(SharedMemoryFds fds,
         UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
         UnmapMemory(ccb_, ccb_size, "CCB");
         // Unmap any previously mapped buffers.
-        for (int i = 0; i < index; i++) {
-          int64_t buffers_size =
-              sizeof(BufferHeader) +
-              num_slots_ *
-                  (Aligned<32>(buffers_[i].slot_size) + sizeof(MessagePrefix));
-          if (buffers_size > 0 && buffers_[i].buffer != nullptr) {
-            UnmapMemory(buffers_[i].buffer, buffers_size, "buffers");
-          }
-        }
+        UnmapBuffers(buffers_.begin(), buffers_.begin() + index, num_slots_);
         return absl::InternalError(absl::StrFormat(
             "Failed to map channel buffers: %s", strerror(errno)));
       }
@@ -411,15 +422,7 @@ absl::Status Channel::MapNewBuffers(std::vector<SlotBuffer> buffers) {
 
       if (mem == MAP_FAILED) {
         // Unmap any newly mapped buffers.
-        for (size_t i = start; i < buffers_.size(); i++) {
-          int64_t buffers_size =
-              sizeof(BufferHeader) +
-              num_slots_ *
-                  (Aligned<32>(buffers_[i].slot_size) + sizeof(MessagePrefix));
-          if (buffers_size > 0 && buffers_[i].buffer != nullptr) {
-            UnmapMemory(buffers_[i].buffer, buffers_size, "buffers");
-          }
-        }
+        UnmapBuffers(buffers_.begin() + start, buffers_.end(), num_slots_);
         return absl::InternalError(absl::StrFormat(
             "Failed to map new channel buffers: %s", strerror(errno)));
       }
