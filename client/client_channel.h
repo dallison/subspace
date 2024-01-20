@@ -186,8 +186,8 @@ public:
   // can never fail.
   size_t AllocateSharedPtr() {
     for (size_t i = 0; i < size_t(MaxSharedPtrs()); ++i) {
-      if (shared_ptr_refs_[i] == 0) {
-        shared_ptr_refs_[i] = 1;
+      int zero = 0;
+      if (shared_ptr_refs_[i].compare_exchange_strong(zero, 1)) {
         num_shared_ptrs_++;
         return i;
       }
