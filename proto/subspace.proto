@@ -160,6 +160,10 @@ message ChannelStats {
   string channel_name = 1;
   int64 total_bytes = 2;
   int64 total_messages = 3;
+  int32 slot_size = 4;
+  int32 num_slots = 5;
+  int32 num_pubs = 6;
+  int32 num_subs = 7;
 }
 
 // This is published to the /subspace/Statistics channel.

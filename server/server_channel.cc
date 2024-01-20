@@ -259,7 +259,14 @@ void ServerChannel::GetChannelStats(subspace::ChannelStats *stats) {
   GetStatsCounters(total_bytes, total_messages);
   stats->set_total_bytes(total_bytes);
   stats->set_total_messages(total_messages);
-}
+  stats->set_slot_size(SlotSize());
+  stats->set_num_slots(NumSlots());
+
+  int num_pubs, num_subs;
+  CountUsers(num_pubs, num_subs);
+  stats->set_num_pubs(num_pubs);
+  stats->set_num_subs(num_subs);
+  }
 
 ChannelCounters &ServerChannel::RecordUpdate(bool is_pub, bool add,
                                              bool reliable) {
