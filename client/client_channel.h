@@ -66,7 +66,7 @@
 
 namespace subspace {
 
-class Client;
+class ClientImpl;
 
 namespace details {
 
@@ -113,7 +113,7 @@ public:
   bool IsFixedSize() const { return options_.IsFixedSize(); }
 
 private:
-  friend class ::subspace::Client;
+  friend class ::subspace::ClientImpl;
 
   bool IsPublisher() const override { return true; }
 
@@ -171,6 +171,10 @@ public:
     }
   }
 
+  std::shared_ptr<SubscriberImpl> shared_from_this() {
+    return std::static_pointer_cast<SubscriberImpl>(Channel::shared_from_this()) ;
+  }
+  
   int64_t CurrentOrdinal() const {
     return CurrentSlot() == nullptr ? -1 : CurrentSlot()->ordinal;
   }
@@ -217,7 +221,7 @@ public:
   }
 
 private:
-  friend class ::subspace::Client;
+  friend class ::subspace::ClientImpl;
 
   bool IsSubscriber() const override { return true; }
 

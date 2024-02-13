@@ -27,12 +27,14 @@ void ClientHandler::Run(co::Coroutine *c) {
       std::vector<toolbelt::FileDescriptor> fds;
       subspace::Response response;
       if (absl::Status s = HandleMessage(request, response, fds); !s.ok()) {
-        server_->logger_.Log(toolbelt::LogLevel::kError, "%s\n", s.ToString().c_str());
+        server_->logger_.Log(toolbelt::LogLevel::kError, "%s\n",
+                             s.ToString().c_str());
         return;
       }
 
       if (!response.SerializeToArray(sendbuf, kSendBufLen)) {
-        server_->logger_.Log(toolbelt::LogLevel::kError, "Failed to serialize response\n");
+        server_->logger_.Log(toolbelt::LogLevel::kError,
+                             "Failed to serialize response\n");
         return;
       }
       size_t msglen = response.ByteSizeLong();
@@ -41,11 +43,13 @@ void ClientHandler::Run(co::Coroutine *c) {
         return;
       }
       if (absl::Status status = socket_.SendFds(fds, c); !status.ok()) {
-        server_->logger_.Log(toolbelt::LogLevel::kError, "%s\n", status.ToString().c_str());
+        server_->logger_.Log(toolbelt::LogLevel::kError, "%s\n",
+                             status.ToString().c_str());
         return;
       }
     } else {
-      server_->logger_.Log(toolbelt::LogLevel::kError, "Failed to parse message\n");
+      server_->logger_.Log(toolbelt::LogLevel::kError,
+                           "Failed to parse message\n");
       return;
     }
   }
@@ -142,13 +146,15 @@ void ClientHandler::HandleCreatePublisher(
     channel->SetType(req.type());
   }
 
-  // Check capacity of channel.
-  absl::Status cap_ok = channel->HasSufficientCapacity(0);
-  if (!cap_ok.ok()) {
-    response->set_error(absl::StrFormat(
-        "Insufficient capcacity to add a new publisher to channel %s: %s",
-        req.channel_name(), cap_ok.ToString()));
-    return;
+  // Check capacity of channel for unreliable channels.
+  if (!req.is_reliable()) {
+    absl::Status cap_ok = channel->HasSufficientCapacity(0);
+    if (!cap_ok.ok()) {
+      response->set_error(absl::StrFormat(
+          "Insufficient capcacity to add a new publisher to channel %s: %s",
+          req.channel_name(), cap_ok.ToString()));
+      return;
+    }
   }
 
   int num_pubs, num_subs;
@@ -156,7 +162,17 @@ void ClientHandler::HandleCreatePublisher(
 
   // Check consistency of publisher parameters.
   if (num_pubs > 0) {
-    if (channel->SlotSize() != req.slot_size() ||
+    if (req.is_fixed_size() != channel->IsFixedSize()) {
+      response->set_error(
+          absl::StrFormat("Inconsistent publisher parameters for channel %s: "
+                          "all publishers must be either fixed size or not",
+                          req.channel_name()));
+      return;
+    }
+
+    // We check only the number of slots since the slot size can change
+    // over time.
+    if ((req.is_fixed_size() && channel->SlotSize() != req.slot_size()) ||
         channel->NumSlots() != req.num_slots()) {
       response->set_error(absl::StrFormat(
           "Inconsistent publisher parameters for channel %s: "
@@ -176,8 +192,9 @@ void ClientHandler::HandleCreatePublisher(
   }
 
   // Create the publisher.
-  absl::StatusOr<PublisherUser *> publisher = channel->AddPublisher(
-      this, req.is_reliable(), req.is_local(), req.is_bridge());
+  absl::StatusOr<PublisherUser *> publisher =
+      channel->AddPublisher(this, req.is_reliable(), req.is_local(),
+                            req.is_bridge(), req.is_fixed_size());
   if (!publisher.ok()) {
     response->set_error(publisher.status().ToString());
     return;
@@ -264,14 +281,16 @@ void ClientHandler::HandleCreateSubscriber(
     }
     sub = static_cast<SubscriberUser *>(*user);
   } else {
-    absl::Status cap_ok = channel->HasSufficientCapacity(req.max_shared_ptrs());
-    if (!cap_ok.ok()) {
-      response->set_error(absl::StrFormat(
-          "Insufficient capcacity to add a new subscriber to channel %s: %s",
-          req.channel_name(), cap_ok.ToString()));
-      return;
+    if (!req.is_reliable()) {
+      absl::Status cap_ok =
+          channel->HasSufficientCapacity(req.max_shared_ptrs());
+      if (!cap_ok.ok()) {
+        response->set_error(absl::StrFormat(
+            "Insufficient capcacity to add a new subscriber to channel %s: %s",
+            req.channel_name(), cap_ok.ToString()));
+        return;
+      }
     }
-
     // Create the subscriber.
     absl::StatusOr<SubscriberUser *> subscriber = channel->AddSubscriber(
         this, req.is_reliable(), req.is_bridge(), req.max_shared_ptrs());
