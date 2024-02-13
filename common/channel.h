@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <pthread.h>
 #include <string>
+#include <memory>
 
 namespace subspace {
 
@@ -250,7 +251,7 @@ struct BufferSet {
 // space.  If there are multiple publishers or subscribers in the
 // same process, each of them maps in the shared memory. No attempt
 // is made to share the Channel objects.
-class Channel {
+class Channel : public std::enable_shared_from_this<Channel> {
 public:
   struct PublishedMessage {
     MessageSlot *new_slot;
@@ -300,6 +301,9 @@ public:
 
   // Gets the address for the message buffer given a slot pointer.
   void *GetBufferAddress(MessageSlot *slot) const {
+    if (slot == nullptr) {
+      return nullptr;
+    }
     return Buffer(slot->id) +
            (sizeof(MessagePrefix) + Aligned<32>(SlotSize(slot->id))) *
                slot->id +

@@ -43,13 +43,13 @@ ServerChannel::GetReliablePublisherTriggerFds() const {
 
 absl::StatusOr<PublisherUser *>
 ServerChannel::AddPublisher(ClientHandler *handler, bool is_reliable,
-                            bool is_local, bool is_bridge) {
+                            bool is_local, bool is_bridge, bool is_fixed_size) {
   absl::StatusOr<int> user_id = user_ids_.Allocate("publisher");
   if (!user_id.ok()) {
     return user_id.status();
   }
   std::unique_ptr<PublisherUser> pub = std::make_unique<PublisherUser>(
-      handler, *user_id, is_reliable, is_local, is_bridge);
+      handler, *user_id, is_reliable, is_local, is_bridge, is_fixed_size);
   absl::Status status = pub->Init();
   if (!status.ok()) {
     return status;
@@ -175,6 +175,24 @@ bool ServerChannel::IsReliable() const {
   }
   return false;
 }
+
+// Channel is fixed_size if there are any fixed size publishers.  If one is
+// fixed size, they all must be.
+bool ServerChannel::IsFixedSize() const {
+  for (auto &user : users_) {
+    if (user == nullptr) {
+      continue;
+    }
+    if (user->IsPublisher()) {
+      PublisherUser *pub = static_cast<PublisherUser *>(user.get());
+      if (pub->IsFixedSize()) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 
 bool ServerChannel::IsBridgePublisher() const {
   int num_pubs = 0;

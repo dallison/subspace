@@ -86,22 +86,19 @@ static void UnmapMemory(void *p, size_t size, const char *purpose) {
 }
 
 template <typename BufferSetIter>
-static void UnmapBuffers(BufferSetIter first, BufferSetIter last, int num_slots) {
+static void UnmapBuffers(BufferSetIter first, BufferSetIter last,
+                         int num_slots) {
   // Unmap any previously mapped buffers.
   for (; first < last; ++first) {
     int64_t buffers_size =
         sizeof(BufferHeader) +
-        num_slots *
-            (Aligned<32>(first->slot_size) + sizeof(MessagePrefix));
+        num_slots * (Aligned<32>(first->slot_size) + sizeof(MessagePrefix));
     if (buffers_size > 0 && first->buffer != nullptr) {
       UnmapMemory(first->buffer, buffers_size, "buffers");
       first->buffer = nullptr;
       first->slot_size = 0;
     }
   }
-
-
-
 }
 
 static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
@@ -538,9 +535,8 @@ MessageSlot *Channel::FindFreeSlotLocked(bool reliable, int owner) {
       return nullptr;
     }
     MessagePrefix *prefix = Prefix(slot);
-    if ((prefix->flags & (kMessageActivate | kMessageSeen)) ==
-        kMessageActivate) {
-      // An activation message that hasn't been seen.
+    if (reliable && (prefix->flags & kMessageSeen) == 0) {
+      // An message that hasn't been seen.
       return nullptr;
     }
     if (slot->ref_count == 0) {
@@ -670,13 +666,13 @@ MessageSlot *Channel::NextSlot(MessageSlot *slot, bool reliable, int owner,
     Prefix(slot)->flags |= kMessageSeen;
     return slot;
   }
-  if (slot->element.next == 0) {
-    // No more active slots, keep current slot active.
-    return nullptr;
-  }
   // Going to move to another slot.  Decrement refs on current slot.
   IncDecRefCount(slot, reliable, -1);
   slot->owners.Clear(owner);
+  if (slot->element.next == 0) {
+    // No more active slots.
+    return nullptr;
+  }
 
   slot = reinterpret_cast<MessageSlot *>(FromCCBOffset(slot->element.next));
   IncDecRefCount(slot, reliable, +1);

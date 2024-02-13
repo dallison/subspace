@@ -9,11 +9,11 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "common/channel.h"
-#include "toolbelt/triggerfd.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/bitset.h"
 #include "toolbelt/fd.h"
 #include "toolbelt/sockets.h"
+#include "toolbelt/triggerfd.h"
 #include <memory>
 #include <vector>
 
@@ -72,14 +72,17 @@ private:
 class PublisherUser : public User {
 public:
   PublisherUser(ClientHandler *handler, int id, bool is_reliable, bool is_local,
-                bool is_bridge)
-      : User(handler, id, is_reliable, is_bridge), is_local_(is_local) {}
+                bool is_bridge, bool is_fixed_size)
+      : User(handler, id, is_reliable, is_bridge), is_local_(is_local),
+        is_fixed_size_(is_fixed_size) {}
 
   bool IsPublisher() const override { return true; }
   bool IsLocal() const { return is_local_; }
+  bool IsFixedSize() const { return is_fixed_size_; }
 
 private:
   bool is_local_;
+  bool is_fixed_size_;
 };
 
 // This is endpoint transmitting the data for a channel.  It holds an internet
@@ -123,7 +126,7 @@ public:
 
   absl::StatusOr<PublisherUser *> AddPublisher(ClientHandler *handler,
                                                bool is_reliable, bool is_local,
-                                               bool is_bridge);
+                                               bool is_bridge, bool is_fixed_size);
   absl::StatusOr<SubscriberUser *> AddSubscriber(ClientHandler *handler,
                                                  bool is_reliable,
                                                  bool is_bridge,
@@ -180,6 +183,7 @@ public:
 
   bool IsLocal() const;
   bool IsReliable() const;
+  bool IsFixedSize() const;
 
   void SetSharedMemoryFds(SharedMemoryFds fds) {
     shared_memory_fds_ = std::move(fds);

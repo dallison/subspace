@@ -288,13 +288,29 @@ TEST_F(ClientTest, BadPublisherParameters) {
   absl::StatusOr<Publisher> pub1 = client.CreatePublisher("dave0", 256, 10);
   ASSERT_TRUE(pub1.ok());
 
-  // Different slot size.
+  // Different slot size - this is fine due to channel resizing and we are not
+  // fixed size.
   absl::StatusOr<Publisher> pub2 = client.CreatePublisher("dave0", 255, 10);
-  ASSERT_FALSE(pub2.ok());
+  ASSERT_TRUE(pub2.ok());
 
   // Different num slots
   absl::StatusOr<Publisher> pub3 = client.CreatePublisher("dave0", 256, 9);
   ASSERT_FALSE(pub3.ok());
+
+  // Fixed size.
+  absl::StatusOr<Publisher> pub4 =
+      client.CreatePublisher("dave1", 256, 10, {.fixed_size = true});
+  ASSERT_TRUE(pub4.ok());
+
+  // Not fixed size - mismatch fixed size option, same slot size.
+  absl::StatusOr<Publisher> pub5 =
+      client.CreatePublisher("dave1", 256, 10, {.fixed_size = false});
+  ASSERT_FALSE(pub5.ok());
+
+  // Different slot size - we are fixed size, this will fail.
+  absl::StatusOr<Publisher> pub6 =
+      client.CreatePublisher("dave1", 255, 10, {.fixed_size = true});
+  ASSERT_FALSE(pub6.ok());
 }
 
 TEST_F(ClientTest, CreatePublisherThenSubscriber) {

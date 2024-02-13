@@ -31,6 +31,7 @@ message CreatePublisherRequest {
   bool is_reliable = 5;
   bool is_bridge = 6; // This publisher is for the bridge.
   bytes type = 7;    // Type of data carried on channel.
+  bool is_fixed_size = 8;
 }
 
 message CreatePublisherResponse {
