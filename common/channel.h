@@ -97,11 +97,11 @@ public:
               std::function<bool(ChannelLock *lock)> reload = nullptr)
       : lock_(lock), reload_(std::move(reload)) {
     Lock();
-    if (reload != nullptr) {
+    if (reload_ != nullptr) {
       // This will look to see if a reload is needed and if so,
       // unlock the channel, talk to the server and map in the
       // new buffers.  The lock is reacquired before it returns.
-      while (reload(this)) {
+      while (reload_(this)) {
         // Nothing to do, just try reloading again.
       }
     }
