@@ -813,7 +813,7 @@ TEST_F(ClientTest, ReliablePublisher1) {
   // Wait for trigger event in coroutine.
   co::Coroutine c1(machine, [&pub](co::Coroutine *c) {
     struct pollfd fd = pub->GetPollFd();
-    c->Wait(fd);
+    c->Wait(fd.fd);
 
     absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
     ASSERT_TRUE(buffer.ok());
@@ -895,7 +895,7 @@ TEST_F(ClientTest, ReliablePublisher2) {
   co::Coroutine c1(machine, [&pub](co::Coroutine *c) {
     absl::StatusOr<struct pollfd> fd = pub->GetPollFd();
     ASSERT_TRUE(fd.ok());
-    c->Wait(*fd);
+    c->Wait(fd->fd);
 
     absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
     ASSERT_TRUE(buffer.ok());
