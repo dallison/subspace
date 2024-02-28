@@ -79,18 +79,18 @@ http_archive(
 #     path = "../cpp_toolbelt",
 # )
 
-# http_archive(
-#   name = "coroutines",
-#   urls = ["https://github.com/dallison/co/archive/refs/tags/1.3.4.tar.gz"],
-#   strip_prefix = "co-1.3.4",
-#   sha256 = "00b036fcecd0256356bc09b47b049e29f6df34dc97792143630df83591de2c1b"
-# )
+http_archive(
+  name = "coroutines",
+  urls = ["https://github.com/dallison/co/archive/refs/tags/1.3.4.tar.gz"],
+  strip_prefix = "co-1.3.4",
+  sha256 = "00b036fcecd0256356bc09b47b049e29f6df34dc97792143630df83591de2c1b"
+)
 
 # For local debugging of co coroutine library.
-local_repository(
-    name = "coroutines",
-    path = "../co",
-)
+# local_repository(
+#     name = "coroutines",
+#     path = "../co",
+# )
 
 # Bazel python rules.
 http_archive(
