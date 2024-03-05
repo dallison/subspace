@@ -433,7 +433,7 @@ absl::Status Channel::MapNewBuffers(std::vector<SlotBuffer> buffers) {
 }
 
 void Channel::UnmapUnusedBuffers() {
-  for (size_t i = 0; i < buffers_.size(); i++) {
+  for (size_t i = 0; i + 1 < buffers_.size(); i++) {
     if (buffers_[i].buffer == nullptr) {
       continue;
     }
