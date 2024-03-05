@@ -674,6 +674,42 @@ TEST_F(ClientTest, PublishAndResizeSubscriberFirst) {
   ASSERT_EQ(4096, sub->SlotSize());
 }
 
+TEST_F(ClientTest, PublishAndResizeSubscriberConcurrently) {
+  std::string channel_name = "growing_channel";
+  subspace::Client client1;
+  subspace::Client client2;
+  ASSERT_TRUE(client1.Init(Socket()).ok());
+  ASSERT_TRUE(client2.Init(Socket()).ok());
+
+  std::atomic<bool> publisher_finished = false;
+
+  auto t1 = std::thread([&]() {
+    auto client1_pub = *client1.CreatePublisher(channel_name, 1, 4);
+    for (int i = 1; i < 24; i++) {
+      std::size_t size = std::pow(2, i);
+      auto buffer = client1_pub.GetMessageBuffer(size);
+      std::memset(*buffer, i, size);
+      ASSERT_TRUE(client1_pub.PublishMessage(size).ok());
+    }
+    publisher_finished = true;
+  });
+  auto t2 = std::thread([&]() {
+    auto client2_sub = *client2.CreateSubscriber(channel_name);
+    while (publisher_finished == false) {
+      auto message = *client2_sub.ReadMessage();
+      size_t size = message.length;
+      if (size == 0) {
+        continue;
+      } else {
+        std::cout << size << std::endl;
+      }
+    }
+  });
+
+  t1.join();
+  t2.join();
+}
+
 TEST_F(ClientTest, PublishSingleMessagePollAndReadSubscriberFirst) {
   subspace::Client pub_client;
   subspace::Client sub_client;
