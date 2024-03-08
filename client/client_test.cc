@@ -482,6 +482,12 @@ TEST_F(ClientTest, PublishSingleMessageAndRead) {
   msg = sub->ReadMessage();
   ASSERT_TRUE(msg.ok());
   ASSERT_EQ(0, msg->length);
+
+  // Read again to make sure we get another 0.
+  // Regression test.
+  msg = sub->ReadMessage();
+  ASSERT_TRUE(msg.ok());
+  ASSERT_EQ(0, msg->length);
 }
 
 TEST_F(ClientTest, PublishAndResize) {
