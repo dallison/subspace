@@ -666,13 +666,16 @@ MessageSlot *Channel::NextSlot(MessageSlot *slot, bool reliable, int owner,
     Prefix(slot)->flags |= kMessageSeen;
     return slot;
   }
+  if (slot->element.next == 0) {
+    // No more active slots.
+    // We need to hold onto the slot because when we call NextSlot again
+    // for the next batch of messages this slot needs still to allocated
+    // to the subsciber.
+    return nullptr;
+  }
   // Going to move to another slot.  Decrement refs on current slot.
   IncDecRefCount(slot, reliable, -1);
   slot->owners.Clear(owner);
-  if (slot->element.next == 0) {
-    // No more active slots.
-    return nullptr;
-  }
 
   slot = reinterpret_cast<MessageSlot *>(FromCCBOffset(slot->element.next));
   IncDecRefCount(slot, reliable, +1);
