@@ -13,9 +13,9 @@
 #include "toolbelt/bitset.h"
 #include "toolbelt/fd.h"
 #include <cstdint>
+#include <memory>
 #include <pthread.h>
 #include <string>
-#include <memory>
 
 namespace subspace {
 
@@ -402,13 +402,12 @@ public:
   char *Buffer(int slot_id) const {
     int index = ccb_->slots[slot_id].buffer_index;
     if (index < 0 || index >= buffers_.size()) {
-      std::cerr << "Invalid buffer index for slot " << slot_id << ": " << index << std::endl;
+      std::cerr << "Invalid buffer index for slot " << slot_id << ": " << index
+                << std::endl;
       abort();
     }
-    return buffers_.empty()
-               ? nullptr
-               : (buffers_[index].buffer +
-                  sizeof(BufferHeader));
+    return buffers_.empty() ? nullptr
+                            : (buffers_[index].buffer + sizeof(BufferHeader));
   }
   void CleanupSlots(int owner, bool reliable);
   void UnmapUnusedBuffers();
@@ -421,6 +420,7 @@ public:
   }
 
   SystemControlBlock *GetScb() const { return scb_; }
+  ChannelControlBlock *GetCcb() const { return ccb_; }
 
   // Gets the statistics counters.  Locks the CCB.
   void GetStatsCounters(int64_t &total_bytes, int64_t &total_messages);
