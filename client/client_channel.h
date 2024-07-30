@@ -172,9 +172,10 @@ public:
   }
 
   std::shared_ptr<SubscriberImpl> shared_from_this() {
-    return std::static_pointer_cast<SubscriberImpl>(Channel::shared_from_this()) ;
+    return std::static_pointer_cast<SubscriberImpl>(
+        Channel::shared_from_this());
   }
-  
+
   int64_t CurrentOrdinal() const {
     return CurrentSlot() == nullptr ? -1 : CurrentSlot()->ordinal;
   }
@@ -201,9 +202,15 @@ public:
   }
 
   void IncDecSharedPtrRefCount(int inc, size_t index) {
-    shared_ptr_refs_[index] += inc;
-    if (shared_ptr_refs_[index] == 0) {
-      num_shared_ptrs_--;
+    for (;;) {
+      int curr = shared_ptr_refs_[index];
+      int next = curr + inc;
+      if (shared_ptr_refs_[index].compare_exchange_strong(curr, next)) {
+        if (next == 0) {
+          num_shared_ptrs_--;
+        }
+        return;
+      }
     }
   }
   int NumSharedPtrs() const { return num_shared_ptrs_; }

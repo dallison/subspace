@@ -96,15 +96,12 @@ public:
     if (*this != p) {
       IncRefCount(-1);
     }
-    IncRefCount(+1);
     CopyFrom(p);
+    IncRefCount(+1);
     return *this;
   }
 
   shared_ptr &operator=(shared_ptr &&p) {
-    if (*this != p) {
-      IncRefCount(-1);
-    }
     CopyFrom(p);
     p.ResetInternal();
     return *this;
@@ -149,6 +146,9 @@ private:
   shared_ptr(std::shared_ptr<details::SubscriberImpl> sub, const Message &msg)
       : sub_(sub), msg_(msg), slot_(sub->CurrentSlot()),
         ordinal_(sub->CurrentOrdinal()) {
+    if (slot_ == nullptr) {
+      return;
+    }
     if (!sub_->CheckSharedPtrCount()) {
       ResetInternal();
       return;
@@ -176,6 +176,7 @@ private:
     if (slot_ == nullptr) {
       return;
     }
+    ChannelLock lock(&sub_->GetCcb()->lock);
     IncDecSlotRefCount(inc);
     sub_->IncDecSharedPtrRefCount(inc, index_);
   }
@@ -195,6 +196,7 @@ bool operator==(const shared_ptr<M> &p1, const shared_ptr<M> &p2) {
 
 template <typename T> class weak_ptr {
 public:
+  weak_ptr() = default;
   weak_ptr(std::shared_ptr<details::SubscriberImpl> sub, const Message &msg,
            MessageSlot *slot)
       : sub_(sub), msg_(msg), slot_(slot), ordinal_(slot->ordinal) {}
@@ -231,9 +233,14 @@ public:
     return msg_.length == 0 ? 0 : slot_->ref_count;
   }
 
-  bool expired() const { return slot_->ordinal != ordinal_; }
+  bool expired() const {
+    return slot_ == nullptr || slot_->ordinal != ordinal_;
+  }
 
   shared_ptr<T> lock() const {
+    if (sub_ == nullptr || slot_ == nullptr) {
+      return shared_ptr<T>();
+    }
     if (!sub_->CheckSharedPtrCount()) {
       return shared_ptr<T>();
     }
@@ -244,6 +251,13 @@ public:
     }
 
     return shared_ptr<T>(*this);
+  }
+
+  bool operator==(nullptr_t) const {
+    return sub_ == nullptr || slot_ == nullptr;
+  }
+  bool operator!=(nullptr_t) const {
+    return sub_ != nullptr && slot_ != nullptr;
   }
 
 private:
@@ -258,7 +272,7 @@ private:
 
   std::shared_ptr<details::SubscriberImpl> sub_;
   Message msg_;
-  MessageSlot *slot_;
+  MessageSlot *slot_ = nullptr;
   int64_t ordinal_;
 };
 
@@ -271,12 +285,7 @@ inline shared_ptr<T>::shared_ptr(const weak_ptr<T> &p)
   if (sub_ == nullptr) {
     return;
   }
-  if (!sub_->CheckSharedPtrCount()) {
-    ResetInternal();
-    return;
-  }
   index_ = sub_->AllocateSharedPtr();
-  IncDecSlotRefCount(+1);
 }
 
 // This is an Subspace client.  It must be initialized by calling Init() before
