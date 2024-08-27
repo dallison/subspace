@@ -253,10 +253,10 @@ public:
     return shared_ptr<T>(*this);
   }
 
-  bool operator==(nullptr_t) const {
+  bool operator==(std::nullptr_t) const {
     return sub_ == nullptr || slot_ == nullptr;
   }
-  bool operator!=(nullptr_t) const {
+  bool operator!=(std::nullptr_t) const {
     return sub_ != nullptr && slot_ != nullptr;
   }
 

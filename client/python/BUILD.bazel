@@ -1,12 +1,10 @@
-load("@//bzl/local_rules:pybind.bzl", "pybind_module")
+load("@pybind11_bazel//:build_defs.bzl", "pybind_extension")
 
-pybind_module(
+pybind_extension(
     name = "subspace",
     srcs = ["client.cc"],
     visibility = ["//visibility:public"],
-    deps = [
-        "//client:subspace_client",
-    ],
+    deps = ["//client:subspace_client"],
 )
 
 py_test(
