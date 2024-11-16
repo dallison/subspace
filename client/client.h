@@ -18,6 +18,7 @@
 #include <functional>
 #include <string>
 #include <sys/poll.h>
+#include <cstddef>
 
 namespace subspace {
 
