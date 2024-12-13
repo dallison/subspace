@@ -283,7 +283,7 @@ void ClientHandler::HandleCreateSubscriber(
   } else {
     if (!req.is_reliable()) {
       absl::Status cap_ok =
-          channel->HasSufficientCapacity(req.max_shared_ptrs());
+          channel->HasSufficientCapacity(req.max_active_messages() - 1);
       if (!cap_ok.ok()) {
         response->set_error(absl::StrFormat(
             "Insufficient capcacity to add a new subscriber to channel %s: %s",
@@ -293,13 +293,15 @@ void ClientHandler::HandleCreateSubscriber(
     }
     // Create the subscriber.
     absl::StatusOr<SubscriberUser *> subscriber = channel->AddSubscriber(
-        this, req.is_reliable(), req.is_bridge(), req.max_shared_ptrs());
+        this, req.is_reliable(), req.is_bridge(), req.max_active_messages());
     if (!subscriber.ok()) {
       response->set_error(subscriber.status().ToString());
       return;
     }
     sub = *subscriber;
   }
+  channel->RegisterSubscriber(sub->GetId());
+
   response->set_channel_id(channel->GetChannelId());
   response->set_subscriber_id(sub->GetId());
   response->set_type(channel->Type());

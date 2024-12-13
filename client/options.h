@@ -5,6 +5,8 @@
 #ifndef __CLIENT_OPTIONS_H
 #define __CLIENT_OPTIONS_H
 
+#include <string>
+
 namespace subspace {
 
 // You can use the options in two ways depending on your
@@ -90,13 +92,19 @@ struct SubscriberOptions {
   }
 
   SubscriberOptions &SetMaxSharedPtrs(int n) {
-    max_shared_ptrs = n;
+    max_active_messages = n + 1;
+    return *this;
+  }
+
+ SubscriberOptions &SetMaxActiveMessages(int n) {
+    max_active_messages = n;
     return *this;
   }
 
   bool IsReliable() const { return reliable; }
   const std::string &Type() const { return type; }
-  int MaxSharedPtrs() const { return max_shared_ptrs; }
+  int MaxSharedPtrs() const { return max_active_messages - 1; }
+  int MaxActiveMessages() const { return max_active_messages; }
 
   SubscriberOptions &SetBridge(bool v) {
     bridge = v;
@@ -107,7 +115,7 @@ struct SubscriberOptions {
   bool reliable = false;
   bool bridge = false;
   std::string type;
-  int max_shared_ptrs = 0;
+  int max_active_messages = 1;
 };
 
 } // namespace subspace

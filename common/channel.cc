@@ -35,7 +35,7 @@ static absl::flat_hash_map<void *, size_t> *mapped_regions;
 static std::mutex *region_lock;
 #endif
 
-static void *MapMemory(int fd, size_t size, int prot, const char *purpose) {
+void *MapMemory(int fd, size_t size, int prot, const char *purpose) {
   void *p = mmap(NULL, size, prot, MAP_SHARED, fd, 0);
 #if SHOW_MMAPS
   printf("%d: mapping %s with size %zd: %p -> %p\n", getpid(), purpose, size, p,
@@ -56,7 +56,7 @@ static void *MapMemory(int fd, size_t size, int prot, const char *purpose) {
   return p;
 }
 
-static void UnmapMemory(void *p, size_t size, const char *purpose) {
+void UnmapMemory(void *p, size_t size, const char *purpose) {
 #if SHOW_MMAPS
   printf("%d: unmapping %s with size %zd: %p -> %p\n", getpid(), purpose, size,
          p, reinterpret_cast<char *>(p) + size);
@@ -85,271 +85,10 @@ static void UnmapMemory(void *p, size_t size, const char *purpose) {
 #endif
 }
 
-template <typename BufferSetIter>
-static void UnmapBuffers(BufferSetIter first, BufferSetIter last,
-                         int num_slots) {
-  // Unmap any previously mapped buffers.
-  for (; first < last; ++first) {
-    int64_t buffers_size =
-        sizeof(BufferHeader) +
-        num_slots * (Aligned<32>(first->slot_size) + sizeof(MessagePrefix));
-    if (buffers_size > 0 && first->buffer != nullptr) {
-      UnmapMemory(first->buffer, buffers_size, "buffers");
-      first->buffer = nullptr;
-      first->slot_size = 0;
-    }
-  }
-}
-
-static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
-                                                 int64_t size, bool map,
-                                                 toolbelt::FileDescriptor &fd) {
-  char shm_file[NAME_MAX]; // Unique file in file system.
-  char *shm_name;          // Name passed to shm_* (starts with /)
-  int tmpfd;
-#if defined(__linux__)
-  // On Linux we have actual files in /dev/shm so we can create a unique file.
-  snprintf(shm_file, sizeof(shm_file), "/dev/shm/%d.%s.XXXXXX", id, suffix);
-  tmpfd = mkstemp(shm_file);
-  shm_name = shm_file + 8; // After /dev/shm
-#else
-  // On other systems (BSD, MacOS, etc), we need to use a file in /tmp.
-  // This is just used to ensure uniqueness.
-  snprintf(shm_file, sizeof(shm_file), "/tmp/%d.%s.XXXXXX", id, suffix);
-  tmpfd = mkstemp(shm_file);
-  shm_name = shm_file + 4; // After /tmp
-#endif
-  // Remove any existing shared memory.
-  shm_unlink(shm_name);
-
-  // Open the shared memory file.
-  int shm_fd = shm_open(shm_name, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
-  if (shm_fd == -1) {
-    return absl::InternalError(absl::StrFormat(
-        "Failed to open shared memory %s: %s", shm_name, strerror(errno)));
-  }
-
-  // Make it the appropriate size.
-  int e = ftruncate(shm_fd, size);
-  if (e == -1) {
-    shm_unlink(shm_name);
-    return absl::InternalError(
-        absl::StrFormat("Failed to set length of shared memory %s: %s",
-                        shm_name, strerror(errno)));
-  }
-
-  // Map it into memory if asked
-  void *p = nullptr;
-  if (map) {
-    p = MapMemory(shm_fd, size, PROT_READ | PROT_WRITE, suffix);
-    if (p == MAP_FAILED) {
-      shm_unlink(shm_name);
-      return absl::InternalError(absl::StrFormat(
-          "Failed to map shared memory %s: %s", shm_name, strerror(errno)));
-    }
-  }
-
-  // Don't need the file now.  It stays open and available to be mapped in
-  // using the file descriptor.
-  shm_unlink(shm_name);
-  fd.SetFd(shm_fd);
-  (void)close(tmpfd);
-  return p;
-}
-
-static void InitMutex(pthread_mutex_t &mutex) {
-  pthread_mutexattr_t attr;
-  pthread_mutexattr_init(&attr);
-  pthread_mutexattr_setpshared(&attr, 1);
-#ifdef __linux__
-  pthread_mutexattr_setrobust(&attr, PTHREAD_MUTEX_ROBUST);
-#endif
-
-  pthread_mutex_init(&mutex, &attr);
-  pthread_mutexattr_destroy(&attr);
-}
-
-absl::StatusOr<SystemControlBlock *>
-CreateSystemControlBlock(toolbelt::FileDescriptor &fd) {
-  absl::StatusOr<void *> s = CreateSharedMemory(
-      0, "scb", sizeof(SystemControlBlock), /*map=*/true, fd);
-  if (!s.ok()) {
-    return s.status();
-  }
-  SystemControlBlock *scb = reinterpret_cast<SystemControlBlock *>(*s);
-  memset(&scb->counters, 0, sizeof(scb->counters));
-  return scb;
-}
-
 Channel::Channel(const std::string &name, int num_slots, int channel_id,
                  std::string type)
     : name_(name), num_slots_(num_slots), channel_id_(channel_id),
       type_(std::move(type)) {}
-
-absl::StatusOr<SharedMemoryFds>
-Channel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
-                  int num_slots) {
-  // Unmap existing memory.
-  Unmap();
-
-  // If the channel is being remapped (a subscriber that existed
-  // before the first publisher), num_slots_ will be zero and we
-  // set it here now that we know it.  If num_slots_ was already
-  // set we need to make sure that the value passed here is
-  // the same as the current value.
-  if (num_slots_ != 0) {
-    assert(num_slots_ == num_slots);
-  } else {
-    num_slots_ = num_slots;
-  }
-
-  // We are allocating a channel, so we only have one buffer.
-  buffers_.clear();
-
-  // Map SCB into process memory.
-  scb_ = reinterpret_cast<SystemControlBlock *>(MapMemory(
-      scb_fd.Fd(), sizeof(SystemControlBlock), PROT_READ | PROT_WRITE, "SCB"));
-  if (scb_ == MAP_FAILED) {
-    return absl::InternalError(absl::StrFormat(
-        "Failed to map SystemControlBlock: %s", strerror(errno)));
-  }
-
-  SharedMemoryFds fds;
-
-  // One buffer.  The fd will be set when the buffers are allocated in
-  // shared memmory.
-  fds.buffers.emplace_back(slot_size);
-
-  // Create CCB in shared memory and map into process memory.
-  int64_t ccb_size =
-      sizeof(ChannelControlBlock) + sizeof(MessageSlot) * num_slots_;
-  absl::StatusOr<void *> p =
-      CreateSharedMemory(channel_id_, "ccb", ccb_size, /*map=*/true, fds.ccb);
-  if (!p.ok()) {
-    UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
-    return p.status();
-  }
-  ccb_ = reinterpret_cast<ChannelControlBlock *>(*p);
-
-  // Create a single buffer but don't map it in.  There is no need to
-  // map in the buffers in the server since they will never be used.
-  int64_t buffers_size =
-      sizeof(BufferHeader) +
-      num_slots_ * (Aligned<32>(slot_size) + sizeof(MessagePrefix));
-  if (buffers_size == 0) {
-    buffers_size = 256;
-  }
-  p = CreateSharedMemory(channel_id_, "buffers0", buffers_size,
-                         /*map=*/false, fds.buffers[0].fd);
-  if (!p.ok()) {
-    UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
-    UnmapMemory(ccb_, ccb_size, "CCB");
-    return p.status();
-  }
-  buffers_.emplace_back(slot_size, reinterpret_cast<char *>(*p));
-  ccb_->num_buffers = 1;
-
-  // Initialize the CCB.
-  InitMutex(ccb_->lock);
-
-  // Build CCB data.
-  // Copy possibly truncated channel name into CCB for ease
-  // of debugging (you can see it in all processes).
-  strncpy(ccb_->channel_name, name_.c_str(), kMaxChannelName - 1);
-  ccb_->num_slots = num_slots_;
-  ccb_->next_ordinal = 1;
-
-  ListInit(&ccb_->active_list);
-  ListInit(&ccb_->busy_list);
-  ListInit(&ccb_->free_list);
-
-  // Initialize all slots and insert into the free list.
-  for (int32_t i = 0; i < num_slots_; i++) {
-    MessageSlot *slot = &ccb_->slots[i];
-    ListElementInit(&slot->element);
-    slot->id = i;
-    slot->ref_count = 0;
-    slot->reliable_ref_count = 0;
-    slot->buffer_index = -1; // No buffer in the free list.
-    slot->owners.Init();
-    ListInsertAtEnd(&ccb_->free_list, &slot->element);
-  }
-
-  if (debug_) {
-    printf("Channel allocated: scb: %p, ccb: %p, buffers: %p\n", scb_, ccb_,
-           buffers_[0].buffer);
-    Dump();
-  }
-  return fds;
-}
-
-void Channel::PrintList(const SlotList *list) const {
-  void *p = FromCCBOffset(list->first);
-  while (p != FromCCBOffset(0)) {
-    MessageSlot *slot = reinterpret_cast<MessageSlot *>(p);
-    printf("%d(%d/%d)@%d ", slot->id, slot->ref_count, slot->reliable_ref_count,
-           slot->buffer_index);
-    p = FromCCBOffset(slot->element.next);
-  }
-  printf("\n");
-}
-
-void Channel::PrintLists() const {
-  printf("Free list: ");
-  PrintList(&ccb_->free_list);
-  printf("Active list: ");
-  PrintList(&ccb_->active_list);
-  printf("Busy list: ");
-  PrintList(&ccb_->busy_list);
-}
-
-absl::Status Channel::Map(SharedMemoryFds fds,
-                          const toolbelt::FileDescriptor &scb_fd) {
-  scb_ = reinterpret_cast<SystemControlBlock *>(MapMemory(
-      scb_fd.Fd(), sizeof(SystemControlBlock), PROT_READ | PROT_WRITE, "SCB"));
-  if (scb_ == MAP_FAILED) {
-    return absl::InternalError(absl::StrFormat(
-        "Failed to map SystemControlBlock: %s", strerror(errno)));
-  }
-
-  int64_t ccb_size =
-      sizeof(ChannelControlBlock) + sizeof(MessageSlot) * num_slots_;
-  ccb_ = reinterpret_cast<ChannelControlBlock *>(
-      MapMemory(fds.ccb.Fd(), ccb_size, PROT_READ | PROT_WRITE, "CCB"));
-  if (ccb_ == MAP_FAILED) {
-    UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
-    return absl::InternalError(absl::StrFormat(
-        "Failed to map ChannelControlBlock: %s", strerror(errno)));
-  }
-  int index = 0;
-  for (const auto &buffer : fds.buffers) {
-    int64_t buffers_size =
-        sizeof(BufferHeader) +
-        num_slots_ * (Aligned<32>(buffer.slot_size) + sizeof(MessagePrefix));
-    if (buffers_size != 0) {
-      char *mem = reinterpret_cast<char *>(
-          MapMemory(fds.buffers[index].fd.Fd(), buffers_size,
-                    PROT_READ | PROT_WRITE, "buffers"));
-
-      if (mem == MAP_FAILED) {
-        UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
-        UnmapMemory(ccb_, ccb_size, "CCB");
-        // Unmap any previously mapped buffers.
-        UnmapBuffers(buffers_.begin(), buffers_.begin() + index, num_slots_);
-        return absl::InternalError(absl::StrFormat(
-            "Failed to map channel buffers: %s", strerror(errno)));
-      }
-      buffers_.emplace_back(buffer.slot_size, mem);
-      index++;
-    }
-  }
-
-  if (debug_) {
-    printf("Channel mapped: scb: %p, ccb: %p\n", scb_, ccb_);
-    Dump();
-  }
-  return absl::OkStatus();
-}
 
 void Channel::Unmap() {
   if (scb_ == nullptr) {
@@ -368,88 +107,48 @@ void Channel::Unmap() {
   }
   buffers_.clear();
 
-  int64_t ccb_size =
-      sizeof(ChannelControlBlock) + sizeof(MessageSlot) * num_slots_;
-  UnmapMemory(ccb_, ccb_size, "CCB");
+  UnmapMemory(ccb_, CcbSize(num_slots_), "CCB");
 }
 
-// Called on server to extend the allocated buffers.
-absl::StatusOr<toolbelt::FileDescriptor>
-Channel::ExtendBuffers(int32_t new_slot_size) {
-  ChannelLock lock(&ccb_->lock);
-
-  int64_t buffers_size =
-      sizeof(BufferHeader) +
-      num_slots_ * (Aligned<32>(new_slot_size) + sizeof(MessagePrefix));
-
-  char buffer_name[32];
-  snprintf(buffer_name, sizeof(buffer_name), "buffers%d\n",
-           ccb_->num_buffers - 1);
-  toolbelt::FileDescriptor fd;
-  // Create the shared memory for the buffer but don't map it in.  This is
-  // in the server and it is not used here.  The result of a successful
-  // creation will be nullptr.
-  absl::StatusOr<void *> p = CreateSharedMemory(
-      channel_id_, buffer_name, buffers_size, /*map=*/false, fd);
-
-  if (!p.ok()) {
-    return absl::InternalError(
-        absl::StrFormat("Failed to map memory for extension: %s",
-                        p.status().ToString().c_str()));
+bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc) {
+  for (;;) {
+    uint32_t ref = slot->refs.load(std::memory_order_relaxed);
+    if ((ref & kPubOwned) != 0) {
+      return false;
+    }
+    uint32_t new_refs = ref & kRefCountMask;
+    uint32_t new_reliable_refs =
+        (ref >> kReliableRefCountShift) & kRefCountMask;
+    new_refs += inc;
+    if (reliable) {
+      new_reliable_refs += inc;
+    }
+    uint32_t new_ref = (new_reliable_refs << kReliableRefCountShift) | new_refs;
+    if (slot->refs.compare_exchange_weak(ref, new_ref,
+                                         std::memory_order_relaxed)) {
+      return true;
+    }
+    // Another subscriber got there before us.  Try again.
+    // Could also be a publisher, in which case the kPubOwned bit will be set.
   }
-  buffers_.emplace_back(new_slot_size, reinterpret_cast<char *>(*p));
-  ccb_->num_buffers++;
-  return fd;
 }
 
-absl::Status Channel::MapNewBuffers(std::vector<SlotBuffer> buffers) {
-  size_t start = buffers_.size();
-  if (debug_) {
-    printf("Mapping new buffers starting at %zd\n", start);
-  }
-  for (size_t i = start; i < buffers.size(); i++) {
-    const SlotBuffer &buffer = buffers[i];
-
-    int64_t buffers_size =
-        sizeof(BufferHeader) +
-        num_slots_ * (Aligned<32>(buffer.slot_size) + sizeof(MessagePrefix));
-    if (buffers_size != 0) {
-      char *mem = reinterpret_cast<char *>(MapMemory(
-          buffer.fd.Fd(), buffers_size, PROT_READ | PROT_WRITE, "new buffers"));
-
-      if (mem == MAP_FAILED) {
-        // Unmap any newly mapped buffers.
-        UnmapBuffers(buffers_.begin() + start, buffers_.end(), num_slots_);
-        return absl::InternalError(absl::StrFormat(
-            "Failed to map new channel buffers: %s", strerror(errno)));
-      }
-      buffers_.emplace_back(buffer.slot_size, mem);
+void Channel::DumpSlots() const {
+  for (int i = 0; i < num_slots_; i++) {
+    const MessageSlot *slot = &ccb_->slots[i];
+    uint32_t refs = slot->refs.load(std::memory_order_relaxed);
+    int reliable_refs = (refs >> kReliableRefCountShift) & kRefCountMask;
+    bool is_pub = (refs & kPubOwned) != 0;
+    refs &= kRefCountMask;
+    std::cout << "Slot: " << i;
+    if (is_pub) {
+      std::cout << " publisher " << refs;
+    } else {
+      std::cout << " refs: " << refs << " reliable refs: " << reliable_refs;
     }
-  }
-  return absl::OkStatus();
-}
-
-void Channel::UnmapUnusedBuffers() {
-  for (size_t i = 0; i + 1 < buffers_.size(); i++) {
-    if (buffers_[i].buffer == nullptr) {
-      continue;
-    }
-    BufferHeader *hdr = reinterpret_cast<BufferHeader *>(buffers_[i].buffer +
-                                                         sizeof(BufferHeader)) -
-                        1;
-    if (hdr->refs == 0) {
-      int64_t buffers_size = sizeof(BufferHeader) +
-                             num_slots_ * (Aligned<32>(buffers_[i].slot_size) +
-                                           sizeof(MessagePrefix));
-      if (buffers_size > 0) {
-        if (debug_) {
-          printf("%p: Unmapping unused buffers at index %zd\n", this, i);
-        }
-        UnmapMemory(buffers_[i].buffer, buffers_size, "buffers");
-        buffers_[i].buffer = nullptr;
-        buffers_[i].slot_size = 0;
-      }
-    }
+    std::cout << " ordinal: " << slot->ordinal
+              << " buffer_index: " << slot->buffer_index
+              << " message size: " << slot->message_size << std::endl;
   }
 }
 
@@ -458,22 +157,16 @@ void Channel::Dump() const {
   toolbelt::Hexdump(scb_, 64);
 
   printf("CCB:\n");
-  int64_t ccb_size =
-      sizeof(ChannelControlBlock) + sizeof(MessageSlot) * num_slots_;
-  toolbelt::Hexdump(ccb_, ccb_size);
-  PrintLists();
+  toolbelt::Hexdump(ccb_, CcbSize(num_slots_));
+
+  printf("Slots:\n");
+  DumpSlots();
+
   printf("Buffers:\n");
   int index = 0;
   for (auto &buffer : buffers_) {
     printf("  (%d) %d: %p\n", index++, buffer.slot_size, buffer.buffer);
   }
-}
-
-void Channel::ClaimPublisherSlot(MessageSlot *slot, int owner, SlotList &list) {
-  ListRemove(&list, &slot->element);
-  AddToBusyList(slot);
-  slot->owners.Set(owner);
-  SetSlotToBiggestBuffer(slot);
 }
 
 void Channel::DecrementBufferRefs(int buffer_index) {
@@ -501,213 +194,55 @@ void Channel::IncrementBufferRefs(int buffer_index) {
   }
 }
 
-void Channel::SetSlotToBiggestBuffer(MessageSlot *slot) {
-  if (slot == nullptr) {
-    return;
-  }
-  if (slot->buffer_index != -1) {
-    // If the slot has a buffer (it's not in the free list), decrement the
-    // refs for the buffer.
-    DecrementBufferRefs(slot->buffer_index);
-  }
-  slot->buffer_index = buffers_.size() - 1; // Use biggest buffer.
-  IncrementBufferRefs(slot->buffer_index);
-}
-
-MessageSlot *Channel::FindFreeSlotLocked(bool reliable, int owner) {
-  // Check if there is a free slot and if so, take it.
-  if (ccb_->free_list.first != 0) {
-    MessageSlot *slot =
-        reinterpret_cast<MessageSlot *>(FromCCBOffset(ccb_->free_list.first));
-    ClaimPublisherSlot(slot, owner, ccb_->free_list);
-    return slot;
-  }
-
-  // No free slot, search for first slot with no references in the
-  // active list.
-  // If reliable is set, don't go past a slot with a reliable_ref_count
-  // or an activation message that hasn't been seen by a subscriber.
-  void *p = FromCCBOffset(ccb_->active_list.first);
-  while (p != FromCCBOffset(0)) {
-    MessageSlot *slot = reinterpret_cast<MessageSlot *>(p);
-    if (reliable && slot->reliable_ref_count != 0) {
-      // Don't go past slot with reliable reference.
-      return nullptr;
-    }
-    MessagePrefix *prefix = Prefix(slot);
-    if (reliable && (prefix->flags & kMessageSeen) == 0) {
-      // An message that hasn't been seen.
-      return nullptr;
-    }
-    if (slot->ref_count == 0) {
-      prefix->flags = 0;
-      ClaimPublisherSlot(slot, owner, ccb_->active_list);
-      return slot;
-    }
-    p = FromCCBOffset(slot->element.next);
-  }
-  return nullptr;
-}
-
-MessageSlot *Channel::FindFreeSlot(bool reliable, int owner,
-                                   std::function<bool(ChannelLock *)> reload) {
-  ChannelLock lock(&ccb_->lock, std::move(reload));
-  return FindFreeSlotLocked(reliable, owner);
-}
-
-void Channel::GetStatsCounters(int64_t &total_bytes, int64_t &total_messages) {
-  ChannelLock lock(&ccb_->lock);
+void Channel::GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages, uint32_t& max_message_size, uint32_t& total_drops) {
   total_bytes = ccb_->total_bytes;
   total_messages = ccb_->total_messages;
+  max_message_size = ccb_->max_message_size;
+  total_drops = ccb_->total_drops;
 }
 
-Channel::PublishedMessage Channel::ActivateSlotAndGetAnother(
-    MessageSlot *slot, bool reliable, bool is_activation, int owner,
-    bool omit_prefix, bool *notify, std::function<bool(ChannelLock *)> reload) {
-  ChannelLock lock(&ccb_->lock, std::move(reload));
-
-  // Move slot from busy list to active list.
-  ListRemove(&ccb_->busy_list, &slot->element);
-  slot->owners.Clear(owner);
-  AddToActiveList(slot);
-
-  // If the previously last element in the active list has been seen by a
-  // subscriber we need to notify the subscribers that we've added a new
-  // message.  If hasn't been seen, we've already notified the subscribers when
-  // we added the slot to the active list.
-  MessageSlot *prev =
-      reinterpret_cast<MessageSlot *>(FromCCBOffset(slot->element.prev));
-  if (notify != nullptr) {
-    if (prev == FromCCBOffset(0) || (Prefix(prev)->flags & kMessageSeen) != 0) {
-      *notify = true;
-    }
+void Channel::ReloadIfNecessary(std::function<bool()> reload) {
+  if (reload == nullptr) {
+    return;
   }
-  void *buffer = GetBufferAddress(slot);
-  MessagePrefix *prefix = reinterpret_cast<MessagePrefix *>(buffer) - 1;
+  do {
+  } while (reload());
+}
 
-  // Copy message parameters into message prefix in buffer.
-  if (omit_prefix) {
-    slot->ordinal = prefix->ordinal; // Copy ordinal from prefix.
+void Channel::CleanupSlots(int owner, bool reliable, bool is_pub) {
+  if (is_pub) {
+    // Look for a slot with kPubOwned set and clear it.
+    for (int i = 0; i < NumSlots(); i++) {
+      MessageSlot *slot = &ccb_->slots[i];
+      uint32_t refs = slot->refs.load(std::memory_order_relaxed);
+      if ((refs & kPubOwned) != 0) {
+        slot->refs.store(0, std::memory_order_relaxed);
+        // Clear the slot in all the subscriber bitsets.
+        ccb_->subscribers.Traverse([this, slot](int sub_id) {
+          GetAvailableSlots(sub_id).Clear(slot->id);
+        });
+        return;
+      }
+    }
   } else {
-    slot->ordinal = ccb_->next_ordinal++;
-    prefix->message_size = slot->message_size;
-    prefix->ordinal = slot->ordinal;
-    prefix->timestamp = toolbelt::Now();
-    prefix->flags = 0;
-    if (is_activation) {
-      prefix->flags |= kMessageActivate;
-    }
-  }
-
-  // Update counters.
-  ccb_->total_messages++;
-  ccb_->total_bytes += slot->message_size;
-
-  // A reliable publisher doesn't allocate a slot until it is asked for.
-  if (reliable) {
-    return {nullptr, prefix->ordinal, prefix->timestamp};
-  }
-  // Find a new slot.
-  return {FindFreeSlotLocked(reliable, owner), prefix->ordinal,
-          prefix->timestamp};
-}
-
-inline void IncDecRefCount(MessageSlot *slot, bool reliable, int inc) {
-  slot->ref_count += inc;
-  if (reliable) {
-    slot->reliable_ref_count += inc;
-  }
-}
-
-void Channel::CleanupSlots(int owner, bool reliable) {
-  ChannelLock lock(&ccb_->lock);
-  // Clean up active list.  Remove references for any slot owned by the
-  // owner.
-  void *p = FromCCBOffset(ccb_->active_list.first);
-  while (p != FromCCBOffset(0)) {
-    MessageSlot *slot = reinterpret_cast<MessageSlot *>(p);
-    if (slot->owners.IsSet(owner)) {
-      slot->owners.Clear(owner);
-      IncDecRefCount(slot, reliable, -1);
-    }
-
-    p = FromCCBOffset(slot->element.next);
-  }
-
-  // Remove any publishers from the busy list.
-  p = FromCCBOffset(ccb_->busy_list.first);
-  while (p != FromCCBOffset(0)) {
-    MessageSlot *slot = reinterpret_cast<MessageSlot *>(p);
-    p = FromCCBOffset(slot->element.next);
-
-    if (slot->owners.IsSet(owner)) {
-      slot->buffer_index = -1;
-      slot->owners.Clear(owner);
-      // Move the slot to the free list.
-      ListRemove(&ccb_->busy_list, &slot->element);
-      ListInsertAtEnd(&ccb_->free_list, &slot->element);
+    // Subscriber.
+    // Remove the subscriber from the subscriber bitset.
+    ccb_->subscribers.Clear(owner);
+    // Go through all the slots and remove the owner from the owners bitset.
+    for (int i = 0; i < NumSlots(); i++) {
+      MessageSlot *slot = &ccb_->slots[i];
+      if (slot->sub_owners.IsSet(owner)) {
+        slot->sub_owners.Clear(owner);
+        AtomicIncRefCount(slot, reliable, -1);
+      }
     }
   }
 }
 
-MessageSlot *Channel::NextSlot(MessageSlot *slot, bool reliable, int owner,
-                               std::function<bool(ChannelLock *)> reload) {
-  ChannelLock lock(&ccb_->lock, std::move(reload));
-  if (slot == nullptr) {
-    // No current slot, first in list.
-    if (ccb_->active_list.first == 0) {
-      return nullptr;
-    }
-    // Take first slot in active list.
-    slot =
-        reinterpret_cast<MessageSlot *>(FromCCBOffset(ccb_->active_list.first));
-    slot->owners.Set(owner);
-    IncDecRefCount(slot, reliable, +1);
-    Prefix(slot)->flags |= kMessageSeen;
-    return slot;
-  }
-  if (slot->element.next == 0) {
-    // No more active slots.
-    // We need to hold onto the slot because when we call NextSlot again
-    // for the next batch of messages this slot needs still to allocated
-    // to the subsciber.
-    return nullptr;
-  }
-  // Going to move to another slot.  Decrement refs on current slot.
-  IncDecRefCount(slot, reliable, -1);
-  slot->owners.Clear(owner);
-
-  slot = reinterpret_cast<MessageSlot *>(FromCCBOffset(slot->element.next));
-  IncDecRefCount(slot, reliable, +1);
-  Prefix(slot)->flags |= kMessageSeen;
-  slot->owners.Set(owner);
-  return slot;
-}
-
-MessageSlot *Channel::LastSlot(MessageSlot *slot, bool reliable, int owner,
-                               std::function<bool(ChannelLock *)> reload) {
-  ChannelLock lock(&ccb_->lock, std::move(reload));
-  if (ccb_->active_list.last == 0) {
-    return nullptr;
-  }
-  if (slot != nullptr) {
-    IncDecRefCount(slot, reliable, -1);
-    slot->owners.Clear(owner);
-  }
-  slot = reinterpret_cast<MessageSlot *>(FromCCBOffset(ccb_->active_list.last));
-  IncDecRefCount(slot, reliable, +1);
-  Prefix(slot)->flags |= kMessageSeen;
-  slot->owners.Set(owner);
-  return slot;
-}
-
-MessageSlot *
-Channel::FindActiveSlotByTimestamp(MessageSlot *old_slot, uint64_t timestamp,
-                                   bool reliable, int owner,
-                                   std::vector<MessageSlot *> &buffer,
-                                   std::function<bool(ChannelLock *)> reload) {
-  ChannelLock lock(&ccb_->lock, std::move(reload));
-
+MessageSlot *Channel::FindActiveSlotByTimestamp(
+    MessageSlot *old_slot, uint64_t timestamp, bool reliable, int owner,
+    std::vector<MessageSlot *> &buffer, std::function<bool()> reload) {
+#if 0
   // Copy pointers to active list slots into search buffer.  They are already
   // in timestamp order.
   buffer.clear();
@@ -741,16 +276,9 @@ Channel::FindActiveSlotByTimestamp(MessageSlot *old_slot, uint64_t timestamp,
   Prefix(new_slot)->flags |= kMessageSeen;
   new_slot->owners.Set(owner);
   return new_slot;
-}
-
-bool Channel::LockForSharedInternal(MessageSlot *slot, int64_t ordinal,
-                                    bool reliable) {
-  ChannelLock lock(&ccb_->lock);
-  if (slot->ordinal != ordinal) {
-    return false;
-  }
-  IncDecRefCount(slot, reliable, +1);
-  return true;
+#else
+  return nullptr;
+#endif
 }
 
 } // namespace subspace
