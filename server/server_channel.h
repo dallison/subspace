@@ -23,6 +23,9 @@ constexpr int kMaxUsers = kMaxSlotOwners;
 class ClientHandler;
 class Server;
 
+absl::StatusOr<SystemControlBlock *>
+CreateSystemControlBlock(toolbelt::FileDescriptor &fd);
+
 // A user is a publisher or subscriber on a channel.  Each user has a
 // unique (per channel) user id.  A user might have a trigger fd
 // associated with it (subscribers always have one, but only
@@ -59,14 +62,14 @@ private:
 class SubscriberUser : public User {
 public:
   SubscriberUser(ClientHandler *handler, int id, bool is_reliable,
-                 bool is_bridge, int max_shared_ptrs)
+                 bool is_bridge, int max_active_messages)
       : User(handler, id, is_reliable, is_bridge),
-        max_shared_ptrs_(max_shared_ptrs) {}
+        max_active_messages_(max_active_messages) {}
   bool IsSubscriber() const override { return true; }
-  int MaxSharedPtrs() const { return max_shared_ptrs_; }
+  int MaxActiveMessages() const { return max_active_messages_; }
 
 private:
-  int max_shared_ptrs_;
+  int max_active_messages_;
 };
 
 class PublisherUser : public User {
@@ -130,7 +133,7 @@ public:
   absl::StatusOr<SubscriberUser *> AddSubscriber(ClientHandler *handler,
                                                  bool is_reliable,
                                                  bool is_bridge,
-                                                 int max_shared_ptrs);
+                                                 int max_active_messages);
 
   // Get the file descriptors for all subscriber triggers.
   std::vector<toolbelt::FileDescriptor> GetSubscriberTriggerFds() const;
@@ -157,7 +160,7 @@ public:
   void RemoveUser(int user_id);
   void RemoveAllUsersFor(ClientHandler *handler);
   bool IsEmpty() const { return user_ids_.IsEmpty(); }
-  absl::Status HasSufficientCapacity(int new_max_ptrs) const;
+  absl::Status HasSufficientCapacity(int new_max_active_messages) const;
   void CountUsers(int &num_pubs, int &num_subs) const;
   void GetChannelInfo(subspace::ChannelInfo *info);
   void GetChannelStats(subspace::ChannelStats *stats);
@@ -193,6 +196,19 @@ public:
 
   // Add a buffer (slot size and memory fd) to the shared_memory_fds.
   void AddBuffer(int slot_size, toolbelt::FileDescriptor fd);
+
+  // Allocate the shared memory for a channel.  The num_slots_
+  // and slot_size_ member variables will either be 0 (for a subscriber
+  // to channel with no publishers), or will contain the channel
+  // size parameters.  Unless there's an error, it returns the
+  // file descriptors for the allocated CCB and buffers.  The
+  // SCB has already been allocated and will be mapped in for
+  // this channel.  This is only used in the server.
+  absl::StatusOr<SharedMemoryFds>
+  Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
+           int num_slots);
+
+  absl::StatusOr<toolbelt::FileDescriptor> ExtendBuffers(int32_t new_slot_size);
 
 private:
   std::vector<std::unique_ptr<User>> users_;

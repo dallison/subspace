@@ -4,11 +4,18 @@ cc_library(
     name = "subspace_client",
     srcs = [
         "client.cc",
+        "client_channel.cc",
+        "message.cc",
+        "publisher.cc",
+        "subscriber.cc",
     ],
     hdrs = [
         "client.h",
         "client_channel.h",
+        "message.h",
         "options.h",
+        "publisher.h",
+        "subscriber.h",
     ],
     deps = [
         "//common:subspace_common",

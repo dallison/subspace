@@ -56,7 +56,7 @@ message CreateSubscriberRequest {
   bool is_reliable = 3;
   bool is_bridge = 4; // This subscriber is for the bridge.
   bytes type = 5;    // Type of data carried on channel.
-  int32 max_shared_ptrs = 6;    // Max number of shared_ptr objects.
+  int32 max_active_messages = 6;    // Max number of active message objects.
 }
 
 message CreateSubscriberResponse {
@@ -165,6 +165,8 @@ message ChannelStats {
   int32 num_slots = 5;
   int32 num_pubs = 6;
   int32 num_subs = 7;
+  uint32 max_message_size = 8;
+  uint32 total_drops = 9;
 }
 
 // This is published to the /subspace/Statistics channel.

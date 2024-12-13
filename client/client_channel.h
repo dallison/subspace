@@ -83,6 +83,15 @@ public:
     return GetScb()->counters[GetChannelId()];
   }
 
+  // Client-side channel mapping.  The SharedMemoryFds contains the
+  // file descriptors for the CCB and buffers.  The num_slots_
+  // member variable contains either 0 or the
+  // channel size parameters.
+  absl::Status Map(SharedMemoryFds fds, const toolbelt::FileDescriptor &scb_fd);
+
+  absl::Status MapNewBuffers(std::vector<SlotBuffer> buffers);
+  void UnmapUnusedBuffers();
+
 protected:
   virtual bool IsSubscriber() const { return false; }
   virtual bool IsPublisher() const { return false; }
@@ -98,201 +107,9 @@ protected:
   MessageSlot *slot_ = nullptr; // Current slot.
 };
 
-// This is a publisher.  It maps in the channel's memory and allows
-// messages to be published.
-class PublisherImpl : public ClientChannel {
-public:
-  PublisherImpl(const std::string &name, int num_slots, int channel_id,
-                int publisher_id, std::string type,
-                const PublisherOptions &options)
-      : ClientChannel(name, num_slots, channel_id, std::move(type)),
-        publisher_id_(publisher_id), options_(options) {}
 
-  bool IsReliable() const { return options_.IsReliable(); }
-  bool IsLocal() const { return options_.IsLocal(); }
-  bool IsFixedSize() const { return options_.IsFixedSize(); }
 
-private:
-  friend class ::subspace::ClientImpl;
 
-  bool IsPublisher() const override { return true; }
-
-  PublishedMessage
-  ActivateSlotAndGetAnother(bool reliable, bool is_activation, bool omit_prefix,
-                            bool *notify,
-                            std::function<bool(ChannelLock *)> reload) {
-    return Channel::ActivateSlotAndGetAnother(slot_, reliable, is_activation,
-                                              publisher_id_, omit_prefix,
-                                              notify, std::move(reload));
-  }
-  void ClearSubscribers() { subscribers_.clear(); }
-  void AddSubscriber(toolbelt::FileDescriptor fd) {
-    subscribers_.emplace_back(toolbelt::FileDescriptor(), std::move(fd));
-  }
-  size_t NumSubscribers() { return subscribers_.size(); }
-
-  void SetTriggerFd(toolbelt::FileDescriptor fd) {
-    trigger_.SetTriggerFd(std::move(fd));
-  }
-  void SetPollFd(toolbelt::FileDescriptor fd) {
-    trigger_.SetPollFd(std::move(fd));
-  }
-
-  toolbelt::FileDescriptor &GetPollFd() { return trigger_.GetPollFd(); }
-
-  void TriggerSubscribers() {
-    for (auto &fd : subscribers_) {
-      fd.Trigger();
-    }
-  }
-  int GetPublisherId() const { return publisher_id_; }
-
-  void ClearPollFd() { trigger_.Clear(); }
-
-  toolbelt::TriggerFd trigger_;
-  int publisher_id_;
-  std::vector<toolbelt::TriggerFd> subscribers_;
-  PublisherOptions options_;
-};
-
-// A subscriber reads messages from a channel.  It maps the channel
-// shared memory.
-class SubscriberImpl : public ClientChannel {
-public:
-  SubscriberImpl(const std::string &name, int num_slots, int channel_id,
-                 int subscriber_id, std::string type,
-                 const SubscriberOptions &options)
-      : ClientChannel(name, num_slots, channel_id, std::move(type)),
-        subscriber_id_(subscriber_id), options_(options) {
-    shared_ptr_refs_ =
-        std::make_unique<std::atomic<int>[]>(options.MaxSharedPtrs());
-    for (int i = 0; i < options.MaxSharedPtrs(); ++i) {
-      shared_ptr_refs_[i] = 0;
-    }
-  }
-
-  std::shared_ptr<SubscriberImpl> shared_from_this() {
-    return std::static_pointer_cast<SubscriberImpl>(
-        Channel::shared_from_this());
-  }
-
-  int64_t CurrentOrdinal() const {
-    return CurrentSlot() == nullptr ? -1 : CurrentSlot()->ordinal;
-  }
-  int64_t Timestamp() const {
-    return CurrentSlot() == nullptr ? 0 : Prefix(CurrentSlot())->timestamp;
-  }
-  bool IsReliable() const { return options_.IsReliable(); }
-
-  int32_t SlotSize() const { return Channel::SlotSize(CurrentSlot()); }
-
-  // We need another shared ptr.  Find a free reference and return
-  // an index.  We have already checked that there is room so this
-  // can never fail.
-  size_t AllocateSharedPtr() {
-    for (size_t i = 0; i < size_t(MaxSharedPtrs()); ++i) {
-      int zero = 0;
-      if (shared_ptr_refs_[i].compare_exchange_strong(zero, 1)) {
-        num_shared_ptrs_++;
-        return i;
-      }
-    }
-    // Can never get here as the limits have been checked.
-    abort();
-  }
-
-  void IncDecSharedPtrRefCount(int inc, size_t index) {
-    for (;;) {
-      int curr = shared_ptr_refs_[index];
-      int next = curr + inc;
-      if (shared_ptr_refs_[index].compare_exchange_strong(curr, next)) {
-        if (next == 0) {
-          num_shared_ptrs_--;
-        }
-        return;
-      }
-    }
-  }
-  int NumSharedPtrs() const { return num_shared_ptrs_; }
-  int MaxSharedPtrs() const { return options_.MaxSharedPtrs(); }
-  bool CheckSharedPtrCount() const {
-    return num_shared_ptrs_ < options_.MaxSharedPtrs();
-  }
-
-  int GetSharedPtrRefCount(size_t index) const {
-    return shared_ptr_refs_[index];
-  }
-
-  bool LockForShared(MessageSlot *slot, int64_t ordinal) {
-    return LockForSharedInternal(slot, ordinal, IsReliable());
-  }
-
-private:
-  friend class ::subspace::ClientImpl;
-
-  bool IsSubscriber() const override { return true; }
-
-  void ClearPublishers() { reliable_publishers_.clear(); }
-  void AddPublisher(toolbelt::FileDescriptor fd) {
-    reliable_publishers_.emplace_back(toolbelt::FileDescriptor(),
-                                      std::move(fd));
-  }
-  size_t NumReliablePublishers() { return reliable_publishers_.size(); }
-
-  void SetTriggerFd(toolbelt::FileDescriptor fd) {
-    trigger_.SetTriggerFd(std::move(fd));
-  }
-  void SetPollFd(toolbelt::FileDescriptor fd) {
-    trigger_.SetPollFd(std::move(fd));
-  }
-  int GetSubscriberId() const { return subscriber_id_; }
-  void TriggerReliablePublishers() {
-    for (auto &fd : reliable_publishers_) {
-      fd.Trigger();
-    }
-  }
-  void Trigger() { trigger_.Trigger(); }
-
-  MessageSlot *NextSlot(std::function<bool(ChannelLock *)> reload) {
-    return Channel::NextSlot(CurrentSlot(), IsReliable(), subscriber_id_,
-                             std::move(reload));
-  }
-
-  MessageSlot *LastSlot(std::function<bool(ChannelLock *)> reload) {
-    return Channel::LastSlot(CurrentSlot(), IsReliable(), subscriber_id_,
-                             std::move(reload));
-  }
-
-  toolbelt::FileDescriptor &GetPollFd() { return trigger_.GetPollFd(); }
-  void ClearPollFd() { trigger_.Clear(); }
-
-  MessageSlot *FindMessage(uint64_t timestamp) {
-    MessageSlot *slot =
-        FindActiveSlotByTimestamp(CurrentSlot(), timestamp, IsReliable(),
-                                  GetSubscriberId(), search_buffer_, nullptr);
-    if (slot != nullptr) {
-      SetSlot(slot);
-    }
-    return slot;
-  }
-
-  int subscriber_id_;
-  toolbelt::TriggerFd trigger_;
-  std::vector<toolbelt::TriggerFd> reliable_publishers_;
-  SubscriberOptions options_;
-  std::atomic<int> num_shared_ptrs_ = 0;
-
-  // Each shared_ptr has an index into this array that holds a reference
-  // counter.  Each copy of a shared_ptr increments the reference counter
-  // and when it goes to zero, we know that there are no more copies of
-  // the shared_ptr.
-  std::unique_ptr<std::atomic<int>[]> shared_ptr_refs_;
-
-  // It is rare that subscribers need to search for messges by timestamp.  This
-  // will keep the memory allocation to the first search on a subscriber.  Most
-  // subscribers won't use this.
-  std::vector<MessageSlot *> search_buffer_;
-};
 } // namespace details
 } // namespace subspace
 
