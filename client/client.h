@@ -16,6 +16,7 @@
 #include "coroutine.h"
 #include "toolbelt/fd.h"
 #include "toolbelt/sockets.h"
+#include "toolbelt/logging.h"
 #include "toolbelt/triggerfd.h"
 #include <cstddef>
 #include <functional>
@@ -125,249 +126,8 @@ private:
 template <typename T>
 inline shared_ptr<T>::shared_ptr(const weak_ptr<T> &p) : msg_(p.lock().msg_) {}
 
-#if 0
-// Shared and weak pointers to messsages as seen by subscriber.  These
-// refer to a message in a slot.  A shared_ptr maintains a reference to the
-// message until it is destructed or moved to another message.  The message
-// referred to by a shared_ptr will never be removed.  A weak_ptr
-// is a reference to a slot that might go away.  You need to lock the
-// weak_ptr, converting it to a shared_ptr before you can access the
-// message.  The lock may fail if the message slot has gone away.
-//
-// Don't hold onto shared_ptr objects for a long time.   If you do you
-// are keeping slots from being reused, thus reducing the channel
-// capacity for all other publishers and subscribers.  The best strategy
-// is to convert them to a weak_ptr before storing them and then,
-// when you want to use the message, lock it and check that it's still
-// valid.  You should design your system so that lost messages are not
-// an issue.  If you really need to see all messages on a channel, use
-// the reliable mode for the publshers and subscribers.
-//
-// The shared_ptr and weak_ptr have a very similar interface to their
-// counterparts in std.  Please see the C++ documentation for how to use
-// them.
-template <typename T> class weak_ptr;
-
-template <typename T> class shared_ptr {
-public:
-  shared_ptr() = default;
-
-  ~shared_ptr() {
-    if (sub_ != nullptr) {
-      IncRefCount(-1);
-    }
-  }
-  shared_ptr(const weak_ptr<T> &p);
-
-  shared_ptr(const shared_ptr &p)
-      : sub_(p.sub_), index_(p.index_), msg_(p.msg_), slot_(p.slot_),
-        ordinal_(p.ordinal_) {
-    IncRefCount(+1);
-  }
-  shared_ptr(shared_ptr &&p)
-      : sub_(p.sub_), index_(p.index_), msg_(p.msg_), slot_(p.slot_),
-        ordinal_(p.ordinal_) {
-    p.ResetInternal();
-  }
-
-  shared_ptr &operator=(const shared_ptr &p) {
-    if (*this != p) {
-      IncRefCount(-1);
-    }
-    CopyFrom(p);
-    IncRefCount(+1);
-    return *this;
-  }
-
-  shared_ptr &operator=(shared_ptr &&p) {
-    CopyFrom(p);
-    p.ResetInternal();
-    return *this;
-  }
-
-  void reset() {
-    if (sub_ != nullptr) {
-      IncRefCount(-1);
-    }
-    ResetInternal();
-  }
-
-  T *get() const { return reinterpret_cast<T *>(msg_.buffer); }
-  T &operator*() const { return *reinterpret_cast<T *>(msg_.buffer); }
-  T *operator->() const { return get(); }
-  operator bool() const {
-    return sub_ != nullptr && slot_ != nullptr && msg_.length != 0;
-  }
-  long use_count() const {
-    return (sub_ == nullptr || slot_ == nullptr || msg_.length == 0)
-               ? 0
-               : sub_->GetSharedPtrRefCount(index_);
-  }
-
-  const Message &GetMessage() const { return msg_; }
-
-private:
-  friend class ClientImpl;
-  void CopyFrom(const shared_ptr &p) {
-    sub_ = p.sub_;
-    index_ = p.index_;
-    msg_ = p.msg_;
-    slot_ = p.slot_;
-    ordinal_ = p.ordinal_;
-  }
-
-  void ResetInternal() {
-    sub_ = nullptr;
-    slot_ = nullptr;
-  }
-
-  shared_ptr(std::shared_ptr<details::SubscriberImpl> sub, const Message &msg)
-      : sub_(sub), msg_(msg), slot_(sub->CurrentSlot()),
-        ordinal_(sub->CurrentOrdinal()) {
-    if (slot_ == nullptr) {
-      return;
-    }
-    if (!sub_->CheckSharedPtrCount()) {
-      ResetInternal();
-      return;
-    }
-    index_ = sub_->AllocateSharedPtr();
-    IncDecSlotRefCount(+1);
-  }
-
-  template <typename M>
-  friend bool operator==(const shared_ptr<M> &p1, const shared_ptr<M> &p2);
-
-  friend class weak_ptr<T>;
-
-  void IncDecSlotRefCount(int inc) {
-    if (slot_ == nullptr) {
-      return;
-    }
-    slot_->ref_count += inc;
-    if (sub_->IsReliable()) {
-      slot_->reliable_ref_count += inc;
-    }
-  }
-
-  void IncRefCount(int inc) {
-    if (slot_ == nullptr) {
-      return;
-    }
-    ChannelLock lock(&sub_->GetCcb()->lock);
-    IncDecSlotRefCount(inc);
-    sub_->IncDecSharedPtrRefCount(inc, index_);
-  }
-
-  std::shared_ptr<details::SubscriberImpl> sub_ = nullptr;
-  size_t index_ = 0;
-  Message msg_;
-  MessageSlot *slot_ = nullptr;
-  int64_t ordinal_ = -1;
-};
-
-template <typename M>
-bool operator==(const shared_ptr<M> &p1, const shared_ptr<M> &p2) {
-  return p1.sub_ == p2.sub_ && p1.slot_ == p2.slot_ &&
-         p1.ordinal_ == p2.ordinal_;
-}
-
-template <typename T> class weak_ptr {
-public:
-  weak_ptr() = default;
-  weak_ptr(std::shared_ptr<details::SubscriberImpl> sub, const Message &msg,
-           MessageSlot *slot)
-      : sub_(sub), msg_(msg), slot_(slot), ordinal_(slot->ordinal) {}
-  ~weak_ptr() {}
-  weak_ptr(const weak_ptr &p)
-      : sub_(p.sub_), msg_(p.msg_), slot_(p.slot_), ordinal_(p.ordinal_) {}
-  weak_ptr(weak_ptr &&p)
-      : sub_(p.sub_), msg_(p.msg_), slot_(p.slot_), ordinal_(p.ordinal_) {
-    p.reset();
-  }
-  weak_ptr(const shared_ptr<T> &p)
-      : sub_(p.sub_), msg_(p.msg_), slot_(p.slot_), ordinal_(p.ordinal_) {}
-
-  weak_ptr &operator=(const weak_ptr &p) {
-    CopyFrom(p);
-    return *this;
-  }
-
-  weak_ptr &operator=(weak_ptr &&p) {
-    CopyFrom(p);
-    p.reset();
-    return *this;
-  }
-
-  void reset() {
-    sub_ = nullptr;
-    slot_ = nullptr;
-  }
-
-  long use_count() const {
-    if (slot_ == nullptr) {
-      return 0;
-    }
-    return msg_.length == 0 ? 0 : slot_->ref_count;
-  }
-
-  bool expired() const {
-    return slot_ == nullptr || slot_->ordinal != ordinal_;
-  }
-
-  shared_ptr<T> lock() const {
-    if (sub_ == nullptr || slot_ == nullptr) {
-      return shared_ptr<T>();
-    }
-    if (!sub_->CheckSharedPtrCount()) {
-      return shared_ptr<T>();
-    }
-    // This returns true if the slot is still valid.  The reference
-    // counts have been incremented.
-    if (!sub_->LockForShared(slot_, ordinal_)) {
-      return shared_ptr<T>();
-    }
-
-    return shared_ptr<T>(*this);
-  }
-
-  bool operator==(std::nullptr_t) const {
-    return sub_ == nullptr || slot_ == nullptr;
-  }
-  bool operator!=(std::nullptr_t) const {
-    return sub_ != nullptr && slot_ != nullptr;
-  }
-
-private:
-  friend class shared_ptr<T>;
-
-  void CopyFrom(const weak_ptr &p) {
-    sub_ = p.sub_;
-    msg_ = p.msg_;
-    slot_ = p.slot_;
-    ordinal_ = p.ordinal_;
-  }
-
-  std::shared_ptr<details::SubscriberImpl> sub_;
-  Message msg_;
-  MessageSlot *slot_ = nullptr;
-  int64_t ordinal_;
-};
-#endif
-
 class Publisher;
 class Subscriber;
-
-#if 0
-template <typename T>
-inline shared_ptr<T>::shared_ptr(const weak_ptr<T> &p)
-    : sub_(p.sub_), msg_(p.msg_), slot_(p.slot_), ordinal_(p.ordinal_) {
-  if (sub_ == nullptr) {
-    return;
-  }
-  index_ = sub_->AllocateSharedPtr();
-}
-#endif
 
 // This is an Subspace client.  It must be initialized by calling Init()
 // before it can be used.  The Init() function connects it to an Subspace
@@ -491,13 +251,11 @@ private:
   // Find a message given a timestamp.
   absl::StatusOr<Message> FindMessage(details::SubscriberImpl *subscriber,
                                       uint64_t timestamp);
-#if 0
   // AsFindMessage above but returns a shared_ptr to the typed message.
   // NOTE: this is subspace::shared_ptr, not std::shared_ptr.
   template <typename T>
   absl::StatusOr<shared_ptr<T>> FindMessage(details::SubscriberImpl *subscriber,
                                             uint64_t timestamp);
-#endif
 
   // Gets the PollFd for a publisher and subscriber.  PollFds are only
   // available for reliable publishers but a valid pollfd will be returned for
@@ -593,6 +351,7 @@ private:
       std::function<absl::Status(details::PublisherImpl *, int32_t, int32_t)>>
       resize_callbacks_;
   bool debug_ = false;
+  toolbelt::Logger logger_;
 };
 
 // This function returns an subspace::shared_ptr that refers to the message
@@ -612,7 +371,6 @@ ClientImpl::ReadMessage(details::SubscriberImpl *subscriber, ReadMode mode) {
   return ::subspace::shared_ptr<T>(std::move(*msg));
 }
 
-#if 0
 template <typename T>
 inline absl::StatusOr<::subspace::shared_ptr<T>>
 ClientImpl::FindMessage(details::SubscriberImpl *subscriber,
@@ -621,18 +379,8 @@ ClientImpl::FindMessage(details::SubscriberImpl *subscriber,
   if (!msg.ok()) {
     return msg.status();
   }
-  if (msg->length == 0) {
-    return ::subspace::shared_ptr<T>(subscriber->shared_from_this(), *msg);
-  }
-  if (!subscriber->CheckSharedPtrCount()) {
-    return absl::InternalError(
-        absl::StrFormat("Too many shared pointers for %s: current: %d, max: %d",
-                        subscriber->Name(), subscriber->NumSharedPtrs(),
-                        subscriber->MaxActiveMessages()));
-  }
-  return ::subspace::shared_ptr<T>(subscriber->shared_from_this(), *msg);
+   return ::subspace::shared_ptr<T>(std::move(*msg));
 }
-#endif
 
 // The Publisher and Subscriber classes are the main interface for sending
 // and receiving messages.  They can be moved but not copied.
@@ -808,12 +556,10 @@ public:
     return client_->FindMessage(impl_.get(), timestamp);
   }
 
-#if 0
   // AsFindMessage above but returns a shared_ptr to the typed message.
   // NOTE: this is subspace::shared_ptr, not std::shared_ptr.
   template <typename T>
   absl::StatusOr<shared_ptr<T>> FindMessage(uint64_t timestamp);
-#endif
 
   struct pollfd GetPollFd() const {
     return client_->GetPollFd(impl_.get());
@@ -886,14 +632,11 @@ Subscriber::ReadMessage(ReadMode mode) {
   return client_->ReadMessage<T>(impl_.get(), mode);
 }
 
-#if 0
-
 template <typename T>
 inline absl::StatusOr<::subspace::shared_ptr<T>>
 Subscriber::FindMessage(uint64_t timestamp) {
   return client_->FindMessage<T>(impl_.get(), timestamp);
 }
-#endif
 
 // This is a wrapper around the ClientImpl that is created as a shared_ptr
 // to provide lifetime management with respect to Publisher, Subscriber and

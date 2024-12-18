@@ -495,35 +495,59 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
       if (it != dropped_message_callbacks_.end()) {
         it->second(subscriber, drops);
       }
+      logger_.Log(toolbelt::LogLevel::kWarning,
+                  "Dropped %d messages on channel %s", drops,
+                  subscriber->Name().c_str());
     }
   }
 
-  MessagePrefix *prefix = subscriber->Prefix(new_slot);
-  if (prefix == nullptr) {
-    subscriber->ReloadIfNecessary([this, subscriber]() {
-      absl::StatusOr<bool> ok = ReloadBuffersIfNecessary(subscriber);
-      if (!ok.ok()) {
-        return false;
-      }
-      return *ok;
-    });
-    prefix = subscriber->Prefix(new_slot);
-  }
+  MessagePrefix *prefix = subscriber->Prefix(new_slot, [this, subscriber]() {
+    absl::StatusOr<bool> ok = ReloadBuffersIfNecessary(subscriber);
+    if (!ok.ok()) {
+      return false;
+    }
+    return *ok;
+  });
 
   if (prefix != nullptr) {
     if ((prefix->flags & kMessageActivate) != 0) {
       if (!pass_activation) {
+        // We are going to ignore this message, but we have already inc
+        subscriber->RememberOrdinal(new_slot->ordinal);
         subscriber->DecrementSlotRef(new_slot);
+        if (subscriber->IsReliable()) {
+          subscriber->TriggerReliablePublishers();
+        }
         return ReadMessageInternal(subscriber, mode,
                                    /* pass_activation=*/false,
                                    /* clear_trigger=*/false);
       }
     }
   }
-  subscriber->SetActiveMessage(new_slot->message_size, new_slot,
-              subscriber->GetCurrentBufferAddress(),
-              subscriber->CurrentOrdinal(), subscriber->Timestamp());
-  return Message(subscriber->GetActiveMessage());
+  // We have a new slot, clear the subscriber's slot.
+  subscriber->ClearActiveMessage();
+
+  // Allocate a new active message for the slot.
+  auto msg = subscriber->SetActiveMessage(
+      new_slot->message_size, new_slot, subscriber->GetCurrentBufferAddress(),
+      subscriber->CurrentOrdinal(), subscriber->Timestamp());
+
+  // If we are unable to allocate a new message (due to message limits)
+  // restore the slot so that we pick it up next time.
+  if (msg->length == 0) {
+    subscriber->DecrementSlotRef(new_slot);
+    // Subscriber does not have a slot now but the slot it had is still active.
+  } else {
+    // We have a slot, claim it.
+    subscriber->ClaimSlot(new_slot, [this, subscriber]() {
+    absl::StatusOr<bool> ok = ReloadBuffersIfNecessary(subscriber);
+    if (!ok.ok()) {
+      return false;
+    }
+    return *ok;
+  });
+  }
+  return Message(msg);
 }
 
 absl::StatusOr<Message> ClientImpl::ReadMessage(SubscriberImpl *subscriber,
@@ -551,7 +575,6 @@ absl::StatusOr<Message> ClientImpl::ReadMessage(SubscriberImpl *subscriber,
                              /*clear_trigger=*/true);
 }
 
-#if 0
 absl::StatusOr<Message>
 ClientImpl::FindMessageInternal(SubscriberImpl *subscriber,
                                 uint64_t timestamp) {
@@ -586,7 +609,6 @@ absl::StatusOr<Message> ClientImpl::FindMessage(SubscriberImpl *subscriber,
   }
   return FindMessageInternal(subscriber, timestamp);
 }
-#endif
 
 struct pollfd ClientImpl::GetPollFd(SubscriberImpl *subscriber) const {
   struct pollfd fd = {.fd = subscriber->GetPollFd().Fd(), .events = POLLIN};

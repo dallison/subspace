@@ -110,10 +110,17 @@ void Channel::Unmap() {
   UnmapMemory(ccb_, CcbSize(num_slots_), "CCB");
 }
 
-bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc) {
+bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc, int ordinal) {
   for (;;) {
     uint32_t ref = slot->refs.load(std::memory_order_relaxed);
     if ((ref & kPubOwned) != 0) {
+      return false;
+    }
+    // Not pub owned.  If the ordinal has changed we can't get the slot because another
+    // message has been published into it.  We need to try another slot.  An ordinal of 0
+    // in the refs field means that the slot was free and we can keep trying to use it.
+    int ref_ord = (ref >> kOrdinalShift) & kOrdinalMask;
+    if (ref_ord != 0 && ref_ord != ordinal) {
       return false;
     }
     uint32_t new_refs = ref & kRefCountMask;
@@ -123,7 +130,7 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc) {
     if (reliable) {
       new_reliable_refs += inc;
     }
-    uint32_t new_ref = (new_reliable_refs << kReliableRefCountShift) | new_refs;
+    uint32_t new_ref = (ordinal << kOrdinalShift) | (new_reliable_refs << kReliableRefCountShift) | new_refs;
     if (slot->refs.compare_exchange_weak(ref, new_ref,
                                          std::memory_order_relaxed)) {
       return true;
@@ -201,7 +208,7 @@ void Channel::GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages, 
   total_drops = ccb_->total_drops;
 }
 
-void Channel::ReloadIfNecessary(std::function<bool()> reload) {
+void Channel::ReloadIfNecessary(const std::function<bool()>& reload) {
   if (reload == nullptr) {
     return;
   }
@@ -233,52 +240,11 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub) {
       MessageSlot *slot = &ccb_->slots[i];
       if (slot->sub_owners.IsSet(owner)) {
         slot->sub_owners.Clear(owner);
-        AtomicIncRefCount(slot, reliable, -1);
+        AtomicIncRefCount(slot, reliable, -1, 0);
       }
     }
   }
 }
 
-MessageSlot *Channel::FindActiveSlotByTimestamp(
-    MessageSlot *old_slot, uint64_t timestamp, bool reliable, int owner,
-    std::vector<MessageSlot *> &buffer, std::function<bool()> reload) {
-#if 0
-  // Copy pointers to active list slots into search buffer.  They are already
-  // in timestamp order.
-  buffer.clear();
-  buffer.reserve(NumSlots());
-  void *p = FromCCBOffset(ccb_->active_list.first);
-  while (p != FromCCBOffset(0)) {
-    MessageSlot *slot = reinterpret_cast<MessageSlot *>(p);
-    buffer.push_back(slot);
-    p = FromCCBOffset(slot->element.next);
-  }
-  // Apparently, lower_bound will return the first in the range if
-  // the value is less than the whole range.  That's unexpected.
-  if (buffer.empty() || timestamp < Prefix(buffer.front())->timestamp) {
-    return nullptr;
-  }
-
-  // Binary search the search buffer.
-  auto it = std::lower_bound(
-      buffer.begin(), buffer.end(), timestamp,
-      [this](MessageSlot *s, uint64_t t) { return Prefix(s)->timestamp < t; });
-  if (it == buffer.end()) {
-    // Not found, nothing changes.
-    return nullptr;
-  }
-  if (old_slot != nullptr) {
-    IncDecRefCount(old_slot, reliable, -1);
-    old_slot->owners.Clear(owner);
-  }
-  MessageSlot *new_slot = *it;
-  IncDecRefCount(new_slot, reliable, +1);
-  Prefix(new_slot)->flags |= kMessageSeen;
-  new_slot->owners.Set(owner);
-  return new_slot;
-#else
-  return nullptr;
-#endif
-}
 
 } // namespace subspace

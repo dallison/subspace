@@ -9,6 +9,7 @@
 #include "coroutine.h"
 #include "server/server.h"
 #include "toolbelt/hexdump.h"
+#include "toolbelt/pipe.h"
 #include <gtest/gtest.h>
 #include <inttypes.h>
 #include <memory>
@@ -503,9 +504,10 @@ TEST_F(ClientTest, PublishAndResize) {
   absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
   ASSERT_TRUE(pub_status.ok());
 
-  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("dave6", {.max_active_messages = 2});
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber("dave6", {.max_active_messages = 2});
   ASSERT_TRUE(sub.ok());
-  
+
   absl::StatusOr<Message> msg = sub->ReadMessage();
   ASSERT_TRUE(msg.ok());
   ASSERT_EQ(6, msg->length);
@@ -556,7 +558,8 @@ TEST_F(ClientTest, PublishAndResize2) {
   ASSERT_TRUE(pub_status2.ok());
 
   // Now create subscriber and read both messages.
-  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("dave6", {.max_active_messages = 2});
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber("dave6", {.max_active_messages = 2});
   ASSERT_TRUE(sub.ok());
 
   absl::StatusOr<Message> msg = sub->ReadMessage();
@@ -644,7 +647,8 @@ TEST_F(ClientTest, PublishAndResizeSubscriberFirst) {
   ASSERT_TRUE(sub_client.Init(Socket()).ok());
 
   // First create subscriber.
-  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("dave6", {.max_active_messages = 2});
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber("dave6", {.max_active_messages = 2});
   ASSERT_TRUE(sub.ok());
   ASSERT_EQ(0, sub->SlotSize()); // No buffers yet.
 
@@ -1038,7 +1042,7 @@ TEST_F(ClientTest, DroppedMessage) {
     ASSERT_NE(nullptr, *buffer);
     memcpy(*buffer, "foobar", 6);
     absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
-    ASSERT_TRUE(pub_status.ok()); 
+    ASSERT_TRUE(pub_status.ok());
   }
 
   // Read all messages in channel.
@@ -1167,7 +1171,6 @@ TEST_F(ClientTest, Publish2Message2AndReadSharedPtrs) {
   // Number of active messages: 1
 }
 
-#if 0
 TEST_F(ClientTest, FindMessage) {
   subspace::Client pub_client;
   subspace::Client sub_client;
@@ -1243,7 +1246,6 @@ TEST_F(ClientTest, FindMessage) {
     ASSERT_EQ(msgs[8].ordinal, m->ordinal);
   }
 }
-#endif
 
 TEST_F(ClientTest, Mikael) {
   subspace::Client pub_client;
@@ -1284,6 +1286,101 @@ TEST_F(ClientTest, Mikael) {
   ASSERT_EQ(sent_msgs.size(), received_msgs.size());
   for (int i = 0; i < sent_msgs.size(); i++) {
     EXPECT_EQ(sent_msgs[i], received_msgs[i]) << "i = " << i;
+  }
+}
+
+// Stress test with multiple threads.
+TEST_F(ClientTest, MultithreadedSingleChannel) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_TRUE(pub_client.Init(Socket()).ok());
+  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+
+  constexpr int kNumReceivers = 2;
+  constexpr int kNumMessages = 200;
+
+  absl::StatusOr<Publisher> pub =
+      pub_client.CreatePublisher("stress", 256, kNumReceivers + 3);
+  ASSERT_TRUE(pub.ok());
+
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
+      "stress", {.max_active_messages = kNumReceivers + 1});
+  ASSERT_TRUE(sub.ok());
+
+  std::vector<std::thread> receivers;
+  std::vector<toolbelt::SharedPtrPipe<Message>> pipes;
+
+  std::atomic<int> total_received_messages = 0;
+  std::atomic<int> num_dropped = 0;
+
+  for (size_t i = 0; i < kNumReceivers; i++) {
+    pipes.emplace_back(toolbelt::SharedPtrPipe<Message>());
+    ASSERT_TRUE(pipes.back().Open().ok());
+  }
+
+  for (size_t i = 0; i < kNumReceivers; i++) {
+    receivers.emplace_back(
+        [&pipes, i, &total_received_messages, &num_dropped]() {
+          while (total_received_messages + num_dropped < kNumMessages) {
+            auto msg = pipes[i].Read();
+            ASSERT_TRUE(msg.ok());
+            // std::cerr << "received ordinal " << (*msg)->ordinal << " on "
+            //           << i << "\n";
+            total_received_messages++;
+            // Sleep for random microseconds.
+            std::this_thread::sleep_for(std::chrono::microseconds(rand() % 10));
+          }
+          std::cerr << "Receiver " << i << " done\n";
+        });
+  }
+
+  // Create a subscriber thread to read from the channel and write to random
+  // pipe.
+  std::thread sub_thread([&sub, &pipes, &num_dropped]() {
+    uint64_t last_ordinal = 0;
+
+    for (int j = 0; j < kNumMessages; j++) {
+      absl::StatusOr<Message> msg = sub->ReadMessage();
+      ASSERT_TRUE(msg.ok());
+      if (msg->length > 0) {
+        num_dropped += msg->ordinal - last_ordinal - 1;
+        // std::cerr << "DROPPED " << (msg->ordinal - last_ordinal - 1) << "\n";
+        last_ordinal = msg->ordinal;
+        int receiver = rand() % kNumReceivers;
+        // std::cerr << "queued ordinal " << msg->ordinal << " to " << receiver << "\n";
+        ASSERT_TRUE(pipes[receiver]
+                        .Write(std::make_shared<Message>(std::move(*msg)))
+                        .ok());
+      }
+      // Sleep for random microseconds.
+      std::this_thread::sleep_for(std::chrono::microseconds(rand() % 10));
+    }
+  });
+
+    // Create a publisher thread.
+  std::thread pub_thread([&pub]() {
+    for (int j = 0; j < kNumMessages; j++) {
+      absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+      ASSERT_TRUE(buffer.ok());
+      char *buf = reinterpret_cast<char *>(*buffer);
+      int len = snprintf(buf, 256, "foobar %d", j);
+
+      absl::StatusOr<const Message> pub_status = pub->PublishMessage(len + 1);
+      // std::cerr << "pub status " << pub_status.status() << "\n";
+      ASSERT_TRUE(pub_status.ok());
+      // Sleep for random microseconds.
+      std::this_thread::sleep_for(std::chrono::microseconds(rand() % 10));
+    }
+  });
+
+  pub_thread.join();
+  sub_thread.join();
+  // Send one last message to the receivers to stop them.
+  for (size_t i = 0; i < kNumReceivers; i++) {
+    ASSERT_TRUE(pipes[i].Write(std::make_shared<Message>()).ok());
+  }
+  for (auto &r : receivers) {
+    r.join();
   }
 }
 
