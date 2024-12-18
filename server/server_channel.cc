@@ -445,7 +445,6 @@ absl::Status ServerChannel::HasSufficientCapacity(int new_max_active_messages) c
   if (slots_needed <= (NumSlots() - 1)) {
     return absl::OkStatus();
   }
-  max_active_messages -= new_max_active_messages;    // Adjust for error message.
 
   return absl::InternalError(
       absl::StrFormat("there are %d slots with %d publisher%s and %d "
@@ -474,7 +473,7 @@ void ServerChannel::GetChannelStats(subspace::ChannelStats *stats) {
   stats->set_num_slots(NumSlots());
   stats->set_max_message_size(max_message_size);
   stats->set_total_drops(total_drops);
-  
+
   int num_pubs, num_subs;
   CountUsers(num_pubs, num_subs);
   stats->set_num_pubs(num_pubs);

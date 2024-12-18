@@ -29,7 +29,11 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
     uint64_t lowest_ordinal = -1ULL;
     for (int i = 0; i < num_slots_; i++) {
       MessageSlot *s = &ccb_->slots[i];
-      if (s->refs.load(std::memory_order_relaxed) == 0 &&
+      uint32_t refs = s->refs.load(std::memory_order_relaxed);
+      if ((refs & kPubOwned) != 0) {
+        continue;
+      }
+      if ((refs & kRefsMask) == 0 &&
           s->ordinal < lowest_ordinal) {
         slot = s;
         lowest_ordinal = s->ordinal;
@@ -41,12 +45,14 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
       if (retries-- == 0) {
         return nullptr;
       }
-      continue;
+      DumpSlots();
+      return nullptr;
+      // continue;
     }
     // Claim the slot by setting the refs to kPubOwned with our owner in the
     // bottom bits.
     uint32_t ref = kPubOwned | owner;
-    uint32_t expected = 0;
+    uint32_t expected = slot->refs & ~kOrdinalMask;
     if (slot->refs.compare_exchange_weak(expected, ref,
                                          std::memory_order_relaxed)) {
       break;
@@ -55,13 +61,11 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
   slot->ordinal = 0;
   SetSlotToBiggestBuffer(slot);
 
-  Prefix(slot)->flags = 0;
+  Prefix(slot, reload)->flags = 0;
 
   // We have a slot.  Clear it in all the subscriber bitsets.
   ccb_->subscribers.Traverse(
       [this, slot](int sub_id) { GetAvailableSlots(sub_id).Clear(slot->id); });
-
-  ;
   return slot;
 }
 
@@ -96,7 +100,7 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
         break;
       }
       // Don't go past one without the kMessageSeen flag set.
-      if (s.ordinal != 0 && (Prefix(s.slot)->flags & kMessageSeen) == 0) {
+      if (s.ordinal != 0 && (Prefix(s.slot, reload)->flags & kMessageSeen) == 0) {
         break;
       }
       // If the refs is zero we can claim it.
@@ -120,7 +124,7 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
   slot->ordinal = 0;
   SetSlotToBiggestBuffer(slot);
 
-  Prefix(slot)->flags = 0;
+  Prefix(slot, reload)->flags = 0;
 
   // We have a slot.  Clear it in all the subscriber bitsets.
   ccb_->subscribers.Traverse(
@@ -158,8 +162,8 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
   ccb_->total_messages++;
   ccb_->total_bytes += slot->message_size;
 
-  // Set the refs to 0.
-  slot->refs.store(0, std::memory_order_release);
+  // Set the refs to the ordinal with no refs.
+  slot->refs.store((slot->ordinal & kOrdinalMask) << kOrdinalShift, std::memory_order_release);
 
   // Tell all subscribers that the slot is available.
   ccb_->subscribers.Traverse(

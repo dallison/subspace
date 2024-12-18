@@ -70,8 +70,16 @@ constexpr size_t kMaxChannelName = 64;
 // Ref count bits.
 constexpr uint32_t kRefCountMask = 0x3ff;
 constexpr uint32_t kRefCountShift = 10;
-constexpr uint32_t kReliableRefCountShift = 20;
+constexpr uint32_t kReliableRefCountShift = 10;
 constexpr uint32_t kPubOwned = 0x80000000;
+constexpr uint32_t kRefsMask = 0xfffff; // 20 bits
+
+// We put the bottom 11 bits of the ordinal just above the
+// reliable ref count field.  This is to ensure that a publisher
+// hasn't published another message in the slot before a subscriber
+// increments the ref count.
+constexpr uint32_t kOrdinalMask = 0x7ff;    // 11 bits
+constexpr uint32_t kOrdinalShift = 20;
 
 // Aligned to given power of 2.
 template <int64_t alignment> int64_t Aligned(int64_t v) {
@@ -90,7 +98,7 @@ void UnmapMemory(void *p, size_t size, const char *purpose);
 // descriptors are distributed by the server to clients.
 //
 // This is in shared memory, but it is only ever written by the
-// server so there is no lock required to access it in the clients.
+// server.
 struct ChannelCounters {
   uint16_t num_pub_updates;   // Number of updates to publishers.
   uint16_t num_sub_updates;   // Number of updates to subscribers.
@@ -117,6 +125,7 @@ struct MessageSlot {
 struct ActiveSlot {
   MessageSlot *slot;
   uint64_t ordinal;
+  uint64_t timestamp;
 };
 
 // This is located just before the prefix of the first slot's buffer.  It
@@ -150,7 +159,7 @@ struct ChannelControlBlock {          // a.k.a CCB
   // Variable number of MessageSlot structs (num_slots long).
   MessageSlot slots[0];
   // Followed by:
-  // AtomicBitSet<0> availableSlots[kMaxSlotOwners]; // One bit per slot.
+  // AtomicBitSet<0> availableSlots[kMaxSlotOwners]; 
 };
 
 inline size_t AvailableSlotsSize(int num_slots) {
@@ -259,10 +268,18 @@ public:
            sizeof(MessagePrefix);
   }
 
-  void ReloadIfNecessary(std::function<bool()> reload);
+  void ReloadIfNecessary(const std::function<bool()>& reload);
 
   // Get a pointer to the MessagePrefix for a given slot.
-  MessagePrefix *Prefix(MessageSlot *slot) const {
+  MessagePrefix *Prefix(MessageSlot *slot, const std::function<bool()>& reload) {
+    ReloadIfNecessary(reload);
+    MessagePrefix *p = reinterpret_cast<MessagePrefix *>(
+        Buffer(slot->id) +
+        (sizeof(MessagePrefix) + Aligned<32>(SlotSize(slot->id))) * slot->id);
+    return p;
+  }
+
+ MessagePrefix *Prefix(MessageSlot *slot) const {
     MessagePrefix *p = reinterpret_cast<MessagePrefix *>(
         Buffer(slot->id) +
         (sizeof(MessagePrefix) + Aligned<32>(SlotSize(slot->id))) * slot->id);
@@ -273,11 +290,6 @@ public:
 
   void DumpSlots() const;
   void Dump() const;
-
-  // NOTE: these functions access the CCB without locking.  They only access
-  // the buffer_index member of the MessageSlot and that is only updated by the
-  // the publisher when it calls ClaimSlot and inserts the slot into the active
-  // list.
 
   // Get the size associated with the given slot id.
   int SlotSize(int slot_id) const {
@@ -332,20 +344,7 @@ public:
 
   void SetDebug(bool v) { debug_ = v; }
 
-  bool AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc);
-
-  // Search the active list for a message with the given timestamp.  If found,
-  // move the owner to the slot found.  Return nullptr if nothing found in which
-  // no slot ownership changes are done.  This uses the memory inside buffer
-  // to perform a fast search of the slots.  The caller keeps onership of the
-  // buffer, but this function will modify it.  This is to avoid memory
-  // allocation for every search or buffer allocation for every subscriber when
-  // searches are rare.
-  MessageSlot *FindActiveSlotByTimestamp(MessageSlot *old_slot,
-                                         uint64_t timestamp, bool reliable,
-                                         int owner,
-                                         std::vector<MessageSlot *> &buffer,
-                                         std::function<bool()> reload);
+  bool AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc, int ordinal);
 
   void SetType(std::string type) { type_ = std::move(type); }
   const std::string Type() const { return type_; }

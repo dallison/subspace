@@ -32,37 +32,20 @@ public:
 
   int32_t SlotSize() const { return Channel::SlotSize(CurrentSlot()); }
 
-  bool AddActiveMessage(MessageSlot *slot) {
-    int old = num_active_messages.fetch_add(1);
-    if (old >= options_.MaxActiveMessages()) {
-      num_active_messages.fetch_sub(1);
-      return false;
-    }
-    return true;
-  }
+  bool AddActiveMessage(MessageSlot *slot);
+  void RemoveActiveMessage(MessageSlot *slot);
 
-  void RemoveActiveMessage(MessageSlot *slot) {
-    slot->sub_owners.Clear(subscriber_id_);
-    AtomicIncRefCount(slot, IsReliable(), -1);
-    // Clear the bit in the subscriber bitset.
-    GetAvailableSlots(subscriber_id_).Clear(slot->id);
-
-    if (--num_active_messages < options_.MaxActiveMessages()) {
-      Trigger();
-      if (NumSlots() == 1 && IsReliable()) {
-        TriggerReliablePublishers();
-      }
-    }
-  }
-
-  int NumActiveMessages() const { return num_active_messages; }
+  int NumActiveMessages() const { return num_active_messages_; }
   int MaxActiveMessages() const { return options_.MaxActiveMessages(); }
   bool CheckActiveMessageCount() const {
-    return num_active_messages < options_.MaxActiveMessages();
+    return num_active_messages_ < options_.MaxActiveMessages();
   }
 
-  MessageSlot *FindUnseenOrdinal(const std::vector<ActiveSlot> &active_slots);
+  const ActiveSlot *FindUnseenOrdinal(const std::vector<ActiveSlot> &active_slots);
   void PopulateActiveSlots(InPlaceAtomicBitset &bits);
+
+  void ClaimSlot(MessageSlot *slot, std::function<bool()> reload);
+  void RememberOrdinal(uint64_t ordinal) { seen_ordinals_.Insert(ordinal); }
 
   // A subscriber wants to find a slot with a message in it.  There are
   // two ways to get this:
@@ -78,22 +61,26 @@ public:
 
   std::shared_ptr<ActiveMessage> GetActiveMessage() { return active_message_; }
 
-  void SetActiveMessage(size_t len, MessageSlot *slot, const void *buf,
+  void ClearActiveMessage() { active_message_.reset(); }
+
+  std::shared_ptr<ActiveMessage> SetActiveMessage(size_t len, MessageSlot *slot, const void *buf,
                         uint64_t ord, int64_t ts) {
     active_message_.reset();
     active_message_ = std::make_shared<ActiveMessage>(
         ActiveMessage{shared_from_this(), len, slot, buf, ord, ts});
+        return active_message_;
   }
 
   void DecrementSlotRef(MessageSlot *slot) {
-    AtomicIncRefCount(slot, IsReliable(), -1);
+    AtomicIncRefCount(slot, IsReliable(), -1, slot->ordinal & kOrdinalMask);
   }
 
   bool SlotExpired(MessageSlot *slot, uint32_t ordinal) {
     return slot->ordinal != ordinal;
   }
 
-  std::shared_ptr<ActiveMessage> LockWeakMessage(MessageSlot* slot, uint64_t ordinal) {
+  std::shared_ptr<ActiveMessage> LockWeakMessage(MessageSlot *slot,
+                                                 uint64_t ordinal) {
     if (slot == nullptr) {
       return nullptr;
     }
@@ -105,12 +92,24 @@ public:
       return active_message_;
     }
     return std::make_shared<ActiveMessage>(
-        ActiveMessage{shared_from_this(), slot->message_size,
-                      slot, GetBufferAddress(slot), slot->ordinal,
-                      Timestamp(slot)});
+        ActiveMessage{shared_from_this(), slot->message_size, slot,
+                      GetBufferAddress(slot), slot->ordinal, Timestamp(slot)});
   }
 
   int DetectDrops();
+
+  // Search the active list for a message with the given timestamp.  If found,
+  // take ownership of the slot found.  Return nullptr if nothing found in which
+  // no slot ownership changes are done.  This uses the memory inside buffer
+  // to perform a fast search of the slots.  The caller keeps onership of the
+  // buffer, but this function will modify it.  This is to avoid memory
+  // allocation for every search or buffer allocation for every subscriber when
+  // searches are rare.
+  MessageSlot *FindActiveSlotByTimestamp(MessageSlot *old_slot,
+                                         uint64_t timestamp, bool reliable,
+                                         int owner,
+                                         std::vector<ActiveSlot> &buffer,
+                                         std::function<bool()> reload);
 
 private:
   friend class ::subspace::ClientImpl;
@@ -173,19 +172,19 @@ private:
   toolbelt::TriggerFd trigger_;
   std::vector<toolbelt::TriggerFd> reliable_publishers_;
   SubscriberOptions options_;
-  std::atomic<int> num_active_messages = 0;
+  std::atomic<int> num_active_messages_ = 0;
   std::mutex reliable_publishers_mutex_;
 
   // It is rare that subscribers need to search for messges by timestamp.  This
   // will keep the memory allocation to the first search on a subscriber.  Most
   // subscribers won't use this.
-  std::vector<MessageSlot *> search_buffer_;
+  std::vector<ActiveSlot> search_buffer_;
 
   // The subscriber holds on to an active message for the slot it has just
   // read.  A shared pointer to this active message is returned to caller.
   std::shared_ptr<ActiveMessage> active_message_;
 
-    // We keep track of a limited number of ordinals we've seen.
+  // We keep track of a limited number of ordinals we've seen.
   FastRingBuffer<uint64_t, 2000> seen_ordinals_;
   uint64_t last_ordinal_seen_ = 0;
 };
