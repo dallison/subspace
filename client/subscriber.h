@@ -41,12 +41,18 @@ public:
     return num_active_messages_ < options_.MaxActiveMessages();
   }
 
-  const ActiveSlot *FindUnseenOrdinal(const std::vector<ActiveSlot> &active_slots);
+  const ActiveSlot *
+  FindUnseenOrdinal(const std::vector<ActiveSlot> &active_slots);
   void PopulateActiveSlots(InPlaceAtomicBitset &bits);
 
   void ClaimSlot(MessageSlot *slot, std::function<bool()> reload);
   void RememberOrdinal(uint64_t ordinal) { seen_ordinals_.Insert(ordinal); }
-
+  
+  void IgnoreActivation(MessageSlot *slot) {
+    RememberOrdinal(slot->ordinal);
+    DecrementSlotRef(slot);
+    Prefix(slot)->flags |= kMessageSeen;
+  }
   // A subscriber wants to find a slot with a message in it.  There are
   // two ways to get this:
   // NextSlot: gets the next slot in the active list
@@ -63,12 +69,13 @@ public:
 
   void ClearActiveMessage() { active_message_.reset(); }
 
-  std::shared_ptr<ActiveMessage> SetActiveMessage(size_t len, MessageSlot *slot, const void *buf,
-                        uint64_t ord, int64_t ts) {
+  std::shared_ptr<ActiveMessage> SetActiveMessage(size_t len, MessageSlot *slot,
+                                                  const void *buf, uint64_t ord,
+                                                  int64_t ts) {
     active_message_.reset();
     active_message_ = std::make_shared<ActiveMessage>(
         ActiveMessage{shared_from_this(), len, slot, buf, ord, ts});
-        return active_message_;
+    return active_message_;
   }
 
   void DecrementSlotRef(MessageSlot *slot) {

@@ -20,9 +20,6 @@ void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
   slot->sub_owners.Clear(subscriber_id_);
   AtomicIncRefCount(slot, IsReliable(), -1, slot->ordinal & kOrdinalMask);
 
-  // Clear the bit in the subscriber bitset.
-  GetAvailableSlots(subscriber_id_).Clear(slot->id);
-
   if (num_active_messages_-- == options_.MaxActiveMessages()) {
     Trigger();
     if (IsReliable()) {
@@ -81,6 +78,8 @@ SubscriberImpl::FindUnseenOrdinal(const std::vector<ActiveSlot> &active_slots) {
 void SubscriberImpl::ClaimSlot(MessageSlot *slot,
                                std::function<bool()> reload) {
   slot->sub_owners.Set(subscriber_id_);
+  // Clear the bit in the subscriber bitset.
+  GetAvailableSlots(subscriber_id_).Clear(slot->id);
   RememberOrdinal(slot->ordinal);
   Prefix(slot, reload)->flags |= kMessageSeen;
 }
@@ -99,14 +98,18 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
       PopulateActiveSlots(bits);
     }
 
-    active_slots.clear();
+    uint64_t num_messages = 0;
+    do {
+      num_messages = ccb_->total_messages;
+      active_slots.clear();
 
-    // Traverse the bits and add an active slot for each bit set.
-    bits.Traverse([this, &active_slots](int i) {
-      MessageSlot *s = &ccb_->slots[i];
-      ActiveSlot active_slot = {s, s->ordinal, 0};
-      active_slots.push_back(active_slot);
-    });
+      // Traverse the bits and add an active slot for each bit set.
+      bits.Traverse([this, &active_slots](int i) {
+        MessageSlot *s = &ccb_->slots[i];
+        ActiveSlot active_slot = {s, s->ordinal, 0};
+        active_slots.push_back(active_slot);
+      });
+    } while (num_messages != ccb_->total_messages);
 
     // Sort the active slots by ordinal.
     std::sort(active_slots.begin(), active_slots.end(),
@@ -140,14 +143,18 @@ MessageSlot *SubscriberImpl::LastSlot(MessageSlot *slot, bool reliable,
       // Prepopulate the active slots.
       PopulateActiveSlots(bits);
     }
-    active_slots.clear();
+    uint64_t num_messages = 0;
+    do {
+      num_messages = ccb_->total_messages;
+      active_slots.clear();
 
-    // Traverse the bits and add an active slot for each bit set.
-    bits.Traverse([&](int i) {
-      MessageSlot *s = &ccb_->slots[i];
-      ActiveSlot active_slot = {s, s->ordinal};
-      active_slots.push_back(active_slot);
-    });
+      // Traverse the bits and add an active slot for each bit set.
+      bits.Traverse([&](int i) {
+        MessageSlot *s = &ccb_->slots[i];
+        ActiveSlot active_slot = {s, s->ordinal};
+        active_slots.push_back(active_slot);
+      });
+    } while (num_messages != ccb_->total_messages);
 
     // Sort the active slots by ordinal.
     std::sort(active_slots.begin(), active_slots.end(),

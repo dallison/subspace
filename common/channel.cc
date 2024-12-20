@@ -110,27 +110,28 @@ void Channel::Unmap() {
   UnmapMemory(ccb_, CcbSize(num_slots_), "CCB");
 }
 
-bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc, int ordinal) {
+bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc, uint64_t ordinal) {
   for (;;) {
-    uint32_t ref = slot->refs.load(std::memory_order_relaxed);
+    uint64_t ref = slot->refs.load(std::memory_order_relaxed);
     if ((ref & kPubOwned) != 0) {
       return false;
     }
     // Not pub owned.  If the ordinal has changed we can't get the slot because another
     // message has been published into it.  We need to try another slot.  An ordinal of 0
     // in the refs field means that the slot was free and we can keep trying to use it.
-    int ref_ord = (ref >> kOrdinalShift) & kOrdinalMask;
-    if (ref_ord != 0 && ref_ord != ordinal) {
+    uint64_t ref_ord = (ref >> kOrdinalShift) & kOrdinalMask;
+    if (ref_ord != 0 && ordinal != 0 && ref_ord != ordinal) {
       return false;
     }
-    uint32_t new_refs = ref & kRefCountMask;
-    uint32_t new_reliable_refs =
+    uint64_t new_refs = ref & kRefCountMask;
+    uint64_t new_reliable_refs =
         (ref >> kReliableRefCountShift) & kRefCountMask;
     new_refs += inc;
     if (reliable) {
       new_reliable_refs += inc;
     }
-    uint32_t new_ref = (ordinal << kOrdinalShift) | (new_reliable_refs << kReliableRefCountShift) | new_refs;
+    ref &= ~kPubOwned;
+    uint64_t new_ref = (ordinal << kOrdinalShift) | (new_reliable_refs << kReliableRefCountShift) | new_refs;
     if (slot->refs.compare_exchange_weak(ref, new_ref,
                                          std::memory_order_relaxed)) {
       return true;
@@ -143,15 +144,17 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc, int o
 void Channel::DumpSlots() const {
   for (int i = 0; i < num_slots_; i++) {
     const MessageSlot *slot = &ccb_->slots[i];
-    uint32_t refs = slot->refs.load(std::memory_order_relaxed);
+    uint64_t refs = slot->refs.load(std::memory_order_relaxed);
     int reliable_refs = (refs >> kReliableRefCountShift) & kRefCountMask;
     bool is_pub = (refs & kPubOwned) != 0;
-    refs &= kRefCountMask;
+    uint64_t just_refs = refs & kRefCountMask;
+    uint64_t ref_ord = (refs >> kOrdinalShift) & kOrdinalMask;
+
     std::cout << "Slot: " << i;
     if (is_pub) {
-      std::cout << " publisher " << refs;
+      std::cout << " publisher " << just_refs;
     } else {
-      std::cout << " refs: " << refs << " reliable refs: " << reliable_refs;
+      std::cout << " refs: " << just_refs << " reliable refs: " << reliable_refs << " ord: " << ref_ord;
     }
     std::cout << " ordinal: " << slot->ordinal
               << " buffer_index: " << slot->buffer_index
