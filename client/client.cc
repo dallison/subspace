@@ -512,9 +512,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
   if (prefix != nullptr) {
     if ((prefix->flags & kMessageActivate) != 0) {
       if (!pass_activation) {
-        // We are going to ignore this message, but we have already inc
-        subscriber->RememberOrdinal(new_slot->ordinal);
-        subscriber->DecrementSlotRef(new_slot);
+        subscriber->IgnoreActivation(new_slot);
         if (subscriber->IsReliable()) {
           subscriber->TriggerReliablePublishers();
         }

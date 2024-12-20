@@ -608,6 +608,8 @@ public:
 
   int NumActiveMessages() const { return impl_->NumActiveMessages(); }
 
+  void DumpSlots() const { impl_->DumpSlots(); }
+  
 private:
   friend class Server;
   friend class ClientImpl;

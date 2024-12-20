@@ -68,18 +68,18 @@ constexpr int kMaxSlotOwners = 1024;
 constexpr size_t kMaxChannelName = 64;
 
 // Ref count bits.
-constexpr uint32_t kRefCountMask = 0x3ff;
-constexpr uint32_t kRefCountShift = 10;
-constexpr uint32_t kReliableRefCountShift = 10;
-constexpr uint32_t kPubOwned = 0x80000000;
-constexpr uint32_t kRefsMask = 0xfffff; // 20 bits
+constexpr uint64_t kRefCountMask = 0x3ff;
+constexpr uint64_t kRefCountShift = 10;
+constexpr uint64_t kReliableRefCountShift = 10;
+constexpr uint64_t kPubOwned = 1ULL << 63;
+constexpr uint64_t kRefsMask = 0xfffff; // 20 bits
 
-// We put the bottom 11 bits of the ordinal just above the
+// We put the bottom 42 bits of the ordinal just above the
 // reliable ref count field.  This is to ensure that a publisher
 // hasn't published another message in the slot before a subscriber
 // increments the ref count.
-constexpr uint32_t kOrdinalMask = 0x7ff;    // 11 bits
-constexpr uint32_t kOrdinalShift = 20;
+constexpr uint64_t kOrdinalMask = (1ULL << 42) - 1;    // 40 bits
+constexpr uint64_t kOrdinalShift = 20;
 
 // Aligned to given power of 2.
 template <int64_t alignment> int64_t Aligned(int64_t v) {
@@ -115,7 +115,7 @@ struct SystemControlBlock {
 // This is the meta data for a slot.  It is always in a linked list.
 struct MessageSlot {
   int32_t id;                 // Unique ID for slot (0...num_slots-1).
-  std::atomic<uint32_t> refs; // Number of subscribers referring to this slot.
+  std::atomic<uint64_t> refs; // Number of subscribers referring to this slot.
   uint64_t ordinal;           // Message ordinal held currently in slot.
   uint64_t message_size;      // Size of message held in slot.
   int32_t buffer_index;       // Index of buffer.
@@ -344,7 +344,7 @@ public:
 
   void SetDebug(bool v) { debug_ = v; }
 
-  bool AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc, int ordinal);
+  bool AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc, uint64_t ordinal);
 
   void SetType(std::string type) { type_ = std::move(type); }
   const std::string Type() const { return type_; }

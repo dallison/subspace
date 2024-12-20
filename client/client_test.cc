@@ -846,7 +846,7 @@ TEST_F(ClientTest, ReliablePublisher1) {
   absl::StatusOr<Message> msg = sub->ReadMessage();
   ASSERT_TRUE(msg.ok());
   ASSERT_EQ(6, msg->length);
-
+  
   // Publish another set of messages.  We have 5 slots.  The subscriber
   // has one.  We can publish another 4 and then will get a nullptr
   // from GetMessageBuffer.
@@ -1296,8 +1296,8 @@ TEST_F(ClientTest, MultithreadedSingleChannel) {
   ASSERT_TRUE(pub_client.Init(Socket()).ok());
   ASSERT_TRUE(sub_client.Init(Socket()).ok());
 
-  constexpr int kNumReceivers = 2;
-  constexpr int kNumMessages = 200;
+  constexpr int kNumReceivers = 20;
+  constexpr int kNumMessages = 2000;
 
   absl::StatusOr<Publisher> pub =
       pub_client.CreatePublisher("stress", 256, kNumReceivers + 3);
@@ -1330,7 +1330,6 @@ TEST_F(ClientTest, MultithreadedSingleChannel) {
             // Sleep for random microseconds.
             std::this_thread::sleep_for(std::chrono::microseconds(rand() % 10));
           }
-          std::cerr << "Receiver " << i << " done\n";
         });
   }
 
@@ -1343,6 +1342,7 @@ TEST_F(ClientTest, MultithreadedSingleChannel) {
       absl::StatusOr<Message> msg = sub->ReadMessage();
       ASSERT_TRUE(msg.ok());
       if (msg->length > 0) {
+        ASSERT_GT(msg->ordinal, last_ordinal);
         num_dropped += msg->ordinal - last_ordinal - 1;
         // std::cerr << "DROPPED " << (msg->ordinal - last_ordinal - 1) << "\n";
         last_ordinal = msg->ordinal;

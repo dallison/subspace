@@ -29,7 +29,7 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
     uint64_t lowest_ordinal = -1ULL;
     for (int i = 0; i < num_slots_; i++) {
       MessageSlot *s = &ccb_->slots[i];
-      uint32_t refs = s->refs.load(std::memory_order_relaxed);
+      uint64_t refs = s->refs.load(std::memory_order_relaxed);
       if ((refs & kPubOwned) != 0) {
         continue;
       }
@@ -51,8 +51,8 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
     }
     // Claim the slot by setting the refs to kPubOwned with our owner in the
     // bottom bits.
-    uint32_t ref = kPubOwned | owner;
-    uint32_t expected = slot->refs & ~kOrdinalMask;
+    uint64_t ref = kPubOwned | owner;
+    uint64_t expected = slot->refs & ~kRefsMask;
     if (slot->refs.compare_exchange_weak(expected, ref,
                                          std::memory_order_relaxed)) {
       break;
@@ -79,7 +79,7 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
     // Put all free slots into the active_slots vector.
     for (int i = 0; i < NumSlots(); i++) {
       MessageSlot *s = &ccb_->slots[i];
-      uint32_t refs = s->refs.load(std::memory_order_relaxed);
+      uint64_t refs = s->refs.load(std::memory_order_relaxed);
       if ((refs & kPubOwned) == 0) {
         ActiveSlot active_slot = {s, s->ordinal};
         active_slots.push_back(active_slot);
@@ -95,7 +95,7 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
     // Look for a slot with zero refs but don't go past one with non-zero
     // reliable ref count.
     for (auto &s : active_slots) {
-      uint32_t refs = s.slot->refs.load(std::memory_order_relaxed);
+      uint64_t refs = s.slot->refs.load(std::memory_order_relaxed);
       if (((refs >> kReliableRefCountShift) & kRefCountMask) != 0) {
         break;
       }
@@ -103,8 +103,8 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
       if (s.ordinal != 0 && (Prefix(s.slot, reload)->flags & kMessageSeen) == 0) {
         break;
       }
-      // If the refs is zero we can claim it.
-      if (refs == 0) {
+      // If the refs have no references we can claim it.
+      if ((refs & kRefsMask) == 0) {
         slot = s.slot;
         break;
       }
@@ -114,12 +114,13 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
     }
 
     // Claim the slot by setting the kPubOwned bit.
-    uint32_t ref = kPubOwned | owner;
-    uint32_t expected = 0;
+    uint64_t ref = kPubOwned | owner;
+    uint64_t expected = slot->refs & ~kRefsMask;
     if (slot->refs.compare_exchange_weak(expected, ref,
                                          std::memory_order_relaxed)) {
       break;
     }
+
   }
   slot->ordinal = 0;
   SetSlotToBiggestBuffer(slot);
