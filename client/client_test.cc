@@ -1183,7 +1183,7 @@ TEST_F(ClientTest, FindMessage) {
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("dave8");
   ASSERT_TRUE(sub.ok());
 
-  std::vector<const subspace::Message> msgs;
+  std::vector<subspace::Message> msgs;
   for (int i = 0; i < 9; i++) {
     absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
     ASSERT_TRUE(buffer.ok());

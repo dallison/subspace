@@ -2,6 +2,7 @@
 #include "client/client_channel.h"
 #include "client/message.h"
 #include "common/fast_ring_buffer.h"
+#include <mutex>
 
 namespace subspace {
 namespace details {
