@@ -159,7 +159,6 @@ void ClientHandler::HandleCreatePublisher(
 
   int num_pubs, num_subs;
   channel->CountUsers(num_pubs, num_subs);
-
   // Check consistency of publisher parameters.
   if (num_pubs > 0) {
     if (req.is_fixed_size() != channel->IsFixedSize()) {
@@ -381,7 +380,7 @@ void ClientHandler::HandleRemovePublisher(
         absl::StrFormat("No such channel %s", req.channel_name()));
     return;
   }
-  channel->RemoveUser(req.publisher_id());
+  channel->RemoveUser(server_, req.publisher_id());
 }
 
 void ClientHandler::HandleRemoveSubscriber(
@@ -394,7 +393,7 @@ void ClientHandler::HandleRemoveSubscriber(
         absl::StrFormat("No such channel %s", req.channel_name()));
     return;
   }
-  channel->RemoveUser(req.subscriber_id());
+  channel->RemoveUser(server_, req.subscriber_id());
 }
 
 void ClientHandler::HandleResize(const subspace::ResizeRequest &req,

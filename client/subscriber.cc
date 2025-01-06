@@ -7,8 +7,6 @@ bool SubscriberImpl::AddActiveMessage(MessageSlot *slot) {
   int old = num_active_messages_.fetch_add(1);
   if (old >= options_.MaxActiveMessages()) {
     num_active_messages_.fetch_sub(1);
-    std::cerr << "Subscriber " << subscriber_id_
-              << " has too many active messages\n";
     return false;
   }
   return true;
@@ -29,13 +27,19 @@ void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
 }
 
 void SubscriberImpl::PopulateActiveSlots(InPlaceAtomicBitset &bits) {
-  for (int i = 0; i < NumSlots(); i++) {
-    MessageSlot *s = &ccb_->slots[i];
-    uint32_t refs = s->refs.load(std::memory_order_relaxed);
-    if (s->ordinal != 0 && (refs & kPubOwned) == 0) {
-      bits.Set(i);
+  uint64_t num_messages = 0;
+  do {
+    num_messages = ccb_->total_messages;
+    bits.ClearAll();
+
+    for (int i = 0; i < NumSlots(); i++) {
+      MessageSlot *s = &ccb_->slots[i];
+      uint32_t refs = s->refs.load(std::memory_order_relaxed);
+      if (s->ordinal != 0 && (refs & kPubOwned) == 0) {
+        bits.Set(i);
+      }
     }
-  }
+  } while (num_messages != ccb_->total_messages);
 }
 
 int SubscriberImpl::DetectDrops() {
@@ -49,7 +53,7 @@ int SubscriberImpl::DetectDrops() {
   if (ordinals.empty()) {
     return 0;
   }
-  std::sort(ordinals.begin(), ordinals.end());
+  std::stable_sort(ordinals.begin(), ordinals.end());
   last_ordinal_seen_ = ordinals.back();
 
   // Look for gaps in the ordinals.
@@ -84,6 +88,22 @@ void SubscriberImpl::ClaimSlot(MessageSlot *slot,
   Prefix(slot, reload)->flags |= kMessageSeen;
 }
 
+void SubscriberImpl::CollectVisibleSlots(
+    InPlaceAtomicBitset &bits, std::vector<ActiveSlot> &active_slots) {
+  uint64_t num_messages = 0;
+  do {
+    num_messages = ccb_->total_messages;
+    active_slots.clear();
+
+    // Traverse the bits and add an active slot for each bit set.
+    bits.Traverse([this, &active_slots](int i) {
+      MessageSlot *s = &ccb_->slots[i];
+      ActiveSlot active_slot = {s, s->ordinal, 0};
+      active_slots.push_back(active_slot);
+    });
+  } while (num_messages != ccb_->total_messages);
+}
+
 MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
                                       int owner, std::function<bool()> reload) {
   std::vector<ActiveSlot> active_slots;
@@ -98,21 +118,10 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
       PopulateActiveSlots(bits);
     }
 
-    uint64_t num_messages = 0;
-    do {
-      num_messages = ccb_->total_messages;
-      active_slots.clear();
-
-      // Traverse the bits and add an active slot for each bit set.
-      bits.Traverse([this, &active_slots](int i) {
-        MessageSlot *s = &ccb_->slots[i];
-        ActiveSlot active_slot = {s, s->ordinal, 0};
-        active_slots.push_back(active_slot);
-      });
-    } while (num_messages != ccb_->total_messages);
+    CollectVisibleSlots(bits, active_slots);
 
     // Sort the active slots by ordinal.
-    std::sort(active_slots.begin(), active_slots.end(),
+    std::stable_sort(active_slots.begin(), active_slots.end(),
               [](const ActiveSlot &a, const ActiveSlot &b) {
                 return a.ordinal < b.ordinal;
               });
@@ -121,6 +130,8 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
     if (new_slot == nullptr) {
       return nullptr;
     }
+    // std::cerr << "sub looking at slot " << new_slot->slot->id << " ordinal "
+    //           << new_slot->ordinal << "\n";
     // We have a new slot, see if we can increment the ref count.  If we can't
     // we just go back and try again.
     if (AtomicIncRefCount(new_slot->slot, reliable, 1,
@@ -143,21 +154,10 @@ MessageSlot *SubscriberImpl::LastSlot(MessageSlot *slot, bool reliable,
       // Prepopulate the active slots.
       PopulateActiveSlots(bits);
     }
-    uint64_t num_messages = 0;
-    do {
-      num_messages = ccb_->total_messages;
-      active_slots.clear();
-
-      // Traverse the bits and add an active slot for each bit set.
-      bits.Traverse([&](int i) {
-        MessageSlot *s = &ccb_->slots[i];
-        ActiveSlot active_slot = {s, s->ordinal};
-        active_slots.push_back(active_slot);
-      });
-    } while (num_messages != ccb_->total_messages);
+    CollectVisibleSlots(bits, active_slots);
 
     // Sort the active slots by ordinal.
-    std::sort(active_slots.begin(), active_slots.end(),
+    std::stable_sort(active_slots.begin(), active_slots.end(),
               [](const ActiveSlot &a, const ActiveSlot &b) {
                 return a.ordinal < b.ordinal;
               });
@@ -201,7 +201,7 @@ MessageSlot *SubscriberImpl::FindActiveSlotByTimestamp(
       }
     }
     // Sort by timestamp.
-    std::sort(buffer.begin(), buffer.end(),
+    std::stable_sort(buffer.begin(), buffer.end(),
               [](const ActiveSlot &a, const ActiveSlot &b) {
                 return a.timestamp < b.timestamp;
               });

@@ -157,7 +157,7 @@ public:
   ChannelCounters &RecordUpdate(bool is_pub, bool add, bool reliable);
   ChannelCounters &RecordResize();
 
-  void RemoveUser(int user_id);
+  void RemoveUser(Server* server, int user_id);
   void RemoveAllUsersFor(ClientHandler *handler);
   bool IsEmpty() const { return user_ids_.IsEmpty(); }
   absl::Status HasSufficientCapacity(int new_max_active_messages) const;

@@ -105,6 +105,8 @@ struct SubscriberOptions {
   const std::string &Type() const { return type; }
   int MaxSharedPtrs() const { return max_active_messages - 1; }
   int MaxActiveMessages() const { return max_active_messages; }
+  bool LogDroppedMessages() const { return log_dropped_messages; }
+  void SetLogDroppedMessages(bool v) { log_dropped_messages = v; }
 
   SubscriberOptions &SetBridge(bool v) {
     bridge = v;
@@ -116,6 +118,7 @@ struct SubscriberOptions {
   bool bridge = false;
   std::string type;
   int max_active_messages = 1;
+  bool log_dropped_messages = true;
 };
 
 } // namespace subspace
