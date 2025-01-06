@@ -7,7 +7,7 @@
 
 namespace subspace {
 
-inline constexpr size_t BitsToWords(size_t bits) { return bits / 65 + 1; }
+inline constexpr size_t BitsToWords(size_t bits) { return bits == 0 ? 0 : (((bits - 1) / 64) + 1); }
 
 template <size_t SizeInBits> class AtomicBitSet {
 public:
@@ -32,6 +32,7 @@ public:
   void Set(size_t bit) {
     size_t word = bit / 64;
     size_t offset = bit % 64;
+    // std::cerr << "Setting bit " << bit << ", word: " << word << ", bit:" << offset << "\n";
     bits_[word].fetch_or(1ULL << offset, std::memory_order_relaxed);
   }
 
@@ -62,6 +63,23 @@ public:
     return true;
   }
 
+  void Print(std::ostream& os, int start_bit = 0) {
+    // Print the bits with - between each group of 4.
+    size_t start_word = BitsToWords(start_bit) - 1;
+    start_bit %= 64;
+    for (size_t i = start_word; i < BitsToWords(num_bits_); i++) {
+      uint64_t word = bits_[i].load(std::memory_order_relaxed);
+      for (int j = start_bit; j < 64; j++) {
+        os << ((word >> j) & 1);
+        if ((j + 1) % 4 == 0) {
+          os << "-";
+        }
+      }
+      start_bit = 0;
+    }
+    os << "\n";
+  }
+
   void Traverse(std::function<void(size_t)> func) const {
     for (size_t i = 0; i < BitsToWords(num_bits_); i++) {
       int shift = 0;
@@ -69,6 +87,7 @@ public:
       while (bit < num_bits_ && shift < 64) {
         uint64_t word = bits_[i].load(std::memory_order_relaxed) >> shift;
         size_t n = ffsll(word);
+        //std::cerr << "i: " << i << " word " << std::hex << word << " n " << n << std::dec << "\n";
         if (n == 0) {
           break;
         }

@@ -495,9 +495,11 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
       if (it != dropped_message_callbacks_.end()) {
         it->second(subscriber, drops);
       }
+      if (subscriber->options_.log_dropped_messages) {
       logger_.Log(toolbelt::LogLevel::kWarning,
-                  "Dropped %d messages on channel %s", drops,
+                  "Dropped %d message%ss on channel %s", drops, drops == 1 ? "" : "s",
                   subscriber->Name().c_str());
+      }
     }
   }
 

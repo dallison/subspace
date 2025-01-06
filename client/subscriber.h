@@ -48,7 +48,8 @@ public:
 
   void ClaimSlot(MessageSlot *slot, std::function<bool()> reload);
   void RememberOrdinal(uint64_t ordinal) { seen_ordinals_.Insert(ordinal); }
-  
+  void CollectVisibleSlots(InPlaceAtomicBitset &bits, std::vector<ActiveSlot>& active_slots);
+
   void IgnoreActivation(MessageSlot *slot) {
     RememberOrdinal(slot->ordinal);
     DecrementSlotRef(slot);
@@ -193,7 +194,7 @@ private:
   std::shared_ptr<ActiveMessage> active_message_;
 
   // We keep track of a limited number of ordinals we've seen.
-  FastRingBuffer<uint64_t, 2000> seen_ordinals_;
+  FastRingBuffer<uint64_t, 10000> seen_ordinals_;
   uint64_t last_ordinal_seen_ = 0;
 };
 } // namespace details

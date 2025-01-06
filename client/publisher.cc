@@ -33,8 +33,7 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
       if ((refs & kPubOwned) != 0) {
         continue;
       }
-      if ((refs & kRefsMask) == 0 &&
-          s->ordinal < lowest_ordinal) {
+      if ((refs & kRefsMask) == 0 && s->ordinal < lowest_ordinal) {
         slot = s;
         lowest_ordinal = s->ordinal;
       }
@@ -77,6 +76,7 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
   active_slots.reserve(NumSlots());
   for (;;) {
     // Put all free slots into the active_slots vector.
+    active_slots.clear();
     for (int i = 0; i < NumSlots(); i++) {
       MessageSlot *s = &ccb_->slots[i];
       uint64_t refs = s->refs.load(std::memory_order_relaxed);
@@ -87,7 +87,9 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
     }
 
     // Sort the active slots by ordinal.
-    std::sort(active_slots.begin(), active_slots.end(),
+    // std::stable_sort gives consistently better performance than std::sort and also
+    // is more deterministic in slot ordering.
+    std::stable_sort(active_slots.begin(), active_slots.end(),
               [](const ActiveSlot &a, const ActiveSlot &b) {
                 return a.ordinal < b.ordinal;
               });
@@ -100,7 +102,8 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
         break;
       }
       // Don't go past one without the kMessageSeen flag set.
-      if (s.ordinal != 0 && (Prefix(s.slot, reload)->flags & kMessageSeen) == 0) {
+      if (s.ordinal != 0 &&
+          (Prefix(s.slot, reload)->flags & kMessageSeen) == 0) {
         break;
       }
       // If the refs have no references we can claim it.
@@ -112,7 +115,6 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
     if (slot == nullptr) {
       return nullptr;
     }
-
     // Claim the slot by setting the kPubOwned bit.
     uint64_t ref = kPubOwned | owner;
     uint64_t expected = slot->refs & ~kRefsMask;
@@ -120,7 +122,6 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
                                          std::memory_order_relaxed)) {
       break;
     }
-
   }
   slot->ordinal = 0;
   SetSlotToBiggestBuffer(slot);
@@ -164,7 +165,8 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
   ccb_->total_bytes += slot->message_size;
 
   // Set the refs to the ordinal with no refs.
-  slot->refs.store((slot->ordinal & kOrdinalMask) << kOrdinalShift, std::memory_order_release);
+  slot->refs.store((slot->ordinal & kOrdinalMask) << kOrdinalShift,
+                   std::memory_order_release);
 
   // Tell all subscribers that the slot is available.
   ccb_->subscribers.Traverse(

@@ -8,6 +8,7 @@
 #include "client/client.h"
 #include "coroutine.h"
 #include "server/server.h"
+#include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
 #include "toolbelt/pipe.h"
 #include <gtest/gtest.h>
@@ -846,7 +847,7 @@ TEST_F(ClientTest, ReliablePublisher1) {
   absl::StatusOr<Message> msg = sub->ReadMessage();
   ASSERT_TRUE(msg.ok());
   ASSERT_EQ(6, msg->length);
-  
+
   // Publish another set of messages.  We have 5 slots.  The subscriber
   // has one.  We can publish another 4 and then will get a nullptr
   // from GetMessageBuffer.
@@ -1347,7 +1348,8 @@ TEST_F(ClientTest, MultithreadedSingleChannel) {
         // std::cerr << "DROPPED " << (msg->ordinal - last_ordinal - 1) << "\n";
         last_ordinal = msg->ordinal;
         int receiver = rand() % kNumReceivers;
-        // std::cerr << "queued ordinal " << msg->ordinal << " to " << receiver << "\n";
+        // std::cerr << "queued ordinal " << msg->ordinal << " to " << receiver
+        // << "\n";
         ASSERT_TRUE(pipes[receiver]
                         .Write(std::make_shared<Message>(std::move(*msg)))
                         .ok());
@@ -1357,7 +1359,7 @@ TEST_F(ClientTest, MultithreadedSingleChannel) {
     }
   });
 
-    // Create a publisher thread.
+  // Create a publisher thread.
   std::thread pub_thread([&pub]() {
     for (int j = 0; j < kNumMessages; j++) {
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
@@ -1381,6 +1383,671 @@ TEST_F(ClientTest, MultithreadedSingleChannel) {
   }
   for (auto &r : receivers) {
     r.join();
+  }
+}
+
+TEST_F(ClientTest, MultithreadedSingleChannelReliable) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_TRUE(pub_client.Init(Socket()).ok());
+  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+
+  constexpr int kNumReceivers = 20;
+  constexpr int kNumMessages = 200000;
+
+  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
+      "rstress", 256, kNumReceivers + 3, {.reliable = true});
+  ASSERT_TRUE(pub.ok());
+
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
+      "rstress", {.reliable = true, .max_active_messages = kNumReceivers + 1});
+  ASSERT_TRUE(sub.ok());
+
+  std::vector<std::thread> receivers;
+  std::vector<toolbelt::SharedPtrPipe<Message>> pipes;
+
+  std::atomic<int> total_received_messages = 0;
+
+  for (size_t i = 0; i < kNumReceivers; i++) {
+    pipes.emplace_back(toolbelt::SharedPtrPipe<Message>());
+    ASSERT_TRUE(pipes.back().Open().ok());
+  }
+
+  for (size_t i = 0; i < kNumReceivers; i++) {
+    receivers.emplace_back([&pipes, i, &total_received_messages]() {
+      while (total_received_messages < kNumMessages) {
+        auto msg = pipes[i].Read();
+        ASSERT_TRUE(msg.ok());
+        // std::cerr << "received ordinal " << (*msg)->ordinal << " on "
+        //           << i << "\n";
+        total_received_messages++;
+        // Sleep for random microseconds.
+        std::this_thread::sleep_for(std::chrono::microseconds(rand() % 10));
+      }
+    });
+  }
+
+  uint64_t start_time = toolbelt::Now();
+  // Create a subscriber thread to read from the channel and write to random
+  // pipe.
+  std::thread sub_thread([&sub, &pipes]() {
+    uint64_t last_ordinal = 0;
+
+    int j = 0;
+    ASSERT_TRUE(sub->Wait().ok());
+    while (j < kNumMessages) {
+      absl::StatusOr<Message> msg = sub->ReadMessage();
+      ASSERT_TRUE(msg.ok());
+      if (msg->length > 0) {
+        if (last_ordinal != 0) {
+          ASSERT_EQ(msg->ordinal, last_ordinal + 1);
+        }
+        last_ordinal = msg->ordinal;
+        int receiver = rand() % kNumReceivers;
+        ASSERT_TRUE(pipes[receiver]
+                        .Write(std::make_shared<Message>(std::move(*msg)))
+                        .ok());
+        j++;
+      }
+    }
+  });
+
+  // Create a publisher thread.
+  std::thread pub_thread([&pub]() {
+    int j = 0;
+    while (j < kNumMessages) {
+      absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+      ASSERT_TRUE(buffer.ok());
+      if (*buffer == nullptr) {
+        // Can't send, wait until we can try again.
+        ASSERT_TRUE(pub->Wait().ok());
+        continue;
+      }
+      char *buf = reinterpret_cast<char *>(*buffer);
+      int len = snprintf(buf, 256, "foobar %d", j);
+
+      absl::StatusOr<const Message> pub_status = pub->PublishMessage(len + 1);
+      // std::cerr << "pub status " << pub_status.status() << "\n";
+      ASSERT_TRUE(pub_status.ok());
+      j++;
+    }
+  });
+
+  pub_thread.join();
+  sub_thread.join();
+  uint64_t end_time = toolbelt::Now();
+  std::cerr << "Average latency: " << (end_time - start_time) / kNumMessages
+            << " ns\n";
+  // Send one last message to the receivers to stop them.
+  for (size_t i = 0; i < kNumReceivers; i++) {
+    ASSERT_TRUE(pipes[i].Write(std::make_shared<Message>()).ok());
+  }
+  for (auto &r : receivers) {
+    r.join();
+  }
+}
+
+TEST_F(ClientTest, MultithreadedReliableLatency) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_TRUE(pub_client.Init(Socket()).ok());
+  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+
+  constexpr int kNumMessages = 200000;
+
+  absl::StatusOr<Publisher> pub =
+      pub_client.CreatePublisher("lstress", 256, 10, {.reliable = true});
+  ASSERT_TRUE(pub.ok());
+
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber("lstress", {.reliable = true});
+  ASSERT_TRUE(sub.ok());
+
+  uint64_t start_time = toolbelt::Now();
+  // Create a subscriber thread to read from the channel and write to random
+  // pipe.
+  std::thread sub_thread([&sub]() {
+    int j = 0;
+    ASSERT_TRUE(sub->Wait().ok());
+    while (j < kNumMessages) {
+      absl::StatusOr<Message> msg = sub->ReadMessage();
+      ASSERT_TRUE(msg.ok());
+      if (msg->length > 0) {
+        j++;
+      } else {
+        ASSERT_TRUE(sub->Wait().ok());
+      }
+    }
+  });
+
+  // Create a publisher thread.
+  std::thread pub_thread([&pub]() {
+    int j = 0;
+    while (j < kNumMessages) {
+      absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+      ASSERT_TRUE(buffer.ok());
+      if (*buffer == nullptr) {
+        // Can't send, wait until we can try again.
+        ASSERT_TRUE(pub->Wait().ok());
+        continue;
+      }
+      char *buf = reinterpret_cast<char *>(*buffer);
+      int len = snprintf(buf, 256, "foobar %d", j);
+
+      absl::StatusOr<const Message> pub_status = pub->PublishMessage(len + 1);
+      // std::cerr << "pub status " << pub_status.status() << "\n";
+      ASSERT_TRUE(pub_status.ok());
+      j++;
+    }
+  });
+
+  pub_thread.join();
+  sub_thread.join();
+  uint64_t end_time = toolbelt::Now();
+  std::cerr << "Average latency: " << (end_time - start_time) / kNumMessages
+            << " ns\n";
+}
+
+TEST_F(ClientTest, MultithreadedReliableLatencyHistogram) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_TRUE(pub_client.Init(Socket()).ok());
+  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+
+  constexpr int kNumMessages = 20000;
+  std::vector<uint64_t> latencies;
+
+  for (int num_slots = 3; num_slots < 20000; num_slots *= 2) {
+    std::cerr << "num_slots: " << num_slots << "\n";
+    absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
+        "lstress", 256, num_slots, {.reliable = true});
+    ASSERT_TRUE(pub.ok());
+
+    absl::StatusOr<Subscriber> sub =
+        sub_client.CreateSubscriber("lstress", {.reliable = true});
+    ASSERT_TRUE(sub.ok());
+
+    uint64_t start_time = toolbelt::Now();
+    // Create a subscriber thread to read from the channel and write to random
+    // pipe.
+    std::thread sub_thread([&sub]() {
+      int j = 0;
+      ASSERT_TRUE(sub->Wait().ok());
+      while (j < kNumMessages) {
+        absl::StatusOr<Message> msg = sub->ReadMessage();
+        ASSERT_TRUE(msg.ok());
+        if (msg->length > 0) {
+          j++;
+        } else {
+          ASSERT_TRUE(sub->Wait().ok());
+        }
+      }
+    });
+
+    // Create a publisher thread.
+    std::thread pub_thread([&pub]() {
+      int j = 0;
+      while (j < kNumMessages) {
+        absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+        ASSERT_TRUE(buffer.ok());
+        if (*buffer == nullptr) {
+          // Can't send, wait until we can try again.
+          ASSERT_TRUE(pub->Wait().ok());
+          continue;
+        }
+        absl::StatusOr<const Message> pub_status = pub->PublishMessage(1);
+        ASSERT_TRUE(pub_status.ok());
+        j++;
+      }
+    });
+
+    pub_thread.join();
+    sub_thread.join();
+    uint64_t end_time = toolbelt::Now();
+    latencies.push_back((end_time - start_time) / kNumMessages);
+  }
+
+  int slot_size = 3;
+  uint64_t prev_latency = 0;
+  for (auto &latency : latencies) {
+    std::cerr << slot_size << ": " << latency << " ns scaling factor: "
+              << (prev_latency == 0 ? 0 : (double(latency) / prev_latency))
+              << "\n";
+    prev_latency = latency;
+    slot_size *= 2;
+  }
+}
+
+TEST_F(ClientTest, MultithreadedUnreliableLatency) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_TRUE(pub_client.Init(Socket()).ok());
+  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+
+  constexpr int kNumMessages = 2000000;
+
+  absl::StatusOr<Publisher> pub =
+      pub_client.CreatePublisher("lustress", 256, 10, {.reliable = false});
+  ASSERT_TRUE(pub.ok());
+
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
+      "lustress", {.reliable = false, .log_dropped_messages = false});
+  ASSERT_TRUE(sub.ok());
+
+  uint64_t start_time = toolbelt::Now();
+  // Create a subscriber thread to read from the channel and write to random
+  // pipe.
+  std::atomic<int> num_dropped{0};
+  std::thread sub_thread([&sub, &num_dropped]() {
+    uint64_t last_ordinal = 0;
+    int j = 0;
+    ASSERT_TRUE(sub->Wait().ok());
+    while (j < kNumMessages - num_dropped) {
+      absl::StatusOr<Message> msg = sub->ReadMessage();
+      ASSERT_TRUE(msg.ok());
+      if (msg->length > 0) {
+        if (last_ordinal != 0) {
+          num_dropped += msg->ordinal - last_ordinal - 1;
+        }
+        // std::cerr << "DROPPED " << (msg->ordinal - last_ordinal - 1) << "\n";
+        last_ordinal = msg->ordinal;
+        j++;
+      } else {
+        // ASSERT_TRUE(sub->Wait().ok());
+      }
+    }
+    std::cerr << "Received " << j << " messages, dropped " << num_dropped.load()
+              << "\n";
+  });
+
+  // Create a publisher thread.
+  std::thread pub_thread([&pub]() {
+    int j = 0;
+    while (j < kNumMessages) {
+      absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+      ASSERT_TRUE(buffer.ok());
+      if (*buffer == nullptr) {
+        // Can't send, wait until we can try again.
+        ASSERT_TRUE(pub->Wait().ok());
+        continue;
+      }
+
+      absl::StatusOr<const Message> pub_status = pub->PublishMessage(1);
+      // std::cerr << "pub status " << pub_status.status() << "\n";
+      ASSERT_TRUE(pub_status.ok());
+      j++;
+    }
+  });
+
+  pub_thread.join();
+  // The subscriber might have dropped the last sequence of messages
+  // and will therefore not stop.  We need to send enough messages to
+  // stop the subscriber.
+  for (int i = 0; i < 100; i++) {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_TRUE(buffer.ok());
+    if (*buffer == nullptr) {
+      // Can't send, wait until we can try again.
+      ASSERT_TRUE(pub->Wait().ok());
+      continue;
+    }
+
+    absl::StatusOr<const Message> pub_status = pub->PublishMessage(1);
+    // std::cerr << "pub status " << pub_status.status() << "\n";
+    ASSERT_TRUE(pub_status.ok());
+  }
+  sub_thread.join();
+  uint64_t end_time = toolbelt::Now();
+  std::cerr << "Average latency: " << (end_time - start_time) / kNumMessages
+            << " ns\n";
+}
+
+// This measures unreliable latency by sending as fast as possible.  It will
+// drop messages because the publisher will run faster than the subscriber
+// most of the time.
+TEST_F(ClientTest, MultithreadedUnreliableLatencyHistogram) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_TRUE(pub_client.Init(Socket()).ok());
+  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+
+  constexpr int kNumMessages = 20000;
+  // constexpr int kNumMessages = 200000;
+
+  std::vector<uint64_t> latencies;
+
+  for (int num_slots = 3; num_slots < 20000; num_slots *= 2) {
+    std::cerr << "num_slots: " << num_slots << "\n";
+    absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
+        "lustress", 256, num_slots, {.reliable = false});
+    ASSERT_TRUE(pub.ok());
+
+    absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
+        "lustress", {.reliable = false, .log_dropped_messages = false});
+    ASSERT_TRUE(sub.ok());
+
+    uint64_t start_time = toolbelt::Now();
+    // Create a subscriber thread to read from the channel and write to random
+    // pipe.
+    std::atomic<int> num_dropped{0};
+    std::thread sub_thread([&sub, &num_dropped]() {
+      uint64_t last_ordinal = 0;
+      int j = 0;
+      while (j < kNumMessages - num_dropped) {
+        absl::StatusOr<Message> msg = sub->ReadMessage();
+        ASSERT_TRUE(msg.ok());
+        if (msg->length > 0) {
+          if (last_ordinal != 0) {
+            num_dropped += msg->ordinal - last_ordinal - 1;
+          }
+          // std::cerr << "DROPPED " << (msg->ordinal - last_ordinal - 1) <<
+          // "\n";
+          last_ordinal = msg->ordinal;
+          j++;
+        }
+      }
+      std::cerr << "Received " << j << " messages, dropped "
+                << num_dropped.load() << "\n";
+    });
+
+    // Create a publisher thread.
+    std::thread pub_thread([&pub]() {
+      int j = 0;
+      while (j < kNumMessages) {
+        absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+        ASSERT_TRUE(buffer.ok());
+        if (*buffer == nullptr) {
+          // Can't send, wait until we can try again.
+          ASSERT_TRUE(pub->Wait().ok());
+          continue;
+        }
+
+        absl::StatusOr<const Message> pub_status = pub->PublishMessage(1);
+        // std::cerr << "pub status " << pub_status.status() << "\n";
+        ASSERT_TRUE(pub_status.ok());
+        j++;
+      }
+    });
+
+    pub_thread.join();
+
+    // The subscriber might have dropped the last sequence of messages
+    // and will therefore not stop.  We need to send enough messages to
+    // stop the subscriber.
+    for (int i = 0; i < 100; i++) {
+      absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+      ASSERT_TRUE(buffer.ok());
+      if (*buffer == nullptr) {
+        // Can't send, wait until we can try again.
+        ASSERT_TRUE(pub->Wait().ok());
+        continue;
+      }
+
+      absl::StatusOr<const Message> pub_status = pub->PublishMessage(1);
+      // std::cerr << "pub status " << pub_status.status() << "\n";
+      ASSERT_TRUE(pub_status.ok());
+    }
+    sub_thread.join();
+    uint64_t end_time = toolbelt::Now();
+    latencies.push_back((end_time - start_time) / kNumMessages);
+  }
+
+  int slot_size = 3;
+  uint64_t prev_latency = 0;
+  for (auto &latency : latencies) {
+    std::cerr << slot_size << ": " << latency << " ns scaling factor: "
+              << (prev_latency == 0 ? 0 : (double(latency) / prev_latency))
+              << "\n";
+    prev_latency = latency;
+    slot_size *= 2;
+  }
+}
+
+TEST_F(ClientTest, MultithreadedUnreliableLatencyPayload) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_TRUE(pub_client.Init(Socket()).ok());
+  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+
+  constexpr int kNumMessages = 200000;
+
+  absl::StatusOr<Publisher> pub =
+      pub_client.CreatePublisher("lustress", 256, 100, {.reliable = false});
+  ASSERT_TRUE(pub.ok());
+
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
+      "lustress", {.reliable = false, .log_dropped_messages = false});
+  ASSERT_TRUE(sub.ok());
+
+  // Create a subscriber thread to read from the channel and write to random
+  // pipe.
+  std::atomic<int> num_dropped{0};
+
+  std::thread sub_thread([&sub, &num_dropped]() {
+    uint64_t last_ordinal = 0;
+    std::vector<uint64_t> latencies;
+    int j = 0;
+    ASSERT_TRUE(sub->Wait().ok());
+    while (j < kNumMessages - num_dropped) {
+      absl::StatusOr<Message> msg = sub->ReadMessage();
+      ASSERT_TRUE(msg.ok());
+      if (msg->length > 0) {
+        uint64_t receive_time = toolbelt::Now();
+        if (last_ordinal != 0) {
+          num_dropped += msg->ordinal - last_ordinal - 1;
+        }
+        // std::cerr << "DROPPED " << (msg->ordinal - last_ordinal - 1) << "\n";
+        last_ordinal = msg->ordinal;
+        j++;
+        const uint64_t send_time =
+            *reinterpret_cast<const uint64_t *>(msg->buffer);
+        uint64_t latency = receive_time - send_time;
+        latencies.push_back(latency);
+      } else {
+        // ASSERT_TRUE(sub->Wait().ok());
+      }
+    }
+    std::cerr << "Received " << j << " messages, dropped " << num_dropped.load()
+              << "\n";
+    if (latencies.empty()) {
+      std::cerr << "No messages received\n";
+      return;
+    }
+    // Sort latencies.
+    std::sort(latencies.begin(), latencies.end());
+    // Min latency.
+    std::cerr << "Min latency: " << latencies.front() << " ns\n";
+    std::cerr << "Median latency: " << latencies[latencies.size() / 2]
+              << " ns\n";
+    // P99 latency.
+    std::cerr << "P99 latency: " << latencies[latencies.size() * 99 / 100]
+              << " ns\n";
+    // Max latency.
+    std::cerr << "Max latency: " << latencies.back() << " ns\n";
+    // Average latency.
+    uint64_t sum = 0;
+    for (auto &l : latencies) {
+      sum += l;
+    }
+    std::cerr << "Average latency: " << sum / latencies.size() << " ns\n";
+  });
+
+  // Create a publisher thread.
+  std::thread pub_thread([&pub]() {
+    int j = 0;
+    while (j < kNumMessages) {
+      absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+      ASSERT_TRUE(buffer.ok());
+      if (*buffer == nullptr) {
+        // Can't send, wait until we can try again.
+        ASSERT_TRUE(pub->Wait().ok());
+        continue;
+      }
+      uint64_t send_time = toolbelt::Now();
+      memcpy(*buffer, &send_time, sizeof(send_time));
+      absl::StatusOr<const Message> pub_status =
+          pub->PublishMessage(sizeof(send_time));
+      // std::cerr << "pub status " << pub_status.status() << "\n";
+      ASSERT_TRUE(pub_status.ok());
+      j++;
+      // Sleep for random microseconds.
+      std::this_thread::sleep_for(std::chrono::microseconds(rand() % 10));
+    }
+  });
+
+  pub_thread.join();
+  // The subscriber might have dropped the last sequence of messages
+  // and will therefore not stop.  We need to send enough messages to
+  // stop the subscriber.
+  for (int i = 0; i < 100; i++) {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_TRUE(buffer.ok());
+    if (*buffer == nullptr) {
+      // Can't send, wait until we can try again.
+      ASSERT_TRUE(pub->Wait().ok());
+      continue;
+    }
+
+    absl::StatusOr<const Message> pub_status = pub->PublishMessage(1);
+    // std::cerr << "pub status " << pub_status.status() << "\n";
+    ASSERT_TRUE(pub_status.ok());
+  }
+  sub_thread.join();
+}
+
+TEST_F(ClientTest, MultithreadedUnreliableLatencyPayloadHistogram) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_TRUE(pub_client.Init(Socket()).ok());
+  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+
+  constexpr int kNumMessages = 200000;
+
+  struct Stats {
+    int num_slots;
+    int received;
+    int dropped;
+    uint64_t min;
+    uint64_t max;
+    uint64_t p50;
+    uint64_t p99;
+    uint64_t avg;
+  };
+  std::vector<Stats> stats;
+  for (int num_slots = 3; num_slots < 20000; num_slots *= 2) {
+    std::cerr << "Testing with num_slots: " << num_slots << "\n";
+    absl::StatusOr<Publisher> pub =
+        pub_client.CreatePublisher("lustress", 256, num_slots, {.reliable = false});
+    ASSERT_TRUE(pub.ok());
+
+    absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
+        "lustress", {.reliable = false, .log_dropped_messages = false});
+    ASSERT_TRUE(sub.ok());
+
+    // Create a subscriber thread to read from the channel and write to random
+    // pipe.
+    std::atomic<int> num_dropped{0};
+
+    std::thread sub_thread([&sub, &num_dropped, &stats, num_slots]() {
+      uint64_t last_ordinal = 0;
+      std::vector<uint64_t> latencies;
+      int j = 0;
+      ASSERT_TRUE(sub->Wait().ok());
+      while (j < kNumMessages - num_dropped) {
+        absl::StatusOr<Message> msg = sub->ReadMessage();
+        ASSERT_TRUE(msg.ok());
+        if (msg->length > 0) {
+          uint64_t receive_time = toolbelt::Now();
+          if (last_ordinal != 0) {
+            num_dropped += msg->ordinal - last_ordinal - 1;
+          }
+          // std::cerr << "DROPPED " << (msg->ordinal - last_ordinal - 1) <<
+          // "\n";
+          last_ordinal = msg->ordinal;
+          j++;
+          const uint64_t send_time =
+              *reinterpret_cast<const uint64_t *>(msg->buffer);
+          uint64_t latency = receive_time - send_time;
+          latencies.push_back(latency);
+        } else {
+          // ASSERT_TRUE(sub->Wait().ok());
+        }
+      };
+      if (latencies.empty()) {
+        std::cerr << "No messages received\n";
+        return;
+      }
+      // Sort latencies.
+      std::sort(latencies.begin(), latencies.end());
+      // Add stats.
+      Stats s;
+      s.num_slots = num_slots;
+      s.min = latencies.front();
+      s.max = latencies.back();
+      s.p50 = latencies[latencies.size() / 2];
+      s.p99 = latencies[latencies.size() * 99 / 100];
+      s.received = j;
+      s.dropped = num_dropped.load();
+      uint64_t sum = 0;
+      for (auto &l : latencies) {
+        sum += l;
+      }
+      s.avg = sum / latencies.size();
+      stats.push_back(s);
+    });
+
+    // Create a publisher thread.
+    std::thread pub_thread([&pub]() {
+      int j = 0;
+      while (j < kNumMessages) {
+        absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+        ASSERT_TRUE(buffer.ok());
+        if (*buffer == nullptr) {
+          // Can't send, wait until we can try again.
+          ASSERT_TRUE(pub->Wait().ok());
+          continue;
+        }
+        uint64_t send_time = toolbelt::Now();
+        memcpy(*buffer, &send_time, sizeof(send_time));
+        absl::StatusOr<const Message> pub_status =
+            pub->PublishMessage(sizeof(send_time));
+        // std::cerr << "pub status " << pub_status.status() << "\n";
+        ASSERT_TRUE(pub_status.ok());
+        j++;
+        // Transmit at 1 MHz.
+        std::this_thread::sleep_for(std::chrono::microseconds(1));
+      }
+    });
+
+    pub_thread.join();
+    // The subscriber might have dropped the last sequence of messages
+    // and will therefore not stop.  We need to send enough messages to
+    // stop the subscriber.
+    for (int i = 0; i < 100; i++) {
+      absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+      ASSERT_TRUE(buffer.ok());
+      if (*buffer == nullptr) {
+        // Can't send, wait until we can try again.
+        ASSERT_TRUE(pub->Wait().ok());
+        continue;
+      }
+
+      absl::StatusOr<const Message> pub_status = pub->PublishMessage(1);
+      // std::cerr << "pub status " << pub_status.status() << "\n";
+      ASSERT_TRUE(pub_status.ok());
+    }
+    sub_thread.join();
+  }
+  // Print stats
+  for (auto &s : stats) {
+    std::cerr << "slots: " << s.num_slots;
+    std::cerr << ", received: " << s.received;
+    std::cerr << ", dropped: " << s.dropped;
+    std::cerr << ", min: " << s.min << " ns";
+    std::cerr << ", median: " << s.p50 << " ns";
+    std::cerr << ", p99: " << s.p99 << " ns";
+    std::cerr << ", max: " << s.max << " ns";
+    std::cerr << ", average: " << s.avg << " ns\n";
   }
 }
 

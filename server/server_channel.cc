@@ -17,7 +17,6 @@ ServerChannel::~ServerChannel() {
   memset(&GetScb()->counters[GetChannelId()], 0, sizeof(ChannelCounters));
 }
 
-
 static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
                                                  int64_t size, bool map,
                                                  toolbelt::FileDescriptor &fd) {
@@ -88,7 +87,7 @@ CreateSystemControlBlock(toolbelt::FileDescriptor &fd) {
 
 absl::StatusOr<SharedMemoryFds>
 ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
-                  int num_slots) {
+                        int num_slots) {
   // Unmap existing memory.
   Unmap();
 
@@ -121,8 +120,8 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
   fds.buffers.emplace_back(slot_size);
 
   // Create CCB in shared memory and map into process memory.
-  absl::StatusOr<void *> p =
-      CreateSharedMemory(channel_id_, "ccb", CcbSize(num_slots_), /*map=*/true, fds.ccb);
+  absl::StatusOr<void *> p = CreateSharedMemory(
+      channel_id_, "ccb", CcbSize(num_slots_), /*map=*/true, fds.ccb);
   if (!p.ok()) {
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
     return p.status();
@@ -165,9 +164,10 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
   }
 
   // Initialize the available slots for each subscriber.
-  for (int i = 0; i < kMaxSlotOwners; i++) {
-    new (GetAvailableSlotsAddress(i))
-        InPlaceAtomicBitset(num_slots_);
+  if (num_slots_ > 0) {
+    for (int i = 0; i < kMaxSlotOwners; i++) {
+      new (GetAvailableSlotsAddress(i)) InPlaceAtomicBitset(num_slots_);
+    }
   }
 
   if (debug_) {
@@ -287,11 +287,14 @@ void ServerChannel::TriggerAllSubscribers() {
   }
 }
 
-void ServerChannel::RemoveUser(int user_id) {
+void ServerChannel::RemoveUser(Server *server, int user_id) {
+  int num_users = 0;
   for (auto &user : users_) {
     if (user == nullptr) {
       continue;
     }
+
+    num_users++;
     if (user->GetId() == user_id) {
       CleanupSlots(user->GetId(), user->IsReliable(), user->IsPublisher());
       user_ids_.Clear(user->GetId());
@@ -300,8 +303,11 @@ void ServerChannel::RemoveUser(int user_id) {
         TriggerAllSubscribers();
       }
       user.reset();
-      return;
+      num_users--;
     }
+  }
+  if (num_users == 0) {
+    server->RemoveChannel(this);
   }
 }
 
@@ -385,7 +391,6 @@ bool ServerChannel::IsFixedSize() const {
   return false;
 }
 
-
 bool ServerChannel::IsBridgePublisher() const {
   int num_pubs = 0;
   int num_bridge_pubs = 0;
@@ -422,7 +427,8 @@ bool ServerChannel::IsBridgeSubscriber() const {
   return num_subs == num_bridge_subs;
 }
 
-absl::Status ServerChannel::HasSufficientCapacity(int new_max_active_messages) const {
+absl::Status
+ServerChannel::HasSufficientCapacity(int new_max_active_messages) const {
   if (NumSlots() == 0) {
     return absl::OkStatus();
   }
@@ -448,11 +454,11 @@ absl::Status ServerChannel::HasSufficientCapacity(int new_max_active_messages) c
 
   return absl::InternalError(
       absl::StrFormat("there are %d slots with %d publisher%s and %d "
-                      "subscriber%s with %d additional active message%s; you need at least %d slots",
+                      "subscriber%s with %d additional active message%s; you "
+                      "need at least %d slots",
                       NumSlots(), num_pubs, (num_pubs == 1 ? "" : "s"),
                       num_subs, (num_subs == 1 ? "" : "s"), max_active_messages,
-                      (max_active_messages == 1 ? "" : "s"),
-                      slots_needed+1));
+                      (max_active_messages == 1 ? "" : "s"), slots_needed + 1));
 }
 
 void ServerChannel::GetChannelInfo(subspace::ChannelInfo *info) {
@@ -478,7 +484,7 @@ void ServerChannel::GetChannelStats(subspace::ChannelStats *stats) {
   CountUsers(num_pubs, num_subs);
   stats->set_num_pubs(num_pubs);
   stats->set_num_subs(num_subs);
-  }
+}
 
 ChannelCounters &ServerChannel::RecordUpdate(bool is_pub, bool add,
                                              bool reliable) {

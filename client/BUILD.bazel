@@ -4,10 +4,11 @@ cc_library(
     name = "subspace_client",
     srcs = [
         "client.cc",
-        "client_channel.cc",
         "message.cc",
         "publisher.cc",
         "subscriber.cc",
+                "client_channel.cc",
+
     ],
     hdrs = [
         "client.h",
