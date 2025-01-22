@@ -181,7 +181,7 @@ private:
   toolbelt::TriggerFd trigger_;
   std::vector<toolbelt::TriggerFd> reliable_publishers_;
   SubscriberOptions options_;
-  std::atomic<int> num_active_messages_ = 0;
+  std::atomic<int> num_active_messages_{0};
   std::mutex reliable_publishers_mutex_;
 
   // It is rare that subscribers need to search for messges by timestamp.  This
