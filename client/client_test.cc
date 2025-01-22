@@ -689,7 +689,7 @@ TEST_F(ClientTest, PublishAndResizeSubscriberConcurrently) {
   ASSERT_TRUE(client1.Init(Socket()).ok());
   ASSERT_TRUE(client2.Init(Socket()).ok());
 
-  std::atomic<bool> publisher_finished = false;
+  std::atomic<bool> publisher_finished{false};
 
   auto t1 = std::thread([&]() {
     auto client1_pub = *client1.CreatePublisher(channel_name, 1, 4);
@@ -1311,8 +1311,8 @@ TEST_F(ClientTest, MultithreadedSingleChannel) {
   std::vector<std::thread> receivers;
   std::vector<toolbelt::SharedPtrPipe<Message>> pipes;
 
-  std::atomic<int> total_received_messages = 0;
-  std::atomic<int> num_dropped = 0;
+  std::atomic<int> total_received_messages{0};
+  std::atomic<int> num_dropped{0};
 
   for (size_t i = 0; i < kNumReceivers; i++) {
     pipes.emplace_back(toolbelt::SharedPtrPipe<Message>());
@@ -1345,11 +1345,8 @@ TEST_F(ClientTest, MultithreadedSingleChannel) {
       if (msg->length > 0) {
         ASSERT_GT(msg->ordinal, last_ordinal);
         num_dropped += msg->ordinal - last_ordinal - 1;
-        // std::cerr << "DROPPED " << (msg->ordinal - last_ordinal - 1) << "\n";
         last_ordinal = msg->ordinal;
         int receiver = rand() % kNumReceivers;
-        // std::cerr << "queued ordinal " << msg->ordinal << " to " << receiver
-        // << "\n";
         ASSERT_TRUE(pipes[receiver]
                         .Write(std::make_shared<Message>(std::move(*msg)))
                         .ok());
@@ -1406,7 +1403,7 @@ TEST_F(ClientTest, MultithreadedSingleChannelReliable) {
   std::vector<std::thread> receivers;
   std::vector<toolbelt::SharedPtrPipe<Message>> pipes;
 
-  std::atomic<int> total_received_messages = 0;
+  std::atomic<int> total_received_messages{0};
 
   for (size_t i = 0; i < kNumReceivers; i++) {
     pipes.emplace_back(toolbelt::SharedPtrPipe<Message>());
@@ -1646,10 +1643,8 @@ TEST_F(ClientTest, MultithreadedUnreliableLatency) {
       absl::StatusOr<Message> msg = sub->ReadMessage();
       ASSERT_TRUE(msg.ok());
       if (msg->length > 0) {
-        if (last_ordinal != 0) {
           num_dropped += msg->ordinal - last_ordinal - 1;
-        }
-        // std::cerr << "DROPPED " << (msg->ordinal - last_ordinal - 1) << "\n";
+
         last_ordinal = msg->ordinal;
         j++;
       } else {
@@ -1737,11 +1732,7 @@ TEST_F(ClientTest, MultithreadedUnreliableLatencyHistogram) {
         absl::StatusOr<Message> msg = sub->ReadMessage();
         ASSERT_TRUE(msg.ok());
         if (msg->length > 0) {
-          if (last_ordinal != 0) {
             num_dropped += msg->ordinal - last_ordinal - 1;
-          }
-          // std::cerr << "DROPPED " << (msg->ordinal - last_ordinal - 1) <<
-          // "\n";
           last_ordinal = msg->ordinal;
           j++;
         }
@@ -1833,10 +1824,7 @@ TEST_F(ClientTest, MultithreadedUnreliableLatencyPayload) {
       ASSERT_TRUE(msg.ok());
       if (msg->length > 0) {
         uint64_t receive_time = toolbelt::Now();
-        if (last_ordinal != 0) {
           num_dropped += msg->ordinal - last_ordinal - 1;
-        }
-        // std::cerr << "DROPPED " << (msg->ordinal - last_ordinal - 1) << "\n";
         last_ordinal = msg->ordinal;
         j++;
         const uint64_t send_time =
@@ -1958,11 +1946,7 @@ TEST_F(ClientTest, MultithreadedUnreliableLatencyPayloadHistogram) {
         ASSERT_TRUE(msg.ok());
         if (msg->length > 0) {
           uint64_t receive_time = toolbelt::Now();
-          if (last_ordinal != 0) {
             num_dropped += msg->ordinal - last_ordinal - 1;
-          }
-          // std::cerr << "DROPPED " << (msg->ordinal - last_ordinal - 1) <<
-          // "\n";
           last_ordinal = msg->ordinal;
           j++;
           const uint64_t send_time =

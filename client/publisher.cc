@@ -51,7 +51,7 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
     // Claim the slot by setting the refs to kPubOwned with our owner in the
     // bottom bits.
     uint64_t ref = kPubOwned | owner;
-    uint64_t expected = slot->refs & ~kRefsMask;
+    uint64_t expected = slot->ordinal << kOrdinalShift;
     if (slot->refs.compare_exchange_weak(expected, ref,
                                          std::memory_order_relaxed)) {
       break;
@@ -117,7 +117,7 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
     }
     // Claim the slot by setting the kPubOwned bit.
     uint64_t ref = kPubOwned | owner;
-    uint64_t expected = slot->refs & ~kRefsMask;
+    uint64_t expected = slot->ordinal << kOrdinalShift;
     if (slot->refs.compare_exchange_weak(expected, ref,
                                          std::memory_order_relaxed)) {
       break;
