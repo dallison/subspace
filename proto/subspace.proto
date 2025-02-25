@@ -32,6 +32,8 @@ message CreatePublisherRequest {
   bool is_bridge = 6; // This publisher is for the bridge.
   bytes type = 7;    // Type of data carried on channel.
   bool is_fixed_size = 8;
+  string mux = 9;
+  int32 vchan_id = 10;
 }
 
 message CreatePublisherResponse {
@@ -45,6 +47,7 @@ message CreatePublisherResponse {
   repeated int32 sub_trigger_fd_indexes = 8;
   int32 num_sub_updates = 9;
   bytes type = 10;
+  int32 vchan_id = 11;
 }
 
 // This is used both to create a new subscriber and to reload
@@ -57,6 +60,8 @@ message CreateSubscriberRequest {
   bool is_bridge = 4; // This subscriber is for the bridge.
   bytes type = 5;    // Type of data carried on channel.
   int32 max_active_messages = 6;    // Max number of active message objects.
+  string mux = 7;
+  int32 vchan_id = 8;
 }
 
 message CreateSubscriberResponse {
@@ -72,6 +77,7 @@ message CreateSubscriberResponse {
   repeated int32 reliable_pub_trigger_fd_indexes = 10;
   int32 num_pub_updates = 11;
   bytes type = 12;
+  int32 vchan_id = 13;
 }
 
 message GetTriggersRequest { string channel_name = 1; }

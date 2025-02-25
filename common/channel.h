@@ -46,7 +46,12 @@ struct MessagePrefix {
   uint64_t ordinal;
   uint64_t timestamp;
   int64_t flags;
+  int32_t vchan_id;
+  char padding2[64 - 36]; // Align to 64 bytes.
 };
+
+static_assert(sizeof(MessagePrefix) == 64,
+              "MessagePrefix size is not 64 bytes");
 
 // Flag for flags field in MessagePrefix.
 constexpr int kMessageActivate = 1; // This is a reliable activation message.
@@ -61,6 +66,10 @@ constexpr int kMaxChannels = 1024;
 // and publisher reference.  Best if it's a multiple of 64 because
 // it's used as the size in a toolbelt::BitSet.
 constexpr int kMaxSlotOwners = 1024;
+
+// This limits the number of virtual channels.  Each virtual channel
+// needs its own ordinal counter in the CCB (8 bytes each).
+constexpr int kMaxVchanId = 500;
 
 // Max length of a channel name in shared memory.  A name longer
 // this this will be truncated but the full name will be available
@@ -78,7 +87,7 @@ constexpr uint64_t kRefsMask = 0xfffff; // 20 bits
 // reliable ref count field.  This is to ensure that a publisher
 // hasn't published another message in the slot before a subscriber
 // increments the ref count.
-constexpr uint64_t kOrdinalMask = (1ULL << 42) - 1;    // 40 bits
+constexpr uint64_t kOrdinalMask = (1ULL << 42) - 1; // 40 bits
 constexpr uint64_t kOrdinalShift = 20;
 
 // Aligned to given power of 2.
@@ -120,6 +129,7 @@ struct MessageSlot {
   uint64_t message_size;      // Size of message held in slot.
   int32_t buffer_index;       // Index of buffer.
   AtomicBitSet<kMaxSlotOwners> sub_owners; // One bit per subscriber.
+  int32_t vchan_id;                        // Virtual channel ID.
 };
 
 struct ActiveSlot {
@@ -131,8 +141,8 @@ struct ActiveSlot {
 // This is located just before the prefix of the first slot's buffer.  It
 // is 64 bits long to align the prefix to 64 bits.
 struct BufferHeader {
-  int32_t refs;    // Number of references to this buffer.
-  int32_t padding; // Align to 64 bits.
+  std::atomic<int32_t> refs; // Number of references to this buffer.
+  int32_t padding;           // Align to 64 bits.
 };
 
 // The control data for a channel.  This memory is
@@ -145,9 +155,12 @@ struct ChannelControlBlock {          // a.k.a CCB
   char channel_name[kMaxChannelName]; // So that you can see the name in a
                                       // debugger or hexdump.
   int num_slots;
-  std::atomic<int64_t> next_ordinal; // Next ordinal to use.
-  int buffer_index;     // Which buffer in buffers array to use.
-  int num_buffers;      // Size of buffers array in shared memory.
+  std::atomic<int64_t>
+      next_ordinal; // Next ordinal to use for non-virtual channels.
+  std::array<std::atomic<int64_t>, kMaxVchanId>
+      next_vchan_ordinal; // Next ordinal to use (per vchan)
+  int buffer_index;       // Which buffer in buffers array to use.
+  int num_buffers;        // Size of buffers array in shared memory.
   AtomicBitSet<kMaxSlotOwners> subscribers; // One bit per subscriber.
 
   // Statistics counters.
@@ -159,7 +172,7 @@ struct ChannelControlBlock {          // a.k.a CCB
   // Variable number of MessageSlot structs (num_slots long).
   MessageSlot slots[0];
   // Followed by:
-  // AtomicBitSet<0> availableSlots[kMaxSlotOwners]; 
+  // AtomicBitSet<0> availableSlots[kMaxSlotOwners];
 };
 
 inline size_t AvailableSlotsSize(int num_slots) {
@@ -253,7 +266,7 @@ public:
   // for the slot given a slot id.
   void *GetBufferAddress(int slot_id) const {
     return Buffer(slot_id) +
-           (sizeof(MessagePrefix) + Aligned<32>(SlotSize(slot_id))) * slot_id +
+           (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot_id))) * slot_id +
            sizeof(MessagePrefix);
   }
 
@@ -263,26 +276,27 @@ public:
       return nullptr;
     }
     return Buffer(slot->id) +
-           (sizeof(MessagePrefix) + Aligned<32>(SlotSize(slot->id))) *
+           (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot->id))) *
                slot->id +
            sizeof(MessagePrefix);
   }
 
-  void ReloadIfNecessary(const std::function<bool()>& reload);
+  void ReloadIfNecessary(const std::function<bool()> &reload);
 
   // Get a pointer to the MessagePrefix for a given slot.
-  MessagePrefix *Prefix(MessageSlot *slot, const std::function<bool()>& reload) {
+  MessagePrefix *Prefix(MessageSlot *slot,
+                        const std::function<bool()> &reload) {
     ReloadIfNecessary(reload);
     MessagePrefix *p = reinterpret_cast<MessagePrefix *>(
         Buffer(slot->id) +
-        (sizeof(MessagePrefix) + Aligned<32>(SlotSize(slot->id))) * slot->id);
+        (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot->id))) * slot->id);
     return p;
   }
 
- MessagePrefix *Prefix(MessageSlot *slot) const {
+  MessagePrefix *Prefix(MessageSlot *slot) const {
     MessagePrefix *p = reinterpret_cast<MessagePrefix *>(
         Buffer(slot->id) +
-        (sizeof(MessagePrefix) + Aligned<32>(SlotSize(slot->id))) * slot->id);
+        (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot->id))) * slot->id);
     return p;
   }
 
@@ -340,11 +354,13 @@ public:
   ChannelControlBlock *GetCcb() const { return ccb_; }
 
   // Gets the statistics counters.
-  void GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages, uint32_t& max_message_size, uint32_t& total_drops);
+  void GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
+                        uint32_t &max_message_size, uint32_t &total_drops);
 
   void SetDebug(bool v) { debug_ = v; }
 
-  bool AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc, uint64_t ordinal);
+  bool AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
+                         uint64_t ordinal);
 
   void SetType(std::string type) { type_ = std::move(type); }
   const std::string Type() const { return type_; }
@@ -357,7 +373,7 @@ public:
 
   char *EndOfSlots() const {
     return reinterpret_cast<char *>(ccb_) +
-           Aligned<32>(sizeof(ChannelControlBlock) +
+           Aligned<64>(sizeof(ChannelControlBlock) +
                        num_slots_ * sizeof(MessageSlot));
   }
 

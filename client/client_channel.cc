@@ -122,7 +122,25 @@ void ClientChannel::UnmapUnusedBuffers() {
   }
 }
 
-
+bool ClientChannel::ValidateSlotBuffer(MessageSlot *slot,
+                                              std::function<bool()> reload) {
+  if (slot->buffer_index < 0) {
+    return true;
+  }
+  if (reload == nullptr) {
+    return true;
+  }
+  char* buf = Buffer(slot->id);
+  int retries = 1000;
+  while (retries-- > 0 && buf == nullptr) {
+    ReloadIfNecessary(reload);
+    buf = Buffer(slot->id);
+  }
+  if (buf == nullptr) {
+    return false;
+  }
+  return true;
 }
 
+} // namespace details
 } // namespace subspace

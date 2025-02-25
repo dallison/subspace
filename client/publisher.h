@@ -11,9 +11,9 @@ namespace details {
 class PublisherImpl : public ClientChannel {
 public:
   PublisherImpl(const std::string &name, int num_slots, int channel_id,
-                int publisher_id, std::string type,
+                int publisher_id, int vchan_id, std::string type,
                 const PublisherOptions &options)
-      : ClientChannel(name, num_slots, channel_id, std::move(type)),
+      : ClientChannel(name, num_slots, channel_id, vchan_id, std::move(type)),
         publisher_id_(publisher_id), options_(options) {}
 
   bool IsReliable() const { return options_.IsReliable(); }
@@ -82,6 +82,13 @@ private:
   int GetPublisherId() const { return publisher_id_; }
 
   void ClearPollFd() { trigger_.Clear(); }
+
+  uint64_t NextOrdinal(ChannelControlBlock* ccb, int vchan_id) {
+    if (vchan_id == -1) {
+      return ccb->next_ordinal++;
+    }
+    return ccb->next_vchan_ordinal[vchan_id]++;
+  }
 
   toolbelt::TriggerFd trigger_;
   int publisher_id_;

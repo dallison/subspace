@@ -100,7 +100,7 @@ void Channel::Unmap() {
   for (auto &buffer : buffers_) {
     int64_t buffers_size =
         sizeof(BufferHeader) +
-        num_slots_ * (Aligned<32>(buffer.slot_size) + sizeof(MessagePrefix));
+        num_slots_ * (Aligned<64>(buffer.slot_size) + sizeof(MessagePrefix));
     if (buffers_size > 0 && buffer.buffer != nullptr) {
       UnmapMemory(buffer.buffer, buffers_size, "buffers");
     }
@@ -188,7 +188,7 @@ void Channel::DecrementBufferRefs(int buffer_index) {
   hdr->refs--;
   if (debug_) {
     printf("Decremented buffers refs for buffer %d to %d\n", buffer_index,
-           hdr->refs);
+           hdr->refs.load());
   }
 }
 
@@ -200,7 +200,7 @@ void Channel::IncrementBufferRefs(int buffer_index) {
   hdr->refs++;
   if (debug_) {
     printf("Incremented buffers refs for buffer %d to %d\n", buffer_index,
-           hdr->refs);
+           hdr->refs.load());
   }
 }
 

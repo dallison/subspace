@@ -112,4 +112,46 @@ inline size_t SizeofAtomicBitSet(size_t size_in_bits) {
 // An atomic bitset with its bits not stored in the object.
 using InPlaceAtomicBitset = AtomicBitSet<0>;
 
+class DynamicBitSet {
+public:
+  DynamicBitSet(size_t num_bits) : num_bits_(num_bits), bits_(BitsToWords(num_bits), 0) {}
+
+   void Set(size_t bit) {
+    size_t word = bit / 64;
+    size_t offset = bit % 64;
+    bits_[word] |= 1ULL << offset;
+  }
+
+  void Clear(size_t bit) {
+    size_t word = bit / 64;
+    size_t offset = bit % 64;
+    bits_[word] &= ~(1ULL << offset);
+  }
+
+  bool IsSet(size_t bit) const {
+    size_t word = bit / 64;
+    size_t offset = bit % 64;
+    return bits_[word] & (1ULL << offset);
+  }
+
+  void ClearAll() {
+    for (size_t i = 0; i < BitsToWords(num_bits_); i++) {
+      bits_[i] = 0;
+    }
+  }
+
+  bool IsEmpty() const {
+    for (size_t i = 0; i < BitsToWords(num_bits_); i++) {
+      if (bits_[i] != 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+private:
+  size_t num_bits_;
+  std::vector<unsigned long long> bits_;
+};
+
 } // namespace subspace

@@ -202,6 +202,112 @@ TEST_F(ClientTest, CreatePublisherWithType) {
   ASSERT_EQ("foobar", pub->Type());
 }
 
+TEST_F(ClientTest, CreateVirtualPublisherWithType) {
+  subspace::Client client;
+  InitClient(client);
+  {
+    absl::StatusOr<Publisher> pub = client.CreatePublisher(
+        "dave0", 256, 100, {.type = "foobar", .mux = "mainmux"});
+    std::cerr << pub.status() << std::endl;
+    ASSERT_TRUE(pub.ok());
+    ASSERT_EQ("foobar", pub->Type());
+  }
+  // Mux will be destructed here since there are no virtual
+  // channels on it.
+
+  // Create again with different type.
+  {
+    absl::StatusOr<Publisher> pub = client.CreatePublisher(
+        "dave0", 256, 10, {.type = "foobar1", .mux = "mainmux"});
+    ASSERT_TRUE(pub.ok());
+    ASSERT_EQ("foobar1", pub->Type());
+  }
+}
+
+TEST_F(ClientTest, TooManyVirtualPublishers) {
+  subspace::Client client;
+  InitClient(client);
+  constexpr int kMuxCapacity = 10;
+
+  std::vector<Publisher> pubs;
+  for (int i = 0; i < kMuxCapacity - 2; i++) {
+    absl::StatusOr<Publisher> pub = client.CreatePublisher(
+        "dave0", 256, 10, {.type = "foobar", .mux = "mainmux"});
+    ASSERT_TRUE(pub.ok());
+    ASSERT_EQ("foobar", pub->Type());
+    pubs.push_back(std::move(*pub));
+  }
+  // Publisher on the mux will fail
+  absl::StatusOr<Publisher> mux_pub =
+      client.CreatePublisher("mainmux", 256, 10, {.type = "foobar"});
+  ASSERT_FALSE(mux_pub.ok());
+
+  // One more virtual publisher will fail.
+  absl::StatusOr<Publisher> pub = client.CreatePublisher(
+      "dave0", 256, 10, {.type = "foobar", .mux = "mainmux"});
+  ASSERT_FALSE(pub.ok());
+}
+
+TEST_F(ClientTest, CreateVirtualPublisherMuxMismatch) {
+  subspace::Client client;
+  InitClient(client);
+  absl::StatusOr<Publisher> pub = client.CreatePublisher(
+      "dave0", 256, 100, {.type = "foobar", .mux = "mainmux"});
+  ASSERT_TRUE(pub.ok());
+  ASSERT_EQ("foobar", pub->Type());
+
+  // Different mux.
+  absl::StatusOr<Publisher> pub2 = client.CreatePublisher(
+      "dave0", 256, 100, {.type = "foobar", .mux = "diffmux"});
+  ASSERT_FALSE(pub2.ok());
+
+  // No mux.
+  absl::StatusOr<Publisher> pub3 =
+      client.CreatePublisher("dave0", 256, 100, {.type = "foobar"});
+  ASSERT_FALSE(pub3.ok());
+
+  // Creating a channel with same name as mux should fail.
+  absl::StatusOr<Publisher> pub4 = client.CreatePublisher("mainmux", 256, 100);
+  ASSERT_FALSE(pub4.ok());
+}
+
+TEST_F(ClientTest, CreateMultipleVirtualPublisherSameVchan) {
+  subspace::Client client;
+  InitClient(client);
+  std::vector<Publisher> pubs;
+  int last_vchan = -1;
+  for (int i = 0; i < 10; i++) {
+    absl::StatusOr<Publisher> pub = client.CreatePublisher(
+        "dave0", 256, 100, {.type = "foobar", .mux = "mainmux"});
+    ASSERT_TRUE(pub.ok());
+    if (last_vchan == -1) {
+      last_vchan = pub->VirtualChannelId();
+    } else {
+      ASSERT_EQ(last_vchan, pub->VirtualChannelId());
+    }
+    pubs.push_back(std::move(*pub));
+  }
+}
+
+TEST_F(ClientTest, CreateMultipleVirtualPublisherDiffVchan) {
+  subspace::Client client;
+  InitClient(client);
+  std::vector<Publisher> pubs;
+  int last_vchan = -1;
+  for (int i = 0; i < 10; i++) {
+    std::string name = "dave" + std::to_string(i);
+    absl::StatusOr<Publisher> pub = client.CreatePublisher(
+        name, 256, 100, {.type = "foobar", .mux = "mainmux"});
+    ASSERT_TRUE(pub.ok());
+    if (last_vchan == -1) {
+      last_vchan = pub->VirtualChannelId();
+    } else {
+      ASSERT_NE(last_vchan, pub->VirtualChannelId());
+    }
+    pubs.push_back(std::move(*pub));
+  }
+}
+
 TEST_F(ClientTest, PublisherTypeMismatch) {
   subspace::Client client;
   InitClient(client);
@@ -244,6 +350,35 @@ TEST_F(ClientTest, TooManySubscribers) {
   }
   // One more will fail.
   absl::StatusOr<Subscriber> sub = client.CreateSubscriber("dave0");
+  ASSERT_FALSE(sub.ok());
+}
+
+TEST_F(ClientTest, TooManyVirtualSubscribers) {
+  subspace::Client client;
+  InitClient(client);
+  constexpr int kNumSlots = 10;
+
+  // 1 publisher.
+  absl::StatusOr<Publisher> pub =
+      client.CreatePublisher("dave0", 256, kNumSlots, {.mux = "foobar"});
+  ASSERT_TRUE(pub.ok());
+
+  // 6 subscribers.
+  std::vector<Subscriber> subs;
+  for (int i = 0; i < kNumSlots - 4; i++) {
+    absl::StatusOr<Subscriber> sub =
+        client.CreateSubscriber("dave0", {.mux = "foobar"});
+    ASSERT_TRUE(sub.ok());
+    subs.push_back(std::move(*sub));
+  }
+
+  // 1 Multiplexer subscriber.
+  absl::StatusOr<Subscriber> mux_sub = client.CreateSubscriber("foobar");
+  ASSERT_TRUE(mux_sub.ok());
+
+  // One more will fail.
+  absl::StatusOr<Subscriber> sub =
+      client.CreateSubscriber("dave0", {.mux = "foobar"});
   ASSERT_FALSE(sub.ok());
 }
 
@@ -318,36 +453,72 @@ TEST_F(ClientTest, BadPublisherParameters) {
 TEST_F(ClientTest, CreatePublisherThenSubscriber) {
   subspace::Client client;
   InitClient(client);
-  ASSERT_TRUE(client.CreatePublisher("dave1", 256, 10).ok());
-  ASSERT_TRUE(client.CreateSubscriber("dave1").ok());
+  auto p = client.CreatePublisher("dave1", 256, 10);
+  ASSERT_TRUE(p.ok());
+
+  auto s = client.CreateSubscriber("dave1");
+  ASSERT_TRUE(s.ok());
+}
+
+TEST_F(ClientTest, CreateVirtualPublisherThenSubscriber) {
+  subspace::Client client;
+  InitClient(client);
+  auto p = client.CreatePublisher("dave1", 256, 10, {.mux = "foobar"});
+  ASSERT_TRUE(p.ok());
+
+  auto s = client.CreateSubscriber("dave1", {.mux = "foobar"});
+  ASSERT_TRUE(s.ok());
+}
+
+TEST_F(ClientTest, CreateVirtualSubscriberThenPublisher) {
+  subspace::Client client;
+  InitClient(client);
+
+  auto s = client.CreateSubscriber("dave1", {.mux = "foobar"});
+  ASSERT_TRUE(s.ok());
+  auto p = client.CreatePublisher("dave1", 256, 10, {.mux = "foobar"});
+  ASSERT_TRUE(p.ok());
+}
+
+TEST_F(ClientTest, CreateVirtualPublisherThenSubscriberMuxMismatch) {
+  subspace::Client client;
+  InitClient(client);
+  auto p1 = client.CreatePublisher("dave1", 256, 10, {.mux = "foobar"});
+  ASSERT_TRUE(p1.ok());
+
+  auto s1 = client.CreateSubscriber("dave1", {.mux = "foobar"});
+  ASSERT_TRUE(s1.ok());
+
+  // Different mux.
+  auto s2 = client.CreateSubscriber("dave1", {.mux = "diffmux"});
+  ASSERT_FALSE(s2.ok());
+
+  // No mux.
+  auto s3 = client.CreateSubscriber("dave1");
+  ASSERT_FALSE(s3.ok());
 }
 
 TEST_F(ClientTest, CreatePublisherThenSubscriberSameType) {
   subspace::Client client;
   InitClient(client);
-  ASSERT_TRUE(
-      client
-          .CreatePublisher("dave1", 256, 10,
-                           subspace::PublisherOptions().SetType("foobar"))
-          .ok());
-  ASSERT_TRUE(client
-                  .CreateSubscriber(
-                      "dave1", subspace::SubscriberOptions().SetType("foobar"))
-                  .ok());
+  auto p = client.CreatePublisher(
+      "dave1", 256, 10, subspace::PublisherOptions().SetType("foobar"));
+  std::cerr << p.status() << std::endl;
+  ASSERT_TRUE(p.ok());
+  auto s = client.CreateSubscriber(
+      "dave1", subspace::SubscriberOptions().SetType("foobar"));
+  ASSERT_TRUE(s.ok());
 }
 
 TEST_F(ClientTest, CreatePublisherThenSubscriberWrongType) {
   subspace::Client client;
   InitClient(client);
-  ASSERT_TRUE(
-      client
-          .CreatePublisher("dave1", 256, 10,
-                           subspace::PublisherOptions().SetType("foobar"))
-          .ok());
-  ASSERT_FALSE(client
-                   .CreateSubscriber(
-                       "dave1", subspace::SubscriberOptions().SetType("barfoo"))
-                   .ok());
+  auto p = client.CreatePublisher(
+      "dave1", 256, 10, subspace::PublisherOptions().SetType("foobar"));
+  ASSERT_TRUE(p.ok());
+  auto s = client.CreateSubscriber(
+      "dave1", subspace::SubscriberOptions().SetType("barfoo"));
+  ASSERT_FALSE(s.ok());
 }
 
 TEST_F(ClientTest, CreateSubscriber) {
@@ -492,6 +663,107 @@ TEST_F(ClientTest, PublishSingleMessageAndRead) {
   ASSERT_EQ(0, msg->length);
 }
 
+TEST_F(ClientTest, VirtualPublishSingleMessageAndRead) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_TRUE(pub_client.Init(Socket()).ok());
+  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+  absl::StatusOr<Publisher> pub =
+      pub_client.CreatePublisher("dave6", 256, 10, {.mux = "mainmux"});
+  ASSERT_TRUE(pub.ok());
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_TRUE(buffer.ok());
+  memcpy(*buffer, "foobar", 6);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+  ASSERT_TRUE(pub_status.ok());
+
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber("dave6", {.mux = "mainmux"});
+  ASSERT_TRUE(sub.ok());
+
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_TRUE(msg.ok());
+  ASSERT_EQ(6, msg->length);
+
+  // Another read will get 0.
+  msg = sub->ReadMessage();
+  ASSERT_TRUE(msg.ok());
+  ASSERT_EQ(0, msg->length);
+
+  // Read again to make sure we get another 0.
+  // Regression test.
+  msg = sub->ReadMessage();
+  ASSERT_TRUE(msg.ok());
+  ASSERT_EQ(0, msg->length);
+}
+
+TEST_F(ClientTest, VirtualPublishMultiple) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_TRUE(pub_client.Init(Socket()).ok());
+  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+  std::vector<Publisher> pubs;
+  std::vector<Subscriber> subs;
+  // Create 10 publishers on mux mainmux.
+  for (int i = 0; i < 10; i++) {
+    std::string name = "dave" + std::to_string(i);
+    absl::StatusOr<Publisher> pub =
+        pub_client.CreatePublisher(name, 256, 100, {.mux = "mainmux"});
+    ASSERT_TRUE(pub.ok());
+    pubs.push_back(std::move(*pub));
+  }
+
+  // Create 10 subscribers for the same mux and channel names.
+  for (int i = 0; i < 10; i++) {
+    std::string name = "dave" + std::to_string(i);
+    absl::StatusOr<Subscriber> sub =
+        sub_client.CreateSubscriber(name, {.mux = "mainmux"});
+    ASSERT_TRUE(sub.ok());
+    subs.push_back(std::move(*sub));
+  }
+
+  // Create a subscriber to the multiplexer.
+  absl::StatusOr<Subscriber> mux_sub = sub_client.CreateSubscriber("mainmux");
+  ASSERT_TRUE(mux_sub.ok());
+
+  // Publish a message on all 10 publishers
+  for (int i = 0; i < 10; i++) {
+    absl::StatusOr<void *> buffer = pubs[i].GetMessageBuffer();
+    ASSERT_TRUE(buffer.ok());
+    memcpy(*buffer, "foobar", 6);
+    absl::StatusOr<const Message> pub_status = pubs[i].PublishMessage(6);
+    ASSERT_TRUE(pub_status.ok());
+  }
+
+  // Read all messages using the virtual subscribers.
+  for (int i = 0; i < 10; i++) {
+    ASSERT_TRUE(subs[i].Wait().ok());
+    absl::StatusOr<Message> msg = subs[i].ReadMessage();
+    ASSERT_TRUE(msg.ok());
+    ASSERT_EQ(6, msg->length);
+    ASSERT_EQ(i, msg->vchan_id);
+  }
+
+  // Make sure mux is triggered.
+  ASSERT_TRUE(mux_sub->Wait().ok());
+
+  // Read the all messages using the multiplexer subscriber.
+  // This hasn't seen any messages yet so will see them all.
+  for (int i = 0; i < 10; i++) {
+    absl::StatusOr<Message> msg = mux_sub->ReadMessage();
+    ASSERT_TRUE(msg.ok());
+    ASSERT_EQ(6, msg->length);
+    ASSERT_EQ(i, msg->vchan_id);
+  }
+
+  // Read another and get 0 length.
+  for (int i = 0; i < 10; i++) {
+    absl::StatusOr<Message> msg = subs[i].ReadMessage();
+    ASSERT_TRUE(msg.ok());
+    ASSERT_EQ(0, msg->length);
+  }
+}
+
 TEST_F(ClientTest, PublishAndResize) {
   subspace::Client pub_client;
   subspace::Client sub_client;
@@ -507,6 +779,51 @@ TEST_F(ClientTest, PublishAndResize) {
 
   absl::StatusOr<Subscriber> sub =
       sub_client.CreateSubscriber("dave6", {.max_active_messages = 2});
+  ASSERT_TRUE(sub.ok());
+
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_TRUE(msg.ok());
+  ASSERT_EQ(6, msg->length);
+  ASSERT_EQ(256, sub->SlotSize());
+
+  // Publish a bigger message.  This will cause a resize.
+  absl::StatusOr<void *> buffer2 = pub->GetMessageBuffer(4000);
+  ASSERT_TRUE(buffer2.ok());
+  ASSERT_EQ(4096, pub->SlotSize());
+
+  auto &pub_buffers = pub->GetBuffers();
+  ASSERT_EQ(2, pub_buffers.size());
+
+  memcpy(*buffer2, "barfoofoobar", 12);
+
+  absl::StatusOr<const Message> pub_status2 = pub->PublishMessage(12);
+  ASSERT_TRUE(pub_status2.ok());
+
+  absl::StatusOr<Message> msg2 = sub->ReadMessage();
+  ASSERT_TRUE(msg2.ok());
+  ASSERT_EQ(12, msg2->length);
+  ASSERT_EQ(4096, sub->SlotSize());
+
+  auto &sub_buffers = sub->GetBuffers();
+  ASSERT_EQ(2, sub_buffers.size());
+}
+
+TEST_F(ClientTest, PublishVirtualAndResize) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_TRUE(pub_client.Init(Socket()).ok());
+  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+  absl::StatusOr<Publisher> pub =
+      pub_client.CreatePublisher("dave6", 256, 10, {.mux = "mainmux"});
+  ASSERT_TRUE(pub.ok());
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_TRUE(buffer.ok());
+  memcpy(*buffer, "foobar", 6);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+  ASSERT_TRUE(pub_status.ok());
+
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
+      "dave6", {.max_active_messages = 2, .mux = "mainmux"});
   ASSERT_TRUE(sub.ok());
 
   absl::StatusOr<Message> msg = sub->ReadMessage();
@@ -654,6 +971,48 @@ TEST_F(ClientTest, PublishAndResizeSubscriberFirst) {
   ASSERT_EQ(0, sub->SlotSize()); // No buffers yet.
 
   absl::StatusOr<Publisher> pub = pub_client.CreatePublisher("dave6", 256, 10);
+  ASSERT_TRUE(pub.ok());
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_TRUE(buffer.ok());
+  memcpy(*buffer, "foobar", 6);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+  ASSERT_TRUE(pub_status.ok());
+
+  // Publish a bigger message.  This will cause a resize.
+  absl::StatusOr<void *> buffer2 = pub->GetMessageBuffer(4000);
+  ASSERT_TRUE(buffer2.ok());
+  ASSERT_EQ(4096, pub->SlotSize());
+  memcpy(*buffer2, "barfoofoobar", 12);
+
+  absl::StatusOr<const Message> pub_status2 = pub->PublishMessage(12);
+  ASSERT_TRUE(pub_status2.ok());
+
+  // Now read both messages.
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_TRUE(msg.ok());
+  ASSERT_EQ(6, msg->length);
+  ASSERT_EQ(256, sub->SlotSize());
+
+  absl::StatusOr<Message> msg2 = sub->ReadMessage();
+  ASSERT_TRUE(msg2.ok());
+  ASSERT_EQ(12, msg2->length);
+  ASSERT_EQ(4096, sub->SlotSize());
+}
+
+TEST_F(ClientTest, PublishVirtualAndResizeSubscriberFirst) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_TRUE(pub_client.Init(Socket()).ok());
+  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+
+  // First create subscriber.
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
+      "dave6", {.max_active_messages = 2, .mux = "mainmux"});
+  ASSERT_TRUE(sub.ok());
+  ASSERT_EQ(0, sub->SlotSize()); // No buffers yet.
+
+  absl::StatusOr<Publisher> pub =
+      pub_client.CreatePublisher("dave6", 256, 10, {.mux = "mainmux"});
   ASSERT_TRUE(pub.ok());
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
   ASSERT_TRUE(buffer.ok());
@@ -1643,7 +2002,7 @@ TEST_F(ClientTest, MultithreadedUnreliableLatency) {
       absl::StatusOr<Message> msg = sub->ReadMessage();
       ASSERT_TRUE(msg.ok());
       if (msg->length > 0) {
-          num_dropped += msg->ordinal - last_ordinal - 1;
+        num_dropped += msg->ordinal - last_ordinal - 1;
 
         last_ordinal = msg->ordinal;
         j++;
@@ -1732,7 +2091,7 @@ TEST_F(ClientTest, MultithreadedUnreliableLatencyHistogram) {
         absl::StatusOr<Message> msg = sub->ReadMessage();
         ASSERT_TRUE(msg.ok());
         if (msg->length > 0) {
-            num_dropped += msg->ordinal - last_ordinal - 1;
+          num_dropped += msg->ordinal - last_ordinal - 1;
           last_ordinal = msg->ordinal;
           j++;
         }
@@ -1824,7 +2183,7 @@ TEST_F(ClientTest, MultithreadedUnreliableLatencyPayload) {
       ASSERT_TRUE(msg.ok());
       if (msg->length > 0) {
         uint64_t receive_time = toolbelt::Now();
-          num_dropped += msg->ordinal - last_ordinal - 1;
+        num_dropped += msg->ordinal - last_ordinal - 1;
         last_ordinal = msg->ordinal;
         j++;
         const uint64_t send_time =
@@ -1924,8 +2283,8 @@ TEST_F(ClientTest, MultithreadedUnreliableLatencyPayloadHistogram) {
   std::vector<Stats> stats;
   for (int num_slots = 3; num_slots < 20000; num_slots *= 2) {
     std::cerr << "Testing with num_slots: " << num_slots << "\n";
-    absl::StatusOr<Publisher> pub =
-        pub_client.CreatePublisher("lustress", 256, num_slots, {.reliable = false});
+    absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
+        "lustress", 256, num_slots, {.reliable = false});
     ASSERT_TRUE(pub.ok());
 
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
@@ -1946,7 +2305,7 @@ TEST_F(ClientTest, MultithreadedUnreliableLatencyPayloadHistogram) {
         ASSERT_TRUE(msg.ok());
         if (msg->length > 0) {
           uint64_t receive_time = toolbelt::Now();
-            num_dropped += msg->ordinal - last_ordinal - 1;
+          num_dropped += msg->ordinal - last_ordinal - 1;
           last_ordinal = msg->ordinal;
           j++;
           const uint64_t send_time =
@@ -2033,6 +2392,352 @@ TEST_F(ClientTest, MultithreadedUnreliableLatencyPayloadHistogram) {
     std::cerr << ", max: " << s.max << " ns";
     std::cerr << ", average: " << s.avg << " ns\n";
   }
+}
+
+TEST_F(ClientTest, ManyChannelsNonMultiplexed) {
+  std::vector<subspace::Client> pub_clients;
+  subspace::Client sub_client;
+  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+
+  constexpr int kNumChannels = 200;
+  constexpr int kNumSlots = 300;
+  constexpr int kSlotSize = 32768;
+  constexpr int kNumMessages = 1000;
+  // Memory used ~= kNumChannels * kNumSlots * kSlotSize
+  std::vector<std::string> channels;
+
+  for (int i = 0; i < kNumChannels; i++) {
+    subspace::Client pub_client;
+    ASSERT_TRUE(pub_client.Init(Socket()).ok());
+    pub_clients.push_back(std::move(pub_client));
+    channels.push_back(absl::StrFormat("/logs/%d", i));
+  }
+
+  std::vector<Publisher> pubs;
+  for (int i = 0; i < kNumChannels; i++) {
+    absl::StatusOr<Publisher> pub =
+        pub_clients[i].CreatePublisher(channels[i], kSlotSize, kNumSlots);
+    ASSERT_TRUE(pub.ok());
+    pubs.push_back(std::move(*pub));
+  }
+
+  // Create subscribers.
+  std::vector<Subscriber> subs;
+  for (int i = 0; i < kNumChannels; i++) {
+    absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
+        channels[i], {.log_dropped_messages = false});
+    // std::cerr << "sub status " << sub.status() << "\n";
+    ASSERT_TRUE(sub.ok());
+    subs.push_back(std::move(*sub));
+  }
+
+  std::atomic<int> num_messages = 0;
+
+  // Create a thread to read from all subscribers.
+  std::thread sub_thread([&subs, &num_messages] {
+    std::vector<struct pollfd> fds;
+    for (auto &sub : subs) {
+      struct pollfd fd = sub.GetPollFd();
+      fds.push_back(fd);
+    }
+    int num_dropped = 0;
+    std::vector<uint64_t> last_ordinals(kNumChannels, 0);
+    while (num_messages < kNumMessages * kNumChannels - num_dropped) {
+      poll(fds.data(), fds.size(), -1);
+      for (size_t i = 0; i < fds.size(); i++) {
+        if (fds[i].revents & POLLIN) {
+          for (;;) {
+            absl::StatusOr<Message> msg = subs[i].ReadMessage();
+            ASSERT_TRUE(msg.ok());
+            if (msg->length > 0) {
+              num_dropped += msg->ordinal - last_ordinals[i] - 1;
+              last_ordinals[i] = msg->ordinal;
+              num_messages++;
+            } else {
+              break;
+            }
+          }
+        }
+      }
+    }
+  });
+
+  srand(1234);
+  std::vector<uint64_t> periods; // In microseconds
+  for (int i = 0; i < kNumChannels; i++) {
+    periods.push_back(2500 + rand() % 100000);
+  }
+  // Create a thread for each publisher, sending messages at the periods in the
+  // vector.
+  std::vector<std::thread> pub_threads;
+  for (int i = 0; i < kNumChannels; i++) {
+    pub_threads.emplace_back([i, &pubs, &periods]() {
+      int j = 0;
+      while (j < kNumMessages) {
+        absl::StatusOr<void *> buffer = pubs[i].GetMessageBuffer();
+        // std::cerr << "buffer status " << buffer.status() << "\n";
+        ASSERT_TRUE(buffer.ok());
+        uint64_t send_time = toolbelt::Now();
+        memset(*buffer, 0xda, kSlotSize);
+        memcpy(*buffer, &send_time, sizeof(send_time));
+        absl::StatusOr<const Message> pub_status =
+            pubs[i].PublishMessage(sizeof(send_time));
+        // std::cerr << "pub status " << pub_status.status() << "\n";
+        ASSERT_TRUE(pub_status.ok());
+        j++;
+        // Transmit at 1 MHz.
+        std::this_thread::sleep_for(std::chrono::microseconds(periods[i]));
+      }
+    });
+  }
+  // Wait for threads to exit.
+  for (auto &t : pub_threads) {
+    t.join();
+  }
+  // The subscriber might have dropped the last sequence of messages
+  // and will therefore not stop.  We need to send enough messages to
+  // stop the subscriber.
+  for (int i = 0; i < 100; i++) {
+    for (int j = 0; j < kNumChannels; j++) {
+      absl::StatusOr<void *> buffer = pubs[j].GetMessageBuffer();
+      ASSERT_TRUE(buffer.ok());
+      absl::StatusOr<const Message> pub_status = pubs[j].PublishMessage(1);
+      ASSERT_TRUE(pub_status.ok());
+    }
+  }
+  sub_thread.join();
+  std::cerr << "Received " << num_messages << " messages\n";
+  std::cerr << "Dropped " << (kNumMessages * kNumChannels) - num_messages
+            << " messages\n";
+}
+
+TEST_F(ClientTest, ManyChannelsMultiplexed) {
+  std::vector<subspace::Client> pub_clients;
+  subspace::Client sub_client;
+  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+
+  constexpr const char *kMux = "/logs/*";
+  constexpr int kNumChannels = 200;
+  constexpr int kNumSlots = 4000;
+  constexpr int kSlotSize = 32768;
+  constexpr int kNumMessages = 100;
+  // Memory used ~= kNumSlots * kSlotSize
+  std::vector<std::string> channels;
+
+  for (int i = 0; i < kNumChannels; i++) {
+    subspace::Client pub_client;
+    ASSERT_TRUE(pub_client.Init(Socket()).ok());
+    pub_clients.push_back(std::move(pub_client));
+    channels.push_back(absl::StrFormat("/logs/%d", i));
+  }
+
+  std::vector<Publisher> pubs;
+  for (int i = 0; i < kNumChannels; i++) {
+    absl::StatusOr<Publisher> pub = pub_clients[i].CreatePublisher(
+        channels[i], kSlotSize, kNumSlots, {.mux = kMux});
+    ASSERT_TRUE(pub.ok());
+    pubs.push_back(std::move(*pub));
+  }
+
+  // Create subscribers.
+  std::vector<Subscriber> subs;
+  for (int i = 0; i < kNumChannels; i++) {
+    absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
+        channels[i], {.mux = kMux, .log_dropped_messages = true});
+    // std::cerr << "sub status " << sub.status() << "\n";
+    ASSERT_TRUE(sub.ok());
+    subs.push_back(std::move(*sub));
+  }
+
+  std::atomic<int> num_messages = 0;
+
+  // Create a thread to read from all subscribers.
+  std::thread sub_thread([&subs, &num_messages] {
+    std::vector<struct pollfd> fds;
+    for (auto &sub : subs) {
+      struct pollfd fd = sub.GetPollFd();
+      fds.push_back(fd);
+    }
+    int num_dropped = 0;
+    std::vector<uint64_t> last_ordinals(kNumChannels, 0);
+    while (num_messages < kNumMessages * kNumChannels - num_dropped) {
+      poll(fds.data(), fds.size(), -1);
+      for (size_t i = 0; i < fds.size(); i++) {
+        if (fds[i].revents & POLLIN) {
+          for (;;) {
+            absl::StatusOr<Message> msg = subs[i].ReadMessage();
+            ASSERT_TRUE(msg.ok());
+            if (msg->length > 0) {
+              num_dropped += msg->ordinal - last_ordinals[i] - 1;
+              last_ordinals[i] = msg->ordinal;
+              num_messages++;
+            } else {
+              break;
+            }
+          }
+        }
+      }
+    }
+  });
+
+  srand(1234);
+  std::vector<uint64_t> periods; // In microseconds
+  for (int i = 0; i < kNumChannels; i++) {
+    periods.push_back(2500 + rand() % 100000);
+  }
+  // Create a thread for each publisher, sending messages at the periods in the
+  // vector.
+  std::vector<std::thread> pub_threads;
+  for (int i = 0; i < kNumChannels; i++) {
+    pub_threads.emplace_back([i, &pubs, &periods]() {
+      int j = 0;
+      while (j < kNumMessages) {
+        absl::StatusOr<void *> buffer = pubs[i].GetMessageBuffer();
+        // std::cerr << "buffer status " << buffer.status() << "\n";
+        ASSERT_TRUE(buffer.ok());
+        uint64_t send_time = toolbelt::Now();
+        memset(*buffer, 0xda, kSlotSize);
+        memcpy(*buffer, &send_time, sizeof(send_time));
+        absl::StatusOr<const Message> pub_status =
+            pubs[i].PublishMessage(sizeof(send_time));
+        if (!pub_status.ok()) {
+          std::cerr << "pub status " << pub_status.status() << "\n";
+        }
+        ASSERT_TRUE(pub_status.ok());
+        j++;
+        std::this_thread::sleep_for(std::chrono::microseconds(periods[i]));
+      }
+    });
+  }
+  // Wait for threads to exit.
+  for (auto &t : pub_threads) {
+    t.join();
+  }
+  // The subscriber might have dropped the last sequence of messages
+  // and will therefore not stop.  We need to send enough messages to
+  // stop the subscriber.
+  for (int i = 0; i < 10; i++) {
+    for (int j = 0; j < kNumChannels; j++) {
+      absl::StatusOr<void *> buffer = pubs[j].GetMessageBuffer();
+      ASSERT_TRUE(buffer.ok());
+      absl::StatusOr<const Message> pub_status = pubs[j].PublishMessage(1);
+      ASSERT_TRUE(pub_status.ok());
+    }
+  }
+  sub_thread.join();
+  std::cerr << "Received " << num_messages << " messages\n";
+  std::cerr << "Dropped " << (kNumMessages * kNumChannels) - num_messages
+            << " messages\n";
+}
+
+TEST_F(ClientTest, ManyChannelsMultiplexed2) {
+  std::vector<subspace::Client> pub_clients;
+  subspace::Client sub_client;
+  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+
+  constexpr const char *kMux = "/logs/*";
+  constexpr int kNumChannels = 200;
+  constexpr int kNumSlots = 4000;
+  constexpr int kSlotSize = 32768;
+  constexpr int kNumMessages = 100;
+  // Memory used ~= kNumSlots * kSlotSize
+  std::vector<std::string> channels;
+
+  for (int i = 0; i < kNumChannels; i++) {
+    subspace::Client pub_client;
+    ASSERT_TRUE(pub_client.Init(Socket()).ok());
+    pub_clients.push_back(std::move(pub_client));
+    channels.push_back(absl::StrFormat("/logs/%d", i));
+  }
+
+  std::vector<Publisher> pubs;
+  for (int i = 0; i < kNumChannels; i++) {
+    absl::StatusOr<Publisher> pub = pub_clients[i].CreatePublisher(
+        channels[i], kSlotSize, kNumSlots, {.mux = kMux});
+    ASSERT_TRUE(pub.ok());
+    pubs.push_back(std::move(*pub));
+  }
+
+  // Create subscriber to multiplexer.
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber(kMux, {.log_dropped_messages = true});
+  // std::cerr << "sub status " << sub.status() << "\n";
+  ASSERT_TRUE(sub.ok());
+
+  std::atomic<int> num_messages = 0;
+
+  // Create a thread to read from the mux subscriber.
+  std::thread sub_thread([&sub, &num_messages] {
+    struct pollfd pfd = sub->GetPollFd();
+
+    int num_dropped = 0;
+    std::array<uint64_t, kNumChannels> last_ordinals{0};
+    while (num_messages < kNumMessages * kNumChannels - num_dropped) {
+      poll(&pfd, 1, -1);
+      if (pfd.revents & POLLIN) {
+        for (;;) {
+          absl::StatusOr<Message> msg = sub->ReadMessage();
+          ASSERT_TRUE(msg.ok());
+          if (msg->length > 0) {
+            num_dropped += msg->ordinal - last_ordinals[msg->vchan_id] - 1;
+            last_ordinals[msg->vchan_id] = msg->ordinal;
+            num_messages++;
+          } else {
+            break;
+          }
+        }
+      }
+    }
+  });
+
+  srand(1234);
+  std::vector<uint64_t> periods; // In microseconds
+  for (int i = 0; i < kNumChannels; i++) {
+    periods.push_back(2500 + rand() % 100000);
+  }
+  // Create a thread for each publisher, sending messages at the periods in the
+  // vector.
+  std::vector<std::thread> pub_threads;
+  for (int i = 0; i < kNumChannels; i++) {
+    pub_threads.emplace_back([i, &pubs, &periods]() {
+      int j = 0;
+      while (j < kNumMessages) {
+        absl::StatusOr<void *> buffer = pubs[i].GetMessageBuffer();
+        // std::cerr << "buffer status " << buffer.status() << "\n";
+        ASSERT_TRUE(buffer.ok());
+        uint64_t send_time = toolbelt::Now();
+        memset(*buffer, 0xda, kSlotSize);
+        memcpy(*buffer, &send_time, sizeof(send_time));
+        absl::StatusOr<const Message> pub_status =
+            pubs[i].PublishMessage(sizeof(send_time));
+        if (!pub_status.ok()) {
+          std::cerr << "pub status " << pub_status.status() << "\n";
+        }
+        ASSERT_TRUE(pub_status.ok());
+        j++;
+        std::this_thread::sleep_for(std::chrono::microseconds(periods[i]));
+      }
+    });
+  }
+  // Wait for threads to exit.
+  for (auto &t : pub_threads) {
+    t.join();
+  }
+  // The subscriber might have dropped the last sequence of messages
+  // and will therefore not stop.  We need to send enough messages to
+  // stop the subscriber.
+  for (int i = 0; i < 100; i++) {
+    for (int j = 0; j < kNumChannels; j++) {
+      absl::StatusOr<void *> buffer = pubs[j].GetMessageBuffer();
+      ASSERT_TRUE(buffer.ok());
+      absl::StatusOr<const Message> pub_status = pubs[j].PublishMessage(1);
+      ASSERT_TRUE(pub_status.ok());
+    }
+  }
+  sub_thread.join();
+  std::cerr << "Received " << num_messages << " messages\n";
+  std::cerr << "Dropped " << (kNumMessages * kNumChannels) - num_messages
+            << " messages\n";
 }
 
 int main(int argc, char **argv) {
