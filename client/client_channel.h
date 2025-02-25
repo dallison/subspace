@@ -75,8 +75,8 @@ namespace details {
 class ClientChannel : public Channel {
 public:
   ClientChannel(const std::string &name, int num_slots, int channel_id,
-                std::string type)
-      : Channel(name, num_slots, channel_id, std::move(type)) {}
+                int vchan_id, std::string type)
+      : Channel(name, num_slots, channel_id, std::move(type)), vchan_id_(vchan_id) {}
   virtual ~ClientChannel() = default;
   MessageSlot *CurrentSlot() const { return slot_; }
   const ChannelCounters &GetCounters() const {
@@ -92,23 +92,26 @@ public:
   absl::Status MapNewBuffers(std::vector<SlotBuffer> buffers);
   void UnmapUnusedBuffers();
 
+  int VirtualChannelId() const { return vchan_id_; }
+
 protected:
   virtual bool IsSubscriber() const { return false; }
   virtual bool IsPublisher() const { return false; }
 
   void SetSlot(MessageSlot *slot) { slot_ = slot; }
   void *GetCurrentBufferAddress() { return GetBufferAddress(slot_); }
+  bool ValidateSlotBuffer(MessageSlot *slot, std::function<bool()> reload);
 
   void SetMessageSize(int64_t message_size) {
     slot_->message_size = message_size;
   }
 
+  bool IsVirtual() const { return vchan_id_ != -1; }
+
 protected:
   MessageSlot *slot_ = nullptr; // Current slot.
+  int vchan_id_ = -1;       // Virtual channel ID.
 };
-
-
-
 
 } // namespace details
 } // namespace subspace

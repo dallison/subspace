@@ -285,14 +285,70 @@ Server::HandleIncomingConnection(toolbelt::UnixSocket &listen_socket,
 }
 
 absl::StatusOr<ServerChannel *>
+Server::CreateMultiplexer(const std::string &channel_name, int slot_size,
+                          int num_slots, std::string type) {
+  absl::StatusOr<int> channel_id = channel_ids_.Allocate("mux");
+  if (!channel_id.ok()) {
+    return channel_id.status();
+  }
+  logger_.Log(toolbelt::LogLevel::kDebug,
+              "Creating multiplexer %s with %d slots", channel_name.c_str(),
+              num_slots);
+  ServerChannel *channel = new ChannelMultiplexer(*channel_id, channel_name,
+                                                  num_slots, std::move(type));
+  channel->SetDebug(logger_.GetLogLevel() <= toolbelt::LogLevel::kVerboseDebug);
+
+  absl::StatusOr<SharedMemoryFds> fds =
+      channel->Allocate(scb_fd_, slot_size, num_slots);
+  if (!fds.ok()) {
+    return fds.status();
+  }
+  channel->SetSharedMemoryFds(std::move(*fds));
+  channels_.emplace(std::make_pair(channel_name, channel));
+  return channel;
+}
+
+absl::StatusOr<ServerChannel *>
 Server::CreateChannel(const std::string &channel_name, int slot_size,
-                      int num_slots, std::string type) {
+                      int num_slots, const std::string &mux, int vchan_id, std::string type) {
+  if (!mux.empty()) {
+    ServerChannel *mux_channel = FindChannel(mux);
+    if (mux_channel == nullptr) {
+      // No mux found, create one.
+      absl::StatusOr<ServerChannel *> m =
+          CreateMultiplexer(mux, slot_size, num_slots, type);
+      if (!m.ok()) {
+        return m.status();
+      }
+      mux_channel = *m;
+    }
+    if (!mux_channel->IsMux()) {
+      return absl::InternalError(
+          absl::StrFormat("Channel %s is not a multiplexer", mux));
+    }
+    // Create a virtual channel associated with the multiplexer.
+    ChannelMultiplexer *m = static_cast<ChannelMultiplexer *>(mux_channel);
+    absl::StatusOr<std::unique_ptr<VirtualChannel>> vchan = m->CreateVirtualChannel(*this, channel_name, vchan_id);
+    if (!vchan.ok()) {
+      return vchan.status();
+    }
+    ServerChannel* channel = vchan->get();
+
+    logger_.Log(toolbelt::LogLevel::kDebug,
+                "Creating virtual channel %s with %d slots using mux %s", channel_name.c_str(),
+                num_slots, mux.c_str());
+    // The channels_ map owns all the server channels.
+    channels_.emplace(std::make_pair(channel_name, std::move(*vchan)));
+    SendChannelDirectory();
+    return channel;
+  }
+
   absl::StatusOr<int> channel_id = channel_ids_.Allocate("channel");
   if (!channel_id.ok()) {
     return channel_id.status();
   }
   ServerChannel *channel =
-      new ServerChannel(*channel_id, channel_name, num_slots, std::move(type));
+      new ServerChannel(*channel_id, channel_name, num_slots, std::move(type), false);
   channel->SetDebug(logger_.GetLogLevel() <= toolbelt::LogLevel::kVerboseDebug);
 
   absl::StatusOr<SharedMemoryFds> fds =
@@ -309,6 +365,12 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
 
 absl::Status Server::RemapChannel(ServerChannel *channel, int slot_size,
                                   int num_slots) {
+  if (channel->IsVirtual()) {
+    ChannelMultiplexer *mux = static_cast<VirtualChannel *>(channel)->GetMux();
+    std::cerr << "remapping multiplexer " << channel->Name() << " with "
+              << num_slots << " slots" << std::endl;
+    return RemapChannel(mux, slot_size, num_slots);
+  }
   absl::StatusOr<SharedMemoryFds> fds =
       channel->Allocate(scb_fd_, slot_size, num_slots);
   if (!fds.ok()) {
@@ -691,7 +753,8 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
       // The backpressure received here will be applied upwards because
       // we will stop reading the messages from the channel and thus
       // backpressure any publishers writing to that channel.
-      if (absl::StatusOr<ssize_t> n_sent_2 = bridge.SendMessage(data_addr, msglen, c);
+      if (absl::StatusOr<ssize_t> n_sent_2 =
+              bridge.SendMessage(data_addr, msglen, c);
           !n_sent_2.ok()) {
         done = true;
         logger_.Log(toolbelt::LogLevel::kError,
@@ -793,7 +856,8 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
 
   // Wait for the Subscribed message from the server.
   Subscribed subscribed;
-  absl::StatusOr<ssize_t> n_recv = bridge->ReceiveMessage(buffer, sizeof(buffer), c);
+  absl::StatusOr<ssize_t> n_recv =
+      bridge->ReceiveMessage(buffer, sizeof(buffer), c);
   if (!n_recv.ok()) {
     logger_.Log(toolbelt::LogLevel::kError, "Failed to receive Subscribed: %s",
                 n_recv.status().ToString().c_str());

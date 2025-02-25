@@ -23,11 +23,15 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
 
   int retries = num_slots_ * 1000;
   MessageSlot *slot = nullptr;
+  DynamicBitSet embargoed_slots(NumSlots());
 
   for (;;) {
     // Find the slot with refs == 0 and the lowest ordinal.
     uint64_t lowest_ordinal = -1ULL;
     for (int i = 0; i < num_slots_; i++) {
+      if (embargoed_slots.IsSet(i)) {
+        continue;
+      }
       MessageSlot *s = &ccb_->slots[i];
       uint64_t refs = s->refs.load(std::memory_order_relaxed);
       if ((refs & kPubOwned) != 0) {
@@ -46,21 +50,31 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
       }
       DumpSlots();
       return nullptr;
-      // continue;
     }
     // Claim the slot by setting the refs to kPubOwned with our owner in the
     // bottom bits.
+    uint64_t old_refs = slot->refs.load(std::memory_order_relaxed);
     uint64_t ref = kPubOwned | owner;
-    uint64_t expected = slot->ordinal << kOrdinalShift;
+    uint64_t expected = (slot->ordinal & kOrdinalMask) << kOrdinalShift;
     if (slot->refs.compare_exchange_weak(expected, ref,
                                          std::memory_order_relaxed)) {
+      if (!ValidateSlotBuffer(slot, reload)) {
+        // No buffer for the slot.  Embargo the slot so we don't see it again
+        // this loop and try again.
+        embargoed_slots.Set(slot->id);
+        slot->refs.store(old_refs, std::memory_order_relaxed);
+        continue;
+      }
       break;
     }
   }
   slot->ordinal = 0;
+  slot->vchan_id = vchan_id_;
   SetSlotToBiggestBuffer(slot);
 
-  Prefix(slot, reload)->flags = 0;
+  MessagePrefix *p = Prefix(slot, reload);
+  p->flags = 0;
+  p->vchan_id = vchan_id_;
 
   // We have a slot.  Clear it in all the subscriber bitsets.
   ccb_->subscribers.Traverse(
@@ -70,14 +84,19 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
 
 MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
                                                  std::function<bool()> reload) {
-  ReloadIfNecessary(reload);
   MessageSlot *slot = nullptr;
   std::vector<ActiveSlot> active_slots;
   active_slots.reserve(NumSlots());
+  DynamicBitSet embargoed_slots(NumSlots());
   for (;;) {
+    ReloadIfNecessary(reload);
+
     // Put all free slots into the active_slots vector.
     active_slots.clear();
     for (int i = 0; i < NumSlots(); i++) {
+      if (embargoed_slots.IsSet(i)) {
+        continue;
+      }
       MessageSlot *s = &ccb_->slots[i];
       uint64_t refs = s->refs.load(std::memory_order_relaxed);
       if ((refs & kPubOwned) == 0) {
@@ -87,12 +106,12 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
     }
 
     // Sort the active slots by ordinal.
-    // std::stable_sort gives consistently better performance than std::sort and also
-    // is more deterministic in slot ordering.
+    // std::stable_sort gives consistently better performance than std::sort and
+    // also is more deterministic in slot ordering.
     std::stable_sort(active_slots.begin(), active_slots.end(),
-              [](const ActiveSlot &a, const ActiveSlot &b) {
-                return a.ordinal < b.ordinal;
-              });
+                     [](const ActiveSlot &a, const ActiveSlot &b) {
+                       return a.ordinal < b.ordinal;
+                     });
 
     // Look for a slot with zero refs but don't go past one with non-zero
     // reliable ref count.
@@ -116,17 +135,28 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
       return nullptr;
     }
     // Claim the slot by setting the kPubOwned bit.
+    uint64_t old_refs = slot->refs.load(std::memory_order_relaxed);
     uint64_t ref = kPubOwned | owner;
-    uint64_t expected = slot->ordinal << kOrdinalShift;
+    uint64_t expected = (slot->ordinal & kOrdinalMask) << kOrdinalShift;
     if (slot->refs.compare_exchange_weak(expected, ref,
                                          std::memory_order_relaxed)) {
+      if (!ValidateSlotBuffer(slot, reload)) {
+        // No buffer for the slot.  Embargo the slot so we don't see it again
+        // this loop and try again.
+        embargoed_slots.Set(slot->id);
+        slot->refs.store(old_refs, std::memory_order_relaxed);
+        continue;
+      }
       break;
     }
   }
   slot->ordinal = 0;
+  slot->vchan_id = vchan_id_;
   SetSlotToBiggestBuffer(slot);
 
-  Prefix(slot, reload)->flags = 0;
+  MessagePrefix *p = Prefix(slot, reload);
+  p->flags = 0;
+  p->vchan_id = vchan_id_;
 
   // We have a slot.  Clear it in all the subscriber bitsets.
   ccb_->subscribers.Traverse(
@@ -145,7 +175,9 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
   void *buffer = GetBufferAddress(slot);
   MessagePrefix *prefix = reinterpret_cast<MessagePrefix *>(buffer) - 1;
 
-  slot->ordinal = ccb_->next_ordinal++;
+  slot->ordinal = NextOrdinal(ccb_, slot->vchan_id);
+  // std::cerr << "Published message in slot " << slot->id << " with ordinal "
+  //           << slot->ordinal << " vchan " << slot->vchan_id << "\n";
 
   // Copy message parameters into message prefix in buffer.
   if (omit_prefix) {

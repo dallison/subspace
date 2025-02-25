@@ -48,6 +48,7 @@ public:
 private:
   friend class ClientHandler;
   friend class ServerChannel;
+  friend class VirtualChannel;
   static constexpr size_t kDiscoveryBufferSize = 1024;
 
   absl::Status HandleIncomingConnection(toolbelt::UnixSocket &listen_socket,
@@ -58,14 +59,19 @@ private:
   // num_slots will be zero.
   absl::StatusOr<ServerChannel *> CreateChannel(const std::string &channel_name,
                                                 int slot_size, int num_slots,
+                                                const std::string &mux,
+                                                int vchan_id,
                                                 std::string type);
+  absl::StatusOr<ServerChannel *>
+  CreateMultiplexer(const std::string &channel_name, int slot_size,
+                    int num_slots, std::string type);
   absl::Status RemapChannel(ServerChannel *channel, int slot_size,
                             int num_slots);
   ServerChannel *FindChannel(const std::string &channel_name);
   void RemoveChannel(ServerChannel *channel);
   void RemoveAllUsersFor(ClientHandler *handler);
   void CloseHandler(ClientHandler *handler);
-  void ListenerCoroutine(toolbelt::UnixSocket& listen_socket, co::Coroutine *c);
+  void ListenerCoroutine(toolbelt::UnixSocket &listen_socket, co::Coroutine *c);
   void ChannelDirectoryCoroutine(co::Coroutine *c);
   void SendChannelDirectory();
   void StatisticsCoroutine(co::Coroutine *c);

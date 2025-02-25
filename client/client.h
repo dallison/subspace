@@ -481,6 +481,8 @@ public:
     return client_->UnregisterResizeCallback(impl_.get());
   }
 
+  int VirtualChannelId() const { return impl_->VirtualChannelId(); }
+
 private:
   friend class Server;
   friend class ClientImpl;
@@ -610,6 +612,8 @@ public:
 
   void DumpSlots() const { impl_->DumpSlots(); }
   
+  int VirtualChannelId() const { return impl_->VirtualChannelId(); }
+
 private:
   friend class Server;
   friend class ClientImpl;

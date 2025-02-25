@@ -112,6 +112,8 @@ ClientImpl::CreatePublisher(const std::string &channel_name, int slot_size,
   cmd->set_is_bridge(opts.IsBridge());
   cmd->set_is_fixed_size(opts.IsFixedSize());
   cmd->set_type(opts.Type());
+  cmd->set_mux(opts.Mux());
+  cmd->set_vchan_id(opts.VchanId());
 
   // Send request to server and wait for response.
   Response resp;
@@ -130,7 +132,7 @@ ClientImpl::CreatePublisher(const std::string &channel_name, int slot_size,
   // by the server.
   std::shared_ptr<PublisherImpl> channel = std::make_shared<PublisherImpl>(
       channel_name, num_slots, pub_resp.channel_id(), pub_resp.publisher_id(),
-      pub_resp.type(), opts);
+      pub_resp.vchan_id(), pub_resp.type(), opts);
 
   std::vector<SlotBuffer> buffers = CollectBuffers(pub_resp.buffers(), fds);
 
@@ -198,6 +200,8 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
   cmd->set_is_bridge(opts.IsBridge());
   cmd->set_type(opts.Type());
   cmd->set_max_active_messages(opts.MaxActiveMessages());
+  cmd->set_mux(opts.Mux());
+  cmd->set_vchan_id(opts.VchanId());
 
   // Send request to server and wait for response.
   Response resp;
@@ -217,7 +221,7 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
   // by the server.
   std::shared_ptr<SubscriberImpl> channel = std::make_shared<SubscriberImpl>(
       channel_name, sub_resp.num_slots(), sub_resp.channel_id(),
-      sub_resp.subscriber_id(), sub_resp.type(), opts);
+      sub_resp.subscriber_id(), sub_resp.vchan_id(), sub_resp.type(), opts);
 
   channel->SetNumSlots(sub_resp.num_slots());
   std::vector<SlotBuffer> buffers = CollectBuffers(sub_resp.buffers(), fds);
@@ -358,7 +362,7 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
   if (msg.new_slot == nullptr) {
     if (publisher->IsReliable()) {
       // Reliable publishers don't get a slot until it's asked for.
-      return Message(message_size, nullptr, msg.ordinal, msg.timestamp);
+      return Message(message_size, nullptr, msg.ordinal, msg.timestamp, publisher->VirtualChannelId());
     }
     return absl::InternalError(
         absl::StrFormat("Out of slots for channel %s", publisher->Name()));
@@ -369,7 +373,7 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
            msg.new_slot->ordinal);
   }
 
-  return Message(message_size, nullptr, msg.ordinal, msg.timestamp);
+  return Message(message_size, nullptr, msg.ordinal, msg.timestamp, publisher->VirtualChannelId());
 }
 
 absl::Status ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
@@ -487,7 +491,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
   }
 
   if (mode == ReadMode::kReadNext && last_ordinal != -1) {
-    int drops = subscriber->DetectDrops();
+    int drops = subscriber->DetectDrops(new_slot->vchan_id);
     if (drops > 0) {
       // We dropped a message.  If we have a callback registered for this
       // channel, call it with the number of dropped messages.
@@ -496,9 +500,9 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
         it->second(subscriber, drops);
       }
       if (subscriber->options_.log_dropped_messages) {
-      logger_.Log(toolbelt::LogLevel::kWarning,
-                  "Dropped %d message%ss on channel %s", drops, drops == 1 ? "" : "s",
-                  subscriber->Name().c_str());
+        logger_.Log(toolbelt::LogLevel::kWarning,
+                    "Dropped %d message%s on channel %s", drops,
+                    drops == 1 ? "" : "s", subscriber->Name().c_str());
       }
     }
   }
@@ -530,7 +534,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
   // Allocate a new active message for the slot.
   auto msg = subscriber->SetActiveMessage(
       new_slot->message_size, new_slot, subscriber->GetCurrentBufferAddress(),
-      subscriber->CurrentOrdinal(), subscriber->Timestamp());
+      subscriber->CurrentOrdinal(), subscriber->Timestamp(), new_slot->vchan_id);
 
   // If we are unable to allocate a new message (due to message limits)
   // restore the slot so that we pick it up next time.
@@ -540,12 +544,12 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
   } else {
     // We have a slot, claim it.
     subscriber->ClaimSlot(new_slot, [this, subscriber]() {
-    absl::StatusOr<bool> ok = ReloadBuffersIfNecessary(subscriber);
-    if (!ok.ok()) {
-      return false;
-    }
-    return *ok;
-  });
+      absl::StatusOr<bool> ok = ReloadBuffersIfNecessary(subscriber);
+      if (!ok.ok()) {
+        return false;
+      }
+      return *ok;
+    });
   }
   return Message(msg);
 }
@@ -585,7 +589,7 @@ ClientImpl::FindMessageInternal(SubscriberImpl *subscriber,
     return Message();
   }
   return Message(new_slot->message_size, subscriber->GetCurrentBufferAddress(),
-                 subscriber->CurrentOrdinal(), subscriber->Timestamp());
+                 subscriber->CurrentOrdinal(), subscriber->Timestamp(), subscriber->VirtualChannelId());
 }
 
 absl::StatusOr<Message> ClientImpl::FindMessage(SubscriberImpl *subscriber,
@@ -681,6 +685,7 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
   // since that last time we checked.
   SystemControlBlock *scb = subscriber->GetScb();
   int updates = scb->counters[subscriber->GetChannelId()].num_pub_updates;
+
   if (subscriber->NumUpdates() == updates) {
     return absl::OkStatus();
   }
@@ -693,6 +698,7 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
   auto *cmd = req.mutable_create_subscriber();
   cmd->set_channel_name(subscriber->Name());
   cmd->set_subscriber_id(subscriber->GetSubscriberId());
+  cmd->set_mux(subscriber->options_.mux);
 
   // Send request to server and wait for response.
   Response resp;

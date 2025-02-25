@@ -12,9 +12,9 @@ namespace details {
 class SubscriberImpl : public ClientChannel {
 public:
   SubscriberImpl(const std::string &name, int num_slots, int channel_id,
-                 int subscriber_id, std::string type,
+                 int subscriber_id, int vchan_id, std::string type,
                  const SubscriberOptions &options)
-      : ClientChannel(name, num_slots, channel_id, std::move(type)),
+      : ClientChannel(name, num_slots, channel_id, vchan_id, std::move(type)),
         subscriber_id_(subscriber_id), options_(options) {}
 
   std::shared_ptr<SubscriberImpl> shared_from_this() {
@@ -43,15 +43,17 @@ public:
   }
 
   const ActiveSlot *
-  FindUnseenOrdinal(const std::vector<ActiveSlot> &active_slots);
+  FindUnseenOrdinal(const std::vector<ActiveSlot> &active_slots, int vchan_id);
   void PopulateActiveSlots(InPlaceAtomicBitset &bits);
 
   void ClaimSlot(MessageSlot *slot, std::function<bool()> reload);
-  void RememberOrdinal(uint64_t ordinal) { seen_ordinals_.Insert(ordinal); }
-  void CollectVisibleSlots(InPlaceAtomicBitset &bits, std::vector<ActiveSlot>& active_slots);
+  void RememberOrdinal(uint64_t ordinal, int vchan_id);
+  void CollectVisibleSlots(InPlaceAtomicBitset &bits,
+                           std::vector<ActiveSlot> &active_slots,
+                           const DynamicBitSet &embargoed_slots);
 
   void IgnoreActivation(MessageSlot *slot) {
-    RememberOrdinal(slot->ordinal);
+    RememberOrdinal(slot->ordinal, slot->vchan_id);
     DecrementSlotRef(slot);
     Prefix(slot)->flags |= kMessageSeen;
   }
@@ -73,10 +75,10 @@ public:
 
   std::shared_ptr<ActiveMessage> SetActiveMessage(size_t len, MessageSlot *slot,
                                                   const void *buf, uint64_t ord,
-                                                  int64_t ts) {
+                                                  int64_t ts, int vchan_id) {
     active_message_.reset();
     active_message_ = std::make_shared<ActiveMessage>(
-        ActiveMessage{shared_from_this(), len, slot, buf, ord, ts});
+        ActiveMessage{shared_from_this(), len, slot, buf, ord, ts, vchan_id});
     return active_message_;
   }
 
@@ -100,12 +102,12 @@ public:
     if (active_message_->slot == slot && active_message_->ordinal == ordinal) {
       return active_message_;
     }
-    return std::make_shared<ActiveMessage>(
-        ActiveMessage{shared_from_this(), slot->message_size, slot,
-                      GetBufferAddress(slot), slot->ordinal, Timestamp(slot)});
+    return std::make_shared<ActiveMessage>(ActiveMessage{
+        shared_from_this(), slot->message_size, slot, GetBufferAddress(slot),
+        slot->ordinal, Timestamp(slot), slot->vchan_id});
   }
 
-  int DetectDrops();
+  int DetectDrops(int vchan_id);
 
   // Search the active list for a message with the given timestamp.  If found,
   // take ownership of the slot found.  Return nullptr if nothing found in which
@@ -177,6 +179,8 @@ private:
     return slot;
   }
 
+  FastRingBuffer<uint64_t, 10000> &GetSeenOrdinals(int vchan_id);
+
   int subscriber_id_;
   toolbelt::TriggerFd trigger_;
   std::vector<toolbelt::TriggerFd> reliable_publishers_;
@@ -194,7 +198,9 @@ private:
   std::shared_ptr<ActiveMessage> active_message_;
 
   // We keep track of a limited number of ordinals we've seen.
-  FastRingBuffer<uint64_t, 10000> seen_ordinals_;
+  // One of these per virtual channel.  If there are no virtual channels
+  // we will use vchan_id -1.
+  absl::flat_hash_map<int, FastRingBuffer<uint64_t, 10000>> seen_ordinals_;
   uint64_t last_ordinal_seen_ = 0;
 };
 } // namespace details

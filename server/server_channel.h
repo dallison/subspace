@@ -122,18 +122,29 @@ template <typename H> inline H AbslHashValue(H h, const ChannelTransmitter &a) {
 class ServerChannel : public Channel {
 public:
   ServerChannel(int id, const std::string &name, int num_slots,
-                std::string type)
-      : Channel(name, num_slots, id, std::move(type)) {}
+                std::string type, bool is_virtual)
+      : Channel(name, num_slots, id, std::move(type)), is_virtual_(is_virtual) {
+  }
 
-  ~ServerChannel();
+  virtual ~ServerChannel();
 
   absl::StatusOr<PublisherUser *> AddPublisher(ClientHandler *handler,
                                                bool is_reliable, bool is_local,
-                                               bool is_bridge, bool is_fixed_size);
+                                               bool is_bridge,
+                                               bool is_fixed_size);
   absl::StatusOr<SubscriberUser *> AddSubscriber(ClientHandler *handler,
                                                  bool is_reliable,
                                                  bool is_bridge,
                                                  int max_active_messages);
+
+  virtual bool IsMux() const { return false; }
+  virtual int GetVirtualChannelId() const { return -1; }
+  virtual int GetChannelId() const { return Channel::GetChannelId(); }
+  virtual bool IsPlaceholder() const { return Channel::IsPlaceholder(); }
+  bool IsVirtual() const { return is_virtual_; }
+  virtual void RegisterSubscriber(int sub_id) {
+    Channel::RegisterSubscriber(sub_id);
+  }
 
   // Get the file descriptors for all subscriber triggers.
   std::vector<toolbelt::FileDescriptor> GetSubscriberTriggerFds() const;
@@ -154,17 +165,22 @@ public:
   // is_pub: this is a publisher
   // add: the publisher or subscriber is being added
   // reliable: change the reliable counters.
-  ChannelCounters &RecordUpdate(bool is_pub, bool add, bool reliable);
-  ChannelCounters &RecordResize();
+  virtual ChannelCounters &RecordUpdate(bool is_pub, bool add, bool reliable);
 
-  void RemoveUser(Server* server, int user_id);
+  void RemoveUser(Server *server, int user_id);
   void RemoveAllUsersFor(ClientHandler *handler);
-  bool IsEmpty() const { return user_ids_.IsEmpty(); }
-  absl::Status HasSufficientCapacity(int new_max_active_messages) const;
+  virtual bool IsEmpty() const { return user_ids_.IsEmpty(); }
+  virtual absl::Status HasSufficientCapacity(int new_max_active_messages) const;
   void CountUsers(int &num_pubs, int &num_subs) const;
-  void GetChannelInfo(subspace::ChannelInfo *info);
-  void GetChannelStats(subspace::ChannelStats *stats);
+  virtual void GetChannelInfo(subspace::ChannelInfo *info);
+  virtual void GetChannelStats(subspace::ChannelStats *stats);
   void TriggerAllSubscribers();
+
+  virtual int SlotSize() const { return Channel::SlotSize(); }
+  virtual int NumSlots() const { return Channel::NumSlots(); }
+  virtual void CleanupSlots(int owner, bool reliable, bool is_pub) {
+    Channel::CleanupSlots(owner, reliable, is_pub);
+  }
 
   // This is true if all publishers are bridge publishers.
   bool IsBridgePublisher() const;
@@ -188,14 +204,14 @@ public:
   bool IsReliable() const;
   bool IsFixedSize() const;
 
-  void SetSharedMemoryFds(SharedMemoryFds fds) {
+  virtual void SetSharedMemoryFds(SharedMemoryFds fds) {
     shared_memory_fds_ = std::move(fds);
   }
 
-  const SharedMemoryFds &GetFds() { return shared_memory_fds_; }
+  virtual const SharedMemoryFds &GetFds() { return shared_memory_fds_; }
 
   // Add a buffer (slot size and memory fd) to the shared_memory_fds.
-  void AddBuffer(int slot_size, toolbelt::FileDescriptor fd);
+  virtual void AddBuffer(int slot_size, toolbelt::FileDescriptor fd);
 
   // Allocate the shared memory for a channel.  The num_slots_
   // and slot_size_ member variables will either be 0 (for a subscriber
@@ -204,17 +220,122 @@ public:
   // file descriptors for the allocated CCB and buffers.  The
   // SCB has already been allocated and will be mapped in for
   // this channel.  This is only used in the server.
-  absl::StatusOr<SharedMemoryFds>
+  virtual absl::StatusOr<SharedMemoryFds>
   Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
            int num_slots);
 
-  absl::StatusOr<toolbelt::FileDescriptor> ExtendBuffers(int32_t new_slot_size);
+  virtual absl::StatusOr<toolbelt::FileDescriptor>
+  ExtendBuffers(int32_t new_slot_size);
+  
+  struct CapacityInfo{
+    bool capacity_ok;
+    int num_pubs;
+    int num_subs;
+    int max_active_messages;
+    int slots_needed;
+  };
 
-private:
+  CapacityInfo HasSufficientCapacityInternal(int initial_value, int new_max_active_messages) const;
+  absl::Status CapacityError(const CapacityInfo &info) const;
+
+protected:
   std::vector<std::unique_ptr<User>> users_;
   toolbelt::BitSet<kMaxUsers> user_ids_;
   absl::flat_hash_set<ChannelTransmitter> bridged_publishers_;
   SharedMemoryFds shared_memory_fds_;
+  bool is_virtual_ = false;
 };
+
+class VirtualChannel;
+
+class ChannelMultiplexer : public ServerChannel {
+public:
+  ChannelMultiplexer(int id, const std::string &name, int num_slots,
+                     std::string type)
+      : ServerChannel(id, name, num_slots, type, false) {}
+  ~ChannelMultiplexer() {
+    std::cerr << "Destructing mux " << Name() << std::endl;
+  }
+
+  absl::StatusOr<std::unique_ptr<VirtualChannel>>
+  CreateVirtualChannel(Server &server, const std::string &name, int vchan_id);
+
+  void RemoveVirtualChannel(VirtualChannel *vchan);
+
+  bool IsMux() const override { return true; }
+  bool IsEmpty() const override {
+    return virtual_channels_.empty() && ServerChannel::IsEmpty();
+  }
+
+  // Check the capacity of the mux.  There needs to be sufficient slots cover:
+  // 1. One for each publisher, both real and virtual
+  // 2. For each subscriber, the maximum number of active messages.
+  absl::Status
+  HasSufficientCapacity(int new_max_active_messages) const override;
+
+private:
+  int next_vchan_id_ = 0;
+  absl::flat_hash_set<VirtualChannel *> virtual_channels_;
+  absl::flat_hash_set<int> vchan_ids_;
+};
+
+// A virtual channel is a channel that is multiplexed on another channel for its
+// storage.  Publishers and subscribers create created on the virtual channel
+// but the storage is on the multiplexer channel.
+//
+// Virtual channels share the same channel id as the multiplexer channel so any
+// updates to the multiplexer SCB will be seen by all virtual channels.
+class VirtualChannel : public ServerChannel {
+public:
+  VirtualChannel(Server &server, ChannelMultiplexer *mux, int vchan_id,
+                 const std::string &name, int num_slots, std::string type)
+      : ServerChannel(mux->GetChannelId(), name, num_slots, type, true),
+        server_(server), mux_(mux), vchan_id_(vchan_id) {}
+
+  ~VirtualChannel();
+
+  ChannelMultiplexer *GetMux() const { return mux_; }
+  int GetVirtualChannelId() const override { return vchan_id_; }
+
+  bool IsPlaceholder() const override { return mux_->IsPlaceholder(); }
+
+  const SharedMemoryFds &GetFds() override { return mux_->GetFds(); }
+
+  int SlotSize() const override { return mux_->SlotSize(); }
+  int NumSlots() const override { return mux_->NumSlots(); }
+  int GetChannelId() const override { return mux_->GetChannelId(); }
+
+  absl::Status
+  HasSufficientCapacity(int new_max_active_messages) const override {
+    return mux_->HasSufficientCapacity(new_max_active_messages);
+  };
+
+  ChannelCounters &RecordUpdate(bool is_pub, bool add, bool reliable) override {
+    return mux_->RecordUpdate(is_pub, add, reliable);
+  }
+
+  void CleanupSlots(int owner, bool reliable, bool is_pub) override {
+    mux_->CleanupSlots(owner, reliable, is_pub);
+  }
+
+  void RegisterSubscriber(int sub_id) override {
+    mux_->RegisterSubscriber(sub_id);
+  }
+
+  absl::StatusOr<toolbelt::FileDescriptor>
+  ExtendBuffers(int32_t new_slot_size) override {
+    return mux_->ExtendBuffers(new_slot_size);
+  }
+
+  void AddBuffer(int slot_size, toolbelt::FileDescriptor fd) override {
+    mux_->AddBuffer(slot_size, std::move(fd));
+  }
+
+private:
+  Server &server_;
+  ChannelMultiplexer *mux_;
+  int vchan_id_;
+};
+
 } // namespace subspace
 #endif // __SERVER_SERVER_CHANNEL_H

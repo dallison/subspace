@@ -26,9 +26,9 @@ class SubscriberImpl;
 struct ActiveMessage {
   ActiveMessage() = default;
   ActiveMessage(std::shared_ptr<details::SubscriberImpl> sub, size_t len,
-          MessageSlot *slot, const void *buf, uint64_t ord, int64_t ts);
-  ActiveMessage(size_t len, uint64_t ord, uint64_t ts)
-      : length(len), ordinal(ord), timestamp(ts) {}
+          MessageSlot *slot, const void *buf, uint64_t ord, int64_t ts, int vchan_id);
+  ActiveMessage(size_t len, uint64_t ord, uint64_t ts, int vchan_id)
+      : length(len), ordinal(ord), timestamp(ts), vchan_id(vchan_id) {}
   ~ActiveMessage();
 
   // Can't be copied but can be moved.
@@ -46,6 +46,7 @@ struct ActiveMessage {
     buffer = nullptr;
     ordinal = -1;
     timestamp = 0;
+    vchan_id = -1;
   }
 
   std::shared_ptr<details::SubscriberImpl>
@@ -55,22 +56,24 @@ struct ActiveMessage {
   const void *buffer = nullptr; // Address of message payload.
   uint64_t ordinal = 0;         // Monotonic number of message.
   uint64_t timestamp = 0;       // Nanosecond time message was published.
+  int vchan_id;                 // Virtual channel ID (or -1 if not used).
 };
 
 struct Message {
   Message() = default;
-  Message(size_t len, const void *buf, uint64_t ord, int64_t ts)
-      : length(len), buffer(buf), ordinal(ord), timestamp(ts) {}
+  Message(size_t len, const void *buf, uint64_t ord, int64_t ts, int vchan_id)
+      : length(len), buffer(buf), ordinal(ord), timestamp(ts), vchan_id(vchan_id) {}
   Message(std::shared_ptr<ActiveMessage> msg)
       : active_message(std::move(msg)), length(active_message->length),
         buffer(active_message->buffer), ordinal(active_message->ordinal),
-        timestamp(active_message->timestamp) {}
+        timestamp(active_message->timestamp), vchan_id(active_message->vchan_id) {}
   void Release() { active_message.reset(); }
   std::shared_ptr<ActiveMessage> active_message;
   size_t length = 0;
   const void *buffer = nullptr;
   uint64_t ordinal = 0;
   uint64_t timestamp = 0;
+  int vchan_id;                 // Virtual channel ID (or -1 if not used).
 };
 
 } // namespace subspace

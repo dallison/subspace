@@ -67,11 +67,27 @@ struct PublisherOptions {
 
   bool IsBridge() const { return bridge; }
 
+  PublisherOptions &SetMux(std::string m) {
+    mux = std::move(m);
+    return *this;
+  }
+
+  const std::string &Mux() const { return mux; }
+
+  PublisherOptions &SetVchanId(int id) {
+    vchan_id = id;
+    return *this;
+  }
+
+  int VchanId() const { return vchan_id; }
+
   bool local = false;
   bool reliable = false;
   bool bridge = false;
   bool fixed_size = false;
   std::string type;
+  std::string mux;
+  int vchan_id = -1;    // If -1, server will assign.
 };
 
 struct SubscriberOptions {
@@ -96,7 +112,7 @@ struct SubscriberOptions {
     return *this;
   }
 
- SubscriberOptions &SetMaxActiveMessages(int n) {
+  SubscriberOptions &SetMaxActiveMessages(int n) {
     max_active_messages = n;
     return *this;
   }
@@ -114,11 +130,27 @@ struct SubscriberOptions {
   }
   bool IsBridge() const { return bridge; }
 
+  SubscriberOptions &SetMux(std::string m) {
+    mux = std::move(m);
+    return *this;
+  }
+
+  const std::string &Mux() const { return mux; }
+
+  SubscriberOptions &SetVchanId(int id) {
+    vchan_id = id;
+    return *this;
+  }
+
+  int VchanId() const { return vchan_id; }
+
   bool reliable = false;
   bool bridge = false;
   std::string type;
   int max_active_messages = 1;
   bool log_dropped_messages = true;
+  std::string mux;
+  int vchan_id = -1;    // If -1, server will assign.
 };
 
 } // namespace subspace
