@@ -310,7 +310,8 @@ Server::CreateMultiplexer(const std::string &channel_name, int slot_size,
 
 absl::StatusOr<ServerChannel *>
 Server::CreateChannel(const std::string &channel_name, int slot_size,
-                      int num_slots, const std::string &mux, int vchan_id, std::string type) {
+                      int num_slots, const std::string &mux, int vchan_id,
+                      std::string type) {
   if (!mux.empty()) {
     ServerChannel *mux_channel = FindChannel(mux);
     if (mux_channel == nullptr) {
@@ -328,15 +329,16 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
     }
     // Create a virtual channel associated with the multiplexer.
     ChannelMultiplexer *m = static_cast<ChannelMultiplexer *>(mux_channel);
-    absl::StatusOr<std::unique_ptr<VirtualChannel>> vchan = m->CreateVirtualChannel(*this, channel_name, vchan_id);
+    absl::StatusOr<std::unique_ptr<VirtualChannel>> vchan =
+        m->CreateVirtualChannel(*this, channel_name, vchan_id);
     if (!vchan.ok()) {
       return vchan.status();
     }
-    ServerChannel* channel = vchan->get();
+    ServerChannel *channel = vchan->get();
 
     logger_.Log(toolbelt::LogLevel::kDebug,
-                "Creating virtual channel %s with %d slots using mux %s", channel_name.c_str(),
-                num_slots, mux.c_str());
+                "Creating virtual channel %s with %d slots using mux %s",
+                channel_name.c_str(), num_slots, mux.c_str());
     // The channels_ map owns all the server channels.
     channels_.emplace(std::make_pair(channel_name, std::move(*vchan)));
     SendChannelDirectory();
@@ -347,8 +349,8 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
   if (!channel_id.ok()) {
     return channel_id.status();
   }
-  ServerChannel *channel =
-      new ServerChannel(*channel_id, channel_name, num_slots, std::move(type), false);
+  ServerChannel *channel = new ServerChannel(*channel_id, channel_name,
+                                             num_slots, std::move(type), false);
   channel->SetDebug(logger_.GetLogLevel() <= toolbelt::LogLevel::kVerboseDebug);
 
   absl::StatusOr<SharedMemoryFds> fds =
@@ -361,6 +363,14 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
 
   SendChannelDirectory();
   return channel;
+}
+
+uint64_t Server::GetVirtualMemoryUsage() const {
+  uint64_t size = 0;
+  for (const auto &channel : channels_) {
+    size += channel.second->GetVirtualMemoryUsage();
+  }
+  return size;
 }
 
 absl::Status Server::RemapChannel(ServerChannel *channel, int slot_size,

@@ -65,7 +65,7 @@ int SubscriberImpl::DetectDrops(int vchan_id) {
   std::vector<uint64_t> ordinals;
   auto &seen_ordinals = GetSeenOrdinals(vchan_id);
   ordinals.reserve(seen_ordinals.Size());
-  seen_ordinals.Traverse([this, &ordinals](uint64_t o) {
+  seen_ordinals.Traverse([&ordinals](uint64_t o) {
     if (true /*o >= last_ordinal_seen_*/) {
       ordinals.push_back(o);
     }

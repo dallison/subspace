@@ -155,7 +155,7 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
   strncpy(ccb_->channel_name, name_.c_str(), kMaxChannelName - 1);
   ccb_->num_slots = num_slots_;
   ccb_->next_ordinal = 1;
-  for (auto& vchan_ordinal : ccb_->next_vchan_ordinal) {
+  for (auto &vchan_ordinal : ccb_->next_vchan_ordinal) {
     vchan_ordinal = 1;
   }
   new (&ccb_->subscribers) AtomicBitSet<kMaxSlotOwners>();
@@ -238,6 +238,19 @@ ServerChannel::GetReliablePublisherTriggerFds() const {
     }
   }
   return r;
+}
+
+uint64_t ServerChannel::GetVirtualMemoryUsage() const {
+  uint64_t size = CcbSize(num_slots_);
+  for (const auto &buffer : buffers_) {
+    if (buffer.slot_size == 0) {
+      continue;
+    }
+    size +=
+        sizeof(BufferHeader) +
+        (sizeof(MessagePrefix) + Aligned<64>(buffer.slot_size)) * num_slots_;
+  }
+  return size;
 }
 
 absl::StatusOr<PublisherUser *>
@@ -431,8 +444,7 @@ bool ServerChannel::IsBridgeSubscriber() const {
   return num_subs == num_bridge_subs;
 }
 
-ServerChannel::CapacityInfo
-ServerChannel::HasSufficientCapacityInternal(
+ServerChannel::CapacityInfo ServerChannel::HasSufficientCapacityInternal(
     int initial_value, int new_max_active_messages) const {
   if (NumSlots() == 0) {
     return CapacityInfo{true, 0, 0, 0};
@@ -452,9 +464,10 @@ ServerChannel::HasSufficientCapacityInternal(
       max_active_messages += sub->MaxActiveMessages() - 1;
     }
   }
-  int slots_needed = initial_value +
-      num_pubs + num_subs + max_active_messages + 1;
-  return CapacityInfo{slots_needed <= NumSlots() - 1, num_pubs, num_subs, max_active_messages, slots_needed};
+  int slots_needed =
+      initial_value + num_pubs + num_subs + max_active_messages + 1;
+  return CapacityInfo{slots_needed <= NumSlots() - 1, num_pubs, num_subs,
+                      max_active_messages, slots_needed};
 }
 
 absl::Status
@@ -471,10 +484,9 @@ absl::Status ServerChannel::CapacityError(const CapacityInfo &info) const {
       "there are %d slots with %d publisher%s and %d "
       "subscriber%s with %d additional active message%s; you "
       "need at least %d slots",
-      NumSlots(), info.num_pubs, (info.num_pubs == 1 ? "" : "s"),
-      info.num_subs, (info.num_subs == 1 ? "" : "s"),
-      info.max_active_messages, (info.max_active_messages == 1 ? "" : "s"),
-      info.slots_needed + 1));
+      NumSlots(), info.num_pubs, (info.num_pubs == 1 ? "" : "s"), info.num_subs,
+      (info.num_subs == 1 ? "" : "s"), info.max_active_messages,
+      (info.max_active_messages == 1 ? "" : "s"), info.slots_needed + 1));
 }
 
 void ServerChannel::GetChannelInfo(subspace::ChannelInfo *info) {
@@ -543,6 +555,11 @@ ChannelMultiplexer::CreateVirtualChannel(Server &server,
           absl::StrFormat("Virtual channel %d already exists", vchan_id));
     }
   }
+  if (vchan_id >= kMaxVchanId) {
+    return absl::InternalError(absl::StrFormat(
+        "Virtual channel id %d is beyond max virtual channels (%d)", vchan_id,
+        kMaxVchanId));
+  }
   auto v = std::make_unique<VirtualChannel>(server, this, vchan_id, name,
                                             SlotSize(), Type());
   virtual_channels_.insert(v.get());
@@ -562,8 +579,8 @@ ChannelMultiplexer::HasSufficientCapacity(int new_max_active_messages) const {
     return CapacityError(info);
   }
 
-  // Check the virtual channels.  We keep track of the current number of slots needed
-  // and this is incremented each time we process a virtual channel.
+  // Check the virtual channels.  We keep track of the current number of slots
+  // needed and this is incremented each time we process a virtual channel.
   int slots_needed = info.slots_needed;
   for (auto vchan : virtual_channels_) {
     auto vinfo = vchan->HasSufficientCapacityInternal(slots_needed,

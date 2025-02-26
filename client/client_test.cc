@@ -87,6 +87,8 @@ public:
 
   static const std::string &Socket() { return socket_; }
 
+  static subspace::Server* Server() { return server_.get(); } 
+
 private:
   static co::CoroutineScheduler scheduler_;
   static std::string socket_;
@@ -2400,9 +2402,9 @@ TEST_F(ClientTest, ManyChannelsNonMultiplexed) {
   ASSERT_TRUE(sub_client.Init(Socket()).ok());
 
   constexpr int kNumChannels = 200;
-  constexpr int kNumSlots = 300;
+  constexpr int kNumSlots = 100;
   constexpr int kSlotSize = 32768;
-  constexpr int kNumMessages = 1000;
+  constexpr int kNumMessages = 200;
   // Memory used ~= kNumChannels * kNumSlots * kSlotSize
   std::vector<std::string> channels;
 
@@ -2431,6 +2433,10 @@ TEST_F(ClientTest, ManyChannelsNonMultiplexed) {
     subs.push_back(std::move(*sub));
   }
 
+  std::cerr << "Total virtual memory: "
+            << static_cast<double>(Server()->GetVirtualMemoryUsage()) /
+                   (1024 * 1024)
+            << " MB" << std::endl;
   std::atomic<int> num_messages = 0;
 
   // Create a thread to read from all subscribers.
@@ -2465,7 +2471,7 @@ TEST_F(ClientTest, ManyChannelsNonMultiplexed) {
   srand(1234);
   std::vector<uint64_t> periods; // In microseconds
   for (int i = 0; i < kNumChannels; i++) {
-    periods.push_back(2500 + rand() % 100000);
+    periods.push_back(5000 + rand() % 100000);
   }
   // Create a thread for each publisher, sending messages at the periods in the
   // vector.
@@ -2518,9 +2524,9 @@ TEST_F(ClientTest, ManyChannelsMultiplexed) {
 
   constexpr const char *kMux = "/logs/*";
   constexpr int kNumChannels = 200;
-  constexpr int kNumSlots = 4000;
+  constexpr int kNumSlots = 800;
   constexpr int kSlotSize = 32768;
-  constexpr int kNumMessages = 100;
+  constexpr int kNumMessages = 200;
   // Memory used ~= kNumSlots * kSlotSize
   std::vector<std::string> channels;
 
@@ -2543,12 +2549,16 @@ TEST_F(ClientTest, ManyChannelsMultiplexed) {
   std::vector<Subscriber> subs;
   for (int i = 0; i < kNumChannels; i++) {
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        channels[i], {.mux = kMux, .log_dropped_messages = true});
+        channels[i], {.mux = kMux, .log_dropped_messages = false});
     // std::cerr << "sub status " << sub.status() << "\n";
     ASSERT_TRUE(sub.ok());
     subs.push_back(std::move(*sub));
   }
 
+  std::cerr << "Total virtual memory: "
+            << static_cast<double>(Server()->GetVirtualMemoryUsage()) /
+                   (1024 * 1024)
+            << " MB" << std::endl;
   std::atomic<int> num_messages = 0;
 
   // Create a thread to read from all subscribers.
@@ -2580,10 +2590,10 @@ TEST_F(ClientTest, ManyChannelsMultiplexed) {
     }
   });
 
-  srand(1234);
+  srand(time(nullptr));
   std::vector<uint64_t> periods; // In microseconds
   for (int i = 0; i < kNumChannels; i++) {
-    periods.push_back(2500 + rand() % 100000);
+    periods.push_back(5000 + rand() % 100000);
   }
   // Create a thread for each publisher, sending messages at the periods in the
   // vector.
@@ -2637,9 +2647,9 @@ TEST_F(ClientTest, ManyChannelsMultiplexed2) {
 
   constexpr const char *kMux = "/logs/*";
   constexpr int kNumChannels = 200;
-  constexpr int kNumSlots = 4000;
+  constexpr int kNumSlots = 1000;
   constexpr int kSlotSize = 32768;
-  constexpr int kNumMessages = 100;
+  constexpr int kNumMessages = 200;
   // Memory used ~= kNumSlots * kSlotSize
   std::vector<std::string> channels;
 
@@ -2660,9 +2670,14 @@ TEST_F(ClientTest, ManyChannelsMultiplexed2) {
 
   // Create subscriber to multiplexer.
   absl::StatusOr<Subscriber> sub =
-      sub_client.CreateSubscriber(kMux, {.log_dropped_messages = true});
+      sub_client.CreateSubscriber(kMux, {.log_dropped_messages = false});
   // std::cerr << "sub status " << sub.status() << "\n";
   ASSERT_TRUE(sub.ok());
+
+  std::cerr << "Total virtual memory: "
+            << static_cast<double>(Server()->GetVirtualMemoryUsage()) /
+                   (1024 * 1024)
+            << " MB" << std::endl;
 
   std::atomic<int> num_messages = 0;
 
@@ -2693,7 +2708,7 @@ TEST_F(ClientTest, ManyChannelsMultiplexed2) {
   srand(1234);
   std::vector<uint64_t> periods; // In microseconds
   for (int i = 0; i < kNumChannels; i++) {
-    periods.push_back(2500 + rand() % 100000);
+    periods.push_back(5000 + rand() % 100000);
   }
   // Create a thread for each publisher, sending messages at the periods in the
   // vector.
