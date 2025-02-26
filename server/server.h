@@ -45,6 +45,8 @@ public:
   absl::Status Run();
   void Stop();
 
+  uint64_t GetVirtualMemoryUsage() const;
+
 private:
   friend class ClientHandler;
   friend class ServerChannel;
@@ -60,8 +62,7 @@ private:
   absl::StatusOr<ServerChannel *> CreateChannel(const std::string &channel_name,
                                                 int slot_size, int num_slots,
                                                 const std::string &mux,
-                                                int vchan_id,
-                                                std::string type);
+                                                int vchan_id, std::string type);
   absl::StatusOr<ServerChannel *>
   CreateMultiplexer(const std::string &channel_name, int slot_size,
                     int num_slots, std::string type);

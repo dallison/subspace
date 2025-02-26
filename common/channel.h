@@ -121,15 +121,16 @@ struct SystemControlBlock {
   ChannelCounters counters[kMaxChannels];
 };
 
-// This is the meta data for a slot.  It is always in a linked list.
+// This is the meta data for a slot. 
 struct MessageSlot {
-  int32_t id;                 // Unique ID for slot (0...num_slots-1).
   std::atomic<uint64_t> refs; // Number of subscribers referring to this slot.
   uint64_t ordinal;           // Message ordinal held currently in slot.
   uint64_t message_size;      // Size of message held in slot.
-  int32_t buffer_index;       // Index of buffer.
+  int32_t id;                 // Unique ID for slot (0...num_slots-1).
+  int16_t buffer_index;       // Index of buffer.
+  int16_t vchan_id;                        // Virtual channel ID.
   AtomicBitSet<kMaxSlotOwners> sub_owners; // One bit per subscriber.
-  int32_t vchan_id;                        // Virtual channel ID.
+  uint64_t timestamp;                      // Timestamp of message.
 };
 
 struct ActiveSlot {

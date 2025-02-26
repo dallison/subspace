@@ -209,6 +209,7 @@ public:
   }
 
   virtual const SharedMemoryFds &GetFds() { return shared_memory_fds_; }
+  virtual uint64_t GetVirtualMemoryUsage() const;
 
   // Add a buffer (slot size and memory fd) to the shared_memory_fds.
   virtual void AddBuffer(int slot_size, toolbelt::FileDescriptor fd);
@@ -330,6 +331,11 @@ public:
   void AddBuffer(int slot_size, toolbelt::FileDescriptor fd) override {
     mux_->AddBuffer(slot_size, std::move(fd));
   }
+
+   uint64_t GetVirtualMemoryUsage() const override {
+    return 0;
+   }
+
 
 private:
   Server &server_;

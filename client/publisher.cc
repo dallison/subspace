@@ -26,8 +26,8 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
   DynamicBitSet embargoed_slots(NumSlots());
 
   for (;;) {
-    // Find the slot with refs == 0 and the lowest ordinal.
-    uint64_t lowest_ordinal = -1ULL;
+    // Find the slot with refs == 0 and the oldest message.
+    uint64_t earliest_timestamp = -1ULL;
     for (int i = 0; i < num_slots_; i++) {
       if (embargoed_slots.IsSet(i)) {
         continue;
@@ -37,9 +37,9 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
       if ((refs & kPubOwned) != 0) {
         continue;
       }
-      if ((refs & kRefsMask) == 0 && s->ordinal < lowest_ordinal) {
+      if ((refs & kRefsMask) == 0 && s->timestamp < earliest_timestamp) {
         slot = s;
-        lowest_ordinal = s->ordinal;
+        earliest_timestamp = s->timestamp;
       }
     }
     if (slot == nullptr) {
@@ -69,6 +69,7 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
     }
   }
   slot->ordinal = 0;
+  slot->timestamp = -1ULL;
   slot->vchan_id = vchan_id_;
   SetSlotToBiggestBuffer(slot);
 
@@ -176,16 +177,18 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
   MessagePrefix *prefix = reinterpret_cast<MessagePrefix *>(buffer) - 1;
 
   slot->ordinal = NextOrdinal(ccb_, slot->vchan_id);
+  slot->timestamp = toolbelt::Now();
   // std::cerr << "Published message in slot " << slot->id << " with ordinal "
   //           << slot->ordinal << " vchan " << slot->vchan_id << "\n";
 
   // Copy message parameters into message prefix in buffer.
   if (omit_prefix) {
     slot->ordinal = prefix->ordinal; // Copy ordinal from prefix.
+    slot->timestamp = prefix->timestamp;
   } else {
     prefix->message_size = slot->message_size;
     prefix->ordinal = slot->ordinal;
-    prefix->timestamp = toolbelt::Now();
+    prefix->timestamp = slot->timestamp;
     prefix->flags = 0;
     if (is_activation) {
       prefix->flags |= kMessageActivate;
