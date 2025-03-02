@@ -15,7 +15,7 @@ static void UnmapBuffers(BufferSetIter first, BufferSetIter last,
   for (; first < last; ++first) {
     int64_t buffers_size =
         sizeof(BufferHeader) +
-        num_slots * (Aligned<32>(first->slot_size) + sizeof(MessagePrefix));
+        num_slots * (Aligned<64>(first->slot_size) + sizeof(MessagePrefix));
     if (buffers_size > 0 && first->buffer != nullptr) {
       UnmapMemory(first->buffer, buffers_size, "buffers");
       first->buffer = nullptr;
@@ -44,7 +44,7 @@ absl::Status ClientChannel::Map(SharedMemoryFds fds,
   for (const auto &buffer : fds.buffers) {
     int64_t buffers_size =
         sizeof(BufferHeader) +
-        num_slots_ * (Aligned<32>(buffer.slot_size) + sizeof(MessagePrefix));
+        num_slots_ * (Aligned<64>(buffer.slot_size) + sizeof(MessagePrefix));
     if (buffers_size != 0) {
       char *mem = reinterpret_cast<char *>(
           MapMemory(fds.buffers[index].fd.Fd(), buffers_size,
@@ -81,7 +81,7 @@ absl::Status ClientChannel::MapNewBuffers(std::vector<SlotBuffer> buffers) {
 
     int64_t buffers_size =
         sizeof(BufferHeader) +
-        num_slots_ * (Aligned<32>(buffer.slot_size) + sizeof(MessagePrefix));
+        num_slots_ * (Aligned<64>(buffer.slot_size) + sizeof(MessagePrefix));
     if (buffers_size != 0) {
       char *mem = reinterpret_cast<char *>(MapMemory(
           buffer.fd.Fd(), buffers_size, PROT_READ | PROT_WRITE, "new buffers"));
@@ -108,7 +108,7 @@ void ClientChannel::UnmapUnusedBuffers() {
                         1;
     if (hdr->refs == 0) {
       int64_t buffers_size = sizeof(BufferHeader) +
-                             num_slots_ * (Aligned<32>(buffers_[i].slot_size) +
+                             num_slots_ * (Aligned<64>(buffers_[i].slot_size) +
                                            sizeof(MessagePrefix));
       if (buffers_size > 0) {
         if (debug_) {

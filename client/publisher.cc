@@ -69,7 +69,7 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
     }
   }
   slot->ordinal = 0;
-  slot->timestamp = -1ULL;
+  slot->timestamp = 0;
   slot->vchan_id = vchan_id_;
   SetSlotToBiggestBuffer(slot);
 
@@ -101,17 +101,17 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
       MessageSlot *s = &ccb_->slots[i];
       uint64_t refs = s->refs.load(std::memory_order_relaxed);
       if ((refs & kPubOwned) == 0) {
-        ActiveSlot active_slot = {s, s->ordinal};
+        ActiveSlot active_slot = {s, s->ordinal, s->timestamp};
         active_slots.push_back(active_slot);
       }
     }
 
-    // Sort the active slots by ordinal.
+    // Sort the active slots by timestamp.
     // std::stable_sort gives consistently better performance than std::sort and
     // also is more deterministic in slot ordering.
     std::stable_sort(active_slots.begin(), active_slots.end(),
                      [](const ActiveSlot &a, const ActiveSlot &b) {
-                       return a.ordinal < b.ordinal;
+                       return a.timestamp < b.timestamp;
                      });
 
     // Look for a slot with zero refs but don't go past one with non-zero
@@ -152,6 +152,7 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
     }
   }
   slot->ordinal = 0;
+  slot->timestamp = 0;
   slot->vchan_id = vchan_id_;
   SetSlotToBiggestBuffer(slot);
 

@@ -665,6 +665,33 @@ TEST_F(ClientTest, PublishSingleMessageAndRead) {
   ASSERT_EQ(0, msg->length);
 }
 
+TEST_F(ClientTest, PublishSingleMessageAndReadWithCallback) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_TRUE(pub_client.Init(Socket()).ok());
+  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher("dave6", 256, 10);
+  ASSERT_TRUE(pub.ok());
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_TRUE(buffer.ok());
+  memcpy(*buffer, "foobar", 6);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+  ASSERT_TRUE(pub_status.ok());
+
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("dave6");
+  ASSERT_TRUE(sub.ok());
+
+  sub->RegisterMessageCallback([](Subscriber *s, Message msg) {
+    ASSERT_EQ(6, msg.length);
+  });
+
+  auto status = sub->ProcessAllMessages();
+  ASSERT_TRUE(status.ok());
+
+  status = sub->UnregisterMessageCallback();
+  ASSERT_TRUE(status.ok());
+}
+
 TEST_F(ClientTest, VirtualPublishSingleMessageAndRead) {
   subspace::Client pub_client;
   subspace::Client sub_client;
@@ -1250,6 +1277,7 @@ TEST_F(ClientTest, ReliablePublisher1) {
   co::Coroutine c2(machine, [&sub](co::Coroutine *c) {
     for (int i = 0; i < 4; i++) {
       absl::StatusOr<Message> msg = sub->ReadMessage();
+      std::cerr << msg.status() << std::endl;
       ASSERT_TRUE(msg.ok());
       ASSERT_EQ(6, msg->length);
     }
@@ -1257,7 +1285,9 @@ TEST_F(ClientTest, ReliablePublisher1) {
     absl::StatusOr<Message> msg = sub->ReadMessage();
     ASSERT_TRUE(msg.ok());
     ASSERT_EQ(0, msg->length);
+
   });
+
   machine.Run();
 }
 
@@ -1398,13 +1428,14 @@ TEST_F(ClientTest, DroppedMessage) {
   // old slot: 2: 7, new slot: 3: 8
   //
   // So on the first read we drop 4 messages (expecting ordinal 2 but get 6).
+
   for (int i = 0; i < 4; i++) {
     absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
     ASSERT_TRUE(buffer.ok());
     ASSERT_NE(nullptr, *buffer);
     memcpy(*buffer, "foobar", 6);
     absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
-    ASSERT_TRUE(pub_status.ok());
+   ASSERT_TRUE(pub_status.ok());
   }
 
   // Read all messages in channel.
@@ -2549,7 +2580,7 @@ TEST_F(ClientTest, ManyChannelsMultiplexed) {
   std::vector<Subscriber> subs;
   for (int i = 0; i < kNumChannels; i++) {
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        channels[i], {.mux = kMux, .log_dropped_messages = false});
+        channels[i], {.log_dropped_messages = false, .mux = kMux});
     // std::cerr << "sub status " << sub.status() << "\n";
     ASSERT_TRUE(sub.ok());
     subs.push_back(std::move(*sub));
@@ -2640,7 +2671,7 @@ TEST_F(ClientTest, ManyChannelsMultiplexed) {
             << " messages\n";
 }
 
-TEST_F(ClientTest, ManyChannelsMultiplexed2) {
+TEST_F(ClientTest, ManyChannelsMultiplexedSubscribedToMux) {
   std::vector<subspace::Client> pub_clients;
   subspace::Client sub_client;
   ASSERT_TRUE(sub_client.Init(Socket()).ok());

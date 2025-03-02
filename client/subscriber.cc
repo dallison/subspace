@@ -55,18 +55,23 @@ void SubscriberImpl::PopulateActiveSlots(InPlaceAtomicBitset &bits) {
   } while (num_messages != ccb_->total_messages);
 }
 
-FastRingBuffer<uint64_t, 10000> &SubscriberImpl::GetSeenOrdinals(int vchan_id) {
-  auto[it, _] =
-      seen_ordinals_.emplace(vchan_id, FastRingBuffer<uint64_t, 10000>());
-  return it->second;
+SubscriberImpl::OrdinalTracker &SubscriberImpl::GetOrdinalTracker(int vchan_id) {
+  auto it = ordinal_trackers_.find(vchan_id);
+  if (it != ordinal_trackers_.end()) {
+    return *it->second;
+  }
+  auto[it2, _] = ordinal_trackers_.emplace(
+      vchan_id, std::make_unique<OrdinalTracker>());
+
+  return *it2->second;
 }
 
 int SubscriberImpl::DetectDrops(int vchan_id) {
   std::vector<uint64_t> ordinals;
-  auto &seen_ordinals = GetSeenOrdinals(vchan_id);
-  ordinals.reserve(seen_ordinals.Size());
-  seen_ordinals.Traverse([&ordinals](uint64_t o) {
-    if (true /*o >= last_ordinal_seen_*/) {
+  auto &tracker = GetOrdinalTracker(vchan_id);
+  ordinals.reserve(tracker.ordinals.Size());
+  tracker.ordinals.Traverse([&tracker, &ordinals](uint64_t o) {
+    if (o >= tracker.last_ordinal_seen) {
       ordinals.push_back(o);
     }
   });
@@ -74,7 +79,7 @@ int SubscriberImpl::DetectDrops(int vchan_id) {
     return 0;
   }
   std::stable_sort(ordinals.begin(), ordinals.end());
-  last_ordinal_seen_ = ordinals.back();
+  tracker.last_ordinal_seen = ordinals.back();
 
   // Look for gaps in the ordinals.
   int drops = 0;
@@ -88,8 +93,8 @@ int SubscriberImpl::DetectDrops(int vchan_id) {
 }
 
 void SubscriberImpl::RememberOrdinal(uint64_t ordinal, int vchan_id) {
-  auto &seen_ordinals = GetSeenOrdinals(vchan_id);
-  seen_ordinals.Insert(ordinal);
+  auto &tracker = GetOrdinalTracker(vchan_id);
+  tracker.ordinals.Insert(ordinal);
 }
 
 const ActiveSlot *
@@ -97,9 +102,9 @@ SubscriberImpl::FindUnseenOrdinal(const std::vector<ActiveSlot> &active_slots,
                                   int vchan_id) {
   // Traverse the active slots looking for the first ordinal that is not zero
   // and has not been seen by a subscriber.
-  auto &seen_ordinals = GetSeenOrdinals(vchan_id);
+  auto &tracker = GetOrdinalTracker(vchan_id);
   for (auto &s : active_slots) {
-    if (s.ordinal != 0 && !seen_ordinals.Contains(s.ordinal)) {
+    if (s.ordinal != 0 && !tracker.ordinals.Contains(s.ordinal)) {
       return &s;
     }
   }
@@ -134,7 +139,7 @@ void SubscriberImpl::CollectVisibleSlots(InPlaceAtomicBitset &bits,
       }
       // std::cerr << "collected slot " << s->id << " ordinal " << s->ordinal
       //           << " vchan " << s->vchan_id << "\n";
-      ActiveSlot active_slot = {s, s->ordinal, 0};
+      ActiveSlot active_slot = {s, s->ordinal, s->timestamp};
       active_slots.push_back(active_slot);
     });
   } while (num_messages != ccb_->total_messages);
@@ -157,13 +162,14 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
 
     CollectVisibleSlots(bits, active_slots, embargoed_slots);
 
-    // Sort the active slots by ordinal.
+    // Sort the active slots by timestamp.
     std::stable_sort(active_slots.begin(), active_slots.end(),
                      [](const ActiveSlot &a, const ActiveSlot &b) {
-                       return a.ordinal < b.ordinal;
+                       return a.timestamp < b.timestamp;
                      });
 
-    const ActiveSlot *new_slot = FindUnseenOrdinal(active_slots, vchan_id_);
+    const ActiveSlot *new_slot =
+        FindUnseenOrdinal(active_slots, vchan_id_);
     if (new_slot == nullptr) {
       return nullptr;
     }
@@ -183,7 +189,8 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
         continue;
       }
       // std::cerr << "sub got slot " << new_slot->slot->id << " ordinal "
-      //           << new_slot->ordinal << " vchan " << new_slot->slot->vchan_id << "\n";
+      //           << new_slot->ordinal << " vchan " << new_slot->slot->vchan_id
+      //           << "\n";
       return new_slot->slot;
     }
   }
@@ -205,10 +212,10 @@ MessageSlot *SubscriberImpl::LastSlot(MessageSlot *slot, bool reliable,
     }
     CollectVisibleSlots(bits, active_slots, embargoed_slots);
 
-    // Sort the active slots by ordinal.
+    // Sort the active slots by timestamp.
     std::stable_sort(active_slots.begin(), active_slots.end(),
                      [](const ActiveSlot &a, const ActiveSlot &b) {
-                       return a.ordinal < b.ordinal;
+                       return a.timestamp < b.timestamp;
                      });
 
     ActiveSlot *new_slot = nullptr;
