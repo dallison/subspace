@@ -135,7 +135,7 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
   // map in the buffers in the server since they will never be used.
   int64_t buffers_size =
       sizeof(BufferHeader) +
-      num_slots_ * (Aligned<32>(slot_size) + sizeof(MessagePrefix));
+      num_slots_ * (Aligned<64>(slot_size) + sizeof(MessagePrefix));
   if (buffers_size == 0) {
     buffers_size = 256;
   }
@@ -190,7 +190,7 @@ absl::StatusOr<toolbelt::FileDescriptor>
 ServerChannel::ExtendBuffers(int32_t new_slot_size) {
   int64_t buffers_size =
       sizeof(BufferHeader) +
-      num_slots_ * (Aligned<32>(new_slot_size) + sizeof(MessagePrefix));
+      num_slots_ * (Aligned<64>(new_slot_size) + sizeof(MessagePrefix));
 
   char buffer_name[32];
   snprintf(buffer_name, sizeof(buffer_name), "buffers%d\n",

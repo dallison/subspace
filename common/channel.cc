@@ -158,6 +158,8 @@ void Channel::DumpSlots() const {
     }
     std::cout << " ordinal: " << slot->ordinal
               << " buffer_index: " << slot->buffer_index
+              << " vchan_id: " << slot->vchan_id
+              << " timestamp: " << slot->timestamp
               << " message size: " << slot->message_size << std::endl;
   }
 }

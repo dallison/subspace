@@ -27,7 +27,7 @@ public:
   }
   int64_t Timestamp() const { return Timestamp(CurrentSlot()); }
   int64_t Timestamp(MessageSlot *slot) const {
-    return slot == nullptr ? 0 : Prefix(slot)->timestamp;
+    return slot == nullptr ? 0 : slot->timestamp;
   }
   bool IsReliable() const { return options_.IsReliable(); }
 
@@ -82,6 +82,7 @@ public:
     return active_message_;
   }
 
+
   void DecrementSlotRef(MessageSlot *slot) {
     AtomicIncRefCount(slot, IsReliable(), -1, slot->ordinal & kOrdinalMask);
   }
@@ -124,6 +125,11 @@ public:
 
 private:
   friend class ::subspace::ClientImpl;
+
+  struct OrdinalTracker {
+    FastRingBuffer<uint64_t, 10000> ordinals;
+    uint64_t last_ordinal_seen = 0;
+  };
 
   bool IsSubscriber() const override { return true; }
 
@@ -179,7 +185,7 @@ private:
     return slot;
   }
 
-  FastRingBuffer<uint64_t, 10000> &GetSeenOrdinals(int vchan_id);
+  OrdinalTracker &GetOrdinalTracker(int vchan_id);
 
   int subscriber_id_;
   toolbelt::TriggerFd trigger_;
@@ -200,8 +206,10 @@ private:
   // We keep track of a limited number of ordinals we've seen.
   // One of these per virtual channel.  If there are no virtual channels
   // we will use vchan_id -1.
-  absl::flat_hash_map<int, FastRingBuffer<uint64_t, 10000>> seen_ordinals_;
-  uint64_t last_ordinal_seen_ = 0;
+  absl::flat_hash_map<int, std::unique_ptr<OrdinalTracker>> ordinal_trackers_;
+
+  //
+  std::function<void(SubscriberImpl*, Message)> message_callback_;
 };
 } // namespace details
 } // namespace subspace

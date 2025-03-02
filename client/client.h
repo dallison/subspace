@@ -15,8 +15,8 @@
 #include "common/channel.h"
 #include "coroutine.h"
 #include "toolbelt/fd.h"
-#include "toolbelt/sockets.h"
 #include "toolbelt/logging.h"
+#include "toolbelt/sockets.h"
 #include "toolbelt/triggerfd.h"
 #include <cstddef>
 #include <functional>
@@ -277,6 +277,11 @@ private:
   absl::Status
   UnregisterDroppedMessageCallback(details::SubscriberImpl *subscriber);
 
+  absl::Status RegisterMessageCallback(
+      details::SubscriberImpl *subscriber,
+      std::function<void(details::SubscriberImpl *, Message)> callback);
+  absl::Status UnregisterMessageCallback(details::SubscriberImpl *subscriber);
+
   // Register a callback that will be called when the publisher wants a
   // channel to be resized.  Note that there is more than one
   // publisher, only the one that causes the resize will cause the
@@ -292,6 +297,12 @@ private:
       std::function<absl::Status(details::PublisherImpl *, int32_t, int32_t)>
           cb);
   absl::Status UnregisterResizeCallback(details::PublisherImpl *publisher);
+
+  // Call the message callback function for all avaialble messages.  You must
+  // have registered a callback function with RegisterMessageCallback for this
+  // to work.
+  absl::Status ProcessAllMessages(details::SubscriberImpl *subscriber,
+                                  ReadMode mode = ReadMode::kReadNext);
 
   // Get the most recently received ordinal for the subscriber.
   int64_t GetCurrentOrdinal(details::SubscriberImpl *sub) const;
@@ -345,6 +356,13 @@ private:
                       std::function<void(details::SubscriberImpl *, int64_t)>>
       dropped_message_callbacks_;
 
+  // Callback per subscriber to call when a message is received.  Use the
+  // `ProcessAllMessages` function on the Subscriber to call this function for
+  // all currently available messages.
+  absl::flat_hash_map<details::SubscriberImpl *,
+                      std::function<void(details::SubscriberImpl *, Message)>>
+      message_callbacks_;
+
   // Call the function when a publisher causes a channel to be resized.
   absl::flat_hash_map<
       details::PublisherImpl *,
@@ -379,7 +397,7 @@ ClientImpl::FindMessage(details::SubscriberImpl *subscriber,
   if (!msg.ok()) {
     return msg.status();
   }
-   return ::subspace::shared_ptr<T>(std::move(*msg));
+  return ::subspace::shared_ptr<T>(std::move(*msg));
 }
 
 // The Publisher and Subscriber classes are the main interface for sending
@@ -455,6 +473,8 @@ public:
 
   std::string Name() const { return impl_->Name(); }
   std::string Type() const { return impl_->Type(); }
+
+  void DumpSlots() const { impl_->DumpSlots(); }
 
   bool IsReliable() const { return impl_->IsReliable(); }
   bool IsLocal() const { return impl_->IsLocal(); }
@@ -596,6 +616,23 @@ public:
     return client_->UnregisterDroppedMessageCallback(impl_.get());
   }
 
+  absl::Status
+  RegisterMessageCallback(std::function<void(Subscriber *, Message)> callback) {
+    return client_->RegisterMessageCallback(impl_.get(), [
+      this, callback = std::move(callback)
+    ](details::SubscriberImpl * s, Message m) {
+      callback(this, std::move(m));
+    });
+  }
+
+  absl::Status UnregisterMessageCallback() {
+    return client_->UnregisterMessageCallback(impl_.get());
+  }
+
+  absl::Status ProcessAllMessages(ReadMode mode = ReadMode::kReadNext) {
+    return client_->ProcessAllMessages(impl_.get(), mode);
+  }
+
   const ChannelCounters &GetCounters() const { return impl_->GetCounters(); }
 
   int64_t CurrentOrdinal() const { return impl_->CurrentOrdinal(); }
@@ -611,7 +648,7 @@ public:
   int NumActiveMessages() const { return impl_->NumActiveMessages(); }
 
   void DumpSlots() const { impl_->DumpSlots(); }
-  
+
   int VirtualChannelId() const { return impl_->VirtualChannelId(); }
 
 private:

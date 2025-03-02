@@ -6,6 +6,7 @@
 #include "absl/strings/str_format.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/clock.h"
+#include "toolbelt/hexdump.h"
 #include "toolbelt/mutex.h"
 #include "toolbelt/sockets.h"
 #include <cerrno>
@@ -68,6 +69,30 @@ ClientImpl::UnregisterDroppedMessageCallback(SubscriberImpl *subscriber) {
   return absl::OkStatus();
 }
 
+absl::Status ClientImpl::RegisterMessageCallback(
+    SubscriberImpl *subscriber,
+    std::function<void(SubscriberImpl *, Message)> callback) {
+  auto it = message_callbacks_.find(subscriber);
+  if (it != message_callbacks_.end()) {
+    return absl::InternalError(absl::StrFormat(
+        "A message callback has already been registered for channel %s\n",
+        subscriber->Name()));
+  }
+  message_callbacks_[subscriber] = std::move(callback);
+  return absl::OkStatus();
+}
+
+absl::Status ClientImpl::UnregisterMessageCallback(SubscriberImpl *subscriber) {
+  auto it = message_callbacks_.find(subscriber);
+  if (it == message_callbacks_.end()) {
+    return absl::InternalError(absl::StrFormat(
+        "No message callback has been registered for channel %s\n",
+        subscriber->Name()));
+  }
+  message_callbacks_.erase(it);
+  return absl::OkStatus();
+}
+
 void ClientImpl::RegisterResizeCallback(
     PublisherImpl *publisher,
     std::function<absl::Status(PublisherImpl *, int32_t, int32_t)> callback) {
@@ -82,6 +107,27 @@ absl::Status ClientImpl::UnregisterResizeCallback(PublisherImpl *publisher) {
         publisher->Name()));
   }
   resize_callbacks_.erase(it);
+  return absl::OkStatus();
+}
+
+absl::Status ClientImpl::ProcessAllMessages(details::SubscriberImpl *subscriber,
+                                            ReadMode mode) {
+  auto it = message_callbacks_.find(subscriber);
+  if (it == message_callbacks_.end()) {
+    return absl::InternalError(absl::StrFormat(
+        "No message callback has been registered for channel %s\n",
+        subscriber->Name()));
+  }
+  for (;;) {
+    absl::StatusOr<Message> msg = ReadMessage(subscriber, mode);
+    if (!msg.ok()) {
+      return msg.status();
+    }
+    if (msg->length == 0) {
+      break;
+    }
+    it->second(subscriber, std::move(*msg));
+  }
   return absl::OkStatus();
 }
 
@@ -362,7 +408,8 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
   if (msg.new_slot == nullptr) {
     if (publisher->IsReliable()) {
       // Reliable publishers don't get a slot until it's asked for.
-      return Message(message_size, nullptr, msg.ordinal, msg.timestamp, publisher->VirtualChannelId());
+      return Message(message_size, nullptr, msg.ordinal, msg.timestamp,
+                     publisher->VirtualChannelId());
     }
     return absl::InternalError(
         absl::StrFormat("Out of slots for channel %s", publisher->Name()));
@@ -373,7 +420,8 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
            msg.new_slot->ordinal);
   }
 
-  return Message(message_size, nullptr, msg.ordinal, msg.timestamp, publisher->VirtualChannelId());
+  return Message(message_size, nullptr, msg.ordinal, msg.timestamp,
+                 publisher->VirtualChannelId());
 }
 
 absl::Status ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
@@ -534,7 +582,8 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
   // Allocate a new active message for the slot.
   auto msg = subscriber->SetActiveMessage(
       new_slot->message_size, new_slot, subscriber->GetCurrentBufferAddress(),
-      subscriber->CurrentOrdinal(), subscriber->Timestamp(), new_slot->vchan_id);
+      subscriber->CurrentOrdinal(), subscriber->Timestamp(),
+      new_slot->vchan_id);
 
   // If we are unable to allocate a new message (due to message limits)
   // restore the slot so that we pick it up next time.
@@ -589,7 +638,8 @@ ClientImpl::FindMessageInternal(SubscriberImpl *subscriber,
     return Message();
   }
   return Message(new_slot->message_size, subscriber->GetCurrentBufferAddress(),
-                 subscriber->CurrentOrdinal(), subscriber->Timestamp(), subscriber->VirtualChannelId());
+                 subscriber->CurrentOrdinal(), subscriber->Timestamp(),
+                 subscriber->VirtualChannelId());
 }
 
 absl::StatusOr<Message> ClientImpl::FindMessage(SubscriberImpl *subscriber,
