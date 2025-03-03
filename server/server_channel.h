@@ -254,9 +254,6 @@ public:
   ChannelMultiplexer(int id, const std::string &name, int num_slots,
                      std::string type)
       : ServerChannel(id, name, num_slots, type, false) {}
-  ~ChannelMultiplexer() {
-    std::cerr << "Destructing mux " << Name() << std::endl;
-  }
 
   absl::StatusOr<std::unique_ptr<VirtualChannel>>
   CreateVirtualChannel(Server &server, const std::string &name, int vchan_id);

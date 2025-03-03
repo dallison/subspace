@@ -681,11 +681,12 @@ TEST_F(ClientTest, PublishSingleMessageAndReadWithCallback) {
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("dave6");
   ASSERT_TRUE(sub.ok());
 
-  sub->RegisterMessageCallback([](Subscriber *s, Message msg) {
+  auto status = sub->RegisterMessageCallback([](Subscriber *s, Message msg) {
     ASSERT_EQ(6, msg.length);
   });
+  ASSERT_TRUE(status.ok());
 
-  auto status = sub->ProcessAllMessages();
+  status = sub->ProcessAllMessages();
   ASSERT_TRUE(status.ok());
 
   status = sub->UnregisterMessageCallback();
