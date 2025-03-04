@@ -7,6 +7,30 @@
 namespace subspace {
 namespace details {
 
+struct OrdinalAndVchanId {
+  uint64_t ordinal;
+  int vchan_id;
+  bool operator==(const OrdinalAndVchanId &o) const {
+    return ordinal == o.ordinal && vchan_id == o.vchan_id;
+  }
+  bool operator!=(const OrdinalAndVchanId &o) const {
+    return ordinal != o.ordinal || vchan_id != o.vchan_id;
+  }
+  bool operator<(const OrdinalAndVchanId &o) const {
+    if (vchan_id < o.vchan_id) {
+      return true;
+    }
+    if (vchan_id > o.vchan_id) {
+      return false;
+    }
+    return ordinal < o.ordinal;
+  }
+};
+
+template <typename H> inline H AbslHashValue(H h, const OrdinalAndVchanId &x) {
+  return H::combine(std::move(h), x.ordinal, x.vchan_id);
+}
+
 // A subscriber reads messages from a channel.  It maps the channel
 // shared memory.
 class SubscriberImpl : public ClientChannel {
@@ -43,10 +67,10 @@ public:
   }
 
   const ActiveSlot *
-  FindUnseenOrdinal(const std::vector<ActiveSlot> &active_slots, int vchan_id);
+  FindUnseenOrdinal(const std::vector<ActiveSlot> &active_slots);
   void PopulateActiveSlots(InPlaceAtomicBitset &bits);
 
-  void ClaimSlot(MessageSlot *slot, std::function<bool()> reload);
+  void ClaimSlot(MessageSlot *slot, std::function<bool()> reload, int vchan_id);
   void RememberOrdinal(uint64_t ordinal, int vchan_id);
   void CollectVisibleSlots(InPlaceAtomicBitset &bits,
                            std::vector<ActiveSlot> &active_slots,
@@ -81,7 +105,6 @@ public:
         ActiveMessage{shared_from_this(), len, slot, buf, ord, ts, vchan_id});
     return active_message_;
   }
-
 
   void DecrementSlotRef(MessageSlot *slot) {
     AtomicIncRefCount(slot, IsReliable(), -1, slot->ordinal & kOrdinalMask);
@@ -127,7 +150,7 @@ private:
   friend class ::subspace::ClientImpl;
 
   struct OrdinalTracker {
-    FastRingBuffer<uint64_t, 10000> ordinals;
+    FastRingBuffer<OrdinalAndVchanId, 10000> ordinals;
     uint64_t last_ordinal_seen = 0;
   };
 
@@ -208,8 +231,8 @@ private:
   // we will use vchan_id -1.
   absl::flat_hash_map<int, std::unique_ptr<OrdinalTracker>> ordinal_trackers_;
 
-  //
-  std::function<void(SubscriberImpl*, Message)> message_callback_;
+  // The callback to call when a message is received.
+  std::function<void(SubscriberImpl *, Message)> message_callback_;
 };
 } // namespace details
 } // namespace subspace

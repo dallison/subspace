@@ -67,11 +67,11 @@ SubscriberImpl::OrdinalTracker &SubscriberImpl::GetOrdinalTracker(int vchan_id) 
 }
 
 int SubscriberImpl::DetectDrops(int vchan_id) {
-  std::vector<uint64_t> ordinals;
-  auto &tracker = GetOrdinalTracker(vchan_id);
+  std::vector<OrdinalAndVchanId> ordinals;
+  auto &tracker = GetOrdinalTracker(vchan_id_);
   ordinals.reserve(tracker.ordinals.Size());
-  tracker.ordinals.Traverse([&tracker, &ordinals](uint64_t o) {
-    if (o >= tracker.last_ordinal_seen) {
+  tracker.ordinals.Traverse([&tracker, &ordinals, vchan_id](const OrdinalAndVchanId& o) {
+    if (vchan_id == o.vchan_id && o.ordinal >= tracker.last_ordinal_seen) {
       ordinals.push_back(o);
     }
   });
@@ -79,32 +79,35 @@ int SubscriberImpl::DetectDrops(int vchan_id) {
     return 0;
   }
   std::stable_sort(ordinals.begin(), ordinals.end());
-  tracker.last_ordinal_seen = ordinals.back();
+  tracker.last_ordinal_seen = ordinals.back().ordinal;
 
   // Look for gaps in the ordinals.
   int drops = 0;
   for (size_t i = 1; i < ordinals.size(); i++) {
-    if (ordinals[i] - ordinals[i - 1] == 1) {
+    if (ordinals[i].vchan_id != vchan_id) {
+      // Must be same vchan_id as ordinals are per vchan.
       continue;
     }
-    drops += static_cast<int>(ordinals[i] - ordinals[i - 1] - 1);
+    if (ordinals[i].ordinal - ordinals[i - 1].ordinal == 1) {
+      continue;
+    }
+    drops += static_cast<int>(ordinals[i].ordinal - ordinals[i - 1].ordinal - 1);
   }
   return drops;
 }
 
 void SubscriberImpl::RememberOrdinal(uint64_t ordinal, int vchan_id) {
-  auto &tracker = GetOrdinalTracker(vchan_id);
-  tracker.ordinals.Insert(ordinal);
+  auto &tracker = GetOrdinalTracker(vchan_id_);
+  tracker.ordinals.Insert(OrdinalAndVchanId{ordinal, vchan_id});
 }
 
 const ActiveSlot *
-SubscriberImpl::FindUnseenOrdinal(const std::vector<ActiveSlot> &active_slots,
-                                  int vchan_id) {
+SubscriberImpl::FindUnseenOrdinal(const std::vector<ActiveSlot> &active_slots) {
   // Traverse the active slots looking for the first ordinal that is not zero
   // and has not been seen by a subscriber.
-  auto &tracker = GetOrdinalTracker(vchan_id);
+  auto &tracker = GetOrdinalTracker(vchan_id_);
   for (auto &s : active_slots) {
-    if (s.ordinal != 0 && !tracker.ordinals.Contains(s.ordinal)) {
+    if (s.ordinal != 0 && !tracker.ordinals.Contains(OrdinalAndVchanId{s.ordinal, s.vchan_id})) {
       return &s;
     }
   }
@@ -112,11 +115,11 @@ SubscriberImpl::FindUnseenOrdinal(const std::vector<ActiveSlot> &active_slots,
 }
 
 void SubscriberImpl::ClaimSlot(MessageSlot *slot,
-                               std::function<bool()> reload) {
+                               std::function<bool()> reload, int vchan_id) {
   slot->sub_owners.Set(subscriber_id_);
   // Clear the bit in the subscriber bitset.
   GetAvailableSlots(subscriber_id_).Clear(slot->id);
-  RememberOrdinal(slot->ordinal, slot->vchan_id);
+  RememberOrdinal(slot->ordinal, vchan_id);
   Prefix(slot, reload)->flags |= kMessageSeen;
 }
 
@@ -139,7 +142,7 @@ void SubscriberImpl::CollectVisibleSlots(InPlaceAtomicBitset &bits,
       }
       // std::cerr << "collected slot " << s->id << " ordinal " << s->ordinal
       //           << " vchan " << s->vchan_id << "\n";
-      ActiveSlot active_slot = {s, s->ordinal, s->timestamp};
+      ActiveSlot active_slot = {s, s->ordinal, s->timestamp, s->vchan_id};
       active_slots.push_back(active_slot);
     });
   } while (num_messages != ccb_->total_messages);
@@ -169,7 +172,7 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
                      });
 
     const ActiveSlot *new_slot =
-        FindUnseenOrdinal(active_slots, vchan_id_);
+        FindUnseenOrdinal(active_slots);
     if (new_slot == nullptr) {
       return nullptr;
     }
