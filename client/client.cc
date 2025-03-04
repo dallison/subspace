@@ -598,7 +598,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
         return false;
       }
       return *ok;
-    });
+    }, subscriber->VirtualChannelId());
   }
   return Message(msg);
 }

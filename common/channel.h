@@ -137,6 +137,7 @@ struct ActiveSlot {
   MessageSlot *slot;
   uint64_t ordinal;
   uint64_t timestamp;
+  int vchan_id;
 };
 
 // This is located just before the prefix of the first slot's buffer.  It
