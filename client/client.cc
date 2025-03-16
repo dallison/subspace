@@ -1011,10 +1011,6 @@ absl::Status ClientImpl::ResizeChannel(PublisherImpl *publisher,
     return absl::InternalError(resp.error());
   }
 
-  // Another publisher beat me to it.
-  if (resp.slot_size() != new_slot_size) {
-    return absl::OkStatus();
-  }
   std::vector<SlotBuffer> buffers = CollectBuffers(resp.buffers(), fds);
   auto status = publisher->MapNewBuffers(std::move(buffers));
   return status;

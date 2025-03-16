@@ -188,6 +188,10 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
 // Called on server to extend the allocated buffers.
 absl::StatusOr<toolbelt::FileDescriptor>
 ServerChannel::ExtendBuffers(int32_t new_slot_size) {
+  if (new_slot_size <= SlotSize()) {
+    // Invalid file descriptor means no resize needed.
+    return toolbelt::FileDescriptor();
+  }
   int64_t buffers_size =
       sizeof(BufferHeader) +
       num_slots_ * (Aligned<64>(new_slot_size) + sizeof(MessagePrefix));

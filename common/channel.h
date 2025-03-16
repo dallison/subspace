@@ -69,7 +69,9 @@ constexpr int kMaxSlotOwners = 1024;
 
 // This limits the number of virtual channels.  Each virtual channel
 // needs its own ordinal counter in the CCB (8 bytes each).
-constexpr int kMaxVchanId = 500;
+// This is stored in the refs field as a 9-bit value.  If all bits are set
+// this indicates -1 (no vchan_id).
+constexpr int kMaxVchanId = 511;
 
 // Max length of a channel name in shared memory.  A name longer
 // this this will be truncated but the full name will be available
@@ -81,15 +83,26 @@ constexpr uint64_t kRefCountMask = 0x3ff;
 constexpr uint64_t kRefCountShift = 10;
 constexpr uint64_t kReliableRefCountShift = 10;
 constexpr uint64_t kPubOwned = 1ULL << 63;
-constexpr uint64_t kRefsMask = 0xfffff; // 20 bits
+constexpr uint64_t kRefsMask = (1ULL << 20) - 1; // 20 bits
 
-// We put the bottom 42 bits of the ordinal just above the
+constexpr uint64_t kVchanIdShift = 20;
+constexpr uint64_t kVchanIdSize = 9;
+constexpr uint64_t kVchanIdMask = (1ULL << kVchanIdSize) - 1;
+
+// We put the bottom 33 bits of the ordinal just above the
 // reliable ref count field.  This is to ensure that a publisher
 // hasn't published another message in the slot before a subscriber
 // increments the ref count.
-constexpr uint64_t kOrdinalMask = (1ULL << 42) - 1; // 40 bits
-constexpr uint64_t kOrdinalShift = 20;
+constexpr uint64_t kOrdinalSize = 33;
+constexpr uint64_t kOrdinalMask = (1ULL << kOrdinalSize) - 1;
+constexpr uint64_t kOrdinalShift = 29;
 
+// Combine an ordinal and a vchan_id into a single 64 bit field, shifted
+// to the correct position for the refs field.
+inline uint64_t BuildOrdinalAndVchanIdBitField(uint64_t ordinal, int vchan_id) {
+  return ((ordinal & kOrdinalMask) << kOrdinalShift) |
+         (ordinal == 0 ? 0 : ((vchan_id & kVchanIdMask) << kVchanIdShift));
+}
 // Aligned to given power of 2.
 template <int64_t alignment> int64_t Aligned(int64_t v) {
   return (v + (alignment - 1)) & ~(alignment - 1);
@@ -121,14 +134,14 @@ struct SystemControlBlock {
   ChannelCounters counters[kMaxChannels];
 };
 
-// This is the meta data for a slot. 
+// This is the meta data for a slot.
 struct MessageSlot {
   std::atomic<uint64_t> refs; // Number of subscribers referring to this slot.
   uint64_t ordinal;           // Message ordinal held currently in slot.
   uint64_t message_size;      // Size of message held in slot.
   int32_t id;                 // Unique ID for slot (0...num_slots-1).
   int16_t buffer_index;       // Index of buffer.
-  int16_t vchan_id;                        // Virtual channel ID.
+  int16_t vchan_id;           // Virtual channel ID.
   AtomicBitSet<kMaxSlotOwners> sub_owners; // One bit per subscriber.
   uint64_t timestamp;                      // Timestamp of message.
 };
@@ -362,7 +375,7 @@ public:
   void SetDebug(bool v) { debug_ = v; }
 
   bool AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
-                         uint64_t ordinal);
+                         uint64_t ordinal, int vchan_id);
 
   void SetType(std::string type) { type_ = std::move(type); }
   const std::string Type() const { return type_; }

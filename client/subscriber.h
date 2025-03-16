@@ -107,7 +107,7 @@ public:
   }
 
   void DecrementSlotRef(MessageSlot *slot) {
-    AtomicIncRefCount(slot, IsReliable(), -1, slot->ordinal & kOrdinalMask);
+    AtomicIncRefCount(slot, IsReliable(), -1, slot->ordinal & kOrdinalMask, vchan_id_);
   }
 
   bool SlotExpired(MessageSlot *slot, uint32_t ordinal) {
