@@ -110,17 +110,28 @@ void Channel::Unmap() {
   UnmapMemory(ccb_, CcbSize(num_slots_), "CCB");
 }
 
-bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc, uint64_t ordinal) {
+bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
+                                uint64_t ordinal, int vchan_id) {
   for (;;) {
     uint64_t ref = slot->refs.load(std::memory_order_relaxed);
     if ((ref & kPubOwned) != 0) {
       return false;
     }
-    // Not pub owned.  If the ordinal has changed we can't get the slot because another
-    // message has been published into it.  We need to try another slot.  An ordinal of 0
-    // in the refs field means that the slot was free and we can keep trying to use it.
+    ordinal &= kOrdinalMask;
+    // Not pub owned.  If the ordinal has changed we can't get the slot because
+    // another message has been published into it.  We need to try another slot.
+    // An ordinal of 0 in the refs field means that the slot was free and we can
+    // keep trying to use it.
     uint64_t ref_ord = (ref >> kOrdinalShift) & kOrdinalMask;
     if (ref_ord != 0 && ordinal != 0 && ref_ord != ordinal) {
+      return false;
+    }
+    int ref_vchan_id = (ref >> kVchanIdShift) & kVchanIdMask;
+    // Sign extend to 32 bits.  The value stored in the refs field is a 9 bit
+    // value
+    ref_vchan_id = (ref_vchan_id << (32 - kVchanIdSize)) >> (32 - kVchanIdSize);
+
+    if (ref_ord != 0 && ordinal != 0 && ref_vchan_id != vchan_id) {
       return false;
     }
     uint64_t new_refs = ref & kRefCountMask;
@@ -131,7 +142,8 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc, uint6
       new_reliable_refs += inc;
     }
     ref &= ~kPubOwned;
-    uint64_t new_ref = (ordinal << kOrdinalShift) | (new_reliable_refs << kReliableRefCountShift) | new_refs;
+    uint64_t new_ref = BuildOrdinalAndVchanIdBitField(ordinal, vchan_id) |
+                       (new_reliable_refs << kReliableRefCountShift) | new_refs;
     if (slot->refs.compare_exchange_weak(ref, new_ref,
                                          std::memory_order_relaxed)) {
       return true;
@@ -154,7 +166,8 @@ void Channel::DumpSlots() const {
     if (is_pub) {
       std::cout << " publisher " << just_refs;
     } else {
-      std::cout << " refs: " << just_refs << " reliable refs: " << reliable_refs << " ord: " << ref_ord;
+      std::cout << " refs: " << just_refs << " reliable refs: " << reliable_refs
+                << " ord: " << ref_ord;
     }
     std::cout << " ordinal: " << slot->ordinal
               << " buffer_index: " << slot->buffer_index
@@ -206,14 +219,16 @@ void Channel::IncrementBufferRefs(int buffer_index) {
   }
 }
 
-void Channel::GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages, uint32_t& max_message_size, uint32_t& total_drops) {
+void Channel::GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
+                               uint32_t &max_message_size,
+                               uint32_t &total_drops) {
   total_bytes = ccb_->total_bytes;
   total_messages = ccb_->total_messages;
   max_message_size = ccb_->max_message_size;
   total_drops = ccb_->total_drops;
 }
 
-void Channel::ReloadIfNecessary(const std::function<bool()>& reload) {
+void Channel::ReloadIfNecessary(const std::function<bool()> &reload) {
   if (reload == nullptr) {
     return;
   }
@@ -245,11 +260,10 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub) {
       MessageSlot *slot = &ccb_->slots[i];
       if (slot->sub_owners.IsSet(owner)) {
         slot->sub_owners.Clear(owner);
-        AtomicIncRefCount(slot, reliable, -1, 0);
+        AtomicIncRefCount(slot, reliable, -1, 0, 0);
       }
     }
   }
 }
-
 
 } // namespace subspace

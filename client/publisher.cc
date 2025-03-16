@@ -55,7 +55,7 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
     // bottom bits.
     uint64_t old_refs = slot->refs.load(std::memory_order_relaxed);
     uint64_t ref = kPubOwned | owner;
-    uint64_t expected = (slot->ordinal & kOrdinalMask) << kOrdinalShift;
+    uint64_t expected = BuildOrdinalAndVchanIdBitField(slot->ordinal, slot->vchan_id);
     if (slot->refs.compare_exchange_weak(expected, ref,
                                          std::memory_order_relaxed)) {
       if (!ValidateSlotBuffer(slot, reload)) {
@@ -138,7 +138,7 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
     // Claim the slot by setting the kPubOwned bit.
     uint64_t old_refs = slot->refs.load(std::memory_order_relaxed);
     uint64_t ref = kPubOwned | owner;
-    uint64_t expected = (slot->ordinal & kOrdinalMask) << kOrdinalShift;
+    uint64_t expected = BuildOrdinalAndVchanIdBitField(slot->ordinal, vchan_id_);
     if (slot->refs.compare_exchange_weak(expected, ref,
                                          std::memory_order_relaxed)) {
       if (!ValidateSlotBuffer(slot, reload)) {
@@ -186,10 +186,12 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
   if (omit_prefix) {
     slot->ordinal = prefix->ordinal; // Copy ordinal from prefix.
     slot->timestamp = prefix->timestamp;
+    slot->vchan_id = prefix->vchan_id;
   } else {
     prefix->message_size = slot->message_size;
     prefix->ordinal = slot->ordinal;
     prefix->timestamp = slot->timestamp;
+    prefix->vchan_id = slot->vchan_id;
     prefix->flags = 0;
     if (is_activation) {
       prefix->flags |= kMessageActivate;
@@ -201,7 +203,7 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
   ccb_->total_bytes += slot->message_size;
 
   // Set the refs to the ordinal with no refs.
-  slot->refs.store((slot->ordinal & kOrdinalMask) << kOrdinalShift,
+  slot->refs.store(BuildOrdinalAndVchanIdBitField(slot->ordinal, vchan_id_),
                    std::memory_order_release);
 
   // Tell all subscribers that the slot is available.

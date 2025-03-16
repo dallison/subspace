@@ -28,7 +28,7 @@ void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
   // std::cerr << "remove active message " << slot->id << " " << slot->ordinal
   //           << "\n";
   slot->sub_owners.Clear(subscriber_id_);
-  AtomicIncRefCount(slot, IsReliable(), -1, slot->ordinal & kOrdinalMask);
+  AtomicIncRefCount(slot, IsReliable(), -1, slot->ordinal, slot->vchan_id);
 
   if (num_active_messages_-- == options_.MaxActiveMessages()) {
     Trigger();
@@ -181,14 +181,14 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
     // We have a new slot, see if we can increment the ref count.  If we can't
     // we just go back and try again.
     if (AtomicIncRefCount(new_slot->slot, reliable, 1,
-                          new_slot->ordinal & kOrdinalMask)) {
+                          new_slot->ordinal, new_slot->vchan_id)) {
       if (!ValidateSlotBuffer(new_slot->slot, reload) ||
           new_slot->slot->buffer_index == -1) {
         // Failed to get a buffer for the slot.  Embargo the slot so we don't
         // see it again this loop and try again.
         embargoed_slots.Set(new_slot->slot->id);
         AtomicIncRefCount(new_slot->slot, reliable, -1,
-                          new_slot->ordinal & kOrdinalMask);
+                          new_slot->ordinal, new_slot->vchan_id);
         continue;
       }
       // std::cerr << "sub got slot " << new_slot->slot->id << " ordinal "
@@ -236,14 +236,14 @@ MessageSlot *SubscriberImpl::LastSlot(MessageSlot *slot, bool reliable,
 
     // Increment the ref count.
     if (AtomicIncRefCount(new_slot->slot, reliable, 1,
-                          new_slot->ordinal & kOrdinalMask)) {
+                          new_slot->ordinal, new_slot->vchan_id)) {
       if (!ValidateSlotBuffer(new_slot->slot, reload) ||
           new_slot->slot->buffer_index == -1) {
         // Failed to get a buffer for the slot.  Embargo the slot so we don't
         // see it again this loop and try again.
         embargoed_slots.Set(new_slot->slot->id);
         AtomicIncRefCount(new_slot->slot, reliable, -1,
-                          new_slot->ordinal & kOrdinalMask);
+                          new_slot->ordinal, new_slot->vchan_id);
         continue;
       }
       return new_slot->slot;
@@ -294,13 +294,13 @@ MessageSlot *SubscriberImpl::FindActiveSlotByTimestamp(
     }
 
     // Try to increment the ref count.
-    if (AtomicIncRefCount(it->slot, reliable, 1, it->ordinal & kOrdinalMask)) {
+    if (AtomicIncRefCount(it->slot, reliable, 1, it->ordinal, it->vchan_id)) {
       if (!ValidateSlotBuffer(it->slot, reload) ||
           it->slot->buffer_index == -1) {
         // Failed to get a buffer for the slot.  Embargo the slot so we don't
         // see it again this loop and try again.
         embargoed_slots.Set(it->slot->id);
-        AtomicIncRefCount(it->slot, reliable, -1, it->ordinal & kOrdinalMask);
+        AtomicIncRefCount(it->slot, reliable, -1, it->ordinal, it->vchan_id);
         continue;
       }
       Prefix(it->slot, reload)->flags |= kMessageSeen;
