@@ -177,6 +177,7 @@ struct ChannelControlBlock {          // a.k.a CCB
   int buffer_index;       // Which buffer in buffers array to use.
   int num_buffers;        // Size of buffers array in shared memory.
   AtomicBitSet<kMaxSlotOwners> subscribers; // One bit per subscriber.
+  std::array<int16_t, kMaxSlotOwners> subVchanIds;
 
   // Statistics counters.
   std::atomic<uint64_t> total_bytes;
@@ -195,7 +196,7 @@ inline size_t AvailableSlotsSize(int num_slots) {
 }
 
 inline size_t CcbSize(int num_slots) {
-  return sizeof(ChannelControlBlock) + num_slots * sizeof(MessageSlot) +
+  return Aligned<64>(sizeof(ChannelControlBlock) + num_slots * sizeof(MessageSlot)) +
          AvailableSlotsSize(num_slots);
 }
 
@@ -315,7 +316,10 @@ public:
     return p;
   }
 
-  void RegisterSubscriber(int sub_id) { ccb_->subscribers.Set(sub_id); }
+  void RegisterSubscriber(int sub_id, int vchan_id) {
+    ccb_->subscribers.Set(sub_id);
+    ccb_->subVchanIds[sub_id] = vchan_id;
+  }
 
   void DumpSlots() const;
   void Dump() const;

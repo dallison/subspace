@@ -137,13 +137,25 @@ public:
                                                  bool is_bridge,
                                                  int max_active_messages);
 
+  virtual std::string Type() const { return Channel::Type(); }
+  virtual void SetType(const std::string &type) { Channel::SetType(type); }
+
+  virtual absl::StatusOr<int> AllocateUserId(const char *type);
+
+  virtual void AddUserId(int id) { user_ids_.Set(id); }
+  virtual void RemoveUserId(int id) { user_ids_.Clear(id); }
+  void AddUser(int id, std::unique_ptr<User> user) {
+    users_[id] = std::move(user);
+    AddUserId(id);
+  }
+
   virtual bool IsMux() const { return false; }
   virtual int GetVirtualChannelId() const { return -1; }
   virtual int GetChannelId() const { return Channel::GetChannelId(); }
   virtual bool IsPlaceholder() const { return Channel::IsPlaceholder(); }
   bool IsVirtual() const { return is_virtual_; }
-  virtual void RegisterSubscriber(int sub_id) {
-    Channel::RegisterSubscriber(sub_id);
+  virtual void RegisterSubscriber(int sub_id, int vchan_id) {
+    Channel::RegisterSubscriber(sub_id, vchan_id);
   }
 
   // Get the file descriptors for all subscriber triggers.
@@ -155,10 +167,11 @@ public:
   // Translate a user id into a User pointer.  The pointer ownership
   // is kept by the ServerChannel.
   absl::StatusOr<User *> GetUser(int id) {
-    if (id < 0 || id >= users_.size()) {
+    auto it = users_.find(id);
+    if (it == users_.end()) {
       return absl::InternalError("Invalid user id");
     }
-    return users_[id].get();
+    return it->second.get();
   }
 
   // Record an update to a channel in the SCB.  Args:
@@ -227,8 +240,8 @@ public:
 
   virtual absl::StatusOr<toolbelt::FileDescriptor>
   ExtendBuffers(int32_t new_slot_size);
-  
-  struct CapacityInfo{
+
+  struct CapacityInfo {
     bool capacity_ok;
     int num_pubs;
     int num_subs;
@@ -236,11 +249,12 @@ public:
     int slots_needed;
   };
 
-  CapacityInfo HasSufficientCapacityInternal(int initial_value, int new_max_active_messages) const;
+  CapacityInfo HasSufficientCapacityInternal(int initial_value,
+                                             int new_max_active_messages) const;
   absl::Status CapacityError(const CapacityInfo &info) const;
 
 protected:
-  std::vector<std::unique_ptr<User>> users_;
+  absl::flat_hash_map<int, std::unique_ptr<User>> users_;
   toolbelt::BitSet<kMaxUsers> user_ids_;
   absl::flat_hash_set<ChannelTransmitter> bridged_publishers_;
   SharedMemoryFds shared_memory_fds_;
@@ -292,6 +306,22 @@ public:
 
   ~VirtualChannel();
 
+  std::string Type() const override { return mux_->Type(); }
+  void SetType(const std::string &type) override { mux_->SetType(type); }
+
+  // Users (pubs and subs) are assigned ids from the multiplexer but owned
+  // by this channel.  This is because they all share the same CCB and
+  // each needs a unique ID for the multiplexer.  However they are not
+  // users of the multiplexer.
+  absl::StatusOr<int> AllocateUserId(const char *type) override {
+    return mux_->AllocateUserId(type);
+  }
+
+  void RemoveUserId(int id) override {
+    mux_->RemoveUserId(id);
+    user_ids_.Clear(id);
+  }
+
   ChannelMultiplexer *GetMux() const { return mux_; }
   int GetVirtualChannelId() const override { return vchan_id_; }
 
@@ -316,8 +346,8 @@ public:
     mux_->CleanupSlots(owner, reliable, is_pub);
   }
 
-  void RegisterSubscriber(int sub_id) override {
-    mux_->RegisterSubscriber(sub_id);
+  void RegisterSubscriber(int sub_id, int vchan_id) override {
+    mux_->RegisterSubscriber(sub_id, vchan_id);
   }
 
   absl::StatusOr<toolbelt::FileDescriptor>
@@ -329,10 +359,7 @@ public:
     mux_->AddBuffer(slot_size, std::move(fd));
   }
 
-   uint64_t GetVirtualMemoryUsage() const override {
-    return 0;
-   }
-
+  uint64_t GetVirtualMemoryUsage() const override { return 0; }
 
 private:
   Server &server_;
