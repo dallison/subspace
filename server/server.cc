@@ -327,6 +327,14 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
       return absl::InternalError(
           absl::StrFormat("Channel %s is not a multiplexer", mux));
     }
+    if (mux_channel->IsPlaceholder()) {
+      // Remap the memory now that we know the slots.
+      absl::Status status =
+          RemapChannel(mux_channel, slot_size, num_slots);
+      if (!status.ok()) {
+        return status;
+      }
+    }
     // Create a virtual channel associated with the multiplexer.
     ChannelMultiplexer *m = static_cast<ChannelMultiplexer *>(mux_channel);
     absl::StatusOr<std::unique_ptr<VirtualChannel>> vchan =
@@ -377,8 +385,9 @@ absl::Status Server::RemapChannel(ServerChannel *channel, int slot_size,
                                   int num_slots) {
   if (channel->IsVirtual()) {
     ChannelMultiplexer *mux = static_cast<VirtualChannel *>(channel)->GetMux();
-    std::cerr << "remapping multiplexer " << channel->Name() << " with "
-              << num_slots << " slots" << std::endl;
+    logger_.Log(toolbelt::LogLevel::kDebug,
+                "Remapping multiplexer %s with %d slots", channel->Name().c_str(),
+                num_slots);
     return RemapChannel(mux, slot_size, num_slots);
   }
   absl::StatusOr<SharedMemoryFds> fds =

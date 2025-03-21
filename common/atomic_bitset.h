@@ -26,7 +26,7 @@ public:
   void Init(size_t num_bits) {
     num_bits_ = num_bits;
     for (size_t i = 0; i < BitsToWords(num_bits_); i++) {
-      bits_[i].store(0, std::memory_order_relaxed);
+     bits_[i].store(0, std::memory_order_relaxed);
     }
   }
   void Set(size_t bit) {
@@ -106,7 +106,7 @@ private:
 };
 
 inline size_t SizeofAtomicBitSet(size_t size_in_bits) {
-  return sizeof(std::atomic<uint64_t>) * BitsToWords(size_in_bits);
+  return sizeof(size_t) + sizeof(std::atomic<uint64_t>) * BitsToWords(size_in_bits);
 }
 
 // An atomic bitset with its bits not stored in the object.

@@ -55,7 +55,8 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
     // bottom bits.
     uint64_t old_refs = slot->refs.load(std::memory_order_relaxed);
     uint64_t ref = kPubOwned | owner;
-    uint64_t expected = BuildOrdinalAndVchanIdBitField(slot->ordinal, slot->vchan_id);
+    uint64_t expected =
+        BuildOrdinalAndVchanIdBitField(slot->ordinal, slot->vchan_id);
     if (slot->refs.compare_exchange_weak(expected, ref,
                                          std::memory_order_relaxed)) {
       if (!ValidateSlotBuffer(slot, reload)) {
@@ -78,8 +79,13 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
   p->vchan_id = vchan_id_;
 
   // We have a slot.  Clear it in all the subscriber bitsets.
-  ccb_->subscribers.Traverse(
-      [this, slot](int sub_id) { GetAvailableSlots(sub_id).Clear(slot->id); });
+  ccb_->subscribers.Traverse([this, slot](int sub_id) {
+    if (vchan_id_ != -1 && ccb_->subVchanIds[sub_id] != -1 &&
+        vchan_id_ != ccb_->subVchanIds[sub_id]) {
+      return;
+    }
+    GetAvailableSlots(sub_id).Clear(slot->id);
+  });
   return slot;
 }
 
@@ -138,7 +144,8 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
     // Claim the slot by setting the kPubOwned bit.
     uint64_t old_refs = slot->refs.load(std::memory_order_relaxed);
     uint64_t ref = kPubOwned | owner;
-    uint64_t expected = BuildOrdinalAndVchanIdBitField(slot->ordinal, vchan_id_);
+    uint64_t expected =
+        BuildOrdinalAndVchanIdBitField(slot->ordinal, vchan_id_);
     if (slot->refs.compare_exchange_weak(expected, ref,
                                          std::memory_order_relaxed)) {
       if (!ValidateSlotBuffer(slot, reload)) {
@@ -207,8 +214,13 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
                    std::memory_order_release);
 
   // Tell all subscribers that the slot is available.
-  ccb_->subscribers.Traverse(
-      [this, slot](int sub_id) { GetAvailableSlots(sub_id).Set(slot->id); });
+  ccb_->subscribers.Traverse([this, slot](int sub_id) {
+    if (vchan_id_ != -1 && ccb_->subVchanIds[sub_id] != -1 &&
+        vchan_id_ != ccb_->subVchanIds[sub_id]) {
+      return;
+    }
+    GetAvailableSlots(sub_id).Set(slot->id);
+  });
 
   // A reliable publisher doesn't allocate a slot until it is asked for.
   if (reliable) {

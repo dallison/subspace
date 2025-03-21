@@ -130,7 +130,6 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
     return p.status();
   }
   ccb_ = reinterpret_cast<ChannelControlBlock *>(*p);
-
   // Create a single buffer but don't map it in.  There is no need to
   // map in the buffers in the server since they will never be used.
   int64_t buffers_size =
@@ -219,7 +218,7 @@ ServerChannel::ExtendBuffers(int32_t new_slot_size) {
 std::vector<toolbelt::FileDescriptor>
 ServerChannel::GetSubscriberTriggerFds() const {
   std::vector<toolbelt::FileDescriptor> r;
-  for (auto &user : users_) {
+  for (auto & [ id, user ] : users_) {
     if (user == nullptr) {
       continue;
     }
@@ -233,7 +232,7 @@ ServerChannel::GetSubscriberTriggerFds() const {
 std::vector<toolbelt::FileDescriptor>
 ServerChannel::GetReliablePublisherTriggerFds() const {
   std::vector<toolbelt::FileDescriptor> r;
-  for (auto &user : users_) {
+  for (auto & [ id, user ] : users_) {
     if (user == nullptr) {
       continue;
     }
@@ -257,10 +256,16 @@ uint64_t ServerChannel::GetVirtualMemoryUsage() const {
   return size;
 }
 
+// User ids are allocated from the multiplexer as all virtual channels
+// on the mux share the same CCB.
+absl::StatusOr<int> ServerChannel::AllocateUserId(const char *type) {
+  return user_ids_.Allocate(type);
+}
+
 absl::StatusOr<PublisherUser *>
 ServerChannel::AddPublisher(ClientHandler *handler, bool is_reliable,
                             bool is_local, bool is_bridge, bool is_fixed_size) {
-  absl::StatusOr<int> user_id = user_ids_.Allocate("publisher");
+  absl::StatusOr<int> user_id = AllocateUserId("publisher");
   if (!user_id.ok()) {
     return user_id.status();
   }
@@ -271,17 +276,14 @@ ServerChannel::AddPublisher(ClientHandler *handler, bool is_reliable,
     return status;
   }
   PublisherUser *result = pub.get();
-  if (*user_id >= users_.size()) {
-    users_.resize(*user_id + 1);
-  }
-  users_[*user_id] = std::move(pub);
+  AddUser(*user_id, std::move(pub));
   return result;
 }
 
 absl::StatusOr<SubscriberUser *>
 ServerChannel::AddSubscriber(ClientHandler *handler, bool is_reliable,
                              bool is_bridge, int max_active_messages) {
-  absl::StatusOr<int> user_id = user_ids_.Allocate("subscriber");
+  absl::StatusOr<int> user_id = AllocateUserId("subscriber");
   if (!user_id.ok()) {
     return user_id.status();
   }
@@ -292,16 +294,12 @@ ServerChannel::AddSubscriber(ClientHandler *handler, bool is_reliable,
     return status;
   }
   SubscriberUser *result = sub.get();
-  if (*user_id >= users_.size()) {
-    users_.resize(*user_id + 1);
-  }
-  users_[*user_id] = std::move(sub);
-
+  AddUser(*user_id, std::move(sub));
   return result;
 }
 
 void ServerChannel::TriggerAllSubscribers() {
-  for (auto &user : users_) {
+  for (auto & [ id, user ] : users_) {
     if (user == nullptr) {
       continue;
     }
@@ -312,34 +310,41 @@ void ServerChannel::TriggerAllSubscribers() {
 }
 
 void ServerChannel::RemoveUser(Server *server, int user_id) {
-  for (auto &user : users_) {
-    if (user == nullptr) {
-      continue;
-    }
-
-    if (user->GetId() == user_id) {
-      CleanupSlots(user->GetId(), user->IsReliable(), user->IsPublisher());
-      user_ids_.Clear(user->GetId());
-      RecordUpdate(user->IsPublisher(), /*add=*/false, user->IsReliable());
-      if (user->IsPublisher()) {
-        TriggerAllSubscribers();
-      }
-      user.reset();
-    }
+  if (IsVirtual()) {
+    ChannelMultiplexer *mux = static_cast<VirtualChannel *>(this)->GetMux();
+    mux->RemoveUserId(user_id);
+    return;
   }
+  auto it = users_.find(user_id);
+  if (it == users_.end()) {
+    return;
+  }
+
+  User *user = it->second.get();
+  if (user == nullptr) {
+    users_.erase(it);
+    return;
+  }
+  CleanupSlots(user->GetId(), user->IsReliable(), user->IsPublisher());
+  RemoveUserId(user->GetId());
+  RecordUpdate(user->IsPublisher(), /*add=*/false, user->IsReliable());
+  if (user->IsPublisher()) {
+    TriggerAllSubscribers();
+  }
+  users_.erase(it);
   if (IsEmpty()) {
     server->RemoveChannel(this);
   }
 }
 
 void ServerChannel::RemoveAllUsersFor(ClientHandler *handler) {
-  for (auto &user : users_) {
+  for (auto & [ id, user ] : users_) {
     if (user == nullptr) {
       continue;
     }
     if (user->GetHandler() == handler) {
       CleanupSlots(user->GetId(), user->IsReliable(), user->IsPublisher());
-      user_ids_.Clear(user->GetId());
+      RemoveUserId(user->GetId());
       RecordUpdate(user->IsPublisher(), /*add=*/false, user->IsReliable());
       if (user->IsPublisher()) {
         TriggerAllSubscribers();
@@ -351,7 +356,7 @@ void ServerChannel::RemoveAllUsersFor(ClientHandler *handler) {
 
 void ServerChannel::CountUsers(int &num_pubs, int &num_subs) const {
   num_pubs = num_subs = 0;
-  for (auto &user : users_) {
+  for (auto & [ id, user ] : users_) {
     if (user == nullptr) {
       continue;
     }
@@ -365,7 +370,7 @@ void ServerChannel::CountUsers(int &num_pubs, int &num_subs) const {
 
 // Channel is public if there are any public publishers.
 bool ServerChannel::IsLocal() const {
-  for (auto &user : users_) {
+  for (auto & [ id, user ] : users_) {
     if (user == nullptr) {
       continue;
     }
@@ -381,7 +386,7 @@ bool ServerChannel::IsLocal() const {
 
 // Channel is reliable if there are any reliable publishers.
 bool ServerChannel::IsReliable() const {
-  for (auto &user : users_) {
+  for (auto & [ id, user ] : users_) {
     if (user == nullptr) {
       continue;
     }
@@ -398,7 +403,7 @@ bool ServerChannel::IsReliable() const {
 // Channel is fixed_size if there are any fixed size publishers.  If one is
 // fixed size, they all must be.
 bool ServerChannel::IsFixedSize() const {
-  for (auto &user : users_) {
+  for (auto & [ id, user ] : users_) {
     if (user == nullptr) {
       continue;
     }
@@ -415,7 +420,7 @@ bool ServerChannel::IsFixedSize() const {
 bool ServerChannel::IsBridgePublisher() const {
   int num_pubs = 0;
   int num_bridge_pubs = 0;
-  for (auto &user : users_) {
+  for (auto & [ id, user ] : users_) {
     if (user == nullptr) {
       continue;
     }
@@ -433,7 +438,7 @@ bool ServerChannel::IsBridgePublisher() const {
 bool ServerChannel::IsBridgeSubscriber() const {
   int num_subs = 0;
   int num_bridge_subs = 0;
-  for (auto &user : users_) {
+  for (auto & [ id, user ] : users_) {
     if (user == nullptr) {
       continue;
     }
@@ -459,7 +464,7 @@ ServerChannel::CapacityInfo ServerChannel::HasSufficientCapacityInternal(
 
   // Add in the total active message maximums.
   int max_active_messages = new_max_active_messages;
-  for (auto &user : users_) {
+  for (auto & [ id, user ] : users_) {
     if (user == nullptr) {
       continue;
     }

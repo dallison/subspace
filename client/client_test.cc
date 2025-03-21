@@ -2503,7 +2503,7 @@ TEST_F(ClientTest, ManyChannelsNonMultiplexed) {
   srand(1234);
   std::vector<uint64_t> periods; // In microseconds
   for (int i = 0; i < kNumChannels; i++) {
-    periods.push_back(5000 + rand() % 100000);
+    periods.push_back(5000 + rand() % 1000);
   }
   // Create a thread for each publisher, sending messages at the periods in the
   // vector.
@@ -2622,10 +2622,10 @@ TEST_F(ClientTest, ManyChannelsMultiplexed) {
     }
   });
 
-  srand(time(nullptr));
+  srand(1024);
   std::vector<uint64_t> periods; // In microseconds
   for (int i = 0; i < kNumChannels; i++) {
-    periods.push_back(5000 + rand() % 100000);
+    periods.push_back(5000 + rand() % 1000);
   }
   // Create a thread for each publisher, sending messages at the periods in the
   // vector.
@@ -2679,7 +2679,7 @@ TEST_F(ClientTest, ManyChannelsMultiplexedSubscribedToMux) {
 
   constexpr const char *kMux = "/logs/*";
   constexpr int kNumChannels = 200;
-  constexpr int kNumSlots = 1000;
+  constexpr int kNumSlots = 800;
   constexpr int kSlotSize = 32768;
   constexpr int kNumMessages = 200;
   // Memory used ~= kNumSlots * kSlotSize
@@ -2740,7 +2740,7 @@ TEST_F(ClientTest, ManyChannelsMultiplexedSubscribedToMux) {
   srand(1234);
   std::vector<uint64_t> periods; // In microseconds
   for (int i = 0; i < kNumChannels; i++) {
-    periods.push_back(5000 + rand() % 100000);
+    periods.push_back(5000 + rand() % 1000);
   }
   // Create a thread for each publisher, sending messages at the periods in the
   // vector.
