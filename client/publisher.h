@@ -63,7 +63,6 @@ private:
   void AddSubscriber(toolbelt::FileDescriptor fd) {
     subscribers_.emplace_back(toolbelt::FileDescriptor(), std::move(fd));
   }
-  size_t NumSubscribers() { return subscribers_.size(); }
 
   void SetTriggerFd(toolbelt::FileDescriptor fd) {
     trigger_.SetTriggerFd(std::move(fd));

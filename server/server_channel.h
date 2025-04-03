@@ -191,8 +191,8 @@ public:
 
   virtual int SlotSize() const { return Channel::SlotSize(); }
   virtual int NumSlots() const { return Channel::NumSlots(); }
-  virtual void CleanupSlots(int owner, bool reliable, bool is_pub) {
-    Channel::CleanupSlots(owner, reliable, is_pub);
+  virtual void CleanupSlots(int owner, bool reliable, bool is_pub, int vchan_id) {
+    Channel::CleanupSlots(owner, reliable, is_pub, vchan_id);
   }
 
   // This is true if all publishers are bridge publishers.
@@ -342,8 +342,8 @@ public:
     return mux_->RecordUpdate(is_pub, add, reliable);
   }
 
-  void CleanupSlots(int owner, bool reliable, bool is_pub) override {
-    mux_->CleanupSlots(owner, reliable, is_pub);
+  void CleanupSlots(int owner, bool reliable, bool is_pub, int vchan_id) override {
+    mux_->CleanupSlots(owner, reliable, is_pub, vchan_id);
   }
 
   void RegisterSubscriber(int sub_id, int vchan_id) override {

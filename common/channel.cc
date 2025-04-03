@@ -111,7 +111,7 @@ void Channel::Unmap() {
 }
 
 bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
-                                uint64_t ordinal, int vchan_id) {
+                                uint64_t ordinal, int vchan_id, bool retire) {
   for (;;) {
     uint64_t ref = slot->refs.load(std::memory_order_relaxed);
     if ((ref & kPubOwned) != 0) {
@@ -142,10 +142,23 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
       new_reliable_refs += inc;
     }
     ref &= ~kPubOwned;
-    uint64_t new_ref = BuildOrdinalAndVchanIdBitField(ordinal, vchan_id) |
-                       (new_reliable_refs << kReliableRefCountShift) | new_refs;
+    int retired_refs = (ref >> kRetiredRefsShift) & kRetiredRefsMask;
+    if (retire) {
+      retired_refs++;
+    }
+    uint64_t new_ref =
+        BuildOrdinalAndVchanIdBitField(ordinal, vchan_id) |
+        ((retired_refs & kRetiredRefsMask) << kRetiredRefsShift) |
+        (new_reliable_refs << kReliableRefCountShift) | new_refs;
     if (slot->refs.compare_exchange_weak(ref, new_ref,
                                          std::memory_order_relaxed)) {
+      // std::cerr << slot->id << " retired_refs: " << retired_refs
+      //           << " num subs: " << NumSubscribers(vchan_id) << std::endl;
+      if (retired_refs >= NumSubscribers(vchan_id)) {
+        // All subscribers have seen the slot, retire it.
+        RetiredSlots().Set(slot->id);
+        // std::cerr << "Retiring slot " << slot->id << std::endl;
+      }
       return true;
     }
     // Another subscriber got there before us.  Try again.
@@ -236,7 +249,8 @@ void Channel::ReloadIfNecessary(const std::function<bool()> &reload) {
   } while (reload());
 }
 
-void Channel::CleanupSlots(int owner, bool reliable, bool is_pub) {
+void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
+                           int vchan_id) {
   if (is_pub) {
     // Look for a slot with kPubOwned set and clear it.
     for (int i = 0; i < NumSlots(); i++) {
@@ -255,12 +269,14 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub) {
     // Subscriber.
     // Remove the subscriber from the subscriber bitset.
     ccb_->subscribers.Clear(owner);
+    ccb_->num_subs.RemoveSubscriber(vchan_id);
+
     // Go through all the slots and remove the owner from the owners bitset.
     for (int i = 0; i < NumSlots(); i++) {
       MessageSlot *slot = &ccb_->slots[i];
       if (slot->sub_owners.IsSet(owner)) {
         slot->sub_owners.Clear(owner);
-        AtomicIncRefCount(slot, reliable, -1, 0, 0);
+        AtomicIncRefCount(slot, reliable, -1, 0, 0, true);
       }
     }
   }
