@@ -91,6 +91,11 @@ CreateSystemControlBlock(toolbelt::FileDescriptor &fd) {
 absl::StatusOr<SharedMemoryFds>
 ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
                         int num_slots) {
+  SubscriberCounter num_subs;
+
+  if (scb_ != nullptr) {
+    num_subs = ccb_->num_subs;
+  }
   // Unmap existing memory.
   Unmap();
 
@@ -130,6 +135,8 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
     return p.status();
   }
   ccb_ = reinterpret_cast<ChannelControlBlock *>(*p);
+  ccb_->num_subs = num_subs;
+
   // Create a single buffer but don't map it in.  There is no need to
   // map in the buffers in the server since they will never be used.
   int64_t buffers_size =
@@ -159,7 +166,7 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
   }
   new (&ccb_->subscribers) AtomicBitSet<kMaxSlotOwners>();
 
-  // Initialize all slots and insert into the free list.
+  // Initialize all slots
   for (int32_t i = 0; i < num_slots_; i++) {
     MessageSlot *slot = &ccb_->slots[i];
     slot->id = i;
@@ -171,6 +178,10 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
 
   // Initialize the available slots for each subscriber.
   if (num_slots_ > 0) {
+    // All slots are initially retired.
+    new (RetiredSlotsAddr()) InPlaceAtomicBitset(num_slots_);
+    RetiredSlots().SetAll();
+
     for (int i = 0; i < kMaxSlotOwners; i++) {
       new (GetAvailableSlotsAddress(i)) InPlaceAtomicBitset(num_slots_);
     }
@@ -313,7 +324,6 @@ void ServerChannel::RemoveUser(Server *server, int user_id) {
   if (IsVirtual()) {
     ChannelMultiplexer *mux = static_cast<VirtualChannel *>(this)->GetMux();
     mux->RemoveUserId(user_id);
-    return;
   }
   auto it = users_.find(user_id);
   if (it == users_.end()) {
@@ -325,7 +335,8 @@ void ServerChannel::RemoveUser(Server *server, int user_id) {
     users_.erase(it);
     return;
   }
-  CleanupSlots(user->GetId(), user->IsReliable(), user->IsPublisher());
+  CleanupSlots(user->GetId(), user->IsReliable(), user->IsPublisher(),
+               GetVirtualChannelId());
   RemoveUserId(user->GetId());
   RecordUpdate(user->IsPublisher(), /*add=*/false, user->IsReliable());
   if (user->IsPublisher()) {
@@ -343,7 +354,8 @@ void ServerChannel::RemoveAllUsersFor(ClientHandler *handler) {
       continue;
     }
     if (user->GetHandler() == handler) {
-      CleanupSlots(user->GetId(), user->IsReliable(), user->IsPublisher());
+      CleanupSlots(user->GetId(), user->IsReliable(), user->IsPublisher(),
+                   GetVirtualChannelId());
       RemoveUserId(user->GetId());
       RecordUpdate(user->IsPublisher(), /*add=*/false, user->IsReliable());
       if (user->IsPublisher()) {

@@ -84,18 +84,22 @@ constexpr uint64_t kRefCountShift = 10;
 constexpr uint64_t kReliableRefCountShift = 10;
 constexpr uint64_t kPubOwned = 1ULL << 63;
 constexpr uint64_t kRefsMask = (1ULL << 20) - 1; // 20 bits
+constexpr uint64_t kRetiredRefsSize = 10;
+constexpr uint64_t kRetiredRefsMask = (1ULL << kRetiredRefsSize) - 1;
+constexpr uint64_t kRetiredRefsShift = 20;
 
-constexpr uint64_t kVchanIdShift = 20;
+// Virtual channel ID is just above retired refs and is 9 bits long.
+constexpr uint64_t kVchanIdShift = kRetiredRefsShift + kRetiredRefsSize;
 constexpr uint64_t kVchanIdSize = 9;
 constexpr uint64_t kVchanIdMask = (1ULL << kVchanIdSize) - 1;
 
-// We put the bottom 33 bits of the ordinal just above the
-// reliable ref count field.  This is to ensure that a publisher
+// We put the bottom 24 bits of the ordinal just above the
+// vchan ID field.  This is to ensure that a publisher
 // hasn't published another message in the slot before a subscriber
 // increments the ref count.
-constexpr uint64_t kOrdinalSize = 33;
+constexpr uint64_t kOrdinalSize = 24;
 constexpr uint64_t kOrdinalMask = (1ULL << kOrdinalSize) - 1;
-constexpr uint64_t kOrdinalShift = 29;
+constexpr uint64_t kOrdinalShift = 39;
 
 // Combine an ordinal and a vchan_id into a single 64 bit field, shifted
 // to the correct position for the refs field.
@@ -160,6 +164,32 @@ struct BufferHeader {
   int32_t padding;           // Align to 64 bits.
 };
 
+// This counts the number of subscribers given a virtual channel id.
+class SubscriberCounter {
+public:
+  void AddSubscriber(int vchan_id) {
+    num_subs_[vchan_id+1]++;
+  }
+
+  void RemoveSubscriber(int vchan_id) {
+    num_subs_[vchan_id+1]--;
+  }
+
+  // If vchan_id is valid we also count the number of subscribers to the
+  // multiplexer itself.
+  int NumSubscribers(int vchan_id) {
+    int n = num_subs_[0];
+    if (vchan_id == -1) {
+      return n;
+    }
+    return n + num_subs_[vchan_id+1];
+  }
+
+private:
+  // Vchan ID -1 means invalid vchan ID so we just use element 0 for that.
+  std::array<int, kMaxVchanId+1> num_subs_;
+};
+
 // The control data for a channel.  This memory is
 // allocated by the server and mapped into the process
 // for all publishers and subscribers.  Each mapped CCB is mapped
@@ -177,8 +207,12 @@ struct ChannelControlBlock {          // a.k.a CCB
   int buffer_index;       // Which buffer in buffers array to use.
   int num_buffers;        // Size of buffers array in shared memory.
   AtomicBitSet<kMaxSlotOwners> subscribers; // One bit per subscriber.
-  std::array<int16_t, kMaxSlotOwners> subVchanIds;
 
+  // Given a subscriber ID, what is the vchan ID associated with it.
+  std::array<int16_t, kMaxSlotOwners> sub_vchan_ids;
+
+  SubscriberCounter num_subs;
+ 
   // Statistics counters.
   std::atomic<uint64_t> total_bytes;
   std::atomic<uint64_t> total_messages;
@@ -188,6 +222,8 @@ struct ChannelControlBlock {          // a.k.a CCB
   // Variable number of MessageSlot structs (num_slots long).
   MessageSlot slots[0];
   // Followed by:
+  // AtomicBitSet<0> retiredSlots[num_slots];
+  // Followed by:
   // AtomicBitSet<0> availableSlots[kMaxSlotOwners];
 };
 
@@ -196,7 +232,9 @@ inline size_t AvailableSlotsSize(int num_slots) {
 }
 
 inline size_t CcbSize(int num_slots) {
-  return Aligned<64>(sizeof(ChannelControlBlock) + num_slots * sizeof(MessageSlot)) +
+  return Aligned<64>(sizeof(ChannelControlBlock) +
+                     num_slots * sizeof(MessageSlot)) +
+         Aligned<64>(SizeofAtomicBitSet(num_slots)) +
          AvailableSlotsSize(num_slots);
 }
 
@@ -318,7 +356,8 @@ public:
 
   void RegisterSubscriber(int sub_id, int vchan_id) {
     ccb_->subscribers.Set(sub_id);
-    ccb_->subVchanIds[sub_id] = vchan_id;
+    ccb_->sub_vchan_ids[sub_id] = vchan_id;
+    ccb_->num_subs.AddSubscriber(vchan_id);
   }
 
   void DumpSlots() const;
@@ -360,7 +399,11 @@ public:
     return buffers_.empty() ? nullptr
                             : (buffers_[index].buffer + sizeof(BufferHeader));
   }
-  void CleanupSlots(int owner, bool reliable, bool is_pub);
+  void CleanupSlots(int owner, bool reliable, bool is_pub, int vchan_id);
+
+  int NumSubscribers(int vchan_id) const {
+    return ccb_->num_subs.NumSubscribers(vchan_id);
+  }
 
   int GetChannelId() const { return channel_id_; }
 
@@ -379,7 +422,7 @@ public:
   void SetDebug(bool v) { debug_ = v; }
 
   bool AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
-                         uint64_t ordinal, int vchan_id);
+                         uint64_t ordinal, int vchan_id, bool retire);
 
   void SetType(std::string type) { type_ = std::move(type); }
   const std::string Type() const { return type_; }
@@ -395,6 +438,17 @@ public:
            Aligned<64>(sizeof(ChannelControlBlock) +
                        num_slots_ * sizeof(MessageSlot));
   }
+  char *EndOfRetiredSlots() const {
+    return EndOfSlots() + Aligned<64>(SizeofAtomicBitSet(num_slots_));
+  }
+
+  InPlaceAtomicBitset *RetiredSlotsAddr() {
+    return reinterpret_cast<InPlaceAtomicBitset *>(EndOfSlots());
+  }
+
+  InPlaceAtomicBitset &RetiredSlots() {
+    return *reinterpret_cast<InPlaceAtomicBitset *>(EndOfSlots());
+  }
 
   InPlaceAtomicBitset &GetAvailableSlots(int sub_id) {
     return *GetAvailableSlotsAddress(sub_id);
@@ -402,7 +456,7 @@ public:
 
   InPlaceAtomicBitset *GetAvailableSlotsAddress(int sub_id) {
     return reinterpret_cast<InPlaceAtomicBitset *>(
-        EndOfSlots() + SizeofAtomicBitSet(num_slots_) * sub_id);
+        EndOfRetiredSlots() + SizeofAtomicBitSet(num_slots_) * sub_id);
   }
 
 protected:

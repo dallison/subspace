@@ -503,6 +503,10 @@ public:
 
   int VirtualChannelId() const { return impl_->VirtualChannelId(); }
 
+  int NumSubscribers(int vchan_id = -1) const {
+    return impl_->NumSubscribers(vchan_id);
+  }
+
 private:
   friend class Server;
   friend class ClientImpl;
@@ -650,6 +654,10 @@ public:
   void DumpSlots() const { impl_->DumpSlots(); }
 
   int VirtualChannelId() const { return impl_->VirtualChannelId(); }
+
+  int NumSubscribers(int vchan_id = -1) const {
+    return impl_->NumSubscribers(vchan_id);
+  }
 
 private:
   friend class Server;

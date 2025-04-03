@@ -78,7 +78,7 @@ public:
 
   void IgnoreActivation(MessageSlot *slot) {
     RememberOrdinal(slot->ordinal, slot->vchan_id);
-    DecrementSlotRef(slot);
+    DecrementSlotRef(slot, true);
     Prefix(slot)->flags |= kMessageSeen;
   }
   // A subscriber wants to find a slot with a message in it.  There are
@@ -106,8 +106,8 @@ public:
     return active_message_;
   }
 
-  void DecrementSlotRef(MessageSlot *slot) {
-    AtomicIncRefCount(slot, IsReliable(), -1, slot->ordinal & kOrdinalMask, vchan_id_);
+  void DecrementSlotRef(MessageSlot *slot, bool retire) {
+    AtomicIncRefCount(slot, IsReliable(), -1, slot->ordinal & kOrdinalMask, vchan_id_, retire);
   }
 
   bool SlotExpired(MessageSlot *slot, uint32_t ordinal) {

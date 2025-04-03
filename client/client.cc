@@ -301,7 +301,9 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
 
 absl::StatusOr<void *> ClientImpl::GetMessageBuffer(PublisherImpl *publisher,
                                                     int32_t max_size) {
-  publisher->ClearPollFd();
+  if (publisher->IsReliable()) {
+    publisher->ClearPollFd();
+  }
 
   int32_t slot_size = publisher->SlotSize();
   if (max_size != -1 && max_size > slot_size) {
@@ -332,7 +334,7 @@ absl::StatusOr<void *> ClientImpl::GetMessageBuffer(PublisherImpl *publisher,
     // there are no slots with reliable_ref_count > 0 and therefore nothing
     // to stop the publisher taking all the slots.  An incoming subscriber
     // would miss all those messages and that's not reliable.
-    if (publisher->NumSubscribers() == 0) {
+    if (publisher->NumSubscribers(publisher->VirtualChannelId()) == 0) {
       return nullptr;
     }
     MessageSlot *slot = publisher->FindFreeSlotReliable(
@@ -588,7 +590,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
   // If we are unable to allocate a new message (due to message limits)
   // restore the slot so that we pick it up next time.
   if (msg->length == 0) {
-    subscriber->DecrementSlotRef(new_slot);
+    subscriber->DecrementSlotRef(new_slot, false);
     // Subscriber does not have a slot now but the slot it had is still active.
   } else {
     // We have a slot, claim it.
@@ -796,16 +798,15 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
 
 absl::Status
 ClientImpl::ReloadSubscribersIfNecessary(PublisherImpl *publisher) {
-  if (absl::Status status = CheckConnected(); !status.ok()) {
-    return status;
-  }
-
   SystemControlBlock *scb = publisher->GetScb();
   int updates = scb->counters[publisher->GetChannelId()].num_sub_updates;
   if (publisher->NumUpdates() == updates) {
     return absl::OkStatus();
   }
   publisher->SetNumUpdates(updates);
+  if (absl::Status status = CheckConnected(); !status.ok()) {
+    return status;
+  }
 
   // We do have updates, get a new list of subscriber for
   // the channel.
@@ -833,9 +834,6 @@ ClientImpl::ReloadSubscribersIfNecessary(PublisherImpl *publisher) {
 
 absl::Status
 ClientImpl::ReloadReliablePublishersIfNecessary(SubscriberImpl *subscriber) {
-  if (absl::Status status = CheckConnected(); !status.ok()) {
-    return status;
-  }
   // Check if there are any updates to the publishers
   // since that last time we checked.
   SystemControlBlock *scb = subscriber->GetScb();
@@ -845,6 +843,9 @@ ClientImpl::ReloadReliablePublishersIfNecessary(SubscriberImpl *subscriber) {
   }
   subscriber->SetNumUpdates(updates);
 
+  if (absl::Status status = CheckConnected(); !status.ok()) {
+    return status;
+  }
   // We do have updates, get a new list of subscriber for
   // the channel.
   Request req;

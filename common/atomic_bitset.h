@@ -32,7 +32,6 @@ public:
   void Set(size_t bit) {
     size_t word = bit / 64;
     size_t offset = bit % 64;
-    // std::cerr << "Setting bit " << bit << ", word: " << word << ", bit:" << offset << "\n";
     bits_[word].fetch_or(1ULL << offset, std::memory_order_relaxed);
   }
 
@@ -54,6 +53,12 @@ public:
     }
   }
 
+  void SetAll() {
+    for (size_t i = 0; i < num_bits_; i++) {
+      Set(i);
+    }
+  }
+
   bool IsEmpty() const {
     for (size_t i = 0; i < BitsToWords(num_bits_); i++) {
       if (bits_[i].load(std::memory_order_relaxed) != 0) {
@@ -63,9 +68,20 @@ public:
     return true;
   }
 
-  void Print(std::ostream& os, int start_bit = 0) {
+  int FindFirstSet() const {
+    for (size_t i = 0; i < BitsToWords(num_bits_); i++) {
+      uint64_t word = bits_[i].load(std::memory_order_relaxed);
+      int bit = ffsll(word);
+      if (bit > 0) {
+        return i * 64 + bit - 1;
+      }
+    }
+    return -1;
+  }
+
+  void Print(std::ostream& os, int start_bit = 0) const {
     // Print the bits with - between each group of 4.
-    size_t start_word = BitsToWords(start_bit) - 1;
+    size_t start_word = start_bit / 64;
     start_bit %= 64;
     for (size_t i = start_word; i < BitsToWords(num_bits_); i++) {
       uint64_t word = bits_[i].load(std::memory_order_relaxed);
