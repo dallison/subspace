@@ -187,7 +187,7 @@ public:
 
 private:
   // Vchan ID -1 means invalid vchan ID so we just use element 0 for that.
-  std::array<int, kMaxVchanId+1> num_subs_;
+  std::array<int, kMaxVchanId+1> num_subs_ = {};
 };
 
 // The control data for a channel.  This memory is
