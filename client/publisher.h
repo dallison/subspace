@@ -82,13 +82,6 @@ private:
 
   void ClearPollFd() { trigger_.Clear(); }
 
-  uint64_t NextOrdinal(ChannelControlBlock* ccb, int vchan_id) {
-    if (vchan_id == -1) {
-      return ccb->next_ordinal++;
-    }
-    return ccb->next_vchan_ordinal[vchan_id]++;
-  }
-
   toolbelt::TriggerFd trigger_;
   int publisher_id_;
   std::vector<toolbelt::TriggerFd> subscribers_;

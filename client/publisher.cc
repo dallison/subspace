@@ -66,9 +66,10 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
     // bottom bits.
     uint64_t old_refs = slot->refs.load(std::memory_order_relaxed);
     uint64_t ref = kPubOwned | owner;
-    uint64_t expected =
-        BuildOrdinalAndVchanIdBitField(slot->ordinal, slot->vchan_id) |
-        (old_refs & (kRetiredRefsMask << kRetiredRefsShift));
+    uint64_t expected = BuildRefsBitField(
+        slot->ordinal, (old_refs >> kVchanIdShift) & kVchanIdMask,
+        (old_refs >> kRetiredRefsShift) & kRetiredRefsMask);
+
     if (slot->refs.compare_exchange_weak(expected, ref,
                                          std::memory_order_relaxed)) {
       if (!ValidateSlotBuffer(slot, reload)) {
@@ -165,9 +166,9 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
     // Claim the slot by setting the kPubOwned bit.
     uint64_t old_refs = slot->refs.load(std::memory_order_relaxed);
     uint64_t ref = kPubOwned | owner;
-    uint64_t expected =
-        BuildOrdinalAndVchanIdBitField(slot->ordinal, vchan_id_) |
-        (old_refs & (kRetiredRefsMask << kRetiredRefsShift));
+    uint64_t expected = BuildRefsBitField(
+        slot->ordinal, (old_refs >> kVchanIdShift) & kVchanIdMask,
+        (old_refs >> kRetiredRefsShift) & kRetiredRefsMask);
     if (slot->refs.compare_exchange_weak(expected, ref,
                                          std::memory_order_relaxed)) {
       if (!ValidateSlotBuffer(slot, reload)) {
@@ -207,7 +208,7 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
   void *buffer = GetBufferAddress(slot);
   MessagePrefix *prefix = reinterpret_cast<MessagePrefix *>(buffer) - 1;
 
-  slot->ordinal = NextOrdinal(ccb_, slot->vchan_id);
+  slot->ordinal = ccb_->ordinals.Next(slot->vchan_id);
   slot->timestamp = toolbelt::Now();
   // std::cerr << "Published message in slot " << slot->id << " with ordinal "
   //           << slot->ordinal << " vchan " << slot->vchan_id << "\n";
@@ -233,7 +234,7 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
   ccb_->total_bytes += slot->message_size;
 
   // Set the refs to the ordinal with no refs.
-  slot->refs.store(BuildOrdinalAndVchanIdBitField(slot->ordinal, vchan_id_),
+  slot->refs.store(BuildRefsBitField(slot->ordinal, vchan_id_, 0),
                    std::memory_order_release);
 
   // Tell all subscribers that the slot is available.
