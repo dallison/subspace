@@ -160,10 +160,10 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
   // of debugging (you can see it in all processes).
   strncpy(ccb_->channel_name, name_.c_str(), kMaxChannelName - 1);
   ccb_->num_slots = num_slots_;
-  ccb_->next_ordinal = 1;
-  for (auto &vchan_ordinal : ccb_->next_vchan_ordinal) {
-    vchan_ordinal = 1;
-  }
+
+  // Initialize all ordinals to 1.
+  ccb_->ordinals.Init();
+
   new (&ccb_->subscribers) AtomicBitSet<kMaxSlotOwners>();
 
   // Initialize all slots

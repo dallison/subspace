@@ -127,9 +127,10 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
       return false;
     }
     int ref_vchan_id = (ref >> kVchanIdShift) & kVchanIdMask;
-    // Sign extend to 32 bits.  The value stored in the refs field is a 9 bit
-    // value
-    ref_vchan_id = (ref_vchan_id << (32 - kVchanIdSize)) >> (32 - kVchanIdSize);
+    if (ref_vchan_id == (1 << kVchanIdSize) - 1) {
+      // This is a special case where the vchan_id is invalid.  
+      ref_vchan_id = vchan_id;
+    }
 
     if (ref_ord != 0 && ordinal != 0 && ref_vchan_id != vchan_id) {
       return false;
@@ -147,8 +148,7 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
       retired_refs++;
     }
     uint64_t new_ref =
-        BuildOrdinalAndVchanIdBitField(ordinal, vchan_id) |
-        ((retired_refs & kRetiredRefsMask) << kRetiredRefsShift) |
+        BuildRefsBitField(ordinal, vchan_id, retired_refs) |
         (new_reliable_refs << kReliableRefCountShift) | new_refs;
     if (slot->refs.compare_exchange_weak(ref, new_ref,
                                          std::memory_order_relaxed)) {

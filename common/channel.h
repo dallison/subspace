@@ -42,12 +42,12 @@ static constexpr size_t kMaxMessage = 4096;
 // not received and will not be written to.
 struct MessagePrefix {
   int32_t padding; // Padding for Socket::SendMessage.
-  uint32_t message_size;
+  uint64_t message_size;
   uint64_t ordinal;
   uint64_t timestamp;
   int64_t flags;
   int32_t vchan_id;
-  char padding2[64 - 36]; // Align to 64 bytes.
+  char padding2[64 - 44]; // Align to 64 bytes.
 };
 
 static_assert(sizeof(MessagePrefix) == 64,
@@ -69,9 +69,9 @@ constexpr int kMaxSlotOwners = 1024;
 
 // This limits the number of virtual channels.  Each virtual channel
 // needs its own ordinal counter in the CCB (8 bytes each).
-// This is stored in the refs field as a 9-bit value.  If all bits are set
+// This is stored in the refs field as a 10-bit value.  If all bits are set
 // this indicates -1 (no vchan_id).
-constexpr int kMaxVchanId = 511;
+constexpr int kMaxVchanId = 1023;
 
 // Max length of a channel name in shared memory.  A name longer
 // this this will be truncated but the full name will be available
@@ -88,24 +88,26 @@ constexpr uint64_t kRetiredRefsSize = 10;
 constexpr uint64_t kRetiredRefsMask = (1ULL << kRetiredRefsSize) - 1;
 constexpr uint64_t kRetiredRefsShift = 20;
 
-// Virtual channel ID is just above retired refs and is 9 bits long.
+// Virtual channel ID is just above retired refs and is 10 bits long.
 constexpr uint64_t kVchanIdShift = kRetiredRefsShift + kRetiredRefsSize;
-constexpr uint64_t kVchanIdSize = 9;
+constexpr uint64_t kVchanIdSize = 10;
 constexpr uint64_t kVchanIdMask = (1ULL << kVchanIdSize) - 1;
 
-// We put the bottom 24 bits of the ordinal just above the
+// We put the bottom 23 bits of the ordinal just above the
 // vchan ID field.  This is to ensure that a publisher
 // hasn't published another message in the slot before a subscriber
 // increments the ref count.
-constexpr uint64_t kOrdinalSize = 24;
+constexpr uint64_t kOrdinalSize = 23;
 constexpr uint64_t kOrdinalMask = (1ULL << kOrdinalSize) - 1;
-constexpr uint64_t kOrdinalShift = 39;
+constexpr uint64_t kOrdinalShift = 40;
 
 // Combine an ordinal and a vchan_id into a single 64 bit field, shifted
 // to the correct position for the refs field.
-inline uint64_t BuildOrdinalAndVchanIdBitField(uint64_t ordinal, int vchan_id) {
+inline uint64_t BuildRefsBitField(uint64_t ordinal, int vchan_id,
+                                  int retired_refs) {
   return ((ordinal & kOrdinalMask) << kOrdinalShift) |
-         (ordinal == 0 ? 0 : ((vchan_id & kVchanIdMask) << kVchanIdShift));
+         (ordinal == 0 ? 0 : ((vchan_id & kVchanIdMask) << kVchanIdShift)) |
+        ((retired_refs & kRetiredRefsMask) << kRetiredRefsShift);
 }
 // Aligned to given power of 2.
 template <int64_t alignment> int64_t Aligned(int64_t v) {
@@ -190,6 +192,20 @@ private:
   std::array<int, kMaxVchanId+1> num_subs_ = {};
 };
 
+class OrdinalAccumulator {
+public:
+  void Init() {
+    for (int i = 0; i < kMaxVchanId+1; i++) {
+      ordinals_[i] = 1;
+    }
+  }
+  uint64_t Next(int vchan_id) {
+    return ordinals_[vchan_id+1]++;
+  }
+private:
+  std::array<uint64_t, kMaxVchanId+1> ordinals_ = {};
+};
+
 // The control data for a channel.  This memory is
 // allocated by the server and mapped into the process
 // for all publishers and subscribers.  Each mapped CCB is mapped
@@ -200,10 +216,8 @@ struct ChannelControlBlock {          // a.k.a CCB
   char channel_name[kMaxChannelName]; // So that you can see the name in a
                                       // debugger or hexdump.
   int num_slots;
-  std::atomic<int64_t>
-      next_ordinal; // Next ordinal to use for non-virtual channels.
-  std::array<std::atomic<int64_t>, kMaxVchanId>
-      next_vchan_ordinal; // Next ordinal to use (per vchan)
+  OrdinalAccumulator ordinals; // Ordinal accumulator for virtual channels.
+
   int buffer_index;       // Which buffer in buffers array to use.
   int num_buffers;        // Size of buffers array in shared memory.
   AtomicBitSet<kMaxSlotOwners> subscribers; // One bit per subscriber.
