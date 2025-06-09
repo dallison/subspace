@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <iostream>
 
 namespace subspace {
 
@@ -78,6 +79,8 @@ constexpr int kMaxVchanId = 1023;
 // in process memory.
 constexpr size_t kMaxChannelName = 64;
 
+constexpr size_t kMaxBuffers = 1024;
+
 // Ref count bits.
 constexpr uint64_t kRefCountMask = 0x3ff;
 constexpr uint64_t kRefCountShift = 10;
@@ -110,7 +113,7 @@ inline uint64_t BuildRefsBitField(uint64_t ordinal, int vchan_id,
         ((retired_refs & kRetiredRefsMask) << kRetiredRefsShift);
 }
 // Aligned to given power of 2.
-template <int64_t alignment> int64_t Aligned(int64_t v) {
+template <int64_t alignment=16> int64_t Aligned(int64_t v) {
   return (v + (alignment - 1)) & ~(alignment - 1);
 }
 
@@ -159,11 +162,10 @@ struct ActiveSlot {
   int vchan_id;
 };
 
-// This is located just before the prefix of the first slot's buffer.  It
-// is 64 bits long to align the prefix to 64 bits.
-struct BufferHeader {
-  std::atomic<int32_t> refs; // Number of references to this buffer.
-  int32_t padding;           // Align to 64 bits.
+
+struct BufferControlBlock {
+  std::atomic<int32_t> refs[kMaxBuffers]; // Number of references to this buffer.
+  std::atomic<uint64_t> sizes[kMaxBuffers]; // Number of references to this buffer.
 };
 
 // This counts the number of subscribers given a virtual channel id.
@@ -226,7 +228,7 @@ struct ChannelControlBlock {          // a.k.a CCB
   std::array<int16_t, kMaxSlotOwners> sub_vchan_ids;
 
   SubscriberCounter num_subs;
- 
+
   // Statistics counters.
   std::atomic<uint64_t> total_bytes;
   std::atomic<uint64_t> total_messages;
@@ -246,9 +248,9 @@ inline size_t AvailableSlotsSize(int num_slots) {
 }
 
 inline size_t CcbSize(int num_slots) {
-  return Aligned<64>(sizeof(ChannelControlBlock) +
+  return Aligned(sizeof(ChannelControlBlock) +
                      num_slots * sizeof(MessageSlot)) +
-         Aligned<64>(SizeofAtomicBitSet(num_slots)) +
+         Aligned(SizeofAtomicBitSet(num_slots)) +
          AvailableSlotsSize(num_slots);
 }
 
@@ -265,32 +267,26 @@ struct SlotBuffer {
 // buffers: message buffer memory.
 struct SharedMemoryFds {
   SharedMemoryFds() = default;
-  SharedMemoryFds(toolbelt::FileDescriptor ccb_fd, std::vector<SlotBuffer> bufs)
-      : ccb(std::move(ccb_fd)), buffers(std::move(bufs)) {}
+  SharedMemoryFds(toolbelt::FileDescriptor ccb_fd, toolbelt::FileDescriptor bcb_fd)
+      : ccb(std::move(ccb_fd)), bcb(std::move(bcb_fd)) {}
   SharedMemoryFds(const SharedMemoryFds &) = delete;
 
   SharedMemoryFds(SharedMemoryFds &&c) {
     ccb = std::move(c.ccb);
-    buffers = std::move(c.buffers);
+    bcb = std::move(c.bcb);
   }
   SharedMemoryFds &operator=(const SharedMemoryFds &) = delete;
 
   SharedMemoryFds &operator=(SharedMemoryFds &&c) {
     ccb = std::move(c.ccb);
-    buffers = std::move(c.buffers);
+    bcb = std::move(c.bcb);
     return *this;
   }
 
   toolbelt::FileDescriptor ccb;    // Channel Control Block.
-  std::vector<SlotBuffer> buffers; // Message Buffers.
+  toolbelt::FileDescriptor bcb;    // Buffer Control Block.
 };
 
-struct BufferSet {
-  BufferSet() = default;
-  BufferSet(int32_t slot_sz, char *buf) : slot_size(slot_sz), buffer(buf) {}
-  int32_t slot_size = 0;
-  char *buffer = nullptr;
-};
 
 // This is the representation of a channel as seen by a publisher
 // or subscriber.  There is one of these objects per publisher
@@ -318,7 +314,7 @@ public:
           std::string type);
   ~Channel() { Unmap(); }
 
-  void Unmap();
+  virtual void Unmap();
 
   const std::string &Name() const { return name_; }
 
@@ -330,43 +326,10 @@ public:
   // no publishers and thus the shared memory is not yet valid.
   bool IsPlaceholder() const { return NumSlots() == 0; }
 
-  // What is the address of the message buffer (after the MessagePrefix)
-  // for the slot given a slot id.
-  void *GetBufferAddress(int slot_id) const {
-    return Buffer(slot_id) +
-           (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot_id))) * slot_id +
-           sizeof(MessagePrefix);
-  }
-
-  // Gets the address for the message buffer given a slot pointer.
-  void *GetBufferAddress(MessageSlot *slot) const {
-    if (slot == nullptr) {
-      return nullptr;
-    }
-    return Buffer(slot->id) +
-           (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot->id))) *
-               slot->id +
-           sizeof(MessagePrefix);
-  }
 
   void ReloadIfNecessary(const std::function<bool()> &reload);
 
-  // Get a pointer to the MessagePrefix for a given slot.
-  MessagePrefix *Prefix(MessageSlot *slot,
-                        const std::function<bool()> &reload) {
-    ReloadIfNecessary(reload);
-    MessagePrefix *p = reinterpret_cast<MessagePrefix *>(
-        Buffer(slot->id) +
-        (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot->id))) * slot->id);
-    return p;
-  }
 
-  MessagePrefix *Prefix(MessageSlot *slot) const {
-    MessagePrefix *p = reinterpret_cast<MessagePrefix *>(
-        Buffer(slot->id) +
-        (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot->id))) * slot->id);
-    return p;
-  }
 
   void RegisterSubscriber(int sub_id, int vchan_id) {
     ccb_->subscribers.Set(sub_id);
@@ -374,45 +337,24 @@ public:
     ccb_->num_subs.AddSubscriber(vchan_id);
   }
 
-  void DumpSlots() const;
-  void Dump() const;
+  void DumpSlots(std::ostream& os) const;
+  virtual void Dump(std::ostream& os) const;
 
-  // Get the size associated with the given slot id.
-  int SlotSize(int slot_id) const {
-    return buffers_.empty()
-               ? 0
-               : buffers_[ccb_->slots[slot_id].buffer_index].slot_size;
-  }
 
-  int SlotSize(MessageSlot *slot) const {
-    if (slot == nullptr) {
-      return 0;
+    uint64_t BufferSizeToSlotSize(uint64_t size) const {
+        return (size - NumSlots() * sizeof(MessagePrefix)) / NumSlots();
+    };
+
+    uint64_t SlotSizeToBufferSize(uint64_t slot_size) const {
+        return NumSlots() * (slot_size + sizeof(MessagePrefix));
     }
-    return buffers_.empty()
-               ? 0
-               : buffers_[ccb_->slots[slot->id].buffer_index].slot_size;
-  }
-  // Get the biggest slot size for the channel.
-  int SlotSize() const {
-    return buffers_.empty() ? 0 : buffers_.back().slot_size;
-  }
+
 
   // Get the number of slots in the channel (can't be changed)
   int NumSlots() const { return num_slots_; }
   void SetNumSlots(int n) { num_slots_ = n; }
 
-  // Get the buffer associated with the given slot id.  The first buffer
-  // starts immediately after the buffer header.
-  char *Buffer(int slot_id) const {
-    int index = ccb_->slots[slot_id].buffer_index;
-    if (index < 0 || index >= buffers_.size()) {
-      std::cerr << "Invalid buffer index for slot " << slot_id << ": " << index
-                << std::endl;
-      abort();
-    }
-    return buffers_.empty() ? nullptr
-                            : (buffers_[index].buffer + sizeof(BufferHeader));
-  }
+
   void CleanupSlots(int owner, bool reliable, bool is_pub, int vchan_id);
 
   int NumSubscribers(int vchan_id) const {
@@ -441,19 +383,13 @@ public:
   void SetType(std::string type) { type_ = std::move(type); }
   const std::string Type() const { return type_; }
 
-  bool BuffersChanged() const {
-    return ccb_->num_buffers != static_cast<int>(buffers_.size());
-  }
-
-  const std::vector<BufferSet> &GetBuffers() const { return buffers_; }
-
   char *EndOfSlots() const {
     return reinterpret_cast<char *>(ccb_) +
-           Aligned<64>(sizeof(ChannelControlBlock) +
+           Aligned(sizeof(ChannelControlBlock) +
                        num_slots_ * sizeof(MessageSlot));
   }
   char *EndOfRetiredSlots() const {
-    return EndOfSlots() + Aligned<64>(SizeofAtomicBitSet(num_slots_));
+    return EndOfSlots() + Aligned(SizeofAtomicBitSet(num_slots_));
   }
 
   InPlaceAtomicBitset *RetiredSlotsAddr() {
@@ -496,7 +432,7 @@ protected:
 
   SystemControlBlock *scb_ = nullptr;
   ChannelControlBlock *ccb_ = nullptr;
-  std::vector<BufferSet> buffers_;
+  BufferControlBlock* bcb_ = nullptr;
   bool debug_ = false;
 };
 

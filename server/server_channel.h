@@ -224,8 +224,6 @@ public:
   virtual const SharedMemoryFds &GetFds() { return shared_memory_fds_; }
   virtual uint64_t GetVirtualMemoryUsage() const;
 
-  // Add a buffer (slot size and memory fd) to the shared_memory_fds.
-  virtual void AddBuffer(int slot_size, toolbelt::FileDescriptor fd);
 
   // Allocate the shared memory for a channel.  The num_slots_
   // and slot_size_ member variables will either be 0 (for a subscriber
@@ -237,9 +235,6 @@ public:
   virtual absl::StatusOr<SharedMemoryFds>
   Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
            int num_slots);
-
-  virtual absl::StatusOr<toolbelt::FileDescriptor>
-  ExtendBuffers(int32_t new_slot_size);
 
   struct CapacityInfo {
     bool capacity_ok;

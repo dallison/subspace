@@ -96,18 +96,8 @@ void Channel::Unmap() {
     return;
   }
   UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
-
-  for (auto &buffer : buffers_) {
-    int64_t buffers_size =
-        sizeof(BufferHeader) +
-        num_slots_ * (Aligned<64>(buffer.slot_size) + sizeof(MessagePrefix));
-    if (buffers_size > 0 && buffer.buffer != nullptr) {
-      UnmapMemory(buffer.buffer, buffers_size, "buffers");
-    }
-  }
-  buffers_.clear();
-
   UnmapMemory(ccb_, CcbSize(num_slots_), "CCB");
+  UnmapMemory(bcb_, sizeof(BufferControlBlock), "BCB");
 }
 
 bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
@@ -128,7 +118,7 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
     }
     int ref_vchan_id = (ref >> kVchanIdShift) & kVchanIdMask;
     if (ref_vchan_id == (1 << kVchanIdSize) - 1) {
-      // This is a special case where the vchan_id is invalid.  
+      // This is a special case where the vchan_id is invalid.
       ref_vchan_id = vchan_id;
     }
 
@@ -166,7 +156,7 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
   }
 }
 
-void Channel::DumpSlots() const {
+void Channel::DumpSlots(std::ostream& os) const {
   for (int i = 0; i < num_slots_; i++) {
     const MessageSlot *slot = &ccb_->slots[i];
     uint64_t refs = slot->refs.load(std::memory_order_relaxed);
@@ -175,14 +165,14 @@ void Channel::DumpSlots() const {
     uint64_t just_refs = refs & kRefCountMask;
     uint64_t ref_ord = (refs >> kOrdinalShift) & kOrdinalMask;
 
-    std::cout << "Slot: " << i;
+    os << "Slot: " << i;
     if (is_pub) {
-      std::cout << " publisher " << just_refs;
+      os << " publisher " << just_refs;
     } else {
-      std::cout << " refs: " << just_refs << " reliable refs: " << reliable_refs
+      os << " refs: " << just_refs << " reliable refs: " << reliable_refs
                 << " ord: " << ref_ord;
     }
-    std::cout << " ordinal: " << slot->ordinal
+    os << " ordinal: " << slot->ordinal
               << " buffer_index: " << slot->buffer_index
               << " vchan_id: " << slot->vchan_id
               << " timestamp: " << slot->timestamp
@@ -190,45 +180,32 @@ void Channel::DumpSlots() const {
   }
 }
 
-void Channel::Dump() const {
-  printf("SCB:\n");
+void Channel::Dump(std::ostream& os) const {
+  os << "SCB:\n";
   toolbelt::Hexdump(scb_, 64);
 
-  printf("CCB:\n");
+  os << "CCB:\n";
   toolbelt::Hexdump(ccb_, CcbSize(num_slots_));
 
-  printf("Slots:\n");
-  DumpSlots();
-
-  printf("Buffers:\n");
-  int index = 0;
-  for (auto &buffer : buffers_) {
-    printf("  (%d) %d: %p\n", index++, buffer.slot_size, buffer.buffer);
-  }
+  os << "Slots:\n";
+  DumpSlots(os);
 }
 
 void Channel::DecrementBufferRefs(int buffer_index) {
-  BufferHeader *hdr =
-      reinterpret_cast<BufferHeader *>(buffers_[buffer_index].buffer +
-                                       sizeof(BufferHeader)) -
-      1;
-  assert(hdr->refs > 0);
-  hdr->refs--;
+  assert(bcb_->refs[buffer_index] > 0);
+  bcb_->refs[buffer_index]--;
   if (debug_) {
     printf("Decremented buffers refs for buffer %d to %d\n", buffer_index,
-           hdr->refs.load());
+           bcb_->refs[buffer_index].load());
   }
 }
 
 void Channel::IncrementBufferRefs(int buffer_index) {
-  BufferHeader *hdr =
-      reinterpret_cast<BufferHeader *>(buffers_[buffer_index].buffer +
-                                       sizeof(BufferHeader)) -
-      1;
-  hdr->refs++;
+  assert(bcb_->refs[buffer_index] > 0);
+  bcb_->refs[buffer_index]--;
   if (debug_) {
     printf("Incremented buffers refs for buffer %d to %d\n", buffer_index,
-           hdr->refs.load());
+           bcb_->refs[buffer_index].load());
   }
 }
 

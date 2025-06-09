@@ -4,6 +4,74 @@
 namespace subspace {
 namespace details {
 
+  absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
+    size_t final_buffer_size = size_t(slotSizeToBufferSize(final_slot_size));
+
+    uint64_t current_slot_size = 0;
+    int num_buffers = ccb_->num_buffers.load(std::memory_order_relaxed);
+
+    for (;;) {
+        while (current_slot_size < final_slot_size || buffers_.size() < size_t(num_buffers)) {
+            size_t buffer_index = buffers_.size();
+            auto shm_fd =
+                  CreateBuffer(buffer_index, final_buffer_size);
+            if (!shm_fd.ok()) {
+              return shm_fd.status();
+            }
+            if (!shm_fd->valid()) {
+                // This means that the file in /dev/shm already exists so we need to attach
+                // to it.
+                shm_fd = OpenBuffer(buffer_index);
+                if (!shm_fd.ok()) {
+                  return shm_fd.status();
+                }
+                auto size = GetBufferSize(*shm_fd);
+                if (!size.ok()) {
+                  return size.status();
+                }
+                auto addr =
+                        MapBuffer(*shm_fd, *size, BufferMapMode::READ_WRITE);
+                if (!addr.ok()) {
+                  return addr.status();
+                }
+                // Determine the slot size from the segment size and numSlots.
+                current_slot_size = BufferSizeToSlotSize(*size);
+                assert(SlotSizeToBufferSize(current_slot_size) == *size);
+                buffers_.emplace_back(*size, current_slot_size, NumSlots(), *addr);
+            } else {
+                // We successfully created the /dev/shm file.  This means that there wasn't any
+                // another publisher that created it before us.  We increment numBuffers in the CCB
+                // after attaching the buffer.
+
+                // We have created a new buffer, record its size in the bufferRefs in the CCB
+                // so that we have a record of the amount of virtual memory used.
+                bcb_->sizes[buffers_.size()].store(
+                        final_buffer_size, std::memory_order_relaxed);
+                auto addr = MapBuffer(*shm_fd, final_buffer_size, BufferMapMode::READ_WRITE);
+                if (!addr.ok()) {
+                  return addr.status();
+                }
+                assert(SlotSizeToBufferSize(final_slot_size) == final_buffer_size);
+                buffers_.emplace_back(
+                        final_buffer_size, final_slot_size, NumSlots(), *addr);
+                current_slot_size = final_slot_size;
+            }
+        }
+        int new_num_buffers = int(buffers_.size());
+        // Update the atomic numBuffers in the CCB.  If this fails it means something
+        // else got there before us and we just go back and remap any new buffers.
+        if (ccb_->num_buffers.compare_exchange_strong(
+                    num_buffers, new_num_buffers, std::memory_order_relaxed)) {
+            // We successfully updated the number of buffers in the CCB.
+            break;
+        }
+        // Another thread has updated the number of buffers in the CCB.  We need to
+        // retry.
+    }
+
+    return absl::OkStatus();
+}
+
 void PublisherImpl::SetSlotToBiggestBuffer(MessageSlot *slot) {
   if (slot == nullptr) {
     return;
@@ -58,7 +126,7 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
       // We are guaranteed to find a slot, but let's not go into an infinite
       // loop if something goes wrong.
       if (retries-- == 0) {
-        DumpSlots();
+        DumpSlots(std::cout);
         return nullptr;
       }
     }

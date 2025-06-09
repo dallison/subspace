@@ -11,9 +11,9 @@ namespace details {
 class PublisherImpl : public ClientChannel {
 public:
   PublisherImpl(const std::string &name, int num_slots, int channel_id,
-                int publisher_id, int vchan_id, std::string type,
+                int publisher_id, int vchan_id, std::string shm_prefix, std::string type,
                 const PublisherOptions &options)
-      : ClientChannel(name, num_slots, channel_id, vchan_id, std::move(type)),
+      : ClientChannel(name, num_slots, channel_id, vchan_id, std::move(shm_prefix), std::move(type)),
         publisher_id_(publisher_id), options_(options) {}
 
   bool IsReliable() const { return options_.IsReliable(); }
@@ -24,6 +24,8 @@ public:
   MessageSlot *FindFreeSlotReliable(int owner, std::function<bool()> reload);
 
     void SetSlotToBiggestBuffer(MessageSlot *slot);
+
+        cruise::Status CreateOrAttachBuffers(uint64_t slot_size);
 
 private:
   friend class ::subspace::ClientImpl;
@@ -50,7 +52,7 @@ private:
                                              bool is_activation, int owner,
                                              bool omit_prefix, bool *notify,
                                              std::function<bool()> reload);
-                                             
+
   Channel::PublishedMessage ActivateSlotAndGetAnother(bool reliable, bool is_activation,
                                     bool omit_prefix, bool *notify,
                                     std::function<bool()> reload) {
