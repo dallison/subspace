@@ -38,6 +38,7 @@ absl::Status ClientImpl::Init(const std::string &server_socket,
   }
 
   name_ = client_name;
+  socket_name_ = server_socket;
   Request req;
   req.mutable_init()->set_client_name(client_name);
   Response resp;
@@ -151,7 +152,7 @@ ClientImpl::CreatePublisher(const std::string &channel_name, int slot_size,
   Request req;
   auto *cmd = req.mutable_create_publisher();
   cmd->set_channel_name(channel_name);
-  cmd->set_slot_size(slot_size);
+  cmd->set_slot_size(Aligned(slot_size));
   cmd->set_num_slots(num_slots);
   cmd->set_is_local(opts.IsLocal());
   cmd->set_is_reliable(opts.IsReliable());
@@ -178,17 +179,19 @@ ClientImpl::CreatePublisher(const std::string &channel_name, int slot_size,
   // by the server.
   std::shared_ptr<PublisherImpl> channel = std::make_shared<PublisherImpl>(
       channel_name, num_slots, pub_resp.channel_id(), pub_resp.publisher_id(),
-      pub_resp.vchan_id(), pub_resp.type(), opts);
+      pub_resp.vchan_id(), socket_name_, pub_resp.type(), opts);
 
-  std::vector<SlotBuffer> buffers = CollectBuffers(pub_resp.buffers(), fds);
 
   SharedMemoryFds channel_fds(std::move(fds[pub_resp.ccb_fd_index()]),
-                              std::move(buffers));
+                              td::move(fds[pub_resp.bcb_fd_index()]));
   if (absl::Status status = channel->Map(std::move(channel_fds), scb_fd_);
       !status.ok()) {
     return status;
   }
 
+  if (absl::Status status = channel->CreateOrAttachBuffers(Aligned(slot_size)); !status.ok()) {
+    return status;
+  }
   channel->SetTriggerFd(std::move(fds[pub_resp.pub_trigger_fd_index()]));
   channel->SetPollFd(std::move(fds[pub_resp.pub_poll_fd_index()]));
 
@@ -267,18 +270,21 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
   // by the server.
   std::shared_ptr<SubscriberImpl> channel = std::make_shared<SubscriberImpl>(
       channel_name, sub_resp.num_slots(), sub_resp.channel_id(),
-      sub_resp.subscriber_id(), sub_resp.vchan_id(), sub_resp.type(), opts);
+      sub_resp.subscriber_id(), sub_resp.vchan_id(), socket_name_, sub_resp.type(), opts);
+
 
   channel->SetNumSlots(sub_resp.num_slots());
-  std::vector<SlotBuffer> buffers = CollectBuffers(sub_resp.buffers(), fds);
 
   SharedMemoryFds channel_fds(std::move(fds[sub_resp.ccb_fd_index()]),
-                              std::move(buffers));
+                              std::move(fds[sub_resp.bcb_fd_index()]));
   if (absl::Status status = channel->Map(std::move(channel_fds), scb_fd_);
       !status.ok()) {
     return status;
   }
 
+  if (absl::Status status = channel->AttachBuffers(); !status.ok()) {
+    return status;
+  }
   channel->SetTriggerFd(std::move(fds[sub_resp.trigger_fd_index()]));
   channel->SetPollFd(std::move(fds[sub_resp.poll_fd_index()]));
 
@@ -709,24 +715,8 @@ ClientImpl::ReloadBuffersIfNecessary(ClientChannel *channel) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
-  Request req;
-  auto *cmd = req.mutable_get_buffers();
-  cmd->set_channel_name(channel->Name());
 
-  // Send request to server and wait for response.
-  Response response;
-  std::vector<toolbelt::FileDescriptor> fds;
-  fds.reserve(100);
-
-  if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
-      !status.ok()) {
-    return status;
-  }
-
-  auto &resp = response.get_buffers();
-  std::vector<SlotBuffer> buffers = CollectBuffers(resp.buffers(), fds);
-  if (absl::Status status = channel->MapNewBuffers(std::move(buffers));
-      !status.ok()) {
+  if (absl::Status stauts = channel->AttachBuffers(); !status.ok()) {
     return status;
   }
   return true;
@@ -782,6 +772,9 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
 
   if (absl::Status status = subscriber->Map(std::move(channel_fds), scb_fd_);
       !status.ok()) {
+    return status;
+  }
+  if (absl::Status status = subscriber->AttachBuffers(); !status.ok()) {
     return status;
   }
   subscriber->SetTriggerFd(fds[sub_resp.trigger_fd_index()]);
@@ -993,28 +986,7 @@ absl::Status ClientImpl::ResizeChannel(PublisherImpl *publisher,
     }
   }
 
-  Request req;
-  auto *cmd = req.mutable_resize();
-  cmd->set_channel_name(publisher->Name());
-  cmd->set_new_slot_size(new_slot_size);
-
-  // Send request to server and wait for response.
-  Response response;
-  std::vector<toolbelt::FileDescriptor> fds;
-  fds.reserve(100);
-  if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
-      !status.ok()) {
-    return status;
-  }
-
-  auto &resp = response.resize();
-  if (!resp.error().empty()) {
-    return absl::InternalError(resp.error());
-  }
-
-  std::vector<SlotBuffer> buffers = CollectBuffers(resp.buffers(), fds);
-  auto status = publisher->MapNewBuffers(std::move(buffers));
-  return status;
+  return publisher->CreateOrAttachBuffers(Aligned(new_slot_size));
 }
 
 absl::Status ClientImpl::SendRequestReceiveResponse(

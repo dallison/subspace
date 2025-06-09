@@ -87,14 +87,6 @@ ClientHandler::HandleMessage(const subspace::Request &req,
                            resp.mutable_remove_subscriber(), fds);
     break;
 
-  case subspace::Request::kResize:
-    HandleResize(req.resize(), resp.mutable_resize(), fds);
-    break;
-
-  case subspace::Request::kGetBuffers:
-    HandleGetBuffers(req.get_buffers(), resp.mutable_get_buffers(), fds);
-    break;
-
   case subspace::Request::REQUEST_NOT_SET:
     return absl::InternalError("Protocol error: unknown request");
   }
@@ -255,14 +247,10 @@ void ClientHandler::HandleCreatePublisher(
 
   response->set_ccb_fd_index(0);
   fds.push_back(channel_fds.ccb);
+  response->set_bcb_fd_index(1);
+  fds.push_back(channel_fds.bcb);
 
-  int fd_index = 1;
-  for (const auto &buffer : channel_fds.buffers) {
-    auto *info = response->add_buffers();
-    info->set_slot_size(buffer.slot_size);
-    info->set_fd_index(fd_index++);
-    fds.push_back(buffer.fd);
-  }
+  int fd_index = 2;
 
   // Copy the publisher poll and triggers fds.
   response->set_pub_poll_fd_index(fd_index++);
@@ -358,7 +346,7 @@ void ClientHandler::HandleCreateSubscriber(
 
   SubscriberUser *sub;
   if (req.subscriber_id() != -1) {
-    // This is an exsiting subscriber.
+    // This is an existing subscriber.
     absl::StatusOr<User *> user = channel->GetUser(req.subscriber_id());
     if (!user.ok()) {
       response->set_error(user.status().ToString());
@@ -396,14 +384,10 @@ void ClientHandler::HandleCreateSubscriber(
 
   response->set_ccb_fd_index(0);
   fds.push_back(channel_fds.ccb);
+  response->set_bcb_fd_index(1);
+  fds.push_back(channel_fds.bcb);
 
-  int fd_index = 1;
-  for (const auto &buffer : channel_fds.buffers) {
-    auto *info = response->add_buffers();
-    info->set_slot_size(buffer.slot_size);
-    info->set_fd_index(fd_index++);
-    fds.push_back(buffer.fd);
-  }
+  int fd_index = 2;
 
   response->set_trigger_fd_index(fd_index++);
   fds.push_back(sub->GetTriggerFd());
@@ -510,61 +494,6 @@ void ClientHandler::HandleRemoveSubscriber(
     return;
   }
   channel->RemoveUser(server_, req.subscriber_id());
-}
-
-void ClientHandler::HandleResize(const subspace::ResizeRequest &req,
-                                 subspace::ResizeResponse *response,
-                                 std::vector<toolbelt::FileDescriptor> &fds) {
-  ServerChannel *channel = server_->FindChannel(req.channel_name());
-  if (channel == nullptr) {
-    response->set_error(
-        absl::StrFormat("No such channel %s", req.channel_name()));
-    return;
-  }
-
-  absl::StatusOr<toolbelt::FileDescriptor> fd =
-      channel->ExtendBuffers(req.new_slot_size());
-  if (!fd.ok()) {
-    response->set_error(absl::StrFormat(
-        "Failed to resize channel %s to %d byte: %s", req.channel_name(),
-        req.new_slot_size(), fd.status().ToString()));
-    return;
-  }
-  response->set_slot_size(channel->SlotSize());
-
-  if (fd->Valid()) {
-    channel->AddBuffer(req.new_slot_size(), std::move(*fd));
-  }
-  const SharedMemoryFds &channel_fds = channel->GetFds();
-
-  int fd_index = 0;
-  for (const auto &buffer : channel_fds.buffers) {
-    auto *info = response->add_buffers();
-    info->set_slot_size(buffer.slot_size);
-    info->set_fd_index(fd_index++);
-    fds.push_back(buffer.fd);
-  }
-}
-
-void ClientHandler::HandleGetBuffers(
-    const subspace::GetBuffersRequest &req,
-    subspace::GetBuffersResponse *response,
-    std::vector<toolbelt::FileDescriptor> &fds) {
-  ServerChannel *channel = server_->FindChannel(req.channel_name());
-  if (channel == nullptr) {
-    response->set_error(
-        absl::StrFormat("No such channel %s", req.channel_name()));
-    return;
-  }
-  const SharedMemoryFds &channel_fds = channel->GetFds();
-
-  int fd_index = 0;
-  for (const auto &buffer : channel_fds.buffers) {
-    auto *info = response->add_buffers();
-    info->set_slot_size(buffer.slot_size);
-    info->set_fd_index(fd_index++);
-    fds.push_back(buffer.fd);
-  }
 }
 
 } // namespace subspace

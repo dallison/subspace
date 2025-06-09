@@ -137,23 +137,15 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
   ccb_ = reinterpret_cast<ChannelControlBlock *>(*p);
   ccb_->num_subs = num_subs;
 
-  // Create a single buffer but don't map it in.  There is no need to
-  // map in the buffers in the server since they will never be used.
-  int64_t buffers_size =
-      sizeof(BufferHeader) +
-      num_slots_ * (Aligned<64>(slot_size) + sizeof(MessagePrefix));
-  if (buffers_size == 0) {
-    buffers_size = 256;
-  }
-  p = CreateSharedMemory(channel_id_, "buffers0", buffers_size,
-                         /*map=*/false, fds.buffers[0].fd);
+  // Create buffer control block.
+  p = CreateSharedMemory(channel_id_, "BCB", sizeof(BufferControl), /*map=*/true, fds.bcb);
   if (!p.ok()) {
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
     UnmapMemory(ccb_, CcbSize(num_slots_), "CCB");
     return p.status();
   }
-  buffers_.emplace_back(slot_size, reinterpret_cast<char *>(*p));
-  ccb_->num_buffers = 1;
+
+  ccb_->num_buffers = 0;
 
   // Build CCB data.
   // Copy possibly truncated channel name into CCB for ease
@@ -195,37 +187,6 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
   return fds;
 }
 
-// Called on server to extend the allocated buffers.
-absl::StatusOr<toolbelt::FileDescriptor>
-ServerChannel::ExtendBuffers(int32_t new_slot_size) {
-  if (new_slot_size <= SlotSize()) {
-    // Invalid file descriptor means no resize needed.
-    return toolbelt::FileDescriptor();
-  }
-  int64_t buffers_size =
-      sizeof(BufferHeader) +
-      num_slots_ * (Aligned<64>(new_slot_size) + sizeof(MessagePrefix));
-
-  char buffer_name[32];
-  snprintf(buffer_name, sizeof(buffer_name), "buffers%d\n",
-           ccb_->num_buffers - 1);
-  toolbelt::FileDescriptor fd;
-  // Create the shared memory for the buffer but don't map it in.  This is
-  // in the server and it is not used here.  The result of a successful
-  // creation will be nullptr.
-  absl::StatusOr<void *> p = CreateSharedMemory(
-      channel_id_, buffer_name, buffers_size, /*map=*/false, fd);
-
-  if (!p.ok()) {
-    return absl::InternalError(
-        absl::StrFormat("Failed to map memory for extension: %s",
-                        p.status().ToString().c_str()));
-  }
-  buffers_.emplace_back(new_slot_size, reinterpret_cast<char *>(*p));
-  ccb_->num_buffers++;
-  return fd;
-}
-
 std::vector<toolbelt::FileDescriptor>
 ServerChannel::GetSubscriberTriggerFds() const {
   std::vector<toolbelt::FileDescriptor> r;
@@ -256,14 +217,11 @@ ServerChannel::GetReliablePublisherTriggerFds() const {
 
 uint64_t ServerChannel::GetVirtualMemoryUsage() const {
   uint64_t size = CcbSize(num_slots_);
-  for (const auto &buffer : buffers_) {
-    if (buffer.slot_size == 0) {
-      continue;
+    for (int i = 0; i < ccb_->num_buffers; i++) {
+        if (bcb_->refs[i] > 0) {
+            size += bcb_->sizes[i];
+        }
     }
-    size +=
-        sizeof(BufferHeader) +
-        (sizeof(MessagePrefix) + Aligned<64>(buffer.slot_size)) * num_slots_;
-  }
   return size;
 }
 
