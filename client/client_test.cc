@@ -448,7 +448,7 @@ TEST_F(ClientTest, BadPublisherParameters) {
 
   // Different slot size - we are fixed size, this will fail.
   absl::StatusOr<Publisher> pub6 =
-      client.CreatePublisher("dave1", 255, 10, {.fixed_size = true});
+      client.CreatePublisher("dave1", 512, 10, {.fixed_size = true});
   ASSERT_FALSE(pub6.ok());
 }
 
