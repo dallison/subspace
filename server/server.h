@@ -69,6 +69,7 @@ private:
   absl::Status RemapChannel(ServerChannel *channel, int slot_size,
                             int num_slots);
   ServerChannel *FindChannel(const std::string &channel_name);
+  void RemoveAllBuffers();
   void RemoveChannel(ServerChannel *channel);
   void RemoveAllUsersFor(ClientHandler *handler);
   void CloseHandler(ClientHandler *handler);

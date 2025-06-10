@@ -55,7 +55,7 @@ public:
   }
   bool IsReliable() const { return options_.IsReliable(); }
 
-  int32_t SlotSize() const { return Channel::SlotSize(CurrentSlot()); }
+  int32_t SlotSize() const { return ClientChannel::SlotSize(CurrentSlot()); }
 
   bool AddActiveMessage(MessageSlot *slot);
   void RemoveActiveMessage(MessageSlot *slot);
@@ -79,7 +79,7 @@ public:
   void IgnoreActivation(MessageSlot *slot) {
     RememberOrdinal(slot->ordinal, slot->vchan_id);
     DecrementSlotRef(slot, true);
-    Prefix(slot)->flags |= kMessageSeen;
+    slot->flags |= kMessageSeen;
   }
   // A subscriber wants to find a slot with a message in it.  There are
   // two ways to get this:

@@ -958,12 +958,12 @@ TEST_F(ClientTest, PublishAndResizeUnmapBuffers) {
   {
     auto &pub_buffers = pub->GetBuffers();
     ASSERT_EQ(2, pub_buffers.size());
-    ASSERT_EQ(nullptr, pub_buffers[0].buffer);
+    ASSERT_EQ(nullptr, pub_buffers[0]->buffer);
 
     auto &sub_buffers = sub->GetBuffers();
     ASSERT_EQ(2, sub_buffers.size());
-    ASSERT_EQ(nullptr, sub_buffers[0].buffer);
-    ASSERT_NE(nullptr, sub_buffers[1].buffer);
+    ASSERT_EQ(nullptr, sub_buffers[0]->buffer);
+    ASSERT_NE(nullptr, sub_buffers[1]->buffer);
   }
 
   // Publish one more that will check for free buffers and will unmap
@@ -982,8 +982,8 @@ TEST_F(ClientTest, PublishAndResizeUnmapBuffers) {
   {
     auto &pub_buffers = pub->GetBuffers();
     ASSERT_EQ(2, pub_buffers.size());
-    ASSERT_EQ(nullptr, pub_buffers[0].buffer);
-    ASSERT_NE(nullptr, pub_buffers[1].buffer);
+    ASSERT_EQ(nullptr, pub_buffers[0]->buffer);
+    ASSERT_NE(nullptr, pub_buffers[1]->buffer);
   }
 }
 

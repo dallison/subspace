@@ -78,9 +78,9 @@ public:
   weak_ptr(const shared_ptr<T> &p)
       : sub_(p.msg_->sub), slot_(p.msg_->slot), ordinal_(p.msg_->ordinal) {}
   weak_ptr(const weak_ptr &p)
-      : sub_(p.sub), slot_(p.slot), ordinal_(p.ordinal) {}
+      : sub_(p.sub_), slot_(p.slot_), ordinal_(p.ordinal_) {}
   weak_ptr(weak_ptr &&p)
-      : sub_(std::move(p.sub)), slot_(p.slot), ordinal_(p.ordinal) {
+      : sub_(std::move(p.sub_)), slot_(p.slot_), ordinal_(p.ordinal_) {
     p.slot_ = nullptr;
     p.ordinal_ = 0;
   }
@@ -96,8 +96,8 @@ public:
     sub_ = std::move(p.sub_);
     slot_ = p.slot_;
     ordinal_ = p.ordinal_;
-    p->slot_ = nullptr;
-    p->ordinal_ = 0;
+    p.slot_ = nullptr;
+    p.ordinal_ = 0;
     return *this;
   }
 
@@ -331,7 +331,7 @@ private:
   absl::StatusOr<bool>
   ReloadBuffersIfNecessary(details::ClientChannel *channel);
 
-  const std::vector<BufferSet> &
+  const std::vector<std::unique_ptr<details::BufferSet>> &
   GetBuffers(details::ClientChannel *channel) const {
     return channel->GetBuffers();
   }
@@ -475,7 +475,7 @@ public:
   std::string Name() const { return impl_->Name(); }
   std::string Type() const { return impl_->Type(); }
 
-  void DumpSlots() const { impl_->DumpSlots(); }
+  void DumpSlots(std::ostream& os) const { impl_->DumpSlots(os); }
 
   bool IsReliable() const { return impl_->IsReliable(); }
   bool IsLocal() const { return impl_->IsLocal(); }
@@ -483,7 +483,7 @@ public:
 
   int32_t SlotSize() const { return impl_->SlotSize(); }
 
-  const std::vector<BufferSet> &GetBuffers() const {
+  const std::vector<std::unique_ptr<details::BufferSet>> &GetBuffers() const {
     return client_->GetBuffers(impl_.get());
   }
 
@@ -646,13 +646,13 @@ public:
 
   int32_t SlotSize() const { return impl_->SlotSize(); }
 
-  const std::vector<BufferSet> &GetBuffers() const {
+  const std::vector<std::unique_ptr<details::BufferSet>> &GetBuffers() const {
     return client_->GetBuffers(impl_.get());
   }
 
   int NumActiveMessages() const { return impl_->NumActiveMessages(); }
 
-  void DumpSlots() const { impl_->DumpSlots(); }
+  void DumpSlots(std::ostream& os) const { impl_->DumpSlots(os); }
 
   int VirtualChannelId() const { return impl_->VirtualChannelId(); }
 

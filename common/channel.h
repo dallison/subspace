@@ -16,9 +16,9 @@
 
 #include <atomic>
 #include <cstdint>
+#include <iostream>
 #include <memory>
 #include <string>
-#include <iostream>
 
 namespace subspace {
 
@@ -57,7 +57,9 @@ static_assert(sizeof(MessagePrefix) == 64,
 // Flag for flags field in MessagePrefix.
 constexpr int kMessageActivate = 1; // This is a reliable activation message.
 constexpr int kMessageBridged = 2;  // This message came from the bridge.
-constexpr int kMessageSeen = 4;     // Message has been seen.
+
+// Flags for MessageSlot flags.
+constexpr int kMessageSeen = 1;     // Message has been seen.
 
 // We need a max channels number because the size of things in
 // shared memory needs to be fixed.
@@ -110,10 +112,10 @@ inline uint64_t BuildRefsBitField(uint64_t ordinal, int vchan_id,
                                   int retired_refs) {
   return ((ordinal & kOrdinalMask) << kOrdinalShift) |
          (ordinal == 0 ? 0 : ((vchan_id & kVchanIdMask) << kVchanIdShift)) |
-        ((retired_refs & kRetiredRefsMask) << kRetiredRefsShift);
+         ((retired_refs & kRetiredRefsMask) << kRetiredRefsShift);
 }
 // Aligned to given power of 2.
-template <int64_t alignment=16> int64_t Aligned(int64_t v) {
+template <int64_t alignment = 64> int64_t Aligned(int64_t v) {
   return (v + (alignment - 1)) & ~(alignment - 1);
 }
 
@@ -153,6 +155,7 @@ struct MessageSlot {
   int16_t vchan_id;           // Virtual channel ID.
   AtomicBitSet<kMaxSlotOwners> sub_owners; // One bit per subscriber.
   uint64_t timestamp;                      // Timestamp of message.
+  uint32_t flags;
 };
 
 struct ActiveSlot {
@@ -162,22 +165,19 @@ struct ActiveSlot {
   int vchan_id;
 };
 
-
 struct BufferControlBlock {
-  std::atomic<int32_t> refs[kMaxBuffers]; // Number of references to this buffer.
-  std::atomic<uint64_t> sizes[kMaxBuffers]; // Number of references to this buffer.
+  std::atomic<int32_t>
+      refs[kMaxBuffers]; // Number of references to this buffer.
+  std::atomic<uint64_t>
+      sizes[kMaxBuffers]; // Number of references to this buffer.
 };
 
 // This counts the number of subscribers given a virtual channel id.
 class SubscriberCounter {
 public:
-  void AddSubscriber(int vchan_id) {
-    num_subs_[vchan_id+1]++;
-  }
+  void AddSubscriber(int vchan_id) { num_subs_[vchan_id + 1]++; }
 
-  void RemoveSubscriber(int vchan_id) {
-    num_subs_[vchan_id+1]--;
-  }
+  void RemoveSubscriber(int vchan_id) { num_subs_[vchan_id + 1]--; }
 
   // If vchan_id is valid we also count the number of subscribers to the
   // multiplexer itself.
@@ -186,26 +186,25 @@ public:
     if (vchan_id == -1) {
       return n;
     }
-    return n + num_subs_[vchan_id+1];
+    return n + num_subs_[vchan_id + 1];
   }
 
 private:
   // Vchan ID -1 means invalid vchan ID so we just use element 0 for that.
-  std::array<int, kMaxVchanId+1> num_subs_ = {};
+  std::array<int, kMaxVchanId + 1> num_subs_ = {};
 };
 
 class OrdinalAccumulator {
 public:
   void Init() {
-    for (int i = 0; i < kMaxVchanId+1; i++) {
+    for (int i = 0; i < kMaxVchanId + 1; i++) {
       ordinals_[i] = 1;
     }
   }
-  uint64_t Next(int vchan_id) {
-    return ordinals_[vchan_id+1]++;
-  }
+  uint64_t Next(int vchan_id) { return ordinals_[vchan_id + 1]++; }
+
 private:
-  std::array<uint64_t, kMaxVchanId+1> ordinals_ = {};
+  std::array<uint64_t, kMaxVchanId + 1> ordinals_ = {};
 };
 
 // The control data for a channel.  This memory is
@@ -220,8 +219,8 @@ struct ChannelControlBlock {          // a.k.a CCB
   int num_slots;
   OrdinalAccumulator ordinals; // Ordinal accumulator for virtual channels.
 
-  int buffer_index;       // Which buffer in buffers array to use.
-  int num_buffers;        // Size of buffers array in shared memory.
+  int buffer_index;             // Which buffer in buffers array to use.
+  std::atomic<int> num_buffers; // Size of buffers array in shared memory.
   AtomicBitSet<kMaxSlotOwners> subscribers; // One bit per subscriber.
 
   // Given a subscriber ID, what is the vchan ID associated with it.
@@ -249,9 +248,8 @@ inline size_t AvailableSlotsSize(int num_slots) {
 
 inline size_t CcbSize(int num_slots) {
   return Aligned(sizeof(ChannelControlBlock) +
-                     num_slots * sizeof(MessageSlot)) +
-         Aligned(SizeofAtomicBitSet(num_slots)) +
-         AvailableSlotsSize(num_slots);
+                 num_slots * sizeof(MessageSlot)) +
+         Aligned(SizeofAtomicBitSet(num_slots)) + AvailableSlotsSize(num_slots);
 }
 
 struct SlotBuffer {
@@ -267,7 +265,8 @@ struct SlotBuffer {
 // buffers: message buffer memory.
 struct SharedMemoryFds {
   SharedMemoryFds() = default;
-  SharedMemoryFds(toolbelt::FileDescriptor ccb_fd, toolbelt::FileDescriptor bcb_fd)
+  SharedMemoryFds(toolbelt::FileDescriptor ccb_fd,
+                  toolbelt::FileDescriptor bcb_fd)
       : ccb(std::move(ccb_fd)), bcb(std::move(bcb_fd)) {}
   SharedMemoryFds(const SharedMemoryFds &) = delete;
 
@@ -283,10 +282,9 @@ struct SharedMemoryFds {
     return *this;
   }
 
-  toolbelt::FileDescriptor ccb;    // Channel Control Block.
-  toolbelt::FileDescriptor bcb;    // Buffer Control Block.
+  toolbelt::FileDescriptor ccb; // Channel Control Block.
+  toolbelt::FileDescriptor bcb; // Buffer Control Block.
 };
-
 
 // This is the representation of a channel as seen by a publisher
 // or subscriber.  There is one of these objects per publisher
@@ -312,7 +310,7 @@ public:
 
   Channel(const std::string &name, int num_slots, int channel_id,
           std::string type);
-  ~Channel() { Unmap(); }
+  virtual ~Channel() { Unmap(); }
 
   virtual void Unmap();
 
@@ -326,10 +324,10 @@ public:
   // no publishers and thus the shared memory is not yet valid.
   bool IsPlaceholder() const { return NumSlots() == 0; }
 
-
   void ReloadIfNecessary(const std::function<bool()> &reload);
 
-
+  std::string BufferSharedMemoryName(const std::string &shm_prefix,
+                                     int buffer_index) const;
 
   void RegisterSubscriber(int sub_id, int vchan_id) {
     ccb_->subscribers.Set(sub_id);
@@ -337,23 +335,20 @@ public:
     ccb_->num_subs.AddSubscriber(vchan_id);
   }
 
-  void DumpSlots(std::ostream& os) const;
-  virtual void Dump(std::ostream& os) const;
+  void DumpSlots(std::ostream &os) const;
+  virtual void Dump(std::ostream &os) const;
 
+  uint64_t BufferSizeToSlotSize(uint64_t size) const {
+    return (size - NumSlots() * sizeof(MessagePrefix)) / NumSlots();
+  };
 
-    uint64_t BufferSizeToSlotSize(uint64_t size) const {
-        return (size - NumSlots() * sizeof(MessagePrefix)) / NumSlots();
-    };
-
-    uint64_t SlotSizeToBufferSize(uint64_t slot_size) const {
-        return NumSlots() * (slot_size + sizeof(MessagePrefix));
-    }
-
+  uint64_t SlotSizeToBufferSize(uint64_t slot_size) const {
+    return NumSlots() * (slot_size + sizeof(MessagePrefix));
+  }
 
   // Get the number of slots in the channel (can't be changed)
   int NumSlots() const { return num_slots_; }
   void SetNumSlots(int n) { num_slots_ = n; }
-
 
   void CleanupSlots(int owner, bool reliable, bool is_pub, int vchan_id);
 
@@ -386,7 +381,7 @@ public:
   char *EndOfSlots() const {
     return reinterpret_cast<char *>(ccb_) +
            Aligned(sizeof(ChannelControlBlock) +
-                       num_slots_ * sizeof(MessageSlot));
+                   num_slots_ * sizeof(MessageSlot));
   }
   char *EndOfRetiredSlots() const {
     return EndOfSlots() + Aligned(SizeofAtomicBitSet(num_slots_));
@@ -432,7 +427,7 @@ protected:
 
   SystemControlBlock *scb_ = nullptr;
   ChannelControlBlock *ccb_ = nullptr;
-  BufferControlBlock* bcb_ = nullptr;
+  BufferControlBlock *bcb_ = nullptr;
   bool debug_ = false;
 };
 
