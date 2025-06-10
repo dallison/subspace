@@ -16,6 +16,7 @@
 #include "toolbelt/triggerfd.h"
 #include <memory>
 #include <vector>
+#include <sys/mman.h>
 
 namespace subspace {
 constexpr int kMaxUsers = kMaxSlotOwners;
@@ -189,12 +190,32 @@ public:
   virtual void GetChannelStats(subspace::ChannelStats *stats);
   void TriggerAllSubscribers();
 
-  virtual int SlotSize() const { return Channel::SlotSize(); }
+  virtual int SlotSize() const { 
+    if (ccb_->num_buffers == 0) {
+      return 0; // No buffers, no slots.
+    }
+    uint64_t size = bcb_->sizes[ccb_->num_buffers - 1];
+    if (size == 0) {
+      return 0; // No slots.
+    }
+    return BufferSizeToSlotSize(size); 
+  }
+
   virtual int NumSlots() const { return Channel::NumSlots(); }
   virtual void CleanupSlots(int owner, bool reliable, bool is_pub, int vchan_id) {
     Channel::CleanupSlots(owner, reliable, is_pub, vchan_id);
   }
 
+  void RemoveBuffer(const std::string& shm_prefix) {
+    if (IsVirtual()) {
+      // Virtual channels do not have buffers.
+      return;
+    }
+    for (int i = 0; i < ccb_->num_buffers; i++) {
+      std::string filename = BufferSharedMemoryName(shm_prefix, i);
+      (void)shm_unlink(filename.c_str());
+    }
+  }
   // This is true if all publishers are bridge publishers.
   bool IsBridgePublisher() const;
   bool IsBridgeSubscriber() const;
@@ -343,15 +364,6 @@ public:
 
   void RegisterSubscriber(int sub_id, int vchan_id) override {
     mux_->RegisterSubscriber(sub_id, vchan_id);
-  }
-
-  absl::StatusOr<toolbelt::FileDescriptor>
-  ExtendBuffers(int32_t new_slot_size) override {
-    return mux_->ExtendBuffers(new_slot_size);
-  }
-
-  void AddBuffer(int slot_size, toolbelt::FileDescriptor fd) override {
-    mux_->AddBuffer(slot_size, std::move(fd));
   }
 
   uint64_t GetVirtualMemoryUsage() const override { return 0; }

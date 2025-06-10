@@ -100,6 +100,12 @@ void Channel::Unmap() {
   UnmapMemory(bcb_, sizeof(BufferControlBlock), "BCB");
 }
 
+std::string Channel::BufferSharedMemoryName(const std::string &shm_prefix,
+                                            int buffer_index) const {
+  return absl::StrFormat("%s_buffer_%d_%d", shm_prefix, GetChannelId(),
+                         buffer_index);
+}
+
 bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
                                 uint64_t ordinal, int vchan_id, bool retire) {
   for (;;) {
@@ -137,9 +143,8 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
     if (retire) {
       retired_refs++;
     }
-    uint64_t new_ref =
-        BuildRefsBitField(ordinal, vchan_id, retired_refs) |
-        (new_reliable_refs << kReliableRefCountShift) | new_refs;
+    uint64_t new_ref = BuildRefsBitField(ordinal, vchan_id, retired_refs) |
+                       (new_reliable_refs << kReliableRefCountShift) | new_refs;
     if (slot->refs.compare_exchange_weak(ref, new_ref,
                                          std::memory_order_relaxed)) {
       // std::cerr << slot->id << " retired_refs: " << retired_refs
@@ -156,7 +161,7 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
   }
 }
 
-void Channel::DumpSlots(std::ostream& os) const {
+void Channel::DumpSlots(std::ostream &os) const {
   for (int i = 0; i < num_slots_; i++) {
     const MessageSlot *slot = &ccb_->slots[i];
     uint64_t refs = slot->refs.load(std::memory_order_relaxed);
@@ -170,17 +175,16 @@ void Channel::DumpSlots(std::ostream& os) const {
       os << " publisher " << just_refs;
     } else {
       os << " refs: " << just_refs << " reliable refs: " << reliable_refs
-                << " ord: " << ref_ord;
+         << " ord: " << ref_ord;
     }
     os << " ordinal: " << slot->ordinal
-              << " buffer_index: " << slot->buffer_index
-              << " vchan_id: " << slot->vchan_id
-              << " timestamp: " << slot->timestamp
-              << " message size: " << slot->message_size << std::endl;
+       << " buffer_index: " << slot->buffer_index
+       << " vchan_id: " << slot->vchan_id << " timestamp: " << slot->timestamp
+       << " message size: " << slot->message_size << std::endl;
   }
 }
 
-void Channel::Dump(std::ostream& os) const {
+void Channel::Dump(std::ostream &os) const {
   os << "SCB:\n";
   toolbelt::Hexdump(scb_, 64);
 
@@ -201,8 +205,7 @@ void Channel::DecrementBufferRefs(int buffer_index) {
 }
 
 void Channel::IncrementBufferRefs(int buffer_index) {
-  assert(bcb_->refs[buffer_index] > 0);
-  bcb_->refs[buffer_index]--;
+  bcb_->refs[buffer_index]++;
   if (debug_) {
     printf("Incremented buffers refs for buffer %d to %d\n", buffer_index,
            bcb_->refs[buffer_index].load());

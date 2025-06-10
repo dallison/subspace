@@ -72,12 +72,12 @@ namespace details {
 
 struct BufferSet {
   BufferSet() = default;
-  BufferSet(uint64_t full_sz, uint64_t slot_sz, char *buf) : full_size(full_sz), slot_size(slot_sz), buffer(buf) {}
+  BufferSet(uint64_t full_sz, uint64_t slot_sz, char *buf)
+      : full_size(full_sz), slot_size(slot_sz), buffer(buf) {}
   uint64_t full_size = 0;
   uint64_t slot_size = 0;
   char *buffer = nullptr;
 };
-
 
 // This is a channel as seen by a client.  It's going to be either
 // a publisher or a subscriber, as defined as the subclasses.
@@ -85,7 +85,8 @@ class ClientChannel : public Channel {
 public:
   ClientChannel(const std::string &name, int num_slots, int channel_id,
                 int vchan_id, std::string shm_prefix, std::string type)
-      : Channel(name, num_slots, channel_id, std::move(type)), vchan_id_(vchan_id), shm_prefix_(std::move(shm_prefix)) {}
+      : Channel(name, num_slots, channel_id, std::move(type)),
+        vchan_id_(vchan_id), shm_prefix_(std::move(shm_prefix)) {}
   virtual ~ClientChannel() = default;
   MessageSlot *CurrentSlot() const { return slot_; }
   const ChannelCounters &GetCounters() const {
@@ -94,7 +95,7 @@ public:
 
   void Unmap() override;
 
-  void Dump(std::ostream& os) override;
+  void Dump(std::ostream &os) const override;
 
   // Client-side channel mapping.  The SharedMemoryFds contains the
   // file descriptors for the CCB and buffers.  The num_slots_
@@ -107,7 +108,7 @@ public:
 
   int VirtualChannelId() const { return vchan_id_; }
 
-    // What is the address of the message buffer (after the MessagePrefix)
+  // What is the address of the message buffer (after the MessagePrefix)
   // for the slot given a slot id.
   void *GetBufferAddress(int slot_id) const {
     return Buffer(slot_id) +
@@ -147,7 +148,7 @@ public:
   int SlotSize(int slot_id) const {
     return buffers_.empty()
                ? 0
-               : buffers_[ccb_->slots[slot_id].buffer_index].slot_size;
+               : buffers_[ccb_->slots[slot_id].buffer_index]->slot_size;
   }
 
   int SlotSize(MessageSlot *slot) const {
@@ -156,14 +157,14 @@ public:
     }
     return buffers_.empty()
                ? 0
-               : buffers_[ccb_->slots[slot->id].buffer_index].slot_size;
+               : buffers_[ccb_->slots[slot->id].buffer_index]->slot_size;
   }
   // Get the biggest slot size for the channel.
   int SlotSize() const {
-    return buffers_.empty() ? 0 : buffers_.back().slot_size;
+    return buffers_.empty() ? 0 : buffers_.back()->slot_size;
   }
 
-   // Get the buffer associated with the given slot id.  The first buffer
+  // Get the buffer associated with the given slot id.  The first buffer
   // starts immediately after the buffer header.
   char *Buffer(int slot_id) const {
     int index = ccb_->slots[slot_id].buffer_index;
@@ -172,16 +173,18 @@ public:
                 << std::endl;
       abort();
     }
-    return buffers_.empty() ? nullptr
-                            : (buffers_[index].buffer + sizeof(BufferHeader));
+    return buffers_.empty() ? nullptr : (buffers_[index]->buffer);
   }
 
-   bool BuffersChanged() const {
+  bool BuffersChanged() const {
     return ccb_->num_buffers != static_cast<int>(buffers_.size());
   }
 
-  const std::vector<BufferSet> &GetBuffers() const { return buffers_; }
+  const std::vector<std::unique_ptr<BufferSet>> &GetBuffers() const {
+    return buffers_;
+  }
 
+  absl::Status AttachBuffers();
 
 protected:
   virtual bool IsSubscriber() const { return false; }
@@ -197,20 +200,24 @@ protected:
 
   bool IsVirtual() const { return vchan_id_ != -1; }
 
+  absl::StatusOr<toolbelt::FileDescriptor> CreateBuffer(int buffer_index,
+                                                        size_t size);
+  absl::StatusOr<toolbelt::FileDescriptor> OpenBuffer(int buffer_index);
+  absl::StatusOr<size_t> GetBufferSize(toolbelt::FileDescriptor &shm_fd, int buffer_index) const;
+  absl::StatusOr<char *> MapBuffer(toolbelt::FileDescriptor &shm_fd,
+                                   size_t size, bool read_only);
 
-    absl::StatusOr<toolbelt::FileDescriptor> CreateBuffer(int buffer_index, size_t size);
-    absl::StatusOr<toolbelt::FileDescriptor> OpenBuffer(int buffer_index);
-    absl::StatusOr<size_t> GetBufferSize(toolbelt::FileDescriptor& shm_fd) const;
-    absl::StatusOr<char*>
-    MapBuffer(toolbelt::FileDescriptor& shm_fd, size_t size, bool read_only);
+  std::string BufferSharedMemoryName(int buffer_index) const {
+    return Channel::BufferSharedMemoryName(shm_prefix_, buffer_index);
+  }
 
-    std::string BufferSharedMemoryName(int buffer_index) const {
-        return fmt::format("{}_buffer_{}_{}", shm_prefix_, GetChannelId(), buffer_index);
-    }
+#if defined(__APPLE__)
+  absl::Status CreateShadowFile(const std::string &filename, off_t size);
+#endif
 
 protected:
   MessageSlot *slot_ = nullptr; // Current slot.
-  int vchan_id_ = -1;       // Virtual channel ID.
+  int vchan_id_ = -1;           // Virtual channel ID.
   std::string shm_prefix_;
   std::vector<std::unique_ptr<BufferSet>> buffers_ = {};
 };

@@ -120,7 +120,7 @@ void SubscriberImpl::ClaimSlot(MessageSlot *slot,
   // Clear the bit in the subscriber bitset.
   GetAvailableSlots(subscriber_id_).Clear(slot->id);
   RememberOrdinal(slot->ordinal, vchan_id);
-  Prefix(slot, reload)->flags |= kMessageSeen;
+  slot->flags |= kMessageSeen;
 }
 
 void SubscriberImpl::CollectVisibleSlots(InPlaceAtomicBitset &bits,
@@ -303,7 +303,7 @@ MessageSlot *SubscriberImpl::FindActiveSlotByTimestamp(
         AtomicIncRefCount(it->slot, reliable, -1, it->ordinal, it->vchan_id, false);
         continue;
       }
-      Prefix(it->slot, reload)->flags |= kMessageSeen;
+      it->slot->flags |= kMessageSeen;
       it->slot->sub_owners.Set(owner);
       return it->slot;
     }

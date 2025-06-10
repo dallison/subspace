@@ -110,9 +110,6 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
     num_slots_ = num_slots;
   }
 
-  // We are allocating a channel, so we only have one buffer.
-  buffers_.clear();
-
   // Map SCB into process memory.
   scb_ = reinterpret_cast<SystemControlBlock *>(MapMemory(
       scb_fd.Fd(), sizeof(SystemControlBlock), PROT_READ | PROT_WRITE, "SCB"));
@@ -122,10 +119,6 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
   }
 
   SharedMemoryFds fds;
-
-  // One buffer.  The fd will be set when the buffers are allocated in
-  // shared memmory.
-  fds.buffers.emplace_back(slot_size);
 
   // Create CCB in shared memory and map into process memory.
   absl::StatusOr<void *> p = CreateSharedMemory(
@@ -138,13 +131,13 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
   ccb_->num_subs = num_subs;
 
   // Create buffer control block.
-  p = CreateSharedMemory(channel_id_, "BCB", sizeof(BufferControl), /*map=*/true, fds.bcb);
+  p = CreateSharedMemory(channel_id_, "bcb", sizeof(BufferControlBlock), /*map=*/true, fds.bcb);
   if (!p.ok()) {
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
     UnmapMemory(ccb_, CcbSize(num_slots_), "CCB");
     return p.status();
   }
-
+  bcb_ = reinterpret_cast<BufferControlBlock *>(*p);
   ccb_->num_buffers = 0;
 
   // Build CCB data.
@@ -180,9 +173,9 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
   }
 
   if (debug_) {
-    printf("Channel allocated: scb: %p, ccb: %p, buffers: %p\n", scb_, ccb_,
-           buffers_[0].buffer);
-    Dump();
+    printf("Channel allocated: scb: %p, ccb: %p, bcb: %p\n", scb_, ccb_,
+           bcb_);
+    Dump(std::cout);
   }
   return fds;
 }
@@ -513,10 +506,6 @@ ChannelCounters &ServerChannel::RecordUpdate(bool is_pub, bool add,
     }
   }
   return counters;
-}
-
-void ServerChannel::AddBuffer(int slot_size, toolbelt::FileDescriptor fd) {
-  shared_memory_fds_.buffers.push_back({slot_size, std::move(fd)});
 }
 
 absl::StatusOr<std::unique_ptr<VirtualChannel>>

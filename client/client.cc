@@ -132,17 +132,6 @@ absl::Status ClientImpl::ProcessAllMessages(details::SubscriberImpl *subscriber,
   return absl::OkStatus();
 }
 
-static std::vector<SlotBuffer>
-CollectBuffers(const google::protobuf::RepeatedPtrField<BufferInfo> &buffers,
-               const std::vector<toolbelt::FileDescriptor> &fds) {
-  std::vector<SlotBuffer> r;
-  r.reserve(buffers.size());
-  for (auto &buffer : buffers) {
-    r.emplace_back(buffer.slot_size(), fds[buffer.fd_index()]);
-  }
-  return r;
-}
-
 absl::StatusOr<Publisher>
 ClientImpl::CreatePublisher(const std::string &channel_name, int slot_size,
                             int num_slots, const PublisherOptions &opts) {
@@ -183,7 +172,7 @@ ClientImpl::CreatePublisher(const std::string &channel_name, int slot_size,
 
 
   SharedMemoryFds channel_fds(std::move(fds[pub_resp.ccb_fd_index()]),
-                              td::move(fds[pub_resp.bcb_fd_index()]));
+                              std::move(fds[pub_resp.bcb_fd_index()]));
   if (absl::Status status = channel->Map(std::move(channel_fds), scb_fd_);
       !status.ok()) {
     return status;
@@ -318,6 +307,7 @@ absl::StatusOr<void *> ClientImpl::GetMessageBuffer(PublisherImpl *publisher,
     while (new_slot_size <= slot_size || new_slot_size < max_size) {
       new_slot_size *= 2;
     }
+
     if (absl::Status status = ResizeChannel(publisher, new_slot_size);
         !status.ok()) {
       return status;
@@ -716,7 +706,7 @@ ClientImpl::ReloadBuffersIfNecessary(ClientChannel *channel) {
     return status;
   }
 
-  if (absl::Status stauts = channel->AttachBuffers(); !status.ok()) {
+  if (absl::Status status = channel->AttachBuffers(); !status.ok()) {
     return status;
   }
   return true;
@@ -764,9 +754,8 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
   }
   subscriber->SetNumSlots(sub_resp.num_slots());
 
-  std::vector<SlotBuffer> buffers = CollectBuffers(sub_resp.buffers(), fds);
   SharedMemoryFds channel_fds(std::move(fds[sub_resp.ccb_fd_index()]),
-                              std::move(buffers));
+                              std::move(fds[sub_resp.bcb_fd_index()]));
 
   // subscriber->SetSlots(sub_resp.slot_size(), sub_resp.num_slots());
 
