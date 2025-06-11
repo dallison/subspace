@@ -132,7 +132,7 @@ void Server::RemoveAllBuffers() {
 #if defined(__APPLE__)
 // On MacOS we create a file in /tmp for each buffer and we need to
 // use shm_unlink to remove the shared memory segment associated with it.
-  std::string shm_prefix = absl::StrFormat("/tmp/%s_buffer_", socket_name_);
+  std::string shm_prefix = absl::StrFormat("%s_", socket_name_);
   for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
     if (entry.path().string().find(shm_prefix) == 0) {
       (void)shm_unlink(entry.path().c_str());
@@ -151,7 +151,7 @@ void Server::RemoveAllBuffers() {
 }
 
 absl::Status Server::Run() {
-  // RemoveAllBuffers();
+  RemoveAllBuffers();
   std::vector<struct pollfd> poll_fds;
 
 #ifndef __linux__
