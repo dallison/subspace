@@ -102,8 +102,16 @@ void Channel::Unmap() {
 
 std::string Channel::BufferSharedMemoryName(const std::string &shm_prefix,
                                             int buffer_index) const {
+#if defined(__APPLE__)
+  // MacOS has a limit of 31 characters for the shared memory name, so we need
+  // to keep it short.
+  // The socket name on MacOS is "/tmp/subspaceXXXXXX" which is 20 characters
+  // long, so we have 11 characters left for the buffer name.
+  return absl::StrFormat("%s_%d_%d", shm_prefix, GetChannelId(), buffer_index);
+#else
   return absl::StrFormat("%s_buffer_%d_%d", shm_prefix, GetChannelId(),
                          buffer_index);
+#endif
 }
 
 bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,

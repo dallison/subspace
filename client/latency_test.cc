@@ -36,11 +36,7 @@ public:
       return;
     }
     printf("Starting Subspace server\n");
-    char tmp[] = "/tmp/subspaceXXXXXX";
-    int fd = mkstemp(tmp);
-    ASSERT_NE(-1, fd);
-    socket_ = tmp;
-    close(fd);
+    socket_ = "/tmp/subspace";
 
     // The server will write to this pipe to notify us when it
     // has started and stopped.  This end of the pipe is blocking.
