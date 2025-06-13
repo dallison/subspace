@@ -11,12 +11,14 @@
 #include <sys/mman.h>
 #if defined(__APPLE__)
 #include <sys/posix_shm.h>
+#include <sys/stat.h>
 #endif
 #include "absl/container/flat_hash_map.h"
 #include <cassert>
 #include <inttypes.h>
 #include <mutex>
 #include <unistd.h>
+#include "absl/strings/str_replace.h"
 
 namespace subspace {
 
@@ -100,16 +102,16 @@ void Channel::Unmap() {
   UnmapMemory(bcb_, sizeof(BufferControlBlock), "BCB");
 }
 
-std::string Channel::BufferSharedMemoryName(const std::string &shm_prefix,
+std::string Channel::BufferSharedMemoryName(uint64_t session_id,
                                             int buffer_index) const {
+  std::string sanitized_name = absl::StrReplaceAll(ResolvedName(), {{"/", "."}});
+
 #if defined(__APPLE__)
-  // MacOS has a limit of 31 characters for the shared memory name, so we need
-  // to keep it short.
-  // The socket name on MacOS is "/tmp/subspaceXXXXXX" which is 20 characters
-  // long, so we have 11 characters left for the buffer name.
-  return absl::StrFormat("%s_%d_%d", shm_prefix, GetChannelId(), buffer_index);
+  // Since you can't actually see any shared memory names in the MacOS filesystem we
+  // need to use /tmp to create a shadow file that is mapped to a shared memory name.
+  return absl::StrFormat("/tmp/subspace_%d_%s_%d", session_id, sanitized_name, buffer_index);
 #else
-  return absl::StrFormat("%s_buffer_%d_%d", shm_prefix, GetChannelId(),
+  return absl::StrFormat("subspace_%d_%s_%d", session_id, sanitized_name,
                          buffer_index);
 #endif
 }
@@ -269,5 +271,17 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
     }
   }
 }
+
+#if defined(__APPLE__)
+absl::StatusOr<std::string> Channel::MacOsSharedMemoryName(const std::string& shadow_file) {
+  struct stat st;
+  int e = ::stat(shadow_file.c_str(), &st);
+  if (e == -1) {
+    return absl::InternalError(absl::StrFormat("Failed to determine MacOS shm name for %s", shadow_file));
+  }
+  // Use the inode number (unique per file) to make the shm file name.
+  return absl::StrFormat("subspace_%d", st.st_ino);
+}
+#endif
 
 } // namespace subspace

@@ -49,6 +49,7 @@ absl::Status ClientImpl::Init(const std::string &server_socket,
     return status;
   }
   scb_fd_ = std::move(fds[resp.init().scb_fd_index()]);
+  session_id_ = resp.init().session_id();
   return absl::OkStatus();
 }
 
@@ -168,7 +169,7 @@ ClientImpl::CreatePublisher(const std::string &channel_name, int slot_size,
   // by the server.
   std::shared_ptr<PublisherImpl> channel = std::make_shared<PublisherImpl>(
       channel_name, num_slots, pub_resp.channel_id(), pub_resp.publisher_id(),
-      pub_resp.vchan_id(), socket_name_, pub_resp.type(), opts);
+      pub_resp.vchan_id(), session_id_, pub_resp.type(), opts);
 
 
   SharedMemoryFds channel_fds(std::move(fds[pub_resp.ccb_fd_index()]),
@@ -259,7 +260,7 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
   // by the server.
   std::shared_ptr<SubscriberImpl> channel = std::make_shared<SubscriberImpl>(
       channel_name, sub_resp.num_slots(), sub_resp.channel_id(),
-      sub_resp.subscriber_id(), sub_resp.vchan_id(), socket_name_, sub_resp.type(), opts);
+      sub_resp.subscriber_id(), sub_resp.vchan_id(), session_id_, sub_resp.type(), opts);
 
 
   channel->SetNumSlots(sub_resp.num_slots());

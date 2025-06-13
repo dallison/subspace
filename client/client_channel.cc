@@ -3,6 +3,7 @@
 #if defined(__APPLE__)
 #include <sys/posix_shm.h>
 #endif
+#include <sys/stat.h>
 
 namespace subspace {
 
@@ -24,7 +25,10 @@ static void UnmapBuffers(BufferSetIter first, BufferSetIter last,
 }
 
 #if defined(__APPLE__)
-  absl::Status ClientChannel::CreateShadowFile(const std::string &filename, off_t size) {
+
+absl::StatusOr<std::string> ClientChannel::CreateMacOSSharedMemoryFile(const std::string &filename, off_t size) {
+    // Create a file in /tmp and make it the same size as the shared memory.  This will not
+    // actually allocate any disk space.
     int fd = open(filename.c_str(), O_RDWR | O_CREAT, 0666);
     if (fd < 0) {
       return absl::InternalError(absl::StrFormat(
@@ -37,8 +41,9 @@ static void UnmapBuffers(BufferSetIter first, BufferSetIter last,
           size, strerror(errno)));
     }
     close(fd);
-    return absl::OkStatus();
-  }
+
+    return MacOsSharedMemoryName(filename);
+}
 #endif
 
 absl::Status ClientChannel::Map(SharedMemoryFds fds,
@@ -200,6 +205,7 @@ absl::StatusOr<toolbelt::FileDescriptor>
 ClientChannel::CreateBuffer(int buffer_index, size_t size) {
   std::string filename = BufferSharedMemoryName(buffer_index);
 
+#if !defined(__APPLE__)
   // Open the shared memory file.
   auto shm_fd = OpenSharedMemoryFile(filename, O_RDWR | O_CREAT | O_EXCL);
   if (!shm_fd.ok()) {
@@ -219,15 +225,33 @@ ClientChannel::CreateBuffer(int buffer_index, size_t size) {
                                                               strerror(errno)));
   }
 
-#if defined(__APPLE__)
+#else
 // On MacOS we need to create a shadow file that has the same size as the
 // shared memory file.  This is because the fstat of the shm "file" returns a
 // page aligned size, which is not what we want.  The shadow file is used
 // to determine the size of the shared memory segment.
-  if (absl::Status status = CreateShadowFile(filename, off_t(size));
-      !status.ok()) {
+  absl::StatusOr<std::string> shm_name = CreateMacOSSharedMemoryFile(filename, off_t(size));
+  if (!shm_name.ok()) {
+    return shm_name.status();
+  }
+
+  // shm_name is the name of the shared memory.
+  auto shm_fd = OpenSharedMemoryFile(*shm_name, O_RDWR | O_CREAT | O_EXCL);
+  if (!shm_fd.ok()) {
+    return shm_fd.status();
+  }
+  if (!shm_fd->Valid()) {
+    // Can only happen if the file already exists.
+    return *shm_fd;
+  }
+
+  // Make it the appropriate size.
+  int e = ftruncate(shm_fd->Fd(), off_t(size));
+  if (e == -1) {
     (void)shm_unlink(filename.c_str());
-    return status;
+    return absl::InternalError(
+        absl::StrFormat("Failed to set length of shared memory %s: %s", filename,
+                                                              strerror(errno)));
   }
 
 #endif
@@ -237,9 +261,16 @@ ClientChannel::CreateBuffer(int buffer_index, size_t size) {
 absl::StatusOr<toolbelt::FileDescriptor>
 ClientChannel::OpenBuffer(int buffer_index) {
   std::string filename = BufferSharedMemoryName(buffer_index);
-
+#if !defined(__APPLE__)
   // Open the shared memory file.
   return OpenSharedMemoryFile(filename, O_RDWR);
+#else
+  auto shm_name = MacOsSharedMemoryName(filename);
+  if (!shm_name.ok()) {
+    return shm_name.status();
+  }
+    return OpenSharedMemoryFile(*shm_name, O_RDWR);
+#endif
 }
 
 absl::StatusOr<size_t>

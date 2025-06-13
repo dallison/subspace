@@ -84,9 +84,9 @@ struct BufferSet {
 class ClientChannel : public Channel {
 public:
   ClientChannel(const std::string &name, int num_slots, int channel_id,
-                int vchan_id, std::string shm_prefix, std::string type)
+                int vchan_id, uint64_t session_id, std::string type)
       : Channel(name, num_slots, channel_id, std::move(type)),
-        vchan_id_(vchan_id), shm_prefix_(std::move(shm_prefix)) {}
+        vchan_id_(vchan_id), session_id_(std::move(session_id)) {}
   virtual ~ClientChannel() = default;
   MessageSlot *CurrentSlot() const { return slot_; }
   const ChannelCounters &GetCounters() const {
@@ -208,17 +208,17 @@ protected:
                                    size_t size, bool read_only);
 
   std::string BufferSharedMemoryName(int buffer_index) const {
-    return Channel::BufferSharedMemoryName(shm_prefix_, buffer_index);
+    return Channel::BufferSharedMemoryName(session_id_, buffer_index);
   }
 
 #if defined(__APPLE__)
-  absl::Status CreateShadowFile(const std::string &filename, off_t size);
+  absl::StatusOr<std::string> CreateMacOSSharedMemoryFile(const std::string &filename, off_t size);
 #endif
 
 protected:
   MessageSlot *slot_ = nullptr; // Current slot.
   int vchan_id_ = -1;           // Virtual channel ID.
-  std::string shm_prefix_;
+  uint64_t session_id_;
   std::vector<std::unique_ptr<BufferSet>> buffers_ = {};
 };
 

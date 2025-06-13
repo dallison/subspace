@@ -11,10 +11,10 @@ namespace details {
 class PublisherImpl : public ClientChannel {
 public:
   PublisherImpl(const std::string &name, int num_slots, int channel_id,
-                int publisher_id, int vchan_id, std::string shm_prefix,
+                int publisher_id, int vchan_id, uint64_t session_id,
                 std::string type, const PublisherOptions &options)
       : ClientChannel(name, num_slots, channel_id, vchan_id,
-                      std::move(shm_prefix), std::move(type)),
+                      std::move(session_id), std::move(type)),
         publisher_id_(publisher_id), options_(options) {}
 
   bool IsReliable() const { return options_.IsReliable(); }
@@ -32,6 +32,11 @@ private:
   friend class ::subspace::ClientImpl;
 
   bool IsPublisher() const override { return true; }
+
+
+    std::string ResolvedName() const override {
+        return IsVirtual() ? options_.mux : Name();
+    }
 
   // A publisher is done with its busy slot (it now contains a message).  The
   // slot is moved from the busy list to the end of the active list and other

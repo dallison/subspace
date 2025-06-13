@@ -159,6 +159,10 @@ public:
     Channel::RegisterSubscriber(sub_id, vchan_id);
   }
 
+  std::string ResolvedName() const override {
+    return Name();
+  }
+
   // Get the file descriptors for all subscriber triggers.
   std::vector<toolbelt::FileDescriptor> GetSubscriberTriggerFds() const;
 
@@ -190,7 +194,7 @@ public:
   virtual void GetChannelStats(subspace::ChannelStats *stats);
   void TriggerAllSubscribers();
 
-  virtual int SlotSize() const { 
+  virtual int SlotSize() const {
     if (ccb_->num_buffers == 0) {
       return 0; // No buffers, no slots.
     }
@@ -198,7 +202,7 @@ public:
     if (size == 0) {
       return 0; // No slots.
     }
-    return BufferSizeToSlotSize(size); 
+    return BufferSizeToSlotSize(size);
   }
 
   virtual int NumSlots() const { return Channel::NumSlots(); }
@@ -206,14 +210,18 @@ public:
     Channel::CleanupSlots(owner, reliable, is_pub, vchan_id);
   }
 
-  void RemoveBuffer(const std::string& shm_prefix) {
-    if (IsVirtual()) {
-      // Virtual channels do not have buffers.
-      return;
-    }
+  virtual void RemoveBuffer(uint64_t session_id) {
     for (int i = 0; i < ccb_->num_buffers; i++) {
-      std::string filename = BufferSharedMemoryName(shm_prefix, i);
+      std::string filename = BufferSharedMemoryName(session_id, i);
+#if defined(__APPLE__)
+      auto shm_name = MacOsSharedMemoryName(filename);
+      if (shm_name.ok()) {
+        (void)shm_unlink(shm_name->c_str());
+      }
+      remove(filename.c_str());
+#else
       (void)shm_unlink(filename.c_str());
+#endif
     }
   }
   // This is true if all publishers are bridge publishers.
@@ -301,6 +309,13 @@ public:
   absl::Status
   HasSufficientCapacity(int new_max_active_messages) const override;
 
+   void RemoveBuffer(uint64_t session_id) override {
+    if (!virtual_channels_.empty()) {
+      return;
+    }
+    ServerChannel::RemoveBuffer(session_id);
+  }
+
 private:
   int next_vchan_id_ = 0;
   absl::flat_hash_set<VirtualChannel *> virtual_channels_;
@@ -348,6 +363,13 @@ public:
   int SlotSize() const override { return mux_->SlotSize(); }
   int NumSlots() const override { return mux_->NumSlots(); }
   int GetChannelId() const override { return mux_->GetChannelId(); }
+
+  std::string ResolvedName() const override {
+    return mux_->ResolvedName();
+  }
+  void RemoveBuffer(uint64_t session_id) override {
+    mux_->RemoveBuffer(session_id);
+  }
 
   absl::Status
   HasSufficientCapacity(int new_max_active_messages) const override {

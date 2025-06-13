@@ -36,9 +36,9 @@ template <typename H> inline H AbslHashValue(H h, const OrdinalAndVchanId &x) {
 class SubscriberImpl : public ClientChannel {
 public:
   SubscriberImpl(const std::string &name, int num_slots, int channel_id,
-                 int subscriber_id, int vchan_id, std::string shm_prefix, std::string type,
+                 int subscriber_id, int vchan_id, uint64_t session_id, std::string type,
                  const SubscriberOptions &options)
-      : ClientChannel(name, num_slots, channel_id, vchan_id, std::move(shm_prefix), std::move(type)),
+      : ClientChannel(name, num_slots, channel_id, vchan_id, std::move(session_id), std::move(type)),
         subscriber_id_(subscriber_id), options_(options) {}
 
   std::shared_ptr<SubscriberImpl> shared_from_this() {
@@ -209,6 +209,10 @@ private:
   }
 
   OrdinalTracker &GetOrdinalTracker(int vchan_id);
+
+      std::string ResolvedName() const override {
+        return IsVirtual() ? options_.mux : Name();
+    }
 
   int subscriber_id_;
   toolbelt::TriggerFd trigger_;

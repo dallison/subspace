@@ -124,6 +124,7 @@ TEST_F(ClientTest, CreatePublisher) {
   subspace::Client client;
   InitClient(client);
   absl::StatusOr<Publisher> pub = client.CreatePublisher("dave0", 256, 10);
+  std::cerr << pub.status() << std::endl;
   ASSERT_TRUE(pub.ok());
 }
 
