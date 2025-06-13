@@ -138,15 +138,17 @@ absl::Status ClientChannel::AttachBuffers() {
       // It's possible the ftruncate has not been called yet, so we try again.
       continue;
     }
-    // Map the shared memory buffer.
-    auto addr = MapBuffer(*shm_fd, *size, map_read_only);
-    if (!addr.ok()) {
-      return addr.status();
-    }
-    // Determine the slot size from the segment size and numSlots.
+    absl::StatusOr<char*> addr;
     uint64_t slot_size = BufferSizeToSlotSize(*size);
-    assert(SlotSizeToBufferSize(slot_size) == *size);
-
+    if (slot_size > 0) {
+      // Map the shared memory buffer.
+      addr = MapBuffer(*shm_fd, *size, map_read_only);
+      if (!addr.ok()) {
+        return addr.status();
+      }
+    } else {
+      addr = nullptr;
+    }
     buffers_.emplace_back(std::make_unique<BufferSet>(*size, slot_size, *addr));
   }
   return absl::OkStatus();

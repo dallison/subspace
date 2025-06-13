@@ -29,31 +29,28 @@ namespace details {
                 if (!size.ok()) {
                   return size.status();
                 }
-
-                auto addr =
-                        MapBuffer(*shm_fd, *size, /*read_only=*/false);
-                if (!addr.ok()) {
-                  return addr.status();
-                }
-                // Determine the slot size from the segment size and numSlots.
+                absl::StatusOr<char*> addr;
                 current_slot_size = BufferSizeToSlotSize(*size);
-
-                assert(SlotSizeToBufferSize(current_slot_size) == *size);
+                if (current_slot_size > 0) {
+                   addr =
+                          MapBuffer(*shm_fd, *size, /*read_only=*/false);
+                  if (!addr.ok()) {
+                    return addr.status();
+                  }
+                } else {
+                  addr = nullptr;
+                }
                 buffers_.emplace_back(std::make_unique<BufferSet>(*size, current_slot_size, *addr));
-            } else {
-                // We successfully created the /dev/shm file.  This means that there wasn't any
-                // another publisher that created it before us.  We increment numBuffers in the CCB
-                // after attaching the buffer.
-
-                // We have created a new buffer, record its size in the bufferRefs in the CCB
-                // so that we have a record of the amount of virtual memory used.
+                 bcb_->sizes[buffers_.size()].store(
+                        final_buffer_size, std::memory_order_relaxed);
+             } else {
+                // We successfully created the /dev/shm file.
                 bcb_->sizes[buffers_.size()].store(
                         final_buffer_size, std::memory_order_relaxed);
                 auto addr = MapBuffer(*shm_fd, final_buffer_size, /*read_only=*/false);
                 if (!addr.ok()) {
                   return addr.status();
                 }
-                assert(SlotSizeToBufferSize(final_slot_size) == final_buffer_size);
                 buffers_.emplace_back(
                         std::make_unique<BufferSet>(final_buffer_size, final_slot_size, *addr));
                 current_slot_size = final_slot_size;
