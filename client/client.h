@@ -338,6 +338,8 @@ private:
 
   std::string name_;
   std::string socket_name_;
+  uint64_t session_id_ = 0;
+
   toolbelt::UnixSocket socket_;
   toolbelt::FileDescriptor scb_fd_; // System control block memory fd.
   char buffer_[kMaxMessage];        // Buffer for comms with server over UDS.

@@ -99,6 +99,7 @@ void ClientHandler::HandleInit(const subspace::InitRequest &req,
   response->set_scb_fd_index(0);
   fds.push_back(server_->scb_fd_);
   client_name_ = req.client_name();
+  response->set_session_id(server_->GetSessionId());
 }
 
 void ClientHandler::HandleCreatePublisher(

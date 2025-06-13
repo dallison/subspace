@@ -16,6 +16,7 @@ message InitRequest { string client_name = 1; }
 // the fd array.
 message InitResponse {
   int32 scb_fd_index = 1; // Index into fds of SystemControlBlock fd.
+  int64 session_id = 2;
 }
 
 message CreatePublisherRequest {

@@ -128,30 +128,8 @@ void Server::ListenerCoroutine(toolbelt::UnixSocket &listen_socket,
   }
 }
 
-void Server::RemoveAllBuffers() {
-#if defined(__APPLE__)
-// On MacOS we create a file in /tmp for each buffer and we need to
-// use shm_unlink to remove the shared memory segment associated with it.
-  std::string shm_prefix = absl::StrFormat("%s_", socket_name_);
-  for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
-    if (entry.path().string().find(shm_prefix) == 0) {
-      (void)shm_unlink(entry.path().c_str());
-      remove(entry.path().c_str());
-    }
-  }
-#else
-  // Remove all files in /dev/shm that have the socket prefix.
-  std::string shm_prefix = absl::StrFormat("/dev/shm/%s.", socket_name_);
-  for (const auto &entry : std::filesystem::directory_iterator("/dev/shm")) {
-    if (entry.path().string().find(shm_prefix) == 0) {
-      remove(entry.path().c_str());
-    }
-  }
-#endif
-}
 
 absl::Status Server::Run() {
-  RemoveAllBuffers();
   std::vector<struct pollfd> poll_fds;
 
 #ifndef __linux__
@@ -160,6 +138,7 @@ absl::Status Server::Run() {
   // namespace (not a file).
   remove(socket_name_.c_str());
 #endif
+  session_id_ = AllocateSessionId();
 
   toolbelt::UnixSocket listen_socket;
   absl::Status status = listen_socket.Bind(socket_name_, true);
@@ -432,7 +411,7 @@ ServerChannel *Server::FindChannel(const std::string &channel_name) {
 }
 
 void Server::RemoveChannel(ServerChannel *channel) {
-  channel->RemoveBuffer(socket_name_);
+  channel->RemoveBuffer(session_id_);
   channel_ids_.Clear(channel->GetChannelId());
   auto it = channels_.find(channel->Name());
   channels_.erase(it);

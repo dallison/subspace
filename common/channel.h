@@ -316,6 +316,11 @@ public:
 
   const std::string &Name() const { return name_; }
 
+  virtual std::string ResolvedName() const = 0;
+
+#if defined(__APPLE__)
+    absl::StatusOr<std::string> MacOsSharedMemoryName(const std::string& shadow_file);
+#endif
   // For debug, prints the contents of the three linked lists in
   // shared memory,
   void PrintLists() const;
@@ -326,8 +331,7 @@ public:
 
   void ReloadIfNecessary(const std::function<bool()> &reload);
 
-  std::string BufferSharedMemoryName(const std::string &shm_prefix,
-                                     int buffer_index) const;
+  std::string BufferSharedMemoryName(uint64_t session_id, int buffer_index) const;
 
   void RegisterSubscriber(int sub_id, int vchan_id) {
     ccb_->subscribers.Set(sub_id);

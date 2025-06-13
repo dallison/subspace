@@ -15,6 +15,7 @@
 #include "server/server_channel.h"
 #include "toolbelt/bitset.h"
 #include "toolbelt/fd.h"
+#include "toolbelt/clock.h"
 #include "toolbelt/logging.h"
 #include <memory>
 #include <vector>
@@ -47,6 +48,8 @@ public:
 
   uint64_t GetVirtualMemoryUsage() const;
 
+  uint64_t GetSessionId() const { return session_id_; }
+
 private:
   friend class ClientHandler;
   friend class ServerChannel;
@@ -69,7 +72,6 @@ private:
   absl::Status RemapChannel(ServerChannel *channel, int slot_size,
                             int num_slots);
   ServerChannel *FindChannel(const std::string &channel_name);
-  void RemoveAllBuffers();
   void RemoveChannel(ServerChannel *channel);
   void RemoveAllUsersFor(ClientHandler *handler);
   void CloseHandler(ClientHandler *handler);
@@ -103,7 +105,12 @@ private:
                                     toolbelt::TCPSocket &receiver_listener,
                                     char *buffer, size_t buffer_size,
                                     co::Coroutine *c);
+
+  static uint64_t AllocateSessionId() {
+    return toolbelt::Now();
+  }
   std::string socket_name_;
+  uint64_t session_id_;
   std::vector<std::unique_ptr<ClientHandler>> client_handlers_;
   bool running_ = false;
   std::string server_id_;
