@@ -14,11 +14,11 @@
 #include <sys/stat.h>
 #endif
 #include "absl/container/flat_hash_map.h"
+#include "absl/strings/str_replace.h"
 #include <cassert>
 #include <inttypes.h>
 #include <mutex>
 #include <unistd.h>
-#include "absl/strings/str_replace.h"
 
 namespace subspace {
 
@@ -104,12 +104,15 @@ void Channel::Unmap() {
 
 std::string Channel::BufferSharedMemoryName(uint64_t session_id,
                                             int buffer_index) const {
-  std::string sanitized_name = absl::StrReplaceAll(ResolvedName(), {{"/", "."}});
+  std::string sanitized_name =
+      absl::StrReplaceAll(ResolvedName(), {{"/", "."}});
 
 #if defined(__APPLE__)
-  // Since you can't actually see any shared memory names in the MacOS filesystem we
-  // need to use /tmp to create a shadow file that is mapped to a shared memory name.
-  return absl::StrFormat("/tmp/subspace_%d_%s_%d", session_id, sanitized_name, buffer_index);
+  // Since you can't actually see any shared memory names in the MacOS
+  // filesystem we need to use /tmp to create a shadow file that is mapped to a
+  // shared memory name.
+  return absl::StrFormat("/tmp/subspace_%d_%s_%d", session_id, sanitized_name,
+                         buffer_index);
 #else
   return absl::StrFormat("subspace_%d_%s_%d", session_id, sanitized_name,
                          buffer_index);
@@ -273,11 +276,13 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
 }
 
 #if defined(__APPLE__)
-absl::StatusOr<std::string> Channel::MacOsSharedMemoryName(const std::string& shadow_file) {
+absl::StatusOr<std::string>
+Channel::MacOsSharedMemoryName(const std::string &shadow_file) {
   struct stat st;
   int e = ::stat(shadow_file.c_str(), &st);
   if (e == -1) {
-    return absl::InternalError(absl::StrFormat("Failed to determine MacOS shm name for %s", shadow_file));
+    return absl::InternalError(absl::StrFormat(
+        "Failed to determine MacOS shm name for %s", shadow_file));
   }
   // Use the inode number (unique per file) to make the shm file name.
   return absl::StrFormat("subspace_%d", st.st_ino);

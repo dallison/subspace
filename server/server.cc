@@ -11,6 +11,7 @@
 #include "toolbelt/sockets.h"
 #include <cerrno>
 #include <fcntl.h>
+#include <filesystem>
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <setjmp.h>
@@ -19,7 +20,6 @@
 #include <sys/poll.h>
 #include <unistd.h>
 #include <vector>
-#include <filesystem>
 
 namespace subspace {
 
@@ -127,7 +127,6 @@ void Server::ListenerCoroutine(toolbelt::UnixSocket &listen_socket,
     }
   }
 }
-
 
 absl::Status Server::Run() {
   std::vector<struct pollfd> poll_fds;
@@ -332,8 +331,7 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
     }
     if (mux_channel->IsPlaceholder()) {
       // Remap the memory now that we know the slots.
-      absl::Status status =
-          RemapChannel(mux_channel, slot_size, num_slots);
+      absl::Status status = RemapChannel(mux_channel, slot_size, num_slots);
       if (!status.ok()) {
         return status;
       }
@@ -389,8 +387,8 @@ absl::Status Server::RemapChannel(ServerChannel *channel, int slot_size,
   if (channel->IsVirtual()) {
     ChannelMultiplexer *mux = static_cast<VirtualChannel *>(channel)->GetMux();
     logger_.Log(toolbelt::LogLevel::kDebug,
-                "Remapping multiplexer %s with %d slots", channel->Name().c_str(),
-                num_slots);
+                "Remapping multiplexer %s with %d slots",
+                channel->Name().c_str(), num_slots);
     return RemapChannel(mux, slot_size, num_slots);
   }
   absl::StatusOr<SharedMemoryFds> fds =

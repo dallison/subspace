@@ -59,7 +59,7 @@ constexpr int kMessageActivate = 1; // This is a reliable activation message.
 constexpr int kMessageBridged = 2;  // This message came from the bridge.
 
 // Flags for MessageSlot flags.
-constexpr int kMessageSeen = 1;     // Message has been seen.
+constexpr int kMessageSeen = 1; // Message has been seen.
 
 // We need a max channels number because the size of things in
 // shared memory needs to be fixed.
@@ -319,7 +319,8 @@ public:
   virtual std::string ResolvedName() const = 0;
 
 #if defined(__APPLE__)
-    absl::StatusOr<std::string> MacOsSharedMemoryName(const std::string& shadow_file);
+  absl::StatusOr<std::string>
+  MacOsSharedMemoryName(const std::string &shadow_file);
 #endif
   // For debug, prints the contents of the three linked lists in
   // shared memory,
@@ -331,7 +332,8 @@ public:
 
   void ReloadIfNecessary(const std::function<bool()> &reload);
 
-  std::string BufferSharedMemoryName(uint64_t session_id, int buffer_index) const;
+  std::string BufferSharedMemoryName(uint64_t session_id,
+                                     int buffer_index) const;
 
   void RegisterSubscriber(int sub_id, int vchan_id) {
     ccb_->subscribers.Set(sub_id);

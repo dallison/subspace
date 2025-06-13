@@ -171,7 +171,6 @@ ClientImpl::CreatePublisher(const std::string &channel_name, int slot_size,
       channel_name, num_slots, pub_resp.channel_id(), pub_resp.publisher_id(),
       pub_resp.vchan_id(), session_id_, pub_resp.type(), opts);
 
-
   SharedMemoryFds channel_fds(std::move(fds[pub_resp.ccb_fd_index()]),
                               std::move(fds[pub_resp.bcb_fd_index()]));
   if (absl::Status status = channel->Map(std::move(channel_fds), scb_fd_);
@@ -179,7 +178,8 @@ ClientImpl::CreatePublisher(const std::string &channel_name, int slot_size,
     return status;
   }
 
-  if (absl::Status status = channel->CreateOrAttachBuffers(Aligned(slot_size)); !status.ok()) {
+  if (absl::Status status = channel->CreateOrAttachBuffers(Aligned(slot_size));
+      !status.ok()) {
     return status;
   }
   channel->SetTriggerFd(std::move(fds[pub_resp.pub_trigger_fd_index()]));
@@ -260,8 +260,8 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
   // by the server.
   std::shared_ptr<SubscriberImpl> channel = std::make_shared<SubscriberImpl>(
       channel_name, sub_resp.num_slots(), sub_resp.channel_id(),
-      sub_resp.subscriber_id(), sub_resp.vchan_id(), session_id_, sub_resp.type(), opts);
-
+      sub_resp.subscriber_id(), sub_resp.vchan_id(), session_id_,
+      sub_resp.type(), opts);
 
   channel->SetNumSlots(sub_resp.num_slots());
 
@@ -591,13 +591,16 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     // Subscriber does not have a slot now but the slot it had is still active.
   } else {
     // We have a slot, claim it.
-    subscriber->ClaimSlot(new_slot, [this, subscriber]() {
-      absl::StatusOr<bool> ok = ReloadBuffersIfNecessary(subscriber);
-      if (!ok.ok()) {
-        return false;
-      }
-      return *ok;
-    }, subscriber->VirtualChannelId());
+    subscriber->ClaimSlot(new_slot,
+                          [this, subscriber]() {
+                            absl::StatusOr<bool> ok =
+                                ReloadBuffersIfNecessary(subscriber);
+                            if (!ok.ok()) {
+                              return false;
+                            }
+                            return *ok;
+                          },
+                          subscriber->VirtualChannelId());
   }
   return Message(msg);
 }

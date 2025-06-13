@@ -1679,7 +1679,6 @@ TEST_F(ClientTest, Mikael) {
   }
 }
 
-
 int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);
   absl::ParseCommandLine(argc, argv);

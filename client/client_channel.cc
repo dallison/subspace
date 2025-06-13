@@ -26,23 +26,26 @@ static void UnmapBuffers(BufferSetIter first, BufferSetIter last,
 
 #if defined(__APPLE__)
 
-absl::StatusOr<std::string> ClientChannel::CreateMacOSSharedMemoryFile(const std::string &filename, off_t size) {
-    // Create a file in /tmp and make it the same size as the shared memory.  This will not
-    // actually allocate any disk space.
-    int fd = open(filename.c_str(), O_RDWR | O_CREAT, 0666);
-    if (fd < 0) {
-      return absl::InternalError(absl::StrFormat(
-          "Failed to open shadow file %s: %s", filename.c_str(), strerror(errno)));
-    }
-    if (ftruncate(fd, size) < 0) {
-      close(fd);
-      return absl::InternalError(absl::StrFormat(
-          "Failed to truncate shadow file %s to size %zd: %s", filename.c_str(),
-          size, strerror(errno)));
-    }
+absl::StatusOr<std::string>
+ClientChannel::CreateMacOSSharedMemoryFile(const std::string &filename,
+                                           off_t size) {
+  // Create a file in /tmp and make it the same size as the shared memory.  This
+  // will not actually allocate any disk space.
+  int fd = open(filename.c_str(), O_RDWR | O_CREAT, 0666);
+  if (fd < 0) {
+    return absl::InternalError(
+        absl::StrFormat("Failed to open shadow file %s: %s", filename.c_str(),
+                        strerror(errno)));
+  }
+  if (ftruncate(fd, size) < 0) {
     close(fd);
+    return absl::InternalError(
+        absl::StrFormat("Failed to truncate shadow file %s to size %zd: %s",
+                        filename.c_str(), size, strerror(errno)));
+  }
+  close(fd);
 
-    return MacOsSharedMemoryName(filename);
+  return MacOsSharedMemoryName(filename);
 }
 #endif
 
@@ -138,7 +141,7 @@ absl::Status ClientChannel::AttachBuffers() {
       // It's possible the ftruncate has not been called yet, so we try again.
       continue;
     }
-    absl::StatusOr<char*> addr;
+    absl::StatusOr<char *> addr;
     uint64_t slot_size = BufferSizeToSlotSize(*size);
     if (slot_size > 0) {
       // Map the shared memory buffer.
@@ -196,8 +199,8 @@ OpenSharedMemoryFile(const std::string &filename, int flags) {
       // File already exists, return an invalid fd.
       return toolbelt::FileDescriptor();
     }
-    return absl::InternalError(absl::StrFormat("Failed to open shared memory %s: %s",
-        filename, strerror(errno)));
+    return absl::InternalError(absl::StrFormat(
+        "Failed to open shared memory %s: %s", filename, strerror(errno)));
   }
 
   return toolbelt::FileDescriptor(shm_fd);
@@ -223,16 +226,17 @@ ClientChannel::CreateBuffer(int buffer_index, size_t size) {
   if (e == -1) {
     (void)shm_unlink(filename.c_str());
     return absl::InternalError(
-        absl::StrFormat("Failed to set length of shared memory %s: %s", filename,
-                                                              strerror(errno)));
+        absl::StrFormat("Failed to set length of shared memory %s: %s",
+                        filename, strerror(errno)));
   }
 
 #else
-// On MacOS we need to create a shadow file that has the same size as the
-// shared memory file.  This is because the fstat of the shm "file" returns a
-// page aligned size, which is not what we want.  The shadow file is used
-// to determine the size of the shared memory segment.
-  absl::StatusOr<std::string> shm_name = CreateMacOSSharedMemoryFile(filename, off_t(size));
+  // On MacOS we need to create a shadow file that has the same size as the
+  // shared memory file.  This is because the fstat of the shm "file" returns a
+  // page aligned size, which is not what we want.  The shadow file is used
+  // to determine the size of the shared memory segment.
+  absl::StatusOr<std::string> shm_name =
+      CreateMacOSSharedMemoryFile(filename, off_t(size));
   if (!shm_name.ok()) {
     return shm_name.status();
   }
@@ -252,8 +256,8 @@ ClientChannel::CreateBuffer(int buffer_index, size_t size) {
   if (e == -1) {
     (void)shm_unlink(filename.c_str());
     return absl::InternalError(
-        absl::StrFormat("Failed to set length of shared memory %s: %s", filename,
-                                                              strerror(errno)));
+        absl::StrFormat("Failed to set length of shared memory %s: %s",
+                        filename, strerror(errno)));
   }
 
 #endif
@@ -271,21 +275,22 @@ ClientChannel::OpenBuffer(int buffer_index) {
   if (!shm_name.ok()) {
     return shm_name.status();
   }
-    return OpenSharedMemoryFile(*shm_name, O_RDWR);
+  return OpenSharedMemoryFile(*shm_name, O_RDWR);
 #endif
 }
 
 absl::StatusOr<size_t>
-ClientChannel::GetBufferSize(toolbelt::FileDescriptor &shm_fd, int buffer_index) const {
+ClientChannel::GetBufferSize(toolbelt::FileDescriptor &shm_fd,
+                             int buffer_index) const {
 #if defined(__APPLE__)
-// On MacOS we need to look at the size of the shadow file because it looks like
-// the fstat of the shm "file" returns a page aligned size.
+  // On MacOS we need to look at the size of the shadow file because it looks
+  // like the fstat of the shm "file" returns a page aligned size.
   std::string filename = BufferSharedMemoryName(buffer_index);
   struct stat sb;
   if (stat(filename.c_str(), &sb) == -1) {
     return absl::InternalError(
         absl::StrFormat("Failed to get size of shared memory %s: %s", filename,
-                                                            strerror(errno)));
+                        strerror(errno)));
   }
   return sb.st_size;
 #else
@@ -293,10 +298,10 @@ ClientChannel::GetBufferSize(toolbelt::FileDescriptor &shm_fd, int buffer_index)
   if (fstat(shm_fd.Fd(), &sb) == -1) {
     return absl::InternalError(
         absl::StrFormat("Failed to get size of shared memory from fd %d: %s",
-            shm_fd.Fd(), strerror(errno)));
+                        shm_fd.Fd(), strerror(errno)));
   }
   return sb.st_size;
-  #endif
+#endif
 }
 
 absl::StatusOr<char *>
@@ -306,10 +311,10 @@ ClientChannel::MapBuffer(toolbelt::FileDescriptor &shm_fd, size_t size,
   void *p = MapMemory(shm_fd.Fd(), size, prot, "buffers");
   if (p == MAP_FAILED) {
     return absl::InternalError(
-        absl::StrFormat("Failed to map shared memory from fd %d: %s", shm_fd.Fd(),
-                                                            strerror(errno)));
+        absl::StrFormat("Failed to map shared memory from fd %d: %s",
+                        shm_fd.Fd(), strerror(errno)));
   }
-  return reinterpret_cast<char*>(p);
+  return reinterpret_cast<char *>(p);
 }
 
 } // namespace details
