@@ -15,8 +15,8 @@
 #include "toolbelt/sockets.h"
 #include "toolbelt/triggerfd.h"
 #include <memory>
-#include <vector>
 #include <sys/mman.h>
+#include <vector>
 
 namespace subspace {
 constexpr int kMaxUsers = kMaxSlotOwners;
@@ -159,9 +159,7 @@ public:
     Channel::RegisterSubscriber(sub_id, vchan_id);
   }
 
-  std::string ResolvedName() const override {
-    return Name();
-  }
+  std::string ResolvedName() const override { return Name(); }
 
   // Get the file descriptors for all subscriber triggers.
   std::vector<toolbelt::FileDescriptor> GetSubscriberTriggerFds() const;
@@ -206,7 +204,8 @@ public:
   }
 
   virtual int NumSlots() const { return Channel::NumSlots(); }
-  virtual void CleanupSlots(int owner, bool reliable, bool is_pub, int vchan_id) {
+  virtual void CleanupSlots(int owner, bool reliable, bool is_pub,
+                            int vchan_id) {
     Channel::CleanupSlots(owner, reliable, is_pub, vchan_id);
   }
 
@@ -252,7 +251,6 @@ public:
 
   virtual const SharedMemoryFds &GetFds() { return shared_memory_fds_; }
   virtual uint64_t GetVirtualMemoryUsage() const;
-
 
   // Allocate the shared memory for a channel.  The num_slots_
   // and slot_size_ member variables will either be 0 (for a subscriber
@@ -309,7 +307,7 @@ public:
   absl::Status
   HasSufficientCapacity(int new_max_active_messages) const override;
 
-   void RemoveBuffer(uint64_t session_id) override {
+  void RemoveBuffer(uint64_t session_id) override {
     if (!virtual_channels_.empty()) {
       return;
     }
@@ -364,9 +362,7 @@ public:
   int NumSlots() const override { return mux_->NumSlots(); }
   int GetChannelId() const override { return mux_->GetChannelId(); }
 
-  std::string ResolvedName() const override {
-    return mux_->ResolvedName();
-  }
+  std::string ResolvedName() const override { return mux_->ResolvedName(); }
   void RemoveBuffer(uint64_t session_id) override {
     mux_->RemoveBuffer(session_id);
   }
@@ -380,7 +376,8 @@ public:
     return mux_->RecordUpdate(is_pub, add, reliable);
   }
 
-  void CleanupSlots(int owner, bool reliable, bool is_pub, int vchan_id) override {
+  void CleanupSlots(int owner, bool reliable, bool is_pub,
+                    int vchan_id) override {
     mux_->CleanupSlots(owner, reliable, is_pub, vchan_id);
   }
 

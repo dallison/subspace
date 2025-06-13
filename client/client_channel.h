@@ -203,7 +203,8 @@ protected:
   absl::StatusOr<toolbelt::FileDescriptor> CreateBuffer(int buffer_index,
                                                         size_t size);
   absl::StatusOr<toolbelt::FileDescriptor> OpenBuffer(int buffer_index);
-  absl::StatusOr<size_t> GetBufferSize(toolbelt::FileDescriptor &shm_fd, int buffer_index) const;
+  absl::StatusOr<size_t> GetBufferSize(toolbelt::FileDescriptor &shm_fd,
+                                       int buffer_index) const;
   absl::StatusOr<char *> MapBuffer(toolbelt::FileDescriptor &shm_fd,
                                    size_t size, bool read_only);
 
@@ -212,7 +213,8 @@ protected:
   }
 
 #if defined(__APPLE__)
-  absl::StatusOr<std::string> CreateMacOSSharedMemoryFile(const std::string &filename, off_t size);
+  absl::StatusOr<std::string>
+  CreateMacOSSharedMemoryFile(const std::string &filename, off_t size);
 #endif
 
 protected:

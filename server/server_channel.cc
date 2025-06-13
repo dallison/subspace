@@ -131,7 +131,8 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
   ccb_->num_subs = num_subs;
 
   // Create buffer control block.
-  p = CreateSharedMemory(channel_id_, "bcb", sizeof(BufferControlBlock), /*map=*/true, fds.bcb);
+  p = CreateSharedMemory(channel_id_, "bcb", sizeof(BufferControlBlock),
+                         /*map=*/true, fds.bcb);
   if (!p.ok()) {
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
     UnmapMemory(ccb_, CcbSize(num_slots_), "CCB");
@@ -173,8 +174,7 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
   }
 
   if (debug_) {
-    printf("Channel allocated: scb: %p, ccb: %p, bcb: %p\n", scb_, ccb_,
-           bcb_);
+    printf("Channel allocated: scb: %p, ccb: %p, bcb: %p\n", scb_, ccb_, bcb_);
     Dump(std::cout);
   }
   return fds;
@@ -210,11 +210,11 @@ ServerChannel::GetReliablePublisherTriggerFds() const {
 
 uint64_t ServerChannel::GetVirtualMemoryUsage() const {
   uint64_t size = CcbSize(num_slots_);
-    for (int i = 0; i < ccb_->num_buffers; i++) {
-        if (bcb_->refs[i] > 0) {
-            size += bcb_->sizes[i];
-        }
+  for (int i = 0; i < ccb_->num_buffers; i++) {
+    if (bcb_->refs[i] > 0) {
+      size += bcb_->sizes[i];
     }
+  }
   return size;
 }
 

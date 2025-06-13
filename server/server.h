@@ -14,8 +14,8 @@
 #include "proto/subspace.pb.h"
 #include "server/server_channel.h"
 #include "toolbelt/bitset.h"
-#include "toolbelt/fd.h"
 #include "toolbelt/clock.h"
+#include "toolbelt/fd.h"
 #include "toolbelt/logging.h"
 #include <memory>
 #include <vector>
@@ -106,9 +106,7 @@ private:
                                     char *buffer, size_t buffer_size,
                                     co::Coroutine *c);
 
-  static uint64_t AllocateSessionId() {
-    return toolbelt::Now();
-  }
+  static uint64_t AllocateSessionId() { return toolbelt::Now(); }
   std::string socket_name_;
   uint64_t session_id_;
   std::vector<std::unique_ptr<ClientHandler>> client_handlers_;
