@@ -343,6 +343,9 @@ public:
   virtual void Dump(std::ostream &os) const;
 
   uint64_t BufferSizeToSlotSize(uint64_t size) const {
+    if (size < NumSlots() * sizeof(MessagePrefix)) {
+      return 0;
+    }
     return (size - NumSlots() * sizeof(MessagePrefix)) / NumSlots();
   };
 
