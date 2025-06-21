@@ -17,9 +17,9 @@ bazel_dep(name = "zlib", version = "1.3.1.bcr.3")
 # Toolbelt
 http_archive(
     name = "toolbelt",
-    integrity = "sha256-vlRb0hMtip/JDPWbK6YIXnds8HjrMAoc/iZjQ/BX9Vc=",
-    strip_prefix = "cpp_toolbelt-1.1.7",
-    urls = ["https://github.com/dallison/cpp_toolbelt/archive/refs/tags/1.1.7.tar.gz"],
+    integrity = "sha256-fIIrlEg2Iizs2eTsLw9gA5Y8owvE6zoOKNZOxbyFluw=",
+    strip_prefix = "cpp_toolbelt-1.2.5",
+    urls = ["https://github.com/dallison/cpp_toolbelt/archive/refs/tags/1.2.5.tar.gz"],
 )
 # For local debugging of toolbelt coroutine library.
 #bazel_dep(name = "toolbelt")
@@ -31,16 +31,16 @@ http_archive(
 # Coroutines
 http_archive(
     name = "coroutines",
-    integrity = "sha256-cJ3a89VebabjRgLjHNsEsjIQE+hi+5vdtuAh4RfTXCI=",
-    strip_prefix = "co-1.3.7",
-    urls = ["https://github.com/dallison/co/archive/refs/tags/1.3.7.tar.gz"],
+    integrity = "sha256-PCpyMPnMgHAWtL1FWK7bYUTzOWqoGf/PgU5gdIR2tT4=",
+    strip_prefix = "co-2.0.1",
+    urls = ["https://github.com/dallison/co/archive/refs/tags/2.0.1.tar.gz"],
 )
 # For local debugging of co coroutine library.
-#bazel_dep(name = "coroutines")
-#local_path_override(
+# bazel_dep(name = "coroutines")
+# local_path_override(
 #    module_name = "coroutines",
 #    path = "../co",
-#)
+# )
 
 bazel_dep(name = "rules_python", version = "0.40.0")
 
