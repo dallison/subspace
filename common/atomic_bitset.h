@@ -7,7 +7,9 @@
 
 namespace subspace {
 
-inline constexpr size_t BitsToWords(size_t bits) { return bits == 0 ? 0 : (((bits - 1) / 64) + 1); }
+inline constexpr size_t BitsToWords(size_t bits) {
+  return bits == 0 ? 0 : (((bits - 1) / 64) + 1);
+}
 
 template <size_t SizeInBits> class AtomicBitSet {
 public:
@@ -21,12 +23,12 @@ public:
     for (size_t i = 0; i < BitsToWords(num_bits_); i++) {
       bits_[i].store(0, std::memory_order_relaxed);
     }
- }
+  }
 
   void Init(size_t num_bits) {
     num_bits_ = num_bits;
     for (size_t i = 0; i < BitsToWords(num_bits_); i++) {
-     bits_[i].store(0, std::memory_order_relaxed);
+      bits_[i].store(0, std::memory_order_relaxed);
     }
   }
   void Set(size_t bit) {
@@ -79,7 +81,7 @@ public:
     return -1;
   }
 
-  void Print(std::ostream& os, int start_bit = 0) const {
+  void Print(std::ostream &os, int start_bit = 0) const {
     // Print the bits with - between each group of 4.
     size_t start_word = start_bit / 64;
     start_bit %= 64;
@@ -103,7 +105,8 @@ public:
       while (bit < num_bits_ && shift < 64) {
         uint64_t word = bits_[i].load(std::memory_order_relaxed) >> shift;
         size_t n = ffsll(word);
-        //std::cerr << "i: " << i << " word " << std::hex << word << " n " << n << std::dec << "\n";
+        // std::cerr << "i: " << i << " word " << std::hex << word << " n " << n
+        // << std::dec << "\n";
         if (n == 0) {
           break;
         }
@@ -122,7 +125,8 @@ private:
 };
 
 inline size_t SizeofAtomicBitSet(size_t size_in_bits) {
-  return sizeof(size_t) + sizeof(std::atomic<uint64_t>) * BitsToWords(size_in_bits);
+  return sizeof(size_t) +
+         sizeof(std::atomic<uint64_t>) * BitsToWords(size_in_bits);
 }
 
 // An atomic bitset with its bits not stored in the object.
@@ -130,9 +134,10 @@ using InPlaceAtomicBitset = AtomicBitSet<0>;
 
 class DynamicBitSet {
 public:
-  DynamicBitSet(size_t num_bits) : num_bits_(num_bits), bits_(BitsToWords(num_bits), 0) {}
+  DynamicBitSet(size_t num_bits)
+      : num_bits_(num_bits), bits_(BitsToWords(num_bits), 0) {}
 
-   void Set(size_t bit) {
+  void Set(size_t bit) {
     size_t word = bit / 64;
     size_t offset = bit % 64;
     bits_[word] |= 1ULL << offset;

@@ -79,6 +79,12 @@ struct PublisherOptions {
     return *this;
   }
 
+  bool Activate() const { return activate; }
+  PublisherOptions &SetActivate(bool v) {
+    activate = v;
+    return *this;
+  }
+
   int VchanId() const { return vchan_id; }
 
   bool local = false;
@@ -86,8 +92,11 @@ struct PublisherOptions {
   bool bridge = false;
   bool fixed_size = false;
   std::string type;
+  bool activate =
+      true; // If true, the channel will be activated even if unreliable.
+
   std::string mux;
-  int vchan_id = -1;    // If -1, server will assign.
+  int vchan_id = -1; // If -1, server will assign.
 };
 
 struct SubscriberOptions {
@@ -142,6 +151,12 @@ struct SubscriberOptions {
     return *this;
   }
 
+  bool PassActivation() const { return pass_activation; }
+  SubscriberOptions &SetPassActivation(bool v) {
+    pass_activation = v;
+    return *this;
+  }
+
   int VchanId() const { return vchan_id; }
 
   bool reliable = false;
@@ -149,8 +164,11 @@ struct SubscriberOptions {
   std::string type;
   int max_active_messages = 1;
   bool log_dropped_messages = true;
+  bool pass_activation = false; // If true, the subscriber will pass activation
+                                // messages to the user.
+
   std::string mux;
-  int vchan_id = -1;    // If -1, server will assign.
+  int vchan_id = -1; // If -1, server will assign.
 };
 
 } // namespace subspace

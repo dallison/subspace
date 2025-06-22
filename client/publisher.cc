@@ -4,71 +4,72 @@
 namespace subspace {
 namespace details {
 
-  absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
-    size_t final_buffer_size = size_t(SlotSizeToBufferSize(final_slot_size));
+absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
+  size_t final_buffer_size = size_t(SlotSizeToBufferSize(final_slot_size));
 
-    uint64_t current_slot_size = 0;
-    int num_buffers = ccb_->num_buffers.load(std::memory_order_relaxed);
+  uint64_t current_slot_size = 0;
+  int num_buffers = ccb_->num_buffers.load(std::memory_order_relaxed);
 
-    for (;;) {
-        while (current_slot_size < final_slot_size || buffers_.size() < size_t(num_buffers)) {
-            size_t buffer_index = buffers_.size();
-            auto shm_fd =
-                  CreateBuffer(buffer_index, final_buffer_size);
-            if (!shm_fd.ok()) {
-              return shm_fd.status();
-            }
-            if (!shm_fd->Valid()) {
-                // This means that the file in /dev/shm already exists so we need to attach
-                // to it.
-                shm_fd = OpenBuffer(buffer_index);
-                if (!shm_fd.ok()) {
-                  return shm_fd.status();
-                }
-                auto size = GetBufferSize(*shm_fd, buffer_index);
-                if (!size.ok()) {
-                  return size.status();
-                }
-                absl::StatusOr<char*> addr;
-                current_slot_size = BufferSizeToSlotSize(*size);
-                if (current_slot_size > 0) {
-                   addr =
-                          MapBuffer(*shm_fd, *size, /*read_only=*/false);
-                  if (!addr.ok()) {
-                    return addr.status();
-                  }
-                } else {
-                  addr = nullptr;
-                }
-                buffers_.emplace_back(std::make_unique<BufferSet>(*size, current_slot_size, *addr));
-                 bcb_->sizes[buffers_.size()].store(
-                        final_buffer_size, std::memory_order_relaxed);
-             } else {
-                // We successfully created the /dev/shm file.
-                bcb_->sizes[buffers_.size()].store(
-                        final_buffer_size, std::memory_order_relaxed);
-                auto addr = MapBuffer(*shm_fd, final_buffer_size, /*read_only=*/false);
-                if (!addr.ok()) {
-                  return addr.status();
-                }
-                buffers_.emplace_back(
-                        std::make_unique<BufferSet>(final_buffer_size, final_slot_size, *addr));
-                current_slot_size = final_slot_size;
-            }
+  for (;;) {
+    while (current_slot_size < final_slot_size ||
+           buffers_.size() < size_t(num_buffers)) {
+      size_t buffer_index = buffers_.size();
+      auto shm_fd = CreateBuffer(buffer_index, final_buffer_size);
+      if (!shm_fd.ok()) {
+        return shm_fd.status();
+      }
+      if (!shm_fd->Valid()) {
+        // This means that the file in /dev/shm already exists so we need to
+        // attach to it.
+        shm_fd = OpenBuffer(buffer_index);
+        if (!shm_fd.ok()) {
+          return shm_fd.status();
         }
-        int new_num_buffers = int(buffers_.size());
-        // Update the atomic numBuffers in the CCB.  If this fails it means something
-        // else got there before us and we just go back and remap any new buffers.
-        if (ccb_->num_buffers.compare_exchange_strong(
-                    num_buffers, new_num_buffers, std::memory_order_relaxed)) {
-            // We successfully updated the number of buffers in the CCB.
-            break;
+        auto size = GetBufferSize(*shm_fd, buffer_index);
+        if (!size.ok()) {
+          return size.status();
         }
-        // Another thread has updated the number of buffers in the CCB.  We need to
-        // retry.
+        absl::StatusOr<char *> addr;
+        current_slot_size = BufferSizeToSlotSize(*size);
+        if (current_slot_size > 0) {
+          addr = MapBuffer(*shm_fd, *size, /*read_only=*/false);
+          if (!addr.ok()) {
+            return addr.status();
+          }
+        } else {
+          addr = nullptr;
+        }
+        buffers_.emplace_back(
+            std::make_unique<BufferSet>(*size, current_slot_size, *addr));
+        bcb_->sizes[buffers_.size()].store(final_buffer_size,
+                                           std::memory_order_relaxed);
+      } else {
+        // We successfully created the /dev/shm file.
+        bcb_->sizes[buffers_.size()].store(final_buffer_size,
+                                           std::memory_order_relaxed);
+        auto addr = MapBuffer(*shm_fd, final_buffer_size, /*read_only=*/false);
+        if (!addr.ok()) {
+          return addr.status();
+        }
+        buffers_.emplace_back(std::make_unique<BufferSet>(
+            final_buffer_size, final_slot_size, *addr));
+        current_slot_size = final_slot_size;
+      }
     }
+    int new_num_buffers = int(buffers_.size());
+    // Update the atomic numBuffers in the CCB.  If this fails it means
+    // something else got there before us and we just go back and remap any new
+    // buffers.
+    if (ccb_->num_buffers.compare_exchange_strong(num_buffers, new_num_buffers,
+                                                  std::memory_order_relaxed)) {
+      // We successfully updated the number of buffers in the CCB.
+      break;
+    }
+    // Another thread has updated the number of buffers in the CCB.  We need to
+    // retry.
+  }
 
-    return absl::OkStatus();
+  return absl::OkStatus();
 }
 
 void PublisherImpl::SetSlotToBiggestBuffer(MessageSlot *slot) {
@@ -128,6 +129,7 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
         DumpSlots(std::cout);
         return nullptr;
       }
+      continue;
     }
     // Claim the slot by setting the refs to kPubOwned with our owner in the
     // bottom bits.
@@ -175,19 +177,16 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
 
     // Put all free slots into the active_slots vector.
     active_slots.clear();
-    if (!RetiredSlots().IsEmpty()) {
-      RetiredSlots().Traverse([this, &active_slots, &embargoed_slots](int i) {
-        if (embargoed_slots.IsSet(i)) {
-          return;
-        }
-        MessageSlot *s = &ccb_->slots[i];
-        uint64_t refs = s->refs.load(std::memory_order_relaxed);
-        if ((refs & kPubOwned) != 0) {
-          return;
-        }
-        ActiveSlot active_slot = {s, s->ordinal, s->timestamp};
-        active_slots.push_back(active_slot);
-      });
+    int retired_slot = RetiredSlots().FindFirstSet();
+    if (retired_slot != -1) { // We have a retired slot.
+      if (embargoed_slots.IsSet(retired_slot)) {
+        continue;
+      }
+      RetiredSlots().Clear(retired_slot);
+      MessageSlot *s = &ccb_->slots[retired_slot];
+
+      ActiveSlot active_slot = {s, s->ordinal, s->timestamp};
+      active_slots.push_back(active_slot);
     } else {
       for (int i = 0; i < NumSlots(); i++) {
         if (embargoed_slots.IsSet(i)) {
@@ -217,8 +216,7 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
         break;
       }
       // Don't go past one without the kMessageSeen flag set.
-      if (s.ordinal != 0 &&
-          (s.slot->flags & kMessageSeen) == 0) {
+      if (s.ordinal != 0 && (s.slot->flags & kMessageSeen) == 0) {
         break;
       }
       // If the refs have no references we can claim it.
@@ -281,7 +279,6 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
 
   // Copy message parameters into message prefix in buffer.
   if (omit_prefix) {
-    slot->ordinal = prefix->ordinal; // Copy ordinal from prefix.
     slot->timestamp = prefix->timestamp;
     slot->vchan_id = prefix->vchan_id;
   } else {
@@ -292,6 +289,7 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     prefix->flags = 0;
     if (is_activation) {
       prefix->flags |= kMessageActivate;
+      ccb_->activation_tracker.Activate(slot->vchan_id);
     }
   }
 

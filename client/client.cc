@@ -207,6 +207,11 @@ ClientImpl::CreatePublisher(const std::string &channel_name, int slot_size,
       return absl::InternalError("No slot available for publisher");
     }
     channel->SetSlot(slot);
+    if (opts.Activate()) {
+      if (absl::Status status = ActivateChannel(channel.get()); !status.ok()) {
+        return status;
+      }
+    }
   } else {
     // Send a single activation message to the channel.
     absl::Status status = ActivateReliableChannel(channel.get());
@@ -626,7 +631,8 @@ absl::StatusOr<Message> ClientImpl::ReadMessage(SubscriberImpl *subscriber,
     return status;
   }
 
-  return ReadMessageInternal(subscriber, mode, /*pass_activation=*/false,
+  return ReadMessageInternal(subscriber, mode,
+                             subscriber->options_.pass_activation,
                              /*clear_trigger=*/true);
 }
 
@@ -892,6 +898,32 @@ absl::Status ClientImpl::ActivateReliableChannel(PublisherImpl *publisher) {
         return *ok;
       });
   publisher->SetSlot(nullptr);
+  publisher->TriggerSubscribers();
+
+  return absl::OkStatus();
+}
+
+absl::Status ClientImpl::ActivateChannel(PublisherImpl *publisher) {
+  if (publisher->IsActivated(publisher->VirtualChannelId())) {
+    return absl::OkStatus();
+  }
+
+  void *buffer = publisher->GetCurrentBufferAddress();
+  if (buffer == nullptr) {
+    return absl::InternalError(
+        absl::StrFormat("Channel %s has no buffer", publisher->Name()));
+  }
+  Channel::PublishedMessage msg = publisher->ActivateSlotAndGetAnother(
+      /*reliable=*/false,
+      /*is_activation=*/true,
+      /*omit_prefix=*/false, /*notify=*/nullptr, [this, publisher]() {
+        absl::StatusOr<bool> ok = ReloadBuffersIfNecessary(publisher);
+        if (!ok.ok()) {
+          return false;
+        }
+        return *ok;
+      });
+  publisher->SetSlot(msg.new_slot);
   publisher->TriggerSubscribers();
 
   return absl::OkStatus();

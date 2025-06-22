@@ -1348,7 +1348,6 @@ TEST_F(ClientTest, ReliablePublisher2) {
     absl::StatusOr<struct pollfd> fd = pub->GetPollFd();
     ASSERT_TRUE(fd.ok());
     c->Wait(fd->fd);
-
     absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
     ASSERT_TRUE(buffer.ok());
     ASSERT_NE(nullptr, *buffer);
