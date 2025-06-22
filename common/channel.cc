@@ -248,9 +248,17 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
     // Look for a slot with kPubOwned set and clear it.
     for (int i = 0; i < NumSlots(); i++) {
       MessageSlot *slot = &ccb_->slots[i];
-      uint32_t refs = slot->refs.load(std::memory_order_relaxed);
-      if ((refs & kPubOwned) != 0) {
+      uint64_t refs = slot->refs.load(std::memory_order_relaxed);
+      // Is the slot owned by this publisher?
+      if (refs == (kPubOwned | uint64_t(owner))) {
+        // Owned by this publisher, clear slot.
         slot->refs.store(0, std::memory_order_relaxed);
+        slot->message_size = 0;
+        slot->ordinal = 0;
+        slot->timestamp = 0;
+        slot->flags = 0;
+        slot->buffer_index = -1; // No buffer in the free list.
+        slot->vchan_id = -1;     // No vchan_id.
         // Clear the slot in all the subscriber bitsets.
         ccb_->subscribers.Traverse([this, slot](int sub_id) {
           GetAvailableSlots(sub_id).Clear(slot->id);

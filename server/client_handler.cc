@@ -374,7 +374,8 @@ void ClientHandler::HandleCreateSubscriber(
     }
     sub = *subscriber;
   }
-  channel->RegisterSubscriber(sub->GetId(), channel->GetVirtualChannelId());
+  channel->RegisterSubscriber(sub->GetId(), channel->GetVirtualChannelId(),
+                              req.subscriber_id() == -1);
 
   response->set_channel_id(channel->GetChannelId());
   response->set_subscriber_id(sub->GetId());

@@ -155,8 +155,8 @@ public:
   virtual int GetChannelId() const { return Channel::GetChannelId(); }
   virtual bool IsPlaceholder() const { return Channel::IsPlaceholder(); }
   bool IsVirtual() const { return is_virtual_; }
-  virtual void RegisterSubscriber(int sub_id, int vchan_id) {
-    Channel::RegisterSubscriber(sub_id, vchan_id);
+  virtual void RegisterSubscriber(int sub_id, int vchan_id, bool is_new) {
+    Channel::RegisterSubscriber(sub_id, vchan_id, is_new);
   }
 
   std::string ResolvedName() const override { return Name(); }
@@ -381,8 +381,8 @@ public:
     mux_->CleanupSlots(owner, reliable, is_pub, vchan_id);
   }
 
-  void RegisterSubscriber(int sub_id, int vchan_id) override {
-    mux_->RegisterSubscriber(sub_id, vchan_id);
+  void RegisterSubscriber(int sub_id, int vchan_id, bool is_new) override {
+    mux_->RegisterSubscriber(sub_id, vchan_id, is_new);
   }
 
   uint64_t GetVirtualMemoryUsage() const override { return 0; }

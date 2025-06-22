@@ -36,9 +36,10 @@ template <typename H> inline H AbslHashValue(H h, const OrdinalAndVchanId &x) {
 class SubscriberImpl : public ClientChannel {
 public:
   SubscriberImpl(const std::string &name, int num_slots, int channel_id,
-                 int subscriber_id, int vchan_id, uint64_t session_id, std::string type,
-                 const SubscriberOptions &options)
-      : ClientChannel(name, num_slots, channel_id, vchan_id, std::move(session_id), std::move(type)),
+                 int subscriber_id, int vchan_id, uint64_t session_id,
+                 std::string type, const SubscriberOptions &options)
+      : ClientChannel(name, num_slots, channel_id, vchan_id,
+                      std::move(session_id), std::move(type)),
         subscriber_id_(subscriber_id), options_(options) {}
 
   std::shared_ptr<SubscriberImpl> shared_from_this() {
@@ -107,7 +108,8 @@ public:
   }
 
   void DecrementSlotRef(MessageSlot *slot, bool retire) {
-    AtomicIncRefCount(slot, IsReliable(), -1, slot->ordinal & kOrdinalMask, vchan_id_, retire);
+    AtomicIncRefCount(slot, IsReliable(), -1, slot->ordinal & kOrdinalMask,
+                      vchan_id_, retire);
   }
 
   bool SlotExpired(MessageSlot *slot, uint32_t ordinal) {
@@ -210,9 +212,9 @@ private:
 
   OrdinalTracker &GetOrdinalTracker(int vchan_id);
 
-      std::string ResolvedName() const override {
-        return IsVirtual() ? options_.mux : Name();
-    }
+  std::string ResolvedName() const override {
+    return IsVirtual() ? options_.mux : Name();
+  }
 
   int subscriber_id_;
   toolbelt::TriggerFd trigger_;

@@ -33,10 +33,9 @@ private:
 
   bool IsPublisher() const override { return true; }
 
-
-    std::string ResolvedName() const override {
-        return IsVirtual() ? options_.mux : Name();
-    }
+  std::string ResolvedName() const override {
+    return IsVirtual() ? options_.mux : Name();
+  }
 
   // A publisher is done with its busy slot (it now contains a message).  The
   // slot is moved from the busy list to the end of the active list and other

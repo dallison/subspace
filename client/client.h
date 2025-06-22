@@ -318,6 +318,7 @@ private:
   ReloadReliablePublishersIfNecessary(details::SubscriberImpl *subscriber);
   absl::Status RemoveChannel(details::ClientChannel *channel);
   absl::Status ActivateReliableChannel(details::PublisherImpl *channel);
+  absl::Status ActivateChannel(details::PublisherImpl *channel);
   absl::StatusOr<Message>
   ReadMessageInternal(details::SubscriberImpl *subscriber, ReadMode mode,
                       bool pass_activation, bool clear_trigger);
@@ -477,7 +478,7 @@ public:
   std::string Name() const { return impl_->Name(); }
   std::string Type() const { return impl_->Type(); }
 
-  void DumpSlots(std::ostream& os) const { impl_->DumpSlots(os); }
+  void DumpSlots(std::ostream &os) const { impl_->DumpSlots(os); }
 
   bool IsReliable() const { return impl_->IsReliable(); }
   bool IsLocal() const { return impl_->IsLocal(); }
@@ -654,7 +655,7 @@ public:
 
   int NumActiveMessages() const { return impl_->NumActiveMessages(); }
 
-  void DumpSlots(std::ostream& os) const { impl_->DumpSlots(os); }
+  void DumpSlots(std::ostream &os) const { impl_->DumpSlots(os); }
 
   int VirtualChannelId() const { return impl_->VirtualChannelId(); }
 

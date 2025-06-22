@@ -89,6 +89,8 @@ constexpr uint64_t kRefCountShift = 10;
 constexpr uint64_t kReliableRefCountShift = 10;
 constexpr uint64_t kPubOwned = 1ULL << 63;
 constexpr uint64_t kRefsMask = (1ULL << 20) - 1; // 20 bits
+constexpr uint64_t kReliableRefsMask = ((1ULL << 10) - 1)
+                                       << kReliableRefCountShift;
 constexpr uint64_t kRetiredRefsSize = 10;
 constexpr uint64_t kRetiredRefsMask = (1ULL << kRetiredRefsSize) - 1;
 constexpr uint64_t kRetiredRefsShift = 20;
@@ -207,6 +209,17 @@ private:
   std::array<uint64_t, kMaxVchanId + 1> ordinals_ = {};
 };
 
+class ActivationTracker {
+public:
+  void Activate(int vchan_id) { activations_.Set(vchan_id + 1); }
+  bool IsActivated(int vchan_id) const {
+    return activations_.IsSet(vchan_id + 1);
+  }
+
+private:
+  AtomicBitSet<kMaxVchanId + 1> activations_; // One bit per vchan_id.
+};
+
 // The control data for a channel.  This memory is
 // allocated by the server and mapped into the process
 // for all publishers and subscribers.  Each mapped CCB is mapped
@@ -218,8 +231,9 @@ struct ChannelControlBlock {          // a.k.a CCB
                                       // debugger or hexdump.
   int num_slots;
   OrdinalAccumulator ordinals; // Ordinal accumulator for virtual channels.
-
-  int buffer_index;             // Which buffer in buffers array to use.
+  ActivationTracker activation_tracker; // Tracks which vchan_ids have been
+                                        // activated by a publisher.
+  int buffer_index;                     // Which buffer in buffers array to use.
   std::atomic<int> num_buffers; // Size of buffers array in shared memory.
   AtomicBitSet<kMaxSlotOwners> subscribers; // One bit per subscriber.
 
@@ -335,10 +349,12 @@ public:
   std::string BufferSharedMemoryName(uint64_t session_id,
                                      int buffer_index) const;
 
-  void RegisterSubscriber(int sub_id, int vchan_id) {
+  void RegisterSubscriber(int sub_id, int vchan_id, bool is_new) {
     ccb_->subscribers.Set(sub_id);
     ccb_->sub_vchan_ids[sub_id] = vchan_id;
-    ccb_->num_subs.AddSubscriber(vchan_id);
+    if (is_new) {
+      ccb_->num_subs.AddSubscriber(vchan_id);
+    }
   }
 
   void DumpSlots(std::ostream &os) const;
@@ -411,6 +427,10 @@ public:
   InPlaceAtomicBitset *GetAvailableSlotsAddress(int sub_id) {
     return reinterpret_cast<InPlaceAtomicBitset *>(
         EndOfRetiredSlots() + SizeofAtomicBitSet(num_slots_) * sub_id);
+  }
+
+  bool IsActivated(int vchan_id) const {
+    return ccb_->activation_tracker.IsActivated(vchan_id);
   }
 
 protected:
