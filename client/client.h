@@ -181,6 +181,12 @@ private:
   CreatePublisher(const std::string &channel_name, int slot_size, int num_slots,
                   const PublisherOptions &opts = PublisherOptions());
 
+  // Create a publisher with the slot size and number of slots set in the
+  // options.
+  absl::StatusOr<Publisher>
+  CreatePublisher(const std::string &channel_name,
+                  const PublisherOptions &opts = PublisherOptions());
+
   // Create a subscriber for the given channel. This can be done before there
   // are any publishers on the channel.
   absl::StatusOr<Subscriber>
@@ -723,6 +729,14 @@ public:
   CreatePublisher(const std::string &channel_name, int slot_size, int num_slots,
                   const PublisherOptions &opts = PublisherOptions()) {
     return impl_->CreatePublisher(channel_name, slot_size, num_slots, opts);
+  }
+
+  // If you prefer, you can create the publisher with the slot size and
+  // number of slots set in the options.
+  absl::StatusOr<Publisher>
+  CreatePublisher(const std::string &channel_name,
+                  const PublisherOptions &opts = PublisherOptions()) {
+    return impl_->CreatePublisher(channel_name, opts);
   }
 
   // Create a subscriber for the given channel. This can be done before there

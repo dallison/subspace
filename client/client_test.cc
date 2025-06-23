@@ -662,6 +662,47 @@ TEST_F(ClientTest, PublishSingleMessageAndRead) {
   ASSERT_EQ(0, msg->length);
 }
 
+TEST_F(ClientTest, PublishSingleMessageAndReadWithActivation) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_TRUE(pub_client.Init(Socket()).ok());
+  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
+      "dave6", {.slot_size = 256, .num_slots = 10, .activate = true});
+  ASSERT_TRUE(pub.ok());
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_TRUE(buffer.ok());
+  memcpy(*buffer, "foobar", 6);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+  ASSERT_TRUE(pub_status.ok());
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
+      "dave6", {.max_active_messages = 2, .pass_activation = true});
+  ASSERT_TRUE(sub.ok());
+
+  // Read activation message.
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_TRUE(msg.ok());
+  ASSERT_EQ(1, msg->length);
+  ASSERT_TRUE(msg->is_activation);
+
+  // Read the actual message.
+  msg = sub->ReadMessage();
+  ASSERT_TRUE(msg.ok());
+  ASSERT_EQ(6, msg->length);
+
+  // Another read will get 0.
+  msg = sub->ReadMessage();
+  ASSERT_TRUE(msg.ok());
+  ASSERT_EQ(0, msg->length);
+
+  // Read again to make sure we get another 0.
+  // Regression test.
+  msg = sub->ReadMessage();
+  ASSERT_TRUE(msg.ok());
+  ASSERT_EQ(0, msg->length);
+}
+
 TEST_F(ClientTest, PublishSingleMessageAndReadWithCallback) {
   subspace::Client pub_client;
   subspace::Client sub_client;
@@ -1368,6 +1409,102 @@ TEST_F(ClientTest, ReliablePublisher2) {
     ASSERT_TRUE(msg.ok());
     ASSERT_EQ(0, msg->length);
   });
+  machine.Run();
+}
+
+TEST_F(ClientTest, ReliablePublisherActivation) {
+  subspace::Client client;
+  InitClient(client);
+  absl::StatusOr<Publisher> pub = client.CreatePublisher(
+      "rel_dave",
+      subspace::PublisherOptions().SetSlotSize(32).SetNumSlots(5).SetReliable(
+          true));
+  ASSERT_TRUE(pub.ok());
+  absl::StatusOr<Subscriber> sub = client.CreateSubscriber(
+      "rel_dave", {.reliable = true, .pass_activation = true});
+  ASSERT_TRUE(sub.ok());
+
+  auto &counters = pub->GetChannelCounters();
+  ASSERT_EQ(1, counters.num_pubs);
+  ASSERT_EQ(1, counters.num_subs);
+  ASSERT_EQ(1, counters.num_reliable_pubs);
+  ASSERT_EQ(1, counters.num_reliable_subs);
+
+  // Read the activation.
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_TRUE(msg.ok());
+  ASSERT_EQ(1, msg->length);
+  ASSERT_TRUE(msg->is_activation);
+
+  msg->Release();
+
+  // Publish a reliable message.
+  {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_TRUE(buffer.ok());
+    ASSERT_NE(nullptr, *buffer);
+    memcpy(*buffer, "foobar", 6);
+    absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+    ASSERT_TRUE(pub_status.ok());
+  }
+
+  // Read the message from reliable subscriber.
+  msg = sub->ReadMessage();
+  ASSERT_TRUE(msg.ok());
+  ASSERT_EQ(6, msg->length);
+
+  // Publish another set of messages.  We have 5 slots.  The subscriber
+  // has one.  We can publish another 4 and then will get a nullptr
+  // from GetMessageBuffer.
+  for (int i = 0; i < 4; i++) {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_TRUE(buffer.ok());
+    ASSERT_NE(nullptr, *buffer);
+    memcpy(*buffer, "foobar", 6);
+    absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+    ASSERT_TRUE(pub_status.ok());
+  }
+
+  // 5th message will get a nullptr because we don't have any
+  // slots left.
+  {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_TRUE(buffer.ok());
+    ASSERT_EQ(nullptr, *buffer);
+  }
+
+  msg->Release();
+
+  co::CoroutineScheduler machine;
+
+  // Wait for trigger event in coroutine.
+  co::Coroutine c1(machine, [&pub](co::Coroutine *c) {
+    struct pollfd fd = pub->GetPollFd();
+    c->Wait(fd.fd);
+
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_TRUE(buffer.ok());
+    ASSERT_NE(nullptr, *buffer);
+    memcpy(*buffer, "foobar", 6);
+    absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+    ASSERT_TRUE(pub_status.ok());
+  });
+
+  // Read messages in coroutine.
+  co::Coroutine c2(machine, [&sub](co::Coroutine *c) {
+    for (int i = 0; i < 4; i++) {
+      absl::StatusOr<Message> msg = sub->ReadMessage();
+      std::cerr << msg.status() << std::endl;
+      ASSERT_TRUE(msg.ok());
+      ASSERT_EQ(6, msg->length);
+    }
+    // No messages left, will get 0 length and trigger publisher.
+    absl::StatusOr<Message> msg = sub->ReadMessage();
+    ASSERT_TRUE(msg.ok());
+    ASSERT_EQ(0, msg->length);
+
+  });
+
   machine.Run();
 }
 
