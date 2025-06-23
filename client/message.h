@@ -29,7 +29,7 @@ struct ActiveMessage {
                 MessageSlot *slot_ptr, const void *buf, uint64_t ord, int64_t ts,
                 int vid, bool activation);
   ActiveMessage(size_t len, uint64_t ord, uint64_t ts, int vid, bool activation)
-      : length(len), ordinal(ord), timestamp(ts), vchan_id(vid), is_activation(is_activation) {}
+      : length(len), ordinal(ord), timestamp(ts), vchan_id(vid), is_activation(activation) {}
   ~ActiveMessage();
 
   // Can't be copied but can be moved.
@@ -48,7 +48,7 @@ struct ActiveMessage {
     ordinal = -1;
     timestamp = 0;
     vchan_id = -1;
-    bool is_activation = false;
+    is_activation = false;
   }
 
   std::shared_ptr<details::SubscriberImpl>
