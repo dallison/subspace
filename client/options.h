@@ -26,6 +26,21 @@ namespace subspace {
 
 // Options when creating a publisher.
 struct PublisherOptions {
+  int32_t SlotSize() const {
+    return slot_size;
+  }
+  int32_t NumSlots() const {
+    return num_slots;
+  }
+  PublisherOptions &SetSlotSize(int32_t size) {
+    slot_size = size;
+    return *this;
+  }
+  PublisherOptions &SetNumSlots(int32_t num) {
+    num_slots = num;
+    return *this;
+  }
+
   // A public publisher's messages will be seen outside of the
   // publishing computer.
   PublisherOptions &SetLocal(bool v) {
@@ -86,6 +101,10 @@ struct PublisherOptions {
   }
 
   int VchanId() const { return vchan_id; }
+
+  // If you use the new CreatePublisher API, set the slot size and num slots in here.
+  int32_t slot_size = 0;
+  int32_t num_slots = 0;
 
   bool local = false;
   bool reliable = false;

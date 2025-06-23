@@ -134,16 +134,15 @@ absl::Status ClientImpl::ProcessAllMessages(details::SubscriberImpl *subscriber,
 }
 
 absl::StatusOr<Publisher>
-ClientImpl::CreatePublisher(const std::string &channel_name, int slot_size,
-                            int num_slots, const PublisherOptions &opts) {
+ClientImpl::CreatePublisher(const std::string &channel_name, const PublisherOptions &opts) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
   Request req;
   auto *cmd = req.mutable_create_publisher();
   cmd->set_channel_name(channel_name);
-  cmd->set_slot_size(Aligned(slot_size));
-  cmd->set_num_slots(num_slots);
+  cmd->set_slot_size(Aligned(opts.slot_size));
+  cmd->set_num_slots(opts.num_slots);
   cmd->set_is_local(opts.IsLocal());
   cmd->set_is_reliable(opts.IsReliable());
   cmd->set_is_bridge(opts.IsBridge());
@@ -168,7 +167,7 @@ ClientImpl::CreatePublisher(const std::string &channel_name, int slot_size,
   // Make a local ClientChannel object and map in the shared memory allocated
   // by the server.
   std::shared_ptr<PublisherImpl> channel = std::make_shared<PublisherImpl>(
-      channel_name, num_slots, pub_resp.channel_id(), pub_resp.publisher_id(),
+      channel_name, opts.num_slots, pub_resp.channel_id(), pub_resp.publisher_id(),
       pub_resp.vchan_id(), session_id_, pub_resp.type(), opts);
 
   SharedMemoryFds channel_fds(std::move(fds[pub_resp.ccb_fd_index()]),
@@ -178,7 +177,7 @@ ClientImpl::CreatePublisher(const std::string &channel_name, int slot_size,
     return status;
   }
 
-  if (absl::Status status = channel->CreateOrAttachBuffers(Aligned(slot_size));
+  if (absl::Status status = channel->CreateOrAttachBuffers(Aligned(opts.slot_size));
       !status.ok()) {
     return status;
   }
@@ -220,12 +219,20 @@ ClientImpl::CreatePublisher(const std::string &channel_name, int slot_size,
     }
   }
   channel->TriggerSubscribers();
-
   // channel->Dump();
   channels_.insert(channel);
   return Publisher(shared_from_this(), channel);
 }
 
+  absl::StatusOr<Publisher>
+  ClientImpl::CreatePublisher(const std::string &channel_name, int slot_size, int num_slots,
+                  const PublisherOptions &opts) {
+                    PublisherOptions options = opts;
+                    options.slot_size = slot_size;
+                    options.num_slots = num_slots;
+                    return CreatePublisher(
+                        channel_name, options);
+                  }
 absl::StatusOr<Subscriber>
 ClientImpl::CreateSubscriber(const std::string &channel_name,
                              const SubscriberOptions &opts) {
@@ -413,7 +420,7 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
     if (publisher->IsReliable()) {
       // Reliable publishers don't get a slot until it's asked for.
       return Message(message_size, nullptr, msg.ordinal, msg.timestamp,
-                     publisher->VirtualChannelId());
+                     publisher->VirtualChannelId(), false);
     }
     return absl::InternalError(
         absl::StrFormat("Out of slots for channel %s", publisher->Name()));
@@ -425,7 +432,7 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
   }
 
   return Message(message_size, nullptr, msg.ordinal, msg.timestamp,
-                 publisher->VirtualChannelId());
+                 publisher->VirtualChannelId(), false);
 }
 
 absl::Status ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
@@ -567,8 +574,10 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     return *ok;
   });
 
+  bool is_activation = false;
   if (prefix != nullptr) {
     if ((prefix->flags & kMessageActivate) != 0) {
+      is_activation = true;
       if (!pass_activation) {
         subscriber->IgnoreActivation(new_slot);
         if (subscriber->IsReliable()) {
@@ -587,7 +596,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
   auto msg = subscriber->SetActiveMessage(
       new_slot->message_size, new_slot, subscriber->GetCurrentBufferAddress(),
       subscriber->CurrentOrdinal(), subscriber->Timestamp(),
-      new_slot->vchan_id);
+      new_slot->vchan_id, is_activation);
 
   // If we are unable to allocate a new message (due to message limits)
   // restore the slot so that we pick it up next time.
@@ -647,7 +656,7 @@ ClientImpl::FindMessageInternal(SubscriberImpl *subscriber,
   }
   return Message(new_slot->message_size, subscriber->GetCurrentBufferAddress(),
                  subscriber->CurrentOrdinal(), subscriber->Timestamp(),
-                 subscriber->VirtualChannelId());
+                 subscriber->VirtualChannelId(), false);
 }
 
 absl::StatusOr<Message> ClientImpl::FindMessage(SubscriberImpl *subscriber,
@@ -913,6 +922,9 @@ absl::Status ClientImpl::ActivateChannel(PublisherImpl *publisher) {
     return absl::InternalError(
         absl::StrFormat("Channel %s has no buffer", publisher->Name()));
   }
+  MessageSlot *slot = publisher->CurrentSlot();
+  slot->message_size = 1;
+
   Channel::PublishedMessage msg = publisher->ActivateSlotAndGetAnother(
       /*reliable=*/false,
       /*is_activation=*/true,

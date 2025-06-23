@@ -100,10 +100,10 @@ public:
 
   std::shared_ptr<ActiveMessage> SetActiveMessage(size_t len, MessageSlot *slot,
                                                   const void *buf, uint64_t ord,
-                                                  int64_t ts, int vchan_id) {
+                                                  int64_t ts, int vchan_id, bool is_activation) {
     active_message_.reset();
     active_message_ = std::make_shared<ActiveMessage>(
-        ActiveMessage{shared_from_this(), len, slot, buf, ord, ts, vchan_id});
+        ActiveMessage{shared_from_this(), len, slot, buf, ord, ts, vchan_id, is_activation});
     return active_message_;
   }
 
@@ -130,7 +130,7 @@ public:
     }
     return std::make_shared<ActiveMessage>(ActiveMessage{
         shared_from_this(), slot->message_size, slot, GetBufferAddress(slot),
-        slot->ordinal, Timestamp(slot), slot->vchan_id});
+        slot->ordinal, Timestamp(slot), slot->vchan_id, false});
   }
 
   int DetectDrops(int vchan_id);
