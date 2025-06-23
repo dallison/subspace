@@ -2,10 +2,10 @@
 #include "client/subscriber.h"
 
 namespace subspace {
-ActiveMessage::ActiveMessage(std::shared_ptr<details::SubscriberImpl> sub, size_t len,
-                 MessageSlot *slot, const void *buf, uint64_t ord, int64_t ts, int vchan_id)
-    : sub(sub), length(len), slot(slot), buffer(buf), ordinal(ord),
-      timestamp(ts), vchan_id(vchan_id) {
+ActiveMessage::ActiveMessage(std::shared_ptr<details::SubscriberImpl> subr, size_t len,
+                 MessageSlot *slot_ptr, const void *buf, uint64_t ord, int64_t ts, int vid)
+    : sub(std::move(subr)), length(len), slot(slot_ptr), buffer(buf), ordinal(ord),
+      timestamp(ts), vchan_id(vid) {
   if (slot == nullptr) {
     return;
   }
