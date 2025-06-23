@@ -25,10 +25,10 @@ class SubscriberImpl;
 // message just published.
 struct ActiveMessage {
   ActiveMessage() = default;
-  ActiveMessage(std::shared_ptr<details::SubscriberImpl> sub, size_t len,
-          MessageSlot *slot, const void *buf, uint64_t ord, int64_t ts, int vchan_id);
-  ActiveMessage(size_t len, uint64_t ord, uint64_t ts, int vchan_id)
-      : length(len), ordinal(ord), timestamp(ts), vchan_id(vchan_id) {}
+  ActiveMessage(std::shared_ptr<details::SubscriberImpl> subr, size_t len,
+          MessageSlot *slot_ptr, const void *buf, uint64_t ord, int64_t ts, int vid);
+  ActiveMessage(size_t len, uint64_t ord, uint64_t ts, int vid)
+      : length(len), ordinal(ord), timestamp(ts), vchan_id(vid) {}
   ~ActiveMessage();
 
   // Can't be copied but can be moved.
@@ -56,13 +56,13 @@ struct ActiveMessage {
   const void *buffer = nullptr; // Address of message payload.
   uint64_t ordinal = 0;         // Monotonic number of message.
   uint64_t timestamp = 0;       // Nanosecond time message was published.
-  int vchan_id;                 // Virtual channel ID (or -1 if not used).
+  int vchan_id = -1;            // Virtual channel ID (or -1 if not used).
 };
 
 struct Message {
   Message() = default;
-  Message(size_t len, const void *buf, uint64_t ord, int64_t ts, int vchan_id)
-      : length(len), buffer(buf), ordinal(ord), timestamp(ts), vchan_id(vchan_id) {}
+  Message(size_t len, const void *buf, uint64_t ord, int64_t ts, int vid)
+      : length(len), buffer(buf), ordinal(ord), timestamp(ts), vchan_id(vid) {}
   Message(std::shared_ptr<ActiveMessage> msg)
       : active_message(std::move(msg)), length(active_message->length),
         buffer(active_message->buffer), ordinal(active_message->ordinal),
@@ -73,7 +73,7 @@ struct Message {
   const void *buffer = nullptr;
   uint64_t ordinal = 0;
   uint64_t timestamp = 0;
-  int vchan_id;                 // Virtual channel ID (or -1 if not used).
+  int vchan_id = -1;            // Virtual channel ID (or -1 if not used).
 };
 
 } // namespace subspace
