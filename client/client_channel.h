@@ -171,6 +171,7 @@ public:
     if (index < 0 || index >= buffers_.size()) {
       std::cerr << "Invalid buffer index for slot " << slot_id << ": " << index
                 << std::endl;
+      DumpSlots(std::cerr);
       abort();
     }
     return buffers_.empty() ? nullptr : (buffers_[index]->buffer);
