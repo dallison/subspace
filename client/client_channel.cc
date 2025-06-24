@@ -109,11 +109,11 @@ bool ClientChannel::ValidateSlotBuffer(MessageSlot *slot,
   if (reload == nullptr) {
     return true;
   }
-  char *buf = Buffer(slot->id);
+  char *buf = Buffer(slot->id, false);
   int retries = 1000;
   while (retries-- > 0 && buf == nullptr) {
     ReloadIfNecessary(reload);
-    buf = Buffer(slot->id);
+    buf = Buffer(slot->id, false);
   }
   if (buf == nullptr) {
     return false;
