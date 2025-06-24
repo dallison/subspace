@@ -36,7 +36,9 @@ public:
       return;
     }
     printf("Starting Subspace server\n");
-    socket_ = "/tmp/subspace";
+    char socket_name_template[] = "/tmp/subspaceXXXXXX"; // NOLINT
+    ::close(mkstemp(&socket_name_template[0]));
+    socket_ = &socket_name_template[0];
 
     // The server will write to this pipe to notify us when it
     // has started and stopped.  This end of the pipe is blocking.
@@ -1677,6 +1679,64 @@ TEST_F(ClientTest, Mikael) {
   for (int i = 0; i < sent_msgs.size(); i++) {
     EXPECT_EQ(sent_msgs[i], received_msgs[i]) << "i = " << i;
   }
+}
+
+TEST_F(ClientTest, RaceBetweenPubAndUnsub) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_TRUE(pub_client.Init(Socket()).ok());
+  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+
+  constexpr int NUM_CHANNELS = 32;
+
+  std::vector<Publisher> pubs;
+  for (int i = 0; i < NUM_CHANNELS; ++i) {
+    std::array<char, 64> buf = {};
+    (void)snprintf(buf.data(), buf.size(), "ch_%d", i);
+    absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(buf.data(), 1024, 32);
+    ASSERT_TRUE(pub.ok());
+    pubs.emplace_back(std::move(*pub));
+  }
+
+  std::vector<Subscriber> subs;
+  for (int i = 0; i < NUM_CHANNELS; ++i) {
+    std::array<char, 64> buf = {};
+    (void)snprintf(buf.data(), buf.size(), "ch_%d", i);
+    absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(buf.data());
+    ASSERT_TRUE(sub.ok());
+    subs.emplace_back(std::move(*sub));
+  }
+
+  std::atomic<bool> pub_stopped = false;
+  std::thread pub_thread([&pubs, &pub_stopped]() {
+    while (!pub_stopped) {
+      for (auto& pub : pubs) {
+        absl::StatusOr<void *> buffer = pub.GetMessageBuffer();
+        ASSERT_TRUE(buffer.ok());
+        char *buf = reinterpret_cast<char *>(*buffer);
+        int len = snprintf(buf, 256, "foobar");
+
+        absl::StatusOr<const Message> pub_status = pub.PublishMessage(len + 1);
+        ASSERT_TRUE(pub_status.ok());
+      }
+    }
+  });
+
+  std::thread sub_thread([&subs]() {
+    for (auto& sub : subs) {
+      absl::StatusOr<Message> msg = sub.ReadMessage();
+      ASSERT_TRUE(msg.ok());
+    }
+    // Unsubscribe all channels.
+    // Test fails ~20% of the time (by timeout) if we unsubscribe channels.
+    // Commenting out this line makes it work.
+    subs.clear();
+  });
+
+  sub_thread.join();
+
+  pub_stopped = true;
+  pub_thread.join();
 }
 
 int main(int argc, char **argv) {
