@@ -92,7 +92,8 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
   int retries = num_slots_ * 1000;
   MessageSlot *slot = nullptr;
   DynamicBitSet embargoed_slots(NumSlots());
-
+  constexpr int max_cas_retries = 1000;
+  int cas_retries = 0;
   for (;;) {
     // Look at the first retired slot.  If there are no retired
     // slots, look at all slots for the earliest unreferenced one.
@@ -138,7 +139,6 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
     uint64_t expected = BuildRefsBitField(
         slot->ordinal, (old_refs >> kVchanIdShift) & kVchanIdMask,
         (old_refs >> kRetiredRefsShift) & kRetiredRefsMask);
-
     if (slot->refs.compare_exchange_weak(expected, ref,
                                          std::memory_order_relaxed)) {
       if (!ValidateSlotBuffer(slot, reload)) {
@@ -149,6 +149,10 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
         continue;
       }
       break;
+    }
+    if (++cas_retries >= max_cas_retries) {
+      // Rather than spinning forever, let's just give up and return nullptr.
+      return nullptr;
     }
   }
   slot->ordinal = 0;

@@ -119,6 +119,21 @@ std::string Channel::BufferSharedMemoryName(uint64_t session_id,
 #endif
 }
 
+std::string DecodedRefsBitField(uint64_t refs) {
+  std::string result;
+  int ref_count = refs & kRefCountMask;
+  int reliable_ref_count = (refs >> kReliableRefCountShift) & kRefCountMask;
+  int retired_refs = (refs >> kRetiredRefsShift) & kRetiredRefsMask;
+  int vchan_id = (refs >> kVchanIdShift) & kVchanIdMask;
+  uint64_t ordinal = (refs >> kOrdinalShift) & kOrdinalMask;
+
+  absl::StrAppendFormat(&result, "ref_count: %d, reliable_ref_count: %d, "
+                        "retired_refs: %d, vchan_id: %d, ordinal: %d",
+                        ref_count, reliable_ref_count, retired_refs, vchan_id,
+                        ordinal);
+  return result;
+}
+
 bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
                                 uint64_t ordinal, int vchan_id, bool retire) {
   for (;;) {
@@ -156,7 +171,7 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
     if (retire) {
       retired_refs++;
     }
-    uint64_t new_ref = BuildRefsBitField(ordinal, vchan_id, retired_refs) |
+    uint64_t new_ref = BuildRefsBitField(ref_ord, vchan_id, retired_refs) |
                        (new_reliable_refs << kReliableRefCountShift) | new_refs;
     if (slot->refs.compare_exchange_weak(ref, new_ref,
                                          std::memory_order_relaxed)) {

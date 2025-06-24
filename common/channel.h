@@ -116,6 +116,8 @@ inline uint64_t BuildRefsBitField(uint64_t ordinal, int vchan_id,
          (ordinal == 0 ? 0 : ((vchan_id & kVchanIdMask) << kVchanIdShift)) |
          ((retired_refs & kRetiredRefsMask) << kRetiredRefsShift);
 }
+std::string DecodedRefsBitField(uint64_t refs);
+
 // Aligned to given power of 2.
 template <int64_t alignment = 64> int64_t Aligned(int64_t v) {
   return (v + (alignment - 1)) & ~(alignment - 1);
