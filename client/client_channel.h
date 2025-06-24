@@ -166,13 +166,18 @@ public:
 
   // Get the buffer associated with the given slot id.  The first buffer
   // starts immediately after the buffer header.
-  char *Buffer(int slot_id) const {
+  char *Buffer(int slot_id, bool abort_on_range = true) const {
     int index = ccb_->slots[slot_id].buffer_index;
     if (index < 0 || index >= buffers_.size()) {
-      std::cerr << "Invalid buffer index for slot " << slot_id << ": " << index
-                << std::endl;
-      DumpSlots(std::cerr);
-      abort();
+      if (abort_on_range) {
+        // If the index is out of range, we have a problem.
+        // This should never happen.
+        std::cerr << "Invalid buffer index for slot " << slot_id << ": " << index
+                  << std::endl;
+        DumpSlots(std::cerr);
+        abort();
+      }
+      return nullptr;
     }
     return buffers_.empty() ? nullptr : (buffers_[index]->buffer);
   }
