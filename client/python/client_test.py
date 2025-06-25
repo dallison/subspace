@@ -1,5 +1,5 @@
 
-from python.runfiles import runfiles
+from rules_python.python.runfiles import runfiles
 
 import client.python.subspace as subspace
 import os
@@ -16,7 +16,7 @@ class TestSubspaceClient(unittest.TestCase):
 
         r = runfiles.Create()
 
-        self.server_proc = subprocess.Popen([r.Rlocation("_main/server/subspace_server"), "--local", "--socket=" + self.socket_name])
+        self.server_proc = subprocess.Popen([r.Rlocation("__main__/server/subspace_server"), "--local", "--socket=" + self.socket_name])
 
         # Wait for client to be able to init.
         waiting_client = subspace.Client()

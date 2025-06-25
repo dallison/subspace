@@ -170,13 +170,14 @@ struct SubscriberOptions {
     return *this;
   }
 
+  int VchanId() const { return vchan_id; }
+
   bool PassActivation() const { return pass_activation; }
   SubscriberOptions &SetPassActivation(bool v) {
     pass_activation = v;
     return *this;
   }
 
-  int VchanId() const { return vchan_id; }
 
   bool reliable = false;
   bool bridge = false;
