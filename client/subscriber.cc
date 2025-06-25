@@ -159,7 +159,9 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
 
   DynamicBitSet embargoed_slots(NumSlots());
 
-  for (;;) {
+  constexpr int kMaxRetries = 1000;
+  int retries = 0;
+  while (retries++ < kMaxRetries) {
     ReloadIfNecessary(reload);
     if (slot == nullptr) {
       // Prepopulate the active slots.
@@ -199,6 +201,9 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
       return new_slot->slot;
     }
   }
+  std::cerr << "SubscriberImpl::NextSlot: too many retries, giving up\n";
+  DumpSlots(std::cerr);
+  abort();
 }
 
 MessageSlot *SubscriberImpl::LastSlot(MessageSlot *slot, bool reliable,
