@@ -194,7 +194,7 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
     // We have a new slot, see if we can increment the ref count.  If we can't
     // we just go back and try again.
     if (AtomicIncRefCount(new_slot->slot, reliable, 1, new_slot->ordinal,
-                          new_slot->vchan_id, false, print_errors)) {
+                          new_slot->vchan_id, false)) {
       if (!ValidateSlotBuffer(new_slot->slot, reload) ||
           new_slot->slot->buffer_index == -1) {
         if (print_errors) {
@@ -208,17 +208,10 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
                           new_slot->vchan_id, false);
         continue;
       }
-      if (print_errors) {
-        std::cerr << "sub got slot " << new_slot->slot->id << " ordinal "
-                  << new_slot->ordinal << " vchan " << new_slot->slot->vchan_id
-                  << "\n";
-      }
       return new_slot->slot;
     }
   }
-  std::cerr << "SubscriberImpl::NextSlot: too many retries, giving up\n";
-  DumpSlots(std::cerr);
-  abort();
+  return nullptr;
 }
 
 MessageSlot *SubscriberImpl::LastSlot(MessageSlot *slot, bool reliable,
