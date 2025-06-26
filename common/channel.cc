@@ -127,7 +127,8 @@ std::string DecodedRefsBitField(uint64_t refs) {
   int vchan_id = (refs >> kVchanIdShift) & kVchanIdMask;
   uint64_t ordinal = (refs >> kOrdinalShift) & kOrdinalMask;
 
-  absl::StrAppendFormat(&result, "ref_count: %d, reliable_ref_count: %d, "
+  absl::StrAppendFormat(&result,
+                        "ref_count: %d, reliable_ref_count: %d, "
                         "retired_refs: %d, vchan_id: %d, ordinal: %d",
                         ref_count, reliable_ref_count, retired_refs, vchan_id,
                         ordinal);
@@ -135,7 +136,7 @@ std::string DecodedRefsBitField(uint64_t refs) {
 }
 
 bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
-                                uint64_t ordinal, int vchan_id, bool retire) {
+                                uint64_t ordinal, int vchan_id, bool retire, bool print_failure) {
   for (;;) {
     uint64_t ref = slot->refs.load(std::memory_order_relaxed);
     if ((ref & kPubOwned) != 0) {
@@ -148,6 +149,17 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
     // keep trying to use it.
     uint64_t ref_ord = (ref >> kOrdinalShift) & kOrdinalMask;
     if (ref_ord != 0 && ordinal != 0 && ref_ord != ordinal) {
+      if (print_failure) {
+        std::cerr << "Reference ordinal mismatch for slot "
+                  << slot->id << " with refs: " << std::hex << ref
+                  << std::dec << " ref_ord: " << ref_ord
+                  << " ordinal: " << ordinal
+                  << " vchan_id: " << vchan_id
+                  << " reliable: " << reliable
+                  << " inc: " << inc
+                  << " retire: " << retire
+                  << "Current refs: " << DecodedRefsBitField(ref) << std::endl;
+      }
       return false;
     }
     int ref_vchan_id = (ref >> kVchanIdShift) & kVchanIdMask;
@@ -157,6 +169,17 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
     }
 
     if (ref_ord != 0 && ordinal != 0 && ref_vchan_id != vchan_id) {
+      if (print_failure) {
+        std::cerr << "Reference vchan_id mismatch for slot "
+                  << slot->id << " with refs: " << std::hex << ref
+                  << std::dec << " ref_vchan_id: " << ref_vchan_id
+                  << " ordinal: " << ordinal
+                  << " vchan_id: " << vchan_id
+                  << " reliable: " << reliable
+                  << " inc: " << inc
+                  << " retire: " << retire
+                  << "Current refs: " << DecodedRefsBitField(ref) << std::endl;
+      }
       return false;
     }
     uint64_t new_refs = ref & kRefCountMask;
@@ -184,6 +207,18 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
       }
       return true;
     }
+    if (print_failure) {
+      std::cerr << "Failed to increment ref count for slot "
+                << slot->id << " with refs: " << std::hex << ref
+                << std::dec << " new_refs: " << new_ref
+                << " ordinal: " << ordinal
+                << " vchan_id: " << vchan_id
+                << " reliable: " << reliable
+                << " inc: " << inc
+                << " retire: " << retire
+                << " Current refs: " << DecodedRefsBitField(ref)
+                << " new refs: " << DecodedRefsBitField(new_ref) << std::endl;
+    }
     // Another subscriber got there before us.  Try again.
     // Could also be a publisher, in which case the kPubOwned bit will be set.
   }
@@ -206,7 +241,8 @@ void MessageSlot::Dump(std::ostream &os) const {
   os << " ordinal: " << ordinal
      << " buffer_index: " << buffer_index
      << " vchan_id: " << vchan_id << " timestamp: " << timestamp
-     << " message size: " << message_size << "\n";
+     << " message size: " << message_size
+     << " raw refs: " << std::hex << refs << std::dec << "\n";
 }
 
 void Channel::DumpSlots(std::ostream &os) const {
