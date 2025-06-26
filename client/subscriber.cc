@@ -166,9 +166,9 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
 
   constexpr int kMaxRetries = 1000;
   int retries = 0;
-  const ActiveSlot *new_slot;
 
   while (retries++ < kMaxRetries) {
+    const bool print_errors = retries >= kMaxRetries - 10;
     ReloadIfNecessary(reload);
     if (slot == nullptr) {
       // Prepopulate the active slots.
@@ -183,18 +183,24 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
                        return a.timestamp < b.timestamp;
                      });
 
-    new_slot = FindUnseenOrdinal(active_slots);
+    const ActiveSlot *new_slot = FindUnseenOrdinal(active_slots);
     if (new_slot == nullptr) {
       return nullptr;
     }
-    // std::cerr << "sub looking at slot " << new_slot->slot->id << " ordinal "
-    //           << new_slot->ordinal << "\n";
+    if (print_errors) {
+      std::cerr << "sub looking at slot " << new_slot->slot->id << " ordinal "
+                << new_slot->ordinal << "\n";
+    }
     // We have a new slot, see if we can increment the ref count.  If we can't
     // we just go back and try again.
     if (AtomicIncRefCount(new_slot->slot, reliable, 1, new_slot->ordinal,
-                          new_slot->vchan_id, false, true)) {
+                          new_slot->vchan_id, false, print_errors)) {
       if (!ValidateSlotBuffer(new_slot->slot, reload) ||
           new_slot->slot->buffer_index == -1) {
+        if (print_errors) {
+          std::cerr << "sub failed on slot: ";
+          new_slot->slot->Dump(std::cerr);
+        }
         // Failed to get a buffer for the slot.  Embargo the slot so we don't
         // see it again this loop and try again.
         embargoed_slots.Set(new_slot->slot->id);
@@ -202,16 +208,15 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
                           new_slot->vchan_id, false);
         continue;
       }
-      // std::cerr << "sub got slot " << new_slot->slot->id << " ordinal "
-      //           << new_slot->ordinal << " vchan " << new_slot->slot->vchan_id
-      //           << "\n";
+      if (print_errors) {
+        std::cerr << "sub got slot " << new_slot->slot->id << " ordinal "
+                  << new_slot->ordinal << " vchan " << new_slot->slot->vchan_id
+                  << "\n";
+      }
       return new_slot->slot;
     }
   }
   std::cerr << "SubscriberImpl::NextSlot: too many retries, giving up\n";
-  std::cerr << "new_slot: " << new_slot->slot->id
-            << " ordinal: " << new_slot->ordinal
-            << " vchan_id: " << new_slot->vchan_id << "\n";
   DumpSlots(std::cerr);
   abort();
 }

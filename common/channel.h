@@ -160,6 +160,8 @@ struct MessageSlot {
   AtomicBitSet<kMaxSlotOwners> sub_owners; // One bit per subscriber.
   uint64_t timestamp;                      // Timestamp of message.
   uint32_t flags;
+
+  void Dump(std::ostream &os) const;
 };
 
 struct ActiveSlot {
