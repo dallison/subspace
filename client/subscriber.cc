@@ -166,6 +166,8 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
 
   constexpr int kMaxRetries = 1000;
   int retries = 0;
+  const ActiveSlot *new_slot;
+
   while (retries++ < kMaxRetries) {
     ReloadIfNecessary(reload);
     if (slot == nullptr) {
@@ -181,7 +183,7 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
                        return a.timestamp < b.timestamp;
                      });
 
-    const ActiveSlot *new_slot = FindUnseenOrdinal(active_slots);
+    new_slot = FindUnseenOrdinal(active_slots);
     if (new_slot == nullptr) {
       return nullptr;
     }
@@ -190,7 +192,7 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
     // We have a new slot, see if we can increment the ref count.  If we can't
     // we just go back and try again.
     if (AtomicIncRefCount(new_slot->slot, reliable, 1, new_slot->ordinal,
-                          new_slot->vchan_id, false)) {
+                          new_slot->vchan_id, false, true)) {
       if (!ValidateSlotBuffer(new_slot->slot, reload) ||
           new_slot->slot->buffer_index == -1) {
         // Failed to get a buffer for the slot.  Embargo the slot so we don't
@@ -207,6 +209,9 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
     }
   }
   std::cerr << "SubscriberImpl::NextSlot: too many retries, giving up\n";
+  std::cerr << "new_slot: " << new_slot->slot->id
+            << " ordinal: " << new_slot->ordinal
+            << " vchan_id: " << new_slot->vchan_id << "\n";
   DumpSlots(std::cerr);
   abort();
 }

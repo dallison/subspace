@@ -400,7 +400,7 @@ public:
   void SetDebug(bool v) { debug_ = v; }
 
   bool AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
-                         uint64_t ordinal, int vchan_id, bool retire);
+                         uint64_t ordinal, int vchan_id, bool retire, bool print_failure = false);
 
   void SetType(std::string type) { type_ = std::move(type); }
   const std::string Type() const { return type_; }
