@@ -134,7 +134,8 @@ absl::Status ClientImpl::ProcessAllMessages(details::SubscriberImpl *subscriber,
 }
 
 absl::StatusOr<Publisher>
-ClientImpl::CreatePublisher(const std::string &channel_name, const PublisherOptions &opts) {
+ClientImpl::CreatePublisher(const std::string &channel_name,
+                            const PublisherOptions &opts) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -167,8 +168,9 @@ ClientImpl::CreatePublisher(const std::string &channel_name, const PublisherOpti
   // Make a local ClientChannel object and map in the shared memory allocated
   // by the server.
   std::shared_ptr<PublisherImpl> channel = std::make_shared<PublisherImpl>(
-      channel_name, opts.num_slots, pub_resp.channel_id(), pub_resp.publisher_id(),
-      pub_resp.vchan_id(), session_id_, pub_resp.type(), opts);
+      channel_name, opts.num_slots, pub_resp.channel_id(),
+      pub_resp.publisher_id(), pub_resp.vchan_id(), session_id_,
+      pub_resp.type(), opts);
 
   SharedMemoryFds channel_fds(std::move(fds[pub_resp.ccb_fd_index()]),
                               std::move(fds[pub_resp.bcb_fd_index()]));
@@ -177,7 +179,8 @@ ClientImpl::CreatePublisher(const std::string &channel_name, const PublisherOpti
     return status;
   }
 
-  if (absl::Status status = channel->CreateOrAttachBuffers(Aligned(opts.slot_size));
+  if (absl::Status status =
+          channel->CreateOrAttachBuffers(Aligned(opts.slot_size));
       !status.ok()) {
     return status;
   }
@@ -224,15 +227,14 @@ ClientImpl::CreatePublisher(const std::string &channel_name, const PublisherOpti
   return Publisher(shared_from_this(), channel);
 }
 
-  absl::StatusOr<Publisher>
-  ClientImpl::CreatePublisher(const std::string &channel_name, int slot_size, int num_slots,
-                  const PublisherOptions &opts) {
-                    PublisherOptions options = opts;
-                    options.slot_size = slot_size;
-                    options.num_slots = num_slots;
-                    return CreatePublisher(
-                        channel_name, options);
-                  }
+absl::StatusOr<Publisher>
+ClientImpl::CreatePublisher(const std::string &channel_name, int slot_size,
+                            int num_slots, const PublisherOptions &opts) {
+  PublisherOptions options = opts;
+  options.slot_size = slot_size;
+  options.num_slots = num_slots;
+  return CreatePublisher(channel_name, options);
+}
 absl::StatusOr<Subscriber>
 ClientImpl::CreateSubscriber(const std::string &channel_name,
                              const SubscriberOptions &opts) {
@@ -595,8 +597,8 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
   // Allocate a new active message for the slot.
   auto msg = subscriber->SetActiveMessage(
       new_slot->message_size, new_slot, subscriber->GetCurrentBufferAddress(),
-      subscriber->CurrentOrdinal(), subscriber->Timestamp(),
-      new_slot->vchan_id, is_activation);
+      subscriber->CurrentOrdinal(), subscriber->Timestamp(), new_slot->vchan_id,
+      is_activation);
 
   // If we are unable to allocate a new message (due to message limits)
   // restore the slot so that we pick it up next time.
@@ -605,16 +607,16 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     // Subscriber does not have a slot now but the slot it had is still active.
   } else {
     // We have a slot, claim it.
-    subscriber->ClaimSlot(new_slot,
-                          [this, subscriber]() {
-                            absl::StatusOr<bool> ok =
-                                ReloadBuffersIfNecessary(subscriber);
-                            if (!ok.ok()) {
-                              return false;
-                            }
-                            return *ok;
-                          },
-                          subscriber->VirtualChannelId());
+    subscriber->ClaimSlot(
+        new_slot,
+        [this, subscriber]() {
+          absl::StatusOr<bool> ok = ReloadBuffersIfNecessary(subscriber);
+          if (!ok.ok()) {
+            return false;
+          }
+          return *ok;
+        },
+        subscriber->VirtualChannelId(), mode == ReadMode::kReadNewest);
   }
   return Message(msg);
 }

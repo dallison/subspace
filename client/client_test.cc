@@ -664,6 +664,47 @@ TEST_F(ClientTest, PublishSingleMessageAndRead) {
   ASSERT_EQ(0, msg->length);
 }
 
+TEST_F(ClientTest, PublishSingleMessageAndReadNewest) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_TRUE(pub_client.Init(Socket()).ok());
+  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher("dave6", 256, 10);
+  ASSERT_TRUE(pub.ok());
+
+  // Publish a message.
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_TRUE(buffer.ok());
+  memcpy(*buffer, "foobar", 6);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+  ASSERT_TRUE(pub_status.ok());
+
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber("dave6", {.max_active_messages = 2});
+  ASSERT_TRUE(sub.ok());
+
+  // Another message.
+  {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_TRUE(buffer.ok());
+    memcpy(*buffer, "foobar2", 7);
+    absl::StatusOr<const Message> pub_status = pub->PublishMessage(7);
+    ASSERT_TRUE(pub_status.ok());
+  }
+
+  // Read the newest message.
+  absl::StatusOr<Message> msg =
+      sub->ReadMessage(subspace::ReadMode::kReadNewest);
+  ASSERT_TRUE(msg.ok());
+  ASSERT_EQ(7, msg->length);
+
+  // There are no more messages since we read the newest one.
+  // Another read will get 0.
+  msg = sub->ReadMessage();
+  ASSERT_TRUE(msg.ok());
+  ASSERT_EQ(0, msg->length);
+}
+
 TEST_F(ClientTest, PublishSingleMessageAndReadWithActivation) {
   subspace::Client pub_client;
   subspace::Client sub_client;
@@ -1830,7 +1871,8 @@ TEST_F(ClientTest, RaceBetweenPubAndUnsub) {
   for (int i = 0; i < NUM_CHANNELS; ++i) {
     std::array<char, 64> buf = {};
     (void)snprintf(buf.data(), buf.size(), "ch_%d", i);
-    absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(buf.data(), 1024, 32);
+    absl::StatusOr<Publisher> pub =
+        pub_client.CreatePublisher(buf.data(), 1024, 32);
     ASSERT_TRUE(pub.ok());
     pubs.emplace_back(std::move(*pub));
   }
@@ -1847,7 +1889,7 @@ TEST_F(ClientTest, RaceBetweenPubAndUnsub) {
   std::atomic<bool> pub_stopped = false;
   std::thread pub_thread([&pubs, &pub_stopped]() {
     while (!pub_stopped) {
-      for (auto& pub : pubs) {
+      for (auto &pub : pubs) {
         absl::StatusOr<void *> buffer = pub.GetMessageBuffer();
         ASSERT_TRUE(buffer.ok());
         char *buf = reinterpret_cast<char *>(*buffer);
@@ -1860,7 +1902,7 @@ TEST_F(ClientTest, RaceBetweenPubAndUnsub) {
   });
 
   std::thread sub_thread([&subs]() {
-    for (auto& sub : subs) {
+    for (auto &sub : subs) {
       absl::StatusOr<Message> msg = sub.ReadMessage();
       ASSERT_TRUE(msg.ok());
     }
