@@ -194,7 +194,7 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
     if (retire) {
       retired_refs++;
     }
-    uint64_t new_ref = BuildRefsBitField(ref_ord, vchan_id, retired_refs) |
+    uint64_t new_ref = BuildRefsBitField(ref_ord, ref_vchan_id, retired_refs) |
                        (new_reliable_refs << kReliableRefCountShift) | new_refs;
     if (slot->refs.compare_exchange_weak(ref, new_ref,
                                          std::memory_order_relaxed)) {
