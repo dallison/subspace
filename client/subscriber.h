@@ -71,7 +71,7 @@ public:
   FindUnseenOrdinal(const std::vector<ActiveSlot> &active_slots);
   void PopulateActiveSlots(InPlaceAtomicBitset &bits);
 
-  void ClaimSlot(MessageSlot *slot, std::function<bool()> reload, int vchan_id);
+  void ClaimSlot(MessageSlot *slot, std::function<bool()> reload, int vchan_id, bool was_newest);
   void RememberOrdinal(uint64_t ordinal, int vchan_id);
   void CollectVisibleSlots(InPlaceAtomicBitset &bits,
                            std::vector<ActiveSlot> &active_slots,

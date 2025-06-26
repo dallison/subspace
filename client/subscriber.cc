@@ -120,10 +120,15 @@ SubscriberImpl::FindUnseenOrdinal(const std::vector<ActiveSlot> &active_slots) {
 }
 
 void SubscriberImpl::ClaimSlot(MessageSlot *slot, std::function<bool()> reload,
-                               int vchan_id) {
+                               int vchan_id, bool was_newest) {
   slot->sub_owners.Set(subscriber_id_);
-  // Clear the bit in the subscriber bitset.
-  GetAvailableSlots(subscriber_id_).Clear(slot->id);
+  if (was_newest) {
+    // We read the newest slot so there can't be any other messages for this subscriber.
+    GetAvailableSlots(subscriber_id_).ClearAll();
+  } else {
+    // Clear the bit in the subscriber bitset.
+    GetAvailableSlots(subscriber_id_).Clear(slot->id);
+  }
   RememberOrdinal(slot->ordinal, vchan_id);
   slot->flags |= kMessageSeen;
 }

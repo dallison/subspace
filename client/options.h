@@ -112,7 +112,7 @@ struct PublisherOptions {
   bool fixed_size = false;
   std::string type;
   bool activate =
-      true; // If true, the channel will be activated even if unreliable.
+      false; // If true, the channel will be activated even if unreliable.
 
   std::string mux;
   int vchan_id = -1; // If -1, server will assign.
