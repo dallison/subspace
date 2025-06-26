@@ -200,7 +200,7 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
                                          std::memory_order_relaxed)) {
       // std::cerr << slot->id << " retired_refs: " << retired_refs
       //           << " num subs: " << NumSubscribers(vchan_id) << std::endl;
-      if (retired_refs >= NumSubscribers(vchan_id)) {
+      if (retired_refs >= NumSubscribers(ref_vchan_id)) {
         // All subscribers have seen the slot, retire it.
         RetiredSlots().Set(slot->id);
         // std::cerr << "Retiring slot " << slot->id << std::endl;
@@ -332,7 +332,7 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
       MessageSlot *slot = &ccb_->slots[i];
       if (slot->sub_owners.IsSet(owner)) {
         slot->sub_owners.Clear(owner);
-        AtomicIncRefCount(slot, reliable, -1, 0, 0, true);
+        AtomicIncRefCount(slot, reliable, -1, 0, slot->vchan_id, true);
       }
     }
   }
