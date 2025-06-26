@@ -168,6 +168,7 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
   int retries = 0;
 
   while (retries++ < kMaxRetries) {
+    const bool print_errors = retries >= kMaxRetries - 10;
     ReloadIfNecessary(reload);
     if (slot == nullptr) {
       // Prepopulate the active slots.
@@ -186,17 +187,17 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
     if (new_slot == nullptr) {
       return nullptr;
     }
-    if (retries >= kMaxRetries - 10) {
+    if (print_errors) {
       std::cerr << "sub looking at slot " << new_slot->slot->id << " ordinal "
                 << new_slot->ordinal << "\n";
     }
     // We have a new slot, see if we can increment the ref count.  If we can't
     // we just go back and try again.
     if (AtomicIncRefCount(new_slot->slot, reliable, 1, new_slot->ordinal,
-                          new_slot->vchan_id, false, true)) {
+                          new_slot->vchan_id, false, print_errors)) {
       if (!ValidateSlotBuffer(new_slot->slot, reload) ||
           new_slot->slot->buffer_index == -1) {
-        if (retries >= kMaxRetries - 10) {
+        if (print_errors) {
           std::cerr << "sub failed on slot: ";
           new_slot->slot->Dump(std::cerr);
         }
@@ -207,7 +208,7 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
                           new_slot->vchan_id, false);
         continue;
       }
-      if (retries >= kMaxRetries - 10) {
+      if (print_errors) {
         std::cerr << "sub got slot " << new_slot->slot->id << " ordinal "
                   << new_slot->ordinal << " vchan " << new_slot->slot->vchan_id
                   << "\n";
