@@ -165,7 +165,7 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
     int ref_vchan_id = (ref >> kVchanIdShift) & kVchanIdMask;
     if (ref_vchan_id == (1 << kVchanIdSize) - 1) {
       // This is a special case where the vchan_id is invalid.
-      ref_vchan_id = vchan_id;
+      ref_vchan_id = -1;
     }
 
     if (ref_ord != 0 && ordinal != 0 && ref_vchan_id != vchan_id) {
@@ -332,7 +332,7 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
       MessageSlot *slot = &ccb_->slots[i];
       if (slot->sub_owners.IsSet(owner)) {
         slot->sub_owners.Clear(owner);
-        AtomicIncRefCount(slot, reliable, -1, 0, slot->vchan_id, true);
+        AtomicIncRefCount(slot, reliable, -1, 0, 0, true);
       }
     }
   }
