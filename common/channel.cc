@@ -158,7 +158,7 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
                   << " reliable: " << reliable
                   << " inc: " << inc
                   << " retire: " << retire
-                  << "Current refs: " << DecodedRefsBitField(ref) << std::endl;
+                  << " Current refs: " << DecodedRefsBitField(ref) << std::endl;
       }
       return false;
     }
@@ -178,7 +178,7 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
                   << " reliable: " << reliable
                   << " inc: " << inc
                   << " retire: " << retire
-                  << "Current refs: " << DecodedRefsBitField(ref) << std::endl;
+                  << " Current refs: " << DecodedRefsBitField(ref) << std::endl;
       }
       return false;
     }
