@@ -166,6 +166,7 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
 
   constexpr int kMaxRetries = 1000;
   int retries = 0;
+
   while (retries++ < kMaxRetries) {
     ReloadIfNecessary(reload);
     if (slot == nullptr) {
@@ -192,7 +193,7 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
     // We have a new slot, see if we can increment the ref count.  If we can't
     // we just go back and try again.
     if (AtomicIncRefCount(new_slot->slot, reliable, 1, new_slot->ordinal,
-                          new_slot->vchan_id, false)) {
+                          new_slot->vchan_id, false, true)) {
       if (!ValidateSlotBuffer(new_slot->slot, reload) ||
           new_slot->slot->buffer_index == -1) {
         if (retries >= kMaxRetries - 10) {
