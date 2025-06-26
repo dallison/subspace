@@ -189,26 +189,30 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
   }
 }
 
+void MessageSlot::Dump(std::ostream &os) const {
+  uint64_t l_refs = refs.load(std::memory_order_relaxed);
+  int reliable_refs = (l_refs >> kReliableRefCountShift) & kRefCountMask;
+  bool is_pub = (l_refs & kPubOwned) != 0;
+  uint64_t just_refs = l_refs & kRefCountMask;
+  uint64_t ref_ord = (l_refs >> kOrdinalShift) & kOrdinalMask;
+
+  os << "Slot: " << id;
+  if (is_pub) {
+    os << " publisher " << just_refs;
+  } else {
+    os << " refs: " << just_refs << " reliable refs: " << reliable_refs
+       << " ord: " << ref_ord;
+  }
+  os << " ordinal: " << ordinal
+     << " buffer_index: " << buffer_index
+     << " vchan_id: " << vchan_id << " timestamp: " << timestamp
+     << " message size: " << message_size << "\n";
+}
+
 void Channel::DumpSlots(std::ostream &os) const {
   for (int i = 0; i < num_slots_; i++) {
     const MessageSlot *slot = &ccb_->slots[i];
-    uint64_t refs = slot->refs.load(std::memory_order_relaxed);
-    int reliable_refs = (refs >> kReliableRefCountShift) & kRefCountMask;
-    bool is_pub = (refs & kPubOwned) != 0;
-    uint64_t just_refs = refs & kRefCountMask;
-    uint64_t ref_ord = (refs >> kOrdinalShift) & kOrdinalMask;
-
-    os << "Slot: " << i;
-    if (is_pub) {
-      os << " publisher " << just_refs;
-    } else {
-      os << " refs: " << just_refs << " reliable refs: " << reliable_refs
-         << " ord: " << ref_ord;
-    }
-    os << " ordinal: " << slot->ordinal
-       << " buffer_index: " << slot->buffer_index
-       << " vchan_id: " << slot->vchan_id << " timestamp: " << slot->timestamp
-       << " message size: " << slot->message_size << std::endl;
+    slot->Dump(os);
   }
 }
 

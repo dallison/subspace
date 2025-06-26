@@ -185,14 +185,20 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
     if (new_slot == nullptr) {
       return nullptr;
     }
-    // std::cerr << "sub looking at slot " << new_slot->slot->id << " ordinal "
-    //           << new_slot->ordinal << "\n";
+    if (retries >= kMaxRetries - 10) {
+      std::cerr << "sub looking at slot " << new_slot->slot->id << " ordinal "
+                << new_slot->ordinal << "\n";
+    }
     // We have a new slot, see if we can increment the ref count.  If we can't
     // we just go back and try again.
     if (AtomicIncRefCount(new_slot->slot, reliable, 1, new_slot->ordinal,
                           new_slot->vchan_id, false)) {
       if (!ValidateSlotBuffer(new_slot->slot, reload) ||
           new_slot->slot->buffer_index == -1) {
+        if (retries >= kMaxRetries - 10) {
+          std::cerr << "sub failed on slot: ";
+          new_slot->slot->Dump(std::cerr);
+        }
         // Failed to get a buffer for the slot.  Embargo the slot so we don't
         // see it again this loop and try again.
         embargoed_slots.Set(new_slot->slot->id);
@@ -200,9 +206,11 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
                           new_slot->vchan_id, false);
         continue;
       }
-      // std::cerr << "sub got slot " << new_slot->slot->id << " ordinal "
-      //           << new_slot->ordinal << " vchan " << new_slot->slot->vchan_id
-      //           << "\n";
+      if (retries >= kMaxRetries - 10) {
+        std::cerr << "sub got slot " << new_slot->slot->id << " ordinal "
+                  << new_slot->ordinal << " vchan " << new_slot->slot->vchan_id
+                  << "\n";
+      }
       return new_slot->slot;
     }
   }
