@@ -1173,7 +1173,6 @@ TEST_F(ClientTest, PublishAndResizeSubscriberConcurrently) {
   auto t2 = std::thread([&]() {
     auto client2_sub = *client2.CreateSubscriber(channel_name);
     while (publisher_finished == false) {
-      std::cerr << "reading message" << std::endl;
       auto message = *client2_sub.ReadMessage();
       size_t size = message.length;
       if (size == 0) {
