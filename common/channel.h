@@ -407,6 +407,8 @@ public:
   void SetType(std::string type) { type_ = std::move(type); }
   const std::string Type() const { return type_; }
 
+  std::string_view TypeView() const { return type_; }
+
   char *EndOfSlots() const {
     return reinterpret_cast<char *>(ccb_) +
            Aligned(sizeof(ChannelControlBlock) +
