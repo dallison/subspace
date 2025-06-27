@@ -483,6 +483,7 @@ public:
 
   std::string Name() const { return impl_->Name(); }
   std::string Type() const { return impl_->Type(); }
+  std::string_view TypeView() const { return impl_->TypeView(); }
 
   void DumpSlots(std::ostream &os) const { impl_->DumpSlots(os); }
 
@@ -491,6 +492,7 @@ public:
   bool IsFixedSize() const { return impl_->IsFixedSize(); }
 
   int32_t SlotSize() const { return impl_->SlotSize(); }
+  int32_t NumSlots() const { return impl_->NumSlots(); }
 
   const std::vector<std::unique_ptr<details::BufferSet>> &GetBuffers() const {
     return client_->GetBuffers(impl_.get());
@@ -615,6 +617,7 @@ public:
 
   std::string Name() const { return impl_->Name(); }
   std::string Type() const { return impl_->Type(); }
+  std::string_view TypeView() const { return impl_->TypeView(); }
 
   // Register a function to be called when a subscriber drops a message.  The
   // function is called with the number of messages that have been missed
@@ -654,6 +657,7 @@ public:
   bool IsReliable() const { return impl_->IsReliable(); }
 
   int32_t SlotSize() const { return impl_->SlotSize(); }
+  int32_t NumSlots() const { return impl_->NumSlots(); }
 
   const std::vector<std::unique_ptr<details::BufferSet>> &GetBuffers() const {
     return client_->GetBuffers(impl_.get());
