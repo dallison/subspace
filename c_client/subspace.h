@@ -115,7 +115,6 @@ typedef struct {
 // defaults are:
 // socket_name: "subspace"
 // client_name: ""
-// timeoutSeconds: 0 (no timeout)
 SubspaceClient subspace_create_client(void);
 SubspaceClient subspace_create_client_with_socket(const char* socket_name);
 SubspaceClient
