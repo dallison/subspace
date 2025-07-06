@@ -1,3 +1,7 @@
+// Copyright 2025 David Allison
+// All Rights Reserved
+// See LICENSE file for licensing information.
+
 #pragma once
 
 #include "absl/container/flat_hash_set.h"

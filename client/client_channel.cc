@@ -1,3 +1,7 @@
+// Copyright 2025 David Allison
+// All Rights Reserved
+// See LICENSE file for licensing information.
+
 #include "client/client_channel.h"
 #include <sys/mman.h>
 #if defined(__APPLE__)
