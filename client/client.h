@@ -277,7 +277,7 @@ private:
   // Register a function to be called when a subscriber drops a message.  The
   // function is called with the number of messages that have been missed
   // as its second argument.
-  void RegisterDroppedMessageCallback(
+  absl::Status RegisterDroppedMessageCallback(
       details::SubscriberImpl *subscriber,
       std::function<void(details::SubscriberImpl *, int64_t)> callback);
   absl::Status
@@ -298,13 +298,13 @@ private:
   //
   // Returns absl::OkStatus() if resize is OK.  If the callback wants
   // to prevent the resize from happening, return an error.
-  void RegisterResizeCallback(
+  absl::Status RegisterResizeCallback(
       details::PublisherImpl *publisher,
       std::function<absl::Status(details::PublisherImpl *, int32_t, int32_t)>
           cb);
   absl::Status UnregisterResizeCallback(details::PublisherImpl *publisher);
 
-  // Call the message callback function for all avaialble messages.  You must
+  // Call the message callback function for all available messages.  You must
   // have registered a callback function with RegisterMessageCallback for this
   // to work.
   absl::Status ProcessAllMessages(details::SubscriberImpl *subscriber,
@@ -500,9 +500,9 @@ public:
 
   // Register a function to be called when the publisher resizes
   // the channel.
-  void RegisterResizeCallback(
+  absl::Status RegisterResizeCallback(
       std::function<absl::Status(Publisher *, int, int)> callback) {
-    client_->RegisterResizeCallback(
+    return client_->RegisterResizeCallback(
         impl_.get(),
         [ this, callback = std::move(callback) ](
             details::PublisherImpl * p, int32_t old_size, int32_t new_size)
@@ -622,9 +622,9 @@ public:
   // Register a function to be called when a subscriber drops a message.  The
   // function is called with the number of messages that have been missed
   // as its second argument.
-  void RegisterDroppedMessageCallback(
+  absl::Status RegisterDroppedMessageCallback(
       std::function<void(Subscriber *, int64_t)> callback) {
-    client_->RegisterDroppedMessageCallback(impl_.get(), [
+    return client_->RegisterDroppedMessageCallback(impl_.get(), [
       this, callback = std::move(callback)
     ](details::SubscriberImpl * s, int64_t c) { callback(this, c); });
   }

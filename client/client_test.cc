@@ -1,4 +1,4 @@
-// Copyright 2023 David Allison
+// Copyright 2025 David Allison
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -161,7 +161,7 @@ TEST_F(ClientTest, ResizeCallback) {
   ASSERT_TRUE(pub.ok());
 
   int num_resizes = 0;
-  pub->RegisterResizeCallback([&num_resizes](Publisher *cb_pub,
+  absl::Status status = pub->RegisterResizeCallback([&num_resizes](Publisher *cb_pub,
                                              int32_t old_size,
                                              int32_t new_size) -> absl::Status {
     num_resizes++;
@@ -170,6 +170,7 @@ TEST_F(ClientTest, ResizeCallback) {
     }
     return absl::InternalError("Unable to resize channel");
   });
+  ASSERT_TRUE(status.ok());
 
   // No resize.
   absl::StatusOr<void *> buffer1 = pub->GetMessageBuffer(256);
@@ -1559,11 +1560,12 @@ TEST_F(ClientTest, DroppedMessage) {
   ASSERT_TRUE(sub.ok());
 
   int num_dropped_messages = 0;
-  sub->RegisterDroppedMessageCallback(
+  absl::Status status = sub->RegisterDroppedMessageCallback(
       [&num_dropped_messages, &sub](Subscriber *s, int64_t num_dropped) {
         ASSERT_EQ(*sub, *s);
         num_dropped_messages += num_dropped;
       });
+  ASSERT_TRUE(status.ok());
 
   absl::StatusOr<Publisher> pub = client.CreatePublisher("rel_dave", 32, 5);
   ASSERT_TRUE(pub.ok());

@@ -1,3 +1,7 @@
+// Copyright 2025 David Allison
+// All Rights Reserved
+// See LICENSE file for licensing information.
+
 #pragma once
 #include "client/client_channel.h"
 #include "client/message.h"

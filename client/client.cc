@@ -53,10 +53,17 @@ absl::Status ClientImpl::Init(const std::string &server_socket,
   return absl::OkStatus();
 }
 
-void ClientImpl::RegisterDroppedMessageCallback(
+absl::Status ClientImpl::RegisterDroppedMessageCallback(
     SubscriberImpl *subscriber,
     std::function<void(SubscriberImpl *, int64_t)> callback) {
+  if (dropped_message_callbacks_.find(subscriber) !=
+      dropped_message_callbacks_.end()) {
+    return absl::InternalError(absl::StrFormat(
+        "A dropped message callback has already been registered for channel %s\n",
+        subscriber->Name()));
+  }
   dropped_message_callbacks_[subscriber] = std::move(callback);
+  return absl::OkStatus();
 }
 
 absl::Status
@@ -95,10 +102,16 @@ absl::Status ClientImpl::UnregisterMessageCallback(SubscriberImpl *subscriber) {
   return absl::OkStatus();
 }
 
-void ClientImpl::RegisterResizeCallback(
+absl::Status ClientImpl::RegisterResizeCallback(
     PublisherImpl *publisher,
     std::function<absl::Status(PublisherImpl *, int32_t, int32_t)> callback) {
+  if (resize_callbacks_.find(publisher) != resize_callbacks_.end()) {
+    return absl::InternalError(absl::StrFormat(
+        "A resize callback has already been registered for channel %s\n",
+        publisher->Name()));
+  }
   resize_callbacks_[publisher] = std::move(callback);
+  return absl::OkStatus();
 }
 
 absl::Status ClientImpl::UnregisterResizeCallback(PublisherImpl *publisher) {
