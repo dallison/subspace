@@ -146,6 +146,25 @@ absl::Status ClientImpl::ProcessAllMessages(details::SubscriberImpl *subscriber,
   return absl::OkStatus();
 }
 
+absl::StatusOr<std::vector<Message>> ClientImpl::GetAllMessages(details::SubscriberImpl *subscriber,
+                                            ReadMode mode) {
+  std::vector<Message> r;
+  for (;;) {
+    absl::StatusOr<Message> msg = ReadMessage(subscriber, mode);
+    if (!msg.ok()) {
+      return msg.status();
+    }
+    if (msg->length == 0) {
+      break;
+    }
+    r.push_back(std::move(*msg));
+  }
+  if (!r.empty()) {
+    subscriber->Trigger();
+  }
+  return r;
+}
+
 absl::StatusOr<Publisher>
 ClientImpl::CreatePublisher(const std::string &channel_name,
                             const PublisherOptions &opts) {
@@ -435,7 +454,7 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
     if (publisher->IsReliable()) {
       // Reliable publishers don't get a slot until it's asked for.
       return Message(message_size, nullptr, msg.ordinal, msg.timestamp,
-                     publisher->VirtualChannelId(), false);
+                     publisher->VirtualChannelId(), false, -1);
     }
     return absl::InternalError(
         absl::StrFormat("Out of slots for channel %s", publisher->Name()));
@@ -447,7 +466,7 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
   }
 
   return Message(message_size, nullptr, msg.ordinal, msg.timestamp,
-                 publisher->VirtualChannelId(), false);
+                 publisher->VirtualChannelId(), false, msg.new_slot->id);
 }
 
 absl::Status ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
@@ -671,7 +690,7 @@ ClientImpl::FindMessageInternal(SubscriberImpl *subscriber,
   }
   return Message(new_slot->message_size, subscriber->GetCurrentBufferAddress(),
                  subscriber->CurrentOrdinal(), subscriber->Timestamp(),
-                 subscriber->VirtualChannelId(), false);
+                 subscriber->VirtualChannelId(), false, new_slot->id);
 }
 
 absl::StatusOr<Message> ClientImpl::FindMessage(SubscriberImpl *subscriber,

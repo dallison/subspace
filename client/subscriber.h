@@ -152,6 +152,8 @@ public:
                                          std::vector<ActiveSlot> &buffer,
                                          std::function<bool()> reload);
 
+  void Trigger() { trigger_.Trigger(); }
+
 private:
   friend class ::subspace::ClientImpl;
 
@@ -189,7 +191,6 @@ private:
       fd.Trigger();
     }
   }
-  void Trigger() { trigger_.Trigger(); }
 
   MessageSlot *NextSlot(std::function<bool()> reload) {
     return NextSlot(CurrentSlot(), IsReliable(), subscriber_id_,

@@ -310,6 +310,9 @@ private:
   absl::Status ProcessAllMessages(details::SubscriberImpl *subscriber,
                                   ReadMode mode = ReadMode::kReadNext);
 
+  absl::StatusOr<std::vector<Message>> GetAllMessages(details::SubscriberImpl *subscriber,
+                      ReadMode mode = ReadMode::kReadNext);
+
   // Get the most recently received ordinal for the subscriber.
   int64_t GetCurrentOrdinal(details::SubscriberImpl *sub) const;
 
@@ -650,6 +653,12 @@ public:
     return client_->ProcessAllMessages(impl_.get(), mode);
   }
 
+  absl::StatusOr<std::vector<Message>> GetAllMessages(ReadMode mode = ReadMode::kReadNext) {
+    return client_->GetAllMessages(impl_.get(), mode);
+  }
+
+  void Trigger() { impl_->Trigger(); }
+
   const ChannelCounters &GetCounters() const { return impl_->GetCounters(); }
 
   int64_t CurrentOrdinal() const { return impl_->CurrentOrdinal(); }
@@ -715,6 +724,16 @@ Subscriber::FindMessage(uint64_t timestamp) {
 // ClientImpl.
 class Client {
 public:
+  static absl::StatusOr<std::shared_ptr<Client>> Create(const std::string &server_socket = "/tmp/subspace",
+    const std::string &client_name = "", co::Coroutine *c = nullptr) {
+      auto client = std::make_shared<Client>(c);
+      auto status = client->Init(server_socket, client_name);
+      if (!status.ok()) {
+        return status;
+      }
+      return client;
+    }
+
   Client(co::Coroutine *c = nullptr) : impl_(std::make_shared<ClientImpl>(c)) {}
   ~Client() = default;
 

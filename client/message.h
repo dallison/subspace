@@ -68,15 +68,10 @@ struct ActiveMessage {
 
 struct Message {
   Message() = default;
-  Message(size_t len, const void *buf, uint64_t ord, int64_t ts, int vid, bool activation)
+  Message(size_t len, const void *buf, uint64_t ord, int64_t ts, int vid, bool activation, int32_t sid)
       : length(len), buffer(buf), ordinal(ord), timestamp(ts),
-        vchan_id(vid), is_activation(activation) {}
-  Message(std::shared_ptr<ActiveMessage> msg)
-      : active_message(std::move(msg)), length(active_message->length),
-        buffer(active_message->buffer), ordinal(active_message->ordinal),
-        timestamp(active_message->timestamp),
-        vchan_id(active_message->vchan_id),
-        is_activation(active_message->is_activation) {}
+        vchan_id(vid), is_activation(activation), slot_id(sid) {}
+  Message(std::shared_ptr<ActiveMessage> msg);
   void Release() { active_message.reset(); }
   std::shared_ptr<ActiveMessage> active_message;
   size_t length = 0;
@@ -85,6 +80,7 @@ struct Message {
   uint64_t timestamp = 0;
   int vchan_id = -1;               // Virtual channel ID (or -1 if not used).
   bool is_activation = false; // Is this an activation message?
+  int32_t slot_id = -1;
 };
 
 } // namespace subspace
