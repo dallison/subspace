@@ -9,8 +9,7 @@
 
 namespace subspace {
 
-template <typename T, int N>
-class FastRingBuffer {
+template <typename T, int N> class FastRingBuffer {
 public:
   FastRingBuffer() = default;
 
@@ -44,4 +43,4 @@ private:
   int num_values_ = 0;
 };
 
-}
+} // namespace subspace

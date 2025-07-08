@@ -127,7 +127,8 @@ void SubscriberImpl::ClaimSlot(MessageSlot *slot, std::function<bool()> reload,
                                int vchan_id, bool was_newest) {
   slot->sub_owners.Set(subscriber_id_);
   if (was_newest) {
-    // We read the newest slot so there can't be any other messages for this subscriber.
+    // We read the newest slot so there can't be any other messages for this
+    // subscriber.
     GetAvailableSlots(subscriber_id_).ClearAll();
   } else {
     // Clear the bit in the subscriber bitset.

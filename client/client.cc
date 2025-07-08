@@ -58,9 +58,10 @@ absl::Status ClientImpl::RegisterDroppedMessageCallback(
     std::function<void(SubscriberImpl *, int64_t)> callback) {
   if (dropped_message_callbacks_.find(subscriber) !=
       dropped_message_callbacks_.end()) {
-    return absl::InternalError(absl::StrFormat(
-        "A dropped message callback has already been registered for channel %s\n",
-        subscriber->Name()));
+    return absl::InternalError(
+        absl::StrFormat("A dropped message callback has already been "
+                        "registered for channel %s\n",
+                        subscriber->Name()));
   }
   dropped_message_callbacks_[subscriber] = std::move(callback);
   return absl::OkStatus();
@@ -146,8 +147,8 @@ absl::Status ClientImpl::ProcessAllMessages(details::SubscriberImpl *subscriber,
   return absl::OkStatus();
 }
 
-absl::StatusOr<std::vector<Message>> ClientImpl::GetAllMessages(details::SubscriberImpl *subscriber,
-                                            ReadMode mode) {
+absl::StatusOr<std::vector<Message>>
+ClientImpl::GetAllMessages(details::SubscriberImpl *subscriber, ReadMode mode) {
   std::vector<Message> r;
   for (;;) {
     absl::StatusOr<Message> msg = ReadMessage(subscriber, mode);

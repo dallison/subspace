@@ -75,7 +75,8 @@ public:
   FindUnseenOrdinal(const std::vector<ActiveSlot> &active_slots);
   void PopulateActiveSlots(InPlaceAtomicBitset &bits);
 
-  void ClaimSlot(MessageSlot *slot, std::function<bool()> reload, int vchan_id, bool was_newest);
+  void ClaimSlot(MessageSlot *slot, std::function<bool()> reload, int vchan_id,
+                 bool was_newest);
   void RememberOrdinal(uint64_t ordinal, int vchan_id);
   void CollectVisibleSlots(InPlaceAtomicBitset &bits,
                            std::vector<ActiveSlot> &active_slots,
@@ -104,10 +105,11 @@ public:
 
   std::shared_ptr<ActiveMessage> SetActiveMessage(size_t len, MessageSlot *slot,
                                                   const void *buf, uint64_t ord,
-                                                  int64_t ts, int vchan_id, bool is_activation) {
+                                                  int64_t ts, int vchan_id,
+                                                  bool is_activation) {
     active_message_.reset();
-    active_message_ = std::make_shared<ActiveMessage>(
-        ActiveMessage{shared_from_this(), len, slot, buf, ord, ts, vchan_id, is_activation});
+    active_message_ = std::make_shared<ActiveMessage>(ActiveMessage{
+        shared_from_this(), len, slot, buf, ord, ts, vchan_id, is_activation});
     return active_message_;
   }
 

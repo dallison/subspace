@@ -59,7 +59,7 @@ TEST(CommonTest, BitsetTraverse1) {
       // std::cerr << i << std::endl;
       count++;
     });
-    ASSERT_EQ(count, i+1);
+    ASSERT_EQ(count, i + 1);
   }
 }
 
