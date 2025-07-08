@@ -171,9 +171,9 @@ PYBIND11_MODULE(subspace, m) {
         if (!read_result.ok()) {
           throw std::runtime_error(read_result.status().ToString());
         }
-        auto r =  py::bytes(reinterpret_cast<const char *>(read_result->buffer),
-                         read_result->length);
-        read_result->Release();  // Release the message buffer.
+        auto r = py::bytes(reinterpret_cast<const char *>(read_result->buffer),
+                           read_result->length);
+        read_result->Release(); // Release the message buffer.
         return r;
       },
       R"doc("Read a message from a subscriber. If there are no available messages,

@@ -161,15 +161,15 @@ TEST_F(ClientTest, ResizeCallback) {
   ASSERT_TRUE(pub.ok());
 
   int num_resizes = 0;
-  absl::Status status = pub->RegisterResizeCallback([&num_resizes](Publisher *cb_pub,
-                                             int32_t old_size,
-                                             int32_t new_size) -> absl::Status {
-    num_resizes++;
-    if (num_resizes < 2) {
-      return absl::OkStatus();
-    }
-    return absl::InternalError("Unable to resize channel");
-  });
+  absl::Status status = pub->RegisterResizeCallback(
+      [&num_resizes](Publisher *cb_pub, int32_t old_size,
+                     int32_t new_size) -> absl::Status {
+        num_resizes++;
+        if (num_resizes < 2) {
+          return absl::OkStatus();
+        }
+        return absl::InternalError("Unable to resize channel");
+      });
   ASSERT_TRUE(status.ok());
 
   // No resize.

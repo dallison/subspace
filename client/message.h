@@ -30,10 +30,11 @@ class SubscriberImpl;
 struct ActiveMessage {
   ActiveMessage() = default;
   ActiveMessage(std::shared_ptr<details::SubscriberImpl> subr, size_t len,
-                MessageSlot *slot_ptr, const void *buf, uint64_t ord, int64_t ts,
-                int vid, bool activation);
+                MessageSlot *slot_ptr, const void *buf, uint64_t ord,
+                int64_t ts, int vid, bool activation);
   ActiveMessage(size_t len, uint64_t ord, uint64_t ts, int vid, bool activation)
-      : length(len), ordinal(ord), timestamp(ts), vchan_id(vid), is_activation(activation) {}
+      : length(len), ordinal(ord), timestamp(ts), vchan_id(vid),
+        is_activation(activation) {}
   ~ActiveMessage();
 
   // Can't be copied but can be moved.
@@ -68,9 +69,10 @@ struct ActiveMessage {
 
 struct Message {
   Message() = default;
-  Message(size_t len, const void *buf, uint64_t ord, int64_t ts, int vid, bool activation, int32_t sid)
-      : length(len), buffer(buf), ordinal(ord), timestamp(ts),
-        vchan_id(vid), is_activation(activation), slot_id(sid) {}
+  Message(size_t len, const void *buf, uint64_t ord, int64_t ts, int vid,
+          bool activation, int32_t sid)
+      : length(len), buffer(buf), ordinal(ord), timestamp(ts), vchan_id(vid),
+        is_activation(activation), slot_id(sid) {}
   Message(std::shared_ptr<ActiveMessage> msg);
   void Release() { active_message.reset(); }
   std::shared_ptr<ActiveMessage> active_message;
@@ -78,7 +80,7 @@ struct Message {
   const void *buffer = nullptr;
   uint64_t ordinal = 0;
   uint64_t timestamp = 0;
-  int vchan_id = -1;               // Virtual channel ID (or -1 if not used).
+  int vchan_id = -1;          // Virtual channel ID (or -1 if not used).
   bool is_activation = false; // Is this an activation message?
   int32_t slot_id = -1;
 };

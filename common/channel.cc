@@ -2,7 +2,6 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-
 #include "common/channel.h"
 #include "absl/strings/str_format.h"
 #include "toolbelt/clock.h"
@@ -205,11 +204,10 @@ void MessageSlot::Dump(std::ostream &os) const {
     os << " refs: " << just_refs << " reliable refs: " << reliable_refs
        << " ord: " << ref_ord;
   }
-  os << " ordinal: " << ordinal
-     << " buffer_index: " << buffer_index
+  os << " ordinal: " << ordinal << " buffer_index: " << buffer_index
      << " vchan_id: " << vchan_id << " timestamp: " << timestamp
-     << " message size: " << message_size
-     << " raw refs: " << std::hex << refs << std::dec << "\n";
+     << " message size: " << message_size << " raw refs: " << std::hex << refs
+     << std::dec << "\n";
 }
 
 void Channel::DumpSlots(std::ostream &os) const {

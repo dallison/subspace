@@ -2,7 +2,6 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-
 #ifndef __CLIENT_CLIENT_CHANNEL_H
 #define __CLIENT_CLIENT_CHANNEL_H
 
@@ -173,8 +172,8 @@ public:
       if (abort_on_range) {
         // If the index is out of range, we have a problem.
         // This should never happen.
-        std::cerr << "Invalid buffer index for slot " << slot_id << ": " << index
-                  << std::endl;
+        std::cerr << "Invalid buffer index for slot " << slot_id << ": "
+                  << index << std::endl;
         DumpSlots(std::cerr);
         abort();
       }
