@@ -422,7 +422,25 @@ bool subspace_wait_for_subscriber(SubspaceSubscriber subscriber) {
   // subspace::Subscriber.
   auto sub_ptr = reinterpret_cast<std::shared_ptr<subspace::Subscriber> *>(
       subscriber.subscriber);
-  absl::StatusOr<bool> status = (*sub_ptr)->Wait();
+  absl::Status status = (*sub_ptr)->Wait();
+  if (!status.ok()) {
+    subspace_set_error(status.ToString().c_str());
+    return false;
+  }
+  return true;
+}
+
+int subspace_wait_for_subscriber_with_fd(SubspaceSubscriber subscriber, int fd) {
+  subspace_clear_error();
+  if (subscriber.subscriber == nullptr) {
+    subspace_set_error("Invalid subscriber");
+    return -1;
+  }
+  // The subscriber contains a pointer to a shared_ptr to a shared_ptr to a
+  // subspace::Subscriber.
+  auto sub_ptr = reinterpret_cast<std::shared_ptr<subspace::Subscriber> *>(
+      subscriber.subscriber);
+  absl::StatusOr<int> status = (*sub_ptr)->Wait(toolbelt::FileDescriptor(fd));
   if (!status.ok()) {
     subspace_set_error(status.status().ToString().c_str());
     return false;
@@ -440,7 +458,25 @@ bool subspace_wait_for_publisher(SubspacePublisher publisher) {
   // subspace::Publisher.
   auto pub_ptr = reinterpret_cast<std::shared_ptr<subspace::Publisher> *>(
       publisher.publisher);
-  absl::StatusOr<bool> status = (*pub_ptr)->Wait();
+  absl::Status status = (*pub_ptr)->Wait();
+  if (!status.ok()) {
+    subspace_set_error(status.ToString().c_str());
+    return false;
+  }
+  return true;
+}
+
+int subspace_wait_for_publisher_with_fd(SubspacePublisher publisher, int fd) {
+  subspace_clear_error();
+  if (publisher.publisher == nullptr) {
+    subspace_set_error("Invalid publisher");
+    return false;
+  }
+  // The publisher contains a pointer to a shared_ptr to a shared_ptr to a
+  // subspace::Publisher.
+  auto pub_ptr = reinterpret_cast<std::shared_ptr<subspace::Publisher> *>(
+      publisher.publisher);
+  absl::StatusOr<int> status = (*pub_ptr)->Wait(toolbelt::FileDescriptor(fd));
   if (!status.ok()) {
     subspace_set_error(status.status().ToString().c_str());
     return false;
