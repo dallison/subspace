@@ -1,4 +1,4 @@
-// Copyright 2023 David Allison
+// Copyright 2025 David Allison
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -7,9 +7,8 @@
 #include "server.h"
 #include <csignal>
 #include <string>
-#include <csignal>
 
-static co::CoroutineScheduler* g_scheduler;
+static co::CoroutineScheduler *g_scheduler;
 void Signal(int sig) {
   printf("\nAll coroutines:\n");
   g_scheduler->Show();
@@ -31,7 +30,7 @@ int main(int argc, char **argv) {
 
   co::CoroutineScheduler scheduler;
 
-  g_scheduler = &scheduler;     // For signal handler.
+  g_scheduler = &scheduler; // For signal handler.
   signal(SIGPIPE, SIG_IGN);
   signal(SIGQUIT, Signal);
 
@@ -39,11 +38,12 @@ int main(int argc, char **argv) {
       scheduler, absl::GetFlag(FLAGS_socket), absl::GetFlag(FLAGS_interface),
       absl::GetFlag(FLAGS_disc_port), absl::GetFlag(FLAGS_peer_port),
       absl::GetFlag(FLAGS_local), absl::GetFlag(FLAGS_notify_fd));
-  
+
   server.SetLogLevel(absl::GetFlag(FLAGS_log_level));
   absl::Status s = server.Run();
   if (!s.ok()) {
-    fprintf(stderr, "Error running Subspace server: %s\n", s.ToString().c_str());
+    fprintf(stderr, "Error running Subspace server: %s\n",
+            s.ToString().c_str());
     exit(1);
   }
 }

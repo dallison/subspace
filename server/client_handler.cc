@@ -1,4 +1,4 @@
-// Copyright 2023 David Allison
+// Copyright 2025 David Allison
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -87,14 +87,6 @@ ClientHandler::HandleMessage(const subspace::Request &req,
                            resp.mutable_remove_subscriber(), fds);
     break;
 
-  case subspace::Request::kResize:
-    HandleResize(req.resize(), resp.mutable_resize(), fds);
-    break;
-
-  case subspace::Request::kGetBuffers:
-    HandleGetBuffers(req.get_buffers(), resp.mutable_get_buffers(), fds);
-    break;
-
   case subspace::Request::REQUEST_NOT_SET:
     return absl::InternalError("Protocol error: unknown request");
   }
@@ -107,6 +99,7 @@ void ClientHandler::HandleInit(const subspace::InitRequest &req,
   response->set_scb_fd_index(0);
   fds.push_back(server_->scb_fd_);
   client_name_ = req.client_name();
+  response->set_session_id(server_->GetSessionId());
 }
 
 void ClientHandler::HandleCreatePublisher(
@@ -116,7 +109,8 @@ void ClientHandler::HandleCreatePublisher(
   ServerChannel *channel = server_->FindChannel(req.channel_name());
   if (channel == nullptr) {
     absl::StatusOr<ServerChannel *> ch = server_->CreateChannel(
-        req.channel_name(), req.slot_size(), req.num_slots(), req.type());
+        req.channel_name(), req.slot_size(), req.num_slots(), req.mux(),
+        req.vchan_id(), req.type());
     if (!ch.ok()) {
       response->set_error(ch.status().ToString());
       return;
@@ -132,6 +126,50 @@ void ClientHandler::HandleCreatePublisher(
       return;
     }
   }
+  if (req.mux().empty() && channel->IsMux()) {
+    response->set_error(
+        absl::StrFormat("Cannot create publisher to multiplexer channel %s",
+                        req.channel_name()));
+    return;
+  }
+  if (!req.mux().empty()) {
+    ServerChannel *mux = server_->FindChannel(req.mux());
+    if (mux == nullptr || !mux->IsMux()) {
+      response->set_error(absl::StrFormat(
+          "Channel %s is not a multiplexer, but a multiplexer was "
+          "specified for the publisher",
+          req.channel_name()));
+      return;
+    }
+  }
+  // Check the virtuality settings.  We can't mix virtual and non-virtual
+  // channels with the same name or on different multiplexer channels.
+  if (req.mux().empty() && channel->IsVirtual()) {
+    response->set_error(
+        absl::StrFormat("Channel %s is virtual, but no multiplexer was "
+                        "specified for the publisher",
+                        req.channel_name()));
+    return;
+  }
+  if (!req.mux().empty() && !channel->IsVirtual()) {
+    response->set_error(
+        absl::StrFormat("Channel %s is not virtual, but a multiplexer was "
+                        "specified for the publisher",
+                        req.channel_name()));
+    return;
+  }
+  if (channel->IsVirtual()) {
+    VirtualChannel *vchan = static_cast<VirtualChannel *>(channel);
+    if (vchan->GetMux()->Name() != req.mux()) {
+      response->set_error(absl::StrFormat(
+          "Virtual channels with the same name must use the same multiplexer "
+          "channel;"
+          "channel %s is multiplexer %s, not %s",
+          req.channel_name(), vchan->GetMux()->Name(), req.mux()));
+      return;
+    }
+  }
+
   // Check that the channel types match, if they are provided and
   // already set in the channel.
   if (!req.type().empty() && !channel->Type().empty() &&
@@ -151,7 +189,7 @@ void ClientHandler::HandleCreatePublisher(
     absl::Status cap_ok = channel->HasSufficientCapacity(0);
     if (!cap_ok.ok()) {
       response->set_error(absl::StrFormat(
-          "Insufficient capcacity to add a new publisher to channel %s: %s",
+          "Insufficient capacity to add a new publisher to channel %s: %s",
           req.channel_name(), cap_ok.ToString()));
       return;
     }
@@ -159,7 +197,6 @@ void ClientHandler::HandleCreatePublisher(
 
   int num_pubs, num_subs;
   channel->CountUsers(num_pubs, num_subs);
-
   // Check consistency of publisher parameters.
   if (num_pubs > 0) {
     if (req.is_fixed_size() != channel->IsFixedSize()) {
@@ -201,6 +238,7 @@ void ClientHandler::HandleCreatePublisher(
   }
   response->set_channel_id(channel->GetChannelId());
   response->set_type(channel->Type());
+  response->set_vchan_id(channel->GetVirtualChannelId());
 
   PublisherUser *pub = *publisher;
   response->set_publisher_id(pub->GetId());
@@ -210,14 +248,10 @@ void ClientHandler::HandleCreatePublisher(
 
   response->set_ccb_fd_index(0);
   fds.push_back(channel_fds.ccb);
+  response->set_bcb_fd_index(1);
+  fds.push_back(channel_fds.bcb);
 
-  int fd_index = 1;
-  for (const auto &buffer : channel_fds.buffers) {
-    auto *info = response->add_buffers();
-    info->set_slot_size(buffer.slot_size);
-    info->set_fd_index(fd_index++);
-    fds.push_back(buffer.fd);
-  }
+  int fd_index = 2;
 
   // Copy the publisher poll and triggers fds.
   response->set_pub_poll_fd_index(fd_index++);
@@ -231,6 +265,19 @@ void ClientHandler::HandleCreatePublisher(
   for (auto &fd : sub_fds) {
     response->add_sub_trigger_fd_indexes(fd_index++);
     fds.push_back(fd);
+  }
+
+  if (channel->IsVirtual()) {
+    // Also send back the channel multiplexer's subsciber fds so that
+    // a subscriber to the whole multiplexer can be triggered when a
+    // message is published from any of its virtual channels.
+    VirtualChannel *vchan = static_cast<VirtualChannel *>(channel);
+    std::vector<toolbelt::FileDescriptor> mux_fds =
+        vchan->GetMux()->GetSubscriberTriggerFds();
+    for (auto &fd : mux_fds) {
+      response->add_sub_trigger_fd_indexes(fd_index++);
+      fds.push_back(fd);
+    }
   }
 
   if (!req.is_bridge() && req.is_local()) {
@@ -248,8 +295,8 @@ void ClientHandler::HandleCreateSubscriber(
   ServerChannel *channel = server_->FindChannel(req.channel_name());
   if (channel == nullptr) {
     // No channel exists, map an empty channel.
-    absl::StatusOr<ServerChannel *> ch =
-        server_->CreateChannel(req.channel_name(), 0, 0, req.type());
+    absl::StatusOr<ServerChannel *> ch = server_->CreateChannel(
+        req.channel_name(), 0, 0, req.mux(), req.vchan_id(), req.type());
     if (!ch.ok()) {
       response->set_error(ch.status().ToString());
       return;
@@ -270,10 +317,37 @@ void ClientHandler::HandleCreateSubscriber(
       channel->SetType(req.type());
     }
   }
+  // Check the virtuality settings.  We can't mix virtual and non-virtual
+  // channels with the same name or on different multiplexer channels.
+  if (req.mux().empty() && channel->IsVirtual()) {
+    response->set_error(
+        absl::StrFormat("Channel %s is virtual, but no multiplexer was "
+                        "specified for the subscriber",
+                        req.channel_name()));
+    return;
+  }
+  if (!req.mux().empty() && !channel->IsVirtual()) {
+    response->set_error(
+        absl::StrFormat("Channel %s is not virtual, but a multiplexer was "
+                        "specified for the subscriber",
+                        req.channel_name()));
+    return;
+  }
+  if (channel->IsVirtual()) {
+    VirtualChannel *vchan = static_cast<VirtualChannel *>(channel);
+    if (vchan->GetMux()->Name() != req.mux()) {
+      response->set_error(absl::StrFormat(
+          "Virtual channels with the same name must use the same multiplexer "
+          "channel;"
+          "channel %s is multiplexer %s, not %s",
+          req.channel_name(), vchan->GetMux()->Name(), req.mux()));
+      return;
+    }
+  }
 
   SubscriberUser *sub;
   if (req.subscriber_id() != -1) {
-    // This is an exsiting subscriber.
+    // This is an existing subscriber.
     absl::StatusOr<User *> user = channel->GetUser(req.subscriber_id());
     if (!user.ok()) {
       response->set_error(user.status().ToString());
@@ -283,39 +357,39 @@ void ClientHandler::HandleCreateSubscriber(
   } else {
     if (!req.is_reliable()) {
       absl::Status cap_ok =
-          channel->HasSufficientCapacity(req.max_shared_ptrs());
+          channel->HasSufficientCapacity(req.max_active_messages() - 1);
       if (!cap_ok.ok()) {
         response->set_error(absl::StrFormat(
-            "Insufficient capcacity to add a new subscriber to channel %s: %s",
+            "Insufficient capacity to add a new subscriber to channel %s: %s",
             req.channel_name(), cap_ok.ToString()));
         return;
       }
     }
     // Create the subscriber.
     absl::StatusOr<SubscriberUser *> subscriber = channel->AddSubscriber(
-        this, req.is_reliable(), req.is_bridge(), req.max_shared_ptrs());
+        this, req.is_reliable(), req.is_bridge(), req.max_active_messages());
     if (!subscriber.ok()) {
       response->set_error(subscriber.status().ToString());
       return;
     }
     sub = *subscriber;
   }
+  channel->RegisterSubscriber(sub->GetId(), channel->GetVirtualChannelId(),
+                              req.subscriber_id() == -1);
+
   response->set_channel_id(channel->GetChannelId());
   response->set_subscriber_id(sub->GetId());
   response->set_type(channel->Type());
+  response->set_vchan_id(channel->GetVirtualChannelId());
 
   const SharedMemoryFds &channel_fds = channel->GetFds();
 
   response->set_ccb_fd_index(0);
   fds.push_back(channel_fds.ccb);
+  response->set_bcb_fd_index(1);
+  fds.push_back(channel_fds.bcb);
 
-  int fd_index = 1;
-  for (const auto &buffer : channel_fds.buffers) {
-    auto *info = response->add_buffers();
-    info->set_slot_size(buffer.slot_size);
-    info->set_fd_index(fd_index++);
-    fds.push_back(buffer.fd);
-  }
+  int fd_index = 2;
 
   response->set_trigger_fd_index(fd_index++);
   fds.push_back(sub->GetTriggerFd());
@@ -325,13 +399,25 @@ void ClientHandler::HandleCreateSubscriber(
 
   response->set_slot_size(channel->SlotSize());
   response->set_num_slots(channel->NumSlots());
-
   // Add publisher trigger indexes.
   std::vector<toolbelt::FileDescriptor> pub_fds =
       channel->GetReliablePublisherTriggerFds();
   for (auto &fd : pub_fds) {
     response->add_reliable_pub_trigger_fd_indexes(fd_index++);
     fds.push_back(fd);
+  }
+
+  if (channel->IsVirtual()) {
+    // Also send back the channel multiplexer's subsciber fds so that
+    // a subscriber to the whole multiplexer can be triggered when a
+    // message is published from any of its virtual channels.
+    VirtualChannel *vchan = static_cast<VirtualChannel *>(channel);
+    std::vector<toolbelt::FileDescriptor> mux_fds =
+        vchan->GetMux()->GetReliablePublisherTriggerFds();
+    for (auto &fd : mux_fds) {
+      response->add_reliable_pub_trigger_fd_indexes(fd_index++);
+      fds.push_back(fd);
+    }
   }
 
   if (!req.is_bridge()) {
@@ -367,6 +453,23 @@ void ClientHandler::HandleGetTriggers(
     response->add_sub_trigger_fd_indexes(index++);
     fds.push_back(fd);
   }
+
+  if (channel->IsVirtual()) {
+    // Also send back the channel multiplexer's subsciber and publisher fds.
+    VirtualChannel *vchan = static_cast<VirtualChannel *>(channel);
+    std::vector<toolbelt::FileDescriptor> mux_fds =
+        vchan->GetMux()->GetSubscriberTriggerFds();
+    for (auto &fd : mux_fds) {
+      response->add_sub_trigger_fd_indexes(index++);
+      fds.push_back(fd);
+    }
+
+    mux_fds = vchan->GetMux()->GetReliablePublisherTriggerFds();
+    for (auto &fd : mux_fds) {
+      response->add_reliable_pub_trigger_fd_indexes(index++);
+      fds.push_back(fd);
+    }
+  }
 }
 
 void ClientHandler::HandleRemovePublisher(
@@ -379,7 +482,7 @@ void ClientHandler::HandleRemovePublisher(
         absl::StrFormat("No such channel %s", req.channel_name()));
     return;
   }
-  channel->RemoveUser(req.publisher_id());
+  channel->RemoveUser(server_, req.publisher_id());
 }
 
 void ClientHandler::HandleRemoveSubscriber(
@@ -392,65 +495,7 @@ void ClientHandler::HandleRemoveSubscriber(
         absl::StrFormat("No such channel %s", req.channel_name()));
     return;
   }
-  channel->RemoveUser(req.subscriber_id());
-}
-
-void ClientHandler::HandleResize(const subspace::ResizeRequest &req,
-                                 subspace::ResizeResponse *response,
-                                 std::vector<toolbelt::FileDescriptor> &fds) {
-  ServerChannel *channel = server_->FindChannel(req.channel_name());
-  if (channel == nullptr) {
-    response->set_error(
-        absl::StrFormat("No such channel %s", req.channel_name()));
-    return;
-  }
-
-  // If channel is already bigger than requested, don't resize.
-  if (req.new_slot_size() <= channel->SlotSize()) {
-    response->set_slot_size(channel->SlotSize());
-    return;
-  }
-  absl::StatusOr<toolbelt::FileDescriptor> fd =
-      channel->ExtendBuffers(req.new_slot_size());
-  if (!fd.ok()) {
-    response->set_error(absl::StrFormat(
-        "Failed to resize channel %s to %d byte: %s", req.channel_name(),
-        req.new_slot_size(), fd.status().ToString()));
-    return;
-  }
-  response->set_slot_size(channel->SlotSize());
-
-  channel->AddBuffer(req.new_slot_size(), std::move(*fd));
-  const SharedMemoryFds &channel_fds = channel->GetFds();
-
-  int fd_index = 0;
-  for (const auto &buffer : channel_fds.buffers) {
-    auto *info = response->add_buffers();
-    info->set_slot_size(buffer.slot_size);
-    info->set_fd_index(fd_index++);
-    fds.push_back(buffer.fd);
-  }
-}
-
-void ClientHandler::HandleGetBuffers(
-    const subspace::GetBuffersRequest &req,
-    subspace::GetBuffersResponse *response,
-    std::vector<toolbelt::FileDescriptor> &fds) {
-  ServerChannel *channel = server_->FindChannel(req.channel_name());
-  if (channel == nullptr) {
-    response->set_error(
-        absl::StrFormat("No such channel %s", req.channel_name()));
-    return;
-  }
-  const SharedMemoryFds &channel_fds = channel->GetFds();
-
-  int fd_index = 0;
-  for (const auto &buffer : channel_fds.buffers) {
-    auto *info = response->add_buffers();
-    info->set_slot_size(buffer.slot_size);
-    info->set_fd_index(fd_index++);
-    fds.push_back(buffer.fd);
-  }
+  channel->RemoveUser(server_, req.subscriber_id());
 }
 
 } // namespace subspace

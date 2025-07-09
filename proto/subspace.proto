@@ -16,11 +16,7 @@ message InitRequest { string client_name = 1; }
 // the fd array.
 message InitResponse {
   int32 scb_fd_index = 1; // Index into fds of SystemControlBlock fd.
-}
-
-message BufferInfo {
-  int32 slot_size = 1;
-  int32 fd_index = 2;
+  int64 session_id = 2;
 }
 
 message CreatePublisherRequest {
@@ -30,8 +26,10 @@ message CreatePublisherRequest {
   bool is_local = 4;
   bool is_reliable = 5;
   bool is_bridge = 6; // This publisher is for the bridge.
-  bytes type = 7;    // Type of data carried on channel.
+  bytes type = 7;     // Type of data carried on channel.
   bool is_fixed_size = 8;
+  string mux = 9;
+  int32 vchan_id = 10;
 }
 
 message CreatePublisherResponse {
@@ -39,12 +37,13 @@ message CreatePublisherResponse {
   int32 channel_id = 2;
   int32 publisher_id = 3;
   int32 ccb_fd_index = 4;
-  repeated BufferInfo buffers = 5;
+  int32 bcb_fd_index = 5;
   int32 pub_poll_fd_index = 6;
   int32 pub_trigger_fd_index = 7;
   repeated int32 sub_trigger_fd_indexes = 8;
   int32 num_sub_updates = 9;
   bytes type = 10;
+  int32 vchan_id = 11;
 }
 
 // This is used both to create a new subscriber and to reload
@@ -54,9 +53,11 @@ message CreateSubscriberRequest {
   string channel_name = 1;
   int32 subscriber_id = 2; // -1 if there is no existing subscriber.
   bool is_reliable = 3;
-  bool is_bridge = 4; // This subscriber is for the bridge.
-  bytes type = 5;    // Type of data carried on channel.
-  int32 max_shared_ptrs = 6;    // Max number of shared_ptr objects.
+  bool is_bridge = 4;            // This subscriber is for the bridge.
+  bytes type = 5;                // Type of data carried on channel.
+  int32 max_active_messages = 6; // Max number of active message objects.
+  string mux = 7;
+  int32 vchan_id = 8;
 }
 
 message CreateSubscriberResponse {
@@ -64,7 +65,7 @@ message CreateSubscriberResponse {
   int32 channel_id = 2;
   int32 subscriber_id = 3;
   int32 ccb_fd_index = 4;
-  repeated BufferInfo buffers = 5;
+  int32 bcb_fd_index = 5;
   int32 trigger_fd_index = 6;
   int32 poll_fd_index = 7;
   int32 slot_size = 8; // Might be zero if no publisher.
@@ -72,6 +73,7 @@ message CreateSubscriberResponse {
   repeated int32 reliable_pub_trigger_fd_indexes = 10;
   int32 num_pub_updates = 11;
   bytes type = 12;
+  int32 vchan_id = 13;
 }
 
 message GetTriggersRequest { string channel_name = 1; }
@@ -96,26 +98,6 @@ message RemoveSubscriberRequest {
 
 message RemoveSubscriberResponse { string error = 1; }
 
-message ResizeRequest {
-  string channel_name = 1;
-  int32 new_slot_size = 2;
-}
-
-message ResizeResponse {
-  string error = 1;  
-  repeated BufferInfo buffers = 2;
-  int32 slot_size = 3;    // Will be equal to new_slot_size if success.
-}
-
-message GetBuffersRequest {
-  string channel_name = 1;
-}
-
-message GetBuffersResponse {
-  string error = 1;
-  repeated BufferInfo buffers = 2;
-}
-
 message Request {
   oneof request {
     InitRequest init = 1;
@@ -124,8 +106,6 @@ message Request {
     GetTriggersRequest get_triggers = 4;
     RemovePublisherRequest remove_publisher = 5;
     RemoveSubscriberRequest remove_subscriber = 6;
-    ResizeRequest resize = 7;
-    GetBuffersRequest get_buffers = 8;
   }
 }
 
@@ -137,8 +117,6 @@ message Response {
     GetTriggersResponse get_triggers = 4;
     RemovePublisherResponse remove_publisher = 5;
     RemoveSubscriberResponse remove_subscriber = 6;
-    ResizeResponse resize = 7;
-    GetBuffersResponse get_buffers = 8;
   }
 }
 
@@ -165,6 +143,8 @@ message ChannelStats {
   int32 num_slots = 5;
   int32 num_pubs = 6;
   int32 num_subs = 7;
+  uint32 max_message_size = 8;
+  uint32 total_drops = 9;
 }
 
 // This is published to the /subspace/Statistics channel.

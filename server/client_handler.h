@@ -1,4 +1,4 @@
-// Copyright 2023 David Allison
+// Copyright 2025 David Allison
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -55,12 +55,6 @@ private:
   void HandleRemoveSubscriber(const subspace::RemoveSubscriberRequest &req,
                               subspace::RemoveSubscriberResponse *response,
                               std::vector<toolbelt::FileDescriptor> &fds);
-  void HandleResize(const subspace::ResizeRequest &req,
-                    subspace::ResizeResponse *response,
-                    std::vector<toolbelt::FileDescriptor> &fds);
-  void HandleGetBuffers(const subspace::GetBuffersRequest &req,
-                        subspace::GetBuffersResponse *response,
-                        std::vector<toolbelt::FileDescriptor> &fds);
   Server *server_;
   toolbelt::UnixSocket socket_;
   char buffer_[kMaxMessage];

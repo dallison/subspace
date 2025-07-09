@@ -1,5 +1,5 @@
 
-// Copyright 2023 David Allison
+// Copyright 2025 David Allison
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -10,11 +10,14 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "common/atomic_bitset.h"
 #include "toolbelt/bitset.h"
 #include "toolbelt/fd.h"
+
+#include <atomic>
 #include <cstdint>
+#include <iostream>
 #include <memory>
-#include <pthread.h>
 #include <string>
 
 namespace subspace {
@@ -40,16 +43,23 @@ static constexpr size_t kMaxMessage = 4096;
 // not received and will not be written to.
 struct MessagePrefix {
   int32_t padding; // Padding for Socket::SendMessage.
-  int32_t message_size;
-  int64_t ordinal;
+  uint64_t message_size;
+  uint64_t ordinal;
   uint64_t timestamp;
   int64_t flags;
+  int32_t vchan_id;
+  char padding2[64 - 44]; // Align to 64 bytes.
 };
+
+static_assert(sizeof(MessagePrefix) == 64,
+              "MessagePrefix size is not 64 bytes");
 
 // Flag for flags field in MessagePrefix.
 constexpr int kMessageActivate = 1; // This is a reliable activation message.
 constexpr int kMessageBridged = 2;  // This message came from the bridge.
-constexpr int kMessageSeen = 4;     // Message has been seen.
+
+// Flags for MessageSlot flags.
+constexpr int kMessageSeen = 1; // Message has been seen.
 
 // We need a max channels number because the size of things in
 // shared memory needs to be fixed.
@@ -60,10 +70,61 @@ constexpr int kMaxChannels = 1024;
 // it's used as the size in a toolbelt::BitSet.
 constexpr int kMaxSlotOwners = 1024;
 
+// This limits the number of virtual channels.  Each virtual channel
+// needs its own ordinal counter in the CCB (8 bytes each).
+// This is stored in the refs field as a 10-bit value.  If all bits are set
+// this indicates -1 (no vchan_id).
+constexpr int kMaxVchanId = 1023;
+
 // Max length of a channel name in shared memory.  A name longer
 // this this will be truncated but the full name will be available
 // in process memory.
 constexpr size_t kMaxChannelName = 64;
+
+constexpr size_t kMaxBuffers = 1024;
+
+// Ref count bits.
+constexpr uint64_t kRefCountMask = 0x3ff;
+constexpr uint64_t kRefCountShift = 10;
+constexpr uint64_t kReliableRefCountShift = 10;
+constexpr uint64_t kPubOwned = 1ULL << 63;
+constexpr uint64_t kRefsMask = (1ULL << 20) - 1; // 20 bits
+constexpr uint64_t kReliableRefsMask = ((1ULL << 10) - 1)
+                                       << kReliableRefCountShift;
+constexpr uint64_t kRetiredRefsSize = 10;
+constexpr uint64_t kRetiredRefsMask = (1ULL << kRetiredRefsSize) - 1;
+constexpr uint64_t kRetiredRefsShift = 20;
+
+// Virtual channel ID is just above retired refs and is 10 bits long.
+constexpr uint64_t kVchanIdShift = kRetiredRefsShift + kRetiredRefsSize;
+constexpr uint64_t kVchanIdSize = 10;
+constexpr uint64_t kVchanIdMask = (1ULL << kVchanIdSize) - 1;
+
+// We put the bottom 23 bits of the ordinal just above the
+// vchan ID field.  This is to ensure that a publisher
+// hasn't published another message in the slot before a subscriber
+// increments the ref count.
+constexpr uint64_t kOrdinalSize = 23;
+constexpr uint64_t kOrdinalMask = (1ULL << kOrdinalSize) - 1;
+constexpr uint64_t kOrdinalShift = 40;
+
+// Combine an ordinal and a vchan_id into a single 64 bit field, shifted
+// to the correct position for the refs field.
+inline uint64_t BuildRefsBitField(uint64_t ordinal, int vchan_id,
+                                  int retired_refs) {
+  return ((ordinal & kOrdinalMask) << kOrdinalShift) |
+         (ordinal == 0 ? 0 : ((vchan_id & kVchanIdMask) << kVchanIdShift)) |
+         ((retired_refs & kRetiredRefsMask) << kRetiredRefsShift);
+}
+std::string DecodedRefsBitField(uint64_t refs);
+
+// Aligned to given power of 2.
+template <int64_t alignment = 64> int64_t Aligned(int64_t v) {
+  return (v + (alignment - 1)) & ~(alignment - 1);
+}
+
+void *MapMemory(int fd, size_t size, int prot, const char *purpose);
+void UnmapMemory(void *p, size_t size, const char *purpose);
 
 // This is a global (to a server) structure in shared memory that holds
 // counts for the number of updates to publishers and subscribers on
@@ -74,7 +135,7 @@ constexpr size_t kMaxChannelName = 64;
 // descriptors are distributed by the server to clients.
 //
 // This is in shared memory, but it is only ever written by the
-// server so there is no lock required to access it in the clients.
+// server.
 struct ChannelCounters {
   uint16_t num_pub_updates;   // Number of updates to publishers.
   uint16_t num_sub_updates;   // Number of updates to subscribers.
@@ -84,77 +145,83 @@ struct ChannelCounters {
   uint16_t num_reliable_subs; // Current number of reliable subscribers.
 };
 
-// ChannelLock locks a channel and also handles reload races where
-// another client has changed the channel's buffers while we
-// were waiting for the lock.  If the 'reload' function returns
-// true, the buffers have been changed and we have mapped
-// them in.  We all reload in a loop because we need to unlock
-// the channel while we talk to the server and another client could
-// get in and change the buffers while we are not looking.
-class ChannelLock {
-public:
-  ChannelLock(pthread_mutex_t *lock,
-              std::function<bool(ChannelLock *lock)> reload = nullptr)
-      : lock_(lock), reload_(std::move(reload)) {
-    Lock();
-    if (reload_ != nullptr) {
-      // This will look to see if a reload is needed and if so,
-      // unlock the channel, talk to the server and map in the
-      // new buffers.  The lock is reacquired before it returns.
-      while (reload_(this)) {
-        // Nothing to do, just try reloading again.
-      }
-    }
-  }
-
-  ~ChannelLock() { Unlock(); }
-
-  void Lock() { pthread_mutex_lock(lock_); }
-  void Unlock() { pthread_mutex_unlock(lock_); }
-
-private:
-  pthread_mutex_t *lock_;
-  std::function<bool(ChannelLock *)> reload_;
-};
-
 struct SystemControlBlock {
   ChannelCounters counters[kMaxChannels];
 };
 
-// Message slots are held in a double linked list, each element of
-// which is a SlotListElement (embedded at offset 0 in the MessageSlot
-// struct in shared memory).  The linked lists do not use pointers
-// because this is in shared memory mapped at different virtual
-// addresses in each client.  Instead they use an offset from the
-// start of the ChannelControlBlock (CCB) as a pointer.
-struct SlotListElement {
-  int32_t prev;
-  int32_t next;
-};
-
-// Double linked list header in shared memory.
-struct SlotList {
-  int32_t first;
-  int32_t last;
-};
-
-// This is the meta data for a slot.  It is always in a linked list.
+// This is the meta data for a slot.
 struct MessageSlot {
-  SlotListElement element;
+  std::atomic<uint64_t> refs; // Number of subscribers referring to this slot.
+  uint64_t ordinal;           // Message ordinal held currently in slot.
+  uint64_t message_size;      // Size of message held in slot.
   int32_t id;                 // Unique ID for slot (0...num_slots-1).
-  int16_t ref_count;          // Number of subscribers referring to this slot.
-  int16_t reliable_ref_count; // Number of reliable subscriber references.
-  int64_t ordinal;            // Message ordinal held currently in slot.
-  int64_t message_size;       // Size of message held in slot.
-  int32_t buffer_index;       // Index of buffer.
-  toolbelt::BitSet<kMaxSlotOwners> owners; // One bit per publisher/subscriber.
+  int16_t buffer_index;       // Index of buffer.
+  int16_t vchan_id;           // Virtual channel ID.
+  AtomicBitSet<kMaxSlotOwners> sub_owners; // One bit per subscriber.
+  uint64_t timestamp;                      // Timestamp of message.
+  uint32_t flags;
+
+  void Dump(std::ostream &os) const;
 };
 
-// This is located just before the prefix of the first slot's buffer.  It
-// is 64 bits long to align the prefix to 64 bits.
-struct BufferHeader {
-  int32_t refs;    // Number of references to this buffer.
-  int32_t padding; // Align to 64 bits.
+struct ActiveSlot {
+  MessageSlot *slot;
+  uint64_t ordinal;
+  uint64_t timestamp;
+  int vchan_id;
+};
+
+struct BufferControlBlock {
+  std::atomic<int32_t>
+      refs[kMaxBuffers]; // Number of references to this buffer.
+  std::atomic<uint64_t>
+      sizes[kMaxBuffers]; // Number of references to this buffer.
+};
+
+// This counts the number of subscribers given a virtual channel id.
+class SubscriberCounter {
+public:
+  void AddSubscriber(int vchan_id) { num_subs_[vchan_id + 1]++; }
+
+  void RemoveSubscriber(int vchan_id) { num_subs_[vchan_id + 1]--; }
+
+  // If vchan_id is valid we also count the number of subscribers to the
+  // multiplexer itself.
+  int NumSubscribers(int vchan_id) {
+    int n = num_subs_[0];
+    if (vchan_id == -1) {
+      return n;
+    }
+    return n + num_subs_[vchan_id + 1];
+  }
+
+private:
+  // Vchan ID -1 means invalid vchan ID so we just use element 0 for that.
+  std::array<int, kMaxVchanId + 1> num_subs_ = {};
+};
+
+class OrdinalAccumulator {
+public:
+  void Init() {
+    for (int i = 0; i < kMaxVchanId + 1; i++) {
+      ordinals_[i] = 1;
+    }
+  }
+  uint64_t Next(int vchan_id) { return ordinals_[vchan_id + 1]++; }
+
+private:
+  std::array<uint64_t, kMaxVchanId + 1> ordinals_ = {};
+};
+
+class ActivationTracker {
+public:
+  void Activate(int vchan_id) { activations_.Set(vchan_id + 1); }
+  bool IsActivated(int vchan_id) const {
+    return activations_.IsSet(vchan_id + 1);
+  }
+
+private:
+  AtomicBitSet<kMaxVchanId + 1> activations_; // One bit per vchan_id.
 };
 
 // The control data for a channel.  This memory is
@@ -167,30 +234,41 @@ struct ChannelControlBlock {          // a.k.a CCB
   char channel_name[kMaxChannelName]; // So that you can see the name in a
                                       // debugger or hexdump.
   int num_slots;
-  int64_t next_ordinal; // Next ordinal to use.
-  int buffer_index;     // Which buffer in buffers array to use.
-  int num_buffers;      // Size of buffers array in shared memory.
+  OrdinalAccumulator ordinals; // Ordinal accumulator for virtual channels.
+  ActivationTracker activation_tracker; // Tracks which vchan_ids have been
+                                        // activated by a publisher.
+  int buffer_index;                     // Which buffer in buffers array to use.
+  std::atomic<int> num_buffers; // Size of buffers array in shared memory.
+  AtomicBitSet<kMaxSlotOwners> subscribers; // One bit per subscriber.
+
+  // Given a subscriber ID, what is the vchan ID associated with it.
+  std::array<int16_t, kMaxSlotOwners> sub_vchan_ids;
+
+  SubscriberCounter num_subs;
 
   // Statistics counters.
-  int64_t total_bytes;
-  int64_t total_messages;
-
-  // Slot lists.
-  // Active list: slots with active messages in them.
-  // Busy list: slots allocated to publishers
-  // Free list: slots not allocated.
-  SlotList active_list;
-  SlotList busy_list;
-  SlotList free_list;
-
-  pthread_mutex_t lock; // Lock for this channel only.
+  std::atomic<uint64_t> total_bytes;
+  std::atomic<uint64_t> total_messages;
+  std::atomic<uint32_t> max_message_size;
+  std::atomic<uint32_t> total_drops;
 
   // Variable number of MessageSlot structs (num_slots long).
   MessageSlot slots[0];
+  // Followed by:
+  // AtomicBitSet<0> retiredSlots[num_slots];
+  // Followed by:
+  // AtomicBitSet<0> availableSlots[kMaxSlotOwners];
 };
 
-absl::StatusOr<SystemControlBlock *>
-CreateSystemControlBlock(toolbelt::FileDescriptor &fd);
+inline size_t AvailableSlotsSize(int num_slots) {
+  return SizeofAtomicBitSet(num_slots) * kMaxSlotOwners;
+}
+
+inline size_t CcbSize(int num_slots) {
+  return Aligned(sizeof(ChannelControlBlock) +
+                 num_slots * sizeof(MessageSlot)) +
+         Aligned(SizeofAtomicBitSet(num_slots)) + AvailableSlotsSize(num_slots);
+}
 
 struct SlotBuffer {
   SlotBuffer(int32_t slot_sz) : slot_size(slot_sz) {}
@@ -205,36 +283,25 @@ struct SlotBuffer {
 // buffers: message buffer memory.
 struct SharedMemoryFds {
   SharedMemoryFds() = default;
-  SharedMemoryFds(toolbelt::FileDescriptor ccb_fd, std::vector<SlotBuffer> bufs)
-      : ccb(std::move(ccb_fd)), buffers(std::move(bufs)) {}
+  SharedMemoryFds(toolbelt::FileDescriptor ccb_fd,
+                  toolbelt::FileDescriptor bcb_fd)
+      : ccb(std::move(ccb_fd)), bcb(std::move(bcb_fd)) {}
   SharedMemoryFds(const SharedMemoryFds &) = delete;
 
   SharedMemoryFds(SharedMemoryFds &&c) {
     ccb = std::move(c.ccb);
-    buffers = std::move(c.buffers);
+    bcb = std::move(c.bcb);
   }
   SharedMemoryFds &operator=(const SharedMemoryFds &) = delete;
 
   SharedMemoryFds &operator=(SharedMemoryFds &&c) {
     ccb = std::move(c.ccb);
-    buffers = std::move(c.buffers);
+    bcb = std::move(c.bcb);
     return *this;
   }
 
-  toolbelt::FileDescriptor ccb;    // Channel Control Block.
-  std::vector<SlotBuffer> buffers; // Message Buffers.
-};
-
-// Aligned to given power of 2.
-template <int64_t alignment> int64_t Aligned(int64_t v) {
-  return (v + (alignment - 1)) & ~(alignment - 1);
-}
-
-struct BufferSet {
-  BufferSet() = default;
-  BufferSet(int32_t slot_sz, char *buf) : slot_size(slot_sz), buffer(buf) {}
-  int32_t slot_size = 0;
-  char *buffer = nullptr;
+  toolbelt::FileDescriptor ccb; // Channel Control Block.
+  toolbelt::FileDescriptor bcb; // Buffer Control Block.
 };
 
 // This is the representation of a channel as seen by a publisher
@@ -255,34 +322,24 @@ class Channel : public std::enable_shared_from_this<Channel> {
 public:
   struct PublishedMessage {
     MessageSlot *new_slot;
-    int64_t ordinal;
+    uint64_t ordinal;
     uint64_t timestamp;
   };
 
   Channel(const std::string &name, int num_slots, int channel_id,
           std::string type);
-  ~Channel() { Unmap(); }
+  virtual ~Channel() { Unmap(); }
 
-  // Allocate the shared memory for a channel.  The num_slots_
-  // and slot_size_ member variables will either be 0 (for a subscriber
-  // to channel with no publishers), or will contain the channel
-  // size parameters.  Unless there's an error, it returns the
-  // file descriptors for the allocated CCB and buffers.  The
-  // SCB has already been allocated and will be mapped in for
-  // this channel.  This is only used in the server.
-  absl::StatusOr<SharedMemoryFds>
-  Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
-           int num_slots);
-
-  // Client-side channel mapping.  The SharedMemoryFds contains the
-  // file descriptors for the CCB and buffers.  The num_slots_
-  // member variable contains either 0 or the
-  // channel size parameters.
-  absl::Status Map(SharedMemoryFds fds, const toolbelt::FileDescriptor &scb_fd);
-  void Unmap();
+  virtual void Unmap();
 
   const std::string &Name() const { return name_; }
 
+  virtual std::string ResolvedName() const = 0;
+
+#if defined(__APPLE__)
+  absl::StatusOr<std::string>
+  MacOsSharedMemoryName(const std::string &shadow_file);
+#endif
   // For debug, prints the contents of the three linked lists in
   // shared memory,
   void PrintLists() const;
@@ -291,126 +348,42 @@ public:
   // no publishers and thus the shared memory is not yet valid.
   bool IsPlaceholder() const { return NumSlots() == 0; }
 
-  // What is the address of the message buffer (after the MessagePrefix)
-  // for the slot given a slot id.
-  void *GetBufferAddress(int slot_id) const {
-    return Buffer(slot_id) +
-           (sizeof(MessagePrefix) + Aligned<32>(SlotSize(slot_id))) * slot_id +
-           sizeof(MessagePrefix);
-  }
+  void ReloadIfNecessary(const std::function<bool()> &reload);
 
-  // Gets the address for the message buffer given a slot pointer.
-  void *GetBufferAddress(MessageSlot *slot) const {
-    if (slot == nullptr) {
-      return nullptr;
+  std::string BufferSharedMemoryName(uint64_t session_id,
+                                     int buffer_index) const;
+
+  void RegisterSubscriber(int sub_id, int vchan_id, bool is_new) {
+    ccb_->subscribers.Set(sub_id);
+    ccb_->sub_vchan_ids[sub_id] = vchan_id;
+    if (is_new) {
+      ccb_->num_subs.AddSubscriber(vchan_id);
     }
-    return Buffer(slot->id) +
-           (sizeof(MessagePrefix) + Aligned<32>(SlotSize(slot->id))) *
-               slot->id +
-           sizeof(MessagePrefix);
   }
 
-  // Find a free slot to use.  This will come from the free list if there
-  // is a free slot.  Otherwise it will search for the first unreferenced slot
-  // in the active list.  If reliable is true, the search will not go past
-  // a slot with a reliable_ref_count > 0.  The owner is the ID of the
-  // subscriber or publisher, allocated by the server.
-  //
-  // This locks the CCB.
-  MessageSlot *FindFreeSlot(bool reliable, int owner,
-                            std::function<bool(ChannelLock *)> reload);
+  void DumpSlots(std::ostream &os) const;
+  virtual void Dump(std::ostream &os) const;
 
-  // A publisher is done with its busy slot (it now contains a message).  The
-  // slot is moved from the busy list to the end of the active list and other
-  // slot is obtained, unless reliable is set to true.  The new slot
-  // is returned and this will be nullptr if reliable is true (reliable
-  // publishers get a new slot later).  The function fills in the
-  // MessagePrefix.
-  //
-  // The args are:
-  // reliable: this is for a reliable publisher, so don't allocate a new slot
-  // is_activation: this is an activation message for a reliable publisher
-  // owner: the ID of the publisher
-  // omit_prefix: don't fill in the MessagePrefix (used when a message
-  //              is read from the bridge)
-  // notify: set to true if we should notify the subscribers.
-  //
-  // Locks the CCB.
-  PublishedMessage
-  ActivateSlotAndGetAnother(MessageSlot *slot, bool reliable,
-                            bool is_activation, int owner, bool omit_prefix,
-                            bool *notify,
-                            std::function<bool(ChannelLock *)> reload);
-
-  // A subscriber wants to find a slot with a message in it.  There are
-  // two ways to get this:
-  // NextSlot: gets the next slot in the active list
-  // LastSlot: gets the last slot in the active list.
-  // Can return nullptr if there is no slot.
-  // If reliable is true, the reliable_ref_count in the MessageSlot will
-  // be manipulated.  The owner is the subscriber ID.
-  //
-  // Locks the CCB.
-  MessageSlot *NextSlot(MessageSlot *slot, bool reliable, int owner,
-                        std::function<bool(ChannelLock *)> reload);
-  MessageSlot *LastSlot(MessageSlot *slot, bool reliable, int owner,
-                        std::function<bool(ChannelLock *)> reload);
-
-  // Get a pointer to the MessagePrefix for a given slot.
-  MessagePrefix *Prefix(MessageSlot *slot) const {
-    MessagePrefix *p = reinterpret_cast<MessagePrefix *>(
-        Buffer(slot->id) +
-        (sizeof(MessagePrefix) + Aligned<32>(SlotSize(slot->id))) * slot->id);
-    return p;
-  }
-
-  absl::StatusOr<toolbelt::FileDescriptor> ExtendBuffers(int32_t new_slot_size);
-
-  void Dump() const;
-
-  // NOTE: these functions access the CCB without locking.  They only access
-  // the buffer_index member of the MessageSlot and that is only updated by the
-  // the publisher when it calls ClaimSlot and inserts the slot into the active
-  // list.
-
-  // Get the size associated with the given slot id.
-  int SlotSize(int slot_id) const {
-    return buffers_.empty()
-               ? 0
-               : buffers_[ccb_->slots[slot_id].buffer_index].slot_size;
-  }
-
-  int SlotSize(MessageSlot *slot) const {
-    if (slot == nullptr) {
+  uint64_t BufferSizeToSlotSize(uint64_t size) const {
+    if (size < NumSlots() * sizeof(MessagePrefix)) {
       return 0;
     }
-    return buffers_.empty()
-               ? 0
-               : buffers_[ccb_->slots[slot->id].buffer_index].slot_size;
-  }
-  // Get the biggest slot size for the channel.
-  int SlotSize() const {
-    return buffers_.empty() ? 0 : buffers_.back().slot_size;
+    return (size - NumSlots() * sizeof(MessagePrefix)) / NumSlots();
+  };
+
+  uint64_t SlotSizeToBufferSize(uint64_t slot_size) const {
+    return NumSlots() * (slot_size + sizeof(MessagePrefix));
   }
 
   // Get the number of slots in the channel (can't be changed)
   int NumSlots() const { return num_slots_; }
   void SetNumSlots(int n) { num_slots_ = n; }
 
-  // Get the buffer associated with the given slot id.  The first buffer
-  // starts immediately after the buffer header.
-  char *Buffer(int slot_id) const {
-    int index = ccb_->slots[slot_id].buffer_index;
-    if (index < 0 || index >= buffers_.size()) {
-      std::cerr << "Invalid buffer index for slot " << slot_id << ": " << index
-                << std::endl;
-      abort();
-    }
-    return buffers_.empty() ? nullptr
-                            : (buffers_[index].buffer + sizeof(BufferHeader));
+  void CleanupSlots(int owner, bool reliable, bool is_pub, int vchan_id);
+
+  int NumSubscribers(int vchan_id) const {
+    return ccb_->num_subs.NumSubscribers(vchan_id);
   }
-  void CleanupSlots(int owner, bool reliable);
-  void UnmapUnusedBuffers();
 
   int GetChannelId() const { return channel_id_; }
 
@@ -422,39 +395,51 @@ public:
   SystemControlBlock *GetScb() const { return scb_; }
   ChannelControlBlock *GetCcb() const { return ccb_; }
 
-  // Gets the statistics counters.  Locks the CCB.
-  void GetStatsCounters(int64_t &total_bytes, int64_t &total_messages);
+  // Gets the statistics counters.
+  void GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
+                        uint32_t &max_message_size, uint32_t &total_drops);
 
-  bool LockForSharedInternal(MessageSlot *slot, int64_t ordinal, bool reliable);
   void SetDebug(bool v) { debug_ = v; }
 
-  // Search the active list for a message with the given timestamp.  If found,
-  // move the owner to the slot found.  Return nullptr if nothing found in which
-  // no slot ownership changes are done.  This uses the memory inside buffer
-  // to perform a fast search of the slots.  The caller keeps onership of the
-  // buffer, but this function will modify it.  This is to avoid memory
-  // allocation for every search or buffer allocation for every subscriber when
-  // searches are rare.
-  MessageSlot *
-  FindActiveSlotByTimestamp(MessageSlot *old_slot, uint64_t timestamp,
-                            bool reliable, int owner,
-                            std::vector<MessageSlot *> &buffer,
-                            std::function<bool(ChannelLock *)> reload);
+  bool AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
+                         uint64_t ordinal, int vchan_id, bool retire);
 
   void SetType(std::string type) { type_ = std::move(type); }
   const std::string Type() const { return type_; }
 
-  bool BuffersChanged() const {
-    return ccb_->num_buffers != static_cast<int>(buffers_.size());
+  std::string_view TypeView() const { return type_; }
+
+  char *EndOfSlots() const {
+    return reinterpret_cast<char *>(ccb_) +
+           Aligned(sizeof(ChannelControlBlock) +
+                   num_slots_ * sizeof(MessageSlot));
+  }
+  char *EndOfRetiredSlots() const {
+    return EndOfSlots() + Aligned(SizeofAtomicBitSet(num_slots_));
   }
 
-  absl::Status MapNewBuffers(std::vector<SlotBuffer> buffers);
+  InPlaceAtomicBitset *RetiredSlotsAddr() {
+    return reinterpret_cast<InPlaceAtomicBitset *>(EndOfSlots());
+  }
 
-  void SetSlotToBiggestBuffer(MessageSlot *slot);
+  InPlaceAtomicBitset &RetiredSlots() {
+    return *reinterpret_cast<InPlaceAtomicBitset *>(EndOfSlots());
+  }
 
-  const std::vector<BufferSet> &GetBuffers() const { return buffers_; }
+  InPlaceAtomicBitset &GetAvailableSlots(int sub_id) {
+    return *GetAvailableSlotsAddress(sub_id);
+  }
 
-private:
+  InPlaceAtomicBitset *GetAvailableSlotsAddress(int sub_id) {
+    return reinterpret_cast<InPlaceAtomicBitset *>(
+        EndOfRetiredSlots() + SizeofAtomicBitSet(num_slots_) * sub_id);
+  }
+
+  bool IsActivated(int vchan_id) const {
+    return ccb_->activation_tracker.IsActivated(vchan_id);
+  }
+
+protected:
   int32_t ToCCBOffset(void *addr) const {
     return (int32_t)(reinterpret_cast<char *>(addr) -
                      reinterpret_cast<char *>(ccb_));
@@ -463,53 +448,6 @@ private:
   void *FromCCBOffset(int32_t offset) const {
     return reinterpret_cast<char *>(ccb_) + offset;
   }
-
-  void ListInsertAtEnd(SlotList *list, SlotListElement *e) {
-    int32_t offset = ToCCBOffset(e);
-    if (list->last == 0) {
-      list->first = list->last = offset;
-    } else {
-      SlotListElement *last =
-          reinterpret_cast<SlotListElement *>(FromCCBOffset(list->last));
-      last->next = offset;
-      e->prev = list->last;
-      list->last = offset;
-    }
-  }
-
-  static void ListInit(SlotList *list) { list->first = list->last = 0; }
-
-  static void ListElementInit(SlotListElement *e) { e->prev = e->next = 0; }
-
-  void ListRemove(SlotList *list, SlotListElement *e) {
-    if (e->prev == 0) {
-      list->first = e->next;
-    } else {
-      SlotListElement *prev =
-          reinterpret_cast<SlotListElement *>(FromCCBOffset(e->prev));
-      prev->next = e->next;
-    }
-    if (e->next == 0) {
-      list->last = e->prev;
-    } else {
-      SlotListElement *next =
-          reinterpret_cast<SlotListElement *>(FromCCBOffset(e->next));
-      next->prev = e->prev;
-    }
-    e->prev = e->next = 0;
-  }
-
-  void PrintList(const SlotList *list) const;
-
-  void AddToBusyList(MessageSlot *slot) {
-    ListInsertAtEnd(&ccb_->busy_list, &slot->element);
-  }
-  void AddToActiveList(MessageSlot *slot) {
-    ListInsertAtEnd(&ccb_->active_list, &slot->element);
-  }
-  MessageSlot *FindFreeSlotLocked(bool reliable, int owner);
-
-  void ClaimPublisherSlot(MessageSlot *slot, int owner, SlotList &list);
 
   void DecrementBufferRefs(int buffer_index);
   void IncrementBufferRefs(int buffer_index);
@@ -524,7 +462,7 @@ private:
 
   SystemControlBlock *scb_ = nullptr;
   ChannelControlBlock *ccb_ = nullptr;
-  std::vector<BufferSet> buffers_;
+  BufferControlBlock *bcb_ = nullptr;
   bool debug_ = false;
 };
 
