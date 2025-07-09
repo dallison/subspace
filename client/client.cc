@@ -503,8 +503,10 @@ absl::Status ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
   return absl::OkStatus();
 }
 
-absl::StatusOr<int> ClientImpl::WaitForReliablePublisher(
-    PublisherImpl *publisher, toolbelt::FileDescriptor &fd, co::Coroutine *c) {
+absl::StatusOr<int>
+ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
+                                     const toolbelt::FileDescriptor &fd,
+                                     co::Coroutine *c) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -574,9 +576,10 @@ absl::Status ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
   return absl::OkStatus();
 }
 
-absl::StatusOr<int> ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
-                                                  toolbelt::FileDescriptor &fd,
-                                                  co::Coroutine *c) {
+absl::StatusOr<int>
+ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
+                              const toolbelt::FileDescriptor &fd,
+                              co::Coroutine *c) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }

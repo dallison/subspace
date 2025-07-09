@@ -214,6 +214,11 @@ int subspace_get_subscriber_num_slots(SubspaceSubscriber subscriber);
 // until a message is available.
 bool subspace_wait_for_subscriber(SubspaceSubscriber subscriber);
 
+// Waits with an additional file descriptor that can be used to interrupt the
+// wait.  Returns the integer fd value of the file descriptor that triggered
+// the wait.  Returns -1 on error.
+int subspace_wait_for_subscriber_with_fd(SubspaceSubscriber subscriber, int fd);
+
 bool subspace_register_subscriber_callback(SubspaceSubscriber subscriber,
                                            void (*callback)(SubspaceSubscriber,
                                                             SubspaceMessage));
@@ -248,8 +253,14 @@ const SubspaceMessage subspace_publish_message(SubspacePublisher publisher,
 
 // Reliable publishers that cannot send a message at the present time can be
 // waited for using this function.  It will block until the publisher is able to
-// send a message.
+// send a message.  Returns -1 on error.
 bool subspace_wait_for_publisher(SubspacePublisher publisher);
+
+// Waits with an additional file descriptor that can be used to interrupt the
+// wait.  Returns the integer fd value of the file descriptor that triggered
+// the wait.
+int subspace_wait_for_publisher_with_fd(SubspacePublisher publisher, int fd);
+
 struct pollfd subspace_get_publisher_poll_fd(SubspacePublisher publisher);
 int subspace_get_publisher_fd(SubspacePublisher publisher);
 

@@ -236,7 +236,7 @@ private:
   // the function will block on a poll until the publisher is triggered.
   absl::StatusOr<int>
   WaitForReliablePublisher(details::PublisherImpl *publisher,
-                           toolbelt::FileDescriptor &fd,
+                           const toolbelt::FileDescriptor &fd,
                            co::Coroutine *c = nullptr);
 
   // Wait until there's a message available to be read by the
@@ -251,7 +251,7 @@ private:
   // will wait.  If it's not, the function will block on a poll
   // until the subscriber is triggered.
   absl::StatusOr<int> WaitForSubscriber(details::SubscriberImpl *subscriber,
-                                        toolbelt::FileDescriptor &fd,
+                                        const toolbelt::FileDescriptor &fd,
                                         co::Coroutine *c = nullptr);
 
   // Read a message from a subscriber.  If there are no available messages
@@ -495,7 +495,7 @@ public:
   // This also takes an additional file descriptor that can be used to interrupt
   // the wait.  Returns the integer fd value of the file descriptor that
   // triggered the wait.
-  absl::StatusOr<int> Wait(toolbelt::FileDescriptor &fd,
+  absl::StatusOr<int> Wait(const toolbelt::FileDescriptor &fd,
                            co::Coroutine *c = nullptr) {
     return client_->WaitForReliablePublisher(impl_.get(), fd, c);
   }
@@ -611,7 +611,7 @@ public:
   // This also takes an additional file descriptor that can be used to interrupt
   // the wait.  Returns the integer fd value of the file descriptor that
   // triggered the wait.
-  absl::StatusOr<int> Wait(toolbelt::FileDescriptor &fd,
+  absl::StatusOr<int> Wait(const toolbelt::FileDescriptor &fd,
                            co::Coroutine *c = nullptr) {
     return client_->WaitForSubscriber(impl_.get(), fd, c);
   }
