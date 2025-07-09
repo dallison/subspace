@@ -684,20 +684,20 @@ TEST_F(StressTest, VirtualChannels) {
   ASSERT_OK(s);
   int pipes[2];
   ASSERT_EQ(0, pipe(pipes));
+  toolbelt::FileDescriptor rfd(pipes[0]);
 
   // Thread to read messages from the mux.
-  std::thread sub_thread([&s, pipes]() {
+  std::thread sub_thread([&s, pipes, &rfd]() {
     int num_messages = 0;
     while (num_messages < kNumMessages) {
       // Wait for notification of a message.
-      struct pollfd fds[2];
-      fds[0] = s->GetPollFd();
-      fds[1] = {.fd = pipes[0], .events = POLLIN};
-      int e = ::poll(fds, 2, -1);
-      ASSERT_GT(e, 0);
-      if (fds[1].revents & POLLIN) {
-        break;
+      absl::StatusOr<int> waitStatus = s->Wait(rfd);
+      ASSERT_OK(waitStatus);
+      if (*waitStatus == pipes[0]) {
+        // We got a notification from the pipe, so we can read messages.
+        continue;
       }
+
       // Read all available messages.
       for (;;) {
         absl::StatusOr<Message> m = s->ReadMessage();

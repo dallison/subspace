@@ -503,6 +503,51 @@ absl::Status ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
   return absl::OkStatus();
 }
 
+absl::StatusOr<int> ClientImpl::WaitForReliablePublisher(
+    PublisherImpl *publisher, toolbelt::FileDescriptor &fd, co::Coroutine *c) {
+  if (absl::Status status = CheckConnected(); !status.ok()) {
+    return status;
+  }
+  if (!publisher->IsReliable()) {
+    return absl::InternalError("Unreliable publishers can't wait");
+  }
+  // Check if there are any new subscribers and if so, load their trigger fds.
+  if (absl::Status status = ReloadSubscribersIfNecessary(publisher);
+      !status.ok()) {
+    return status;
+  }
+  int result = -1;
+  if (c != nullptr) {
+    result = c->Wait({publisher->GetPollFd().Fd(), fd.Fd()}, POLLIN);
+  } else if (co_ != nullptr) {
+    // Coroutine aware.  Yield control back until the poll fd is triggered.
+    co_->Wait({publisher->GetPollFd().Fd(), fd.Fd()}, POLLIN);
+  } else {
+    struct pollfd fds[2] = {
+        {.fd = publisher->GetPollFd().Fd(), .events = POLLIN},
+        {.fd = fd.Fd(), .events = POLLIN}};
+    int e = ::poll(fds, 2, -1);
+    // Since we are waiting forever will can only get the value 1 from the poll.
+    // We will never get 0 since there is no timeout.  Anything else (can only
+    // be -1) will be an error.
+    if (e <= 0) {
+      return absl::InternalError(
+          absl::StrFormat("Error from poll waiting for reliable publisher: %s",
+                          strerror(errno)));
+    }
+    if (fds[0].revents & POLLIN) {
+      result = fds[0].fd; // The publisher's poll fd triggered.
+    } else if (fds[1].revents & POLLIN) {
+      result = fds[1].fd; // The passed in fd triggered.
+    } else {
+      return absl::InternalError(
+          "Unexpected poll result, neither publisher nor passed in fd "
+          "triggered");
+    }
+  }
+  return result;
+}
+
 absl::Status ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
                                            co::Coroutine *c) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
@@ -527,6 +572,46 @@ absl::Status ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
     }
   }
   return absl::OkStatus();
+}
+
+absl::StatusOr<int> ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
+                                                  toolbelt::FileDescriptor &fd,
+                                                  co::Coroutine *c) {
+  if (absl::Status status = CheckConnected(); !status.ok()) {
+    return status;
+  }
+  int result = -1;
+  if (c != nullptr) {
+    // Coroutine aware.  Yield control back until the poll fd is triggered.
+    c->Wait({subscriber->GetPollFd().Fd(), fd.Fd()}, POLLIN);
+  } else if (co_ != nullptr) {
+    // Coroutine aware.  Yield control back until the poll fd is triggered.
+    co_->Wait({subscriber->GetPollFd().Fd(), fd.Fd()}, POLLIN);
+  } else {
+    struct pollfd fds[2] = {
+        {.fd = subscriber->GetPollFd().Fd(), .events = POLLIN},
+        {.fd = fd.Fd(), .events = POLLIN}};
+    int e = ::poll(fds, 2, -1);
+    // Since we are waiting forever will can only get the value 1 from the poll.
+    // We will never get 0 since there is no timeout.  Anything else (can only
+    // be -1) will be an error.
+    if (e <= 0) {
+      return absl::InternalError(absl::StrFormat(
+          "Error from poll waiting for subscriber: %s", strerror(errno)));
+    }
+    if (fds[0].revents & POLLIN) {
+      // The subscriber's poll fd triggered.
+      return fds[0].fd;
+    } else if (fds[1].revents & POLLIN) {
+      // The passed in fd triggered.
+      return fds[1].fd;
+    } else {
+      return absl::InternalError(
+          "Unexpected poll result, neither subscriber nor passed in fd "
+          "triggered");
+    }
+  }
+  return result;
 }
 
 absl::StatusOr<Message>
