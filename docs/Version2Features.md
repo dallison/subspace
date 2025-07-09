@@ -1,4 +1,4 @@
-# New features in Subspace Block 2
+# New features in Subspace version 2
 
 This version of Subspace contains a couple of new features that enhance the stability and usability.
 
@@ -123,3 +123,21 @@ Notice that the subscriber is created on the multiplexer channel name and does n
 
 If you are using a multi-computer system where messages are sent over a network between computers using a multiplexer subscriber (the most efficient way), it is probably best to determine the virtual channel ID vs channel name mapping ahead of time and apply the same mapping to all computers. 
 
+## Client side buffer allocations
+In version 1 the buffers for channels were allocated by the server and communicated to the client via
+a file descriptor.  This had the disadvantage that a resize operation was a round-trip to the server
+allowing the system to perform context switches and reducing performance.
+
+In version 2, the allocation of buffers is on the client and uses the file system as the namespace.
+On Linux it uses files in `/dev/shm` and on MacOs, the files are in `/tmp` and those map to shared
+memory segments held somewhere else not visible to the file system.
+
+This speeds up resize operations substantially and are now around 10 microseconds on a fast
+computer.  Also the variation in resize speed is greatly reduced.
+
+## C Client
+A new C-language client has been added.  This provides most of the functionality present
+in the C++ client with many fewer dependencies.  Being in C, it's more portable too.  It just
+maps onto the C++ client but provides C-linkage functions.
+
+This should be easier to map into other languages like Rust or Go in the future.
