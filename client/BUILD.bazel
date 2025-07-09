@@ -4,11 +4,19 @@ cc_library(
     name = "subspace_client",
     srcs = [
         "client.cc",
+        "message.cc",
+        "publisher.cc",
+        "subscriber.cc",
+                "client_channel.cc",
+
     ],
     hdrs = [
         "client.h",
         "client_channel.h",
+        "message.h",
         "options.h",
+        "publisher.h",
+        "subscriber.h",
     ],
     deps = [
         "//common:subspace_common",
@@ -25,6 +33,46 @@ cc_test(
     name = "client_test",
     size = "small",
     srcs = ["client_test.cc"],
+    data = [
+        "//server:subspace_server",
+    ],
+    deps = [
+        ":subspace_client",
+        "//server",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/flags:parse",
+        "@com_google_absl//absl/hash:hash_testing",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_googletest//:gtest",
+        "@coroutines//:co",
+    ],
+)
+
+cc_test(
+    name = "latency_test",
+    size = "small",
+    srcs = ["latency_test.cc"],
+    data = [
+        "//server:subspace_server",
+    ],
+    deps = [
+        ":subspace_client",
+        "//server",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/flags:parse",
+        "@com_google_absl//absl/hash:hash_testing",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_googletest//:gtest",
+        "@coroutines//:co",
+    ],
+)
+
+cc_test(
+    name = "stress_test",
+    size = "large",
+    srcs = ["stress_test.cc"],
     data = [
         "//server:subspace_server",
     ],

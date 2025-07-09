@@ -6,7 +6,9 @@ cc_library(
         "channel.cc",
     ],
     hdrs = [
+        "atomic_bitset.h",
         "channel.h",
+        "fast_ring_buffer.h",
     ],
     linkopts = select({
         "//:macos_x86_64": [],
@@ -24,5 +26,19 @@ cc_library(
         "@com_google_protobuf//:protobuf",
         "@coroutines//:co",
         "@toolbelt//toolbelt",
+    ],
+)
+
+cc_test(
+    name = "common_test",
+    size = "small",
+    srcs = [
+        "atomic_bitset.h",
+        "common_test.cc",
+        "fast_ring_buffer.h",
+    ],
+    deps = [
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_googletest//:gtest_main",
     ],
 )

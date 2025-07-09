@@ -1,4 +1,4 @@
-// Copyright 2023 David Allison
+// Copyright 2025 David Allison
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -70,18 +70,127 @@ class ClientImpl;
 
 namespace details {
 
+struct BufferSet {
+  BufferSet() = default;
+  BufferSet(uint64_t full_sz, uint64_t slot_sz, char *buf)
+      : full_size(full_sz), slot_size(slot_sz), buffer(buf) {}
+  uint64_t full_size = 0;
+  uint64_t slot_size = 0;
+  char *buffer = nullptr;
+};
+
 // This is a channel as seen by a client.  It's going to be either
 // a publisher or a subscriber, as defined as the subclasses.
 class ClientChannel : public Channel {
 public:
   ClientChannel(const std::string &name, int num_slots, int channel_id,
-                std::string type)
-      : Channel(name, num_slots, channel_id, std::move(type)) {}
+                int vchan_id, uint64_t session_id, std::string type)
+      : Channel(name, num_slots, channel_id, std::move(type)),
+        vchan_id_(vchan_id), session_id_(std::move(session_id)) {}
   virtual ~ClientChannel() = default;
   MessageSlot *CurrentSlot() const { return slot_; }
   const ChannelCounters &GetCounters() const {
     return GetScb()->counters[GetChannelId()];
   }
+
+  void Unmap() override;
+
+  void Dump(std::ostream &os) const override;
+
+  // Client-side channel mapping.  The SharedMemoryFds contains the
+  // file descriptors for the CCB and buffers.  The num_slots_
+  // member variable contains either 0 or the
+  // channel size parameters.
+  absl::Status Map(SharedMemoryFds fds, const toolbelt::FileDescriptor &scb_fd);
+
+  absl::Status MapNewBuffers(std::vector<SlotBuffer> buffers);
+  void UnmapUnusedBuffers();
+
+  int VirtualChannelId() const { return vchan_id_; }
+
+  // What is the address of the message buffer (after the MessagePrefix)
+  // for the slot given a slot id.
+  void *GetBufferAddress(int slot_id) const {
+    return Buffer(slot_id) +
+           (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot_id))) * slot_id +
+           sizeof(MessagePrefix);
+  }
+
+  // Gets the address for the message buffer given a slot pointer.
+  void *GetBufferAddress(MessageSlot *slot) const {
+    if (slot == nullptr) {
+      return nullptr;
+    }
+    return Buffer(slot->id) +
+           (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot->id))) *
+               slot->id +
+           sizeof(MessagePrefix);
+  }
+
+  // Get a pointer to the MessagePrefix for a given slot.
+  MessagePrefix *Prefix(MessageSlot *slot,
+                        const std::function<bool()> &reload) {
+    ReloadIfNecessary(reload);
+    MessagePrefix *p = reinterpret_cast<MessagePrefix *>(
+        Buffer(slot->id) +
+        (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot->id))) * slot->id);
+    return p;
+  }
+
+  MessagePrefix *Prefix(MessageSlot *slot) const {
+    MessagePrefix *p = reinterpret_cast<MessagePrefix *>(
+        Buffer(slot->id) +
+        (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot->id))) * slot->id);
+    return p;
+  }
+
+  // Get the size associated with the given slot id.
+  int SlotSize(int slot_id) const {
+    return buffers_.empty()
+               ? 0
+               : buffers_[ccb_->slots[slot_id].buffer_index]->slot_size;
+  }
+
+  int SlotSize(MessageSlot *slot) const {
+    if (slot == nullptr) {
+      return 0;
+    }
+    return buffers_.empty()
+               ? 0
+               : buffers_[ccb_->slots[slot->id].buffer_index]->slot_size;
+  }
+  // Get the biggest slot size for the channel.
+  int SlotSize() const {
+    return buffers_.empty() ? 0 : buffers_.back()->slot_size;
+  }
+
+  // Get the buffer associated with the given slot id.  The first buffer
+  // starts immediately after the buffer header.
+  char *Buffer(int slot_id, bool abort_on_range = true) const {
+    int index = ccb_->slots[slot_id].buffer_index;
+    if (index < 0 || index >= buffers_.size()) {
+      if (abort_on_range) {
+        // If the index is out of range, we have a problem.
+        // This should never happen.
+        std::cerr << "Invalid buffer index for slot " << slot_id << ": "
+                  << index << std::endl;
+        DumpSlots(std::cerr);
+        abort();
+      }
+      return nullptr;
+    }
+    return buffers_.empty() ? nullptr : (buffers_[index]->buffer);
+  }
+
+  bool BuffersChanged() const {
+    return ccb_->num_buffers != static_cast<int>(buffers_.size());
+  }
+
+  const std::vector<std::unique_ptr<BufferSet>> &GetBuffers() const {
+    return buffers_;
+  }
+
+  absl::Status AttachBuffers();
 
 protected:
   virtual bool IsSubscriber() const { return false; }
@@ -89,210 +198,38 @@ protected:
 
   void SetSlot(MessageSlot *slot) { slot_ = slot; }
   void *GetCurrentBufferAddress() { return GetBufferAddress(slot_); }
+  bool ValidateSlotBuffer(MessageSlot *slot, std::function<bool()> reload);
 
   void SetMessageSize(int64_t message_size) {
     slot_->message_size = message_size;
   }
 
+  bool IsVirtual() const { return vchan_id_ != -1; }
+
+  absl::StatusOr<toolbelt::FileDescriptor> CreateBuffer(int buffer_index,
+                                                        size_t size);
+  absl::StatusOr<toolbelt::FileDescriptor> OpenBuffer(int buffer_index);
+  absl::StatusOr<size_t> GetBufferSize(toolbelt::FileDescriptor &shm_fd,
+                                       int buffer_index) const;
+  absl::StatusOr<char *> MapBuffer(toolbelt::FileDescriptor &shm_fd,
+                                   size_t size, bool read_only);
+
+  std::string BufferSharedMemoryName(int buffer_index) const {
+    return Channel::BufferSharedMemoryName(session_id_, buffer_index);
+  }
+
+#if defined(__APPLE__)
+  absl::StatusOr<std::string>
+  CreateMacOSSharedMemoryFile(const std::string &filename, off_t size);
+#endif
+
 protected:
   MessageSlot *slot_ = nullptr; // Current slot.
+  int vchan_id_ = -1;           // Virtual channel ID.
+  uint64_t session_id_;
+  std::vector<std::unique_ptr<BufferSet>> buffers_ = {};
 };
 
-// This is a publisher.  It maps in the channel's memory and allows
-// messages to be published.
-class PublisherImpl : public ClientChannel {
-public:
-  PublisherImpl(const std::string &name, int num_slots, int channel_id,
-                int publisher_id, std::string type,
-                const PublisherOptions &options)
-      : ClientChannel(name, num_slots, channel_id, std::move(type)),
-        publisher_id_(publisher_id), options_(options) {}
-
-  bool IsReliable() const { return options_.IsReliable(); }
-  bool IsLocal() const { return options_.IsLocal(); }
-  bool IsFixedSize() const { return options_.IsFixedSize(); }
-
-private:
-  friend class ::subspace::ClientImpl;
-
-  bool IsPublisher() const override { return true; }
-
-  PublishedMessage
-  ActivateSlotAndGetAnother(bool reliable, bool is_activation, bool omit_prefix,
-                            bool *notify,
-                            std::function<bool(ChannelLock *)> reload) {
-    return Channel::ActivateSlotAndGetAnother(slot_, reliable, is_activation,
-                                              publisher_id_, omit_prefix,
-                                              notify, std::move(reload));
-  }
-  void ClearSubscribers() { subscribers_.clear(); }
-  void AddSubscriber(toolbelt::FileDescriptor fd) {
-    subscribers_.emplace_back(toolbelt::FileDescriptor(), std::move(fd));
-  }
-  size_t NumSubscribers() { return subscribers_.size(); }
-
-  void SetTriggerFd(toolbelt::FileDescriptor fd) {
-    trigger_.SetTriggerFd(std::move(fd));
-  }
-  void SetPollFd(toolbelt::FileDescriptor fd) {
-    trigger_.SetPollFd(std::move(fd));
-  }
-
-  toolbelt::FileDescriptor &GetPollFd() { return trigger_.GetPollFd(); }
-
-  void TriggerSubscribers() {
-    for (auto &fd : subscribers_) {
-      fd.Trigger();
-    }
-  }
-  int GetPublisherId() const { return publisher_id_; }
-
-  void ClearPollFd() { trigger_.Clear(); }
-
-  toolbelt::TriggerFd trigger_;
-  int publisher_id_;
-  std::vector<toolbelt::TriggerFd> subscribers_;
-  PublisherOptions options_;
-};
-
-// A subscriber reads messages from a channel.  It maps the channel
-// shared memory.
-class SubscriberImpl : public ClientChannel {
-public:
-  SubscriberImpl(const std::string &name, int num_slots, int channel_id,
-                 int subscriber_id, std::string type,
-                 const SubscriberOptions &options)
-      : ClientChannel(name, num_slots, channel_id, std::move(type)),
-        subscriber_id_(subscriber_id), options_(options) {
-    shared_ptr_refs_ =
-        std::make_unique<std::atomic<int>[]>(options.MaxSharedPtrs());
-    for (int i = 0; i < options.MaxSharedPtrs(); ++i) {
-      shared_ptr_refs_[i] = 0;
-    }
-  }
-
-  std::shared_ptr<SubscriberImpl> shared_from_this() {
-    return std::static_pointer_cast<SubscriberImpl>(
-        Channel::shared_from_this());
-  }
-
-  int64_t CurrentOrdinal() const {
-    return CurrentSlot() == nullptr ? -1 : CurrentSlot()->ordinal;
-  }
-  int64_t Timestamp() const {
-    return CurrentSlot() == nullptr ? 0 : Prefix(CurrentSlot())->timestamp;
-  }
-  bool IsReliable() const { return options_.IsReliable(); }
-
-  int32_t SlotSize() const { return Channel::SlotSize(CurrentSlot()); }
-
-  // We need another shared ptr.  Find a free reference and return
-  // an index.  We have already checked that there is room so this
-  // can never fail.
-  size_t AllocateSharedPtr() {
-    for (size_t i = 0; i < size_t(MaxSharedPtrs()); ++i) {
-      int zero = 0;
-      if (shared_ptr_refs_[i].compare_exchange_strong(zero, 1)) {
-        num_shared_ptrs_++;
-        return i;
-      }
-    }
-    // Can never get here as the limits have been checked.
-    abort();
-  }
-
-  void IncDecSharedPtrRefCount(int inc, size_t index) {
-    for (;;) {
-      int curr = shared_ptr_refs_[index];
-      int next = curr + inc;
-      if (shared_ptr_refs_[index].compare_exchange_strong(curr, next)) {
-        if (next == 0) {
-          num_shared_ptrs_--;
-        }
-        return;
-      }
-    }
-  }
-  int NumSharedPtrs() const { return num_shared_ptrs_; }
-  int MaxSharedPtrs() const { return options_.MaxSharedPtrs(); }
-  bool CheckSharedPtrCount() const {
-    return num_shared_ptrs_ < options_.MaxSharedPtrs();
-  }
-
-  int GetSharedPtrRefCount(size_t index) const {
-    return shared_ptr_refs_[index];
-  }
-
-  bool LockForShared(MessageSlot *slot, int64_t ordinal) {
-    return LockForSharedInternal(slot, ordinal, IsReliable());
-  }
-
-private:
-  friend class ::subspace::ClientImpl;
-
-  bool IsSubscriber() const override { return true; }
-
-  void ClearPublishers() { reliable_publishers_.clear(); }
-  void AddPublisher(toolbelt::FileDescriptor fd) {
-    reliable_publishers_.emplace_back(toolbelt::FileDescriptor(),
-                                      std::move(fd));
-  }
-  size_t NumReliablePublishers() { return reliable_publishers_.size(); }
-
-  void SetTriggerFd(toolbelt::FileDescriptor fd) {
-    trigger_.SetTriggerFd(std::move(fd));
-  }
-  void SetPollFd(toolbelt::FileDescriptor fd) {
-    trigger_.SetPollFd(std::move(fd));
-  }
-  int GetSubscriberId() const { return subscriber_id_; }
-  void TriggerReliablePublishers() {
-    for (auto &fd : reliable_publishers_) {
-      fd.Trigger();
-    }
-  }
-  void Trigger() { trigger_.Trigger(); }
-
-  MessageSlot *NextSlot(std::function<bool(ChannelLock *)> reload) {
-    return Channel::NextSlot(CurrentSlot(), IsReliable(), subscriber_id_,
-                             std::move(reload));
-  }
-
-  MessageSlot *LastSlot(std::function<bool(ChannelLock *)> reload) {
-    return Channel::LastSlot(CurrentSlot(), IsReliable(), subscriber_id_,
-                             std::move(reload));
-  }
-
-  toolbelt::FileDescriptor &GetPollFd() { return trigger_.GetPollFd(); }
-  void ClearPollFd() { trigger_.Clear(); }
-
-  MessageSlot *FindMessage(uint64_t timestamp) {
-    MessageSlot *slot =
-        FindActiveSlotByTimestamp(CurrentSlot(), timestamp, IsReliable(),
-                                  GetSubscriberId(), search_buffer_, nullptr);
-    if (slot != nullptr) {
-      SetSlot(slot);
-    }
-    return slot;
-  }
-
-  int subscriber_id_;
-  toolbelt::TriggerFd trigger_;
-  std::vector<toolbelt::TriggerFd> reliable_publishers_;
-  SubscriberOptions options_;
-  std::atomic<int> num_shared_ptrs_ = 0;
-
-  // Each shared_ptr has an index into this array that holds a reference
-  // counter.  Each copy of a shared_ptr increments the reference counter
-  // and when it goes to zero, we know that there are no more copies of
-  // the shared_ptr.
-  std::unique_ptr<std::atomic<int>[]> shared_ptr_refs_;
-
-  // It is rare that subscribers need to search for messges by timestamp.  This
-  // will keep the memory allocation to the first search on a subscriber.  Most
-  // subscribers won't use this.
-  std::vector<MessageSlot *> search_buffer_;
-};
 } // namespace details
 } // namespace subspace
 

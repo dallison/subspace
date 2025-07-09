@@ -8,17 +8,20 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "client/client_channel.h"
+#include "client/message.h"
 #include "client/options.h"
+#include "client/publisher.h"
+#include "client/subscriber.h"
 #include "common/channel.h"
 #include "coroutine.h"
 #include "toolbelt/fd.h"
+#include "toolbelt/logging.h"
 #include "toolbelt/sockets.h"
 #include "toolbelt/triggerfd.h"
+#include <cstddef>
 #include <functional>
 #include <string>
 #include <sys/poll.h>
-#include <cstddef>
 
 namespace subspace {
 
@@ -27,271 +30,108 @@ enum class ReadMode {
   kReadNewest,
 };
 
-// This is a message read by ReadMessage.  The 'length' member is the
-// length of the message data in bytes and 'buffer' points to the
-// start address of the message in shared memory.  If there is no message read,
-// the length member will be zero and buffer will be nullptr.
-// The ordinal is a monotonically increasing sequence number for all messages
-// sent to the channel.
-// The timestamp is the nanonsecond monotonic time when the message was
-// published in memory.
-//
-// It is also returned by Publish but only the length, ordinal and timestamp
-// members are available.  This can be used to see the information on the
-// message just published.
-struct Message {
-  Message() = default;
-  Message(size_t len, const void *buf, int64_t ord, int64_t ts)
-      : length(len), buffer(buf), ordinal(ord), timestamp(ts) {}
-  size_t length = 0;            // Length of message in bytes.
-  const void *buffer = nullptr; // Address of message payload.
-  int64_t ordinal = -1;         // Monotonic number of message.
-  uint64_t timestamp = 0;       // Nanosecond time message was published.
-};
-
-// Shared and weak pointers to messsages as seen by subscriber.  These
-// refer to a message in a slot.  A shared_ptr maintains a reference to the
-// message until it is destructed or moved to another message.  The message
-// referred to by a shared_ptr will never be removed.  A weak_ptr
-// is a reference to a slot that might go away.  You need to lock the
-// weak_ptr, converting it to a shared_ptr before you can access the
-// message.  The lock may fail if the message slot has gone away.
-//
-// Don't hold onto shared_ptr objects for a long time.   If you do you
-// are keeping slots from being reused, thus reducing the channel
-// capacity for all other publishers and subscribers.  The best strategy
-// is to convert them to a weak_ptr before storing them and then,
-// when you want to use the message, lock it and check that it's still
-// valid.  You should design your system so that lost messages are not
-// an issue.  If you really need to see all messages on a channel, use
-// the reliable mode for the publshers and subscribers.
-//
-// The shared_ptr and weak_ptr have a very similar interface to their
-// counterparts in std.  Please see the C++ documentation for how to use
-// them.
 template <typename T> class weak_ptr;
 
 template <typename T> class shared_ptr {
 public:
   shared_ptr() = default;
-
-  ~shared_ptr() {
-    if (sub_ != nullptr) {
-      IncRefCount(-1);
-    }
-  }
+  shared_ptr(const Message &m) : msg_(m.active_message) {}
+  shared_ptr(std::shared_ptr<ActiveMessage> m) : msg_(std::move(m)) {}
+  shared_ptr(const shared_ptr &p) : msg_(p.msg_) {}
+  shared_ptr(shared_ptr &&p) : msg_(std::move(p.msg_)) {}
   shared_ptr(const weak_ptr<T> &p);
 
-  shared_ptr(const shared_ptr &p)
-      : sub_(p.sub_), index_(p.index_), msg_(p.msg_), slot_(p.slot_),
-        ordinal_(p.ordinal_) {
-    IncRefCount(+1);
-  }
-  shared_ptr(shared_ptr &&p)
-      : sub_(p.sub_), index_(p.index_), msg_(p.msg_), slot_(p.slot_),
-        ordinal_(p.ordinal_) {
-    p.ResetInternal();
-  }
-
   shared_ptr &operator=(const shared_ptr &p) {
-    if (*this != p) {
-      IncRefCount(-1);
-    }
-    CopyFrom(p);
-    IncRefCount(+1);
+    msg_ = p.msg_;
     return *this;
   }
 
   shared_ptr &operator=(shared_ptr &&p) {
-    CopyFrom(p);
-    p.ResetInternal();
+    msg_ = std::move(p.msg_);
     return *this;
   }
 
-  void reset() {
-    if (sub_ != nullptr) {
-      IncRefCount(-1);
-    }
-    ResetInternal();
-  }
-
-  T *get() const { return reinterpret_cast<T *>(msg_.buffer); }
-  T &operator*() const { return *reinterpret_cast<T *>(msg_.buffer); }
+  T *get() const { return reinterpret_cast<T *>(msg_->buffer); }
+  T &operator*() const { return *reinterpret_cast<T *>(msg_->buffer); }
   T *operator->() const { return get(); }
-  operator bool() const {
-    return sub_ != nullptr && slot_ != nullptr && msg_.length != 0;
-  }
+  operator bool() const { return msg_ != nullptr; }
   long use_count() const {
-    return (sub_ == nullptr || slot_ == nullptr || msg_.length == 0)
+    return msg_.use_count() == 0
                ? 0
-               : sub_->GetSharedPtrRefCount(index_);
+               : msg_.use_count() -
+                     1; // Subscriber has a reference that we shouldn't count
   }
+  void reset() { msg_.reset(); }
 
-  const Message &GetMessage() const { return msg_; }
+  bool operator==(const shared_ptr &p) const { return msg_ == p.msg_; }
+  bool operator!=(const shared_ptr &p) const { return msg_ != p.msg_; }
 
 private:
-  friend class ClientImpl;
-  void CopyFrom(const shared_ptr &p) {
-    sub_ = p.sub_;
-    index_ = p.index_;
-    msg_ = p.msg_;
-    slot_ = p.slot_;
-    ordinal_ = p.ordinal_;
-  }
+  template <typename M> friend class weak_ptr;
 
-  void ResetInternal() {
-    sub_ = nullptr;
-    slot_ = nullptr;
-  }
-
-  shared_ptr(std::shared_ptr<details::SubscriberImpl> sub, const Message &msg)
-      : sub_(sub), msg_(msg), slot_(sub->CurrentSlot()),
-        ordinal_(sub->CurrentOrdinal()) {
-    if (slot_ == nullptr) {
-      return;
-    }
-    if (!sub_->CheckSharedPtrCount()) {
-      ResetInternal();
-      return;
-    }
-    index_ = sub_->AllocateSharedPtr();
-    IncDecSlotRefCount(+1);
-  }
-
-  template <typename M>
-  friend bool operator==(const shared_ptr<M> &p1, const shared_ptr<M> &p2);
-
-  friend class weak_ptr<T>;
-
-  void IncDecSlotRefCount(int inc) {
-    if (slot_ == nullptr) {
-      return;
-    }
-    slot_->ref_count += inc;
-    if (sub_->IsReliable()) {
-      slot_->reliable_ref_count += inc;
-    }
-  }
-
-  void IncRefCount(int inc) {
-    if (slot_ == nullptr) {
-      return;
-    }
-    ChannelLock lock(&sub_->GetCcb()->lock);
-    IncDecSlotRefCount(inc);
-    sub_->IncDecSharedPtrRefCount(inc, index_);
-  }
-
-  std::shared_ptr<details::SubscriberImpl> sub_ = nullptr;
-  size_t index_ = 0;
-  Message msg_;
-  MessageSlot *slot_ = nullptr;
-  int64_t ordinal_ = -1;
+  std::shared_ptr<ActiveMessage> msg_;
 };
-
-template <typename M>
-bool operator==(const shared_ptr<M> &p1, const shared_ptr<M> &p2) {
-  return p1.sub_ == p2.sub_ && p1.slot_ == p2.slot_ &&
-         p1.ordinal_ == p2.ordinal_;
-}
 
 template <typename T> class weak_ptr {
 public:
   weak_ptr() = default;
-  weak_ptr(std::shared_ptr<details::SubscriberImpl> sub, const Message &msg,
-           MessageSlot *slot)
-      : sub_(sub), msg_(msg), slot_(slot), ordinal_(slot->ordinal) {}
-  ~weak_ptr() {}
-  weak_ptr(const weak_ptr &p)
-      : sub_(p.sub_), msg_(p.msg_), slot_(p.slot_), ordinal_(p.ordinal_) {}
-  weak_ptr(weak_ptr &&p)
-      : sub_(p.sub_), msg_(p.msg_), slot_(p.slot_), ordinal_(p.ordinal_) {
-    p.reset();
-  }
   weak_ptr(const shared_ptr<T> &p)
-      : sub_(p.sub_), msg_(p.msg_), slot_(p.slot_), ordinal_(p.ordinal_) {}
+      : sub_(p.msg_->sub), slot_(p.msg_->slot), ordinal_(p.msg_->ordinal) {}
+  weak_ptr(const weak_ptr &p)
+      : sub_(p.sub_), slot_(p.slot_), ordinal_(p.ordinal_) {}
+  weak_ptr(weak_ptr &&p)
+      : sub_(std::move(p.sub_)), slot_(p.slot_), ordinal_(p.ordinal_) {
+    p.slot_ = nullptr;
+    p.ordinal_ = 0;
+  }
 
   weak_ptr &operator=(const weak_ptr &p) {
-    CopyFrom(p);
+    sub_ = p.sub_;
+    slot_ = p.slot_;
+    ordinal_ = p.ordinal_;
     return *this;
   }
 
   weak_ptr &operator=(weak_ptr &&p) {
-    CopyFrom(p);
-    p.reset();
+    sub_ = std::move(p.sub_);
+    slot_ = p.slot_;
+    ordinal_ = p.ordinal_;
+    p.slot_ = nullptr;
+    p.ordinal_ = 0;
     return *this;
   }
 
-  void reset() {
-    sub_ = nullptr;
-    slot_ = nullptr;
-  }
-
-  long use_count() const {
-    if (slot_ == nullptr) {
-      return 0;
+  shared_ptr<T> lock() const {
+    if (sub_ == nullptr) {
+      return shared_ptr<T>();
     }
-    return msg_.length == 0 ? 0 : slot_->ref_count;
+    return sub_->LockWeakMessage(slot_, ordinal_);
   }
 
   bool expired() const {
-    return slot_ == nullptr || slot_->ordinal != ordinal_;
-  }
-
-  shared_ptr<T> lock() const {
     if (sub_ == nullptr || slot_ == nullptr) {
-      return shared_ptr<T>();
+      return true;
     }
-    if (!sub_->CheckSharedPtrCount()) {
-      return shared_ptr<T>();
-    }
-    // This returns true if the slot is still valid.  The reference
-    // counts have been incremented.
-    if (!sub_->LockForShared(slot_, ordinal_)) {
-      return shared_ptr<T>();
-    }
-
-    return shared_ptr<T>(*this);
-  }
-
-  bool operator==(std::nullptr_t) const {
-    return sub_ == nullptr || slot_ == nullptr;
-  }
-  bool operator!=(std::nullptr_t) const {
-    return sub_ != nullptr && slot_ != nullptr;
+    return sub_->SlotExpired(slot_, ordinal_);
   }
 
 private:
-  friend class shared_ptr<T>;
-
-  void CopyFrom(const weak_ptr &p) {
-    sub_ = p.sub_;
-    msg_ = p.msg_;
-    slot_ = p.slot_;
-    ordinal_ = p.ordinal_;
-  }
+  template <typename M> friend class shared_ptr;
 
   std::shared_ptr<details::SubscriberImpl> sub_;
-  Message msg_;
   MessageSlot *slot_ = nullptr;
-  int64_t ordinal_;
+  uint64_t ordinal_ = 0;
 };
+
+template <typename T>
+inline shared_ptr<T>::shared_ptr(const weak_ptr<T> &p) : msg_(p.lock().msg_) {}
 
 class Publisher;
 class Subscriber;
 
-template <typename T>
-inline shared_ptr<T>::shared_ptr(const weak_ptr<T> &p)
-    : sub_(p.sub_), msg_(p.msg_), slot_(p.slot_), ordinal_(p.ordinal_) {
-  if (sub_ == nullptr) {
-    return;
-  }
-  index_ = sub_->AllocateSharedPtr();
-}
-
-// This is an Subspace client.  It must be initialized by calling Init() before
-// it can be used.  The Init() function connects it to an Subspace server that
-// is listening on the same Unix Domain Socket.
+// This is an Subspace client.  It must be initialized by calling Init()
+// before it can be used.  The Init() function connects it to an Subspace
+// server that is listening on the same Unix Domain Socket.
 //
 // This is NOT THREAD SAFE so don't use it in a multithreaded program without
 // ensuring that two threads can't access it at the same time.
@@ -341,6 +181,12 @@ private:
   CreatePublisher(const std::string &channel_name, int slot_size, int num_slots,
                   const PublisherOptions &opts = PublisherOptions());
 
+  // Create a publisher with the slot size and number of slots set in the
+  // options.
+  absl::StatusOr<Publisher>
+  CreatePublisher(const std::string &channel_name,
+                  const PublisherOptions &opts = PublisherOptions());
+
   // Create a subscriber for the given channel. This can be done before there
   // are any publishers on the channel.
   absl::StatusOr<Subscriber>
@@ -385,6 +231,14 @@ private:
   absl::Status WaitForReliablePublisher(details::PublisherImpl *publisher,
                                         co::Coroutine *c = nullptr);
 
+  // Wait until a reliable publisher can try again to send a message.  If the
+  // client is coroutine-aware, the coroutine will wait.  If it's not,
+  // the function will block on a poll until the publisher is triggered.
+  absl::StatusOr<int>
+  WaitForReliablePublisher(details::PublisherImpl *publisher,
+                           const toolbelt::FileDescriptor &fd,
+                           co::Coroutine *c = nullptr);
+
   // Wait until there's a message available to be read by the
   // subscriber.  If the client is coroutine-aware, the coroutine
   // will wait.  If it's not, the function will block on a poll
@@ -392,15 +246,22 @@ private:
   absl::Status WaitForSubscriber(details::SubscriberImpl *subscriber,
                                  co::Coroutine *c = nullptr);
 
+  // Wait until there' s a message available to be read by the
+  // subscriber.  If the client is coroutine-aware, the coroutine
+  // will wait.  If it's not, the function will block on a poll
+  // until the subscriber is triggered.
+  absl::StatusOr<int> WaitForSubscriber(details::SubscriberImpl *subscriber,
+                                        const toolbelt::FileDescriptor &fd,
+                                        co::Coroutine *c = nullptr);
+
   // Read a message from a subscriber.  If there are no available messages
   // the 'length' field of the returned Message will be zero.  The 'buffer'
   // field of the Message is set to the address of the message in shared
   // memory which is read-only.  If the read is triggered by the PollFd,
   // you must read all the avaiable messages from the subscriber as the
   // PollFd is only triggered when a new message is published.
-  absl::StatusOr<const Message>
-  ReadMessage(details::SubscriberImpl *subscriber,
-              ReadMode mode = ReadMode::kReadNext);
+  absl::StatusOr<Message> ReadMessage(details::SubscriberImpl *subscriber,
+                                      ReadMode mode = ReadMode::kReadNext);
 
   // As ReadMessage above but returns a shared_ptr to the typed message.
   // NOTE: this is subspace::shared_ptr, not std::shared_ptr.
@@ -410,9 +271,8 @@ private:
               ReadMode mode = ReadMode::kReadNext);
 
   // Find a message given a timestamp.
-  absl::StatusOr<const Message> FindMessage(details::SubscriberImpl *subscriber,
-                                            uint64_t timestamp);
-
+  absl::StatusOr<Message> FindMessage(details::SubscriberImpl *subscriber,
+                                      uint64_t timestamp);
   // AsFindMessage above but returns a shared_ptr to the typed message.
   // NOTE: this is subspace::shared_ptr, not std::shared_ptr.
   template <typename T>
@@ -433,11 +293,16 @@ private:
   // Register a function to be called when a subscriber drops a message.  The
   // function is called with the number of messages that have been missed
   // as its second argument.
-  void RegisterDroppedMessageCallback(
+  absl::Status RegisterDroppedMessageCallback(
       details::SubscriberImpl *subscriber,
       std::function<void(details::SubscriberImpl *, int64_t)> callback);
   absl::Status
   UnregisterDroppedMessageCallback(details::SubscriberImpl *subscriber);
+
+  absl::Status RegisterMessageCallback(
+      details::SubscriberImpl *subscriber,
+      std::function<void(details::SubscriberImpl *, Message)> callback);
+  absl::Status UnregisterMessageCallback(details::SubscriberImpl *subscriber);
 
   // Register a callback that will be called when the publisher wants a
   // channel to be resized.  Note that there is more than one
@@ -449,11 +314,21 @@ private:
   //
   // Returns absl::OkStatus() if resize is OK.  If the callback wants
   // to prevent the resize from happening, return an error.
-  void RegisterResizeCallback(
+  absl::Status RegisterResizeCallback(
       details::PublisherImpl *publisher,
       std::function<absl::Status(details::PublisherImpl *, int32_t, int32_t)>
           cb);
   absl::Status UnregisterResizeCallback(details::PublisherImpl *publisher);
+
+  // Call the message callback function for all available messages.  You must
+  // have registered a callback function with RegisterMessageCallback for this
+  // to work.
+  absl::Status ProcessAllMessages(details::SubscriberImpl *subscriber,
+                                  ReadMode mode = ReadMode::kReadNext);
+
+  absl::StatusOr<std::vector<Message>>
+  GetAllMessages(details::SubscriberImpl *subscriber,
+                 ReadMode mode = ReadMode::kReadNext);
 
   // Get the most recently received ordinal for the subscriber.
   int64_t GetCurrentOrdinal(details::SubscriberImpl *sub) const;
@@ -469,25 +344,29 @@ private:
   ReloadReliablePublishersIfNecessary(details::SubscriberImpl *subscriber);
   absl::Status RemoveChannel(details::ClientChannel *channel);
   absl::Status ActivateReliableChannel(details::PublisherImpl *channel);
-  absl::StatusOr<const Message>
+  absl::Status ActivateChannel(details::PublisherImpl *channel);
+  absl::StatusOr<Message>
   ReadMessageInternal(details::SubscriberImpl *subscriber, ReadMode mode,
                       bool pass_activation, bool clear_trigger);
-  absl::StatusOr<const Message>
+  absl::StatusOr<Message>
   FindMessageInternal(details::SubscriberImpl *subscriber, uint64_t timestamp);
   absl::StatusOr<const Message>
   PublishMessageInternal(details::PublisherImpl *publisher,
                          int64_t message_size, bool omit_prefix);
   absl::Status ResizeChannel(details::PublisherImpl *publisher,
                              int32_t new_slot_size);
-  absl::StatusOr<bool> ReloadBuffersIfNecessary(details::ClientChannel *channel,
-                                                ChannelLock *lock);
+  absl::StatusOr<bool>
+  ReloadBuffersIfNecessary(details::ClientChannel *channel);
 
-  const std::vector<BufferSet> &
+  const std::vector<std::unique_ptr<details::BufferSet>> &
   GetBuffers(details::ClientChannel *channel) const {
     return channel->GetBuffers();
   }
 
   std::string name_;
+  std::string socket_name_;
+  uint64_t session_id_ = 0;
+
   toolbelt::UnixSocket socket_;
   toolbelt::FileDescriptor scb_fd_; // System control block memory fd.
   char buffer_[kMaxMessage];        // Buffer for comms with server over UDS.
@@ -507,12 +386,20 @@ private:
                       std::function<void(details::SubscriberImpl *, int64_t)>>
       dropped_message_callbacks_;
 
+  // Callback per subscriber to call when a message is received.  Use the
+  // `ProcessAllMessages` function on the Subscriber to call this function for
+  // all currently available messages.
+  absl::flat_hash_map<details::SubscriberImpl *,
+                      std::function<void(details::SubscriberImpl *, Message)>>
+      message_callbacks_;
+
   // Call the function when a publisher causes a channel to be resized.
   absl::flat_hash_map<
       details::PublisherImpl *,
       std::function<absl::Status(details::PublisherImpl *, int32_t, int32_t)>>
       resize_callbacks_;
   bool debug_ = false;
+  toolbelt::Logger logger_;
 };
 
 // This function returns an subspace::shared_ptr that refers to the message
@@ -529,16 +416,7 @@ ClientImpl::ReadMessage(details::SubscriberImpl *subscriber, ReadMode mode) {
   if (!msg.ok()) {
     return msg.status();
   }
-  if (msg->length == 0) {
-    return ::subspace::shared_ptr<T>(subscriber->shared_from_this(), *msg);
-  }
-  if (!subscriber->CheckSharedPtrCount()) {
-    return absl::InternalError(
-        absl::StrFormat("Too many shared pointers for %s: current: %d, max: %d",
-                        subscriber->Name(), subscriber->NumSharedPtrs(),
-                        subscriber->MaxSharedPtrs()));
-  }
-  return ::subspace::shared_ptr<T>(subscriber->shared_from_this(), *msg);
+  return ::subspace::shared_ptr<T>(std::move(*msg));
 }
 
 template <typename T>
@@ -549,16 +427,7 @@ ClientImpl::FindMessage(details::SubscriberImpl *subscriber,
   if (!msg.ok()) {
     return msg.status();
   }
-  if (msg->length == 0) {
-    return ::subspace::shared_ptr<T>(subscriber->shared_from_this(), *msg);
-  }
-  if (!subscriber->CheckSharedPtrCount()) {
-    return absl::InternalError(
-        absl::StrFormat("Too many shared pointers for %s: current: %d, max: %d",
-                        subscriber->Name(), subscriber->NumSharedPtrs(),
-                        subscriber->MaxSharedPtrs()));
-  }
-  return ::subspace::shared_ptr<T>(subscriber->shared_from_this(), *msg);
+  return ::subspace::shared_ptr<T>(std::move(*msg));
 }
 
 // The Publisher and Subscriber classes are the main interface for sending
@@ -609,7 +478,7 @@ public:
   // argument specifies the actual size of the message to send.  Returns the
   // information about the message sent with buffer set to nullptr since
   // the publisher cannot access the message once it's been published.
-  absl::StatusOr<Message> PublishMessage(int64_t message_size) {
+  absl::StatusOr<const Message> PublishMessage(int64_t message_size) {
     return client_->PublishMessage(impl_.get(), message_size);
   }
 
@@ -618,6 +487,17 @@ public:
   // the function will block on a poll until the publisher is triggered.
   absl::Status Wait(co::Coroutine *c = nullptr) {
     return client_->WaitForReliablePublisher(impl_.get(), c);
+  }
+
+  // Wait until a reliable publisher can try again to send a message.  If the
+  // client is coroutine-aware, the coroutine will wait.  If it's not,
+  // the function will block on a poll until the publisher is triggered.
+  // This also takes an additional file descriptor that can be used to interrupt
+  // the wait.  Returns the integer fd value of the file descriptor that
+  // triggered the wait.
+  absl::StatusOr<int> Wait(const toolbelt::FileDescriptor &fd,
+                           co::Coroutine *c = nullptr) {
+    return client_->WaitForReliablePublisher(impl_.get(), fd, c);
   }
 
   struct pollfd GetPollFd() const {
@@ -634,22 +514,26 @@ public:
 
   std::string Name() const { return impl_->Name(); }
   std::string Type() const { return impl_->Type(); }
+  std::string_view TypeView() const { return impl_->TypeView(); }
+
+  void DumpSlots(std::ostream &os) const { impl_->DumpSlots(os); }
 
   bool IsReliable() const { return impl_->IsReliable(); }
   bool IsLocal() const { return impl_->IsLocal(); }
   bool IsFixedSize() const { return impl_->IsFixedSize(); }
 
   int32_t SlotSize() const { return impl_->SlotSize(); }
+  int32_t NumSlots() const { return impl_->NumSlots(); }
 
-  const std::vector<BufferSet> &GetBuffers() const {
+  const std::vector<std::unique_ptr<details::BufferSet>> &GetBuffers() const {
     return client_->GetBuffers(impl_.get());
   }
 
   // Register a function to be called when the publisher resizes
   // the channel.
-  void RegisterResizeCallback(
+  absl::Status RegisterResizeCallback(
       std::function<absl::Status(Publisher *, int, int)> callback) {
-    client_->RegisterResizeCallback(
+    return client_->RegisterResizeCallback(
         impl_.get(),
         [ this, callback = std::move(callback) ](
             details::PublisherImpl * p, int32_t old_size, int32_t new_size)
@@ -658,6 +542,12 @@ public:
 
   absl::Status UnregisterResizeCallback() {
     return client_->UnregisterResizeCallback(impl_.get());
+  }
+
+  int VirtualChannelId() const { return impl_->VirtualChannelId(); }
+
+  int NumSubscribers(int vchan_id = -1) const {
+    return impl_->NumSubscribers(vchan_id);
   }
 
 private:
@@ -714,14 +604,25 @@ public:
     return client_->WaitForSubscriber(impl_.get(), c);
   }
 
+  // Wait until there's a message available to be read by the
+  // subscriber.  If the client is coroutine-aware, the coroutine
+  // will wait.  If it's not, the function will block on a poll
+  // until the subscriber is triggered.
+  // This also takes an additional file descriptor that can be used to interrupt
+  // the wait.  Returns the integer fd value of the file descriptor that
+  // triggered the wait.
+  absl::StatusOr<int> Wait(const toolbelt::FileDescriptor &fd,
+                           co::Coroutine *c = nullptr) {
+    return client_->WaitForSubscriber(impl_.get(), fd, c);
+  }
+
   // Read a message from a subscriber.  If there are no available messages
   // the 'length' field of the returned Message will be zero.  The 'buffer'
   // field of the Message is set to the address of the message in shared
   // memory which is read-only.  If the read is triggered by the PollFd,
   // you must read all the avaiable messages from the subscriber as the
   // PollFd is only triggered when a new message is published.
-  absl::StatusOr<const Message>
-  ReadMessage(ReadMode mode = ReadMode::kReadNext) {
+  absl::StatusOr<Message> ReadMessage(ReadMode mode = ReadMode::kReadNext) {
     return client_->ReadMessage(impl_.get(), mode);
   }
 
@@ -732,7 +633,7 @@ public:
   ReadMessage(ReadMode mode = ReadMode::kReadNext);
 
   // Find a message given a timestamp.
-  absl::StatusOr<const Message> FindMessage(uint64_t timestamp) {
+  absl::StatusOr<Message> FindMessage(uint64_t timestamp) {
     return client_->FindMessage(impl_.get(), timestamp);
   }
 
@@ -759,13 +660,14 @@ public:
 
   std::string Name() const { return impl_->Name(); }
   std::string Type() const { return impl_->Type(); }
+  std::string_view TypeView() const { return impl_->TypeView(); }
 
   // Register a function to be called when a subscriber drops a message.  The
   // function is called with the number of messages that have been missed
   // as its second argument.
-  void RegisterDroppedMessageCallback(
+  absl::Status RegisterDroppedMessageCallback(
       std::function<void(Subscriber *, int64_t)> callback) {
-    client_->RegisterDroppedMessageCallback(impl_.get(), [
+    return client_->RegisterDroppedMessageCallback(impl_.get(), [
       this, callback = std::move(callback)
     ](details::SubscriberImpl * s, int64_t c) { callback(this, c); });
   }
@@ -774,6 +676,30 @@ public:
     return client_->UnregisterDroppedMessageCallback(impl_.get());
   }
 
+  absl::Status
+  RegisterMessageCallback(std::function<void(Subscriber *, Message)> callback) {
+    return client_->RegisterMessageCallback(impl_.get(), [
+      this, callback = std::move(callback)
+    ](details::SubscriberImpl * s, Message m) {
+      callback(this, std::move(m));
+    });
+  }
+
+  absl::Status UnregisterMessageCallback() {
+    return client_->UnregisterMessageCallback(impl_.get());
+  }
+
+  absl::Status ProcessAllMessages(ReadMode mode = ReadMode::kReadNext) {
+    return client_->ProcessAllMessages(impl_.get(), mode);
+  }
+
+  absl::StatusOr<std::vector<Message>>
+  GetAllMessages(ReadMode mode = ReadMode::kReadNext) {
+    return client_->GetAllMessages(impl_.get(), mode);
+  }
+
+  void Trigger() { impl_->Trigger(); }
+
   const ChannelCounters &GetCounters() const { return impl_->GetCounters(); }
 
   int64_t CurrentOrdinal() const { return impl_->CurrentOrdinal(); }
@@ -781,12 +707,21 @@ public:
   bool IsReliable() const { return impl_->IsReliable(); }
 
   int32_t SlotSize() const { return impl_->SlotSize(); }
+  int32_t NumSlots() const { return impl_->NumSlots(); }
 
-  const std::vector<BufferSet> &GetBuffers() const {
+  const std::vector<std::unique_ptr<details::BufferSet>> &GetBuffers() const {
     return client_->GetBuffers(impl_.get());
   }
 
-  int NumSharedPtrs() const { return impl_->NumSharedPtrs(); }
+  int NumActiveMessages() const { return impl_->NumActiveMessages(); }
+
+  void DumpSlots(std::ostream &os) const { impl_->DumpSlots(os); }
+
+  int VirtualChannelId() const { return impl_->VirtualChannelId(); }
+
+  int NumSubscribers(int vchan_id = -1) const {
+    return impl_->NumSubscribers(vchan_id);
+  }
 
 private:
   friend class Server;
@@ -796,7 +731,7 @@ private:
              std::shared_ptr<details::SubscriberImpl> impl)
       : client_(client), impl_(impl) {}
 
-  absl::StatusOr<const Message>
+  absl::StatusOr<Message>
   ReadMessageInternal(ReadMode mode, bool pass_activation, bool clear_trigger) {
     return client_->ReadMessageInternal(impl_.get(), mode, pass_activation,
                                         clear_trigger);
@@ -830,6 +765,17 @@ Subscriber::FindMessage(uint64_t timestamp) {
 // ClientImpl.
 class Client {
 public:
+  static absl::StatusOr<std::shared_ptr<Client>>
+  Create(const std::string &server_socket = "/tmp/subspace",
+         const std::string &client_name = "", co::Coroutine *c = nullptr) {
+    auto client = std::make_shared<Client>(c);
+    auto status = client->Init(server_socket, client_name);
+    if (!status.ok()) {
+      return status;
+    }
+    return client;
+  }
+
   Client(co::Coroutine *c = nullptr) : impl_(std::make_shared<ClientImpl>(c)) {}
   ~Client() = default;
 
@@ -848,6 +794,14 @@ public:
   CreatePublisher(const std::string &channel_name, int slot_size, int num_slots,
                   const PublisherOptions &opts = PublisherOptions()) {
     return impl_->CreatePublisher(channel_name, slot_size, num_slots, opts);
+  }
+
+  // If you prefer, you can create the publisher with the slot size and
+  // number of slots set in the options.
+  absl::StatusOr<Publisher>
+  CreatePublisher(const std::string &channel_name,
+                  const PublisherOptions &opts = PublisherOptions()) {
+    return impl_->CreatePublisher(channel_name, opts);
   }
 
   // Create a subscriber for the given channel. This can be done before there
