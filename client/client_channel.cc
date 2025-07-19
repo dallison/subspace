@@ -13,21 +13,6 @@ namespace subspace {
 
 namespace details {
 
-template <typename BufferSetIter>
-static void UnmapBuffers(BufferSetIter first, BufferSetIter last,
-                         int num_slots) {
-  // Unmap any previously mapped buffers.
-  for (; first < last; ++first) {
-    int64_t buffers_size = first->full_size;
-    if (buffers_size > 0 && first->buffer != nullptr) {
-      UnmapMemory(first->buffer, buffers_size, "buffers");
-      first->buffer = nullptr;
-      first->slot_size = 0;
-      first->full_size = 0;
-    }
-  }
-}
-
 #if defined(__APPLE__)
 
 absl::StatusOr<std::string>
@@ -100,6 +85,17 @@ void ClientChannel::UnmapUnusedBuffers() {
         buffers_[i]->buffer = nullptr;
         buffers_[i]->full_size = 0;
         buffers_[i]->slot_size = 0;
+        std::string filename = BufferSharedMemoryName(i);
+#if defined(__APPLE__)
+        // On MacOS we need to remove both the shadow file and the shm_file
+        auto shm_file = MacOsSharedMemoryName(filename);
+        if (shm_file.ok()) {
+          (void)shm_unlink(shm_file->c_str());
+        }
+        (void)remove(filename.c_str());
+#else
+        (void)shm_unlink(filename.c_str());
+#endif
       }
     }
   }
@@ -135,6 +131,13 @@ absl::Status ClientChannel::AttachBuffers() {
     size_t buffer_index = buffers_.size();
     auto shm_fd = OpenBuffer(buffer_index);
     if (!shm_fd.ok()) {
+      if (buffers_.size() + 1 < size_t(num_buffers)) {
+        // The buffer might have been deleted because there are no
+        // references to it.  If we are not the last buffer, this is
+        // fine and we just add an empty buffer.
+        buffers_.emplace_back(std::make_unique<BufferSet>(0, 0, nullptr));
+        continue;
+      }
       return shm_fd.status();
     }
     auto size = GetBufferSize(*shm_fd, buffer_index);

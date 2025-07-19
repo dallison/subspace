@@ -255,6 +255,7 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
     }
   }
   channel->TriggerSubscribers();
+  channel->UnmapUnusedBuffers();
   // channel->Dump();
   channels_.insert(channel);
   return Publisher(shared_from_this(), channel);
