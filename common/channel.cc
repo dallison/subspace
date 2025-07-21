@@ -305,7 +305,7 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
 
 #if defined(__APPLE__)
 absl::StatusOr<std::string>
-Channel::MacOsSharedMemoryName(const std::string &shadow_file) {
+Channel::MacOsSharedMemoryName(const std::string &shadow_file) const {
   struct stat st;
   int e = ::stat(shadow_file.c_str(), &st);
   if (e == -1) {
