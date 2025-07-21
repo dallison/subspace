@@ -70,7 +70,7 @@ absl::Status ClientChannel::Map(SharedMemoryFds fds,
   return absl::OkStatus();
 }
 
-void ClientChannel::UnmapUnusedBuffers() {
+absl::Status ClientChannel::UnmapUnusedBuffers() {
   for (size_t i = 0; i + 1 < buffers_.size(); i++) {
 
     if (buffers_[i]->buffer == nullptr) {
@@ -85,20 +85,16 @@ void ClientChannel::UnmapUnusedBuffers() {
         buffers_[i]->buffer = nullptr;
         buffers_[i]->full_size = 0;
         buffers_[i]->slot_size = 0;
-        std::string filename = BufferSharedMemoryName(i);
-#if defined(__APPLE__)
-        // On MacOS we need to remove both the shadow file and the shm_file
-        auto shm_file = MacOsSharedMemoryName(filename);
-        if (shm_file.ok()) {
-          (void)shm_unlink(shm_file->c_str());
+        if (IsPublisher()) {
+          if (absl::Status status =
+                  ZeroOutSharedMemoryFile(i); !status.ok()) {
+            return status;
+          }
         }
-        (void)remove(filename.c_str());
-#else
-        (void)shm_unlink(filename.c_str());
-#endif
       }
     }
   }
+  return absl::OkStatus();
 }
 
 bool ClientChannel::ValidateSlotBuffer(MessageSlot *slot,
@@ -131,6 +127,7 @@ absl::Status ClientChannel::AttachBuffers() {
     size_t buffer_index = buffers_.size();
     auto shm_fd = OpenBuffer(buffer_index);
     if (!shm_fd.ok()) {
+#if defined(__APPLE__)
       if (buffers_.size() + 1 < size_t(num_buffers)) {
         // The buffer might have been deleted because there are no
         // references to it.  If we are not the last buffer, this is
@@ -138,6 +135,7 @@ absl::Status ClientChannel::AttachBuffers() {
         buffers_.emplace_back(std::make_unique<BufferSet>(0, 0, nullptr));
         continue;
       }
+#endif
       return shm_fd.status();
     }
     auto size = GetBufferSize(*shm_fd, buffer_index);
@@ -145,6 +143,14 @@ absl::Status ClientChannel::AttachBuffers() {
       return size.status();
     }
     if (*size == 0) {
+#if !defined(__APPLE__)
+      if (buffers_.size() + 1 < size_t(num_buffers)) {
+        // If the size is 0, it means the buffer has been deleted or not yet
+        // created.  We just add an empty buffer.
+        buffers_.emplace_back(std::make_unique<BufferSet>(0, 0, nullptr));
+      }
+#endif
+
       // It's possible the ftruncate has not been called yet, so we try again.
       continue;
     }
@@ -211,6 +217,48 @@ OpenSharedMemoryFile(const std::string &filename, int flags) {
   }
 
   return toolbelt::FileDescriptor(shm_fd);
+}
+
+absl::Status ClientChannel::ZeroOutSharedMemoryFile(int buffer_index) const {
+  std::string filename = BufferSharedMemoryName(buffer_index);
+#if defined(__APPLE__)
+  // On MacOS we set the length of the shadow file and remove the shm_file.
+  auto shm_name = MacOsSharedMemoryName(filename);
+  if (!shm_name.ok()) {
+    return shm_name.status();
+  }
+  // Remove the shm_file
+  if (shm_unlink(shm_name->c_str()) != 0) {
+    return absl::InternalError(absl::StrFormat(
+        "Failed to unlink shared memory %s: %s", *shm_name, strerror(errno)));
+  }
+  toolbelt::FileDescriptor fd(open(filename.c_str(), O_RDWR));
+  if (!fd.Valid()) {
+    return absl::InternalError(
+        absl::StrFormat("Failed to open shadow file %s: %s", filename.c_str(),
+                        strerror(errno)));
+  }
+  // Set the length of the shadow file to 0.
+  if (ftruncate(fd.Fd(), 0) < 0) {
+    return absl::InternalError(
+        absl::StrFormat("Failed to truncate shadow file %s: %s", filename.c_str(),
+                        strerror(errno)));
+  }
+#else
+  // Open the shared memory file.
+  auto shm_fd = OpenSharedMemoryFile(filename, O_RDWR);
+  if (!shm_fd.ok()) {
+    return shm_fd.status();
+  }
+
+  int e = ftruncate(shm_fd->Fd(), 0);
+  if (e == -1) {
+    return absl::InternalError(
+        absl::StrFormat("Failed to set length of shared memory %s: %s",
+                        filename, strerror(errno)));
+  }
+#endif
+  return absl::OkStatus();
 }
 
 absl::StatusOr<toolbelt::FileDescriptor>
