@@ -14,11 +14,13 @@ if(APPLE)
     message(STATUS "Building for Apple platform in proto subdirectory. Propagating CMAKE_OSX_ARCHITECTURES: ${CMAKE_OSX_ARCHITECTURES}")
 endif()
 
+# Protobuf provides targets like protobuf::libprotobuf and the protoc executable.
 # --- External Dependency: Protobuf (using FetchContent for native CMake) ---
 FetchContent_Declare(
     protobuf
     GIT_REPOSITORY https://github.com/protocolbuffers/protobuf.git
-    GIT_TAG v29.0
+    GIT_TAG v29.5
+    FIND_PACKAGE_ARGS NAMES protobuf
     # Protobuf's CMake build can be configured to build only necessary components
     CMAKE_ARGS
         -Dprotobuf_BUILD_TESTS=OFF # Explicitly disable building tests to avoid gmock conflicts
@@ -29,6 +31,9 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(protobuf)
 # Protobuf provides targets like protobuf::libprotobuf and the protoc executable.
+include(FindProtobuf)
+find_package(protobuf CONFIG REQUIRED)
+
 
 # Define the .proto file(s) in this subdirectory
 set(PROTO_FILES
@@ -36,18 +41,19 @@ set(PROTO_FILES
 )
 
 # Variables to store the generated source and header files
-set(SUBSPACE_PROTO_GENERATED_SRCS "")
-set(SUBSPACE_PROTO_GENERATED_HDRS "")
-
-# Use the protobuf_generate_cpp function to generate C++ files
-# This function automatically adds custom commands to perform the generation
-# and sets up dependencies on the protoc executable.
-protobuf_generate_cpp(SUBSPACE_PROTO_GENERATED_SRCS SUBSPACE_PROTO_GENERATED_HDRS ${PROTO_FILES})
+set(SUBSPACE_PROTO_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}")
 
 # Define the subspace_proto library target
-add_library(subspace_proto STATIC
-    ${SUBSPACE_PROTO_GENERATED_SRCS} # Add the generated .cc files
-)
+add_library(subspace_proto STATIC OBJECT "${CMAKE_CURRENT_LIST_DIR}/subspace.proto")
+# Use the protobuf_generate function to generate C++ files
+# This function automatically adds custom commands to perform the generation
+# and sets up dependencies on the protoc executable.
+protobuf_generate(
+    TARGET subspace_proto
+    LANGUAGE cpp
+    IMPORT_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+    PROTOC_OUT_DIR ${SUBSPACE_PROTO_GENERATED_DIR})
+
 
 # Add the directory containing the generated headers to the include paths
 target_include_directories(subspace_proto PUBLIC
@@ -58,9 +64,4 @@ target_include_directories(subspace_proto PUBLIC
 target_link_libraries(subspace_proto PUBLIC
     protobuf::libprotobuf
 )
-
-# Ensure the generation step runs before compiling the library
-# (protobuf_generate_cpp typically handles this implicitly, but explicit is clear)
-add_dependencies(subspace_proto protobuf) # Depends on the main protobuf target being built
-
 

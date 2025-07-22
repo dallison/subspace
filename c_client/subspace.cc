@@ -91,8 +91,8 @@ subspace_create_subscriber(SubspaceClient client, const char *channel_name,
       .reliable = options.reliable,
       .type = std::string(options.type.type, options.type.type_length),
       .max_active_messages = options.max_active_messages,
-      .pass_activation = options.pass_activation,
       .log_dropped_messages = options.log_dropped_messages,
+      .pass_activation = options.pass_activation,
   };
   subspace_clear_error();
   SubspaceSubscriber subscriber;
