@@ -33,24 +33,12 @@ endif()
 # Include FetchContent module for handling external dependencies
 include(FetchContent)
 
-# --- External Dependency: Googletest (using FetchContent for native CMake) ---
-# FetchContent_Declare(
-#     googletest
-#     GIT_REPOSITORY https://github.com/google/googletest.git
-#     GIT_TAG release-1.11.0 # Matches the version in your WORKSPACE
-#     # Pass architecture settings to Googletest's CMake build
-#     CMAKE_ARGS
-#         CMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
-# )
-# FetchContent_MakeAvailable(googletest)
-# Googletest provides targets like gtest_main, gtest, gmock.
-
 # --- External Dependency: Abseil (using FetchContent for native CMake) ---
 set(ABSL_ENABLE_INSTALL ON)
 FetchContent_Declare(
     abseil
     GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
-    GIT_TAG 20230802.0 # Matches the version in your WORKSPACE
+    GIT_TAG 20240722.0 # Matches the version in your WORKSPACE
     # Pass architecture settings and CXX standard propagation to Abseil's CMake build
     CMAKE_ARGS
         CMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
@@ -102,7 +90,4 @@ add_subdirectory(client)
 add_subdirectory(server)
 add_subdirectory(common)
 add_subdirectory(c_client)
-
-
-
 
