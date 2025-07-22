@@ -23,10 +23,11 @@ target_link_libraries(libserver PUBLIC
 
 # Example for a server executable:
 add_executable(subspace_server
-    server/main.cc
+    main.cc
 )
 
 target_link_libraries(subspace_server PUBLIC
     libserver
+    absl::flags_parse
 )
 

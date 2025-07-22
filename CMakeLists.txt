@@ -46,6 +46,7 @@ include(FetchContent)
 # Googletest provides targets like gtest_main, gtest, gmock.
 
 # --- External Dependency: Abseil (using FetchContent for native CMake) ---
+set(ABSL_ENABLE_INSTALL ON)
 FetchContent_Declare(
     abseil
     GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
@@ -57,22 +58,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(abseil)
 # Abseil provides targets like absl::base, absl::strings, etc.
-
-# --- External Dependency: Protobuf (using FetchContent for native CMake) ---
-FetchContent_Declare(
-    protobuf
-    GIT_REPOSITORY https://github.com/protocolbuffers/protobuf.git
-    GIT_TAG v29.5 
-    # Protobuf's CMake build can be configured to build only necessary components
-    CMAKE_ARGS
-        -Dprotobuf_BUILD_TESTS=OFF # Explicitly disable building tests to avoid gmock conflicts
-        -Dprotobuf_BUILD_EXAMPLES=OFF
-        -Dprotobuf_BUILD_SHARED_LIBS=OFF # Build static libs
-        # Pass architecture settings to Protobuf's CMake build
-        CMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
-)
-FetchContent_MakeAvailable(protobuf)
-# Protobuf provides targets like protobuf::libprotobuf and the protoc executable.
 
 # --- External Dependency: cpp_toolbelt (using FetchContent for native CMake) ---
 # Assumes cpp_toolbelt repository now contains a CMakeLists.txt at its root.
@@ -101,71 +86,23 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(co)
 # co provides the 'co' target.
 
-# Define the .proto file(s) in this subdirectory
-set(PROTO_FILES
-    proto/subspace.proto
-)
-
-# Variables to store the generated source and header files
-set(SUBSPACE_PROTO_GENERATED_SRCS "")
-set(SUBSPACE_PROTO_GENERATED_HDRS "")
-
-# Use the protobuf_generate_cpp function to generate C++ files
-# This function automatically adds custom commands to perform the generation
-# and sets up dependencies on the protoc executable.
-protobuf_generate_cpp(SUBSPACE_PROTO_GENERATED_SRCS SUBSPACE_PROTO_GENERATED_HDRS ${PROTO_FILES})
-
-
-# Define the subspace_proto library target
-add_library(subspace_proto STATIC
-    ${SUBSPACE_PROTO_GENERATED_SRCS} # Add the generated .cc files
-)
-
-# Add the directory containing the generated headers to the include paths
-target_include_directories(subspace_proto PUBLIC
-    ${CMAKE_CURRENT_BINARY_DIR} # Headers are generated into the build directory of this subdirectory
-)
-
-# Link the generated library against the main Protobuf library
-target_link_libraries(subspace_proto PUBLIC
-    protobuf::libprotobuf
-)
-
+#add to get */file.h includes working
+include_directories(${CMAKE_CURRENT_SOURCE_DIR})
+#add to get proto/subspace.pb.h working
+include_directories(${CMAKE_CURRENT_BINARY_DIR})
+# --- Subspace Tests Target ---
+# Corresponds to //subspace/tests:tests
+enable_testing() # Enable CTest for running tests
 
 # --- Add Subdirectories ---
 # These directories are expected to contain their own CMakeLists.txt files
 # that define targets (libraries, executables, etc.)
+add_subdirectory(proto)
 add_subdirectory(client)
 add_subdirectory(server)
 add_subdirectory(common)
 add_subdirectory(c_client)
 
 
-# --- Subspace Tests Target ---
-# Corresponds to //subspace/tests:tests
-enable_testing() # Enable CTest for running tests
-
-add_executable(subspace_tests
-    # Source files for tests are omitted here for manual addition by the user.
-    # These might also be moved into a 'tests' subdirectory.
-)
-
-target_link_libraries(subspace_tests PRIVATE
-    # Link against your internal common library or other sub-project libraries here
-    gtest_main # Googletest main target for tests
-    protobuf::libprotobuf # Protobuf library for tests
-    toolbelt # Link against the cpp_toolbelt library
-    co # Link against the co library
-)
-
-target_include_directories(subspace_tests PRIVATE
-    # Include generated protobuf headers for tests (if handled by a sub-project)
-)
-
-# Dependencies for tests (e.g., if they depend on targets defined in subdirectories)
-# For example: add_dependencies(subspace_tests common_lib)
-
-# Add the test executable to CTest
-add_test(NAME subspace_all_tests COMMAND subspace_tests)
 
 

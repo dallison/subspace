@@ -7,20 +7,20 @@ add_library(subspace_common STATIC
     atomic_bitset.h
     channel.cc
     channel.h
-    common_test.cc
     fast_ring_buffer.h
 )
 
-target_include_directories(subspace_common PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR} # Assumes headers are directly in 'common'
+target_link_libraries(subspace_common PUBLIC
+    absl::base
+    absl::flags
+    absl::flat_hash_set
+    absl::strings
+    toolbelt
+    co
+    protobuf::libprotobuf # If common code uses protobuf
 )
 
-# Link against external dependencies if needed by common components:
-# target_link_libraries(subspace_common PUBLIC
-#     absl::base
-#     absl::strings
-#     toolbelt
-#     co
-#     protobuf::libprotobuf # If common code uses protobuf
-# )
+add_executable(common_test common_test.cc)
+add_test(NAME common_test COMMAND common_test)
+target_link_libraries(common_test PUBLIC subspace_common gtest gtest_main)
 
