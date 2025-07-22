@@ -1029,8 +1029,12 @@ TEST_F(ClientTest, PublishAndResizeUnmapBuffers) {
   }
 
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("dave6");
-  ASSERT_TRUE(sub.ok());
+  ASSERT_TRUE(sub.ok()) << sub.status();
 
+  // Create another publisher after resize.
+  absl::StatusOr<Publisher> pub2 = pub_client.CreatePublisher("dave6", 256, 10);
+  ASSERT_TRUE(pub2.ok());
+  
   // Read all messages.
   for (int i = 0; i < 10; i++) {
     absl::StatusOr<Message> msg = sub->ReadMessage();
