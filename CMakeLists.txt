@@ -50,7 +50,7 @@ set(ABSL_ENABLE_INSTALL ON)
 FetchContent_Declare(
     abseil
     GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
-    GIT_TAG 20230802.0 # Matches the version in your WORKSPACE
+    GIT_TAG 20240722.0 # Matches the version in your WORKSPACE
     # Pass architecture settings and CXX standard propagation to Abseil's CMake build
     CMAKE_ARGS
         CMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
