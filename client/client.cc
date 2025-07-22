@@ -255,6 +255,9 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
     }
   }
   channel->TriggerSubscribers();
+  if (absl::Status status = channel->UnmapUnusedBuffers(); !status.ok()) {
+    return status;
+  }
   // channel->Dump();
   channels_.insert(channel);
   return Publisher(shared_from_this(), channel);
@@ -448,7 +451,9 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
   // would be faster.
   if (notify) {
     publisher->TriggerSubscribers();
-    publisher->UnmapUnusedBuffers();
+    if (absl::Status status = publisher->UnmapUnusedBuffers(); !status.ok()) {
+      return status;
+    }
   }
 
   if (msg.new_slot == nullptr) {
@@ -663,7 +668,9 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     // I'm out of messages to read, trigger the publishers to give me
     // some more.  This is only for reliable publishers.
     subscriber->TriggerReliablePublishers();
-    subscriber->UnmapUnusedBuffers();
+    if (absl::Status status = subscriber->UnmapUnusedBuffers(); !status.ok()) {
+      return status;
+    }
     return Message();
   }
   subscriber->SetSlot(new_slot);

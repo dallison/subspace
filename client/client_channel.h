@@ -104,7 +104,7 @@ public:
   absl::Status Map(SharedMemoryFds fds, const toolbelt::FileDescriptor &scb_fd);
 
   absl::Status MapNewBuffers(std::vector<SlotBuffer> buffers);
-  void UnmapUnusedBuffers();
+  absl::Status UnmapUnusedBuffers();
 
   int VirtualChannelId() const { return vchan_id_; }
 
@@ -217,6 +217,9 @@ protected:
   std::string BufferSharedMemoryName(int buffer_index) const {
     return Channel::BufferSharedMemoryName(session_id_, buffer_index);
   }
+
+  absl::Status ZeroOutSharedMemoryFile(
+      int buffer_index) const;
 
 #if defined(__APPLE__)
   absl::StatusOr<std::string>

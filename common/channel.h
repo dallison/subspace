@@ -338,7 +338,7 @@ public:
 
 #if defined(__APPLE__)
   absl::StatusOr<std::string>
-  MacOsSharedMemoryName(const std::string &shadow_file);
+  MacOsSharedMemoryName(const std::string &shadow_file) const;
 #endif
   // For debug, prints the contents of the three linked lists in
   // shared memory,
