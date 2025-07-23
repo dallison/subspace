@@ -504,11 +504,11 @@ public:
     return client_->GetPollFd(impl_.get());
   }
 
-      // This is a file descriptor that you can poll on to wait for
-    // message slots to be retired.  It is triggered
-    const toolbelt::FileDescriptor& GetRetirementFd() const {
-        return impl_->GetRetirementFd();
-    }
+  // This is a file descriptor that you can poll on to wait for
+  // message slots to be retired.  It is triggered
+  const toolbelt::FileDescriptor &GetRetirementFd() const {
+    return impl_->GetRetirementFd();
+  }
 
   toolbelt::FileDescriptor GetFileDescriptor() const {
     return client_->GetFileDescriptor(impl_.get());

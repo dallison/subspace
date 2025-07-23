@@ -136,7 +136,8 @@ std::string DecodedRefsBitField(uint64_t refs) {
 }
 
 bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
-                                uint64_t ordinal, int vchan_id, bool retire, std::function<void()> retire_callback) {
+                                uint64_t ordinal, int vchan_id, bool retire,
+                                std::function<void()> retire_callback) {
   for (;;) {
     uint64_t ref = slot->refs.load(std::memory_order_relaxed);
     if ((ref & kPubOwned) != 0) {
@@ -218,6 +219,8 @@ void Channel::DumpSlots(std::ostream &os) const {
     const MessageSlot *slot = &ccb_->slots[i];
     slot->Dump(os);
   }
+  os << "Retired slots: ";
+  RetiredSlots().Print(os);
 }
 
 void Channel::Dump(std::ostream &os) const {

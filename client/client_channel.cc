@@ -86,8 +86,7 @@ absl::Status ClientChannel::UnmapUnusedBuffers() {
         buffers_[i]->full_size = 0;
         buffers_[i]->slot_size = 0;
         if (IsPublisher()) {
-          if (absl::Status status =
-                  ZeroOutSharedMemoryFile(i); !status.ok()) {
+          if (absl::Status status = ZeroOutSharedMemoryFile(i); !status.ok()) {
             return status;
           }
         }
@@ -241,8 +240,8 @@ absl::Status ClientChannel::ZeroOutSharedMemoryFile(int buffer_index) const {
   // Set the length of the shadow file to 0.
   if (ftruncate(fd.Fd(), 0) < 0) {
     return absl::InternalError(
-        absl::StrFormat("Failed to truncate shadow file %s: %s", filename.c_str(),
-                        strerror(errno)));
+        absl::StrFormat("Failed to truncate shadow file %s: %s",
+                        filename.c_str(), strerror(errno)));
   }
 #else
   // Open the shared memory file.
@@ -373,22 +372,23 @@ ClientChannel::MapBuffer(toolbelt::FileDescriptor &shm_fd, size_t size,
 }
 
 void ClientChannel::TriggerRetirement(int slot_id) {
-    if (!has_retirement_triggers_) {
-        // No retirement triggers, let's avoid locking the mutex.
-        return;
+  if (!has_retirement_triggers_) {
+    // No retirement triggers, let's avoid locking the mutex.
+    return;
+  }
+  std::unique_lock<std::mutex> lock(retirement_lock_);
+  for (auto &fd : retirement_triggers_) {
+    ssize_t n = ::write(fd.Fd(), &slot_id, sizeof(slot_id));
+    // TODO: what to do if this fails?  For now just write an error to stderr.
+    if (n < 0) {
+      std::cerr << "Failed to trigger retirement for slot " << slot_id << ": "
+                << strerror(errno) << std::endl;
+    } else if (n != sizeof(slot_id)) {
+      std::cerr << "Failed to trigger retirement for slot " << slot_id
+                << ": wrote " << n << " bytes, expected " << sizeof(slot_id)
+                << " bytes" << std::endl;
     }
-    std::unique_lock<std::mutex> lock(retirement_lock_);
-    for (auto& fd : retirement_triggers_) {
-        ssize_t n = ::write(fd.Fd(), &slot_id, sizeof(slot_id));
-        // TODO: what to do if this fails?  For now just write an error to stderr.
-        if (n < 0) {
-            std::cerr << "Failed to trigger retirement for slot " << slot_id << ": "
-                      << strerror(errno) << std::endl;
-        } else if (n != sizeof(slot_id)) {
-            std::cerr << "Failed to trigger retirement for slot " << slot_id << ": wrote " << n
-                      << " bytes, expected " << sizeof(slot_id) << " bytes" << std::endl;
-        }
-    }
+  }
 }
 
 } // namespace details

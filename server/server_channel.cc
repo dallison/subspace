@@ -208,23 +208,23 @@ ServerChannel::GetReliablePublisherTriggerFds() const {
   return r;
 }
 
-
 std::vector<toolbelt::FileDescriptor> ServerChannel::GetRetirementFds() const {
-    std::vector<toolbelt::FileDescriptor> r;
-    for (auto& [id, user] : users_) {
-        if (user == nullptr) {
-            continue;
-        }
-        if (user->IsPublisher()) {
-            // The publisher probably won't have a retirement fd.
-            auto& fd = static_cast<PublisherUser*>(user.get())->GetRetirementFdWriter();
-            if (!fd.Valid()) {
-                continue;
-            }
-            r.push_back(fd);
-        }
+  std::vector<toolbelt::FileDescriptor> r;
+  for (auto & [ id, user ] : users_) {
+    if (user == nullptr) {
+      continue;
     }
-    return r;
+    if (user->IsPublisher()) {
+      // The publisher probably won't have a retirement fd.
+      auto &fd =
+          static_cast<PublisherUser *>(user.get())->GetRetirementFdWriter();
+      if (!fd.Valid()) {
+        continue;
+      }
+      r.push_back(fd);
+    }
+  }
+  return r;
 }
 
 uint64_t ServerChannel::GetVirtualMemoryUsage() const {

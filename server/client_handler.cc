@@ -169,9 +169,9 @@ void ClientHandler::HandleCreatePublisher(
       return;
     }
     if (req.notify_retirement()) {
-        response->set_error(
-                "Virtual channels do not support notifying publishers of slot retirement");
-        return;
+      response->set_error("Virtual channels do not support notifying "
+                          "publishers of slot retirement");
+      return;
     }
   }
 
@@ -290,25 +290,26 @@ void ClientHandler::HandleCreatePublisher(
   }
 
   if (req.notify_retirement()) {
-      // Allocate a retirement fd for the publisher.
-      absl::Status status = pub->AllocateRetirementFd();
-      if (!status.ok()) {
-          response->set_error(absl::StrFormat("Failed to allocate retirement fd for channel %s: %s",
-                  req.channel_name(), status.ToString()));
-          return;
-      }
-      response->set_retirement_fd_index(fd_index++);
-      // We tell the publisher to use the read end of the pipe.
-      fds.push_back(pub->GetRetirementFdReader());
+    // Allocate a retirement fd for the publisher.
+    absl::Status status = pub->AllocateRetirementFd();
+    if (!status.ok()) {
+      response->set_error(
+          absl::StrFormat("Failed to allocate retirement fd for channel %s: %s",
+                          req.channel_name(), status.ToString()));
+      return;
+    }
+    response->set_retirement_fd_index(fd_index++);
+    // We tell the publisher to use the read end of the pipe.
+    fds.push_back(pub->GetRetirementFdReader());
   } else {
-      response->set_retirement_fd_index(-1);
+    response->set_retirement_fd_index(-1);
   }
 
   // Add retirement fds.
   std::vector<toolbelt::FileDescriptor> ret_fds = channel->GetRetirementFds();
-  for (auto& fd : ret_fds) {
-      response->add_retirement_fd_indexes(fd_index++);
-      fds.push_back(fd);
+  for (auto &fd : ret_fds) {
+    response->add_retirement_fd_indexes(fd_index++);
+    fds.push_back(fd);
   }
   ChannelCounters &counters =
       channel->RecordUpdate(/*is_pub=*/true, /*add=*/true, req.is_reliable());
@@ -433,13 +434,12 @@ void ClientHandler::HandleCreateSubscriber(
     response->add_reliable_pub_trigger_fd_indexes(fd_index++);
     fds.push_back(fd);
   }
-    // Add retirement fds.
-    std::vector<toolbelt::FileDescriptor> ret_fds = channel->GetRetirementFds();
-    for (auto& fd : ret_fds) {
-        response->add_retirement_fd_indexes(fd_index++);
-        fds.push_back(fd);
-    }
-
+  // Add retirement fds.
+  std::vector<toolbelt::FileDescriptor> ret_fds = channel->GetRetirementFds();
+  for (auto &fd : ret_fds) {
+    response->add_retirement_fd_indexes(fd_index++);
+    fds.push_back(fd);
+  }
 
   if (channel->IsVirtual()) {
     // Also send back the channel multiplexer's subsciber fds so that
@@ -504,11 +504,11 @@ void ClientHandler::HandleGetTriggers(
       fds.push_back(fd);
     }
   }
-    // Add retirement fds.
+  // Add retirement fds.
   std::vector<toolbelt::FileDescriptor> ret_fds = channel->GetRetirementFds();
-  for (auto& fd : ret_fds) {
-      response->add_retirement_fd_indexes(index++);
-      fds.push_back(fd);
+  for (auto &fd : ret_fds) {
+    response->add_retirement_fd_indexes(index++);
+    fds.push_back(fd);
   }
 }
 

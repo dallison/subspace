@@ -255,16 +255,16 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
       return status;
     }
   }
-      // Retirement fds.
-    if (pub_resp.retirement_fd_index() != -1) {
-        channel->SetRetirementFd(std::move(fds[size_t(pub_resp.retirement_fd_index())]));
-    }
+  // Retirement fds.
+  if (pub_resp.retirement_fd_index() != -1) {
+    channel->SetRetirementFd(
+        std::move(fds[size_t(pub_resp.retirement_fd_index())]));
+  }
 
-    channel->ClearRetirementTriggers();
-    for (auto index : pub_resp.retirement_fd_indexes()) {
-        channel->AddRetirementTrigger(fds[size_t(index)]);
-    }
-
+  channel->ClearRetirementTriggers();
+  for (auto index : pub_resp.retirement_fd_indexes()) {
+    channel->AddRetirementTrigger(fds[size_t(index)]);
+  }
 
   channel->TriggerSubscribers();
   if (absl::Status status = channel->UnmapUnusedBuffers(); !status.ok()) {
@@ -346,13 +346,11 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
     channel->AddPublisher(std::move(fds[index]));
   }
 
-
-    // Retirement fds.
-    channel->ClearRetirementTriggers();
-    for (auto index : sub_resp.retirement_fd_indexes()) {
-        channel->AddRetirementTrigger(fds[size_t(index)]);
-    }
-
+  // Retirement fds.
+  channel->ClearRetirementTriggers();
+  for (auto index : sub_resp.retirement_fd_indexes()) {
+    channel->AddRetirementTrigger(fds[size_t(index)]);
+  }
 
   channel->SetNumUpdates(sub_resp.num_pub_updates());
 
@@ -944,11 +942,11 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
     subscriber->AddPublisher(fds[index]);
   }
 
-      // Retirement fds.
-    subscriber->ClearRetirementTriggers();
-    for (auto index : sub_resp.retirement_fd_indexes()) {
-        subscriber->AddRetirementTrigger(fds[size_t(index)]);
-    }
+  // Retirement fds.
+  subscriber->ClearRetirementTriggers();
+  for (auto index : sub_resp.retirement_fd_indexes()) {
+    subscriber->AddRetirementTrigger(fds[size_t(index)]);
+  }
 
   // subscriber->Dump();
   return absl::OkStatus();
@@ -988,10 +986,10 @@ ClientImpl::ReloadSubscribersIfNecessary(PublisherImpl *publisher) {
     publisher->AddSubscriber(fds[index]);
   }
 
-    publisher->ClearRetirementTriggers();
-    for (auto index : sub_resp.retirement_fd_indexes()) {
-        publisher->AddRetirementTrigger(fds[size_t(index)]);
-    }
+  publisher->ClearRetirementTriggers();
+  for (auto index : sub_resp.retirement_fd_indexes()) {
+    publisher->AddRetirementTrigger(fds[size_t(index)]);
+  }
   return absl::OkStatus();
 }
 

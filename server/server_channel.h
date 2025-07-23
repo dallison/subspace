@@ -85,12 +85,12 @@ public:
   bool IsLocal() const { return is_local_; }
   bool IsFixedSize() const { return is_fixed_size_; }
 
-  toolbelt::FileDescriptor& GetRetirementFdWriter() {
-      return retirement_pipe_.WriteFd();
+  toolbelt::FileDescriptor &GetRetirementFdWriter() {
+    return retirement_pipe_.WriteFd();
   }
 
-  toolbelt::FileDescriptor& GetRetirementFdReader() {
-      return retirement_pipe_.ReadFd();
+  toolbelt::FileDescriptor &GetRetirementFdReader() {
+    return retirement_pipe_.ReadFd();
   }
 
   absl::Status AllocateRetirementFd() {
@@ -109,8 +109,8 @@ public:
 private:
   bool is_local_;
   bool is_fixed_size_;
-  toolbelt::Pipe retirement_pipe_;  // For notifying publisher of slot retirement.
-
+  toolbelt::Pipe
+      retirement_pipe_; // For notifying publisher of slot retirement.
 };
 
 // This is endpoint transmitting the data for a channel.  It holds an internet
