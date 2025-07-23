@@ -127,6 +127,16 @@ message ChannelInfo {
   int32 slot_size = 2;
   int32 num_slots = 3;
   bytes type = 4;
+  int32 num_pubs = 5;         // Total number of publishers for this channel.
+  int32 num_subs = 6;         // Total number of subscribers for this channel.
+  int32 num_bridge_pubs = 7;  // Number of publishers that are bridges.
+  int32 num_bridge_subs = 8;  // Number of subscribers that are bridges.
+  bool is_reliable = 9;       // True if channel is reliable.
+  bool is_virtual = 10;       // True if channel is virtual.
+
+  // Only if is_virtual is true.
+  int32 vchan_id = 11;        // Virtual channel ID.
+  string mux = 12;
 }
 
 // This is published to the /subspace/ChannelDirectory channel.

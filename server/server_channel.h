@@ -188,6 +188,7 @@ public:
   virtual bool IsEmpty() const { return user_ids_.IsEmpty(); }
   virtual absl::Status HasSufficientCapacity(int new_max_active_messages) const;
   void CountUsers(int &num_pubs, int &num_subs) const;
+  void CountBridgeUsers(int &num_pubs, int &num_subs) const;
   virtual void GetChannelInfo(subspace::ChannelInfo *info);
   virtual void GetChannelStats(subspace::ChannelStats *stats);
   void TriggerAllSubscribers();
