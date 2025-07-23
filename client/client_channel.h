@@ -192,7 +192,21 @@ public:
 
   absl::Status AttachBuffers();
 
+      void ClearRetirementTriggers() {
+        std::unique_lock<std::mutex> lock(retirement_lock_);
+        retirement_triggers_.clear();
+        has_retirement_triggers_ = false;
+    }
+
+    void AddRetirementTrigger(toolbelt::FileDescriptor fd) {
+        std::unique_lock<std::mutex> lock(retirement_lock_);
+        retirement_triggers_.emplace_back(std::move(fd));
+        has_retirement_triggers_ = true;
+    }
+
 protected:
+    void TriggerRetirement(int slot_id);
+
   virtual bool IsSubscriber() const { return false; }
   virtual bool IsPublisher() const { return false; }
 
@@ -231,6 +245,21 @@ protected:
   int vchan_id_ = -1;           // Virtual channel ID.
   uint64_t session_id_;
   std::vector<std::unique_ptr<BufferSet>> buffers_ = {};
+
+    // Retirement triggers.  Although these are not in shared memory,
+    // the retirement of a slot can occur in any thread so we need
+    // a mutex.  But we don't want to lock the mutex if there are none
+    // so we use an atomic boolean to check this.
+    //
+    // It is going to be very rare that the retirement triggers are changed
+    // while an active messages is being destructed (a cause of a retirement).
+    // The use of an atomic is not needed since single loads and stores are
+    // atomic on Intel and ARM processors but it's free and serves to
+    // document the intent that this is a flag that is checked before
+    // locking the mutex (and also TSAN won't nag about it).
+    std::atomic<bool> has_retirement_triggers_{false};
+    std::vector<toolbelt::FileDescriptor> retirement_triggers_ = {};
+    std::mutex retirement_lock_;
 };
 
 } // namespace details

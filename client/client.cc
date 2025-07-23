@@ -184,6 +184,7 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
   cmd->set_type(opts.Type());
   cmd->set_mux(opts.Mux());
   cmd->set_vchan_id(opts.VchanId());
+  cmd->set_notify_retirement(opts.notify_retirement);
 
   // Send request to server and wait for response.
   Response resp;
@@ -254,6 +255,17 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
       return status;
     }
   }
+      // Retirement fds.
+    if (pub_resp.retirement_fd_index() != -1) {
+        channel->SetRetirementFd(std::move(fds[size_t(pub_resp.retirement_fd_index())]));
+    }
+
+    channel->ClearRetirementTriggers();
+    for (auto index : pub_resp.retirement_fd_indexes()) {
+        channel->AddRetirementTrigger(fds[size_t(index)]);
+    }
+
+
   channel->TriggerSubscribers();
   if (absl::Status status = channel->UnmapUnusedBuffers(); !status.ok()) {
     return status;
@@ -333,6 +345,14 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
   for (auto index : sub_resp.reliable_pub_trigger_fd_indexes()) {
     channel->AddPublisher(std::move(fds[index]));
   }
+
+
+    // Retirement fds.
+    channel->ClearRetirementTriggers();
+    for (auto index : sub_resp.retirement_fd_indexes()) {
+        channel->AddRetirementTrigger(fds[size_t(index)]);
+    }
+
 
   channel->SetNumUpdates(sub_resp.num_pub_updates());
 
@@ -923,6 +943,13 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
   for (auto index : sub_resp.reliable_pub_trigger_fd_indexes()) {
     subscriber->AddPublisher(fds[index]);
   }
+
+      // Retirement fds.
+    subscriber->ClearRetirementTriggers();
+    for (auto index : sub_resp.retirement_fd_indexes()) {
+        subscriber->AddRetirementTrigger(fds[size_t(index)]);
+    }
+
   // subscriber->Dump();
   return absl::OkStatus();
 }
@@ -960,6 +987,11 @@ ClientImpl::ReloadSubscribersIfNecessary(PublisherImpl *publisher) {
   for (auto index : sub_resp.sub_trigger_fd_indexes()) {
     publisher->AddSubscriber(fds[index]);
   }
+
+    publisher->ClearRetirementTriggers();
+    for (auto index : sub_resp.retirement_fd_indexes()) {
+        publisher->AddRetirementTrigger(fds[size_t(index)]);
+    }
   return absl::OkStatus();
 }
 
