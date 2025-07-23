@@ -101,6 +101,21 @@ int ClientTest::server_pipe_[2];
 std::unique_ptr<subspace::Server> ClientTest::server_;
 std::thread ClientTest::server_thread_;
 
+#define VAR(a) a##__COUNTER__
+#define EVAL_AND_ASSERT_OK(expr) EVAL_AND_ASSERT_OK2(VAR(r_), expr)
+
+#define EVAL_AND_ASSERT_OK2(result, expr)                                      \
+  ({                                                                           \
+    auto result = (expr);                                                      \
+    if (!result.ok()) {                                                        \
+      std::cerr << result.status() << std::endl;                               \
+    }                                                                          \
+    ASSERT_TRUE(result.ok());                                                  \
+    std::move(*result);                                                        \
+  })
+
+#define ASSERT_OK(e) ASSERT_TRUE(e.ok())
+
 TEST_F(ClientTest, InetAddressSupportsAbslHash) {
   struct sockaddr_in addr = {
 #if defined(__APPLE__)
@@ -1034,7 +1049,7 @@ TEST_F(ClientTest, PublishAndResizeUnmapBuffers) {
   // Create another publisher after resize.
   absl::StatusOr<Publisher> pub2 = pub_client.CreatePublisher("dave6", 256, 10);
   ASSERT_TRUE(pub2.ok());
-  
+
   // Read all messages.
   for (int i = 0; i < 10; i++) {
     absl::StatusOr<Message> msg = sub->ReadMessage();
@@ -1922,6 +1937,369 @@ TEST_F(ClientTest, RaceBetweenPubAndUnsub) {
   pub_stopped = true;
   pub_thread.join();
 }
+
+
+// One publisher with a retirement trigger and two subscribers.  Subscribers trigger
+// the retirement.
+TEST_F(ClientTest, RetirementTrigger1) {
+    auto pub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+    auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+    absl::StatusOr<Publisher> p = pub_client->CreatePublisher(
+            "dave6", {.slot_size = 256, .num_slots = 10, .notify_retirement = true});
+    ASSERT_OK(p);
+    auto pub = std::move(*p);
+
+    {
+        // You can't create a virtual publisher with notify_retirement.
+        absl::StatusOr<Publisher> p2 = pub_client->CreatePublisher(
+                "dave6v",
+                {
+                        .slot_size = 256,
+                        .num_slots = 10,
+                        .mux = "/foobar",
+                        .notify_retirement = true,
+                });
+        ASSERT_FALSE(p2.ok());
+    }
+    const toolbelt::FileDescriptor& retirement_fd = pub.GetRetirementFd();
+    absl::StatusOr<void*> buffer = pub.GetMessageBuffer();
+    ASSERT_OK(buffer);
+    memcpy(*buffer, "foobar", 6);
+    absl::StatusOr<const Message> pub_status = pub.PublishMessage(6);
+    ASSERT_OK(pub_status);
+
+    absl::StatusOr<Subscriber> s1 =
+            sub_client->CreateSubscriber("dave6", {.max_active_messages = 1});
+    ASSERT_OK(s1);
+    auto sub1 = std::move(*s1);
+
+    absl::StatusOr<Subscriber> s2 =
+            sub_client->CreateSubscriber("dave6", {.max_active_messages = 1});
+    ASSERT_OK(s2);
+    auto sub2 = std::move(*s2);
+
+    // Read the message in sub1.
+    absl::StatusOr<subspace::Message> p1 = sub1.ReadMessage();
+    ASSERT_OK(p1);
+    auto ptr1 = std::move(*p1);
+    ASSERT_STREQ("foobar", reinterpret_cast<const char*>(ptr1.buffer));
+
+    // Keep the message alive in sub1 and read it in sub2.
+    absl::StatusOr<subspace::Message> p2 = sub2.ReadMessage();
+    ASSERT_OK(p2);
+    auto ptr2 = std::move(*p2);
+    ASSERT_STREQ("foobar", reinterpret_cast<const char*>(ptr2.buffer));
+
+    // Reset the first message.
+    ptr1.Release();
+    // Reset the second message. This will trigger a retirement.
+    ptr2.Release();
+
+    // Read the retirement fd and expect it to contain slot 0.
+    struct pollfd fd = {.events = POLLIN, .fd = retirement_fd.Fd()};
+    int e = ::poll(&fd, 1, -1);
+    ASSERT_EQ(1, e);
+    ASSERT_TRUE(fd.revents & POLLIN);
+    int retired_slot;
+    ssize_t n = ::read(retirement_fd.Fd(), &retired_slot, sizeof(retired_slot));
+    ASSERT_EQ(sizeof(retired_slot), n);
+    ASSERT_EQ(0, retired_slot);
+
+    // Pipe should be empty now.
+    e = ::poll(&fd, 1, 0);
+    ASSERT_EQ(0, e);
+    ASSERT_FALSE(fd.revents & POLLIN);
+}
+
+// This tests retirement from the the publisher side using dropped messages.  We
+// have two subscribers, one reads two messages and the other doesn't read any.
+// Since the second subscriber will never see the messages, the publisher will
+// recycle the slots and trigger a retirement.
+TEST_F(ClientTest, RetirementTrigger2) {
+    auto pub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+    auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+    absl::StatusOr<Publisher> p = pub_client->CreatePublisher(
+            "dave6", {.slot_size = 256, .num_slots = 10, .notify_retirement = true});
+    ASSERT_OK(p);
+    auto pub = std::move(*p);
+
+    const toolbelt::FileDescriptor& retirement_fd = pub.GetRetirementFd();
+
+    absl::StatusOr<Subscriber> s1 =
+            sub_client->CreateSubscriber("dave6", {.max_active_messages = 1});
+    ASSERT_OK(s1);
+    auto sub1 = std::move(*s1);
+
+    absl::StatusOr<Subscriber> s2 =
+            sub_client->CreateSubscriber("dave6", {.max_active_messages = 1});
+    ASSERT_OK(s2);
+    auto sub2 = std::move(*s2);
+
+    // Fill the slots with messages with enough room for two subscribers.
+    for (int i = 0; i < 7; i++) {
+        // Publish a message.
+        absl::StatusOr<void*> buffer = pub.GetMessageBuffer();
+        ASSERT_OK(buffer);
+        memcpy(*buffer, "foobar", 6);
+        absl::StatusOr<const Message> pub_status = pub.PublishMessage(6);
+        ASSERT_OK(pub_status);
+    }
+
+    // There should be no retired messages at this point.
+
+    // Read 2 messages in sub1.  These will be retired.
+    for (int i = 0; i < 2; i++) {
+        absl::StatusOr<subspace::Message> p1 = sub1.ReadMessage();
+        ASSERT_OK(p1);
+        auto ptr1 = std::move(*p1);
+        ASSERT_STREQ("foobar", reinterpret_cast<const char*>(ptr1.buffer));
+    }
+
+    // Publish 2 messages, these will take the retired slots.
+    for (int i = 0; i < 2; i++) {
+        absl::StatusOr<void*> buffer = pub.GetMessageBuffer();
+        ASSERT_OK(buffer);
+        memcpy(*buffer, "foobar", 6);
+        absl::StatusOr<const Message> pub_status = pub.PublishMessage(6);
+        ASSERT_OK(pub_status);
+    }
+
+    // There should be nothing in the retirement fd.
+    struct pollfd fd = {.events = POLLIN, .fd = retirement_fd.Fd()};
+    int e = ::poll(&fd, 1, 0);
+    ASSERT_EQ(0, e);
+    ASSERT_FALSE(fd.revents & POLLIN);
+
+    // Publish another message.  This will trigger the recycling of a slot and trigger
+    // a publisher-side retirement.
+    {
+        absl::StatusOr<void*> buffer = pub.GetMessageBuffer();
+        ASSERT_OK(buffer);
+        memcpy(*buffer, "foobar", 6);
+        absl::StatusOr<const Message> pub_status = pub.PublishMessage(6);
+        ASSERT_OK(pub_status);
+    }
+    // Read the retirement fd and expect it to contain slot 0.
+    e = ::poll(&fd, 1, -1);
+    ASSERT_EQ(1, e);
+    ASSERT_TRUE(fd.revents & POLLIN);
+    int retired_slot;
+    ssize_t n = ::read(retirement_fd.Fd(), &retired_slot, sizeof(retired_slot));
+    ASSERT_EQ(sizeof(retired_slot), n);
+    ASSERT_EQ(0, retired_slot);
+
+    // Send another two messages.  This will both trigger a recycled slot and
+    // a publisher-side retirement.
+    for (int i = 0; i < 2; i++) {
+        absl::StatusOr<void*> buffer = pub.GetMessageBuffer();
+        ASSERT_OK(buffer);
+        memcpy(*buffer, "foobar", 6);
+        absl::StatusOr<const Message> pub_status = pub.PublishMessage(6);
+        ASSERT_OK(pub_status);
+    }
+
+    // Read the retirement pipe.  There should be 2 slot ids in the pipe.
+    e = ::poll(&fd, 1, -1);
+    ASSERT_EQ(1, e);
+    ASSERT_TRUE(fd.revents & POLLIN);
+    int retired_slots[2];
+    for (int i = 0; i < 2; i++) {
+        // Read the retirement fd and expect it to contain slot 1 and 2.
+        n = ::read(retirement_fd.Fd(), &retired_slots[i], sizeof(retired_slots[i]));
+        ASSERT_EQ(sizeof(retired_slots[i]), n);
+    }
+    ASSERT_EQ(1, retired_slots[0]);
+    ASSERT_EQ(2, retired_slots[1]);
+
+    // Pipe will be empty.
+    e = ::poll(&fd, 1, 0);
+    ASSERT_EQ(0, e);
+    ASSERT_FALSE(fd.revents & POLLIN);
+}
+
+// Checks that retirement notification works with two publishers on different clients.
+TEST_F(ClientTest, RetirementTrigger3) {
+    auto pub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+    auto pub2Client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+    auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+    absl::StatusOr<Publisher> p = pub_client->CreatePublisher(
+            "dave6", {.slot_size = 256, .num_slots = 10, .notify_retirement = true});
+    ASSERT_OK(p);
+    auto pub = std::move(*p);
+
+    // Another publisher on a different client.
+    absl::StatusOr<Publisher> pp2 = pub2Client->CreatePublisher(
+            "dave6", {.slot_size = 256, .num_slots = 10, .notify_retirement = true});
+    ASSERT_OK(pp2);
+    auto pub2 = std::move(*pp2);
+
+    // We check for retirement trigger on the second publisher, not the one that
+    // retires the slots.
+    const toolbelt::FileDescriptor& retirement_fd = pub2.GetRetirementFd();
+
+    absl::StatusOr<void*> buffer = pub.GetMessageBuffer();
+    ASSERT_OK(buffer);
+    memcpy(*buffer, "foobar", 6);
+    absl::StatusOr<const Message> pub_status = pub.PublishMessage(6);
+    ASSERT_OK(pub_status);
+
+    absl::StatusOr<Subscriber> s1 =
+            sub_client->CreateSubscriber("dave6", {.max_active_messages = 1});
+    ASSERT_OK(s1);
+    auto sub1 = std::move(*s1);
+
+    absl::StatusOr<Subscriber> s2 =
+            sub_client->CreateSubscriber("dave6", {.max_active_messages = 1});
+    ASSERT_OK(s2);
+    auto sub2 = std::move(*s2);
+
+    // Read the message in sub1.
+    absl::StatusOr<subspace::Message> p1 = sub1.ReadMessage();
+    ASSERT_OK(p1);
+    auto ptr1 = *p1;
+    ASSERT_STREQ("foobar", reinterpret_cast<const char*>(ptr1.buffer));
+
+    // Keep the message alive in sub1 and read it in sub2.
+    absl::StatusOr<subspace::Message> p2 = sub2.ReadMessage();
+    ASSERT_OK(p2);
+    auto ptr2 = std::move(*p2);
+    ASSERT_STREQ("foobar", reinterpret_cast<const char*>(ptr2.buffer));
+
+    // Reset the first message.
+    ptr1.Release();
+    // Reset the second message. This will trigger a retirement.
+    ptr2.Release();
+
+    // Read the retirement fd and expect it to contain slot 0.
+    struct pollfd fd = {.events = POLLIN, .fd = retirement_fd.Fd()};
+    int e = ::poll(&fd, 1, -1);
+    ASSERT_EQ(1, e);
+    ASSERT_TRUE(fd.revents & POLLIN);
+    int retired_slot;
+    ssize_t n = ::read(retirement_fd.Fd(), &retired_slot, sizeof(retired_slot));
+    ASSERT_EQ(sizeof(retired_slot), n);
+    ASSERT_EQ(0, retired_slot);
+
+    // Pipe should be empty now.
+    e = ::poll(&fd, 1, 0);
+    ASSERT_EQ(0, e);
+    ASSERT_FALSE(fd.revents & POLLIN);
+}
+
+TEST_F(ClientTest, RetirementTrigger4) {
+    auto pub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+    auto pub2Client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+    auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+    absl::StatusOr<Publisher> p = pub_client->CreatePublisher(
+            "dave6", {.slot_size = 256, .num_slots = 10, .notify_retirement = true});
+    ASSERT_OK(p);
+    auto pub = std::move(*p);
+
+    // Another publisher on a different client.
+    absl::StatusOr<Publisher> pp2 = pub2Client->CreatePublisher(
+            "dave6", {.slot_size = 256, .num_slots = 10, .notify_retirement = true});
+    ASSERT_OK(pp2);
+    auto pub2 = std::move(*pp2);
+
+    // We check for retirement trigger on the second publisher, not the one that
+    // retires the slots.
+    const toolbelt::FileDescriptor& retirement_fd = pub2.GetRetirementFd();
+
+    absl::StatusOr<Subscriber> s1 =
+            sub_client->CreateSubscriber("dave6", {.max_active_messages = 1});
+    ASSERT_OK(s1);
+    auto sub1 = std::move(*s1);
+
+    absl::StatusOr<Subscriber> s2 =
+            sub_client->CreateSubscriber("dave6", {.max_active_messages = 1});
+    ASSERT_OK(s2);
+    auto sub2 = std::move(*s2);
+
+    // Fill the slots with messages with enough room for two subscribers.
+    for (int i = 0; i < 6; i++) {
+        // Publish a message.
+        absl::StatusOr<void*> buffer = pub.GetMessageBuffer();
+        ASSERT_OK(buffer);
+        memcpy(*buffer, "foobar", 6);
+        absl::StatusOr<const Message> pub_status = pub.PublishMessage(6);
+        ASSERT_OK(pub_status);
+    }
+
+    // Read 2 messages in sub1.  These will be retired.
+    for (int i = 0; i < 2; i++) {
+        absl::StatusOr<subspace::Message> p1 = sub1.ReadMessage();
+        ASSERT_OK(p1);
+        auto ptr1 = std::move(*p1);
+        ASSERT_STREQ("foobar", reinterpret_cast<const char*>(ptr1.buffer));
+    }
+
+    // Publish 2 messages, these will take the retired slots.
+    for (int i = 0; i < 2; i++) {
+        absl::StatusOr<void*> buffer = pub.GetMessageBuffer();
+        ASSERT_OK(buffer);
+        memcpy(*buffer, "foobar", 6);
+        absl::StatusOr<const Message> pub_status = pub.PublishMessage(6);
+        ASSERT_OK(pub_status);
+    }
+
+    // There should be nothing in the retirement fd.
+    struct pollfd fd = {.events = POLLIN, .fd = retirement_fd.Fd()};
+    int e = ::poll(&fd, 1, 0);
+    ASSERT_EQ(0, e);
+    ASSERT_FALSE(fd.revents & POLLIN);
+
+    // Publish another message.  This will trigger the recycling of a slot and trigger
+    // a publisher-side retirement.
+    {
+        absl::StatusOr<void*> buffer = pub.GetMessageBuffer();
+        ASSERT_OK(buffer);
+        memcpy(*buffer, "foobar", 6);
+        absl::StatusOr<const Message> pub_status = pub.PublishMessage(6);
+        ASSERT_OK(pub_status);
+    }
+
+    // Read the retirement fd and expect it to contain slot 0.
+    e = ::poll(&fd, 1, -1);
+    ASSERT_EQ(1, e);
+    ASSERT_TRUE(fd.revents & POLLIN);
+    int retired_slot;
+    ssize_t n = ::read(retirement_fd.Fd(), &retired_slot, sizeof(retired_slot));
+    ASSERT_EQ(sizeof(retired_slot), n);
+    ASSERT_EQ(0, retired_slot);
+
+    // Send another two messages.  This will both trigger a recycled slot and
+    // a publisher-side retirement.
+    for (int i = 0; i < 2; i++) {
+        absl::StatusOr<void*> buffer = pub.GetMessageBuffer();
+        ASSERT_OK(buffer);
+        memcpy(*buffer, "foobar", 6);
+        absl::StatusOr<const Message> pub_status = pub.PublishMessage(6);
+        ASSERT_OK(pub_status);
+    }
+
+    // Read the retirement pipe.  There should be 2 slot ids in the pipe.
+    e = ::poll(&fd, 1, -1);
+    ASSERT_EQ(1, e);
+    ASSERT_TRUE(fd.revents & POLLIN);
+    int retired_slots[2];
+    for (int i = 0; i < 2; i++) {
+        // Read the retirement fd and expect it to contain slot 2 and 3.
+        n = ::read(retirement_fd.Fd(), &retired_slots[i], sizeof(retired_slots[i]));
+        ASSERT_EQ(sizeof(retired_slots[i]), n);
+    }
+    ASSERT_EQ(2, retired_slots[0]);
+    ASSERT_EQ(3, retired_slots[1]);
+
+    // Pipe will be empty.
+    e = ::poll(&fd, 1, 0);
+    ASSERT_EQ(0, e);
+    ASSERT_FALSE(fd.revents & POLLIN);
+}
+
 
 int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);

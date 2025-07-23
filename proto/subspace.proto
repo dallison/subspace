@@ -30,6 +30,7 @@ message CreatePublisherRequest {
   bool is_fixed_size = 8;
   string mux = 9;
   int32 vchan_id = 10;
+  bool notify_retirement = 11;  // Notify publisher of slot retirement.
 }
 
 message CreatePublisherResponse {
@@ -44,6 +45,8 @@ message CreatePublisherResponse {
   int32 num_sub_updates = 9;
   bytes type = 10;
   int32 vchan_id = 11;
+  int32 retirement_fd_index = 14;             // My retirement fd index (read end)
+  repeated int32 retirement_fd_indexes = 15;  // Write end of all retirement fds.
 }
 
 // This is used both to create a new subscriber and to reload
@@ -74,6 +77,7 @@ message CreateSubscriberResponse {
   int32 num_pub_updates = 11;
   bytes type = 12;
   int32 vchan_id = 13;
+  repeated int32 retirement_fd_indexes = 14;
 }
 
 message GetTriggersRequest { string channel_name = 1; }
@@ -82,6 +86,7 @@ message GetTriggersResponse {
   string error = 1;
   repeated int32 reliable_pub_trigger_fd_indexes = 2;
   repeated int32 sub_trigger_fd_indexes = 3;
+  repeated int32 retirement_fd_indexes = 4;
 }
 
 message RemovePublisherRequest {

@@ -402,7 +402,7 @@ public:
   void SetDebug(bool v) { debug_ = v; }
 
   bool AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
-                         uint64_t ordinal, int vchan_id, bool retire);
+                         uint64_t ordinal, int vchan_id, bool retire, std::function<void()> retire_callback = {});
 
   void SetType(std::string type) { type_ = std::move(type); }
   const std::string Type() const { return type_; }
@@ -424,6 +424,10 @@ public:
 
   InPlaceAtomicBitset &RetiredSlots() {
     return *reinterpret_cast<InPlaceAtomicBitset *>(EndOfSlots());
+  }
+
+  const InPlaceAtomicBitset &RetiredSlots() const {
+    return *reinterpret_cast<const InPlaceAtomicBitset *>(EndOfSlots());
   }
 
   InPlaceAtomicBitset &GetAvailableSlots(int sub_id) {

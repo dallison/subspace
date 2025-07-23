@@ -12,6 +12,7 @@
 #include "proto/subspace.pb.h"
 #include "toolbelt/bitset.h"
 #include "toolbelt/fd.h"
+#include "toolbelt/pipe.h"
 #include "toolbelt/sockets.h"
 #include "toolbelt/triggerfd.h"
 #include <memory>
@@ -84,9 +85,32 @@ public:
   bool IsLocal() const { return is_local_; }
   bool IsFixedSize() const { return is_fixed_size_; }
 
+  toolbelt::FileDescriptor& GetRetirementFdWriter() {
+      return retirement_pipe_.WriteFd();
+  }
+
+  toolbelt::FileDescriptor& GetRetirementFdReader() {
+      return retirement_pipe_.ReadFd();
+  }
+
+  absl::Status AllocateRetirementFd() {
+#if defined(__linux__)
+    auto p = toolbelt::Pipe::CreateWithFlags(O_DIRECT);
+#else
+    auto p = toolbelt::Pipe::Create();
+#endif
+    if (!p.ok()) {
+      return p.status();
+    }
+    retirement_pipe_ = std::move(*p);
+    return absl::OkStatus();
+  }
+
 private:
   bool is_local_;
   bool is_fixed_size_;
+  toolbelt::Pipe retirement_pipe_;  // For notifying publisher of slot retirement.
+
 };
 
 // This is endpoint transmitting the data for a channel.  It holds an internet
@@ -166,6 +190,8 @@ public:
 
   // Get the file descriptors for all reliable publisher triggers.
   std::vector<toolbelt::FileDescriptor> GetReliablePublisherTriggerFds() const;
+
+  std::vector<toolbelt::FileDescriptor> GetRetirementFds() const;
 
   // Translate a user id into a User pointer.  The pointer ownership
   // is kept by the ServerChannel.

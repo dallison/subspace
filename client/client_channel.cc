@@ -372,5 +372,24 @@ ClientChannel::MapBuffer(toolbelt::FileDescriptor &shm_fd, size_t size,
   return reinterpret_cast<char *>(p);
 }
 
+void ClientChannel::TriggerRetirement(int slot_id) {
+    if (!has_retirement_triggers_) {
+        // No retirement triggers, let's avoid locking the mutex.
+        return;
+    }
+    std::unique_lock<std::mutex> lock(retirement_lock_);
+    for (auto& fd : retirement_triggers_) {
+        ssize_t n = ::write(fd.Fd(), &slot_id, sizeof(slot_id));
+        // TODO: what to do if this fails?  For now just write an error to stderr.
+        if (n < 0) {
+            std::cerr << "Failed to trigger retirement for slot " << slot_id << ": "
+                      << strerror(errno) << std::endl;
+        } else if (n != sizeof(slot_id)) {
+            std::cerr << "Failed to trigger retirement for slot " << slot_id << ": wrote " << n
+                      << " bytes, expected " << sizeof(slot_id) << " bytes" << std::endl;
+        }
+    }
+}
+
 } // namespace details
 } // namespace subspace

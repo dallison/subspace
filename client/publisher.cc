@@ -98,10 +98,11 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
   DynamicBitSet embargoed_slots(NumSlots());
   constexpr int max_cas_retries = 1000;
   int cas_retries = 0;
+  int retired_slot = -1;
   for (;;) {
     // Look at the first retired slot.  If there are no retired
     // slots, look at all slots for the earliest unreferenced one.
-    int retired_slot = RetiredSlots().FindFirstSet();
+    retired_slot = RetiredSlots().FindFirstSet();
     if (retired_slot != -1) {
       // We have a retired slot.
       if (embargoed_slots.IsSet(retired_slot)) {
@@ -171,6 +172,12 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
   // We have a slot.  Clear it in all the subscriber bitsets.
   ccb_->subscribers.Traverse(
       [this, slot](int sub_id) { GetAvailableSlots(sub_id).Clear(slot->id); });
+
+    // If we took a slot that wasn't retired we must trigger the retirement fd.  This happens
+    // when we recycle a slot that has not yet been seen by all subscribers.
+    if (retired_slot == -1) {
+        TriggerRetirement(slot->id);
+    }
   return slot;
 }
 
@@ -180,12 +187,13 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
   std::vector<ActiveSlot> active_slots;
   active_slots.reserve(NumSlots());
   DynamicBitSet embargoed_slots(NumSlots());
+  int retired_slot = -1;
   for (;;) {
     ReloadIfNecessary(reload);
 
     // Put all free slots into the active_slots vector.
     active_slots.clear();
-    int retired_slot = RetiredSlots().FindFirstSet();
+    retired_slot = RetiredSlots().FindFirstSet();
     if (retired_slot != -1) { // We have a retired slot.
       if (embargoed_slots.IsSet(retired_slot)) {
         continue;
@@ -268,6 +276,11 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
   ccb_->subscribers.Traverse(
       [this, slot](int sub_id) { GetAvailableSlots(sub_id).Clear(slot->id); });
 
+    // If we took a slot that wasn't retired we must trigger the retirement fd.  This happens
+    // when we recycle a slot that has not yet been seen by all subscribers.
+    if (retired_slot == -1) {
+        TriggerRetirement(slot->id);
+    }
   return slot;
 }
 

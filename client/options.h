@@ -98,6 +98,12 @@ struct PublisherOptions {
 
   int VchanId() const { return vchan_id; }
 
+  bool NotifyRetirement() const { return notify_retirement; }
+  PublisherOptions &SetNotifyRetirement(bool v) {
+    notify_retirement = v;
+    return *this;
+  }
+
   // If you use the new CreatePublisher API, set the slot size and num slots in
   // here.
   int32_t slot_size = 0;
@@ -113,6 +119,7 @@ struct PublisherOptions {
 
   std::string mux;
   int vchan_id = -1; // If -1, server will assign.
+  bool notify_retirement = false;
 };
 
 struct SubscriberOptions {

@@ -32,6 +32,16 @@ public:
 
   absl::Status CreateOrAttachBuffers(uint64_t slot_size);
 
+      void SetRetirementFd(toolbelt::FileDescriptor fd) {
+        retirement_fd_ = std::move(fd);
+    }
+
+    // This is the read end of a pipe into which will be written the slot ids
+    // for retired slots.
+    const toolbelt::FileDescriptor& GetRetirementFd() const {
+        return retirement_fd_;
+    }
+
 private:
   friend class ::subspace::ClientImpl;
 
@@ -97,6 +107,7 @@ private:
   int publisher_id_;
   std::vector<toolbelt::TriggerFd> subscribers_;
   PublisherOptions options_;
+  toolbelt::FileDescriptor retirement_fd_ = {};
 };
 
 } // namespace details
