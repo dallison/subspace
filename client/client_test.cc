@@ -1961,8 +1961,7 @@ TEST_F(ClientTest, RetirementTrigger1) {
     ASSERT_FALSE(p2.ok());
   }
   const toolbelt::FileDescriptor &retirement_fd = pub.GetRetirementFd();
-
-  std::cerr << "retirement_fd = " << retirement_fd.Fd() << std::endl;
+  ASSERT_TRUE(retirement_fd.Valid());
 
   absl::StatusOr<void *> buffer = pub.GetMessageBuffer();
   ASSERT_OK(buffer);
