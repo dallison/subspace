@@ -331,6 +331,22 @@ void ServerChannel::CountUsers(int &num_pubs, int &num_subs) const {
   }
 }
 
+void ServerChannel::CountBridgeUsers(int &num_pubs, int &num_subs) const {
+  num_pubs = num_subs = 0;
+  for (auto & [ id, user ] : users_) {
+    if (user == nullptr) {
+      continue;
+    }
+    if (user->IsBridge()) {
+      if (user->IsPublisher()) {
+        num_pubs++;
+      } else {
+        num_subs++;
+      }
+    }
+  }
+}
+
 // Channel is public if there are any public publishers.
 bool ServerChannel::IsLocal() const {
   for (auto & [ id, user ] : users_) {
@@ -466,6 +482,22 @@ void ServerChannel::GetChannelInfo(subspace::ChannelInfo *info) {
   info->set_slot_size(SlotSize());
   info->set_num_slots(NumSlots());
   info->set_type(Type());
+
+  int num_pubs, num_subs;
+  CountUsers(num_pubs, num_subs);
+  info->set_num_pubs(num_pubs);
+  info->set_num_subs(num_subs);
+  info->set_is_reliable(IsReliable());
+  if (IsVirtual()) {
+    info->set_is_virtual(true);
+    VirtualChannel *vchan = static_cast<VirtualChannel *>(this);
+    info->set_vchan_id(GetVirtualChannelId());
+    info->set_mux(vchan->GetMux()->Name());
+  }
+
+  CountBridgeUsers(num_pubs, num_subs);
+  info->set_num_bridge_pubs(num_pubs);
+  info->set_num_bridge_subs(num_subs);
 }
 
 void ServerChannel::GetChannelStats(subspace::ChannelStats *stats) {
