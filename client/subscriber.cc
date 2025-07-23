@@ -32,8 +32,9 @@ void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
   // std::cerr << "remove active message " << slot->id << " " << slot->ordinal
   //           << "\n";
   slot->sub_owners.Clear(subscriber_id_);
-  AtomicIncRefCount(slot, IsReliable(), -1, slot->ordinal, slot->vchan_id,
-                    true, [this, slot]() { TriggerRetirement(slot->id); });
+  AtomicIncRefCount(slot, IsReliable(), -1, slot->ordinal, slot->vchan_id, true,
+                    [this, slot]() {
+                       TriggerRetirement(slot->id); });
 
   if (num_active_messages_-- == options_.MaxActiveMessages()) {
     Trigger();

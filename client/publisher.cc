@@ -173,11 +173,12 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
   ccb_->subscribers.Traverse(
       [this, slot](int sub_id) { GetAvailableSlots(sub_id).Clear(slot->id); });
 
-    // If we took a slot that wasn't retired we must trigger the retirement fd.  This happens
-    // when we recycle a slot that has not yet been seen by all subscribers.
-    if (retired_slot == -1) {
-        TriggerRetirement(slot->id);
-    }
+  // If we took a slot that wasn't retired we must trigger the retirement fd.
+  // This happens when we recycle a slot that has not yet been seen by all
+  // subscribers.
+  if (retired_slot == -1) {
+    TriggerRetirement(slot->id);
+  }
   return slot;
 }
 
@@ -276,11 +277,12 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
   ccb_->subscribers.Traverse(
       [this, slot](int sub_id) { GetAvailableSlots(sub_id).Clear(slot->id); });
 
-    // If we took a slot that wasn't retired we must trigger the retirement fd.  This happens
-    // when we recycle a slot that has not yet been seen by all subscribers.
-    if (retired_slot == -1) {
-        TriggerRetirement(slot->id);
-    }
+  // If we took a slot that wasn't retired we must trigger the retirement fd.
+  // This happens when we recycle a slot that has not yet been seen by all
+  // subscribers.
+  if (retired_slot == -1) {
+    TriggerRetirement(slot->id);
+  }
   return slot;
 }
 
