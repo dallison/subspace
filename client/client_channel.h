@@ -14,6 +14,11 @@
 #include "toolbelt/triggerfd.h"
 #include <sys/poll.h>
 
+#include <mutex>
+#include <string>
+#include <vector>
+#include <memory>
+
 // Notification strategy
 // ---------------------
 // Each subscriber and reliable publisher has a TriggerFd, which is
