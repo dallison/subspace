@@ -51,6 +51,10 @@ public:
     return *this;
   }
 
+  subspace::Message GetMessage() const {
+    return Message(msg_);
+  }
+
   T *get() const { return reinterpret_cast<T *>(msg_->buffer); }
   T &operator*() const { return *reinterpret_cast<T *>(msg_->buffer); }
   T *operator->() const { return get(); }
@@ -115,6 +119,20 @@ public:
     return sub_->SlotExpired(slot_, ordinal_);
   }
 
+  void reset() {
+    sub_.reset();
+    slot_ = nullptr;
+    ordinal_ = 0;
+  }
+
+  bool operator==(const weak_ptr &p) const {
+    return sub_ == p.sub_ && slot_ == p.slot_ && ordinal_ == p.ordinal_;
+  }
+
+  bool operator!=(const weak_ptr &p) const {
+    return sub_ != p.sub_ || slot_ != p.slot_ || ordinal_ != p.ordinal_;
+  }
+  
 private:
   template <typename M> friend class shared_ptr;
 
