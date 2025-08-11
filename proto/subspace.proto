@@ -181,6 +181,18 @@ message Subscribed {
   int32 slot_size = 2;
   int32 num_slots = 3;
   bool reliable = 4;
+
+  // If the publisher wants notified of retirement, we send the
+  // address of a TCP socket that is listening for an incoming
+  // connection over which the retirement will be sent.
+  bool notify_retirement = 5;
+  ChannelAddress retirement_socket = 6;
+}
+
+// This is sent over a TCP connection from the peer server when the
+// given slot retires and the publisher wants notification of it.
+message RetirementNotification {
+  int32 slot_id = 1;
 }
 
 // This message is sent over UDP.
@@ -192,6 +204,7 @@ message Discovery {
   message Advertise {
     string channel_name = 1;
     bool reliable = 2;
+    bool notify_retirement = 3; // Notify publisher when slots retire.
   }
 
   // Subscribe to the given channel.  The sender is listening
