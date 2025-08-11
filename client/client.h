@@ -132,7 +132,7 @@ public:
   bool operator!=(const weak_ptr &p) const {
     return sub_ != p.sub_ || slot_ != p.slot_ || ordinal_ != p.ordinal_;
   }
-  
+
 private:
   template <typename M> friend class shared_ptr;
 
@@ -433,6 +433,9 @@ ClientImpl::ReadMessage(details::SubscriberImpl *subscriber, ReadMode mode) {
   absl::StatusOr<Message> msg = ReadMessage(subscriber, mode);
   if (!msg.ok()) {
     return msg.status();
+  }
+  if (msg->length == 0) {
+    return ::subspace::shared_ptr<T>();
   }
   return ::subspace::shared_ptr<T>(std::move(*msg));
 }
