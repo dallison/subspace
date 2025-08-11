@@ -97,6 +97,14 @@ Server::Server(co::CoroutineScheduler &scheduler,
       discovery_port_(disc_port), discovery_peer_port_(peer_port),
       local_(local), notify_fd_(notify_fd), co_scheduler_(scheduler) {}
 
+Server::Server(co::CoroutineScheduler &scheduler,
+               const std::string &socket_name, const std::string &interface,
+               const toolbelt::InetAddress &peer, int disc_port, int peer_port,
+               bool local, int notify_fd)
+    : socket_name_(socket_name), interface_(interface), peer_address_(peer),
+      discovery_port_(disc_port), discovery_peer_port_(peer_port),
+      local_(local), notify_fd_(notify_fd), co_scheduler_(scheduler) {}
+
 Server::~Server() {
   // Clear this before other data members get destroyed.
   client_handlers_.clear();
@@ -199,19 +207,30 @@ absl::Status Server::Run() {
       return s;
     }
 
-    discovery_addr_ = bcast_addr;
-    discovery_addr_.SetPort(discovery_peer_port_);
-
-    if (absl::Status s = discovery_transmitter_.SetBroadcast(); !s.ok()) {
-      return s;
+    if (peer_address_.Valid()) {
+      // If peer address is supplied, use it.
+      discovery_addr_ = peer_address_;
+    } else {
+      // Otherwise use the broadcast address.
+      discovery_addr_ = bcast_addr;
+      discovery_addr_.SetPort(discovery_peer_port_);
+      if (absl::Status s = discovery_transmitter_.SetBroadcast(); !s.ok()) {
+        return s;
+      }
     }
 
+    std::cerr << "Discovery transmitter in address "
+              << discovery_addr_.ToString() << "\n";
+
     // Open the discovery receiver socket.
+    std::cerr << "discovery receiver on port " << discovery_port_ << "\n";
     if (absl::Status s = discovery_receiver_.Bind(
             toolbelt::InetAddress::AnyAddress(discovery_port_));
         !s.ok()) {
       return s;
     }
+    std::cerr << "Discovery receiver on address "
+              << discovery_receiver_.BoundAddress().ToString() << "\n";
   }
 
   // Register a callback to be called when a coroutine completes.  The
@@ -547,7 +566,8 @@ void Server::SendQuery(const std::string &channel_name) {
   coroutines_.insert(std::make_unique<co::Coroutine>(
       co_scheduler_,
       [this, channel_name](co::Coroutine *c) {
-        logger_.Log(toolbelt::LogLevel::kDebug, "Sending Query %s with discovery port %d",
+        logger_.Log(toolbelt::LogLevel::kDebug,
+                    "Sending Query %s with discovery port %d",
                     channel_name.c_str(), discovery_port_);
         char buffer[kDiscoveryBufferSize];
         Discovery disc;
@@ -583,7 +603,8 @@ void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
   coroutines_.insert(std::make_unique<co::Coroutine>(
       co_scheduler_,
       [this, channel_name, reliable](co::Coroutine *c) {
-        logger_.Log(toolbelt::LogLevel::kDebug, "Sending Advertise %s with discovery port %d",
+        logger_.Log(toolbelt::LogLevel::kDebug,
+                    "Sending Advertise %s with discovery port %d",
                     channel_name.c_str(), discovery_port_);
         char buffer[kDiscoveryBufferSize];
         Discovery disc;
@@ -613,6 +634,7 @@ void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
 // This coroutine receives discovery messages over UDP.
 void Server::DiscoveryReceiverCoroutine(co::Coroutine *c) {
   char buffer[kDiscoveryBufferSize];
+  std::cerr << "Discovery receiver running\n";
   for (;;) {
     toolbelt::InetAddress sender;
     absl::StatusOr<ssize_t> n =

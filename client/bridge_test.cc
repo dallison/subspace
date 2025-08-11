@@ -47,8 +47,9 @@ public:
       // has started and stopped.  This end of the pipe is blocking.
       (void)pipe(server_pipe_[i]);
 
+      int peer_port = kDiscPorts[(i + 1) % 2];
       server_[i] = std::make_unique<subspace::Server>(
-          scheduler_[i], socket_[i], "", kDiscPorts[i % 2], kDiscPorts[(i + 1) % 2],
+          scheduler_[i], socket_[i], "", kDiscPorts[i % 2], peer_port,
           /*local=*/false, server_pipe_[i][1]);
 
       server_[i]->SetLogLevel(absl::GetFlag(FLAGS_log_level));
@@ -156,8 +157,6 @@ TEST_F(BridgeTest, Basic) {
   absl::StatusOr<Subscriber> sub =
       client2.CreateSubscriber("public", {.max_active_messages = 2});
   ASSERT_TRUE(sub.ok());
-
-  sleep(2);
 
   // Send a message on the publisher.
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();

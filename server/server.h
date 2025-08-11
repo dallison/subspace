@@ -41,6 +41,10 @@ public:
   Server(co::CoroutineScheduler &scheduler, const std::string &socket_name,
          const std::string &interface, int disc_port, int peer_port, bool local,
          int notify_fd = -1);
+  // This constructor can be used when you have a single peer server to talk to.
+  Server(co::CoroutineScheduler &scheduler, const std::string &socket_name,
+         const std::string &interface, const toolbelt::InetAddress &peer, int disc_port, int peer_port,
+         bool local, int notify_fd = -1);
   ~Server();
   void SetLogLevel(const std::string &level) { logger_.SetLogLevel(level); }
   absl::Status Run();
@@ -115,6 +119,7 @@ private:
   std::string server_id_;
   std::string hostname_;
   std::string interface_;
+  toolbelt::InetAddress peer_address_;
   int discovery_port_;
   int discovery_peer_port_;
   bool local_;
