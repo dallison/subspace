@@ -221,12 +221,12 @@ absl::Status Server::Run() {
       [this](co::Coroutine *c) { coroutines_.erase(c); });
 
   // Start the listener coroutine.
-  coroutines_.insert(
-      std::make_unique<co::Coroutine>(co_scheduler_,
-                                      [this, &listen_socket](co::Coroutine *c) {
-                                        ListenerCoroutine(listen_socket, c);
-                                      },
-                                      "Listener UDS"));
+  coroutines_.insert(std::make_unique<co::Coroutine>(
+      co_scheduler_,
+      [this, &listen_socket](co::Coroutine *c) {
+        ListenerCoroutine(listen_socket, c);
+      },
+      "Listener UDS"));
 #if 0
   // Start the channel directory coroutine.
   coroutines_.insert(std::make_unique<co::Coroutine>(
@@ -275,13 +275,13 @@ Server::HandleIncomingConnection(toolbelt::UnixSocket &listen_socket,
       std::make_unique<ClientHandler>(this, std::move(*s)));
   ClientHandler *handler_ptr = client_handlers_.back().get();
 
-  coroutines_.insert(
-      std::make_unique<co::Coroutine>(co_scheduler_,
-                                      [this, handler_ptr](co::Coroutine *c) {
-                                        handler_ptr->Run(c);
-                                        CloseHandler(handler_ptr);
-                                      },
-                                      "Client handler"));
+  coroutines_.insert(std::make_unique<co::Coroutine>(
+      co_scheduler_,
+      [this, handler_ptr](co::Coroutine *c) {
+        handler_ptr->Run(c);
+        CloseHandler(handler_ptr);
+      },
+      "Client handler"));
 
   return absl::OkStatus();
 }
@@ -547,13 +547,12 @@ void Server::SendQuery(const std::string &channel_name) {
   coroutines_.insert(std::make_unique<co::Coroutine>(
       co_scheduler_,
       [this, channel_name](co::Coroutine *c) {
-        logger_.Log(toolbelt::LogLevel::kDebug, "Sending Query %s",
-                    channel_name.c_str());
+        logger_.Log(toolbelt::LogLevel::kDebug, "Sending Query %s with discovery port %d",
+                    channel_name.c_str(), discovery_port_);
         char buffer[kDiscoveryBufferSize];
         Discovery disc;
         disc.set_server_id(server_id_);
         disc.set_port(discovery_port_);
-
         auto *query = disc.mutable_query();
         query->set_channel_name(channel_name);
 
@@ -584,8 +583,8 @@ void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
   coroutines_.insert(std::make_unique<co::Coroutine>(
       co_scheduler_,
       [this, channel_name, reliable](co::Coroutine *c) {
-        logger_.Log(toolbelt::LogLevel::kDebug, "Sending Advertise %s",
-                    channel_name.c_str());
+        logger_.Log(toolbelt::LogLevel::kDebug, "Sending Advertise %s with discovery port %d",
+                    channel_name.c_str(), discovery_port_);
         char buffer[kDiscoveryBufferSize];
         Discovery disc;
         disc.set_server_id(server_id_);
@@ -655,6 +654,7 @@ void Server::DiscoveryReceiverCoroutine(co::Coroutine *c) {
 void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
                                         bool pub_reliable, bool sub_reliable,
                                         toolbelt::InetAddress subscriber,
+                                        toolbelt::FileDescriptor &retirement_fd,
                                         co::Coroutine *c) {
   logger_.Log(toolbelt::LogLevel::kDebug, "BridgeTransmitterCoroutine running");
   toolbelt::TCPSocket bridge;
@@ -686,6 +686,12 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
   subscribed.set_num_slots(channel->NumSlots());
   subscribed.set_reliable(pub_reliable);
 
+  if (retirement_fd.Valid()) {
+    // We want to be notified when the slot has been retired.
+    subscribed.set_notify_retirement(true);
+    // Allocate a TCP listen socket to wait for an incoming connection from the
+    // other server.
+  }
   bool ok = subscribed.SerializeToArray(databuf, static_cast<int>(buflen));
   if (!ok) {
     logger_.Log(toolbelt::LogLevel::kError,
@@ -1074,12 +1080,14 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
            sizeof(subscriber_ip));
     toolbelt::InetAddress subscriber_addr(subscriber_ip,
                                           subscribe.receiver().port());
+    toolbelt::FileDescriptor retirement_fd;
+
     coroutines_.insert(std::make_unique<co::Coroutine>(
         co_scheduler_,
-        [this, pub_reliable, sub_reliable, subscriber_addr,
-         ch](co::Coroutine *c) {
+        [this, pub_reliable, sub_reliable, subscriber_addr, retirement_fd,
+         ch](co::Coroutine *c) mutable {
           BridgeTransmitterCoroutine(ch, pub_reliable, sub_reliable,
-                                     subscriber_addr, c);
+                                     subscriber_addr, retirement_fd, c);
         },
         absl::StrFormat("Bridge transmitter for %s", channel->first).c_str()));
   } else {

@@ -86,6 +86,7 @@ private:
   void BridgeTransmitterCoroutine(ServerChannel *channel, bool pub_reliable,
                                   bool sub_reliable,
                                   toolbelt::InetAddress subscriber,
+                                  toolbelt::FileDescriptor &retirement_fd,
                                   co::Coroutine *c);
   void BridgeReceiverCoroutine(std::string channel_name, bool sub_reliable,
                                toolbelt::InetAddress publisher,
