@@ -668,6 +668,11 @@ void Server::DiscoveryReceiverCoroutine(co::Coroutine *c) {
   }
 }
 
+// This coroutine creates a subscriber to the given channel and sends
+// every message received over the bridge to another server.  It first sends
+// a 'Subscribed' message detailing the information about the channel then
+// enters a loop reading messages sent to the channel on this side of the
+// bridge and sending them over.
 void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
                                         bool pub_reliable, bool sub_reliable,
                                         toolbelt::InetAddress subscriber,
@@ -872,6 +877,11 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
   channel->RemoveBridgedAddress(subscriber, sub_reliable);
 }
 
+// This coroutine reads retirement messages from the bridge and removes
+// the reference to the slot that has been retired on the other side.
+// References to the active messages are kept in a vector, indexed by slot_id.
+// If these references are the last reference to the slot, it will be retired
+// on this side and the publisher's retirement FD is sent the slot.
 void Server::RetirementReceiverCoroutine(
     toolbelt::TCPSocket &retirement_listener,
     std::vector<std::shared_ptr<ActiveMessage>> &active_retirement_msgs,
@@ -954,7 +964,9 @@ absl::Status Server::SendSubscribeMessage(
 
 // This coroutine receives messages on a TCP socket and publishes
 // them to a local channel.  The messages contain the prefix which
-// is sent intact to the channel.
+// is sent intact to the channel.  It first receives a 'Subscribed' message
+// with the channel details, then enters a loop reading message from the
+// bridge and publishing them to the local channel.
 void Server::BridgeReceiverCoroutine(std::string channel_name,
                                      bool sub_reliable,
                                      toolbelt::InetAddress publisher,
@@ -1160,6 +1172,11 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
   // Socket has been closed, we're done.
 }
 
+// This coroutine receives retirement notifications from the bridge publisher
+// and sends those over the bridge to the server that originally published the
+// message.  The slot ID sent back to the original server is the slot of the
+// original message, not this side's slot.  That is held in the MessagePrefix
+// which is kept intact.
 void Server::RetirementCoroutine(
     const std::string &channel_name, toolbelt::FileDescriptor &&retirement_fd,
     std::unique_ptr<toolbelt::TCPSocket> retirement_transmitter,
