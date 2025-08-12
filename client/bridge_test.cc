@@ -166,6 +166,7 @@ TEST_F(BridgeTest, Basic) {
   absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
   ASSERT_TRUE(pub_status.ok());
 
+  sleep(1);
   // Receive the message on the subscriber.
   absl::StatusOr<Message> msg = sub->ReadMessage();
   ASSERT_TRUE(msg.ok());
@@ -202,6 +203,7 @@ TEST_F(BridgeTest, TwoSubs) {
   absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
   ASSERT_TRUE(pub_status.ok());
 
+  sleep(1);
   // Receive the message on the subscriber.
   absl::StatusOr<Message> msg = sub1->ReadMessage();
   ASSERT_TRUE(msg.ok());
@@ -222,15 +224,18 @@ TEST_F(BridgeTest, BasicRetirement) {
   InitClient(client2, 1);
 
   // Create a non-local publisher on client 1.
-  absl::StatusOr<Publisher> pub = client1.CreatePublisher(
-      "/bridged_channel", {.slot_size = 256, .num_slots = 10, .local = false, .notify_retirement = true});
+  absl::StatusOr<Publisher> pub =
+      client1.CreatePublisher("/bridged_channel", {.slot_size = 256,
+                                                   .num_slots = 10,
+                                                   .local = false,
+                                                   .notify_retirement = true});
   ASSERT_TRUE(pub.ok());
 
   absl::StatusOr<Subscriber> sub =
       client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
   ASSERT_TRUE(sub.ok());
 
-  sleep(3);
+  sleep(1);
   // Send a message on the publisher.
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
   ASSERT_TRUE(buffer.ok());
@@ -238,12 +243,35 @@ TEST_F(BridgeTest, BasicRetirement) {
   absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
   ASSERT_TRUE(pub_status.ok());
 
+  sleep(1);
+
+  auto retirement_fd = pub->GetRetirementFd();
+  ASSERT_TRUE(retirement_fd.Valid());
+
   // Receive the message on the subscriber.
   absl::StatusOr<Message> msg = sub->ReadMessage();
   ASSERT_TRUE(msg.ok());
   ASSERT_EQ(6, msg->length);
   ASSERT_EQ(256, sub->SlotSize());
+  // Release the message on the subscriber (on server 2).
   msg->Release();
+#if 0
+  // Send another message to trigger retirement of first message
+  {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_TRUE(buffer.ok());
+    memcpy(*buffer, "foobar", 6);
+    absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+    ASSERT_TRUE(pub_status.ok());
+  }
+#endif
+
+  std::cerr << "Waiting for retirement notification..." << std::endl;
+  // Read the retirement fd.
+  int32_t slot_id;
+  ssize_t n = ::read(retirement_fd.Fd(), &slot_id, sizeof(slot_id));
+  ASSERT_EQ(n, sizeof(slot_id));
+  ASSERT_EQ(0, slot_id);
 }
 
 int main(int argc, char **argv) {

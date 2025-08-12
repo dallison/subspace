@@ -77,7 +77,7 @@ SubscriberImpl::GetOrdinalTracker(int vchan_id) {
   if (it != ordinal_trackers_.end()) {
     return *it->second;
   }
-  auto[it2, _] =
+  auto [it2, _] =
       ordinal_trackers_.emplace(vchan_id, std::make_unique<OrdinalTracker>());
 
   return *it2->second;

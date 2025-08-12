@@ -9,8 +9,8 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "client_handler.h"
 #include "client/message.h"
+#include "client_handler.h"
 #include "coroutine.h"
 #include "proto/subspace.pb.h"
 #include "server/server_channel.h"
@@ -88,10 +88,10 @@ private:
   void PublisherCoroutine(co::Coroutine *c);
   void SendQuery(const std::string &channel_name);
   void SendAdvertise(const std::string &channel_name, bool reliable);
-  void BridgeTransmitterCoroutine(
-      ServerChannel *channel, bool pub_reliable, bool sub_reliable,
-      toolbelt::InetAddress subscriber,
-      std::vector<toolbelt::FileDescriptor> &&retirement_fds, co::Coroutine *c);
+  void BridgeTransmitterCoroutine(ServerChannel *channel, bool pub_reliable,
+                                  bool sub_reliable,
+                                  toolbelt::InetAddress subscriber,
+                                  bool notify_retirement, co::Coroutine *c);
   void BridgeReceiverCoroutine(std::string channel_name, bool sub_reliable,
                                toolbelt::InetAddress publisher,
                                co::Coroutine *c);
@@ -129,6 +129,7 @@ private:
   std::string server_id_;
   std::string hostname_;
   std::string interface_;
+  toolbelt::InetAddress my_address_;
   toolbelt::InetAddress peer_address_;
   int discovery_port_;
   int discovery_peer_port_;
