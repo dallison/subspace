@@ -232,7 +232,7 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
   if (!opts.IsReliable()) {
     // A publisher needs a slot.  Allocate one.
     MessageSlot *slot = channel->FindFreeSlotUnreliable(
-        channel->GetPublisherId(), [ this, channel = channel.get() ]() {
+        channel->GetPublisherId(), [this, channel = channel.get()]() {
           absl::StatusOr<bool> ok = ReloadBuffersIfNecessary(channel);
           if (!ok.ok()) {
             return false;
@@ -764,7 +764,15 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
         },
         subscriber->VirtualChannelId(), mode == ReadMode::kReadNewest);
   }
-  return Message(msg);
+  auto ret_msg = Message(msg);
+  if (subscriber->IsBridge()) {
+    // Bridge subscribers don't hold onto the message in the subscriber to allow
+    // timely slot retirement.  If they hold onto it, the slot would not be retired
+    // until the next message is read.  This only affect bridge subscribers which
+    // are used to send data between servers.
+    subscriber->ClearActiveMessage();
+  }
+  return ret_msg;
 }
 
 absl::StatusOr<Message> ClientImpl::ReadMessage(SubscriberImpl *subscriber,
@@ -835,7 +843,7 @@ struct pollfd ClientImpl::GetPollFd(SubscriberImpl *subscriber) const {
 }
 
 struct pollfd ClientImpl::GetPollFd(PublisherImpl *publisher) const {
-  static struct pollfd fd { .fd = -1, .events = POLLIN };
+  static struct pollfd fd{.fd = -1, .events = POLLIN};
   if (!publisher->IsReliable()) {
     return fd;
   }
