@@ -21,7 +21,7 @@ static inline bool VirtualChannelIdMatch(MessageSlot *slot, int vchan_id) {
 
 bool SubscriberImpl::AddActiveMessage(MessageSlot *slot) {
   int old = num_active_messages_.fetch_add(1);
-  if (old >= options_.MaxActiveMessages()) {
+  if (old >= options_.MaxActiveMessages() && !IsBridge()) {
     num_active_messages_.fetch_sub(1);
     return false;
   }
@@ -34,7 +34,17 @@ void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
   slot->sub_owners.Clear(subscriber_id_);
   AtomicIncRefCount(slot, IsReliable(), -1, slot->ordinal, slot->vchan_id, true,
                     [this, slot]() {
-                       TriggerRetirement(slot->id); });
+                      // When a slot retires we want to use the slot id that was
+                      // originally used for the message.  If the message came
+                      // in from a bridge we want to notify the original sender
+                      // of the message, not the bridge publisher.
+                      //
+                      // The original slot id is in the message prefix.  This is
+                      // kept intact when the bridge publisher sends the
+                      // message.
+                      MessagePrefix *prefix = Prefix(slot);
+                      TriggerRetirement(prefix->slot_id);
+                    });
 
   if (num_active_messages_-- == options_.MaxActiveMessages()) {
     Trigger();

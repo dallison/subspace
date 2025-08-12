@@ -119,7 +119,7 @@ bool ClientChannel::ValidateSlotBuffer(MessageSlot *slot,
 absl::Status ClientChannel::AttachBuffers() {
   // NOTE: the num_buffers variable in the CCB is atomic and could change while
   // we are in or after we are done with this loop.
-  bool map_read_only = IsSubscriber();
+  bool map_read_only = IsSubscriber() && !IsBridge();
   int num_buffers = ccb_->num_buffers;
   while (buffers_.size() < size_t(num_buffers)) {
     // We need to open the next buffer in the list.  The buffer index is

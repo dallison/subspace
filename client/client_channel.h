@@ -224,6 +224,7 @@ protected:
   }
 
   bool IsVirtual() const { return vchan_id_ != -1; }
+  virtual bool IsBridge() const { return false; }
 
   absl::StatusOr<toolbelt::FileDescriptor> CreateBuffer(int buffer_index,
                                                         size_t size);

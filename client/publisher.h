@@ -46,6 +46,7 @@ private:
   friend class ::subspace::ClientImpl;
 
   bool IsPublisher() const override { return true; }
+  bool IsBridge() const override { return options_.IsBridge(); }
 
   std::string ResolvedName() const override {
     return IsVirtual() ? options_.mux : Name();
