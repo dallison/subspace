@@ -924,7 +924,7 @@ absl::Status Server::SendSubscribeMessage(
     toolbelt::InetAddress publisher, toolbelt::TCPSocket &receiver_listener,
     char *buffer, size_t buffer_size, co::Coroutine *c) {
   const toolbelt::InetAddress &receiver_addr = receiver_listener.BoundAddress();
-  logger_.Log(toolbelt::LogLevel::kDebug, "Bridge receiver socket: %s",
+  logger_.Log(toolbelt::LogLevel::kDebug, "Sending subscribe with bridge receiver socket: %s",
               receiver_addr.ToString().c_str());
   // Send a subscribe request to the publisher.
   Discovery disc;
@@ -965,7 +965,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
 
   toolbelt::TCPSocket receiver_listener;
   absl::Status s =
-      receiver_listener.Bind(toolbelt::InetAddress::AnyAddress(0), true);
+      receiver_listener.Bind(toolbelt::InetAddress(my_address_.IpAddress(), 0), true);
   if (!s.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Unable to bind socket for bridge receiver for %s: %s",
@@ -1180,22 +1180,18 @@ void Server::RetirementCoroutine(
       break;
     }
     // We received a retirement notification, send the fd.
-    logger_.Log(toolbelt::LogLevel::kDebug,
+    logger_.Log(toolbelt::LogLevel::kVerboseDebug,
                 "Received retirement notification for %s",
                 channel_name.c_str());
 
     // Send the retirement fd to the other side.
-    logger_.Log(toolbelt::LogLevel::kDebug,
-                "Sending retirement fd for %s, slot %d", channel_name.c_str(),
-                slot_id);
-
     RetirementNotification msg;
     // If the slot id is zero the protobuf message will be serialized to 0
     // bytes. Sending a message of zero length is very confusing, so we adjust
-    // it by adding 1.
+    // it by adding 1.  We remove the adjustment when it is received.
     msg.set_slot_id(slot_id + 1);
 
-    char buffer[1024];
+    char buffer[32];
     bool ok = msg.SerializeToArray(buffer + sizeof(int32_t),
                                    sizeof(buffer) - sizeof(int32_t));
     if (!ok) {
@@ -1210,6 +1206,7 @@ void Server::RetirementCoroutine(
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to send retirement fd for %s: %s",
                   channel_name.c_str(), nsent.status().ToString().c_str());
+      return;
     }
   }
 }
