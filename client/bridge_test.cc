@@ -36,7 +36,7 @@ public:
     if (!absl::GetFlag(FLAGS_start_server)) {
       return;
     }
-    constexpr int kDiscPorts[2] = {7000, 7001};
+    constexpr int kDiscPorts[2] = {6522, 6523};
     for (int i = 0; i < 2; i++) {
       printf("Starting Subspace server %d\n", i);
       char socket_name_template[] = "/tmp/subspaceXXXXXX"; // NOLINT
@@ -151,13 +151,14 @@ TEST_F(BridgeTest, Basic) {
 
   // Create a non-local publisher on client 1.
   absl::StatusOr<Publisher> pub = client1.CreatePublisher(
-      "public", {.slot_size = 100, .num_slots = 10, .local = false});
+      "/bridged_channel", {.slot_size = 256, .num_slots = 10, .local = false});
   ASSERT_TRUE(pub.ok());
 
   absl::StatusOr<Subscriber> sub =
-      client2.CreateSubscriber("public", {.max_active_messages = 2});
+      client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
   ASSERT_TRUE(sub.ok());
 
+  sleep(1);
   // Send a message on the publisher.
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
   ASSERT_TRUE(buffer.ok());
@@ -170,6 +171,79 @@ TEST_F(BridgeTest, Basic) {
   ASSERT_TRUE(msg.ok());
   ASSERT_EQ(6, msg->length);
   ASSERT_EQ(256, sub->SlotSize());
+}
+
+TEST_F(BridgeTest, TwoSubs) {
+  sleep(1); // Give the server time to clean up discovery from previous test
+  subspace::Client client1;
+  InitClient(client1, 0);
+
+  subspace::Client client2;
+  InitClient(client2, 1);
+
+  // Create a non-local publisher on client 1.
+  absl::StatusOr<Publisher> pub = client1.CreatePublisher(
+      "/bridged_channel", {.slot_size = 256, .num_slots = 10, .local = false});
+  ASSERT_TRUE(pub.ok());
+
+  absl::StatusOr<Subscriber> sub1 =
+      client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
+  ASSERT_TRUE(sub1.ok());
+
+  absl::StatusOr<Subscriber> sub2 =
+      client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
+  ASSERT_TRUE(sub2.ok());
+
+  sleep(1);
+  // Send a message on the publisher.
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_TRUE(buffer.ok());
+  memcpy(*buffer, "foobar", 6);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+  ASSERT_TRUE(pub_status.ok());
+
+  // Receive the message on the subscriber.
+  absl::StatusOr<Message> msg = sub1->ReadMessage();
+  ASSERT_TRUE(msg.ok());
+  ASSERT_EQ(6, msg->length);
+  ASSERT_EQ(256, sub1->SlotSize());
+
+  msg = sub2->ReadMessage();
+  ASSERT_TRUE(msg.ok());
+  ASSERT_EQ(6, msg->length);
+  ASSERT_EQ(256, sub2->SlotSize());
+}
+
+TEST_F(BridgeTest, BasicRetirement) {
+  subspace::Client client1;
+  InitClient(client1, 0);
+
+  subspace::Client client2;
+  InitClient(client2, 1);
+
+  // Create a non-local publisher on client 1.
+  absl::StatusOr<Publisher> pub = client1.CreatePublisher(
+      "/bridged_channel", {.slot_size = 256, .num_slots = 10, .local = false, .notify_retirement = true});
+  ASSERT_TRUE(pub.ok());
+
+  absl::StatusOr<Subscriber> sub =
+      client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
+  ASSERT_TRUE(sub.ok());
+
+  sleep(3);
+  // Send a message on the publisher.
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_TRUE(buffer.ok());
+  memcpy(*buffer, "foobar", 6);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+  ASSERT_TRUE(pub_status.ok());
+
+  // Receive the message on the subscriber.
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_TRUE(msg.ok());
+  ASSERT_EQ(6, msg->length);
+  ASSERT_EQ(256, sub->SlotSize());
+  msg->Release();
 }
 
 int main(int argc, char **argv) {

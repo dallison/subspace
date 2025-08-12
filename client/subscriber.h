@@ -170,7 +170,8 @@ private:
   };
 
   bool IsSubscriber() const override { return true; }
-
+  bool IsBridge() const override { return options_.IsBridge(); }
+  
   void ClearPublishers() {
     std::unique_lock<std::mutex> lock(reliable_publishers_mutex_);
     reliable_publishers_.clear();

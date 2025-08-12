@@ -10,6 +10,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "client_handler.h"
+#include "client/message.h"
 #include "coroutine.h"
 #include "proto/subspace.pb.h"
 #include "server/server_channel.h"
@@ -43,8 +44,8 @@ public:
          int notify_fd = -1);
   // This constructor can be used when you have a single peer server to talk to.
   Server(co::CoroutineScheduler &scheduler, const std::string &socket_name,
-         const std::string &interface, const toolbelt::InetAddress &peer, int disc_port, int peer_port,
-         bool local, int notify_fd = -1);
+         const std::string &interface, const toolbelt::InetAddress &peer,
+         int disc_port, int peer_port, bool local, int notify_fd = -1);
   ~Server();
   void SetLogLevel(const std::string &level) { logger_.SetLogLevel(level); }
   absl::Status Run();
@@ -87,14 +88,23 @@ private:
   void PublisherCoroutine(co::Coroutine *c);
   void SendQuery(const std::string &channel_name);
   void SendAdvertise(const std::string &channel_name, bool reliable);
-  void BridgeTransmitterCoroutine(ServerChannel *channel, bool pub_reliable,
-                                  bool sub_reliable,
-                                  toolbelt::InetAddress subscriber,
-                                  toolbelt::FileDescriptor &retirement_fd,
-                                  co::Coroutine *c);
+  void BridgeTransmitterCoroutine(
+      ServerChannel *channel, bool pub_reliable, bool sub_reliable,
+      toolbelt::InetAddress subscriber,
+      std::vector<toolbelt::FileDescriptor> &&retirement_fds, co::Coroutine *c);
   void BridgeReceiverCoroutine(std::string channel_name, bool sub_reliable,
                                toolbelt::InetAddress publisher,
                                co::Coroutine *c);
+  void RetirementCoroutine(
+      const std::string &channel_name, toolbelt::FileDescriptor &&retirement_fd,
+      std::unique_ptr<toolbelt::TCPSocket> retirement_transmitter,
+      co::Coroutine *c);
+
+  void RetirementReceiverCoroutine(
+      toolbelt::TCPSocket &retirement_listener,
+      std::vector<std::shared_ptr<ActiveMessage>> &active_retirement_msgs,
+      co::Coroutine *c);
+
   void SubscribeOverBridge(ServerChannel *channel, bool reliable,
                            toolbelt::InetAddress publisher);
   void IncomingQuery(const Discovery::Query &query,

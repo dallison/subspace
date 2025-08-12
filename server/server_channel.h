@@ -271,7 +271,7 @@ public:
   bool IsLocal() const;
   bool IsReliable() const;
   bool IsFixedSize() const;
-
+  
   virtual void SetSharedMemoryFds(SharedMemoryFds fds) {
     shared_memory_fds_ = std::move(fds);
   }
