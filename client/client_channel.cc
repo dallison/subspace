@@ -374,7 +374,6 @@ ClientChannel::MapBuffer(toolbelt::FileDescriptor &shm_fd, size_t size,
 void ClientChannel::TriggerRetirement(int slot_id) {
   if (!has_retirement_triggers_) {
     // No retirement triggers, let's avoid locking the mutex.
-    std::cerr << "No retirement triggers\n";
     return;
   }
   std::unique_lock<std::mutex> lock(retirement_lock_);
