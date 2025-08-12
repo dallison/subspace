@@ -255,16 +255,6 @@ TEST_F(BridgeTest, BasicRetirement) {
   ASSERT_EQ(256, sub->SlotSize());
   // Release the message on the subscriber (on server 2).
   msg->Release();
-#if 0
-  // Send another message to trigger retirement of first message
-  {
-    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-    ASSERT_TRUE(buffer.ok());
-    memcpy(*buffer, "foobar", 6);
-    absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
-    ASSERT_TRUE(pub_status.ok());
-  }
-#endif
 
   std::cerr << "Waiting for retirement notification..." << std::endl;
   // Read the retirement fd.
@@ -272,6 +262,173 @@ TEST_F(BridgeTest, BasicRetirement) {
   ssize_t n = ::read(retirement_fd.Fd(), &slot_id, sizeof(slot_id));
   ASSERT_EQ(n, sizeof(slot_id));
   ASSERT_EQ(0, slot_id);
+}
+
+TEST_F(BridgeTest, MultipleRetirement) {
+  subspace::Client client1;
+  InitClient(client1, 0);
+
+  subspace::Client client2;
+  InitClient(client2, 1);
+
+  constexpr int kNumSlots = 10;
+
+  // Create publisher to consume a slot.  This will check that we received
+  // retirement notifications for the correct slot ids.  This will use slot 0
+  // so we will never receive a retirement notification for it.
+  absl::StatusOr<Publisher> local_pub = client1.CreatePublisher(
+      "/bridged_channel",
+      {.slot_size = 256, .num_slots = kNumSlots, .local = false});
+  ASSERT_TRUE(local_pub.ok());
+
+  // Create a non-local publisher on client 1.
+  absl::StatusOr<Publisher> pub =
+      client1.CreatePublisher("/bridged_channel", {.slot_size = 256,
+                                                   .num_slots = kNumSlots,
+                                                   .local = false,
+                                                   .notify_retirement = true});
+  ASSERT_TRUE(pub.ok());
+
+  absl::StatusOr<Subscriber> sub =
+      client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
+  ASSERT_TRUE(sub.ok());
+
+  sleep(1);
+
+  constexpr int kNumMessages = 7;
+  for (int i = 0; i < kNumMessages; i++) {
+    // Send a message on the publisher.
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_TRUE(buffer.ok());
+    snprintf(static_cast<char *>(*buffer), 256, "foobar %d", i);
+    absl::StatusOr<const Message> pub_status = pub->PublishMessage(12 + i);
+    ASSERT_TRUE(pub_status.ok());
+  }
+
+  sleep(1);
+
+  auto retirement_fd = pub->GetRetirementFd();
+  ASSERT_TRUE(retirement_fd.Valid());
+
+  // Receive all messages on the subscriber.
+  (void)sub->Wait();
+  int num_received = 0;
+  while (num_received < kNumMessages) {
+    absl::StatusOr<Message> msg = sub->ReadMessage();
+    if (!msg.ok() || msg->length == 0) {
+      break;
+    }
+    std::cerr << "received message: " << msg->ordinal << " in slot "
+              << msg->slot_id << std::endl;
+    num_received++;
+  }
+  sub->ClearActiveMessage();
+
+  std::cerr << "Waiting for retirement notifications..." << std::endl;
+  std::set<int> retired_slots;
+  int num_notifications = 0;
+  while (num_notifications < kNumMessages) {
+    // Read the retirement fd.
+    int32_t slot_id;
+    ssize_t n = ::read(retirement_fd.Fd(), &slot_id, sizeof(slot_id));
+    if (n <= 0) {
+      break; // No more notifications, we're done.
+    }
+    std::cerr << "received retirement notification for slot " << slot_id
+              << std::endl;
+    ASSERT_EQ(n, sizeof(slot_id));
+    retired_slots.insert(slot_id);
+    num_notifications++;
+  }
+
+  // Make sure all slots have been retired.
+  // NB: We use i+1 because we have a publisher on slot 0 which will never be
+  // used.
+  for (int i = 0; i < kNumMessages; i++) {
+    ASSERT_TRUE(retired_slots.count(i + 1));
+  }
+}
+
+TEST_F(BridgeTest, MultipleRetirement2) {
+  subspace::Client client1;
+  InitClient(client1, 0);
+
+  subspace::Client client2;
+  InitClient(client2, 1);
+
+  constexpr int kNumSlots = 10;
+
+  // Create a non-local publisher on client 1.
+  absl::StatusOr<Publisher> pub =
+      client1.CreatePublisher("/bridged_channel", {.slot_size = 256,
+                                                   .num_slots = kNumSlots,
+                                                   .local = false,
+                                                   .notify_retirement = true});
+  ASSERT_TRUE(pub.ok());
+
+  // Create publisher on the subscriber server.  This wil consume slot 0 on that
+  // side.
+  absl::StatusOr<Publisher> local_pub = client2.CreatePublisher(
+      "/bridged_channel",
+      {.slot_size = 256, .num_slots = kNumSlots, .local = false});
+  ASSERT_TRUE(local_pub.ok());
+
+  absl::StatusOr<Subscriber> sub =
+      client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
+  ASSERT_TRUE(sub.ok());
+
+  sleep(1);
+
+  constexpr int kNumMessages = 7;
+  for (int i = 0; i < kNumMessages; i++) {
+    // Send a message on the publisher.
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_TRUE(buffer.ok());
+    snprintf(static_cast<char *>(*buffer), 256, "foobar %d", i);
+    absl::StatusOr<const Message> pub_status = pub->PublishMessage(12 + i);
+    ASSERT_TRUE(pub_status.ok());
+  }
+
+  sleep(1);
+
+  auto retirement_fd = pub->GetRetirementFd();
+  ASSERT_TRUE(retirement_fd.Valid());
+
+  // Receive all messages on the subscriber.
+  (void)sub->Wait();
+  int num_received = 0;
+  while (num_received < kNumMessages) {
+    absl::StatusOr<Message> msg = sub->ReadMessage();
+    if (!msg.ok() || msg->length == 0) {
+      break;
+    }
+    std::cerr << "received message: " << msg->ordinal << " in slot "
+              << msg->slot_id << std::endl;
+    num_received++;
+  }
+  sub->ClearActiveMessage();
+
+  std::cerr << "Waiting for retirement notifications..." << std::endl;
+  std::set<int> retired_slots;
+  int num_notifications = 0;
+  while (num_notifications < kNumMessages) {
+    // Read the retirement fd.
+    int32_t slot_id;
+    ssize_t n = ::read(retirement_fd.Fd(), &slot_id, sizeof(slot_id));
+    if (n <= 0) {
+      break; // No more notifications, we're done.
+    }
+    std::cerr << "received retirement notification for slot " << slot_id
+              << std::endl;
+    ASSERT_EQ(n, sizeof(slot_id));
+    retired_slots.insert(slot_id);
+    num_notifications++;
+  }
+
+  // Make sure all slots have been retired.
+  for (int i = 0; i < kNumMessages; i++) {
+    ASSERT_TRUE(retired_slots.count(i));
+  }
 }
 
 int main(int argc, char **argv) {

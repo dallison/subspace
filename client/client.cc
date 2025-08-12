@@ -1036,6 +1036,12 @@ ClientImpl::ReloadReliablePublishersIfNecessary(SubscriberImpl *subscriber) {
   for (auto index : sub_resp.reliable_pub_trigger_fd_indexes()) {
     subscriber->AddPublisher(fds[index]);
   }
+
+  subscriber->ClearRetirementTriggers();
+  for (auto index : sub_resp.retirement_fd_indexes()) {
+    subscriber->AddRetirementTrigger(fds[size_t(index)]);
+  }
+
   return absl::OkStatus();
 }
 

@@ -920,8 +920,6 @@ void Server::RetirementReceiverCoroutine(
     slot_id -= 1;
 
     if (slot_id < 0 || slot_id >= active_retirement_msgs.size()) {
-      logger_.Log(toolbelt::LogLevel::kError,
-                  "Invalid slot number in Retirement message: %d", slot_id);
       continue;
     }
     active_retirement_msgs[slot_id].reset();
