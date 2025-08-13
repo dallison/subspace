@@ -170,7 +170,7 @@ message Statistics {
 }
 
 message ChannelAddress {
-  bytes ip_address = 1; // In host byte order.
+  bytes address = 1; // In host byte order.
   int32 port = 2;       // In host byte order.
 }
 

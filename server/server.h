@@ -90,18 +90,18 @@ private:
   void SendAdvertise(const std::string &channel_name, bool reliable);
   void BridgeTransmitterCoroutine(ServerChannel *channel, bool pub_reliable,
                                   bool sub_reliable,
-                                  toolbelt::InetAddress subscriber,
+                                  toolbelt::SocketAddress subscriber,
                                   bool notify_retirement, co::Coroutine *c);
   void BridgeReceiverCoroutine(std::string channel_name, bool sub_reliable,
                                toolbelt::InetAddress publisher,
                                co::Coroutine *c);
   void RetirementCoroutine(
       const std::string &channel_name, toolbelt::FileDescriptor &&retirement_fd,
-      std::unique_ptr<toolbelt::TCPSocket> retirement_transmitter,
+      std::unique_ptr<toolbelt::StreamSocket> retirement_transmitter,
       co::Coroutine *c);
 
   void RetirementReceiverCoroutine(
-      toolbelt::TCPSocket &retirement_listener,
+      toolbelt::StreamSocket &retirement_listener,
       std::vector<std::shared_ptr<ActiveMessage>> &active_retirement_msgs,
       co::Coroutine *c);
 
@@ -117,7 +117,7 @@ private:
   absl::Status SendSubscribeMessage(const std::string &channel_name,
                                     bool reliable,
                                     toolbelt::InetAddress publisher,
-                                    toolbelt::TCPSocket &receiver_listener,
+                                    toolbelt::StreamSocket &receiver_listener,
                                     char *buffer, size_t buffer_size,
                                     co::Coroutine *c);
 
@@ -129,7 +129,7 @@ private:
   std::string server_id_;
   std::string hostname_;
   std::string interface_;
-  toolbelt::InetAddress my_address_;
+  toolbelt::SocketAddress my_address_;
   toolbelt::InetAddress peer_address_;
   int discovery_port_;
   int discovery_peer_port_;

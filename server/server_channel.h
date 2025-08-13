@@ -117,11 +117,11 @@ private:
 // address and whether the transmitter is or not.  It is absl hashable.
 class ChannelTransmitter {
 public:
-  ChannelTransmitter(const toolbelt::InetAddress &addr, bool reliable)
+  ChannelTransmitter(const toolbelt::SocketAddress &addr, bool reliable)
       : addr_(addr), reliable_(reliable) {}
 
 private:
-  toolbelt::InetAddress addr_;
+  toolbelt::SocketAddress addr_;
   bool reliable_;
 
   // Provide support for Abseil hashing.
@@ -256,22 +256,22 @@ public:
 
   // Determine if the given address is registered as a bridge
   // publisher.
-  bool IsBridged(const toolbelt::InetAddress &addr, bool reliable) const {
+  bool IsBridged(const toolbelt::SocketAddress &addr, bool reliable) const {
     return bridged_publishers_.contains(ChannelTransmitter(addr, reliable));
   }
 
-  void AddBridgedAddress(const toolbelt::InetAddress &addr, bool reliable) {
+  void AddBridgedAddress(const toolbelt::SocketAddress &addr, bool reliable) {
     bridged_publishers_.emplace(addr, reliable);
   }
 
-  void RemoveBridgedAddress(const toolbelt::InetAddress &addr, bool reliable) {
+  void RemoveBridgedAddress(const toolbelt::SocketAddress &addr, bool reliable) {
     bridged_publishers_.erase(ChannelTransmitter(addr, reliable));
   }
 
   bool IsLocal() const;
   bool IsReliable() const;
   bool IsFixedSize() const;
-  
+
   virtual void SetSharedMemoryFds(SharedMemoryFds fds) {
     shared_memory_fds_ = std::move(fds);
   }
