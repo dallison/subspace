@@ -750,6 +750,12 @@ public:
     return impl_->NumSubscribers(vchan_id);
   }
 
+  // If you don't want to hold on to the current active message in the subscriber, you can
+  // call this.
+  void ClearActiveMessage() {
+    impl_->ClearActiveMessage();
+  }
+
 private:
   friend class Server;
   friend class ClientImpl;

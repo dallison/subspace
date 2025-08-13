@@ -43,6 +43,7 @@ static constexpr size_t kMaxMessage = 4096;
 // not received and will not be written to.
 struct MessagePrefix {
   int32_t padding; // Padding for Socket::SendMessage.
+  int32_t slot_id; // The slot ID this message is in.
   uint64_t message_size;
   uint64_t ordinal;
   uint64_t timestamp;

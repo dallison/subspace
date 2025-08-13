@@ -310,6 +310,7 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     prefix->timestamp = slot->timestamp;
     prefix->vchan_id = slot->vchan_id;
     prefix->flags = 0;
+    prefix->slot_id = slot->id;
     if (is_activation) {
       prefix->flags |= kMessageActivate;
       ccb_->activation_tracker.Activate(slot->vchan_id);
