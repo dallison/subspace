@@ -1240,34 +1240,14 @@ void Server::RetirementCoroutine(
               channel_name.c_str());
   for (;;) {
     int32_t slot_id;
-    // Wait for a retirement notification.
-    int wfd = c->Wait(retirement_fd.Fd(), POLLIN);
-    if (wfd != retirement_fd.Fd()) {
+    absl::StatusOr<ssize_t> n = retirement_fd.Read(&slot_id, sizeof(slot_id), c);
+    if (!n.ok()) {
+      // Failed to read the slot ID, we're done.
       return;
     }
-#if defined(__linux__)
-    // On linux we use O_DIRECT so we are guaranteed to read the entire message
-    // in one go.
-    ssize_t n = ::read(retirement_fd.Fd(), reinterpret_cast<char *>(&slot_id),
-                       sizeof(slot_id));
-    if (n != sizeof(slot_id)) {
-      // Failed to read the entire slot ID, we're done.
-      return;
+    if (*n == 0) {
+      return;  // EOF, we're done.
     }
-#else
-    // On other platforms we read the slot ID in a loop.
-    ssize_t nread = 0;
-    while (nread < sizeof(slot_id)) {
-      ssize_t n =
-          ::read(retirement_fd.Fd(), reinterpret_cast<char *>(&slot_id) + nread,
-                 sizeof(slot_id) - nread);
-      if (n <= 0) {
-        // No more notifications, we're done.
-        return;
-      }
-      nread += n;
-    }
-#endif
 
     // We received a retirement notification, send the fd.
     logger_.Log(toolbelt::LogLevel::kVerboseDebug,
