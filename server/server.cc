@@ -675,11 +675,11 @@ void Server::DiscoveryReceiverCoroutine(co::Coroutine *c) {
 // bridge and sending them over.
 void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
                                         bool pub_reliable, bool sub_reliable,
-                                        toolbelt::InetAddress subscriber,
+                                        toolbelt::SocketAddress subscriber,
                                         bool notify_retirement,
                                         co::Coroutine *c) {
   logger_.Log(toolbelt::LogLevel::kDebug, "BridgeTransmitterCoroutine running");
-  toolbelt::TCPSocket bridge;
+  toolbelt::StreamSocket bridge;
   if (absl::Status status = bridge.Connect(subscriber); !status.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to connect to bridge subscriber: %s",
@@ -708,17 +708,17 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
   subscribed.set_num_slots(channel->NumSlots());
   subscribed.set_reliable(pub_reliable);
 
-  toolbelt::TCPSocket retirement_listener;
-  toolbelt::InetAddress retirement_addr;
+  toolbelt::StreamSocket retirement_listener;
+  toolbelt::SocketAddress retirement_addr;
 
   if (notify_retirement) {
     // We want to be notified when the slot has been retired.
     subscribed.set_notify_retirement(true);
-    // Allocate a TCP listen socket to wait for an incoming connection from the
+    // Allocate a listen socket to wait for an incoming connection from the
     // other server.
 
     absl::Status s = retirement_listener.Bind(
-        toolbelt::InetAddress(my_address_.IpAddress(), 0), true);
+        toolbelt::SocketAddress::AnyPort(my_address_), true);
     if (!s.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Unable to bind socket for retirement receiver for %s: %s",
@@ -730,10 +730,25 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
                 retirement_addr.ToString().c_str());
 
     // Tell the other side where to connect to notify us of slot retirement
-
     auto *ret_addr = subscribed.mutable_retirement_socket();
-    in_addr ip_addr = retirement_addr.IpAddress();
-    ret_addr->set_ip_address(&ip_addr, sizeof(ip_addr));
+    switch (retirement_addr.Type()) {
+    case toolbelt::SocketAddress::kAddressInet: {
+      in_addr ip_addr = retirement_addr.GetInetAddress().IpAddress();
+      ret_addr->set_address(&ip_addr, sizeof(ip_addr));
+      break;
+    }
+    case toolbelt::SocketAddress::kAddressVirtual: {
+      uint32_t cid = retirement_addr.GetVirtualAddress().Cid();
+      ret_addr->set_address(&cid, sizeof(cid));
+      break;
+    }
+    default:
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Unsupported address type for retirement notification: %s",
+                  retirement_addr.ToString().c_str());
+      return;
+    }
+
     ret_addr->set_port(retirement_addr.Port());
   }
 
@@ -883,11 +898,11 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
 // If these references are the last reference to the slot, it will be retired
 // on this side and the publisher's retirement FD is sent the slot.
 void Server::RetirementReceiverCoroutine(
-    toolbelt::TCPSocket &retirement_listener,
+    toolbelt::StreamSocket &retirement_listener,
     std::vector<std::shared_ptr<ActiveMessage>> &active_retirement_msgs,
     co::Coroutine *c) {
   // Accept connection on the retirement listener socket.
-  absl::StatusOr<toolbelt::TCPSocket> retirement_socket =
+  absl::StatusOr<toolbelt::StreamSocket> retirement_socket =
       retirement_listener.Accept(c);
   if (!retirement_socket.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
@@ -929,10 +944,11 @@ void Server::RetirementReceiverCoroutine(
 // Send a Subscribe message over UDP.
 absl::Status Server::SendSubscribeMessage(
     const std::string &channel_name, bool reliable,
-    toolbelt::InetAddress publisher, toolbelt::TCPSocket &receiver_listener,
+    toolbelt::InetAddress publisher, toolbelt::StreamSocket &receiver_listener,
     char *buffer, size_t buffer_size, co::Coroutine *c) {
-  const toolbelt::InetAddress &receiver_addr = receiver_listener.BoundAddress();
-  logger_.Log(toolbelt::LogLevel::kDebug, "Sending subscribe with bridge receiver socket: %s",
+  const toolbelt::SocketAddress &receiver_addr = receiver_listener.BoundAddress();
+  logger_.Log(toolbelt::LogLevel::kDebug,
+              "Sending subscribe with bridge receiver socket: %s",
               receiver_addr.ToString().c_str());
   // Send a subscribe request to the publisher.
   Discovery disc;
@@ -941,8 +957,24 @@ absl::Status Server::SendSubscribeMessage(
   sub->set_channel_name(channel_name);
   sub->set_reliable(reliable);
   auto *sub_addr = sub->mutable_receiver();
-  in_addr ip_addr = receiver_addr.IpAddress();
-  sub_addr->set_ip_address(&ip_addr, sizeof(ip_addr));
+  switch (receiver_addr.Type()) {
+  case toolbelt::SocketAddress::kAddressInet: {
+    // IPv4 address.
+    in_addr ip_addr = receiver_addr.GetInetAddress().IpAddress();
+    sub_addr->set_address(&ip_addr, sizeof(ip_addr));
+    break;
+  }
+  case toolbelt::SocketAddress::kAddressVirtual: {
+    // Virtual address.
+    uint32_t cid = receiver_addr.GetVirtualAddress().Cid();
+    sub_addr->set_address(&cid, sizeof(cid));
+    break;
+  }
+  default:
+    return absl::InternalError(
+        absl::StrFormat("Unsupported address type for subscribe: %s",
+                        receiver_addr.ToString().c_str()));
+  }
   sub_addr->set_port(receiver_addr.Port());
 
   bool ok = disc.SerializeToArray(buffer, static_cast<int>(buffer_size));
@@ -973,16 +1005,17 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
   logger_.Log(toolbelt::LogLevel::kDebug, "BridgeReceiverCoroutine running");
   char buffer[kDiscoveryBufferSize];
 
-  toolbelt::TCPSocket receiver_listener;
-  absl::Status s =
-      receiver_listener.Bind(toolbelt::InetAddress(my_address_.IpAddress(), 0), true);
+  toolbelt::StreamSocket receiver_listener;
+  absl::Status s = receiver_listener.Bind(
+      toolbelt::SocketAddress::AnyPort(my_address_), true);
   if (!s.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Unable to bind socket for bridge receiver for %s: %s",
                 channel_name.c_str(), s.ToString().c_str());
     return;
   }
-  const toolbelt::InetAddress &receiver_addr = receiver_listener.BoundAddress();
+  const toolbelt::SocketAddress &receiver_addr =
+      receiver_listener.BoundAddress();
   logger_.Log(toolbelt::LogLevel::kDebug, "Bridge receiver socket: %s",
               receiver_addr.ToString().c_str());
 
@@ -996,7 +1029,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
   }
 
   // Accept connection on listen socket.
-  absl::StatusOr<toolbelt::TCPSocket> bridge = receiver_listener.Accept(c);
+  absl::StatusOr<toolbelt::StreamSocket> bridge = receiver_listener.Accept(c);
   if (!bridge.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to accept incoming bridge connection: %s",
@@ -1029,17 +1062,41 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     return;
   }
 
-  std::unique_ptr<toolbelt::TCPSocket> retirement_transmitter;
+  std::unique_ptr<toolbelt::StreamSocket> retirement_transmitter;
 
   if (subscribed.notify_retirement()) {
-    retirement_transmitter = std::make_unique<toolbelt::TCPSocket>();
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(subscribed.retirement_socket().port());
-    addr.sin_addr.s_addr = ntohl(*reinterpret_cast<const uint32_t *>(
-        subscribed.retirement_socket().ip_address().data()));
-    toolbelt::InetAddress retirement_addr(addr);
+    retirement_transmitter = std::make_unique<toolbelt::StreamSocket>();
+    toolbelt::SocketAddress retirement_addr;
+    switch (my_address_.Type()) {
+    case toolbelt::SocketAddress::kAddressInet: {
+      // IPv4 address.
+      struct sockaddr_in addr;
+      memset(&addr, 0, sizeof(addr));
+      addr.sin_family = AF_INET;
+      addr.sin_port = htons(subscribed.retirement_socket().port());
+      addr.sin_addr.s_addr = ntohl(*reinterpret_cast<const uint32_t *>(
+          subscribed.retirement_socket().address().data()));
+      retirement_addr = toolbelt::SocketAddress(addr);
+      break;
+    }
+    case toolbelt::SocketAddress::kAddressVirtual: {
+      // Virtual address.
+      struct sockaddr_vm addr;
+      memset(&addr, 0, sizeof(addr));
+      addr.svm_family = AF_VSOCK;
+      addr.svm_port = subscribed.retirement_socket().port();
+      addr.svm_cid = *reinterpret_cast<const uint32_t *>(
+          subscribed.retirement_socket().address().data());
+      retirement_addr = toolbelt::SocketAddress(addr);
+      break;
+    }
+    default:
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Unsupported address type for retirement notification: %s",
+                  my_address_.ToString().c_str());
+      return;
+    }
+
     s = retirement_transmitter->Connect(retirement_addr);
     if (!s.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
@@ -1177,7 +1234,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
 // which is kept intact.
 void Server::RetirementCoroutine(
     const std::string &channel_name, toolbelt::FileDescriptor &&retirement_fd,
-    std::unique_ptr<toolbelt::TCPSocket> retirement_transmitter,
+    std::unique_ptr<toolbelt::StreamSocket> retirement_transmitter,
     co::Coroutine *c) {
   logger_.Log(toolbelt::LogLevel::kDebug, "Retirement coroutine for %s running",
               channel_name.c_str());
@@ -1188,12 +1245,30 @@ void Server::RetirementCoroutine(
     if (wfd != retirement_fd.Fd()) {
       return;
     }
+#if defined(__linux__)
+    // On linux we use O_DIRECT so we are guaranteed to read the entire message
+    // in one go.
     ssize_t n = ::read(retirement_fd.Fd(), reinterpret_cast<char *>(&slot_id),
                        sizeof(slot_id));
-    if (n <= 0) {
-      // No more notifications, we're done.
-      break;
+    if (n != sizeof(slot_id)) {
+      // Failed to read the entire slot ID, we're done.
+      return;
     }
+#else
+    // On other platforms we read the slot ID in a loop.
+    ssize_t nread = 0;
+    while (nread < sizeof(slot_id)) {
+      ssize_t n =
+          ::read(retirement_fd.Fd(), reinterpret_cast<char *>(&slot_id) + nread,
+                 sizeof(slot_id) - nread);
+      if (n <= 0) {
+        // No more notifications, we're done.
+        return;
+      }
+      nread += n;
+    }
+#endif
+
     // We received a retirement notification, send the fd.
     logger_.Log(toolbelt::LogLevel::kVerboseDebug,
                 "Received retirement notification for %s",
@@ -1297,21 +1372,40 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
 
     channel->second->AddBridgedAddress(sender, sub_reliable);
 
-    // The subscribe message contains the IP address and port of the TCP
+    // The subscribe message contains the IP address and port of the
     // socket listening for our connection for the channel.  Extract it.
-    // TODO: IPv6?
-    in_addr subscriber_ip;
-    memcpy(&subscriber_ip, subscribe.receiver().ip_address().data(),
-           sizeof(subscriber_ip));
-    toolbelt::InetAddress subscriber_addr(subscriber_ip,
-                                          subscribe.receiver().port());
+    toolbelt::SocketAddress subscriber_addr;
+    switch (my_address_.Type()) {
+    case toolbelt::SocketAddress::kAddressInet: {
+      in_addr subscriber_ip;
+      memcpy(&subscriber_ip, subscribe.receiver().address().data(),
+             sizeof(subscriber_ip));
+      subscriber_addr =
+          toolbelt::SocketAddress(subscriber_ip, subscribe.receiver().port());
+      break;
+    }
+    case toolbelt::SocketAddress::kAddressVirtual: {
+      uint32_t cid = *reinterpret_cast<const uint32_t *>(
+          subscribe.receiver().address().data());
+      subscriber_addr =
+          toolbelt::SocketAddress(cid, subscribe.receiver().port());
+      break;
+    }
+    default:
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Unknown address type for subscribe receiver");
+      return;
+    }
+
     bool notify_retirement = !channel->second->GetRetirementFds().empty();
     coroutines_.insert(std::make_unique<co::Coroutine>(
         co_scheduler_,
-        [this, pub_reliable, sub_reliable, subscriber_addr, notify_retirement,
+        [this, pub_reliable, sub_reliable,
+         subscriber_addr = std::move(subscriber_addr), notify_retirement,
          ch](co::Coroutine *c) mutable {
           BridgeTransmitterCoroutine(ch, pub_reliable, sub_reliable,
-                                     subscriber_addr, notify_retirement, c);
+                                     std::move(subscriber_addr),
+                                     notify_retirement, c);
         },
         absl::StrFormat("Bridge transmitter for %s", channel->first).c_str()));
   } else {
