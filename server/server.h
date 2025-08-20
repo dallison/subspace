@@ -55,6 +55,8 @@ public:
 
   uint64_t GetSessionId() const { return session_id_; }
 
+  absl::StatusOr<toolbelt::FileDescriptor> CreateBridgeNotificationPipe();
+
 private:
   friend class ClientHandler;
   friend class ServerChannel;
@@ -151,6 +153,11 @@ private:
   toolbelt::UDPSocket discovery_transmitter_;
   toolbelt::UDPSocket discovery_receiver_;
   toolbelt::Logger logger_;
+
+  // Optional pipe to allow test to be notified when discovery sets up a
+  // new connection.  The server will send an encoded protobuf Subscribed
+  // message through this pipe if it is set up.
+  toolbelt::Pipe bridge_notification_pipe_;
 };
 
 } // namespace subspace
