@@ -7,6 +7,7 @@
 #include "absl/hash/hash_testing.h"
 #include "client/client.h"
 #include "coroutine.h"
+#include "proto/subspace.pb.h"
 #include "server/server.h"
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
@@ -28,6 +29,22 @@ using Publisher = subspace::Publisher;
 using Subscriber = subspace::Subscriber;
 using Message = subspace::Message;
 using InetAddress = toolbelt::InetAddress;
+
+#define VAR(a) a##__COUNTER__
+#define EVAL_AND_ASSERT_OK(expr) EVAL_AND_ASSERT_OK2(VAR(r_), expr)
+
+#define EVAL_AND_ASSERT_OK2(result, expr)                                      \
+  ({                                                                           \
+    auto result = (expr);                                                      \
+    if (!result.ok()) {                                                        \
+      std::cerr << result.status() << std::endl;                               \
+    }                                                                          \
+    ASSERT_TRUE(result.ok());                                                  \
+    std::move(*result);                                                        \
+  })
+
+#define ASSERT_OK(e) ASSERT_TRUE(e.ok())
+
 
 class BridgeTest : public ::testing::Test {
 public:
@@ -53,6 +70,10 @@ public:
           /*local=*/false, server_pipe_[i][1]);
 
       server_[i]->SetLogLevel(absl::GetFlag(FLAGS_log_level));
+
+      auto bridge_pipe = server_[i]->CreateBridgeNotificationPipe();
+      ASSERT_OK(bridge_pipe);
+      bridge_notification_pipe_[i] = *bridge_pipe;
 
       // Start server running in a thread.
       server_thread_[i] = std::thread([i]() {
@@ -101,12 +122,17 @@ public:
 
   static subspace::Server *Server(int i) { return server_[i].get(); }
 
+  static toolbelt::FileDescriptor &BridgeNotificationPipe(int i) {
+    return bridge_notification_pipe_[i];
+  }
+
 private:
   static co::CoroutineScheduler scheduler_[2];
   static std::string socket_[2];
   static int server_pipe_[2][2];
   static std::unique_ptr<subspace::Server> server_[2];
   static std::thread server_thread_[2];
+  static toolbelt::FileDescriptor bridge_notification_pipe_[2];
 };
 
 co::CoroutineScheduler BridgeTest::scheduler_[2];
@@ -114,7 +140,7 @@ std::string BridgeTest::socket_[2] = {"/tmp/subspace1", "/tmp/subspace2"};
 int BridgeTest::server_pipe_[2][2];
 std::unique_ptr<subspace::Server> BridgeTest::server_[2];
 std::thread BridgeTest::server_thread_[2];
-
+toolbelt::FileDescriptor BridgeTest::bridge_notification_pipe_[2];
 static co::CoroutineScheduler *g_scheduler[2];
 
 // For debugging, hit ^\ to dump all coroutines if this test is not working
@@ -127,20 +153,22 @@ static void SigQuitHandler(int sig) {
   (void)raise(sig);
 }
 
-#define VAR(a) a##__COUNTER__
-#define EVAL_AND_ASSERT_OK(expr) EVAL_AND_ASSERT_OK2(VAR(r_), expr)
+void WaitForSubscribedMessage(toolbelt::FileDescriptor &bridge_pipe,
+                              const std::string &channel_name) {
+  std::cerr << "Waiting for bridge notification\n";
+  char buffer[4096];
+  int32_t length;
+  absl::StatusOr<ssize_t> n = bridge_pipe.Read(&length, sizeof(length));
+  ASSERT_OK(n);
+  ASSERT_EQ(sizeof(int32_t), *n);
 
-#define EVAL_AND_ASSERT_OK2(result, expr)                                      \
-  ({                                                                           \
-    auto result = (expr);                                                      \
-    if (!result.ok()) {                                                        \
-      std::cerr << result.status() << std::endl;                               \
-    }                                                                          \
-    ASSERT_TRUE(result.ok());                                                  \
-    std::move(*result);                                                        \
-  })
+  n = bridge_pipe.Read(buffer, *n);
+  ASSERT_OK(n);
 
-#define ASSERT_OK(e) ASSERT_TRUE(e.ok())
+  subspace::Subscribed subscribed;
+  ASSERT_TRUE(subscribed.ParseFromArray(buffer, *n));
+  ASSERT_EQ(subscribed.channel_name(), channel_name);
+}
 
 TEST_F(BridgeTest, Basic) {
   subspace::Client client1;
@@ -157,6 +185,9 @@ TEST_F(BridgeTest, Basic) {
   absl::StatusOr<Subscriber> sub =
       client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
   ASSERT_TRUE(sub.ok());
+
+  // toolbelt::FileDescriptor &bridge_pipe = BridgeNotificationPipe(0);
+  // WaitForSubscribedMessage(bridge_pipe, "/bridge_channel");
 
   sleep(1);
   // Send a message on the publisher.

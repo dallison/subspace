@@ -112,6 +112,18 @@ Server::~Server() {
 
 void Server::Stop() { co_scheduler_.Stop(); }
 
+absl::StatusOr<toolbelt::FileDescriptor>
+Server::CreateBridgeNotificationPipe() {
+  auto status = toolbelt::Pipe::Create();
+  if (!status.ok()) {
+    return absl::InternalError(
+        absl::StrFormat("Failed to create bridge notification pipe: %s",
+                        status.status().ToString().c_str()));
+  }
+  bridge_notification_pipe_ = *status;
+  return bridge_notification_pipe_.ReadFd();
+}
+
 void Server::CloseHandler(ClientHandler *handler) {
   for (auto it = client_handlers_.begin(); it != client_handlers_.end(); it++) {
     if (it->get() == handler) {
@@ -767,6 +779,21 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
     return;
   }
 
+  if (bridge_notification_pipe_.WriteFd().Valid()) {
+    // Also send the Subscribed message to the bridge notification pipe.  This is
+    // sent without a coroutine.
+    // TODO: use a coroutine to avoid blocking?
+    // We send the whole buffer including the 4-byte length.
+    std::cerr << "Sending subscribed " << subscribed.DebugString();
+    if (absl::StatusOr<ssize_t> s = bridge_notification_pipe_.WriteFd().Write(buffer, length + sizeof(int32_t));
+        !s.ok()) {
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to send subscribed message to bridge notification pipe: %s",
+                  s.status().ToString().c_str());
+      // Ignore the error.
+    }
+  }
+
   Client client(c);
   if (absl::Status s = client.Init(socket_name_); !s.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
@@ -946,7 +973,8 @@ absl::Status Server::SendSubscribeMessage(
     const std::string &channel_name, bool reliable,
     toolbelt::InetAddress publisher, toolbelt::StreamSocket &receiver_listener,
     char *buffer, size_t buffer_size, co::Coroutine *c) {
-  const toolbelt::SocketAddress &receiver_addr = receiver_listener.BoundAddress();
+  const toolbelt::SocketAddress &receiver_addr =
+      receiver_listener.BoundAddress();
   logger_.Log(toolbelt::LogLevel::kDebug,
               "Sending subscribe with bridge receiver socket: %s",
               receiver_addr.ToString().c_str());
@@ -1240,13 +1268,14 @@ void Server::RetirementCoroutine(
               channel_name.c_str());
   for (;;) {
     int32_t slot_id;
-    absl::StatusOr<ssize_t> n = retirement_fd.Read(&slot_id, sizeof(slot_id), c);
+    absl::StatusOr<ssize_t> n =
+        retirement_fd.Read(&slot_id, sizeof(slot_id), c);
     if (!n.ok()) {
       // Failed to read the slot ID, we're done.
       return;
     }
     if (*n == 0) {
-      return;  // EOF, we're done.
+      return; // EOF, we're done.
     }
 
     // We received a retirement notification, send the fd.
