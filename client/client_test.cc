@@ -110,7 +110,7 @@ std::thread ClientTest::server_thread_;
     if (!result.ok()) {                                                        \
       std::cerr << result.status() << std::endl;                               \
     }                                                                          \
-    ASSERT_TRUE(result.ok());                                                  \
+    ASSERT_OK(result);                                                         \
     std::move(*result);                                                        \
   })
 

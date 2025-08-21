@@ -8,6 +8,7 @@
 #include "client/client.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/clock.h"
+#include "toolbelt/hexdump.h"
 #include "toolbelt/sockets.h"
 #include <cerrno>
 #include <fcntl.h>
@@ -247,12 +248,12 @@ absl::Status Server::Run() {
       [this](co::Coroutine *c) { coroutines_.erase(c); });
 
   // Start the listener coroutine.
-  coroutines_.insert(std::make_unique<co::Coroutine>(
-      co_scheduler_,
-      [this, &listen_socket](co::Coroutine *c) {
-        ListenerCoroutine(listen_socket, c);
-      },
-      "Listener UDS"));
+  coroutines_.insert(
+      std::make_unique<co::Coroutine>(co_scheduler_,
+                                      [this, &listen_socket](co::Coroutine *c) {
+                                        ListenerCoroutine(listen_socket, c);
+                                      },
+                                      "Listener UDS"));
 #if 0
   // Start the channel directory coroutine.
   coroutines_.insert(std::make_unique<co::Coroutine>(
@@ -301,13 +302,13 @@ Server::HandleIncomingConnection(toolbelt::UnixSocket &listen_socket,
       std::make_unique<ClientHandler>(this, std::move(*s)));
   ClientHandler *handler_ptr = client_handlers_.back().get();
 
-  coroutines_.insert(std::make_unique<co::Coroutine>(
-      co_scheduler_,
-      [this, handler_ptr](co::Coroutine *c) {
-        handler_ptr->Run(c);
-        CloseHandler(handler_ptr);
-      },
-      "Client handler"));
+  coroutines_.insert(
+      std::make_unique<co::Coroutine>(co_scheduler_,
+                                      [this, handler_ptr](co::Coroutine *c) {
+                                        handler_ptr->Run(c);
+                                        CloseHandler(handler_ptr);
+                                      },
+                                      "Client handler"));
 
   return absl::OkStatus();
 }
@@ -779,21 +780,6 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
     return;
   }
 
-  if (bridge_notification_pipe_.WriteFd().Valid()) {
-    // Also send the Subscribed message to the bridge notification pipe.  This is
-    // sent without a coroutine.
-    // TODO: use a coroutine to avoid blocking?
-    // We send the whole buffer including the 4-byte length.
-    std::cerr << "Sending subscribed " << subscribed.DebugString();
-    if (absl::StatusOr<ssize_t> s = bridge_notification_pipe_.WriteFd().Write(buffer, length + sizeof(int32_t));
-        !s.ok()) {
-      logger_.Log(toolbelt::LogLevel::kError,
-                  "Failed to send subscribed message to bridge notification pipe: %s",
-                  s.status().ToString().c_str());
-      // Ignore the error.
-    }
-  }
-
   Client client(c);
   if (absl::Status s = client.Init(socket_name_); !s.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
@@ -829,6 +815,22 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
                                              active_retirement_msgs, c2);
         },
         absl::StrFormat("Retirement receiver for %s", channel_name)));
+  }
+
+  if (bridge_notification_pipe_.WriteFd().Valid()) {
+    // Also send the Subscribed message to the bridge notification pipe.  This
+    // is sent without a coroutine.
+    // TODO: use a coroutine to avoid blocking?
+    // We send the whole buffer including the 4-byte length.
+    if (absl::StatusOr<ssize_t> s = bridge_notification_pipe_.WriteFd().Write(
+            buffer, length + sizeof(int32_t));
+        !s.ok()) {
+      logger_.Log(
+          toolbelt::LogLevel::kError,
+          "Failed to send subscribed message to bridge notification pipe: %s",
+          s.status().ToString().c_str());
+      // Ignore the error.
+    }
   }
 
   // Read messages from subscriber and send to bridge socket.
@@ -1067,14 +1069,17 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
 
   // Wait for the Subscribed message from the server.
   Subscribed subscribed;
-  absl::StatusOr<ssize_t> n_recv =
-      bridge->ReceiveMessage(buffer, sizeof(buffer), c);
+  // Recieve it into offset 3 in buffer so that we can write the length for
+  // sending it out again to the bridge notification pipe.
+  absl::StatusOr<ssize_t> n_recv = bridge->ReceiveMessage(
+      buffer + sizeof(int32_t), sizeof(buffer) - sizeof(int32_t), c);
   if (!n_recv.ok()) {
     logger_.Log(toolbelt::LogLevel::kError, "Failed to receive Subscribed: %s",
                 n_recv.status().ToString().c_str());
     return;
   }
-  if (!subscribed.ParseFromArray(buffer, static_cast<int>(*n_recv))) {
+  if (!subscribed.ParseFromArray(buffer + sizeof(int32_t),
+                                 static_cast<int>(*n_recv))) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to parse Subscribed message");
     return;
@@ -1163,12 +1168,35 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     // the socket connected to the other server.
     coroutines_.insert(std::make_unique<co::Coroutine>(
         co_scheduler_,
-        [this, retirement_fd = std::move(retirement_fd),
-         &retirement_transmitter, channel_name](co::Coroutine *c) mutable {
+        [
+          this, retirement_fd = std::move(retirement_fd),
+          &retirement_transmitter, channel_name
+        ](co::Coroutine * c) mutable {
           RetirementCoroutine(channel_name, std::move(retirement_fd),
                               std::move(retirement_transmitter), c);
         },
         absl::StrFormat("Retirement notifier for %s", channel_name).c_str()));
+  }
+
+  if (bridge_notification_pipe_.WriteFd().Valid()) {
+    // Also send the Subscribed message to the bridge notification pipe.  This
+    // is sent without a coroutine.
+    // TODO: use a coroutine to avoid blocking?
+    // We send the whole buffer including the 4-byte length.
+    // Write the length in big endian.
+    buffer[0] = (*n_recv >> 24) & 0xff;
+    buffer[1] = (*n_recv >> 16) & 0xff;
+    buffer[2] = (*n_recv >> 8) & 0xff;
+    buffer[3] = *n_recv & 0xff;
+    if (absl::StatusOr<ssize_t> s = bridge_notification_pipe_.WriteFd().Write(
+            buffer, *n_recv + sizeof(int32_t));
+        !s.ok()) {
+      logger_.Log(
+          toolbelt::LogLevel::kError,
+          "Failed to send subscribed message to bridge notification pipe: %s",
+          s.status().ToString().c_str());
+      // Ignore the error.
+    }
   }
 
   // Now we receive messages from the bridge and send to the
@@ -1280,8 +1308,8 @@ void Server::RetirementCoroutine(
 
     // We received a retirement notification, send the fd.
     logger_.Log(toolbelt::LogLevel::kVerboseDebug,
-                "Received retirement notification for %s",
-                channel_name.c_str());
+                "Received retirement notification for %s, slot %d",
+                channel_name.c_str(), slot_id);
 
     // Send the retirement fd to the other side.
     RetirementNotification msg;
@@ -1409,9 +1437,10 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
     bool notify_retirement = !channel->second->GetRetirementFds().empty();
     coroutines_.insert(std::make_unique<co::Coroutine>(
         co_scheduler_,
-        [this, pub_reliable, sub_reliable,
-         subscriber_addr = std::move(subscriber_addr), notify_retirement,
-         ch](co::Coroutine *c) mutable {
+        [
+          this, pub_reliable, sub_reliable,
+          subscriber_addr = std::move(subscriber_addr), notify_retirement, ch
+        ](co::Coroutine * c) mutable {
           BridgeTransmitterCoroutine(ch, pub_reliable, sub_reliable,
                                      std::move(subscriber_addr),
                                      notify_retirement, c);
