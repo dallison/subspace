@@ -45,7 +45,6 @@ using InetAddress = toolbelt::InetAddress;
 
 #define ASSERT_OK(e) ASSERT_TRUE(e.ok())
 
-
 class BridgeTest : public ::testing::Test {
 public:
   // We run one server for the duration of the whole test suite.
@@ -161,13 +160,16 @@ void WaitForSubscribedMessage(toolbelt::FileDescriptor &bridge_pipe,
   absl::StatusOr<ssize_t> n = bridge_pipe.Read(&length, sizeof(length));
   ASSERT_OK(n);
   ASSERT_EQ(sizeof(int32_t), *n);
+  length = ntohl(length); // Length is network byte order.
 
-  n = bridge_pipe.Read(buffer, *n);
+  n = bridge_pipe.Read(buffer, length);
   ASSERT_OK(n);
 
   subspace::Subscribed subscribed;
   ASSERT_TRUE(subscribed.ParseFromArray(buffer, *n));
   ASSERT_EQ(subscribed.channel_name(), channel_name);
+  std::cerr << "Received bridge notification for channel: "
+            << subscribed.channel_name() << std::endl;
 }
 
 TEST_F(BridgeTest, Basic) {
@@ -186,10 +188,9 @@ TEST_F(BridgeTest, Basic) {
       client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
   ASSERT_TRUE(sub.ok());
 
-  // toolbelt::FileDescriptor &bridge_pipe = BridgeNotificationPipe(0);
-  // WaitForSubscribedMessage(bridge_pipe, "/bridge_channel");
+  toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
+  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_channel");
 
-  sleep(1);
   // Send a message on the publisher.
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
   ASSERT_TRUE(buffer.ok());
@@ -197,7 +198,9 @@ TEST_F(BridgeTest, Basic) {
   absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
   ASSERT_TRUE(pub_status.ok());
 
-  sleep(1);
+  toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
+  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_channel");
+
   // Receive the message on the subscriber.
   absl::StatusOr<Message> msg = sub->ReadMessage();
   ASSERT_TRUE(msg.ok());
@@ -206,7 +209,6 @@ TEST_F(BridgeTest, Basic) {
 }
 
 TEST_F(BridgeTest, TwoSubs) {
-  sleep(1); // Give the server time to clean up discovery from previous test
   subspace::Client client1;
   InitClient(client1, 0);
 
@@ -226,7 +228,9 @@ TEST_F(BridgeTest, TwoSubs) {
       client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
   ASSERT_TRUE(sub2.ok());
 
-  sleep(1);
+  toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
+  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_channel");
+
   // Send a message on the publisher.
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
   ASSERT_TRUE(buffer.ok());
@@ -234,7 +238,9 @@ TEST_F(BridgeTest, TwoSubs) {
   absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
   ASSERT_TRUE(pub_status.ok());
 
-  sleep(1);
+  toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
+  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_channel");
+
   // Receive the message on the subscriber.
   absl::StatusOr<Message> msg = sub1->ReadMessage();
   ASSERT_TRUE(msg.ok());
@@ -266,7 +272,9 @@ TEST_F(BridgeTest, BasicRetirement) {
       client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
   ASSERT_TRUE(sub.ok());
 
-  sleep(1);
+  toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
+  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_channel");
+
   // Send a message on the publisher.
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
   ASSERT_TRUE(buffer.ok());
@@ -274,7 +282,8 @@ TEST_F(BridgeTest, BasicRetirement) {
   absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
   ASSERT_TRUE(pub_status.ok());
 
-  sleep(1);
+  toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
+  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_channel");
 
   auto retirement_fd = pub->GetRetirementFd();
   ASSERT_TRUE(retirement_fd.Valid());
@@ -324,7 +333,8 @@ TEST_F(BridgeTest, MultipleRetirement) {
       client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
   ASSERT_TRUE(sub.ok());
 
-  sleep(1);
+  toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
+  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_channel");
 
   constexpr int kNumMessages = 7;
   for (int i = 0; i < kNumMessages; i++) {
@@ -336,7 +346,8 @@ TEST_F(BridgeTest, MultipleRetirement) {
     ASSERT_TRUE(pub_status.ok());
   }
 
-  sleep(1);
+  toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
+  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_channel");
 
   auto retirement_fd = pub->GetRetirementFd();
   ASSERT_TRUE(retirement_fd.Valid());
@@ -346,8 +357,12 @@ TEST_F(BridgeTest, MultipleRetirement) {
   int num_received = 0;
   while (num_received < kNumMessages) {
     absl::StatusOr<Message> msg = sub->ReadMessage();
-    if (!msg.ok() || msg->length == 0) {
+    if (!msg.ok()) {
       break;
+    }
+    if (msg->length == 0) {
+      (void)sub->Wait();
+      continue;
     }
     std::cerr << "received message: " << msg->ordinal << " in slot "
               << msg->slot_id << std::endl;
@@ -408,7 +423,8 @@ TEST_F(BridgeTest, MultipleRetirement2) {
       client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
   ASSERT_TRUE(sub.ok());
 
-  sleep(1);
+  toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
+  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_channel");
 
   constexpr int kNumMessages = 7;
   for (int i = 0; i < kNumMessages; i++) {
@@ -420,7 +436,8 @@ TEST_F(BridgeTest, MultipleRetirement2) {
     ASSERT_TRUE(pub_status.ok());
   }
 
-  sleep(1);
+  toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
+  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_channel");
 
   auto retirement_fd = pub->GetRetirementFd();
   ASSERT_TRUE(retirement_fd.Valid());
@@ -430,8 +447,12 @@ TEST_F(BridgeTest, MultipleRetirement2) {
   int num_received = 0;
   while (num_received < kNumMessages) {
     absl::StatusOr<Message> msg = sub->ReadMessage();
-    if (!msg.ok() || msg->length == 0) {
+    if (!msg.ok()) {
       break;
+    }
+    if (msg->length == 0) {
+      (void)sub->Wait();
+      continue;
     }
     std::cerr << "received message: " << msg->ordinal << " in slot "
               << msg->slot_id << std::endl;
