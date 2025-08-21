@@ -1,0 +1,25 @@
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "rpc_server",
+    srcs = [
+        "rpc_server.cc",
+    ],
+    hdrs = [
+        "rpc_server.h",
+
+    ],
+    deps = [
+        "//common:subspace_common",
+        "//client:subspace_client",
+        "//proto:subspace_cc_proto",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/flags:parse",
+        "@coroutines//:co",
+    ],
+)
