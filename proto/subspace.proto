@@ -1,4 +1,4 @@
-// Copyright 2023 David Allison
+// Copyright 2023-2025 David Allison
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -6,6 +6,7 @@ syntax = "proto3";
 
 package subspace;
 
+import "google/protobuf/any.proto";
 message InitRequest { string client_name = 1; }
 
 // All Request and Response messages are carried over a Unix Domain
@@ -224,3 +225,69 @@ message Discovery {
     Subscribe subscribe = 5;
   }
 }
+
+//
+// Remote procedure call messages.
+//
+
+// Ask the server to open connection to a server.  The response will contain the
+// session ID for the server and a list of methods that can be called on it.
+message RpcOpenRequest {
+  string name = 1;
+}
+
+message RpcOpenResponse {
+  message MethodChannel {
+    string name = 1; // Name of the channel.
+    int32 slot_size = 2; // Size of each slot in bytes.
+    int32 num_slots = 3; // Number of slots in the channel.
+    string type = 4; // Type of data carried on this channel.
+  }
+
+  message Method {
+    string name = 1;      // Name of the method to call
+    MethodChannel request_channel = 2; // Channel to send request on.
+    MethodChannel response_channel = 3; // Channel to receive response on.
+  }
+  string error = 1;
+  int32 session_id = 2; // Session ID for this server.
+  repeated Method methods = 3; // List of methods available on this server.
+}
+
+message RpcCloseRequest {
+  int32 session_id = 1; // Session ID to close.
+}
+
+message RpcCloseResponse {
+  string error = 1; // Error message if any.
+}
+
+message RpcServerRequest {
+  oneof request {
+    RpcOpenRequest open = 1;
+    RpcCloseRequest close = 2;
+  }
+}
+
+message RpcServerResponse {
+  oneof response {
+    RpcOpenResponse open = 1;
+    RpcCloseResponse close = 2;
+  }
+}
+
+message RpcRequest {
+  string method = 1;
+  google.protobuf.Any arguments = 2; // Data to send to the server.
+  int32 session_id = 3; // Session ID for this request.
+  int32 request_id = 4; // Unique ID for this request.
+}
+
+message RpcResponse {
+  string error = 1; // Error message if any.
+  google.protobuf.Any result = 2; // Data returned by the server.
+  int32 session_id = 3; // Session ID for this response.
+  int32 request_id = 4; // Unique ID for this response, matches request.
+}
+
+
