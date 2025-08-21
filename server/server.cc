@@ -8,6 +8,7 @@
 #include "client/client.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/clock.h"
+#include "toolbelt/hexdump.h"
 #include "toolbelt/sockets.h"
 #include <cerrno>
 #include <fcntl.h>
@@ -97,12 +98,32 @@ Server::Server(co::CoroutineScheduler &scheduler,
       discovery_port_(disc_port), discovery_peer_port_(peer_port),
       local_(local), notify_fd_(notify_fd), co_scheduler_(scheduler) {}
 
+Server::Server(co::CoroutineScheduler &scheduler,
+               const std::string &socket_name, const std::string &interface,
+               const toolbelt::InetAddress &peer, int disc_port, int peer_port,
+               bool local, int notify_fd)
+    : socket_name_(socket_name), interface_(interface), peer_address_(peer),
+      discovery_port_(disc_port), discovery_peer_port_(peer_port),
+      local_(local), notify_fd_(notify_fd), co_scheduler_(scheduler) {}
+
 Server::~Server() {
   // Clear this before other data members get destroyed.
   client_handlers_.clear();
 }
 
 void Server::Stop() { co_scheduler_.Stop(); }
+
+absl::StatusOr<toolbelt::FileDescriptor>
+Server::CreateBridgeNotificationPipe() {
+  auto status = toolbelt::Pipe::Create();
+  if (!status.ok()) {
+    return absl::InternalError(
+        absl::StrFormat("Failed to create bridge notification pipe: %s",
+                        status.status().ToString().c_str()));
+  }
+  bridge_notification_pipe_ = *status;
+  return bridge_notification_pipe_.ReadFd();
+}
 
 void Server::CloseHandler(ClientHandler *handler) {
   for (auto it = client_handlers_.begin(); it != client_handlers_.end(); it++) {
@@ -177,7 +198,7 @@ absl::Status Server::Run() {
   }
 
   // Make a unique server id to identify this server.
-  server_id_ = absl::StrFormat("%s.%d", hostname, getpid());
+  server_id_ = absl::StrFormat("%s.%s.%d", hostname, socket_name_, getpid());
 
   if (!local_) {
     // Find the IP and broadcast IPv4 addresses based on the interface supplied
@@ -193,17 +214,23 @@ absl::Status Server::Run() {
     logger_.Log(toolbelt::LogLevel::kInfo, "IPv4: %s, Broadcast: %s",
                 ip_addr.ToString().c_str(), bcast_addr.ToString().c_str());
 
+    my_address_ = ip_addr;
     // Bind the discovery transmitter to the network and any free
     // port on the requested interface.
     if (absl::Status s = discovery_transmitter_.Bind(ip_addr); !s.ok()) {
       return s;
     }
 
-    discovery_addr_ = bcast_addr;
-    discovery_addr_.SetPort(discovery_peer_port_);
-
-    if (absl::Status s = discovery_transmitter_.SetBroadcast(); !s.ok()) {
-      return s;
+    if (peer_address_.Valid()) {
+      // If peer address is supplied, use it.
+      discovery_addr_ = peer_address_;
+    } else {
+      // Otherwise use the broadcast address.
+      discovery_addr_ = bcast_addr;
+      discovery_addr_.SetPort(discovery_peer_port_);
+      if (absl::Status s = discovery_transmitter_.SetBroadcast(); !s.ok()) {
+        return s;
+      }
     }
 
     // Open the discovery receiver socket.
@@ -547,13 +574,13 @@ void Server::SendQuery(const std::string &channel_name) {
   coroutines_.insert(std::make_unique<co::Coroutine>(
       co_scheduler_,
       [this, channel_name](co::Coroutine *c) {
-        logger_.Log(toolbelt::LogLevel::kDebug, "Sending Query %s",
-                    channel_name.c_str());
+        logger_.Log(toolbelt::LogLevel::kDebug,
+                    "Sending Query %s with discovery port %d",
+                    channel_name.c_str(), discovery_port_);
         char buffer[kDiscoveryBufferSize];
         Discovery disc;
         disc.set_server_id(server_id_);
         disc.set_port(discovery_port_);
-
         auto *query = disc.mutable_query();
         query->set_channel_name(channel_name);
 
@@ -584,8 +611,9 @@ void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
   coroutines_.insert(std::make_unique<co::Coroutine>(
       co_scheduler_,
       [this, channel_name, reliable](co::Coroutine *c) {
-        logger_.Log(toolbelt::LogLevel::kDebug, "Sending Advertise %s",
-                    channel_name.c_str());
+        logger_.Log(toolbelt::LogLevel::kDebug,
+                    "Sending Advertise %s with discovery port %d",
+                    channel_name.c_str(), discovery_port_);
         char buffer[kDiscoveryBufferSize];
         Discovery disc;
         disc.set_server_id(server_id_);
@@ -614,6 +642,7 @@ void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
 // This coroutine receives discovery messages over UDP.
 void Server::DiscoveryReceiverCoroutine(co::Coroutine *c) {
   char buffer[kDiscoveryBufferSize];
+
   for (;;) {
     toolbelt::InetAddress sender;
     absl::StatusOr<ssize_t> n =
@@ -652,12 +681,18 @@ void Server::DiscoveryReceiverCoroutine(co::Coroutine *c) {
   }
 }
 
+// This coroutine creates a subscriber to the given channel and sends
+// every message received over the bridge to another server.  It first sends
+// a 'Subscribed' message detailing the information about the channel then
+// enters a loop reading messages sent to the channel on this side of the
+// bridge and sending them over.
 void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
                                         bool pub_reliable, bool sub_reliable,
-                                        toolbelt::InetAddress subscriber,
+                                        toolbelt::SocketAddress subscriber,
+                                        bool notify_retirement,
                                         co::Coroutine *c) {
   logger_.Log(toolbelt::LogLevel::kDebug, "BridgeTransmitterCoroutine running");
-  toolbelt::TCPSocket bridge;
+  toolbelt::StreamSocket bridge;
   if (absl::Status status = bridge.Connect(subscriber); !status.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to connect to bridge subscriber: %s",
@@ -685,6 +720,50 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
   subscribed.set_slot_size(channel->SlotSize());
   subscribed.set_num_slots(channel->NumSlots());
   subscribed.set_reliable(pub_reliable);
+
+  toolbelt::StreamSocket retirement_listener;
+  toolbelt::SocketAddress retirement_addr;
+
+  if (notify_retirement) {
+    // We want to be notified when the slot has been retired.
+    subscribed.set_notify_retirement(true);
+    // Allocate a listen socket to wait for an incoming connection from the
+    // other server.
+
+    absl::Status s = retirement_listener.Bind(
+        toolbelt::SocketAddress::AnyPort(my_address_), true);
+    if (!s.ok()) {
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Unable to bind socket for retirement receiver for %s: %s",
+                  channel_name.c_str(), s.ToString().c_str());
+      return;
+    }
+    retirement_addr = retirement_listener.BoundAddress();
+    logger_.Log(toolbelt::LogLevel::kDebug, "Retirement listener: %s",
+                retirement_addr.ToString().c_str());
+
+    // Tell the other side where to connect to notify us of slot retirement
+    auto *ret_addr = subscribed.mutable_retirement_socket();
+    switch (retirement_addr.Type()) {
+    case toolbelt::SocketAddress::kAddressInet: {
+      in_addr ip_addr = retirement_addr.GetInetAddress().IpAddress();
+      ret_addr->set_address(&ip_addr, sizeof(ip_addr));
+      break;
+    }
+    case toolbelt::SocketAddress::kAddressVirtual: {
+      uint32_t cid = retirement_addr.GetVirtualAddress().Cid();
+      ret_addr->set_address(&cid, sizeof(cid));
+      break;
+    }
+    default:
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Unsupported address type for retirement notification: %s",
+                  retirement_addr.ToString().c_str());
+      return;
+    }
+
+    ret_addr->set_port(retirement_addr.Port());
+  }
 
   bool ok = subscribed.SerializeToArray(databuf, static_cast<int>(buflen));
   if (!ok) {
@@ -717,6 +796,43 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
                 channel_name.c_str(), sub.status().ToString().c_str());
     return;
   }
+
+  // For retirement notifications, we keep track of the Messages we
+  // send over the bridge.  This extends the lifetime of the AciveMessage until
+  // the other side of the bridge sends us a retirement notification for the
+  // message's slot.
+  std::vector<std::shared_ptr<ActiveMessage>> active_retirement_msgs;
+  bool notifying_of_retirement = !channel->GetRetirementFds().empty();
+
+  // Spawn a coroutine to read from the retirement connection.
+  if (notifying_of_retirement) {
+    active_retirement_msgs.resize(channel->NumSlots());
+    coroutines_.insert(std::make_unique<co::Coroutine>(
+        co_scheduler_,
+        [this, &retirement_listener,
+         &active_retirement_msgs](co::Coroutine *c2) {
+          return RetirementReceiverCoroutine(retirement_listener,
+                                             active_retirement_msgs, c2);
+        },
+        absl::StrFormat("Retirement receiver for %s", channel_name)));
+  }
+
+  if (bridge_notification_pipe_.WriteFd().Valid()) {
+    // Also send the Subscribed message to the bridge notification pipe.  This
+    // is sent without a coroutine.
+    // TODO: use a coroutine to avoid blocking?
+    // We send the whole buffer including the 4-byte length.
+    if (absl::StatusOr<ssize_t> s = bridge_notification_pipe_.WriteFd().Write(
+            buffer, length + sizeof(int32_t));
+        !s.ok()) {
+      logger_.Log(
+          toolbelt::LogLevel::kError,
+          "Failed to send subscribed message to bridge notification pipe: %s",
+          s.status().ToString().c_str());
+      // Ignore the error.
+    }
+  }
+
   // Read messages from subscriber and send to bridge socket.
   bool done = false;
   while (!done) {
@@ -739,7 +855,7 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
         break;
       }
       if (msg->length == 0) {
-        // End of messages, wait for more.w
+        // End of messages, wait for more.
         break;
       }
       // We want to send the MessagePrefix along with the message.
@@ -784,7 +900,13 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
 
         break;
       }
+      if (notifying_of_retirement) {
+        // We need to keep track of the message so that we can retire it
+        // when the other side retires the slot.
+        active_retirement_msgs[msg->slot_id] = std::move(msg->active_message);
+      }
     }
+
     const ChannelCounters &counters = sub->GetCounters();
     if (counters.num_pubs == 0) {
       // No publisher left to send anything.  We're done.
@@ -799,13 +921,64 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
   channel->RemoveBridgedAddress(subscriber, sub_reliable);
 }
 
+// This coroutine reads retirement messages from the bridge and removes
+// the reference to the slot that has been retired on the other side.
+// References to the active messages are kept in a vector, indexed by slot_id.
+// If these references are the last reference to the slot, it will be retired
+// on this side and the publisher's retirement FD is sent the slot.
+void Server::RetirementReceiverCoroutine(
+    toolbelt::StreamSocket &retirement_listener,
+    std::vector<std::shared_ptr<ActiveMessage>> &active_retirement_msgs,
+    co::Coroutine *c) {
+  // Accept connection on the retirement listener socket.
+  absl::StatusOr<toolbelt::StreamSocket> retirement_socket =
+      retirement_listener.Accept(c);
+  if (!retirement_socket.ok()) {
+    logger_.Log(toolbelt::LogLevel::kError,
+                "Failed to accept retirement connection: %s",
+                retirement_socket.status().ToString().c_str());
+    return;
+  }
+
+  // Read retirement messages from the socket.
+  char buffer[kDiscoveryBufferSize];
+  for (;;) {
+    absl::StatusOr<ssize_t> n_recv =
+        retirement_socket->ReceiveMessage(buffer, sizeof(buffer), c);
+    if (!n_recv.ok()) {
+      return;
+    }
+    if (*n_recv == 0) {
+      // No more messages, we're done.
+      break;
+    }
+    RetirementNotification retirement;
+    if (!retirement.ParseFromArray(buffer, static_cast<int>(*n_recv))) {
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to parse Retirement message");
+      continue;
+    }
+    int slot_id = retirement.slot_id();
+    // We always send 1 greater than the slot id to prevent a slot id of 0
+    // being sent (which is serialized as 0 bytes.  Remove the adustment.
+    slot_id -= 1;
+
+    if (slot_id < 0 || slot_id >= active_retirement_msgs.size()) {
+      continue;
+    }
+    active_retirement_msgs[slot_id].reset();
+  }
+}
+
 // Send a Subscribe message over UDP.
 absl::Status Server::SendSubscribeMessage(
     const std::string &channel_name, bool reliable,
-    toolbelt::InetAddress publisher, toolbelt::TCPSocket &receiver_listener,
+    toolbelt::InetAddress publisher, toolbelt::StreamSocket &receiver_listener,
     char *buffer, size_t buffer_size, co::Coroutine *c) {
-  const toolbelt::InetAddress &receiver_addr = receiver_listener.BoundAddress();
-  logger_.Log(toolbelt::LogLevel::kDebug, "Bridge receiver socket: %s",
+  const toolbelt::SocketAddress &receiver_addr =
+      receiver_listener.BoundAddress();
+  logger_.Log(toolbelt::LogLevel::kDebug,
+              "Sending subscribe with bridge receiver socket: %s",
               receiver_addr.ToString().c_str());
   // Send a subscribe request to the publisher.
   Discovery disc;
@@ -814,8 +987,24 @@ absl::Status Server::SendSubscribeMessage(
   sub->set_channel_name(channel_name);
   sub->set_reliable(reliable);
   auto *sub_addr = sub->mutable_receiver();
-  in_addr ip_addr = receiver_addr.IpAddress();
-  sub_addr->set_ip_address(&ip_addr, sizeof(ip_addr));
+  switch (receiver_addr.Type()) {
+  case toolbelt::SocketAddress::kAddressInet: {
+    // IPv4 address.
+    in_addr ip_addr = receiver_addr.GetInetAddress().IpAddress();
+    sub_addr->set_address(&ip_addr, sizeof(ip_addr));
+    break;
+  }
+  case toolbelt::SocketAddress::kAddressVirtual: {
+    // Virtual address.
+    uint32_t cid = receiver_addr.GetVirtualAddress().Cid();
+    sub_addr->set_address(&cid, sizeof(cid));
+    break;
+  }
+  default:
+    return absl::InternalError(
+        absl::StrFormat("Unsupported address type for subscribe: %s",
+                        receiver_addr.ToString().c_str()));
+  }
   sub_addr->set_port(receiver_addr.Port());
 
   bool ok = disc.SerializeToArray(buffer, static_cast<int>(buffer_size));
@@ -835,7 +1024,9 @@ absl::Status Server::SendSubscribeMessage(
 
 // This coroutine receives messages on a TCP socket and publishes
 // them to a local channel.  The messages contain the prefix which
-// is sent intact to the channel.
+// is sent intact to the channel.  It first receives a 'Subscribed' message
+// with the channel details, then enters a loop reading message from the
+// bridge and publishing them to the local channel.
 void Server::BridgeReceiverCoroutine(std::string channel_name,
                                      bool sub_reliable,
                                      toolbelt::InetAddress publisher,
@@ -844,16 +1035,17 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
   logger_.Log(toolbelt::LogLevel::kDebug, "BridgeReceiverCoroutine running");
   char buffer[kDiscoveryBufferSize];
 
-  toolbelt::TCPSocket receiver_listener;
-  absl::Status s =
-      receiver_listener.Bind(toolbelt::InetAddress(hostname_, 0), true);
+  toolbelt::StreamSocket receiver_listener;
+  absl::Status s = receiver_listener.Bind(
+      toolbelt::SocketAddress::AnyPort(my_address_), true);
   if (!s.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Unable to bind socket for bridge receiver for %s: %s",
                 channel_name.c_str(), s.ToString().c_str());
     return;
   }
-  const toolbelt::InetAddress &receiver_addr = receiver_listener.BoundAddress();
+  const toolbelt::SocketAddress &receiver_addr =
+      receiver_listener.BoundAddress();
   logger_.Log(toolbelt::LogLevel::kDebug, "Bridge receiver socket: %s",
               receiver_addr.ToString().c_str());
 
@@ -867,7 +1059,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
   }
 
   // Accept connection on listen socket.
-  absl::StatusOr<toolbelt::TCPSocket> bridge = receiver_listener.Accept(c);
+  absl::StatusOr<toolbelt::StreamSocket> bridge = receiver_listener.Accept(c);
   if (!bridge.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to accept incoming bridge connection: %s",
@@ -877,14 +1069,17 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
 
   // Wait for the Subscribed message from the server.
   Subscribed subscribed;
-  absl::StatusOr<ssize_t> n_recv =
-      bridge->ReceiveMessage(buffer, sizeof(buffer), c);
+  // Recieve it into offset 3 in buffer so that we can write the length for
+  // sending it out again to the bridge notification pipe.
+  absl::StatusOr<ssize_t> n_recv = bridge->ReceiveMessage(
+      buffer + sizeof(int32_t), sizeof(buffer) - sizeof(int32_t), c);
   if (!n_recv.ok()) {
     logger_.Log(toolbelt::LogLevel::kError, "Failed to receive Subscribed: %s",
                 n_recv.status().ToString().c_str());
     return;
   }
-  if (!subscribed.ParseFromArray(buffer, static_cast<int>(*n_recv))) {
+  if (!subscribed.ParseFromArray(buffer + sizeof(int32_t),
+                                 static_cast<int>(*n_recv))) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to parse Subscribed message");
     return;
@@ -899,11 +1094,58 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
                 s.ToString().c_str());
     return;
   }
+
+  std::unique_ptr<toolbelt::StreamSocket> retirement_transmitter;
+
+  if (subscribed.notify_retirement()) {
+    retirement_transmitter = std::make_unique<toolbelt::StreamSocket>();
+    toolbelt::SocketAddress retirement_addr;
+    switch (my_address_.Type()) {
+    case toolbelt::SocketAddress::kAddressInet: {
+      // IPv4 address.
+      struct sockaddr_in addr;
+      memset(&addr, 0, sizeof(addr));
+      addr.sin_family = AF_INET;
+      addr.sin_port = htons(subscribed.retirement_socket().port());
+      addr.sin_addr.s_addr = ntohl(*reinterpret_cast<const uint32_t *>(
+          subscribed.retirement_socket().address().data()));
+      retirement_addr = toolbelt::SocketAddress(addr);
+      break;
+    }
+    case toolbelt::SocketAddress::kAddressVirtual: {
+      // Virtual address.
+      struct sockaddr_vm addr;
+      memset(&addr, 0, sizeof(addr));
+      addr.svm_family = AF_VSOCK;
+      addr.svm_port = subscribed.retirement_socket().port();
+      addr.svm_cid = *reinterpret_cast<const uint32_t *>(
+          subscribed.retirement_socket().address().data());
+      retirement_addr = toolbelt::SocketAddress(addr);
+      break;
+    }
+    default:
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Unsupported address type for retirement notification: %s",
+                  my_address_.ToString().c_str());
+      return;
+    }
+
+    s = retirement_transmitter->Connect(retirement_addr);
+    if (!s.ok()) {
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to connect to retirement socket for %s: %s",
+                  channel_name.c_str(), s.ToString().c_str());
+      return;
+    }
+  }
   // For a reliable publisher, this will send an activation message
   // to the local channel.
   absl::StatusOr<Publisher> pub = client.CreatePublisher(
       channel_name, subscribed.slot_size(), subscribed.num_slots(),
-      PublisherOptions().SetReliable(subscribed.reliable()).SetBridge(true));
+      PublisherOptions()
+          .SetReliable(subscribed.reliable())
+          .SetBridge(true)
+          .SetNotifyRetirement(subscribed.notify_retirement()));
   if (!pub.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to create bridge publisher for %s: %s",
@@ -911,7 +1153,53 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     return;
   }
 
-  // toolbelt::Now we receive messages from the bridge and send to the
+  toolbelt::FileDescriptor retirement_fd;
+  if (subscribed.notify_retirement()) {
+    // We need to send the retirement fd to the publisher.
+    // This is used to notify us when a slot is retired.
+    retirement_fd = pub->GetRetirementFd();
+    if (!retirement_fd.Valid()) {
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to get retirement fd for %s", channel_name.c_str());
+      return;
+    }
+
+    // Add a coroutine to listen for retirement notifications and send them to
+    // the socket connected to the other server.
+    coroutines_.insert(std::make_unique<co::Coroutine>(
+        co_scheduler_,
+        [
+          this, retirement_fd = std::move(retirement_fd),
+          &retirement_transmitter, channel_name
+        ](co::Coroutine * c) mutable {
+          RetirementCoroutine(channel_name, std::move(retirement_fd),
+                              std::move(retirement_transmitter), c);
+        },
+        absl::StrFormat("Retirement notifier for %s", channel_name).c_str()));
+  }
+
+  if (bridge_notification_pipe_.WriteFd().Valid()) {
+    // Also send the Subscribed message to the bridge notification pipe.  This
+    // is sent without a coroutine.
+    // TODO: use a coroutine to avoid blocking?
+    // We send the whole buffer including the 4-byte length.
+    // Write the length in big endian.
+    buffer[0] = (*n_recv >> 24) & 0xff;
+    buffer[1] = (*n_recv >> 16) & 0xff;
+    buffer[2] = (*n_recv >> 8) & 0xff;
+    buffer[3] = *n_recv & 0xff;
+    if (absl::StatusOr<ssize_t> s = bridge_notification_pipe_.WriteFd().Write(
+            buffer, *n_recv + sizeof(int32_t));
+        !s.ok()) {
+      logger_.Log(
+          toolbelt::LogLevel::kError,
+          "Failed to send subscribed message to bridge notification pipe: %s",
+          s.status().ToString().c_str());
+      // Ignore the error.
+    }
+  }
+
+  // Now we receive messages from the bridge and send to the
   // publisher.
   for (;;) {
     absl::StatusOr<void *> buf = pub->GetMessageBuffer();
@@ -981,8 +1269,8 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     }
     prefix->flags |= kMessageBridged;
 
-    absl::StatusOr<const Message> pub_msg =
-        pub->PublishMessageInternal(*n, /*omit_prefix=*/true);
+    absl::StatusOr<const Message> pub_msg = pub->PublishMessageInternal(
+        *n - kAdjustedPrefixLength, /*omit_prefix=*/true);
     if (!pub_msg.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to publish bridge message for %s: %s",
@@ -993,6 +1281,61 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
   logger_.Log(toolbelt::LogLevel::kDebug,
               "Bridge receiver coroutine terminating");
   // Socket has been closed, we're done.
+}
+
+// This coroutine receives retirement notifications from the bridge publisher
+// and sends those over the bridge to the server that originally published the
+// message.  The slot ID sent back to the original server is the slot of the
+// original message, not this side's slot.  That is held in the MessagePrefix
+// which is kept intact.
+void Server::RetirementCoroutine(
+    const std::string &channel_name, toolbelt::FileDescriptor &&retirement_fd,
+    std::unique_ptr<toolbelt::StreamSocket> retirement_transmitter,
+    co::Coroutine *c) {
+  logger_.Log(toolbelt::LogLevel::kDebug, "Retirement coroutine for %s running",
+              channel_name.c_str());
+  for (;;) {
+    int32_t slot_id;
+    absl::StatusOr<ssize_t> n =
+        retirement_fd.Read(&slot_id, sizeof(slot_id), c);
+    if (!n.ok()) {
+      // Failed to read the slot ID, we're done.
+      return;
+    }
+    if (*n == 0) {
+      return; // EOF, we're done.
+    }
+
+    // We received a retirement notification, send the fd.
+    logger_.Log(toolbelt::LogLevel::kVerboseDebug,
+                "Received retirement notification for %s, slot %d",
+                channel_name.c_str(), slot_id);
+
+    // Send the retirement fd to the other side.
+    RetirementNotification msg;
+    // If the slot id is zero the protobuf message will be serialized to 0
+    // bytes. Sending a message of zero length is very confusing, so we adjust
+    // it by adding 1.  We remove the adjustment when it is received.
+    msg.set_slot_id(slot_id + 1);
+
+    char buffer[32];
+    bool ok = msg.SerializeToArray(buffer + sizeof(int32_t),
+                                   sizeof(buffer) - sizeof(int32_t));
+    if (!ok) {
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to serialize retirement notification for %s",
+                  channel_name.c_str());
+      return;
+    }
+    absl::StatusOr<ssize_t> nsent = retirement_transmitter->SendMessage(
+        buffer + sizeof(int32_t), msg.ByteSizeLong(), c);
+    if (!nsent.ok()) {
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to send retirement fd for %s: %s",
+                  channel_name.c_str(), nsent.status().ToString().c_str());
+      return;
+    }
+  }
 }
 
 void Server::SubscribeOverBridge(ServerChannel *channel, bool reliable,
@@ -1066,20 +1409,41 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
 
     channel->second->AddBridgedAddress(sender, sub_reliable);
 
-    // The subscribe message contains the IP address and port of the TCP
+    // The subscribe message contains the IP address and port of the
     // socket listening for our connection for the channel.  Extract it.
-    // TODO: IPv6?
-    in_addr subscriber_ip;
-    memcpy(&subscriber_ip, subscribe.receiver().ip_address().data(),
-           sizeof(subscriber_ip));
-    toolbelt::InetAddress subscriber_addr(subscriber_ip,
-                                          subscribe.receiver().port());
+    toolbelt::SocketAddress subscriber_addr;
+    switch (my_address_.Type()) {
+    case toolbelt::SocketAddress::kAddressInet: {
+      in_addr subscriber_ip;
+      memcpy(&subscriber_ip, subscribe.receiver().address().data(),
+             sizeof(subscriber_ip));
+      subscriber_addr =
+          toolbelt::SocketAddress(subscriber_ip, subscribe.receiver().port());
+      break;
+    }
+    case toolbelt::SocketAddress::kAddressVirtual: {
+      uint32_t cid = *reinterpret_cast<const uint32_t *>(
+          subscribe.receiver().address().data());
+      subscriber_addr =
+          toolbelt::SocketAddress(cid, subscribe.receiver().port());
+      break;
+    }
+    default:
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Unknown address type for subscribe receiver");
+      return;
+    }
+
+    bool notify_retirement = !channel->second->GetRetirementFds().empty();
     coroutines_.insert(std::make_unique<co::Coroutine>(
         co_scheduler_,
-        [this, pub_reliable, sub_reliable, subscriber_addr,
-         ch](co::Coroutine *c) {
+        [
+          this, pub_reliable, sub_reliable,
+          subscriber_addr = std::move(subscriber_addr), notify_retirement, ch
+        ](co::Coroutine * c) mutable {
           BridgeTransmitterCoroutine(ch, pub_reliable, sub_reliable,
-                                     subscriber_addr, c);
+                                     std::move(subscriber_addr),
+                                     notify_retirement, c);
         },
         absl::StrFormat("Bridge transmitter for %s", channel->first).c_str()));
   } else {
