@@ -5,6 +5,7 @@
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
 #include "absl/hash/hash_testing.h"
+#include "absl/status/status_matchers.h"
 #include "client/client.h"
 #include "coroutine.h"
 #include "proto/subspace.pb.h"
@@ -39,11 +40,11 @@ using InetAddress = toolbelt::InetAddress;
     if (!result.ok()) {                                                        \
       std::cerr << result.status() << std::endl;                               \
     }                                                                          \
-    ASSERT_TRUE(result.ok());                                                  \
+    ASSERT_OK(result);                                                  \
     std::move(*result);                                                        \
   })
 
-#define ASSERT_OK(e) ASSERT_TRUE(e.ok())
+#define ASSERT_OK(e) ASSERT_THAT(e, ::absl_testing::IsOk())
 
 class BridgeTest : public ::testing::Test {
 public:
@@ -114,7 +115,7 @@ public:
   void TearDown() override {}
 
   void InitClient(subspace::Client &client, int server) {
-    ASSERT_TRUE(client.Init(Socket(server)).ok());
+    ASSERT_OK(client.Init(Socket(server)));
   }
 
   static const std::string &Socket(int i) { return socket_[i]; }
@@ -182,28 +183,28 @@ TEST_F(BridgeTest, Basic) {
   // Create a non-local publisher on client 1.
   absl::StatusOr<Publisher> pub = client1.CreatePublisher(
       "/bridged_channel", {.slot_size = 256, .num_slots = 10, .local = false});
-  ASSERT_TRUE(pub.ok());
+  ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
       client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
-  ASSERT_TRUE(sub.ok());
+  ASSERT_OK(sub);
 
   toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
   WaitForSubscribedMessage(send_bridge_pipe, "/bridged_channel");
 
   // Send a message on the publisher.
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-  ASSERT_TRUE(buffer.ok());
+  ASSERT_OK(buffer);
   memcpy(*buffer, "foobar", 6);
   absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
-  ASSERT_TRUE(pub_status.ok());
+  ASSERT_OK(pub_status);
 
   toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
   WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_channel");
 
   // Receive the message on the subscriber.
   absl::StatusOr<Message> msg = sub->ReadMessage();
-  ASSERT_TRUE(msg.ok());
+  ASSERT_OK(msg);
   ASSERT_EQ(6, msg->length);
   ASSERT_EQ(256, sub->SlotSize());
 }
@@ -218,37 +219,37 @@ TEST_F(BridgeTest, TwoSubs) {
   // Create a non-local publisher on client 1.
   absl::StatusOr<Publisher> pub = client1.CreatePublisher(
       "/bridged_channel", {.slot_size = 256, .num_slots = 10, .local = false});
-  ASSERT_TRUE(pub.ok());
+  ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub1 =
       client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
-  ASSERT_TRUE(sub1.ok());
+  ASSERT_OK(sub1);
 
   absl::StatusOr<Subscriber> sub2 =
       client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
-  ASSERT_TRUE(sub2.ok());
+  ASSERT_OK(sub2);
 
   toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
   WaitForSubscribedMessage(send_bridge_pipe, "/bridged_channel");
 
   // Send a message on the publisher.
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-  ASSERT_TRUE(buffer.ok());
+  ASSERT_OK(buffer);
   memcpy(*buffer, "foobar", 6);
   absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
-  ASSERT_TRUE(pub_status.ok());
+  ASSERT_OK(pub_status);
 
   toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
   WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_channel");
 
   // Receive the message on the subscriber.
   absl::StatusOr<Message> msg = sub1->ReadMessage();
-  ASSERT_TRUE(msg.ok());
+  ASSERT_OK(msg);
   ASSERT_EQ(6, msg->length);
   ASSERT_EQ(256, sub1->SlotSize());
 
   msg = sub2->ReadMessage();
-  ASSERT_TRUE(msg.ok());
+  ASSERT_OK(msg);
   ASSERT_EQ(6, msg->length);
   ASSERT_EQ(256, sub2->SlotSize());
 }
@@ -266,21 +267,21 @@ TEST_F(BridgeTest, BasicRetirement) {
                                                    .num_slots = 10,
                                                    .local = false,
                                                    .notify_retirement = true});
-  ASSERT_TRUE(pub.ok());
+  ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
       client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
-  ASSERT_TRUE(sub.ok());
+  ASSERT_OK(sub);
 
   toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
   WaitForSubscribedMessage(send_bridge_pipe, "/bridged_channel");
 
   // Send a message on the publisher.
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-  ASSERT_TRUE(buffer.ok());
+  ASSERT_OK(buffer);
   memcpy(*buffer, "foobar", 6);
   absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
-  ASSERT_TRUE(pub_status.ok());
+  ASSERT_OK(pub_status);
 
   toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
   WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_channel");
@@ -290,7 +291,7 @@ TEST_F(BridgeTest, BasicRetirement) {
 
   // Receive the message on the subscriber.
   absl::StatusOr<Message> msg = sub->ReadMessage();
-  ASSERT_TRUE(msg.ok());
+  ASSERT_OK(msg);
   ASSERT_EQ(6, msg->length);
   ASSERT_EQ(256, sub->SlotSize());
   // Release the message on the subscriber (on server 2).
@@ -319,7 +320,7 @@ TEST_F(BridgeTest, MultipleRetirement) {
   absl::StatusOr<Publisher> local_pub = client1.CreatePublisher(
       "/bridged_channel",
       {.slot_size = 256, .num_slots = kNumSlots, .local = false});
-  ASSERT_TRUE(local_pub.ok());
+  ASSERT_OK(local_pub);
 
   // Create a non-local publisher on client 1.
   absl::StatusOr<Publisher> pub =
@@ -327,11 +328,11 @@ TEST_F(BridgeTest, MultipleRetirement) {
                                                    .num_slots = kNumSlots,
                                                    .local = false,
                                                    .notify_retirement = true});
-  ASSERT_TRUE(pub.ok());
+  ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
       client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
-  ASSERT_TRUE(sub.ok());
+  ASSERT_OK(sub);
 
   toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
   WaitForSubscribedMessage(send_bridge_pipe, "/bridged_channel");
@@ -340,10 +341,10 @@ TEST_F(BridgeTest, MultipleRetirement) {
   for (int i = 0; i < kNumMessages; i++) {
     // Send a message on the publisher.
     absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-    ASSERT_TRUE(buffer.ok());
+    ASSERT_OK(buffer);
     snprintf(static_cast<char *>(*buffer), 256, "foobar %d", i);
     absl::StatusOr<const Message> pub_status = pub->PublishMessage(12 + i);
-    ASSERT_TRUE(pub_status.ok());
+    ASSERT_OK(pub_status);
   }
 
   toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
@@ -410,18 +411,18 @@ TEST_F(BridgeTest, MultipleRetirement2) {
                                                    .num_slots = kNumSlots,
                                                    .local = false,
                                                    .notify_retirement = true});
-  ASSERT_TRUE(pub.ok());
+  ASSERT_OK(pub);
 
   // Create publisher on the subscriber server.  This wil consume slot 0 on that
   // side.
   absl::StatusOr<Publisher> local_pub = client2.CreatePublisher(
       "/bridged_channel",
       {.slot_size = 256, .num_slots = kNumSlots, .local = false});
-  ASSERT_TRUE(local_pub.ok());
+  ASSERT_OK(local_pub);
 
   absl::StatusOr<Subscriber> sub =
       client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
-  ASSERT_TRUE(sub.ok());
+  ASSERT_OK(sub);
 
   toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
   WaitForSubscribedMessage(send_bridge_pipe, "/bridged_channel");
@@ -430,10 +431,10 @@ TEST_F(BridgeTest, MultipleRetirement2) {
   for (int i = 0; i < kNumMessages; i++) {
     // Send a message on the publisher.
     absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-    ASSERT_TRUE(buffer.ok());
+    ASSERT_OK(buffer);
     snprintf(static_cast<char *>(*buffer), 256, "foobar %d", i);
     absl::StatusOr<const Message> pub_status = pub->PublishMessage(12 + i);
-    ASSERT_TRUE(pub_status.ok());
+    ASSERT_OK(pub_status);
   }
 
   toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);

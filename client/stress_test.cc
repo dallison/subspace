@@ -17,6 +17,7 @@
 #include <signal.h>
 #include <sys/resource.h>
 #include <thread>
+#include "absl/status/status_matchers.h"
 
 ABSL_FLAG(bool, start_server, true, "Start the subspace server");
 ABSL_FLAG(std::string, server, "", "Path to server executable");
@@ -27,6 +28,21 @@ using Publisher = subspace::Publisher;
 using Subscriber = subspace::Subscriber;
 using Message = subspace::Message;
 using InetAddress = toolbelt::InetAddress;
+
+#define VAR(a) a##__COUNTER__
+#define EVAL_AND_ASSERT_OK(expr) EVAL_AND_ASSERT_OK2(VAR(r_), expr)
+
+#define EVAL_AND_ASSERT_OK2(result, expr)                                      \
+  ({                                                                           \
+    auto result = (expr);                                                      \
+    if (!result.ok()) {                                                        \
+      std::cerr << result.status() << std::endl;                               \
+    }                                                                          \
+    ASSERT_OK(result);                                                  \
+    std::move(*result);                                                        \
+  })
+
+#define ASSERT_OK(e) ASSERT_THAT(e, ::absl_testing::IsOk())
 
 class StressTest : public ::testing::Test {
 public:
@@ -80,7 +96,7 @@ public:
   void TearDown() override {}
 
   void InitClient(subspace::Client &client) {
-    ASSERT_TRUE(client.Init(Socket()).ok());
+    ASSERT_OK(client.Init(Socket()));
   }
 
   static const std::string &Socket() { return socket_; }
@@ -111,21 +127,6 @@ static void SigQuitHandler(int sig) {
   signal(sig, SIG_DFL);
   (void)raise(sig);
 }
-
-#define VAR(a) a##__COUNTER__
-#define EVAL_AND_ASSERT_OK(expr) EVAL_AND_ASSERT_OK2(VAR(r_), expr)
-
-#define EVAL_AND_ASSERT_OK2(result, expr)                                      \
-  ({                                                                           \
-    auto result = (expr);                                                      \
-    if (!result.ok()) {                                                        \
-      std::cerr << result.status() << std::endl;                               \
-    }                                                                          \
-    ASSERT_TRUE(result.ok());                                                  \
-    std::move(*result);                                                        \
-  })
-
-#define ASSERT_OK(e) ASSERT_TRUE(e.ok())
 
 TEST_F(StressTest, Coroutines) {
   auto oldSig = signal(SIGQUIT, SigQuitHandler);
@@ -765,7 +766,7 @@ TEST_F(StressTest, ManyChannelsNonMultiplexed) {
   for (int i = 0; i < kNumChannels; i++) {
     absl::StatusOr<Publisher> pub = pub_clients[i]->CreatePublisher(
         channels[i], {.slot_size = kSlotSize, .num_slots = knum_slots});
-    ASSERT_TRUE(pub.ok());
+    ASSERT_OK(pub);
     pubs.push_back(std::move(*pub));
   }
 
@@ -775,7 +776,7 @@ TEST_F(StressTest, ManyChannelsNonMultiplexed) {
     absl::StatusOr<Subscriber> sub = sub_client->CreateSubscriber(
         channels[i], {.log_dropped_messages = false});
     // std::cerr << "sub status " << sub.status() << "\n";
-    ASSERT_TRUE(sub.ok());
+    ASSERT_OK(sub);
     subs.push_back(std::move(*sub));
   }
 
@@ -796,7 +797,7 @@ TEST_F(StressTest, ManyChannelsNonMultiplexed) {
         if (fds[i].revents & POLLIN) {
           for (;;) {
             absl::StatusOr<Message> msg = subs[i].ReadMessage();
-            ASSERT_TRUE(msg.ok());
+            ASSERT_OK(msg);
             if (msg->length > 0) {
               num_dropped += msg->ordinal - last_ordinals[i] - 1;
               last_ordinals[i] = msg->ordinal;
@@ -830,7 +831,7 @@ TEST_F(StressTest, ManyChannelsNonMultiplexed) {
         absl::StatusOr<const Message> pub_status =
             pubs[i].PublishMessage(sizeof(send_time));
         // std::cerr << "pub status " << pub_status.status() << "\n";
-        ASSERT_TRUE(pub_status.ok());
+        ASSERT_OK(pub_status);
         j++;
         // Transmit at 1 MHz.
         std::this_thread::sleep_for(std::chrono::microseconds(periods[i]));
@@ -849,7 +850,7 @@ TEST_F(StressTest, ManyChannelsNonMultiplexed) {
       absl::StatusOr<void *> buffer = pubs[j].GetMessageBuffer();
       ASSERT_OK(buffer);
       absl::StatusOr<const Message> pub_status = pubs[j].PublishMessage(1);
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
     }
   }
   sub_thread.join();
@@ -881,7 +882,7 @@ TEST_F(StressTest, ManyChannelsMultiplexed) {
     absl::StatusOr<Publisher> pub = pub_clients[i]->CreatePublisher(
         channels[i],
         {.slot_size = kSlotSize, .num_slots = knum_slots, .mux = kMux});
-    ASSERT_TRUE(pub.ok());
+    ASSERT_OK(pub);
     pubs.push_back(std::move(*pub));
   }
 
@@ -891,7 +892,7 @@ TEST_F(StressTest, ManyChannelsMultiplexed) {
     absl::StatusOr<Subscriber> sub = sub_client->CreateSubscriber(
         channels[i], {.log_dropped_messages = false, .mux = kMux});
     // std::cerr << "sub status " << sub.status() << "\n";
-    ASSERT_TRUE(sub.ok());
+    ASSERT_OK(sub);
     subs.push_back(std::move(*sub));
   }
 
@@ -912,7 +913,7 @@ TEST_F(StressTest, ManyChannelsMultiplexed) {
         if (fds[i].revents & POLLIN) {
           for (;;) {
             absl::StatusOr<Message> msg = subs[i].ReadMessage();
-            ASSERT_TRUE(msg.ok());
+            ASSERT_OK(msg);
             if (msg->length > 0) {
               num_dropped += msg->ordinal - last_ordinals[i] - 1;
               last_ordinals[i] = msg->ordinal;
@@ -948,7 +949,7 @@ TEST_F(StressTest, ManyChannelsMultiplexed) {
         if (!pub_status.ok()) {
           std::cerr << "pub status " << pub_status.status() << "\n";
         }
-        ASSERT_TRUE(pub_status.ok());
+        ASSERT_OK(pub_status);
         j++;
         std::this_thread::sleep_for(std::chrono::microseconds(periods[i]));
       }
@@ -966,7 +967,7 @@ TEST_F(StressTest, ManyChannelsMultiplexed) {
       absl::StatusOr<void *> buffer = pubs[j].GetMessageBuffer();
       ASSERT_OK(buffer);
       absl::StatusOr<const Message> pub_status = pubs[j].PublishMessage(1);
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
     }
   }
   sub_thread.join();
@@ -1000,7 +1001,7 @@ TEST_F(StressTest, ManyChannelsMultiplexedSubscribedToMux) {
                                                       .num_slots = knum_slots,
                                                       .activate = true,
                                                       .mux = kMux});
-    ASSERT_TRUE(pub.ok());
+    ASSERT_OK(pub);
     pubs.push_back(std::move(*pub));
   }
 
@@ -1008,7 +1009,7 @@ TEST_F(StressTest, ManyChannelsMultiplexedSubscribedToMux) {
   absl::StatusOr<Subscriber> sub =
       sub_client->CreateSubscriber(kMux, {.log_dropped_messages = false});
   // std::cerr << "sub status " << sub.status() << "\n";
-  ASSERT_TRUE(sub.ok());
+  ASSERT_OK(sub);
 
   std::atomic<int> num_messages = 0;
 
@@ -1023,7 +1024,7 @@ TEST_F(StressTest, ManyChannelsMultiplexedSubscribedToMux) {
       if (pfd.revents & POLLIN) {
         for (;;) {
           absl::StatusOr<Message> msg = sub->ReadMessage();
-          ASSERT_TRUE(msg.ok());
+          ASSERT_OK(msg);
           if (msg->length > 0) {
             num_dropped += msg->ordinal - last_ordinals[msg->vchan_id] - 1;
             last_ordinals[msg->vchan_id] = msg->ordinal;
@@ -1058,7 +1059,7 @@ TEST_F(StressTest, ManyChannelsMultiplexedSubscribedToMux) {
         if (!pub_status.ok()) {
           std::cerr << "pub status " << pub_status.status() << "\n";
         }
-        ASSERT_TRUE(pub_status.ok());
+        ASSERT_OK(pub_status);
         j++;
         std::this_thread::sleep_for(std::chrono::microseconds(periods[i]));
       }
@@ -1076,7 +1077,7 @@ TEST_F(StressTest, ManyChannelsMultiplexedSubscribedToMux) {
       absl::StatusOr<void *> buffer = pubs[j].GetMessageBuffer();
       ASSERT_OK(buffer);
       absl::StatusOr<const Message> pub_status = pubs[j].PublishMessage(1);
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
     }
   }
   sub_thread.join();
