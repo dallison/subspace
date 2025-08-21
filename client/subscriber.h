@@ -134,9 +134,14 @@ public:
     if (active_message_->slot == slot && active_message_->ordinal == ordinal) {
       return active_message_;
     }
-    return std::make_shared<ActiveMessage>(ActiveMessage{
+    auto msg = std::make_shared<ActiveMessage>(ActiveMessage{
         shared_from_this(), slot->message_size, slot, GetBufferAddress(slot),
         slot->ordinal, Timestamp(slot), slot->vchan_id, false});
+    if (msg->length == 0) {
+      // Failed to get an active message, return an empty shared_ptr.
+      return nullptr;
+    }
+    return msg;
   }
 
   int DetectDrops(int vchan_id);
@@ -165,7 +170,8 @@ private:
   };
 
   bool IsSubscriber() const override { return true; }
-
+  bool IsBridge() const override { return options_.IsBridge(); }
+  
   void ClearPublishers() {
     std::unique_lock<std::mutex> lock(reliable_publishers_mutex_);
     reliable_publishers_.clear();

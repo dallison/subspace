@@ -9,6 +9,7 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "client/message.h"
 #include "client_handler.h"
 #include "coroutine.h"
 #include "proto/subspace.pb.h"
@@ -41,6 +42,10 @@ public:
   Server(co::CoroutineScheduler &scheduler, const std::string &socket_name,
          const std::string &interface, int disc_port, int peer_port, bool local,
          int notify_fd = -1);
+  // This constructor can be used when you have a single peer server to talk to.
+  Server(co::CoroutineScheduler &scheduler, const std::string &socket_name,
+         const std::string &interface, const toolbelt::InetAddress &peer,
+         int disc_port, int peer_port, bool local, int notify_fd = -1);
   ~Server();
   void SetLogLevel(const std::string &level) { logger_.SetLogLevel(level); }
   absl::Status Run();
@@ -49,6 +54,8 @@ public:
   uint64_t GetVirtualMemoryUsage() const;
 
   uint64_t GetSessionId() const { return session_id_; }
+
+  absl::StatusOr<toolbelt::FileDescriptor> CreateBridgeNotificationPipe();
 
 private:
   friend class ClientHandler;
@@ -85,11 +92,21 @@ private:
   void SendAdvertise(const std::string &channel_name, bool reliable);
   void BridgeTransmitterCoroutine(ServerChannel *channel, bool pub_reliable,
                                   bool sub_reliable,
-                                  toolbelt::InetAddress subscriber,
-                                  co::Coroutine *c);
+                                  toolbelt::SocketAddress subscriber,
+                                  bool notify_retirement, co::Coroutine *c);
   void BridgeReceiverCoroutine(std::string channel_name, bool sub_reliable,
                                toolbelt::InetAddress publisher,
                                co::Coroutine *c);
+  void RetirementCoroutine(
+      const std::string &channel_name, toolbelt::FileDescriptor &&retirement_fd,
+      std::unique_ptr<toolbelt::StreamSocket> retirement_transmitter,
+      co::Coroutine *c);
+
+  void RetirementReceiverCoroutine(
+      toolbelt::StreamSocket &retirement_listener,
+      std::vector<std::shared_ptr<ActiveMessage>> &active_retirement_msgs,
+      co::Coroutine *c);
+
   void SubscribeOverBridge(ServerChannel *channel, bool reliable,
                            toolbelt::InetAddress publisher);
   void IncomingQuery(const Discovery::Query &query,
@@ -102,7 +119,7 @@ private:
   absl::Status SendSubscribeMessage(const std::string &channel_name,
                                     bool reliable,
                                     toolbelt::InetAddress publisher,
-                                    toolbelt::TCPSocket &receiver_listener,
+                                    toolbelt::StreamSocket &receiver_listener,
                                     char *buffer, size_t buffer_size,
                                     co::Coroutine *c);
 
@@ -114,6 +131,8 @@ private:
   std::string server_id_;
   std::string hostname_;
   std::string interface_;
+  toolbelt::SocketAddress my_address_;
+  toolbelt::InetAddress peer_address_;
   int discovery_port_;
   int discovery_peer_port_;
   bool local_;
@@ -134,6 +153,11 @@ private:
   toolbelt::UDPSocket discovery_transmitter_;
   toolbelt::UDPSocket discovery_receiver_;
   toolbelt::Logger logger_;
+
+  // Optional pipe to allow test to be notified when discovery sets up a
+  // new connection.  The server will send an encoded protobuf Subscribed
+  // message through this pipe if it is set up.
+  toolbelt::Pipe bridge_notification_pipe_;
 };
 
 } // namespace subspace

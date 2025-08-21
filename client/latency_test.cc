@@ -17,6 +17,7 @@
 #include <signal.h>
 #include <sys/resource.h>
 #include <thread>
+#include "absl/status/status_matchers.h"
 
 ABSL_FLAG(bool, start_server, true, "Start the subspace server");
 ABSL_FLAG(std::string, server, "", "Path to server executable");
@@ -27,6 +28,21 @@ using Publisher = subspace::Publisher;
 using Subscriber = subspace::Subscriber;
 using Message = subspace::Message;
 using InetAddress = toolbelt::InetAddress;
+
+#define VAR(a) a##__COUNTER__
+#define EVAL_AND_ASSERT_OK(expr) EVAL_AND_ASSERT_OK2(VAR(r_), expr)
+
+#define EVAL_AND_ASSERT_OK2(result, expr)                                      \
+  ({                                                                           \
+    auto result = (expr);                                                      \
+    if (!result.ok()) {                                                        \
+      std::cerr << result.status() << std::endl;                               \
+    }                                                                          \
+    ASSERT_OK(result);                                                  \
+    std::move(*result);                                                        \
+  })
+
+#define ASSERT_OK(e) ASSERT_THAT(e, ::absl_testing::IsOk())
 
 class LatencyTest : public ::testing::Test {
 public:
@@ -78,7 +94,7 @@ public:
   void TearDown() override {}
 
   void InitClient(subspace::Client &client) {
-    ASSERT_TRUE(client.Init(Socket()).ok());
+    ASSERT_OK(client.Init(Socket()));
   }
 
   static const std::string &Socket() { return socket_; }
@@ -103,19 +119,19 @@ std::thread LatencyTest::server_thread_;
 TEST_F(LatencyTest, MultithreadedSingleChannel) {
   subspace::Client pub_client;
   subspace::Client sub_client;
-  ASSERT_TRUE(pub_client.Init(Socket()).ok());
-  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
 
   constexpr int kNumReceivers = 20;
   constexpr int kNumMessages = 2000;
 
   absl::StatusOr<Publisher> pub =
       pub_client.CreatePublisher("stress", 256, kNumReceivers + 3);
-  ASSERT_TRUE(pub.ok());
+  ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
       "stress", {.max_active_messages = kNumReceivers + 1});
-  ASSERT_TRUE(sub.ok());
+  ASSERT_OK(sub);
 
   std::vector<std::thread> receivers;
   std::vector<toolbelt::SharedPtrPipe<Message>> pipes;
@@ -125,7 +141,7 @@ TEST_F(LatencyTest, MultithreadedSingleChannel) {
 
   for (size_t i = 0; i < kNumReceivers; i++) {
     pipes.emplace_back(toolbelt::SharedPtrPipe<Message>());
-    ASSERT_TRUE(pipes.back().Open().ok());
+    ASSERT_OK(pipes.back().Open());
   }
 
   for (size_t i = 0; i < kNumReceivers; i++) {
@@ -133,7 +149,7 @@ TEST_F(LatencyTest, MultithreadedSingleChannel) {
         [&pipes, i, &total_received_messages, &num_dropped]() {
           while (total_received_messages + num_dropped < kNumMessages) {
             auto msg = pipes[i].Read();
-            ASSERT_TRUE(msg.ok());
+            ASSERT_OK(msg);
             // std::cerr << "received ordinal " << (*msg)->ordinal << " on "
             //           << i << "\n";
             total_received_messages++;
@@ -150,7 +166,7 @@ TEST_F(LatencyTest, MultithreadedSingleChannel) {
 
     for (int j = 0; j < kNumMessages; j++) {
       absl::StatusOr<Message> msg = sub->ReadMessage();
-      ASSERT_TRUE(msg.ok());
+      ASSERT_OK(msg);
       if (msg->length > 0) {
         ASSERT_GT(msg->ordinal, last_ordinal);
         num_dropped += msg->ordinal - last_ordinal - 1;
@@ -169,13 +185,13 @@ TEST_F(LatencyTest, MultithreadedSingleChannel) {
   std::thread pub_thread([&pub]() {
     for (int j = 0; j < kNumMessages; j++) {
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-      ASSERT_TRUE(buffer.ok());
+      ASSERT_OK(buffer);
       char *buf = reinterpret_cast<char *>(*buffer);
       int len = snprintf(buf, 256, "foobar %d", j);
 
       absl::StatusOr<const Message> pub_status = pub->PublishMessage(len + 1);
       // std::cerr << "pub status " << pub_status.status() << "\n";
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
       // Sleep for random microseconds.
       std::this_thread::sleep_for(std::chrono::microseconds(rand() % 10));
     }
@@ -185,7 +201,7 @@ TEST_F(LatencyTest, MultithreadedSingleChannel) {
   sub_thread.join();
   // Send one last message to the receivers to stop them.
   for (size_t i = 0; i < kNumReceivers; i++) {
-    ASSERT_TRUE(pipes[i].Write(std::make_shared<Message>()).ok());
+    ASSERT_OK(pipes[i].Write(std::make_shared<Message>()));
   }
   for (auto &r : receivers) {
     r.join();
@@ -195,19 +211,19 @@ TEST_F(LatencyTest, MultithreadedSingleChannel) {
 TEST_F(LatencyTest, MultithreadedSingleChannelReliable) {
   subspace::Client pub_client;
   subspace::Client sub_client;
-  ASSERT_TRUE(pub_client.Init(Socket()).ok());
-  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
 
   constexpr int kNumReceivers = 20;
   constexpr int kNumMessages = 200000;
 
   absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
       "rstress", 256, kNumReceivers + 3, {.reliable = true});
-  ASSERT_TRUE(pub.ok());
+  ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
       "rstress", {.reliable = true, .max_active_messages = kNumReceivers + 1});
-  ASSERT_TRUE(sub.ok());
+  ASSERT_OK(sub);
 
   std::vector<std::thread> receivers;
   std::vector<toolbelt::SharedPtrPipe<Message>> pipes;
@@ -216,14 +232,14 @@ TEST_F(LatencyTest, MultithreadedSingleChannelReliable) {
 
   for (size_t i = 0; i < kNumReceivers; i++) {
     pipes.emplace_back(toolbelt::SharedPtrPipe<Message>());
-    ASSERT_TRUE(pipes.back().Open().ok());
+    ASSERT_OK(pipes.back().Open());
   }
 
   for (size_t i = 0; i < kNumReceivers; i++) {
     receivers.emplace_back([&pipes, i, &total_received_messages]() {
       while (total_received_messages < kNumMessages) {
         auto msg = pipes[i].Read();
-        ASSERT_TRUE(msg.ok());
+        ASSERT_OK(msg);
         // std::cerr << "received ordinal " << (*msg)->ordinal << " on "
         //           << i << "\n";
         total_received_messages++;
@@ -240,10 +256,10 @@ TEST_F(LatencyTest, MultithreadedSingleChannelReliable) {
     uint64_t last_ordinal = 0;
 
     int j = 0;
-    ASSERT_TRUE(sub->Wait().ok());
+    ASSERT_OK(sub->Wait());
     while (j < kNumMessages) {
       absl::StatusOr<Message> msg = sub->ReadMessage();
-      ASSERT_TRUE(msg.ok());
+      ASSERT_OK(msg);
       if (msg->length > 0) {
         if (last_ordinal != 0) {
           ASSERT_EQ(msg->ordinal, last_ordinal + 1);
@@ -263,10 +279,10 @@ TEST_F(LatencyTest, MultithreadedSingleChannelReliable) {
     int j = 0;
     while (j < kNumMessages) {
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-      ASSERT_TRUE(buffer.ok());
+      ASSERT_OK(buffer);
       if (*buffer == nullptr) {
         // Can't send, wait until we can try again.
-        ASSERT_TRUE(pub->Wait().ok());
+        ASSERT_OK(pub->Wait());
         continue;
       }
       char *buf = reinterpret_cast<char *>(*buffer);
@@ -274,7 +290,7 @@ TEST_F(LatencyTest, MultithreadedSingleChannelReliable) {
 
       absl::StatusOr<const Message> pub_status = pub->PublishMessage(len + 1);
       // std::cerr << "pub status " << pub_status.status() << "\n";
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
       j++;
     }
   });
@@ -286,7 +302,7 @@ TEST_F(LatencyTest, MultithreadedSingleChannelReliable) {
             << " ns\n";
   // Send one last message to the receivers to stop them.
   for (size_t i = 0; i < kNumReceivers; i++) {
-    ASSERT_TRUE(pipes[i].Write(std::make_shared<Message>()).ok());
+    ASSERT_OK(pipes[i].Write(std::make_shared<Message>()));
   }
   for (auto &r : receivers) {
     r.join();
@@ -296,32 +312,32 @@ TEST_F(LatencyTest, MultithreadedSingleChannelReliable) {
 TEST_F(LatencyTest, MultithreadedReliableLatency) {
   subspace::Client pub_client;
   subspace::Client sub_client;
-  ASSERT_TRUE(pub_client.Init(Socket()).ok());
-  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
 
   constexpr int kNumMessages = 200000;
 
   absl::StatusOr<Publisher> pub =
       pub_client.CreatePublisher("lstress", 256, 10, {.reliable = true});
-  ASSERT_TRUE(pub.ok());
+  ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
       sub_client.CreateSubscriber("lstress", {.reliable = true});
-  ASSERT_TRUE(sub.ok());
+  ASSERT_OK(sub);
 
   uint64_t start_time = toolbelt::Now();
   // Create a subscriber thread to read from the channel and write to random
   // pipe.
   std::thread sub_thread([&sub]() {
     int j = 0;
-    ASSERT_TRUE(sub->Wait().ok());
+    ASSERT_OK(sub->Wait());
     while (j < kNumMessages) {
       absl::StatusOr<Message> msg = sub->ReadMessage();
-      ASSERT_TRUE(msg.ok());
+      ASSERT_OK(msg);
       if (msg->length > 0) {
         j++;
       } else {
-        ASSERT_TRUE(sub->Wait().ok());
+        ASSERT_OK(sub->Wait());
       }
     }
   });
@@ -331,10 +347,10 @@ TEST_F(LatencyTest, MultithreadedReliableLatency) {
     int j = 0;
     while (j < kNumMessages) {
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-      ASSERT_TRUE(buffer.ok());
+      ASSERT_OK(buffer);
       if (*buffer == nullptr) {
         // Can't send, wait until we can try again.
-        ASSERT_TRUE(pub->Wait().ok());
+        ASSERT_OK(pub->Wait());
         continue;
       }
       char *buf = reinterpret_cast<char *>(*buffer);
@@ -342,7 +358,7 @@ TEST_F(LatencyTest, MultithreadedReliableLatency) {
 
       absl::StatusOr<const Message> pub_status = pub->PublishMessage(len + 1);
       // std::cerr << "pub status " << pub_status.status() << "\n";
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
       j++;
     }
   });
@@ -357,8 +373,8 @@ TEST_F(LatencyTest, MultithreadedReliableLatency) {
 TEST_F(LatencyTest, MultithreadedReliableLatencyHistogram) {
   subspace::Client pub_client;
   subspace::Client sub_client;
-  ASSERT_TRUE(pub_client.Init(Socket()).ok());
-  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
 
   constexpr int kNumMessages = 20000;
   std::vector<uint64_t> latencies;
@@ -367,25 +383,25 @@ TEST_F(LatencyTest, MultithreadedReliableLatencyHistogram) {
     std::cerr << "num_slots: " << num_slots << "\n";
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
         "lstress", 256, num_slots, {.reliable = true});
-    ASSERT_TRUE(pub.ok());
+    ASSERT_OK(pub);
 
     absl::StatusOr<Subscriber> sub =
         sub_client.CreateSubscriber("lstress", {.reliable = true});
-    ASSERT_TRUE(sub.ok());
+    ASSERT_OK(sub);
 
     uint64_t start_time = toolbelt::Now();
     // Create a subscriber thread to read from the channel and write to random
     // pipe.
     std::thread sub_thread([&sub]() {
       int j = 0;
-      ASSERT_TRUE(sub->Wait().ok());
+      ASSERT_OK(sub->Wait());
       while (j < kNumMessages) {
         absl::StatusOr<Message> msg = sub->ReadMessage();
-        ASSERT_TRUE(msg.ok());
+        ASSERT_OK(msg);
         if (msg->length > 0) {
           j++;
         } else {
-          ASSERT_TRUE(sub->Wait().ok());
+          ASSERT_OK(sub->Wait());
         }
       }
     });
@@ -395,14 +411,14 @@ TEST_F(LatencyTest, MultithreadedReliableLatencyHistogram) {
       int j = 0;
       while (j < kNumMessages) {
         absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-        ASSERT_TRUE(buffer.ok());
+        ASSERT_OK(buffer);
         if (*buffer == nullptr) {
           // Can't send, wait until we can try again.
-          ASSERT_TRUE(pub->Wait().ok());
+          ASSERT_OK(pub->Wait());
           continue;
         }
         absl::StatusOr<const Message> pub_status = pub->PublishMessage(1);
-        ASSERT_TRUE(pub_status.ok());
+        ASSERT_OK(pub_status);
         j++;
       }
     });
@@ -427,18 +443,18 @@ TEST_F(LatencyTest, MultithreadedReliableLatencyHistogram) {
 TEST_F(LatencyTest, MultithreadedUnreliableLatency) {
   subspace::Client pub_client;
   subspace::Client sub_client;
-  ASSERT_TRUE(pub_client.Init(Socket()).ok());
-  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
 
   constexpr int kNumMessages = 2000000;
 
   absl::StatusOr<Publisher> pub =
       pub_client.CreatePublisher("lustress", 256, 10, {.reliable = false});
-  ASSERT_TRUE(pub.ok());
+  ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
       "lustress", {.reliable = false, .log_dropped_messages = false});
-  ASSERT_TRUE(sub.ok());
+  ASSERT_OK(sub);
 
   uint64_t start_time = toolbelt::Now();
   // Create a subscriber thread to read from the channel and write to random
@@ -447,17 +463,17 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatency) {
   std::thread sub_thread([&sub, &num_dropped]() {
     uint64_t last_ordinal = 0;
     int j = 0;
-    ASSERT_TRUE(sub->Wait().ok());
+    ASSERT_OK(sub->Wait());
     while (j < kNumMessages - num_dropped) {
       absl::StatusOr<Message> msg = sub->ReadMessage();
-      ASSERT_TRUE(msg.ok());
+      ASSERT_OK(msg);
       if (msg->length > 0) {
         num_dropped += msg->ordinal - last_ordinal - 1;
 
         last_ordinal = msg->ordinal;
         j++;
       } else {
-        // ASSERT_TRUE(sub->Wait().ok());
+        // ASSERT_OK(sub->Wait());
       }
     }
     std::cerr << "Received " << j << " messages, dropped " << num_dropped.load()
@@ -469,16 +485,16 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatency) {
     int j = 0;
     while (j < kNumMessages) {
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-      ASSERT_TRUE(buffer.ok());
+      ASSERT_OK(buffer);
       if (*buffer == nullptr) {
         // Can't send, wait until we can try again.
-        ASSERT_TRUE(pub->Wait().ok());
+        ASSERT_OK(pub->Wait());
         continue;
       }
 
       absl::StatusOr<const Message> pub_status = pub->PublishMessage(1);
       // std::cerr << "pub status " << pub_status.status() << "\n";
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
       j++;
     }
   });
@@ -489,16 +505,16 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatency) {
   // stop the subscriber.
   for (int i = 0; i < 100; i++) {
     absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-    ASSERT_TRUE(buffer.ok());
+    ASSERT_OK(buffer);
     if (*buffer == nullptr) {
       // Can't send, wait until we can try again.
-      ASSERT_TRUE(pub->Wait().ok());
+      ASSERT_OK(pub->Wait());
       continue;
     }
 
     absl::StatusOr<const Message> pub_status = pub->PublishMessage(1);
     // std::cerr << "pub status " << pub_status.status() << "\n";
-    ASSERT_TRUE(pub_status.ok());
+    ASSERT_OK(pub_status);
   }
   sub_thread.join();
   uint64_t end_time = toolbelt::Now();
@@ -509,20 +525,20 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatency) {
 TEST_F(LatencyTest, PublisherLatency) {
   subspace::Client pub_client;
   subspace::Client sub_client;
-  ASSERT_TRUE(pub_client.Init(Socket()).ok());
-  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
 
   constexpr int kNumMessages = 20000;
   for (int num_slots = 10; num_slots < 100000;
        num_slots = (num_slots)*15 / 10) {
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
         "publat", 256, num_slots, {.reliable = false});
-    ASSERT_TRUE(pub.ok());
+    ASSERT_OK(pub);
 
     std::cerr << num_slots << ",";
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
         "publat", {.reliable = false, .log_dropped_messages = false});
-    ASSERT_TRUE(sub.ok());
+    ASSERT_OK(sub);
 
     uint64_t total_time = 0;
 
@@ -532,14 +548,14 @@ TEST_F(LatencyTest, PublisherLatency) {
       // Publish a message.
       uint64_t start_time = toolbelt::Now();
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-      ASSERT_TRUE(buffer.ok());
+      ASSERT_OK(buffer);
       absl::StatusOr<const Message> pub_status = pub->PublishMessage(100);
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
       uint64_t end = toolbelt::Now();
       total_time += end - start_time;
 
       absl::StatusOr<Message> msg = sub->ReadMessage();
-      ASSERT_TRUE(msg.ok());
+      ASSERT_OK(msg);
       ASSERT_EQ(100, msg->length);
     }
     std::cerr << total_time / kNumMessages << ",";
@@ -547,15 +563,15 @@ TEST_F(LatencyTest, PublisherLatency) {
     // Now fill the channel.
     for (int i = 0; i < num_slots; i++) {
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-      ASSERT_TRUE(buffer.ok());
+      ASSERT_OK(buffer);
       if (*buffer == nullptr) {
         // Can't send, wait until we can try again.
-        ASSERT_TRUE(pub->Wait().ok());
+        ASSERT_OK(pub->Wait());
         continue;
       }
       absl::StatusOr<const Message> pub_status = pub->PublishMessage(100);
       // std::cerr << "pub status " << pub_status.status() << "\n";
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
     }
 
     // Send the same number of messages but with the channel full so that it has
@@ -565,10 +581,10 @@ TEST_F(LatencyTest, PublisherLatency) {
       // Publish a message.
       uint64_t start_time = toolbelt::Now();
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-      ASSERT_TRUE(buffer.ok());
+      ASSERT_OK(buffer);
 
       absl::StatusOr<const Message> pub_status = pub->PublishMessage(100);
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
       uint64_t end = toolbelt::Now();
       total_time += end - start_time;
     }
@@ -579,8 +595,8 @@ TEST_F(LatencyTest, PublisherLatency) {
 TEST_F(LatencyTest, PublisherLatencyHistogram) {
   subspace::Client pub_client;
   subspace::Client sub_client;
-  ASSERT_TRUE(pub_client.Init(Socket()).ok());
-  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
 
   auto show_latencies = [](std::vector<uint64_t> &latencies) {
     // Sort latencies.
@@ -605,12 +621,12 @@ TEST_F(LatencyTest, PublisherLatencyHistogram) {
        num_slots = (num_slots)*15 / 10) {
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
         "publat", 256, num_slots, {.reliable = false});
-    ASSERT_TRUE(pub.ok());
+    ASSERT_OK(pub);
 
     std::cerr << num_slots << ",";
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
         "publat", {.reliable = false, .log_dropped_messages = false});
-    ASSERT_TRUE(sub.ok());
+    ASSERT_OK(sub);
 
     std::vector<uint64_t> latencies;
     latencies.reserve(kNumMessages);
@@ -621,14 +637,14 @@ TEST_F(LatencyTest, PublisherLatencyHistogram) {
       // Publish a message.
       uint64_t start_time = toolbelt::Now();
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-      ASSERT_TRUE(buffer.ok());
+      ASSERT_OK(buffer);
       absl::StatusOr<const Message> pub_status = pub->PublishMessage(100);
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
       uint64_t end = toolbelt::Now();
       latencies.push_back(end - start_time);
 
       absl::StatusOr<Message> msg = sub->ReadMessage();
-      ASSERT_TRUE(msg.ok());
+      ASSERT_OK(msg);
       ASSERT_EQ(100, msg->length);
     }
 
@@ -639,15 +655,15 @@ TEST_F(LatencyTest, PublisherLatencyHistogram) {
     // Now fill the channel.
     for (int i = 0; i < num_slots; i++) {
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-      ASSERT_TRUE(buffer.ok());
+      ASSERT_OK(buffer);
       if (*buffer == nullptr) {
         // Can't send, wait until we can try again.
-        ASSERT_TRUE(pub->Wait().ok());
+        ASSERT_OK(pub->Wait());
         continue;
       }
       absl::StatusOr<const Message> pub_status = pub->PublishMessage(100);
       // std::cerr << "pub status " << pub_status.status() << "\n";
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
     }
 
     // Send the same number of messages but with the channel full so that it has
@@ -656,10 +672,10 @@ TEST_F(LatencyTest, PublisherLatencyHistogram) {
       // Publish a message.
       uint64_t start_time = toolbelt::Now();
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-      ASSERT_TRUE(buffer.ok());
+      ASSERT_OK(buffer);
 
       absl::StatusOr<const Message> pub_status = pub->PublishMessage(100);
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
       uint64_t end = toolbelt::Now();
       latencies.push_back(end - start_time);
     }
@@ -670,8 +686,8 @@ TEST_F(LatencyTest, PublisherLatencyHistogram) {
 TEST_F(LatencyTest, PublisherLatencyMultiSub) {
   subspace::Client pub_client;
   subspace::Client sub_client;
-  ASSERT_TRUE(pub_client.Init(Socket()).ok());
-  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
 
   constexpr int kNumMessages = 20000;
   for (int num_slots = 10; num_slots < 10000; num_slots *= 5) {
@@ -679,7 +695,7 @@ TEST_F(LatencyTest, PublisherLatencyMultiSub) {
     for (int num_subs = 1; num_subs < sqrt(num_slots); num_subs *= 2) {
       absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
           "publat", 256, num_slots, {.reliable = false});
-      ASSERT_TRUE(pub.ok());
+      ASSERT_OK(pub);
 
       std::cerr << num_slots << "," << num_subs << ",";
       std::vector<Subscriber> subs;
@@ -687,7 +703,7 @@ TEST_F(LatencyTest, PublisherLatencyMultiSub) {
       for (int i = 0; i < num_subs; i++) {
         absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
             "publat", {.reliable = false, .log_dropped_messages = false});
-        ASSERT_TRUE(sub.ok());
+        ASSERT_OK(sub);
         subs.push_back(std::move(*sub));
       }
 
@@ -699,15 +715,15 @@ TEST_F(LatencyTest, PublisherLatencyMultiSub) {
         // Publish a message.
         uint64_t start_time = toolbelt::Now();
         absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-        ASSERT_TRUE(buffer.ok());
+        ASSERT_OK(buffer);
         absl::StatusOr<const Message> pub_status = pub->PublishMessage(100);
-        ASSERT_TRUE(pub_status.ok());
+        ASSERT_OK(pub_status);
         uint64_t end = toolbelt::Now();
         total_time += end - start_time;
 
         for (int i = 0; i < num_subs; i++) {
           absl::StatusOr<Message> msg = subs[i].ReadMessage();
-          ASSERT_TRUE(msg.ok());
+          ASSERT_OK(msg);
           ASSERT_EQ(100, msg->length);
         }
       }
@@ -716,15 +732,15 @@ TEST_F(LatencyTest, PublisherLatencyMultiSub) {
       // Now fill the channel.
       for (int i = 0; i < num_slots; i++) {
         absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-        ASSERT_TRUE(buffer.ok());
+        ASSERT_OK(buffer);
         if (*buffer == nullptr) {
           // Can't send, wait until we can try again.
-          ASSERT_TRUE(pub->Wait().ok());
+          ASSERT_OK(pub->Wait());
           continue;
         }
         absl::StatusOr<const Message> pub_status = pub->PublishMessage(100);
         // std::cerr << "pub status " << pub_status.status() << "\n";
-        ASSERT_TRUE(pub_status.ok());
+        ASSERT_OK(pub_status);
       }
 
       // Send the same number of messages but with the channel full so that it
@@ -734,10 +750,10 @@ TEST_F(LatencyTest, PublisherLatencyMultiSub) {
         // Publish a message.
         uint64_t start_time = toolbelt::Now();
         absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-        ASSERT_TRUE(buffer.ok());
+        ASSERT_OK(buffer);
 
         absl::StatusOr<const Message> pub_status = pub->PublishMessage(100);
-        ASSERT_TRUE(pub_status.ok());
+        ASSERT_OK(pub_status);
         uint64_t end = toolbelt::Now();
         total_time += end - start_time;
       }
@@ -749,21 +765,21 @@ TEST_F(LatencyTest, PublisherLatencyMultiSub) {
 TEST_F(LatencyTest, VirtualPublisherLatency) {
   subspace::Client pub_client;
   subspace::Client sub_client;
-  ASSERT_TRUE(pub_client.Init(Socket()).ok());
-  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
 
   constexpr int kNumMessages = 20000;
   for (int num_slots = 10; num_slots < 100000;
        num_slots = (num_slots)*15 / 10) {
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
         "publat", 256, num_slots, {.reliable = false, .mux = "/foo"});
-    ASSERT_TRUE(pub.ok());
+    ASSERT_OK(pub);
 
     std::cerr << num_slots << ",";
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
         "publat",
         {.reliable = false, .log_dropped_messages = false, .mux = "/foo"});
-    ASSERT_TRUE(sub.ok());
+    ASSERT_OK(sub);
 
     uint64_t total_time = 0;
 
@@ -773,14 +789,14 @@ TEST_F(LatencyTest, VirtualPublisherLatency) {
       // Publish a message.
       uint64_t start_time = toolbelt::Now();
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-      ASSERT_TRUE(buffer.ok());
+      ASSERT_OK(buffer);
       absl::StatusOr<const Message> pub_status = pub->PublishMessage(100);
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
       uint64_t end = toolbelt::Now();
       total_time += end - start_time;
 
       absl::StatusOr<Message> msg = sub->ReadMessage();
-      ASSERT_TRUE(msg.ok());
+      ASSERT_OK(msg);
       ASSERT_EQ(100, msg->length);
     }
     std::cerr << total_time / kNumMessages << ",";
@@ -788,15 +804,15 @@ TEST_F(LatencyTest, VirtualPublisherLatency) {
     // Now fill the channel.
     for (int i = 0; i < num_slots; i++) {
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-      ASSERT_TRUE(buffer.ok());
+      ASSERT_OK(buffer);
       if (*buffer == nullptr) {
         // Can't send, wait until we can try again.
-        ASSERT_TRUE(pub->Wait().ok());
+        ASSERT_OK(pub->Wait());
         continue;
       }
       absl::StatusOr<const Message> pub_status = pub->PublishMessage(100);
       // std::cerr << "pub status " << pub_status.status() << "\n";
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
     }
 
     // Send the same number of messages but with the channel full so that it has
@@ -806,10 +822,10 @@ TEST_F(LatencyTest, VirtualPublisherLatency) {
       // Publish a message.
       uint64_t start_time = toolbelt::Now();
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-      ASSERT_TRUE(buffer.ok());
+      ASSERT_OK(buffer);
 
       absl::StatusOr<const Message> pub_status = pub->PublishMessage(100);
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
       uint64_t end = toolbelt::Now();
       total_time += end - start_time;
     }
@@ -820,8 +836,8 @@ TEST_F(LatencyTest, VirtualPublisherLatency) {
 TEST_F(LatencyTest, VirtualPublisherLatencyMultiSub) {
   subspace::Client pub_client;
   subspace::Client sub_client;
-  ASSERT_TRUE(pub_client.Init(Socket()).ok());
-  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
 
   constexpr int kNumMessages = 20000;
   for (int num_slots = 10; num_slots < 10000; num_slots *= 5) {
@@ -829,7 +845,7 @@ TEST_F(LatencyTest, VirtualPublisherLatencyMultiSub) {
     for (int num_subs = 1; num_subs < sqrt(num_slots); num_subs *= 2) {
       absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
           "publat", 256, num_slots, {.reliable = false, .mux = "/foo"});
-      ASSERT_TRUE(pub.ok());
+      ASSERT_OK(pub);
 
       std::cerr << num_slots << "," << num_subs << ",";
       std::vector<Subscriber> subs;
@@ -838,7 +854,7 @@ TEST_F(LatencyTest, VirtualPublisherLatencyMultiSub) {
         absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
             "publat",
             {.reliable = false, .log_dropped_messages = false, .mux = "/foo"});
-        ASSERT_TRUE(sub.ok());
+        ASSERT_OK(sub);
         subs.push_back(std::move(*sub));
       }
 
@@ -850,15 +866,15 @@ TEST_F(LatencyTest, VirtualPublisherLatencyMultiSub) {
         // Publish a message.
         uint64_t start_time = toolbelt::Now();
         absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-        ASSERT_TRUE(buffer.ok());
+        ASSERT_OK(buffer);
         absl::StatusOr<const Message> pub_status = pub->PublishMessage(100);
-        ASSERT_TRUE(pub_status.ok());
+        ASSERT_OK(pub_status);
         uint64_t end = toolbelt::Now();
         total_time += end - start_time;
 
         for (int i = 0; i < num_subs; i++) {
           absl::StatusOr<Message> msg = subs[i].ReadMessage();
-          ASSERT_TRUE(msg.ok());
+          ASSERT_OK(msg);
           ASSERT_EQ(100, msg->length);
         }
       }
@@ -867,15 +883,15 @@ TEST_F(LatencyTest, VirtualPublisherLatencyMultiSub) {
       // Now fill the channel.
       for (int i = 0; i < num_slots; i++) {
         absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-        ASSERT_TRUE(buffer.ok());
+        ASSERT_OK(buffer);
         if (*buffer == nullptr) {
           // Can't send, wait until we can try again.
-          ASSERT_TRUE(pub->Wait().ok());
+          ASSERT_OK(pub->Wait());
           continue;
         }
         absl::StatusOr<const Message> pub_status = pub->PublishMessage(100);
         // std::cerr << "pub status " << pub_status.status() << "\n";
-        ASSERT_TRUE(pub_status.ok());
+        ASSERT_OK(pub_status);
       }
 
       // Send the same number of messages but with the channel full so that it
@@ -885,10 +901,10 @@ TEST_F(LatencyTest, VirtualPublisherLatencyMultiSub) {
         // Publish a message.
         uint64_t start_time = toolbelt::Now();
         absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-        ASSERT_TRUE(buffer.ok());
+        ASSERT_OK(buffer);
 
         absl::StatusOr<const Message> pub_status = pub->PublishMessage(100);
-        ASSERT_TRUE(pub_status.ok());
+        ASSERT_OK(pub_status);
         uint64_t end = toolbelt::Now();
         total_time += end - start_time;
       }
@@ -900,26 +916,26 @@ TEST_F(LatencyTest, VirtualPublisherLatencyMultiSub) {
 TEST_F(LatencyTest, VirtualPublisherMuxLatency) {
   subspace::Client pub_client;
   subspace::Client sub_client;
-  ASSERT_TRUE(pub_client.Init(Socket()).ok());
-  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
 
   constexpr int kNumMessages = 20000;
   for (int num_slots = 10; num_slots < 100000;
        num_slots = (num_slots)*15 / 10) {
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
         "publat", 256, num_slots, {.reliable = false, .mux = "/foo"});
-    ASSERT_TRUE(pub.ok());
+    ASSERT_OK(pub);
 
     std::cerr << num_slots << ",";
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
         "publat",
         {.reliable = false, .log_dropped_messages = false, .mux = "/foo"});
-    ASSERT_TRUE(sub.ok());
+    ASSERT_OK(sub);
 
     // Mux subscriber.
     absl::StatusOr<Subscriber> mux_sub = sub_client.CreateSubscriber(
         "/foo", {.reliable = false, .log_dropped_messages = false});
-    ASSERT_TRUE(mux_sub.ok());
+    ASSERT_OK(mux_sub);
 
     uint64_t total_time = 0;
 
@@ -929,18 +945,18 @@ TEST_F(LatencyTest, VirtualPublisherMuxLatency) {
       // Publish a message.
       uint64_t start_time = toolbelt::Now();
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-      ASSERT_TRUE(buffer.ok());
+      ASSERT_OK(buffer);
       absl::StatusOr<const Message> pub_status = pub->PublishMessage(100);
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
       uint64_t end = toolbelt::Now();
       total_time += end - start_time;
 
       absl::StatusOr<Message> msg = sub->ReadMessage();
-      ASSERT_TRUE(msg.ok());
+      ASSERT_OK(msg);
       ASSERT_EQ(100, msg->length);
 
       absl::StatusOr<Message> mux_msg = mux_sub->ReadMessage();
-      ASSERT_TRUE(mux_msg.ok());
+      ASSERT_OK(mux_msg);
       ASSERT_EQ(100, mux_msg->length);
     }
     std::cerr << total_time / kNumMessages << ",";
@@ -948,10 +964,10 @@ TEST_F(LatencyTest, VirtualPublisherMuxLatency) {
     // Now fill the channel.
     for (int i = 0; i < num_slots; i++) {
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-      ASSERT_TRUE(buffer.ok());
+      ASSERT_OK(buffer);
       absl::StatusOr<const Message> pub_status = pub->PublishMessage(100);
       // std::cerr << "pub status " << pub_status.status() << "\n";
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
     }
 
     // Send the same number of messages but with the channel full so that it has
@@ -961,10 +977,10 @@ TEST_F(LatencyTest, VirtualPublisherMuxLatency) {
       // Publish a message.
       uint64_t start_time = toolbelt::Now();
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-      ASSERT_TRUE(buffer.ok());
+      ASSERT_OK(buffer);
 
       absl::StatusOr<const Message> pub_status = pub->PublishMessage(100);
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
       uint64_t end = toolbelt::Now();
       total_time += end - start_time;
     }
@@ -978,8 +994,8 @@ TEST_F(LatencyTest, VirtualPublisherMuxLatency) {
 TEST_F(LatencyTest, MultithreadedUnreliableLatencyHistogram) {
   subspace::Client pub_client;
   subspace::Client sub_client;
-  ASSERT_TRUE(pub_client.Init(Socket()).ok());
-  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
 
   constexpr int kNumMessages = 20000;
 
@@ -989,11 +1005,11 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyHistogram) {
     std::cerr << "num_slots: " << num_slots << "\n";
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
         "lustress", 256, num_slots, {.reliable = false});
-    ASSERT_TRUE(pub.ok());
+    ASSERT_OK(pub);
 
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
         "lustress", {.reliable = false, .log_dropped_messages = false});
-    ASSERT_TRUE(sub.ok());
+    ASSERT_OK(sub);
 
     uint64_t start_time = toolbelt::Now();
     // Create a subscriber thread to read from the channel and write to random
@@ -1004,7 +1020,7 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyHistogram) {
       int j = 0;
       while (j < kNumMessages - num_dropped) {
         absl::StatusOr<Message> msg = sub->ReadMessage();
-        ASSERT_TRUE(msg.ok());
+        ASSERT_OK(msg);
         if (msg->length > 0) {
           num_dropped += msg->ordinal - last_ordinal - 1;
           last_ordinal = msg->ordinal;
@@ -1020,16 +1036,16 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyHistogram) {
       int j = 0;
       while (j < kNumMessages) {
         absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-        ASSERT_TRUE(buffer.ok());
+        ASSERT_OK(buffer);
         if (*buffer == nullptr) {
           // Can't send, wait until we can try again.
-          ASSERT_TRUE(pub->Wait().ok());
+          ASSERT_OK(pub->Wait());
           continue;
         }
 
         absl::StatusOr<const Message> pub_status = pub->PublishMessage(1);
         // std::cerr << "pub status " << pub_status.status() << "\n";
-        ASSERT_TRUE(pub_status.ok());
+        ASSERT_OK(pub_status);
         j++;
       }
     });
@@ -1041,16 +1057,16 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyHistogram) {
     // stop the subscriber.
     for (int i = 0; i < 100; i++) {
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-      ASSERT_TRUE(buffer.ok());
+      ASSERT_OK(buffer);
       if (*buffer == nullptr) {
         // Can't send, wait until we can try again.
-        ASSERT_TRUE(pub->Wait().ok());
+        ASSERT_OK(pub->Wait());
         continue;
       }
 
       absl::StatusOr<const Message> pub_status = pub->PublishMessage(1);
       // std::cerr << "pub status " << pub_status.status() << "\n";
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
     }
     sub_thread.join();
     uint64_t end_time = toolbelt::Now();
@@ -1071,18 +1087,18 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyHistogram) {
 TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayload) {
   subspace::Client pub_client;
   subspace::Client sub_client;
-  ASSERT_TRUE(pub_client.Init(Socket()).ok());
-  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
 
   constexpr int kNumMessages = 200000;
 
   absl::StatusOr<Publisher> pub =
       pub_client.CreatePublisher("lustress", 256, 100, {.reliable = false});
-  ASSERT_TRUE(pub.ok());
+  ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
       "lustress", {.reliable = false, .log_dropped_messages = false});
-  ASSERT_TRUE(sub.ok());
+  ASSERT_OK(sub);
 
   // Create a subscriber thread to read from the channel and write to random
   // pipe.
@@ -1093,10 +1109,10 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayload) {
     std::vector<uint64_t> latencies;
     latencies.reserve(kNumMessages);
     int j = 0;
-    ASSERT_TRUE(sub->Wait().ok());
+    ASSERT_OK(sub->Wait());
     while (j < kNumMessages - num_dropped) {
       absl::StatusOr<Message> msg = sub->ReadMessage();
-      ASSERT_TRUE(msg.ok());
+      ASSERT_OK(msg);
       if (msg->length > 0) {
         uint64_t receive_time = toolbelt::Now();
         num_dropped += msg->ordinal - last_ordinal - 1;
@@ -1107,7 +1123,7 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayload) {
         uint64_t latency = receive_time - send_time;
         latencies.push_back(latency);
       } else {
-        // ASSERT_TRUE(sub->Wait().ok());
+        // ASSERT_OK(sub->Wait());
       }
     }
     std::cerr << "Received " << j << " messages, dropped " << num_dropped.load()
@@ -1140,10 +1156,10 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayload) {
     int j = 0;
     while (j < kNumMessages) {
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-      ASSERT_TRUE(buffer.ok());
+      ASSERT_OK(buffer);
       if (*buffer == nullptr) {
         // Can't send, wait until we can try again.
-        ASSERT_TRUE(pub->Wait().ok());
+        ASSERT_OK(pub->Wait());
         continue;
       }
       uint64_t send_time = toolbelt::Now();
@@ -1151,7 +1167,7 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayload) {
       absl::StatusOr<const Message> pub_status =
           pub->PublishMessage(sizeof(send_time));
       // std::cerr << "pub status " << pub_status.status() << "\n";
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
       j++;
       // Sleep for random microseconds.
       std::this_thread::sleep_for(std::chrono::microseconds(rand() % 10));
@@ -1164,16 +1180,16 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayload) {
   // stop the subscriber.
   for (int i = 0; i < 100; i++) {
     absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-    ASSERT_TRUE(buffer.ok());
+    ASSERT_OK(buffer);
     if (*buffer == nullptr) {
       // Can't send, wait until we can try again.
-      ASSERT_TRUE(pub->Wait().ok());
+      ASSERT_OK(pub->Wait());
       continue;
     }
 
     absl::StatusOr<const Message> pub_status = pub->PublishMessage(1);
     // std::cerr << "pub status " << pub_status.status() << "\n";
-    ASSERT_TRUE(pub_status.ok());
+    ASSERT_OK(pub_status);
   }
   sub_thread.join();
 }
@@ -1181,8 +1197,8 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayload) {
 TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayloadHistogram) {
   subspace::Client pub_client;
   subspace::Client sub_client;
-  ASSERT_TRUE(pub_client.Init(Socket()).ok());
-  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
 
   constexpr int kNumMessages = 20000;
 
@@ -1201,11 +1217,11 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayloadHistogram) {
     std::cerr << "Testing with num_slots: " << num_slots << "\n";
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
         "lustress", 256, num_slots, {.reliable = false});
-    ASSERT_TRUE(pub.ok());
+    ASSERT_OK(pub);
 
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
         "lustress", {.reliable = false, .log_dropped_messages = false});
-    ASSERT_TRUE(sub.ok());
+    ASSERT_OK(sub);
 
     // Create a subscriber thread to read from the channel and write to random
     // pipe.
@@ -1215,10 +1231,10 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayloadHistogram) {
       uint64_t last_ordinal = 0;
       std::vector<uint64_t> latencies;
       int j = 0;
-      ASSERT_TRUE(sub->Wait().ok());
+      ASSERT_OK(sub->Wait());
       while (j < kNumMessages - num_dropped) {
         absl::StatusOr<Message> msg = sub->ReadMessage();
-        ASSERT_TRUE(msg.ok());
+        ASSERT_OK(msg);
         if (msg->length > 0) {
           uint64_t receive_time = toolbelt::Now();
           num_dropped += msg->ordinal - last_ordinal - 1;
@@ -1229,7 +1245,7 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayloadHistogram) {
           uint64_t latency = receive_time - send_time;
           latencies.push_back(latency);
         } else {
-          // ASSERT_TRUE(sub->Wait().ok());
+          // ASSERT_OK(sub->Wait());
         }
       };
       if (latencies.empty()) {
@@ -1260,10 +1276,10 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayloadHistogram) {
       int j = 0;
       while (j < kNumMessages) {
         absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-        ASSERT_TRUE(buffer.ok());
+        ASSERT_OK(buffer);
         if (*buffer == nullptr) {
           // Can't send, wait until we can try again.
-          ASSERT_TRUE(pub->Wait().ok());
+          ASSERT_OK(pub->Wait());
           continue;
         }
         uint64_t send_time = toolbelt::Now();
@@ -1271,7 +1287,7 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayloadHistogram) {
         absl::StatusOr<const Message> pub_status =
             pub->PublishMessage(sizeof(send_time));
         // std::cerr << "pub status " << pub_status.status() << "\n";
-        ASSERT_TRUE(pub_status.ok());
+        ASSERT_OK(pub_status);
         j++;
         // Transmit at 10 kHz.
         std::this_thread::sleep_for(std::chrono::microseconds(100));
@@ -1284,16 +1300,16 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayloadHistogram) {
     // stop the subscriber.
     for (int i = 0; i < 100; i++) {
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-      ASSERT_TRUE(buffer.ok());
+      ASSERT_OK(buffer);
       if (*buffer == nullptr) {
         // Can't send, wait until we can try again.
-        ASSERT_TRUE(pub->Wait().ok());
+        ASSERT_OK(pub->Wait());
         continue;
       }
 
       absl::StatusOr<const Message> pub_status = pub->PublishMessage(1);
       // std::cerr << "pub status " << pub_status.status() << "\n";
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
     }
     sub_thread.join();
   }
@@ -1313,7 +1329,7 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayloadHistogram) {
 TEST_F(LatencyTest, ManyChannelsNonMultiplexed) {
   std::vector<subspace::Client> pub_clients;
   subspace::Client sub_client;
-  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+  ASSERT_OK(sub_client.Init(Socket()));
 
   constexpr int kNumChannels = 200;
   constexpr int kNumSlots = 100;
@@ -1324,7 +1340,7 @@ TEST_F(LatencyTest, ManyChannelsNonMultiplexed) {
 
   for (int i = 0; i < kNumChannels; i++) {
     subspace::Client pub_client;
-    ASSERT_TRUE(pub_client.Init(Socket()).ok());
+    ASSERT_OK(pub_client.Init(Socket()));
     pub_clients.push_back(std::move(pub_client));
     channels.push_back(absl::StrFormat("/logs/%d", i));
   }
@@ -1333,7 +1349,7 @@ TEST_F(LatencyTest, ManyChannelsNonMultiplexed) {
   for (int i = 0; i < kNumChannels; i++) {
     absl::StatusOr<Publisher> pub =
         pub_clients[i].CreatePublisher(channels[i], kSlotSize, kNumSlots);
-    ASSERT_TRUE(pub.ok());
+    ASSERT_OK(pub);
     pubs.push_back(std::move(*pub));
   }
 
@@ -1343,7 +1359,7 @@ TEST_F(LatencyTest, ManyChannelsNonMultiplexed) {
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
         channels[i], {.log_dropped_messages = false});
     // std::cerr << "sub status " << sub.status() << "\n";
-    ASSERT_TRUE(sub.ok());
+    ASSERT_OK(sub);
     subs.push_back(std::move(*sub));
   }
 
@@ -1368,7 +1384,7 @@ TEST_F(LatencyTest, ManyChannelsNonMultiplexed) {
         if (fds[i].revents & POLLIN) {
           for (;;) {
             absl::StatusOr<Message> msg = subs[i].ReadMessage();
-            ASSERT_TRUE(msg.ok());
+            ASSERT_OK(msg);
             if (msg->length > 0) {
               num_dropped += msg->ordinal - last_ordinals[i] - 1;
               last_ordinals[i] = msg->ordinal;
@@ -1398,14 +1414,14 @@ TEST_F(LatencyTest, ManyChannelsNonMultiplexed) {
       while (j < kNumMessages) {
         absl::StatusOr<void *> buffer = pubs[i].GetMessageBuffer();
         // std::cerr << "buffer status " << buffer.status() << "\n";
-        ASSERT_TRUE(buffer.ok());
+        ASSERT_OK(buffer);
         uint64_t send_time = toolbelt::Now();
         memset(*buffer, 0xda, kSlotSize);
         memcpy(*buffer, &send_time, sizeof(send_time));
         absl::StatusOr<const Message> pub_status =
             pubs[i].PublishMessage(sizeof(send_time));
         // std::cerr << "pub status " << pub_status.status() << "\n";
-        ASSERT_TRUE(pub_status.ok());
+        ASSERT_OK(pub_status);
         j++;
         // Transmit at 1 MHz.
         std::this_thread::sleep_for(std::chrono::microseconds(periods[i]));
@@ -1422,9 +1438,9 @@ TEST_F(LatencyTest, ManyChannelsNonMultiplexed) {
   for (int i = 0; i < 100; i++) {
     for (int j = 0; j < kNumChannels; j++) {
       absl::StatusOr<void *> buffer = pubs[j].GetMessageBuffer();
-      ASSERT_TRUE(buffer.ok());
+      ASSERT_OK(buffer);
       absl::StatusOr<const Message> pub_status = pubs[j].PublishMessage(1);
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
     }
   }
   uint64_t end = toolbelt::Now();
@@ -1438,7 +1454,7 @@ TEST_F(LatencyTest, ManyChannelsNonMultiplexed) {
 TEST_F(LatencyTest, ManyChannelsMultiplexed) {
   std::vector<subspace::Client> pub_clients;
   subspace::Client sub_client;
-  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+  ASSERT_OK(sub_client.Init(Socket()));
 
   constexpr const char *kMux = "/logs/*";
   constexpr int kNumChannels = 200;
@@ -1450,7 +1466,7 @@ TEST_F(LatencyTest, ManyChannelsMultiplexed) {
 
   for (int i = 0; i < kNumChannels; i++) {
     subspace::Client pub_client;
-    ASSERT_TRUE(pub_client.Init(Socket()).ok());
+    ASSERT_OK(pub_client.Init(Socket()));
     pub_clients.push_back(std::move(pub_client));
     channels.push_back(absl::StrFormat("/logs/%d", i));
   }
@@ -1459,7 +1475,7 @@ TEST_F(LatencyTest, ManyChannelsMultiplexed) {
   for (int i = 0; i < kNumChannels; i++) {
     absl::StatusOr<Publisher> pub = pub_clients[i].CreatePublisher(
         channels[i], kSlotSize, kNumSlots, {.mux = kMux});
-    ASSERT_TRUE(pub.ok());
+    ASSERT_OK(pub);
     pubs.push_back(std::move(*pub));
   }
 
@@ -1469,7 +1485,7 @@ TEST_F(LatencyTest, ManyChannelsMultiplexed) {
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
         channels[i], {.log_dropped_messages = false, .mux = kMux});
     // std::cerr << "sub status " << sub.status() << "\n";
-    ASSERT_TRUE(sub.ok());
+    ASSERT_OK(sub);
     subs.push_back(std::move(*sub));
   }
 
@@ -1494,7 +1510,7 @@ TEST_F(LatencyTest, ManyChannelsMultiplexed) {
         if (fds[i].revents & POLLIN) {
           for (;;) {
             absl::StatusOr<Message> msg = subs[i].ReadMessage();
-            ASSERT_TRUE(msg.ok());
+            ASSERT_OK(msg);
             if (msg->length > 0) {
               num_dropped += msg->ordinal - last_ordinals[i] - 1;
               last_ordinals[i] = msg->ordinal;
@@ -1523,7 +1539,7 @@ TEST_F(LatencyTest, ManyChannelsMultiplexed) {
       while (j < kNumMessages) {
         absl::StatusOr<void *> buffer = pubs[i].GetMessageBuffer();
         // std::cerr << "buffer status " << buffer.status() << "\n";
-        ASSERT_TRUE(buffer.ok());
+        ASSERT_OK(buffer);
         uint64_t send_time = toolbelt::Now();
         memset(*buffer, 0xda, kSlotSize);
         memcpy(*buffer, &send_time, sizeof(send_time));
@@ -1532,7 +1548,7 @@ TEST_F(LatencyTest, ManyChannelsMultiplexed) {
         if (!pub_status.ok()) {
           std::cerr << "pub status " << pub_status.status() << "\n";
         }
-        ASSERT_TRUE(pub_status.ok());
+        ASSERT_OK(pub_status);
         j++;
         std::this_thread::sleep_for(std::chrono::microseconds(periods[i]));
       }
@@ -1548,9 +1564,9 @@ TEST_F(LatencyTest, ManyChannelsMultiplexed) {
   for (int i = 0; i < 10; i++) {
     for (int j = 0; j < kNumChannels; j++) {
       absl::StatusOr<void *> buffer = pubs[j].GetMessageBuffer();
-      ASSERT_TRUE(buffer.ok());
+      ASSERT_OK(buffer);
       absl::StatusOr<const Message> pub_status = pubs[j].PublishMessage(1);
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
     }
   }
   sub_thread.join();
@@ -1564,7 +1580,7 @@ TEST_F(LatencyTest, ManyChannelsMultiplexed) {
 TEST_F(LatencyTest, ManyChannelsMultiplexedSubscribedToMux) {
   std::vector<subspace::Client> pub_clients;
   subspace::Client sub_client;
-  ASSERT_TRUE(sub_client.Init(Socket()).ok());
+  ASSERT_OK(sub_client.Init(Socket()));
 
   constexpr const char *kMux = "/logs/*";
   constexpr int kNumChannels = 200;
@@ -1576,7 +1592,7 @@ TEST_F(LatencyTest, ManyChannelsMultiplexedSubscribedToMux) {
 
   for (int i = 0; i < kNumChannels; i++) {
     subspace::Client pub_client;
-    ASSERT_TRUE(pub_client.Init(Socket()).ok());
+    ASSERT_OK(pub_client.Init(Socket()));
     pub_clients.push_back(std::move(pub_client));
     channels.push_back(absl::StrFormat("/logs/%d", i));
   }
@@ -1585,7 +1601,7 @@ TEST_F(LatencyTest, ManyChannelsMultiplexedSubscribedToMux) {
   for (int i = 0; i < kNumChannels; i++) {
     absl::StatusOr<Publisher> pub = pub_clients[i].CreatePublisher(
         channels[i], kSlotSize, kNumSlots, {.mux = kMux});
-    ASSERT_TRUE(pub.ok());
+    ASSERT_OK(pub);
     pubs.push_back(std::move(*pub));
   }
 
@@ -1593,7 +1609,7 @@ TEST_F(LatencyTest, ManyChannelsMultiplexedSubscribedToMux) {
   absl::StatusOr<Subscriber> sub =
       sub_client.CreateSubscriber(kMux, {.log_dropped_messages = false});
   // std::cerr << "sub status " << sub.status() << "\n";
-  ASSERT_TRUE(sub.ok());
+  ASSERT_OK(sub);
 
   std::cerr << "Total virtual memory: "
             << static_cast<double>(Server()->GetVirtualMemoryUsage()) /
@@ -1613,7 +1629,7 @@ TEST_F(LatencyTest, ManyChannelsMultiplexedSubscribedToMux) {
       if (pfd.revents & POLLIN) {
         for (;;) {
           absl::StatusOr<Message> msg = sub->ReadMessage();
-          ASSERT_TRUE(msg.ok());
+          ASSERT_OK(msg);
           if (msg->length > 0) {
             num_dropped += msg->ordinal - last_ordinals[msg->vchan_id] - 1;
             last_ordinals[msg->vchan_id] = msg->ordinal;
@@ -1642,7 +1658,7 @@ TEST_F(LatencyTest, ManyChannelsMultiplexedSubscribedToMux) {
       while (j < kNumMessages) {
         absl::StatusOr<void *> buffer = pubs[i].GetMessageBuffer();
         // std::cerr << "buffer status " << buffer.status() << "\n";
-        ASSERT_TRUE(buffer.ok());
+        ASSERT_OK(buffer);
         uint64_t send_time = toolbelt::Now();
         memset(*buffer, 0xda, kSlotSize);
         memcpy(*buffer, &send_time, sizeof(send_time));
@@ -1651,7 +1667,7 @@ TEST_F(LatencyTest, ManyChannelsMultiplexedSubscribedToMux) {
         if (!pub_status.ok()) {
           std::cerr << "pub status " << pub_status.status() << "\n";
         }
-        ASSERT_TRUE(pub_status.ok());
+        ASSERT_OK(pub_status);
         j++;
         std::this_thread::sleep_for(std::chrono::microseconds(periods[i]));
       }
@@ -1667,9 +1683,9 @@ TEST_F(LatencyTest, ManyChannelsMultiplexedSubscribedToMux) {
   for (int i = 0; i < 100; i++) {
     for (int j = 0; j < kNumChannels; j++) {
       absl::StatusOr<void *> buffer = pubs[j].GetMessageBuffer();
-      ASSERT_TRUE(buffer.ok());
+      ASSERT_OK(buffer);
       absl::StatusOr<const Message> pub_status = pubs[j].PublishMessage(1);
-      ASSERT_TRUE(pub_status.ok());
+      ASSERT_OK(pub_status);
     }
   }
   sub_thread.join();
