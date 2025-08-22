@@ -3,16 +3,31 @@
 
 namespace subspace {
 
-RpcClient::RpcClient(std::string service, std::string subspace_server_socket)
-    : service_(std::move(service)),
-      subspace_server_socket_(std::move(subspace_server_socket)) {}
+RpcClient::RpcClient(std::string service, uint64_t client_id,
+                     std::string subspace_server_socket)
+    : service_(std::move(service)), client_id_(client_id),
+      subspace_server_socket_(std::move(subspace_server_socket)),
+      logger_("rpcclient") {}
 
-RpcClient::~RpcClient() {}
 
-absl::Status RpcClient::Init(co::Coroutine *c) {
+RpcClient::~RpcClient() {
+  if (session_id_ != 0) {
+    auto status = CloseService(std::chrono::nanoseconds(0), coroutine_);
+    if (!status.ok()) {
+      logger_.Log(toolbelt::LogLevel::kError, "Error closing RPC client: %s",
+                   status.ToString().c_str());
+    }
+  }
+}
+
+absl::Status RpcClient::Open(std::chrono::nanoseconds timeout,
+                             co::Coroutine *c) {
   if (session_id_ != 0) {
     return absl::FailedPreconditionError("Session already initialized");
   }
+  logger_.Log(toolbelt::LogLevel::kDebug,
+              "Initializing RPC client for service: %s", service_.c_str());
+  coroutine_ = c;
   auto client = Client::Create(subspace_server_socket_);
   if (!client.ok()) {
     return absl::InternalError(absl::StrFormat("Failed to create client: %s",
@@ -20,11 +35,26 @@ absl::Status RpcClient::Init(co::Coroutine *c) {
   }
   client_ = std::move(*client);
 
-  return OpenService(c);
+  return OpenService(timeout, c);
+}
+
+absl::Status RpcClient::Close(std::chrono::nanoseconds timeout,
+                              co::Coroutine *c) {
+  if (session_id_ == 0) {
+    return absl::FailedPreconditionError("Session not initialized");
+  }
+  auto status = CloseService(std::chrono::nanoseconds(0), coroutine_);
+  if (!status.ok()) {
+    return absl::InternalError(
+        absl::StrFormat("Failed to close service: %s", status.ToString()));
+  }
+  session_id_ = 0;
+  return absl::OkStatus();
 }
 
 absl::Status
 RpcClient::PublishServerRequest(const subspace::RpcServerRequest &req,
+                                std::chrono::nanoseconds timeout,
                                 co::Coroutine *c) {
   uint64_t length = req.ByteSizeLong();
   absl::StatusOr<void *> buffer;
@@ -34,14 +64,14 @@ RpcClient::PublishServerRequest(const subspace::RpcServerRequest &req,
       return absl::InternalError(absl::StrFormat(
           "Failed to get message buffer: %s", buffer.status().ToString()));
     }
-    if (*buffer == nullptr) {
-      // Can't send yet, wait and try again.
-      auto wait_status = service_pub_->Wait(c);
-      if (!wait_status.ok()) {
-        return absl::InternalError(absl::StrFormat(
-            "Failed to wait for message buffer: %s", wait_status.ToString()));
-      }
-      continue;
+    if (*buffer != nullptr) {
+      break;
+    }
+    // Can't send yet, wait and try again.
+    auto wait_status = service_pub_->Wait(timeout, c);
+    if (!wait_status.ok()) {
+      return absl::InternalError(absl::StrFormat(
+          "Failed to wait for message buffer: %s", wait_status.ToString()));
     }
   }
 
@@ -54,38 +84,52 @@ RpcClient::PublishServerRequest(const subspace::RpcServerRequest &req,
     return absl::InternalError(absl::StrFormat("Failed to publish request: %s",
                                                pub_status.status().ToString()));
   }
+  logger_.Log(toolbelt::LogLevel::kDebug, "Published RPC request: %s",
+              req.DebugString().c_str());
   return absl::OkStatus();
 }
 
 absl::StatusOr<subspace::RpcServerResponse>
-RpcClient::ReadServerResponse(co::Coroutine *c) {
+RpcClient::ReadServerResponse(int request_id, std::chrono::nanoseconds timeout,
+                              co::Coroutine *c) {
   // Wait for the response and read it.
-  subspace::Message msg;
-  // TODO: timeout here.
   for (;;) {
-    if (!service_sub_->Wait(c).ok()) {
+    auto wait_status = service_sub_->Wait(timeout, c);
+    if (!wait_status.ok()) {
       return absl::InternalError("Timeout waiting for response");
     }
-    auto m = service_sub_->ReadMessage();
-    if (!m.ok()) {
-      return absl::InternalError(
-          absl::StrFormat("Failed to read message: %s", m.status().ToString()));
-    }
-    if (m->length > 0) {
-      msg = std::move(*m);
-      break;
+    for (;;) {
+      auto m = service_sub_->ReadMessage();
+      if (!m.ok()) {
+        return absl::InternalError(absl::StrFormat("Failed to read message: %s",
+                                                   m.status().ToString()));
+      }
+      if (m->length > 0) {
+        subspace::Message msg = std::move(*m);
+        subspace::RpcServerResponse response;
+        if (!response.ParseFromArray(msg.buffer, msg.length)) {
+          return absl::InternalError("Failed to parse RPC server response");
+        }
+        if (response.client_id() == client_id_ &&
+            response.request_id() == request_id) {
+          logger_.Log(toolbelt::LogLevel::kDebug,
+                      "Received RPC server response: %s",
+                      response.DebugString().c_str());
+          return response;
+        }
+        break;
+      }
     }
   }
-
-  subspace::RpcServerResponse response;
-  if (!response.ParseFromArray(msg.buffer, msg.length)) {
-    return absl::InternalError("Failed to parse RPC server response");
-  }
-  return response;
 }
 
-absl::Status RpcClient::OpenService(co::Coroutine *c) {
+absl::Status RpcClient::OpenService(std::chrono::nanoseconds timeout,
+                                    co::Coroutine *c) {
+  logger_.Log(toolbelt::LogLevel::kDebug, "Opening service");
   subspace::RpcServerRequest req;
+  req.set_client_id(client_id_);
+  int request_id = next_request_id_++;
+  req.set_request_id(request_id);
   req.mutable_open();
 
   auto client = subspace::Client::Create(subspace_server_socket_, service_);
@@ -94,13 +138,14 @@ absl::Status RpcClient::OpenService(co::Coroutine *c) {
         "Failed to create subspace client: %s", client.status().ToString()));
   }
   client_ = std::move(*client);
-
-  auto pub =
-      client_->CreatePublisher(absl::StrFormat("/rpc/%s/request", service_),
-                               {.slot_size = kRpcRequestSlotSize,
-                                .num_slots = kRpcRequestNumSlots,
-                                .reliable = true,
-                                .type = "subspace.RpcServerRequest"});
+  std::string request_name = absl::StrFormat("/rpc/%s/request", service_);
+  logger_.Log(toolbelt::LogLevel::kDebug, "Creating publisher to channel: %s",
+              request_name.c_str());
+  auto pub = client_->CreatePublisher(request_name,
+                                      {.slot_size = kRpcRequestSlotSize,
+                                       .num_slots = kRpcRequestNumSlots,
+                                       .reliable = true,
+                                       .type = "subspace.RpcServerRequest"});
   if (!pub.ok()) {
     return absl::InternalError(absl::StrFormat(
         "Failed to create request publisher: %s", pub.status().ToString()));
@@ -117,12 +162,13 @@ absl::Status RpcClient::OpenService(co::Coroutine *c) {
 
   service_sub_ = std::make_shared<subspace::Subscriber>(std::move(*sub));
 
-  auto pub_status = PublishServerRequest(req, c);
+  logger_.Log(toolbelt::LogLevel::kDebug, "Sending open request");
+  auto pub_status = PublishServerRequest(req, timeout, c);
   if (!pub_status.ok()) {
     return pub_status;
   }
 
-  auto resp = ReadServerResponse(c);
+  auto resp = ReadServerResponse(request_id, timeout, c);
   if (!resp.ok()) {
     return absl::InternalError(absl::StrFormat(
         "Failed to read server response: %s", resp.status().ToString()));
@@ -142,6 +188,7 @@ absl::Status RpcClient::OpenService(co::Coroutine *c) {
     m->response_type = method.response_channel().type();
     m->slot_size = method.request_channel().slot_size();
     m->num_slots = method.request_channel().num_slots();
+
     auto pub = client_->CreatePublisher(
         method.request_channel().name(), m->slot_size, m->num_slots,
         {.reliable = true, .type = method.request_channel().type()});
@@ -163,19 +210,25 @@ absl::Status RpcClient::OpenService(co::Coroutine *c) {
         std::make_shared<subspace::Subscriber>(std::move(*sub));
     methods_[m->name] = std::move(m);
   }
+  logger_.Log(toolbelt::LogLevel::kInfo, "Opened service %s with session ID: %d",
+              service_.c_str(), session_id_);
   return absl::OkStatus();
 }
 
-absl::Status RpcClient::CloseService(co::Coroutine *c) {
+absl::Status RpcClient::CloseService(std::chrono::nanoseconds timeout,
+                                     co::Coroutine *c) {
   subspace::RpcServerRequest req;
+  req.set_client_id(client_id_);
+  int request_id = next_request_id_++;
+  req.set_request_id(request_id);
   req.mutable_close()->set_session_id(session_id_);
 
-  auto pub_status = PublishServerRequest(req, c);
+  auto pub_status = PublishServerRequest(req, timeout, c);
   if (!pub_status.ok()) {
     return pub_status;
   }
 
-  auto resp = ReadServerResponse(c);
+  auto resp = ReadServerResponse(request_id, timeout, c);
   if (!resp.ok()) {
     return absl::InternalError(absl::StrFormat(
         "Failed to read server response: %s", resp.status().ToString()));
@@ -191,7 +244,10 @@ absl::Status RpcClient::CloseService(co::Coroutine *c) {
 absl::StatusOr<google::protobuf::Any>
 RpcClient::InvokeMethod(const std::string &name,
                         const google::protobuf::Any &request,
-                        co::Coroutine *c) {
+                        std::chrono::nanoseconds timeout, co::Coroutine *c) {
+  if (c == nullptr) {
+    c = coroutine_;
+  }
   auto it = methods_.find(name);
   if (it == methods_.end()) {
     return absl::NotFoundError(absl::StrFormat("Method not found: %s", name));
@@ -201,6 +257,7 @@ RpcClient::InvokeMethod(const std::string &name,
 
   subspace::RpcRequest req;
   int request_id = ++next_request_id_;
+  req.set_client_id(client_id_);
   req.set_session_id(session_id_);
   req.set_request_id(request_id);
   req.set_method(name);
@@ -215,14 +272,14 @@ RpcClient::InvokeMethod(const std::string &name,
       return absl::InternalError(absl::StrFormat(
           "Failed to get message buffer: %s", buffer.status().ToString()));
     }
-    if (*buffer == nullptr) {
-      // Can't send yet, wait and try again.
-      auto wait_status = method->request_publisher->Wait(c);
-      if (!wait_status.ok()) {
-        return absl::InternalError(absl::StrFormat(
-            "Failed to wait for message buffer: %s", wait_status.ToString()));
-      }
-      continue;
+    if (*buffer != nullptr) {
+      break;
+    }
+    // Can't send yet, wait and try again.
+    auto wait_status = method->request_publisher->Wait(timeout, c);
+    if (!wait_status.ok()) {
+      return absl::InternalError(absl::StrFormat(
+          "Failed to wait for message buffer: %s", wait_status.ToString()));
     }
   }
 
@@ -240,40 +297,36 @@ RpcClient::InvokeMethod(const std::string &name,
   }
 
   // Wait for the response.
-  subspace::Message msg;
-  // TODO: timeout here.
   for (;;) {
-    auto wait_status = method->response_subscriber->Wait(c);
+    auto wait_status = method->response_subscriber->Wait(timeout, c);
     if (!wait_status.ok()) {
       return absl::InternalError(absl::StrFormat(
           "Error waiting for response: %s", wait_status.ToString()));
     }
-    auto m = method->response_subscriber->ReadMessage();
-    if (!m.ok()) {
-      return absl::InternalError(
-          absl::StrFormat("Failed to read message: %s", m.status().ToString()));
-    }
-    if (m->length > 0) {
-      msg = std::move(*m);
+    for (;;) {
+      auto m = method->response_subscriber->ReadMessage();
+      if (!m.ok()) {
+        return absl::InternalError(absl::StrFormat("Failed to read message: %s",
+                                                   m.status().ToString()));
+      }
+      if (m->length > 0) {
+        subspace::Message msg = std::move(*m);
+        subspace::RpcResponse rpc_response;
+        if (!rpc_response.ParseFromArray(msg.buffer, msg.length)) {
+          return absl::InternalError("Failed to parse RPC response");
+        }
+        if (rpc_response.client_id() == client_id_ &&
+            rpc_response.request_id() == request_id &&
+            rpc_response.session_id() == session_id_) {
+          logger_.Log(toolbelt::LogLevel::kDebug, "Received RPC response: %s",
+                      rpc_response.DebugString().c_str());
+          return rpc_response.result();
+        }
+        continue;
+      }
       break;
     }
   }
-
-  subspace::RpcResponse rpc_response;
-  if (!rpc_response.ParseFromArray(msg.buffer, msg.length)) {
-    return absl::InternalError("Failed to parse RPC response");
-  }
-  if (rpc_response.session_id() != session_id_) {
-    return absl::InternalError(
-        absl::StrFormat("Response session ID mismatch: expected %d, got %d",
-                        session_id_, rpc_response.session_id()));
-  }
-  if (rpc_response.request_id() != request_id) {
-    return absl::InternalError(
-        absl::StrFormat("Response request ID mismatch: expected %d, got %d",
-                        request_id, rpc_response.request_id()));
-  }
-  return rpc_response.result();
 }
 
 } // namespace subspace

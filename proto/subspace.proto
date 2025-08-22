@@ -254,6 +254,7 @@ message RpcOpenResponse {
   }
   int32 session_id = 1; // Session ID for this server.
   repeated Method methods = 2; // List of methods available on this server.
+  uint64 client_id = 3;   // Client that this is destined for.
 }
 
 message RpcCloseRequest {
@@ -264,18 +265,22 @@ message RpcCloseResponse {
 }
 
 message RpcServerRequest {
+  uint64 client_id = 1;
+  int32 request_id = 2;
   oneof request {
-    RpcOpenRequest open = 1;
-    RpcCloseRequest close = 2;
+    RpcOpenRequest open = 3;
+    RpcCloseRequest close = 4;
   }
 }
 
 message RpcServerResponse {
-  oneof response {
-    RpcOpenResponse open = 1;
-    RpcCloseResponse close = 2;
+  uint64 client_id = 1;
+  int32 request_id = 2;
+    oneof response {
+    RpcOpenResponse open = 3;
+    RpcCloseResponse close = 4;
   }
-  string error = 3;
+  string error = 5;
 }
 
 message RpcRequest {
@@ -283,6 +288,7 @@ message RpcRequest {
   google.protobuf.Any arguments = 2; // Data to send to the server.
   int32 session_id = 3; // Session ID for this request.
   int32 request_id = 4; // Unique ID for this request.
+  uint64 client_id = 5; // Client ID making the request.
 }
 
 message RpcResponse {
@@ -290,6 +296,14 @@ message RpcResponse {
   google.protobuf.Any result = 2; // Data returned by the server.
   int32 session_id = 3; // Session ID for this response.
   int32 request_id = 4; // Unique ID for this response, matches request.
+  uint64 client_id = 5; // Client ID making the request.
 }
 
+// Carries raw bytes over RPC.
+message RawMessage {
+  bytes data = 1;
+}
 
+// RPC calls with no result return this.
+message VoidMessage {
+}

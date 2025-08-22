@@ -31,6 +31,7 @@ cc_test(
         "//server:subspace_server",
     ],
     deps = [
+        ":rpc_client",
         "//rpc/server:rpc_server",
         "//client:subspace_client",
         "//rpc/proto:rpc_test_cc_proto",
