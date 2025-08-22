@@ -1,0 +1,47 @@
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "rpc_client",
+    srcs = [
+        "rpc_client.cc",
+    ],
+    hdrs = [
+        "rpc_client.h",
+    ],
+    deps = [
+        "//rpc/server:rpc_server",
+        "//client:subspace_client",
+        "//common:subspace_common",
+        "//proto:subspace_cc_proto",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/flags:parse",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:str_format",
+        "@coroutines//:co",
+    ],
+)
+
+cc_test(
+    name = "client_test",
+    srcs = ["client_test.cc"],
+    data = [
+        "//server:subspace_server",
+    ],
+    deps = [
+        "//rpc/server:rpc_server",
+        "//client:subspace_client",
+        "//rpc/proto:rpc_test_cc_proto",
+        "//server",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/flags:parse",
+        "@com_google_absl//absl/hash:hash_testing",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_matchers",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_googletest//:gtest",
+        "@coroutines//:co",
+    ],
+)

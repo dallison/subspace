@@ -2,8 +2,8 @@
 #include "proto/subspace.pb.h"
 
 namespace subspace {
-RpcServer::RpcServer(std::string name, std::string server_socket)
-    : name_(std::move(name)), server_socket_(std::move(server_socket)) {}
+RpcServer::RpcServer(std::string name, std::string subspace_server_socket)
+    : name_(std::move(name)), subspace_server_socket_(std::move(subspace_server_socket)) {}
 
 void RpcServer::Stop() {
   running_ = false;
@@ -11,7 +11,7 @@ void RpcServer::Stop() {
 }
 
 absl::Status RpcServer::CreateChannels() {
-  auto client = subspace::Client::Create(server_socket_, name_);
+  auto client = subspace::Client::Create(subspace_server_socket_, name_);
   if (!client.ok()) {
     return client.status();
   }

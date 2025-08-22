@@ -13,7 +13,7 @@ constexpr int32_t kRpcResponseNumSlots = 16;
 
 class RpcServer : public std::enable_shared_from_this<RpcServer> {
 public:
-  RpcServer(std::string name, std::string server_socket);
+  RpcServer(std::string name, std::string subspace_server_socket = "/tmp/subspace");
 
   absl::Status Run();
 
@@ -111,7 +111,7 @@ private:
                               co::Coroutine *c);
 
   std::string name_;
-  std::string server_socket_;
+  std::string subspace_server_socket_;
   co::CoroutineScheduler scheduler_;
   std::shared_ptr<Client> client_;
   absl::flat_hash_map<std::string, std::shared_ptr<Method>> methods_;
