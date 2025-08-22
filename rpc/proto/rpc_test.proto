@@ -1,0 +1,16 @@
+// Copyright 025 David Allison
+// All Rights Reserved
+// See LICENSE file for licensing information.
+
+syntax = "proto3";
+
+package rpc;
+
+message TestRequest {
+  string message = 1;
+}
+
+message TestResponse {
+  string message = 1;
+}
+
