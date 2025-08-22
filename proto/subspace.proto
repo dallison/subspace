@@ -233,25 +233,27 @@ message Discovery {
 // Ask the server to open connection to a server.  The response will contain the
 // session ID for the server and a list of methods that can be called on it.
 message RpcOpenRequest {
-  string name = 1;
 }
 
 message RpcOpenResponse {
-  message MethodChannel {
+  message RequestChannel {
     string name = 1; // Name of the channel.
     int32 slot_size = 2; // Size of each slot in bytes.
     int32 num_slots = 3; // Number of slots in the channel.
     string type = 4; // Type of data carried on this channel.
   }
 
+  message ResponseChannel {
+    string name = 1; // Name of the channel.
+    string type = 2; // Type of data carried on this channel.`
+  }
   message Method {
     string name = 1;      // Name of the method to call
-    MethodChannel request_channel = 2; // Channel to send request on.
-    MethodChannel response_channel = 3; // Channel to receive response on.
+    RequestChannel request_channel = 2; // Channel to send request on.
+    ResponseChannel response_channel = 3; // Channel to receive response on.
   }
-  string error = 1;
-  int32 session_id = 2; // Session ID for this server.
-  repeated Method methods = 3; // List of methods available on this server.
+  int32 session_id = 1; // Session ID for this server.
+  repeated Method methods = 2; // List of methods available on this server.
 }
 
 message RpcCloseRequest {
@@ -259,7 +261,6 @@ message RpcCloseRequest {
 }
 
 message RpcCloseResponse {
-  string error = 1; // Error message if any.
 }
 
 message RpcServerRequest {
@@ -274,6 +275,7 @@ message RpcServerResponse {
     RpcOpenResponse open = 1;
     RpcCloseResponse close = 2;
   }
+  string error = 3;
 }
 
 message RpcRequest {
