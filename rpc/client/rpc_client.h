@@ -55,8 +55,9 @@ public:
                                                  r.status().ToString()));
     }
     Response resp;
+    std::cerr << "Received response: " << r->DebugString() << std::endl;
     if (!r->UnpackTo(&resp)) {
-      return absl::InternalError("Failed to unpack response");
+      return absl::InternalError("3 Failed to unpack response");
     }
     return resp;
   }
@@ -77,7 +78,7 @@ public:
     }
     RawMessage resp;
     if (!r->UnpackTo(&resp)) {
-      return absl::InternalError("Failed to unpack response");
+      return absl::InternalError("1 Failed to unpack response");
     }
     return std::vector<char>(resp.data().begin(), resp.data().end());
   }
@@ -95,7 +96,7 @@ public:
     }
     VoidMessage resp;
     if (!r->UnpackTo(&resp)) {
-      return absl::InternalError("Failed to unpack response");
+      return absl::InternalError("2 Failed to unpack response");
     }
     return absl::OkStatus();
   }

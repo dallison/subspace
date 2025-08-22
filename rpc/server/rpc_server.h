@@ -21,9 +21,7 @@ public:
   RpcServer(std::string name,
             std::string subspace_server_socket = "/tmp/subspace");
 
-  ~RpcServer() {
-    std::cerr << "destructing RpcServer: " << name_ << std::endl;
-  }
+  ~RpcServer() = default;
 
   void SetLogLevel(const std::string &level) { logger_.SetLogLevel(level); }
 

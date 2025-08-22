@@ -9,13 +9,12 @@ RpcClient::RpcClient(std::string service, uint64_t client_id,
       subspace_server_socket_(std::move(subspace_server_socket)),
       logger_("rpcclient") {}
 
-
 RpcClient::~RpcClient() {
   if (session_id_ != 0) {
     auto status = CloseService(std::chrono::nanoseconds(0), coroutine_);
     if (!status.ok()) {
       logger_.Log(toolbelt::LogLevel::kError, "Error closing RPC client: %s",
-                   status.ToString().c_str());
+                  status.ToString().c_str());
     }
   }
 }
@@ -210,8 +209,9 @@ absl::Status RpcClient::OpenService(std::chrono::nanoseconds timeout,
         std::make_shared<subspace::Subscriber>(std::move(*sub));
     methods_[m->name] = std::move(m);
   }
-  logger_.Log(toolbelt::LogLevel::kInfo, "Opened service %s with session ID: %d",
-              service_.c_str(), session_id_);
+  logger_.Log(toolbelt::LogLevel::kInfo,
+              "Opened service %s with session ID: %d", service_.c_str(),
+              session_id_);
   return absl::OkStatus();
 }
 
@@ -320,6 +320,10 @@ RpcClient::InvokeMethod(const std::string &name,
             rpc_response.session_id() == session_id_) {
           logger_.Log(toolbelt::LogLevel::kDebug, "Received RPC response: %s",
                       rpc_response.DebugString().c_str());
+          if (!rpc_response.error().empty()) {
+            return absl::InternalError(
+                absl::StrFormat("%s", rpc_response.error()));
+          }
           return rpc_response.result();
         }
         continue;
