@@ -3,6 +3,8 @@
 #include "client/client.h"
 #include "coroutine.h"
 #include "google/protobuf/any.pb.h"
+#include "toolbelt/logging.h"
+#include "toolbelt/pipe.h"
 
 namespace subspace {
 
@@ -11,13 +13,39 @@ constexpr int32_t kRpcResponseSlotSize = 16 * 1024;
 constexpr int32_t kRpcRequestNumSlots = 16;
 constexpr int32_t kRpcResponseNumSlots = 16;
 
+constexpr int32_t kDefaultMethodSlotSize = 16 * 1024;
+constexpr int32_t kDefaultMethodNumSlots = 64;
+
 class RpcServer : public std::enable_shared_from_this<RpcServer> {
 public:
-  RpcServer(std::string name, std::string subspace_server_socket = "/tmp/subspace");
+  RpcServer(std::string name,
+            std::string subspace_server_socket = "/tmp/subspace");
 
-  absl::Status Run();
+  ~RpcServer() {
+    std::cerr << "destructing RpcServer: " << name_ << std::endl;
+  }
+
+  void SetLogLevel(const std::string &level) { logger_.SetLogLevel(level); }
+
+  void SetStartingSessionId(int session_id) {
+    session_id_ = session_id;
+  }
+
+  absl::Status Run(co::CoroutineScheduler *scheduler = nullptr);
 
   void Stop();
+
+  // Method with a request and response.
+  absl::Status
+  RegisterMethod(const std::string &method, const std::string &request_type,
+                 const std::string &response_type,
+                 std::function<absl::Status(const google::protobuf::Any &,
+                                            google::protobuf::Any *)>
+                     callback) {
+    return RegisterMethod(method, request_type, response_type,
+                          kDefaultMethodSlotSize, kDefaultMethodNumSlots,
+                          std::move(callback));
+  }
 
   absl::Status
   RegisterMethod(const std::string &method, const std::string &request_type,
@@ -25,14 +53,40 @@ public:
                  int32_t num_slots,
                  std::function<absl::Status(const google::protobuf::Any &,
                                             google::protobuf::Any *)>
-                     callback) {
-    if (methods_.find(method) != methods_.end()) {
-      return absl::AlreadyExistsError("Method already registered: " + method);
-    }
-    methods_[method] =
-        std::make_shared<Method>(this, method, request_type, response_type,
-                                 slot_size, num_slots, std::move(callback));
-    return absl::OkStatus();
+                     callback);
+
+                       absl::Status
+  RegisterMethod(const std::string &method, const std::string &request_type,
+                 absl::Status (*callback)(const google::protobuf::Any &)) {
+    return RegisterMethod(method, request_type, kDefaultMethodSlotSize,
+                          kDefaultMethodNumSlots, callback);
+  }
+
+  absl::Status
+  RegisterMethod(const std::string &method, const std::string &request_type,
+                 int32_t slot_size, int32_t num_slots,
+                 absl::Status (*callback)(const google::protobuf::Any &));
+
+
+  template <typename Request, typename Response>
+  absl::Status RegisterMethod(const std::string &method, const Request &request, Response* response) {
+    auto request_descriptor = Request::descriptor();
+    auto response_descriptor = Response::descriptor();
+
+    return RegisterMethod(method, request_descriptor->full_name(), response_descriptor->full_name(),
+                          kDefaultMethodSlotSize, kDefaultMethodNumSlots,
+                          [request, response](const google::protobuf::Any &req,
+                                              google::protobuf::Any *res) {
+                            if (!req.UnpackTo(&request)) {
+                              return absl::InvalidArgumentError("Failed to unpack request");
+                            }
+                            auto status = callback(request, response);
+                            if (!status.ok()) {
+                              return status;
+                            }
+                            res->PackFrom(*response);
+                            return absl::OkStatus();
+                          });
   }
 
   absl::Status UnregisterMethod(const std::string &method) {
@@ -80,7 +134,8 @@ private:
   };
 
   struct Session {
-    int id;
+    int session_id;
+    uint64_t client_id;
     absl::flat_hash_map<std::string, std::shared_ptr<MethodInstance>> methods;
   };
 
@@ -88,33 +143,36 @@ private:
   void AddCoroutine(std::unique_ptr<co::Coroutine> coroutine) {
     coroutines_.insert(std::move(coroutine));
   }
-  void ListenerCoroutine(co::Coroutine *c);
+  static void ListenerCoroutine(std::shared_ptr<RpcServer> server, co::Coroutine *c);
 
   absl::Status HandleIncomingRpcServerRequest(subspace::Message msg,
                                               co::Coroutine *c);
-  absl::Status HandleOpen(const subspace::RpcOpenRequest &request,
+  absl::Status HandleOpen(uint64_t client_id, const subspace::RpcOpenRequest &request,
                           subspace::RpcOpenResponse *response,
                           co::Coroutine *c);
-  absl::Status HandleClose(const subspace::RpcCloseRequest &request,
+  absl::Status HandleClose(uint64_t client_id, const subspace::RpcCloseRequest &request,
                            subspace::RpcCloseResponse *response,
                            co::Coroutine *c);
   absl::Status
   PublishRpcServerResponse(const subspace::RpcServerResponse &response,
                            co::Coroutine *c);
 
-  absl::StatusOr<std::shared_ptr<Session>> CreateSession();
+  absl::StatusOr<std::shared_ptr<Session>> CreateSession(uint64_t client_id);
   absl::Status DestroySession(int session_id);
 
-  void SessionMethodCoroutine(std::shared_ptr<RpcServer> server,
+  static void SessionMethodCoroutine(std::shared_ptr<RpcServer> server,
                               std::shared_ptr<Session> session,
                               std::shared_ptr<MethodInstance> method,
                               co::Coroutine *c);
 
   std::string name_;
   std::string subspace_server_socket_;
-  co::CoroutineScheduler scheduler_;
+  co::CoroutineScheduler local_scheduler_;
+  co::CoroutineScheduler *scheduler_;
   std::shared_ptr<Client> client_;
   absl::flat_hash_map<std::string, std::shared_ptr<Method>> methods_;
+  toolbelt::Logger logger_;
+  toolbelt::Pipe interrupt_pipe_;
 
   std::shared_ptr<subspace::Subscriber> request_receiver_;
   std::shared_ptr<subspace::Publisher> response_publisher_;

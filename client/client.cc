@@ -493,8 +493,10 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
                  publisher->VirtualChannelId(), false, msg.new_slot->id);
 }
 
-absl::Status ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
-                                                  co::Coroutine *c) {
+absl::Status
+ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
+                                     std::chrono::nanoseconds timeout,
+                                     co::Coroutine *c) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -506,14 +508,15 @@ absl::Status ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
       !status.ok()) {
     return status;
   }
+  uint64_t timeout_ns = timeout.count();
   if (c != nullptr) {
-    c->Wait(publisher->GetPollFd().Fd(), POLLIN);
+    c->Wait(publisher->GetPollFd().Fd(), POLLIN, timeout_ns);
   } else if (co_ != nullptr) {
     // Coroutine aware.  Yield control back until the poll fd is triggered.
-    co_->Wait(publisher->GetPollFd().Fd(), POLLIN);
+    co_->Wait(publisher->GetPollFd().Fd(), POLLIN, timeout_ns);
   } else {
     struct pollfd fd = {.fd = publisher->GetPollFd().Fd(), .events = POLLIN};
-    int e = ::poll(&fd, 1, -1);
+    int e = ::poll(&fd, 1, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
     // Since we are waiting forever will can only get the value 1 from the poll.
     // We will never get 0 since there is no timeout.  Anything else (can only
     // be -1) will be an error.
@@ -529,6 +532,8 @@ absl::Status ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
 absl::StatusOr<int>
 ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
                                      const toolbelt::FileDescriptor &fd,
+                                     std::chrono::nanoseconds timeout,
+
                                      co::Coroutine *c) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
@@ -542,16 +547,18 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
     return status;
   }
   int result = -1;
+  uint64_t timeout_ns = timeout.count();
   if (c != nullptr) {
-    result = c->Wait({publisher->GetPollFd().Fd(), fd.Fd()}, POLLIN);
+    result =
+        c->Wait({publisher->GetPollFd().Fd(), fd.Fd()}, POLLIN, timeout_ns);
   } else if (co_ != nullptr) {
     // Coroutine aware.  Yield control back until the poll fd is triggered.
-    co_->Wait({publisher->GetPollFd().Fd(), fd.Fd()}, POLLIN);
+    co_->Wait({publisher->GetPollFd().Fd(), fd.Fd()}, POLLIN, timeout_ns);
   } else {
     struct pollfd fds[2] = {
         {.fd = publisher->GetPollFd().Fd(), .events = POLLIN},
         {.fd = fd.Fd(), .events = POLLIN}};
-    int e = ::poll(fds, 2, -1);
+    int e = ::poll(fds, 2, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
     // Since we are waiting forever will can only get the value 1 from the poll.
     // We will never get 0 since there is no timeout.  Anything else (can only
     // be -1) will be an error.
@@ -574,20 +581,22 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
 }
 
 absl::Status ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
+                                           std::chrono::nanoseconds timeout,
                                            co::Coroutine *c) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
 
+  uint64_t timeout_ns = timeout.count();
   if (c != nullptr) {
     // Coroutine aware.  Yield control back until the poll fd is triggered.
-    c->Wait(subscriber->GetPollFd().Fd(), POLLIN);
+    c->Wait(subscriber->GetPollFd().Fd(), POLLIN, timeout_ns);
   } else if (co_ != nullptr) {
     // Coroutine aware.  Yield control back until the poll fd is triggered.
-    co_->Wait(subscriber->GetPollFd().Fd(), POLLIN);
+    co_->Wait(subscriber->GetPollFd().Fd(), POLLIN, timeout_ns);
   } else {
     struct pollfd fd = {.fd = subscriber->GetPollFd().Fd(), .events = POLLIN};
-    int e = ::poll(&fd, 1, -1);
+    int e = ::poll(&fd, 1, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
     // Since we are waiting forever will can only get the value 1 from the poll.
     // We will never get 0 since there is no timeout.  Anything else (can only
     // be -1) will be an error.
@@ -599,25 +608,25 @@ absl::Status ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
   return absl::OkStatus();
 }
 
-absl::StatusOr<int>
-ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
-                              const toolbelt::FileDescriptor &fd,
-                              co::Coroutine *c) {
+absl::StatusOr<int> ClientImpl::WaitForSubscriber(
+    SubscriberImpl *subscriber, const toolbelt::FileDescriptor &fd,
+    std::chrono::nanoseconds timeout, co::Coroutine *c) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
   int result = -1;
+  uint64_t timeout_ns = timeout.count();
   if (c != nullptr) {
     // Coroutine aware.  Yield control back until the poll fd is triggered.
-    c->Wait({subscriber->GetPollFd().Fd(), fd.Fd()}, POLLIN);
+    c->Wait({subscriber->GetPollFd().Fd(), fd.Fd()}, POLLIN, timeout_ns);
   } else if (co_ != nullptr) {
     // Coroutine aware.  Yield control back until the poll fd is triggered.
-    co_->Wait({subscriber->GetPollFd().Fd(), fd.Fd()}, POLLIN);
+    co_->Wait({subscriber->GetPollFd().Fd(), fd.Fd()}, POLLIN, timeout_ns);
   } else {
     struct pollfd fds[2] = {
         {.fd = subscriber->GetPollFd().Fd(), .events = POLLIN},
         {.fd = fd.Fd(), .events = POLLIN}};
-    int e = ::poll(fds, 2, -1);
+    int e = ::poll(fds, 2, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
     // Since we are waiting forever will can only get the value 1 from the poll.
     // We will never get 0 since there is no timeout.  Anything else (can only
     // be -1) will be an error.
@@ -767,9 +776,9 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
   auto ret_msg = Message(msg);
   if (subscriber->IsBridge()) {
     // Bridge subscribers don't hold onto the message in the subscriber to allow
-    // timely slot retirement.  If they hold onto it, the slot would not be retired
-    // until the next message is read.  This only affect bridge subscribers which
-    // are used to send data between servers.
+    // timely slot retirement.  If they hold onto it, the slot would not be
+    // retired until the next message is read.  This only affect bridge
+    // subscribers which are used to send data between servers.
     subscriber->ClearActiveMessage();
   }
   return ret_msg;

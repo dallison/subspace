@@ -120,11 +120,13 @@ int ServerTest::server_pipe_[2];
 std::unique_ptr<subspace::Server> ServerTest::server_;
 std::thread ServerTest::server_thread_;
 
-static int interrupt_pipe[2];
-
+static int next_session = 1;
 static std::shared_ptr<subspace::RpcServer> BuildServer() {
   auto server =
       std::make_shared<subspace::RpcServer>("test", ServerTest::Socket());
+
+  server->SetLogLevel("debug");
+  server->SetStartingSessionId(next_session++);
 
   auto s = server->RegisterMethod(
       "TestMethod", "subspace.TestRequest", "subspace.TestResponse", 256, 10,
@@ -138,43 +140,137 @@ static std::shared_ptr<subspace::RpcServer> BuildServer() {
         return absl::OkStatus();
       });
   EXPECT_TRUE(s.ok());
+
+  // Void method.
+  s = server->RegisterMethod(
+      "VoidMethod", "subspace.TestRequest",
+      [](const google::protobuf::Any &req) -> absl::Status {
+        std::cerr << "VoidMethod called with request: " << req.DebugString()
+                  << std::endl;
+        return absl::OkStatus();
+      });
+
+  // Error method.
+  s = server->RegisterMethod("ErrorMethod", "subspace.TestRequest",
+                             "subspace.TestResponse",
+                             [](const google::protobuf::Any &req,
+                                google::protobuf::Any *res) -> absl::Status {
+                               std::cerr << "ErrorMethod called with request: "
+                                         << req.DebugString() << std::endl;
+                               return absl::InternalError("Error occurred");
+                             });
+  EXPECT_TRUE(s.ok());
+
+  // void error method.
+  s = server->RegisterMethod(
+      "VoidErrorMethod", "subspace.TestRequest",
+      [](const google::protobuf::Any &req) -> absl::Status {
+        std::cerr << "VoidErrorMethod called with request: "
+                  << req.DebugString() << std::endl;
+        return absl::InternalError("Error occurred");
+      });
+  EXPECT_TRUE(s.ok());
+
   return server;
 }
 
+struct ServerContext {
+  std::shared_ptr<subspace::Client> client;
+  std::shared_ptr<subspace::Publisher> pub;
+  std::shared_ptr<subspace::Subscriber> sub;
+  uint64_t client_id;
+  int session_id;
+};
+
+static uint64_t next_client_id = 1;
+static int next_request_id = 1;
+
 static void Open(std::shared_ptr<subspace::RpcServer> server,
-                 subspace::RpcServerResponse &response) {
+                 subspace::RpcServerResponse &response, ServerContext &ctx,
+                 co::Coroutine *c) {
   subspace::RpcServerRequest req;
+  ctx.client_id = next_client_id++;
+  req.set_client_id(ctx.client_id);
+
+  int request_id = next_request_id++;
+  req.set_request_id(request_id);
   req.mutable_open();
 
   subspace::Client client;
   ServerTest::InitClient(client);
+  ctx.client = std::make_shared<subspace::Client>(std::move(client));
 
-  auto pub = client.CreatePublisher(
+  auto pub = ctx.client->CreatePublisher(
       "/rpc/test/request", 1024, 10,
       {.reliable = true, .type = "subspace.RpcServerRequest"});
   ASSERT_OK(pub);
-  auto sub = client.CreateSubscriber(
+
+  ctx.pub = std::make_shared<subspace::Publisher>(std::move(*pub));
+  auto sub = ctx.client->CreateSubscriber(
       "/rpc/test/response",
       {.reliable = true, .type = "subspace.RpcServerResponse"});
   ASSERT_OK(sub);
 
-  auto buffer = pub->GetMessageBuffer(256);
+  ctx.sub = std::make_shared<subspace::Subscriber>(std::move(*sub));
+
+  auto buffer = ctx.pub->GetMessageBuffer(256);
   ASSERT_OK(buffer);
   ASSERT_TRUE(req.SerializeToArray(*buffer, 1024));
-  ASSERT_OK(pub->PublishMessage(int(req.ByteSizeLong())));
+  ASSERT_OK(ctx.pub->PublishMessage(int(req.ByteSizeLong())));
 
   subspace::Message msg;
   for (;;) {
-    ASSERT_OK(sub->Wait());
-    auto m = sub->ReadMessage();
-    ASSERT_OK(m);
-    if (m->length > 0) {
-      msg = std::move(*m);
-      break;
+    ASSERT_OK(ctx.sub->Wait(c));
+    for (;;) {
+      auto m = ctx.sub->ReadMessage();
+      ASSERT_OK(m);
+      if (m->length > 0) {
+        msg = std::move(*m);
+        ASSERT_TRUE(response.ParseFromArray(msg.buffer, msg.length));
+        if (response.client_id() == ctx.client_id &&
+            response.request_id() == request_id && response.has_open()) {
+          ctx.session_id = response.open().session_id();
+          return;
+        }
+      }
     }
   }
+}
 
-  ASSERT_TRUE(response.ParseFromArray(msg.buffer, msg.length));
+static void Close(std::shared_ptr<subspace::RpcServer> server,
+                  ServerContext &ctx, co::Coroutine *c) {
+  subspace::RpcServerRequest req;
+  req.set_client_id(ctx.client_id);
+
+  int request_id = next_request_id++;
+  req.set_request_id(request_id);
+  req.mutable_close()->set_session_id(ctx.session_id);
+
+  auto buffer = ctx.pub->GetMessageBuffer(256);
+  ASSERT_OK(buffer);
+  ASSERT_TRUE(req.SerializeToArray(*buffer, 1024));
+  ASSERT_OK(ctx.pub->PublishMessage(int(req.ByteSizeLong())));
+
+  subspace::Message msg;
+  for (;;) {
+    std::cerr << "waiting for close\n";
+    ASSERT_OK(ctx.sub->Wait(c));
+    for (;;) {
+      auto m = ctx.sub->ReadMessage();
+      ASSERT_OK(m);
+      if (m->length > 0) {
+        msg = std::move(*m);
+        subspace::RpcServerResponse response;
+        ASSERT_TRUE(response.ParseFromArray(msg.buffer, msg.length));
+        if (response.client_id() == ctx.client_id &&
+            response.request_id() == request_id && response.has_close()) {
+          std::cerr << "Received close response: " << response.DebugString()
+                    << std::endl;
+          return;
+        }
+      }
+    }
+  }
 }
 
 static const subspace::RpcOpenResponse::Method *
@@ -188,152 +284,352 @@ FindMethod(const subspace::RpcOpenResponse &response, const std::string &name) {
 }
 
 TEST_F(ServerTest, Open) {
+  co::CoroutineScheduler scheduler;
+
   auto server = BuildServer();
-  std::thread server_thread([&]() {
-    absl::Status status = server->Run();
-    if (!status.ok()) {
-      fprintf(stderr, "Error running RPC server: %s\n",
-              status.ToString().c_str());
-      exit(1);
-    }
+  ASSERT_OK(server->Run(&scheduler));
+
+  co::Coroutine test(scheduler, [&](co::Coroutine *c) {
+    ServerContext ctx;
+    subspace::RpcServerResponse response;
+    Open(server, response, ctx, c);
+    std::cerr << "Received response: " << response.DebugString() << std::endl;
+
+    Close(server, ctx, c);
+
+    server->Stop();
   });
 
-  server_thread.detach();
-
-  subspace::RpcServerResponse response;
-  Open(server, response);
-  std::cerr << "Received response: " << response.DebugString() << std::endl;
-
-  std::cerr << "stopping server\n";
-  server->Stop();
+  scheduler.Run();
+  std::cerr << "Server stopped" << std::endl;
+  std::cerr << "Server use count: " << server.use_count() << std::endl;
 }
 
 TEST_F(ServerTest, OpenAndCallNoResponseRead) {
+  co::CoroutineScheduler scheduler;
+
   auto server = BuildServer();
-  std::thread server_thread([&]() {
-    absl::Status status = server->Run();
-    if (!status.ok()) {
-      fprintf(stderr, "Error running RPC server: %s\n",
-              status.ToString().c_str());
-      exit(1);
-    }
+  ASSERT_OK(server->Run(&scheduler));
+
+  co::Coroutine test(scheduler, [&](co::Coroutine *c) {
+    ServerContext ctx;
+    subspace::RpcServerResponse response;
+    Open(server, response, ctx, c);
+    std::cerr << "Received response: " << response.DebugString() << std::endl;
+
+    subspace::RpcRequest req;
+    req.set_client_id(ctx.client_id);
+    req.set_session_id(response.open().session_id());
+    int request_id = next_request_id++;
+    req.set_request_id(request_id);
+    req.set_method("TestMethod");
+    auto *args = req.mutable_arguments();
+
+    rpc::TestRequest test_request;
+    test_request.set_message("Hello, world!");
+    args->PackFrom(test_request);
+
+    subspace::Client client;
+    InitClient(client);
+
+    // Find the TestRequest method in the response.
+    auto *method = FindMethod(response.open(), "TestMethod");
+    ASSERT_NE(method, nullptr);
+
+    std::cerr << "creating pub " << method->request_channel().name() << std::endl;
+    auto pub = client.CreatePublisher(
+        method->request_channel().name(), method->request_channel().slot_size(),
+        method->request_channel().num_slots(),
+        {.reliable = true, .type = method->request_channel().type()});
+    ASSERT_OK(pub);
+
+    std::cerr << "publishing " << req.DebugString();
+    std::cerr << "request channel: " << method->request_channel().name()
+              << std::endl;
+    // This is a reliable publisher but we are guaranteed to be able to send.
+    auto buffer = pub->GetMessageBuffer(int32_t(req.ByteSizeLong()));
+    ASSERT_OK(buffer);
+    ASSERT_NE(nullptr, *buffer);
+    ASSERT_TRUE(req.SerializeToArray(*buffer, req.ByteSizeLong()));
+    ASSERT_OK(pub->PublishMessage(int(req.ByteSizeLong())));
+    Close(server, ctx, c);
+    server->Stop();
   });
 
-  server_thread.detach();
-
-  subspace::RpcServerResponse response;
-  Open(server, response);
-  std::cerr << "Received response: " << response.DebugString() << std::endl;
-
-  subspace::RpcRequest req;
-  req.set_session_id(response.open().session_id());
-  req.set_request_id(1234);
-  req.set_method("TestMethod");
-  auto *args = req.mutable_arguments();
-
-  rpc::TestRequest test_request;
-  test_request.set_message("Hello, world!");
-  args->PackFrom(test_request);
-
-  subspace::Client client;
-  InitClient(client);
-
-  // Find the TestRequest method in the response.
-  auto *method = FindMethod(response.open(), "TestMethod");
-  ASSERT_NE(method, nullptr);
-
-  auto pub = client.CreatePublisher(
-      method->request_channel().name(), method->request_channel().slot_size(),
-      method->request_channel().num_slots(),
-      {.reliable = true, .type = method->request_channel().type()});
-  ASSERT_OK(pub);
-
-  std::cerr << "publishing " << req.DebugString();
-  std::cerr << "request channel: " << method->request_channel().name() << std::endl;
-  // This is a reliable publisher but we are guaranteed to be able to send.
-  auto buffer = pub->GetMessageBuffer(int32_t(req.ByteSizeLong()));
-  ASSERT_OK(buffer);
-  ASSERT_TRUE(req.SerializeToArray(*buffer, req.ByteSizeLong()));
-  ASSERT_OK(pub->PublishMessage(int(req.ByteSizeLong())));
-
-  sleep(1);
-
-  std::cerr << "stopping server\n";
-  server->Stop();
+  scheduler.Run();
 }
 
 TEST_F(ServerTest, OpenAndCall) {
+  co::CoroutineScheduler scheduler;
+
   auto server = BuildServer();
-  std::thread server_thread([&]() {
-    absl::Status status = server->Run();
-    if (!status.ok()) {
-      fprintf(stderr, "Error running RPC server: %s\n",
-              status.ToString().c_str());
-      exit(1);
+  ASSERT_OK(server->Run(&scheduler));
+
+  co::Coroutine test(scheduler, [&](co::Coroutine *c) {
+    ServerContext ctx;
+    subspace::RpcServerResponse response;
+    Open(server, response, ctx, c);
+    std::cerr << "Received response: " << response.DebugString() << std::endl;
+
+    subspace::RpcRequest req;
+    req.set_client_id(ctx.client_id);
+    req.set_session_id(response.open().session_id());
+    int request_id = next_request_id++;
+    req.set_request_id(request_id);
+    req.set_method("TestMethod");
+    auto *args = req.mutable_arguments();
+
+    rpc::TestRequest test_request;
+    test_request.set_message("Hello, world!");
+    args->PackFrom(test_request);
+
+    subspace::Client client;
+    InitClient(client);
+
+    // Find the TestRequest method in the response.
+    auto *method = FindMethod(response.open(), "TestMethod");
+    ASSERT_NE(method, nullptr);
+
+    auto pub = client.CreatePublisher(
+        method->request_channel().name(), method->request_channel().slot_size(),
+        method->request_channel().num_slots(),
+        {.reliable = true, .type = method->request_channel().type()});
+    ASSERT_OK(pub);
+
+    std::cerr << "subscribing to " << method->response_channel().name() << std::endl;
+    auto sub = client.CreateSubscriber(
+        method->response_channel().name(),
+        {.reliable = true, .type = method->response_channel().type()});
+    ASSERT_OK(sub);
+
+    std::cerr << "publishing " << req.DebugString();
+    // This is a reliable publisher but we are guaranteed to be able to send.
+    auto buffer = pub->GetMessageBuffer(int32_t(req.ByteSizeLong()));
+    ASSERT_OK(buffer);
+    ASSERT_TRUE(req.SerializeToArray(*buffer, req.ByteSizeLong()));
+    ASSERT_OK(pub->PublishMessage(int(req.ByteSizeLong())));
+
+    subspace::Message msg;
+    bool done = false;
+    while (!done) {
+      ASSERT_OK(sub->Wait(c));
+      for (;;) {
+        auto m = sub->ReadMessage();
+        ASSERT_OK(m);
+        std::cerr << "message length: " << m->length << std::endl;
+        if (m->length > 0) {
+          msg = std::move(*m);
+          subspace::RpcResponse rpc_response;
+          ASSERT_TRUE(rpc_response.ParseFromArray(msg.buffer, msg.length));
+          std::cerr << "received message " << rpc_response.DebugString() << std::endl;
+          if (rpc_response.client_id() == ctx.client_id &&
+              rpc_response.request_id() == request_id) {
+            std::cerr << "Received RPC response: " << rpc_response.DebugString()
+                      << std::endl;
+
+            rpc::TestResponse response_message;
+            rpc_response.result().UnpackTo(&response_message);
+            std::cerr << "Received RPC result: "
+                      << response_message.DebugString() << std::endl;
+            done = true;
+            break;
+          }
+          continue;
+        }
+        break;
+      }
     }
+    subspace::RpcResponse rpc_response;
+    rpc_response.ParseFromArray(msg.buffer, msg.length);
+    std::cerr << "Received RPC response: " << rpc_response.DebugString()
+              << std::endl;
+
+    rpc::TestResponse response_message;
+    rpc_response.result().UnpackTo(&response_message);
+    std::cerr << "Received RPC result: " << response_message.DebugString()
+              << std::endl;
+    Close(server, ctx, c);
+
+    server->Stop();
   });
 
-  server_thread.detach();
+  scheduler.Run();
+}
 
-  subspace::RpcServerResponse response;
-  Open(server, response);
-  std::cerr << "Received response: " << response.DebugString() << std::endl;
+TEST_F(ServerTest, CallVoidMethod) {
+  co::CoroutineScheduler scheduler;
 
-  subspace::RpcRequest req;
-  req.set_session_id(response.open().session_id());
-  req.set_request_id(1234);
-  req.set_method("TestMethod");
-  auto *args = req.mutable_arguments();
+  auto server = BuildServer();
+  ASSERT_OK(server->Run(&scheduler));
 
-  rpc::TestRequest test_request;
-  test_request.set_message("Hello, world!");
-  args->PackFrom(test_request);
+  co::Coroutine test(scheduler, [&](co::Coroutine *c) {
+    ServerContext ctx;
+    subspace::RpcServerResponse response;
+    Open(server, response, ctx, c);
+    std::cerr << "Received response: " << response.DebugString() << std::endl;
 
-  subspace::Client client;
-  InitClient(client);
+    subspace::RpcRequest req;
+    req.set_client_id(ctx.client_id);
+    req.set_session_id(response.open().session_id());
+    int request_id = next_request_id++;
+    req.set_request_id(request_id);
+    req.set_method("VoidMethod");
+    auto *args = req.mutable_arguments();
 
-  // Find the TestRequest method in the response.
-  auto *method = FindMethod(response.open(), "TestMethod");
-  ASSERT_NE(method, nullptr);
+    rpc::TestRequest test_request;
+    test_request.set_message("Hello, void world!");
+    args->PackFrom(test_request);
 
-  auto pub = client.CreatePublisher(
-      method->request_channel().name(), method->request_channel().slot_size(),
-      method->request_channel().num_slots(),
-      {.reliable = true, .type = method->request_channel().type()});
-  ASSERT_OK(pub);
+    subspace::Client client;
+    InitClient(client);
 
-  auto sub = client.CreateSubscriber(
-      method->response_channel().name(),
-      {.reliable = true, .type = method->response_channel().type()});
-  ASSERT_OK(sub);
+    // Find the TestRequest method in the response.
+    auto *method = FindMethod(response.open(), "VoidMethod");
+    ASSERT_NE(method, nullptr);
 
-  std::cerr << "publishing " << req.DebugString();
-  // This is a reliable publisher but we are guaranteed to be able to send.
-  auto buffer = pub->GetMessageBuffer(int32_t(req.ByteSizeLong()));
-  ASSERT_OK(buffer);
-  ASSERT_TRUE(req.SerializeToArray(*buffer, req.ByteSizeLong()));
-  ASSERT_OK(pub->PublishMessage(int(req.ByteSizeLong())));
+    auto pub = client.CreatePublisher(
+        method->request_channel().name(), method->request_channel().slot_size(),
+        method->request_channel().num_slots(),
+        {.reliable = true, .type = method->request_channel().type()});
+    ASSERT_OK(pub);
 
-  subspace::Message msg;
-  for (;;) {
-    ASSERT_OK(sub->Wait());
-    auto m = sub->ReadMessage();
-    ASSERT_OK(m);
-    if (m->length > 0) {
-      msg = std::move(*m);
-      break;
+    auto sub = client.CreateSubscriber(
+        method->response_channel().name(),
+        {.reliable = true, .type = method->response_channel().type()});
+    ASSERT_OK(sub);
+
+    std::cerr << "publishing " << req.DebugString();
+    std::cerr << "request channel: " << method->request_channel().name()
+              << std::endl;
+    // This is a reliable publisher but we are guaranteed to be able to send.
+    auto buffer = pub->GetMessageBuffer(int32_t(req.ByteSizeLong()));
+    ASSERT_OK(buffer);
+    ASSERT_TRUE(req.SerializeToArray(*buffer, req.ByteSizeLong()));
+    ASSERT_OK(pub->PublishMessage(int(req.ByteSizeLong())));
+    bool done = false;
+    subspace::Message msg;
+
+    while (!done) {
+      ASSERT_OK(sub->Wait(c));
+      for (;;) {
+        auto m = sub->ReadMessage();
+        ASSERT_OK(m);
+        if (m->length > 0) {
+          msg = std::move(*m);
+          subspace::RpcResponse rpc_response;
+          ASSERT_TRUE(rpc_response.ParseFromArray(msg.buffer, msg.length));
+          std::cerr << "received message " << rpc_response.DebugString() << " " << rpc_response.client_id() << " " << ctx.client_id<< std::endl;
+          if (rpc_response.client_id() == ctx.client_id &&
+              rpc_response.request_id() == request_id) {
+            std::cerr << "Received RPC response: " << rpc_response.DebugString()
+                      << std::endl;
+
+            rpc::TestResponse response_message;
+            rpc_response.result().UnpackTo(&response_message);
+            std::cerr << "Received RPC result: "
+                      << response_message.DebugString() << std::endl;
+            done = true;
+            break;
+          }
+          continue;
+        }
+        break;
+      }
     }
-  }
-  subspace::RpcResponse rpc_response;
-  rpc_response.ParseFromArray(msg.buffer, msg.length);
-  std::cerr << "Received RPC response: " << rpc_response.DebugString() << std::endl;
+    Close(server, ctx, c);
+    server->Stop();
+  });
 
-  rpc::TestResponse response_message;
-  rpc_response.result().UnpackTo(&response_message);
-  std::cerr << "Received RPC result: " << response_message.DebugString() << std::endl;
+  scheduler.Run();
+}
 
-  std::cerr << "stopping server\n";
-  server->Stop();
+TEST_F(ServerTest, CallError) {
+  co::CoroutineScheduler scheduler;
+
+  auto server = BuildServer();
+  ASSERT_OK(server->Run(&scheduler));
+
+  co::Coroutine test(scheduler, [&](co::Coroutine *c) {
+    ServerContext ctx;
+    subspace::RpcServerResponse response;
+    Open(server, response, ctx, c);
+    std::cerr << "Received response: " << response.DebugString() << std::endl;
+
+    subspace::RpcRequest req;
+    req.set_client_id(ctx.client_id);
+    req.set_session_id(response.open().session_id());
+    int request_id = next_request_id++;
+    req.set_request_id(request_id);
+    req.set_method("ErrorMethod");
+    auto *args = req.mutable_arguments();
+
+    rpc::TestRequest test_request;
+    test_request.set_message("Hello, error world!");
+    args->PackFrom(test_request);
+
+    subspace::Client client;
+    InitClient(client);
+
+    // Find the TestRequest method in the response.
+    auto *method = FindMethod(response.open(), "ErrorMethod");
+    ASSERT_NE(method, nullptr);
+
+    auto pub = client.CreatePublisher(
+        method->request_channel().name(), method->request_channel().slot_size(),
+        method->request_channel().num_slots(),
+        {.reliable = true, .type = method->request_channel().type()});
+    ASSERT_OK(pub);
+
+    auto sub = client.CreateSubscriber(
+        method->response_channel().name(),
+        {.reliable = true, .type = method->response_channel().type()});
+    ASSERT_OK(sub);
+
+    std::cerr << "publishing " << req.DebugString();
+    std::cerr << "request channel: " << method->request_channel().name()
+              << std::endl;
+    // This is a reliable publisher but we are guaranteed to be able to send.
+    auto buffer = pub->GetMessageBuffer(int32_t(req.ByteSizeLong()));
+    ASSERT_OK(buffer);
+    ASSERT_TRUE(req.SerializeToArray(*buffer, req.ByteSizeLong()));
+    ASSERT_OK(pub->PublishMessage(int(req.ByteSizeLong())));
+
+    subspace::Message msg;
+
+    bool done = false;
+    while (!done) {
+      ASSERT_OK(sub->Wait(c));
+      for (;;) {
+        auto m = sub->ReadMessage();
+        ASSERT_OK(m);
+        if (m->length > 0) {
+          msg = std::move(*m);
+          subspace::RpcResponse rpc_response;
+          ASSERT_TRUE(rpc_response.ParseFromArray(msg.buffer, msg.length));
+          if (rpc_response.client_id() == ctx.client_id &&
+              rpc_response.request_id() == request_id) {
+            std::cerr << "Received RPC response: " << rpc_response.DebugString()
+                      << std::endl;
+
+            rpc::TestResponse response_message;
+            rpc_response.result().UnpackTo(&response_message);
+            std::cerr << "Received RPC result: "
+                      << response_message.DebugString() << std::endl;
+            EXPECT_EQ("Error executing method ErrorMethod: INTERNAL: Error occurred",
+                      rpc_response.error());
+            done = true;
+            break;
+          }
+          continue;
+        }
+        break;
+      }
+    }
+    Close(server, ctx, c);
+    server->Stop();
+  });
+
+  scheduler.Run();
 }
 
 int main(int argc, char **argv) {
