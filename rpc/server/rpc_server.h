@@ -8,17 +8,20 @@
 
 namespace subspace {
 
-constexpr int32_t kRpcRequestSlotSize = 16 * 1024;
-constexpr int32_t kRpcResponseSlotSize = 16 * 1024;
-constexpr int32_t kRpcRequestNumSlots = 16;
-constexpr int32_t kRpcResponseNumSlots = 16;
+// Slot parameters for requests and responses for the open/close requests.
+constexpr int32_t kRpcRequestSlotSize = 128;
+constexpr int32_t kRpcResponseSlotSize = 128;
+constexpr int32_t kRpcRequestNumSlots = 100;
+constexpr int32_t kRpcResponseNumSlots = 100;
 
-constexpr int32_t kDefaultMethodSlotSize = 16 * 1024;
-constexpr int32_t kDefaultMethodNumSlots = 64;
+// Default slot parameters for method invocation requests.  The slot size
+// can be expanded if the request is bigger.
+constexpr int32_t kDefaultMethodSlotSize = 256;
+constexpr int32_t kDefaultMethodNumSlots = 100;
 
 class RpcServer : public std::enable_shared_from_this<RpcServer> {
 public:
-  RpcServer(std::string name,
+  RpcServer(std::string service_name,
             std::string subspace_server_socket = "/tmp/subspace");
 
   ~RpcServer() = default;
@@ -29,8 +32,18 @@ public:
     session_id_ = session_id;
   }
 
+  // Run the server.  If you pass a coroutine scheduler this will use it
+  // and the function will not block.  If you don't pass a scheduler
+  // the server will use its own internal scheduler and this function will
+  // block until the server is stopped (the Stop call).
+  //
+  // If you are using this in threaded application (most common probably),
+  // just omit the scheduler argument and the thread will run the server.
+  //
+  // There is no use of threads inside the server itself.
   absl::Status Run(co::CoroutineScheduler *scheduler = nullptr);
 
+  // Stop the server running.  This will signal a stop and will return immediately.
   void Stop();
 
   // Method with a request and response.
