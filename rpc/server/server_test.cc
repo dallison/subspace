@@ -130,8 +130,8 @@ static std::shared_ptr<subspace::RpcServer> BuildServer() {
 
   auto s = server->RegisterMethod(
       "TestMethod", "subspace.TestRequest", "subspace.TestResponse", 256, 10,
-      [](const google::protobuf::Any &req,
-         google::protobuf::Any *res) -> absl::Status {
+      [](const google::protobuf::Any &req, google::protobuf::Any *res,
+         co::Coroutine *) -> absl::Status {
         std::cerr << "TestMethod called with request: " << req.DebugString()
                   << std::endl;
         rpc::TestResponse r;
@@ -144,27 +144,27 @@ static std::shared_ptr<subspace::RpcServer> BuildServer() {
   // Void method.
   s = server->RegisterMethod(
       "VoidMethod", "subspace.TestRequest",
-      [](const google::protobuf::Any &req) -> absl::Status {
+      [](const google::protobuf::Any &req, co::Coroutine *) -> absl::Status {
         std::cerr << "VoidMethod called with request: " << req.DebugString()
                   << std::endl;
         return absl::OkStatus();
       });
 
   // Error method.
-  s = server->RegisterMethod("ErrorMethod", "subspace.TestRequest",
-                             "subspace.TestResponse",
-                             [](const google::protobuf::Any &req,
-                                google::protobuf::Any *res) -> absl::Status {
-                               std::cerr << "ErrorMethod called with request: "
-                                         << req.DebugString() << std::endl;
-                               return absl::InternalError("Error occurred");
-                             });
+  s = server->RegisterMethod(
+      "ErrorMethod", "subspace.TestRequest", "subspace.TestResponse",
+      [](const google::protobuf::Any &req, google::protobuf::Any *res,
+         co::Coroutine *) -> absl::Status {
+        std::cerr << "ErrorMethod called with request: " << req.DebugString()
+                  << std::endl;
+        return absl::InternalError("Error occurred");
+      });
   EXPECT_TRUE(s.ok());
 
   // void error method.
   s = server->RegisterMethod(
       "VoidErrorMethod", "subspace.TestRequest",
-      [](const google::protobuf::Any &req) -> absl::Status {
+      [](const google::protobuf::Any &req, co::Coroutine *) -> absl::Status {
         std::cerr << "VoidErrorMethod called with request: "
                   << req.DebugString() << std::endl;
         return absl::InternalError("Error occurred");
@@ -336,7 +336,8 @@ TEST_F(ServerTest, OpenAndCallNoResponseRead) {
     auto *method = FindMethod(response.open(), "TestMethod");
     ASSERT_NE(method, nullptr);
 
-    std::cerr << "creating pub " << method->request_channel().name() << std::endl;
+    std::cerr << "creating pub " << method->request_channel().name()
+              << std::endl;
     auto pub = client.CreatePublisher(
         method->request_channel().name(), method->request_channel().slot_size(),
         method->request_channel().num_slots(),
@@ -396,7 +397,8 @@ TEST_F(ServerTest, OpenAndCall) {
         {.reliable = true, .type = method->request_channel().type()});
     ASSERT_OK(pub);
 
-    std::cerr << "subscribing to " << method->response_channel().name() << std::endl;
+    std::cerr << "subscribing to " << method->response_channel().name()
+              << std::endl;
     auto sub = client.CreateSubscriber(
         method->response_channel().name(),
         {.reliable = true, .type = method->response_channel().type()});
@@ -421,7 +423,8 @@ TEST_F(ServerTest, OpenAndCall) {
           msg = std::move(*m);
           subspace::RpcResponse rpc_response;
           ASSERT_TRUE(rpc_response.ParseFromArray(msg.buffer, msg.length));
-          std::cerr << "received message " << rpc_response.DebugString() << std::endl;
+          std::cerr << "received message " << rpc_response.DebugString()
+                    << std::endl;
           if (rpc_response.client_id() == ctx.client_id &&
               rpc_response.request_id() == request_id) {
             std::cerr << "Received RPC response: " << rpc_response.DebugString()
@@ -518,7 +521,9 @@ TEST_F(ServerTest, CallVoidMethod) {
           msg = std::move(*m);
           subspace::RpcResponse rpc_response;
           ASSERT_TRUE(rpc_response.ParseFromArray(msg.buffer, msg.length));
-          std::cerr << "received message " << rpc_response.DebugString() << " " << rpc_response.client_id() << " " << ctx.client_id<< std::endl;
+          std::cerr << "received message " << rpc_response.DebugString() << " "
+                    << rpc_response.client_id() << " " << ctx.client_id
+                    << std::endl;
           if (rpc_response.client_id() == ctx.client_id &&
               rpc_response.request_id() == request_id) {
             std::cerr << "Received RPC response: " << rpc_response.DebugString()
@@ -615,8 +620,9 @@ TEST_F(ServerTest, CallError) {
             rpc_response.result().UnpackTo(&response_message);
             std::cerr << "Received RPC result: "
                       << response_message.DebugString() << std::endl;
-            EXPECT_EQ("Error executing method ErrorMethod: INTERNAL: Error occurred",
-                      rpc_response.error());
+            EXPECT_EQ(
+                "Error executing method ErrorMethod: INTERNAL: Error occurred",
+                rpc_response.error());
             done = true;
             break;
           }

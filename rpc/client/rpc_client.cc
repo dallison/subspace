@@ -42,7 +42,7 @@ absl::Status RpcClient::Close(std::chrono::nanoseconds timeout,
   if (session_id_ == 0) {
     return absl::FailedPreconditionError("Session not initialized");
   }
-  auto status = CloseService(std::chrono::nanoseconds(0), coroutine_);
+  auto status = CloseService(timeout, coroutine_);
   if (!status.ok()) {
     return absl::InternalError(
         absl::StrFormat("Failed to close service: %s", status.ToString()));

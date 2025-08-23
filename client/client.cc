@@ -509,22 +509,28 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
     return status;
   }
   uint64_t timeout_ns = timeout.count();
+  int result = -1;
   if (c != nullptr) {
-    c->Wait(publisher->GetPollFd().Fd(), POLLIN, timeout_ns);
+    result = c->Wait(publisher->GetPollFd().Fd(), POLLIN, timeout_ns);
   } else if (co_ != nullptr) {
     // Coroutine aware.  Yield control back until the poll fd is triggered.
-    co_->Wait(publisher->GetPollFd().Fd(), POLLIN, timeout_ns);
+    result = co_->Wait(publisher->GetPollFd().Fd(), POLLIN, timeout_ns);
   } else {
     struct pollfd fd = {.fd = publisher->GetPollFd().Fd(), .events = POLLIN};
     int e = ::poll(&fd, 1, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
     // Since we are waiting forever will can only get the value 1 from the poll.
     // We will never get 0 since there is no timeout.  Anything else (can only
     // be -1) will be an error.
-    if (e != 1) {
+    if (timeout_ns != 0 && e == 0) {
+      result = -1;
+    } else if (e != 1) {
       return absl::InternalError(
           absl::StrFormat("Error from poll waiting for reliable publisher: %s",
                           strerror(errno)));
     }
+  }
+  if (result == -1) {
+    return absl::InternalError("Timeout waiting for reliable publisher");
   }
   return absl::OkStatus();
 }
@@ -553,7 +559,7 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
         c->Wait({publisher->GetPollFd().Fd(), fd.Fd()}, POLLIN, timeout_ns);
   } else if (co_ != nullptr) {
     // Coroutine aware.  Yield control back until the poll fd is triggered.
-    co_->Wait({publisher->GetPollFd().Fd(), fd.Fd()}, POLLIN, timeout_ns);
+    result = co_->Wait({publisher->GetPollFd().Fd(), fd.Fd()}, POLLIN, timeout_ns);
   } else {
     struct pollfd fds[2] = {
         {.fd = publisher->GetPollFd().Fd(), .events = POLLIN},
@@ -588,22 +594,28 @@ absl::Status ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
   }
 
   uint64_t timeout_ns = timeout.count();
+  int result = -1;
   if (c != nullptr) {
     // Coroutine aware.  Yield control back until the poll fd is triggered.
-    c->Wait(subscriber->GetPollFd().Fd(), POLLIN, timeout_ns);
+    result = c->Wait(subscriber->GetPollFd().Fd(), POLLIN, timeout_ns);
   } else if (co_ != nullptr) {
     // Coroutine aware.  Yield control back until the poll fd is triggered.
-    co_->Wait(subscriber->GetPollFd().Fd(), POLLIN, timeout_ns);
+    result = co_->Wait(subscriber->GetPollFd().Fd(), POLLIN, timeout_ns);
   } else {
     struct pollfd fd = {.fd = subscriber->GetPollFd().Fd(), .events = POLLIN};
     int e = ::poll(&fd, 1, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
     // Since we are waiting forever will can only get the value 1 from the poll.
     // We will never get 0 since there is no timeout.  Anything else (can only
     // be -1) will be an error.
-    if (e != 1) {
+    if (timeout_ns != 0 && e == 0) {
+      result = -1;
+    } else if (e != 1) {
       return absl::InternalError(absl::StrFormat(
           "Error from poll waiting for subscriber: %s", strerror(errno)));
     }
+  }
+  if (result == -1) {
+    return absl::InternalError("Timeout waiting for subscriber");
   }
   return absl::OkStatus();
 }
@@ -618,10 +630,12 @@ absl::StatusOr<int> ClientImpl::WaitForSubscriber(
   uint64_t timeout_ns = timeout.count();
   if (c != nullptr) {
     // Coroutine aware.  Yield control back until the poll fd is triggered.
-    c->Wait({subscriber->GetPollFd().Fd(), fd.Fd()}, POLLIN, timeout_ns);
+    result =
+        c->Wait({subscriber->GetPollFd().Fd(), fd.Fd()}, POLLIN, timeout_ns);
   } else if (co_ != nullptr) {
     // Coroutine aware.  Yield control back until the poll fd is triggered.
-    co_->Wait({subscriber->GetPollFd().Fd(), fd.Fd()}, POLLIN, timeout_ns);
+    result =
+        co_->Wait({subscriber->GetPollFd().Fd(), fd.Fd()}, POLLIN, timeout_ns);
   } else {
     struct pollfd fds[2] = {
         {.fd = subscriber->GetPollFd().Fd(), .events = POLLIN},
