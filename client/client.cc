@@ -527,6 +527,8 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
       return absl::InternalError(
           absl::StrFormat("Error from poll waiting for reliable publisher: %s",
                           strerror(errno)));
+    } else {
+      result = fd.fd;
     }
   }
   if (result == -1) {
@@ -612,6 +614,8 @@ absl::Status ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
     } else if (e != 1) {
       return absl::InternalError(absl::StrFormat(
           "Error from poll waiting for subscriber: %s", strerror(errno)));
+    } else {
+      result = fd.fd;
     }
   }
   if (result == -1) {
