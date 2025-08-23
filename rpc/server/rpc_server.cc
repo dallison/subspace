@@ -4,8 +4,8 @@
 #include <stdio.h>
 
 namespace subspace {
-RpcServer::RpcServer(std::string name, std::string subspace_server_socket)
-    : name_(std::move(name)),
+RpcServer::RpcServer(std::string service_name, std::string subspace_server_socket)
+    : name_(std::move(service_name)),
       subspace_server_socket_(std::move(subspace_server_socket)),
       logger_("rpcserver") {
   logger_.Log(toolbelt::LogLevel::kInfo, "RpcServer created for service: %s",
@@ -21,7 +21,6 @@ RpcServer::RpcServer(std::string name, std::string subspace_server_socket)
 void RpcServer::Stop() {
   running_ = false;
   interrupt_pipe_.Close();
-  std::cerr << "RpcServer stopped" << std::endl;
 }
 
 absl::Status RpcServer::RegisterMethod(
