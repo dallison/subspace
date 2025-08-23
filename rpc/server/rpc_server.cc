@@ -72,8 +72,8 @@ absl::Status RpcServer::CreateChannels() {
               request_name.c_str());
   auto receiver = client_->CreateSubscriber(
       request_name, {.reliable = true,
-                     .max_active_messages = 1,
-                     .type = "subspace.RpcServerRequest"});
+                     .type = "subspace.RpcServerRequest",
+                     .max_active_messages = 1});
   if (!receiver.ok()) {
     return receiver.status();
   }
