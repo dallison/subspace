@@ -126,11 +126,11 @@ std::thread ClientTest::server_thread_;
 static std::shared_ptr<subspace::RpcServer> BuildServer() {
   auto server =
       std::make_shared<subspace::RpcServer>("test", ClientTest::Socket());
-
+  server->SetLogLevel("debug");
   auto s = server->RegisterMethod(
       "TestMethod", "subspace.TestRequest", "subspace.TestResponse", 256, 10,
-      [](const google::protobuf::Any &req,
-         google::protobuf::Any *res) -> absl::Status {
+      [](const google::protobuf::Any &req, google::protobuf::Any *res,
+         co::Coroutine *) -> absl::Status {
         std::cerr << "TestMethod called with request: " << req.DebugString()
                   << std::endl;
         rpc::TestResponse r;
@@ -143,94 +143,48 @@ static std::shared_ptr<subspace::RpcServer> BuildServer() {
   // Void method.
   s = server->RegisterMethod(
       "VoidMethod", "subspace.TestRequest",
-      [](const google::protobuf::Any &req) -> absl::Status {
+      [](const google::protobuf::Any &req, co::Coroutine *) -> absl::Status {
         std::cerr << "VoidMethod called with request: " << req.DebugString()
                   << std::endl;
         return absl::OkStatus();
       });
 
   // Error method.
-  s = server->RegisterMethod("ErrorMethod", "subspace.TestRequest",
-                             "subspace.TestResponse",
-                             [](const google::protobuf::Any &req,
-                                google::protobuf::Any *res) -> absl::Status {
-                               std::cerr << "ErrorMethod called with request: "
-                                         << req.DebugString() << std::endl;
-                               return absl::InternalError("Error occurred");
-                             });
+  s = server->RegisterMethod(
+      "ErrorMethod", "subspace.TestRequest", "subspace.TestResponse",
+      [](const google::protobuf::Any &req, google::protobuf::Any *res,
+         co::Coroutine *) -> absl::Status {
+        std::cerr << "ErrorMethod called with request: " << req.DebugString()
+                  << std::endl;
+        return absl::InternalError("Error occurred");
+      });
   EXPECT_TRUE(s.ok());
 
   // void error method.
   s = server->RegisterMethod(
       "VoidErrorMethod", "subspace.TestRequest",
-      [](const google::protobuf::Any &req) -> absl::Status {
+      [](const google::protobuf::Any &req, co::Coroutine *) -> absl::Status {
         std::cerr << "VoidErrorMethod called with request: "
                   << req.DebugString() << std::endl;
         return absl::InternalError("Error occurred");
       });
   EXPECT_TRUE(s.ok());
+
+  s = server->RegisterMethod(
+      "TimeoutMethod", "subspace.TestRequest", "subspace.TestResponse",
+      [](const google::protobuf::Any &req, google::protobuf::Any *res,
+         co::Coroutine *c) -> absl::Status {
+        std::cerr << "TimeoutMethod called with request: " << req.DebugString()
+                  << std::endl;
+        c->Sleep(2);
+        rpc::TestResponse r;
+        r.set_message("Hello from TimeoutMethod");
+        res->PackFrom(r);
+        std::cerr << "TimeoutMethod completed" << std::endl;
+        return absl::OkStatus();
+      });
+  EXPECT_TRUE(s.ok());
   return server;
-}
-
-TEST_F(ClientTest, Basic) {
-  co::CoroutineScheduler scheduler;
-
-  auto server = BuildServer();
-  ASSERT_OK(server->Run(&scheduler));
-
-  co::Coroutine test(scheduler, [&](co::Coroutine *c) {
-    subspace::RpcClient client("test", 1, ClientTest::Socket());
-    ASSERT_OK(client.Open(c));
-
-    rpc::TestRequest test_request;
-    test_request.set_message("Hello, world!");
-
-    google::protobuf::Any any;
-    any.PackFrom(test_request);
-
-    absl::StatusOr<google::protobuf::Any> resp =
-        client.InvokeMethod("TestMethod", any, c);
-    ASSERT_OK(resp);
-
-    rpc::TestResponse response;
-    (*resp).UnpackTo(&response);
-    EXPECT_EQ(response.message(), "Hello from TestMethod");
-    ASSERT_OK(client.Close(c));
-    server->Stop();
-  });
-
-  scheduler.Run();
-}
-
-TEST_F(ClientTest, BasicTimeout) {
-  co::CoroutineScheduler scheduler;
-
-  auto server = BuildServer();
-  ASSERT_OK(server->Run(&scheduler));
-
-  co::Coroutine test(scheduler, [&](co::Coroutine *c) {
-    subspace::RpcClient client("test", 2, ClientTest::Socket());
-    client.SetLogLevel("debug");
-    ASSERT_OK(client.Open(10s, c));
-
-    rpc::TestRequest test_request;
-    test_request.set_message("Hello, world!");
-
-    google::protobuf::Any any;
-    any.PackFrom(test_request);
-
-    absl::StatusOr<google::protobuf::Any> resp =
-        client.InvokeMethod("TestMethod", any, c);
-    ASSERT_OK(resp);
-
-    rpc::TestResponse response;
-    (*resp).UnpackTo(&response);
-    EXPECT_EQ(response.message(), "Hello from TestMethod");
-    ASSERT_OK(client.Close(c));
-    server->Stop();
-  });
-
-  scheduler.Run();
 }
 
 TEST_F(ClientTest, Typed) {
@@ -306,6 +260,35 @@ TEST_F(ClientTest, TypedError) {
               "method ErrorMethod: INTERNAL: Error occurred",
               resp.status().ToString());
 
+    ASSERT_OK(client.Close(c));
+    server->Stop();
+  });
+
+  scheduler.Run();
+}
+
+TEST_F(ClientTest, TypedTimeout) {
+  co::CoroutineScheduler scheduler;
+
+  auto server = BuildServer();
+  ASSERT_OK(server->Run(&scheduler));
+
+  co::Coroutine test(scheduler, [&](co::Coroutine *c) {
+    subspace::RpcClient client("test", 3, ClientTest::Socket());
+    ASSERT_OK(client.Open(c));
+
+    rpc::TestRequest test_request;
+    test_request.set_message("Hello, world!");
+
+    // Invoke with 1 second timeout.  The method will take 2 seconds to respond.
+    absl::StatusOr<rpc::TestResponse> resp =
+        client.Call<rpc::TestRequest, rpc::TestResponse>("TimeoutMethod",
+                                                         test_request, 1s, c);
+    ASSERT_FALSE(resp.ok());
+    std::cerr << "Received error: " << resp.status().ToString() << std::endl;
+    ASSERT_EQ("INTERNAL: Failed to invoke method: INTERNAL: Error waiting for "
+              "response: INTERNAL: Timeout waiting for subscriber",
+              resp.status().ToString());
     ASSERT_OK(client.Close(c));
     server->Stop();
   });

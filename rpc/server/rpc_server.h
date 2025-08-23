@@ -38,7 +38,7 @@ public:
   RegisterMethod(const std::string &method, const std::string &request_type,
                  const std::string &response_type,
                  std::function<absl::Status(const google::protobuf::Any &,
-                                            google::protobuf::Any *)>
+                                            google::protobuf::Any *, co::Coroutine*)>
                      callback) {
     return RegisterMethod(method, request_type, response_type,
                           kDefaultMethodSlotSize, kDefaultMethodNumSlots,
@@ -50,12 +50,12 @@ public:
                  const std::string &response_type, int32_t slot_size,
                  int32_t num_slots,
                  std::function<absl::Status(const google::protobuf::Any &,
-                                            google::protobuf::Any *)>
+                                            google::protobuf::Any *, co::Coroutine*)>
                      callback);
 
                        absl::Status
   RegisterMethod(const std::string &method, const std::string &request_type,
-                 absl::Status (*callback)(const google::protobuf::Any &)) {
+                 absl::Status (*callback)(const google::protobuf::Any &, co::Coroutine*)) {
     return RegisterMethod(method, request_type, kDefaultMethodSlotSize,
                           kDefaultMethodNumSlots, callback);
   }
@@ -63,7 +63,7 @@ public:
   absl::Status
   RegisterMethod(const std::string &method, const std::string &request_type,
                  int32_t slot_size, int32_t num_slots,
-                 absl::Status (*callback)(const google::protobuf::Any &));
+                 absl::Status (*callback)(const google::protobuf::Any &, co::Coroutine*));
 
 
   template <typename Request, typename Response>
@@ -74,11 +74,11 @@ public:
     return RegisterMethod(method, request_descriptor->full_name(), response_descriptor->full_name(),
                           kDefaultMethodSlotSize, kDefaultMethodNumSlots,
                           [request, response](const google::protobuf::Any &req,
-                                              google::protobuf::Any *res) {
+                                              google::protobuf::Any *res, co::Coroutine* c) -> absl::Status {
                             if (!req.UnpackTo(&request)) {
                               return absl::InvalidArgumentError("Failed to unpack request");
                             }
-                            auto status = callback(request, response);
+                            auto status = callback(request, response, c);
                             if (!status.ok()) {
                               return status;
                             }
@@ -103,7 +103,7 @@ private:
     Method(RpcServer *server, std::string name, std::string request_type,
            std::string response_type, int32_t slot_size, int32_t num_slots,
            std::function<absl::Status(const google::protobuf::Any &,
-                                      google::protobuf::Any *)>
+                                      google::protobuf::Any *, co::Coroutine*)>
                callback)
         : name(std::move(name)), request_type(std::move(request_type)),
           response_type(std::move(response_type)), slot_size(slot_size),
@@ -119,7 +119,7 @@ private:
     int32_t slot_size;
     int32_t num_slots;
     std::function<absl::Status(const google::protobuf::Any &,
-                               google::protobuf::Any *)>
+                               google::protobuf::Any *, co::Coroutine*)>
         callback;
     std::string request_channel;
     std::string response_channel;

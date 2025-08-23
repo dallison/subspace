@@ -21,13 +21,14 @@ RpcServer::RpcServer(std::string name, std::string subspace_server_socket)
 void RpcServer::Stop() {
   running_ = false;
   interrupt_pipe_.Close();
+  std::cerr << "RpcServer stopped" << std::endl;
 }
 
 absl::Status RpcServer::RegisterMethod(
     const std::string &method, const std::string &request_type,
     const std::string &response_type, int32_t slot_size, int32_t num_slots,
     std::function<absl::Status(const google::protobuf::Any &,
-                               google::protobuf::Any *)>
+                               google::protobuf::Any *, co::Coroutine*)>
         callback) {
   if (methods_.find(method) != methods_.end()) {
     return absl::AlreadyExistsError("Method already registered: " + method);
@@ -42,14 +43,14 @@ absl::Status RpcServer::RegisterMethod(
 absl::Status RpcServer::RegisterMethod(
     const std::string &method, const std::string &request_type,
     int32_t slot_size, int32_t num_slots,
-    absl::Status (*callback)(const google::protobuf::Any &)) {
+    absl::Status (*callback)(const google::protobuf::Any &, co::Coroutine*)) {
   if (methods_.find(method) != methods_.end()) {
     return absl::AlreadyExistsError("Method already registered: " + method);
   }
   methods_[method] = std::make_shared<Method>(
       this, method, request_type, "subspace.VoidMessage", slot_size, num_slots,
-      [callback](const google::protobuf::Any &req, google::protobuf::Any *res) {
-        auto status = callback(req);
+      [callback](const google::protobuf::Any &req, google::protobuf::Any *res, co::Coroutine *c) {
+        auto status = callback(req, c);
         if (!status.ok()) {
           return status;
         }
@@ -419,8 +420,12 @@ void RpcServer::SessionMethodCoroutine(std::shared_ptr<RpcServer> server,
                         "Calling method %s",
                         method_instance->method->name.c_str());
     absl::Status method_status =
-        method_instance->method->callback(request.arguments(), result);
+        method_instance->method->callback(request.arguments(), result, c);
     if (!method_status.ok()) {
+        server->logger_.Log(toolbelt::LogLevel::kError,
+                            "Error executing method %s: %s",
+                            method_instance->method->name.c_str(),
+                            method_status.ToString().c_str());
       response.set_error(absl::StrFormat("Error executing method %s: %s",
                                          method_instance->method->name,
                                          method_status.ToString()));
@@ -432,6 +437,10 @@ void RpcServer::SessionMethodCoroutine(std::shared_ptr<RpcServer> server,
       buffer = method_instance->response_publisher->GetMessageBuffer(
           int32_t(length));
       if (!buffer.ok()) {
+        server->logger_.Log(toolbelt::LogLevel::kError,
+                            "Error getting buffer for method %s: %s",
+                            method_instance->method->name.c_str(),
+                            buffer.status().ToString().c_str());
         response.set_error(absl::StrFormat(
             "Error getting buffer for method %s: %s",
             method_instance->method->name, buffer.status().ToString()));
@@ -439,6 +448,9 @@ void RpcServer::SessionMethodCoroutine(std::shared_ptr<RpcServer> server,
       }
       if (*buffer != nullptr) {
         break;
+      }
+      if (!server->interrupt_pipe_.ReadFd().Valid()) {
+        return;
       }
       // Buffer is not ready, wait and try again.
       auto status = method_instance->response_publisher->Wait(
@@ -472,6 +484,9 @@ void RpcServer::SessionMethodCoroutine(std::shared_ptr<RpcServer> server,
                           method_instance->method->name.c_str(),
                           pub_result.status().ToString().c_str());
     }
+    server->logger_.Log(toolbelt::LogLevel::kDebug,
+                        "Published response for method %s",
+                        method_instance->method->name.c_str());
   }
 }
 
