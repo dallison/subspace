@@ -261,8 +261,7 @@ RpcClient::InvokeMethod(const std::string &name,
   req.set_session_id(session_id_);
   req.set_request_id(request_id);
   req.set_method(name);
-  auto *args = req.mutable_arguments();
-  args->PackFrom(request);
+  *req.mutable_argument() = request;
 
   absl::StatusOr<void *> buffer;
   for (;;) {

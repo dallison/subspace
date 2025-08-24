@@ -150,7 +150,6 @@ RpcClient::Call(const std::string &method, const Request &request,
         absl::StrFormat("Failed to invoke method: %s", r.status().ToString()));
   }
   Response resp;
-  std::cerr << "Received response: " << r->DebugString() << std::endl;
   if (!r->UnpackTo(&resp)) {
     return absl::InternalError("3 Failed to unpack response");
   }

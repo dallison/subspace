@@ -42,7 +42,7 @@ absl::Status RpcServer::RegisterMethod(
 absl::Status RpcServer::RegisterMethod(
     const std::string &method, const std::string &request_type,
     int32_t slot_size, int32_t num_slots,
-    absl::Status (*callback)(const google::protobuf::Any &, co::Coroutine*)) {
+    std::function<absl::Status(const google::protobuf::Any &, co::Coroutine*)> callback) {
   if (methods_.find(method) != methods_.end()) {
     return absl::AlreadyExistsError("Method already registered: " + method);
   }
@@ -382,9 +382,6 @@ void RpcServer::SessionMethodCoroutine(std::shared_ptr<RpcServer> server,
       }
       if (m->length == 0) {
         // No message, continue waiting.
-        server->logger_.Log(toolbelt::LogLevel::kDebug,
-                            "No message received for method %s",
-                            method->method->name.c_str());
         break;
       }
       if (!request.ParseFromArray(m->buffer, m->length)) {
@@ -419,7 +416,7 @@ void RpcServer::SessionMethodCoroutine(std::shared_ptr<RpcServer> server,
                         "Calling method %s",
                         method_instance->method->name.c_str());
     absl::Status method_status =
-        method_instance->method->callback(request.arguments(), result, c);
+        method_instance->method->callback(request.argument(), result, c);
     if (!method_status.ok()) {
         server->logger_.Log(toolbelt::LogLevel::kError,
                             "Error executing method %s: %s",
