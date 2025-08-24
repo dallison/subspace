@@ -126,33 +126,41 @@ std::thread ClientTest::server_thread_;
 static std::shared_ptr<subspace::RpcServer> BuildServer() {
   auto server =
       std::make_shared<subspace::RpcServer>("test", ClientTest::Socket());
-  server->SetLogLevel("debug");
-  auto s = server->RegisterMethod(
-      "TestMethod", "subspace.TestRequest", "subspace.TestResponse", 256, 10,
-      [](const google::protobuf::Any &req, google::protobuf::Any *res,
-         co::Coroutine *) -> absl::Status {
+
+  auto s = server->RegisterMethod<rpc::TestRequest, rpc::TestResponse>(
+      "TestMethod",
+      [](const auto &req, auto *res, co::Coroutine *) -> absl::Status {
         std::cerr << "TestMethod called with request: " << req.DebugString()
                   << std::endl;
-        rpc::TestResponse r;
-        r.set_message("Hello from TestMethod");
-        res->PackFrom(r);
+        res->set_message("Hello from TestMethod");
+        return absl::OkStatus();
+      });
+  EXPECT_TRUE(s.ok());
+
+  // Performance
+  s = server->RegisterMethod<rpc::PerfRequest, rpc::PerfResponse>(
+      "PerfMethod",
+      [](const auto&req, auto *res,
+         co::Coroutine *) -> absl::Status {
+        res->set_client_send_time(req.send_time());
+        res->set_server_send_time(toolbelt::Now());
         return absl::OkStatus();
       });
   EXPECT_TRUE(s.ok());
 
   // Void method.
-  s = server->RegisterMethod(
-      "VoidMethod", "subspace.TestRequest",
-      [](const google::protobuf::Any &req, co::Coroutine *) -> absl::Status {
+  s = server->RegisterMethod<rpc::TestRequest>(
+      "VoidMethod",
+      [](const auto &req, auto *) -> absl::Status {
         std::cerr << "VoidMethod called with request: " << req.DebugString()
                   << std::endl;
         return absl::OkStatus();
       });
 
   // Error method.
-  s = server->RegisterMethod(
-      "ErrorMethod", "subspace.TestRequest", "subspace.TestResponse",
-      [](const google::protobuf::Any &req, google::protobuf::Any *res,
+  s = server->RegisterMethod<rpc::TestRequest, rpc::TestResponse>(
+      "ErrorMethod", 
+      [](const auto &req, auto *res,
          co::Coroutine *) -> absl::Status {
         std::cerr << "ErrorMethod called with request: " << req.DebugString()
                   << std::endl;
@@ -161,25 +169,23 @@ static std::shared_ptr<subspace::RpcServer> BuildServer() {
   EXPECT_TRUE(s.ok());
 
   // void error method.
-  s = server->RegisterMethod(
-      "VoidErrorMethod", "subspace.TestRequest",
-      [](const google::protobuf::Any &req, co::Coroutine *) -> absl::Status {
+  s = server->RegisterMethod<rpc::TestRequest>(
+      "VoidErrorMethod",
+      [](const auto &req, co::Coroutine *) -> absl::Status {
         std::cerr << "VoidErrorMethod called with request: "
                   << req.DebugString() << std::endl;
         return absl::InternalError("Error occurred");
       });
   EXPECT_TRUE(s.ok());
 
-  s = server->RegisterMethod(
-      "TimeoutMethod", "subspace.TestRequest", "subspace.TestResponse",
-      [](const google::protobuf::Any &req, google::protobuf::Any *res,
+  s = server->RegisterMethod<rpc::TestRequest, rpc::TestResponse>(
+      "TimeoutMethod", 
+      [](const auto &req, auto *res,
          co::Coroutine *c) -> absl::Status {
         std::cerr << "TimeoutMethod called with request: " << req.DebugString()
                   << std::endl;
         c->Sleep(2);
-        rpc::TestResponse r;
-        r.set_message("Hello from TimeoutMethod");
-        res->PackFrom(r);
+        res->set_message("Hello from TimeoutMethod");
         std::cerr << "TimeoutMethod completed" << std::endl;
         return absl::OkStatus();
       });
@@ -296,6 +302,43 @@ TEST_F(ClientTest, TypedTimeout) {
   scheduler.Run();
 }
 
+TEST_F(ClientTest, Performance) {
+  co::CoroutineScheduler scheduler;
+
+  auto server = BuildServer();
+  ASSERT_OK(server->Run(&scheduler));
+
+  co::Coroutine test(scheduler, [&](co::Coroutine *c) {
+    subspace::RpcClient client("test", 3, ClientTest::Socket());
+    ASSERT_OK(client.Open(c));
+
+    uint64_t total_rtt = 0;
+    uint64_t total_server_time = 0;
+
+    int num_iterations = 1000;
+    for (int i = 0; i < 10; i++) {
+      rpc::PerfRequest request;
+      request.set_send_time(toolbelt::Now());
+
+      absl::StatusOr<rpc::PerfResponse> resp =
+          client.Call<rpc::PerfRequest, rpc::PerfResponse>("PerfMethod",
+                                                           request, c);
+      ASSERT_OK(resp);
+
+      uint64_t rtt = toolbelt::Now() - request.send_time();
+      int64_t server_time = resp->server_send_time() - resp->client_send_time();
+      total_rtt += rtt;
+      total_server_time += server_time;
+    }
+      std::cerr << "RTT: " << (total_rtt / num_iterations) << " ns, server time: " << (total_server_time / num_iterations)
+                << " ns" << std::endl;
+
+    ASSERT_OK(client.Close(c));
+    server->Stop();
+  });
+
+  scheduler.Run();
+}
 int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);
   absl::ParseCommandLine(argc, argv);

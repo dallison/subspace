@@ -1,5 +1,6 @@
 #pragma once
 #include "absl/container/flat_hash_map.h"
+#include "absl/types/span.h"
 #include "client/client.h"
 #include "coroutine.h"
 #include "google/protobuf/any.pb.h"
@@ -28,9 +29,7 @@ public:
 
   void SetLogLevel(const std::string &level) { logger_.SetLogLevel(level); }
 
-  void SetStartingSessionId(int session_id) {
-    session_id_ = session_id;
-  }
+  void SetStartingSessionId(int session_id) { session_id_ = session_id; }
 
   // Run the server.  If you pass a coroutine scheduler this will use it
   // and the function will not block.  If you don't pass a scheduler
@@ -43,61 +42,196 @@ public:
   // There is no use of threads inside the server itself.
   absl::Status Run(co::CoroutineScheduler *scheduler = nullptr);
 
-  // Stop the server running.  This will signal a stop and will return immediately.
+  // Stop the server running.  This will signal a stop and will return
+  // immediately.
   void Stop();
 
+  // These methods are non-templated and take google::protobuf::Any arguments
+  // and responses.
+
   // Method with a request and response.
-  absl::Status
-  RegisterMethod(const std::string &method, const std::string &request_type,
-                 const std::string &response_type,
-                 std::function<absl::Status(const google::protobuf::Any &,
-                                            google::protobuf::Any *, co::Coroutine*)>
-                     callback) {
+  absl::Status RegisterMethod(
+      const std::string &method, const std::string &request_type,
+      const std::string &response_type,
+      std::function<absl::Status(const google::protobuf::Any &,
+                                 google::protobuf::Any *, co::Coroutine *)>
+          callback) {
     return RegisterMethod(method, request_type, response_type,
                           kDefaultMethodSlotSize, kDefaultMethodNumSlots,
                           std::move(callback));
   }
 
+  absl::Status RegisterMethod(
+      const std::string &method, const std::string &request_type,
+      const std::string &response_type, int32_t slot_size, int32_t num_slots,
+      std::function<absl::Status(const google::protobuf::Any &,
+                                 google::protobuf::Any *, co::Coroutine *)>
+          callback);
+
   absl::Status
   RegisterMethod(const std::string &method, const std::string &request_type,
-                 const std::string &response_type, int32_t slot_size,
-                 int32_t num_slots,
                  std::function<absl::Status(const google::protobuf::Any &,
-                                            google::protobuf::Any *, co::Coroutine*)>
-                     callback);
-
-                       absl::Status
-  RegisterMethod(const std::string &method, const std::string &request_type,
-                 absl::Status (*callback)(const google::protobuf::Any &, co::Coroutine*)) {
+                                            co::Coroutine *)>
+                     callback) {
     return RegisterMethod(method, request_type, kDefaultMethodSlotSize,
-                          kDefaultMethodNumSlots, callback);
+                          kDefaultMethodNumSlots, std::move(callback));
   }
 
   absl::Status
   RegisterMethod(const std::string &method, const std::string &request_type,
                  int32_t slot_size, int32_t num_slots,
-                 absl::Status (*callback)(const google::protobuf::Any &, co::Coroutine*));
+                 std::function<absl::Status(const google::protobuf::Any &,
+                                            co::Coroutine *)>
+                     callback);
 
+  // The normal use case will be to use the templated versions of
+  // RegisterMethod below.
+  // Typed methods with request and response.
+  template <typename Request, typename Response>
+  absl::Status RegisterMethod(
+      const std::string &method,
+      std::function<absl::Status(const Request &, Response *, co::Coroutine *)>
+          callback) {
+    return RegisterMethod<Request, Response>(method, kDefaultMethodSlotSize,
+                                             kDefaultMethodNumSlots,
+                                             std::move(callback));
+  }
 
   template <typename Request, typename Response>
-  absl::Status RegisterMethod(const std::string &method, const Request &request, Response* response) {
+  absl::Status RegisterMethod(
+      const std::string &method, int32_t slot_size, int32_t num_slots,
+      std::function<absl::Status(const Request &, Response *, co::Coroutine *)>
+          callback) {
     auto request_descriptor = Request::descriptor();
     auto response_descriptor = Response::descriptor();
 
-    return RegisterMethod(method, request_descriptor->full_name(), response_descriptor->full_name(),
-                          kDefaultMethodSlotSize, kDefaultMethodNumSlots,
-                          [request, response](const google::protobuf::Any &req,
-                                              google::protobuf::Any *res, co::Coroutine* c) -> absl::Status {
-                            if (!req.UnpackTo(&request)) {
-                              return absl::InvalidArgumentError("Failed to unpack request");
-                            }
-                            auto status = callback(request, response, c);
-                            if (!status.ok()) {
-                              return status;
-                            }
-                            res->PackFrom(*response);
-                            return absl::OkStatus();
-                          });
+    return RegisterMethod(
+        method, request_descriptor->full_name(),
+        response_descriptor->full_name(), kDefaultMethodSlotSize,
+        kDefaultMethodNumSlots,
+        [ method, callback = std::move(callback),
+          request_descriptor ](const google::protobuf::Any &req,
+                               google::protobuf::Any *res, co::Coroutine *c)
+            ->absl::Status {
+              if (!req.Is<Request>()) {
+                return absl::InvalidArgumentError(absl::StrFormat(
+                    "Invalid argment type for %s: need %s got %s", method,
+                    request_descriptor->full_name().c_str(),
+                    req.type_url().c_str()));
+              }
+              Request request;
+              if (!req.UnpackTo(&request)) {
+                return absl::InvalidArgumentError("Failed to unpack request");
+              }
+              Response response;
+              auto status = callback(request, &response, c);
+              if (!status.ok()) {
+                return status;
+              }
+              res->PackFrom(response);
+              return absl::OkStatus();
+            });
+  }
+
+  // Typed void methods.
+  template <typename Request>
+  absl::Status RegisterMethod(
+      const std::string &method,
+      std::function<absl::Status(const Request &, co::Coroutine *)> callback) {
+    return RegisterMethod<Request>(method, kDefaultMethodSlotSize,
+                                   kDefaultMethodNumSlots, std::move(callback));
+  }
+
+  // Type void method with slot parameters.
+  template <typename Request>
+  absl::Status RegisterMethod(
+      const std::string &method, int32_t slot_size, int32_t num_slots,
+      std::function<absl::Status(const Request &, co::Coroutine *)> callback) {
+    auto request_descriptor = Request::descriptor();
+
+    return RegisterMethod(
+        method, request_descriptor->full_name(), kDefaultMethodSlotSize,
+        kDefaultMethodNumSlots,
+        [ method, callback = std::move(callback), request_descriptor ](
+            const google::protobuf::Any &req, co::Coroutine *c)
+            ->absl::Status {
+              if (!req.Is<Request>()) {
+                return absl::InvalidArgumentError(absl::StrFormat(
+                    "Invalid argment type for %s: need %s got %s", method,
+                    request_descriptor->full_name().c_str(),
+                    req.type_url().c_str()));
+              }
+              Request request;
+              if (!req.UnpackTo(&request)) {
+                return absl::InvalidArgumentError("Failed to unpack request");
+              }
+              return callback(request, c);
+            });
+  }
+
+  // Method that takes a raw message and returns a raw message.
+  // NOTE: this will make a copy of the request into a vector<char>.  For a more
+  // efficient version that doesn't copy, use the version below that takes a
+  // span.
+  absl::Status RegisterMethod(
+      const std::string &method,
+      std::function<absl::Status(const std::vector<char> &, std::vector<char> *,
+                                 co::Coroutine *)>
+          callback) {
+    return RegisterMethod(method, kDefaultMethodNumSlots,
+                          kDefaultMethodNumSlots, std::move(callback));
+  }
+
+  absl::Status RegisterMethod(
+      const std::string &method, int slot_size, int num_slots,
+      std::function<absl::Status(const std::vector<char> &, std::vector<char> *,
+                                 co::Coroutine *)>
+          callback) {
+    return RegisterMethod<RawMessage, RawMessage>(
+        method, slot_size, num_slots,
+        [callback = std::move(callback)](const RawMessage &req, RawMessage *res,
+                                         co::Coroutine *c)
+            ->absl::Status {
+              std::vector<char> request(req.data().begin(), req.data().end());
+              std::vector<char> response;
+              auto status = callback(request, &response, c);
+              if (!status.ok()) {
+                return status;
+              }
+              res->set_data(response.data(), response.size());
+              return absl::OkStatus();
+            });
+  }
+
+  absl::Status RegisterMethod(
+      const std::string &method,
+      std::function<absl::Status(const absl::Span<const char> &, std::vector<char> *,
+                                 co::Coroutine *)>
+          callback) {
+    return RegisterMethod(method, kDefaultMethodNumSlots,
+                          kDefaultMethodNumSlots, std::move(callback));
+  }
+
+  absl::Status RegisterMethod(
+      const std::string &method, int32_t slot_size, int32_t num_slots,
+      std::function<absl::Status(const absl::Span<const char> &, std::vector<char> *,
+                                 co::Coroutine *)>
+          callback) {
+    return RegisterMethod<RawMessage, RawMessage>(
+        method, [callback = std::move(callback)](
+                    const RawMessage &req, RawMessage *res, co::Coroutine *c)
+                    ->absl::Status {
+                      const absl::Span<const char> request(req.data().data(),
+                                               req.data().size());
+                      std::vector<char> response;
+                      auto status = callback(request, &response, c);
+                      if (!status.ok()) {
+                        return status;
+                      }
+                      // This is still a copy.
+                      res->set_data(response.data(), response.size());
+                      return absl::OkStatus();
+                    });
   }
 
   absl::Status UnregisterMethod(const std::string &method) {
@@ -116,7 +250,7 @@ private:
     Method(RpcServer *server, std::string name, std::string request_type,
            std::string response_type, int32_t slot_size, int32_t num_slots,
            std::function<absl::Status(const google::protobuf::Any &,
-                                      google::protobuf::Any *, co::Coroutine*)>
+                                      google::protobuf::Any *, co::Coroutine *)>
                callback)
         : name(std::move(name)), request_type(std::move(request_type)),
           response_type(std::move(response_type)), slot_size(slot_size),
@@ -132,7 +266,7 @@ private:
     int32_t slot_size;
     int32_t num_slots;
     std::function<absl::Status(const google::protobuf::Any &,
-                               google::protobuf::Any *, co::Coroutine*)>
+                               google::protobuf::Any *, co::Coroutine *)>
         callback;
     std::string request_channel;
     std::string response_channel;
@@ -154,14 +288,17 @@ private:
   void AddCoroutine(std::unique_ptr<co::Coroutine> coroutine) {
     coroutines_.insert(std::move(coroutine));
   }
-  static void ListenerCoroutine(std::shared_ptr<RpcServer> server, co::Coroutine *c);
+  static void ListenerCoroutine(std::shared_ptr<RpcServer> server,
+                                co::Coroutine *c);
 
   absl::Status HandleIncomingRpcServerRequest(subspace::Message msg,
                                               co::Coroutine *c);
-  absl::Status HandleOpen(uint64_t client_id, const subspace::RpcOpenRequest &request,
+  absl::Status HandleOpen(uint64_t client_id,
+                          const subspace::RpcOpenRequest &request,
                           subspace::RpcOpenResponse *response,
                           co::Coroutine *c);
-  absl::Status HandleClose(uint64_t client_id, const subspace::RpcCloseRequest &request,
+  absl::Status HandleClose(uint64_t client_id,
+                           const subspace::RpcCloseRequest &request,
                            subspace::RpcCloseResponse *response,
                            co::Coroutine *c);
   absl::Status
@@ -172,9 +309,9 @@ private:
   absl::Status DestroySession(int session_id);
 
   static void SessionMethodCoroutine(std::shared_ptr<RpcServer> server,
-                              std::shared_ptr<Session> session,
-                              std::shared_ptr<MethodInstance> method,
-                              co::Coroutine *c);
+                                     std::shared_ptr<Session> session,
+                                     std::shared_ptr<MethodInstance> method,
+                                     co::Coroutine *c);
 
   std::string name_;
   std::string subspace_server_socket_;

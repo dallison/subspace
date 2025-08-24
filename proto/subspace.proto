@@ -285,7 +285,7 @@ message RpcServerResponse {
 
 message RpcRequest {
   string method = 1;
-  google.protobuf.Any arguments = 2; // Data to send to the server.
+  google.protobuf.Any argument = 2; // Data to send to the server.
   int32 session_id = 3; // Session ID for this request.
   int32 request_id = 4; // Unique ID for this request.
   uint64 client_id = 5; // Client ID making the request.
