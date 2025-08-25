@@ -1,0 +1,24 @@
+// Copyright 025 David Allison
+// All Rights Reserved
+// See LICENSE file for licensing information.
+
+syntax = "proto3";
+
+package rpc;
+
+message TestRequest {
+  string message = 1;
+}
+
+message TestResponse {
+  string message = 1;
+}
+
+message PerfRequest {
+  uint64 send_time = 1;
+}
+
+message PerfResponse {
+  uint64 client_send_time = 1;   // Time sent by client.
+  uint64 server_send_time = 2;   // Time sent by server.
+}

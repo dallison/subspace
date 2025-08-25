@@ -1998,7 +1998,7 @@ TEST_F(ClientTest, RetirementTrigger1) {
   ptr2.Release();
 
   // Read the retirement fd and expect it to contain slot 0.
-  struct pollfd fd = {.events = POLLIN, .fd = retirement_fd.Fd()};
+  struct pollfd fd = {.fd = retirement_fd.Fd(), .events = POLLIN};
   int e = ::poll(&fd, 1, -1);
   ASSERT_EQ(1, e);
   ASSERT_TRUE(fd.revents & POLLIN);
@@ -2068,7 +2068,7 @@ TEST_F(ClientTest, RetirementTrigger2) {
   }
 
   // There should be nothing in the retirement fd.
-  struct pollfd fd = {.events = POLLIN, .fd = retirement_fd.Fd()};
+  struct pollfd fd = {.fd = retirement_fd.Fd(), .events = POLLIN};
   int e = ::poll(&fd, 1, 0);
   ASSERT_EQ(0, e);
   ASSERT_FALSE(fd.revents & POLLIN);
@@ -2177,7 +2177,7 @@ TEST_F(ClientTest, RetirementTrigger3) {
   ptr2.Release();
 
   // Read the retirement fd and expect it to contain slot 0.
-  struct pollfd fd = {.events = POLLIN, .fd = retirement_fd.Fd()};
+  struct pollfd fd = {.fd = retirement_fd.Fd(), .events = POLLIN};
   int e = ::poll(&fd, 1, -1);
   ASSERT_EQ(1, e);
   ASSERT_TRUE(fd.revents & POLLIN);
@@ -2250,7 +2250,7 @@ TEST_F(ClientTest, RetirementTrigger4) {
   }
 
   // There should be nothing in the retirement fd.
-  struct pollfd fd = {.events = POLLIN, .fd = retirement_fd.Fd()};
+  struct pollfd fd = {.fd = retirement_fd.Fd(), .events = POLLIN};
   int e = ::poll(&fd, 1, 0);
   ASSERT_EQ(0, e);
   ASSERT_FALSE(fd.revents & POLLIN);
