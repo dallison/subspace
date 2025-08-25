@@ -123,7 +123,7 @@ std::thread ServerTest::server_thread_;
 static int next_session = 1;
 static std::shared_ptr<subspace::RpcServer> BuildServer() {
   auto server =
-      std::make_shared<subspace::RpcServer>("test", ServerTest::Socket());
+      std::make_shared<subspace::RpcServer>("TestService", ServerTest::Socket());
 
   server->SetLogLevel("debug");
   server->SetStartingSessionId(next_session++);

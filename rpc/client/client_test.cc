@@ -125,7 +125,8 @@ std::thread ClientTest::server_thread_;
 
 static std::shared_ptr<subspace::RpcServer> BuildServer() {
   auto server =
-      std::make_shared<subspace::RpcServer>("test", ClientTest::Socket());
+      std::make_shared<subspace::RpcServer>("TestService", ClientTest::Socket());
+  server->SetLogLevel("info");
 
   auto s = server->RegisterMethod<rpc::TestRequest, rpc::TestResponse>(
       "TestMethod",
@@ -140,8 +141,7 @@ static std::shared_ptr<subspace::RpcServer> BuildServer() {
   // Performance
   s = server->RegisterMethod<rpc::PerfRequest, rpc::PerfResponse>(
       "PerfMethod",
-      [](const auto&req, auto *res,
-         co::Coroutine *) -> absl::Status {
+      [](const auto &req, auto *res, co::Coroutine *) -> absl::Status {
         res->set_client_send_time(req.send_time());
         res->set_server_send_time(toolbelt::Now());
         return absl::OkStatus();
@@ -150,8 +150,7 @@ static std::shared_ptr<subspace::RpcServer> BuildServer() {
 
   // Void method.
   s = server->RegisterMethod<rpc::TestRequest>(
-      "VoidMethod",
-      [](const auto &req, auto *) -> absl::Status {
+      "VoidMethod", [](const auto &req, auto *) -> absl::Status {
         std::cerr << "VoidMethod called with request: " << req.DebugString()
                   << std::endl;
         return absl::OkStatus();
@@ -159,9 +158,8 @@ static std::shared_ptr<subspace::RpcServer> BuildServer() {
 
   // Error method.
   s = server->RegisterMethod<rpc::TestRequest, rpc::TestResponse>(
-      "ErrorMethod", 
-      [](const auto &req, auto *res,
-         co::Coroutine *) -> absl::Status {
+      "ErrorMethod",
+      [](const auto &req, auto *res, co::Coroutine *) -> absl::Status {
         std::cerr << "ErrorMethod called with request: " << req.DebugString()
                   << std::endl;
         return absl::InternalError("Error occurred");
@@ -170,8 +168,7 @@ static std::shared_ptr<subspace::RpcServer> BuildServer() {
 
   // void error method.
   s = server->RegisterMethod<rpc::TestRequest>(
-      "VoidErrorMethod",
-      [](const auto &req, co::Coroutine *) -> absl::Status {
+      "VoidErrorMethod", [](const auto &req, co::Coroutine *) -> absl::Status {
         std::cerr << "VoidErrorMethod called with request: "
                   << req.DebugString() << std::endl;
         return absl::InternalError("Error occurred");
@@ -179,9 +176,8 @@ static std::shared_ptr<subspace::RpcServer> BuildServer() {
   EXPECT_TRUE(s.ok());
 
   s = server->RegisterMethod<rpc::TestRequest, rpc::TestResponse>(
-      "TimeoutMethod", 
-      [](const auto &req, auto *res,
-         co::Coroutine *c) -> absl::Status {
+      "TimeoutMethod",
+      [](const auto &req, auto *res, co::Coroutine *c) -> absl::Status {
         std::cerr << "TimeoutMethod called with request: " << req.DebugString()
                   << std::endl;
         c->Sleep(2);
@@ -200,7 +196,7 @@ TEST_F(ClientTest, Typed) {
   ASSERT_OK(server->Run(&scheduler));
 
   co::Coroutine test(scheduler, [&](co::Coroutine *c) {
-    subspace::RpcClient client("test", 3, ClientTest::Socket());
+    subspace::RpcClient client("TestService", 3, ClientTest::Socket());
     ASSERT_OK(client.Open(c));
 
     rpc::TestRequest test_request;
@@ -209,6 +205,7 @@ TEST_F(ClientTest, Typed) {
     absl::StatusOr<rpc::TestResponse> resp =
         client.Call<rpc::TestRequest, rpc::TestResponse>("TestMethod",
                                                          test_request, c);
+    std::cerr << resp.status().ToString() << std::endl;
     ASSERT_OK(resp);
 
     EXPECT_EQ(resp->message(), "Hello from TestMethod");
@@ -219,6 +216,34 @@ TEST_F(ClientTest, Typed) {
   scheduler.Run();
 }
 
+TEST_F(ClientTest, TypedMethodId) {
+  co::CoroutineScheduler scheduler;
+
+  auto server = BuildServer();
+  ASSERT_OK(server->Run(&scheduler));
+
+  co::Coroutine test(scheduler, [&](co::Coroutine *c) {
+    subspace::RpcClient client("TestService", 3, ClientTest::Socket());
+    ASSERT_OK(client.Open(c));
+
+    auto TestMethodId = client.FindMethod("TestMethod");
+    ASSERT_OK(TestMethodId);
+
+    rpc::TestRequest test_request;
+    test_request.set_message("Hello, world!");
+
+    absl::StatusOr<rpc::TestResponse> resp =
+        client.Call<rpc::TestRequest, rpc::TestResponse>(*TestMethodId,
+                                                         test_request, c);
+    ASSERT_OK(resp);
+
+    EXPECT_EQ(resp->message(), "Hello from TestMethod");
+    ASSERT_OK(client.Close(c));
+    server->Stop();
+  });
+
+  scheduler.Run();
+}
 TEST_F(ClientTest, TypedVoid) {
   co::CoroutineScheduler scheduler;
 
@@ -226,7 +251,7 @@ TEST_F(ClientTest, TypedVoid) {
   ASSERT_OK(server->Run(&scheduler));
 
   co::Coroutine test(scheduler, [&](co::Coroutine *c) {
-    subspace::RpcClient client("test", 3, ClientTest::Socket());
+    subspace::RpcClient client("TestService", 3, ClientTest::Socket());
     ASSERT_OK(client.Open(c));
 
     rpc::TestRequest test_request;
@@ -250,8 +275,7 @@ TEST_F(ClientTest, TypedError) {
   ASSERT_OK(server->Run(&scheduler));
 
   co::Coroutine test(scheduler, [&](co::Coroutine *c) {
-    subspace::RpcClient client("test", 3, ClientTest::Socket());
-    client.SetLogLevel("debug");
+    subspace::RpcClient client("TestService", 3, ClientTest::Socket());
     ASSERT_OK(client.Open(c));
 
     rpc::TestRequest test_request;
@@ -280,7 +304,7 @@ TEST_F(ClientTest, TypedTimeout) {
   ASSERT_OK(server->Run(&scheduler));
 
   co::Coroutine test(scheduler, [&](co::Coroutine *c) {
-    subspace::RpcClient client("test", 3, ClientTest::Socket());
+    subspace::RpcClient client("TestService", 3, ClientTest::Socket());
     ASSERT_OK(client.Open(c));
 
     rpc::TestRequest test_request;
@@ -309,19 +333,22 @@ TEST_F(ClientTest, Performance) {
   ASSERT_OK(server->Run(&scheduler));
 
   co::Coroutine test(scheduler, [&](co::Coroutine *c) {
-    subspace::RpcClient client("test", 3, ClientTest::Socket());
+    subspace::RpcClient client("TestService", 3, ClientTest::Socket());
     ASSERT_OK(client.Open(c));
+
+    auto PerfMethodId = client.FindMethod("PerfMethod");
+    ASSERT_OK(PerfMethodId);
 
     uint64_t total_rtt = 0;
     uint64_t total_server_time = 0;
 
-    int num_iterations = 1000;
-    for (int i = 0; i < 10; i++) {
+    int num_iterations = 10000;
+    for (int i = 0; i < num_iterations; i++) {
       rpc::PerfRequest request;
       request.set_send_time(toolbelt::Now());
 
       absl::StatusOr<rpc::PerfResponse> resp =
-          client.Call<rpc::PerfRequest, rpc::PerfResponse>("PerfMethod",
+          client.Call<rpc::PerfRequest, rpc::PerfResponse>(*PerfMethodId,
                                                            request, c);
       ASSERT_OK(resp);
 
@@ -330,8 +357,9 @@ TEST_F(ClientTest, Performance) {
       total_rtt += rtt;
       total_server_time += server_time;
     }
-      std::cerr << "RTT: " << (total_rtt / num_iterations) << " ns, server time: " << (total_server_time / num_iterations)
-                << " ns" << std::endl;
+    std::cerr << "RTT: " << (total_rtt / num_iterations)
+              << " ns, server time: " << (total_server_time / num_iterations)
+              << " ns" << std::endl;
 
     ASSERT_OK(client.Close(c));
     server->Stop();

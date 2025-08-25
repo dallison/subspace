@@ -29,7 +29,7 @@ public:
 
   void SetLogLevel(const std::string &level) { logger_.SetLogLevel(level); }
 
-  void SetStartingSessionId(int session_id) { session_id_ = session_id; }
+  void SetStartingSessionId(int session_id) { next_session_id_ = session_id; }
 
   // Run the server.  If you pass a coroutine scheduler this will use it
   // and the function will not block.  If you don't pass a scheduler
@@ -55,10 +55,10 @@ public:
       const std::string &response_type,
       std::function<absl::Status(const google::protobuf::Any &,
                                  google::protobuf::Any *, co::Coroutine *)>
-          callback) {
+          callback, int id = -1) {
     return RegisterMethod(method, request_type, response_type,
                           kDefaultMethodSlotSize, kDefaultMethodNumSlots,
-                          std::move(callback));
+                          std::move(callback), id);
   }
 
   absl::Status RegisterMethod(
@@ -66,15 +66,15 @@ public:
       const std::string &response_type, int32_t slot_size, int32_t num_slots,
       std::function<absl::Status(const google::protobuf::Any &,
                                  google::protobuf::Any *, co::Coroutine *)>
-          callback);
+          callback, int id = -1);
 
   absl::Status
   RegisterMethod(const std::string &method, const std::string &request_type,
                  std::function<absl::Status(const google::protobuf::Any &,
                                             co::Coroutine *)>
-                     callback) {
+                     callback, int id) {
     return RegisterMethod(method, request_type, kDefaultMethodSlotSize,
-                          kDefaultMethodNumSlots, std::move(callback));
+                          kDefaultMethodNumSlots, std::move(callback), id);
   }
 
   absl::Status
@@ -82,7 +82,7 @@ public:
                  int32_t slot_size, int32_t num_slots,
                  std::function<absl::Status(const google::protobuf::Any &,
                                             co::Coroutine *)>
-                     callback);
+                     callback, int id = -1);
 
   // The normal use case will be to use the templated versions of
   // RegisterMethod below.
@@ -91,17 +91,17 @@ public:
   absl::Status RegisterMethod(
       const std::string &method,
       std::function<absl::Status(const Request &, Response *, co::Coroutine *)>
-          callback) {
+          callback, int id = -1) {
     return RegisterMethod<Request, Response>(method, kDefaultMethodSlotSize,
                                              kDefaultMethodNumSlots,
-                                             std::move(callback));
+                                             std::move(callback), id);
   }
 
   template <typename Request, typename Response>
   absl::Status RegisterMethod(
       const std::string &method, int32_t slot_size, int32_t num_slots,
       std::function<absl::Status(const Request &, Response *, co::Coroutine *)>
-          callback) {
+          callback, int id = -1) {
     auto request_descriptor = Request::descriptor();
     auto response_descriptor = Response::descriptor();
 
@@ -130,23 +130,23 @@ public:
               }
               res->PackFrom(response);
               return absl::OkStatus();
-            });
+            }, id);
   }
 
   // Typed void methods.
   template <typename Request>
   absl::Status RegisterMethod(
       const std::string &method,
-      std::function<absl::Status(const Request &, co::Coroutine *)> callback) {
+      std::function<absl::Status(const Request &, co::Coroutine *)> callback, int id) {
     return RegisterMethod<Request>(method, kDefaultMethodSlotSize,
-                                   kDefaultMethodNumSlots, std::move(callback));
+                                   kDefaultMethodNumSlots, std::move(callback), id);
   }
 
   // Type void method with slot parameters.
   template <typename Request>
   absl::Status RegisterMethod(
       const std::string &method, int32_t slot_size, int32_t num_slots,
-      std::function<absl::Status(const Request &, co::Coroutine *)> callback) {
+      std::function<absl::Status(const Request &, co::Coroutine *)> callback, int id) {
     auto request_descriptor = Request::descriptor();
 
     return RegisterMethod(
@@ -166,7 +166,7 @@ public:
                 return absl::InvalidArgumentError("Failed to unpack request");
               }
               return callback(request, c);
-            });
+            } ,id);
   }
 
   // Method that takes a raw message and returns a raw message.
@@ -177,16 +177,16 @@ public:
       const std::string &method,
       std::function<absl::Status(const std::vector<char> &, std::vector<char> *,
                                  co::Coroutine *)>
-          callback) {
+          callback, int id = -1) {
     return RegisterMethod(method, kDefaultMethodNumSlots,
-                          kDefaultMethodNumSlots, std::move(callback));
+                          kDefaultMethodNumSlots, std::move(callback), id);
   }
 
   absl::Status RegisterMethod(
       const std::string &method, int slot_size, int num_slots,
       std::function<absl::Status(const std::vector<char> &, std::vector<char> *,
                                  co::Coroutine *)>
-          callback) {
+          callback, int id) {
     return RegisterMethod<RawMessage, RawMessage>(
         method, slot_size, num_slots,
         [callback = std::move(callback)](const RawMessage &req, RawMessage *res,
@@ -200,26 +200,25 @@ public:
               }
               res->set_data(response.data(), response.size());
               return absl::OkStatus();
-            });
+            }, id);
   }
 
   absl::Status RegisterMethod(
       const std::string &method,
       std::function<absl::Status(const absl::Span<const char> &, std::vector<char> *,
                                  co::Coroutine *)>
-          callback) {
+          callback, int id) {
     return RegisterMethod(method, kDefaultMethodNumSlots,
-                          kDefaultMethodNumSlots, std::move(callback));
+                          kDefaultMethodNumSlots, std::move(callback), id);
   }
 
   absl::Status RegisterMethod(
       const std::string &method, int32_t slot_size, int32_t num_slots,
       std::function<absl::Status(const absl::Span<const char> &, std::vector<char> *,
                                  co::Coroutine *)>
-          callback) {
+          callback, int id) {
     return RegisterMethod<RawMessage, RawMessage>(
-        method, [callback = std::move(callback)](
-                    const RawMessage &req, RawMessage *res, co::Coroutine *c)
+        method, [callback = std::move(callback)](const RawMessage &req, RawMessage *res, co::Coroutine *c)
                     ->absl::Status {
                       const absl::Span<const char> request(req.data().data(),
                                                req.data().size());
@@ -231,7 +230,7 @@ public:
                       // This is still a copy.
                       res->set_data(response.data(), response.size());
                       return absl::OkStatus();
-                    });
+                    }, id);
   }
 
   absl::Status UnregisterMethod(const std::string &method) {
@@ -251,10 +250,10 @@ private:
            std::string response_type, int32_t slot_size, int32_t num_slots,
            std::function<absl::Status(const google::protobuf::Any &,
                                       google::protobuf::Any *, co::Coroutine *)>
-               callback)
+               callback, int id)
         : name(std::move(name)), request_type(std::move(request_type)),
           response_type(std::move(response_type)), slot_size(slot_size),
-          num_slots(num_slots), callback(std::move(callback)) {
+          num_slots(num_slots), callback(std::move(callback)), id(id) {
       request_channel =
           absl::StrFormat("/rpc/%s/%s/request", server->Name(), this->name);
       response_channel =
@@ -270,6 +269,7 @@ private:
         callback;
     std::string request_channel;
     std::string response_channel;
+    int id;
   };
 
   struct MethodInstance {
@@ -281,7 +281,7 @@ private:
   struct Session {
     int session_id;
     uint64_t client_id;
-    absl::flat_hash_map<std::string, std::shared_ptr<MethodInstance>> methods;
+    absl::flat_hash_map<int, std::shared_ptr<MethodInstance>> methods;
   };
 
   absl::Status CreateChannels();
@@ -310,7 +310,7 @@ private:
 
   static void SessionMethodCoroutine(std::shared_ptr<RpcServer> server,
                                      std::shared_ptr<Session> session,
-                                     std::shared_ptr<MethodInstance> method,
+                                     std::shared_ptr<MethodInstance> method_instance,
                                      co::Coroutine *c);
 
   std::string name_;
@@ -326,7 +326,8 @@ private:
   std::shared_ptr<subspace::Publisher> response_publisher_;
   absl::flat_hash_set<std::unique_ptr<co::Coroutine>> coroutines_;
   bool running_ = false;
-  int32_t session_id_ = 0; // Next session ID.
+  int32_t next_session_id_ = 0; // Next session ID.
+  int next_method_id_ = 0; // Next method ID.
   absl::flat_hash_map<int32_t, std::shared_ptr<Session>> sessions_;
 };
 

@@ -22,3 +22,8 @@ message PerfResponse {
   uint64 client_send_time = 1;   // Time sent by client.
   uint64 server_send_time = 2;   // Time sent by server.
 }
+
+service TestService {
+  rpc TestMethod(TestRequest) returns (TestResponse);
+  rpc PerfMethod(PerfRequest) returns (PerfResponse);
+}

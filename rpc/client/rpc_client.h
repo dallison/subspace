@@ -35,10 +35,61 @@ public:
   absl::Status Close(std::chrono::nanoseconds timeout,
                      co::Coroutine *c = nullptr);
 
+  absl::StatusOr<int> FindMethod(const std::string &method);
+
   // Call with request and response (both protobuf types).  This will
   // block (the coroutine if provided) and there is no timeout.
   template <typename Request, typename Response>
-  absl::StatusOr<Response> Call(const std::string &method,
+  absl::StatusOr<Response> Call(int method_id, const Request &request,
+                                co::Coroutine *c = nullptr) {
+    return Call<Request, Response>(method_id, request,
+                                   std::chrono::nanoseconds(0), c);
+  }
+
+  // Call with request and response.  Both types must be protobuf messages.  A
+  // timeout will result in an error.
+  template <typename Request, typename Response>
+  absl::StatusOr<Response> Call(int method_id, const Request &request,
+                                std::chrono::nanoseconds timeout,
+                                co::Coroutine *c = nullptr);
+
+  // Call with a raw message.  You will get a raw buffer back.
+  absl::StatusOr<std::vector<char>> Call(int method_id,
+                                         const std::vector<char> &request,
+                                         std::chrono::nanoseconds timeout,
+                                         co::Coroutine *c = nullptr);
+
+  // Call void method.
+  template <typename Request>
+  absl::Status Call(int method_id, const Request &request,
+                    co::Coroutine *c = nullptr) {
+    return Call(method_id, request, std::chrono::nanoseconds(0), c);
+  }
+
+  // Call void method.
+  template <typename Request>
+  absl::Status Call(int method_id, const Request &request,
+                    std::chrono::nanoseconds timeout,
+                    co::Coroutine *c = nullptr);
+
+  // Call with a void raw message.  There is a response internally but you don't
+  // see it.
+  template <>
+  absl::Status Call(int method_id, const std::vector<char> &request,
+                    co::Coroutine *c) {
+    return Call<std::vector<char>>(method_id, request,
+                                   std::chrono::nanoseconds(0), c);
+  }
+
+  template <>
+  absl::Status Call(int method_id, const std::vector<char> &request,
+                    std::chrono::nanoseconds timeout, co::Coroutine *c);
+
+  // Calls with method name.
+  // Call with request and response (both protobuf types).  This will
+  // block (the coroutine if provided) and there is no timeout.
+  template <typename Request, typename Response>
+  absl::StatusOr<Response> Call(const std::string &method_name,
                                 const Request &request,
                                 co::Coroutine *c = nullptr);
 
@@ -46,44 +97,46 @@ public:
   // timeout will result in an error.
   template <typename Request, typename Response>
   absl::StatusOr<Response>
-  Call(const std::string &method, const Request &request,
+  Call(const std::string &method_name, const Request &request,
        std::chrono::nanoseconds timeout, co::Coroutine *c = nullptr);
 
   // Call with a raw message.  You will get a raw buffer back.
-  absl::StatusOr<std::vector<char>> Call(const std::string &method,
+  absl::StatusOr<std::vector<char>> Call(const std::string &method_name,
                                          const std::vector<char> &request,
                                          std::chrono::nanoseconds timeout,
                                          co::Coroutine *c = nullptr);
 
   // Call void method.
   template <typename Request>
-  absl::Status Call(const std::string &method, const Request &request,
+  absl::Status Call(const std::string &method_name, const Request &request,
                     co::Coroutine *c = nullptr) {
-    return Call(method, request, std::chrono::nanoseconds(0), c);
+    return Call(method_name, request, std::chrono::nanoseconds(0), c);
   }
 
   // Call void method.
   template <typename Request>
-  absl::Status Call(const std::string &method, const Request &request,
+  absl::Status Call(const std::string &method_name, const Request &request,
                     std::chrono::nanoseconds timeout,
                     co::Coroutine *c = nullptr);
 
   // Call with a void raw message.  There is a response internally but you don't
   // see it.
   template <>
-  absl::Status Call(const std::string &method, const std::vector<char> &request,
-                    co::Coroutine *c) {
-    return Call<std::vector<char>>(method, request, std::chrono::nanoseconds(0),
-                                   c);
+  absl::Status Call(const std::string &method_name,
+                    const std::vector<char> &request, co::Coroutine *c) {
+    return Call<std::vector<char>>(method_name, request,
+                                   std::chrono::nanoseconds(0), c);
   }
 
   template <>
-  absl::Status Call(const std::string &method, const std::vector<char> &request,
+  absl::Status Call(const std::string &method_name,
+                    const std::vector<char> &request,
                     std::chrono::nanoseconds timeout, co::Coroutine *c);
 
 private:
   struct Method {
     std::string name;
+    int id;
     std::string request_type;
     std::string response_type;
     int32_t slot_size;
@@ -104,13 +157,13 @@ private:
   // Low level method invocation functions that takes untyped protobuf.Any
   // request and response.
   absl::StatusOr<google::protobuf::Any>
-  InvokeMethod(const std::string &name, const google::protobuf::Any &request,
+  InvokeMethod(int method_id, const google::protobuf::Any &request,
                co::Coroutine *c = nullptr) {
-    return InvokeMethod(name, request, std::chrono::nanoseconds(0), c);
+    return InvokeMethod(method_id, request, std::chrono::nanoseconds(0), c);
   }
 
   absl::StatusOr<google::protobuf::Any>
-  InvokeMethod(const std::string &name, const google::protobuf::Any &request,
+  InvokeMethod(int method_id, const google::protobuf::Any &request,
                std::chrono::nanoseconds timeout, co::Coroutine *c = nullptr);
 
   std::string service_;
@@ -119,32 +172,23 @@ private:
   toolbelt::Logger logger_;
   co::Coroutine *coroutine_ = nullptr;
   std::shared_ptr<subspace::Client> client_;
-  absl::flat_hash_map<std::string, std::shared_ptr<Method>> methods_;
+  absl::flat_hash_map<int, std::shared_ptr<Method>> methods_;
+  absl::flat_hash_map<std::string, int> method_name_to_id_;
   int session_id_ = 0;
   int next_request_id_ = 0;
   std::shared_ptr<subspace::Publisher> service_pub_;
   std::shared_ptr<subspace::Subscriber> service_sub_;
 };
 
-// Call with request and response (both protobuf types).  This will
-// block (the coroutine if provided) and there is no timeout.
-template <typename Request, typename Response>
-inline absl::StatusOr<Response> RpcClient::Call(const std::string &method,
-                                                const Request &request,
-                                                co::Coroutine *c) {
-  return Call<Request, Response>(method, request, std::chrono::nanoseconds(0),
-                                 c);
-}
-
 // Call with request and response.  Both types must be protobuf messages.  A
 // timeout will result in an error.
 template <typename Request, typename Response>
 inline absl::StatusOr<Response>
-RpcClient::Call(const std::string &method, const Request &request,
+RpcClient::Call(int method_id, const Request &request,
                 std::chrono::nanoseconds timeout, co::Coroutine *c) {
   google::protobuf::Any any;
   any.PackFrom(request);
-  auto r = InvokeMethod(method, any, timeout, c);
+  auto r = InvokeMethod(method_id, any, timeout, c);
   if (!r.ok()) {
     return absl::InternalError(
         absl::StrFormat("Failed to invoke method: %s", r.status().ToString()));
@@ -158,13 +202,13 @@ RpcClient::Call(const std::string &method, const Request &request,
 
 // Call with a raw message.  You will get a raw buffer back.
 inline absl::StatusOr<std::vector<char>>
-RpcClient::Call(const std::string &method, const std::vector<char> &request,
+RpcClient::Call(int method_id, const std::vector<char> &request,
                 std::chrono::nanoseconds timeout, co::Coroutine *c) {
   RawMessage raw_request;
   raw_request.set_data(request.data(), request.size());
   google::protobuf::Any any;
   any.PackFrom(raw_request);
-  auto r = InvokeMethod(method, any, timeout, c);
+  auto r = InvokeMethod(method_id, any, timeout, c);
   if (!r.ok()) {
     return absl::InternalError(
         absl::StrFormat("Failed to invoke method: %s", r.status().ToString()));
@@ -179,12 +223,12 @@ RpcClient::Call(const std::string &method, const std::vector<char> &request,
 // Call void method.  There is an internal response message sent but it is
 // absorbed.
 template <typename Request>
-inline absl::Status
-RpcClient::Call(const std::string &method, const Request &request,
-                std::chrono::nanoseconds timeout, co::Coroutine *c) {
+inline absl::Status RpcClient::Call(int method_id, const Request &request,
+                                    std::chrono::nanoseconds timeout,
+                                    co::Coroutine *c) {
   google::protobuf::Any any;
   any.PackFrom(request);
-  auto r = InvokeMethod(method, any, timeout, c);
+  auto r = InvokeMethod(method_id, any, timeout, c);
   if (!r.ok()) {
     return absl::InternalError(
         absl::StrFormat("Failed to invoke method: %s", r.status().ToString()));
@@ -200,13 +244,13 @@ RpcClient::Call(const std::string &method, const Request &request,
 // see it.
 template <>
 inline absl::Status
-RpcClient::Call(const std::string &method, const std::vector<char> &request,
+RpcClient::Call(int method_id, const std::vector<char> &request,
                 std::chrono::nanoseconds timeout, co::Coroutine *c) {
   RawMessage raw_request;
   raw_request.set_data(request.data(), request.size());
   google::protobuf::Any any;
   any.PackFrom(raw_request);
-  auto r = InvokeMethod(method, any, timeout, c);
+  auto r = InvokeMethod(method_id, any, timeout, c);
   if (!r.ok()) {
     return absl::InternalError(
         absl::StrFormat("Failed to invoke method: %s", r.status().ToString()));
@@ -218,4 +262,81 @@ RpcClient::Call(const std::string &method, const std::vector<char> &request,
   return absl::OkStatus();
 }
 
+template <typename Request, typename Response>
+inline absl::StatusOr<Response> RpcClient::Call(const std::string &method_name,
+                                         const Request &request,
+                                         co::Coroutine *c) {
+  auto method_id = FindMethod(method_name);
+  if (!method_id.ok()) {
+    return absl::InternalError(
+        absl::StrFormat("No such method: %s", method_name));
+  }
+  return Call<Request,Response>(*method_id, request, c);
+}
+
+// Call with request and response.  Both types must be protobuf messages.  A
+// timeout will result in an error.
+template <typename Request, typename Response>
+inline absl::StatusOr<Response>
+RpcClient::Call(const std::string &method_name, const Request &request,
+                std::chrono::nanoseconds timeout, co::Coroutine *c) {
+  auto method_id = FindMethod(method_name);
+  if (!method_id.ok()) {
+    return absl::InternalError(
+        absl::StrFormat("No such method: %s", method_name));
+  }
+  return Call<Request,Response>(*method_id, request, timeout, c);
+}
+
+// Call with a raw message.  You will get a raw buffer back.
+inline absl::StatusOr<std::vector<char>>
+RpcClient::Call(const std::string &method_name,
+                const std::vector<char> &request,
+                std::chrono::nanoseconds timeout, co::Coroutine *c) {
+  auto method_id = FindMethod(method_name);
+  if (!method_id.ok()) {
+    return absl::InternalError(
+        absl::StrFormat("No such method: %s", method_name));
+  }
+  return Call(*method_id, request, timeout, c);
+}
+
+// Call void method.
+template <typename Request>
+inline absl::Status
+RpcClient::Call(const std::string &method_name, const Request &request,
+                std::chrono::nanoseconds timeout, co::Coroutine *c) {
+  auto method_id = FindMethod(method_name);
+  if (!method_id.ok()) {
+    return absl::InternalError(
+        absl::StrFormat("No such method: %s", method_name));
+  }
+  return Call<Request>(*method_id, request, timeout, c);
+}
+
+template <>
+inline absl::Status RpcClient::Call(const std::string &method_name,
+                             const std::vector<char> &request,
+                             std::chrono::nanoseconds timeout,
+                             co::Coroutine *c) {
+  auto method_id = FindMethod(method_name);
+  if (!method_id.ok()) {
+    return absl::InternalError(
+        absl::StrFormat("No such method: %s", method_name));
+  }
+  RawMessage raw_request;
+  raw_request.set_data(request.data(), request.size());
+  google::protobuf::Any any;
+  any.PackFrom(raw_request);
+  auto r = InvokeMethod(*method_id, any, timeout, c);
+  if (!r.ok()) {
+    return absl::InternalError(
+        absl::StrFormat("Failed to invoke method: %s", r.status().ToString()));
+  }
+  VoidMessage resp;
+  if (!r->UnpackTo(&resp)) {
+    return absl::InternalError("2 Failed to unpack response");
+  }
+  return absl::OkStatus();
+}
 } // namespace subspace

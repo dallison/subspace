@@ -28,13 +28,13 @@ absl::Status RpcServer::RegisterMethod(
     const std::string &response_type, int32_t slot_size, int32_t num_slots,
     std::function<absl::Status(const google::protobuf::Any &,
                                google::protobuf::Any *, co::Coroutine*)>
-        callback) {
+        callback, int id) {
   if (methods_.find(method) != methods_.end()) {
     return absl::AlreadyExistsError("Method already registered: " + method);
   }
   methods_[method] =
       std::make_shared<Method>(this, method, request_type, response_type,
-                               slot_size, num_slots, std::move(callback));
+                               slot_size, num_slots, std::move(callback), id == -1 ? ++next_method_id_ : id);
   return absl::OkStatus();
 }
 
@@ -42,7 +42,7 @@ absl::Status RpcServer::RegisterMethod(
 absl::Status RpcServer::RegisterMethod(
     const std::string &method, const std::string &request_type,
     int32_t slot_size, int32_t num_slots,
-    std::function<absl::Status(const google::protobuf::Any &, co::Coroutine*)> callback) {
+    std::function<absl::Status(const google::protobuf::Any &, co::Coroutine*)> callback, int id) {
   if (methods_.find(method) != methods_.end()) {
     return absl::AlreadyExistsError("Method already registered: " + method);
   }
@@ -57,7 +57,7 @@ absl::Status RpcServer::RegisterMethod(
         // into a google.protobuf.Any.
         res->PackFrom(VoidMessage());
         return absl::OkStatus();
-      });
+      }, id == -1 ? ++next_method_id_ : id);
   return absl::OkStatus();
 }
 
@@ -258,9 +258,10 @@ absl::Status RpcServer::HandleOpen(uint64_t client_id,
   auto session = *s;
   response->set_session_id(session->session_id);
 
-  for (auto &[name, method] : session->methods) {
+  for (auto &[id, method] : session->methods) {
     auto *m = response->add_methods();
     m->set_name(method->method->name);
+    m->set_id(id);
     auto *req = m->mutable_request_channel();
     req->set_name(absl::StrFormat("%s/%d/%d", method->method->request_channel,
                                   client_id, session->session_id));
@@ -295,7 +296,7 @@ absl::Status RpcServer::HandleClose(uint64_t client_id,
 
 absl::StatusOr<std::shared_ptr<RpcServer::Session>> RpcServer::CreateSession(uint64_t client_id) {
   auto session = std::make_shared<Session>();
-  session->session_id = ++session_id_;
+  session->session_id = ++next_session_id_;
   session->client_id = client_id;
   for (auto &[name, method] : methods_) {
     auto method_instance = std::make_shared<MethodInstance>();
@@ -330,7 +331,7 @@ absl::StatusOr<std::shared_ptr<RpcServer::Session>> RpcServer::CreateSession(uin
     method_instance->response_publisher =
         std::make_shared<subspace::Publisher>(std::move(*pub));
 
-    session->methods.insert({method->name, method_instance});
+    session->methods.insert({method->id, method_instance});
 
     AddCoroutine(std::make_unique<co::Coroutine>(
         *scheduler_, [server = shared_from_this(), session,
@@ -353,12 +354,11 @@ absl::Status RpcServer::DestroySession(int session_id) {
 
 void RpcServer::SessionMethodCoroutine(std::shared_ptr<RpcServer> server,
                                        std::shared_ptr<Session> session,
-                                       std::shared_ptr<MethodInstance> method,
-
+                                       std::shared_ptr<MethodInstance> method_instance,
                                        co::Coroutine *c) {
   while (server->running_) {
     auto s =
-        method->request_subscriber->Wait(server->interrupt_pipe_.ReadFd(), c);
+        method_instance->request_subscriber->Wait(server->interrupt_pipe_.ReadFd(), c);
     if (!s.ok()) {
       server->logger_.Log(toolbelt::LogLevel::kError,
                           "Error waiting for request: %s",
@@ -370,13 +370,12 @@ void RpcServer::SessionMethodCoroutine(std::shared_ptr<RpcServer> server,
     }
     subspace::RpcRequest request;
     bool request_ok = false;
-    std::shared_ptr<MethodInstance> method_instance;
     for (;;) {
-      auto m = method->request_subscriber->ReadMessage();
+      auto m = method_instance->request_subscriber->ReadMessage();
       if (!m.ok()) {
         server->logger_.Log(toolbelt::LogLevel::kError,
                             "Error reading message for method %s: %s",
-                            method->method->name.c_str(),
+                            method_instance->method->name.c_str(),
                             m.status().ToString().c_str());
         break;
       }
@@ -387,19 +386,11 @@ void RpcServer::SessionMethodCoroutine(std::shared_ptr<RpcServer> server,
       if (!request.ParseFromArray(m->buffer, m->length)) {
         server->logger_.Log(toolbelt::LogLevel::kError,
                             "Error parsing request for method %s: %s",
-                            method->method->name.c_str(),
+                            method_instance->method->name.c_str(),
                             m.status().ToString().c_str());
         continue;
       }
       if (request.session_id() == session->session_id) {
-        auto it = session->methods.find(request.method());
-        if (it == session->methods.end()) {
-          server->logger_.Log(toolbelt::LogLevel::kError,
-                              "Unknown method: %s",
-                              request.method().c_str());
-          continue;
-        }
-        method_instance = it->second;
         request_ok = true;
         break;
       }

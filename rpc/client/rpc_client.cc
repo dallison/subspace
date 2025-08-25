@@ -19,6 +19,14 @@ RpcClient::~RpcClient() {
   }
 }
 
+absl::StatusOr<int> RpcClient::FindMethod(const std::string& method) {
+  auto it = method_name_to_id_.find(method);
+  if (it == method_name_to_id_.end()) {
+    return absl::NotFoundError("Method not found");
+  }
+  return it->second;
+}
+
 absl::Status RpcClient::Open(std::chrono::nanoseconds timeout,
                              co::Coroutine *c) {
   if (session_id_ != 0) {
@@ -183,6 +191,7 @@ absl::Status RpcClient::OpenService(std::chrono::nanoseconds timeout,
   for (const auto &method : response.open().methods()) {
     auto m = std::make_shared<Method>();
     m->name = method.name();
+    m->id = method.id();
     m->request_type = method.request_channel().type();
     m->response_type = method.response_channel().type();
     m->slot_size = method.request_channel().slot_size();
@@ -207,7 +216,8 @@ absl::Status RpcClient::OpenService(std::chrono::nanoseconds timeout,
     }
     m->response_subscriber =
         std::make_shared<subspace::Subscriber>(std::move(*sub));
-    methods_[m->name] = std::move(m);
+    method_name_to_id_[m->name] = m->id;
+    methods_[m->id] = std::move(m);
   }
   logger_.Log(toolbelt::LogLevel::kInfo,
               "Opened service %s with session ID: %d", service_.c_str(),
@@ -242,15 +252,15 @@ absl::Status RpcClient::CloseService(std::chrono::nanoseconds timeout,
 }
 
 absl::StatusOr<google::protobuf::Any>
-RpcClient::InvokeMethod(const std::string &name,
+RpcClient::InvokeMethod(int method_id,
                         const google::protobuf::Any &request,
                         std::chrono::nanoseconds timeout, co::Coroutine *c) {
   if (c == nullptr) {
     c = coroutine_;
   }
-  auto it = methods_.find(name);
+  auto it = methods_.find(method_id);
   if (it == methods_.end()) {
-    return absl::NotFoundError(absl::StrFormat("Method not found: %s", name));
+    return absl::NotFoundError(absl::StrFormat("Method %d not found", method_id));
   }
 
   const auto &method = it->second;
@@ -260,7 +270,7 @@ RpcClient::InvokeMethod(const std::string &name,
   req.set_client_id(client_id_);
   req.set_session_id(session_id_);
   req.set_request_id(request_id);
-  req.set_method(name);
+  req.set_method(method_id);
   *req.mutable_argument() = request;
 
   absl::StatusOr<void *> buffer;
