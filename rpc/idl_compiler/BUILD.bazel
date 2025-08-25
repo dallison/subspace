@@ -1,0 +1,47 @@
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "rpc_lib",
+    srcs = [
+        "gen.cc",
+        "service_gen.cc",
+    ],
+    hdrs = [
+        "gen.h",
+        "service_gen.h",
+    ],
+    deps = [
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_protobuf//:protoc_lib",
+    ],
+)
+
+cc_binary(
+    name = "subspace_rpc",
+    srcs = [
+        "main.cc",
+    ],
+    deps = [
+        ":rpc_lib",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/flags:parse",
+        "@com_google_protobuf//:protoc_lib",
+    ],
+)
+
+sh_binary(
+    name = "run_protoc",
+    srcs = [
+        "run_protoc.sh",
+    ],
+    data = [
+        ":subspace_rpc",
+        "//rpc/proto:rpc_test_proto",
+        "@com_google_protobuf//:protoc",
+    ],
+)

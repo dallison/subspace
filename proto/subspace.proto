@@ -245,12 +245,13 @@ message RpcOpenResponse {
 
   message ResponseChannel {
     string name = 1; // Name of the channel.
-    string type = 2; // Type of data carried on this channel.`
+    string type = 2; // Type of data carried on this channel.
   }
   message Method {
     string name = 1;      // Name of the method to call
-    RequestChannel request_channel = 2; // Channel to send request on.
-    ResponseChannel response_channel = 3; // Channel to receive response on.
+    int32 id = 2;
+    RequestChannel request_channel = 3; // Channel to send request on.
+    ResponseChannel response_channel = 4; // Channel to receive response on.
   }
   int32 session_id = 1; // Session ID for this server.
   repeated Method methods = 2; // List of methods available on this server.
@@ -284,7 +285,7 @@ message RpcServerResponse {
 }
 
 message RpcRequest {
-  string method = 1;
+  int32 method = 1;
   google.protobuf.Any argument = 2; // Data to send to the server.
   int32 session_id = 3; // Session ID for this request.
   int32 request_id = 4; // Unique ID for this request.
