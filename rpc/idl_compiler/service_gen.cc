@@ -86,10 +86,10 @@ void ServiceGenerator::GenerateServerMethodRegistrations(std::ostream &os) {
   for (int i = 0; i < service_->method_count(); i++) {
     const auto *method = service_->method(i);
     os << "  {\n";
-    os << "   auto status = server_ = RegisterMethod<"
+    os << "   auto status = server_.RegisterMethod<"
        << method->input_type()->name() << ", " << method->output_type()->name()
        << ">(\"" << method->name()
-       << "\", [](const auto &req, auto *res, co::Coroutine *c) -> absl::Status "
+       << "\", [this](const auto &req, auto *res, co::Coroutine *c) -> absl::Status "
           "{\n";
     os << "      auto s = this->" << method->name() << "(req, c);\n";
     os << "      if (!s.ok()) {\n";
@@ -97,7 +97,7 @@ void ServiceGenerator::GenerateServerMethodRegistrations(std::ostream &os) {
     os << "      }\n";
     os << "      *res = std::move(s.value());\n";
     os << "      return absl::OkStatus();\n";
-    os << "    }, " << service_->name() << "Client::k" << method->name() << "Id);\n";
+    os << "    }, " << i << ");\n";
     os << "    if (!status.ok()) {\n";
     os << "      return status;\n";
     os << "    }\n";
@@ -123,7 +123,7 @@ void ServiceGenerator::GenerateMethodClientSource(
   os << "absl::StatusOr<" << method->output_type()->name() << "> "
      << service_->name() << "Client::" << method_name << "(const "
      << method->input_type()->name()
-     << "& request, co::Coroutine* c = nullptr) {\n";
+     << "& request, co::Coroutine* c) {\n";
   os << "  return client_.Call<" << method->input_type()->name() << ", "
      << method->output_type()->name() << ">(k" << method_name
      << "Id, request, c);\n";

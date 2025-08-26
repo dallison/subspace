@@ -65,8 +65,10 @@ def _subspace_rpc_aspect_impl(target, _ctx):
     cpp_outputs = []
 
     def add_output(base):
-        cpp_outputs.append(paths.replace_extension(base, ".subspace_rpc.cc"))
-        cpp_outputs.append(paths.replace_extension(base, ".subspace_rpc.h"))
+        cpp_outputs.append(paths.replace_extension(base, ".subspace.rpc_client.cc"))
+        cpp_outputs.append(paths.replace_extension(base, ".subspace.rpc_client.h"))
+        cpp_outputs.append(paths.replace_extension(base, ".subspace.rpc_server.cc"))
+        cpp_outputs.append(paths.replace_extension(base, ".subspace.rpc_server.h"))
 
     if ProtoInfo in target:
         transitive_sources = target[ProtoInfo].transitive_sources
@@ -98,11 +100,11 @@ subspace_rpc_aspect = aspect(
     implementation = _subspace_rpc_aspect_impl,
 )
 
-# The subspace_rpc rule runs the Phaser plugin from the protoc compiler.
+# The subspace_rpc rule runs the Subspace RPC plugin from the protoc compiler.
 # The deps for the rule are proto_libraries that contain the protobuf files.
 def _subspace_rpc_impl(ctx):
     outputs = []
-  
+
     direct_sources = []
     transitive_sources = []
     cpp_outputs = []
@@ -116,11 +118,11 @@ def _subspace_rpc_impl(ctx):
 
             # If we are creating a header file in our package, we need to create a symlink to it.
             # This is because the header file will be something like
-            # subspace_rpc/testdata/subspace_rpc/testdata/Test.subspace_rpc.h
+            # subspace_rpc/testdata/subspace_rpc/testdata/Test.subspace.rpc_client.h
             # but we want to be able to do:
-            # #include "subspace_rpc/testdata/Test.subspace_rpc.h"
+            # #include "subspace_rpc/testdata/Test.subspace.rpc_client.h"
             # so we create the symlink:
-            # Test.subspace_rpc.h -> subspace_rpc/testdata/subspace_rpc/testdata/Test.subspace_rpc.h
+            # Test.subspace.rpc_client.h -> subspace_rpc/testdata/subspace_rpc/testdata/Test.subspace.rpc_client.h
             if out_file.extension == "h":
                 prefix = paths.join(ctx.attr.target_name, package_name)
                 symlink_name = out_file.short_path[len(prefix) + 1:]
@@ -161,7 +163,7 @@ _subspace_rpc_gen = rule(
         ),
         "subspace_rpc_plugin": attr.label(
             executable = True,
-            default = Label("//subspace_rpc/compiler:subspace_rpc"),
+            default = Label("//rpc/idl_compiler:subspace_rpc"),
             cfg = "exec",
         ),
         "deps": attr.label_list(
@@ -174,10 +176,22 @@ _subspace_rpc_gen = rule(
     implementation = _subspace_rpc_impl,
 )
 
+def get_rpc_extension(filename):
+    """
+    Returns the file extension from a given filename or path.
+    Returns an empty string if no extension is found.
+    """
+    parts = filename.split(".")
+    if len(parts) > 2:
+        return ".".join(parts[-2:])
+    else:
+        return ""
+
 def _split_files_impl(ctx):
     files = []
     for file in ctx.files.deps:
-        if file.extension == ctx.attr.ext:
+        ext = get_rpc_extension(file.basename)
+        if ext == ctx.attr.ext:
             files.append(file)
 
     return [DefaultInfo(files = depset(files))]
@@ -190,7 +204,7 @@ _split_files = rule(
     implementation = _split_files_impl,
 )
 
-def subspace_rpc_library(name, deps = [], runtime = "@subspace_rpc//subspace_rpc/runtime:subspace_rpc_runtime", add_namespace = ""):
+def subspace_rpc_library(name, deps = [], add_namespace = ""):
     """
     Generate a cc_libary for protobuf files specified in deps.
 
@@ -201,41 +215,65 @@ def subspace_rpc_library(name, deps = [], runtime = "@subspace_rpc//subspace_rpc
         runtime: label for subspace_rpc runtime.
         add_namespace: add given namespace to the message output
     """
-    subspace_rpc = name + "_subspace_rpc"
+    all_files = name + "_files"
 
     _subspace_rpc_gen(
-        name = subspace_rpc,
+        name = all_files,
         deps = deps,
         add_namespace = add_namespace,
         package_name = native.package_name(),
         target_name = name,
     )
 
-    srcs = name + "_srcs"
+    client_srcs = name + "_client_srcs"
     _split_files(
-        name = srcs,
-        ext = "cc",
-        deps = [subspace_rpc],
+        name = client_srcs,
+        ext = "rpc_client.cc",
+        deps = [all_files],
     )
+    client_deps = ["//rpc/client:rpc_client"]
 
-    hdrs = name + "_hdrs"
+    client_hdrs = name + "_client_hdrs"
     _split_files(
-        name = hdrs,
-        ext = "h",
-        deps = [subspace_rpc],
+        name = client_hdrs,
+        ext = "rpc_client.h",
+        deps = [all_files],
     )
 
     libdeps = []
     for dep in deps:
-        if not dep.endswith("_proto"):
-            libdeps.append(dep)
+        if dep.endswith("_proto"):
+            cc_proto = dep.replace("_proto", "_cc_proto")
+            libdeps.append(cc_proto)
 
-    if runtime != "":
-        libdeps = libdeps + [runtime]
-
+    client_name = name + "_client"
     native.cc_library(
-        name = name,
-        srcs = [srcs],
-        hdrs = [hdrs],
-        deps = libdeps,
+        name = client_name,
+        srcs = [client_srcs],
+        hdrs = [client_hdrs],
+        deps = libdeps + client_deps
+    )
+
+    server_srcs = name + "_server_srcs"
+    _split_files(
+        name = server_srcs,
+        ext = "rpc_server.cc",
+        deps = [all_files],
+    )
+
+    server_hdrs = name + "_server_hdrs"
+    _split_files(
+        name = server_hdrs,
+        ext = "rpc_server.h",
+        deps = [all_files],
+    )
+
+    server_deps = ["//rpc/server:rpc_server"]
+
+    server_name = name + "_server"
+    native.cc_library(
+        name = server_name,
+        srcs = [server_srcs],
+        hdrs = [server_hdrs],
+        deps = libdeps + server_deps,
     )
