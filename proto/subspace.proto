@@ -31,7 +31,7 @@ message CreatePublisherRequest {
   bool is_fixed_size = 8;
   string mux = 9;
   int32 vchan_id = 10;
-  bool notify_retirement = 11;  // Notify publisher of slot retirement.
+  bool notify_retirement = 11; // Notify publisher of slot retirement.
 }
 
 message CreatePublisherResponse {
@@ -46,8 +46,8 @@ message CreatePublisherResponse {
   int32 num_sub_updates = 9;
   bytes type = 10;
   int32 vchan_id = 11;
-  int32 retirement_fd_index = 14;             // My retirement fd index (read end)
-  repeated int32 retirement_fd_indexes = 15;  // Write end of all retirement fds.
+  int32 retirement_fd_index = 14; // My retirement fd index (read end)
+  repeated int32 retirement_fd_indexes = 15; // Write end of all retirement fds.
 }
 
 // This is used both to create a new subscriber and to reload
@@ -133,15 +133,15 @@ message ChannelInfo {
   int32 slot_size = 2;
   int32 num_slots = 3;
   bytes type = 4;
-  int32 num_pubs = 5;         // Total number of publishers for this channel.
-  int32 num_subs = 6;         // Total number of subscribers for this channel.
-  int32 num_bridge_pubs = 7;  // Number of publishers that are bridges.
-  int32 num_bridge_subs = 8;  // Number of subscribers that are bridges.
-  bool is_reliable = 9;       // True if channel is reliable.
-  bool is_virtual = 10;       // True if channel is virtual.
+  int32 num_pubs = 5;        // Total number of publishers for this channel.
+  int32 num_subs = 6;        // Total number of subscribers for this channel.
+  int32 num_bridge_pubs = 7; // Number of publishers that are bridges.
+  int32 num_bridge_subs = 8; // Number of subscribers that are bridges.
+  bool is_reliable = 9;      // True if channel is reliable.
+  bool is_virtual = 10;      // True if channel is virtual.
 
   // Only if is_virtual is true.
-  int32 vchan_id = 11;        // Virtual channel ID.
+  int32 vchan_id = 11; // Virtual channel ID.
   string mux = 12;
 }
 
@@ -172,7 +172,7 @@ message Statistics {
 
 message ChannelAddress {
   bytes address = 1; // In host byte order.
-  int32 port = 2;       // In host byte order.
+  int32 port = 2;    // In host byte order.
 }
 
 // This is sent over the connected channel TCP bridge when the
@@ -192,9 +192,7 @@ message Subscribed {
 
 // This is sent over a TCP connection from the peer server when the
 // given slot retires and the publisher wants notification of it.
-message RetirementNotification {
-  int32 slot_id = 1;
-}
+message RetirementNotification { int32 slot_id = 1; }
 
 // This message is sent over UDP.
 message Discovery {
@@ -232,15 +230,14 @@ message Discovery {
 
 // Ask the server to open connection to a server.  The response will contain the
 // session ID for the server and a list of methods that can be called on it.
-message RpcOpenRequest {
-}
+message RpcOpenRequest {}
 
 message RpcOpenResponse {
   message RequestChannel {
-    string name = 1; // Name of the channel.
+    string name = 1;     // Name of the channel.
     int32 slot_size = 2; // Size of each slot in bytes.
     int32 num_slots = 3; // Number of slots in the channel.
-    string type = 4; // Type of data carried on this channel.
+    string type = 4;     // Type of data carried on this channel.
   }
 
   message ResponseChannel {
@@ -248,22 +245,21 @@ message RpcOpenResponse {
     string type = 2; // Type of data carried on this channel.
   }
   message Method {
-    string name = 1;      // Name of the method to call
+    string name = 1; // Name of the method to call
     int32 id = 2;
-    RequestChannel request_channel = 3; // Channel to send request on.
+    RequestChannel request_channel = 3;   // Channel to send request on.
     ResponseChannel response_channel = 4; // Channel to receive response on.
   }
-  int32 session_id = 1; // Session ID for this server.
+  int32 session_id = 1;        // Session ID for this server.
   repeated Method methods = 2; // List of methods available on this server.
-  uint64 client_id = 3;   // Client that this is destined for.
+  uint64 client_id = 3;        // Client that this is destined for.
 }
 
 message RpcCloseRequest {
   int32 session_id = 1; // Session ID to close.
 }
 
-message RpcCloseResponse {
-}
+message RpcCloseResponse {}
 
 message RpcServerRequest {
   uint64 client_id = 1;
@@ -277,7 +273,7 @@ message RpcServerRequest {
 message RpcServerResponse {
   uint64 client_id = 1;
   int32 request_id = 2;
-    oneof response {
+  oneof response {
     RpcOpenResponse open = 3;
     RpcCloseResponse close = 4;
   }
@@ -287,24 +283,35 @@ message RpcServerResponse {
 message RpcRequest {
   int32 method = 1;
   google.protobuf.Any argument = 2; // Data to send to the server.
-  int32 session_id = 3; // Session ID for this request.
-  int32 request_id = 4; // Unique ID for this request.
-  uint64 client_id = 5; // Client ID making the request.
+  int32 session_id = 3;             // Session ID for this request.
+  int32 request_id = 4;             // Unique ID for this request.
+  uint64 client_id = 5;             // Client ID making the request.
 }
 
 message RpcResponse {
-  string error = 1; // Error message if any.
+  string error = 1;               // Error message if any.
   google.protobuf.Any result = 2; // Data returned by the server.
-  int32 session_id = 3; // Session ID for this response.
+  int32 session_id = 3;           // Session ID for this response.
   int32 request_id = 4; // Unique ID for this response, matches request.
   uint64 client_id = 5; // Client ID making the request.
 }
 
-// Carries raw bytes over RPC.
-message RawMessage {
-  bytes data = 1;
+// This is sent to cancel a streaming method.
+message RpcCancelRequest {
+  int32 session_id = 1; // Session ID for this request.
+  int32 request_id = 2; // Unique ID for this request.
+  uint64 client_id = 3; // Client ID making the request.
 }
 
-// RPC calls with no result return this.
-message VoidMessage {
+message RpcCancelResponse {
+  string error = 1;
+  int32 session_id = 2; // Session ID for this response.
+  int32 request_id = 3; // Unique ID for this response, matches request.
+  uint64 client_id = 4; // Client ID making the request.
 }
+
+// Carries raw bytes over RPC.
+message RawMessage { bytes data = 1; }
+
+// RPC calls with no result return this.
+message VoidMessage {}
