@@ -19,7 +19,7 @@ RpcClient::~RpcClient() {
   }
 }
 
-absl::StatusOr<int> RpcClient::FindMethod(const std::string& method) {
+absl::StatusOr<int> RpcClient::FindMethod(std::string_view method) {
   auto it = method_name_to_id_.find(method);
   if (it == method_name_to_id_.end()) {
     return absl::NotFoundError("Method not found");
