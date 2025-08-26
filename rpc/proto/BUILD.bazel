@@ -1,5 +1,6 @@
 load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
 load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
+load("//:rpc/subspace_rpc_library.bzl", "subspace_rpc_library")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -13,3 +14,9 @@ cc_proto_library(
     deps = [":rpc_test_proto"],
 )
 
+subspace_rpc_library(
+    name = "rpc_test_subspace",
+    deps = [
+        ":rpc_test_proto",
+    ],
+)

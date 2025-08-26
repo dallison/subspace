@@ -45,13 +45,15 @@ bool CodeGenerator::Generate(
     google::protobuf::compiler::GeneratorContext *generator_context,
     std::string *error) const {
 
-  // The options for the compiler are passed in the --rpc_out parameter
+  // The options for the compiler are passed in the --subspace_rpc_out parameter
   // as a comma separated list of key=value pairs, followed by a colon
   // and then the output directory.
   std::vector<std::pair<std::string, std::string>> options;
   google::protobuf::compiler::ParseGeneratorParameter(parameter, &options);
 
   for (auto option : options) {
+    std::cerr << "option " << option.first << "=" << option.second
+              << "\n";
     if (option.first == "add_namespace") {
       added_namespace_ = option.second;
     } else if (option.first == "package_name") {
@@ -205,7 +207,7 @@ Generator::Generator(const google::protobuf::FileDescriptor *file,
 void Generator::GenerateClientHeaders(std::ostream &os) {
   os << "#pragma once\n";
   std::string main_base =
-      GeneratedFilename(package_name_, target_name_, file_->name());
+      GeneratedFilename("", "", file_->name());
   std::filesystem::path cpp_header(main_base);
   cpp_header.replace_extension(".pb.h");
 
@@ -246,7 +248,7 @@ void Generator::GenerateClientSources(std::ostream &os) {
 void Generator::GenerateServerHeaders(std::ostream &os) {
   os << "#pragma once\n";
   std::string main_base =
-      GeneratedFilename(package_name_, target_name_, file_->name());
+      GeneratedFilename("", "", file_->name());
   std::filesystem::path cpp_header(main_base);
   cpp_header.replace_extension(".pb.h");
 
