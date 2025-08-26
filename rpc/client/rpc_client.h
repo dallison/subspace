@@ -6,7 +6,7 @@
 
 namespace subspace {
 
-class RpcClient {
+class RpcClient : public std::enable_shared_from_this<RpcClient> {
 public:
   // Create an RPC client.  The arguments are:
   // service: the RPC service to use - there must be an RPC server running on

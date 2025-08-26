@@ -16,19 +16,19 @@ void ServiceGenerator::GenerateClientHeader(std::ostream &os) {
   os << "public:\n";
   os << "  " << service_->name()
      << "Client(uint64_t client_id, std::string "
-        "subspace_socket) : client_(\""
+        "subspace_socket) : client_(std::make_shared<subspace::RpcClient>(\""
      << service_->name()
      << "\", client_id, "
-        "std::move(subspace_socket)) {\n";
+        "std::move(subspace_socket))) {\n";
   os << "  }\n";
   os << "  absl::Status Open(co::Coroutine* c = nullptr) {\n";
-  os << "    return client_.Open(c);\n";
+  os << "    return client_->Open(c);\n";
   os << "  }\n";
   os << "  absl::Status Close(co::Coroutine* c = nullptr) {\n";
-  os << "    return client_.Close(c);\n";
+  os << "    return client_->Close(c);\n";
   os << "  }\n";
   os << "  void SetLogLevel(const std::string& level) {\n";
-  os << "    client_.SetLogLevel(level);\n";
+  os << "    client_->SetLogLevel(level);\n";
   os << "  }\n";
   os << "\n";
   for (int i = 0; i < service_->method_count(); i++) {
@@ -44,7 +44,7 @@ void ServiceGenerator::GenerateClientHeader(std::ostream &os) {
     os << "  static constexpr int k" << absl::StrCat(method->name(), "Id")
        << " = " << i << ";\n";
   }
-  os << "  subspace::RpcClient client_;\n";
+  os << "  std::shared_ptr<subspace::RpcClient> client_;\n";
   os << "};\n";
 
   os << "\n\n";
@@ -141,7 +141,7 @@ void ServiceGenerator::GenerateMethodClientSource(
   os << "absl::StatusOr<" << method->output_type()->name() << "> "
      << service_->name() << "Client::" << method_name << "(const "
      << method->input_type()->name() << "& request, co::Coroutine* c) {\n";
-  os << "  return client_.Call<" << method->input_type()->name() << ", "
+  os << "  return client_->Call<" << method->input_type()->name() << ", "
      << method->output_type()->name() << ">(k" << method_name
      << "Id, request, c);\n";
   os << "}\n";
