@@ -32,6 +32,7 @@ absl::Status RpcServer::RegisterMethod(
   if (methods_.find(method) != methods_.end()) {
     return absl::AlreadyExistsError("Method already registered: " + method);
   }
+  std::cerr << "registering method " << method << " with id " << id << std::endl;
   methods_[method] =
       std::make_shared<Method>(this, method, request_type, response_type,
                                slot_size, num_slots, std::move(callback), id == -1 ? ++next_method_id_ : id);

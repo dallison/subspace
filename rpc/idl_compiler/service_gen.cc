@@ -27,6 +27,10 @@ void ServiceGenerator::GenerateClientHeader(std::ostream &os) {
   os << "  absl::Status Close(co::Coroutine* c = nullptr) {\n";
   os << "    return client_.Close(c);\n";
   os << "  }\n";
+  os << "  void SetLogLevel(const std::string& level) {\n";
+  os << "    client_.SetLogLevel(level);\n";
+  os << "  }\n";
+  os << "\n";
   for (int i = 0; i < service_->method_count(); i++) {
     const auto *method = service_->method(i);
     GenerateMethodClientHeader(method, os);
@@ -52,9 +56,23 @@ void ServiceGenerator::GenerateServerHeader(std::ostream &os) {
   os << "public:\n";
   os << "  " << service_->name()
      << "Server(const std::string& "
-        "subspace_socket) : server_(\""
-     << service_->name() << "\", std::move(subspace_socket)) {}\n";
+        "subspace_socket) : server_(std::make_shared<subspace::RpcServer>(\""
+     << service_->name() << "\", std::move(subspace_socket))) {}\n";
+  os << "  virtual ~" << service_->name() << "Server() = default;\n";
+  os << "\n";
   os << "  absl::Status RegisterMethods();\n";
+  os << "\n";
+  os << "  absl::Status Run(co::CoroutineScheduler* scheduler = nullptr) {\n";
+  os << "    return server_->Run(scheduler);\n";
+  os << "  }\n";
+  os << "\n";
+  os << "  void Stop() {\n";
+  os << "    server_->Stop();\n";
+  os << "  }\n";
+  os << "\n";
+  os << "  void SetLogLevel(const std::string& level) {\n";
+  os << "    server_->SetLogLevel(level);\n";
+  os << "  }\n";
   os << "\n";
   os << "protected:\n";
   for (int i = 0; i < service_->method_count(); i++) {
@@ -63,7 +81,7 @@ void ServiceGenerator::GenerateServerHeader(std::ostream &os) {
   }
   os << "\n";
   os << "private:\n";
-  os << "  subspace::RpcServer server_;\n";
+  os << "  std::shared_ptr<subspace::RpcServer> server_;\n";
   os << "};\n";
 }
 
@@ -86,11 +104,11 @@ void ServiceGenerator::GenerateServerMethodRegistrations(std::ostream &os) {
   for (int i = 0; i < service_->method_count(); i++) {
     const auto *method = service_->method(i);
     os << "  {\n";
-    os << "   auto status = server_.RegisterMethod<"
+    os << "   auto status = server_->RegisterMethod<"
        << method->input_type()->name() << ", " << method->output_type()->name()
        << ">(\"" << method->name()
-       << "\", [this](const auto &req, auto *res, co::Coroutine *c) -> absl::Status "
-          "{\n";
+       << "\", [this](const auto &req, auto *res, co::Coroutine *c) -> "
+          "absl::Status {\n";
     os << "      auto s = this->" << method->name() << "(req, c);\n";
     os << "      if (!s.ok()) {\n";
     os << "        return s.status();\n";
@@ -122,8 +140,7 @@ void ServiceGenerator::GenerateMethodClientSource(
   std::string method_name = method->name();
   os << "absl::StatusOr<" << method->output_type()->name() << "> "
      << service_->name() << "Client::" << method_name << "(const "
-     << method->input_type()->name()
-     << "& request, co::Coroutine* c) {\n";
+     << method->input_type()->name() << "& request, co::Coroutine* c) {\n";
   os << "  return client_.Call<" << method->input_type()->name() << ", "
      << method->output_type()->name() << ">(k" << method_name
      << "Id, request, c);\n";
