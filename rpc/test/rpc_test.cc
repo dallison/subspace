@@ -218,10 +218,8 @@ TEST_F(RpcTest, Stream) {
     class MyResponseReceiver
         : public subspace::ResponseReceiver<rpc::TestResponse> {
     public:
-      void OnResponse(const rpc::TestResponse &response,
-                      bool is_last) override {
-        std::cerr << "Received response: " << response.message() << " last "
-                  << is_last << std::endl;
+      void OnResponse(const rpc::TestResponse &response) override {
+        std::cerr << "Received response: " << response.message() << std::endl;
         count++;
       }
       void OnError(const absl::Status &status) override {
