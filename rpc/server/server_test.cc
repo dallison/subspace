@@ -797,9 +797,8 @@ TEST_F(ServerTest, CancelStream) {
         {.reliable = true, .type = method->request_channel().type()});
     ASSERT_OK(pub);
 
-    auto cancel_pub = client.CreatePublisher(
-        method->cancel_channel(), subspace::kCancelChannelNumSlots,
-        subspace::kCancelChannelSlotSize, {.reliable = true});
+    auto cancel_pub = client.CreatePublisher(method->cancel_channel(), 64, 10,
+                                             {.reliable = true});
     ASSERT_OK(cancel_pub);
 
     std::cerr << "subscribing to " << method->response_channel().name()
@@ -842,8 +841,7 @@ TEST_F(ServerTest, CancelStream) {
             num_results++;
             if (num_results == 5) {
               // Send a cancel message
-              auto buffer = cancel_pub->GetMessageBuffer(
-                  subspace::kCancelChannelSlotSize);
+              auto buffer = cancel_pub->GetMessageBuffer(64);
               ASSERT_OK(buffer);
               subspace::RpcCancelRequest cancel;
               cancel.set_client_id(ctx.client_id);
