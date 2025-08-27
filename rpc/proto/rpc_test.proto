@@ -8,6 +8,7 @@ package rpc;
 
 message TestRequest {
   string message = 1;
+  int32 stream_period = 2;    // In milliseconds
 }
 
 message TestResponse {

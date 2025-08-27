@@ -249,6 +249,7 @@ message RpcOpenResponse {
     int32 id = 2;
     RequestChannel request_channel = 3;   // Channel to send request on.
     ResponseChannel response_channel = 4; // Channel to receive response on.
+    string cancel_channel = 5;            // To cancel streams.
   }
   int32 session_id = 1;        // Session ID for this server.
   repeated Method methods = 2; // List of methods available on this server.
@@ -292,22 +293,17 @@ message RpcResponse {
   string error = 1;               // Error message if any.
   google.protobuf.Any result = 2; // Data returned by the server.
   int32 session_id = 3;           // Session ID for this response.
-  int32 request_id = 4; // Unique ID for this response, matches request.
-  uint64 client_id = 5; // Client ID making the request.
+  int32 request_id = 4;           // Unique ID for this response, matches request.
+  uint64 client_id = 5;           // Client ID making the request.
+  bool is_last = 6;               // Whether this is the last response in a stream.
+  bool is_cancelled = 7;          // Whether this response is for a cancelled request.
 }
 
 // This is sent to cancel a streaming method.
 message RpcCancelRequest {
   int32 session_id = 1; // Session ID for this request.
-  int32 request_id = 2; // Unique ID for this request.
+  int32 request_id = 2; // Request ID for method invocation.
   uint64 client_id = 3; // Client ID making the request.
-}
-
-message RpcCancelResponse {
-  string error = 1;
-  int32 session_id = 2; // Session ID for this response.
-  int32 request_id = 3; // Unique ID for this response, matches request.
-  uint64 client_id = 4; // Client ID making the request.
 }
 
 // Carries raw bytes over RPC.
