@@ -15,10 +15,6 @@ constexpr int32_t kRpcResponseSlotSize = 128;
 constexpr int32_t kRpcRequestNumSlots = 100;
 constexpr int32_t kRpcResponseNumSlots = 100;
 
-// Stream cancel channel parameters.
-constexpr int32_t kCancelChannelSlotSize = 64;
-constexpr int32_t kCancelChannelNumSlots = 8;
-
 // Default slot parameters for method invocation requests.  The slot size
 // can be expanded if the request is bigger.
 constexpr int32_t kDefaultMethodSlotSize = 256;
@@ -119,8 +115,7 @@ struct Session {
 
 } // namespace internal
 
-template <typename Response>
-struct StreamWriter {
+template <typename Response> struct StreamWriter {
   // Returns true if the write worked, false if the request was cancelled.
   bool Write(const Response &res, co::Coroutine *c) {
     auto any = std::make_unique<google::protobuf::Any>();
@@ -128,16 +123,14 @@ struct StreamWriter {
     return writer->Write(std::move(any), c);
   }
 
-    void Finish(co::Coroutine *c) { writer->Finish(c); }
+  void Finish(co::Coroutine *c) { writer->Finish(c); }
 
   void Cancel() { writer->Cancel(); }
 
   bool IsCancelled() const { return writer->IsCancelled(); }
 
-  void SetWriter(internal::AnyStreamWriter *writer) {
-    this->writer = writer;
-  }
-  internal::AnyStreamWriter* writer;
+  void SetWriter(internal::AnyStreamWriter *writer) { this->writer = writer; }
+  internal::AnyStreamWriter *writer;
 };
 
 class RpcServer : public std::enable_shared_from_this<RpcServer> {
@@ -474,9 +467,10 @@ inline absl::Status RpcServer::RegisterMethod(
   return RegisterMethod(
       method, request_descriptor->full_name(), response_descriptor->full_name(),
       kDefaultMethodSlotSize, kDefaultMethodNumSlots,
-      [method, callback = std::move(callback), request_descriptor, &typed_writer](
-          const google::protobuf::Any &req, internal::AnyStreamWriter &writer,
-          co::Coroutine *c) -> absl::Status {
+      [method, callback = std::move(callback), request_descriptor,
+       typed_writer](const google::protobuf::Any &req,
+                      internal::AnyStreamWriter &writer,
+                      co::Coroutine *c) mutable -> absl::Status {
         if (!req.Is<Request>()) {
           return absl::InvalidArgumentError(absl::StrFormat(
               "Invalid argment type for %s: need %s got %s", method,

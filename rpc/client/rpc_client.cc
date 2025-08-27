@@ -216,6 +216,21 @@ absl::Status RpcClient::OpenService(std::chrono::nanoseconds timeout,
     }
     m->response_subscriber =
         std::make_shared<subspace::Subscriber>(std::move(*sub));
+
+    if (!method.cancel_channel().empty()) {
+      auto cpub = client_->CreatePublisher(method.cancel_channel(),
+                                           kCancelChannelSlotSize,
+                                           kCancelChannelNumSlots,
+                                           {
+                                               .reliable = true,
+                                           });
+      if (!cpub.ok()) {
+        return absl::InternalError(absl::StrFormat(
+            "Failed to create cancel publisher: %s", cpub.status().ToString()));
+      }
+      m->cancel_publisher =
+          std::make_shared<subspace::Publisher>(std::move(*cpub));
+    }
     method_name_to_id_[m->name] = m->id;
     methods_[m->id] = std::move(m);
   }
@@ -349,7 +364,7 @@ absl::Status RpcClient::InvokeMethod(
                        const RpcResponse *)>
         response_handler,
     std::chrono::nanoseconds timeout, co::Coroutine *c) {
-      std::cerr << "shared_from_this: " << shared_from_this() << "\n";
+  std::cerr << "shared_from_this: " << shared_from_this() << "\n";
   if (c == nullptr) {
     c = coroutine_;
   }
@@ -431,8 +446,8 @@ absl::Status RpcClient::InvokeMethod(
                 absl::StrFormat("%s", rpc_response.error()));
           }
           std::cerr << "Calling response handler\n";
-          response_handler(shared_from_this(), client_id_, session_id_, request_id, method,
-                           &rpc_response);
+          response_handler(shared_from_this(), client_id_, session_id_,
+                           request_id, method, &rpc_response);
           // We stop receiving response if this is the last one, cancelled or
           // errored
           if (rpc_response.is_last() || rpc_response.is_cancelled() ||
@@ -448,10 +463,10 @@ absl::Status RpcClient::InvokeMethod(
   return absl::OkStatus();
 }
 
-absl::Status RpcClient::CancelRequest(uint64_t client_id, int session_id,
-                                      int request_id,
-                                      std::shared_ptr<client_internal::Method> method,
-                                    std::chrono::nanoseconds timeout, co::Coroutine *c) {
+absl::Status
+RpcClient::CancelRequest(uint64_t client_id, int session_id, int request_id,
+                         std::shared_ptr<client_internal::Method> method,
+                         std::chrono::nanoseconds timeout, co::Coroutine *c) {
   subspace::RpcCancelRequest req;
   req.set_client_id(client_id_);
   req.set_session_id(session_id_);

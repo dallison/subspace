@@ -8,6 +8,9 @@ namespace subspace {
 
 class RpcClient;
 
+constexpr int32_t kCancelChannelSlotSize = 64;
+constexpr int32_t kCancelChannelNumSlots = 8;
+
 namespace client_internal {
 struct Method {
   std::string name;
@@ -29,6 +32,8 @@ public:
 
   // Called when a response is received.
   virtual void OnResponse(const Response &response, bool is_last) = 0;
+
+  virtual void OnFinish() = 0;
 
   // Called when an error occurs.
   virtual void OnError(const absl::Status &status) = 0;
@@ -451,10 +456,12 @@ inline absl::Status RpcClient::Call(int method_id, const Request &request,
           receiver.OnCancel();
         } else if (!response->error().empty()) {
           receiver.OnError(absl::InternalError(response->error()));
+        } else if (response->is_last() && !response->has_result()) {
+          receiver.OnFinish();
         } else {
           Response resp;
           if (!response->result().UnpackTo(&resp)) {
-            receiver.OnError(absl::InternalError("Failed to unpack response"));
+            receiver.OnError(absl::InternalError("5 Failed to unpack response"));
           } else {
             receiver.OnResponse(resp, response->is_last());
           }
