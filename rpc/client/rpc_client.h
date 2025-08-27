@@ -31,7 +31,7 @@ public:
   virtual ~ResponseReceiver() = default;
 
   // Called when a response is received.
-  virtual void OnResponse(const Response &response, bool is_last) = 0;
+  virtual void OnResponse(const Response &response) = 0;
 
   virtual void OnFinish() = 0;
 
@@ -463,7 +463,7 @@ inline absl::Status RpcClient::Call(int method_id, const Request &request,
           if (!response->result().UnpackTo(&resp)) {
             receiver.OnError(absl::InternalError("5 Failed to unpack response"));
           } else {
-            receiver.OnResponse(resp, response->is_last());
+            receiver.OnResponse(resp);
           }
         }
       },

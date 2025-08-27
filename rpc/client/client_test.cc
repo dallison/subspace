@@ -420,10 +420,9 @@ TEST_F(ClientTest, TypedStream) {
     class MyResponseReceiver
         : public subspace::ResponseReceiver<rpc::TestResponse> {
     public:
-      void OnResponse(const rpc::TestResponse &response,
-                      bool is_last) override {
-        std::cerr << "Received response: " << response.message() << " last "
-                  << is_last << std::endl;
+      void OnResponse(const rpc::TestResponse &response
+       ) override {
+        std::cerr << "Received response: " << response.message() << std::endl;
         count++;
       }
 
@@ -471,10 +470,8 @@ TEST_F(ClientTest, CancelStream) {
     class MyResponseReceiver
         : public subspace::ResponseReceiver<rpc::TestResponse> {
     public:
-      void OnResponse(const rpc::TestResponse &response,
-                      bool is_last) override {
-        std::cerr << "Received response: " << response.message() << " last "
-                  << is_last << std::endl;
+      void OnResponse(const rpc::TestResponse &response) override {
+        std::cerr << "Received response: " << response.message() << std::endl;
         count++;
         if (count == 5) {
           std::cerr << "Cancelling stream after 5 responses" << std::endl;
