@@ -103,6 +103,25 @@ void ServiceGenerator::GenerateServerMethodRegistrations(std::ostream &os) {
   os << "absl::Status " << service_->name() << "Server::RegisterMethods() {\n";
   for (int i = 0; i < service_->method_count(); i++) {
     const auto *method = service_->method(i);
+
+    if (method->server_streaming()) {
+      // Streaming method.
+      os << "  {\n";
+      os << "   auto status = server_->RegisterMethod<"
+         << method->input_type()->name() << ", " << method->output_type()->name()
+         << ">(\"" << method->name()
+         << "\", [this](const auto &req, subspace::StreamWriter<"
+            << method->output_type()->name()
+         << "> &writer, co::Coroutine *c) -> absl::Status {\n";
+      os << "      return this->" << method->name() << "(req, writer, c);\n";
+      os << "    }, " << i << ");\n";
+      os << "    if (!status.ok()) {\n";
+      os << "      return status;\n";
+      os << "    }\n";
+      os << "  }\n";
+      continue;
+    }
+
     os << "  {\n";
     os << "   auto status = server_->RegisterMethod<"
        << method->input_type()->name() << ", " << method->output_type()->name()
@@ -128,6 +147,16 @@ void ServiceGenerator::GenerateServerMethodRegistrations(std::ostream &os) {
 void ServiceGenerator::GenerateMethodClientHeader(
     const google::protobuf::MethodDescriptor *method, std::ostream &os) {
   std::string method_name = method->name();
+  if (method->server_streaming()) {
+    // Streaming method.
+    os << "  absl::Status " << method_name << "(";
+    os << "const " << method->input_type()->name() << "& request";
+    os << ", subspace::ResponseReceiver<" << method->output_type()->name()
+       << ">& receiver";
+    os << ", co::Coroutine* c = nullptr";
+    os << ");\n";
+    return;
+  }
   os << "  absl::StatusOr<" << method->output_type()->name() << "> "
      << method_name << "(";
   os << "const " << method->input_type()->name() << "& request";
@@ -138,6 +167,18 @@ void ServiceGenerator::GenerateMethodClientHeader(
 void ServiceGenerator::GenerateMethodClientSource(
     const google::protobuf::MethodDescriptor *method, std::ostream &os) {
   std::string method_name = method->name();
+  if (method->server_streaming()) {
+    // Streaming method.
+    os << "absl::Status " << service_->name() << "Client::" << method_name
+       << "(const " << method->input_type()->name()
+       << "& request, subspace::ResponseReceiver<" << method->output_type()->name()
+       << ">& receiver, co::Coroutine* c) {\n";
+    os << "  return client_->Call<" << method->input_type()->name() << ", "
+       << method->output_type()->name() << ">(k" << method_name
+       << "Id, request, receiver, c);\n";
+    os << "}\n";
+    return;
+  }
   os << "absl::StatusOr<" << method->output_type()->name() << "> "
      << service_->name() << "Client::" << method_name << "(const "
      << method->input_type()->name() << "& request, co::Coroutine* c) {\n";
@@ -149,6 +190,14 @@ void ServiceGenerator::GenerateMethodClientSource(
 
 void ServiceGenerator::GenerateMethodServerHeader(
     const google::protobuf::MethodDescriptor *method, std::ostream &os) {
+  if (method->server_streaming()) {
+    // Streaming method.
+    os << "  virtual absl::Status " << method->name() << "(const "
+       << method->input_type()->name()
+       << "& request, subspace::StreamWriter<" << method->output_type()->name()
+       << ">& writer, co::Coroutine* c = nullptr) = 0;\n";
+    return;
+  }
   os << "  virtual absl::StatusOr<" << method->output_type()->name() << "> "
      << method->name() << "(const " << method->input_type()->name()
      << "& request, co::Coroutine* c = nullptr) = 0;\n";

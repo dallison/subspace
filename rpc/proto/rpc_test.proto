@@ -28,4 +28,5 @@ message PerfResponse {
 service TestService {
   rpc TestMethod(TestRequest) returns (TestResponse);
   rpc PerfMethod(PerfRequest) returns (PerfResponse);
+  rpc StreamMethod(TestRequest) returns (stream TestResponse);
 }
