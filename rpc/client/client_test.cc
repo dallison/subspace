@@ -190,8 +190,7 @@ static std::shared_ptr<subspace::RpcServer> BuildServer() {
   // Stream method.
   s = server->RegisterMethod<rpc::TestRequest, rpc::TestResponse>(
       "StreamMethod",
-      [](const auto &req,
-         subspace::StreamWriter<rpc::TestResponse> &writer,
+      [](const auto &req, subspace::StreamWriter<rpc::TestResponse> &writer,
          co::Coroutine *c) -> absl::Status {
         std::cerr << "StreamMethod called with request: " << req.DebugString()
                   << std::endl;
@@ -225,7 +224,8 @@ TEST_F(ClientTest, Typed) {
   ASSERT_OK(server->Run(&scheduler));
 
   co::Coroutine test(scheduler, [&](co::Coroutine *c) {
-    auto client = std::make_shared<subspace::RpcClient>("TestService", 1, ClientTest::Socket());
+    auto client = std::make_shared<subspace::RpcClient>("TestService", 1,
+                                                        ClientTest::Socket());
     ASSERT_OK(client->Open(c));
 
     rpc::TestRequest test_request;
@@ -233,7 +233,7 @@ TEST_F(ClientTest, Typed) {
 
     absl::StatusOr<rpc::TestResponse> resp =
         client->Call<rpc::TestRequest, rpc::TestResponse>("TestMethod",
-                                                         test_request, c);
+                                                          test_request, c);
     std::cerr << resp.status().ToString() << std::endl;
     ASSERT_OK(resp);
 
@@ -252,7 +252,8 @@ TEST_F(ClientTest, TypedMethodId) {
   ASSERT_OK(server->Run(&scheduler));
 
   co::Coroutine test(scheduler, [&](co::Coroutine *c) {
-    auto client = std::make_shared<subspace::RpcClient>("TestService", 2, ClientTest::Socket());
+    auto client = std::make_shared<subspace::RpcClient>("TestService", 2,
+                                                        ClientTest::Socket());
     ASSERT_OK(client->Open(c));
 
     auto TestMethodId = client->FindMethod("TestMethod");
@@ -263,7 +264,7 @@ TEST_F(ClientTest, TypedMethodId) {
 
     absl::StatusOr<rpc::TestResponse> resp =
         client->Call<rpc::TestRequest, rpc::TestResponse>(*TestMethodId,
-                                                         test_request, c);
+                                                          test_request, c);
     ASSERT_OK(resp);
 
     EXPECT_EQ(resp->message(), "Hello from TestMethod");
@@ -281,7 +282,8 @@ TEST_F(ClientTest, TypedVoid) {
   ASSERT_OK(server->Run(&scheduler));
 
   co::Coroutine test(scheduler, [&](co::Coroutine *c) {
-    auto client = std::make_shared<subspace::RpcClient>("TestService", 3, ClientTest::Socket());
+    auto client = std::make_shared<subspace::RpcClient>("TestService", 3,
+                                                        ClientTest::Socket());
     ASSERT_OK(client->Open(c));
 
     rpc::TestRequest test_request;
@@ -305,7 +307,8 @@ TEST_F(ClientTest, TypedError) {
   ASSERT_OK(server->Run(&scheduler));
 
   co::Coroutine test(scheduler, [&](co::Coroutine *c) {
-    auto client = std::make_shared<subspace::RpcClient>("TestService", 4, ClientTest::Socket());
+    auto client = std::make_shared<subspace::RpcClient>("TestService", 4,
+                                                        ClientTest::Socket());
     ASSERT_OK(client->Open(c));
 
     rpc::TestRequest test_request;
@@ -313,7 +316,7 @@ TEST_F(ClientTest, TypedError) {
 
     absl::StatusOr<rpc::TestResponse> resp =
         client->Call<rpc::TestRequest, rpc::TestResponse>("ErrorMethod",
-                                                         test_request, c);
+                                                          test_request, c);
     ASSERT_FALSE(resp.ok());
     std::cerr << "Received error: " << resp.status().ToString() << std::endl;
     ASSERT_EQ("INTERNAL: Failed to invoke method: INTERNAL: Error executing "
@@ -334,7 +337,8 @@ TEST_F(ClientTest, TypedTimeout) {
   ASSERT_OK(server->Run(&scheduler));
 
   co::Coroutine test(scheduler, [&](co::Coroutine *c) {
-    auto client = std::make_shared<subspace::RpcClient>("TestService", 5, ClientTest::Socket());
+    auto client = std::make_shared<subspace::RpcClient>("TestService", 5,
+                                                        ClientTest::Socket());
     ASSERT_OK(client->Open(c));
 
     rpc::TestRequest test_request;
@@ -343,7 +347,7 @@ TEST_F(ClientTest, TypedTimeout) {
     // Invoke with 1 second timeout.  The method will take 2 seconds to respond.
     absl::StatusOr<rpc::TestResponse> resp =
         client->Call<rpc::TestRequest, rpc::TestResponse>("TimeoutMethod",
-                                                         test_request, 1s, c);
+                                                          test_request, 1s, c);
     ASSERT_FALSE(resp.ok());
     std::cerr << "Received error: " << resp.status().ToString() << std::endl;
     ASSERT_EQ("INTERNAL: Failed to invoke method: INTERNAL: Error waiting for "
@@ -363,7 +367,8 @@ TEST_F(ClientTest, Performance) {
   ASSERT_OK(server->Run(&scheduler));
 
   co::Coroutine test(scheduler, [&](co::Coroutine *c) {
-    auto client = std::make_shared<subspace::RpcClient>("TestService", 6, ClientTest::Socket());
+    auto client = std::make_shared<subspace::RpcClient>("TestService", 6,
+                                                        ClientTest::Socket());
     ASSERT_OK(client->Open(c));
 
     auto PerfMethodId = client->FindMethod("PerfMethod");
@@ -379,7 +384,7 @@ TEST_F(ClientTest, Performance) {
 
       absl::StatusOr<rpc::PerfResponse> resp =
           client->Call<rpc::PerfRequest, rpc::PerfResponse>(*PerfMethodId,
-                                                           request, c);
+                                                            request, c);
       ASSERT_OK(resp);
 
       uint64_t rtt = toolbelt::Now() - request.send_time();
@@ -405,18 +410,21 @@ TEST_F(ClientTest, TypedStream) {
   ASSERT_OK(server->Run(&scheduler));
 
   co::Coroutine test(scheduler, [&](co::Coroutine *c) {
-    auto client = std::make_shared<subspace::RpcClient>("TestService", 7, ClientTest::Socket());
+    auto client = std::make_shared<subspace::RpcClient>("TestService", 7,
+                                                        ClientTest::Socket());
     ASSERT_OK(client->Open(c));
 
     rpc::TestRequest test_request;
     test_request.set_message("Hello, world!");
 
-    class MyResponseReceiver : public subspace::ResponseReceiver<rpc::TestResponse> {
+    class MyResponseReceiver
+        : public subspace::ResponseReceiver<rpc::TestResponse> {
     public:
       void OnResponse(const rpc::TestResponse &response,
                       bool is_last) override {
         std::cerr << "Received response: " << response.message() << " last "
                   << is_last << std::endl;
+        count++;
       }
 
       void OnError(const absl::Status &status) override {
@@ -424,6 +432,11 @@ TEST_F(ClientTest, TypedStream) {
       }
 
       void OnCancel() override { std::cerr << "Stream cancelled" << std::endl; }
+
+      void OnFinish() override { std::cerr << "Stream finished" << std::endl; }
+
+      int GetCount() const { return count; }
+      int count = 0;
     };
 
     MyResponseReceiver receiver;
@@ -431,6 +444,68 @@ TEST_F(ClientTest, TypedStream) {
         "StreamMethod", test_request, receiver, c);
     std::cerr << status.ToString() << std::endl;
     ASSERT_OK(status);
+
+    ASSERT_EQ(200, receiver.GetCount());
+    ASSERT_OK(client->Close(c));
+    server->Stop();
+  });
+
+  scheduler.Run();
+}
+
+TEST_F(ClientTest, CancelStream) {
+  co::CoroutineScheduler scheduler;
+
+  auto server = BuildServer();
+  ASSERT_OK(server->Run(&scheduler));
+
+  co::Coroutine test(scheduler, [&](co::Coroutine *c) {
+    auto client = std::make_shared<subspace::RpcClient>("TestService", 7,
+                                                        ClientTest::Socket());
+    ASSERT_OK(client->Open(c));
+
+    rpc::TestRequest test_request;
+    test_request.set_message("Hello, world!");
+    test_request.set_stream_period(100);
+
+    class MyResponseReceiver
+        : public subspace::ResponseReceiver<rpc::TestResponse> {
+    public:
+      void OnResponse(const rpc::TestResponse &response,
+                      bool is_last) override {
+        std::cerr << "Received response: " << response.message() << " last "
+                  << is_last << std::endl;
+        count++;
+        if (count == 5) {
+          std::cerr << "Cancelling stream after 5 responses" << std::endl;
+          if (auto status = Cancel(); !status.ok()) {
+            std::cerr << "Error cancelling stream: " << status.ToString()
+                      << std::endl;
+          }
+        }
+      }
+
+      void OnError(const absl::Status &status) override {
+        std::cerr << "Received error: " << status.ToString() << std::endl;
+      }
+
+      void OnCancel() override { std::cerr << "Stream cancelled" << std::endl; }
+
+      void OnFinish() override { std::cerr << "Stream finished" << std::endl; }
+
+      int GetCount() const { return count; }
+
+      int count = 0;
+    };
+
+    MyResponseReceiver receiver;
+    absl::Status status = client->Call<rpc::TestRequest, rpc::TestResponse>(
+        "StreamMethod", test_request, receiver, c);
+    std::cerr << status.ToString() << std::endl;
+    ASSERT_OK(status);
+
+    // Depending on timing we may get a one more reponse after the cancel.
+    ASSERT_LE(receiver.GetCount(), 6);
 
     ASSERT_OK(client->Close(c));
     server->Stop();

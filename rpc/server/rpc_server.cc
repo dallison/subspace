@@ -670,7 +670,6 @@ void RpcServer::SessionStreamingMethodCoroutine(
                                     msg.status().ToString().c_str());
                 continue;
               }
-              std::cerr << "CANCEL " << cancel.DebugString();
               if (cancel.session_id() == session->session_id &&
                   cancel.request_id() == request.request_id()) {
                 request_ok = true;
