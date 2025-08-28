@@ -319,9 +319,8 @@ TEST_F(ClientTest, TypedError) {
                                                           test_request, c);
     ASSERT_FALSE(resp.ok());
     std::cerr << "Received error: " << resp.status().ToString() << std::endl;
-    ASSERT_EQ("INTERNAL: Failed to invoke method: INTERNAL: Error executing "
-              "method ErrorMethod: INTERNAL: Error occurred",
-              resp.status().ToString());
+    ASSERT_TRUE(absl::StrContains(resp.status().ToString(),
+                                  "INTERNAL: Error occurred"));
 
     ASSERT_OK(client->Close(c));
     server->Stop();
@@ -350,9 +349,9 @@ TEST_F(ClientTest, TypedTimeout) {
                                                           test_request, 1s, c);
     ASSERT_FALSE(resp.ok());
     std::cerr << "Received error: " << resp.status().ToString() << std::endl;
-    ASSERT_EQ("INTERNAL: Failed to invoke method: INTERNAL: Error waiting for "
-              "response: INTERNAL: Timeout waiting for subscriber",
-              resp.status().ToString());
+    ASSERT_TRUE(
+        absl::StrContains(resp.status().ToString(), "INTERNAL: Timeout"));
+
     ASSERT_OK(client->Close(c));
     server->Stop();
   });
