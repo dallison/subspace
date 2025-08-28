@@ -1,0 +1,34 @@
+// Copyright 025 David Allison
+// All Rights Reserved
+// See LICENSE file for licensing information.
+
+syntax = "proto3";
+
+package rpc;
+
+message TestRequest {
+  string message = 1;
+  int32 stream_period = 2;    // In milliseconds
+}
+
+message TestResponse {
+  string message = 1;
+  int32 foo = 2;
+}
+
+message PerfRequest {
+  uint64 send_time = 1;
+}
+
+message PerfResponse {
+  uint64 client_send_time = 1;   // Time sent by client.
+  uint64 server_send_time = 2;   // Time sent by server.
+}
+
+service TestService {
+  rpc TestMethod(TestRequest) returns (TestResponse);
+  rpc PerfMethod(PerfRequest) returns (PerfResponse);
+  rpc StreamMethod(TestRequest) returns (stream TestResponse);
+  rpc ErrorMethod(TestRequest) returns (TestResponse);
+  rpc TimeoutMethod(TestRequest) returns (TestResponse);
+}
