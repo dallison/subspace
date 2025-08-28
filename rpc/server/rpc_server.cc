@@ -36,33 +36,34 @@ void RpcServer::Stop() {
 
 absl::Status RpcServer::RegisterMethod(
     const std::string &method, const std::string &request_type,
-    const std::string &response_type, int32_t slot_size, int32_t num_slots,
+    const std::string &response_type,
     std::function<absl::Status(const google::protobuf::Any &,
                                google::protobuf::Any *, co::Coroutine *)>
         callback,
-    int id) {
+    MethodOptions &&options) {
   if (methods_.find(method) != methods_.end()) {
     return absl::AlreadyExistsError("Method already registered: " + method);
   }
 
   methods_[method] = std::make_shared<Method>(
-      this, method, request_type, response_type, slot_size, num_slots,
-      std::move(callback), id == -1 ? ++next_method_id_ : id);
+      this, method, request_type, response_type, options.slot_size,
+      options.num_slots, std::move(callback),
+      options.id == -1 ? ++next_method_id_ : options.id);
   return absl::OkStatus();
 }
 
 // Register void method.
 absl::Status RpcServer::RegisterMethod(
     const std::string &method, const std::string &request_type,
-    int32_t slot_size, int32_t num_slots,
     std::function<absl::Status(const google::protobuf::Any &, co::Coroutine *)>
         callback,
-    int id) {
+    MethodOptions &&options) {
   if (methods_.find(method) != methods_.end()) {
     return absl::AlreadyExistsError("Method already registered: " + method);
   }
   methods_[method] = std::make_shared<Method>(
-      this, method, request_type, "subspace.VoidMessage", slot_size, num_slots,
+      this, method, request_type, "subspace.VoidMessage", options.slot_size,
+      options.num_slots,
       [callback](const google::protobuf::Any &req, google::protobuf::Any *res,
                  co::Coroutine *c) {
         auto status = callback(req, c);
@@ -74,18 +75,18 @@ absl::Status RpcServer::RegisterMethod(
         res->PackFrom(VoidMessage());
         return absl::OkStatus();
       },
-      id == -1 ? ++next_method_id_ : id);
+      options.id == -1 ? ++next_method_id_ : options.id);
   return absl::OkStatus();
 }
 
 absl::Status RpcServer::RegisterMethod(
-    const std::string &method, int slot_size, int num_slots,
+    const std::string &method,
     std::function<absl::Status(const std::vector<char> &, std::vector<char> *,
                                co::Coroutine *)>
         callback,
-    int id) {
+    MethodOptions &&options) {
   return RegisterMethod<RawMessage, RawMessage>(
-      method, slot_size, num_slots,
+      method,
       [callback = std::move(callback)](const RawMessage &req, RawMessage *res,
                                        co::Coroutine *c) -> absl::Status {
         std::vector<char> request(req.data().begin(), req.data().end());
@@ -97,15 +98,15 @@ absl::Status RpcServer::RegisterMethod(
         res->set_data(response.data(), response.size());
         return absl::OkStatus();
       },
-      id);
+      std::move(options));
 }
 
 absl::Status RpcServer::RegisterMethod(
-    const std::string &method, int32_t slot_size, int32_t num_slots,
+    const std::string &method,
     std::function<absl::Status(const absl::Span<const char> &,
                                std::vector<char> *, co::Coroutine *)>
         callback,
-    int id) {
+    MethodOptions &&options) {
   return RegisterMethod<RawMessage, RawMessage>(
       method,
       [callback = std::move(callback)](const RawMessage &req, RawMessage *res,
@@ -121,23 +122,24 @@ absl::Status RpcServer::RegisterMethod(
         res->set_data(response.data(), response.size());
         return absl::OkStatus();
       },
-      id);
+      std::move(options));
 }
 
 absl::Status RpcServer::RegisterMethod(
     const std::string &method, const std::string &request_type,
-    const std::string &response_type, int32_t slot_size, int32_t num_slots,
+    const std::string &response_type,
     std::function<absl::Status(const google::protobuf::Any &, AnyStreamWriter &,
                                co::Coroutine *)>
         callback,
-    int id) {
+    MethodOptions &&options) {
   if (methods_.find(method) != methods_.end()) {
     return absl::AlreadyExistsError("Method already registered: " + method);
   }
 
   methods_[method] = std::make_shared<Method>(
-      this, method, request_type, response_type, slot_size, num_slots,
-      std::move(callback), id == -1 ? ++next_method_id_ : id);
+      this, method, request_type, response_type, options.slot_size,
+      options.num_slots, std::move(callback),
+      options.id == -1 ? ++next_method_id_ : options.id);
   return absl::OkStatus();
 }
 

@@ -137,6 +137,12 @@ template <typename Response> struct StreamWriter {
   internal::AnyStreamWriter *writer;
 };
 
+struct MethodOptions {
+  int32_t slot_size = kDefaultMethodSlotSize;
+  int32_t num_slots = kDefaultMethodNumSlots;
+  int id = -1;
+};
+
 class RpcServer : public std::enable_shared_from_this<RpcServer> {
 public:
   RpcServer(std::string service_name,
@@ -165,43 +171,22 @@ public:
 
   // Register a method that takes a request and produces a response.  The
   // default channel parameters (slot size and number of slots) will be used.
-  template <typename Request, typename Response>
-  absl::Status RegisterMethod(
-      const std::string &method,
-      std::function<absl::Status(const Request &, Response *, co::Coroutine *)>
-          callback,
-      int id = -1) {
-    return RegisterMethod<Request, Response>(method, kDefaultMethodSlotSize,
-                                             kDefaultMethodNumSlots,
-                                             std::move(callback), id);
-  }
 
   // Register a method that takes a request and produces a response.  You
   // specify the slot size and number of slots for the channels.
   template <typename Request, typename Response>
   absl::Status RegisterMethod(
-      const std::string &method, int32_t slot_size, int32_t num_slots,
+      const std::string &method,
       std::function<absl::Status(const Request &, Response *, co::Coroutine *)>
           callback,
-      int id = -1);
-
-  // Typed void methods.
-  template <typename Request>
-  absl::Status RegisterMethod(
-      const std::string &method,
-      std::function<absl::Status(const Request &, co::Coroutine *)> callback,
-      int id = -1) {
-    return RegisterMethod<Request>(method, kDefaultMethodSlotSize,
-                                   kDefaultMethodNumSlots, std::move(callback),
-                                   id);
-  }
+      MethodOptions &&options = {});
 
   // Type void method with slot parameters.
   template <typename Request>
   absl::Status RegisterMethod(
-      const std::string &method, int32_t slot_size, int32_t num_slots,
+      const std::string &method,
       std::function<absl::Status(const Request &, co::Coroutine *)> callback,
-      int id = -1);
+      MethodOptions &&options = {});
 
   // Method that takes a raw message and returns a raw message.
   // NOTE: this will make a copy of the request into a vector<char>.  For a more
@@ -212,55 +197,24 @@ public:
       std::function<absl::Status(const std::vector<char> &, std::vector<char> *,
                                  co::Coroutine *)>
           callback,
-      int id = -1) {
-    return RegisterMethod(method, kDefaultMethodNumSlots,
-                          kDefaultMethodNumSlots, std::move(callback), id);
-  }
-
-  absl::Status RegisterMethod(
-      const std::string &method, int slot_size, int num_slots,
-      std::function<absl::Status(const std::vector<char> &, std::vector<char> *,
-                                 co::Coroutine *)>
-          callback,
-      int id = -1);
+      MethodOptions &&options = {});
 
   absl::Status RegisterMethod(
       const std::string &method,
       std::function<absl::Status(const absl::Span<const char> &,
                                  std::vector<char> *, co::Coroutine *)>
           callback,
-      int id = -1) {
-    return RegisterMethod(method, kDefaultMethodNumSlots,
-                          kDefaultMethodNumSlots, std::move(callback), id);
-  }
-
-  absl::Status RegisterMethod(
-      const std::string &method, int32_t slot_size, int32_t num_slots,
-      std::function<absl::Status(const absl::Span<const char> &,
-                                 std::vector<char> *, co::Coroutine *)>
-          callback,
-      int id = -1);
+      MethodOptions &&options = {});
 
   // Server streaming methods.  These take in a single request and produce
   // multiple responses.
   template <typename Request, typename Response>
   absl::Status RegisterMethod(
-      const std::string &method, int32_t slot_size, int32_t num_slots,
-      std::function<absl::Status(const Request &, StreamWriter<Response> &,
-                                 co::Coroutine *)>
-          callback,
-      int id = -1);
-
-  template <typename Request, typename Response>
-  absl::Status RegisterMethod(
       const std::string &method,
       std::function<absl::Status(const Request &, StreamWriter<Response> &,
                                  co::Coroutine *)>
           callback,
-      int id = -1) {
-    return RegisterMethod(method, kDefaultMethodSlotSize,
-                          kDefaultMethodNumSlots, std::move(callback), id);
-  }
+      MethodOptions &&options = {});
 
   absl::Status UnregisterMethod(const std::string &method) {
     auto it = methods_.find(method);
@@ -284,46 +238,23 @@ public:
       std::function<absl::Status(const google::protobuf::Any &,
                                  google::protobuf::Any *, co::Coroutine *)>
           callback,
-      int id = -1) {
-    return RegisterMethod(method, request_type, response_type,
-                          kDefaultMethodSlotSize, kDefaultMethodNumSlots,
-                          std::move(callback), id);
-  }
-
-  absl::Status RegisterMethod(
-      const std::string &method, const std::string &request_type,
-      const std::string &response_type, int32_t slot_size, int32_t num_slots,
-      std::function<absl::Status(const google::protobuf::Any &,
-                                 google::protobuf::Any *, co::Coroutine *)>
-          callback,
-      int id = -1);
+      MethodOptions &&options = {});
 
   absl::Status
   RegisterMethod(const std::string &method, const std::string &request_type,
                  std::function<absl::Status(const google::protobuf::Any &,
                                             co::Coroutine *)>
                      callback,
-                 int id = -1) {
-    return RegisterMethod(method, request_type, kDefaultMethodSlotSize,
-                          kDefaultMethodNumSlots, std::move(callback), id);
-  }
-
-  absl::Status
-  RegisterMethod(const std::string &method, const std::string &request_type,
-                 int32_t slot_size, int32_t num_slots,
-                 std::function<absl::Status(const google::protobuf::Any &,
-                                            co::Coroutine *)>
-                     callback,
-                 int id = -1);
+                 MethodOptions &&options = {});
 
   // Streaming method.
   absl::Status RegisterMethod(
       const std::string &method, const std::string &request_type,
-      const std::string &response_type, int32_t slot_size, int32_t num_slots,
+      const std::string &response_type,
       std::function<absl::Status(const google::protobuf::Any &,
                                  internal::AnyStreamWriter &, co::Coroutine *)>
           callback,
-      int id = -1);
+      MethodOptions &&options = {});
 
   // For debugging we might need to get hold of the scheduler.
   co::CoroutineScheduler *Scheduler() { return scheduler_; }
@@ -401,16 +332,15 @@ private:
 
 template <typename Request, typename Response>
 inline absl::Status RpcServer::RegisterMethod(
-    const std::string &method, int32_t slot_size, int32_t num_slots,
+    const std::string &method,
     std::function<absl::Status(const Request &, Response *, co::Coroutine *)>
         callback,
-    int id) {
+    MethodOptions &&options) {
   auto request_descriptor = Request::descriptor();
   auto response_descriptor = Response::descriptor();
 
   return RegisterMethod(
       method, request_descriptor->full_name(), response_descriptor->full_name(),
-      kDefaultMethodSlotSize, kDefaultMethodNumSlots,
       [method, callback = std::move(callback), request_descriptor](
           const google::protobuf::Any &req, google::protobuf::Any *res,
           co::Coroutine *c) -> absl::Status {
@@ -431,19 +361,18 @@ inline absl::Status RpcServer::RegisterMethod(
         res->PackFrom(response);
         return absl::OkStatus();
       },
-      id);
+      std::move(options));
 }
 
 template <typename Request>
 inline absl::Status RpcServer::RegisterMethod(
-    const std::string &method, int32_t slot_size, int32_t num_slots,
+    const std::string &method,
     std::function<absl::Status(const Request &, co::Coroutine *)> callback,
-    int id) {
+    MethodOptions &&options) {
   auto request_descriptor = Request::descriptor();
 
   return RegisterMethod(
-      method, request_descriptor->full_name(), kDefaultMethodSlotSize,
-      kDefaultMethodNumSlots,
+      method, request_descriptor->full_name(),
       [method, callback = std::move(callback), request_descriptor](
           const google::protobuf::Any &req, co::Coroutine *c) -> absl::Status {
         if (!req.Is<Request>()) {
@@ -457,27 +386,26 @@ inline absl::Status RpcServer::RegisterMethod(
         }
         return callback(request, c);
       },
-      id);
+      std::move(options));
 }
 
 template <typename Request, typename Response>
 inline absl::Status RpcServer::RegisterMethod(
-    const std::string &method, int32_t slot_size, int32_t num_slots,
+    const std::string &method,
     std::function<absl::Status(const Request &, StreamWriter<Response> &,
                                co::Coroutine *)>
         callback,
-    int id) {
+    MethodOptions &&options) {
   auto request_descriptor = Request::descriptor();
   auto response_descriptor = Response::descriptor();
 
   StreamWriter<Response> typed_writer;
   return RegisterMethod(
       method, request_descriptor->full_name(), response_descriptor->full_name(),
-      kDefaultMethodSlotSize, kDefaultMethodNumSlots,
       [method, callback = std::move(callback), request_descriptor,
        typed_writer](const google::protobuf::Any &req,
-                      internal::AnyStreamWriter &writer,
-                      co::Coroutine *c) mutable -> absl::Status {
+                     internal::AnyStreamWriter &writer,
+                     co::Coroutine *c) mutable -> absl::Status {
         if (!req.Is<Request>()) {
           return absl::InvalidArgumentError(absl::StrFormat(
               "Invalid argment type for %s: need %s got %s", method,
@@ -494,6 +422,6 @@ inline absl::Status RpcServer::RegisterMethod(
         }
         return absl::OkStatus();
       },
-      id);
+      std::move(options));
 }
 } // namespace subspace
