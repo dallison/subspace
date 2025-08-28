@@ -245,7 +245,7 @@ TEST_F(RpcTest, Stream) {
     class MyResponseReceiver
         : public subspace::ResponseReceiver<rpc::TestResponse> {
     public:
-      void OnResponse(const rpc::TestResponse &response) override {
+      void OnResponse(rpc::TestResponse &&response) override {
         std::cerr << "Received response: " << response.message() << std::endl;
         count++;
       }
