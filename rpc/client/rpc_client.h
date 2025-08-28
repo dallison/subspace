@@ -1,3 +1,7 @@
+// Copyright 2025 David Allison
+// All Rights Reserved
+// See LICENSE file for licensing information.
+
 #pragma once
 
 #include "client/client.h"
@@ -243,6 +247,24 @@ private:
                    response_handler,
                std::chrono::nanoseconds timeout, co::Coroutine *c = nullptr);
 
+  // This is only used for error reporting so a linear search is fine.
+  std::string MethodName(int id) const {
+    for (const auto &m : methods_) {
+      if (m.second->id == id) {
+        return m.second->name;
+      }
+    }
+    return "unknown";
+  }
+
+  void Destroy() {
+    client_.reset();
+    service_sub_.reset();
+    service_pub_.reset();
+    methods_.clear();
+    closed_ = true;
+  }
+
   std::string service_;
   uint64_t client_id_;
   std::string subspace_server_socket_;
@@ -255,6 +277,7 @@ private:
   int next_request_id_ = 0;
   std::shared_ptr<subspace::Publisher> service_pub_;
   std::shared_ptr<subspace::Subscriber> service_sub_;
+  bool closed_ = false;
 };
 
 // Call with request and response.  Both types must be protobuf messages.  A
@@ -274,7 +297,7 @@ RpcClient::Call(int method_id, const Request &request,
   auto r = InvokeMethod(method_id, any, timeout, c);
   if (!r.ok()) {
     return absl::InternalError(
-        absl::StrFormat("Failed to invoke method: %s", r.status().ToString()));
+        absl::StrFormat("Failed to invoke method '%s': %s", MethodName(method_id), r.status().ToString()));
   }
   if constexpr (std::is_base_of_v<google::protobuf::Message, Response>) {
     Response resp;
@@ -308,7 +331,7 @@ RpcClient::Call(std::string_view method_name, const Request &request,
   auto method_id = FindMethod(method_name);
   if (!method_id.ok()) {
     return absl::InternalError(
-        absl::StrFormat("No such method: %s", method_name));
+        absl::StrFormat("No such method: '%s'", method_name));
   }
   return Call<Request, Response>(*method_id, request, timeout, c);
 }
@@ -385,7 +408,7 @@ RpcClient::Call(const std::string &method_name, const Request &request,
   auto method_id = FindMethod(method_name);
   if (!method_id.ok()) {
     return absl::InternalError(
-        absl::StrFormat("No such method: %s", method_name));
+        absl::StrFormat("No such method: '%s'", method_name));
   }
   return Call(*method_id, request, receiver, timeout, c);
 }

@@ -1,3 +1,7 @@
+// Copyright 2025 David Allison
+// All Rights Reserved
+// See LICENSE file for licensing information.
+
 #pragma once
 #include "absl/container/flat_hash_map.h"
 #include "absl/types/span.h"
@@ -320,6 +324,9 @@ public:
                                  internal::AnyStreamWriter &, co::Coroutine *)>
           callback,
       int id = -1);
+
+  // For debugging we might need to get hold of the scheduler.
+  co::CoroutineScheduler *Scheduler() { return scheduler_; }
 
 private:
   friend struct internal::AnyStreamWriter;
