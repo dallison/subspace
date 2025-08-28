@@ -134,7 +134,7 @@ void ServiceGenerator::GenerateServerMethodRegistrations(std::ostream &os) {
          << method->output_type()->name()
          << "> &writer, co::Coroutine *c) -> absl::Status {\n";
       os << "      return this->" << method->name() << "(req, writer, c);\n";
-      os << "    }, " << i << ");\n";
+      os << "    }, {.id=" << i << "});\n";
       os << "    if (!status.ok()) {\n";
       os << "      return status;\n";
       os << "    }\n";
@@ -154,7 +154,7 @@ void ServiceGenerator::GenerateServerMethodRegistrations(std::ostream &os) {
     os << "      }\n";
     os << "      *res = std::move(s.value());\n";
     os << "      return absl::OkStatus();\n";
-    os << "    }, " << i << ");\n";
+    os << "    }, {.id=" << i << "});\n";
     os << "    if (!status.ok()) {\n";
     os << "      return status;\n";
     os << "    }\n";

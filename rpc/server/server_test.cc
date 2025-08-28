@@ -129,7 +129,7 @@ static std::shared_ptr<subspace::RpcServer> BuildServer() {
   server->SetStartingSessionId(next_session++);
 
   auto s = server->RegisterMethod(
-      "TestMethod", "subspace.TestRequest", "subspace.TestResponse", 256, 10,
+      "TestMethod", "subspace.TestRequest", "subspace.TestResponse",
       [](const google::protobuf::Any &req, google::protobuf::Any *res,
          co::Coroutine *) -> absl::Status {
         std::cerr << "TestMethod called with request: " << req.DebugString()
@@ -173,7 +173,7 @@ static std::shared_ptr<subspace::RpcServer> BuildServer() {
 
   // Stream method.
   s = server->RegisterMethod(
-      "StreamMethod", "subspace.TestRequest", "subspace.TestResponse", 256, 10,
+      "StreamMethod", "subspace.TestRequest", "subspace.TestResponse",
       [](const google::protobuf::Any &req,
          subspace::internal::AnyStreamWriter &writer,
          co::Coroutine *c) -> absl::Status {
