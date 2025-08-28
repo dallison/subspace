@@ -1,3 +1,7 @@
+// Copyright 2025 David Allison
+// All Rights Reserved
+// See LICENSE file for licensing information.
+
 #include "rpc/server/rpc_server.h"
 #include "proto/subspace.pb.h"
 #include <inttypes.h>
@@ -264,8 +268,6 @@ absl::Status RpcServer::HandleIncomingRpcServerRequest(subspace::Message msg,
     break;
   }
   case subspace::RpcServerRequest::kClose: {
-    logger_.Log(toolbelt::LogLevel::kDebug, "Handling Close request: %s",
-                request.close().DebugString().c_str());
     if (auto status = HandleClose(request.client_id(), request.close(),
                                   response.mutable_close(), c);
         !status.ok()) {
@@ -373,6 +375,8 @@ absl::Status RpcServer::HandleClose(uint64_t client_id,
   auto session = it->second;
   // Clean up session resources here.
   sessions_.erase(session->session_id);
+  logger_.Log(toolbelt::LogLevel::kDebug, "Closed session: %d",
+              session->session_id);
   return absl::OkStatus();
 }
 
@@ -435,8 +439,9 @@ RpcServer::CreateSession(uint64_t client_id) {
     session->methods.insert({method->id, method_instance});
 
     AddCoroutine(std::make_unique<co::Coroutine>(
-        *scheduler_, [server = shared_from_this(), session,
-                      method_instance](co::Coroutine *c) {
+        *scheduler_,
+        [server = shared_from_this(), session,
+         method_instance](co::Coroutine *c) {
           if (method_instance->method->IsStreaming()) {
             SessionStreamingMethodCoroutine(std::move(server), session,
                                             method_instance, c);
@@ -444,7 +449,9 @@ RpcServer::CreateSession(uint64_t client_id) {
             SessionMethodCoroutine(std::move(server), session, method_instance,
                                    c);
           }
-        }));
+        },
+        absl::StrFormat("Session %d Method %s", session->session_id,
+                        method->name.c_str())));
   }
   sessions_[session->session_id] = session;
   logger_.Log(toolbelt::LogLevel::kDebug, "Created session: %d",
@@ -851,15 +858,15 @@ void AnyStreamWriter::Finish(co::Coroutine *c) {
                                    nullptr, true, IsCancelled(), c);
 }
 
-  void Method::MakeChannelNames(RpcServer *server) {
-    request_channel =
-        absl::StrFormat("/rpc/%s/%s/request", server->Name(), this->name);
-    response_channel =
-        absl::StrFormat("/rpc/%s/%s/response", server->Name(), this->name);
-    if (IsStreaming()) {
-      cancel_channel =
-          absl::StrFormat("/rpc/%s/%s/cancel", server->Name(), this->name);
-    }
+void Method::MakeChannelNames(RpcServer *server) {
+  request_channel =
+      absl::StrFormat("/rpc/%s/%s/request", server->Name(), this->name);
+  response_channel =
+      absl::StrFormat("/rpc/%s/%s/response", server->Name(), this->name);
+  if (IsStreaming()) {
+    cancel_channel =
+        absl::StrFormat("/rpc/%s/%s/cancel", server->Name(), this->name);
   }
+}
 } // namespace internal
 } // namespace subspace
