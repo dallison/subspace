@@ -1194,12 +1194,17 @@ TEST_F(ClientTest, PublishAndResizeSubscriberConcurrently) {
   auto t2 = std::thread([&]() {
     auto client2_sub = *client2.CreateSubscriber(channel_name);
     while (publisher_finished == false) {
-      auto message = *client2_sub.ReadMessage();
-      size_t size = message.length;
-      if (size == 0) {
-        continue;
-      } else {
-        std::cout << size << std::endl;
+      struct pollfd fd = client2_sub.GetPollFd();
+      int e = ::poll(&fd, 1, -1);
+      ASSERT_EQ(1, e);
+      while (true) {
+        auto message = *client2_sub.ReadMessage();
+        size_t size = message.length;
+        if (size == 0) {
+          break;
+        } else {
+          std::cout << size << std::endl;
+        }
       }
     }
   });
@@ -1998,7 +2003,7 @@ TEST_F(ClientTest, RetirementTrigger1) {
   ptr2.Release();
 
   // Read the retirement fd and expect it to contain slot 0.
-  struct pollfd fd = {.events = POLLIN, .fd = retirement_fd.Fd()};
+  struct pollfd fd = {.fd = retirement_fd.Fd(), .events = POLLIN};
   int e = ::poll(&fd, 1, -1);
   ASSERT_EQ(1, e);
   ASSERT_TRUE(fd.revents & POLLIN);
@@ -2068,7 +2073,7 @@ TEST_F(ClientTest, RetirementTrigger2) {
   }
 
   // There should be nothing in the retirement fd.
-  struct pollfd fd = {.events = POLLIN, .fd = retirement_fd.Fd()};
+  struct pollfd fd = {.fd = retirement_fd.Fd(), .events = POLLIN};
   int e = ::poll(&fd, 1, 0);
   ASSERT_EQ(0, e);
   ASSERT_FALSE(fd.revents & POLLIN);
@@ -2177,7 +2182,7 @@ TEST_F(ClientTest, RetirementTrigger3) {
   ptr2.Release();
 
   // Read the retirement fd and expect it to contain slot 0.
-  struct pollfd fd = {.events = POLLIN, .fd = retirement_fd.Fd()};
+  struct pollfd fd = {.fd = retirement_fd.Fd(), .events = POLLIN};
   int e = ::poll(&fd, 1, -1);
   ASSERT_EQ(1, e);
   ASSERT_TRUE(fd.revents & POLLIN);
@@ -2250,7 +2255,7 @@ TEST_F(ClientTest, RetirementTrigger4) {
   }
 
   // There should be nothing in the retirement fd.
-  struct pollfd fd = {.events = POLLIN, .fd = retirement_fd.Fd()};
+  struct pollfd fd = {.fd = retirement_fd.Fd(), .events = POLLIN};
   int e = ::poll(&fd, 1, 0);
   ASSERT_EQ(0, e);
   ASSERT_FALSE(fd.revents & POLLIN);
