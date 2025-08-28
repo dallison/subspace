@@ -66,6 +66,9 @@ RpcClient::PublishServerRequest(const subspace::RpcServerRequest &req,
   uint64_t length = req.ByteSizeLong();
   absl::StatusOr<void *> buffer;
   for (;;) {
+    if (service_pub_->NumSubscribers() == 0) {
+      return absl::InternalError("No subscribers; is the RPC server running?");
+    }
     buffer = service_pub_->GetMessageBuffer(int32_t(length));
     if (!buffer.ok()) {
       return absl::InternalError(absl::StrFormat(
@@ -189,7 +192,7 @@ absl::Status RpcClient::OpenService(std::chrono::nanoseconds timeout,
 
   // Populate the methods.
   for (const auto &method : response.open().methods()) {
-    auto m = std::make_shared<Method>();
+    auto m = std::make_shared<client_internal::Method>();
     m->name = method.name();
     m->id = method.id();
     m->request_type = method.request_channel().type();
@@ -216,6 +219,21 @@ absl::Status RpcClient::OpenService(std::chrono::nanoseconds timeout,
     }
     m->response_subscriber =
         std::make_shared<subspace::Subscriber>(std::move(*sub));
+
+    if (!method.cancel_channel().empty()) {
+      auto cpub = client_->CreatePublisher(method.cancel_channel(),
+                                           kCancelChannelSlotSize,
+                                           kCancelChannelNumSlots,
+                                           {
+                                               .reliable = true,
+                                           });
+      if (!cpub.ok()) {
+        return absl::InternalError(absl::StrFormat(
+            "Failed to create cancel publisher: %s", cpub.status().ToString()));
+      }
+      m->cancel_publisher =
+          std::make_shared<subspace::Publisher>(std::move(*cpub));
+    }
     method_name_to_id_[m->name] = m->id;
     methods_[m->id] = std::move(m);
   }
@@ -252,15 +270,15 @@ absl::Status RpcClient::CloseService(std::chrono::nanoseconds timeout,
 }
 
 absl::StatusOr<google::protobuf::Any>
-RpcClient::InvokeMethod(int method_id,
-                        const google::protobuf::Any &request,
+RpcClient::InvokeMethod(int method_id, const google::protobuf::Any &request,
                         std::chrono::nanoseconds timeout, co::Coroutine *c) {
   if (c == nullptr) {
     c = coroutine_;
   }
   auto it = methods_.find(method_id);
   if (it == methods_.end()) {
-    return absl::NotFoundError(absl::StrFormat("Method %d not found", method_id));
+    return absl::NotFoundError(
+        absl::StrFormat("Method %d not found", method_id));
   }
 
   const auto &method = it->second;
@@ -275,7 +293,10 @@ RpcClient::InvokeMethod(int method_id,
 
   absl::StatusOr<void *> buffer;
   for (;;) {
-    buffer = method->request_publisher->GetMessageBuffer(
+    if (method->request_publisher->NumSubscribers() == 0) {
+      return absl::InternalError("No subscribers; is the RPC server running?");
+    }
+        buffer = method->request_publisher->GetMessageBuffer(
         int32_t(req.ByteSizeLong()));
     if (!buffer.ok()) {
       return absl::InternalError(absl::StrFormat(
@@ -340,6 +361,161 @@ RpcClient::InvokeMethod(int method_id,
       break;
     }
   }
+}
+
+absl::Status RpcClient::InvokeMethod(
+    int method_id, const google::protobuf::Any &request,
+    std::function<void(std::shared_ptr<RpcClient>, uint64_t, int, int,
+                       std::shared_ptr<client_internal::Method>,
+                       const RpcResponse *)>
+        response_handler,
+    std::chrono::nanoseconds timeout, co::Coroutine *c) {
+  std::cerr << "shared_from_this: " << shared_from_this() << "\n";
+  if (c == nullptr) {
+    c = coroutine_;
+  }
+  auto it = methods_.find(method_id);
+  if (it == methods_.end()) {
+    return absl::NotFoundError(
+        absl::StrFormat("Method %d not found", method_id));
+  }
+
+  const auto &method = it->second;
+
+  subspace::RpcRequest req;
+  int request_id = ++next_request_id_;
+  req.set_client_id(client_id_);
+  req.set_session_id(session_id_);
+  req.set_request_id(request_id);
+  req.set_method(method_id);
+  *req.mutable_argument() = request;
+
+  absl::StatusOr<void *> buffer;
+  for (;;) {
+    if (method->request_publisher->NumSubscribers() == 0) {
+      return absl::InternalError("No subscribers; is the RPC server running?");
+    }
+    buffer = method->request_publisher->GetMessageBuffer(
+        int32_t(req.ByteSizeLong()));
+    if (!buffer.ok()) {
+      return absl::InternalError(absl::StrFormat(
+          "Failed to get message buffer: %s", buffer.status().ToString()));
+    }
+    if (*buffer != nullptr) {
+      break;
+    }
+    // Can't send yet, wait and try again.
+    auto wait_status = method->request_publisher->Wait(timeout, c);
+    if (!wait_status.ok()) {
+      return absl::InternalError(absl::StrFormat(
+          "Failed to wait for message buffer: %s", wait_status.ToString()));
+    }
+  }
+
+  // We can serialize and publish now.
+  uint64_t request_size = req.ByteSizeLong();
+  if (!req.SerializeToArray(*buffer, int32_t(request_size))) {
+    return absl::InternalError(absl::StrFormat(
+        "Failed to serialize request: %s", req.SerializeAsString()));
+  }
+  auto pub_status =
+      method->request_publisher->PublishMessage(int32_t(request_size));
+  if (!pub_status.ok()) {
+    return absl::InternalError(absl::StrFormat("Failed to publish request: %s",
+                                               pub_status.status().ToString()));
+  }
+  // We have sent the method invocation request.  Now we receive all the
+  // responses.
+
+  for (;;) {
+    auto wait_status = method->response_subscriber->Wait(timeout, c);
+    if (!wait_status.ok()) {
+      return absl::InternalError(absl::StrFormat(
+          "Error waiting for response: %s", wait_status.ToString()));
+    }
+    for (;;) {
+      auto m = method->response_subscriber->ReadMessage();
+      if (!m.ok()) {
+        return absl::InternalError(absl::StrFormat("Failed to read message: %s",
+                                                   m.status().ToString()));
+      }
+      if (m->length > 0) {
+        subspace::Message msg = std::move(*m);
+        subspace::RpcResponse rpc_response;
+        if (!rpc_response.ParseFromArray(msg.buffer, msg.length)) {
+          return absl::InternalError("Failed to parse RPC response");
+        }
+        if (rpc_response.client_id() == client_id_ &&
+            rpc_response.request_id() == request_id &&
+            rpc_response.session_id() == session_id_) {
+          logger_.Log(toolbelt::LogLevel::kDebug, "Received RPC response: %s",
+                      rpc_response.DebugString().c_str());
+          if (!rpc_response.error().empty()) {
+            return absl::InternalError(
+                absl::StrFormat("%s", rpc_response.error()));
+          }
+          std::cerr << "Calling response handler\n";
+          response_handler(shared_from_this(), client_id_, session_id_,
+                           request_id, method, &rpc_response);
+          // We stop receiving response if this is the last one, cancelled or
+          // errored
+          if (rpc_response.is_last() || rpc_response.is_cancelled() ||
+              !rpc_response.error().empty()) {
+            return absl::OkStatus();
+          }
+        }
+        continue;
+      }
+      break;
+    }
+  }
+  return absl::OkStatus();
+}
+
+absl::Status
+RpcClient::CancelRequest(uint64_t client_id, int session_id, int request_id,
+                         std::shared_ptr<client_internal::Method> method,
+                         std::chrono::nanoseconds timeout, co::Coroutine *c) {
+  subspace::RpcCancelRequest req;
+  req.set_client_id(client_id_);
+  req.set_session_id(session_id_);
+  req.set_request_id(request_id);
+
+  absl::StatusOr<void *> buffer;
+  for (;;) {
+    buffer =
+        method->cancel_publisher->GetMessageBuffer(int32_t(req.ByteSizeLong()));
+    if (!buffer.ok()) {
+      return absl::InternalError(
+          absl::StrFormat("Failed to get message buffer for cancel: %s",
+                          buffer.status().ToString()));
+    }
+    if (*buffer != nullptr) {
+      break;
+    }
+    // Can't send yet, wait and try again.
+    auto wait_status = method->cancel_publisher->Wait(timeout, c);
+    if (!wait_status.ok()) {
+      return absl::InternalError(
+          absl::StrFormat("Failed to wait for message buffer for cancel: %s",
+                          wait_status.ToString()));
+    }
+  }
+
+  // We can serialize and publish now.
+  uint64_t request_size = req.ByteSizeLong();
+  if (!req.SerializeToArray(*buffer, int32_t(request_size))) {
+    return absl::InternalError(absl::StrFormat(
+        "Failed to serialize cancel request: %s", req.SerializeAsString()));
+  }
+  auto pub_status =
+      method->cancel_publisher->PublishMessage(int32_t(request_size));
+  if (!pub_status.ok()) {
+    return absl::InternalError(
+        absl::StrFormat("Failed to publish cancel request: %s",
+                        pub_status.status().ToString()));
+  }
+  return absl::OkStatus();
 }
 
 } // namespace subspace

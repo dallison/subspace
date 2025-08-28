@@ -20,6 +20,119 @@ constexpr int32_t kRpcResponseNumSlots = 100;
 constexpr int32_t kDefaultMethodSlotSize = 256;
 constexpr int32_t kDefaultMethodNumSlots = 100;
 
+class RpcServer;
+
+namespace internal {
+
+struct Session;
+struct MethodInstance;
+
+struct AnyStreamWriter {
+  AnyStreamWriter(std::shared_ptr<RpcServer> server,
+                  std::shared_ptr<Session> session,
+                  std::shared_ptr<MethodInstance> method_instance,
+                  const RpcRequest &request)
+      : server(std::move(server)), session(std::move(session)),
+        method_instance(std::move(method_instance)), request(request) {}
+
+  // Returns true if the write worked, false if the request was cancelled.
+  bool Write(std::unique_ptr<google::protobuf::Any> res, co::Coroutine *c);
+  void Finish(co::Coroutine *c);
+
+  void Cancel() { is_cancelled = true; }
+
+  bool IsCancelled() const { return is_cancelled; }
+
+  std::shared_ptr<RpcServer> server;
+  std::shared_ptr<Session> session;
+  std::shared_ptr<MethodInstance> method_instance;
+  const RpcRequest &request;
+  bool is_cancelled = false;
+};
+
+struct Method {
+  Method(RpcServer *server, std::string name, std::string request_type,
+         std::string response_type, int32_t slot_size, int32_t num_slots,
+         std::function<absl::Status(const google::protobuf::Any &,
+                                    google::protobuf::Any *, co::Coroutine *)>
+             callback,
+         int id)
+      : name(std::move(name)), request_type(std::move(request_type)),
+        response_type(std::move(response_type)), slot_size(slot_size),
+        num_slots(num_slots), callback(std::move(callback)), id(id) {
+    MakeChannelNames(server);
+  }
+  // Streaming method constructor.
+  Method(
+      RpcServer *server, std::string name, std::string request_type,
+      std::string response_type, int32_t slot_size, int32_t num_slots,
+      std::function<absl::Status(const google::protobuf::Any &,
+                                 internal::AnyStreamWriter &, co::Coroutine *)>
+          callback,
+      int id)
+      : name(std::move(name)), request_type(std::move(request_type)),
+        response_type(std::move(response_type)), slot_size(slot_size),
+        num_slots(num_slots), stream_callback(std::move(callback)), id(id) {
+    MakeChannelNames(server);
+  }
+
+  void MakeChannelNames(RpcServer *server);
+
+  bool IsStreaming() const { return stream_callback != nullptr; }
+
+  std::string name;
+  std::string request_type;
+  std::string response_type;
+  int32_t slot_size;
+  int32_t num_slots;
+  // Callback for normal, non-streaming method that is called and returns a
+  // single result.
+  std::function<absl::Status(const google::protobuf::Any &,
+                             google::protobuf::Any *, co::Coroutine *)>
+      callback;
+  // Callback for a streaming method that produces multiple responses.
+  std::function<absl::Status(const google::protobuf::Any &,
+                             internal::AnyStreamWriter &, co::Coroutine *)>
+      stream_callback;
+  std::string request_channel;
+  std::string response_channel;
+  std::string cancel_channel;
+  int id;
+};
+
+struct MethodInstance {
+  std::shared_ptr<Method> method;
+  std::shared_ptr<subspace::Subscriber> request_subscriber;
+  std::shared_ptr<subspace::Publisher> response_publisher;
+  std::shared_ptr<subspace::Subscriber> cancel_subscriber;
+};
+
+struct Session {
+  int session_id;
+  uint64_t client_id;
+  absl::flat_hash_map<int, std::shared_ptr<MethodInstance>> methods;
+};
+
+} // namespace internal
+
+template <typename Response> struct StreamWriter {
+  // Returns true if the write worked, false if the request was cancelled.
+  bool Write(const Response &res, co::Coroutine *c) {
+    auto any = std::make_unique<google::protobuf::Any>();
+    any->PackFrom(res);
+    return writer->Write(std::move(any), c);
+  }
+
+  void Finish(co::Coroutine *c) { writer->Finish(c); }
+
+  void Cancel() { writer->Cancel(); }
+
+  bool IsCancelled() const { return writer->IsCancelled(); }
+
+  void SetWriter(internal::AnyStreamWriter *writer) { this->writer = writer; }
+  internal::AnyStreamWriter *writer;
+};
+
 class RpcServer : public std::enable_shared_from_this<RpcServer> {
 public:
   RpcServer(std::string service_name,
@@ -46,128 +159,45 @@ public:
   // immediately.
   void Stop();
 
-  // These methods are non-templated and take google::protobuf::Any arguments
-  // and responses.
-
-  // Method with a request and response.
-  absl::Status RegisterMethod(
-      const std::string &method, const std::string &request_type,
-      const std::string &response_type,
-      std::function<absl::Status(const google::protobuf::Any &,
-                                 google::protobuf::Any *, co::Coroutine *)>
-          callback, int id = -1) {
-    return RegisterMethod(method, request_type, response_type,
-                          kDefaultMethodSlotSize, kDefaultMethodNumSlots,
-                          std::move(callback), id);
-  }
-
-  absl::Status RegisterMethod(
-      const std::string &method, const std::string &request_type,
-      const std::string &response_type, int32_t slot_size, int32_t num_slots,
-      std::function<absl::Status(const google::protobuf::Any &,
-                                 google::protobuf::Any *, co::Coroutine *)>
-          callback, int id = -1);
-
-  absl::Status
-  RegisterMethod(const std::string &method, const std::string &request_type,
-                 std::function<absl::Status(const google::protobuf::Any &,
-                                            co::Coroutine *)>
-                     callback, int id) {
-    return RegisterMethod(method, request_type, kDefaultMethodSlotSize,
-                          kDefaultMethodNumSlots, std::move(callback), id);
-  }
-
-  absl::Status
-  RegisterMethod(const std::string &method, const std::string &request_type,
-                 int32_t slot_size, int32_t num_slots,
-                 std::function<absl::Status(const google::protobuf::Any &,
-                                            co::Coroutine *)>
-                     callback, int id = -1);
-
-  // The normal use case will be to use the templated versions of
-  // RegisterMethod below.
-  // Typed methods with request and response.
+  // Register a method that takes a request and produces a response.  The
+  // default channel parameters (slot size and number of slots) will be used.
   template <typename Request, typename Response>
   absl::Status RegisterMethod(
       const std::string &method,
       std::function<absl::Status(const Request &, Response *, co::Coroutine *)>
-          callback, int id = -1) {
+          callback,
+      int id = -1) {
     return RegisterMethod<Request, Response>(method, kDefaultMethodSlotSize,
                                              kDefaultMethodNumSlots,
                                              std::move(callback), id);
   }
 
+  // Register a method that takes a request and produces a response.  You
+  // specify the slot size and number of slots for the channels.
   template <typename Request, typename Response>
   absl::Status RegisterMethod(
       const std::string &method, int32_t slot_size, int32_t num_slots,
       std::function<absl::Status(const Request &, Response *, co::Coroutine *)>
-          callback, int id = -1) {
-    auto request_descriptor = Request::descriptor();
-    auto response_descriptor = Response::descriptor();
-
-    return RegisterMethod(
-        method, request_descriptor->full_name(),
-        response_descriptor->full_name(), kDefaultMethodSlotSize,
-        kDefaultMethodNumSlots,
-        [ method, callback = std::move(callback),
-          request_descriptor ](const google::protobuf::Any &req,
-                               google::protobuf::Any *res, co::Coroutine *c)
-            ->absl::Status {
-              if (!req.Is<Request>()) {
-                return absl::InvalidArgumentError(absl::StrFormat(
-                    "Invalid argment type for %s: need %s got %s", method,
-                    request_descriptor->full_name().c_str(),
-                    req.type_url().c_str()));
-              }
-              Request request;
-              if (!req.UnpackTo(&request)) {
-                return absl::InvalidArgumentError("Failed to unpack request");
-              }
-              Response response;
-              auto status = callback(request, &response, c);
-              if (!status.ok()) {
-                return status;
-              }
-              res->PackFrom(response);
-              return absl::OkStatus();
-            }, id);
-  }
+          callback,
+      int id = -1);
 
   // Typed void methods.
   template <typename Request>
   absl::Status RegisterMethod(
       const std::string &method,
-      std::function<absl::Status(const Request &, co::Coroutine *)> callback, int id) {
+      std::function<absl::Status(const Request &, co::Coroutine *)> callback,
+      int id = -1) {
     return RegisterMethod<Request>(method, kDefaultMethodSlotSize,
-                                   kDefaultMethodNumSlots, std::move(callback), id);
+                                   kDefaultMethodNumSlots, std::move(callback),
+                                   id);
   }
 
   // Type void method with slot parameters.
   template <typename Request>
   absl::Status RegisterMethod(
       const std::string &method, int32_t slot_size, int32_t num_slots,
-      std::function<absl::Status(const Request &, co::Coroutine *)> callback, int id) {
-    auto request_descriptor = Request::descriptor();
-
-    return RegisterMethod(
-        method, request_descriptor->full_name(), kDefaultMethodSlotSize,
-        kDefaultMethodNumSlots,
-        [ method, callback = std::move(callback), request_descriptor ](
-            const google::protobuf::Any &req, co::Coroutine *c)
-            ->absl::Status {
-              if (!req.Is<Request>()) {
-                return absl::InvalidArgumentError(absl::StrFormat(
-                    "Invalid argment type for %s: need %s got %s", method,
-                    request_descriptor->full_name().c_str(),
-                    req.type_url().c_str()));
-              }
-              Request request;
-              if (!req.UnpackTo(&request)) {
-                return absl::InvalidArgumentError("Failed to unpack request");
-              }
-              return callback(request, c);
-            } ,id);
-  }
+      std::function<absl::Status(const Request &, co::Coroutine *)> callback,
+      int id = -1);
 
   // Method that takes a raw message and returns a raw message.
   // NOTE: this will make a copy of the request into a vector<char>.  For a more
@@ -177,7 +207,8 @@ public:
       const std::string &method,
       std::function<absl::Status(const std::vector<char> &, std::vector<char> *,
                                  co::Coroutine *)>
-          callback, int id = -1) {
+          callback,
+      int id = -1) {
     return RegisterMethod(method, kDefaultMethodNumSlots,
                           kDefaultMethodNumSlots, std::move(callback), id);
   }
@@ -186,51 +217,45 @@ public:
       const std::string &method, int slot_size, int num_slots,
       std::function<absl::Status(const std::vector<char> &, std::vector<char> *,
                                  co::Coroutine *)>
-          callback, int id) {
-    return RegisterMethod<RawMessage, RawMessage>(
-        method, slot_size, num_slots,
-        [callback = std::move(callback)](const RawMessage &req, RawMessage *res,
-                                         co::Coroutine *c)
-            ->absl::Status {
-              std::vector<char> request(req.data().begin(), req.data().end());
-              std::vector<char> response;
-              auto status = callback(request, &response, c);
-              if (!status.ok()) {
-                return status;
-              }
-              res->set_data(response.data(), response.size());
-              return absl::OkStatus();
-            }, id);
-  }
+          callback,
+      int id = -1);
 
   absl::Status RegisterMethod(
       const std::string &method,
-      std::function<absl::Status(const absl::Span<const char> &, std::vector<char> *,
-                                 co::Coroutine *)>
-          callback, int id) {
+      std::function<absl::Status(const absl::Span<const char> &,
+                                 std::vector<char> *, co::Coroutine *)>
+          callback,
+      int id = -1) {
     return RegisterMethod(method, kDefaultMethodNumSlots,
                           kDefaultMethodNumSlots, std::move(callback), id);
   }
 
   absl::Status RegisterMethod(
       const std::string &method, int32_t slot_size, int32_t num_slots,
-      std::function<absl::Status(const absl::Span<const char> &, std::vector<char> *,
+      std::function<absl::Status(const absl::Span<const char> &,
+                                 std::vector<char> *, co::Coroutine *)>
+          callback,
+      int id = -1);
+
+  // Server streaming methods.  These take in a single request and produce
+  // multiple responses.
+  template <typename Request, typename Response>
+  absl::Status RegisterMethod(
+      const std::string &method, int32_t slot_size, int32_t num_slots,
+      std::function<absl::Status(const Request &, StreamWriter<Response> &,
                                  co::Coroutine *)>
-          callback, int id) {
-    return RegisterMethod<RawMessage, RawMessage>(
-        method, [callback = std::move(callback)](const RawMessage &req, RawMessage *res, co::Coroutine *c)
-                    ->absl::Status {
-                      const absl::Span<const char> request(req.data().data(),
-                                               req.data().size());
-                      std::vector<char> response;
-                      auto status = callback(request, &response, c);
-                      if (!status.ok()) {
-                        return status;
-                      }
-                      // This is still a copy.
-                      res->set_data(response.data(), response.size());
-                      return absl::OkStatus();
-                    }, id);
+          callback,
+      int id = -1);
+
+  template <typename Request, typename Response>
+  absl::Status RegisterMethod(
+      const std::string &method,
+      std::function<absl::Status(const Request &, StreamWriter<Response> &,
+                                 co::Coroutine *)>
+          callback,
+      int id = -1) {
+    return RegisterMethod(method, kDefaultMethodSlotSize,
+                          kDefaultMethodNumSlots, std::move(callback), id);
   }
 
   absl::Status UnregisterMethod(const std::string &method) {
@@ -244,45 +269,60 @@ public:
 
   const std::string &Name() const { return name_; }
 
+  // These methods are non-templated and take google::protobuf::Any arguments
+  // and responses.  They are notionally private but we need to access them
+  // for the server test unit test.
+
+  // Method with a request and response.
+  absl::Status RegisterMethod(
+      const std::string &method, const std::string &request_type,
+      const std::string &response_type,
+      std::function<absl::Status(const google::protobuf::Any &,
+                                 google::protobuf::Any *, co::Coroutine *)>
+          callback,
+      int id = -1) {
+    return RegisterMethod(method, request_type, response_type,
+                          kDefaultMethodSlotSize, kDefaultMethodNumSlots,
+                          std::move(callback), id);
+  }
+
+  absl::Status RegisterMethod(
+      const std::string &method, const std::string &request_type,
+      const std::string &response_type, int32_t slot_size, int32_t num_slots,
+      std::function<absl::Status(const google::protobuf::Any &,
+                                 google::protobuf::Any *, co::Coroutine *)>
+          callback,
+      int id = -1);
+
+  absl::Status
+  RegisterMethod(const std::string &method, const std::string &request_type,
+                 std::function<absl::Status(const google::protobuf::Any &,
+                                            co::Coroutine *)>
+                     callback,
+                 int id = -1) {
+    return RegisterMethod(method, request_type, kDefaultMethodSlotSize,
+                          kDefaultMethodNumSlots, std::move(callback), id);
+  }
+
+  absl::Status
+  RegisterMethod(const std::string &method, const std::string &request_type,
+                 int32_t slot_size, int32_t num_slots,
+                 std::function<absl::Status(const google::protobuf::Any &,
+                                            co::Coroutine *)>
+                     callback,
+                 int id = -1);
+
+  // Streaming method.
+  absl::Status RegisterMethod(
+      const std::string &method, const std::string &request_type,
+      const std::string &response_type, int32_t slot_size, int32_t num_slots,
+      std::function<absl::Status(const google::protobuf::Any &,
+                                 internal::AnyStreamWriter &, co::Coroutine *)>
+          callback,
+      int id = -1);
+
 private:
-  struct Method {
-    Method(RpcServer *server, std::string name, std::string request_type,
-           std::string response_type, int32_t slot_size, int32_t num_slots,
-           std::function<absl::Status(const google::protobuf::Any &,
-                                      google::protobuf::Any *, co::Coroutine *)>
-               callback, int id)
-        : name(std::move(name)), request_type(std::move(request_type)),
-          response_type(std::move(response_type)), slot_size(slot_size),
-          num_slots(num_slots), callback(std::move(callback)), id(id) {
-      request_channel =
-          absl::StrFormat("/rpc/%s/%s/request", server->Name(), this->name);
-      response_channel =
-          absl::StrFormat("/rpc/%s/%s/response", server->Name(), this->name);
-    }
-    std::string name;
-    std::string request_type;
-    std::string response_type;
-    int32_t slot_size;
-    int32_t num_slots;
-    std::function<absl::Status(const google::protobuf::Any &,
-                               google::protobuf::Any *, co::Coroutine *)>
-        callback;
-    std::string request_channel;
-    std::string response_channel;
-    int id;
-  };
-
-  struct MethodInstance {
-    std::shared_ptr<Method> method;
-    std::shared_ptr<subspace::Subscriber> request_subscriber;
-    std::shared_ptr<subspace::Publisher> response_publisher;
-  };
-
-  struct Session {
-    int session_id;
-    uint64_t client_id;
-    absl::flat_hash_map<int, std::shared_ptr<MethodInstance>> methods;
-  };
+  friend struct internal::AnyStreamWriter;
 
   absl::Status CreateChannels();
   void AddCoroutine(std::unique_ptr<co::Coroutine> coroutine) {
@@ -305,20 +345,41 @@ private:
   PublishRpcServerResponse(const subspace::RpcServerResponse &response,
                            co::Coroutine *c);
 
-  absl::StatusOr<std::shared_ptr<Session>> CreateSession(uint64_t client_id);
+  absl::StatusOr<std::shared_ptr<internal::Session>>
+  CreateSession(uint64_t client_id);
   absl::Status DestroySession(int session_id);
 
-  static void SessionMethodCoroutine(std::shared_ptr<RpcServer> server,
-                                     std::shared_ptr<Session> session,
-                                     std::shared_ptr<MethodInstance> method_instance,
-                                     co::Coroutine *c);
+  static void SessionMethodCoroutine(
+      std::shared_ptr<RpcServer> server,
+      std::shared_ptr<internal::Session> session,
+      std::shared_ptr<internal::MethodInstance> method_instance,
+      co::Coroutine *c);
+
+  static void SessionStreamingMethodCoroutine(
+      std::shared_ptr<RpcServer> server,
+      std::shared_ptr<internal::Session> session,
+      std::shared_ptr<internal::MethodInstance> method_instance,
+      co::Coroutine *c);
+
+  static void SendStreamRpcResponse(
+      std::shared_ptr<RpcServer> server,
+      std::shared_ptr<internal::Session> session,
+      std::shared_ptr<internal::MethodInstance> method_instance,
+      const RpcRequest &request, std::unique_ptr<google::protobuf::Any> result,
+      bool is_last, bool is_cancelled, co::Coroutine *c);
+  static void
+  SendRpcError(std::shared_ptr<RpcServer> server,
+               std::shared_ptr<internal::Session> session,
+               std::shared_ptr<internal::MethodInstance> method_instance,
+               const RpcRequest &request, const std::string &error,
+               co::Coroutine *c);
 
   std::string name_;
   std::string subspace_server_socket_;
   co::CoroutineScheduler local_scheduler_;
   co::CoroutineScheduler *scheduler_;
   std::shared_ptr<Client> client_;
-  absl::flat_hash_map<std::string, std::shared_ptr<Method>> methods_;
+  absl::flat_hash_map<std::string, std::shared_ptr<internal::Method>> methods_;
   toolbelt::Logger logger_;
   toolbelt::Pipe interrupt_pipe_;
 
@@ -327,8 +388,105 @@ private:
   absl::flat_hash_set<std::unique_ptr<co::Coroutine>> coroutines_;
   bool running_ = false;
   int32_t next_session_id_ = 0; // Next session ID.
-  int next_method_id_ = 0; // Next method ID.
-  absl::flat_hash_map<int32_t, std::shared_ptr<Session>> sessions_;
+  int next_method_id_ = 0;      // Next method ID.
+  absl::flat_hash_map<int32_t, std::shared_ptr<internal::Session>> sessions_;
 };
 
+template <typename Request, typename Response>
+inline absl::Status RpcServer::RegisterMethod(
+    const std::string &method, int32_t slot_size, int32_t num_slots,
+    std::function<absl::Status(const Request &, Response *, co::Coroutine *)>
+        callback,
+    int id) {
+  auto request_descriptor = Request::descriptor();
+  auto response_descriptor = Response::descriptor();
+
+  return RegisterMethod(
+      method, request_descriptor->full_name(), response_descriptor->full_name(),
+      kDefaultMethodSlotSize, kDefaultMethodNumSlots,
+      [method, callback = std::move(callback), request_descriptor](
+          const google::protobuf::Any &req, google::protobuf::Any *res,
+          co::Coroutine *c) -> absl::Status {
+        if (!req.Is<Request>()) {
+          return absl::InvalidArgumentError(absl::StrFormat(
+              "Invalid argment type for %s: need %s got %s", method,
+              request_descriptor->full_name().c_str(), req.type_url().c_str()));
+        }
+        Request request;
+        if (!req.UnpackTo(&request)) {
+          return absl::InvalidArgumentError("Failed to unpack request");
+        }
+        Response response;
+        auto status = callback(request, &response, c);
+        if (!status.ok()) {
+          return status;
+        }
+        res->PackFrom(response);
+        return absl::OkStatus();
+      },
+      id);
+}
+
+template <typename Request>
+inline absl::Status RpcServer::RegisterMethod(
+    const std::string &method, int32_t slot_size, int32_t num_slots,
+    std::function<absl::Status(const Request &, co::Coroutine *)> callback,
+    int id) {
+  auto request_descriptor = Request::descriptor();
+
+  return RegisterMethod(
+      method, request_descriptor->full_name(), kDefaultMethodSlotSize,
+      kDefaultMethodNumSlots,
+      [method, callback = std::move(callback), request_descriptor](
+          const google::protobuf::Any &req, co::Coroutine *c) -> absl::Status {
+        if (!req.Is<Request>()) {
+          return absl::InvalidArgumentError(absl::StrFormat(
+              "Invalid argment type for %s: need %s got %s", method,
+              request_descriptor->full_name().c_str(), req.type_url().c_str()));
+        }
+        Request request;
+        if (!req.UnpackTo(&request)) {
+          return absl::InvalidArgumentError("Failed to unpack request");
+        }
+        return callback(request, c);
+      },
+      id);
+}
+
+template <typename Request, typename Response>
+inline absl::Status RpcServer::RegisterMethod(
+    const std::string &method, int32_t slot_size, int32_t num_slots,
+    std::function<absl::Status(const Request &, StreamWriter<Response> &,
+                               co::Coroutine *)>
+        callback,
+    int id) {
+  auto request_descriptor = Request::descriptor();
+  auto response_descriptor = Response::descriptor();
+
+  StreamWriter<Response> typed_writer;
+  return RegisterMethod(
+      method, request_descriptor->full_name(), response_descriptor->full_name(),
+      kDefaultMethodSlotSize, kDefaultMethodNumSlots,
+      [method, callback = std::move(callback), request_descriptor,
+       typed_writer](const google::protobuf::Any &req,
+                      internal::AnyStreamWriter &writer,
+                      co::Coroutine *c) mutable -> absl::Status {
+        if (!req.Is<Request>()) {
+          return absl::InvalidArgumentError(absl::StrFormat(
+              "Invalid argment type for %s: need %s got %s", method,
+              request_descriptor->full_name().c_str(), req.type_url().c_str()));
+        }
+        Request request;
+        if (!req.UnpackTo(&request)) {
+          return absl::InvalidArgumentError("Failed to unpack request");
+        }
+        typed_writer.SetWriter(&writer);
+        auto status = callback(request, typed_writer, c);
+        if (!status.ok()) {
+          return status;
+        }
+        return absl::OkStatus();
+      },
+      id);
+}
 } // namespace subspace
