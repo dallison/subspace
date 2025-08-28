@@ -18,6 +18,7 @@
 #include "toolbelt/logging.h"
 #include "toolbelt/sockets.h"
 #include "toolbelt/triggerfd.h"
+#include <chrono>
 #include <cstddef>
 #include <functional>
 #include <string>
@@ -51,9 +52,7 @@ public:
     return *this;
   }
 
-  subspace::Message GetMessage() const {
-    return Message(msg_);
-  }
+  subspace::Message GetMessage() const { return Message(msg_); }
 
   T *get() const { return reinterpret_cast<T *>(msg_->buffer); }
   T &operator*() const { return *reinterpret_cast<T *>(msg_->buffer); }
@@ -247,6 +246,12 @@ private:
   // client is coroutine-aware, the coroutine will wait.  If it's not,
   // the function will block on a poll until the publisher is triggered.
   absl::Status WaitForReliablePublisher(details::PublisherImpl *publisher,
+                                        co::Coroutine *c = nullptr) {
+    return WaitForReliablePublisher(publisher, std::chrono::nanoseconds(0), c);
+  }
+
+  absl::Status WaitForReliablePublisher(details::PublisherImpl *publisher,
+                                        std::chrono::nanoseconds timeout,
                                         co::Coroutine *c = nullptr);
 
   // Wait until a reliable publisher can try again to send a message.  If the
@@ -255,13 +260,25 @@ private:
   absl::StatusOr<int>
   WaitForReliablePublisher(details::PublisherImpl *publisher,
                            const toolbelt::FileDescriptor &fd,
-                           co::Coroutine *c = nullptr);
+                           co::Coroutine *c = nullptr) {
+    return WaitForReliablePublisher(publisher, fd, std::chrono::nanoseconds(0), c);
+  }
+
+  absl::StatusOr<int> WaitForReliablePublisher(
+      details::PublisherImpl *publisher, const toolbelt::FileDescriptor &fd,
+      std::chrono::nanoseconds timeout, co::Coroutine *c = nullptr);
 
   // Wait until there's a message available to be read by the
   // subscriber.  If the client is coroutine-aware, the coroutine
   // will wait.  If it's not, the function will block on a poll
   // until the subscriber is triggered.
   absl::Status WaitForSubscriber(details::SubscriberImpl *subscriber,
+                                 co::Coroutine *c = nullptr) {
+    return WaitForSubscriber(subscriber, std::chrono::nanoseconds(0), c);
+  }
+
+  absl::Status WaitForSubscriber(details::SubscriberImpl *subscriber,
+                                 std::chrono::nanoseconds timeout,
                                  co::Coroutine *c = nullptr);
 
   // Wait until there' s a message available to be read by the
@@ -270,7 +287,14 @@ private:
   // until the subscriber is triggered.
   absl::StatusOr<int> WaitForSubscriber(details::SubscriberImpl *subscriber,
                                         const toolbelt::FileDescriptor &fd,
-                                        co::Coroutine *c = nullptr);
+                                        co::Coroutine *c = nullptr) {
+    return WaitForSubscriber(subscriber, fd, std::chrono::nanoseconds(0), c);
+  }
+
+  absl::StatusOr<int> WaitForSubscriber(details::SubscriberImpl *subscriber,
+                                        const toolbelt::FileDescriptor &fd,
+                                           std::chrono::nanoseconds timeout,
+                                     co::Coroutine *c = nullptr);
 
   // Read a message from a subscriber.  If there are no available messages
   // the 'length' field of the returned Message will be zero.  The 'buffer'
@@ -510,6 +534,11 @@ public:
     return client_->WaitForReliablePublisher(impl_.get(), c);
   }
 
+  absl::Status Wait(std::chrono::nanoseconds timeout,
+                    co::Coroutine *c = nullptr) {
+    return client_->WaitForReliablePublisher(impl_.get(), timeout, c);
+  }
+
   // Wait until a reliable publisher can try again to send a message.  If the
   // client is coroutine-aware, the coroutine will wait.  If it's not,
   // the function will block on a poll until the publisher is triggered.
@@ -521,9 +550,13 @@ public:
     return client_->WaitForReliablePublisher(impl_.get(), fd, c);
   }
 
-  struct pollfd GetPollFd() const {
-    return client_->GetPollFd(impl_.get());
+  absl::StatusOr<int> Wait(const toolbelt::FileDescriptor &fd,
+                           std::chrono::nanoseconds timeout,
+                           co::Coroutine *c = nullptr) {
+    return client_->WaitForReliablePublisher(impl_.get(), fd, timeout, c);
   }
+
+  struct pollfd GetPollFd() const { return client_->GetPollFd(impl_.get()); }
 
   // This is a file descriptor that you can poll on to wait for
   // message slots to be retired.  It is triggered
@@ -562,9 +595,9 @@ public:
       std::function<absl::Status(Publisher *, int, int)> callback) {
     return client_->RegisterResizeCallback(
         impl_.get(),
-        [ this, callback = std::move(callback) ](
-            details::PublisherImpl * p, int32_t old_size, int32_t new_size)
-            ->absl::Status { return callback(this, old_size, new_size); });
+        [this, callback = std::move(callback)](
+            details::PublisherImpl *p, int32_t old_size, int32_t new_size)
+            -> absl::Status { return callback(this, old_size, new_size); });
   }
 
   absl::Status UnregisterResizeCallback() {
@@ -631,6 +664,11 @@ public:
     return client_->WaitForSubscriber(impl_.get(), c);
   }
 
+  absl::Status Wait(std::chrono::nanoseconds timeout,
+                    co::Coroutine *c = nullptr) {
+    return client_->WaitForSubscriber(impl_.get(), timeout, c);
+  }
+
   // Wait until there's a message available to be read by the
   // subscriber.  If the client is coroutine-aware, the coroutine
   // will wait.  If it's not, the function will block on a poll
@@ -641,6 +679,12 @@ public:
   absl::StatusOr<int> Wait(const toolbelt::FileDescriptor &fd,
                            co::Coroutine *c = nullptr) {
     return client_->WaitForSubscriber(impl_.get(), fd, c);
+  }
+
+  absl::StatusOr<int> Wait(const toolbelt::FileDescriptor &fd,
+                           std::chrono::nanoseconds timeout,
+                           co::Coroutine *c = nullptr) {
+    return client_->WaitForSubscriber(impl_.get(), fd, timeout, c);
   }
 
   // Read a message from a subscriber.  If there are no available messages
@@ -669,9 +713,7 @@ public:
   template <typename T>
   absl::StatusOr<shared_ptr<T>> FindMessage(uint64_t timestamp);
 
-  struct pollfd GetPollFd() const {
-    return client_->GetPollFd(impl_.get());
-  }
+  struct pollfd GetPollFd() const { return client_->GetPollFd(impl_.get()); }
 
   toolbelt::FileDescriptor GetFileDescriptor() const {
     return client_->GetFileDescriptor(impl_.get());
@@ -694,9 +736,10 @@ public:
   // as its second argument.
   absl::Status RegisterDroppedMessageCallback(
       std::function<void(Subscriber *, int64_t)> callback) {
-    return client_->RegisterDroppedMessageCallback(impl_.get(), [
-      this, callback = std::move(callback)
-    ](details::SubscriberImpl * s, int64_t c) { callback(this, c); });
+    return client_->RegisterDroppedMessageCallback(
+        impl_.get(),
+        [this, callback = std::move(callback)](
+            details::SubscriberImpl *s, int64_t c) { callback(this, c); });
   }
 
   absl::Status UnregisterDroppedMessageCallback() {
@@ -705,11 +748,11 @@ public:
 
   absl::Status
   RegisterMessageCallback(std::function<void(Subscriber *, Message)> callback) {
-    return client_->RegisterMessageCallback(impl_.get(), [
-      this, callback = std::move(callback)
-    ](details::SubscriberImpl * s, Message m) {
-      callback(this, std::move(m));
-    });
+    return client_->RegisterMessageCallback(
+        impl_.get(), [this, callback = std::move(callback)](
+                         details::SubscriberImpl *s, Message m) {
+          callback(this, std::move(m));
+        });
   }
 
   absl::Status UnregisterMessageCallback() {
@@ -750,11 +793,9 @@ public:
     return impl_->NumSubscribers(vchan_id);
   }
 
-  // If you don't want to hold on to the current active message in the subscriber, you can
-  // call this.
-  void ClearActiveMessage() {
-    impl_->ClearActiveMessage();
-  }
+  // If you don't want to hold on to the current active message in the
+  // subscriber, you can call this.
+  void ClearActiveMessage() { impl_->ClearActiveMessage(); }
 
 private:
   friend class Server;

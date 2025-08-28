@@ -9,6 +9,7 @@
 #include <functional>
 #include <iostream>
 #include <strings.h>
+#include <vector>
 
 namespace subspace {
 
