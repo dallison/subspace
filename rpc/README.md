@@ -14,7 +14,7 @@ It has the following features:
 The API looks something like a simpler version of gRPC.
 
 ## Service definition
-A service is defined in a `.proto` file, just like gRPC does.  A Starlark
+A service is defined in a `.proto` file, just like `gRPC` does.  A Starlark
 Bazel extension is provided to handle the service and generate code for both
 the client and server side.
 
@@ -55,7 +55,7 @@ service TestService {
 }
 ```
 
-You can write a BUILD.bazel (or just BUILD) that contains:
+You can write a `BUILD.bazel` (or just BUILD) that contains:
 
 ```
 load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
@@ -105,6 +105,20 @@ RPC functions:
 The client library will define a class with a member function for each of these
 functions and the server library will define a class that has a pure virtual
 function for each of them
+
+The output files are placed in the Bazel output directory.  For example,
+for the `rpc_test.proto` service, in a top level `rpc/proto` directory, the header files are in:
+
+```
+bazel-bin/rpc/proto/rpc_test.subspace.rpc_client.h
+bazel-bin/rpc/proto/rpc_test.subspace.rpc_server.h
+```
+
+To include them in a program, just use:
+
+```c++
+#include "rpc/proto/rpc_test.subspace.rpc_client.h"
+```
 
 ## RPC server
 Each service that wants to export a set of remote procedure calls runs an
@@ -309,8 +323,12 @@ using namespace std::chrono_literals;
 ```
 If the server doesn't respond withing 10 seconds, you will get an error.
 
+When you are done with a client you should call the `Close` function to remove
+the channels and tell the server it has gone away.  The destructor also calls `Close`
+but you should call it yourself to detect any errors.
+
 ## Streaming functions
-Like gRPC, we provide a way for a single RPC function to result in multiple responses
+Like `gRPC`, we provide a way for a single RPC function to result in multiple responses
 sent by the server.  This is referred to as `server streaming`.  gRPC also provides a
 `client streaming` facility but that isn't supported at time of writing.
 
@@ -452,6 +470,43 @@ classes provide.
 
 I promise I will document them fully soon...
 
+## Execution model
+Unlike `gRPC`, Subspace RPC does not force you into a multithreaded environment.  Internally the
+server uses coroutines to provide cooperative multitasking but there are no internal threads
+created.  This is a BYOT model (Bring Your Own Threads), so if you insist on using threads
+you would run each server in its own thread.  When a server is executing a method it is blocking
+the server so if you want to have a parallel execution model (a server running multiple methods
+at one time), you will need to use separate servers, each in its own thread.
+
+Likewise, the client is single threaded and coroutine-aware but if you want to use threads,
+run the client in a thread.  Method invocations in a client are always blocking, if you want
+non-blocking clients, wrap the client in a thread and provide a callback yourself.
+
+This all may seem to be a bit restrictive, but this system is intended to be a simple RPC
+system built over Subspace IPC, not a full replacement for something like gRPC.  If you need
+to have the features of gRPC, I suggest you just use it and deal with the complexity.
+
+### How coroutines are used
+In the server, every session opened from a client creates a bunch of coroutines, one for each
+method that the server supports.  Each coroutine is listening on the `request` channel and
+responds on the `response` channel.  When the method is invoked, it is passed a coroutine pointer
+that can be used to cooperate with the other coroutines in the server.  If your method blocks
+(calls read or waits for a mutex or something) the whole server is blocked (it's all in a single
+thread).
+
+If you are using a threading model where the server is running in its own thread, you can ignore
+the coroutine pointer and block away, but be aware that the server will not be able to process
+another method while this is happening.
+
+Coroutines provide ways to wait for file descriptors, sleep and yield, so if you want to
+take advantage of the cooperative multitasking and enable the server to handle more than
+one method at a time, you can use these facilities.  Please take a gander at
+[my coroutine library](https://github.com/dallison/co) for details on coroutines.
+
+The main advantage of going to the effort of using coroutines is that you can completely
+avoid any multithreading pitfalls.  There is never any need to lock data since, by definition,
+only one thread can access the memory at one time.  So no mutuxes or condition variables and no
+data races.
 
 ## How it works
 As the name suggests, this uses Subspace IPC for its transport.  Subspace already supports reliable

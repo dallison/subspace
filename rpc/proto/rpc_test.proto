@@ -29,4 +29,6 @@ service TestService {
   rpc TestMethod(TestRequest) returns (TestResponse);
   rpc PerfMethod(PerfRequest) returns (PerfResponse);
   rpc StreamMethod(TestRequest) returns (stream TestResponse);
+  rpc ErrorMethod(TestRequest) returns (TestResponse);
+  rpc TimeoutMethod(TestRequest) returns (TestResponse);
 }
