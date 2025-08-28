@@ -3,15 +3,15 @@ This library provides a remote procedure call (RPC) facility built on top of Sub
 It has the following features:
 
 1. Reliable shared memory transport
-1. Intra and iter-computer calls
+1. Intra and inter-computer calls
 1. Type safe client and server API
 1. Coroutine aware (you don't need to use coroutines)
 1. Bazel integration using Starlark
-1. gRPC style services in proto file
+1. `gRPC` style services in proto file
 1. Server streaming calls
 1. Protobuf serialization
 
-The API looks something like a simpler version of gRPC.
+The API looks something like a simpler version of `gRPC`.
 
 ## Service definition
 A service is defined in a `.proto` file, just like `gRPC` does.  A Starlark
