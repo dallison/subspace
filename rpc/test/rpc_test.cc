@@ -141,6 +141,29 @@ public:
     res.set_server_send_time(toolbelt::Now());
     return res;
   }
+
+  absl::Status StreamMethod(const rpc::TestRequest &request,
+                            subspace::StreamWriter<rpc::TestResponse> &writer,
+                            co::Coroutine *c) override {
+    std::cerr << "StreamMethod called with request: " << request.DebugString()
+              << std::endl;
+    constexpr int kNumResults = 200;
+    for (int i = 0; i < kNumResults; i++) {
+      if (writer.IsCancelled()) {
+        std::cerr << "StreamMethod cancelled after " << i << " responses"
+                  << std::endl;
+        writer.Finish(c);
+        return absl::OkStatus();
+      }
+      rpc::TestResponse r;
+      r.set_message("Hello from StreamMethod part " + std::to_string(i));
+      writer.Write(r, c);
+      c->Millisleep(request.stream_period());
+    }
+
+    writer.Finish(c);
+    return absl::OkStatus();
+  }
 };
 
 static std::shared_ptr<MyServer> BuildServer() {
@@ -158,14 +181,14 @@ TEST_F(RpcTest, Basic) {
   ASSERT_OK(server->Run(&scheduler));
 
   co::Coroutine test(scheduler, [&](co::Coroutine *c) {
-    rpc::TestServiceClient client(getpid(), RpcTest::Socket());
-    client.SetLogLevel("debug");
-
-    ASSERT_OK(client.Open(c));
+    auto cl = rpc::TestServiceClient::Create(getpid(), RpcTest::Socket(), c);
+    ASSERT_OK(cl);
+    auto client = *cl;
+    client->SetLogLevel("debug");
 
     rpc::TestRequest req;
     req.set_message("this is a test");
-    absl::StatusOr<rpc::TestResponse> r = client.TestMethod(req, c);
+    absl::StatusOr<rpc::TestResponse> r = client->TestMethod(req, c);
     std::cerr << r.status().ToString() << std::endl;
     ASSERT_OK(r);
 
@@ -173,6 +196,50 @@ TEST_F(RpcTest, Basic) {
     ASSERT_OK(r);
 
     EXPECT_EQ(r->message(), "Hello from TestMethod");
+    ASSERT_OK(client->Close(c));
+    server->Stop();
+  });
+
+  scheduler.Run();
+}
+
+TEST_F(RpcTest, Stream) {
+  co::CoroutineScheduler scheduler;
+
+  auto server = BuildServer();
+  ASSERT_OK(server->Run(&scheduler));
+
+  co::Coroutine test(scheduler, [&](co::Coroutine *c) {
+    rpc::TestServiceClient client(getpid(), RpcTest::Socket());
+    client.SetLogLevel("debug");
+
+    ASSERT_OK(client.Open(c));
+
+    class MyResponseReceiver
+        : public subspace::ResponseReceiver<rpc::TestResponse> {
+    public:
+      void OnResponse(rpc::TestResponse &&response) override {
+        std::cerr << "Received response: " << response.message() << std::endl;
+        count++;
+      }
+      void OnError(const absl::Status &status) override {
+        std::cerr << "Received error: " << status.ToString() << std::endl;
+      }
+      void OnCancel() override { std::cerr << "Stream cancelled" << std::endl; }
+      void OnFinish() override { std::cerr << "Stream finished" << std::endl; }
+      int GetCount() const { return count; }
+      int count = 0;
+    };
+
+    MyResponseReceiver receiver;
+    rpc::TestRequest req;
+    req.set_message("this is a test");
+    absl::Status status = client.StreamMethod(req, receiver, c);
+    absl::StatusOr<rpc::TestResponse> r = client.TestMethod(req, c);
+    std::cerr << r.status().ToString() << std::endl;
+    ASSERT_OK(r);
+
+    ASSERT_EQ(200, receiver.GetCount());
     ASSERT_OK(client.Close(c));
     server->Stop();
   });
