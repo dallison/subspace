@@ -181,14 +181,14 @@ TEST_F(RpcTest, Basic) {
   ASSERT_OK(server->Run(&scheduler));
 
   co::Coroutine test(scheduler, [&](co::Coroutine *c) {
-    rpc::TestServiceClient client(getpid(), RpcTest::Socket());
-    client.SetLogLevel("debug");
-
-    ASSERT_OK(client.Open(c));
+    auto cl = rpc::TestServiceClient::Create(getpid(), RpcTest::Socket(), c);
+    ASSERT_OK(cl);
+    auto client = *cl;
+    client->SetLogLevel("debug");
 
     rpc::TestRequest req;
     req.set_message("this is a test");
-    absl::StatusOr<rpc::TestResponse> r = client.TestMethod(req, c);
+    absl::StatusOr<rpc::TestResponse> r = client->TestMethod(req, c);
     std::cerr << r.status().ToString() << std::endl;
     ASSERT_OK(r);
 
@@ -196,7 +196,7 @@ TEST_F(RpcTest, Basic) {
     ASSERT_OK(r);
 
     EXPECT_EQ(r->message(), "Hello from TestMethod");
-    ASSERT_OK(client.Close(c));
+    ASSERT_OK(client->Close(c));
     server->Stop();
   });
 

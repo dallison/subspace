@@ -66,6 +66,9 @@ RpcClient::PublishServerRequest(const subspace::RpcServerRequest &req,
   uint64_t length = req.ByteSizeLong();
   absl::StatusOr<void *> buffer;
   for (;;) {
+    if (service_pub_->NumSubscribers() == 0) {
+      return absl::InternalError("No subscribers; is the RPC server running?");
+    }
     buffer = service_pub_->GetMessageBuffer(int32_t(length));
     if (!buffer.ok()) {
       return absl::InternalError(absl::StrFormat(
@@ -290,7 +293,10 @@ RpcClient::InvokeMethod(int method_id, const google::protobuf::Any &request,
 
   absl::StatusOr<void *> buffer;
   for (;;) {
-    buffer = method->request_publisher->GetMessageBuffer(
+    if (method->request_publisher->NumSubscribers() == 0) {
+      return absl::InternalError("No subscribers; is the RPC server running?");
+    }
+        buffer = method->request_publisher->GetMessageBuffer(
         int32_t(req.ByteSizeLong()));
     if (!buffer.ok()) {
       return absl::InternalError(absl::StrFormat(
@@ -386,6 +392,9 @@ absl::Status RpcClient::InvokeMethod(
 
   absl::StatusOr<void *> buffer;
   for (;;) {
+    if (method->request_publisher->NumSubscribers() == 0) {
+      return absl::InternalError("No subscribers; is the RPC server running?");
+    }
     buffer = method->request_publisher->GetMessageBuffer(
         int32_t(req.ByteSizeLong()));
     if (!buffer.ok()) {
