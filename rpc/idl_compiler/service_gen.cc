@@ -21,6 +21,17 @@ void ServiceGenerator::GenerateClientHeader(std::ostream &os) {
      << "\", client_id, "
         "std::move(subspace_socket))) {\n";
   os << "  }\n";
+  os << "  static absl::StatusOr<std::shared_ptr<" << service_->name()
+     << "Client>> Create(uint64_t client_id, const std::string& subspace_socket, co::Coroutine* c = nullptr) "
+        "{\n";
+  os << "    auto client = std::make_shared<" << service_->name()
+     << "Client>(client_id, subspace_socket);\n";
+  os << "    auto status = client->Open(c);\n";
+  os << "    if (!status.ok()) {\n";
+  os << "      return status;\n";
+  os << "    }\n";
+  os << "    return client;\n";
+  os << "  }\n";
   os << "  absl::Status Open(co::Coroutine* c = nullptr) {\n";
   os << "    return client_->Open(c);\n";
   os << "  }\n";
@@ -153,15 +164,32 @@ void ServiceGenerator::GenerateMethodClientHeader(
     os << "const " << method->input_type()->name() << "& request";
     os << ", subspace::ResponseReceiver<" << method->output_type()->name()
        << ">& receiver";
-    os << ", co::Coroutine* c = nullptr";
+    os << ", std::chrono::nanoseconds timeout, co::Coroutine* c = nullptr";
     os << ");\n";
+       os << "  absl::Status " << method_name << "(";
+    os << "const " << method->input_type()->name() << "& request";
+    os << ", subspace::ResponseReceiver<" << method->output_type()->name()
+       << ">& receiver";
+    os << ", co::Coroutine* c = nullptr";
+    os << ") {\n";
+    os << "    return " << method_name
+       << "(request, receiver, std::chrono::nanoseconds(0), c);\n";
+    os << "  }\n";
     return;
   }
   os << "  absl::StatusOr<" << method->output_type()->name() << "> "
      << method_name << "(";
   os << "const " << method->input_type()->name() << "& request";
-  os << ", co::Coroutine* c = nullptr";
+  os << ", std::chrono::nanoseconds timeout, co::Coroutine* c = nullptr";
   os << ");\n";
+    os << "  absl::StatusOr<" << method->output_type()->name() << "> "
+     << method_name << "(";
+  os << "const " << method->input_type()->name() << "& request";
+  os << ", co::Coroutine* c = nullptr";
+  os << ") {\n";
+  os << "    return " << method_name
+     << "(request, std::chrono::nanoseconds(0), c);\n";
+  os << "  }\n";
 }
 
 void ServiceGenerator::GenerateMethodClientSource(
@@ -172,19 +200,19 @@ void ServiceGenerator::GenerateMethodClientSource(
     os << "absl::Status " << service_->name() << "Client::" << method_name
        << "(const " << method->input_type()->name()
        << "& request, subspace::ResponseReceiver<" << method->output_type()->name()
-       << ">& receiver, co::Coroutine* c) {\n";
+       << ">& receiver, std::chrono::nanoseconds timeout, co::Coroutine* c) {\n";
     os << "  return client_->Call<" << method->input_type()->name() << ", "
        << method->output_type()->name() << ">(k" << method_name
-       << "Id, request, receiver, c);\n";
+       << "Id, request, receiver, timeout, c);\n";
     os << "}\n";
     return;
   }
   os << "absl::StatusOr<" << method->output_type()->name() << "> "
      << service_->name() << "Client::" << method_name << "(const "
-     << method->input_type()->name() << "& request, co::Coroutine* c) {\n";
+     << method->input_type()->name() << "& request, std::chrono::nanoseconds timeout, co::Coroutine* c) {\n";
   os << "  return client_->Call<" << method->input_type()->name() << ", "
      << method->output_type()->name() << ">(k" << method_name
-     << "Id, request, c);\n";
+     << "Id, request, timeout, c);\n";
   os << "}\n";
 }
 
