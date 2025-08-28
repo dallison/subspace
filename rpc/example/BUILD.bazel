@@ -1,0 +1,33 @@
+package(default_visibility = ["//visibility:public"])
+
+cc_test(
+    name = "server",
+    srcs = ["server.cc"],
+    data = [
+        "//server:subspace_server",
+    ],
+    deps = [
+        "//rpc/proto:rpc_test_cc_proto",
+        "//rpc/proto:rpc_test_subspace_rpc_server",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/flags:parse",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+    ],
+)
+
+cc_test(
+    name = "client",
+    srcs = ["client.cc"],
+    data = [
+        "//server:subspace_server",
+    ],
+    deps = [
+        "//rpc/proto:rpc_test_cc_proto",
+        "//rpc/proto:rpc_test_subspace_rpc_client",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/flags:parse",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+    ],
+)

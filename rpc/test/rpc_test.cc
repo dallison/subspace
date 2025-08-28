@@ -16,6 +16,7 @@
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
 #include "toolbelt/pipe.h"
+#include <chrono>
 #include <gtest/gtest.h>
 #include <inttypes.h>
 #include <memory>
@@ -32,6 +33,8 @@ using Publisher = subspace::Publisher;
 using Subscriber = subspace::Subscriber;
 using Message = subspace::Message;
 using InetAddress = toolbelt::InetAddress;
+
+using namespace std::chrono_literals;
 
 #define VAR(a) a##__COUNTER__
 #define EVAL_AND_ASSERT_OK(expr) EVAL_AND_ASSERT_OK2(VAR(r_), expr)
@@ -121,6 +124,7 @@ int RpcTest::server_pipe_[2];
 std::unique_ptr<subspace::Server> RpcTest::server_;
 std::thread RpcTest::server_thread_;
 
+
 class MyServer : public rpc::TestServiceServer {
 public:
   MyServer(const std::string &socket) : rpc::TestServiceServer(socket) {}
@@ -164,13 +168,39 @@ public:
     writer.Finish(c);
     return absl::OkStatus();
   }
+
+  absl::StatusOr<rpc::TestResponse> ErrorMethod(const rpc::TestRequest &request,
+                                                co::Coroutine *c) override {
+    return absl::InternalError("Error occurred");
+  }
+
+  absl::StatusOr<rpc::TestResponse>
+  TimeoutMethod(const rpc::TestRequest &request, co::Coroutine *c) override {
+    c->Sleep(2);
+    rpc::TestResponse response;
+    response.set_message("Hello from TestMethod");
+    return response;
+  }
 };
 
-static std::shared_ptr<MyServer> BuildServer() {
+static MyServer* server_instance = nullptr;
+static void SigQuit(int sig) {
+  if (server_instance != nullptr) {
+    std::cerr << "Signal " << sig << " received, dumping coroutines"
+              << std::endl;
+    server_instance->DumpCoroutines();
+  }
+  signal(SIGQUIT, SIG_DFL);
+  raise(SIGQUIT);
+}
+
+static std::shared_ptr<MyServer> BuildServer(const std::string& log_level="info") {
   auto server = std::make_shared<MyServer>(RpcTest::Socket());
-  server->SetLogLevel("debug");
+  server->SetLogLevel(log_level);
   auto s = server->RegisterMethods();
   EXPECT_TRUE(s.ok());
+  server_instance = server.get();
+  signal(SIGQUIT, SigQuit);
   return server;
 }
 
@@ -184,14 +214,11 @@ TEST_F(RpcTest, Basic) {
     auto cl = rpc::TestServiceClient::Create(getpid(), RpcTest::Socket(), c);
     ASSERT_OK(cl);
     auto client = *cl;
-    client->SetLogLevel("debug");
+    client->SetLogLevel("info");
 
     rpc::TestRequest req;
     req.set_message("this is a test");
     absl::StatusOr<rpc::TestResponse> r = client->TestMethod(req, c);
-    std::cerr << r.status().ToString() << std::endl;
-    ASSERT_OK(r);
-
     std::cerr << r.status().ToString() << std::endl;
     ASSERT_OK(r);
 
@@ -211,7 +238,7 @@ TEST_F(RpcTest, Stream) {
 
   co::Coroutine test(scheduler, [&](co::Coroutine *c) {
     rpc::TestServiceClient client(getpid(), RpcTest::Socket());
-    client.SetLogLevel("debug");
+    client.SetLogLevel("info");
 
     ASSERT_OK(client.Open(c));
 
@@ -246,6 +273,60 @@ TEST_F(RpcTest, Stream) {
 
   scheduler.Run();
 }
+
+TEST_F(RpcTest, Error) {
+  co::CoroutineScheduler scheduler;
+
+  auto server = BuildServer();
+  ASSERT_OK(server->Run(&scheduler));
+
+  co::Coroutine test(scheduler, [&](co::Coroutine *c) {
+    auto cl = rpc::TestServiceClient::Create(getpid(), RpcTest::Socket(), c);
+    ASSERT_OK(cl);
+    auto client = *cl;
+    client->SetLogLevel("info");
+
+    rpc::TestRequest req;
+    req.set_message("this is a test");
+    absl::StatusOr<rpc::TestResponse> r = client->ErrorMethod(req, c);
+    std::cerr << r.status().ToString() << std::endl;
+    ASSERT_FALSE(r.ok());
+    EXPECT_TRUE(
+        absl::StrContains(r.status().ToString(), "INTERNAL: Error occurred"));
+    ASSERT_OK(client->Close(2s, c));
+    std::cerr << "Stopping server\n";
+    server->Stop();
+  });
+
+  scheduler.Run();
+}
+
+TEST_F(RpcTest, Timeout) {
+  co::CoroutineScheduler scheduler;
+
+  auto server = BuildServer();
+  ASSERT_OK(server->Run(&scheduler));
+
+  co::Coroutine test(scheduler, [&](co::Coroutine *c) {
+    auto cl = rpc::TestServiceClient::Create(getpid(), RpcTest::Socket(), c);
+    ASSERT_OK(cl);
+    auto client = *cl;
+    client->SetLogLevel("info");
+
+    rpc::TestRequest req;
+    req.set_message("this is a test");
+    absl::StatusOr<rpc::TestResponse> r = client->TimeoutMethod(req, 1s, c);
+    std::cerr << r.status().ToString() << std::endl;
+    ASSERT_FALSE(r.ok());
+    EXPECT_TRUE(
+        absl::StrContains(r.status().ToString(), "INTERNAL: Error waiting for response: INTERNAL: Timeout"));
+    ASSERT_OK(client->Close(2s, c));
+    server->Stop();
+  });
+
+  scheduler.Run();
+}
+
 
 int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);

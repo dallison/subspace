@@ -1,3 +1,7 @@
+// Copyright 2025 David Allison
+// All Rights Reserved
+// See LICENSE file for licensing information.
+
 #include "rpc/client/rpc_client.h"
 #include "rpc/server/rpc_server.h"
 
@@ -67,6 +71,7 @@ RpcClient::PublishServerRequest(const subspace::RpcServerRequest &req,
   absl::StatusOr<void *> buffer;
   for (;;) {
     if (service_pub_->NumSubscribers() == 0) {
+      Destroy();
       return absl::InternalError("No subscribers; is the RPC server running?");
     }
     buffer = service_pub_->GetMessageBuffer(int32_t(length));
@@ -127,8 +132,9 @@ RpcClient::ReadServerResponse(int request_id, std::chrono::nanoseconds timeout,
                       response.DebugString().c_str());
           return response;
         }
-        break;
+        continue;
       }
+      break;
     }
   }
 }
@@ -245,6 +251,9 @@ absl::Status RpcClient::OpenService(std::chrono::nanoseconds timeout,
 
 absl::Status RpcClient::CloseService(std::chrono::nanoseconds timeout,
                                      co::Coroutine *c) {
+  if (closed_) {
+    return absl::InternalError("Client is closed");
+  }
   subspace::RpcServerRequest req;
   req.set_client_id(client_id_);
   int request_id = next_request_id_++;
@@ -272,6 +281,9 @@ absl::Status RpcClient::CloseService(std::chrono::nanoseconds timeout,
 absl::StatusOr<google::protobuf::Any>
 RpcClient::InvokeMethod(int method_id, const google::protobuf::Any &request,
                         std::chrono::nanoseconds timeout, co::Coroutine *c) {
+  if (closed_) {
+    return absl::InternalError("Client is closed");
+  }
   if (c == nullptr) {
     c = coroutine_;
   }
@@ -294,9 +306,10 @@ RpcClient::InvokeMethod(int method_id, const google::protobuf::Any &request,
   absl::StatusOr<void *> buffer;
   for (;;) {
     if (method->request_publisher->NumSubscribers() == 0) {
+      Destroy();
       return absl::InternalError("No subscribers; is the RPC server running?");
     }
-        buffer = method->request_publisher->GetMessageBuffer(
+    buffer = method->request_publisher->GetMessageBuffer(
         int32_t(req.ByteSizeLong()));
     if (!buffer.ok()) {
       return absl::InternalError(absl::StrFormat(
@@ -370,7 +383,9 @@ absl::Status RpcClient::InvokeMethod(
                        const RpcResponse *)>
         response_handler,
     std::chrono::nanoseconds timeout, co::Coroutine *c) {
-  std::cerr << "shared_from_this: " << shared_from_this() << "\n";
+  if (closed_) {
+    return absl::InternalError("Client is closed");
+  }
   if (c == nullptr) {
     c = coroutine_;
   }
@@ -393,6 +408,7 @@ absl::Status RpcClient::InvokeMethod(
   absl::StatusOr<void *> buffer;
   for (;;) {
     if (method->request_publisher->NumSubscribers() == 0) {
+      Destroy();
       return absl::InternalError("No subscribers; is the RPC server running?");
     }
     buffer = method->request_publisher->GetMessageBuffer(
@@ -454,7 +470,6 @@ absl::Status RpcClient::InvokeMethod(
             return absl::InternalError(
                 absl::StrFormat("%s", rpc_response.error()));
           }
-          std::cerr << "Calling response handler\n";
           response_handler(shared_from_this(), client_id_, session_id_,
                            request_id, method, &rpc_response);
           // We stop receiving response if this is the last one, cancelled or
@@ -476,6 +491,9 @@ absl::Status
 RpcClient::CancelRequest(uint64_t client_id, int session_id, int request_id,
                          std::shared_ptr<client_internal::Method> method,
                          std::chrono::nanoseconds timeout, co::Coroutine *c) {
+  if (closed_) {
+    return absl::InternalError("Client is closed");
+  }
   subspace::RpcCancelRequest req;
   req.set_client_id(client_id_);
   req.set_session_id(session_id_);
@@ -483,6 +501,10 @@ RpcClient::CancelRequest(uint64_t client_id, int session_id, int request_id,
 
   absl::StatusOr<void *> buffer;
   for (;;) {
+    if (method->cancel_publisher->NumSubscribers() == 0) {
+      Destroy();
+      return absl::InternalError("No subscribers; is the RPC server running?");
+    }
     buffer =
         method->cancel_publisher->GetMessageBuffer(int32_t(req.ByteSizeLong()));
     if (!buffer.ok()) {
