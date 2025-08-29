@@ -134,7 +134,7 @@ public:
   }
 
   // Get a pointer to the MessagePrefix for a given slot.
-  MessagePrefix *Prefix(MessageSlot *slot) {
+  MessagePrefix *Prefix(MessageSlot *slot) override {
     MessagePrefix *p = reinterpret_cast<MessagePrefix *>(
         Buffer(slot->id) +
         (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot->id))) * slot->id);
@@ -152,17 +152,21 @@ public:
     if (slot == nullptr) {
       return 0;
     }
-    return buffers_.empty()
-               ? 0
-               : buffers_[ccb_->slots[slot->id].buffer_index]->slot_size;
+    if (buffers_.empty()) {
+      return 0;
+    }
+    if (ccb_->slots[slot->id].buffer_index < 0 ||
+        ccb_->slots[slot->id].buffer_index >= buffers_.size()) {
+      return 0;
+    }
+    return buffers_[ccb_->slots[slot->id].buffer_index]->slot_size;
   }
   // Get the biggest slot size for the channel.
   int SlotSize() const {
     return buffers_.empty() ? 0 : buffers_.back()->slot_size;
   }
 
-  // Get the buffer associated with the given slot id.  The first buffer
-  // starts immediately after the buffer header.
+  // Get the buffer associated with the given slot id.
   char *Buffer(int slot_id,
                bool abort_on_range = true) {
     // While we are trying to get the buffer a publisher might be adding
@@ -171,7 +175,7 @@ public:
     constexpr int kMaxRetries = 1000;
     int retries = 0;
     while (retries < kMaxRetries) {
-      int index = ccb_->slots[slot_id].buffer_index;
+      size_t index = ccb_->slots[slot_id].buffer_index;
       if (index >= 0 && index < buffers_.size()) {
         return buffers_.empty() ? nullptr : (buffers_[index]->buffer);
       }

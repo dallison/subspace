@@ -25,8 +25,6 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
       if (!shm_fd->Valid()) {
         // This means that the file in /dev/shm already exists so we need to
         // attach to it.
-        std::cerr << "Publisher calling OpenBuffer for buffer index " << buffer_index
-                  << " for channel " << name_ << "\n";
         shm_fd = OpenBuffer(buffer_index);
         if (!shm_fd.ok()) {
           return shm_fd.status();
@@ -69,11 +67,6 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
     if (ccb_->num_buffers.compare_exchange_strong(num_buffers, new_num_buffers,
                                                   std::memory_order_relaxed)) {
       // We successfully updated the number of buffers in the CCB.
-      std::cerr << "Publisher channel " << name_ << " created/attached "
-                << new_num_buffers << "/"
-                << ccb_->num_buffers.load(std::memory_order_relaxed)
-                << " buffers of size " << final_buffer_size << " bytes"
-                << std::endl;
       break;
     }
     // Another thread has updated the number of buffers in the CCB.  We need to

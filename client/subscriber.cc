@@ -29,21 +29,21 @@ bool SubscriberImpl::AddActiveMessage(MessageSlot *slot) {
 }
 
 void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
-  std::cerr << "remove active message " << slot->id << " " << slot->ordinal
-            << "\n";
+  std::cerr << this << " remove active message " << slot->id << " "
+            << slot->ordinal << "\n";
   slot->sub_owners.Clear(subscriber_id_);
   AtomicIncRefCount(slot, IsReliable(), -1, slot->ordinal, slot->vchan_id, true,
-                    [this, slot]() {
+                    [this](int retired_slot_id) {
                       // When a slot retires we want to use the slot id that was
                       // originally used for the message.  If the message came
                       // in from a bridge we want to notify the original sender
                       // of the message, not the bridge publisher.
                       //
-                      // The original slot id is in the message prefix.  This is
-                      // kept intact when the bridge publisher sends the
-                      // message.
-                      MessagePrefix *prefix = Prefix(slot);
-                      TriggerRetirement(prefix->slot_id);
+                      // NOTE: lock-free complexity here.  You can't rely on the
+                      // slot still holding the same data since we've set the
+                      // ref count to zero and another publisher may have
+                      // reused the slot.
+                      TriggerRetirement(retired_slot_id);
                     });
 
   if (num_active_messages_-- == options_.MaxActiveMessages()) {
@@ -52,6 +52,8 @@ void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
       TriggerReliablePublishers();
     }
   }
+  std::cerr << this << " num active messages now " << num_active_messages_
+            << "\n";
 }
 
 void SubscriberImpl::PopulateActiveSlots(InPlaceAtomicBitset &bits) {
@@ -134,8 +136,8 @@ SubscriberImpl::FindUnseenOrdinal(const std::vector<ActiveSlot> &active_slots) {
   return nullptr;
 }
 
-void SubscriberImpl::ClaimSlot(MessageSlot *slot,
-                               int vchan_id, bool was_newest) {
+void SubscriberImpl::ClaimSlot(MessageSlot *slot, int vchan_id,
+                               bool was_newest) {
   slot->sub_owners.Set(subscriber_id_);
   if (was_newest) {
     // We read the newest slot so there can't be any other messages for this
@@ -166,6 +168,9 @@ void SubscriberImpl::CollectVisibleSlots(InPlaceAtomicBitset &bits,
       if (!VirtualChannelIdMatch(s, vchan_id_)) {
         return;
       }
+      if (s->buffer_index == -1) {
+        return;
+      }
       ActiveSlot active_slot = {s, s->ordinal, s->timestamp, s->vchan_id};
       active_slots.push_back(active_slot);
     });
@@ -183,7 +188,6 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
   constexpr int kMaxRetries = 1000;
   int retries = 0;
 
-  std::cerr << this << " NextSlot called\n";
   while (retries++ < kMaxRetries) {
     const bool print_errors = retries >= kMaxRetries - 10;
     CheckReload();
@@ -231,7 +235,8 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
   return nullptr;
 }
 
-MessageSlot *SubscriberImpl::LastSlot(MessageSlot *slot, bool reliable, int owner) {
+MessageSlot *SubscriberImpl::LastSlot(MessageSlot *slot, bool reliable,
+                                      int owner) {
   std::vector<ActiveSlot> active_slots;
   active_slots.reserve(NumSlots());
   InPlaceAtomicBitset &bits = GetAvailableSlots(owner);
@@ -327,8 +332,7 @@ MessageSlot *SubscriberImpl::FindActiveSlotByTimestamp(
     // Try to increment the ref count.
     if (AtomicIncRefCount(it->slot, reliable, 1, it->ordinal, it->vchan_id,
                           false)) {
-      if (!ValidateSlotBuffer(it->slot) ||
-          it->slot->buffer_index == -1) {
+      if (!ValidateSlotBuffer(it->slot) || it->slot->buffer_index == -1) {
         // Failed to get a buffer for the slot.  Embargo the slot so we don't
         // see it again this loop and try again.
         embargoed_slots.Set(it->slot->id);
