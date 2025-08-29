@@ -88,9 +88,9 @@ void UnmapMemory(void *p, size_t size, const char *purpose) {
 }
 
 Channel::Channel(const std::string &name, int num_slots, int channel_id,
-                 std::string type)
+                 std::string type, std::function<bool(Channel *)> reload)
     : name_(name), num_slots_(num_slots), channel_id_(channel_id),
-      type_(std::move(type)) {}
+      type_(std::move(type)), reload_callback_(std::move(reload)) {}
 
 void Channel::Unmap() {
   if (scb_ == nullptr) {
@@ -311,12 +311,12 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
 
 #if defined(__APPLE__)
 absl::StatusOr<std::string>
-Channel::MacOsSharedMemoryName(const std::string &shadow_file) const {
+Channel::MacOsSharedMemoryName(const std::string &shadow_file) {
   struct stat st;
   int e = ::stat(shadow_file.c_str(), &st);
   if (e == -1) {
     return absl::InternalError(absl::StrFormat(
-        "Failed to determine MacOS shm name for %s", shadow_file));
+        "Failed to determine MacOS shm name for %s: %s", shadow_file, strerror(errno)));
   }
   // Use the inode number (unique per file) to make the shm file name.
   return absl::StrFormat("subspace_%d", st.st_ino);

@@ -25,6 +25,8 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
       if (!shm_fd->Valid()) {
         // This means that the file in /dev/shm already exists so we need to
         // attach to it.
+        std::cerr << "Publisher calling OpenBuffer for buffer index " << buffer_index
+                  << " for channel " << name_ << "\n";
         shm_fd = OpenBuffer(buffer_index);
         if (!shm_fd.ok()) {
           return shm_fd.status();
@@ -67,6 +69,11 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
     if (ccb_->num_buffers.compare_exchange_strong(num_buffers, new_num_buffers,
                                                   std::memory_order_relaxed)) {
       // We successfully updated the number of buffers in the CCB.
+      std::cerr << "Publisher channel " << name_ << " created/attached "
+                << new_num_buffers << "/"
+                << ccb_->num_buffers.load(std::memory_order_relaxed)
+                << " buffers of size " << final_buffer_size << " bytes"
+                << std::endl;
       break;
     }
     // Another thread has updated the number of buffers in the CCB.  We need to
@@ -88,10 +95,7 @@ void PublisherImpl::SetSlotToBiggestBuffer(MessageSlot *slot) {
   IncrementBufferRefs(slot->buffer_index);
 }
 
-MessageSlot *
-PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
-  ReloadIfNecessary(reload);
-
+MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
   int retries = num_slots_ * 1000;
   MessageSlot *slot = nullptr;
   DynamicBitSet embargoed_slots(NumSlots());
@@ -99,6 +103,7 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
   int cas_retries = 0;
   int retired_slot = -1;
   for (;;) {
+    CheckReload();
     // Look at the first retired slot.  If there are no retired
     // slots, look at all slots for the earliest unreferenced one.
     retired_slot = RetiredSlots().FindFirstSet();
@@ -145,7 +150,7 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
         (old_refs >> kRetiredRefsShift) & kRetiredRefsMask);
     if (slot->refs.compare_exchange_weak(expected, ref,
                                          std::memory_order_relaxed)) {
-      if (!ValidateSlotBuffer(slot, reload)) {
+      if (!ValidateSlotBuffer(slot)) {
         // No buffer for the slot.  Embargo the slot so we don't see it again
         // this loop and try again.
         embargoed_slots.Set(slot->id);
@@ -164,7 +169,7 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
   slot->vchan_id = vchan_id_;
   SetSlotToBiggestBuffer(slot);
 
-  MessagePrefix *p = Prefix(slot, reload);
+  MessagePrefix *p = Prefix(slot);
   p->flags = 0;
   p->vchan_id = vchan_id_;
 
@@ -181,15 +186,14 @@ PublisherImpl::FindFreeSlotUnreliable(int owner, std::function<bool()> reload) {
   return slot;
 }
 
-MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
-                                                 std::function<bool()> reload) {
+MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
   MessageSlot *slot = nullptr;
   std::vector<ActiveSlot> active_slots;
   active_slots.reserve(NumSlots());
   DynamicBitSet embargoed_slots(NumSlots());
   int retired_slot = -1;
   for (;;) {
-    ReloadIfNecessary(reload);
+    CheckReload();
 
     // Put all free slots into the active_slots vector.
     active_slots.clear();
@@ -252,7 +256,7 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
         (old_refs >> kRetiredRefsShift) & kRetiredRefsMask);
     if (slot->refs.compare_exchange_weak(expected, ref,
                                          std::memory_order_relaxed)) {
-      if (!ValidateSlotBuffer(slot, reload)) {
+      if (!ValidateSlotBuffer(slot)) {
         // No buffer for the slot.  Embargo the slot so we don't see it again
         // this loop and try again.
         embargoed_slots.Set(slot->id);
@@ -268,7 +272,7 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
   slot->vchan_id = vchan_id_;
   SetSlotToBiggestBuffer(slot);
 
-  MessagePrefix *p = Prefix(slot, reload);
+  MessagePrefix *p = Prefix(slot);
   p->flags = 0;
   p->vchan_id = vchan_id_;
 
@@ -287,7 +291,7 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner,
 
 Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     MessageSlot *slot, bool reliable, bool is_activation, int owner,
-    bool omit_prefix, bool *notify, std::function<bool()> reload) {
+    bool omit_prefix, bool *notify) {
   if (notify != nullptr) {
     *notify = true; // TODO: remove notify.
   }
@@ -335,11 +339,11 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
 
   // A reliable publisher doesn't allocate a slot until it is asked for.
   if (reliable) {
-    ReloadIfNecessary(reload);
+    CheckReload();
     return {nullptr, 0, 0};
   }
   // Find a new slot.x
-  MessageSlot *new_slot = FindFreeSlotUnreliable(owner, reload);
+  MessageSlot *new_slot = FindFreeSlotUnreliable(owner);
 
   return {new_slot, prefix->ordinal, prefix->timestamp};
 }
