@@ -149,6 +149,86 @@ void Server::ListenerCoroutine(toolbelt::UnixSocket &listen_socket,
   }
 }
 
+void Server::CleanupAfterSession() {
+  std::string session_shm_file_prefix =
+      "subspace_." + std::to_string(session_id_);
+
+#if defined(__APPLE__)
+  // Remove all files starting with "subspace_SESSION" in /tmp.  These refer to
+  // shared memory segments names "subspace_INODE".
+  for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
+    if (entry.path().filename().string().rfind(session_shm_file_prefix, 0) ==
+        0) {
+      // Extrace the node and remove the shared memory segment.
+      // The name of the shared memory segment is "subspace_<inode>".
+      auto status = Channel::MacOsSharedMemoryName(entry.path().string());
+      if (status.ok()) {
+        shm_unlink(status->c_str());
+      }
+      (void)std::filesystem::remove(entry.path());
+    }
+  }
+  // Remove all files in /tmp that contain .scb., .ccb. or .bcb. in the name.
+  std::string ccb_shm_prefix = absl::StrFormat(".%d.ccb.", session_id_);
+  std::string bcb_shm_prefix = absl::StrFormat(".%d.bcb.", session_id_);
+  for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
+    std::string filename = entry.path().filename().string();
+    if (filename.find(ccb_shm_prefix) != std::string::npos ||
+        filename.find(bcb_shm_prefix) != std::string::npos) {
+      (void)std::filesystem::remove(entry.path());
+      // There is also a shm segment with the same name as the file.
+      (void)shm_unlink(entry.path().filename().c_str());
+    }
+  }
+
+#else
+  // Remove all files starting with "subspace_SESSION" in /dev/shm.
+  for (const auto &entry : std::filesystem::directory_iterator("/dev/shm")) {
+    std::string filename = entry.path().filename().string();
+    if (filename.rfind(session_shm_file_prefix, 0) == 0) {
+      (void)std::filesystem::remove(entry.path());
+    }
+  }
+#endif
+}
+
+void Server::CleanupFilesystem() {
+#if defined(__APPLE__)
+  // Remove all files starting with "subspace_" in /tmp.  These refer to
+  // shared memory segments names "subspace_INODE".
+  for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
+    if (entry.path().filename().string().rfind("subspace_", 0) == 0) {
+      // Extrace the node and remove the shared memory segment.
+      // The name of the shared memory segment is "subspace_<inode>".
+      auto status = Channel::MacOsSharedMemoryName(entry.path().string());
+      if (status.ok()) {
+        shm_unlink(status->c_str());
+      }
+      (void)std::filesystem::remove(entry.path());
+    }
+  }
+  // Remove all files in /tmp that contain .scb., .ccb. or .bcb. in the name.
+  for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
+    std::string filename = entry.path().filename().string();
+    if (filename.find(".ccb.") != std::string::npos ||
+        filename.find(".bcb.") != std::string::npos) {
+      (void)std::filesystem::remove(entry.path());
+      // There is also a shm segment with the same name as the file.
+      (void)shm_unlink(entry.path().filename().c_str());
+    }
+  }
+
+#else
+  // Remove all files starting with "subspace_" in /dev/shm.
+  for (const auto &entry : std::filesystem::directory_iterator("/dev/shm")) {
+    std::string filename = entry.path().filename().string();
+    if (filename.rfind("subspace_", 0) == 0) {
+      (void)std::filesystem::remove(entry.path());
+    }
+  }
+#endif
+}
+
 absl::Status Server::Run() {
   std::vector<struct pollfd> poll_fds;
 
@@ -248,12 +328,12 @@ absl::Status Server::Run() {
       [this](co::Coroutine *c) { coroutines_.erase(c); });
 
   // Start the listener coroutine.
-  coroutines_.insert(
-      std::make_unique<co::Coroutine>(co_scheduler_,
-                                      [this, &listen_socket](co::Coroutine *c) {
-                                        ListenerCoroutine(listen_socket, c);
-                                      },
-                                      "Listener UDS"));
+  coroutines_.insert(std::make_unique<co::Coroutine>(
+      co_scheduler_,
+      [this, &listen_socket](co::Coroutine *c) {
+        ListenerCoroutine(listen_socket, c);
+      },
+      "Listener UDS"));
 #if 0
   // Start the channel directory coroutine.
   coroutines_.insert(std::make_unique<co::Coroutine>(
@@ -302,13 +382,13 @@ Server::HandleIncomingConnection(toolbelt::UnixSocket &listen_socket,
       std::make_unique<ClientHandler>(this, std::move(*s)));
   ClientHandler *handler_ptr = client_handlers_.back().get();
 
-  coroutines_.insert(
-      std::make_unique<co::Coroutine>(co_scheduler_,
-                                      [this, handler_ptr](co::Coroutine *c) {
-                                        handler_ptr->Run(c);
-                                        CloseHandler(handler_ptr);
-                                      },
-                                      "Client handler"));
+  coroutines_.insert(std::make_unique<co::Coroutine>(
+      co_scheduler_,
+      [this, handler_ptr](co::Coroutine *c) {
+        handler_ptr->Run(c);
+        CloseHandler(handler_ptr);
+      },
+      "Client handler"));
 
   return absl::OkStatus();
 }
@@ -323,8 +403,8 @@ Server::CreateMultiplexer(const std::string &channel_name, int slot_size,
   logger_.Log(toolbelt::LogLevel::kDebug,
               "Creating multiplexer %s with %d slots", channel_name.c_str(),
               num_slots);
-  ServerChannel *channel = new ChannelMultiplexer(*channel_id, channel_name,
-                                                  num_slots, std::move(type));
+  ServerChannel *channel = new ChannelMultiplexer(
+      *channel_id, channel_name, num_slots, std::move(type), session_id_);
   channel->SetDebug(logger_.GetLogLevel() <= toolbelt::LogLevel::kVerboseDebug);
 
   absl::StatusOr<SharedMemoryFds> fds =
@@ -385,8 +465,9 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
   if (!channel_id.ok()) {
     return channel_id.status();
   }
-  ServerChannel *channel = new ServerChannel(*channel_id, channel_name,
-                                             num_slots, std::move(type), false);
+  ServerChannel *channel =
+      new ServerChannel(*channel_id, channel_name, num_slots, std::move(type),
+                        false, session_id_);
   channel->SetDebug(logger_.GetLogLevel() <= toolbelt::LogLevel::kVerboseDebug);
 
   absl::StatusOr<SharedMemoryFds> fds =
@@ -1168,10 +1249,8 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     // the socket connected to the other server.
     coroutines_.insert(std::make_unique<co::Coroutine>(
         co_scheduler_,
-        [
-          this, retirement_fd = std::move(retirement_fd),
-          &retirement_transmitter, channel_name
-        ](co::Coroutine * c) mutable {
+        [this, retirement_fd = std::move(retirement_fd),
+         &retirement_transmitter, channel_name](co::Coroutine *c) mutable {
           RetirementCoroutine(channel_name, std::move(retirement_fd),
                               std::move(retirement_transmitter), c);
         },
@@ -1437,10 +1516,9 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
     bool notify_retirement = !channel->second->GetRetirementFds().empty();
     coroutines_.insert(std::make_unique<co::Coroutine>(
         co_scheduler_,
-        [
-          this, pub_reliable, sub_reliable,
-          subscriber_addr = std::move(subscriber_addr), notify_retirement, ch
-        ](co::Coroutine * c) mutable {
+        [this, pub_reliable, sub_reliable,
+         subscriber_addr = std::move(subscriber_addr), notify_retirement,
+         ch](co::Coroutine *c) mutable {
           BridgeTransmitterCoroutine(ch, pub_reliable, sub_reliable,
                                      std::move(subscriber_addr),
                                      notify_retirement, c);

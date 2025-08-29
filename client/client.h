@@ -261,7 +261,8 @@ private:
   WaitForReliablePublisher(details::PublisherImpl *publisher,
                            const toolbelt::FileDescriptor &fd,
                            co::Coroutine *c = nullptr) {
-    return WaitForReliablePublisher(publisher, fd, std::chrono::nanoseconds(0), c);
+    return WaitForReliablePublisher(publisher, fd, std::chrono::nanoseconds(0),
+                                    c);
   }
 
   absl::StatusOr<int> WaitForReliablePublisher(
@@ -293,8 +294,8 @@ private:
 
   absl::StatusOr<int> WaitForSubscriber(details::SubscriberImpl *subscriber,
                                         const toolbelt::FileDescriptor &fd,
-                                           std::chrono::nanoseconds timeout,
-                                     co::Coroutine *c = nullptr);
+                                        std::chrono::nanoseconds timeout,
+                                        co::Coroutine *c = nullptr);
 
   // Read a message from a subscriber.  If there are no available messages
   // the 'length' field of the returned Message will be zero.  The 'buffer'
@@ -379,6 +380,8 @@ private:
   absl::Status
   SendRequestReceiveResponse(const Request &req, Response &response,
                              std::vector<toolbelt::FileDescriptor> &fds);
+
+  bool CheckReload(details::ClientChannel *channel);
 
   absl::Status ReloadSubscriber(details::SubscriberImpl *channel);
   absl::Status ReloadSubscribersIfNecessary(details::PublisherImpl *publisher);
