@@ -183,20 +183,30 @@ public:
   // starts immediately after the buffer header.
   char *Buffer(int slot_id, const std::function<bool()> &reload,
                bool abort_on_range = true) {
-    ReloadIfNecessary(reload);
-    int index = ccb_->slots[slot_id].buffer_index;
-    if (index < 0 || index >= buffers_.size()) {
-      if (abort_on_range) {
-        // If the index is out of range, we have a problem.
-        // This should never happen.
-        std::cerr << "Invalid buffer index for slot " << slot_id << ": "
-                  << index << " there are " << buffers_.size() << " buffers" << std::endl;
-        DumpSlots(std::cerr);
-        abort();
+    // While we are trying to get the buffer a publisher might be adding
+    // more buffers. Since we are going to abort if the index isn't in
+    // range we should try very hard to make it so.
+    constexpr int kMaxRetries = 1000;
+    int retries = 0;
+    while (retries < kMaxRetries) {
+      int index = ccb_->slots[slot_id].buffer_index;
+      if (index >= 0 && index < buffers_.size()) {
+        return buffers_.empty() ? nullptr : (buffers_[index]->buffer);
       }
-      return nullptr;
+      ReloadIfNecessary(reload);
+      retries++;
     }
-    return buffers_.empty() ? nullptr : (buffers_[index]->buffer);
+    if (abort_on_range) {
+      // If the index is out of range, we have a problem.
+      // This should never happen.
+      int index = ccb_->slots[slot_id].buffer_index;
+      std::cerr << "Invalid buffer index for slot " << slot_id << ": "
+                << index << " there are " << buffers_.size() << " buffers" << std::endl;
+      std::cerr << "Channel: " << name_ << " from " << (IsPublisher() ? "publisher" : "subscriber") << std::endl;
+      DumpSlots(std::cerr);
+      abort();
+    }
+    return nullptr;
   }
 
   bool BuffersChanged() const {
