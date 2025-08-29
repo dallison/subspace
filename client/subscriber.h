@@ -41,9 +41,9 @@ class SubscriberImpl : public ClientChannel {
 public:
   SubscriberImpl(const std::string &name, int num_slots, int channel_id,
                  int subscriber_id, int vchan_id, uint64_t session_id,
-                 std::string type, const SubscriberOptions &options)
+                 std::string type, const SubscriberOptions &options, std::function<bool(Channel*)> reload)
       : ClientChannel(name, num_slots, channel_id, vchan_id,
-                      std::move(session_id), std::move(type)),
+                      std::move(session_id), std::move(type), std::move(reload)),
         subscriber_id_(subscriber_id), options_(options) {}
 
   std::shared_ptr<SubscriberImpl> shared_from_this() {
@@ -75,7 +75,7 @@ public:
   FindUnseenOrdinal(const std::vector<ActiveSlot> &active_slots);
   void PopulateActiveSlots(InPlaceAtomicBitset &bits);
 
-  void ClaimSlot(MessageSlot *slot, std::function<bool()> reload, int vchan_id,
+  void ClaimSlot(MessageSlot *slot, int vchan_id,
                  bool was_newest);
   void RememberOrdinal(uint64_t ordinal, int vchan_id);
   void CollectVisibleSlots(InPlaceAtomicBitset &bits,
@@ -94,10 +94,8 @@ public:
   // Can return nullptr if there is no slot.
   // If reliable is true, the reliable_ref_count in the MessageSlot will
   // be manipulated.  The owner is the subscriber ID.
-  MessageSlot *NextSlot(MessageSlot *slot, bool reliable, int owner,
-                        std::function<bool()> reload);
-  MessageSlot *LastSlot(MessageSlot *slot, bool reliable, int owner,
-                        std::function<bool()> reload);
+  MessageSlot *NextSlot(MessageSlot *slot, bool reliable, int owner);
+  MessageSlot *LastSlot(MessageSlot *slot, bool reliable, int owner);
 
   std::shared_ptr<ActiveMessage> GetActiveMessage() { return active_message_; }
 
@@ -156,8 +154,7 @@ public:
   MessageSlot *FindActiveSlotByTimestamp(MessageSlot *old_slot,
                                          uint64_t timestamp, bool reliable,
                                          int owner,
-                                         std::vector<ActiveSlot> &buffer,
-                                         std::function<bool()> reload);
+                                         std::vector<ActiveSlot> &buffer);
 
   void Trigger() { trigger_.Trigger(); }
 
@@ -171,7 +168,7 @@ private:
 
   bool IsSubscriber() const override { return true; }
   bool IsBridge() const override { return options_.IsBridge(); }
-  
+
   void ClearPublishers() {
     std::unique_lock<std::mutex> lock(reliable_publishers_mutex_);
     reliable_publishers_.clear();
@@ -200,14 +197,12 @@ private:
     }
   }
 
-  MessageSlot *NextSlot(std::function<bool()> reload) {
-    return NextSlot(CurrentSlot(), IsReliable(), subscriber_id_,
-                    std::move(reload));
+  MessageSlot *NextSlot() {
+    return NextSlot(CurrentSlot(), IsReliable(), subscriber_id_);
   }
 
-  MessageSlot *LastSlot(std::function<bool()> reload) {
-    return LastSlot(CurrentSlot(), IsReliable(), subscriber_id_,
-                    std::move(reload));
+  MessageSlot *LastSlot() {
+    return LastSlot(CurrentSlot(), IsReliable(), subscriber_id_);
   }
 
   toolbelt::FileDescriptor &GetPollFd() { return trigger_.GetPollFd(); }
@@ -216,7 +211,7 @@ private:
   MessageSlot *FindMessage(uint64_t timestamp) {
     MessageSlot *slot =
         FindActiveSlotByTimestamp(CurrentSlot(), timestamp, IsReliable(),
-                                  GetSubscriberId(), search_buffer_, nullptr);
+                                  GetSubscriberId(), search_buffer_);
     if (slot != nullptr) {
       SetSlot(slot);
     }

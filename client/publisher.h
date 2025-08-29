@@ -16,17 +16,17 @@ class PublisherImpl : public ClientChannel {
 public:
   PublisherImpl(const std::string &name, int num_slots, int channel_id,
                 int publisher_id, int vchan_id, uint64_t session_id,
-                std::string type, const PublisherOptions &options)
+                std::string type, const PublisherOptions &options, std::function<bool(Channel*)> reload)
       : ClientChannel(name, num_slots, channel_id, vchan_id,
-                      std::move(session_id), std::move(type)),
+                      std::move(session_id), std::move(type), std::move(reload)),
         publisher_id_(publisher_id), options_(options) {}
 
   bool IsReliable() const { return options_.IsReliable(); }
   bool IsLocal() const { return options_.IsLocal(); }
   bool IsFixedSize() const { return options_.IsFixedSize(); }
 
-  MessageSlot *FindFreeSlotUnreliable(int owner, std::function<bool()> reload);
-  MessageSlot *FindFreeSlotReliable(int owner, std::function<bool()> reload);
+  MessageSlot *FindFreeSlotUnreliable(int owner);
+  MessageSlot *FindFreeSlotReliable(int owner);
 
   void SetSlotToBiggestBuffer(MessageSlot *slot);
 
@@ -71,14 +71,13 @@ private:
   Channel::PublishedMessage
   ActivateSlotAndGetAnother(MessageSlot *slot, bool reliable,
                             bool is_activation, int owner, bool omit_prefix,
-                            bool *notify, std::function<bool()> reload);
+                            bool *notify);
 
   Channel::PublishedMessage
   ActivateSlotAndGetAnother(bool reliable, bool is_activation, bool omit_prefix,
-                            bool *notify, std::function<bool()> reload) {
+                            bool *notify) {
     return ActivateSlotAndGetAnother(slot_, reliable, is_activation,
-                                     publisher_id_, omit_prefix, notify,
-                                     std::move(reload));
+                                     publisher_id_, omit_prefix, notify);
   }
 
   void ClearSubscribers() { subscribers_.clear(); }

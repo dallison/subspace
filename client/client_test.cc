@@ -52,6 +52,7 @@ public:
       return;
     }
     printf("Starting Subspace server\n");
+    // subspace::Server::CleanupFilesystem();
     char socket_name_template[] = "/tmp/subspaceXXXXXX"; // NOLINT
     ::close(mkstemp(&socket_name_template[0]));
     socket_ = &socket_name_template[0];
@@ -90,6 +91,9 @@ public:
     char buf[8];
     (void)::read(server_pipe_[0], buf, 8);
     server_thread_.join();
+    server_->CleanupAfterSession();
+    // Remove the socket if it exists.
+    (void)remove(socket_.c_str());
   }
 
   void SetUp() override { signal(SIGPIPE, SIG_IGN); }

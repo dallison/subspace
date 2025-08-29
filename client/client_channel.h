@@ -18,6 +18,7 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <thread>
 
 // Notification strategy
 // ---------------------
@@ -89,8 +90,8 @@ struct BufferSet {
 class ClientChannel : public Channel {
 public:
   ClientChannel(const std::string &name, int num_slots, int channel_id,
-                int vchan_id, uint64_t session_id, std::string type)
-      : Channel(name, num_slots, channel_id, std::move(type)),
+                int vchan_id, uint64_t session_id, std::string type, std::function<bool(Channel*)> reload)
+      : Channel(name, num_slots, channel_id, std::move(type), std::move(reload)),
         vchan_id_(vchan_id), session_id_(std::move(session_id)) {}
   virtual ~ClientChannel() = default;
   MessageSlot *CurrentSlot() const { return slot_; }
@@ -115,46 +116,27 @@ public:
 
   // What is the address of the message buffer (after the MessagePrefix)
   // for the slot given a slot id.
-  void *GetBufferAddress(int slot_id, const std::function<bool()> &reload) {
-    return Buffer(slot_id, reload) +
-           (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot_id))) * slot_id +
-           sizeof(MessagePrefix);
-  }
-
   void *GetBufferAddress(int slot_id) {
-    return Buffer(slot_id, nullptr) +
+    return Buffer(slot_id) +
            (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot_id))) * slot_id +
            sizeof(MessagePrefix);
   }
 
   // Gets the address for the message buffer given a slot pointer.
-  void *GetBufferAddress(MessageSlot *slot,
-                         const std::function<bool()> &reload) {
+  void *GetBufferAddress(MessageSlot *slot) {
     if (slot == nullptr) {
       return nullptr;
     }
-    return Buffer(slot->id, reload) +
-           (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot->id))) *
-               slot->id +
-           sizeof(MessagePrefix);
-  }
-
-    void *GetBufferAddress(MessageSlot *slot) {
-    if (slot == nullptr) {
-      return nullptr;
-    }
-    return Buffer(slot->id, nullptr) +
+    return Buffer(slot->id) +
            (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot->id))) *
                slot->id +
            sizeof(MessagePrefix);
   }
 
   // Get a pointer to the MessagePrefix for a given slot.
-  MessagePrefix *Prefix(MessageSlot *slot,
-                        const std::function<bool()> &reload) {
-    ReloadIfNecessary(reload);
+  MessagePrefix *Prefix(MessageSlot *slot) {
     MessagePrefix *p = reinterpret_cast<MessagePrefix *>(
-        Buffer(slot->id, reload) +
+        Buffer(slot->id) +
         (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot->id))) * slot->id);
     return p;
   }
@@ -181,7 +163,7 @@ public:
 
   // Get the buffer associated with the given slot id.  The first buffer
   // starts immediately after the buffer header.
-  char *Buffer(int slot_id, const std::function<bool()> &reload,
+  char *Buffer(int slot_id,
                bool abort_on_range = true) {
     // While we are trying to get the buffer a publisher might be adding
     // more buffers. Since we are going to abort if the index isn't in
@@ -193,7 +175,7 @@ public:
       if (index >= 0 && index < buffers_.size()) {
         return buffers_.empty() ? nullptr : (buffers_[index]->buffer);
       }
-      ReloadIfNecessary(reload);
+      CheckReload();
       retries++;
       std::this_thread::yield();
     }
@@ -201,9 +183,9 @@ public:
       // If the index is out of range, we have a problem.
       // This should never happen.
       int index = ccb_->slots[slot_id].buffer_index;
-      std::cerr << "Invalid buffer index for slot " << slot_id << ": "
+      std::cerr << this << " Invalid buffer index for slot " << slot_id << ": "
                 << index << " there are " << buffers_.size() << " buffers" << std::endl;
-      std::cerr << "Channel: " << name_ << " from " << (IsPublisher() ? "publisher" : "subscriber") << std::endl;
+      std::cerr << this << "Channel: " << name_ << " from " << (IsPublisher() ? "publisher" : "subscriber") << std::endl;
       DumpSlots(std::cerr);
       abort();
     }
@@ -239,10 +221,10 @@ protected:
   virtual bool IsPublisher() const { return false; }
 
   void SetSlot(MessageSlot *slot) { slot_ = slot; }
-  void *GetCurrentBufferAddress(const std::function<bool()> &reload) {
-    return GetBufferAddress(slot_, reload);
+  void *GetCurrentBufferAddress() {
+    return GetBufferAddress(slot_);
   }
-  bool ValidateSlotBuffer(MessageSlot *slot, std::function<bool()> reload);
+  bool ValidateSlotBuffer(MessageSlot *slot);
 
   void SetMessageSize(int64_t message_size) {
     slot_->message_size = message_size;
