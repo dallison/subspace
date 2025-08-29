@@ -42,7 +42,7 @@ void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
                       // The original slot id is in the message prefix.  This is
                       // kept intact when the bridge publisher sends the
                       // message.
-                      MessagePrefix *prefix = Prefix(slot);
+                      MessagePrefix *prefix = Prefix(slot, nullptr);
                       TriggerRetirement(prefix->slot_id);
                     });
 

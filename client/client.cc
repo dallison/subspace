@@ -232,7 +232,7 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
   if (!opts.IsReliable()) {
     // A publisher needs a slot.  Allocate one.
     MessageSlot *slot = channel->FindFreeSlotUnreliable(
-        channel->GetPublisherId(), [this, channel = channel.get()]() {
+        channel->GetPublisherId(), [ this, channel = channel.get() ]() {
           absl::StatusOr<bool> ok = ReloadBuffersIfNecessary(channel);
           if (!ok.ok()) {
             return false;
@@ -416,7 +416,13 @@ absl::StatusOr<void *> ClientImpl::GetMessageBuffer(PublisherImpl *publisher,
     publisher->SetSlot(slot);
   }
 
-  void *buffer = publisher->GetCurrentBufferAddress();
+  void *buffer = publisher->GetCurrentBufferAddress([this, publisher]() {
+    absl::StatusOr<bool> ok = ReloadBuffersIfNecessary(publisher);
+    if (!ok.ok()) {
+      return false;
+    }
+    return *ok;
+  });
   if (buffer == nullptr) {
     return absl::InternalError(
         absl::StrFormat("Channel %s has no buffer", publisher->Name()));
@@ -561,7 +567,8 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
         c->Wait({publisher->GetPollFd().Fd(), fd.Fd()}, POLLIN, timeout_ns);
   } else if (co_ != nullptr) {
     // Coroutine aware.  Yield control back until the poll fd is triggered.
-    result = co_->Wait({publisher->GetPollFd().Fd(), fd.Fd()}, POLLIN, timeout_ns);
+    result =
+        co_->Wait({publisher->GetPollFd().Fd(), fd.Fd()}, POLLIN, timeout_ns);
   } else {
     struct pollfd fds[2] = {
         {.fd = publisher->GetPollFd().Fd(), .events = POLLIN},
@@ -769,7 +776,14 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
 
   // Allocate a new active message for the slot.
   auto msg = subscriber->SetActiveMessage(
-      new_slot->message_size, new_slot, subscriber->GetCurrentBufferAddress(),
+      new_slot->message_size, new_slot,
+      subscriber->GetCurrentBufferAddress([this, subscriber]() {
+        absl::StatusOr<bool> ok = ReloadBuffersIfNecessary(subscriber);
+        if (!ok.ok()) {
+          return false;
+        }
+        return *ok;
+      }),
       subscriber->CurrentOrdinal(), subscriber->Timestamp(), new_slot->vchan_id,
       is_activation);
 
@@ -837,7 +851,15 @@ ClientImpl::FindMessageInternal(SubscriberImpl *subscriber,
     // Not found.
     return Message();
   }
-  return Message(new_slot->message_size, subscriber->GetCurrentBufferAddress(),
+  return Message(new_slot->message_size,
+                 subscriber->GetCurrentBufferAddress([this, subscriber]() {
+                   absl::StatusOr<bool> ok =
+                       ReloadBuffersIfNecessary(subscriber);
+                   if (!ok.ok()) {
+                     return false;
+                   }
+                   return *ok;
+                 }),
                  subscriber->CurrentOrdinal(), subscriber->Timestamp(),
                  subscriber->VirtualChannelId(), false, new_slot->id);
 }
@@ -870,7 +892,7 @@ struct pollfd ClientImpl::GetPollFd(SubscriberImpl *subscriber) const {
 }
 
 struct pollfd ClientImpl::GetPollFd(PublisherImpl *publisher) const {
-  static struct pollfd fd{.fd = -1, .events = POLLIN};
+  static struct pollfd fd { .fd = -1, .events = POLLIN };
   if (!publisher->IsReliable()) {
     return fd;
   }
@@ -1090,7 +1112,13 @@ absl::Status ClientImpl::ActivateReliableChannel(PublisherImpl *publisher) {
   }
   publisher->SetSlot(slot);
 
-  void *buffer = publisher->GetCurrentBufferAddress();
+  void *buffer = publisher->GetCurrentBufferAddress([this, publisher]() {
+    absl::StatusOr<bool> ok = ReloadBuffersIfNecessary(publisher);
+    if (!ok.ok()) {
+      return false;
+    }
+    return *ok;
+  });
   if (buffer == nullptr) {
     return absl::InternalError(
         absl::StrFormat("Channel %s has no buffer", publisher->Name()));
@@ -1118,7 +1146,13 @@ absl::Status ClientImpl::ActivateChannel(PublisherImpl *publisher) {
     return absl::OkStatus();
   }
 
-  void *buffer = publisher->GetCurrentBufferAddress();
+  void *buffer = publisher->GetCurrentBufferAddress([this, publisher]() {
+    absl::StatusOr<bool> ok = ReloadBuffersIfNecessary(publisher);
+    if (!ok.ok()) {
+      return false;
+    }
+    return *ok;
+  });
   if (buffer == nullptr) {
     return absl::InternalError(
         absl::StrFormat("Channel %s has no buffer", publisher->Name()));
