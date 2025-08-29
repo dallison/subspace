@@ -715,7 +715,6 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     }
   }
 
-  std::cerr << subscriber << " calling Prefix\n";
   MessagePrefix *prefix = subscriber->Prefix(new_slot);
 
   bool is_activation = false;
@@ -738,7 +737,6 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
   subscriber->ClearActiveMessage();
 
   // Allocate a new active message for the slot.
-  std::cerr << subscriber << " calling SetActiveMessage\n";
   auto msg = subscriber->SetActiveMessage(
       new_slot->message_size, new_slot,
       subscriber->GetCurrentBufferAddress(),
@@ -752,7 +750,6 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     // Subscriber does not have a slot now but the slot it had is still active.
   } else {
     // We have a slot, claim it.
-    std::cerr << subscriber << " calling ClaimSlot\n";
     subscriber->ClaimSlot(
         new_slot,
         subscriber->VirtualChannelId(), mode == ReadMode::kReadNewest);
@@ -765,7 +762,6 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     // subscribers which are used to send data between servers.
     subscriber->ClearActiveMessage();
   }
-  std::cerr << subscriber << " returning message\n";
   return ret_msg;
 }
 
@@ -880,18 +876,12 @@ bool ClientImpl::CheckReload(ClientChannel *channel) {
 
 absl::StatusOr<bool>
 ClientImpl::ReloadBuffersIfNecessary(ClientChannel *channel) {
-  std::cerr << channel << " Checking for buffer changes "
-            << channel->GetCcb()->num_buffers << "/"
-            << channel->GetBuffers().size() << "\n";
   if (!channel->BuffersChanged()) {
     return false;
   }
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
-
-  std::cerr << channel << " Buffers changed for channel " << channel->Name()
-            << ", reloading\n";
   if (absl::Status status = channel->AttachBuffers(); !status.ok()) {
     return status;
   }

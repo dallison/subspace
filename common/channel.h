@@ -402,9 +402,11 @@ public:
 
   void SetDebug(bool v) { debug_ = v; }
 
+  virtual MessagePrefix *Prefix(MessageSlot *slot) { return nullptr; }
+
   bool AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
                          uint64_t ordinal, int vchan_id, bool retire,
-                         std::function<void()> retire_callback = {});
+                         std::function<void(int)> retire_callback = {});
 
   void SetType(std::string type) { type_ = std::move(type); }
   const std::string Type() const { return type_; }

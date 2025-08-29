@@ -123,8 +123,6 @@ absl::Status ClientChannel::AttachBuffers() {
   while (buffers_.size() < size_t(num_buffers)) {
     // We need to open the next buffer in the list.  The buffer index is
     size_t buffer_index = buffers_.size();
-    std::cerr << "Subscriber calling OpenBuffer for buffer index "
-              << buffer_index << " for channel " << name_ << "\n";
     auto shm_fd = OpenBuffer(buffer_index);
     if (!shm_fd.ok()) {
 #if defined(__APPLE__)

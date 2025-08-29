@@ -177,7 +177,7 @@ void Server::CleanupAfterSession() {
         filename.find(bcb_shm_prefix) != std::string::npos) {
       (void)std::filesystem::remove(entry.path());
       // There is also a shm segment with the same name as the file.
-      sym_unlink(entry.filename().c_str());
+      (void)shm_unlink(entry.path().filename().c_str());
     }
   }
 
@@ -213,6 +213,8 @@ void Server::CleanupFilesystem() {
     if (filename.find(".ccb.") != std::string::npos ||
         filename.find(".bcb.") != std::string::npos) {
       (void)std::filesystem::remove(entry.path());
+      // There is also a shm segment with the same name as the file.
+      (void)shm_unlink(entry.path().filename().c_str());
     }
   }
 

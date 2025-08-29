@@ -2,10 +2,12 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
+#include "absl/debugging/failure_signal_handler.h"
+#include "absl/debugging/symbolize.h"
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
-#include "absl/status/status_matchers.h"
 #include "absl/hash/hash_testing.h"
+#include "absl/status/status_matchers.h"
 #include "client/client.h"
 #include "coroutine.h"
 #include "server/server.h"
@@ -51,6 +53,7 @@ public:
     if (!absl::GetFlag(FLAGS_start_server)) {
       return;
     }
+
     printf("Starting Subspace server\n");
     // subspace::Server::CleanupFilesystem();
     char socket_name_template[] = "/tmp/subspaceXXXXXX"; // NOLINT
@@ -124,16 +127,17 @@ std::thread ClientTest::server_thread_;
 TEST_F(ClientTest, InetAddressSupportsAbslHash) {
   struct sockaddr_in addr = {
 #if defined(__APPLE__)
-    .sin_len = sizeof(int),
+      .sin_len = sizeof(int),
 #endif
-    .sin_family = AF_INET,
-    .sin_port = htons(1234),
-    .sin_addr = {.s_addr = htonl(0x12345678)}
-  };
+      .sin_family = AF_INET,
+      .sin_port = htons(1234),
+      .sin_addr = {.s_addr = htonl(0x12345678)}};
 
   EXPECT_TRUE(absl::VerifyTypeImplementsAbslHashCorrectly({
-      toolbelt::InetAddress(), toolbelt::InetAddress("1.2.3.4", 2),
-      toolbelt::InetAddress("localhost", 3), toolbelt::InetAddress(addr),
+      toolbelt::InetAddress(),
+      toolbelt::InetAddress("1.2.3.4", 2),
+      toolbelt::InetAddress("localhost", 3),
+      toolbelt::InetAddress(addr),
   }));
 }
 
@@ -1186,7 +1190,8 @@ TEST_F(ClientTest, PublishAndResizeSubscriberConcurrently) {
   std::atomic<bool> publisher_finished{false};
 
   auto t1 = std::thread([&]() {
-    auto client1_pub = *client1.CreatePublisher(channel_name, {.slot_size=1, .num_slots=4});
+    auto client1_pub = *client1.CreatePublisher(
+        channel_name, {.slot_size = 1, .num_slots = 4});
     for (int i = 1; i < 24; i++) {
       std::size_t size = std::pow(2, i);
       auto buffer = client1_pub.GetMessageBuffer(size);
@@ -1398,7 +1403,6 @@ TEST_F(ClientTest, ReliablePublisher1) {
     absl::StatusOr<Message> msg = sub->ReadMessage();
     ASSERT_OK(msg);
     ASSERT_EQ(0, msg->length);
-
   });
 
   machine.Run();
@@ -1577,7 +1581,6 @@ TEST_F(ClientTest, ReliablePublisherActivation) {
     absl::StatusOr<Message> msg = sub->ReadMessage();
     ASSERT_OK(msg);
     ASSERT_EQ(0, msg->length);
-
   });
 
   machine.Run();
@@ -2317,6 +2320,12 @@ TEST_F(ClientTest, RetirementTrigger4) {
 int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);
   absl::ParseCommandLine(argc, argv);
+
+  absl::InitializeSymbolizer(argv[0]);
+
+  absl::InstallFailureSignalHandler({
+      .use_alternate_stack = false,
+  });
 
   return RUN_ALL_TESTS();
 }
