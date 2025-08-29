@@ -29,8 +29,8 @@ bool SubscriberImpl::AddActiveMessage(MessageSlot *slot) {
 }
 
 void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
-  std::cerr << this << " remove active message " << slot->id << " "
-            << slot->ordinal << "\n";
+  // std::cerr << this << " remove active message " << slot->id << " "
+  //           << slot->ordinal << "\n";
   slot->sub_owners.Clear(subscriber_id_);
   AtomicIncRefCount(slot, IsReliable(), -1, slot->ordinal, slot->vchan_id, true,
                     [this](int retired_slot_id) {
@@ -52,8 +52,6 @@ void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
       TriggerReliablePublishers();
     }
   }
-  std::cerr << this << " num active messages now " << num_active_messages_
-            << "\n";
 }
 
 void SubscriberImpl::PopulateActiveSlots(InPlaceAtomicBitset &bits) {

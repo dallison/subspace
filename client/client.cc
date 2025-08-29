@@ -732,7 +732,6 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
       }
     }
   }
-  std::cerr << subscriber << " clearing active message\n";
   // We have a new slot, clear the subscriber's slot.
   subscriber->ClearActiveMessage();
 
