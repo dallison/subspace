@@ -195,6 +195,7 @@ public:
       }
       ReloadIfNecessary(reload);
       retries++;
+      std::this_thread::yield();
     }
     if (abort_on_range) {
       // If the index is out of range, we have a problem.
