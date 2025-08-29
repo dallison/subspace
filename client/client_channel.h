@@ -190,7 +190,7 @@ public:
         // If the index is out of range, we have a problem.
         // This should never happen.
         std::cerr << "Invalid buffer index for slot " << slot_id << ": "
-                  << index << std::endl;
+                  << index << " there are " << buffers_.size() << " buffers" << std::endl;
         DumpSlots(std::cerr);
         abort();
       }

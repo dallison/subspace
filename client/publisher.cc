@@ -72,7 +72,6 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
     // Another thread has updated the number of buffers in the CCB.  We need to
     // retry.
   }
-
   return absl::OkStatus();
 }
 

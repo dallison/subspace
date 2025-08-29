@@ -1182,7 +1182,7 @@ TEST_F(ClientTest, PublishAndResizeSubscriberConcurrently) {
   std::atomic<bool> publisher_finished{false};
 
   auto t1 = std::thread([&]() {
-    auto client1_pub = *client1.CreatePublisher(channel_name, 1, 4);
+    auto client1_pub = *client1.CreatePublisher(channel_name, {.slot_size=1, .num_slots=4});
     for (int i = 1; i < 24; i++) {
       std::size_t size = std::pow(2, i);
       auto buffer = client1_pub.GetMessageBuffer(size);
@@ -1190,6 +1190,7 @@ TEST_F(ClientTest, PublishAndResizeSubscriberConcurrently) {
       ASSERT_OK(client1_pub.PublishMessage(size));
     }
     publisher_finished = true;
+    std::cerr << "publisher finished\n";
   });
   auto t2 = std::thread([&]() {
     auto client2_sub = *client2.CreateSubscriber(channel_name);
@@ -1207,6 +1208,7 @@ TEST_F(ClientTest, PublishAndResizeSubscriberConcurrently) {
         }
       }
     }
+    std::cerr << "subscriber done\n";
   });
 
   t1.join();
