@@ -8,6 +8,8 @@
 #include <sys/posix_shm.h>
 #endif
 #include <sys/stat.h>
+#include <chrono>
+#include <thread>
 
 namespace subspace {
 
@@ -237,8 +239,8 @@ absl::Status ClientChannel::ZeroOutSharedMemoryFile(int buffer_index) const {
         absl::StrFormat("Failed to open shadow file %s: %s", filename.c_str(),
                         strerror(errno)));
   }
-  // Set the length of the shadow file to 0.
-  if (ftruncate(fd.Fd(), 0) < 0) {
+  // Set the length of the shadow file to 1.
+  if (ftruncate(fd.Fd(), 1) < 0) {
     return absl::InternalError(
         absl::StrFormat("Failed to truncate shadow file %s: %s",
                         filename.c_str(), strerror(errno)));
@@ -250,7 +252,7 @@ absl::Status ClientChannel::ZeroOutSharedMemoryFile(int buffer_index) const {
     return shm_fd.status();
   }
 
-  int e = ftruncate(shm_fd->Fd(), 0);
+  int e = ftruncate(shm_fd->Fd(), 1);
   if (e == -1) {
     return absl::InternalError(
         absl::StrFormat("Failed to set length of shared memory %s: %s",
