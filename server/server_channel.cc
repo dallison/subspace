@@ -22,7 +22,7 @@ ServerChannel::~ServerChannel() {
 
 static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
                                                  int64_t size, bool map,
-                                                 toolbelt::FileDescriptor &fd) {
+                                                 toolbelt::FileDescriptor &fd, int session_id = 0) {
   char shm_file[NAME_MAX]; // Unique file in file system.
   char *shm_name;          // Name passed to shm_* (starts with /)
   int tmpfd;
@@ -34,7 +34,7 @@ static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
 #else
   // On other systems (BSD, MacOS, etc), we need to use a file in /tmp.
   // This is just used to ensure uniqueness.
-  snprintf(shm_file, sizeof(shm_file), "/tmp/%d.%s.XXXXXX", id, suffix);
+  snprintf(shm_file, sizeof(shm_file), "/tmp/%d.%d.%s.XXXXXX", session_id, id, suffix);
   tmpfd = mkstemp(shm_file);
   shm_name = shm_file + 4; // After /tmp
 #endif
@@ -79,7 +79,7 @@ static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
 absl::StatusOr<SystemControlBlock *>
 CreateSystemControlBlock(toolbelt::FileDescriptor &fd) {
   absl::StatusOr<void *> s = CreateSharedMemory(
-      0, "scb", sizeof(SystemControlBlock), /*map=*/true, fd);
+      0, "scb", sizeof(SystemControlBlock), /*map=*/true, fd, 0);
   if (!s.ok()) {
     return s.status();
   }
@@ -122,7 +122,7 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
 
   // Create CCB in shared memory and map into process memory.
   absl::StatusOr<void *> p = CreateSharedMemory(
-      channel_id_, "ccb", CcbSize(num_slots_), /*map=*/true, fds.ccb);
+      channel_id_, "ccb", CcbSize(num_slots_), /*map=*/true, fds.ccb, session_id_);
   if (!p.ok()) {
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
     return p.status();
@@ -132,7 +132,7 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
 
   // Create buffer control block.
   p = CreateSharedMemory(channel_id_, "bcb", sizeof(BufferControlBlock),
-                         /*map=*/true, fds.bcb);
+                         /*map=*/true, fds.bcb, session_id_);
   if (!p.ok()) {
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
     UnmapMemory(ccb_, CcbSize(num_slots_), "CCB");
@@ -580,7 +580,7 @@ ChannelMultiplexer::CreateVirtualChannel(Server &server,
         kMaxVchanId));
   }
   auto v = std::make_unique<VirtualChannel>(server, this, vchan_id, name,
-                                            SlotSize(), Type());
+                                            SlotSize(), Type(), session_id_);
   virtual_channels_.insert(v.get());
   vchan_ids_.insert(vchan_id);
   return v;

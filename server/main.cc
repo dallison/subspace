@@ -52,6 +52,8 @@ int main(int argc, char **argv) {
   }
 
   server->SetLogLevel(absl::GetFlag(FLAGS_log_level));
+  subspace::Server::CleanupFilesystem();
+
   absl::Status s = server->Run();
   if (!s.ok()) {
     fprintf(stderr, "Error running Subspace server: %s\n",

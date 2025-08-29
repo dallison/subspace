@@ -7,8 +7,8 @@
 #if defined(__APPLE__)
 #include <sys/posix_shm.h>
 #endif
-#include <sys/stat.h>
 #include <chrono>
+#include <sys/stat.h>
 #include <thread>
 
 namespace subspace {
@@ -98,19 +98,16 @@ absl::Status ClientChannel::UnmapUnusedBuffers() {
   return absl::OkStatus();
 }
 
-bool ClientChannel::ValidateSlotBuffer(MessageSlot *slot,
-                                       std::function<bool()> reload) {
+bool ClientChannel::ValidateSlotBuffer(MessageSlot *slot) {
   if (slot->buffer_index < 0) {
     return true;
   }
-  if (reload == nullptr) {
-    return true;
-  }
-  char *buf = Buffer(slot->id, reload, false);
+
+  char *buf = Buffer(slot->id, false);
   int retries = 1000;
   while (retries-- > 0 && buf == nullptr) {
-    ReloadIfNecessary(reload);
-    buf = Buffer(slot->id, reload, false);
+    CheckReload();
+    buf = Buffer(slot->id, false);
   }
   if (buf == nullptr) {
     return false;
@@ -228,11 +225,9 @@ absl::Status ClientChannel::ZeroOutSharedMemoryFile(int buffer_index) const {
   if (!shm_name.ok()) {
     return shm_name.status();
   }
-  // Remove the shm_file
-  if (shm_unlink(shm_name->c_str()) != 0) {
-    return absl::InternalError(absl::StrFormat(
-        "Failed to unlink shared memory %s: %s", *shm_name, strerror(errno)));
-  }
+  // We can't remove the shm file here because it can race with subscribers trying
+  // to open it.
+
   toolbelt::FileDescriptor fd(open(filename.c_str(), O_RDWR));
   if (!fd.Valid()) {
     return absl::InternalError(

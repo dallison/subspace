@@ -328,7 +328,7 @@ public:
   };
 
   Channel(const std::string &name, int num_slots, int channel_id,
-          std::string type);
+          std::string type, std::function<bool(Channel *)> reload = nullptr);
   virtual ~Channel() { Unmap(); }
 
   virtual void Unmap();
@@ -338,8 +338,8 @@ public:
   virtual std::string ResolvedName() const = 0;
 
 #if defined(__APPLE__)
-  absl::StatusOr<std::string>
-  MacOsSharedMemoryName(const std::string &shadow_file) const;
+  static absl::StatusOr<std::string>
+  MacOsSharedMemoryName(const std::string &shadow_file);
 #endif
   // For debug, prints the contents of the three linked lists in
   // shared memory,
@@ -402,9 +402,11 @@ public:
 
   void SetDebug(bool v) { debug_ = v; }
 
+  virtual MessagePrefix *Prefix(MessageSlot *slot) { return nullptr; }
+
   bool AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
                          uint64_t ordinal, int vchan_id, bool retire,
-                         std::function<void()> retire_callback = {});
+                         std::function<void(int)> retire_callback = {});
 
   void SetType(std::string type) { type_ = std::move(type); }
   const std::string Type() const { return type_; }
@@ -458,6 +460,17 @@ protected:
   void DecrementBufferRefs(int buffer_index);
   void IncrementBufferRefs(int buffer_index);
 
+  void CheckReload() {
+    if (reload_callback_ == nullptr) {
+      return;
+    }
+    for (;;) {
+      if (!reload_callback_(this)) {
+        break;
+      }
+    }
+  }
+
   std::string name_;
   int num_slots_;
 
@@ -470,6 +483,7 @@ protected:
   ChannelControlBlock *ccb_ = nullptr;
   BufferControlBlock *bcb_ = nullptr;
   bool debug_ = false;
+  std::function<bool(Channel *)> reload_callback_;
 };
 
 } // namespace subspace

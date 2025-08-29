@@ -147,8 +147,8 @@ template <typename H> inline H AbslHashValue(H h, const ChannelTransmitter &a) {
 class ServerChannel : public Channel {
 public:
   ServerChannel(int id, const std::string &name, int num_slots,
-                std::string type, bool is_virtual)
-      : Channel(name, num_slots, id, std::move(type)), is_virtual_(is_virtual) {
+                std::string type, bool is_virtual, int session_id)
+      : Channel(name, num_slots, id, std::move(type)), is_virtual_(is_virtual), session_id_(session_id) {
   }
 
   virtual ~ServerChannel();
@@ -308,6 +308,7 @@ protected:
   absl::flat_hash_set<ChannelTransmitter> bridged_publishers_;
   SharedMemoryFds shared_memory_fds_;
   bool is_virtual_ = false;
+  int session_id_;
 };
 
 class VirtualChannel;
@@ -315,8 +316,8 @@ class VirtualChannel;
 class ChannelMultiplexer : public ServerChannel {
 public:
   ChannelMultiplexer(int id, const std::string &name, int num_slots,
-                     std::string type)
-      : ServerChannel(id, name, num_slots, type, false) {}
+                     std::string type, int session_id)
+      : ServerChannel(id, name, num_slots, type, false, session_id) {}
 
   absl::StatusOr<std::unique_ptr<VirtualChannel>>
   CreateVirtualChannel(Server &server, const std::string &name, int vchan_id);
@@ -356,8 +357,8 @@ private:
 class VirtualChannel : public ServerChannel {
 public:
   VirtualChannel(Server &server, ChannelMultiplexer *mux, int vchan_id,
-                 const std::string &name, int num_slots, std::string type)
-      : ServerChannel(mux->GetChannelId(), name, num_slots, type, true),
+                 const std::string &name, int num_slots, std::string type, int session_id)
+      : ServerChannel(mux->GetChannelId(), name, num_slots, type, true, session_id),
         server_(server), mux_(mux), vchan_id_(vchan_id) {}
 
   ~VirtualChannel();

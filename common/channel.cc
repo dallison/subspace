@@ -88,9 +88,9 @@ void UnmapMemory(void *p, size_t size, const char *purpose) {
 }
 
 Channel::Channel(const std::string &name, int num_slots, int channel_id,
-                 std::string type)
+                 std::string type, std::function<bool(Channel *)> reload)
     : name_(name), num_slots_(num_slots), channel_id_(channel_id),
-      type_(std::move(type)) {}
+      type_(std::move(type)), reload_callback_(std::move(reload)) {}
 
 void Channel::Unmap() {
   if (scb_ == nullptr) {
@@ -137,7 +137,7 @@ std::string DecodedRefsBitField(uint64_t refs) {
 
 bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
                                 uint64_t ordinal, int vchan_id, bool retire,
-                                std::function<void()> retire_callback) {
+                                std::function<void(int)> retire_callback) {
   for (;;) {
     uint64_t ref = slot->refs.load(std::memory_order_relaxed);
     if ((ref & kPubOwned) != 0) {
@@ -175,6 +175,13 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
     }
     uint64_t new_ref = BuildRefsBitField(ref_ord, ref_vchan_id, retired_refs) |
                        (new_reliable_refs << kReliableRefCountShift) | new_refs;
+    MessagePrefix *prefix = Prefix(slot);
+    int original_slot_id = slot->id;
+    if (prefix != nullptr) {
+      // If this is called on the server, we won't have a prefix since the buffers are
+      // not mapped in.
+      original_slot_id = prefix->slot_id;
+    }
     if (slot->refs.compare_exchange_weak(ref, new_ref,
                                          std::memory_order_relaxed)) {
       // std::cerr << slot->id << " retired_refs: " << retired_refs
@@ -184,7 +191,7 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
         RetiredSlots().Set(slot->id);
         // std::cerr << "Retiring slot " << slot->id << std::endl;
         if (retire_callback) {
-          retire_callback();
+          retire_callback(original_slot_id);
         }
       }
       return true;
@@ -278,13 +285,9 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
       // Is the slot owned by this publisher?
       if (refs == (kPubOwned | uint64_t(owner))) {
         // Owned by this publisher, clear slot.
-        slot->refs.store(0, std::memory_order_relaxed);
-        slot->message_size = 0;
         slot->ordinal = 0;
-        slot->timestamp = 0;
-        slot->flags = 0;
-        slot->buffer_index = -1; // No buffer in the free list.
-        slot->vchan_id = -1;     // No vchan_id.
+        slot->refs = 0;       // Sequentially consistent because we've changed the ordinal too.
+
         // Clear the slot in all the subscriber bitsets.
         ccb_->subscribers.Traverse([this, slot](int sub_id) {
           GetAvailableSlots(sub_id).Clear(slot->id);
@@ -311,12 +314,12 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
 
 #if defined(__APPLE__)
 absl::StatusOr<std::string>
-Channel::MacOsSharedMemoryName(const std::string &shadow_file) const {
+Channel::MacOsSharedMemoryName(const std::string &shadow_file) {
   struct stat st;
   int e = ::stat(shadow_file.c_str(), &st);
   if (e == -1) {
     return absl::InternalError(absl::StrFormat(
-        "Failed to determine MacOS shm name for %s", shadow_file));
+        "Failed to determine MacOS shm name for %s: %s", shadow_file, strerror(errno)));
   }
   // Use the inode number (unique per file) to make the shm file name.
   return absl::StrFormat("subspace_%d", st.st_ino);
