@@ -14,10 +14,10 @@
 #include "toolbelt/triggerfd.h"
 #include <sys/poll.h>
 
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
-#include <memory>
 
 // Notification strategy
 // ---------------------
@@ -115,18 +115,35 @@ public:
 
   // What is the address of the message buffer (after the MessagePrefix)
   // for the slot given a slot id.
-  void *GetBufferAddress(int slot_id) const {
-    return Buffer(slot_id) +
+  void *GetBufferAddress(int slot_id, const std::function<bool()> &reload) {
+    return Buffer(slot_id, reload) +
+           (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot_id))) * slot_id +
+           sizeof(MessagePrefix);
+  }
+
+  void *GetBufferAddress(int slot_id) {
+    return Buffer(slot_id, nullptr) +
            (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot_id))) * slot_id +
            sizeof(MessagePrefix);
   }
 
   // Gets the address for the message buffer given a slot pointer.
-  void *GetBufferAddress(MessageSlot *slot) const {
+  void *GetBufferAddress(MessageSlot *slot,
+                         const std::function<bool()> &reload) {
     if (slot == nullptr) {
       return nullptr;
     }
-    return Buffer(slot->id) +
+    return Buffer(slot->id, reload) +
+           (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot->id))) *
+               slot->id +
+           sizeof(MessagePrefix);
+  }
+
+    void *GetBufferAddress(MessageSlot *slot) {
+    if (slot == nullptr) {
+      return nullptr;
+    }
+    return Buffer(slot->id, nullptr) +
            (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot->id))) *
                slot->id +
            sizeof(MessagePrefix);
@@ -137,14 +154,7 @@ public:
                         const std::function<bool()> &reload) {
     ReloadIfNecessary(reload);
     MessagePrefix *p = reinterpret_cast<MessagePrefix *>(
-        Buffer(slot->id) +
-        (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot->id))) * slot->id);
-    return p;
-  }
-
-  MessagePrefix *Prefix(MessageSlot *slot) const {
-    MessagePrefix *p = reinterpret_cast<MessagePrefix *>(
-        Buffer(slot->id) +
+        Buffer(slot->id, reload) +
         (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot->id))) * slot->id);
     return p;
   }
@@ -171,7 +181,9 @@ public:
 
   // Get the buffer associated with the given slot id.  The first buffer
   // starts immediately after the buffer header.
-  char *Buffer(int slot_id, bool abort_on_range = true) const {
+  char *Buffer(int slot_id, const std::function<bool()> &reload,
+               bool abort_on_range = true) {
+    ReloadIfNecessary(reload);
     int index = ccb_->slots[slot_id].buffer_index;
     if (index < 0 || index >= buffers_.size()) {
       if (abort_on_range) {
@@ -216,7 +228,9 @@ protected:
   virtual bool IsPublisher() const { return false; }
 
   void SetSlot(MessageSlot *slot) { slot_ = slot; }
-  void *GetCurrentBufferAddress() { return GetBufferAddress(slot_); }
+  void *GetCurrentBufferAddress(const std::function<bool()> &reload) {
+    return GetBufferAddress(slot_, reload);
+  }
   bool ValidateSlotBuffer(MessageSlot *slot, std::function<bool()> reload);
 
   void SetMessageSize(int64_t message_size) {
