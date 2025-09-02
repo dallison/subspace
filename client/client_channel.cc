@@ -81,17 +81,12 @@ absl::Status ClientChannel::UnmapUnusedBuffers() {
     if (bcb_->refs[i] == 0) {
       if (buffers_[i]->full_size > 0) {
         if (debug_) {
-          printf("%p: Unmapping unused buffers at index %zd\n", this, i);
+          fprintf(stderr, "%p: Unmapping unused buffers at index %zd\n", this, i);
         }
         UnmapMemory(buffers_[i]->buffer, buffers_[i]->full_size, "buffers");
         buffers_[i]->buffer = nullptr;
         buffers_[i]->full_size = 0;
         buffers_[i]->slot_size = 0;
-        if (IsPublisher()) {
-          if (absl::Status status = ZeroOutSharedMemoryFile(i); !status.ok()) {
-            return status;
-          }
-        }
       }
     }
   }
@@ -217,46 +212,6 @@ OpenSharedMemoryFile(const std::string &filename, int flags) {
   return toolbelt::FileDescriptor(shm_fd);
 }
 
-absl::Status ClientChannel::ZeroOutSharedMemoryFile(int buffer_index) const {
-  std::string filename = BufferSharedMemoryName(buffer_index);
-#if defined(__APPLE__)
-  // On MacOS we set the length of the shadow file and remove the shm_file.
-  auto shm_name = MacOsSharedMemoryName(filename);
-  if (!shm_name.ok()) {
-    return shm_name.status();
-  }
-  // We can't remove the shm file here because it can race with subscribers trying
-  // to open it.
-
-  toolbelt::FileDescriptor fd(open(filename.c_str(), O_RDWR));
-  if (!fd.Valid()) {
-    return absl::InternalError(
-        absl::StrFormat("Failed to open shadow file %s: %s", filename.c_str(),
-                        strerror(errno)));
-  }
-  // Set the length of the shadow file to 1.
-  if (ftruncate(fd.Fd(), 1) < 0) {
-    return absl::InternalError(
-        absl::StrFormat("Failed to truncate shadow file %s: %s",
-                        filename.c_str(), strerror(errno)));
-  }
-#else
-  // Open the shared memory file.
-  auto shm_fd = OpenSharedMemoryFile(filename, O_RDWR);
-  if (!shm_fd.ok()) {
-    return shm_fd.status();
-  }
-
-  int e = ftruncate(shm_fd->Fd(), 1);
-  if (e == -1) {
-    return absl::InternalError(
-        absl::StrFormat("Failed to set length of shared memory %s: %s",
-                        filename, strerror(errno)));
-  }
-#endif
-  return absl::OkStatus();
-}
-
 absl::StatusOr<toolbelt::FileDescriptor>
 ClientChannel::CreateBuffer(int buffer_index, size_t size) {
   std::string filename = BufferSharedMemoryName(buffer_index);
@@ -345,6 +300,7 @@ ClientChannel::GetBufferSize(toolbelt::FileDescriptor &shm_fd,
   }
   return sb.st_size;
 #else
+  std::string filename = BufferSharedMemoryName(buffer_index);
   struct stat sb;
   if (fstat(shm_fd.Fd(), &sb) == -1) {
     return absl::InternalError(

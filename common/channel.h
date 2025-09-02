@@ -161,6 +161,7 @@ struct MessageSlot {
   AtomicBitSet<kMaxSlotOwners> sub_owners; // One bit per subscriber.
   uint64_t timestamp;                      // Timestamp of message.
   uint32_t flags;
+  int32_t bridged_slot_id;	// Slot ID of other side of bridge.
 
   void Dump(std::ostream &os) const;
 };
@@ -349,8 +350,6 @@ public:
   // no publishers and thus the shared memory is not yet valid.
   bool IsPlaceholder() const { return NumSlots() == 0; }
 
-  void ReloadIfNecessary(const std::function<bool()> &reload);
-
   std::string BufferSharedMemoryName(uint64_t session_id,
                                      int buffer_index) const;
 
@@ -406,7 +405,7 @@ public:
 
   bool AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
                          uint64_t ordinal, int vchan_id, bool retire,
-                         std::function<void(int)> retire_callback = {});
+                         std::function<void()> retire_callback = {});
 
   void SetType(std::string type) { type_ = std::move(type); }
   const std::string Type() const { return type_; }

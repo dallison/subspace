@@ -24,7 +24,20 @@
 ABSL_FLAG(bool, start_server, true, "Start the subspace server");
 ABSL_FLAG(std::string, server, "", "Path to server executable");
 
-void SignalHandler(int sig) { printf("Signal %d", sig); }
+void SignalHandler(int sig) { 
+       	fprintf(stderr,"Signal %d", sig); 
+	std::cerr.flush();
+	FILE *fp = fopen("/proc/self/maps", "r");
+	for (;;) { 
+		int ch = fgetc(fp);
+		if (ch == EOF) {
+			break;
+		}
+		fputc(ch, stderr);
+	}
+	signal(sig, SIG_DFL);
+	raise(sig);
+}
 
 using Publisher = subspace::Publisher;
 using Subscriber = subspace::Subscriber;
@@ -2320,6 +2333,9 @@ TEST_F(ClientTest, RetirementTrigger4) {
 int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);
   absl::ParseCommandLine(argc, argv);
+
+  signal(SIGSEGV, SignalHandler);
+  signal(SIGBUS, SignalHandler);
 
   absl::InitializeSymbolizer(argv[0]);
 
