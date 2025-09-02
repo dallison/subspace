@@ -137,8 +137,9 @@ std::string DecodedRefsBitField(uint64_t refs) {
 
 bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
                                 uint64_t ordinal, int vchan_id, bool retire,
-                                std::function<void(int)> retire_callback) {
+                                std::function<void()> retire_callback) {
   for (;;) {
+    CheckReload();
     uint64_t ref = slot->refs.load(std::memory_order_relaxed);
     if ((ref & kPubOwned) != 0) {
       return false;
@@ -175,13 +176,6 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
     }
     uint64_t new_ref = BuildRefsBitField(ref_ord, ref_vchan_id, retired_refs) |
                        (new_reliable_refs << kReliableRefCountShift) | new_refs;
-    MessagePrefix *prefix = Prefix(slot);
-    int original_slot_id = slot->id;
-    if (prefix != nullptr) {
-      // If this is called on the server, we won't have a prefix since the buffers are
-      // not mapped in.
-      original_slot_id = prefix->slot_id;
-    }
     if (slot->refs.compare_exchange_weak(ref, new_ref,
                                          std::memory_order_relaxed)) {
       // std::cerr << slot->id << " retired_refs: " << retired_refs
@@ -189,9 +183,8 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
       if (retired_refs >= NumSubscribers(ref_vchan_id)) {
         // All subscribers have seen the slot, retire it.
         RetiredSlots().Set(slot->id);
-        // std::cerr << "Retiring slot " << slot->id << std::endl;
         if (retire_callback) {
-          retire_callback(original_slot_id);
+          retire_callback();
         }
       }
       return true;
@@ -265,14 +258,6 @@ void Channel::GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
   total_messages = ccb_->total_messages;
   max_message_size = ccb_->max_message_size;
   total_drops = ccb_->total_drops;
-}
-
-void Channel::ReloadIfNecessary(const std::function<bool()> &reload) {
-  if (reload == nullptr) {
-    return;
-  }
-  do {
-  } while (reload());
 }
 
 void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,

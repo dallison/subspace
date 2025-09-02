@@ -33,17 +33,16 @@ void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
   //           << slot->ordinal << "\n";
   slot->sub_owners.Clear(subscriber_id_);
   AtomicIncRefCount(slot, IsReliable(), -1, slot->ordinal, slot->vchan_id, true,
-                    [this](int retired_slot_id) {
+                    [this, slot]() {
                       // When a slot retires we want to use the slot id that was
                       // originally used for the message.  If the message came
                       // in from a bridge we want to notify the original sender
                       // of the message, not the bridge publisher.
                       //
-                      // NOTE: lock-free complexity here.  You can't rely on the
-                      // slot still holding the same data since we've set the
-                      // ref count to zero and another publisher may have
-                      // reused the slot.
-                      TriggerRetirement(retired_slot_id);
+		      // The original slot id is in the message prefix and is copied
+		      // into the slot when the bridge publisher publishes the
+		      // message.
+                      TriggerRetirement(slot->bridged_slot_id);
                     });
 
   if (num_active_messages_-- == options_.MaxActiveMessages()) {

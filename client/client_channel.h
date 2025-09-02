@@ -12,6 +12,7 @@
 #include "toolbelt/fd.h"
 #include "toolbelt/sockets.h"
 #include "toolbelt/triggerfd.h"
+#include "toolbelt/clock.h"
 #include <sys/poll.h>
 
 #include <memory>
@@ -143,6 +144,10 @@ public:
 
   // Get the size associated with the given slot id.
   int SlotSize(int slot_id) const {
+    if (ccb_->slots[slot_id].buffer_index < 0 ||
+        ccb_->slots[slot_id].buffer_index >= buffers_.size()) {
+      return 0;
+    }
     return buffers_.empty()
                ? 0
                : buffers_[ccb_->slots[slot_id].buffer_index]->slot_size;
@@ -248,8 +253,6 @@ protected:
   std::string BufferSharedMemoryName(int buffer_index) const {
     return Channel::BufferSharedMemoryName(session_id_, buffer_index);
   }
-
-  absl::Status ZeroOutSharedMemoryFile(int buffer_index) const;
 
 #if defined(__APPLE__)
   absl::StatusOr<std::string>

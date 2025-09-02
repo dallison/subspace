@@ -10,7 +10,6 @@ namespace details {
 
 absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
   size_t final_buffer_size = size_t(SlotSizeToBufferSize(final_slot_size));
-
   uint64_t current_slot_size = 0;
   int num_buffers = ccb_->num_buffers.load(std::memory_order_relaxed);
 
@@ -300,6 +299,7 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
   if (omit_prefix) {
     slot->timestamp = prefix->timestamp;
     slot->vchan_id = prefix->vchan_id;
+    slot->bridged_slot_id = prefix->slot_id;
   } else {
     prefix->message_size = slot->message_size;
     prefix->ordinal = slot->ordinal;

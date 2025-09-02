@@ -865,9 +865,7 @@ int64_t ClientImpl::GetCurrentOrdinal(SubscriberImpl *sub) const {
 bool ClientImpl::CheckReload(ClientChannel *channel) {
   auto reloaded = ReloadBuffersIfNecessary(channel);
   if (!reloaded.ok()) {
-    logger_.Log(toolbelt::LogLevel::kError,
-                "Error reloading buffers for channel %s: %s", channel->Name().c_str(),
-                reloaded.status().message());
+    std::cerr << "Error reloading buffers for channel " << channel->Name() << ": " << reloaded.status() << std::endl;
     return false;
   }
   return *reloaded;
