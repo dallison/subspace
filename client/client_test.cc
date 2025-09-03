@@ -1249,14 +1249,14 @@ TEST_F(ClientTest, PublishConcurrentlyToOneSubscriber) {
   pub_threads.reserve(kNumPublishers);
   for (int i = 0; i < kNumPublishers; ++i) {
     pub_threads.emplace_back(
-      std::thread([&]() {
+      std::thread([&channel_name, i]() {
         subspace::Client pub_client;
         ASSERT_OK(pub_client.Init(Socket()));
         auto pub = *pub_client.CreatePublisher(
-            channel_name, {.slot_size = 64, .num_slots = 2*kNumPublishers + 16});
+            channel_name, {.slot_size = 256, .num_slots = 2*kNumPublishers + 16});
         std::array<char, 16> msg = {};
-        auto size = std::snprintf(msg.data(), msg.size() - 1, "M%d", i);
-        auto buffer = pub.GetMessageBuffer(16);
+        auto size = std::snprintf(msg.data(), msg.size(), "M%d", i);
+        auto buffer = pub.GetMessageBuffer(size);
         std::memcpy(*buffer, msg.data(), size);
         ASSERT_OK(pub.PublishMessage(size));
       })
@@ -1281,11 +1281,6 @@ TEST_F(ClientTest, PublishConcurrentlyToOneSubscriber) {
   std::sort(all_recv_msgs.begin(), all_recv_msgs.end());
   auto last_uniq = std::unique(all_recv_msgs.begin(), all_recv_msgs.end());
   EXPECT_EQ(last_uniq - all_recv_msgs.begin(), kNumPublishers);
-
-  for (const auto& s : all_recv_msgs) {
-    std::cerr << s << '\n';
-  }
-  std::cerr << std::flush;
 }
 
 TEST_F(ClientTest, PublishSingleMessagePollAndReadSubscriberFirst) {
