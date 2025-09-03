@@ -1268,13 +1268,13 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     buffer[1] = (*n_recv >> 16) & 0xff;
     buffer[2] = (*n_recv >> 8) & 0xff;
     buffer[3] = *n_recv & 0xff;
-    if (absl::StatusOr<ssize_t> s = bridge_notification_pipe_.WriteFd().Write(
+    if (absl::StatusOr<ssize_t> sz_or = bridge_notification_pipe_.WriteFd().Write(
             buffer, *n_recv + sizeof(int32_t));
-        !s.ok()) {
+        !sz_or.ok()) {
       logger_.Log(
           toolbelt::LogLevel::kError,
           "Failed to send subscribed message to bridge notification pipe: %s",
-          s.status().ToString().c_str());
+          sz_or.status().ToString().c_str());
       // Ignore the error.
     }
   }
