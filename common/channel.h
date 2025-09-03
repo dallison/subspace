@@ -212,7 +212,7 @@ public:
   uint64_t Next(int vchan_id) { return ordinals_[vchan_id + 1]++; }
 
 private:
-  std::array<uint64_t, kMaxVchanId + 1> ordinals_ = {};
+  std::array<std::atomic<uint64_t>, kMaxVchanId + 1> ordinals_ = {};
 };
 
 class ActivationTracker {

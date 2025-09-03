@@ -14,6 +14,7 @@
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
 #include "toolbelt/pipe.h"
+#include <cstdio>
 #include <gtest/gtest.h>
 #include <inttypes.h>
 #include <memory>
@@ -1235,6 +1236,101 @@ TEST_F(ClientTest, PublishAndResizeSubscriberConcurrently) {
 
   t1.join();
   t2.join();
+}
+
+TEST_F(ClientTest, PublishConcurrentlyFromOneClientToOneSubscriber) {
+  std::string channel_name = "checkin_channel";
+  subspace::Client sub_client;
+  ASSERT_OK(sub_client.Init(Socket()));
+  auto sub = *sub_client.CreateSubscriber(channel_name);
+
+  constexpr int kNumPublishers = 100;
+  std::vector<Publisher> pubs;
+  pubs.reserve(kNumPublishers);
+  subspace::Client pub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  for (int i = 0; i < kNumPublishers; ++i) {
+    pubs.emplace_back(*pub_client.CreatePublisher(
+        channel_name, {.slot_size = 256, .num_slots = 2*kNumPublishers + 16}));
+  }
+
+  std::vector<std::thread> pub_threads;
+  pub_threads.reserve(kNumPublishers);
+  for (int i = 0; i < kNumPublishers; ++i) {
+    pub_threads.emplace_back(
+      std::thread([&pubs, i]() {
+        std::array<char, 16> msg = {};
+        auto size = std::snprintf(msg.data(), msg.size(), "M%d", i);
+        auto buffer = pubs[i].GetMessageBuffer(size);
+        std::memcpy(*buffer, msg.data(), size);
+        ASSERT_OK(pubs[i].PublishMessage(size));
+      })
+    );
+  }
+
+  for (auto& t : pub_threads) {
+    t.join();
+  }
+
+  std::vector<std::string> all_recv_msgs;
+  all_recv_msgs.reserve(kNumPublishers);
+  while (true) {
+    auto message = *sub.ReadMessage();
+    size_t size = message.length;
+    if (size == 0) {
+      break;
+    }
+    all_recv_msgs.emplace_back(std::string(reinterpret_cast<const char *>(message.buffer), message.length));
+  }
+  EXPECT_EQ(all_recv_msgs.size(), kNumPublishers);
+  std::sort(all_recv_msgs.begin(), all_recv_msgs.end());
+  auto last_uniq = std::unique(all_recv_msgs.begin(), all_recv_msgs.end());
+  EXPECT_EQ(last_uniq - all_recv_msgs.begin(), kNumPublishers);
+}
+
+TEST_F(ClientTest, PublishConcurrentlyToOneSubscriber) {
+  std::string channel_name = "checkin_channel";
+  subspace::Client sub_client;
+  ASSERT_OK(sub_client.Init(Socket()));
+  auto sub = *sub_client.CreateSubscriber(channel_name);
+
+  std::vector<std::thread> pub_threads;
+  constexpr int kNumPublishers = 100;
+  pub_threads.reserve(kNumPublishers);
+  for (int i = 0; i < kNumPublishers; ++i) {
+    pub_threads.emplace_back(
+      std::thread([&channel_name, i]() {
+        subspace::Client pub_client;
+        ASSERT_OK(pub_client.Init(Socket()));
+        auto pub = *pub_client.CreatePublisher(
+            channel_name, {.slot_size = 256, .num_slots = 2*kNumPublishers + 16});
+        std::array<char, 16> msg = {};
+        auto size = std::snprintf(msg.data(), msg.size(), "M%d", i);
+        auto buffer = pub.GetMessageBuffer(size);
+        std::memcpy(*buffer, msg.data(), size);
+        ASSERT_OK(pub.PublishMessage(size));
+      })
+    );
+  }
+
+  for (auto& t : pub_threads) {
+    t.join();
+  }
+
+  std::vector<std::string> all_recv_msgs;
+  all_recv_msgs.reserve(kNumPublishers);
+  while (true) {
+    auto message = *sub.ReadMessage();
+    size_t size = message.length;
+    if (size == 0) {
+      break;
+    }
+    all_recv_msgs.emplace_back(std::string(reinterpret_cast<const char *>(message.buffer), message.length));
+  }
+  EXPECT_EQ(all_recv_msgs.size(), kNumPublishers);
+  std::sort(all_recv_msgs.begin(), all_recv_msgs.end());
+  auto last_uniq = std::unique(all_recv_msgs.begin(), all_recv_msgs.end());
+  EXPECT_EQ(last_uniq - all_recv_msgs.begin(), kNumPublishers);
 }
 
 TEST_F(ClientTest, PublishSingleMessagePollAndReadSubscriberFirst) {
