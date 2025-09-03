@@ -1258,8 +1258,7 @@ TEST_F(ClientTest, PublishConcurrentlyFromOneClientToOneSubscriber) {
   pub_threads.reserve(kNumPublishers);
   for (int i = 0; i < kNumPublishers; ++i) {
     pub_threads.emplace_back(
-      std::thread([&channel_name, &pubs, i]() {
-        // usleep(1000 * i);  // <--- Fixes the problem.
+      std::thread([&pubs, i]() {
         std::array<char, 16> msg = {};
         auto size = std::snprintf(msg.data(), msg.size(), "M%d", i);
         auto buffer = pubs[i].GetMessageBuffer(size);
