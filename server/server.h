@@ -57,7 +57,7 @@ public:
 
   absl::StatusOr<toolbelt::FileDescriptor> CreateBridgeNotificationPipe();
 
-  static void CleanupFilesystem();
+  void CleanupFilesystem();
   void CleanupAfterSession();
 
 private:

@@ -25,6 +25,13 @@ ABSL_FLAG(std::string, log_level, "info", "Log level");
 ABSL_FLAG(std::string, interface, "", "Discovery network interface");
 ABSL_FLAG(bool, local, false, "Use local computer only");
 ABSL_FLAG(int, notify_fd, -1, "File descriptor to notify of startup");
+#if defined(___APPLE__)
+// This is default true on Mac since is uses /tmp.
+ABSL_FLAG(bool, cleanup_filesystem, true, "Cleanup the filesystem on server startup");
+#else
+// Default false on other OSes as it interferes with tests that run multiple servers.
+ABSL_FLAG(bool, cleanup_filesystem, false, "Cleanup the filesystem on server startup");
+#endif
 
 int main(int argc, char **argv) {
   absl::ParseCommandLine(argc, argv);
@@ -52,7 +59,9 @@ int main(int argc, char **argv) {
   }
 
   server->SetLogLevel(absl::GetFlag(FLAGS_log_level));
-  subspace::Server::CleanupFilesystem();
+  if (absl::GetFlag(FLAGS_cleanup_filesystem)) {
+    server->CleanupFilesystem();
+  }
 
   absl::Status s = server->Run();
   if (!s.ok()) {
