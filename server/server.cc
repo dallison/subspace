@@ -193,6 +193,7 @@ void Server::CleanupAfterSession() {
 }
 
 void Server::CleanupFilesystem() {
+  logger_.Log(toolbelt::LogLevel::kInfo, "Cleaning up filesystem...");
 #if defined(__APPLE__)
   // Remove all files starting with "subspace_" in /tmp.  These refer to
   // shared memory segments names "subspace_INODE".
