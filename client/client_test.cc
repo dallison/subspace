@@ -25,11 +25,11 @@
 ABSL_FLAG(bool, start_server, true, "Start the subspace server");
 ABSL_FLAG(std::string, server, "", "Path to server executable");
 
-void SignalHandler(int sig) { 
-       	fprintf(stderr,"Signal %d", sig); 
+void SignalHandler(int sig) {
+       	fprintf(stderr,"Signal %d", sig);
 	std::cerr.flush();
 	FILE *fp = fopen("/proc/self/maps", "r");
-	for (;;) { 
+	for (;;) {
 		int ch = fgetc(fp);
 		if (ch == EOF) {
 			break;
@@ -1300,8 +1300,19 @@ TEST_F(ClientTest, PublishConcurrentlyToOneSubscriber) {
   for (int i = 0; i < kNumPublishers; ++i) {
     pub_threads.emplace_back(
       std::thread([&channel_name, i]() {
+        // We have a backlog of 10 hardcoded for the subscriber's listen socket.  We will get
+        // a connection refused if we exceed this so use a retry loop with a delay if we get
+        // errors on connection.  Happens on MacOS.
         subspace::Client pub_client;
-        ASSERT_OK(pub_client.Init(Socket()));
+        bool connected = false;
+        for (int i = 0; i < 100; i++) {
+          if (pub_client.Init(Socket()).ok()) {
+            connected = true;
+            break;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        ASSERT_TRUE(connected);
         auto pub = *pub_client.CreatePublisher(
             channel_name, {.slot_size = 256, .num_slots = 2*kNumPublishers + 16});
         std::array<char, 16> msg = {};
