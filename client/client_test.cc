@@ -2437,6 +2437,62 @@ TEST_F(ClientTest, RetirementTrigger4) {
   ASSERT_FALSE(fd.revents & POLLIN);
 }
 
+TEST_F(ClientTest, ChannelDirectory) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> p1 =
+      client->CreatePublisher("chan1", {.slot_size = 256, .num_slots = 10});
+  ASSERT_OK(p1);
+
+  absl::StatusOr<Publisher> p2 =
+      client->CreatePublisher("chan2", {.slot_size = 256, .num_slots = 10});
+  ASSERT_OK(p2);
+
+  absl::StatusOr<Subscriber> s1 = client->CreateSubscriber("chan1");
+  ASSERT_OK(s1);
+
+  absl::StatusOr<Subscriber> s2 = client->CreateSubscriber("chan2");
+  ASSERT_OK(s2);
+
+  // Subscribe to channel directory.
+  absl::StatusOr<Subscriber> dir_sub = client->CreateSubscriber(
+      "/subspace/ChannelDirectory");
+  ASSERT_OK(dir_sub);
+
+  sleep(1);  // Give some time for directory to be updated.
+
+  // Read the latest channel directory message.
+  absl::StatusOr<subspace::Message> msg = dir_sub->ReadMessage(subspace::ReadMode::kReadNewest);
+  ASSERT_OK(msg);
+  ASSERT_NE(0, msg->length);
+
+  subspace::ChannelDirectory dir;
+  ASSERT_TRUE(dir.ParseFromArray(msg->buffer, msg->length));
+  ASSERT_GE(dir.channels_size(), 2);
+
+  // Check that we have both chan1 and chan2 in the directory.
+  bool found_chan1 = false;
+  bool found_chan2 = false;
+  for (int i = 0; i < dir.channels_size(); i++) {
+    const subspace::ChannelInfo &info = dir.channels(i);
+    if (info.name() == "chan1") {
+      found_chan1 = true;
+      ASSERT_EQ(256, info.slot_size());
+      ASSERT_EQ(10, info.num_slots());
+      ASSERT_EQ(1, info.num_pubs());
+      ASSERT_EQ(1, info.num_subs());
+    } else if (info.name() == "chan2") {
+      found_chan2 = true;
+      ASSERT_EQ(256, info.slot_size());
+      ASSERT_EQ(10, info.num_slots());
+      ASSERT_EQ(1, info.num_pubs());
+      ASSERT_EQ(1, info.num_subs());
+    }
+  }
+  ASSERT_TRUE(found_chan1);
+  ASSERT_TRUE(found_chan2);
+}
+
 int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);
   absl::ParseCommandLine(argc, argv);
