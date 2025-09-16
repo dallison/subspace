@@ -225,11 +225,11 @@ public:
 
   virtual int SlotSize() const {
     if (ccb_->num_buffers == 0) {
-      return last_known_slot_size_; // No buffers, no slots.
+      return last_known_slot_size_;
     }
     uint64_t size = bcb_->sizes[ccb_->num_buffers - 1];
     if (size == 0) {
-      return last_known_slot_size_; // No slots.
+      return last_known_slot_size_;
     }
     last_known_slot_size_ = BufferSizeToSlotSize(size);
     return last_known_slot_size_;
