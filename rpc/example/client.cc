@@ -14,7 +14,7 @@
 
 ABSL_FLAG(std::string, subspace_socket, "/tmp/subspace",
           "Subspace server socket name");
-ABSL_FLAG(std::string, method, "TestMethod", "Method to call");
+ABSL_FLAG(std::string, method, "test", "Method to call");
 ABSL_FLAG(std::string, log_level, "info",
           "Log level (debug, info, warn, error)");
 ABSL_FLAG(int, perf_iterations, 1000,
