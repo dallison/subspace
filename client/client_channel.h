@@ -36,40 +36,8 @@
 // For a reliable publisher, the publisher should wait for its
 // event if it fails to get a buffer to send a message.  The
 // subscribers will trigger the event when they have read all
-// the aviailable messages.
+// the available messages.
 //
-// The naive approach to get this working is for the publisher
-// to trigger the subscribers events for every message it sends, but
-// this would mean a write to a pipe every time a message is
-// sent.  That's a system call and takes some time.
-// Instead we take the approach that the publisher only triggers when
-// it publishes a message immediately after a message that has been
-// seen by a subscriber.  In other words, if a publisher is publishing
-// a bunch of messages at once, only the first one will result in
-// the subscribers being triggered.  All the other messages are
-// buffered ahead for the subscriber to pick up when it starts
-// reading.
-//
-// Practically, this means that the publisher will notify the
-// subscriber if the last message in the active list before
-// it adds a new one has the kMessageSeen flag set (has been
-// seen by a subscriber).  If the publisher is publishing slowly
-// it will trigger the subscribers for every message.
-//
-// For reliable publisher triggers, the naive design would trigger
-// the publisher every time it reads a message.  The better
-// approach is for the subscriber to only trigger
-// the event when it has finished reading all the messages that
-// are available.  When the publisher receives the event it can then
-// fill up all the slots that have been read before it runs out
-// of slots again (if it's going fast).
-//
-// Using this strategy, we limit the number of event triggers and
-// thus improve the latency of the system by eliminating unnecessary
-// system calls to write to a pipe or eventfd.
-//
-// As of time of writing, the latency for a message on the same
-// computer using shared memory is about 0.25 microseconds on a Mac M1.
 
 namespace subspace {
 
