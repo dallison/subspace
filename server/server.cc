@@ -335,7 +335,7 @@ absl::Status Server::Run() {
         ListenerCoroutine(listen_socket, c);
       },
       "Listener UDS"));
-#if 0
+
   // Start the channel directory coroutine.
   coroutines_.insert(std::make_unique<co::Coroutine>(
       co_scheduler_, [this](co::Coroutine *c) { ChannelDirectoryCoroutine(c); },
@@ -345,7 +345,6 @@ absl::Status Server::Run() {
   coroutines_.insert(std::make_unique<co::Coroutine>(
       co_scheduler_, [this](co::Coroutine *c) { StatisticsCoroutine(c); },
       "Channel stats"));
-#endif
 
   if (!local_) {
     // Start the discovery receiver coroutine.
@@ -458,7 +457,6 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
                 channel_name.c_str(), num_slots, mux.c_str());
     // The channels_ map owns all the server channels.
     channels_.emplace(std::make_pair(channel_name, std::move(*vchan)));
-    SendChannelDirectory();
     return channel;
   }
 
@@ -470,6 +468,7 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
       new ServerChannel(*channel_id, channel_name, num_slots, std::move(type),
                         false, session_id_);
   channel->SetDebug(logger_.GetLogLevel() <= toolbelt::LogLevel::kVerboseDebug);
+  channel->SetLastKnownSlotSize(slot_size);
 
   absl::StatusOr<SharedMemoryFds> fds =
       channel->Allocate(scb_fd_, slot_size, num_slots);
@@ -479,7 +478,6 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
   channel->SetSharedMemoryFds(std::move(*fds));
   channels_.emplace(std::make_pair(channel_name, channel));
 
-  SendChannelDirectory();
   return channel;
 }
 
@@ -1268,8 +1266,9 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     buffer[1] = (*n_recv >> 16) & 0xff;
     buffer[2] = (*n_recv >> 8) & 0xff;
     buffer[3] = *n_recv & 0xff;
-    if (absl::StatusOr<ssize_t> sz_or = bridge_notification_pipe_.WriteFd().Write(
-            buffer, *n_recv + sizeof(int32_t));
+    if (absl::StatusOr<ssize_t> sz_or =
+            bridge_notification_pipe_.WriteFd().Write(
+                buffer, *n_recv + sizeof(int32_t));
         !sz_or.ok()) {
       logger_.Log(
           toolbelt::LogLevel::kError,

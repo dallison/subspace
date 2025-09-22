@@ -77,7 +77,7 @@ public:
     return Cancel(std::chrono::nanoseconds(0), c);
   }
 
-  void SetInvokationDetails(std::shared_ptr<RpcClient> client,
+  void SetInvocationDetails(std::shared_ptr<RpcClient> client,
                             uint64_t client_id, int session_id, int request_id,
                             std::shared_ptr<client_internal::Method> method) {
     if (client_ != nullptr) {
@@ -357,7 +357,7 @@ inline absl::Status RpcClient::Call(int method_id, const Request &request,
                   std::shared_ptr<client_internal::Method> method,
                   const RpcResponse *response) {
         // For cancellation we need to store the IDs for the outgoing request.
-        receiver.SetInvokationDetails(client, client_id, session_id, request_id,
+        receiver.SetInvocationDetails(client, client_id, session_id, request_id,
                                       method);
         if (response->is_cancelled()) {
           receiver.OnCancel();
