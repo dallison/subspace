@@ -174,6 +174,10 @@ public:
     AddUserId(id);
   }
 
+  void SetLastKnownSlotSize(int32_t slot_size) {
+    last_known_slot_size_ = slot_size;
+  }
+
   virtual bool IsMux() const { return false; }
   virtual int GetVirtualChannelId() const { return -1; }
   virtual int GetChannelId() const { return Channel::GetChannelId(); }
@@ -221,13 +225,14 @@ public:
 
   virtual int SlotSize() const {
     if (ccb_->num_buffers == 0) {
-      return 0; // No buffers, no slots.
+      return last_known_slot_size_;
     }
     uint64_t size = bcb_->sizes[ccb_->num_buffers - 1];
     if (size == 0) {
-      return 0; // No slots.
+      return last_known_slot_size_;
     }
-    return BufferSizeToSlotSize(size);
+    last_known_slot_size_ = BufferSizeToSlotSize(size);
+    return last_known_slot_size_;
   }
 
   virtual int NumSlots() const { return Channel::NumSlots(); }
@@ -309,6 +314,7 @@ protected:
   SharedMemoryFds shared_memory_fds_;
   bool is_virtual_ = false;
   int session_id_;
+  mutable int32_t last_known_slot_size_ = 0;
 };
 
 class VirtualChannel;

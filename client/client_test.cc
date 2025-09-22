@@ -25,11 +25,11 @@
 ABSL_FLAG(bool, start_server, true, "Start the subspace server");
 ABSL_FLAG(std::string, server, "", "Path to server executable");
 
-void SignalHandler(int sig) { 
-       	fprintf(stderr,"Signal %d", sig); 
+void SignalHandler(int sig) {
+       	fprintf(stderr,"Signal %d", sig);
 	std::cerr.flush();
 	FILE *fp = fopen("/proc/self/maps", "r");
-	for (;;) { 
+	for (;;) {
 		int ch = fgetc(fp);
 		if (ch == EOF) {
 			break;
@@ -1300,8 +1300,19 @@ TEST_F(ClientTest, PublishConcurrentlyToOneSubscriber) {
   for (int i = 0; i < kNumPublishers; ++i) {
     pub_threads.emplace_back(
       std::thread([&channel_name, i]() {
+        // We have a backlog of 10 hardcoded for the subscriber's listen socket.  We will get
+        // a connection refused if we exceed this so use a retry loop with a delay if we get
+        // errors on connection.  Happens on MacOS.
         subspace::Client pub_client;
-        ASSERT_OK(pub_client.Init(Socket()));
+        bool connected = false;
+        for (int i = 0; i < 100; i++) {
+          if (pub_client.Init(Socket()).ok()) {
+            connected = true;
+            break;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        ASSERT_TRUE(connected);
         auto pub = *pub_client.CreatePublisher(
             channel_name, {.slot_size = 256, .num_slots = 2*kNumPublishers + 16});
         std::array<char, 16> msg = {};
@@ -2424,6 +2435,62 @@ TEST_F(ClientTest, RetirementTrigger4) {
   e = ::poll(&fd, 1, 0);
   ASSERT_EQ(0, e);
   ASSERT_FALSE(fd.revents & POLLIN);
+}
+
+TEST_F(ClientTest, ChannelDirectory) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> p1 =
+      client->CreatePublisher("chan1", {.slot_size = 256, .num_slots = 10});
+  ASSERT_OK(p1);
+
+  absl::StatusOr<Publisher> p2 =
+      client->CreatePublisher("chan2", {.slot_size = 256, .num_slots = 10});
+  ASSERT_OK(p2);
+
+  absl::StatusOr<Subscriber> s1 = client->CreateSubscriber("chan1");
+  ASSERT_OK(s1);
+
+  absl::StatusOr<Subscriber> s2 = client->CreateSubscriber("chan2");
+  ASSERT_OK(s2);
+
+  // Subscribe to channel directory.
+  absl::StatusOr<Subscriber> dir_sub = client->CreateSubscriber(
+      "/subspace/ChannelDirectory");
+  ASSERT_OK(dir_sub);
+
+  sleep(1);  // Give some time for directory to be updated.
+
+  // Read the latest channel directory message.
+  absl::StatusOr<subspace::Message> msg = dir_sub->ReadMessage(subspace::ReadMode::kReadNewest);
+  ASSERT_OK(msg);
+  ASSERT_NE(0, msg->length);
+
+  subspace::ChannelDirectory dir;
+  ASSERT_TRUE(dir.ParseFromArray(msg->buffer, msg->length));
+  ASSERT_GE(dir.channels_size(), 2);
+
+  // Check that we have both chan1 and chan2 in the directory.
+  bool found_chan1 = false;
+  bool found_chan2 = false;
+  for (int i = 0; i < dir.channels_size(); i++) {
+    const subspace::ChannelInfo &info = dir.channels(i);
+    if (info.name() == "chan1") {
+      found_chan1 = true;
+      ASSERT_EQ(256, info.slot_size());
+      ASSERT_EQ(10, info.num_slots());
+      ASSERT_EQ(1, info.num_pubs());
+      ASSERT_EQ(1, info.num_subs());
+    } else if (info.name() == "chan2") {
+      found_chan2 = true;
+      ASSERT_EQ(256, info.slot_size());
+      ASSERT_EQ(10, info.num_slots());
+      ASSERT_EQ(1, info.num_pubs());
+      ASSERT_EQ(1, info.num_subs());
+    }
+  }
+  ASSERT_TRUE(found_chan1);
+  ASSERT_TRUE(found_chan2);
 }
 
 int main(int argc, char **argv) {

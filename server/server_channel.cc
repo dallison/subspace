@@ -316,6 +316,7 @@ void ServerChannel::RemoveUser(Server *server, int user_id) {
   if (IsEmpty()) {
     server->RemoveChannel(this);
   }
+  server->SendChannelDirectory();
 }
 
 void ServerChannel::RemoveAllUsersFor(ClientHandler *handler) {
@@ -506,6 +507,7 @@ void ServerChannel::GetChannelInfo(subspace::ChannelInfo *info) {
   CountUsers(num_pubs, num_subs);
   info->set_num_pubs(num_pubs);
   info->set_num_subs(num_subs);
+
   info->set_is_reliable(IsReliable());
   if (IsVirtual()) {
     info->set_is_virtual(true);

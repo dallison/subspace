@@ -241,6 +241,8 @@ void ClientHandler::HandleCreatePublisher(
     response->set_error(publisher.status().ToString());
     return;
   }
+  server_->SendChannelDirectory();
+
   response->set_channel_id(channel->GetChannelId());
   response->set_type(channel->Type());
   response->set_vchan_id(channel->GetVirtualChannelId());
@@ -402,6 +404,7 @@ void ClientHandler::HandleCreateSubscriber(
     }
     sub = *subscriber;
   }
+  server_->SendChannelDirectory();
   channel->RegisterSubscriber(sub->GetId(), channel->GetVirtualChannelId(),
                               req.subscriber_id() == -1);
 
