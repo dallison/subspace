@@ -1,0 +1,11 @@
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+rust_library(
+    name = "rust_client",
+    srcs = [
+        "rust_client.rs",
+    ],
+    deps = [
+    ],
+    visibility = ["//visibility:public"],
+)
