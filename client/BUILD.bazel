@@ -17,6 +17,8 @@ cc_library(
         "publisher.h",
         "subscriber.h",
     ],
+    strip_include_prefix = ".",
+    include_prefix = "subspace/client",
     deps = [
         "//common:subspace_common",
         "@com_google_absl//absl/container:flat_hash_map",
