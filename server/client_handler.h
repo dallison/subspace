@@ -2,8 +2,8 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#ifndef _SERVER_CLIENT_HANDLER_H
-#define _SERVER_CLIENT_HANDLER_H
+#ifndef _xSERVERCLIENT_HANDLER_H
+#define _xSERVERCLIENT_HANDLER_H
 
 #include "absl/status/status.h"
 #include "common/channel.h"
@@ -63,4 +63,4 @@ private:
 
 } // namespace subspace
 
-#endif // _SERVER_CLIENT_HANDLER_H
+#endif // _xSERVERCLIENT_HANDLER_H

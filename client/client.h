@@ -2,8 +2,8 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#ifndef _CLIENT_CLIENT_H
-#define _CLIENT_CLIENT_H
+#ifndef _xCLIENT_CLIENT_H
+#define _xCLIENT_CLIENT_H
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
@@ -899,4 +899,4 @@ private:
 
 } // namespace subspace
 
-#endif // _CLIENT_CLIENT_H
+#endif // _xCLIENT_CLIENT_H

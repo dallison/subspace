@@ -3,8 +3,8 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#ifndef _COMMON_CHANNEL_H
-#define _COMMON_CHANNEL_H
+#ifndef _xCOMMON_CHANNEL_H
+#define _xCOMMON_CHANNEL_H
 
 #include <stdio.h>
 
@@ -486,4 +486,4 @@ protected:
 };
 
 } // namespace subspace
-#endif /* _COMMON_CHANNEL_H */
+#endif /* _xCOMMON_CHANNEL_H */
