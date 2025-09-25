@@ -2,8 +2,8 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#ifndef _CLIENT_CLIENT_CHANNEL_H
-#define _CLIENT_CLIENT_CHANNEL_H
+#ifndef _xCLIENT_CLIENT_CHANNEL_H
+#define _xCLIENT_CLIENT_CHANNEL_H
 
 #include "client/options.h"
 #include "common/channel.h"
@@ -252,4 +252,4 @@ protected:
 } // namespace details
 } // namespace subspace
 
-#endif // _CLIENT_CLIENT_CHANNEL_H
+#endif // _xCLIENT_CLIENT_CHANNEL_H

@@ -2,8 +2,8 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#ifndef _SERVER_SERVER_CHANNEL_H
-#define _SERVER_SERVER_CHANNEL_H
+#ifndef _xSERVERSERVER_CHANNEL_H
+#define _xSERVERSERVER_CHANNEL_H
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
@@ -428,4 +428,4 @@ private:
 };
 
 } // namespace subspace
-#endif // _SERVER_SERVER_CHANNEL_H
+#endif // _xSERVERSERVER_CHANNEL_H

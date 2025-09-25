@@ -2,8 +2,8 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#ifndef _CLIENT_OPTIONS_H
-#define _CLIENT_OPTIONS_H
+#ifndef _xCLIENT_OPTIONS_H
+#define _xCLIENT_OPTIONS_H
 
 #include <string>
 
@@ -196,4 +196,4 @@ struct SubscriberOptions {
 
 } // namespace subspace
 
-#endif // _CLIENT_OPTIONS_H
+#endif // _xCLIENT_OPTIONS_H
