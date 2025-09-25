@@ -2,8 +2,8 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#ifndef __SERVER_SERVER_H
-#define __SERVER_SERVER_H
+#ifndef _SERVER_SERVER_H
+#define _SERVER_SERVER_H
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
@@ -165,4 +165,4 @@ private:
 
 } // namespace subspace
 
-#endif // __SERVER_SERVER_H
+#endif // _SERVER_SERVER_H
