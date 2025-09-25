@@ -599,7 +599,7 @@ public:
     return client_->RegisterResizeCallback(
         impl_.get(),
         [this, callback = std::move(callback)](
-            details::PublisherImpl *p, int32_t old_size, int32_t new_size)
+            details::PublisherImpl *, int32_t old_size, int32_t new_size)
             -> absl::Status { return callback(this, old_size, new_size); });
   }
 
@@ -742,7 +742,7 @@ public:
     return client_->RegisterDroppedMessageCallback(
         impl_.get(),
         [this, callback = std::move(callback)](
-            details::SubscriberImpl *s, int64_t c) { callback(this, c); });
+            details::SubscriberImpl *, int64_t c) { callback(this, c); });
   }
 
   absl::Status UnregisterDroppedMessageCallback() {
@@ -753,7 +753,7 @@ public:
   RegisterMessageCallback(std::function<void(Subscriber *, Message)> callback) {
     return client_->RegisterMessageCallback(
         impl_.get(), [this, callback = std::move(callback)](
-                         details::SubscriberImpl *s, Message m) {
+                         details::SubscriberImpl *, Message m) {
           callback(this, std::move(m));
         });
   }

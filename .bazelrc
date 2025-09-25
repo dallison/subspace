@@ -15,6 +15,9 @@ build:apple_silicon --cpu=darwin_arm64
 # Common flags for Clang
 build:clang --action_env=BAZEL_COMPILER=clang
 build:clang --action_env=CC=clang --action_env=CXX=clang++
+build:clang --copt="-Wno-reserved-macro-identifier"
+build:clang --copt="-Wunused-parameter"
+
 #build:clang --linkopt=-fuse-ld=lld
 
 # Clang with libc++
@@ -25,3 +28,4 @@ build:libc++ --action_env=BAZEL_CXXOPTS=-stdlib=libc++
 build:libc++ --action_env=BAZEL_LINKLIBS=-l%:libc++.a:-l%:libc++abi.a
 build:libc++ --action_env=BAZEL_LINKOPTS=-lm:-pthread
 build:libc++ --define force_libcpp=enabled
+
