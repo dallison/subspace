@@ -347,6 +347,14 @@ private:
       std::function<void(details::SubscriberImpl *, Message)> callback);
   absl::Status UnregisterMessageCallback(details::SubscriberImpl *subscriber);
 
+  void InvokeMessageCallback(details::SubscriberImpl *subscriber,
+                             Message msg) {
+    auto it = message_callbacks_.find(subscriber);
+    if (it != message_callbacks_.end() && it->second) {
+      it->second(subscriber, msg);
+    }
+  }
+
   // Register a callback that will be called when the publisher wants a
   // channel to be resized.  Note that there is more than one
   // publisher, only the one that causes the resize will cause the
@@ -372,6 +380,7 @@ private:
   absl::StatusOr<std::vector<Message>>
   GetAllMessages(details::SubscriberImpl *subscriber,
                  ReadMode mode = ReadMode::kReadNext);
+
 
   // Get the most recently received ordinal for the subscriber.
   int64_t GetCurrentOrdinal(details::SubscriberImpl *sub) const;
@@ -530,6 +539,10 @@ public:
     return client_->PublishMessage(impl_.get(), message_size);
   }
 
+  absl::StatusOr<const Message> PublishMessageWithPrefix(int64_t message_size) {
+    return PublishMessageInternal(message_size, true);
+  }
+
   // Wait until a reliable publisher can try again to send a message.  If the
   // client is coroutine-aware, the coroutine will wait.  If it's not,
   // the function will block on a poll until the publisher is triggered.
@@ -559,7 +572,9 @@ public:
     return client_->WaitForReliablePublisher(impl_.get(), fd, timeout, c);
   }
 
-  struct pollfd GetPollFd() const { return client_->GetPollFd(impl_.get()); }
+  struct pollfd GetPollFd() const {
+    return client_->GetPollFd(impl_.get());
+  }
 
   // This is a file descriptor that you can poll on to wait for
   // message slots to be retired.  It is triggered
@@ -590,6 +605,18 @@ public:
 
   const std::vector<std::unique_ptr<details::BufferSet>> &GetBuffers() const {
     return client_->GetBuffers(impl_.get());
+  }
+
+  void GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
+                        uint32_t &max_message_size, uint32_t &total_drops) {
+    impl_->GetStatsCounters(total_bytes, total_messages, max_message_size,
+                            total_drops);
+  }
+
+  const ChannelCounters &GetCounters() const { return impl_->GetCounters(); }
+
+  std::string BufferSharedMemoryName(int buffer_index) const {
+    return impl_->BufferSharedMemoryName(buffer_index);
   }
 
   // Register a function to be called when the publisher resizes
@@ -706,6 +733,13 @@ public:
   absl::StatusOr<shared_ptr<T>>
   ReadMessage(ReadMode mode = ReadMode::kReadNext);
 
+  bool AddActiveMessage(int32_t slot_id) {
+    return impl_->AddActiveMessage(impl_->GetSlot(slot_id));
+  }
+  void RemoveActiveMessage(int32_t slot_id) {
+    impl_->RemoveActiveMessage(impl_->GetSlot(slot_id));
+  }
+
   // Find a message given a timestamp.
   absl::StatusOr<Message> FindMessage(uint64_t timestamp) {
     return client_->FindMessage(impl_.get(), timestamp);
@@ -716,7 +750,9 @@ public:
   template <typename T>
   absl::StatusOr<shared_ptr<T>> FindMessage(uint64_t timestamp);
 
-  struct pollfd GetPollFd() const { return client_->GetPollFd(impl_.get()); }
+  struct pollfd GetPollFd() const {
+    return client_->GetPollFd(impl_.get());
+  }
 
   toolbelt::FileDescriptor GetFileDescriptor() const {
     return client_->GetFileDescriptor(impl_.get());
@@ -762,6 +798,10 @@ public:
     return client_->UnregisterMessageCallback(impl_.get());
   }
 
+  void InvokeMessageCallback(Message msg) {
+    client_->InvokeMessageCallback(impl_.get(), std::move(msg));
+  }
+
   absl::Status ProcessAllMessages(ReadMode mode = ReadMode::kReadNext) {
     return client_->ProcessAllMessages(impl_.get(), mode);
   }
@@ -772,6 +812,9 @@ public:
   }
 
   void Trigger() { impl_->Trigger(); }
+  void Untrigger() { impl_->Untrigger(); }
+
+  bool IsPlaceholder() const { return SlotSize() == 0; }
 
   const ChannelCounters &GetCounters() const { return impl_->GetCounters(); }
 
@@ -792,6 +835,8 @@ public:
 
   int VirtualChannelId() const { return impl_->VirtualChannelId(); }
 
+  int ConfiguredVchanId() const { return impl_->ConfiguredVchanId(); }
+
   int NumSubscribers(int vchan_id = -1) const {
     return impl_->NumSubscribers(vchan_id);
   }
@@ -800,13 +845,18 @@ public:
   // subscriber, you can call this.
   void ClearActiveMessage() { impl_->ClearActiveMessage(); }
 
+  void TriggerReliablePublishers() {
+    impl_->TriggerReliablePublishers();
+  }
+
 private:
   friend class Server;
   friend class ClientImpl;
 
   Subscriber(std::shared_ptr<ClientImpl> client,
              std::shared_ptr<details::SubscriberImpl> impl)
-      : client_(client), impl_(impl) {}
+      : client_(client), impl_(impl) {
+      }
 
   absl::StatusOr<Message>
   ReadMessageInternal(ReadMode mode, bool pass_activation, bool clear_trigger) {

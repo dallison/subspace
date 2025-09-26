@@ -6,6 +6,7 @@
 #define _xCLIENT_OPTIONS_H
 
 #include <string>
+#include <functional>
 
 namespace subspace {
 
@@ -23,6 +24,8 @@ namespace subspace {
 // or you can access the struct member directly.
 //
 // Your choice.
+
+class Subscriber;
 
 // Options when creating a publisher.
 struct PublisherOptions {

@@ -279,6 +279,7 @@ ClientImpl::CreatePublisher(const std::string &channel_name, int slot_size,
   options.num_slots = num_slots;
   return CreatePublisher(channel_name, options);
 }
+
 absl::StatusOr<Subscriber>
 ClientImpl::CreateSubscriber(const std::string &channel_name,
                              const SubscriberOptions &opts) {
@@ -358,7 +359,28 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
   // channel->Dump();
 
   channels_.insert(channel);
-  return Subscriber(shared_from_this(), channel);
+  auto sub = Subscriber(shared_from_this(), channel);
+  return sub;
+}
+
+static uint64_t ExpandSlotSize(uint64_t slotSize) {
+    // smaller than 4K, double the size
+    // 4K..16K, times 1.5
+    // 16K..64K, times 1.25
+    // 64K..256K, times 1.125
+    // 256K..1M, times 1.0625
+    // 1M..., times 1.03125
+    static constexpr double multipliers[] = {2.0, 1.5, 1.25, 1.125, 1.0625, 1.03125};
+    static constexpr size_t sizeRanges[] = {4096, 16384, 65536, 262144, 1048576};
+    size_t i = 0;
+    for (; i < std::size(sizeRanges); i++) {
+        if (slotSize <= sizeRanges[i]) {
+            break;
+        }
+    }
+    // i will be the index of the multiplier to use.  It might be one past the
+    // end of the sizeRanges array.
+    return Aligned(uint64_t(double(slotSize) * multipliers[i]));
 }
 
 absl::StatusOr<void *> ClientImpl::GetMessageBuffer(PublisherImpl *publisher,
@@ -372,7 +394,7 @@ absl::StatusOr<void *> ClientImpl::GetMessageBuffer(PublisherImpl *publisher,
     int32_t new_slot_size = slot_size;
     assert(new_slot_size > 0);
     while (new_slot_size <= slot_size || new_slot_size < max_size) {
-      new_slot_size *= 2;
+      new_slot_size = ExpandSlotSize(new_slot_size);
     }
 
     if (absl::Status status = ResizeChannel(publisher, new_slot_size);
