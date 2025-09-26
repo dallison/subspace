@@ -41,9 +41,11 @@ class SubscriberImpl : public ClientChannel {
 public:
   SubscriberImpl(const std::string &name, int num_slots, int channel_id,
                  int subscriber_id, int vchan_id, uint64_t session_id,
-                 std::string type, const SubscriberOptions &options, std::function<bool(Channel*)> reload)
+                 std::string type, const SubscriberOptions &options,
+                 std::function<bool(Channel *)> reload)
       : ClientChannel(name, num_slots, channel_id, vchan_id,
-                      std::move(session_id), std::move(type), std::move(reload)),
+                      std::move(session_id), std::move(type),
+                      std::move(reload)),
         subscriber_id_(subscriber_id), options_(options) {}
 
   std::shared_ptr<SubscriberImpl> shared_from_this() {
@@ -71,12 +73,18 @@ public:
     return num_active_messages_ < options_.MaxActiveMessages();
   }
 
+  // This is the configured virtual channel ID, not the value assigned when the
+  // subscriber is created by the server.  The difference is that the configured
+  // value is normally -1 and this allows the server to pick a vchan ID.  The
+  // use of a configured ID is to allow a multiplexer subscriber to determine
+  // which channel a vchanId corresponds to when it receives messages.
+  int ConfiguredVchanId() const { return options_.vchan_id; }
+
   const ActiveSlot *
   FindUnseenOrdinal(const std::vector<ActiveSlot> &active_slots);
   void PopulateActiveSlots(InPlaceAtomicBitset &bits);
 
-  void ClaimSlot(MessageSlot *slot, int vchan_id,
-                 bool was_newest);
+  void ClaimSlot(MessageSlot *slot, int vchan_id, bool was_newest);
   void RememberOrdinal(uint64_t ordinal, int vchan_id);
   void CollectVisibleSlots(InPlaceAtomicBitset &bits,
                            std::vector<ActiveSlot> &active_slots,
@@ -157,6 +165,14 @@ public:
                                          std::vector<ActiveSlot> &buffer);
 
   void Trigger() { trigger_.Trigger(); }
+  void Untrigger() { trigger_.Clear(); }
+
+  void TriggerReliablePublishers() {
+    std::unique_lock<std::mutex> lock(reliable_publishers_mutex_);
+    for (auto &fd : reliable_publishers_) {
+      fd.Trigger();
+    }
+  }
 
 private:
   friend class ::subspace::ClientImpl;
@@ -190,12 +206,6 @@ private:
     trigger_.SetPollFd(std::move(fd));
   }
   int GetSubscriberId() const { return subscriber_id_; }
-  void TriggerReliablePublishers() {
-    std::unique_lock<std::mutex> lock(reliable_publishers_mutex_);
-    for (auto &fd : reliable_publishers_) {
-      fd.Trigger();
-    }
-  }
 
   MessageSlot *NextSlot() {
     return NextSlot(CurrentSlot(), IsReliable(), subscriber_id_);

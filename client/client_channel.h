@@ -110,6 +110,13 @@ public:
     return p;
   }
 
+  MessageSlot* GetSlot(int32_t id) const {
+    if (id < 0 || id >= num_slots_) {
+      return nullptr;
+    }
+    return &ccb_->slots[id];
+  }
+
   // Get the size associated with the given slot id.
   int SlotSize(int slot_id) const {
     if (ccb_->slots[slot_id].buffer_index < 0 ||
@@ -191,6 +198,10 @@ public:
     has_retirement_triggers_ = true;
   }
 
+    std::string BufferSharedMemoryName(int buffer_index) const {
+    return Channel::BufferSharedMemoryName(session_id_, buffer_index);
+  }
+
 protected:
   void TriggerRetirement(int slot_id);
 
@@ -218,16 +229,11 @@ protected:
   absl::StatusOr<char *> MapBuffer(toolbelt::FileDescriptor &shm_fd,
                                    size_t size, bool read_only);
 
-  std::string BufferSharedMemoryName(int buffer_index) const {
-    return Channel::BufferSharedMemoryName(session_id_, buffer_index);
-  }
-
 #if defined(__APPLE__)
   absl::StatusOr<std::string>
   CreateMacOSSharedMemoryFile(const std::string &filename, off_t size);
 #endif
 
-protected:
   MessageSlot *slot_ = nullptr; // Current slot.
   int vchan_id_ = -1;           // Virtual channel ID.
   uint64_t session_id_;
