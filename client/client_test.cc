@@ -26,19 +26,21 @@ ABSL_FLAG(bool, start_server, true, "Start the subspace server");
 ABSL_FLAG(std::string, server, "", "Path to server executable");
 
 void SignalHandler(int sig) {
-       	fprintf(stderr,"Signal %d", sig);
-	std::cerr.flush();
-	FILE *fp = fopen("/proc/self/maps", "r");
-	for (;;) {
-		int ch = fgetc(fp);
-		if (ch == EOF) {
-			break;
-		}
-		fputc(ch, stderr);
-	}
-	signal(sig, SIG_DFL);
-	raise(sig);
+  fprintf(stderr, "Signal %d", sig);
+  std::cerr.flush();
+  FILE *fp = fopen("/proc/self/maps", "r");
+  for (;;) {
+    int ch = fgetc(fp);
+    if (ch == EOF) {
+      break;
+    }
+    fputc(ch, stderr);
+  }
+  signal(sig, SIG_DFL);
+  raise(sig);
 }
+
+void SigQuitHandler(int signum);
 
 using Publisher = subspace::Publisher;
 using Subscriber = subspace::Subscriber;
@@ -80,8 +82,7 @@ public:
 
     server_ =
         std::make_unique<subspace::Server>(scheduler_, socket_, "", 0, 0,
-                                           /*local=*/true, server_pipe_[1]);
-
+                                           /*local=*/true, server_pipe_[1], 1, true);
     // Start server running in a thread.
     server_thread_ = std::thread([]() {
       absl::Status s = server_->Run();
@@ -120,6 +121,8 @@ public:
     ASSERT_OK(client.Init(Socket()));
   }
 
+  static co::CoroutineScheduler &Scheduler() { return scheduler_; }
+
   static const std::string &Socket() { return socket_; }
 
   static subspace::Server *Server() { return server_.get(); }
@@ -138,14 +141,21 @@ int ClientTest::server_pipe_[2];
 std::unique_ptr<subspace::Server> ClientTest::server_;
 std::thread ClientTest::server_thread_;
 
+void SigQuitHandler(int signum) {
+  ClientTest::Scheduler().Show();
+  signal(signum, SIG_DFL);
+  raise(signum);
+}
+
 TEST_F(ClientTest, InetAddressSupportsAbslHash) {
   struct sockaddr_in addr = {
 #if defined(__APPLE__)
-      .sin_len = sizeof(int),
+    .sin_len = sizeof(int),
 #endif
-      .sin_family = AF_INET,
-      .sin_port = htons(1234),
-      .sin_addr = {.s_addr = htonl(0x12345678)}};
+    .sin_family = AF_INET,
+    .sin_port = htons(1234),
+    .sin_addr = {.s_addr = htonl(0x12345678)}
+  };
 
   EXPECT_TRUE(absl::VerifyTypeImplementsAbslHashCorrectly({
       toolbelt::InetAddress(),
@@ -812,6 +822,41 @@ TEST_F(ClientTest, PublishSingleMessageAndReadWithCallback) {
   ASSERT_OK(status);
 }
 
+
+TEST_F(ClientTest, PublishSingleMessageAndReadWithPlugin) {
+  ASSERT_OK(Server()->LoadPlugin("NOP", "plugins/nop_plugin.so"));
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher("dave6", 256, 10);
+  ASSERT_OK(pub);
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "foobar", 6);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+  ASSERT_OK(pub_status);
+
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("dave6");
+  ASSERT_OK(sub);
+
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(6, msg->length);
+
+  // Another read will get 0.
+  msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(0, msg->length);
+
+  // Read again to make sure we get another 0.
+  // Regression test.
+  msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(0, msg->length);
+  ASSERT_OK(Server()->UnloadPlugin("NOP"));
+}
+
 TEST_F(ClientTest, VirtualPublishSingleMessageAndRead) {
   subspace::Client pub_client;
   subspace::Client sub_client;
@@ -1251,24 +1296,23 @@ TEST_F(ClientTest, PublishConcurrentlyFromOneClientToOneSubscriber) {
   ASSERT_OK(pub_client.Init(Socket()));
   for (int i = 0; i < kNumPublishers; ++i) {
     pubs.emplace_back(*pub_client.CreatePublisher(
-        channel_name, {.slot_size = 256, .num_slots = 2*kNumPublishers + 16}));
+        channel_name,
+        {.slot_size = 256, .num_slots = 2 * kNumPublishers + 16}));
   }
 
   std::vector<std::thread> pub_threads;
   pub_threads.reserve(kNumPublishers);
   for (int i = 0; i < kNumPublishers; ++i) {
-    pub_threads.emplace_back(
-      std::thread([&pubs, i]() {
-        std::array<char, 16> msg = {};
-        auto size = std::snprintf(msg.data(), msg.size(), "M%d", i);
-        auto buffer = pubs[i].GetMessageBuffer(size);
-        std::memcpy(*buffer, msg.data(), size);
-        ASSERT_OK(pubs[i].PublishMessage(size));
-      })
-    );
+    pub_threads.emplace_back(std::thread([&pubs, i]() {
+      std::array<char, 16> msg = {};
+      auto size = std::snprintf(msg.data(), msg.size(), "M%d", i);
+      auto buffer = pubs[i].GetMessageBuffer(size);
+      std::memcpy(*buffer, msg.data(), size);
+      ASSERT_OK(pubs[i].PublishMessage(size));
+    }));
   }
 
-  for (auto& t : pub_threads) {
+  for (auto &t : pub_threads) {
     t.join();
   }
 
@@ -1280,7 +1324,8 @@ TEST_F(ClientTest, PublishConcurrentlyFromOneClientToOneSubscriber) {
     if (size == 0) {
       break;
     }
-    all_recv_msgs.emplace_back(std::string(reinterpret_cast<const char *>(message.buffer), message.length));
+    all_recv_msgs.emplace_back(std::string(
+        reinterpret_cast<const char *>(message.buffer), message.length));
   }
   EXPECT_EQ(all_recv_msgs.size(), kNumPublishers);
   std::sort(all_recv_msgs.begin(), all_recv_msgs.end());
@@ -1298,33 +1343,32 @@ TEST_F(ClientTest, PublishConcurrentlyToOneSubscriber) {
   constexpr int kNumPublishers = 100;
   pub_threads.reserve(kNumPublishers);
   for (int i = 0; i < kNumPublishers; ++i) {
-    pub_threads.emplace_back(
-      std::thread([&channel_name, i]() {
-        // We have a backlog of 10 hardcoded for the subscriber's listen socket.  We will get
-        // a connection refused if we exceed this so use a retry loop with a delay if we get
-        // errors on connection.  Happens on MacOS.
-        subspace::Client pub_client;
-        bool connected = false;
-        for (int i = 0; i < 100; i++) {
-          if (pub_client.Init(Socket()).ok()) {
-            connected = true;
-            break;
-          }
-          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    pub_threads.emplace_back(std::thread([&channel_name, i]() {
+      // We have a backlog of 10 hardcoded for the subscriber's listen socket.
+      // We will get a connection refused if we exceed this so use a retry loop
+      // with a delay if we get errors on connection.  Happens on MacOS.
+      subspace::Client pub_client;
+      bool connected = false;
+      for (int i = 0; i < 100; i++) {
+        if (pub_client.Init(Socket()).ok()) {
+          connected = true;
+          break;
         }
-        ASSERT_TRUE(connected);
-        auto pub = *pub_client.CreatePublisher(
-            channel_name, {.slot_size = 256, .num_slots = 2*kNumPublishers + 16});
-        std::array<char, 16> msg = {};
-        auto size = std::snprintf(msg.data(), msg.size(), "M%d", i);
-        auto buffer = pub.GetMessageBuffer(size);
-        std::memcpy(*buffer, msg.data(), size);
-        ASSERT_OK(pub.PublishMessage(size));
-      })
-    );
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      ASSERT_TRUE(connected);
+      auto pub = *pub_client.CreatePublisher(
+          channel_name,
+          {.slot_size = 256, .num_slots = 2 * kNumPublishers + 16});
+      std::array<char, 16> msg = {};
+      auto size = std::snprintf(msg.data(), msg.size(), "M%d", i);
+      auto buffer = pub.GetMessageBuffer(size);
+      std::memcpy(*buffer, msg.data(), size);
+      ASSERT_OK(pub.PublishMessage(size));
+    }));
   }
 
-  for (auto& t : pub_threads) {
+  for (auto &t : pub_threads) {
     t.join();
   }
 
@@ -1336,7 +1380,8 @@ TEST_F(ClientTest, PublishConcurrentlyToOneSubscriber) {
     if (size == 0) {
       break;
     }
-    all_recv_msgs.emplace_back(std::string(reinterpret_cast<const char *>(message.buffer), message.length));
+    all_recv_msgs.emplace_back(std::string(
+        reinterpret_cast<const char *>(message.buffer), message.length));
   }
   EXPECT_EQ(all_recv_msgs.size(), kNumPublishers);
   std::sort(all_recv_msgs.begin(), all_recv_msgs.end());
@@ -2455,14 +2500,15 @@ TEST_F(ClientTest, ChannelDirectory) {
   ASSERT_OK(s2);
 
   // Subscribe to channel directory.
-  absl::StatusOr<Subscriber> dir_sub = client->CreateSubscriber(
-      "/subspace/ChannelDirectory");
+  absl::StatusOr<Subscriber> dir_sub =
+      client->CreateSubscriber("/subspace/ChannelDirectory");
   ASSERT_OK(dir_sub);
 
-  sleep(1);  // Give some time for directory to be updated.
+  sleep(1); // Give some time for directory to be updated.
 
   // Read the latest channel directory message.
-  absl::StatusOr<subspace::Message> msg = dir_sub->ReadMessage(subspace::ReadMode::kReadNewest);
+  absl::StatusOr<subspace::Message> msg =
+      dir_sub->ReadMessage(subspace::ReadMode::kReadNewest);
   ASSERT_OK(msg);
   ASSERT_NE(0, msg->length);
 
@@ -2499,6 +2545,7 @@ int main(int argc, char **argv) {
 
   signal(SIGSEGV, SignalHandler);
   signal(SIGBUS, SignalHandler);
+  signal(SIGQUIT, SigQuitHandler);
 
   absl::InitializeSymbolizer(argv[0]);
 

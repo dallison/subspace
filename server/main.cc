@@ -32,6 +32,8 @@ ABSL_FLAG(bool, cleanup_filesystem, true, "Cleanup the filesystem on server star
 // Default false on other OSes as it interferes with tests that run multiple servers.
 ABSL_FLAG(bool, cleanup_filesystem, false, "Cleanup the filesystem on server startup");
 #endif
+ABSL_FLAG(std::vector<std::string>, plugins, {},
+          "List of plugins to load");
 
 int main(int argc, char **argv) {
   absl::ParseCommandLine(argc, argv);
@@ -61,6 +63,23 @@ int main(int argc, char **argv) {
   server->SetLogLevel(absl::GetFlag(FLAGS_log_level));
   if (absl::GetFlag(FLAGS_cleanup_filesystem)) {
     server->CleanupFilesystem();
+  }
+
+  // Load the plugins.  Each plugin is a name:path pair.
+  for (const auto &p : absl::GetFlag(FLAGS_plugins)) {
+    auto pos = p.find(':');
+    if (pos == std::string::npos) {
+      fprintf(stderr, "Plugin '%s' is not in name:path format\n", p.c_str());
+      exit(1);
+    }
+    std::string name = p.substr(0, pos);
+    std::string path = p.substr(pos + 1);
+    absl::Status status = server->LoadPlugin(name, path);
+    if (!status.ok()) {
+      fprintf(stderr, "Failed to load plugin %s from %s: %s\n",
+              name.c_str(), path.c_str(), status.ToString().c_str());
+      exit(1);
+    }
   }
 
   absl::Status s = server->Run();

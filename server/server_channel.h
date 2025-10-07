@@ -293,7 +293,7 @@ public:
   // this channel.  This is only used in the server.
   virtual absl::StatusOr<SharedMemoryFds>
   Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
-           int num_slots);
+           int num_slots, int initial_ordinal);
 
   struct CapacityInfo {
     bool capacity_ok;

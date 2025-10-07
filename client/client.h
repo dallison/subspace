@@ -176,7 +176,7 @@ public:
   //
   // These are public so that they can be accessed by std::make_shared.
   // You shouldn't create these yourself - create a Client instead.
-  ClientImpl(co::Coroutine *c = nullptr) : co_(c) {}
+  ClientImpl(const co::Coroutine *c = nullptr) : co_(c) {}
   ~ClientImpl() = default;
 
 private:
@@ -246,13 +246,13 @@ private:
   // client is coroutine-aware, the coroutine will wait.  If it's not,
   // the function will block on a poll until the publisher is triggered.
   absl::Status WaitForReliablePublisher(details::PublisherImpl *publisher,
-                                        co::Coroutine *c = nullptr) {
+                                        const co::Coroutine *c = nullptr) {
     return WaitForReliablePublisher(publisher, std::chrono::nanoseconds(0), c);
   }
 
   absl::Status WaitForReliablePublisher(details::PublisherImpl *publisher,
                                         std::chrono::nanoseconds timeout,
-                                        co::Coroutine *c = nullptr);
+                                        const co::Coroutine *c = nullptr);
 
   // Wait until a reliable publisher can try again to send a message.  If the
   // client is coroutine-aware, the coroutine will wait.  If it's not,
@@ -260,27 +260,27 @@ private:
   absl::StatusOr<int>
   WaitForReliablePublisher(details::PublisherImpl *publisher,
                            const toolbelt::FileDescriptor &fd,
-                           co::Coroutine *c = nullptr) {
+                           const co::Coroutine *c = nullptr) {
     return WaitForReliablePublisher(publisher, fd, std::chrono::nanoseconds(0),
                                     c);
   }
 
   absl::StatusOr<int> WaitForReliablePublisher(
       details::PublisherImpl *publisher, const toolbelt::FileDescriptor &fd,
-      std::chrono::nanoseconds timeout, co::Coroutine *c = nullptr);
+      std::chrono::nanoseconds timeout, const co::Coroutine *c = nullptr);
 
   // Wait until there's a message available to be read by the
   // subscriber.  If the client is coroutine-aware, the coroutine
   // will wait.  If it's not, the function will block on a poll
   // until the subscriber is triggered.
   absl::Status WaitForSubscriber(details::SubscriberImpl *subscriber,
-                                 co::Coroutine *c = nullptr) {
+                                 const co::Coroutine *c = nullptr) {
     return WaitForSubscriber(subscriber, std::chrono::nanoseconds(0), c);
   }
 
   absl::Status WaitForSubscriber(details::SubscriberImpl *subscriber,
                                  std::chrono::nanoseconds timeout,
-                                 co::Coroutine *c = nullptr);
+                                 const co::Coroutine *c = nullptr);
 
   // Wait until there' s a message available to be read by the
   // subscriber.  If the client is coroutine-aware, the coroutine
@@ -288,14 +288,14 @@ private:
   // until the subscriber is triggered.
   absl::StatusOr<int> WaitForSubscriber(details::SubscriberImpl *subscriber,
                                         const toolbelt::FileDescriptor &fd,
-                                        co::Coroutine *c = nullptr) {
+                                        const co::Coroutine *c = nullptr) {
     return WaitForSubscriber(subscriber, fd, std::chrono::nanoseconds(0), c);
   }
 
   absl::StatusOr<int> WaitForSubscriber(details::SubscriberImpl *subscriber,
                                         const toolbelt::FileDescriptor &fd,
                                         std::chrono::nanoseconds timeout,
-                                        co::Coroutine *c = nullptr);
+                                        const co::Coroutine *c = nullptr);
 
   // Read a message from a subscriber.  If there are no available messages
   // the 'length' field of the returned Message will be zero.  The 'buffer'
@@ -430,7 +430,7 @@ private:
 
   // If this is non-nullptr the client is coroutine aware and will cooperate
   // with all other coroutines to share the CPU.
-  co::Coroutine *co_; // Does not own the coroutine.
+  const co::Coroutine *co_; // Does not own the coroutine.
 
   // Call this function when the given subscriber detects a dropped message.
   // This will only really happen when you have an unreliable subscriber
@@ -546,12 +546,12 @@ public:
   // Wait until a reliable publisher can try again to send a message.  If the
   // client is coroutine-aware, the coroutine will wait.  If it's not,
   // the function will block on a poll until the publisher is triggered.
-  absl::Status Wait(co::Coroutine *c = nullptr) {
+  absl::Status Wait(const co::Coroutine *c = nullptr) {
     return client_->WaitForReliablePublisher(impl_.get(), c);
   }
 
   absl::Status Wait(std::chrono::nanoseconds timeout,
-                    co::Coroutine *c = nullptr) {
+                    const co::Coroutine *c = nullptr) {
     return client_->WaitForReliablePublisher(impl_.get(), timeout, c);
   }
 
@@ -562,13 +562,13 @@ public:
   // the wait.  Returns the integer fd value of the file descriptor that
   // triggered the wait.
   absl::StatusOr<int> Wait(const toolbelt::FileDescriptor &fd,
-                           co::Coroutine *c = nullptr) {
+                           const co::Coroutine *c = nullptr) {
     return client_->WaitForReliablePublisher(impl_.get(), fd, c);
   }
 
   absl::StatusOr<int> Wait(const toolbelt::FileDescriptor &fd,
                            std::chrono::nanoseconds timeout,
-                           co::Coroutine *c = nullptr) {
+                           const co::Coroutine *c = nullptr) {
     return client_->WaitForReliablePublisher(impl_.get(), fd, timeout, c);
   }
 
@@ -690,12 +690,12 @@ public:
   // subscriber.  If the client is coroutine-aware, the coroutine
   // will wait.  If it's not, the function will block on a poll
   // until the subscriber is triggered.
-  absl::Status Wait(co::Coroutine *c = nullptr) {
+  absl::Status Wait(const co::Coroutine *c = nullptr) {
     return client_->WaitForSubscriber(impl_.get(), c);
   }
 
   absl::Status Wait(std::chrono::nanoseconds timeout,
-                    co::Coroutine *c = nullptr) {
+                    const co::Coroutine *c = nullptr) {
     return client_->WaitForSubscriber(impl_.get(), timeout, c);
   }
 
@@ -707,13 +707,13 @@ public:
   // the wait.  Returns the integer fd value of the file descriptor that
   // triggered the wait.
   absl::StatusOr<int> Wait(const toolbelt::FileDescriptor &fd,
-                           co::Coroutine *c = nullptr) {
+                           const co::Coroutine *c = nullptr) {
     return client_->WaitForSubscriber(impl_.get(), fd, c);
   }
 
   absl::StatusOr<int> Wait(const toolbelt::FileDescriptor &fd,
                            std::chrono::nanoseconds timeout,
-                           co::Coroutine *c = nullptr) {
+                           const co::Coroutine *c = nullptr) {
     return client_->WaitForSubscriber(impl_.get(), fd, timeout, c);
   }
 
@@ -894,7 +894,7 @@ class Client {
 public:
   static absl::StatusOr<std::shared_ptr<Client>>
   Create(const std::string &server_socket = "/tmp/subspace",
-         const std::string &client_name = "", co::Coroutine *c = nullptr) {
+         const std::string &client_name = "", const co::Coroutine *c = nullptr) {
     auto client = std::make_shared<Client>(c);
     auto status = client->Init(server_socket, client_name);
     if (!status.ok()) {
@@ -903,7 +903,7 @@ public:
     return client;
   }
 
-  Client(co::Coroutine *c = nullptr) : impl_(std::make_shared<ClientImpl>(c)) {}
+  Client(const co::Coroutine *c = nullptr) : impl_(std::make_shared<ClientImpl>(c)) {}
   ~Client() = default;
 
   const std::string &GetName() const { return impl_->GetName(); }

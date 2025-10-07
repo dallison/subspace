@@ -1,0 +1,13 @@
+package(default_visibility = ["//visibility:public"])
+
+cc_binary(
+    name = "nop_plugin.so",
+    srcs = ["nop_plugin.cc"],
+    deps = [
+        "//server:server",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings:str_format",
+    ],
+    linkstatic = False,
+    linkshared = True,
+)

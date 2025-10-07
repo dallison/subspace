@@ -10,7 +10,7 @@ namespace subspace {
 
 ClientHandler::~ClientHandler() { server_->RemoveAllUsersFor(this); }
 
-void ClientHandler::Run(co::Coroutine *c) {
+void ClientHandler::Run() {
   // The data is placed 4 bytes into the buffer.  The first 4
   // bytes of the buffer are used by SendMessage and ReceiveMessage
   // for the length of the data.
@@ -18,7 +18,7 @@ void ClientHandler::Run(co::Coroutine *c) {
   constexpr size_t kSendBufLen = sizeof(buffer_) - sizeof(int32_t);
   for (;;) {
     absl::StatusOr<ssize_t> n_recv =
-        socket_.ReceiveMessage(buffer_, sizeof(buffer_), c);
+        socket_.ReceiveMessage(buffer_, sizeof(buffer_), co::self);
     if (!n_recv.ok()) {
       return;
     }
@@ -38,11 +38,11 @@ void ClientHandler::Run(co::Coroutine *c) {
         return;
       }
       size_t msglen = response.ByteSizeLong();
-      absl::StatusOr<ssize_t> n_sent = socket_.SendMessage(sendbuf, msglen, c);
+      absl::StatusOr<ssize_t> n_sent = socket_.SendMessage(sendbuf, msglen, co::self);
       if (!n_sent.ok()) {
         return;
       }
-      if (absl::Status status = socket_.SendFds(fds, c); !status.ok()) {
+      if (absl::Status status = socket_.SendFds(fds, co::self); !status.ok()) {
         server_->logger_.Log(toolbelt::LogLevel::kError, "%s\n",
                              status.ToString().c_str());
         return;
@@ -108,6 +108,12 @@ void ClientHandler::HandleCreatePublisher(
     std::vector<toolbelt::FileDescriptor> &fds) {
   ServerChannel *channel = server_->FindChannel(req.channel_name());
   if (channel == nullptr) {
+    server_->logger_.Log(toolbelt::LogLevel::kDebug,
+                         "Publisher %s is creating new channel %s with size "
+                         "%d/%d and type length %d (total of %d channels)",
+                         client_name_.c_str(), req.channel_name().c_str(),
+                         req.slot_size(), req.num_slots(), req.type().size(),
+                         server_->GetNumChannels());
     absl::StatusOr<ServerChannel *> ch = server_->CreateChannel(
         req.channel_name(), req.slot_size(), req.num_slots(), req.mux(),
         req.vchan_id(), req.type());
@@ -117,6 +123,12 @@ void ClientHandler::HandleCreatePublisher(
     }
     channel = *ch;
   } else if (channel->IsPlaceholder()) {
+    server_->logger_.Log(
+        toolbelt::LogLevel::kDebug,
+        "Publisher %s is remapping placeholder channel %s with size %d/%d and "
+        "type length %d (total of %d channels)",
+        client_name_.c_str(), req.channel_name().c_str(), req.slot_size(),
+        req.num_slots(), req.type().size(), server_->GetNumChannels());
     // Channel exists, but it's just a placeholder.  Remap the memory now
     // that we know the slots.
     absl::Status status =
@@ -233,6 +245,10 @@ void ClientHandler::HandleCreatePublisher(
     }
   }
 
+  server_->logger_.Log(toolbelt::LogLevel::kDebug,
+                       "Client %s creating publisher on channel %s: VM: %s",
+                       client_name_.c_str(), req.channel_name().c_str(),
+                       GetTotalVM().c_str());
   // Create the publisher.
   absl::StatusOr<PublisherUser *> publisher =
       channel->AddPublisher(this, req.is_reliable(), req.is_local(),
@@ -241,6 +257,7 @@ void ClientHandler::HandleCreatePublisher(
     response->set_error(publisher.status().ToString());
     return;
   }
+  server_->OnNewPublisher(channel->Name(), (*publisher)->GetId());
   server_->SendChannelDirectory();
 
   response->set_channel_id(channel->GetChannelId());
@@ -325,6 +342,11 @@ void ClientHandler::HandleCreateSubscriber(
   ServerChannel *channel = server_->FindChannel(req.channel_name());
   if (channel == nullptr) {
     // No channel exists, map an empty channel.
+    server_->logger_.Log(toolbelt::LogLevel::kDebug,
+                          "Subscriber %s is creating new placeholder channel %s "
+                          "with type length %d (total of %d channels)",
+                          client_name_.c_str(), req.channel_name().c_str(),
+                          req.type().size(), server_->GetNumChannels());
     absl::StatusOr<ServerChannel *> ch = server_->CreateChannel(
         req.channel_name(), 0, 0, req.mux(), req.vchan_id(), req.type());
     if (!ch.ok()) {
@@ -396,6 +418,10 @@ void ClientHandler::HandleCreateSubscriber(
       }
     }
     // Create the subscriber.
+    server_->logger_.Log(toolbelt::LogLevel::kDebug,
+                          "Client %s creating subscriber on channel %s: VM: %s",
+                          client_name_.c_str(), req.channel_name().c_str(),
+                          GetTotalVM().c_str());
     absl::StatusOr<SubscriberUser *> subscriber = channel->AddSubscriber(
         this, req.is_reliable(), req.is_bridge(), req.max_active_messages());
     if (!subscriber.ok()) {
@@ -404,6 +430,8 @@ void ClientHandler::HandleCreateSubscriber(
     }
     sub = *subscriber;
   }
+  server_->OnNewSubscriber(channel->Name(), sub->GetId());
+
   server_->SendChannelDirectory();
   channel->RegisterSubscriber(sub->GetId(), channel->GetVirtualChannelId(),
                               req.subscriber_id() == -1);
@@ -541,4 +569,8 @@ void ClientHandler::HandleRemoveSubscriber(
   channel->RemoveUser(server_, req.subscriber_id());
 }
 
+std::string ClientHandler::GetTotalVM() {
+  uint64_t total_vm = server_->GetVirtualMemoryUsage();
+  return absl::StrFormat("%g MiB", double(total_vm) / (1024.0 * 1024.0));
+}
 } // namespace subspace

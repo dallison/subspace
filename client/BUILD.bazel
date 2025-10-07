@@ -36,6 +36,7 @@ cc_test(
     srcs = ["client_test.cc"],
     data = [
         "//server:subspace_server",
+        "//plugins:nop_plugin.so",
     ],
     deps = [
         ":subspace_client",

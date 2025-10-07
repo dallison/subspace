@@ -11,6 +11,7 @@ cc_library(
         "server.h",
         "client_handler.h",
         "server_channel.h",
+        "plugin.h",
     ],
     deps = [
         "//common:subspace_common",

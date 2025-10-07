@@ -503,7 +503,7 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
 absl::Status
 ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
                                      std::chrono::nanoseconds timeout,
-                                     co::Coroutine *c) {
+                                     const co::Coroutine *c) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -549,7 +549,7 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
                                      const toolbelt::FileDescriptor &fd,
                                      std::chrono::nanoseconds timeout,
 
-                                     co::Coroutine *c) {
+                                     const co::Coroutine *c) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -598,7 +598,7 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
 
 absl::Status ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
                                            std::chrono::nanoseconds timeout,
-                                           co::Coroutine *c) {
+                                           const co::Coroutine *c) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -634,7 +634,7 @@ absl::Status ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
 
 absl::StatusOr<int> ClientImpl::WaitForSubscriber(
     SubscriberImpl *subscriber, const toolbelt::FileDescriptor &fd,
-    std::chrono::nanoseconds timeout, co::Coroutine *c) {
+    std::chrono::nanoseconds timeout, const co::Coroutine *c) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
