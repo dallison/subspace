@@ -71,7 +71,33 @@ public:
   absl::Status UnloadPlugin(const std::string &name);
 
   co::CoroutineScheduler &GetScheduler() { return co_scheduler_; }
-  
+
+  absl::flat_hash_map<std::string, std::unique_ptr<ServerChannel>>& GetChannels() {
+    return channels_;
+  }
+
+  bool ShuttingDown() const { return shutting_down_; }
+
+
+  size_t GetNumChannels() const { return channels_.size(); }
+
+  absl::Status HandleIncomingConnection(toolbelt::UnixSocket &listen_socket);
+
+  // Create a channel in both process and shared memory.  For a placeholder
+  // subscriber, the channel parameters are not known, so slot_size and
+  // num_slots will be zero.
+  absl::StatusOr<ServerChannel *> CreateChannel(const std::string &channel_name,
+                                                int slot_size, int num_slots,
+                                                const std::string &mux,
+                                                int vchan_id, std::string type);
+  absl::StatusOr<ServerChannel *>
+  CreateMultiplexer(const std::string &channel_name, int slot_size,
+                    int num_slots, std::string type);
+  absl::Status RemapChannel(ServerChannel *channel, int slot_size,
+                            int num_slots);
+  ServerChannel *FindChannel(const std::string &channel_name);
+  void RemoveChannel(ServerChannel *channel);
+
 private:
   friend class ClientHandler;
   friend class ServerChannel;
@@ -94,28 +120,10 @@ private:
     std::unique_ptr<PluginInterface> interface;
   };
 
-  void NotifyViaFd(int64_t val);
-  void CreateShutdownTrigger();
-  size_t GetNumChannels() const { return channels_.size(); }
-
-  absl::Status HandleIncomingConnection(toolbelt::UnixSocket &listen_socket);
-
-  // Create a channel in both process and shared memory.  For a placeholder
-  // subscriber, the channel parameters are not known, so slot_size and
-  // num_slots will be zero.
-  absl::StatusOr<ServerChannel *> CreateChannel(const std::string &channel_name,
-                                                int slot_size, int num_slots,
-                                                const std::string &mux,
-                                                int vchan_id, std::string type);
-  absl::StatusOr<ServerChannel *>
-  CreateMultiplexer(const std::string &channel_name, int slot_size,
-                    int num_slots, std::string type);
-  absl::Status RemapChannel(ServerChannel *channel, int slot_size,
-                            int num_slots);
-  ServerChannel *FindChannel(const std::string &channel_name);
-  void RemoveChannel(ServerChannel *channel);
   void RemoveAllUsersFor(ClientHandler *handler);
   void CloseHandler(ClientHandler *handler);
+  void NotifyViaFd(int64_t val);
+  void CreateShutdownTrigger();
   void ListenerCoroutine(toolbelt::UnixSocket &listen_socket);
   void ChannelDirectoryCoroutine();
   void SendChannelDirectory();
