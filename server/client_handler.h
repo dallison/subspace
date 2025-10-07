@@ -25,9 +25,11 @@ public:
 
   // Run the client handler receiver in a coroutine.  Terminates
   // when the connection to the client is closed.
-  void Run(co::Coroutine *c);
+  void Run();
 
 private:
+  std::string GetTotalVM();
+
   absl::Status HandleMessage(const subspace::Request &req,
                              subspace::Response &resp,
                              std::vector<toolbelt::FileDescriptor> &fds);

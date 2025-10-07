@@ -204,9 +204,9 @@ private:
 
 class OrdinalAccumulator {
 public:
-  void Init() {
+  void Init(int v) {
     for (int i = 0; i < kMaxVchanId + 1; i++) {
-      ordinals_[i] = 1;
+      ordinals_[i] = v;
     }
   }
   uint64_t Next(int vchan_id) { return ordinals_[vchan_id + 1]++; }
