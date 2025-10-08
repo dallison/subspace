@@ -23,7 +23,7 @@ cc_library(
         "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/flags:parse",
-        "@coroutines//:co",
+        "@coroutines//co:co",
     ],
 )
 
@@ -34,7 +34,7 @@ cc_binary(
     ],
     deps = [
       ":server",
-      "@coroutines//:co",
+      "@coroutines//co:co",
     ],
     linkopts = select({
         "//:macos_x86_64": [],

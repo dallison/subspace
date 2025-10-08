@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <sys/mman.h>
 #include <sys/poll.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #include <vector>
 
@@ -98,7 +99,7 @@ Server::Server(co::CoroutineScheduler &scheduler,
                int initial_ordinal, bool wait_for_clients)
     : socket_name_(socket_name), interface_(interface),
       discovery_port_(disc_port), discovery_peer_port_(peer_port),
-      local_(local), notify_fd_(notify_fd), co_scheduler_(scheduler),
+      local_(local), notify_fd_(notify_fd), scheduler_(scheduler),
       initial_ordinal_(initial_ordinal), wait_for_clients_(wait_for_clients) {
   CreateShutdownTrigger();
 }
@@ -110,22 +111,26 @@ Server::Server(co::CoroutineScheduler &scheduler,
                bool wait_for_clients)
     : socket_name_(socket_name), interface_(interface), peer_address_(peer),
       discovery_port_(disc_port), discovery_peer_port_(peer_port),
-      local_(local), notify_fd_(notify_fd), co_scheduler_(scheduler),
+      local_(local), notify_fd_(notify_fd), scheduler_(scheduler),
       initial_ordinal_(initial_ordinal), wait_for_clients_(wait_for_clients) {
   CreateShutdownTrigger();
 }
+
 
 Server::~Server() {
   // Clear this before other data members get destroyed.
   client_handlers_.clear();
 }
 
-void Server::Stop() {
-  shutting_down_ = true;
-  if (!wait_for_clients_) {
-    co_scheduler_.Stop();
+void Server::Stop(bool force) {
+  if (shutting_down_) {
     return;
   }
+  if (force || !wait_for_clients_) {
+    scheduler_.Stop();
+    return;
+  }
+  shutting_down_ = true;
   shutdown_trigger_fd_.Trigger();
   NotifyViaFd(kServerWaiting);
 }
@@ -290,9 +295,13 @@ absl::Status Server::Run() {
     return status;
   }
 
-  // Notify listener that the server is ready.
+  // Notify listener that the server is ready.  Do this in a coroutine so that
+  // it executes when we start running.
   if (notify_fd_.Valid()) {
-    NotifyViaFd(kServerReady);
+    scheduler_.Spawn([this]() {
+      NotifyViaFd(kServerReady);
+      OnReady();
+    });
   }
 
   absl::StatusOr<SystemControlBlock *> scb = CreateSystemControlBlock(scb_fd_);
@@ -365,38 +374,36 @@ absl::Status Server::Run() {
   }
 
   // Start the listener coroutine.
-  co_scheduler_.Spawn(
+  scheduler_.Spawn(
       [this, &listen_socket]() { ListenerCoroutine(listen_socket); },
       {.name = "Listener UDS",
        .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
 
   // Start the channel directory coroutine.
-  co_scheduler_.Spawn([this]() { ChannelDirectoryCoroutine(); },
-                      {.name = "Channel directory",
-                       .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+  scheduler_.Spawn([this]() { ChannelDirectoryCoroutine(); },
+                    {.name = "Channel directory",
+                     .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
 
   // Start the channel stats coroutine.
-  co_scheduler_.Spawn([this]() { StatisticsCoroutine(); },
-                      {.name = "Channel stats",
-                       .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+  scheduler_.Spawn([this]() { StatisticsCoroutine(); },
+                    {.name = "Channel stats",
+                     .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
 
   if (!local_) {
     // Start the discovery receiver coroutine.
-    co_scheduler_.Spawn(
-        [this]() { DiscoveryReceiverCoroutine(); },
-        {.name = "Discovery receiver",
-         .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+    scheduler_.Spawn([this]() { DiscoveryReceiverCoroutine(); },
+                      {.name = "Discovery receiver",
+                       .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
 
     // Start the gratuitous Advertiser coroutine.  This sends Advertise messages
     // every 5 seconds.
-    co_scheduler_.Spawn(
-        [this]() { GratuitousAdvertiseCoroutine(); },
-        {.name = "Gratuitous advertiser",
-         .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+    scheduler_.Spawn([this]() { GratuitousAdvertiseCoroutine(); },
+                      {.name = "Gratuitous advertiser",
+                       .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
   }
 
   // Run the coroutine main loop.
-  co_scheduler_.Run();
+  scheduler_.Run();
 
   // Notify listener that we're stopped.
   NotifyViaFd(kServerStopped);
@@ -413,7 +420,7 @@ Server::HandleIncomingConnection(toolbelt::UnixSocket &listen_socket) {
       std::make_unique<ClientHandler>(this, std::move(*s)));
   ClientHandler *handler_ptr = client_handlers_.back().get();
 
-  co_scheduler_.Spawn(
+  scheduler_.Spawn(
       [this, handler_ptr]() {
         handler_ptr->Run();
         CloseHandler(handler_ptr);
@@ -688,7 +695,7 @@ void Server::SendQuery(const std::string &channel_name) {
     return;
   }
   // Spawn a coroutine to send the Query message.
-  co_scheduler_.Spawn(
+  scheduler_.Spawn(
       [this, channel_name]() {
         logger_.Log(toolbelt::LogLevel::kDebug,
                     "Sending Query %s with discovery port %d",
@@ -725,7 +732,7 @@ void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
     return;
   }
   // Spawn a coroutine to send the Publish message.
-  co_scheduler_.Spawn(
+  scheduler_.Spawn(
       [this, channel_name, reliable]() {
         logger_.Log(toolbelt::LogLevel::kDebug,
                     "Sending Advertise %s with discovery port %d",
@@ -924,7 +931,7 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
   // Spawn a coroutine to read from the retirement connection.
   if (notifying_of_retirement) {
     active_retirement_msgs.resize(channel->NumSlots());
-    co_scheduler_.Spawn(
+    scheduler_.Spawn(
         [this, &retirement_listener, &active_retirement_msgs]() {
           return RetirementReceiverCoroutine(retirement_listener,
                                              active_retirement_msgs);
@@ -1283,7 +1290,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
 
     // Add a coroutine to listen for retirement notifications and send them to
     // the socket connected to the other server.
-    co_scheduler_.Spawn(
+    scheduler_.Spawn(
         [this, retirement_fd = std::move(retirement_fd),
          &retirement_transmitter, channel_name]() mutable {
           RetirementCoroutine(channel_name, std::move(retirement_fd),
@@ -1456,7 +1463,7 @@ void Server::RetirementCoroutine(
 
 void Server::SubscribeOverBridge(ServerChannel *channel, bool reliable,
                                  toolbelt::InetAddress publisher) {
-  co_scheduler_.Spawn(
+  scheduler_.Spawn(
       [this, channel, reliable, publisher]() {
         BridgeReceiverCoroutine(channel->Name(), reliable, publisher);
       },
@@ -1495,8 +1502,9 @@ void Server::IncomingAdvertise(const Discovery::Advertise &advertise,
     }
     channel->second->AddBridgedAddress(sender, advertise.reliable());
 
-    int num_pubs, num_subs;
-    channel->second->CountUsers(num_pubs, num_subs);
+    int num_pubs, num_subs, num_bridge_pubs, num_bridge_subs;
+    channel->second->CountUsers(num_pubs, num_subs, num_bridge_pubs,
+                                num_bridge_subs);
     if (num_subs > 0) {
       SubscribeOverBridge(channel->second.get(), advertise.reliable(), sender);
     }
@@ -1551,7 +1559,7 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
     }
 
     bool notify_retirement = !channel->second->GetRetirementFds().empty();
-    co_scheduler_.Spawn(
+    scheduler_.Spawn(
         [this, ch, pub_reliable, sub_reliable,
          subscriber_addr = std::move(subscriber_addr), notify_retirement]() {
           BridgeTransmitterCoroutine(ch, pub_reliable, sub_reliable,
@@ -1626,6 +1634,13 @@ absl::Status Server::UnloadPlugin(const std::string &name) {
   }
   plugins_.erase(it);
   return absl::OkStatus();
+}
+
+void Server::OnReady() {
+  std::lock_guard<std::mutex> lock(plugin_lock_);
+  for (const auto &plugin : plugins_) {
+    plugin->interface->OnReady(*this);
+  }
 }
 
 void Server::OnNewChannel(const std::string &channel_name) {

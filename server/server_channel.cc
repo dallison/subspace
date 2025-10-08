@@ -346,31 +346,21 @@ void ServerChannel::RemoveAllUsersFor(ClientHandler *handler) {
   }
 }
 
-void ServerChannel::CountUsers(int &num_pubs, int &num_subs) const {
-  num_pubs = num_subs = 0;
+void ServerChannel::CountUsers(int &num_pubs, int &num_subs, int &num_bridge_pubs, int &num_bridge_subs) const {
+  num_pubs = num_subs = num_bridge_pubs = num_bridge_subs = 0;
   for (auto &[id, user] : users_) {
     if (user == nullptr) {
       continue;
     }
     if (user->IsPublisher()) {
       num_pubs++;
+      if (user->IsBridge()) {
+        num_bridge_pubs++;
+      }
     } else {
       num_subs++;
-    }
-  }
-}
-
-void ServerChannel::CountBridgeUsers(int &num_pubs, int &num_subs) const {
-  num_pubs = num_subs = 0;
-  for (auto &[id, user] : users_) {
-    if (user == nullptr) {
-      continue;
-    }
-    if (user->IsBridge()) {
-      if (user->IsPublisher()) {
-        num_pubs++;
-      } else {
-        num_subs++;
+      if (user->IsBridge()) {
+        num_bridge_subs++;
       }
     }
   }
@@ -467,8 +457,8 @@ ServerChannel::CapacityInfo ServerChannel::HasSufficientCapacityInternal(
     return CapacityInfo{true, 0, 0, 0};
   }
   // Count number of publishers and subscribers.
-  int num_pubs, num_subs;
-  CountUsers(num_pubs, num_subs);
+  int num_pubs, num_subs, num_bridge_pubs, num_bridge_subs;
+  CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs);
 
   // Add in the total active message maximums.
   int max_active_messages = new_max_active_messages;
@@ -512,10 +502,12 @@ void ServerChannel::GetChannelInfo(subspace::ChannelInfo *info) {
   info->set_num_slots(NumSlots());
   info->set_type(Type());
 
-  int num_pubs, num_subs;
-  CountUsers(num_pubs, num_subs);
+  int num_pubs, num_subs, num_bridge_pubs, num_bridge_subs;
+  CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs);
   info->set_num_pubs(num_pubs);
   info->set_num_subs(num_subs);
+  info->set_num_bridge_pubs(num_bridge_pubs);
+  info->set_num_bridge_subs(num_bridge_subs);
 
   info->set_is_reliable(IsReliable());
   if (IsVirtual()) {
@@ -524,10 +516,6 @@ void ServerChannel::GetChannelInfo(subspace::ChannelInfo *info) {
     info->set_vchan_id(GetVirtualChannelId());
     info->set_mux(vchan->GetMux()->Name());
   }
-
-  CountBridgeUsers(num_pubs, num_subs);
-  info->set_num_bridge_pubs(num_pubs);
-  info->set_num_bridge_subs(num_subs);
 }
 
 void ServerChannel::GetChannelStats(subspace::ChannelStats *stats) {
@@ -542,10 +530,12 @@ void ServerChannel::GetChannelStats(subspace::ChannelStats *stats) {
   stats->set_max_message_size(max_message_size);
   stats->set_total_drops(total_drops);
 
-  int num_pubs, num_subs;
-  CountUsers(num_pubs, num_subs);
+  int num_pubs, num_subs, num_bridge_pubs, num_bridge_subs;
+  CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs);
   stats->set_num_pubs(num_pubs);
   stats->set_num_subs(num_subs);
+  stats->set_num_bridge_pubs(num_bridge_pubs);
+  stats->set_num_bridge_subs(num_bridge_subs);
 }
 
 ChannelCounters &ServerChannel::RecordUpdate(bool is_pub, bool add,

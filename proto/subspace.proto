@@ -161,6 +161,8 @@ message ChannelStats {
   int32 num_subs = 7;
   uint32 max_message_size = 8;
   uint32 total_drops = 9;
+  int32 num_bridge_pubs = 10; // Number of publishers that are bridges.
+  int32 num_bridge_subs = 11; // Number of subscribers that are bridges.
 }
 
 // This is published to the /subspace/Statistics channel.

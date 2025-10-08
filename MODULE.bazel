@@ -31,9 +31,9 @@ http_archive(
 # Coroutines
 http_archive(
     name = "coroutines",
-    integrity = "sha256-bNsNBC4hZscE5gnapyNfyxlsQmR4/hbxrJbNu0FdE+8=",
-    strip_prefix = "co-2.1.4",
-    urls = ["https://github.com/dallison/co/archive/refs/tags/2.1.4.tar.gz"],
+    integrity = "sha256-s7kNp+7E2FsW6LzFzlBQA0GdPhn2HHWqAfTnIlitbDA=",
+    strip_prefix = "co-2.1.5",
+    urls = ["https://github.com/dallison/co/archive/refs/tags/2.1.5.tar.gz"],
 )
 # For local debugging of co coroutine library.
 # bazel_dep(name = "coroutines")

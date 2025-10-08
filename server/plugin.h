@@ -17,6 +17,7 @@ class Server;
 // the current coroutine is in `co::self`.
 struct PluginInterfaceFunctions {
   absl::Status (*onStartup)(Server &s, const std::string& name);
+  void (*onReady)(Server &s);
   void (*onShutdown)();
 
   void (*onNewChannel)(Server &s, const std::string &channel_name);
@@ -39,6 +40,8 @@ public:
   absl::Status OnStartup(Server &s, const std::string& name) {
     return functions_.onStartup(s, name);
   }
+
+  void OnReady(Server &s) { functions_.onReady(s); }
 
   void OnShutdown() { functions_.onShutdown(); }
 
