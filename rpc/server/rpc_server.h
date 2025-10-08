@@ -6,7 +6,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/types/span.h"
 #include "client/client.h"
-#include "coroutine.h"
+#include "co/coroutine.h"
 #include "google/protobuf/any.pb.h"
 #include "toolbelt/logging.h"
 #include "toolbelt/pipe.h"
