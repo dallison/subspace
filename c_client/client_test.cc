@@ -3,7 +3,7 @@
 // See LICENSE file for licensing information.
 
 #include "c_client/subspace.h"
-#include "coroutine.h"
+#include "co/coroutine.h"
 #include "server/server.h"
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"

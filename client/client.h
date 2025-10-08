@@ -13,7 +13,7 @@
 #include "client/publisher.h"
 #include "client/subscriber.h"
 #include "common/channel.h"
-#include "coroutine.h"
+#include "co/coroutine.h"
 #include "toolbelt/fd.h"
 #include "toolbelt/logging.h"
 #include "toolbelt/sockets.h"

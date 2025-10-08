@@ -4,7 +4,7 @@
 #include "client/client.h"
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
-#include "coroutine.h"
+#include "co/coroutine.h"
 #include <csignal>
 #include <inttypes.h>
 
