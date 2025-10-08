@@ -212,8 +212,8 @@ void ClientHandler::HandleCreatePublisher(
     }
   }
 
-  int num_pubs, num_subs;
-  channel->CountUsers(num_pubs, num_subs);
+  int num_pubs, num_subs, num_bridge_pubs, num_bridge_subs;
+  channel->CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs);
   // Check consistency of publisher parameters.
   if (num_pubs > 0) {
     if (req.is_fixed_size() != channel->IsFixedSize()) {

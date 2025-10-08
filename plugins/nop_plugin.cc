@@ -8,6 +8,10 @@ absl::Status OnStartup(subspace::Server &s, const std::string &name) {
              name.c_str());
   return absl::OkStatus();
 }
+void OnReady(subspace::Server &s) {
+  logger.Log(toolbelt::LogLevel::kInfo, "NOP plugin ready\n");
+}
+
 void OnShutdown() {
   logger.Log(toolbelt::LogLevel::kInfo, "NOP plugin shutting down\n");
 }
@@ -50,6 +54,7 @@ extern "C" {
 subspace::PluginInterface *NOP_Create() {
   subspace::PluginInterfaceFunctions functions = {
       .onStartup = nop_plugin::OnStartup,
+      .onReady = nop_plugin::OnReady,
       .onShutdown = nop_plugin::OnShutdown,
       .onNewChannel = nop_plugin::OnNewChannel,
       .onRemoveChannel = nop_plugin::OnRemoveChannel,

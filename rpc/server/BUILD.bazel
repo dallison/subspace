@@ -20,7 +20,7 @@ cc_library(
         "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/flags:parse",
-        "@coroutines//:co",
+        "@coroutines//co:co",
     ],
 )
 
@@ -41,7 +41,7 @@ cc_test(
         "@com_google_absl//absl/status:status_matchers",
         "@com_google_absl//absl/status:statusor",
         "@com_google_googletest//:gtest",
-        "@coroutines//:co",
+        "@coroutines//co:co",
         "//rpc/proto:rpc_test_cc_proto",
     ],
 )

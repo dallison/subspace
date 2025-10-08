@@ -22,8 +22,8 @@
 #include "toolbelt/logging.h"
 #include "toolbelt/triggerfd.h"
 #include <memory>
-#include <vector>
 #include <mutex>
+#include <vector>
 
 namespace subspace {
 
@@ -53,12 +53,14 @@ public:
          const std::string &interface, const toolbelt::InetAddress &peer,
          int disc_port, int peer_port, bool local, int notify_fd = -1,
          int initial_ordinal = 1, bool wait_for_clients = false);
+
   ~Server();
   void SetLogLevel(const std::string &level) { logger_.SetLogLevel(level); }
   absl::Status Run();
-  void Stop();
+  void Stop(bool force = false);
 
   uint64_t GetVirtualMemoryUsage() const;
+  const std::string& GetSocketName() const { return socket_name_; }
 
   uint64_t GetSessionId() const { return session_id_; }
 
@@ -70,14 +72,18 @@ public:
   absl::Status LoadPlugin(const std::string &name, const std::string &path);
   absl::Status UnloadPlugin(const std::string &name);
 
-  co::CoroutineScheduler &GetScheduler() { return co_scheduler_; }
+  co::CoroutineScheduler &GetScheduler() { return scheduler_; }
 
-  absl::flat_hash_map<std::string, std::unique_ptr<ServerChannel>>& GetChannels() {
+  absl::flat_hash_map<std::string, std::unique_ptr<ServerChannel>> &
+  GetChannels() {
     return channels_;
   }
 
-  bool ShuttingDown() const { return shutting_down_; }
+  int GetShutdownTriggerFd() {
+    return shutdown_trigger_fd_.GetPollFd().Fd();
+  }
 
+  bool ShuttingDown() const { return shutting_down_; }
 
   size_t GetNumChannels() const { return channels_.size(); }
 
@@ -164,6 +170,7 @@ private:
   static uint64_t AllocateSessionId() { return toolbelt::Now(); }
 
   // Plugin callers.
+  void OnReady();
   void OnNewChannel(const std::string &channel_name);
   void OnRemoveChannel(const std::string &channel_name);
   void OnNewPublisher(const std::string &channel_name, int publisher_id);
@@ -184,14 +191,16 @@ private:
   int discovery_peer_port_;
   bool local_;
   toolbelt::FileDescriptor notify_fd_;
-  bool shutting_down_ = false;
+
+  // Atomic only because of testing.
+  std::atomic<bool> shutting_down_ = false;
 
   absl::flat_hash_map<std::string, std::unique_ptr<ServerChannel>> channels_;
 
   SystemControlBlock *scb_;
   toolbelt::FileDescriptor scb_fd_;
   toolbelt::BitSet<kMaxChannels> channel_ids_;
-  co::CoroutineScheduler &co_scheduler_;
+  co::CoroutineScheduler &scheduler_;
 
   toolbelt::TriggerFd channel_directory_trigger_fd_;
   toolbelt::InetAddress discovery_addr_;
@@ -208,7 +217,8 @@ private:
 
   bool wait_for_clients_ = false;
 
-  // In tests we will load a plugin while the server is running.  This needs a lock.
+  // In tests we will load a plugin while the server is running.  This needs a
+  // lock.
   std::mutex plugin_lock_;
 
   std::vector<std::unique_ptr<Plugin>> plugins_;
