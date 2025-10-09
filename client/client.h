@@ -12,8 +12,8 @@
 #include "client/options.h"
 #include "client/publisher.h"
 #include "client/subscriber.h"
-#include "common/channel.h"
 #include "co/coroutine.h"
+#include "common/channel.h"
 #include "toolbelt/fd.h"
 #include "toolbelt/logging.h"
 #include "toolbelt/sockets.h"
@@ -29,6 +29,25 @@ namespace subspace {
 enum class ReadMode {
   kReadNext,
   kReadNewest,
+};
+
+struct ChannelInfo {
+    std::string channel_name;
+    int num_publishers;
+    int num_subscribers;
+    int num_bridge_pubs;
+    int num_bridge_subs;
+    std::string type;
+    uint64_t slot_size;
+    int num_slots;
+    bool reliable;
+};
+
+struct ChannelStats {
+    std::string channel_name;
+    uint64_t total_bytes;
+    uint64_t total_messages;
+    uint64_t max_message_size;
 };
 
 template <typename T> class weak_ptr;
@@ -218,6 +237,19 @@ private:
   // for the given channel (publisher or subscriber)
   const ChannelCounters &GetChannelCounters(details::ClientChannel *channel);
 
+  absl::StatusOr<const ChannelCounters>
+  GetChannelCounters(const std::string &channel_name) const;
+
+    absl::StatusOr<const ChannelInfo>
+  GetChannelInfo(const std::string &channelName);
+  absl::StatusOr<const std::vector<ChannelInfo>> GetChannelInfo();
+
+  absl::StatusOr<const ChannelStats>
+  GetChannelStats(const std::string &channelName);
+  absl::StatusOr<const std::vector<ChannelStats>> GetChannelStats();
+
+  absl::StatusOr<bool> ChannelExists(const std::string &channelName);
+
   // Remove publisher and subscriber.
   absl::Status RemovePublisher(details::PublisherImpl *publisher);
   absl::Status RemoveSubscriber(details::SubscriberImpl *subscriber);
@@ -347,8 +379,7 @@ private:
       std::function<void(details::SubscriberImpl *, Message)> callback);
   absl::Status UnregisterMessageCallback(details::SubscriberImpl *subscriber);
 
-  void InvokeMessageCallback(details::SubscriberImpl *subscriber,
-                             Message msg) {
+  void InvokeMessageCallback(details::SubscriberImpl *subscriber, Message msg) {
     auto it = message_callbacks_.find(subscriber);
     if (it != message_callbacks_.end() && it->second) {
       it->second(subscriber, msg);
@@ -380,7 +411,6 @@ private:
   absl::StatusOr<std::vector<Message>>
   GetAllMessages(details::SubscriberImpl *subscriber,
                  ReadMode mode = ReadMode::kReadNext);
-
 
   // Get the most recently received ordinal for the subscriber.
   int64_t GetCurrentOrdinal(details::SubscriberImpl *sub) const;
@@ -640,6 +670,8 @@ public:
     return impl_->NumSubscribers(vchan_id);
   }
 
+  int CurrentSlotId() const { return impl_->CurrentSlotId(); }
+
 private:
   friend class Server;
   friend class ClientImpl;
@@ -845,9 +877,7 @@ public:
   // subscriber, you can call this.
   void ClearActiveMessage() { impl_->ClearActiveMessage(); }
 
-  void TriggerReliablePublishers() {
-    impl_->TriggerReliablePublishers();
-  }
+  void TriggerReliablePublishers() { impl_->TriggerReliablePublishers(); }
 
 private:
   friend class Server;
@@ -855,8 +885,7 @@ private:
 
   Subscriber(std::shared_ptr<ClientImpl> client,
              std::shared_ptr<details::SubscriberImpl> impl)
-      : client_(client), impl_(impl) {
-      }
+      : client_(client), impl_(impl) {}
 
   absl::StatusOr<Message>
   ReadMessageInternal(ReadMode mode, bool pass_activation, bool clear_trigger) {
@@ -894,7 +923,8 @@ class Client {
 public:
   static absl::StatusOr<std::shared_ptr<Client>>
   Create(const std::string &server_socket = "/tmp/subspace",
-         const std::string &client_name = "", const co::Coroutine *c = nullptr) {
+         const std::string &client_name = "",
+         const co::Coroutine *c = nullptr) {
     auto client = std::make_shared<Client>(c);
     auto status = client->Init(server_socket, client_name);
     if (!status.ok()) {
@@ -903,7 +933,8 @@ public:
     return client;
   }
 
-  Client(const co::Coroutine *c = nullptr) : impl_(std::make_shared<ClientImpl>(c)) {}
+  Client(const co::Coroutine *c = nullptr)
+      : impl_(std::make_shared<ClientImpl>(c)) {}
   ~Client() = default;
 
   const std::string &GetName() const { return impl_->GetName(); }
@@ -942,6 +973,31 @@ public:
   // Call with true to turn on some debug information.  Kind of meaningless
   // information unless you know how this works in detail.
   void SetDebug(bool v) { impl_->SetDebug(v); }
+
+  absl::StatusOr<const ChannelCounters>
+  GetChannelCounters(const std::string &channel_name) const {
+    return impl_->GetChannelCounters(channel_name);
+  }
+
+  absl::StatusOr<const ChannelInfo>
+  GetChannelInfo(const std::string &channelName) {
+    return impl_->GetChannelInfo(channelName);
+  }
+  absl::StatusOr<const std::vector<ChannelInfo>> GetChannelInfo() {
+    return impl_->GetChannelInfo();
+  }
+
+  absl::StatusOr<const ChannelStats>
+  GetChannelStats(const std::string &channelName) {
+    return impl_->GetChannelStats(channelName);
+  }
+  absl::StatusOr<const std::vector<ChannelStats>> GetChannelStats() {
+    return impl_->GetChannelStats();
+  }
+
+  absl::StatusOr<bool> ChannelExists(const std::string &channelName) {
+    return impl_->ChannelExists(channelName);
+  }
 
 private:
   std::shared_ptr<ClientImpl> impl_;

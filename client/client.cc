@@ -4,6 +4,7 @@
 
 #include "client/client.h"
 #include "absl/strings/str_format.h"
+#include "client.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
@@ -204,8 +205,8 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
   std::shared_ptr<PublisherImpl> channel = std::make_shared<PublisherImpl>(
       channel_name, opts.num_slots, pub_resp.channel_id(),
       pub_resp.publisher_id(), pub_resp.vchan_id(), session_id_,
-      pub_resp.type(), opts, [this](Channel* c) {
-        return CheckReload(static_cast<ClientChannel*>(c));
+      pub_resp.type(), opts, [this](Channel *c) {
+        return CheckReload(static_cast<ClientChannel *>(c));
       });
 
   SharedMemoryFds channel_fds(std::move(fds[pub_resp.ccb_fd_index()]),
@@ -233,8 +234,8 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
 
   if (!opts.IsReliable()) {
     // A publisher needs a slot.  Allocate one.
-    MessageSlot *slot = channel->FindFreeSlotUnreliable(
-        channel->GetPublisherId());
+    MessageSlot *slot =
+        channel->FindFreeSlotUnreliable(channel->GetPublisherId());
     if (slot == nullptr) {
       return absl::InternalError("No slot available for publisher");
     }
@@ -320,8 +321,8 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
   std::shared_ptr<SubscriberImpl> channel = std::make_shared<SubscriberImpl>(
       channel_name, sub_resp.num_slots(), sub_resp.channel_id(),
       sub_resp.subscriber_id(), sub_resp.vchan_id(), session_id_,
-      sub_resp.type(), opts, [this](Channel* c) {
-        return CheckReload(static_cast<ClientChannel*>(c));
+      sub_resp.type(), opts, [this](Channel *c) {
+        return CheckReload(static_cast<ClientChannel *>(c));
       });
 
   channel->SetNumSlots(sub_resp.num_slots());
@@ -364,23 +365,24 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
 }
 
 static uint64_t ExpandSlotSize(uint64_t slotSize) {
-    // smaller than 4K, double the size
-    // 4K..16K, times 1.5
-    // 16K..64K, times 1.25
-    // 64K..256K, times 1.125
-    // 256K..1M, times 1.0625
-    // 1M..., times 1.03125
-    static constexpr double multipliers[] = {2.0, 1.5, 1.25, 1.125, 1.0625, 1.03125};
-    static constexpr size_t sizeRanges[] = {4096, 16384, 65536, 262144, 1048576};
-    size_t i = 0;
-    for (; i < std::size(sizeRanges); i++) {
-        if (slotSize <= sizeRanges[i]) {
-            break;
-        }
+  // smaller than 4K, double the size
+  // 4K..16K, times 1.5
+  // 16K..64K, times 1.25
+  // 64K..256K, times 1.125
+  // 256K..1M, times 1.0625
+  // 1M..., times 1.03125
+  static constexpr double multipliers[] = {2.0,   1.5,    1.25,
+                                           1.125, 1.0625, 1.03125};
+  static constexpr size_t sizeRanges[] = {4096, 16384, 65536, 262144, 1048576};
+  size_t i = 0;
+  for (; i < std::size(sizeRanges); i++) {
+    if (slotSize <= sizeRanges[i]) {
+      break;
     }
-    // i will be the index of the multiplier to use.  It might be one past the
-    // end of the sizeRanges array.
-    return Aligned(uint64_t(double(slotSize) * multipliers[i]));
+  }
+  // i will be the index of the multiplier to use.  It might be one past the
+  // end of the sizeRanges array.
+  return Aligned(uint64_t(double(slotSize) * multipliers[i]));
 }
 
 absl::StatusOr<void *> ClientImpl::GetMessageBuffer(PublisherImpl *publisher,
@@ -422,8 +424,8 @@ absl::StatusOr<void *> ClientImpl::GetMessageBuffer(PublisherImpl *publisher,
     if (publisher->NumSubscribers(publisher->VirtualChannelId()) == 0) {
       return nullptr;
     }
-    MessageSlot *slot = publisher->FindFreeSlotReliable(
-        publisher->GetPublisherId());
+    MessageSlot *slot =
+        publisher->FindFreeSlotReliable(publisher->GetPublisherId());
     if (slot == nullptr) {
       return nullptr;
     }
@@ -759,8 +761,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
 
   // Allocate a new active message for the slot.
   auto msg = subscriber->SetActiveMessage(
-      new_slot->message_size, new_slot,
-      subscriber->GetCurrentBufferAddress(),
+      new_slot->message_size, new_slot, subscriber->GetCurrentBufferAddress(),
       subscriber->CurrentOrdinal(), subscriber->Timestamp(), new_slot->vchan_id,
       is_activation);
 
@@ -771,9 +772,8 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     // Subscriber does not have a slot now but the slot it had is still active.
   } else {
     // We have a slot, claim it.
-    subscriber->ClaimSlot(
-        new_slot,
-        subscriber->VirtualChannelId(), mode == ReadMode::kReadNewest);
+    subscriber->ClaimSlot(new_slot, subscriber->VirtualChannelId(),
+                          mode == ReadMode::kReadNewest);
   }
   auto ret_msg = Message(msg);
   if (subscriber->IsBridge()) {
@@ -821,8 +821,7 @@ ClientImpl::FindMessageInternal(SubscriberImpl *subscriber,
     // Not found.
     return Message();
   }
-  return Message(new_slot->message_size,
-                 subscriber->GetCurrentBufferAddress(),
+  return Message(new_slot->message_size, subscriber->GetCurrentBufferAddress(),
                  subscriber->CurrentOrdinal(), subscriber->Timestamp(),
                  subscriber->VirtualChannelId(), false, new_slot->id);
 }
@@ -855,7 +854,7 @@ struct pollfd ClientImpl::GetPollFd(SubscriberImpl *subscriber) const {
 }
 
 struct pollfd ClientImpl::GetPollFd(PublisherImpl *publisher) const {
-  static struct pollfd fd{.fd = -1, .events = POLLIN};
+  static struct pollfd fd { .fd = -1, .events = POLLIN };
   if (!publisher->IsReliable()) {
     return fd;
   }
@@ -887,7 +886,8 @@ int64_t ClientImpl::GetCurrentOrdinal(SubscriberImpl *sub) const {
 bool ClientImpl::CheckReload(ClientChannel *channel) {
   auto reloaded = ReloadBuffersIfNecessary(channel);
   if (!reloaded.ok()) {
-    std::cerr << "Error reloading buffers for channel " << channel->Name() << ": " << reloaded.status() << std::endl;
+    std::cerr << "Error reloading buffers for channel " << channel->Name()
+              << ": " << reloaded.status() << std::endl;
     return false;
   }
   return *reloaded;
@@ -1069,8 +1069,8 @@ ClientImpl::ReloadReliablePublishersIfNecessary(SubscriberImpl *subscriber) {
 // is created.  This is to ensure that the reliable subscribers see
 // on message and thus keep a reference to it.
 absl::Status ClientImpl::ActivateReliableChannel(PublisherImpl *publisher) {
-  MessageSlot *slot = publisher->FindFreeSlotReliable(
-      publisher->GetPublisherId());
+  MessageSlot *slot =
+      publisher->FindFreeSlotReliable(publisher->GetPublisherId());
   if (slot == nullptr) {
     return absl::InternalError(
         absl::StrFormat("Channel %s has no free slots", publisher->Name()));
@@ -1176,8 +1176,166 @@ absl::Status ClientImpl::RemoveSubscriber(SubscriberImpl *subscriber) {
   return RemoveChannel(subscriber);
 }
 
+absl::StatusOr<const ChannelCounters>
+ClientImpl::GetChannelCounters(const std::string &channel_name) const {
+  // TODO: find a better way to search for a channel.
+  for (auto it = channels_.begin(); it != channels_.end(); ++it) {
+    if ((*it)->Name() == channel_name) {
+      return (*it)->GetCounters();
+    }
+  }
+  return absl::InternalError(
+      absl::StrFormat("Channel %s doesn't exist", channel_name));
+}
+
 const ChannelCounters &ClientImpl::GetChannelCounters(ClientChannel *channel) {
   return channel->GetCounters();
+}
+
+absl::StatusOr<const ChannelInfo>
+ClientImpl::GetChannelInfo(const std::string &channel) {
+  if (absl::Status status = CheckConnected(); !status.ok()) {
+    return status;
+  }
+  Request req;
+  auto *cmd = req.mutable_get_channel_info();
+  cmd->set_channel_name(channel);
+
+  // Send request to server and wait for response.
+  Response response;
+  std::vector<toolbelt::FileDescriptor> fds;
+  if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
+      !status.ok()) {
+    return status;
+  }
+
+  auto &resp = response.get_channel_info();
+  if (!resp.error().empty()) {
+    return absl::InternalError(resp.error());
+  }
+  // There will be one channel information in the response.
+  if (resp.channels_size() != 1) {
+    return absl::InternalError("Invalid response for getChannelInfo");
+  }
+  ChannelInfo result;
+  const ChannelInfoProto &info = resp.channels()[0];
+  result.channel_name = info.name();
+  result.num_publishers = info.num_pubs();
+  result.num_subscribers = info.num_subs();
+  result.num_bridge_pubs = info.num_bridge_pubs();
+  result.num_bridge_subs = info.num_bridge_subs();
+  result.reliable = info.is_reliable();
+  result.type = info.type();
+  result.slot_size = info.slot_size();
+  result.num_slots = info.num_slots();
+  return result;
+}
+
+absl::StatusOr<const std::vector<ChannelInfo>> ClientImpl::GetChannelInfo() {
+  if (absl::Status status = CheckConnected(); !status.ok()) {
+    return status;
+  }
+  Request req;
+  [[maybe_unused]] auto cmd = req.mutable_get_channel_info();
+
+  // Send request to server and wait for response.
+  Response response;
+  std::vector<toolbelt::FileDescriptor> fds;
+  if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
+      !status.ok()) {
+    return status;
+  }
+  auto &resp = response.get_channel_info();
+  if (!resp.error().empty()) {
+    return absl::InternalError(resp.error());
+  }
+  std::vector<ChannelInfo> r;
+  for (auto &info : resp.channels()) {
+    ChannelInfo result;
+    result.channel_name = info.name();
+    result.num_publishers = info.num_pubs();
+    result.num_subscribers = info.num_subs();
+    result.num_bridge_pubs = info.num_bridge_pubs();
+    result.num_bridge_subs = info.num_bridge_subs();
+    result.reliable = info.is_reliable();
+    result.type = info.type();
+    result.slot_size = info.slot_size();
+    result.num_slots = info.num_slots();
+    r.push_back(result);
+  }
+  return r;
+}
+
+absl::StatusOr<bool> ClientImpl::ChannelExists(const std::string &channelName) {
+  if (absl::Status status = CheckConnected(); !status.ok()) {
+    return status;
+  }
+  absl::StatusOr<const ChannelInfo> info = GetChannelInfo(channelName);
+  return info.ok();
+}
+
+absl::StatusOr<const ChannelStats>
+ClientImpl::GetChannelStats(const std::string &channel) {
+  if (absl::Status status = CheckConnected(); !status.ok()) {
+    return status;
+  }
+  Request req;
+  auto *cmd = req.mutable_get_channel_stats();
+  cmd->set_channel_name(channel);
+
+  // Send request to server and wait for response.
+  Response response;
+  std::vector<toolbelt::FileDescriptor> fds;
+  if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
+      !status.ok()) {
+    return status;
+  }
+  auto &resp = response.get_channel_stats();
+  if (!resp.error().empty()) {
+    return absl::InternalError(resp.error());
+  }
+  // There will be one channel information in the response.
+  if (resp.channels_size() != 1) {
+    return absl::InternalError("Invalid response for getChannelStats");
+  }
+  ChannelStats result;
+  const ChannelStatsProto &stats = resp.channels()[0];
+  result.channel_name = stats.channel_name();
+  result.total_bytes = stats.total_bytes();
+  result.total_messages = stats.total_messages();
+  result.max_message_size = stats.max_message_size();
+  return result;
+}
+
+absl::StatusOr<const std::vector<ChannelStats>> ClientImpl::GetChannelStats() {
+  if (absl::Status status = CheckConnected(); !status.ok()) {
+    return status;
+  }
+
+  Request req;
+  [[maybe_unused]] auto cmd = req.mutable_get_channel_stats();
+
+  // Send request to server and wait for response.
+  Response response;
+  std::vector<toolbelt::FileDescriptor> fds;
+  if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
+      !status.ok()) {
+    return status;
+  }
+  auto &resp = response.get_channel_stats();
+  if (!resp.error().empty()) {
+    return absl::InternalError(resp.error());
+  }
+  std::vector<ChannelStats> r;
+  for (auto &stats : resp.channels()) {
+    ChannelStats result;
+    result.channel_name = stats.channel_name();
+    result.total_bytes = stats.total_bytes();
+    result.total_messages = stats.total_messages();
+    result.max_message_size = stats.max_message_size();
+    r.push_back(result);
+  }
+  return r;
 }
 
 absl::Status ClientImpl::ResizeChannel(PublisherImpl *publisher,

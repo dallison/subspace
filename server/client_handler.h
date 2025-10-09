@@ -57,6 +57,12 @@ private:
   void HandleRemoveSubscriber(const subspace::RemoveSubscriberRequest &req,
                               subspace::RemoveSubscriberResponse *response,
                               std::vector<toolbelt::FileDescriptor> &fds);
+  void HandleGetChannelInfo(const subspace::GetChannelInfoRequest &req,
+                            subspace::GetChannelInfoResponse *response,
+                            std::vector<toolbelt::FileDescriptor> &fds);
+  void HandleGetChannelStats(const subspace::GetChannelStatsRequest &req,
+                             subspace::GetChannelStatsResponse *response,
+                             std::vector<toolbelt::FileDescriptor> &fds);
   Server *server_;
   toolbelt::UnixSocket socket_;
   char buffer_[kMaxMessage];
