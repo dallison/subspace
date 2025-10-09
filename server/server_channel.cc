@@ -496,7 +496,7 @@ absl::Status ServerChannel::CapacityError(const CapacityInfo &info) const {
       (info.max_active_messages == 1 ? "" : "s"), info.slots_needed + 1));
 }
 
-void ServerChannel::GetChannelInfo(subspace::ChannelInfo *info) {
+void ServerChannel::GetChannelInfo(subspace::ChannelInfoProto *info) {
   info->set_name(Name());
   info->set_slot_size(SlotSize());
   info->set_num_slots(NumSlots());
@@ -518,7 +518,7 @@ void ServerChannel::GetChannelInfo(subspace::ChannelInfo *info) {
   }
 }
 
-void ServerChannel::GetChannelStats(subspace::ChannelStats *stats) {
+void ServerChannel::GetChannelStats(subspace::ChannelStatsProto *stats) {
   stats->set_channel_name(Name());
   uint64_t total_bytes, total_messages;
   uint32_t max_message_size, total_drops;

@@ -126,6 +126,8 @@ private:
     std::unique_ptr<PluginInterface> interface;
   };
 
+  void ForeachChannel(std::function<void(ServerChannel*)> func);
+
   void RemoveAllUsersFor(ClientHandler *handler);
   void CloseHandler(ClientHandler *handler);
   void NotifyViaFd(int64_t val);

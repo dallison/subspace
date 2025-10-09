@@ -104,6 +104,25 @@ message RemoveSubscriberRequest {
 
 message RemoveSubscriberResponse { string error = 1; }
 
+
+message GetChannelInfoRequest {
+  string channel_name = 1; // Empty for all channels.
+}
+
+message GetChannelInfoResponse {
+  string error = 1;
+  repeated ChannelInfoProto channels = 2;
+}
+
+message GetChannelStatsRequest {
+  string channel_name = 1; // Empty for all channels.
+}
+
+message GetChannelStatsResponse {
+  string error = 1;
+  repeated ChannelStatsProto channels = 2;
+}
+
 message Request {
   oneof request {
     InitRequest init = 1;
@@ -112,6 +131,8 @@ message Request {
     GetTriggersRequest get_triggers = 4;
     RemovePublisherRequest remove_publisher = 5;
     RemoveSubscriberRequest remove_subscriber = 6;
+    GetChannelInfoRequest get_channel_info = 9;
+    GetChannelStatsRequest get_channel_stats = 10;
   }
 }
 
@@ -123,12 +144,14 @@ message Response {
     GetTriggersResponse get_triggers = 4;
     RemovePublisherResponse remove_publisher = 5;
     RemoveSubscriberResponse remove_subscriber = 6;
+    GetChannelInfoResponse get_channel_info = 9;
+    GetChannelStatsResponse get_channel_stats = 10;
   }
 }
 
 // These messages are carried on Subspace channels published by
 // the server.
-message ChannelInfo {
+message ChannelInfoProto {
   string name = 1;
   int32 slot_size = 2;
   int32 num_slots = 3;
@@ -148,10 +171,10 @@ message ChannelInfo {
 // This is published to the /subspace/ChannelDirectory channel.
 message ChannelDirectory {
   string server_id = 1;
-  repeated ChannelInfo channels = 2;
+  repeated ChannelInfoProto channels = 2;
 }
 
-message ChannelStats {
+message ChannelStatsProto {
   string channel_name = 1;
   int64 total_bytes = 2;
   int64 total_messages = 3;
@@ -169,7 +192,7 @@ message ChannelStats {
 message Statistics {
   string server_id = 1;
   int64 timestamp = 2;
-  repeated ChannelStats channels = 3;
+  repeated ChannelStatsProto channels = 3;
 }
 
 message ChannelAddress {
@@ -295,10 +318,10 @@ message RpcResponse {
   string error = 1;               // Error message if any.
   google.protobuf.Any result = 2; // Data returned by the server.
   int32 session_id = 3;           // Session ID for this response.
-  int32 request_id = 4;           // Unique ID for this response, matches request.
-  uint64 client_id = 5;           // Client ID making the request.
-  bool is_last = 6;               // Whether this is the last response in a stream.
-  bool is_cancelled = 7;          // Whether this response is for a cancelled request.
+  int32 request_id = 4;  // Unique ID for this response, matches request.
+  uint64 client_id = 5;  // Client ID making the request.
+  bool is_last = 6;      // Whether this is the last response in a stream.
+  bool is_cancelled = 7; // Whether this response is for a cancelled request.
 }
 
 // This is sent to cancel a streaming method.

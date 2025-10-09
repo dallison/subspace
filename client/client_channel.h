@@ -64,6 +64,9 @@ public:
         vchan_id_(vchan_id), session_id_(std::move(session_id)) {}
   virtual ~ClientChannel() = default;
   MessageSlot *CurrentSlot() const { return slot_; }
+  int32_t CurrentSlotId() const {
+    return slot_ != nullptr ? slot_->id : -1;
+  }
   const ChannelCounters &GetCounters() const {
     return GetScb()->counters[GetChannelId()];
   }

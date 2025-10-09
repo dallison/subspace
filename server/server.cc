@@ -197,6 +197,12 @@ void Server::NotifyViaFd(int64_t val) {
   }
 }
 
+void Server::ForeachChannel(std::function<void(ServerChannel*)> func) {
+    for (auto& channel : channels_) {
+        func(channel.second.get());
+    }
+}
+
 void Server::CleanupAfterSession() {
   std::string session_shm_file_prefix =
       "subspace_." + std::to_string(session_id_);

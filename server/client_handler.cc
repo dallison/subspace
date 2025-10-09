@@ -4,6 +4,7 @@
 
 #include "server/client_handler.h"
 #include "absl/strings/str_format.h"
+#include "client_handler.h"
 #include "server/server.h"
 
 namespace subspace {
@@ -85,6 +86,13 @@ ClientHandler::HandleMessage(const subspace::Request &req,
   case subspace::Request::kRemoveSubscriber:
     HandleRemoveSubscriber(req.remove_subscriber(),
                            resp.mutable_remove_subscriber(), fds);
+    break;
+
+  case subspace::Request::kGetChannelInfo:
+    HandleGetChannelInfo(req.get_channel_info(), resp.mutable_get_channel_info(), fds);
+    break;
+  case subspace::Request::kGetChannelStats:
+    HandleGetChannelStats(req.get_channel_stats(), resp.mutable_get_channel_stats(), fds);
     break;
 
   case subspace::Request::REQUEST_NOT_SET:
@@ -567,6 +575,50 @@ void ClientHandler::HandleRemoveSubscriber(
     return;
   }
   channel->RemoveUser(server_, req.subscriber_id());
+}
+
+void ClientHandler::HandleGetChannelInfo(
+    const subspace::GetChannelInfoRequest &req,
+    subspace::GetChannelInfoResponse *response,
+    std::vector<toolbelt::FileDescriptor> &fds) {
+    if (req.channel_name().empty()) {
+        // All channels.
+        auto result = response->mutable_channels();
+
+        server_->ForeachChannel([result](ServerChannel* channel) {
+            channel->GetChannelInfo(result->Add());
+        });
+        return;
+    }
+    ServerChannel* channel = server_->FindChannel(req.channel_name());
+    if (channel == nullptr) {
+        response->set_error(absl::StrFormat("No such channel %s", req.channel_name()));
+        return;
+    }
+    auto info = response->mutable_channels();
+    channel->GetChannelInfo(info->Add());
+}
+
+void ClientHandler::HandleGetChannelStats(
+    const subspace::GetChannelStatsRequest &req,
+    subspace::GetChannelStatsResponse *response,
+    std::vector<toolbelt::FileDescriptor> &fds) {
+   if (req.channel_name().empty()) {
+        // All channels.
+        auto result = response->mutable_channels();
+
+        server_->ForeachChannel([result](ServerChannel* channel) {
+            channel->GetChannelStats(result->Add());
+        });
+        return;
+    }
+    ServerChannel* channel = server_->FindChannel(req.channel_name());
+    if (channel == nullptr) {
+        response->set_error(absl::StrFormat("No such channel %s", req.channel_name()));
+        return;
+    }
+    auto info = response->mutable_channels();
+    channel->GetChannelStats(info->Add());
 }
 
 std::string ClientHandler::GetTotalVM() {
