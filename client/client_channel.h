@@ -43,6 +43,11 @@ namespace subspace {
 
 class ClientImpl;
 
+enum class BufferMapMode {
+  kReadOnly,
+  kReadWrite,
+};
+
 namespace details {
 
 struct BufferSet {
@@ -179,6 +184,8 @@ public:
     return nullptr;
   }
 
+  virtual BufferMapMode MapMode() const = 0;
+
   bool BuffersChanged() const {
     return ccb_->num_buffers != static_cast<int>(buffers_.size());
   }
@@ -230,7 +237,7 @@ protected:
   absl::StatusOr<size_t> GetBufferSize(toolbelt::FileDescriptor &shm_fd,
                                        int buffer_index) const;
   absl::StatusOr<char *> MapBuffer(toolbelt::FileDescriptor &shm_fd,
-                                   size_t size, bool read_only);
+                                   size_t size, BufferMapMode mode);
 
 #if defined(__APPLE__)
   absl::StatusOr<std::string>

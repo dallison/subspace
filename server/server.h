@@ -54,7 +54,7 @@ public:
          int disc_port, int peer_port, bool local, int notify_fd = -1,
          int initial_ordinal = 1, bool wait_for_clients = false);
 
-  ~Server();
+  virtual ~Server();
   void SetLogLevel(const std::string &level) { logger_.SetLogLevel(level); }
   absl::Status Run();
   void Stop(bool force = false);
@@ -72,7 +72,7 @@ public:
   absl::Status LoadPlugin(const std::string &name, const std::string &path);
   absl::Status UnloadPlugin(const std::string &name);
 
-  co::CoroutineScheduler &GetScheduler() { return scheduler_; }
+  virtual co::CoroutineScheduler &GetScheduler() { return scheduler_; }
 
   absl::flat_hash_map<std::string, std::unique_ptr<ServerChannel>> &
   GetChannels() {
@@ -114,9 +114,6 @@ private:
     Plugin(const std::string &n, void *h, std::unique_ptr<PluginInterface> i)
         : name(n), handle(h), interface(std::move(i)) {}
     ~Plugin() {
-      if (interface) {
-        interface->OnShutdown();
-      }
       if (handle) {
         dlclose(handle);
       }

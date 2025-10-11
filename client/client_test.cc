@@ -280,7 +280,7 @@ TEST_F(ClientTest, TooManyVirtualPublishers) {
   constexpr int kMuxCapacity = 10;
 
   std::vector<Publisher> pubs;
-  for (int i = 0; i < kMuxCapacity - 2; i++) {
+  for (int i = 0; i < kMuxCapacity - 1; i++) {
     absl::StatusOr<Publisher> pub = client.CreatePublisher(
         "dave0", 256, 10, {.type = "foobar", .mux = "mainmux"});
     ASSERT_OK(pub);
@@ -415,7 +415,7 @@ TEST_F(ClientTest, TooManyVirtualSubscribers) {
 
   // 6 subscribers.
   std::vector<Subscriber> subs;
-  for (int i = 0; i < kNumSlots - 4; i++) {
+  for (int i = 0; i < kNumSlots - 3; i++) {
     absl::StatusOr<Subscriber> sub =
         client.CreateSubscriber("dave0", {.mux = "foobar"});
     ASSERT_OK(sub);
@@ -2520,7 +2520,7 @@ TEST_F(ClientTest, ChannelDirectory) {
   bool found_chan1 = false;
   bool found_chan2 = false;
   for (int i = 0; i < dir.channels_size(); i++) {
-    const subspace::ChannelInfo &info = dir.channels(i);
+    const subspace::ChannelInfoProto &info = dir.channels(i);
     if (info.name() == "chan1") {
       found_chan1 = true;
       ASSERT_EQ(256, info.slot_size());

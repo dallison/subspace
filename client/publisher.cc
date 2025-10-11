@@ -3,6 +3,7 @@
 // See LICENSE file for licensing information.
 
 #include "client/publisher.h"
+#include "client_channel.h"
 #include "toolbelt/clock.h"
 
 namespace subspace {
@@ -35,7 +36,7 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
         absl::StatusOr<char *> addr;
         current_slot_size = BufferSizeToSlotSize(*size);
         if (current_slot_size > 0) {
-          addr = MapBuffer(*shm_fd, *size, /*read_only=*/false);
+          addr = MapBuffer(*shm_fd, *size, BufferMapMode::kReadWrite);
           if (!addr.ok()) {
             return addr.status();
           }
@@ -50,7 +51,7 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
         // We successfully created the /dev/shm file.
         bcb_->sizes[buffers_.size()].store(final_buffer_size,
                                            std::memory_order_relaxed);
-        auto addr = MapBuffer(*shm_fd, final_buffer_size, /*read_only=*/false);
+        auto addr = MapBuffer(*shm_fd, final_buffer_size, BufferMapMode::kReadWrite);
         if (!addr.ok()) {
           return addr.status();
         }

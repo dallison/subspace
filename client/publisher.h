@@ -42,11 +42,13 @@ public:
         return retirement_fd_;
     }
 
+
 private:
   friend class ::subspace::ClientImpl;
 
   bool IsPublisher() const override { return true; }
   bool IsBridge() const override { return options_.IsBridge(); }
+  BufferMapMode MapMode() const override { return BufferMapMode::kReadWrite; }
 
   std::string ResolvedName() const override {
     return IsVirtual() ? options_.mux : Name();

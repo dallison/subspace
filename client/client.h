@@ -14,6 +14,7 @@
 #include "client/subscriber.h"
 #include "co/coroutine.h"
 #include "common/channel.h"
+#include "subscriber.h"
 #include "toolbelt/fd.h"
 #include "toolbelt/logging.h"
 #include "toolbelt/sockets.h"
@@ -878,6 +879,14 @@ public:
   void ClearActiveMessage() { impl_->ClearActiveMessage(); }
 
   void TriggerReliablePublishers() { impl_->TriggerReliablePublishers(); }
+
+  bool AtomicIncRefCount(int slot_id, int inc) {
+    MessageSlot* slot = impl_->GetSlot(slot_id);
+    if (slot != nullptr) {
+      return impl_->AtomicIncRefCount(slot, IsReliable(), inc, slot->ordinal, slot->vchan_id, false);
+    }
+    return false;
+  }
 
 private:
   friend class Server;

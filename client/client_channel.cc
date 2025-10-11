@@ -113,7 +113,7 @@ bool ClientChannel::ValidateSlotBuffer(MessageSlot *slot) {
 absl::Status ClientChannel::AttachBuffers() {
   // NOTE: the num_buffers variable in the CCB is atomic and could change while
   // we are in or after we are done with this loop.
-  bool map_read_only = IsSubscriber() && !IsBridge();
+  BufferMapMode mode = MapMode();
   int num_buffers = ccb_->num_buffers;
   while (buffers_.size() < size_t(num_buffers)) {
     // We need to open the next buffer in the list.  The buffer index is
@@ -151,7 +151,7 @@ absl::Status ClientChannel::AttachBuffers() {
     uint64_t slot_size = BufferSizeToSlotSize(*size);
     if (slot_size > 0) {
       // Map the shared memory buffer.
-      addr = MapBuffer(*shm_fd, *size, map_read_only);
+      addr = MapBuffer(*shm_fd, *size, mode);
       if (!addr.ok()) {
         return addr.status();
       }
@@ -313,8 +313,8 @@ ClientChannel::GetBufferSize(toolbelt::FileDescriptor &shm_fd,
 
 absl::StatusOr<char *>
 ClientChannel::MapBuffer(toolbelt::FileDescriptor &shm_fd, size_t size,
-                         bool read_only) {
-  int prot = read_only ? PROT_READ : (PROT_READ | PROT_WRITE);
+                         BufferMapMode mode) {
+  int prot = mode == BufferMapMode::kReadOnly ? PROT_READ : (PROT_READ | PROT_WRITE);
   void *p = MapMemory(shm_fd.Fd(), size, prot, "buffers");
   if (p == MAP_FAILED) {
     return absl::InternalError(

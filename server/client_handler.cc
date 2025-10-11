@@ -39,7 +39,8 @@ void ClientHandler::Run() {
         return;
       }
       size_t msglen = response.ByteSizeLong();
-      absl::StatusOr<ssize_t> n_sent = socket_.SendMessage(sendbuf, msglen, co::self);
+      absl::StatusOr<ssize_t> n_sent =
+          socket_.SendMessage(sendbuf, msglen, co::self);
       if (!n_sent.ok()) {
         return;
       }
@@ -89,10 +90,12 @@ ClientHandler::HandleMessage(const subspace::Request &req,
     break;
 
   case subspace::Request::kGetChannelInfo:
-    HandleGetChannelInfo(req.get_channel_info(), resp.mutable_get_channel_info(), fds);
+    HandleGetChannelInfo(req.get_channel_info(),
+                         resp.mutable_get_channel_info(), fds);
     break;
   case subspace::Request::kGetChannelStats:
-    HandleGetChannelStats(req.get_channel_stats(), resp.mutable_get_channel_stats(), fds);
+    HandleGetChannelStats(req.get_channel_stats(),
+                          resp.mutable_get_channel_stats(), fds);
     break;
 
   case subspace::Request::REQUEST_NOT_SET:
@@ -232,16 +235,35 @@ void ClientHandler::HandleCreatePublisher(
       return;
     }
 
-    // We check only the number of slots since the slot size can change
-    // over time.
-    if ((req.is_fixed_size() && channel->SlotSize() != req.slot_size()) ||
-        channel->NumSlots() != req.num_slots()) {
+    int current_num_slots = channel->NumSlots();
+
+    bool slot_size_changed =
+        channel->SlotSize() != 0 && req.slot_size() > channel->SlotSize();
+    bool num_slots_changed = req.num_slots() > current_num_slots;
+    if (num_slots_changed) {
       response->set_error(absl::StrFormat(
-          "Inconsistent publisher parameters for channel %s: "
-          "existing: %d/%d, new: %d/%d",
-          req.channel_name(), channel->SlotSize(), channel->NumSlots(),
-          req.slot_size(), req.num_slots()));
+          "Failed to add publisher to %s with more slots (%d) than the current "
+          "number (%d)",
+          req.channel_name(), req.num_slots(), current_num_slots));
       return;
+    }
+
+    if (slot_size_changed) {
+      if (slot_size_changed) {
+        if (channel->IsFixedSize()) {
+          // Fixed size channels cannot change size.
+          response->set_error(absl::StrFormat(
+              "Failed to add publisher to fixed size channel %s with different "
+              "slot size (%d) than the current size (%d)",
+              req.channel_name(), req.slot_size(), channel->SlotSize()));
+          return;
+        }
+      }
+      server_->logger_.Log(
+          toolbelt::LogLevel::kDebug,
+          "Publisher %s is resizing channel %s buffers from %d bytes to %d",
+          client_name_.c_str(), channel->Name().c_str(), channel->SlotSize(),
+          req.slot_size());
     }
 
     if (channel->IsLocal() != req.is_local()) {
@@ -351,10 +373,10 @@ void ClientHandler::HandleCreateSubscriber(
   if (channel == nullptr) {
     // No channel exists, map an empty channel.
     server_->logger_.Log(toolbelt::LogLevel::kDebug,
-                          "Subscriber %s is creating new placeholder channel %s "
-                          "with type length %d (total of %d channels)",
-                          client_name_.c_str(), req.channel_name().c_str(),
-                          req.type().size(), server_->GetNumChannels());
+                         "Subscriber %s is creating new placeholder channel %s "
+                         "with type length %d (total of %d channels)",
+                         client_name_.c_str(), req.channel_name().c_str(),
+                         req.type().size(), server_->GetNumChannels());
     absl::StatusOr<ServerChannel *> ch = server_->CreateChannel(
         req.channel_name(), 0, 0, req.mux(), req.vchan_id(), req.type());
     if (!ch.ok()) {
@@ -427,9 +449,9 @@ void ClientHandler::HandleCreateSubscriber(
     }
     // Create the subscriber.
     server_->logger_.Log(toolbelt::LogLevel::kDebug,
-                          "Client %s creating subscriber on channel %s: VM: %s",
-                          client_name_.c_str(), req.channel_name().c_str(),
-                          GetTotalVM().c_str());
+                         "Client %s creating subscriber on channel %s: VM: %s",
+                         client_name_.c_str(), req.channel_name().c_str(),
+                         GetTotalVM().c_str());
     absl::StatusOr<SubscriberUser *> subscriber = channel->AddSubscriber(
         this, req.is_reliable(), req.is_bridge(), req.max_active_messages());
     if (!subscriber.ok()) {
@@ -581,44 +603,46 @@ void ClientHandler::HandleGetChannelInfo(
     const subspace::GetChannelInfoRequest &req,
     subspace::GetChannelInfoResponse *response,
     std::vector<toolbelt::FileDescriptor> &fds) {
-    if (req.channel_name().empty()) {
-        // All channels.
-        auto result = response->mutable_channels();
+  if (req.channel_name().empty()) {
+    // All channels.
+    auto result = response->mutable_channels();
 
-        server_->ForeachChannel([result](ServerChannel* channel) {
-            channel->GetChannelInfo(result->Add());
-        });
-        return;
-    }
-    ServerChannel* channel = server_->FindChannel(req.channel_name());
-    if (channel == nullptr) {
-        response->set_error(absl::StrFormat("No such channel %s", req.channel_name()));
-        return;
-    }
-    auto info = response->mutable_channels();
-    channel->GetChannelInfo(info->Add());
+    server_->ForeachChannel([result](ServerChannel *channel) {
+      channel->GetChannelInfo(result->Add());
+    });
+    return;
+  }
+  ServerChannel *channel = server_->FindChannel(req.channel_name());
+  if (channel == nullptr) {
+    response->set_error(
+        absl::StrFormat("No such channel %s", req.channel_name()));
+    return;
+  }
+  auto info = response->mutable_channels();
+  channel->GetChannelInfo(info->Add());
 }
 
 void ClientHandler::HandleGetChannelStats(
     const subspace::GetChannelStatsRequest &req,
     subspace::GetChannelStatsResponse *response,
     std::vector<toolbelt::FileDescriptor> &fds) {
-   if (req.channel_name().empty()) {
-        // All channels.
-        auto result = response->mutable_channels();
+  if (req.channel_name().empty()) {
+    // All channels.
+    auto result = response->mutable_channels();
 
-        server_->ForeachChannel([result](ServerChannel* channel) {
-            channel->GetChannelStats(result->Add());
-        });
-        return;
-    }
-    ServerChannel* channel = server_->FindChannel(req.channel_name());
-    if (channel == nullptr) {
-        response->set_error(absl::StrFormat("No such channel %s", req.channel_name()));
-        return;
-    }
-    auto info = response->mutable_channels();
-    channel->GetChannelStats(info->Add());
+    server_->ForeachChannel([result](ServerChannel *channel) {
+      channel->GetChannelStats(result->Add());
+    });
+    return;
+  }
+  ServerChannel *channel = server_->FindChannel(req.channel_name());
+  if (channel == nullptr) {
+    response->set_error(
+        absl::StrFormat("No such channel %s", req.channel_name()));
+    return;
+  }
+  auto info = response->mutable_channels();
+  channel->GetChannelStats(info->Add());
 }
 
 std::string ClientHandler::GetTotalVM() {

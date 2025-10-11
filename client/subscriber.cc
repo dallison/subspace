@@ -20,8 +20,11 @@ static inline bool VirtualChannelIdMatch(MessageSlot *slot, int vchan_id) {
 }
 
 bool SubscriberImpl::AddActiveMessage(MessageSlot *slot) {
+  // std::cerr << "adding active message " << slot->id << " " << slot->ordinal
+  //           << "\n";
   int old = num_active_messages_.fetch_add(1);
   if (old >= options_.MaxActiveMessages() && !IsBridge()) {
+    // std::cerr << "exceeded max active messages\n";
     num_active_messages_.fetch_sub(1);
     return false;
   }
@@ -44,7 +47,6 @@ void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
 		      // message.
                       TriggerRetirement(slot->bridged_slot_id);
                     });
-
   if (num_active_messages_-- == options_.MaxActiveMessages()) {
     Trigger();
     if (IsReliable()) {

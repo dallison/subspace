@@ -131,6 +131,9 @@ void Server::Stop(bool force) {
     return;
   }
   shutting_down_ = true;
+  for (auto& plugin: plugins_) {
+    plugin->interface->OnShutdown();
+  }
   shutdown_trigger_fd_.Trigger();
   NotifyViaFd(kServerWaiting);
 }
@@ -591,9 +594,10 @@ void Server::ChannelDirectoryCoroutine() {
   absl::Status status = client.Init(socket_name_);
   if (!status.ok()) {
     logger_.Log(
-        toolbelt::LogLevel::kFatal,
+        toolbelt::LogLevel::kError,
         "Failed to initialize Subspace client for channel directory: %s",
         status.ToString().c_str());
+        return;
   }
   constexpr int kDirectorySlotSize = 128 * 1024 - sizeof(MessagePrefix);
   constexpr int kDirectoryNumSlots = 32;
@@ -602,9 +606,10 @@ void Server::ChannelDirectoryCoroutine() {
       "/subspace/ChannelDirectory", kDirectorySlotSize, kDirectoryNumSlots,
       PublisherOptions().SetType("subspace.ChannelDirectory"));
   if (!channel_directory.ok()) {
-    logger_.Log(toolbelt::LogLevel::kFatal,
+    logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to create channel directory channel: %s",
                 channel_directory.status().ToString().c_str());
+    return;
   }
   while (!shutting_down_) {
     co::Wait(channel_directory_trigger_fd_.GetPollFd().Fd(), POLLIN);
@@ -645,9 +650,10 @@ void Server::StatisticsCoroutine() {
   Client client(co::self);
   absl::Status status = client.Init(socket_name_);
   if (!status.ok()) {
-    logger_.Log(toolbelt::LogLevel::kFatal,
+    logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to initialize Subspace client for statistics: %s",
                 status.ToString().c_str());
+    return;
   }
   constexpr int kStatsSlotSize = 8192 - sizeof(MessagePrefix);
   constexpr int kStatsNumSlots = 32;
@@ -656,9 +662,10 @@ void Server::StatisticsCoroutine() {
       "/subspace/Statistics", kStatsSlotSize, kStatsNumSlots,
       PublisherOptions().SetType("subspace.Statistics"));
   if (!pub.ok()) {
-    logger_.Log(toolbelt::LogLevel::kFatal,
+    logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to create statistics channel: %s",
                 pub.status().ToString().c_str());
+                return;
   }
 
   constexpr int kPeriodSecs = 2;

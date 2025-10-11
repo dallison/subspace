@@ -346,7 +346,9 @@ void ServerChannel::RemoveAllUsersFor(ClientHandler *handler) {
   }
 }
 
-void ServerChannel::CountUsers(int &num_pubs, int &num_subs, int &num_bridge_pubs, int &num_bridge_subs) const {
+void ServerChannel::CountUsers(int &num_pubs, int &num_subs,
+                               int &num_bridge_pubs,
+                               int &num_bridge_subs) const {
   num_pubs = num_subs = num_bridge_pubs = num_bridge_subs = 0;
   for (auto &[id, user] : users_) {
     if (user == nullptr) {
@@ -452,9 +454,9 @@ bool ServerChannel::IsBridgeSubscriber() const {
 }
 
 ServerChannel::CapacityInfo ServerChannel::HasSufficientCapacityInternal(
-    int initial_value, int new_max_active_messages) const {
+    int new_max_active_messages) const {
   if (NumSlots() == 0) {
-    return CapacityInfo{true, 0, 0, 0};
+    return CapacityInfo{true, 0, 0, 0, 0};
   }
   // Count number of publishers and subscribers.
   int num_pubs, num_subs, num_bridge_pubs, num_bridge_subs;
@@ -471,15 +473,14 @@ ServerChannel::CapacityInfo ServerChannel::HasSufficientCapacityInternal(
       max_active_messages += sub->MaxActiveMessages() - 1;
     }
   }
-  int slots_needed =
-      initial_value + num_pubs + num_subs + max_active_messages + 1;
+  int slots_needed = num_pubs + num_subs + max_active_messages + 1;
   return CapacityInfo{slots_needed <= NumSlots() - 1, num_pubs, num_subs,
                       max_active_messages, slots_needed};
 }
 
 absl::Status
 ServerChannel::HasSufficientCapacity(int new_max_active_messages) const {
-  auto info = HasSufficientCapacityInternal(0, new_max_active_messages);
+  auto info = HasSufficientCapacityInternal(new_max_active_messages);
   if (info.capacity_ok) {
     return absl::OkStatus();
   }
@@ -516,6 +517,31 @@ void ServerChannel::GetChannelInfo(subspace::ChannelInfoProto *info) {
     info->set_vchan_id(GetVirtualChannelId());
     info->set_mux(vchan->GetMux()->Name());
   }
+}
+
+std::vector<ResizeInfo> ServerChannel::GetResizeInfo() const {
+  std::vector<ResizeInfo> info;
+  // Derive the resize information from the bcb contents.  Since the server
+  // isn't aware of resize operations we have to derive the information.
+  if (bcb_ == nullptr || ccb_ == nullptr) {
+    // No buffers, no resizes.
+    return info;
+  }
+  uint64_t previous_buffer_size = 0;
+  for (int i = 0; i < ccb_->num_buffers; i++) {
+    if (previous_buffer_size == 0) {
+      previous_buffer_size = bcb_->sizes[i];
+      continue;
+    }
+    ResizeInfo resize_info;
+
+    resize_info.new_slot_size = BufferSizeToSlotSize(bcb_->sizes[i]);
+    resize_info.old_slot_size = BufferSizeToSlotSize(previous_buffer_size);
+    previous_buffer_size = bcb_->sizes[i];
+    info.push_back(resize_info);
+  }
+  scb_->counters[GetChannelId()].num_resizes = info.size();
+  return info;
 }
 
 void ServerChannel::GetChannelStats(subspace::ChannelStatsProto *stats) {
@@ -591,32 +617,36 @@ void ChannelMultiplexer::RemoveVirtualChannel(VirtualChannel *vchan) {
   virtual_channels_.erase(vchan);
 }
 
-absl::Status
-ChannelMultiplexer::HasSufficientCapacity(int new_max_active_messages) const {
-  // Check the real pubs and subs on the multiplexer.
-  auto info = HasSufficientCapacityInternal(0, new_max_active_messages);
-  if (!info.capacity_ok) {
-    return CapacityError(info);
-  }
-
-  // Check the virtual channels.  We keep track of the current number of slots
-  // needed and this is incremented each time we process a virtual channel.
-  int slots_needed = info.slots_needed;
-  for (auto vchan : virtual_channels_) {
-    auto vinfo = vchan->HasSufficientCapacityInternal(slots_needed,
-                                                      new_max_active_messages);
-    if (!vinfo.capacity_ok) {
-      return CapacityError(vinfo);
-    }
-    slots_needed = vinfo.slots_needed;
-  }
-  return absl::OkStatus();
-}
-
 VirtualChannel::~VirtualChannel() {
   mux_->RemoveVirtualChannel(this);
   if (mux_->IsEmpty()) {
     server_.RemoveChannel(mux_);
   }
+}
+
+void ChannelMultiplexer::CountUsers(int &num_pubs, int &num_subs,
+                                    int &num_bridge_pubs,
+                                    int &num_bridge_subs) const {
+  int total_pubs = 0;
+  int total_subs = 0;
+  int total_bridge_pubs = 0;
+  int total_bridge_subs = 0;
+
+  for (auto vchan : virtual_channels_) {
+    int vchan_pubs, vchan_subs, vchan_bridge_pubs, vchan_bridge_subs;
+    vchan->GetUserCount(vchan_pubs, vchan_subs, vchan_bridge_pubs,
+                        vchan_bridge_subs);
+    total_pubs += vchan_pubs;
+    total_subs += vchan_subs;
+    total_bridge_pubs += vchan_bridge_pubs;
+    total_bridge_subs += vchan_bridge_subs;
+  }
+  // Add the counts from the multiplexer itself.
+  ServerChannel::CountUsers(num_pubs, num_subs, num_bridge_pubs,
+                            num_bridge_subs);
+  num_pubs += total_pubs;
+  num_subs += total_subs;
+  num_bridge_pubs += total_bridge_pubs;
+  num_bridge_subs += total_bridge_subs;
 }
 } // namespace subspace

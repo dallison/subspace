@@ -144,6 +144,7 @@ struct ChannelCounters {
   uint16_t num_reliable_pubs; // Current number of reliable publishers.
   uint16_t num_subs;          // Current number of subscribers.
   uint16_t num_reliable_subs; // Current number of reliable subscribers.
+  uint16_t num_resizes;       // Number of times channel has been resized.
 };
 
 struct SystemControlBlock {
