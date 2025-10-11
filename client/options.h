@@ -185,6 +185,12 @@ struct SubscriberOptions {
     return *this;
   }
 
+  bool ReadWrite() const { return read_write; }
+  SubscriberOptions &SetReadWrite(bool v) {
+    read_write = v;
+    return *this;
+  }
+
   bool reliable = false;
   bool bridge = false;
   std::string type;
@@ -192,6 +198,7 @@ struct SubscriberOptions {
   bool log_dropped_messages = true;
   bool pass_activation = false; // If true, the subscriber will pass activation
                                 // messages to the user.
+  bool read_write = false;
 
   std::string mux;
   int vchan_id = -1; // If -1, server will assign.

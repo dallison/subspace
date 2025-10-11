@@ -182,6 +182,12 @@ private:
     uint64_t last_ordinal_seen = 0;
   };
 
+  BufferMapMode MapMode() const override {
+    return options_.IsBridge() || options_.ReadWrite()
+               ? BufferMapMode::kReadWrite
+               : BufferMapMode::kReadOnly;
+  }
+
   bool IsSubscriber() const override { return true; }
   bool IsBridge() const override { return options_.IsBridge(); }
 

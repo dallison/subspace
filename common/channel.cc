@@ -157,7 +157,6 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
       // This is a special case where the vchan_id is invalid.
       ref_vchan_id = -1;
     }
-
     if (ref_ord != 0 && ordinal != 0 && ref_vchan_id != vchan_id) {
       return false;
     }
@@ -175,6 +174,9 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
     }
     uint64_t new_ref = BuildRefsBitField(ref_ord, ref_vchan_id, retired_refs) |
                        (new_reliable_refs << kReliableRefCountShift) | new_refs;
+                      if (new_ref == -1ULL) {
+                        abort();
+                      }
     if (slot->refs.compare_exchange_weak(ref, new_ref,
                                          std::memory_order_relaxed)) {
       // std::cerr << slot->id << " retired_refs: " << retired_refs
