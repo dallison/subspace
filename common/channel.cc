@@ -174,14 +174,18 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
     }
     uint64_t new_ref = BuildRefsBitField(ref_ord, ref_vchan_id, retired_refs) |
                        (new_reliable_refs << kReliableRefCountShift) | new_refs;
-                      if (new_ref == -1ULL) {
-                        abort();
-                      }
+    if (new_ref == -1ULL) {
+      abort();
+    }
     if (slot->refs.compare_exchange_weak(ref, new_ref,
                                          std::memory_order_relaxed)) {
-      // std::cerr << slot->id << " retired_refs: " << retired_refs
-      //           << " num subs: " << NumSubscribers(vchan_id) << std::endl;
-      if (retired_refs >= NumSubscribers(ref_vchan_id)) {
+      // std::cerr << slot->id << " retire: " << retire
+      //           << " retired_refs: " << retired_refs
+      //           << " num subs: " << NumSubscribers(vchan_id)
+      //           << " new_refs: " << new_refs
+      //           << " new_reliable_refs: " << new_reliable_refs << std::endl;
+      if (new_refs == 0 && new_reliable_refs == 0 &&
+          retired_refs >= NumSubscribers(ref_vchan_id)) {
         // All subscribers have seen the slot, retire it.
         RetiredSlots().Set(slot->id);
         if (retire_callback) {
@@ -272,7 +276,8 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
       if (refs == (kPubOwned | uint64_t(owner))) {
         // Owned by this publisher, clear slot.
         slot->ordinal = 0;
-        slot->refs = 0;       // Sequentially consistent because we've changed the ordinal too.
+        slot->refs =
+            0; // Sequentially consistent because we've changed the ordinal too.
 
         // Clear the slot in all the subscriber bitsets.
         ccb_->subscribers.Traverse([this, slot](int sub_id) {
@@ -304,8 +309,9 @@ Channel::MacOsSharedMemoryName(const std::string &shadow_file) {
   struct stat st;
   int e = ::stat(shadow_file.c_str(), &st);
   if (e == -1) {
-    return absl::InternalError(absl::StrFormat(
-        "Failed to determine MacOS shm name for %s: %s", shadow_file, strerror(errno)));
+    return absl::InternalError(
+        absl::StrFormat("Failed to determine MacOS shm name for %s: %s",
+                        shadow_file, strerror(errno)));
   }
   // Use the inode number (unique per file) to make the shm file name.
   return absl::StrFormat("subspace_%d", st.st_ino);
