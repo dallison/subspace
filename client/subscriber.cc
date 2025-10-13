@@ -33,7 +33,7 @@ bool SubscriberImpl::AddActiveMessage(MessageSlot *slot) {
 
 void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
   // std::cerr << this << " remove active message " << slot->id << " "
-  //           << slot->ordinal << "\n";
+  //           << slot->ordinal << " refs " << std::hex << slot->refs.load() << std::dec << "\n";
   slot->sub_owners.Clear(subscriber_id_);
   AtomicIncRefCount(slot, IsReliable(), -1, slot->ordinal, slot->vchan_id, true,
                     [this, slot]() {

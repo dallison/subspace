@@ -387,16 +387,32 @@ static uint64_t ExpandSlotSize(uint64_t slotSize) {
 
 absl::StatusOr<void *> ClientImpl::GetMessageBuffer(PublisherImpl *publisher,
                                                     int32_t max_size) {
+                                                      auto span_or_status = GetMessageBufferSpan(publisher, max_size);
+  if (!span_or_status.ok()) {
+    return span_or_status.status();
+  }
+  if (absl::Span<std::byte> span = span_or_status.value();
+      !span.empty()) {
+    return span.data();
+  }
+  return nullptr;
+}
+
+absl::StatusOr<absl::Span<std::byte>>
+ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int32_t max_size) {
+
   if (publisher->IsReliable()) {
     publisher->ClearPollFd();
   }
 
   int32_t slot_size = publisher->SlotSize();
+  size_t span_size = size_t(slot_size);
   if (max_size != -1 && max_size > slot_size) {
     int32_t new_slot_size = slot_size;
     assert(new_slot_size > 0);
     while (new_slot_size <= slot_size || new_slot_size < max_size) {
       new_slot_size = ExpandSlotSize(new_slot_size);
+      span_size = size_t(new_slot_size);
     }
 
     if (absl::Status status = ResizeChannel(publisher, new_slot_size);
@@ -422,12 +438,12 @@ absl::StatusOr<void *> ClientImpl::GetMessageBuffer(PublisherImpl *publisher,
     // to stop the publisher taking all the slots.  An incoming subscriber
     // would miss all those messages and that's not reliable.
     if (publisher->NumSubscribers(publisher->VirtualChannelId()) == 0) {
-      return nullptr;
+      return absl::Span<std::byte>();
     }
     MessageSlot *slot =
         publisher->FindFreeSlotReliable(publisher->GetPublisherId());
     if (slot == nullptr) {
-      return nullptr;
+      return absl::Span<std::byte>();
     }
     publisher->SetSlot(slot);
   }
@@ -437,7 +453,7 @@ absl::StatusOr<void *> ClientImpl::GetMessageBuffer(PublisherImpl *publisher,
     return absl::InternalError(
         absl::StrFormat("Channel %s has no buffer", publisher->Name()));
   }
-  return buffer;
+  return absl::Span<std::byte>(reinterpret_cast<std::byte *>(buffer), span_size);
 }
 
 absl::StatusOr<const Message>

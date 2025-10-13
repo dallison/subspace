@@ -79,6 +79,18 @@ struct Message {
     active_message->Release();
     active_message.reset();
   }
+
+  void Reset() {
+    active_message.reset();
+    length = 0;
+    buffer = nullptr;
+    ordinal = 0;
+    timestamp = 0;
+    vchan_id = -1;
+    is_activation = false;
+    slot_id = -1;
+  }
+  
   std::shared_ptr<ActiveMessage> active_message;
   size_t length = 0;
   const void *buffer = nullptr;
