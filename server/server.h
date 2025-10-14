@@ -59,6 +59,11 @@ public:
   absl::Status Run();
   void Stop(bool force = false);
 
+  // The machine name can be used to distinguish between multiple servers
+  // running on the same computer.
+  void SetMachineName(std::string name) { machine_name_ = std::move(name); }
+  const std::string& MachineName() const { return machine_name_; }
+
   uint64_t GetVirtualMemoryUsage() const;
   const std::string& GetSocketName() const { return socket_name_; }
 
@@ -222,6 +227,7 @@ private:
 
   std::vector<std::unique_ptr<Plugin>> plugins_;
   toolbelt::TriggerFd shutdown_trigger_fd_;
+  std::string machine_name_;
 };
 
 } // namespace subspace

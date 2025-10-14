@@ -65,7 +65,6 @@ private:
                              std::vector<toolbelt::FileDescriptor> &fds);
   Server *server_;
   toolbelt::UnixSocket socket_;
-  char buffer_[kMaxMessage];
   std::string client_name_;
 };
 

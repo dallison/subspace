@@ -461,7 +461,6 @@ private:
 
   toolbelt::UnixSocket socket_;
   toolbelt::FileDescriptor scb_fd_; // System control block memory fd.
-  char buffer_[kMaxMessage];        // Buffer for comms with server over UDS.
 
   // The client owns all the publishers and subscribers.
   absl::flat_hash_set<std::shared_ptr<details::ClientChannel>> channels_;
@@ -861,7 +860,9 @@ public:
   void Trigger() { impl_->Trigger(); }
   void Untrigger() { impl_->Untrigger(); }
 
-  bool IsPlaceholder() const { return SlotSize() == 0; }
+  bool IsPlaceholder() const {
+    return impl_->IsPlaceholder();
+  }
 
   const ChannelCounters &GetCounters() const { return impl_->GetCounters(); }
 

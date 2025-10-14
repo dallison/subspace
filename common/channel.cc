@@ -189,6 +189,8 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
         // All subscribers have seen the slot, retire it.
         RetiredSlots().Set(slot->id);
         if (retire_callback) {
+          // std::cerr << "Calling retire callback for slot " << slot->id
+          //           << std::endl;
           retire_callback();
         }
       }
@@ -216,6 +218,7 @@ void MessageSlot::Dump(std::ostream &os) const {
   os << " ordinal: " << ordinal << " buffer_index: " << buffer_index
      << " vchan_id: " << vchan_id << " timestamp: " << timestamp
      << " message size: " << message_size << " raw refs: " << std::hex << refs
+     << " flags: " << flags
      << std::dec << "\n";
 }
 
