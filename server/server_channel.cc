@@ -231,7 +231,7 @@ std::vector<toolbelt::FileDescriptor> ServerChannel::GetRetirementFds() const {
 }
 
 uint64_t ServerChannel::GetVirtualMemoryUsage() const {
-  uint64_t size = CcbSize(num_slots_);
+  uint64_t size = sizeof(SystemControlBlock) + CcbSize(num_slots_) + sizeof(BufferControlBlock);
   for (int i = 0; i < ccb_->num_buffers; i++) {
     if (bcb_->refs[i] > 0) {
       size += bcb_->sizes[i];
@@ -540,7 +540,7 @@ std::vector<ResizeInfo> ServerChannel::GetResizeInfo() const {
     previous_buffer_size = bcb_->sizes[i];
     info.push_back(resize_info);
   }
-  scb_->counters[GetChannelId()].num_resizes = info.size();
+  scb_->counters[GetChannelId()].num_resizes = ccb_->num_buffers - 1;
   return info;
 }
 
