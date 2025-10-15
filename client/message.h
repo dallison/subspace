@@ -76,6 +76,9 @@ struct Message {
         is_activation(activation), slot_id(sid) {}
   Message(std::shared_ptr<ActiveMessage> msg);
   void Release() {
+    if (active_message == nullptr) {
+      return;
+    }
     active_message->Release();
     active_message.reset();
   }
@@ -90,7 +93,7 @@ struct Message {
     is_activation = false;
     slot_id = -1;
   }
-  
+
   std::shared_ptr<ActiveMessage> active_message;
   size_t length = 0;
   const void *buffer = nullptr;
