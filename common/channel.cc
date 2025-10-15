@@ -268,6 +268,17 @@ void Channel::GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
   total_drops = ccb_->total_drops;
 }
 
+uint64_t Channel::GetVirtualMemoryUsage() const {
+  uint64_t size = sizeof(SystemControlBlock) + CcbSize(num_slots_) +
+                  sizeof(BufferControlBlock);
+  for (int i = 0; i < ccb_->num_buffers; i++) {
+    if (bcb_->refs[i] > 0) {
+      size += bcb_->sizes[i];
+    }
+  }
+  return size;
+}
+
 void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
                            int vchan_id) {
   if (is_pub) {
