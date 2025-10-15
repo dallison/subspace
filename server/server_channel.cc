@@ -229,17 +229,6 @@ std::vector<toolbelt::FileDescriptor> ServerChannel::GetRetirementFds() const {
   }
   return r;
 }
-
-uint64_t ServerChannel::GetVirtualMemoryUsage() const {
-  uint64_t size = sizeof(SystemControlBlock) + CcbSize(num_slots_) + sizeof(BufferControlBlock);
-  for (int i = 0; i < ccb_->num_buffers; i++) {
-    if (bcb_->refs[i] > 0) {
-      size += bcb_->sizes[i];
-    }
-  }
-  return size;
-}
-
 // User ids are allocated from the multiplexer as all virtual channels
 // on the mux share the same CCB.
 absl::StatusOr<int> ServerChannel::AllocateUserId(const char *type) {

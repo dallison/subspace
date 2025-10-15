@@ -185,9 +185,13 @@ struct BufferControlBlock {
 // This counts the number of subscribers given a virtual channel id.
 class SubscriberCounter {
 public:
-  void AddSubscriber(int vchan_id) { num_subs_[vchan_id + 1]++; }
+  void AddSubscriber(int vchan_id) {
+    num_subs_[vchan_id + 1]++;
+  }
 
-  void RemoveSubscriber(int vchan_id) { num_subs_[vchan_id + 1]--; }
+  void RemoveSubscriber(int vchan_id) {
+    num_subs_[vchan_id + 1]--;
+  }
 
   // If vchan_id is valid we also count the number of subscribers to the
   // multiplexer itself.
@@ -447,6 +451,8 @@ public:
   bool IsActivated(int vchan_id) const {
     return ccb_->activation_tracker.IsActivated(vchan_id);
   }
+
+  virtual uint64_t GetVirtualMemoryUsage() const;
 
 protected:
   int32_t ToCCBOffset(void *addr) const {

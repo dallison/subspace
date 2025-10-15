@@ -290,7 +290,7 @@ public:
   }
 
   virtual const SharedMemoryFds &GetFds() { return shared_memory_fds_; }
-  virtual uint64_t GetVirtualMemoryUsage() const;
+  virtual uint64_t GetVirtualMemoryUsage() const { return Channel::GetVirtualMemoryUsage(); }
 
   // Allocate the shared memory for a channel.  The num_slots_
   // and slot_size_ member variables will either be 0 (for a subscriber

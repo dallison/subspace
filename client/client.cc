@@ -759,6 +759,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
       if (it != dropped_message_callbacks_.end()) {
         it->second(subscriber, drops);
       }
+      subscriber->RecordDroppedMessages(drops);
       if (subscriber->options_.log_dropped_messages) {
         logger_.Log(toolbelt::LogLevel::kWarning,
                     "Dropped %d message%s on channel %s", drops,

@@ -467,6 +467,9 @@ void ClientHandler::HandleCreateSubscriber(
       response->set_error(subscriber.status().ToString());
       return;
     }
+    ChannelCounters &counters = channel->RecordUpdate(
+        /*is_pub=*/false, /*add=*/true, req.is_reliable());
+    response->set_num_pub_updates(counters.num_pub_updates);
     sub = *subscriber;
   }
   server_->OnNewSubscriber(channel->Name(), sub->GetId());
@@ -528,9 +531,6 @@ void ClientHandler::HandleCreateSubscriber(
     // Send Query to subscribe to public channels on other servers.
     server_->SendQuery(req.channel_name());
   }
-  ChannelCounters &counters =
-      channel->RecordUpdate(/*is_pub=*/false, /*add=*/true, req.is_reliable());
-  response->set_num_pub_updates(counters.num_pub_updates);
 }
 
 void ClientHandler::HandleGetTriggers(

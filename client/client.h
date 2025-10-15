@@ -568,7 +568,7 @@ public:
     return client_->GetMessageBuffer(impl_.get(), max_size);
   }
 
-    // Get the messsage buffer as a span.  Returns an empty span if there is no
+  // Get the messsage buffer as a span.  Returns an empty span if there is no
   // buffer available
   absl::StatusOr<absl::Span<std::byte>>
   GetMessageBufferSpan(int32_t max_size = -1) {
@@ -655,6 +655,10 @@ public:
                         uint32_t &max_message_size, uint32_t &total_drops) {
     impl_->GetStatsCounters(total_bytes, total_messages, max_message_size,
                             total_drops);
+  }
+
+  uint64_t GetVirtualMemoryUsage() const {
+    return impl_->GetVirtualMemoryUsage();
   }
 
   const ChannelCounters &GetCounters() const { return impl_->GetCounters(); }
@@ -812,6 +816,10 @@ public:
     return client_->GetChannelCounters(impl_.get());
   }
 
+  uint64_t GetVirtualMemoryUsage() const {
+    return impl_->GetVirtualMemoryUsage();
+  }
+
   std::string Name() const { return impl_->Name(); }
   std::string Type() const { return impl_->Type(); }
   std::string_view TypeView() const { return impl_->TypeView(); }
@@ -860,9 +868,7 @@ public:
   void Trigger() { impl_->Trigger(); }
   void Untrigger() { impl_->Untrigger(); }
 
-  bool IsPlaceholder() const {
-    return impl_->IsPlaceholder();
-  }
+  bool IsPlaceholder() const { return impl_->IsPlaceholder(); }
 
   const ChannelCounters &GetCounters() const { return impl_->GetCounters(); }
 
