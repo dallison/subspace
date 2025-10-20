@@ -1,0 +1,14 @@
+package(default_visibility = ["//visibility:public"])
+
+# This is a wrapper library for the co coroutine library.  If you get multiple definition of the
+# coroutine symbols when linking with both the co coroutine library and subspace, you can depend
+# on this library instead of the co library directly.
+#
+# This might be a snafu in Bazel.  I suspect that it can't correlate the two difference references
+# to the coroutine library when linking with both the co library and subspace.
+cc_library(
+    name = "coroutines",
+    deps = [
+        "@coroutines//co:co",
+    ],
+)
