@@ -79,6 +79,10 @@ struct Message {
     active_message->Release();
     active_message.reset();
   }
+  std::string ChannelType() const;
+  int NumSlots() const;
+  uint64_t SlotSize() const;
+
   std::shared_ptr<ActiveMessage> active_message;
   size_t length = 0;
   const void *buffer = nullptr;
