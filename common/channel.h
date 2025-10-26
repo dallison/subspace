@@ -22,8 +22,9 @@
 
 namespace subspace {
 
-// Max message size for comms with server.
-static constexpr size_t kMaxMessage = 4096;
+// Flag for flags field in MessagePrefix.
+constexpr int kMessageActivate = 1; // This is a reliable activation message.
+constexpr int kMessageBridged = 2;  // This message came from the bridge.
 
 // This is stored immediately before the channel buffer in shared
 // memory.  It is transferred intact across the TCP bridges.
@@ -50,17 +51,17 @@ struct MessagePrefix {
   int64_t flags;
   int32_t vchan_id;
   char padding2[64 - 44]; // Align to 64 bytes.
+
+  bool IsActivation() const { return (flags & kMessageActivate) != 0; }
+  bool IsBridged() const { return (flags & kMessageBridged) != 0; }
 };
 
 static_assert(sizeof(MessagePrefix) == 64,
               "MessagePrefix size is not 64 bytes");
 
-// Flag for flags field in MessagePrefix.
-constexpr int kMessageActivate = 1; // This is a reliable activation message.
-constexpr int kMessageBridged = 2;  // This message came from the bridge.
-
 // Flags for MessageSlot flags.
 constexpr int kMessageSeen = 1; // Message has been seen.
+constexpr int kMessageIsActivation = 2; // This is an activation message.
 
 // We need a max channels number because the size of things in
 // shared memory needs to be fixed.
@@ -184,9 +185,13 @@ struct BufferControlBlock {
 // This counts the number of subscribers given a virtual channel id.
 class SubscriberCounter {
 public:
-  void AddSubscriber(int vchan_id) { num_subs_[vchan_id + 1]++; }
+  void AddSubscriber(int vchan_id) {
+    num_subs_[vchan_id + 1]++;
+  }
 
-  void RemoveSubscriber(int vchan_id) { num_subs_[vchan_id + 1]--; }
+  void RemoveSubscriber(int vchan_id) {
+    num_subs_[vchan_id + 1]--;
+  }
 
   // If vchan_id is valid we also count the number of subscribers to the
   // multiplexer itself.
@@ -446,6 +451,8 @@ public:
   bool IsActivated(int vchan_id) const {
     return ccb_->activation_tracker.IsActivated(vchan_id);
   }
+
+  virtual uint64_t GetVirtualMemoryUsage() const;
 
 protected:
   int32_t ToCCBOffset(void *addr) const {

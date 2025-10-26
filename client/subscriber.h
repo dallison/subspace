@@ -64,6 +64,8 @@ public:
 
   int32_t SlotSize() const { return ClientChannel::SlotSize(CurrentSlot()); }
 
+  bool IsPlaceholder() const { return ClientChannel::SlotSize() == 0; }
+
   bool AddActiveMessage(MessageSlot *slot);
   void RemoveActiveMessage(MessageSlot *slot);
 

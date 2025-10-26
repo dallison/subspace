@@ -161,6 +161,15 @@ ClientImpl::GetAllMessages(details::SubscriberImpl *subscriber, ReadMode mode) {
     }
     r.push_back(std::move(*msg));
   }
+  // We we are out of unique_ptrs, untrigger the subscriber so that it will be
+  // retriggered when a unique_ptr is released.
+  if (subscriber->NumActiveMessages() == subscriber->MaxActiveMessages()) {
+    // std::cerr << "read {} messages, untriggering subscriber\n"_format(
+    //         subscriber->numActiveMessages());
+    subscriber->Untrigger();
+    return r;
+  }
+
   if (!r.empty()) {
     subscriber->Trigger();
   }
@@ -232,24 +241,27 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
 
   channel->SetNumUpdates(pub_resp.num_sub_updates());
 
-  if (!opts.IsReliable()) {
-    // A publisher needs a slot.  Allocate one.
-    MessageSlot *slot =
-        channel->FindFreeSlotUnreliable(channel->GetPublisherId());
-    if (slot == nullptr) {
-      return absl::InternalError("No slot available for publisher");
-    }
-    channel->SetSlot(slot);
-    if (opts.Activate()) {
-      if (absl::Status status = ActivateChannel(channel.get()); !status.ok()) {
+  if (!opts.IsBridge()) {
+    if (!opts.IsReliable()) {
+      // A publisher needs a slot.  Allocate one.
+      MessageSlot *slot =
+          channel->FindFreeSlotUnreliable(channel->GetPublisherId());
+      if (slot == nullptr) {
+        return absl::InternalError("No slot available for publisher");
+      }
+      channel->SetSlot(slot);
+      if (opts.Activate()) {
+        if (absl::Status status = ActivateChannel(channel.get());
+            !status.ok()) {
+          return status;
+        }
+      }
+    } else {
+      // Send a single activation message to the channel.
+      absl::Status status = ActivateReliableChannel(channel.get());
+      if (!status.ok()) {
         return status;
       }
-    }
-  } else {
-    // Send a single activation message to the channel.
-    absl::Status status = ActivateReliableChannel(channel.get());
-    if (!status.ok()) {
-      return status;
     }
   }
   // Retirement fds.
@@ -387,16 +399,31 @@ static uint64_t ExpandSlotSize(uint64_t slotSize) {
 
 absl::StatusOr<void *> ClientImpl::GetMessageBuffer(PublisherImpl *publisher,
                                                     int32_t max_size) {
+  auto span_or_status = GetMessageBufferSpan(publisher, max_size);
+  if (!span_or_status.ok()) {
+    return span_or_status.status();
+  }
+  if (absl::Span<std::byte> span = span_or_status.value(); !span.empty()) {
+    return span.data();
+  }
+  return nullptr;
+}
+
+absl::StatusOr<absl::Span<std::byte>>
+ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int32_t max_size) {
+
   if (publisher->IsReliable()) {
     publisher->ClearPollFd();
   }
 
   int32_t slot_size = publisher->SlotSize();
+  size_t span_size = size_t(slot_size);
   if (max_size != -1 && max_size > slot_size) {
     int32_t new_slot_size = slot_size;
     assert(new_slot_size > 0);
     while (new_slot_size <= slot_size || new_slot_size < max_size) {
       new_slot_size = ExpandSlotSize(new_slot_size);
+      span_size = size_t(new_slot_size);
     }
 
     if (absl::Status status = ResizeChannel(publisher, new_slot_size);
@@ -422,12 +449,12 @@ absl::StatusOr<void *> ClientImpl::GetMessageBuffer(PublisherImpl *publisher,
     // to stop the publisher taking all the slots.  An incoming subscriber
     // would miss all those messages and that's not reliable.
     if (publisher->NumSubscribers(publisher->VirtualChannelId()) == 0) {
-      return nullptr;
+      return absl::Span<std::byte>();
     }
     MessageSlot *slot =
         publisher->FindFreeSlotReliable(publisher->GetPublisherId());
     if (slot == nullptr) {
-      return nullptr;
+      return absl::Span<std::byte>();
     }
     publisher->SetSlot(slot);
   }
@@ -437,7 +464,8 @@ absl::StatusOr<void *> ClientImpl::GetMessageBuffer(PublisherImpl *publisher,
     return absl::InternalError(
         absl::StrFormat("Channel %s has no buffer", publisher->Name()));
   }
-  return buffer;
+  return absl::Span<std::byte>(reinterpret_cast<std::byte *>(buffer),
+                               span_size);
 }
 
 absl::StatusOr<const Message>
@@ -731,6 +759,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
       if (it != dropped_message_callbacks_.end()) {
         it->second(subscriber, drops);
       }
+      subscriber->RecordDroppedMessages(drops);
       if (subscriber->options_.log_dropped_messages) {
         logger_.Log(toolbelt::LogLevel::kWarning,
                     "Dropped %d message%s on channel %s", drops,
@@ -1363,29 +1392,34 @@ absl::Status ClientImpl::ResizeChannel(PublisherImpl *publisher,
 absl::Status ClientImpl::SendRequestReceiveResponse(
     const Request &req, Response &response,
     std::vector<toolbelt::FileDescriptor> &fds) {
-  // SendMessage needs 4 bytes before the buffer passed to
-  // use for the length.
-  char *sendbuf = buffer_ + sizeof(int32_t);
-  constexpr size_t kSendBufLen = sizeof(buffer_) - sizeof(int32_t);
 
-  if (!req.SerializeToArray(sendbuf, kSendBufLen)) {
-    return absl::InternalError("Failed to serialize request");
+  {
+    // SendMessage needs 4 bytes before the buffer passed to
+    // use for the length.
+    size_t msg_len = req.ByteSizeLong();
+    std::vector<char> send_msg(sizeof(int32_t) + msg_len);
+    char *sendbuf = send_msg.data() + sizeof(int32_t);
+
+    if (!req.SerializeToArray(sendbuf, msg_len)) {
+      return absl::InternalError("Failed to serialize request");
+    }
+
+    absl::StatusOr<ssize_t> n = socket_.SendMessage(sendbuf, msg_len, co_);
+    if (!n.ok()) {
+      socket_.Close();
+      return n.status();
+    }
   }
 
-  size_t length = req.ByteSizeLong();
-  absl::StatusOr<ssize_t> n = socket_.SendMessage(sendbuf, length, co_);
-  if (!n.ok()) {
+  // Wait for response and any fds.
+  absl::StatusOr<std::vector<char>> recv_msg =
+      socket_.ReceiveVariableLengthMessage(co_);
+  if (!recv_msg.ok()) {
     socket_.Close();
-    return n.status();
+    return recv_msg.status();
   }
-
-  // Wait for response and put it in the same buffer we used for send.
-  n = socket_.ReceiveMessage(buffer_, sizeof(buffer_), co_);
-  if (!n.ok()) {
-    socket_.Close();
-    return n.status();
-  }
-  if (!response.ParseFromArray(buffer_, static_cast<int>(*n))) {
+  if (!response.ParseFromArray(recv_msg->data(),
+                               static_cast<int>(recv_msg->size()))) {
     socket_.Close();
     return absl::InternalError("Failed to parse response");
   }
