@@ -25,6 +25,8 @@ ABSL_FLAG(std::string, log_level, "info", "Log level");
 ABSL_FLAG(std::string, interface, "", "Discovery network interface");
 ABSL_FLAG(bool, local, false, "Use local computer only");
 ABSL_FLAG(int, notify_fd, -1, "File descriptor to notify of startup");
+ABSL_FLAG(std::string, machine, "", "Machine name");
+
 #if defined(___APPLE__)
 // This is default true on Mac since is uses /tmp.
 ABSL_FLAG(bool, cleanup_filesystem, true, "Cleanup the filesystem on server startup");
@@ -81,6 +83,8 @@ int main(int argc, char **argv) {
       exit(1);
     }
   }
+
+  server->SetMachineName(absl::GetFlag(FLAGS_machine));
 
   absl::Status s = server->Run();
   if (!s.ok()) {

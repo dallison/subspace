@@ -329,6 +329,11 @@ void ClientChannel::TriggerRetirement(int slot_id) {
     // No retirement triggers, let's avoid locking the mutex.
     return;
   }
+  MessageSlot *slot = GetSlot(slot_id);
+  if ((slot->flags & kMessageIsActivation) != 0) {
+    // Don't retire activation messages.
+    return;
+  }
   std::unique_lock<std::mutex> lock(retirement_lock_);
   for (auto &fd : retirement_triggers_) {
     ssize_t n = ::write(fd.Fd(), &slot_id, sizeof(slot_id));

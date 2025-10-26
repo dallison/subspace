@@ -51,7 +51,8 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
         // We successfully created the /dev/shm file.
         bcb_->sizes[buffers_.size()].store(final_buffer_size,
                                            std::memory_order_relaxed);
-        auto addr = MapBuffer(*shm_fd, final_buffer_size, BufferMapMode::kReadWrite);
+        auto addr =
+            MapBuffer(*shm_fd, final_buffer_size, BufferMapMode::kReadWrite);
         if (!addr.ok()) {
           return addr.status();
         }
@@ -282,9 +283,10 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
   return slot;
 }
 
-Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
-    MessageSlot *slot, bool reliable, bool is_activation, int owner,
-    bool omit_prefix, bool *notify) {
+Channel::PublishedMessage
+PublisherImpl::ActivateSlotAndGetAnother(MessageSlot *slot, bool reliable,
+                                         bool is_activation, int owner,
+                                         bool omit_prefix, bool *notify) {
   if (notify != nullptr) {
     *notify = true; // TODO: remove notify.
   }
@@ -308,15 +310,23 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     prefix->vchan_id = slot->vchan_id;
     prefix->flags = 0;
     prefix->slot_id = slot->id;
+    slot->bridged_slot_id = slot->id;
     if (is_activation) {
       prefix->flags |= kMessageActivate;
+      slot->flags |= kMessageIsActivation;
       ccb_->activation_tracker.Activate(slot->vchan_id);
     }
   }
 
   // Update counters.
-  ccb_->total_messages++;
-  ccb_->total_bytes += slot->message_size;
+  if (!is_activation) {
+    ccb_->total_messages++;
+    ccb_->total_bytes += slot->message_size;
+
+    if (slot->message_size > ccb_->max_message_size) {
+      ccb_->max_message_size = slot->message_size;
+    }
+  }
 
   // Set the refs to the ordinal with no refs.
   slot->refs.store(BuildRefsBitField(slot->ordinal, vchan_id_, 0),

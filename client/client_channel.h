@@ -212,6 +212,10 @@ public:
     return Channel::BufferSharedMemoryName(session_id_, buffer_index);
   }
 
+  void RecordDroppedMessages(uint32_t num) {
+    ccb_->total_drops += num;  // Atomic increment.
+}
+
 protected:
   void TriggerRetirement(int slot_id);
 

@@ -8,6 +8,8 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/types/span.h"
+
 #include "client/message.h"
 #include "client/options.h"
 #include "client/publisher.h"
@@ -33,22 +35,22 @@ enum class ReadMode {
 };
 
 struct ChannelInfo {
-    std::string channel_name;
-    int num_publishers;
-    int num_subscribers;
-    int num_bridge_pubs;
-    int num_bridge_subs;
-    std::string type;
-    uint64_t slot_size;
-    int num_slots;
-    bool reliable;
+  std::string channel_name;
+  int num_publishers;
+  int num_subscribers;
+  int num_bridge_pubs;
+  int num_bridge_subs;
+  std::string type;
+  uint64_t slot_size;
+  int num_slots;
+  bool reliable;
 };
 
 struct ChannelStats {
-    std::string channel_name;
-    uint64_t total_bytes;
-    uint64_t total_messages;
-    uint64_t max_message_size;
+  std::string channel_name;
+  uint64_t total_bytes;
+  uint64_t total_messages;
+  uint64_t max_message_size;
 };
 
 template <typename T> class weak_ptr;
@@ -241,7 +243,7 @@ private:
   absl::StatusOr<const ChannelCounters>
   GetChannelCounters(const std::string &channel_name) const;
 
-    absl::StatusOr<const ChannelInfo>
+  absl::StatusOr<const ChannelInfo>
   GetChannelInfo(const std::string &channelName);
   absl::StatusOr<const std::vector<ChannelInfo>> GetChannelInfo();
 
@@ -267,6 +269,11 @@ private:
   // will be resized.
   absl::StatusOr<void *> GetMessageBuffer(details::PublisherImpl *publisher,
                                           int32_t max_size);
+
+  // Get the messsage buffer as a span.  Returns an empty span if there is no
+  // buffer available
+  absl::StatusOr<absl::Span<std::byte>>
+  GetMessageBufferSpan(details::PublisherImpl *publisher, int32_t max_size);
 
   // Publish the message in the publisher's buffer.  The message_size
   // argument specifies the actual size of the message to send.  Returns the
@@ -454,7 +461,6 @@ private:
 
   toolbelt::UnixSocket socket_;
   toolbelt::FileDescriptor scb_fd_; // System control block memory fd.
-  char buffer_[kMaxMessage];        // Buffer for comms with server over UDS.
 
   // The client owns all the publishers and subscribers.
   absl::flat_hash_set<std::shared_ptr<details::ClientChannel>> channels_;
@@ -562,6 +568,13 @@ public:
     return client_->GetMessageBuffer(impl_.get(), max_size);
   }
 
+  // Get the messsage buffer as a span.  Returns an empty span if there is no
+  // buffer available
+  absl::StatusOr<absl::Span<std::byte>>
+  GetMessageBufferSpan(int32_t max_size = -1) {
+    return client_->GetMessageBufferSpan(impl_.get(), max_size);
+  }
+
   // Publish the message in the publisher's buffer.  The message_size
   // argument specifies the actual size of the message to send.  Returns the
   // information about the message sent with buffer set to nullptr since
@@ -642,6 +655,10 @@ public:
                         uint32_t &max_message_size, uint32_t &total_drops) {
     impl_->GetStatsCounters(total_bytes, total_messages, max_message_size,
                             total_drops);
+  }
+
+  uint64_t GetVirtualMemoryUsage() const {
+    return impl_->GetVirtualMemoryUsage();
   }
 
   const ChannelCounters &GetCounters() const { return impl_->GetCounters(); }
@@ -799,6 +816,10 @@ public:
     return client_->GetChannelCounters(impl_.get());
   }
 
+  uint64_t GetVirtualMemoryUsage() const {
+    return impl_->GetVirtualMemoryUsage();
+  }
+
   std::string Name() const { return impl_->Name(); }
   std::string Type() const { return impl_->Type(); }
   std::string_view TypeView() const { return impl_->TypeView(); }
@@ -847,7 +868,7 @@ public:
   void Trigger() { impl_->Trigger(); }
   void Untrigger() { impl_->Untrigger(); }
 
-  bool IsPlaceholder() const { return SlotSize() == 0; }
+  bool IsPlaceholder() const { return impl_->IsPlaceholder(); }
 
   const ChannelCounters &GetCounters() const { return impl_->GetCounters(); }
 
@@ -881,9 +902,10 @@ public:
   void TriggerReliablePublishers() { impl_->TriggerReliablePublishers(); }
 
   bool AtomicIncRefCount(int slot_id, int inc) {
-    MessageSlot* slot = impl_->GetSlot(slot_id);
+    MessageSlot *slot = impl_->GetSlot(slot_id);
     if (slot != nullptr) {
-      return impl_->AtomicIncRefCount(slot, IsReliable(), inc, slot->ordinal, slot->vchan_id, false);
+      return impl_->AtomicIncRefCount(slot, IsReliable(), inc, slot->ordinal,
+                                      slot->vchan_id, false);
     }
     return false;
   }
