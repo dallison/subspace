@@ -176,6 +176,10 @@ public:
     }
   }
 
+  void SetOnReceiveCallback(std::function<absl::StatusOr<int64_t>(void* buffer, int64_t size)> callback) {
+    on_receive_callback_ = std::move(callback);
+  }
+
 private:
   friend class ::subspace::ClientImpl;
 
@@ -265,6 +269,7 @@ private:
 
   // The callback to call when a message is received.
   std::function<void(SubscriberImpl *, Message)> message_callback_;
+  std::function<absl::StatusOr<int64_t>(void* buffer, int64_t size)> on_receive_callback_ = nullptr;
 };
 } // namespace details
 } // namespace subspace

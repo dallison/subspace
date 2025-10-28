@@ -241,27 +241,27 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
 
   channel->SetNumUpdates(pub_resp.num_sub_updates());
 
-  if (!opts.IsBridge()) {
-    if (!opts.IsReliable()) {
-      // A publisher needs a slot.  Allocate one.
-      MessageSlot *slot =
-          channel->FindFreeSlotUnreliable(channel->GetPublisherId());
-      if (slot == nullptr) {
-        return absl::InternalError("No slot available for publisher");
-      }
-      channel->SetSlot(slot);
-      if (opts.Activate()) {
-        if (absl::Status status = ActivateChannel(channel.get());
-            !status.ok()) {
-          return status;
-        }
-      }
-    } else {
-      // Send a single activation message to the channel.
-      absl::Status status = ActivateReliableChannel(channel.get());
-      if (!status.ok()) {
+  // An unreliable publisher always needs a slot but if we are a bridge we
+  // don't active the channels as the original publisher's activation message
+  // will be used.
+  if (!opts.IsReliable()) {
+    // A publisher needs a slot.  Allocate one.
+    MessageSlot *slot =
+        channel->FindFreeSlotUnreliable(channel->GetPublisherId());
+    if (slot == nullptr) {
+      return absl::InternalError("No slot available for publisher");
+    }
+    channel->SetSlot(slot);
+    if (!opts.IsBridge() && opts.Activate()) {
+      if (absl::Status status = ActivateChannel(channel.get()); !status.ok()) {
         return status;
       }
+    }
+  } else if (!opts.IsBridge()) {
+    // Send a single activation message to the channel.
+    absl::Status status = ActivateReliableChannel(channel.get());
+    if (!status.ok()) {
+      return status;
     }
   }
   // Retirement fds.
@@ -462,7 +462,7 @@ ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int32_t max_size) {
   void *buffer = publisher->GetCurrentBufferAddress();
   if (buffer == nullptr) {
     return absl::InternalError(
-        absl::StrFormat("Channel %s has no buffer", publisher->Name()));
+        absl::StrFormat("1 Channel %s has no buffer", publisher->Name()));
   }
   return absl::Span<std::byte>(reinterpret_cast<std::byte *>(buffer),
                                span_size);
@@ -470,16 +470,25 @@ ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int32_t max_size) {
 
 absl::StatusOr<const Message>
 ClientImpl::PublishMessage(PublisherImpl *publisher, int64_t message_size) {
-  return PublishMessageInternal(publisher, message_size, /*omit_prefix=*/false);
+  return PublishMessageInternal(publisher, message_size, /*omit_prefix=*/false, /*use_prefix_slot_id=*/ false);
 }
 
 absl::StatusOr<const Message>
 ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
-                                   int64_t message_size, bool omit_prefix) {
+                                   int64_t message_size, bool omit_prefix,
+                                   bool use_prefix_slot_id) {
   // Check if there are any new subscribers and if so, load their trigger fds.
   if (absl::Status status = ReloadSubscribersIfNecessary(publisher);
       !status.ok()) {
     return status;
+  }
+  if (publisher->on_send_callback_ != nullptr) {
+    absl::StatusOr<int64_t> status_or_size = publisher->on_send_callback_(
+        publisher->GetCurrentBufferAddress(), message_size);
+    if (!status_or_size.ok()) {
+      return status_or_size.status();
+    }
+    message_size = status_or_size.value();
   }
   publisher->SetMessageSize(message_size);
   MessageSlot *old_slot = publisher->CurrentSlot();
@@ -490,25 +499,18 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
     }
   }
 
-  bool notify = false;
   Channel::PublishedMessage msg = publisher->ActivateSlotAndGetAnother(
-      publisher->IsReliable(), /*is_activation=*/false, omit_prefix, &notify);
+      publisher->IsReliable(), /*is_activation=*/false, omit_prefix,
+      use_prefix_slot_id);
 
   // Prevent use of old_slot.
   old_slot = nullptr;
 
   publisher->SetSlot(msg.new_slot);
 
-  // Only trigger subscribers if we need to.
-  // We could trigger for every message, but that is unnecessary and
-  // slower.  It would basically mean a write to pipe for every
-  // message sent.  That's fast, but if we can avoid it, things
-  // would be faster.
-  if (notify) {
-    publisher->TriggerSubscribers();
-    if (absl::Status status = publisher->UnmapUnusedBuffers(); !status.ok()) {
-      return status;
-    }
+  publisher->TriggerSubscribers();
+  if (absl::Status status = publisher->UnmapUnusedBuffers(); !status.ok()) {
+    return status;
   }
 
   if (msg.new_slot == nullptr) {
@@ -784,6 +786,18 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
                                    /* clear_trigger=*/false);
       }
     }
+  }
+  // Call the on receive callback.
+  if (subscriber->on_receive_callback_ != nullptr) {
+    absl::StatusOr<int64_t> status_or_size = subscriber->on_receive_callback_(
+        subscriber->GetCurrentBufferAddress(), new_slot->message_size);
+    if (!status_or_size.ok()) {
+      return status_or_size.status();
+    }
+    new_slot->message_size = status_or_size.value();
+  }
+  if (new_slot->message_size <= 0) {
+    return Message();
   }
   // We have a new slot, clear the subscriber's slot.
   subscriber->ClearActiveMessage();
@@ -1116,7 +1130,7 @@ absl::Status ClientImpl::ActivateReliableChannel(PublisherImpl *publisher) {
   publisher->ActivateSlotAndGetAnother(
       /*reliable=*/true,
       /*is_activation=*/true,
-      /*omit_prefix=*/false, /*notify=*/nullptr);
+      /*omit_prefix=*/false, /*use_prefix_slot_id=*/false);
   publisher->SetSlot(nullptr);
   publisher->TriggerSubscribers();
 
@@ -1131,7 +1145,7 @@ absl::Status ClientImpl::ActivateChannel(PublisherImpl *publisher) {
   void *buffer = publisher->GetCurrentBufferAddress();
   if (buffer == nullptr) {
     return absl::InternalError(
-        absl::StrFormat("Channel %s has no buffer", publisher->Name()));
+        absl::StrFormat("3 Channel %s has no buffer", publisher->Name()));
   }
   MessageSlot *slot = publisher->CurrentSlot();
   slot->message_size = 1;
@@ -1139,7 +1153,7 @@ absl::Status ClientImpl::ActivateChannel(PublisherImpl *publisher) {
   Channel::PublishedMessage msg = publisher->ActivateSlotAndGetAnother(
       /*reliable=*/false,
       /*is_activation=*/true,
-      /*omit_prefix=*/false, /*notify=*/nullptr);
+      /*omit_prefix=*/false, /*use_prefix_slot_id=*/false);
   publisher->SetSlot(msg.new_slot);
   publisher->TriggerSubscribers();
 

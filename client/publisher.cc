@@ -283,14 +283,9 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
   return slot;
 }
 
-Channel::PublishedMessage
-PublisherImpl::ActivateSlotAndGetAnother(MessageSlot *slot, bool reliable,
-                                         bool is_activation, int owner,
-                                         bool omit_prefix, bool *notify) {
-  if (notify != nullptr) {
-    *notify = true; // TODO: remove notify.
-  }
-
+Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
+    MessageSlot *slot, bool reliable, bool is_activation, int owner,
+    bool omit_prefix, bool use_prefix_slot_id) {
   void *buffer = GetBufferAddress(slot);
   MessagePrefix *prefix = reinterpret_cast<MessagePrefix *>(buffer) - 1;
 
@@ -302,7 +297,8 @@ PublisherImpl::ActivateSlotAndGetAnother(MessageSlot *slot, bool reliable,
   if (omit_prefix) {
     slot->timestamp = prefix->timestamp;
     slot->vchan_id = prefix->vchan_id;
-    slot->bridged_slot_id = prefix->slot_id;
+    // The bridged_slot_id is the slot is used for the retirement notification.
+    slot->bridged_slot_id = use_prefix_slot_id ? prefix->slot_id : slot->id;
   } else {
     prefix->message_size = slot->message_size;
     prefix->ordinal = slot->ordinal;

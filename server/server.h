@@ -57,7 +57,7 @@ public:
   virtual ~Server();
   void SetLogLevel(const std::string &level) { logger_.SetLogLevel(level); }
   toolbelt::LogLevel GetLogLevel() const { return logger_.GetLogLevel(); }
-  
+
   absl::Status Run();
   void Stop(bool force = false);
 

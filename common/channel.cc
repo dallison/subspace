@@ -208,7 +208,7 @@ void MessageSlot::Dump(std::ostream &os) const {
   uint64_t just_refs = l_refs & kRefCountMask;
   uint64_t ref_ord = (l_refs >> kOrdinalShift) & kOrdinalMask;
 
-  os << "Slot: " << id;
+  os << this << " Slot: " << id;
   if (is_pub) {
     os << " publisher " << just_refs;
   } else {

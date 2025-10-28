@@ -1407,7 +1407,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     prefix->flags |= kMessageBridged;
 
     absl::StatusOr<const Message> pub_msg = pub->PublishMessageInternal(
-        *n - kAdjustedPrefixLength, /*omit_prefix=*/true);
+        *n - kAdjustedPrefixLength, /*omit_prefix=*/true, /*omit_prefix_slot_id=*/true);
     if (!pub_msg.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to publish bridge message for %s: %s",
