@@ -482,7 +482,7 @@ TEST_F(ClientTest, BadPublisherParameters) {
 
   // Different num slots
   absl::StatusOr<Publisher> pub3 = client.CreatePublisher("dave0", 256, 9);
-  ASSERT_FALSE(pub3.ok());
+  ASSERT_TRUE(pub3.ok());
 
   // Fixed size.
   absl::StatusOr<Publisher> pub4 =

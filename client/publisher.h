@@ -42,6 +42,9 @@ public:
         return retirement_fd_;
     }
 
+  void SetOnSendCallback(std::function<absl::StatusOr<int64_t>(void* buffer, int64_t size)> callback) {
+    on_send_callback_ = std::move(callback);
+  }
 
 private:
   friend class ::subspace::ClientImpl;
@@ -73,13 +76,12 @@ private:
   Channel::PublishedMessage
   ActivateSlotAndGetAnother(MessageSlot *slot, bool reliable,
                             bool is_activation, int owner, bool omit_prefix,
-                            bool *notify);
+                            bool use_prefix_slot_id);
 
   Channel::PublishedMessage
-  ActivateSlotAndGetAnother(bool reliable, bool is_activation, bool omit_prefix,
-                            bool *notify) {
+  ActivateSlotAndGetAnother(bool reliable, bool is_activation, bool omit_prefix, bool use_prefix_slot_id) {
     return ActivateSlotAndGetAnother(slot_, reliable, is_activation,
-                                     publisher_id_, omit_prefix, notify);
+                                     publisher_id_, omit_prefix, use_prefix_slot_id);
   }
 
   void ClearSubscribers() { subscribers_.clear(); }
@@ -110,6 +112,7 @@ private:
   std::vector<toolbelt::TriggerFd> subscribers_;
   PublisherOptions options_;
   toolbelt::FileDescriptor retirement_fd_ = {};
+  std::function<absl::StatusOr<int64_t>(void* buffer, int64_t size)> on_send_callback_ = nullptr;
 };
 
 } // namespace details

@@ -290,7 +290,9 @@ public:
   }
 
   virtual const SharedMemoryFds &GetFds() { return shared_memory_fds_; }
-  virtual uint64_t GetVirtualMemoryUsage() const { return Channel::GetVirtualMemoryUsage(); }
+  virtual uint64_t GetVirtualMemoryUsage() const {
+    return Channel::GetVirtualMemoryUsage();
+  }
 
   // Allocate the shared memory for a channel.  The num_slots_
   // and slot_size_ member variables will either be 0 (for a subscriber
@@ -313,6 +315,13 @@ public:
 
   CapacityInfo HasSufficientCapacityInternal(int new_max_active_messages) const;
   absl::Status CapacityError(const CapacityInfo &info) const;
+
+  virtual void GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
+                                uint32_t &max_message_size,
+                                uint32_t &total_drops) {
+    Channel::GetStatsCounters(total_bytes, total_messages, max_message_size,
+                              total_drops);
+  }
 
 protected:
   absl::flat_hash_map<int, std::unique_ptr<User>> users_;
@@ -431,8 +440,16 @@ public:
 
   uint64_t GetVirtualMemoryUsage() const override { return 0; }
 
-  void GetUserCount(int& num_pubs, int& num_subs, int& num_bridge_pubs, int& num_bridge_subs) const {
-    ServerChannel::CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs);
+  void GetUserCount(int &num_pubs, int &num_subs, int &num_bridge_pubs,
+                    int &num_bridge_subs) const {
+    ServerChannel::CountUsers(num_pubs, num_subs, num_bridge_pubs,
+                              num_bridge_subs);
+  }
+
+  void GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
+                        uint32_t &max_message_size, uint32_t &total_drops) {
+    mux_->GetStatsCounters(total_bytes, total_messages, max_message_size,
+                           total_drops);
   }
 
 private:

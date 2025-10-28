@@ -444,7 +444,8 @@ private:
   FindMessageInternal(details::SubscriberImpl *subscriber, uint64_t timestamp);
   absl::StatusOr<const Message>
   PublishMessageInternal(details::PublisherImpl *publisher,
-                         int64_t message_size, bool omit_prefix);
+                         int64_t message_size, bool omit_prefix,
+                         bool use_prefix_slot_id);
   absl::Status ResizeChannel(details::PublisherImpl *publisher,
                              int32_t new_slot_size);
   absl::StatusOr<bool>
@@ -583,8 +584,14 @@ public:
     return client_->PublishMessage(impl_.get(), message_size);
   }
 
-  absl::StatusOr<const Message> PublishMessageWithPrefix(int64_t message_size) {
-    return PublishMessageInternal(message_size, true);
+  // Publish a message that already includes a prefix.  You have the option to
+  // use the slot id passed in the prefix for message retirement or use the
+  // If the message arrived over a bridge and you want to pass the retirement
+  // back over the bridge, use the slot id from the prefix.  If the retirement
+  // notification is locally handled, use the slot id from the message.
+  absl::StatusOr<const Message>
+  PublishMessageWithPrefix(int64_t message_size, bool use_slot_id_from_prefix) {
+    return PublishMessageInternal(message_size, true, use_slot_id_from_prefix);
   }
 
   // Wait until a reliable publisher can try again to send a message.  If the
@@ -682,6 +689,14 @@ public:
     return client_->UnregisterResizeCallback(impl_.get());
   }
 
+  void SetOnSendCallback(
+      std::function<absl::StatusOr<int64_t>(void *buffer, int64_t size)>
+          callback) {
+    impl_->SetOnSendCallback(std::move(callback));
+  }
+
+  void ClearOnSendCallback() { impl_->SetOnSendCallback(nullptr); }
+
   int VirtualChannelId() const { return impl_->VirtualChannelId(); }
 
   int NumSubscribers(int vchan_id = -1) const {
@@ -689,6 +704,8 @@ public:
   }
 
   int CurrentSlotId() const { return impl_->CurrentSlotId(); }
+
+  MessageSlot *CurrentSlot() const { return impl_->CurrentSlot(); }
 
 private:
   friend class Server;
@@ -698,10 +715,11 @@ private:
             std::shared_ptr<details::PublisherImpl> impl)
       : client_(client), impl_(impl) {}
 
-  absl::StatusOr<const Message> PublishMessageInternal(int64_t message_size,
-                                                       bool omit_prefix) {
+  absl::StatusOr<const Message>
+  PublishMessageInternal(int64_t message_size, bool omit_prefix,
+                         bool use_prefix_slot_id) {
     return client_->PublishMessageInternal(impl_.get(), message_size,
-                                           omit_prefix);
+                                           omit_prefix, use_prefix_slot_id);
   }
 
   std::shared_ptr<ClientImpl> client_;
@@ -855,6 +873,14 @@ public:
   void InvokeMessageCallback(Message msg) {
     client_->InvokeMessageCallback(impl_.get(), std::move(msg));
   }
+
+  void SetOnReceiveCallback(
+      std::function<absl::StatusOr<int64_t>(void *buffer, int64_t size)>
+          callback) {
+    impl_->SetOnReceiveCallback(std::move(callback));
+  }
+
+  void ClearOnReceiveCallback() { impl_->SetOnReceiveCallback(nullptr); }
 
   absl::Status ProcessAllMessages(ReadMode mode = ReadMode::kReadNext) {
     return client_->ProcessAllMessages(impl_.get(), mode);
