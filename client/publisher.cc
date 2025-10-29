@@ -10,6 +10,11 @@ namespace subspace {
 namespace details {
 
 absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
+  if (final_slot_size == 0) {
+    // If we are being asked for a slot size of 0, we will just use 64 bytes.
+    // This is the minimum slot size we can use.
+    final_slot_size = 64;
+  }
   size_t final_buffer_size = size_t(SlotSizeToBufferSize(final_slot_size));
   uint64_t current_slot_size = 0;
   int num_buffers = ccb_->num_buffers.load(std::memory_order_relaxed);
