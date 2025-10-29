@@ -13,6 +13,7 @@ class Server;
 
 struct PluginContext  {
   PluginContext(const std::string &name) : logger(name) {}
+  virtual ~PluginContext() = default;
   toolbelt::Logger logger;
 };
 

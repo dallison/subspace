@@ -612,10 +612,10 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
         {.fd = publisher->GetPollFd().Fd(), .events = POLLIN},
         {.fd = fd.Fd(), .events = POLLIN}};
     int e = ::poll(fds, 2, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
-    // Since we are waiting forever will can only get the value 1 from the poll.
-    // We will never get 0 since there is no timeout.  Anything else (can only
-    // be -1) will be an error.
-    if (e <= 0) {
+    if (timeout_ns == 0 && e == 0) {
+      return absl::InternalError("Timeout waiting for reliable publisher");
+    }
+    if (e < 0) {
       return absl::InternalError(
           absl::StrFormat("Error from poll waiting for reliable publisher: %s",
                           strerror(errno)));
@@ -690,17 +690,17 @@ absl::StatusOr<int> ClientImpl::WaitForSubscriber(
         {.fd = subscriber->GetPollFd().Fd(), .events = POLLIN},
         {.fd = fd.Fd(), .events = POLLIN}};
     int e = ::poll(fds, 2, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
-    // Since we are waiting forever will can only get the value 1 from the poll.
-    // We will never get 0 since there is no timeout.  Anything else (can only
-    // be -1) will be an error.
-    if (e <= 0) {
+    if (timeout_ns == 0 && e == 0) {
+      return absl::InternalError("Timeout waiting for subscriber");
+    }
+    if (e < 0) {
       return absl::InternalError(absl::StrFormat(
           "Error from poll waiting for subscriber: %s", strerror(errno)));
     }
-    if (fds[0].revents & POLLIN) {
+    if (fds[0].revents & (POLLIN | POLLHUP)) {
       // The subscriber's poll fd triggered.
       return fds[0].fd;
-    } else if (fds[1].revents & POLLIN) {
+    } else if (fds[1].revents & (POLLIN | POLLHUP)) {
       // The passed in fd triggered.
       return fds[1].fd;
     } else {

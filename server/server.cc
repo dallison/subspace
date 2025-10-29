@@ -566,12 +566,12 @@ ServerChannel *Server::FindChannel(const std::string &channel_name) {
 }
 
 void Server::RemoveChannel(ServerChannel *channel) {
+  OnRemoveChannel(channel->Name());
   channel->RemoveBuffer(session_id_);
   channel_ids_.Clear(channel->GetChannelId());
   auto it = channels_.find(channel->Name());
   channels_.erase(it);
   SendChannelDirectory();
-  OnRemoveChannel(channel->Name());
 }
 
 void Server::RemoveAllUsersFor(ClientHandler *handler) {
