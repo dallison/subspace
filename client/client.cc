@@ -482,6 +482,11 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
       !status.ok()) {
     return status;
   }
+
+  if (message_size == 0) {
+    return absl::InternalError("Message size must be greater than 0");
+  }
+
   if (publisher->on_send_callback_ != nullptr) {
     absl::StatusOr<int64_t> status_or_size = publisher->on_send_callback_(
         publisher->GetCurrentBufferAddress(), message_size);
