@@ -188,7 +188,11 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
   int retries = 0;
 
   while (retries++ < kMaxRetries) {
-    const bool print_errors = retries >= kMaxRetries - 10;
+    #ifndef NDEBUG
+    const bool print_errors = retries >= kMaxRetries - 1;
+    #else
+    const bool print_errors = false;
+    #endif
     CheckReload();
     if (slot == nullptr) {
       // Prepopulate the active slots.

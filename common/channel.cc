@@ -218,8 +218,7 @@ void MessageSlot::Dump(std::ostream &os) const {
   os << " ordinal: " << ordinal << " buffer_index: " << buffer_index
      << " vchan_id: " << vchan_id << " timestamp: " << timestamp
      << " message size: " << message_size << " raw refs: " << std::hex << refs
-     << " flags: " << flags
-     << std::dec << "\n";
+     << " flags: " << flags << std::dec << "\n";
 }
 
 void Channel::DumpSlots(std::ostream &os) const {
