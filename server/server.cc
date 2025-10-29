@@ -655,7 +655,7 @@ void Server::StatisticsCoroutine() {
                 status.ToString().c_str());
     return;
   }
-  constexpr int kStatsSlotSize = 8192 - sizeof(MessagePrefix);
+  constexpr int kStatsSlotSize = 256*1024 - sizeof(MessagePrefix);
   constexpr int kStatsNumSlots = 32;
 
   absl::StatusOr<Publisher> pub = client.CreatePublisher(

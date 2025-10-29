@@ -53,7 +53,9 @@ struct MessagePrefix {
   char padding2[64 - 44]; // Align to 64 bytes.
 
   bool IsActivation() const { return (flags & kMessageActivate) != 0; }
+  void SetIsActivation() { flags |= kMessageActivate; }
   bool IsBridged() const { return (flags & kMessageBridged) != 0; }
+  void SetIsBridged() { flags |= kMessageBridged; }
 };
 
 static_assert(sizeof(MessagePrefix) == 64,

@@ -615,9 +615,9 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
           absl::StrFormat("Error from poll waiting for reliable publisher: %s",
                           strerror(errno)));
     }
-    if (fds[0].revents & POLLIN) {
+    if (fds[0].revents & (POLLIN | POLLHUP)) {
       result = fds[0].fd; // The publisher's poll fd triggered.
-    } else if (fds[1].revents & POLLIN) {
+    } else if (fds[1].revents & (POLLIN | POLLHUP)) {
       result = fds[1].fd; // The passed in fd triggered.
     } else {
       return absl::InternalError(
