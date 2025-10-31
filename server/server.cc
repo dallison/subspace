@@ -116,7 +116,6 @@ Server::Server(co::CoroutineScheduler &scheduler,
   CreateShutdownTrigger();
 }
 
-
 Server::~Server() {
   // Clear this before other data members get destroyed.
   client_handlers_.clear();
@@ -131,7 +130,7 @@ void Server::Stop(bool force) {
     return;
   }
   shutting_down_ = true;
-  for (auto& plugin: plugins_) {
+  for (auto &plugin : plugins_) {
     plugin->interface->OnShutdown();
   }
   shutdown_trigger_fd_.Trigger();
@@ -200,10 +199,10 @@ void Server::NotifyViaFd(int64_t val) {
   }
 }
 
-void Server::ForeachChannel(std::function<void(ServerChannel*)> func) {
-    for (auto& channel : channels_) {
-        func(channel.second.get());
-    }
+void Server::ForeachChannel(std::function<void(ServerChannel *)> func) {
+  for (auto &channel : channels_) {
+    func(channel.second.get());
+  }
 }
 
 void Server::CleanupAfterSession() {
@@ -309,9 +308,9 @@ absl::Status Server::Run() {
   if (notify_fd_.Valid()) {
     scheduler_.Spawn([this]() {
       NotifyViaFd(kServerReady);
-      OnReady();
     });
   }
+  OnReady();
 
   absl::StatusOr<SystemControlBlock *> scb = CreateSystemControlBlock(scb_fd_);
   if (!scb.ok()) {
@@ -390,25 +389,25 @@ absl::Status Server::Run() {
 
   // Start the channel directory coroutine.
   scheduler_.Spawn([this]() { ChannelDirectoryCoroutine(); },
-                    {.name = "Channel directory",
-                     .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+                   {.name = "Channel directory",
+                    .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
 
   // Start the channel stats coroutine.
   scheduler_.Spawn([this]() { StatisticsCoroutine(); },
-                    {.name = "Channel stats",
-                     .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+                   {.name = "Channel stats",
+                    .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
 
   if (!local_) {
     // Start the discovery receiver coroutine.
     scheduler_.Spawn([this]() { DiscoveryReceiverCoroutine(); },
-                      {.name = "Discovery receiver",
-                       .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+                     {.name = "Discovery receiver",
+                      .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
 
     // Start the gratuitous Advertiser coroutine.  This sends Advertise messages
     // every 5 seconds.
     scheduler_.Spawn([this]() { GratuitousAdvertiseCoroutine(); },
-                      {.name = "Gratuitous advertiser",
-                       .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+                     {.name = "Gratuitous advertiser",
+                      .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
   }
 
   // Run the coroutine main loop.
@@ -597,7 +596,7 @@ void Server::ChannelDirectoryCoroutine() {
         toolbelt::LogLevel::kError,
         "Failed to initialize Subspace client for channel directory: %s",
         status.ToString().c_str());
-        return;
+    return;
   }
   constexpr int kDirectorySlotSize = 128 * 1024 - sizeof(MessagePrefix);
   constexpr int kDirectoryNumSlots = 32;
@@ -655,7 +654,7 @@ void Server::StatisticsCoroutine() {
                 status.ToString().c_str());
     return;
   }
-  constexpr int kStatsSlotSize = 256*1024 - sizeof(MessagePrefix);
+  constexpr int kStatsSlotSize = 256 * 1024 - sizeof(MessagePrefix);
   constexpr int kStatsNumSlots = 32;
 
   absl::StatusOr<Publisher> pub = client.CreatePublisher(
@@ -665,7 +664,7 @@ void Server::StatisticsCoroutine() {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to create statistics channel: %s",
                 pub.status().ToString().c_str());
-                return;
+    return;
   }
 
   constexpr int kPeriodSecs = 2;
@@ -1407,7 +1406,8 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     prefix->flags |= kMessageBridged;
 
     absl::StatusOr<const Message> pub_msg = pub->PublishMessageInternal(
-        *n - kAdjustedPrefixLength, /*omit_prefix=*/true, /*omit_prefix_slot_id=*/true);
+        *n - kAdjustedPrefixLength, /*omit_prefix=*/true,
+        /*omit_prefix_slot_id=*/true);
     if (!pub_msg.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to publish bridge message for %s: %s",
