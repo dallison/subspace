@@ -598,7 +598,7 @@ void Server::ChannelDirectoryCoroutine() {
         status.ToString().c_str());
     return;
   }
-  constexpr int kDirectorySlotSize = 128 * 1024 - sizeof(MessagePrefix);
+  constexpr int kDirectorySlotSize = 1024;
   constexpr int kDirectoryNumSlots = 32;
 
   absl::StatusOr<Publisher> channel_directory = client.CreatePublisher(
@@ -620,20 +620,20 @@ void Server::ChannelDirectoryCoroutine() {
       auto info = directory.add_channels();
       channel.second->GetChannelInfo(info);
     }
-    absl::StatusOr<void *> buffer = channel_directory->GetMessageBuffer();
+    int64_t length = directory.ByteSizeLong();
+    absl::StatusOr<void *> buffer = channel_directory->GetMessageBuffer(int32_t(length));
     if (!buffer.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to get channel directory buffer: %s",
                   buffer.status().ToString().c_str());
       return;
     }
-    bool ok = directory.SerializeToArray(*buffer, kDirectorySlotSize);
+    bool ok = directory.SerializeToArray(*buffer, length);
     if (!ok) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to serialize channel directory");
       continue;
     }
-    int64_t length = directory.ByteSizeLong();
     absl::StatusOr<const Message> s = channel_directory->PublishMessage(length);
     if (!s.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
@@ -654,7 +654,7 @@ void Server::StatisticsCoroutine() {
                 status.ToString().c_str());
     return;
   }
-  constexpr int kStatsSlotSize = 256 * 1024 - sizeof(MessagePrefix);
+  constexpr int kStatsSlotSize = 1024;
   constexpr int kStatsNumSlots = 32;
 
   absl::StatusOr<Publisher> pub = client.CreatePublisher(
@@ -677,20 +677,21 @@ void Server::StatisticsCoroutine() {
       auto s = stats.add_channels();
       channel.second->GetChannelStats(s);
     }
-    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    int64_t length = stats.ByteSizeLong();
+
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer(int32_t(length));
     if (!buffer.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to get channel stats buffer: %s",
                   buffer.status().ToString().c_str());
       return;
     }
-    bool ok = stats.SerializeToArray(*buffer, kStatsSlotSize);
+    bool ok = stats.SerializeToArray(*buffer, length);
     if (!ok) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to serialize channel stats");
       continue;
     }
-    int64_t length = stats.ByteSizeLong();
     absl::StatusOr<const Message> s = pub->PublishMessage(length);
     if (!s.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
