@@ -26,6 +26,17 @@
 
 namespace subspace {
 
+// In multithreaded tests we can't dlclose the plugins because the dynamic linker doesn't
+// play well with threads.
+static std::atomic<bool> close_plugins_on_shutdown = false;
+void ClosePluginsOnShutdown() {
+  close_plugins_on_shutdown = true;
+}
+
+bool ShouldClosePluginsOnShutdown() {
+  return close_plugins_on_shutdown;
+}
+
 // Look for the IP address and calculate the broadcast address
 // for the given interface.  If the interface name is empty
 // choose the first interface that supports broadcast and

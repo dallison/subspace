@@ -140,8 +140,14 @@ using InPlaceAtomicBitset = AtomicBitSet<0>;
 
 class DynamicBitSet {
 public:
+  DynamicBitSet() : num_bits_(0), bits_(0) {}
   DynamicBitSet(size_t num_bits)
       : num_bits_(num_bits), bits_(BitsToWords(num_bits), 0) {}
+
+  void Resize(size_t num_bits) {
+    num_bits_ = num_bits;
+    bits_.resize(BitsToWords(num_bits), 0);
+  }
 
   void Set(size_t bit) {
     size_t word = bit / 64;

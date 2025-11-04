@@ -369,6 +369,10 @@ public:
     }
   }
 
+  int GetSubVchanId(int32_t i) const {
+    return ccb_->sub_vchan_ids[i];
+}
+
   void DumpSlots(std::ostream &os) const;
   virtual void Dump(std::ostream &os) const;
 
@@ -385,7 +389,7 @@ public:
 
   // Get the number of slots in the channel (can't be changed)
   int NumSlots() const { return num_slots_; }
-  void SetNumSlots(int n) { num_slots_ = n; }
+  virtual void SetNumSlots(int n) { num_slots_ = n; }
 
   void CleanupSlots(int owner, bool reliable, bool is_pub, int vchan_id);
 

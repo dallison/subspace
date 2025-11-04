@@ -68,7 +68,10 @@ public:
                 std::function<bool(Channel *)> reload)
       : Channel(name, num_slots, channel_id, std::move(type),
                 std::move(reload)),
-        vchan_id_(vchan_id), session_id_(std::move(session_id)) {}
+        vchan_id_(vchan_id), session_id_(std::move(session_id)) {
+          active_slots_.reserve(num_slots);
+          embargoed_slots_.Resize(num_slots);
+        }
   virtual ~ClientChannel() = default;
   MessageSlot *CurrentSlot() const { return slot_; }
   int32_t CurrentSlotId() const { return slot_ != nullptr ? slot_->id : -1; }
@@ -154,6 +157,12 @@ public:
   int SlotSize() const {
     return buffers_.empty() ? 0 : buffers_.back()->slot_size;
   }
+
+  void SetNumSlots(int n) override {
+    Channel::SetNumSlots(n);
+    active_slots_.resize(n);
+    embargoed_slots_.Resize(n);
+   }
 
   // Get the buffer associated with the given slot id.
   char *Buffer(int slot_id, bool abort_on_range = true) {
@@ -270,6 +279,9 @@ protected:
   std::atomic<bool> has_retirement_triggers_{false};
   std::vector<toolbelt::FileDescriptor> retirement_triggers_ = {};
   std::mutex retirement_lock_;
+
+  std::vector<ActiveSlot> active_slots_;
+  DynamicBitSet embargoed_slots_;
 };
 
 } // namespace details
