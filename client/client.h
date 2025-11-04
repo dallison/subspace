@@ -590,7 +590,7 @@ public:
   // back over the bridge, use the slot id from the prefix.  If the retirement
   // notification is locally handled, use the slot id from the message.
   absl::StatusOr<const Message>
-  PublishMessageWithPrefix(int64_t message_size, bool use_slot_id_from_prefix) {
+  PublishMessageWithPrefix(int64_t message_size, bool use_slot_id_from_prefix = true) {
     return PublishMessageInternal(message_size, true, use_slot_id_from_prefix);
   }
 
