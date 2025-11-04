@@ -83,14 +83,12 @@ public:
   int ConfiguredVchanId() const { return options_.vchan_id; }
 
   const ActiveSlot *
-  FindUnseenOrdinal(const std::vector<ActiveSlot> &active_slots);
+  FindUnseenOrdinal();
   void PopulateActiveSlots(InPlaceAtomicBitset &bits);
 
   void ClaimSlot(MessageSlot *slot, int vchan_id, bool was_newest);
   void RememberOrdinal(uint64_t ordinal, int vchan_id);
-  void CollectVisibleSlots(InPlaceAtomicBitset &bits,
-                           std::vector<ActiveSlot> &active_slots,
-                           const DynamicBitSet &embargoed_slots);
+  void CollectVisibleSlots(InPlaceAtomicBitset &bits);
 
   void IgnoreActivation(MessageSlot *slot) {
     RememberOrdinal(slot->ordinal, slot->vchan_id);
@@ -179,6 +177,8 @@ public:
   void SetOnReceiveCallback(std::function<absl::StatusOr<int64_t>(void* buffer, int64_t size)> callback) {
     on_receive_callback_ = std::move(callback);
   }
+
+  std::string Mux() const { return options_.Mux(); }
 
 private:
   friend class ::subspace::ClientImpl;

@@ -698,6 +698,7 @@ public:
   void ClearOnSendCallback() { impl_->SetOnSendCallback(nullptr); }
 
   int VirtualChannelId() const { return impl_->VirtualChannelId(); }
+  std::string Mux() const { return impl_->Mux(); }
 
   int NumSubscribers(int vchan_id = -1) const {
     return impl_->NumSubscribers(vchan_id);
@@ -706,6 +707,7 @@ public:
   int CurrentSlotId() const { return impl_->CurrentSlotId(); }
 
   MessageSlot *CurrentSlot() const { return impl_->CurrentSlot(); }
+
 
 private:
   friend class Server;
@@ -916,6 +918,8 @@ public:
   int VirtualChannelId() const { return impl_->VirtualChannelId(); }
 
   int ConfiguredVchanId() const { return impl_->ConfiguredVchanId(); }
+
+  std::string Mux() const { return impl_->Mux(); }
 
   int NumSubscribers(int vchan_id = -1) const {
     return impl_->NumSubscribers(vchan_id);
