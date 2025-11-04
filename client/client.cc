@@ -810,7 +810,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
   // Allocate a new active message for the slot.
   auto msg = subscriber->SetActiveMessage(
       new_slot->message_size, new_slot, subscriber->GetCurrentBufferAddress(),
-      subscriber->CurrentOrdinal(), subscriber->Timestamp(), new_slot->vchan_id,
+      subscriber->CurrentOrdinal(), subscriber->Timestamp(new_slot), new_slot->vchan_id,
       is_activation);
 
   // If we are unable to allocate a new message (due to message limits)
