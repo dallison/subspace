@@ -231,6 +231,8 @@ void Channel::DumpSlots(std::ostream &os) const {
   }
   os << "Retired slots: ";
   RetiredSlots().Print(os);
+  os << "Free slots: ";
+  FreeSlots().Print(os);
 }
 
 void Channel::Dump(std::ostream &os) const {
