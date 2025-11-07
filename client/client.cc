@@ -470,7 +470,8 @@ ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int32_t max_size) {
 
 absl::StatusOr<const Message>
 ClientImpl::PublishMessage(PublisherImpl *publisher, int64_t message_size) {
-  return PublishMessageInternal(publisher, message_size, /*omit_prefix=*/false, /*use_prefix_slot_id=*/ false);
+  return PublishMessageInternal(publisher, message_size, /*omit_prefix=*/false,
+                                /*use_prefix_slot_id=*/false);
 }
 
 absl::StatusOr<const Message>
@@ -810,8 +811,8 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
   // Allocate a new active message for the slot.
   auto msg = subscriber->SetActiveMessage(
       new_slot->message_size, new_slot, subscriber->GetCurrentBufferAddress(),
-      subscriber->CurrentOrdinal(), subscriber->Timestamp(new_slot), new_slot->vchan_id,
-      is_activation);
+      subscriber->CurrentOrdinal(), subscriber->Timestamp(new_slot),
+      new_slot->vchan_id, is_activation);
 
   // If we are unable to allocate a new message (due to message limits)
   // restore the slot so that we pick it up next time.
@@ -934,8 +935,6 @@ int64_t ClientImpl::GetCurrentOrdinal(SubscriberImpl *sub) const {
 bool ClientImpl::CheckReload(ClientChannel *channel) {
   auto reloaded = ReloadBuffersIfNecessary(channel);
   if (!reloaded.ok()) {
-    std::cerr << "Error reloading buffers for channel " << channel->Name()
-              << ": " << reloaded.status() << std::endl;
     return false;
   }
   return *reloaded;

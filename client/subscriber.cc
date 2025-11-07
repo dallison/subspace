@@ -46,6 +46,9 @@ void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
                       // The original slot id is in the message prefix and is
                       // copied into the slot when the bridge publisher
                       // publishes the message.
+                      // std::string details = absl::StrFormat(
+                      //   "%d: RemoveActiveMessage: %s retiring slot %d ordinal %d vchan_id %d\n", getpid(), Name(), slot->bridged_slot_id, slot->ordinal, slot->vchan_id);
+                      // std::cerr << details;
                       TriggerRetirement(slot->bridged_slot_id);
                     });
   if (num_active_messages_-- == options_.MaxActiveMessages()) {

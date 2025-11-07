@@ -110,7 +110,7 @@ Server::Server(co::CoroutineScheduler &scheduler,
                int initial_ordinal, bool wait_for_clients)
     : socket_name_(socket_name), interface_(interface),
       discovery_port_(disc_port), discovery_peer_port_(peer_port),
-      local_(local), notify_fd_(notify_fd), scheduler_(scheduler),
+      local_(local), notify_fd_(notify_fd), scheduler_(scheduler), logger_("Subspace server"),
       initial_ordinal_(initial_ordinal), wait_for_clients_(wait_for_clients) {
   CreateShutdownTrigger();
 }
@@ -122,7 +122,7 @@ Server::Server(co::CoroutineScheduler &scheduler,
                bool wait_for_clients)
     : socket_name_(socket_name), interface_(interface), peer_address_(peer),
       discovery_port_(disc_port), discovery_peer_port_(peer_port),
-      local_(local), notify_fd_(notify_fd), scheduler_(scheduler),
+      local_(local), notify_fd_(notify_fd), scheduler_(scheduler), logger_("Subspace server"),
       initial_ordinal_(initial_ordinal), wait_for_clients_(wait_for_clients) {
   CreateShutdownTrigger();
 }
