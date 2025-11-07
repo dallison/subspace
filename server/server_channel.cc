@@ -167,9 +167,12 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
 
   // Initialize the available slots for each subscriber.
   if (num_slots_ > 0) {
-    // All slots are initially retired.
+    // No retired slots initially.
     new (RetiredSlotsAddr()) InPlaceAtomicBitset(num_slots_);
-    RetiredSlots().SetAll();
+
+    // All slots are initially free.
+    new (FreeSlotsAddr()) InPlaceAtomicBitset(num_slots_);
+    FreeSlots().SetAll();
 
     for (int i = 0; i < kMaxSlotOwners; i++) {
       new (GetAvailableSlotsAddress(i)) InPlaceAtomicBitset(num_slots_);

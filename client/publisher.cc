@@ -101,12 +101,16 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
   constexpr int max_cas_retries = 1000;
   int cas_retries = 0;
   int retired_slot = -1;
+  int free_slot = -1;
   for (;;) {
     CheckReload();
-    // Look at the first retired slot.  If there are no retired
-    // slots, look at all slots for the earliest unreferenced one.
-    retired_slot = RetiredSlots().FindFirstSet();
-    if (retired_slot != -1) {
+    // First look at free slots then at retired slots.  If there are no free or
+    // retired slots, look at all slots for the earliest unreferenced one.
+    if (free_slot = FreeSlots().FindFirstSet(); free_slot != -1) {
+      // Take a free slot if there is one.
+      slot = &ccb_->slots[free_slot];
+      FreeSlots().Clear(free_slot);
+    } else if ((retired_slot = RetiredSlots().FindFirstSet()) != -1) {
       // We have a retired slot.
       if (embargoed_slots_.IsSet(retired_slot)) {
         continue;
@@ -131,6 +135,7 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
         }
       }
     }
+
     if (slot == nullptr) {
       // We are guaranteed to find a slot, but let's not go into an infinite
       // loop if something goes wrong.
@@ -185,7 +190,7 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
   // If we took a slot that wasn't retired we must trigger the retirement fd.
   // This happens when we recycle a slot that has not yet been seen by all
   // subscribers.
-  if (retired_slot == -1) {
+  if (free_slot == -1 && retired_slot == -1) {
     TriggerRetirement(slot->id);
   }
   return slot;
@@ -194,14 +199,20 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
 MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
   MessageSlot *slot = nullptr;
   int retired_slot = -1;
+  int free_slot = -1;
   embargoed_slots_.ClearAll();
   for (;;) {
     CheckReload();
 
     // Put all free slots into the active_slots vector.
     active_slots_.clear();
-    retired_slot = RetiredSlots().FindFirstSet();
-    if (retired_slot != -1) { // We have a retired slot.
+    if (free_slot = FreeSlots().FindFirstSet(); free_slot != -1) {
+      FreeSlots().Clear(free_slot);
+      MessageSlot *s = &ccb_->slots[free_slot];
+
+      ActiveSlot active_slot = {s, s->ordinal, s->timestamp};
+      active_slots_.push_back(active_slot);
+   } else if ((retired_slot = RetiredSlots().FindFirstSet()) != -1) {
       if (embargoed_slots_.IsSet(retired_slot)) {
         continue;
       }
@@ -223,6 +234,7 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
         }
       }
     }
+
     // Sort the active slots by timestamp.
     // std::stable_sort gives consistently better performance than std::sort and
     // also is more deterministic in slot ordering.
@@ -280,19 +292,18 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
   p->vchan_id = vchan_id_;
 
   // We have a slot.  Clear it in all the subscriber bitsets.
-  ccb_->subscribers.Traverse(
-      [this, slot](int sub_id) {
-        int vid = GetSubVchanId(sub_id);
-        if (vid != -1 && slot->vchan_id != -1 && vid != slot->vchan_id) {
-            return;
-        }
-        GetAvailableSlots(sub_id).Clear(slot->id);
-      });
+  ccb_->subscribers.Traverse([this, slot](int sub_id) {
+    int vid = GetSubVchanId(sub_id);
+    if (vid != -1 && slot->vchan_id != -1 && vid != slot->vchan_id) {
+      return;
+    }
+    GetAvailableSlots(sub_id).Clear(slot->id);
+  });
 
   // If we took a slot that wasn't retired we must trigger the retirement fd.
   // This happens when we recycle a slot that has not yet been seen by all
   // subscribers.
-  if (retired_slot == -1) {
+  if (free_slot == -1 && retired_slot == -1) {
     TriggerRetirement(slot->id);
   }
   return slot;

@@ -488,6 +488,8 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
     return absl::InternalError("Message size must be greater than 0");
   }
 
+  int32_t old_slot_id = publisher->CurrentSlotId();
+
   if (publisher->on_send_callback_ != nullptr) {
     absl::StatusOr<int64_t> status_or_size = publisher->on_send_callback_(
         publisher->GetCurrentBufferAddress(), message_size);
@@ -535,7 +537,7 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
   }
 
   return Message(message_size, nullptr, msg.ordinal, msg.timestamp,
-                 publisher->VirtualChannelId(), false, msg.new_slot->id);
+                 publisher->VirtualChannelId(), false, old_slot_id);
 }
 
 absl::Status

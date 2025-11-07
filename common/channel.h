@@ -267,7 +267,10 @@ struct ChannelControlBlock {          // a.k.a CCB
   // Followed by:
   // AtomicBitSet<0> retiredSlots[num_slots];
   // Followed by:
+  // AtomicBitSet<0> freeSlots[num_slots];
+  // Followed by:
   // AtomicBitSet<0> availableSlots[kMaxSlotOwners];
+  //
 };
 
 inline size_t AvailableSlotsSize(int num_slots) {
@@ -277,7 +280,7 @@ inline size_t AvailableSlotsSize(int num_slots) {
 inline size_t CcbSize(int num_slots) {
   return Aligned(sizeof(ChannelControlBlock) +
                  num_slots * sizeof(MessageSlot)) +
-         Aligned(SizeofAtomicBitSet(num_slots)) + AvailableSlotsSize(num_slots);
+         Aligned(SizeofAtomicBitSet(num_slots)) * 2 + AvailableSlotsSize(num_slots);
 }
 
 struct SlotBuffer {
@@ -432,6 +435,10 @@ public:
   char *EndOfRetiredSlots() const {
     return EndOfSlots() + Aligned(SizeofAtomicBitSet(num_slots_));
   }
+  char *EndOfFreeSlots() const {
+    return EndOfRetiredSlots() + Aligned(SizeofAtomicBitSet(num_slots_));
+  }
+
 
   InPlaceAtomicBitset *RetiredSlotsAddr() {
     return reinterpret_cast<InPlaceAtomicBitset *>(EndOfSlots());
@@ -445,13 +452,26 @@ public:
     return *reinterpret_cast<const InPlaceAtomicBitset *>(EndOfSlots());
   }
 
+
+  InPlaceAtomicBitset *FreeSlotsAddr() {
+    return reinterpret_cast<InPlaceAtomicBitset *>(EndOfRetiredSlots());
+  }
+
+  InPlaceAtomicBitset &FreeSlots() {
+    return *reinterpret_cast<InPlaceAtomicBitset *>(EndOfRetiredSlots());
+  }
+
+  const InPlaceAtomicBitset &FreeSlots() const {
+    return *reinterpret_cast<const InPlaceAtomicBitset *>(EndOfRetiredSlots());
+  }
+
   InPlaceAtomicBitset &GetAvailableSlots(int sub_id) {
     return *GetAvailableSlotsAddress(sub_id);
   }
 
   InPlaceAtomicBitset *GetAvailableSlotsAddress(int sub_id) {
     return reinterpret_cast<InPlaceAtomicBitset *>(
-        EndOfRetiredSlots() + SizeofAtomicBitSet(num_slots_) * sub_id);
+        EndOfFreeSlots() + SizeofAtomicBitSet(num_slots_) * sub_id);
   }
 
   bool IsActivated(int vchan_id) const {
