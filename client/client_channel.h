@@ -6,20 +6,20 @@
 #define _xCLIENT_CLIENT_CHANNEL_H
 
 #include "client/options.h"
-#include "common/channel.h"
 #include "co/coroutine.h"
+#include "common/channel.h"
 #include "proto/subspace.pb.h"
+#include "toolbelt/clock.h"
 #include "toolbelt/fd.h"
 #include "toolbelt/sockets.h"
 #include "toolbelt/triggerfd.h"
-#include "toolbelt/clock.h"
 #include <sys/poll.h>
 
 #include <memory>
 #include <mutex>
 #include <string>
-#include <vector>
 #include <thread>
+#include <vector>
 
 // Notification strategy
 // ---------------------
@@ -64,14 +64,17 @@ struct BufferSet {
 class ClientChannel : public Channel {
 public:
   ClientChannel(const std::string &name, int num_slots, int channel_id,
-                int vchan_id, uint64_t session_id, std::string type, std::function<bool(Channel*)> reload)
-      : Channel(name, num_slots, channel_id, std::move(type), std::move(reload)),
-        vchan_id_(vchan_id), session_id_(std::move(session_id)) {}
+                int vchan_id, uint64_t session_id, std::string type,
+                std::function<bool(Channel *)> reload)
+      : Channel(name, num_slots, channel_id, std::move(type),
+                std::move(reload)),
+        vchan_id_(vchan_id), session_id_(std::move(session_id)) {
+          active_slots_.reserve(num_slots);
+          embargoed_slots_.Resize(num_slots);
+        }
   virtual ~ClientChannel() = default;
   MessageSlot *CurrentSlot() const { return slot_; }
-  int32_t CurrentSlotId() const {
-    return slot_ != nullptr ? slot_->id : -1;
-  }
+  int32_t CurrentSlotId() const { return slot_ != nullptr ? slot_->id : -1; }
   const ChannelCounters &GetCounters() const {
     return GetScb()->counters[GetChannelId()];
   }
@@ -104,10 +107,11 @@ public:
     if (slot == nullptr) {
       return nullptr;
     }
-    return Buffer(slot->id) +
-           (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot->id))) *
-               slot->id +
-           sizeof(MessagePrefix);
+    void *b =
+        Buffer(slot->id) +
+        (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot->id))) * slot->id +
+        sizeof(MessagePrefix);
+    return b;
   }
 
   // Get a pointer to the MessagePrefix for a given slot.
@@ -118,7 +122,7 @@ public:
     return p;
   }
 
-  MessageSlot* GetSlot(int32_t id) const {
+  MessageSlot *GetSlot(int32_t id) const {
     if (id < 0 || id >= num_slots_) {
       return nullptr;
     }
@@ -154,9 +158,14 @@ public:
     return buffers_.empty() ? 0 : buffers_.back()->slot_size;
   }
 
+  void SetNumSlots(int n) override {
+    Channel::SetNumSlots(n);
+    active_slots_.resize(n);
+    embargoed_slots_.Resize(n);
+   }
+
   // Get the buffer associated with the given slot id.
-  char *Buffer(int slot_id,
-               bool abort_on_range = true) {
+  char *Buffer(int slot_id, bool abort_on_range = true) {
     // While we are trying to get the buffer a publisher might be adding
     // more buffers. Since we are going to abort if the index isn't in
     // range we should try very hard to make it so.
@@ -176,11 +185,14 @@ public:
       // This should never happen.
       int index = ccb_->slots[slot_id].buffer_index;
       std::cerr << this << " Invalid buffer index for slot " << slot_id << ": "
-                << index << " there are " << buffers_.size() << " buffers" << std::endl;
-      std::cerr << this << "Channel: " << name_ << " from " << (IsPublisher() ? "publisher" : "subscriber") << std::endl;
+                << index << " there are " << buffers_.size() << " buffers"
+                << std::endl;
+      std::cerr << this << "Channel: " << name_ << " from "
+                << (IsPublisher() ? "publisher" : "subscriber") << std::endl;
       DumpSlots(std::cerr);
       abort();
     }
+
     return nullptr;
   }
 
@@ -208,13 +220,13 @@ public:
     has_retirement_triggers_ = true;
   }
 
-    std::string BufferSharedMemoryName(int buffer_index) const {
+  std::string BufferSharedMemoryName(int buffer_index) const {
     return Channel::BufferSharedMemoryName(session_id_, buffer_index);
   }
 
   void RecordDroppedMessages(uint32_t num) {
-    ccb_->total_drops += num;  // Atomic increment.
-}
+    ccb_->total_drops += num; // Atomic increment.
+  }
 
 protected:
   void TriggerRetirement(int slot_id);
@@ -267,6 +279,9 @@ protected:
   std::atomic<bool> has_retirement_triggers_{false};
   std::vector<toolbelt::FileDescriptor> retirement_triggers_ = {};
   std::mutex retirement_lock_;
+
+  std::vector<ActiveSlot> active_slots_;
+  DynamicBitSet embargoed_slots_;
 };
 
 } // namespace details

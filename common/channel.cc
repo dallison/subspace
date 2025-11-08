@@ -163,6 +163,11 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
     uint64_t new_refs = ref & kRefCountMask;
     uint64_t new_reliable_refs =
         (ref >> kReliableRefCountShift) & kRefCountMask;
+    if (inc < 0 && new_refs == 0) {
+      // Don't try to decrement the refs below zero.  How can this happen?
+      return true;
+    }
+
     new_refs += inc;
     if (reliable) {
       new_reliable_refs += inc;
@@ -179,12 +184,10 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
     }
     if (slot->refs.compare_exchange_weak(ref, new_ref,
                                          std::memory_order_relaxed)) {
-      // std::cerr << slot->id << " retire: " << retire
-      //           << " retired_refs: " << retired_refs
-      //           << " num subs: " << NumSubscribers(vchan_id)
-      //           << " new_refs: " << new_refs
-      //           << " new_reliable_refs: " << new_reliable_refs << std::endl;
-      if (new_refs == 0 && new_reliable_refs == 0 &&
+      // std::string details = absl::StrFormat(
+      //   "%d: AtomicIncRefCount: %s slot %d ordinal %d retired_refs: %d NumSubscribers: %d retire: %d\n", getpid(), Name(), slot->id, ordinal, retired_refs, NumSubscribers(ref_vchan_id), retire);
+      // std::cerr << details;
+      if (retire && new_refs == 0 && new_reliable_refs == 0 &&
           retired_refs >= NumSubscribers(ref_vchan_id)) {
         // All subscribers have seen the slot, retire it.
         RetiredSlots().Set(slot->id);
@@ -208,7 +211,7 @@ void MessageSlot::Dump(std::ostream &os) const {
   uint64_t just_refs = l_refs & kRefCountMask;
   uint64_t ref_ord = (l_refs >> kOrdinalShift) & kOrdinalMask;
 
-  os << "Slot: " << id;
+  os << this << " Slot: " << id;
   if (is_pub) {
     os << " publisher " << just_refs;
   } else {
@@ -218,8 +221,7 @@ void MessageSlot::Dump(std::ostream &os) const {
   os << " ordinal: " << ordinal << " buffer_index: " << buffer_index
      << " vchan_id: " << vchan_id << " timestamp: " << timestamp
      << " message size: " << message_size << " raw refs: " << std::hex << refs
-     << " flags: " << flags
-     << std::dec << "\n";
+     << " flags: " << flags << std::dec << "\n";
 }
 
 void Channel::DumpSlots(std::ostream &os) const {
@@ -229,6 +231,8 @@ void Channel::DumpSlots(std::ostream &os) const {
   }
   os << "Retired slots: ";
   RetiredSlots().Print(os);
+  os << "Free slots: ";
+  FreeSlots().Print(os);
 }
 
 void Channel::Dump(std::ostream &os) const {

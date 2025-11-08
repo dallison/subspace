@@ -17,9 +17,11 @@ bazel_dep(name = "zlib", version = "1.3.1.bcr.3")
 # Toolbelt
 http_archive(
     name = "toolbelt",
-    integrity = "sha256-wsM6aRqvzQZH6SHwYLDoPMnV5ta/Hw5pU7MdzQP6vPI=",
-    strip_prefix = "cpp_toolbelt-1.5.2",
-    urls = ["https://github.com/dallison/cpp_toolbelt/archive/refs/tags/1.5.2.tar.gz"],
+    # integrity = "sha256-d3f29073968a8ea1b51899b643d2b5e83403fa63",
+    sha256 = "881646748f7dafa1d0b74152e8bb529da790e0109a5c5757119c9c184c40d16f",
+    strip_prefix = "cpp_toolbelt-b74ba4506ad084dfd93282be03dec561facad37e",
+    # urls = ["https://github.com/dallison/cpp_toolbelt/archive/refs/tags/1.5.3.tar.gz"],
+    urls = ["https://github.com/dallison/cpp_toolbelt/archive/b74ba4506ad084dfd93282be03dec561facad37e.tar.gz"],
 )
 # For local debugging of toolbelt coroutine library.
 # bazel_dep(name = "toolbelt")
@@ -31,16 +33,18 @@ http_archive(
 # Coroutines
 http_archive(
     name = "coroutines",
-    integrity = "sha256-NWEIyURzi6Y35HyfiVkwCpr/GXNLxOZlibvV6tzBzc8=",
-    strip_prefix = "co-2.1.6",
-    urls = ["https://github.com/dallison/co/archive/refs/tags/2.1.6.tar.gz"],
+    # integrity = "sha256-tRZ5YigZhxVJDBENpQwqL1Bch1VPuV+tgKSK+/72aTU=",
+    sha256 = "d38c2a2480f016ed44c8460b9b9c6436445211bf14b6b0947e7577ccb29ca9d4",
+    strip_prefix = "co-562a5a335570c8ab70d8d36f3e6d7e85ccccfd10",
+    # urls = ["https://github.com/dallison/co/archive/refs/tags/2.1.8.tar.gz"],
+    urls = ["https://github.com/dallison/co/archive/562a5a335570c8ab70d8d36f3e6d7e85ccccfd10.tar.gz"],
 )
 # For local debugging of co coroutine library.
 # bazel_dep(name = "coroutines")
 # local_path_override(
-#    module_name = "coroutines",
-#    path = "../co",
-# )
+#   module_name = "coroutines",
+#   path = "../co",
+#  )
 
 bazel_dep(name = "rules_python", version = "0.40.0")
 

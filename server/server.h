@@ -33,6 +33,11 @@ constexpr int64_t kServerReady = 1;
 constexpr int64_t kServerStopped = 2;
 constexpr int64_t kServerWaiting = 3;
 
+// In multithreaded tests we can't dlclose the plugins because the dynamic linker doesn't
+// play well with threads.
+void ClosePluginsOnShutdown();
+bool ShouldClosePluginsOnShutdown();
+
 // The Subspace server.
 // This is a single-threaded, coroutine-based server that maintains shared
 // memory IPC channels and communicates with other servers to allow for
@@ -57,7 +62,7 @@ public:
   virtual ~Server();
   void SetLogLevel(const std::string &level) { logger_.SetLogLevel(level); }
   toolbelt::LogLevel GetLogLevel() const { return logger_.GetLogLevel(); }
-  
+
   absl::Status Run();
   void Stop(bool force = false);
 
@@ -122,7 +127,9 @@ private:
         : name(n), handle(h), interface(std::move(i)) {}
     ~Plugin() {
       if (handle) {
-        dlclose(handle);
+        if (ShouldClosePluginsOnShutdown()) {
+          dlclose(handle);
+        }
       }
     }
     std::string name;

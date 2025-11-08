@@ -64,7 +64,7 @@ public:
 
   int32_t SlotSize() const { return ClientChannel::SlotSize(CurrentSlot()); }
 
-  bool IsPlaceholder() const { return ClientChannel::SlotSize() == 0; }
+  bool IsPlaceholder() const { return ClientChannel::NumSlots() == 0; }
 
   bool AddActiveMessage(MessageSlot *slot);
   void RemoveActiveMessage(MessageSlot *slot);
@@ -83,14 +83,12 @@ public:
   int ConfiguredVchanId() const { return options_.vchan_id; }
 
   const ActiveSlot *
-  FindUnseenOrdinal(const std::vector<ActiveSlot> &active_slots);
+  FindUnseenOrdinal();
   void PopulateActiveSlots(InPlaceAtomicBitset &bits);
 
   void ClaimSlot(MessageSlot *slot, int vchan_id, bool was_newest);
   void RememberOrdinal(uint64_t ordinal, int vchan_id);
-  void CollectVisibleSlots(InPlaceAtomicBitset &bits,
-                           std::vector<ActiveSlot> &active_slots,
-                           const DynamicBitSet &embargoed_slots);
+  void CollectVisibleSlots(InPlaceAtomicBitset &bits);
 
   void IgnoreActivation(MessageSlot *slot) {
     RememberOrdinal(slot->ordinal, slot->vchan_id);
@@ -175,6 +173,12 @@ public:
       fd.Trigger();
     }
   }
+
+  void SetOnReceiveCallback(std::function<absl::StatusOr<int64_t>(void* buffer, int64_t size)> callback) {
+    on_receive_callback_ = std::move(callback);
+  }
+
+  std::string Mux() const { return options_.Mux(); }
 
 private:
   friend class ::subspace::ClientImpl;
@@ -265,6 +269,7 @@ private:
 
   // The callback to call when a message is received.
   std::function<void(SubscriberImpl *, Message)> message_callback_;
+  std::function<absl::StatusOr<int64_t>(void* buffer, int64_t size)> on_receive_callback_ = nullptr;
 };
 } // namespace details
 } // namespace subspace
