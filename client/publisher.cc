@@ -106,10 +106,14 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
     CheckReload();
     // First look at free slots then at retired slots.  If there are no free or
     // retired slots, look at all slots for the earliest unreferenced one.
-    if (free_slot = FreeSlots().FindFirstSet(); free_slot != -1) {
+    if (!ccb_->free_slots_exhausted.load(std::memory_order_relaxed) &&
+        (free_slot = FreeSlots().FindFirstSet()) != -1) {
       // Take a free slot if there is one.
       slot = &ccb_->slots[free_slot];
       FreeSlots().Clear(free_slot);
+      if (FreeSlots().IsEmpty()) {
+        ccb_->free_slots_exhausted.store(true, std::memory_order_relaxed);
+      }
     } else if ((retired_slot = RetiredSlots().FindFirstSet()) != -1) {
       // We have a retired slot.
       if (embargoed_slots_.IsSet(retired_slot)) {
@@ -206,8 +210,12 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
 
     // Put all free slots into the active_slots vector.
     active_slots_.clear();
-    if (free_slot = FreeSlots().FindFirstSet(); free_slot != -1) {
+    if (!ccb_->free_slots_exhausted.load(std::memory_order_relaxed) &&
+        (free_slot = FreeSlots().FindFirstSet()) != -1) {
       FreeSlots().Clear(free_slot);
+      if (FreeSlots().IsEmpty()) {
+        ccb_->free_slots_exhausted.store(true, std::memory_order_relaxed);
+      }
       MessageSlot *s = &ccb_->slots[free_slot];
 
       ActiveSlot active_slot = {s, s->ordinal, s->timestamp};

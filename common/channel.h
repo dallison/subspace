@@ -262,6 +262,10 @@ struct ChannelControlBlock {          // a.k.a CCB
   std::atomic<uint32_t> max_message_size;
   std::atomic<uint32_t> total_drops;
 
+  // If true there are no more free slots and there's no need to check
+  // the bitset for them (there will never be another free slot)
+  std::atomic<bool> free_slots_exhausted;
+
   // Variable number of MessageSlot structs (num_slots long).
   MessageSlot slots[0];
   // Followed by:
