@@ -290,9 +290,7 @@ public:
   }
 
   virtual const SharedMemoryFds &GetFds() { return shared_memory_fds_; }
-  virtual uint64_t GetVirtualMemoryUsage() const {
-    return Channel::GetVirtualMemoryUsage();
-  }
+  uint64_t GetVirtualMemoryUsage() const override { return Channel::GetVirtualMemoryUsage(); }
 
   // Allocate the shared memory for a channel.  The num_slots_
   // and slot_size_ member variables will either be 0 (for a subscriber
@@ -447,7 +445,7 @@ public:
   }
 
   void GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
-                        uint32_t &max_message_size, uint32_t &total_drops) {
+                        uint32_t &max_message_size, uint32_t &total_drops) override {
     mux_->GetStatsCounters(total_bytes, total_messages, max_message_size,
                            total_drops);
   }
