@@ -80,9 +80,9 @@ public:
     // has started and stopped.  This end of the pipe is blocking.
     (void)pipe(server_pipe_);
 
-    server_ =
-        std::make_unique<subspace::Server>(scheduler_, socket_, "", 0, 0,
-                                           /*local=*/true, server_pipe_[1], 1, true);
+    server_ = std::make_unique<subspace::Server>(scheduler_, socket_, "", 0, 0,
+                                                 /*local=*/true,
+                                                 server_pipe_[1], 1, true);
     // Start server running in a thread.
     server_thread_ = std::thread([]() {
       absl::Status s = server_->Run();
@@ -482,7 +482,7 @@ TEST_F(ClientTest, BadPublisherParameters) {
 
   // Different num slots
   absl::StatusOr<Publisher> pub3 = client.CreatePublisher("dave0", 256, 9);
-  ASSERT_FALSE(pub3.ok());
+  ASSERT_TRUE(pub3.ok());
 
   // Fixed size.
   absl::StatusOr<Publisher> pub4 =
@@ -713,6 +713,76 @@ TEST_F(ClientTest, PublishSingleMessageAndRead) {
   ASSERT_EQ(0, msg->length);
 }
 
+TEST_F(ClientTest, PublishSingleMessageWithPrefixAndRead) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher("dave6", {.slot_size = 256, .num_slots = 10, .type = "foobar"});
+  ASSERT_OK(pub);
+
+  ASSERT_EQ("foobar", pub->TypeView());
+  ASSERT_FALSE(pub->IsReliable());
+  ASSERT_FALSE(pub->IsFixedSize());
+  ASSERT_EQ(256, pub->SlotSize());
+  ASSERT_EQ(10, pub->NumSlots());
+  ASSERT_EQ(0, pub->CurrentSlotId());
+  ASSERT_EQ("", pub->Mux());
+  std::stringstream ss;
+  pub->DumpSlots(ss);
+  ASSERT_NE("", ss.str());
+  ASSERT_NE("", pub->BufferSharedMemoryName(0));
+  ASSERT_EQ(0, pub->CurrentSlotId());
+  ASSERT_NE(nullptr, pub->CurrentSlot());
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "foobar", 6);
+
+  auto prefix = reinterpret_cast<subspace::MessagePrefix *>(*buffer) - 1;
+  prefix->SetIsBridged();
+  prefix->timestamp = 1234;
+
+  absl::StatusOr<const Message> pub_status = pub->PublishMessageWithPrefix(6);
+  ASSERT_OK(pub_status);
+
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("dave6");
+  ASSERT_OK(sub);
+
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(6, msg->length);
+
+  auto prefix2 =
+      reinterpret_cast<const subspace::MessagePrefix *>(msg->buffer) - 1;
+  ASSERT_TRUE(prefix2->IsBridged());
+  ASSERT_EQ(1234, prefix2->timestamp);
+  ASSERT_EQ(1, sub->CurrentOrdinal());
+  ASSERT_EQ("dave6", sub->Name());
+  ASSERT_EQ("foobar", sub->TypeView());
+  ASSERT_FALSE(sub->IsReliable());
+  ASSERT_EQ(256, sub->SlotSize());
+  ASSERT_EQ(10, sub->NumSlots());
+  ASSERT_EQ("", sub->Mux());
+  ss.clear();
+  sub->DumpSlots(ss);
+  ASSERT_NE("", ss.str());
+  ASSERT_EQ(1234, sub->Timestamp());
+  ASSERT_EQ(1234, msg->timestamp);
+  ASSERT_EQ(-1, sub->VirtualChannelId());
+  ASSERT_EQ(-1, sub->ConfiguredVchanId());
+  // Another read will get 0.
+  msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(0, msg->length);
+
+  // Read again to make sure we get another 0.
+  // Regression test.
+  msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(0, msg->length);
+}
+
 TEST_F(ClientTest, PublishSingleMessageAndReadNewest) {
   subspace::Client pub_client;
   subspace::Client sub_client;
@@ -821,7 +891,6 @@ TEST_F(ClientTest, PublishSingleMessageAndReadWithCallback) {
   status = sub->UnregisterMessageCallback();
   ASSERT_OK(status);
 }
-
 
 TEST_F(ClientTest, PublishSingleMessageAndReadWithPlugin) {
   ASSERT_OK(Server()->LoadPlugin("NOP", "plugins/nop_plugin.so"));
@@ -2537,6 +2606,20 @@ TEST_F(ClientTest, ChannelDirectory) {
   }
   ASSERT_TRUE(found_chan1);
   ASSERT_TRUE(found_chan2);
+}
+
+TEST_F(ClientTest, MessageGetters) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub =
+      client->CreatePublisher("chan1", {.slot_size = 256, .num_slots = 10});
+  ASSERT_OK(pub);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "foobar", 6);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(0);
+  ASSERT_FALSE(pub_status.ok());
 }
 
 int main(int argc, char **argv) {

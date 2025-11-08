@@ -53,7 +53,9 @@ struct MessagePrefix {
   char padding2[64 - 44]; // Align to 64 bytes.
 
   bool IsActivation() const { return (flags & kMessageActivate) != 0; }
+  void SetIsActivation() { flags |= kMessageActivate; }
   bool IsBridged() const { return (flags & kMessageBridged) != 0; }
+  void SetIsBridged() { flags |= kMessageBridged; }
 };
 
 static_assert(sizeof(MessagePrefix) == 64,
@@ -260,12 +262,19 @@ struct ChannelControlBlock {          // a.k.a CCB
   std::atomic<uint32_t> max_message_size;
   std::atomic<uint32_t> total_drops;
 
+  // If true there are no more free slots and there's no need to check
+  // the bitset for them (there will never be another free slot)
+  std::atomic<bool> free_slots_exhausted;
+
   // Variable number of MessageSlot structs (num_slots long).
   MessageSlot slots[0];
   // Followed by:
   // AtomicBitSet<0> retiredSlots[num_slots];
   // Followed by:
+  // AtomicBitSet<0> freeSlots[num_slots];
+  // Followed by:
   // AtomicBitSet<0> availableSlots[kMaxSlotOwners];
+  //
 };
 
 inline size_t AvailableSlotsSize(int num_slots) {
@@ -275,7 +284,7 @@ inline size_t AvailableSlotsSize(int num_slots) {
 inline size_t CcbSize(int num_slots) {
   return Aligned(sizeof(ChannelControlBlock) +
                  num_slots * sizeof(MessageSlot)) +
-         Aligned(SizeofAtomicBitSet(num_slots)) + AvailableSlotsSize(num_slots);
+         Aligned(SizeofAtomicBitSet(num_slots)) * 2 + AvailableSlotsSize(num_slots);
 }
 
 struct SlotBuffer {
@@ -367,6 +376,10 @@ public:
     }
   }
 
+  int GetSubVchanId(int32_t i) const {
+    return ccb_->sub_vchan_ids[i];
+}
+
   void DumpSlots(std::ostream &os) const;
   virtual void Dump(std::ostream &os) const;
 
@@ -383,7 +396,7 @@ public:
 
   // Get the number of slots in the channel (can't be changed)
   int NumSlots() const { return num_slots_; }
-  void SetNumSlots(int n) { num_slots_ = n; }
+  virtual void SetNumSlots(int n) { num_slots_ = n; }
 
   void CleanupSlots(int owner, bool reliable, bool is_pub, int vchan_id);
 
@@ -426,6 +439,10 @@ public:
   char *EndOfRetiredSlots() const {
     return EndOfSlots() + Aligned(SizeofAtomicBitSet(num_slots_));
   }
+  char *EndOfFreeSlots() const {
+    return EndOfRetiredSlots() + Aligned(SizeofAtomicBitSet(num_slots_));
+  }
+
 
   InPlaceAtomicBitset *RetiredSlotsAddr() {
     return reinterpret_cast<InPlaceAtomicBitset *>(EndOfSlots());
@@ -439,13 +456,26 @@ public:
     return *reinterpret_cast<const InPlaceAtomicBitset *>(EndOfSlots());
   }
 
+
+  InPlaceAtomicBitset *FreeSlotsAddr() {
+    return reinterpret_cast<InPlaceAtomicBitset *>(EndOfRetiredSlots());
+  }
+
+  InPlaceAtomicBitset &FreeSlots() {
+    return *reinterpret_cast<InPlaceAtomicBitset *>(EndOfRetiredSlots());
+  }
+
+  const InPlaceAtomicBitset &FreeSlots() const {
+    return *reinterpret_cast<const InPlaceAtomicBitset *>(EndOfRetiredSlots());
+  }
+
   InPlaceAtomicBitset &GetAvailableSlots(int sub_id) {
     return *GetAvailableSlotsAddress(sub_id);
   }
 
   InPlaceAtomicBitset *GetAvailableSlotsAddress(int sub_id) {
     return reinterpret_cast<InPlaceAtomicBitset *>(
-        EndOfRetiredSlots() + SizeofAtomicBitSet(num_slots_) * sub_id);
+        EndOfFreeSlots() + SizeofAtomicBitSet(num_slots_) * sub_id);
   }
 
   bool IsActivated(int vchan_id) const {

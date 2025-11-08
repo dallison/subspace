@@ -46,6 +46,9 @@ int main(int argc, char **argv) {
   signal(SIGPIPE, SIG_IGN);
   signal(SIGQUIT, Signal);
 
+  // Close the plugins when the server is shutting down.
+  subspace::ClosePluginsOnShutdown();
+
   std::unique_ptr<subspace::Server> server;
 
   if (absl::GetFlag(FLAGS_peer_address).empty()) {
