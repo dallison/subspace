@@ -5,6 +5,7 @@
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
 #include "absl/hash/hash_testing.h"
+#include "absl/status/status_matchers.h"
 #include "client/client.h"
 #include "co/coroutine.h"
 #include "server/server.h"
@@ -17,7 +18,6 @@
 #include <signal.h>
 #include <sys/resource.h>
 #include <thread>
-#include "absl/status/status_matchers.h"
 
 ABSL_FLAG(bool, start_server, true, "Start the subspace server");
 ABSL_FLAG(std::string, server, "", "Path to server executable");
@@ -38,7 +38,7 @@ using InetAddress = toolbelt::InetAddress;
     if (!result.ok()) {                                                        \
       std::cerr << result.status() << std::endl;                               \
     }                                                                          \
-    ASSERT_OK(result);                                                  \
+    ASSERT_OK(result);                                                         \
     std::move(*result);                                                        \
   })
 
@@ -96,6 +96,7 @@ public:
   void TearDown() override {}
 
   void InitClient(subspace::Client &client) {
+    client.SetThreadSafe(true);
     ASSERT_OK(client.Init(Socket()));
   }
 
@@ -366,6 +367,96 @@ TEST_F(StressTest, Threads) {
   for (int i = 0; i < kNumClients; i++) {
     threads.push_back(std::thread([&, i]() { readAll(i); }));
   }
+
+  // Wait for all threads to complete.
+  for (auto &t : threads) {
+    t.join();
+  }
+  signal(SIGQUIT, oldSig);
+}
+
+TEST_F(StressTest, ThreadSafety) {
+  auto oldSig = signal(SIGQUIT, SigQuitHandler);
+
+  // Uses one client with a thread per pub and sub.  Stress test the thread safety of the client.
+  constexpr int kNumChannels = 100; // Channels per client.
+
+  constexpr int kMaxActiveMessages = 5;
+  // Number of channels accounts for all publishers, subscribers and unique_ptrs
+  constexpr int kNumSlots = kNumChannels * (2 + kMaxActiveMessages) + 1;
+
+  std::shared_ptr<subspace::Client> client;
+
+  std::vector<std::string> channels;
+  std::vector<subspace::Publisher> pubs;
+  std::vector<subspace::Subscriber> subs;
+
+  client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), absl::StrFormat("client")));
+  client->SetThreadSafe(true);
+
+  // Create the channel names.
+  for (int j = 0; j < kNumChannels; j++) {
+    channels.push_back(absl::StrFormat("/foobar/%d", j));
+  }
+  // Create the publishers.
+  for (int j = 0; j < kNumChannels; j++) {
+    pubs.emplace_back(EVAL_AND_ASSERT_OK(client->CreatePublisher(
+        channels[j], {.slot_size = 32, .num_slots = kNumSlots})));
+  }
+
+  // Create the subscribers.
+  for (int j = 0; j < kNumChannels; j++) {
+    subs.emplace_back(EVAL_AND_ASSERT_OK(client->CreateSubscriber(
+        channels[j], {.max_active_messages = kMaxActiveMessages})));
+  }
+
+  std::vector<std::thread> threads;
+
+  // Publish messages
+  auto publish = [&](int pubId) {
+    for (int i = 0; i < kNumSlots - 1; i++) {
+      absl::StatusOr<void *> buffer = pubs[pubId].GetMessageBuffer();
+      ASSERT_OK(buffer);
+      memcpy(*buffer, "foobar", 6);
+      absl::StatusOr<const Message> pubStatus = pubs[pubId].PublishMessage(6);
+      ASSERT_OK(pubStatus);
+    }
+  };
+
+  // Publish all messages from all publishers in all clients.
+  for (int i = 0; i < kNumChannels; i++) {
+    threads.push_back(std::thread([&, i]() { publish(i); }));
+  }
+
+  // Read all messages from a single subscriber.
+  auto read = [&](int subId) {
+    int num_messages = 0;
+    while (num_messages < kNumSlots - 1) {
+      // Wait for notification of a message.
+      ASSERT_OK(subs[subId].Wait());
+
+      // Read all available messages up to our active message limit.
+      absl::StatusOr<std::vector<::subspace::Message>> msgs =
+          subs[subId].GetAllMessages();
+      ASSERT_OK(msgs);
+      auto all = *msgs;
+      for (auto &msg : all) {
+        if (msg.length == 0) {
+          break;
+        }
+        num_messages++;
+        ASSERT_EQ(6, msg.length);
+      }
+    }
+  };
+
+  // Read all messages in all clients.
+  for (int i = 0; i < kNumChannels; i++) {
+    threads.push_back(std::thread([&, i]() { read(i); }));
+  }
+
+  std::cerr << threads.size() << " threads created" << std::endl;
 
   // Wait for all threads to complete.
   for (auto &t : threads) {
@@ -683,22 +774,11 @@ TEST_F(StressTest, VirtualChannels) {
   // Create a subscriber to the mux.
   absl::StatusOr<Subscriber> s = subClient->CreateSubscriber("/foobar");
   ASSERT_OK(s);
-  int pipes[2];
-  ASSERT_EQ(0, pipe(pipes));
-  toolbelt::FileDescriptor rfd(pipes[0]);
 
   // Thread to read messages from the mux.
-  std::thread sub_thread([&s, pipes, &rfd]() {
+  std::thread sub_thread([&s]() {
     int num_messages = 0;
     while (num_messages < kNumMessages) {
-      // Wait for notification of a message.
-      absl::StatusOr<int> waitStatus = s->Wait(rfd);
-      ASSERT_OK(waitStatus);
-      if (*waitStatus == pipes[0]) {
-        // We got a notification from the pipe, so we can read messages.
-        continue;
-      }
-
       // Read all available messages.
       for (;;) {
         absl::StatusOr<Message> m = s->ReadMessage();
@@ -735,14 +815,9 @@ TEST_F(StressTest, VirtualChannels) {
   for (auto &t : threads) {
     t.join();
   }
-  sleep(2);
-  // Interrupt the subscriber to cause it to stop.
-  close(pipes[1]);
 
   // Wait for the subscriber to finish.
   sub_thread.join();
-
-  close(pipes[0]);
 }
 
 TEST_F(StressTest, ManyChannelsNonMultiplexed) {

@@ -118,6 +118,7 @@ public:
   void TearDown() override {}
 
   void InitClient(subspace::Client &client) {
+    client.SetThreadSafe(true);
     ASSERT_OK(client.Init(Socket()));
   }
 
@@ -199,6 +200,9 @@ TEST_F(ClientTest, Resize1) {
   absl::StatusOr<void *> buffer3 = pub->GetMessageBuffer(512);
   ASSERT_OK(buffer3);
   ASSERT_EQ(512, pub->SlotSize());
+
+  // For thread safety support we need to cancel the publish if we don't want to send it.
+  pub->CancelPublish();
 }
 
 TEST_F(ClientTest, ResizeCallback) {
@@ -241,6 +245,8 @@ TEST_F(ClientTest, ResizeCallback) {
   // allows one resize.
   absl::StatusOr<void *> buffer4 = pub->GetMessageBuffer(1000);
   ASSERT_FALSE(buffer4.ok());
+  // For thread safety support we need to cancel the publish if we don't want to send it.
+  pub->CancelPublish();
 }
 
 TEST_F(ClientTest, CreatePublisherWithType) {

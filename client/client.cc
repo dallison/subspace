@@ -19,6 +19,75 @@ using ClientChannel = details::ClientChannel;
 using SubscriberImpl = details::SubscriberImpl;
 using PublisherImpl = details::PublisherImpl;
 
+// Get the current thread as a 64 bit number.
+static uint64_t GetThreadId() {
+  return static_cast<uint64_t>(pthread_self());
+}
+
+ClientImpl::ClientLockGuard::ClientLockGuard(
+    ClientImpl *client, LockMode lock_mode)
+    : client_(client), lock_mode_(lock_mode) {
+  if (!client_->thread_safe_) {
+    return;
+  }
+  switch (lock_mode_) {
+  case LockMode::kAutoLock:
+    Lock();
+    break;
+  case LockMode::kDeferredLock: {
+    uint64_t old_thread_id = GetThreadId();
+    uint64_t new_thread_id = old_thread_id;
+    // If we the current owner of the lock we allow to continue without
+    // relocking. If we are not the current owner, we lock the mutex.
+    if (!client_->owner_thread_id_.compare_exchange_strong(old_thread_id, new_thread_id, std::memory_order_relaxed)) {
+      Lock();
+    }
+    client_->owner_thread_id_.store(new_thread_id, std::memory_order_relaxed);
+    break;
+  }
+  case LockMode::kAlreadyLocked:
+    locked_ = true;
+    break;
+  }
+}
+
+ClientImpl::ClientLockGuard::~ClientLockGuard() {
+  if (!client_->thread_safe_) {
+    return;
+  }
+  switch (lock_mode_) {
+  case LockMode::kAutoLock:
+    Unlock();
+    break;
+  case LockMode::kDeferredLock:
+    if (!committed_) {
+      Unlock();
+    }
+    break;
+  case LockMode::kAlreadyLocked:
+    Unlock();
+    break;
+  }
+}
+
+void ClientImpl::ClientLockGuard::Lock() {
+  client_->mutex_.lock();
+  locked_ = true;
+}
+
+void ClientImpl::ClientLockGuard::Unlock() {
+  client_->mutex_.unlock();
+  locked_ = false;
+  client_->owner_thread_id_.store(0, std::memory_order_relaxed);
+}
+
+void ClientImpl::ClientLockGuard::CommitLock() {
+  if (lock_mode_ != LockMode::kDeferredLock) {
+    return;
+  }
+  committed_ = true;
+}
+
 absl::Status ClientImpl::CheckConnected() const {
   if (!socket_.Connected()) {
     return absl::InternalError(
@@ -29,6 +98,7 @@ absl::Status ClientImpl::CheckConnected() const {
 
 absl::Status ClientImpl::Init(const std::string &server_socket,
                               const std::string &client_name) {
+  ClientLockGuard guard(this);
   if (socket_.Connected()) {
     return absl::InternalError("Client is already connected to the server; "
                                "Init() called twice perhaps?");
@@ -57,6 +127,7 @@ absl::Status ClientImpl::Init(const std::string &server_socket,
 absl::Status ClientImpl::RegisterDroppedMessageCallback(
     SubscriberImpl *subscriber,
     std::function<void(SubscriberImpl *, int64_t)> callback) {
+  ClientLockGuard guard(this);
   if (dropped_message_callbacks_.find(subscriber) !=
       dropped_message_callbacks_.end()) {
     return absl::InternalError(
@@ -70,6 +141,7 @@ absl::Status ClientImpl::RegisterDroppedMessageCallback(
 
 absl::Status
 ClientImpl::UnregisterDroppedMessageCallback(SubscriberImpl *subscriber) {
+  ClientLockGuard guard(this);
   auto it = dropped_message_callbacks_.find(subscriber);
   if (it == dropped_message_callbacks_.end()) {
     return absl::InternalError(absl::StrFormat(
@@ -83,6 +155,7 @@ ClientImpl::UnregisterDroppedMessageCallback(SubscriberImpl *subscriber) {
 absl::Status ClientImpl::RegisterMessageCallback(
     SubscriberImpl *subscriber,
     std::function<void(SubscriberImpl *, Message)> callback) {
+  ClientLockGuard guard(this);
   auto it = message_callbacks_.find(subscriber);
   if (it != message_callbacks_.end()) {
     return absl::InternalError(absl::StrFormat(
@@ -94,6 +167,7 @@ absl::Status ClientImpl::RegisterMessageCallback(
 }
 
 absl::Status ClientImpl::UnregisterMessageCallback(SubscriberImpl *subscriber) {
+  ClientLockGuard guard(this);
   auto it = message_callbacks_.find(subscriber);
   if (it == message_callbacks_.end()) {
     return absl::InternalError(absl::StrFormat(
@@ -107,6 +181,7 @@ absl::Status ClientImpl::UnregisterMessageCallback(SubscriberImpl *subscriber) {
 absl::Status ClientImpl::RegisterResizeCallback(
     PublisherImpl *publisher,
     std::function<absl::Status(PublisherImpl *, int32_t, int32_t)> callback) {
+  ClientLockGuard guard(this);
   if (resize_callbacks_.find(publisher) != resize_callbacks_.end()) {
     return absl::InternalError(absl::StrFormat(
         "A resize callback has already been registered for channel %s\n",
@@ -117,6 +192,7 @@ absl::Status ClientImpl::RegisterResizeCallback(
 }
 
 absl::Status ClientImpl::UnregisterResizeCallback(PublisherImpl *publisher) {
+  ClientLockGuard guard(this);
   auto it = resize_callbacks_.find(publisher);
   if (it == resize_callbacks_.end()) {
     return absl::InternalError(absl::StrFormat(
@@ -129,12 +205,18 @@ absl::Status ClientImpl::UnregisterResizeCallback(PublisherImpl *publisher) {
 
 absl::Status ClientImpl::ProcessAllMessages(details::SubscriberImpl *subscriber,
                                             ReadMode mode) {
-  auto it = message_callbacks_.find(subscriber);
-  if (it == message_callbacks_.end()) {
-    return absl::InternalError(absl::StrFormat(
-        "No message callback has been registered for channel %s\n",
-        subscriber->Name()));
+  std::function<void(details::SubscriberImpl *, Message)> callback;
+  {
+    ClientLockGuard guard(this);
+    auto it = message_callbacks_.find(subscriber);
+    if (it == message_callbacks_.end()) {
+      return absl::InternalError(absl::StrFormat(
+          "No message callback has been registered for channel %s\n",
+          subscriber->Name()));
+    }
+    callback = it->second;
   }
+
   for (;;) {
     absl::StatusOr<Message> msg = ReadMessage(subscriber, mode);
     if (!msg.ok()) {
@@ -143,7 +225,7 @@ absl::Status ClientImpl::ProcessAllMessages(details::SubscriberImpl *subscriber,
     if (msg->length == 0) {
       break;
     }
-    it->second(subscriber, std::move(*msg));
+    callback(subscriber, std::move(*msg));
   }
   return absl::OkStatus();
 }
@@ -179,6 +261,7 @@ ClientImpl::GetAllMessages(details::SubscriberImpl *subscriber, ReadMode mode) {
 absl::StatusOr<Publisher>
 ClientImpl::CreatePublisher(const std::string &channel_name,
                             const PublisherOptions &opts) {
+  ClientLockGuard guard(this);
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -296,6 +379,7 @@ ClientImpl::CreatePublisher(const std::string &channel_name, int slot_size,
 absl::StatusOr<Subscriber>
 ClientImpl::CreateSubscriber(const std::string &channel_name,
                              const SubscriberOptions &opts) {
+  ClientLockGuard guard(this);
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -411,6 +495,10 @@ absl::StatusOr<void *> ClientImpl::GetMessageBuffer(PublisherImpl *publisher,
 
 absl::StatusOr<absl::Span<std::byte>>
 ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int32_t max_size) {
+  // If the current thread is calling this while it already owns the mutex we
+  // allow it to continue without locking.  If another t thread is trying to
+  // call this lock the mutex until the current thread releases it.
+  ClientLockGuard guard(this, LockMode::kDeferredLock);
 
   if (publisher->IsReliable()) {
     publisher->ClearPollFd();
@@ -464,6 +552,11 @@ ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int32_t max_size) {
     return absl::InternalError(
         absl::StrFormat("1 Channel %s has no buffer", publisher->Name()));
   }
+  // If we are returning a valid message buffer we commit the lock so that we can hold onto it until
+  // the message is published or cancelled.
+  if (span_size > 0) {
+    guard.CommitLock();
+  }
   return absl::Span<std::byte>(reinterpret_cast<std::byte *>(buffer),
                                span_size);
 }
@@ -478,6 +571,10 @@ absl::StatusOr<const Message>
 ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
                                    int64_t message_size, bool omit_prefix,
                                    bool use_prefix_slot_id) {
+  // Lock is already held by the call to GetMessageBufferSpan.  This RAII
+  // instance wil relesas the lock when we return from this function.
+  ClientLockGuard guard(this, LockMode::kAlreadyLocked);
+
   // Check if there are any new subscribers and if so, load their trigger fds.
   if (absl::Status status = ReloadSubscribersIfNecessary(publisher);
       !status.ok()) {
@@ -538,6 +635,11 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
 
   return Message(message_size, nullptr, msg.ordinal, msg.timestamp,
                  publisher->VirtualChannelId(), false, old_slot_id);
+}
+
+void ClientImpl::CancelPublish(PublisherImpl *publisher) {
+  // Creating this object will unlock the mutex when it goes out of scope.
+  ClientLockGuard guard(this, LockMode::kAlreadyLocked);
 }
 
 absl::Status
@@ -839,10 +941,13 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
 
 absl::StatusOr<Message> ClientImpl::ReadMessage(SubscriberImpl *subscriber,
                                                 ReadMode mode) {
+
+  ClientLockGuard guard(this);
   // If the channel is a placeholder (no publishers present), look
   // in the SCB to see if a new publisher has been created and if so,
   // talk to the server to get the information to reload the shared
-  // memory.  If there still isn't a publisher, we will still be a placeholder.
+  // memory.  If there still isn't a publisher, we will still be a
+  // placeholder.
   if (subscriber->IsPlaceholder()) {
     absl::Status status = ReloadSubscriber(subscriber);
     if (!status.ok() || subscriber->IsPlaceholder()) {
@@ -866,7 +971,6 @@ absl::StatusOr<Message> ClientImpl::ReadMessage(SubscriberImpl *subscriber,
 absl::StatusOr<Message>
 ClientImpl::FindMessageInternal(SubscriberImpl *subscriber,
                                 uint64_t timestamp) {
-
   MessageSlot *new_slot = subscriber->FindMessage(timestamp);
   if (new_slot == nullptr) {
     // Not found.
@@ -879,9 +983,13 @@ ClientImpl::FindMessageInternal(SubscriberImpl *subscriber,
 
 absl::StatusOr<Message> ClientImpl::FindMessage(SubscriberImpl *subscriber,
                                                 uint64_t timestamp) {
+
+  ClientLockGuard guard(this);
+
   // If the channel is a placeholder (no publishers present), contact the
   // server to see if there is now a publisher.  This will reload the shared
-  // memory.  If there still isn't a publisher, we will still be a placeholder.
+  // memory.  If there still isn't a publisher, we will still be a
+  // placeholder.
   if (subscriber->IsPlaceholder()) {
     absl::Status status = ReloadSubscriber(subscriber);
     if (!status.ok() || subscriber->IsPlaceholder()) {
@@ -896,6 +1004,7 @@ absl::StatusOr<Message> ClientImpl::FindMessage(SubscriberImpl *subscriber,
   if (!status.ok()) {
     return status;
   }
+
   return FindMessageInternal(subscriber, timestamp);
 }
 
@@ -926,7 +1035,8 @@ ClientImpl::GetFileDescriptor(PublisherImpl *publisher) const {
   return publisher->GetPollFd();
 }
 
-int64_t ClientImpl::GetCurrentOrdinal(SubscriberImpl *sub) const {
+int64_t ClientImpl::GetCurrentOrdinal(SubscriberImpl *sub) {
+  ClientLockGuard guard(this);
   MessageSlot *slot = sub->CurrentSlot();
   if (slot == nullptr) {
     return -1;
@@ -1176,6 +1286,7 @@ absl::Status ClientImpl::RemoveChannel(ClientChannel *channel) {
 }
 
 absl::Status ClientImpl::RemovePublisher(PublisherImpl *publisher) {
+  ClientLockGuard guard(this);
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -1201,6 +1312,7 @@ absl::Status ClientImpl::RemovePublisher(PublisherImpl *publisher) {
 }
 
 absl::Status ClientImpl::RemoveSubscriber(SubscriberImpl *subscriber) {
+  ClientLockGuard guard(this);
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -1281,6 +1393,7 @@ ClientImpl::GetChannelInfo(const std::string &channel) {
 }
 
 absl::StatusOr<const std::vector<ChannelInfo>> ClientImpl::GetChannelInfo() {
+  ClientLockGuard guard(this);
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -1316,6 +1429,7 @@ absl::StatusOr<const std::vector<ChannelInfo>> ClientImpl::GetChannelInfo() {
 }
 
 absl::StatusOr<bool> ClientImpl::ChannelExists(const std::string &channelName) {
+  ClientLockGuard guard(this);
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -1325,6 +1439,7 @@ absl::StatusOr<bool> ClientImpl::ChannelExists(const std::string &channelName) {
 
 absl::StatusOr<const ChannelStats>
 ClientImpl::GetChannelStats(const std::string &channel) {
+  ClientLockGuard guard(this);
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -1357,6 +1472,7 @@ ClientImpl::GetChannelStats(const std::string &channel) {
 }
 
 absl::StatusOr<const std::vector<ChannelStats>> ClientImpl::GetChannelStats() {
+  ClientLockGuard guard(this);
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -1413,6 +1529,7 @@ absl::Status ClientImpl::SendRequestReceiveResponse(
     const Request &req, Response &response,
     std::vector<toolbelt::FileDescriptor> &fds) {
 
+  // std::cerr << "Sending request " << req.DebugString() << "\n";
   {
     // SendMessage needs 4 bytes before the buffer passed to
     // use for the length.
