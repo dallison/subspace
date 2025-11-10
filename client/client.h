@@ -24,9 +24,11 @@
 #include <chrono>
 #include <cstddef>
 #include <functional>
+#include <mutex>
+#include <pthread.h>
 #include <string>
 #include <sys/poll.h>
-
+#include <thread>
 namespace subspace {
 
 enum class ReadMode {
@@ -207,6 +209,39 @@ private:
   friend class Publisher;
   friend class Subscriber;
 
+  enum class LockMode {
+    kAutoLock,     // Lock on construction, unlock on destruction
+    kDeferredLock, // Locks if not already locked by the current thread, unlocks
+                   // if not committed.
+    kAlreadyLocked, // Already locked by the current thread, unlock on
+                    // destruction
+  };
+
+  // RAII class to conditionally lock a mutex.  This is like std::lock_guard but
+  // allows a locking mode to be specified.  The default is be behave like
+  // std::lock_guard.  To support holding the lock across GetMessageBuffer and
+  // PublishMessage calls it also support deferring the lock and unlock.  This
+  // mode also allows for calls to GetMessageBuffer multiple times without
+  // publishing.
+  class ClientLockGuard {
+  public:
+    ClientLockGuard(ClientImpl *client,
+                    LockMode lock_mode = LockMode::kAutoLock);
+    ~ClientLockGuard();
+    void Lock();
+    void Unlock();
+
+    // If we are using a deferred lock we need to commit it before the object is
+    // desctructed if we want to hold onto the lock.
+    void CommitLock();
+
+  private:
+    ClientImpl *client_;
+    LockMode lock_mode_;
+    bool locked_ = false;
+    bool committed_ = false;
+  };
+
   const std::string &GetName() const { return name_; }
 
   // Initialize the client by connecting to the server.
@@ -235,6 +270,8 @@ private:
   // Call with true to turn on some debug information.  Kind of meaningless
   // information unless you know how this works in detail.
   void SetDebug(bool v) { debug_ = v; }
+
+  void SetThreadSafe(bool v) { thread_safe_ = v; }
 
   // Get a snapshot of the current number of publishers and subscribers
   // for the given channel (publisher or subscriber)
@@ -281,6 +318,10 @@ private:
   // the publisher cannot access the message once it's been published.
   absl::StatusOr<const Message>
   PublishMessage(details::PublisherImpl *publisher, int64_t message_size);
+
+  // In thread-safe mode, if you don't want to publish the message, you must cancel the
+  // publish.  This will release the lock.
+  void CancelPublish(details::PublisherImpl *publisher);
 
   // Wait until a reliable publisher can try again to send a message.  If the
   // client is coroutine-aware, the coroutine will wait.  If it's not,
@@ -421,7 +462,7 @@ private:
                  ReadMode mode = ReadMode::kReadNext);
 
   // Get the most recently received ordinal for the subscriber.
-  int64_t GetCurrentOrdinal(details::SubscriberImpl *sub) const;
+  int64_t GetCurrentOrdinal(details::SubscriberImpl *sub);
 
   absl::Status CheckConnected() const;
   absl::Status
@@ -492,6 +533,13 @@ private:
       resize_callbacks_;
   bool debug_ = false;
   toolbelt::Logger logger_;
+  mutable std::mutex mutex_;
+  std::atomic<uint64_t> owner_thread_id_ = {};
+
+  // For backward compatibility we default to non-thread-safe because it has
+  // implications for the GetMessageBufferSpan function.  You have to publish
+  // the message or call CancelPublish in order to release the lock.
+  bool thread_safe_ = false;
 };
 
 // This function returns an subspace::shared_ptr that refers to the message
@@ -565,12 +613,16 @@ public:
   // detect when another attempt can be made to get a buffer.
   // If max_size is greater than the current buffer size, the buffers
   // will be resized.
+  //
+  // In thread-safe mode, this will hold a lock on the client until you publish
+  // the message.  If you don't want to publish the message, you must cancel the
+  // publish using CancelPublish.  This will release the lock.
   absl::StatusOr<void *> GetMessageBuffer(int32_t max_size = -1) {
     return client_->GetMessageBuffer(impl_.get(), max_size);
   }
 
   // Get the messsage buffer as a span.  Returns an empty span if there is no
-  // buffer available
+  // buffer available.  See GetMessageBuffer for details of
   absl::StatusOr<absl::Span<std::byte>>
   GetMessageBufferSpan(int32_t max_size = -1) {
     return client_->GetMessageBufferSpan(impl_.get(), max_size);
@@ -580,6 +632,9 @@ public:
   // argument specifies the actual size of the message to send.  Returns the
   // information about the message sent with buffer set to nullptr since
   // the publisher cannot access the message once it's been published.
+  //
+  // In thread-safe mode, this will release the lock on the client.  If you don't
+  // want to publish the message, you must cancel the publish using CancelPublish.
   absl::StatusOr<const Message> PublishMessage(int64_t message_size) {
     return client_->PublishMessage(impl_.get(), message_size);
   }
@@ -589,10 +644,17 @@ public:
   // If the message arrived over a bridge and you want to pass the retirement
   // back over the bridge, use the slot id from the prefix.  If the retirement
   // notification is locally handled, use the slot id from the message.
+  //
+  // In thread-safe mode, this will release the lock on the client.  If you don't
+  // want to publish the message, you must cancel the publish using CancelPublish.
   absl::StatusOr<const Message>
-  PublishMessageWithPrefix(int64_t message_size, bool use_slot_id_from_prefix = true) {
+  PublishMessageWithPrefix(int64_t message_size,
+                           bool use_slot_id_from_prefix = true) {
     return PublishMessageInternal(message_size, true, use_slot_id_from_prefix);
   }
+
+  // If you don't want to publish the message, you must cancel the publish.  This will release the lock.
+  void CancelPublish() { client_->CancelPublish(impl_.get()); }
 
   // Wait until a reliable publisher can try again to send a message.  If the
   // client is coroutine-aware, the coroutine will wait.  If it's not,
@@ -707,7 +769,6 @@ public:
   int CurrentSlotId() const { return impl_->CurrentSlotId(); }
 
   MessageSlot *CurrentSlot() const { return impl_->CurrentSlot(); }
-
 
 private:
   friend class Server;
@@ -1034,6 +1095,8 @@ public:
   // Call with true to turn on some debug information.  Kind of meaningless
   // information unless you know how this works in detail.
   void SetDebug(bool v) { impl_->SetDebug(v); }
+
+  void SetThreadSafe(bool v) { impl_->SetThreadSafe(v); }
 
   absl::StatusOr<const ChannelCounters>
   GetChannelCounters(const std::string &channel_name) const {

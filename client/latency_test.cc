@@ -94,6 +94,7 @@ public:
   void TearDown() override {}
 
   void InitClient(subspace::Client &client) {
+    client.SetThreadSafe(true);
     ASSERT_OK(client.Init(Socket()));
   }
 
@@ -682,6 +683,101 @@ TEST_F(LatencyTest, PublisherLatencyHistogram) {
     show_latencies(latencies);
   }
 }
+
+
+TEST_F(LatencyTest, PublisherLatencyHistogramThreadSafe) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  pub_client.SetThreadSafe(true);
+  sub_client.SetThreadSafe(true);
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  auto show_latencies = [](std::vector<uint64_t> &latencies) {
+    // Sort latencies.
+    std::sort(latencies.begin(), latencies.end());
+    // Min latency.
+    std::cerr << latencies.front() << ",";
+    // Median.
+    std::cerr << latencies[latencies.size() / 2] << ",";
+    // P99 latency.
+    std::cerr << latencies[latencies.size() * 99 / 100] << ",";
+    // Max latency.
+    std::cerr << latencies.back() << ",";
+    // Average latency.
+    uint64_t sum = 0;
+    for (auto &l : latencies) {
+      sum += l;
+    }
+    std::cerr << sum / latencies.size() << "\n";
+  };
+  constexpr int kNumMessages = 20000;
+  for (int num_slots = 10; num_slots < 100000;
+       num_slots = (num_slots)*15 / 10) {
+    absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
+        "publat", 256, num_slots, {.reliable = false});
+    ASSERT_OK(pub);
+
+    std::cerr << num_slots << ",";
+    absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
+        "publat", {.reliable = false, .log_dropped_messages = false});
+    ASSERT_OK(sub);
+
+    std::vector<uint64_t> latencies;
+    latencies.reserve(kNumMessages);
+
+    // Send messages ensuring there is always a retired message.  Measure the
+    // total time to send (but not to receive).
+    for (int i = 0; i < kNumMessages; i++) {
+      // Publish a message.
+      uint64_t start_time = toolbelt::Now();
+      absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+      ASSERT_OK(buffer);
+      absl::StatusOr<const Message> pub_status = pub->PublishMessage(100);
+      ASSERT_OK(pub_status);
+      uint64_t end = toolbelt::Now();
+      latencies.push_back(end - start_time);
+
+      absl::StatusOr<Message> msg = sub->ReadMessage();
+      ASSERT_OK(msg);
+      ASSERT_EQ(100, msg->length);
+    }
+
+    show_latencies(latencies);
+    latencies.clear();
+    std::cerr << num_slots << ",";
+
+    // Now fill the channel.
+    for (int i = 0; i < num_slots; i++) {
+      absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+      ASSERT_OK(buffer);
+      if (*buffer == nullptr) {
+        // Can't send, wait until we can try again.
+        ASSERT_OK(pub->Wait());
+        continue;
+      }
+      absl::StatusOr<const Message> pub_status = pub->PublishMessage(100);
+      // std::cerr << "pub status " << pub_status.status() << "\n";
+      ASSERT_OK(pub_status);
+    }
+
+    // Send the same number of messages but with the channel full so that it has
+    // to take messages that subscribers have not yet seen.
+    for (int i = 0; i < kNumMessages; i++) {
+      // Publish a message.
+      uint64_t start_time = toolbelt::Now();
+      absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+      ASSERT_OK(buffer);
+
+      absl::StatusOr<const Message> pub_status = pub->PublishMessage(100);
+      ASSERT_OK(pub_status);
+      uint64_t end = toolbelt::Now();
+      latencies.push_back(end - start_time);
+    }
+    show_latencies(latencies);
+  }
+}
+
 
 TEST_F(LatencyTest, PublisherLatencyMultiSub) {
   subspace::Client pub_client;
