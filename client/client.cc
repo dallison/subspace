@@ -20,12 +20,10 @@ using SubscriberImpl = details::SubscriberImpl;
 using PublisherImpl = details::PublisherImpl;
 
 // Get the current thread as a 64 bit number.
-static uint64_t GetThreadId() {
-  return static_cast<uint64_t>(pthread_self());
-}
+static uint64_t GetThreadId() { return static_cast<uint64_t>(pthread_self()); }
 
-ClientImpl::ClientLockGuard::ClientLockGuard(
-    ClientImpl *client, LockMode lock_mode)
+ClientImpl::ClientLockGuard::ClientLockGuard(ClientImpl *client,
+                                             LockMode lock_mode)
     : client_(client), lock_mode_(lock_mode) {
   if (!client_->thread_safe_) {
     return;
@@ -34,20 +32,19 @@ ClientImpl::ClientLockGuard::ClientLockGuard(
   case LockMode::kAutoLock:
     Lock();
     break;
+  case LockMode::kMaybeLocked:
   case LockMode::kDeferredLock: {
     uint64_t old_thread_id = GetThreadId();
     uint64_t new_thread_id = old_thread_id;
     // If we the current owner of the lock we allow to continue without
     // relocking. If we are not the current owner, we lock the mutex.
-    if (!client_->owner_thread_id_.compare_exchange_strong(old_thread_id, new_thread_id, std::memory_order_relaxed)) {
+    if (!client_->owner_thread_id_.compare_exchange_strong(
+            old_thread_id, new_thread_id, std::memory_order_relaxed)) {
       Lock();
     }
     client_->owner_thread_id_.store(new_thread_id, std::memory_order_relaxed);
     break;
   }
-  case LockMode::kAlreadyLocked:
-    locked_ = true;
-    break;
   }
 }
 
@@ -64,7 +61,7 @@ ClientImpl::ClientLockGuard::~ClientLockGuard() {
       Unlock();
     }
     break;
-  case LockMode::kAlreadyLocked:
+  case LockMode::kMaybeLocked:
     Unlock();
     break;
   }
@@ -482,8 +479,9 @@ static uint64_t ExpandSlotSize(uint64_t slotSize) {
 }
 
 absl::StatusOr<void *> ClientImpl::GetMessageBuffer(PublisherImpl *publisher,
-                                                    int32_t max_size) {
-  auto span_or_status = GetMessageBufferSpan(publisher, max_size);
+                                                    int32_t max_size,
+                                                    bool lock) {
+  auto span_or_status = GetMessageBufferSpan(publisher, max_size, lock);
   if (!span_or_status.ok()) {
     return span_or_status.status();
   }
@@ -494,12 +492,13 @@ absl::StatusOr<void *> ClientImpl::GetMessageBuffer(PublisherImpl *publisher,
 }
 
 absl::StatusOr<absl::Span<std::byte>>
-ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int32_t max_size) {
+ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int32_t max_size,
+                                 bool lock) {
   // If the current thread is calling this while it already owns the mutex we
   // allow it to continue without locking.  If another t thread is trying to
   // call this lock the mutex until the current thread releases it.
-  ClientLockGuard guard(this, LockMode::kDeferredLock);
-
+  ClientLockGuard guard(this,
+                        lock ? LockMode::kDeferredLock : LockMode::kMaybeLocked);
   if (publisher->IsReliable()) {
     publisher->ClearPollFd();
   }
@@ -552,8 +551,8 @@ ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int32_t max_size) {
     return absl::InternalError(
         absl::StrFormat("1 Channel %s has no buffer", publisher->Name()));
   }
-  // If we are returning a valid message buffer we commit the lock so that we can hold onto it until
-  // the message is published or cancelled.
+  // If we are returning a valid message buffer we commit the lock so that we
+  // can hold onto it until the message is published or cancelled.
   if (span_size > 0) {
     guard.CommitLock();
   }
@@ -573,7 +572,7 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
                                    bool use_prefix_slot_id) {
   // Lock is already held by the call to GetMessageBufferSpan.  This RAII
   // instance wil relesas the lock when we return from this function.
-  ClientLockGuard guard(this, LockMode::kAlreadyLocked);
+  ClientLockGuard guard(this, LockMode::kMaybeLocked);
 
   // Check if there are any new subscribers and if so, load their trigger fds.
   if (absl::Status status = ReloadSubscribersIfNecessary(publisher);
@@ -639,7 +638,7 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
 
 void ClientImpl::CancelPublish(PublisherImpl *publisher) {
   // Creating this object will unlock the mutex when it goes out of scope.
-  ClientLockGuard guard(this, LockMode::kAlreadyLocked);
+  ClientLockGuard guard(this, LockMode::kMaybeLocked);
 }
 
 absl::Status

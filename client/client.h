@@ -213,7 +213,7 @@ private:
     kAutoLock,     // Lock on construction, unlock on destruction
     kDeferredLock, // Locks if not already locked by the current thread, unlocks
                    // if not committed.
-    kAlreadyLocked, // Already locked by the current thread, unlock on
+    kMaybeLocked, // Maybe locked by the current thread, lock if not, unlock on
                     // destruction
   };
 
@@ -305,12 +305,11 @@ private:
   // If max_size is greater than the current buffer size, the buffers
   // will be resized.
   absl::StatusOr<void *> GetMessageBuffer(details::PublisherImpl *publisher,
-                                          int32_t max_size);
-
+                                          int32_t max_size, bool lock);
   // Get the messsage buffer as a span.  Returns an empty span if there is no
   // buffer available
   absl::StatusOr<absl::Span<std::byte>>
-  GetMessageBufferSpan(details::PublisherImpl *publisher, int32_t max_size);
+  GetMessageBufferSpan(details::PublisherImpl *publisher, int32_t max_size, bool lock);
 
   // Publish the message in the publisher's buffer.  The message_size
   // argument specifies the actual size of the message to send.  Returns the
@@ -617,15 +616,15 @@ public:
   // In thread-safe mode, this will hold a lock on the client until you publish
   // the message.  If you don't want to publish the message, you must cancel the
   // publish using CancelPublish.  This will release the lock.
-  absl::StatusOr<void *> GetMessageBuffer(int32_t max_size = -1) {
-    return client_->GetMessageBuffer(impl_.get(), max_size);
+  absl::StatusOr<void *> GetMessageBuffer(int32_t max_size = -1, bool lock = true) {
+    return client_->GetMessageBuffer(impl_.get(), max_size, lock);
   }
 
   // Get the messsage buffer as a span.  Returns an empty span if there is no
   // buffer available.  See GetMessageBuffer for details of
   absl::StatusOr<absl::Span<std::byte>>
-  GetMessageBufferSpan(int32_t max_size = -1) {
-    return client_->GetMessageBufferSpan(impl_.get(), max_size);
+  GetMessageBufferSpan(int32_t max_size = -1, bool lock = true) {
+    return client_->GetMessageBufferSpan(impl_.get(), max_size, lock);
   }
 
   // Publish the message in the publisher's buffer.  The message_size
