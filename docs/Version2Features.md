@@ -157,3 +157,29 @@ RPC is a way for one process to invoke a procedure on another.  Subspace 2 provi
 The RPC system comprises a set of clients and a set of servers.  Each server provides a set of services (functions) that can be invoked from the client.  Internally, subspace creates request and response channels and uses reliable messaging.
 
 TODO: fully document this...
+
+## Thread safety
+A new feature of Subspace version 2 is the addition of optional thread-safety features.  This adds a
+mutual exclusion lock (mutex) to the client that allows multiple threads to use it once.  The lock
+is used if you call:
+
+```c++
+SetThreadSafe(true)
+```
+on the Client object after you create it.
+
+Most of the thread-safety features are invisible to the user with one exception.
+
+When you call `GetMessageBuffer` or `GetMessageBufferSpan` the client will be locked to the
+current thread until you call `PublishMessage` or `CancelPublish`.  The usual method of sending
+messages is to call `GetMessageBuffer` to obtain a pointer to the shared memory for the buffer, then
+serialize the message into the memory, and then publish the message.  When thread-safety is enabled
+the client will be locked while this is occurring.  This is necessary to prevent another thread
+making these same sequence of calls at the same time and corrupting the message.
+
+If you want to disable this locking functionality you can pass a `false` second argument to `GetMessageBuffer` to
+tell it to not hold the lock.  This will be useful if you are doing zero-copy operations where the
+time between getting the buffer and publishing the message is longer and holding the lock would prevent
+any other usage of the client.  You will need to be careful with thread safety yourself in this case, but that
+is always a given.
+

@@ -197,12 +197,9 @@ TEST_F(ClientTest, Resize1) {
   ASSERT_EQ(512, pub->SlotSize());
 
   // Won't resize.
-  absl::StatusOr<void *> buffer3 = pub->GetMessageBuffer(512);
+  absl::StatusOr<void *> buffer3 = pub->GetMessageBuffer(512, false);
   ASSERT_OK(buffer3);
   ASSERT_EQ(512, pub->SlotSize());
-
-  // For thread safety support we need to cancel the publish if we don't want to send it.
-  pub->CancelPublish();
 }
 
 TEST_F(ClientTest, ResizeCallback) {
