@@ -20,7 +20,7 @@ using SubscriberImpl = details::SubscriberImpl;
 using PublisherImpl = details::PublisherImpl;
 
 // Get the current thread as a 64 bit number.
-static uint64_t GetThreadId() { return static_cast<uint64_t>(pthread_self()); }
+static uint64_t GetThreadId() { return reinterpret_cast<uint64_t>(pthread_self()); }
 
 ClientImpl::ClientLockGuard::ClientLockGuard(ClientImpl *client,
                                              LockMode lock_mode)
