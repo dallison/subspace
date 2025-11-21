@@ -26,16 +26,12 @@
 
 namespace subspace {
 
-// In multithreaded tests we can't dlclose the plugins because the dynamic linker doesn't
-// play well with threads.
+// In multithreaded tests we can't dlclose the plugins because the dynamic
+// linker doesn't play well with threads.
 static std::atomic<bool> close_plugins_on_shutdown = false;
-void ClosePluginsOnShutdown() {
-  close_plugins_on_shutdown = true;
-}
+void ClosePluginsOnShutdown() { close_plugins_on_shutdown = true; }
 
-bool ShouldClosePluginsOnShutdown() {
-  return close_plugins_on_shutdown;
-}
+bool ShouldClosePluginsOnShutdown() { return close_plugins_on_shutdown; }
 
 // Look for the IP address and calculate the broadcast address
 // for the given interface.  If the interface name is empty
@@ -107,11 +103,14 @@ static absl::Status FindIPAddresses(const std::string &interface,
 Server::Server(co::CoroutineScheduler &scheduler,
                const std::string &socket_name, const std::string &interface,
                int disc_port, int peer_port, bool local, int notify_fd,
-               int initial_ordinal, bool wait_for_clients)
+               int initial_ordinal, bool wait_for_clients,
+               bool publish_server_channels)
     : socket_name_(socket_name), interface_(interface),
       discovery_port_(disc_port), discovery_peer_port_(peer_port),
-      local_(local), notify_fd_(notify_fd), scheduler_(scheduler), logger_("Subspace server"),
-      initial_ordinal_(initial_ordinal), wait_for_clients_(wait_for_clients) {
+      local_(local), notify_fd_(notify_fd), scheduler_(scheduler),
+      logger_("Subspace server"), initial_ordinal_(initial_ordinal),
+      wait_for_clients_(wait_for_clients),
+      publish_server_channels_(publish_server_channels) {
   CreateShutdownTrigger();
 }
 
@@ -119,11 +118,13 @@ Server::Server(co::CoroutineScheduler &scheduler,
                const std::string &socket_name, const std::string &interface,
                const toolbelt::InetAddress &peer, int disc_port, int peer_port,
                bool local, int notify_fd, int initial_ordinal,
-               bool wait_for_clients)
+               bool wait_for_clients, bool publish_server_channels)
     : socket_name_(socket_name), interface_(interface), peer_address_(peer),
       discovery_port_(disc_port), discovery_peer_port_(peer_port),
-      local_(local), notify_fd_(notify_fd), scheduler_(scheduler), logger_("Subspace server"),
-      initial_ordinal_(initial_ordinal), wait_for_clients_(wait_for_clients) {
+      local_(local), notify_fd_(notify_fd), scheduler_(scheduler),
+      logger_("Subspace server"), initial_ordinal_(initial_ordinal),
+      wait_for_clients_(wait_for_clients),
+      publish_server_channels_(publish_server_channels) {
   CreateShutdownTrigger();
 }
 
@@ -317,9 +318,7 @@ absl::Status Server::Run() {
   // Notify listener that the server is ready.  Do this in a coroutine so that
   // it executes when we start running.
   if (notify_fd_.Valid()) {
-    scheduler_.Spawn([this]() {
-      NotifyViaFd(kServerReady);
-    });
+    scheduler_.Spawn([this]() { NotifyViaFd(kServerReady); });
   }
   OnReady();
 
@@ -398,15 +397,17 @@ absl::Status Server::Run() {
       {.name = "Listener UDS",
        .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
 
-  // Start the channel directory coroutine.
-  scheduler_.Spawn([this]() { ChannelDirectoryCoroutine(); },
-                   {.name = "Channel directory",
-                    .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+  if (publish_server_channels_) {
+    // Start the channel directory coroutine.
+    scheduler_.Spawn([this]() { ChannelDirectoryCoroutine(); },
+                     {.name = "Channel directory",
+                      .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
 
-  // Start the channel stats coroutine.
-  scheduler_.Spawn([this]() { StatisticsCoroutine(); },
-                   {.name = "Channel stats",
-                    .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+    // Start the channel stats coroutine.
+    scheduler_.Spawn([this]() { StatisticsCoroutine(); },
+                     {.name = "Channel stats",
+                      .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+  }
 
   if (!local_) {
     // Start the discovery receiver coroutine.
@@ -632,7 +633,8 @@ void Server::ChannelDirectoryCoroutine() {
       channel.second->GetChannelInfo(info);
     }
     int64_t length = directory.ByteSizeLong();
-    absl::StatusOr<void *> buffer = channel_directory->GetMessageBuffer(int32_t(length));
+    absl::StatusOr<void *> buffer =
+        channel_directory->GetMessageBuffer(int32_t(length));
     if (!buffer.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to get channel directory buffer: %s",
