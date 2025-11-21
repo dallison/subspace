@@ -52,12 +52,12 @@ public:
   Server(co::CoroutineScheduler &scheduler, const std::string &socket_name,
          const std::string &interface, int disc_port, int peer_port, bool local,
          int notify_fd = -1, int initial_ordinal = 1,
-         bool wait_for_clients = false);
+         bool wait_for_clients = false, bool publish_server_channels = true);
   // This constructor can be used when you have a single peer server to talk to.
   Server(co::CoroutineScheduler &scheduler, const std::string &socket_name,
          const std::string &interface, const toolbelt::InetAddress &peer,
          int disc_port, int peer_port, bool local, int notify_fd = -1,
-         int initial_ordinal = 1, bool wait_for_clients = false);
+         int initial_ordinal = 1, bool wait_for_clients = false, bool publish_server_channels = true);
 
   virtual ~Server();
   void SetLogLevel(const std::string &level) { logger_.SetLogLevel(level); }
@@ -237,6 +237,7 @@ private:
   std::vector<std::unique_ptr<Plugin>> plugins_;
   toolbelt::TriggerFd shutdown_trigger_fd_;
   std::string machine_name_;
+  bool publish_server_channels_ = true;
 };
 
 } // namespace subspace
