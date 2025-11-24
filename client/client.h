@@ -585,7 +585,11 @@ public:
   Publisher(const Publisher &other) = delete;
   Publisher &operator=(const Publisher &other) = delete;
 
-  Publisher(Publisher &&other) : client_(std::move(other.client_)), impl_(std::move(other.impl_)) {
+  Publisher(Publisher &&other) : client_(std::move(other.client_)), impl_(std::move(other.impl_)), resize_callback_(std::move(other.resize_callback_)) {
+    if (impl_ != nullptr && client_ != nullptr && resize_callback_ != nullptr) {
+      UnregisterResizeCallback().IgnoreError();
+      RegisterResizeCallback(resize_callback_).IgnoreError();
+    }
     other.client_ = nullptr;
     other.impl_ = nullptr;
   }
@@ -593,6 +597,11 @@ public:
   Publisher &operator=(Publisher &&other) {
     client_ = std::move(other.client_);
     impl_ = std::move(other.impl_);
+    resize_callback_ = std::move(other.resize_callback_);
+    if (impl_ != nullptr && client_ != nullptr && resize_callback_ != nullptr) {
+      UnregisterResizeCallback().IgnoreError();
+      RegisterResizeCallback(resize_callback_).IgnoreError();
+    }
     other.client_ = nullptr;
     other.impl_ = nullptr;
     return *this;
@@ -739,11 +748,12 @@ public:
   // the channel.
   absl::Status RegisterResizeCallback(
       std::function<absl::Status(Publisher *, int, int)> callback) {
+    resize_callback_ = std::move(callback);
     return client_->RegisterResizeCallback(
         impl_.get(),
-        [this, callback = std::move(callback)](
+        [this](
             details::PublisherImpl *, int32_t old_size, int32_t new_size)
-            -> absl::Status { return callback(this, old_size, new_size); });
+            -> absl::Status { return resize_callback_(this, old_size, new_size); });
   }
 
   absl::Status UnregisterResizeCallback() {
@@ -786,6 +796,7 @@ private:
 
   std::shared_ptr<ClientImpl> client_;
   std::shared_ptr<details::PublisherImpl> impl_;
+  std::function<absl::Status(Publisher *, int, int)> resize_callback_ = nullptr;
 };
 
 class Subscriber {
@@ -799,7 +810,15 @@ public:
 
   Subscriber &operator=(const Subscriber &other) = delete;
 
-  Subscriber(Subscriber &&other) : client_(std::move(other.client_)), impl_(std::move(other.impl_)) {
+  Subscriber(Subscriber &&other) : client_(std::move(other.client_)), impl_(std::move(other.impl_)), dropped_message_callback_(std::move(other.dropped_message_callback_)), message_callback_(std::move(other.message_callback_)) {
+    if (impl_ != nullptr && client_ != nullptr && dropped_message_callback_ != nullptr) {
+      UnregisterDroppedMessageCallback().IgnoreError();
+      RegisterDroppedMessageCallback(dropped_message_callback_).IgnoreError();
+    }
+    if (impl_ != nullptr && client_ != nullptr && message_callback_ != nullptr) {
+      UnregisterMessageCallback().IgnoreError();
+      RegisterMessageCallback(message_callback_).IgnoreError();
+    }
     other.client_ = nullptr;
     other.impl_ = nullptr;
   }
@@ -807,6 +826,16 @@ public:
   Subscriber &operator=(Subscriber &&other) {
     client_ = std::move(other.client_);
     impl_ = std::move(other.impl_);
+    dropped_message_callback_ = std::move(other.dropped_message_callback_);
+    message_callback_ = std::move(other.message_callback_);
+    if (impl_ != nullptr && client_ != nullptr && dropped_message_callback_ != nullptr) {
+      UnregisterDroppedMessageCallback().IgnoreError();
+      RegisterDroppedMessageCallback(dropped_message_callback_).IgnoreError();
+    }
+    if (impl_ != nullptr && client_ != nullptr && message_callback_ != nullptr) {
+      UnregisterMessageCallback().IgnoreError();
+      RegisterMessageCallback(message_callback_).IgnoreError();
+    }
     other.client_ = nullptr;
     other.impl_ = nullptr;
     return *this;
@@ -909,10 +938,11 @@ public:
   // as its second argument.
   absl::Status RegisterDroppedMessageCallback(
       std::function<void(Subscriber *, int64_t)> callback) {
+    dropped_message_callback_ = std::move(callback);
     return client_->RegisterDroppedMessageCallback(
         impl_.get(),
-        [this, callback = std::move(callback)](
-            details::SubscriberImpl *, int64_t c) { callback(this, c); });
+        [this](
+            details::SubscriberImpl *, int64_t c) { dropped_message_callback_(this, c); });
   }
 
   absl::Status UnregisterDroppedMessageCallback() {
@@ -921,10 +951,11 @@ public:
 
   absl::Status
   RegisterMessageCallback(std::function<void(Subscriber *, Message)> callback) {
+    message_callback_ = std::move(callback);
     return client_->RegisterMessageCallback(
-        impl_.get(), [this, callback = std::move(callback)](
+        impl_.get(), [this](
                          details::SubscriberImpl *, Message m) {
-          callback(this, std::move(m));
+          message_callback_(this, std::move(m));
         });
   }
 
@@ -1016,6 +1047,8 @@ private:
 
   std::shared_ptr<ClientImpl> client_;
   std::shared_ptr<details::SubscriberImpl> impl_;
+  std::function<void(Subscriber *, int64_t)> dropped_message_callback_ = nullptr;
+  std::function<void(Subscriber *, Message)> message_callback_ = nullptr;
 };
 
 template <typename T>
