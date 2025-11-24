@@ -585,14 +585,14 @@ public:
   Publisher(const Publisher &other) = delete;
   Publisher &operator=(const Publisher &other) = delete;
 
-  Publisher(Publisher &&other) : client_(other.client_), impl_(other.impl_) {
+  Publisher(Publisher &&other) : client_(std::move(other.client_)), impl_(std::move(other.impl_)) {
     other.client_ = nullptr;
     other.impl_ = nullptr;
   }
 
   Publisher &operator=(Publisher &&other) {
-    client_ = other.client_;
-    impl_ = other.impl_;
+    client_ = std::move(other.client_);
+    impl_ = std::move(other.impl_);
     other.client_ = nullptr;
     other.impl_ = nullptr;
     return *this;
@@ -799,14 +799,14 @@ public:
 
   Subscriber &operator=(const Subscriber &other) = delete;
 
-  Subscriber(Subscriber &&other) : client_(other.client_), impl_(other.impl_) {
+  Subscriber(Subscriber &&other) : client_(std::move(other.client_)), impl_(std::move(other.impl_)) {
     other.client_ = nullptr;
     other.impl_ = nullptr;
   }
 
   Subscriber &operator=(Subscriber &&other) {
-    client_ = other.client_;
-    impl_ = other.impl_;
+    client_ = std::move(other.client_);
+    impl_ = std::move(other.impl_);
     other.client_ = nullptr;
     other.impl_ = nullptr;
     return *this;
