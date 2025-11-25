@@ -588,7 +588,7 @@ public:
 
   Publisher(Publisher &&other) : client_(std::move(other.client_)), impl_(std::move(other.impl_)), resize_callback_(std::move(other.resize_callback_)) {
     if (impl_ != nullptr && client_ != nullptr && resize_callback_ != nullptr) {
-      UnregisterResizeCallback().IgnoreError();
+      client_->UnregisterResizeCallback(impl_.get()).IgnoreError();
       RegisterResizeCallback(resize_callback_).IgnoreError();
     }
     other.client_ = nullptr;
@@ -600,7 +600,7 @@ public:
     impl_ = std::move(other.impl_);
     resize_callback_ = std::move(other.resize_callback_);
     if (impl_ != nullptr && client_ != nullptr && resize_callback_ != nullptr) {
-      UnregisterResizeCallback().IgnoreError();
+      client_->UnregisterResizeCallback(impl_.get()).IgnoreError();
       RegisterResizeCallback(resize_callback_).IgnoreError();
     }
     other.client_ = nullptr;
@@ -822,11 +822,11 @@ public:
 
   Subscriber(Subscriber &&other) : client_(std::move(other.client_)), impl_(std::move(other.impl_)), dropped_message_callback_(std::move(other.dropped_message_callback_)), message_callback_(std::move(other.message_callback_)) {
     if (impl_ != nullptr && client_ != nullptr && dropped_message_callback_ != nullptr) {
-      UnregisterDroppedMessageCallback().IgnoreError();
+      client_->UnregisterDroppedMessageCallback(impl_.get()).IgnoreError();
       RegisterDroppedMessageCallback(dropped_message_callback_).IgnoreError();
     }
     if (impl_ != nullptr && client_ != nullptr && message_callback_ != nullptr) {
-      UnregisterMessageCallback().IgnoreError();
+      client_->UnregisterMessageCallback(impl_.get()).IgnoreError();
       RegisterMessageCallback(message_callback_).IgnoreError();
     }
     other.client_ = nullptr;
@@ -839,11 +839,11 @@ public:
     dropped_message_callback_ = std::move(other.dropped_message_callback_);
     message_callback_ = std::move(other.message_callback_);
     if (impl_ != nullptr && client_ != nullptr && dropped_message_callback_ != nullptr) {
-      UnregisterDroppedMessageCallback().IgnoreError();
+      client_->UnregisterDroppedMessageCallback(impl_.get()).IgnoreError();
       RegisterDroppedMessageCallback(dropped_message_callback_).IgnoreError();
     }
     if (impl_ != nullptr && client_ != nullptr && message_callback_ != nullptr) {
-      UnregisterMessageCallback().IgnoreError();
+      client_->UnregisterMessageCallback(impl_.get()).IgnoreError();
       RegisterMessageCallback(message_callback_).IgnoreError();
     }
     other.client_ = nullptr;
