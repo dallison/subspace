@@ -17,10 +17,10 @@ public:
   PublisherImpl(const std::string &name, int num_slots, int channel_id,
                 int publisher_id, int vchan_id, uint64_t session_id,
                 std::string type, const PublisherOptions &options,
-                std::function<bool(Channel *)> reload)
+                std::function<bool(Channel *)> reload, int user_id, int group_id)
       : ClientChannel(name, num_slots, channel_id, vchan_id,
                       std::move(session_id), std::move(type),
-                      std::move(reload)),
+                      std::move(reload), user_id, group_id),
         publisher_id_(publisher_id), options_(options) {}
 
   bool IsReliable() const { return options_.IsReliable(); }

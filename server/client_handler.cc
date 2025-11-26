@@ -120,6 +120,8 @@ void ClientHandler::HandleInit(const subspace::InitRequest &req,
   fds.push_back(server_->scb_fd_);
   client_name_ = req.client_name();
   response->set_session_id(server_->GetSessionId());
+  response->set_user_id(getuid());
+  response->set_group_id(getgid());
 }
 
 void ClientHandler::HandleCreatePublisher(

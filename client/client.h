@@ -213,8 +213,8 @@ private:
     kAutoLock,     // Lock on construction, unlock on destruction
     kDeferredLock, // Locks if not already locked by the current thread, unlocks
                    // if not committed.
-    kMaybeLocked, // Maybe locked by the current thread, lock if not, unlock on
-                    // destruction
+    kMaybeLocked,  // Maybe locked by the current thread, lock if not, unlock on
+                   // destruction
   };
 
   // RAII class to conditionally lock a mutex.  This is like std::lock_guard but
@@ -309,7 +309,8 @@ private:
   // Get the messsage buffer as a span.  Returns an empty span if there is no
   // buffer available
   absl::StatusOr<absl::Span<std::byte>>
-  GetMessageBufferSpan(details::PublisherImpl *publisher, int32_t max_size, bool lock);
+  GetMessageBufferSpan(details::PublisherImpl *publisher, int32_t max_size,
+                       bool lock);
 
   // Publish the message in the publisher's buffer.  The message_size
   // argument specifies the actual size of the message to send.  Returns the
@@ -318,8 +319,8 @@ private:
   absl::StatusOr<const Message>
   PublishMessage(details::PublisherImpl *publisher, int64_t message_size);
 
-  // In thread-safe mode, if you don't want to publish the message, you must cancel the
-  // publish.  This will release the lock.
+  // In thread-safe mode, if you don't want to publish the message, you must
+  // cancel the publish.  This will release the lock.
   void CancelPublish(details::PublisherImpl *publisher);
 
   // Wait until a reliable publisher can try again to send a message.  If the
@@ -539,6 +540,12 @@ private:
   // implications for the GetMessageBufferSpan function.  You have to publish
   // the message or call CancelPublish in order to release the lock.
   bool thread_safe_ = false;
+
+  // User and group id for the server.  This is used to change the ownership of
+  // the shared memory files so that the server can delete them.  Important when
+  // the client is running as root and the server isn't
+  int server_user_id_ = -1;
+  int server_group_id_ = -1;
 };
 
 // This function returns an subspace::shared_ptr that refers to the message
@@ -586,7 +593,9 @@ public:
   Publisher(const Publisher &other) = delete;
   Publisher &operator=(const Publisher &other) = delete;
 
-  Publisher(Publisher &&other) : client_(std::move(other.client_)), impl_(std::move(other.impl_)), resize_callback_(std::move(other.resize_callback_)) {
+  Publisher(Publisher &&other)
+      : client_(std::move(other.client_)), impl_(std::move(other.impl_)),
+        resize_callback_(std::move(other.resize_callback_)) {
     if (impl_ != nullptr && client_ != nullptr && resize_callback_ != nullptr) {
       client_->UnregisterResizeCallback(impl_.get()).IgnoreError();
       RegisterResizeCallback(resize_callback_).IgnoreError();
@@ -626,7 +635,8 @@ public:
   // In thread-safe mode, this will hold a lock on the client until you publish
   // the message.  If you don't want to publish the message, you must cancel the
   // publish using CancelPublish.  This will release the lock.
-  absl::StatusOr<void *> GetMessageBuffer(int32_t max_size = -1, bool lock = true) {
+  absl::StatusOr<void *> GetMessageBuffer(int32_t max_size = -1,
+                                          bool lock = true) {
     return client_->GetMessageBuffer(impl_.get(), max_size, lock);
   }
 
@@ -642,8 +652,9 @@ public:
   // information about the message sent with buffer set to nullptr since
   // the publisher cannot access the message once it's been published.
   //
-  // In thread-safe mode, this will release the lock on the client.  If you don't
-  // want to publish the message, you must cancel the publish using CancelPublish.
+  // In thread-safe mode, this will release the lock on the client.  If you
+  // don't want to publish the message, you must cancel the publish using
+  // CancelPublish.
   absl::StatusOr<const Message> PublishMessage(int64_t message_size) {
     return client_->PublishMessage(impl_.get(), message_size);
   }
@@ -654,15 +665,17 @@ public:
   // back over the bridge, use the slot id from the prefix.  If the retirement
   // notification is locally handled, use the slot id from the message.
   //
-  // In thread-safe mode, this will release the lock on the client.  If you don't
-  // want to publish the message, you must cancel the publish using CancelPublish.
+  // In thread-safe mode, this will release the lock on the client.  If you
+  // don't want to publish the message, you must cancel the publish using
+  // CancelPublish.
   absl::StatusOr<const Message>
   PublishMessageWithPrefix(int64_t message_size,
                            bool use_slot_id_from_prefix = true) {
     return PublishMessageInternal(message_size, true, use_slot_id_from_prefix);
   }
 
-  // If you don't want to publish the message, you must cancel the publish.  This will release the lock.
+  // If you don't want to publish the message, you must cancel the publish. This
+  // will release the lock.
   void CancelPublish() { client_->CancelPublish(impl_.get()); }
 
   // Wait until a reliable publisher can try again to send a message.  If the
@@ -749,9 +762,12 @@ public:
   // the channel.
   absl::Status RegisterResizeCallback(
       std::function<absl::Status(Publisher *, int, int)> callback) {
-    auto status = client_->RegisterResizeCallback(impl_.get(), [this](
-                         details::PublisherImpl *, int32_t old_size, int32_t new_size)
-                         -> absl::Status { return resize_callback_(this, old_size, new_size); });
+    auto status = client_->RegisterResizeCallback(
+        impl_.get(),
+        [this](details::PublisherImpl *, int32_t old_size,
+               int32_t new_size) -> absl::Status {
+          return resize_callback_(this, old_size, new_size);
+        });
     if (!status.ok()) {
       return status;
     }
@@ -820,12 +836,17 @@ public:
 
   Subscriber &operator=(const Subscriber &other) = delete;
 
-  Subscriber(Subscriber &&other) : client_(std::move(other.client_)), impl_(std::move(other.impl_)), dropped_message_callback_(std::move(other.dropped_message_callback_)), message_callback_(std::move(other.message_callback_)) {
-    if (impl_ != nullptr && client_ != nullptr && dropped_message_callback_ != nullptr) {
+  Subscriber(Subscriber &&other)
+      : client_(std::move(other.client_)), impl_(std::move(other.impl_)),
+        dropped_message_callback_(std::move(other.dropped_message_callback_)),
+        message_callback_(std::move(other.message_callback_)) {
+    if (impl_ != nullptr && client_ != nullptr &&
+        dropped_message_callback_ != nullptr) {
       client_->UnregisterDroppedMessageCallback(impl_.get()).IgnoreError();
       RegisterDroppedMessageCallback(dropped_message_callback_).IgnoreError();
     }
-    if (impl_ != nullptr && client_ != nullptr && message_callback_ != nullptr) {
+    if (impl_ != nullptr && client_ != nullptr &&
+        message_callback_ != nullptr) {
       client_->UnregisterMessageCallback(impl_.get()).IgnoreError();
       RegisterMessageCallback(message_callback_).IgnoreError();
     }
@@ -838,11 +859,13 @@ public:
     impl_ = std::move(other.impl_);
     dropped_message_callback_ = std::move(other.dropped_message_callback_);
     message_callback_ = std::move(other.message_callback_);
-    if (impl_ != nullptr && client_ != nullptr && dropped_message_callback_ != nullptr) {
+    if (impl_ != nullptr && client_ != nullptr &&
+        dropped_message_callback_ != nullptr) {
       client_->UnregisterDroppedMessageCallback(impl_.get()).IgnoreError();
       RegisterDroppedMessageCallback(dropped_message_callback_).IgnoreError();
     }
-    if (impl_ != nullptr && client_ != nullptr && message_callback_ != nullptr) {
+    if (impl_ != nullptr && client_ != nullptr &&
+        message_callback_ != nullptr) {
       client_->UnregisterMessageCallback(impl_.get()).IgnoreError();
       RegisterMessageCallback(message_callback_).IgnoreError();
     }
@@ -948,8 +971,10 @@ public:
   // as its second argument.
   absl::Status RegisterDroppedMessageCallback(
       std::function<void(Subscriber *, int64_t)> callback) {
-    auto status = client_->RegisterDroppedMessageCallback(impl_.get(), [this](
-                         details::SubscriberImpl *, int64_t c) { dropped_message_callback_(this, c); });
+    auto status = client_->RegisterDroppedMessageCallback(
+        impl_.get(), [this](details::SubscriberImpl *, int64_t c) {
+          dropped_message_callback_(this, c);
+        });
     if (!status.ok()) {
       return status;
     }
@@ -968,8 +993,8 @@ public:
 
   absl::Status
   RegisterMessageCallback(std::function<void(Subscriber *, Message)> callback) {
-    auto status = client_->RegisterMessageCallback(impl_.get(), [this](
-                         details::SubscriberImpl *, Message m) {
+    auto status = client_->RegisterMessageCallback(
+        impl_.get(), [this](details::SubscriberImpl *, Message m) {
           message_callback_(this, std::move(m));
         });
     if (!status.ok()) {
@@ -1072,7 +1097,8 @@ private:
 
   std::shared_ptr<ClientImpl> client_;
   std::shared_ptr<details::SubscriberImpl> impl_;
-  std::function<void(Subscriber *, int64_t)> dropped_message_callback_ = nullptr;
+  std::function<void(Subscriber *, int64_t)> dropped_message_callback_ =
+      nullptr;
   std::function<void(Subscriber *, Message)> message_callback_ = nullptr;
 };
 

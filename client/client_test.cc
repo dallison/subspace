@@ -242,7 +242,8 @@ TEST_F(ClientTest, ResizeCallback) {
   // allows one resize.
   absl::StatusOr<void *> buffer4 = pub->GetMessageBuffer(1000);
   ASSERT_FALSE(buffer4.ok());
-  // For thread safety support we need to cancel the publish if we don't want to send it.
+  // For thread safety support we need to cancel the publish if we don't want to
+  // send it.
   pub->CancelPublish();
 }
 
@@ -721,7 +722,8 @@ TEST_F(ClientTest, PublishSingleMessageWithPrefixAndRead) {
   subspace::Client sub_client;
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
-  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher("dave6", {.slot_size = 256, .num_slots = 10, .type = "foobar"});
+  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
+      "dave6", {.slot_size = 256, .num_slots = 10, .type = "foobar"});
   ASSERT_OK(pub);
 
   ASSERT_EQ("foobar", pub->TypeView());
@@ -2623,6 +2625,130 @@ TEST_F(ClientTest, MessageGetters) {
   memcpy(*buffer, "foobar", 6);
   absl::StatusOr<const Message> pub_status = pub->PublishMessage(0);
   ASSERT_FALSE(pub_status.ok());
+}
+
+// This tests checksums.  We have two publishers, one that calculates a checksum and one that doesn't.
+// We have 2 subscribers, one that checks the checksum and expects an error if there's an error
+// and one that checks the checksum and passes the message intact but with the checksum_error flag set.
+TEST_F(ClientTest, ChecksumVerification) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan1", {.slot_size = 256, .num_slots = 10, .checksum = true});
+  ASSERT_OK(pub);
+
+  // Create a second publisher that doesn't calculate a checksum.
+  absl::StatusOr<Publisher> pub2 =
+      client->CreatePublisher("chan1", {.slot_size = 256, .num_slots = 10});
+  ASSERT_OK(pub2);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "foobar", 6);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+  ASSERT_OK(pub_status);
+
+  absl::StatusOr<Subscriber> sub =
+      client->CreateSubscriber("chan1", {.checksum = true});
+  ASSERT_OK(sub);
+
+  {
+    absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+    ASSERT_OK(msg);
+    ASSERT_EQ(6, msg->length);
+    ASSERT_STREQ("foobar", reinterpret_cast<const char *>(msg->buffer));
+  }
+
+  // Build a message but overwrite the message buffer with a different string.
+  absl::StatusOr<void *> buffer2 = pub->GetMessageBuffer();
+  ASSERT_OK(buffer2);
+  memcpy(*buffer2, "foobar", 6);
+  absl::StatusOr<const Message> pub_status2 = pub->PublishMessage(6);
+  ASSERT_OK(pub_status2);
+
+  char *buf = reinterpret_cast<char *>(*buffer2);
+  buf[0] = 'x';
+
+  // Read the message with a bad checksum.
+  {
+    absl::StatusOr<subspace::Message> msg2 = sub->ReadMessage();
+    ASSERT_FALSE(msg2.ok());
+    ASSERT_EQ(absl::StatusCode::kInternal, msg2.status().code());
+    ASSERT_EQ("Checksum verification failed", msg2.status().message());
+  }
+
+  // Send another message with a valid checksum.
+  absl::StatusOr<void *> buffer3 = pub->GetMessageBuffer();
+  ASSERT_OK(buffer3);
+  memcpy(*buffer3, "foobar", 6);
+  absl::StatusOr<const Message> pub_status3 = pub->PublishMessage(6);
+  ASSERT_OK(pub_status3);
+
+  // Read the message with the valid checksum
+  {
+    absl::StatusOr<subspace::Message> msg3 = sub->ReadMessage();
+    ASSERT_OK(msg3);
+    ASSERT_EQ(6, msg3->length);
+    ASSERT_STREQ("foobar", reinterpret_cast<const char *>(msg3->buffer));
+  }
+
+  // Send a message on pub2 with no checksum and corrupt it.
+  absl::StatusOr<void *> buffer4 = pub2->GetMessageBuffer();
+  ASSERT_OK(buffer4);
+  memcpy(*buffer4, "foobar", 6);
+  absl::StatusOr<const Message> pub_status4 = pub2->PublishMessage(6);
+  ASSERT_OK(pub_status4);
+  char *buf4 = reinterpret_cast<char *>(*buffer4);
+  buf4[0] = 'X';
+
+  // Read the corrupted message with no checksum.  Although the subscriber is
+  // checking for a checksum, it will not be set since the publisher didn't
+  // calculate one.
+  {
+    absl::StatusOr<subspace::Message> msg5 = sub->ReadMessage();
+    ASSERT_OK(msg5);
+    ASSERT_EQ(6, msg5->length);
+    ASSERT_STREQ("Xoobar", reinterpret_cast<const char *>(msg5->buffer));
+    ASSERT_FALSE(msg5->checksum_error);
+  }
+
+  // Create another subscriber with pass checksum errors.
+  absl::StatusOr<Subscriber> sub2 = client->CreateSubscriber(
+      "chan1", {.checksum = true, .pass_checksum_errors = true});
+  ASSERT_OK(sub2);
+
+  // First message will be fine since the checksum is good.
+  {
+    absl::StatusOr<subspace::Message> msg4 = sub2->ReadMessage();
+    ASSERT_OK(msg4);
+    ASSERT_EQ(6, msg4->length);
+    ASSERT_STREQ("foobar", reinterpret_cast<const char *>(msg4->buffer));
+  }
+
+  // Second message wil have a checksum error flag set.
+  {
+    absl::StatusOr<subspace::Message> msg5 = sub2->ReadMessage();
+    ASSERT_OK(msg5);
+    ASSERT_EQ(6, msg5->length);
+    ASSERT_TRUE(msg5->checksum_error);
+  }
+
+  // Third message will be fine since the checksum is good.
+  {
+    absl::StatusOr<subspace::Message> msg6 = sub2->ReadMessage();
+    ASSERT_OK(msg6);
+    ASSERT_EQ(6, msg6->length);
+    ASSERT_STREQ("foobar", reinterpret_cast<const char *>(msg6->buffer));
+  }
+
+  // Fourth message doesn't have a checksum.
+  {
+    absl::StatusOr<subspace::Message> msg7 = sub2->ReadMessage();
+    ASSERT_OK(msg7);
+    ASSERT_EQ(6, msg7->length);
+    ASSERT_STREQ("Xoobar", reinterpret_cast<const char *>(msg7->buffer));
+    ASSERT_FALSE(msg7->checksum_error);
+  }
 }
 
 int main(int argc, char **argv) {

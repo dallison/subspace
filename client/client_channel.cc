@@ -81,7 +81,8 @@ absl::Status ClientChannel::UnmapUnusedBuffers() {
     if (bcb_->refs[i] == 0) {
       if (buffers_[i]->full_size > 0) {
         if (debug_) {
-          fprintf(stderr, "%p: Unmapping unused buffers at index %zd\n", this, i);
+          fprintf(stderr, "%p: Unmapping unused buffers at index %zd\n", this,
+                  i);
         }
         UnmapMemory(buffers_[i]->buffer, buffers_[i]->full_size, "buffers");
         buffers_[i]->buffer = nullptr;
@@ -236,6 +237,21 @@ ClientChannel::CreateBuffer(int buffer_index, size_t size) {
                         filename, strerror(errno)));
   }
 
+  std::string shm_filename = "/dev/shm/" + filename;
+  // Change the permissions for the file to 777.
+  if (chmod(shm_filename.c_str(), 0777) == -1) {
+    return absl::InternalError(
+        absl::StrFormat("Failed to change permissions of shared memory %s: %s", shm_filename, strerror(errno)));
+  }
+
+  if (getuid() == 0) {
+    // If we are root, change the owner for the file to server's user and group.
+    if (chown(shm_filename.c_str(), user_id_, group_id_) == -1) {
+      return absl::InternalError(
+          absl::StrFormat("Failed to change owner of shared memory %s: %s", shm_filename, strerror(errno)));
+    }
+  }
+
 #else
   // On MacOS we need to create a shadow file that has the same size as the
   // shared memory file.  This is because the fstat of the shm "file" returns a
@@ -266,6 +282,20 @@ ClientChannel::CreateBuffer(int buffer_index, size_t size) {
                         filename, strerror(errno)));
   }
 
+  // Change the permissions for the file to 777.
+  if (chmod(shm_name->c_str(), 0777) == -1) {
+    return absl::InternalError(
+      absl::StrFormat("Failed to change permissions of shared memory %s: %s",  *shm_name, strerror(errno)));
+
+  }
+
+  if (getuid() == 0) {
+    // If we are root, change the owner for the file to server's user and group.
+    if (chown(shm_name.c_str(), user_id_, group_id_) == -1) {
+      return absl::InternalError(
+        absl::StrFormat("Failed to change owner of shared memory %s: %s", *shm_name, strerror(errno)));
+    }
+  }
 #endif
   return *shm_fd;
 }
@@ -314,7 +344,8 @@ ClientChannel::GetBufferSize(toolbelt::FileDescriptor &shm_fd,
 absl::StatusOr<char *>
 ClientChannel::MapBuffer(toolbelt::FileDescriptor &shm_fd, size_t size,
                          BufferMapMode mode) {
-  int prot = mode == BufferMapMode::kReadOnly ? PROT_READ : (PROT_READ | PROT_WRITE);
+  int prot =
+      mode == BufferMapMode::kReadOnly ? PROT_READ : (PROT_READ | PROT_WRITE);
   void *p = MapMemory(shm_fd.Fd(), size, prot, "buffers");
   if (p == MAP_FAILED) {
     return absl::InternalError(
