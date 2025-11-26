@@ -5,8 +5,8 @@
 #ifndef _xCLIENT_OPTIONS_H
 #define _xCLIENT_OPTIONS_H
 
-#include <string>
 #include <functional>
+#include <string>
 
 namespace subspace {
 
@@ -107,6 +107,21 @@ struct PublisherOptions {
     return *this;
   }
 
+  // If this is set to true all messages published will have a checksum
+  // calculated and placed in the MessagePrefix metadata.  If subscribers want
+  // to verify the checksum the must set the SubscriberOptions.Checksum to true.
+  // Included in the checksum is the message prefix and the message
+  // data.
+  //
+  // Using checksums on all messages will increase the latency of message transmission.  Use it
+  // sparingly.  Subscribers generally map the buffers in read-only so the only way to corrup it is
+  // for the publishing process to overwrite the buffer after it has been published.
+  PublisherOptions &SetChecksum(bool v) {
+    checksum = v;
+    return *this;
+  }
+  bool Checksum() const { return checksum; }
+
   // If you use the new CreatePublisher API, set the slot size and num slots in
   // here.
   int32_t slot_size = 0;
@@ -123,6 +138,7 @@ struct PublisherOptions {
   std::string mux;
   int vchan_id = -1; // If -1, server will assign.
   bool notify_retirement = false;
+  bool checksum = false;
 };
 
 struct SubscriberOptions {
@@ -191,6 +207,24 @@ struct SubscriberOptions {
     return *this;
   }
 
+  // If this options is set to true the checksum calculated by the publisher
+  // will be verified. The checksum is placed in the MessagePrefix metadata. See
+  // PassChecksumErrors below for options for handling checksum errors.
+  SubscriberOptions &SetChecksum(bool v) {
+    checksum = v;
+    return *this;
+  }
+  bool Checksum() const { return checksum; }
+
+  // If we get a checksum error and this is true the message will be received
+  // but will have the checksum_error flag set.  If false, an error will be
+  // returned from ReadMessage.
+  SubscriberOptions &SetPassChecksumErrors(bool v) {
+    pass_checksum_errors = v;
+    return *this;
+  }
+  bool PassChecksumErrors() const { return pass_checksum_errors; }
+
   bool reliable = false;
   bool bridge = false;
   std::string type;
@@ -202,6 +236,8 @@ struct SubscriberOptions {
 
   std::string mux;
   int vchan_id = -1; // If -1, server will assign.
+  bool checksum = false;
+  bool pass_checksum_errors = false;
 };
 
 } // namespace subspace

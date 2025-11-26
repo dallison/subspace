@@ -5,7 +5,7 @@
 #include "client/publisher.h"
 #include "client_channel.h"
 #include "toolbelt/clock.h"
-
+#include "client/checksum.h"
 namespace subspace {
 namespace details {
 
@@ -342,9 +342,17 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     prefix->slot_id = slot->id;
     slot->bridged_slot_id = slot->id;
     if (is_activation) {
-      prefix->flags |= kMessageActivate;
+      prefix->SetIsActivation();
       slot->flags |= kMessageIsActivation;
       ccb_->activation_tracker.Activate(slot->vchan_id);
+    }
+    if (options_.Checksum()) {
+      prefix->SetHasChecksum();
+      // Checksum includes the prefix and the message data.  Obviously the checksum itself isn't
+      // included since we are calculating it here.  The first 4 bytes (padding) are also not
+      // incluced.
+      std::vector<absl::Span<const uint8_t>> data = GetMessageChecksumData(prefix, buffer, slot->message_size);
+      prefix->checksum = CalculateChecksum(data);
     }
   }
 

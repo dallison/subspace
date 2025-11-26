@@ -32,10 +32,10 @@ struct ActiveMessage {
   ActiveMessage() = default;
   ActiveMessage(std::shared_ptr<details::SubscriberImpl> subr, size_t len,
                 MessageSlot *slot_ptr, const void *buf, uint64_t ord,
-                int64_t ts, int vid, bool activation);
-  ActiveMessage(size_t len, uint64_t ord, uint64_t ts, int vid, bool activation)
+                int64_t ts, int vid, bool activation, bool checksum_error);
+  ActiveMessage(size_t len, uint64_t ord, uint64_t ts, int vid, bool activation, bool checksum_error)
       : length(len), ordinal(ord), timestamp(ts), vchan_id(vid),
-        is_activation(activation) {}
+        is_activation(activation), checksum_error(checksum_error) {}
   ~ActiveMessage();
 
   // Can't be copied but can be moved.
@@ -66,14 +66,15 @@ struct ActiveMessage {
   uint64_t timestamp = 0;       // Nanosecond time message was published.
   int vchan_id = -1;            // Virtual channel ID (or -1 if not used).
   bool is_activation = false;   // Is this an activation message?
+  bool checksum_error = false;  // Was there a checksum error?
 };
 
 struct Message {
   Message() = default;
   Message(size_t len, const void *buf, uint64_t ord, int64_t ts, int vid,
-          bool activation, int32_t sid)
+          bool activation, int32_t sid, bool checksum_error)
       : length(len), buffer(buf), ordinal(ord), timestamp(ts), vchan_id(vid),
-        is_activation(activation), slot_id(sid) {}
+        is_activation(activation), slot_id(sid), checksum_error(checksum_error) {}
   Message(std::shared_ptr<ActiveMessage> msg);
   void Release() {
     if (active_message == nullptr) {
@@ -102,6 +103,7 @@ struct Message {
   int vchan_id = -1;          // Virtual channel ID (or -1 if not used).
   bool is_activation = false; // Is this an activation message?
   int32_t slot_id = -1;
+  bool checksum_error = false;
 };
 
 } // namespace subspace

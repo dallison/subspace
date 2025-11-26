@@ -23,8 +23,9 @@
 namespace subspace {
 
 // Flag for flags field in MessagePrefix.
-constexpr int kMessageActivate = 1; // This is a reliable activation message.
-constexpr int kMessageBridged = 2;  // This message came from the bridge.
+constexpr int kMessageActivate = 1;    // This is a reliable activation message.
+constexpr int kMessageBridged = 2;     // This message came from the bridge.
+constexpr int kMessageHasChecksum = 4; // This message has a checksum.
 
 // This is stored immediately before the channel buffer in shared
 // memory.  It is transferred intact across the TCP bridges.
@@ -50,19 +51,22 @@ struct MessagePrefix {
   uint64_t timestamp;
   int64_t flags;
   int32_t vchan_id;
-  char padding2[64 - 44]; // Align to 64 bytes.
+  uint32_t checksum;
+  char padding2[64 - 48]; // Align to 64 bytes.
 
   bool IsActivation() const { return (flags & kMessageActivate) != 0; }
   void SetIsActivation() { flags |= kMessageActivate; }
   bool IsBridged() const { return (flags & kMessageBridged) != 0; }
   void SetIsBridged() { flags |= kMessageBridged; }
+  bool HasChecksum() const { return (flags & kMessageHasChecksum) != 0; }
+  void SetHasChecksum() { flags |= kMessageHasChecksum; }
 };
 
 static_assert(sizeof(MessagePrefix) == 64,
               "MessagePrefix size is not 64 bytes");
 
 // Flags for MessageSlot flags.
-constexpr int kMessageSeen = 1; // Message has been seen.
+constexpr int kMessageSeen = 1;         // Message has been seen.
 constexpr int kMessageIsActivation = 2; // This is an activation message.
 
 // We need a max channels number because the size of things in
@@ -165,7 +169,7 @@ struct MessageSlot {
   AtomicBitSet<kMaxSlotOwners> sub_owners; // One bit per subscriber.
   uint64_t timestamp;                      // Timestamp of message.
   uint32_t flags;
-  int32_t bridged_slot_id;	// Slot ID of other side of bridge.
+  int32_t bridged_slot_id; // Slot ID of other side of bridge.
 
   void Dump(std::ostream &os) const;
 };
@@ -184,16 +188,27 @@ struct BufferControlBlock {
       sizes[kMaxBuffers]; // Number of references to this buffer.
 };
 
+// Given a message prefix and a buffer containing the message data return a vector of spans
+// that can be used to calculate the checksum.
+inline std::vector<absl::Span<const uint8_t>>
+GetMessageChecksumData(MessagePrefix *prefix, void *buffer,
+                       size_t message_size) {
+  std::vector<absl::Span<const uint8_t>> data = {
+      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t *>(
+                                    prefix) + offsetof(MessagePrefix, slot_id),
+                                offsetof(MessagePrefix, checksum) -
+                                    offsetof(MessagePrefix, slot_id)),
+      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t *>(buffer),
+                                message_size)};
+  return data;
+}
+
 // This counts the number of subscribers given a virtual channel id.
 class SubscriberCounter {
 public:
-  void AddSubscriber(int vchan_id) {
-    num_subs_[vchan_id + 1]++;
-  }
+  void AddSubscriber(int vchan_id) { num_subs_[vchan_id + 1]++; }
 
-  void RemoveSubscriber(int vchan_id) {
-    num_subs_[vchan_id + 1]--;
-  }
+  void RemoveSubscriber(int vchan_id) { num_subs_[vchan_id + 1]--; }
 
   // If vchan_id is valid we also count the number of subscribers to the
   // multiplexer itself.
@@ -284,7 +299,8 @@ inline size_t AvailableSlotsSize(int num_slots) {
 inline size_t CcbSize(int num_slots) {
   return Aligned(sizeof(ChannelControlBlock) +
                  num_slots * sizeof(MessageSlot)) +
-         Aligned(SizeofAtomicBitSet(num_slots)) * 2 + AvailableSlotsSize(num_slots);
+         Aligned(SizeofAtomicBitSet(num_slots)) * 2 +
+         AvailableSlotsSize(num_slots);
 }
 
 struct SlotBuffer {
@@ -376,9 +392,7 @@ public:
     }
   }
 
-  int GetSubVchanId(int32_t i) const {
-    return ccb_->sub_vchan_ids[i];
-}
+  int GetSubVchanId(int32_t i) const { return ccb_->sub_vchan_ids[i]; }
 
   void DumpSlots(std::ostream &os) const;
   virtual void Dump(std::ostream &os) const;
@@ -443,7 +457,6 @@ public:
     return EndOfRetiredSlots() + Aligned(SizeofAtomicBitSet(num_slots_));
   }
 
-
   InPlaceAtomicBitset *RetiredSlotsAddr() {
     return reinterpret_cast<InPlaceAtomicBitset *>(EndOfSlots());
   }
@@ -455,7 +468,6 @@ public:
   const InPlaceAtomicBitset &RetiredSlots() const {
     return *reinterpret_cast<const InPlaceAtomicBitset *>(EndOfSlots());
   }
-
 
   InPlaceAtomicBitset *FreeSlotsAddr() {
     return reinterpret_cast<InPlaceAtomicBitset *>(EndOfRetiredSlots());

@@ -14,6 +14,7 @@
 #include "toolbelt/sockets.h"
 #include "toolbelt/triggerfd.h"
 #include <sys/poll.h>
+#include "client/checksum.h"
 
 #include <memory>
 #include <mutex>
@@ -65,10 +66,10 @@ class ClientChannel : public Channel {
 public:
   ClientChannel(const std::string &name, int num_slots, int channel_id,
                 int vchan_id, uint64_t session_id, std::string type,
-                std::function<bool(Channel *)> reload)
+                std::function<bool(Channel *)> reload, int user_id, int group_id)
       : Channel(name, num_slots, channel_id, std::move(type),
                 std::move(reload)),
-        vchan_id_(vchan_id), session_id_(std::move(session_id)) {
+        vchan_id_(vchan_id), session_id_(std::move(session_id)), user_id_(user_id), group_id_(group_id) {
           active_slots_.reserve(num_slots);
           embargoed_slots_.Resize(num_slots);
         }
@@ -264,7 +265,9 @@ protected:
   int vchan_id_ = -1;           // Virtual channel ID.
   uint64_t session_id_;
   std::vector<std::unique_ptr<BufferSet>> buffers_ = {};
-
+  int user_id_ = -1;
+  int group_id_ = -1;
+  
   // Retirement triggers.  Although these are not in shared memory,
   // the retirement of a slot can occur in any thread so we need
   // a mutex.  But we don't want to lock the mutex if there are none

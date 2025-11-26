@@ -18,6 +18,8 @@ message InitRequest { string client_name = 1; }
 message InitResponse {
   int32 scb_fd_index = 1; // Index into fds of SystemControlBlock fd.
   int64 session_id = 2;
+  int32 user_id = 3;
+  int32 group_id = 4;
 }
 
 message CreatePublisherRequest {

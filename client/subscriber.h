@@ -42,10 +42,10 @@ public:
   SubscriberImpl(const std::string &name, int num_slots, int channel_id,
                  int subscriber_id, int vchan_id, uint64_t session_id,
                  std::string type, const SubscriberOptions &options,
-                 std::function<bool(Channel *)> reload)
+                 std::function<bool(Channel *)> reload, int user_id, int group_id)
       : ClientChannel(name, num_slots, channel_id, vchan_id,
                       std::move(session_id), std::move(type),
-                      std::move(reload)),
+                      std::move(reload), user_id, group_id),
         subscriber_id_(subscriber_id), options_(options) {}
 
   std::shared_ptr<SubscriberImpl> shared_from_this() {
@@ -112,10 +112,10 @@ public:
   std::shared_ptr<ActiveMessage> SetActiveMessage(size_t len, MessageSlot *slot,
                                                   const void *buf, uint64_t ord,
                                                   int64_t ts, int vchan_id,
-                                                  bool is_activation) {
+                                                  bool is_activation, bool checksum_error) {
     active_message_.reset();
     active_message_ = std::make_shared<ActiveMessage>(ActiveMessage{
-        shared_from_this(), len, slot, buf, ord, ts, vchan_id, is_activation});
+        shared_from_this(), len, slot, buf, ord, ts, vchan_id, is_activation, checksum_error});
     return active_message_;
   }
 
@@ -142,7 +142,7 @@ public:
     }
     auto msg = std::make_shared<ActiveMessage>(ActiveMessage{
         shared_from_this(), slot->message_size, slot, GetBufferAddress(slot),
-        slot->ordinal, Timestamp(slot), slot->vchan_id, false});
+        slot->ordinal, Timestamp(slot), slot->vchan_id, false, false});
     if (msg->length == 0) {
       // Failed to get an active message, return an empty shared_ptr.
       return nullptr;
@@ -179,6 +179,15 @@ public:
   }
 
   std::string Mux() const { return options_.Mux(); }
+
+  bool ValidateChecksum(const std::vector<absl::Span<const uint8_t>>& data, uint32_t checksum) {
+    if (!options_.Checksum()) {
+      return true;
+    }
+    return VerifyChecksum(data, checksum);
+  }
+
+  bool PassChecksumErrors() const { return options_.PassChecksumErrors(); }
 
 private:
   friend class ::subspace::ClientImpl;

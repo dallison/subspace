@@ -8,9 +8,11 @@
 namespace subspace {
 ActiveMessage::ActiveMessage(std::shared_ptr<details::SubscriberImpl> subr,
                              size_t len, MessageSlot *slot_ptr, const void *buf,
-                             uint64_t ord, int64_t ts, int vid, bool activation)
+                             uint64_t ord, int64_t ts, int vid, bool activation,
+                             bool checksum_error)
     : sub(std::move(subr)), length(len), slot(slot_ptr), buffer(buf),
-      ordinal(ord), timestamp(ts), vchan_id(vid), is_activation(activation) {
+      ordinal(ord), timestamp(ts), vchan_id(vid), is_activation(activation),
+      checksum_error(checksum_error) {
   if (slot == nullptr) {
     return;
   }
@@ -33,7 +35,7 @@ Message::Message(std::shared_ptr<ActiveMessage> msg)
       buffer(active_message->buffer), ordinal(active_message->ordinal),
       timestamp(active_message->timestamp), vchan_id(active_message->vchan_id),
       is_activation(active_message->is_activation),
-      slot_id(active_message->slot != nullptr ? active_message->slot->id : -1) {
-}
+      slot_id(active_message->slot != nullptr ? active_message->slot->id : -1),
+      checksum_error(active_message->checksum_error) {}
 
 } // namespace subspace

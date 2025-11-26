@@ -12,7 +12,6 @@
 #include "toolbelt/sockets.h"
 #include <cerrno>
 #include <inttypes.h>
-
 namespace subspace {
 
 using ClientChannel = details::ClientChannel;
@@ -20,7 +19,9 @@ using SubscriberImpl = details::SubscriberImpl;
 using PublisherImpl = details::PublisherImpl;
 
 // Get the current thread as a 64 bit number.
-static uint64_t GetThreadId() { return reinterpret_cast<uint64_t>(pthread_self()); }
+static uint64_t GetThreadId() {
+  return reinterpret_cast<uint64_t>(pthread_self());
+}
 
 ClientImpl::ClientLockGuard::ClientLockGuard(ClientImpl *client,
                                              LockMode lock_mode)
@@ -118,6 +119,8 @@ absl::Status ClientImpl::Init(const std::string &server_socket,
   }
   scb_fd_ = std::move(fds[resp.init().scb_fd_index()]);
   session_id_ = resp.init().session_id();
+  server_user_id_ = resp.init().user_id();
+  server_group_id_ = resp.init().group_id();
   return absl::OkStatus();
 }
 
@@ -294,9 +297,11 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
   std::shared_ptr<PublisherImpl> channel = std::make_shared<PublisherImpl>(
       channel_name, opts.num_slots, pub_resp.channel_id(),
       pub_resp.publisher_id(), pub_resp.vchan_id(), session_id_,
-      pub_resp.type(), opts, [this](Channel *c) {
+      pub_resp.type(), opts,
+      [this](Channel *c) {
         return CheckReload(static_cast<ClientChannel *>(c));
-      });
+      },
+      server_user_id_, server_group_id_);
 
   SharedMemoryFds channel_fds(std::move(fds[pub_resp.ccb_fd_index()]),
                               std::move(fds[pub_resp.bcb_fd_index()]));
@@ -414,9 +419,11 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
   std::shared_ptr<SubscriberImpl> channel = std::make_shared<SubscriberImpl>(
       channel_name, sub_resp.num_slots(), sub_resp.channel_id(),
       sub_resp.subscriber_id(), sub_resp.vchan_id(), session_id_,
-      sub_resp.type(), opts, [this](Channel *c) {
+      sub_resp.type(), opts,
+      [this](Channel *c) {
         return CheckReload(static_cast<ClientChannel *>(c));
-      });
+      },
+      server_user_id_, server_group_id_);
 
   channel->SetNumSlots(sub_resp.num_slots());
 
@@ -497,8 +504,8 @@ ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int32_t max_size,
   // If the current thread is calling this while it already owns the mutex we
   // allow it to continue without locking.  If another t thread is trying to
   // call this lock the mutex until the current thread releases it.
-  ClientLockGuard guard(this,
-                        lock ? LockMode::kDeferredLock : LockMode::kMaybeLocked);
+  ClientLockGuard guard(this, lock ? LockMode::kDeferredLock
+                                   : LockMode::kMaybeLocked);
   if (publisher->IsReliable()) {
     publisher->ClearPollFd();
   }
@@ -621,7 +628,7 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
     if (publisher->IsReliable()) {
       // Reliable publishers don't get a slot until it's asked for.
       return Message(message_size, nullptr, msg.ordinal, msg.timestamp,
-                     publisher->VirtualChannelId(), false, -1);
+                     publisher->VirtualChannelId(), false, -1, false);
     }
     return absl::InternalError(
         absl::StrFormat("Out of slots for channel %s", publisher->Name()));
@@ -633,7 +640,7 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
   }
 
   return Message(message_size, nullptr, msg.ordinal, msg.timestamp,
-                 publisher->VirtualChannelId(), false, old_slot_id);
+                 publisher->VirtualChannelId(), false, old_slot_id, false);
 }
 
 void ClientImpl::CancelPublish(PublisherImpl *publisher) {
@@ -882,7 +889,14 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
   MessagePrefix *prefix = subscriber->Prefix(new_slot);
 
   bool is_activation = false;
+  bool checksum_error = false;
   if (prefix != nullptr) {
+    if (prefix->HasChecksum()) {
+      std::vector<absl::Span<const uint8_t>> data =
+          GetMessageChecksumData(prefix, subscriber->GetCurrentBufferAddress(),
+                                 new_slot->message_size);
+      checksum_error = !subscriber->ValidateChecksum(data, prefix->checksum);
+    }
     if ((prefix->flags & kMessageActivate) != 0) {
       is_activation = true;
       if (!pass_activation) {
@@ -915,7 +929,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
   auto msg = subscriber->SetActiveMessage(
       new_slot->message_size, new_slot, subscriber->GetCurrentBufferAddress(),
       subscriber->CurrentOrdinal(), subscriber->Timestamp(new_slot),
-      new_slot->vchan_id, is_activation);
+      new_slot->vchan_id, is_activation, checksum_error);
 
   // If we are unable to allocate a new message (due to message limits)
   // restore the slot so that we pick it up next time.
@@ -935,6 +949,11 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     // subscribers which are used to send data between servers.
     subscriber->ClearActiveMessage();
   }
+  if (checksum_error && !subscriber->PassChecksumErrors()) {
+    return absl::InternalError("Checksum verification failed");
+  }
+  // A checksum error that is ignored results in a valid message with the
+  // checksum_error flag set.
   return ret_msg;
 }
 
@@ -977,7 +996,7 @@ ClientImpl::FindMessageInternal(SubscriberImpl *subscriber,
   }
   return Message(new_slot->message_size, subscriber->GetCurrentBufferAddress(),
                  subscriber->CurrentOrdinal(), subscriber->Timestamp(),
-                 subscriber->VirtualChannelId(), false, new_slot->id);
+                 subscriber->VirtualChannelId(), false, new_slot->id, false);
 }
 
 absl::StatusOr<Message> ClientImpl::FindMessage(SubscriberImpl *subscriber,
