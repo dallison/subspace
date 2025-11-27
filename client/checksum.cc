@@ -9,7 +9,7 @@
 
 namespace subspace {
 
-#if defined(__aarch64__)
+#if defined(HARDWARE_CRC) && defined(__aarch64__)
 #include <arm_acle.h>
 static inline uint32_t CRC32(uint32_t crc, const uint8_t *data, size_t length) {
   size_t i = 0;
@@ -32,7 +32,7 @@ static inline uint32_t CRC32(uint32_t crc, const uint8_t *data, size_t length) {
 
   return crc;
 }
-#elif defined(__x86_64__)
+#elif defined(HARDWARE_CRC) && defined(__x86_64__)
 #include <nmmintrin.h>
 static inline uint32_t CRC32(uint32_t crc, const uint8_t *data, size_t length) {
   size_t i = 0;

@@ -671,7 +671,7 @@ TEST_F(LatencyTest, PublisherLatencyPayload) {
   ASSERT_OK(sub_client.Init(Socket()));
 
   constexpr int kNumMessages = 2000;
-  constexpr int kMaxPayloadSize = 10 * 1024;
+  constexpr int kMaxPayloadSize = 32 * 1024;
 
   auto random_payload = [](void *buffer) -> int {
     int size = (rand() % (kMaxPayloadSize - 1)) + 1;
@@ -758,7 +758,7 @@ TEST_F(LatencyTest, PublisherLatencyPayloadChecksum) {
   ASSERT_OK(sub_client.Init(Socket()));
 
   constexpr int kNumMessages = 2000;
-  constexpr int kMaxPayloadSize = 10 * 1024;
+  constexpr int kMaxPayloadSize = 32 * 1024;
 
   auto random_payload = [](void *buffer) -> int {
     int size = (rand() % (kMaxPayloadSize - 1)) + 1;
