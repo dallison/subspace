@@ -10,7 +10,6 @@
 namespace subspace {
 
 #if defined(__aarch64__)
-// AARCH64 has CRC instructions.  Use them for the CRC32 calculation.
 #include <arm_acle.h>
 static inline uint32_t CRC32(uint32_t crc, const uint8_t *data, size_t length) {
   size_t i = 0;
@@ -34,7 +33,6 @@ static inline uint32_t CRC32(uint32_t crc, const uint8_t *data, size_t length) {
   return crc;
 }
 #elif defined(__x86_64__)
-// X86_64 has CRC32 instructions.  Use them for the CRC32 calculation.
 #include <nmmintrin.h>
 static inline uint32_t CRC32(uint32_t crc, const uint8_t *data, size_t length) {
   size_t i = 0;
