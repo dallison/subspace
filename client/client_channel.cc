@@ -279,21 +279,21 @@ ClientChannel::CreateBuffer(int buffer_index, size_t size) {
     (void)shm_unlink(filename.c_str());
     return absl::InternalError(
         absl::StrFormat("Failed to set length of shared memory %s: %s",
-                        filename, strerror(errno)));
+                        filename, strerror(errno)));  
   }
 
   // Change the permissions for the file to 777.
-  if (chmod(shm_name->c_str(), 0777) == -1) {
+  if (chmod(filename.c_str(), 0777) == -1) {
     return absl::InternalError(
-      absl::StrFormat("Failed to change permissions of shared memory %s: %s",  *shm_name, strerror(errno)));
+      absl::StrFormat("Failed to change permissions of shared memory %s: %s",  filename, strerror(errno)));
 
   }
 
   if (getuid() == 0) {
     // If we are root, change the owner for the file to server's user and group.
-    if (chown(shm_name.c_str(), user_id_, group_id_) == -1) {
+    if (chown(filename.c_str(), user_id_, group_id_) == -1) {
       return absl::InternalError(
-        absl::StrFormat("Failed to change owner of shared memory %s: %s", *shm_name, strerror(errno)));
+        absl::StrFormat("Failed to change owner of shared memory %s: %s", filename, strerror(errno)));
     }
   }
 #endif

@@ -5,9 +5,57 @@
 #include "client/checksum.h"
 #include <cstddef>
 #include <cstdint>
+#include <iostream>
 
 namespace subspace {
 
+#if defined(__aarch64__)
+// AARCH64 has CRC instructions.  Use them for the CRC32 calculation.
+#include <arm_acle.h>
+static inline uint32_t CRC32(uint32_t crc, const uint8_t *data, size_t length) {
+  size_t i = 0;
+
+  // Process 8 bytes at a time.
+  for (; i + 8 <= length; i += 8) {
+    crc = __crc32d(crc, *reinterpret_cast<const uint64_t *>(data + i));
+  }
+
+  // Process remaining 4 bytes.
+  if (i + 4 <= length) {
+    crc = __crc32w(crc, *reinterpret_cast<const uint32_t *>(data + i));
+    i += 4;
+  }
+
+  // Process remaining bytes one at a time.
+  for (; i < length; i++) {
+    crc = __crc32b(crc, data[i]);
+  }
+
+  return crc;
+}
+#elif defined(__x86_64__)
+// X86_64 has CRC32 instructions.  Use them for the CRC32 calculation.
+#include <nmmintrin.h>
+static inline uint32_t CRC32(uint32_t crc, const uint8_t *data, size_t length) {
+  size_t i = 0;
+  // Process 8 bytes at a time.
+  for (; i + 8 <= length; i += 8) {
+    crc = _mm_crc32_u64(crc, *reinterpret_cast<const uint64_t *>(data + i));
+  }
+  // Process remaining 4 bytes.
+  if (i + 4 <= length) {
+    crc = _mm_crc32_u32(crc, *reinterpret_cast<const uint32_t *>(data + i));
+    i += 4;
+  }
+
+  // Process remaining bytes one at a time.
+  for (; i < length; i++) {
+    crc = _mm_crc32_u8(crc, data[i]);
+  }
+
+  return crc;
+}
+#else
 // Vibe-coded Fast CRC32 lookup table (IEEE 802.3 polynomial: 0xEDB88320)
 static const uint32_t crc32_table[256] = {
     0x00000000, 0x77073096, 0xEE0E612C, 0x990951BA, 0x076DC419, 0x706AF48F,
@@ -54,12 +102,14 @@ static const uint32_t crc32_table[256] = {
     0x54DE5729, 0x23D967BF, 0xB3667A2E, 0xC4614AB8, 0x5D681B02, 0x2A6F2B94,
     0xB40BBE37, 0xC30C8EA1, 0x5A05DF1B, 0x2D02EF8D};
 
+// Generic CRC32 calculation using lookup table.
 static inline uint32_t CRC32(uint32_t crc, const uint8_t *data, size_t length) {
   for (size_t i = 0; i < length; i++) {
     crc = (crc >> 8) ^ crc32_table[(crc ^ data[i]) & 0xFF];
   }
   return crc;
 }
+#endif
 
 uint32_t CalculateChecksum(const std::vector<absl::Span<const uint8_t>> &data) {
   uint32_t crc = 0xFFFFFFFF;
