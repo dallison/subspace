@@ -190,10 +190,10 @@ struct BufferControlBlock {
 
 // Given a message prefix and a buffer containing the message data return a vector of spans
 // that can be used to calculate the checksum.
-inline std::vector<absl::Span<const uint8_t>>
+inline std::array<absl::Span<const uint8_t>, 2>
 GetMessageChecksumData(MessagePrefix *prefix, void *buffer,
                        size_t message_size) {
-  std::vector<absl::Span<const uint8_t>> data = {
+  std::array<absl::Span<const uint8_t>, 2> data = {
       absl::Span<const uint8_t>(reinterpret_cast<const uint8_t *>(
                                     prefix) + offsetof(MessagePrefix, slot_id),
                                 offsetof(MessagePrefix, checksum) -

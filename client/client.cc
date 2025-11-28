@@ -892,7 +892,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
   bool checksum_error = false;
   if (prefix != nullptr) {
     if (prefix->HasChecksum()) {
-      std::vector<absl::Span<const uint8_t>> data =
+      auto data =
           GetMessageChecksumData(prefix, subscriber->GetCurrentBufferAddress(),
                                  new_slot->message_size);
       checksum_error = !subscriber->ValidateChecksum(data, prefix->checksum);

@@ -351,7 +351,7 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
       // Checksum includes the prefix and the message data.  Obviously the checksum itself isn't
       // included since we are calculating it here.  The first 4 bytes (padding) are also not
       // incluced.
-      std::vector<absl::Span<const uint8_t>> data = GetMessageChecksumData(prefix, buffer, slot->message_size);
+      auto data = GetMessageChecksumData(prefix, buffer, slot->message_size);
       prefix->checksum = CalculateChecksum(data);
     }
   }
