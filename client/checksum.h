@@ -10,7 +10,7 @@
 #include <cstdint>
 
 // Undefine this if you don't want to use hardware CRC32 instructions
-#define HARDWARE_CRC 1
+#define SUBSPACE_HARDWARE_CRC 1
 
 namespace subspace {
 
