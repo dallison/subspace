@@ -32,6 +32,7 @@ SYM_DATA(SubspaceCRC32)
 // x0: new crc
 SYM(SubspaceCRC32):
 1:
+  // 8-byte loop until x2 is less than 8
   cmp x2, #8
   blt 2f
   ldr x4, [x1], #8
@@ -39,14 +40,15 @@ SYM(SubspaceCRC32):
   subs x2, x2, #8
   b 1b
 
+  // 4 byte remainder.  Can only be one.
 2:
   cmp x2, #4
   blt 3f
   ldr w4, [x1], #4
   crc32w w0, w0, w4
   subs x2, x2, #4
-  b 2b
 
+  // Single byte remainder.
 3:
   cbz x2, 4f
   ldrb w4, [x1], #1
