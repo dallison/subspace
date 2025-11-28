@@ -10,7 +10,13 @@
 namespace subspace {
 
 extern "C" {
-#if defined(HARDWARE_CRC) && defined(__aarch64__)
+
+#if defined(__x86_64__) && !defined(__SSE4_2__)
+// On Intel crc is only available when SSE4.2 is enabled
+#undef SUBSPACE_HARDWARE_CRC
+#endif
+
+#if defined(SUBSPACE_HARDWARE_CRC) && defined(__aarch64__)
 
 // Whether to use the hand-written assembly version of the CRC32 function
 // in arm_crc32.S
@@ -41,7 +47,7 @@ uint32_t SubspaceCRC32(uint32_t crc, const uint8_t *data, size_t length) {
 }
 #endif  // !defined(ARM_ASM_CRC32)
 
-#elif defined(HARDWARE_CRC) && defined(__x86_64__)
+#elif defined(SUBSPACE_HARDWARE_CRC) && defined(__x86_64__)
 #include <nmmintrin.h>
 uint32_t SubspaceCRC32(uint32_t crc, const uint8_t *data, size_t length) {
   size_t i = 0;
