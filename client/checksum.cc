@@ -9,9 +9,16 @@
 
 namespace subspace {
 
+extern "C" {
 #if defined(HARDWARE_CRC) && defined(__aarch64__)
+
+// Whether to use the hand-written assembly version of the CRC32 function
+// in arm_crc32.S
+#define ARM_ASM_CRC32 1
+
+#if !defined(ARM_ASM_CRC32)
 #include <arm_acle.h>
-static inline uint32_t CRC32(uint32_t crc, const uint8_t *data, size_t length) {
+uint32_t SubspaceCRC32(uint32_t crc, const uint8_t *data, size_t length) {
   size_t i = 0;
 
   // Process 8 bytes at a time.
@@ -32,9 +39,11 @@ static inline uint32_t CRC32(uint32_t crc, const uint8_t *data, size_t length) {
 
   return crc;
 }
+#endif  // !defined(ARM_ASM_CRC32)
+
 #elif defined(HARDWARE_CRC) && defined(__x86_64__)
 #include <nmmintrin.h>
-static inline uint32_t CRC32(uint32_t crc, const uint8_t *data, size_t length) {
+uint32_t SubspaceCRC32(uint32_t crc, const uint8_t *data, size_t length) {
   size_t i = 0;
   // Process 8 bytes at a time.
   for (; i + 8 <= length; i += 8) {
@@ -101,25 +110,12 @@ static const uint32_t crc32_table[256] = {
     0xB40BBE37, 0xC30C8EA1, 0x5A05DF1B, 0x2D02EF8D};
 
 // Generic CRC32 calculation using lookup table.
-static inline uint32_t CRC32(uint32_t crc, const uint8_t *data, size_t length) {
+uint32_t SubspaceCRC32(uint32_t crc, const uint8_t *data, size_t length) {
   for (size_t i = 0; i < length; i++) {
     crc = (crc >> 8) ^ crc32_table[(crc ^ data[i]) & 0xFF];
   }
   return crc;
 }
 #endif
-
-uint32_t CalculateChecksum(const std::vector<absl::Span<const uint8_t>> &data) {
-  uint32_t crc = 0xFFFFFFFF;
-  for (const auto &span : data) {
-    crc = CRC32(crc, span.data(), span.size());
-  }
-  return crc ^ 0xFFFFFFFF;
-}
-
-bool VerifyChecksum(const std::vector<absl::Span<const uint8_t>> &data,
-                    uint32_t checksum) {
-  return CalculateChecksum(data) == checksum;
-}
-
+} // extern "C"
 } // namespace subspace

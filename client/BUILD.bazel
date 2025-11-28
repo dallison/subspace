@@ -9,6 +9,7 @@ cc_library(
         "publisher.cc",
         "subscriber.cc",
         "checksum.cc",
+        "arm_crc32.S",
     ],
     hdrs = [
         "client.h",

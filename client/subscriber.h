@@ -180,7 +180,7 @@ public:
 
   std::string Mux() const { return options_.Mux(); }
 
-  bool ValidateChecksum(const std::vector<absl::Span<const uint8_t>>& data, uint32_t checksum) {
+  bool ValidateChecksum(const std::array<absl::Span<const uint8_t>, 2>& data, uint32_t checksum) {
     if (!options_.Checksum()) {
       return true;
     }
