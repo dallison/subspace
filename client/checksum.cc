@@ -16,6 +16,12 @@ extern "C" {
 #undef SUBSPACE_HARDWARE_CRC
 #endif
 
+#if defined(__aarch64__) && !defined(__ARM_FEATURE_CRC32)
+// Swite off hardware CRC32 if it is not available on aarch64.
+#undef SUBSPACE_HARDWARE_CRC
+#endif
+
+
 #if defined(SUBSPACE_HARDWARE_CRC) && defined(__aarch64__)
 
 // Whether to use the hand-written assembly version of the CRC32 function
