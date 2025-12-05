@@ -18,10 +18,10 @@ bazel_dep(name = "zlib", version = "1.3.1.bcr.3")
 http_archive(
     name = "toolbelt",
     # integrity = "sha256-d3f29073968a8ea1b51899b643d2b5e83403fa63",
-    sha256 = "881646748f7dafa1d0b74152e8bb529da790e0109a5c5757119c9c184c40d16f",
-    strip_prefix = "cpp_toolbelt-b74ba4506ad084dfd93282be03dec561facad37e",
+    sha256 = "519aab3d83546b2d317765d94ac4e11ada927f17bcfe67ff403d74bbdd8be2ad",
+    strip_prefix = "cpp_toolbelt-7ec0e2cd2a17a006f976df23d07ad530499249e0",
     # urls = ["https://github.com/dallison/cpp_toolbelt/archive/refs/tags/1.5.3.tar.gz"],
-    urls = ["https://github.com/dallison/cpp_toolbelt/archive/b74ba4506ad084dfd93282be03dec561facad37e.tar.gz"],
+    urls = ["https://github.com/dallison/cpp_toolbelt/archive/7ec0e2cd2a17a006f976df23d07ad530499249e0.tar.gz"],
 )
 # For local debugging of toolbelt coroutine library.
 # bazel_dep(name = "toolbelt")
