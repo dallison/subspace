@@ -5,7 +5,7 @@
 # build systems.
 
 cmake_minimum_required(VERSION 3.15)
-project(Subspace LANGUAGES CXX)
+project(Subspace LANGUAGES CXX ASM)
 
 # Set C++ standard and compiler flags
 set(CMAKE_CXX_STANDARD 17)
@@ -41,38 +41,68 @@ FetchContent_Declare(
     GIT_TAG 20240722.0 # Matches the version in your WORKSPACE
     # Pass architecture settings and CXX standard propagation to Abseil's CMake build
     CMAKE_ARGS
-        CMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
+        -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
         -DABSL_PROPAGATE_CXX_STD=ON # Propagate C++ standard settings
 )
 FetchContent_MakeAvailable(abseil)
 # Abseil provides targets like absl::base, absl::strings, etc.
 
+# --- External Dependency: co (using FetchContent for native CMake) ---
+# Using the same version as Bazel build (commit cf1252b2f5952d7cba83b67dd69288971c0a2b57)
+# MUST be declared before cpp_toolbelt since cpp_toolbelt depends on it
+FetchContent_Declare(
+    co
+    GIT_REPOSITORY https://github.com/dallison/co.git
+    GIT_TAG cf1252b2f5952d7cba83b67dd69288971c0a2b57
+    # Pass architecture settings to co's CMake build
+    CMAKE_ARGS
+        -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
+)
+FetchContent_MakeAvailable(co)
+# co provides the 'co' target.
+
 # --- External Dependency: cpp_toolbelt (using FetchContent for native CMake) ---
-# Assumes cpp_toolbelt repository now contains a CMakeLists.txt at its root.
+# Using the same version as Bazel build (commit 7ec0e2cd2a17a006f976df23d07ad530499249e0)
+# Note: cpp_toolbelt's CMakeLists.txt will try to fetch co, but since we've already
+# declared it above, FetchContent will use our version instead
 FetchContent_Declare(
     cpp_toolbelt
     GIT_REPOSITORY https://github.com/dallison/cpp_toolbelt.git
-    GIT_TAG main
+    GIT_TAG 7ec0e2cd2a17a006f976df23d07ad530499249e0
     # Pass architecture settings to cpp_toolbelt's CMake build
     CMAKE_ARGS
-        CMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
+        -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
 )
 FetchContent_MakeAvailable(cpp_toolbelt)
 # cpp_toolbelt provides the 'toolbelt' target.
 
-
-# --- External Dependency: co (using FetchContent for native CMake) ---
-# Assumes co repository now contains a CMakeLists.txt at its root.
+# --- External Dependency: Googletest (using FetchContent for native CMake) ---
 FetchContent_Declare(
-    co
-    GIT_REPOSITORY https://github.com/dallison/co.git
-    GIT_TAG main
-    # Pass architecture settings to co's CMake build
+    googletest
+    GIT_REPOSITORY https://github.com/google/googletest.git
+    GIT_TAG v1.15.2 # Matches the version in MODULE.bazel
+    # Pass architecture settings to Googletest's CMake build
     CMAKE_ARGS
-        CMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
+        -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
 )
-FetchContent_MakeAvailable(co)
-# co provides the 'co' target.
+FetchContent_MakeAvailable(googletest)
+# Googletest provides targets like gtest, gtest_main, gmock, gmock_main
+
+# --- External Dependency: Protobuf (using FetchContent for native CMake) ---
+FetchContent_Declare(
+    protobuf
+    GIT_REPOSITORY https://github.com/protocolbuffers/protobuf.git
+    GIT_TAG v29.5
+    # Protobuf's CMake build can be configured to build only necessary components
+    CMAKE_ARGS
+        -Dprotobuf_BUILD_TESTS=OFF # Explicitly disable building tests to avoid gmock conflicts
+        -Dprotobuf_BUILD_EXAMPLES=OFF
+        -Dprotobuf_BUILD_SHARED_LIBS=OFF # Build static libs
+        -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
+)
+FetchContent_MakeAvailable(protobuf)
+# Protobuf provides targets like protobuf::libprotobuf and protobuf::protoc
+# These targets can be used directly without find_package
 
 #add to get */file.h includes working
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})

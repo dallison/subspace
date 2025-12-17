@@ -2,7 +2,7 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#if defined(__aarch64__)
+#if defined(__ARM_FEATURE_CRC32) && defined(__aarch64__)
 
 // This is a handcoded ARM64 CRC32 function that uses the built-in CRC
 // instructions.  It is as fast as I can make it.
