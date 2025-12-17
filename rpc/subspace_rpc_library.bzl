@@ -79,7 +79,7 @@ def _subspace_rpc_aspect_impl(target, _ctx):
                 # For a file that is not in this package, we need to generate the
                 # output in our package.
                 # The path looks like:
-                # ../com_google_protobuf/_virtual_imports/any_proto/google/protobuf/any.proto
+                # ../protobuf/_virtual_imports/any_proto/google/protobuf/any.proto
                 # We want to declare the file as:ƒ
                 # google/protobuf/any.subspace_rpc.cc
                 v = file_path.split("_virtual_imports/")
@@ -158,7 +158,7 @@ _subspace_rpc_gen = rule(
     attrs = {
         "protoc": attr.label(
             executable = True,
-            default = Label("@com_google_protobuf//:protoc"),
+            default = Label("@protobuf//:protoc"),
             cfg = "exec",
         ),
         "subspace_rpc_plugin": attr.label(
