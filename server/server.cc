@@ -581,6 +581,18 @@ void Server::RemoveChannel(ServerChannel *channel) {
   channel->RemoveBuffer(session_id_);
   channel_ids_.Clear(channel->GetChannelId());
   auto it = channels_.find(channel->Name());
+  if (it == channels_.end()) {
+    return;
+  }
+  if (it->second->IsVirtual()) {
+    auto vchan = static_cast<VirtualChannel *>(it->second.get());
+    ChannelMultiplexer *mux =
+        vchan->GetMux();
+    mux->RemoveVirtualChannel(vchan);
+    if (mux->IsEmpty()) {
+      RemoveChannel(mux);
+    }
+  }
   channels_.erase(it);
   SendChannelDirectory();
 }

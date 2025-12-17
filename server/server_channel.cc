@@ -598,7 +598,7 @@ ChannelMultiplexer::CreateVirtualChannel(Server &server,
         "Virtual channel id %d is beyond max virtual channels (%d)", vchan_id,
         kMaxVchanId));
   }
-  auto v = std::make_unique<VirtualChannel>(server, this, vchan_id, name,
+  auto v = std::make_unique<VirtualChannel>(this, vchan_id, name,
                                             SlotSize(), Type(), session_id_);
   virtual_channels_.insert(v.get());
   vchan_ids_.insert(vchan_id);
@@ -607,13 +607,6 @@ ChannelMultiplexer::CreateVirtualChannel(Server &server,
 void ChannelMultiplexer::RemoveVirtualChannel(VirtualChannel *vchan) {
   vchan_ids_.erase(vchan->GetVirtualChannelId());
   virtual_channels_.erase(vchan);
-}
-
-VirtualChannel::~VirtualChannel() {
-  mux_->RemoveVirtualChannel(this);
-  if (mux_->IsEmpty()) {
-    server_.RemoveChannel(mux_);
-  }
 }
 
 void ChannelMultiplexer::CountUsers(int &num_pubs, int &num_subs,
