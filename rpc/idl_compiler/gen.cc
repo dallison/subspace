@@ -32,7 +32,7 @@ static std::string GeneratedFilename(const std::filesystem::path &package_name,
   size_t virtual_imports = filename.find("_virtual_imports/");
   if (virtual_imports != std::string::npos) {
     // This is something like:
-    // bazel-out/darwin_arm64-dbg/bin/external/com_google_protobuf/_virtual_imports/any_proto/google/protobuf/any.proto
+    // bazel-out/darwin_arm64-dbg/bin/external/protobuf/_virtual_imports/any_proto/google/protobuf/any.proto
     filename = filename.substr(virtual_imports + sizeof("_virtual_imports/"));
     // Remove the first directory.
     filename = filename.substr(filename.find('/') + 1);

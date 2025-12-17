@@ -5,8 +5,8 @@ cc_binary(
     srcs = ["nop_plugin.cc"],
     deps = [
         "//server:server",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/strings:str_format",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings:str_format",
     ],
     linkstatic = False,
     linkshared = True,

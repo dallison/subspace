@@ -4,7 +4,7 @@ proto_library(
     name = "subspace_proto",
     srcs = ["subspace.proto"],
     deps = [
-        "@com_google_protobuf//:any_proto",
+        "@protobuf//:any_proto",
     ],
 )
 
