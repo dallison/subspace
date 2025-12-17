@@ -373,14 +373,12 @@ private:
 // updates to the multiplexer SCB will be seen by all virtual channels.
 class VirtualChannel : public ServerChannel {
 public:
-  VirtualChannel(Server &server, ChannelMultiplexer *mux, int vchan_id,
+  VirtualChannel(ChannelMultiplexer *mux, int vchan_id,
                  const std::string &name, int num_slots, std::string type,
                  int session_id)
       : ServerChannel(mux->GetChannelId(), name, num_slots, type, true,
                       session_id),
-        server_(server), mux_(mux), vchan_id_(vchan_id) {}
-
-  ~VirtualChannel();
+        mux_(mux), vchan_id_(vchan_id) {}
 
   std::string Type() const override { return mux_->Type(); }
   void SetType(const std::string &type) override { mux_->SetType(type); }
@@ -451,7 +449,6 @@ public:
   }
 
 private:
-  Server &server_;
   ChannelMultiplexer *mux_;
   int vchan_id_;
 };
