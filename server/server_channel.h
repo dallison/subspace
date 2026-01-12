@@ -251,8 +251,8 @@ public:
   virtual void RemoveBuffer(uint64_t session_id) {
     for (int i = 0; i < ccb_->num_buffers; i++) {
       std::string filename = BufferSharedMemoryName(session_id, i);
-#if defined(__APPLE__)
-      auto shm_name = MacOsSharedMemoryName(filename);
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
+      auto shm_name = PosixSharedMemoryName(filename);
       if (shm_name.ok()) {
         (void)shm_unlink(shm_name->c_str());
       }

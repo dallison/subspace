@@ -369,9 +369,9 @@ public:
 
   virtual std::string ResolvedName() const = 0;
 
-#if defined(__APPLE__)
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   static absl::StatusOr<std::string>
-  MacOsSharedMemoryName(const std::string &shadow_file);
+  PosixSharedMemoryName(const std::string &shadow_file);
 #endif
   // For debug, prints the contents of the three linked lists in
   // shared memory,

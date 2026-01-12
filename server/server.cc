@@ -221,7 +221,7 @@ void Server::CleanupAfterSession() {
   std::string session_shm_file_prefix =
       "subspace_." + std::to_string(session_id_);
 
-#if defined(__APPLE__)
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   // Remove all files starting with "subspace_SESSION" in /tmp.  These refer to
   // shared memory segments names "subspace_INODE".
   for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
@@ -262,7 +262,7 @@ void Server::CleanupAfterSession() {
 
 void Server::CleanupFilesystem() {
   logger_.Log(toolbelt::LogLevel::kInfo, "Cleaning up filesystem...");
-#if defined(__APPLE__)
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   // Remove all files starting with "subspace_" in /tmp.  These refer to
   // shared memory segments names "subspace_INODE".
   for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {

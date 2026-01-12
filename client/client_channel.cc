@@ -4,7 +4,7 @@
 
 #include "client/client_channel.h"
 #include <sys/mman.h>
-#if defined(__APPLE__)
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
 #include <sys/posix_shm.h>
 #endif
 #include <chrono>
@@ -15,10 +15,10 @@ namespace subspace {
 
 namespace details {
 
-#if defined(__APPLE__)
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
 
 absl::StatusOr<std::string>
-ClientChannel::CreateMacOSSharedMemoryFile(const std::string &filename,
+ClientChannel::CreatePosixSharedMemoryFile(const std::string &filename,
                                            off_t size) {
   // Create a file in /tmp and make it the same size as the shared memory.  This
   // will not actually allocate any disk space.
@@ -36,7 +36,7 @@ ClientChannel::CreateMacOSSharedMemoryFile(const std::string &filename,
   }
   close(fd);
 
-  return MacOsSharedMemoryName(filename);
+  return PosixSharedMemoryName(filename);
 }
 #endif
 
@@ -121,7 +121,7 @@ absl::Status ClientChannel::AttachBuffers() {
     size_t buffer_index = buffers_.size();
     auto shm_fd = OpenBuffer(buffer_index);
     if (!shm_fd.ok()) {
-#if defined(__APPLE__)
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
       if (buffers_.size() + 1 < size_t(num_buffers)) {
         // The buffer might have been deleted because there are no
         // references to it.  If we are not the last buffer, this is
@@ -137,7 +137,7 @@ absl::Status ClientChannel::AttachBuffers() {
       return size.status();
     }
     if (*size == 0) {
-#if !defined(__APPLE__)
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
       if (buffers_.size() + 1 < size_t(num_buffers)) {
         // If the size is 0, it means the buffer has been deleted or not yet
         // created.  We just add an empty buffer.
@@ -217,7 +217,7 @@ absl::StatusOr<toolbelt::FileDescriptor>
 ClientChannel::CreateBuffer(int buffer_index, size_t size) {
   std::string filename = BufferSharedMemoryName(buffer_index);
 
-#if !defined(__APPLE__)
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
   // Open the shared memory file.
   auto shm_fd = OpenSharedMemoryFile(filename, O_RDWR | O_CREAT | O_EXCL);
   if (!shm_fd.ok()) {
@@ -253,12 +253,12 @@ ClientChannel::CreateBuffer(int buffer_index, size_t size) {
   }
 
 #else
-  // On MacOS we need to create a shadow file that has the same size as the
+  // On Posix we need to create a shadow file that has the same size as the
   // shared memory file.  This is because the fstat of the shm "file" returns a
   // page aligned size, which is not what we want.  The shadow file is used
   // to determine the size of the shared memory segment.
   absl::StatusOr<std::string> shm_name =
-      CreateMacOSSharedMemoryFile(filename, off_t(size));
+      CreatePosixSharedMemoryFile(filename, off_t(size));
   if (!shm_name.ok()) {
     return shm_name.status();
   }
@@ -303,11 +303,11 @@ ClientChannel::CreateBuffer(int buffer_index, size_t size) {
 absl::StatusOr<toolbelt::FileDescriptor>
 ClientChannel::OpenBuffer(int buffer_index) {
   std::string filename = BufferSharedMemoryName(buffer_index);
-#if !defined(__APPLE__)
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
   // Open the shared memory file.
   return OpenSharedMemoryFile(filename, O_RDWR);
 #else
-  auto shm_name = MacOsSharedMemoryName(filename);
+  auto shm_name = PosixSharedMemoryName(filename);
   if (!shm_name.ok()) {
     return shm_name.status();
   }
@@ -318,8 +318,8 @@ ClientChannel::OpenBuffer(int buffer_index) {
 absl::StatusOr<size_t>
 ClientChannel::GetBufferSize(toolbelt::FileDescriptor &shm_fd,
                              int buffer_index) const {
-#if defined(__APPLE__)
-  // On MacOS we need to look at the size of the shadow file because it looks
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
+  // On Posix we need to look at the size of the shadow file because it looks
   // like the fstat of the shm "file" returns a page aligned size.
   std::string filename = BufferSharedMemoryName(buffer_index);
   struct stat sb;

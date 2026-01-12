@@ -321,14 +321,14 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
   }
 }
 
-#if defined(__APPLE__)
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
 absl::StatusOr<std::string>
-Channel::MacOsSharedMemoryName(const std::string &shadow_file) {
+Channel::PosixSharedMemoryName(const std::string &shadow_file) {
   struct stat st;
   int e = ::stat(shadow_file.c_str(), &st);
   if (e == -1) {
     return absl::InternalError(
-        absl::StrFormat("Failed to determine MacOS shm name for %s: %s",
+        absl::StrFormat("Failed to determine Posix shm name for %s: %s",
                         shadow_file, strerror(errno)));
   }
   // Use the inode number (unique per file) to make the shm file name.
