@@ -32,9 +32,9 @@ http_archive(
 # Coroutines
 http_archive(
     name = "coroutines",
-    sha256 = "44cfc56924e4aa338fbf6c424a8f5db2e6e7d88e27666fd137aeb6cb67c236e1",
-    strip_prefix = "co-26f5da14c994276ab038f7ad512ca37ba32f19dc",
-    urls = ["https://github.com/dallison/co/archive/26f5da14c994276ab038f7ad512ca37ba32f19dc.tar.gz"],
+    sha256 = "10e6fe70bb76e91a941e4d765944aab796116b317082179ef4ec14b00581c843",
+    strip_prefix = "co-439a0f52c73ad4ce40b1c50a665629f4f0873a87",
+    urls = ["https://github.com/dallison/co/archive/439a0f52c73ad4ce40b1c50a665629f4f0873a87.tar.gz"],
 )
 
 # For local debugging of co coroutine library.
