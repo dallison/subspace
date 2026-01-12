@@ -22,6 +22,18 @@
 
 namespace subspace {
 
+#define SUBSPACE_SHMEM_MODE_POSIX 1
+#define SUBSPACE_SHMEM_MODE_LINUX 2
+
+// Change this if you want to use a different shared memory mode.
+#if defined(__linux__)
+// On Linux we can use /dev/shm directly for shared memory.
+#define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_LINUX
+#else
+// On other systems we need to use a file in /tmp and then create a shared memory segment with the same name.
+#define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_POSIX
+#endif
+
 // Flag for flags field in MessagePrefix.
 constexpr int kMessageActivate = 1;    // This is a reliable activation message.
 constexpr int kMessageBridged = 2;     // This message came from the bridge.
@@ -369,9 +381,9 @@ public:
 
   virtual std::string ResolvedName() const = 0;
 
-#if defined(__APPLE__)
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   static absl::StatusOr<std::string>
-  MacOsSharedMemoryName(const std::string &shadow_file);
+  PosixSharedMemoryName(const std::string &shadow_file);
 #endif
   // For debug, prints the contents of the three linked lists in
   // shared memory,

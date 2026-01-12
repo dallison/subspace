@@ -1957,8 +1957,8 @@ TEST_F(ClientTest, Publish2Message2AndReadSharedPtrs) {
   for (int i = 0; i < 2; i++) {
     absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
     ASSERT_OK(buffer);
-    memcpy(*buffer, "foobar", 6);
-    absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+    memcpy(*buffer, "foobar", 7);
+    absl::StatusOr<const Message> pub_status = pub->PublishMessage(7);
     ASSERT_OK(pub_status);
   }
 

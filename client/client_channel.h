@@ -256,9 +256,9 @@ protected:
   absl::StatusOr<char *> MapBuffer(toolbelt::FileDescriptor &shm_fd,
                                    size_t size, BufferMapMode mode);
 
-#if defined(__APPLE__)
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   absl::StatusOr<std::string>
-  CreateMacOSSharedMemoryFile(const std::string &filename, off_t size);
+  CreatePosixSharedMemoryFile(const std::string &filename, off_t size);
 #endif
 
   MessageSlot *slot_ = nullptr; // Current slot.
