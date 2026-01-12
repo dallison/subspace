@@ -42,6 +42,16 @@
 
 namespace subspace {
 
+
+#define SUBSPACE_SHMEM_MODE_POSIX 1
+#define SUBSPACE_SHMEM_MODE_LINUX 2
+
+#if defined(__linux__)
+#define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_LINUX
+#else
+#define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_POSIX
+#endif
+
 class ClientImpl;
 
 enum class BufferMapMode {
@@ -256,9 +266,9 @@ protected:
   absl::StatusOr<char *> MapBuffer(toolbelt::FileDescriptor &shm_fd,
                                    size_t size, BufferMapMode mode);
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__QNX__) || defined(__QNXNTO__)
   absl::StatusOr<std::string>
-  CreateMacOSSharedMemoryFile(const std::string &filename, off_t size);
+  CreatePosixSharedMemoryFile(const std::string &filename, off_t size);
 #endif
 
   MessageSlot *slot_ = nullptr; // Current slot.
