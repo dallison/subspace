@@ -42,6 +42,16 @@
 
 namespace subspace {
 
+
+#define SUBSPACE_SHMEM_MODE_POSIX 1
+#define SUBSPACE_SHMEM_MODE_LINUX 2
+
+#if defined(__linux__)
+#define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_LINUX
+#else
+#define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_POSIX
+#endif
+
 class ClientImpl;
 
 enum class BufferMapMode {
