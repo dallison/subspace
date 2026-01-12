@@ -5,6 +5,12 @@ build:asan --copt -g
 build:asan --copt -fno-omit-frame-pointer
 build:asan --linkopt -fsanitize=address
 
+# Enable the built-in platform-specific configuration feature
+common --enable_platform_specific_config
+
+# Apply this flag only when building on/for macOS
+build:macos --macos_minimum_os=10.15
+
 # For all builds, use C++17
 build --cxxopt="-std=c++17"
 build --cxxopt='-Wno-sign-compare'
