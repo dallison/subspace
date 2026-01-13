@@ -139,7 +139,6 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
                                 uint64_t ordinal, int vchan_id, bool retire,
                                 std::function<void()> retire_callback) {
   for (;;) {
-    CheckReload();
     uint64_t ref = slot->refs.load(std::memory_order_relaxed);
     if ((ref & kPubOwned) != 0) {
       return false;

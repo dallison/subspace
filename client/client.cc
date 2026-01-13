@@ -429,6 +429,11 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
       !status.ok()) {
     return status;
   }
+
+  if (message_size == 0) {
+    return absl::InternalError("Message size must be greater than 0");
+  }
+
   publisher->SetMessageSize(message_size);
   MessageSlot *old_slot = publisher->CurrentSlot();
   if (debug_) {
