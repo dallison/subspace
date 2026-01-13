@@ -7,6 +7,7 @@
 #include "absl/strings/str_split.h"
 #include <filesystem>
 #include <fstream>
+#include <string_view>
 
 namespace subspace {
 
@@ -28,9 +29,9 @@ WriteToZeroCopyStream(const std::string &data,
 
 static std::string GeneratedFilename(const std::filesystem::path &package_name,
                                      const std::filesystem::path &target_name,
-                                     std::string filename) {
+                                     std::string_view filename) {
   size_t virtual_imports = filename.find("_virtual_imports/");
-  if (virtual_imports != std::string::npos) {
+  if (virtual_imports != std::string_view::npos) {
     // This is something like:
     // bazel-out/darwin_arm64-dbg/bin/external/com_google_protobuf/_virtual_imports/any_proto/google/protobuf/any.proto
     filename = filename.substr(virtual_imports + sizeof("_virtual_imports/"));
@@ -200,7 +201,7 @@ Generator::Generator(const google::protobuf::FileDescriptor *file,
     : file_(file), added_namespace_(ns), package_name_(pn), target_name_(tn) {
   for (int i = 0; i < file->service_count(); i++) {
     service_gens_.push_back(std::make_unique<ServiceGenerator>(
-        file->service(i), added_namespace_, file->package()));
+        file->service(i), added_namespace_, std::string{file->package()}));
   }
 }
 

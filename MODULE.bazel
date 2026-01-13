@@ -3,23 +3,23 @@ module(
 )
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 
-bazel_dep(name = "bazel_skylib", version = "1.7.1")
-bazel_dep(name = "platforms", version = "0.0.10")
-bazel_dep(name = "abseil-cpp", version = "20240722.0.bcr.1", repo_name = "com_google_absl")
-bazel_dep(name = "googletest", version = "1.15.2", repo_name = "com_google_googletest")
-bazel_dep(name = "protobuf", version = "29.0", repo_name = "com_google_protobuf")
+bazel_dep(name = "bazel_skylib", version = "1.9.0")
+bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "abseil-cpp", version = "20250512.1")
+bazel_dep(name = "googletest", version = "1.17.0")
+bazel_dep(name = "protobuf", version = "33.2")
 
-bazel_dep(name = "rules_cc", version = "0.0.16")
+bazel_dep(name = "rules_cc", version = "0.2.16")
 bazel_dep(name = "rules_pkg", version = "1.0.1")
-bazel_dep(name = "zlib", version = "1.3.1.bcr.3")
+bazel_dep(name = "zlib", version = "1.3.1.bcr.5")
 
 # Toolbelt
-http_archive(
+git_repository(
     name = "toolbelt",
-    integrity = "sha256-6H+zgo/8NGZEU43PLKMcoCglmISWD5xk2SOzMGKIbAY=",
-    strip_prefix = "cpp_toolbelt-1.4.1",
-    urls = ["https://github.com/dallison/cpp_toolbelt/archive/refs/tags/1.4.1.tar.gz"],
+    commit = "0286a5f6da0f256d6ffbc9f6b43cd6b003fe9dbf",
+    remote = "https://github.com/dallison/cpp_toolbelt.git",
 )
 # For local debugging of toolbelt coroutine library.
 # bazel_dep(name = "toolbelt")
@@ -31,9 +31,9 @@ http_archive(
 # Coroutines
 http_archive(
     name = "coroutines",
-    integrity = "sha256-PhOYq1eE8Q8UOhzDHq2+rafTU4VTt9fZ0ZZyNE+hWb4=",
-    strip_prefix = "co-2.1.0",
-    urls = ["https://github.com/dallison/co/archive/refs/tags/2.1.0.tar.gz"],
+    integrity = "sha256-fdSwDRrEyFf6PRX8fkkfSPTWPB3Z9tc5GiUbkwsk0Mc=",
+    strip_prefix = "co-3.0.0",
+    urls = ["https://github.com/dallison/co/archive/refs/tags/3.0.0.tar.gz"],
 )
 # For local debugging of co coroutine library.
 # bazel_dep(name = "coroutines")
@@ -42,7 +42,7 @@ http_archive(
 #    path = "../co",
 # )
 
-bazel_dep(name = "rules_python", version = "0.40.0")
+bazel_dep(name = "rules_python", version = "1.7.0")
 
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(
@@ -51,4 +51,4 @@ python.toolchain(
     python_version = "3.11.1",
 )
 
-bazel_dep(name = "pybind11_bazel", version = "2.13.6")
+bazel_dep(name = "pybind11_bazel", version = "3.0.0")
