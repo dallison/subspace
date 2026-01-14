@@ -166,7 +166,7 @@ void ServiceGenerator::GenerateServerMethodRegistrations(std::ostream &os) {
 
 void ServiceGenerator::GenerateMethodClientHeader(
     const google::protobuf::MethodDescriptor *method, std::ostream &os) {
-  std::string method_name = method->name();
+  const auto method_name = method->name();
   if (method->server_streaming()) {
     // Streaming method.
     os << "  absl::Status " << method_name << "(";
@@ -203,7 +203,7 @@ void ServiceGenerator::GenerateMethodClientHeader(
 
 void ServiceGenerator::GenerateMethodClientSource(
     const google::protobuf::MethodDescriptor *method, std::ostream &os) {
-  std::string method_name = method->name();
+  const auto method_name = method->name();
   if (method->server_streaming()) {
     // Streaming method.
     os << "absl::Status " << service_->name() << "Client::" << method_name

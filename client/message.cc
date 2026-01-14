@@ -30,6 +30,27 @@ void ActiveMessage::Release() {
   ResetInternal();
 }
 
+std::string Message::ChannelType() const {
+  if (active_message == nullptr || active_message->sub == nullptr) {
+    return "";
+  }
+  return active_message->sub->SlotType();
+}
+
+int Message::NumSlots() const {
+  if (active_message == nullptr || active_message->sub == nullptr) {
+    return 0;
+  }
+  return active_message->sub->NumSlots();
+}
+
+uint64_t Message::SlotSize() const {
+  if (active_message == nullptr || active_message->sub == nullptr) {
+    return 0;
+  }
+  return active_message->sub->SlotSize();
+}
+
 Message::Message(std::shared_ptr<ActiveMessage> msg)
     : active_message(std::move(msg)), length(active_message->length),
       buffer(active_message->buffer), ordinal(active_message->ordinal),

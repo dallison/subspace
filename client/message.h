@@ -95,6 +95,10 @@ struct Message {
     slot_id = -1;
   }
 
+  std::string ChannelType() const;
+  int NumSlots() const;
+  uint64_t SlotSize() const;
+
   std::shared_ptr<ActiveMessage> active_message;
   size_t length = 0;
   const void *buffer = nullptr;

@@ -35,8 +35,8 @@ void RpcServer::Stop() {
 }
 
 absl::Status RpcServer::RegisterMethod(
-    const std::string &method, const std::string &request_type,
-    const std::string &response_type,
+    const std::string &method, std::string_view request_type,
+    std::string_view response_type,
     std::function<absl::Status(const google::protobuf::Any &,
                                google::protobuf::Any *, co::Coroutine *)>
         callback,
@@ -46,7 +46,7 @@ absl::Status RpcServer::RegisterMethod(
   }
 
   methods_[method] = std::make_shared<Method>(
-      this, method, request_type, response_type, options.slot_size,
+      this, method, std::string{request_type}, std::string{response_type}, options.slot_size,
       options.num_slots, std::move(callback),
       options.id == -1 ? ++next_method_id_ : options.id);
   return absl::OkStatus();
@@ -54,7 +54,7 @@ absl::Status RpcServer::RegisterMethod(
 
 // Register void method.
 absl::Status RpcServer::RegisterMethod(
-    const std::string &method, const std::string &request_type,
+    const std::string &method, std::string_view request_type,
     std::function<absl::Status(const google::protobuf::Any &, co::Coroutine *)>
         callback,
     MethodOptions &&options) {
@@ -62,7 +62,7 @@ absl::Status RpcServer::RegisterMethod(
     return absl::AlreadyExistsError("Method already registered: " + method);
   }
   methods_[method] = std::make_shared<Method>(
-      this, method, request_type, "subspace.VoidMessage", options.slot_size,
+      this, method, std::string{request_type}, "subspace.VoidMessage", options.slot_size,
       options.num_slots,
       [callback](const google::protobuf::Any &req, google::protobuf::Any *res,
                  co::Coroutine *c) {
@@ -126,8 +126,8 @@ absl::Status RpcServer::RegisterMethod(
 }
 
 absl::Status RpcServer::RegisterMethod(
-    const std::string &method, const std::string &request_type,
-    const std::string &response_type,
+    const std::string &method, std::string_view request_type,
+    std::string_view response_type,
     std::function<absl::Status(const google::protobuf::Any &, AnyStreamWriter &,
                                co::Coroutine *)>
         callback,
@@ -137,7 +137,7 @@ absl::Status RpcServer::RegisterMethod(
   }
 
   methods_[method] = std::make_shared<Method>(
-      this, method, request_type, response_type, options.slot_size,
+      this, method, std::string{request_type}, std::string{response_type}, options.slot_size,
       options.num_slots, std::move(callback),
       options.id == -1 ? ++next_method_id_ : options.id);
   return absl::OkStatus();

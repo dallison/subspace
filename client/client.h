@@ -16,7 +16,7 @@
 #include "client/subscriber.h"
 #include "co/coroutine.h"
 #include "common/channel.h"
-#include "subscriber.h"
+
 #include "toolbelt/fd.h"
 #include "toolbelt/logging.h"
 #include "toolbelt/sockets.h"

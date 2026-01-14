@@ -233,15 +233,15 @@ public:
 
   // Method with a request and response.
   absl::Status RegisterMethod(
-      const std::string &method, const std::string &request_type,
-      const std::string &response_type,
+      const std::string &method, std::string_view request_type,
+      std::string_view response_type,
       std::function<absl::Status(const google::protobuf::Any &,
                                  google::protobuf::Any *, co::Coroutine *)>
           callback,
       MethodOptions &&options = {});
 
   absl::Status
-  RegisterMethod(const std::string &method, const std::string &request_type,
+  RegisterMethod(const std::string &method, std::string_view request_type,
                  std::function<absl::Status(const google::protobuf::Any &,
                                             co::Coroutine *)>
                      callback,
@@ -249,8 +249,8 @@ public:
 
   // Streaming method.
   absl::Status RegisterMethod(
-      const std::string &method, const std::string &request_type,
-      const std::string &response_type,
+      const std::string &method, std::string_view request_type,
+      std::string_view response_type,
       std::function<absl::Status(const google::protobuf::Any &,
                                  internal::AnyStreamWriter &, co::Coroutine *)>
           callback,
@@ -347,7 +347,7 @@ inline absl::Status RpcServer::RegisterMethod(
         if (!req.Is<Request>()) {
           return absl::InvalidArgumentError(absl::StrFormat(
               "Invalid argment type for %s: need %s got %s", method,
-              request_descriptor->full_name().c_str(), req.type_url().c_str()));
+              request_descriptor->full_name(), req.type_url()));
         }
         Request request;
         if (!req.UnpackTo(&request)) {
@@ -378,7 +378,7 @@ inline absl::Status RpcServer::RegisterMethod(
         if (!req.Is<Request>()) {
           return absl::InvalidArgumentError(absl::StrFormat(
               "Invalid argment type for %s: need %s got %s", method,
-              request_descriptor->full_name().c_str(), req.type_url().c_str()));
+              request_descriptor->full_name(), req.type_url()));
         }
         Request request;
         if (!req.UnpackTo(&request)) {
@@ -409,7 +409,7 @@ inline absl::Status RpcServer::RegisterMethod(
         if (!req.Is<Request>()) {
           return absl::InvalidArgumentError(absl::StrFormat(
               "Invalid argment type for %s: need %s got %s", method,
-              request_descriptor->full_name().c_str(), req.type_url().c_str()));
+              request_descriptor->full_name(), req.type_url()));
         }
         Request request;
         if (!req.UnpackTo(&request)) {

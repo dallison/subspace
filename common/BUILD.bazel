@@ -24,7 +24,7 @@ cc_library(
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
         "@protobuf//:protobuf",
-        "@coroutines//co",
+        "@coroutines//:co",
         "@toolbelt//toolbelt",
     ],
 )
@@ -39,6 +39,6 @@ cc_test(
     ],
     deps = [
         "@abseil-cpp//absl/container:flat_hash_set",
-        "@com_google_googletest//:gtest_main",
+        "@googletest//:gtest_main",
     ],
 )

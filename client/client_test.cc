@@ -2617,14 +2617,25 @@ TEST_F(ClientTest, MessageGetters) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
   absl::StatusOr<Publisher> pub =
-      client->CreatePublisher("chan1", {.slot_size = 256, .num_slots = 10});
+      client->CreatePublisher("chan1", {.slot_size = 256, .num_slots = 10, .type = "test-type"});
   ASSERT_OK(pub);
+
+  absl::StatusOr<Subscriber> sub = client->CreateSubscriber("chan1");
+  ASSERT_OK(sub);
 
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
   ASSERT_OK(buffer);
   memcpy(*buffer, "foobar", 6);
-  absl::StatusOr<const Message> pub_status = pub->PublishMessage(0);
-  ASSERT_FALSE(pub_status.ok());
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+  ASSERT_OK(pub_status);
+
+  absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_NE(0, msg->length);
+  // test message getters for publisher data
+  ASSERT_EQ("test-type", msg->ChannelType());
+  ASSERT_EQ(256, msg->SlotSize());
+  ASSERT_EQ(10, msg->NumSlots());
 }
 
 // This tests checksums.  We have two publishers, one that calculates a checksum and one that doesn't.
