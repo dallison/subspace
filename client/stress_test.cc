@@ -6,7 +6,7 @@
 #include "absl/flags/parse.h"
 #include "absl/hash/hash_testing.h"
 #include "client/client.h"
-#include "coroutine.h"
+#include "co/coroutine.h"
 #include "server/server.h"
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
