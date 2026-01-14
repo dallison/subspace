@@ -422,7 +422,8 @@ public:
 
   // Get the number of slots in the channel (can't be changed)
   int NumSlots() const { return num_slots_; }
-  virtual void SetNumSlots(int n) { num_slots_ = n; }
+  void SetNumSlots(int n) { num_slots_ = n; }
+  std::string SlotType() const { return type_; }
 
   void CleanupSlots(int owner, bool reliable, bool is_pub, int vchan_id);
 

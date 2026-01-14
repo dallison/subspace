@@ -3,19 +3,20 @@ module(
 )
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 
-bazel_dep(name = "bazel_skylib", version = "1.7.1")
-bazel_dep(name = "platforms", version = "0.0.10")
-bazel_dep(name = "abseil-cpp", version = "20250814.1")
-bazel_dep(name = "googletest", version = "1.15.2", repo_name = "com_google_googletest")
+bazel_dep(name = "bazel_skylib", version = "1.9.0")
+bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "abseil-cpp", version = "20250512.1")
+bazel_dep(name = "googletest", version = "1.17.0")
 bazel_dep(name = "protobuf", version = "33.2")
 
-bazel_dep(name = "rules_cc", version = "0.0.16")
+bazel_dep(name = "rules_cc", version = "0.2.16")
 bazel_dep(name = "rules_pkg", version = "1.0.1")
-bazel_dep(name = "zlib", version = "1.3.1.bcr.3")
+bazel_dep(name = "zlib", version = "1.3.1.bcr.5")
 
 # Toolbelt
-http_archive(
+git_repository(
     name = "toolbelt",
     sha256 = "3b1ea0a94c1cd253a51db47deb1b0ff4f68fff15b865ff2e640fa193d60ad97c",
     strip_prefix = "cpp_toolbelt-82c0692d5a815c0cefb7b467ba78ae8ced795ee7",
@@ -44,7 +45,7 @@ http_archive(
 #   path = "../
 # )
 
-bazel_dep(name = "rules_python", version = "0.40.0")
+bazel_dep(name = "rules_python", version = "1.7.0")
 
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(
@@ -53,4 +54,4 @@ python.toolchain(
     python_version = "3.11.1",
 )
 
-bazel_dep(name = "pybind11_bazel", version = "2.13.6")
+bazel_dep(name = "pybind11_bazel", version = "3.0.0")

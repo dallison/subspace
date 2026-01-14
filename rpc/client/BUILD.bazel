@@ -42,7 +42,7 @@ cc_test(
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:status_matchers",
         "@abseil-cpp//absl/status:statusor",
-        "@com_google_googletest//:gtest",
+        "@googletest//:gtest",
         "@coroutines//co:co",
     ],
 )
