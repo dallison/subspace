@@ -11,7 +11,7 @@
 #include "absl/status/statusor.h"
 #include "client/message.h"
 #include "client_handler.h"
-#include "coroutine.h"
+#include "co/coroutine.h"
 #include "proto/subspace.pb.h"
 #include "server/server_channel.h"
 #include "toolbelt/bitset.h"

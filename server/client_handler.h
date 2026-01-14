@@ -7,7 +7,7 @@
 
 #include "absl/status/status.h"
 #include "common/channel.h"
-#include "coroutine.h"
+#include "co/coroutine.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/sockets.h"
 #include <sys/poll.h>

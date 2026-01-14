@@ -158,7 +158,7 @@ _subspace_rpc_gen = rule(
     attrs = {
         "protoc": attr.label(
             executable = True,
-            default = Label("@com_google_protobuf//:protoc"),
+            default = Label("@protobuf//:protoc"),
             cfg = "exec",
         ),
         "subspace_rpc_plugin": attr.label(
