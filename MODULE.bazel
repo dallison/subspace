@@ -3,7 +3,6 @@ module(
 )
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
-git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 
 bazel_dep(name = "bazel_skylib", version = "1.9.0")
 bazel_dep(name = "platforms", version = "1.0.0")
@@ -14,9 +13,10 @@ bazel_dep(name = "protobuf", version = "33.2")
 bazel_dep(name = "rules_cc", version = "0.2.16")
 bazel_dep(name = "rules_pkg", version = "1.0.1")
 bazel_dep(name = "zlib", version = "1.3.1.bcr.5")
+bazel_dep(name = "coroutines", version = "3.0.0")
 
 # Toolbelt
-git_repository(
+http_archive(
     name = "toolbelt",
     sha256 = "3b1ea0a94c1cd253a51db47deb1b0ff4f68fff15b865ff2e640fa193d60ad97c",
     strip_prefix = "cpp_toolbelt-82c0692d5a815c0cefb7b467ba78ae8ced795ee7",
@@ -24,19 +24,11 @@ git_repository(
 )
 
 # For local debugging of toolbelt coroutine library.
-# bazel_dep(name = "toolbelt")
 # local_path_override(
 #    module_name = "toolbelt",
 #    path = "../cpp_toolbelt",
 # )
 
-# Coroutines
-http_archive(
-    name = "coroutines",
-    sha256 = "10e6fe70bb76e91a941e4d765944aab796116b317082179ef4ec14b00581c843",
-    strip_prefix = "co-439a0f52c73ad4ce40b1c50a665629f4f0873a87",
-    urls = ["https://github.com/dallison/co/archive/439a0f52c73ad4ce40b1c50a665629f4f0873a87.tar.gz"],
-)
 
 # For local debugging of co coroutine library.
 # bazel_dep(name = "coroutines")
