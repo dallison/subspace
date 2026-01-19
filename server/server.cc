@@ -391,6 +391,9 @@ absl::Status Server::Run() {
     }
   }
 
+  // TODO: why does this not work?
+  // scheduler_.EnableAborts(false);
+  
   // Start the listener coroutine.
   scheduler_.Spawn(
       [this, &listen_socket]() { ListenerCoroutine(listen_socket); },
@@ -1197,8 +1200,8 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
   char buffer[kDiscoveryBufferSize];
 
   toolbelt::StreamSocket receiver_listener;
-  absl::Status s = receiver_listener.Bind(
-      toolbelt::SocketAddress::AnyPort(my_address_), true);
+  auto addr = toolbelt::SocketAddress::AnyPort(my_address_);
+  absl::Status s = receiver_listener.Bind(addr, true);
   if (!s.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Unable to bind socket for bridge receiver for %s: %s",
@@ -1580,6 +1583,8 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
       in_addr subscriber_ip;
       memcpy(&subscriber_ip, subscribe.receiver().address().data(),
              sizeof(subscriber_ip));
+      // Need this in host byte order.
+      subscriber_ip.s_addr = ntohl(subscriber_ip.s_addr);
       subscriber_addr =
           toolbelt::SocketAddress(subscriber_ip, subscribe.receiver().port());
       break;
