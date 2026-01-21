@@ -163,7 +163,7 @@ private:
 
   void RetirementReceiverCoroutine(
       toolbelt::StreamSocket &retirement_listener,
-      std::vector<std::shared_ptr<ActiveMessage>> &active_retirement_msgs);
+      std::shared_ptr<std::vector<std::shared_ptr<ActiveMessage>>> active_retirement_msgs);
 
   void SubscribeOverBridge(ServerChannel *channel, bool reliable,
                            toolbelt::InetAddress publisher);

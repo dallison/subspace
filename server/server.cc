@@ -391,9 +391,11 @@ absl::Status Server::Run() {
     }
   }
 
-  // TODO: why does this not work?
-  // scheduler_.EnableAborts(false);
-  
+  // TODO: why does this not work?  The BridgeSenderCoroutine causes a terminate because the co::AbortException
+  // is not caught in the coroutine caller.  This appears to be a bug somewhere as I can't find why the catch
+  // isn't working.  We don't need to abort handling anyway.
+  scheduler_.EnableAborts(false);
+
   // Start the listener coroutine.
   scheduler_.Spawn(
       [this, &listen_socket]() { ListenerCoroutine(listen_socket); },
@@ -589,8 +591,7 @@ void Server::RemoveChannel(ServerChannel *channel) {
   }
   if (it->second->IsVirtual()) {
     auto vchan = static_cast<VirtualChannel *>(it->second.get());
-    ChannelMultiplexer *mux =
-        vchan->GetMux();
+    ChannelMultiplexer *mux = vchan->GetMux();
     mux->RemoveVirtualChannel(vchan);
     if (mux->IsEmpty()) {
       RemoveChannel(mux);
@@ -966,14 +967,16 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
   // send over the bridge.  This extends the lifetime of the AciveMessage until
   // the other side of the bridge sends us a retirement notification for the
   // message's slot.
-  std::vector<std::shared_ptr<ActiveMessage>> active_retirement_msgs;
+  std::shared_ptr<std::vector<std::shared_ptr<ActiveMessage>>>
+      active_retirement_msgs =
+          std::make_shared<std::vector<std::shared_ptr<ActiveMessage>>>();
   bool notifying_of_retirement = !channel->GetRetirementFds().empty();
 
   // Spawn a coroutine to read from the retirement connection.
   if (notifying_of_retirement) {
-    active_retirement_msgs.resize(channel->NumSlots());
+    active_retirement_msgs->resize(channel->NumSlots());
     scheduler_.Spawn(
-        [this, &retirement_listener, &active_retirement_msgs]() {
+        [this, &retirement_listener, active_retirement_msgs]() mutable {
           return RetirementReceiverCoroutine(retirement_listener,
                                              active_retirement_msgs);
         },
@@ -1067,7 +1070,8 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
       if (notifying_of_retirement) {
         // We need to keep track of the message so that we can retire it
         // when the other side retires the slot.
-        active_retirement_msgs[msg->slot_id] = std::move(msg->active_message);
+        (*active_retirement_msgs)[msg->slot_id] =
+            std::move(msg->active_message);
       }
     }
 
@@ -1092,7 +1096,8 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
 // on this side and the publisher's retirement FD is sent the slot.
 void Server::RetirementReceiverCoroutine(
     toolbelt::StreamSocket &retirement_listener,
-    std::vector<std::shared_ptr<ActiveMessage>> &active_retirement_msgs) {
+    std::shared_ptr<std::vector<std::shared_ptr<ActiveMessage>>>
+        active_retirement_msgs) {
   // Accept connection on the retirement listener socket.
   absl::StatusOr<toolbelt::StreamSocket> retirement_socket =
       retirement_listener.Accept(co::self);
@@ -1126,10 +1131,10 @@ void Server::RetirementReceiverCoroutine(
     // being sent (which is serialized as 0 bytes.  Remove the adustment.
     slot_id -= 1;
 
-    if (slot_id < 0 || slot_id >= active_retirement_msgs.size()) {
+    if (slot_id < 0 || slot_id >= active_retirement_msgs->size()) {
       continue;
     }
-    active_retirement_msgs[slot_id].reset();
+    (*active_retirement_msgs)[slot_id].reset();
   }
 }
 
