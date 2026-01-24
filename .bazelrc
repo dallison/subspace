@@ -35,3 +35,17 @@ build:libc++ --action_env=BAZEL_LINKLIBS=-l%:libc++.a:-l%:libc++abi.a
 build:libc++ --action_env=BAZEL_LINKOPTS=-lm:-pthread
 build:libc++ --define force_libcpp=enabled
 
+# Define the QNX environment
+# Force Bazel to stop looking at the local host compiler
+build:qnx --crosstool_top=//toolchain:qnx_toolchain
+build:qnx --cpu=aarch64
+build:qnx --compiler=qcc
+
+# This is the key: prevent auto-configuration
+build:qnx --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+
+build:qnx --action_env=QNX_HOST=$(HOME)/qnx800/host/linux/x86_64
+build:qnx --action_env=QNX_TARGET=$(HOME)/qnx800/target/qnx8
+build:qnx --crosstool_top=//toolchain:qnx_toolchain
+build:qnx --cpu=aarch64
+build:qnx --host_crosstool_top=@bazel_tools//tools/cpp:toolchain
