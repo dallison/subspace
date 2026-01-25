@@ -185,7 +185,7 @@ def _impl(ctx):
                 ],
                 flag_groups = [
                     flag_group(
-                        flags = ["-Wc,-MD", "-Wc,-MF,%{dependency_file}"],
+                        flags = ["-Wc,-MD,-MF,%{dependency_file}"],
                         expand_if_available = "dependency_file",
                     ),
                 ],
