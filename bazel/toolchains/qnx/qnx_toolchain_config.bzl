@@ -155,6 +155,32 @@ def _impl(ctx):
             ),
         ],
     )
+
+    include_path_passthrough = feature(
+        name = "include_path_passthrough",
+        enabled = True,
+        flag_sets = [
+            flag_set(
+                actions = [
+                    ACTION_NAMES.c_compile,
+                    ACTION_NAMES.cpp_compile,
+                    ACTION_NAMES.preprocess_assemble,
+                    ACTION_NAMES.cpp_header_parsing,
+                    ACTION_NAMES.cpp_module_compile,
+                ],
+                flag_groups = [
+                    flag_group(
+                        flags = ["-I%{include_paths}"],
+                        iterate_over = "include_paths",
+                    ),
+                    flag_group(
+                        flags = ["-iquote %{quote_include_paths}"],
+                        iterate_over = "quote_include_paths",
+                    ),
+                ],
+            ),
+        ],
+    )
     
     # Assembly flags
     asm_flags = feature(
@@ -183,12 +209,6 @@ def _impl(ctx):
                     ACTION_NAMES.preprocess_assemble,
                     ACTION_NAMES.cpp_module_compile,
                 ],
-                flag_groups = [
-                    flag_group(
-                        flags = ["-Wc,-MD,-MF,%{dependency_file}"],
-                        expand_if_available = "dependency_file",
-                    ),
-                ],
             ),
         ],
     )
@@ -198,6 +218,7 @@ def _impl(ctx):
         compiler_flags,
         linker_flags,
         include_paths,
+        include_path_passthrough,
         asm_flags,
         dependency_file_feature,
     ]
