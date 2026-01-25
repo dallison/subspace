@@ -93,7 +93,7 @@ def _impl(ctx):
                             "-Wc,-std=c++17",
                             "-Wc,-Wall",
                             "-Wc,-Wextra",
-                            "-D__QNX__",
+                            "-Wc,-MD", "-Wc,-MF", "%{dependency_file}"
                         ],
                     ),
                 ],
