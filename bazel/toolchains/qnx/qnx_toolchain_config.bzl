@@ -93,7 +93,6 @@ def _impl(ctx):
                             "-Wc,-std=c++17",
                             "-Wc,-Wall",
                             "-Wc,-Wextra",
-                            "-Wc,-MD", "-Wc,-MF", "%{dependency_file}"
                         ],
                     ),
                 ],
@@ -172,6 +171,27 @@ def _impl(ctx):
             ),
         ],
     )
+
+    dependency_file_feature = feature(
+        name = "dependency_file",
+        enabled = True,
+        flag_sets = [
+            flag_set(
+                actions = [
+                    ACTION_NAMES.c_compile,
+                    ACTION_NAMES.cpp_compile,
+                    ACTION_NAMES.preprocess_assemble,
+                    ACTION_NAMES.cpp_module_compile,
+                ],
+                flag_groups = [
+                    flag_group(
+                        flags = ["-Wc,-MD", "-Wc,-MF,%{dependency_file}"],
+                        expand_if_available = "dependency_file",
+                    ),
+                ],
+            ),
+        ],
+    )
     
     # Default features
     default_features = [
@@ -179,6 +199,7 @@ def _impl(ctx):
         linker_flags,
         include_paths,
         asm_flags,
+        dependency_file_feature,
     ]
     
     cxx_builtin_includes = [
