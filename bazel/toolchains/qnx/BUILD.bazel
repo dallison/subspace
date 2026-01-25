@@ -1,0 +1,79 @@
+# QNX 8 Toolchain for Bazel
+# Supports both aarch64 and x86_64 architectures
+
+load("@rules_cc//cc:defs.bzl", "cc_toolchain", "cc_toolchain_suite")
+load(":qnx_toolchain_config.bzl", "qnx_cc_toolchain_config")
+
+package(default_visibility = ["//visibility:public"])
+
+# QNX aarch64 toolchain configuration
+# QNX_SDP_PATH should be set via environment variable (defaults to ~/qnx800)
+qnx_cc_toolchain_config(
+    name = "qnx_aarch64_config",
+    cpu = "aarch64",
+    compiler_suffix = "gcc_ntoaarch64",
+)
+
+cc_toolchain(
+    name = "qnx_aarch64_cc_toolchain",
+    all_files = ":qnx_aarch64_empty",
+    compiler_files = ":qnx_aarch64_empty",
+    dwp_files = ":qnx_aarch64_empty",
+    linker_files = ":qnx_aarch64_empty",
+    objcopy_files = ":qnx_aarch64_empty",
+    strip_files = ":qnx_aarch64_empty",
+    supports_param_files = 1,
+    toolchain_config = ":qnx_aarch64_config",
+)
+
+# QNX x86_64 toolchain configuration
+# QNX_SDP_PATH should be set via environment variable (defaults to ~/qnx800)
+qnx_cc_toolchain_config(
+    name = "qnx_x86_64_config",
+    cpu = "x86_64",
+    compiler_suffix = "gcc_ntox86_64",
+)
+
+cc_toolchain(
+    name = "qnx_x86_64_cc_toolchain",
+    all_files = ":qnx_x86_64_empty",
+    compiler_files = ":qnx_x86_64_empty",
+    dwp_files = ":qnx_x86_64_empty",
+    linker_files = ":qnx_x86_64_empty",
+    objcopy_files = ":qnx_x86_64_empty",
+    strip_files = ":qnx_x86_64_empty",
+    supports_param_files = 1,
+    toolchain_config = ":qnx_x86_64_config",
+)
+
+# Empty file groups (Bazel requires these but we use the compiler directly)
+filegroup(
+    name = "qnx_aarch64_empty",
+    srcs = [],
+)
+
+filegroup(
+    name = "qnx_x86_64_empty",
+    srcs = [],
+)
+
+# Toolchain declarations
+toolchain(
+    name = "qnx_aarch64_toolchain",
+    target_compatible_with = [
+        "//bazel/toolchains/qnx/platforms:qnx",
+        "@platforms//cpu:aarch64",
+    ],
+    toolchain = ":qnx_aarch64_cc_toolchain",
+    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+)
+
+toolchain(
+    name = "qnx_x86_64_toolchain",
+    target_compatible_with = [
+        "//bazel/toolchains/qnx/platforms:qnx",
+        "@platforms//cpu:x86_64",
+    ],
+    toolchain = ":qnx_x86_64_cc_toolchain",
+    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+)

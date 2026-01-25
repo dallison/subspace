@@ -35,17 +35,18 @@ build:libc++ --action_env=BAZEL_LINKLIBS=-l%:libc++.a:-l%:libc++abi.a
 build:libc++ --action_env=BAZEL_LINKOPTS=-lm:-pthread
 build:libc++ --define force_libcpp=enabled
 
-# Define the QNX environment
-# Force Bazel to stop looking at the local host compiler
-build:qnx --crosstool_top=//toolchain:qnx_toolchain
-build:qnx --cpu=aarch64
-build:qnx --compiler=qcc
+# QNX 8 Toolchain Configurations
+# Set QNX_SDP_PATH environment variable or use default ~/qnx800
+build:qnx_aarch64 --platforms=//bazel/toolchains/qnx/platforms:qnx_aarch64
+build:qnx_aarch64 --action_env=QNX_SDP_PATH
+build:qnx_aarch64 --define=QNX_SDP_PATH=/home/dave.allison/qnx800
+build:qnx_aarch64 --cxxopt=-D__QNX__
 
-# This is the key: prevent auto-configuration
-build:qnx --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+build:qnx_x86_64 --platforms=//bazel/toolchains/qnx/platforms:qnx_x86_64
+build:qnx_x86_64 --action_env=QNX_SDP_PATH
+build:qnx_x86_64 --define=QNX_SDP_PATH=/home/dave.allison/qnx800
+build:qnx_x86_64 --cxxopt=-D__QNX__
 
-build:qnx --action_env=QNX_HOST=$(HOME)/qnx800/host/linux/x86_64
-build:qnx --action_env=QNX_TARGET=$(HOME)/qnx800/target/qnx8
-build:qnx --crosstool_top=//toolchain:qnx_toolchain
-build:qnx --cpu=aarch64
-build:qnx --host_crosstool_top=@bazel_tools//tools/cpp:toolchain
+# QNX common flags
+build:qnx --cxxopt=-std=c++17
+build:qnx --cxxopt=-Wno-sign-compare

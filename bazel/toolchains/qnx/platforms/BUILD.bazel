@@ -1,0 +1,28 @@
+# QNX Platform Definitions
+
+package(default_visibility = ["//visibility:public"])
+
+# Define QNX OS constraint value
+# Note: We use @platforms//os constraint_setting but define our own QNX value
+constraint_value(
+    name = "qnx",
+    constraint_setting = "@platforms//os:os",
+)
+
+# QNX aarch64 platform
+platform(
+    name = "qnx_aarch64",
+    constraint_values = [
+        ":qnx",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+# QNX x86_64 platform
+platform(
+    name = "qnx_x86_64",
+    constraint_values = [
+        ":qnx",
+        "@platforms//cpu:x86_64",
+    ],
+)
