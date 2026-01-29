@@ -162,8 +162,6 @@ void WaitForSubscribedMessage(toolbelt::FileDescriptor &bridge_pipe,
   ASSERT_OK(n);
   ASSERT_EQ(sizeof(int32_t), *n);
   length = ntohl(length); // Length is network byte order.
-                                std::cerr << "Bridge notification length: " << length
-                                          << std::endl;
   n = bridge_pipe.Read(buffer, length);
   ASSERT_OK(n);
 
