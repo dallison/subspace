@@ -27,7 +27,7 @@ cc_library(
         "@abseil-cpp//absl/strings:str_format",
         "@protobuf//:protobuf",
         "@coroutines//:co",
-        "@toolbelt//toolbelt",
+        "@cpp_toolbelt//toolbelt",
     ],
 )
 
