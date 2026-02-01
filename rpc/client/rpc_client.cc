@@ -1,4 +1,4 @@
-// Copyright 2025 David Allison
+// Copyright 2024-2026 David Allison
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
