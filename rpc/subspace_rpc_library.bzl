@@ -3,6 +3,8 @@ This module provides a rule to generate subspace_rpc message files from proto_li
 """
 
 load("@bazel_skylib//lib:paths.bzl", "paths")
+load("@rules_proto//proto:defs.bzl", "ProtoInfo")
+load("@rules_cc//cc:defs.bzl", "cc_library")
 
 MessageInfo = provider(fields = ["direct_sources", "transitive_sources", "cpp_outputs"])
 
@@ -247,11 +249,11 @@ def subspace_rpc_library(name, deps = [], add_namespace = ""):
             libdeps.append(cc_proto)
 
     client_name = name + "_client"
-    native.cc_library(
+    cc_library(
         name = client_name,
         srcs = [client_srcs],
         hdrs = [client_hdrs],
-        deps = libdeps + client_deps
+        deps = libdeps + client_deps,
     )
 
     server_srcs = name + "_server_srcs"
@@ -271,7 +273,7 @@ def subspace_rpc_library(name, deps = [], add_namespace = ""):
     server_deps = ["//rpc/server:rpc_server"]
 
     server_name = name + "_server"
-    native.cc_library(
+    cc_library(
         name = server_name,
         srcs = [server_srcs],
         hdrs = [server_hdrs],

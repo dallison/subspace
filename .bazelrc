@@ -8,6 +8,8 @@ build:asan --linkopt -fsanitize=address
 # Enable the built-in platform-specific configuration feature
 common --enable_platform_specific_config
 
+build --enable_platform_specific_config
+
 # Apply this flag only when building on/for macOS
 build:macos --macos_minimum_os=10.15
 

@@ -5,10 +5,90 @@
 #include "rpc/idl_compiler/gen.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_split.h"
-#include <filesystem>
 #include <fstream>
 #include <string_view>
 
+#if defined(__APPLE__)
+// For some reason, when building on MacOS, bazel doesn't pass the correct
+// macos version to the compiler, so std::filesystem is not available.
+// So we provide a minimal implementation of path and create_directories, only
+// the stuff we need.  I wish I didn't have to do this but I can't get the build
+// to work otherwise.
+#include <sys/stat.h>
+class path {
+public:
+  path() = default;
+  path(const std::string &s) : str_(s) {}
+  path(const char *s) : str_(s) {}
+  path operator/(const path &other) const {
+    if (str_.empty()) {
+      return other;
+    }
+    if (other.str_.empty()) {
+      return *this;
+    }
+    return path(str_ + "/" + other.str_);
+  }
+  path operator/(const std::string &other) const {
+    return (*this) / path(other);
+  }
+  path operator/(const char *other) const {
+    return (*this) / path(std::string(other));
+  }
+  path operator/(const std::string_view &other) const {
+    return (*this) / path(std::string(other));
+  }
+
+  operator std::string() {
+    return str_;
+  }
+
+  path parent_path() const {
+    size_t last_slash = str_.rfind('/');
+    if (last_slash != std::string::npos) {
+      return path(str_.substr(0, last_slash));
+    } else {
+      return path();
+    }
+  }
+
+  void replace_extension(const std::string &ext) {
+    size_t last_dot = str_.rfind('.');
+    if (last_dot != std::string::npos) {
+      str_ = str_.substr(0, last_dot) + ext;
+    } else {
+      str_ += ext;
+    }
+  }
+  std::string string() const { return str_; }
+private:
+  std::string str_;
+};
+
+std::ostream& operator<<(std::ostream& os, const path& p) {
+    os << p.string();
+    return os;
+}
+
+void create_directories(const path& p) {
+    // No std::filesystem available, so use mkdir recursively.
+    std::string path_str = p.string();
+    size_t pos = 0;
+    do {
+        pos = path_str.find('/', pos + 1);
+        std::string subdir = path_str.substr(0, pos);
+        if (!subdir.empty()) {
+            mkdir(subdir.c_str(), 0755);  // Ignore errors
+        }
+    } while (pos != std::string::npos);
+}
+#else
+// On non-MacOS systems we can use std::filesystem
+#include <filesystem>
+
+using path = path;
+using create_directories = std::filesystem::create_directories;
+#endif
 namespace subspace {
 
 static void
@@ -27,8 +107,8 @@ WriteToZeroCopyStream(const std::string &data,
   }
 }
 
-static std::string GeneratedFilename(const std::filesystem::path &package_name,
-                                     const std::filesystem::path &target_name,
+static std::string GeneratedFilename(const path &package_name,
+                                     const path &target_name,
                                      std::string_view filename) {
   size_t virtual_imports = filename.find("_virtual_imports/");
   if (virtual_imports != std::string_view::npos) {
@@ -86,7 +166,7 @@ bool CodeGenerator::GenerateClient(
   std::string filename =
       GeneratedFilename(package_name_, target_name_, file->name());
 
-  std::filesystem::path hp(filename);
+  path hp(filename);
   hp.replace_extension(".subspace.rpc_client.h");
   std::cerr << "Generating " << hp << "\n";
 
@@ -97,7 +177,7 @@ bool CodeGenerator::GenerateClient(
   std::unique_ptr<google::protobuf::io::ZeroCopyOutputStream> header_output(
       generator_context->Open(hp.string()));
 
-  std::filesystem::create_directories(hp.parent_path());
+  create_directories(hp.parent_path());
 
   if (header_output == nullptr) {
     std::cerr << "Failed to open " << hp << " for writing\n";
@@ -107,7 +187,7 @@ bool CodeGenerator::GenerateClient(
   std::stringstream header_stream;
   gen.GenerateClientHeaders(header_stream);
 
-  std::filesystem::path cp(filename);
+  path cp(filename);
   cp.replace_extension(".subspace.rpc_client.cc");
   std::cerr << "Generating " << cp << "\n";
 
@@ -134,7 +214,7 @@ bool CodeGenerator::GenerateServer(
   std::string filename =
       GeneratedFilename(package_name_, target_name_, file->name());
 
-  std::filesystem::path hp(filename);
+  path hp(filename);
   hp.replace_extension(".subspace.rpc_server.h");
   std::cerr << "Generating " << hp << "\n";
 
@@ -145,7 +225,7 @@ bool CodeGenerator::GenerateServer(
   std::unique_ptr<google::protobuf::io::ZeroCopyOutputStream> header_output(
       generator_context->Open(hp.string()));
 
-  std::filesystem::create_directories(hp.parent_path());
+  create_directories(hp.parent_path());
 
   if (header_output == nullptr) {
     std::cerr << "Failed to open " << hp << " for writing\n";
@@ -155,7 +235,7 @@ bool CodeGenerator::GenerateServer(
   std::stringstream header_stream;
   gen.GenerateServerHeaders(header_stream);
 
-  std::filesystem::path cp(filename);
+  path cp(filename);
   cp.replace_extension(".subspace.rpc_server.cc");
   std::cerr << "Generating " << cp << "\n";
 
@@ -209,7 +289,7 @@ void Generator::GenerateClientHeaders(std::ostream &os) {
   os << "#pragma once\n";
   std::string main_base =
       GeneratedFilename("", "", file_->name());
-  std::filesystem::path cpp_header(main_base);
+  path cpp_header(main_base);
   cpp_header.replace_extension(".pb.h");
 
   os << "#include \"rpc/client/rpc_client.h\"\n";
@@ -217,7 +297,7 @@ void Generator::GenerateClientHeaders(std::ostream &os) {
   for (int i = 0; i < file_->dependency_count(); i++) {
     std::string base = GeneratedFilename(package_name_, target_name_,
                                          file_->dependency(i)->name());
-    std::filesystem::path p(base);
+    path p(base);
     p.replace_extension(".subspace.rpc_client.h");
     os << "#include \"" << p.string() << "\"\n";
   }
@@ -232,7 +312,7 @@ void Generator::GenerateClientHeaders(std::ostream &os) {
 }
 
 void Generator::GenerateClientSources(std::ostream &os) {
-  std::filesystem::path p(
+  path p(
       GeneratedFilename(package_name_, target_name_, file_->name()));
   p.replace_extension(".subspace.rpc_client.h");
   os << "#include \"" << p.string() << "\"\n";
@@ -250,7 +330,7 @@ void Generator::GenerateServerHeaders(std::ostream &os) {
   os << "#pragma once\n";
   std::string main_base =
       GeneratedFilename("", "", file_->name());
-  std::filesystem::path cpp_header(main_base);
+  path cpp_header(main_base);
   cpp_header.replace_extension(".pb.h");
 
   os << "#include \"rpc/server/rpc_server.h\"\n";
@@ -258,7 +338,7 @@ void Generator::GenerateServerHeaders(std::ostream &os) {
   for (int i = 0; i < file_->dependency_count(); i++) {
     std::string base = GeneratedFilename(package_name_, target_name_,
                                          file_->dependency(i)->name());
-    std::filesystem::path p(base);
+    path p(base);
     p.replace_extension(".subspace.rpc_client.h");
     os << "#include \"" << p.string() << "\"\n";
   }
@@ -273,7 +353,7 @@ void Generator::GenerateServerHeaders(std::ostream &os) {
 }
 
 void Generator::GenerateServerSources(std::ostream &os) {
-  std::filesystem::path p(
+  path p(
       GeneratedFilename(package_name_, target_name_, file_->name()));
   p.replace_extension(".subspace.rpc_server.h");
   os << "#include \"" << p.string() << "\"\n";
