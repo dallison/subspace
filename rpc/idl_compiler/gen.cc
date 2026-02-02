@@ -86,7 +86,7 @@ void create_directories(const path& p) {
 // On non-MacOS systems we can use std::filesystem
 #include <filesystem>
 
-using path = path;
+using path = std::filesystem::path;
 using create_directories = std::filesystem::create_directories;
 #endif
 namespace subspace {
