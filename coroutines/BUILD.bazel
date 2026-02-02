@@ -1,5 +1,7 @@
 package(default_visibility = ["//visibility:public"])
 
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
 # This is a wrapper library for the co coroutine library.  If you get multiple definition of the
 # coroutine symbols when linking with both the co coroutine library and subspace, you can depend
 # on this library instead of the co library directly.
