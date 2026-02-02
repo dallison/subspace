@@ -11,7 +11,7 @@
 #if defined(__APPLE__)
 // For some reason, when building on MacOS, bazel doesn't pass the correct
 // macos version to the compiler, so std::filesystem is not available.
-// So we provide a minimal implementation of path and create_directories, only
+// So we provide a minimal implementation of path and CreateDirectories, only
 // the stuff we need.  I wish I didn't have to do this but I can't get the build
 // to work otherwise.
 #include <sys/stat.h>
@@ -70,7 +70,7 @@ std::ostream& operator<<(std::ostream& os, const path& p) {
     return os;
 }
 
-void create_directories(const path& p) {
+void CreateDirectories(const path& p) {
     // No std::filesystem available, so use mkdir recursively.
     std::string path_str = p.string();
     size_t pos = 0;
@@ -87,7 +87,10 @@ void create_directories(const path& p) {
 #include <filesystem>
 
 using path = std::filesystem::path;
-using create_directories = std::filesystem::create_directories;
+void CreateDirectories(const path& p) {
+   std::filesystem::create_directories(p);
+}
+
 #endif
 namespace subspace {
 
@@ -177,7 +180,7 @@ bool CodeGenerator::GenerateClient(
   std::unique_ptr<google::protobuf::io::ZeroCopyOutputStream> header_output(
       generator_context->Open(hp.string()));
 
-  create_directories(hp.parent_path());
+  CreateDirectories(hp.parent_path());
 
   if (header_output == nullptr) {
     std::cerr << "Failed to open " << hp << " for writing\n";
@@ -225,7 +228,7 @@ bool CodeGenerator::GenerateServer(
   std::unique_ptr<google::protobuf::io::ZeroCopyOutputStream> header_output(
       generator_context->Open(hp.string()));
 
-  create_directories(hp.parent_path());
+  CreateDirectories(hp.parent_path());
 
   if (header_output == nullptr) {
     std::cerr << "Failed to open " << hp << " for writing\n";
