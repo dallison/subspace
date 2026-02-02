@@ -1,5 +1,8 @@
 package(default_visibility = ["//visibility:public"])
 
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_binary")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+
 cc_library(
     name = "rpc_lib",
     srcs = [
