@@ -6,49 +6,77 @@
 #include "client/subscriber.h"
 
 namespace subspace {
-ActiveMessage::ActiveMessage(std::shared_ptr<details::SubscriberImpl> subr,
-                             size_t len, MessageSlot *slot_ptr, const void *buf,
-                             uint64_t ord, int64_t ts, int vid, bool activation,
-                             bool checksum_error)
-    : sub(std::move(subr)), length(len), slot(slot_ptr), buffer(buf),
-      ordinal(ord), timestamp(ts), vchan_id(vid), is_activation(activation),
-      checksum_error(checksum_error) {
-  if (slot == nullptr) {
-    return;
-  }
-  if (!sub->AddActiveMessage(slot)) {
-    ResetInternal();
-  }
+
+ActiveMessage::~ActiveMessage() { 
+  Release(); 
 }
 
-ActiveMessage::~ActiveMessage() { Release(); }
-
 void ActiveMessage::Release() {
-  if (sub != nullptr) {
-    sub->RemoveActiveMessage(slot);
+  if (sub.expired()) {
+    return;
+  }
+  std::shared_ptr<details::SubscriberImpl> subr = sub.lock();
+  if (subr != nullptr && slot != nullptr) {
+    subr->RemoveActiveMessage(slot);
   }
   ResetInternal();
 }
 
+void ActiveMessage::Reset(size_t len, MessageSlot *slot_ptr, const void *buf,
+                          uint64_t ord, int64_t ts, int vid, bool activation,
+                          bool cs_error) {
+  Release(); // This will decrement the reference for the current slot.
+  length = len;
+  slot = slot_ptr;
+  buffer = buf;
+  ordinal = ord;
+  timestamp = ts;
+  vchan_id = vid;
+  is_activation = activation;
+  checksum_error = cs_error;
+  if (slot == nullptr) {
+    return;
+  }
+  std::shared_ptr<details::SubscriberImpl> subr = sub.lock();
+  if (subr == nullptr) {
+    return;
+  }
+  if (!subr->AddActiveMessage(slot)) {
+    ResetInternal();
+  }
+}
+
 std::string Message::ChannelType() const {
-  if (active_message == nullptr || active_message->sub == nullptr) {
+  if (active_message == nullptr || active_message->sub.expired()) {
     return "";
   }
-  return active_message->sub->SlotType();
+  std::shared_ptr<details::SubscriberImpl> subr = active_message->sub.lock();
+  if (subr == nullptr) {
+    return "";
+  }
+  return subr->SlotType();
 }
 
 int Message::NumSlots() const {
-  if (active_message == nullptr || active_message->sub == nullptr) {
+  if (active_message == nullptr || active_message->sub.expired()) {
     return 0;
   }
-  return active_message->sub->NumSlots();
+  std::shared_ptr<details::SubscriberImpl> subr = active_message->sub.lock();
+  if (subr == nullptr) {
+    return 0;
+  }
+  return subr->NumSlots();
 }
 
 uint64_t Message::SlotSize() const {
-  if (active_message == nullptr || active_message->sub == nullptr) {
+  if (active_message == nullptr || active_message->sub.expired()) {
     return 0;
   }
-  return active_message->sub->SlotSize();
+  std::shared_ptr<details::SubscriberImpl> subr = active_message->sub.lock();
+  if (subr == nullptr) {
+    return 0;
+  }
+  return subr->SlotSize();
 }
 
 Message::Message(std::shared_ptr<ActiveMessage> msg)

@@ -1924,26 +1924,26 @@ TEST_F(ClientTest, PublishSingleMessageAndReadSharedPtr) {
   ASSERT_TRUE(static_cast<bool>(ptr));
   ASSERT_STREQ("foobar", ptr.get());
 
-  ASSERT_EQ(1, ptr.use_count());
+  ASSERT_EQ(2, ptr.use_count());
 
   // Copy the shared ptr using copy constructor.
   subspace::shared_ptr<const char> p2(ptr);
-  ASSERT_EQ(2, ptr.use_count());
-  ASSERT_EQ(2, p2.use_count());
+  ASSERT_EQ(3, ptr.use_count());
+  ASSERT_EQ(3, p2.use_count());
 
   // Copy using copy operator.
   subspace::shared_ptr<const char> p3 = ptr;
-  ASSERT_EQ(3, ptr.use_count());
-  ASSERT_EQ(3, p2.use_count());
-  ASSERT_EQ(3, p3.use_count());
+  ASSERT_EQ(4, ptr.use_count());
+  ASSERT_EQ(4, p2.use_count());
+  ASSERT_EQ(4, p3.use_count());
 
   // Move p3 to p4.
   subspace::shared_ptr<const char> p4 = std::move(p3);
   ASSERT_FALSE(static_cast<bool>(p3));
-  ASSERT_EQ(3, ptr.use_count());
-  ASSERT_EQ(3, p2.use_count());
+  ASSERT_EQ(4, ptr.use_count());
+  ASSERT_EQ(4, p2.use_count());
   ASSERT_EQ(0, p3.use_count());
-  ASSERT_EQ(3, p4.use_count());
+  ASSERT_EQ(4, p4.use_count());
 }
 
 TEST_F(ClientTest, Publish2Message2AndReadSharedPtrs) {
@@ -2010,7 +2010,7 @@ TEST_F(ClientTest, Publish2Message2AndReadSharedPtrs) {
     // Number of active messages: 2
     ASSERT_EQ(1, sub->NumActiveMessages());
 
-    ASSERT_EQ(2, p2.use_count());
+    ASSERT_EQ(3, p2.use_count());
   }
   // Number of active messages: 1
 }

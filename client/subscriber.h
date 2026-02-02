@@ -42,11 +42,14 @@ public:
   SubscriberImpl(const std::string &name, int num_slots, int channel_id,
                  int subscriber_id, int vchan_id, uint64_t session_id,
                  std::string type, const SubscriberOptions &options,
-                 std::function<bool(Channel *)> reload, int user_id, int group_id)
+                 std::function<bool(Channel *)> reload, int user_id,
+                 int group_id)
       : ClientChannel(name, num_slots, channel_id, vchan_id,
-                      std::move(session_id), std::move(type),
-                      std::move(reload), user_id, group_id),
+                      std::move(session_id), std::move(type), std::move(reload),
+                      user_id, group_id),
         subscriber_id_(subscriber_id), options_(options) {}
+
+  void InitActiveMessages();
 
   std::shared_ptr<SubscriberImpl> shared_from_this() {
     return std::static_pointer_cast<SubscriberImpl>(
@@ -82,8 +85,7 @@ public:
   // which channel a vchanId corresponds to when it receives messages.
   int ConfiguredVchanId() const { return options_.vchan_id; }
 
-  const ActiveSlot *
-  FindUnseenOrdinal();
+  const ActiveSlot *FindUnseenOrdinal();
   void PopulateActiveSlots(InPlaceAtomicBitset &bits);
 
   void ClaimSlot(MessageSlot *slot, int vchan_id, bool was_newest);
@@ -107,15 +109,21 @@ public:
 
   std::shared_ptr<ActiveMessage> GetActiveMessage() { return active_message_; }
 
-  void ClearActiveMessage() { active_message_.reset(); }
+  void ClearActiveMessage() {
+    if (active_message_ != nullptr) {
+      active_message_->Release();
+    }
+    active_message_.reset();
+  }
 
   std::shared_ptr<ActiveMessage> SetActiveMessage(size_t len, MessageSlot *slot,
                                                   const void *buf, uint64_t ord,
                                                   int64_t ts, int vchan_id,
-                                                  bool is_activation, bool checksum_error) {
-    active_message_.reset();
-    active_message_ = std::make_shared<ActiveMessage>(ActiveMessage{
-        shared_from_this(), len, slot, buf, ord, ts, vchan_id, is_activation, checksum_error});
+                                                  bool is_activation,
+                                                  bool checksum_error) {
+    std::shared_ptr<ActiveMessage> &m = active_messages_[slot->id];
+    m->Reset(len, slot, buf, ord, ts, vchan_id, is_activation, checksum_error);
+    active_message_ = m;
     return active_message_;
   }
 
@@ -140,9 +148,9 @@ public:
     if (active_message_->slot == slot && active_message_->ordinal == ordinal) {
       return active_message_;
     }
-    auto msg = std::make_shared<ActiveMessage>(ActiveMessage{
-        shared_from_this(), slot->message_size, slot, GetBufferAddress(slot),
-        slot->ordinal, Timestamp(slot), slot->vchan_id, false, false});
+    std::shared_ptr<ActiveMessage> &msg = active_messages_[slot->id];
+    msg->Reset(slot->message_size, slot, GetBufferAddress(slot), slot->ordinal,
+               Timestamp(slot), slot->vchan_id, false, false);
     if (msg->length == 0) {
       // Failed to get an active message, return an empty shared_ptr.
       return nullptr;
@@ -174,13 +182,16 @@ public:
     }
   }
 
-  void SetOnReceiveCallback(std::function<absl::StatusOr<int64_t>(void* buffer, int64_t size)> callback) {
+  void SetOnReceiveCallback(
+      std::function<absl::StatusOr<int64_t>(void *buffer, int64_t size)>
+          callback) {
     on_receive_callback_ = std::move(callback);
   }
 
   std::string Mux() const { return options_.Mux(); }
 
-  bool ValidateChecksum(const std::array<absl::Span<const uint8_t>, 2>& data, uint32_t checksum) {
+  bool ValidateChecksum(const std::array<absl::Span<const uint8_t>, 2> &data,
+                        uint32_t checksum) {
     if (!options_.Checksum()) {
       return true;
     }
@@ -267,8 +278,13 @@ private:
   // subscribers won't use this.
   std::vector<ActiveSlot> search_buffer_;
 
+  // We have one active message per slot.  These are allocated when the
+  // subscriber is created to avoid memory allocation for every message we
+  // receive.
+  std::vector<std::shared_ptr<ActiveMessage>> active_messages_;
+
   // The subscriber holds on to an active message for the slot it has just
-  // read.  A shared pointer to this active message is returned to caller.
+  // read.
   std::shared_ptr<ActiveMessage> active_message_;
 
   // We keep track of a limited number of ordinals we've seen.
@@ -278,7 +294,8 @@ private:
 
   // The callback to call when a message is received.
   std::function<void(SubscriberImpl *, Message)> message_callback_;
-  std::function<absl::StatusOr<int64_t>(void* buffer, int64_t size)> on_receive_callback_ = nullptr;
+  std::function<absl::StatusOr<int64_t>(void *buffer, int64_t size)>
+      on_receive_callback_ = nullptr;
 };
 } // namespace details
 } // namespace subspace

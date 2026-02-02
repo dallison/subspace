@@ -30,12 +30,8 @@ class SubscriberImpl;
 // message just published.
 struct ActiveMessage {
   ActiveMessage() = default;
-  ActiveMessage(std::shared_ptr<details::SubscriberImpl> subr, size_t len,
-                MessageSlot *slot_ptr, const void *buf, uint64_t ord,
-                int64_t ts, int vid, bool activation, bool checksum_error);
-  ActiveMessage(size_t len, uint64_t ord, uint64_t ts, int vid, bool activation, bool checksum_error)
-      : length(len), ordinal(ord), timestamp(ts), vchan_id(vid),
-        is_activation(activation), checksum_error(checksum_error) {}
+  ActiveMessage(std::shared_ptr<details::SubscriberImpl> subr)
+      : sub(std::weak_ptr<details::SubscriberImpl>(subr)) {}
   ~ActiveMessage();
 
   // Can't be copied but can be moved.
@@ -47,7 +43,6 @@ struct ActiveMessage {
   void Release();
 
   void ResetInternal() {
-    sub.reset();
     length = 0;
     slot = nullptr;
     buffer = nullptr;
@@ -55,9 +50,13 @@ struct ActiveMessage {
     timestamp = 0;
     vchan_id = -1;
     is_activation = false;
+    checksum_error = false;
   }
 
-  std::shared_ptr<details::SubscriberImpl>
+  void Reset(size_t len, MessageSlot *slot_ptr, const void *buf, uint64_t ord,
+             int64_t ts, int vid, bool activation, bool checksum_error);
+
+  std::weak_ptr<details::SubscriberImpl>
       sub;                      // Subscriber that read the message.
   size_t length = 0;            // Length of message in bytes.
   MessageSlot *slot = nullptr;  // Slot for message.
@@ -74,7 +73,8 @@ struct Message {
   Message(size_t len, const void *buf, uint64_t ord, int64_t ts, int vid,
           bool activation, int32_t sid, bool checksum_error)
       : length(len), buffer(buf), ordinal(ord), timestamp(ts), vchan_id(vid),
-        is_activation(activation), slot_id(sid), checksum_error(checksum_error) {}
+        is_activation(activation), slot_id(sid),
+        checksum_error(checksum_error) {}
   Message(std::shared_ptr<ActiveMessage> msg);
   void Release() {
     if (active_message == nullptr) {

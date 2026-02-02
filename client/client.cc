@@ -425,6 +425,7 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
       },
       server_user_id_, server_group_id_);
 
+  channel->InitActiveMessages();
   channel->SetNumSlots(sub_resp.num_slots());
 
   SharedMemoryFds channel_fds(std::move(fds[sub_resp.ccb_fd_index()]),
@@ -1125,7 +1126,8 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
     subscriber->SetType(sub_resp.type());
   }
   subscriber->SetNumSlots(sub_resp.num_slots());
-
+  subscriber->InitActiveMessages();
+  
   SharedMemoryFds channel_fds(std::move(fds[sub_resp.ccb_fd_index()]),
                               std::move(fds[sub_resp.bcb_fd_index()]));
 

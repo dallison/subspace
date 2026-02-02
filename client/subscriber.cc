@@ -7,6 +7,13 @@
 namespace subspace {
 namespace details {
 
+void SubscriberImpl::InitActiveMessages() {
+  active_messages_.resize(NumSlots());
+  for (auto &m : active_messages_) {
+    m = std::make_shared<ActiveMessage>(shared_from_this());
+  }
+}
+
 // For non-virtual channels both the slots' vchan_id and the subsriber's
 // are -1.  This is the common case.
 // For virtual subscribers, if the slot's vchan_id is -1 it means that
@@ -49,7 +56,10 @@ void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
 
                       // Enable this for debugging slot retirement.
                       // std::string details = absl::StrFormat(
-                      //   "%d: RemoveActiveMessage: %s retiring slot %d ordinal %d vchan_id %d\n", getpid(), Name(), slot->bridged_slot_id, slot->ordinal, slot->vchan_id);
+                      //   "%d: RemoveActiveMessage: %s retiring slot %d ordinal
+                      //   %d vchan_id %d\n", getpid(), Name(),
+                      //   slot->bridged_slot_id, slot->ordinal,
+                      //   slot->vchan_id);
                       // std::cerr << details;
                       TriggerRetirement(slot->bridged_slot_id);
                     });
