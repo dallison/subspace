@@ -47,7 +47,10 @@ public:
       : ClientChannel(name, num_slots, channel_id, vchan_id,
                       std::move(session_id), std::move(type), std::move(reload),
                       user_id, group_id),
-        subscriber_id_(subscriber_id), options_(options) {}
+        subscriber_id_(subscriber_id), options_(options) {
+		// Preallocate to avoid malloc later.
+		(void)GetOrdinalTracker(vchan_id_);
+	}
 
   void InitActiveMessages();
 

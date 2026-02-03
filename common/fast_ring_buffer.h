@@ -11,7 +11,7 @@ namespace subspace {
 
 template <typename T, int N> class FastRingBuffer {
 public:
-  FastRingBuffer() = default;
+  FastRingBuffer() { set_.reserve(N); }
 
   void Insert(T value) {
     if (num_values_ == N) {
