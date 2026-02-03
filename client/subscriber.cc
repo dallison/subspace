@@ -113,7 +113,7 @@ int SubscriberImpl::DetectDrops(int vchan_id) {
   if (ordinals.empty()) {
     return 0;
   }
-  std::stable_sort(ordinals.begin(), ordinals.end());
+  std::sort(ordinals.begin(), ordinals.end());
   tracker.last_ordinal_seen = ordinals.back().ordinal;
 
   // Look for gaps in the ordinals.
@@ -214,7 +214,7 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
     CollectVisibleSlots(bits);
 
     // Sort the active slots by timestamp.
-    std::stable_sort(active_slots_.begin(), active_slots_.end(),
+    std::sort(active_slots_.begin(), active_slots_.end(),
                      [](const ActiveSlot &a, const ActiveSlot &b) {
                        return a.timestamp < b.timestamp;
                      });
@@ -271,7 +271,7 @@ MessageSlot *SubscriberImpl::LastSlot(MessageSlot *slot, bool reliable,
     CollectVisibleSlots(bits);
 
     // Sort the active slots by timestamp.
-    std::stable_sort(active_slots_.begin(), active_slots_.end(),
+    std::sort(active_slots_.begin(), active_slots_.end(),
                      [](const ActiveSlot &a, const ActiveSlot &b) {
                        return a.timestamp < b.timestamp;
                      });
@@ -327,7 +327,7 @@ MessageSlot *SubscriberImpl::FindActiveSlotByTimestamp(
       }
     }
     // Sort by timestamp.
-    std::stable_sort(buffer.begin(), buffer.end(),
+    std::sort(buffer.begin(), buffer.end(),
                      [](const ActiveSlot &a, const ActiveSlot &b) {
                        return a.timestamp < b.timestamp;
                      });
