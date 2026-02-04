@@ -529,6 +529,7 @@ TEST_F(LatencyTest, PublisherLatency) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
 
+  std::cerr << "num_slots,latency_with_retirement,latency_no_retirement\n";
   constexpr int kNumMessages = 20000;
   for (int num_slots = 10; num_slots < 100000;
        num_slots = (num_slots)*15 / 10) {
@@ -599,6 +600,7 @@ TEST_F(LatencyTest, PublisherLatencyChecksum) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
 
+  std::cerr << "num_slots,latency_with_retirement,latency_no_retirement\n";
   constexpr int kNumMessages = 20000;
   for (int num_slots = 10; num_slots < 100000;
        num_slots = (num_slots)*15 / 10) {
@@ -680,8 +682,8 @@ TEST_F(LatencyTest, PublisherLatencyPayload) {
     }
     return size;
   };
-  for (int num_slots = 10; num_slots < 10000;
-       num_slots = (num_slots)*15 / 10) {
+  std::cerr << "num_slots,latency_with_retirement,latency_no_retirement\n";
+  for (int num_slots = 10; num_slots < 10000; num_slots = (num_slots)*15 / 10) {
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
         "publat", kMaxPayloadSize, num_slots, {.reliable = false});
     ASSERT_OK(pub);
@@ -750,7 +752,6 @@ TEST_F(LatencyTest, PublisherLatencyPayload) {
   }
 }
 
-
 TEST_F(LatencyTest, PublisherLatencyPayloadChecksum) {
   subspace::Client pub_client;
   subspace::Client sub_client;
@@ -767,15 +768,17 @@ TEST_F(LatencyTest, PublisherLatencyPayloadChecksum) {
     }
     return size;
   };
-  for (int num_slots = 10; num_slots < 10000;
-       num_slots = (num_slots)*15 / 10) {
-    absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-        "publat", kMaxPayloadSize, num_slots, {.reliable = false, .checksum = true});
+  std::cerr << "num_slots,latency_with_retirement,latency_no_retirement\n";
+  for (int num_slots = 10; num_slots < 10000; num_slots = (num_slots)*15 / 10) {
+    absl::StatusOr<Publisher> pub =
+        pub_client.CreatePublisher("publat", kMaxPayloadSize, num_slots,
+                                   {.reliable = false, .checksum = true});
     ASSERT_OK(pub);
 
     std::cerr << num_slots << ",";
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        "publat", {.reliable = false, .log_dropped_messages = false, .checksum = true});
+        "publat",
+        {.reliable = false, .log_dropped_messages = false, .checksum = true});
     ASSERT_OK(sub);
 
     uint64_t total_time = 0;
@@ -837,13 +840,13 @@ TEST_F(LatencyTest, PublisherLatencyPayloadChecksum) {
   }
 }
 
-
 TEST_F(LatencyTest, PublisherLatencyHistogram) {
   subspace::Client pub_client;
   subspace::Client sub_client;
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
 
+  std::cerr << "num_slots,min,median,p99,max,average\n";
   auto show_latencies = [](std::vector<uint64_t> &latencies) {
     // Sort latencies.
     std::sort(latencies.begin(), latencies.end());
@@ -937,6 +940,7 @@ TEST_F(LatencyTest, PublisherLatencyHistogramThreadSafe) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
 
+  std::cerr << "num_slots,min,median,p99,max,average\n";
   auto show_latencies = [](std::vector<uint64_t> &latencies) {
     // Sort latencies.
     std::sort(latencies.begin(), latencies.end());
@@ -1028,6 +1032,7 @@ TEST_F(LatencyTest, PublisherLatencyMultiSub) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
 
+  std::cerr << "num_slots,num_subs,latency_with_retirement,latency_no_retirement\n";
   constexpr int kNumMessages = 20000;
   for (int num_slots = 10; num_slots < 10000; num_slots *= 5) {
 
@@ -1107,6 +1112,7 @@ TEST_F(LatencyTest, VirtualPublisherLatency) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
 
+  std::cerr << "num_slots,latency_with_retirement,latency_no_retirement\n";
   constexpr int kNumMessages = 20000;
   for (int num_slots = 10; num_slots < 100000;
        num_slots = (num_slots)*15 / 10) {
@@ -1178,6 +1184,7 @@ TEST_F(LatencyTest, VirtualPublisherLatencyMultiSub) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
 
+  std::cerr << "num_slots,num_subs,latency_with_retirement,latency_no_retirement\n";
   constexpr int kNumMessages = 20000;
   for (int num_slots = 10; num_slots < 10000; num_slots *= 5) {
 
@@ -1258,6 +1265,7 @@ TEST_F(LatencyTest, VirtualPublisherMuxLatency) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
 
+  std::cerr << "num_slots,latency_with_retirement,latency_no_retirement\n";
   constexpr int kNumMessages = 20000;
   for (int num_slots = 10; num_slots < 100000;
        num_slots = (num_slots)*15 / 10) {
@@ -1339,7 +1347,6 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyHistogram) {
   constexpr int kNumMessages = 20000;
 
   std::vector<uint64_t> latencies;
-
   for (int num_slots = 3; num_slots < 20000; num_slots *= 2) {
     std::cerr << "num_slots: " << num_slots << "\n";
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
@@ -2033,6 +2040,78 @@ TEST_F(LatencyTest, ManyChannelsMultiplexedSubscribedToMux) {
   std::cerr << "Dropped " << (kNumMessages * kNumChannels) - num_messages
             << " messages\n";
   std::cerr << "Total time: " << end - start << " ns\n";
+}
+
+TEST_F(LatencyTest, SubscriberLatency) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  std::cerr << "num_slots,avg_latency_ns\n";
+
+  for (int num_slots = 100; num_slots < 10000; num_slots += 100) {
+    // Create publisher.
+    absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
+        "sublat", 256, num_slots, {.reliable = false});
+    ASSERT_OK(pub);
+    // Create subscriber.
+    absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
+        "sublat", {.reliable = false, .log_dropped_messages = false});
+    ASSERT_OK(sub);
+
+    // Fill channel.
+    for (int i = 0; i < num_slots - 1; i++) {
+      absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+      ASSERT_OK(buffer);
+      absl::StatusOr<const Message> pub_status = pub->PublishMessage(100);
+      ASSERT_OK(pub_status);
+    }
+
+    uint64_t start = toolbelt::Now();
+    // Read all messages and calculate average time per message in nanoseconds.
+    for (int i = 0; i < num_slots - 1; i++) {
+      absl::StatusOr<Message> msg = sub->ReadMessage();
+      ASSERT_OK(msg);
+      ASSERT_EQ(100, msg->length);
+    }
+    uint64_t end = toolbelt::Now();
+    std::cerr << num_slots << "," << (end - start) / (num_slots - 1) << "\n";
+  }
+}
+
+TEST_F(LatencyTest, PubSubLatency) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  std::cerr << "num_messages,avg_latency_ns\n";
+  for (int num_messages = 100; num_messages <= 20000; num_messages += 100) {
+    absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
+        "pubsublat", 256, 10, {.reliable = false});
+    ASSERT_OK(pub);
+    // Create subscriber.
+    absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
+        "pubsublat", {.reliable = false, .log_dropped_messages = false});
+    ASSERT_OK(sub);
+
+    // Send and receive messages, measuring time taken.
+    uint64_t start = toolbelt::Now();
+    for (int i = 0; i < num_messages; i++) {
+      // Send a message and immediately read it.
+      absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+      ASSERT_OK(buffer);
+      absl::StatusOr<const Message> pub_status = pub->PublishMessage(100);
+      ASSERT_OK(pub_status);
+      absl::StatusOr<Message> msg = sub->ReadMessage();
+      ASSERT_OK(msg);
+      ASSERT_EQ(100, msg->length);
+    }
+    uint64_t end = toolbelt::Now();
+    std::cerr << num_messages << "," << (end - start) / num_messages
+              << "\n";
+  }
 }
 
 int main(int argc, char **argv) {
