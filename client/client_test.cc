@@ -14,6 +14,7 @@
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
 #include "toolbelt/pipe.h"
+#include <array>
 #include <cstdio>
 #include <gtest/gtest.h>
 #include <inttypes.h>
@@ -2759,6 +2760,199 @@ TEST_F(ClientTest, ChecksumVerification) {
     ASSERT_EQ(6, msg7->length);
     ASSERT_STREQ("Xoobar", reinterpret_cast<const char *>(msg7->buffer));
     ASSERT_FALSE(msg7->checksum_error);
+  }
+}
+
+TEST_F(ClientTest, ChecksumCallback) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_cb", {.slot_size = 256, .num_slots = 10, .checksum = true});
+  ASSERT_OK(pub);
+
+  absl::StatusOr<Subscriber> sub =
+      client->CreateSubscriber("chan_cb", {.checksum = true});
+  ASSERT_OK(sub);
+
+  auto fake_crc =
+      [](const std::array<absl::Span<const uint8_t>, 2> &data) -> uint32_t {
+    uint32_t sum = 0;
+    for (const auto &span : data) {
+      for (uint8_t byte : span) {
+        sum += byte;
+      }
+    }
+    return sum;
+  };
+
+  pub->SetChecksumCallback(fake_crc);
+  sub->SetChecksumCallback(fake_crc);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "abc", 3);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(3);
+  ASSERT_OK(pub_status);
+
+  {
+    absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+    ASSERT_OK(msg);
+    ASSERT_EQ(3, msg->length);
+    ASSERT_STREQ("abc", reinterpret_cast<const char *>(msg->buffer));
+  }
+
+  // Publish and corrupt the message buffer to force a checksum failure.
+  absl::StatusOr<void *> buffer2 = pub->GetMessageBuffer();
+  ASSERT_OK(buffer2);
+  memcpy(*buffer2, "def", 3);
+  absl::StatusOr<const Message> pub_status2 = pub->PublishMessage(3);
+  ASSERT_OK(pub_status2);
+  char *buf = reinterpret_cast<char *>(*buffer2);
+  buf[1] = 'X';
+
+  {
+    absl::StatusOr<subspace::Message> msg2 = sub->ReadMessage();
+    ASSERT_FALSE(msg2.ok());
+    ASSERT_EQ(absl::StatusCode::kInternal, msg2.status().code());
+    ASSERT_EQ("Checksum verification failed", msg2.status().message());
+  }
+}
+
+TEST_F(ClientTest, ChecksumCallbackPassErrors) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_cb_pass", {.slot_size = 256, .num_slots = 10, .checksum = true});
+  ASSERT_OK(pub);
+
+  absl::StatusOr<Subscriber> sub = client->CreateSubscriber(
+      "chan_cb_pass", {.checksum = true, .pass_checksum_errors = true});
+  ASSERT_OK(sub);
+
+  auto fake_crc =
+      [](const std::array<absl::Span<const uint8_t>, 2> &data) -> uint32_t {
+    uint32_t sum = 0;
+    for (const auto &span : data) {
+      for (uint8_t byte : span) {
+        sum += byte;
+      }
+    }
+    return sum;
+  };
+
+  pub->SetChecksumCallback(fake_crc);
+  sub->SetChecksumCallback(fake_crc);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "xyz", 3);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(3);
+  ASSERT_OK(pub_status);
+  char *buf = reinterpret_cast<char *>(*buffer);
+  buf[2] = 'Z';
+
+  {
+    absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+    ASSERT_OK(msg);
+    ASSERT_EQ(3, msg->length);
+    ASSERT_TRUE(msg->checksum_error);
+  }
+}
+
+TEST_F(ClientTest, ChecksumCallbackReset) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_cb_reset", {.slot_size = 256, .num_slots = 10, .checksum = true});
+  ASSERT_OK(pub);
+
+  absl::StatusOr<Subscriber> sub =
+      client->CreateSubscriber("chan_cb_reset", {.checksum = true});
+  ASSERT_OK(sub);
+
+  auto fake_crc =
+      [](const std::array<absl::Span<const uint8_t>, 2> &data) -> uint32_t {
+    uint32_t sum = 0;
+    for (const auto &span : data) {
+      for (uint8_t byte : span) {
+        sum += byte;
+      }
+    }
+    return sum;
+  };
+
+  auto fake_crc_mismatch =
+      [&fake_crc](const std::array<absl::Span<const uint8_t>, 2> &data)
+          -> uint32_t { return fake_crc(data) + 1; };
+
+  pub->SetChecksumCallback(fake_crc);
+  sub->SetChecksumCallback(fake_crc_mismatch);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "reset", 5);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(5);
+  ASSERT_OK(pub_status);
+
+  {
+    absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+    ASSERT_FALSE(msg.ok());
+    ASSERT_EQ(absl::StatusCode::kInternal, msg.status().code());
+    ASSERT_EQ("Checksum verification failed", msg.status().message());
+  }
+
+  pub->ResetChecksumCallback();
+  sub->ResetChecksumCallback();
+
+  absl::StatusOr<void *> buffer2 = pub->GetMessageBuffer();
+  ASSERT_OK(buffer2);
+  memcpy(*buffer2, "reset", 5);
+  absl::StatusOr<const Message> pub_status2 = pub->PublishMessage(5);
+  ASSERT_OK(pub_status2);
+
+  {
+    absl::StatusOr<subspace::Message> msg2 = sub->ReadMessage();
+    ASSERT_OK(msg2);
+    ASSERT_EQ(5, msg2->length);
+    ASSERT_STREQ("reset", reinterpret_cast<const char *>(msg2->buffer));
+  }
+}
+
+TEST_F(ClientTest, ChecksumCallbackPublisherOnly) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_cb_pub_only", {.slot_size = 256, .num_slots = 10, .checksum = true});
+  ASSERT_OK(pub);
+
+  absl::StatusOr<Subscriber> sub =
+      client->CreateSubscriber("chan_cb_pub_only", {.checksum = true});
+  ASSERT_OK(sub);
+
+  auto fake_crc =
+      [](const std::array<absl::Span<const uint8_t>, 2> &data) -> uint32_t {
+    uint32_t sum = 0;
+    for (const auto &span : data) {
+      for (uint8_t byte : span) {
+        sum += byte;
+      }
+    }
+    return sum;
+  };
+
+  pub->SetChecksumCallback(fake_crc);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "onlypub", 7);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(7);
+  ASSERT_OK(pub_status);
+
+  {
+    absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+    ASSERT_FALSE(msg.ok());
+    ASSERT_EQ(absl::StatusCode::kInternal, msg.status().code());
+    ASSERT_EQ("Checksum verification failed", msg.status().message());
   }
 }
 

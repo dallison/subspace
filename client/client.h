@@ -758,6 +758,12 @@ public:
     return impl_->BufferSharedMemoryName(buffer_index);
   }
 
+  void SetChecksumCallback(ChecksumCallback callback) {
+    impl_->SetChecksumCallback(std::move(callback));
+  }
+
+  void ResetChecksumCallback() { impl_->ResetChecksumCallback(); }
+
   // Register a function to be called when the publisher resizes
   // the channel.
   absl::Status RegisterResizeCallback(
@@ -965,6 +971,12 @@ public:
   std::string Name() const { return impl_->Name(); }
   std::string Type() const { return impl_->Type(); }
   std::string_view TypeView() const { return impl_->TypeView(); }
+
+  void SetChecksumCallback(ChecksumCallback callback) {
+    impl_->SetChecksumCallback(std::move(callback));
+  }
+
+  void ResetChecksumCallback() { impl_->ResetChecksumCallback(); }
 
   // Register a function to be called when a subscriber drops a message.  The
   // function is called with the number of messages that have been missed

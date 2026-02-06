@@ -50,6 +50,12 @@ public:
     on_send_callback_ = std::move(callback);
   }
 
+  void SetChecksumCallback(ChecksumCallback callback) {
+    checksum_callback_ = std::move(callback);
+  }
+
+  void ResetChecksumCallback() { checksum_callback_ = nullptr; }
+
   std::string Mux() const { return options_.Mux(); }
 
 private:
@@ -123,6 +129,7 @@ private:
   toolbelt::FileDescriptor retirement_fd_ = {};
   std::function<absl::StatusOr<int64_t>(void *buffer, int64_t size)>
       on_send_callback_ = nullptr;
+  ChecksumCallback checksum_callback_ = nullptr;
 
 };
 
