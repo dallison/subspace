@@ -759,6 +759,34 @@ auto pub = client->CreatePublisher("secure_channel", 512, 20,
         .SetType("SecureMessage")).value();
 ```
 
+### Checksum Callbacks
+
+If you need a custom checksum algorithm (or want to integrate hardware/offload),
+you can provide checksum callbacks for publishers and subscribers. When set, the
+callback replaces the built-in CRC32 for checksum calculation or verification.
+
+**Publisher/Subscriber API:**
+- `Publisher::SetChecksumCallback(ChecksumCallback cb)`
+- `Publisher::ResetChecksumCallback()`
+- `Subscriber::SetChecksumCallback(ChecksumCallback cb)`
+- `Subscriber::ResetChecksumCallback()`
+
+**Example: Custom checksum callback**
+```cpp
+auto fake_crc = [](const std::array<absl::Span<const uint8_t>, 2> &data) -> uint32_t {
+    uint32_t sum = 0;
+    for (const auto &span : data) {
+        for (uint8_t byte : span) {
+            sum += byte;
+        }
+    }
+    return sum;
+};
+
+pub.SetChecksumCallback(fake_crc);
+sub.SetChecksumCallback(fake_crc);
+```
+
 ## SubscriberOptions
 
 The `SubscriberOptions` struct configures subscriber behavior. Like `PublisherOptions`, it supports both chained setters and designated initializers.
