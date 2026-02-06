@@ -191,12 +191,21 @@ public:
     on_receive_callback_ = std::move(callback);
   }
 
+  void SetChecksumCallback(ChecksumCallback callback) {
+    checksum_callback_ = std::move(callback);
+  }
+
+  void ResetChecksumCallback() { checksum_callback_ = nullptr; }
+
   std::string Mux() const { return options_.Mux(); }
 
   bool ValidateChecksum(const std::array<absl::Span<const uint8_t>, 2> &data,
                         uint32_t checksum) {
     if (!options_.Checksum()) {
       return true;
+    }
+    if (checksum_callback_ != nullptr) {
+      return checksum_callback_(data) == checksum;
     }
     return VerifyChecksum(data, checksum);
   }
@@ -207,7 +216,7 @@ private:
   friend class ::subspace::ClientImpl;
 
   struct OrdinalTracker {
-    FastRingBuffer<OrdinalAndVchanId, 10000> ordinals;
+    FastRingBuffer<OrdinalAndVchanId, kMaxSlotOwners> ordinals;
     uint64_t last_ordinal_seen = 0;
   };
 
@@ -299,6 +308,7 @@ private:
   std::function<void(SubscriberImpl *, Message)> message_callback_;
   std::function<absl::StatusOr<int64_t>(void *buffer, int64_t size)>
       on_receive_callback_ = nullptr;
+  ChecksumCallback checksum_callback_ = nullptr;
 };
 } // namespace details
 } // namespace subspace

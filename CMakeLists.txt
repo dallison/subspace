@@ -16,7 +16,7 @@ set(protobuf_BUILD_TESTS OFF CACHE INTERNAL "No protobuf tests")
 
 # Add common compile options as found in subspace/BUILD
 # These will apply to all targets in this CMakeLists.txt unless overridden.
-add_compile_options(-Wall -Wextra)
+add_compile_options(-Wall -Wextra -Wno-missing-field-initializers -Wno-unused-parameter)
 
 # --- Apple Silicon (ARM64) specific settings ---
 # Ensure that CMake targets the correct architecture when building on Apple platforms.
@@ -53,7 +53,7 @@ FetchContent_MakeAvailable(abseil)
 FetchContent_Declare(
     co
     GIT_REPOSITORY https://github.com/dallison/co.git
-    GIT_TAG cf1252b2f5952d7cba83b67dd69288971c0a2b57
+    GIT_TAG c1cd0992d51c7a9bf9e4ecc0b6204cca05adc4a6
     # Pass architecture settings to co's CMake build
     CMAKE_ARGS
         -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
@@ -68,7 +68,7 @@ FetchContent_MakeAvailable(co)
 FetchContent_Declare(
     cpp_toolbelt
     GIT_REPOSITORY https://github.com/dallison/cpp_toolbelt.git
-    GIT_TAG 7ec0e2cd2a17a006f976df23d07ad530499249e0
+    GIT_TAG 1aa8db7fd7096b53a1daa1bba86bbda8a312c7dd
     # Pass architecture settings to cpp_toolbelt's CMake build
     CMAKE_ARGS
         -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"

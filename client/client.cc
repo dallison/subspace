@@ -557,7 +557,7 @@ ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int32_t max_size,
   void *buffer = publisher->GetCurrentBufferAddress();
   if (buffer == nullptr) {
     return absl::InternalError(
-        absl::StrFormat("1 Channel %s has no buffer", publisher->Name()));
+        absl::StrFormat("Channel %s has no buffer.  This should never happen.", publisher->Name()));
   }
   // If we are returning a valid message buffer we commit the lock so that we
   // can hold onto it until the message is published or cancelled.

@@ -352,7 +352,11 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
       // included since we are calculating it here.  The first 4 bytes (padding) are also not
       // incluced.
       auto data = GetMessageChecksumData(prefix, buffer, slot->message_size);
-      prefix->checksum = CalculateChecksum(data);
+      if (checksum_callback_ != nullptr) {
+        prefix->checksum = checksum_callback_(data);
+      } else {
+        prefix->checksum = CalculateChecksum(data);
+      }
     }
   }
 
