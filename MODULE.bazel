@@ -25,13 +25,4 @@ python.toolchain(
     python_version = "3.11.1",
 )
 
-# http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
-
-# http_archive(
-#     name = "cpp_toolbelt",
-#     sha256 = "3b1ea0a94c1cd253a51db47deb1b0ff4f68fff15b865ff2e640fa193d60ad97c",
-#     strip_prefix = "cpp_toolbelt-82c0692d5a815c0cefb7b467ba78ae8ced795ee7",
-#     urls = ["https://github.com/dallison/cpp_toolbelt/archive/82c0692d5a815c0cefb7b467ba78ae8ced795ee7.tar.gz"],
-# )
-
 bazel_dep(name = "pybind11_bazel", version = "3.0.0")
