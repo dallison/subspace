@@ -48,9 +48,9 @@ public:
                       std::move(session_id), std::move(type), std::move(reload),
                       user_id, group_id),
         subscriber_id_(subscriber_id), options_(options) {
-		// Preallocate to avoid malloc later.
-		(void)GetOrdinalTracker(vchan_id_);
-	}
+    // Preallocate to avoid malloc later.
+    (void)GetOrdinalTracker(vchan_id_);
+  }
 
   void InitActiveMessages();
 
@@ -113,8 +113,11 @@ public:
   std::shared_ptr<ActiveMessage> GetActiveMessage() { return active_message_; }
 
   void ClearActiveMessage() {
+    if (!options_.keep_active_message) {
+      return;
+    }
     if (active_message_ != nullptr) {
-      active_message_->Release();
+      active_message_->DecRef();
     }
     active_message_.reset();
   }
@@ -125,9 +128,12 @@ public:
                                                   bool is_activation,
                                                   bool checksum_error) {
     std::shared_ptr<ActiveMessage> &m = active_messages_[slot->id];
-    m->Reset(len, slot, buf, ord, ts, vchan_id, is_activation, checksum_error);
-    active_message_ = m;
-    return active_message_;
+    m->Reset(len, buf, ord, ts, vchan_id, is_activation, checksum_error);
+    if (options_.keep_active_message) {
+      active_message_ = m;
+      m->IncRef();
+    }
+    return m;
   }
 
   void DecrementSlotRef(MessageSlot *slot, bool retire) {
@@ -148,11 +154,12 @@ public:
       return nullptr;
     }
     // If we are still holding on to the same active message, return it.
-    if (active_message_->slot == slot && active_message_->ordinal == ordinal) {
+    if (options_.keep_active_message && active_message_ != nullptr &&
+        active_message_->slot == slot && active_message_->ordinal == ordinal) {
       return active_message_;
     }
     std::shared_ptr<ActiveMessage> &msg = active_messages_[slot->id];
-    msg->Reset(slot->message_size, slot, GetBufferAddress(slot), slot->ordinal,
+    msg->Reset(slot->message_size, GetBufferAddress(slot), slot->ordinal,
                Timestamp(slot), slot->vchan_id, false, false);
     if (msg->length == 0) {
       // Failed to get an active message, return an empty shared_ptr.

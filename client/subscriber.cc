@@ -9,8 +9,10 @@ namespace details {
 
 void SubscriberImpl::InitActiveMessages() {
   active_messages_.resize(NumSlots());
+  int slot_id = 0;
   for (auto &m : active_messages_) {
-    m = std::make_shared<ActiveMessage>(shared_from_this());
+    m = std::make_shared<ActiveMessage>(shared_from_this(), &ccb_->slots[slot_id]);
+    slot_id++;
   }
 }
 

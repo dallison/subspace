@@ -425,7 +425,6 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
       },
       server_user_id_, server_group_id_);
 
-  channel->InitActiveMessages();
   channel->SetNumSlots(sub_resp.num_slots());
 
   SharedMemoryFds channel_fds(std::move(fds[sub_resp.ccb_fd_index()]),
@@ -434,6 +433,8 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
       !status.ok()) {
     return status;
   }
+
+  channel->InitActiveMessages();
 
   if (absl::Status status = channel->AttachBuffers(); !status.ok()) {
     return status;
@@ -557,7 +558,8 @@ ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int32_t max_size,
   void *buffer = publisher->GetCurrentBufferAddress();
   if (buffer == nullptr) {
     return absl::InternalError(
-        absl::StrFormat("Channel %s has no buffer.  This should never happen.", publisher->Name()));
+        absl::StrFormat("Channel %s has no buffer.  This should never happen.",
+                        publisher->Name()));
   }
   // If we are returning a valid message buffer we commit the lock so that we
   // can hold onto it until the message is published or cancelled.
@@ -1126,17 +1128,17 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
     subscriber->SetType(sub_resp.type());
   }
   subscriber->SetNumSlots(sub_resp.num_slots());
-  subscriber->InitActiveMessages();
-  
+
   SharedMemoryFds channel_fds(std::move(fds[sub_resp.ccb_fd_index()]),
                               std::move(fds[sub_resp.bcb_fd_index()]));
-
   // subscriber->SetSlots(sub_resp.slot_size(), sub_resp.num_slots());
 
   if (absl::Status status = subscriber->Map(std::move(channel_fds), scb_fd_);
       !status.ok()) {
     return status;
   }
+  subscriber->InitActiveMessages();
+
   if (absl::Status status = subscriber->AttachBuffers(); !status.ok()) {
     return status;
   }
