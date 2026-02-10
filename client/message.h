@@ -40,27 +40,12 @@ struct ActiveMessage {
   ActiveMessage(ActiveMessage &&) = default;
   ActiveMessage &operator=(ActiveMessage &&) = default;
 
-  void Release();
-
-  void ResetInternal() {
-    length = 0;
-    buffer = nullptr;
-    ordinal = -1;
-    timestamp = 0;
-    vchan_id = -1;
-    is_activation = false;
-    checksum_error = false;
-  }
-
   void Reset(size_t len, const void *buf, uint64_t ord, int64_t ts, int vid,
              bool activation, bool checksum_error);
 
-  void IncRef() { 
-    refs++;
-  }
+  void IncRef() { refs++; }
   void DecRef() {
-    refs--;
-    Release();
+    Release(--refs);
   }
 
   std::weak_ptr<details::SubscriberImpl>
@@ -77,6 +62,19 @@ struct ActiveMessage {
   // We keep track of the number of references to this active message.  Once it
   // goes to zero we can release the slot.
   std::atomic<int> refs = 0;
+
+private:
+  void Release(int ref_count);
+
+  void ResetInternal() {
+    length = 0;
+    buffer = nullptr;
+    ordinal = -1;
+    timestamp = 0;
+    vchan_id = -1;
+    is_activation = false;
+    checksum_error = false;
+  }
 };
 
 struct Message {
@@ -130,11 +128,10 @@ struct Message {
 
   Message(Message &&other)
       : active_message(std::move(other.active_message)), length(other.length),
-                       buffer(other.buffer), ordinal(other.ordinal),
-                       timestamp(other.timestamp), vchan_id(other.vchan_id),
-                       is_activation(other.is_activation),
-                       slot_id(other.slot_id),
-                       checksum_error(other.checksum_error) {
+        buffer(other.buffer), ordinal(other.ordinal),
+        timestamp(other.timestamp), vchan_id(other.vchan_id),
+        is_activation(other.is_activation), slot_id(other.slot_id),
+        checksum_error(other.checksum_error) {
     other.ResetInternal();
   }
 

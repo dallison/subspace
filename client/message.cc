@@ -9,15 +9,12 @@ namespace subspace {
 
 ActiveMessage::~ActiveMessage() {}
 
-void ActiveMessage::Release() {
+void ActiveMessage::Release(int ref_count) {
   if (sub.expired()) {
     return;
   }
   std::shared_ptr<details::SubscriberImpl> subr = sub.lock();
-  if (refs.load() == -1) {
-    abort();
-  }
-  if (length != 0 && refs.load() == 0) {
+  if (length != 0 && ref_count == 0) {
     subr->RemoveActiveMessage(slot);
     ResetInternal();
   }
