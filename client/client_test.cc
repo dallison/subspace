@@ -1016,6 +1016,7 @@ TEST_F(ClientTest, VirtualPublishMultiple) {
   // Make sure mux is triggered.
   ASSERT_OK(mux_sub->Wait());
 
+  std::cerr << "reading mux subscriber" << std::endl;
   // Read the all messages using the multiplexer subscriber.
   // This hasn't seen any messages yet so will see them all.
   for (int i = 0; i < 10; i++) {
@@ -1614,7 +1615,7 @@ TEST_F(ClientTest, ReliablePublisher1) {
     ASSERT_EQ(nullptr, *buffer);
   }
 
-  msg->Release();
+  msg->Reset();
 
   co::CoroutineScheduler machine;
 
@@ -1699,7 +1700,7 @@ TEST_F(ClientTest, ReliablePublisher2) {
     ASSERT_EQ(nullptr, *buffer);
   }
 
-  msg->Release();
+  msg->Reset();
 
   co::CoroutineScheduler machine;
 
@@ -1755,7 +1756,7 @@ TEST_F(ClientTest, ReliablePublisherActivation) {
   ASSERT_EQ(1, msg->length);
   ASSERT_TRUE(msg->is_activation);
 
-  msg->Release();
+  msg->Reset();
 
   // Publish a reliable message.
   {
@@ -1792,7 +1793,7 @@ TEST_F(ClientTest, ReliablePublisherActivation) {
     ASSERT_EQ(nullptr, *buffer);
   }
 
-  msg->Release();
+  msg->Reset();
 
   co::CoroutineScheduler machine;
 
@@ -1830,7 +1831,8 @@ TEST_F(ClientTest, DroppedMessage) {
   subspace::Client client;
   InitClient(client);
 
-  absl::StatusOr<Subscriber> sub = client.CreateSubscriber("rel_dave");
+  absl::StatusOr<Subscriber> sub =
+      client.CreateSubscriber("rel_dave", {.keep_active_message = true});
   ASSERT_OK(sub);
 
   int num_dropped_messages = 0;
@@ -1915,7 +1917,7 @@ TEST_F(ClientTest, PublishSingleMessageAndReadSharedPtr) {
   ASSERT_OK(pub_status);
 
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-      "dave6", subspace::SubscriberOptions().SetMaxActiveMessages(3));
+      "dave6", subspace::SubscriberOptions().SetMaxActiveMessages(3).SetKeepActiveMessage(false));
   ASSERT_OK(sub);
 
   absl::StatusOr<subspace::shared_ptr<const char>> p =
@@ -1925,26 +1927,26 @@ TEST_F(ClientTest, PublishSingleMessageAndReadSharedPtr) {
   ASSERT_TRUE(static_cast<bool>(ptr));
   ASSERT_STREQ("foobar", ptr.get());
 
-  ASSERT_EQ(2, ptr.use_count());
+  ASSERT_EQ(1, ptr.use_count());
 
   // Copy the shared ptr using copy constructor.
   subspace::shared_ptr<const char> p2(ptr);
-  ASSERT_EQ(3, ptr.use_count());
-  ASSERT_EQ(3, p2.use_count());
+  ASSERT_EQ(2, ptr.use_count());
+  ASSERT_EQ(2, p2.use_count());
 
   // Copy using copy operator.
   subspace::shared_ptr<const char> p3 = ptr;
-  ASSERT_EQ(4, ptr.use_count());
-  ASSERT_EQ(4, p2.use_count());
-  ASSERT_EQ(4, p3.use_count());
+  ASSERT_EQ(3, ptr.use_count());
+  ASSERT_EQ(3, p2.use_count());
+  ASSERT_EQ(3, p3.use_count());
 
   // Move p3 to p4.
   subspace::shared_ptr<const char> p4 = std::move(p3);
   ASSERT_FALSE(static_cast<bool>(p3));
-  ASSERT_EQ(4, ptr.use_count());
-  ASSERT_EQ(4, p2.use_count());
+  ASSERT_EQ(3, ptr.use_count());
+  ASSERT_EQ(3, p2.use_count());
   ASSERT_EQ(0, p3.use_count());
-  ASSERT_EQ(4, p4.use_count());
+  ASSERT_EQ(3, p4.use_count());
 }
 
 TEST_F(ClientTest, Publish2Message2AndReadSharedPtrs) {
@@ -1964,7 +1966,7 @@ TEST_F(ClientTest, Publish2Message2AndReadSharedPtrs) {
   }
 
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-      "dave6", subspace::SubscriberOptions().SetMaxActiveMessages(2));
+      "dave6", subspace::SubscriberOptions().SetMaxActiveMessages(2).SetKeepActiveMessage(false));
   ASSERT_OK(sub);
 
   absl::StatusOr<subspace::shared_ptr<const char>> p =
@@ -2009,9 +2011,9 @@ TEST_F(ClientTest, Publish2Message2AndReadSharedPtrs) {
     // Shared ptr from weak ptr and destruct it.
     subspace::shared_ptr<const char> p2(w2);
     // Number of active messages: 2
-    ASSERT_EQ(1, sub->NumActiveMessages());
+    ASSERT_EQ(2, sub->NumActiveMessages());
 
-    ASSERT_EQ(3, p2.use_count());
+    ASSERT_EQ(2, p2.use_count());
   }
   // Number of active messages: 1
 }
@@ -2246,10 +2248,14 @@ TEST_F(ClientTest, RetirementTrigger1) {
   auto ptr2 = std::move(*p2);
   ASSERT_STREQ("foobar", reinterpret_cast<const char *>(ptr2.buffer));
 
+  sub1.ClearActiveMessage();
+  sub2.ClearActiveMessage();
+  std::cerr << "resetting first message" << std::endl;
   // Reset the first message.
-  ptr1.Release();
+  ptr1.Reset();
   // Reset the second message. This will trigger a retirement.
-  ptr2.Release();
+  std::cerr << "resetting second message" << std::endl;
+  ptr2.Reset();
 
   // Read the retirement fd and expect it to contain slot 0.
   struct pollfd fd = {.fd = retirement_fd.Fd(), .events = POLLIN};
@@ -2283,12 +2289,12 @@ TEST_F(ClientTest, RetirementTrigger2) {
   const toolbelt::FileDescriptor &retirement_fd = pub.GetRetirementFd();
 
   absl::StatusOr<Subscriber> s1 =
-      sub_client->CreateSubscriber("dave6", {.max_active_messages = 1});
+      sub_client->CreateSubscriber("dave6", {.max_active_messages = 1, .keep_active_message = true});
   ASSERT_OK(s1);
   auto sub1 = std::move(*s1);
 
   absl::StatusOr<Subscriber> s2 =
-      sub_client->CreateSubscriber("dave6", {.max_active_messages = 1});
+      sub_client->CreateSubscriber("dave6", {.max_active_messages = 1, .keep_active_message = true});
   ASSERT_OK(s2);
   auto sub2 = std::move(*s2);
 
@@ -2416,7 +2422,7 @@ TEST_F(ClientTest, RetirementTrigger3) {
   // Read the message in sub1.
   absl::StatusOr<subspace::Message> p1 = sub1.ReadMessage();
   ASSERT_OK(p1);
-  auto ptr1 = *p1;
+  auto ptr1 = std::move(*p1);
   ASSERT_STREQ("foobar", reinterpret_cast<const char *>(ptr1.buffer));
 
   // Keep the message alive in sub1 and read it in sub2.
@@ -2425,10 +2431,12 @@ TEST_F(ClientTest, RetirementTrigger3) {
   auto ptr2 = std::move(*p2);
   ASSERT_STREQ("foobar", reinterpret_cast<const char *>(ptr2.buffer));
 
+  sub1.ClearActiveMessage();
+  sub2.ClearActiveMessage();
   // Reset the first message.
-  ptr1.Release();
+  ptr1.Reset();
   // Reset the second message. This will trigger a retirement.
-  ptr2.Release();
+  ptr2.Reset();
 
   // Read the retirement fd and expect it to contain slot 0.
   struct pollfd fd = {.fd = retirement_fd.Fd(), .events = POLLIN};
@@ -2467,12 +2475,12 @@ TEST_F(ClientTest, RetirementTrigger4) {
   const toolbelt::FileDescriptor &retirement_fd = pub2.GetRetirementFd();
 
   absl::StatusOr<Subscriber> s1 =
-      sub_client->CreateSubscriber("dave6", {.max_active_messages = 1});
+      sub_client->CreateSubscriber("dave6", {.max_active_messages = 1, .keep_active_message = true});
   ASSERT_OK(s1);
   auto sub1 = std::move(*s1);
 
   absl::StatusOr<Subscriber> s2 =
-      sub_client->CreateSubscriber("dave6", {.max_active_messages = 1});
+      sub_client->CreateSubscriber("dave6", {.max_active_messages = 1, .keep_active_message = true});
   ASSERT_OK(s2);
   auto sub2 = std::move(*s2);
 
@@ -2617,8 +2625,8 @@ TEST_F(ClientTest, ChannelDirectory) {
 TEST_F(ClientTest, MessageGetters) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
-  absl::StatusOr<Publisher> pub =
-      client->CreatePublisher("chan1", {.slot_size = 256, .num_slots = 10, .type = "test-type"});
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan1", {.slot_size = 256, .num_slots = 10, .type = "test-type"});
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub = client->CreateSubscriber("chan1");
@@ -2639,9 +2647,10 @@ TEST_F(ClientTest, MessageGetters) {
   ASSERT_EQ(10, msg->NumSlots());
 }
 
-// This tests checksums.  We have two publishers, one that calculates a checksum and one that doesn't.
-// We have 2 subscribers, one that checks the checksum and expects an error if there's an error
-// and one that checks the checksum and passes the message intact but with the checksum_error flag set.
+// This tests checksums.  We have two publishers, one that calculates a checksum
+// and one that doesn't. We have 2 subscribers, one that checks the checksum and
+// expects an error if there's an error and one that checks the checksum and
+// passes the message intact but with the checksum_error flag set.
 TEST_F(ClientTest, ChecksumVerification) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
@@ -2882,8 +2891,10 @@ TEST_F(ClientTest, ChecksumCallbackReset) {
   };
 
   auto fake_crc_mismatch =
-      [&fake_crc](const std::array<absl::Span<const uint8_t>, 2> &data)
-          -> uint32_t { return fake_crc(data) + 1; };
+      [&fake_crc](
+          const std::array<absl::Span<const uint8_t>, 2> &data) -> uint32_t {
+    return fake_crc(data) + 1;
+  };
 
   pub->SetChecksumCallback(fake_crc);
   sub->SetChecksumCallback(fake_crc_mismatch);
@@ -2922,7 +2933,8 @@ TEST_F(ClientTest, ChecksumCallbackPublisherOnly) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
-      "chan_cb_pub_only", {.slot_size = 256, .num_slots = 10, .checksum = true});
+      "chan_cb_pub_only",
+      {.slot_size = 256, .num_slots = 10, .checksum = true});
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =

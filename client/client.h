@@ -60,9 +60,11 @@ template <typename T> class weak_ptr;
 template <typename T> class shared_ptr {
 public:
   shared_ptr() = default;
-  shared_ptr(const Message &m) : msg_(m.active_message) {}
-  shared_ptr(std::shared_ptr<ActiveMessage> m) : msg_(std::move(m)) {}
-  shared_ptr(const shared_ptr &p) : msg_(p.msg_) {}
+  shared_ptr(const Message &m) : msg_(m.active_message) { msg_->IncRef(); }
+  shared_ptr(std::shared_ptr<ActiveMessage> m) : msg_(std::move(m)) {
+    msg_->IncRef();
+  }
+  shared_ptr(const shared_ptr &p) : msg_(p.msg_) { msg_->IncRef(); }
   shared_ptr(shared_ptr &&p) : msg_(std::move(p.msg_)) {}
   shared_ptr(const weak_ptr<T> &p);
 
@@ -76,19 +78,24 @@ public:
     return *this;
   }
 
+  ~shared_ptr() {
+    if (msg_ != nullptr) {
+      msg_->DecRef();
+    }
+  }
   subspace::Message GetMessage() const { return Message(msg_); }
 
   T *get() const { return reinterpret_cast<T *>(msg_->buffer); }
   T &operator*() const { return *reinterpret_cast<T *>(msg_->buffer); }
   T *operator->() const { return get(); }
   operator bool() const { return msg_ != nullptr; }
-  long use_count() const {
-    return msg_.use_count() == 0
-               ? 0
-               : msg_.use_count() -
-                     1; // Subscriber has a reference that we shouldn't count
+  long use_count() const { return msg_ == nullptr ? 0 : msg_->refs.load(); }
+  void reset() {
+    if (msg_ != nullptr) {
+      msg_->DecRef();
+    }
+    msg_ = nullptr;
   }
-  void reset() { msg_.reset(); }
 
   bool operator==(const shared_ptr &p) const { return msg_ == p.msg_; }
   bool operator!=(const shared_ptr &p) const { return msg_ != p.msg_; }
@@ -431,7 +438,7 @@ private:
   void InvokeMessageCallback(details::SubscriberImpl *subscriber, Message msg) {
     auto it = message_callbacks_.find(subscriber);
     if (it != message_callbacks_.end() && it->second) {
-      it->second(subscriber, msg);
+      it->second(subscriber, std::move(msg));
     }
   }
 

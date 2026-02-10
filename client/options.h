@@ -225,6 +225,12 @@ struct SubscriberOptions {
   }
   bool PassChecksumErrors() const { return pass_checksum_errors; }
 
+  SubscriberOptions &SetKeepActiveMessage(bool v) {
+    keep_active_message = v;
+    return *this;
+  }
+  bool KeepActiveMessage() const { return keep_active_message; }
+
   bool reliable = false;
   bool bridge = false;
   std::string type;
@@ -238,6 +244,12 @@ struct SubscriberOptions {
   int vchan_id = -1; // If -1, server will assign.
   bool checksum = false;
   bool pass_checksum_errors = false;
+
+  // If true, the subscriber will keep a reference to the most recent
+  // active message.  This is useful if you don't want to pass Message structs
+  // around and you want to keep the message alive until you are done with it.
+  // You should call ClearActiveMessage() to release the reference when you are done with it.
+  bool keep_active_message = false;
 };
 
 } // namespace subspace

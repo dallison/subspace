@@ -7,40 +7,37 @@
 
 namespace subspace {
 
-ActiveMessage::~ActiveMessage() { 
-  Release(); 
-}
+ActiveMessage::~ActiveMessage() {}
 
 void ActiveMessage::Release() {
   if (sub.expired()) {
     return;
   }
   std::shared_ptr<details::SubscriberImpl> subr = sub.lock();
-  if (subr != nullptr && slot != nullptr) {
-    subr->RemoveActiveMessage(slot);
+  if (refs.load() == -1) {
+    abort();
   }
-  ResetInternal();
+  if (length != 0 && refs.load() == 0) {
+    subr->RemoveActiveMessage(slot);
+    ResetInternal();
+  }
 }
 
-void ActiveMessage::Reset(size_t len, MessageSlot *slot_ptr, const void *buf,
-                          uint64_t ord, int64_t ts, int vid, bool activation,
-                          bool cs_error) {
-  Release(); // This will decrement the reference for the current slot.
+void ActiveMessage::Reset(size_t len, const void *buf, uint64_t ord, int64_t ts,
+                          int vid, bool activation, bool cs_error) {
   length = len;
-  slot = slot_ptr;
   buffer = buf;
   ordinal = ord;
   timestamp = ts;
   vchan_id = vid;
   is_activation = activation;
   checksum_error = cs_error;
-  if (slot == nullptr) {
-    return;
-  }
+
   std::shared_ptr<details::SubscriberImpl> subr = sub.lock();
   if (subr == nullptr) {
     return;
   }
+
   if (!subr->AddActiveMessage(slot)) {
     ResetInternal();
   }
@@ -85,6 +82,8 @@ Message::Message(std::shared_ptr<ActiveMessage> msg)
       timestamp(active_message->timestamp), vchan_id(active_message->vchan_id),
       is_activation(active_message->is_activation),
       slot_id(active_message->slot != nullptr ? active_message->slot->id : -1),
-      checksum_error(active_message->checksum_error) {}
+      checksum_error(active_message->checksum_error) {
+  active_message->IncRef();
+}
 
 } // namespace subspace
