@@ -33,7 +33,6 @@ bool SubscriberImpl::AddActiveMessage(MessageSlot *slot) {
   //           << "\n";
   int old = num_active_messages_.fetch_add(1);
   if (old >= options_.MaxActiveMessages() && !IsBridge()) {
-    // std::cerr << "exceeded max active messages\n";
     num_active_messages_.fetch_sub(1);
     return false;
   }
@@ -65,7 +64,7 @@ void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
                       // std::cerr << details;
                       TriggerRetirement(slot->bridged_slot_id);
                     });
-  if (num_active_messages_-- == options_.MaxActiveMessages()) {
+  if (--num_active_messages_ < options_.MaxActiveMessages()) {
     Trigger();
     if (IsReliable()) {
       TriggerReliablePublishers();
@@ -146,6 +145,7 @@ const ActiveSlot *SubscriberImpl::FindUnseenOrdinal() {
   for (auto &s : active_slots_) {
     if (s.ordinal != 0 &&
         !tracker.ordinals.Contains(OrdinalAndVchanId{s.ordinal, s.vchan_id})) {
+      // std::cerr << absl::StrFormat("Found unseen ordinal %d in slot %d\n", s.ordinal, s.slot->id);
       return &s;
     }
   }
@@ -165,6 +165,11 @@ void SubscriberImpl::ClaimSlot(MessageSlot *slot, int vchan_id,
   }
   RememberOrdinal(slot->ordinal, vchan_id);
   slot->flags |= kMessageSeen;
+}
+
+void SubscriberImpl::UnreadSlot(MessageSlot *slot) {
+  slot->flags &= ~kMessageSeen;
+  DecrementSlotRef(slot, false);
 }
 
 void SubscriberImpl::CollectVisibleSlots(InPlaceAtomicBitset &bits) {

@@ -40,13 +40,11 @@ struct ActiveMessage {
   ActiveMessage(ActiveMessage &&) = default;
   ActiveMessage &operator=(ActiveMessage &&) = default;
 
-  void Reset(size_t len, const void *buf, uint64_t ord, int64_t ts, int vid,
+  void Set(size_t len, const void *buf, uint64_t ord, int64_t ts, int vid,
              bool activation, bool checksum_error);
 
   void IncRef() { refs++; }
-  void DecRef() {
-    Release(--refs);
-  }
+  void DecRef() { Release(--refs); }
 
   std::weak_ptr<details::SubscriberImpl>
       sub;                      // Subscriber that read the message.
@@ -66,15 +64,7 @@ struct ActiveMessage {
 private:
   void Release(int ref_count);
 
-  void ResetInternal() {
-    length = 0;
-    buffer = nullptr;
-    ordinal = -1;
-    timestamp = 0;
-    vchan_id = -1;
-    is_activation = false;
-    checksum_error = false;
-  }
+  void ResetInternal();
 };
 
 struct Message {
@@ -108,12 +98,15 @@ struct Message {
   }
 
   Message &operator=(const Message &other) {
-    if (active_message != nullptr) {
-      active_message->DecRef();
-    }
-    active_message = other.active_message;
-    if (active_message != nullptr) {
-      active_message->IncRef();
+    // Are we changing the active message?
+    if (active_message != other.active_message) {
+      if (active_message != nullptr) {
+        active_message->DecRef();
+      }
+      active_message = other.active_message;
+      if (active_message != nullptr) {
+        active_message->IncRef();
+      }
     }
     length = other.length;
     buffer = other.buffer;
@@ -132,11 +125,17 @@ struct Message {
         timestamp(other.timestamp), vchan_id(other.vchan_id),
         is_activation(other.is_activation), slot_id(other.slot_id),
         checksum_error(other.checksum_error) {
-    other.ResetInternal();
+    // In a move the reference count for the active message doesn't change.
   }
 
   Message &operator=(Message &&other) {
-    active_message = std::move(other.active_message);
+    if (active_message != other.active_message) {
+      if (active_message != nullptr) {
+        active_message->DecRef();
+      }
+      active_message = std::move(other.active_message);
+      // Reference count for the active message is unchanged.
+    }
     length = other.length;
     buffer = other.buffer;
     ordinal = other.ordinal;

@@ -92,6 +92,7 @@ public:
   void PopulateActiveSlots(InPlaceAtomicBitset &bits);
 
   void ClaimSlot(MessageSlot *slot, int vchan_id, bool was_newest);
+  void UnreadSlot(MessageSlot *slot);
   void RememberOrdinal(uint64_t ordinal, int vchan_id);
   void CollectVisibleSlots(InPlaceAtomicBitset &bits);
 
@@ -128,7 +129,7 @@ public:
                                                   bool is_activation,
                                                   bool checksum_error) {
     std::shared_ptr<ActiveMessage> &m = active_messages_[slot->id];
-    m->Reset(len, buf, ord, ts, vchan_id, is_activation, checksum_error);
+    m->Set(len, buf, ord, ts, vchan_id, is_activation, checksum_error);
     if (options_.keep_active_message) {
       active_message_ = m;
       m->IncRef();
@@ -159,7 +160,7 @@ public:
       return active_message_;
     }
     std::shared_ptr<ActiveMessage> &msg = active_messages_[slot->id];
-    msg->Reset(slot->message_size, GetBufferAddress(slot), slot->ordinal,
+    msg->Set(slot->message_size, GetBufferAddress(slot), slot->ordinal,
                Timestamp(slot), slot->vchan_id, false, false);
     if (msg->length == 0) {
       // Failed to get an active message, return an empty shared_ptr.
@@ -218,6 +219,8 @@ public:
   }
 
   bool PassChecksumErrors() const { return options_.PassChecksumErrors(); }
+
+  void DumpOrdinals(std::ostream &os);
 
 private:
   friend class ::subspace::ClientImpl;

@@ -241,8 +241,8 @@ TEST_F(LatencyTest, MultithreadedSingleChannelReliable) {
       while (total_received_messages < kNumMessages) {
         auto msg = pipes[i].Read();
         ASSERT_OK(msg);
-        // std::cerr << "received ordinal " << (*msg)->ordinal << " on "
-        //           << i << "\n";
+        // std::cerr << absl::StrFormat("Received message %d %d\n",
+        // (*msg)->slot_id, (*msg)->ordinal);
         total_received_messages++;
         // Sleep for random microseconds.
         std::this_thread::sleep_for(std::chrono::microseconds(rand() % 10));
@@ -262,8 +262,15 @@ TEST_F(LatencyTest, MultithreadedSingleChannelReliable) {
       absl::StatusOr<Message> msg = sub->ReadMessage();
       ASSERT_OK(msg);
       if (msg->length > 0) {
+        // std::cerr << absl::StrFormat("Received message %d %d\n", msg->slot_id, msg->ordinal);
         if (last_ordinal != 0) {
-          ASSERT_EQ(msg->ordinal, last_ordinal + 1);
+          if (msg->ordinal != last_ordinal + 1) {
+            std::cerr << absl::StrFormat(
+                "Ordinal ordering issue received %d, expected %d\n",
+                msg->ordinal, last_ordinal + 1);
+            sub->DumpSlots(std::cerr);
+            abort();
+          }
         }
         last_ordinal = msg->ordinal;
         int receiver = rand() % kNumReceivers;
@@ -1032,7 +1039,8 @@ TEST_F(LatencyTest, PublisherLatencyMultiSub) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
 
-  std::cerr << "num_slots,num_subs,latency_with_retirement,latency_no_retirement\n";
+  std::cerr
+      << "num_slots,num_subs,latency_with_retirement,latency_no_retirement\n";
   constexpr int kNumMessages = 20000;
   for (int num_slots = 10; num_slots < 10000; num_slots *= 5) {
 
@@ -1184,7 +1192,8 @@ TEST_F(LatencyTest, VirtualPublisherLatencyMultiSub) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
 
-  std::cerr << "num_slots,num_subs,latency_with_retirement,latency_no_retirement\n";
+  std::cerr
+      << "num_slots,num_subs,latency_with_retirement,latency_no_retirement\n";
   constexpr int kNumMessages = 20000;
   for (int num_slots = 10; num_slots < 10000; num_slots *= 5) {
 
@@ -2088,8 +2097,8 @@ TEST_F(LatencyTest, PubSubLatency) {
 
   std::cerr << "num_messages,avg_latency_ns\n";
   for (int num_messages = 100; num_messages <= 20000; num_messages += 100) {
-    absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-        "pubsublat", 256, 10, {.reliable = false});
+    absl::StatusOr<Publisher> pub =
+        pub_client.CreatePublisher("pubsublat", 256, 10, {.reliable = false});
     ASSERT_OK(pub);
     // Create subscriber.
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
@@ -2109,8 +2118,7 @@ TEST_F(LatencyTest, PubSubLatency) {
       ASSERT_EQ(100, msg->length);
     }
     uint64_t end = toolbelt::Now();
-    std::cerr << num_messages << "," << (end - start) / num_messages
-              << "\n";
+    std::cerr << num_messages << "," << (end - start) / num_messages << "\n";
   }
 }
 
