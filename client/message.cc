@@ -4,10 +4,21 @@
 
 #include "client/message.h"
 #include "client/subscriber.h"
+#include "absl/strings/str_format.h"
 
 namespace subspace {
 
 ActiveMessage::~ActiveMessage() {}
+
+void ActiveMessage::ResetInternal() {
+  length = 0;
+  buffer = nullptr;
+  ordinal = -1;
+  timestamp = 0;
+  vchan_id = -1;
+  is_activation = false;
+  checksum_error = false;
+}
 
 void ActiveMessage::Release(int ref_count) {
   if (sub.expired()) {
@@ -15,12 +26,14 @@ void ActiveMessage::Release(int ref_count) {
   }
   std::shared_ptr<details::SubscriberImpl> subr = sub.lock();
   if (length != 0 && ref_count == 0) {
-    subr->RemoveActiveMessage(slot);
+    // The message must be reset before releasing the slot since another message
+    // might take the slot once we release and before we reset it.
     ResetInternal();
+    subr->RemoveActiveMessage(slot);
   }
 }
 
-void ActiveMessage::Reset(size_t len, const void *buf, uint64_t ord, int64_t ts,
+void ActiveMessage::Set(size_t len, const void *buf, uint64_t ord, int64_t ts,
                           int vid, bool activation, bool cs_error) {
   length = len;
   buffer = buf;

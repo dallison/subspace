@@ -937,7 +937,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
   // If we are unable to allocate a new message (due to message limits)
   // restore the slot so that we pick it up next time.
   if (msg->length == 0) {
-    subscriber->DecrementSlotRef(new_slot, false);
+    subscriber->UnreadSlot(new_slot);
     // Subscriber does not have a slot now but the slot it had is still active.
   } else {
     // We have a slot, claim it.
