@@ -294,7 +294,7 @@ TEST_F(BridgeTest, BasicRetirement) {
   ASSERT_EQ(6, msg->length);
   ASSERT_EQ(256, sub->SlotSize());
   // Release the message on the subscriber (on server 2).
-  msg->Release();
+  msg->Reset();
 
   std::cerr << "Waiting for retirement notification..." << std::endl;
   // Read the retirement fd.
