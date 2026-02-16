@@ -57,8 +57,8 @@ void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
 
                       // Enable this for debugging slot retirement.
                       // std::string details = absl::StrFormat(
-                      //   "%d: RemoveActiveMessage: %s retiring slot %d ordinal
-                      //   %d vchan_id %d\n", getpid(), Name(),
+                      //   "%d: RemoveActiveMessage: %s retiring slot %d ordinal "
+                      //   "%d vchan_id %d\n", getpid(), Name(),
                       //   slot->bridged_slot_id, slot->ordinal,
                       //   slot->vchan_id);
                       // std::cerr << details;
