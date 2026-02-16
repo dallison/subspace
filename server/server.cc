@@ -1134,7 +1134,7 @@ void Server::RetirementReceiverCoroutine(
     if (slot_id < 0 || slot_id >= active_retirement_msgs->size()) {
       continue;
     }
-    (*active_retirement_msgs)[slot_id].reset();
+    (*active_retirement_msgs)[slot_id]->DecRef();
   }
 }
 
