@@ -1,5 +1,7 @@
 package(default_visibility = ["//visibility:public"])
 
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
 cc_library(
     name = "subspace_client",
     srcs = [
@@ -8,6 +10,8 @@ cc_library(
         "message.cc",
         "publisher.cc",
         "subscriber.cc",
+        "checksum.cc",
+        "arm_crc32.S",
     ],
     hdrs = [
         "client.h",
@@ -16,7 +20,10 @@ cc_library(
         "options.h",
         "publisher.h",
         "subscriber.h",
+        "checksum.h",
     ],
+    strip_include_prefix = ".",
+    include_prefix = "subspace/client",
     deps = [
         "//common:subspace_common",
         "@abseil-cpp//absl/container:flat_hash_map",
@@ -24,8 +31,9 @@ cc_library(
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings:str_format",
-        "@coroutines//:co",
-    ],
+        "@abseil-cpp//absl/types:span",
+        "@coroutines//co",
+   ],
 )
 
 cc_test(
@@ -34,6 +42,7 @@ cc_test(
     srcs = ["client_test.cc"],
     data = [
         "//server:subspace_server",
+        "//plugins:nop_plugin.so",
     ],
     deps = [
         ":subspace_client",

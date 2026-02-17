@@ -1,9 +1,9 @@
-// Copyright 2025 David Allison
+// Copyright 2023-2026 David Allison
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#ifndef __SERVER_SERVER_CHANNEL_H
-#define __SERVER_SERVER_CHANNEL_H
+#ifndef _xSERVERSERVER_CHANNEL_H
+#define _xSERVERSERVER_CHANNEL_H
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
@@ -27,6 +27,11 @@ class Server;
 
 absl::StatusOr<SystemControlBlock *>
 CreateSystemControlBlock(toolbelt::FileDescriptor &fd);
+
+struct ResizeInfo {
+  int old_slot_size;
+  int new_slot_size;
+};
 
 // A user is a publisher or subscriber on a channel.  Each user has a
 // unique (per channel) user id.  A user might have a trigger fd
@@ -148,8 +153,8 @@ class ServerChannel : public Channel {
 public:
   ServerChannel(int id, const std::string &name, int num_slots,
                 std::string type, bool is_virtual, int session_id)
-      : Channel(name, num_slots, id, std::move(type)), is_virtual_(is_virtual), session_id_(session_id) {
-  }
+      : Channel(name, num_slots, id, std::move(type)), is_virtual_(is_virtual),
+        session_id_(session_id) {}
 
   virtual ~ServerChannel();
 
@@ -217,11 +222,13 @@ public:
   void RemoveAllUsersFor(ClientHandler *handler);
   virtual bool IsEmpty() const { return user_ids_.IsEmpty(); }
   virtual absl::Status HasSufficientCapacity(int new_max_active_messages) const;
-  void CountUsers(int &num_pubs, int &num_subs) const;
-  void CountBridgeUsers(int &num_pubs, int &num_subs) const;
-  virtual void GetChannelInfo(subspace::ChannelInfo *info);
-  virtual void GetChannelStats(subspace::ChannelStats *stats);
+  virtual void CountUsers(int &num_pubs, int &num_subs, int &num_bridge_pubs,
+                          int &num_bridge_subs) const;
+  virtual void GetChannelInfo(subspace::ChannelInfoProto *info);
+  virtual void GetChannelStats(subspace::ChannelStatsProto *stats);
   void TriggerAllSubscribers();
+
+  std::vector<ResizeInfo> GetResizeInfo() const;
 
   virtual int SlotSize() const {
     if (ccb_->num_buffers == 0) {
@@ -244,8 +251,8 @@ public:
   virtual void RemoveBuffer(uint64_t session_id) {
     for (int i = 0; i < ccb_->num_buffers; i++) {
       std::string filename = BufferSharedMemoryName(session_id, i);
-#if defined(__APPLE__)
-      auto shm_name = MacOsSharedMemoryName(filename);
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
+      auto shm_name = PosixSharedMemoryName(filename);
       if (shm_name.ok()) {
         (void)shm_unlink(shm_name->c_str());
       }
@@ -269,7 +276,8 @@ public:
     bridged_publishers_.emplace(addr, reliable);
   }
 
-  void RemoveBridgedAddress(const toolbelt::SocketAddress &addr, bool reliable) {
+  void RemoveBridgedAddress(const toolbelt::SocketAddress &addr,
+                            bool reliable) {
     bridged_publishers_.erase(ChannelTransmitter(addr, reliable));
   }
 
@@ -282,7 +290,7 @@ public:
   }
 
   virtual const SharedMemoryFds &GetFds() { return shared_memory_fds_; }
-  virtual uint64_t GetVirtualMemoryUsage() const;
+  uint64_t GetVirtualMemoryUsage() const override { return Channel::GetVirtualMemoryUsage(); }
 
   // Allocate the shared memory for a channel.  The num_slots_
   // and slot_size_ member variables will either be 0 (for a subscriber
@@ -292,8 +300,8 @@ public:
   // SCB has already been allocated and will be mapped in for
   // this channel.  This is only used in the server.
   virtual absl::StatusOr<SharedMemoryFds>
-  Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
-           int num_slots);
+  Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size, int num_slots,
+           int initial_ordinal);
 
   struct CapacityInfo {
     bool capacity_ok;
@@ -303,9 +311,15 @@ public:
     int slots_needed;
   };
 
-  CapacityInfo HasSufficientCapacityInternal(int initial_value,
-                                             int new_max_active_messages) const;
+  CapacityInfo HasSufficientCapacityInternal(int new_max_active_messages) const;
   absl::Status CapacityError(const CapacityInfo &info) const;
+
+  virtual void GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
+                                uint32_t &max_message_size,
+                                uint32_t &total_drops) {
+    Channel::GetStatsCounters(total_bytes, total_messages, max_message_size,
+                              total_drops);
+  }
 
 protected:
   absl::flat_hash_map<int, std::unique_ptr<User>> users_;
@@ -335,18 +349,15 @@ public:
     return virtual_channels_.empty() && ServerChannel::IsEmpty();
   }
 
-  // Check the capacity of the mux.  There needs to be sufficient slots cover:
-  // 1. One for each publisher, both real and virtual
-  // 2. For each subscriber, the maximum number of active messages.
-  absl::Status
-  HasSufficientCapacity(int new_max_active_messages) const override;
-
   void RemoveBuffer(uint64_t session_id) override {
     if (!virtual_channels_.empty()) {
       return;
     }
     ServerChannel::RemoveBuffer(session_id);
   }
+
+  void CountUsers(int &num_pubs, int &num_subs, int &num_bridge_pubs,
+                  int &num_bridge_subs) const override;
 
 private:
   int next_vchan_id_ = 0;
@@ -362,12 +373,12 @@ private:
 // updates to the multiplexer SCB will be seen by all virtual channels.
 class VirtualChannel : public ServerChannel {
 public:
-  VirtualChannel(Server &server, ChannelMultiplexer *mux, int vchan_id,
-                 const std::string &name, int num_slots, std::string type, int session_id)
-      : ServerChannel(mux->GetChannelId(), name, num_slots, type, true, session_id),
-        server_(server), mux_(mux), vchan_id_(vchan_id) {}
-
-  ~VirtualChannel();
+  VirtualChannel(ChannelMultiplexer *mux, int vchan_id,
+                 const std::string &name, int num_slots, std::string type,
+                 int session_id)
+      : ServerChannel(mux->GetChannelId(), name, num_slots, type, true,
+                      session_id),
+        mux_(mux), vchan_id_(vchan_id) {}
 
   std::string Type() const override { return mux_->Type(); }
   void SetType(const std::string &type) override { mux_->SetType(type); }
@@ -385,6 +396,10 @@ public:
     user_ids_.Clear(id);
   }
 
+  void CountUsers(int &num_pubs, int &num_subs, int &num_bridge_pubs,
+                  int &num_bridge_subs) const override {
+    mux_->CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs);
+  }
   ChannelMultiplexer *GetMux() const { return mux_; }
   int GetVirtualChannelId() const override { return vchan_id_; }
 
@@ -421,11 +436,22 @@ public:
 
   uint64_t GetVirtualMemoryUsage() const override { return 0; }
 
+  void GetUserCount(int &num_pubs, int &num_subs, int &num_bridge_pubs,
+                    int &num_bridge_subs) const {
+    ServerChannel::CountUsers(num_pubs, num_subs, num_bridge_pubs,
+                              num_bridge_subs);
+  }
+
+  void GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
+                        uint32_t &max_message_size, uint32_t &total_drops) override {
+    mux_->GetStatsCounters(total_bytes, total_messages, max_message_size,
+                           total_drops);
+  }
+
 private:
-  Server &server_;
   ChannelMultiplexer *mux_;
   int vchan_id_;
 };
 
 } // namespace subspace
-#endif // __SERVER_SERVER_CHANNEL_H
+#endif // _xSERVERSERVER_CHANNEL_H

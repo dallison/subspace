@@ -1,10 +1,10 @@
 
-// Copyright 2025 David Allison
+// Copyright 2023-2026 David Allison
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#ifndef __COMMON_CHANNEL_H
-#define __COMMON_CHANNEL_H
+#ifndef _xCOMMON_CHANNEL_H
+#define _xCOMMON_CHANNEL_H
 
 #include <stdio.h>
 
@@ -22,8 +22,22 @@
 
 namespace subspace {
 
-// Max message size for comms with server.
-static constexpr size_t kMaxMessage = 4096;
+#define SUBSPACE_SHMEM_MODE_POSIX 1
+#define SUBSPACE_SHMEM_MODE_LINUX 2
+
+// Change this if you want to use a different shared memory mode.
+#if defined(__linux__)
+// On Linux we can use /dev/shm directly for shared memory.
+#define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_LINUX
+#else
+// On other systems we need to use a file in /tmp and then create a shared memory segment with the same name.
+#define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_POSIX
+#endif
+
+// Flag for flags field in MessagePrefix.
+constexpr int kMessageActivate = 1;    // This is a reliable activation message.
+constexpr int kMessageBridged = 2;     // This message came from the bridge.
+constexpr int kMessageHasChecksum = 4; // This message has a checksum.
 
 // This is stored immediately before the channel buffer in shared
 // memory.  It is transferred intact across the TCP bridges.
@@ -49,18 +63,23 @@ struct MessagePrefix {
   uint64_t timestamp;
   int64_t flags;
   int32_t vchan_id;
-  char padding2[64 - 44]; // Align to 64 bytes.
+  uint32_t checksum;
+  char padding2[64 - 48]; // Align to 64 bytes.
+
+  bool IsActivation() const { return (flags & kMessageActivate) != 0; }
+  void SetIsActivation() { flags |= kMessageActivate; }
+  bool IsBridged() const { return (flags & kMessageBridged) != 0; }
+  void SetIsBridged() { flags |= kMessageBridged; }
+  bool HasChecksum() const { return (flags & kMessageHasChecksum) != 0; }
+  void SetHasChecksum() { flags |= kMessageHasChecksum; }
 };
 
 static_assert(sizeof(MessagePrefix) == 64,
               "MessagePrefix size is not 64 bytes");
 
-// Flag for flags field in MessagePrefix.
-constexpr int kMessageActivate = 1; // This is a reliable activation message.
-constexpr int kMessageBridged = 2;  // This message came from the bridge.
-
 // Flags for MessageSlot flags.
-constexpr int kMessageSeen = 1; // Message has been seen.
+constexpr int kMessageSeen = 1;         // Message has been seen.
+constexpr int kMessageIsActivation = 2; // This is an activation message.
 
 // We need a max channels number because the size of things in
 // shared memory needs to be fixed.
@@ -144,6 +163,7 @@ struct ChannelCounters {
   uint16_t num_reliable_pubs; // Current number of reliable publishers.
   uint16_t num_subs;          // Current number of subscribers.
   uint16_t num_reliable_subs; // Current number of reliable subscribers.
+  uint16_t num_resizes;       // Number of times channel has been resized.
 };
 
 struct SystemControlBlock {
@@ -161,7 +181,7 @@ struct MessageSlot {
   AtomicBitSet<kMaxSlotOwners> sub_owners; // One bit per subscriber.
   uint64_t timestamp;                      // Timestamp of message.
   uint32_t flags;
-  int32_t bridged_slot_id;	// Slot ID of other side of bridge.
+  int32_t bridged_slot_id; // Slot ID of other side of bridge.
 
   void Dump(std::ostream &os) const;
 };
@@ -179,6 +199,21 @@ struct BufferControlBlock {
   std::atomic<uint64_t>
       sizes[kMaxBuffers]; // Number of references to this buffer.
 };
+
+// Given a message prefix and a buffer containing the message data return a vector of spans
+// that can be used to calculate the checksum.
+inline std::array<absl::Span<const uint8_t>, 2>
+GetMessageChecksumData(MessagePrefix *prefix, void *buffer,
+                       size_t message_size) {
+  std::array<absl::Span<const uint8_t>, 2> data = {
+      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t *>(
+                                    prefix) + offsetof(MessagePrefix, slot_id),
+                                offsetof(MessagePrefix, checksum) -
+                                    offsetof(MessagePrefix, slot_id)),
+      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t *>(buffer),
+                                message_size)};
+  return data;
+}
 
 // This counts the number of subscribers given a virtual channel id.
 class SubscriberCounter {
@@ -204,9 +239,9 @@ private:
 
 class OrdinalAccumulator {
 public:
-  void Init() {
+  void Init(int v) {
     for (int i = 0; i < kMaxVchanId + 1; i++) {
-      ordinals_[i] = 1;
+      ordinals_[i] = v;
     }
   }
   uint64_t Next(int vchan_id) { return ordinals_[vchan_id + 1]++; }
@@ -254,12 +289,19 @@ struct ChannelControlBlock {          // a.k.a CCB
   std::atomic<uint32_t> max_message_size;
   std::atomic<uint32_t> total_drops;
 
+  // If true there are no more free slots and there's no need to check
+  // the bitset for them (there will never be another free slot)
+  std::atomic<bool> free_slots_exhausted;
+
   // Variable number of MessageSlot structs (num_slots long).
   MessageSlot slots[0];
   // Followed by:
   // AtomicBitSet<0> retiredSlots[num_slots];
   // Followed by:
+  // AtomicBitSet<0> freeSlots[num_slots];
+  // Followed by:
   // AtomicBitSet<0> availableSlots[kMaxSlotOwners];
+  //
 };
 
 inline size_t AvailableSlotsSize(int num_slots) {
@@ -269,7 +311,8 @@ inline size_t AvailableSlotsSize(int num_slots) {
 inline size_t CcbSize(int num_slots) {
   return Aligned(sizeof(ChannelControlBlock) +
                  num_slots * sizeof(MessageSlot)) +
-         Aligned(SizeofAtomicBitSet(num_slots)) + AvailableSlotsSize(num_slots);
+         Aligned(SizeofAtomicBitSet(num_slots)) * 2 +
+         AvailableSlotsSize(num_slots);
 }
 
 struct SlotBuffer {
@@ -338,9 +381,9 @@ public:
 
   virtual std::string ResolvedName() const = 0;
 
-#if defined(__APPLE__)
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   static absl::StatusOr<std::string>
-  MacOsSharedMemoryName(const std::string &shadow_file);
+  PosixSharedMemoryName(const std::string &shadow_file);
 #endif
   // For debug, prints the contents of the three linked lists in
   // shared memory,
@@ -361,6 +404,8 @@ public:
     }
   }
 
+  int GetSubVchanId(int32_t i) const { return ccb_->sub_vchan_ids[i]; }
+
   void DumpSlots(std::ostream &os) const;
   virtual void Dump(std::ostream &os) const;
 
@@ -377,7 +422,7 @@ public:
 
   // Get the number of slots in the channel (can't be changed)
   int NumSlots() const { return num_slots_; }
-  void SetNumSlots(int n) { num_slots_ = n; }
+  virtual void SetNumSlots(int n) { num_slots_ = n; }
   std::string SlotType() const { return type_; }
 
   void CleanupSlots(int owner, bool reliable, bool is_pub, int vchan_id);
@@ -421,6 +466,9 @@ public:
   char *EndOfRetiredSlots() const {
     return EndOfSlots() + Aligned(SizeofAtomicBitSet(num_slots_));
   }
+  char *EndOfFreeSlots() const {
+    return EndOfRetiredSlots() + Aligned(SizeofAtomicBitSet(num_slots_));
+  }
 
   InPlaceAtomicBitset *RetiredSlotsAddr() {
     return reinterpret_cast<InPlaceAtomicBitset *>(EndOfSlots());
@@ -434,18 +482,32 @@ public:
     return *reinterpret_cast<const InPlaceAtomicBitset *>(EndOfSlots());
   }
 
+  InPlaceAtomicBitset *FreeSlotsAddr() {
+    return reinterpret_cast<InPlaceAtomicBitset *>(EndOfRetiredSlots());
+  }
+
+  InPlaceAtomicBitset &FreeSlots() {
+    return *reinterpret_cast<InPlaceAtomicBitset *>(EndOfRetiredSlots());
+  }
+
+  const InPlaceAtomicBitset &FreeSlots() const {
+    return *reinterpret_cast<const InPlaceAtomicBitset *>(EndOfRetiredSlots());
+  }
+
   InPlaceAtomicBitset &GetAvailableSlots(int sub_id) {
     return *GetAvailableSlotsAddress(sub_id);
   }
 
   InPlaceAtomicBitset *GetAvailableSlotsAddress(int sub_id) {
     return reinterpret_cast<InPlaceAtomicBitset *>(
-        EndOfRetiredSlots() + SizeofAtomicBitSet(num_slots_) * sub_id);
+        EndOfFreeSlots() + SizeofAtomicBitSet(num_slots_) * sub_id);
   }
 
   bool IsActivated(int vchan_id) const {
     return ccb_->activation_tracker.IsActivated(vchan_id);
   }
+
+  virtual uint64_t GetVirtualMemoryUsage() const;
 
 protected:
   int32_t ToCCBOffset(void *addr) const {
@@ -487,4 +549,4 @@ protected:
 };
 
 } // namespace subspace
-#endif /* __COMMON_CHANNEL_H */
+#endif /* _xCOMMON_CHANNEL_H */

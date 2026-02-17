@@ -1,9 +1,9 @@
-// Copyright 2025 David Allison
+// Copyright 2023-2026 David Allison
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#ifndef __SERVER_CLIENT_HANDLER_H
-#define __SERVER_CLIENT_HANDLER_H
+#ifndef _xSERVERCLIENT_HANDLER_H
+#define _xSERVERCLIENT_HANDLER_H
 
 #include "absl/status/status.h"
 #include "common/channel.h"
@@ -25,9 +25,11 @@ public:
 
   // Run the client handler receiver in a coroutine.  Terminates
   // when the connection to the client is closed.
-  void Run(co::Coroutine *c);
+  void Run();
 
 private:
+  std::string GetTotalVM();
+
   absl::Status HandleMessage(const subspace::Request &req,
                              subspace::Response &resp,
                              std::vector<toolbelt::FileDescriptor> &fds);
@@ -55,12 +57,17 @@ private:
   void HandleRemoveSubscriber(const subspace::RemoveSubscriberRequest &req,
                               subspace::RemoveSubscriberResponse *response,
                               std::vector<toolbelt::FileDescriptor> &fds);
+  void HandleGetChannelInfo(const subspace::GetChannelInfoRequest &req,
+                            subspace::GetChannelInfoResponse *response,
+                            std::vector<toolbelt::FileDescriptor> &fds);
+  void HandleGetChannelStats(const subspace::GetChannelStatsRequest &req,
+                             subspace::GetChannelStatsResponse *response,
+                             std::vector<toolbelt::FileDescriptor> &fds);
   Server *server_;
   toolbelt::UnixSocket socket_;
-  char buffer_[kMaxMessage];
   std::string client_name_;
 };
 
 } // namespace subspace
 
-#endif // __SERVER_CLIENT_HANDLER_H
+#endif // _xSERVERCLIENT_HANDLER_H

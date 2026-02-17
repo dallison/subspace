@@ -2,18 +2,21 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#ifndef __CLIENT_CLIENT_H
-#define __CLIENT_CLIENT_H
+#ifndef _xCLIENT_CLIENT_H
+#define _xCLIENT_CLIENT_H
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/types/span.h"
+
 #include "client/message.h"
 #include "client/options.h"
 #include "client/publisher.h"
 #include "client/subscriber.h"
-#include "common/channel.h"
 #include "co/coroutine.h"
+#include "common/channel.h"
+
 #include "toolbelt/fd.h"
 #include "toolbelt/logging.h"
 #include "toolbelt/sockets.h"
@@ -21,9 +24,11 @@
 #include <chrono>
 #include <cstddef>
 #include <functional>
+#include <mutex>
+#include <pthread.h>
 #include <string>
 #include <sys/poll.h>
-
+#include <thread>
 namespace subspace {
 
 enum class ReadMode {
@@ -31,14 +36,35 @@ enum class ReadMode {
   kReadNewest,
 };
 
+struct ChannelInfo {
+  std::string channel_name;
+  int num_publishers;
+  int num_subscribers;
+  int num_bridge_pubs;
+  int num_bridge_subs;
+  std::string type;
+  uint64_t slot_size;
+  int num_slots;
+  bool reliable;
+};
+
+struct ChannelStats {
+  std::string channel_name;
+  uint64_t total_bytes;
+  uint64_t total_messages;
+  uint64_t max_message_size;
+};
+
 template <typename T> class weak_ptr;
 
 template <typename T> class shared_ptr {
 public:
   shared_ptr() = default;
-  shared_ptr(const Message &m) : msg_(m.active_message) {}
-  shared_ptr(std::shared_ptr<ActiveMessage> m) : msg_(std::move(m)) {}
-  shared_ptr(const shared_ptr &p) : msg_(p.msg_) {}
+  shared_ptr(const Message &m) : msg_(m.active_message) { msg_->IncRef(); }
+  shared_ptr(std::shared_ptr<ActiveMessage> m) : msg_(std::move(m)) {
+    msg_->IncRef();
+  }
+  shared_ptr(const shared_ptr &p) : msg_(p.msg_) { msg_->IncRef(); }
   shared_ptr(shared_ptr &&p) : msg_(std::move(p.msg_)) {}
   shared_ptr(const weak_ptr<T> &p);
 
@@ -52,19 +78,24 @@ public:
     return *this;
   }
 
+  ~shared_ptr() {
+    if (msg_ != nullptr) {
+      msg_->DecRef();
+    }
+  }
   subspace::Message GetMessage() const { return Message(msg_); }
 
   T *get() const { return reinterpret_cast<T *>(msg_->buffer); }
   T &operator*() const { return *reinterpret_cast<T *>(msg_->buffer); }
   T *operator->() const { return get(); }
   operator bool() const { return msg_ != nullptr; }
-  long use_count() const {
-    return msg_.use_count() == 0
-               ? 0
-               : msg_.use_count() -
-                     1; // Subscriber has a reference that we shouldn't count
+  long use_count() const { return msg_ == nullptr ? 0 : msg_->refs.load(); }
+  void reset() {
+    if (msg_ != nullptr) {
+      msg_->DecRef();
+    }
+    msg_ = nullptr;
   }
-  void reset() { msg_.reset(); }
 
   bool operator==(const shared_ptr &p) const { return msg_ == p.msg_; }
   bool operator!=(const shared_ptr &p) const { return msg_ != p.msg_; }
@@ -176,7 +207,7 @@ public:
   //
   // These are public so that they can be accessed by std::make_shared.
   // You shouldn't create these yourself - create a Client instead.
-  ClientImpl(co::Coroutine *c = nullptr) : co_(c) {}
+  ClientImpl(const co::Coroutine *c = nullptr) : co_(c) {}
   ~ClientImpl() = default;
 
 private:
@@ -184,6 +215,39 @@ private:
   friend class Server;
   friend class Publisher;
   friend class Subscriber;
+
+  enum class LockMode {
+    kAutoLock,     // Lock on construction, unlock on destruction
+    kDeferredLock, // Locks if not already locked by the current thread, unlocks
+                   // if not committed.
+    kMaybeLocked,  // Maybe locked by the current thread, lock if not, unlock on
+                   // destruction
+  };
+
+  // RAII class to conditionally lock a mutex.  This is like std::lock_guard but
+  // allows a locking mode to be specified.  The default is be behave like
+  // std::lock_guard.  To support holding the lock across GetMessageBuffer and
+  // PublishMessage calls it also support deferring the lock and unlock.  This
+  // mode also allows for calls to GetMessageBuffer multiple times without
+  // publishing.
+  class ClientLockGuard {
+  public:
+    ClientLockGuard(ClientImpl *client,
+                    LockMode lock_mode = LockMode::kAutoLock);
+    ~ClientLockGuard();
+    void Lock();
+    void Unlock();
+
+    // If we are using a deferred lock we need to commit it before the object is
+    // desctructed if we want to hold onto the lock.
+    void CommitLock();
+
+  private:
+    ClientImpl *client_;
+    LockMode lock_mode_;
+    bool locked_ = false;
+    bool committed_ = false;
+  };
 
   const std::string &GetName() const { return name_; }
 
@@ -214,9 +278,24 @@ private:
   // information unless you know how this works in detail.
   void SetDebug(bool v) { debug_ = v; }
 
+  void SetThreadSafe(bool v) { thread_safe_ = v; }
+
   // Get a snapshot of the current number of publishers and subscribers
   // for the given channel (publisher or subscriber)
   const ChannelCounters &GetChannelCounters(details::ClientChannel *channel);
+
+  absl::StatusOr<const ChannelCounters>
+  GetChannelCounters(const std::string &channel_name) const;
+
+  absl::StatusOr<const ChannelInfo>
+  GetChannelInfo(const std::string &channelName);
+  absl::StatusOr<const std::vector<ChannelInfo>> GetChannelInfo();
+
+  absl::StatusOr<const ChannelStats>
+  GetChannelStats(const std::string &channelName);
+  absl::StatusOr<const std::vector<ChannelStats>> GetChannelStats();
+
+  absl::StatusOr<bool> ChannelExists(const std::string &channelName);
 
   // Remove publisher and subscriber.
   absl::Status RemovePublisher(details::PublisherImpl *publisher);
@@ -233,7 +312,12 @@ private:
   // If max_size is greater than the current buffer size, the buffers
   // will be resized.
   absl::StatusOr<void *> GetMessageBuffer(details::PublisherImpl *publisher,
-                                          int32_t max_size);
+                                          int32_t max_size, bool lock);
+  // Get the messsage buffer as a span.  Returns an empty span if there is no
+  // buffer available
+  absl::StatusOr<absl::Span<std::byte>>
+  GetMessageBufferSpan(details::PublisherImpl *publisher, int32_t max_size,
+                       bool lock);
 
   // Publish the message in the publisher's buffer.  The message_size
   // argument specifies the actual size of the message to send.  Returns the
@@ -242,17 +326,21 @@ private:
   absl::StatusOr<const Message>
   PublishMessage(details::PublisherImpl *publisher, int64_t message_size);
 
+  // In thread-safe mode, if you don't want to publish the message, you must
+  // cancel the publish.  This will release the lock.
+  void CancelPublish(details::PublisherImpl *publisher);
+
   // Wait until a reliable publisher can try again to send a message.  If the
   // client is coroutine-aware, the coroutine will wait.  If it's not,
   // the function will block on a poll until the publisher is triggered.
   absl::Status WaitForReliablePublisher(details::PublisherImpl *publisher,
-                                        co::Coroutine *c = nullptr) {
+                                        const co::Coroutine *c = nullptr) {
     return WaitForReliablePublisher(publisher, std::chrono::nanoseconds(0), c);
   }
 
   absl::Status WaitForReliablePublisher(details::PublisherImpl *publisher,
                                         std::chrono::nanoseconds timeout,
-                                        co::Coroutine *c = nullptr);
+                                        const co::Coroutine *c = nullptr);
 
   // Wait until a reliable publisher can try again to send a message.  If the
   // client is coroutine-aware, the coroutine will wait.  If it's not,
@@ -260,27 +348,27 @@ private:
   absl::StatusOr<int>
   WaitForReliablePublisher(details::PublisherImpl *publisher,
                            const toolbelt::FileDescriptor &fd,
-                           co::Coroutine *c = nullptr) {
+                           const co::Coroutine *c = nullptr) {
     return WaitForReliablePublisher(publisher, fd, std::chrono::nanoseconds(0),
                                     c);
   }
 
   absl::StatusOr<int> WaitForReliablePublisher(
       details::PublisherImpl *publisher, const toolbelt::FileDescriptor &fd,
-      std::chrono::nanoseconds timeout, co::Coroutine *c = nullptr);
+      std::chrono::nanoseconds timeout, const co::Coroutine *c = nullptr);
 
   // Wait until there's a message available to be read by the
   // subscriber.  If the client is coroutine-aware, the coroutine
   // will wait.  If it's not, the function will block on a poll
   // until the subscriber is triggered.
   absl::Status WaitForSubscriber(details::SubscriberImpl *subscriber,
-                                 co::Coroutine *c = nullptr) {
+                                 const co::Coroutine *c = nullptr) {
     return WaitForSubscriber(subscriber, std::chrono::nanoseconds(0), c);
   }
 
   absl::Status WaitForSubscriber(details::SubscriberImpl *subscriber,
                                  std::chrono::nanoseconds timeout,
-                                 co::Coroutine *c = nullptr);
+                                 const co::Coroutine *c = nullptr);
 
   // Wait until there' s a message available to be read by the
   // subscriber.  If the client is coroutine-aware, the coroutine
@@ -288,14 +376,14 @@ private:
   // until the subscriber is triggered.
   absl::StatusOr<int> WaitForSubscriber(details::SubscriberImpl *subscriber,
                                         const toolbelt::FileDescriptor &fd,
-                                        co::Coroutine *c = nullptr) {
+                                        const co::Coroutine *c = nullptr) {
     return WaitForSubscriber(subscriber, fd, std::chrono::nanoseconds(0), c);
   }
 
   absl::StatusOr<int> WaitForSubscriber(details::SubscriberImpl *subscriber,
                                         const toolbelt::FileDescriptor &fd,
                                         std::chrono::nanoseconds timeout,
-                                        co::Coroutine *c = nullptr);
+                                        const co::Coroutine *c = nullptr);
 
   // Read a message from a subscriber.  If there are no available messages
   // the 'length' field of the returned Message will be zero.  The 'buffer'
@@ -347,6 +435,13 @@ private:
       std::function<void(details::SubscriberImpl *, Message)> callback);
   absl::Status UnregisterMessageCallback(details::SubscriberImpl *subscriber);
 
+  void InvokeMessageCallback(details::SubscriberImpl *subscriber, Message msg) {
+    auto it = message_callbacks_.find(subscriber);
+    if (it != message_callbacks_.end() && it->second) {
+      it->second(subscriber, std::move(msg));
+    }
+  }
+
   // Register a callback that will be called when the publisher wants a
   // channel to be resized.  Note that there is more than one
   // publisher, only the one that causes the resize will cause the
@@ -374,7 +469,7 @@ private:
                  ReadMode mode = ReadMode::kReadNext);
 
   // Get the most recently received ordinal for the subscriber.
-  int64_t GetCurrentOrdinal(details::SubscriberImpl *sub) const;
+  int64_t GetCurrentOrdinal(details::SubscriberImpl *sub);
 
   absl::Status CheckConnected() const;
   absl::Status
@@ -397,7 +492,8 @@ private:
   FindMessageInternal(details::SubscriberImpl *subscriber, uint64_t timestamp);
   absl::StatusOr<const Message>
   PublishMessageInternal(details::PublisherImpl *publisher,
-                         int64_t message_size, bool omit_prefix);
+                         int64_t message_size, bool omit_prefix,
+                         bool use_prefix_slot_id);
   absl::Status ResizeChannel(details::PublisherImpl *publisher,
                              int32_t new_slot_size);
   absl::StatusOr<bool>
@@ -414,14 +510,13 @@ private:
 
   toolbelt::UnixSocket socket_;
   toolbelt::FileDescriptor scb_fd_; // System control block memory fd.
-  char buffer_[kMaxMessage];        // Buffer for comms with server over UDS.
 
   // The client owns all the publishers and subscribers.
   absl::flat_hash_set<std::shared_ptr<details::ClientChannel>> channels_;
 
   // If this is non-nullptr the client is coroutine aware and will cooperate
   // with all other coroutines to share the CPU.
-  co::Coroutine *co_; // Does not own the coroutine.
+  const co::Coroutine *co_; // Does not own the coroutine.
 
   // Call this function when the given subscriber detects a dropped message.
   // This will only really happen when you have an unreliable subscriber
@@ -445,6 +540,19 @@ private:
       resize_callbacks_;
   bool debug_ = false;
   toolbelt::Logger logger_;
+  mutable std::mutex mutex_;
+  std::atomic<uint64_t> owner_thread_id_ = {};
+
+  // For backward compatibility we default to non-thread-safe because it has
+  // implications for the GetMessageBufferSpan function.  You have to publish
+  // the message or call CancelPublish in order to release the lock.
+  bool thread_safe_ = false;
+
+  // User and group id for the server.  This is used to change the ownership of
+  // the shared memory files so that the server can delete them.  Important when
+  // the client is running as root and the server isn't
+  int server_user_id_ = -1;
+  int server_group_id_ = -1;
 };
 
 // This function returns an subspace::shared_ptr that refers to the message
@@ -484,6 +592,7 @@ class Publisher {
 public:
   ~Publisher() {
     if (client_ != nullptr && impl_ != nullptr) {
+      UnregisterResizeCallback().IgnoreError();
       (void)client_->RemovePublisher(impl_.get());
     }
   }
@@ -491,14 +600,25 @@ public:
   Publisher(const Publisher &other) = delete;
   Publisher &operator=(const Publisher &other) = delete;
 
-  Publisher(Publisher &&other) : client_(other.client_), impl_(other.impl_) {
+  Publisher(Publisher &&other)
+      : client_(std::move(other.client_)), impl_(std::move(other.impl_)),
+        resize_callback_(std::move(other.resize_callback_)) {
+    if (impl_ != nullptr && client_ != nullptr && resize_callback_ != nullptr) {
+      client_->UnregisterResizeCallback(impl_.get()).IgnoreError();
+      RegisterResizeCallback(resize_callback_).IgnoreError();
+    }
     other.client_ = nullptr;
     other.impl_ = nullptr;
   }
 
   Publisher &operator=(Publisher &&other) {
-    client_ = other.client_;
-    impl_ = other.impl_;
+    client_ = std::move(other.client_);
+    impl_ = std::move(other.impl_);
+    resize_callback_ = std::move(other.resize_callback_);
+    if (impl_ != nullptr && client_ != nullptr && resize_callback_ != nullptr) {
+      client_->UnregisterResizeCallback(impl_.get()).IgnoreError();
+      RegisterResizeCallback(resize_callback_).IgnoreError();
+    }
     other.client_ = nullptr;
     other.impl_ = nullptr;
     return *this;
@@ -518,27 +638,62 @@ public:
   // detect when another attempt can be made to get a buffer.
   // If max_size is greater than the current buffer size, the buffers
   // will be resized.
-  absl::StatusOr<void *> GetMessageBuffer(int32_t max_size = -1) {
-    return client_->GetMessageBuffer(impl_.get(), max_size);
+  //
+  // In thread-safe mode, this will hold a lock on the client until you publish
+  // the message.  If you don't want to publish the message, you must cancel the
+  // publish using CancelPublish.  This will release the lock.
+  absl::StatusOr<void *> GetMessageBuffer(int32_t max_size = -1,
+                                          bool lock = true) {
+    return client_->GetMessageBuffer(impl_.get(), max_size, lock);
+  }
+
+  // Get the messsage buffer as a span.  Returns an empty span if there is no
+  // buffer available.  See GetMessageBuffer for details of
+  absl::StatusOr<absl::Span<std::byte>>
+  GetMessageBufferSpan(int32_t max_size = -1, bool lock = true) {
+    return client_->GetMessageBufferSpan(impl_.get(), max_size, lock);
   }
 
   // Publish the message in the publisher's buffer.  The message_size
   // argument specifies the actual size of the message to send.  Returns the
   // information about the message sent with buffer set to nullptr since
   // the publisher cannot access the message once it's been published.
+  //
+  // In thread-safe mode, this will release the lock on the client.  If you
+  // don't want to publish the message, you must cancel the publish using
+  // CancelPublish.
   absl::StatusOr<const Message> PublishMessage(int64_t message_size) {
     return client_->PublishMessage(impl_.get(), message_size);
   }
 
+  // Publish a message that already includes a prefix.  You have the option to
+  // use the slot id passed in the prefix for message retirement or use the
+  // If the message arrived over a bridge and you want to pass the retirement
+  // back over the bridge, use the slot id from the prefix.  If the retirement
+  // notification is locally handled, use the slot id from the message.
+  //
+  // In thread-safe mode, this will release the lock on the client.  If you
+  // don't want to publish the message, you must cancel the publish using
+  // CancelPublish.
+  absl::StatusOr<const Message>
+  PublishMessageWithPrefix(int64_t message_size,
+                           bool use_slot_id_from_prefix = true) {
+    return PublishMessageInternal(message_size, true, use_slot_id_from_prefix);
+  }
+
+  // If you don't want to publish the message, you must cancel the publish. This
+  // will release the lock.
+  void CancelPublish() { client_->CancelPublish(impl_.get()); }
+
   // Wait until a reliable publisher can try again to send a message.  If the
   // client is coroutine-aware, the coroutine will wait.  If it's not,
   // the function will block on a poll until the publisher is triggered.
-  absl::Status Wait(co::Coroutine *c = nullptr) {
+  absl::Status Wait(const co::Coroutine *c = nullptr) {
     return client_->WaitForReliablePublisher(impl_.get(), c);
   }
 
   absl::Status Wait(std::chrono::nanoseconds timeout,
-                    co::Coroutine *c = nullptr) {
+                    const co::Coroutine *c = nullptr) {
     return client_->WaitForReliablePublisher(impl_.get(), timeout, c);
   }
 
@@ -549,17 +704,19 @@ public:
   // the wait.  Returns the integer fd value of the file descriptor that
   // triggered the wait.
   absl::StatusOr<int> Wait(const toolbelt::FileDescriptor &fd,
-                           co::Coroutine *c = nullptr) {
+                           const co::Coroutine *c = nullptr) {
     return client_->WaitForReliablePublisher(impl_.get(), fd, c);
   }
 
   absl::StatusOr<int> Wait(const toolbelt::FileDescriptor &fd,
                            std::chrono::nanoseconds timeout,
-                           co::Coroutine *c = nullptr) {
+                           const co::Coroutine *c = nullptr) {
     return client_->WaitForReliablePublisher(impl_.get(), fd, timeout, c);
   }
 
-  struct pollfd GetPollFd() const { return client_->GetPollFd(impl_.get()); }
+  struct pollfd GetPollFd() const {
+    return client_->GetPollFd(impl_.get());
+  }
 
   // This is a file descriptor that you can poll on to wait for
   // message slots to be retired.  It is triggered
@@ -592,26 +749,72 @@ public:
     return client_->GetBuffers(impl_.get());
   }
 
+  void GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
+                        uint32_t &max_message_size, uint32_t &total_drops) {
+    impl_->GetStatsCounters(total_bytes, total_messages, max_message_size,
+                            total_drops);
+  }
+
+  uint64_t GetVirtualMemoryUsage() const {
+    return impl_->GetVirtualMemoryUsage();
+  }
+
+  const ChannelCounters &GetCounters() const { return impl_->GetCounters(); }
+
+  std::string BufferSharedMemoryName(int buffer_index) const {
+    return impl_->BufferSharedMemoryName(buffer_index);
+  }
+
+  void SetChecksumCallback(ChecksumCallback callback) {
+    impl_->SetChecksumCallback(std::move(callback));
+  }
+
+  void ResetChecksumCallback() { impl_->ResetChecksumCallback(); }
+
   // Register a function to be called when the publisher resizes
   // the channel.
   absl::Status RegisterResizeCallback(
       std::function<absl::Status(Publisher *, int, int)> callback) {
-    return client_->RegisterResizeCallback(
+    auto status = client_->RegisterResizeCallback(
         impl_.get(),
-        [this, callback = std::move(callback)](
-            details::PublisherImpl *p, int32_t old_size, int32_t new_size)
-            -> absl::Status { return callback(this, old_size, new_size); });
+        [this](details::PublisherImpl *, int32_t old_size,
+               int32_t new_size) -> absl::Status {
+          return resize_callback_(this, old_size, new_size);
+        });
+    if (!status.ok()) {
+      return status;
+    }
+    resize_callback_ = std::move(callback);
+    return absl::OkStatus();
   }
 
   absl::Status UnregisterResizeCallback() {
-    return client_->UnregisterResizeCallback(impl_.get());
+    auto status = client_->UnregisterResizeCallback(impl_.get());
+    if (!status.ok()) {
+      return status;
+    }
+    resize_callback_ = nullptr;
+    return absl::OkStatus();
   }
 
+  void SetOnSendCallback(
+      std::function<absl::StatusOr<int64_t>(void *buffer, int64_t size)>
+          callback) {
+    impl_->SetOnSendCallback(std::move(callback));
+  }
+
+  void ClearOnSendCallback() { impl_->SetOnSendCallback(nullptr); }
+
   int VirtualChannelId() const { return impl_->VirtualChannelId(); }
+  std::string Mux() const { return impl_->Mux(); }
 
   int NumSubscribers(int vchan_id = -1) const {
     return impl_->NumSubscribers(vchan_id);
   }
+
+  int CurrentSlotId() const { return impl_->CurrentSlotId(); }
+
+  MessageSlot *CurrentSlot() const { return impl_->CurrentSlot(); }
 
 private:
   friend class Server;
@@ -621,20 +824,24 @@ private:
             std::shared_ptr<details::PublisherImpl> impl)
       : client_(client), impl_(impl) {}
 
-  absl::StatusOr<const Message> PublishMessageInternal(int64_t message_size,
-                                                       bool omit_prefix) {
+  absl::StatusOr<const Message>
+  PublishMessageInternal(int64_t message_size, bool omit_prefix,
+                         bool use_prefix_slot_id) {
     return client_->PublishMessageInternal(impl_.get(), message_size,
-                                           omit_prefix);
+                                           omit_prefix, use_prefix_slot_id);
   }
 
   std::shared_ptr<ClientImpl> client_;
   std::shared_ptr<details::PublisherImpl> impl_;
+  std::function<absl::Status(Publisher *, int, int)> resize_callback_ = nullptr;
 };
 
 class Subscriber {
 public:
   ~Subscriber() {
     if (client_ != nullptr && impl_ != nullptr) {
+      UnregisterDroppedMessageCallback().IgnoreError();
+      UnregisterMessageCallback().IgnoreError();
       (void)client_->RemoveSubscriber(impl_.get());
     }
   }
@@ -642,14 +849,39 @@ public:
 
   Subscriber &operator=(const Subscriber &other) = delete;
 
-  Subscriber(Subscriber &&other) : client_(other.client_), impl_(other.impl_) {
+  Subscriber(Subscriber &&other)
+      : client_(std::move(other.client_)), impl_(std::move(other.impl_)),
+        dropped_message_callback_(std::move(other.dropped_message_callback_)),
+        message_callback_(std::move(other.message_callback_)) {
+    if (impl_ != nullptr && client_ != nullptr &&
+        dropped_message_callback_ != nullptr) {
+      client_->UnregisterDroppedMessageCallback(impl_.get()).IgnoreError();
+      RegisterDroppedMessageCallback(dropped_message_callback_).IgnoreError();
+    }
+    if (impl_ != nullptr && client_ != nullptr &&
+        message_callback_ != nullptr) {
+      client_->UnregisterMessageCallback(impl_.get()).IgnoreError();
+      RegisterMessageCallback(message_callback_).IgnoreError();
+    }
     other.client_ = nullptr;
     other.impl_ = nullptr;
   }
 
   Subscriber &operator=(Subscriber &&other) {
-    client_ = other.client_;
-    impl_ = other.impl_;
+    client_ = std::move(other.client_);
+    impl_ = std::move(other.impl_);
+    dropped_message_callback_ = std::move(other.dropped_message_callback_);
+    message_callback_ = std::move(other.message_callback_);
+    if (impl_ != nullptr && client_ != nullptr &&
+        dropped_message_callback_ != nullptr) {
+      client_->UnregisterDroppedMessageCallback(impl_.get()).IgnoreError();
+      RegisterDroppedMessageCallback(dropped_message_callback_).IgnoreError();
+    }
+    if (impl_ != nullptr && client_ != nullptr &&
+        message_callback_ != nullptr) {
+      client_->UnregisterMessageCallback(impl_.get()).IgnoreError();
+      RegisterMessageCallback(message_callback_).IgnoreError();
+    }
     other.client_ = nullptr;
     other.impl_ = nullptr;
     return *this;
@@ -663,12 +895,12 @@ public:
   // subscriber.  If the client is coroutine-aware, the coroutine
   // will wait.  If it's not, the function will block on a poll
   // until the subscriber is triggered.
-  absl::Status Wait(co::Coroutine *c = nullptr) {
+  absl::Status Wait(const co::Coroutine *c = nullptr) {
     return client_->WaitForSubscriber(impl_.get(), c);
   }
 
   absl::Status Wait(std::chrono::nanoseconds timeout,
-                    co::Coroutine *c = nullptr) {
+                    const co::Coroutine *c = nullptr) {
     return client_->WaitForSubscriber(impl_.get(), timeout, c);
   }
 
@@ -680,13 +912,13 @@ public:
   // the wait.  Returns the integer fd value of the file descriptor that
   // triggered the wait.
   absl::StatusOr<int> Wait(const toolbelt::FileDescriptor &fd,
-                           co::Coroutine *c = nullptr) {
+                           const co::Coroutine *c = nullptr) {
     return client_->WaitForSubscriber(impl_.get(), fd, c);
   }
 
   absl::StatusOr<int> Wait(const toolbelt::FileDescriptor &fd,
                            std::chrono::nanoseconds timeout,
-                           co::Coroutine *c = nullptr) {
+                           const co::Coroutine *c = nullptr) {
     return client_->WaitForSubscriber(impl_.get(), fd, timeout, c);
   }
 
@@ -706,6 +938,13 @@ public:
   absl::StatusOr<shared_ptr<T>>
   ReadMessage(ReadMode mode = ReadMode::kReadNext);
 
+  bool AddActiveMessage(int32_t slot_id) {
+    return impl_->AddActiveMessage(impl_->GetSlot(slot_id));
+  }
+  void RemoveActiveMessage(int32_t slot_id) {
+    impl_->RemoveActiveMessage(impl_->GetSlot(slot_id));
+  }
+
   // Find a message given a timestamp.
   absl::StatusOr<Message> FindMessage(uint64_t timestamp) {
     return client_->FindMessage(impl_.get(), timestamp);
@@ -716,7 +955,9 @@ public:
   template <typename T>
   absl::StatusOr<shared_ptr<T>> FindMessage(uint64_t timestamp);
 
-  struct pollfd GetPollFd() const { return client_->GetPollFd(impl_.get()); }
+  struct pollfd GetPollFd() const {
+    return client_->GetPollFd(impl_.get());
+  }
 
   toolbelt::FileDescriptor GetFileDescriptor() const {
     return client_->GetFileDescriptor(impl_.get());
@@ -730,37 +971,78 @@ public:
     return client_->GetChannelCounters(impl_.get());
   }
 
+  uint64_t GetVirtualMemoryUsage() const {
+    return impl_->GetVirtualMemoryUsage();
+  }
+
   std::string Name() const { return impl_->Name(); }
   std::string Type() const { return impl_->Type(); }
   std::string_view TypeView() const { return impl_->TypeView(); }
+
+  void SetChecksumCallback(ChecksumCallback callback) {
+    impl_->SetChecksumCallback(std::move(callback));
+  }
+
+  void ResetChecksumCallback() { impl_->ResetChecksumCallback(); }
 
   // Register a function to be called when a subscriber drops a message.  The
   // function is called with the number of messages that have been missed
   // as its second argument.
   absl::Status RegisterDroppedMessageCallback(
       std::function<void(Subscriber *, int64_t)> callback) {
-    return client_->RegisterDroppedMessageCallback(
-        impl_.get(),
-        [this, callback = std::move(callback)](
-            details::SubscriberImpl *s, int64_t c) { callback(this, c); });
+    auto status = client_->RegisterDroppedMessageCallback(
+        impl_.get(), [this](details::SubscriberImpl *, int64_t c) {
+          dropped_message_callback_(this, c);
+        });
+    if (!status.ok()) {
+      return status;
+    }
+    dropped_message_callback_ = std::move(callback);
+    return absl::OkStatus();
   }
 
   absl::Status UnregisterDroppedMessageCallback() {
-    return client_->UnregisterDroppedMessageCallback(impl_.get());
+    auto status = client_->UnregisterDroppedMessageCallback(impl_.get());
+    if (!status.ok()) {
+      return status;
+    }
+    dropped_message_callback_ = nullptr;
+    return absl::OkStatus();
   }
 
   absl::Status
   RegisterMessageCallback(std::function<void(Subscriber *, Message)> callback) {
-    return client_->RegisterMessageCallback(
-        impl_.get(), [this, callback = std::move(callback)](
-                         details::SubscriberImpl *s, Message m) {
-          callback(this, std::move(m));
+    auto status = client_->RegisterMessageCallback(
+        impl_.get(), [this](details::SubscriberImpl *, Message m) {
+          message_callback_(this, std::move(m));
         });
+    if (!status.ok()) {
+      return status;
+    }
+    message_callback_ = std::move(callback);
+    return absl::OkStatus();
   }
 
   absl::Status UnregisterMessageCallback() {
-    return client_->UnregisterMessageCallback(impl_.get());
+    auto status = client_->UnregisterMessageCallback(impl_.get());
+    if (!status.ok()) {
+      return status;
+    }
+    message_callback_ = nullptr;
+    return absl::OkStatus();
   }
+
+  void InvokeMessageCallback(Message msg) {
+    client_->InvokeMessageCallback(impl_.get(), std::move(msg));
+  }
+
+  void SetOnReceiveCallback(
+      std::function<absl::StatusOr<int64_t>(void *buffer, int64_t size)>
+          callback) {
+    impl_->SetOnReceiveCallback(std::move(callback));
+  }
+
+  void ClearOnReceiveCallback() { impl_->SetOnReceiveCallback(nullptr); }
 
   absl::Status ProcessAllMessages(ReadMode mode = ReadMode::kReadNext) {
     return client_->ProcessAllMessages(impl_.get(), mode);
@@ -772,6 +1054,9 @@ public:
   }
 
   void Trigger() { impl_->Trigger(); }
+  void Untrigger() { impl_->Untrigger(); }
+
+  bool IsPlaceholder() const { return impl_->IsPlaceholder(); }
 
   const ChannelCounters &GetCounters() const { return impl_->GetCounters(); }
 
@@ -792,6 +1077,10 @@ public:
 
   int VirtualChannelId() const { return impl_->VirtualChannelId(); }
 
+  int ConfiguredVchanId() const { return impl_->ConfiguredVchanId(); }
+
+  std::string Mux() const { return impl_->Mux(); }
+
   int NumSubscribers(int vchan_id = -1) const {
     return impl_->NumSubscribers(vchan_id);
   }
@@ -799,6 +1088,17 @@ public:
   // If you don't want to hold on to the current active message in the
   // subscriber, you can call this.
   void ClearActiveMessage() { impl_->ClearActiveMessage(); }
+
+  void TriggerReliablePublishers() { impl_->TriggerReliablePublishers(); }
+
+  bool AtomicIncRefCount(int slot_id, int inc) {
+    MessageSlot *slot = impl_->GetSlot(slot_id);
+    if (slot != nullptr) {
+      return impl_->AtomicIncRefCount(slot, IsReliable(), inc, slot->ordinal,
+                                      slot->vchan_id, false);
+    }
+    return false;
+  }
 
 private:
   friend class Server;
@@ -816,6 +1116,9 @@ private:
 
   std::shared_ptr<ClientImpl> client_;
   std::shared_ptr<details::SubscriberImpl> impl_;
+  std::function<void(Subscriber *, int64_t)> dropped_message_callback_ =
+      nullptr;
+  std::function<void(Subscriber *, Message)> message_callback_ = nullptr;
 };
 
 template <typename T>
@@ -844,7 +1147,8 @@ class Client {
 public:
   static absl::StatusOr<std::shared_ptr<Client>>
   Create(const std::string &server_socket = "/tmp/subspace",
-         const std::string &client_name = "", co::Coroutine *c = nullptr) {
+         const std::string &client_name = "",
+         const co::Coroutine *c = nullptr) {
     auto client = std::make_shared<Client>(c);
     auto status = client->Init(server_socket, client_name);
     if (!status.ok()) {
@@ -853,7 +1157,8 @@ public:
     return client;
   }
 
-  Client(co::Coroutine *c = nullptr) : impl_(std::make_shared<ClientImpl>(c)) {}
+  Client(const co::Coroutine *c = nullptr)
+      : impl_(std::make_shared<ClientImpl>(c)) {}
   ~Client() = default;
 
   const std::string &GetName() const { return impl_->GetName(); }
@@ -893,10 +1198,37 @@ public:
   // information unless you know how this works in detail.
   void SetDebug(bool v) { impl_->SetDebug(v); }
 
+  void SetThreadSafe(bool v) { impl_->SetThreadSafe(v); }
+
+  absl::StatusOr<const ChannelCounters>
+  GetChannelCounters(const std::string &channel_name) const {
+    return impl_->GetChannelCounters(channel_name);
+  }
+
+  absl::StatusOr<const ChannelInfo>
+  GetChannelInfo(const std::string &channelName) {
+    return impl_->GetChannelInfo(channelName);
+  }
+  absl::StatusOr<const std::vector<ChannelInfo>> GetChannelInfo() {
+    return impl_->GetChannelInfo();
+  }
+
+  absl::StatusOr<const ChannelStats>
+  GetChannelStats(const std::string &channelName) {
+    return impl_->GetChannelStats(channelName);
+  }
+  absl::StatusOr<const std::vector<ChannelStats>> GetChannelStats() {
+    return impl_->GetChannelStats();
+  }
+
+  absl::StatusOr<bool> ChannelExists(const std::string &channelName) {
+    return impl_->ChannelExists(channelName);
+  }
+
 private:
   std::shared_ptr<ClientImpl> impl_;
 };
 
 } // namespace subspace
 
-#endif // __CLIENT_CLIENT_H
+#endif // _xCLIENT_CLIENT_H

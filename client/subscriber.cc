@@ -1,4 +1,4 @@
-// Copyright 2025 David Allison
+// Copyright 2023-2026 David Allison
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -6,6 +6,15 @@
 
 namespace subspace {
 namespace details {
+
+void SubscriberImpl::InitActiveMessages() {
+  active_messages_.resize(NumSlots());
+  int slot_id = 0;
+  for (auto &m : active_messages_) {
+    m = std::make_shared<ActiveMessage>(shared_from_this(), &ccb_->slots[slot_id]);
+    slot_id++;
+  }
+}
 
 // For non-virtual channels both the slots' vchan_id and the subsriber's
 // are -1.  This is the common case.
@@ -20,6 +29,8 @@ static inline bool VirtualChannelIdMatch(MessageSlot *slot, int vchan_id) {
 }
 
 bool SubscriberImpl::AddActiveMessage(MessageSlot *slot) {
+  // std::cerr << "adding active message " << slot->id << " " << slot->ordinal
+  //           << "\n";
   int old = num_active_messages_.fetch_add(1);
   if (old >= options_.MaxActiveMessages() && !IsBridge()) {
     num_active_messages_.fetch_sub(1);
@@ -30,7 +41,8 @@ bool SubscriberImpl::AddActiveMessage(MessageSlot *slot) {
 
 void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
   // std::cerr << this << " remove active message " << slot->id << " "
-  //           << slot->ordinal << "\n";
+  //           << slot->ordinal << " refs " << std::hex << slot->refs.load() <<
+  //           std::dec << "\n";
   slot->sub_owners.Clear(subscriber_id_);
   AtomicIncRefCount(slot, IsReliable(), -1, slot->ordinal, slot->vchan_id, true,
                     [this, slot]() {
@@ -39,13 +51,20 @@ void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
                       // in from a bridge we want to notify the original sender
                       // of the message, not the bridge publisher.
                       //
-		      // The original slot id is in the message prefix and is copied
-		      // into the slot when the bridge publisher publishes the
-		      // message.
+                      // The original slot id is in the message prefix and is
+                      // copied into the slot when the bridge publisher
+                      // publishes the message.
+
+                      // Enable this for debugging slot retirement.
+                      // std::string details = absl::StrFormat(
+                      //   "%d: RemoveActiveMessage: %s retiring slot %d ordinal "
+                      //   "%d vchan_id %d\n", getpid(), Name(),
+                      //   slot->bridged_slot_id, slot->ordinal,
+                      //   slot->vchan_id);
+                      // std::cerr << details;
                       TriggerRetirement(slot->bridged_slot_id);
                     });
-
-  if (num_active_messages_-- == options_.MaxActiveMessages()) {
+  if (--num_active_messages_ < options_.MaxActiveMessages()) {
     Trigger();
     if (IsReliable()) {
       TriggerReliablePublishers();
@@ -95,7 +114,7 @@ int SubscriberImpl::DetectDrops(int vchan_id) {
   if (ordinals.empty()) {
     return 0;
   }
-  std::stable_sort(ordinals.begin(), ordinals.end());
+  std::sort(ordinals.begin(), ordinals.end());
   tracker.last_ordinal_seen = ordinals.back().ordinal;
 
   // Look for gaps in the ordinals.
@@ -119,14 +138,14 @@ void SubscriberImpl::RememberOrdinal(uint64_t ordinal, int vchan_id) {
   tracker.ordinals.Insert(OrdinalAndVchanId{ordinal, vchan_id});
 }
 
-const ActiveSlot *
-SubscriberImpl::FindUnseenOrdinal(const std::vector<ActiveSlot> &active_slots) {
+const ActiveSlot *SubscriberImpl::FindUnseenOrdinal() {
   // Traverse the active slots looking for the first ordinal that is not zero
   // and has not been seen by a subscriber.
   auto &tracker = GetOrdinalTracker(vchan_id_);
-  for (auto &s : active_slots) {
+  for (auto &s : active_slots_) {
     if (s.ordinal != 0 &&
         !tracker.ordinals.Contains(OrdinalAndVchanId{s.ordinal, s.vchan_id})) {
+      // std::cerr << absl::StrFormat("Found unseen ordinal %d in slot %d\n", s.ordinal, s.slot->id);
       return &s;
     }
   }
@@ -148,17 +167,20 @@ void SubscriberImpl::ClaimSlot(MessageSlot *slot, int vchan_id,
   slot->flags |= kMessageSeen;
 }
 
-void SubscriberImpl::CollectVisibleSlots(InPlaceAtomicBitset &bits,
-                                         std::vector<ActiveSlot> &active_slots,
-                                         const DynamicBitSet &embargoed_slots) {
+void SubscriberImpl::UnreadSlot(MessageSlot *slot) {
+  slot->flags &= ~kMessageSeen;
+  DecrementSlotRef(slot, false);
+}
+
+void SubscriberImpl::CollectVisibleSlots(InPlaceAtomicBitset &bits) {
   uint64_t num_messages = 0;
   do {
     num_messages = ccb_->total_messages;
-    active_slots.clear();
+    active_slots_.clear();
 
     // Traverse the bits and add an active slot for each bit set.
-    bits.Traverse([this, &active_slots, &embargoed_slots](int i) {
-      if (embargoed_slots.IsSet(i)) {
+    bits.Traverse([this](int i) {
+      if (embargoed_slots_.IsSet(i)) {
         return;
       }
       MessageSlot *s = &ccb_->slots[i];
@@ -169,45 +191,51 @@ void SubscriberImpl::CollectVisibleSlots(InPlaceAtomicBitset &bits,
         return;
       }
       ActiveSlot active_slot = {s, s->ordinal, s->timestamp, s->vchan_id};
-      active_slots.push_back(active_slot);
+      active_slots_.push_back(active_slot);
     });
   } while (num_messages != ccb_->total_messages);
 }
 
 MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
                                       int owner) {
-  std::vector<ActiveSlot> active_slots;
-  active_slots.reserve(NumSlots());
+
   InPlaceAtomicBitset &bits = GetAvailableSlots(owner);
 
-  DynamicBitSet embargoed_slots(NumSlots());
+  embargoed_slots_.ClearAll();
 
   constexpr int kMaxRetries = 1000;
   int retries = 0;
 
   while (retries++ < kMaxRetries) {
-    const bool print_errors = retries >= kMaxRetries - 10;
+#ifndef NDEBUG
+    const bool print_errors = retries >= kMaxRetries - 1;
+#else
+    const bool print_errors = false;
+#endif
     CheckReload();
     if (slot == nullptr) {
       // Prepopulate the active slots.
       PopulateActiveSlots(bits);
     }
 
-    CollectVisibleSlots(bits, active_slots, embargoed_slots);
+    CollectVisibleSlots(bits);
 
     // Sort the active slots by timestamp.
-    std::stable_sort(active_slots.begin(), active_slots.end(),
+    std::sort(active_slots_.begin(), active_slots_.end(),
                      [](const ActiveSlot &a, const ActiveSlot &b) {
                        return a.timestamp < b.timestamp;
                      });
 
-    const ActiveSlot *new_slot = FindUnseenOrdinal(active_slots);
+    const ActiveSlot *new_slot = FindUnseenOrdinal();
     if (new_slot == nullptr) {
       return nullptr;
     }
     if (print_errors) {
-      std::cerr << "sub looking at slot " << new_slot->slot->id << " ordinal "
-                << new_slot->ordinal << "\n";
+      std::cerr << "Warning: subscriber for " << Name()
+                << " has reached the max retries for reference counter "
+                   "increment on slot "
+                << new_slot->slot->id << " ordinal " << new_slot->ordinal
+                << "; this may indicate heavy use of the channel\n";
     }
     // We have a new slot, see if we can increment the ref count.  If we can't
     // we just go back and try again.
@@ -216,12 +244,15 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
       if (!ValidateSlotBuffer(new_slot->slot) ||
           new_slot->slot->buffer_index == -1) {
         if (print_errors) {
-          std::cerr << "sub failed on slot: ";
+          std::cerr << "Subscriber for " << Name()
+                    << " detected buffer failure on slot: "
+                    << new_slot->slot->id
+                    << " buffer index: " << new_slot->slot->buffer_index;
           new_slot->slot->Dump(std::cerr);
         }
         // Failed to get a buffer for the slot.  Embargo the slot so we don't
         // see it again this loop and try again.
-        embargoed_slots.Set(new_slot->slot->id);
+        embargoed_slots_.Set(new_slot->slot->id);
         AtomicIncRefCount(new_slot->slot, reliable, -1, new_slot->ordinal,
                           new_slot->vchan_id, false);
         continue;
@@ -234,29 +265,27 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
 
 MessageSlot *SubscriberImpl::LastSlot(MessageSlot *slot, bool reliable,
                                       int owner) {
-  std::vector<ActiveSlot> active_slots;
-  active_slots.reserve(NumSlots());
+
   InPlaceAtomicBitset &bits = GetAvailableSlots(owner);
 
-  DynamicBitSet embargoed_slots(NumSlots());
-
+  embargoed_slots_.ClearAll();
   for (;;) {
     CheckReload();
     if (slot == nullptr) {
       // Prepopulate the active slots.
       PopulateActiveSlots(bits);
     }
-    CollectVisibleSlots(bits, active_slots, embargoed_slots);
+    CollectVisibleSlots(bits);
 
     // Sort the active slots by timestamp.
-    std::stable_sort(active_slots.begin(), active_slots.end(),
+    std::sort(active_slots_.begin(), active_slots_.end(),
                      [](const ActiveSlot &a, const ActiveSlot &b) {
                        return a.timestamp < b.timestamp;
                      });
 
     ActiveSlot *new_slot = nullptr;
-    if (!active_slots.empty()) {
-      new_slot = &active_slots.back();
+    if (!active_slots_.empty()) {
+      new_slot = &active_slots_.back();
 
       if (slot != nullptr && slot == new_slot->slot) {
         // Same slot, nothing changes.
@@ -274,7 +303,7 @@ MessageSlot *SubscriberImpl::LastSlot(MessageSlot *slot, bool reliable,
           new_slot->slot->buffer_index == -1) {
         // Failed to get a buffer for the slot.  Embargo the slot so we don't
         // see it again this loop and try again.
-        embargoed_slots.Set(new_slot->slot->id);
+        embargoed_slots_.Set(new_slot->slot->id);
         AtomicIncRefCount(new_slot->slot, reliable, -1, new_slot->ordinal,
                           new_slot->vchan_id, false);
         continue;
@@ -287,8 +316,7 @@ MessageSlot *SubscriberImpl::LastSlot(MessageSlot *slot, bool reliable,
 MessageSlot *SubscriberImpl::FindActiveSlotByTimestamp(
     MessageSlot *old_slot, uint64_t timestamp, bool reliable, int owner,
     std::vector<ActiveSlot> &buffer) {
-  DynamicBitSet embargoed_slots(NumSlots());
-
+  embargoed_slots_.ClearAll();
   for (;;) {
     CheckReload();
     buffer.clear();
@@ -296,7 +324,7 @@ MessageSlot *SubscriberImpl::FindActiveSlotByTimestamp(
 
     // Prepopulate the search buffer.
     for (int i = 0; i < NumSlots(); i++) {
-      if (embargoed_slots.IsSet(i)) {
+      if (embargoed_slots_.IsSet(i)) {
         continue;
       }
       MessageSlot *s = &ccb_->slots[i];
@@ -306,7 +334,7 @@ MessageSlot *SubscriberImpl::FindActiveSlotByTimestamp(
       }
     }
     // Sort by timestamp.
-    std::stable_sort(buffer.begin(), buffer.end(),
+    std::sort(buffer.begin(), buffer.end(),
                      [](const ActiveSlot &a, const ActiveSlot &b) {
                        return a.timestamp < b.timestamp;
                      });
@@ -332,7 +360,7 @@ MessageSlot *SubscriberImpl::FindActiveSlotByTimestamp(
       if (!ValidateSlotBuffer(it->slot) || it->slot->buffer_index == -1) {
         // Failed to get a buffer for the slot.  Embargo the slot so we don't
         // see it again this loop and try again.
-        embargoed_slots.Set(it->slot->id);
+        embargoed_slots_.Set(it->slot->id);
         AtomicIncRefCount(it->slot, reliable, -1, it->ordinal, it->vchan_id,
                           false);
         continue;

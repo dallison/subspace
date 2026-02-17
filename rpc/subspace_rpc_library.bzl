@@ -3,6 +3,8 @@ This module provides a rule to generate subspace_rpc message files from proto_li
 """
 
 load("@bazel_skylib//lib:paths.bzl", "paths")
+load("@rules_proto//proto:defs.bzl", "ProtoInfo")
+load("@rules_cc//cc:defs.bzl", "cc_library")
 
 MessageInfo = provider(fields = ["direct_sources", "transitive_sources", "cpp_outputs"])
 
@@ -79,7 +81,7 @@ def _subspace_rpc_aspect_impl(target, _ctx):
                 # For a file that is not in this package, we need to generate the
                 # output in our package.
                 # The path looks like:
-                # ../com_google_protobuf/_virtual_imports/any_proto/google/protobuf/any.proto
+                # ../protobuf/_virtual_imports/any_proto/google/protobuf/any.proto
                 # We want to declare the file as:ƒ
                 # google/protobuf/any.subspace_rpc.cc
                 v = file_path.split("_virtual_imports/")
@@ -247,11 +249,11 @@ def subspace_rpc_library(name, deps = [], add_namespace = ""):
             libdeps.append(cc_proto)
 
     client_name = name + "_client"
-    native.cc_library(
+    cc_library(
         name = client_name,
         srcs = [client_srcs],
         hdrs = [client_hdrs],
-        deps = libdeps + client_deps
+        deps = libdeps + client_deps,
     )
 
     server_srcs = name + "_server_srcs"
@@ -271,7 +273,7 @@ def subspace_rpc_library(name, deps = [], add_namespace = ""):
     server_deps = ["//rpc/server:rpc_server"]
 
     server_name = name + "_server"
-    native.cc_library(
+    cc_library(
         name = server_name,
         srcs = [server_srcs],
         hdrs = [server_hdrs],

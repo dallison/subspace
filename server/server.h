@@ -1,9 +1,9 @@
-// Copyright 2025 David Allison
+// Copyright 2023-2026 David Allison
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#ifndef __SERVER_SERVER_H
-#define __SERVER_SERVER_H
+#ifndef _xSERVERSERVER_H
+#define _xSERVERSERVER_H
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
@@ -12,13 +12,17 @@
 #include "client/message.h"
 #include "client_handler.h"
 #include "co/coroutine.h"
+#include "plugin.h"
 #include "proto/subspace.pb.h"
+#include "server/plugin.h"
 #include "server/server_channel.h"
 #include "toolbelt/bitset.h"
 #include "toolbelt/clock.h"
 #include "toolbelt/fd.h"
 #include "toolbelt/logging.h"
+#include "toolbelt/triggerfd.h"
 #include <memory>
+#include <mutex>
 #include <vector>
 
 namespace subspace {
@@ -27,6 +31,12 @@ namespace subspace {
 // is stopped.
 constexpr int64_t kServerReady = 1;
 constexpr int64_t kServerStopped = 2;
+constexpr int64_t kServerWaiting = 3;
+
+// In multithreaded tests we can't dlclose the plugins because the dynamic linker doesn't
+// play well with threads.
+void ClosePluginsOnShutdown();
+bool ShouldClosePluginsOnShutdown();
 
 // The Subspace server.
 // This is a single-threaded, coroutine-based server that maintains shared
@@ -41,17 +51,28 @@ public:
   // The values are written in host byte order.
   Server(co::CoroutineScheduler &scheduler, const std::string &socket_name,
          const std::string &interface, int disc_port, int peer_port, bool local,
-         int notify_fd = -1);
+         int notify_fd = -1, int initial_ordinal = 1,
+         bool wait_for_clients = false, bool publish_server_channels = true);
   // This constructor can be used when you have a single peer server to talk to.
   Server(co::CoroutineScheduler &scheduler, const std::string &socket_name,
          const std::string &interface, const toolbelt::InetAddress &peer,
-         int disc_port, int peer_port, bool local, int notify_fd = -1);
-  ~Server();
+         int disc_port, int peer_port, bool local, int notify_fd = -1,
+         int initial_ordinal = 1, bool wait_for_clients = false, bool publish_server_channels = true);
+
+  virtual ~Server();
   void SetLogLevel(const std::string &level) { logger_.SetLogLevel(level); }
+  toolbelt::LogLevel GetLogLevel() const { return logger_.GetLogLevel(); }
+
   absl::Status Run();
-  void Stop();
+  void Stop(bool force = false);
+
+  // The machine name can be used to distinguish between multiple servers
+  // running on the same computer.
+  void SetMachineName(std::string name) { machine_name_ = std::move(name); }
+  const std::string& MachineName() const { return machine_name_; }
 
   uint64_t GetVirtualMemoryUsage() const;
+  const std::string& GetSocketName() const { return socket_name_; }
 
   uint64_t GetSessionId() const { return session_id_; }
 
@@ -60,14 +81,25 @@ public:
   void CleanupFilesystem();
   void CleanupAfterSession();
 
-private:
-  friend class ClientHandler;
-  friend class ServerChannel;
-  friend class VirtualChannel;
-  static constexpr size_t kDiscoveryBufferSize = 1024;
+  absl::Status LoadPlugin(const std::string &name, const std::string &path);
+  absl::Status UnloadPlugin(const std::string &name);
 
-  absl::Status HandleIncomingConnection(toolbelt::UnixSocket &listen_socket,
-                                        co::Coroutine *c);
+  virtual co::CoroutineScheduler &GetScheduler() { return scheduler_; }
+
+  absl::flat_hash_map<std::string, std::unique_ptr<ServerChannel>> &
+  GetChannels() {
+    return channels_;
+  }
+
+  int GetShutdownTriggerFd() {
+    return shutdown_trigger_fd_.GetPollFd().Fd();
+  }
+
+  bool ShuttingDown() const { return shutting_down_; }
+
+  size_t GetNumChannels() const { return channels_.size(); }
+
+  absl::Status HandleIncomingConnection(toolbelt::UnixSocket &listen_socket);
 
   // Create a channel in both process and shared memory.  For a placeholder
   // subscriber, the channel parameters are not known, so slot_size and
@@ -83,32 +115,55 @@ private:
                             int num_slots);
   ServerChannel *FindChannel(const std::string &channel_name);
   void RemoveChannel(ServerChannel *channel);
+
+private:
+  friend class ClientHandler;
+  friend class ServerChannel;
+  friend class VirtualChannel;
+  static constexpr size_t kDiscoveryBufferSize = 1024;
+
+  struct Plugin {
+    Plugin(const std::string &n, void *h, std::unique_ptr<PluginInterface> i)
+        : name(n), handle(h), interface(std::move(i)) {}
+    ~Plugin() {
+      if (handle) {
+        if (ShouldClosePluginsOnShutdown()) {
+          dlclose(handle);
+        }
+      }
+    }
+    std::string name;
+    void *handle = nullptr;
+    std::unique_ptr<PluginInterface> interface;
+  };
+
+  void ForeachChannel(std::function<void(ServerChannel*)> func);
+
   void RemoveAllUsersFor(ClientHandler *handler);
   void CloseHandler(ClientHandler *handler);
-  void ListenerCoroutine(toolbelt::UnixSocket &listen_socket, co::Coroutine *c);
-  void ChannelDirectoryCoroutine(co::Coroutine *c);
+  void NotifyViaFd(int64_t val);
+  void CreateShutdownTrigger();
+  void ListenerCoroutine(toolbelt::UnixSocket &listen_socket);
+  void ChannelDirectoryCoroutine();
   void SendChannelDirectory();
-  void StatisticsCoroutine(co::Coroutine *c);
-  void DiscoveryReceiverCoroutine(co::Coroutine *c);
-  void PublisherCoroutine(co::Coroutine *c);
+  void StatisticsCoroutine();
+  void DiscoveryReceiverCoroutine();
+  void PublisherCoroutine();
   void SendQuery(const std::string &channel_name);
   void SendAdvertise(const std::string &channel_name, bool reliable);
   void BridgeTransmitterCoroutine(ServerChannel *channel, bool pub_reliable,
                                   bool sub_reliable,
                                   toolbelt::SocketAddress subscriber,
-                                  bool notify_retirement, co::Coroutine *c);
+                                  bool notify_retirement);
   void BridgeReceiverCoroutine(std::string channel_name, bool sub_reliable,
-                               toolbelt::InetAddress publisher,
-                               co::Coroutine *c);
+                               toolbelt::InetAddress publisher);
   void RetirementCoroutine(
       const std::string &channel_name, toolbelt::FileDescriptor &&retirement_fd,
-      std::unique_ptr<toolbelt::StreamSocket> retirement_transmitter,
-      co::Coroutine *c);
+      std::unique_ptr<toolbelt::StreamSocket> retirement_transmitter);
 
   void RetirementReceiverCoroutine(
       toolbelt::StreamSocket &retirement_listener,
-      std::vector<std::shared_ptr<ActiveMessage>> &active_retirement_msgs,
-      co::Coroutine *c);
+      std::shared_ptr<std::vector<std::shared_ptr<ActiveMessage>>> active_retirement_msgs);
 
   void SubscribeOverBridge(ServerChannel *channel, bool reliable,
                            toolbelt::InetAddress publisher);
@@ -118,15 +173,24 @@ private:
                          const toolbelt::InetAddress &sender);
   void IncomingSubscribe(const Discovery::Subscribe &subscribe,
                          const toolbelt::InetAddress &sender);
-  void GratuitousAdvertiseCoroutine(co::Coroutine *c);
+  void GratuitousAdvertiseCoroutine();
   absl::Status SendSubscribeMessage(const std::string &channel_name,
                                     bool reliable,
                                     toolbelt::InetAddress publisher,
                                     toolbelt::StreamSocket &receiver_listener,
-                                    char *buffer, size_t buffer_size,
-                                    co::Coroutine *c);
+                                    char *buffer, size_t buffer_size);
 
   static uint64_t AllocateSessionId() { return toolbelt::Now(); }
+
+  // Plugin callers.
+  void OnReady();
+  void OnNewChannel(const std::string &channel_name);
+  void OnRemoveChannel(const std::string &channel_name);
+  void OnNewPublisher(const std::string &channel_name, int publisher_id);
+  void OnRemovePublisher(const std::string &channel_name, int publisher_id);
+  void OnNewSubscriber(const std::string &channel_name, int subscriber_id);
+  void OnRemoveSubscriber(const std::string &channel_name, int subscriber_id);
+
   std::string socket_name_;
   uint64_t session_id_;
   std::vector<std::unique_ptr<ClientHandler>> client_handlers_;
@@ -141,15 +205,15 @@ private:
   bool local_;
   toolbelt::FileDescriptor notify_fd_;
 
+  // Atomic only because of testing.
+  std::atomic<bool> shutting_down_ = false;
+
   absl::flat_hash_map<std::string, std::unique_ptr<ServerChannel>> channels_;
 
   SystemControlBlock *scb_;
   toolbelt::FileDescriptor scb_fd_;
   toolbelt::BitSet<kMaxChannels> channel_ids_;
-  co::CoroutineScheduler &co_scheduler_;
-
-  // All coroutines are owned by this set.
-  absl::flat_hash_set<std::unique_ptr<co::Coroutine>> coroutines_;
+  co::CoroutineScheduler &scheduler_;
 
   toolbelt::TriggerFd channel_directory_trigger_fd_;
   toolbelt::InetAddress discovery_addr_;
@@ -161,8 +225,21 @@ private:
   // new connection.  The server will send an encoded protobuf Subscribed
   // message through this pipe if it is set up.
   toolbelt::Pipe bridge_notification_pipe_;
+
+  int initial_ordinal_ = 1;
+
+  bool wait_for_clients_ = false;
+
+  // In tests we will load a plugin while the server is running.  This needs a
+  // lock.
+  std::mutex plugin_lock_;
+
+  std::vector<std::unique_ptr<Plugin>> plugins_;
+  toolbelt::TriggerFd shutdown_trigger_fd_;
+  std::string machine_name_;
+  bool publish_server_channels_ = true;
 };
 
 } // namespace subspace
 
-#endif // __SERVER_SERVER_H
+#endif // _xSERVERSERVER_H

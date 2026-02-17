@@ -1,25 +1,26 @@
-// Copyright 2025 David Allison
+// Copyright 2023-2026 David Allison
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#ifndef __CLIENT_CLIENT_CHANNEL_H
-#define __CLIENT_CLIENT_CHANNEL_H
+#ifndef _xCLIENT_CLIENT_CHANNEL_H
+#define _xCLIENT_CLIENT_CHANNEL_H
 
 #include "client/options.h"
-#include "common/channel.h"
 #include "co/coroutine.h"
+#include "common/channel.h"
 #include "proto/subspace.pb.h"
+#include "toolbelt/clock.h"
 #include "toolbelt/fd.h"
 #include "toolbelt/sockets.h"
 #include "toolbelt/triggerfd.h"
-#include "toolbelt/clock.h"
 #include <sys/poll.h>
+#include "client/checksum.h"
 
 #include <memory>
 #include <mutex>
 #include <string>
-#include <vector>
 #include <thread>
+#include <vector>
 
 // Notification strategy
 // ---------------------
@@ -41,7 +42,22 @@
 
 namespace subspace {
 
+
+#define SUBSPACE_SHMEM_MODE_POSIX 1
+#define SUBSPACE_SHMEM_MODE_LINUX 2
+
+#if defined(__linux__)
+#define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_LINUX
+#else
+#define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_POSIX
+#endif
+
 class ClientImpl;
+
+enum class BufferMapMode {
+  kReadOnly,
+  kReadWrite,
+};
 
 namespace details {
 
@@ -59,11 +75,17 @@ struct BufferSet {
 class ClientChannel : public Channel {
 public:
   ClientChannel(const std::string &name, int num_slots, int channel_id,
-                int vchan_id, uint64_t session_id, std::string type, std::function<bool(Channel*)> reload)
-      : Channel(name, num_slots, channel_id, std::move(type), std::move(reload)),
-        vchan_id_(vchan_id), session_id_(std::move(session_id)) {}
+                int vchan_id, uint64_t session_id, std::string type,
+                std::function<bool(Channel *)> reload, int user_id, int group_id)
+      : Channel(name, num_slots, channel_id, std::move(type),
+                std::move(reload)),
+        vchan_id_(vchan_id), session_id_(std::move(session_id)), user_id_(user_id), group_id_(group_id) {
+          active_slots_.reserve(num_slots);
+          embargoed_slots_.Resize(num_slots);
+        }
   virtual ~ClientChannel() = default;
   MessageSlot *CurrentSlot() const { return slot_; }
+  int32_t CurrentSlotId() const { return slot_ != nullptr ? slot_->id : -1; }
   const ChannelCounters &GetCounters() const {
     return GetScb()->counters[GetChannelId()];
   }
@@ -96,10 +118,11 @@ public:
     if (slot == nullptr) {
       return nullptr;
     }
-    return Buffer(slot->id) +
-           (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot->id))) *
-               slot->id +
-           sizeof(MessagePrefix);
+    void *b =
+        Buffer(slot->id) +
+        (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot->id))) * slot->id +
+        sizeof(MessagePrefix);
+    return b;
   }
 
   // Get a pointer to the MessagePrefix for a given slot.
@@ -108,6 +131,13 @@ public:
         Buffer(slot->id) +
         (sizeof(MessagePrefix) + Aligned<64>(SlotSize(slot->id))) * slot->id);
     return p;
+  }
+
+  MessageSlot *GetSlot(int32_t id) const {
+    if (id < 0 || id >= num_slots_) {
+      return nullptr;
+    }
+    return &ccb_->slots[id];
   }
 
   // Get the size associated with the given slot id.
@@ -139,9 +169,14 @@ public:
     return buffers_.empty() ? 0 : buffers_.back()->slot_size;
   }
 
+  void SetNumSlots(int n) override {
+    Channel::SetNumSlots(n);
+    active_slots_.resize(n);
+    embargoed_slots_.Resize(n);
+   }
+
   // Get the buffer associated with the given slot id.
-  char *Buffer(int slot_id,
-               bool abort_on_range = true) {
+  char *Buffer(int slot_id, bool abort_on_range = true) {
     // While we are trying to get the buffer a publisher might be adding
     // more buffers. Since we are going to abort if the index isn't in
     // range we should try very hard to make it so.
@@ -161,13 +196,18 @@ public:
       // This should never happen.
       int index = ccb_->slots[slot_id].buffer_index;
       std::cerr << this << " Invalid buffer index for slot " << slot_id << ": "
-                << index << " there are " << buffers_.size() << " buffers" << std::endl;
-      std::cerr << this << "Channel: " << name_ << " from " << (IsPublisher() ? "publisher" : "subscriber") << std::endl;
+                << index << " there are " << buffers_.size() << " buffers"
+                << std::endl;
+      std::cerr << this << "Channel: " << name_ << " from "
+                << (IsPublisher() ? "publisher" : "subscriber") << std::endl;
       DumpSlots(std::cerr);
       abort();
     }
+
     return nullptr;
   }
+
+  virtual BufferMapMode MapMode() const = 0;
 
   bool BuffersChanged() const {
     return ccb_->num_buffers != static_cast<int>(buffers_.size());
@@ -189,6 +229,14 @@ public:
     std::unique_lock<std::mutex> lock(retirement_lock_);
     retirement_triggers_.emplace_back(std::move(fd));
     has_retirement_triggers_ = true;
+  }
+
+  std::string BufferSharedMemoryName(int buffer_index) const {
+    return Channel::BufferSharedMemoryName(session_id_, buffer_index);
+  }
+
+  void RecordDroppedMessages(uint32_t num) {
+    ccb_->total_drops += num; // Atomic increment.
   }
 
 protected:
@@ -216,23 +264,20 @@ protected:
   absl::StatusOr<size_t> GetBufferSize(toolbelt::FileDescriptor &shm_fd,
                                        int buffer_index) const;
   absl::StatusOr<char *> MapBuffer(toolbelt::FileDescriptor &shm_fd,
-                                   size_t size, bool read_only);
+                                   size_t size, BufferMapMode mode);
 
-  std::string BufferSharedMemoryName(int buffer_index) const {
-    return Channel::BufferSharedMemoryName(session_id_, buffer_index);
-  }
-
-#if defined(__APPLE__)
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   absl::StatusOr<std::string>
-  CreateMacOSSharedMemoryFile(const std::string &filename, off_t size);
+  CreatePosixSharedMemoryFile(const std::string &filename, off_t size);
 #endif
 
-protected:
   MessageSlot *slot_ = nullptr; // Current slot.
   int vchan_id_ = -1;           // Virtual channel ID.
   uint64_t session_id_;
   std::vector<std::unique_ptr<BufferSet>> buffers_ = {};
-
+  int user_id_ = -1;
+  int group_id_ = -1;
+  
   // Retirement triggers.  Although these are not in shared memory,
   // the retirement of a slot can occur in any thread so we need
   // a mutex.  But we don't want to lock the mutex if there are none
@@ -247,9 +292,12 @@ protected:
   std::atomic<bool> has_retirement_triggers_{false};
   std::vector<toolbelt::FileDescriptor> retirement_triggers_ = {};
   std::mutex retirement_lock_;
+
+  std::vector<ActiveSlot> active_slots_;
+  DynamicBitSet embargoed_slots_;
 };
 
 } // namespace details
 } // namespace subspace
 
-#endif // __CLIENT_CLIENT_CHANNEL_H
+#endif // _xCLIENT_CLIENT_CHANNEL_H

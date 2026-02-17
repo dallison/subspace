@@ -1,4 +1,4 @@
-// Copyright 2025 David Allison
+// Copyright 2023-2026 David Allison
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -14,6 +14,7 @@
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
 #include "toolbelt/pipe.h"
+#include <array>
 #include <cstdio>
 #include <gtest/gtest.h>
 #include <inttypes.h>
@@ -26,19 +27,21 @@ ABSL_FLAG(bool, start_server, true, "Start the subspace server");
 ABSL_FLAG(std::string, server, "", "Path to server executable");
 
 void SignalHandler(int sig) {
-       	fprintf(stderr,"Signal %d", sig);
-	std::cerr.flush();
-	FILE *fp = fopen("/proc/self/maps", "r");
-	for (;;) {
-		int ch = fgetc(fp);
-		if (ch == EOF) {
-			break;
-		}
-		fputc(ch, stderr);
-	}
-	signal(sig, SIG_DFL);
-	raise(sig);
+  fprintf(stderr, "Signal %d", sig);
+  std::cerr.flush();
+  FILE *fp = fopen("/proc/self/maps", "r");
+  for (;;) {
+    int ch = fgetc(fp);
+    if (ch == EOF) {
+      break;
+    }
+    fputc(ch, stderr);
+  }
+  signal(sig, SIG_DFL);
+  raise(sig);
 }
+
+void SigQuitHandler(int signum);
 
 using Publisher = subspace::Publisher;
 using Subscriber = subspace::Subscriber;
@@ -78,10 +81,9 @@ public:
     // has started and stopped.  This end of the pipe is blocking.
     (void)pipe(server_pipe_);
 
-    server_ =
-        std::make_unique<subspace::Server>(scheduler_, socket_, "", 0, 0,
-                                           /*local=*/true, server_pipe_[1]);
-
+    server_ = std::make_unique<subspace::Server>(scheduler_, socket_, "", 0, 0,
+                                                 /*local=*/true,
+                                                 server_pipe_[1], 1, true);
     // Start server running in a thread.
     server_thread_ = std::thread([]() {
       absl::Status s = server_->Run();
@@ -117,8 +119,11 @@ public:
   void TearDown() override {}
 
   void InitClient(subspace::Client &client) {
+    client.SetThreadSafe(true);
     ASSERT_OK(client.Init(Socket()));
   }
+
+  static co::CoroutineScheduler &Scheduler() { return scheduler_; }
 
   static const std::string &Socket() { return socket_; }
 
@@ -138,14 +143,21 @@ int ClientTest::server_pipe_[2];
 std::unique_ptr<subspace::Server> ClientTest::server_;
 std::thread ClientTest::server_thread_;
 
+void SigQuitHandler(int signum) {
+  ClientTest::Scheduler().Show();
+  signal(signum, SIG_DFL);
+  raise(signum);
+}
+
 TEST_F(ClientTest, InetAddressSupportsAbslHash) {
   struct sockaddr_in addr = {
 #if defined(__APPLE__)
-      .sin_len = sizeof(int),
+    .sin_len = sizeof(int),
 #endif
-      .sin_family = AF_INET,
-      .sin_port = htons(1234),
-      .sin_addr = {.s_addr = htonl(0x12345678)}};
+    .sin_family = AF_INET,
+    .sin_port = htons(1234),
+    .sin_addr = {.s_addr = htonl(0x12345678)}
+  };
 
   EXPECT_TRUE(absl::VerifyTypeImplementsAbslHashCorrectly({
       toolbelt::InetAddress(),
@@ -186,7 +198,7 @@ TEST_F(ClientTest, Resize1) {
   ASSERT_EQ(512, pub->SlotSize());
 
   // Won't resize.
-  absl::StatusOr<void *> buffer3 = pub->GetMessageBuffer(512);
+  absl::StatusOr<void *> buffer3 = pub->GetMessageBuffer(512, false);
   ASSERT_OK(buffer3);
   ASSERT_EQ(512, pub->SlotSize());
 }
@@ -231,6 +243,9 @@ TEST_F(ClientTest, ResizeCallback) {
   // allows one resize.
   absl::StatusOr<void *> buffer4 = pub->GetMessageBuffer(1000);
   ASSERT_FALSE(buffer4.ok());
+  // For thread safety support we need to cancel the publish if we don't want to
+  // send it.
+  pub->CancelPublish();
 }
 
 TEST_F(ClientTest, CreatePublisherWithType) {
@@ -270,7 +285,7 @@ TEST_F(ClientTest, TooManyVirtualPublishers) {
   constexpr int kMuxCapacity = 10;
 
   std::vector<Publisher> pubs;
-  for (int i = 0; i < kMuxCapacity - 2; i++) {
+  for (int i = 0; i < kMuxCapacity - 1; i++) {
     absl::StatusOr<Publisher> pub = client.CreatePublisher(
         "dave0", 256, 10, {.type = "foobar", .mux = "mainmux"});
     ASSERT_OK(pub);
@@ -405,7 +420,7 @@ TEST_F(ClientTest, TooManyVirtualSubscribers) {
 
   // 6 subscribers.
   std::vector<Subscriber> subs;
-  for (int i = 0; i < kNumSlots - 4; i++) {
+  for (int i = 0; i < kNumSlots - 3; i++) {
     absl::StatusOr<Subscriber> sub =
         client.CreateSubscriber("dave0", {.mux = "foobar"});
     ASSERT_OK(sub);
@@ -472,7 +487,7 @@ TEST_F(ClientTest, BadPublisherParameters) {
 
   // Different num slots
   absl::StatusOr<Publisher> pub3 = client.CreatePublisher("dave0", 256, 9);
-  ASSERT_FALSE(pub3.ok());
+  ASSERT_TRUE(pub3.ok());
 
   // Fixed size.
   absl::StatusOr<Publisher> pub4 =
@@ -703,6 +718,77 @@ TEST_F(ClientTest, PublishSingleMessageAndRead) {
   ASSERT_EQ(0, msg->length);
 }
 
+TEST_F(ClientTest, PublishSingleMessageWithPrefixAndRead) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
+      "dave6", {.slot_size = 256, .num_slots = 10, .type = "foobar"});
+  ASSERT_OK(pub);
+
+  ASSERT_EQ("foobar", pub->TypeView());
+  ASSERT_FALSE(pub->IsReliable());
+  ASSERT_FALSE(pub->IsFixedSize());
+  ASSERT_EQ(256, pub->SlotSize());
+  ASSERT_EQ(10, pub->NumSlots());
+  ASSERT_EQ(0, pub->CurrentSlotId());
+  ASSERT_EQ("", pub->Mux());
+  std::stringstream ss;
+  pub->DumpSlots(ss);
+  ASSERT_NE("", ss.str());
+  ASSERT_NE("", pub->BufferSharedMemoryName(0));
+  ASSERT_EQ(0, pub->CurrentSlotId());
+  ASSERT_NE(nullptr, pub->CurrentSlot());
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "foobar", 6);
+
+  auto prefix = reinterpret_cast<subspace::MessagePrefix *>(*buffer) - 1;
+  prefix->SetIsBridged();
+  prefix->timestamp = 1234;
+
+  absl::StatusOr<const Message> pub_status = pub->PublishMessageWithPrefix(6);
+  ASSERT_OK(pub_status);
+
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("dave6");
+  ASSERT_OK(sub);
+
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(6, msg->length);
+
+  auto prefix2 =
+      reinterpret_cast<const subspace::MessagePrefix *>(msg->buffer) - 1;
+  ASSERT_TRUE(prefix2->IsBridged());
+  ASSERT_EQ(1234, prefix2->timestamp);
+  ASSERT_EQ(1, sub->CurrentOrdinal());
+  ASSERT_EQ("dave6", sub->Name());
+  ASSERT_EQ("foobar", sub->TypeView());
+  ASSERT_FALSE(sub->IsReliable());
+  ASSERT_EQ(256, sub->SlotSize());
+  ASSERT_EQ(10, sub->NumSlots());
+  ASSERT_EQ("", sub->Mux());
+  ss.clear();
+  sub->DumpSlots(ss);
+  ASSERT_NE("", ss.str());
+  ASSERT_EQ(1234, sub->Timestamp());
+  ASSERT_EQ(1234, msg->timestamp);
+  ASSERT_EQ(-1, sub->VirtualChannelId());
+  ASSERT_EQ(-1, sub->ConfiguredVchanId());
+  // Another read will get 0.
+  msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(0, msg->length);
+
+  // Read again to make sure we get another 0.
+  // Regression test.
+  msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(0, msg->length);
+}
+
 TEST_F(ClientTest, PublishSingleMessageAndReadNewest) {
   subspace::Client pub_client;
   subspace::Client sub_client;
@@ -812,6 +898,40 @@ TEST_F(ClientTest, PublishSingleMessageAndReadWithCallback) {
   ASSERT_OK(status);
 }
 
+TEST_F(ClientTest, PublishSingleMessageAndReadWithPlugin) {
+  ASSERT_OK(Server()->LoadPlugin("NOP", "plugins/nop_plugin.so"));
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher("dave6", 256, 10);
+  ASSERT_OK(pub);
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "foobar", 6);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+  ASSERT_OK(pub_status);
+
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("dave6");
+  ASSERT_OK(sub);
+
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(6, msg->length);
+
+  // Another read will get 0.
+  msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(0, msg->length);
+
+  // Read again to make sure we get another 0.
+  // Regression test.
+  msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(0, msg->length);
+  ASSERT_OK(Server()->UnloadPlugin("NOP"));
+}
+
 TEST_F(ClientTest, VirtualPublishSingleMessageAndRead) {
   subspace::Client pub_client;
   subspace::Client sub_client;
@@ -896,6 +1016,7 @@ TEST_F(ClientTest, VirtualPublishMultiple) {
   // Make sure mux is triggered.
   ASSERT_OK(mux_sub->Wait());
 
+  std::cerr << "reading mux subscriber" << std::endl;
   // Read the all messages using the multiplexer subscriber.
   // This hasn't seen any messages yet so will see them all.
   for (int i = 0; i < 10; i++) {
@@ -1251,24 +1372,23 @@ TEST_F(ClientTest, PublishConcurrentlyFromOneClientToOneSubscriber) {
   ASSERT_OK(pub_client.Init(Socket()));
   for (int i = 0; i < kNumPublishers; ++i) {
     pubs.emplace_back(*pub_client.CreatePublisher(
-        channel_name, {.slot_size = 256, .num_slots = 2*kNumPublishers + 16}));
+        channel_name,
+        {.slot_size = 256, .num_slots = 2 * kNumPublishers + 16}));
   }
 
   std::vector<std::thread> pub_threads;
   pub_threads.reserve(kNumPublishers);
   for (int i = 0; i < kNumPublishers; ++i) {
-    pub_threads.emplace_back(
-      std::thread([&pubs, i]() {
-        std::array<char, 16> msg = {};
-        auto size = std::snprintf(msg.data(), msg.size(), "M%d", i);
-        auto buffer = pubs[i].GetMessageBuffer(size);
-        std::memcpy(*buffer, msg.data(), size);
-        ASSERT_OK(pubs[i].PublishMessage(size));
-      })
-    );
+    pub_threads.emplace_back(std::thread([&pubs, i]() {
+      std::array<char, 16> msg = {};
+      auto size = std::snprintf(msg.data(), msg.size(), "M%d", i);
+      auto buffer = pubs[i].GetMessageBuffer(size);
+      std::memcpy(*buffer, msg.data(), size);
+      ASSERT_OK(pubs[i].PublishMessage(size));
+    }));
   }
 
-  for (auto& t : pub_threads) {
+  for (auto &t : pub_threads) {
     t.join();
   }
 
@@ -1280,7 +1400,8 @@ TEST_F(ClientTest, PublishConcurrentlyFromOneClientToOneSubscriber) {
     if (size == 0) {
       break;
     }
-    all_recv_msgs.emplace_back(std::string(reinterpret_cast<const char *>(message.buffer), message.length));
+    all_recv_msgs.emplace_back(std::string(
+        reinterpret_cast<const char *>(message.buffer), message.length));
   }
   EXPECT_EQ(all_recv_msgs.size(), kNumPublishers);
   std::sort(all_recv_msgs.begin(), all_recv_msgs.end());
@@ -1298,33 +1419,32 @@ TEST_F(ClientTest, PublishConcurrentlyToOneSubscriber) {
   constexpr int kNumPublishers = 100;
   pub_threads.reserve(kNumPublishers);
   for (int i = 0; i < kNumPublishers; ++i) {
-    pub_threads.emplace_back(
-      std::thread([&channel_name, i]() {
-        // We have a backlog of 10 hardcoded for the subscriber's listen socket.  We will get
-        // a connection refused if we exceed this so use a retry loop with a delay if we get
-        // errors on connection.  Happens on MacOS.
-        subspace::Client pub_client;
-        bool connected = false;
-        for (int i = 0; i < 100; i++) {
-          if (pub_client.Init(Socket()).ok()) {
-            connected = true;
-            break;
-          }
-          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    pub_threads.emplace_back(std::thread([&channel_name, i]() {
+      // We have a backlog of 10 hardcoded for the subscriber's listen socket.
+      // We will get a connection refused if we exceed this so use a retry loop
+      // with a delay if we get errors on connection.  Happens on MacOS.
+      subspace::Client pub_client;
+      bool connected = false;
+      for (int i = 0; i < 100; i++) {
+        if (pub_client.Init(Socket()).ok()) {
+          connected = true;
+          break;
         }
-        ASSERT_TRUE(connected);
-        auto pub = *pub_client.CreatePublisher(
-            channel_name, {.slot_size = 256, .num_slots = 2*kNumPublishers + 16});
-        std::array<char, 16> msg = {};
-        auto size = std::snprintf(msg.data(), msg.size(), "M%d", i);
-        auto buffer = pub.GetMessageBuffer(size);
-        std::memcpy(*buffer, msg.data(), size);
-        ASSERT_OK(pub.PublishMessage(size));
-      })
-    );
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      ASSERT_TRUE(connected);
+      auto pub = *pub_client.CreatePublisher(
+          channel_name,
+          {.slot_size = 256, .num_slots = 2 * kNumPublishers + 16});
+      std::array<char, 16> msg = {};
+      auto size = std::snprintf(msg.data(), msg.size(), "M%d", i);
+      auto buffer = pub.GetMessageBuffer(size);
+      std::memcpy(*buffer, msg.data(), size);
+      ASSERT_OK(pub.PublishMessage(size));
+    }));
   }
 
-  for (auto& t : pub_threads) {
+  for (auto &t : pub_threads) {
     t.join();
   }
 
@@ -1336,7 +1456,8 @@ TEST_F(ClientTest, PublishConcurrentlyToOneSubscriber) {
     if (size == 0) {
       break;
     }
-    all_recv_msgs.emplace_back(std::string(reinterpret_cast<const char *>(message.buffer), message.length));
+    all_recv_msgs.emplace_back(std::string(
+        reinterpret_cast<const char *>(message.buffer), message.length));
   }
   EXPECT_EQ(all_recv_msgs.size(), kNumPublishers);
   std::sort(all_recv_msgs.begin(), all_recv_msgs.end());
@@ -1494,7 +1615,7 @@ TEST_F(ClientTest, ReliablePublisher1) {
     ASSERT_EQ(nullptr, *buffer);
   }
 
-  msg->Release();
+  msg->Reset();
 
   co::CoroutineScheduler machine;
 
@@ -1579,7 +1700,7 @@ TEST_F(ClientTest, ReliablePublisher2) {
     ASSERT_EQ(nullptr, *buffer);
   }
 
-  msg->Release();
+  msg->Reset();
 
   co::CoroutineScheduler machine;
 
@@ -1635,7 +1756,7 @@ TEST_F(ClientTest, ReliablePublisherActivation) {
   ASSERT_EQ(1, msg->length);
   ASSERT_TRUE(msg->is_activation);
 
-  msg->Release();
+  msg->Reset();
 
   // Publish a reliable message.
   {
@@ -1672,7 +1793,7 @@ TEST_F(ClientTest, ReliablePublisherActivation) {
     ASSERT_EQ(nullptr, *buffer);
   }
 
-  msg->Release();
+  msg->Reset();
 
   co::CoroutineScheduler machine;
 
@@ -1710,7 +1831,8 @@ TEST_F(ClientTest, DroppedMessage) {
   subspace::Client client;
   InitClient(client);
 
-  absl::StatusOr<Subscriber> sub = client.CreateSubscriber("rel_dave");
+  absl::StatusOr<Subscriber> sub =
+      client.CreateSubscriber("rel_dave", {.keep_active_message = true});
   ASSERT_OK(sub);
 
   int num_dropped_messages = 0;
@@ -1795,7 +1917,7 @@ TEST_F(ClientTest, PublishSingleMessageAndReadSharedPtr) {
   ASSERT_OK(pub_status);
 
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-      "dave6", subspace::SubscriberOptions().SetMaxActiveMessages(3));
+      "dave6", subspace::SubscriberOptions().SetMaxActiveMessages(3).SetKeepActiveMessage(false));
   ASSERT_OK(sub);
 
   absl::StatusOr<subspace::shared_ptr<const char>> p =
@@ -1838,13 +1960,13 @@ TEST_F(ClientTest, Publish2Message2AndReadSharedPtrs) {
   for (int i = 0; i < 2; i++) {
     absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
     ASSERT_OK(buffer);
-    memcpy(*buffer, "foobar", 6);
-    absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+    memcpy(*buffer, "foobar", 7);
+    absl::StatusOr<const Message> pub_status = pub->PublishMessage(7);
     ASSERT_OK(pub_status);
   }
 
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-      "dave6", subspace::SubscriberOptions().SetMaxActiveMessages(2));
+      "dave6", subspace::SubscriberOptions().SetMaxActiveMessages(2).SetKeepActiveMessage(false));
   ASSERT_OK(sub);
 
   absl::StatusOr<subspace::shared_ptr<const char>> p =
@@ -1889,7 +2011,7 @@ TEST_F(ClientTest, Publish2Message2AndReadSharedPtrs) {
     // Shared ptr from weak ptr and destruct it.
     subspace::shared_ptr<const char> p2(w2);
     // Number of active messages: 2
-    ASSERT_EQ(1, sub->NumActiveMessages());
+    ASSERT_EQ(2, sub->NumActiveMessages());
 
     ASSERT_EQ(2, p2.use_count());
   }
@@ -2126,10 +2248,14 @@ TEST_F(ClientTest, RetirementTrigger1) {
   auto ptr2 = std::move(*p2);
   ASSERT_STREQ("foobar", reinterpret_cast<const char *>(ptr2.buffer));
 
+  sub1.ClearActiveMessage();
+  sub2.ClearActiveMessage();
+  std::cerr << "resetting first message" << std::endl;
   // Reset the first message.
-  ptr1.Release();
+  ptr1.Reset();
   // Reset the second message. This will trigger a retirement.
-  ptr2.Release();
+  std::cerr << "resetting second message" << std::endl;
+  ptr2.Reset();
 
   // Read the retirement fd and expect it to contain slot 0.
   struct pollfd fd = {.fd = retirement_fd.Fd(), .events = POLLIN};
@@ -2163,12 +2289,12 @@ TEST_F(ClientTest, RetirementTrigger2) {
   const toolbelt::FileDescriptor &retirement_fd = pub.GetRetirementFd();
 
   absl::StatusOr<Subscriber> s1 =
-      sub_client->CreateSubscriber("dave6", {.max_active_messages = 1});
+      sub_client->CreateSubscriber("dave6", {.max_active_messages = 1, .keep_active_message = true});
   ASSERT_OK(s1);
   auto sub1 = std::move(*s1);
 
   absl::StatusOr<Subscriber> s2 =
-      sub_client->CreateSubscriber("dave6", {.max_active_messages = 1});
+      sub_client->CreateSubscriber("dave6", {.max_active_messages = 1, .keep_active_message = true});
   ASSERT_OK(s2);
   auto sub2 = std::move(*s2);
 
@@ -2296,7 +2422,7 @@ TEST_F(ClientTest, RetirementTrigger3) {
   // Read the message in sub1.
   absl::StatusOr<subspace::Message> p1 = sub1.ReadMessage();
   ASSERT_OK(p1);
-  auto ptr1 = *p1;
+  auto ptr1 = std::move(*p1);
   ASSERT_STREQ("foobar", reinterpret_cast<const char *>(ptr1.buffer));
 
   // Keep the message alive in sub1 and read it in sub2.
@@ -2305,10 +2431,12 @@ TEST_F(ClientTest, RetirementTrigger3) {
   auto ptr2 = std::move(*p2);
   ASSERT_STREQ("foobar", reinterpret_cast<const char *>(ptr2.buffer));
 
+  sub1.ClearActiveMessage();
+  sub2.ClearActiveMessage();
   // Reset the first message.
-  ptr1.Release();
+  ptr1.Reset();
   // Reset the second message. This will trigger a retirement.
-  ptr2.Release();
+  ptr2.Reset();
 
   // Read the retirement fd and expect it to contain slot 0.
   struct pollfd fd = {.fd = retirement_fd.Fd(), .events = POLLIN};
@@ -2347,12 +2475,12 @@ TEST_F(ClientTest, RetirementTrigger4) {
   const toolbelt::FileDescriptor &retirement_fd = pub2.GetRetirementFd();
 
   absl::StatusOr<Subscriber> s1 =
-      sub_client->CreateSubscriber("dave6", {.max_active_messages = 1});
+      sub_client->CreateSubscriber("dave6", {.max_active_messages = 1, .keep_active_message = true});
   ASSERT_OK(s1);
   auto sub1 = std::move(*s1);
 
   absl::StatusOr<Subscriber> s2 =
-      sub_client->CreateSubscriber("dave6", {.max_active_messages = 1});
+      sub_client->CreateSubscriber("dave6", {.max_active_messages = 1, .keep_active_message = true});
   ASSERT_OK(s2);
   auto sub2 = std::move(*s2);
 
@@ -2455,14 +2583,15 @@ TEST_F(ClientTest, ChannelDirectory) {
   ASSERT_OK(s2);
 
   // Subscribe to channel directory.
-  absl::StatusOr<Subscriber> dir_sub = client->CreateSubscriber(
-      "/subspace/ChannelDirectory");
+  absl::StatusOr<Subscriber> dir_sub =
+      client->CreateSubscriber("/subspace/ChannelDirectory");
   ASSERT_OK(dir_sub);
 
-  sleep(1);  // Give some time for directory to be updated.
+  sleep(1); // Give some time for directory to be updated.
 
   // Read the latest channel directory message.
-  absl::StatusOr<subspace::Message> msg = dir_sub->ReadMessage(subspace::ReadMode::kReadNewest);
+  absl::StatusOr<subspace::Message> msg =
+      dir_sub->ReadMessage(subspace::ReadMode::kReadNewest);
   ASSERT_OK(msg);
   ASSERT_NE(0, msg->length);
 
@@ -2474,7 +2603,7 @@ TEST_F(ClientTest, ChannelDirectory) {
   bool found_chan1 = false;
   bool found_chan2 = false;
   for (int i = 0; i < dir.channels_size(); i++) {
-    const subspace::ChannelInfo &info = dir.channels(i);
+    const subspace::ChannelInfoProto &info = dir.channels(i);
     if (info.name() == "chan1") {
       found_chan1 = true;
       ASSERT_EQ(256, info.slot_size());
@@ -2496,8 +2625,8 @@ TEST_F(ClientTest, ChannelDirectory) {
 TEST_F(ClientTest, MessageGetters) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
-  absl::StatusOr<Publisher> pub =
-      client->CreatePublisher("chan1", {.slot_size = 256, .num_slots = 10, .type = "test-type"});
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan1", {.slot_size = 256, .num_slots = 10, .type = "test-type"});
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub = client->CreateSubscriber("chan1");
@@ -2518,12 +2647,334 @@ TEST_F(ClientTest, MessageGetters) {
   ASSERT_EQ(10, msg->NumSlots());
 }
 
+// This tests checksums.  We have two publishers, one that calculates a checksum
+// and one that doesn't. We have 2 subscribers, one that checks the checksum and
+// expects an error if there's an error and one that checks the checksum and
+// passes the message intact but with the checksum_error flag set.
+TEST_F(ClientTest, ChecksumVerification) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan1", {.slot_size = 256, .num_slots = 10, .checksum = true});
+  ASSERT_OK(pub);
+
+  // Create a second publisher that doesn't calculate a checksum.
+  absl::StatusOr<Publisher> pub2 =
+      client->CreatePublisher("chan1", {.slot_size = 256, .num_slots = 10});
+  ASSERT_OK(pub2);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "foobar", 6);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+  ASSERT_OK(pub_status);
+
+  absl::StatusOr<Subscriber> sub =
+      client->CreateSubscriber("chan1", {.checksum = true});
+  ASSERT_OK(sub);
+
+  {
+    absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+    ASSERT_OK(msg);
+    ASSERT_EQ(6, msg->length);
+    ASSERT_STREQ("foobar", reinterpret_cast<const char *>(msg->buffer));
+  }
+
+  // Build a message but overwrite the message buffer with a different string.
+  absl::StatusOr<void *> buffer2 = pub->GetMessageBuffer();
+  ASSERT_OK(buffer2);
+  memcpy(*buffer2, "foobar", 6);
+  absl::StatusOr<const Message> pub_status2 = pub->PublishMessage(6);
+  ASSERT_OK(pub_status2);
+
+  char *buf = reinterpret_cast<char *>(*buffer2);
+  buf[0] = 'x';
+
+  // Read the message with a bad checksum.
+  {
+    absl::StatusOr<subspace::Message> msg2 = sub->ReadMessage();
+    ASSERT_FALSE(msg2.ok());
+    ASSERT_EQ(absl::StatusCode::kInternal, msg2.status().code());
+    ASSERT_EQ("Checksum verification failed", msg2.status().message());
+  }
+
+  // Send another message with a valid checksum.
+  absl::StatusOr<void *> buffer3 = pub->GetMessageBuffer();
+  ASSERT_OK(buffer3);
+  memcpy(*buffer3, "foobar", 6);
+  absl::StatusOr<const Message> pub_status3 = pub->PublishMessage(6);
+  ASSERT_OK(pub_status3);
+
+  // Read the message with the valid checksum
+  {
+    absl::StatusOr<subspace::Message> msg3 = sub->ReadMessage();
+    ASSERT_OK(msg3);
+    ASSERT_EQ(6, msg3->length);
+    ASSERT_STREQ("foobar", reinterpret_cast<const char *>(msg3->buffer));
+  }
+
+  // Send a message on pub2 with no checksum and corrupt it.
+  absl::StatusOr<void *> buffer4 = pub2->GetMessageBuffer();
+  ASSERT_OK(buffer4);
+  memcpy(*buffer4, "foobar", 6);
+  absl::StatusOr<const Message> pub_status4 = pub2->PublishMessage(6);
+  ASSERT_OK(pub_status4);
+  char *buf4 = reinterpret_cast<char *>(*buffer4);
+  buf4[0] = 'X';
+
+  // Read the corrupted message with no checksum.  Although the subscriber is
+  // checking for a checksum, it will not be set since the publisher didn't
+  // calculate one.
+  {
+    absl::StatusOr<subspace::Message> msg5 = sub->ReadMessage();
+    ASSERT_OK(msg5);
+    ASSERT_EQ(6, msg5->length);
+    ASSERT_STREQ("Xoobar", reinterpret_cast<const char *>(msg5->buffer));
+    ASSERT_FALSE(msg5->checksum_error);
+  }
+
+  // Create another subscriber with pass checksum errors.
+  absl::StatusOr<Subscriber> sub2 = client->CreateSubscriber(
+      "chan1", {.checksum = true, .pass_checksum_errors = true});
+  ASSERT_OK(sub2);
+
+  // First message will be fine since the checksum is good.
+  {
+    absl::StatusOr<subspace::Message> msg4 = sub2->ReadMessage();
+    ASSERT_OK(msg4);
+    ASSERT_EQ(6, msg4->length);
+    ASSERT_STREQ("foobar", reinterpret_cast<const char *>(msg4->buffer));
+  }
+
+  // Second message wil have a checksum error flag set.
+  {
+    absl::StatusOr<subspace::Message> msg5 = sub2->ReadMessage();
+    ASSERT_OK(msg5);
+    ASSERT_EQ(6, msg5->length);
+    ASSERT_TRUE(msg5->checksum_error);
+  }
+
+  // Third message will be fine since the checksum is good.
+  {
+    absl::StatusOr<subspace::Message> msg6 = sub2->ReadMessage();
+    ASSERT_OK(msg6);
+    ASSERT_EQ(6, msg6->length);
+    ASSERT_STREQ("foobar", reinterpret_cast<const char *>(msg6->buffer));
+  }
+
+  // Fourth message doesn't have a checksum.
+  {
+    absl::StatusOr<subspace::Message> msg7 = sub2->ReadMessage();
+    ASSERT_OK(msg7);
+    ASSERT_EQ(6, msg7->length);
+    ASSERT_STREQ("Xoobar", reinterpret_cast<const char *>(msg7->buffer));
+    ASSERT_FALSE(msg7->checksum_error);
+  }
+}
+
+TEST_F(ClientTest, ChecksumCallback) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_cb", {.slot_size = 256, .num_slots = 10, .checksum = true});
+  ASSERT_OK(pub);
+
+  absl::StatusOr<Subscriber> sub =
+      client->CreateSubscriber("chan_cb", {.checksum = true});
+  ASSERT_OK(sub);
+
+  auto fake_crc =
+      [](const std::array<absl::Span<const uint8_t>, 2> &data) -> uint32_t {
+    uint32_t sum = 0;
+    for (const auto &span : data) {
+      for (uint8_t byte : span) {
+        sum += byte;
+      }
+    }
+    return sum;
+  };
+
+  pub->SetChecksumCallback(fake_crc);
+  sub->SetChecksumCallback(fake_crc);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "abc", 3);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(3);
+  ASSERT_OK(pub_status);
+
+  {
+    absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+    ASSERT_OK(msg);
+    ASSERT_EQ(3, msg->length);
+    ASSERT_STREQ("abc", reinterpret_cast<const char *>(msg->buffer));
+  }
+
+  // Publish and corrupt the message buffer to force a checksum failure.
+  absl::StatusOr<void *> buffer2 = pub->GetMessageBuffer();
+  ASSERT_OK(buffer2);
+  memcpy(*buffer2, "def", 3);
+  absl::StatusOr<const Message> pub_status2 = pub->PublishMessage(3);
+  ASSERT_OK(pub_status2);
+  char *buf = reinterpret_cast<char *>(*buffer2);
+  buf[1] = 'X';
+
+  {
+    absl::StatusOr<subspace::Message> msg2 = sub->ReadMessage();
+    ASSERT_FALSE(msg2.ok());
+    ASSERT_EQ(absl::StatusCode::kInternal, msg2.status().code());
+    ASSERT_EQ("Checksum verification failed", msg2.status().message());
+  }
+}
+
+TEST_F(ClientTest, ChecksumCallbackPassErrors) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_cb_pass", {.slot_size = 256, .num_slots = 10, .checksum = true});
+  ASSERT_OK(pub);
+
+  absl::StatusOr<Subscriber> sub = client->CreateSubscriber(
+      "chan_cb_pass", {.checksum = true, .pass_checksum_errors = true});
+  ASSERT_OK(sub);
+
+  auto fake_crc =
+      [](const std::array<absl::Span<const uint8_t>, 2> &data) -> uint32_t {
+    uint32_t sum = 0;
+    for (const auto &span : data) {
+      for (uint8_t byte : span) {
+        sum += byte;
+      }
+    }
+    return sum;
+  };
+
+  pub->SetChecksumCallback(fake_crc);
+  sub->SetChecksumCallback(fake_crc);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "xyz", 3);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(3);
+  ASSERT_OK(pub_status);
+  char *buf = reinterpret_cast<char *>(*buffer);
+  buf[2] = 'Z';
+
+  {
+    absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+    ASSERT_OK(msg);
+    ASSERT_EQ(3, msg->length);
+    ASSERT_TRUE(msg->checksum_error);
+  }
+}
+
+TEST_F(ClientTest, ChecksumCallbackReset) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_cb_reset", {.slot_size = 256, .num_slots = 10, .checksum = true});
+  ASSERT_OK(pub);
+
+  absl::StatusOr<Subscriber> sub =
+      client->CreateSubscriber("chan_cb_reset", {.checksum = true});
+  ASSERT_OK(sub);
+
+  auto fake_crc =
+      [](const std::array<absl::Span<const uint8_t>, 2> &data) -> uint32_t {
+    uint32_t sum = 0;
+    for (const auto &span : data) {
+      for (uint8_t byte : span) {
+        sum += byte;
+      }
+    }
+    return sum;
+  };
+
+  auto fake_crc_mismatch =
+      [&fake_crc](
+          const std::array<absl::Span<const uint8_t>, 2> &data) -> uint32_t {
+    return fake_crc(data) + 1;
+  };
+
+  pub->SetChecksumCallback(fake_crc);
+  sub->SetChecksumCallback(fake_crc_mismatch);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "reset", 5);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(5);
+  ASSERT_OK(pub_status);
+
+  {
+    absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+    ASSERT_FALSE(msg.ok());
+    ASSERT_EQ(absl::StatusCode::kInternal, msg.status().code());
+    ASSERT_EQ("Checksum verification failed", msg.status().message());
+  }
+
+  pub->ResetChecksumCallback();
+  sub->ResetChecksumCallback();
+
+  absl::StatusOr<void *> buffer2 = pub->GetMessageBuffer();
+  ASSERT_OK(buffer2);
+  memcpy(*buffer2, "reset", 5);
+  absl::StatusOr<const Message> pub_status2 = pub->PublishMessage(5);
+  ASSERT_OK(pub_status2);
+
+  {
+    absl::StatusOr<subspace::Message> msg2 = sub->ReadMessage();
+    ASSERT_OK(msg2);
+    ASSERT_EQ(5, msg2->length);
+    ASSERT_STREQ("reset", reinterpret_cast<const char *>(msg2->buffer));
+  }
+}
+
+TEST_F(ClientTest, ChecksumCallbackPublisherOnly) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_cb_pub_only",
+      {.slot_size = 256, .num_slots = 10, .checksum = true});
+  ASSERT_OK(pub);
+
+  absl::StatusOr<Subscriber> sub =
+      client->CreateSubscriber("chan_cb_pub_only", {.checksum = true});
+  ASSERT_OK(sub);
+
+  auto fake_crc =
+      [](const std::array<absl::Span<const uint8_t>, 2> &data) -> uint32_t {
+    uint32_t sum = 0;
+    for (const auto &span : data) {
+      for (uint8_t byte : span) {
+        sum += byte;
+      }
+    }
+    return sum;
+  };
+
+  pub->SetChecksumCallback(fake_crc);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "onlypub", 7);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(7);
+  ASSERT_OK(pub_status);
+
+  {
+    absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+    ASSERT_FALSE(msg.ok());
+    ASSERT_EQ(absl::StatusCode::kInternal, msg.status().code());
+    ASSERT_EQ("Checksum verification failed", msg.status().message());
+  }
+}
+
 int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);
   absl::ParseCommandLine(argc, argv);
 
   signal(SIGSEGV, SignalHandler);
   signal(SIGBUS, SignalHandler);
+  signal(SIGQUIT, SigQuitHandler);
 
   absl::InitializeSymbolizer(argv[0]);
 

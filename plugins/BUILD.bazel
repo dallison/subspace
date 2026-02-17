@@ -1,0 +1,15 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+cc_binary(
+    name = "nop_plugin.so",
+    srcs = ["nop_plugin.cc"],
+    deps = [
+        "//server:server",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+    linkstatic = False,
+    linkshared = True,
+)

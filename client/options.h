@@ -1,10 +1,11 @@
-// Copyright 2025 David Allison
+// Copyright 2023-2026 David Allison
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#ifndef __CLIENT_OPTIONS_H
-#define __CLIENT_OPTIONS_H
+#ifndef _xCLIENT_OPTIONS_H
+#define _xCLIENT_OPTIONS_H
 
+#include <functional>
 #include <string>
 
 namespace subspace {
@@ -23,6 +24,8 @@ namespace subspace {
 // or you can access the struct member directly.
 //
 // Your choice.
+
+class Subscriber;
 
 // Options when creating a publisher.
 struct PublisherOptions {
@@ -104,6 +107,21 @@ struct PublisherOptions {
     return *this;
   }
 
+  // If this is set to true all messages published will have a checksum
+  // calculated and placed in the MessagePrefix metadata.  If subscribers want
+  // to verify the checksum the must set the SubscriberOptions.Checksum to true.
+  // Included in the checksum is the message prefix and the message
+  // data.
+  //
+  // Using checksums on all messages will increase the latency of message transmission.  Use it
+  // sparingly.  Subscribers generally map the buffers in read-only so the only way to corrup it is
+  // for the publishing process to overwrite the buffer after it has been published.
+  PublisherOptions &SetChecksum(bool v) {
+    checksum = v;
+    return *this;
+  }
+  bool Checksum() const { return checksum; }
+
   // If you use the new CreatePublisher API, set the slot size and num slots in
   // here.
   int32_t slot_size = 0;
@@ -120,6 +138,7 @@ struct PublisherOptions {
   std::string mux;
   int vchan_id = -1; // If -1, server will assign.
   bool notify_retirement = false;
+  bool checksum = false;
 };
 
 struct SubscriberOptions {
@@ -182,6 +201,36 @@ struct SubscriberOptions {
     return *this;
   }
 
+  bool ReadWrite() const { return read_write; }
+  SubscriberOptions &SetReadWrite(bool v) {
+    read_write = v;
+    return *this;
+  }
+
+  // If this options is set to true the checksum calculated by the publisher
+  // will be verified. The checksum is placed in the MessagePrefix metadata. See
+  // PassChecksumErrors below for options for handling checksum errors.
+  SubscriberOptions &SetChecksum(bool v) {
+    checksum = v;
+    return *this;
+  }
+  bool Checksum() const { return checksum; }
+
+  // If we get a checksum error and this is true the message will be received
+  // but will have the checksum_error flag set.  If false, an error will be
+  // returned from ReadMessage.
+  SubscriberOptions &SetPassChecksumErrors(bool v) {
+    pass_checksum_errors = v;
+    return *this;
+  }
+  bool PassChecksumErrors() const { return pass_checksum_errors; }
+
+  SubscriberOptions &SetKeepActiveMessage(bool v) {
+    keep_active_message = v;
+    return *this;
+  }
+  bool KeepActiveMessage() const { return keep_active_message; }
+
   bool reliable = false;
   bool bridge = false;
   std::string type;
@@ -189,11 +238,20 @@ struct SubscriberOptions {
   bool log_dropped_messages = true;
   bool pass_activation = false; // If true, the subscriber will pass activation
                                 // messages to the user.
+  bool read_write = false;
 
   std::string mux;
   int vchan_id = -1; // If -1, server will assign.
+  bool checksum = false;
+  bool pass_checksum_errors = false;
+
+  // If true, the subscriber will keep a reference to the most recent
+  // active message.  This is useful if you don't want to pass Message structs
+  // around and you want to keep the message alive until you are done with it.
+  // You should call ClearActiveMessage() to release the reference when you are done with it.
+  bool keep_active_message = false;
 };
 
 } // namespace subspace
 
-#endif // __CLIENT_OPTIONS_H
+#endif // _xCLIENT_OPTIONS_H

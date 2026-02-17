@@ -1,9 +1,10 @@
-// Copyright 2025 David Allison
+// Copyright 2023-2026 David Allison
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
@@ -29,56 +30,170 @@ class SubscriberImpl;
 // members are available.  This can be used to see the information on the
 // message just published.
 struct ActiveMessage {
-  ActiveMessage() = default;
-  ActiveMessage(std::shared_ptr<details::SubscriberImpl> subr, size_t len,
-                MessageSlot *slot_ptr, const void *buf, uint64_t ord,
-                int64_t ts, int vid, bool activation);
-  ActiveMessage(size_t len, uint64_t ord, uint64_t ts, int vid, bool activation)
-      : length(len), ordinal(ord), timestamp(ts), vchan_id(vid),
-        is_activation(activation) {}
+  ActiveMessage(std::shared_ptr<details::SubscriberImpl> subr, MessageSlot *s)
+      : sub(std::weak_ptr<details::SubscriberImpl>(subr)), slot(s) {}
   ~ActiveMessage();
 
   // Can't be copied but can be moved.
   ActiveMessage(const ActiveMessage &) = delete;
   ActiveMessage &operator=(const ActiveMessage &) = delete;
-  ActiveMessage(ActiveMessage &&) = default;
-  ActiveMessage &operator=(ActiveMessage &&) = default;
 
-  void Release();
+  ActiveMessage(ActiveMessage &&other) {
+    sub = std::move(other.sub);
+    length = other.length;
+    slot = other.slot;
+    buffer = other.buffer;
+    ordinal = other.ordinal;
+    timestamp = other.timestamp;
+    vchan_id = other.vchan_id;
+    is_activation = other.is_activation;
+    checksum_error = other.checksum_error;
+    refs = other.refs.load();
+    other.refs.store(0);
+  };
 
-  void ResetInternal() {
-    sub.reset();
-    length = 0;
-    slot = nullptr;
-    buffer = nullptr;
-    ordinal = -1;
-    timestamp = 0;
-    vchan_id = -1;
-    is_activation = false;
+  ActiveMessage &operator=(ActiveMessage &&other) {
+    sub = std::move(other.sub);
+    length = other.length;
+    slot = other.slot;
+    buffer = other.buffer;
+    ordinal = other.ordinal;
+    timestamp = other.timestamp;
+    vchan_id = other.vchan_id;
+    is_activation = other.is_activation;
+    checksum_error = other.checksum_error;
+    refs = other.refs.load();
+    other.refs.store(0);
+    return *this;
   }
 
-  std::shared_ptr<details::SubscriberImpl>
+  void Set(size_t len, const void *buf, uint64_t ord, int64_t ts, int vid,
+             bool activation, bool checksum_error);
+
+  void IncRef() { refs++; }
+  void DecRef() { Release(--refs); }
+
+  std::weak_ptr<details::SubscriberImpl>
       sub;                      // Subscriber that read the message.
   size_t length = 0;            // Length of message in bytes.
-  MessageSlot *slot = nullptr;  // Slot for message.
+  MessageSlot *slot;            // Slot for message.
   const void *buffer = nullptr; // Address of message payload.
   uint64_t ordinal = 0;         // Monotonic number of message.
   uint64_t timestamp = 0;       // Nanosecond time message was published.
   int vchan_id = -1;            // Virtual channel ID (or -1 if not used).
   bool is_activation = false;   // Is this an activation message?
+  bool checksum_error = false;  // Was there a checksum error?
+
+  // We keep track of the number of references to this active message.  Once it
+  // goes to zero we can release the slot.
+  std::atomic<int> refs = 0;
+
+private:
+  void Release(int ref_count);
+
+  void ResetInternal();
 };
 
 struct Message {
   Message() = default;
   Message(size_t len, const void *buf, uint64_t ord, int64_t ts, int vid,
-          bool activation, int32_t sid)
+          bool activation, int32_t sid, bool checksum_error)
       : length(len), buffer(buf), ordinal(ord), timestamp(ts), vchan_id(vid),
-        is_activation(activation), slot_id(sid) {}
+        is_activation(activation), slot_id(sid),
+        checksum_error(checksum_error) {}
   Message(std::shared_ptr<ActiveMessage> msg);
-  void Release() {
-    active_message->Release();
-    active_message.reset();
+
+  // We can copy this around and move it.  It maintains a reference to the
+  // active message. which has a reference count to the slot.
+
+  ~Message() {
+    if (active_message != nullptr) {
+      active_message->DecRef();
+    }
   }
+
+  // Copying requires incrementing reference count for active_mesasge.
+  Message(const Message &other)
+      : active_message(other.active_message), length(other.length),
+        buffer(other.buffer), ordinal(other.ordinal),
+        timestamp(other.timestamp), vchan_id(other.vchan_id),
+        is_activation(other.is_activation), slot_id(other.slot_id),
+        checksum_error(other.checksum_error) {
+    if (active_message != nullptr) {
+      active_message->IncRef();
+    }
+  }
+
+  Message &operator=(const Message &other) {
+    // Are we changing the active message?
+    if (active_message != other.active_message) {
+      if (active_message != nullptr) {
+        active_message->DecRef();
+      }
+      active_message = other.active_message;
+      if (active_message != nullptr) {
+        active_message->IncRef();
+      }
+    }
+    length = other.length;
+    buffer = other.buffer;
+    ordinal = other.ordinal;
+    timestamp = other.timestamp;
+    vchan_id = other.vchan_id;
+    is_activation = other.is_activation;
+    slot_id = other.slot_id;
+    checksum_error = other.checksum_error;
+    return *this;
+  }
+
+  Message(Message &&other)
+      : active_message(std::move(other.active_message)), length(other.length),
+        buffer(other.buffer), ordinal(other.ordinal),
+        timestamp(other.timestamp), vchan_id(other.vchan_id),
+        is_activation(other.is_activation), slot_id(other.slot_id),
+        checksum_error(other.checksum_error) {
+    // In a move the reference count for the active message doesn't change.
+  }
+
+  Message &operator=(Message &&other) {
+    if (active_message != other.active_message) {
+      if (active_message != nullptr) {
+        active_message->DecRef();
+      }
+      active_message = std::move(other.active_message);
+      // Reference count for the active message is unchanged.
+    }
+    length = other.length;
+    buffer = other.buffer;
+    ordinal = other.ordinal;
+    timestamp = other.timestamp;
+    vchan_id = other.vchan_id;
+    is_activation = other.is_activation;
+    slot_id = other.slot_id;
+    checksum_error = other.checksum_error;
+    other.ResetInternal();
+    return *this;
+  }
+
+  void Reset() {
+    if (active_message != nullptr) {
+      active_message->DecRef();
+    }
+    ResetInternal();
+  }
+
+  void ResetInternal() {
+    active_message.reset();
+    length = 0;
+    buffer = nullptr;
+    ordinal = 0;
+    timestamp = 0;
+    vchan_id = -1;
+    is_activation = false;
+    checksum_error = false;
+    slot_id = -1;
+  }
+
   std::string ChannelType() const;
   int NumSlots() const;
   uint64_t SlotSize() const;
@@ -91,6 +206,7 @@ struct Message {
   int vchan_id = -1;          // Virtual channel ID (or -1 if not used).
   bool is_activation = false; // Is this an activation message?
   int32_t slot_id = -1;
+  bool checksum_error = false;
 };
 
 } // namespace subspace

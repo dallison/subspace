@@ -1,5 +1,7 @@
 package(default_visibility = ["//visibility:public"])
 
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_binary")
+
 cc_library(
     name = "server",
     srcs = [
@@ -11,6 +13,7 @@ cc_library(
         "server.h",
         "client_handler.h",
         "server_channel.h",
+        "plugin.h",
     ],
     deps = [
         "//common:subspace_common",
@@ -22,7 +25,7 @@ cc_library(
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/flags:flag",
         "@abseil-cpp//absl/flags:parse",
-        "@coroutines//:co",
+        "@coroutines//co:co",
     ],
 )
 
@@ -33,7 +36,7 @@ cc_binary(
     ],
     deps = [
       ":server",
-      "@coroutines//:co",
+      "@coroutines//co:co",
     ],
     linkopts = select({
         "//:macos_x86_64": [],

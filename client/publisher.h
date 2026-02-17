@@ -1,4 +1,4 @@
-// Copyright 2025 David Allison
+// Copyright 2023-2026 David Allison
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -16,9 +16,11 @@ class PublisherImpl : public ClientChannel {
 public:
   PublisherImpl(const std::string &name, int num_slots, int channel_id,
                 int publisher_id, int vchan_id, uint64_t session_id,
-                std::string type, const PublisherOptions &options, std::function<bool(Channel*)> reload)
+                std::string type, const PublisherOptions &options,
+                std::function<bool(Channel *)> reload, int user_id, int group_id)
       : ClientChannel(name, num_slots, channel_id, vchan_id,
-                      std::move(session_id), std::move(type), std::move(reload)),
+                      std::move(session_id), std::move(type),
+                      std::move(reload), user_id, group_id),
         publisher_id_(publisher_id), options_(options) {}
 
   bool IsReliable() const { return options_.IsReliable(); }
@@ -32,21 +34,36 @@ public:
 
   absl::Status CreateOrAttachBuffers(uint64_t slot_size);
 
-      void SetRetirementFd(toolbelt::FileDescriptor fd) {
-        retirement_fd_ = std::move(fd);
-    }
+  void SetRetirementFd(toolbelt::FileDescriptor fd) {
+    retirement_fd_ = std::move(fd);
+  }
 
-    // This is the read end of a pipe into which will be written the slot ids
-    // for retired slots.
-    const toolbelt::FileDescriptor& GetRetirementFd() const {
-        return retirement_fd_;
-    }
+  // This is the read end of a pipe into which will be written the slot ids
+  // for retired slots.
+  const toolbelt::FileDescriptor &GetRetirementFd() const {
+    return retirement_fd_;
+  }
+
+  void SetOnSendCallback(
+      std::function<absl::StatusOr<int64_t>(void *buffer, int64_t size)>
+          callback) {
+    on_send_callback_ = std::move(callback);
+  }
+
+  void SetChecksumCallback(ChecksumCallback callback) {
+    checksum_callback_ = std::move(callback);
+  }
+
+  void ResetChecksumCallback() { checksum_callback_ = nullptr; }
+
+  std::string Mux() const { return options_.Mux(); }
 
 private:
   friend class ::subspace::ClientImpl;
 
   bool IsPublisher() const override { return true; }
   bool IsBridge() const override { return options_.IsBridge(); }
+  BufferMapMode MapMode() const override { return BufferMapMode::kReadWrite; }
 
   std::string ResolvedName() const override {
     return IsVirtual() ? options_.mux : Name();
@@ -71,13 +88,15 @@ private:
   Channel::PublishedMessage
   ActivateSlotAndGetAnother(MessageSlot *slot, bool reliable,
                             bool is_activation, int owner, bool omit_prefix,
-                            bool *notify);
+                            bool use_prefix_slot_id);
 
-  Channel::PublishedMessage
-  ActivateSlotAndGetAnother(bool reliable, bool is_activation, bool omit_prefix,
-                            bool *notify) {
+  Channel::PublishedMessage ActivateSlotAndGetAnother(bool reliable,
+                                                      bool is_activation,
+                                                      bool omit_prefix,
+                                                      bool use_prefix_slot_id) {
     return ActivateSlotAndGetAnother(slot_, reliable, is_activation,
-                                     publisher_id_, omit_prefix, notify);
+                                     publisher_id_, omit_prefix,
+                                     use_prefix_slot_id);
   }
 
   void ClearSubscribers() { subscribers_.clear(); }
@@ -108,6 +127,10 @@ private:
   std::vector<toolbelt::TriggerFd> subscribers_;
   PublisherOptions options_;
   toolbelt::FileDescriptor retirement_fd_ = {};
+  std::function<absl::StatusOr<int64_t>(void *buffer, int64_t size)>
+      on_send_callback_ = nullptr;
+  ChecksumCallback checksum_callback_ = nullptr;
+
 };
 
 } // namespace details
