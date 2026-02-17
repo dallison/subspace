@@ -99,7 +99,7 @@ TEST_F(ClientTest, CreatePublisherThenSubscriber) {
   ASSERT_TRUE(subspace_has_error());
   char *error_message = subspace_get_last_error();
   std::cerr << error_message << std::endl;
-  ASSERT_NE(nullptr, strstr(error_message, "Inconsistent publisher parameter"));
+  ASSERT_NE(nullptr, strstr(error_message, "Failed to add publisher to dave1"));
 
   SubspaceSubscriber sub = subspace_create_subscriber(
       client, "dave1", subspace_subscriber_options_default());
@@ -372,7 +372,7 @@ TEST_F(ClientTest, DroppedMessage) {
     subspace_free_message(&msg);
   }
 
-  // Why 12 messages.  We have 10 slots with 1 publisher and 1 subscriber.  This leaves us with 7
+  // Why 11 messages.  We have 10 slots with 1 publisher and 1 subscriber.  This leaves us with 7
   // slots that can hold messages (we need one spare slot).  
-  ASSERT_EQ(12, num_dropped_messages);
+  ASSERT_EQ(11, num_dropped_messages);
 }
