@@ -37,8 +37,35 @@ struct ActiveMessage {
   // Can't be copied but can be moved.
   ActiveMessage(const ActiveMessage &) = delete;
   ActiveMessage &operator=(const ActiveMessage &) = delete;
-  ActiveMessage(ActiveMessage &&) = default;
-  ActiveMessage &operator=(ActiveMessage &&) = default;
+
+  ActiveMessage(ActiveMessage &&other) {
+    sub = std::move(other.sub);
+    length = other.length;
+    slot = other.slot;
+    buffer = other.buffer;
+    ordinal = other.ordinal;
+    timestamp = other.timestamp;
+    vchan_id = other.vchan_id;
+    is_activation = other.is_activation;
+    checksum_error = other.checksum_error;
+    refs = other.refs.load();
+    other.refs.store(0);
+  };
+
+  ActiveMessage &operator=(ActiveMessage &&other) {
+    sub = std::move(other.sub);
+    length = other.length;
+    slot = other.slot;
+    buffer = other.buffer;
+    ordinal = other.ordinal;
+    timestamp = other.timestamp;
+    vchan_id = other.vchan_id;
+    is_activation = other.is_activation;
+    checksum_error = other.checksum_error;
+    refs = other.refs.load();
+    other.refs.store(0);
+    return *this;
+  }
 
   void Set(size_t len, const void *buf, uint64_t ord, int64_t ts, int vid,
              bool activation, bool checksum_error);
