@@ -1273,24 +1273,24 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     switch (my_address_.Type()) {
     case toolbelt::SocketAddress::kAddressInet: {
       // IPv4 address.
-      struct sockaddr_in addr;
-      memset(&addr, 0, sizeof(addr));
-      addr.sin_family = AF_INET;
-      addr.sin_port = htons(subscribed.retirement_socket().port());
-      addr.sin_addr.s_addr = ntohl(*reinterpret_cast<const uint32_t *>(
+      struct sockaddr_in tmp_addr;
+      memset(&tmp_addr, 0, sizeof(tmp_addr));
+      tmp_addr.sin_family = AF_INET;
+      tmp_addr.sin_port = htons(subscribed.retirement_socket().port());
+      tmp_addr.sin_addr.s_addr = ntohl(*reinterpret_cast<const uint32_t *>(
           subscribed.retirement_socket().address().data()));
-      retirement_addr = toolbelt::SocketAddress(addr);
+      retirement_addr = toolbelt::SocketAddress(tmp_addr);
       break;
     }
     case toolbelt::SocketAddress::kAddressVirtual: {
       // Virtual address.
-      struct sockaddr_vm addr;
-      memset(&addr, 0, sizeof(addr));
-      addr.svm_family = AF_VSOCK;
-      addr.svm_port = subscribed.retirement_socket().port();
-      addr.svm_cid = *reinterpret_cast<const uint32_t *>(
+      struct sockaddr_vm tmp_addr;
+      memset(&tmp_addr, 0, sizeof(tmp_addr));
+      tmp_addr.svm_family = AF_VSOCK;
+      tmp_addr.svm_port = subscribed.retirement_socket().port();
+      tmp_addr.svm_cid = *reinterpret_cast<const uint32_t *>(
           subscribed.retirement_socket().address().data());
-      retirement_addr = toolbelt::SocketAddress(addr);
+      retirement_addr = toolbelt::SocketAddress(tmp_addr);
       break;
     }
     default:
