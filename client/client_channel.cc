@@ -1,10 +1,10 @@
-// Copyright 2025 David Allison
+// Copyright 2023-2026 David Allison
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
 #include "client/client_channel.h"
 #include <sys/mman.h>
-#if defined(__APPLE__)
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
 #include <sys/posix_shm.h>
 #endif
 #include <chrono>
@@ -15,10 +15,10 @@ namespace subspace {
 
 namespace details {
 
-#if defined(__APPLE__)
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
 
 absl::StatusOr<std::string>
-ClientChannel::CreateMacOSSharedMemoryFile(const std::string &filename,
+ClientChannel::CreatePosixSharedMemoryFile(const std::string &filename,
                                            off_t size) {
   // Create a file in /tmp and make it the same size as the shared memory.  This
   // will not actually allocate any disk space.
@@ -36,7 +36,7 @@ ClientChannel::CreateMacOSSharedMemoryFile(const std::string &filename,
   }
   close(fd);
 
-  return MacOsSharedMemoryName(filename);
+  return PosixSharedMemoryName(filename);
 }
 #endif
 
@@ -81,7 +81,8 @@ absl::Status ClientChannel::UnmapUnusedBuffers() {
     if (bcb_->refs[i] == 0) {
       if (buffers_[i]->full_size > 0) {
         if (debug_) {
-          fprintf(stderr, "%p: Unmapping unused buffers at index %zd\n", this, i);
+          fprintf(stderr, "%p: Unmapping unused buffers at index %zd\n", this,
+                  i);
         }
         UnmapMemory(buffers_[i]->buffer, buffers_[i]->full_size, "buffers");
         buffers_[i]->buffer = nullptr;
@@ -113,14 +114,14 @@ bool ClientChannel::ValidateSlotBuffer(MessageSlot *slot) {
 absl::Status ClientChannel::AttachBuffers() {
   // NOTE: the num_buffers variable in the CCB is atomic and could change while
   // we are in or after we are done with this loop.
-  bool map_read_only = IsSubscriber() && !IsBridge();
+  BufferMapMode mode = MapMode();
   int num_buffers = ccb_->num_buffers;
   while (buffers_.size() < size_t(num_buffers)) {
     // We need to open the next buffer in the list.  The buffer index is
     size_t buffer_index = buffers_.size();
     auto shm_fd = OpenBuffer(buffer_index);
     if (!shm_fd.ok()) {
-#if defined(__APPLE__)
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
       if (buffers_.size() + 1 < size_t(num_buffers)) {
         // The buffer might have been deleted because there are no
         // references to it.  If we are not the last buffer, this is
@@ -136,7 +137,7 @@ absl::Status ClientChannel::AttachBuffers() {
       return size.status();
     }
     if (*size == 0) {
-#if !defined(__APPLE__)
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
       if (buffers_.size() + 1 < size_t(num_buffers)) {
         // If the size is 0, it means the buffer has been deleted or not yet
         // created.  We just add an empty buffer.
@@ -151,7 +152,7 @@ absl::Status ClientChannel::AttachBuffers() {
     uint64_t slot_size = BufferSizeToSlotSize(*size);
     if (slot_size > 0) {
       // Map the shared memory buffer.
-      addr = MapBuffer(*shm_fd, *size, map_read_only);
+      addr = MapBuffer(*shm_fd, *size, mode);
       if (!addr.ok()) {
         return addr.status();
       }
@@ -216,7 +217,7 @@ absl::StatusOr<toolbelt::FileDescriptor>
 ClientChannel::CreateBuffer(int buffer_index, size_t size) {
   std::string filename = BufferSharedMemoryName(buffer_index);
 
-#if !defined(__APPLE__)
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
   // Open the shared memory file.
   auto shm_fd = OpenSharedMemoryFile(filename, O_RDWR | O_CREAT | O_EXCL);
   if (!shm_fd.ok()) {
@@ -236,13 +237,28 @@ ClientChannel::CreateBuffer(int buffer_index, size_t size) {
                         filename, strerror(errno)));
   }
 
+  std::string shm_filename = "/dev/shm/" + filename;
+  // Change the permissions for the file to 777.
+  if (chmod(shm_filename.c_str(), 0777) == -1) {
+    return absl::InternalError(
+        absl::StrFormat("Failed to change permissions of shared memory %s: %s", shm_filename, strerror(errno)));
+  }
+
+  if (getuid() == 0) {
+    // If we are root, change the owner for the file to server's user and group.
+    if (chown(shm_filename.c_str(), user_id_, group_id_) == -1) {
+      return absl::InternalError(
+          absl::StrFormat("Failed to change owner of shared memory %s: %s", shm_filename, strerror(errno)));
+    }
+  }
+
 #else
-  // On MacOS we need to create a shadow file that has the same size as the
+  // On Posix we need to create a shadow file that has the same size as the
   // shared memory file.  This is because the fstat of the shm "file" returns a
   // page aligned size, which is not what we want.  The shadow file is used
   // to determine the size of the shared memory segment.
   absl::StatusOr<std::string> shm_name =
-      CreateMacOSSharedMemoryFile(filename, off_t(size));
+      CreatePosixSharedMemoryFile(filename, off_t(size));
   if (!shm_name.ok()) {
     return shm_name.status();
   }
@@ -263,9 +279,23 @@ ClientChannel::CreateBuffer(int buffer_index, size_t size) {
     (void)shm_unlink(filename.c_str());
     return absl::InternalError(
         absl::StrFormat("Failed to set length of shared memory %s: %s",
-                        filename, strerror(errno)));
+                        filename, strerror(errno)));  
   }
 
+  // Change the permissions for the file to 777.
+  if (chmod(filename.c_str(), 0777) == -1) {
+    return absl::InternalError(
+      absl::StrFormat("Failed to change permissions of shared memory %s: %s",  filename, strerror(errno)));
+
+  }
+
+  if (getuid() == 0) {
+    // If we are root, change the owner for the file to server's user and group.
+    if (chown(filename.c_str(), user_id_, group_id_) == -1) {
+      return absl::InternalError(
+        absl::StrFormat("Failed to change owner of shared memory %s: %s", filename, strerror(errno)));
+    }
+  }
 #endif
   return *shm_fd;
 }
@@ -273,11 +303,11 @@ ClientChannel::CreateBuffer(int buffer_index, size_t size) {
 absl::StatusOr<toolbelt::FileDescriptor>
 ClientChannel::OpenBuffer(int buffer_index) {
   std::string filename = BufferSharedMemoryName(buffer_index);
-#if !defined(__APPLE__)
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
   // Open the shared memory file.
   return OpenSharedMemoryFile(filename, O_RDWR);
 #else
-  auto shm_name = MacOsSharedMemoryName(filename);
+  auto shm_name = PosixSharedMemoryName(filename);
   if (!shm_name.ok()) {
     return shm_name.status();
   }
@@ -288,8 +318,8 @@ ClientChannel::OpenBuffer(int buffer_index) {
 absl::StatusOr<size_t>
 ClientChannel::GetBufferSize(toolbelt::FileDescriptor &shm_fd,
                              int buffer_index) const {
-#if defined(__APPLE__)
-  // On MacOS we need to look at the size of the shadow file because it looks
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
+  // On Posix we need to look at the size of the shadow file because it looks
   // like the fstat of the shm "file" returns a page aligned size.
   std::string filename = BufferSharedMemoryName(buffer_index);
   struct stat sb;
@@ -313,8 +343,9 @@ ClientChannel::GetBufferSize(toolbelt::FileDescriptor &shm_fd,
 
 absl::StatusOr<char *>
 ClientChannel::MapBuffer(toolbelt::FileDescriptor &shm_fd, size_t size,
-                         bool read_only) {
-  int prot = read_only ? PROT_READ : (PROT_READ | PROT_WRITE);
+                         BufferMapMode mode) {
+  int prot =
+      mode == BufferMapMode::kReadOnly ? PROT_READ : (PROT_READ | PROT_WRITE);
   void *p = MapMemory(shm_fd.Fd(), size, prot, "buffers");
   if (p == MAP_FAILED) {
     return absl::InternalError(
@@ -327,6 +358,11 @@ ClientChannel::MapBuffer(toolbelt::FileDescriptor &shm_fd, size_t size,
 void ClientChannel::TriggerRetirement(int slot_id) {
   if (!has_retirement_triggers_) {
     // No retirement triggers, let's avoid locking the mutex.
+    return;
+  }
+  MessageSlot *slot = GetSlot(slot_id);
+  if ((slot->flags & kMessageIsActivation) != 0) {
+    // Don't retire activation messages.
     return;
   }
   std::unique_lock<std::mutex> lock(retirement_lock_);

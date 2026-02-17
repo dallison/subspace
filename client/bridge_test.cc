@@ -1,4 +1,4 @@
-// Copyright 2025 David Allison
+// Copyright 2023-2026 David Allison
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -162,7 +162,6 @@ void WaitForSubscribedMessage(toolbelt::FileDescriptor &bridge_pipe,
   ASSERT_OK(n);
   ASSERT_EQ(sizeof(int32_t), *n);
   length = ntohl(length); // Length is network byte order.
-
   n = bridge_pipe.Read(buffer, length);
   ASSERT_OK(n);
 
@@ -295,7 +294,7 @@ TEST_F(BridgeTest, BasicRetirement) {
   ASSERT_EQ(6, msg->length);
   ASSERT_EQ(256, sub->SlotSize());
   // Release the message on the subscriber (on server 2).
-  msg->Release();
+  msg->Reset();
 
   std::cerr << "Waiting for retirement notification..." << std::endl;
   // Read the retirement fd.

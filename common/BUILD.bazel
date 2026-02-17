@@ -1,5 +1,7 @@
 package(default_visibility = ["//visibility:public"])
 
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
 cc_library(
     name = "subspace_common",
     srcs = [
@@ -25,7 +27,7 @@ cc_library(
         "@abseil-cpp//absl/strings:str_format",
         "@protobuf//:protobuf",
         "@coroutines//:co",
-        "@toolbelt//toolbelt",
+        "@cpp_toolbelt//toolbelt",
     ],
 )
 

@@ -5,6 +5,14 @@ build:asan --copt -g
 build:asan --copt -fno-omit-frame-pointer
 build:asan --linkopt -fsanitize=address
 
+# Enable the built-in platform-specific configuration feature
+common --enable_platform_specific_config
+
+build --enable_platform_specific_config
+
+# Apply this flag only when building on/for macOS
+build:macos --macos_minimum_os=10.15
+
 # For all builds, use C++17
 build --cxxopt="-std=c++17"
 build --cxxopt='-Wno-sign-compare'
@@ -15,6 +23,9 @@ build:apple_silicon --cpu=darwin_arm64
 # Common flags for Clang
 build:clang --action_env=BAZEL_COMPILER=clang
 build:clang --action_env=CC=clang --action_env=CXX=clang++
+build:clang --copt="-Wno-reserved-macro-identifier"
+build:clang --copt="-Wunused-parameter"
+
 #build:clang --linkopt=-fuse-ld=lld
 
 # Clang with libc++
@@ -25,3 +36,19 @@ build:libc++ --action_env=BAZEL_CXXOPTS=-stdlib=libc++
 build:libc++ --action_env=BAZEL_LINKLIBS=-l%:libc++.a:-l%:libc++abi.a
 build:libc++ --action_env=BAZEL_LINKOPTS=-lm:-pthread
 build:libc++ --define force_libcpp=enabled
+
+# QNX 8 Toolchain Configurations
+# Set QNX_SDP_PATH environment variable or use default ~/qnx800
+build:qnx_aarch64 --platforms=//bazel/toolchains/qnx/platforms:qnx_aarch64
+build:qnx_aarch64 --action_env=QNX_SDP_PATH
+build:qnx_aarch64 --define=QNX_SDP_PATH=/home/dave.allison/qnx800
+build:qnx_aarch64 --cxxopt=-D__QNX__
+
+build:qnx_x86_64 --platforms=//bazel/toolchains/qnx/platforms:qnx_x86_64
+build:qnx_x86_64 --action_env=QNX_SDP_PATH
+build:qnx_x86_64 --define=QNX_SDP_PATH=/home/dave.allison/qnx800
+build:qnx_x86_64 --cxxopt=-D__QNX__
+
+# QNX common flags
+build:qnx --cxxopt=-std=c++17
+build:qnx --cxxopt=-Wno-sign-compare

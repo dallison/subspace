@@ -48,7 +48,7 @@ The previous version of Subpace used a custom implementation of a `shared_ptr` a
 This version, due to the complexity of implementing a lock-free algorithm, changes the implementation to wrap the standard library implementation and is thus much simpler.  It should work in the same way so you shouldn't see any difference if you used the old versions.
 
 ## Message callbacks.
-You can now register a callback function for a subsciber that can be invoked for every message received by the subscriber.  The function is called from an invocation of `ProcessAllMessages` on the same subscriber.  This will call the registered callback function for every available message, returning when there are no more messages available.  The callback function is called with a pointer to `Subscriber` and the instance of the `Message` received.  
+You can now register a callback function for a subsciber that can be invoked for every message received by the subscriber.  The function is called from an invocation of `ProcessAllMessages` on the same subscriber.  This will call the registered callback function for every available message, returning when there are no more messages available.  The callback function is called with a pointer to `Subscriber` and the instance of the `Message` received.
 
 An example of the use of this is:
 ```c++
@@ -63,12 +63,21 @@ for (;;) {
 
 ```
 
+## Messsage retirement notifications
+If your publishers are sending messages that contain references to external things (like shared memory indexes, files, GPU pointers, etc.) you will need to know when you are able to free up the external thing.  There is now a publisher option available to enable the system to notify the publisher when all the subscribers have seen the message.
+
+If you set the `notify_retirement` option in `PublisherOptions`, the system will create a pipe that will carry notifications of when a message slot has been retired.  The `slot ID` for the retired slots will be written (as a 32 bit integer) to the pipe and the publisher end can read this pipe to receive the notification.
+
+Say you have a message that contains a pointer to something in the GPU (a number).  The publisher will allocate the GPU memory, put a reference to it in the message and publish it.  The publisher needs to know when it can free up the GPU memory and reuse it, otherwise you would run of memory.  So the publisher process will set the `notify_retirement` option and call `GetRetirementFd` to get the file descriptor for the read-end of the pipe.
+
+Then, when all the subscribers have processed the message (or the message is dropped), the `slot ID` of the slot containing the message will be written to the pipe.  The publisher process can then read the slot ID from the pipe and correlate that number with the GPU pointer (it will need to keep that mapping).  It can then safely free up the GPU pointer.
+
 ## Multiplexed virtual channels
 There is a style of IPC usage that insists on only one publisher per channel.  If you are a proponent of this, you will probably be creating a bunch of channels, perhaps a set of them per process/node that all have one publisher and a few subscribers.  In an IPC system that uses TCP for transport this isn't a big deal since they will use the kernel's pre-allocated TCP buffers for their message storage, but in a shared memory IPC system, each channel will have a ring buffer of shared memory allocated for them.
 
 As the system grows, the number of channels also grows and the amount of shared memory increases accordingly.  This is a bit of stress on the memory.
 
-The new feature in this release is the ability to create a set of channels that all share the same `multiplexer` channel.  These are called `virtual channels` and all publishers and subscribers work with them in exactly the same manner as with normal channels. 
+The new feature in this release is the ability to create a set of channels that all share the same `multiplexer` channel.  These are called `virtual channels` and all publishers and subscribers work with them in exactly the same manner as with normal channels.
 
 To create a virtual channel set the `mux` member of the publisher or subscriber options to the name of another channel that will be used as the multiplexer channel.  All virtual channels that use the same multiplexer channel will shared the slots in that multiplexer channel instead of allocating their own shared memory.  Like any other channel, a multiplexer channel will be created by the first publisher or subscriber to use it.  You cannot create a publisher to a multiplexer channel that is not a virtual publisher, but you can create a subscriber to one.
 
@@ -121,7 +130,7 @@ auto sub = client.CreateSubscriber("/logs_mux");
 ```
 Notice that the subscriber is created on the multiplexer channel name and does not use the `mux` option.  This subscriber will be able to read all messages sent on the multiplexer and each message contains a `vchan_id` member that specifies that virtual channel the message is carried on.  You can use this number to determine the name of the virtual channel either by recording the values assigned by the server or using the mapping you chose to determine `vchan_ids`.
 
-If you are using a multi-computer system where messages are sent over a network between computers using a multiplexer subscriber (the most efficient way), it is probably best to determine the virtual channel ID vs channel name mapping ahead of time and apply the same mapping to all computers. 
+If you are using a multi-computer system where messages are sent over a network between computers using a multiplexer subscriber (the most efficient way), it is probably best to determine the virtual channel ID vs channel name mapping ahead of time and apply the same mapping to all computers.
 
 ## Client side buffer allocations
 In version 1 the buffers for channels were allocated by the server and communicated to the client via
@@ -141,3 +150,36 @@ in the C++ client with many fewer dependencies.  Being in C, it's more portable 
 maps onto the C++ client but provides C-linkage functions.
 
 This should be easier to map into other languages like Rust or Go in the future.
+
+## Remote Procedure Calls (RPC)
+RPC is a way for one process to invoke a procedure on another.  Subspace 2 provides an API similar to `gRPC` for peforming this task over shared memory.  RPC has difference semantics than pub/sub in that it's always point-to-point and it always uses reliable messaging (it would be bad for a command to be dropped before the server has seen it).
+
+The RPC system comprises a set of clients and a set of servers.  Each server provides a set of services (functions) that can be invoked from the client.  Internally, subspace creates request and response channels and uses reliable messaging.
+
+TODO: fully document this...
+
+## Thread safety
+A new feature of Subspace version 2 is the addition of optional thread-safety features.  This adds a
+mutual exclusion lock (mutex) to the client that allows multiple threads to use it once.  The lock
+is used if you call:
+
+```c++
+SetThreadSafe(true)
+```
+on the Client object after you create it.
+
+Most of the thread-safety features are invisible to the user with one exception.
+
+When you call `GetMessageBuffer` or `GetMessageBufferSpan` the client will be locked to the
+current thread until you call `PublishMessage` or `CancelPublish`.  The usual method of sending
+messages is to call `GetMessageBuffer` to obtain a pointer to the shared memory for the buffer, then
+serialize the message into the memory, and then publish the message.  When thread-safety is enabled
+the client will be locked while this is occurring.  This is necessary to prevent another thread
+making these same sequence of calls at the same time and corrupting the message.
+
+If you want to disable this locking functionality you can pass a `false` second argument to `GetMessageBuffer` to
+tell it to not hold the lock.  This will be useful if you are doing zero-copy operations where the
+time between getting the buffer and publishing the message is longer and holding the lock would prevent
+any other usage of the client.  You will need to be careful with thread safety yourself in this case, but that
+is always a given.
+

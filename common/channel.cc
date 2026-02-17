@@ -1,4 +1,4 @@
-// Copyright 2025 David Allison
+// Copyright 2023-2026 David Allison
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -157,13 +157,17 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
       // This is a special case where the vchan_id is invalid.
       ref_vchan_id = -1;
     }
-
     if (ref_ord != 0 && ordinal != 0 && ref_vchan_id != vchan_id) {
       return false;
     }
     uint64_t new_refs = ref & kRefCountMask;
     uint64_t new_reliable_refs =
         (ref >> kReliableRefCountShift) & kRefCountMask;
+    if (inc < 0 && new_refs == 0) {
+      // Don't try to decrement the refs below zero.  How can this happen?
+      return true;
+    }
+
     new_refs += inc;
     if (reliable) {
       new_reliable_refs += inc;
@@ -177,12 +181,16 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
                        (new_reliable_refs << kReliableRefCountShift) | new_refs;
     if (slot->refs.compare_exchange_weak(ref, new_ref,
                                          std::memory_order_relaxed)) {
-      // std::cerr << slot->id << " retired_refs: " << retired_refs
-      //           << " num subs: " << NumSubscribers(vchan_id) << std::endl;
-      if (retired_refs >= NumSubscribers(ref_vchan_id)) {
+      // std::string details = absl::StrFormat(
+      //   "%d: AtomicIncRefCount: %s slot %d ordinal %d retired_refs: %d NumSubscribers: %d retire: %d\n", getpid(), Name(), slot->id, ordinal, retired_refs, NumSubscribers(ref_vchan_id), retire);
+      // std::cerr << details;
+      if (retire && new_refs == 0 && new_reliable_refs == 0 &&
+          retired_refs >= NumSubscribers(ref_vchan_id)) {
         // All subscribers have seen the slot, retire it.
         RetiredSlots().Set(slot->id);
         if (retire_callback) {
+          // std::cerr << "Calling retire callback for slot " << slot->id
+          //           << std::endl;
           retire_callback();
         }
       }
@@ -200,7 +208,7 @@ void MessageSlot::Dump(std::ostream &os) const {
   uint64_t just_refs = l_refs & kRefCountMask;
   uint64_t ref_ord = (l_refs >> kOrdinalShift) & kOrdinalMask;
 
-  os << "Slot: " << id;
+  os << this << " Slot: " << id;
   if (is_pub) {
     os << " publisher " << just_refs;
   } else {
@@ -210,7 +218,7 @@ void MessageSlot::Dump(std::ostream &os) const {
   os << " ordinal: " << ordinal << " buffer_index: " << buffer_index
      << " vchan_id: " << vchan_id << " timestamp: " << timestamp
      << " message size: " << message_size << " raw refs: " << std::hex << refs
-     << std::dec << "\n";
+     << " flags: " << flags << std::dec << "\n";
 }
 
 void Channel::DumpSlots(std::ostream &os) const {
@@ -220,6 +228,8 @@ void Channel::DumpSlots(std::ostream &os) const {
   }
   os << "Retired slots: ";
   RetiredSlots().Print(os);
+  os << "Free slots: ";
+  FreeSlots().Print(os);
 }
 
 void Channel::Dump(std::ostream &os) const {
@@ -259,6 +269,17 @@ void Channel::GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
   total_drops = ccb_->total_drops;
 }
 
+uint64_t Channel::GetVirtualMemoryUsage() const {
+  uint64_t size = sizeof(SystemControlBlock) + CcbSize(num_slots_) +
+                  sizeof(BufferControlBlock);
+  for (int i = 0; i < ccb_->num_buffers; i++) {
+    if (bcb_->refs[i] > 0) {
+      size += bcb_->sizes[i];
+    }
+  }
+  return size;
+}
+
 void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
                            int vchan_id) {
   if (is_pub) {
@@ -270,7 +291,8 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
       if (refs == (kPubOwned | uint64_t(owner))) {
         // Owned by this publisher, clear slot.
         slot->ordinal = 0;
-        slot->refs = 0;       // Sequentially consistent because we've changed the ordinal too.
+        slot->refs =
+            0; // Sequentially consistent because we've changed the ordinal too.
 
         // Clear the slot in all the subscriber bitsets.
         ccb_->subscribers.Traverse([this, slot](int sub_id) {
@@ -296,14 +318,15 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
   }
 }
 
-#if defined(__APPLE__)
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
 absl::StatusOr<std::string>
-Channel::MacOsSharedMemoryName(const std::string &shadow_file) {
+Channel::PosixSharedMemoryName(const std::string &shadow_file) {
   struct stat st;
   int e = ::stat(shadow_file.c_str(), &st);
   if (e == -1) {
-    return absl::InternalError(absl::StrFormat(
-        "Failed to determine MacOS shm name for %s: %s", shadow_file, strerror(errno)));
+    return absl::InternalError(
+        absl::StrFormat("Failed to determine Posix shm name for %s: %s",
+                        shadow_file, strerror(errno)));
   }
   // Use the inode number (unique per file) to make the shm file name.
   return absl::StrFormat("subspace_%d", st.st_ino);

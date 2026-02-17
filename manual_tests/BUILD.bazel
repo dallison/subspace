@@ -1,5 +1,7 @@
 package(default_visibility = ["//visibility:public"])
 
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
 cc_binary(
     name = "pub",
     srcs = [
@@ -144,7 +146,7 @@ cc_binary(
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/flags:flag",
         "@abseil-cpp//absl/flags:parse",
-        "@coroutines//:co",
+        "@coroutines//co:co",
     ],
     linkopts = select({
         "//:macos_x86_64": [],

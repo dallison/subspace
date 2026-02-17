@@ -1,4 +1,4 @@
-// Copyright 2025 David Allison
+// Copyright 2023-2026 David Allison
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -25,6 +25,8 @@ ABSL_FLAG(std::string, log_level, "info", "Log level");
 ABSL_FLAG(std::string, interface, "", "Discovery network interface");
 ABSL_FLAG(bool, local, false, "Use local computer only");
 ABSL_FLAG(int, notify_fd, -1, "File descriptor to notify of startup");
+ABSL_FLAG(std::string, machine, "", "Machine name");
+
 #if defined(___APPLE__)
 // This is default true on Mac since is uses /tmp.
 ABSL_FLAG(bool, cleanup_filesystem, true, "Cleanup the filesystem on server startup");
@@ -32,6 +34,8 @@ ABSL_FLAG(bool, cleanup_filesystem, true, "Cleanup the filesystem on server star
 // Default false on other OSes as it interferes with tests that run multiple servers.
 ABSL_FLAG(bool, cleanup_filesystem, false, "Cleanup the filesystem on server startup");
 #endif
+ABSL_FLAG(std::vector<std::string>, plugins, {},
+          "List of plugins to load");
 
 int main(int argc, char **argv) {
   absl::ParseCommandLine(argc, argv);
@@ -41,6 +45,9 @@ int main(int argc, char **argv) {
   g_scheduler = &scheduler; // For signal handler.
   signal(SIGPIPE, SIG_IGN);
   signal(SIGQUIT, Signal);
+
+  // Close the plugins when the server is shutting down.
+  subspace::ClosePluginsOnShutdown();
 
   std::unique_ptr<subspace::Server> server;
 
@@ -62,6 +69,25 @@ int main(int argc, char **argv) {
   if (absl::GetFlag(FLAGS_cleanup_filesystem)) {
     server->CleanupFilesystem();
   }
+
+  // Load the plugins.  Each plugin is a name:path pair.
+  for (const auto &p : absl::GetFlag(FLAGS_plugins)) {
+    auto pos = p.find(':');
+    if (pos == std::string::npos) {
+      fprintf(stderr, "Plugin '%s' is not in name:path format\n", p.c_str());
+      exit(1);
+    }
+    std::string name = p.substr(0, pos);
+    std::string path = p.substr(pos + 1);
+    absl::Status status = server->LoadPlugin(name, path);
+    if (!status.ok()) {
+      fprintf(stderr, "Failed to load plugin %s from %s: %s\n",
+              name.c_str(), path.c_str(), status.ToString().c_str());
+      exit(1);
+    }
+  }
+
+  server->SetMachineName(absl::GetFlag(FLAGS_machine));
 
   absl::Status s = server->Run();
   if (!s.ok()) {
