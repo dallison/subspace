@@ -101,7 +101,7 @@ PYBIND11_MODULE(subspace, m) {
       .def("__enter__", [](Message &self) { return &self; })
       .def("__exit__",
            [](Message &self, py::object, py::object, py::object) {
-             self.Release();
+             self.Reset();
              return py::none();
            })
       .def_readonly("length", &Message::length,
@@ -173,7 +173,7 @@ PYBIND11_MODULE(subspace, m) {
         }
         auto r = py::bytes(reinterpret_cast<const char *>(read_result->buffer),
                            read_result->length);
-        read_result->Release(); // Release the message buffer.
+        read_result->Reset(); // Release the message buffer.
         return r;
       },
       R"doc("Read a message from a subscriber. If there are no available messages,

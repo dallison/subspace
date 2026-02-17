@@ -447,7 +447,7 @@ public:
 
   void SetDebug(bool v) { debug_ = v; }
 
-  virtual MessagePrefix *Prefix(MessageSlot *slot) { return nullptr; }
+  virtual MessagePrefix *Prefix(MessageSlot */*slot*/) { return nullptr; }
 
   bool AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
                          uint64_t ordinal, int vchan_id, bool retire,
