@@ -68,7 +68,7 @@ struct ActiveMessage {
   }
 
   void Set(size_t len, const void *buf, uint64_t ord, int64_t ts, int vid,
-             bool activation, bool checksum_error);
+             bool activation, bool cs_error);
 
   void IncRef() { refs++; }
   void DecRef() { Release(--refs); }
@@ -97,10 +97,10 @@ private:
 struct Message {
   Message() = default;
   Message(size_t len, const void *buf, uint64_t ord, int64_t ts, int vid,
-          bool activation, int32_t sid, bool checksum_error)
+          bool activation, int32_t sid, bool cs_error)
       : length(len), buffer(buf), ordinal(ord), timestamp(ts), vchan_id(vid),
         is_activation(activation), slot_id(sid),
-        checksum_error(checksum_error) {}
+        checksum_error(cs_error) {}
   Message(std::shared_ptr<ActiveMessage> msg);
 
   // We can copy this around and move it.  It maintains a reference to the
