@@ -44,6 +44,10 @@ cc_test(
         "//server:subspace_server",
         "//plugins:nop_plugin.so",
     ],
+    copts = [
+        "-Wno-missing-field-initializers",
+        "-Wno-unused-parameter",
+    ],
     deps = [
         ":subspace_client",
         "//server",
