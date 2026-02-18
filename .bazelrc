@@ -15,7 +15,8 @@ build:macos --macos_minimum_os=10.15
 
 # For all builds, use C++17
 build --cxxopt="-std=c++17"
-build --cxxopt='-Wno-sign-compare'
+build --copt="-Wextra"
+build --copt="-Wno-missing-field-initializers"
 
 # For Apple Silicon
 build:apple_silicon --cpu=darwin_arm64
@@ -28,6 +29,11 @@ build:clang --copt="-Wunused-parameter"
 
 #build:clang --linkopt=-fuse-ld=lld
 
+# Common flags for GCC (similar to clang, -Wextra etc.)
+build:gcc --action_env=BAZEL_COMPILER=gcc
+build:gcc --action_env=CC=gcc --action_env=CXX=g++
+build:gcc --copt="-Wunused-parameter"
+build:gcc --copt="-Wextra"
 # Clang with libc++
 build:libc++ --config=clang
 build:libc++ --action_env=CXXFLAGS=-stdlib=libc++

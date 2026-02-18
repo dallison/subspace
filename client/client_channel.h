@@ -143,7 +143,7 @@ public:
   // Get the size associated with the given slot id.
   int SlotSize(int slot_id) const {
     if (ccb_->slots[slot_id].buffer_index < 0 ||
-        ccb_->slots[slot_id].buffer_index >= buffers_.size()) {
+        static_cast<size_t>(ccb_->slots[slot_id].buffer_index) >= buffers_.size()) {
       return 0;
     }
     return buffers_.empty()
@@ -159,7 +159,7 @@ public:
       return 0;
     }
     if (ccb_->slots[slot->id].buffer_index < 0 ||
-        ccb_->slots[slot->id].buffer_index >= buffers_.size()) {
+        static_cast<size_t>(ccb_->slots[slot->id].buffer_index) >= buffers_.size()) {
       return 0;
     }
     return buffers_[ccb_->slots[slot->id].buffer_index]->slot_size;
@@ -184,7 +184,7 @@ public:
     int retries = 0;
     while (retries < kMaxRetries) {
       size_t index = ccb_->slots[slot_id].buffer_index;
-      if (index >= 0 && index < buffers_.size()) {
+      if (index != -1ULL && index < buffers_.size()) {
         return buffers_.empty() ? nullptr : (buffers_[index]->buffer);
       }
       CheckReload();
