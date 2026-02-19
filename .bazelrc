@@ -15,6 +15,9 @@ build:macos --macos_minimum_os=10.15
 
 # For all builds, use C++17
 build --cxxopt="-std=c++17"
+
+# Statically link C++ deps into Rust binaries (avoids RPATH issues)
+build --@rules_rust//rust/settings:experimental_use_cc_common_link=True
 build --copt="-Wextra"
 build --copt="-Wno-missing-field-initializers"
 

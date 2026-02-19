@@ -1,0 +1,41 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+
+package(default_visibility = ["//visibility:public"])
+
+cargo_build_script(
+    name = "build_script",
+    srcs = ["build.rs"],
+    build_script_env = {
+        "PROTOC": "$(execpath @protobuf//:protoc)",
+        "SUBSPACE_PROTO_FILE": "$(execpath //proto:subspace.proto)",
+    },
+    data = [
+        "//proto:subspace.proto",
+        "@protobuf//:protoc",
+        "@protobuf//:well_known_type_protos",
+    ],
+    deps = all_crate_deps(build = True),
+)
+
+rust_library(
+    name = "subspace_client_rust",
+    srcs = glob(["src/**/*.rs"]),
+    crate_name = "subspace_client",
+    aliases = aliases(),
+    deps = all_crate_deps(normal = True) + [
+        ":build_script",
+    ],
+)
+
+rust_test(
+    name = "client_test",
+    srcs = ["tests/client_test.rs"],
+    rustc_flags = ["--cfg=server_ffi"],
+    env = {"RUST_TEST_THREADS": "1"},
+    deps = [
+        ":subspace_client_rust",
+        "//server:server_ffi",
+    ] + all_crate_deps(normal = True),
+)
