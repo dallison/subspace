@@ -1,0 +1,18 @@
+[package]
+name = "subspace-client"
+version = "2.2.0"
+edition = "2021"
+description = "Rust client for Subspace IPC"
+license = "Proprietary"
+
+[dependencies]
+nix = { version = "0.29", features = ["mman", "socket", "uio", "poll", "fs", "event"] }
+prost = "0.13"
+prost-types = "0.13"
+crc32fast = "1.4"
+thiserror = "2"
+log = "0.4"
+libc = "0.2"
+
+[build-dependencies]
+prost-build = "0.13"
