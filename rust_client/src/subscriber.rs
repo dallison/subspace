@@ -3,6 +3,7 @@
 // See LICENSE file for licensing information.
 
 use crate::channel::*;
+use crate::checksum;
 use crate::message::ActiveMessage;
 use crate::options::SubscriberOptions;
 use crate::publisher::{attach_buffers, clear_trigger, trigger_fd};
@@ -10,6 +11,13 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::os::unix::io::RawFd;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, Weak};
+
+use crate::error::Result;
+use crate::message::Message;
+
+pub type DroppedMessageCallback = Box<dyn Fn(i64) + Send + Sync>;
+pub type MessageCallback = Box<dyn Fn(Message) + Send + Sync>;
+pub type OnReceiveCallback = Box<dyn Fn(*mut u8, i64) -> Result<i64> + Send + Sync>;
 
 pub struct SubscriberImpl {
     pub channel: Channel,
@@ -27,6 +35,10 @@ pub struct SubscriberImpl {
 
     self_ref: Option<Weak<Mutex<SubscriberImpl>>>,
     pub(crate) active_messages: Vec<Arc<ActiveMessage>>,
+    pub(crate) dropped_message_callback: Option<DroppedMessageCallback>,
+    pub(crate) message_callback: Option<MessageCallback>,
+    pub(crate) on_receive_callback: Option<OnReceiveCallback>,
+    pub(crate) checksum_callback: Option<checksum::ChecksumCallback>,
 }
 
 struct OrdinalTracker {
@@ -126,6 +138,10 @@ impl SubscriberImpl {
             ordinal_trackers: HashMap::new(),
             self_ref: None,
             active_messages: Vec::new(),
+            dropped_message_callback: None,
+            message_callback: None,
+            on_receive_callback: None,
+            checksum_callback: None,
         };
         s.get_or_create_tracker(vchan_id);
         s
