@@ -59,6 +59,21 @@ pub struct Message {
 unsafe impl Send for Message {}
 unsafe impl Sync for Message {}
 
+impl std::fmt::Debug for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Message")
+            .field("length", &self.length)
+            .field("buffer", &self.buffer)
+            .field("ordinal", &self.ordinal)
+            .field("timestamp", &self.timestamp)
+            .field("vchan_id", &self.vchan_id)
+            .field("is_activation", &self.is_activation)
+            .field("slot_id", &self.slot_id)
+            .field("checksum_error", &self.checksum_error)
+            .finish()
+    }
+}
+
 impl Clone for Message {
     fn clone(&self) -> Self {
         if let Some(ref am) = self.active_message {

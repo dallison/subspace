@@ -4,12 +4,16 @@
 
 use crate::channel::*;
 use crate::checksum;
+use crate::error::Result;
 use crate::options::PublisherOptions;
 use nix::fcntl::OFlag;
 use nix::sys::mman::ProtFlags;
 use nix::sys::stat::Mode;
 use std::os::unix::io::RawFd;
 use std::sync::atomic::Ordering;
+
+pub type OnSendCallback = Box<dyn Fn(*mut u8, i64) -> Result<i64> + Send + Sync>;
+pub type ResizeCallback = Box<dyn Fn(i32, i32) -> Result<()> + Send + Sync>;
 
 pub struct PublishedMessage {
     pub new_slot: Option<usize>,
@@ -27,6 +31,10 @@ pub struct PublisherImpl {
     pub trigger_fd: RawFd,
     pub retirement_fd: RawFd,
     pub retirement_trigger_fds: Vec<RawFd>,
+
+    pub(crate) on_send_callback: Option<OnSendCallback>,
+    pub(crate) resize_callback: Option<ResizeCallback>,
+    pub(crate) checksum_callback: Option<checksum::ChecksumCallback>,
 }
 
 impl PublisherImpl {
@@ -56,6 +64,9 @@ impl PublisherImpl {
             trigger_fd: -1,
             retirement_fd: -1,
             retirement_trigger_fds: Vec::new(),
+            on_send_callback: None,
+            resize_callback: None,
+            checksum_callback: None,
         }
     }
 
@@ -426,7 +437,11 @@ impl PublisherImpl {
                             slot.message_size as usize,
                         );
                         let spans: Vec<&[u8]> = data.iter().copied().collect();
-                        p.checksum = checksum::calculate_checksum(&spans);
+                        p.checksum = if let Some(ref cb) = self.checksum_callback {
+                            cb(&spans)
+                        } else {
+                            checksum::calculate_checksum(&spans)
+                        };
                     }
                 }
             }

@@ -107,6 +107,11 @@ impl Publisher {
                     pub_impl.channel.name, slot_size, new_slot_size
                 )));
             }
+
+            if let Some(ref cb) = pub_impl.resize_callback {
+                cb(slot_size, new_slot_size)?;
+            }
+
             pub_impl.create_or_attach_buffers(aligned64(new_slot_size as i64) as u64)?;
             if let Some(si) = pub_impl.channel.slot {
                 pub_impl.channel.set_slot_to_biggest_buffer(si);
@@ -159,6 +164,12 @@ impl Publisher {
             .slot
             .map(|si| pub_impl.channel.slot_ref(si).id)
             .unwrap_or(-1);
+
+        let mut message_size = message_size;
+        if let Some(ref cb) = pub_impl.on_send_callback {
+            let buffer = pub_impl.channel.get_current_buffer_address();
+            message_size = cb(buffer, message_size)?;
+        }
 
         let slot_idx = pub_impl.channel.slot.unwrap();
         pub_impl.channel.slot_mut(slot_idx).message_size = message_size as u64;
@@ -229,6 +240,44 @@ impl Publisher {
 
     pub fn num_subscribers(&self, vchan_id: i32) -> i32 {
         self.imp.lock().unwrap().channel.num_subscribers(vchan_id)
+    }
+
+    /// Register a callback invoked just before a message is published.
+    /// The callback receives the buffer pointer and message size, and
+    /// returns the (possibly modified) message size.
+    pub fn set_on_send_callback<F>(&self, callback: F)
+    where
+        F: Fn(*mut u8, i64) -> Result<i64> + Send + Sync + 'static,
+    {
+        self.imp.lock().unwrap().on_send_callback = Some(Box::new(callback));
+    }
+
+    pub fn clear_on_send_callback(&self) {
+        self.imp.lock().unwrap().on_send_callback = None;
+    }
+
+    /// Register a callback invoked when the publisher resizes the channel.
+    /// Receives (old_size, new_size).  Return an error to prevent the resize.
+    pub fn register_resize_callback<F>(&self, callback: F)
+    where
+        F: Fn(i32, i32) -> Result<()> + Send + Sync + 'static,
+    {
+        self.imp.lock().unwrap().resize_callback = Some(Box::new(callback));
+    }
+
+    pub fn unregister_resize_callback(&self) {
+        self.imp.lock().unwrap().resize_callback = None;
+    }
+
+    pub fn set_checksum_callback<F>(&self, callback: F)
+    where
+        F: Fn(&[&[u8]]) -> u32 + Send + Sync + 'static,
+    {
+        self.imp.lock().unwrap().checksum_callback = Some(Box::new(callback));
+    }
+
+    pub fn reset_checksum_callback(&self) {
+        self.imp.lock().unwrap().checksum_callback = None;
     }
 }
 
@@ -338,6 +387,111 @@ impl Subscriber {
 
     pub fn num_active_messages(&self) -> i32 {
         self.imp.lock().unwrap().num_active_messages()
+    }
+
+    /// Register a callback invoked whenever dropped messages are detected
+    /// during a read.  The callback receives the number of messages dropped.
+    pub fn register_dropped_message_callback<F>(&self, callback: F)
+    where
+        F: Fn(i64) + Send + Sync + 'static,
+    {
+        self.imp.lock().unwrap().dropped_message_callback = Some(Box::new(callback));
+    }
+
+    /// Remove any previously registered dropped-message callback.
+    pub fn unregister_dropped_message_callback(&self) {
+        self.imp.lock().unwrap().dropped_message_callback = None;
+    }
+
+    /// Register a callback invoked by `process_all_messages` for each
+    /// message read from the channel.
+    pub fn register_message_callback<F>(&self, callback: F)
+    where
+        F: Fn(Message) + Send + Sync + 'static,
+    {
+        self.imp.lock().unwrap().message_callback = Some(Box::new(callback));
+    }
+
+    pub fn unregister_message_callback(&self) {
+        self.imp.lock().unwrap().message_callback = None;
+    }
+
+    /// Register a callback invoked when a message is received.  The callback
+    /// receives the buffer pointer and message size, and returns the (possibly
+    /// modified) message size.
+    pub fn set_on_receive_callback<F>(&self, callback: F)
+    where
+        F: Fn(*mut u8, i64) -> Result<i64> + Send + Sync + 'static,
+    {
+        self.imp.lock().unwrap().on_receive_callback = Some(Box::new(callback));
+    }
+
+    pub fn clear_on_receive_callback(&self) {
+        self.imp.lock().unwrap().on_receive_callback = None;
+    }
+
+    pub fn set_checksum_callback<F>(&self, callback: F)
+    where
+        F: Fn(&[&[u8]]) -> u32 + Send + Sync + 'static,
+    {
+        self.imp.lock().unwrap().checksum_callback = Some(Box::new(callback));
+    }
+
+    pub fn reset_checksum_callback(&self) {
+        self.imp.lock().unwrap().checksum_callback = None;
+    }
+
+    /// Invoke the registered message callback with the given message.
+    pub fn invoke_message_callback(&self, msg: Message) {
+        let sub = self.imp.lock().unwrap();
+        if let Some(ref cb) = sub.message_callback {
+            cb(msg);
+        }
+    }
+
+    /// Read all available messages and pass each to the registered message
+    /// callback.  Returns an error if no message callback is registered.
+    pub fn process_all_messages(&self, mode: ReadMode) -> Result<()> {
+        {
+            let sub = self.imp.lock().unwrap();
+            if sub.message_callback.is_none() {
+                return Err(SubspaceError::Internal(format!(
+                    "No message callback registered for channel {}",
+                    sub.channel.name
+                )));
+            }
+        }
+        loop {
+            let msg = self.read_message(mode)?;
+            if msg.is_empty() {
+                break;
+            }
+            let sub = self.imp.lock().unwrap();
+            if let Some(ref cb) = sub.message_callback {
+                cb(msg);
+            }
+        }
+        Ok(())
+    }
+
+    /// Read all available messages and return them as a `Vec`.
+    pub fn get_all_messages(&self, mode: ReadMode) -> Result<Vec<Message>> {
+        let mut messages = Vec::new();
+        loop {
+            let msg = self.read_message(mode)?;
+            if msg.is_empty() {
+                break;
+            }
+            messages.push(msg);
+        }
+
+        let sub = self.imp.lock().unwrap();
+        if sub.num_active_messages() >= sub.options.max_active_messages {
+            sub.untrigger();
+        } else if !messages.is_empty() {
+            sub.trigger();
+        }
+        Ok(messages)
     }
 }
 
@@ -771,6 +925,9 @@ fn read_message_internal(
         let new_vchan_id = sub.channel.slot_ref(new_idx).vchan_id as i32;
         let drops = sub.detect_drops(new_vchan_id);
         if drops > 0 {
+            if let Some(ref cb) = sub.dropped_message_callback {
+                cb(drops as i64);
+            }
             if sub.options.log_dropped_messages {
                 log::warn!(
                     "Dropped {} message{} on channel {}",
@@ -802,7 +959,12 @@ fn read_message_internal(
                     slot.message_size as usize,
                 );
                 let spans: Vec<&[u8]> = data.iter().copied().collect();
-                checksum_error = !checksum::verify_checksum(&spans, p.checksum);
+                let computed = if let Some(ref cb) = sub.checksum_callback {
+                    cb(&spans)
+                } else {
+                    checksum::calculate_checksum(&spans)
+                };
+                checksum_error = computed != p.checksum;
             }
 
             if (p.flags & MESSAGE_ACTIVATE) != 0 {
@@ -816,6 +978,13 @@ fn read_message_internal(
                 }
             }
         }
+    }
+
+    if let Some(ref cb) = sub.on_receive_callback {
+        let buffer = sub.channel.get_buffer_address(new_idx);
+        let slot = sub.channel.slot_ref(new_idx);
+        let new_size = cb(buffer as *mut u8, slot.message_size as i64)?;
+        sub.channel.slot_mut(new_idx).message_size = new_size as u64;
     }
 
     let slot = sub.channel.slot_ref(new_idx);
