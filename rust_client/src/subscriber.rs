@@ -9,7 +9,7 @@ use crate::publisher::{attach_buffers, clear_trigger, trigger_fd};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::os::unix::io::RawFd;
 use std::sync::atomic::Ordering;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
 
 pub struct SubscriberImpl {
     pub channel: Channel,
@@ -21,10 +21,12 @@ pub struct SubscriberImpl {
     pub reliable_publisher_fds: Mutex<Vec<RawFd>>,
     pub retirement_trigger_fds: Vec<RawFd>,
 
-    pub active_messages: Vec<ActiveMessage>,
     num_active_messages: std::sync::atomic::AtomicI32,
 
     ordinal_trackers: HashMap<i32, OrdinalTracker>,
+
+    self_ref: Option<Weak<Mutex<SubscriberImpl>>>,
+    pub(crate) active_messages: Vec<Arc<ActiveMessage>>,
 }
 
 struct OrdinalTracker {
@@ -120,12 +122,34 @@ impl SubscriberImpl {
             trigger_fd: -1,
             reliable_publisher_fds: Mutex::new(Vec::new()),
             retirement_trigger_fds: Vec::new(),
-            active_messages: Vec::new(),
             num_active_messages: std::sync::atomic::AtomicI32::new(0),
             ordinal_trackers: HashMap::new(),
+            self_ref: None,
+            active_messages: Vec::new(),
         };
         s.get_or_create_tracker(vchan_id);
         s
+    }
+
+    pub fn set_self_ref(&mut self, weak: Weak<Mutex<SubscriberImpl>>) {
+        self.self_ref = Some(weak);
+    }
+
+    /// (Re)builds the per-slot active messages used by `Message` to release
+    /// slots on drop.  Must be called after `set_self_ref` and whenever
+    /// `num_slots` changes (e.g. after a reload).
+    pub fn init_active_messages(&mut self) {
+        let weak = self.self_ref.as_ref().expect("self_ref not set").clone();
+        self.active_messages.clear();
+        for i in 0..self.channel.num_slots as usize {
+            let w = weak.clone();
+            self.active_messages.push(Arc::new(ActiveMessage::new(Box::new(move || {
+                if let Some(sub_arc) = w.upgrade() {
+                    let sub = sub_arc.lock().unwrap();
+                    sub.remove_active_message(i);
+                }
+            }))));
+        }
     }
 
     pub fn resolved_name(&self) -> &str {
@@ -133,18 +157,6 @@ impl SubscriberImpl {
             &self.options.mux
         } else {
             &self.channel.name
-        }
-    }
-
-    pub fn init_active_messages(&mut self) {
-        self.active_messages.clear();
-        for slot_id in 0..self.channel.num_slots as usize {
-            self.active_messages.push(ActiveMessage::new(
-                slot_id,
-                Box::new(|_slot_index| {
-                    // Release callback is handled externally by the subscriber.
-                }),
-            ));
         }
     }
 

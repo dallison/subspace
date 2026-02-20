@@ -190,6 +190,7 @@ impl Publisher {
             is_activation: false,
             slot_id: old_slot_id,
             checksum_error: false,
+            active_message: None,
         })
     }
 
@@ -573,7 +574,6 @@ impl Client {
             prot,
         )?;
 
-        sub_impl.init_active_messages();
         sub_impl.attach_buffers()?;
 
         sub_impl.trigger_fd = fds[sub_resp.trigger_fd_index as usize];
@@ -596,6 +596,12 @@ impl Client {
         sub_impl.trigger();
 
         let sub_arc = Arc::new(Mutex::new(sub_impl));
+        {
+            let weak = Arc::downgrade(&sub_arc);
+            let mut sub = sub_arc.lock().unwrap();
+            sub.set_self_ref(weak);
+            sub.init_active_messages();
+        }
         Ok(Subscriber {
             inner: self.inner.clone(),
             imp: sub_arc,
@@ -839,6 +845,9 @@ fn read_message_internal(
         return Err(SubspaceError::ChecksumError);
     }
 
+    let am = &sub.active_messages[new_idx];
+    am.inc_ref();
+
     Ok(Message {
         length: msg_size,
         buffer,
@@ -848,6 +857,7 @@ fn read_message_internal(
         is_activation,
         slot_id,
         checksum_error,
+        active_message: Some(Arc::clone(am)),
     })
 }
 
@@ -895,7 +905,6 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
         prot,
     )?;
 
-    sub.init_active_messages();
     sub.attach_buffers()?;
 
     sub.trigger_fd = fds[sub_resp.trigger_fd_index as usize];
@@ -913,6 +922,8 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
     for &idx in &sub_resp.retirement_fd_indexes {
         sub.retirement_trigger_fds.push(fds[idx as usize]);
     }
+
+    sub.init_active_messages();
 
     Ok(())
 }
