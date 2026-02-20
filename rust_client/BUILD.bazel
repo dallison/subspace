@@ -39,3 +39,16 @@ rust_test(
         "//server:server_ffi",
     ] + all_crate_deps(normal = True),
 )
+
+rust_test(
+    name = "latency_test",
+    srcs = ["tests/latency_test.rs"],
+    rustc_flags = ["--cfg=server_ffi"],
+    env = {"RUST_TEST_THREADS": "1"},
+    size = "large",
+    timeout = "long",
+    deps = [
+        ":subspace_client_rust",
+        "//server:server_ffi",
+    ] + all_crate_deps(normal = True),
+)
