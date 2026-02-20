@@ -3,61 +3,27 @@
 // See LICENSE file for licensing information.
 
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Arc;
 
-/// Tracks the lifetime of a message slot reference.
-/// When the ref count drops to zero, the slot is released.
-pub struct ActiveMessage {
-    pub length: usize,
-    pub buffer: *const u8,
-    pub ordinal: u64,
-    pub timestamp: u64,
-    pub vchan_id: i32,
-    pub slot_index: usize,
-    pub is_activation: bool,
-    pub checksum_error: bool,
-    pub refs: AtomicI32,
-
-    /// Callback invoked when ref count reaches zero.
-    /// Arguments: slot_index.
-    release_fn: Option<Box<dyn Fn(usize) + Send + Sync>>,
+/// Pre-allocated per-slot guard that releases a shared-memory message slot
+/// when the last `Message` referencing it is dropped.
+///
+/// The subscriber keeps one `Arc<ActiveMessage>` per slot; reading a
+/// message just clones the `Arc` (atomic increment, no heap allocation).
+/// An internal `AtomicI32` ref count tracks how many `Message` objects
+/// reference the slot; when it reaches zero the `release` callback fires,
+/// calling `SubscriberImpl::remove_active_message`.
+pub(crate) struct ActiveMessage {
+    refs: AtomicI32,
+    release: Box<dyn Fn() + Send + Sync>,
 }
 
-unsafe impl Send for ActiveMessage {}
-unsafe impl Sync for ActiveMessage {}
-
 impl ActiveMessage {
-    pub fn new(slot_index: usize, release_fn: Box<dyn Fn(usize) + Send + Sync>) -> Self {
+    pub fn new(release: Box<dyn Fn() + Send + Sync>) -> Self {
         Self {
-            length: 0,
-            buffer: std::ptr::null(),
-            ordinal: 0,
-            timestamp: 0,
-            vchan_id: -1,
-            slot_index,
-            is_activation: false,
-            checksum_error: false,
             refs: AtomicI32::new(0),
-            release_fn: Some(release_fn),
+            release,
         }
-    }
-
-    pub fn set(
-        &mut self,
-        length: usize,
-        buffer: *const u8,
-        ordinal: u64,
-        timestamp: u64,
-        vchan_id: i32,
-        is_activation: bool,
-        checksum_error: bool,
-    ) {
-        self.length = length;
-        self.buffer = buffer;
-        self.ordinal = ordinal;
-        self.timestamp = timestamp;
-        self.vchan_id = vchan_id;
-        self.is_activation = is_activation;
-        self.checksum_error = checksum_error;
     }
 
     pub fn inc_ref(&self) {
@@ -65,31 +31,18 @@ impl ActiveMessage {
     }
 
     pub fn dec_ref(&self) {
-        let old = self.refs.fetch_sub(1, Ordering::Relaxed);
-        if old == 1 && self.length != 0 {
-            if let Some(ref f) = self.release_fn {
-                f(self.slot_index);
-            }
+        let old = self.refs.fetch_sub(1, Ordering::Release);
+        if old == 1 {
+            std::sync::atomic::fence(Ordering::Acquire);
+            (self.release)();
         }
-    }
-
-    pub fn reset(&mut self) {
-        self.length = 0;
-        self.buffer = std::ptr::null();
-        self.ordinal = u64::MAX;
-        self.timestamp = 0;
-        self.vchan_id = -1;
-        self.is_activation = false;
-        self.checksum_error = false;
-    }
-
-    pub fn ref_count(&self) -> i32 {
-        self.refs.load(Ordering::Relaxed)
     }
 }
 
 /// A message read from a subscriber or returned by publish.
-#[derive(Clone)]
+///
+/// Cloning a `Message` shares ownership of the underlying slot; the slot
+/// is released only when the *last* clone is dropped.
 pub struct Message {
     pub length: usize,
     pub buffer: *const u8,
@@ -99,10 +52,39 @@ pub struct Message {
     pub is_activation: bool,
     pub slot_id: i32,
     pub checksum_error: bool,
+
+    pub(crate) active_message: Option<Arc<ActiveMessage>>,
 }
 
 unsafe impl Send for Message {}
 unsafe impl Sync for Message {}
+
+impl Clone for Message {
+    fn clone(&self) -> Self {
+        if let Some(ref am) = self.active_message {
+            am.inc_ref();
+        }
+        Self {
+            length: self.length,
+            buffer: self.buffer,
+            ordinal: self.ordinal,
+            timestamp: self.timestamp,
+            vchan_id: self.vchan_id,
+            is_activation: self.is_activation,
+            slot_id: self.slot_id,
+            checksum_error: self.checksum_error,
+            active_message: self.active_message.clone(),
+        }
+    }
+}
+
+impl Drop for Message {
+    fn drop(&mut self) {
+        if let Some(ref am) = self.active_message {
+            am.dec_ref();
+        }
+    }
+}
 
 impl Default for Message {
     fn default() -> Self {
@@ -115,6 +97,7 @@ impl Default for Message {
             is_activation: false,
             slot_id: -1,
             checksum_error: false,
+            active_message: None,
         }
     }
 }
