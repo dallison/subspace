@@ -1,3 +1,4 @@
 bazel-*
 .vscode/*
 build
+rust_client/target
