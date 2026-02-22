@@ -13,7 +13,7 @@
 extern "C" {
 #endif
 
-thread_local SubspaceError subspace_error = {.error_message = ""};
+thread_local SubspaceError subspace_error = {};
 
 void subspace_clear_error(void) { subspace_error.error_message[0] = '\0'; }
 
