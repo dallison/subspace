@@ -304,7 +304,11 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
       },
       server_user_id_, server_group_id_);
 
-  channel->SetPrefixSize(opts.PrefixSize());
+  int32_t ps = opts.PrefixSize();
+  if (ps < Channel::kMinPrefixSize) {
+    ps = Channel::kMinPrefixSize;
+  }
+  channel->SetPrefixSize(ps);
 
   SharedMemoryFds channel_fds(std::move(fds[pub_resp.ccb_fd_index()]),
                               std::move(fds[pub_resp.bcb_fd_index()]));
@@ -902,9 +906,9 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
       auto data =
           GetMessageChecksumData(prefix, subscriber->GetCurrentBufferAddress(),
                                  new_slot->message_size);
-      const void *cksum = GetChecksumAddress(prefix);
-      size_t cksum_size = GetChecksumSize(subscriber->PrefixAreaSize());
-      checksum_error = !subscriber->ValidateChecksum(data, cksum, cksum_size);
+      absl::Span<const std::byte> cksum =
+          GetChecksumSpan(prefix, subscriber->PrefixAreaSize());
+      checksum_error = !subscriber->ValidateChecksum(data, cksum);
     }
     if ((prefix->flags & kMessageActivate) != 0) {
       is_activation = true;

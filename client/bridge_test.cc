@@ -483,6 +483,104 @@ TEST_F(BridgeTest, MultipleRetirement2) {
   }
 }
 
+void WaitForSubscribedMessageWithPrefixSize(
+    toolbelt::FileDescriptor &bridge_pipe, const std::string &channel_name,
+    int32_t expected_prefix_size) {
+  std::cerr << "Waiting for bridge notification\n";
+  char buffer[4096];
+  int32_t length;
+  absl::StatusOr<ssize_t> n = bridge_pipe.Read(&length, sizeof(length));
+  ASSERT_OK(n);
+  ASSERT_EQ(sizeof(int32_t), *n);
+  length = ntohl(length);
+  n = bridge_pipe.Read(buffer, length);
+  ASSERT_OK(n);
+
+  subspace::Subscribed subscribed;
+  ASSERT_TRUE(subscribed.ParseFromArray(buffer, *n));
+  ASSERT_EQ(subscribed.channel_name(), channel_name);
+  ASSERT_EQ(expected_prefix_size, subscribed.prefix_size());
+  std::cerr << "Received bridge notification for channel: "
+            << subscribed.channel_name()
+            << " prefix_size: " << subscribed.prefix_size() << std::endl;
+}
+
+TEST_F(BridgeTest, PrefixSize) {
+  subspace::Client client1;
+  InitClient(client1, 0);
+
+  subspace::Client client2;
+  InitClient(client2, 1);
+
+  absl::StatusOr<Publisher> pub = client1.CreatePublisher(
+      "/bridged_prefix",
+      {.slot_size = 256, .num_slots = 10, .local = false, .prefix_size = 3});
+  ASSERT_OK(pub);
+  ASSERT_EQ(3u * 64, pub->PrefixAreaSize());
+
+  absl::StatusOr<Subscriber> sub =
+      client2.CreateSubscriber("/bridged_prefix", {.max_active_messages = 2});
+  ASSERT_OK(sub);
+
+  toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
+  WaitForSubscribedMessageWithPrefixSize(send_bridge_pipe, "/bridged_prefix",
+                                         3);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "prefix_test", 11);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(11);
+  ASSERT_OK(pub_status);
+
+  toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
+  WaitForSubscribedMessageWithPrefixSize(recv_bridge_pipe, "/bridged_prefix",
+                                         3);
+
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(11, msg->length);
+  ASSERT_EQ(0, memcmp("prefix_test", msg->buffer, 11));
+  ASSERT_EQ(3u * 64, sub->PrefixAreaSize());
+}
+
+TEST_F(BridgeTest, PrefixSizeDefault) {
+  subspace::Client client1;
+  InitClient(client1, 0);
+
+  subspace::Client client2;
+  InitClient(client2, 1);
+
+  absl::StatusOr<Publisher> pub = client1.CreatePublisher(
+      "/bridged_prefix_def",
+      {.slot_size = 256, .num_slots = 10, .local = false});
+  ASSERT_OK(pub);
+  ASSERT_EQ(64u, pub->PrefixAreaSize());
+
+  absl::StatusOr<Subscriber> sub = client2.CreateSubscriber(
+      "/bridged_prefix_def", {.max_active_messages = 2});
+  ASSERT_OK(sub);
+
+  toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
+  WaitForSubscribedMessageWithPrefixSize(send_bridge_pipe,
+                                         "/bridged_prefix_def", 1);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "default", 7);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(7);
+  ASSERT_OK(pub_status);
+
+  toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
+  WaitForSubscribedMessageWithPrefixSize(recv_bridge_pipe,
+                                         "/bridged_prefix_def", 1);
+
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(7, msg->length);
+  ASSERT_EQ(0, memcmp("default", msg->buffer, 7));
+  ASSERT_EQ(64u, sub->PrefixAreaSize());
+}
+
 int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);
   absl::ParseCommandLine(argc, argv);

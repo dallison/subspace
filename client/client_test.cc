@@ -2786,15 +2786,14 @@ TEST_F(ClientTest, ChecksumCallback) {
 
   auto fake_crc =
       [](const std::array<absl::Span<const uint8_t>, 2> &data,
-         void *checksum, size_t checksum_size) {
+         absl::Span<std::byte> checksum) {
     uint32_t sum = 0;
     for (const auto &span : data) {
       for (uint8_t byte : span) {
         sum += byte;
       }
     }
-    size_t n = sizeof(sum) < checksum_size ? sizeof(sum) : checksum_size;
-    memcpy(checksum, &sum, n);
+    *reinterpret_cast<uint32_t *>(checksum.data()) = sum;
   };
 
   pub->SetChecksumCallback(fake_crc);
@@ -2843,15 +2842,14 @@ TEST_F(ClientTest, ChecksumCallbackPassErrors) {
 
   auto fake_crc =
       [](const std::array<absl::Span<const uint8_t>, 2> &data,
-         void *checksum, size_t checksum_size) {
+         absl::Span<std::byte> checksum) {
     uint32_t sum = 0;
     for (const auto &span : data) {
       for (uint8_t byte : span) {
         sum += byte;
       }
     }
-    size_t n = sizeof(sum) < checksum_size ? sizeof(sum) : checksum_size;
-    memcpy(checksum, &sum, n);
+    *reinterpret_cast<uint32_t *>(checksum.data()) = sum;
   };
 
   pub->SetChecksumCallback(fake_crc);
@@ -2886,23 +2884,21 @@ TEST_F(ClientTest, ChecksumCallbackReset) {
 
   auto fake_crc =
       [](const std::array<absl::Span<const uint8_t>, 2> &data,
-         void *checksum, size_t checksum_size) {
+         absl::Span<std::byte> checksum) {
     uint32_t sum = 0;
     for (const auto &span : data) {
       for (uint8_t byte : span) {
         sum += byte;
       }
     }
-    size_t n = sizeof(sum) < checksum_size ? sizeof(sum) : checksum_size;
-    memcpy(checksum, &sum, n);
+    *reinterpret_cast<uint32_t *>(checksum.data()) = sum;
   };
 
   auto fake_crc_mismatch =
       [&fake_crc](const std::array<absl::Span<const uint8_t>, 2> &data,
-                  void *checksum, size_t checksum_size) {
-    fake_crc(data, checksum, checksum_size);
-    // Corrupt the first byte to force a mismatch.
-    static_cast<uint8_t *>(checksum)[0] ^= 0xFF;
+                  absl::Span<std::byte> checksum) {
+    fake_crc(data, checksum);
+    checksum[0] ^= std::byte{0xFF};
   };
 
   pub->SetChecksumCallback(fake_crc);
@@ -2952,15 +2948,14 @@ TEST_F(ClientTest, ChecksumCallbackPublisherOnly) {
 
   auto fake_crc =
       [](const std::array<absl::Span<const uint8_t>, 2> &data,
-         void *checksum, size_t checksum_size) {
+         absl::Span<std::byte> checksum) {
     uint32_t sum = 0;
     for (const auto &span : data) {
       for (uint8_t byte : span) {
         sum += byte;
       }
     }
-    size_t n = sizeof(sum) < checksum_size ? sizeof(sum) : checksum_size;
-    memcpy(checksum, &sum, n);
+    *reinterpret_cast<uint32_t *>(checksum.data()) = sum;
   };
 
   pub->SetChecksumCallback(fake_crc);
@@ -2997,9 +2992,9 @@ TEST_F(ClientTest, Checksum20Byte) {
   // 20-byte checksum: 5 CRC32 values computed with different seeds.
   auto checksum_20 =
       [](const std::array<absl::Span<const uint8_t>, 2> &data,
-         void *checksum, size_t checksum_size) {
-    ASSERT_GE(checksum_size, 20u);
-    uint32_t *out = reinterpret_cast<uint32_t *>(checksum);
+         absl::Span<std::byte> checksum) {
+    ASSERT_GE(checksum.size(), 20u);
+    uint32_t *out = reinterpret_cast<uint32_t *>(checksum.data());
     for (int k = 0; k < 5; k++) {
       uint32_t crc = 0xFFFFFFFF ^ static_cast<uint32_t>(k * 0x11111111);
       for (const auto &span : data) {
@@ -3041,6 +3036,70 @@ TEST_F(ClientTest, Checksum20Byte) {
     ASSERT_EQ(absl::StatusCode::kInternal, msg.status().code());
     ASSERT_EQ("Checksum verification failed", msg.status().message());
   }
+}
+
+TEST_F(ClientTest, PrefixSizeZero) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  // prefix_size 0 is treated as 1 (backward compat), so this should succeed.
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_ps0", {.slot_size = 256, .num_slots = 10, .prefix_size = 0});
+  ASSERT_OK(pub);
+  ASSERT_EQ(64u, pub->PrefixAreaSize());
+}
+
+TEST_F(ClientTest, PrefixSizeTooLarge) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_ps_big", {.slot_size = 256, .num_slots = 10, .prefix_size = 17});
+  ASSERT_FALSE(pub.ok());
+}
+
+TEST_F(ClientTest, PrefixSizeNegative) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_ps_neg", {.slot_size = 256, .num_slots = 10, .prefix_size = -1});
+  ASSERT_FALSE(pub.ok());
+}
+
+TEST_F(ClientTest, PrefixSizeInconsistent) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub1 = client->CreatePublisher(
+      "chan_ps_incon", {.slot_size = 256, .num_slots = 10, .prefix_size = 2});
+  ASSERT_OK(pub1);
+
+  // A second publisher on the same channel with a different prefix_size
+  // should fail.
+  absl::StatusOr<Publisher> pub2 = client->CreatePublisher(
+      "chan_ps_incon", {.slot_size = 256, .num_slots = 10, .prefix_size = 3});
+  ASSERT_FALSE(pub2.ok());
+}
+
+TEST_F(ClientTest, PrefixSizeMax) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_ps_max", {.slot_size = 256, .num_slots = 10, .prefix_size = 16});
+  ASSERT_OK(pub);
+  ASSERT_EQ(16u * 64, pub->PrefixAreaSize());
+}
+
+TEST_F(ClientTest, PrefixSizeSubscriberGetsValue) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_ps_sub", {.slot_size = 256, .num_slots = 10, .prefix_size = 4});
+  ASSERT_OK(pub);
+
+  absl::StatusOr<Subscriber> sub =
+      client->CreateSubscriber("chan_ps_sub");
+  ASSERT_OK(sub);
+
+  ASSERT_EQ(4u * 64, pub->PrefixAreaSize());
+  ASSERT_EQ(4u * 64, sub->PrefixAreaSize());
 }
 
 int main(int argc, char **argv) {

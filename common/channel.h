@@ -10,6 +10,7 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/types/span.h"
 #include "common/atomic_bitset.h"
 #include "toolbelt/bitset.h"
 #include "toolbelt/fd.h"
@@ -63,8 +64,9 @@ struct MessagePrefix {
   uint64_t timestamp;
   int64_t flags;
   int32_t vchan_id;
+  int32_t padding2;  // Align checksum to 16-byte boundary.
   uint32_t checksum;
-  char padding2[64 - 48]; // Align to 64 bytes.
+  char padding3[64 - 52]; // Align to 64 bytes.
 
   bool IsActivation() const { return (flags & kMessageActivate) != 0; }
   void SetIsActivation() { flags |= kMessageActivate; }
@@ -215,19 +217,21 @@ GetMessageChecksumData(MessagePrefix *prefix, void *buffer,
   return data;
 }
 
-// Get the address and available size of the checksum storage area within
-// the prefix.  The area starts at the checksum field and extends to the
-// end of the full prefix area (which may span multiple 64-byte chunks).
-inline void *GetChecksumAddress(MessagePrefix *prefix) {
-  return &prefix->checksum;
+// Get a span over the checksum storage area within the prefix.
+// The area starts at the checksum field and extends to the end of the
+// full prefix area (which may span multiple 64-byte chunks).
+inline absl::Span<std::byte> GetChecksumSpan(MessagePrefix *prefix,
+                                             size_t prefix_area_size) {
+  return absl::Span<std::byte>(
+      reinterpret_cast<std::byte *>(&prefix->checksum),
+      prefix_area_size - offsetof(MessagePrefix, checksum));
 }
 
-inline const void *GetChecksumAddress(const MessagePrefix *prefix) {
-  return &prefix->checksum;
-}
-
-inline size_t GetChecksumSize(size_t prefix_area_size) {
-  return prefix_area_size - offsetof(MessagePrefix, checksum);
+inline absl::Span<const std::byte>
+GetChecksumSpan(const MessagePrefix *prefix, size_t prefix_area_size) {
+  return absl::Span<const std::byte>(
+      reinterpret_cast<const std::byte *>(&prefix->checksum),
+      prefix_area_size - offsetof(MessagePrefix, checksum));
 }
 
 // This counts the number of subscribers given a virtual channel id.

@@ -350,13 +350,11 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     if (options_.Checksum()) {
       prefix->SetHasChecksum();
       auto data = GetMessageChecksumData(prefix, buffer, slot->message_size);
-      void *cksum = GetChecksumAddress(prefix);
-      size_t cksum_size = GetChecksumSize(PrefixAreaSize());
-      memset(cksum, 0, cksum_size);
+      absl::Span<std::byte> cksum = GetChecksumSpan(prefix, PrefixAreaSize());
       if (checksum_callback_ != nullptr) {
-        checksum_callback_(data, cksum, cksum_size);
+        checksum_callback_(data, cksum);
       } else {
-        CalculateChecksum(data, cksum, cksum_size);
+        CalculateChecksum(data, cksum);
       }
     }
   }

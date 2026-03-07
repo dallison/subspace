@@ -209,18 +209,19 @@ public:
   std::string Mux() const { return options_.Mux(); }
 
   bool ValidateChecksum(const std::array<absl::Span<const uint8_t>, 2> &data,
-                        const void *checksum, size_t checksum_size) {
+                        absl::Span<const std::byte> checksum) {
     if (!options_.Checksum()) {
       return true;
     }
     if (checksum_callback_ != nullptr) {
       // Compute the expected checksum into a zero-initialized temporary
       // buffer and compare with what was stored in the prefix.
-      uint8_t tmp[Channel::kMaxPrefixSize * sizeof(MessagePrefix)] = {};
-      checksum_callback_(data, tmp, checksum_size);
-      return memcmp(tmp, checksum, checksum_size) == 0;
+      std::byte tmp[Channel::kMaxPrefixSize * sizeof(MessagePrefix)] = {};
+      absl::Span<std::byte> tmp_span(tmp, checksum.size());
+      checksum_callback_(data, tmp_span);
+      return memcmp(tmp, checksum.data(), checksum.size()) == 0;
     }
-    return VerifyChecksum(data, checksum, checksum_size);
+    return VerifyChecksum(data, checksum);
   }
 
   bool PassChecksumErrors() const { return options_.PassChecksumErrors(); }
