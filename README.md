@@ -774,15 +774,14 @@ callback replaces the built-in CRC32 for checksum calculation or verification.
 **Example: Custom checksum callback**
 ```cpp
 auto fake_crc = [](const std::array<absl::Span<const uint8_t>, 2> &data,
-                   void *checksum, size_t checksum_size) {
+                   absl::Span<std::byte> checksum) {
     uint32_t sum = 0;
     for (const auto &span : data) {
         for (uint8_t byte : span) {
             sum += byte;
         }
     }
-    size_t n = sizeof(sum) < checksum_size ? sizeof(sum) : checksum_size;
-    memcpy(checksum, &sum, n);
+    *reinterpret_cast<uint32_t *>(checksum.data()) = sum;
 };
 
 pub.SetChecksumCallback(fake_crc);
