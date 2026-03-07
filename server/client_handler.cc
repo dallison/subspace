@@ -298,6 +298,29 @@ void ClientHandler::HandleCreatePublisher(
     response->set_error(publisher.status().ToString());
     return;
   }
+  {
+    int32_t ps = req.prefix_size();
+    if (ps == 0) {
+      ps = Channel::kMinPrefixSize;
+    }
+    if (ps < Channel::kMinPrefixSize || ps > Channel::kMaxPrefixSize) {
+      response->set_error(
+          absl::StrFormat("Invalid prefix_size %d for channel %s: "
+                          "must be between %d and %d",
+                          ps, req.channel_name(), Channel::kMinPrefixSize,
+                          Channel::kMaxPrefixSize));
+      return;
+    }
+    if (channel->PrefixSize() != 1 && channel->PrefixSize() != ps) {
+      response->set_error(
+          absl::StrFormat("Inconsistent prefix_size for channel %s: "
+                          "already set to %d, not %d",
+                          req.channel_name(), channel->PrefixSize(), ps));
+      return;
+    }
+    channel->SetPrefixSize(ps);
+  }
+
   server_->OnNewPublisher(channel->Name(), (*publisher)->GetId());
   server_->SendChannelDirectory();
 
@@ -502,6 +525,7 @@ void ClientHandler::HandleCreateSubscriber(
 
   response->set_slot_size(channel->SlotSize());
   response->set_num_slots(channel->NumSlots());
+  response->set_prefix_size(channel->PrefixSize());
   // Add publisher trigger indexes.
   std::vector<toolbelt::FileDescriptor> pub_fds =
       channel->GetReliablePublisherTriggerFds();

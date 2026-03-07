@@ -278,6 +278,7 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
   cmd->set_mux(opts.Mux());
   cmd->set_vchan_id(opts.VchanId());
   cmd->set_notify_retirement(opts.notify_retirement);
+  cmd->set_prefix_size(opts.PrefixSize());
 
   // Send request to server and wait for response.
   Response resp;
@@ -302,6 +303,8 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
         return CheckReload(static_cast<ClientChannel *>(c));
       },
       server_user_id_, server_group_id_);
+
+  channel->SetPrefixSize(opts.PrefixSize());
 
   SharedMemoryFds channel_fds(std::move(fds[pub_resp.ccb_fd_index()]),
                               std::move(fds[pub_resp.bcb_fd_index()]));
@@ -426,6 +429,7 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
       server_user_id_, server_group_id_);
 
   channel->SetNumSlots(sub_resp.num_slots());
+  channel->SetPrefixSize(sub_resp.prefix_size());
 
   SharedMemoryFds channel_fds(std::move(fds[sub_resp.ccb_fd_index()]),
                               std::move(fds[sub_resp.bcb_fd_index()]));
@@ -898,7 +902,9 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
       auto data =
           GetMessageChecksumData(prefix, subscriber->GetCurrentBufferAddress(),
                                  new_slot->message_size);
-      checksum_error = !subscriber->ValidateChecksum(data, prefix->checksum);
+      const void *cksum = GetChecksumAddress(prefix);
+      size_t cksum_size = GetChecksumSize(subscriber->PrefixAreaSize());
+      checksum_error = !subscriber->ValidateChecksum(data, cksum, cksum_size);
     }
     if ((prefix->flags & kMessageActivate) != 0) {
       is_activation = true;
@@ -1128,6 +1134,7 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
     subscriber->SetType(sub_resp.type());
   }
   subscriber->SetNumSlots(sub_resp.num_slots());
+  subscriber->SetPrefixSize(sub_resp.prefix_size());
 
   SharedMemoryFds channel_fds(std::move(fds[sub_resp.ccb_fd_index()]),
                               std::move(fds[sub_resp.bcb_fd_index()]));

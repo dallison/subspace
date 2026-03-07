@@ -6,6 +6,7 @@
 #include "client/client_channel.h"
 #include "client/message.h"
 #include "common/fast_ring_buffer.h"
+#include <cstring>
 #include <mutex>
 
 namespace subspace {
@@ -208,14 +209,18 @@ public:
   std::string Mux() const { return options_.Mux(); }
 
   bool ValidateChecksum(const std::array<absl::Span<const uint8_t>, 2> &data,
-                        uint32_t checksum) {
+                        const void *checksum, size_t checksum_size) {
     if (!options_.Checksum()) {
       return true;
     }
     if (checksum_callback_ != nullptr) {
-      return checksum_callback_(data) == checksum;
+      // Compute the expected checksum into a zero-initialized temporary
+      // buffer and compare with what was stored in the prefix.
+      uint8_t tmp[Channel::kMaxPrefixSize * sizeof(MessagePrefix)] = {};
+      checksum_callback_(data, tmp, checksum_size);
+      return memcmp(tmp, checksum, checksum_size) == 0;
     }
-    return VerifyChecksum(data, checksum);
+    return VerifyChecksum(data, checksum, checksum_size);
   }
 
   bool PassChecksumErrors() const { return options_.PassChecksumErrors(); }

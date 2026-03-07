@@ -200,8 +200,8 @@ struct BufferControlBlock {
       sizes[kMaxBuffers]; // Number of references to this buffer.
 };
 
-// Given a message prefix and a buffer containing the message data return a vector of spans
-// that can be used to calculate the checksum.
+// Given a message prefix and a buffer containing the message data return a pair of spans
+// covering the data to be checksummed (prefix fields before the checksum + message payload).
 inline std::array<absl::Span<const uint8_t>, 2>
 GetMessageChecksumData(MessagePrefix *prefix, void *buffer,
                        size_t message_size) {
@@ -213,6 +213,21 @@ GetMessageChecksumData(MessagePrefix *prefix, void *buffer,
       absl::Span<const uint8_t>(reinterpret_cast<const uint8_t *>(buffer),
                                 message_size)};
   return data;
+}
+
+// Get the address and available size of the checksum storage area within
+// the prefix.  The area starts at the checksum field and extends to the
+// end of the full prefix area (which may span multiple 64-byte chunks).
+inline void *GetChecksumAddress(MessagePrefix *prefix) {
+  return &prefix->checksum;
+}
+
+inline const void *GetChecksumAddress(const MessagePrefix *prefix) {
+  return &prefix->checksum;
+}
+
+inline size_t GetChecksumSize(size_t prefix_area_size) {
+  return prefix_area_size - offsetof(MessagePrefix, checksum);
 }
 
 // This counts the number of subscribers given a virtual channel id.
@@ -409,15 +424,27 @@ public:
   void DumpSlots(std::ostream &os) const;
   virtual void Dump(std::ostream &os) const;
 
+  static constexpr int32_t kMinPrefixSize = 1;
+  static constexpr int32_t kMaxPrefixSize = 16;
+
+  // Total size of the prefix area per slot.  prefix_size_ is the number
+  // of 64-byte chunks; 1 means just the MessagePrefix itself.
+  size_t PrefixAreaSize() const {
+    return prefix_size_ * sizeof(MessagePrefix);
+  }
+
+  int32_t PrefixSize() const { return prefix_size_; }
+  void SetPrefixSize(int32_t size) { prefix_size_ = size; }
+
   uint64_t BufferSizeToSlotSize(uint64_t size) const {
-    if (size < NumSlots() * sizeof(MessagePrefix)) {
+    if (size < NumSlots() * PrefixAreaSize()) {
       return 0;
     }
-    return (size - NumSlots() * sizeof(MessagePrefix)) / NumSlots();
+    return (size - NumSlots() * PrefixAreaSize()) / NumSlots();
   };
 
   uint64_t SlotSizeToBufferSize(uint64_t slot_size) const {
-    return NumSlots() * (slot_size + sizeof(MessagePrefix));
+    return NumSlots() * (slot_size + PrefixAreaSize());
   }
 
   // Get the number of slots in the channel (can't be changed)
@@ -538,6 +565,7 @@ protected:
 
   int channel_id_; // ID allocated from server.
   std::string type_;
+  int32_t prefix_size_ = 1;
 
   uint16_t num_updates_ = 0;
 

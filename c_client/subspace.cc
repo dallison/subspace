@@ -80,6 +80,7 @@ SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size,
       .fixed_size = false,
       .type = {.type = nullptr, .type_length = 0},
       .activate = false,
+      .prefix_size = 1,
   };
   return options;
 }
@@ -123,6 +124,7 @@ SubspacePublisher subspace_create_publisher(SubspaceClient client,
       .fixed_size = options.fixed_size,
       .type = std::string(options.type.type, options.type.type_length),
       .activate = options.activate,
+      .prefix_size = options.prefix_size,
   };
   subspace_clear_error();
   SubspacePublisher publisher;

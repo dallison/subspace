@@ -56,7 +56,11 @@ PYBIND11_MODULE(subspace, m) {
       .def("set_num_slots", &PublisherOptions::SetNumSlots,
            "Set the number of slots for the publisher.")
       .def("num_slots", &PublisherOptions::NumSlots,
-           "Get the number of slots for the publisher.");
+           "Get the number of slots for the publisher.")
+      .def("set_prefix_size", &PublisherOptions::SetPrefixSize,
+           "Set the prefix size in 64-byte chunks.")
+      .def("prefix_size", &PublisherOptions::PrefixSize,
+           "Get the prefix size in 64-byte chunks.");
 
   // SubscriberOptions class.
   py::class_<SubscriberOptions>(m, "SubscriberOptions",
