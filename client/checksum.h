@@ -19,23 +19,31 @@ extern "C" {
 uint32_t SubspaceCRC32(uint32_t crc, const uint8_t *data, size_t length);
 }
 
-using ChecksumCallback =
-    std::function<uint32_t(const std::array<absl::Span<const uint8_t>, 2> &)>;
+// The callback receives the data to be checksummed and a writable region
+// where the checksum should be stored.  The default CRC32 implementation
+// writes 4 bytes; custom callbacks may use the full region.
+using ChecksumCallback = std::function<void(
+    const std::array<absl::Span<const uint8_t>, 2> &data,
+    void *checksum, size_t checksum_size)>;
 
 template <size_t N>
-uint32_t
-CalculateChecksum(const std::array<absl::Span<const uint8_t>, N> &data) {
+void CalculateChecksum(const std::array<absl::Span<const uint8_t>, N> &data,
+                       void *checksum, size_t checksum_size) {
   uint32_t crc = 0xFFFFFFFF;
   for (size_t i = 0; i < N; i++) {
     crc = SubspaceCRC32(crc, data[i].data(), data[i].size());
   }
-  return ~crc;
+  *reinterpret_cast<uint32_t *>(checksum) = ~crc;
 }
 
 template <size_t N>
 bool VerifyChecksum(const std::array<absl::Span<const uint8_t>, N> &data,
-                    uint32_t checksum) {
-  return CalculateChecksum(data) == checksum;
+                    const void *checksum, size_t checksum_size) {
+  uint32_t crc = 0xFFFFFFFF;
+  for (size_t i = 0; i < N; i++) {
+    crc = SubspaceCRC32(crc, data[i].data(), data[i].size());
+  }
+  return *reinterpret_cast<const uint32_t *>(checksum) == ~crc;
 }
 
 } // namespace subspace

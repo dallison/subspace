@@ -885,6 +885,7 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
   subscribed.set_slot_size(channel->SlotSize());
   subscribed.set_num_slots(channel->NumSlots());
   subscribed.set_reliable(pub_reliable);
+  subscribed.set_prefix_size(channel->PrefixSize());
 
   toolbelt::StreamSocket retirement_listener;
   toolbelt::SocketAddress retirement_addr;
@@ -1026,8 +1027,12 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
         break;
       }
       // We want to send the MessagePrefix along with the message.
+      // The prefix area may be larger than sizeof(MessagePrefix) if
+      // prefix_size > 0; the extra chunks sit between the MessagePrefix
+      // and the message data.
+      size_t prefix_area = sub->PrefixAreaSize();
       const char *prefix_addr =
-          reinterpret_cast<const char *>(msg->buffer) - sizeof(MessagePrefix);
+          reinterpret_cast<const char *>(msg->buffer) - prefix_area;
       const MessagePrefix *prefix =
           reinterpret_cast<const MessagePrefix *>(prefix_addr);
       // NOTE: there's a question here about whether we want to send an
@@ -1043,7 +1048,7 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
       // contains a padding member for this purpose.  We don't
       // count the padding in the length sent.
       char *data_addr = const_cast<char *>(prefix_addr) + sizeof(int32_t);
-      size_t msglen = msg->length + sizeof(MessagePrefix) - sizeof(int32_t);
+      size_t msglen = msg->length + prefix_area - sizeof(int32_t);
 
       // Note that for a reliable publisher where the subscriber is slower
       // we will get backpressure from the receiver because it won't
@@ -1310,12 +1315,17 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
   }
   // For a reliable publisher, this will send an activation message
   // to the local channel.
+  int32_t bridge_prefix_size = subscribed.prefix_size();
+  if (bridge_prefix_size < Channel::kMinPrefixSize) {
+    bridge_prefix_size = Channel::kMinPrefixSize;
+  }
   absl::StatusOr<Publisher> pub = client.CreatePublisher(
       channel_name, subscribed.slot_size(), subscribed.num_slots(),
       PublisherOptions()
           .SetReliable(subscribed.reliable())
           .SetBridge(true)
-          .SetNotifyRetirement(subscribed.notify_retirement()));
+          .SetNotifyRetirement(subscribed.notify_retirement())
+          .SetPrefixSize(bridge_prefix_size));
   if (!pub.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to create bridge publisher for %s: %s",
@@ -1412,13 +1422,13 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     // This is to allow SendMessage to use it for the length to avoid
     // 2 sends to the network.  We need to receive into the address
     // after the padding.
-    constexpr size_t kAdjustedPrefixLength =
-        sizeof(MessagePrefix) - sizeof(int32_t);
-    char *prefix_addr = reinterpret_cast<char *>(*buf) - sizeof(MessagePrefix);
+    size_t prefix_area = pub->PrefixAreaSize();
+    size_t adjusted_prefix_length = prefix_area - sizeof(int32_t);
+    char *prefix_addr = reinterpret_cast<char *>(*buf) - prefix_area;
     char *after_padding = prefix_addr + sizeof(int32_t);
 
     absl::StatusOr<ssize_t> n = bridge->ReceiveMessage(
-        after_padding, subscribed.slot_size() + kAdjustedPrefixLength,
+        after_padding, subscribed.slot_size() + adjusted_prefix_length,
         co::self);
     if (!n.ok()) {
       // This will happen when the bridge transmitter on the other
@@ -1440,7 +1450,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     prefix->flags |= kMessageBridged;
 
     absl::StatusOr<const Message> pub_msg = pub->PublishMessageInternal(
-        *n - kAdjustedPrefixLength, /*omit_prefix=*/true,
+        *n - adjusted_prefix_length, /*omit_prefix=*/true,
         /*omit_prefix_slot_id=*/true);
     if (!pub_msg.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,

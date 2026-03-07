@@ -321,7 +321,8 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     MessageSlot *slot, bool reliable, bool is_activation, int owner,
     bool omit_prefix, bool use_prefix_slot_id) {
   void *buffer = GetBufferAddress(slot);
-  MessagePrefix *prefix = reinterpret_cast<MessagePrefix *>(buffer) - 1;
+  MessagePrefix *prefix = reinterpret_cast<MessagePrefix *>(
+      static_cast<char *>(buffer) - PrefixAreaSize());
 
   slot->ordinal = ccb_->ordinals.Next(slot->vchan_id);
   slot->timestamp = toolbelt::Now();
@@ -348,14 +349,14 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     }
     if (options_.Checksum()) {
       prefix->SetHasChecksum();
-      // Checksum includes the prefix and the message data.  Obviously the checksum itself isn't
-      // included since we are calculating it here.  The first 4 bytes (padding) are also not
-      // incluced.
       auto data = GetMessageChecksumData(prefix, buffer, slot->message_size);
+      void *cksum = GetChecksumAddress(prefix);
+      size_t cksum_size = GetChecksumSize(PrefixAreaSize());
+      memset(cksum, 0, cksum_size);
       if (checksum_callback_ != nullptr) {
-        prefix->checksum = checksum_callback_(data);
+        checksum_callback_(data, cksum, cksum_size);
       } else {
-        prefix->checksum = CalculateChecksum(data);
+        CalculateChecksum(data, cksum, cksum_size);
       }
     }
   }

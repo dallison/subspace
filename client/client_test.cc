@@ -745,7 +745,8 @@ TEST_F(ClientTest, PublishSingleMessageWithPrefixAndRead) {
   ASSERT_OK(buffer);
   memcpy(*buffer, "foobar", 6);
 
-  auto prefix = reinterpret_cast<subspace::MessagePrefix *>(*buffer) - 1;
+  auto prefix = reinterpret_cast<subspace::MessagePrefix *>(
+      static_cast<char *>(*buffer) - pub->PrefixAreaSize());
   prefix->SetIsBridged();
   prefix->timestamp = 1234;
 
@@ -759,8 +760,8 @@ TEST_F(ClientTest, PublishSingleMessageWithPrefixAndRead) {
   ASSERT_OK(msg);
   ASSERT_EQ(6, msg->length);
 
-  auto prefix2 =
-      reinterpret_cast<const subspace::MessagePrefix *>(msg->buffer) - 1;
+  auto prefix2 = reinterpret_cast<const subspace::MessagePrefix *>(
+      static_cast<const char *>(msg->buffer) - sub->PrefixAreaSize());
   ASSERT_TRUE(prefix2->IsBridged());
   ASSERT_EQ(1234, prefix2->timestamp);
   ASSERT_EQ(1, sub->CurrentOrdinal());
@@ -2784,14 +2785,16 @@ TEST_F(ClientTest, ChecksumCallback) {
   ASSERT_OK(sub);
 
   auto fake_crc =
-      [](const std::array<absl::Span<const uint8_t>, 2> &data) -> uint32_t {
+      [](const std::array<absl::Span<const uint8_t>, 2> &data,
+         void *checksum, size_t checksum_size) {
     uint32_t sum = 0;
     for (const auto &span : data) {
       for (uint8_t byte : span) {
         sum += byte;
       }
     }
-    return sum;
+    size_t n = sizeof(sum) < checksum_size ? sizeof(sum) : checksum_size;
+    memcpy(checksum, &sum, n);
   };
 
   pub->SetChecksumCallback(fake_crc);
@@ -2839,14 +2842,16 @@ TEST_F(ClientTest, ChecksumCallbackPassErrors) {
   ASSERT_OK(sub);
 
   auto fake_crc =
-      [](const std::array<absl::Span<const uint8_t>, 2> &data) -> uint32_t {
+      [](const std::array<absl::Span<const uint8_t>, 2> &data,
+         void *checksum, size_t checksum_size) {
     uint32_t sum = 0;
     for (const auto &span : data) {
       for (uint8_t byte : span) {
         sum += byte;
       }
     }
-    return sum;
+    size_t n = sizeof(sum) < checksum_size ? sizeof(sum) : checksum_size;
+    memcpy(checksum, &sum, n);
   };
 
   pub->SetChecksumCallback(fake_crc);
@@ -2880,20 +2885,24 @@ TEST_F(ClientTest, ChecksumCallbackReset) {
   ASSERT_OK(sub);
 
   auto fake_crc =
-      [](const std::array<absl::Span<const uint8_t>, 2> &data) -> uint32_t {
+      [](const std::array<absl::Span<const uint8_t>, 2> &data,
+         void *checksum, size_t checksum_size) {
     uint32_t sum = 0;
     for (const auto &span : data) {
       for (uint8_t byte : span) {
         sum += byte;
       }
     }
-    return sum;
+    size_t n = sizeof(sum) < checksum_size ? sizeof(sum) : checksum_size;
+    memcpy(checksum, &sum, n);
   };
 
   auto fake_crc_mismatch =
-      [&fake_crc](
-          const std::array<absl::Span<const uint8_t>, 2> &data) -> uint32_t {
-    return fake_crc(data) + 1;
+      [&fake_crc](const std::array<absl::Span<const uint8_t>, 2> &data,
+                  void *checksum, size_t checksum_size) {
+    fake_crc(data, checksum, checksum_size);
+    // Corrupt the first byte to force a mismatch.
+    static_cast<uint8_t *>(checksum)[0] ^= 0xFF;
   };
 
   pub->SetChecksumCallback(fake_crc);
@@ -2942,14 +2951,16 @@ TEST_F(ClientTest, ChecksumCallbackPublisherOnly) {
   ASSERT_OK(sub);
 
   auto fake_crc =
-      [](const std::array<absl::Span<const uint8_t>, 2> &data) -> uint32_t {
+      [](const std::array<absl::Span<const uint8_t>, 2> &data,
+         void *checksum, size_t checksum_size) {
     uint32_t sum = 0;
     for (const auto &span : data) {
       for (uint8_t byte : span) {
         sum += byte;
       }
     }
-    return sum;
+    size_t n = sizeof(sum) < checksum_size ? sizeof(sum) : checksum_size;
+    memcpy(checksum, &sum, n);
   };
 
   pub->SetChecksumCallback(fake_crc);
@@ -2961,6 +2972,70 @@ TEST_F(ClientTest, ChecksumCallbackPublisherOnly) {
   ASSERT_OK(pub_status);
 
   {
+    absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+    ASSERT_FALSE(msg.ok());
+    ASSERT_EQ(absl::StatusCode::kInternal, msg.status().code());
+    ASSERT_EQ("Checksum verification failed", msg.status().message());
+  }
+}
+
+TEST_F(ClientTest, Checksum20Byte) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_ck20",
+      {.slot_size = 256, .num_slots = 10, .checksum = true, .prefix_size = 2});
+  ASSERT_OK(pub);
+
+  absl::StatusOr<Subscriber> sub =
+      client->CreateSubscriber("chan_ck20", {.checksum = true});
+  ASSERT_OK(sub);
+
+  ASSERT_EQ(2 * 64, pub->PrefixAreaSize());
+  ASSERT_EQ(2 * 64, sub->PrefixAreaSize());
+
+  // 20-byte checksum: 5 CRC32 values computed with different seeds.
+  auto checksum_20 =
+      [](const std::array<absl::Span<const uint8_t>, 2> &data,
+         void *checksum, size_t checksum_size) {
+    ASSERT_GE(checksum_size, 20u);
+    uint32_t *out = reinterpret_cast<uint32_t *>(checksum);
+    for (int k = 0; k < 5; k++) {
+      uint32_t crc = 0xFFFFFFFF ^ static_cast<uint32_t>(k * 0x11111111);
+      for (const auto &span : data) {
+        crc = subspace::SubspaceCRC32(crc, span.data(), span.size());
+      }
+      out[k] = ~crc;
+    }
+  };
+
+  pub->SetChecksumCallback(checksum_20);
+  sub->SetChecksumCallback(checksum_20);
+
+  // Successful publish and read.
+  {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_OK(buffer);
+    memcpy(*buffer, "hello20", 7);
+    absl::StatusOr<const Message> pub_status = pub->PublishMessage(7);
+    ASSERT_OK(pub_status);
+
+    absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+    ASSERT_OK(msg);
+    ASSERT_EQ(7, msg->length);
+    ASSERT_EQ(0, memcmp("hello20", msg->buffer, 7));
+  }
+
+  // Corrupt message data after publish to trigger checksum failure.
+  {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_OK(buffer);
+    memcpy(*buffer, "corrupt", 7);
+    absl::StatusOr<const Message> pub_status = pub->PublishMessage(7);
+    ASSERT_OK(pub_status);
+    char *buf = reinterpret_cast<char *>(*buffer);
+    buf[0] = 'X';
+
     absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
     ASSERT_FALSE(msg.ok());
     ASSERT_EQ(absl::StatusCode::kInternal, msg.status().code());

@@ -816,6 +816,8 @@ public:
 
   MessageSlot *CurrentSlot() const { return impl_->CurrentSlot(); }
 
+  size_t PrefixAreaSize() const { return impl_->PrefixAreaSize(); }
+
 private:
   friend class Server;
   friend class ClientImpl;
@@ -1090,6 +1092,8 @@ public:
   void ClearActiveMessage() { impl_->ClearActiveMessage(); }
 
   void TriggerReliablePublishers() { impl_->TriggerReliablePublishers(); }
+
+  size_t PrefixAreaSize() const { return impl_->PrefixAreaSize(); }
 
   bool AtomicIncRefCount(int slot_id, int inc) {
     MessageSlot *slot = impl_->GetSlot(slot_id);
