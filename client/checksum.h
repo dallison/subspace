@@ -27,7 +27,7 @@ using ChecksumCallback = std::function<void(
     absl::Span<std::byte> checksum)>;
 
 template <size_t N>
-void CalculateChecksum(const std::array<absl::Span<const uint8_t>, N> &data,
+void CalculateCRC32Checksum(const std::array<absl::Span<const uint8_t>, N> &data,
                        absl::Span<std::byte> checksum) {
   uint32_t crc = 0xFFFFFFFF;
   for (size_t i = 0; i < N; i++) {
@@ -37,7 +37,7 @@ void CalculateChecksum(const std::array<absl::Span<const uint8_t>, N> &data,
 }
 
 template <size_t N>
-bool VerifyChecksum(const std::array<absl::Span<const uint8_t>, N> &data,
+bool VerifyCRC32Checksum(const std::array<absl::Span<const uint8_t>, N> &data,
                     absl::Span<const std::byte> checksum) {
   uint32_t crc = 0xFFFFFFFF;
   for (size_t i = 0; i < N; i++) {

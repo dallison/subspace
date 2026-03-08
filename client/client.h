@@ -765,10 +765,15 @@ public:
     return impl_->BufferSharedMemoryName(buffer_index);
   }
 
+  // Set a custom checksum callback to replace the default CRC32.
+  // The callback is invoked for every published message and receives the
+  // data spans to checksum plus a writable absl::Span<std::byte> of
+  // ChecksumSize() bytes where the checksum should be written.
   void SetChecksumCallback(ChecksumCallback callback) {
     impl_->SetChecksumCallback(std::move(callback));
   }
 
+  // Revert to the built-in CRC32 checksum.
   void ResetChecksumCallback() { impl_->ResetChecksumCallback(); }
 
   // Register a function to be called when the publisher resizes
@@ -816,7 +821,21 @@ public:
 
   MessageSlot *CurrentSlot() const { return impl_->CurrentSlot(); }
 
-  size_t PrefixAreaSize() const { return impl_->PrefixAreaSize(); }
+  // Total prefix area size in bytes (always a multiple of 64).
+  // Determined by ChecksumSize() and MetadataSize().
+  int32_t PrefixSize() const { return impl_->PrefixSize(); }
+
+  // Number of bytes reserved for the checksum (default 4 for CRC32).
+  int32_t ChecksumSize() const { return impl_->ChecksumSize(); }
+
+  // Number of bytes of user metadata in the prefix area (default 0).
+  int32_t MetadataSize() const { return impl_->MetadataSize(); }
+
+  // Get a writable span over the user metadata area in the current
+  // slot's prefix.  Call this between GetMessageBuffer() and
+  // PublishMessage() to attach per-message metadata.  Returns an
+  // empty span if MetadataSize() is 0.
+  absl::Span<std::byte> GetMetadata() { return impl_->GetMetadata(); }
 
 private:
   friend class Server;
@@ -981,10 +1000,16 @@ public:
   std::string Type() const { return impl_->Type(); }
   std::string_view TypeView() const { return impl_->TypeView(); }
 
+  // Set a custom checksum callback to replace the default CRC32 verification.
+  // The callback receives the data spans and a read-only absl::Span of
+  // ChecksumSize() bytes containing the stored checksum.  It should write
+  // the computed checksum into the temporary buffer provided by the
+  // subscriber for comparison.
   void SetChecksumCallback(ChecksumCallback callback) {
     impl_->SetChecksumCallback(std::move(callback));
   }
 
+  // Revert to the built-in CRC32 checksum verification.
   void ResetChecksumCallback() { impl_->ResetChecksumCallback(); }
 
   // Register a function to be called when a subscriber drops a message.  The
@@ -1093,7 +1118,21 @@ public:
 
   void TriggerReliablePublishers() { impl_->TriggerReliablePublishers(); }
 
-  size_t PrefixAreaSize() const { return impl_->PrefixAreaSize(); }
+  // Total prefix area size in bytes (always a multiple of 64).
+  // Determined by ChecksumSize() and MetadataSize().
+  int32_t PrefixSize() const { return impl_->PrefixSize(); }
+
+  // Number of bytes reserved for the checksum (default 4 for CRC32).
+  int32_t ChecksumSize() const { return impl_->ChecksumSize(); }
+
+  // Number of bytes of user metadata in the prefix area (default 0).
+  int32_t MetadataSize() const { return impl_->MetadataSize(); }
+
+  // Get a read-only span over the user metadata area in the most
+  // recently read message's prefix.  Only valid while the message is
+  // active (between ReadMessage() and the next ReadMessage() or
+  // ClearActiveMessage()).  Returns an empty span if MetadataSize() is 0.
+  absl::Span<const std::byte> GetMetadata() { return impl_->GetMetadata(); }
 
   bool AtomicIncRefCount(int slot_id, int inc) {
     MessageSlot *slot = impl_->GetSlot(slot_id);

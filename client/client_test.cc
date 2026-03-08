@@ -746,7 +746,7 @@ TEST_F(ClientTest, PublishSingleMessageWithPrefixAndRead) {
   memcpy(*buffer, "foobar", 6);
 
   auto prefix = reinterpret_cast<subspace::MessagePrefix *>(
-      static_cast<char *>(*buffer) - pub->PrefixAreaSize());
+      static_cast<char *>(*buffer) - pub->PrefixSize());
   prefix->SetIsBridged();
   prefix->timestamp = 1234;
 
@@ -761,7 +761,7 @@ TEST_F(ClientTest, PublishSingleMessageWithPrefixAndRead) {
   ASSERT_EQ(6, msg->length);
 
   auto prefix2 = reinterpret_cast<const subspace::MessagePrefix *>(
-      static_cast<const char *>(msg->buffer) - sub->PrefixAreaSize());
+      static_cast<const char *>(msg->buffer) - sub->PrefixSize());
   ASSERT_TRUE(prefix2->IsBridged());
   ASSERT_EQ(1234, prefix2->timestamp);
   ASSERT_EQ(1, sub->CurrentOrdinal());
@@ -2979,15 +2979,17 @@ TEST_F(ClientTest, Checksum20Byte) {
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
       "chan_ck20",
-      {.slot_size = 256, .num_slots = 10, .checksum = true, .prefix_size = 2});
+      {.slot_size = 256, .num_slots = 10, .checksum = true, .checksum_size = 20});
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
       client->CreateSubscriber("chan_ck20", {.checksum = true});
   ASSERT_OK(sub);
 
-  ASSERT_EQ(2 * 64, pub->PrefixAreaSize());
-  ASSERT_EQ(2 * 64, sub->PrefixAreaSize());
+  ASSERT_EQ(128, pub->PrefixSize());
+  ASSERT_EQ(128, sub->PrefixSize());
+  ASSERT_EQ(20, pub->ChecksumSize());
+  ASSERT_EQ(20, sub->ChecksumSize());
 
   // 20-byte checksum: 5 CRC32 values computed with different seeds.
   auto checksum_20 =
@@ -3038,68 +3040,274 @@ TEST_F(ClientTest, Checksum20Byte) {
   }
 }
 
-TEST_F(ClientTest, PrefixSizeZero) {
+TEST_F(ClientTest, ChecksumSizeDefault) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
-  // prefix_size 0 is treated as 1 (backward compat), so this should succeed.
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
-      "chan_ps0", {.slot_size = 256, .num_slots = 10, .prefix_size = 0});
+      "chan_cs_def", {.slot_size = 256, .num_slots = 10});
   ASSERT_OK(pub);
-  ASSERT_EQ(64u, pub->PrefixAreaSize());
+  ASSERT_EQ(64, pub->PrefixSize());
+  ASSERT_EQ(4, pub->ChecksumSize());
+  ASSERT_EQ(0, pub->MetadataSize());
 }
 
-TEST_F(ClientTest, PrefixSizeTooLarge) {
+TEST_F(ClientTest, LargeChecksumSize) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
+  // checksum_size=32 → Aligned<64>(48 + 32) = 128 bytes prefix.
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
-      "chan_ps_big", {.slot_size = 256, .num_slots = 10, .prefix_size = 17});
-  ASSERT_FALSE(pub.ok());
+      "chan_cs_big", {.slot_size = 256, .num_slots = 10, .checksum_size = 32});
+  ASSERT_OK(pub);
+  ASSERT_EQ(128, pub->PrefixSize());
+  ASSERT_EQ(32, pub->ChecksumSize());
 }
 
-TEST_F(ClientTest, PrefixSizeNegative) {
+TEST_F(ClientTest, MetadataSize) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
+  // metadata_size=100 → Aligned<64>(48 + 4 + 100) = Aligned<64>(152) = 192.
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
-      "chan_ps_neg", {.slot_size = 256, .num_slots = 10, .prefix_size = -1});
-  ASSERT_FALSE(pub.ok());
+      "chan_meta", {.slot_size = 256, .num_slots = 10, .metadata_size = 100});
+  ASSERT_OK(pub);
+  ASSERT_EQ(192, pub->PrefixSize());
+  ASSERT_EQ(4, pub->ChecksumSize());
+  ASSERT_EQ(100, pub->MetadataSize());
 }
 
 TEST_F(ClientTest, PrefixSizeInconsistent) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
   absl::StatusOr<Publisher> pub1 = client->CreatePublisher(
-      "chan_ps_incon", {.slot_size = 256, .num_slots = 10, .prefix_size = 2});
+      "chan_ps_incon",
+      {.slot_size = 256, .num_slots = 10, .checksum_size = 20});
   ASSERT_OK(pub1);
 
-  // A second publisher on the same channel with a different prefix_size
-  // should fail.
+  // A second publisher with different sizes should fail.
   absl::StatusOr<Publisher> pub2 = client->CreatePublisher(
-      "chan_ps_incon", {.slot_size = 256, .num_slots = 10, .prefix_size = 3});
+      "chan_ps_incon",
+      {.slot_size = 256, .num_slots = 10, .checksum_size = 32});
   ASSERT_FALSE(pub2.ok());
 }
 
-TEST_F(ClientTest, PrefixSizeMax) {
+TEST_F(ClientTest, SubscriberGetsSizes) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
-      "chan_ps_max", {.slot_size = 256, .num_slots = 10, .prefix_size = 16});
-  ASSERT_OK(pub);
-  ASSERT_EQ(16u * 64, pub->PrefixAreaSize());
-}
-
-TEST_F(ClientTest, PrefixSizeSubscriberGetsValue) {
-  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
-
-  absl::StatusOr<Publisher> pub = client->CreatePublisher(
-      "chan_ps_sub", {.slot_size = 256, .num_slots = 10, .prefix_size = 4});
+      "chan_sub_sizes",
+      {.slot_size = 256, .num_slots = 10, .checksum_size = 20,
+       .metadata_size = 50});
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
-      client->CreateSubscriber("chan_ps_sub");
+      client->CreateSubscriber("chan_sub_sizes");
   ASSERT_OK(sub);
 
-  ASSERT_EQ(4u * 64, pub->PrefixAreaSize());
-  ASSERT_EQ(4u * 64, sub->PrefixAreaSize());
+  ASSERT_EQ(pub->PrefixSize(), sub->PrefixSize());
+  ASSERT_EQ(20, sub->ChecksumSize());
+  ASSERT_EQ(50, sub->MetadataSize());
+}
+
+// metadata_size=8, checksum_size=4: 48+4+8=60 → prefix=64
+TEST_F(ClientTest, MetadataSmall) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_meta_s", {.slot_size = 256, .num_slots = 10, .metadata_size = 8});
+  ASSERT_OK(pub);
+  ASSERT_EQ(64, pub->PrefixSize());
+  ASSERT_EQ(8, pub->MetadataSize());
+
+  absl::StatusOr<Subscriber> sub =
+      client->CreateSubscriber("chan_meta_s");
+  ASSERT_OK(sub);
+  ASSERT_EQ(8, sub->MetadataSize());
+
+  // Write metadata, publish, then read and verify.
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "hello", 5);
+
+  auto meta = pub->GetMetadata();
+  ASSERT_EQ(8u, meta.size());
+  memcpy(meta.data(), "METADAT!", 8);
+
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(5);
+  ASSERT_OK(pub_status);
+
+  absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(5, msg->length);
+  ASSERT_EQ(0, memcmp("hello", msg->buffer, 5));
+
+  auto sub_meta = sub->GetMetadata();
+  ASSERT_EQ(8u, sub_meta.size());
+  ASSERT_EQ(0, memcmp("METADAT!", sub_meta.data(), 8));
+}
+
+// metadata_size=12, checksum_size=4: 48+4+12=64 → prefix=64 (exact fit)
+TEST_F(ClientTest, MetadataExactFit) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_meta_ex",
+      {.slot_size = 256, .num_slots = 10, .metadata_size = 12});
+  ASSERT_OK(pub);
+  ASSERT_EQ(64, pub->PrefixSize());
+
+  absl::StatusOr<Subscriber> sub =
+      client->CreateSubscriber("chan_meta_ex");
+  ASSERT_OK(sub);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "exact", 5);
+
+  auto meta = pub->GetMetadata();
+  ASSERT_EQ(12u, meta.size());
+  memcpy(meta.data(), "EXACTLY12!!!", 12);
+
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(5);
+  ASSERT_OK(pub_status);
+
+  absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  auto sub_meta = sub->GetMetadata();
+  ASSERT_EQ(12u, sub_meta.size());
+  ASSERT_EQ(0, memcmp("EXACTLY12!!!", sub_meta.data(), 12));
+}
+
+// metadata_size=13, checksum_size=4: 48+4+13=65 → prefix=128 (spills to 2nd chunk)
+TEST_F(ClientTest, MetadataSpillsToSecondChunk) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_meta_sp",
+      {.slot_size = 256, .num_slots = 10, .metadata_size = 13});
+  ASSERT_OK(pub);
+  ASSERT_EQ(128, pub->PrefixSize());
+
+  absl::StatusOr<Subscriber> sub =
+      client->CreateSubscriber("chan_meta_sp");
+  ASSERT_OK(sub);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "spill", 5);
+
+  auto meta = pub->GetMetadata();
+  ASSERT_EQ(13u, meta.size());
+  memcpy(meta.data(), "SPILL_13BYTES", 13);
+
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(5);
+  ASSERT_OK(pub_status);
+
+  absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  auto sub_meta = sub->GetMetadata();
+  ASSERT_EQ(13u, sub_meta.size());
+  ASSERT_EQ(0, memcmp("SPILL_13BYTES", sub_meta.data(), 13));
+}
+
+// metadata_size=200, checksum_size=32: 48+32+200=280 → prefix=320 (5 chunks)
+TEST_F(ClientTest, MetadataLargeWithLargeChecksum) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_meta_lg",
+      {.slot_size = 512, .num_slots = 10, .checksum_size = 32,
+       .metadata_size = 200});
+  ASSERT_OK(pub);
+  ASSERT_EQ(320, pub->PrefixSize());
+  ASSERT_EQ(32, pub->ChecksumSize());
+  ASSERT_EQ(200, pub->MetadataSize());
+
+  absl::StatusOr<Subscriber> sub =
+      client->CreateSubscriber("chan_meta_lg");
+  ASSERT_OK(sub);
+  ASSERT_EQ(320, sub->PrefixSize());
+  ASSERT_EQ(200, sub->MetadataSize());
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "largemetadata", 13);
+
+  auto meta = pub->GetMetadata();
+  ASSERT_EQ(200u, meta.size());
+  // Fill metadata with a recognizable pattern.
+  for (int i = 0; i < 200; i++) {
+    meta[i] = static_cast<std::byte>(i & 0xFF);
+  }
+
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(13);
+  ASSERT_OK(pub_status);
+
+  absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(13, msg->length);
+
+  auto sub_meta = sub->GetMetadata();
+  ASSERT_EQ(200u, sub_meta.size());
+  for (int i = 0; i < 200; i++) {
+    ASSERT_EQ(static_cast<std::byte>(i & 0xFF), sub_meta[i]) << "at index " << i;
+  }
+}
+
+// metadata_size=0: GetMetadata returns empty span.
+TEST_F(ClientTest, MetadataZero) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_meta_z", {.slot_size = 256, .num_slots = 10});
+  ASSERT_OK(pub);
+  ASSERT_EQ(64, pub->PrefixSize());
+  ASSERT_EQ(0, pub->MetadataSize());
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+
+  auto meta = pub->GetMetadata();
+  ASSERT_TRUE(meta.empty());
+}
+
+// Multiple publishes with different metadata each time.
+TEST_F(ClientTest, MetadataMultipleMessages) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_meta_mm",
+      {.slot_size = 256, .num_slots = 10, .metadata_size = 16});
+  ASSERT_OK(pub);
+
+  absl::StatusOr<Subscriber> sub =
+      client->CreateSubscriber("chan_meta_mm");
+  ASSERT_OK(sub);
+
+  for (int i = 0; i < 5; i++) {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_OK(buffer);
+    char data[4];
+    snprintf(data, sizeof(data), "m%02d", i);
+    memcpy(*buffer, data, 3);
+
+    auto meta = pub->GetMetadata();
+    ASSERT_EQ(16u, meta.size());
+    memset(meta.data(), 0, 16);
+    uint32_t tag = 0xDEAD0000 | i;
+    memcpy(meta.data(), &tag, sizeof(tag));
+
+    absl::StatusOr<const Message> pub_status = pub->PublishMessage(3);
+    ASSERT_OK(pub_status);
+
+    absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+    ASSERT_OK(msg);
+    ASSERT_EQ(3, msg->length);
+
+    auto sub_meta = sub->GetMetadata();
+    ASSERT_EQ(16u, sub_meta.size());
+    uint32_t read_tag;
+    memcpy(&read_tag, sub_meta.data(), sizeof(read_tag));
+    ASSERT_EQ(tag, read_tag);
+  }
 }
 
 int main(int argc, char **argv) {

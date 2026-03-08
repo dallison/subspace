@@ -299,26 +299,31 @@ void ClientHandler::HandleCreatePublisher(
     return;
   }
   {
-    int32_t ps = req.prefix_size();
-    if (ps == 0) {
-      ps = Channel::kMinPrefixSize;
+    int32_t cs = req.checksum_size();
+    int32_t ms = req.metadata_size();
+    if (cs <= 0) {
+      cs = 4;
     }
-    if (ps < Channel::kMinPrefixSize || ps > Channel::kMaxPrefixSize) {
+    if (ms < 0) {
+      ms = 0;
+    }
+    if (channel->ChecksumSize() != 4 && channel->ChecksumSize() != cs) {
       response->set_error(
-          absl::StrFormat("Invalid prefix_size %d for channel %s: "
-                          "must be between %d and %d",
-                          ps, req.channel_name(), Channel::kMinPrefixSize,
-                          Channel::kMaxPrefixSize));
+          absl::StrFormat("Inconsistent checksum_size for channel %s: "
+                          "already %d, not %d",
+                          req.channel_name(), channel->ChecksumSize(), cs));
       return;
     }
-    if (channel->PrefixSize() != 1 && channel->PrefixSize() != ps) {
+    if (channel->MetadataSize() != 0 && channel->MetadataSize() != ms) {
       response->set_error(
-          absl::StrFormat("Inconsistent prefix_size for channel %s: "
-                          "already set to %d, not %d",
-                          req.channel_name(), channel->PrefixSize(), ps));
+          absl::StrFormat("Inconsistent metadata_size for channel %s: "
+                          "already %d, not %d",
+                          req.channel_name(), channel->MetadataSize(), ms));
       return;
     }
-    channel->SetPrefixSize(ps);
+    channel->SetChecksumSize(cs);
+    channel->SetMetadataSize(ms);
+    channel->SetPrefixSize(Channel::ComputePrefixSize(cs, ms));
   }
 
   server_->OnNewPublisher(channel->Name(), (*publisher)->GetId());
@@ -525,7 +530,8 @@ void ClientHandler::HandleCreateSubscriber(
 
   response->set_slot_size(channel->SlotSize());
   response->set_num_slots(channel->NumSlots());
-  response->set_prefix_size(channel->PrefixSize());
+  response->set_checksum_size(channel->ChecksumSize());
+  response->set_metadata_size(channel->MetadataSize());
   // Add publisher trigger indexes.
   std::vector<toolbelt::FileDescriptor> pub_fds =
       channel->GetReliablePublisherTriggerFds();

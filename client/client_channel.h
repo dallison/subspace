@@ -109,8 +109,8 @@ public:
   // for the slot given a slot id.
   void *GetBufferAddress(int slot_id) {
     return Buffer(slot_id) +
-           (PrefixAreaSize() + Aligned<64>(SlotSize(slot_id))) * slot_id +
-           PrefixAreaSize();
+           (PrefixSize() + Aligned<64>(SlotSize(slot_id))) * slot_id +
+           PrefixSize();
   }
 
   // Gets the address for the message buffer given a slot pointer.
@@ -120,8 +120,8 @@ public:
     }
     void *b =
         Buffer(slot->id) +
-        (PrefixAreaSize() + Aligned<64>(SlotSize(slot->id))) * slot->id +
-        PrefixAreaSize();
+        (PrefixSize() + Aligned<64>(SlotSize(slot->id))) * slot->id +
+        PrefixSize();
     return b;
   }
 
@@ -129,7 +129,7 @@ public:
   MessagePrefix *Prefix(MessageSlot *slot) override {
     MessagePrefix *p = reinterpret_cast<MessagePrefix *>(
         Buffer(slot->id) +
-        (PrefixAreaSize() + Aligned<64>(SlotSize(slot->id))) * slot->id);
+        (PrefixSize() + Aligned<64>(SlotSize(slot->id))) * slot->id);
     return p;
   }
 
