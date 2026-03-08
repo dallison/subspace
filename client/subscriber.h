@@ -206,7 +206,19 @@ public:
 
   void ResetChecksumCallback() { checksum_callback_ = nullptr; }
 
+  absl::Span<const std::byte> GetMetadata() {
+    if (MetadataSize() == 0 || slot_ == nullptr) {
+      return {};
+    }
+    MessagePrefix *prefix = Prefix(slot_);
+    return GetMetadataSpan(prefix, ChecksumSize(), MetadataSize());
+  }
+
   std::string Mux() const { return options_.Mux(); }
+
+  void AllocateChecksumBuffer() {
+    checksum_tmp_.assign(ChecksumSize(), std::byte{0});
+  }
 
   bool ValidateChecksum(const std::array<absl::Span<const uint8_t>, 2> &data,
                         absl::Span<const std::byte> checksum) {
@@ -214,14 +226,11 @@ public:
       return true;
     }
     if (checksum_callback_ != nullptr) {
-      // Compute the expected checksum into a zero-initialized temporary
-      // buffer and compare with what was stored in the prefix.
-      std::byte tmp[Channel::kMaxPrefixSize * sizeof(MessagePrefix)] = {};
-      absl::Span<std::byte> tmp_span(tmp, checksum.size());
+      absl::Span<std::byte> tmp_span(checksum_tmp_.data(), checksum.size());
       checksum_callback_(data, tmp_span);
-      return memcmp(tmp, checksum.data(), checksum.size()) == 0;
+      return memcmp(checksum_tmp_.data(), checksum.data(), checksum.size()) == 0;
     }
-    return VerifyChecksum(data, checksum);
+    return VerifyCRC32Checksum(data, checksum);
   }
 
   bool PassChecksumErrors() const { return options_.PassChecksumErrors(); }
@@ -325,6 +334,7 @@ private:
   std::function<absl::StatusOr<int64_t>(void *buffer, int64_t size)>
       on_receive_callback_ = nullptr;
   ChecksumCallback checksum_callback_ = nullptr;
+  std::vector<std::byte> checksum_tmp_;
 };
 } // namespace details
 } // namespace subspace

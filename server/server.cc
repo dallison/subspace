@@ -885,7 +885,8 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
   subscribed.set_slot_size(channel->SlotSize());
   subscribed.set_num_slots(channel->NumSlots());
   subscribed.set_reliable(pub_reliable);
-  subscribed.set_prefix_size(channel->PrefixSize());
+  subscribed.set_checksum_size(channel->ChecksumSize());
+  subscribed.set_metadata_size(channel->MetadataSize());
 
   toolbelt::StreamSocket retirement_listener;
   toolbelt::SocketAddress retirement_addr;
@@ -1027,10 +1028,9 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
         break;
       }
       // We want to send the MessagePrefix along with the message.
-      // The prefix area may be larger than sizeof(MessagePrefix) if
-      // prefix_size > 0; the extra chunks sit between the MessagePrefix
-      // and the message data.
-      size_t prefix_area = sub->PrefixAreaSize();
+      // The prefix area may be larger than sizeof(MessagePrefix) when
+      // checksum_size or metadata_size requires additional 64-byte chunks.
+      size_t prefix_area = sub->PrefixSize();
       const char *prefix_addr =
           reinterpret_cast<const char *>(msg->buffer) - prefix_area;
       const MessagePrefix *prefix =
@@ -1315,9 +1315,13 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
   }
   // For a reliable publisher, this will send an activation message
   // to the local channel.
-  int32_t bridge_prefix_size = subscribed.prefix_size();
-  if (bridge_prefix_size < Channel::kMinPrefixSize) {
-    bridge_prefix_size = Channel::kMinPrefixSize;
+  int32_t bridge_cs = subscribed.checksum_size();
+  int32_t bridge_ms = subscribed.metadata_size();
+  if (bridge_cs <= 0) {
+    bridge_cs = 4;
+  }
+  if (bridge_ms < 0) {
+    bridge_ms = 0;
   }
   absl::StatusOr<Publisher> pub = client.CreatePublisher(
       channel_name, subscribed.slot_size(), subscribed.num_slots(),
@@ -1325,7 +1329,8 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
           .SetReliable(subscribed.reliable())
           .SetBridge(true)
           .SetNotifyRetirement(subscribed.notify_retirement())
-          .SetPrefixSize(bridge_prefix_size));
+          .SetChecksumSize(bridge_cs)
+          .SetMetadataSize(bridge_ms));
   if (!pub.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to create bridge publisher for %s: %s",
@@ -1422,7 +1427,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     // This is to allow SendMessage to use it for the length to avoid
     // 2 sends to the network.  We need to receive into the address
     // after the padding.
-    size_t prefix_area = pub->PrefixAreaSize();
+    size_t prefix_area = pub->PrefixSize();
     size_t adjusted_prefix_length = prefix_area - sizeof(int32_t);
     char *prefix_addr = reinterpret_cast<char *>(*buf) - prefix_area;
     char *after_padding = prefix_addr + sizeof(int32_t);

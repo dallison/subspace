@@ -50,7 +50,7 @@
 #### Message Checksum Support
 - **Hardware-accelerated checksums**: Integrated CRC32 checksum calculation for message integrity
   - Hardware CRC32 instruction support with fallback implementations
-  - `CalculateChecksum()` and `VerifyChecksum()` functions for multi-span data validation
+  - `CalculateCRC32Checksum()` and `VerifyCRC32Checksum()` functions for multi-span data validation
   - ARM assembly optimizations for CRC32 calculations
   - Configurable hardware acceleration via `SUBSPACE_HARDWARE_CRC` compilation flag
   - Template-based checksum calculation for arbitrary data spans

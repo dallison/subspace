@@ -218,20 +218,34 @@ GetMessageChecksumData(MessagePrefix *prefix, void *buffer,
 }
 
 // Get a span over the checksum storage area within the prefix.
-// The area starts at the checksum field and extends to the end of the
-// full prefix area (which may span multiple 64-byte chunks).
 inline absl::Span<std::byte> GetChecksumSpan(MessagePrefix *prefix,
-                                             size_t prefix_area_size) {
+                                             int32_t checksum_size) {
   return absl::Span<std::byte>(
-      reinterpret_cast<std::byte *>(&prefix->checksum),
-      prefix_area_size - offsetof(MessagePrefix, checksum));
+      reinterpret_cast<std::byte *>(&prefix->checksum), checksum_size);
 }
 
 inline absl::Span<const std::byte>
-GetChecksumSpan(const MessagePrefix *prefix, size_t prefix_area_size) {
+GetChecksumSpan(const MessagePrefix *prefix, int32_t checksum_size) {
   return absl::Span<const std::byte>(
-      reinterpret_cast<const std::byte *>(&prefix->checksum),
-      prefix_area_size - offsetof(MessagePrefix, checksum));
+      reinterpret_cast<const std::byte *>(&prefix->checksum), checksum_size);
+}
+
+// Get a span over the user metadata area, which immediately follows
+// the checksum area in the prefix extensions.
+inline absl::Span<std::byte> GetMetadataSpan(MessagePrefix *prefix,
+                                             int32_t checksum_size,
+                                             int32_t metadata_size) {
+  return absl::Span<std::byte>(
+      reinterpret_cast<std::byte *>(&prefix->checksum) + checksum_size,
+      metadata_size);
+}
+
+inline absl::Span<const std::byte>
+GetMetadataSpan(const MessagePrefix *prefix, int32_t checksum_size,
+                int32_t metadata_size) {
+  return absl::Span<const std::byte>(
+      reinterpret_cast<const std::byte *>(&prefix->checksum) + checksum_size,
+      metadata_size);
 }
 
 // This counts the number of subscribers given a virtual channel id.
@@ -428,27 +442,35 @@ public:
   void DumpSlots(std::ostream &os) const;
   virtual void Dump(std::ostream &os) const;
 
-  static constexpr int32_t kMinPrefixSize = 1;
-  static constexpr int32_t kMaxPrefixSize = 16;
-
-  // Total size of the prefix area per slot.  prefix_size_ is the number
-  // of 64-byte chunks; 1 means just the MessagePrefix itself.
-  size_t PrefixAreaSize() const {
-    return prefix_size_ * sizeof(MessagePrefix);
+  // Compute the prefix size in bytes from checksum and metadata sizes.
+  // The result is rounded up to a 64-byte boundary.
+  static int32_t ComputePrefixSize(int32_t checksum_size,
+                                   int32_t metadata_size) {
+    return static_cast<int32_t>(
+        Aligned<64>(offsetof(MessagePrefix, checksum) + checksum_size +
+                    metadata_size));
   }
 
+  // Total prefix area size in bytes (always a multiple of 64).
   int32_t PrefixSize() const { return prefix_size_; }
   void SetPrefixSize(int32_t size) { prefix_size_ = size; }
 
+  int32_t ChecksumSize() const { return checksum_size_; }
+  void SetChecksumSize(int32_t size) { checksum_size_ = size; }
+
+  int32_t MetadataSize() const { return metadata_size_; }
+  void SetMetadataSize(int32_t size) { metadata_size_ = size; }
+
   uint64_t BufferSizeToSlotSize(uint64_t size) const {
-    if (size < NumSlots() * PrefixAreaSize()) {
+    if (size < NumSlots() * static_cast<uint64_t>(PrefixSize())) {
       return 0;
     }
-    return (size - NumSlots() * PrefixAreaSize()) / NumSlots();
+    return (size - NumSlots() * static_cast<uint64_t>(PrefixSize())) /
+           NumSlots();
   };
 
   uint64_t SlotSizeToBufferSize(uint64_t slot_size) const {
-    return NumSlots() * (slot_size + PrefixAreaSize());
+    return NumSlots() * (slot_size + PrefixSize());
   }
 
   // Get the number of slots in the channel (can't be changed)
@@ -569,7 +591,9 @@ protected:
 
   int channel_id_; // ID allocated from server.
   std::string type_;
-  int32_t prefix_size_ = 1;
+  int32_t prefix_size_ = 64;
+  int32_t checksum_size_ = 4;
+  int32_t metadata_size_ = 0;
 
   uint16_t num_updates_ = 0;
 

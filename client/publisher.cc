@@ -322,7 +322,7 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     bool omit_prefix, bool use_prefix_slot_id) {
   void *buffer = GetBufferAddress(slot);
   MessagePrefix *prefix = reinterpret_cast<MessagePrefix *>(
-      static_cast<char *>(buffer) - PrefixAreaSize());
+      static_cast<char *>(buffer) - PrefixSize());
 
   slot->ordinal = ccb_->ordinals.Next(slot->vchan_id);
   slot->timestamp = toolbelt::Now();
@@ -350,11 +350,11 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     if (options_.Checksum()) {
       prefix->SetHasChecksum();
       auto data = GetMessageChecksumData(prefix, buffer, slot->message_size);
-      absl::Span<std::byte> cksum = GetChecksumSpan(prefix, PrefixAreaSize());
+      absl::Span<std::byte> cksum = GetChecksumSpan(prefix, ChecksumSize());
       if (checksum_callback_ != nullptr) {
         checksum_callback_(data, cksum);
       } else {
-        CalculateChecksum(data, cksum);
+        CalculateCRC32Checksum(data, cksum);
       }
     }
   }
