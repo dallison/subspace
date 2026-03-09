@@ -913,7 +913,9 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     if (prefix->HasChecksum()) {
       auto data =
           GetMessageChecksumData(prefix, subscriber->GetCurrentBufferAddress(),
-                                 new_slot->message_size);
+                                 new_slot->message_size,
+                                 subscriber->ChecksumSize(),
+                                 subscriber->MetadataSize());
       absl::Span<const std::byte> cksum =
           GetChecksumSpan(prefix, subscriber->ChecksumSize());
       checksum_error = !subscriber->ValidateChecksum(data, cksum);

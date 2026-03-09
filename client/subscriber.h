@@ -220,7 +220,7 @@ public:
     checksum_tmp_.assign(ChecksumSize(), std::byte{0});
   }
 
-  bool ValidateChecksum(const std::array<absl::Span<const uint8_t>, 2> &data,
+  bool ValidateChecksum(const std::array<absl::Span<const uint8_t>, 3> &data,
                         absl::Span<const std::byte> checksum) {
     if (!options_.Checksum()) {
       return true;

@@ -40,6 +40,10 @@ constexpr int kMessageActivate = 1;    // This is a reliable activation message.
 constexpr int kMessageBridged = 2;     // This message came from the bridge.
 constexpr int kMessageHasChecksum = 4; // This message has a checksum.
 
+// Maximum values for checksum_size and metadata_size (must fit in uint16_t).
+constexpr int32_t kMaxChecksumSize = 0xFFFF;
+constexpr int32_t kMaxMetadataSize = 0xFFFF;
+
 // This is stored immediately before the channel buffer in shared
 // memory.  It is transferred intact across the TCP bridges.
 // 32 bytes long.
@@ -64,7 +68,8 @@ struct MessagePrefix {
   uint64_t timestamp;
   int64_t flags;
   int32_t vchan_id;
-  int32_t padding2;  // Align checksum to 16-byte boundary.
+  uint16_t checksum_size;
+  uint16_t metadata_size;
   uint32_t checksum;
   char padding3[64 - 52]; // Align to 64 bytes.
 
@@ -202,16 +207,23 @@ struct BufferControlBlock {
       sizes[kMaxBuffers]; // Number of references to this buffer.
 };
 
-// Given a message prefix and a buffer containing the message data return a pair of spans
-// covering the data to be checksummed (prefix fields before the checksum + message payload).
-inline std::array<absl::Span<const uint8_t>, 2>
+// Given a message prefix and a buffer containing the message data return three
+// spans covering the data to be checksummed:
+//   [0] prefix fields before the checksum (slot_id through padding2)
+//   [1] user metadata area (immediately after the checksum storage)
+//   [2] message payload
+inline std::array<absl::Span<const uint8_t>, 3>
 GetMessageChecksumData(MessagePrefix *prefix, void *buffer,
-                       size_t message_size) {
-  std::array<absl::Span<const uint8_t>, 2> data = {
-      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t *>(
-                                    prefix) + offsetof(MessagePrefix, slot_id),
+                       size_t message_size, int32_t checksum_size,
+                       int32_t metadata_size) {
+  const auto *base = reinterpret_cast<const uint8_t *>(prefix);
+  std::array<absl::Span<const uint8_t>, 3> data = {
+      absl::Span<const uint8_t>(base + offsetof(MessagePrefix, slot_id),
                                 offsetof(MessagePrefix, checksum) -
                                     offsetof(MessagePrefix, slot_id)),
+      absl::Span<const uint8_t>(
+          base + offsetof(MessagePrefix, checksum) + checksum_size,
+          metadata_size),
       absl::Span<const uint8_t>(reinterpret_cast<const uint8_t *>(buffer),
                                 message_size)};
   return data;

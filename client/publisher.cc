@@ -339,6 +339,8 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     prefix->ordinal = slot->ordinal;
     prefix->timestamp = slot->timestamp;
     prefix->vchan_id = slot->vchan_id;
+    prefix->checksum_size = static_cast<uint16_t>(ChecksumSize());
+    prefix->metadata_size = static_cast<uint16_t>(MetadataSize());
     prefix->flags = 0;
     prefix->slot_id = slot->id;
     slot->bridged_slot_id = slot->id;
@@ -349,7 +351,8 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     }
     if (options_.Checksum()) {
       prefix->SetHasChecksum();
-      auto data = GetMessageChecksumData(prefix, buffer, slot->message_size);
+      auto data = GetMessageChecksumData(prefix, buffer, slot->message_size,
+                                         ChecksumSize(), MetadataSize());
       absl::Span<std::byte> cksum = GetChecksumSpan(prefix, ChecksumSize());
       if (checksum_callback_ != nullptr) {
         checksum_callback_(data, cksum);
