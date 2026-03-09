@@ -3589,6 +3589,9 @@ TEST_F(ClientTest, ChecksumIgnoresPrefixPaddingLargeChecksum) {
 // ---------------------------------------------------------------------------
 // Self-contained AES-128-CMAC (RFC 4493) for checksum callback tests.
 // Only forward encryption is needed.
+//
+// NOTE: this is AI generated and has not be validated for use in anything
+// but a test.  I have no way of knowing whether it is correct or not.
 // ---------------------------------------------------------------------------
 namespace {
 
