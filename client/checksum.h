@@ -23,7 +23,7 @@ uint32_t SubspaceCRC32(uint32_t crc, const uint8_t *data, size_t length);
 // where the checksum should be stored.  The default CRC32 implementation
 // writes 4 bytes; custom callbacks may use the full region.
 using ChecksumCallback = std::function<void(
-    const std::array<absl::Span<const uint8_t>, 2> &data,
+    const std::array<absl::Span<const uint8_t>, 3> &data,
     absl::Span<std::byte> checksum)>;
 
 template <size_t N>

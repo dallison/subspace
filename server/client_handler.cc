@@ -307,6 +307,18 @@ void ClientHandler::HandleCreatePublisher(
     if (ms < 0) {
       ms = 0;
     }
+    if (cs > kMaxChecksumSize) {
+      response->set_error(
+          absl::StrFormat("checksum_size %d exceeds maximum %d for channel %s",
+                          cs, kMaxChecksumSize, req.channel_name()));
+      return;
+    }
+    if (ms > kMaxMetadataSize) {
+      response->set_error(
+          absl::StrFormat("metadata_size %d exceeds maximum %d for channel %s",
+                          ms, kMaxMetadataSize, req.channel_name()));
+      return;
+    }
     if (channel->ChecksumSize() != 4 && channel->ChecksumSize() != cs) {
       response->set_error(
           absl::StrFormat("Inconsistent checksum_size for channel %s: "

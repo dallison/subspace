@@ -2785,7 +2785,7 @@ TEST_F(ClientTest, ChecksumCallback) {
   ASSERT_OK(sub);
 
   auto fake_crc =
-      [](const std::array<absl::Span<const uint8_t>, 2> &data,
+      [](const std::array<absl::Span<const uint8_t>, 3> &data,
          absl::Span<std::byte> checksum) {
     uint32_t sum = 0;
     for (const auto &span : data) {
@@ -2841,7 +2841,7 @@ TEST_F(ClientTest, ChecksumCallbackPassErrors) {
   ASSERT_OK(sub);
 
   auto fake_crc =
-      [](const std::array<absl::Span<const uint8_t>, 2> &data,
+      [](const std::array<absl::Span<const uint8_t>, 3> &data,
          absl::Span<std::byte> checksum) {
     uint32_t sum = 0;
     for (const auto &span : data) {
@@ -2883,7 +2883,7 @@ TEST_F(ClientTest, ChecksumCallbackReset) {
   ASSERT_OK(sub);
 
   auto fake_crc =
-      [](const std::array<absl::Span<const uint8_t>, 2> &data,
+      [](const std::array<absl::Span<const uint8_t>, 3> &data,
          absl::Span<std::byte> checksum) {
     uint32_t sum = 0;
     for (const auto &span : data) {
@@ -2895,7 +2895,7 @@ TEST_F(ClientTest, ChecksumCallbackReset) {
   };
 
   auto fake_crc_mismatch =
-      [&fake_crc](const std::array<absl::Span<const uint8_t>, 2> &data,
+      [&fake_crc](const std::array<absl::Span<const uint8_t>, 3> &data,
                   absl::Span<std::byte> checksum) {
     fake_crc(data, checksum);
     checksum[0] ^= std::byte{0xFF};
@@ -2947,7 +2947,7 @@ TEST_F(ClientTest, ChecksumCallbackPublisherOnly) {
   ASSERT_OK(sub);
 
   auto fake_crc =
-      [](const std::array<absl::Span<const uint8_t>, 2> &data,
+      [](const std::array<absl::Span<const uint8_t>, 3> &data,
          absl::Span<std::byte> checksum) {
     uint32_t sum = 0;
     for (const auto &span : data) {
@@ -2993,7 +2993,7 @@ TEST_F(ClientTest, Checksum20Byte) {
 
   // 20-byte checksum: 5 CRC32 values computed with different seeds.
   auto checksum_20 =
-      [](const std::array<absl::Span<const uint8_t>, 2> &data,
+      [](const std::array<absl::Span<const uint8_t>, 3> &data,
          absl::Span<std::byte> checksum) {
     ASSERT_GE(checksum.size(), 20u);
     uint32_t *out = reinterpret_cast<uint32_t *>(checksum.data());
@@ -3252,6 +3252,44 @@ TEST_F(ClientTest, MetadataLargeWithLargeChecksum) {
   }
 }
 
+TEST_F(ClientTest, ChecksumSizeTooLarge) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_cs_big_fail",
+      {.slot_size = 256, .num_slots = 10, .checksum_size = 0x10000});
+  ASSERT_FALSE(pub.ok());
+}
+
+TEST_F(ClientTest, MetadataSizeTooLarge) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_ms_big_fail",
+      {.slot_size = 256, .num_slots = 10, .metadata_size = 0x10000});
+  ASSERT_FALSE(pub.ok());
+}
+
+TEST_F(ClientTest, ChecksumSizeAtMax) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_cs_max",
+      {.slot_size = 0x20000, .num_slots = 2, .checksum_size = 0xFFFF});
+  ASSERT_OK(pub);
+  ASSERT_EQ(0xFFFF, pub->ChecksumSize());
+}
+
+TEST_F(ClientTest, MetadataSizeAtMax) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_ms_max",
+      {.slot_size = 0x20000, .num_slots = 2, .metadata_size = 0xFFFF});
+  ASSERT_OK(pub);
+  ASSERT_EQ(0xFFFF, pub->MetadataSize());
+}
+
 // metadata_size=0: GetMetadata returns empty span.
 TEST_F(ClientTest, MetadataZero) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
@@ -3308,6 +3346,624 @@ TEST_F(ClientTest, MetadataMultipleMessages) {
     memcpy(&read_tag, sub_meta.data(), sizeof(read_tag));
     ASSERT_EQ(tag, read_tag);
   }
+}
+
+// Checksum + metadata: successful round-trip.
+TEST_F(ClientTest, ChecksumWithMetadata) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_cs_meta",
+      {.slot_size = 256, .num_slots = 10, .checksum = true,
+       .metadata_size = 16});
+  ASSERT_OK(pub);
+  ASSERT_EQ(4, pub->ChecksumSize());
+  ASSERT_EQ(16, pub->MetadataSize());
+  // 48 + 4 + 16 = 68 → Aligned<64> = 128
+  ASSERT_EQ(128, pub->PrefixSize());
+
+  absl::StatusOr<Subscriber> sub =
+      client->CreateSubscriber("chan_cs_meta", {.checksum = true});
+  ASSERT_OK(sub);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "hello", 5);
+
+  auto meta = pub->GetMetadata();
+  ASSERT_EQ(16u, meta.size());
+  memcpy(meta.data(), "META_CHECKSUM!!\0", 16);
+
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(5);
+  ASSERT_OK(pub_status);
+
+  absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(5, msg->length);
+  ASSERT_STREQ("hello", reinterpret_cast<const char *>(msg->buffer));
+
+  auto sub_meta = sub->GetMetadata();
+  ASSERT_EQ(16u, sub_meta.size());
+  ASSERT_EQ(0, memcmp("META_CHECKSUM!!\0", sub_meta.data(), 16));
+}
+
+// Checksum + metadata: corrupt the message payload after publish → checksum error.
+TEST_F(ClientTest, ChecksumWithMetadataCorruptPayload) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_cs_meta_cp",
+      {.slot_size = 256, .num_slots = 10, .checksum = true,
+       .metadata_size = 16});
+  ASSERT_OK(pub);
+
+  absl::StatusOr<Subscriber> sub =
+      client->CreateSubscriber("chan_cs_meta_cp", {.checksum = true});
+  ASSERT_OK(sub);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "foobar", 6);
+
+  auto meta = pub->GetMetadata();
+  memcpy(meta.data(), "ABCDEFGHIJKLMNOP", 16);
+
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+  ASSERT_OK(pub_status);
+
+  // Corrupt the payload after publishing.
+  reinterpret_cast<char *>(*buffer)[0] = 'X';
+
+  absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+  ASSERT_FALSE(msg.ok());
+  ASSERT_EQ(absl::StatusCode::kInternal, msg.status().code());
+}
+
+// Checksum + metadata: corrupt the metadata after publish → checksum error.
+TEST_F(ClientTest, ChecksumWithMetadataCorruptMetadata) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_cs_meta_cm",
+      {.slot_size = 256, .num_slots = 10, .checksum = true,
+       .metadata_size = 16});
+  ASSERT_OK(pub);
+
+  absl::StatusOr<Subscriber> sub =
+      client->CreateSubscriber("chan_cs_meta_cm", {.checksum = true});
+  ASSERT_OK(sub);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "intact", 6);
+
+  auto meta = pub->GetMetadata();
+  memcpy(meta.data(), "ABCDEFGHIJKLMNOP", 16);
+
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+  ASSERT_OK(pub_status);
+
+  // Corrupt the metadata after publishing.
+  meta[0] = std::byte{0xFF};
+
+  absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+  ASSERT_FALSE(msg.ok());
+  ASSERT_EQ(absl::StatusCode::kInternal, msg.status().code());
+}
+
+// Checksum + metadata: corrupt metadata, pass_checksum_errors → message
+// delivered with checksum_error flag set.
+TEST_F(ClientTest, ChecksumWithMetadataCorruptMetadataPassError) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_cs_meta_pe",
+      {.slot_size = 256, .num_slots = 10, .checksum = true,
+       .metadata_size = 16});
+  ASSERT_OK(pub);
+
+  absl::StatusOr<Subscriber> sub = client->CreateSubscriber(
+      "chan_cs_meta_pe", {.checksum = true, .pass_checksum_errors = true});
+  ASSERT_OK(sub);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "intact", 6);
+
+  auto meta = pub->GetMetadata();
+  memcpy(meta.data(), "ABCDEFGHIJKLMNOP", 16);
+
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+  ASSERT_OK(pub_status);
+
+  // Corrupt metadata.
+  meta[15] ^= std::byte{0x01};
+
+  absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(6, msg->length);
+  ASSERT_TRUE(msg->checksum_error);
+}
+
+// Verify that padding bytes between (checksum + metadata) and the next 64-byte
+// boundary are NOT covered by the checksum.  Corrupting them must not
+// invalidate the checksum.
+TEST_F(ClientTest, ChecksumIgnoresPrefixPadding) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  // checksum_size=4, metadata_size=16 → used=48+4+16=68, prefix=128.
+  // Padding region is bytes [68..128) relative to prefix start.
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_cs_pad",
+      {.slot_size = 256, .num_slots = 10, .checksum = true,
+       .metadata_size = 16});
+  ASSERT_OK(pub);
+  ASSERT_EQ(128, pub->PrefixSize());
+
+  absl::StatusOr<Subscriber> sub =
+      client->CreateSubscriber("chan_cs_pad", {.checksum = true});
+  ASSERT_OK(sub);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "padtest", 7);
+
+  auto meta = pub->GetMetadata();
+  memcpy(meta.data(), "0123456789abcdef", 16);
+
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(7);
+  ASSERT_OK(pub_status);
+
+  // The prefix lives immediately before the buffer.
+  char *prefix_base = reinterpret_cast<char *>(*buffer) - pub->PrefixSize();
+  // Padding starts after checksum + metadata: offset 48 + 4 + 16 = 68.
+  int32_t used = offsetof(subspace::MessagePrefix, checksum) +
+                 pub->ChecksumSize() + pub->MetadataSize();
+  int32_t pad_len = pub->PrefixSize() - used;
+  ASSERT_GT(pad_len, 0);
+
+  // Scribble over the entire padding region.
+  memset(prefix_base + used, 0xAA, pad_len);
+
+  // Checksum should still be valid because padding is not checksummed.
+  absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(7, msg->length);
+  ASSERT_STREQ("padtest", reinterpret_cast<const char *>(msg->buffer));
+}
+
+// Same test with a larger checksum (20 bytes) to ensure the padding boundary
+// is computed correctly for non-default checksum sizes.
+TEST_F(ClientTest, ChecksumIgnoresPrefixPaddingLargeChecksum) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  // checksum_size=20, metadata_size=32 → used=48+20+32=100, prefix=128.
+  // Padding region is bytes [100..128).
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_cs_pad_lg",
+      {.slot_size = 256, .num_slots = 10, .checksum = true,
+       .checksum_size = 20, .metadata_size = 32});
+  ASSERT_OK(pub);
+  ASSERT_EQ(128, pub->PrefixSize());
+  ASSERT_EQ(20, pub->ChecksumSize());
+  ASSERT_EQ(32, pub->MetadataSize());
+
+  absl::StatusOr<Subscriber> sub =
+      client->CreateSubscriber("chan_cs_pad_lg", {.checksum = true});
+  ASSERT_OK(sub);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "bigpad", 6);
+
+  auto meta = pub->GetMetadata();
+  ASSERT_EQ(32u, meta.size());
+  for (int i = 0; i < 32; i++) {
+    meta[i] = static_cast<std::byte>(i);
+  }
+
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+  ASSERT_OK(pub_status);
+
+  // Scribble over the padding region.
+  char *prefix_base = reinterpret_cast<char *>(*buffer) - pub->PrefixSize();
+  int32_t used = offsetof(subspace::MessagePrefix, checksum) +
+                 pub->ChecksumSize() + pub->MetadataSize();
+  int32_t pad_len = pub->PrefixSize() - used;
+  ASSERT_GT(pad_len, 0);
+  memset(prefix_base + used, 0xBB, pad_len);
+
+  absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(6, msg->length);
+  ASSERT_STREQ("bigpad", reinterpret_cast<const char *>(msg->buffer));
+
+  // Verify metadata survived.
+  auto sub_meta = sub->GetMetadata();
+  ASSERT_EQ(32u, sub_meta.size());
+  for (int i = 0; i < 32; i++) {
+    ASSERT_EQ(static_cast<std::byte>(i), sub_meta[i]) << "at index " << i;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Self-contained AES-128-CMAC (RFC 4493) for checksum callback tests.
+// Only forward encryption is needed.
+// ---------------------------------------------------------------------------
+namespace {
+
+// FIPS 197 S-box.
+static const uint8_t kAesSbox[256] = {
+    0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+    0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+    0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+    0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+    0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+    0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+    0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+    0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+    0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+    0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+    0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+    0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+    0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+    0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+    0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+    0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16,
+};
+
+static const uint8_t kRcon[10] = {
+    0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1b,0x36};
+
+inline void Xor128(uint8_t *dst, const uint8_t *src) {
+  for (int i = 0; i < 16; i++) dst[i] ^= src[i];
+}
+
+inline uint8_t Gmul2(uint8_t a) {
+  return static_cast<uint8_t>((a << 1) ^ ((a >> 7) * 0x1b));
+}
+
+void Aes128KeyExpand(const uint8_t key[16], uint8_t rk[176]) {
+  memcpy(rk, key, 16);
+  for (int i = 0; i < 10; i++) {
+    const uint8_t *prev = rk + 16 * i;
+    uint8_t *next = rk + 16 * (i + 1);
+    uint8_t t[4] = {
+        static_cast<uint8_t>(kAesSbox[prev[13]] ^ kRcon[i]),
+        kAesSbox[prev[14]],
+        kAesSbox[prev[15]],
+        kAesSbox[prev[12]]};
+    for (int j = 0; j < 4; j++) next[j] = prev[j] ^ t[j];
+    for (int w = 1; w < 4; w++)
+      for (int j = 0; j < 4; j++)
+        next[4 * w + j] = prev[4 * w + j] ^ next[4 * (w - 1) + j];
+  }
+}
+
+void MixColumns(uint8_t s[16]) {
+  for (int c = 0; c < 4; c++) {
+    uint8_t *col = s + 4 * c;
+    uint8_t a0 = col[0], a1 = col[1], a2 = col[2], a3 = col[3];
+    col[0] = Gmul2(a0) ^ Gmul2(a1) ^ a1 ^ a2 ^ a3;
+    col[1] = a0 ^ Gmul2(a1) ^ Gmul2(a2) ^ a2 ^ a3;
+    col[2] = a0 ^ a1 ^ Gmul2(a2) ^ Gmul2(a3) ^ a3;
+    col[3] = Gmul2(a0) ^ a0 ^ a1 ^ a2 ^ Gmul2(a3);
+  }
+}
+
+void Aes128Encrypt(const uint8_t rk[176], uint8_t block[16]) {
+  Xor128(block, rk);
+  for (int r = 1; r <= 10; r++) {
+    for (int i = 0; i < 16; i++) block[i] = kAesSbox[block[i]];
+    // ShiftRows (column-major state).
+    // Row 1: left by 1.
+    uint8_t t = block[1];
+    block[1] = block[5]; block[5] = block[9];
+    block[9] = block[13]; block[13] = t;
+    // Row 2: left by 2.
+    std::swap(block[2], block[10]);
+    std::swap(block[6], block[14]);
+    // Row 3: left by 3 (= right by 1).
+    t = block[15];
+    block[15] = block[11]; block[11] = block[7];
+    block[7] = block[3]; block[3] = t;
+    if (r < 10) MixColumns(block);
+    Xor128(block, rk + 16 * r);
+  }
+}
+
+void ShiftLeft128(const uint8_t in[16], uint8_t out[16]) {
+  for (int i = 0; i < 15; i++)
+    out[i] = static_cast<uint8_t>((in[i] << 1) | (in[i + 1] >> 7));
+  out[15] = static_cast<uint8_t>(in[15] << 1);
+}
+
+// AES-128-CMAC (RFC 4493) over a concatenation of spans.
+void Aes128Cmac(const uint8_t key[16],
+                const std::array<absl::Span<const uint8_t>, 3> &data,
+                uint8_t mac[16]) {
+  uint8_t rk[176];
+  Aes128KeyExpand(key, rk);
+
+  // Generate subkeys K1, K2.
+  uint8_t L[16] = {};
+  Aes128Encrypt(rk, L);
+  uint8_t K1[16], K2[16];
+  ShiftLeft128(L, K1);
+  if (L[0] & 0x80) K1[15] ^= 0x87;
+  ShiftLeft128(K1, K2);
+  if (K1[0] & 0x80) K2[15] ^= 0x87;
+
+  size_t total = 0;
+  for (const auto &s : data) total += s.size();
+
+  uint8_t X[16] = {};
+  uint8_t blk[16];
+  size_t pos = 0;
+  size_t processed = 0;
+
+  for (const auto &span : data) {
+    for (size_t i = 0; i < span.size(); i++) {
+      blk[pos++] = span[i];
+      processed++;
+      if (pos == 16 && processed < total) {
+        Xor128(X, blk);
+        Aes128Encrypt(rk, X);
+        pos = 0;
+      }
+    }
+  }
+
+  if (pos == 16 && total > 0) {
+    Xor128(blk, K1);
+  } else {
+    blk[pos++] = 0x80;
+    while (pos < 16) blk[pos++] = 0x00;
+    Xor128(blk, K2);
+  }
+  Xor128(X, blk);
+  Aes128Encrypt(rk, X);
+  memcpy(mac, X, 16);
+}
+
+// Fixed test key (RFC 4493 test vector key).
+static const uint8_t kCmacTestKey[16] = {
+    0x2b,0x7e,0x15,0x16,0x28,0xae,0xd2,0xa6,
+    0xab,0xf7,0x15,0x88,0x09,0xcf,0x4f,0x3c};
+
+// ChecksumCallback wrapper that computes AES-128-CMAC.
+void CmacChecksumCallback(
+    const std::array<absl::Span<const uint8_t>, 3> &data,
+    absl::Span<std::byte> checksum) {
+  uint8_t mac[16];
+  Aes128Cmac(kCmacTestKey, data, mac);
+  memcpy(checksum.data(), mac, std::min<size_t>(checksum.size(), 16));
+}
+
+} // anonymous namespace
+
+// Validate the AES-128-CMAC implementation against RFC 4493 test vectors.
+TEST(Aes128CmacTest, Rfc4493Vectors) {
+  // Example 2: 16-byte message (one complete block).
+  {
+    const uint8_t msg[16] = {
+        0x6b,0xc1,0xbe,0xe2,0x2e,0x40,0x9f,0x96,
+        0xe9,0x3d,0x7e,0x11,0x73,0x93,0x17,0x2a};
+    const uint8_t expected[16] = {
+        0x07,0x0a,0x16,0xb4,0x6b,0x4d,0x41,0x44,
+        0xf7,0x9b,0xdd,0x9d,0xd0,0x4a,0x28,0x7c};
+    std::array<absl::Span<const uint8_t>, 3> data = {
+        absl::Span<const uint8_t>(msg, 16),
+        absl::Span<const uint8_t>(),
+        absl::Span<const uint8_t>()};
+    uint8_t mac[16];
+    Aes128Cmac(kCmacTestKey, data, mac);
+    ASSERT_EQ(0, memcmp(mac, expected, 16));
+  }
+  // Example 3: 40-byte message (not a multiple of 16).
+  {
+    const uint8_t msg[40] = {
+        0x6b,0xc1,0xbe,0xe2,0x2e,0x40,0x9f,0x96,
+        0xe9,0x3d,0x7e,0x11,0x73,0x93,0x17,0x2a,
+        0xae,0x2d,0x8a,0x57,0x1e,0x03,0xac,0x9c,
+        0x9e,0xb7,0x6f,0xac,0x45,0xaf,0x8e,0x51,
+        0x30,0xc8,0x1c,0x46,0xa3,0x5c,0xe4,0x11};
+    const uint8_t expected[16] = {
+        0xdf,0xa6,0x67,0x47,0xde,0x9a,0xe6,0x30,
+        0x30,0xca,0x32,0x61,0x14,0x97,0xc8,0x27};
+    std::array<absl::Span<const uint8_t>, 3> data = {
+        absl::Span<const uint8_t>(msg, 40),
+        absl::Span<const uint8_t>(),
+        absl::Span<const uint8_t>()};
+    uint8_t mac[16];
+    Aes128Cmac(kCmacTestKey, data, mac);
+    ASSERT_EQ(0, memcmp(mac, expected, 16));
+  }
+  // Example 4: 64-byte message (four complete blocks).
+  {
+    const uint8_t msg[64] = {
+        0x6b,0xc1,0xbe,0xe2,0x2e,0x40,0x9f,0x96,
+        0xe9,0x3d,0x7e,0x11,0x73,0x93,0x17,0x2a,
+        0xae,0x2d,0x8a,0x57,0x1e,0x03,0xac,0x9c,
+        0x9e,0xb7,0x6f,0xac,0x45,0xaf,0x8e,0x51,
+        0x30,0xc8,0x1c,0x46,0xa3,0x5c,0xe4,0x11,
+        0xe5,0xfb,0xc1,0x19,0x1a,0x0a,0x52,0xef,
+        0xf6,0x9f,0x24,0x45,0xdf,0x4f,0x9b,0x17,
+        0xad,0x2b,0x41,0x7b,0xe6,0x6c,0x37,0x10};
+    const uint8_t expected[16] = {
+        0x51,0xf0,0xbe,0xbf,0x7e,0x3b,0x9d,0x92,
+        0xfc,0x49,0x74,0x17,0x79,0x36,0x3c,0xfe};
+    std::array<absl::Span<const uint8_t>, 3> data = {
+        absl::Span<const uint8_t>(msg, 64),
+        absl::Span<const uint8_t>(),
+        absl::Span<const uint8_t>()};
+    uint8_t mac[16];
+    Aes128Cmac(kCmacTestKey, data, mac);
+    ASSERT_EQ(0, memcmp(mac, expected, 16));
+  }
+  // Same 40-byte message split across all three spans produces identical MAC.
+  {
+    const uint8_t msg[40] = {
+        0x6b,0xc1,0xbe,0xe2,0x2e,0x40,0x9f,0x96,
+        0xe9,0x3d,0x7e,0x11,0x73,0x93,0x17,0x2a,
+        0xae,0x2d,0x8a,0x57,0x1e,0x03,0xac,0x9c,
+        0x9e,0xb7,0x6f,0xac,0x45,0xaf,0x8e,0x51,
+        0x30,0xc8,0x1c,0x46,0xa3,0x5c,0xe4,0x11};
+    const uint8_t expected[16] = {
+        0xdf,0xa6,0x67,0x47,0xde,0x9a,0xe6,0x30,
+        0x30,0xca,0x32,0x61,0x14,0x97,0xc8,0x27};
+    std::array<absl::Span<const uint8_t>, 3> data = {
+        absl::Span<const uint8_t>(msg, 10),
+        absl::Span<const uint8_t>(msg + 10, 17),
+        absl::Span<const uint8_t>(msg + 27, 13)};
+    uint8_t mac[16];
+    Aes128Cmac(kCmacTestKey, data, mac);
+    ASSERT_EQ(0, memcmp(mac, expected, 16));
+  }
+}
+
+// AES-128-CMAC checksum with metadata: successful round-trip.
+TEST_F(ClientTest, ChecksumAes128CmacWithMetadata) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  // checksum_size=16 for the 128-bit CMAC output.
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_cmac",
+      {.slot_size = 256, .num_slots = 10, .checksum = true,
+       .checksum_size = 16, .metadata_size = 24});
+  ASSERT_OK(pub);
+  ASSERT_EQ(16, pub->ChecksumSize());
+  ASSERT_EQ(24, pub->MetadataSize());
+
+  absl::StatusOr<Subscriber> sub =
+      client->CreateSubscriber("chan_cmac", {.checksum = true});
+  ASSERT_OK(sub);
+
+  pub->SetChecksumCallback(CmacChecksumCallback);
+  sub->SetChecksumCallback(CmacChecksumCallback);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "cmac-test-payload", 17);
+
+  auto meta = pub->GetMetadata();
+  ASSERT_EQ(24u, meta.size());
+  memcpy(meta.data(), "metadata-for-cmac-test!!", 24);
+
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(17);
+  ASSERT_OK(pub_status);
+
+  absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(17, msg->length);
+  ASSERT_EQ(0, memcmp("cmac-test-payload", msg->buffer, 17));
+
+  auto sub_meta = sub->GetMetadata();
+  ASSERT_EQ(24u, sub_meta.size());
+  ASSERT_EQ(0, memcmp("metadata-for-cmac-test!!", sub_meta.data(), 24));
+}
+
+// AES-128-CMAC: corrupt payload after publish → checksum error.
+TEST_F(ClientTest, ChecksumAes128CmacCorruptPayload) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_cmac_cp",
+      {.slot_size = 256, .num_slots = 10, .checksum = true,
+       .checksum_size = 16, .metadata_size = 24});
+  ASSERT_OK(pub);
+
+  absl::StatusOr<Subscriber> sub =
+      client->CreateSubscriber("chan_cmac_cp", {.checksum = true});
+  ASSERT_OK(sub);
+
+  pub->SetChecksumCallback(CmacChecksumCallback);
+  sub->SetChecksumCallback(CmacChecksumCallback);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "cmac-corrupt", 12);
+
+  auto meta = pub->GetMetadata();
+  memcpy(meta.data(), "metadata_________________xx", 24);
+
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(12);
+  ASSERT_OK(pub_status);
+
+  reinterpret_cast<char *>(*buffer)[0] = 'X';
+
+  absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+  ASSERT_FALSE(msg.ok());
+  ASSERT_EQ(absl::StatusCode::kInternal, msg.status().code());
+}
+
+// AES-128-CMAC: corrupt metadata after publish → checksum error.
+TEST_F(ClientTest, ChecksumAes128CmacCorruptMetadata) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_cmac_cm",
+      {.slot_size = 256, .num_slots = 10, .checksum = true,
+       .checksum_size = 16, .metadata_size = 24});
+  ASSERT_OK(pub);
+
+  absl::StatusOr<Subscriber> sub =
+      client->CreateSubscriber("chan_cmac_cm", {.checksum = true});
+  ASSERT_OK(sub);
+
+  pub->SetChecksumCallback(CmacChecksumCallback);
+  sub->SetChecksumCallback(CmacChecksumCallback);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "intact-payload", 14);
+
+  auto meta = pub->GetMetadata();
+  memcpy(meta.data(), "metadata_________________xx", 24);
+
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(14);
+  ASSERT_OK(pub_status);
+
+  meta[0] ^= std::byte{0xFF};
+
+  absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+  ASSERT_FALSE(msg.ok());
+  ASSERT_EQ(absl::StatusCode::kInternal, msg.status().code());
+}
+
+// AES-128-CMAC: corrupt metadata, pass_checksum_errors → delivered with flag.
+TEST_F(ClientTest, ChecksumAes128CmacCorruptMetadataPassError) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_cmac_pe",
+      {.slot_size = 256, .num_slots = 10, .checksum = true,
+       .checksum_size = 16, .metadata_size = 24});
+  ASSERT_OK(pub);
+
+  absl::StatusOr<Subscriber> sub = client->CreateSubscriber(
+      "chan_cmac_pe", {.checksum = true, .pass_checksum_errors = true});
+  ASSERT_OK(sub);
+
+  pub->SetChecksumCallback(CmacChecksumCallback);
+  sub->SetChecksumCallback(CmacChecksumCallback);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "intact-payload", 14);
+
+  auto meta = pub->GetMetadata();
+  memcpy(meta.data(), "metadata_________________xx", 24);
+
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(14);
+  ASSERT_OK(pub_status);
+
+  meta[23] ^= std::byte{0x01};
+
+  absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(14, msg->length);
+  ASSERT_TRUE(msg->checksum_error);
 }
 
 int main(int argc, char **argv) {
