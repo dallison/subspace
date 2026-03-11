@@ -298,6 +298,46 @@ void ClientHandler::HandleCreatePublisher(
     response->set_error(publisher.status().ToString());
     return;
   }
+  {
+    int32_t cs = req.checksum_size();
+    int32_t ms = req.metadata_size();
+    if (cs <= 0) {
+      cs = 4;
+    }
+    if (ms < 0) {
+      ms = 0;
+    }
+    if (cs > kMaxChecksumSize) {
+      response->set_error(
+          absl::StrFormat("checksum_size %d exceeds maximum %d for channel %s",
+                          cs, kMaxChecksumSize, req.channel_name()));
+      return;
+    }
+    if (ms > kMaxMetadataSize) {
+      response->set_error(
+          absl::StrFormat("metadata_size %d exceeds maximum %d for channel %s",
+                          ms, kMaxMetadataSize, req.channel_name()));
+      return;
+    }
+    if (channel->ChecksumSize() != 4 && channel->ChecksumSize() != cs) {
+      response->set_error(
+          absl::StrFormat("Inconsistent checksum_size for channel %s: "
+                          "already %d, not %d",
+                          req.channel_name(), channel->ChecksumSize(), cs));
+      return;
+    }
+    if (channel->MetadataSize() != 0 && channel->MetadataSize() != ms) {
+      response->set_error(
+          absl::StrFormat("Inconsistent metadata_size for channel %s: "
+                          "already %d, not %d",
+                          req.channel_name(), channel->MetadataSize(), ms));
+      return;
+    }
+    channel->SetChecksumSize(cs);
+    channel->SetMetadataSize(ms);
+    channel->SetPrefixSize(Channel::ComputePrefixSize(cs, ms));
+  }
+
   server_->OnNewPublisher(channel->Name(), (*publisher)->GetId());
   server_->SendChannelDirectory();
 
@@ -502,6 +542,8 @@ void ClientHandler::HandleCreateSubscriber(
 
   response->set_slot_size(channel->SlotSize());
   response->set_num_slots(channel->NumSlots());
+  response->set_checksum_size(channel->ChecksumSize());
+  response->set_metadata_size(channel->MetadataSize());
   // Add publisher trigger indexes.
   std::vector<toolbelt::FileDescriptor> pub_fds =
       channel->GetReliablePublisherTriggerFds();

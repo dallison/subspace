@@ -13,7 +13,7 @@
 extern "C" {
 #endif
 
-thread_local SubspaceError subspace_error = {.error_message = ""};
+thread_local SubspaceError subspace_error = {};
 
 void subspace_clear_error(void) { subspace_error.error_message[0] = '\0'; }
 
@@ -80,6 +80,8 @@ SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size,
       .fixed_size = false,
       .type = {.type = nullptr, .type_length = 0},
       .activate = false,
+      .checksum_size = 4,
+      .metadata_size = 0,
   };
   return options;
 }
@@ -123,6 +125,8 @@ SubspacePublisher subspace_create_publisher(SubspaceClient client,
       .fixed_size = options.fixed_size,
       .type = std::string(options.type.type, options.type.type_length),
       .activate = options.activate,
+      .checksum_size = options.checksum_size,
+      .metadata_size = options.metadata_size,
   };
   subspace_clear_error();
   SubspacePublisher publisher;

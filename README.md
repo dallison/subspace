@@ -32,7 +32,10 @@ It has the following features:
 1.	Builds using Bazel and uses Abseil and Protocol Buffers from Google.
 1.	Uses my C++ coroutine library (https://github.com/dallison/co)
 
-See the file docs/subspace.pdf for full documentation.
+See the file docs/subspace.pdf for full documentation.  Additional documentation:
+- [Checksums and User Metadata](docs/checksums-and-metadata.md)
+- [Client Architecture](docs/client-architecture.md)
+- [Server Architecture](docs/server-architecture.md)
 
 # Building
 
@@ -433,6 +436,19 @@ public:
     // Resize callback registration
     absl::Status RegisterResizeCallback(
         std::function<absl::Status(Publisher*, int, int)> callback);
+
+    // Prefix area and checksum/metadata sizes
+    int32_t PrefixSize() const;     // Total prefix bytes (multiple of 64)
+    int32_t ChecksumSize() const;   // Bytes reserved for checksum
+    int32_t MetadataSize() const;   // Bytes of user metadata
+
+    // Writable span over the user metadata area in the current slot's prefix.
+    // Call between GetMessageBuffer() and PublishMessage().
+    absl::Span<std::byte> GetMetadata();
+
+    // Custom checksum support
+    void SetChecksumCallback(ChecksumCallback cb);
+    void ResetChecksumCallback();
 };
 ```
 
@@ -586,6 +602,19 @@ public:
     // Statistics
     const ChannelCounters& GetChannelCounters();
     int NumActiveMessages() const;
+
+    // Prefix area and checksum/metadata sizes
+    int32_t PrefixSize() const;     // Total prefix bytes (multiple of 64)
+    int32_t ChecksumSize() const;   // Bytes reserved for checksum
+    int32_t MetadataSize() const;   // Bytes of user metadata
+
+    // Read-only span over the user metadata area in the most recently
+    // read message's prefix.  Valid while the message is active.
+    absl::Span<const std::byte> GetMetadata();
+
+    // Custom checksum support
+    void SetChecksumCallback(ChecksumCallback cb);
+    void ResetChecksumCallback();
 };
 ```
 
@@ -715,7 +744,9 @@ auto pub = client->CreatePublisher("channel",
         .local = false,
         .type = "MyMessageType",
         .fixed_size = false,
-        .checksum = true
+        .checksum = true,
+        .checksum_size = 4,   // default CRC32
+        .metadata_size = 0,   // no user metadata
     }).value();
 ```
 
@@ -735,6 +766,8 @@ auto pub = client->CreatePublisher("channel",
 | `activate` / `SetActivate()` | `bool` | `false` | If true, channel is activated even if unreliable. |
 | `notify_retirement` / `SetNotifyRetirement()` | `bool` | `false` | If true, notify when slots are retired. |
 | `checksum` / `SetChecksum()` | `bool` | `false` | If true, calculate checksums for all messages. |
+| `checksum_size` / `SetChecksumSize()` | `int32_t` | `4` | Number of bytes reserved for the checksum (starting at the `checksum` field of `MessagePrefix`). Default 4 for CRC32. Increase for larger checksums (e.g. 20 for SHA-1). |
+| `metadata_size` / `SetMetadataSize()` | `int32_t` | `0` | Number of bytes of user metadata stored immediately after the checksum area. Accessible via `Publisher::GetMetadata()` / `Subscriber::GetMetadata()`. |
 
 **Getter Methods:**
 - `int32_t SlotSize() const`
@@ -749,6 +782,8 @@ auto pub = client->CreatePublisher("channel",
 - `bool Activate() const`
 - `bool NotifyRetirement() const`
 - `bool Checksum() const`
+- `int32_t ChecksumSize() const`
+- `int32_t MetadataSize() const`
 
 **Example: Creating a reliable publisher with checksums**
 ```cpp
@@ -759,33 +794,106 @@ auto pub = client->CreatePublisher("secure_channel", 512, 20,
         .SetType("SecureMessage")).value();
 ```
 
+### Checksums and the Prefix Area
+
+Each message slot has a prefix area preceding the message buffer.  The prefix
+contains the `MessagePrefix` struct (ordinal, timestamp, size, flags, etc.) whose
+`checksum` field marks the start of the checksum storage.  The total prefix
+area is always aligned to a 64-byte boundary and its size is determined by:
+
+```
+prefix_size = align_up(offsetof(MessagePrefix, checksum) + checksum_size + metadata_size, 64)
+```
+
+With the defaults (`checksum_size = 4`, `metadata_size = 0`) the prefix area
+is 64 bytes — the `MessagePrefix` itself.  Increasing either value causes the
+prefix to grow in 64-byte increments.
+
+When checksums are enabled (`SetChecksum(true)`), the built-in CRC32 writes a
+4-byte checksum at the start of the checksum area.  If you need a larger
+checksum (e.g. 20 bytes for SHA-1), set `checksum_size` accordingly:
+
+```cpp
+auto pub = client->CreatePublisher("channel", 
+    subspace::PublisherOptions()
+        .SetSlotSize(1024)
+        .SetNumSlots(10)
+        .SetChecksum(true)
+        .SetChecksumSize(20)).value();
+```
+
+### User Metadata
+
+The metadata area sits immediately after the checksum area in the prefix.
+Set `metadata_size` on the publisher to reserve space:
+
+```cpp
+auto pub = client->CreatePublisher("channel",
+    subspace::PublisherOptions()
+        .SetSlotSize(1024)
+        .SetNumSlots(10)
+        .SetMetadataSize(16)).value();
+
+// Write metadata between GetMessageBuffer() and PublishMessage():
+auto buffer = pub.GetMessageBuffer(128).value();
+auto meta = pub.GetMetadata();  // absl::Span<std::byte>, 16 bytes
+memcpy(meta.data(), my_metadata, 16);
+pub.PublishMessage(128);
+```
+
+Subscribers read metadata from the most recently read message:
+
+```cpp
+auto msg = sub.ReadMessage().value();
+auto meta = sub.GetMetadata();  // absl::Span<const std::byte>, 16 bytes
+```
+
 ### Checksum Callbacks
 
-If you need a custom checksum algorithm (or want to integrate hardware/offload),
-you can provide checksum callbacks for publishers and subscribers. When set, the
-callback replaces the built-in CRC32 for checksum calculation or verification.
+If you need a custom checksum algorithm, you can provide a callback that
+replaces the built-in CRC32.  The callback receives the data to checksum
+(as three spans covering the prefix header, the prefix extension, and the
+message body) plus a writable
+`absl::Span<std::byte>` of `ChecksumSize()` bytes where it should write
+the result:
 
-**Publisher/Subscriber API:**
-- `Publisher::SetChecksumCallback(ChecksumCallback cb)`
-- `Publisher::ResetChecksumCallback()`
-- `Subscriber::SetChecksumCallback(ChecksumCallback cb)`
-- `Subscriber::ResetChecksumCallback()`
-
-**Example: Custom checksum callback**
 ```cpp
-auto fake_crc = [](const std::array<absl::Span<const uint8_t>, 2> &data) -> uint32_t {
+using ChecksumCallback =
+    std::function<void(const std::array<absl::Span<const uint8_t>, 3> &data,
+                       absl::Span<std::byte> checksum)>;
+```
+
+**Example: Simple additive checksum (4 bytes)**
+```cpp
+auto fake_crc = [](const std::array<absl::Span<const uint8_t>, 3> &data,
+                   absl::Span<std::byte> checksum) {
     uint32_t sum = 0;
     for (const auto &span : data) {
         for (uint8_t byte : span) {
             sum += byte;
         }
     }
-    return sum;
+    *reinterpret_cast<uint32_t *>(checksum.data()) = sum;
 };
 
 pub.SetChecksumCallback(fake_crc);
 sub.SetChecksumCallback(fake_crc);
 ```
+
+**Example: 20-byte custom checksum (requires `checksum_size = 20`)**
+```cpp
+auto sha1_like = [](const std::array<absl::Span<const uint8_t>, 3> &data,
+                    absl::Span<std::byte> checksum) {
+    // checksum.size() == 20
+    // Write your 20-byte digest into checksum.data()
+    my_sha1(data, checksum.data(), checksum.size());
+};
+
+pub.SetChecksumCallback(sha1_like);
+sub.SetChecksumCallback(sha1_like);
+```
+
+Call `ResetChecksumCallback()` to revert to the built-in CRC32.
 
 ## SubscriberOptions
 
@@ -1003,12 +1111,16 @@ SubspacePublisherOptions pub_opts = subspace_publisher_options_default(1024, 10)
 // pub_opts.reliable = false
 // pub_opts.fixed_size = false
 // pub_opts.activate = false
+// pub_opts.checksum_size = 4   (CRC32)
+// pub_opts.metadata_size = 0   (no user metadata)
 
 // Customize options
 pub_opts.reliable = true;
 pub_opts.fixed_size = false;
 pub_opts.type.type = "MyMessageType";
 pub_opts.type.type_length = strlen(pub_opts.type.type);
+pub_opts.checksum_size = 20;   // e.g. 20-byte digest
+pub_opts.metadata_size = 32;   // 32 bytes of user metadata
 
 // Create publisher
 SubspacePublisher pub = subspace_create_publisher(client, "my_channel", pub_opts);
