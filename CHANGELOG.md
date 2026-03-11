@@ -17,8 +17,10 @@
   - Configurable locking behavior for performance optimization
   - Thread-safe message retirement handling
 
-#### Checksums
-- **Configurable checksum generation and checking**: Optionally allows a CRC32 checksum to be added into the `MessagePrefix` for a published message and checked in subscribers.  A message with a failed checksum can either be dropped by the client or received with a failure notification.
+#### Checksums and Prefix Extensions
+- **Configurable checksum generation and checking**: Optionally allows a checksum to be stored in the message prefix and verified by subscribers.  A message with a failed checksum can either be dropped by the client or received with a failure notification.
+- **Arbitrary-sized checksums**: The `checksum_size` option (default 4 for CRC32) controls how many bytes are reserved for the checksum starting at the `checksum` field of `MessagePrefix`. Custom checksum callbacks receive an `absl::Span<std::byte>` of `checksum_size` bytes to write their result.
+- **User metadata in the prefix**: The `metadata_size` option reserves additional bytes immediately after the checksum area. Publishers write metadata via `GetMetadata()` and subscribers read it with the same method. The total prefix size is automatically aligned to 64-byte boundaries.
   
 #### Portability
 - **POSIX shared memory**: for non-Linux systems, uses POSIX shared memory with a shadow file in /tmp.
@@ -50,10 +52,15 @@
 #### Message Checksum Support
 - **Hardware-accelerated checksums**: Integrated CRC32 checksum calculation for message integrity
   - Hardware CRC32 instruction support with fallback implementations
-  - `CalculateChecksum()` and `VerifyChecksum()` functions for multi-span data validation
+  - `CalculateCRC32Checksum()` and `VerifyCRC32Checksum()` functions for multi-span data validation
   - ARM assembly optimizations for CRC32 calculations
   - Configurable hardware acceleration via `SUBSPACE_HARDWARE_CRC` compilation flag
   - Template-based checksum calculation for arbitrary data spans
+- **Configurable checksum and metadata sizes**: `checksum_size` and `metadata_size` publisher options control the prefix layout
+  - Checksum callbacks receive an `absl::Span<std::byte>` of the configured size
+  - `GetMetadata()` on publishers (writable) and subscribers (read-only) for per-message user data
+  - `PrefixSize()`, `ChecksumSize()`, and `MetadataSize()` exposed on both `Publisher` and `Subscriber`
+  - Sizes are validated on the server and propagated across the bridge
 
 ### Testing Infrastructure
 
@@ -157,14 +164,18 @@
   - Atomic operations for retirement trigger management
 
 ### Breaking Changes
-- None in this release - all changes are backward compatible bug fixes and improvements
+- `ChecksumCallback` signature changed: now receives `absl::Span<std::byte> checksum` (writable destination) instead of returning a `uint32_t`.
+- `CalculateChecksum()` renamed to `CalculateCRC32Checksum()`.
+- `VerifyChecksum()` renamed to `VerifyCRC32Checksum()`.
 
 ### Migration Notes
-- No migration required for existing applications
-- New retirement notification features are opt-in via publisher options
-- Thread safety must be explicitly enabled via `SetThreadSafe(true)`
-- Server plugins require separate compilation and loading
-- Enhanced bridge testing infrastructure is available for developers working with multi-server deployments
+- No migration required for existing applications using the default 4-byte CRC32 checksum (the defaults are unchanged).
+- Custom checksum callbacks must be updated to the new `void(data, absl::Span<std::byte> checksum)` signature.
+- New `checksum_size` and `metadata_size` publisher options are opt-in; existing publishers default to `checksum_size = 4` and `metadata_size = 0`.
+- New retirement notification features are opt-in via publisher options.
+- Thread safety must be explicitly enabled via `SetThreadSafe(true)`.
+- Server plugins require separate compilation and loading.
+- Enhanced bridge testing infrastructure is available for developers working with multi-server deployments.
 
 ---
 
