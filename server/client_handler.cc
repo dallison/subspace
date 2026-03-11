@@ -411,6 +411,11 @@ void ClientHandler::HandleCreatePublisher(
     response->add_retirement_fd_indexes(fd_index++);
     fds.push_back(fd);
   }
+
+  if (auto *shadow = server_->GetShadowReplicator(); shadow != nullptr) {
+    shadow->SendAddPublisher(channel->Name(), pub);
+  }
+
   ChannelCounters &counters =
       channel->RecordUpdate(/*is_pub=*/true, /*add=*/true, req.is_reliable());
   response->set_num_sub_updates(counters.num_sub_updates);
@@ -515,6 +520,9 @@ void ClientHandler::HandleCreateSubscriber(
     sub = *subscriber;
   }
   server_->OnNewSubscriber(channel->Name(), sub->GetId());
+  if (auto *shadow = server_->GetShadowReplicator(); shadow != nullptr) {
+    shadow->SendAddSubscriber(channel->Name(), sub);
+  }
 
   server_->SendChannelDirectory();
   channel->RegisterSubscriber(sub->GetId(), channel->GetVirtualChannelId(),

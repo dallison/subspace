@@ -36,6 +36,8 @@ ABSL_FLAG(bool, cleanup_filesystem, false, "Cleanup the filesystem on server sta
 #endif
 ABSL_FLAG(std::vector<std::string>, plugins, {},
           "List of plugins to load");
+ABSL_FLAG(std::string, shadow_socket, "",
+          "Shadow process Unix socket (empty = disabled)");
 
 int main(int argc, char **argv) {
   absl::ParseCommandLine(argc, argv);
@@ -88,6 +90,7 @@ int main(int argc, char **argv) {
   }
 
   server->SetMachineName(absl::GetFlag(FLAGS_machine));
+  server->SetShadowSocket(absl::GetFlag(FLAGS_shadow_socket));
 
   absl::Status s = server->Run();
   if (!s.ok()) {

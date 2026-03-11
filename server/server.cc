@@ -330,6 +330,19 @@ absl::Status Server::Run() {
   }
   scb_ = *scb;
 
+  if (shadow_replicator_ != nullptr) {
+    absl::Status shadow_status = shadow_replicator_->Connect();
+    if (!shadow_status.ok()) {
+      logger_.Log(toolbelt::LogLevel::kWarning,
+                  "Failed to connect to shadow process: %s",
+                  shadow_status.ToString().c_str());
+    } else {
+      shadow_replicator_->SendInit(session_id_, scb_fd_);
+      logger_.Log(toolbelt::LogLevel::kInfo,
+                  "Connected to shadow process");
+    }
+  }
+
   // Create the trigger fd for sending the channel directory.
   if (absl::Status s = channel_directory_trigger_fd_.Open(); !s.ok()) {
     return absl::InternalError(
@@ -522,6 +535,9 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
     // The channels_ map owns all the server channels.
     channels_.emplace(std::make_pair(channel_name, std::move(*vchan)));
     OnNewChannel(channel_name);
+    if (shadow_replicator_ != nullptr) {
+      shadow_replicator_->SendCreateChannel(channel);
+    }
     return channel;
   }
 
@@ -543,6 +559,9 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
   channel->SetSharedMemoryFds(std::move(*fds));
   channels_.emplace(std::make_pair(channel_name, channel));
   OnNewChannel(channel_name);
+  if (shadow_replicator_ != nullptr) {
+    shadow_replicator_->SendCreateChannel(channel);
+  }
 
   return channel;
 }
@@ -583,6 +602,10 @@ ServerChannel *Server::FindChannel(const std::string &channel_name) {
 
 void Server::RemoveChannel(ServerChannel *channel) {
   OnRemoveChannel(channel->Name());
+  if (shadow_replicator_ != nullptr) {
+    shadow_replicator_->SendRemoveChannel(channel->Name(),
+                                          channel->GetChannelId());
+  }
   channel->RemoveBuffer(session_id_);
   channel_ids_.Clear(channel->GetChannelId());
   auto it = channels_.find(channel->Name());
@@ -1749,6 +1772,13 @@ void Server::OnRemoveSubscriber(const std::string &channel_name,
   std::lock_guard<std::mutex> lock(plugin_lock_);
   for (const auto &plugin : plugins_) {
     plugin->interface->OnRemoveSubscriber(*this, channel_name, subscriber_id);
+  }
+}
+
+void Server::SetShadowSocket(const std::string &socket_name) {
+  if (!socket_name.empty()) {
+    shadow_replicator_ =
+        std::make_unique<ShadowReplicator>(socket_name, logger_);
   }
 }
 
