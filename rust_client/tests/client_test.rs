@@ -7,12 +7,22 @@ use std::process::{Child, Command, Stdio};
 
 use subspace_client::bitset::DynamicBitSet;
 use subspace_client::channel::{
-    aligned, aligned64, build_refs_bit_field, ORDINAL_MASK, ORDINAL_SHIFT, PUB_OWNED,
-    RETIRED_REFS_MASK, RETIRED_REFS_SHIFT, VCHAN_ID_MASK, VCHAN_ID_SHIFT,
+    aligned, aligned64, build_refs_bit_field, CHECKSUM_OFFSET, ORDINAL_MASK, ORDINAL_SHIFT,
+    PUB_OWNED, RETIRED_REFS_MASK, RETIRED_REFS_SHIFT, VCHAN_ID_MASK, VCHAN_ID_SHIFT,
 };
 use subspace_client::checksum::{
     calculate_crc32_checksum, subspace_crc32, verify_crc32_checksum,
 };
+
+fn calculate_checksum(spans: &[&[u8]]) -> u32 {
+    let mut buf = [0u8; 4];
+    calculate_crc32_checksum(spans, &mut buf);
+    u32::from_ne_bytes(buf)
+}
+
+fn verify_checksum(spans: &[&[u8]], checksum: u32) -> bool {
+    verify_crc32_checksum(spans, &checksum.to_ne_bytes())
+}
 use subspace_client::options::{PublisherOptions, SubscriberOptions};
 use subspace_client::{Client, ReadMode, SubspaceError};
 
@@ -1218,7 +1228,9 @@ fn integration_checksum_error_returns_error() {
         .create_subscriber("rust_csum_err", &sub_opts)
         .unwrap();
 
-    subscriber.set_checksum_callback(|_spans| 0xBADBAD);
+    subscriber.set_checksum_callback(|_spans: &[&[u8]], cksum: &mut [u8]| {
+        cksum[..4].copy_from_slice(&0xBADBADu32.to_ne_bytes());
+    });
 
     let payload = b"good data";
     let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
@@ -1257,7 +1269,9 @@ fn integration_checksum_error_passed_through() {
         .create_subscriber("rust_csum_pass", &sub_opts)
         .unwrap();
 
-    subscriber.set_checksum_callback(|_spans| 0xBADBAD);
+    subscriber.set_checksum_callback(|_spans: &[&[u8]], cksum: &mut [u8]| {
+        cksum[..4].copy_from_slice(&0xBADBADu32.to_ne_bytes());
+    });
 
     let payload = b"good data";
     let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
@@ -1287,8 +1301,10 @@ fn integration_custom_checksum_callback() {
         .unwrap();
 
     // Install a custom checksum callback on the publisher that always
-    // returns a fixed value.
-    publisher.set_checksum_callback(|_spans| 0xDEADBEEF);
+    // writes a fixed value.
+    publisher.set_checksum_callback(|_spans: &[&[u8]], cksum: &mut [u8]| {
+        cksum[..4].copy_from_slice(&0xDEADBEEFu32.to_ne_bytes());
+    });
 
     let sub_opts = SubscriberOptions::new()
         .set_checksum(true)
@@ -1299,7 +1315,9 @@ fn integration_custom_checksum_callback() {
 
     // Install the same custom checksum on the subscriber so verification
     // matches.
-    subscriber.set_checksum_callback(|_spans| 0xDEADBEEF);
+    subscriber.set_checksum_callback(|_spans: &[&[u8]], cksum: &mut [u8]| {
+        cksum[..4].copy_from_slice(&0xDEADBEEFu32.to_ne_bytes());
+    });
 
     let payload = b"custom checksum";
     let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
@@ -1315,7 +1333,9 @@ fn integration_custom_checksum_callback() {
     } // msg dropped here, releasing the active slot
 
     // Now set a *mismatched* checksum callback on the subscriber.
-    subscriber.set_checksum_callback(|_spans| 0xCAFEBABE);
+    subscriber.set_checksum_callback(|_spans: &[&[u8]], cksum: &mut [u8]| {
+        cksum[..4].copy_from_slice(&0xCAFEBABEu32.to_ne_bytes());
+    });
 
     let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
     unsafe {
@@ -1325,6 +1345,416 @@ fn integration_custom_checksum_callback() {
 
     let msg2 = subscriber.read_message(ReadMode::ReadNext).unwrap();
     assert!(msg2.checksum_error);
+}
+
+// ── Checksum + metadata tests ────────────────────────────────────────────────
+
+#[test]
+fn integration_checksum_with_metadata() {
+    let pub_client = new_client("test_cs_meta_p");
+    let sub_client = new_client("test_cs_meta_s");
+
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(10)
+        .set_checksum(true)
+        .set_metadata_size(16);
+    let publisher = pub_client
+        .create_publisher("rust_cs_meta", &pub_opts)
+        .unwrap();
+    assert_eq!(publisher.checksum_size(), 4);
+    assert_eq!(publisher.metadata_size(), 16);
+    // 48 + 4 + 16 = 68 → Aligned<64> = 128
+    assert_eq!(publisher.prefix_size(), 128);
+
+    let sub_opts = SubscriberOptions::new().set_checksum(true);
+    let subscriber = sub_client
+        .create_subscriber("rust_cs_meta", &sub_opts)
+        .unwrap();
+
+    let payload = b"hello";
+    let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
+    }
+    publisher.set_metadata(b"META_CHECKSUM!!\0");
+
+    publisher.publish_message(payload.len() as i64).unwrap();
+
+    let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(msg.length, payload.len());
+    assert!(!msg.checksum_error);
+    let data = unsafe { std::slice::from_raw_parts(msg.buffer, msg.length) };
+    assert_eq!(data, payload);
+
+    let sub_meta = subscriber.get_metadata();
+    assert_eq!(sub_meta.len(), 16);
+    assert_eq!(&sub_meta[..], b"META_CHECKSUM!!\0");
+}
+
+#[test]
+fn integration_checksum_with_metadata_corrupt_payload() {
+    let pub_client = new_client("test_cs_meta_cp_p");
+    let sub_client = new_client("test_cs_meta_cp_s");
+
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(10)
+        .set_checksum(true)
+        .set_metadata_size(16);
+    let publisher = pub_client
+        .create_publisher("rust_cs_meta_cp", &pub_opts)
+        .unwrap();
+
+    let sub_opts = SubscriberOptions::new().set_checksum(true);
+    let subscriber = sub_client
+        .create_subscriber("rust_cs_meta_cp", &sub_opts)
+        .unwrap();
+
+    let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
+    unsafe {
+        std::ptr::copy_nonoverlapping(b"foobar".as_ptr(), buf, 6);
+    }
+    publisher.set_metadata(b"ABCDEFGHIJKLMNOP");
+
+    publisher.publish_message(6).unwrap();
+
+    // Corrupt the payload after publishing.
+    unsafe { *buf = b'X' };
+
+    let result = subscriber.read_message(ReadMode::ReadNext);
+    assert!(
+        matches!(result, Err(SubspaceError::ChecksumError)),
+        "Expected ChecksumError, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn integration_checksum_with_metadata_corrupt_metadata() {
+    let pub_client = new_client("test_cs_meta_cm_p");
+    let sub_client = new_client("test_cs_meta_cm_s");
+
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(10)
+        .set_checksum(true)
+        .set_metadata_size(16);
+    let publisher = pub_client
+        .create_publisher("rust_cs_meta_cm", &pub_opts)
+        .unwrap();
+
+    let sub_opts = SubscriberOptions::new().set_checksum(true);
+    let subscriber = sub_client
+        .create_subscriber("rust_cs_meta_cm", &sub_opts)
+        .unwrap();
+
+    let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
+    unsafe {
+        std::ptr::copy_nonoverlapping(b"intact".as_ptr(), buf, 6);
+    }
+    publisher.set_metadata(b"ABCDEFGHIJKLMNOP");
+
+    publisher.publish_message(6).unwrap();
+
+    // Corrupt the metadata after publishing via raw pointer.
+    let prefix_base = unsafe { buf.sub(publisher.prefix_size() as usize) };
+    let meta_offset = CHECKSUM_OFFSET + publisher.checksum_size() as usize;
+    unsafe { *prefix_base.add(meta_offset) = 0xFF };
+
+    let result = subscriber.read_message(ReadMode::ReadNext);
+    assert!(
+        matches!(result, Err(SubspaceError::ChecksumError)),
+        "Expected ChecksumError, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn integration_checksum_with_metadata_corrupt_metadata_pass_error() {
+    let pub_client = new_client("test_cs_meta_pe_p");
+    let sub_client = new_client("test_cs_meta_pe_s");
+
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(10)
+        .set_checksum(true)
+        .set_metadata_size(16);
+    let publisher = pub_client
+        .create_publisher("rust_cs_meta_pe", &pub_opts)
+        .unwrap();
+
+    let sub_opts = SubscriberOptions::new()
+        .set_checksum(true)
+        .set_pass_checksum_errors(true);
+    let subscriber = sub_client
+        .create_subscriber("rust_cs_meta_pe", &sub_opts)
+        .unwrap();
+
+    let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
+    unsafe {
+        std::ptr::copy_nonoverlapping(b"intact".as_ptr(), buf, 6);
+    }
+    publisher.set_metadata(b"ABCDEFGHIJKLMNOP");
+
+    publisher.publish_message(6).unwrap();
+
+    // Corrupt metadata.
+    let prefix_base = unsafe { buf.sub(publisher.prefix_size() as usize) };
+    let meta_last = CHECKSUM_OFFSET + publisher.checksum_size() as usize + 15;
+    unsafe { *prefix_base.add(meta_last) ^= 0x01 };
+
+    let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(msg.length, 6);
+    assert!(msg.checksum_error);
+}
+
+#[test]
+fn integration_checksum_ignores_prefix_padding() {
+    let pub_client = new_client("test_cs_pad_p");
+    let sub_client = new_client("test_cs_pad_s");
+
+    // checksum_size=4, metadata_size=16 → used=48+4+16=68, prefix=128.
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(10)
+        .set_checksum(true)
+        .set_metadata_size(16);
+    let publisher = pub_client
+        .create_publisher("rust_cs_pad", &pub_opts)
+        .unwrap();
+    assert_eq!(publisher.prefix_size(), 128);
+
+    let sub_opts = SubscriberOptions::new().set_checksum(true);
+    let subscriber = sub_client
+        .create_subscriber("rust_cs_pad", &sub_opts)
+        .unwrap();
+
+    let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
+    unsafe {
+        std::ptr::copy_nonoverlapping(b"padtest".as_ptr(), buf, 7);
+    }
+    publisher.set_metadata(b"0123456789abcdef");
+
+    publisher.publish_message(7).unwrap();
+
+    // Scribble over the padding region after (checksum + metadata).
+    let prefix_base = unsafe { buf.sub(publisher.prefix_size() as usize) };
+    let used = CHECKSUM_OFFSET
+        + publisher.checksum_size() as usize
+        + publisher.metadata_size() as usize;
+    let pad_len = publisher.prefix_size() as usize - used;
+    assert!(pad_len > 0);
+    unsafe {
+        std::ptr::write_bytes(prefix_base.add(used), 0xAA, pad_len);
+    }
+
+    let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(msg.length, 7);
+    assert!(!msg.checksum_error);
+    let data = unsafe { std::slice::from_raw_parts(msg.buffer, msg.length) };
+    assert_eq!(data, b"padtest");
+}
+
+#[test]
+fn integration_checksum_ignores_prefix_padding_large_checksum() {
+    let pub_client = new_client("test_cs_pad_lg_p");
+    let sub_client = new_client("test_cs_pad_lg_s");
+
+    // checksum_size=20, metadata_size=32 → used=48+20+32=100, prefix=128.
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(10)
+        .set_checksum(true)
+        .set_checksum_size(20)
+        .set_metadata_size(32);
+    let publisher = pub_client
+        .create_publisher("rust_cs_pad_lg", &pub_opts)
+        .unwrap();
+    assert_eq!(publisher.prefix_size(), 128);
+    assert_eq!(publisher.checksum_size(), 20);
+    assert_eq!(publisher.metadata_size(), 32);
+
+    let sub_opts = SubscriberOptions::new().set_checksum(true);
+    let subscriber = sub_client
+        .create_subscriber("rust_cs_pad_lg", &sub_opts)
+        .unwrap();
+
+    let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
+    unsafe {
+        std::ptr::copy_nonoverlapping(b"bigpad".as_ptr(), buf, 6);
+    }
+    let meta_data: Vec<u8> = (0..32).map(|i| i as u8).collect();
+    publisher.set_metadata(&meta_data);
+
+    publisher.publish_message(6).unwrap();
+
+    // Scribble over the padding region.
+    let prefix_base = unsafe { buf.sub(publisher.prefix_size() as usize) };
+    let used = CHECKSUM_OFFSET
+        + publisher.checksum_size() as usize
+        + publisher.metadata_size() as usize;
+    let pad_len = publisher.prefix_size() as usize - used;
+    assert!(pad_len > 0);
+    unsafe {
+        std::ptr::write_bytes(prefix_base.add(used), 0xBB, pad_len);
+    }
+
+    let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(msg.length, 6);
+    assert!(!msg.checksum_error);
+    let data = unsafe { std::slice::from_raw_parts(msg.buffer, msg.length) };
+    assert_eq!(data, b"bigpad");
+
+    // Verify metadata survived.
+    let sub_meta = subscriber.get_metadata();
+    assert_eq!(sub_meta.len(), 32);
+    for i in 0..32 {
+        assert_eq!(sub_meta[i], i as u8, "metadata mismatch at index {}", i);
+    }
+}
+
+#[test]
+fn integration_checksum_size_too_large() {
+    let client = new_client("test_cs_too_big");
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(10)
+        .set_checksum_size(0x10000);
+    let result = client.create_publisher("rust_cs_too_big", &pub_opts);
+    assert!(result.is_err());
+}
+
+#[test]
+fn integration_metadata_size_too_large() {
+    let client = new_client("test_ms_too_big");
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(10)
+        .set_metadata_size(0x10000);
+    let result = client.create_publisher("rust_ms_too_big", &pub_opts);
+    assert!(result.is_err());
+}
+
+#[test]
+fn integration_checksum_size_at_max() {
+    let client = new_client("test_cs_at_max");
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(0x20000)
+        .set_num_slots(2)
+        .set_checksum_size(0xFFFF);
+    let publisher = client
+        .create_publisher("rust_cs_at_max", &pub_opts)
+        .unwrap();
+    assert_eq!(publisher.checksum_size(), 0xFFFF);
+}
+
+#[test]
+fn integration_metadata_size_at_max() {
+    let client = new_client("test_ms_at_max");
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(0x20000)
+        .set_num_slots(2)
+        .set_metadata_size(0xFFFF);
+    let publisher = client
+        .create_publisher("rust_ms_at_max", &pub_opts)
+        .unwrap();
+    assert_eq!(publisher.metadata_size(), 0xFFFF);
+}
+
+#[test]
+fn integration_metadata_round_trip_no_checksum() {
+    let pub_client = new_client("test_meta_nc_p");
+    let sub_client = new_client("test_meta_nc_s");
+
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(10)
+        .set_metadata_size(8);
+    let publisher = pub_client
+        .create_publisher("rust_meta_nc", &pub_opts)
+        .unwrap();
+    assert_eq!(publisher.metadata_size(), 8);
+
+    let sub_opts = SubscriberOptions::new();
+    let subscriber = sub_client
+        .create_subscriber("rust_meta_nc", &sub_opts)
+        .unwrap();
+
+    let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
+    unsafe {
+        std::ptr::copy_nonoverlapping(b"hello".as_ptr(), buf, 5);
+    }
+    publisher.set_metadata(b"METADAT!");
+
+    publisher.publish_message(5).unwrap();
+
+    let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(msg.length, 5);
+    let data = unsafe { std::slice::from_raw_parts(msg.buffer, msg.length) };
+    assert_eq!(data, b"hello");
+
+    let sub_meta = subscriber.get_metadata();
+    assert_eq!(&sub_meta[..], b"METADAT!");
+}
+
+#[test]
+fn integration_metadata_zero_returns_empty() {
+    let client = new_client("test_meta_zero");
+
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(10);
+    let publisher = client
+        .create_publisher("rust_meta_zero", &pub_opts)
+        .unwrap();
+    assert_eq!(publisher.metadata_size(), 0);
+
+    let (_, _) = publisher.get_message_buffer(256).unwrap().unwrap();
+    let meta = publisher.get_metadata();
+    assert!(meta.is_empty());
+}
+
+#[test]
+fn integration_metadata_multiple_messages() {
+    let pub_client = new_client("test_meta_mm_p");
+    let sub_client = new_client("test_meta_mm_s");
+
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(10)
+        .set_metadata_size(16);
+    let publisher = pub_client
+        .create_publisher("rust_meta_mm", &pub_opts)
+        .unwrap();
+
+    let sub_opts = SubscriberOptions::new();
+    let subscriber = sub_client
+        .create_subscriber("rust_meta_mm", &sub_opts)
+        .unwrap();
+
+    for i in 0u32..5 {
+        let text = format!("m{:02}", i);
+        let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
+        unsafe {
+            std::ptr::copy_nonoverlapping(text.as_ptr(), buf, text.len());
+        }
+
+        let tag = 0xDEAD0000u32 | i;
+        let mut meta_buf = vec![0u8; 16];
+        meta_buf[..4].copy_from_slice(&tag.to_ne_bytes());
+        publisher.set_metadata(&meta_buf);
+
+        publisher.publish_message(text.len() as i64).unwrap();
+
+        let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
+        assert_eq!(msg.length, text.len());
+
+        let sub_meta = subscriber.get_metadata();
+        assert_eq!(sub_meta.len(), 16);
+        let read_tag = u32::from_ne_bytes(sub_meta[..4].try_into().unwrap());
+        assert_eq!(read_tag, tag);
+    }
 }
 
 // ── Retirement trigger helpers ───────────────────────────────────────────────

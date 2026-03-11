@@ -295,6 +295,13 @@ impl Publisher {
     pub fn get_metadata(&self) -> Vec<u8> {
         self.imp.lock().unwrap().get_metadata().to_vec()
     }
+
+    pub fn set_metadata(&self, data: &[u8]) {
+        let mut imp = self.imp.lock().unwrap();
+        let meta = imp.get_metadata();
+        let len = meta.len().min(data.len());
+        meta[..len].copy_from_slice(&data[..len]);
+    }
 }
 
 impl Drop for Publisher {
