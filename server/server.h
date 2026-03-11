@@ -16,6 +16,7 @@
 #include "proto/subspace.pb.h"
 #include "server/plugin.h"
 #include "server/server_channel.h"
+#include "server/shadow_replicator.h"
 #include "toolbelt/bitset.h"
 #include "toolbelt/clock.h"
 #include "toolbelt/fd.h"
@@ -70,6 +71,9 @@ public:
   // running on the same computer.
   void SetMachineName(std::string name) { machine_name_ = std::move(name); }
   const std::string& MachineName() const { return machine_name_; }
+
+  void SetShadowSocket(const std::string &socket_name);
+  ShadowReplicator *GetShadowReplicator() { return shadow_replicator_.get(); }
 
   uint64_t GetVirtualMemoryUsage() const;
   const std::string& GetSocketName() const { return socket_name_; }
@@ -238,6 +242,8 @@ private:
   toolbelt::TriggerFd shutdown_trigger_fd_;
   std::string machine_name_;
   bool publish_server_channels_ = true;
+
+  std::unique_ptr<ShadowReplicator> shadow_replicator_;
 };
 
 } // namespace subspace

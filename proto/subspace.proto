@@ -344,3 +344,80 @@ message RawMessage { bytes data = 1; }
 
 // RPC calls with no result return this.
 message VoidMessage {}
+
+//
+// Shadow process replication messages.
+//
+// These messages are sent from the server to an optional shadow process
+// over a Unix domain socket.  The shadow process maintains a mirror of
+// the server's channel database so that it can recover after a crash.
+// File descriptors accompany create events via SCM_RIGHTS.
+
+message ShadowEvent {
+  oneof event {
+    ShadowInit init = 1;
+    ShadowCreateChannel create_channel = 2;
+    ShadowRemoveChannel remove_channel = 3;
+    ShadowAddPublisher add_publisher = 4;
+    ShadowRemovePublisher remove_publisher = 5;
+    ShadowAddSubscriber add_subscriber = 6;
+    ShadowRemoveSubscriber remove_subscriber = 7;
+  }
+}
+
+message ShadowInit {
+  uint64 session_id = 1;
+  // FDs sent via SCM_RIGHTS: [scb_fd]
+}
+
+message ShadowCreateChannel {
+  string channel_name = 1;
+  int32 channel_id = 2;
+  int32 slot_size = 3;
+  int32 num_slots = 4;
+  bytes type = 5;
+  bool is_local = 6;
+  bool is_reliable = 7;
+  bool is_fixed_size = 8;
+  int32 checksum_size = 9;
+  int32 metadata_size = 10;
+  string mux = 11;
+  int32 vchan_id = 12;
+  // FDs sent via SCM_RIGHTS: [ccb_fd, bcb_fd]
+}
+
+message ShadowRemoveChannel {
+  string channel_name = 1;
+  int32 channel_id = 2;
+}
+
+message ShadowAddPublisher {
+  string channel_name = 1;
+  int32 publisher_id = 2;
+  bool is_reliable = 3;
+  bool is_local = 4;
+  bool is_bridge = 5;
+  bool is_fixed_size = 6;
+  bool notify_retirement = 7;
+  // FDs sent via SCM_RIGHTS: [poll_fd, trigger_fd]
+  // If notify_retirement: also [retirement_read_fd, retirement_write_fd]
+}
+
+message ShadowRemovePublisher {
+  string channel_name = 1;
+  int32 publisher_id = 2;
+}
+
+message ShadowAddSubscriber {
+  string channel_name = 1;
+  int32 subscriber_id = 2;
+  bool is_reliable = 3;
+  bool is_bridge = 4;
+  int32 max_active_messages = 5;
+  // FDs sent via SCM_RIGHTS: [trigger_fd, poll_fd]
+}
+
+message ShadowRemoveSubscriber {
+  string channel_name = 1;
+  int32 subscriber_id = 2;
+}
