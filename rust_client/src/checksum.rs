@@ -2,8 +2,7 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-use crate::channel::MessagePrefix;
-use std::mem;
+use crate::channel::{MessagePrefix, CHECKSUM_OFFSET};
 
 #[rustfmt::skip]
 static CRC32_TABLE: [u32; 256] = [
@@ -59,36 +58,101 @@ pub fn subspace_crc32(mut crc: u32, data: &[u8]) -> u32 {
     crc
 }
 
-pub type ChecksumCallback = Box<dyn Fn(&[&[u8]]) -> u32 + Send + Sync>;
+/// Callback receives three data spans and a writable checksum destination slice.
+pub type ChecksumCallback = Box<dyn Fn(&[&[u8]], &mut [u8]) + Send + Sync>;
 
-pub fn calculate_checksum(spans: &[&[u8]]) -> u32 {
+/// Compute CRC32 and write the 4-byte result into `checksum_dest`.
+pub fn calculate_crc32_checksum(spans: &[&[u8]], checksum_dest: &mut [u8]) {
     let mut crc: u32 = 0xFFFFFFFF;
     for span in spans {
         crc = subspace_crc32(crc, span);
     }
-    !crc
+    let result = !crc;
+    checksum_dest[..4].copy_from_slice(&result.to_ne_bytes());
 }
 
-pub fn verify_checksum(spans: &[&[u8]], checksum: u32) -> bool {
-    calculate_checksum(spans) == checksum
+/// Verify CRC32 against the stored checksum bytes.
+pub fn verify_crc32_checksum(spans: &[&[u8]], checksum: &[u8]) -> bool {
+    let mut crc: u32 = 0xFFFFFFFF;
+    for span in spans {
+        crc = subspace_crc32(crc, span);
+    }
+    let result = !crc;
+    checksum.len() >= 4 && checksum[..4] == result.to_ne_bytes()
 }
 
-/// Build the two spans used for checksum: prefix fields (slot_id..checksum) and message payload.
+/// Build three spans for checksum computation:
+///   [0] prefix fields before the checksum (slot_id through metadata_size)
+///   [1] user metadata area (immediately after checksum storage)
+///   [2] message payload
 ///
 /// # Safety
-/// `prefix` must point to a valid `MessagePrefix` in mapped shared memory.
+/// `prefix` must point to a valid `MessagePrefix` in mapped shared memory
+/// with sufficient space for checksum_size + metadata_size after the checksum field.
 pub unsafe fn get_message_checksum_data<'a>(
     prefix: *const MessagePrefix,
     buffer: *const u8,
     message_size: usize,
-) -> [&'a [u8]; 2] {
-    let prefix_start =
-        (prefix as *const u8).add(mem::offset_of!(MessagePrefix, slot_id));
-    let prefix_end =
-        (prefix as *const u8).add(mem::offset_of!(MessagePrefix, checksum));
-    let prefix_len = prefix_end as usize - prefix_start as usize;
+    checksum_size: i32,
+    metadata_size: i32,
+) -> [&'a [u8]; 3] {
+    let base = prefix as *const u8;
+    let slot_id_offset = std::mem::offset_of!(MessagePrefix, slot_id);
+    let prefix_fields_len = CHECKSUM_OFFSET - slot_id_offset;
+    let metadata_start = base.add(CHECKSUM_OFFSET + checksum_size as usize);
     [
-        std::slice::from_raw_parts(prefix_start, prefix_len),
+        std::slice::from_raw_parts(base.add(slot_id_offset), prefix_fields_len),
+        std::slice::from_raw_parts(metadata_start, metadata_size as usize),
         std::slice::from_raw_parts(buffer, message_size),
     ]
+}
+
+/// Get a mutable slice over the checksum storage area in the prefix.
+///
+/// # Safety
+/// `prefix` must point to valid mapped memory with sufficient space.
+pub unsafe fn get_checksum_slice(prefix: *mut MessagePrefix, checksum_size: i32) -> &'static mut [u8] {
+    let base = prefix as *mut u8;
+    std::slice::from_raw_parts_mut(base.add(CHECKSUM_OFFSET), checksum_size as usize)
+}
+
+/// Get a const slice over the checksum storage area in the prefix.
+///
+/// # Safety
+/// `prefix` must point to valid mapped memory with sufficient space.
+pub unsafe fn get_checksum_slice_const(prefix: *const MessagePrefix, checksum_size: i32) -> &'static [u8] {
+    let base = prefix as *const u8;
+    std::slice::from_raw_parts(base.add(CHECKSUM_OFFSET), checksum_size as usize)
+}
+
+/// Get a mutable slice over the user metadata area.
+///
+/// # Safety
+/// `prefix` must point to valid mapped memory with sufficient space.
+pub unsafe fn get_metadata_slice(
+    prefix: *mut MessagePrefix,
+    checksum_size: i32,
+    metadata_size: i32,
+) -> &'static mut [u8] {
+    let base = prefix as *mut u8;
+    std::slice::from_raw_parts_mut(
+        base.add(CHECKSUM_OFFSET + checksum_size as usize),
+        metadata_size as usize,
+    )
+}
+
+/// Get a const slice over the user metadata area.
+///
+/// # Safety
+/// `prefix` must point to valid mapped memory with sufficient space.
+pub unsafe fn get_metadata_slice_const(
+    prefix: *const MessagePrefix,
+    checksum_size: i32,
+    metadata_size: i32,
+) -> &'static [u8] {
+    let base = prefix as *const u8;
+    std::slice::from_raw_parts(
+        base.add(CHECKSUM_OFFSET + checksum_size as usize),
+        metadata_size as usize,
+    )
 }

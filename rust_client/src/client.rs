@@ -271,13 +271,29 @@ impl Publisher {
 
     pub fn set_checksum_callback<F>(&self, callback: F)
     where
-        F: Fn(&[&[u8]]) -> u32 + Send + Sync + 'static,
+        F: Fn(&[&[u8]], &mut [u8]) + Send + Sync + 'static,
     {
         self.imp.lock().unwrap().checksum_callback = Some(Box::new(callback));
     }
 
     pub fn reset_checksum_callback(&self) {
         self.imp.lock().unwrap().checksum_callback = None;
+    }
+
+    pub fn prefix_size(&self) -> i32 {
+        self.imp.lock().unwrap().prefix_size()
+    }
+
+    pub fn checksum_size(&self) -> i32 {
+        self.imp.lock().unwrap().checksum_size()
+    }
+
+    pub fn metadata_size(&self) -> i32 {
+        self.imp.lock().unwrap().metadata_size()
+    }
+
+    pub fn get_metadata(&self) -> Vec<u8> {
+        self.imp.lock().unwrap().get_metadata().to_vec()
     }
 }
 
@@ -432,13 +448,29 @@ impl Subscriber {
 
     pub fn set_checksum_callback<F>(&self, callback: F)
     where
-        F: Fn(&[&[u8]]) -> u32 + Send + Sync + 'static,
+        F: Fn(&[&[u8]], &mut [u8]) + Send + Sync + 'static,
     {
         self.imp.lock().unwrap().checksum_callback = Some(Box::new(callback));
     }
 
     pub fn reset_checksum_callback(&self) {
         self.imp.lock().unwrap().checksum_callback = None;
+    }
+
+    pub fn prefix_size(&self) -> i32 {
+        self.imp.lock().unwrap().prefix_size()
+    }
+
+    pub fn checksum_size(&self) -> i32 {
+        self.imp.lock().unwrap().checksum_size()
+    }
+
+    pub fn metadata_size(&self) -> i32 {
+        self.imp.lock().unwrap().metadata_size()
+    }
+
+    pub fn get_metadata(&self) -> Vec<u8> {
+        self.imp.lock().unwrap().get_metadata().to_vec()
     }
 
     /// Invoke the registered message callback with the given message.
@@ -574,6 +606,8 @@ impl Client {
                     mux: opts.mux.clone(),
                     vchan_id: opts.vchan_id,
                     notify_retirement: opts.notify_retirement,
+                    checksum_size: opts.checksum_size,
+                    metadata_size: opts.metadata_size,
                 },
             )),
         };
@@ -603,6 +637,14 @@ impl Client {
             String::from_utf8_lossy(&pub_resp.r#type).to_string(),
             opts.clone(),
         );
+
+        {
+            let cs = if opts.checksum_size > 0 { opts.checksum_size } else { 4 };
+            let ms = if opts.metadata_size > 0 { opts.metadata_size } else { 0 };
+            pub_impl.channel.checksum_size = cs;
+            pub_impl.channel.metadata_size = ms;
+            pub_impl.channel.prefix_size = compute_prefix_size(cs, ms);
+        }
 
         let prot = ProtFlags::PROT_READ | ProtFlags::PROT_WRITE;
         pub_impl.channel.map(
@@ -720,6 +762,15 @@ impl Client {
 
         sub_impl.channel.num_slots = sub_resp.num_slots;
         sub_impl.channel.embargoed_slots.resize(sub_resp.num_slots as usize);
+
+        {
+            let cs = if sub_resp.checksum_size > 0 { sub_resp.checksum_size } else { 4 };
+            let ms = if sub_resp.metadata_size > 0 { sub_resp.metadata_size } else { 0 };
+            sub_impl.channel.checksum_size = cs;
+            sub_impl.channel.metadata_size = ms;
+            sub_impl.channel.prefix_size = compute_prefix_size(cs, ms);
+            sub_impl.checksum_tmp = vec![0u8; cs as usize];
+        }
 
         sub_impl.channel.map(
             client.scb_fd,
@@ -953,18 +1004,23 @@ fn read_message_internal(
             if p.has_checksum() && sub.options.checksum {
                 let buffer = sub.channel.get_buffer_address(new_idx);
                 let slot = sub.channel.slot_ref(new_idx);
+                let cs = sub.channel.checksum_size;
+                let ms = sub.channel.metadata_size;
                 let data = checksum::get_message_checksum_data(
                     prefix,
                     buffer,
                     slot.message_size as usize,
+                    cs,
+                    ms,
                 );
-                let spans: Vec<&[u8]> = data.iter().copied().collect();
-                let computed = if let Some(ref cb) = sub.checksum_callback {
-                    cb(&spans)
+                let stored_cksum = checksum::get_checksum_slice_const(prefix, cs);
+                if let Some(ref cb) = sub.checksum_callback {
+                    sub.checksum_tmp.fill(0);
+                    cb(&data, &mut sub.checksum_tmp);
+                    checksum_error = sub.checksum_tmp != stored_cksum;
                 } else {
-                    checksum::calculate_checksum(&spans)
-                };
-                checksum_error = computed != p.checksum;
+                    checksum_error = !checksum::verify_crc32_checksum(&data, stored_cksum);
+                }
             }
 
             if (p.flags & MESSAGE_ACTIVATE) != 0 {
@@ -1065,6 +1121,15 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
     }
     sub.channel.num_slots = sub_resp.num_slots;
     sub.channel.embargoed_slots.resize(sub_resp.num_slots as usize);
+
+    {
+        let cs = if sub_resp.checksum_size > 0 { sub_resp.checksum_size } else { 4 };
+        let ms = if sub_resp.metadata_size > 0 { sub_resp.metadata_size } else { 0 };
+        sub.channel.checksum_size = cs;
+        sub.channel.metadata_size = ms;
+        sub.channel.prefix_size = compute_prefix_size(cs, ms);
+        sub.checksum_tmp = vec![0u8; cs as usize];
+    }
 
     let prot = ProtFlags::PROT_READ | ProtFlags::PROT_WRITE;
     sub.channel.map(

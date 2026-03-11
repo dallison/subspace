@@ -78,6 +78,41 @@ impl PublisherImpl {
         }
     }
 
+    pub fn prefix_size(&self) -> i32 {
+        self.channel.prefix_size
+    }
+
+    pub fn checksum_size(&self) -> i32 {
+        self.channel.checksum_size
+    }
+
+    pub fn metadata_size(&self) -> i32 {
+        self.channel.metadata_size
+    }
+
+    /// Get a mutable slice over the user metadata area for the current slot.
+    /// Returns an empty slice if metadata_size is 0 or no slot is active.
+    pub fn get_metadata(&mut self) -> &mut [u8] {
+        if self.channel.metadata_size == 0 {
+            return &mut [];
+        }
+        if let Some(slot_idx) = self.channel.slot {
+            let prefix = self.channel.get_prefix(slot_idx);
+            if prefix.is_null() {
+                return &mut [];
+            }
+            unsafe {
+                checksum::get_metadata_slice(
+                    prefix,
+                    self.channel.checksum_size,
+                    self.channel.metadata_size,
+                )
+            }
+        } else {
+            &mut []
+        }
+    }
+
     pub fn find_free_slot_unreliable(&mut self, owner: i32) -> Option<usize> {
         let max_retries = self.channel.num_slots as usize * 1000;
         let mut retries = max_retries;
@@ -419,6 +454,8 @@ impl PublisherImpl {
                     p.ordinal = slot.ordinal;
                     p.timestamp = slot.timestamp;
                     p.vchan_id = slot.vchan_id as i32;
+                    p.checksum_size = self.channel.checksum_size as u16;
+                    p.metadata_size = self.channel.metadata_size as u16;
                     p.flags = 0;
                     p.slot_id = slot.id;
                     let slot = self.channel.slot_mut(slot_idx);
@@ -431,17 +468,22 @@ impl PublisherImpl {
                     if self.options.checksum {
                         p.set_has_checksum();
                         let buffer = self.channel.get_buffer_address(slot_idx);
+                        let cs = self.channel.checksum_size;
+                        let ms = self.channel.metadata_size;
                         let data = checksum::get_message_checksum_data(
                             prefix,
                             buffer,
                             slot.message_size as usize,
+                            cs,
+                            ms,
                         );
-                        let spans: Vec<&[u8]> = data.iter().copied().collect();
-                        p.checksum = if let Some(ref cb) = self.checksum_callback {
-                            cb(&spans)
+                        let cksum = checksum::get_checksum_slice(prefix, cs);
+                        cksum.fill(0);
+                        if let Some(ref cb) = self.checksum_callback {
+                            cb(&data, cksum);
                         } else {
-                            checksum::calculate_checksum(&spans)
-                        };
+                            checksum::calculate_crc32_checksum(&data, cksum);
+                        }
                     }
                 }
             }
@@ -657,13 +699,15 @@ fn create_shm(name: &str, size: usize) -> crate::error::Result<RawFd> {
 #[cfg(not(target_os = "linux"))]
 fn create_shm(name: &str, size: usize) -> crate::error::Result<RawFd> {
     use nix::sys::mman::shm_open;
+    use std::os::unix::io::IntoRawFd;
     let fd = shm_open(
         name,
         OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_EXCL,
         Mode::from_bits_truncate(0o666),
     )?;
-    unsafe { libc::ftruncate(fd, size as libc::off_t); }
-    Ok(fd)
+    let raw_fd = fd.into_raw_fd();
+    unsafe { libc::ftruncate(raw_fd, size as libc::off_t); }
+    Ok(raw_fd)
 }
 
 #[cfg(target_os = "linux")]
@@ -676,8 +720,9 @@ fn open_shm(name: &str) -> crate::error::Result<RawFd> {
 #[cfg(not(target_os = "linux"))]
 fn open_shm(name: &str) -> crate::error::Result<RawFd> {
     use nix::sys::mman::shm_open;
+    use std::os::unix::io::IntoRawFd;
     let fd = shm_open(name, OFlag::O_RDWR, Mode::empty())?;
-    Ok(fd)
+    Ok(fd.into_raw_fd())
 }
 
 fn get_shm_size(fd: RawFd) -> crate::error::Result<usize> {

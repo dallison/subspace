@@ -10,7 +10,9 @@ use subspace_client::channel::{
     aligned, aligned64, build_refs_bit_field, ORDINAL_MASK, ORDINAL_SHIFT, PUB_OWNED,
     RETIRED_REFS_MASK, RETIRED_REFS_SHIFT, VCHAN_ID_MASK, VCHAN_ID_SHIFT,
 };
-use subspace_client::checksum::{calculate_checksum, subspace_crc32, verify_checksum};
+use subspace_client::checksum::{
+    calculate_crc32_checksum, subspace_crc32, verify_crc32_checksum,
+};
 use subspace_client::options::{PublisherOptions, SubscriberOptions};
 use subspace_client::{Client, ReadMode, SubspaceError};
 
