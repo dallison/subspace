@@ -67,6 +67,10 @@ pub fn aligned64(v: i64) -> i64 {
     aligned::<64>(v)
 }
 
+pub fn compute_prefix_size(checksum_size: i32, metadata_size: i32) -> i32 {
+    aligned64((CHECKSUM_OFFSET as i64) + checksum_size as i64 + metadata_size as i64) as i32
+}
+
 // ── MessagePrefix ───────────────────────────────────────────────────────────
 
 #[repr(C)]
@@ -78,11 +82,15 @@ pub struct MessagePrefix {
     pub timestamp: u64,
     pub flags: i64,
     pub vchan_id: i32,
+    pub checksum_size: u16,
+    pub metadata_size: u16,
     pub checksum: u32,
-    pub padding2: [u8; 16],
+    pub padding3: [u8; 64 - 52],
 }
 
 const _: () = assert!(std::mem::size_of::<MessagePrefix>() == 64);
+
+pub const CHECKSUM_OFFSET: usize = 48; // offsetof(MessagePrefix, checksum)
 
 impl MessagePrefix {
     pub fn is_activation(&self) -> bool {
@@ -263,6 +271,10 @@ pub struct Channel {
     pub session_id: u64,
     pub num_updates: u16,
 
+    pub prefix_size: i32,
+    pub checksum_size: i32,
+    pub metadata_size: i32,
+
     pub scb: *mut SystemControlBlock,
     pub ccb: *mut ChannelControlBlock,
     pub bcb: *mut BufferControlBlock,
@@ -308,6 +320,9 @@ impl Channel {
             vchan_id,
             session_id,
             num_updates: 0,
+            prefix_size: std::mem::size_of::<MessagePrefix>() as i32,
+            checksum_size: 4,
+            metadata_size: 0,
             scb: std::ptr::null_mut(),
             ccb: std::ptr::null_mut(),
             bcb: std::ptr::null_mut(),
@@ -557,12 +572,12 @@ impl Channel {
             return std::ptr::null_mut();
         }
         let buffer = &self.buffers[buf_idx as usize];
-        let prefix_size = std::mem::size_of::<MessagePrefix>();
+        let ps = self.prefix_size as usize;
         let slot_size = aligned64(buffer.slot_size as i64) as usize;
         unsafe {
             buffer
                 .buffer
-                .add((prefix_size + slot_size) * slot_idx + prefix_size)
+                .add((ps + slot_size) * slot_idx + ps)
         }
     }
 
@@ -573,9 +588,9 @@ impl Channel {
             return std::ptr::null_mut();
         }
         let buffer = &self.buffers[buf_idx as usize];
-        let prefix_size = std::mem::size_of::<MessagePrefix>();
+        let ps = self.prefix_size as usize;
         let slot_size = aligned64(buffer.slot_size as i64) as usize;
-        unsafe { buffer.buffer.add((prefix_size + slot_size) * slot_idx) as *mut MessagePrefix }
+        unsafe { buffer.buffer.add((ps + slot_size) * slot_idx) as *mut MessagePrefix }
     }
 
     pub fn get_current_buffer_address(&self) -> *mut u8 {
@@ -603,12 +618,12 @@ impl Channel {
 
     pub fn slot_size_to_buffer_size(&self, slot_size: u64) -> u64 {
         let ns = self.num_slots as u64;
-        ns * (slot_size + std::mem::size_of::<MessagePrefix>() as u64)
+        ns * (slot_size + self.prefix_size as u64)
     }
 
     pub fn buffer_size_to_slot_size(&self, buffer_size: u64) -> u64 {
         let ns = self.num_slots as u64;
-        let prefix_total = ns * std::mem::size_of::<MessagePrefix>() as u64;
+        let prefix_total = ns * self.prefix_size as u64;
         if buffer_size < prefix_total {
             return 0;
         }

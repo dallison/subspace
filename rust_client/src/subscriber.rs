@@ -39,6 +39,7 @@ pub struct SubscriberImpl {
     pub(crate) message_callback: Option<MessageCallback>,
     pub(crate) on_receive_callback: Option<OnReceiveCallback>,
     pub(crate) checksum_callback: Option<checksum::ChecksumCallback>,
+    pub checksum_tmp: Vec<u8>,
 }
 
 struct OrdinalTracker {
@@ -142,6 +143,7 @@ impl SubscriberImpl {
             message_callback: None,
             on_receive_callback: None,
             checksum_callback: None,
+            checksum_tmp: vec![0u8; 4],
         };
         s.get_or_create_tracker(vchan_id);
         s
@@ -173,6 +175,41 @@ impl SubscriberImpl {
             &self.options.mux
         } else {
             &self.channel.name
+        }
+    }
+
+    pub fn prefix_size(&self) -> i32 {
+        self.channel.prefix_size
+    }
+
+    pub fn checksum_size(&self) -> i32 {
+        self.channel.checksum_size
+    }
+
+    pub fn metadata_size(&self) -> i32 {
+        self.channel.metadata_size
+    }
+
+    /// Get a const slice over the user metadata area for the current slot.
+    /// Returns an empty slice if metadata_size is 0 or no slot is active.
+    pub fn get_metadata(&self) -> &[u8] {
+        if self.channel.metadata_size == 0 {
+            return &[];
+        }
+        if let Some(slot_idx) = self.channel.slot {
+            let prefix = self.channel.get_prefix(slot_idx);
+            if prefix.is_null() {
+                return &[];
+            }
+            unsafe {
+                checksum::get_metadata_slice_const(
+                    prefix,
+                    self.channel.checksum_size,
+                    self.channel.metadata_size,
+                )
+            }
+        } else {
+            &[]
         }
     }
 

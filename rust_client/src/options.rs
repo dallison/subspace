@@ -2,7 +2,7 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PublisherOptions {
     pub slot_size: i32,
     pub num_slots: i32,
@@ -16,14 +16,34 @@ pub struct PublisherOptions {
     pub vchan_id: i32,
     pub notify_retirement: bool,
     pub checksum: bool,
+    pub checksum_size: i32,
+    pub metadata_size: i32,
+}
+
+impl Default for PublisherOptions {
+    fn default() -> Self {
+        Self {
+            slot_size: 0,
+            num_slots: 0,
+            local: false,
+            reliable: false,
+            bridge: false,
+            fixed_size: false,
+            channel_type: String::new(),
+            activate: false,
+            mux: String::new(),
+            vchan_id: -1,
+            notify_retirement: false,
+            checksum: false,
+            checksum_size: 4,
+            metadata_size: 0,
+        }
+    }
 }
 
 impl PublisherOptions {
     pub fn new() -> Self {
-        Self {
-            vchan_id: -1,
-            ..Default::default()
-        }
+        Self::default()
     }
 
     pub fn set_slot_size(mut self, size: i32) -> Self {
@@ -83,6 +103,16 @@ impl PublisherOptions {
 
     pub fn set_checksum(mut self, v: bool) -> Self {
         self.checksum = v;
+        self
+    }
+
+    pub fn set_checksum_size(mut self, size: i32) -> Self {
+        self.checksum_size = size;
+        self
+    }
+
+    pub fn set_metadata_size(mut self, size: i32) -> Self {
+        self.metadata_size = size;
         self
     }
 }
