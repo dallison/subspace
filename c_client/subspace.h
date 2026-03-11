@@ -96,6 +96,8 @@ typedef struct {
   bool fixed_size; // Don't resize the slot size if a larger message is sent.
   SubspaceTypeInfo type; // Type of the message.  This is an opaque string.
   bool activate;         // Send an activation message when created.
+  int32_t checksum_size; // Bytes reserved for checksum (default 4).
+  int32_t metadata_size; // Bytes reserved for user metadata (default 0).
 } SubspacePublisherOptions;
 
 typedef struct {

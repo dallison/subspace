@@ -278,6 +278,8 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
   cmd->set_mux(opts.Mux());
   cmd->set_vchan_id(opts.VchanId());
   cmd->set_notify_retirement(opts.notify_retirement);
+  cmd->set_checksum_size(opts.ChecksumSize());
+  cmd->set_metadata_size(opts.MetadataSize());
 
   // Send request to server and wait for response.
   Response resp;
@@ -302,6 +304,12 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
         return CheckReload(static_cast<ClientChannel *>(c));
       },
       server_user_id_, server_group_id_);
+
+  int32_t cs = opts.ChecksumSize() > 0 ? opts.ChecksumSize() : 4;
+  int32_t ms = opts.MetadataSize() > 0 ? opts.MetadataSize() : 0;
+  channel->SetChecksumSize(cs);
+  channel->SetMetadataSize(ms);
+  channel->SetPrefixSize(Channel::ComputePrefixSize(cs, ms));
 
   SharedMemoryFds channel_fds(std::move(fds[pub_resp.ccb_fd_index()]),
                               std::move(fds[pub_resp.bcb_fd_index()]));
@@ -426,6 +434,14 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
       server_user_id_, server_group_id_);
 
   channel->SetNumSlots(sub_resp.num_slots());
+  {
+    int32_t cs = sub_resp.checksum_size() > 0 ? sub_resp.checksum_size() : 4;
+    int32_t ms = sub_resp.metadata_size() > 0 ? sub_resp.metadata_size() : 0;
+    channel->SetChecksumSize(cs);
+    channel->SetMetadataSize(ms);
+    channel->SetPrefixSize(Channel::ComputePrefixSize(cs, ms));
+    channel->AllocateChecksumBuffer();
+  }
 
   SharedMemoryFds channel_fds(std::move(fds[sub_resp.ccb_fd_index()]),
                               std::move(fds[sub_resp.bcb_fd_index()]));
@@ -897,8 +913,12 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     if (prefix->HasChecksum()) {
       auto data =
           GetMessageChecksumData(prefix, subscriber->GetCurrentBufferAddress(),
-                                 new_slot->message_size);
-      checksum_error = !subscriber->ValidateChecksum(data, prefix->checksum);
+                                 new_slot->message_size,
+                                 subscriber->ChecksumSize(),
+                                 subscriber->MetadataSize());
+      absl::Span<const std::byte> cksum =
+          GetChecksumSpan(prefix, subscriber->ChecksumSize());
+      checksum_error = !subscriber->ValidateChecksum(data, cksum);
     }
     if ((prefix->flags & kMessageActivate) != 0) {
       is_activation = true;
@@ -1128,6 +1148,14 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
     subscriber->SetType(sub_resp.type());
   }
   subscriber->SetNumSlots(sub_resp.num_slots());
+  {
+    int32_t cs = sub_resp.checksum_size() > 0 ? sub_resp.checksum_size() : 4;
+    int32_t ms = sub_resp.metadata_size() > 0 ? sub_resp.metadata_size() : 0;
+    subscriber->SetChecksumSize(cs);
+    subscriber->SetMetadataSize(ms);
+    subscriber->SetPrefixSize(Channel::ComputePrefixSize(cs, ms));
+    subscriber->AllocateChecksumBuffer();
+  }
 
   SharedMemoryFds channel_fds(std::move(fds[sub_resp.ccb_fd_index()]),
                               std::move(fds[sub_resp.bcb_fd_index()]));

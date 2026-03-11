@@ -56,7 +56,15 @@ PYBIND11_MODULE(subspace, m) {
       .def("set_num_slots", &PublisherOptions::SetNumSlots,
            "Set the number of slots for the publisher.")
       .def("num_slots", &PublisherOptions::NumSlots,
-           "Get the number of slots for the publisher.");
+           "Get the number of slots for the publisher.")
+      .def("set_checksum_size", &PublisherOptions::SetChecksumSize,
+           "Set the checksum size in bytes.")
+      .def("checksum_size", &PublisherOptions::ChecksumSize,
+           "Get the checksum size in bytes.")
+      .def("set_metadata_size", &PublisherOptions::SetMetadataSize,
+           "Set the metadata size in bytes.")
+      .def("metadata_size", &PublisherOptions::MetadataSize,
+           "Get the metadata size in bytes.");
 
   // SubscriberOptions class.
   py::class_<SubscriberOptions>(m, "SubscriberOptions",

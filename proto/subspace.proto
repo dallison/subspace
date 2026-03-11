@@ -34,6 +34,8 @@ message CreatePublisherRequest {
   string mux = 9;
   int32 vchan_id = 10;
   bool notify_retirement = 11; // Notify publisher of slot retirement.
+  int32 checksum_size = 12;    // Bytes reserved for checksum.
+  int32 metadata_size = 13;    // Bytes reserved for user metadata.
 }
 
 message CreatePublisherResponse {
@@ -81,6 +83,8 @@ message CreateSubscriberResponse {
   bytes type = 12;
   int32 vchan_id = 13;
   repeated int32 retirement_fd_indexes = 14;
+  int32 checksum_size = 15; // Bytes reserved for checksum (from publisher).
+  int32 metadata_size = 16; // Bytes reserved for user metadata (from publisher).
 }
 
 message GetTriggersRequest { string channel_name = 1; }
@@ -215,6 +219,8 @@ message Subscribed {
   // connection over which the retirement will be sent.
   bool notify_retirement = 5;
   ChannelAddress retirement_socket = 6;
+  int32 checksum_size = 7;  // Bytes reserved for checksum.
+  int32 metadata_size = 8;  // Bytes reserved for user metadata.
 }
 
 // This is sent over a TCP connection from the peer server when the

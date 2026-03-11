@@ -56,6 +56,14 @@ public:
 
   void ResetChecksumCallback() { checksum_callback_ = nullptr; }
 
+  absl::Span<std::byte> GetMetadata() {
+    if (MetadataSize() == 0 || slot_ == nullptr) {
+      return {};
+    }
+    MessagePrefix *prefix = Prefix(slot_);
+    return GetMetadataSpan(prefix, ChecksumSize(), MetadataSize());
+  }
+
   std::string Mux() const { return options_.Mux(); }
 
 private:
