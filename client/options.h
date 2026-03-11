@@ -122,6 +122,22 @@ struct PublisherOptions {
   }
   bool Checksum() const { return checksum; }
 
+  // Number of bytes reserved for the checksum starting at the checksum
+  // field of MessagePrefix.  Default is 4 (CRC32).
+  PublisherOptions &SetChecksumSize(int32_t size) {
+    checksum_size = size;
+    return *this;
+  }
+  int32_t ChecksumSize() const { return checksum_size; }
+
+  // Number of bytes of user metadata stored immediately after the
+  // checksum area in the prefix extensions.  Default is 0 (none).
+  PublisherOptions &SetMetadataSize(int32_t size) {
+    metadata_size = size;
+    return *this;
+  }
+  int32_t MetadataSize() const { return metadata_size; }
+
   // If you use the new CreatePublisher API, set the slot size and num slots in
   // here.
   int32_t slot_size = 0;
@@ -139,6 +155,8 @@ struct PublisherOptions {
   int vchan_id = -1; // If -1, server will assign.
   bool notify_retirement = false;
   bool checksum = false;
+  int32_t checksum_size = 4;
+  int32_t metadata_size = 0;
 };
 
 struct SubscriberOptions {

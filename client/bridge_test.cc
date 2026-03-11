@@ -483,6 +483,211 @@ TEST_F(BridgeTest, MultipleRetirement2) {
   }
 }
 
+void WaitForSubscribedMessageWithSizes(
+    toolbelt::FileDescriptor &bridge_pipe, const std::string &channel_name,
+    int32_t expected_checksum_size, int32_t expected_metadata_size) {
+  std::cerr << "Waiting for bridge notification\n";
+  char buffer[4096];
+  int32_t length;
+  absl::StatusOr<ssize_t> n = bridge_pipe.Read(&length, sizeof(length));
+  ASSERT_OK(n);
+  ASSERT_EQ(sizeof(int32_t), *n);
+  length = ntohl(length);
+  n = bridge_pipe.Read(buffer, length);
+  ASSERT_OK(n);
+
+  subspace::Subscribed subscribed;
+  ASSERT_TRUE(subscribed.ParseFromArray(buffer, *n));
+  ASSERT_EQ(subscribed.channel_name(), channel_name);
+  ASSERT_EQ(expected_checksum_size, subscribed.checksum_size());
+  ASSERT_EQ(expected_metadata_size, subscribed.metadata_size());
+  std::cerr << "Received bridge notification for channel: "
+            << subscribed.channel_name()
+            << " checksum_size: " << subscribed.checksum_size()
+            << " metadata_size: " << subscribed.metadata_size() << std::endl;
+}
+
+TEST_F(BridgeTest, LargeChecksumBridge) {
+  subspace::Client client1;
+  InitClient(client1, 0);
+
+  subspace::Client client2;
+  InitClient(client2, 1);
+
+  // checksum_size=20, metadata_size=50 → prefix = Aligned<64>(48+20+50) = 128.
+  absl::StatusOr<Publisher> pub = client1.CreatePublisher(
+      "/bridged_sizes",
+      {.slot_size = 256, .num_slots = 10, .local = false,
+       .checksum_size = 20, .metadata_size = 50});
+  ASSERT_OK(pub);
+  ASSERT_EQ(128, pub->PrefixSize());
+
+  absl::StatusOr<Subscriber> sub =
+      client2.CreateSubscriber("/bridged_sizes", {.max_active_messages = 2});
+  ASSERT_OK(sub);
+
+  toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
+  WaitForSubscribedMessageWithSizes(send_bridge_pipe, "/bridged_sizes", 20, 50);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "bridge_sizes", 12);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(12);
+  ASSERT_OK(pub_status);
+
+  toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
+  WaitForSubscribedMessageWithSizes(recv_bridge_pipe, "/bridged_sizes", 20, 50);
+
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(12, msg->length);
+  ASSERT_EQ(0, memcmp("bridge_sizes", msg->buffer, 12));
+  ASSERT_EQ(128, sub->PrefixSize());
+  ASSERT_EQ(20, sub->ChecksumSize());
+  ASSERT_EQ(50, sub->MetadataSize());
+}
+
+TEST_F(BridgeTest, DefaultSizesBridge) {
+  subspace::Client client1;
+  InitClient(client1, 0);
+
+  subspace::Client client2;
+  InitClient(client2, 1);
+
+  absl::StatusOr<Publisher> pub = client1.CreatePublisher(
+      "/bridged_def_sizes",
+      {.slot_size = 256, .num_slots = 10, .local = false});
+  ASSERT_OK(pub);
+  ASSERT_EQ(64, pub->PrefixSize());
+
+  absl::StatusOr<Subscriber> sub = client2.CreateSubscriber(
+      "/bridged_def_sizes", {.max_active_messages = 2});
+  ASSERT_OK(sub);
+
+  toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
+  WaitForSubscribedMessageWithSizes(send_bridge_pipe, "/bridged_def_sizes",
+                                    4, 0);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "default", 7);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(7);
+  ASSERT_OK(pub_status);
+
+  toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
+  WaitForSubscribedMessageWithSizes(recv_bridge_pipe, "/bridged_def_sizes",
+                                    4, 0);
+
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(7, msg->length);
+  ASSERT_EQ(0, memcmp("default", msg->buffer, 7));
+  ASSERT_EQ(64, sub->PrefixSize());
+}
+
+// metadata_size=24, checksum_size=4: prefix=128 (48+4+24=76, rounds to 128).
+// Verify metadata survives the bridge.
+TEST_F(BridgeTest, MetadataBridge) {
+  subspace::Client client1;
+  InitClient(client1, 0);
+
+  subspace::Client client2;
+  InitClient(client2, 1);
+
+  absl::StatusOr<Publisher> pub = client1.CreatePublisher(
+      "/bridged_meta",
+      {.slot_size = 256, .num_slots = 10, .local = false, .metadata_size = 24});
+  ASSERT_OK(pub);
+  ASSERT_EQ(128, pub->PrefixSize());
+  ASSERT_EQ(24, pub->MetadataSize());
+
+  absl::StatusOr<Subscriber> sub =
+      client2.CreateSubscriber("/bridged_meta", {.max_active_messages = 2});
+  ASSERT_OK(sub);
+
+  toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
+  WaitForSubscribedMessageWithSizes(send_bridge_pipe, "/bridged_meta", 4, 24);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "bridgemeta", 10);
+
+  auto meta = pub->GetMetadata();
+  ASSERT_EQ(24u, meta.size());
+  memcpy(meta.data(), "BRIDGE_METADATA_24BYTES!", 24);
+
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(10);
+  ASSERT_OK(pub_status);
+
+  toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
+  WaitForSubscribedMessageWithSizes(recv_bridge_pipe, "/bridged_meta", 4, 24);
+
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(10, msg->length);
+  ASSERT_EQ(0, memcmp("bridgemeta", msg->buffer, 10));
+  ASSERT_EQ(128, sub->PrefixSize());
+  ASSERT_EQ(24, sub->MetadataSize());
+
+  auto sub_meta = sub->GetMetadata();
+  ASSERT_EQ(24u, sub_meta.size());
+  ASSERT_EQ(0, memcmp("BRIDGE_METADATA_24BYTES!", sub_meta.data(), 24));
+}
+
+// metadata_size=100, checksum_size=20: prefix=192 (48+20+100=168, rounds to 192).
+TEST_F(BridgeTest, MetadataLargeBridge) {
+  subspace::Client client1;
+  InitClient(client1, 0);
+
+  subspace::Client client2;
+  InitClient(client2, 1);
+
+  absl::StatusOr<Publisher> pub = client1.CreatePublisher(
+      "/bridged_meta_lg",
+      {.slot_size = 256, .num_slots = 10, .local = false,
+       .checksum_size = 20, .metadata_size = 100});
+  ASSERT_OK(pub);
+  ASSERT_EQ(192, pub->PrefixSize());
+
+  absl::StatusOr<Subscriber> sub =
+      client2.CreateSubscriber("/bridged_meta_lg", {.max_active_messages = 2});
+  ASSERT_OK(sub);
+
+  toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
+  WaitForSubscribedMessageWithSizes(send_bridge_pipe, "/bridged_meta_lg",
+                                    20, 100);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "large", 5);
+
+  auto meta = pub->GetMetadata();
+  ASSERT_EQ(100u, meta.size());
+  for (int i = 0; i < 100; i++) {
+    meta[i] = static_cast<std::byte>(i ^ 0xAB);
+  }
+
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(5);
+  ASSERT_OK(pub_status);
+
+  toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
+  WaitForSubscribedMessageWithSizes(recv_bridge_pipe, "/bridged_meta_lg",
+                                    20, 100);
+
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(5, msg->length);
+  ASSERT_EQ(192, sub->PrefixSize());
+  ASSERT_EQ(20, sub->ChecksumSize());
+  ASSERT_EQ(100, sub->MetadataSize());
+
+  auto sub_meta = sub->GetMetadata();
+  ASSERT_EQ(100u, sub_meta.size());
+  for (int i = 0; i < 100; i++) {
+    ASSERT_EQ(static_cast<std::byte>(i ^ 0xAB), sub_meta[i]) << "at index " << i;
+  }
+}
+
 int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);
   absl::ParseCommandLine(argc, argv);
