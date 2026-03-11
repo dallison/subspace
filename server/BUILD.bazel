@@ -29,6 +29,16 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "server_ffi",
+    srcs = ["server_ffi.cc"],
+    hdrs = ["server_ffi.h"],
+    deps = [
+        ":server",
+        "@coroutines//co:co",
+    ],
+)
+
 cc_binary(
     name = "subspace_server",
     srcs = [
