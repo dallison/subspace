@@ -394,6 +394,9 @@ absl::Status Server::Run() {
 
   // Phase 3: If still not recovered, create a fresh SCB.
   if (!recovered) {
+    if (cleanup_filesystem_) {
+      CleanupFilesystem();
+    }
     absl::StatusOr<SystemControlBlock *> scb =
         CreateSystemControlBlock(scb_fd_);
     if (!scb.ok()) {
