@@ -1,4 +1,5 @@
 // Copyright 2023-2026 David Allison
+// Shadow support is Copyright 2026 Cruise LLC
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -168,6 +169,190 @@ void ShadowReplicator::SendRemoveSubscriber(const std::string &channel_name,
   msg->set_channel_name(channel_name);
   msg->set_subscriber_id(sub_id);
   SendEvent(event);
+}
+
+absl::StatusOr<ShadowEvent> ShadowReplicator::ReceiveEvent(
+    std::vector<toolbelt::FileDescriptor> &fds) {
+  absl::StatusOr<std::vector<char>> recv =
+      socket_.ReceiveVariableLengthMessage();
+  if (!recv.ok()) {
+    return recv.status();
+  }
+  if (recv->empty()) {
+    return absl::UnavailableError("Shadow disconnected during state dump");
+  }
+
+  ShadowEvent event;
+  if (!event.ParseFromArray(recv->data(), static_cast<int>(recv->size()))) {
+    return absl::InternalError("Failed to parse shadow event");
+  }
+
+  bool has_fds = event.has_create_channel() ||
+                 event.has_add_publisher() || event.has_add_subscriber();
+  if (has_fds) {
+    absl::Status s = socket_.ReceiveFds(fds);
+    if (!s.ok()) {
+      return s;
+    }
+  }
+  return event;
+}
+
+absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
+  if (!connected_) {
+    return absl::FailedPreconditionError("Not connected to shadow");
+  }
+
+  RecoveredState state;
+
+  // 1. Read the ShadowStateDump header.
+  {
+    std::vector<toolbelt::FileDescriptor> fds;
+    absl::StatusOr<ShadowEvent> event = ReceiveEvent(fds);
+    if (!event.ok()) {
+      return event.status();
+    }
+    if (!event->has_state_dump()) {
+      return absl::InternalError(
+          "Expected ShadowStateDump header, got different event");
+    }
+    const auto &dump = event->state_dump();
+    state.session_id = dump.session_id();
+    if (state.session_id != 0) {
+      std::vector<toolbelt::FileDescriptor> scb_fds;
+      absl::Status s = socket_.ReceiveFds(scb_fds);
+      if (!s.ok()) {
+        return s;
+      }
+      if (!scb_fds.empty()) {
+        state.scb_fd = std::move(scb_fds[0]);
+      }
+    }
+  }
+
+  // 2. Read channel/publisher/subscriber events until ShadowStateDone.
+  for (;;) {
+    std::vector<toolbelt::FileDescriptor> fds;
+    absl::StatusOr<ShadowEvent> event = ReceiveEvent(fds);
+    if (!event.ok()) {
+      return event.status();
+    }
+
+    if (event->has_state_done()) {
+      break;
+    }
+
+    if (event->has_create_channel()) {
+      const auto &msg = event->create_channel();
+      if (fds.size() < 2) {
+        return absl::InternalError("create_channel in dump missing FDs");
+      }
+      RecoveredChannel ch;
+      ch.name = msg.channel_name();
+      ch.channel_id = msg.channel_id();
+      ch.slot_size = msg.slot_size();
+      ch.num_slots = msg.num_slots();
+      ch.type = msg.type();
+      ch.is_local = msg.is_local();
+      ch.is_reliable = msg.is_reliable();
+      ch.is_fixed_size = msg.is_fixed_size();
+      ch.checksum_size = msg.checksum_size();
+      ch.metadata_size = msg.metadata_size();
+      ch.mux = msg.mux();
+      ch.vchan_id = msg.vchan_id();
+      ch.ccb_fd = std::move(fds[0]);
+      ch.bcb_fd = std::move(fds[1]);
+      state.channels.push_back(std::move(ch));
+      continue;
+    }
+
+    if (event->has_add_publisher()) {
+      const auto &msg = event->add_publisher();
+      size_t expected = msg.notify_retirement() ? 4 : 2;
+      if (fds.size() < expected) {
+        return absl::InternalError("add_publisher in dump missing FDs");
+      }
+      RecoveredPublisher pub;
+      pub.id = msg.publisher_id();
+      pub.is_reliable = msg.is_reliable();
+      pub.is_local = msg.is_local();
+      pub.is_bridge = msg.is_bridge();
+      pub.is_fixed_size = msg.is_fixed_size();
+      pub.notify_retirement = msg.notify_retirement();
+      pub.poll_fd = std::move(fds[0]);
+      pub.trigger_fd = std::move(fds[1]);
+      if (msg.notify_retirement()) {
+        pub.retirement_read_fd = std::move(fds[2]);
+        pub.retirement_write_fd = std::move(fds[3]);
+      }
+      // Attach to the last channel (dump sends publishers right after
+      // their channel).
+      if (state.channels.empty()) {
+        return absl::InternalError("add_publisher before any channel");
+      }
+      auto &target = state.channels.back();
+      if (target.name != msg.channel_name()) {
+        // Find the right channel.
+        bool found = false;
+        for (auto &c : state.channels) {
+          if (c.name == msg.channel_name()) {
+            c.publishers.push_back(std::move(pub));
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          return absl::InternalError(absl::StrFormat(
+              "add_publisher for unknown channel '%s'", msg.channel_name()));
+        }
+      } else {
+        target.publishers.push_back(std::move(pub));
+      }
+      continue;
+    }
+
+    if (event->has_add_subscriber()) {
+      const auto &msg = event->add_subscriber();
+      if (fds.size() < 2) {
+        return absl::InternalError("add_subscriber in dump missing FDs");
+      }
+      RecoveredSubscriber sub;
+      sub.id = msg.subscriber_id();
+      sub.is_reliable = msg.is_reliable();
+      sub.is_bridge = msg.is_bridge();
+      sub.max_active_messages = msg.max_active_messages();
+      sub.trigger_fd = std::move(fds[0]);
+      sub.poll_fd = std::move(fds[1]);
+      if (state.channels.empty()) {
+        return absl::InternalError("add_subscriber before any channel");
+      }
+      auto &target = state.channels.back();
+      if (target.name != msg.channel_name()) {
+        bool found = false;
+        for (auto &c : state.channels) {
+          if (c.name == msg.channel_name()) {
+            c.subscribers.push_back(std::move(sub));
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          return absl::InternalError(absl::StrFormat(
+              "add_subscriber for unknown channel '%s'", msg.channel_name()));
+        }
+      } else {
+        target.subscribers.push_back(std::move(sub));
+      }
+      continue;
+    }
+
+    return absl::InternalError("Unexpected event type in state dump");
+  }
+
+  logger_.Log(toolbelt::LogLevel::kInfo,
+              "Received state dump from shadow (session_id=%lu, %d channels)",
+              state.session_id, static_cast<int>(state.channels.size()));
+  return state;
 }
 
 } // namespace subspace

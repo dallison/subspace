@@ -58,12 +58,15 @@ public:
   bool IsBridge() const { return is_bridge_; }
   void Trigger() { trigger_fd_.Trigger(); }
 
+  void SetTriggerFd(toolbelt::TriggerFd fd) { trigger_fd_ = std::move(fd); }
+  void SetHandler(ClientHandler *handler) { handler_ = handler; }
+
 private:
   ClientHandler *handler_;
   int id_;
   toolbelt::TriggerFd trigger_fd_;
   bool is_reliable_;
-  bool is_bridge_; // This is used to send or receive over a bridge.
+  bool is_bridge_;
 };
 
 class SubscriberUser : public User {
@@ -111,11 +114,14 @@ public:
     return absl::OkStatus();
   }
 
+  void SetRetirementPipe(toolbelt::Pipe pipe) {
+    retirement_pipe_ = std::move(pipe);
+  }
+
 private:
   bool is_local_;
   bool is_fixed_size_;
-  toolbelt::Pipe
-      retirement_pipe_; // For notifying publisher of slot retirement.
+  toolbelt::Pipe retirement_pipe_;
 };
 
 // This is endpoint transmitting the data for a channel.  It holds an internet
@@ -158,6 +164,8 @@ public:
 
   virtual ~ServerChannel();
 
+  void SetSkipCleanup(bool v) { skip_cleanup_ = v; }
+
   absl::StatusOr<PublisherUser *> AddPublisher(ClientHandler *handler,
                                                bool is_reliable, bool is_local,
                                                bool is_bridge,
@@ -177,6 +185,10 @@ public:
   void AddUser(int id, std::unique_ptr<User> user) {
     users_[id] = std::move(user);
     AddUserId(id);
+  }
+
+  const absl::flat_hash_map<int, std::unique_ptr<User>> &GetUsers() const {
+    return users_;
   }
 
   void SetLastKnownSlotSize(int32_t slot_size) {
@@ -267,13 +279,21 @@ public:
   bool IsBridgeSubscriber() const;
 
   // Determine if the given address is registered as a bridge
-  // publisher.
-  bool IsBridged(const toolbelt::SocketAddress &addr, bool reliable) const {
-    return bridged_publishers_.contains(ChannelTransmitter(addr, reliable));
+  // publisher with the same server_id.  Returns false if the address
+  // is present but with a different server_id (stale bridge from a
+  // restarted server).
+  bool IsBridged(const toolbelt::SocketAddress &addr, bool reliable,
+                 const std::string &server_id = "") const {
+    auto it = bridged_publishers_.find(ChannelTransmitter(addr, reliable));
+    if (it == bridged_publishers_.end()) {
+      return false;
+    }
+    return server_id.empty() || it->second == server_id;
   }
 
-  void AddBridgedAddress(const toolbelt::SocketAddress &addr, bool reliable) {
-    bridged_publishers_.emplace(addr, reliable);
+  void AddBridgedAddress(const toolbelt::SocketAddress &addr, bool reliable,
+                         const std::string &server_id = "") {
+    bridged_publishers_[ChannelTransmitter(addr, reliable)] = server_id;
   }
 
   void RemoveBridgedAddress(const toolbelt::SocketAddress &addr,
@@ -303,6 +323,12 @@ public:
   Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size, int num_slots,
            int initial_ordinal);
 
+  // Map existing shared memory from recovered FDs (after a server crash).
+  // Does not initialize CCB/BCB -- they already contain valid data.
+  absl::Status MapExisting(const toolbelt::FileDescriptor &scb_fd,
+                           toolbelt::FileDescriptor ccb_fd,
+                           toolbelt::FileDescriptor bcb_fd);
+
   struct CapacityInfo {
     bool capacity_ok;
     int num_pubs;
@@ -324,9 +350,10 @@ public:
 protected:
   absl::flat_hash_map<int, std::unique_ptr<User>> users_;
   toolbelt::BitSet<kMaxUsers> user_ids_;
-  absl::flat_hash_set<ChannelTransmitter> bridged_publishers_;
+  absl::flat_hash_map<ChannelTransmitter, std::string> bridged_publishers_;
   SharedMemoryFds shared_memory_fds_;
   bool is_virtual_ = false;
+  bool skip_cleanup_ = false;
   int session_id_;
   mutable int32_t last_known_slot_size_ = 0;
 };
