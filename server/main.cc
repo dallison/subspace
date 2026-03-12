@@ -71,7 +71,7 @@ int main(int argc, char **argv) {
 
   server->SetLogLevel(absl::GetFlag(FLAGS_log_level));
   if (absl::GetFlag(FLAGS_cleanup_filesystem)) {
-    server->CleanupFilesystem();
+    server->SetCleanupFilesystem(true);
   }
 
   // Load the plugins.  Each plugin is a name:path pair.

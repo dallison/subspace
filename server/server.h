@@ -101,6 +101,8 @@ public:
 
   absl::StatusOr<toolbelt::FileDescriptor> CreateBridgeNotificationPipe();
 
+  void SetCleanupFilesystem(bool v) { cleanup_filesystem_ = v; }
+
   void CleanupFilesystem();
   void CleanupAfterSession();
 
@@ -257,6 +259,7 @@ private:
 
   bool wait_for_clients_ = false;
   bool simulate_crash_ = false;
+  bool cleanup_filesystem_ = false;
 
   // In tests we will load a plugin while the server is running.  This needs a
   // lock.
