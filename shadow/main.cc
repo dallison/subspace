@@ -1,4 +1,5 @@
 // Copyright 2023-2026 David Allison
+// Shadow support is Copyright 2026 Cruise LLC
 // All Rights Reserved
 // See LICENSE file for licensing information.
 

@@ -36,6 +36,7 @@ message CreatePublisherRequest {
   bool notify_retirement = 11; // Notify publisher of slot retirement.
   int32 checksum_size = 12;    // Bytes reserved for checksum.
   int32 metadata_size = 13;    // Bytes reserved for user metadata.
+  int32 publisher_id = 14;     // -1 for new, >= 0 to reclaim existing.
 }
 
 message CreatePublisherResponse {
@@ -362,6 +363,8 @@ message ShadowEvent {
     ShadowRemovePublisher remove_publisher = 5;
     ShadowAddSubscriber add_subscriber = 6;
     ShadowRemoveSubscriber remove_subscriber = 7;
+    ShadowStateDump state_dump = 8;
+    ShadowStateDone state_done = 9;
   }
 }
 
@@ -420,4 +423,14 @@ message ShadowAddSubscriber {
 message ShadowRemoveSubscriber {
   string channel_name = 1;
   int32 subscriber_id = 2;
+}
+
+message ShadowStateDump {
+  uint64 session_id = 1;
+  int32 num_channels = 2;
+  // FDs sent via SCM_RIGHTS: [scb_fd] if session_id != 0
+}
+
+message ShadowStateDone {
+  // Empty marker signaling the end of the state dump.
 }

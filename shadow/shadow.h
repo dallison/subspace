@@ -1,4 +1,5 @@
 // Copyright 2023-2026 David Allison
+// Shadow support is Copyright 2026 Cruise LLC
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -84,6 +85,10 @@ private:
   void NotifyEvent();
   void ListenerCoroutine();
   void ClientCoroutine(std::shared_ptr<toolbelt::UnixSocket> client_socket);
+  absl::Status SendStateDump(toolbelt::UnixSocket &socket);
+  absl::Status SendEvent(toolbelt::UnixSocket &socket,
+                         const ShadowEvent &event,
+                         const std::vector<toolbelt::FileDescriptor> &fds = {});
 
   absl::Status HandleEvent(const ShadowEvent &event,
                            std::vector<toolbelt::FileDescriptor> &fds);

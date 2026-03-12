@@ -1,4 +1,5 @@
 // Copyright 2023-2026 David Allison
+// Shadow support is Copyright 2026 Cruise LLC
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -63,6 +64,14 @@ void Shadow::ListenerCoroutine() {
 
 void Shadow::ClientCoroutine(
     std::shared_ptr<toolbelt::UnixSocket> client_socket) {
+  // Send current state dump to the newly connected server.
+  if (absl::Status s = SendStateDump(*client_socket); !s.ok()) {
+    logger_.Log(toolbelt::LogLevel::kError,
+                "Shadow: failed to send state dump: %s",
+                s.ToString().c_str());
+    return;
+  }
+
   for (;;) {
     absl::StatusOr<std::vector<char>> receive_buffer =
         client_socket->ReceiveVariableLengthMessage(co::self);
@@ -128,6 +137,9 @@ absl::Status Shadow::HandleEvent(const ShadowEvent &event,
     return HandleAddSubscriber(event.add_subscriber(), fds);
   case ShadowEvent::kRemoveSubscriber:
     return HandleRemoveSubscriber(event.remove_subscriber());
+  case ShadowEvent::kStateDump:
+  case ShadowEvent::kStateDone:
+    return absl::OkStatus();
   case ShadowEvent::EVENT_NOT_SET:
     return absl::InternalError("Shadow: received event with no type set");
   }
@@ -291,6 +303,133 @@ Shadow::HandleRemoveSubscriber(const ShadowRemoveSubscriber &msg) {
               msg.channel_name().c_str(), msg.subscriber_id());
 
   it->second.subscribers.erase(msg.subscriber_id());
+  return absl::OkStatus();
+}
+
+absl::Status
+Shadow::SendEvent(toolbelt::UnixSocket &socket, const ShadowEvent &event,
+                  const std::vector<toolbelt::FileDescriptor> &fds) {
+  size_t msglen = event.ByteSizeLong();
+  std::vector<char> buffer(sizeof(int32_t) + msglen);
+  if (!event.SerializeToArray(buffer.data() + sizeof(int32_t), msglen)) {
+    return absl::InternalError("Shadow: failed to serialize event for dump");
+  }
+
+  absl::StatusOr<ssize_t> n =
+      socket.SendMessage(buffer.data() + sizeof(int32_t), msglen);
+  if (!n.ok()) {
+    return n.status();
+  }
+
+  if (!fds.empty()) {
+    absl::Status status = socket.SendFds(fds);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  return absl::OkStatus();
+}
+
+absl::Status Shadow::SendStateDump(toolbelt::UnixSocket &socket) {
+  // 1. Send the header.
+  {
+    ShadowEvent event;
+    auto *dump = event.mutable_state_dump();
+    dump->set_session_id(session_id_);
+    dump->set_num_channels(static_cast<int32_t>(channels_.size()));
+
+    std::vector<toolbelt::FileDescriptor> fds;
+    if (session_id_ != 0 && scb_fd_.Valid()) {
+      fds.push_back(scb_fd_);
+    }
+    if (absl::Status s = SendEvent(socket, event, fds); !s.ok()) {
+      return s;
+    }
+  }
+
+  // 2. For each channel, send ShadowCreateChannel + FDs, then its
+  //    publishers and subscribers.
+  for (auto &[name, ch] : channels_) {
+    // Channel.
+    {
+      ShadowEvent event;
+      auto *msg = event.mutable_create_channel();
+      msg->set_channel_name(ch.name);
+      msg->set_channel_id(ch.channel_id);
+      msg->set_slot_size(ch.slot_size);
+      msg->set_num_slots(ch.num_slots);
+      msg->set_type(ch.type);
+      msg->set_is_local(ch.is_local);
+      msg->set_is_reliable(ch.is_reliable);
+      msg->set_is_fixed_size(ch.is_fixed_size);
+      msg->set_checksum_size(ch.checksum_size);
+      msg->set_metadata_size(ch.metadata_size);
+      msg->set_mux(ch.mux);
+      msg->set_vchan_id(ch.vchan_id);
+
+      std::vector<toolbelt::FileDescriptor> fds;
+      fds.push_back(ch.ccb_fd);
+      fds.push_back(ch.bcb_fd);
+      if (absl::Status s = SendEvent(socket, event, fds); !s.ok()) {
+        return s;
+      }
+    }
+
+    // Publishers.
+    for (auto &[pub_id, pub] : ch.publishers) {
+      ShadowEvent event;
+      auto *msg = event.mutable_add_publisher();
+      msg->set_channel_name(ch.name);
+      msg->set_publisher_id(pub.id);
+      msg->set_is_reliable(pub.is_reliable);
+      msg->set_is_local(pub.is_local);
+      msg->set_is_bridge(pub.is_bridge);
+      msg->set_is_fixed_size(pub.is_fixed_size);
+      msg->set_notify_retirement(pub.notify_retirement);
+
+      std::vector<toolbelt::FileDescriptor> fds;
+      fds.push_back(pub.poll_fd);
+      fds.push_back(pub.trigger_fd);
+      if (pub.notify_retirement) {
+        fds.push_back(pub.retirement_read_fd);
+        fds.push_back(pub.retirement_write_fd);
+      }
+      if (absl::Status s = SendEvent(socket, event, fds); !s.ok()) {
+        return s;
+      }
+    }
+
+    // Subscribers.
+    for (auto &[sub_id, sub] : ch.subscribers) {
+      ShadowEvent event;
+      auto *msg = event.mutable_add_subscriber();
+      msg->set_channel_name(ch.name);
+      msg->set_subscriber_id(sub.id);
+      msg->set_is_reliable(sub.is_reliable);
+      msg->set_is_bridge(sub.is_bridge);
+      msg->set_max_active_messages(sub.max_active_messages);
+
+      std::vector<toolbelt::FileDescriptor> fds;
+      fds.push_back(sub.trigger_fd);
+      fds.push_back(sub.poll_fd);
+      if (absl::Status s = SendEvent(socket, event, fds); !s.ok()) {
+        return s;
+      }
+    }
+  }
+
+  // 3. Send the done marker.
+  {
+    ShadowEvent event;
+    event.mutable_state_done();
+    if (absl::Status s = SendEvent(socket, event); !s.ok()) {
+      return s;
+    }
+  }
+
+  logger_.Log(toolbelt::LogLevel::kInfo,
+              "Shadow: sent state dump (session_id=%lu, %d channels)",
+              session_id_, static_cast<int>(channels_.size()));
   return absl::OkStatus();
 }
 
