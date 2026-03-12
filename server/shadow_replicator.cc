@@ -238,115 +238,108 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
       return event.status();
     }
 
-    if (event->has_state_done()) {
-      break;
-    }
+    auto find_channel = [&](const std::string &name)
+        -> absl::StatusOr<RecoveredChannel *> {
+      if (state.channels.empty()) {
+        return absl::InternalError(
+            absl::StrFormat("event for channel '%s' before any channel", name));
+      }
+      auto &back = state.channels.back();
+      if (back.name == name) {
+        return &back;
+      }
+      for (auto &c : state.channels) {
+        if (c.name == name) {
+          return &c;
+        }
+      }
+      return absl::InternalError(
+          absl::StrFormat("event for unknown channel '%s'", name));
+    };
 
-    if (event->has_create_channel()) {
+    switch (event->event_case()) {
+    case ShadowEvent::kStateDone:
+      break;
+
+    case ShadowEvent::kCreateChannel: {
       const auto &msg = event->create_channel();
       if (fds.size() < 2) {
         return absl::InternalError("create_channel in dump missing FDs");
       }
-      RecoveredChannel ch;
-      ch.name = msg.channel_name();
-      ch.channel_id = msg.channel_id();
-      ch.slot_size = msg.slot_size();
-      ch.num_slots = msg.num_slots();
-      ch.type = msg.type();
-      ch.is_local = msg.is_local();
-      ch.is_reliable = msg.is_reliable();
-      ch.is_fixed_size = msg.is_fixed_size();
-      ch.checksum_size = msg.checksum_size();
-      ch.metadata_size = msg.metadata_size();
-      ch.mux = msg.mux();
-      ch.vchan_id = msg.vchan_id();
-      ch.ccb_fd = std::move(fds[0]);
-      ch.bcb_fd = std::move(fds[1]);
-      state.channels.push_back(std::move(ch));
+      state.channels.push_back(RecoveredChannel{
+          .name = msg.channel_name(),
+          .channel_id = msg.channel_id(),
+          .slot_size = msg.slot_size(),
+          .num_slots = msg.num_slots(),
+          .type = msg.type(),
+          .is_local = msg.is_local(),
+          .is_reliable = msg.is_reliable(),
+          .is_fixed_size = msg.is_fixed_size(),
+          .checksum_size = msg.checksum_size(),
+          .metadata_size = msg.metadata_size(),
+          .mux = msg.mux(),
+          .vchan_id = msg.vchan_id(),
+          .ccb_fd = std::move(fds[0]),
+          .bcb_fd = std::move(fds[1]),
+      });
       continue;
     }
 
-    if (event->has_add_publisher()) {
+    case ShadowEvent::kAddPublisher: {
       const auto &msg = event->add_publisher();
       size_t expected = msg.notify_retirement() ? 4 : 2;
       if (fds.size() < expected) {
         return absl::InternalError("add_publisher in dump missing FDs");
       }
-      RecoveredPublisher pub;
-      pub.id = msg.publisher_id();
-      pub.is_reliable = msg.is_reliable();
-      pub.is_local = msg.is_local();
-      pub.is_bridge = msg.is_bridge();
-      pub.is_fixed_size = msg.is_fixed_size();
-      pub.notify_retirement = msg.notify_retirement();
-      pub.poll_fd = std::move(fds[0]);
-      pub.trigger_fd = std::move(fds[1]);
-      if (msg.notify_retirement()) {
-        pub.retirement_read_fd = std::move(fds[2]);
-        pub.retirement_write_fd = std::move(fds[3]);
+      absl::StatusOr<RecoveredChannel *> ch = find_channel(msg.channel_name());
+      if (!ch.ok()) {
+        return ch.status();
       }
-      // Attach to the last channel (dump sends publishers right after
-      // their channel).
-      if (state.channels.empty()) {
-        return absl::InternalError("add_publisher before any channel");
-      }
-      auto &target = state.channels.back();
-      if (target.name != msg.channel_name()) {
-        // Find the right channel.
-        bool found = false;
-        for (auto &c : state.channels) {
-          if (c.name == msg.channel_name()) {
-            c.publishers.push_back(std::move(pub));
-            found = true;
-            break;
-          }
-        }
-        if (!found) {
-          return absl::InternalError(absl::StrFormat(
-              "add_publisher for unknown channel '%s'", msg.channel_name()));
-        }
-      } else {
-        target.publishers.push_back(std::move(pub));
-      }
+      (*ch)->publishers.push_back(RecoveredPublisher{
+          .id = msg.publisher_id(),
+          .is_reliable = msg.is_reliable(),
+          .is_local = msg.is_local(),
+          .is_bridge = msg.is_bridge(),
+          .is_fixed_size = msg.is_fixed_size(),
+          .notify_retirement = msg.notify_retirement(),
+          .poll_fd = std::move(fds[0]),
+          .trigger_fd = std::move(fds[1]),
+          .retirement_read_fd = msg.notify_retirement()
+                                    ? std::move(fds[2])
+                                    : toolbelt::FileDescriptor(),
+          .retirement_write_fd = msg.notify_retirement()
+                                     ? std::move(fds[3])
+                                     : toolbelt::FileDescriptor(),
+      });
       continue;
     }
 
-    if (event->has_add_subscriber()) {
+    case ShadowEvent::kAddSubscriber: {
       const auto &msg = event->add_subscriber();
       if (fds.size() < 2) {
         return absl::InternalError("add_subscriber in dump missing FDs");
       }
-      RecoveredSubscriber sub;
-      sub.id = msg.subscriber_id();
-      sub.is_reliable = msg.is_reliable();
-      sub.is_bridge = msg.is_bridge();
-      sub.max_active_messages = msg.max_active_messages();
-      sub.trigger_fd = std::move(fds[0]);
-      sub.poll_fd = std::move(fds[1]);
-      if (state.channels.empty()) {
-        return absl::InternalError("add_subscriber before any channel");
+      absl::StatusOr<RecoveredChannel *> ch = find_channel(msg.channel_name());
+      if (!ch.ok()) {
+        return ch.status();
       }
-      auto &target = state.channels.back();
-      if (target.name != msg.channel_name()) {
-        bool found = false;
-        for (auto &c : state.channels) {
-          if (c.name == msg.channel_name()) {
-            c.subscribers.push_back(std::move(sub));
-            found = true;
-            break;
-          }
-        }
-        if (!found) {
-          return absl::InternalError(absl::StrFormat(
-              "add_subscriber for unknown channel '%s'", msg.channel_name()));
-        }
-      } else {
-        target.subscribers.push_back(std::move(sub));
-      }
+      (*ch)->subscribers.push_back(RecoveredSubscriber{
+          .id = msg.subscriber_id(),
+          .is_reliable = msg.is_reliable(),
+          .is_bridge = msg.is_bridge(),
+          .max_active_messages = msg.max_active_messages(),
+          .trigger_fd = std::move(fds[0]),
+          .poll_fd = std::move(fds[1]),
+      });
       continue;
     }
 
-    return absl::InternalError("Unexpected event type in state dump");
+    default:
+      return absl::InternalError("Unexpected event type in state dump");
+    }
+
+    // kStateDone breaks out of the switch; break the loop here.
+    break;
   }
 
   logger_.Log(toolbelt::LogLevel::kInfo,

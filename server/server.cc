@@ -1409,14 +1409,18 @@ Server::SendSubscribeMessage(const std::string &channel_name, bool reliable,
 void Server::BridgeReceiverCoroutine(std::string channel_name,
                                      bool sub_reliable,
                                      toolbelt::InetAddress publisher) {
-  // Remove the bridged address when we exit so that discovery can
-  // re-establish the bridge if the remote server restarts.
-  auto remove_bridged = [this, &channel_name, &publisher, sub_reliable]() {
-    auto it = channels_.find(channel_name);
-    if (it != channels_.end()) {
-      it->second->RemoveBridgedAddress(publisher, sub_reliable);
+  struct BridgeGuard {
+    Server *server;
+    const std::string &channel_name;
+    const toolbelt::InetAddress &publisher;
+    bool sub_reliable;
+    ~BridgeGuard() {
+      auto it = server->channels_.find(channel_name);
+      if (it != server->channels_.end()) {
+        it->second->RemoveBridgedAddress(publisher, sub_reliable);
+      }
     }
-  };
+  } bridge_guard{this, channel_name, publisher, sub_reliable};
 
   // Open a listening TCP socket on a free port.
   logger_.Log(toolbelt::LogLevel::kDebug, "BridgeReceiverCoroutine running");
@@ -1429,7 +1433,6 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     logger_.Log(toolbelt::LogLevel::kError,
                 "Unable to bind socket for bridge receiver for %s: %s",
                 channel_name.c_str(), s.ToString().c_str());
-    remove_bridged();
     return;
   }
   const toolbelt::SocketAddress &receiver_addr =
@@ -1443,7 +1446,6 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to send Subscribe message for channel %s: %s",
                 channel_name.c_str(), s.ToString().c_str());
-    remove_bridged();
     return;
   }
 
@@ -1454,7 +1456,6 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to accept incoming bridge connection: %s",
                 bridge.status().ToString().c_str());
-    remove_bridged();
     return;
   }
 
@@ -1467,14 +1468,12 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
   if (!n_recv.ok()) {
     logger_.Log(toolbelt::LogLevel::kError, "Failed to receive Subscribed: %s",
                 n_recv.status().ToString().c_str());
-    remove_bridged();
     return;
   }
   if (!subscribed.ParseFromArray(buffer + sizeof(int32_t),
                                  static_cast<int>(*n_recv))) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to parse Subscribed message");
-    remove_bridged();
     return;
   }
 
@@ -1485,7 +1484,6 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to connect to Subspace server: %s",
                 s.ToString().c_str());
-    remove_bridged();
     return;
   }
 
@@ -1521,7 +1519,6 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
       logger_.Log(toolbelt::LogLevel::kError,
                   "Unsupported address type for retirement notification: %s",
                   my_address_.ToString().c_str());
-      remove_bridged();
       return;
     }
 
@@ -1530,7 +1527,6 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to connect to retirement socket for %s: %s",
                   channel_name.c_str(), s.ToString().c_str());
-      remove_bridged();
       return;
     }
   }
@@ -1556,7 +1552,6 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to create bridge publisher for %s: %s",
                 channel_name.c_str(), pub.status().ToString().c_str());
-    remove_bridged();
     return;
   }
 
@@ -1568,7 +1563,6 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     if (!retirement_fd.Valid()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to get retirement fd for %s", channel_name.c_str());
-      remove_bridged();
       return;
     }
 
@@ -1689,7 +1683,6 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
 
   logger_.Log(toolbelt::LogLevel::kDebug,
               "Bridge receiver coroutine terminating");
-  remove_bridged();
 }
 
 // This coroutine receives retirement notifications from the bridge publisher
