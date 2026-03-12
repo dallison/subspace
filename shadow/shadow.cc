@@ -170,21 +170,22 @@ Shadow::HandleCreateChannel(const ShadowCreateChannel &msg,
                         msg.channel_name()));
   }
 
-  ShadowChannel ch;
-  ch.name = msg.channel_name();
-  ch.channel_id = msg.channel_id();
-  ch.slot_size = msg.slot_size();
-  ch.num_slots = msg.num_slots();
-  ch.type = msg.type();
-  ch.is_local = msg.is_local();
-  ch.is_reliable = msg.is_reliable();
-  ch.is_fixed_size = msg.is_fixed_size();
-  ch.checksum_size = msg.checksum_size();
-  ch.metadata_size = msg.metadata_size();
-  ch.mux = msg.mux();
-  ch.vchan_id = msg.vchan_id();
-  ch.ccb_fd = std::move(fds[0]);
-  ch.bcb_fd = std::move(fds[1]);
+  ShadowChannel ch{
+      .name = msg.channel_name(),
+      .channel_id = msg.channel_id(),
+      .slot_size = msg.slot_size(),
+      .num_slots = msg.num_slots(),
+      .type = msg.type(),
+      .is_local = msg.is_local(),
+      .is_reliable = msg.is_reliable(),
+      .is_fixed_size = msg.is_fixed_size(),
+      .checksum_size = msg.checksum_size(),
+      .metadata_size = msg.metadata_size(),
+      .mux = msg.mux(),
+      .vchan_id = msg.vchan_id(),
+      .ccb_fd = std::move(fds[0]),
+      .bcb_fd = std::move(fds[1]),
+  };
 
   logger_.Log(toolbelt::LogLevel::kInfo,
               "Shadow: create channel '%s' id=%d slots=%d/%d",
@@ -222,19 +223,20 @@ Shadow::HandleAddPublisher(const ShadowAddPublisher &msg,
                         msg.channel_name()));
   }
 
-  ShadowPublisher pub;
-  pub.id = msg.publisher_id();
-  pub.is_reliable = msg.is_reliable();
-  pub.is_local = msg.is_local();
-  pub.is_bridge = msg.is_bridge();
-  pub.is_fixed_size = msg.is_fixed_size();
-  pub.notify_retirement = msg.notify_retirement();
-  pub.poll_fd = std::move(fds[0]);
-  pub.trigger_fd = std::move(fds[1]);
-  if (msg.notify_retirement()) {
-    pub.retirement_read_fd = std::move(fds[2]);
-    pub.retirement_write_fd = std::move(fds[3]);
-  }
+  ShadowPublisher pub{
+      .id = msg.publisher_id(),
+      .is_reliable = msg.is_reliable(),
+      .is_local = msg.is_local(),
+      .is_bridge = msg.is_bridge(),
+      .is_fixed_size = msg.is_fixed_size(),
+      .notify_retirement = msg.notify_retirement(),
+      .poll_fd = std::move(fds[0]),
+      .trigger_fd = std::move(fds[1]),
+      .retirement_read_fd = msg.notify_retirement() ? std::move(fds[2])
+                                                    : toolbelt::FileDescriptor(),
+      .retirement_write_fd = msg.notify_retirement() ? std::move(fds[3])
+                                                     : toolbelt::FileDescriptor(),
+  };
 
   logger_.Log(toolbelt::LogLevel::kInfo,
               "Shadow: add publisher '%s' pub_id=%d reliable=%d",
@@ -275,13 +277,14 @@ Shadow::HandleAddSubscriber(const ShadowAddSubscriber &msg,
                         msg.channel_name()));
   }
 
-  ShadowSubscriber sub;
-  sub.id = msg.subscriber_id();
-  sub.is_reliable = msg.is_reliable();
-  sub.is_bridge = msg.is_bridge();
-  sub.max_active_messages = msg.max_active_messages();
-  sub.trigger_fd = std::move(fds[0]);
-  sub.poll_fd = std::move(fds[1]);
+  ShadowSubscriber sub{
+      .id = msg.subscriber_id(),
+      .is_reliable = msg.is_reliable(),
+      .is_bridge = msg.is_bridge(),
+      .max_active_messages = msg.max_active_messages(),
+      .trigger_fd = std::move(fds[0]),
+      .poll_fd = std::move(fds[1]),
+  };
 
   logger_.Log(toolbelt::LogLevel::kInfo,
               "Shadow: add subscriber '%s' sub_id=%d reliable=%d",
