@@ -28,7 +28,7 @@ static inline bool VirtualChannelIdMatch(MessageSlot *slot, int vchan_id) {
   return vchan_id == -1 || slot->vchan_id == -1 || slot->vchan_id == vchan_id;
 }
 
-bool SubscriberImpl::AddActiveMessage(MessageSlot *slot) {
+bool SubscriberImpl::AddActiveMessage(MessageSlot * /*slot*/) {
   // std::cerr << "adding active message " << slot->id << " " << slot->ordinal
   //           << "\n";
   int old = num_active_messages_.fetch_add(1);
@@ -40,9 +40,9 @@ bool SubscriberImpl::AddActiveMessage(MessageSlot *slot) {
 }
 
 void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
-  // std::cerr << this << " remove active message " << slot->id << " "
-  //           << slot->ordinal << " refs " << std::hex << slot->refs.load() <<
-  //           std::dec << "\n";
+    // std::cerr << this << " remove active message " << slot->id << " "
+    //           << slot->ordinal << " refs " << std::hex << slot->refs.load() <<
+    //           std::dec << "\n";
   slot->sub_owners.Clear(subscriber_id_);
   AtomicIncRefCount(slot, IsReliable(), -1, slot->ordinal, slot->vchan_id, true,
                     [this, slot]() {
@@ -314,7 +314,7 @@ MessageSlot *SubscriberImpl::LastSlot(MessageSlot *slot, bool reliable,
 }
 
 MessageSlot *SubscriberImpl::FindActiveSlotByTimestamp(
-    MessageSlot *old_slot, uint64_t timestamp, bool reliable, int owner,
+    MessageSlot * /*old_slot*/, uint64_t timestamp, bool reliable, int owner,
     std::vector<ActiveSlot> &buffer) {
   embargoed_slots_.ClearAll();
   for (;;) {

@@ -237,6 +237,8 @@ public:
 
   void DumpOrdinals(std::ostream &os);
 
+  bool ForTunnel() const { return options_.ForTunnel(); }
+
 private:
   friend class ::subspace::ClientImpl;
 

@@ -273,6 +273,7 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
   cmd->set_is_local(opts.IsLocal());
   cmd->set_is_reliable(opts.IsReliable());
   cmd->set_is_bridge(opts.IsBridge());
+  cmd->set_for_tunnel(opts.ForTunnel());
   cmd->set_is_fixed_size(opts.IsFixedSize());
   cmd->set_type(opts.Type());
   cmd->set_mux(opts.Mux());
@@ -350,8 +351,10 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
         return status;
       }
     }
-  } else if (!opts.IsBridge()) {
-    // Send a single activation message to the channel.
+  } else if (!opts.IsBridge() && !opts.ForTunnel()) {
+    // Send a single activation message to the channel.  Don't activate if
+    // this is a tunnel publisher because there will already be an existing
+    // reliable publisher that has been activated.
     absl::Status status = ActivateReliableChannel(channel.get());
     if (!status.ok()) {
       return status;
@@ -403,6 +406,7 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
   cmd->set_subscriber_id(-1); // New subscriber is being created.
   cmd->set_is_reliable(opts.IsReliable());
   cmd->set_is_bridge(opts.IsBridge());
+  cmd->set_for_tunnel(opts.ForTunnel());
   cmd->set_type(opts.Type());
   cmd->set_max_active_messages(opts.MaxActiveMessages());
   cmd->set_mux(opts.Mux());
@@ -631,7 +635,7 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
 
   Channel::PublishedMessage msg = publisher->ActivateSlotAndGetAnother(
       publisher->IsReliable(), /*is_activation=*/false, omit_prefix,
-      use_prefix_slot_id);
+      use_prefix_slot_id, publisher->ForTunnel());
 
   // Prevent use of old_slot.
   old_slot = nullptr;
@@ -897,7 +901,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
         it->second(subscriber, drops);
       }
       subscriber->RecordDroppedMessages(drops);
-      if (subscriber->options_.log_dropped_messages) {
+      if (false && subscriber->options_.log_dropped_messages) {
         logger_.Log(toolbelt::LogLevel::kWarning,
                     "Dropped %d message%s on channel %s", drops,
                     drops == 1 ? "" : "s", subscriber->Name().c_str());
@@ -1435,6 +1439,8 @@ ClientImpl::GetChannelInfo(const std::string &channel) {
   result.num_subscribers = info.num_subs();
   result.num_bridge_pubs = info.num_bridge_pubs();
   result.num_bridge_subs = info.num_bridge_subs();
+  result.num_tunnel_pubs = info.num_tunnel_pubs();
+  result.num_tunnel_subs = info.num_tunnel_subs();
   result.reliable = info.is_reliable();
   result.type = info.type();
   result.slot_size = info.slot_size();
@@ -1469,6 +1475,8 @@ absl::StatusOr<const std::vector<ChannelInfo>> ClientImpl::GetChannelInfo() {
     result.num_subscribers = info.num_subs();
     result.num_bridge_pubs = info.num_bridge_pubs();
     result.num_bridge_subs = info.num_bridge_subs();
+    result.num_tunnel_pubs = info.num_tunnel_pubs();
+    result.num_tunnel_subs = info.num_tunnel_subs();
     result.reliable = info.is_reliable();
     result.type = info.type();
     result.slot_size = info.slot_size();

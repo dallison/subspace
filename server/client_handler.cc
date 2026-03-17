@@ -235,7 +235,9 @@ void ClientHandler::HandleCreatePublisher(
   }
 
   int num_pubs, num_subs, num_bridge_pubs, num_bridge_subs;
-  channel->CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs);
+  int num_tunnel_pubs, num_tunnel_subs;
+  channel->CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs,
+                      num_tunnel_pubs, num_tunnel_subs);
   // Check consistency of publisher parameters.
   if (num_pubs > 0) {
     if (req.is_fixed_size() != channel->IsFixedSize()) {
@@ -293,7 +295,8 @@ void ClientHandler::HandleCreatePublisher(
   // Create the publisher.
   absl::StatusOr<PublisherUser *> publisher =
       channel->AddPublisher(this, req.is_reliable(), req.is_local(),
-                            req.is_bridge(), req.is_fixed_size());
+                            req.is_bridge(), req.for_tunnel(),
+                            req.is_fixed_size());
   if (!publisher.ok()) {
     response->set_error(publisher.status().ToString());
     return;
@@ -504,7 +507,8 @@ void ClientHandler::HandleCreateSubscriber(
                          client_name_.c_str(), req.channel_name().c_str(),
                          GetTotalVM().c_str());
     absl::StatusOr<SubscriberUser *> subscriber = channel->AddSubscriber(
-        this, req.is_reliable(), req.is_bridge(), req.max_active_messages());
+        this, req.is_reliable(), req.is_bridge(), req.for_tunnel(),
+        req.max_active_messages());
     if (!subscriber.ok()) {
       response->set_error(subscriber.status().ToString());
       return;
