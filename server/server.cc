@@ -413,19 +413,27 @@ absl::Status Server::Run() {
     if (primary_shadow_replicator_->Connect().ok()) {
       primary_connected = true;
       // Drain the state dump so the shadow is ready for new events.
-      (void)primary_shadow_replicator_->ReceiveStateDump();
+      if (auto s = primary_shadow_replicator_->ReceiveStateDump(); !s.ok()) {
+        logger_.Log(toolbelt::LogLevel::kError,
+                    "Failed to receive state dump from primary shadow: %s",
+                    s.status().ToString().c_str());
+      }
     }
   }
   if (!secondary_connected && secondary_shadow_replicator_ != nullptr) {
     if (secondary_shadow_replicator_->Connect().ok()) {
       secondary_connected = true;
-      (void)secondary_shadow_replicator_->ReceiveStateDump();
+      if (auto s = secondary_shadow_replicator_->ReceiveStateDump(); !s.ok()) {
+        logger_.Log(toolbelt::LogLevel::kError,
+                    "Failed to receive state dump from secondary shadow: %s",
+                    s.status().ToString().c_str());
+      }
     }
   }
 
   // Phase 4: Send init and re-replicate recovered state to all connected
   // shadows.
-  auto ReplicateToShadow = [this, recovered](ShadowReplicator *shadow) {
+  auto replicate_to_shadow = [this, recovered](ShadowReplicator *shadow) {
     shadow->SendInit(session_id_, scb_fd_);
     if (recovered) {
       for (auto &[name, ch] : channels_) {
@@ -447,12 +455,12 @@ absl::Status Server::Run() {
   };
 
   if (primary_connected) {
-    ReplicateToShadow(primary_shadow_replicator_.get());
+    replicate_to_shadow(primary_shadow_replicator_.get());
     logger_.Log(toolbelt::LogLevel::kInfo,
                 "Connected to primary shadow process");
   }
   if (secondary_connected) {
-    ReplicateToShadow(secondary_shadow_replicator_.get());
+    replicate_to_shadow(secondary_shadow_replicator_.get());
     logger_.Log(toolbelt::LogLevel::kInfo,
                 "Connected to secondary shadow process");
   }
