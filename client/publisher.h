@@ -65,6 +65,7 @@ public:
   }
 
   std::string Mux() const { return options_.Mux(); }
+  bool ForTunnel() const { return options_.ForTunnel(); }
 
 private:
   friend class ::subspace::ClientImpl;
@@ -96,15 +97,16 @@ private:
   Channel::PublishedMessage
   ActivateSlotAndGetAnother(MessageSlot *slot, bool reliable,
                             bool is_activation, int owner, bool omit_prefix,
-                            bool use_prefix_slot_id);
+                            bool use_prefix_slot_id, bool for_tunnel = false);
 
   Channel::PublishedMessage ActivateSlotAndGetAnother(bool reliable,
                                                       bool is_activation,
                                                       bool omit_prefix,
-                                                      bool use_prefix_slot_id) {
+                                                      bool use_prefix_slot_id,
+                                                      bool for_tunnel = false) {
     return ActivateSlotAndGetAnother(slot_, reliable, is_activation,
                                      publisher_id_, omit_prefix,
-                                     use_prefix_slot_id);
+                                     use_prefix_slot_id, for_tunnel);
   }
 
   void ClearSubscribers() { subscribers_.clear(); }

@@ -452,7 +452,9 @@ TEST_F(ShadowRecoveryTest, ServerRecoversStateFromShadow) {
   EXPECT_EQ(channel->NumSlots(), 4);
 
   int num_pubs = 0, num_subs = 0, num_bridge_pubs = 0, num_bridge_subs = 0;
-  channel->CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs);
+  int num_tunnel_pubs = 0, num_tunnel_subs = 0;
+  channel->CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs,
+                      num_tunnel_pubs, num_tunnel_subs);
   EXPECT_EQ(num_pubs, 1);
   EXPECT_EQ(num_subs, 1);
 
@@ -817,7 +819,8 @@ TEST_F(DualShadowRecoveryTest, RecoverFromPrimaryWhenBothHealthy) {
   ASSERT_EQ(channels.count("dual_chan"), 1u);
   auto *channel = channels.at("dual_chan").get();
   int np = 0, ns = 0, nbp = 0, nbs = 0;
-  channel->CountUsers(np, ns, nbp, nbs);
+  int ntp = 0, nts = 0;
+  channel->CountUsers(np, ns, nbp, nbs, ntp, nts);
   EXPECT_EQ(np, 1);
   EXPECT_EQ(ns, 1);
 

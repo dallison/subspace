@@ -21,6 +21,7 @@ struct ShadowPublisher {
   bool is_reliable = false;
   bool is_local = false;
   bool is_bridge = false;
+  bool for_tunnel = false;
   bool is_fixed_size = false;
   bool notify_retirement = false;
   toolbelt::FileDescriptor poll_fd;
@@ -33,6 +34,7 @@ struct ShadowSubscriber {
   int id = 0;
   bool is_reliable = false;
   bool is_bridge = false;
+  bool for_tunnel = false;
   int max_active_messages = 0;
   toolbelt::FileDescriptor trigger_fd;
   toolbelt::FileDescriptor poll_fd;
