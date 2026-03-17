@@ -1565,8 +1565,10 @@ void Server::IncomingAdvertise(const Discovery::Advertise &advertise,
     channel->second->AddBridgedAddress(sender, advertise.reliable());
 
     int num_pubs, num_subs, num_bridge_pubs, num_bridge_subs;
+    int num_tunnel_pubs, num_tunnel_subs;
     channel->second->CountUsers(num_pubs, num_subs, num_bridge_pubs,
-                                num_bridge_subs);
+                                num_bridge_subs, num_tunnel_pubs,
+                                num_tunnel_subs);
     if (num_subs > 0) {
       SubscribeOverBridge(channel->second.get(), advertise.reliable(), sender);
     }
