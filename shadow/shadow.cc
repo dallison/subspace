@@ -31,7 +31,7 @@ absl::Status Shadow::Run() {
     return status;
   }
 
-  logger_.Log(toolbelt::LogLevel::kDebug, "Shadow listening on %s",
+  logger_.Log(toolbelt::LogLevel::kInfo, "Shadow listening on %s",
               socket_name_.c_str());
 
   NotifyEvent();
@@ -51,7 +51,7 @@ void Shadow::ListenerCoroutine() {
       break;
     }
 
-    logger_.Log(toolbelt::LogLevel::kDebug,
+    logger_.Log(toolbelt::LogLevel::kInfo,
                 "Shadow accepted connection from server");
 
     auto client =
