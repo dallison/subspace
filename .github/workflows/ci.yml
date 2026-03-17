@@ -18,7 +18,7 @@ jobs:
       # These flags apply to all bazel build and test commands.
       COMMON_BASE_FLAGS: --verbose_failures ${{ matrix.bazel_flags }}
       # These flags apply to all bazel test commands.
-      COMMON_TEST_FLAGS: --test_output=errors --test_summary=detailed ${{ env.COMMON_BASE_FLAGS }}
+      COMMON_TEST_FLAGS: --test_output=errors --test_summary=detailed
 
     steps:
       - name: Checkout code
@@ -43,6 +43,7 @@ jobs:
         run: |
           bazel test //... \
             --test_tag_filters=-large \
+            $COMMON_BASE_FLAGS
             $COMMON_TEST_FLAGS
 
         # Just separate these out so they don't run if some smaller tests fail.
@@ -50,5 +51,6 @@ jobs:
         run: |
           bazel test //... \
             --test_tag_filters=large \
+            $COMMON_BASE_FLAGS \
             $COMMON_TEST_FLAGS
 
