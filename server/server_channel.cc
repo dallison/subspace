@@ -13,7 +13,7 @@
 namespace subspace {
 
 ServerChannel::~ServerChannel() {
-  if (is_virtual_) {
+  if (is_virtual_ || skip_cleanup_) {
     return;
   }
   // Clear the channel counters in the SCB.
@@ -186,6 +186,39 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
   return fds;
 }
 
+absl::Status
+ServerChannel::MapExisting(const toolbelt::FileDescriptor &scb_fd,
+                           toolbelt::FileDescriptor ccb_fd,
+                           toolbelt::FileDescriptor bcb_fd) {
+  scb_ = reinterpret_cast<SystemControlBlock *>(MapMemory(
+      scb_fd.Fd(), sizeof(SystemControlBlock), PROT_READ | PROT_WRITE, "SCB"));
+  if (scb_ == MAP_FAILED) {
+    return absl::InternalError(absl::StrFormat(
+        "Failed to map recovered SCB: %s", strerror(errno)));
+  }
+
+  ccb_ = reinterpret_cast<ChannelControlBlock *>(MapMemory(
+      ccb_fd.Fd(), CcbSize(num_slots_), PROT_READ | PROT_WRITE, "CCB"));
+  if (ccb_ == MAP_FAILED) {
+    UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+    return absl::InternalError(absl::StrFormat(
+        "Failed to map recovered CCB: %s", strerror(errno)));
+  }
+
+  bcb_ = reinterpret_cast<BufferControlBlock *>(MapMemory(
+      bcb_fd.Fd(), sizeof(BufferControlBlock), PROT_READ | PROT_WRITE, "BCB"));
+  if (bcb_ == MAP_FAILED) {
+    UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+    UnmapMemory(ccb_, CcbSize(num_slots_), "CCB");
+    return absl::InternalError(absl::StrFormat(
+        "Failed to map recovered BCB: %s", strerror(errno)));
+  }
+
+  shared_memory_fds_ =
+      SharedMemoryFds(std::move(ccb_fd), std::move(bcb_fd));
+  return absl::OkStatus();
+}
+
 std::vector<toolbelt::FileDescriptor>
 ServerChannel::GetSubscriberTriggerFds() const {
   std::vector<toolbelt::FileDescriptor> r;
@@ -307,8 +340,16 @@ void ServerChannel::RemoveUser(Server *server, int user_id) {
   }
   if (user->IsPublisher()) {
     server->OnRemovePublisher(Name(), user->GetId());
+    server->ForEachShadow(
+        [this, &user](const std::unique_ptr<ShadowReplicator> &shadow) {
+          shadow->SendRemovePublisher(Name(), user->GetId());
+        });
   } else {
     server->OnRemoveSubscriber(Name(), user->GetId());
+    server->ForEachShadow(
+        [this, &user](const std::unique_ptr<ShadowReplicator> &shadow) {
+          shadow->SendRemoveSubscriber(Name(), user->GetId());
+        });
   }
   CleanupSlots(user->GetId(), user->IsReliable(), user->IsPublisher(),
                GetVirtualChannelId());
@@ -581,6 +622,9 @@ ChannelCounters &ServerChannel::RecordUpdate(bool is_pub, bool add,
   SystemControlBlock *scb = GetScb();
   int channel_id = GetChannelId();
   ChannelCounters &counters = scb->counters[channel_id];
+  if (skip_cleanup_ && !add) {
+    return counters;
+  }
   int inc = add ? 1 : -1;
   if (is_pub) {
     SetNumUpdates(++counters.num_pub_updates);

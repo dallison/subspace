@@ -16,6 +16,7 @@
 #include "proto/subspace.pb.h"
 #include "server/plugin.h"
 #include "server/server_channel.h"
+#include "server/shadow_replicator.h"
 #include "toolbelt/bitset.h"
 #include "toolbelt/clock.h"
 #include "toolbelt/fd.h"
@@ -71,12 +72,36 @@ public:
   void SetMachineName(std::string name) { machine_name_ = std::move(name); }
   const std::string& MachineName() const { return machine_name_; }
 
+  void SetShadowSocket(const std::string &socket_name);
+  void SetShadowSockets(const std::string &primary, const std::string &secondary);
+  void SimulateCrash() {
+    simulate_crash_ = true;
+    for (auto &[name, ch] : channels_) {
+      ch->SetSkipCleanup(true);
+    }
+  }
+  const std::unique_ptr<ShadowReplicator> &GetPrimaryShadowReplicator() {
+    return primary_shadow_replicator_;
+  }
+  const std::unique_ptr<ShadowReplicator> &GetSecondaryShadowReplicator() {
+    return secondary_shadow_replicator_;
+  }
+
+  template <typename Fn> void ForEachShadow(Fn fn) {
+    if (primary_shadow_replicator_)
+      fn(primary_shadow_replicator_);
+    if (secondary_shadow_replicator_)
+      fn(secondary_shadow_replicator_);
+  }
+
   uint64_t GetVirtualMemoryUsage() const;
   const std::string& GetSocketName() const { return socket_name_; }
 
   uint64_t GetSessionId() const { return session_id_; }
 
   absl::StatusOr<toolbelt::FileDescriptor> CreateBridgeNotificationPipe();
+
+  void SetCleanupFilesystem(bool v) { cleanup_filesystem_ = v; }
 
   void CleanupFilesystem();
   void CleanupAfterSession();
@@ -137,6 +162,8 @@ private:
     std::unique_ptr<PluginInterface> interface;
   };
 
+  absl::Status RecoverFromShadow(RecoveredState &state);
+
   void ForeachChannel(std::function<void(ServerChannel*)> func);
 
   void RemoveAllUsersFor(ClientHandler *handler);
@@ -170,9 +197,11 @@ private:
   void IncomingQuery(const Discovery::Query &query,
                      const toolbelt::InetAddress &sender);
   void IncomingAdvertise(const Discovery::Advertise &advertise,
-                         const toolbelt::InetAddress &sender);
+                         const toolbelt::InetAddress &sender,
+                         const std::string &server_id);
   void IncomingSubscribe(const Discovery::Subscribe &subscribe,
-                         const toolbelt::InetAddress &sender);
+                         const toolbelt::InetAddress &sender,
+                         const std::string &server_id);
   void GratuitousAdvertiseCoroutine();
   absl::Status SendSubscribeMessage(const std::string &channel_name,
                                     bool reliable,
@@ -229,6 +258,8 @@ private:
   int initial_ordinal_ = 1;
 
   bool wait_for_clients_ = false;
+  bool simulate_crash_ = false;
+  bool cleanup_filesystem_ = false;
 
   // In tests we will load a plugin while the server is running.  This needs a
   // lock.
@@ -238,6 +269,9 @@ private:
   toolbelt::TriggerFd shutdown_trigger_fd_;
   std::string machine_name_;
   bool publish_server_channels_ = true;
+
+  std::unique_ptr<ShadowReplicator> primary_shadow_replicator_;
+  std::unique_ptr<ShadowReplicator> secondary_shadow_replicator_;
 };
 
 } // namespace subspace
