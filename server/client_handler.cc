@@ -377,7 +377,7 @@ void ClientHandler::HandleCreatePublisher(
       }
     }
 
-    server_->ForEachShadow([&](ShadowReplicator *shadow) {
+    server_->ForEachShadow([&](const std::unique_ptr<ShadowReplicator> &shadow) {
       shadow->SendAddPublisher(channel->Name(), pub);
     });
 
@@ -552,7 +552,7 @@ void ClientHandler::HandleCreateSubscriber(
 
   if (!reclaimed) {
     server_->OnNewSubscriber(channel->Name(), sub->GetId());
-    server_->ForEachShadow([&](ShadowReplicator *shadow) {
+    server_->ForEachShadow([&](const std::unique_ptr<ShadowReplicator> &shadow) {
       shadow->SendAddSubscriber(channel->Name(), sub);
     });
     server_->SendChannelDirectory();

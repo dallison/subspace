@@ -340,14 +340,16 @@ void ServerChannel::RemoveUser(Server *server, int user_id) {
   }
   if (user->IsPublisher()) {
     server->OnRemovePublisher(Name(), user->GetId());
-    server->ForEachShadow([this, &user](ShadowReplicator *shadow) {
-      shadow->SendRemovePublisher(Name(), user->GetId());
-    });
+    server->ForEachShadow(
+        [this, &user](const std::unique_ptr<ShadowReplicator> &shadow) {
+          shadow->SendRemovePublisher(Name(), user->GetId());
+        });
   } else {
     server->OnRemoveSubscriber(Name(), user->GetId());
-    server->ForEachShadow([this, &user](ShadowReplicator *shadow) {
-      shadow->SendRemoveSubscriber(Name(), user->GetId());
-    });
+    server->ForEachShadow(
+        [this, &user](const std::unique_ptr<ShadowReplicator> &shadow) {
+          shadow->SendRemoveSubscriber(Name(), user->GetId());
+        });
   }
   CleanupSlots(user->GetId(), user->IsReliable(), user->IsPublisher(),
                GetVirtualChannelId());
