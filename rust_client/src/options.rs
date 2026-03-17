@@ -9,6 +9,7 @@ pub struct PublisherOptions {
     pub local: bool,
     pub reliable: bool,
     pub bridge: bool,
+    pub for_tunnel: bool,
     pub fixed_size: bool,
     pub channel_type: String,
     pub activate: bool,
@@ -28,6 +29,7 @@ impl Default for PublisherOptions {
             local: false,
             reliable: false,
             bridge: false,
+            for_tunnel: false,
             fixed_size: false,
             channel_type: String::new(),
             activate: false,
@@ -81,6 +83,11 @@ impl PublisherOptions {
         self
     }
 
+    pub fn set_for_tunnel(mut self, v: bool) -> Self {
+        self.for_tunnel = v;
+        self
+    }
+
     pub fn set_mux(mut self, m: String) -> Self {
         self.mux = m;
         self
@@ -121,6 +128,7 @@ impl PublisherOptions {
 pub struct SubscriberOptions {
     pub reliable: bool,
     pub bridge: bool,
+    pub for_tunnel: bool,
     pub channel_type: String,
     pub max_active_messages: i32,
     pub log_dropped_messages: bool,
@@ -138,6 +146,7 @@ impl Default for SubscriberOptions {
         Self {
             reliable: false,
             bridge: false,
+            for_tunnel: false,
             channel_type: String::new(),
             max_active_messages: 1,
             log_dropped_messages: true,
@@ -184,6 +193,11 @@ impl SubscriberOptions {
 
     pub fn set_bridge(mut self, v: bool) -> Self {
         self.bridge = v;
+        self
+    }
+
+    pub fn set_for_tunnel(mut self, v: bool) -> Self {
+        self.for_tunnel = v;
         self
     }
 

@@ -55,6 +55,7 @@ A thin C layer over the C++ API using opaque `void*` pointers and thread-local e
 - **Coroutine support** — the client can yield when waiting for slots/messages (uses the `co` library).
 - **Checksums** — optional message integrity verification using CRC32 by default, with support for arbitrary-sized checksums via callbacks.  The `checksum_size` and `metadata_size` publisher options control the prefix layout; user metadata can be attached to each message through `GetMetadata()`.  See [Checksums and User Metadata](checksums-and-metadata.md) for details.
 - **Bridging** — forwards channels between servers over TCP for cross-machine communication.
+- **Tunnel support** — the `for_tunnel` publisher/subscriber option marks messages with the `kMessageCrossMachine` flag in the `MessagePrefix`, allowing external tunnel processes to distinguish locally and remotely generated messages.
 
 ## Summary
 
