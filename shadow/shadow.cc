@@ -31,7 +31,7 @@ absl::Status Shadow::Run() {
     return status;
   }
 
-  logger_.Log(toolbelt::LogLevel::kInfo, "Shadow listening on %s",
+  logger_.Log(toolbelt::LogLevel::kDebug, "Shadow listening on %s",
               socket_name_.c_str());
 
   NotifyEvent();
@@ -51,7 +51,7 @@ void Shadow::ListenerCoroutine() {
       break;
     }
 
-    logger_.Log(toolbelt::LogLevel::kInfo,
+    logger_.Log(toolbelt::LogLevel::kDebug,
                 "Shadow accepted connection from server");
 
     auto client =
@@ -81,7 +81,7 @@ void Shadow::ClientCoroutine(
       break;
     }
     if (receive_buffer->empty()) {
-      logger_.Log(toolbelt::LogLevel::kInfo, "Server disconnected");
+      logger_.Log(toolbelt::LogLevel::kDebug, "Server disconnected");
       break;
     }
 
@@ -116,7 +116,7 @@ void Shadow::ClientCoroutine(
     NotifyEvent();
   }
 
-  logger_.Log(toolbelt::LogLevel::kInfo,
+  logger_.Log(toolbelt::LogLevel::kDebug,
               "Shadow waiting for new server connection");
 }
 
@@ -156,7 +156,7 @@ absl::Status Shadow::HandleInit(const ShadowInit &msg,
 
   channels_.clear();
 
-  logger_.Log(toolbelt::LogLevel::kInfo, "Shadow: init session_id=%lu",
+  logger_.Log(toolbelt::LogLevel::kDebug, "Shadow: init session_id=%lu",
               session_id_);
   return absl::OkStatus();
 }
@@ -187,7 +187,7 @@ Shadow::HandleCreateChannel(const ShadowCreateChannel &msg,
       .bcb_fd = std::move(fds[1]),
   };
 
-  logger_.Log(toolbelt::LogLevel::kInfo,
+  logger_.Log(toolbelt::LogLevel::kDebug,
               "Shadow: create channel '%s' id=%d slots=%d/%d",
               ch.name.c_str(), ch.channel_id, ch.num_slots, ch.slot_size);
 
@@ -197,7 +197,7 @@ Shadow::HandleCreateChannel(const ShadowCreateChannel &msg,
 
 absl::Status
 Shadow::HandleRemoveChannel(const ShadowRemoveChannel &msg) {
-  logger_.Log(toolbelt::LogLevel::kInfo, "Shadow: remove channel '%s' id=%d",
+  logger_.Log(toolbelt::LogLevel::kDebug, "Shadow: remove channel '%s' id=%d",
               msg.channel_name().c_str(), msg.channel_id());
 
   channels_.erase(msg.channel_name());
@@ -228,6 +228,7 @@ Shadow::HandleAddPublisher(const ShadowAddPublisher &msg,
       .is_reliable = msg.is_reliable(),
       .is_local = msg.is_local(),
       .is_bridge = msg.is_bridge(),
+      .for_tunnel = msg.for_tunnel(),
       .is_fixed_size = msg.is_fixed_size(),
       .notify_retirement = msg.notify_retirement(),
       .poll_fd = std::move(fds[0]),
@@ -238,7 +239,7 @@ Shadow::HandleAddPublisher(const ShadowAddPublisher &msg,
                                                      : toolbelt::FileDescriptor(),
   };
 
-  logger_.Log(toolbelt::LogLevel::kInfo,
+  logger_.Log(toolbelt::LogLevel::kDebug,
               "Shadow: add publisher '%s' pub_id=%d reliable=%d",
               msg.channel_name().c_str(), pub.id, pub.is_reliable);
 
@@ -253,7 +254,7 @@ Shadow::HandleRemovePublisher(const ShadowRemovePublisher &msg) {
     return absl::OkStatus();
   }
 
-  logger_.Log(toolbelt::LogLevel::kInfo,
+  logger_.Log(toolbelt::LogLevel::kDebug,
               "Shadow: remove publisher '%s' pub_id=%d",
               msg.channel_name().c_str(), msg.publisher_id());
 
@@ -281,12 +282,13 @@ Shadow::HandleAddSubscriber(const ShadowAddSubscriber &msg,
       .id = msg.subscriber_id(),
       .is_reliable = msg.is_reliable(),
       .is_bridge = msg.is_bridge(),
+      .for_tunnel = msg.for_tunnel(),
       .max_active_messages = msg.max_active_messages(),
       .trigger_fd = std::move(fds[0]),
       .poll_fd = std::move(fds[1]),
   };
 
-  logger_.Log(toolbelt::LogLevel::kInfo,
+  logger_.Log(toolbelt::LogLevel::kDebug,
               "Shadow: add subscriber '%s' sub_id=%d reliable=%d",
               msg.channel_name().c_str(), sub.id, sub.is_reliable);
 
@@ -301,7 +303,7 @@ Shadow::HandleRemoveSubscriber(const ShadowRemoveSubscriber &msg) {
     return absl::OkStatus();
   }
 
-  logger_.Log(toolbelt::LogLevel::kInfo,
+  logger_.Log(toolbelt::LogLevel::kDebug,
               "Shadow: remove subscriber '%s' sub_id=%d",
               msg.channel_name().c_str(), msg.subscriber_id());
 
@@ -387,6 +389,7 @@ absl::Status Shadow::SendStateDump(toolbelt::UnixSocket &socket) {
       msg->set_is_reliable(pub.is_reliable);
       msg->set_is_local(pub.is_local);
       msg->set_is_bridge(pub.is_bridge);
+      msg->set_for_tunnel(pub.for_tunnel);
       msg->set_is_fixed_size(pub.is_fixed_size);
       msg->set_notify_retirement(pub.notify_retirement);
 
@@ -410,6 +413,7 @@ absl::Status Shadow::SendStateDump(toolbelt::UnixSocket &socket) {
       msg->set_subscriber_id(sub.id);
       msg->set_is_reliable(sub.is_reliable);
       msg->set_is_bridge(sub.is_bridge);
+      msg->set_for_tunnel(sub.for_tunnel);
       msg->set_max_active_messages(sub.max_active_messages);
 
       std::vector<toolbelt::FileDescriptor> fds;
@@ -430,7 +434,7 @@ absl::Status Shadow::SendStateDump(toolbelt::UnixSocket &socket) {
     }
   }
 
-  logger_.Log(toolbelt::LogLevel::kInfo,
+  logger_.Log(toolbelt::LogLevel::kDebug,
               "Shadow: sent state dump (session_id=%lu, %d channels)",
               session_id_, static_cast<int>(channels_.size()));
   return absl::OkStatus();

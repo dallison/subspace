@@ -42,6 +42,8 @@ struct ChannelInfo {
   int num_subscribers;
   int num_bridge_pubs;
   int num_bridge_subs;
+  int num_tunnel_pubs;
+  int num_tunnel_subs;
   std::string type;
   uint64_t slot_size;
   int num_slots;
@@ -762,6 +764,7 @@ public:
   bool IsReliable() const { return impl_->IsReliable(); }
   bool IsLocal() const { return impl_->IsLocal(); }
   bool IsFixedSize() const { return impl_->IsFixedSize(); }
+  bool ForTunnel() const { return impl_->ForTunnel(); }
 
   int32_t SlotSize() const { return impl_->SlotSize(); }
   int32_t NumSlots() const { return impl_->NumSlots(); }
@@ -1111,6 +1114,7 @@ public:
   int64_t CurrentOrdinal() const { return impl_->CurrentOrdinal(); }
   int64_t Timestamp() const { return impl_->Timestamp(); }
   bool IsReliable() const { return impl_->IsReliable(); }
+  bool ForTunnel() const { return impl_->ForTunnel(); }
 
   int32_t SlotSize() const { return impl_->SlotSize(); }
   int32_t NumSlots() const { return impl_->NumSlots(); }

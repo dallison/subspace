@@ -748,7 +748,7 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
     for (auto &rpub : rch.publishers) {
       auto pub = std::make_unique<PublisherUser>(
           nullptr, rpub.id, rpub.is_reliable, rpub.is_local, rpub.is_bridge,
-          rpub.is_fixed_size);
+          rpub.for_tunnel, rpub.is_fixed_size);
 
       toolbelt::TriggerFd tfd(rpub.poll_fd, rpub.trigger_fd);
       pub->SetTriggerFd(std::move(tfd));
@@ -766,7 +766,7 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
     for (auto &rsub : rch.subscribers) {
       auto sub = std::make_unique<SubscriberUser>(
           nullptr, rsub.id, rsub.is_reliable, rsub.is_bridge,
-          rsub.max_active_messages);
+          rsub.for_tunnel, rsub.max_active_messages);
 
       toolbelt::TriggerFd tfd(rsub.trigger_fd, rsub.poll_fd);
       sub->SetTriggerFd(std::move(tfd));
@@ -1789,8 +1789,10 @@ void Server::IncomingAdvertise(const Discovery::Advertise &advertise,
                                        server_id);
 
     int num_pubs, num_subs, num_bridge_pubs, num_bridge_subs;
+    int num_tunnel_pubs, num_tunnel_subs;
     channel->second->CountUsers(num_pubs, num_subs, num_bridge_pubs,
-                                num_bridge_subs);
+                                num_bridge_subs, num_tunnel_pubs,
+                                num_tunnel_subs);
     if (num_subs > 0) {
       SubscribeOverBridge(channel->second.get(), advertise.reliable(), sender);
     }

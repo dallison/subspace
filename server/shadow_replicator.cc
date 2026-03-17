@@ -120,6 +120,7 @@ void ShadowReplicator::SendAddPublisher(const std::string &channel_name,
   msg->set_is_reliable(pub->IsReliable());
   msg->set_is_local(pub->IsLocal());
   msg->set_is_bridge(pub->IsBridge());
+  msg->set_for_tunnel(pub->ForTunnel());
   msg->set_is_fixed_size(pub->IsFixedSize());
 
   std::vector<toolbelt::FileDescriptor> fds;
@@ -154,6 +155,7 @@ void ShadowReplicator::SendAddSubscriber(const std::string &channel_name,
   msg->set_subscriber_id(sub->GetId());
   msg->set_is_reliable(sub->IsReliable());
   msg->set_is_bridge(sub->IsBridge());
+  msg->set_for_tunnel(sub->ForTunnel());
   msg->set_max_active_messages(sub->MaxActiveMessages());
 
   std::vector<toolbelt::FileDescriptor> fds;
@@ -300,6 +302,7 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
           .is_reliable = msg.is_reliable(),
           .is_local = msg.is_local(),
           .is_bridge = msg.is_bridge(),
+          .for_tunnel = msg.for_tunnel(),
           .is_fixed_size = msg.is_fixed_size(),
           .notify_retirement = msg.notify_retirement(),
           .poll_fd = std::move(fds[0]),
@@ -327,6 +330,7 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
           .id = msg.subscriber_id(),
           .is_reliable = msg.is_reliable(),
           .is_bridge = msg.is_bridge(),
+          .for_tunnel = msg.for_tunnel(),
           .max_active_messages = msg.max_active_messages(),
           .trigger_fd = std::move(fds[0]),
           .poll_fd = std::move(fds[1]),

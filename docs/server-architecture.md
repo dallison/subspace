@@ -39,7 +39,7 @@ The server is only involved in **setup and teardown** — once channels are esta
 | `CreateSubscriber` | Creates/registers a subscriber on a channel |
 | `RemovePublisher` / `RemoveSubscriber` | Removes users from a channel |
 | `GetTriggers` | Returns trigger FDs for a channel |
-| `GetChannelInfo` / `GetChannelStats` | Returns channel metadata |
+| `GetChannelInfo` / `GetChannelStats` | Returns channel metadata (includes bridge and tunnel user counts) |
 
 ## Channel Creation and Management
 
@@ -99,7 +99,7 @@ Each channel requires three shared memory regions, created via `shm_open()` (POS
 ### Adding a Publisher
 
 1. Allocate a user ID from the channel's `user_ids_` bitset.
-2. Create a `PublisherUser` with reliability/local/bridge flags.
+2. Create a `PublisherUser` with reliability/local/bridge/tunnel flags.
 3. Initialize a trigger FD for reliable publishers.
 4. Update SCB counters.
 5. Return the publisher ID and file descriptors (CCB, BCB, trigger, poll, retirement FDs).
@@ -164,6 +164,7 @@ Server
 - **Discovery-based bridging** — UDP for lightweight discovery, TCP for reliable data transfer. Supports IPv4 and virtual addresses (VSOCK).
 - **Capacity management** — unreliable channels check capacity before adding subscribers to prevent buffer exhaustion.
 - **Retirement tracking** — for reliable channels, tracks message lifetimes across bridges to prevent premature slot reuse.
+- **Tunnel tracking** — publishers and subscribers can be flagged as tunnel endpoints (`for_tunnel`). The server tracks tunnel user counts separately and reports them via `GetChannelInfo` (`num_tunnel_pubs`, `num_tunnel_subs`), allowing monitoring tools to distinguish between local, bridged, and tunneled users.
 - **Plugin system** — loadable modules with callbacks (OnReady, OnNewChannel, OnNewPublisher, etc.) for extensibility.
 
 ## File Structure
