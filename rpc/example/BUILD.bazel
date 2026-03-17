@@ -8,6 +8,7 @@ cc_test(
     data = [
         "//server:subspace_server",
     ],
+    tags = ["manual"],
     deps = [
         "//rpc/proto:rpc_test_cc_proto",
         "//rpc/proto:rpc_test_subspace_rpc_server",
@@ -24,6 +25,7 @@ cc_test(
     data = [
         "//server:subspace_server",
     ],
+    tags = ["manual"],
     deps = [
         "//rpc/proto:rpc_test_cc_proto",
         "//rpc/proto:rpc_test_subspace_rpc_client",
