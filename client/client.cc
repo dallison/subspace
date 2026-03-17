@@ -901,7 +901,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
         it->second(subscriber, drops);
       }
       subscriber->RecordDroppedMessages(drops);
-      if (false && subscriber->options_.log_dropped_messages) {
+      if (subscriber->options_.log_dropped_messages) {
         logger_.Log(toolbelt::LogLevel::kWarning,
                     "Dropped %d message%s on channel %s", drops,
                     drops == 1 ? "" : "s", subscriber->Name().c_str());

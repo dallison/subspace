@@ -144,9 +144,6 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
       // We are guaranteed to find a slot, but let's not go into an infinite
       // loop if something goes wrong.
       if (retries-- == 0) {
-        std::string details = absl::StrFormat("1 Failed to find a free slot for publisher %s num subscribers: %d\n", Name(), NumSubscribers(-1));
-        std::cerr << details;
-        DumpSlots(std::cout);
         return nullptr;
       }
       continue;
@@ -172,10 +169,6 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
     }
     if (++cas_retries >= max_cas_retries) {
       // Rather than spinning forever, let's just give up and return nullptr.
-      std::string details = absl::StrFormat("2 Failed to find a new slot for publisher %s num subscribers: %d\n", Name(), NumSubscribers(-1));
-      std::cerr << details;
-      DumpSlots(std::cerr);
-      abort();
       return nullptr;
     }
   }
