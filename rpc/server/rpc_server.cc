@@ -31,7 +31,8 @@ RpcServer::RpcServer(std::string service_name,
 
 void RpcServer::Stop() {
   running_ = false;
-  interrupt_pipe_.Close();
+  char buf = 1;
+  (void)::write(interrupt_pipe_.WriteFd().Fd(), &buf, 1);
 }
 
 absl::Status RpcServer::RegisterMethod(
