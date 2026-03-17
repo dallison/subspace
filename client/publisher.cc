@@ -155,7 +155,6 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
     uint64_t expected = BuildRefsBitField(
         slot->ordinal, (old_refs >> kVchanIdShift) & kVchanIdMask,
         (old_refs >> kRetiredRefsShift) & kRetiredRefsMask);
-    uint64_t old_expected = expected;
     if (slot->refs.compare_exchange_weak(expected, ref,
                                          std::memory_order_relaxed)) {
       if (!ValidateSlotBuffer(slot)) {
