@@ -8,12 +8,14 @@ cc_library(
         "server.cc",
         "client_handler.cc",
         "server_channel.cc",
+        "shadow_replicator.cc",
     ],
     hdrs = [
         "server.h",
         "client_handler.h",
         "server_channel.h",
         "plugin.h",
+        "shadow_replicator.h",
     ],
     deps = [
         "//common:subspace_common",

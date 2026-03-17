@@ -42,6 +42,8 @@ struct ChannelInfo {
   int num_subscribers;
   int num_bridge_pubs;
   int num_bridge_subs;
+  int num_tunnel_pubs;
+  int num_tunnel_subs;
   std::string type;
   uint64_t slot_size;
   int num_slots;
@@ -476,6 +478,25 @@ private:
   SendRequestReceiveResponse(const Request &req, Response &response,
                              std::vector<toolbelt::FileDescriptor> &fds);
 
+  absl::Status Reconnect();
+  absl::Status ReregisterPublisher(details::PublisherImpl *publisher);
+  absl::Status ReregisterSubscriber(details::SubscriberImpl *subscriber);
+
+  static void FillCreatePublisherRequest(CreatePublisherRequest *cmd,
+                                         const std::string &channel_name,
+                                         const PublisherOptions &opts,
+                                         int publisher_id);
+  void ApplyPublisherResponseFds(details::PublisherImpl *publisher,
+                                 const CreatePublisherResponse &resp,
+                                 std::vector<toolbelt::FileDescriptor> &fds);
+  static void FillCreateSubscriberRequest(CreateSubscriberRequest *cmd,
+                                          const std::string &channel_name,
+                                          const SubscriberOptions &opts,
+                                          int subscriber_id);
+  void ApplySubscriberResponseFds(details::SubscriberImpl *subscriber,
+                                  const CreateSubscriberResponse &resp,
+                                  std::vector<toolbelt::FileDescriptor> &fds);
+
   bool CheckReload(details::ClientChannel *channel);
 
   absl::Status ReloadSubscriber(details::SubscriberImpl *channel);
@@ -553,6 +574,8 @@ private:
   // the client is running as root and the server isn't
   int server_user_id_ = -1;
   int server_group_id_ = -1;
+  bool was_connected_ = false;
+  bool reconnecting_ = false;
 };
 
 // This function returns an subspace::shared_ptr that refers to the message
@@ -741,6 +764,7 @@ public:
   bool IsReliable() const { return impl_->IsReliable(); }
   bool IsLocal() const { return impl_->IsLocal(); }
   bool IsFixedSize() const { return impl_->IsFixedSize(); }
+  bool ForTunnel() const { return impl_->ForTunnel(); }
 
   int32_t SlotSize() const { return impl_->SlotSize(); }
   int32_t NumSlots() const { return impl_->NumSlots(); }
@@ -1090,6 +1114,7 @@ public:
   int64_t CurrentOrdinal() const { return impl_->CurrentOrdinal(); }
   int64_t Timestamp() const { return impl_->Timestamp(); }
   bool IsReliable() const { return impl_->IsReliable(); }
+  bool ForTunnel() const { return impl_->ForTunnel(); }
 
   int32_t SlotSize() const { return impl_->SlotSize(); }
   int32_t NumSlots() const { return impl_->NumSlots(); }

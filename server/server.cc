@@ -1,5 +1,6 @@
 // Copyright 2023-2026 David Allison
 // All Rights Reserved
+// Shadow support is Copyright 2026 Cruise LLC
 // See LICENSE file for licensing information.
 
 #include "server/server.h"
@@ -308,6 +309,7 @@ absl::Status Server::Run() {
   remove(socket_name_.c_str());
 #endif
   session_id_ = AllocateSessionId();
+  uint64_t instance_nonce_ = session_id_;
 
   toolbelt::UnixSocket listen_socket;
   absl::Status status = listen_socket.Bind(socket_name_, true);
@@ -322,13 +324,146 @@ absl::Status Server::Run() {
   }
   OnReady();
 
-  absl::StatusOr<SystemControlBlock *> scb = CreateSystemControlBlock(scb_fd_);
-  if (!scb.ok()) {
-    return absl::InternalError(absl::StrFormat(
-        "Failed to create SystemControlBlock in shared memory: %s",
-        scb.status().ToString().c_str()));
+  bool recovered = false;
+  bool primary_connected = false;
+  bool secondary_connected = false;
+
+  // Helper to attempt recovery from a single shadow replicator.
+  auto try_recover_from = [this](const std::unique_ptr<ShadowReplicator> &replicator,
+                               const char *label) -> bool {
+    absl::Status status = replicator->Connect();
+    if (!status.ok()) {
+      logger_.Log(toolbelt::LogLevel::kWarning,
+                  "Failed to connect to %s shadow: %s", label,
+                  status.ToString().c_str());
+      return false;
+    }
+    absl::StatusOr<RecoveredState> state = replicator->ReceiveStateDump();
+    if (!state.ok()) {
+      logger_.Log(toolbelt::LogLevel::kWarning,
+                  "Failed to receive state dump from %s shadow: %s", label,
+                  state.status().ToString().c_str());
+      return false;
+    }
+    if (state->session_id == 0 || !state->scb_fd.Valid()) {
+      return false;
+    }
+
+    // Restore the original session_id so that buffer shared memory
+    // file names remain consistent with the files already on disk.
+    session_id_ = state->session_id;
+
+    scb_fd_ = std::move(state->scb_fd);
+    scb_ = reinterpret_cast<SystemControlBlock *>(
+        MapMemory(scb_fd_.Fd(), sizeof(SystemControlBlock),
+                  PROT_READ | PROT_WRITE, "SCB"));
+    if (scb_ == MAP_FAILED) {
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to map recovered SCB from %s shadow", label);
+      return false;
+    }
+    absl::Status rs = RecoverFromShadow(*state);
+    if (!rs.ok()) {
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to recover from %s shadow: %s", label,
+                  rs.ToString().c_str());
+      return false;
+    }
+    logger_.Log(toolbelt::LogLevel::kInfo,
+                "Recovered %d channels from %s shadow (session_id=%lu)",
+                static_cast<int>(state->channels.size()), label,
+                state->session_id);
+    return true;
+  };
+
+  // Phase 1: Try primary shadow.
+  if (primary_shadow_replicator_ != nullptr) {
+    if (try_recover_from(primary_shadow_replicator_, "primary")) {
+      recovered = true;
+    }
+    primary_connected = primary_shadow_replicator_->Connected();
   }
-  scb_ = *scb;
+
+  // Phase 2: If not recovered, try secondary shadow.
+  if (!recovered && secondary_shadow_replicator_ != nullptr) {
+    if (try_recover_from(secondary_shadow_replicator_, "secondary")) {
+      recovered = true;
+    }
+    secondary_connected = secondary_shadow_replicator_->Connected();
+  }
+
+  // Phase 3: If still not recovered, create a fresh SCB.
+  if (!recovered) {
+    if (cleanup_filesystem_) {
+      CleanupFilesystem();
+    }
+    absl::StatusOr<SystemControlBlock *> scb =
+        CreateSystemControlBlock(scb_fd_);
+    if (!scb.ok()) {
+      return absl::InternalError(absl::StrFormat(
+          "Failed to create SystemControlBlock in shared memory: %s",
+          scb.status().ToString().c_str()));
+    }
+    scb_ = *scb;
+  }
+
+  // Connect any shadow that wasn't tried during recovery so it can
+  // receive the re-replication.
+  if (!primary_connected && primary_shadow_replicator_ != nullptr) {
+    if (primary_shadow_replicator_->Connect().ok()) {
+      primary_connected = true;
+      // Drain the state dump so the shadow is ready for new events.
+      if (auto s = primary_shadow_replicator_->ReceiveStateDump(); !s.ok()) {
+        logger_.Log(toolbelt::LogLevel::kError,
+                    "Failed to receive state dump from primary shadow: %s",
+                    s.status().ToString().c_str());
+      }
+    }
+  }
+  if (!secondary_connected && secondary_shadow_replicator_ != nullptr) {
+    if (secondary_shadow_replicator_->Connect().ok()) {
+      secondary_connected = true;
+      if (auto s = secondary_shadow_replicator_->ReceiveStateDump(); !s.ok()) {
+        logger_.Log(toolbelt::LogLevel::kError,
+                    "Failed to receive state dump from secondary shadow: %s",
+                    s.status().ToString().c_str());
+      }
+    }
+  }
+
+  // Phase 4: Send init and re-replicate recovered state to all connected
+  // shadows.
+  auto replicate_to_shadow = [this, recovered](const std::unique_ptr<ShadowReplicator> &shadow) {
+    shadow->SendInit(session_id_, scb_fd_);
+    if (recovered) {
+      for (auto &[name, ch] : channels_) {
+        shadow->SendCreateChannel(ch.get());
+        for (auto &[uid, user] : ch->GetUsers()) {
+          if (user == nullptr) {
+            continue;
+          }
+          if (user->IsPublisher()) {
+            shadow->SendAddPublisher(
+                name, static_cast<PublisherUser *>(user.get()));
+          } else if (user->IsSubscriber()) {
+            shadow->SendAddSubscriber(
+                name, static_cast<SubscriberUser *>(user.get()));
+          }
+        }
+      }
+    }
+  };
+
+  if (primary_connected) {
+    replicate_to_shadow(primary_shadow_replicator_);
+    logger_.Log(toolbelt::LogLevel::kInfo,
+                "Connected to primary shadow process");
+  }
+  if (secondary_connected) {
+    replicate_to_shadow(secondary_shadow_replicator_);
+    logger_.Log(toolbelt::LogLevel::kInfo,
+                "Connected to secondary shadow process");
+  }
 
   // Create the trigger fd for sending the channel directory.
   if (absl::Status s = channel_directory_trigger_fd_.Open(); !s.ok()) {
@@ -347,8 +482,11 @@ absl::Status Server::Run() {
     hostname_ = hostname;
   }
 
-  // Make a unique server id to identify this server.
-  server_id_ = absl::StrFormat("%s.%s.%d", hostname, socket_name_, getpid());
+  // Make a unique server id to identify this server.  Include the instance
+  // nonce (allocated fresh every Run() call) so that a restarted server gets
+  // a different id even within the same process.
+  server_id_ = absl::StrFormat("%s.%s.%d.%lu", hostname, socket_name_, getpid(),
+                               instance_nonce_);
 
   if (!local_) {
     // Find the IP and broadcast IPv4 addresses based on the interface supplied
@@ -425,6 +563,17 @@ absl::Status Server::Run() {
     scheduler_.Spawn([this]() { GratuitousAdvertiseCoroutine(); },
                      {.name = "Gratuitous advertiser",
                       .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+
+    // If we recovered channels, immediately advertise them so that
+    // bridges can be re-established without waiting for the first
+    // gratuitous advertise cycle.
+    if (recovered) {
+      for (auto &[name, ch] : channels_) {
+        if (!ch->IsLocal() && !ch->IsBridgePublisher()) {
+          SendAdvertise(name, ch->IsReliable());
+        }
+      }
+    }
   }
 
   // Run the coroutine main loop.
@@ -522,6 +671,9 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
     // The channels_ map owns all the server channels.
     channels_.emplace(std::make_pair(channel_name, std::move(*vchan)));
     OnNewChannel(channel_name);
+    ForEachShadow([channel](const std::unique_ptr<ShadowReplicator> &s) {
+      s->SendCreateChannel(channel);
+    });
     return channel;
   }
 
@@ -543,6 +695,9 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
   channel->SetSharedMemoryFds(std::move(*fds));
   channels_.emplace(std::make_pair(channel_name, channel));
   OnNewChannel(channel_name);
+  ForEachShadow([channel](const std::unique_ptr<ShadowReplicator> &s) {
+    s->SendCreateChannel(channel);
+  });
 
   return channel;
 }
@@ -581,9 +736,72 @@ ServerChannel *Server::FindChannel(const std::string &channel_name) {
   return it->second.get();
 }
 
+absl::Status Server::RecoverFromShadow(RecoveredState &state) {
+  for (auto &rch : state.channels) {
+    channel_ids_.Set(rch.channel_id);
+
+    auto *channel = new ServerChannel(rch.channel_id, rch.name, rch.num_slots,
+                                      rch.type, false, session_id_);
+    channel->SetDebug(logger_.GetLogLevel() <=
+                      toolbelt::LogLevel::kVerboseDebug);
+    channel->SetLastKnownSlotSize(rch.slot_size);
+    channel->SetChecksumSize(rch.checksum_size);
+    channel->SetMetadataSize(rch.metadata_size);
+
+    if (absl::Status s =
+            channel->MapExisting(scb_fd_, std::move(rch.ccb_fd),
+                                 std::move(rch.bcb_fd));
+        !s.ok()) {
+      return s;
+    }
+
+    for (auto &rpub : rch.publishers) {
+      auto pub = std::make_unique<PublisherUser>(
+          nullptr, rpub.id, rpub.is_reliable, rpub.is_local, rpub.is_bridge,
+          rpub.for_tunnel, rpub.is_fixed_size);
+
+      toolbelt::TriggerFd tfd(rpub.poll_fd, rpub.trigger_fd);
+      pub->SetTriggerFd(std::move(tfd));
+
+      if (rpub.notify_retirement) {
+        toolbelt::Pipe pipe;
+        pipe.ReadFd() = std::move(rpub.retirement_read_fd);
+        pipe.WriteFd() = std::move(rpub.retirement_write_fd);
+        pub->SetRetirementPipe(std::move(pipe));
+      }
+
+      channel->AddUser(rpub.id, std::move(pub));
+    }
+
+    for (auto &rsub : rch.subscribers) {
+      auto sub = std::make_unique<SubscriberUser>(
+          nullptr, rsub.id, rsub.is_reliable, rsub.is_bridge,
+          rsub.for_tunnel, rsub.max_active_messages);
+
+      toolbelt::TriggerFd tfd(rsub.trigger_fd, rsub.poll_fd);
+      sub->SetTriggerFd(std::move(tfd));
+
+      channel->AddUser(rsub.id, std::move(sub));
+    }
+
+    channels_.emplace(rch.name, channel);
+    logger_.Log(toolbelt::LogLevel::kInfo,
+                "Recovered channel '%s' (id=%d, %d pubs, %d subs)",
+                rch.name.c_str(), rch.channel_id,
+                static_cast<int>(rch.publishers.size()),
+                static_cast<int>(rch.subscribers.size()));
+  }
+  return absl::OkStatus();
+}
+
 void Server::RemoveChannel(ServerChannel *channel) {
   OnRemoveChannel(channel->Name());
-  channel->RemoveBuffer(session_id_);
+  ForEachShadow([channel](const std::unique_ptr<ShadowReplicator> &s) {
+    s->SendRemoveChannel(channel->Name(), channel->GetChannelId());
+  });
+  if (!simulate_crash_) {
+    channel->RemoveBuffer(session_id_);
+  }
   channel_ids_.Clear(channel->GetChannelId());
   auto it = channels_.find(channel->Name());
   if (it == channels_.end()) {
@@ -836,10 +1054,10 @@ void Server::DiscoveryReceiverCoroutine() {
       IncomingQuery(disc.query(), sender);
       break;
     case Discovery::kAdvertise:
-      IncomingAdvertise(disc.advertise(), sender);
+      IncomingAdvertise(disc.advertise(), sender, disc.server_id());
       break;
     case Discovery::kSubscribe:
-      IncomingSubscribe(disc.subscribe(), sender);
+      IncomingSubscribe(disc.subscribe(), sender, disc.server_id());
       break;
     default:
       break;
@@ -1205,6 +1423,19 @@ Server::SendSubscribeMessage(const std::string &channel_name, bool reliable,
 void Server::BridgeReceiverCoroutine(std::string channel_name,
                                      bool sub_reliable,
                                      toolbelt::InetAddress publisher) {
+  struct BridgeGuard {
+    Server *server;
+    const std::string &channel_name;
+    const toolbelt::InetAddress &publisher;
+    bool sub_reliable;
+    ~BridgeGuard() {
+      auto it = server->channels_.find(channel_name);
+      if (it != server->channels_.end()) {
+        it->second->RemoveBridgedAddress(publisher, sub_reliable);
+      }
+    }
+  } bridge_guard{this, channel_name, publisher, sub_reliable};
+
   // Open a listening TCP socket on a free port.
   logger_.Log(toolbelt::LogLevel::kDebug, "BridgeReceiverCoroutine running");
   char buffer[kDiscoveryBufferSize];
@@ -1466,7 +1697,6 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
 
   logger_.Log(toolbelt::LogLevel::kDebug,
               "Bridge receiver coroutine terminating");
-  // Socket has been closed, we're done.
 }
 
 // This coroutine receives retirement notifications from the bridge publisher
@@ -1547,26 +1777,32 @@ void Server::IncomingQuery(const Discovery::Query &query,
 }
 
 void Server::IncomingAdvertise(const Discovery::Advertise &advertise,
-                               const toolbelt::InetAddress &sender) {
+                               const toolbelt::InetAddress &sender,
+                               const std::string &server_id) {
   // Do I want to subscribe to this channel?
   auto channel = channels_.find(advertise.channel_name());
   if (channel != channels_.end()) {
-    if (channel->second->IsBridged(sender, advertise.reliable())) {
-      // Already bridged to this sender.
+    if (channel->second->IsBridged(sender, advertise.reliable(), server_id)) {
+      // Already bridged to this sender with the same server instance.
       logger_.Log(toolbelt::LogLevel::kDebug,
                   "Channel %s is already bridged to this address",
                   advertise.channel_name().c_str());
       return;
     }
     if (channel->second->IsBridgeSubscriber()) {
-      // All the local subscribers are bridge subscribers.
       return;
     }
-    channel->second->AddBridgedAddress(sender, advertise.reliable());
+    // Remove any stale bridge entry from a previous server instance
+    // before adding the new one.
+    channel->second->RemoveBridgedAddress(sender, advertise.reliable());
+    channel->second->AddBridgedAddress(sender, advertise.reliable(),
+                                       server_id);
 
     int num_pubs, num_subs, num_bridge_pubs, num_bridge_subs;
+    int num_tunnel_pubs, num_tunnel_subs;
     channel->second->CountUsers(num_pubs, num_subs, num_bridge_pubs,
-                                num_bridge_subs);
+                                num_bridge_subs, num_tunnel_pubs,
+                                num_tunnel_subs);
     if (num_subs > 0) {
       SubscribeOverBridge(channel->second.get(), advertise.reliable(), sender);
     }
@@ -1574,7 +1810,8 @@ void Server::IncomingAdvertise(const Discovery::Advertise &advertise,
 }
 
 void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
-                               const toolbelt::InetAddress &sender) {
+                               const toolbelt::InetAddress &sender,
+                               const std::string &server_id) {
   bool sub_reliable = subscribe.reliable();
 
   auto channel = channels_.find(subscribe.channel_name());
@@ -1582,8 +1819,8 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
     if (channel->second->IsLocal()) {
       return;
     }
-    if (channel->second->IsBridged(sender, sub_reliable)) {
-      // Already bridged to this sender.
+    if (channel->second->IsBridged(sender, sub_reliable, server_id)) {
+      // Already bridged to this sender with the same server instance.
       logger_.Log(toolbelt::LogLevel::kDebug,
                   "Channel %s is already bridged to this address",
                   subscribe.channel_name().c_str());
@@ -1593,7 +1830,8 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
     ServerChannel *ch = channel->second.get();
     bool pub_reliable = ch->IsReliable();
 
-    channel->second->AddBridgedAddress(sender, sub_reliable);
+    channel->second->RemoveBridgedAddress(sender, sub_reliable);
+    channel->second->AddBridgedAddress(sender, sub_reliable, server_id);
 
     // The subscribe message contains the IP address and port of the
     // socket listening for our connection for the channel.  Extract it.
@@ -1749,6 +1987,22 @@ void Server::OnRemoveSubscriber(const std::string &channel_name,
   std::lock_guard<std::mutex> lock(plugin_lock_);
   for (const auto &plugin : plugins_) {
     plugin->interface->OnRemoveSubscriber(*this, channel_name, subscriber_id);
+  }
+}
+
+void Server::SetShadowSocket(const std::string &socket_name) {
+  SetShadowSockets(socket_name, "");
+}
+
+void Server::SetShadowSockets(const std::string &primary,
+                               const std::string &secondary) {
+  if (!primary.empty()) {
+    primary_shadow_replicator_ =
+        std::make_unique<ShadowReplicator>(primary, logger_);
+  }
+  if (!secondary.empty()) {
+    secondary_shadow_replicator_ =
+        std::make_unique<ShadowReplicator>(secondary, logger_);
   }
 }
 

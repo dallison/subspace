@@ -13,7 +13,7 @@
 namespace subspace {
 
 ServerChannel::~ServerChannel() {
-  if (is_virtual_) {
+  if (is_virtual_ || skip_cleanup_) {
     return;
   }
   // Clear the channel counters in the SCB.
@@ -186,6 +186,39 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
   return fds;
 }
 
+absl::Status
+ServerChannel::MapExisting(const toolbelt::FileDescriptor &scb_fd,
+                           toolbelt::FileDescriptor ccb_fd,
+                           toolbelt::FileDescriptor bcb_fd) {
+  scb_ = reinterpret_cast<SystemControlBlock *>(MapMemory(
+      scb_fd.Fd(), sizeof(SystemControlBlock), PROT_READ | PROT_WRITE, "SCB"));
+  if (scb_ == MAP_FAILED) {
+    return absl::InternalError(absl::StrFormat(
+        "Failed to map recovered SCB: %s", strerror(errno)));
+  }
+
+  ccb_ = reinterpret_cast<ChannelControlBlock *>(MapMemory(
+      ccb_fd.Fd(), CcbSize(num_slots_), PROT_READ | PROT_WRITE, "CCB"));
+  if (ccb_ == MAP_FAILED) {
+    UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+    return absl::InternalError(absl::StrFormat(
+        "Failed to map recovered CCB: %s", strerror(errno)));
+  }
+
+  bcb_ = reinterpret_cast<BufferControlBlock *>(MapMemory(
+      bcb_fd.Fd(), sizeof(BufferControlBlock), PROT_READ | PROT_WRITE, "BCB"));
+  if (bcb_ == MAP_FAILED) {
+    UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+    UnmapMemory(ccb_, CcbSize(num_slots_), "CCB");
+    return absl::InternalError(absl::StrFormat(
+        "Failed to map recovered BCB: %s", strerror(errno)));
+  }
+
+  shared_memory_fds_ =
+      SharedMemoryFds(std::move(ccb_fd), std::move(bcb_fd));
+  return absl::OkStatus();
+}
+
 std::vector<toolbelt::FileDescriptor>
 ServerChannel::GetSubscriberTriggerFds() const {
   std::vector<toolbelt::FileDescriptor> r;
@@ -240,13 +273,15 @@ absl::StatusOr<int> ServerChannel::AllocateUserId(const char *type) {
 
 absl::StatusOr<PublisherUser *>
 ServerChannel::AddPublisher(ClientHandler *handler, bool is_reliable,
-                            bool is_local, bool is_bridge, bool is_fixed_size) {
+                            bool is_local, bool is_bridge, bool for_tunnel,
+                            bool is_fixed_size) {
   absl::StatusOr<int> user_id = AllocateUserId("publisher");
   if (!user_id.ok()) {
     return user_id.status();
   }
   std::unique_ptr<PublisherUser> pub = std::make_unique<PublisherUser>(
-      handler, *user_id, is_reliable, is_local, is_bridge, is_fixed_size);
+      handler, *user_id, is_reliable, is_local, is_bridge, for_tunnel,
+      is_fixed_size);
   absl::Status status = pub->Init();
   if (!status.ok()) {
     return status;
@@ -259,13 +294,15 @@ ServerChannel::AddPublisher(ClientHandler *handler, bool is_reliable,
 
 absl::StatusOr<SubscriberUser *>
 ServerChannel::AddSubscriber(ClientHandler *handler, bool is_reliable,
-                             bool is_bridge, int max_active_messages) {
+                             bool is_bridge, bool for_tunnel,
+                             int max_active_messages) {
   absl::StatusOr<int> user_id = AllocateUserId("subscriber");
   if (!user_id.ok()) {
     return user_id.status();
   }
   std::unique_ptr<SubscriberUser> sub = std::make_unique<SubscriberUser>(
-      handler, *user_id, is_reliable, is_bridge, max_active_messages);
+      handler, *user_id, is_reliable, is_bridge, for_tunnel,
+      max_active_messages);
   absl::Status status = sub->Init();
   if (!status.ok()) {
     return status;
@@ -303,8 +340,16 @@ void ServerChannel::RemoveUser(Server *server, int user_id) {
   }
   if (user->IsPublisher()) {
     server->OnRemovePublisher(Name(), user->GetId());
+    server->ForEachShadow(
+        [this, &user](const std::unique_ptr<ShadowReplicator> &shadow) {
+          shadow->SendRemovePublisher(Name(), user->GetId());
+        });
   } else {
     server->OnRemoveSubscriber(Name(), user->GetId());
+    server->ForEachShadow(
+        [this, &user](const std::unique_ptr<ShadowReplicator> &shadow) {
+          shadow->SendRemoveSubscriber(Name(), user->GetId());
+        });
   }
   CleanupSlots(user->GetId(), user->IsReliable(), user->IsPublisher(),
                GetVirtualChannelId());
@@ -339,9 +384,11 @@ void ServerChannel::RemoveAllUsersFor(ClientHandler *handler) {
 }
 
 void ServerChannel::CountUsers(int &num_pubs, int &num_subs,
-                               int &num_bridge_pubs,
-                               int &num_bridge_subs) const {
+                               int &num_bridge_pubs, int &num_bridge_subs,
+                               int &num_tunnel_pubs,
+                               int &num_tunnel_subs) const {
   num_pubs = num_subs = num_bridge_pubs = num_bridge_subs = 0;
+  num_tunnel_pubs = num_tunnel_subs = 0;
   for (auto &[id, user] : users_) {
     if (user == nullptr) {
       continue;
@@ -351,10 +398,16 @@ void ServerChannel::CountUsers(int &num_pubs, int &num_subs,
       if (user->IsBridge()) {
         num_bridge_pubs++;
       }
+      if (user->ForTunnel()) {
+        num_tunnel_pubs++;
+      }
     } else {
       num_subs++;
       if (user->IsBridge()) {
         num_bridge_subs++;
+      }
+      if (user->ForTunnel()) {
+        num_tunnel_subs++;
       }
     }
   }
@@ -452,7 +505,9 @@ ServerChannel::CapacityInfo ServerChannel::HasSufficientCapacityInternal(
   }
   // Count number of publishers and subscribers.
   int num_pubs, num_subs, num_bridge_pubs, num_bridge_subs;
-  CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs);
+  int num_tunnel_pubs, num_tunnel_subs;
+  CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs,
+             num_tunnel_pubs, num_tunnel_subs);
 
   // Add in the total active message maximums.
   int max_active_messages = new_max_active_messages;
@@ -496,11 +551,15 @@ void ServerChannel::GetChannelInfo(subspace::ChannelInfoProto *info) {
   info->set_type(Type());
 
   int num_pubs, num_subs, num_bridge_pubs, num_bridge_subs;
-  CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs);
+  int num_tunnel_pubs, num_tunnel_subs;
+  CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs,
+             num_tunnel_pubs, num_tunnel_subs);
   info->set_num_pubs(num_pubs);
   info->set_num_subs(num_subs);
   info->set_num_bridge_pubs(num_bridge_pubs);
   info->set_num_bridge_subs(num_bridge_subs);
+  info->set_num_tunnel_pubs(num_tunnel_pubs);
+  info->set_num_tunnel_subs(num_tunnel_subs);
 
   info->set_is_reliable(IsReliable());
   if (IsVirtual()) {
@@ -549,7 +608,9 @@ void ServerChannel::GetChannelStats(subspace::ChannelStatsProto *stats) {
   stats->set_total_drops(total_drops);
 
   int num_pubs, num_subs, num_bridge_pubs, num_bridge_subs;
-  CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs);
+  int num_tunnel_pubs, num_tunnel_subs;
+  CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs,
+             num_tunnel_pubs, num_tunnel_subs);
   stats->set_num_pubs(num_pubs);
   stats->set_num_subs(num_subs);
   stats->set_num_bridge_pubs(num_bridge_pubs);
@@ -561,6 +622,9 @@ ChannelCounters &ServerChannel::RecordUpdate(bool is_pub, bool add,
   SystemControlBlock *scb = GetScb();
   int channel_id = GetChannelId();
   ChannelCounters &counters = scb->counters[channel_id];
+  if (skip_cleanup_ && !add) {
+    return counters;
+  }
   int inc = add ? 1 : -1;
   if (is_pub) {
     SetNumUpdates(++counters.num_pub_updates);
@@ -610,28 +674,37 @@ void ChannelMultiplexer::RemoveVirtualChannel(VirtualChannel *vchan) {
 }
 
 void ChannelMultiplexer::CountUsers(int &num_pubs, int &num_subs,
-                                    int &num_bridge_pubs,
-                                    int &num_bridge_subs) const {
+                                    int &num_bridge_pubs, int &num_bridge_subs,
+                                    int &num_tunnel_pubs,
+                                    int &num_tunnel_subs) const {
   int total_pubs = 0;
   int total_subs = 0;
   int total_bridge_pubs = 0;
   int total_bridge_subs = 0;
+  int total_tunnel_pubs = 0;
+  int total_tunnel_subs = 0;
 
   for (auto vchan : virtual_channels_) {
     int vchan_pubs, vchan_subs, vchan_bridge_pubs, vchan_bridge_subs;
+    int vchan_tunnel_pubs, vchan_tunnel_subs;
     vchan->GetUserCount(vchan_pubs, vchan_subs, vchan_bridge_pubs,
-                        vchan_bridge_subs);
+                        vchan_bridge_subs, vchan_tunnel_pubs,
+                        vchan_tunnel_subs);
     total_pubs += vchan_pubs;
     total_subs += vchan_subs;
     total_bridge_pubs += vchan_bridge_pubs;
     total_bridge_subs += vchan_bridge_subs;
+    total_tunnel_pubs += vchan_tunnel_pubs;
+    total_tunnel_subs += vchan_tunnel_subs;
   }
   // Add the counts from the multiplexer itself.
   ServerChannel::CountUsers(num_pubs, num_subs, num_bridge_pubs,
-                            num_bridge_subs);
+                            num_bridge_subs, num_tunnel_pubs, num_tunnel_subs);
   num_pubs += total_pubs;
   num_subs += total_subs;
   num_bridge_pubs += total_bridge_pubs;
   num_bridge_subs += total_bridge_subs;
+  num_tunnel_pubs += total_tunnel_pubs;
+  num_tunnel_subs += total_tunnel_subs;
 }
 } // namespace subspace

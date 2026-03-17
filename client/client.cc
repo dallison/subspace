@@ -121,6 +121,7 @@ absl::Status ClientImpl::Init(const std::string &server_socket,
   session_id_ = resp.init().session_id();
   server_user_id_ = resp.init().user_id();
   server_group_id_ = resp.init().group_id();
+  was_connected_ = true;
   return absl::OkStatus();
 }
 
@@ -266,20 +267,8 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
     return status;
   }
   Request req;
-  auto *cmd = req.mutable_create_publisher();
-  cmd->set_channel_name(channel_name);
-  cmd->set_slot_size(Aligned(opts.slot_size));
-  cmd->set_num_slots(opts.num_slots);
-  cmd->set_is_local(opts.IsLocal());
-  cmd->set_is_reliable(opts.IsReliable());
-  cmd->set_is_bridge(opts.IsBridge());
-  cmd->set_is_fixed_size(opts.IsFixedSize());
-  cmd->set_type(opts.Type());
-  cmd->set_mux(opts.Mux());
-  cmd->set_vchan_id(opts.VchanId());
-  cmd->set_notify_retirement(opts.notify_retirement);
-  cmd->set_checksum_size(opts.ChecksumSize());
-  cmd->set_metadata_size(opts.MetadataSize());
+  FillCreatePublisherRequest(req.mutable_create_publisher(), channel_name, opts,
+                             -1);
 
   // Send request to server and wait for response.
   Response resp;
@@ -294,8 +283,6 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
     return absl::InternalError(pub_resp.error());
   }
 
-  // Make a local ClientChannel object and map in the shared memory allocated
-  // by the server.
   std::shared_ptr<PublisherImpl> channel = std::make_shared<PublisherImpl>(
       channel_name, opts.num_slots, pub_resp.channel_id(),
       pub_resp.publisher_id(), pub_resp.vchan_id(), session_id_,
@@ -323,22 +310,10 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
       !status.ok()) {
     return status;
   }
-  channel->SetTriggerFd(std::move(fds[pub_resp.pub_trigger_fd_index()]));
-  channel->SetPollFd(std::move(fds[pub_resp.pub_poll_fd_index()]));
 
-  // Add all subscriber triggers fds to the publisher channel.
-  channel->ClearSubscribers();
-  for (auto index : pub_resp.sub_trigger_fd_indexes()) {
-    channel->AddSubscriber(std::move(fds[index]));
-  }
+  ApplyPublisherResponseFds(channel.get(), pub_resp, fds);
 
-  channel->SetNumUpdates(pub_resp.num_sub_updates());
-
-  // An unreliable publisher always needs a slot but if we are a bridge we
-  // don't active the channels as the original publisher's activation message
-  // will be used.
   if (!opts.IsReliable()) {
-    // A publisher needs a slot.  Allocate one.
     MessageSlot *slot =
         channel->FindFreeSlotUnreliable(channel->GetPublisherId());
     if (slot == nullptr) {
@@ -350,29 +325,20 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
         return status;
       }
     }
-  } else if (!opts.IsBridge()) {
-    // Send a single activation message to the channel.
+  } else if (!opts.IsBridge() && !opts.ForTunnel()) {
+    // Send a single activation message to the channel.  Don't activate if
+    // this is a tunnel publisher because there will already be an existing
+    // reliable publisher that has been activated.
     absl::Status status = ActivateReliableChannel(channel.get());
     if (!status.ok()) {
       return status;
     }
-  }
-  // Retirement fds.
-  if (pub_resp.retirement_fd_index() != -1) {
-    channel->SetRetirementFd(
-        std::move(fds[size_t(pub_resp.retirement_fd_index())]));
-  }
-
-  channel->ClearRetirementTriggers();
-  for (auto index : pub_resp.retirement_fd_indexes()) {
-    channel->AddRetirementTrigger(fds[size_t(index)]);
   }
 
   channel->TriggerSubscribers();
   if (absl::Status status = channel->UnmapUnusedBuffers(); !status.ok()) {
     return status;
   }
-  // channel->Dump();
   channels_.insert(channel);
   return Publisher(shared_from_this(), channel);
 }
@@ -398,15 +364,8 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
         "MaxActiveMessages must be at least 1 for a subscriber");
   }
   Request req;
-  auto *cmd = req.mutable_create_subscriber();
-  cmd->set_channel_name(channel_name);
-  cmd->set_subscriber_id(-1); // New subscriber is being created.
-  cmd->set_is_reliable(opts.IsReliable());
-  cmd->set_is_bridge(opts.IsBridge());
-  cmd->set_type(opts.Type());
-  cmd->set_max_active_messages(opts.MaxActiveMessages());
-  cmd->set_mux(opts.Mux());
-  cmd->set_vchan_id(opts.VchanId());
+  FillCreateSubscriberRequest(req.mutable_create_subscriber(), channel_name,
+                              opts, -1);
 
   // Send request to server and wait for response.
   Response resp;
@@ -422,8 +381,6 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
     return absl::InternalError(sub_resp.error());
   }
 
-  // Make a local Subscriber object and map in the shared memory allocated
-  // by the server.
   std::shared_ptr<SubscriberImpl> channel = std::make_shared<SubscriberImpl>(
       channel_name, sub_resp.num_slots(), sub_resp.channel_id(),
       sub_resp.subscriber_id(), sub_resp.vchan_id(), session_id_,
@@ -455,31 +412,13 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
   if (absl::Status status = channel->AttachBuffers(); !status.ok()) {
     return status;
   }
-  channel->SetTriggerFd(std::move(fds[sub_resp.trigger_fd_index()]));
-  channel->SetPollFd(std::move(fds[sub_resp.poll_fd_index()]));
 
-  // Add all publisher triggers fds to the subscriber channel.
-  channel->ClearPublishers();
-  for (auto index : sub_resp.reliable_pub_trigger_fd_indexes()) {
-    channel->AddPublisher(std::move(fds[index]));
-  }
+  ApplySubscriberResponseFds(channel.get(), sub_resp, fds);
 
-  // Retirement fds.
-  channel->ClearRetirementTriggers();
-  for (auto index : sub_resp.retirement_fd_indexes()) {
-    channel->AddRetirementTrigger(fds[size_t(index)]);
-  }
-
-  channel->SetNumUpdates(sub_resp.num_pub_updates());
-
-  // Trigger the subscriber to pick up all existing messages.
   channel->Trigger();
 
-  // channel->Dump();
-
   channels_.insert(channel);
-  auto sub = Subscriber(shared_from_this(), channel);
-  return sub;
+  return Subscriber(shared_from_this(), channel);
 }
 
 static uint64_t ExpandSlotSize(uint64_t slotSize) {
@@ -631,7 +570,7 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
 
   Channel::PublishedMessage msg = publisher->ActivateSlotAndGetAnother(
       publisher->IsReliable(), /*is_activation=*/false, omit_prefix,
-      use_prefix_slot_id);
+      use_prefix_slot_id, publisher->ForTunnel());
 
   // Prevent use of old_slot.
   old_slot = nullptr;
@@ -1337,8 +1276,8 @@ absl::Status ClientImpl::RemoveChannel(ClientChannel *channel) {
 
 absl::Status ClientImpl::RemovePublisher(PublisherImpl *publisher) {
   ClientLockGuard guard(this);
-  if (absl::Status status = CheckConnected(); !status.ok()) {
-    return status;
+  if (!socket_.Connected()) {
+    return RemoveChannel(publisher);
   }
   Request req;
   auto *cmd = req.mutable_remove_publisher();
@@ -1351,7 +1290,7 @@ absl::Status ClientImpl::RemovePublisher(PublisherImpl *publisher) {
   fds.reserve(100);
   if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
       !status.ok()) {
-    return status;
+    return RemoveChannel(publisher);
   }
 
   auto &resp = response.remove_publisher();
@@ -1363,8 +1302,8 @@ absl::Status ClientImpl::RemovePublisher(PublisherImpl *publisher) {
 
 absl::Status ClientImpl::RemoveSubscriber(SubscriberImpl *subscriber) {
   ClientLockGuard guard(this);
-  if (absl::Status status = CheckConnected(); !status.ok()) {
-    return status;
+  if (!socket_.Connected()) {
+    return RemoveChannel(subscriber);
   }
   Request req;
   auto *cmd = req.mutable_remove_subscriber();
@@ -1377,7 +1316,7 @@ absl::Status ClientImpl::RemoveSubscriber(SubscriberImpl *subscriber) {
   fds.reserve(100);
   if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
       !status.ok()) {
-    return status;
+    return RemoveChannel(subscriber);
   }
 
   auto &resp = response.remove_subscriber();
@@ -1435,6 +1374,8 @@ ClientImpl::GetChannelInfo(const std::string &channel) {
   result.num_subscribers = info.num_subs();
   result.num_bridge_pubs = info.num_bridge_pubs();
   result.num_bridge_subs = info.num_bridge_subs();
+  result.num_tunnel_pubs = info.num_tunnel_pubs();
+  result.num_tunnel_subs = info.num_tunnel_subs();
   result.reliable = info.is_reliable();
   result.type = info.type();
   result.slot_size = info.slot_size();
@@ -1469,6 +1410,8 @@ absl::StatusOr<const std::vector<ChannelInfo>> ClientImpl::GetChannelInfo() {
     result.num_subscribers = info.num_subs();
     result.num_bridge_pubs = info.num_bridge_pubs();
     result.num_bridge_subs = info.num_bridge_subs();
+    result.num_tunnel_pubs = info.num_tunnel_pubs();
+    result.num_tunnel_subs = info.num_tunnel_subs();
     result.reliable = info.is_reliable();
     result.type = info.type();
     result.slot_size = info.slot_size();
@@ -1575,14 +1518,182 @@ absl::Status ClientImpl::ResizeChannel(PublisherImpl *publisher,
   return publisher->CreateOrAttachBuffers(Aligned(new_slot_size));
 }
 
+void ClientImpl::FillCreatePublisherRequest(CreatePublisherRequest *cmd,
+                                             const std::string &channel_name,
+                                             const PublisherOptions &opts,
+                                             int publisher_id) {
+  cmd->set_channel_name(channel_name);
+  cmd->set_slot_size(Aligned(opts.slot_size));
+  cmd->set_num_slots(opts.num_slots);
+  cmd->set_is_local(opts.IsLocal());
+  cmd->set_is_reliable(opts.IsReliable());
+  cmd->set_is_bridge(opts.IsBridge());
+  cmd->set_for_tunnel(opts.ForTunnel());
+  cmd->set_is_fixed_size(opts.IsFixedSize());
+  cmd->set_type(opts.Type());
+  cmd->set_mux(opts.Mux());
+  cmd->set_vchan_id(opts.VchanId());
+  cmd->set_notify_retirement(opts.notify_retirement);
+  cmd->set_checksum_size(opts.ChecksumSize());
+  cmd->set_metadata_size(opts.MetadataSize());
+  cmd->set_publisher_id(publisher_id);
+}
+
+void ClientImpl::ApplyPublisherResponseFds(
+    PublisherImpl *publisher, const CreatePublisherResponse &resp,
+    std::vector<toolbelt::FileDescriptor> &fds) {
+  publisher->SetTriggerFd(std::move(fds[resp.pub_trigger_fd_index()]));
+  publisher->SetPollFd(std::move(fds[resp.pub_poll_fd_index()]));
+
+  publisher->ClearSubscribers();
+  for (auto index : resp.sub_trigger_fd_indexes()) {
+    publisher->AddSubscriber(std::move(fds[index]));
+  }
+
+  if (resp.retirement_fd_index() != -1) {
+    publisher->SetRetirementFd(
+        std::move(fds[size_t(resp.retirement_fd_index())]));
+  }
+
+  publisher->ClearRetirementTriggers();
+  for (auto index : resp.retirement_fd_indexes()) {
+    publisher->AddRetirementTrigger(fds[size_t(index)]);
+  }
+
+  publisher->SetNumUpdates(resp.num_sub_updates());
+}
+
+void ClientImpl::FillCreateSubscriberRequest(CreateSubscriberRequest *cmd,
+                                              const std::string &channel_name,
+                                              const SubscriberOptions &opts,
+                                              int subscriber_id) {
+  cmd->set_channel_name(channel_name);
+  cmd->set_subscriber_id(subscriber_id);
+  cmd->set_is_reliable(opts.IsReliable());
+  cmd->set_is_bridge(opts.IsBridge());
+  cmd->set_for_tunnel(opts.ForTunnel());
+  cmd->set_type(opts.Type());
+  cmd->set_max_active_messages(opts.MaxActiveMessages());
+  cmd->set_mux(opts.Mux());
+  cmd->set_vchan_id(opts.VchanId());
+}
+
+void ClientImpl::ApplySubscriberResponseFds(
+    SubscriberImpl *subscriber, const CreateSubscriberResponse &resp,
+    std::vector<toolbelt::FileDescriptor> &fds) {
+  subscriber->SetTriggerFd(std::move(fds[resp.trigger_fd_index()]));
+  subscriber->SetPollFd(std::move(fds[resp.poll_fd_index()]));
+
+  subscriber->ClearPublishers();
+  for (auto index : resp.reliable_pub_trigger_fd_indexes()) {
+    subscriber->AddPublisher(std::move(fds[index]));
+  }
+
+  subscriber->ClearRetirementTriggers();
+  for (auto index : resp.retirement_fd_indexes()) {
+    subscriber->AddRetirementTrigger(fds[size_t(index)]);
+  }
+
+  subscriber->SetNumUpdates(resp.num_pub_updates());
+}
+
+absl::Status ClientImpl::Reconnect() {
+  reconnecting_ = true;
+  auto cleanup = [this]() { reconnecting_ = false; };
+
+  socket_.Close();
+  socket_ = toolbelt::UnixSocket();
+
+  absl::Status status = socket_.Connect(socket_name_);
+  if (!status.ok()) {
+    cleanup();
+    return status;
+  }
+
+  Request init_req;
+  init_req.mutable_init()->set_client_name(name_);
+  Response init_resp;
+  std::vector<toolbelt::FileDescriptor> init_fds;
+  init_fds.reserve(100);
+  status = SendRequestReceiveResponse(init_req, init_resp, init_fds);
+  if (!status.ok()) {
+    cleanup();
+    return status;
+  }
+  scb_fd_ = std::move(init_fds[init_resp.init().scb_fd_index()]);
+  session_id_ = init_resp.init().session_id();
+  server_user_id_ = init_resp.init().user_id();
+  server_group_id_ = init_resp.init().group_id();
+
+  for (auto &channel : channels_) {
+    if (auto *pub = dynamic_cast<PublisherImpl *>(channel.get())) {
+      status = ReregisterPublisher(pub);
+      if (!status.ok()) {
+        cleanup();
+        return status;
+      }
+    } else if (auto *sub = dynamic_cast<SubscriberImpl *>(channel.get())) {
+      status = ReregisterSubscriber(sub);
+      if (!status.ok()) {
+        cleanup();
+        return status;
+      }
+    }
+  }
+
+  cleanup();
+  return absl::OkStatus();
+}
+
+absl::Status ClientImpl::ReregisterPublisher(PublisherImpl *publisher) {
+  Request req;
+  FillCreatePublisherRequest(req.mutable_create_publisher(), publisher->Name(),
+                             publisher->options_,
+                             publisher->GetPublisherId());
+
+  Response resp;
+  std::vector<toolbelt::FileDescriptor> fds;
+  fds.reserve(100);
+  if (absl::Status status = SendRequestReceiveResponse(req, resp, fds);
+      !status.ok()) {
+    return status;
+  }
+  auto &pub_resp = resp.create_publisher();
+  if (!pub_resp.error().empty()) {
+    return absl::InternalError(pub_resp.error());
+  }
+
+  ApplyPublisherResponseFds(publisher, pub_resp, fds);
+  return absl::OkStatus();
+}
+
+absl::Status ClientImpl::ReregisterSubscriber(SubscriberImpl *subscriber) {
+  Request req;
+  FillCreateSubscriberRequest(req.mutable_create_subscriber(),
+                              subscriber->Name(), subscriber->options_,
+                              subscriber->GetSubscriberId());
+
+  Response resp;
+  std::vector<toolbelt::FileDescriptor> fds;
+  fds.reserve(100);
+  if (absl::Status status = SendRequestReceiveResponse(req, resp, fds);
+      !status.ok()) {
+    return status;
+  }
+  auto &sub_resp = resp.create_subscriber();
+  if (!sub_resp.error().empty()) {
+    return absl::InternalError(sub_resp.error());
+  }
+
+  ApplySubscriberResponseFds(subscriber, sub_resp, fds);
+  return absl::OkStatus();
+}
+
 absl::Status ClientImpl::SendRequestReceiveResponse(
     const Request &req, Response &response,
     std::vector<toolbelt::FileDescriptor> &fds) {
 
-  // std::cerr << "Sending request " << req.DebugString() << "\n";
   {
-    // SendMessage needs 4 bytes before the buffer passed to
-    // use for the length.
     size_t msg_len = req.ByteSizeLong();
     std::vector<char> send_msg(sizeof(int32_t) + msg_len);
     char *sendbuf = send_msg.data() + sizeof(int32_t);
@@ -1594,15 +1705,28 @@ absl::Status ClientImpl::SendRequestReceiveResponse(
     absl::StatusOr<ssize_t> n = socket_.SendMessage(sendbuf, msg_len, co_);
     if (!n.ok()) {
       socket_.Close();
+      if (was_connected_ && !reconnecting_) {
+        if (absl::Status rs = Reconnect(); rs.ok()) {
+          return SendRequestReceiveResponse(req, response, fds);
+        } else {
+          return rs;
+        }
+      }
       return n.status();
     }
   }
 
-  // Wait for response and any fds.
   absl::StatusOr<std::vector<char>> recv_msg =
       socket_.ReceiveVariableLengthMessage(co_);
   if (!recv_msg.ok()) {
     socket_.Close();
+    if (was_connected_ && !reconnecting_) {
+      if (absl::Status rs = Reconnect(); rs.ok()) {
+        return SendRequestReceiveResponse(req, response, fds);
+      } else {
+        return rs;
+      }
+    }
     return recv_msg.status();
   }
   if (!response.ParseFromArray(recv_msg->data(),
