@@ -329,7 +329,7 @@ absl::Status Server::Run() {
   bool secondary_connected = false;
 
   // Helper to attempt recovery from a single shadow replicator.
-  auto TryRecoverFrom = [this](ShadowReplicator *replicator,
+  auto try_recover_from = [this](const std::unique_ptr<ShadowReplicator> &replicator,
                                const char *label) -> bool {
     absl::Status status = replicator->Connect();
     if (!status.ok()) {
@@ -378,7 +378,7 @@ absl::Status Server::Run() {
 
   // Phase 1: Try primary shadow.
   if (primary_shadow_replicator_ != nullptr) {
-    if (TryRecoverFrom(primary_shadow_replicator_.get(), "primary")) {
+    if (try_recover_from(primary_shadow_replicator_, "primary")) {
       recovered = true;
     }
     primary_connected = primary_shadow_replicator_->Connected();
@@ -386,7 +386,7 @@ absl::Status Server::Run() {
 
   // Phase 2: If not recovered, try secondary shadow.
   if (!recovered && secondary_shadow_replicator_ != nullptr) {
-    if (TryRecoverFrom(secondary_shadow_replicator_.get(), "secondary")) {
+    if (try_recover_from(secondary_shadow_replicator_, "secondary")) {
       recovered = true;
     }
     secondary_connected = secondary_shadow_replicator_->Connected();
@@ -433,7 +433,7 @@ absl::Status Server::Run() {
 
   // Phase 4: Send init and re-replicate recovered state to all connected
   // shadows.
-  auto replicate_to_shadow = [this, recovered](ShadowReplicator *shadow) {
+  auto replicate_to_shadow = [this, recovered](const std::unique_ptr<ShadowReplicator> &shadow) {
     shadow->SendInit(session_id_, scb_fd_);
     if (recovered) {
       for (auto &[name, ch] : channels_) {
@@ -455,12 +455,12 @@ absl::Status Server::Run() {
   };
 
   if (primary_connected) {
-    replicate_to_shadow(primary_shadow_replicator_.get());
+    replicate_to_shadow(primary_shadow_replicator_);
     logger_.Log(toolbelt::LogLevel::kInfo,
                 "Connected to primary shadow process");
   }
   if (secondary_connected) {
-    replicate_to_shadow(secondary_shadow_replicator_.get());
+    replicate_to_shadow(secondary_shadow_replicator_);
     logger_.Log(toolbelt::LogLevel::kInfo,
                 "Connected to secondary shadow process");
   }
@@ -671,8 +671,9 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
     // The channels_ map owns all the server channels.
     channels_.emplace(std::make_pair(channel_name, std::move(*vchan)));
     OnNewChannel(channel_name);
-    ForEachShadow(
-        [channel](ShadowReplicator *s) { s->SendCreateChannel(channel); });
+    ForEachShadow([channel](const std::unique_ptr<ShadowReplicator> &s) {
+      s->SendCreateChannel(channel);
+    });
     return channel;
   }
 
@@ -694,8 +695,9 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
   channel->SetSharedMemoryFds(std::move(*fds));
   channels_.emplace(std::make_pair(channel_name, channel));
   OnNewChannel(channel_name);
-  ForEachShadow(
-      [channel](ShadowReplicator *s) { s->SendCreateChannel(channel); });
+  ForEachShadow([channel](const std::unique_ptr<ShadowReplicator> &s) {
+    s->SendCreateChannel(channel);
+  });
 
   return channel;
 }
@@ -794,7 +796,7 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
 
 void Server::RemoveChannel(ServerChannel *channel) {
   OnRemoveChannel(channel->Name());
-  ForEachShadow([channel](ShadowReplicator *s) {
+  ForEachShadow([channel](const std::unique_ptr<ShadowReplicator> &s) {
     s->SendRemoveChannel(channel->Name(), channel->GetChannelId());
   });
   if (!simulate_crash_) {

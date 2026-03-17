@@ -436,7 +436,7 @@ TEST_F(ShadowRecoveryTest, ServerRecoversStateFromShadow) {
 
   // Simulate a crash: disconnect the shadow replicators first so that
   // cleanup events from Stop() don't reach the shadow.
-  server_->ForEachShadow([](subspace::ShadowReplicator *s) { s->Close(); });
+  server_->ForEachShadow([](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
   StopServer();
 
   // Start a new server that connects to the same shadow.
@@ -503,7 +503,7 @@ TEST_F(ShadowRecoveryTest, ServerFunctionalAfterRecovery) {
   }));
 
   // Simulate crash.
-  server_->ForEachShadow([](subspace::ShadowReplicator *s) { s->Close(); });
+  server_->ForEachShadow([](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
   StopServer();
 
   // Phase 2: Recovered server -- verify we can create new channels, publish
@@ -608,7 +608,7 @@ TEST_F(ShadowRecoveryTest, ClientReconnectsAfterServerRestart) {
 
   // Simulate crash: disconnect the shadow replicators so cleanup events
   // from Stop() don't reach the shadow, then stop the server.
-  server_->ForEachShadow([](subspace::ShadowReplicator *s) { s->Close(); });
+  server_->ForEachShadow([](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
   StopServer();
 
   // Phase 2: Restart the server (it recovers state from the shadow).
@@ -809,7 +809,7 @@ TEST_F(DualShadowRecoveryTest, RecoverFromPrimaryWhenBothHealthy) {
   ASSERT_NE(primary_session, 0u);
 
   // Simulate crash.
-  server_->ForEachShadow([](subspace::ShadowReplicator *s) { s->Close(); });
+  server_->ForEachShadow([](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
   StopServer();
 
   // Restart server -- both shadows are healthy, so primary should be used.
@@ -864,7 +864,7 @@ TEST_F(DualShadowRecoveryTest, RecoverFromSecondaryWhenPrimaryDown) {
   }));
 
   // Simulate crash.
-  server_->ForEachShadow([](subspace::ShadowReplicator *s) { s->Close(); });
+  server_->ForEachShadow([](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
   StopServer();
 
   // Stop the primary shadow before restarting the server.
@@ -1167,7 +1167,7 @@ TEST_F(BridgeShadowRecoveryTest, BridgeRecoversAfterServerRestart) {
   // Simulate crash on server 0.  SimulateCrash() prevents the
   // destructor from cleaning up shared memory files.
   server0_->ForEachShadow(
-      [](subspace::ShadowReplicator *s) { s->Close(); });
+      [](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
   server0_->SimulateCrash();
   StopServer0();
 

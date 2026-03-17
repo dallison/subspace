@@ -80,18 +80,18 @@ public:
       ch->SetSkipCleanup(true);
     }
   }
-  ShadowReplicator *GetPrimaryShadowReplicator() {
-    return primary_shadow_replicator_.get();
+  const std::unique_ptr<ShadowReplicator> &GetPrimaryShadowReplicator() {
+    return primary_shadow_replicator_;
   }
-  ShadowReplicator *GetSecondaryShadowReplicator() {
-    return secondary_shadow_replicator_.get();
+  const std::unique_ptr<ShadowReplicator> &GetSecondaryShadowReplicator() {
+    return secondary_shadow_replicator_;
   }
 
   template <typename Fn> void ForEachShadow(Fn fn) {
     if (primary_shadow_replicator_)
-      fn(primary_shadow_replicator_.get());
+      fn(primary_shadow_replicator_);
     if (secondary_shadow_replicator_)
-      fn(secondary_shadow_replicator_.get());
+      fn(secondary_shadow_replicator_);
   }
 
   uint64_t GetVirtualMemoryUsage() const;
