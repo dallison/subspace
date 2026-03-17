@@ -1,3 +1,8 @@
+// Copyright 2024-2026 David Allison
+// Rust client is Copyright 2026 Cruise LLC
+// All Rights Reserved
+// See LICENSE file for licensing information.
+
 fn find_well_known_types(start: &std::path::Path, depth: u32) -> Option<String> {
     if depth > 4 {
         return None;
