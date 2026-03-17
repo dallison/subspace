@@ -288,72 +288,108 @@ void ClientHandler::HandleCreatePublisher(
     }
   }
 
-  server_->logger_.Log(toolbelt::LogLevel::kDebug,
-                       "Client %s creating publisher on channel %s: VM: %s",
-                       client_name_.c_str(), req.channel_name().c_str(),
-                       GetTotalVM().c_str());
-  // Create the publisher.
-  absl::StatusOr<PublisherUser *> publisher =
-      channel->AddPublisher(this, req.is_reliable(), req.is_local(),
-                            req.is_bridge(), req.for_tunnel(),
-                            req.is_fixed_size());
-  if (!publisher.ok()) {
-    response->set_error(publisher.status().ToString());
-    return;
-  }
-  {
-    int32_t cs = req.checksum_size();
-    int32_t ms = req.metadata_size();
-    if (cs <= 0) {
-      cs = 4;
+  PublisherUser *pub = nullptr;
+  bool reclaimed = false;
+
+  // Check if this is a reclaim of an existing orphaned publisher.
+  if (req.publisher_id() >= 0) {
+    absl::StatusOr<User *> user = channel->GetUser(req.publisher_id());
+    if (user.ok() && (*user)->GetHandler() == nullptr) {
+      pub = static_cast<PublisherUser *>(*user);
+      pub->SetHandler(this);
+      reclaimed = true;
+      server_->logger_.Log(toolbelt::LogLevel::kDebug,
+                           "Client %s reclaiming publisher %d on channel %s",
+                           client_name_.c_str(), req.publisher_id(),
+                           req.channel_name().c_str());
     }
-    if (ms < 0) {
-      ms = 0;
-    }
-    if (cs > kMaxChecksumSize) {
-      response->set_error(
-          absl::StrFormat("checksum_size %d exceeds maximum %d for channel %s",
-                          cs, kMaxChecksumSize, req.channel_name()));
-      return;
-    }
-    if (ms > kMaxMetadataSize) {
-      response->set_error(
-          absl::StrFormat("metadata_size %d exceeds maximum %d for channel %s",
-                          ms, kMaxMetadataSize, req.channel_name()));
-      return;
-    }
-    if (channel->ChecksumSize() != 4 && channel->ChecksumSize() != cs) {
-      response->set_error(
-          absl::StrFormat("Inconsistent checksum_size for channel %s: "
-                          "already %d, not %d",
-                          req.channel_name(), channel->ChecksumSize(), cs));
-      return;
-    }
-    if (channel->MetadataSize() != 0 && channel->MetadataSize() != ms) {
-      response->set_error(
-          absl::StrFormat("Inconsistent metadata_size for channel %s: "
-                          "already %d, not %d",
-                          req.channel_name(), channel->MetadataSize(), ms));
-      return;
-    }
-    channel->SetChecksumSize(cs);
-    channel->SetMetadataSize(ms);
-    channel->SetPrefixSize(Channel::ComputePrefixSize(cs, ms));
   }
 
-  server_->OnNewPublisher(channel->Name(), (*publisher)->GetId());
-  server_->SendChannelDirectory();
+  if (!reclaimed) {
+    server_->logger_.Log(toolbelt::LogLevel::kDebug,
+                         "Client %s creating publisher on channel %s: VM: %s",
+                         client_name_.c_str(), req.channel_name().c_str(),
+                         GetTotalVM().c_str());
+    // Create the publisher.
+    absl::StatusOr<PublisherUser *> publisher =
+        channel->AddPublisher(this, req.is_reliable(), req.is_local(),
+                              req.is_bridge(), req.for_tunnel(),
+                              req.is_fixed_size());
+    if (!publisher.ok()) {
+      response->set_error(publisher.status().ToString());
+      return;
+    }
+    pub = *publisher;
+    {
+      int32_t cs = req.checksum_size();
+      int32_t ms = req.metadata_size();
+      if (cs <= 0) {
+        cs = 4;
+      }
+      if (ms < 0) {
+        ms = 0;
+      }
+      if (cs > kMaxChecksumSize) {
+        response->set_error(absl::StrFormat(
+            "checksum_size %d exceeds maximum %d for channel %s", cs,
+            kMaxChecksumSize, req.channel_name()));
+        return;
+      }
+      if (ms > kMaxMetadataSize) {
+        response->set_error(absl::StrFormat(
+            "metadata_size %d exceeds maximum %d for channel %s", ms,
+            kMaxMetadataSize, req.channel_name()));
+        return;
+      }
+      if (channel->ChecksumSize() != 4 && channel->ChecksumSize() != cs) {
+        response->set_error(
+            absl::StrFormat("Inconsistent checksum_size for channel %s: "
+                            "already %d, not %d",
+                            req.channel_name(), channel->ChecksumSize(), cs));
+        return;
+      }
+      if (channel->MetadataSize() != 0 && channel->MetadataSize() != ms) {
+        response->set_error(
+            absl::StrFormat("Inconsistent metadata_size for channel %s: "
+                            "already %d, not %d",
+                            req.channel_name(), channel->MetadataSize(), ms));
+        return;
+      }
+      channel->SetChecksumSize(cs);
+      channel->SetMetadataSize(ms);
+      channel->SetPrefixSize(Channel::ComputePrefixSize(cs, ms));
+    }
+
+    server_->OnNewPublisher(channel->Name(), pub->GetId());
+    server_->SendChannelDirectory();
+
+    if (!req.is_bridge() && req.is_local()) {
+      server_->SendAdvertise(req.channel_name(), req.is_reliable());
+    }
+
+    if (req.notify_retirement()) {
+      absl::Status status = pub->AllocateRetirementFd();
+      if (!status.ok()) {
+        response->set_error(absl::StrFormat(
+            "Failed to allocate retirement fd for channel %s: %s",
+            req.channel_name(), status.ToString()));
+        return;
+      }
+    }
+
+    server_->ForEachShadow([&](const std::unique_ptr<ShadowReplicator> &shadow) {
+      shadow->SendAddPublisher(channel->Name(), pub);
+    });
+
+    channel->RecordUpdate(/*is_pub=*/true, /*add=*/true, req.is_reliable());
+  }
 
   response->set_channel_id(channel->GetChannelId());
   response->set_type(channel->Type());
   response->set_vchan_id(channel->GetVirtualChannelId());
-
-  PublisherUser *pub = *publisher;
   response->set_publisher_id(pub->GetId());
 
-  // Copy the shared memory file descriptors.
   const SharedMemoryFds &channel_fds = channel->GetFds();
-
   response->set_ccb_fd_index(0);
   fds.push_back(channel_fds.ccb);
   response->set_bcb_fd_index(1);
@@ -361,13 +397,11 @@ void ClientHandler::HandleCreatePublisher(
 
   int fd_index = 2;
 
-  // Copy the publisher poll and triggers fds.
   response->set_pub_poll_fd_index(fd_index++);
   fds.push_back(pub->GetPollFd());
   response->set_pub_trigger_fd_index(fd_index++);
   fds.push_back(pub->GetTriggerFd());
 
-  // Add subscriber trigger indexes.
   std::vector<toolbelt::FileDescriptor> sub_fds =
       channel->GetSubscriberTriggerFds();
   for (auto &fd : sub_fds) {
@@ -376,9 +410,6 @@ void ClientHandler::HandleCreatePublisher(
   }
 
   if (channel->IsVirtual()) {
-    // Also send back the channel multiplexer's subsciber fds so that
-    // a subscriber to the whole multiplexer can be triggered when a
-    // message is published from any of its virtual channels.
     VirtualChannel *vchan = static_cast<VirtualChannel *>(channel);
     std::vector<toolbelt::FileDescriptor> mux_fds =
         vchan->GetMux()->GetSubscriberTriggerFds();
@@ -388,34 +419,27 @@ void ClientHandler::HandleCreatePublisher(
     }
   }
 
-  if (!req.is_bridge() && req.is_local()) {
-    server_->SendAdvertise(req.channel_name(), req.is_reliable());
-  }
-
-  if (req.notify_retirement()) {
-    // Allocate a retirement fd for the publisher.
-    absl::Status status = pub->AllocateRetirementFd();
-    if (!status.ok()) {
-      response->set_error(
-          absl::StrFormat("Failed to allocate retirement fd for channel %s: %s",
-                          req.channel_name(), status.ToString()));
-      return;
-    }
+  if (req.notify_retirement() && !reclaimed) {
     response->set_retirement_fd_index(fd_index++);
-    // We tell the publisher to use the read end of the pipe.
+    fds.push_back(pub->GetRetirementFdReader());
+  } else if (pub->GetRetirementFdReader().Valid()) {
+    response->set_retirement_fd_index(fd_index++);
     fds.push_back(pub->GetRetirementFdReader());
   } else {
     response->set_retirement_fd_index(-1);
   }
 
-  // Add retirement fds.
   std::vector<toolbelt::FileDescriptor> ret_fds = channel->GetRetirementFds();
   for (auto &fd : ret_fds) {
     response->add_retirement_fd_indexes(fd_index++);
     fds.push_back(fd);
   }
+
+  ServerChannel *resolved = channel->IsVirtual()
+      ? static_cast<VirtualChannel *>(channel)->GetMux()
+      : channel;
   ChannelCounters &counters =
-      channel->RecordUpdate(/*is_pub=*/true, /*add=*/true, req.is_reliable());
+      resolved->GetScb()->counters[resolved->GetChannelId()];
   response->set_num_sub_updates(counters.num_sub_updates);
 }
 
@@ -482,14 +506,23 @@ void ClientHandler::HandleCreateSubscriber(
   }
 
   SubscriberUser *sub;
+  bool reclaimed = false;
   if (req.subscriber_id() != -1) {
-    // This is an existing subscriber.
+    // This is an existing subscriber (reload or reclaim).
     absl::StatusOr<User *> user = channel->GetUser(req.subscriber_id());
     if (!user.ok()) {
       response->set_error(user.status().ToString());
       return;
     }
     sub = static_cast<SubscriberUser *>(*user);
+    if (sub->GetHandler() == nullptr) {
+      sub->SetHandler(this);
+      reclaimed = true;
+      server_->logger_.Log(toolbelt::LogLevel::kDebug,
+                           "Client %s reclaiming subscriber %d on channel %s",
+                           client_name_.c_str(), req.subscriber_id(),
+                           req.channel_name().c_str());
+    }
   } else {
     if (!req.is_reliable()) {
       absl::Status cap_ok =
@@ -513,16 +546,27 @@ void ClientHandler::HandleCreateSubscriber(
       response->set_error(subscriber.status().ToString());
       return;
     }
-    ChannelCounters &counters = channel->RecordUpdate(
-        /*is_pub=*/false, /*add=*/true, req.is_reliable());
-    response->set_num_pub_updates(counters.num_pub_updates);
+    channel->RecordUpdate(/*is_pub=*/false, /*add=*/true, req.is_reliable());
     sub = *subscriber;
   }
-  server_->OnNewSubscriber(channel->Name(), sub->GetId());
 
-  server_->SendChannelDirectory();
+  if (!reclaimed) {
+    server_->OnNewSubscriber(channel->Name(), sub->GetId());
+    server_->ForEachShadow([&](const std::unique_ptr<ShadowReplicator> &shadow) {
+      shadow->SendAddSubscriber(channel->Name(), sub);
+    });
+    server_->SendChannelDirectory();
+  }
+
   channel->RegisterSubscriber(sub->GetId(), channel->GetVirtualChannelId(),
                               req.subscriber_id() == -1);
+
+  ServerChannel *resolved = channel->IsVirtual()
+      ? static_cast<VirtualChannel *>(channel)->GetMux()
+      : channel;
+  ChannelCounters &counters =
+      resolved->GetScb()->counters[resolved->GetChannelId()];
+  response->set_num_pub_updates(counters.num_pub_updates);
 
   response->set_channel_id(channel->GetChannelId());
   response->set_subscriber_id(sub->GetId());

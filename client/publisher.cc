@@ -219,7 +219,7 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
 
       ActiveSlot active_slot = {s, s->ordinal, s->timestamp};
       active_slots_.push_back(active_slot);
-    } else if (!for_tunnel && (retired_slot = RetiredSlots().FindFirstSet()) != -1) {
+    } else if (!ForTunnel() && (retired_slot = RetiredSlots().FindFirstSet()) != -1) {
       if (embargoed_slots_.IsSet(retired_slot)) {
         continue;
       }
