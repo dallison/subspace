@@ -94,7 +94,7 @@ Every message slot begins with a `MessagePrefix` structure:
 | 8 | `message_size` | `uint64_t` | Payload size in bytes. |
 | 16 | `ordinal` | `uint64_t` | Monotonically increasing sequence number. |
 | 24 | `timestamp` | `uint64_t` | Publish time (nanoseconds, `CLOCK_MONOTONIC`). |
-| 32 | `flags` | `int64_t` | Bitfield: `kMessageActivate` (1), `kMessageBridged` (2), `kMessageHasChecksum` (4). |
+| 32 | `flags` | `int64_t` | Bitfield: `kMessageActivate` (1), `kMessageBridged` (2), `kMessageHasChecksum` (4), `kMessageCrossMachine` (8). |
 | 40 | `vchan_id` | `int32_t` | Virtual channel ID (-1 = global). |
 | 44 | `checksum_size` | `uint16_t` | Size of checksum area in bytes. |
 | 46 | `metadata_size` | `uint16_t` | Size of user metadata area in bytes. |
@@ -179,7 +179,7 @@ Following the slot array (with 64-byte alignment):
 2. The server creates the channel (if new) with the specified slot size and slot count, validates options (type matching, checksum/metadata size limits), and returns file descriptors for CCB, BCB, and buffer shared memory.
 3. The client maps all shared memory regions.
 4. For **unreliable** publishers: a free slot is immediately claimed via `FindFreeSlotUnreliable`. If `options.activate` is set, an activation message is published.
-5. For **reliable** publishers: an activation message is published via `ActivateReliableChannel`.
+5. For **reliable** publishers: an activation message is published via `ActivateReliableChannel`, **unless** the publisher is a bridge or tunnel publisher (they skip activation because the original local publisher has already activated the channel).
 6. Subscriber trigger file descriptors are collected so the publisher can notify subscribers on publish.
 
 ### 4.2 Publishing a Message
@@ -208,7 +208,7 @@ Internally, `ActivateSlotAndGetAnother`:
 
 1. Assigns an ordinal from `OrdinalAccumulator::Next(vchan_id)`.
 2. Writes the timestamp (`CLOCK_MONOTONIC`).
-3. Fills the `MessagePrefix` fields: `message_size`, `ordinal`, `timestamp`, `vchan_id`, `checksum_size`, `metadata_size`, `flags`, `slot_id`.
+3. Fills the `MessagePrefix` fields: `message_size`, `ordinal`, `timestamp`, `vchan_id`, `checksum_size`, `metadata_size`, `flags`, `slot_id`. If the publisher has `for_tunnel` set, the `kMessageCrossMachine` flag is added to `flags`.
 4. If checksum is enabled, computes the checksum over three data regions:
    - Prefix fields from `slot_id` through `metadata_size` (bytes 4–48).
    - User metadata area.
@@ -693,7 +693,54 @@ Bridge subscribers call `ClearActiveMessage()` immediately after reading so that
 
 ---
 
-## 18. Statistics and Counters
+## 18. Tunnel Support
+
+The `for_tunnel` option on publishers and subscribers adds support for external
+tunnel processes that need to know whether messages are locally or remotely
+generated.  Unlike bridging (which is handled internally by the server),
+tunneling is intended for external processes that forward messages between
+machines and need to annotate them with their origin.
+
+### 18.1 Cross-Machine Flag
+
+When a publisher is created with `SetForTunnel(true)`, every message it
+publishes has the `kMessageCrossMachine` flag set in the `MessagePrefix`.
+Subscribers can check `prefix->IsCrossMachine()` to determine whether a
+message originated from a remote machine (via a tunnel) or was produced
+locally.
+
+This flag is set in both code paths of `ActivateSlotAndGetAnother`:
+
+- **Normal publish** (`omit_prefix = false`): the flag is set on the freshly
+  written prefix.
+- **Prefix-forwarding** (`omit_prefix = true`): the flag is OR'd onto the
+  existing prefix, preserving any flags already present.
+
+### 18.2 Reliable Activation Skip
+
+Tunnel publishers skip reliable channel activation during `CreatePublisher`.
+This is because the tunnel publisher is forwarding messages for a channel
+that already has a local reliable publisher which has already activated
+the channel.  Sending a second activation would be redundant and could
+interfere with ordinal tracking.
+
+### 18.3 Channel Info
+
+The server tracks tunnel publishers and subscribers separately.
+`GetChannelInfo` reports `num_tunnel_pubs` and `num_tunnel_subs` alongside
+the existing `num_bridge_pubs` / `num_bridge_subs` counts, allowing
+monitoring tools to distinguish between local, bridged, and tunneled users.
+
+### 18.4 Options
+
+| Option | Class | Default | Description |
+|--------|-------|---------|-------------|
+| `SetForTunnel(bool)` | `PublisherOptions` | `false` | Mark this publisher as a tunnel endpoint. Sets the cross-machine flag on published messages and skips reliable activation. |
+| `SetForTunnel(bool)` | `SubscriberOptions` | `false` | Mark this subscriber as a tunnel endpoint. Tracked in the server's tunnel subscriber count. |
+
+---
+
+## 19. Statistics and Counters
 
 ### Channel Counters (from SCB)
 
@@ -714,7 +761,7 @@ Bridge subscribers call `ClearActiveMessage()` immediately after reading so that
 
 ---
 
-## 19. Configuration Limits
+## 20. Configuration Limits
 
 | Parameter | Maximum | Enforced By |
 |-----------|---------|-------------|

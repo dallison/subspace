@@ -3,9 +3,9 @@
 // See LICENSE file for licensing information.
 
 #include "client/publisher.h"
+#include "client/checksum.h"
 #include "client_channel.h"
 #include "toolbelt/clock.h"
-#include "client/checksum.h"
 namespace subspace {
 namespace details {
 
@@ -144,7 +144,6 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
       // We are guaranteed to find a slot, but let's not go into an infinite
       // loop if something goes wrong.
       if (retries-- == 0) {
-        DumpSlots(std::cout);
         return nullptr;
       }
       continue;
@@ -220,7 +219,7 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
 
       ActiveSlot active_slot = {s, s->ordinal, s->timestamp};
       active_slots_.push_back(active_slot);
-   } else if ((retired_slot = RetiredSlots().FindFirstSet()) != -1) {
+    } else if (!for_tunnel && (retired_slot = RetiredSlots().FindFirstSet()) != -1) {
       if (embargoed_slots_.IsSet(retired_slot)) {
         continue;
       }
@@ -319,7 +318,7 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
 
 Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     MessageSlot *slot, bool reliable, bool is_activation, int owner,
-    bool omit_prefix, bool use_prefix_slot_id) {
+    bool omit_prefix, bool use_prefix_slot_id, bool for_tunnel) {
   void *buffer = GetBufferAddress(slot);
   MessagePrefix *prefix = reinterpret_cast<MessagePrefix *>(
       static_cast<char *>(buffer) - PrefixSize());
@@ -330,6 +329,9 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
 
   // Copy message parameters into message prefix in buffer.
   if (omit_prefix) {
+    if (for_tunnel) {
+      prefix->SetIsCrossMachine();
+    }
     slot->timestamp = prefix->timestamp;
     slot->vchan_id = prefix->vchan_id;
     // The bridged_slot_id is the slot is used for the retirement notification.
@@ -348,6 +350,9 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
       prefix->SetIsActivation();
       slot->flags |= kMessageIsActivation;
       ccb_->activation_tracker.Activate(slot->vchan_id);
+    }
+    if (for_tunnel) {
+      prefix->SetIsCrossMachine();
     }
     if (options_.Checksum()) {
       prefix->SetHasChecksum();

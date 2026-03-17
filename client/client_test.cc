@@ -3969,6 +3969,82 @@ TEST_F(ClientTest, ChecksumAes128CmacCorruptMetadataPassError) {
   ASSERT_TRUE(msg->checksum_error);
 }
 
+TEST_F(ClientTest, TunnelPublisherSetsCrossMachineFlag) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
+      "tunnel_test1",
+      {.slot_size = 256, .num_slots = 10, .for_tunnel = true});
+  ASSERT_OK(pub);
+  ASSERT_TRUE(pub->ForTunnel());
+
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
+      "tunnel_test1", {.for_tunnel = true});
+  ASSERT_OK(sub);
+  ASSERT_TRUE(sub->ForTunnel());
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "tunnel", 6);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+  ASSERT_OK(pub_status);
+
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(6, msg->length);
+  ASSERT_EQ(0, memcmp(msg->buffer, "tunnel", 6));
+
+  auto prefix = reinterpret_cast<const subspace::MessagePrefix *>(
+      static_cast<const char *>(msg->buffer) - sub->PrefixSize());
+  ASSERT_TRUE(prefix->IsCrossMachine());
+
+  // Verify tunnel counts via GetChannelInfo.
+  absl::StatusOr<const subspace::ChannelInfo> info =
+      pub_client.GetChannelInfo("tunnel_test1");
+  ASSERT_OK(info);
+  ASSERT_EQ(1, info->num_tunnel_pubs);
+  ASSERT_EQ(1, info->num_tunnel_subs);
+}
+
+TEST_F(ClientTest, NonTunnelPublisherDoesNotSetCrossMachineFlag) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
+      "tunnel_test2", {.slot_size = 256, .num_slots = 10});
+  ASSERT_OK(pub);
+  ASSERT_FALSE(pub->ForTunnel());
+
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("tunnel_test2");
+  ASSERT_OK(sub);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "local", 5);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(5);
+  ASSERT_OK(pub_status);
+
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(5, msg->length);
+
+  auto prefix = reinterpret_cast<const subspace::MessagePrefix *>(
+      static_cast<const char *>(msg->buffer) - sub->PrefixSize());
+  ASSERT_FALSE(prefix->IsCrossMachine());
+
+  // Verify tunnel counts are zero.
+  absl::StatusOr<const subspace::ChannelInfo> info =
+      pub_client.GetChannelInfo("tunnel_test2");
+  ASSERT_OK(info);
+  ASSERT_EQ(0, info->num_tunnel_pubs);
+  ASSERT_EQ(0, info->num_tunnel_subs);
+}
+
 int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);
   absl::ParseCommandLine(argc, argv);
