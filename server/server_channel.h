@@ -39,9 +39,10 @@ struct ResizeInfo {
 // reliable publishers have one).
 class User {
 public:
-  User(ClientHandler *handler, int id, bool is_reliable, bool is_bridge)
+  User(ClientHandler *handler, int id, bool is_reliable, bool is_bridge,
+       bool for_tunnel)
       : handler_(handler), id_(id), is_reliable_(is_reliable),
-        is_bridge_(is_bridge) {}
+        is_bridge_(is_bridge), for_tunnel_(for_tunnel) {}
   virtual ~User() = default;
 
   absl::Status Init() { return trigger_fd_.Open(); }
@@ -56,6 +57,7 @@ public:
   ClientHandler *GetHandler() const { return handler_; }
   bool IsReliable() const { return is_reliable_; }
   bool IsBridge() const { return is_bridge_; }
+  bool ForTunnel() const { return for_tunnel_; }
   void Trigger() { trigger_fd_.Trigger(); }
 
 private:
@@ -64,13 +66,14 @@ private:
   toolbelt::TriggerFd trigger_fd_;
   bool is_reliable_;
   bool is_bridge_; // This is used to send or receive over a bridge.
+  bool for_tunnel_ = false;
 };
 
 class SubscriberUser : public User {
 public:
   SubscriberUser(ClientHandler *handler, int id, bool is_reliable,
-                 bool is_bridge, int max_active_messages)
-      : User(handler, id, is_reliable, is_bridge),
+                 bool is_bridge, bool for_tunnel, int max_active_messages)
+      : User(handler, id, is_reliable, is_bridge, for_tunnel),
         max_active_messages_(max_active_messages) {}
   bool IsSubscriber() const override { return true; }
   int MaxActiveMessages() const { return max_active_messages_; }
@@ -82,9 +85,9 @@ private:
 class PublisherUser : public User {
 public:
   PublisherUser(ClientHandler *handler, int id, bool is_reliable, bool is_local,
-                bool is_bridge, bool is_fixed_size)
-      : User(handler, id, is_reliable, is_bridge), is_local_(is_local),
-        is_fixed_size_(is_fixed_size) {}
+                bool is_bridge, bool for_tunnel, bool is_fixed_size)
+      : User(handler, id, is_reliable, is_bridge, for_tunnel),
+        is_local_(is_local), is_fixed_size_(is_fixed_size) {}
 
   bool IsPublisher() const override { return true; }
   bool IsLocal() const { return is_local_; }
@@ -161,10 +164,12 @@ public:
   absl::StatusOr<PublisherUser *> AddPublisher(ClientHandler *handler,
                                                bool is_reliable, bool is_local,
                                                bool is_bridge,
+                                               bool for_tunnel,
                                                bool is_fixed_size);
   absl::StatusOr<SubscriberUser *> AddSubscriber(ClientHandler *handler,
                                                  bool is_reliable,
                                                  bool is_bridge,
+                                                 bool for_tunnel,
                                                  int max_active_messages);
 
   virtual std::string Type() const { return Channel::Type(); }
@@ -223,7 +228,8 @@ public:
   virtual bool IsEmpty() const { return user_ids_.IsEmpty(); }
   virtual absl::Status HasSufficientCapacity(int new_max_active_messages) const;
   virtual void CountUsers(int &num_pubs, int &num_subs, int &num_bridge_pubs,
-                          int &num_bridge_subs) const;
+                          int &num_bridge_subs, int &num_tunnel_pubs,
+                          int &num_tunnel_subs) const;
   virtual void GetChannelInfo(subspace::ChannelInfoProto *info);
   virtual void GetChannelStats(subspace::ChannelStatsProto *stats);
   void TriggerAllSubscribers();
@@ -357,7 +363,8 @@ public:
   }
 
   void CountUsers(int &num_pubs, int &num_subs, int &num_bridge_pubs,
-                  int &num_bridge_subs) const override;
+                  int &num_bridge_subs, int &num_tunnel_pubs,
+                  int &num_tunnel_subs) const override;
 
 private:
   int next_vchan_id_ = 0;
@@ -397,8 +404,10 @@ public:
   }
 
   void CountUsers(int &num_pubs, int &num_subs, int &num_bridge_pubs,
-                  int &num_bridge_subs) const override {
-    mux_->CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs);
+                  int &num_bridge_subs, int &num_tunnel_pubs,
+                  int &num_tunnel_subs) const override {
+    mux_->CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs,
+                     num_tunnel_pubs, num_tunnel_subs);
   }
   ChannelMultiplexer *GetMux() const { return mux_; }
   int GetVirtualChannelId() const override { return vchan_id_; }
@@ -437,9 +446,11 @@ public:
   uint64_t GetVirtualMemoryUsage() const override { return 0; }
 
   void GetUserCount(int &num_pubs, int &num_subs, int &num_bridge_pubs,
-                    int &num_bridge_subs) const {
+                    int &num_bridge_subs, int &num_tunnel_pubs,
+                    int &num_tunnel_subs) const {
     ServerChannel::CountUsers(num_pubs, num_subs, num_bridge_pubs,
-                              num_bridge_subs);
+                              num_bridge_subs, num_tunnel_pubs,
+                              num_tunnel_subs);
   }
 
   void GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,

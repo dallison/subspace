@@ -36,9 +36,10 @@ namespace subspace {
 #endif
 
 // Flag for flags field in MessagePrefix.
-constexpr int kMessageActivate = 1;    // This is a reliable activation message.
-constexpr int kMessageBridged = 2;     // This message came from the bridge.
-constexpr int kMessageHasChecksum = 4; // This message has a checksum.
+constexpr int kMessageActivate = 1;      // This is a reliable activation message.
+constexpr int kMessageBridged = 2;       // This message came from the bridge.
+constexpr int kMessageHasChecksum = 4;   // This message has a checksum.
+constexpr int kMessageCrossMachine = 8;  // This is a cross-machine (tunnel) message.
 
 // Maximum values for checksum_size and metadata_size (must fit in uint16_t).
 constexpr int32_t kMaxChecksumSize = 0xFFFF;
@@ -79,6 +80,8 @@ struct MessagePrefix {
   void SetIsBridged() { flags |= kMessageBridged; }
   bool HasChecksum() const { return (flags & kMessageHasChecksum) != 0; }
   void SetHasChecksum() { flags |= kMessageHasChecksum; }
+  bool IsCrossMachine() const { return (flags & kMessageCrossMachine) != 0; }
+  void SetIsCrossMachine() { flags |= kMessageCrossMachine; }
 };
 
 static_assert(sizeof(MessagePrefix) == 64,

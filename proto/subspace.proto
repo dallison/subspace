@@ -31,6 +31,7 @@ message CreatePublisherRequest {
   bool is_bridge = 6; // This publisher is for the bridge.
   bytes type = 7;     // Type of data carried on channel.
   bool is_fixed_size = 8;
+  bool for_tunnel = 15;
   string mux = 9;
   int32 vchan_id = 10;
   bool notify_retirement = 11; // Notify publisher of slot retirement.
@@ -64,6 +65,7 @@ message CreateSubscriberRequest {
   bool is_bridge = 4;            // This subscriber is for the bridge.
   bytes type = 5;                // Type of data carried on channel.
   int32 max_active_messages = 6; // Max number of active message objects.
+  bool for_tunnel = 9;
   string mux = 7;
   int32 vchan_id = 8;
 }
@@ -167,6 +169,8 @@ message ChannelInfoProto {
   int32 num_bridge_pubs = 7; // Number of publishers that are bridges.
   int32 num_bridge_subs = 8; // Number of subscribers that are bridges.
   bool is_reliable = 9;      // True if channel is reliable.
+  int32 num_tunnel_pubs = 13;  // Number of publishers that are tunnels.
+  int32 num_tunnel_subs = 14;  // Number of subscribers that are tunnels.
   bool is_virtual = 10;      // True if channel is virtual.
 
   // Only if is_virtual is true.
