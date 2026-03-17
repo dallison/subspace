@@ -1,4 +1,5 @@
 // Copyright 2024-2026 David Allison
+// Rust client is Copyright 2026 Cruise LLC
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
