@@ -98,6 +98,22 @@ FetchContent_MakeAvailable(protobuf)
 # Protobuf provides targets like protobuf::libprotobuf and protobuf::protoc
 # These targets can be used directly without find_package
 
+# --- Option: Python bindings ---
+option(SUBSPACE_PYTHON "Build Python bindings (requires Python3 and pybind11)" OFF)
+
+if(SUBSPACE_PYTHON)
+    find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
+
+    FetchContent_Declare(
+        pybind11
+        GIT_REPOSITORY https://github.com/pybind/pybind11.git
+        GIT_TAG v2.13.6
+        CMAKE_ARGS
+            -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
+    )
+    FetchContent_MakeAvailable(pybind11)
+endif()
+
 #add to get */file.h includes working
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 #add to get proto/subspace.pb.h working
@@ -116,4 +132,25 @@ add_subdirectory(server)
 add_subdirectory(shadow)
 add_subdirectory(c_client)
 add_subdirectory(rust_client)
+
+# --- Python bindings and tests ---
+if(SUBSPACE_PYTHON)
+    add_subdirectory(client/python)
+    add_subdirectory(server/python)
+
+    # Create __init__.py package stubs so that the hierarchical imports
+    # (e.g. "import client.python.subspace") resolve from the build tree.
+    file(WRITE "${CMAKE_BINARY_DIR}/client/__init__.py" "")
+    file(WRITE "${CMAKE_BINARY_DIR}/client/python/__init__.py" "")
+    file(WRITE "${CMAKE_BINARY_DIR}/server/__init__.py" "")
+    file(WRITE "${CMAKE_BINARY_DIR}/server/python/__init__.py" "")
+
+    add_test(
+        NAME python_client_test
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/client/python/client_test.py -v
+    )
+    set_tests_properties(python_client_test PROPERTIES
+        ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}"
+    )
+endif()
 
