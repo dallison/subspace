@@ -52,6 +52,8 @@ PYBIND11_MODULE(subspace, m) {
       .def_readonly("num_subscribers", &ChannelInfo::num_subscribers)
       .def_readonly("num_bridge_pubs", &ChannelInfo::num_bridge_pubs)
       .def_readonly("num_bridge_subs", &ChannelInfo::num_bridge_subs)
+      .def_readonly("num_tunnel_pubs", &ChannelInfo::num_tunnel_pubs)
+      .def_readonly("num_tunnel_subs", &ChannelInfo::num_tunnel_subs)
       .def_readonly("type", &ChannelInfo::type)
       .def_readonly("slot_size", &ChannelInfo::slot_size)
       .def_readonly("num_slots", &ChannelInfo::num_slots)
@@ -114,7 +116,21 @@ PYBIND11_MODULE(subspace, m) {
       .def("set_checksum", &PublisherOptions::SetChecksum,
            "Set whether published messages include a checksum.")
       .def("checksum", &PublisherOptions::Checksum,
-           "Get whether published messages include a checksum.");
+           "Get whether published messages include a checksum.")
+      .def("set_checksum_size", &PublisherOptions::SetChecksumSize,
+           "Set the checksum size in bytes.")
+      .def("checksum_size", &PublisherOptions::ChecksumSize,
+           "Get the checksum size in bytes.")
+      .def("set_metadata_size", &PublisherOptions::SetMetadataSize,
+           "Set the metadata size in bytes.")
+      .def("metadata_size", &PublisherOptions::MetadataSize,
+           "Get the metadata size in bytes.")
+      .def("set_for_tunnel", &PublisherOptions::SetForTunnel,
+           "Set whether this publisher is for an external tunnel process. "
+           "Tunnel publishers mark messages with a cross-machine flag so "
+           "subscribers can distinguish locally vs remotely generated messages.")
+      .def("for_tunnel", &PublisherOptions::ForTunnel,
+           "Get whether this publisher is for an external tunnel process.");
 
   // SubscriberOptions class.
   py::class_<SubscriberOptions>(m, "SubscriberOptions",
@@ -174,7 +190,13 @@ PYBIND11_MODULE(subspace, m) {
            "active message.")
       .def("keep_active_message", &SubscriberOptions::KeepActiveMessage,
            "Get whether the subscriber keeps a reference to the most recent "
-           "active message.");
+           "active message.")
+      .def("set_for_tunnel", &SubscriberOptions::SetForTunnel,
+           "Set whether this subscriber is for an external tunnel process. "
+           "Tunnel subscribers need to know whether messages are locally or "
+           "remotely generated via the cross-machine flag.")
+      .def("for_tunnel", &SubscriberOptions::ForTunnel,
+           "Get whether this subscriber is for an external tunnel process.");
 
   // Message class returned from read_message.
   py::class_<Message>(m, "Message",
@@ -209,7 +231,13 @@ PYBIND11_MODULE(subspace, m) {
       .def_readonly("slot_id", &Message::slot_id,
                     "The slot ID of the message.")
       .def_readonly("checksum_error", &Message::checksum_error,
-                    "Whether a checksum error was detected for this message.");
+                    "Whether a checksum error was detected for this message.")
+      .def("channel_type", &Message::ChannelType,
+           "Get the channel type string for this message's channel.")
+      .def("num_slots", &Message::NumSlots,
+           "Get the number of message slots in this message's channel.")
+      .def("slot_size", &Message::SlotSize,
+           "Get the slot size in bytes for this message's channel.");
 
   // -------------------------------------------------------------------------
   // Publisher
@@ -410,6 +438,64 @@ allow the resize or False to prevent it.)doc",
         }
       },
       "Unregister the resize callback.");
+
+  publisher_class.def("for_tunnel", &Publisher::ForTunnel,
+                      "Get whether this publisher is for a tunnel process.");
+
+  publisher_class.def("prefix_size", &Publisher::PrefixSize,
+                      "Get the total prefix area size in bytes.");
+
+  publisher_class.def("checksum_size", &Publisher::ChecksumSize,
+                      "Get the checksum size in bytes (default 4 for CRC32).");
+
+  publisher_class.def("metadata_size", &Publisher::MetadataSize,
+                      "Get the user metadata size in bytes (default 0).");
+
+  publisher_class.def(
+      "get_metadata",
+      [](Publisher *self) -> py::bytes {
+        absl::Span<std::byte> span = self->GetMetadata();
+        return py::bytes(reinterpret_cast<const char *>(span.data()),
+                         span.size());
+      },
+      R"doc(Get the metadata area as bytes.  Call this between
+get_message_buffer() and publish_buffer() to read the current
+metadata contents.)doc");
+
+  publisher_class.def(
+      "set_metadata",
+      [](Publisher *self, py::bytes data) {
+        auto view = static_cast<std::string_view>(data);
+        absl::Span<std::byte> span = self->GetMetadata();
+        if (view.size() > span.size()) {
+          throw std::runtime_error(
+              "Metadata too large: " + std::to_string(view.size()) +
+              " bytes vs " + std::to_string(span.size()) + " available");
+        }
+        std::memcpy(span.data(), view.data(), view.size());
+      },
+      R"doc(Write metadata into the current slot's prefix area.  Call this
+between get_message_buffer() and publish_buffer().  The data
+must not exceed metadata_size() bytes.)doc",
+      py::arg("data"));
+
+  publisher_class.def(
+      "get_stats_counters",
+      [](Publisher *self) -> py::dict {
+        uint64_t total_bytes = 0, total_messages = 0;
+        uint32_t max_message_size = 0, total_drops = 0;
+        self->GetStatsCounters(total_bytes, total_messages, max_message_size,
+                               total_drops);
+        py::dict d;
+        d["total_bytes"] = total_bytes;
+        d["total_messages"] = total_messages;
+        d["max_message_size"] = max_message_size;
+        d["total_drops"] = total_drops;
+        return d;
+      },
+      R"doc(Get cumulative stats counters for this publisher.  Returns a dict
+with keys: total_bytes, total_messages, max_message_size,
+total_drops.)doc");
 
   // -------------------------------------------------------------------------
   // Subscriber
@@ -668,6 +754,35 @@ The callback receives an integer count of messages that were missed.)doc",
         }
       },
       "Unregister the dropped-message callback.");
+
+  subscriber_class.def("for_tunnel", &Subscriber::ForTunnel,
+                       "Get whether this subscriber is for a tunnel process.");
+
+  subscriber_class.def("prefix_size", &Subscriber::PrefixSize,
+                       "Get the total prefix area size in bytes.");
+
+  subscriber_class.def("checksum_size", &Subscriber::ChecksumSize,
+                       "Get the checksum size in bytes (default 4 for CRC32).");
+
+  subscriber_class.def("metadata_size", &Subscriber::MetadataSize,
+                       "Get the user metadata size in bytes (default 0).");
+
+  subscriber_class.def(
+      "get_metadata",
+      [](Subscriber *self) -> py::bytes {
+        absl::Span<const std::byte> span = self->GetMetadata();
+        return py::bytes(reinterpret_cast<const char *>(span.data()),
+                         span.size());
+      },
+      R"doc(Get the read-only metadata from the most recently read message's
+prefix.  Only valid while the message is active (between
+read_message_object() and Reset / context-manager exit).  Returns
+empty bytes if metadata_size is 0.)doc");
+
+  subscriber_class.def("trigger_reliable_publishers",
+                       &Subscriber::TriggerReliablePublishers,
+                       "Trigger all reliable publishers on this channel to "
+                       "wake up and retry sending.");
 
   // -------------------------------------------------------------------------
   // Client

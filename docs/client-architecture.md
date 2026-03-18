@@ -23,7 +23,7 @@ Each channel uses three shared memory structures:
 1. **Create publisher** — client sends an RPC to the server, which allocates shared memory and returns file descriptors for the CCB, buffers, and trigger FDs.
 2. **`GetMessageBuffer(size)`** — returns a pointer into a shared memory slot. If the message is larger than the current slot size, the channel auto-resizes.
 3. **User writes data** directly into the buffer (zero-copy).
-4. **`PublishMessage(length)`** — writes a `MessagePrefix` (size, ordinal, timestamp, optional checksum), marks the slot as available, and triggers subscriber file descriptors to wake them up.
+4. **`PublishMessage(length)`** — writes a `MessagePrefix` (size, ordinal, timestamp, optional checksum and user metadata in the prefix area), marks the slot as available, and triggers subscriber file descriptors to wake them up.
 
 ## Subscribing Flow
 
@@ -53,8 +53,9 @@ A thin C layer over the C++ API using opaque `void*` pointers and thread-local e
 
 - **Virtual channels** — multiplex logical channels on one physical channel.
 - **Coroutine support** — the client can yield when waiting for slots/messages (uses the `co` library).
-- **Checksums** — optional message integrity verification.
+- **Checksums** — optional message integrity verification using CRC32 by default, with support for arbitrary-sized checksums via callbacks.  The `checksum_size` and `metadata_size` publisher options control the prefix layout; user metadata can be attached to each message through `GetMetadata()`.  See [Checksums and User Metadata](checksums-and-metadata.md) for details.
 - **Bridging** — forwards channels between servers over TCP for cross-machine communication.
+- **Tunnel support** — the `for_tunnel` publisher/subscriber option marks messages with the `kMessageCrossMachine` flag in the `MessagePrefix`, allowing external tunnel processes to distinguish locally and remotely generated messages.
 
 ## Summary
 

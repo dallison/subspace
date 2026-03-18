@@ -10,6 +10,7 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/types/span.h"
 #include "common/atomic_bitset.h"
 #include "toolbelt/bitset.h"
 #include "toolbelt/fd.h"
@@ -35,9 +36,14 @@ namespace subspace {
 #endif
 
 // Flag for flags field in MessagePrefix.
-constexpr int kMessageActivate = 1;    // This is a reliable activation message.
-constexpr int kMessageBridged = 2;     // This message came from the bridge.
-constexpr int kMessageHasChecksum = 4; // This message has a checksum.
+constexpr int kMessageActivate = 1;      // This is a reliable activation message.
+constexpr int kMessageBridged = 2;       // This message came from the bridge.
+constexpr int kMessageHasChecksum = 4;   // This message has a checksum.
+constexpr int kMessageCrossMachine = 8;  // This is a cross-machine (tunnel) message.
+
+// Maximum values for checksum_size and metadata_size (must fit in uint16_t).
+constexpr int32_t kMaxChecksumSize = 0xFFFF;
+constexpr int32_t kMaxMetadataSize = 0xFFFF;
 
 // This is stored immediately before the channel buffer in shared
 // memory.  It is transferred intact across the TCP bridges.
@@ -63,8 +69,10 @@ struct MessagePrefix {
   uint64_t timestamp;
   int64_t flags;
   int32_t vchan_id;
+  uint16_t checksum_size;
+  uint16_t metadata_size;
   uint32_t checksum;
-  char padding2[64 - 48]; // Align to 64 bytes.
+  char padding3[64 - 52]; // Align to 64 bytes.
 
   bool IsActivation() const { return (flags & kMessageActivate) != 0; }
   void SetIsActivation() { flags |= kMessageActivate; }
@@ -72,6 +80,8 @@ struct MessagePrefix {
   void SetIsBridged() { flags |= kMessageBridged; }
   bool HasChecksum() const { return (flags & kMessageHasChecksum) != 0; }
   void SetHasChecksum() { flags |= kMessageHasChecksum; }
+  bool IsCrossMachine() const { return (flags & kMessageCrossMachine) != 0; }
+  void SetIsCrossMachine() { flags |= kMessageCrossMachine; }
 };
 
 static_assert(sizeof(MessagePrefix) == 64,
@@ -200,19 +210,57 @@ struct BufferControlBlock {
       sizes[kMaxBuffers]; // Number of references to this buffer.
 };
 
-// Given a message prefix and a buffer containing the message data return a vector of spans
-// that can be used to calculate the checksum.
-inline std::array<absl::Span<const uint8_t>, 2>
+// Given a message prefix and a buffer containing the message data return three
+// spans covering the data to be checksummed:
+//   [0] prefix fields before the checksum (slot_id through padding2)
+//   [1] user metadata area (immediately after the checksum storage)
+//   [2] message payload
+inline std::array<absl::Span<const uint8_t>, 3>
 GetMessageChecksumData(MessagePrefix *prefix, void *buffer,
-                       size_t message_size) {
-  std::array<absl::Span<const uint8_t>, 2> data = {
-      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t *>(
-                                    prefix) + offsetof(MessagePrefix, slot_id),
+                       size_t message_size, int32_t checksum_size,
+                       int32_t metadata_size) {
+  const auto *base = reinterpret_cast<const uint8_t *>(prefix);
+  std::array<absl::Span<const uint8_t>, 3> data = {
+      absl::Span<const uint8_t>(base + offsetof(MessagePrefix, slot_id),
                                 offsetof(MessagePrefix, checksum) -
                                     offsetof(MessagePrefix, slot_id)),
+      absl::Span<const uint8_t>(
+          base + offsetof(MessagePrefix, checksum) + checksum_size,
+          metadata_size),
       absl::Span<const uint8_t>(reinterpret_cast<const uint8_t *>(buffer),
                                 message_size)};
   return data;
+}
+
+// Get a span over the checksum storage area within the prefix.
+inline absl::Span<std::byte> GetChecksumSpan(MessagePrefix *prefix,
+                                             int32_t checksum_size) {
+  return absl::Span<std::byte>(
+      reinterpret_cast<std::byte *>(&prefix->checksum), checksum_size);
+}
+
+inline absl::Span<const std::byte>
+GetChecksumSpan(const MessagePrefix *prefix, int32_t checksum_size) {
+  return absl::Span<const std::byte>(
+      reinterpret_cast<const std::byte *>(&prefix->checksum), checksum_size);
+}
+
+// Get a span over the user metadata area, which immediately follows
+// the checksum area in the prefix extensions.
+inline absl::Span<std::byte> GetMetadataSpan(MessagePrefix *prefix,
+                                             int32_t checksum_size,
+                                             int32_t metadata_size) {
+  return absl::Span<std::byte>(
+      reinterpret_cast<std::byte *>(&prefix->checksum) + checksum_size,
+      metadata_size);
+}
+
+inline absl::Span<const std::byte>
+GetMetadataSpan(const MessagePrefix *prefix, int32_t checksum_size,
+                int32_t metadata_size) {
+  return absl::Span<const std::byte>(
+      reinterpret_cast<const std::byte *>(&prefix->checksum) + checksum_size,
+      metadata_size);
 }
 
 // This counts the number of subscribers given a virtual channel id.
@@ -409,15 +457,35 @@ public:
   void DumpSlots(std::ostream &os) const;
   virtual void Dump(std::ostream &os) const;
 
+  // Compute the prefix size in bytes from checksum and metadata sizes.
+  // The result is rounded up to a 64-byte boundary.
+  static int32_t ComputePrefixSize(int32_t checksum_size,
+                                   int32_t metadata_size) {
+    return static_cast<int32_t>(
+        Aligned<64>(offsetof(MessagePrefix, checksum) + checksum_size +
+                    metadata_size));
+  }
+
+  // Total prefix area size in bytes (always a multiple of 64).
+  int32_t PrefixSize() const { return prefix_size_; }
+  void SetPrefixSize(int32_t size) { prefix_size_ = size; }
+
+  int32_t ChecksumSize() const { return checksum_size_; }
+  void SetChecksumSize(int32_t size) { checksum_size_ = size; }
+
+  int32_t MetadataSize() const { return metadata_size_; }
+  void SetMetadataSize(int32_t size) { metadata_size_ = size; }
+
   uint64_t BufferSizeToSlotSize(uint64_t size) const {
-    if (size < NumSlots() * sizeof(MessagePrefix)) {
+    if (size < NumSlots() * static_cast<uint64_t>(PrefixSize())) {
       return 0;
     }
-    return (size - NumSlots() * sizeof(MessagePrefix)) / NumSlots();
+    return (size - NumSlots() * static_cast<uint64_t>(PrefixSize())) /
+           NumSlots();
   };
 
   uint64_t SlotSizeToBufferSize(uint64_t slot_size) const {
-    return NumSlots() * (slot_size + sizeof(MessagePrefix));
+    return NumSlots() * (slot_size + PrefixSize());
   }
 
   // Get the number of slots in the channel (can't be changed)
@@ -538,6 +606,9 @@ protected:
 
   int channel_id_; // ID allocated from server.
   std::string type_;
+  int32_t prefix_size_ = 64;
+  int32_t checksum_size_ = 4;
+  int32_t metadata_size_ = 0;
 
   uint16_t num_updates_ = 0;
 

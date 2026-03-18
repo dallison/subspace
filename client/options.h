@@ -81,6 +81,17 @@ struct PublisherOptions {
 
   bool IsBridge() const { return bridge; }
 
+  // Adds support for external tunnel processes that need to know whether
+  // messages are locally or remotely generated.  When set, the cross-machine
+  // flag is written into the MessagePrefix and reliable channel activation
+  // is skipped (the existing local publisher will have already activated).
+  PublisherOptions &SetForTunnel(bool v) {
+    for_tunnel = v;
+    return *this;
+  }
+
+  bool ForTunnel() const { return for_tunnel; }
+
   PublisherOptions &SetMux(std::string m) {
     mux = std::move(m);
     return *this;
@@ -122,6 +133,22 @@ struct PublisherOptions {
   }
   bool Checksum() const { return checksum; }
 
+  // Number of bytes reserved for the checksum starting at the checksum
+  // field of MessagePrefix.  Default is 4 (CRC32).
+  PublisherOptions &SetChecksumSize(int32_t size) {
+    checksum_size = size;
+    return *this;
+  }
+  int32_t ChecksumSize() const { return checksum_size; }
+
+  // Number of bytes of user metadata stored immediately after the
+  // checksum area in the prefix extensions.  Default is 0 (none).
+  PublisherOptions &SetMetadataSize(int32_t size) {
+    metadata_size = size;
+    return *this;
+  }
+  int32_t MetadataSize() const { return metadata_size; }
+
   // If you use the new CreatePublisher API, set the slot size and num slots in
   // here.
   int32_t slot_size = 0;
@@ -130,6 +157,7 @@ struct PublisherOptions {
   bool local = false;
   bool reliable = false;
   bool bridge = false;
+  bool for_tunnel = false;
   bool fixed_size = false;
   std::string type;
   bool activate =
@@ -139,6 +167,8 @@ struct PublisherOptions {
   int vchan_id = -1; // If -1, server will assign.
   bool notify_retirement = false;
   bool checksum = false;
+  int32_t checksum_size = 4;
+  int32_t metadata_size = 0;
 };
 
 struct SubscriberOptions {
@@ -180,6 +210,14 @@ struct SubscriberOptions {
     return *this;
   }
   bool IsBridge() const { return bridge; }
+
+  // Adds support for external tunnel processes that need to know whether
+  // messages are locally or remotely generated.
+  SubscriberOptions &SetForTunnel(bool v) {
+    for_tunnel = v;
+    return *this;
+  }
+  bool ForTunnel() const { return for_tunnel; }
 
   SubscriberOptions &SetMux(std::string m) {
     mux = std::move(m);
@@ -233,6 +271,7 @@ struct SubscriberOptions {
 
   bool reliable = false;
   bool bridge = false;
+  bool for_tunnel = false;
   std::string type;
   int max_active_messages = 1;
   bool log_dropped_messages = true;

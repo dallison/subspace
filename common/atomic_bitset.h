@@ -106,8 +106,8 @@ public:
 
   void Traverse(std::function<void(size_t)> func) const {
     for (size_t i = 0; i < BitsToWords(num_bits_); i++) {
-      int shift = 0;
-      int bit = i * 64;
+      size_t shift = 0;
+      size_t bit = i * 64;
       while (bit < num_bits_ && shift < 64) {
         uint64_t word = bits_[i].load(std::memory_order_relaxed) >> shift;
         size_t n = ffsll(word);
