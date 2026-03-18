@@ -613,7 +613,7 @@ impl PublisherImpl {
                     Err(_) => {
                         // File already exists, attach to it.
                         let fd = open_shm(&shm_name)?;
-                        let size = get_shm_size(fd)?;
+                        let size = get_shm_size(fd, &shm_name)?;
                         let cs = self.channel.buffer_size_to_slot_size(size as u64);
                         let addr = if cs > 0 {
                             map_memory(
@@ -698,11 +698,33 @@ fn create_shm(name: &str, size: usize) -> crate::error::Result<RawFd> {
 }
 
 #[cfg(not(target_os = "linux"))]
+fn posix_shm_name(shadow_path: &str) -> crate::error::Result<String> {
+    let stat = nix::sys::stat::stat(shadow_path)?;
+    Ok(format!("subspace_{}", stat.st_ino))
+}
+
+#[cfg(not(target_os = "linux"))]
 fn create_shm(name: &str, size: usize) -> crate::error::Result<RawFd> {
     use nix::sys::mman::shm_open;
     use std::os::unix::io::IntoRawFd;
-    let fd = shm_open(
+
+    // Create a shadow file at the given path and truncate it to the desired
+    // size.  macOS returns a page-aligned size from fstat on shm fds, so we
+    // read the real size from this shadow file instead.
+    let shadow_fd = nix::fcntl::open(
         name,
+        OFlag::O_RDWR | OFlag::O_CREAT,
+        Mode::from_bits_truncate(0o666),
+    )?;
+    unsafe { libc::ftruncate(shadow_fd, size as libc::off_t); }
+    unsafe { libc::close(shadow_fd); }
+
+    // Use the shadow file's inode to build a short name that fits within
+    // macOS's PSHMNAMELEN (31-char) limit.
+    let shm_name = posix_shm_name(name)?;
+
+    let fd = shm_open(
+        shm_name.as_str(),
         OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_EXCL,
         Mode::from_bits_truncate(0o666),
     )?;
@@ -722,12 +744,22 @@ fn open_shm(name: &str) -> crate::error::Result<RawFd> {
 fn open_shm(name: &str) -> crate::error::Result<RawFd> {
     use nix::sys::mman::shm_open;
     use std::os::unix::io::IntoRawFd;
-    let fd = shm_open(name, OFlag::O_RDWR, Mode::empty())?;
+    let shm_name = posix_shm_name(name)?;
+    let fd = shm_open(shm_name.as_str(), OFlag::O_RDWR, Mode::empty())?;
     Ok(fd.into_raw_fd())
 }
 
-fn get_shm_size(fd: RawFd) -> crate::error::Result<usize> {
+#[cfg(target_os = "linux")]
+fn get_shm_size(fd: RawFd, _shadow_path: &str) -> crate::error::Result<usize> {
     let stat = nix::sys::stat::fstat(fd)?;
+    Ok(stat.st_size as usize)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn get_shm_size(_fd: RawFd, shadow_path: &str) -> crate::error::Result<usize> {
+    // macOS fstat on shm fds returns page-aligned sizes; read the shadow file
+    // to get the real size (matches C++ GetBufferSize).
+    let stat = nix::sys::stat::stat(shadow_path)?;
     Ok(stat.st_size as usize)
 }
 
@@ -764,7 +796,7 @@ pub fn attach_buffers(channel: &mut Channel, read_write: bool) -> crate::error::
         let shm_name = channel.buffer_shared_memory_name(&resolved_name, buffer_index);
 
         let fd = open_shm(&shm_name)?;
-        let size = get_shm_size(fd)?;
+        let size = get_shm_size(fd, &shm_name)?;
         let cs = channel.buffer_size_to_slot_size(size as u64);
         let prot = if read_write {
             ProtFlags::PROT_READ | ProtFlags::PROT_WRITE
