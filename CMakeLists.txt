@@ -13,6 +13,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF) # Prefer standard C++
 
 set(protobuf_BUILD_TESTS OFF CACHE INTERNAL "No protobuf tests")
+set(ABSL_BUILD_TEST_HELPERS ON CACHE INTERNAL "Enable Abseil TESTONLY+PUBLIC helpers (e.g. status_matchers)")
+set(ABSL_USE_EXTERNAL_GOOGLETEST ON CACHE INTERNAL "Use our GoogleTest instead of Abseil downloading its own")
+set(ABSL_FIND_GOOGLETEST OFF CACHE INTERNAL "Don't find_package(GTest); we provide it via FetchContent")
 
 # Add common compile options as found in subspace/BUILD
 # These will apply to all targets in this CMakeLists.txt unless overridden.
@@ -33,60 +36,51 @@ endif()
 # Include FetchContent module for handling external dependencies
 include(FetchContent)
 
+# --- External Dependency: Googletest (using FetchContent for native CMake) ---
+# Fetched first so Abseil can find it when ABSL_BUILD_TEST_HELPERS is ON.
+FetchContent_Declare(
+    googletest
+    GIT_REPOSITORY https://github.com/google/googletest.git
+    GIT_TAG v1.15.2 # Matches the version in MODULE.bazel
+    CMAKE_ARGS
+        -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
+)
+FetchContent_MakeAvailable(googletest)
+
 # --- External Dependency: Abseil (using FetchContent for native CMake) ---
 set(ABSL_ENABLE_INSTALL ON)
 FetchContent_Declare(
     abseil
     GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
-    GIT_TAG 20240722.0 # Matches the version in your WORKSPACE
-    # Pass architecture settings and CXX standard propagation to Abseil's CMake build
+    GIT_TAG 20240722.0
     CMAKE_ARGS
         -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
-        -DABSL_PROPAGATE_CXX_STD=ON # Propagate C++ standard settings
+        -DABSL_PROPAGATE_CXX_STD=ON
 )
 FetchContent_MakeAvailable(abseil)
-# Abseil provides targets like absl::base, absl::strings, etc.
 
 # --- External Dependency: co (using FetchContent for native CMake) ---
-# Using the same version as Bazel build (commit cf1252b2f5952d7cba83b67dd69288971c0a2b57)
 # MUST be declared before cpp_toolbelt since cpp_toolbelt depends on it
 FetchContent_Declare(
     co
     GIT_REPOSITORY https://github.com/dallison/co.git
     GIT_TAG c1cd0992d51c7a9bf9e4ecc0b6204cca05adc4a6
-    # Pass architecture settings to co's CMake build
     CMAKE_ARGS
         -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
 )
 FetchContent_MakeAvailable(co)
-# co provides the 'co' target.
 
 # --- External Dependency: cpp_toolbelt (using FetchContent for native CMake) ---
-# Using the same version as Bazel build (commit 7ec0e2cd2a17a006f976df23d07ad530499249e0)
-# Note: cpp_toolbelt's CMakeLists.txt will try to fetch co, but since we've already
+# cpp_toolbelt's CMakeLists.txt will try to fetch co, but since we've already
 # declared it above, FetchContent will use our version instead
 FetchContent_Declare(
     cpp_toolbelt
     GIT_REPOSITORY https://github.com/dallison/cpp_toolbelt.git
     GIT_TAG 1aa8db7fd7096b53a1daa1bba86bbda8a312c7dd
-    # Pass architecture settings to cpp_toolbelt's CMake build
     CMAKE_ARGS
         -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
 )
 FetchContent_MakeAvailable(cpp_toolbelt)
-# cpp_toolbelt provides the 'toolbelt' target.
-
-# --- External Dependency: Googletest (using FetchContent for native CMake) ---
-FetchContent_Declare(
-    googletest
-    GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG v1.15.2 # Matches the version in MODULE.bazel
-    # Pass architecture settings to Googletest's CMake build
-    CMAKE_ARGS
-        -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
-)
-FetchContent_MakeAvailable(googletest)
-# Googletest provides targets like gtest, gtest_main, gmock, gmock_main
 
 # --- External Dependency: Protobuf (using FetchContent for native CMake) ---
 FetchContent_Declare(
@@ -116,8 +110,10 @@ enable_testing() # Enable CTest for running tests
 # These directories are expected to contain their own CMakeLists.txt files
 # that define targets (libraries, executables, etc.)
 add_subdirectory(proto)
+add_subdirectory(common)
 add_subdirectory(client)
 add_subdirectory(server)
-add_subdirectory(common)
+add_subdirectory(shadow)
 add_subdirectory(c_client)
+add_subdirectory(rust_client)
 
