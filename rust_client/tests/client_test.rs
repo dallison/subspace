@@ -412,9 +412,9 @@ unsafe impl Sync for ServerGuard {}
 #[cfg(server_ffi)]
 impl ServerGuard {
     fn start() -> Self {
-        let tmp = std::env::temp_dir()
-            .join(format!("subspace_rust_test_{}", std::process::id()));
-        let socket_path = tmp.to_str().unwrap().to_string();
+        // Use /tmp directly — std::env::temp_dir() on macOS (especially under
+        // Bazel) can exceed the 104-byte sun_path limit for Unix sockets.
+        let socket_path = format!("/tmp/ss_rt_{}", std::process::id());
 
         let mut pipe_fds = [0 as libc::c_int; 2];
         assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
@@ -526,9 +526,9 @@ struct ServerGuard {
 #[cfg(not(server_ffi))]
 impl ServerGuard {
     fn start() -> Self {
-        let tmp = std::env::temp_dir()
-            .join(format!("subspace_rust_test_{}", std::process::id()));
-        let socket_path = tmp.to_str().unwrap().to_string();
+        // Use /tmp directly — std::env::temp_dir() on macOS (especially under
+        // Bazel) can exceed the 104-byte sun_path limit for Unix sockets.
+        let socket_path = format!("/tmp/ss_rt_{}", std::process::id());
 
         let binary = find_server_binary();
         let child = Command::new(&binary)
