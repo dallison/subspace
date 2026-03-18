@@ -38,8 +38,8 @@ jobs:
           bazel test //... \
             --test_tag_filters=-large \
             --verbose_failures \
+            --test_output=errors \
             ${{ matrix.bazel_flags }}
-            --test_output=errors
 
         # Just separate these out so they don't run if some smaller tests fail.
       - name: Run large tests
@@ -47,12 +47,12 @@ jobs:
           bazel test //... \
             --test_tag_filters=large \
             --verbose_failures \
+            --test_output=errors \
             ${{ matrix.bazel_flags }} \
-            --test_output=errors
 
       - name: Upload Bazel test logs
         uses: actions/upload-artifact@v7
-        if: always() # Upload artifacts even if the previous step failed
+        if: failure() # Upload artifacts only if a step failed
         with:
           name: bazel-test-logs
           path: bazel-testlogs
