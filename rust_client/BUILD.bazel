@@ -1,4 +1,5 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 
@@ -29,6 +30,15 @@ rust_library(
     ],
 )
 
+cc_library(
+    name = "cross_lang_ffi",
+    srcs = ["cross_lang_ffi.cc"],
+    hdrs = ["cross_lang_ffi.h"],
+    deps = [
+        "//client:subspace_client",
+    ],
+)
+
 rust_test(
     name = "client_test",
     srcs = ["tests/client_test.rs"],
@@ -36,6 +46,7 @@ rust_test(
     env = {"RUST_TEST_THREADS": "1"},
     deps = [
         ":subspace_client_rust",
+        ":cross_lang_ffi",
         "//server:server_ffi",
     ] + all_crate_deps(normal = True),
 )

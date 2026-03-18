@@ -2275,3 +2275,349 @@ fn integration_reliable_publisher_activation() {
     // Publisher can obtain a buffer again.
     assert!(publisher.get_message_buffer(32).unwrap().is_some());
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Cross-language tests: C++ client (via FFI) ↔ Rust client
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(server_ffi)]
+extern "C" {
+    fn cpp_test_create_client(
+        socket_name: *const std::ffi::c_char,
+        name: *const std::ffi::c_char,
+    ) -> *mut std::ffi::c_void;
+    fn cpp_test_destroy_client(handle: *mut std::ffi::c_void);
+
+    fn cpp_test_create_publisher(
+        client: *mut std::ffi::c_void,
+        channel: *const std::ffi::c_char,
+        slot_size: i32,
+        num_slots: std::ffi::c_int,
+        checksum_size: i32,
+        metadata_size: i32,
+    ) -> *mut std::ffi::c_void;
+    fn cpp_test_destroy_publisher(handle: *mut std::ffi::c_void);
+    fn cpp_test_publish(
+        pub_handle: *mut std::ffi::c_void,
+        payload: *const u8,
+        payload_len: usize,
+        metadata: *const u8,
+        metadata_len: usize,
+    ) -> i64;
+
+    fn cpp_test_create_subscriber(
+        client: *mut std::ffi::c_void,
+        channel: *const std::ffi::c_char,
+        checksum: bool,
+    ) -> *mut std::ffi::c_void;
+    fn cpp_test_destroy_subscriber(handle: *mut std::ffi::c_void);
+    fn cpp_test_subscriber_fd(handle: *mut std::ffi::c_void) -> std::ffi::c_int;
+    fn cpp_test_read_message(
+        handle: *mut std::ffi::c_void,
+        payload_out: *mut u8,
+        payload_cap: usize,
+        metadata_out: *mut u8,
+        metadata_cap: usize,
+        metadata_size_out: *mut i32,
+    ) -> i64;
+}
+
+/// RAII wrapper around the C++ client FFI handle.
+#[cfg(server_ffi)]
+struct CppClient(*mut std::ffi::c_void);
+
+#[cfg(server_ffi)]
+impl CppClient {
+    fn new(name: &str) -> Self {
+        let c_sock = std::ffi::CString::new(server_socket()).unwrap();
+        let c_name = std::ffi::CString::new(name).unwrap();
+        let h = unsafe { cpp_test_create_client(c_sock.as_ptr(), c_name.as_ptr()) };
+        assert!(!h.is_null(), "cpp_test_create_client failed");
+        CppClient(h)
+    }
+}
+
+#[cfg(server_ffi)]
+impl Drop for CppClient {
+    fn drop(&mut self) {
+        unsafe { cpp_test_destroy_client(self.0) };
+    }
+}
+
+#[cfg(server_ffi)]
+struct CppPublisher(*mut std::ffi::c_void);
+
+#[cfg(server_ffi)]
+impl CppPublisher {
+    fn new(
+        client: &CppClient,
+        channel: &str,
+        slot_size: i32,
+        num_slots: i32,
+        checksum_size: i32,
+        metadata_size: i32,
+    ) -> Self {
+        let c_ch = std::ffi::CString::new(channel).unwrap();
+        let h = unsafe {
+            cpp_test_create_publisher(
+                client.0,
+                c_ch.as_ptr(),
+                slot_size,
+                num_slots as std::ffi::c_int,
+                checksum_size,
+                metadata_size,
+            )
+        };
+        assert!(!h.is_null(), "cpp_test_create_publisher failed");
+        CppPublisher(h)
+    }
+
+    fn publish(&self, payload: &[u8], metadata: &[u8]) -> i64 {
+        let meta_ptr = if metadata.is_empty() {
+            std::ptr::null()
+        } else {
+            metadata.as_ptr()
+        };
+        let ord = unsafe {
+            cpp_test_publish(self.0, payload.as_ptr(), payload.len(), meta_ptr, metadata.len())
+        };
+        assert!(ord >= 0, "cpp_test_publish failed");
+        ord
+    }
+}
+
+#[cfg(server_ffi)]
+impl Drop for CppPublisher {
+    fn drop(&mut self) {
+        unsafe { cpp_test_destroy_publisher(self.0) };
+    }
+}
+
+#[cfg(server_ffi)]
+struct CppSubscriber(*mut std::ffi::c_void);
+
+#[cfg(server_ffi)]
+impl CppSubscriber {
+    fn new(client: &CppClient, channel: &str, checksum: bool) -> Self {
+        let c_ch = std::ffi::CString::new(channel).unwrap();
+        let h = unsafe { cpp_test_create_subscriber(client.0, c_ch.as_ptr(), checksum) };
+        assert!(!h.is_null(), "cpp_test_create_subscriber failed");
+        CppSubscriber(h)
+    }
+
+    fn wait(&self, timeout_ms: i32) -> bool {
+        let fd = unsafe { cpp_test_subscriber_fd(self.0) };
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        ret > 0 && (pfd.revents & libc::POLLIN) != 0
+    }
+
+    fn read_message(&self) -> (Vec<u8>, Vec<u8>, i32) {
+        let mut payload = vec![0u8; 4096];
+        let mut metadata = vec![0u8; 256];
+        let mut meta_size: i32 = 0;
+        let len = unsafe {
+            cpp_test_read_message(
+                self.0,
+                payload.as_mut_ptr(),
+                payload.len(),
+                metadata.as_mut_ptr(),
+                metadata.len(),
+                &mut meta_size,
+            )
+        };
+        assert!(len >= 0, "cpp_test_read_message failed");
+        payload.truncate(len as usize);
+        metadata.truncate(meta_size as usize);
+        (payload, metadata, meta_size)
+    }
+}
+
+#[cfg(server_ffi)]
+impl Drop for CppSubscriber {
+    fn drop(&mut self) {
+        unsafe { cpp_test_destroy_subscriber(self.0) };
+    }
+}
+
+/// C++ publisher with checksum + metadata → Rust subscriber verifies.
+#[cfg(server_ffi)]
+#[test]
+fn cross_lang_cpp_pub_rust_sub_checksum_metadata() {
+    let cpp_client = CppClient::new("xl_cpp_pub");
+    let rust_client = new_client("xl_rust_sub");
+
+    let cpp_pub = CppPublisher::new(&cpp_client, "xl_cs_meta_1", 256, 10, 4, 16);
+
+    let sub_opts = SubscriberOptions::new().set_checksum(true);
+    let rust_sub = rust_client
+        .create_subscriber("xl_cs_meta_1", &sub_opts)
+        .unwrap();
+
+    let payload = b"hello from C++";
+    let metadata = b"CPP_META_1234567"; // exactly 16 bytes
+    cpp_pub.publish(payload, metadata);
+
+    let msg = rust_sub.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(msg.length, payload.len());
+    assert!(!msg.checksum_error, "checksum mismatch on cross-language message");
+    let data = unsafe { std::slice::from_raw_parts(msg.buffer, msg.length) };
+    assert_eq!(data, payload);
+
+    let sub_meta = rust_sub.get_metadata();
+    assert_eq!(sub_meta.len(), 16);
+    assert_eq!(&sub_meta[..], metadata);
+}
+
+/// Rust publisher with checksum + metadata → C++ subscriber reads and verifies.
+#[cfg(server_ffi)]
+#[test]
+fn cross_lang_rust_pub_cpp_sub_checksum_metadata() {
+    let rust_client = new_client("xl_rust_pub");
+    let cpp_client = CppClient::new("xl_cpp_sub");
+
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(10)
+        .set_checksum(true)
+        .set_metadata_size(16);
+    let rust_pub = rust_client
+        .create_publisher("xl_cs_meta_2", &pub_opts)
+        .unwrap();
+
+    let cpp_sub = CppSubscriber::new(&cpp_client, "xl_cs_meta_2", true);
+
+    let payload = b"hello from Rust";
+    let metadata = b"RUST_META_123456"; // exactly 16 bytes
+    let (buf, _) = rust_pub.get_message_buffer(256).unwrap().unwrap();
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
+    }
+    rust_pub.set_metadata(metadata);
+    rust_pub.publish_message(payload.len() as i64).unwrap();
+
+    assert!(cpp_sub.wait(5000), "C++ subscriber timed out waiting for message");
+    let (recv_payload, recv_metadata, meta_size) = cpp_sub.read_message();
+    assert_eq!(recv_payload, payload);
+    assert_eq!(meta_size, 16);
+    assert_eq!(&recv_metadata[..], metadata);
+}
+
+/// Multiple messages round-tripped in both directions with varying payloads.
+#[cfg(server_ffi)]
+#[test]
+fn cross_lang_bidirectional_multiple_messages() {
+    let cpp_client = CppClient::new("xl_bidi_cpp");
+    let rust_client = new_client("xl_bidi_rust");
+
+    // C++ → Rust direction
+    let cpp_pub = CppPublisher::new(&cpp_client, "xl_bidi_cr", 512, 10, 4, 8);
+
+    let sub_opts = SubscriberOptions::new().set_checksum(true);
+    let rust_sub = rust_client
+        .create_subscriber("xl_bidi_cr", &sub_opts)
+        .unwrap();
+
+    for i in 0u32..5 {
+        let payload = format!("cpp_msg_{}", i);
+        let mut meta = [0u8; 8];
+        meta[..4].copy_from_slice(&i.to_ne_bytes());
+        cpp_pub.publish(payload.as_bytes(), &meta);
+
+        let msg = rust_sub.read_message(ReadMode::ReadNext).unwrap();
+        assert_eq!(msg.length, payload.len());
+        assert!(!msg.checksum_error);
+        let data = unsafe { std::slice::from_raw_parts(msg.buffer, msg.length) };
+        assert_eq!(data, payload.as_bytes());
+
+        let sub_meta = rust_sub.get_metadata();
+        assert_eq!(sub_meta.len(), 8);
+        let tag = u32::from_ne_bytes(sub_meta[..4].try_into().unwrap());
+        assert_eq!(tag, i);
+    }
+
+    // Rust → C++ direction
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(512)
+        .set_num_slots(10)
+        .set_checksum(true)
+        .set_metadata_size(8);
+    let rust_pub = rust_client
+        .create_publisher("xl_bidi_rc", &pub_opts)
+        .unwrap();
+
+    let cpp_sub = CppSubscriber::new(&cpp_client, "xl_bidi_rc", true);
+
+    for i in 0u32..5 {
+        let payload = format!("rust_msg_{}", i);
+        let mut meta = [0u8; 8];
+        meta[..4].copy_from_slice(&(i + 100).to_ne_bytes());
+
+        let (buf, _) = rust_pub.get_message_buffer(512).unwrap().unwrap();
+        unsafe {
+            std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
+        }
+        rust_pub.set_metadata(&meta);
+        rust_pub.publish_message(payload.len() as i64).unwrap();
+
+        assert!(cpp_sub.wait(5000), "C++ subscriber timed out on message {}", i);
+        let (recv_payload, recv_metadata, meta_size) = cpp_sub.read_message();
+        assert_eq!(recv_payload, payload.as_bytes());
+        assert_eq!(meta_size, 8);
+        let tag = u32::from_ne_bytes(recv_metadata[..4].try_into().unwrap());
+        assert_eq!(tag, i + 100);
+    }
+}
+
+/// Checksum-only (no metadata) round trip between C++ and Rust.
+#[cfg(server_ffi)]
+#[test]
+fn cross_lang_checksum_only_no_metadata() {
+    let cpp_client = CppClient::new("xl_csum_cpp");
+    let rust_client = new_client("xl_csum_rust");
+
+    // C++ pub → Rust sub, checksum but zero metadata.
+    let cpp_pub = CppPublisher::new(&cpp_client, "xl_csum_only", 256, 10, 4, 0);
+
+    let sub_opts = SubscriberOptions::new().set_checksum(true);
+    let rust_sub = rust_client
+        .create_subscriber("xl_csum_only", &sub_opts)
+        .unwrap();
+
+    let payload = b"checksum-only payload from C++";
+    cpp_pub.publish(payload, &[]);
+
+    let msg = rust_sub.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(msg.length, payload.len());
+    assert!(!msg.checksum_error);
+    let data = unsafe { std::slice::from_raw_parts(msg.buffer, msg.length) };
+    assert_eq!(data, payload);
+    assert!(rust_sub.get_metadata().is_empty());
+}
+
+/// Plain message (no checksum, no metadata) between C++ and Rust.
+#[cfg(server_ffi)]
+#[test]
+fn cross_lang_plain_message() {
+    let cpp_client = CppClient::new("xl_plain_cpp");
+    let rust_client = new_client("xl_plain_rust");
+
+    let cpp_pub = CppPublisher::new(&cpp_client, "xl_plain", 256, 10, 4, 0);
+
+    let sub_opts = SubscriberOptions::new();
+    let rust_sub = rust_client
+        .create_subscriber("xl_plain", &sub_opts)
+        .unwrap();
+
+    let payload = b"simple cross-language message";
+    cpp_pub.publish(payload, &[]);
+
+    let msg = rust_sub.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(msg.length, payload.len());
+    let data = unsafe { std::slice::from_raw_parts(msg.buffer, msg.length) };
+    assert_eq!(data, payload);
+}
