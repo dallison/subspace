@@ -18,6 +18,8 @@ It has the following features:
 
 1.	Single threaded coroutine based server process written in C++17
 1.	Coroutine-aware client library, in C++17.
+1.	Native Rust client library with the same shared-memory performance as the C++ client.
+1.	C client wrapper for easy integration into other language bindings.
 1.	Publish/subscribe methodology with multiple publisher and multiple subscribers per channel.
 1.	No communication with server for message transfer.
 1.	Message type agnostic transmission – bring your own serialization.
@@ -27,6 +29,7 @@ It has the following features:
 1.	Ability to read the next or newest message in a channel.
 1.	File-descriptor-based event triggers.
 1.	Automatic UDP discovery and TCP bridging of channels between servers.
+1.	Shadow process for crash recovery -- the server can restart and resume without losing shared memory state.
 1.	Shared and weak pointers for message references.
 1.	Ports to MacOS and Linux, ARM64 and x86_64.
 1.	Builds using Bazel and uses Abseil and Protocol Buffers from Google.
@@ -36,6 +39,8 @@ See the file docs/subspace.pdf for full documentation.  Additional documentation
 - [Checksums and User Metadata](docs/checksums-and-metadata.md)
 - [Client Architecture](docs/client-architecture.md)
 - [Server Architecture](docs/server-architecture.md)
+- [Rust Client](docs/rust-client.md)
+- [Shadow Process (Crash Recovery)](docs/shadow-process.md)
 
 # Building
 
@@ -116,6 +121,17 @@ bazel run //client:stress_test
 bazel test //client:stress_test
 ```
 
+#### Rust Client Tests
+
+The Rust client tests exercise the full Rust client API against a real C++ server
+(started in-process via FFI), including cross-language interoperability tests
+that verify C++ publishers can talk to Rust subscribers and vice versa with
+checksums and metadata.
+
+```bash
+bazel test //rust_client:client_test
+```
+
 #### Running All Tests
 
 To run all tests at once:
@@ -127,6 +143,7 @@ bazel test //...
 # Run all tests in a specific directory
 bazel test //client/...
 bazel test //common/...
+bazel test //rust_client/...
 ```
 
 ## Building with CMake
@@ -228,11 +245,16 @@ The CMake build provides the following targets:
 - `subspace_client` - Client library
 - `subspace_common` - Common utilities library
 - `subspace_proto` - Protocol buffer definitions library
-- `libserver` - Server library
+- `libserver` - Server library (includes shadow replicator)
 - `subspace_server` - Server executable
-- `client_test`, `latency_test`, `stress_test` - Test executables
+- `shadow_lib` - Shadow process library
+- `subspace_shadow` - Shadow process executable
+- `subspace_client_rust` - Rust client library (built via Cargo; requires `cargo`)
+- `client_test`, `latency_test`, `stress_test` - C++ client test executables
 - `common_test` - Common library tests
 - `c_client_test` - C client tests
+- `shadow_test` - Shadow process tests
+- `rust_client_test` - Rust client tests (via `cargo test`; requires the server binary)
 
 # Bazel WORKSPACE
 Add this to your Bazel WORKSPACE file to get access to this library without downloading it manually.
@@ -1435,6 +1457,74 @@ int main() {
 - `char* subspace_get_last_error(void)`
 - `bool subspace_has_error(void)`
 
+## Rust Client
+
+Subspace includes a native Rust client library (`rust_client/`) that communicates
+with the same C++ server and shares the same shared-memory layout as the C++
+client.  Rust publishers and C++ subscribers (and vice versa) can exchange
+messages on the same channels, including checksums and user metadata --
+cross-language interoperability is covered by automated tests.
+
+### Quick Start
+
+```rust
+use subspace_client::{Client, ReadMode};
+use subspace_client::options::{PublisherOptions, SubscriberOptions};
+
+// Connect to the server.
+let client = Client::new("/tmp/subspace", "my_app")?;
+
+// Create a publisher.
+let pub_opts = PublisherOptions::new()
+    .set_slot_size(1024)
+    .set_num_slots(10);
+let publisher = client.create_publisher("sensor_data", &pub_opts)?;
+
+// Publish a message.
+let (buf, _cap) = publisher.get_message_buffer(64)?.unwrap();
+unsafe { std::ptr::copy_nonoverlapping(b"hello".as_ptr(), buf, 5); }
+publisher.publish_message(5)?;
+
+// Create a subscriber (in another client or the same one).
+let sub_opts = SubscriberOptions::new();
+let subscriber = client.create_subscriber("sensor_data", &sub_opts)?;
+
+// Read a message.
+let msg = subscriber.read_message(ReadMode::ReadNext)?;
+assert_eq!(msg.length, 5);
+```
+
+### Features
+
+- Full pub/sub support: unreliable and reliable channels, read-next and
+  read-newest modes, activation messages, virtual channels.
+- Checksums (built-in CRC32 or custom callbacks) and per-message user metadata.
+- File-descriptor-based `wait()` for integration with event loops and `poll()`.
+- Slot retirement notification for reliable publishers.
+- Runs on Linux and macOS (ARM64 and x86_64).
+
+### Building
+
+```bash
+# Build the library
+bazel build //rust_client:subspace_client_rust
+
+# Run the tests (starts an in-process C++ server via FFI)
+bazel test //rust_client:client_test
+```
+
+### Bazel Dependency
+
+```starlark
+rust_binary(
+    name = "my_app",
+    deps = ["@subspace//rust_client:subspace_client_rust"],
+)
+```
+
+See [docs/rust-client.md](docs/rust-client.md) for the full API reference and
+usage guide.
+
 ## Message Types and Serialization
 
 Subspace is message-type agnostic. You can send any data structure as long as it fits in the slot size. Common approaches:
@@ -1476,3 +1566,89 @@ scheduler.Run();
 ```
 
 When using coroutines, `Wait()` operations will yield instead of blocking the thread.
+
+## Shadow Server (Crash Recovery)
+
+Subspace supports a **shadow process** that mirrors the server's channel,
+publisher, and subscriber state.  If the server crashes and restarts it can
+reconnect to the shadow, reload the full state, and resume operation without
+losing shared-memory buffers.  Existing clients can then reclaim their
+publishers and subscribers.
+
+### How It Works
+
+The shadow is a lightweight, coroutine-based daemon that maintains a copy of
+the server's channel database.  It communicates with the server over a Unix
+domain socket using protobuf-encoded `ShadowEvent` messages.  Shared-memory
+file descriptors (SCB, CCB, BCB, trigger, and retirement FDs) are passed once
+using `SCM_RIGHTS` so the shadow holds them open even if the server dies.
+
+On startup the server connects to the shadow and receives a state dump.  If
+the state dump contains channels (i.e. the shadow has state from a previous
+server instance), the server re-maps the existing shared memory and recreates
+its internal channel, publisher, and subscriber structures.  It then
+re-replicates all recovered state back to the shadow(s) so they stay in sync.
+
+### Dual Shadow Support
+
+The server supports two shadows -- a primary and a secondary -- for
+additional redundancy.  On recovery it tries the primary first; if the primary
+has no state (or is unavailable) it falls back to the secondary.  After
+recovery, both shadows are brought up to date with the full state.
+
+### Running
+
+Start one or two shadow processes:
+
+```bash
+# Primary shadow
+./bazel-bin/shadow/subspace_shadow --socket=/tmp/subspace_shadow
+
+# Optional secondary shadow
+./bazel-bin/shadow/subspace_shadow --socket=/tmp/subspace_shadow2
+```
+
+Then start the server with shadow sockets:
+
+```bash
+./bazel-bin/server/subspace_server \
+    --shadow_socket=/tmp/subspace_shadow \
+    --secondary_shadow_socket=/tmp/subspace_shadow2
+```
+
+If the server is killed and restarted with the same flags, it will recover
+its full state from whichever shadow is available.
+
+### What Survives a Restart
+
+- Channel definitions (name, slot size, number of slots, type, flags).
+- Shared memory mappings -- buffers remain intact in `/dev/shm` (Linux) or
+  POSIX shared memory (macOS).
+- Publisher and subscriber metadata (IDs, trigger FDs, reliability settings,
+  tunnel flags).
+- The session ID, so clients can detect a server restart and reclaim their
+  connections.
+
+### What Does Not Survive
+
+- Active client TCP connections -- clients must reconnect and re-register
+  their publishers and subscribers.
+- In-flight messages that had not yet been consumed are still in shared memory,
+  but subscribers need to re-attach to resume reading.
+
+### Server Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--shadow_socket` | `""` (disabled) | Unix socket path for the primary shadow process |
+| `--secondary_shadow_socket` | `""` (disabled) | Unix socket path for the secondary shadow process |
+
+### Shadow Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--socket` | `/tmp/subspace_shadow` | Unix socket path to listen on |
+| `--log_level` | `info` | Log level (`debug`, `info`, `warning`, `error`) |
+
+See [docs/shadow-process.md](docs/shadow-process.md) for the full design
+document including the protocol, FD lifecycle, and recovery sequence.
