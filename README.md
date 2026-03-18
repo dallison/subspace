@@ -18,6 +18,8 @@ It has the following features:
 
 1.	Single threaded coroutine based server process written in C++17
 1.	Coroutine-aware client library, in C++17.
+1.	Native Rust client library with the same shared-memory performance as the C++ client.
+1.	C client wrapper for easy integration into other language bindings.
 1.	Publish/subscribe methodology with multiple publisher and multiple subscribers per channel.
 1.	No communication with server for message transfer.
 1.	Message type agnostic transmission – bring your own serialization.
@@ -27,12 +29,18 @@ It has the following features:
 1.	Ability to read the next or newest message in a channel.
 1.	File-descriptor-based event triggers.
 1.	Automatic UDP discovery and TCP bridging of channels between servers.
+1.	Shadow process for crash recovery -- the server can restart and resume without losing shared memory state.
 1.	Shared and weak pointers for message references.
 1.	Ports to MacOS and Linux, ARM64 and x86_64.
 1.	Builds using Bazel and uses Abseil and Protocol Buffers from Google.
 1.	Uses my C++ coroutine library (https://github.com/dallison/co)
 
-See the file docs/subspace.pdf for full documentation.
+See the file docs/subspace.pdf for full documentation.  Additional documentation:
+- [Checksums and User Metadata](docs/checksums-and-metadata.md)
+- [Client Architecture](docs/client-architecture.md)
+- [Server Architecture](docs/server-architecture.md)
+- [Rust Client](docs/rust-client.md)
+- [Shadow Process (Crash Recovery)](docs/shadow-process.md)
 
 # Building
 
@@ -113,6 +121,17 @@ bazel run //client:stress_test
 bazel test //client:stress_test
 ```
 
+#### Rust Client Tests
+
+The Rust client tests exercise the full Rust client API against a real C++ server
+(started in-process via FFI), including cross-language interoperability tests
+that verify C++ publishers can talk to Rust subscribers and vice versa with
+checksums and metadata.
+
+```bash
+bazel test //rust_client:client_test
+```
+
 #### Running All Tests
 
 To run all tests at once:
@@ -124,6 +143,7 @@ bazel test //...
 # Run all tests in a specific directory
 bazel test //client/...
 bazel test //common/...
+bazel test //rust_client/...
 ```
 
 ## Building with CMake
@@ -225,11 +245,16 @@ The CMake build provides the following targets:
 - `subspace_client` - Client library
 - `subspace_common` - Common utilities library
 - `subspace_proto` - Protocol buffer definitions library
-- `libserver` - Server library
+- `libserver` - Server library (includes shadow replicator)
 - `subspace_server` - Server executable
-- `client_test`, `latency_test`, `stress_test` - Test executables
+- `shadow_lib` - Shadow process library
+- `subspace_shadow` - Shadow process executable
+- `subspace_client_rust` - Rust client library (built via Cargo; requires `cargo`)
+- `client_test`, `latency_test`, `stress_test` - C++ client test executables
 - `common_test` - Common library tests
 - `c_client_test` - C client tests
+- `shadow_test` - Shadow process tests
+- `rust_client_test` - Rust client tests (via `cargo test`; requires the server binary)
 
 # Bazel WORKSPACE
 Add this to your Bazel WORKSPACE file to get access to this library without downloading it manually.
@@ -433,6 +458,19 @@ public:
     // Resize callback registration
     absl::Status RegisterResizeCallback(
         std::function<absl::Status(Publisher*, int, int)> callback);
+
+    // Prefix area and checksum/metadata sizes
+    int32_t PrefixSize() const;     // Total prefix bytes (multiple of 64)
+    int32_t ChecksumSize() const;   // Bytes reserved for checksum
+    int32_t MetadataSize() const;   // Bytes of user metadata
+
+    // Writable span over the user metadata area in the current slot's prefix.
+    // Call between GetMessageBuffer() and PublishMessage().
+    absl::Span<std::byte> GetMetadata();
+
+    // Custom checksum support
+    void SetChecksumCallback(ChecksumCallback cb);
+    void ResetChecksumCallback();
 };
 ```
 
@@ -586,6 +624,19 @@ public:
     // Statistics
     const ChannelCounters& GetChannelCounters();
     int NumActiveMessages() const;
+
+    // Prefix area and checksum/metadata sizes
+    int32_t PrefixSize() const;     // Total prefix bytes (multiple of 64)
+    int32_t ChecksumSize() const;   // Bytes reserved for checksum
+    int32_t MetadataSize() const;   // Bytes of user metadata
+
+    // Read-only span over the user metadata area in the most recently
+    // read message's prefix.  Valid while the message is active.
+    absl::Span<const std::byte> GetMetadata();
+
+    // Custom checksum support
+    void SetChecksumCallback(ChecksumCallback cb);
+    void ResetChecksumCallback();
 };
 ```
 
@@ -715,7 +766,9 @@ auto pub = client->CreatePublisher("channel",
         .local = false,
         .type = "MyMessageType",
         .fixed_size = false,
-        .checksum = true
+        .checksum = true,
+        .checksum_size = 4,   // default CRC32
+        .metadata_size = 0,   // no user metadata
     }).value();
 ```
 
@@ -735,6 +788,8 @@ auto pub = client->CreatePublisher("channel",
 | `activate` / `SetActivate()` | `bool` | `false` | If true, channel is activated even if unreliable. |
 | `notify_retirement` / `SetNotifyRetirement()` | `bool` | `false` | If true, notify when slots are retired. |
 | `checksum` / `SetChecksum()` | `bool` | `false` | If true, calculate checksums for all messages. |
+| `checksum_size` / `SetChecksumSize()` | `int32_t` | `4` | Number of bytes reserved for the checksum (starting at the `checksum` field of `MessagePrefix`). Default 4 for CRC32. Increase for larger checksums (e.g. 20 for SHA-1). |
+| `metadata_size` / `SetMetadataSize()` | `int32_t` | `0` | Number of bytes of user metadata stored immediately after the checksum area. Accessible via `Publisher::GetMetadata()` / `Subscriber::GetMetadata()`. |
 
 **Getter Methods:**
 - `int32_t SlotSize() const`
@@ -749,6 +804,8 @@ auto pub = client->CreatePublisher("channel",
 - `bool Activate() const`
 - `bool NotifyRetirement() const`
 - `bool Checksum() const`
+- `int32_t ChecksumSize() const`
+- `int32_t MetadataSize() const`
 
 **Example: Creating a reliable publisher with checksums**
 ```cpp
@@ -759,33 +816,106 @@ auto pub = client->CreatePublisher("secure_channel", 512, 20,
         .SetType("SecureMessage")).value();
 ```
 
+### Checksums and the Prefix Area
+
+Each message slot has a prefix area preceding the message buffer.  The prefix
+contains the `MessagePrefix` struct (ordinal, timestamp, size, flags, etc.) whose
+`checksum` field marks the start of the checksum storage.  The total prefix
+area is always aligned to a 64-byte boundary and its size is determined by:
+
+```
+prefix_size = align_up(offsetof(MessagePrefix, checksum) + checksum_size + metadata_size, 64)
+```
+
+With the defaults (`checksum_size = 4`, `metadata_size = 0`) the prefix area
+is 64 bytes — the `MessagePrefix` itself.  Increasing either value causes the
+prefix to grow in 64-byte increments.
+
+When checksums are enabled (`SetChecksum(true)`), the built-in CRC32 writes a
+4-byte checksum at the start of the checksum area.  If you need a larger
+checksum (e.g. 20 bytes for SHA-1), set `checksum_size` accordingly:
+
+```cpp
+auto pub = client->CreatePublisher("channel", 
+    subspace::PublisherOptions()
+        .SetSlotSize(1024)
+        .SetNumSlots(10)
+        .SetChecksum(true)
+        .SetChecksumSize(20)).value();
+```
+
+### User Metadata
+
+The metadata area sits immediately after the checksum area in the prefix.
+Set `metadata_size` on the publisher to reserve space:
+
+```cpp
+auto pub = client->CreatePublisher("channel",
+    subspace::PublisherOptions()
+        .SetSlotSize(1024)
+        .SetNumSlots(10)
+        .SetMetadataSize(16)).value();
+
+// Write metadata between GetMessageBuffer() and PublishMessage():
+auto buffer = pub.GetMessageBuffer(128).value();
+auto meta = pub.GetMetadata();  // absl::Span<std::byte>, 16 bytes
+memcpy(meta.data(), my_metadata, 16);
+pub.PublishMessage(128);
+```
+
+Subscribers read metadata from the most recently read message:
+
+```cpp
+auto msg = sub.ReadMessage().value();
+auto meta = sub.GetMetadata();  // absl::Span<const std::byte>, 16 bytes
+```
+
 ### Checksum Callbacks
 
-If you need a custom checksum algorithm (or want to integrate hardware/offload),
-you can provide checksum callbacks for publishers and subscribers. When set, the
-callback replaces the built-in CRC32 for checksum calculation or verification.
+If you need a custom checksum algorithm, you can provide a callback that
+replaces the built-in CRC32.  The callback receives the data to checksum
+(as three spans covering the prefix header, the prefix extension, and the
+message body) plus a writable
+`absl::Span<std::byte>` of `ChecksumSize()` bytes where it should write
+the result:
 
-**Publisher/Subscriber API:**
-- `Publisher::SetChecksumCallback(ChecksumCallback cb)`
-- `Publisher::ResetChecksumCallback()`
-- `Subscriber::SetChecksumCallback(ChecksumCallback cb)`
-- `Subscriber::ResetChecksumCallback()`
-
-**Example: Custom checksum callback**
 ```cpp
-auto fake_crc = [](const std::array<absl::Span<const uint8_t>, 2> &data) -> uint32_t {
+using ChecksumCallback =
+    std::function<void(const std::array<absl::Span<const uint8_t>, 3> &data,
+                       absl::Span<std::byte> checksum)>;
+```
+
+**Example: Simple additive checksum (4 bytes)**
+```cpp
+auto fake_crc = [](const std::array<absl::Span<const uint8_t>, 3> &data,
+                   absl::Span<std::byte> checksum) {
     uint32_t sum = 0;
     for (const auto &span : data) {
         for (uint8_t byte : span) {
             sum += byte;
         }
     }
-    return sum;
+    *reinterpret_cast<uint32_t *>(checksum.data()) = sum;
 };
 
 pub.SetChecksumCallback(fake_crc);
 sub.SetChecksumCallback(fake_crc);
 ```
+
+**Example: 20-byte custom checksum (requires `checksum_size = 20`)**
+```cpp
+auto sha1_like = [](const std::array<absl::Span<const uint8_t>, 3> &data,
+                    absl::Span<std::byte> checksum) {
+    // checksum.size() == 20
+    // Write your 20-byte digest into checksum.data()
+    my_sha1(data, checksum.data(), checksum.size());
+};
+
+pub.SetChecksumCallback(sha1_like);
+sub.SetChecksumCallback(sha1_like);
+```
+
+Call `ResetChecksumCallback()` to revert to the built-in CRC32.
 
 ## SubscriberOptions
 
@@ -1003,12 +1133,16 @@ SubspacePublisherOptions pub_opts = subspace_publisher_options_default(1024, 10)
 // pub_opts.reliable = false
 // pub_opts.fixed_size = false
 // pub_opts.activate = false
+// pub_opts.checksum_size = 4   (CRC32)
+// pub_opts.metadata_size = 0   (no user metadata)
 
 // Customize options
 pub_opts.reliable = true;
 pub_opts.fixed_size = false;
 pub_opts.type.type = "MyMessageType";
 pub_opts.type.type_length = strlen(pub_opts.type.type);
+pub_opts.checksum_size = 20;   // e.g. 20-byte digest
+pub_opts.metadata_size = 32;   // 32 bytes of user metadata
 
 // Create publisher
 SubspacePublisher pub = subspace_create_publisher(client, "my_channel", pub_opts);
@@ -1323,6 +1457,74 @@ int main() {
 - `char* subspace_get_last_error(void)`
 - `bool subspace_has_error(void)`
 
+## Rust Client
+
+Subspace includes a native Rust client library (`rust_client/`) that communicates
+with the same C++ server and shares the same shared-memory layout as the C++
+client.  Rust publishers and C++ subscribers (and vice versa) can exchange
+messages on the same channels, including checksums and user metadata --
+cross-language interoperability is covered by automated tests.
+
+### Quick Start
+
+```rust
+use subspace_client::{Client, ReadMode};
+use subspace_client::options::{PublisherOptions, SubscriberOptions};
+
+// Connect to the server.
+let client = Client::new("/tmp/subspace", "my_app")?;
+
+// Create a publisher.
+let pub_opts = PublisherOptions::new()
+    .set_slot_size(1024)
+    .set_num_slots(10);
+let publisher = client.create_publisher("sensor_data", &pub_opts)?;
+
+// Publish a message.
+let (buf, _cap) = publisher.get_message_buffer(64)?.unwrap();
+unsafe { std::ptr::copy_nonoverlapping(b"hello".as_ptr(), buf, 5); }
+publisher.publish_message(5)?;
+
+// Create a subscriber (in another client or the same one).
+let sub_opts = SubscriberOptions::new();
+let subscriber = client.create_subscriber("sensor_data", &sub_opts)?;
+
+// Read a message.
+let msg = subscriber.read_message(ReadMode::ReadNext)?;
+assert_eq!(msg.length, 5);
+```
+
+### Features
+
+- Full pub/sub support: unreliable and reliable channels, read-next and
+  read-newest modes, activation messages, virtual channels.
+- Checksums (built-in CRC32 or custom callbacks) and per-message user metadata.
+- File-descriptor-based `wait()` for integration with event loops and `poll()`.
+- Slot retirement notification for reliable publishers.
+- Runs on Linux and macOS (ARM64 and x86_64).
+
+### Building
+
+```bash
+# Build the library
+bazel build //rust_client:subspace_client_rust
+
+# Run the tests (starts an in-process C++ server via FFI)
+bazel test //rust_client:client_test
+```
+
+### Bazel Dependency
+
+```starlark
+rust_binary(
+    name = "my_app",
+    deps = ["@subspace//rust_client:subspace_client_rust"],
+)
+```
+
+See [docs/rust-client.md](docs/rust-client.md) for the full API reference and
+usage guide.
+
 ## Message Types and Serialization
 
 Subspace is message-type agnostic. You can send any data structure as long as it fits in the slot size. Common approaches:
@@ -1364,3 +1566,89 @@ scheduler.Run();
 ```
 
 When using coroutines, `Wait()` operations will yield instead of blocking the thread.
+
+## Shadow Server (Crash Recovery)
+
+Subspace supports a **shadow process** that mirrors the server's channel,
+publisher, and subscriber state.  If the server crashes and restarts it can
+reconnect to the shadow, reload the full state, and resume operation without
+losing shared-memory buffers.  Existing clients can then reclaim their
+publishers and subscribers.
+
+### How It Works
+
+The shadow is a lightweight, coroutine-based daemon that maintains a copy of
+the server's channel database.  It communicates with the server over a Unix
+domain socket using protobuf-encoded `ShadowEvent` messages.  Shared-memory
+file descriptors (SCB, CCB, BCB, trigger, and retirement FDs) are passed once
+using `SCM_RIGHTS` so the shadow holds them open even if the server dies.
+
+On startup the server connects to the shadow and receives a state dump.  If
+the state dump contains channels (i.e. the shadow has state from a previous
+server instance), the server re-maps the existing shared memory and recreates
+its internal channel, publisher, and subscriber structures.  It then
+re-replicates all recovered state back to the shadow(s) so they stay in sync.
+
+### Dual Shadow Support
+
+The server supports two shadows -- a primary and a secondary -- for
+additional redundancy.  On recovery it tries the primary first; if the primary
+has no state (or is unavailable) it falls back to the secondary.  After
+recovery, both shadows are brought up to date with the full state.
+
+### Running
+
+Start one or two shadow processes:
+
+```bash
+# Primary shadow
+./bazel-bin/shadow/subspace_shadow --socket=/tmp/subspace_shadow
+
+# Optional secondary shadow
+./bazel-bin/shadow/subspace_shadow --socket=/tmp/subspace_shadow2
+```
+
+Then start the server with shadow sockets:
+
+```bash
+./bazel-bin/server/subspace_server \
+    --shadow_socket=/tmp/subspace_shadow \
+    --secondary_shadow_socket=/tmp/subspace_shadow2
+```
+
+If the server is killed and restarted with the same flags, it will recover
+its full state from whichever shadow is available.
+
+### What Survives a Restart
+
+- Channel definitions (name, slot size, number of slots, type, flags).
+- Shared memory mappings -- buffers remain intact in `/dev/shm` (Linux) or
+  POSIX shared memory (macOS).
+- Publisher and subscriber metadata (IDs, trigger FDs, reliability settings,
+  tunnel flags).
+- The session ID, so clients can detect a server restart and reclaim their
+  connections.
+
+### What Does Not Survive
+
+- Active client TCP connections -- clients must reconnect and re-register
+  their publishers and subscribers.
+- In-flight messages that had not yet been consumed are still in shared memory,
+  but subscribers need to re-attach to resume reading.
+
+### Server Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--shadow_socket` | `""` (disabled) | Unix socket path for the primary shadow process |
+| `--secondary_shadow_socket` | `""` (disabled) | Unix socket path for the secondary shadow process |
+
+### Shadow Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--socket` | `/tmp/subspace_shadow` | Unix socket path to listen on |
+| `--log_level` | `info` | Log level (`debug`, `info`, `warning`, `error`) |
+
+See [docs/shadow-process.md](docs/shadow-process.md) for the full design
+document including the protocol, FD lifecycle, and recovery sequence.

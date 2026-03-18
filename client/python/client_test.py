@@ -867,6 +867,185 @@ class TestSubspaceClient(unittest.TestCase):
         sub = None
 
     # ------------------------------------------------------------------
+    # for_tunnel option
+    # ------------------------------------------------------------------
+    def test_for_tunnel_publisher_option(self):
+        opts = subspace.PublisherOptions()
+        self.assertFalse(opts.for_tunnel())
+        opts.set_for_tunnel(True)
+        self.assertTrue(opts.for_tunnel())
+
+    def test_for_tunnel_subscriber_option(self):
+        opts = subspace.SubscriberOptions()
+        self.assertFalse(opts.for_tunnel())
+        opts.set_for_tunnel(True)
+        self.assertTrue(opts.for_tunnel())
+
+    def test_for_tunnel_publisher_accessor(self):
+        client = self._make_client("tunnel_pub")
+        opts = subspace.PublisherOptions()
+        opts.set_slot_size(256)
+        opts.set_num_slots(4)
+        opts.set_for_tunnel(True)
+        pub = client.create_publisher(channel_name="ch_tunnel_pub",
+                                      options=opts)
+        self.assertTrue(pub.for_tunnel())
+        pub = None
+
+    def test_non_tunnel_publisher_accessor(self):
+        client = self._make_client("no_tunnel_pub")
+        pub = client.create_publisher(channel_name="ch_no_tunnel_pub",
+                                      slot_size=256, num_slots=4)
+        self.assertFalse(pub.for_tunnel())
+        pub = None
+
+    def test_for_tunnel_subscriber_accessor(self):
+        client = self._make_client("tunnel_sub")
+        client.create_publisher(channel_name="ch_tunnel_sub",
+                                slot_size=256, num_slots=4)
+        opts = subspace.SubscriberOptions()
+        opts.set_for_tunnel(True)
+        sub = client.create_subscriber(channel_name="ch_tunnel_sub",
+                                       options=opts)
+        self.assertTrue(sub.for_tunnel())
+        sub = None
+
+    # ------------------------------------------------------------------
+    # Metadata
+    # ------------------------------------------------------------------
+    def test_publisher_metadata(self):
+        client = self._make_client("pub_meta")
+        opts = subspace.PublisherOptions()
+        opts.set_slot_size(256)
+        opts.set_num_slots(4)
+        opts.set_metadata_size(16)
+        pub = client.create_publisher(channel_name="ch_pub_meta",
+                                      options=opts)
+        self.assertEqual(pub.metadata_size(), 16)
+
+        buf = pub.get_message_buffer(64)
+        buf[:5] = b"hello"
+        pub.set_metadata(b"\x01\x02\x03\x04")
+        pub.publish_buffer(5)
+
+        sub_opts = subspace.SubscriberOptions()
+        sub_opts.set_checksum(True)
+        sub = client.create_subscriber(channel_name="ch_pub_meta",
+                                       options=sub_opts)
+        sub.wait()
+
+        with sub.read_message_object() as msg:
+            self.assertEqual(msg.buffer, b"hello")
+
+        meta = sub.get_metadata()
+        self.assertEqual(len(meta), 16)
+        self.assertEqual(meta[:4], b"\x01\x02\x03\x04")
+
+        pub = None
+        sub = None
+
+    # ------------------------------------------------------------------
+    # Prefix/checksum/metadata size accessors
+    # ------------------------------------------------------------------
+    def test_prefix_checksum_metadata_sizes(self):
+        client = self._make_client("sizes")
+        opts = subspace.PublisherOptions()
+        opts.set_slot_size(256)
+        opts.set_num_slots(4)
+        opts.set_checksum_size(4)
+        opts.set_metadata_size(8)
+        pub = client.create_publisher(channel_name="ch_sizes", options=opts)
+
+        self.assertEqual(pub.checksum_size(), 4)
+        self.assertEqual(pub.metadata_size(), 8)
+        self.assertGreater(pub.prefix_size(), 0)
+
+        sub_opts = subspace.SubscriberOptions()
+        sub_opts.set_checksum(True)
+        sub = client.create_subscriber(channel_name="ch_sizes",
+                                       options=sub_opts)
+        self.assertEqual(sub.checksum_size(), 4)
+        self.assertEqual(sub.metadata_size(), 8)
+        self.assertGreater(sub.prefix_size(), 0)
+
+        pub = None
+        sub = None
+
+    # ------------------------------------------------------------------
+    # Stats counters
+    # ------------------------------------------------------------------
+    def test_publisher_stats_counters(self):
+        client = self._make_client("stats_ctr")
+        pub = client.create_publisher(channel_name="ch_stats_ctr",
+                                      slot_size=256, num_slots=10)
+        pub.publish_message(b"data1")
+        pub.publish_message(b"data2")
+
+        stats = pub.get_stats_counters()
+        self.assertIn("total_bytes", stats)
+        self.assertIn("total_messages", stats)
+        self.assertIn("max_message_size", stats)
+        self.assertIn("total_drops", stats)
+        self.assertEqual(stats["total_messages"], 2)
+        self.assertGreater(stats["total_bytes"], 0)
+
+        pub = None
+
+    # ------------------------------------------------------------------
+    # Channel info with tunnel counts
+    # ------------------------------------------------------------------
+    def test_channel_info_tunnel_counts(self):
+        client = self._make_client("info_tunnel")
+        opts = subspace.PublisherOptions()
+        opts.set_slot_size(256)
+        opts.set_num_slots(4)
+        opts.set_for_tunnel(True)
+        pub = client.create_publisher(channel_name="ch_info_tunnel",
+                                      options=opts)
+
+        info = client.get_channel_info("ch_info_tunnel")
+        self.assertEqual(info.num_tunnel_pubs, 1)
+        self.assertEqual(info.num_tunnel_subs, 0)
+
+        pub = None
+
+    # ------------------------------------------------------------------
+    # trigger_reliable_publishers
+    # ------------------------------------------------------------------
+    def test_trigger_reliable_publishers(self):
+        client = self._make_client("trigger_rel")
+        pub = client.create_publisher(channel_name="ch_trigger_rel",
+                                      slot_size=256, num_slots=10)
+        sub = client.create_subscriber(channel_name="ch_trigger_rel")
+
+        # Should not raise.
+        sub.trigger_reliable_publishers()
+
+        pub = None
+        sub = None
+
+    # ------------------------------------------------------------------
+    # Message metadata accessors
+    # ------------------------------------------------------------------
+    def test_message_channel_type(self):
+        client = self._make_client("msg_meta")
+        pub = client.create_publisher(channel_name="ch_msg_meta",
+                                      slot_size=256, num_slots=10,
+                                      type="my_msg_type")
+        sub = client.create_subscriber(channel_name="ch_msg_meta",
+                                       type="my_msg_type")
+        pub.publish_message(b"test")
+        sub.wait()
+
+        with sub.read_message_object() as msg:
+            self.assertEqual(msg.channel_type(), "my_msg_type")
+            self.assertEqual(msg.num_slots(), 10)
+            self.assertEqual(msg.slot_size(), 256)
+
+        pub = None
+        sub = None
+
+    # ------------------------------------------------------------------
     # Server context manager
     # ------------------------------------------------------------------
     def test_server_context_manager(self):

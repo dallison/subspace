@@ -42,6 +42,8 @@ struct ChannelInfo {
   int num_subscribers;
   int num_bridge_pubs;
   int num_bridge_subs;
+  int num_tunnel_pubs;
+  int num_tunnel_subs;
   std::string type;
   uint64_t slot_size;
   int num_slots;
@@ -476,6 +478,25 @@ private:
   SendRequestReceiveResponse(const Request &req, Response &response,
                              std::vector<toolbelt::FileDescriptor> &fds);
 
+  absl::Status Reconnect();
+  absl::Status ReregisterPublisher(details::PublisherImpl *publisher);
+  absl::Status ReregisterSubscriber(details::SubscriberImpl *subscriber);
+
+  static void FillCreatePublisherRequest(CreatePublisherRequest *cmd,
+                                         const std::string &channel_name,
+                                         const PublisherOptions &opts,
+                                         int publisher_id);
+  void ApplyPublisherResponseFds(details::PublisherImpl *publisher,
+                                 const CreatePublisherResponse &resp,
+                                 std::vector<toolbelt::FileDescriptor> &fds);
+  static void FillCreateSubscriberRequest(CreateSubscriberRequest *cmd,
+                                          const std::string &channel_name,
+                                          const SubscriberOptions &opts,
+                                          int subscriber_id);
+  void ApplySubscriberResponseFds(details::SubscriberImpl *subscriber,
+                                  const CreateSubscriberResponse &resp,
+                                  std::vector<toolbelt::FileDescriptor> &fds);
+
   bool CheckReload(details::ClientChannel *channel);
 
   absl::Status ReloadSubscriber(details::SubscriberImpl *channel);
@@ -553,6 +574,8 @@ private:
   // the client is running as root and the server isn't
   int server_user_id_ = -1;
   int server_group_id_ = -1;
+  bool was_connected_ = false;
+  bool reconnecting_ = false;
 };
 
 // This function returns an subspace::shared_ptr that refers to the message
@@ -741,6 +764,7 @@ public:
   bool IsReliable() const { return impl_->IsReliable(); }
   bool IsLocal() const { return impl_->IsLocal(); }
   bool IsFixedSize() const { return impl_->IsFixedSize(); }
+  bool ForTunnel() const { return impl_->ForTunnel(); }
 
   int32_t SlotSize() const { return impl_->SlotSize(); }
   int32_t NumSlots() const { return impl_->NumSlots(); }
@@ -765,10 +789,15 @@ public:
     return impl_->BufferSharedMemoryName(buffer_index);
   }
 
+  // Set a custom checksum callback to replace the default CRC32.
+  // The callback is invoked for every published message and receives the
+  // data spans to checksum plus a writable absl::Span<std::byte> of
+  // ChecksumSize() bytes where the checksum should be written.
   void SetChecksumCallback(ChecksumCallback callback) {
     impl_->SetChecksumCallback(std::move(callback));
   }
 
+  // Revert to the built-in CRC32 checksum.
   void ResetChecksumCallback() { impl_->ResetChecksumCallback(); }
 
   // Register a function to be called when the publisher resizes
@@ -815,6 +844,22 @@ public:
   int CurrentSlotId() const { return impl_->CurrentSlotId(); }
 
   MessageSlot *CurrentSlot() const { return impl_->CurrentSlot(); }
+
+  // Total prefix area size in bytes (always a multiple of 64).
+  // Determined by ChecksumSize() and MetadataSize().
+  int32_t PrefixSize() const { return impl_->PrefixSize(); }
+
+  // Number of bytes reserved for the checksum (default 4 for CRC32).
+  int32_t ChecksumSize() const { return impl_->ChecksumSize(); }
+
+  // Number of bytes of user metadata in the prefix area (default 0).
+  int32_t MetadataSize() const { return impl_->MetadataSize(); }
+
+  // Get a writable span over the user metadata area in the current
+  // slot's prefix.  Call this between GetMessageBuffer() and
+  // PublishMessage() to attach per-message metadata.  Returns an
+  // empty span if MetadataSize() is 0.
+  absl::Span<std::byte> GetMetadata() { return impl_->GetMetadata(); }
 
 private:
   friend class Server;
@@ -979,10 +1024,16 @@ public:
   std::string Type() const { return impl_->Type(); }
   std::string_view TypeView() const { return impl_->TypeView(); }
 
+  // Set a custom checksum callback to replace the default CRC32 verification.
+  // The callback receives the data spans and a read-only absl::Span of
+  // ChecksumSize() bytes containing the stored checksum.  It should write
+  // the computed checksum into the temporary buffer provided by the
+  // subscriber for comparison.
   void SetChecksumCallback(ChecksumCallback callback) {
     impl_->SetChecksumCallback(std::move(callback));
   }
 
+  // Revert to the built-in CRC32 checksum verification.
   void ResetChecksumCallback() { impl_->ResetChecksumCallback(); }
 
   // Register a function to be called when a subscriber drops a message.  The
@@ -1063,6 +1114,7 @@ public:
   int64_t CurrentOrdinal() const { return impl_->CurrentOrdinal(); }
   int64_t Timestamp() const { return impl_->Timestamp(); }
   bool IsReliable() const { return impl_->IsReliable(); }
+  bool ForTunnel() const { return impl_->ForTunnel(); }
 
   int32_t SlotSize() const { return impl_->SlotSize(); }
   int32_t NumSlots() const { return impl_->NumSlots(); }
@@ -1090,6 +1142,22 @@ public:
   void ClearActiveMessage() { impl_->ClearActiveMessage(); }
 
   void TriggerReliablePublishers() { impl_->TriggerReliablePublishers(); }
+
+  // Total prefix area size in bytes (always a multiple of 64).
+  // Determined by ChecksumSize() and MetadataSize().
+  int32_t PrefixSize() const { return impl_->PrefixSize(); }
+
+  // Number of bytes reserved for the checksum (default 4 for CRC32).
+  int32_t ChecksumSize() const { return impl_->ChecksumSize(); }
+
+  // Number of bytes of user metadata in the prefix area (default 0).
+  int32_t MetadataSize() const { return impl_->MetadataSize(); }
+
+  // Get a read-only span over the user metadata area in the most
+  // recently read message's prefix.  Only valid while the message is
+  // active (between ReadMessage() and the next ReadMessage() or
+  // ClearActiveMessage()).  Returns an empty span if MetadataSize() is 0.
+  absl::Span<const std::byte> GetMetadata() { return impl_->GetMetadata(); }
 
   bool AtomicIncRefCount(int slot_id, int inc) {
     MessageSlot *slot = impl_->GetSlot(slot_id);
