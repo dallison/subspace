@@ -5,7 +5,7 @@
 
 #include "shadow/shadow.h"
 #include "server/server.h"
-#include "subspace/client/client.h"
+#include "client/client.h"
 #include "absl/status/status_matchers.h"
 #include "gtest/gtest.h"
 #include <chrono>
