@@ -664,9 +664,7 @@ impl SubscriberImpl {
     fn trigger_retirement(&self, slot_id: usize) {
         for &fd in &self.retirement_trigger_fds {
             let buf = (slot_id as i32).to_ne_bytes();
-            unsafe {
-                libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len());
-            }
+            crate::syscall_shim::shim_write(fd, buf.as_ptr() as *const libc::c_void, buf.len());
         }
     }
 
