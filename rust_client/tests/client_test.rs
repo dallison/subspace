@@ -2621,3 +2621,367 @@ fn cross_lang_plain_message() {
     let data = unsafe { std::slice::from_raw_parts(msg.buffer, msg.length) };
     assert_eq!(data, payload);
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Additional coverage tests
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn coverage_get_channel_info() {
+    let client = new_client("cov_info");
+    let opts = PublisherOptions::new()
+        .set_slot_size(128)
+        .set_num_slots(8)
+        .set_type("info_type".to_string());
+    let _pub = client.create_publisher("cov_info_ch", &opts).unwrap();
+
+    let info = client.get_channel_info("cov_info_ch").unwrap();
+    assert_eq!(info.channel_name, "cov_info_ch");
+    assert_eq!(info.num_publishers, 1);
+    assert_eq!(info.slot_size, 128);
+    assert_eq!(info.num_slots, 8);
+    assert_eq!(info.channel_type, "info_type");
+}
+
+#[test]
+fn coverage_get_channel_info_not_found() {
+    let client = new_client("cov_info_nf");
+    let result = client.get_channel_info("nonexistent_channel_xxxx");
+    assert!(result.is_err());
+}
+
+#[test]
+fn coverage_get_all_channel_info() {
+    let client = new_client("cov_all_info");
+    let opts = PublisherOptions::new().set_slot_size(64).set_num_slots(4);
+    let _pub1 = client.create_publisher("cov_all_1", &opts).unwrap();
+    let _pub2 = client.create_publisher("cov_all_2", &opts).unwrap();
+
+    let all = client.get_all_channel_info().unwrap();
+    assert!(all.len() >= 2);
+    let names: Vec<&str> = all.iter().map(|c| c.channel_name.as_str()).collect();
+    assert!(names.contains(&"cov_all_1"));
+    assert!(names.contains(&"cov_all_2"));
+}
+
+#[test]
+fn coverage_get_channel_stats() {
+    let client = new_client("cov_stats");
+    let opts = PublisherOptions::new().set_slot_size(256).set_num_slots(8);
+    let pub_handle = client.create_publisher("cov_stats_ch", &opts).unwrap();
+
+    let (buf, _max) = pub_handle.get_message_buffer(64).unwrap().unwrap();
+    let payload = b"stats_test_payload";
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
+    }
+    let _msg = pub_handle.publish_message(payload.len() as i64).unwrap();
+
+    let stats = client.get_channel_stats("cov_stats_ch").unwrap();
+    assert_eq!(stats.channel_name, "cov_stats_ch");
+    assert!(stats.total_messages >= 1);
+}
+
+#[test]
+fn coverage_get_channel_stats_not_found() {
+    let client = new_client("cov_stats_nf");
+    let result = client.get_channel_stats("nonexistent_stats_xxxx");
+    assert!(result.is_err());
+}
+
+#[test]
+fn coverage_set_debug() {
+    let client = new_client("cov_debug");
+    client.set_debug(true);
+    client.set_debug(false);
+}
+
+#[test]
+fn coverage_on_send_callback() {
+    let client = new_client("cov_onsend");
+    let opts = PublisherOptions::new().set_slot_size(256).set_num_slots(8);
+    let pub_handle = client.create_publisher("cov_onsend_ch", &opts).unwrap();
+
+    pub_handle.set_on_send_callback(move |_buf, size| Ok(size));
+
+    let (buf, _max) = pub_handle.get_message_buffer(64).unwrap().unwrap();
+    let payload = b"callback_test";
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
+    }
+    let _msg = pub_handle.publish_message(payload.len() as i64).unwrap();
+
+    pub_handle.clear_on_send_callback();
+    // A second publish without callback should still work.
+    let (buf2, _) = pub_handle.get_message_buffer(64).unwrap().unwrap();
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), buf2, payload.len());
+    }
+    let _msg2 = pub_handle.publish_message(payload.len() as i64).unwrap();
+}
+
+#[test]
+fn coverage_resize_callback() {
+    let client = new_client("cov_resize");
+    let opts = PublisherOptions::new().set_slot_size(64).set_num_slots(8);
+    let pub_handle = client.create_publisher("cov_resize_ch", &opts).unwrap();
+
+    pub_handle.register_resize_callback(|_old_size, _new_size| Ok(()));
+    pub_handle.unregister_resize_callback();
+}
+
+#[test]
+fn coverage_on_receive_callback() {
+    let client = new_client("cov_onrecv");
+    let opts = PublisherOptions::new().set_slot_size(256).set_num_slots(16);
+    let pub_handle = client.create_publisher("cov_onrecv_ch", &opts).unwrap();
+
+    let sub_opts = SubscriberOptions::new();
+    let sub = client.create_subscriber("cov_onrecv_ch", &sub_opts).unwrap();
+
+    let received_size = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
+    let received_clone = received_size.clone();
+    sub.set_on_receive_callback(move |_buf, size| {
+        received_clone.store(size, std::sync::atomic::Ordering::SeqCst);
+        Ok(size)
+    });
+
+    let (buf, _) = pub_handle.get_message_buffer(64).unwrap().unwrap();
+    let payload = b"receive_callback_test";
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
+    }
+    let _msg = pub_handle.publish_message(payload.len() as i64).unwrap();
+
+    let read_msg = sub.read_message(ReadMode::ReadNext).unwrap();
+    assert!(!read_msg.is_empty());
+
+    sub.clear_on_receive_callback();
+}
+
+#[test]
+fn coverage_process_all_messages_no_callback() {
+    let client = new_client("cov_procall_nocb");
+    let opts = PublisherOptions::new().set_slot_size(64).set_num_slots(16);
+    let _pub = client.create_publisher("cov_procall_nocb_ch", &opts).unwrap();
+    let sub_opts = SubscriberOptions::new();
+    let sub = client.create_subscriber("cov_procall_nocb_ch", &sub_opts).unwrap();
+
+    let result = sub.process_all_messages(ReadMode::ReadNext);
+    assert!(result.is_err(), "should fail without message callback");
+}
+
+#[test]
+fn coverage_invoke_message_callback() {
+    let client = new_client("cov_invoke");
+    let opts = PublisherOptions::new().set_slot_size(256).set_num_slots(16);
+    let pub_handle = client.create_publisher("cov_invoke_ch", &opts).unwrap();
+    let sub_opts = SubscriberOptions::new().set_max_active_messages(8);
+    let sub = client.create_subscriber("cov_invoke_ch", &sub_opts).unwrap();
+
+    let count = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0));
+    let count_clone = count.clone();
+    sub.register_message_callback(move |_msg| {
+        count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    // invoke_message_callback calls the registered callback directly.
+    sub.invoke_message_callback(subspace_client::Message::default());
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    sub.unregister_message_callback();
+
+    // Invoking without a callback is a no-op.
+    sub.invoke_message_callback(subspace_client::Message::default());
+}
+
+#[test]
+fn coverage_get_all_messages_empty() {
+    let client = new_client("cov_getall_e");
+    let opts = PublisherOptions::new().set_slot_size(256).set_num_slots(16);
+    let _pub = client.create_publisher("cov_getall_e_ch", &opts).unwrap();
+    let sub_opts = SubscriberOptions::new().set_max_active_messages(8);
+    let sub = client.create_subscriber("cov_getall_e_ch", &sub_opts).unwrap();
+
+    // No messages published, so get_all_messages returns empty.
+    let messages = sub.get_all_messages(ReadMode::ReadNext).unwrap();
+    assert!(messages.is_empty());
+}
+
+#[test]
+fn coverage_message_default_and_is_empty() {
+    use subspace_client::Message;
+    let msg = Message::default();
+    assert!(msg.is_empty());
+    assert_eq!(msg.length, 0);
+    assert_eq!(msg.ordinal, 0);
+    assert_eq!(msg.timestamp, 0);
+    assert_eq!(msg.vchan_id, -1);
+    assert!(!msg.is_activation);
+    assert!(!msg.checksum_error);
+    assert_eq!(msg.slot_id, -1);
+    assert!(msg.buffer.is_null());
+
+    let data = unsafe { msg.as_slice() };
+    assert!(data.is_empty());
+}
+
+#[test]
+fn coverage_message_debug_format() {
+    use subspace_client::Message;
+    let msg = Message::default();
+    let debug_str = format!("{:?}", msg);
+    assert!(debug_str.contains("Message"));
+    assert!(debug_str.contains("length"));
+}
+
+#[test]
+fn coverage_message_clone_default() {
+    use subspace_client::Message;
+    let msg = Message::default();
+    let cloned = msg.clone();
+    assert_eq!(cloned.length, msg.length);
+    assert_eq!(cloned.ordinal, msg.ordinal);
+}
+
+#[test]
+fn coverage_publisher_accessors() {
+    let client = new_client("cov_pub_acc");
+    let opts = PublisherOptions::new()
+        .set_slot_size(128)
+        .set_num_slots(8)
+        .set_type("pub_type".to_string())
+        .set_fixed_size(true);
+    let pub_handle = client.create_publisher("cov_pub_acc_ch", &opts).unwrap();
+
+    assert_eq!(pub_handle.name(), "cov_pub_acc_ch");
+    assert!(!pub_handle.is_reliable());
+    assert!(pub_handle.is_fixed_size());
+    assert_eq!(pub_handle.num_slots(), 8);
+    assert!(pub_handle.slot_size() > 0);
+    assert!(pub_handle.get_poll_fd() >= 0);
+    assert!(pub_handle.prefix_size() > 0);
+    assert!(pub_handle.checksum_size() > 0);
+}
+
+#[test]
+fn coverage_subscriber_accessors() {
+    let client = new_client("cov_sub_acc");
+    let opts = PublisherOptions::new().set_slot_size(128).set_num_slots(16);
+    let _pub = client.create_publisher("cov_sub_acc_ch", &opts).unwrap();
+    let sub_opts = SubscriberOptions::new();
+    let sub = client.create_subscriber("cov_sub_acc_ch", &sub_opts).unwrap();
+
+    assert_eq!(sub.name(), "cov_sub_acc_ch");
+    assert!(!sub.is_reliable());
+    assert!(!sub.is_placeholder());
+    assert!(sub.num_slots() > 0);
+    assert!(sub.get_poll_fd() >= 0);
+    assert!(sub.prefix_size() > 0);
+    assert!(sub.checksum_size() > 0);
+    assert_eq!(sub.num_active_messages(), 0);
+}
+
+#[test]
+fn coverage_subscriber_trigger_untrigger() {
+    let client = new_client("cov_trig");
+    let opts = PublisherOptions::new().set_slot_size(64).set_num_slots(16);
+    let _pub = client.create_publisher("cov_trig_ch", &opts).unwrap();
+    let sub_opts = SubscriberOptions::new();
+    let sub = client.create_subscriber("cov_trig_ch", &sub_opts).unwrap();
+
+    sub.trigger();
+    sub.untrigger();
+}
+
+#[test]
+fn coverage_publisher_num_subscribers() {
+    let client = new_client("cov_numsubs");
+    let opts = PublisherOptions::new().set_slot_size(64).set_num_slots(16);
+    let pub_handle = client.create_publisher("cov_numsubs_ch", &opts).unwrap();
+
+    assert_eq!(pub_handle.num_subscribers(pub_handle.virtual_channel_id()), 0);
+}
+
+#[test]
+fn coverage_subscriber_current_ordinal_and_timestamp() {
+    let client = new_client("cov_ord");
+    let opts = PublisherOptions::new().set_slot_size(256).set_num_slots(16);
+    let pub_handle = client.create_publisher("cov_ord_ch", &opts).unwrap();
+    let sub_opts = SubscriberOptions::new();
+    let sub = client.create_subscriber("cov_ord_ch", &sub_opts).unwrap();
+
+    let (buf, _) = pub_handle.get_message_buffer(64).unwrap().unwrap();
+    let payload = b"ordinal_test";
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
+    }
+    let _msg = pub_handle.publish_message(payload.len() as i64).unwrap();
+
+    let read_msg = sub.read_message(ReadMode::ReadNext).unwrap();
+    assert!(!read_msg.is_empty());
+    assert!(read_msg.ordinal > 0);
+    assert!(sub.current_ordinal() > 0);
+    assert!(sub.timestamp() > 0);
+}
+
+#[test]
+fn coverage_error_display_variants() {
+    let e = SubspaceError::Internal("test".to_string());
+    assert!(format!("{}", e).contains("test"));
+
+    let e = SubspaceError::InvalidArgument("bad".to_string());
+    assert!(format!("{}", e).contains("bad"));
+
+    let e = SubspaceError::NotConnected("dc".to_string());
+    assert!(format!("{}", e).contains("dc"));
+
+    let e = SubspaceError::Timeout("t".to_string());
+    assert!(format!("{}", e).contains("t"));
+
+    let e = SubspaceError::ServerError("srv".to_string());
+    assert!(format!("{}", e).contains("srv"));
+
+    let e = SubspaceError::ChecksumError;
+    assert!(format!("{}", e).contains("checksum"));
+}
+
+#[test]
+fn coverage_publisher_metadata_accessors() {
+    let client = new_client("cov_pubmeta");
+    let opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(8)
+        .set_metadata_size(16);
+    let pub_handle = client.create_publisher("cov_pubmeta_ch", &opts).unwrap();
+
+    assert_eq!(pub_handle.metadata_size(), 16);
+
+    let meta = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+    pub_handle.set_metadata(&meta);
+    let read_meta = pub_handle.get_metadata();
+    assert_eq!(read_meta, meta);
+}
+
+#[test]
+fn coverage_subscriber_metadata_accessor() {
+    let client = new_client("cov_submeta");
+    let opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(16)
+        .set_metadata_size(8);
+    let pub_handle = client.create_publisher("cov_submeta_ch", &opts).unwrap();
+    let sub_opts = SubscriberOptions::new();
+    let sub = client.create_subscriber("cov_submeta_ch", &sub_opts).unwrap();
+
+    // Publish a message to force the subscriber to load channel data.
+    let (buf, _) = pub_handle.get_message_buffer(64).unwrap().unwrap();
+    let payload = b"meta";
+    unsafe { std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len()); }
+    let _msg = pub_handle.publish_message(payload.len() as i64).unwrap();
+    sub.wait(Some(1000)).unwrap();
+    let _ = sub.read_message(ReadMode::ReadNext).unwrap();
+
+    assert_eq!(sub.metadata_size(), 8);
+    let meta = sub.get_metadata();
+    assert_eq!(meta.len(), 8);
+}

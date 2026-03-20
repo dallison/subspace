@@ -6,7 +6,8 @@
 use crate::bitset::{
     bits_to_words, sizeof_atomic_bitset, AtomicBitSet, DynamicBitSet, InPlaceAtomicBitSet,
 };
-use nix::sys::mman::{mmap, munmap, MapFlags, ProtFlags};
+use crate::syscall_shim::{shim_mmap, shim_munmap};
+use nix::sys::mman::{MapFlags, ProtFlags};
 use std::num::NonZeroUsize;
 use std::os::fd::BorrowedFd;
 use std::os::unix::io::RawFd;
@@ -362,7 +363,7 @@ impl Channel {
     pub fn unmap(&mut self) {
         if !self.scb.is_null() {
             unsafe {
-                let _ = munmap(
+                let _ = shim_munmap(
                     NonNull::new_unchecked(self.scb as *mut _),
                     self.scb_size,
                 );
@@ -371,7 +372,7 @@ impl Channel {
         }
         if !self.ccb.is_null() {
             unsafe {
-                let _ = munmap(
+                let _ = shim_munmap(
                     NonNull::new_unchecked(self.ccb as *mut _),
                     self.ccb_size,
                 );
@@ -380,7 +381,7 @@ impl Channel {
         }
         if !self.bcb.is_null() {
             unsafe {
-                let _ = munmap(
+                let _ = shim_munmap(
                     NonNull::new_unchecked(self.bcb as *mut _),
                     self.bcb_size,
                 );
@@ -713,7 +714,7 @@ impl Drop for Channel {
         for buf in &self.buffers {
             if !buf.buffer.is_null() {
                 unsafe {
-                    let _ = munmap(
+                    let _ = shim_munmap(
                         NonNull::new_unchecked(buf.buffer as *mut _),
                         buf.full_size as usize,
                     );
@@ -731,7 +732,7 @@ pub fn map_memory(fd: RawFd, size: usize, prot: ProtFlags) -> crate::error::Resu
     })?;
     unsafe {
         let borrowed = BorrowedFd::borrow_raw(fd);
-        let ptr = mmap(None, size, prot, MapFlags::MAP_SHARED, borrowed, 0)?;
+        let ptr = shim_mmap(size, prot, MapFlags::MAP_SHARED, borrowed, 0)?;
         Ok(ptr.as_ptr() as *mut u8)
     }
 }

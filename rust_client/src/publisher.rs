@@ -7,6 +7,7 @@ use crate::channel::*;
 use crate::checksum;
 use crate::error::Result;
 use crate::options::PublisherOptions;
+use crate::syscall_shim::{shim_close, shim_fstat, shim_ftruncate, shim_open, shim_read, shim_write};
 use nix::fcntl::OFlag;
 use nix::sys::mman::ProtFlags;
 use nix::sys::stat::Mode;
@@ -602,7 +603,7 @@ impl PublisherImpl {
                             final_buffer_size as usize,
                             ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
                         )?;
-                        unsafe { libc::close(fd); }
+                        shim_close(fd);
                         self.channel.buffers.push(BufferSet {
                             full_size: final_buffer_size,
                             slot_size: final_slot_size,
@@ -624,7 +625,7 @@ impl PublisherImpl {
                         } else {
                             std::ptr::null_mut()
                         };
-                        unsafe { libc::close(fd); }
+                        shim_close(fd);
                         unsafe {
                             (*self.channel.bcb).sizes[buffer_index]
                                 .store(final_buffer_size, Ordering::Relaxed);
@@ -672,9 +673,7 @@ impl PublisherImpl {
     pub fn trigger_retirement(&self, slot_id: usize) {
         for &fd in &self.retirement_trigger_fds {
             let buf = (slot_id as i32).to_ne_bytes();
-            unsafe {
-                libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len());
-            }
+            shim_write(fd, buf.as_ptr() as *const libc::c_void, buf.len());
         }
     }
 
@@ -688,70 +687,61 @@ impl PublisherImpl {
 #[cfg(target_os = "linux")]
 fn create_shm(name: &str, size: usize) -> crate::error::Result<RawFd> {
     let path = format!("/dev/shm/{}", name);
-    let fd = nix::fcntl::open(
+    let fd = shim_open(
         path.as_str(),
         OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_EXCL,
         Mode::from_bits_truncate(0o666),
     )?;
-    unsafe { libc::ftruncate(fd, size as libc::off_t); }
+    shim_ftruncate(fd, size as libc::off_t);
     Ok(fd)
 }
 
 #[cfg(not(target_os = "linux"))]
 fn posix_shm_name(shadow_path: &str) -> crate::error::Result<String> {
-    let stat = nix::sys::stat::stat(shadow_path)?;
+    let stat = crate::syscall_shim::shim_stat(shadow_path)?;
     Ok(format!("subspace_{}", stat.st_ino))
 }
 
 #[cfg(not(target_os = "linux"))]
 fn create_shm(name: &str, size: usize) -> crate::error::Result<RawFd> {
-    use nix::sys::mman::shm_open;
-    use std::os::unix::io::IntoRawFd;
-
-    // Create a shadow file at the given path and truncate it to the desired
-    // size.  macOS returns a page-aligned size from fstat on shm fds, so we
-    // read the real size from this shadow file instead.
-    let shadow_fd = nix::fcntl::open(
+    let shadow_fd = shim_open(
         name,
         OFlag::O_RDWR | OFlag::O_CREAT,
         Mode::from_bits_truncate(0o666),
     )?;
-    unsafe { libc::ftruncate(shadow_fd, size as libc::off_t); }
-    unsafe { libc::close(shadow_fd); }
+    shim_ftruncate(shadow_fd, size as libc::off_t);
+    shim_close(shadow_fd);
 
     // Use the shadow file's inode to build a short name that fits within
     // macOS's PSHMNAMELEN (31-char) limit.
     let shm_name = posix_shm_name(name)?;
 
-    let fd = shm_open(
+    let raw_fd = crate::syscall_shim::shim_shm_open(
         shm_name.as_str(),
         OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_EXCL,
         Mode::from_bits_truncate(0o666),
     )?;
-    let raw_fd = fd.into_raw_fd();
-    unsafe { libc::ftruncate(raw_fd, size as libc::off_t); }
+    shim_ftruncate(raw_fd, size as libc::off_t);
     Ok(raw_fd)
 }
 
 #[cfg(target_os = "linux")]
 fn open_shm(name: &str) -> crate::error::Result<RawFd> {
     let path = format!("/dev/shm/{}", name);
-    let fd = nix::fcntl::open(path.as_str(), OFlag::O_RDWR, Mode::empty())?;
+    let fd = shim_open(path.as_str(), OFlag::O_RDWR, Mode::empty())?;
     Ok(fd)
 }
 
 #[cfg(not(target_os = "linux"))]
 fn open_shm(name: &str) -> crate::error::Result<RawFd> {
-    use nix::sys::mman::shm_open;
-    use std::os::unix::io::IntoRawFd;
     let shm_name = posix_shm_name(name)?;
-    let fd = shm_open(shm_name.as_str(), OFlag::O_RDWR, Mode::empty())?;
-    Ok(fd.into_raw_fd())
+    let fd = crate::syscall_shim::shim_shm_open(shm_name.as_str(), OFlag::O_RDWR, nix::sys::stat::Mode::empty())?;
+    Ok(fd)
 }
 
 #[cfg(target_os = "linux")]
 fn get_shm_size(fd: RawFd, _shadow_path: &str) -> crate::error::Result<usize> {
-    let stat = nix::sys::stat::fstat(fd)?;
+    let stat = shim_fstat(fd)?;
     Ok(stat.st_size as usize)
 }
 
@@ -759,7 +749,7 @@ fn get_shm_size(fd: RawFd, _shadow_path: &str) -> crate::error::Result<usize> {
 fn get_shm_size(_fd: RawFd, shadow_path: &str) -> crate::error::Result<usize> {
     // macOS fstat on shm fds returns page-aligned sizes; read the shadow file
     // to get the real size (matches C++ GetBufferSize).
-    let stat = nix::sys::stat::stat(shadow_path)?;
+    let stat = crate::syscall_shim::shim_stat(shadow_path)?;
     Ok(stat.st_size as usize)
 }
 
@@ -768,9 +758,7 @@ pub fn trigger_fd(fd: RawFd) {
         return;
     }
     let val: u64 = 1;
-    unsafe {
-        libc::write(fd, val.to_ne_bytes().as_ptr() as *const libc::c_void, 8);
-    }
+    shim_write(fd, val.to_ne_bytes().as_ptr() as *const libc::c_void, 8);
 }
 
 pub fn clear_trigger(fd: RawFd) {
@@ -779,9 +767,7 @@ pub fn clear_trigger(fd: RawFd) {
     }
     let mut buf = [0u8; 8];
     loop {
-        let n = unsafe {
-            libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
-        };
+        let n = shim_read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len());
         if n <= 0 {
             break;
         }
@@ -808,7 +794,7 @@ pub fn attach_buffers(channel: &mut Channel, read_write: bool) -> crate::error::
         } else {
             std::ptr::null_mut()
         };
-        unsafe { libc::close(fd); }
+        shim_close(fd);
         channel.buffers.push(BufferSet {
             full_size: size as u64,
             slot_size: cs,

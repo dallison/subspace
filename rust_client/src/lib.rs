@@ -13,6 +13,7 @@ pub mod options;
 pub mod publisher;
 pub mod socket;
 pub mod subscriber;
+pub mod syscall_shim;
 
 pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/subspace.rs"));
