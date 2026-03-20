@@ -28,7 +28,7 @@ static inline bool VirtualChannelIdMatch(MessageSlot *slot, int vchan_id) {
   return vchan_id == -1 || slot->vchan_id == -1 || slot->vchan_id == vchan_id;
 }
 
-bool SubscriberImpl::AddActiveMessage(MessageSlot * /*slot*/) {
+bool SubscriberImpl::AddActiveMessage([[maybe_unused]] MessageSlot *slot) {
   // std::cerr << "adding active message " << slot->id << " " << slot->ordinal
   //           << "\n";
   int old = num_active_messages_.fetch_add(1);
@@ -80,7 +80,7 @@ void SubscriberImpl::PopulateActiveSlots(InPlaceAtomicBitset &bits) {
 
     for (int i = 0; i < NumSlots(); i++) {
       MessageSlot *s = &ccb_->slots[i];
-      uint32_t refs = s->refs.load(std::memory_order_relaxed);
+      uint64_t refs = s->refs.load(std::memory_order_relaxed);
       if (VirtualChannelIdMatch(s, vchan_id_) && s->ordinal != 0 &&
           (refs & kPubOwned) == 0) {
         bits.Set(i);
@@ -314,7 +314,7 @@ MessageSlot *SubscriberImpl::LastSlot(MessageSlot *slot, bool reliable,
 }
 
 MessageSlot *SubscriberImpl::FindActiveSlotByTimestamp(
-    MessageSlot * /*old_slot*/, uint64_t timestamp, bool reliable, int owner,
+    [[maybe_unused]] MessageSlot *old_slot, uint64_t timestamp, bool reliable, int owner,
     std::vector<ActiveSlot> &buffer) {
   embargoed_slots_.ClearAll();
   for (;;) {
@@ -328,7 +328,7 @@ MessageSlot *SubscriberImpl::FindActiveSlotByTimestamp(
         continue;
       }
       MessageSlot *s = &ccb_->slots[i];
-      uint32_t refs = s->refs.load(std::memory_order_relaxed);
+      uint64_t refs = s->refs.load(std::memory_order_relaxed);
       if (s->ordinal != 0 && (refs & kPubOwned) == 0) {
         buffer.push_back({s, 0, Prefix(s)->timestamp});
       }

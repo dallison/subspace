@@ -677,7 +677,7 @@ void ClientHandler::HandleGetTriggers(
 void ClientHandler::HandleRemovePublisher(
     const subspace::RemovePublisherRequest &req,
     subspace::RemovePublisherResponse *response,
-    std::vector<toolbelt::FileDescriptor> &fds) {
+    [[maybe_unused]] std::vector<toolbelt::FileDescriptor> &fds) {
   ServerChannel *channel = server_->FindChannel(req.channel_name());
   if (channel == nullptr) {
     response->set_error(
@@ -690,7 +690,7 @@ void ClientHandler::HandleRemovePublisher(
 void ClientHandler::HandleRemoveSubscriber(
     const subspace::RemoveSubscriberRequest &req,
     subspace::RemoveSubscriberResponse *response,
-    std::vector<toolbelt::FileDescriptor> &fds) {
+    [[maybe_unused]] std::vector<toolbelt::FileDescriptor> &fds) {
   ServerChannel *channel = server_->FindChannel(req.channel_name());
   if (channel == nullptr) {
     response->set_error(
@@ -703,7 +703,7 @@ void ClientHandler::HandleRemoveSubscriber(
 void ClientHandler::HandleGetChannelInfo(
     const subspace::GetChannelInfoRequest &req,
     subspace::GetChannelInfoResponse *response,
-    std::vector<toolbelt::FileDescriptor> &fds) {
+    [[maybe_unused]] std::vector<toolbelt::FileDescriptor> &fds) {
   if (req.channel_name().empty()) {
     // All channels.
     auto result = response->mutable_channels();
@@ -726,7 +726,7 @@ void ClientHandler::HandleGetChannelInfo(
 void ClientHandler::HandleGetChannelStats(
     const subspace::GetChannelStatsRequest &req,
     subspace::GetChannelStatsResponse *response,
-    std::vector<toolbelt::FileDescriptor> &fds) {
+    [[maybe_unused]] std::vector<toolbelt::FileDescriptor> &fds) {
   if (req.channel_name().empty()) {
     // All channels.
     auto result = response->mutable_channels();
