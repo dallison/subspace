@@ -501,25 +501,25 @@ TEST_F(StressTest, ActiveMessages) {
   };
 
   std::vector<Receiver> receivers;
+  receivers.reserve(kMaxActiveMessages);
   std::atomic<int> num_messages_received = 0;
   std::atomic<int> num_dropped_messages = 0;
 
   std::cerr << "expecting " << kNumMessages << " messages" << std::endl;
-  // Create the receivers and start them running.
+  // Create the receivers and their pipes first to avoid vector reallocation
+  // while threads are running (use-after-free from dangling references).
   for (int i = 0; i < kMaxActiveMessages; i++) {
     receivers.push_back(Receiver());
     auto pipe = toolbelt::SharedPtrPipe<subspace::Message>::Create();
     ASSERT_OK(pipe);
     receivers[i].pipe = *pipe;
-
+  }
+  for (int i = 0; i < kMaxActiveMessages; i++) {
     receivers[i].thread = std::thread([&, i]() {
       while (num_messages_received <
              kNumMessages - num_dropped_messages.load()) {
         auto msg = receivers[i].pipe.Read();
         num_messages_received++;
-        // Just throw the message away.
-        // We are interested in the receiver reading the message, not what the
-        // message contains.
         std::this_thread::sleep_for(std::chrono::microseconds(rand() % 10));
         msg.IgnoreError();
       }
@@ -651,25 +651,25 @@ TEST_F(StressTest, ActiveMessages2) {
   };
 
   std::vector<Receiver> receivers;
+  receivers.reserve(kMaxActiveMessages);
   std::atomic<int> num_messages_received = 0;
   std::atomic<int> num_dropped_messages = 0;
 
   std::cerr << "expecting " << kNumMessages << " messages" << std::endl;
-  // Create the receivers and start them running.
+  // Create the receivers and their pipes first to avoid vector reallocation
+  // while threads are running (use-after-free from dangling references).
   for (int i = 0; i < kMaxActiveMessages; i++) {
     receivers.push_back(Receiver());
     auto pipe = toolbelt::SharedPtrPipe<subspace::Message>::Create();
     ASSERT_OK(pipe);
     receivers[i].pipe = *pipe;
-
+  }
+  for (int i = 0; i < kMaxActiveMessages; i++) {
     receivers[i].thread = std::thread([&, i]() {
       while (num_messages_received <
              kNumMessages - num_dropped_messages.load()) {
         auto msg = receivers[i].pipe.Read();
         num_messages_received++;
-        // Just throw the message away.
-        // We are interested in the receiver reading the message, not what the
-        // message contains.
         std::this_thread::sleep_for(std::chrono::microseconds(rand() % 10));
         msg.IgnoreError();
       }
