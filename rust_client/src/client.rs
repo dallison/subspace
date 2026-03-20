@@ -1360,10 +1360,7 @@ fn poll_fd_with_timeout(fd: RawFd, timeout_ms: i32) -> Result<i32> {
         events: libc::POLLIN,
         revents: 0,
     };
-    let result = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
-    if result < 0 {
-        return Err(SubspaceError::Io(std::io::Error::last_os_error()));
-    }
+    let result = crate::syscall_shim::shim_poll(&mut pfd, 1, timeout_ms)?;
     Ok(result)
 }
 

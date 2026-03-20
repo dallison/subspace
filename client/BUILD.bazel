@@ -36,6 +36,19 @@ cc_library(
    ],
 )
 
+cc_library(
+    name = "test_fixture",
+    testonly = True,
+    hdrs = ["test_fixture.h"],
+    deps = [
+        ":subspace_client",
+        "//server",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@coroutines//:co",
+        "@googletest//:gtest",
+    ],
+)
+
 cc_test(
     name = "client_test",
     size = "small",
@@ -50,6 +63,7 @@ cc_test(
     ],
     deps = [
         ":subspace_client",
+        ":test_fixture",
         "//server",
         "@abseil-cpp//absl/debugging:failure_signal_handler",
         "@abseil-cpp//absl/debugging:symbolize",
@@ -74,6 +88,7 @@ cc_test(
     ],
     deps = [
         ":subspace_client",
+        ":test_fixture",
         "//server",
         "@abseil-cpp//absl/flags:flag",
         "@abseil-cpp//absl/flags:parse",
@@ -96,10 +111,31 @@ cc_test(
     ],
     deps = [
         ":subspace_client",
+        ":test_fixture",
         "//server",
         "@abseil-cpp//absl/flags:flag",
         "@abseil-cpp//absl/flags:parse",
         "@abseil-cpp//absl/hash:hash_testing",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@abseil-cpp//absl/status:statusor",
+        "@googletest//:gtest",
+        "@coroutines//:co",
+    ],
+)
+
+cc_test(
+    name = "syscall_failure_test",
+    size = "small",
+    srcs = ["syscall_failure_test.cc"],
+    copts = [
+        "-Wno-missing-field-initializers",
+    ],
+    deps = [
+        ":subspace_client",
+        ":test_fixture",
+        "//common:subspace_common",
+        "//server",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:status_matchers",
         "@abseil-cpp//absl/status:statusor",

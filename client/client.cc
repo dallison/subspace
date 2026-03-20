@@ -5,6 +5,7 @@
 #include "client/client.h"
 #include "absl/strings/str_format.h"
 #include "client.h"
+#include "common/syscall_shim.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
@@ -630,7 +631,7 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
     result = co_->Wait(publisher->GetPollFd().Fd(), POLLIN, timeout_ns);
   } else {
     struct pollfd fd = {.fd = publisher->GetPollFd().Fd(), .events = POLLIN};
-    int e = ::poll(&fd, 1, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
+    int e = GetSyscallShim().poll_fn(&fd, 1, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
     // Since we are waiting forever will can only get the value 1 from the poll.
     // We will never get 0 since there is no timeout.  Anything else (can only
     // be -1) will be an error.
@@ -680,7 +681,7 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
     struct pollfd fds[2] = {
         {.fd = publisher->GetPollFd().Fd(), .events = POLLIN},
         {.fd = fd.Fd(), .events = POLLIN}};
-    int e = ::poll(fds, 2, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
+    int e = GetSyscallShim().poll_fn(fds, 2, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
     if (timeout_ns == 0 && e == 0) {
       return absl::InternalError("Timeout waiting for reliable publisher");
     }
@@ -719,7 +720,7 @@ absl::Status ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
     result = co_->Wait(subscriber->GetPollFd().Fd(), POLLIN, timeout_ns);
   } else {
     struct pollfd fd = {.fd = subscriber->GetPollFd().Fd(), .events = POLLIN};
-    int e = ::poll(&fd, 1, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
+    int e = GetSyscallShim().poll_fn(&fd, 1, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
     // Since we are waiting forever will can only get the value 1 from the poll.
     // We will never get 0 since there is no timeout.  Anything else (can only
     // be -1) will be an error.
@@ -758,7 +759,7 @@ absl::StatusOr<int> ClientImpl::WaitForSubscriber(
     struct pollfd fds[2] = {
         {.fd = subscriber->GetPollFd().Fd(), .events = POLLIN},
         {.fd = fd.Fd(), .events = POLLIN}};
-    int e = ::poll(fds, 2, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
+    int e = GetSyscallShim().poll_fn(fds, 2, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
     if (timeout_ns == 0 && e == 0) {
       return absl::InternalError("Timeout waiting for subscriber");
     }

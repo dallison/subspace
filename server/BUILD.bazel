@@ -1,6 +1,6 @@
 package(default_visibility = ["//visibility:public"])
 
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_binary")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_binary", "cc_test")
 
 cc_library(
     name = "server",
@@ -56,4 +56,19 @@ cc_binary(
         "//:macos_default": [],
         "//conditions:default": [ "-lrt" , "-ldl"],
     }),
+)
+
+cc_test(
+    name = "server_test",
+    size = "small",
+    srcs = ["server_test.cc"],
+    deps = [
+        ":server",
+        "//client:subspace_client",
+        "//client:test_fixture",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@googletest//:gtest",
+        "@coroutines//:co",
+    ],
 )

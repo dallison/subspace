@@ -6,11 +6,14 @@ cc_library(
     name = "subspace_common",
     srcs = [
         "channel.cc",
+        "syscall_shim.cc",
     ],
     hdrs = [
         "atomic_bitset.h",
         "channel.h",
         "fast_ring_buffer.h",
+        "syscall_shim.h",
+        "syscall_shim_test_helper.h",
     ],
     linkopts = select({
         "//:macos_x86_64": [],
