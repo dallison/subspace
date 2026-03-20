@@ -547,7 +547,7 @@ impl Channel {
 
             if slot
                 .refs
-                .compare_exchange_weak(r, new_ref, Ordering::Relaxed, Ordering::Relaxed)
+                .compare_exchange_weak(r, new_ref, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
                 if retire

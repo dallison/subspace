@@ -71,6 +71,7 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
     // something else got there before us and we just go back and remap any new
     // buffers.
     if (ccb_->num_buffers.compare_exchange_strong(num_buffers, new_num_buffers,
+                                                  std::memory_order_release,
                                                   std::memory_order_relaxed)) {
       // We successfully updated the number of buffers in the CCB.
       break;
@@ -156,6 +157,7 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
         slot->ordinal, (old_refs >> kVchanIdShift) & kVchanIdMask,
         (old_refs >> kRetiredRefsShift) & kRetiredRefsMask);
     if (slot->refs.compare_exchange_weak(expected, ref,
+                                         std::memory_order_acquire,
                                          std::memory_order_relaxed)) {
       if (!ValidateSlotBuffer(slot)) {
         // No buffer for the slot.  Embargo the slot so we don't see it again
@@ -277,6 +279,7 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
         slot->ordinal, (old_refs >> kVchanIdShift) & kVchanIdMask,
         (old_refs >> kRetiredRefsShift) & kRetiredRefsMask);
     if (slot->refs.compare_exchange_weak(expected, ref,
+                                         std::memory_order_acquire,
                                          std::memory_order_relaxed)) {
       if (!ValidateSlotBuffer(slot)) {
         // No buffer for the slot.  Embargo the slot so we don't see it again

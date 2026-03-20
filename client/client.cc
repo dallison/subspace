@@ -74,9 +74,9 @@ void ClientImpl::ClientLockGuard::Lock() {
 }
 
 void ClientImpl::ClientLockGuard::Unlock() {
+  client_->owner_thread_id_.store(0, std::memory_order_relaxed);
   client_->mutex_.unlock();
   locked_ = false;
-  client_->owner_thread_id_.store(0, std::memory_order_relaxed);
 }
 
 void ClientImpl::ClientLockGuard::CommitLock() {
