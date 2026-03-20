@@ -2,119 +2,22 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
+#include "client/test_fixture.h"
+
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
-#include "absl/hash/hash_testing.h"
-#include "absl/status/status_matchers.h"
-#include "client/client.h"
-#include "co/coroutine.h"
-#include "server/server.h"
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
 #include "toolbelt/pipe.h"
-#include <gtest/gtest.h>
 #include <inttypes.h>
-#include <memory>
-#include <signal.h>
 #include <sys/resource.h>
-#include <thread>
 
 ABSL_FLAG(bool, start_server, true, "Start the subspace server");
 ABSL_FLAG(std::string, server, "", "Path to server executable");
 
-void SignalHandler(int sig) { printf("Signal %d", sig); }
-
-using Publisher = subspace::Publisher;
-using Subscriber = subspace::Subscriber;
-using Message = subspace::Message;
 using InetAddress = toolbelt::InetAddress;
 
-#define VAR(a) a##__COUNTER__
-#define EVAL_AND_ASSERT_OK(expr) EVAL_AND_ASSERT_OK2(VAR(r_), expr)
-
-#define EVAL_AND_ASSERT_OK2(result, expr)                                      \
-  ({                                                                           \
-    auto result = (expr);                                                      \
-    if (!result.ok()) {                                                        \
-      std::cerr << result.status() << std::endl;                               \
-    }                                                                          \
-    ASSERT_OK(result);                                                         \
-    std::move(*result);                                                        \
-  })
-
-#define ASSERT_OK(e) ASSERT_THAT(e, ::absl_testing::IsOk())
-
-class LatencyTest : public ::testing::Test {
-public:
-  // We run one server for the duration of the whole test suite.
-  static void SetUpTestSuite() {
-    if (!absl::GetFlag(FLAGS_start_server)) {
-      return;
-    }
-    printf("Starting Subspace server\n");
-    socket_ = "/tmp/subspace";
-
-    // The server will write to this pipe to notify us when it
-    // has started and stopped.  This end of the pipe is blocking.
-    (void)pipe(server_pipe_);
-
-    server_ =
-        std::make_unique<subspace::Server>(scheduler_, socket_, "", 0, 0,
-                                           /*local=*/true, server_pipe_[1]);
-
-    // Start server running in a thread.
-    server_thread_ = std::thread([]() {
-      absl::Status s = server_->Run();
-      if (!s.ok()) {
-        fprintf(stderr, "Error running Subspace server: %s\n",
-                s.ToString().c_str());
-        exit(1);
-      }
-    });
-
-    // Wait for server to tell us that it's running.
-    char buf[8];
-    (void)::read(server_pipe_[0], buf, 8);
-  }
-
-  static void TearDownTestSuite() {
-    if (!absl::GetFlag(FLAGS_start_server)) {
-      return;
-    }
-    printf("Stopping Subspace server\n");
-    server_->Stop();
-
-    // Wait for server to tell us that it's stopped.
-    char buf[8];
-    (void)::read(server_pipe_[0], buf, 8);
-    server_thread_.join();
-  }
-
-  void SetUp() override { signal(SIGPIPE, SIG_IGN); }
-  void TearDown() override {}
-
-  void InitClient(subspace::Client &client) {
-    client.SetThreadSafe(true);
-    ASSERT_OK(client.Init(Socket()));
-  }
-
-  static const std::string &Socket() { return socket_; }
-
-  static subspace::Server *Server() { return server_.get(); }
-
-private:
-  static co::CoroutineScheduler scheduler_;
-  static std::string socket_;
-  static int server_pipe_[2];
-  static std::unique_ptr<subspace::Server> server_;
-  static std::thread server_thread_;
-};
-
-co::CoroutineScheduler LatencyTest::scheduler_;
-std::string LatencyTest::socket_ = "/tmp/subspace";
-int LatencyTest::server_pipe_[2];
-std::unique_ptr<subspace::Server> LatencyTest::server_;
-std::thread LatencyTest::server_thread_;
+class LatencyTest : public SubspaceTestBase {};
 
 // Stress test with multiple threads.
 TEST_F(LatencyTest, MultithreadedSingleChannel) {
