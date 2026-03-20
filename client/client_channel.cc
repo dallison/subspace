@@ -3,6 +3,7 @@
 // See LICENSE file for licensing information.
 
 #include "client/client_channel.h"
+#include "common/syscall_shim.h"
 #include <sys/mman.h>
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
 #include <sys/posix_shm.h>
@@ -22,19 +23,20 @@ ClientChannel::CreatePosixSharedMemoryFile(const std::string &filename,
                                            off_t size) {
   // Create a file in /tmp and make it the same size as the shared memory.  This
   // will not actually allocate any disk space.
-  int fd = open(filename.c_str(), O_RDWR | O_CREAT, 0666);
+  auto &shim = GetSyscallShim();
+  int fd = shim.open_fn(filename.c_str(), O_RDWR | O_CREAT, 0666);
   if (fd < 0) {
     return absl::InternalError(
         absl::StrFormat("Failed to open shadow file %s: %s", filename.c_str(),
                         strerror(errno)));
   }
-  if (ftruncate(fd, size) < 0) {
-    close(fd);
+  if (shim.ftruncate_fn(fd, size) < 0) {
+    shim.close_fn(fd);
     return absl::InternalError(
         absl::StrFormat("Failed to truncate shadow file %s to size %zd: %s",
                         filename.c_str(), size, strerror(errno)));
   }
-  close(fd);
+  shim.close_fn(fd);
 
   return PosixSharedMemoryName(filename);
 }
@@ -198,8 +200,8 @@ void ClientChannel::Dump(std::ostream &os) const {
 static absl::StatusOr<toolbelt::FileDescriptor>
 OpenSharedMemoryFile(const std::string &filename, int flags) {
   mode_t old_umask = umask(0);
-  int shm_fd =
-      shm_open(filename.c_str(), flags, S_IRUSR | S_IWUSR | S_IROTH | S_IWOTH);
+  int shm_fd = GetSyscallShim().shm_open_fn(filename.c_str(), flags,
+                                             S_IRUSR | S_IWUSR | S_IROTH | S_IWOTH);
   umask(old_umask);
   if (shm_fd == -1) {
     if (errno == EEXIST) {
@@ -217,6 +219,7 @@ absl::StatusOr<toolbelt::FileDescriptor>
 ClientChannel::CreateBuffer(int buffer_index, size_t size) {
   std::string filename = BufferSharedMemoryName(buffer_index);
 
+  auto &shim = GetSyscallShim();
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
   // Open the shared memory file.
   auto shm_fd = OpenSharedMemoryFile(filename, O_RDWR | O_CREAT | O_EXCL);
@@ -229,9 +232,9 @@ ClientChannel::CreateBuffer(int buffer_index, size_t size) {
   }
 
   // Make it the appropriate size.
-  int e = ftruncate(shm_fd->Fd(), off_t(size));
+  int e = shim.ftruncate_fn(shm_fd->Fd(), off_t(size));
   if (e == -1) {
-    (void)shm_unlink(filename.c_str());
+    (void)shim.shm_unlink_fn(filename.c_str());
     return absl::InternalError(
         absl::StrFormat("Failed to set length of shared memory %s: %s",
                         filename, strerror(errno)));
@@ -239,14 +242,14 @@ ClientChannel::CreateBuffer(int buffer_index, size_t size) {
 
   std::string shm_filename = "/dev/shm/" + filename;
   // Change the permissions for the file to 777.
-  if (chmod(shm_filename.c_str(), 0777) == -1) {
+  if (shim.chmod_fn(shm_filename.c_str(), 0777) == -1) {
     return absl::InternalError(
         absl::StrFormat("Failed to change permissions of shared memory %s: %s", shm_filename, strerror(errno)));
   }
 
   if (getuid() == 0) {
     // If we are root, change the owner for the file to server's user and group.
-    if (chown(shm_filename.c_str(), user_id_, group_id_) == -1) {
+    if (shim.chown_fn(shm_filename.c_str(), user_id_, group_id_) == -1) {
       return absl::InternalError(
           absl::StrFormat("Failed to change owner of shared memory %s: %s", shm_filename, strerror(errno)));
     }
@@ -274,16 +277,16 @@ ClientChannel::CreateBuffer(int buffer_index, size_t size) {
   }
 
   // Make it the appropriate size.
-  int e = ftruncate(shm_fd->Fd(), off_t(size));
+  int e = shim.ftruncate_fn(shm_fd->Fd(), off_t(size));
   if (e == -1) {
-    (void)shm_unlink(filename.c_str());
+    (void)shim.shm_unlink_fn(filename.c_str());
     return absl::InternalError(
         absl::StrFormat("Failed to set length of shared memory %s: %s",
-                        filename, strerror(errno)));  
+                        filename, strerror(errno)));
   }
 
   // Change the permissions for the file to 777.
-  if (chmod(filename.c_str(), 0777) == -1) {
+  if (shim.chmod_fn(filename.c_str(), 0777) == -1) {
     return absl::InternalError(
       absl::StrFormat("Failed to change permissions of shared memory %s: %s",  filename, strerror(errno)));
 
@@ -291,7 +294,7 @@ ClientChannel::CreateBuffer(int buffer_index, size_t size) {
 
   if (getuid() == 0) {
     // If we are root, change the owner for the file to server's user and group.
-    if (chown(filename.c_str(), user_id_, group_id_) == -1) {
+    if (shim.chown_fn(filename.c_str(), user_id_, group_id_) == -1) {
       return absl::InternalError(
         absl::StrFormat("Failed to change owner of shared memory %s: %s", filename, strerror(errno)));
     }
@@ -318,12 +321,13 @@ ClientChannel::OpenBuffer(int buffer_index) {
 absl::StatusOr<size_t>
 ClientChannel::GetBufferSize(toolbelt::FileDescriptor &shm_fd,
                              int buffer_index) const {
+  auto &shim = GetSyscallShim();
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   // On Posix we need to look at the size of the shadow file because it looks
   // like the fstat of the shm "file" returns a page aligned size.
   std::string filename = BufferSharedMemoryName(buffer_index);
   struct stat sb;
-  if (stat(filename.c_str(), &sb) == -1) {
+  if (shim.stat_fn(filename.c_str(), &sb) == -1) {
     return absl::InternalError(
         absl::StrFormat("Failed to get size of shared memory %s: %s", filename,
                         strerror(errno)));
@@ -332,7 +336,7 @@ ClientChannel::GetBufferSize(toolbelt::FileDescriptor &shm_fd,
 #else
   std::string filename = BufferSharedMemoryName(buffer_index);
   struct stat sb;
-  if (fstat(shm_fd.Fd(), &sb) == -1) {
+  if (shim.fstat_fn(shm_fd.Fd(), &sb) == -1) {
     return absl::InternalError(
         absl::StrFormat("Failed to get size of shared memory from fd %d: %s",
                         shm_fd.Fd(), strerror(errno)));
@@ -367,7 +371,7 @@ void ClientChannel::TriggerRetirement(int slot_id) {
   }
   std::unique_lock<std::mutex> lock(retirement_lock_);
   for (auto &fd : retirement_triggers_) {
-    ssize_t n = ::write(fd.Fd(), &slot_id, sizeof(slot_id));
+    ssize_t n = GetSyscallShim().write_fn(fd.Fd(), &slot_id, sizeof(slot_id));
     // TODO: what to do if this fails?  For now just write an error to stderr.
     if (n < 0) {
       std::cerr << "Failed to trigger retirement for slot " << slot_id << ": "

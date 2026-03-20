@@ -2,31 +2,24 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
+#include "client/test_fixture.h"
+
 #include "absl/debugging/failure_signal_handler.h"
 #include "absl/debugging/symbolize.h"
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
 #include "absl/hash/hash_testing.h"
-#include "absl/status/status_matchers.h"
-#include "client/client.h"
-#include "co/coroutine.h"
-#include "server/server.h"
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
 #include "toolbelt/pipe.h"
 #include <array>
-#include <cstdio>
-#include <gtest/gtest.h>
 #include <inttypes.h>
-#include <memory>
-#include <signal.h>
 #include <sys/resource.h>
-#include <thread>
 
 ABSL_FLAG(bool, start_server, true, "Start the subspace server");
 ABSL_FLAG(std::string, server, "", "Path to server executable");
 
-void SignalHandler(int sig) {
+static void SignalHandler(int sig) {
   fprintf(stderr, "Signal %d", sig);
   std::cerr.flush();
   FILE *fp = fopen("/proc/self/maps", "r");
@@ -41,109 +34,11 @@ void SignalHandler(int sig) {
   raise(sig);
 }
 
-void SigQuitHandler(int signum);
-
-using Publisher = subspace::Publisher;
-using Subscriber = subspace::Subscriber;
-using Message = subspace::Message;
 using InetAddress = toolbelt::InetAddress;
 
-#define VAR(a) a##__COUNTER__
-#define EVAL_AND_ASSERT_OK(expr) EVAL_AND_ASSERT_OK2(VAR(r_), expr)
+class ClientTest : public SubspaceTestBase {};
 
-#define EVAL_AND_ASSERT_OK2(result, expr)                                      \
-  ({                                                                           \
-    auto result = (expr);                                                      \
-    if (!result.ok()) {                                                        \
-      std::cerr << result.status() << std::endl;                               \
-    }                                                                          \
-    ASSERT_OK(result);                                                         \
-    std::move(*result);                                                        \
-  })
-
-#define ASSERT_OK(e) ASSERT_THAT(e, ::absl_testing::IsOk())
-
-class ClientTest : public ::testing::Test {
-public:
-  // We run one server for the duration of the whole test suite.
-  static void SetUpTestSuite() {
-    if (!absl::GetFlag(FLAGS_start_server)) {
-      return;
-    }
-
-    printf("Starting Subspace server\n");
-    // subspace::Server::CleanupFilesystem();
-    char socket_name_template[] = "/tmp/subspaceXXXXXX"; // NOLINT
-    ::close(mkstemp(&socket_name_template[0]));
-    socket_ = &socket_name_template[0];
-
-    // The server will write to this pipe to notify us when it
-    // has started and stopped.  This end of the pipe is blocking.
-    (void)pipe(server_pipe_);
-
-    server_ = std::make_unique<subspace::Server>(scheduler_, socket_, "", 0, 0,
-                                                 /*local=*/true,
-                                                 server_pipe_[1], 1, true);
-    // Start server running in a thread.
-    server_thread_ = std::thread([]() {
-      absl::Status s = server_->Run();
-      if (!s.ok()) {
-        fprintf(stderr, "Error running Subspace server: %s\n",
-                s.ToString().c_str());
-        exit(1);
-      }
-    });
-
-    // Wait for server to tell us that it's running.
-    char buf[8];
-    (void)::read(server_pipe_[0], buf, 8);
-  }
-
-  static void TearDownTestSuite() {
-    if (!absl::GetFlag(FLAGS_start_server)) {
-      return;
-    }
-    printf("Stopping Subspace server\n");
-    server_->Stop();
-
-    // Wait for server to tell us that it's stopped.
-    char buf[8];
-    (void)::read(server_pipe_[0], buf, 8);
-    server_thread_.join();
-    server_->CleanupAfterSession();
-    // Remove the socket if it exists.
-    (void)remove(socket_.c_str());
-  }
-
-  void SetUp() override { signal(SIGPIPE, SIG_IGN); }
-  void TearDown() override {}
-
-  void InitClient(subspace::Client &client) {
-    client.SetThreadSafe(true);
-    ASSERT_OK(client.Init(Socket()));
-  }
-
-  static co::CoroutineScheduler &Scheduler() { return scheduler_; }
-
-  static const std::string &Socket() { return socket_; }
-
-  static subspace::Server *Server() { return server_.get(); }
-
-private:
-  static co::CoroutineScheduler scheduler_;
-  static std::string socket_;
-  static int server_pipe_[2];
-  static std::unique_ptr<subspace::Server> server_;
-  static std::thread server_thread_;
-};
-
-co::CoroutineScheduler ClientTest::scheduler_;
-std::string ClientTest::socket_ = "/tmp/subspace";
-int ClientTest::server_pipe_[2];
-std::unique_ptr<subspace::Server> ClientTest::server_;
-std::thread ClientTest::server_thread_;
-
-void SigQuitHandler(int signum) {
+static void SigQuitHandler(int signum) {
   ClientTest::Scheduler().Show();
   signal(signum, SIG_DFL);
   raise(signum);
@@ -4043,6 +3938,724 @@ TEST_F(ClientTest, NonTunnelPublisherDoesNotSetCrossMachineFlag) {
   ASSERT_OK(info);
   ASSERT_EQ(0, info->num_tunnel_pubs);
   ASSERT_EQ(0, info->num_tunnel_subs);
+}
+
+// ---------------------------------------------------------------------------
+// Coverage: Client API paths
+// ---------------------------------------------------------------------------
+
+TEST_F(ClientTest, InitTwiceFails) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  absl::Status s = client.Init(Socket());
+  ASSERT_FALSE(s.ok());
+  EXPECT_THAT(s.message(), ::testing::HasSubstr("already connected"));
+}
+
+TEST_F(ClientTest, CheckConnectedBeforeInit) {
+  subspace::Client client;
+  auto pub = client.CreatePublisher("no_init_chan", {.slot_size = 64, .num_slots = 4});
+  ASSERT_FALSE(pub.ok());
+  EXPECT_THAT(pub.status().message(), ::testing::HasSubstr("not connected"));
+}
+
+TEST_F(ClientTest, ChannelExistsTrue) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub = client.CreatePublisher("exists_test", {.slot_size = 64, .num_slots = 4});
+  ASSERT_OK(pub);
+  auto exists = client.ChannelExists("exists_test");
+  ASSERT_OK(exists);
+  ASSERT_TRUE(*exists);
+}
+
+TEST_F(ClientTest, ChannelExistsFalse) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto exists = client.ChannelExists("no_such_channel_42");
+  ASSERT_OK(exists);
+  ASSERT_FALSE(*exists);
+}
+
+TEST_F(ClientTest, GetChannelStatsByName) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub = EVAL_AND_ASSERT_OK(
+      client.CreatePublisher("stats_test", {.slot_size = 256, .num_slots = 4}));
+  auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  memset(buf, 'x', 100);
+  auto msg = pub.PublishMessage(100);
+  ASSERT_OK(msg);
+
+  auto stats = client.GetChannelStats("stats_test");
+  ASSERT_OK(stats);
+  ASSERT_EQ("stats_test", stats->channel_name);
+  ASSERT_EQ(100u, stats->total_bytes);
+  ASSERT_EQ(1u, stats->total_messages);
+  ASSERT_EQ(100u, stats->max_message_size);
+}
+
+TEST_F(ClientTest, GetChannelStatsAll) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub1 = EVAL_AND_ASSERT_OK(
+      client.CreatePublisher("allstats1", {.slot_size = 64, .num_slots = 4}));
+  auto pub2 = EVAL_AND_ASSERT_OK(
+      client.CreatePublisher("allstats2", {.slot_size = 64, .num_slots = 4}));
+
+  auto buf1 = EVAL_AND_ASSERT_OK(pub1.GetMessageBuffer());
+  memset(buf1, 'a', 10);
+  ASSERT_OK(pub1.PublishMessage(10));
+
+  auto buf2 = EVAL_AND_ASSERT_OK(pub2.GetMessageBuffer());
+  memset(buf2, 'b', 20);
+  ASSERT_OK(pub2.PublishMessage(20));
+
+  auto all_stats = client.GetChannelStats();
+  ASSERT_OK(all_stats);
+  ASSERT_GE(all_stats->size(), 2u);
+
+  bool found1 = false, found2 = false;
+  for (auto &s : *all_stats) {
+    if (s.channel_name == "allstats1") {
+      found1 = true;
+      ASSERT_EQ(10u, s.total_bytes);
+    }
+    if (s.channel_name == "allstats2") {
+      found2 = true;
+      ASSERT_EQ(20u, s.total_bytes);
+    }
+  }
+  ASSERT_TRUE(found1);
+  ASSERT_TRUE(found2);
+}
+
+TEST_F(ClientTest, GetChannelCountersByName) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub = EVAL_AND_ASSERT_OK(
+      client.CreatePublisher("counters_name", {.slot_size = 64, .num_slots = 4}));
+  auto counters = client.GetChannelCounters("counters_name");
+  ASSERT_OK(counters);
+  ASSERT_EQ(1, counters->num_pubs);
+}
+
+TEST_F(ClientTest, GetChannelCountersByNameNotFound) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto counters = client.GetChannelCounters("nonexistent_channel_xyz");
+  ASSERT_FALSE(counters.ok());
+  EXPECT_THAT(counters.status().message(), ::testing::HasSubstr("doesn't exist"));
+}
+
+TEST_F(ClientTest, GetChannelInfoAll) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub = EVAL_AND_ASSERT_OK(
+      client.CreatePublisher("infoall_test", {.slot_size = 64, .num_slots = 4}));
+
+  auto all_info = client.GetChannelInfo();
+  ASSERT_OK(all_info);
+  bool found = false;
+  for (auto &info : *all_info) {
+    if (info.channel_name == "infoall_test") {
+      found = true;
+      ASSERT_EQ(1, info.num_publishers);
+    }
+  }
+  ASSERT_TRUE(found);
+}
+
+TEST_F(ClientTest, GetCurrentOrdinal) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  auto pub = EVAL_AND_ASSERT_OK(
+      pub_client.CreatePublisher("ordinal_test", {.slot_size = 64, .num_slots = 4}));
+  auto sub = EVAL_AND_ASSERT_OK(
+      sub_client.CreateSubscriber("ordinal_test"));
+
+  // Before any reads, ordinal should be -1 (no current slot).
+  ASSERT_EQ(-1, sub.GetCurrentOrdinal());
+
+  auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  memset(buf, 'x', 10);
+  ASSERT_OK(pub.PublishMessage(10));
+
+  auto msg = sub.ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(10, msg->length);
+
+  int64_t ord = sub.GetCurrentOrdinal();
+  ASSERT_GT(ord, 0);
+}
+
+TEST_F(ClientTest, SetDebugDoesNotCrash) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  client.SetDebug(true);
+  auto pub = EVAL_AND_ASSERT_OK(
+      client.CreatePublisher("debug_test", {.slot_size = 64, .num_slots = 4}));
+  auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  memset(buf, 'y', 5);
+  ASSERT_OK(pub.PublishMessage(5));
+  client.SetDebug(false);
+}
+
+// ---------------------------------------------------------------------------
+// Coverage: Publisher edge cases
+// ---------------------------------------------------------------------------
+
+TEST_F(ClientTest, UnreliablePublisherFileDescriptorAndPollFd) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub = EVAL_AND_ASSERT_OK(
+      client.CreatePublisher("unreliable_fd", {.slot_size = 64, .num_slots = 4}));
+  ASSERT_FALSE(pub.IsReliable());
+  auto fd = pub.GetFileDescriptor();
+  ASSERT_FALSE(fd.Valid());
+
+  // GetPollFd for unreliable publisher also returns an fd.  Verify it
+  // doesn't crash and returns the expected event mask.
+  struct pollfd pfd = pub.GetPollFd();
+  ASSERT_EQ(POLLIN, pfd.events);
+}
+
+TEST_F(ClientTest, UnreliablePublisherGetFileDescriptorInvalid) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub = EVAL_AND_ASSERT_OK(
+      client.CreatePublisher("unreliable_fd2", {.slot_size = 64, .num_slots = 4}));
+  ASSERT_FALSE(pub.IsReliable());
+  auto fd = pub.GetFileDescriptor();
+  ASSERT_FALSE(fd.Valid());
+}
+
+TEST_F(ClientTest, PublishZeroSizeFails) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub = EVAL_AND_ASSERT_OK(
+      client.CreatePublisher("zero_pub", {.slot_size = 64, .num_slots = 4}));
+  auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  auto msg = pub.PublishMessage(0);
+  ASSERT_FALSE(msg.ok());
+  EXPECT_THAT(msg.status().message(), ::testing::HasSubstr("greater than 0"));
+}
+
+TEST_F(ClientTest, ReliablePublisherNoSubscribersEmptyBuffer) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "reliable_nosub",
+      subspace::PublisherOptions().SetSlotSize(64).SetNumSlots(4).SetReliable(
+          true)));
+  auto buf = pub.GetMessageBuffer();
+  ASSERT_OK(buf);
+  ASSERT_EQ(nullptr, *buf);
+}
+
+TEST_F(ClientTest, OnSendCallbackSuccess) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub = EVAL_AND_ASSERT_OK(
+      client.CreatePublisher("onsend_test", {.slot_size = 256, .num_slots = 4}));
+
+  bool callback_called = false;
+  pub.SetOnSendCallback(
+      [&](void *buffer, int64_t size) -> absl::StatusOr<int64_t> {
+        callback_called = true;
+        return size;
+      });
+
+  auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  memset(buf, 'z', 50);
+  ASSERT_OK(pub.PublishMessage(50));
+  ASSERT_TRUE(callback_called);
+  pub.ClearOnSendCallback();
+}
+
+TEST_F(ClientTest, OnSendCallbackError) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub = EVAL_AND_ASSERT_OK(
+      client.CreatePublisher("onsend_err", {.slot_size = 256, .num_slots = 4}));
+
+  pub.SetOnSendCallback(
+      [](void *, int64_t) -> absl::StatusOr<int64_t> {
+        return absl::InternalError("send callback failed");
+      });
+
+  auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  memset(buf, 'a', 10);
+  auto msg = pub.PublishMessage(10);
+  ASSERT_FALSE(msg.ok());
+  EXPECT_THAT(msg.status().message(), ::testing::HasSubstr("send callback failed"));
+  pub.ClearOnSendCallback();
+}
+
+TEST_F(ClientTest, WaitForUnreliablePublisherFails) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub = EVAL_AND_ASSERT_OK(
+      client.CreatePublisher("unreliable_wait", {.slot_size = 64, .num_slots = 4}));
+  ASSERT_FALSE(pub.IsReliable());
+  absl::Status s = pub.Wait();
+  ASSERT_FALSE(s.ok());
+  EXPECT_THAT(s.message(), ::testing::HasSubstr("Unreliable publishers can't wait"));
+}
+
+TEST_F(ClientTest, WaitForReliablePublisherTimeout) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  auto sub = EVAL_AND_ASSERT_OK(sub_client.CreateSubscriber(
+      "reliable_timeout",
+      subspace::SubscriberOptions().SetReliable(true)));
+  auto pub = EVAL_AND_ASSERT_OK(pub_client.CreatePublisher(
+      "reliable_timeout",
+      subspace::PublisherOptions().SetSlotSize(64).SetNumSlots(2).SetReliable(
+          true)));
+
+  // Fill all slots to force backpressure.
+  auto buf1 = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  memset(buf1, 'a', 10);
+  ASSERT_OK(pub.PublishMessage(10));
+
+  // Wait with a short timeout — should time out since subscriber hasn't read.
+  absl::Status s = pub.Wait(std::chrono::milliseconds(10));
+  ASSERT_FALSE(s.ok());
+  EXPECT_THAT(s.message(), ::testing::HasSubstr("Timeout"));
+}
+
+TEST_F(ClientTest, WaitForSubscriberTimeout) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  // Create pub first so channel exists, then subscriber.
+  auto pub = EVAL_AND_ASSERT_OK(pub_client.CreatePublisher(
+      "sub_timeout", {.slot_size = 64, .num_slots = 4}));
+  auto sub = EVAL_AND_ASSERT_OK(sub_client.CreateSubscriber("sub_timeout"));
+
+  // Read any initial trigger to drain the subscriber fd.
+  auto msg = sub.ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(0, msg->length);
+
+  // Now wait with timeout — no new message, should time out.
+  absl::Status s = sub.Wait(std::chrono::milliseconds(10));
+  ASSERT_FALSE(s.ok());
+  EXPECT_THAT(s.message(), ::testing::HasSubstr("Timeout"));
+}
+
+// ---------------------------------------------------------------------------
+// Coverage: Subscriber edge cases
+// ---------------------------------------------------------------------------
+
+TEST_F(ClientTest, MaxActiveMessagesTooSmall) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto sub = client.CreateSubscriber(
+      "max_active_test",
+      subspace::SubscriberOptions().SetMaxActiveMessages(0));
+  ASSERT_FALSE(sub.ok());
+  EXPECT_THAT(sub.status().message(),
+              ::testing::HasSubstr("MaxActiveMessages"));
+}
+
+TEST_F(ClientTest, OnReceiveCallbackSuccess) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  auto pub = EVAL_AND_ASSERT_OK(pub_client.CreatePublisher(
+      "onrecv_test", {.slot_size = 256, .num_slots = 4}));
+  auto sub = EVAL_AND_ASSERT_OK(sub_client.CreateSubscriber("onrecv_test"));
+
+  bool callback_called = false;
+  sub.SetOnReceiveCallback(
+      [&](void *buffer, int64_t size) -> absl::StatusOr<int64_t> {
+        callback_called = true;
+        return size;
+      });
+
+  auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  memset(buf, 'q', 50);
+  ASSERT_OK(pub.PublishMessage(50));
+
+  auto msg = sub.ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(50, msg->length);
+  ASSERT_TRUE(callback_called);
+  sub.ClearOnReceiveCallback();
+}
+
+TEST_F(ClientTest, OnReceiveCallbackError) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  auto pub = EVAL_AND_ASSERT_OK(pub_client.CreatePublisher(
+      "onrecv_err", {.slot_size = 256, .num_slots = 4}));
+  auto sub = EVAL_AND_ASSERT_OK(sub_client.CreateSubscriber("onrecv_err"));
+
+  sub.SetOnReceiveCallback(
+      [](void *, int64_t) -> absl::StatusOr<int64_t> {
+        return absl::InternalError("receive callback failed");
+      });
+
+  auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  memset(buf, 'q', 10);
+  ASSERT_OK(pub.PublishMessage(10));
+
+  auto msg = sub.ReadMessage();
+  ASSERT_FALSE(msg.ok());
+  EXPECT_THAT(msg.status().message(),
+              ::testing::HasSubstr("receive callback failed"));
+  sub.ClearOnReceiveCallback();
+}
+
+TEST_F(ClientTest, ProcessAllMessagesWithoutCallback) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto sub = EVAL_AND_ASSERT_OK(client.CreateSubscriber("process_nocb"));
+  absl::Status s = sub.ProcessAllMessages();
+  ASSERT_FALSE(s.ok());
+  EXPECT_THAT(s.message(), ::testing::HasSubstr("No message callback"));
+}
+
+TEST_F(ClientTest, WaitForSubscriberWithExtraFd) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  auto pub = EVAL_AND_ASSERT_OK(pub_client.CreatePublisher(
+      "twofd_test", {.slot_size = 64, .num_slots = 4}));
+  auto sub = EVAL_AND_ASSERT_OK(sub_client.CreateSubscriber("twofd_test"));
+
+  auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  memset(buf, 'w', 10);
+  ASSERT_OK(pub.PublishMessage(10));
+
+  int extra_pipe[2];
+  ASSERT_EQ(0, pipe(extra_pipe));
+  toolbelt::FileDescriptor extra_fd(extra_pipe[0]);
+
+  auto result = sub.Wait(extra_fd, std::chrono::milliseconds(100));
+  ASSERT_OK(result);
+  ASSERT_EQ(sub.GetPollFd().fd, *result);
+
+  ::close(extra_pipe[1]);
+}
+
+TEST_F(ClientTest, WaitForSubscriberExtraFdFires) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  auto pub = EVAL_AND_ASSERT_OK(pub_client.CreatePublisher(
+      "twofd_extra", {.slot_size = 64, .num_slots = 4}));
+  auto sub = EVAL_AND_ASSERT_OK(sub_client.CreateSubscriber("twofd_extra"));
+
+  // Drain any initial trigger.
+  auto msg = sub.ReadMessage();
+  ASSERT_OK(msg);
+
+  int extra_pipe[2];
+  ASSERT_EQ(0, pipe(extra_pipe));
+  toolbelt::FileDescriptor extra_fd(extra_pipe[0]);
+
+  // Write to the extra pipe so it triggers (not the subscriber fd).
+  ASSERT_EQ(1, ::write(extra_pipe[1], "x", 1));
+
+  auto result = sub.Wait(extra_fd, std::chrono::milliseconds(100));
+  ASSERT_OK(result);
+  // The result should be the extra fd, not the subscriber fd.
+  ASSERT_NE(sub.GetPollFd().fd, *result);
+
+  ::close(extra_pipe[1]);
+}
+
+TEST_F(ClientTest, WaitForReliablePublisherWithExtraFd) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  auto sub = EVAL_AND_ASSERT_OK(sub_client.CreateSubscriber(
+      "reliable_twofd",
+      subspace::SubscriberOptions().SetReliable(true)));
+  auto pub = EVAL_AND_ASSERT_OK(pub_client.CreatePublisher(
+      "reliable_twofd",
+      subspace::PublisherOptions().SetSlotSize(64).SetNumSlots(4).SetReliable(
+          true)));
+
+  int extra_pipe[2];
+  ASSERT_EQ(0, pipe(extra_pipe));
+  toolbelt::FileDescriptor extra_fd(extra_pipe[0]);
+
+  // Write to extra pipe so it fires.
+  ASSERT_EQ(1, ::write(extra_pipe[1], "y", 1));
+
+  auto result = pub.Wait(extra_fd, std::chrono::milliseconds(100));
+  ASSERT_OK(result);
+  ASSERT_EQ(extra_pipe[0], *result);
+
+  ::close(extra_pipe[1]);
+}
+
+// ---------------------------------------------------------------------------
+// Coverage: Callback registration errors
+// ---------------------------------------------------------------------------
+
+TEST_F(ClientTest, DoubleRegisterDroppedMessageCallback) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto sub = EVAL_AND_ASSERT_OK(client.CreateSubscriber("double_dropped"));
+
+  ASSERT_OK(sub.RegisterDroppedMessageCallback(
+      [](Subscriber *, int64_t) {}));
+  absl::Status s = sub.RegisterDroppedMessageCallback(
+      [](Subscriber *, int64_t) {});
+  ASSERT_FALSE(s.ok());
+  EXPECT_THAT(s.message(), ::testing::HasSubstr("already been registered"));
+  ASSERT_OK(sub.UnregisterDroppedMessageCallback());
+}
+
+TEST_F(ClientTest, UnregisterDroppedMessageCallbackNotRegistered) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto sub = EVAL_AND_ASSERT_OK(client.CreateSubscriber("unreg_dropped"));
+  absl::Status s = sub.UnregisterDroppedMessageCallback();
+  ASSERT_FALSE(s.ok());
+  EXPECT_THAT(s.message(),
+              ::testing::HasSubstr("No dropped message callback"));
+}
+
+TEST_F(ClientTest, DoubleRegisterMessageCallback) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto sub = EVAL_AND_ASSERT_OK(client.CreateSubscriber("double_msg_cb"));
+
+  ASSERT_OK(sub.RegisterMessageCallback(
+      [](Subscriber *, Message) {}));
+  absl::Status s = sub.RegisterMessageCallback(
+      [](Subscriber *, Message) {});
+  ASSERT_FALSE(s.ok());
+  EXPECT_THAT(s.message(), ::testing::HasSubstr("already been registered"));
+  ASSERT_OK(sub.UnregisterMessageCallback());
+}
+
+TEST_F(ClientTest, UnregisterMessageCallbackNotRegistered) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto sub = EVAL_AND_ASSERT_OK(client.CreateSubscriber("unreg_msg_cb"));
+  absl::Status s = sub.UnregisterMessageCallback();
+  ASSERT_FALSE(s.ok());
+  EXPECT_THAT(s.message(), ::testing::HasSubstr("No message callback"));
+}
+
+TEST_F(ClientTest, DoubleRegisterResizeCallback) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub = EVAL_AND_ASSERT_OK(
+      client.CreatePublisher("double_resize", {.slot_size = 64, .num_slots = 4}));
+
+  ASSERT_OK(pub.RegisterResizeCallback(
+      [](Publisher *, int, int) -> absl::Status { return absl::OkStatus(); }));
+  absl::Status s = pub.RegisterResizeCallback(
+      [](Publisher *, int, int) -> absl::Status { return absl::OkStatus(); });
+  ASSERT_FALSE(s.ok());
+  EXPECT_THAT(s.message(), ::testing::HasSubstr("already been registered"));
+  ASSERT_OK(pub.UnregisterResizeCallback());
+}
+
+TEST_F(ClientTest, UnregisterResizeCallbackNotRegistered) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub = EVAL_AND_ASSERT_OK(
+      client.CreatePublisher("unreg_resize", {.slot_size = 64, .num_slots = 4}));
+  absl::Status s = pub.UnregisterResizeCallback();
+  ASSERT_FALSE(s.ok());
+  EXPECT_THAT(s.message(), ::testing::HasSubstr("No resize callback"));
+}
+
+// ---------------------------------------------------------------------------
+// Coverage: Message edge cases
+// ---------------------------------------------------------------------------
+
+TEST_F(ClientTest, DefaultMessageGetters) {
+  subspace::Message msg;
+  ASSERT_EQ(0, msg.length);
+  ASSERT_EQ(nullptr, msg.buffer);
+  ASSERT_EQ("", msg.ChannelType());
+  ASSERT_EQ(0u, msg.NumSlots());
+  ASSERT_EQ(0u, msg.SlotSize());
+}
+
+TEST_F(ClientTest, MessageCopyAndMove) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  auto pub = EVAL_AND_ASSERT_OK(pub_client.CreatePublisher(
+      "msg_copy", {.slot_size = 64, .num_slots = 4}));
+  auto sub = EVAL_AND_ASSERT_OK(sub_client.CreateSubscriber("msg_copy"));
+
+  auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  memset(buf, 'c', 20);
+  ASSERT_OK(pub.PublishMessage(20));
+
+  auto msg1 = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_EQ(20, msg1.length);
+
+  // Copy constructor.
+  subspace::Message msg2 = msg1;
+  ASSERT_EQ(20, msg2.length);
+  ASSERT_EQ(msg1.ordinal, msg2.ordinal);
+
+  // Move constructor.
+  subspace::Message msg3 = std::move(msg2);
+  ASSERT_EQ(20, msg3.length);
+
+  // Copy assignment.
+  subspace::Message msg4;
+  msg4 = msg1;
+  ASSERT_EQ(20, msg4.length);
+
+  // Move assignment.
+  subspace::Message msg5;
+  msg5 = std::move(msg3);
+  ASSERT_EQ(20, msg5.length);
+
+  // Reset.
+  msg5.Reset();
+  ASSERT_EQ(0, msg5.length);
+}
+
+// ---------------------------------------------------------------------------
+// Coverage: Options builder chains
+// ---------------------------------------------------------------------------
+
+TEST_F(ClientTest, PublisherOptionsChain) {
+  subspace::PublisherOptions opts;
+  opts.SetSlotSize(128)
+      .SetNumSlots(8)
+      .SetReliable(true)
+      .SetLocal(true)
+      .SetFixedSize(true)
+      .SetType("my_type")
+      .SetForTunnel(true)
+      .SetMux("/mymux")
+      .SetVchanId(7)
+      .SetActivate(true)
+      .SetNotifyRetirement(true)
+      .SetChecksum(true)
+      .SetChecksumSize(8)
+      .SetMetadataSize(16);
+
+  ASSERT_EQ(128, opts.SlotSize());
+  ASSERT_EQ(8, opts.NumSlots());
+  ASSERT_TRUE(opts.IsReliable());
+  ASSERT_TRUE(opts.IsLocal());
+  ASSERT_TRUE(opts.IsFixedSize());
+  ASSERT_EQ("my_type", opts.Type());
+  ASSERT_TRUE(opts.ForTunnel());
+  ASSERT_EQ("/mymux", opts.Mux());
+  ASSERT_EQ(7, opts.VchanId());
+  ASSERT_TRUE(opts.Activate());
+  ASSERT_TRUE(opts.NotifyRetirement());
+  ASSERT_TRUE(opts.Checksum());
+  ASSERT_EQ(8, opts.ChecksumSize());
+  ASSERT_EQ(16, opts.MetadataSize());
+}
+
+TEST_F(ClientTest, SubscriberOptionsChain) {
+  subspace::SubscriberOptions opts;
+  opts.SetReliable(true)
+      .SetType("sub_type")
+      .SetMaxActiveMessages(20)
+      .SetBridge(true)
+      .SetForTunnel(true)
+      .SetMux("/submux")
+      .SetVchanId(3)
+      .SetPassActivation(true)
+      .SetReadWrite(true)
+      .SetChecksum(true)
+      .SetPassChecksumErrors(true)
+      .SetKeepActiveMessage(true);
+  opts.SetLogDroppedMessages(true);
+
+  ASSERT_TRUE(opts.IsReliable());
+  ASSERT_EQ("sub_type", opts.Type());
+  ASSERT_EQ(19, opts.MaxSharedPtrs());
+  ASSERT_EQ(20, opts.MaxActiveMessages());
+  ASSERT_TRUE(opts.LogDroppedMessages());
+  ASSERT_TRUE(opts.IsBridge());
+  ASSERT_TRUE(opts.ForTunnel());
+  ASSERT_EQ("/submux", opts.Mux());
+  ASSERT_EQ(3, opts.VchanId());
+  ASSERT_TRUE(opts.PassActivation());
+  ASSERT_TRUE(opts.ReadWrite());
+  ASSERT_TRUE(opts.Checksum());
+  ASSERT_TRUE(opts.PassChecksumErrors());
+  ASSERT_TRUE(opts.KeepActiveMessage());
+
+  // SetMaxSharedPtrs sets max_active_messages = shared_ptrs + 1.
+  subspace::SubscriberOptions opts2;
+  opts2.SetMaxSharedPtrs(10);
+  ASSERT_EQ(10, opts2.MaxSharedPtrs());
+  ASSERT_EQ(11, opts2.MaxActiveMessages());
+}
+
+// ---------------------------------------------------------------------------
+// Coverage: ResizeChannel with FixedSize publisher
+// ---------------------------------------------------------------------------
+
+TEST_F(ClientTest, ResizeFixedSizePublisherFails) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "fixed_resize",
+      subspace::PublisherOptions().SetSlotSize(128).SetNumSlots(4).SetFixedSize(
+          true)));
+
+  auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  auto bigger = pub.GetMessageBuffer(256);
+  ASSERT_FALSE(bigger.ok());
+  EXPECT_THAT(bigger.status().message(), ::testing::HasSubstr("fixed size"));
+}
+
+// ---------------------------------------------------------------------------
+// Coverage: Resize callback returning error
+// ---------------------------------------------------------------------------
+
+TEST_F(ClientTest, ResizeCallbackReturnsError) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub = EVAL_AND_ASSERT_OK(
+      client.CreatePublisher("resize_err", {.slot_size = 64, .num_slots = 4}));
+
+  ASSERT_OK(pub.RegisterResizeCallback(
+      [](Publisher *, int, int) -> absl::Status {
+        return absl::InternalError("resize denied");
+      }));
+
+  auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  auto bigger = pub.GetMessageBuffer(256);
+  ASSERT_FALSE(bigger.ok());
+  EXPECT_THAT(bigger.status().message(), ::testing::HasSubstr("resize denied"));
+  ASSERT_OK(pub.UnregisterResizeCallback());
 }
 
 int main(int argc, char **argv) {
