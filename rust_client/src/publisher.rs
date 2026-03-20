@@ -203,7 +203,7 @@ impl PublisherImpl {
                     .compare_exchange_weak(
                         expected,
                         ref_val,
-                        Ordering::Relaxed,
+                        Ordering::Acquire,
                         Ordering::Relaxed,
                     )
                     .is_ok()
@@ -371,7 +371,7 @@ impl PublisherImpl {
                     .compare_exchange_weak(
                         expected,
                         ref_val,
-                        Ordering::Relaxed,
+                        Ordering::Acquire,
                         Ordering::Relaxed,
                     )
                     .is_ok()
@@ -647,7 +647,7 @@ impl PublisherImpl {
                 .compare_exchange(
                     num_buffers,
                     new_num_buffers,
-                    Ordering::Relaxed,
+                    Ordering::Release,
                     Ordering::Relaxed,
                 )
                 .is_ok()
@@ -658,7 +658,7 @@ impl PublisherImpl {
                 .channel
                 .ccb()
                 .num_buffers
-                .load(Ordering::Relaxed);
+                .load(Ordering::Acquire);
         }
         Ok(())
     }
@@ -789,7 +789,7 @@ pub fn clear_trigger(fd: RawFd) {
 }
 
 pub fn attach_buffers(channel: &mut Channel, read_write: bool) -> crate::error::Result<()> {
-    let num_buffers = channel.ccb().num_buffers.load(Ordering::Relaxed) as usize;
+    let num_buffers = channel.ccb().num_buffers.load(Ordering::Acquire) as usize;
     let resolved_name = channel.name.clone();
     while channel.buffers.len() < num_buffers {
         let buffer_index = channel.buffers.len();

@@ -23,7 +23,7 @@ ServerChannel::~ServerChannel() {
 static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
                                                  int64_t size, bool map,
                                                  toolbelt::FileDescriptor &fd,
-                                                 int session_id = 0) {
+                                                 [[maybe_unused]] int session_id = 0) {
   char shm_file[NAME_MAX]; // Unique file in file system.
   char *shm_name;          // Name passed to shm_* (starts with /)
   int tmpfd;
@@ -91,8 +91,9 @@ CreateSystemControlBlock(toolbelt::FileDescriptor &fd) {
 }
 
 absl::StatusOr<SharedMemoryFds>
-ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size,
-                        int num_slots, int initial_ordinal) {
+ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
+                        [[maybe_unused]] int slot_size, int num_slots,
+                        int initial_ordinal) {
   SubscriberCounter num_subs;
 
   if (scb_ != nullptr) {
@@ -643,7 +644,7 @@ ChannelCounters &ServerChannel::RecordUpdate(bool is_pub, bool add,
 }
 
 absl::StatusOr<std::unique_ptr<VirtualChannel>>
-ChannelMultiplexer::CreateVirtualChannel(Server &server,
+ChannelMultiplexer::CreateVirtualChannel([[maybe_unused]] Server &server,
                                          const std::string &name,
                                          int vchan_id) {
   if (vchan_id == -1) {
