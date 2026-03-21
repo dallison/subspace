@@ -1,4 +1,5 @@
 // Copyright 2023-2026 David Allison
+// Asio RPC support is Copyright 2026 Cruise LLC
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -8,40 +9,38 @@
 #include "rpc/common/rpc_common.h"
 #include "toolbelt/logging.h"
 
+#include <boost/asio.hpp>
+#include <boost/asio/spawn.hpp>
 #include <chrono>
-#include <type_traits>
 #include <string_view>
+#include <type_traits>
 
-namespace subspace {
+namespace subspace::asio_rpc {
 
 class RpcClient;
 
-template <typename Response> class ResponseReceiver : public client_internal::ResponseReceiverBase<Response> {
+template <typename Response>
+class ResponseReceiver
+    : public client_internal::ResponseReceiverBase<Response> {
 public:
   ResponseReceiver() = default;
   ~ResponseReceiver() override = default;
 
-  // Called when a response is received.
-  // From ResponseReceiverBase:
-  //   virtual void OnResponse(Response &&response) = 0;
-  // Or, if Response == void:
-  //   virtual void OnResponse() = 0;
-
   virtual void OnFinish() = 0;
-
-  // Called when an error occurs.
   virtual void OnError(const absl::Status &status) = 0;
-
   virtual void OnCancel() = 0;
 
   bool IsCancelled() const { return cancelled_; }
 
   absl::Status Cancel(std::chrono::nanoseconds timeout,
-                      co::Coroutine *c = nullptr);
+                      boost::asio::yield_context yield);
 
-  absl::Status Cancel(co::Coroutine *c = nullptr) {
-    return Cancel(std::chrono::nanoseconds(0), c);
+  absl::Status Cancel(boost::asio::yield_context yield) {
+    return Cancel(std::chrono::nanoseconds(0), yield);
   }
+
+  // Blocking cancel (no coroutine).
+  absl::Status Cancel(std::chrono::nanoseconds timeout = {});
 
   void SetInvocationDetails(std::shared_ptr<RpcClient> client,
                             uint64_t client_id, int session_id, int request_id,
@@ -67,143 +66,127 @@ private:
 
 class RpcClient : public std::enable_shared_from_this<RpcClient> {
 public:
-  // Create an RPC client.  The arguments are:
-  // service: the RPC service to use - there must be an RPC server running on
-  //     this service.
-  // client_id: the ID of the client - unique per client (getpid() or
-  //     gettid() maybe)
-  // subspace_server_socket: the socket path for the subspace server
   RpcClient(std::string service, uint64_t client_id,
             std::string subspace_server_socket = "/tmp/subspace");
   ~RpcClient();
 
-  // Set the logger level.  Valid levels are:
-  // verbose, debug, info, warning, error
   void SetLogLevel(const std::string &level) { logger_.SetLogLevel(level); }
 
-  // Open the RPC client and connect to the service passed to the constructor.
-  absl::Status Open(co::Coroutine *c = nullptr) {
-    return Open(std::chrono::nanoseconds(0), c);
+  // Open with yield_context.
+  absl::Status Open(boost::asio::yield_context yield) {
+    return Open(std::chrono::nanoseconds(0), yield);
   }
   absl::Status Open(std::chrono::nanoseconds timeout,
-                    co::Coroutine *c = nullptr);
+                    boost::asio::yield_context yield);
 
-  absl::Status Close(co::Coroutine *c = nullptr) {
-    return Close(std::chrono::nanoseconds(0), c);
+  // Blocking open (no coroutine).
+  absl::Status Open(std::chrono::nanoseconds timeout = {});
+
+  // Close with yield_context.
+  absl::Status Close(boost::asio::yield_context yield) {
+    return Close(std::chrono::nanoseconds(0), yield);
   }
   absl::Status Close(std::chrono::nanoseconds timeout,
-                     co::Coroutine *c = nullptr);
+                     boost::asio::yield_context yield);
+
+  // Blocking close (no coroutine).
+  absl::Status Close(std::chrono::nanoseconds timeout = {});
 
   absl::StatusOr<int> FindMethod(std::string_view method);
 
   template <typename Response>
-  using CallResult = std::conditional_t<
-      std::is_same_v<void, Response>, absl::Status, absl::StatusOr<Response>>;
+  using CallResult = std::conditional_t<std::is_same_v<void, Response>,
+                                        absl::Status, absl::StatusOr<Response>>;
 
-  // Call with request and response.  A timeout will result in an error.
-  // Request type can be:
-  //  - A protobuf message type, or
-  //  - A container of bytes (with data() and size() members).
-  // Response type can be:
-  //  - A protobuf message type, or
-  //  - `void` (default if omitted) to ignore/discard the response, or
-  //  - A container of bytes (constructible from two iterators).
-  // For non-void response types, returns absl::StatusOr<Response>,
-  // otherwise, returns absl::Status.
   template <typename Request, typename Response = void>
   CallResult<Response> Call(int method_id, const Request &request,
                             std::chrono::nanoseconds timeout,
-                            co::Coroutine *c = nullptr);
+                            boost::asio::yield_context yield);
 
-  // Call with request and response, same as above, except this will
-  // block (the coroutine if provided) and there is no timeout.
   template <typename Request, typename Response = void>
   CallResult<Response> Call(int method_id, const Request &request,
-                            co::Coroutine *c = nullptr) {
+                            boost::asio::yield_context yield) {
     return Call<Request, Response>(method_id, request,
-                                   std::chrono::nanoseconds(0), c);
+                                  std::chrono::nanoseconds(0), yield);
   }
 
-  // Call with request and response, same as above, but using the method's
-  // name rather than its id.  A timeout will result in an error.
-  template <typename Request, typename Response = void>
-  CallResult<Response>
-  Call(std::string_view method_name, const Request &request,
-       std::chrono::nanoseconds timeout, co::Coroutine *c = nullptr);
-
-  // Call with request and response, same as above, but using the method's
-  // name rather than its id.  This will block (the coroutine if provided)
-  // and there is no timeout.
   template <typename Request, typename Response = void>
   CallResult<Response> Call(std::string_view method_name,
                             const Request &request,
-                            co::Coroutine *c = nullptr) {
+                            std::chrono::nanoseconds timeout,
+                            boost::asio::yield_context yield);
+
+  template <typename Request, typename Response = void>
+  CallResult<Response> Call(std::string_view method_name,
+                            const Request &request,
+                            boost::asio::yield_context yield) {
     return Call<Request, Response>(method_name, request,
-                                   std::chrono::nanoseconds(0), c);
+                                  std::chrono::nanoseconds(0), yield);
   }
 
-  // Call a streaming function.  A class derived from the ResponseReceiver
-  // interface is provided and will be used to receive responses.  This
-  // function will block until all streaming responses have been received.
-  // Request type can be:
-  //  - A protobuf message type, or
-  //  - A container of bytes (with data() and size() members).
-  // Response type can be:
-  //  - A protobuf message type, or
-  //  - `void` (default if omitted) to ignore/discard the response, or
-  //  - A container of bytes (constructible from two iterators).
+  // Streaming calls.
   template <typename Request, typename Response>
   absl::Status Call(int method_id, const Request &request,
                     ResponseReceiver<Response> &receiver,
                     std::chrono::nanoseconds timeout,
-                    co::Coroutine *c = nullptr);
+                    boost::asio::yield_context yield);
 
   template <typename Request, typename Response>
   absl::Status Call(const std::string &method_name, const Request &request,
                     ResponseReceiver<Response> &receiver,
                     std::chrono::nanoseconds timeout,
-                    co::Coroutine *c = nullptr);
+                    boost::asio::yield_context yield);
 
   template <typename Request, typename Response>
   absl::Status Call(int method_id, const Request &request,
                     ResponseReceiver<Response> &receiver,
-                    co::Coroutine *c = nullptr) {
-    return Call(method_id, request, receiver, std::chrono::nanoseconds(0), c);
+                    boost::asio::yield_context yield) {
+    return Call(method_id, request, receiver, std::chrono::nanoseconds(0),
+                yield);
   }
 
   template <typename Request, typename Response>
   absl::Status Call(const std::string &method_name, const Request &request,
                     ResponseReceiver<Response> &receiver,
-                    co::Coroutine *c = nullptr) {
-    return Call(method_name, request, receiver, std::chrono::nanoseconds(0), c);
+                    boost::asio::yield_context yield) {
+    return Call(method_name, request, receiver, std::chrono::nanoseconds(0),
+                yield);
   }
 
-  absl::Status CancelRequest(uint64_t client_id, int session_id, int request_id,
-                             std::shared_ptr<client_internal::Method> method,
-                             std::chrono::nanoseconds timeout,
-                             co::Coroutine *c);
+  absl::Status CancelRequest(uint64_t client_id, int session_id,
+                              int request_id,
+                              std::shared_ptr<client_internal::Method> method,
+                              std::chrono::nanoseconds timeout,
+                              boost::asio::yield_context yield);
+
+  // Blocking cancel (for ResponseReceiver::Cancel without yield).
+  absl::Status CancelRequest(uint64_t client_id, int session_id,
+                              int request_id,
+                              std::shared_ptr<client_internal::Method> method,
+                              std::chrono::nanoseconds timeout);
 
 private:
-  absl::Status OpenService(std::chrono::nanoseconds timeout, co::Coroutine *c);
-  absl::Status CloseService(std::chrono::nanoseconds timeout, co::Coroutine *c);
+  absl::Status OpenService(std::chrono::nanoseconds timeout,
+                           boost::asio::yield_context yield);
+  absl::Status CloseService(std::chrono::nanoseconds timeout,
+                            boost::asio::yield_context yield);
   absl::Status PublishServerRequest(const subspace::RpcServerRequest &req,
                                     std::chrono::nanoseconds timeout,
-                                    co::Coroutine *c = nullptr);
+                                    boost::asio::yield_context yield);
   absl::StatusOr<subspace::RpcServerResponse>
   ReadServerResponse(int request_id, std::chrono::nanoseconds timeout,
-                     co::Coroutine *c = nullptr);
+                     boost::asio::yield_context yield);
 
-  // Low level method invocation functions that takes untyped protobuf.Any
-  // request and response.
   absl::StatusOr<google::protobuf::Any>
   InvokeMethod(int method_id, const google::protobuf::Any &request,
-               co::Coroutine *c = nullptr) {
-    return InvokeMethod(method_id, request, std::chrono::nanoseconds(0), c);
+               boost::asio::yield_context yield) {
+    return InvokeMethod(method_id, request, std::chrono::nanoseconds(0), yield);
   }
 
   absl::StatusOr<google::protobuf::Any>
   InvokeMethod(int method_id, const google::protobuf::Any &request,
-               std::chrono::nanoseconds timeout, co::Coroutine *c = nullptr);
+               std::chrono::nanoseconds timeout,
+               boost::asio::yield_context yield);
 
   absl::Status
   InvokeMethod(int method_id, const google::protobuf::Any &request,
@@ -211,9 +194,9 @@ private:
                                   int, std::shared_ptr<client_internal::Method>,
                                   const RpcResponse *)>
                    response_handler,
-               std::chrono::nanoseconds timeout, co::Coroutine *c = nullptr);
+               std::chrono::nanoseconds timeout,
+               boost::asio::yield_context yield);
 
-  // This is only used for error reporting so a linear search is fine.
   std::string MethodName(int id) const {
     for (const auto &m : methods_) {
       if (m.second->id == id) {
@@ -235,7 +218,6 @@ private:
   uint64_t client_id_;
   std::string subspace_server_socket_;
   toolbelt::Logger logger_;
-  co::Coroutine *coroutine_ = nullptr;
   std::shared_ptr<subspace::Client> client_;
   absl::flat_hash_map<int, std::shared_ptr<client_internal::Method>> methods_;
   absl::flat_hash_map<std::string_view, int> method_name_to_id_;
@@ -246,12 +228,11 @@ private:
   bool closed_ = false;
 };
 
-// Call with request and response.  Both types must be protobuf messages.  A
-// timeout will result in an error.
 template <typename Request, typename Response>
 inline RpcClient::CallResult<Response>
 RpcClient::Call(int method_id, const Request &request,
-                std::chrono::nanoseconds timeout, co::Coroutine *c) {
+                std::chrono::nanoseconds timeout,
+                boost::asio::yield_context yield) {
   google::protobuf::Any any;
   if constexpr (std::is_base_of_v<google::protobuf::Message, Request>) {
     any.PackFrom(request);
@@ -260,10 +241,11 @@ RpcClient::Call(int method_id, const Request &request,
     raw_request.set_data(request.data(), request.size());
     any.PackFrom(raw_request);
   }
-  auto r = InvokeMethod(method_id, any, timeout, c);
+  auto r = InvokeMethod(method_id, any, timeout, yield);
   if (!r.ok()) {
-    return absl::InternalError(
-        absl::StrFormat("Failed to invoke method '%s': %s", MethodName(method_id), r.status().ToString()));
+    return absl::InternalError(absl::StrFormat(
+        "Failed to invoke method '%s': %s", MethodName(method_id),
+        r.status().ToString()));
   }
   if constexpr (std::is_base_of_v<google::protobuf::Message, Response>) {
     Response resp;
@@ -288,25 +270,24 @@ RpcClient::Call(int method_id, const Request &request,
   }
 }
 
-// Call with request and response.  Both types must be protobuf messages.  A
-// timeout will result in an error.
 template <typename Request, typename Response>
 inline RpcClient::CallResult<Response>
 RpcClient::Call(std::string_view method_name, const Request &request,
-                std::chrono::nanoseconds timeout, co::Coroutine *c) {
+                std::chrono::nanoseconds timeout,
+                boost::asio::yield_context yield) {
   auto method_id = FindMethod(method_name);
   if (!method_id.ok()) {
     return absl::InternalError(
         absl::StrFormat("No such method: '%s'", method_name));
   }
-  return Call<Request, Response>(*method_id, request, timeout, c);
+  return Call<Request, Response>(*method_id, request, timeout, yield);
 }
 
 template <typename Request, typename Response>
 inline absl::Status RpcClient::Call(int method_id, const Request &request,
                                     ResponseReceiver<Response> &receiver,
                                     std::chrono::nanoseconds timeout,
-                                    co::Coroutine *c) {
+                                    boost::asio::yield_context yield) {
   google::protobuf::Any any;
   if constexpr (std::is_base_of_v<google::protobuf::Message, Request>) {
     any.PackFrom(request);
@@ -322,7 +303,6 @@ inline absl::Status RpcClient::Call(int method_id, const Request &request,
                   int session_id, int request_id,
                   std::shared_ptr<client_internal::Method> method,
                   const RpcResponse *response) {
-        // For cancellation we need to store the IDs for the outgoing request.
         receiver.SetInvocationDetails(client, client_id, session_id, request_id,
                                       method);
         if (response->is_cancelled()) {
@@ -332,7 +312,8 @@ inline absl::Status RpcClient::Call(int method_id, const Request &request,
         } else if (response->is_last() && !response->has_result()) {
           receiver.OnFinish();
         } else {
-          if constexpr (std::is_base_of_v<google::protobuf::Message, Response>) {
+          if constexpr (std::is_base_of_v<google::protobuf::Message,
+                                          Response>) {
             Response resp;
             if (!response->result().UnpackTo(&resp)) {
               receiver.OnError(absl::InternalError(
@@ -344,21 +325,24 @@ inline absl::Status RpcClient::Call(int method_id, const Request &request,
           } else if constexpr (std::is_same_v<Response, void>) {
             VoidMessage resp;
             if (!response->result().UnpackTo(&resp)) {
-              receiver.OnError(absl::InternalError("Failed to unpack void response"));
+              receiver.OnError(
+                  absl::InternalError("Failed to unpack void response"));
             } else {
               receiver.OnResponse();
             }
           } else {
             RawMessage resp;
             if (!response->result().UnpackTo(&resp)) {
-              receiver.OnError(absl::InternalError("Failed to unpack raw bytes response"));
+              receiver.OnError(
+                  absl::InternalError("Failed to unpack raw bytes response"));
             } else {
-              receiver.OnResponse(Response(resp.data().begin(), resp.data().end()));
+              receiver.OnResponse(
+                  Response(resp.data().begin(), resp.data().end()));
             }
           }
         }
       },
-      timeout, c);
+      timeout, yield);
   if (!status.ok()) {
     return absl::InternalError(
         absl::StrFormat("Failed to invoke method: %s", status.ToString()));
@@ -370,28 +354,46 @@ template <typename Request, typename Response>
 inline absl::Status
 RpcClient::Call(const std::string &method_name, const Request &request,
                 ResponseReceiver<Response> &receiver,
-                std::chrono::nanoseconds timeout, co::Coroutine *c) {
+                std::chrono::nanoseconds timeout,
+                boost::asio::yield_context yield) {
   auto method_id = FindMethod(method_name);
   if (!method_id.ok()) {
     return absl::InternalError(
         absl::StrFormat("No such method: '%s'", method_name));
   }
-  return Call(*method_id, request, receiver, timeout, c);
+  return Call(*method_id, request, receiver, timeout, yield);
 }
 
 template <typename Response>
 inline absl::Status
 ResponseReceiver<Response>::Cancel(std::chrono::nanoseconds timeout,
-                                   co::Coroutine *c) {
+                                   boost::asio::yield_context yield) {
   if (IsCancelled()) {
     return absl::OkStatus();
   }
-  if (auto status = client_->CancelRequest(client_id_, session_id_, request_id_,
-                                           method_, timeout, c);
+  if (auto status = client_->CancelRequest(client_id_, session_id_,
+                                           request_id_, method_, timeout,
+                                           yield);
       !status.ok()) {
     return status;
   }
   cancelled_ = true;
   return absl::OkStatus();
 }
-} // namespace subspace
+
+template <typename Response>
+inline absl::Status
+ResponseReceiver<Response>::Cancel(std::chrono::nanoseconds timeout) {
+  if (IsCancelled()) {
+    return absl::OkStatus();
+  }
+  if (auto status = client_->CancelRequest(client_id_, session_id_,
+                                           request_id_, method_, timeout);
+      !status.ok()) {
+    return status;
+  }
+  cancelled_ = true;
+  return absl::OkStatus();
+}
+
+} // namespace subspace::asio_rpc

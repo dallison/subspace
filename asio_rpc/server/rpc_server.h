@@ -1,4 +1,5 @@
 // Copyright 2023-2026 David Allison
+// Asio RPC support is Copyright 2026 Cruise LLC
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -6,13 +7,15 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/types/span.h"
 #include "client/client.h"
-#include "co/coroutine.h"
 #include "google/protobuf/any.pb.h"
 #include "rpc/common/rpc_common.h"
 #include "toolbelt/logging.h"
 #include "toolbelt/pipe.h"
 
-namespace subspace {
+#include <boost/asio.hpp>
+#include <boost/asio/spawn.hpp>
+
+namespace subspace::asio_rpc {
 
 class RpcServer;
 
@@ -29,9 +32,9 @@ struct AnyStreamWriter {
       : server(std::move(server)), session(std::move(session)),
         method_instance(std::move(method_instance)), request(request) {}
 
-  // Returns true if the write worked, false if the request was cancelled.
-  bool Write(std::unique_ptr<google::protobuf::Any> res, co::Coroutine *c);
-  void Finish(co::Coroutine *c);
+  bool Write(std::unique_ptr<google::protobuf::Any> res,
+             boost::asio::yield_context yield);
+  void Finish(boost::asio::yield_context yield);
 
   void Cancel() { is_cancelled = true; }
 
@@ -48,7 +51,8 @@ struct Method {
   Method(RpcServer *server, std::string name, std::string request_type,
          std::string response_type, int32_t slot_size, int32_t num_slots,
          std::function<absl::Status(const google::protobuf::Any &,
-                                    google::protobuf::Any *, co::Coroutine *)>
+                                    google::protobuf::Any *,
+                                    boost::asio::yield_context)>
              callback,
          int id)
       : name(std::move(name)), request_type(std::move(request_type)),
@@ -56,12 +60,13 @@ struct Method {
         num_slots(num_slots), callback(std::move(callback)), id(id) {
     MakeChannelNames(server);
   }
-  // Streaming method constructor.
+
   Method(
       RpcServer *server, std::string name, std::string request_type,
       std::string response_type, int32_t slot_size, int32_t num_slots,
       std::function<absl::Status(const google::protobuf::Any &,
-                                 internal::AnyStreamWriter &, co::Coroutine *)>
+                                 internal::AnyStreamWriter &,
+                                 boost::asio::yield_context)>
           callback,
       int id)
       : name(std::move(name)), request_type(std::move(request_type)),
@@ -79,14 +84,13 @@ struct Method {
   std::string response_type;
   int32_t slot_size;
   int32_t num_slots;
-  // Callback for normal, non-streaming method that is called and returns a
-  // single result.
   std::function<absl::Status(const google::protobuf::Any &,
-                             google::protobuf::Any *, co::Coroutine *)>
+                             google::protobuf::Any *,
+                             boost::asio::yield_context)>
       callback;
-  // Callback for a streaming method that produces multiple responses.
   std::function<absl::Status(const google::protobuf::Any &,
-                             internal::AnyStreamWriter &, co::Coroutine *)>
+                             internal::AnyStreamWriter &,
+                             boost::asio::yield_context)>
       stream_callback;
   std::string request_channel;
   std::string response_channel;
@@ -110,14 +114,13 @@ struct Session {
 } // namespace internal
 
 template <typename Response> struct StreamWriter {
-  // Returns true if the write worked, false if the request was cancelled.
-  bool Write(const Response &res, co::Coroutine *c) {
+  bool Write(const Response &res, boost::asio::yield_context yield) {
     auto any = std::make_unique<google::protobuf::Any>();
     any->PackFrom(res);
-    return writer->Write(std::move(any), c);
+    return writer->Write(std::move(any), yield);
   }
 
-  void Finish(co::Coroutine *c) { writer->Finish(c); }
+  void Finish(boost::asio::yield_context yield) { writer->Finish(yield); }
 
   void Cancel() { writer->Cancel(); }
 
@@ -138,65 +141,49 @@ public:
 
   void SetStartingSessionId(int session_id) { next_session_id_ = session_id; }
 
-  // Run the server.  If you pass a coroutine scheduler this will use it
-  // and the function will not block.  If you don't pass a scheduler
-  // the server will use its own internal scheduler and this function will
-  // block until the server is stopped (the Stop call).
-  //
-  // If you are using this in threaded application (most common probably),
-  // just omit the scheduler argument and the thread will run the server.
-  //
-  // There is no use of threads inside the server itself.
-  absl::Status Run(co::CoroutineScheduler *scheduler = nullptr);
+  // Run the server.  If you pass an io_context this will use it
+  // and the function will not block.  If you don't pass one
+  // the server will use its own internal io_context and this function will
+  // block until the server is stopped.
+  absl::Status Run(boost::asio::io_context *ioc = nullptr);
 
-  // Stop the server running.  This will signal a stop and will return
-  // immediately.
   void Stop();
 
-  // Register a method that takes a request and produces a response.  The
-  // default channel parameters (slot size and number of slots) will be used.
-
-  // Register a method that takes a request and produces a response.  You
-  // specify the slot size and number of slots for the channels.
   template <typename Request, typename Response>
   absl::Status RegisterMethod(
       const std::string &method,
-      std::function<absl::Status(const Request &, Response *, co::Coroutine *)>
+      std::function<absl::Status(const Request &, Response *,
+                                 boost::asio::yield_context)>
           callback,
       MethodOptions &&options = {});
 
-  // Type void method with slot parameters.
   template <typename Request>
   absl::Status RegisterMethod(
       const std::string &method,
-      std::function<absl::Status(const Request &, co::Coroutine *)> callback,
+      std::function<absl::Status(const Request &, boost::asio::yield_context)>
+          callback,
       MethodOptions &&options = {});
 
-  // Method that takes a raw message and returns a raw message.
-  // NOTE: this will make a copy of the request into a vector<char>.  For a more
-  // efficient version that doesn't copy, use the version below that takes a
-  // span.
   absl::Status RegisterMethod(
       const std::string &method,
       std::function<absl::Status(const std::vector<char> &, std::vector<char> *,
-                                 co::Coroutine *)>
+                                 boost::asio::yield_context)>
           callback,
       MethodOptions &&options = {});
 
   absl::Status RegisterMethod(
       const std::string &method,
       std::function<absl::Status(const absl::Span<const char> &,
-                                 std::vector<char> *, co::Coroutine *)>
+                                 std::vector<char> *,
+                                 boost::asio::yield_context)>
           callback,
       MethodOptions &&options = {});
 
-  // Server streaming methods.  These take in a single request and produce
-  // multiple responses.
   template <typename Request, typename Response>
   absl::Status RegisterMethod(
       const std::string &method,
       std::function<absl::Status(const Request &, StreamWriter<Response> &,
-                                 co::Coroutine *)>
+                                 boost::asio::yield_context)>
           callback,
       MethodOptions &&options = {});
 
@@ -211,95 +198,90 @@ public:
 
   const std::string &Name() const { return name_; }
 
-  // These methods are non-templated and take google::protobuf::Any arguments
-  // and responses.  They are notionally private but we need to access them
-  // for the server test unit test.
-
-  // Method with a request and response.
   absl::Status RegisterMethod(
       const std::string &method, std::string_view request_type,
       std::string_view response_type,
       std::function<absl::Status(const google::protobuf::Any &,
-                                 google::protobuf::Any *, co::Coroutine *)>
+                                 google::protobuf::Any *,
+                                 boost::asio::yield_context)>
           callback,
       MethodOptions &&options = {});
 
-  absl::Status
-  RegisterMethod(const std::string &method, std::string_view request_type,
-                 std::function<absl::Status(const google::protobuf::Any &,
-                                            co::Coroutine *)>
-                     callback,
-                 MethodOptions &&options = {});
+  absl::Status RegisterMethod(
+      const std::string &method, std::string_view request_type,
+      std::function<absl::Status(const google::protobuf::Any &,
+                                 boost::asio::yield_context)>
+          callback,
+      MethodOptions &&options = {});
 
-  // Streaming method.
   absl::Status RegisterMethod(
       const std::string &method, std::string_view request_type,
       std::string_view response_type,
       std::function<absl::Status(const google::protobuf::Any &,
-                                 internal::AnyStreamWriter &, co::Coroutine *)>
+                                 internal::AnyStreamWriter &,
+                                 boost::asio::yield_context)>
           callback,
       MethodOptions &&options = {});
 
-  // For debugging we might need to get hold of the scheduler.
-  co::CoroutineScheduler *Scheduler() { return scheduler_; }
+  boost::asio::io_context *IoContext() { return io_context_; }
 
 private:
   friend struct internal::AnyStreamWriter;
 
   absl::Status CreateChannels();
-  void AddCoroutine(std::unique_ptr<co::Coroutine> coroutine) {
-    coroutines_.insert(std::move(coroutine));
-  }
-  static void ListenerCoroutine(std::shared_ptr<RpcServer> server,
-                                co::Coroutine *c);
 
-  absl::Status HandleIncomingRpcServerRequest(subspace::Message msg,
-                                              co::Coroutine *c);
+  static void ListenerCoroutine(std::shared_ptr<RpcServer> server,
+                                boost::asio::yield_context yield);
+
+  absl::Status
+  HandleIncomingRpcServerRequest(subspace::Message msg,
+                                 boost::asio::yield_context yield);
   absl::Status HandleOpen(uint64_t client_id,
                           const subspace::RpcOpenRequest &request,
                           subspace::RpcOpenResponse *response,
-                          co::Coroutine *c);
+                          boost::asio::yield_context yield);
   absl::Status HandleClose(uint64_t client_id,
                            const subspace::RpcCloseRequest &request,
                            subspace::RpcCloseResponse *response,
-                           co::Coroutine *c);
+                           boost::asio::yield_context yield);
   absl::Status
   PublishRpcServerResponse(const subspace::RpcServerResponse &response,
-                           co::Coroutine *c);
+                           boost::asio::yield_context yield);
 
   absl::StatusOr<std::shared_ptr<internal::Session>>
-  CreateSession(uint64_t client_id);
+  CreateSession(uint64_t client_id, boost::asio::yield_context yield);
   absl::Status DestroySession(int session_id);
 
   static void SessionMethodCoroutine(
       std::shared_ptr<RpcServer> server,
       std::shared_ptr<internal::Session> session,
       std::shared_ptr<internal::MethodInstance> method_instance,
-      co::Coroutine *c);
+      boost::asio::yield_context yield);
 
   static void SessionStreamingMethodCoroutine(
       std::shared_ptr<RpcServer> server,
       std::shared_ptr<internal::Session> session,
       std::shared_ptr<internal::MethodInstance> method_instance,
-      co::Coroutine *c);
+      boost::asio::yield_context yield);
 
   static void SendStreamRpcResponse(
       std::shared_ptr<RpcServer> server,
       std::shared_ptr<internal::Session> session,
       std::shared_ptr<internal::MethodInstance> method_instance,
       const RpcRequest &request, std::unique_ptr<google::protobuf::Any> result,
-      bool is_last, bool is_cancelled, co::Coroutine *c);
+      bool is_last, bool is_cancelled, boost::asio::yield_context yield);
+
   static void
   SendRpcError(std::shared_ptr<RpcServer> server,
                std::shared_ptr<internal::Session> session,
                std::shared_ptr<internal::MethodInstance> method_instance,
                const RpcRequest &request, const std::string &error,
-               co::Coroutine *c);
+               boost::asio::yield_context yield);
 
   std::string name_;
   std::string subspace_server_socket_;
-  co::CoroutineScheduler local_scheduler_;
-  co::CoroutineScheduler *scheduler_;
+  boost::asio::io_context local_io_context_;
+  boost::asio::io_context *io_context_;
   std::shared_ptr<Client> client_;
   absl::flat_hash_map<std::string, std::shared_ptr<internal::Method>> methods_;
   toolbelt::Logger logger_;
@@ -307,17 +289,17 @@ private:
 
   std::shared_ptr<subspace::Subscriber> request_receiver_;
   std::shared_ptr<subspace::Publisher> response_publisher_;
-  absl::flat_hash_set<std::unique_ptr<co::Coroutine>> coroutines_;
   bool running_ = false;
-  int32_t next_session_id_ = 0; // Next session ID.
-  int next_method_id_ = 0;      // Next method ID.
+  int32_t next_session_id_ = 0;
+  int next_method_id_ = 0;
   absl::flat_hash_map<int32_t, std::shared_ptr<internal::Session>> sessions_;
 };
 
 template <typename Request, typename Response>
 inline absl::Status RpcServer::RegisterMethod(
     const std::string &method,
-    std::function<absl::Status(const Request &, Response *, co::Coroutine *)>
+    std::function<absl::Status(const Request &, Response *,
+                               boost::asio::yield_context)>
         callback,
     MethodOptions &&options) {
   auto request_descriptor = Request::descriptor();
@@ -327,7 +309,7 @@ inline absl::Status RpcServer::RegisterMethod(
       method, request_descriptor->full_name(), response_descriptor->full_name(),
       [method, callback = std::move(callback), request_descriptor](
           const google::protobuf::Any &req, google::protobuf::Any *res,
-          co::Coroutine *c) -> absl::Status {
+          boost::asio::yield_context yield) -> absl::Status {
         if (!req.Is<Request>()) {
           return absl::InvalidArgumentError(absl::StrFormat(
               "Invalid argment type for %s: need %s got %s", method,
@@ -338,7 +320,7 @@ inline absl::Status RpcServer::RegisterMethod(
           return absl::InvalidArgumentError("Failed to unpack request");
         }
         Response response;
-        auto status = callback(request, &response, c);
+        auto status = callback(request, &response, yield);
         if (!status.ok()) {
           return status;
         }
@@ -351,14 +333,16 @@ inline absl::Status RpcServer::RegisterMethod(
 template <typename Request>
 inline absl::Status RpcServer::RegisterMethod(
     const std::string &method,
-    std::function<absl::Status(const Request &, co::Coroutine *)> callback,
+    std::function<absl::Status(const Request &, boost::asio::yield_context)>
+        callback,
     MethodOptions &&options) {
   auto request_descriptor = Request::descriptor();
 
   return RegisterMethod(
       method, request_descriptor->full_name(),
-      [method, callback = std::move(callback), request_descriptor](
-          const google::protobuf::Any &req, co::Coroutine *c) -> absl::Status {
+      [method, callback = std::move(callback),
+       request_descriptor](const google::protobuf::Any &req,
+                           boost::asio::yield_context yield) -> absl::Status {
         if (!req.Is<Request>()) {
           return absl::InvalidArgumentError(absl::StrFormat(
               "Invalid argment type for %s: need %s got %s", method,
@@ -368,7 +352,7 @@ inline absl::Status RpcServer::RegisterMethod(
         if (!req.UnpackTo(&request)) {
           return absl::InvalidArgumentError("Failed to unpack request");
         }
-        return callback(request, c);
+        return callback(request, yield);
       },
       std::move(options));
 }
@@ -377,7 +361,7 @@ template <typename Request, typename Response>
 inline absl::Status RpcServer::RegisterMethod(
     const std::string &method,
     std::function<absl::Status(const Request &, StreamWriter<Response> &,
-                               co::Coroutine *)>
+                               boost::asio::yield_context)>
         callback,
     MethodOptions &&options) {
   auto request_descriptor = Request::descriptor();
@@ -389,7 +373,7 @@ inline absl::Status RpcServer::RegisterMethod(
       [method, callback = std::move(callback), request_descriptor,
        typed_writer](const google::protobuf::Any &req,
                      internal::AnyStreamWriter &writer,
-                     co::Coroutine *c) mutable -> absl::Status {
+                     boost::asio::yield_context yield) mutable -> absl::Status {
         if (!req.Is<Request>()) {
           return absl::InvalidArgumentError(absl::StrFormat(
               "Invalid argment type for %s: need %s got %s", method,
@@ -400,7 +384,7 @@ inline absl::Status RpcServer::RegisterMethod(
           return absl::InvalidArgumentError("Failed to unpack request");
         }
         typed_writer.SetWriter(&writer);
-        auto status = callback(request, typed_writer, c);
+        auto status = callback(request, typed_writer, yield);
         if (!status.ok()) {
           return status;
         }
@@ -408,4 +392,4 @@ inline absl::Status RpcServer::RegisterMethod(
       },
       std::move(options));
 }
-} // namespace subspace
+} // namespace subspace::asio_rpc

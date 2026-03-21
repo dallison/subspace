@@ -9,11 +9,12 @@ cc_library(
     ],
     hdrs = [
         "rpc_server.h",
-
     ],
+    copts = ["-std=c++20"],
     deps = [
-        "//common:subspace_common",
+        "//coro_rpc/common:async_wait",
         "//client:subspace_client",
+        "//common:subspace_common",
         "//proto:subspace_cc_proto",
         "//rpc/common:rpc_common",
         "@abseil-cpp//absl/container:flat_hash_map",
@@ -21,31 +22,23 @@ cc_library(
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings:str_format",
-        "@abseil-cpp//absl/flags:flag",
-        "@abseil-cpp//absl/flags:parse",
-        "@coroutines//co:co",
+        "@boost.asio//:boost.asio",
     ],
 )
 
 cc_test(
     name = "server_test",
     srcs = ["server_test.cc"],
-    data = [
-        "//server:subspace_server",
-    ],
+    copts = ["-std=c++20"],
     deps = [
         ":rpc_server",
-        "//client:subspace_client",
-        "//server",
-        "@abseil-cpp//absl/flags:flag",
-        "@abseil-cpp//absl/flags:parse",
-        "@abseil-cpp//absl/hash:hash_testing",
-        "@abseil-cpp//absl/status",
-        "@abseil-cpp//absl/status:status_matchers",
-        "@abseil-cpp//absl/status:statusor",
-        "@googletest//:gtest",
-        "@coroutines//co:co",
+        "//client:test_fixture",
+        "//coro_rpc/common:async_wait",
         "//rpc/proto:rpc_test_cc_proto",
+        "@abseil-cpp//absl/flags:parse",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@boost.asio//:boost.asio",
+        "@googletest//:gtest",
     ],
 )
-
