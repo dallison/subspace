@@ -1,0 +1,730 @@
+diff --git a/co/coroutine_cpp20.cc b/co/coroutine_cpp20.cc
+index 68e1b4a..293ca81 100644
+--- a/co/coroutine_cpp20.cc
++++ b/co/coroutine_cpp20.cc
+@@ -183,10 +183,12 @@ void Scheduler::CleanupCoroutine(Coroutine* coroutine) {
+       }
+     }
+   }
++
++  CleanupTimeoutFd(coroutine);
+ }
+ 
+ void Scheduler::WaitForFd(Coroutine* coroutine, int fd, uint32_t event_mask,
+-                           uint64_t /*timeout_ns*/) {
++                           uint64_t timeout_ns) {
+   if (!coroutine) return;
+ 
+   // If already ready, schedule immediately.
+@@ -284,6 +286,104 @@ void Scheduler::WaitForFd(Coroutine* coroutine, int fd, uint32_t event_mask,
+         }
+       }
+     }
++#endif
++  }
++
++  // Set up timeout timer if requested.
++  if (timeout_ns > 0) {
++#if CO_TIMER_MODE == CO_TIMER_TIMERFD
++    int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
++    if (tfd != -1) {
++      struct itimerspec its = {};
++      its.it_value.tv_sec = timeout_ns / 1000000000ULL;
++      its.it_value.tv_nsec = timeout_ns % 1000000000ULL;
++      timerfd_settime(tfd, 0, &its, nullptr);
++
++      timerfds_.insert(tfd);
++      coroutine->SetTimeoutFd(tfd);
++
++      auto& timer_wait_list = waiting_fds_[tfd];
++      timer_wait_list.push_back(coroutine);
++
++#if CO_POLL_MODE == CO_POLL_EPOLL
++      if (epoll_fd_ != -1) {
++        struct epoll_event tev;
++        tev.data.fd = tfd;
++        tev.events = EPOLLIN;
++        int ret = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, tfd, &tev);
++        if (ret == -1 && errno == EEXIST) {
++          epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, tfd, &tev);
++        }
++      }
++#endif
++    }
++
++#elif CO_TIMER_MODE == CO_TIMER_EVENT
++    int kq = kqueue();
++    if (kq != -1) {
++      timerfds_.insert(kq);
++      coroutine->SetTimeoutFd(kq);
++
++      struct kevent kev;
++      EV_SET(&kev, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT, NOTE_NSECONDS,
++             timeout_ns, 0);
++      kevent(kq, &kev, 1, nullptr, 0, nullptr);
++
++      auto& timer_wait_list = waiting_fds_[kq];
++      timer_wait_list.push_back(coroutine);
++    }
++
++#elif CO_TIMER_MODE == CO_TIMER_POSIX
++    int pipe_fds[2];
++    if (pipe(pipe_fds) == 0) {
++      int read_fd = pipe_fds[0];
++      int write_fd = pipe_fds[1];
++      fcntl(read_fd, F_SETFL, fcntl(read_fd, F_GETFL, 0) | O_NONBLOCK);
++      fcntl(write_fd, F_SETFL, fcntl(write_fd, F_GETFL, 0) | O_NONBLOCK);
++
++      struct sigevent se = {};
++      se.sigev_notify = SIGEV_THREAD;
++      se.sigev_notify_attributes = nullptr;
++      se.sigev_value.sival_int = write_fd;
++      se.sigev_notify_function = [](union sigval sv) {
++        char c = 1;
++        (void)write(sv.sival_int, &c, 1);
++      };
++
++      timer_t timer_id;
++      if (timer_create(CLOCK_REALTIME, &se, &timer_id) == 0) {
++        struct itimerspec its = {};
++        its.it_value.tv_sec = timeout_ns / 1000000000ULL;
++        its.it_value.tv_nsec = timeout_ns % 1000000000ULL;
++        if (timer_settime(timer_id, 0, &its, nullptr) == 0) {
++          timerfds_.insert(read_fd);
++          posix_timers_[read_fd] = {timer_id, write_fd};
++          coroutine->SetTimeoutFd(read_fd);
++
++          auto& timer_wait_list = waiting_fds_[read_fd];
++          timer_wait_list.push_back(coroutine);
++
++#if CO_POLL_MODE == CO_POLL_EPOLL
++          if (epoll_fd_ != -1) {
++            struct epoll_event tev;
++            tev.data.fd = read_fd;
++            tev.events = EPOLLIN;
++            int ret = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, read_fd, &tev);
++            if (ret == -1 && errno == EEXIST) {
++              epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, read_fd, &tev);
++            }
++          }
++#endif
++        } else {
++          timer_delete(timer_id);
++          close(read_fd);
++          close(write_fd);
++        }
++      } else {
++        close(read_fd);
++        close(write_fd);
++      }
++    }
+ #endif
+   }
+ }
+@@ -436,12 +536,54 @@ void Scheduler::ResumeCoroutine(Coroutine* coroutine, int value) {
+     }
+   }
+ 
++  // Clean up timeout timer fd if present.
++  CleanupTimeoutFd(coroutine);
++
+   coroutine->SetWaitResult(value);
+   coroutine->SetState(Coroutine::State::kReady);
+   ready_queue_.push_back(coroutine);
+   TriggerInterrupt();
+ }
+ 
++void Scheduler::CleanupTimeoutFd(Coroutine* coroutine) {
++  int tfd = coroutine->GetTimeoutFd();
++  if (tfd == -1) return;
++
++  auto tfd_it = waiting_fds_.find(tfd);
++  if (tfd_it != waiting_fds_.end()) {
++    auto& list = tfd_it->second;
++    list.erase(std::remove(list.begin(), list.end(), coroutine), list.end());
++    if (list.empty()) {
++      waiting_fds_.erase(tfd_it);
++#if CO_POLL_MODE == CO_POLL_EPOLL
++      if (epoll_fd_ != -1) {
++        epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, tfd, nullptr);
++      }
++#endif
++    }
++  }
++
++  if (timerfds_.count(tfd) > 0) {
++#if CO_TIMER_MODE == CO_TIMER_TIMERFD
++    uint64_t val;
++    (void)read(tfd, &val, sizeof(val));
++#elif CO_TIMER_MODE == CO_TIMER_POSIX
++    auto pt = posix_timers_.find(tfd);
++    if (pt != posix_timers_.end()) {
++      struct itimerspec disarm = {};
++      timer_settime(pt->second.timer_id, 0, &disarm, nullptr);
++      timer_delete(pt->second.timer_id);
++      close(pt->second.write_fd);
++      posix_timers_.erase(pt);
++    }
++#endif
++    close(tfd);
++    timerfds_.erase(tfd);
++  }
++
++  coroutine->SetTimeoutFd(-1);
++}
++
+ #if CO_POLL_MODE == CO_POLL_EPOLL
+ void Scheduler::DispatchEpollEvents(struct epoll_event* events, int count) {
+   for (int i = 0; i < count; i++) {
+diff --git a/co/coroutine_cpp20.h b/co/coroutine_cpp20.h
+index e2320f9..84ed139 100644
+--- a/co/coroutine_cpp20.h
++++ b/co/coroutine_cpp20.h
+@@ -100,6 +100,7 @@ struct BaseAwaitable;
+ struct YieldAwaitable;
+ struct WaitAwaitable;
+ struct SleepAwaitable;
++template <typename T> struct ValueTask;
+ 
+ // Represents a single C++20 stackless coroutine managed by a Scheduler.
+ class Coroutine {
+@@ -119,6 +120,7 @@ public:
+   friend struct WaitAwaitable;
+   friend struct SleepAwaitable;
+   friend struct Task;
++  template <typename T> friend struct ValueTask;
+ 
+   template<typename Func>
+   Coroutine(Scheduler& scheduler, Func&& func, const std::string& name = "",
+@@ -158,6 +160,8 @@ private:
+   void SetState(State state) { state_ = state; }
+   void SetWaitResult(int result) { wait_result_ = result; }
+   int GetWaitResult() const { return wait_result_; }
++  void SetTimeoutFd(int fd) { timeout_fd_ = fd; }
++  int GetTimeoutFd() const { return timeout_fd_; }
+ 
+   inline void Resume(int value = 0);
+ 
+@@ -169,6 +173,10 @@ private:
+   int id_;
+   int wait_result_ = -1;
+   int interrupt_fd_ = -1;
++  int timeout_fd_ = -1;
++  // Holds the callable (e.g. lambda) that produced the coroutine, keeping
++  // its captures alive for the lifetime of the coroutine frame.
++  std::shared_ptr<void> callable_storage_;
+ };
+ 
+ // Manages a set of coroutines, scheduling them cooperatively using
+@@ -205,6 +213,7 @@ private:
+   void ProcessReadyCoroutines();
+   void ProcessEvents();
+   void CleanupCoroutine(Coroutine* coroutine);
++  void CleanupTimeoutFd(Coroutine* coroutine);
+   void TriggerInterrupt();
+ #if CO_POLL_MODE == CO_POLL_EPOLL
+   void DispatchEpollEvents(struct epoll_event* events, int count);
+@@ -356,11 +365,18 @@ inline Coroutine::Coroutine(Scheduler& scheduler, Func&& func, const std::string
+     interrupt_fd_(interrupt_fd == -1 ? -1 : dup(interrupt_fd)) {
+   name_ = name.empty() ? "co-" + std::to_string(id_) : name;
+ 
++  // Store the callable so its captures (e.g. lambda captures) remain alive
++  // for the lifetime of the coroutine. C++20 coroutine frames hold a pointer
++  // to the callable's captures, so the callable must outlive the frame.
++  using FuncType = std::decay_t<Func>;
++  auto stored = std::make_shared<FuncType>(std::forward<Func>(func));
++  callable_storage_ = stored;
++
+   auto task = [&]() {
+-    if constexpr (std::is_invocable_v<Func, Coroutine&>) {
+-      return func(*this);
++    if constexpr (std::is_invocable_v<FuncType, Coroutine&>) {
++      return (*stored)(*this);
+     } else {
+-      return func();
++      return (*stored)();
+     }
+   }();
+   if constexpr (requires { task.handle_; }) {
+@@ -395,6 +411,14 @@ inline SleepAwaitable Coroutine::Sleep(std::chrono::duration<Rep, Period> durati
+   return Sleep(static_cast<uint64_t>(ns));
+ }
+ 
++// Thread-local pointers to the currently running coroutine and its scheduler.
++// These are set automatically by the scheduler before each coroutine is resumed,
++// enabling the free functions below. Each thread running a scheduler gets its
++// own copy. Declared here (before Task/ValueTask) so that ValueTask::await_resume
++// can reference co20::self to restore the Coroutine's handle tracking.
++extern thread_local Coroutine* self;
++extern thread_local Scheduler* scheduler;
++
+ // Task type returned by coroutine functions: [](Coroutine& co) -> Task { ... }
+ struct Task {
+   struct promise_type {
+@@ -437,12 +461,144 @@ struct Task {
+   Task(Task&& other) noexcept : handle_(other.handle_) { other.handle_ = {}; }
+ };
+ 
+-// Thread-local pointers to the currently running coroutine and its scheduler.
+-// These are set automatically by the scheduler before each coroutine is resumed,
+-// enabling the free functions below. Each thread running a scheduler gets its
+-// own copy.
+-extern thread_local Coroutine* self;
+-extern thread_local Scheduler* scheduler;
++// A sub-coroutine that produces a value of type T. Unlike Task (which is
++// managed by the Scheduler), ValueTask<T> is designed to be co_await'ed from
++// within a Task or another ValueTask. It uses symmetric transfer to run inline
++// with the caller, sharing the same Scheduler and Coroutine context.
++//
++// Usage:
++//   ValueTask<int> ComputeAsync(Coroutine& co) {
++//     co_await co.Wait(fd, POLLIN);
++//     co_return 42;
++//   }
++//
++//   // From within a Task:
++//   int result = co_await ComputeAsync(co);
++template <typename T>
++struct ValueTask {
++  struct promise_type {
++    T value_{};
++    std::coroutine_handle<> continuation_{};
++
++    std::suspend_always initial_suspend() noexcept { return {}; }
++
++    struct FinalAwaiter {
++      bool await_ready() const noexcept { return false; }
++      std::coroutine_handle<> await_suspend(
++          std::coroutine_handle<promise_type> h) const noexcept {
++        if (auto cont = h.promise().continuation_; cont)
++          return cont;
++        return std::noop_coroutine();
++      }
++      void await_resume() const noexcept {}
++    };
++
++    FinalAwaiter final_suspend() noexcept { return {}; }
++    void unhandled_exception() {}
++
++    ValueTask get_return_object() {
++      return ValueTask{std::coroutine_handle<promise_type>::from_promise(*this)};
++    }
++
++    template <typename U>
++    void return_value(U&& v) { value_ = std::forward<U>(v); }
++  };
++
++  std::coroutine_handle<promise_type> handle_;
++
++  explicit ValueTask(std::coroutine_handle<promise_type> h) : handle_(h) {}
++  ~ValueTask() { if (handle_) handle_.destroy(); }
++
++  ValueTask(const ValueTask&) = delete;
++  ValueTask& operator=(const ValueTask&) = delete;
++  ValueTask(ValueTask&& o) noexcept : handle_(o.handle_) { o.handle_ = {}; }
++  ValueTask& operator=(ValueTask&& o) noexcept {
++    if (this != &o) {
++      if (handle_) handle_.destroy();
++      handle_ = o.handle_;
++      o.handle_ = {};
++    }
++    return *this;
++  }
++
++  // Awaitable interface for co_await.
++  bool await_ready() const noexcept { return false; }
++
++  std::coroutine_handle<> await_suspend(std::coroutine_handle<> caller) const noexcept {
++    handle_.promise().continuation_ = caller;
++    return handle_;
++  }
++
++  T await_resume() {
++    // Restore the Coroutine's handle to point to the caller (continuation)
++    // before this ValueTask is destroyed, preventing a dangling handle.
++    if (co20::self && handle_.promise().continuation_) {
++      co20::self->SetHandle(handle_.promise().continuation_);
++    }
++    return std::move(handle_.promise().value_);
++  }
++};
++
++// Void specialization of ValueTask for sub-coroutines that don't return a
++// value but still need to co_await internally.
++template <>
++struct ValueTask<void> {
++  struct promise_type {
++    std::coroutine_handle<> continuation_{};
++
++    std::suspend_always initial_suspend() noexcept { return {}; }
++
++    struct FinalAwaiter {
++      bool await_ready() const noexcept { return false; }
++      std::coroutine_handle<> await_suspend(
++          std::coroutine_handle<promise_type> h) const noexcept {
++        if (auto cont = h.promise().continuation_; cont)
++          return cont;
++        return std::noop_coroutine();
++      }
++      void await_resume() const noexcept {}
++    };
++
++    FinalAwaiter final_suspend() noexcept { return {}; }
++    void unhandled_exception() {}
++
++    ValueTask get_return_object() {
++      return ValueTask{std::coroutine_handle<promise_type>::from_promise(*this)};
++    }
++
++    void return_void() {}
++  };
++
++  std::coroutine_handle<promise_type> handle_;
++
++  explicit ValueTask(std::coroutine_handle<promise_type> h) : handle_(h) {}
++  ~ValueTask() { if (handle_) handle_.destroy(); }
++
++  ValueTask(const ValueTask&) = delete;
++  ValueTask& operator=(const ValueTask&) = delete;
++  ValueTask(ValueTask&& o) noexcept : handle_(o.handle_) { o.handle_ = {}; }
++  ValueTask& operator=(ValueTask&& o) noexcept {
++    if (this != &o) {
++      if (handle_) handle_.destroy();
++      handle_ = o.handle_;
++      o.handle_ = {};
++    }
++    return *this;
++  }
++
++  bool await_ready() const noexcept { return false; }
++
++  std::coroutine_handle<> await_suspend(std::coroutine_handle<> caller) const noexcept {
++    handle_.promise().continuation_ = caller;
++    return handle_;
++  }
++
++  void await_resume() const {
++    if (co20::self && handle_.promise().continuation_) {
++      co20::self->SetHandle(handle_.promise().continuation_);
++    }
++  }
++};
+ 
+ // --- Coroutine::Resume (needs thread_local declarations above) ---
+ 
+diff --git a/co/test_cpp20.cc b/co/test_cpp20.cc
+index 0e2fa7c..6f09686 100644
+--- a/co/test_cpp20.cc
++++ b/co/test_cpp20.cc
+@@ -631,6 +631,311 @@ TEST(Cpp20, InterruptFdDataFirst) {
+ #endif
+ }
+ 
++// --- ValueTask<T> tests ---
++
++ValueTask<int> AddAsync(Coroutine& co, int a, int b) {
++  co_await co.Yield();
++  co_return a + b;
++}
++
++TEST(Cpp20ValueTask, BasicReturn) {
++  Scheduler scheduler;
++  int result = 0;
++
++  scheduler.Spawn([&result](Coroutine& co) -> Task {
++    result = co_await AddAsync(co, 3, 4);
++    co_return;
++  }, "test");
++
++  scheduler.Run();
++  EXPECT_EQ(7, result);
++}
++
++ValueTask<std::string> ReadFromPipeAsync(Coroutine& co, int read_fd) {
++  std::string data;
++  for (;;) {
++    int fd = co_await co.Wait(read_fd, POLLIN);
++    if (fd != read_fd) break;
++    char buf[64];
++    ssize_t n = read(read_fd, buf, sizeof(buf));
++    if (n <= 0) break;
++    data.append(buf, n);
++  }
++  co_return data;
++}
++
++TEST(Cpp20ValueTask, WithWait) {
++  Scheduler scheduler;
++  int pipes[2];
++  ASSERT_EQ(0, pipe(pipes));
++
++  std::string result;
++
++  scheduler.Spawn([&pipes, &result](Coroutine& co) -> Task {
++    result = co_await ReadFromPipeAsync(co, pipes[0]);
++    close(pipes[0]);
++    co_return;
++  }, "reader");
++
++  scheduler.Spawn([&pipes](Coroutine& co) -> Task {
++    co_await co.Yield();
++    const char* msg = "hello";
++    (void)write(pipes[1], msg, 5);
++    co_await co.Yield();
++    close(pipes[1]);
++    co_return;
++  }, "writer");
++
++  scheduler.Run();
++  EXPECT_EQ("hello", result);
++}
++
++ValueTask<int> InnerCompute(Coroutine& co, int x) {
++  co_await co.Yield();
++  co_return x * 2;
++}
++
++ValueTask<int> OuterCompute(Coroutine& co, int x) {
++  int doubled = co_await InnerCompute(co, x);
++  co_await co.Yield();
++  co_return doubled + 1;
++}
++
++TEST(Cpp20ValueTask, Nested) {
++  Scheduler scheduler;
++  int result = 0;
++
++  scheduler.Spawn([&result](Coroutine& co) -> Task {
++    result = co_await OuterCompute(co, 5);
++    co_return;
++  }, "test");
++
++  scheduler.Run();
++  EXPECT_EQ(11, result);
++}
++
++ValueTask<void> IncrementAsync(Coroutine& co, int& counter) {
++  co_await co.Yield();
++  counter++;
++  co_return;
++}
++
++TEST(Cpp20ValueTask, VoidReturn) {
++  Scheduler scheduler;
++  int counter = 0;
++
++  scheduler.Spawn([&counter](Coroutine& co) -> Task {
++    co_await IncrementAsync(co, counter);
++    co_await IncrementAsync(co, counter);
++    co_await IncrementAsync(co, counter);
++    co_return;
++  }, "test");
++
++  scheduler.Run();
++  EXPECT_EQ(3, counter);
++}
++
++ValueTask<void> WaitAndWrite(Coroutine& co, int write_fd) {
++  co_await co.Wait(write_fd, POLLOUT);
++  char c = 'V';
++  (void)write(write_fd, &c, 1);
++  co_return;
++}
++
++TEST(Cpp20ValueTask, VoidWithWait) {
++  Scheduler scheduler;
++  int pipes[2];
++  ASSERT_EQ(0, pipe(pipes));
++
++  char read_buf = 0;
++
++  scheduler.Spawn([&pipes, &read_buf](Coroutine& co) -> Task {
++    co_await WaitAndWrite(co, pipes[1]);
++    close(pipes[1]);
++    int fd = co_await co.Wait(pipes[0], POLLIN);
++    (void)fd;
++    (void)read(pipes[0], &read_buf, 1);
++    close(pipes[0]);
++    co_return;
++  }, "test");
++
++  scheduler.Run();
++  EXPECT_EQ('V', read_buf);
++}
++
++ValueTask<int> AddWithFreeFunction(int a, int b) {
++  co_await co20::Yield();
++  co_return a + b;
++}
++
++TEST(Cpp20ValueTask, FreeFunctions) {
++  Scheduler scheduler;
++  int result = 0;
++
++  scheduler.Spawn([&result]() -> Task {
++    result = co_await AddWithFreeFunction(10, 20);
++    co_return;
++  }, "test");
++
++  scheduler.Run();
++  EXPECT_EQ(30, result);
++}
++
++TEST(Cpp20ValueTask, MultipleSequentialCalls) {
++  Scheduler scheduler;
++  int sum = 0;
++
++  scheduler.Spawn([&sum](Coroutine& co) -> Task {
++    for (int i = 1; i <= 5; i++) {
++      sum += co_await AddAsync(co, i, 0);
++    }
++    co_return;
++  }, "test");
++
++  scheduler.Run();
++  EXPECT_EQ(15, sum);
++}
++
++ValueTask<bool> CheckPipeReady(Coroutine& co, int read_fd, uint64_t timeout_ns) {
++  int fd = co_await co.Wait(read_fd, POLLIN, timeout_ns);
++  co_return fd == read_fd;
++}
++
++TEST(Cpp20ValueTask, BoolReturn) {
++  Scheduler scheduler;
++  int pipes[2];
++  ASSERT_EQ(0, pipe(pipes));
++
++  bool pipe_ready = false;
++
++  scheduler.Spawn([&pipes, &pipe_ready](Coroutine& co) -> Task {
++    // Write data first so the pipe is ready.
++    char c = 'x';
++    (void)write(pipes[1], &c, 1);
++    co_await co.Yield();
++    pipe_ready = co_await CheckPipeReady(co, pipes[0], 0);
++    close(pipes[0]);
++    close(pipes[1]);
++    co_return;
++  }, "test");
++
++  scheduler.Run();
++  EXPECT_TRUE(pipe_ready);
++}
++
++TEST(Cpp20WaitTimeout, DataArrivesBeforeTimeout) {
++  Scheduler scheduler;
++  int pipes[2];
++  ASSERT_EQ(0, pipe(pipes));
++
++  bool success = false;
++
++  scheduler.Spawn([&](Coroutine& co) -> Task {
++    char c = 'x';
++    (void)write(pipes[1], &c, 1);
++    co_await co.Yield();
++
++    int fd = co_await co.Wait(pipes[0], POLLIN, 1000000000ULL);
++    success = (fd == pipes[0]);
++
++    close(pipes[0]);
++    close(pipes[1]);
++    co_return;
++  }, "test");
++
++  scheduler.Run();
++  EXPECT_TRUE(success);
++}
++
++TEST(Cpp20WaitTimeout, TimeoutExpires) {
++  Scheduler scheduler;
++  int pipes[2];
++  ASSERT_EQ(0, pipe(pipes));
++
++  bool timed_out = false;
++
++  scheduler.Spawn([&](Coroutine& co) -> Task {
++    int fd = co_await co.Wait(pipes[0], POLLIN, 50000000ULL);
++    timed_out = (fd != pipes[0]);
++
++    close(pipes[0]);
++    close(pipes[1]);
++    co_return;
++  }, "test");
++
++  scheduler.Run();
++  EXPECT_TRUE(timed_out);
++}
++
++TEST(Cpp20WaitTimeout, FreeFunctionTimeout) {
++  Scheduler scheduler;
++  int pipes[2];
++  ASSERT_EQ(0, pipe(pipes));
++
++  bool timed_out = false;
++
++  scheduler.Spawn([&]() -> Task {
++    int fd = co_await co20::Wait(pipes[0], POLLIN, 50000000ULL);
++    timed_out = (fd != pipes[0]);
++
++    close(pipes[0]);
++    close(pipes[1]);
++    co_return;
++  }, "test");
++
++  scheduler.Run();
++  EXPECT_TRUE(timed_out);
++}
++
++TEST(Cpp20WaitTimeout, ValueTaskWithTimeout) {
++  Scheduler scheduler;
++  int pipes[2];
++  ASSERT_EQ(0, pipe(pipes));
++
++  bool result = true;
++
++  scheduler.Spawn([&](Coroutine& co) -> Task {
++    result = co_await CheckPipeReady(co, pipes[0], 50000000ULL);
++
++    close(pipes[0]);
++    close(pipes[1]);
++    co_return;
++  }, "test");
++
++  scheduler.Run();
++  EXPECT_FALSE(result);
++}
++
++TEST(Cpp20WaitTimeout, DataArrivesDuringWait) {
++  Scheduler scheduler;
++  int pipes[2];
++  ASSERT_EQ(0, pipe(pipes));
++
++  bool success = false;
++
++  scheduler.Spawn([&](Coroutine& co) -> Task {
++    // Spawn a helper that writes after a short delay.
++    co_await co.Yield();
++
++    int fd = co_await co.Wait(pipes[0], POLLIN, 500000000ULL);
++    success = (fd == pipes[0]);
++
++    close(pipes[0]);
++    close(pipes[1]);
++    co_return;
++  }, "waiter");
++
++  scheduler.Spawn([&](Coroutine& co) -> Task {
++    co_await co.Sleep(std::chrono::milliseconds(20));
++    char c = 'x';
++    (void)write(pipes[1], &c, 1);
++    co_return;
++  }, "writer");
++
++  scheduler.Run();
++  EXPECT_TRUE(success);
++}
++
+ } // namespace co20
+ 
+ #endif // CO20_HAVE_COROUTINES

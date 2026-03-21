@@ -40,12 +40,13 @@ public:
   mutable std::string added_namespace_;
   mutable std::string package_name_;
   mutable std::string target_name_;
+  mutable RpcStyle rpc_style_ = RpcStyle::kCo;
 };
 
 class Generator {
 public:
   Generator(const google::protobuf::FileDescriptor *file, const std::string &ns,
-            const std::string &pn, const std::string &tn);
+            const std::string &pn, const std::string &tn, RpcStyle rpc_style);
 
 
   void GenerateClientHeaders(std::ostream &os);
@@ -63,6 +64,7 @@ private:
   const std::string &added_namespace_;
   const std::string &package_name_;
   const std::string &target_name_;
+  RpcStyle rpc_style_;
 };
 
 } // namespace subspace

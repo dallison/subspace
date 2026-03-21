@@ -13,13 +13,16 @@
 #include <vector>
 
 namespace subspace {
+
+enum class RpcStyle { kCo, kAsio, kCoro, kCo20 };
+
 class ServiceGenerator {
 public:
   ServiceGenerator(const google::protobuf::ServiceDescriptor *service,
                    const std::string &added_namespace,
-                   const std::string &package_name)
+                   const std::string &package_name, RpcStyle rpc_style)
       : service_(service), added_namespace_(added_namespace),
-        package_name_(package_name) {}
+        package_name_(package_name), rpc_style_(rpc_style) {}
 
   void GenerateClientHeader(std::ostream &os);
   void GenerateClientSource(std::ostream &os);
@@ -41,9 +44,15 @@ private:
   void
   GenerateMethodServerSource(const google::protobuf::MethodDescriptor *method,
                              std::ostream &os);
+
+  std::string RpcNamespace() const;
+  std::string CoroutineParam(bool with_default = false) const;
+  std::string CoroutineArg() const;
+
   const google::protobuf::ServiceDescriptor *service_;
   std::string added_namespace_;
   std::string package_name_;
+  RpcStyle rpc_style_;
 };
 
 } // namespace subspace

@@ -3,17 +3,18 @@ package(default_visibility = ["//visibility:public"])
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 cc_library(
-    name = "rpc_server",
+    name = "rpc_client",
     srcs = [
-        "rpc_server.cc",
+        "rpc_client.cc",
     ],
     hdrs = [
-        "rpc_server.h",
-
+        "rpc_client.h",
     ],
     deps = [
-        "//common:subspace_common",
+        "//asio_rpc/common:async_wait",
+        "//asio_rpc/server:rpc_server",
         "//client:subspace_client",
+        "//common:subspace_common",
         "//proto:subspace_cc_proto",
         "//rpc/common:rpc_common",
         "@abseil-cpp//absl/container:flat_hash_map",
@@ -21,31 +22,25 @@ cc_library(
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings:str_format",
-        "@abseil-cpp//absl/flags:flag",
-        "@abseil-cpp//absl/flags:parse",
-        "@coroutines//co:co",
+        "@boost.asio//:boost.asio",
+        "@boost.coroutine//:boost.coroutine",
     ],
 )
 
 cc_test(
-    name = "server_test",
-    srcs = ["server_test.cc"],
-    data = [
-        "//server:subspace_server",
-    ],
+    name = "client_test",
+    srcs = ["client_test.cc"],
     deps = [
-        ":rpc_server",
-        "//client:subspace_client",
-        "//server",
-        "@abseil-cpp//absl/flags:flag",
-        "@abseil-cpp//absl/flags:parse",
-        "@abseil-cpp//absl/hash:hash_testing",
-        "@abseil-cpp//absl/status",
-        "@abseil-cpp//absl/status:status_matchers",
-        "@abseil-cpp//absl/status:statusor",
-        "@googletest//:gtest",
-        "@coroutines//co:co",
+        ":rpc_client",
+        "//asio_rpc/server:rpc_server",
+        "//client:test_fixture",
         "//rpc/proto:rpc_test_cc_proto",
+        "@abseil-cpp//absl/flags:parse",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@boost.asio//:boost.asio",
+        "@boost.coroutine//:boost.coroutine",
+        "@googletest//:gtest",
     ],
 )
-

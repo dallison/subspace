@@ -16,15 +16,19 @@ def _subspace_rpc_action(
         package_name,
         outputs,
         add_namespace,
-        target_name):
+        target_name,
+        rpc_style):
     # The protobuf compiler allow plugins to get arguments specified in the --plugin_out
     # argument.  The args are passed as a comma separated list of key=value pairs followed
     # by a colon and the output directory.
-    options_and_out_dir = ""
+    options = []
     if add_namespace != "":
-        options_and_out_dir = "--subspace_rpc_out=add_namespace={},package_name={},target_name={}:{}".format(add_namespace, package_name, target_name, out_dir)
-    else:
-        options_and_out_dir = "--subspace_rpc_out=package_name={},target_name={}:{}".format(package_name, target_name, out_dir)
+        options.append("add_namespace={}".format(add_namespace))
+    options.append("package_name={}".format(package_name))
+    options.append("target_name={}".format(target_name))
+    if rpc_style != "co":
+        options.append("rpc_style={}".format(rpc_style))
+    options_and_out_dir = "--subspace_rpc_out={}:{}".format(",".join(options), out_dir)
 
     inputs = depset(direct = direct_sources, transitive = transitive_sources)
 
@@ -152,6 +156,7 @@ def _subspace_rpc_impl(ctx):
         cpp_outputs,
         ctx.attr.add_namespace,
         ctx.attr.target_name,
+        ctx.attr.rpc_style,
     )
 
     return [DefaultInfo(files = depset(outputs))]
@@ -174,6 +179,7 @@ _subspace_rpc_gen = rule(
         "add_namespace": attr.string(),
         "package_name": attr.string(),
         "target_name": attr.string(),
+        "rpc_style": attr.string(default = "co"),
     },
     implementation = _subspace_rpc_impl,
 )
@@ -206,16 +212,18 @@ _split_files = rule(
     implementation = _split_files_impl,
 )
 
-def subspace_rpc_library(name, deps = [], add_namespace = ""):
+def subspace_rpc_library(name, deps = [], add_namespace = "", rpc_style = "co"):
     """
-    Generate a cc_libary for protobuf files specified in deps.
+    Generate a cc_library for protobuf files specified in deps.
 
     Args:
         name: name
         deps: proto_libraries that contain the protobuf files
-        deps: dependencies
-        runtime: label for subspace_rpc runtime.
         add_namespace: add given namespace to the message output
+        rpc_style: RPC coroutine style - "co" (default, co::Coroutine),
+                   "asio" (Boost.Asio stackful yield_context),
+                   "coro" (C++20 Boost.Asio awaitable),
+                   "co20" (C++20 co20::Coroutine)
     """
     all_files = name + "_files"
 
@@ -225,6 +233,7 @@ def subspace_rpc_library(name, deps = [], add_namespace = ""):
         add_namespace = add_namespace,
         package_name = native.package_name(),
         target_name = name,
+        rpc_style = rpc_style,
     )
 
     client_srcs = name + "_client_srcs"
@@ -233,7 +242,6 @@ def subspace_rpc_library(name, deps = [], add_namespace = ""):
         ext = "rpc_client.cc",
         deps = [all_files],
     )
-    client_deps = ["//rpc/client:rpc_client"]
 
     client_hdrs = name + "_client_hdrs"
     _split_files(
@@ -241,6 +249,23 @@ def subspace_rpc_library(name, deps = [], add_namespace = ""):
         ext = "rpc_client.h",
         deps = [all_files],
     )
+
+    if rpc_style == "asio":
+        client_deps = ["//asio_rpc/client:rpc_client"]
+        server_deps = ["//asio_rpc/server:rpc_server"]
+    elif rpc_style == "coro":
+        client_deps = ["//coro_rpc/client:rpc_client"]
+        server_deps = ["//coro_rpc/server:rpc_server"]
+    elif rpc_style == "co20":
+        client_deps = ["//co20_rpc/client:rpc_client"]
+        server_deps = ["//co20_rpc/server:rpc_server"]
+    else:
+        client_deps = ["//rpc/client:rpc_client"]
+        server_deps = ["//rpc/server:rpc_server"]
+
+    copts = []
+    if rpc_style == "coro" or rpc_style == "co20":
+        copts = ["-std=c++20"]
 
     libdeps = []
     for dep in deps:
@@ -253,6 +278,7 @@ def subspace_rpc_library(name, deps = [], add_namespace = ""):
         name = client_name,
         srcs = [client_srcs],
         hdrs = [client_hdrs],
+        copts = copts,
         deps = libdeps + client_deps,
     )
 
@@ -270,12 +296,11 @@ def subspace_rpc_library(name, deps = [], add_namespace = ""):
         deps = [all_files],
     )
 
-    server_deps = ["//rpc/server:rpc_server"]
-
     server_name = name + "_server"
     cc_library(
         name = server_name,
         srcs = [server_srcs],
         hdrs = [server_hdrs],
+        copts = copts,
         deps = libdeps + server_deps,
     )

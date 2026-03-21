@@ -144,10 +144,20 @@ bool CodeGenerator::Generate(
       package_name_ = option.second;
     } else if (option.first == "target_name") {
       target_name_ = option.second;
+    } else if (option.first == "rpc_style") {
+      if (option.second == "asio") {
+        rpc_style_ = RpcStyle::kAsio;
+      } else if (option.second == "coro") {
+        rpc_style_ = RpcStyle::kCoro;
+      } else if (option.second == "co20") {
+        rpc_style_ = RpcStyle::kCo20;
+      } else {
+        rpc_style_ = RpcStyle::kCo;
+      }
     }
   }
 
-  Generator gen(file, added_namespace_, package_name_, target_name_);
+  Generator gen(file, added_namespace_, package_name_, target_name_, rpc_style_);
 
   if (!GenerateClient(file, gen, generator_context, error)) {
     *error = "Failed to generate client code";
@@ -280,11 +290,13 @@ void Generator::CloseNamespace(std::ostream &os) {
 
 Generator::Generator(const google::protobuf::FileDescriptor *file,
                      const std::string &ns, const std::string &pn,
-                     const std::string &tn)
-    : file_(file), added_namespace_(ns), package_name_(pn), target_name_(tn) {
+                     const std::string &tn, RpcStyle rpc_style)
+    : file_(file), added_namespace_(ns), package_name_(pn), target_name_(tn),
+      rpc_style_(rpc_style) {
   for (int i = 0; i < file->service_count(); i++) {
     service_gens_.push_back(std::make_unique<ServiceGenerator>(
-        file->service(i), added_namespace_, std::string{file->package()}));
+        file->service(i), added_namespace_, std::string{file->package()},
+        rpc_style));
   }
 }
 
@@ -295,7 +307,20 @@ void Generator::GenerateClientHeaders(std::ostream &os) {
   path cpp_header(main_base);
   cpp_header.replace_extension(".pb.h");
 
-  os << "#include \"rpc/client/rpc_client.h\"\n";
+  switch (rpc_style_) {
+  case RpcStyle::kCo:
+    os << "#include \"rpc/client/rpc_client.h\"\n";
+    break;
+  case RpcStyle::kAsio:
+    os << "#include \"asio_rpc/client/rpc_client.h\"\n";
+    break;
+  case RpcStyle::kCoro:
+    os << "#include \"coro_rpc/client/rpc_client.h\"\n";
+    break;
+  case RpcStyle::kCo20:
+    os << "#include \"co20_rpc/client/rpc_client.h\"\n";
+    break;
+  }
   os << "#include \"" << cpp_header.string() << "\"\n";
   for (int i = 0; i < file_->dependency_count(); i++) {
     std::string base = GeneratedFilename(package_name_, target_name_,
@@ -336,7 +361,20 @@ void Generator::GenerateServerHeaders(std::ostream &os) {
   path cpp_header(main_base);
   cpp_header.replace_extension(".pb.h");
 
-  os << "#include \"rpc/server/rpc_server.h\"\n";
+  switch (rpc_style_) {
+  case RpcStyle::kCo:
+    os << "#include \"rpc/server/rpc_server.h\"\n";
+    break;
+  case RpcStyle::kAsio:
+    os << "#include \"asio_rpc/server/rpc_server.h\"\n";
+    break;
+  case RpcStyle::kCoro:
+    os << "#include \"coro_rpc/server/rpc_server.h\"\n";
+    break;
+  case RpcStyle::kCo20:
+    os << "#include \"co20_rpc/server/rpc_server.h\"\n";
+    break;
+  }
   os << "#include \"" << cpp_header.string() << "\"\n";
   for (int i = 0; i < file_->dependency_count(); i++) {
     std::string base = GeneratedFilename(package_name_, target_name_,
