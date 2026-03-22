@@ -21,6 +21,7 @@ static MMAP_CALL_COUNT: AtomicI32 = AtomicI32::new(0);
 static OPEN_COUNTDOWN: AtomicI32 = AtomicI32::new(-1);
 static FTRUNCATE_COUNTDOWN: AtomicI32 = AtomicI32::new(-1);
 static FSTAT_COUNTDOWN: AtomicI32 = AtomicI32::new(-1);
+static STAT_COUNTDOWN: AtomicI32 = AtomicI32::new(-1);
 static POLL_COUNTDOWN: AtomicI32 = AtomicI32::new(-1);
 
 fn should_fail(countdown: &AtomicI32) -> bool {
@@ -42,6 +43,7 @@ fn reset_counters() {
     OPEN_COUNTDOWN.store(-1, Ordering::SeqCst);
     FTRUNCATE_COUNTDOWN.store(-1, Ordering::SeqCst);
     FSTAT_COUNTDOWN.store(-1, Ordering::SeqCst);
+    STAT_COUNTDOWN.store(-1, Ordering::SeqCst);
     POLL_COUNTDOWN.store(-1, Ordering::SeqCst);
 }
 
@@ -55,7 +57,7 @@ unsafe extern "C" fn failing_mmap(
 ) -> *mut libc::c_void {
     MMAP_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
     if should_fail(&MMAP_COUNTDOWN) {
-        *libc::__errno_location() = libc::ENOMEM;
+        errno::set_errno(errno::Errno(libc::ENOMEM));
         return libc::MAP_FAILED;
     }
     libc::mmap(addr, len, prot, flags, fd, offset)
@@ -67,10 +69,10 @@ unsafe extern "C" fn failing_open(
     mode: libc::mode_t,
 ) -> libc::c_int {
     if should_fail(&OPEN_COUNTDOWN) {
-        *libc::__errno_location() = libc::EACCES;
+        errno::set_errno(errno::Errno(libc::EACCES));
         return -1;
     }
-    libc::open(path, flags, mode)
+    libc::open(path, flags, mode as libc::c_uint)
 }
 
 unsafe extern "C" fn failing_ftruncate(
@@ -78,7 +80,7 @@ unsafe extern "C" fn failing_ftruncate(
     length: libc::off_t,
 ) -> libc::c_int {
     if should_fail(&FTRUNCATE_COUNTDOWN) {
-        *libc::__errno_location() = libc::ENOSPC;
+        errno::set_errno(errno::Errno(libc::ENOSPC));
         return -1;
     }
     libc::ftruncate(fd, length)
@@ -89,10 +91,21 @@ unsafe extern "C" fn failing_fstat(
     buf: *mut libc::stat,
 ) -> libc::c_int {
     if should_fail(&FSTAT_COUNTDOWN) {
-        *libc::__errno_location() = libc::EBADF;
+        errno::set_errno(errno::Errno(libc::EBADF));
         return -1;
     }
     libc::fstat(fd, buf)
+}
+
+unsafe extern "C" fn failing_stat(
+    path: *const libc::c_char,
+    buf: *mut libc::stat,
+) -> libc::c_int {
+    if should_fail(&STAT_COUNTDOWN) {
+        errno::set_errno(errno::Errno(libc::EACCES));
+        return -1;
+    }
+    libc::stat(path, buf)
 }
 
 unsafe extern "C" fn failing_poll(
@@ -101,7 +114,7 @@ unsafe extern "C" fn failing_poll(
     timeout: libc::c_int,
 ) -> libc::c_int {
     if should_fail(&POLL_COUNTDOWN) {
-        *libc::__errno_location() = libc::EINTR;
+        errno::set_errno(errno::Errno(libc::EINTR));
         return -1;
     }
     libc::poll(fds, nfds, timeout)
@@ -113,6 +126,7 @@ fn make_failing_shim() -> SyscallShim {
         open_fn: failing_open,
         ftruncate_fn: failing_ftruncate,
         fstat_fn: failing_fstat,
+        stat_fn: failing_stat,
         poll_fn: failing_poll,
         ..SyscallShim::default()
     }
@@ -459,16 +473,24 @@ fn shim_countdown_decrements() {
 }
 
 #[test]
-fn fstat_fail_on_subscriber_attach() {
+fn fstat_or_stat_fail_on_subscriber_attach() {
     reset_counters();
-    let client = new_client("fstat_sub");
+    let client = new_client("get_shm_size_sub");
     let opts = PublisherOptions::new().set_slot_size(64).set_num_slots(16);
-    let _pub = client.create_publisher("sf_fstat_sub", &opts).unwrap();
+    let _pub = client.create_publisher("sf_get_shm_size_sub", &opts).unwrap();
 
     let _guard = ScopedShim::install();
-    // fstat is called during subscriber buffer attachment (get_shm_size on Linux).
-    FSTAT_COUNTDOWN.store(0, Ordering::SeqCst);
+    // get_shm_size is called during subscriber buffer attachment.
+    // On Linux it uses fstat; on macOS it uses stat on the shadow file.
+    if cfg!(target_os = "linux") {
+        FSTAT_COUNTDOWN.store(0, Ordering::SeqCst);
+    } else {
+        STAT_COUNTDOWN.store(0, Ordering::SeqCst);
+    }
     let sub_opts = SubscriberOptions::new();
-    let result = client.create_subscriber("sf_fstat_sub", &sub_opts);
-    assert!(result.is_err(), "expected fstat failure during subscriber attach");
+    let result = client.create_subscriber("sf_get_shm_size_sub", &sub_opts);
+    assert!(
+        result.is_err(),
+        "expected get_shm_size (fstat/stat) failure during subscriber attach"
+    );
 }
