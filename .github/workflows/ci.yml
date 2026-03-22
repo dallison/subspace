@@ -10,6 +10,7 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
+          - os: ubuntu-arm
           - os: macos-latest
             bazel_flags: --config=apple_silicon
 
