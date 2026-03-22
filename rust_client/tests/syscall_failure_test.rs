@@ -24,6 +24,20 @@ static FSTAT_COUNTDOWN: AtomicI32 = AtomicI32::new(-1);
 static STAT_COUNTDOWN: AtomicI32 = AtomicI32::new(-1);
 static POLL_COUNTDOWN: AtomicI32 = AtomicI32::new(-1);
 
+/// Set `errno` for the current thread (replaces the `errno` crate for Bazel compatibility).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+unsafe fn set_thread_errno(e: libc::c_int) {
+    *libc::__errno_location() = e;
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "linux", target_os = "android")),
+))]
+unsafe fn set_thread_errno(e: libc::c_int) {
+    *libc::__error() = e;
+}
+
 fn should_fail(countdown: &AtomicI32) -> bool {
     let val = countdown.load(Ordering::SeqCst);
     if val < 0 {
@@ -57,7 +71,7 @@ unsafe extern "C" fn failing_mmap(
 ) -> *mut libc::c_void {
     MMAP_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
     if should_fail(&MMAP_COUNTDOWN) {
-        errno::set_errno(errno::Errno(libc::ENOMEM));
+        set_thread_errno(libc::ENOMEM);
         return libc::MAP_FAILED;
     }
     libc::mmap(addr, len, prot, flags, fd, offset)
@@ -69,7 +83,7 @@ unsafe extern "C" fn failing_open(
     mode: libc::mode_t,
 ) -> libc::c_int {
     if should_fail(&OPEN_COUNTDOWN) {
-        errno::set_errno(errno::Errno(libc::EACCES));
+        set_thread_errno(libc::EACCES);
         return -1;
     }
     libc::open(path, flags, mode as libc::c_uint)
@@ -80,7 +94,7 @@ unsafe extern "C" fn failing_ftruncate(
     length: libc::off_t,
 ) -> libc::c_int {
     if should_fail(&FTRUNCATE_COUNTDOWN) {
-        errno::set_errno(errno::Errno(libc::ENOSPC));
+        set_thread_errno(libc::ENOSPC);
         return -1;
     }
     libc::ftruncate(fd, length)
@@ -91,7 +105,7 @@ unsafe extern "C" fn failing_fstat(
     buf: *mut libc::stat,
 ) -> libc::c_int {
     if should_fail(&FSTAT_COUNTDOWN) {
-        errno::set_errno(errno::Errno(libc::EBADF));
+        set_thread_errno(libc::EBADF);
         return -1;
     }
     libc::fstat(fd, buf)
@@ -102,7 +116,7 @@ unsafe extern "C" fn failing_stat(
     buf: *mut libc::stat,
 ) -> libc::c_int {
     if should_fail(&STAT_COUNTDOWN) {
-        errno::set_errno(errno::Errno(libc::EACCES));
+        set_thread_errno(libc::EACCES);
         return -1;
     }
     libc::stat(path, buf)
@@ -114,7 +128,7 @@ unsafe extern "C" fn failing_poll(
     timeout: libc::c_int,
 ) -> libc::c_int {
     if should_fail(&POLL_COUNTDOWN) {
-        errno::set_errno(errno::Errno(libc::EINTR));
+        set_thread_errno(libc::EINTR);
         return -1;
     }
     libc::poll(fds, nfds, timeout)
