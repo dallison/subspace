@@ -33,22 +33,12 @@ jobs:
             --verbose_failures \
             ${{ matrix.bazel_flags }}
 
-      - name: Run tests (excluding large)
+      - name: Run tests
         run: |
           bazel test //... \
-            --test_tag_filters=-large \
             --verbose_failures \
             --test_output=errors \
             ${{ matrix.bazel_flags }}
-
-        # Just separate these out so they don't run if some smaller tests fail.
-      - name: Run large tests
-        run: |
-          bazel test //... \
-            --test_tag_filters=large \
-            --verbose_failures \
-            --test_output=errors \
-            ${{ matrix.bazel_flags }} \
 
       - name: Upload Bazel test logs
         uses: actions/upload-artifact@v7
