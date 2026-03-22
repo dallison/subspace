@@ -1,0 +1,66 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+
+cc_library(
+    name = "shadow_lib",
+    srcs = [
+        "shadow.cc",
+    ],
+    hdrs = [
+        "shadow.h",
+    ],
+    deps = [
+        "//proto:subspace_cc_proto",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings:str_format",
+        "@coroutines//:co",
+        "@cpp_toolbelt//toolbelt",
+    ],
+)
+
+cc_binary(
+    name = "subspace_shadow",
+    srcs = [
+        "main.cc",
+    ],
+    deps = [
+        ":shadow_lib",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/flags:parse",
+    ],
+    linkopts = select({
+        "//:macos_x86_64": [],
+        "//:macos_arm64": [],
+        "//:macos_default": [],
+        "//conditions:default": ["-lrt"],
+    }),
+)
+
+cc_test(
+    name = "shadow_test",
+    size = "small",
+    srcs = ["shadow_test.cc"],
+    copts = [
+        "-Wno-missing-field-initializers",
+        "-Wno-unused-parameter",
+    ],
+    deps = [
+        ":shadow_lib",
+        "//client:subspace_client",
+        "//server",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@abseil-cpp//absl/status:statusor",
+        "@googletest//:gtest_main",
+        "@coroutines//:co",
+    ],
+    linkopts = select({
+        "//:macos_x86_64": [],
+        "//:macos_arm64": [],
+        "//:macos_default": [],
+        "//conditions:default": ["-lrt", "-ldl"],
+    }),
+)

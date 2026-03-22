@@ -81,6 +81,17 @@ struct PublisherOptions {
 
   bool IsBridge() const { return bridge; }
 
+  // Adds support for external tunnel processes that need to know whether
+  // messages are locally or remotely generated.  When set, the cross-machine
+  // flag is written into the MessagePrefix and reliable channel activation
+  // is skipped (the existing local publisher will have already activated).
+  PublisherOptions &SetForTunnel(bool v) {
+    for_tunnel = v;
+    return *this;
+  }
+
+  bool ForTunnel() const { return for_tunnel; }
+
   PublisherOptions &SetMux(std::string m) {
     mux = std::move(m);
     return *this;
@@ -146,6 +157,7 @@ struct PublisherOptions {
   bool local = false;
   bool reliable = false;
   bool bridge = false;
+  bool for_tunnel = false;
   bool fixed_size = false;
   std::string type;
   bool activate =
@@ -199,6 +211,14 @@ struct SubscriberOptions {
   }
   bool IsBridge() const { return bridge; }
 
+  // Adds support for external tunnel processes that need to know whether
+  // messages are locally or remotely generated.
+  SubscriberOptions &SetForTunnel(bool v) {
+    for_tunnel = v;
+    return *this;
+  }
+  bool ForTunnel() const { return for_tunnel; }
+
   SubscriberOptions &SetMux(std::string m) {
     mux = std::move(m);
     return *this;
@@ -251,6 +271,7 @@ struct SubscriberOptions {
 
   bool reliable = false;
   bool bridge = false;
+  bool for_tunnel = false;
   std::string type;
   int max_active_messages = 1;
   bool log_dropped_messages = true;

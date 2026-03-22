@@ -3,6 +3,7 @@
 // See LICENSE file for licensing information.
 
 #include "common/channel.h"
+#include "common/syscall_shim.h"
 #include "absl/strings/str_format.h"
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
@@ -37,8 +38,9 @@ static absl::flat_hash_map<void *, size_t> *mapped_regions;
 static std::mutex *region_lock;
 #endif
 
-void *MapMemory(int fd, size_t size, int prot, const char *purpose) {
-  void *p = mmap(NULL, size, prot, MAP_SHARED, fd, 0);
+void *MapMemory(int fd, size_t size, int prot,
+                [[maybe_unused]] const char *purpose) {
+  void *p = GetSyscallShim().mmap_fn(NULL, size, prot, MAP_SHARED, fd, 0);
 #if SHOW_MMAPS
   printf("%d: mapping %s with size %zd: %p -> %p\n", getpid(), purpose, size, p,
          reinterpret_cast<char *>(p) + size);
@@ -58,7 +60,8 @@ void *MapMemory(int fd, size_t size, int prot, const char *purpose) {
   return p;
 }
 
-void UnmapMemory(void *p, size_t size, const char *purpose) {
+void UnmapMemory(void *p, size_t size,
+                 [[maybe_unused]] const char *purpose) {
 #if SHOW_MMAPS
   printf("%d: unmapping %s with size %zd: %p -> %p\n", getpid(), purpose, size,
          p, reinterpret_cast<char *>(p) + size);
@@ -80,7 +83,9 @@ void UnmapMemory(void *p, size_t size, const char *purpose) {
     return;
   }
 #endif
-  munmap(p, size);
+  if (GetSyscallShim().munmap_fn(p, size) != 0) {
+    fprintf(stderr, "munmap(%p, %zu) failed: %s\n", p, size, strerror(errno));
+  }
 #if !NDEBUG && DEBUG_MMAPS
 
   mapped_regions->erase(p);
@@ -180,6 +185,7 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
     uint64_t new_ref = BuildRefsBitField(ref_ord, ref_vchan_id, retired_refs) |
                        (new_reliable_refs << kReliableRefCountShift) | new_refs;
     if (slot->refs.compare_exchange_weak(ref, new_ref,
+                                         std::memory_order_acq_rel,
                                          std::memory_order_relaxed)) {
       // std::string details = absl::StrFormat(
       //   "%d: AtomicIncRefCount: %s slot %d ordinal %d retired_refs: %d NumSubscribers: %d retire: %d\n", getpid(), Name(), slot->id, ordinal, retired_refs, NumSubscribers(ref_vchan_id), retire);
@@ -322,7 +328,7 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
 absl::StatusOr<std::string>
 Channel::PosixSharedMemoryName(const std::string &shadow_file) {
   struct stat st;
-  int e = ::stat(shadow_file.c_str(), &st);
+  int e = GetSyscallShim().stat_fn(shadow_file.c_str(), &st);
   if (e == -1) {
     return absl::InternalError(
         absl::StrFormat("Failed to determine Posix shm name for %s: %s",

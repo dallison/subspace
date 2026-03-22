@@ -266,7 +266,9 @@ static void Open(std::shared_ptr<subspace::RpcServer> server,
           ctx.session_id = response.open().session_id();
           return;
         }
+        continue;
       }
+      break;
     }
   }
 }
@@ -302,7 +304,9 @@ static void Close(std::shared_ptr<subspace::RpcServer> server,
                     << std::endl;
           return;
         }
+        continue;
       }
+      break;
     }
   }
 }

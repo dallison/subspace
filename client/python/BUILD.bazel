@@ -10,13 +10,9 @@ pybind_extension(
 
 py_test(
     name = "client_test",
-    srcs = ["client_test.py",],
-    data = [
-        "//server:subspace_server",
-    ],
+    srcs = ["client_test.py"],
     deps = [
         ":subspace",
-        "@rules_python//python/runfiles",
+        "//server/python:subspace_server",
     ],
 )
-
