@@ -12,7 +12,13 @@ static int RealOpen(const char *path, int flags, mode_t mode) {
   return ::open(path, flags, mode);
 }
 
-SyscallShim::SyscallShim() : open_fn(RealOpen) {}
+// Wrapper for ::shm_open which on Linux is variadic (int shm_open(const char*,
+// int, ...)) and cannot be stored directly as a typed 3-param function pointer.
+static int RealShmOpen(const char *name, int oflag, mode_t mode) {
+  return ::shm_open(name, oflag, mode);
+}
+
+SyscallShim::SyscallShim() : open_fn(RealOpen), shm_open_fn(RealShmOpen) {}
 
 static SyscallShim default_shim;
 static thread_local SyscallShim *active_shim = &default_shim;

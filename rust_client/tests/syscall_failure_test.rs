@@ -55,7 +55,7 @@ unsafe extern "C" fn failing_mmap(
 ) -> *mut libc::c_void {
     MMAP_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
     if should_fail(&MMAP_COUNTDOWN) {
-        *libc::__errno_location() = libc::ENOMEM;
+        errno::set_errno(errno::Errno(libc::ENOMEM));
         return libc::MAP_FAILED;
     }
     libc::mmap(addr, len, prot, flags, fd, offset)
@@ -67,10 +67,10 @@ unsafe extern "C" fn failing_open(
     mode: libc::mode_t,
 ) -> libc::c_int {
     if should_fail(&OPEN_COUNTDOWN) {
-        *libc::__errno_location() = libc::EACCES;
+        errno::set_errno(errno::Errno(libc::EACCES));
         return -1;
     }
-    libc::open(path, flags, mode)
+    libc::open(path, flags, mode as libc::c_uint)
 }
 
 unsafe extern "C" fn failing_ftruncate(
@@ -78,7 +78,7 @@ unsafe extern "C" fn failing_ftruncate(
     length: libc::off_t,
 ) -> libc::c_int {
     if should_fail(&FTRUNCATE_COUNTDOWN) {
-        *libc::__errno_location() = libc::ENOSPC;
+        errno::set_errno(errno::Errno(libc::ENOSPC));
         return -1;
     }
     libc::ftruncate(fd, length)
@@ -89,7 +89,7 @@ unsafe extern "C" fn failing_fstat(
     buf: *mut libc::stat,
 ) -> libc::c_int {
     if should_fail(&FSTAT_COUNTDOWN) {
-        *libc::__errno_location() = libc::EBADF;
+        errno::set_errno(errno::Errno(libc::EBADF));
         return -1;
     }
     libc::fstat(fd, buf)
@@ -101,7 +101,7 @@ unsafe extern "C" fn failing_poll(
     timeout: libc::c_int,
 ) -> libc::c_int {
     if should_fail(&POLL_COUNTDOWN) {
-        *libc::__errno_location() = libc::EINTR;
+        errno::set_errno(errno::Errno(libc::EINTR));
         return -1;
     }
     libc::poll(fds, nfds, timeout)

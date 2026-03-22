@@ -408,6 +408,7 @@ dependencies = [
 name = "subspace-client"
 version = "2.2.0"
 dependencies = [
+ "errno",
  "libc",
  "log",
  "nix",
