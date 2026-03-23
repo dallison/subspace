@@ -53,4 +53,16 @@ crate.from_cargo(
     cargo_lockfile = "//rust_client:Cargo.lock",
     manifests = ["//rust_client:Cargo.toml"],
 )
+# cargo-bazel maps getrandom's macOS libc dep to aarch64-apple-darwin only; x86_64 (Intel) Darwin
+# falls through to empty deps but the same sources still use libc (getentropy, errno).
+crate.annotation_select(
+    crate = "getrandom",
+    repositories = ["crates"],
+    triples = [
+        "x86_64-apple-darwin",
+        "i686-apple-darwin",
+    ],
+    version = "0.4.1",
+    deps = ["@crates__libc-0.2.182//:libc"],
+)
 use_repo(crate, "crates")
