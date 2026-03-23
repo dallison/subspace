@@ -26,7 +26,7 @@ struct SyscallShim {
   int (*open_fn)(const char *, int, mode_t) = nullptr;
   int (*close_fn)(int) = ::close;
   int (*ftruncate_fn)(int, off_t) = ::ftruncate;
-  int (*shm_open_fn)(const char *, int, mode_t) = ::shm_open;
+  int (*shm_open_fn)(const char *, int, mode_t) = nullptr;
   int (*shm_unlink_fn)(const char *) = ::shm_unlink;
   int (*poll_fn)(struct pollfd *, nfds_t, int) = ::poll;
   int (*stat_fn)(const char *, struct stat *) = ::stat;

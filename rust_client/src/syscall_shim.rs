@@ -15,7 +15,7 @@ use std::ptr::NonNull;
 
 // `libc::open` is variadic and cannot be stored as a function pointer.
 unsafe extern "C" fn real_open(path: *const libc::c_char, flags: libc::c_int, mode: libc::mode_t) -> libc::c_int {
-    libc::open(path, flags, mode)
+    libc::open(path, flags, mode as libc::c_uint)
 }
 
 pub type MmapFn =
@@ -230,7 +230,7 @@ pub fn shim_shm_open(
     // shm_open on macOS/BSD uses a name that starts with '/'.
     // We call through libc directly here since shm_open is not variadic.
     let c_name = std::ffi::CString::new(name).map_err(|_| nix::Error::EINVAL)?;
-    let ret = unsafe { libc::shm_open(c_name.as_ptr(), oflag.bits(), mode.bits()) };
+    let ret = unsafe { libc::shm_open(c_name.as_ptr(), oflag.bits(), mode.bits() as libc::c_uint) };
     if ret < 0 {
         Err(nix::Error::last())
     } else {

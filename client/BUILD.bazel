@@ -150,6 +150,7 @@ cc_test(
     data = [
         "//server:subspace_server",
     ],
+    tags = ["manual"], # Seems to have a ~50% flake rate.
     deps = [
         ":subspace_client",
         "//server",

@@ -83,6 +83,32 @@ Then run each in a separate terminal:
 
 You can run tests directly using `bazel run` or `bazel test`. The `bazel run` command will build and execute the test in one step, while `bazel test` runs tests in test mode (useful for CI/CD).
 
+#### macOS: `xcrun` / `DEVELOPER_DIR` errors
+
+If C++ compile actions fail with `xcrun: error: invalid DEVELOPER_DIR path (/Library/Developer/CommandLineTools), missing xcrun`, the active developer directory does not contain a usable toolchain (often an incomplete Command Line Tools install, or `DEVELOPER_DIR` set incorrectly in your shell, IDE, or CI).
+
+1. Prefer full **Xcode** and point the active developer dir at it:
+
+   ```bash
+   sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+   ```
+
+2. Or install/repair **Command Line Tools** so `xcrun` exists under that path:
+
+   ```bash
+   xcode-select --install
+   ```
+
+3. If you export `DEVELOPER_DIR` yourself (e.g. in `~/.zshrc`), remove it or set it to match `xcode-select -p`.
+
+4. Optional: after (1), you can force Bazel actions to use Xcode with a **user** `.bazelrc` line:
+
+   ```bash
+   build --action_env=DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+   ```
+
+   Adjust the path if Xcode is installed elsewhere.
+
 **Note:** All tests automatically start a subspace server in a separate thread, so you don't need to run the server separately. The tests handle server lifecycle management internally.
 
 #### client_test
