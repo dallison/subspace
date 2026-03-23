@@ -14,7 +14,7 @@
 
 namespace subspace {
 
-enum class RpcStyle { kCo, kAsio, kCoro, kCo20 };
+enum class RpcStyle { kCo, kAsio, kCoro, kCo20, kRust };
 
 class ServiceGenerator {
 public:
@@ -29,6 +29,9 @@ public:
 
   void GenerateServerHeader(std::ostream &os);
   void GenerateServerSource(std::ostream &os);
+
+  void GenerateRustClientFile(std::ostream &os);
+  void GenerateRustServerFile(std::ostream &os);
   
 private:
   void GenerateServerMethodRegistrations(std::ostream &os);
@@ -48,6 +51,7 @@ private:
   std::string RpcNamespace() const;
   std::string CoroutineParam(bool with_default = false) const;
   std::string CoroutineArg() const;
+  static std::string ToSnakeCase(absl::string_view name);
 
   const google::protobuf::ServiceDescriptor *service_;
   std::string added_namespace_;

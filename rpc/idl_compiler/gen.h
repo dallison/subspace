@@ -36,6 +36,10 @@ public:
     std::string *error) const;
   bool GenerateServer(const google::protobuf::FileDescriptor *file, Generator& gen, google::protobuf::compiler::GeneratorContext *generator_context,
     std::string *error) const;
+  bool GenerateRustClient(const google::protobuf::FileDescriptor *file, Generator& gen, google::protobuf::compiler::GeneratorContext *generator_context,
+    std::string *error) const;
+  bool GenerateRustServer(const google::protobuf::FileDescriptor *file, Generator& gen, google::protobuf::compiler::GeneratorContext *generator_context,
+    std::string *error) const;
 
   mutable std::string added_namespace_;
   mutable std::string package_name_;
@@ -54,6 +58,9 @@ public:
 
    void GenerateServerHeaders(std::ostream &os);
   void GenerateServerSources(std::ostream &os);
+
+  void GenerateRustClientFile(std::ostream &os);
+  void GenerateRustServerFile(std::ostream &os);
 
 private:
   void OpenNamespace(std::ostream &os);
