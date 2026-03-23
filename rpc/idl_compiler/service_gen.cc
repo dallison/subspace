@@ -3,12 +3,32 @@
 // See LICENSE file for licensing information.
 
 #include "rpc/idl_compiler/service_gen.h"
+#include "absl/strings/ascii.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_replace.h"
 #include <algorithm>
 #include <cassert>
 
 namespace subspace {
+
+std::string ServiceGenerator::ToSnakeCase(absl::string_view name) {
+  std::string result;
+  for (size_t i = 0; i < name.size(); i++) {
+    char c = name[i];
+    if (std::isupper(c)) {
+      if (i > 0 && !std::isupper(name[i - 1])) {
+        result += '_';
+      } else if (i > 0 && i + 1 < name.size() && std::isupper(name[i - 1]) &&
+                 std::islower(name[i + 1])) {
+        result += '_';
+      }
+      result += static_cast<char>(std::tolower(c));
+    } else {
+      result += c;
+    }
+  }
+  return result;
+}
 
 std::string ServiceGenerator::RpcNamespace() const {
   switch (rpc_style_) {
@@ -20,6 +40,8 @@ std::string ServiceGenerator::RpcNamespace() const {
     return "subspace::coro_rpc";
   case RpcStyle::kCo20:
     return "subspace::co20_rpc";
+  case RpcStyle::kRust:
+    return "subspace_rpc";
   }
   return "subspace";
 }
@@ -32,6 +54,7 @@ std::string ServiceGenerator::CoroutineParam(bool with_default) const {
     return "boost::asio::yield_context yield";
   case RpcStyle::kCoro:
   case RpcStyle::kCo20:
+  case RpcStyle::kRust:
     return "";
   }
   return "";
@@ -45,6 +68,7 @@ std::string ServiceGenerator::CoroutineArg() const {
     return "yield";
   case RpcStyle::kCoro:
   case RpcStyle::kCo20:
+  case RpcStyle::kRust:
     return "";
   }
   return "";
@@ -725,5 +749,198 @@ void ServiceGenerator::GenerateMethodServerHeader(
 void ServiceGenerator::GenerateMethodServerSource(
     [[maybe_unused]] const google::protobuf::MethodDescriptor *method,
     [[maybe_unused]] std::ostream &os) {}
+
+// ---------------------------------------------------------------------------
+// Rust code generation
+// ---------------------------------------------------------------------------
+
+void ServiceGenerator::GenerateRustClientFile(std::ostream &os) {
+  const std::string service_name(service_->name());
+  const std::string client_name = service_name + "Client";
+
+  os << "pub struct " << client_name << " {\n";
+  os << "    client: RpcClient,\n";
+  os << "}\n\n";
+
+  os << "impl " << client_name << " {\n";
+
+  // Method ID constants.
+  for (int i = 0; i < service_->method_count(); i++) {
+    const auto *method = service_->method(i);
+    os << "    const "
+       << absl::AsciiStrToUpper(ToSnakeCase(method->name())) << "_ID"
+       << ": i32 = " << i << ";\n";
+  }
+  os << "\n";
+
+  // create()
+  os << "    pub async fn create(client_id: u64, subspace_socket: &str) -> Result<Self> {\n";
+  os << "        let mut client = RpcClient::new(client_id, subspace_socket, \""
+     << service_name << "\");\n";
+  os << "        client.open(None).await?;\n";
+  os << "        Ok(Self { client })\n";
+  os << "    }\n\n";
+
+  // create_with_timeout()
+  os << "    pub async fn create_with_timeout(client_id: u64, subspace_socket: &str, timeout: Duration) -> Result<Self> {\n";
+  os << "        let mut client = RpcClient::new(client_id, subspace_socket, \""
+     << service_name << "\");\n";
+  os << "        client.open(Some(timeout)).await?;\n";
+  os << "        Ok(Self { client })\n";
+  os << "    }\n\n";
+
+  // close()
+  os << "    pub async fn close(&mut self) -> Result<()> {\n";
+  os << "        self.client.close(None).await\n";
+  os << "    }\n\n";
+
+  // close_with_timeout()
+  os << "    pub async fn close_with_timeout(&mut self, timeout: Duration) -> Result<()> {\n";
+  os << "        self.client.close(Some(timeout)).await\n";
+  os << "    }\n\n";
+
+  // Per-method.
+  for (int i = 0; i < service_->method_count(); i++) {
+    const auto *method = service_->method(i);
+    const std::string rust_method = ToSnakeCase(method->name());
+    const std::string input_type(method->input_type()->name());
+    const std::string output_type(method->output_type()->name());
+    const std::string id_const =
+        absl::AsciiStrToUpper(ToSnakeCase(method->name())) + "_ID";
+
+    if (method->server_streaming()) {
+      os << "    pub async fn " << rust_method
+         << "(&self, request: &" << input_type
+         << ", timeout: Option<Duration>) -> Result<ResponseStream<"
+         << output_type << ">> {\n";
+      os << "        self.client.call_server_streaming(Self::" << id_const
+         << ", request, timeout).await\n";
+      os << "    }\n\n";
+    } else {
+      os << "    pub async fn " << rust_method
+         << "(&self, request: &" << input_type
+         << ", timeout: Option<Duration>) -> Result<"
+         << output_type << "> {\n";
+      os << "        self.client.call(Self::" << id_const
+         << ", request, timeout).await\n";
+      os << "    }\n\n";
+    }
+  }
+
+  os << "}\n\n";
+}
+
+void ServiceGenerator::GenerateRustServerFile(std::ostream &os) {
+  const std::string service_name(service_->name());
+  const std::string handler_name = service_name + "Handler";
+  const std::string server_name = service_name + "Server";
+
+  // Handler trait.
+  os << "#[async_trait::async_trait]\n";
+  os << "pub trait " << handler_name << ": Send + Sync + 'static {\n";
+  for (int i = 0; i < service_->method_count(); i++) {
+    const auto *method = service_->method(i);
+    const std::string rust_method = ToSnakeCase(method->name());
+    const std::string input_type(method->input_type()->name());
+    const std::string output_type(method->output_type()->name());
+
+    if (method->server_streaming()) {
+      os << "    async fn " << rust_method << "(&self, request: "
+         << input_type << ", writer: TypedStreamWriter<"
+         << output_type << ">) -> Result<()>;\n";
+    } else {
+      os << "    async fn " << rust_method << "(&self, request: "
+         << input_type << ") -> Result<" << output_type << ">;\n";
+    }
+  }
+  os << "}\n\n";
+
+  // Per-method handler adapter structs (bridges trait methods to MethodHandler).
+  for (int i = 0; i < service_->method_count(); i++) {
+    const auto *method = service_->method(i);
+    const std::string method_name_pascal(method->name());
+    const std::string input_type(method->input_type()->name());
+    const std::string output_type(method->output_type()->name());
+    const std::string adapter_name = method_name_pascal + "Adapter";
+
+    if (method->server_streaming()) {
+      os << "struct " << adapter_name << "<H: " << handler_name << "> {\n";
+      os << "    handler: Arc<H>,\n";
+      os << "}\n\n";
+
+      os << "#[async_trait::async_trait]\n";
+      os << "impl<H: " << handler_name << "> StreamingMethodHandler for "
+         << adapter_name << "<H> {\n";
+      os << "    async fn handle(&self, request: prost_types::Any, writer: StreamWriter) -> Result<()> {\n";
+      os << "        let req: " << input_type
+         << " = subspace_rpc::async_io::unpack_any(&request)?;\n";
+      os << "        let typed_writer = TypedStreamWriter::new(writer, \""
+         << "type.googleapis.com/" << package_name_ << "." << output_type
+         << "\".to_string());\n";
+      os << "        self.handler." << ToSnakeCase(method->name())
+         << "(req, typed_writer).await\n";
+      os << "    }\n";
+      os << "}\n\n";
+    } else {
+      os << "struct " << adapter_name << "<H: " << handler_name << "> {\n";
+      os << "    handler: Arc<H>,\n";
+      os << "}\n\n";
+
+      os << "#[async_trait::async_trait]\n";
+      os << "impl<H: " << handler_name << "> MethodHandler for "
+         << adapter_name << "<H> {\n";
+      os << "    async fn handle(&self, request: prost_types::Any) -> Result<prost_types::Any> {\n";
+      os << "        let req: " << input_type
+         << " = subspace_rpc::async_io::unpack_any(&request)?;\n";
+      os << "        let resp = self.handler." << ToSnakeCase(method->name())
+         << "(req).await?;\n";
+      os << "        Ok(subspace_rpc::async_io::pack_any(&resp, \""
+         << "type.googleapis.com/" << package_name_ << "." << output_type
+         << "\"))\n";
+      os << "    }\n";
+      os << "}\n\n";
+    }
+  }
+
+  // Server struct.
+  os << "pub struct " << server_name << " {\n";
+  os << "    server: RpcServer,\n";
+  os << "}\n\n";
+
+  os << "impl " << server_name << " {\n";
+
+  // new()
+  os << "    pub fn new<H: " << handler_name << ">(subspace_socket: &str, handler: Arc<H>) -> Self {\n";
+  os << "        let mut server = RpcServer::new(subspace_socket, \""
+     << service_name << "\");\n";
+
+  for (int i = 0; i < service_->method_count(); i++) {
+    const auto *method = service_->method(i);
+    const std::string adapter_name = std::string(method->name()) + "Adapter";
+    if (method->server_streaming()) {
+      os << "        server.register_streaming_method(\""
+         << method->name() << "\", " << i
+         << ", Arc::new(" << adapter_name
+         << " { handler: handler.clone() }), MethodOptions { id: " << i
+         << ", ..Default::default() });\n";
+    } else {
+      os << "        server.register_method(\""
+         << method->name() << "\", " << i
+         << ", Arc::new(" << adapter_name
+         << " { handler: handler.clone() }), MethodOptions { id: " << i
+         << ", ..Default::default() });\n";
+    }
+  }
+
+  os << "        Self { server }\n";
+  os << "    }\n\n";
+
+  // run()
+  os << "    pub async fn run(&self, shutdown: tokio::sync::watch::Receiver<bool>) -> Result<()> {\n";
+  os << "        self.server.run(shutdown).await\n";
+  os << "    }\n";
+
+  os << "}\n\n";
+}
 
 } // namespace subspace

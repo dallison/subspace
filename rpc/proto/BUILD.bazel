@@ -1,6 +1,6 @@
 load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
 load("@protobuf//bazel:proto_library.bzl", "proto_library")
-load("//:rpc/subspace_rpc_library.bzl", "subspace_rpc_library")
+load("//:rpc/subspace_rpc_library.bzl", "subspace_rpc_library", "subspace_rpc_rust_library")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -20,6 +20,17 @@ cc_proto_library(
 
 subspace_rpc_library(
     name = "rpc_test_subspace_rpc",
+    deps = [
+        ":rpc_test_proto",
+    ],
+)
+
+# Generates Rust service stubs:
+# :rpc_test_rust_rpc_files - all .rs files
+# :rpc_test_rust_rpc_client - client .rs files
+# :rpc_test_rust_rpc_server - server .rs files
+subspace_rpc_rust_library(
+    name = "rpc_test_rust_rpc",
     deps = [
         ":rpc_test_proto",
     ],

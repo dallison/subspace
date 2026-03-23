@@ -212,6 +212,146 @@ _split_files = rule(
     implementation = _split_files_impl,
 )
 
+RustRpcInfo = provider(fields = ["direct_sources", "transitive_sources", "rs_outputs", "cpp_outputs"])
+
+def _subspace_rpc_rust_aspect_impl(target, _ctx):
+    direct_sources = []
+    transitive_sources = depset()
+    rs_outputs = []
+    cpp_outputs = []
+
+    def add_output(base):
+        rs_outputs.append(paths.replace_extension(base, ".subspace.rpc_client.rs"))
+        rs_outputs.append(paths.replace_extension(base, ".subspace.rpc_server.rs"))
+        cpp_outputs.append(paths.replace_extension(base, ".subspace.rpc_client.cc"))
+        cpp_outputs.append(paths.replace_extension(base, ".subspace.rpc_client.h"))
+        cpp_outputs.append(paths.replace_extension(base, ".subspace.rpc_server.cc"))
+        cpp_outputs.append(paths.replace_extension(base, ".subspace.rpc_server.h"))
+
+    if ProtoInfo in target:
+        transitive_sources = target[ProtoInfo].transitive_sources
+        for s in transitive_sources.to_list():
+            direct_sources.append(s)
+            file_path = s.short_path
+            if "_virtual_imports" in file_path:
+                v = file_path.split("_virtual_imports/")
+                file_path = v[1].split("/", 1)[1]
+            add_output(file_path)
+
+    return [RustRpcInfo(
+        direct_sources = direct_sources,
+        transitive_sources = transitive_sources,
+        rs_outputs = rs_outputs,
+        cpp_outputs = cpp_outputs,
+    )]
+
+subspace_rpc_rust_aspect = aspect(
+    attr_aspects = ["deps"],
+    provides = [RustRpcInfo],
+    implementation = _subspace_rpc_rust_aspect_impl,
+)
+
+def _subspace_rpc_rust_impl(ctx):
+    all_action_outputs = []
+    rs_outputs = []
+    direct_sources = []
+    transitive_sources = []
+
+    for dep in ctx.attr.deps:
+        info = dep[RustRpcInfo]
+
+        for out in info.rs_outputs:
+            out_name = ctx.attr.target_name + "/" + out
+            out_file = ctx.actions.declare_file(out_name)
+            all_action_outputs.append(out_file)
+            rs_outputs.append(out_file)
+
+        for out in info.cpp_outputs:
+            out_name = ctx.attr.target_name + "/" + out
+            out_file = ctx.actions.declare_file(out_name)
+            all_action_outputs.append(out_file)
+
+        direct_sources += info.direct_sources
+        transitive_sources.append(info.transitive_sources)
+
+    _subspace_rpc_action(
+        ctx,
+        direct_sources,
+        transitive_sources,
+        ctx.bin_dir.path,
+        ctx.attr.package_name,
+        all_action_outputs,
+        ctx.attr.add_namespace,
+        ctx.attr.target_name,
+        "rust",
+    )
+
+    return [DefaultInfo(files = depset(rs_outputs))]
+
+_subspace_rpc_rust_gen = rule(
+    attrs = {
+        "protoc": attr.label(
+            executable = True,
+            default = Label("@protobuf//:protoc"),
+            cfg = "exec",
+        ),
+        "subspace_rpc_plugin": attr.label(
+            executable = True,
+            default = Label("//rpc/idl_compiler:subspace_rpc"),
+            cfg = "exec",
+        ),
+        "deps": attr.label_list(
+            aspects = [subspace_rpc_rust_aspect],
+        ),
+        "add_namespace": attr.string(),
+        "package_name": attr.string(),
+        "target_name": attr.string(),
+    },
+    implementation = _subspace_rpc_rust_impl,
+)
+
+def subspace_rpc_rust_library(name, deps = [], add_namespace = ""):
+    """
+    Generate Rust service stubs from proto_library targets.
+
+    Produces .rs files for client and server stubs that can be included
+    in a Rust crate via include!().  The generated files use subspace_rpc::
+    import paths.
+
+    Creates targets:
+        :{name}_files - all generated Rust source files
+        :{name}_client - just the client .rs files
+        :{name}_server - just the server .rs files
+
+    Args:
+        name: name
+        deps: proto_library targets containing the protobuf files
+        add_namespace: add given namespace to the generated output
+    """
+    all_files = name + "_files"
+
+    _subspace_rpc_rust_gen(
+        name = all_files,
+        deps = deps,
+        add_namespace = add_namespace,
+        package_name = native.package_name(),
+        target_name = name,
+    )
+
+    client_name = name + "_client"
+    _split_files(
+        name = client_name,
+        ext = "rpc_client.rs",
+        deps = [all_files],
+    )
+
+    server_name = name + "_server"
+    _split_files(
+        name = server_name,
+        ext = "rpc_server.rs",
+        deps = [all_files],
+    )
+
 def subspace_rpc_library(name, deps = [], add_namespace = "", rpc_style = "co"):
     """
     Generate a cc_library for protobuf files specified in deps.
