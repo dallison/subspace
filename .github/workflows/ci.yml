@@ -5,6 +5,7 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60 # liberal upper bound to protect against tests stalling
     strategy:
       fail-fast: false
       matrix:
@@ -45,5 +46,5 @@ jobs:
         uses: actions/upload-artifact@v7
         if: failure() # Upload artifacts only if a step failed
         with:
-          name: bazel-test-logs
+          name: bazel-test-logs-${{ matrix.os }}
           path: bazel-testlogs
