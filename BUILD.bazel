@@ -15,3 +15,8 @@ config_setting(
   values = {"cpu": "darwin_x86_64"},
 )
 
+config_setting(
+  name = "android",
+  constraint_values = ["@platforms//os:android"],
+)
+

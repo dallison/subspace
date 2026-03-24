@@ -31,6 +31,12 @@
 #include <thread>
 namespace subspace {
 
+#if defined(__ANDROID__)
+constexpr const char *kDefaultServerSocket = "/data/local/tmp/subspace";
+#else
+constexpr const char *kDefaultServerSocket = "/tmp/subspace";
+#endif
+
 enum class ReadMode {
   kReadNext,
   kReadNewest,
@@ -254,7 +260,7 @@ private:
   const std::string &GetName() const { return name_; }
 
   // Initialize the client by connecting to the server.
-  absl::Status Init(const std::string &server_socket = "/tmp/subspace",
+  absl::Status Init(const std::string &server_socket = kDefaultServerSocket,
                     const std::string &client_name = "");
 
   // Create a publisher for the given channel.  If the channel doesn't exit
@@ -1214,7 +1220,7 @@ Subscriber::FindMessage(uint64_t timestamp) {
 class Client {
 public:
   static absl::StatusOr<std::shared_ptr<Client>>
-  Create(const std::string &server_socket = "/tmp/subspace",
+  Create(const std::string &server_socket = kDefaultServerSocket,
          const std::string &client_name = "",
          const co::Coroutine *c = nullptr) {
     auto client = std::make_shared<Client>(c);
@@ -1232,7 +1238,7 @@ public:
   const std::string &GetName() const { return impl_->GetName(); }
 
   // Initialize the client by connecting to the server.
-  absl::Status Init(const std::string &server_socket = "/tmp/subspace",
+  absl::Status Init(const std::string &server_socket = kDefaultServerSocket,
                     const std::string &client_name = "") {
     return impl_->Init(server_socket, client_name);
   }

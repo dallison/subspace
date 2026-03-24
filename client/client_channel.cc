@@ -200,8 +200,13 @@ void ClientChannel::Dump(std::ostream &os) const {
 static absl::StatusOr<toolbelt::FileDescriptor>
 OpenSharedMemoryFile(const std::string &filename, int flags) {
   mode_t old_umask = umask(0);
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+  int shm_fd = GetSyscallShim().open_fn(filename.c_str(), flags,
+                                        S_IRUSR | S_IWUSR | S_IROTH | S_IWOTH);
+#else
   int shm_fd = GetSyscallShim().shm_open_fn(filename.c_str(), flags,
                                              S_IRUSR | S_IWUSR | S_IROTH | S_IWOTH);
+#endif
   umask(old_umask);
   if (shm_fd == -1) {
     if (errno == EEXIST) {
@@ -220,7 +225,32 @@ ClientChannel::CreateBuffer(int buffer_index, size_t size) {
   std::string filename = BufferSharedMemoryName(buffer_index);
 
   auto &shim = GetSyscallShim();
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+  // On Android, use regular files in the SHM directory.  The file persists so
+  // that subscribers in other processes can open it by path.
+  auto shm_fd = OpenSharedMemoryFile(filename, O_RDWR | O_CREAT | O_EXCL);
+  if (!shm_fd.ok()) {
+    return shm_fd.status();
+  }
+  if (!shm_fd->Valid()) {
+    return *shm_fd;
+  }
+
+  int e = shim.ftruncate_fn(shm_fd->Fd(), off_t(size));
+  if (e == -1) {
+    (void)unlink(filename.c_str());
+    return absl::InternalError(
+        absl::StrFormat("Failed to set length of shared memory %s: %s",
+                        filename, strerror(errno)));
+  }
+
+  if (shim.chmod_fn(filename.c_str(), 0777) == -1) {
+    return absl::InternalError(
+        absl::StrFormat("Failed to change permissions of shared memory %s: %s",
+                        filename, strerror(errno)));
+  }
+
+#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
   // Open the shared memory file.
   auto shm_fd = OpenSharedMemoryFile(filename, O_RDWR | O_CREAT | O_EXCL);
   if (!shm_fd.ok()) {
@@ -306,7 +336,9 @@ ClientChannel::CreateBuffer(int buffer_index, size_t size) {
 absl::StatusOr<toolbelt::FileDescriptor>
 ClientChannel::OpenBuffer(int buffer_index) {
   std::string filename = BufferSharedMemoryName(buffer_index);
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+  return OpenSharedMemoryFile(filename, O_RDWR);
+#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
   // Open the shared memory file.
   return OpenSharedMemoryFile(filename, O_RDWR);
 #else
@@ -334,7 +366,8 @@ ClientChannel::GetBufferSize(toolbelt::FileDescriptor &shm_fd,
   }
   return sb.st_size;
 #else
-  std::string filename = BufferSharedMemoryName(buffer_index);
+  // On Linux and Android, fstat on the fd gives the correct size.
+  [[maybe_unused]] std::string filename = BufferSharedMemoryName(buffer_index);
   struct stat sb;
   if (shim.fstat_fn(shm_fd.Fd(), &sb) == -1) {
     return absl::InternalError(

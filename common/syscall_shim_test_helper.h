@@ -40,8 +40,10 @@ struct FailingShim : SyscallShim {
   int ftruncate_fail_countdown = -1;
   int ftruncate_errno = EIO;
 
+#if !defined(__ANDROID__)
   int shm_open_fail_countdown = -1;
   int shm_open_errno = EACCES;
+#endif
 
   int poll_fail_countdown = -1;
   int poll_errno = EINTR;
@@ -65,7 +67,9 @@ struct FailingShim : SyscallShim {
   int munmap_call_count = 0;
   int open_call_count = 0;
   int ftruncate_call_count = 0;
+#if !defined(__ANDROID__)
   int shm_open_call_count = 0;
+#endif
   int poll_call_count = 0;
   int stat_call_count = 0;
   int fstat_call_count = 0;
@@ -78,7 +82,9 @@ struct FailingShim : SyscallShim {
     munmap_fn = MunmapWrapper;
     open_fn = OpenWrapper;
     ftruncate_fn = FtruncateWrapper;
+#if !defined(__ANDROID__)
     shm_open_fn = ShmOpenWrapper;
+#endif
     poll_fn = PollWrapper;
     stat_fn = StatWrapper;
     fstat_fn = FstatWrapper;
@@ -147,6 +153,7 @@ private:
     return ::ftruncate(fd, length);
   }
 
+#if !defined(__ANDROID__)
   static int ShmOpenWrapper(const char *name, int oflag, mode_t mode) {
     auto *s = Self();
     s->shm_open_call_count++;
@@ -156,6 +163,7 @@ private:
     }
     return ::shm_open(name, oflag, mode);
   }
+#endif
 
   static int PollWrapper(struct pollfd *fds, nfds_t nfds, int timeout) {
     auto *s = Self();

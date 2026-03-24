@@ -1,0 +1,28 @@
+// Copyright 2023-2026 David Allison
+// All Rights Reserved
+// See LICENSE file for licensing information.
+
+// JNI shared library for Android apps.
+cc_library_shared {
+    name: "libsubspace_jni",
+    defaults: ["subspace_defaults"],
+    srcs: ["jni/subspace_jni.cc"],
+    local_include_dirs: [".."],
+    shared_libs: [
+        "libsubspace_client",
+        "liblog",
+    ],
+    static_libs: [
+        "libsubspace_common",
+        "libsubspace_proto",
+    ],
+    header_libs: ["jni_headers"],
+}
+
+// Java library for Android apps.
+java_library {
+    name: "subspace-java",
+    srcs: ["java/com/subspace/*.java"],
+    required: ["libsubspace_jni"],
+    sdk_version: "current",
+}

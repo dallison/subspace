@@ -12,6 +12,7 @@ static int RealOpen(const char *path, int flags, mode_t mode) {
   return ::open(path, flags, mode);
 }
 
+#if !defined(__ANDROID__)
 // Wrapper for ::shm_open which on Linux is variadic (int shm_open(const char*,
 // int, ...)) and cannot be stored directly as a typed 3-param function pointer.
 static int RealShmOpen(const char *name, int oflag, mode_t mode) {
@@ -19,6 +20,9 @@ static int RealShmOpen(const char *name, int oflag, mode_t mode) {
 }
 
 SyscallShim::SyscallShim() : open_fn(RealOpen), shm_open_fn(RealShmOpen) {}
+#else
+SyscallShim::SyscallShim() : open_fn(RealOpen) {}
+#endif
 
 static SyscallShim default_shim;
 static thread_local SyscallShim *active_shim = &default_shim;

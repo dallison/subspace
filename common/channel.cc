@@ -23,6 +23,14 @@
 
 namespace subspace {
 
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+static std::string g_android_shm_dir = kDefaultAndroidShmDir;
+
+const std::string &GetAndroidShmDir() { return g_android_shm_dir; }
+
+void SetAndroidShmDir(const std::string &dir) { g_android_shm_dir = dir; }
+#endif
+
 // Set this to 1 to print the memory mapping and unmapping calls.
 #define SHOW_MMAPS 0
 
@@ -112,7 +120,12 @@ std::string Channel::BufferSharedMemoryName(uint64_t session_id,
   std::string sanitized_name =
       absl::StrReplaceAll(ResolvedName(), {{"/", "."}});
 
-#if defined(__APPLE__)
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+  // On Android, use full paths in the configured SHM directory so that
+  // publishers and subscribers in different processes can open by path.
+  return absl::StrFormat("%s/subspace_%d_%s_%d", GetAndroidShmDir(), session_id,
+                         sanitized_name, buffer_index);
+#elif defined(__APPLE__)
   // Since you can't actually see any shared memory names in the MacOS
   // filesystem we need to use /tmp to create a shadow file that is mapped to a
   // shared memory name.

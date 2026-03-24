@@ -105,7 +105,7 @@ public:
   }
 
   absl::Status AllocateRetirementFd() {
-#if defined(__linux__)
+#if defined(__linux__) && !defined(__ANDROID__)
     auto p = toolbelt::Pipe::CreateWithFlags(O_DIRECT);
 #else
     auto p = toolbelt::Pipe::Create();

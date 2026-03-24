@@ -11,6 +11,7 @@ bazel_dep(name = "protobuf", version = "33.2")
 
 bazel_dep(name = "rules_cc", version = "0.2.16")
 bazel_dep(name = "rules_pkg", version = "1.0.1")
+bazel_dep(name = "rules_android_ndk", version = "0.1.3")
 bazel_dep(name = "zlib", version = "1.3.1.bcr.5")
 bazel_dep(name = "coroutines", version = "3.1.0")
 bazel_dep(name = "cpp_toolbelt", version = "2.0.1")
@@ -57,3 +58,10 @@ crate.annotation_select(
     deps = ["@crates__libc-0.2.182//:libc"],
 )
 use_repo(crate, "crates")
+
+# Android NDK toolchain for cross-compilation.
+# The NDK extension is NOT evaluated here to avoid breaking host-only builds
+# when ANDROID_NDK_HOME is not set.  To build for Android:
+#   1. Set ANDROID_NDK_HOME to your NDK installation
+#   2. Build with: bazelisk build --config=android //client:subspace_client
+# The android config in .bazelrc handles the rest.
