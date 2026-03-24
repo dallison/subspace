@@ -25,14 +25,24 @@ namespace subspace {
 
 #define SUBSPACE_SHMEM_MODE_POSIX 1
 #define SUBSPACE_SHMEM_MODE_LINUX 2
+#define SUBSPACE_SHMEM_MODE_ANDROID 3
 
 // Change this if you want to use a different shared memory mode.
-#if defined(__linux__)
+#if defined(__ANDROID__)
+// Android does not have /dev/shm; use regular files on a tmpfs-backed dir.
+#define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_ANDROID
+#elif defined(__linux__)
 // On Linux we can use /dev/shm directly for shared memory.
 #define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_LINUX
 #else
 // On other systems we need to use a file in /tmp and then create a shared memory segment with the same name.
 #define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_POSIX
+#endif
+
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+constexpr const char *kDefaultAndroidShmDir = "/dev/subspace";
+const std::string &GetAndroidShmDir();
+void SetAndroidShmDir(const std::string &dir);
 #endif
 
 // Flag for flags field in MessagePrefix.

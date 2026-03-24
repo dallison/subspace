@@ -222,7 +222,18 @@ void Server::CleanupAfterSession() {
   std::string session_shm_file_prefix =
       "subspace_." + std::to_string(session_id_);
 
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+  const std::string &shm_dir = GetAndroidShmDir();
+  if (std::filesystem::exists(shm_dir)) {
+    for (const auto &entry : std::filesystem::directory_iterator(shm_dir)) {
+      std::string filename = entry.path().filename().string();
+      if (filename.rfind("subspace_", 0) == 0) {
+        (void)std::filesystem::remove(entry.path());
+      }
+    }
+  }
+
+#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   // Remove all files starting with "subspace_SESSION" in /tmp.  These refer to
   // shared memory segments names "subspace_INODE".
   for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
@@ -263,7 +274,18 @@ void Server::CleanupAfterSession() {
 
 void Server::CleanupFilesystem() {
   logger_.Log(toolbelt::LogLevel::kInfo, "Cleaning up filesystem...");
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+  const std::string &shm_dir = GetAndroidShmDir();
+  if (std::filesystem::exists(shm_dir)) {
+    for (const auto &entry : std::filesystem::directory_iterator(shm_dir)) {
+      std::string filename = entry.path().filename().string();
+      if (filename.rfind("subspace_", 0) == 0) {
+        (void)std::filesystem::remove(entry.path());
+      }
+    }
+  }
+
+#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   // Remove all files starting with "subspace_" in /tmp.  These refer to
   // shared memory segments names "subspace_INODE".
   for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
@@ -301,6 +323,18 @@ void Server::CleanupFilesystem() {
 
 absl::Status Server::Run() {
   std::vector<struct pollfd> poll_fds;
+
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+  // Ensure the Android SHM directory exists.
+  const std::string &shm_dir = GetAndroidShmDir();
+  std::error_code ec;
+  std::filesystem::create_directories(shm_dir, ec);
+  if (ec) {
+    return absl::InternalError(
+        absl::StrFormat("Failed to create SHM directory %s: %s", shm_dir,
+                        ec.message()));
+  }
+#endif
 
 #ifndef __linux__
   // Remove socket name if it exists.  On Non-Linux systems the socket

@@ -1,0 +1,31 @@
+// Copyright 2023-2026 David Allison
+// All Rights Reserved
+// See LICENSE file for licensing information.
+
+cc_library_shared {
+    name: "libsubspace_client",
+    defaults: ["subspace_defaults"],
+    srcs: [
+        "client.cc",
+        "client_channel.cc",
+        "message.cc",
+        "publisher.cc",
+        "subscriber.cc",
+        "checksum.cc",
+        "arm_crc32.S",
+    ],
+    export_include_dirs: ["."],
+    local_include_dirs: [".."],
+    static_libs: [
+        "libsubspace_common",
+        "libsubspace_proto",
+    ],
+    shared_libs: [
+        "libprotobuf-cpp-lite",
+        "liblog",
+    ],
+    // cpp_toolbelt and coroutines must be vendored into the AOSP tree
+    // or provided as prebuilt modules.  Uncomment and adjust once available:
+    // static_libs: ["libcpp_toolbelt", "libcoroutines"],
+    // header_libs: ["libabseil-cpp"],
+}

@@ -35,7 +35,12 @@ bool subspace_has_error(void) {
 // std::shared_ptr<subspace::Client>.
 
 SubspaceClient subspace_create_client(void) {
+#if defined(__ANDROID__)
+  return subspace_create_client_with_socket_and_name(
+      "/data/local/tmp/subspace", "");
+#else
   return subspace_create_client_with_socket_and_name("/tmp/subspace", "");
+#endif
 }
 SubspaceClient subspace_create_client_with_socket(const char *socket_name) {
   return subspace_create_client_with_socket_and_name(socket_name, "");

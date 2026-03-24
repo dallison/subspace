@@ -25,8 +25,48 @@ static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
                                                  toolbelt::FileDescriptor &fd,
                                                  [[maybe_unused]] int session_id = 0) {
   char shm_file[NAME_MAX]; // Unique file in file system.
-  char *shm_name;          // Name passed to shm_* (starts with /)
   int tmpfd;
+
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+  // On Android, /dev/shm does not exist and shm_open is not usable for
+  // cross-process named memory.  Use regular files in a tmpfs-backed
+  // directory; the fd is passed to clients via SCM_RIGHTS.
+  const std::string &shm_dir = GetAndroidShmDir();
+  snprintf(shm_file, sizeof(shm_file), "%s/%d.%s.XXXXXX", shm_dir.c_str(), id,
+           suffix);
+  tmpfd = mkstemp(shm_file);
+  if (tmpfd == -1) {
+    return absl::InternalError(absl::StrFormat(
+        "Failed to create temp file %s: %s", shm_file, strerror(errno)));
+  }
+
+  int e = ftruncate(tmpfd, size);
+  if (e == -1) {
+    unlink(shm_file);
+    close(tmpfd);
+    return absl::InternalError(
+        absl::StrFormat("Failed to set length of shared memory %s: %s",
+                        shm_file, strerror(errno)));
+  }
+
+  void *p = nullptr;
+  if (map) {
+    p = MapMemory(tmpfd, size, PROT_READ | PROT_WRITE, suffix);
+    if (p == MAP_FAILED) {
+      unlink(shm_file);
+      close(tmpfd);
+      return absl::InternalError(absl::StrFormat(
+          "Failed to map shared memory %s: %s", shm_file, strerror(errno)));
+    }
+  }
+
+  // Unlink immediately; the fd remains valid for mmap and SCM_RIGHTS passing.
+  unlink(shm_file);
+  fd.SetFd(tmpfd);
+  return p;
+
+#else
+  char *shm_name;          // Name passed to shm_* (starts with /)
 #if defined(__linux__)
   // On Linux we have actual files in /dev/shm so we can create a unique file.
   snprintf(shm_file, sizeof(shm_file), "/dev/shm/%d.%s.XXXXXX", id, suffix);
@@ -76,6 +116,7 @@ static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
   fd.SetFd(shm_fd);
   (void)close(tmpfd);
   return p;
+#endif
 }
 
 absl::StatusOr<SystemControlBlock *>

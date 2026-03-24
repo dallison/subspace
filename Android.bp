@@ -1,0 +1,22 @@
+// Copyright 2023-2026 David Allison
+// All Rights Reserved
+// See LICENSE file for licensing information.
+
+// Common defaults for all subspace native modules.
+cc_defaults {
+    name: "subspace_defaults",
+    cflags: [
+        "-std=c++17",
+        "-Wall",
+        "-Wextra",
+        "-Wno-missing-field-initializers",
+        "-Wno-unused-parameter",
+    ],
+    target: {
+        android: {
+            cflags: ["-DSUBSPACE_ANDROID"],
+        },
+    },
+    stl: "c++_shared",
+    min_sdk_version: "28",
+}

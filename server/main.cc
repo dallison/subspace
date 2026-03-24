@@ -16,8 +16,13 @@ void Signal(int sig) {
   raise(sig);
 }
 
+#if defined(__ANDROID__)
+ABSL_FLAG(std::string, socket, "/data/local/tmp/subspace",
+          "Name of Unix socket to listen on");
+#else
 ABSL_FLAG(std::string, socket, "/tmp/subspace",
           "Name of Unix socket to listen on");
+#endif
 ABSL_FLAG(int, disc_port, 6502, "Discovery UDP port");
 ABSL_FLAG(int, peer_port, 6502, "Discovery peer UDP port");
 ABSL_FLAG(std::string, peer_address, "", "Bridge peer hostname or IP address");
@@ -27,8 +32,11 @@ ABSL_FLAG(bool, local, false, "Use local computer only");
 ABSL_FLAG(int, notify_fd, -1, "File descriptor to notify of startup");
 ABSL_FLAG(std::string, machine, "", "Machine name");
 
-#if defined(___APPLE__)
-// This is default true on Mac since is uses /tmp.
+#if defined(__APPLE__)
+// Default true on Mac since it uses /tmp.
+ABSL_FLAG(bool, cleanup_filesystem, true, "Cleanup the filesystem on server startup");
+#elif defined(__ANDROID__)
+// Default true on Android to clean up the SHM directory on startup.
 ABSL_FLAG(bool, cleanup_filesystem, true, "Cleanup the filesystem on server startup");
 #else
 // Default false on other OSes as it interferes with tests that run multiple servers.

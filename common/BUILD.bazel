@@ -19,6 +19,7 @@ cc_library(
         "//:macos_x86_64": [],
         "//:macos_arm64": [],
         "//:macos_default": [],
+        "//:android": ["-llog"],
         "//conditions:default": ["-lrt"],
     }),
     deps = [
