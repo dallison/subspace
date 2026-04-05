@@ -4658,6 +4658,66 @@ TEST_F(ClientTest, ResizeCallbackReturnsError) {
   ASSERT_OK(pub.UnregisterResizeCallback());
 }
 
+// ---------------------------------------------------------------------------
+// Free function CreatePublisher / CreateSubscriber convenience helpers.
+// ---------------------------------------------------------------------------
+
+TEST_F(ClientTest, FreeCreatePublisher) {
+  auto pub_or = subspace::CreatePublisher(
+      "free_pub", {.slot_size = 256, .num_slots = 10}, Socket());
+  ASSERT_OK(pub_or);
+  auto pub = std::move(*pub_or);
+  ASSERT_EQ(256, pub.SlotSize());
+  ASSERT_EQ(10, pub.NumSlots());
+}
+
+TEST_F(ClientTest, FreeCreateSubscriber) {
+  // Need a publisher first so the channel exists with concrete slots.
+  subspace::Client client;
+  InitClient(client);
+  auto pub =
+      EVAL_AND_ASSERT_OK(client.CreatePublisher("free_sub", 256, 10));
+
+  auto sub_or = subspace::CreateSubscriber("free_sub", {}, Socket());
+  ASSERT_OK(sub_or);
+  auto sub = std::move(*sub_or);
+  ASSERT_EQ(256, sub.SlotSize());
+}
+
+TEST_F(ClientTest, FreeCreatePublisherAndSubscriberRoundTrip) {
+  auto pub_or = subspace::CreatePublisher(
+      "free_rt", {.slot_size = 256, .num_slots = 10}, Socket());
+  ASSERT_OK(pub_or);
+  auto pub = std::move(*pub_or);
+
+  auto sub_or = subspace::CreateSubscriber("free_rt", {}, Socket());
+  ASSERT_OK(sub_or);
+  auto sub = std::move(*sub_or);
+
+  auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer(256));
+  memcpy(buf, "hello", 5);
+  auto pub_msg = pub.PublishMessage(5);
+  ASSERT_OK(pub_msg);
+
+  auto read_msg = sub.ReadMessage();
+  ASSERT_OK(read_msg);
+  ASSERT_EQ(5, read_msg->length);
+  ASSERT_EQ(0, memcmp(read_msg->buffer, "hello", 5));
+}
+
+TEST_F(ClientTest, FreeCreatePublisherBadSocket) {
+  auto pub_or = subspace::CreatePublisher(
+      "bad_pub", {.slot_size = 256, .num_slots = 10},
+      "/tmp/no_such_subspace_socket");
+  ASSERT_FALSE(pub_or.ok());
+}
+
+TEST_F(ClientTest, FreeCreateSubscriberBadSocket) {
+  auto sub_or = subspace::CreateSubscriber(
+      "bad_sub", {}, "/tmp/no_such_subspace_socket");
+  ASSERT_FALSE(sub_or.ok());
+}
+
 int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);
   absl::ParseCommandLine(argc, argv);
