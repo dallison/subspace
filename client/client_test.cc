@@ -4681,7 +4681,16 @@ TEST_F(ClientTest, FreeCreateSubscriber) {
   auto sub_or = subspace::CreateSubscriber("free_sub", {}, Socket());
   ASSERT_OK(sub_or);
   auto sub = std::move(*sub_or);
-  ASSERT_EQ(256, sub.SlotSize());
+
+  // Verify the subscriber works by publishing and reading a message.
+  auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer(256));
+  memcpy(buf, "test", 4);
+  ASSERT_OK(pub.PublishMessage(4));
+
+  auto msg = sub.ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(4, msg->length);
+  ASSERT_EQ(0, memcmp(msg->buffer, "test", 4));
 }
 
 TEST_F(ClientTest, FreeCreatePublisherAndSubscriberRoundTrip) {
