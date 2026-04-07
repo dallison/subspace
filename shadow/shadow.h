@@ -84,7 +84,7 @@ public:
   // holding the mutex, so the caller must not call back into Shadow methods
   // that also lock the mutex.
   template <typename F>
-  auto WithChannels(F &&f) const -> decltype(f(channels_)) {
+  auto WithChannels(F &&f) const {
     std::lock_guard<std::mutex> lock(mutex_);
     return f(channels_);
   }
