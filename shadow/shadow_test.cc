@@ -152,18 +152,20 @@ TEST_F(ShadowTest, ShadowReceivesCreateChannel) {
   ASSERT_THAT(pub, IsOk());
 
   ASSERT_TRUE(WaitForShadowState([]() {
-    auto &channels = GetShadow()->GetChannels();
-    auto it = channels.find("shadow_test_chan1");
-    return it != channels.end() && it->second.ccb_fd.Valid();
+    return GetShadow()->WithChannels([](auto &channels) {
+      auto it = channels.find("shadow_test_chan1");
+      return it != channels.end() && it->second.ccb_fd.Valid();
+    });
   }));
 
-  auto &channels = GetShadow()->GetChannels();
-  auto it = channels.find("shadow_test_chan1");
-  ASSERT_NE(it, channels.end());
-  EXPECT_EQ(it->second.slot_size, 256);
-  EXPECT_EQ(it->second.num_slots, 4);
-  EXPECT_TRUE(it->second.ccb_fd.Valid());
-  EXPECT_TRUE(it->second.bcb_fd.Valid());
+  GetShadow()->WithChannels([](auto &channels) {
+    auto it = channels.find("shadow_test_chan1");
+    ASSERT_NE(it, channels.end());
+    EXPECT_EQ(it->second.slot_size, 256);
+    EXPECT_EQ(it->second.num_slots, 4);
+    EXPECT_TRUE(it->second.ccb_fd.Valid());
+    EXPECT_TRUE(it->second.bcb_fd.Valid());
+  });
 }
 
 TEST_F(ShadowTest, ShadowReceivesAddPublisher) {
@@ -174,19 +176,21 @@ TEST_F(ShadowTest, ShadowReceivesAddPublisher) {
   ASSERT_THAT(pub, IsOk());
 
   ASSERT_TRUE(WaitForShadowState([]() {
-    auto &channels = GetShadow()->GetChannels();
-    auto it = channels.find("shadow_test_chan2");
-    return it != channels.end() && it->second.publishers.size() == 1;
+    return GetShadow()->WithChannels([](auto &channels) {
+      auto it = channels.find("shadow_test_chan2");
+      return it != channels.end() && it->second.publishers.size() == 1;
+    });
   }));
 
-  auto &channels = GetShadow()->GetChannels();
-  auto it = channels.find("shadow_test_chan2");
-  ASSERT_NE(it, channels.end());
-  EXPECT_EQ(it->second.publishers.size(), 1u);
+  GetShadow()->WithChannels([](auto &channels) {
+    auto it = channels.find("shadow_test_chan2");
+    ASSERT_NE(it, channels.end());
+    EXPECT_EQ(it->second.publishers.size(), 1u);
 
-  auto &pub_entry = it->second.publishers.begin()->second;
-  EXPECT_TRUE(pub_entry.poll_fd.Valid());
-  EXPECT_TRUE(pub_entry.trigger_fd.Valid());
+    auto &pub_entry = it->second.publishers.begin()->second;
+    EXPECT_TRUE(pub_entry.poll_fd.Valid());
+    EXPECT_TRUE(pub_entry.trigger_fd.Valid());
+  });
 }
 
 TEST_F(ShadowTest, ShadowReceivesAddSubscriber) {
@@ -199,20 +203,22 @@ TEST_F(ShadowTest, ShadowReceivesAddSubscriber) {
   ASSERT_THAT(sub, IsOk());
 
   ASSERT_TRUE(WaitForShadowState([]() {
-    auto &channels = GetShadow()->GetChannels();
-    auto it = channels.find("shadow_test_chan3");
-    return it != channels.end() && it->second.subscribers.size() == 1;
+    return GetShadow()->WithChannels([](auto &channels) {
+      auto it = channels.find("shadow_test_chan3");
+      return it != channels.end() && it->second.subscribers.size() == 1;
+    });
   }));
 
-  auto &channels = GetShadow()->GetChannels();
-  auto it = channels.find("shadow_test_chan3");
-  ASSERT_NE(it, channels.end());
-  EXPECT_EQ(it->second.publishers.size(), 1u);
-  EXPECT_EQ(it->second.subscribers.size(), 1u);
+  GetShadow()->WithChannels([](auto &channels) {
+    auto it = channels.find("shadow_test_chan3");
+    ASSERT_NE(it, channels.end());
+    EXPECT_EQ(it->second.publishers.size(), 1u);
+    EXPECT_EQ(it->second.subscribers.size(), 1u);
 
-  auto &sub_entry = it->second.subscribers.begin()->second;
-  EXPECT_TRUE(sub_entry.trigger_fd.Valid());
-  EXPECT_TRUE(sub_entry.poll_fd.Valid());
+    auto &sub_entry = it->second.subscribers.begin()->second;
+    EXPECT_TRUE(sub_entry.trigger_fd.Valid());
+    EXPECT_TRUE(sub_entry.poll_fd.Valid());
+  });
 }
 
 TEST_F(ShadowTest, ShadowReceivesRemovePublisher) {
@@ -224,14 +230,17 @@ TEST_F(ShadowTest, ShadowReceivesRemovePublisher) {
     ASSERT_THAT(pub, IsOk());
 
     ASSERT_TRUE(WaitForShadowState([]() {
-      auto &channels = GetShadow()->GetChannels();
-      auto it = channels.find("shadow_test_chan4");
-      return it != channels.end() && it->second.publishers.size() == 1;
+      return GetShadow()->WithChannels([](auto &channels) {
+        auto it = channels.find("shadow_test_chan4");
+        return it != channels.end() && it->second.publishers.size() == 1;
+      });
     }));
   }
 
   ASSERT_TRUE(WaitForShadowState([]() {
-    return GetShadow()->GetChannels().count("shadow_test_chan4") == 0;
+    return GetShadow()->WithChannels([](auto &channels) {
+      return channels.count("shadow_test_chan4") == 0;
+    });
   }));
 }
 
@@ -246,16 +255,18 @@ TEST_F(ShadowTest, ShadowReceivesRemoveSubscriber) {
     ASSERT_THAT(sub, IsOk());
 
     ASSERT_TRUE(WaitForShadowState([]() {
-      auto &channels = GetShadow()->GetChannels();
-      auto it = channels.find("shadow_test_chan5");
-      return it != channels.end() && it->second.subscribers.size() == 1;
+      return GetShadow()->WithChannels([](auto &channels) {
+        auto it = channels.find("shadow_test_chan5");
+        return it != channels.end() && it->second.subscribers.size() == 1;
+      });
     }));
   }
 
   ASSERT_TRUE(WaitForShadowState([]() {
-    auto &channels = GetShadow()->GetChannels();
-    auto it = channels.find("shadow_test_chan5");
-    return it != channels.end() && it->second.subscribers.empty();
+    return GetShadow()->WithChannels([](auto &channels) {
+      auto it = channels.find("shadow_test_chan5");
+      return it != channels.end() && it->second.subscribers.empty();
+    });
   }));
 }
 
@@ -268,12 +279,16 @@ TEST_F(ShadowTest, ShadowReceivesRemoveChannel) {
     ASSERT_THAT(pub, IsOk());
 
     ASSERT_TRUE(WaitForShadowState([]() {
-      return GetShadow()->GetChannels().count("shadow_test_chan6") > 0;
+      return GetShadow()->WithChannels([](auto &channels) {
+        return channels.count("shadow_test_chan6") > 0;
+      });
     }));
   }
 
   ASSERT_TRUE(WaitForShadowState([]() {
-    return GetShadow()->GetChannels().count("shadow_test_chan6") == 0;
+    return GetShadow()->WithChannels([](auto &channels) {
+      return channels.count("shadow_test_chan6") == 0;
+    });
   }));
 }
 
@@ -416,23 +431,22 @@ TEST_F(ShadowRecoveryTest, ServerRecoversStateFromShadow) {
 
   // Wait for shadow to receive the full state.
   ASSERT_TRUE(WaitForShadowState([this]() {
-    auto &channels = shadow_->GetChannels();
-    auto it = channels.find("recovery_chan");
-    return it != channels.end() && it->second.publishers.size() == 1 &&
-           it->second.subscribers.size() == 1;
+    return shadow_->WithChannels([](auto &channels) {
+      auto it = channels.find("recovery_chan");
+      return it != channels.end() && it->second.publishers.size() == 1 &&
+             it->second.subscribers.size() == 1;
+    });
   }));
 
   // Record the shadow state before stopping the server.
   uint64_t old_session_id = shadow_->GetSessionId();
   ASSERT_NE(old_session_id, 0u);
 
-  int old_channel_id;
-  {
-    auto &channels = shadow_->GetChannels();
+  int old_channel_id = shadow_->WithChannels([](auto &channels) {
     auto it = channels.find("recovery_chan");
-    ASSERT_NE(it, channels.end());
-    old_channel_id = it->second.channel_id;
-  }
+    EXPECT_NE(it, channels.end());
+    return it->second.channel_id;
+  });
 
   // Simulate a crash: disconnect the shadow replicators first so that
   // cleanup events from Stop() don't reach the shadow.
@@ -496,10 +510,11 @@ TEST_F(ShadowRecoveryTest, ServerFunctionalAfterRecovery) {
   ASSERT_THAT(pre_sub, IsOk());
 
   ASSERT_TRUE(WaitForShadowState([this]() {
-    auto &ch = shadow_->GetChannels();
-    auto it = ch.find("persist_chan");
-    return it != ch.end() && it->second.publishers.size() == 1 &&
-           it->second.subscribers.size() == 1;
+    return shadow_->WithChannels([](auto &ch) {
+      auto it = ch.find("persist_chan");
+      return it != ch.end() && it->second.publishers.size() == 1 &&
+             it->second.subscribers.size() == 1;
+    });
   }));
 
   // Simulate crash.
@@ -600,10 +615,11 @@ TEST_F(ShadowRecoveryTest, ClientReconnectsAfterServerRestart) {
 
   // Wait for shadow to have the full state.
   ASSERT_TRUE(WaitForShadowState([this]() {
-    auto &ch = shadow_->GetChannels();
-    auto it = ch.find("reconnect_chan");
-    return it != ch.end() && it->second.publishers.size() == 1 &&
-           it->second.subscribers.size() == 1;
+    return shadow_->WithChannels([](auto &ch) {
+      auto it = ch.find("reconnect_chan");
+      return it != ch.end() && it->second.publishers.size() == 1 &&
+             it->second.subscribers.size() == 1;
+    });
   }));
 
   // Simulate crash: disconnect the shadow replicators so cleanup events
@@ -793,16 +809,18 @@ TEST_F(DualShadowRecoveryTest, RecoverFromPrimaryWhenBothHealthy) {
 
   // Wait for both shadows to receive the state.
   ASSERT_TRUE(WaitForShadowState(primary_shadow_pipe_[0], [this]() {
-    auto &ch = primary_shadow_->GetChannels();
-    auto it = ch.find("dual_chan");
-    return it != ch.end() && it->second.publishers.size() == 1 &&
-           it->second.subscribers.size() == 1;
+    return primary_shadow_->WithChannels([](auto &ch) {
+      auto it = ch.find("dual_chan");
+      return it != ch.end() && it->second.publishers.size() == 1 &&
+             it->second.subscribers.size() == 1;
+    });
   }));
   ASSERT_TRUE(WaitForShadowState(secondary_shadow_pipe_[0], [this]() {
-    auto &ch = secondary_shadow_->GetChannels();
-    auto it = ch.find("dual_chan");
-    return it != ch.end() && it->second.publishers.size() == 1 &&
-           it->second.subscribers.size() == 1;
+    return secondary_shadow_->WithChannels([](auto &ch) {
+      auto it = ch.find("dual_chan");
+      return it != ch.end() && it->second.publishers.size() == 1 &&
+             it->second.subscribers.size() == 1;
+    });
   }));
 
   uint64_t primary_session = primary_shadow_->GetSessionId();
@@ -857,10 +875,14 @@ TEST_F(DualShadowRecoveryTest, RecoverFromSecondaryWhenPrimaryDown) {
 
   // Wait for both shadows to have the channel.
   ASSERT_TRUE(WaitForShadowState(primary_shadow_pipe_[0], [this]() {
-    return primary_shadow_->GetChannels().count("dual_fallback_chan") > 0;
+    return primary_shadow_->WithChannels([](auto &ch) {
+      return ch.count("dual_fallback_chan") > 0;
+    });
   }));
   ASSERT_TRUE(WaitForShadowState(secondary_shadow_pipe_[0], [this]() {
-    return secondary_shadow_->GetChannels().count("dual_fallback_chan") > 0;
+    return secondary_shadow_->WithChannels([](auto &ch) {
+      return ch.count("dual_fallback_chan") > 0;
+    });
   }));
 
   // Simulate crash.
@@ -928,10 +950,14 @@ TEST_F(DualShadowRecoveryTest, FreshStartWhenBothShadowsEmpty) {
 
   // Both shadows should have received the new state.
   ASSERT_TRUE(WaitForShadowState(primary_shadow_pipe_[0], [this]() {
-    return primary_shadow_->GetChannels().count("fresh_chan") > 0;
+    return primary_shadow_->WithChannels([](auto &ch) {
+      return ch.count("fresh_chan") > 0;
+    });
   }));
   ASSERT_TRUE(WaitForShadowState(secondary_shadow_pipe_[0], [this]() {
-    return secondary_shadow_->GetChannels().count("fresh_chan") > 0;
+    return secondary_shadow_->WithChannels([](auto &ch) {
+      return ch.count("fresh_chan") > 0;
+    });
   }));
 
   StopServer();
@@ -1159,9 +1185,10 @@ TEST_F(BridgeShadowRecoveryTest, BridgeRecoversAfterServerRestart) {
 
   // Wait for shadow to replicate the channel state.
   ASSERT_TRUE(WaitForShadowState([this]() {
-    auto &ch = shadow_->GetChannels();
-    auto it = ch.find("/bridge_recovery_chan");
-    return it != ch.end() && it->second.publishers.size() >= 1;
+    return shadow_->WithChannels([](auto &ch) {
+      auto it = ch.find("/bridge_recovery_chan");
+      return it != ch.end() && it->second.publishers.size() >= 1;
+    });
   }));
 
   // Simulate crash on server 0.  SimulateCrash() prevents the
