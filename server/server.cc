@@ -1905,7 +1905,8 @@ absl::Status Server::LoadPlugin(const std::string &name,
   std::lock_guard<std::mutex> lock(plugin_lock_);
 
   void *handle = nullptr;
-  if (path != "BUILTIN") {
+  bool builtin = (path == "BUILTIN");
+  if (!builtin) {
     handle = dlopen(path.c_str(), RTLD_LAZY);
     if (handle == nullptr) {
       return absl::InternalError(
@@ -1914,7 +1915,7 @@ absl::Status Server::LoadPlugin(const std::string &name,
   }
   // Form the name of the init function and find it in the shared object.
   std::string interfaceFunc = absl::StrFormat("%s_Create", name);
-  void *func = dlsym(handle, interfaceFunc.c_str());
+  void *func = dlsym(builtin ? RTLD_DEFAULT : handle, interfaceFunc.c_str());
   if (func == nullptr) {
     return absl::InternalError(
         absl::StrFormat("Can't find plugin initialization symbol %s: %s",
