@@ -1297,6 +1297,36 @@ private:
   std::shared_ptr<ClientImpl> impl_;
 };
 
+// Convenience functions to create a client and publisher/subscriber in one step.
+// The Publisher and Subscriber objects hold a shared_ptr to the ClientImpl
+// internally, so the client stays alive as long as the returned object does.
+
+inline absl::StatusOr<Publisher>
+CreatePublisher(const std::string &channel_name,
+                const PublisherOptions &opts = PublisherOptions(),
+                const std::string &server_socket = "/tmp/subspace",
+                const std::string &client_name = "",
+                const co::Coroutine *c = nullptr) {
+  auto client_or = Client::Create(server_socket, client_name, c);
+  if (!client_or.ok()) {
+    return client_or.status();
+  }
+  return (*client_or)->CreatePublisher(channel_name, opts);
+}
+
+inline absl::StatusOr<Subscriber>
+CreateSubscriber(const std::string &channel_name,
+                 const SubscriberOptions &opts = SubscriberOptions(),
+                 const std::string &server_socket = "/tmp/subspace",
+                 const std::string &client_name = "",
+                 const co::Coroutine *c = nullptr) {
+  auto client_or = Client::Create(server_socket, client_name, c);
+  if (!client_or.ok()) {
+    return client_or.status();
+  }
+  return (*client_or)->CreateSubscriber(channel_name, opts);
+}
+
 } // namespace subspace
 
 #endif // _xCLIENT_CLIENT_H

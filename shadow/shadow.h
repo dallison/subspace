@@ -12,6 +12,7 @@
 #include "toolbelt/fd.h"
 #include "toolbelt/logging.h"
 #include "toolbelt/sockets.h"
+#include <mutex>
 #include <string>
 
 namespace subspace {
@@ -70,11 +71,22 @@ public:
   absl::Status Run();
   void Stop();
 
-  uint64_t GetSessionId() const { return session_id_; }
-  const toolbelt::FileDescriptor &GetScbFd() const { return scb_fd_; }
+  uint64_t GetSessionId() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return session_id_;
+  }
+  const toolbelt::FileDescriptor &GetScbFd() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return scb_fd_;
+  }
 
-  const absl::flat_hash_map<std::string, ShadowChannel> &GetChannels() const {
-    return channels_;
+  // Thread-safe access to the channels map.  The callback is invoked while
+  // holding the mutex, so the caller must not call back into Shadow methods
+  // that also lock the mutex.
+  template <typename F>
+  auto WithChannels(F &&f) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return f(channels_);
   }
 
   void SetLogLevel(const std::string &level) { logger_.SetLogLevel(level); }
@@ -110,6 +122,7 @@ private:
   std::string socket_name_;
   uint64_t session_id_ = 0;
   toolbelt::FileDescriptor scb_fd_;
+  mutable std::mutex mutex_;
   absl::flat_hash_map<std::string, ShadowChannel> channels_;
   toolbelt::Logger logger_;
   toolbelt::UnixSocket listen_socket_;

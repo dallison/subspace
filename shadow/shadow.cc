@@ -122,6 +122,7 @@ void Shadow::ClientCoroutine(
 
 absl::Status Shadow::HandleEvent(const ShadowEvent &event,
                                  std::vector<toolbelt::FileDescriptor> &fds) {
+  std::lock_guard<std::mutex> lock(mutex_);
   switch (event.event_case()) {
   case ShadowEvent::kInit:
     return HandleInit(event.init(), fds);
@@ -336,6 +337,7 @@ Shadow::SendEvent(toolbelt::UnixSocket &socket, const ShadowEvent &event,
 }
 
 absl::Status Shadow::SendStateDump(toolbelt::UnixSocket &socket) {
+  std::lock_guard<std::mutex> lock(mutex_);
   // 1. Send the header.
   {
     ShadowEvent event;
