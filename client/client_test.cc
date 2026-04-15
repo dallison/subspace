@@ -4658,6 +4658,100 @@ TEST_F(ClientTest, ResizeCallbackReturnsError) {
   ASSERT_OK(pub.UnregisterResizeCallback());
 }
 
+// Separate fixture that loads the NOP plugin before the server starts,
+// so that OnReady is called during Run() on the scheduler thread.
+class PluginTest : public ::testing::Test {
+public:
+  static void SetUpTestSuite() {
+    printf("Starting Subspace server with NOP plugin\n");
+    char socket_name_template[] = "/tmp/subspaceXXXXXX"; // NOLINT
+    ::close(mkstemp(&socket_name_template[0]));
+    socket_ = &socket_name_template[0];
+
+    (void)pipe(server_pipe_);
+
+    server_ = std::make_unique<subspace::Server>(
+        scheduler_, socket_, "", 0, 0,
+        /*local=*/true, server_pipe_[1], /*initial_ordinal=*/1,
+        /*wait_for_clients=*/true);
+
+    auto status = server_->LoadPlugin("NOP", "plugins/nop_plugin.so");
+    if (!status.ok()) {
+      fprintf(stderr, "Failed to load NOP plugin: %s\n",
+              status.ToString().c_str());
+      exit(1);
+    }
+
+    server_thread_ = std::thread([]() {
+      absl::Status s = server_->Run();
+      if (!s.ok()) {
+        fprintf(stderr, "Error running Subspace server: %s\n",
+                s.ToString().c_str());
+        exit(1);
+      }
+    });
+
+    char buf[8];
+    (void)::read(server_pipe_[0], buf, 8);
+  }
+
+  static void TearDownTestSuite() {
+    printf("Stopping Subspace server with NOP plugin\n");
+    server_->Stop();
+
+    char buf[8];
+    (void)::read(server_pipe_[0], buf, 8);
+    server_thread_.join();
+    server_->CleanupAfterSession();
+    (void)remove(socket_.c_str());
+  }
+
+  void SetUp() override { signal(SIGPIPE, SIG_IGN); }
+
+  static const std::string &Socket() { return socket_; }
+  static subspace::Server *Server() { return server_.get(); }
+
+private:
+  inline static co::CoroutineScheduler scheduler_;
+  inline static std::string socket_;
+  inline static int server_pipe_[2];
+  inline static std::unique_ptr<subspace::Server> server_;
+  inline static std::thread server_thread_;
+};
+
+TEST_F(PluginTest, HeartbeatPublishes) {
+  subspace::Client sub_client;
+  ASSERT_OK(sub_client.Init(Socket()));
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber("/nop/Heartbeat");
+  ASSERT_OK(sub);
+
+  constexpr int kExpectedMessages = 2;
+  int received = 0;
+  uint64_t prev_seq = 0;
+  while (received < kExpectedMessages) {
+    absl::Status wait_status = sub->Wait(std::chrono::seconds(5));
+    ASSERT_OK(wait_status) << "Timed out waiting for heartbeat message "
+                           << received + 1;
+    for (;;) {
+      absl::StatusOr<Message> msg = sub->ReadMessage();
+      ASSERT_OK(msg);
+      if (msg->length == 0) {
+        break;
+      }
+      ASSERT_EQ(sizeof(uint64_t), msg->length);
+      uint64_t seq;
+      memcpy(&seq, msg->buffer, sizeof(seq));
+      if (received > 0) {
+        EXPECT_GT(seq, prev_seq);
+      }
+      prev_seq = seq;
+      received++;
+    }
+  }
+  ASSERT_GE(received, kExpectedMessages);
+}
+
 int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);
   absl::ParseCommandLine(argc, argv);

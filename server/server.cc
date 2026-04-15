@@ -186,7 +186,17 @@ void Server::CloseHandler(ClientHandler *handler) {
 // UDS and spawns a handler coroutine to handle the communication with
 // the client.
 void Server::ListenerCoroutine(toolbelt::UnixSocket &listen_socket) {
-  while (!shutting_down_) {
+  for (;;) {
+    if (!running_) {
+      // Keep this running until all other coroutines have completed.
+      // This is to make sure that other coroutines that have publisher
+      // and subscribers are able to connect to the server and delete them
+      // on shutdown.
+      auto strings = scheduler_.AllCoroutineStrings();
+      if (strings.size() == 1) {
+        break;
+      }
+    }
     absl::Status status = HandleIncomingConnection(listen_socket);
     if (!status.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,

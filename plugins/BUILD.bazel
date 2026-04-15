@@ -6,6 +6,7 @@ cc_binary(
     name = "nop_plugin.so",
     srcs = ["nop_plugin.cc"],
     deps = [
+        "//client:subspace_client",
         "//server:server",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/strings:str_format",

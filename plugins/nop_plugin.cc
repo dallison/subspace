@@ -1,6 +1,63 @@
+#include "client/client.h"
 #include "server/server.h"
 
+#include <cstring>
+
 namespace nop_plugin {
+
+constexpr int kHeartbeatSlotSize = 256;
+constexpr int kHeartbeatNumSlots = 16;
+constexpr uint64_t kHeartbeatPeriodNs = 1000000000ULL; // 1 second
+
+void HeartbeatCoroutine(subspace::Server &server,
+                        subspace::PluginContext *ctx) {
+  if (server.ShuttingDown()) {
+    return;
+  }
+
+  subspace::Client client(co::self);
+  absl::Status status = client.Init(server.GetSocketName());
+  if (!status.ok()) {
+    ctx->logger.Log(toolbelt::LogLevel::kError,
+                    "NOP plugin: failed to init client for heartbeat: %s",
+                    status.ToString().c_str());
+    return;
+  }
+
+  absl::StatusOr<subspace::Publisher> pub = client.CreatePublisher(
+      "/nop/Heartbeat", kHeartbeatSlotSize, kHeartbeatNumSlots);
+  if (!pub.ok()) {
+    ctx->logger.Log(toolbelt::LogLevel::kError,
+                    "NOP plugin: failed to create heartbeat publisher: %s",
+                    pub.status().ToString().c_str());
+    return;
+  }
+
+  uint64_t seq = 0;
+  for (;;) {
+    int fd = co::Wait(server.GetShutdownTriggerFd(), POLLIN, kHeartbeatPeriodNs);
+    if (fd != -1) {
+      break;
+    }
+
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    if (!buffer.ok()) {
+      ctx->logger.Log(toolbelt::LogLevel::kError,
+                      "NOP plugin: failed to get heartbeat buffer: %s",
+                      buffer.status().ToString().c_str());
+      continue;
+    }
+    memcpy(*buffer, &seq, sizeof(seq));
+    absl::StatusOr<const subspace::Message> msg =
+        pub->PublishMessage(sizeof(seq));
+    if (!msg.ok()) {
+      ctx->logger.Log(toolbelt::LogLevel::kError,
+                      "NOP plugin: failed to publish heartbeat: %s",
+                      msg.status().ToString().c_str());
+    }
+    seq++;
+  }
+}
 
 absl::Status OnStartup(subspace::Server &s, const std::string &name,
                        subspace::PluginContext *ctx) {
@@ -10,6 +67,11 @@ absl::Status OnStartup(subspace::Server &s, const std::string &name,
 }
 void OnReady(subspace::Server &s, subspace::PluginContext *ctx) {
   ctx->logger.Log(toolbelt::LogLevel::kInfo, "NOP plugin ready\n");
+
+  s.GetScheduler().Spawn(
+      [&s, ctx]() { HeartbeatCoroutine(s, ctx); },
+      {.name = "NOP heartbeat",
+       .interrupt_fd = s.GetShutdownTriggerFd()});
 }
 
 void OnShutdown(subspace::PluginContext *ctx) {
