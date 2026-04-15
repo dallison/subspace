@@ -52,9 +52,10 @@ This uses Google's Bazel to build.  You will need to download Bazel to build it.
 The build also needs some external libraries, but Bazel takes care of downloading them.
 The *.bazelrc* file contains some configuration options.
 
-### To build on Mac Apple Silicon
+### To build on Mac
 ```
-bazel build --config=apple_silicon ...
+bazel build --config=macos_arm64 ...    # Apple Silicon
+bazel build --config=macos_x86_64 ...   # Intel
 ```
 
 ### To build on Linux
