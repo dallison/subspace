@@ -8,6 +8,10 @@
 #include <dlfcn.h>
 #include <string>
 
+namespace co {
+class CoroutineScheduler;
+}
+
 namespace subspace {
 class Server;
 
@@ -15,6 +19,7 @@ struct PluginContext  {
   PluginContext(const std::string &name) : logger(name) {}
   virtual ~PluginContext() = default;
   toolbelt::Logger logger;
+  co::CoroutineScheduler *scheduler = nullptr;
 };
 
 // Plugins allow an externally loaded module to handle occurences in the
@@ -74,6 +79,12 @@ public:
   void OnRemoveSubscriber(Server &s, const std::string &channel_name,
                           int subscriber_id) {
     functions_.onRemoveSubscriber(s, channel_name, subscriber_id, ctx_.get());
+  }
+
+  void SetScheduler(co::CoroutineScheduler &scheduler) {
+    if (ctx_) {
+      ctx_->scheduler = &scheduler;
+    }
   }
 
 private:
