@@ -1930,6 +1930,7 @@ absl::Status Server::LoadPlugin(const std::string &name,
   if (!status.ok()) {
     return status;
   }
+  interface->SetScheduler(scheduler_);
   plugins_.push_back(std::make_unique<Plugin>(
       name, handle, std::unique_ptr<PluginInterface>(interface)));
   return absl::OkStatus();
