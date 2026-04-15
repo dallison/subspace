@@ -1,6 +1,6 @@
 package(default_visibility = ["//visibility:public"])
 
-load("@rules_cc//cc:defs.bzl", "cc_binary")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
 
 cc_binary(
     name = "nop_plugin.so",
@@ -13,4 +13,20 @@ cc_binary(
     ],
     linkstatic = False,
     linkshared = True,
+)
+
+# Static library version of the NOP plugin for linking directly into binaries.
+# On macOS, dlopen'd plugins get their own copy of thread-local variables
+# (like co::self), breaking the coroutine scheduler.  Linking the plugin
+# statically avoids that by keeping a single copy of the coroutines library.
+cc_library(
+    name = "nop_plugin_lib",
+    srcs = ["nop_plugin.cc"],
+    deps = [
+        "//client:subspace_client",
+        "//server:server",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+    alwayslink = True,
 )

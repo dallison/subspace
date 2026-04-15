@@ -55,8 +55,12 @@ cc_test(
     srcs = ["client_test.cc"],
     data = [
         "//server:subspace_server",
-        "//plugins:nop_plugin.so",
-    ],
+    ] + select({
+        "//:macos_arm64": [],
+        "//:macos_x86_64": [],
+        "//:macos_default": [],
+        "//conditions:default": ["//plugins:nop_plugin.so"],
+    }),
     copts = [
         "-Wno-missing-field-initializers",
         "-Wno-unused-parameter",
@@ -75,7 +79,12 @@ cc_test(
         "@abseil-cpp//absl/status:statusor",
         "@googletest//:gtest",
         "@coroutines//:co",
-    ],
+    ] + select({
+        "//:macos_arm64": ["//plugins:nop_plugin_lib"],
+        "//:macos_x86_64": ["//plugins:nop_plugin_lib"],
+        "//:macos_default": ["//plugins:nop_plugin_lib"],
+        "//conditions:default": [],
+    }),
 )
 
 cc_test(

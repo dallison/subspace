@@ -795,7 +795,11 @@ TEST_F(ClientTest, PublishSingleMessageAndReadWithCallback) {
 }
 
 TEST_F(ClientTest, PublishSingleMessageAndReadWithPlugin) {
+#ifdef __APPLE__
+  ASSERT_OK(Server()->LoadPlugin("NOP", "BUILTIN"));
+#else
   ASSERT_OK(Server()->LoadPlugin("NOP", "plugins/nop_plugin.so"));
+#endif
   subspace::Client pub_client;
   subspace::Client sub_client;
   ASSERT_OK(pub_client.Init(Socket()));
@@ -4744,7 +4748,11 @@ public:
         /*local=*/true, server_pipe_[1], /*initial_ordinal=*/1,
         /*wait_for_clients=*/true);
 
+#ifdef __APPLE__
+    auto status = server_->LoadPlugin("NOP", "BUILTIN");
+#else
     auto status = server_->LoadPlugin("NOP", "plugins/nop_plugin.so");
+#endif
     if (!status.ok()) {
       fprintf(stderr, "Failed to load NOP plugin: %s\n",
               status.ToString().c_str());
