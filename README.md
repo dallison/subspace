@@ -52,9 +52,10 @@ This uses Google's Bazel to build.  You will need to download Bazel to build it.
 The build also needs some external libraries, but Bazel takes care of downloading them.
 The *.bazelrc* file contains some configuration options.
 
-### To build on Mac Apple Silicon
+### To build on Mac
 ```
-bazel build --config=apple_silicon ...
+bazel build --config=macos_arm64 ...    # Apple Silicon
+bazel build --config=macos_x86_64 ...   # Intel
 ```
 
 ### To build on Linux
@@ -376,6 +377,41 @@ public:
     void SetThreadSafe(bool v);
 };
 ```
+
+### Convenience Free Functions
+
+For simple use cases where you don't need to reuse a client, Subspace provides
+free functions that create a temporary client, perform the operation, and return
+a standalone `Publisher` or `Subscriber`. The returned object keeps the
+underlying client alive for its lifetime.
+
+```cpp
+#include "client/client.h"
+
+// Create a publisher without managing a Client object.
+auto pub_or = subspace::CreatePublisher("my_channel",
+    subspace::PublisherOptions{.slot_size = 1024, .num_slots = 10});
+if (!pub_or.ok()) {
+    // Handle error
+    return;
+}
+auto pub = std::move(*pub_or);
+
+// Create a subscriber without managing a Client object.
+auto sub_or = subspace::CreateSubscriber("my_channel");
+if (!sub_or.ok()) {
+    // Handle error
+    return;
+}
+auto sub = std::move(*sub_or);
+```
+
+**Parameters:**
+- `channel_name`: Name of the channel
+- `opts`: `PublisherOptions` or `SubscriberOptions` (defaults apply)
+- `server_socket` (default: `"/tmp/subspace"`): Path to the server socket
+- `client_name` (default: `""`): Optional client name
+- `c` (optional): Coroutine pointer for coroutine-aware mode
 
 ## Publisher API
 

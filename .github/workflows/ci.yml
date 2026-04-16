@@ -1,0 +1,50 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60 # liberal upper bound to protect against tests stalling
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
+          - os: macos-latest
+            bazel_flags: --config=macos_arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Bazel
+        uses: bazel-contrib/setup-bazel@0.18.0
+        with:
+          # Avoid downloading Bazel every time.
+          bazelisk-cache: true
+          # Store build cache per workflow.
+          disk-cache: ${{ github.workflow }}-${{ matrix.os }}
+          # Share repository cache between workflows.
+          repository-cache: true
+
+      - name: Build all targets
+        run: |
+          bazel build //... \
+            --verbose_failures \
+            ${{ matrix.bazel_flags }}
+
+      - name: Run tests
+        run: |
+          bazel test //... \
+            --verbose_failures \
+            --test_output=errors \
+            ${{ matrix.bazel_flags }}
+
+      - name: Upload Bazel test logs
+        uses: actions/upload-artifact@v7
+        if: failure() # Upload artifacts only if a step failed
+        with:
+          name: bazel-test-logs-${{ matrix.os }}
+          path: bazel-testlogs

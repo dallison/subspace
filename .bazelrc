@@ -1,3 +1,7 @@
+# Import user-local overrides (not checked in). Create user.bazelrc to set
+# machine-specific options, e.g. build --config=macos_arm64
+try-import %workspace%/user.bazelrc
+
 build:asan --strip=never
 build:asan --copt -fsanitize=address
 build:asan --copt -DADDRESS_SANITIZER
@@ -10,23 +14,24 @@ common --enable_platform_specific_config
 
 build --enable_platform_specific_config
 
-# Apply this flag only when building on/for macOS
+# macOS (auto-applied on all macOS hosts via --enable_platform_specific_config).
+# Only arch-independent settings belong here.
 build:macos --macos_minimum_os=10.15
-# If builds fail with: xcrun: invalid DEVELOPER_DIR (.../CommandLineTools), missing xcrun
-# fix the host (sudo xcode-select -s /Applications/Xcode.app/Contents/Developer, or
-# xcode-select --install). See README "macOS: xcrun / DEVELOPER_DIR errors".
-# Rust (crate_universe): on Darwin, default @platforms//host:host often does not match
-# rules_rust platform config_settings, so generated target_compatible_with marks crates
-# incompatible. Linux is unchanged (no --platforms in build:linux).
-# Default here is Apple Silicon (aarch64). Intel macOS: add to your user .bazelrc, e.g.
-#   build --config=darwin_intel
-# so --platforms overrides this after build:macos is applied.
-build:macos --platforms=//platform/host:darwin_arm64
-# Tests must run on an execution platform compatible with --platforms (see default_test_toolchain_type).
-build:macos --extra_execution_platforms=//platform/host:darwin_arm64
 
-build:darwin_intel --platforms=//platform/host:darwin_x86_64
-build:darwin_intel --extra_execution_platforms=//platform/host:darwin_x86_64
+# macOS architecture-specific configs.
+# Rust crate_universe generates target_compatible_with constraints that require an
+# explicit --platforms matching rules_rust config_settings. The default
+# @local_config_platform//:host does not satisfy these, so one of the configs below
+# must be selected when building Rust targets on macOS.
+#
+# Recommended: add one of these to your user.bazelrc (gitignored) for seamless builds:
+#   build --config=macos_arm64    # Apple Silicon
+#   build --config=macos_x86_64   # Intel
+build:macos_arm64 --platforms=//platform/host:darwin_arm64
+build:macos_arm64 --extra_execution_platforms=//platform/host:darwin_arm64
+
+build:macos_x86_64 --platforms=//platform/host:darwin_x86_64
+build:macos_x86_64 --extra_execution_platforms=//platform/host:darwin_x86_64
 
 # For all builds, use C++17
 build --cxxopt="-std=c++17"
@@ -35,12 +40,6 @@ build --cxxopt="-std=c++17"
 build --@rules_rust//rust/settings:experimental_use_cc_common_link=True
 build --copt="-Wextra"
 build --copt="-Wno-missing-field-initializers"
-
-# For Apple Silicon
-build:apple_silicon --cpu=darwin_arm64
-# Overrides build:macos --platforms for aarch64-apple-darwin (rules_rust / Rust deps).
-build:apple_silicon --platforms=//platform/host:darwin_arm64
-build:apple_silicon --extra_execution_platforms=//platform/host:darwin_arm64
 
 # Common flags for Clang
 build:clang --action_env=BAZEL_COMPILER=clang
