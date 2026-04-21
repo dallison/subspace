@@ -2,4 +2,5 @@ bazel-*
 .vscode/*
 build
 rust_client/target
+rust_rpc/target
 user.bazelrc

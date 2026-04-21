@@ -1364,7 +1364,8 @@ void Server::RetirementReceiverCoroutine(
     // being sent (which is serialized as 0 bytes.  Remove the adustment.
     slot_id -= 1;
 
-    if (slot_id < 0 || slot_id >= active_retirement_msgs->size()) {
+    if (slot_id < 0 ||
+        static_cast<size_t>(slot_id) >= active_retirement_msgs->size()) {
       continue;
     }
     (*active_retirement_msgs)[slot_id]->DecRef();
@@ -1774,7 +1775,7 @@ void Server::SubscribeOverBridge(ServerChannel *channel, bool reliable,
 }
 
 void Server::IncomingQuery(const Discovery::Query &query,
-                           const toolbelt::InetAddress &sender) {
+                           const toolbelt::InetAddress & /*sender*/) {
   // Someone is asking who publishes a channel.  Do I publish it?  If so,
   // send an Advertise out.
   auto channel = channels_.find(query.channel_name());

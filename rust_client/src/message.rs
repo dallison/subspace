@@ -38,6 +38,19 @@ impl ActiveMessage {
             (self.release)();
         }
     }
+
+    /// Decrement the reference count without invoking the release callback.
+    /// Returns true if the ref count reached zero (caller is responsible
+    /// for performing the release).
+    pub fn dec_ref_no_release(&self) -> bool {
+        let old = self.refs.fetch_sub(1, Ordering::Release);
+        if old == 1 {
+            std::sync::atomic::fence(Ordering::Acquire);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// A message read from a subscriber or returned by publish.

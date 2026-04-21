@@ -5,6 +5,7 @@
 #pragma once
 
 #include "client/client.h"
+#include "rpc/common/rpc_common.h"
 #include "toolbelt/logging.h"
 
 #include <chrono>
@@ -14,41 +15,6 @@
 namespace subspace {
 
 class RpcClient;
-
-constexpr int32_t kCancelChannelSlotSize = 64;
-constexpr int32_t kCancelChannelNumSlots = 8;
-
-namespace client_internal {
-struct Method {
-  std::string name;
-  int id;
-  std::string request_type;
-  std::string response_type;
-  int32_t slot_size;
-  int32_t num_slots;
-  std::shared_ptr<subspace::Publisher> request_publisher;
-  std::shared_ptr<subspace::Subscriber> response_subscriber;
-  std::shared_ptr<subspace::Publisher> cancel_publisher;
-};
-
-template <typename Response> class ResponseReceiverBase {
-public:
-  ResponseReceiverBase() = default;
-  virtual ~ResponseReceiverBase() = default;
-
-  // Called when a response is received.
-  virtual void OnResponse(Response &&response) = 0;
-};
-
-template <> class ResponseReceiverBase<void> {
-public:
-  ResponseReceiverBase() = default;
-  virtual ~ResponseReceiverBase() = default;
-
-  // Called when a response is received.
-  virtual void OnResponse() = 0;
-};
-} // namespace client_internal
 
 template <typename Response> class ResponseReceiver : public client_internal::ResponseReceiverBase<Response> {
 public:

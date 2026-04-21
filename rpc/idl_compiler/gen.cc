@@ -71,14 +71,14 @@ std::ostream& operator<<(std::ostream& os, const path& p) {
 }
 
 void CreateDirectories(const path& p) {
-    // No std::filesystem available, so use mkdir recursively.
     std::string path_str = p.string();
+    if (path_str.empty()) return;
     size_t pos = 0;
     do {
         pos = path_str.find('/', pos + 1);
         std::string subdir = path_str.substr(0, pos);
         if (!subdir.empty()) {
-            mkdir(subdir.c_str(), 0755);  // Ignore errors
+            mkdir(subdir.c_str(), 0755);
         }
     } while (pos != std::string::npos);
 }
@@ -88,6 +88,7 @@ void CreateDirectories(const path& p) {
 
 using path = std::filesystem::path;
 void CreateDirectories(const path& p) {
+   if (p.empty()) return;
    std::filesystem::create_directories(p);
 }
 
@@ -144,19 +145,41 @@ bool CodeGenerator::Generate(
       package_name_ = option.second;
     } else if (option.first == "target_name") {
       target_name_ = option.second;
+    } else if (option.first == "rpc_style") {
+      if (option.second == "asio") {
+        rpc_style_ = RpcStyle::kAsio;
+      } else if (option.second == "coro") {
+        rpc_style_ = RpcStyle::kCoro;
+      } else if (option.second == "co20") {
+        rpc_style_ = RpcStyle::kCo20;
+      } else if (option.second == "rust") {
+        rpc_style_ = RpcStyle::kRust;
+      } else {
+        rpc_style_ = RpcStyle::kCo;
+      }
     }
   }
 
-  Generator gen(file, added_namespace_, package_name_, target_name_);
+  Generator gen(file, added_namespace_, package_name_, target_name_, rpc_style_);
 
-  if (!GenerateClient(file, gen, generator_context, error)) {
-    *error = "Failed to generate client code";
-    return false;
-  }
-
-  if (!GenerateServer(file, gen, generator_context, error)) {
-    *error = "Failed to generate server code";
-    return false;
+  if (rpc_style_ == RpcStyle::kRust) {
+    if (!GenerateRustClient(file, gen, generator_context, error)) {
+      *error = "Failed to generate Rust client code";
+      return false;
+    }
+    if (!GenerateRustServer(file, gen, generator_context, error)) {
+      *error = "Failed to generate Rust server code";
+      return false;
+    }
+  } else {
+    if (!GenerateClient(file, gen, generator_context, error)) {
+      *error = "Failed to generate client code";
+      return false;
+    }
+    if (!GenerateServer(file, gen, generator_context, error)) {
+      *error = "Failed to generate server code";
+      return false;
+    }
   }
 
   return true;
@@ -280,11 +303,13 @@ void Generator::CloseNamespace(std::ostream &os) {
 
 Generator::Generator(const google::protobuf::FileDescriptor *file,
                      const std::string &ns, const std::string &pn,
-                     const std::string &tn)
-    : file_(file), added_namespace_(ns), package_name_(pn), target_name_(tn) {
+                     const std::string &tn, RpcStyle rpc_style)
+    : file_(file), added_namespace_(ns), package_name_(pn), target_name_(tn),
+      rpc_style_(rpc_style) {
   for (int i = 0; i < file->service_count(); i++) {
     service_gens_.push_back(std::make_unique<ServiceGenerator>(
-        file->service(i), added_namespace_, std::string{file->package()}));
+        file->service(i), added_namespace_, std::string{file->package()},
+        rpc_style));
   }
 }
 
@@ -295,7 +320,22 @@ void Generator::GenerateClientHeaders(std::ostream &os) {
   path cpp_header(main_base);
   cpp_header.replace_extension(".pb.h");
 
-  os << "#include \"rpc/client/rpc_client.h\"\n";
+  switch (rpc_style_) {
+  case RpcStyle::kCo:
+    os << "#include \"rpc/client/rpc_client.h\"\n";
+    break;
+  case RpcStyle::kAsio:
+    os << "#include \"asio_rpc/client/rpc_client.h\"\n";
+    break;
+  case RpcStyle::kCoro:
+    os << "#include \"coro_rpc/client/rpc_client.h\"\n";
+    break;
+  case RpcStyle::kCo20:
+    os << "#include \"co20_rpc/client/rpc_client.h\"\n";
+    break;
+  case RpcStyle::kRust:
+    break;
+  }
   os << "#include \"" << cpp_header.string() << "\"\n";
   for (int i = 0; i < file_->dependency_count(); i++) {
     std::string base = GeneratedFilename(package_name_, target_name_,
@@ -336,7 +376,22 @@ void Generator::GenerateServerHeaders(std::ostream &os) {
   path cpp_header(main_base);
   cpp_header.replace_extension(".pb.h");
 
-  os << "#include \"rpc/server/rpc_server.h\"\n";
+  switch (rpc_style_) {
+  case RpcStyle::kCo:
+    os << "#include \"rpc/server/rpc_server.h\"\n";
+    break;
+  case RpcStyle::kAsio:
+    os << "#include \"asio_rpc/server/rpc_server.h\"\n";
+    break;
+  case RpcStyle::kCoro:
+    os << "#include \"coro_rpc/server/rpc_server.h\"\n";
+    break;
+  case RpcStyle::kCo20:
+    os << "#include \"co20_rpc/server/rpc_server.h\"\n";
+    break;
+  case RpcStyle::kRust:
+    break;
+  }
   os << "#include \"" << cpp_header.string() << "\"\n";
   for (int i = 0; i < file_->dependency_count(); i++) {
     std::string base = GeneratedFilename(package_name_, target_name_,
@@ -368,6 +423,111 @@ void Generator::GenerateServerSources(std::ostream &os) {
   }
 
   CloseNamespace(os);
+}
+
+bool CodeGenerator::GenerateRustClient(
+    const google::protobuf::FileDescriptor *file, Generator &gen,
+    google::protobuf::compiler::GeneratorContext *generator_context,
+    std::string *error) const {
+  std::string filename =
+      GeneratedFilename(package_name_, target_name_, file->name());
+
+  path rp(filename);
+  rp.replace_extension(".subspace.rpc_client.rs");
+  std::cerr << "Generating Rust client: " << rp << "\n";
+
+  std::unique_ptr<google::protobuf::io::ZeroCopyOutputStream> output(
+      generator_context->Open(rp.string()));
+
+  CreateDirectories(rp.parent_path());
+
+  if (output == nullptr) {
+    *error = absl::StrFormat("Failed to open %s for writing", rp.string());
+    return false;
+  }
+  std::stringstream ss;
+  gen.GenerateRustClientFile(ss);
+  WriteToZeroCopyStream(ss.str(), output.get());
+
+  // Still generate empty C++ files so the aspect doesn't complain about missing outputs.
+  for (const auto &ext : {".subspace.rpc_client.h", ".subspace.rpc_client.cc"}) {
+    path ep(filename);
+    ep.replace_extension(ext);
+    std::unique_ptr<google::protobuf::io::ZeroCopyOutputStream> empty(
+        generator_context->Open(ep.string()));
+    if (empty) {
+      std::string comment = "// Rust RPC style - see .rs file.\n";
+      WriteToZeroCopyStream(comment, empty.get());
+    }
+  }
+
+  return true;
+}
+
+bool CodeGenerator::GenerateRustServer(
+    const google::protobuf::FileDescriptor *file, Generator &gen,
+    google::protobuf::compiler::GeneratorContext *generator_context,
+    std::string *error) const {
+  std::string filename =
+      GeneratedFilename(package_name_, target_name_, file->name());
+
+  path rp(filename);
+  rp.replace_extension(".subspace.rpc_server.rs");
+  std::cerr << "Generating Rust server: " << rp << "\n";
+
+  std::unique_ptr<google::protobuf::io::ZeroCopyOutputStream> output(
+      generator_context->Open(rp.string()));
+
+  CreateDirectories(rp.parent_path());
+
+  if (output == nullptr) {
+    *error = absl::StrFormat("Failed to open %s for writing", rp.string());
+    return false;
+  }
+  std::stringstream ss;
+  gen.GenerateRustServerFile(ss);
+  WriteToZeroCopyStream(ss.str(), output.get());
+
+  // Still generate empty C++ files so the aspect doesn't complain about missing outputs.
+  for (const auto &ext : {".subspace.rpc_server.h", ".subspace.rpc_server.cc"}) {
+    path ep(filename);
+    ep.replace_extension(ext);
+    std::unique_ptr<google::protobuf::io::ZeroCopyOutputStream> empty(
+        generator_context->Open(ep.string()));
+    if (empty) {
+      std::string comment = "// Rust RPC style - see .rs file.\n";
+      WriteToZeroCopyStream(comment, empty.get());
+    }
+  }
+
+  return true;
+}
+
+void Generator::GenerateRustClientFile(std::ostream &os) {
+  os << "// Auto-generated by subspace_rpc compiler. Do not edit.\n\n";
+  os << "use subspace_rpc::client::RpcClient;\n";
+  os << "use subspace_rpc::error::Result;\n";
+  os << "use subspace_rpc::stream::ResponseStream;\n";
+  os << "use std::time::Duration;\n";
+  os << "use super::*;\n\n";
+
+  for (auto &svc_gen : service_gens_) {
+    svc_gen->GenerateRustClientFile(os);
+  }
+}
+
+void Generator::GenerateRustServerFile(std::ostream &os) {
+  os << "// Auto-generated by subspace_rpc compiler. Do not edit.\n\n";
+  os << "use subspace_rpc::server::{RpcServer, MethodHandler, StreamingMethodHandler};\n";
+  os << "use subspace_rpc::stream::{StreamWriter, TypedStreamWriter};\n";
+  os << "use subspace_rpc::common::MethodOptions;\n";
+  os << "use subspace_rpc::error::Result;\n";
+  os << "use std::sync::Arc;\n";
+  os << "use super::*;\n\n";
+
+  for (auto &svc_gen : service_gens_) {
+    svc_gen->GenerateRustServerFile(os);
+  }
 }
 
 } // namespace subspace

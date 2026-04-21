@@ -1,0 +1,9 @@
+load("//:rpc/subspace_rpc_library.bzl", "subspace_rpc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+subspace_rpc_library(
+    name = "rpc_test_co20_rpc",
+    deps = ["//rpc/proto:rpc_test_proto"],
+    rpc_style = "co20",
+)
