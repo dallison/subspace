@@ -41,6 +41,18 @@ build --@rules_rust//rust/settings:experimental_use_cc_common_link=True
 build --copt="-Wextra"
 build --copt="-Wno-missing-field-initializers"
 
+# Suppress warnings from imported / third-party code:
+#   1. --features=external_include_paths makes Bazel pass include dirs from
+#      external repositories as -isystem instead of -I/-iquote, so warnings
+#      triggered by their headers (when included from our sources) are
+#      suppressed.
+#   2. --per_file_copt applies -w (disable all warnings) only when compiling
+#      source files that live under external/ (i.e. the external repo cache),
+#      so warnings from protobuf/abseil/boost/etc. own .c/.cc files don't
+#      appear, while our own code still gets -Wextra etc.
+build --features=external_include_paths
+build --per_file_copt=external/.*@-w
+
 # Common flags for Clang
 build:clang --action_env=BAZEL_COMPILER=clang
 build:clang --action_env=CC=clang --action_env=CXX=clang++

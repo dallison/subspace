@@ -1,0 +1,44 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+cc_library(
+    name = "rpc_server",
+    srcs = [
+        "rpc_server.cc",
+    ],
+    hdrs = [
+        "rpc_server.h",
+    ],
+    copts = ["-std=c++20"],
+    deps = [
+        "//coro_rpc/common:async_wait",
+        "//client:subspace_client",
+        "//common:subspace_common",
+        "//proto:subspace_cc_proto",
+        "//rpc/common:rpc_common",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings:str_format",
+        "@boost.asio//:boost.asio",
+    ],
+)
+
+cc_test(
+    name = "server_test",
+    srcs = ["server_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":rpc_server",
+        "//client:test_fixture",
+        "//coro_rpc/common:async_wait",
+        "//rpc/proto:rpc_test_cc_proto",
+        "@abseil-cpp//absl/flags:parse",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@boost.asio//:boost.asio",
+        "@googletest//:gtest",
+    ],
+)

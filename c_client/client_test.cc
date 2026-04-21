@@ -173,7 +173,7 @@ TEST_F(ClientTest, PublishSingleMessageAndRead) {
 // Callback to read the messages.  Doesn't free them but instead stores
 // them.
 std::vector<SubspaceMessage> messages_read;
-void MessageCallback(SubspaceSubscriber subscriber, SubspaceMessage msg) {
+void MessageCallback(SubspaceSubscriber /*subscriber*/, SubspaceMessage msg) {
   ASSERT_EQ(6, msg.length);
   ASSERT_EQ(0, memcmp(msg.buffer, "foobar", 6));
   messages_read.push_back(msg);
@@ -246,7 +246,7 @@ TEST_F(ClientTest, SubscriberCallbacks) {
 
 int num_resizes = 0;
 
-bool ResizeCallback(SubspacePublisher publisher, int32_t old_size,
+bool ResizeCallback(SubspacePublisher /*publisher*/, int32_t old_size,
                     int32_t new_size) {
   EXPECT_EQ(256, old_size);
   EXPECT_EQ(1024, new_size);
@@ -296,7 +296,8 @@ TEST_F(ClientTest, Resize) {
 }
 
 int num_dropped_messages = 0;
-void DroppedMessageCallback(SubspaceSubscriber subscriber, int64_t num_dropped) {
+void DroppedMessageCallback(SubspaceSubscriber /*subscriber*/,
+                            int64_t num_dropped) {
   num_dropped_messages += num_dropped;
 }
 

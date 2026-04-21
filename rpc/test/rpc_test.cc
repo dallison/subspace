@@ -130,7 +130,7 @@ public:
   MyServer(const std::string &socket) : rpc::TestServiceServer(socket) {}
 
   absl::StatusOr<rpc::TestResponse> TestMethod(const rpc::TestRequest &request,
-                                               co::Coroutine *c) override {
+                                               co::Coroutine * /*c*/) override {
     std::cerr << "TestMethod called with request: " << request.DebugString()
               << std::endl;
     rpc::TestResponse response;
@@ -139,7 +139,7 @@ public:
   }
 
   absl::StatusOr<rpc::PerfResponse> PerfMethod(const rpc::PerfRequest &request,
-                                               co::Coroutine *c) override {
+                                               co::Coroutine * /*c*/) override {
     rpc::PerfResponse res;
     res.set_client_send_time(request.send_time());
     res.set_server_send_time(toolbelt::Now());
@@ -169,13 +169,15 @@ public:
     return absl::OkStatus();
   }
 
-  absl::StatusOr<rpc::TestResponse> ErrorMethod(const rpc::TestRequest &request,
-                                                co::Coroutine *c) override {
+  absl::StatusOr<rpc::TestResponse>
+  ErrorMethod(const rpc::TestRequest & /*request*/,
+              co::Coroutine * /*c*/) override {
     return absl::InternalError("Error occurred");
   }
 
   absl::StatusOr<rpc::TestResponse>
-  TimeoutMethod(const rpc::TestRequest &request, co::Coroutine *c) override {
+  TimeoutMethod(const rpc::TestRequest & /*request*/,
+                co::Coroutine *c) override {
     c->Sleep(2);
     rpc::TestResponse response;
     response.set_message("Hello from TestMethod");

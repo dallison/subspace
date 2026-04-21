@@ -36,6 +36,7 @@ pub struct SubscriberImpl {
 
     self_ref: Option<Weak<Mutex<SubscriberImpl>>>,
     pub(crate) active_messages: Vec<Arc<ActiveMessage>>,
+    pub(crate) kept_active_message: Option<(usize, Arc<ActiveMessage>)>,
     pub(crate) dropped_message_callback: Option<DroppedMessageCallback>,
     pub(crate) message_callback: Option<MessageCallback>,
     pub(crate) on_receive_callback: Option<OnReceiveCallback>,
@@ -140,6 +141,7 @@ impl SubscriberImpl {
             ordinal_trackers: HashMap::new(),
             self_ref: None,
             active_messages: Vec::new(),
+            kept_active_message: None,
             dropped_message_callback: None,
             message_callback: None,
             on_receive_callback: None,
@@ -368,6 +370,8 @@ impl SubscriberImpl {
         while retries < MAX_RETRIES {
             retries += 1;
 
+            self.reload_buffers_if_necessary();
+
             if self.channel.slot.is_none() {
                 self.populate_active_slots(&bits);
             }
@@ -398,6 +402,19 @@ impl SubscriberImpl {
                 if !self.channel.validate_slot_buffer(active.slot_index)
                     || self.channel.slot_ref(active.slot_index).buffer_index == -1
                 {
+                    if self.channel.buffers_changed() {
+                        self.channel.atomic_inc_ref_count::<fn()>(
+                            active.slot_index,
+                            reliable,
+                            -1,
+                            active.ordinal,
+                            active.vchan_id,
+                            false,
+                            None,
+                        );
+                        self.reload_buffers_if_necessary();
+                        continue;
+                    }
                     self.channel.embargoed_slots.set(active.slot_index);
                     self.channel.atomic_inc_ref_count::<fn()>(
                         active.slot_index,
@@ -423,6 +440,8 @@ impl SubscriberImpl {
         self.channel.embargoed_slots.clear_all();
 
         loop {
+            self.reload_buffers_if_necessary();
+
             if self.channel.slot.is_none() {
                 self.populate_active_slots(&bits);
             }
@@ -465,6 +484,19 @@ impl SubscriberImpl {
                 if !self.channel.validate_slot_buffer(active.slot_index)
                     || self.channel.slot_ref(active.slot_index).buffer_index == -1
                 {
+                    if self.channel.buffers_changed() {
+                        self.channel.atomic_inc_ref_count::<fn()>(
+                            active.slot_index,
+                            reliable,
+                            -1,
+                            active.ordinal,
+                            active.vchan_id,
+                            false,
+                            None,
+                        );
+                        self.reload_buffers_if_necessary();
+                        continue;
+                    }
                     self.channel.embargoed_slots.set(active.slot_index);
                     self.channel.atomic_inc_ref_count::<fn()>(
                         active.slot_index,
@@ -573,6 +605,8 @@ impl SubscriberImpl {
     ) -> Option<usize> {
         self.channel.embargoed_slots.clear_all();
         loop {
+            self.reload_buffers_if_necessary();
+
             let mut buffer: Vec<ActiveSlot> = Vec::with_capacity(self.channel.num_slots as usize);
 
             for i in 0..self.channel.num_slots as usize {
@@ -622,6 +656,19 @@ impl SubscriberImpl {
                 if !self.channel.validate_slot_buffer(active.slot_index)
                     || self.channel.slot_ref(active.slot_index).buffer_index == -1
                 {
+                    if self.channel.buffers_changed() {
+                        self.channel.atomic_inc_ref_count::<fn()>(
+                            active.slot_index,
+                            reliable,
+                            -1,
+                            active.ordinal,
+                            active.vchan_id,
+                            false,
+                            None,
+                        );
+                        self.reload_buffers_if_necessary();
+                        continue;
+                    }
                     self.channel.embargoed_slots.set(active.slot_index);
                     self.channel.atomic_inc_ref_count::<fn()>(
                         active.slot_index,
@@ -638,6 +685,25 @@ impl SubscriberImpl {
                 slot.flags |= MESSAGE_SEEN;
                 slot.sub_owners.set(self.subscriber_id as usize);
                 return Some(active.slot_index);
+            }
+        }
+    }
+
+    fn reload_buffers_if_necessary(&mut self) {
+        if self.channel.buffers_changed() {
+            if let Err(e) = self.attach_buffers() {
+                log::error!("Failed to attach new buffers: {}", e);
+            }
+        }
+    }
+
+    pub fn clear_active_message(&mut self) {
+        if !self.options.keep_active_message {
+            return;
+        }
+        if let Some((slot_idx, am)) = self.kept_active_message.take() {
+            if am.dec_ref_no_release() {
+                self.remove_active_message(slot_idx);
             }
         }
     }

@@ -4142,7 +4142,7 @@ TEST_F(ClientTest, PublishZeroSizeFails) {
   ASSERT_OK(client.Init(Socket()));
   auto pub = EVAL_AND_ASSERT_OK(
       client.CreatePublisher("zero_pub", {.slot_size = 64, .num_slots = 4}));
-  auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  [[maybe_unused]] auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
   auto msg = pub.PublishMessage(0);
   ASSERT_FALSE(msg.ok());
   EXPECT_THAT(msg.status().message(), ::testing::HasSubstr("greater than 0"));
@@ -4634,7 +4634,7 @@ TEST_F(ClientTest, ResizeFixedSizePublisherFails) {
       subspace::PublisherOptions().SetSlotSize(128).SetNumSlots(4).SetFixedSize(
           true)));
 
-  auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  [[maybe_unused]] auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
   auto bigger = pub.GetMessageBuffer(256);
   ASSERT_FALSE(bigger.ok());
   EXPECT_THAT(bigger.status().message(), ::testing::HasSubstr("fixed size"));
@@ -4655,7 +4655,7 @@ TEST_F(ClientTest, ResizeCallbackReturnsError) {
         return absl::InternalError("resize denied");
       }));
 
-  auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  [[maybe_unused]] auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
   auto bigger = pub.GetMessageBuffer(256);
   ASSERT_FALSE(bigger.ok());
   EXPECT_THAT(bigger.status().message(), ::testing::HasSubstr("resize denied"));

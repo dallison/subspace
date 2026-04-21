@@ -31,7 +31,7 @@ TEST(CommonTest, AtomicBitsetTraverse) {
   bitset.Set(66);
   bitset.Set(129);
   int count = 0;
-  bitset.Traverse([&count](int i) { count++; });
+  bitset.Traverse([&count](int /*i*/) { count++; });
   EXPECT_EQ(count, 6);
 }
 
@@ -55,7 +55,7 @@ TEST(CommonTest, BitsetTraverse1) {
   for (int i = 0; i < 10000; i++) {
     bitset.Set(i);
     int count = 0;
-    bitset.Traverse([&count](int i) {
+    bitset.Traverse([&count](int /*i*/) {
       // std::cerr << i << std::endl;
       count++;
     });
