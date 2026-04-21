@@ -246,6 +246,8 @@ void ServiceGenerator::GenerateClientHeader(std::ostream &os) {
     os << "    return client_->CloseBlocking(timeout);\n";
     os << "  }\n";
     break;
+  case RpcStyle::kRust:
+    break;
   }
 
   os << "  void SetLogLevel(const std::string& level) {\n";
@@ -302,6 +304,8 @@ void ServiceGenerator::GenerateServerHeader(std::ostream &os) {
     os << "  absl::Status Run(co20::Scheduler* scheduler = nullptr) {\n";
     os << "    return server_->Run(scheduler);\n";
     os << "  }\n";
+    break;
+  case RpcStyle::kRust:
     break;
   }
 
@@ -387,6 +391,8 @@ void ServiceGenerator::GenerateServerMethodRegistrations(std::ostream &os) {
         os << "      co_return co_await this->" << method->name()
            << "(req, writer);\n";
         break;
+      case RpcStyle::kRust:
+        break;
       }
 
       os << "    }, {.id=" << i << "});\n";
@@ -439,6 +445,8 @@ void ServiceGenerator::GenerateServerMethodRegistrations(std::ostream &os) {
       os << "      auto s = co_await this->" << method->name()
          << "(req, res);\n";
       os << "      co_return s;\n";
+      break;
+    case RpcStyle::kRust:
       break;
     }
 
@@ -526,6 +534,8 @@ void ServiceGenerator::GenerateMethodClientHeader(
          << "(request, receiver, std::chrono::nanoseconds(0));\n";
       os << "  }\n";
       break;
+    case RpcStyle::kRust:
+      break;
     }
     return;
   }
@@ -589,6 +599,8 @@ void ServiceGenerator::GenerateMethodClientHeader(
        << "(request, out, std::chrono::nanoseconds(0));\n";
     os << "  }\n";
     break;
+  case RpcStyle::kRust:
+    break;
   }
 }
 
@@ -639,6 +651,8 @@ void ServiceGenerator::GenerateMethodClientSource(
          << method->output_type()->name() << ">(k" << method_name
          << "Id, request, receiver, timeout);\n";
       break;
+    case RpcStyle::kRust:
+      break;
     }
     os << "}\n";
     return;
@@ -684,6 +698,8 @@ void ServiceGenerator::GenerateMethodClientSource(
        << method->output_type()->name() << ">(k" << method_name
        << "Id, request, out, timeout);\n";
     break;
+  case RpcStyle::kRust:
+    break;
   }
   os << "}\n";
 }
@@ -718,6 +734,8 @@ void ServiceGenerator::GenerateMethodServerHeader(
          << "::StreamWriter<" << method->output_type()->name()
          << ">& writer) = 0;\n";
       break;
+    case RpcStyle::kRust:
+      break;
     }
     return;
   }
@@ -742,6 +760,8 @@ void ServiceGenerator::GenerateMethodServerHeader(
     os << "  virtual co20::ValueTask<absl::Status> " << method->name()
        << "(const " << method->input_type()->name() << "& request, "
        << method->output_type()->name() << "* response) = 0;\n";
+    break;
+  case RpcStyle::kRust:
     break;
   }
 }

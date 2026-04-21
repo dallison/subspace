@@ -46,7 +46,7 @@ static std::shared_ptr<subspace::co20_rpc::RpcServer> BuildServer() {
 
   auto s = server->RegisterMethod(
       "TestMethod", "subspace.TestRequest", "subspace.TestResponse",
-      [](const google::protobuf::Any &req,
+      [](const google::protobuf::Any & /*req*/,
          google::protobuf::Any *res) -> co20::ValueTask<absl::Status> {
         rpc::TestResponse r;
         r.set_message("Hello from TestMethod");

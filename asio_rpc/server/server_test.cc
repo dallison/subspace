@@ -117,7 +117,7 @@ struct ServerContext {
 static uint64_t next_client_id = 1;
 static int next_request_id = 1;
 
-static void Open(std::shared_ptr<subspace::asio_rpc::RpcServer> server,
+static void Open(std::shared_ptr<subspace::asio_rpc::RpcServer> /*server*/,
                  subspace::RpcServerResponse &response, ServerContext &ctx,
                  boost::asio::yield_context yield) {
   subspace::RpcServerRequest req;
@@ -174,7 +174,7 @@ static void Open(std::shared_ptr<subspace::asio_rpc::RpcServer> server,
   }
 }
 
-static void Close(std::shared_ptr<subspace::asio_rpc::RpcServer> server,
+static void Close(std::shared_ptr<subspace::asio_rpc::RpcServer> /*server*/,
                   ServerContext &ctx, boost::asio::yield_context yield) {
   subspace::RpcServerRequest req;
   req.set_client_id(ctx.client_id);

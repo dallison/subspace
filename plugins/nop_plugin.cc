@@ -59,7 +59,7 @@ void HeartbeatCoroutine(subspace::Server &server,
   }
 }
 
-absl::Status OnStartup(subspace::Server &s, const std::string &name,
+absl::Status OnStartup(subspace::Server & /*s*/, const std::string &name,
                        subspace::PluginContext *ctx) {
   ctx->logger.Log(toolbelt::LogLevel::kInfo, "NOP plugin %s started\n",
                   name.c_str());
@@ -77,36 +77,38 @@ void OnReady(subspace::Server &s, subspace::PluginContext *ctx) {
 void OnShutdown(subspace::PluginContext *ctx) {
   ctx->logger.Log(toolbelt::LogLevel::kInfo, "NOP plugin shutting down\n");
 }
-void OnNewChannel(subspace::Server &s, const std::string &channel_name,
+void OnNewChannel(subspace::Server & /*s*/, const std::string &channel_name,
                   subspace::PluginContext *ctx) {
   ctx->logger.Log(toolbelt::LogLevel::kInfo, "NOP plugin: new channel %s\n",
                   channel_name.c_str());
 }
-void OnRemoveChannel(subspace::Server &s, const std::string &channel_name,
+void OnRemoveChannel(subspace::Server & /*s*/, const std::string &channel_name,
                      subspace::PluginContext *ctx) {
   ctx->logger.Log(toolbelt::LogLevel::kInfo, "NOP plugin: remove channel %s\n",
                   channel_name.c_str());
 }
-void OnNewPublisher(subspace::Server &s, const std::string &channel_name,
+void OnNewPublisher(subspace::Server & /*s*/, const std::string &channel_name,
                     int publisher_id, subspace::PluginContext *ctx) {
   ctx->logger.Log(toolbelt::LogLevel::kInfo,
                   "NOP plugin: new publisher %d on channel %s\n", publisher_id,
                   channel_name.c_str());
 }
-void OnRemovePublisher(subspace::Server &s, const std::string &channel_name,
-                       int publisher_id, subspace::PluginContext *ctx) {
+void OnRemovePublisher(subspace::Server & /*s*/,
+                       const std::string &channel_name, int publisher_id,
+                       subspace::PluginContext *ctx) {
   ctx->logger.Log(toolbelt::LogLevel::kInfo,
                   "NOP plugin: remove publisher %d on channel %s\n",
                   publisher_id, channel_name.c_str());
 }
-void OnNewSubscriber(subspace::Server &s, const std::string &channel_name,
+void OnNewSubscriber(subspace::Server & /*s*/, const std::string &channel_name,
                      int subscriber_id, subspace::PluginContext *ctx) {
   ctx->logger.Log(toolbelt::LogLevel::kInfo,
                   "NOP plugin: new subscriber %d on channel %s\n",
                   subscriber_id, channel_name.c_str());
 }
-void OnRemoveSubscriber(subspace::Server &s, const std::string &channel_name,
-                        int subscriber_id, subspace::PluginContext *ctx) {
+void OnRemoveSubscriber(subspace::Server & /*s*/,
+                        const std::string &channel_name, int subscriber_id,
+                        subspace::PluginContext *ctx) {
   ctx->logger.Log(toolbelt::LogLevel::kInfo,
                   "NOP plugin: remove subscriber %d on channel %s\n",
                   subscriber_id, channel_name.c_str());

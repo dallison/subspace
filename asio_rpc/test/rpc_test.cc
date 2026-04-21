@@ -26,7 +26,7 @@ public:
   MyServer(const std::string &socket) : rpc::TestServiceServer(socket) {}
 
   absl::StatusOr<rpc::TestResponse>
-  TestMethod(const rpc::TestRequest &request,
+  TestMethod(const rpc::TestRequest & /*request*/,
              boost::asio::yield_context) override {
     rpc::TestResponse response;
     response.set_message("Hello from TestMethod");
@@ -140,7 +140,9 @@ TEST_F(AsioRpcTest, Stream) {
         class MyResponseReceiver
             : public subspace::asio_rpc::ResponseReceiver<rpc::TestResponse> {
         public:
-          void OnResponse(rpc::TestResponse &&response) override { count++; }
+          void OnResponse(rpc::TestResponse && /*response*/) override {
+            count++;
+          }
           void OnError(const absl::Status &) override {}
           void OnCancel() override {}
           void OnFinish() override {}
