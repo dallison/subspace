@@ -159,7 +159,7 @@ static std::shared_ptr<subspace::RpcServer> BuildServer() {
   // Error method.
   s = server->RegisterMethod<rpc::TestRequest, rpc::TestResponse>(
       "ErrorMethod",
-      [](const auto &req, auto *res, co::Coroutine *) -> absl::Status {
+      [](const auto &req, auto * /*res*/, co::Coroutine *) -> absl::Status {
         std::cerr << "ErrorMethod called with request: " << req.DebugString()
                   << std::endl;
         return absl::InternalError("Error occurred");

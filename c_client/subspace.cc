@@ -505,7 +505,7 @@ bool subspace_register_resize_callback(SubspacePublisher publisher,
   auto pub_ptr = reinterpret_cast<std::shared_ptr<subspace::Publisher> *>(
       publisher.publisher);
   absl::Status status = (*pub_ptr)->RegisterResizeCallback(
-      [publisher, callback](subspace::Publisher *pub, int32_t old_size,
+      [publisher, callback](subspace::Publisher * /*pub*/, int32_t old_size,
                             int32_t new_size) -> absl::Status {
         // Call the callback with the publisher and the old and new sizes.
         bool ok = callback(publisher, old_size, new_size);

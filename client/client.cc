@@ -602,7 +602,7 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
                  publisher->VirtualChannelId(), false, old_slot_id, false);
 }
 
-void ClientImpl::CancelPublish(PublisherImpl *publisher) {
+void ClientImpl::CancelPublish(PublisherImpl * /*publisher*/) {
   // Creating this object will unlock the mutex when it goes out of scope.
   ClientLockGuard guard(this, LockMode::kMaybeLocked);
 }

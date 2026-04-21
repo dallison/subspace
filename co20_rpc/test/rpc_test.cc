@@ -133,7 +133,7 @@ TEST_F(Co20RpcTest, Basic) {
         EXPECT_EQ(r->message(), "Hello from TestMethod");
 
         auto cs = co_await client->Close();
-        CO_ASSERT_OK(cs);
+        EXPECT_TRUE(cs.ok()) << cs;
         server->Stop();
         co_return;
       },
@@ -173,7 +173,7 @@ TEST_F(Co20RpcTest, Stream) {
         CO_ASSERT_EQ(200, receiver.count);
 
         auto cs = co_await client->Close();
-        CO_ASSERT_OK(cs);
+        EXPECT_TRUE(cs.ok()) << cs;
         server->Stop();
         co_return;
       },
@@ -204,7 +204,7 @@ TEST_F(Co20RpcTest, Error) {
                                       "INTERNAL: Error occurred"));
 
         auto cs = co_await client->Close(2s);
-        CO_ASSERT_OK(cs);
+        EXPECT_TRUE(cs.ok()) << cs;
         server->Stop();
         co_return;
       },
@@ -236,8 +236,9 @@ TEST_F(Co20RpcTest, Timeout) {
             << "Actual: " << s.ToString();
 
         auto cs = co_await client->Close(2s);
-        CO_ASSERT_OK(cs);
+        EXPECT_TRUE(cs.ok()) << cs;
         server->Stop();
+        scheduler.Stop();
         co_return;
       },
       "test");
