@@ -27,11 +27,13 @@ ABSL_FLAG(bool, local, false, "Use local computer only");
 ABSL_FLAG(int, notify_fd, -1, "File descriptor to notify of startup");
 ABSL_FLAG(std::string, machine, "", "Machine name");
 
-#if defined(___APPLE__)
-// This is default true on Mac since is uses /tmp.
+// macOS and QNX both use /tmp-shadowed POSIX shared memory, so it's safe and
+// useful to clean up the filesystem on startup there.  On Linux the server
+// uses /dev/shm directly and tests routinely run multiple instances, so we
+// keep it off by default.
+#if defined(__APPLE__) || defined(__QNX__) || defined(__QNXNTO__)
 ABSL_FLAG(bool, cleanup_filesystem, true, "Cleanup the filesystem on server startup");
 #else
-// Default false on other OSes as it interferes with tests that run multiple servers.
 ABSL_FLAG(bool, cleanup_filesystem, false, "Cleanup the filesystem on server startup");
 #endif
 ABSL_FLAG(std::vector<std::string>, plugins, {},

@@ -1,0 +1,36 @@
+# Platform definitions for QNX 8 (Neutrino) targets.
+#
+# These are referenced from the top-level .bazelrc via:
+#   build:qnx_aarch64 --platforms=//bazel/toolchains/qnx/platforms:qnx_aarch64
+#   build:qnx_x86_64  --platforms=//bazel/toolchains/qnx/platforms:qnx_x86_64
+#
+# The standard @platforms repository does not (yet) ship a QNX OS constraint,
+# so we declare our own and use it alongside the standard CPU constraints.
+# Toolchains targeting QNX should declare `target_compatible_with` against
+# `//bazel/toolchains/qnx/platforms:qnx`.
+
+package(default_visibility = ["//visibility:public"])
+
+# Custom OS constraint value for QNX.  We attach it to the standard
+# @platforms//os:os constraint_setting so that a single target_platform can
+# only ever be one OS.
+constraint_value(
+    name = "qnx",
+    constraint_setting = "@platforms//os:os",
+)
+
+platform(
+    name = "qnx_aarch64",
+    constraint_values = [
+        ":qnx",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+platform(
+    name = "qnx_x86_64",
+    constraint_values = [
+        ":qnx",
+        "@platforms//cpu:x86_64",
+    ],
+)

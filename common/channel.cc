@@ -335,7 +335,10 @@ Channel::PosixSharedMemoryName(const std::string &shadow_file) {
                         shadow_file, strerror(errno)));
   }
   // Use the inode number (unique per file) to make the shm file name.
-  return absl::StrFormat("subspace_%d", st.st_ino);
+  // st_ino is unsigned and can be 64-bit on some systems (e.g. QNX), so
+  // promote to uint64_t before formatting.
+  return absl::StrFormat("subspace_%llu",
+                         static_cast<unsigned long long>(st.st_ino));
 }
 #endif
 
