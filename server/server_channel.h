@@ -447,6 +447,19 @@ public:
   int NumSlots() const override { return mux_->NumSlots(); }
   int GetChannelId() const override { return mux_->GetChannelId(); }
 
+  // The prefix / checksum / metadata sizes describe the per-slot prefix area
+  // laid out in the buffers owned by the multiplexer.  Every virtual channel
+  // sharing a mux must use the same layout, so we delegate both reads and
+  // writes to the mux.  This keeps consistency checks, subscriber responses,
+  // and any later layout-driven computations honest regardless of which
+  // virtual channel handle is used.
+  int32_t PrefixSize() const override { return mux_->PrefixSize(); }
+  void SetPrefixSize(int32_t size) override { mux_->SetPrefixSize(size); }
+  int32_t ChecksumSize() const override { return mux_->ChecksumSize(); }
+  void SetChecksumSize(int32_t size) override { mux_->SetChecksumSize(size); }
+  int32_t MetadataSize() const override { return mux_->MetadataSize(); }
+  void SetMetadataSize(int32_t size) override { mux_->SetMetadataSize(size); }
+
   std::string ResolvedName() const override { return mux_->ResolvedName(); }
   void RemoveBuffer(uint64_t session_id) override {
     mux_->RemoveBuffer(session_id);

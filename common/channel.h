@@ -467,14 +467,20 @@ public:
   }
 
   // Total prefix area size in bytes (always a multiple of 64).
-  int32_t PrefixSize() const { return prefix_size_; }
-  void SetPrefixSize(int32_t size) { prefix_size_ = size; }
+  //
+  // These accessors are virtual so that VirtualChannel (in the server) can
+  // forward them to its underlying multiplexer: storage and slot layout are
+  // owned by the mux, so all virtual channels sharing a mux must agree on
+  // the prefix layout.  Plain (non-mux) channels and client-side channels
+  // simply use their own fields.
+  virtual int32_t PrefixSize() const { return prefix_size_; }
+  virtual void SetPrefixSize(int32_t size) { prefix_size_ = size; }
 
-  int32_t ChecksumSize() const { return checksum_size_; }
-  void SetChecksumSize(int32_t size) { checksum_size_ = size; }
+  virtual int32_t ChecksumSize() const { return checksum_size_; }
+  virtual void SetChecksumSize(int32_t size) { checksum_size_ = size; }
 
-  int32_t MetadataSize() const { return metadata_size_; }
-  void SetMetadataSize(int32_t size) { metadata_size_ = size; }
+  virtual int32_t MetadataSize() const { return metadata_size_; }
+  virtual void SetMetadataSize(int32_t size) { metadata_size_ = size; }
 
   uint64_t BufferSizeToSlotSize(uint64_t size) const {
     if (size < NumSlots() * static_cast<uint64_t>(PrefixSize())) {
