@@ -223,7 +223,6 @@ private:
   std::string socket_name_;
   uint64_t session_id_;
   std::vector<std::unique_ptr<ClientHandler>> client_handlers_;
-  bool running_ = false;
   std::string server_id_;
   std::string hostname_;
   std::string interface_;
