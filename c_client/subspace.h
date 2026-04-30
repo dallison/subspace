@@ -271,6 +271,36 @@ bool subspace_register_resize_callback(SubspacePublisher publisher,
                                                         int32_t, int32_t));
 bool subspace_unregister_resize_callback(SubspacePublisher publisher);
 
+// Per-message user-metadata accessors.
+//
+// A publisher / subscriber created with metadata_size > 0 reserves that
+// many bytes of opaque user metadata in the prefix area of every slot.
+// These calls expose that area:
+//
+//   - subspace_get_publisher_metadata returns a writable pointer into the
+//     current message buffer's metadata region. It is valid between
+//     subspace_get_message_buffer() and subspace_publish_message().
+//
+//   - subspace_get_subscriber_metadata returns a read-only pointer into
+//     the most recently read message's metadata region. It is valid
+//     between subspace_read_message() and the next read on the same
+//     subscriber.
+//
+// In both cases *out_size receives the metadata-region size in bytes
+// (0 if the channel was created with metadata_size == 0). On any error
+// the returned pointer is NULL, *out_size is 0, and the call sets the
+// thread-local error string accessible via subspace_get_last_error().
+void *subspace_get_publisher_metadata(SubspacePublisher publisher,
+                                      size_t *out_size);
+const void *subspace_get_subscriber_metadata(SubspaceSubscriber subscriber,
+                                             size_t *out_size);
+
+// Convenience reporter: returns the configured per-message metadata
+// region size (in bytes) for the publisher / subscriber. Returns 0 if
+// the handle is invalid or metadata is not enabled.
+int32_t subspace_get_publisher_metadata_size(SubspacePublisher publisher);
+int32_t subspace_get_subscriber_metadata_size(SubspaceSubscriber subscriber);
+
 #if defined(__cplusplus)
 } // extern "C"
 #endif

@@ -628,6 +628,68 @@ int subspace_get_subscriber_num_slots(SubspaceSubscriber subscriber) {
   return (*sub_ptr)->NumSlots();
 }
 
+void *subspace_get_publisher_metadata(SubspacePublisher publisher,
+                                      size_t *out_size) {
+  subspace_clear_error();
+  if (out_size != nullptr) {
+    *out_size = 0;
+  }
+  if (publisher.publisher == nullptr) {
+    subspace_set_error("Invalid publisher");
+    return nullptr;
+  }
+  // The publisher contains a pointer to a shared_ptr to a
+  // subspace::Publisher.
+  auto pub_ptr = reinterpret_cast<std::shared_ptr<subspace::Publisher> *>(
+      publisher.publisher);
+  absl::Span<std::byte> span = (*pub_ptr)->GetMetadata();
+  if (out_size != nullptr) {
+    *out_size = span.size();
+  }
+  return span.data();
+}
+
+const void *subspace_get_subscriber_metadata(SubspaceSubscriber subscriber,
+                                             size_t *out_size) {
+  subspace_clear_error();
+  if (out_size != nullptr) {
+    *out_size = 0;
+  }
+  if (subscriber.subscriber == nullptr) {
+    subspace_set_error("Invalid subscriber");
+    return nullptr;
+  }
+  // The subscriber contains a pointer to a shared_ptr to a
+  // subspace::Subscriber. Subscriber::GetMetadata returns a span over the
+  // most recently read slot's metadata region; it remains valid until the
+  // next read on the same subscriber.
+  auto sub_ptr = reinterpret_cast<std::shared_ptr<subspace::Subscriber> *>(
+      subscriber.subscriber);
+  absl::Span<const std::byte> span = (*sub_ptr)->GetMetadata();
+  if (out_size != nullptr) {
+    *out_size = span.size();
+  }
+  return span.data();
+}
+
+int32_t subspace_get_publisher_metadata_size(SubspacePublisher publisher) {
+  if (publisher.publisher == nullptr) {
+    return 0;
+  }
+  auto pub_ptr = reinterpret_cast<std::shared_ptr<subspace::Publisher> *>(
+      publisher.publisher);
+  return (*pub_ptr)->MetadataSize();
+}
+
+int32_t subspace_get_subscriber_metadata_size(SubspaceSubscriber subscriber) {
+  if (subscriber.subscriber == nullptr) {
+    return 0;
+  }
+  auto sub_ptr = reinterpret_cast<std::shared_ptr<subspace::Subscriber> *>(
+      subscriber.subscriber);
+  return (*sub_ptr)->MetadataSize();
+}
+
 #if defined(__cplusplus)
 } // extern "C"
 #endif
