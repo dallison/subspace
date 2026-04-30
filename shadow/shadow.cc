@@ -23,9 +23,11 @@ void Shadow::NotifyEvent() {
 }
 
 absl::Status Shadow::Run() {
-#ifndef __linux__
+  // Clear any stale socket file from a previous unclean shutdown.  Without
+  // this, Bind would fail with EADDRINUSE on Linux too (the previous guard
+  // only removed it on non-Linux, which was incorrect; the server source
+  // unconditionally removes before bind for the same reason).
   remove(socket_name_.c_str());
-#endif
   absl::Status status = listen_socket_.Bind(socket_name_, true);
   if (!status.ok()) {
     return status;
