@@ -2988,6 +2988,80 @@ TEST_F(ClientTest, PrefixSizeInconsistent) {
   ASSERT_FALSE(pub2.ok());
 }
 
+// Virtual channels share storage on a multiplexer, so they must share a
+// single prefix layout. The mux owns the layout: the first publisher to any
+// vchan on a given mux fixes cs/ms, subsequent publishers (on the same vchan
+// or any sibling vchan) must agree, and subscribers on any vchan see the
+// authoritative sizes from the mux.
+TEST_F(ClientTest, VirtualChannelMuxPrefixIsShared) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  // First publisher on vchan_a with checksum_size=20, metadata_size=50:
+  //   48 + 20 + 50 = 118 → Aligned<64> = 128.
+  absl::StatusOr<Publisher> pub_a = client->CreatePublisher(
+      "vchan_a", {.slot_size = 256, .num_slots = 10, .mux = "shared_mux",
+                  .checksum_size = 20, .metadata_size = 50});
+  ASSERT_OK(pub_a);
+  ASSERT_EQ(128, pub_a->PrefixSize());
+  ASSERT_EQ(20, pub_a->ChecksumSize());
+  ASSERT_EQ(50, pub_a->MetadataSize());
+
+  // A subscriber on a different vchan on the same mux must see the mux's
+  // sizes, not the per-vchan defaults (4/0/64).
+  absl::StatusOr<Subscriber> sub_b =
+      client->CreateSubscriber("vchan_b", {.mux = "shared_mux"});
+  ASSERT_OK(sub_b);
+  ASSERT_EQ(128, sub_b->PrefixSize());
+  ASSERT_EQ(20, sub_b->ChecksumSize());
+  ASSERT_EQ(50, sub_b->MetadataSize());
+
+  // A second publisher on a different vchan on the same mux with matching
+  // sizes must succeed and report the same prefix layout.
+  absl::StatusOr<Publisher> pub_b = client->CreatePublisher(
+      "vchan_b", {.slot_size = 256, .num_slots = 10, .mux = "shared_mux",
+                  .checksum_size = 20, .metadata_size = 50});
+  ASSERT_OK(pub_b);
+  ASSERT_EQ(128, pub_b->PrefixSize());
+
+  // A second publisher on yet another vchan with mismatching cs/ms must be
+  // rejected, because virtual channels on a mux cannot disagree on layout.
+  absl::StatusOr<Publisher> pub_c = client->CreatePublisher(
+      "vchan_c", {.slot_size = 256, .num_slots = 10, .mux = "shared_mux",
+                  .checksum_size = 32});
+  ASSERT_FALSE(pub_c.ok());
+
+  absl::StatusOr<Publisher> pub_d = client->CreatePublisher(
+      "vchan_d", {.slot_size = 256, .num_slots = 10, .mux = "shared_mux",
+                  .metadata_size = 100});
+  ASSERT_FALSE(pub_d.ok());
+}
+
+// Symmetric scenario: a subscriber creates the placeholder mux + virtual
+// channel first, then a publisher arrives with non-default sizes. Subscribers
+// on sibling virtual channels created after that must see the publisher's
+// sizes via the mux.
+TEST_F(ClientTest, VirtualChannelMuxPrefixSubscriberFirst) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Subscriber> sub_a =
+      client->CreateSubscriber("vchan_a", {.mux = "sub_first_mux"});
+  ASSERT_OK(sub_a);
+
+  absl::StatusOr<Publisher> pub_a = client->CreatePublisher(
+      "vchan_a", {.slot_size = 256, .num_slots = 10, .mux = "sub_first_mux",
+                  .checksum_size = 20, .metadata_size = 50});
+  ASSERT_OK(pub_a);
+  ASSERT_EQ(128, pub_a->PrefixSize());
+
+  // Subscriber on a sibling vchan should now see the mux's sizes.
+  absl::StatusOr<Subscriber> sub_b =
+      client->CreateSubscriber("vchan_b", {.mux = "sub_first_mux"});
+  ASSERT_OK(sub_b);
+  ASSERT_EQ(128, sub_b->PrefixSize());
+  ASSERT_EQ(20, sub_b->ChecksumSize());
+  ASSERT_EQ(50, sub_b->MetadataSize());
+}
+
 TEST_F(ClientTest, SubscriberGetsSizes) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
