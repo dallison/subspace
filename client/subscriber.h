@@ -337,6 +337,20 @@ private:
       on_receive_callback_ = nullptr;
   ChecksumCallback checksum_callback_ = nullptr;
   std::vector<std::byte> checksum_tmp_;
+
+  // Cache for active_slots_ across NextSlot() calls. The classic path
+  // re-traverses the available-slot bitset and re-sorts active_slots_ on
+  // every receive, which is O(K log K) in the queue depth K. In the common
+  // FIFO consumption case nothing has changed between calls and we can
+  // simply advance a cursor through the already-sorted list. We rebuild
+  // when:
+  //   * the publisher has bumped ccb_->total_messages, or
+  //   * a CAS / validate failed and we need to re-snapshot, or
+  //   * the cursor has fallen off the end of active_slots_.
+  // This cache only optimises the FIFO read path; LastSlot still rebuilds.
+  uint64_t next_slot_cached_total_ = 0;
+  size_t next_slot_cursor_ = 0;
+  bool next_slot_cache_valid_ = false;
 };
 } // namespace details
 } // namespace subspace
