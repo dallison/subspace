@@ -82,6 +82,7 @@ SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size,
       .activate = false,
       .checksum_size = 4,
       .metadata_size = 0,
+      .prefer_retired_slots = true,
   };
   return options;
 }
@@ -127,6 +128,7 @@ SubspacePublisher subspace_create_publisher(SubspaceClient client,
       .activate = options.activate,
       .checksum_size = options.checksum_size,
       .metadata_size = options.metadata_size,
+      .prefer_retired_slots = options.prefer_retired_slots,
   };
   subspace_clear_error();
   SubspacePublisher publisher;
@@ -249,7 +251,7 @@ bool subspace_register_subscriber_callback(SubspaceSubscriber subscriber,
   return true;
 }
 
-bool subspace_unregister_subscriber_callback(SubspaceSubscriber subscriber) {
+bool subspace_remove_subscriber_callback(SubspaceSubscriber subscriber) {
   subspace_clear_error();
   if (subscriber.subscriber == nullptr) {
     subspace_set_error("Invalid subscriber parameter");
@@ -329,6 +331,28 @@ bool subspace_process_all_messages(SubspaceSubscriber subscriber) {
     subspace_set_error(status.ToString().c_str());
     return false;
   }
+  return true;
+}
+
+bool subspace_invoke_subscriber_callback(SubspaceSubscriber subscriber,
+                                         SubspaceMessage message) {
+  subspace_clear_error();
+  if (subscriber.subscriber == nullptr) {
+    subspace_set_error("Invalid subscriber");
+    return false;
+  }
+  if (message.message == nullptr) {
+    subspace_set_error("Invalid message");
+    return false;
+  }
+  auto sub_ptr = reinterpret_cast<std::shared_ptr<subspace::Subscriber> *>(
+      subscriber.subscriber);
+  auto msg_ptr = reinterpret_cast<std::shared_ptr<subspace::Message> *>(
+      message.message);
+  // InvokeMessageCallback takes the Message by value; the copy increments the
+  // active-message refcount so the caller's SubspaceMessage retains ownership
+  // and is still its responsibility to subspace_free_message.
+  (*sub_ptr)->InvokeMessageCallback(**msg_ptr);
   return true;
 }
 
