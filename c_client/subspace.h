@@ -98,6 +98,20 @@ typedef struct {
   bool activate;         // Send an activation message when created.
   int32_t checksum_size; // Bytes reserved for checksum (default 4).
   int32_t metadata_size; // Bytes reserved for user metadata (default 0).
+
+  // Free-slot allocator policy for unreliable publishers (no effect on
+  // reliable ones).  When true (the default, set by
+  // subspace_publisher_options_default), the publisher prefers to
+  // recycle a recently retired slot — whose pages are already cache-hot
+  // from the last publish/consume cycle — over pulling a fresh slot
+  // out of the never-touched FreeSlots pool, which would demand-fault
+  // new physical pages on first write.  In steady state this lets the
+  // publisher cycle through a tiny working set of cache-hot slots
+  // regardless of how deep num_slots is configured, while still
+  // bursting into FreeSlots when the subscriber falls behind.  Set to
+  // false to force the legacy FreeSlots-first allocator (useful when
+  // reproducing pre-fix benchmarks).
+  bool prefer_retired_slots;
 } SubspacePublisherOptions;
 
 typedef struct {
@@ -238,6 +252,20 @@ bool subspace_remove_dropped_message_callback(SubspaceSubscriber subscriber);
 // Get all available messages from the subscriber and call the callback that has
 // been previously registered using subspace_register_subscriber_callback.
 bool subspace_process_all_messages(SubspaceSubscriber subscriber);
+
+// Invoke the subscriber's registered message callback (the one installed via
+// subspace_register_subscriber_callback) with the supplied message. Use this
+// when you want to drive callback dispatch yourself after reading a message
+// with subspace_read_message / subspace_read_message_with_mode (for example,
+// from your own event loop) instead of running subspace_process_all_messages
+// or relying on a worker thread.
+//
+// The supplied SubspaceMessage is *not* consumed by this call; the caller still
+// owns it and must subspace_free_message it as usual. Returns false (and sets
+// the last error) if either argument is invalid; returns true if dispatch was
+// attempted (the callback is a no-op when none has been registered).
+bool subspace_invoke_subscriber_callback(SubspaceSubscriber subscriber,
+                                         SubspaceMessage message);
 
 // Publisher API.
 
