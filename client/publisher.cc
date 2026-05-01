@@ -104,17 +104,42 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
   int cas_retries = 0;
   int retired_slot = -1;
   int free_slot = -1;
+  // See PublisherOptions::SetPreferRetiredSlots() for the rationale.
+  // When true (the default) we prefer recycling a retired slot over
+  // pulling a fresh slot from the never-used pool.  Both are equally
+  // valid for an unreliable publisher (a retired slot has been seen
+  // by every current subscriber and dropped), but a retired slot's
+  // pages are already cache-hot from the recent publish/consume
+  // cycle; a slot out of FreeSlots will demand-fault the kernel into
+  // allocating new physical pages on first write, which dominates
+  // wall-time for large payloads.  In steady state the publisher
+  // cycles through a tiny working set of retired slots without ever
+  // consuming from FreeSlots, while still being able to burst into
+  // FreeSlots if the subscriber falls behind.
+  const bool retired_first = options_.PreferRetiredSlots();
   for (;;) {
     CheckReload();
-    // First look at free slots then at retired slots.  If there are no free or
-    // retired slots, look at all slots for the earliest unreferenced one.
-    if (!ccb_->free_slots_exhausted.load(std::memory_order_relaxed) &&
-        (free_slot = FreeSlots().FindFirstSet()) != -1) {
-      // FindFirstSet uses relaxed loads, so under concurrency a peer
-      // publisher may already have claimed this bit. Atomically clear
-      // and check we won the race; if we lost, the slot already belongs
-      // to someone else and re-using it would silently overwrite an
-      // unread message — try again.
+    bool tried_first = false;
+    if (retired_first) {
+      retired_slot = RetiredSlots().FindFirstSet();
+      tried_first = (retired_slot != -1);
+    } else if (!ccb_->free_slots_exhausted.load(std::memory_order_relaxed)) {
+      free_slot = FreeSlots().FindFirstSet();
+      tried_first = (free_slot != -1);
+    }
+
+    if (tried_first && retired_first) {
+      // Claim the retired slot.
+      if (embargoed_slots_.IsSet(retired_slot)) {
+        continue;
+      }
+      if (!RetiredSlots().ClearWasSet(retired_slot)) {
+        retired_slot = -1;
+        continue;
+      }
+      slot = &ccb_->slots[retired_slot];
+    } else if (tried_first && !retired_first) {
+      // Claim the free slot.
       if (!FreeSlots().ClearWasSet(free_slot)) {
         free_slot = -1;
         continue;
@@ -123,13 +148,24 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
       if (FreeSlots().IsEmpty()) {
         ccb_->free_slots_exhausted.store(true, std::memory_order_relaxed);
       }
-    } else if ((retired_slot = RetiredSlots().FindFirstSet()) != -1) {
-      // We have a retired slot.
+    } else if (retired_first &&
+               !ccb_->free_slots_exhausted.load(std::memory_order_relaxed) &&
+               (free_slot = FreeSlots().FindFirstSet()) != -1) {
+      // Retired pool empty, fall back to FreeSlots.
+      if (!FreeSlots().ClearWasSet(free_slot)) {
+        free_slot = -1;
+        continue;
+      }
+      slot = &ccb_->slots[free_slot];
+      if (FreeSlots().IsEmpty()) {
+        ccb_->free_slots_exhausted.store(true, std::memory_order_relaxed);
+      }
+    } else if (!retired_first &&
+               (retired_slot = RetiredSlots().FindFirstSet()) != -1) {
+      // FreeSlots exhausted (legacy order), fall back to RetiredSlots.
       if (embargoed_slots_.IsSet(retired_slot)) {
         continue;
       }
-      // Same race as FreeSlots above: only one publisher should win the
-      // claim of any given retired bit.
       if (!RetiredSlots().ClearWasSet(retired_slot)) {
         retired_slot = -1;
         continue;
