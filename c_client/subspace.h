@@ -98,6 +98,20 @@ typedef struct {
   bool activate;         // Send an activation message when created.
   int32_t checksum_size; // Bytes reserved for checksum (default 4).
   int32_t metadata_size; // Bytes reserved for user metadata (default 0).
+
+  // Free-slot allocator policy for unreliable publishers (no effect on
+  // reliable ones).  When true (the default, set by
+  // subspace_publisher_options_default), the publisher prefers to
+  // recycle a recently retired slot — whose pages are already cache-hot
+  // from the last publish/consume cycle — over pulling a fresh slot
+  // out of the never-touched FreeSlots pool, which would demand-fault
+  // new physical pages on first write.  In steady state this lets the
+  // publisher cycle through a tiny working set of cache-hot slots
+  // regardless of how deep num_slots is configured, while still
+  // bursting into FreeSlots when the subscriber falls behind.  Set to
+  // false to force the legacy FreeSlots-first allocator (useful when
+  // reproducing pre-fix benchmarks).
+  bool prefer_retired_slots;
 } SubspacePublisherOptions;
 
 typedef struct {
@@ -239,6 +253,20 @@ bool subspace_remove_dropped_message_callback(SubspaceSubscriber subscriber);
 // been previously registered using subspace_register_subscriber_callback.
 bool subspace_process_all_messages(SubspaceSubscriber subscriber);
 
+// Invoke the subscriber's registered message callback (the one installed via
+// subspace_register_subscriber_callback) with the supplied message. Use this
+// when you want to drive callback dispatch yourself after reading a message
+// with subspace_read_message / subspace_read_message_with_mode (for example,
+// from your own event loop) instead of running subspace_process_all_messages
+// or relying on a worker thread.
+//
+// The supplied SubspaceMessage is *not* consumed by this call; the caller still
+// owns it and must subspace_free_message it as usual. Returns false (and sets
+// the last error) if either argument is invalid; returns true if dispatch was
+// attempted (the callback is a no-op when none has been registered).
+bool subspace_invoke_subscriber_callback(SubspaceSubscriber subscriber,
+                                         SubspaceMessage message);
+
 // Publisher API.
 
 // Get the address of the buffer you can use to publish a message.  An
@@ -270,6 +298,36 @@ bool subspace_register_resize_callback(SubspacePublisher publisher,
                                        bool (*callback)(SubspacePublisher,
                                                         int32_t, int32_t));
 bool subspace_unregister_resize_callback(SubspacePublisher publisher);
+
+// Per-message user-metadata accessors.
+//
+// A publisher / subscriber created with metadata_size > 0 reserves that
+// many bytes of opaque user metadata in the prefix area of every slot.
+// These calls expose that area:
+//
+//   - subspace_get_publisher_metadata returns a writable pointer into the
+//     current message buffer's metadata region. It is valid between
+//     subspace_get_message_buffer() and subspace_publish_message().
+//
+//   - subspace_get_subscriber_metadata returns a read-only pointer into
+//     the most recently read message's metadata region. It is valid
+//     between subspace_read_message() and the next read on the same
+//     subscriber.
+//
+// In both cases *out_size receives the metadata-region size in bytes
+// (0 if the channel was created with metadata_size == 0). On any error
+// the returned pointer is NULL, *out_size is 0, and the call sets the
+// thread-local error string accessible via subspace_get_last_error().
+void *subspace_get_publisher_metadata(SubspacePublisher publisher,
+                                      size_t *out_size);
+const void *subspace_get_subscriber_metadata(SubspaceSubscriber subscriber,
+                                             size_t *out_size);
+
+// Convenience reporter: returns the configured per-message metadata
+// region size (in bytes) for the publisher / subscriber. Returns 0 if
+// the handle is invalid or metadata is not enabled.
+int32_t subspace_get_publisher_metadata_size(SubspacePublisher publisher);
+int32_t subspace_get_subscriber_metadata_size(SubspaceSubscriber subscriber);
 
 #if defined(__cplusplus)
 } // extern "C"

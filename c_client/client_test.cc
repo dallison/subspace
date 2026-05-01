@@ -155,11 +155,13 @@ TEST_F(ClientTest, PublishSingleMessageAndRead) {
   ASSERT_EQ(10, subspace_get_subscriber_num_slots(sub));
 
   // Read another message and get length 0.
+  // Empty reads no longer allocate a wrapper, so msg.message is null and
+  // subspace_free_message is a no-op (returns false: nothing to free).
   msg = subspace_read_message(sub);
   ASSERT_FALSE(subspace_has_error());
-  ASSERT_NE(nullptr, msg.message);
+  ASSERT_EQ(nullptr, msg.message);
   ASSERT_EQ(0, msg.length);
-  ASSERT_TRUE(subspace_free_message(&msg));
+  ASSERT_FALSE(subspace_free_message(&msg));
 
   ASSERT_TRUE(subspace_remove_subscriber(&sub));
   ASSERT_FALSE(subspace_remove_subscriber(&sub));

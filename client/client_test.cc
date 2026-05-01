@@ -1918,6 +1918,128 @@ TEST_F(ClientTest, Publish2Message2AndReadSharedPtrs) {
   // Number of active messages: 1
 }
 
+class TestAliasedMessage {
+public:
+  TestAliasedMessage(const void *buffer, size_t length)
+      : base_ptr_(const_cast<void *>(buffer)) {
+    assert(length >= GetSize());
+  }
+  TestAliasedMessage() = default;
+
+  static size_t GetSize() { return 20; }
+
+  void SetName(std::string_view s) {
+    assert(s.size() <= 12);
+    std::memcpy(MutableBase(), s.data(), s.size());
+    std::memset(MutableBase() + s.size(), 0, 12 - s.size());
+  };
+  std::string_view Name() const {
+    std::string_view result{ConstBase(), 12};
+    return result.substr(0, result.find('\0'));
+  }
+
+  void SetId(std::int32_t i) { std::memcpy(MutableBase() + 12, &i, sizeof(i)); }
+  std::int32_t Id() const {
+    std::int32_t result = 0;
+    std::memcpy(&result, ConstBase() + 12, sizeof(result));
+    return result;
+  }
+
+  void SetScore(float f) { std::memcpy(MutableBase() + 16, &f, sizeof(f)); }
+  float Score() const {
+    float result = 0;
+    std::memcpy(&result, ConstBase() + 16, sizeof(result));
+    return result;
+  }
+
+private:
+  void *base_ptr_ = nullptr;
+  char *MutableBase() { return reinterpret_cast<char *>(base_ptr_); }
+  const char *ConstBase() const {
+    return reinterpret_cast<const char *>(base_ptr_);
+  }
+};
+
+struct TestAliasedMessageAliaser {
+  void Set(const void *buffer, size_t length) {
+    msg = TestAliasedMessage(buffer, length);
+  }
+  void Reset() { msg = TestAliasedMessage(); }
+  void AliasTo(const void *buffer, size_t length,
+               const TestAliasedMessage *&dest) const {
+    dest = &msg;
+  }
+  TestAliasedMessage msg;
+};
+
+TEST_F(ClientTest, PublishSingleMessageAndReadAliasedSharedPtr) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+  absl::StatusOr<Publisher> pub =
+      pub_client.CreatePublisher("dave6", TestAliasedMessage::GetSize(), 10);
+  ASSERT_OK(pub);
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  {
+    TestAliasedMessage pub_msg(*buffer, TestAliasedMessage::GetSize());
+    pub_msg.SetName("foobar");
+    pub_msg.SetId(42);
+    pub_msg.SetScore(3.14F);
+  }
+  absl::StatusOr<const Message> pub_status =
+      pub->PublishMessage(TestAliasedMessage::GetSize());
+  ASSERT_OK(pub_status);
+
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber("dave6", subspace::SubscriberOptions()
+                                               .SetMaxActiveMessages(3)
+                                               .SetKeepActiveMessage(false));
+  ASSERT_OK(sub);
+
+  using SharedPtrAliasedMsg =
+      subspace::shared_ptr<const TestAliasedMessage, TestAliasedMessageAliaser>;
+  absl::StatusOr<SharedPtrAliasedMsg> p =
+      sub->ReadMessage<const TestAliasedMessage, TestAliasedMessageAliaser>();
+  ASSERT_OK(p);
+  const auto &ptr = *p;
+  ASSERT_TRUE(static_cast<bool>(ptr));
+  ASSERT_EQ("foobar", ptr->Name());
+  ASSERT_EQ(42, ptr->Id());
+  ASSERT_EQ(3.14F, ptr->Score());
+
+  ASSERT_EQ(1, ptr.use_count());
+
+  // Copy the shared ptr using copy constructor.
+  SharedPtrAliasedMsg p2(ptr);
+  ASSERT_EQ(2, ptr.use_count());
+  ASSERT_EQ(2, p2.use_count());
+  ASSERT_EQ("foobar", p2->Name());
+  ASSERT_EQ(42, p2->Id());
+  ASSERT_EQ(3.14F, p2->Score());
+
+  // Copy using copy operator.
+  SharedPtrAliasedMsg p3 = ptr;
+  ASSERT_EQ(3, ptr.use_count());
+  ASSERT_EQ(3, p2.use_count());
+  ASSERT_EQ(3, p3.use_count());
+  ASSERT_EQ("foobar", p3->Name());
+  ASSERT_EQ(42, p3->Id());
+  ASSERT_EQ(3.14F, p3->Score());
+
+  // Move p3 to p4.
+  SharedPtrAliasedMsg p4 = std::move(p3);
+  ASSERT_FALSE(static_cast<bool>(p3));
+  ASSERT_EQ(3, ptr.use_count());
+  ASSERT_EQ(3, p2.use_count());
+  ASSERT_EQ(0, p3.use_count());
+  ASSERT_EQ(3, p4.use_count());
+  ASSERT_EQ("foobar", p4->Name());
+  ASSERT_EQ(42, p4->Id());
+  ASSERT_EQ(3.14F, p4->Score());
+}
+
 TEST_F(ClientTest, FindMessage) {
   subspace::Client pub_client;
   subspace::Client sub_client;

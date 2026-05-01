@@ -82,6 +82,7 @@ SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size,
       .activate = false,
       .checksum_size = 4,
       .metadata_size = 0,
+      .prefer_retired_slots = true,
   };
   return options;
 }
@@ -127,6 +128,7 @@ SubspacePublisher subspace_create_publisher(SubspaceClient client,
       .activate = options.activate,
       .checksum_size = options.checksum_size,
       .metadata_size = options.metadata_size,
+      .prefer_retired_slots = options.prefer_retired_slots,
   };
   subspace_clear_error();
   SubspacePublisher publisher;
@@ -169,6 +171,13 @@ SubspaceMessage subspace_read_message_with_mode(SubspaceSubscriber subscriber,
       (*sub_ptr)->ReadMessage(readMode);
   if (!status_or_msg.ok()) {
     subspace_set_error(status_or_msg.status().ToString().c_str());
+    return message;
+  }
+  // No data available: return the empty SubspaceMessage as-is. Don't
+  // allocate the smart-pointer wrapper, otherwise every poll without a
+  // message leaks one shared_ptr<Message> + one Message — the caller
+  // would have to call subspace_free_message on every empty read.
+  if (status_or_msg->length == 0) {
     return message;
   }
   // Take ownership of the message.
@@ -242,7 +251,7 @@ bool subspace_register_subscriber_callback(SubspaceSubscriber subscriber,
   return true;
 }
 
-bool subspace_unregister_subscriber_callback(SubspaceSubscriber subscriber) {
+bool subspace_remove_subscriber_callback(SubspaceSubscriber subscriber) {
   subspace_clear_error();
   if (subscriber.subscriber == nullptr) {
     subspace_set_error("Invalid subscriber parameter");
@@ -322,6 +331,28 @@ bool subspace_process_all_messages(SubspaceSubscriber subscriber) {
     subspace_set_error(status.ToString().c_str());
     return false;
   }
+  return true;
+}
+
+bool subspace_invoke_subscriber_callback(SubspaceSubscriber subscriber,
+                                         SubspaceMessage message) {
+  subspace_clear_error();
+  if (subscriber.subscriber == nullptr) {
+    subspace_set_error("Invalid subscriber");
+    return false;
+  }
+  if (message.message == nullptr) {
+    subspace_set_error("Invalid message");
+    return false;
+  }
+  auto sub_ptr = reinterpret_cast<std::shared_ptr<subspace::Subscriber> *>(
+      subscriber.subscriber);
+  auto msg_ptr = reinterpret_cast<std::shared_ptr<subspace::Message> *>(
+      message.message);
+  // InvokeMessageCallback takes the Message by value; the copy increments the
+  // active-message refcount so the caller's SubspaceMessage retains ownership
+  // and is still its responsibility to subspace_free_message.
+  (*sub_ptr)->InvokeMessageCallback(**msg_ptr);
   return true;
 }
 
@@ -626,6 +657,68 @@ int subspace_get_subscriber_num_slots(SubspaceSubscriber subscriber) {
   auto sub_ptr = reinterpret_cast<std::shared_ptr<subspace::Subscriber> *>(
       subscriber.subscriber);
   return (*sub_ptr)->NumSlots();
+}
+
+void *subspace_get_publisher_metadata(SubspacePublisher publisher,
+                                      size_t *out_size) {
+  subspace_clear_error();
+  if (out_size != nullptr) {
+    *out_size = 0;
+  }
+  if (publisher.publisher == nullptr) {
+    subspace_set_error("Invalid publisher");
+    return nullptr;
+  }
+  // The publisher contains a pointer to a shared_ptr to a
+  // subspace::Publisher.
+  auto pub_ptr = reinterpret_cast<std::shared_ptr<subspace::Publisher> *>(
+      publisher.publisher);
+  absl::Span<std::byte> span = (*pub_ptr)->GetMetadata();
+  if (out_size != nullptr) {
+    *out_size = span.size();
+  }
+  return span.data();
+}
+
+const void *subspace_get_subscriber_metadata(SubspaceSubscriber subscriber,
+                                             size_t *out_size) {
+  subspace_clear_error();
+  if (out_size != nullptr) {
+    *out_size = 0;
+  }
+  if (subscriber.subscriber == nullptr) {
+    subspace_set_error("Invalid subscriber");
+    return nullptr;
+  }
+  // The subscriber contains a pointer to a shared_ptr to a
+  // subspace::Subscriber. Subscriber::GetMetadata returns a span over the
+  // most recently read slot's metadata region; it remains valid until the
+  // next read on the same subscriber.
+  auto sub_ptr = reinterpret_cast<std::shared_ptr<subspace::Subscriber> *>(
+      subscriber.subscriber);
+  absl::Span<const std::byte> span = (*sub_ptr)->GetMetadata();
+  if (out_size != nullptr) {
+    *out_size = span.size();
+  }
+  return span.data();
+}
+
+int32_t subspace_get_publisher_metadata_size(SubspacePublisher publisher) {
+  if (publisher.publisher == nullptr) {
+    return 0;
+  }
+  auto pub_ptr = reinterpret_cast<std::shared_ptr<subspace::Publisher> *>(
+      publisher.publisher);
+  return (*pub_ptr)->MetadataSize();
+}
+
+int32_t subspace_get_subscriber_metadata_size(SubspaceSubscriber subscriber) {
+  if (subscriber.subscriber == nullptr) {
+    return 0;
+  }
+  auto sub_ptr = reinterpret_cast<std::shared_ptr<subspace::Subscriber> *>(
+      subscriber.subscriber);
+  return (*sub_ptr)->MetadataSize();
 }
 
 #if defined(__cplusplus)
