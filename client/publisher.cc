@@ -6,6 +6,7 @@
 #include "client/checksum.h"
 #include "client_channel.h"
 #include "toolbelt/clock.h"
+#include <atomic>
 namespace subspace {
 namespace details {
 
@@ -109,9 +110,16 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
     // retired slots, look at all slots for the earliest unreferenced one.
     if (!ccb_->free_slots_exhausted.load(std::memory_order_relaxed) &&
         (free_slot = FreeSlots().FindFirstSet()) != -1) {
-      // Take a free slot if there is one.
+      // FindFirstSet uses relaxed loads, so under concurrency a peer
+      // publisher may already have claimed this bit. Atomically clear
+      // and check we won the race; if we lost, the slot already belongs
+      // to someone else and re-using it would silently overwrite an
+      // unread message — try again.
+      if (!FreeSlots().ClearWasSet(free_slot)) {
+        free_slot = -1;
+        continue;
+      }
       slot = &ccb_->slots[free_slot];
-      FreeSlots().Clear(free_slot);
       if (FreeSlots().IsEmpty()) {
         ccb_->free_slots_exhausted.store(true, std::memory_order_relaxed);
       }
@@ -120,7 +128,12 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
       if (embargoed_slots_.IsSet(retired_slot)) {
         continue;
       }
-      RetiredSlots().Clear(retired_slot);
+      // Same race as FreeSlots above: only one publisher should win the
+      // claim of any given retired bit.
+      if (!RetiredSlots().ClearWasSet(retired_slot)) {
+        retired_slot = -1;
+        continue;
+      }
       slot = &ccb_->slots[retired_slot];
     } else {
       // Find the slot with refs == 0 and the oldest message.
@@ -149,8 +162,7 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
       }
       continue;
     }
-    // Claim the slot by setting the refs to kPubOwned with our owner in the
-    // bottom bits.
+    // Claim the slot by setting the kPubOwned bit and our owner.
     uint64_t old_refs = slot->refs.load(std::memory_order_relaxed);
     uint64_t ref = kPubOwned | owner;
     uint64_t expected = BuildRefsBitField(
@@ -213,7 +225,13 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
     active_slots_.clear();
     if (!ccb_->free_slots_exhausted.load(std::memory_order_relaxed) &&
         (free_slot = FreeSlots().FindFirstSet()) != -1) {
-      FreeSlots().Clear(free_slot);
+      // FindFirstSet uses relaxed loads; only the publisher whose
+      // ClearWasSet returns true actually owns this bit. See
+      // FindFreeSlotUnreliable for details.
+      if (!FreeSlots().ClearWasSet(free_slot)) {
+        free_slot = -1;
+        continue;
+      }
       if (FreeSlots().IsEmpty()) {
         ccb_->free_slots_exhausted.store(true, std::memory_order_relaxed);
       }
@@ -225,7 +243,10 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
       if (embargoed_slots_.IsSet(retired_slot)) {
         continue;
       }
-      RetiredSlots().Clear(retired_slot);
+      if (!RetiredSlots().ClearWasSet(retired_slot)) {
+        retired_slot = -1;
+        continue;
+      }
       MessageSlot *s = &ccb_->slots[retired_slot];
 
       ActiveSlot active_slot = {s, s->ordinal, s->timestamp};
