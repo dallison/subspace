@@ -49,6 +49,22 @@ public:
     bits_[word].fetch_and(~(1ULL << offset), std::memory_order_relaxed);
   }
 
+  // Atomically clear bit and return whether it was previously set.
+  // Use this when racing concurrent producers must establish unique
+  // ownership of a bit (e.g. claiming a free slot from a shared pool):
+  // FindFirstSet uses relaxed loads, so two threads can both see the
+  // same bit set; only the one whose ClearWasSet returns true actually
+  // owns it. Uses acquire ordering so subsequent state inspection of
+  // any data the bit guards happens-after the clear.
+  bool ClearWasSet(size_t bit) {
+    size_t word = bit / 64;
+    size_t offset = bit % 64;
+    uint64_t mask = 1ULL << offset;
+    uint64_t old =
+        bits_[word].fetch_and(~mask, std::memory_order_acquire);
+    return (old & mask) != 0;
+  }
+
   bool IsSet(size_t bit) const {
     size_t word = bit / 64;
     size_t offset = bit % 64;
