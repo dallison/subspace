@@ -171,6 +171,13 @@ SubspaceMessage subspace_read_message_with_mode(SubspaceSubscriber subscriber,
     subspace_set_error(status_or_msg.status().ToString().c_str());
     return message;
   }
+  // No data available: return the empty SubspaceMessage as-is. Don't
+  // allocate the smart-pointer wrapper, otherwise every poll without a
+  // message leaks one shared_ptr<Message> + one Message — the caller
+  // would have to call subspace_free_message on every empty read.
+  if (status_or_msg->length == 0) {
+    return message;
+  }
   // Take ownership of the message.
   subspace::Message *msg = new subspace::Message(std::move(*status_or_msg));
   // This holds a pointer to a shared_ptr to the smart message.
