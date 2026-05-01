@@ -218,15 +218,43 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
       PopulateActiveSlots(bits);
     }
 
-    CollectVisibleSlots(bits);
+    // Fast path: if the publisher hasn't appended any new messages since the
+    // last successful NextSlot() call, the cached, already-sorted
+    // active_slots_ list is still valid. We just need to scan forward from
+    // next_slot_cursor_ to find the next ordinal we haven't yet delivered.
+    //
+    // This avoids the O(K) bitset traversal and O(K log K) timestamp sort on
+    // every receive, which dominates throughput when the queue is deep.
+    const uint64_t total = ccb_->total_messages;
+    if (!next_slot_cache_valid_ || total != next_slot_cached_total_) {
+      CollectVisibleSlots(bits);
+      std::sort(active_slots_.begin(), active_slots_.end(),
+                       [](const ActiveSlot &a, const ActiveSlot &b) {
+                         return a.timestamp < b.timestamp;
+                       });
+      next_slot_cached_total_ = total;
+      next_slot_cursor_ = 0;
+      next_slot_cache_valid_ = true;
+    }
 
-    // Sort the active slots by timestamp.
-    std::sort(active_slots_.begin(), active_slots_.end(),
-                     [](const ActiveSlot &a, const ActiveSlot &b) {
-                       return a.timestamp < b.timestamp;
-                     });
-
-    const ActiveSlot *new_slot = FindUnseenOrdinal();
+    // Walk forward from the cursor, skipping anything we've embargoed in
+    // this NextSlot() invocation or already delivered to this subscriber.
+    auto &tracker = GetOrdinalTracker(vchan_id_);
+    const ActiveSlot *new_slot = nullptr;
+    while (next_slot_cursor_ < active_slots_.size()) {
+      const ActiveSlot &s = active_slots_[next_slot_cursor_];
+      if (embargoed_slots_.IsSet(s.slot->id)) {
+        ++next_slot_cursor_;
+        continue;
+      }
+      if (s.ordinal != 0 &&
+          !tracker.ordinals.Contains(
+              OrdinalAndVchanId{s.ordinal, s.vchan_id})) {
+        new_slot = &s;
+        break;
+      }
+      ++next_slot_cursor_;
+    }
     if (new_slot == nullptr) {
       return nullptr;
     }
@@ -251,14 +279,23 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
           new_slot->slot->Dump(std::cerr);
         }
         // Failed to get a buffer for the slot.  Embargo the slot so we don't
-        // see it again this loop and try again.
+        // see it again this loop and try again. The cache is now stale wrt
+        // the embargo; force a rebuild on the next iteration so subsequent
+        // NextSlot() calls don't permanently skip past the embargoed entry.
         embargoed_slots_.Set(new_slot->slot->id);
         AtomicIncRefCount(new_slot->slot, reliable, -1, new_slot->ordinal,
                           new_slot->vchan_id, false);
+        next_slot_cache_valid_ = false;
         continue;
       }
+      // Successful claim. Advance the cursor so the next NextSlot() call
+      // picks up the next ordinal in the cached, sorted list.
+      ++next_slot_cursor_;
       return new_slot->slot;
     }
+    // CAS failed: another subscriber raced us, or the slot was retired and
+    // overwritten with a new ordinal. Drop the cache and re-snapshot.
+    next_slot_cache_valid_ = false;
   }
   return nullptr;
 }
