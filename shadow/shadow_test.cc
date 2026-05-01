@@ -8,19 +8,84 @@
 #include "client/client.h"
 #include "absl/status/status_matchers.h"
 #include "gtest/gtest.h"
+#include <arpa/inet.h>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <cstring>
+#include <netinet/in.h>
 #include <poll.h>
+#include <string>
+#include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
+#include <vector>
 
 namespace {
 
 using ::absl_testing::IsOk;
 
-constexpr const char *kServerSocket = "/tmp/subspace_shadow_test";
-constexpr const char *kShadowSocket = "/tmp/subspace_shadow_test_shadow";
+// Returns a unique-per-process path for a unix socket.  mkstemp picks a
+// unique filename; we close and immediately unlink it (bind requires the
+// path to not exist) — Shadow::Run / Server then bind a real unix socket
+// at that path.  Using a unique path per process means concurrent or
+// repeated test invocations don't collide on a fixed /tmp/<literal> path.
+static std::string MakeUniqueSocketPath(const char *tag) {
+  std::string templ = std::string("/tmp/subspace_shadow_test_") + tag + "_XXXXXX";
+  std::vector<char> buf(templ.begin(), templ.end());
+  buf.push_back('\0');
+  int fd = mkstemp(buf.data());
+  if (fd >= 0) {
+    ::close(fd);
+    ::unlink(buf.data());
+  }
+  return std::string(buf.data());
+}
+
+// Lazy per-process unique sockets for each fixture.  Each accessor's static
+// local is initialised on first use (process-lifetime), so all references
+// inside a single test invocation see the same path while different
+// invocations see different paths.
+static const std::string &ServerSocket() {
+  static const std::string s = MakeUniqueSocketPath("server");
+  return s;
+}
+static const std::string &ShadowSocket() {
+  static const std::string s = MakeUniqueSocketPath("shadow");
+  return s;
+}
+static const std::string &RecoveryServerSocket() {
+  static const std::string s = MakeUniqueSocketPath("recovery_server");
+  return s;
+}
+static const std::string &RecoveryShadowSocket() {
+  static const std::string s = MakeUniqueSocketPath("recovery_shadow");
+  return s;
+}
+static const std::string &DualServerSocket() {
+  static const std::string s = MakeUniqueSocketPath("dual_server");
+  return s;
+}
+static const std::string &DualPrimaryShadowSocket() {
+  static const std::string s = MakeUniqueSocketPath("dual_primary");
+  return s;
+}
+static const std::string &DualSecondaryShadowSocket() {
+  static const std::string s = MakeUniqueSocketPath("dual_secondary");
+  return s;
+}
+static const std::string &BridgeServer0Socket() {
+  static const std::string s = MakeUniqueSocketPath("bridge_s0");
+  return s;
+}
+static const std::string &BridgeServer1Socket() {
+  static const std::string s = MakeUniqueSocketPath("bridge_s1");
+  return s;
+}
+static const std::string &BridgeShadowSocket() {
+  static const std::string s = MakeUniqueSocketPath("bridge_shd");
+  return s;
+}
 
 class ShadowTest : public ::testing::Test {
 public:
@@ -30,7 +95,7 @@ public:
     (void)pipe(shadow_pipe_);
 
     shadow_ = std::make_unique<subspace::Shadow>(shadow_scheduler_,
-                                                  kShadowSocket);
+                                                  ShadowSocket());
     shadow_->SetLogLevel("verbose");
     shadow_->SetNotifyFd(shadow_pipe_[1]);
 
@@ -47,9 +112,9 @@ public:
 
     (void)pipe(server_pipe_);
     server_ = std::make_unique<subspace::Server>(
-        server_scheduler_, kServerSocket, "", 0, 0, /*local=*/true,
+        server_scheduler_, ServerSocket(), "", 0, 0, /*local=*/true,
         server_pipe_[1], 1, true);
-    server_->SetShadowSocket(kShadowSocket);
+    server_->SetShadowSocket(ShadowSocket());
 
     server_thread_ = std::thread([]() {
       absl::Status s = server_->Run();
@@ -67,10 +132,11 @@ public:
     server_->Stop(/*force=*/true);
     server_thread_.join();
     server_->CleanupAfterSession();
-    (void)remove(kServerSocket);
+    (void)remove(ServerSocket().c_str());
 
     shadow_->Stop();
     shadow_thread_.join();
+    (void)remove(ShadowSocket().c_str());
 
     close(shadow_pipe_[0]);
     close(shadow_pipe_[1]);
@@ -78,7 +144,7 @@ public:
 
   void InitClient(subspace::Client &client) {
     client.SetThreadSafe(true);
-    ASSERT_THAT(client.Init(kServerSocket), IsOk());
+    ASSERT_THAT(client.Init(ServerSocket()), IsOk());
   }
 
   // Block until the given condition is true on the shadow's state.  Each time
@@ -311,15 +377,12 @@ TEST_F(ShadowTest, ServerWithoutShadowSocketWorks) {
   EXPECT_NE(server.GetSecondaryShadowReplicator(), nullptr);
 }
 
-constexpr const char *kRecoveryServerSocket = "/tmp/subspace_recovery_test";
-constexpr const char *kRecoveryShadowSocket = "/tmp/subspace_recovery_shadow";
-
 class ShadowRecoveryTest : public ::testing::Test {
 protected:
   void StartShadow() {
     (void)pipe(shadow_pipe_);
     shadow_ = std::make_unique<subspace::Shadow>(shadow_scheduler_,
-                                                  kRecoveryShadowSocket);
+                                                  RecoveryShadowSocket());
     shadow_->SetLogLevel("verbose");
     shadow_->SetNotifyFd(shadow_pipe_[1]);
 
@@ -338,9 +401,9 @@ protected:
     server_scheduler_ = std::make_unique<co::CoroutineScheduler>();
     (void)pipe(server_pipe_);
     server_ = std::make_unique<subspace::Server>(
-        *server_scheduler_, kRecoveryServerSocket, "", 0, 0, true,
+        *server_scheduler_, RecoveryServerSocket(), "", 0, 0, true,
         server_pipe_[1], 1, true, false);
-    server_->SetShadowSocket(kRecoveryShadowSocket);
+    server_->SetShadowSocket(RecoveryShadowSocket());
 
     server_thread_ = std::thread([this]() {
       absl::Status s = server_->Run();
@@ -358,7 +421,7 @@ protected:
     server_thread_.join();
     close(server_pipe_[0]);
     close(server_pipe_[1]);
-    (void)remove(kRecoveryServerSocket);
+    (void)remove(RecoveryServerSocket().c_str());
     server_.reset();
     server_scheduler_.reset();
   }
@@ -421,7 +484,7 @@ TEST_F(ShadowRecoveryTest, ServerRecoversStateFromShadow) {
   // alive until we stop the server so the pub/sub remain registered.
   subspace::Client client;
   client.SetThreadSafe(true);
-  ASSERT_THAT(client.Init(kRecoveryServerSocket), IsOk());
+  ASSERT_THAT(client.Init(RecoveryServerSocket()), IsOk());
 
   auto pub = client.CreatePublisher("recovery_chan", 256, 4);
   ASSERT_THAT(pub, IsOk());
@@ -495,7 +558,7 @@ TEST_F(ShadowRecoveryTest, ServerFunctionalAfterRecovery) {
   // then publish a message into it.
   subspace::Client pre_client;
   pre_client.SetThreadSafe(true);
-  ASSERT_THAT(pre_client.Init(kRecoveryServerSocket), IsOk());
+  ASSERT_THAT(pre_client.Init(RecoveryServerSocket()), IsOk());
 
   auto pre_pub = pre_client.CreatePublisher("persist_chan", 256, 16);
   ASSERT_THAT(pre_pub, IsOk());
@@ -531,7 +594,7 @@ TEST_F(ShadowRecoveryTest, ServerFunctionalAfterRecovery) {
   // Connect a fresh client to the recovered server.
   subspace::Client post_client;
   post_client.SetThreadSafe(true);
-  ASSERT_THAT(post_client.Init(kRecoveryServerSocket), IsOk());
+  ASSERT_THAT(post_client.Init(RecoveryServerSocket()), IsOk());
 
   // (a) Create a brand-new channel, publish, and read.  Use a scope so
   //     the pub/sub are destroyed afterward, allowing the channel to be
@@ -592,7 +655,7 @@ TEST_F(ShadowRecoveryTest, ClientReconnectsAfterServerRestart) {
   // Phase 1: Create a publisher and subscriber, publish and read a message.
   subspace::Client client;
   client.SetThreadSafe(true);
-  ASSERT_THAT(client.Init(kRecoveryServerSocket), IsOk());
+  ASSERT_THAT(client.Init(RecoveryServerSocket()), IsOk());
 
   auto pub = client.CreatePublisher("reconnect_chan", 256, 16);
   ASSERT_THAT(pub, IsOk());
@@ -678,17 +741,11 @@ TEST_F(ShadowRecoveryTest, ClientReconnectsAfterServerRestart) {
 // Dual shadow tests
 // ---------------------------------------------------------------------------
 
-constexpr const char *kDualServerSocket = "/tmp/subspace_dual_shadow_test";
-constexpr const char *kDualPrimaryShadowSocket =
-    "/tmp/subspace_dual_shadow_primary";
-constexpr const char *kDualSecondaryShadowSocket =
-    "/tmp/subspace_dual_shadow_secondary";
-
 class DualShadowRecoveryTest : public ::testing::Test {
 protected:
   void StartShadow(std::unique_ptr<subspace::Shadow> &shadow,
                    co::CoroutineScheduler &sched, std::thread &thr,
-                   int pipe_fds[2], const char *socket_path) {
+                   int pipe_fds[2], const std::string &socket_path) {
     (void)pipe(pipe_fds);
     shadow = std::make_unique<subspace::Shadow>(sched, socket_path);
     shadow->SetLogLevel("verbose");
@@ -718,7 +775,7 @@ protected:
     server_scheduler_ = std::make_unique<co::CoroutineScheduler>();
     (void)pipe(server_pipe_);
     server_ = std::make_unique<subspace::Server>(
-        *server_scheduler_, kDualServerSocket, "", 0, 0, true,
+        *server_scheduler_, DualServerSocket(), "", 0, 0, true,
         server_pipe_[1], 1, true, false);
     server_->SetShadowSockets(primary_shadow, secondary_shadow);
 
@@ -738,7 +795,7 @@ protected:
     server_thread_.join();
     close(server_pipe_[0]);
     close(server_pipe_[1]);
-    (void)remove(kDualServerSocket);
+    (void)remove(DualServerSocket().c_str());
     server_.reset();
     server_scheduler_.reset();
   }
@@ -792,15 +849,15 @@ TEST_F(DualShadowRecoveryTest, RecoverFromPrimaryWhenBothHealthy) {
   signal(SIGPIPE, SIG_IGN);
 
   StartShadow(primary_shadow_, primary_shadow_sched_, primary_shadow_thread_,
-              primary_shadow_pipe_, kDualPrimaryShadowSocket);
+              primary_shadow_pipe_, DualPrimaryShadowSocket());
   StartShadow(secondary_shadow_, secondary_shadow_sched_,
               secondary_shadow_thread_, secondary_shadow_pipe_,
-              kDualSecondaryShadowSocket);
-  StartServer(kDualPrimaryShadowSocket, kDualSecondaryShadowSocket);
+              DualSecondaryShadowSocket());
+  StartServer(DualPrimaryShadowSocket(), DualSecondaryShadowSocket());
 
   subspace::Client client;
   client.SetThreadSafe(true);
-  ASSERT_THAT(client.Init(kDualServerSocket), IsOk());
+  ASSERT_THAT(client.Init(DualServerSocket()), IsOk());
 
   auto pub = client.CreatePublisher("dual_chan", 256, 4);
   ASSERT_THAT(pub, IsOk());
@@ -831,7 +888,7 @@ TEST_F(DualShadowRecoveryTest, RecoverFromPrimaryWhenBothHealthy) {
   StopServer();
 
   // Restart server -- both shadows are healthy, so primary should be used.
-  StartServer(kDualPrimaryShadowSocket, kDualSecondaryShadowSocket);
+  StartServer(DualPrimaryShadowSocket(), DualSecondaryShadowSocket());
 
   auto &channels = server_->GetChannels();
   ASSERT_EQ(channels.count("dual_chan"), 1u);
@@ -860,15 +917,15 @@ TEST_F(DualShadowRecoveryTest, RecoverFromSecondaryWhenPrimaryDown) {
   signal(SIGPIPE, SIG_IGN);
 
   StartShadow(primary_shadow_, primary_shadow_sched_, primary_shadow_thread_,
-              primary_shadow_pipe_, kDualPrimaryShadowSocket);
+              primary_shadow_pipe_, DualPrimaryShadowSocket());
   StartShadow(secondary_shadow_, secondary_shadow_sched_,
               secondary_shadow_thread_, secondary_shadow_pipe_,
-              kDualSecondaryShadowSocket);
-  StartServer(kDualPrimaryShadowSocket, kDualSecondaryShadowSocket);
+              DualSecondaryShadowSocket());
+  StartServer(DualPrimaryShadowSocket(), DualSecondaryShadowSocket());
 
   subspace::Client client;
   client.SetThreadSafe(true);
-  ASSERT_THAT(client.Init(kDualServerSocket), IsOk());
+  ASSERT_THAT(client.Init(DualServerSocket()), IsOk());
 
   auto pub = client.CreatePublisher("dual_fallback_chan", 256, 4);
   ASSERT_THAT(pub, IsOk());
@@ -891,10 +948,10 @@ TEST_F(DualShadowRecoveryTest, RecoverFromSecondaryWhenPrimaryDown) {
 
   // Stop the primary shadow before restarting the server.
   StopShadow(primary_shadow_, primary_shadow_thread_, primary_shadow_pipe_);
-  (void)remove(kDualPrimaryShadowSocket);
+  (void)remove(DualPrimaryShadowSocket().c_str());
 
   // Restart server -- primary is down, so secondary should be used.
-  StartServer(kDualPrimaryShadowSocket, kDualSecondaryShadowSocket);
+  StartServer(DualPrimaryShadowSocket(), DualSecondaryShadowSocket());
 
   auto &channels = server_->GetChannels();
   ASSERT_EQ(channels.count("dual_fallback_chan"), 1u);
@@ -914,13 +971,13 @@ TEST_F(DualShadowRecoveryTest, FreshStartWhenBothShadowsEmpty) {
 
   // Start fresh shadows (no prior state).
   StartShadow(primary_shadow_, primary_shadow_sched_, primary_shadow_thread_,
-              primary_shadow_pipe_, kDualPrimaryShadowSocket);
+              primary_shadow_pipe_, DualPrimaryShadowSocket());
   StartShadow(secondary_shadow_, secondary_shadow_sched_,
               secondary_shadow_thread_, secondary_shadow_pipe_,
-              kDualSecondaryShadowSocket);
+              DualSecondaryShadowSocket());
 
   // Start the server -- neither shadow has any state to recover.
-  StartServer(kDualPrimaryShadowSocket, kDualSecondaryShadowSocket);
+  StartServer(DualPrimaryShadowSocket(), DualSecondaryShadowSocket());
 
   // Server should have no channels (fresh start).
   EXPECT_TRUE(server_->GetChannels().empty());
@@ -928,7 +985,7 @@ TEST_F(DualShadowRecoveryTest, FreshStartWhenBothShadowsEmpty) {
   // Create a channel to verify server is functional.
   subspace::Client client;
   client.SetThreadSafe(true);
-  ASSERT_THAT(client.Init(kDualServerSocket), IsOk());
+  ASSERT_THAT(client.Init(DualServerSocket()), IsOk());
 
   auto pub = client.CreatePublisher("fresh_chan", 128, 4);
   ASSERT_THAT(pub, IsOk());
@@ -970,11 +1027,41 @@ TEST_F(DualShadowRecoveryTest, FreshStartWhenBothShadowsEmpty) {
 // Bridge + shadow recovery test
 // ---------------------------------------------------------------------------
 
-constexpr const char *kBridgeServer0Socket = "/tmp/subspace_bridge_shadow_s0";
-constexpr const char *kBridgeServer1Socket = "/tmp/subspace_bridge_shadow_s1";
-constexpr const char *kBridgeShadowSocket = "/tmp/subspace_bridge_shadow_shd";
-constexpr int kBridgeDiscPort0 = 6530;
-constexpr int kBridgeDiscPort1 = 6531;
+// Pick a free UDP port by binding to port 0 and reading what the kernel
+// assigned, then closing. There is a tiny race between close and the test's
+// own bind, but it's far smaller than the collision window of a hard-coded
+// port across concurrent test invocations.
+static int PickFreeUdpPort() {
+  int s = ::socket(AF_INET, SOCK_DGRAM, 0);
+  if (s < 0) {
+    return 0;
+  }
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  addr.sin_port = 0;
+  if (::bind(s, reinterpret_cast<const sockaddr *>(&addr), sizeof(addr)) != 0) {
+    ::close(s);
+    return 0;
+  }
+  socklen_t len = sizeof(addr);
+  if (::getsockname(s, reinterpret_cast<sockaddr *>(&addr), &len) != 0) {
+    ::close(s);
+    return 0;
+  }
+  int port = ntohs(addr.sin_port);
+  ::close(s);
+  return port;
+}
+
+static int BridgeDiscPort0() {
+  static const int p = PickFreeUdpPort();
+  return p;
+}
+static int BridgeDiscPort1() {
+  static const int p = PickFreeUdpPort();
+  return p;
+}
 
 static void WaitForSubscribedMessage(toolbelt::FileDescriptor &bridge_pipe,
                                      const std::string &channel_name,
@@ -1005,7 +1092,7 @@ protected:
   void StartShadow() {
     (void)pipe(shadow_pipe_);
     shadow_ = std::make_unique<subspace::Shadow>(shadow_scheduler_,
-                                                  kBridgeShadowSocket);
+                                                  BridgeShadowSocket());
     shadow_->SetLogLevel("verbose");
     shadow_->SetNotifyFd(shadow_pipe_[1]);
     shadow_thread_ = std::thread([this]() {
@@ -1030,10 +1117,10 @@ protected:
     server0_scheduler_ = std::make_unique<co::CoroutineScheduler>();
     (void)pipe(server0_pipe_);
     server0_ = std::make_unique<subspace::Server>(
-        *server0_scheduler_, kBridgeServer0Socket, "", kBridgeDiscPort0,
-        kBridgeDiscPort1, /*local=*/false, server0_pipe_[1]);
+        *server0_scheduler_, BridgeServer0Socket(), "", BridgeDiscPort0(),
+        BridgeDiscPort1(), /*local=*/false, server0_pipe_[1]);
     server0_->SetLogLevel("debug");
-    server0_->SetShadowSocket(kBridgeShadowSocket);
+    server0_->SetShadowSocket(BridgeShadowSocket());
     auto bp = server0_->CreateBridgeNotificationPipe();
     ASSERT_THAT(bp, IsOk());
     server0_bridge_pipe_ = *bp;
@@ -1053,7 +1140,7 @@ protected:
     server0_thread_.join();
     close(server0_pipe_[0]);
     close(server0_pipe_[1]);
-    (void)remove(kBridgeServer0Socket);
+    (void)remove(BridgeServer0Socket().c_str());
     server0_.reset();
     server0_scheduler_.reset();
     server0_bridge_pipe_.Close();
@@ -1062,8 +1149,8 @@ protected:
   void StartServer1() {
     (void)pipe(server1_pipe_);
     server1_ = std::make_unique<subspace::Server>(
-        server1_scheduler_, kBridgeServer1Socket, "", kBridgeDiscPort1,
-        kBridgeDiscPort0, /*local=*/false, server1_pipe_[1]);
+        server1_scheduler_, BridgeServer1Socket(), "", BridgeDiscPort1(),
+        BridgeDiscPort0(), /*local=*/false, server1_pipe_[1]);
     server1_->SetLogLevel("debug");
     auto bp = server1_->CreateBridgeNotificationPipe();
     ASSERT_THAT(bp, IsOk());
@@ -1084,7 +1171,7 @@ protected:
     server1_thread_.join();
     close(server1_pipe_[0]);
     close(server1_pipe_[1]);
-    (void)remove(kBridgeServer1Socket);
+    (void)remove(BridgeServer1Socket().c_str());
     server1_.reset();
     server1_bridge_pipe_.Close();
   }
@@ -1149,7 +1236,7 @@ TEST_F(BridgeShadowRecoveryTest, BridgeRecoversAfterServerRestart) {
   // Client 0 on server 0: create a non-local publisher.
   subspace::Client client0;
   client0.SetThreadSafe(true);
-  ASSERT_THAT(client0.Init(kBridgeServer0Socket), IsOk());
+  ASSERT_THAT(client0.Init(BridgeServer0Socket()), IsOk());
 
   auto pub = client0.CreatePublisher(
       "/bridge_recovery_chan",
@@ -1159,7 +1246,7 @@ TEST_F(BridgeShadowRecoveryTest, BridgeRecoversAfterServerRestart) {
   // Client 1 on server 1: create a subscriber.
   subspace::Client client1;
   client1.SetThreadSafe(true);
-  ASSERT_THAT(client1.Init(kBridgeServer1Socket), IsOk());
+  ASSERT_THAT(client1.Init(BridgeServer1Socket()), IsOk());
 
   auto sub = client1.CreateSubscriber("/bridge_recovery_chan",
                                       {.max_active_messages = 2});
@@ -1169,7 +1256,10 @@ TEST_F(BridgeShadowRecoveryTest, BridgeRecoversAfterServerRestart) {
   // writes to server1_bridge_pipe_ when it receives the Subscribed message.
   WaitForSubscribedMessage(server1_bridge_pipe_, "/bridge_recovery_chan");
 
-  // Verify bridge works: publish and read a message.
+  // Verify bridge works: publish and read a message.  Even though we waited
+  // for the Subscribed handshake, the bridge transmitter may not be fully
+  // primed when the publisher writes, so loop until the expected message
+  // arrives (mirrors the post-crash loop below).
   {
     absl::StatusOr<void *> buf = pub->GetMessageBuffer();
     ASSERT_THAT(buf, IsOk());
@@ -1177,10 +1267,16 @@ TEST_F(BridgeShadowRecoveryTest, BridgeRecoversAfterServerRestart) {
     ASSERT_THAT(pub->PublishMessage(9), IsOk());
   }
   {
-    absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
-    ASSERT_THAT(msg, IsOk());
-    EXPECT_EQ(msg->length, 9u);
-    EXPECT_EQ(memcmp(msg->buffer, "pre_crash", 9), 0);
+    bool received = false;
+    while (!received) {
+      ASSERT_THAT(sub->Wait(std::chrono::seconds(10)), IsOk());
+      absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+      ASSERT_THAT(msg, IsOk());
+      if (msg->length == 9u &&
+          memcmp(msg->buffer, "pre_crash", 9) == 0) {
+        received = true;
+      }
+    }
   }
 
   // Wait for shadow to replicate the channel state.

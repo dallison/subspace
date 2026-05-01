@@ -149,6 +149,28 @@ struct PublisherOptions {
   }
   int32_t MetadataSize() const { return metadata_size; }
 
+  // Free-slot allocator policy for unreliable publishers (no effect on
+  // reliable publishers).  When true, a publisher in FindFreeSlotUnreliable
+  // will prefer to recycle a slot from the RetiredSlots set before pulling
+  // a fresh slot from the never-touched FreeSlots pool.  Both choices are
+  // equally valid (a retired slot has been seen by every current subscriber)
+  // but a retired slot's pages are already cache-hot from the recent
+  // publish/consume cycle, while a fresh FreeSlots slot will demand-fault the
+  // kernel into allocating new physical pages on first write.  In steady
+  // state this lets the publisher cycle through a tiny working set of
+  // cache-hot slots regardless of how deep the channel's slot pool is
+  // configured, while still bursting into FreeSlots when the subscriber
+  // falls behind.  Defaults to false (FreeSlots-first) so multiple messages
+  // remain in distinct slots until the free pool is exhausted, which
+  // preserves behaviour for subscribers that attach after earlier messages
+  // were published and consumed by another subscriber on the same channel.
+  // Set true for the cache-friendly LIFO-style recycling behaviour.
+  PublisherOptions &SetPreferRetiredSlots(bool v) {
+    prefer_retired_slots = v;
+    return *this;
+  }
+  bool PreferRetiredSlots() const { return prefer_retired_slots; }
+
   // If you use the new CreatePublisher API, set the slot size and num slots in
   // here.
   int32_t slot_size = 0;
@@ -169,6 +191,9 @@ struct PublisherOptions {
   bool checksum = false;
   int32_t checksum_size = 4;
   int32_t metadata_size = 0;
+
+  // See SetPreferRetiredSlots() for description.
+  bool prefer_retired_slots = false;
 };
 
 struct SubscriberOptions {
