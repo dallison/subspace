@@ -427,21 +427,24 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     }
   }
 
-  // Update counters.
-  if (!is_activation) {
-    ccb_->total_messages++;
-    ccb_->total_bytes += slot->message_size;
-
-    if (slot->message_size > ccb_->max_message_size) {
-      ccb_->max_message_size = slot->message_size;
-    }
-  }
-
   // Set the refs to the ordinal with no refs.
   slot->refs.store(BuildRefsBitField(slot->ordinal, vchan_id_, 0),
                    std::memory_order_release);
 
-  // Tell all subscribers that the slot is available.
+  // Tell all subscribers that the slot is available, BEFORE bumping
+  // total_messages.  SubscriberImpl::NextSlot() uses total_messages as
+  // a version stamp for its cached active_slots_ snapshot: a subscriber
+  // that observes a bumped total_messages must also observe every
+  // preceding bits.Set() so its CollectVisibleSlots() snapshot can't
+  // miss the just-published slot.  bits.Set() is relaxed, but the
+  // following total_messages++ is seq_cst, so the relaxed bit writes
+  // are sequenced-before the seq_cst increment and therefore
+  // happens-before any subscriber's seq_cst load of total_messages
+  // that observes the new value.  If we incremented total_messages
+  // first, a subscriber could read the new total, run
+  // CollectVisibleSlots() before the bit was visible, cache that
+  // snapshot under next_slot_cached_total_, and then reuse the stale
+  // cache forever (no further total bump arrives to invalidate it).
   ccb_->subscribers.Traverse([this, slot](int sub_id) {
     if (vchan_id_ != -1 && GetSubVchanId(sub_id) != -1 &&
         vchan_id_ != GetSubVchanId(sub_id)) {
@@ -449,6 +452,15 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     }
     GetAvailableSlots(sub_id).Set(slot->id);
   });
+
+  // Update counters AFTER setting the available-slot bits (see above).
+  if (!is_activation) {
+    ccb_->total_bytes += slot->message_size;
+    if (slot->message_size > ccb_->max_message_size) {
+      ccb_->max_message_size = slot->message_size;
+    }
+    ccb_->total_messages++;
+  }
 
   // A reliable publisher doesn't allocate a slot until it is asked for.
   if (reliable) {

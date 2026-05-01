@@ -170,6 +170,16 @@ void SubscriberImpl::ClaimSlot(MessageSlot *slot, int vchan_id,
 void SubscriberImpl::UnreadSlot(MessageSlot *slot) {
   slot->flags &= ~kMessageSeen;
   DecrementSlotRef(slot, false);
+  // NextSlot()'s cache advanced next_slot_cursor_ past this slot when it
+  // returned, on the assumption that ReadMessageInternal would either
+  // ClaimSlot() it (recording the ordinal in the tracker) or accept that it
+  // had been delivered.  When SetActiveMessage() hits max_active_messages
+  // we end up here instead, with the slot's bit still set and the ordinal
+  // never recorded.  Without invalidation the next NextSlot() would reuse
+  // the cached, sorted active_slots_ and walk straight past this entry,
+  // delivering a later ordinal first.  Force a fresh CollectVisibleSlots()
+  // snapshot so we revisit this slot.
+  next_slot_cache_valid_ = false;
 }
 
 void SubscriberImpl::CollectVisibleSlots(InPlaceAtomicBitset &bits) {
@@ -225,6 +235,14 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
     //
     // This avoids the O(K) bitset traversal and O(K log K) timestamp sort on
     // every receive, which dominates throughput when the queue is deep.
+    //
+    // Correctness invariant: when we observe total_messages == T we must
+    // also observe every bits.Set() done by the publisher for ordinals
+    // <= T. PublisherImpl::ActivateSlotAndGetAnother sets the
+    // available-slot bit BEFORE incrementing total_messages, and the
+    // total_messages increment is seq_cst, so the relaxed bit write is
+    // happens-before this seq_cst load and visible to the relaxed
+    // bits.Traverse() inside CollectVisibleSlots().
     const uint64_t total = ccb_->total_messages;
     if (!next_slot_cache_valid_ || total != next_slot_cached_total_) {
       CollectVisibleSlots(bits);
