@@ -5,7 +5,7 @@
 #include "client/client_channel.h"
 #include "common/syscall_shim.h"
 #include <sys/mman.h>
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
+#if defined(__APPLE__)
 #include <sys/posix_shm.h>
 #endif
 #include <chrono>

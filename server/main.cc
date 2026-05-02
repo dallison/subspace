@@ -27,7 +27,7 @@ ABSL_FLAG(bool, local, false, "Use local computer only");
 ABSL_FLAG(int, notify_fd, -1, "File descriptor to notify of startup");
 ABSL_FLAG(std::string, machine, "", "Machine name");
 
-#if defined(___APPLE__)
+#if defined(__APPLE__)
 // This is default true on Mac since is uses /tmp.
 ABSL_FLAG(bool, cleanup_filesystem, true, "Cleanup the filesystem on server startup");
 #else
