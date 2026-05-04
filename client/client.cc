@@ -11,7 +11,9 @@
 #include "toolbelt/hexdump.h"
 #include "toolbelt/mutex.h"
 #include "toolbelt/sockets.h"
+#include <algorithm>
 #include <cerrno>
+#include <cstring>
 #include <inttypes.h>
 namespace subspace {
 
@@ -19,9 +21,16 @@ using ClientChannel = details::ClientChannel;
 using SubscriberImpl = details::SubscriberImpl;
 using PublisherImpl = details::PublisherImpl;
 
-// Get the current thread as a 64 bit number.
+// Get the current thread as a 64 bit number.  pthread_t is integral on some
+// platforms (Linux glibc, QNX) and a pointer on others (macOS); on QNX it is
+// only 32 bits wide.  Use memcpy so the conversion is well-defined regardless
+// of the underlying type.
 static uint64_t GetThreadId() {
-  return reinterpret_cast<uint64_t>(pthread_self());
+  pthread_t tid = pthread_self();
+  uint64_t id = 0;
+  std::memcpy(&id, &tid,
+              sizeof(tid) < sizeof(id) ? sizeof(tid) : sizeof(id));
+  return id;
 }
 
 ClientImpl::ClientLockGuard::ClientLockGuard(ClientImpl *client,
