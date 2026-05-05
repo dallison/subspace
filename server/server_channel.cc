@@ -6,7 +6,7 @@
 #include "absl/strings/str_format.h"
 #include "server/server.h"
 #include <sys/mman.h>
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX && defined(__APPLE__)
 #include <sys/posix_shm.h>
 #endif
 

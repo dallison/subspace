@@ -32,6 +32,16 @@
 #include <thread>
 namespace subspace {
 
+#ifndef __has_cpp_attribute
+#define __has_cpp_attribute(attribute) 0
+#endif
+
+#if __has_cpp_attribute(no_unique_address) && !defined(__QNX__)
+#define SUBSPACE_NO_UNIQUE_ADDRESS [[no_unique_address]]
+#else
+#define SUBSPACE_NO_UNIQUE_ADDRESS
+#endif
+
 enum class ReadMode {
   kReadNext,
   kReadNewest,
@@ -154,7 +164,7 @@ private:
   template <typename M, typename OtherAliaser> friend class weak_ptr;
 
   std::shared_ptr<ActiveMessage> msg_;
-  [[no_unique_address]] Aliaser aliaser_;
+  SUBSPACE_NO_UNIQUE_ADDRESS Aliaser aliaser_;
 };
 
 template <typename T, typename Aliaser> class weak_ptr {
