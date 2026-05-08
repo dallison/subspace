@@ -12,6 +12,11 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF) # Prefer standard C++
 
+option(SUBSPACE_QNX_PMEM "Use QNX persistent-memory buffers instead of POSIX shared memory" OFF)
+if(SUBSPACE_QNX_PMEM)
+    add_compile_definitions(SUBSPACE_ENABLE_QNX_PMEM=1)
+endif()
+
 set(protobuf_BUILD_TESTS OFF CACHE INTERNAL "No protobuf tests")
 set(ABSL_BUILD_TEST_HELPERS ON CACHE INTERNAL "Enable Abseil TESTONLY+PUBLIC helpers (e.g. status_matchers)")
 set(ABSL_USE_EXTERNAL_GOOGLETEST ON CACHE INTERNAL "Use our GoogleTest instead of Abseil downloading its own")

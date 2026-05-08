@@ -8,6 +8,7 @@
 #include "client/options.h"
 #include "co/coroutine.h"
 #include "common/channel.h"
+#include "common/pmem.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/clock.h"
 #include "toolbelt/fd.h"
@@ -18,6 +19,7 @@
 
 #include <memory>
 #include <mutex>
+#include <functional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -45,8 +47,11 @@ namespace subspace {
 
 #define SUBSPACE_SHMEM_MODE_POSIX 1
 #define SUBSPACE_SHMEM_MODE_LINUX 2
+#define SUBSPACE_SHMEM_MODE_QNX_PMEM 3
 
-#if defined(__linux__)
+#if defined(__QNX__) && defined(SUBSPACE_ENABLE_QNX_PMEM)
+#define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_QNX_PMEM
+#elif defined(__linux__)
 #define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_LINUX
 #else
 #define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_POSIX
@@ -235,6 +240,11 @@ public:
     return Channel::BufferSharedMemoryName(session_id_, buffer_index);
   }
 
+  void SetPmemRegistrationCallback(
+      std::function<absl::Status(const PmemBufferMetadata &)> callback) {
+    pmem_registration_callback_ = std::move(callback);
+  }
+
   void RecordDroppedMessages(uint32_t num) {
     ccb_->total_drops += num; // Atomic increment.
   }
@@ -274,6 +284,8 @@ protected:
   MessageSlot *slot_ = nullptr; // Current slot.
   int vchan_id_ = -1;           // Virtual channel ID.
   uint64_t session_id_;
+  std::function<absl::Status(const PmemBufferMetadata &)>
+      pmem_registration_callback_ = nullptr;
   std::vector<std::unique_ptr<BufferSet>> buffers_ = {};
   int user_id_ = -1;
   int group_id_ = -1;

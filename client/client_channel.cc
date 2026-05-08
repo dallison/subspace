@@ -11,10 +11,26 @@
 #include <chrono>
 #include <sys/stat.h>
 #include <thread>
+#include <unistd.h>
 
 namespace subspace {
 
 namespace details {
+
+namespace {
+
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_QNX_PMEM
+uint64_t PageAlignedSize(uint64_t size) {
+  long page_size = sysconf(_SC_PAGESIZE);
+  if (page_size <= 0) {
+    page_size = 4096;
+  }
+  uint64_t alignment = static_cast<uint64_t>(page_size);
+  return (size + alignment - 1) & ~(alignment - 1);
+}
+#endif
+
+} // namespace
 
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
 
@@ -255,6 +271,34 @@ ClientChannel::CreateBuffer(int buffer_index, size_t size) {
     }
   }
 
+#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_QNX_PMEM
+  PmemBufferMetadata metadata;
+  metadata.channel_name = ResolvedName();
+  metadata.session_id = session_id_;
+  metadata.buffer_index = buffer_index;
+  metadata.full_size = size;
+  metadata.allocation_size = PageAlignedSize(size);
+  metadata.shadow_file = filename;
+  metadata.object_name = QnxPmemObjectName(filename);
+
+  auto shm_fd = CreateQnxPmemBuffer(metadata);
+  if (!shm_fd.ok()) {
+    return shm_fd.status();
+  }
+  if (!shm_fd->Valid()) {
+    return *shm_fd;
+  }
+  if (absl::Status status = WritePmemMetadataFile(metadata); !status.ok()) {
+    (void)DestroyQnxPmemBuffer(metadata);
+    return status;
+  }
+  if (pmem_registration_callback_) {
+    if (absl::Status status = pmem_registration_callback_(metadata);
+        !status.ok()) {
+      (void)DestroyQnxPmemBuffer(metadata);
+      return status;
+    }
+  }
 #else
   // On Posix we need to create a shadow file that has the same size as the
   // shared memory file.  This is because the fstat of the shm "file" returns a
@@ -309,6 +353,12 @@ ClientChannel::OpenBuffer(int buffer_index) {
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
   // Open the shared memory file.
   return OpenSharedMemoryFile(filename, O_RDWR);
+#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_QNX_PMEM
+  auto metadata = ReadPmemMetadataFile(filename);
+  if (!metadata.ok()) {
+    return metadata.status();
+  }
+  return OpenQnxPmemBuffer(*metadata, O_RDWR);
 #else
   auto shm_name = PosixSharedMemoryName(filename);
   if (!shm_name.ok()) {
@@ -333,6 +383,13 @@ ClientChannel::GetBufferSize(toolbelt::FileDescriptor &shm_fd,
                         strerror(errno)));
   }
   return sb.st_size;
+#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_QNX_PMEM
+  std::string filename = BufferSharedMemoryName(buffer_index);
+  auto metadata = ReadPmemMetadataFile(filename);
+  if (!metadata.ok()) {
+    return metadata.status();
+  }
+  return metadata->full_size;
 #else
   std::string filename = BufferSharedMemoryName(buffer_index);
   struct stat sb;
@@ -350,6 +407,9 @@ ClientChannel::MapBuffer(toolbelt::FileDescriptor &shm_fd, size_t size,
                          BufferMapMode mode) {
   int prot =
       mode == BufferMapMode::kReadOnly ? PROT_READ : (PROT_READ | PROT_WRITE);
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_QNX_PMEM && defined(PROT_NOCACHE)
+  prot |= PROT_NOCACHE;
+#endif
   void *p = MapMemory(shm_fd.Fd(), size, prot, "buffers");
   if (p == MAP_FAILED) {
     return absl::InternalError(

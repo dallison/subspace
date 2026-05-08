@@ -112,10 +112,11 @@ std::string Channel::BufferSharedMemoryName(uint64_t session_id,
   std::string sanitized_name =
       absl::StrReplaceAll(ResolvedName(), {{"/", "."}});
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) || SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_QNX_PMEM
   // Since you can't actually see any shared memory names in the MacOS
   // filesystem we need to use /tmp to create a shadow file that is mapped to a
-  // shared memory name.
+  // shared memory name. QNX pmem also uses /tmp for the client-visible metadata
+  // shadow file.
   return absl::StrFormat("/tmp/subspace_%d_%s_%d", session_id, sanitized_name,
                          buffer_index);
 #else

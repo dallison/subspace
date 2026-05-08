@@ -5,10 +5,12 @@
 #ifndef _xSERVERSERVER_CHANNEL_H
 #define _xSERVERSERVER_CHANNEL_H
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "common/channel.h"
+#include "common/pmem.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/bitset.h"
 #include "toolbelt/fd.h"
@@ -269,7 +271,14 @@ public:
   virtual void RemoveBuffer(uint64_t session_id) {
     for (int i = 0; i < ccb_->num_buffers; i++) {
       std::string filename = BufferSharedMemoryName(session_id, i);
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_QNX_PMEM
+      auto it = pmem_buffers_.find(i);
+      if (it != pmem_buffers_.end()) {
+        (void)DestroyQnxPmemBuffer(it->second);
+      } else {
+        (void)remove(filename.c_str());
+      }
+#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
       auto shm_name = PosixSharedMemoryName(filename);
       if (shm_name.ok()) {
         (void)shm_unlink(shm_name->c_str());
@@ -279,6 +288,10 @@ public:
       (void)shm_unlink(filename.c_str());
 #endif
     }
+    pmem_buffers_.clear();
+  }
+  void RegisterPmemBuffer(PmemBufferMetadata metadata) {
+    pmem_buffers_[metadata.buffer_index] = std::move(metadata);
   }
   // This is true if all publishers are bridge publishers.
   bool IsBridgePublisher() const;
@@ -357,6 +370,7 @@ protected:
   absl::flat_hash_map<int, std::unique_ptr<User>> users_;
   toolbelt::BitSet<kMaxUsers> user_ids_;
   absl::flat_hash_map<ChannelTransmitter, std::string> bridged_publishers_;
+  absl::flat_hash_map<uint32_t, PmemBufferMetadata> pmem_buffers_;
   SharedMemoryFds shared_memory_fds_;
   bool is_virtual_ = false;
   bool skip_cleanup_ = false;

@@ -25,9 +25,14 @@ namespace subspace {
 
 #define SUBSPACE_SHMEM_MODE_POSIX 1
 #define SUBSPACE_SHMEM_MODE_LINUX 2
+#define SUBSPACE_SHMEM_MODE_QNX_PMEM 3
 
 // Change this if you want to use a different shared memory mode.
-#if defined(__linux__)
+#if defined(__QNX__) && defined(SUBSPACE_ENABLE_QNX_PMEM)
+// QNX persistent-memory buffers are opt-in; otherwise QNX uses POSIX shadow
+// files like other non-Linux platforms.
+#define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_QNX_PMEM
+#elif defined(__linux__)
 // On Linux we can use /dev/shm directly for shared memory.
 #define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_LINUX
 #else

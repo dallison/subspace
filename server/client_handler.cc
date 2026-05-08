@@ -36,6 +36,16 @@ void ClientHandler::Run() {
       }
     }
 
+    if (request.request_case() == subspace::Request::kRegisterPmemBuffer) {
+      if (absl::Status s =
+              HandleRegisterPmemBuffer(request.register_pmem_buffer());
+          !s.ok()) {
+        server_->logger_.Log(toolbelt::LogLevel::kError, "%s\n",
+                             s.ToString().c_str());
+      }
+      continue;
+    }
+
     std::vector<toolbelt::FileDescriptor> fds;
     subspace::Response response;
     if (absl::Status s = HandleMessage(request, response, fds); !s.ok()) {
@@ -107,9 +117,34 @@ ClientHandler::HandleMessage(const subspace::Request &req,
                           resp.mutable_get_channel_stats(), fds);
     break;
 
+  case subspace::Request::kRegisterPmemBuffer:
+    return HandleRegisterPmemBuffer(req.register_pmem_buffer());
+
   case subspace::Request::REQUEST_NOT_SET:
     return absl::InternalError("Protocol error: unknown request");
   }
+  return absl::OkStatus();
+}
+
+absl::Status ClientHandler::HandleRegisterPmemBuffer(
+    const subspace::RegisterPmemBufferRequest &req) {
+  PmemBufferMetadata metadata = FromProto(req.metadata());
+  if (metadata.session_id != server_->GetSessionId()) {
+    return absl::InternalError(absl::StrFormat(
+        "Ignoring QNX pmem registration for stale session %s",
+        std::to_string(metadata.session_id)));
+  }
+
+  ServerChannel *channel = server_->FindChannel(metadata.channel_name);
+  if (channel == nullptr) {
+    return absl::InternalError(absl::StrFormat(
+        "Ignoring QNX pmem registration for unknown channel %s",
+        metadata.channel_name));
+  }
+  if (channel->IsVirtual()) {
+    channel = static_cast<VirtualChannel *>(channel)->GetMux();
+  }
+  channel->RegisterPmemBuffer(std::move(metadata));
   return absl::OkStatus();
 }
 

@@ -232,7 +232,21 @@ void Server::CleanupAfterSession() {
   std::string session_shm_file_prefix =
       "subspace_." + std::to_string(session_id_);
 
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_QNX_PMEM
+  std::string qnx_pmem_prefix =
+      "subspace_" + std::to_string(session_id_) + "_";
+  for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
+    std::string filename = entry.path().filename().string();
+    if (filename.rfind(qnx_pmem_prefix, 0) == 0) {
+      auto metadata = ReadPmemMetadataFile(entry.path().string());
+      if (metadata.ok()) {
+        (void)DestroyQnxPmemBuffer(*metadata);
+      } else {
+        (void)std::filesystem::remove(entry.path());
+      }
+    }
+  }
+#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   // Remove all files starting with "subspace_SESSION" in /tmp.  These refer to
   // shared memory segments names "subspace_INODE".
   for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
@@ -273,7 +287,18 @@ void Server::CleanupAfterSession() {
 
 void Server::CleanupFilesystem() {
   logger_.Log(toolbelt::LogLevel::kInfo, "Cleaning up filesystem...");
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_QNX_PMEM
+  for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
+    if (entry.path().filename().string().rfind("subspace_", 0) == 0) {
+      auto metadata = ReadPmemMetadataFile(entry.path().string());
+      if (metadata.ok()) {
+        (void)DestroyQnxPmemBuffer(*metadata);
+      } else {
+        (void)std::filesystem::remove(entry.path());
+      }
+    }
+  }
+#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   // Remove all files starting with "subspace_" in /tmp.  These refer to
   // shared memory segments names "subspace_INODE".
   for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {

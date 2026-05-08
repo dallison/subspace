@@ -8,6 +8,11 @@ add_library(subspace_common STATIC
     channel.cc
     channel.h
     fast_ring_buffer.h
+    pmem.cc
+    pmem.h
+    syscall_shim.cc
+    syscall_shim.h
+    syscall_shim_test_helper.h
 )
 
 target_link_libraries(subspace_common PUBLIC
@@ -15,6 +20,7 @@ target_link_libraries(subspace_common PUBLIC
     absl::flags
     absl::flat_hash_set
     absl::strings
+    absl::str_format
     toolbelt
     co
     protobuf::libprotobuf # If common code uses protobuf
@@ -23,4 +29,8 @@ target_link_libraries(subspace_common PUBLIC
 add_executable(common_test common_test.cc)
 add_test(NAME common_test COMMAND common_test)
 target_link_libraries(common_test PUBLIC subspace_common gtest gtest_main)
+
+add_executable(pmem_test pmem_test.cc)
+add_test(NAME pmem_test COMMAND pmem_test)
+target_link_libraries(pmem_test PUBLIC subspace_common gtest gtest_main)
 

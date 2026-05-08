@@ -301,6 +301,10 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
         return CheckReload(static_cast<ClientChannel *>(c));
       },
       server_user_id_, server_group_id_);
+  channel->SetPmemRegistrationCallback(
+      [this](const PmemBufferMetadata &metadata) {
+        return RegisterPmemBuffer(metadata);
+      });
 
   int32_t cs = opts.ChecksumSize() > 0 ? opts.ChecksumSize() : 4;
   int32_t ms = opts.MetadataSize() > 0 ? opts.MetadataSize() : 0;
@@ -1751,6 +1755,37 @@ absl::Status ClientImpl::SendRequestReceiveResponse(
   }
 
   return s;
+}
+
+absl::Status ClientImpl::SendOneWayRequest(const Request &req) {
+  size_t msg_len = req.ByteSizeLong();
+  std::vector<char> send_msg(sizeof(int32_t) + msg_len);
+  char *sendbuf = send_msg.data() + sizeof(int32_t);
+
+  if (!req.SerializeToArray(sendbuf, msg_len)) {
+    return absl::InternalError("Failed to serialize one-way request");
+  }
+
+  absl::StatusOr<ssize_t> n = socket_.SendMessage(sendbuf, msg_len, co_);
+  if (!n.ok()) {
+    socket_.Close();
+    if (was_connected_ && !reconnecting_) {
+      if (absl::Status rs = Reconnect(); rs.ok()) {
+        return SendOneWayRequest(req);
+      } else {
+        return rs;
+      }
+    }
+    return n.status();
+  }
+  return absl::OkStatus();
+}
+
+absl::Status ClientImpl::RegisterPmemBuffer(
+    const PmemBufferMetadata &metadata) {
+  Request req;
+  ToProto(metadata, req.mutable_register_pmem_buffer()->mutable_metadata());
+  return SendOneWayRequest(req);
 }
 
 } // namespace subspace
