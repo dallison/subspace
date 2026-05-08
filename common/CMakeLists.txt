@@ -8,6 +8,9 @@ add_library(subspace_common STATIC
     channel.cc
     channel.h
     fast_ring_buffer.h
+    syscall_shim.cc
+    syscall_shim.h
+    syscall_shim_test_helper.h
 )
 
 target_link_libraries(subspace_common PUBLIC

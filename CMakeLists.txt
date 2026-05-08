@@ -11,6 +11,7 @@ project(Subspace LANGUAGES CXX ASM)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF) # Prefer standard C++
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 set(protobuf_BUILD_TESTS OFF CACHE INTERNAL "No protobuf tests")
 set(ABSL_BUILD_TEST_HELPERS ON CACHE INTERNAL "Enable Abseil TESTONLY+PUBLIC helpers (e.g. status_matchers)")
@@ -64,11 +65,20 @@ FetchContent_MakeAvailable(abseil)
 FetchContent_Declare(
     co
     GIT_REPOSITORY https://github.com/dallison/co.git
-    GIT_TAG c1cd0992d51c7a9bf9e4ecc0b6204cca05adc4a6
+    GIT_TAG 3.3.2
     CMAKE_ARGS
         -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
 )
 FetchContent_MakeAvailable(co)
+if(TARGET co)
+    target_link_libraries(co PUBLIC absl::flat_hash_map absl::flat_hash_set)
+endif()
+if(TARGET co_cpp20)
+    target_link_libraries(co_cpp20 PUBLIC absl::flat_hash_map absl::flat_hash_set)
+endif()
+if(TARGET coroutines_test)
+    target_link_libraries(coroutines_test PRIVATE absl::status_matchers gmock)
+endif()
 
 # --- External Dependency: cpp_toolbelt (using FetchContent for native CMake) ---
 # cpp_toolbelt's CMakeLists.txt will try to fetch co, but since we've already
@@ -76,7 +86,7 @@ FetchContent_MakeAvailable(co)
 FetchContent_Declare(
     cpp_toolbelt
     GIT_REPOSITORY https://github.com/dallison/cpp_toolbelt.git
-    GIT_TAG 1aa8db7fd7096b53a1daa1bba86bbda8a312c7dd
+    GIT_TAG 2.1.2
     CMAKE_ARGS
         -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
 )
@@ -129,6 +139,7 @@ add_subdirectory(proto)
 add_subdirectory(common)
 add_subdirectory(client)
 add_subdirectory(server)
+add_subdirectory(plugins)
 add_subdirectory(shadow)
 add_subdirectory(c_client)
 add_subdirectory(rust_client)
