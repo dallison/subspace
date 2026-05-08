@@ -57,6 +57,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Install CMake build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
       - name: Configure CMake
         run: cmake -S . -B build/cmake -DCMAKE_BUILD_TYPE=Debug
 
