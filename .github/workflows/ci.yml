@@ -48,3 +48,25 @@ jobs:
         with:
           name: bazel-test-logs-${{ matrix.os }}
           path: bazel-testlogs
+
+  cmake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install CMake build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Configure CMake
+        run: cmake -S . -B build/cmake -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build CMake targets
+        run: cmake --build build/cmake --parallel $(nproc)
+
+      - name: Run CMake tests
+        run: ctest --test-dir build/cmake --output-on-failure
