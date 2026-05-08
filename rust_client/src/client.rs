@@ -834,6 +834,10 @@ impl Client {
                     checksum_size: opts.checksum_size,
                     metadata_size: opts.metadata_size,
                     publisher_id: -1,
+                    use_qnx_pmem: false,
+                    pmem_alignment: 0,
+                    pmem_pool_id: String::new(),
+                    pmem_cache_enabled: false,
                 },
             )),
         };
@@ -952,6 +956,10 @@ impl Client {
                     max_active_messages: opts.max_active_messages,
                     mux: opts.mux.clone(),
                     vchan_id: opts.vchan_id,
+                    use_qnx_pmem: false,
+                    pmem_alignment: 0,
+                    pmem_pool_id: String::new(),
+                    pmem_cache_enabled: false,
                 },
             )),
         };

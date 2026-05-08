@@ -548,6 +548,57 @@ TEST_F(ShadowRecoveryTest, ServerRecoversStateFromShadow) {
   StopShadow();
 }
 
+#if SUBSPACE_HAS_QNX_PMEM
+TEST_F(ShadowRecoveryTest, ServerRecoversPmemMetadataFromShadow) {
+  signal(SIGPIPE, SIG_IGN);
+
+  StartShadow();
+  StartServer();
+
+  subspace::Client client;
+  client.SetThreadSafe(true);
+  ASSERT_THAT(client.Init(RecoveryServerSocket()), IsOk());
+
+  subspace::PublisherOptions opts = subspace::PublisherOptions()
+                                        .SetSlotSize(256)
+                                        .SetNumSlots(4)
+                                        .SetUseQnxPmem(true)
+                                        .SetPmemAlignment(4096)
+                                        .SetPmemPoolId("shadow_test")
+                                        .SetPmemCacheEnabled(true);
+  auto pub = client.CreatePublisher("pmem_recovery_chan", opts);
+  ASSERT_THAT(pub, IsOk());
+
+  ASSERT_TRUE(WaitForShadowState([this]() {
+    return shadow_->WithChannels([](auto &channels) {
+      auto it = channels.find("pmem_recovery_chan");
+      return it != channels.end() && !it->second.pmem_buffers.empty();
+    });
+  }));
+
+  size_t shadow_pmem_count = shadow_->WithChannels([](auto &channels) {
+    auto it = channels.find("pmem_recovery_chan");
+    EXPECT_NE(it, channels.end());
+    return it->second.pmem_buffers.size();
+  });
+  ASSERT_GT(shadow_pmem_count, 0u);
+
+  server_->ForEachShadow(
+      [](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
+  server_->SimulateCrash();
+  StopServer();
+
+  StartServer();
+  auto &recovered_channels = server_->GetChannels();
+  ASSERT_EQ(recovered_channels.count("pmem_recovery_chan"), 1u);
+  auto *channel = recovered_channels.at("pmem_recovery_chan").get();
+  EXPECT_GT(channel->GetPmemBuffers().size(), 0u);
+
+  StopServer();
+  StopShadow();
+}
+#endif
+
 TEST_F(ShadowRecoveryTest, ServerFunctionalAfterRecovery) {
   signal(SIGPIPE, SIG_IGN);
 

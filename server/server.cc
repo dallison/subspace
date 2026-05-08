@@ -473,6 +473,13 @@ absl::Status Server::Run() {
     if (recovered) {
       for (auto &[name, ch] : channels_) {
         shadow->SendCreateChannel(ch.get());
+#if SUBSPACE_HAS_QNX_PMEM
+        for (const PmemBufferMetadata &metadata : ch->GetPmemBuffers()) {
+          PmemBufferMetadataProto proto;
+          ToProto(metadata, &proto);
+          shadow->SendRegisterPmemBuffer(proto);
+        }
+#endif
         for (auto &[uid, user] : ch->GetUsers()) {
           if (user == nullptr) {
             continue;
@@ -818,6 +825,12 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
 
       channel->AddUser(rsub.id, std::move(sub));
     }
+
+#if SUBSPACE_HAS_QNX_PMEM
+    for (const auto &metadata : rch.pmem_buffers) {
+      channel->RegisterPmemBuffer(FromProto(metadata));
+    }
+#endif
 
     channels_.emplace(rch.name, channel);
     logger_.Log(toolbelt::LogLevel::kInfo,
@@ -1284,10 +1297,16 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
       // The prefix area may be larger than sizeof(MessagePrefix) when
       // checksum_size or metadata_size requires additional 64-byte chunks.
       size_t prefix_area = sub->PrefixSize();
-      const char *prefix_addr =
-          reinterpret_cast<const char *>(msg->buffer) - prefix_area;
+      const MessageSlot *slot = sub->GetSlot(msg->slot_id);
       const MessagePrefix *prefix =
-          reinterpret_cast<const MessagePrefix *>(prefix_addr);
+          slot == nullptr ? nullptr : sub->Prefix(const_cast<MessageSlot *>(slot));
+      if (prefix == nullptr) {
+        logger_.Log(toolbelt::LogLevel::kError,
+                    "Failed to find message prefix for bridge message on %s",
+                    channel_name.c_str());
+        continue;
+      }
+      const char *prefix_addr = reinterpret_cast<const char *>(prefix);
       // NOTE: there's a question here about whether we want to send an
       // activation message across the bridge.  Currently we do send
       // it but the receiver will disregard it.  I don't think we need
@@ -1696,7 +1715,14 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     // after the padding.
     size_t prefix_area = pub->PrefixSize();
     size_t adjusted_prefix_length = prefix_area - sizeof(int32_t);
-    char *prefix_addr = reinterpret_cast<char *>(*buf) - prefix_area;
+    MessagePrefix *prefix = pub->Prefix(pub->CurrentSlot());
+    if (prefix == nullptr) {
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to find message prefix for bridge receiver on %s",
+                  channel_name.c_str());
+      break;
+    }
+    char *prefix_addr = reinterpret_cast<char *>(prefix);
     char *after_padding = prefix_addr + sizeof(int32_t);
 
     absl::StatusOr<ssize_t> n = bridge->ReceiveMessage(
@@ -1713,7 +1739,6 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
 
     // Set the kMessageBridged flag in the prefix so that this message isn't
     // forwarded again over a bridge.
-    MessagePrefix *prefix = reinterpret_cast<MessagePrefix *>(prefix_addr);
     if ((prefix->flags & kMessageActivate) != 0) {
       // Since we have created a reliable publisher and it has sent an
       // activation message through, we don't send another one.

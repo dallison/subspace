@@ -44,7 +44,11 @@ target_link_libraries(subspace_client PUBLIC
 
 
 add_executable(client_test client_test.cc)
+set_target_properties(client_test PROPERTIES ENABLE_EXPORTS ON)
 add_test(NAME client_test COMMAND client_test)
+set_tests_properties(client_test PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
 target_link_libraries(client_test PUBLIC
     subspace_client
     subspace_common

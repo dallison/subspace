@@ -16,7 +16,7 @@ Each channel uses three shared memory structures:
 
 - **System Control Block (SCB)** — one per system, tracks channel-level counters for reload detection.
 - **Channel Control Block (CCB)** — one per channel, contains slot metadata, bitsets for available/retired/free slots, ordinals, and stats. Publishers map it read-write; subscribers map it read-only.
-- **Message Buffers** — the actual data. Stored in `/dev/shm/` (Linux) or POSIX shared memory. Publishers map read-write, subscribers read-only. Buffers can grow dynamically.
+- **Message Buffers** — the actual data. Stored in `/dev/shm/` (Linux), POSIX shared memory (macOS and default QNX builds), or optional QNX PMEM buffers. Publishers map read-write, subscribers read-only. Buffers can grow dynamically.
 
 ## Publishing Flow
 
@@ -24,6 +24,12 @@ Each channel uses three shared memory structures:
 2. **`GetMessageBuffer(size)`** — returns a pointer into a shared memory slot. If the message is larger than the current slot size, the channel auto-resizes.
 3. **User writes data** directly into the buffer (zero-copy).
 4. **`PublishMessage(length)`** — writes a `MessagePrefix` (size, ordinal, timestamp, optional checksum and user metadata in the prefix area), marks the slot as available, and triggers subscriber file descriptors to wake them up.
+
+On QNX PMEM channels, the publisher still allocates message buffers client-side,
+but the buffers are backed by PMEM objects. The publisher writes `/tmp` shadow
+metadata for subscribers and sends a one-way registration request so the server
+can destroy the PMEM objects when the channel is removed. PMEM support is
+provided by General Motors.
 
 ## Subscribing Flow
 
@@ -56,6 +62,7 @@ A thin C layer over the C++ API using opaque `void*` pointers and thread-local e
 - **Checksums** — optional message integrity verification using CRC32 by default, with support for arbitrary-sized checksums via callbacks.  The `checksum_size` and `metadata_size` publisher options control the prefix layout; user metadata can be attached to each message through `GetMetadata()`.  See [Checksums and User Metadata](checksums-and-metadata.md) for details.
 - **Bridging** — forwards channels between servers over TCP for cross-machine communication.
 - **Tunnel support** — the `for_tunnel` publisher/subscriber option marks messages with the `kMessageCrossMachine` flag in the `MessagePrefix`, allowing external tunnel processes to distinguish locally and remotely generated messages.
+- **QNX PMEM support** — optional PMEM-backed message buffers can be enabled in QNX builds and tested on Linux with the `linux_pmem_shim` Bazel config.
 
 ## Summary
 

@@ -4,6 +4,12 @@
 
 The **shadow process** (`subspace_shadow`) is an optional companion to the Subspace server that maintains a real-time mirror of the server's channel database. If the server crashes and restarts, it reconnects to the shadow and recovers all channels, publishers, and subscribers — including their shared memory and event file descriptors — so that the shared memory regions remain valid and accessible to clients that reconnect.
 
+On QNX builds with PMEM enabled, message buffers can be backed by QNX PMEM
+objects instead of POSIX shared memory. PMEM support is provided by General
+Motors. The PMEM objects and their `/tmp` metadata files are managed by the
+publisher and server cleanup path; see [QNX PMEM Support](qnx-pmem.md) for the
+PMEM-specific lifecycle.
+
 The server supports up to **two shadow processes** — a **primary** and a **secondary**. During normal operation, state is replicated to both in parallel. On recovery, the server tries the primary first; if it's unavailable or has no valid state, it falls back to the secondary. If neither has valid data, the server starts fresh with an empty database.
 
 Without any shadow, a server crash means all shared memory regions are orphaned and clients must re-establish channels from scratch. With one or two shadows, recovery is transparent: the new server instance picks up exactly where the old one left off (minus the client socket connections, which must be re-established).
@@ -92,6 +98,8 @@ All messages are wrapped in a `ShadowEvent` protobuf oneof. File descriptors acc
 | `ShadowCreateChannel` | Both | `[ccb_fd, bcb_fd]` | Channel metadata + shared memory FDs |
 | `ShadowAddPublisher` | Both | `[poll_fd, trigger_fd, ...]` | Publisher metadata + notification FDs |
 | `ShadowAddSubscriber` | Both | `[trigger_fd, poll_fd]` | Subscriber metadata + notification FDs |
+| `ShadowRegisterPmemBuffer` | Both | none | QNX PMEM metadata needed to restore server cleanup tracking |
+| `ShadowUnregisterPmemBuffer` | Both | none | Removes QNX PMEM metadata from shadow state |
 | `ShadowStateDone` | Shadow -> Server | none | End-of-dump marker |
 | `ShadowInit` | Server -> Shadow | `[scb_fd]` | New session; clears shadow state |
 | `ShadowRemoveChannel` | Server -> Shadow | none | Channel removed |

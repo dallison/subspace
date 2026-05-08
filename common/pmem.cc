@@ -2,6 +2,13 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
+// PMEM support is provided by General Motors.
+
+#if !((defined(__QNXNTO__) && defined(SUBSPACE_ENABLE_QNX_PMEM)) ||          \
+      (defined(__linux__) && defined(SUBSPACE_ENABLE_LINUX_PMEM_SHIM)))
+#error "common/pmem.cc is only available when PMEM support is compiled in"
+#endif
+
 #include "common/pmem.h"
 
 #include "absl/strings/str_format.h"
@@ -15,7 +22,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#if defined(__QNX__) && defined(SUBSPACE_ENABLE_QNX_PMEM)
+#if defined(__QNXNTO__) && defined(SUBSPACE_ENABLE_QNX_PMEM)
 #include <sys/mman.h>
 #endif
 
@@ -50,6 +57,33 @@ uint64_t PageAlignedSize(uint64_t size) {
   return (size + alignment - 1) & ~(alignment - 1);
 }
 
+#if defined(__QNXNTO__) && defined(SUBSPACE_ENABLE_QNX_PMEM)
+absl::Status AllocateQnxPhysicalPmem(int fd, uint64_t allocation_size,
+                                     const std::string &object_name) {
+  if (shm_ctl(fd, SHMCTL_ANON | SHMCTL_PHYS, 0, allocation_size) == -1) {
+    (void)GetSyscallShim().shm_unlink_fn(object_name.c_str());
+    return absl::InternalError(absl::StrFormat(
+        "Failed to allocate QNX pmem object %s: %s", object_name,
+        strerror(errno)));
+  }
+  return absl::OkStatus();
+}
+#endif
+
+#if defined(__linux__) && defined(SUBSPACE_ENABLE_LINUX_PMEM_SHIM)
+absl::Status AllocateLinuxPmemShim(int fd, uint64_t allocation_size,
+                                   const std::string &object_name) {
+  if (GetSyscallShim().ftruncate_fn(fd, static_cast<off_t>(allocation_size)) ==
+      -1) {
+    (void)GetSyscallShim().shm_unlink_fn(object_name.c_str());
+    return absl::InternalError(absl::StrFormat(
+        "Failed to size Linux PMEM shim object %s: %s", object_name,
+        strerror(errno)));
+  }
+  return absl::OkStatus();
+}
+#endif
+
 } // namespace
 
 PmemBufferMetadata FromProto(const PmemBufferMetadataProto &proto) {
@@ -61,6 +95,14 @@ PmemBufferMetadata FromProto(const PmemBufferMetadataProto &proto) {
   metadata.allocation_size = proto.allocation_size();
   metadata.shadow_file = proto.shadow_file();
   metadata.object_name = proto.object_name();
+#if (defined(__QNXNTO__) && defined(SUBSPACE_ENABLE_QNX_PMEM)) ||            \
+    (defined(__linux__) && defined(SUBSPACE_ENABLE_LINUX_PMEM_SHIM))
+  metadata.slot_id = proto.slot_id();
+  metadata.is_prefix = proto.is_prefix();
+  metadata.pmem_alignment = proto.pmem_alignment();
+  metadata.pmem_pool_id = proto.pmem_pool_id();
+  metadata.pmem_cache_enabled = proto.pmem_cache_enabled();
+#endif
   return metadata;
 }
 
@@ -73,6 +115,14 @@ void ToProto(const PmemBufferMetadata &metadata,
   proto->set_allocation_size(metadata.allocation_size);
   proto->set_shadow_file(metadata.shadow_file);
   proto->set_object_name(metadata.object_name);
+#if (defined(__QNXNTO__) && defined(SUBSPACE_ENABLE_QNX_PMEM)) ||            \
+    (defined(__linux__) && defined(SUBSPACE_ENABLE_LINUX_PMEM_SHIM))
+  proto->set_slot_id(metadata.slot_id);
+  proto->set_is_prefix(metadata.is_prefix);
+  proto->set_pmem_alignment(metadata.pmem_alignment);
+  proto->set_pmem_pool_id(metadata.pmem_pool_id);
+  proto->set_pmem_cache_enabled(metadata.pmem_cache_enabled);
+#endif
 }
 
 absl::Status WritePmemMetadataFile(const PmemBufferMetadata &metadata) {
@@ -186,13 +236,17 @@ CreateQnxPmemBuffer(const PmemBufferMetadata &metadata) {
       metadata.allocation_size != 0 ? metadata.allocation_size
                                     : PageAlignedSize(metadata.full_size);
 
-#if defined(__QNX__) && defined(SUBSPACE_ENABLE_QNX_PMEM)
-  if (shm_ctl(pmem_fd.Fd(), SHMCTL_ANON | SHMCTL_PHYS, 0,
-              allocation_size) == -1) {
-    (void)GetSyscallShim().shm_unlink_fn(metadata.object_name.c_str());
-    return absl::InternalError(absl::StrFormat(
-        "Failed to allocate QNX pmem object %s: %s", metadata.object_name,
-        strerror(errno)));
+#if defined(__QNXNTO__) && defined(SUBSPACE_ENABLE_QNX_PMEM)
+  if (absl::Status status = AllocateQnxPhysicalPmem(
+          pmem_fd.Fd(), allocation_size, metadata.object_name);
+      !status.ok()) {
+    return status;
+  }
+#elif defined(__linux__) && defined(SUBSPACE_ENABLE_LINUX_PMEM_SHIM)
+  if (absl::Status status = AllocateLinuxPmemShim(
+          pmem_fd.Fd(), allocation_size, metadata.object_name);
+      !status.ok()) {
+    return status;
   }
 #else
   if (GetSyscallShim().ftruncate_fn(pmem_fd.Fd(),

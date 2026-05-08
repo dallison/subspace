@@ -16,7 +16,9 @@
 #include "client/subscriber.h"
 #include "co/coroutine.h"
 #include "common/channel.h"
+#if SUBSPACE_HAS_QNX_PMEM
 #include "common/pmem.h"
+#endif
 
 #include "toolbelt/fd.h"
 #include "toolbelt/logging.h"
@@ -539,7 +541,12 @@ private:
   SendRequestReceiveResponse(const Request &req, Response &response,
                              std::vector<toolbelt::FileDescriptor> &fds);
   absl::Status SendOneWayRequest(const Request &req);
+#if SUBSPACE_HAS_QNX_PMEM
   absl::Status RegisterPmemBuffer(const PmemBufferMetadata &metadata);
+  absl::Status UnregisterPmemBuffer(const std::string &channel_name,
+                                    uint64_t session_id,
+                                    uint32_t buffer_index);
+#endif
 
   absl::Status Reconnect();
   absl::Status ReregisterPublisher(details::PublisherImpl *publisher);
@@ -908,6 +915,17 @@ public:
 
   MessageSlot *CurrentSlot() const { return impl_->CurrentSlot(); }
 
+  MessagePrefix *Prefix(MessageSlot *slot) const { return impl_->Prefix(slot); }
+#if SUBSPACE_HAS_QNX_PMEM
+  bool GetQnxPmemHandleFromAddress(const void *address,
+                                   uintptr_t *handle) const {
+    return impl_->GetQnxPmemHandleFromAddress(address, handle);
+  }
+  bool GetQnxPmemHandles(uintptr_t **handles, size_t *count) {
+    return impl_->GetQnxPmemHandles(handles, count);
+  }
+#endif
+
   // Total prefix area size in bytes (always a multiple of 64).
   // Determined by ChecksumSize() and MetadataSize().
   int32_t PrefixSize() const { return impl_->PrefixSize(); }
@@ -1205,6 +1223,18 @@ public:
   void ClearActiveMessage() { impl_->ClearActiveMessage(); }
 
   void TriggerReliablePublishers() { impl_->TriggerReliablePublishers(); }
+
+  MessageSlot *GetSlot(int slot_id) const { return impl_->GetSlot(slot_id); }
+  MessagePrefix *Prefix(MessageSlot *slot) const { return impl_->Prefix(slot); }
+#if SUBSPACE_HAS_QNX_PMEM
+  bool GetQnxPmemHandleFromAddress(const void *address,
+                                   uintptr_t *handle) const {
+    return impl_->GetQnxPmemHandleFromAddress(address, handle);
+  }
+  bool GetQnxPmemHandles(uintptr_t **handles, size_t *count) {
+    return impl_->GetQnxPmemHandles(handles, count);
+  }
+#endif
 
   // Total prefix area size in bytes (always a multiple of 64).
   // Determined by ChecksumSize() and MetadataSize().

@@ -73,6 +73,16 @@ private:
   bool IsPublisher() const override { return true; }
   bool IsBridge() const override { return options_.IsBridge(); }
   BufferMapMode MapMode() const override { return BufferMapMode::kReadWrite; }
+#if SUBSPACE_HAS_QNX_PMEM
+  bool UseQnxPmem() const override { return options_.UseQnxPmem(); }
+  uint32_t PmemAlignment() const override { return options_.PmemAlignment(); }
+  const std::string &PmemPoolId() const override {
+    return options_.PmemPoolId();
+  }
+  bool PmemCacheEnabled() const override {
+    return options_.PmemCacheEnabled();
+  }
+#endif
 
   std::string ResolvedName() const override {
     return IsVirtual() ? options_.mux : Name();

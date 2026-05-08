@@ -8,6 +8,23 @@
 #include "server/server.h"
 
 namespace subspace {
+namespace {
+#if SUBSPACE_HAS_QNX_PMEM
+QnxPmemOptions FromPublisherRequest(const CreatePublisherRequest &req) {
+  return {.use_qnx_pmem = req.use_qnx_pmem(),
+          .pmem_alignment = req.pmem_alignment(),
+          .pmem_pool_id = req.pmem_pool_id(),
+          .pmem_cache_enabled = req.pmem_cache_enabled()};
+}
+
+QnxPmemOptions FromSubscriberRequest(const CreateSubscriberRequest &req) {
+  return {.use_qnx_pmem = req.use_qnx_pmem(),
+          .pmem_alignment = req.pmem_alignment(),
+          .pmem_pool_id = req.pmem_pool_id(),
+          .pmem_cache_enabled = req.pmem_cache_enabled()};
+}
+#endif
+} // namespace
 
 ClientHandler::~ClientHandler() { server_->RemoveAllUsersFor(this); }
 
@@ -36,6 +53,7 @@ void ClientHandler::Run() {
       }
     }
 
+#if SUBSPACE_HAS_QNX_PMEM
     if (request.request_case() == subspace::Request::kRegisterPmemBuffer) {
       if (absl::Status s =
               HandleRegisterPmemBuffer(request.register_pmem_buffer());
@@ -45,6 +63,16 @@ void ClientHandler::Run() {
       }
       continue;
     }
+    if (request.request_case() == subspace::Request::kUnregisterPmemBuffer) {
+      if (absl::Status s =
+              HandleUnregisterPmemBuffer(request.unregister_pmem_buffer());
+          !s.ok()) {
+        server_->logger_.Log(toolbelt::LogLevel::kError, "%s\n",
+                             s.ToString().c_str());
+      }
+      continue;
+    }
+#endif
 
     std::vector<toolbelt::FileDescriptor> fds;
     subspace::Response response;
@@ -117,8 +145,18 @@ ClientHandler::HandleMessage(const subspace::Request &req,
                           resp.mutable_get_channel_stats(), fds);
     break;
 
+#if SUBSPACE_HAS_QNX_PMEM
   case subspace::Request::kRegisterPmemBuffer:
     return HandleRegisterPmemBuffer(req.register_pmem_buffer());
+
+  case subspace::Request::kUnregisterPmemBuffer:
+    return HandleUnregisterPmemBuffer(req.unregister_pmem_buffer());
+#else
+  case subspace::Request::kRegisterPmemBuffer:
+  case subspace::Request::kUnregisterPmemBuffer:
+    return absl::InvalidArgumentError(
+        "QNX PMEM requests are not supported on this platform");
+#endif
 
   case subspace::Request::REQUEST_NOT_SET:
     return absl::InternalError("Protocol error: unknown request");
@@ -126,6 +164,7 @@ ClientHandler::HandleMessage(const subspace::Request &req,
   return absl::OkStatus();
 }
 
+#if SUBSPACE_HAS_QNX_PMEM
 absl::Status ClientHandler::HandleRegisterPmemBuffer(
     const subspace::RegisterPmemBufferRequest &req) {
   PmemBufferMetadata metadata = FromProto(req.metadata());
@@ -144,9 +183,36 @@ absl::Status ClientHandler::HandleRegisterPmemBuffer(
   if (channel->IsVirtual()) {
     channel = static_cast<VirtualChannel *>(channel)->GetMux();
   }
+  PmemBufferMetadataProto proto;
+  ToProto(metadata, &proto);
   channel->RegisterPmemBuffer(std::move(metadata));
+  server_->ForEachShadow(
+      [&proto](const std::unique_ptr<ShadowReplicator> &shadow) {
+        shadow->SendRegisterPmemBuffer(proto);
+      });
   return absl::OkStatus();
 }
+
+absl::Status ClientHandler::HandleUnregisterPmemBuffer(
+    const subspace::UnregisterPmemBufferRequest &req) {
+  if (req.session_id() != server_->GetSessionId()) {
+    return absl::OkStatus();
+  }
+  ServerChannel *channel = server_->FindChannel(req.channel_name());
+  if (channel == nullptr) {
+    return absl::OkStatus();
+  }
+  if (channel->IsVirtual()) {
+    channel = static_cast<VirtualChannel *>(channel)->GetMux();
+  }
+  channel->UnregisterPmemBuffer(req.session_id(), req.buffer_index());
+  server_->ForEachShadow([&req](const std::unique_ptr<ShadowReplicator> &shadow) {
+    shadow->SendUnregisterPmemBuffer(req.channel_name(), req.session_id(),
+                                     req.buffer_index());
+  });
+  return absl::OkStatus();
+}
+#endif
 
 void ClientHandler::HandleInit(const subspace::InitRequest &req,
                                subspace::InitResponse *response,
@@ -167,7 +233,7 @@ void ClientHandler::HandleCreatePublisher(
   if (channel == nullptr) {
     server_->logger_.Log(toolbelt::LogLevel::kDebug,
                          "Publisher %s is creating new channel %s with size "
-                         "%d/%d and type length %d (total of %d channels)",
+                         "%d/%d and type length %zu (total of %zu channels)",
                          client_name_.c_str(), req.channel_name().c_str(),
                          req.slot_size(), req.num_slots(), req.type().size(),
                          server_->GetNumChannels());
@@ -183,7 +249,7 @@ void ClientHandler::HandleCreatePublisher(
     server_->logger_.Log(
         toolbelt::LogLevel::kDebug,
         "Publisher %s is remapping placeholder channel %s with size %d/%d and "
-        "type length %d (total of %d channels)",
+        "type length %zu (total of %zu channels)",
         client_name_.c_str(), req.channel_name().c_str(), req.slot_size(),
         req.num_slots(), req.type().size(), server_->GetNumChannels());
     // Channel exists, but it's just a placeholder.  Remap the memory now
@@ -322,6 +388,36 @@ void ClientHandler::HandleCreatePublisher(
       return;
     }
   }
+
+#if SUBSPACE_HAS_QNX_PMEM
+  ServerChannel *pmem_channel = channel->IsVirtual()
+                                    ? static_cast<VirtualChannel *>(channel)
+                                          ->GetMux()
+                                    : channel;
+  if (absl::Status status = pmem_channel->ValidateOrSetQnxPmemOptions(
+          FromPublisherRequest(req), /*set_if_missing=*/true, "publisher");
+      !status.ok()) {
+    response->set_error(status.ToString());
+    return;
+  }
+  if (req.use_qnx_pmem() && req.publisher_id() < 0) {
+    int num_pubs = 0;
+    int num_subs = 0;
+    int num_bridge_pubs = 0;
+    int num_bridge_subs = 0;
+    int num_tunnel_pubs = 0;
+    int num_tunnel_subs = 0;
+    pmem_channel->CountUsers(num_pubs, num_subs, num_bridge_pubs,
+                             num_bridge_subs, num_tunnel_pubs,
+                             num_tunnel_subs);
+    if (num_pubs + num_bridge_pubs + num_tunnel_pubs > 0) {
+      response->set_error(absl::StrFormat(
+          "QNX PMEM channel %s supports only one publisher",
+          req.channel_name()));
+      return;
+    }
+  }
+#endif
 
   PublisherUser *pub = nullptr;
   bool reclaimed = false;
@@ -487,7 +583,7 @@ void ClientHandler::HandleCreateSubscriber(
     // No channel exists, map an empty channel.
     server_->logger_.Log(toolbelt::LogLevel::kDebug,
                          "Subscriber %s is creating new placeholder channel %s "
-                         "with type length %d (total of %d channels)",
+                         "with type length %zu (total of %zu channels)",
                          client_name_.c_str(), req.channel_name().c_str(),
                          req.type().size(), server_->GetNumChannels());
     absl::StatusOr<ServerChannel *> ch = server_->CreateChannel(
@@ -539,6 +635,21 @@ void ClientHandler::HandleCreateSubscriber(
       return;
     }
   }
+#if SUBSPACE_HAS_QNX_PMEM
+  if (req.use_qnx_pmem()) {
+    ServerChannel *pmem_channel = channel->IsVirtual()
+                                      ? static_cast<VirtualChannel *>(channel)
+                                            ->GetMux()
+                                      : channel;
+    if (absl::Status status = pmem_channel->ValidateOrSetQnxPmemOptions(
+            FromSubscriberRequest(req), /*set_if_missing=*/true,
+            "subscriber");
+        !status.ok()) {
+      response->set_error(status.ToString());
+      return;
+    }
+  }
+#endif
 
   SubscriberUser *sub;
   bool reclaimed = false;
@@ -627,6 +738,18 @@ void ClientHandler::HandleCreateSubscriber(
   response->set_num_slots(channel->NumSlots());
   response->set_checksum_size(channel->ChecksumSize());
   response->set_metadata_size(channel->MetadataSize());
+#if SUBSPACE_HAS_QNX_PMEM
+  ServerChannel *pmem_response_channel =
+      channel->IsVirtual() ? static_cast<VirtualChannel *>(channel)->GetMux()
+                           : channel;
+  if (pmem_response_channel->HasQnxPmemOptions()) {
+    const QnxPmemOptions &pmem = pmem_response_channel->GetQnxPmemOptions();
+    response->set_use_qnx_pmem(pmem.use_qnx_pmem);
+    response->set_pmem_alignment(pmem.pmem_alignment);
+    response->set_pmem_pool_id(pmem.pmem_pool_id);
+    response->set_pmem_cache_enabled(pmem.pmem_cache_enabled);
+  }
+#endif
   // Add publisher trigger indexes.
   std::vector<toolbelt::FileDescriptor> pub_fds =
       channel->GetReliablePublisherTriggerFds();

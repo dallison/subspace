@@ -27,8 +27,19 @@ namespace subspace {
 #define SUBSPACE_SHMEM_MODE_LINUX 2
 #define SUBSPACE_SHMEM_MODE_QNX_PMEM 3
 
+// QNX PMEM support has two gates:
+// 1. Compile-time: real QNX PMEM is enabled, or the Linux PMEM shim is
+//    explicitly enabled for tests.
+// 2. Runtime: individual channels opt in with UseQnxPmem().
+#if (defined(__QNXNTO__) && defined(SUBSPACE_ENABLE_QNX_PMEM)) ||            \
+    (defined(__linux__) && defined(SUBSPACE_ENABLE_LINUX_PMEM_SHIM))
+#define SUBSPACE_HAS_QNX_PMEM 1
+#else
+#define SUBSPACE_HAS_QNX_PMEM 0
+#endif
+
 // Change this if you want to use a different shared memory mode.
-#if defined(__QNX__) && defined(SUBSPACE_ENABLE_QNX_PMEM)
+#if SUBSPACE_HAS_QNX_PMEM
 // QNX persistent-memory buffers are opt-in; otherwise QNX uses POSIX shadow
 // files like other non-Linux platforms.
 #define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_QNX_PMEM

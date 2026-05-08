@@ -38,6 +38,12 @@ build:macos_x86_64 --extra_execution_platforms=//platform/host:darwin_x86_64
 build:qnx_pmem --define=subspace_qnx_pmem=enabled
 build:qnx_pmem --copt="-DSUBSPACE_ENABLE_QNX_PMEM=1"
 
+# Linux test shim for the QNX PMEM transport path. This exposes the same PMEM
+# APIs but backs the allocations with Linux shared memory.
+build:linux_pmem_shim --define=subspace_linux_pmem_shim=enabled
+build:linux_pmem_shim --copt="-DSUBSPACE_ENABLE_QNX_PMEM=1"
+build:linux_pmem_shim --copt="-DSUBSPACE_ENABLE_LINUX_PMEM_SHIM=1"
+
 # For all builds, use C++17
 build --cxxopt="-std=c++17"
 

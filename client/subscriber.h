@@ -255,6 +255,16 @@ private:
 
   bool IsSubscriber() const override { return true; }
   bool IsBridge() const override { return options_.IsBridge(); }
+#if SUBSPACE_HAS_QNX_PMEM
+  bool UseQnxPmem() const override { return options_.UseQnxPmem(); }
+  uint32_t PmemAlignment() const override { return options_.PmemAlignment(); }
+  const std::string &PmemPoolId() const override {
+    return options_.PmemPoolId();
+  }
+  bool PmemCacheEnabled() const override {
+    return options_.PmemCacheEnabled();
+  }
+#endif
 
   void ClearPublishers() {
     std::unique_lock<std::mutex> lock(reliable_publishers_mutex_);

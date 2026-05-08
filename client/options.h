@@ -5,8 +5,18 @@
 #ifndef _xCLIENT_OPTIONS_H
 #define _xCLIENT_OPTIONS_H
 
+#include <cstdint>
 #include <functional>
 #include <string>
+
+#ifndef SUBSPACE_HAS_QNX_PMEM
+#if (defined(__QNXNTO__) && defined(SUBSPACE_ENABLE_QNX_PMEM)) ||            \
+    (defined(__linux__) && defined(SUBSPACE_ENABLE_LINUX_PMEM_SHIM))
+#define SUBSPACE_HAS_QNX_PMEM 1
+#else
+#define SUBSPACE_HAS_QNX_PMEM 0
+#endif
+#endif
 
 namespace subspace {
 
@@ -171,6 +181,35 @@ struct PublisherOptions {
   }
   bool PreferRetiredSlots() const { return prefer_retired_slots; }
 
+#if SUBSPACE_HAS_QNX_PMEM
+  // QNX PMEM options.  When use_qnx_pmem is true, payload slots are backed by
+  // PMEM allocations.  Alignment 0 uses the QNX PMEM default selected by the
+  // implementation.
+  PublisherOptions &SetUseQnxPmem(bool v) {
+    use_qnx_pmem = v;
+    return *this;
+  }
+  bool UseQnxPmem() const { return use_qnx_pmem; }
+
+  PublisherOptions &SetPmemAlignment(uint32_t alignment) {
+    pmem_alignment = alignment;
+    return *this;
+  }
+  uint32_t PmemAlignment() const { return pmem_alignment; }
+
+  PublisherOptions &SetPmemPoolId(std::string pool_id) {
+    pmem_pool_id = std::move(pool_id);
+    return *this;
+  }
+  const std::string &PmemPoolId() const { return pmem_pool_id; }
+
+  PublisherOptions &SetPmemCacheEnabled(bool v) {
+    pmem_cache_enabled = v;
+    return *this;
+  }
+  bool PmemCacheEnabled() const { return pmem_cache_enabled; }
+#endif
+
   // If you use the new CreatePublisher API, set the slot size and num slots in
   // here.
   int32_t slot_size = 0;
@@ -194,6 +233,13 @@ struct PublisherOptions {
 
   // See SetPreferRetiredSlots() for description.
   bool prefer_retired_slots = false;
+
+#if SUBSPACE_HAS_QNX_PMEM
+  bool use_qnx_pmem = false;
+  uint32_t pmem_alignment = 0;
+  std::string pmem_pool_id;
+  bool pmem_cache_enabled = false;
+#endif
 };
 
 struct SubscriberOptions {
@@ -294,6 +340,34 @@ struct SubscriberOptions {
   }
   bool KeepActiveMessage() const { return keep_active_message; }
 
+#if SUBSPACE_HAS_QNX_PMEM
+  // QNX PMEM expectations.  Subscribers use these to require that the channel
+  // they attach to has compatible PMEM settings.
+  SubscriberOptions &SetUseQnxPmem(bool v) {
+    use_qnx_pmem = v;
+    return *this;
+  }
+  bool UseQnxPmem() const { return use_qnx_pmem; }
+
+  SubscriberOptions &SetPmemAlignment(uint32_t alignment) {
+    pmem_alignment = alignment;
+    return *this;
+  }
+  uint32_t PmemAlignment() const { return pmem_alignment; }
+
+  SubscriberOptions &SetPmemPoolId(std::string pool_id) {
+    pmem_pool_id = std::move(pool_id);
+    return *this;
+  }
+  const std::string &PmemPoolId() const { return pmem_pool_id; }
+
+  SubscriberOptions &SetPmemCacheEnabled(bool v) {
+    pmem_cache_enabled = v;
+    return *this;
+  }
+  bool PmemCacheEnabled() const { return pmem_cache_enabled; }
+#endif
+
   bool reliable = false;
   bool bridge = false;
   bool for_tunnel = false;
@@ -314,6 +388,13 @@ struct SubscriberOptions {
   // around and you want to keep the message alive until you are done with it.
   // You should call ClearActiveMessage() to release the reference when you are done with it.
   bool keep_active_message = false;
+
+#if SUBSPACE_HAS_QNX_PMEM
+  bool use_qnx_pmem = false;
+  uint32_t pmem_alignment = 0;
+  std::string pmem_pool_id;
+  bool pmem_cache_enabled = false;
+#endif
 };
 
 } // namespace subspace

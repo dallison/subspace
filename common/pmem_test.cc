@@ -24,6 +24,14 @@ PmemBufferMetadata TestMetadata(const std::string &suffix) {
   metadata.shadow_file =
       "/tmp/subspace_pmem_test_" + std::to_string(getpid()) + "_" + suffix;
   metadata.object_name = QnxPmemObjectName(metadata.shadow_file);
+#if (defined(__QNXNTO__) && defined(SUBSPACE_ENABLE_QNX_PMEM)) ||            \
+    (defined(__linux__) && defined(SUBSPACE_ENABLE_LINUX_PMEM_SHIM))
+  metadata.slot_id = 2;
+  metadata.is_prefix = false;
+  metadata.pmem_alignment = 4096;
+  metadata.pmem_pool_id = "test-pool";
+  metadata.pmem_cache_enabled = true;
+#endif
   return metadata;
 }
 
@@ -42,6 +50,14 @@ TEST(PmemTest, WritesAndReadsMetadata) {
   EXPECT_EQ(read_metadata->allocation_size, metadata.allocation_size);
   EXPECT_EQ(read_metadata->shadow_file, metadata.shadow_file);
   EXPECT_EQ(read_metadata->object_name, metadata.object_name);
+#if (defined(__QNXNTO__) && defined(SUBSPACE_ENABLE_QNX_PMEM)) ||            \
+    (defined(__linux__) && defined(SUBSPACE_ENABLE_LINUX_PMEM_SHIM))
+  EXPECT_EQ(read_metadata->slot_id, metadata.slot_id);
+  EXPECT_EQ(read_metadata->is_prefix, metadata.is_prefix);
+  EXPECT_EQ(read_metadata->pmem_alignment, metadata.pmem_alignment);
+  EXPECT_EQ(read_metadata->pmem_pool_id, metadata.pmem_pool_id);
+  EXPECT_EQ(read_metadata->pmem_cache_enabled, metadata.pmem_cache_enabled);
+#endif
 
   (void)DestroyQnxPmemBuffer(metadata);
 }

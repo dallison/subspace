@@ -13,6 +13,7 @@
 #include "toolbelt/hexdump.h"
 #include "toolbelt/pipe.h"
 #include <array>
+#include <cstring>
 #include <inttypes.h>
 #include <sys/resource.h>
 
@@ -613,6 +614,78 @@ TEST_F(ClientTest, PublishSingleMessageAndRead) {
   ASSERT_EQ(0, msg->length);
 }
 
+#if defined(__linux__) && defined(SUBSPACE_ENABLE_LINUX_PMEM_SHIM)
+TEST_F(ClientTest, LinuxPmemShimPublishesWithHandlesAndSeparatePrefix) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  subspace::PublisherOptions pub_options;
+  pub_options.SetSlotSize(128)
+      .SetNumSlots(4)
+      .SetMetadataSize(8)
+      .SetUseQnxPmem(true)
+      .SetPmemAlignment(4096)
+      .SetPmemPoolId("linux-test")
+      .SetPmemCacheEnabled(true);
+  absl::StatusOr<Publisher> pub =
+      pub_client.CreatePublisher("linux_pmem_shim", pub_options);
+  ASSERT_OK(pub);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer(64);
+  ASSERT_OK(buffer);
+  ASSERT_NE(nullptr, *buffer);
+
+  uintptr_t publisher_handle = 0;
+  ASSERT_TRUE(pub->GetQnxPmemHandleFromAddress(*buffer, &publisher_handle));
+  EXPECT_NE(0U, publisher_handle);
+
+  auto metadata = pub->GetMetadata();
+  ASSERT_EQ(8U, metadata.size());
+  std::memcpy(metadata.data(), "metadata", metadata.size());
+  std::memcpy(*buffer, "pmem-shim", 9);
+
+  subspace::MessagePrefix *prefix = pub->Prefix(pub->CurrentSlot());
+  ASSERT_NE(nullptr, prefix);
+  EXPECT_NE(reinterpret_cast<void *>(prefix), *buffer);
+
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(9);
+  ASSERT_OK(pub_status);
+  ASSERT_GE(pub_status->slot_id, 0);
+
+  subspace::SubscriberOptions sub_options;
+  sub_options.SetMaxActiveMessages(2)
+      .SetUseQnxPmem(true)
+      .SetPmemAlignment(4096)
+      .SetPmemPoolId("linux-test")
+      .SetPmemCacheEnabled(true);
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber("linux_pmem_shim", sub_options);
+  ASSERT_OK(sub);
+
+  uintptr_t *subscriber_handles = nullptr;
+  size_t subscriber_handle_count = 0;
+  ASSERT_TRUE(
+      sub->GetQnxPmemHandles(&subscriber_handles, &subscriber_handle_count));
+  ASSERT_EQ(4U, subscriber_handle_count);
+  ASSERT_NE(nullptr, subscriber_handles);
+  for (size_t i = 0; i < subscriber_handle_count; i++) {
+    EXPECT_NE(0U, subscriber_handles[i]);
+  }
+
+  subspace::MessagePrefix *sub_prefix =
+      sub->Prefix(sub->GetSlot(pub_status->slot_id));
+  ASSERT_NE(nullptr, sub_prefix);
+  EXPECT_EQ(9, sub_prefix->message_size);
+  auto sub_metadata = subspace::GetMetadataSpan(
+      sub_prefix, sub->ChecksumSize(), sub->MetadataSize());
+  ASSERT_EQ(8U, sub_metadata.size());
+  EXPECT_EQ(
+      0, std::memcmp(sub_metadata.data(), "metadata", sub_metadata.size()));
+}
+#endif
+
 TEST_F(ClientTest, PublishSingleMessageWithPrefixAndRead) {
   subspace::Client pub_client;
   subspace::Client sub_client;
@@ -640,8 +713,8 @@ TEST_F(ClientTest, PublishSingleMessageWithPrefixAndRead) {
   ASSERT_OK(buffer);
   memcpy(*buffer, "foobar", 6);
 
-  auto prefix = reinterpret_cast<subspace::MessagePrefix *>(
-      static_cast<char *>(*buffer) - pub->PrefixSize());
+  auto prefix = pub->Prefix(pub->CurrentSlot());
+  ASSERT_NE(nullptr, prefix);
   prefix->SetIsBridged();
   prefix->timestamp = 1234;
 
@@ -655,8 +728,8 @@ TEST_F(ClientTest, PublishSingleMessageWithPrefixAndRead) {
   ASSERT_OK(msg);
   ASSERT_EQ(6, msg->length);
 
-  auto prefix2 = reinterpret_cast<const subspace::MessagePrefix *>(
-      static_cast<const char *>(msg->buffer) - sub->PrefixSize());
+  auto prefix2 = sub->Prefix(sub->GetSlot(msg->slot_id));
+  ASSERT_NE(nullptr, prefix2);
   ASSERT_TRUE(prefix2->IsBridged());
   ASSERT_EQ(1234, prefix2->timestamp);
   ASSERT_EQ(1, sub->CurrentOrdinal());

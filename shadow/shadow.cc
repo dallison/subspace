@@ -5,6 +5,7 @@
 
 #include "shadow/shadow.h"
 #include "absl/strings/str_format.h"
+#include <algorithm>
 #include <unistd.h>
 
 namespace subspace {
@@ -140,6 +141,10 @@ absl::Status Shadow::HandleEvent(const ShadowEvent &event,
     return HandleAddSubscriber(event.add_subscriber(), fds);
   case ShadowEvent::kRemoveSubscriber:
     return HandleRemoveSubscriber(event.remove_subscriber());
+  case ShadowEvent::kRegisterPmemBuffer:
+    return HandleRegisterPmemBuffer(event.register_pmem_buffer());
+  case ShadowEvent::kUnregisterPmemBuffer:
+    return HandleUnregisterPmemBuffer(event.unregister_pmem_buffer());
   case ShadowEvent::kStateDump:
   case ShadowEvent::kStateDone:
     return absl::OkStatus();
@@ -315,6 +320,43 @@ Shadow::HandleRemoveSubscriber(const ShadowRemoveSubscriber &msg) {
 }
 
 absl::Status
+Shadow::HandleRegisterPmemBuffer(const ShadowRegisterPmemBuffer &msg) {
+  const auto &metadata = msg.metadata();
+  auto it = channels_.find(metadata.channel_name());
+  if (it == channels_.end()) {
+    return absl::InternalError(absl::StrFormat(
+        "Shadow: PMEM registration for unknown channel '%s'",
+        metadata.channel_name()));
+  }
+  it->second.pmem_buffers.push_back(metadata);
+  logger_.Log(toolbelt::LogLevel::kDebug,
+              "Shadow: register PMEM buffer '%s' index=%u",
+              metadata.channel_name().c_str(), metadata.buffer_index());
+  return absl::OkStatus();
+}
+
+absl::Status
+Shadow::HandleUnregisterPmemBuffer(const ShadowUnregisterPmemBuffer &msg) {
+  auto it = channels_.find(msg.channel_name());
+  if (it == channels_.end()) {
+    return absl::OkStatus();
+  }
+  auto &buffers = it->second.pmem_buffers;
+  buffers.erase(std::remove_if(buffers.begin(), buffers.end(),
+                               [&msg](const PmemBufferMetadataProto &metadata) {
+                                 return metadata.session_id() ==
+                                            msg.session_id() &&
+                                        metadata.buffer_index() ==
+                                            msg.buffer_index();
+                               }),
+                buffers.end());
+  logger_.Log(toolbelt::LogLevel::kDebug,
+              "Shadow: unregister PMEM buffer '%s' index=%u",
+              msg.channel_name().c_str(), msg.buffer_index());
+  return absl::OkStatus();
+}
+
+absl::Status
 Shadow::SendEvent(toolbelt::UnixSocket &socket, const ShadowEvent &event,
                   const std::vector<toolbelt::FileDescriptor> &fds) {
   size_t msglen = event.ByteSizeLong();
@@ -380,6 +422,15 @@ absl::Status Shadow::SendStateDump(toolbelt::UnixSocket &socket) {
       fds.push_back(ch.ccb_fd);
       fds.push_back(ch.bcb_fd);
       if (absl::Status s = SendEvent(socket, event, fds); !s.ok()) {
+        return s;
+      }
+    }
+
+    // PMEM buffers.
+    for (const auto &metadata : ch.pmem_buffers) {
+      ShadowEvent event;
+      *event.mutable_register_pmem_buffer()->mutable_metadata() = metadata;
+      if (absl::Status s = SendEvent(socket, event); !s.ok()) {
         return s;
       }
     }

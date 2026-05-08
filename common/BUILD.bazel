@@ -6,17 +6,23 @@ cc_library(
     name = "subspace_common",
     srcs = [
         "channel.cc",
-        "pmem.cc",
         "syscall_shim.cc",
-    ],
+    ] + select({
+        "//:qnx_pmem": ["pmem.cc"],
+        "//:linux_pmem_shim": ["pmem.cc"],
+        "//conditions:default": [],
+    }),
     hdrs = [
         "atomic_bitset.h",
         "channel.h",
         "fast_ring_buffer.h",
-        "pmem.h",
         "syscall_shim.h",
         "syscall_shim_test_helper.h",
-    ],
+    ] + select({
+        "//:qnx_pmem": ["pmem.h"],
+        "//:linux_pmem_shim": ["pmem.h"],
+        "//conditions:default": [],
+    }),
     linkopts = select({
         "//:macos_x86_64": [],
         "//:macos_arm64": [],
@@ -54,6 +60,11 @@ cc_test(
     name = "pmem_test",
     size = "small",
     srcs = ["pmem_test.cc"],
+    target_compatible_with = select({
+        "//:qnx_pmem": [],
+        "//:linux_pmem_shim": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
     deps = [
         ":subspace_common",
         "@googletest//:gtest_main",

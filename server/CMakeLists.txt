@@ -25,6 +25,7 @@ target_link_libraries(libserver PUBLIC
 add_executable(subspace_server
     main.cc
 )
+set_target_properties(subspace_server PROPERTIES ENABLE_EXPORTS ON)
 
 target_link_libraries(subspace_server PUBLIC
     libserver

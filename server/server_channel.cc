@@ -11,6 +11,28 @@
 #endif
 
 namespace subspace {
+namespace {
+#if SUBSPACE_HAS_QNX_PMEM
+constexpr uint32_t kDefaultQnxPmemAlignment = 4096;
+
+bool IsPowerOfTwo(uint32_t value) {
+  return value != 0 && (value & (value - 1)) == 0;
+}
+
+QnxPmemOptions NormalizeQnxPmemOptions(QnxPmemOptions options) {
+  if (!options.use_qnx_pmem) {
+    options.pmem_alignment = 0;
+    options.pmem_pool_id.clear();
+    options.pmem_cache_enabled = false;
+    return options;
+  }
+  if (options.pmem_alignment == 0) {
+    options.pmem_alignment = kDefaultQnxPmemAlignment;
+  }
+  return options;
+}
+#endif
+} // namespace
 
 ServerChannel::~ServerChannel() {
   if (is_virtual_ || skip_cleanup_) {
@@ -89,6 +111,63 @@ CreateSystemControlBlock(toolbelt::FileDescriptor &fd) {
   memset(&scb->counters, 0, sizeof(scb->counters));
   return scb;
 }
+
+#if SUBSPACE_HAS_QNX_PMEM
+absl::Status
+ServerChannel::ValidateOrSetQnxPmemOptions(const QnxPmemOptions &options,
+                                           bool set_if_missing,
+                                           const char *user_type) {
+  QnxPmemOptions normalized = NormalizeQnxPmemOptions(options);
+  if (normalized.use_qnx_pmem) {
+    if (!IsPowerOfTwo(normalized.pmem_alignment)) {
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "Invalid QNX PMEM alignment %u for channel %s: alignment must be a "
+          "power of two",
+          normalized.pmem_alignment, Name()));
+    }
+    if (normalized.pmem_pool_id.empty()) {
+      return absl::InvalidArgumentError(
+          absl::StrFormat("QNX PMEM pool id is required for channel %s",
+                          Name()));
+    }
+  }
+
+  if (!qnx_pmem_options_set_) {
+    if (set_if_missing || normalized.use_qnx_pmem) {
+      qnx_pmem_options_ = std::move(normalized);
+      qnx_pmem_options_set_ = true;
+    }
+    return absl::OkStatus();
+  }
+
+  QnxPmemOptions existing = NormalizeQnxPmemOptions(qnx_pmem_options_);
+  if (existing.use_qnx_pmem != normalized.use_qnx_pmem) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Inconsistent QNX PMEM mode for %s on channel %s", user_type, Name()));
+  }
+  if (!existing.use_qnx_pmem) {
+    return absl::OkStatus();
+  }
+  if (existing.pmem_alignment != normalized.pmem_alignment) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Inconsistent QNX PMEM alignment for %s on channel %s: already %u, "
+        "not %u",
+        user_type, Name(), existing.pmem_alignment, normalized.pmem_alignment));
+  }
+  if (existing.pmem_pool_id != normalized.pmem_pool_id) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Inconsistent QNX PMEM pool id for %s on channel %s: already %s, not "
+        "%s",
+        user_type, Name(), existing.pmem_pool_id, normalized.pmem_pool_id));
+  }
+  if (existing.pmem_cache_enabled != normalized.pmem_cache_enabled) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Inconsistent QNX PMEM cache setting for %s on channel %s", user_type,
+        Name()));
+  }
+  return absl::OkStatus();
+}
+#endif
 
 absl::StatusOr<SharedMemoryFds>
 ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,

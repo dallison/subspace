@@ -19,6 +19,15 @@
 #include <stdint.h>
 #include <sys/poll.h>
 
+#ifndef SUBSPACE_HAS_QNX_PMEM
+#if (defined(__QNXNTO__) && defined(SUBSPACE_ENABLE_QNX_PMEM)) ||            \
+    (defined(__linux__) && defined(SUBSPACE_ENABLE_LINUX_PMEM_SHIM))
+#define SUBSPACE_HAS_QNX_PMEM 1
+#else
+#define SUBSPACE_HAS_QNX_PMEM 0
+#endif
+#endif
+
 #if defined(__cplusplus)
 extern "C" {
 #endif
@@ -112,6 +121,16 @@ typedef struct {
   // false to force the legacy FreeSlots-first allocator (useful when
   // reproducing pre-fix benchmarks).
   bool prefer_retired_slots;
+
+#if SUBSPACE_HAS_QNX_PMEM
+  // QNX PMEM options.  When use_qnx_pmem is true, payload slots are backed by
+  // QNX PMEM.  Alignment 0 uses the implementation default.
+  bool use_qnx_pmem;
+  uint32_t pmem_alignment;
+  const char *pmem_pool_id;
+  size_t pmem_pool_id_length;
+  bool pmem_cache_enabled;
+#endif
 } SubspacePublisherOptions;
 
 typedef struct {
@@ -120,6 +139,15 @@ typedef struct {
   int max_active_messages; // Max number of message that can be active at once.
   bool pass_activation;    // Pass activation message in read.
   bool log_dropped_messages; // Log dropped messages to stderr.
+
+#if SUBSPACE_HAS_QNX_PMEM
+  // QNX PMEM expectations for the channel being attached to.
+  bool use_qnx_pmem;
+  uint32_t pmem_alignment;
+  const char *pmem_pool_id;
+  size_t pmem_pool_id_length;
+  bool pmem_cache_enabled;
+#endif
 } SubspaceSubscriberOptions;
 
 typedef enum {
@@ -328,6 +356,16 @@ const void *subspace_get_subscriber_metadata(SubspaceSubscriber subscriber,
 // the handle is invalid or metadata is not enabled.
 int32_t subspace_get_publisher_metadata_size(SubspacePublisher publisher);
 int32_t subspace_get_subscriber_metadata_size(SubspaceSubscriber subscriber);
+
+#if SUBSPACE_HAS_QNX_PMEM
+// QNX PMEM handle accessors.  Returned handle arrays are owned by the publisher
+// / subscriber and remain valid until the channel changes buffers or is
+// destroyed.
+bool subspace_get_publisher_pmem_handle_from_address(
+    SubspacePublisher publisher, const void *address, uintptr_t *handle);
+bool subspace_get_subscriber_pmem_handles(SubspaceSubscriber subscriber,
+                                          uintptr_t **handles, size_t *count);
+#endif
 
 #if defined(__cplusplus)
 } // extern "C"

@@ -275,6 +275,113 @@ TEST_F(ServerTest, PubMetadataSizeInconsistent) {
               ::testing::HasSubstr("Inconsistent metadata_size"));
 }
 
+#if SUBSPACE_HAS_QNX_PMEM
+TEST_F(ServerTest, QnxPmemPublisherOptionsMustMatch) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  subspace::Request req;
+  auto *cmd = req.mutable_create_publisher();
+  cmd->set_channel_name("pmem_options");
+  cmd->set_slot_size(64);
+  cmd->set_num_slots(4);
+  cmd->set_is_local(true);
+  cmd->set_publisher_id(-1);
+  cmd->set_use_qnx_pmem(true);
+  cmd->set_pmem_alignment(4096);
+  cmd->set_pmem_pool_id("camera");
+  cmd->set_pmem_cache_enabled(true);
+  auto result = conn.Send(req);
+  ASSERT_TRUE(result.ok());
+  ASSERT_TRUE(result->first.create_publisher().error().empty());
+
+  subspace::Request req2;
+  auto *cmd2 = req2.mutable_create_publisher();
+  cmd2->set_channel_name("pmem_options");
+  cmd2->set_slot_size(64);
+  cmd2->set_num_slots(4);
+  cmd2->set_is_local(true);
+  cmd2->set_publisher_id(-1);
+  cmd2->set_use_qnx_pmem(true);
+  cmd2->set_pmem_alignment(8192);
+  cmd2->set_pmem_pool_id("camera");
+  cmd2->set_pmem_cache_enabled(true);
+  auto result2 = conn.Send(req2);
+  ASSERT_TRUE(result2.ok());
+  EXPECT_THAT(result2->first.create_publisher().error(),
+              ::testing::HasSubstr("Inconsistent QNX PMEM alignment"));
+}
+
+TEST_F(ServerTest, QnxPmemChannelAllowsOnlyOnePublisher) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  subspace::Request req;
+  auto *cmd = req.mutable_create_publisher();
+  cmd->set_channel_name("pmem_single_pub");
+  cmd->set_slot_size(64);
+  cmd->set_num_slots(4);
+  cmd->set_is_local(true);
+  cmd->set_publisher_id(-1);
+  cmd->set_use_qnx_pmem(true);
+  cmd->set_pmem_alignment(4096);
+  cmd->set_pmem_pool_id("camera");
+  auto result = conn.Send(req);
+  ASSERT_TRUE(result.ok());
+  ASSERT_TRUE(result->first.create_publisher().error().empty());
+
+  subspace::Request req2;
+  auto *cmd2 = req2.mutable_create_publisher();
+  cmd2->set_channel_name("pmem_single_pub");
+  cmd2->set_slot_size(64);
+  cmd2->set_num_slots(4);
+  cmd2->set_is_local(true);
+  cmd2->set_publisher_id(-1);
+  cmd2->set_use_qnx_pmem(true);
+  cmd2->set_pmem_alignment(4096);
+  cmd2->set_pmem_pool_id("camera");
+  auto result2 = conn.Send(req2);
+  ASSERT_TRUE(result2.ok());
+  EXPECT_THAT(result2->first.create_publisher().error(),
+              ::testing::HasSubstr("supports only one publisher"));
+}
+
+TEST_F(ServerTest, QnxPmemSubscriberOptionsMustMatch) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  subspace::Request req;
+  auto *cmd = req.mutable_create_publisher();
+  cmd->set_channel_name("pmem_sub_options");
+  cmd->set_slot_size(64);
+  cmd->set_num_slots(4);
+  cmd->set_is_local(true);
+  cmd->set_publisher_id(-1);
+  cmd->set_use_qnx_pmem(true);
+  cmd->set_pmem_alignment(4096);
+  cmd->set_pmem_pool_id("camera");
+  auto result = conn.Send(req);
+  ASSERT_TRUE(result.ok());
+  ASSERT_TRUE(result->first.create_publisher().error().empty());
+
+  subspace::Request req2;
+  auto *sub = req2.mutable_create_subscriber();
+  sub->set_channel_name("pmem_sub_options");
+  sub->set_subscriber_id(-1);
+  sub->set_max_active_messages(1);
+  sub->set_use_qnx_pmem(true);
+  sub->set_pmem_alignment(4096);
+  sub->set_pmem_pool_id("video");
+  auto result2 = conn.Send(req2);
+  ASSERT_TRUE(result2.ok());
+  EXPECT_THAT(result2->first.create_subscriber().error(),
+              ::testing::HasSubstr("Inconsistent QNX PMEM pool id"));
+}
+#endif
+
 TEST_F(ServerTest, PubToMuxChannelWithoutMuxName) {
   RawConnection conn;
   ASSERT_OK(conn.Connect(Socket()));

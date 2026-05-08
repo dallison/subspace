@@ -67,6 +67,13 @@ SubspaceSubscriberOptions subspace_subscriber_options_default(void) {
       .max_active_messages = 1,
       .pass_activation = false,
       .log_dropped_messages = false,
+#if SUBSPACE_HAS_QNX_PMEM
+      .use_qnx_pmem = false,
+      .pmem_alignment = 0,
+      .pmem_pool_id = nullptr,
+      .pmem_pool_id_length = 0,
+      .pmem_cache_enabled = false,
+#endif
   };
   return options;
 }
@@ -83,6 +90,13 @@ SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size,
       .checksum_size = 4,
       .metadata_size = 0,
       .prefer_retired_slots = true,
+#if SUBSPACE_HAS_QNX_PMEM
+      .use_qnx_pmem = false,
+      .pmem_alignment = 0,
+      .pmem_pool_id = nullptr,
+      .pmem_pool_id_length = 0,
+      .pmem_cache_enabled = false,
+#endif
   };
   return options;
 }
@@ -96,6 +110,15 @@ subspace_create_subscriber(SubspaceClient client, const char *channel_name,
       .max_active_messages = options.max_active_messages,
       .log_dropped_messages = options.log_dropped_messages,
       .pass_activation = options.pass_activation,
+#if SUBSPACE_HAS_QNX_PMEM
+      .use_qnx_pmem = options.use_qnx_pmem,
+      .pmem_alignment = options.pmem_alignment,
+      .pmem_pool_id = options.pmem_pool_id == nullptr
+                          ? std::string()
+                          : std::string(options.pmem_pool_id,
+                                        options.pmem_pool_id_length),
+      .pmem_cache_enabled = options.pmem_cache_enabled,
+#endif
   };
   subspace_clear_error();
   SubspaceSubscriber subscriber;
@@ -129,6 +152,15 @@ SubspacePublisher subspace_create_publisher(SubspaceClient client,
       .checksum_size = options.checksum_size,
       .metadata_size = options.metadata_size,
       .prefer_retired_slots = options.prefer_retired_slots,
+#if SUBSPACE_HAS_QNX_PMEM
+      .use_qnx_pmem = options.use_qnx_pmem,
+      .pmem_alignment = options.pmem_alignment,
+      .pmem_pool_id = options.pmem_pool_id == nullptr
+                          ? std::string()
+                          : std::string(options.pmem_pool_id,
+                                        options.pmem_pool_id_length),
+      .pmem_cache_enabled = options.pmem_cache_enabled,
+#endif
   };
   subspace_clear_error();
   SubspacePublisher publisher;
@@ -720,6 +752,40 @@ int32_t subspace_get_subscriber_metadata_size(SubspaceSubscriber subscriber) {
       subscriber.subscriber);
   return (*sub_ptr)->MetadataSize();
 }
+
+#if SUBSPACE_HAS_QNX_PMEM
+bool subspace_get_publisher_pmem_handle_from_address(
+    SubspacePublisher publisher, const void *address, uintptr_t *handle) {
+  if (handle != nullptr) {
+    *handle = 0;
+  }
+  if (publisher.publisher == nullptr || address == nullptr ||
+      handle == nullptr) {
+    return false;
+  }
+  auto pub_ptr = reinterpret_cast<std::shared_ptr<subspace::Publisher> *>(
+      publisher.publisher);
+  return (*pub_ptr)->GetQnxPmemHandleFromAddress(address, handle);
+}
+
+bool subspace_get_subscriber_pmem_handles(SubspaceSubscriber subscriber,
+                                          uintptr_t **handles,
+                                          size_t *count) {
+  if (handles != nullptr) {
+    *handles = nullptr;
+  }
+  if (count != nullptr) {
+    *count = 0;
+  }
+  if (subscriber.subscriber == nullptr || handles == nullptr ||
+      count == nullptr) {
+    return false;
+  }
+  auto sub_ptr = reinterpret_cast<std::shared_ptr<subspace::Subscriber> *>(
+      subscriber.subscriber);
+  return (*sub_ptr)->GetQnxPmemHandles(handles, count);
+}
+#endif
 
 #if defined(__cplusplus)
 } // extern "C"

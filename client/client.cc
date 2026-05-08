@@ -301,10 +301,17 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
         return CheckReload(static_cast<ClientChannel *>(c));
       },
       server_user_id_, server_group_id_);
+#if SUBSPACE_HAS_QNX_PMEM
   channel->SetPmemRegistrationCallback(
       [this](const PmemBufferMetadata &metadata) {
         return RegisterPmemBuffer(metadata);
       });
+  channel->SetPmemUnregistrationCallback(
+      [this](const std::string &channel_name, uint64_t session_id,
+             uint32_t buffer_index) {
+        return UnregisterPmemBuffer(channel_name, session_id, buffer_index);
+      });
+#endif
 
   int32_t cs = opts.ChecksumSize() > 0 ? opts.ChecksumSize() : 4;
   int32_t ms = opts.MetadataSize() > 0 ? opts.MetadataSize() : 0;
@@ -395,10 +402,18 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
     return absl::InternalError(sub_resp.error());
   }
 
+  SubscriberOptions subscriber_options = opts;
+#if SUBSPACE_HAS_QNX_PMEM
+  subscriber_options.use_qnx_pmem = sub_resp.use_qnx_pmem();
+  subscriber_options.pmem_alignment = sub_resp.pmem_alignment();
+  subscriber_options.pmem_pool_id = sub_resp.pmem_pool_id();
+  subscriber_options.pmem_cache_enabled = sub_resp.pmem_cache_enabled();
+#endif
+
   std::shared_ptr<SubscriberImpl> channel = std::make_shared<SubscriberImpl>(
       channel_name, sub_resp.num_slots(), sub_resp.channel_id(),
       sub_resp.subscriber_id(), sub_resp.vchan_id(), session_id_,
-      sub_resp.type(), opts,
+      sub_resp.type(), subscriber_options,
       [this](Channel *c) {
         return CheckReload(static_cast<ClientChannel *>(c));
       },
@@ -1551,6 +1566,12 @@ void ClientImpl::FillCreatePublisherRequest(CreatePublisherRequest *cmd,
   cmd->set_checksum_size(opts.ChecksumSize());
   cmd->set_metadata_size(opts.MetadataSize());
   cmd->set_publisher_id(publisher_id);
+#if SUBSPACE_HAS_QNX_PMEM
+  cmd->set_use_qnx_pmem(opts.UseQnxPmem());
+  cmd->set_pmem_alignment(opts.PmemAlignment());
+  cmd->set_pmem_pool_id(opts.PmemPoolId());
+  cmd->set_pmem_cache_enabled(opts.PmemCacheEnabled());
+#endif
 }
 
 void ClientImpl::ApplyPublisherResponseFds(
@@ -1590,6 +1611,12 @@ void ClientImpl::FillCreateSubscriberRequest(CreateSubscriberRequest *cmd,
   cmd->set_max_active_messages(opts.MaxActiveMessages());
   cmd->set_mux(opts.Mux());
   cmd->set_vchan_id(opts.VchanId());
+#if SUBSPACE_HAS_QNX_PMEM
+  cmd->set_use_qnx_pmem(opts.UseQnxPmem());
+  cmd->set_pmem_alignment(opts.PmemAlignment());
+  cmd->set_pmem_pool_id(opts.PmemPoolId());
+  cmd->set_pmem_cache_enabled(opts.PmemCacheEnabled());
+#endif
 }
 
 void ClientImpl::ApplySubscriberResponseFds(
@@ -1781,11 +1808,24 @@ absl::Status ClientImpl::SendOneWayRequest(const Request &req) {
   return absl::OkStatus();
 }
 
+#if SUBSPACE_HAS_QNX_PMEM
 absl::Status ClientImpl::RegisterPmemBuffer(
     const PmemBufferMetadata &metadata) {
   Request req;
   ToProto(metadata, req.mutable_register_pmem_buffer()->mutable_metadata());
   return SendOneWayRequest(req);
 }
+
+absl::Status ClientImpl::UnregisterPmemBuffer(const std::string &channel_name,
+                                              uint64_t session_id,
+                                              uint32_t buffer_index) {
+  Request req;
+  auto *unregister = req.mutable_unregister_pmem_buffer();
+  unregister->set_channel_name(channel_name);
+  unregister->set_session_id(session_id);
+  unregister->set_buffer_index(buffer_index);
+  return SendOneWayRequest(req);
+}
+#endif
 
 } // namespace subspace

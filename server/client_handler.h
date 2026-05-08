@@ -63,8 +63,12 @@ private:
   void HandleGetChannelStats(const subspace::GetChannelStatsRequest &req,
                              subspace::GetChannelStatsResponse *response,
                              std::vector<toolbelt::FileDescriptor> &fds);
+#if SUBSPACE_HAS_QNX_PMEM
   absl::Status
   HandleRegisterPmemBuffer(const subspace::RegisterPmemBufferRequest &req);
+  absl::Status
+  HandleUnregisterPmemBuffer(const subspace::UnregisterPmemBufferRequest &req);
+#endif
   Server *server_;
   toolbelt::UnixSocket socket_;
   std::string client_name_;
