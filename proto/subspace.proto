@@ -157,6 +157,7 @@ message PmemBufferMetadataProto {
   uint32 pmem_alignment = 10;
   string pmem_pool_id = 11;
   bool pmem_cache_enabled = 12;
+  uint64 pmem_handle = 13;
 }
 
 message RegisterPmemBufferRequest {

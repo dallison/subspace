@@ -9,6 +9,7 @@
 #include <sys/posix_shm.h>
 #endif
 #include <chrono>
+#include <optional>
 #include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
@@ -130,11 +131,35 @@ void ClientChannel::UnmapQnxPmemBufferSet(size_t buffer_index,
                                           bool unregister_pmem) {
   for (size_t slot = 0; slot < buffer.pmem_slot_buffers.size(); slot++) {
     if (buffer.pmem_slot_buffers[slot] != nullptr) {
-      UnmapMemory(buffer.pmem_slot_buffers[slot], buffer.pmem_slot_sizes[slot],
-                  "pmem slot");
+      PmemBufferMetadata metadata;
+      if (slot < buffer.pmem_metadata.size()) {
+        metadata = buffer.pmem_metadata[slot];
+      }
+      PmemBufferMapping mapping = {
+          .handle = slot < buffer.pmem_handles.size() ? buffer.pmem_handles[slot]
+                                                      : metadata.pmem_handle,
+          .address = buffer.pmem_slot_buffers[slot],
+          .size = slot < buffer.pmem_slot_sizes.size() ? buffer.pmem_slot_sizes[slot]
+                                                       : metadata.allocation_size,
+          .private_data = slot < buffer.pmem_private_data.size()
+                              ? buffer.pmem_private_data[slot]
+                              : nullptr,
+      };
+      if (buffer.uses_pmem_callbacks && buffer.owns_qnx_pmem &&
+          PmemCallbacks().free) {
+        (void)PmemCallbacks().free(metadata, mapping);
+      } else if (buffer.uses_pmem_callbacks && PmemCallbacks().unmap) {
+        (void)PmemCallbacks().unmap(metadata, mapping);
+      } else {
+        UnmapMemory(buffer.pmem_slot_buffers[slot], buffer.pmem_slot_sizes[slot],
+                    "pmem slot");
+      }
       buffer.pmem_slot_buffers[slot] = nullptr;
     }
-    if (buffer.owns_qnx_pmem && slot < buffer.pmem_metadata.size()) {
+    if (buffer.owns_qnx_pmem && slot < buffer.pmem_metadata.size() &&
+        !buffer.uses_pmem_callbacks) {
+      (void)DestroyQnxPmemBuffer(buffer.pmem_metadata[slot]);
+    } else if (buffer.owns_qnx_pmem && slot < buffer.pmem_metadata.size()) {
       (void)DestroyQnxPmemBuffer(buffer.pmem_metadata[slot]);
     }
   }
@@ -468,8 +493,8 @@ ClientChannel::OpenBuffer(int buffer_index) {
 absl::StatusOr<size_t>
 ClientChannel::GetBufferSize(toolbelt::FileDescriptor &shm_fd,
                              int buffer_index) const {
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   auto &shim = GetSyscallShim();
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   // On Posix we need to look at the size of the shadow file because it looks
   // like the fstat of the shm "file" returns a page aligned size.
   std::string filename = BufferSharedMemoryName(buffer_index);
@@ -481,7 +506,6 @@ ClientChannel::GetBufferSize(toolbelt::FileDescriptor &shm_fd,
   }
   return sb.st_size;
 #elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_QNX_PMEM
-  (void)shm_fd;
   std::string filename = BufferSharedMemoryName(buffer_index);
   auto metadata = ReadPmemMetadataFile(filename);
   if (!metadata.ok()) {
@@ -489,7 +513,6 @@ ClientChannel::GetBufferSize(toolbelt::FileDescriptor &shm_fd,
   }
   return metadata->full_size;
 #else
-  auto &shim = GetSyscallShim();
   std::string filename = BufferSharedMemoryName(buffer_index);
   struct stat sb;
   if (shim.fstat_fn(shm_fd.Fd(), &sb) == -1) {
@@ -578,8 +601,11 @@ ClientChannel::CreateQnxPmemBufferSet(size_t buffer_index, size_t full_size,
   buffer->pmem_slot_buffers.resize(NumSlots(), nullptr);
   buffer->pmem_slot_sizes.resize(NumSlots(), payload_size);
   buffer->pmem_handles.resize(NumSlots(), 0);
+  buffer->pmem_private_data.resize(NumSlots(), nullptr);
   buffer->pmem_metadata.reserve(NumSlots());
   buffer->pmem_fds.reserve(NumSlots());
+  buffer->uses_pmem_callbacks =
+      static_cast<bool>(PmemCallbacks().allocate);
   for (int slot = 0; slot < NumSlots(); slot++) {
     PmemBufferMetadata metadata;
     metadata.channel_name = ResolvedName();
@@ -596,13 +622,39 @@ ClientChannel::CreateQnxPmemBufferSet(size_t buffer_index, size_t full_size,
     metadata.pmem_pool_id = PmemPoolId();
     metadata.pmem_cache_enabled = PmemCacheEnabled();
 
-    auto pmem_fd = CreateQnxPmemBuffer(metadata);
-    if (!pmem_fd.ok()) {
-      return pmem_fd.status();
-    }
-    auto addr = MapBuffer(*pmem_fd, payload_size, MapMode());
-    if (!addr.ok()) {
-      return addr.status();
+    char *slot_addr = nullptr;
+    uintptr_t slot_handle = 0;
+    uint64_t slot_mapped_size = payload_size;
+    void *slot_private_data = nullptr;
+    std::optional<toolbelt::FileDescriptor> pmem_fd;
+    if (PmemCallbacks().allocate) {
+      auto mapping = PmemCallbacks().allocate(metadata);
+      if (!mapping.ok()) {
+        return mapping.status();
+      }
+      if (mapping->address == nullptr || mapping->handle == 0) {
+        return absl::InternalError(
+            "QNX PMEM allocation callback returned an empty mapping");
+      }
+      slot_addr = static_cast<char *>(mapping->address);
+      slot_handle = mapping->handle;
+      slot_mapped_size =
+          mapping->size == 0 ? payload_size : static_cast<uint64_t>(mapping->size);
+      slot_private_data = mapping->private_data;
+      metadata.pmem_handle = slot_handle;
+    } else {
+      auto created_fd = CreateQnxPmemBuffer(metadata);
+      if (!created_fd.ok()) {
+        return created_fd.status();
+      }
+      auto addr = MapBuffer(*created_fd, payload_size, MapMode());
+      if (!addr.ok()) {
+        return addr.status();
+      }
+      slot_addr = *addr;
+      slot_handle = static_cast<uintptr_t>(created_fd->Fd());
+      pmem_fd.emplace(std::move(*created_fd));
+      metadata.pmem_handle = slot_handle;
     }
     if (absl::Status status = WritePmemMetadataFile(metadata); !status.ok()) {
       return status;
@@ -613,10 +665,13 @@ ClientChannel::CreateQnxPmemBufferSet(size_t buffer_index, size_t full_size,
         return status;
       }
     }
-    buffer->pmem_handles[slot] =
-        static_cast<uintptr_t>(pmem_fd->Fd());
-    buffer->pmem_slot_buffers[slot] = *addr;
-    buffer->pmem_fds.push_back(std::move(*pmem_fd));
+    buffer->pmem_handles[slot] = slot_handle;
+    buffer->pmem_slot_buffers[slot] = slot_addr;
+    buffer->pmem_slot_sizes[slot] = slot_mapped_size;
+    buffer->pmem_private_data[slot] = slot_private_data;
+    if (pmem_fd.has_value()) {
+      buffer->pmem_fds.push_back(std::move(*pmem_fd));
+    }
     buffer->pmem_metadata.push_back(std::move(metadata));
   }
   return buffer;
@@ -649,26 +704,52 @@ ClientChannel::OpenQnxPmemBufferSet(size_t buffer_index, size_t full_size,
   buffer->pmem_slot_buffers.resize(NumSlots(), nullptr);
   buffer->pmem_slot_sizes.resize(NumSlots(), payload_size);
   buffer->pmem_handles.resize(NumSlots(), 0);
+  buffer->pmem_private_data.resize(NumSlots(), nullptr);
   buffer->pmem_metadata.reserve(NumSlots());
   buffer->pmem_fds.reserve(NumSlots());
+  buffer->uses_pmem_callbacks = static_cast<bool>(PmemCallbacks().map);
   for (int slot = 0; slot < NumSlots(); slot++) {
     std::string shadow_file = absl::StrFormat("%s_slot_%d", base, slot);
     auto metadata = ReadPmemMetadataFile(shadow_file);
     if (!metadata.ok()) {
       return metadata.status();
     }
-    auto pmem_fd = OpenQnxPmemBuffer(*metadata, O_RDWR);
-    if (!pmem_fd.ok()) {
-      return pmem_fd.status();
+    char *slot_addr = nullptr;
+    uintptr_t slot_handle = metadata->pmem_handle;
+    uint64_t slot_mapped_size = payload_size;
+    void *slot_private_data = nullptr;
+    if (PmemCallbacks().map) {
+      auto mapping = PmemCallbacks().map(*metadata);
+      if (!mapping.ok()) {
+        return mapping.status();
+      }
+      if (mapping->address == nullptr) {
+        return absl::InternalError(
+            "QNX PMEM map callback returned an empty mapping");
+      }
+      slot_addr = static_cast<char *>(mapping->address);
+      slot_handle =
+          mapping->handle == 0 ? metadata->pmem_handle : mapping->handle;
+      slot_mapped_size =
+          mapping->size == 0 ? payload_size : static_cast<uint64_t>(mapping->size);
+      slot_private_data = mapping->private_data;
+    } else {
+      auto pmem_fd = OpenQnxPmemBuffer(*metadata, O_RDWR);
+      if (!pmem_fd.ok()) {
+        return pmem_fd.status();
+      }
+      auto addr = MapBuffer(*pmem_fd, payload_size, MapMode());
+      if (!addr.ok()) {
+        return addr.status();
+      }
+      slot_addr = *addr;
+      slot_handle = static_cast<uintptr_t>(pmem_fd->Fd());
+      buffer->pmem_fds.push_back(std::move(*pmem_fd));
     }
-    auto addr = MapBuffer(*pmem_fd, payload_size, MapMode());
-    if (!addr.ok()) {
-      return addr.status();
-    }
-    buffer->pmem_handles[slot] =
-        static_cast<uintptr_t>(pmem_fd->Fd());
-    buffer->pmem_slot_buffers[slot] = *addr;
-    buffer->pmem_fds.push_back(std::move(*pmem_fd));
+    buffer->pmem_handles[slot] = slot_handle;
+    buffer->pmem_slot_buffers[slot] = slot_addr;
+    buffer->pmem_slot_sizes[slot] = slot_mapped_size;
+    buffer->pmem_private_data[slot] = slot_private_data;
     buffer->pmem_metadata.push_back(std::move(*metadata));
   }
   return buffer;

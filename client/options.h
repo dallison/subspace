@@ -5,18 +5,14 @@
 #ifndef _xCLIENT_OPTIONS_H
 #define _xCLIENT_OPTIONS_H
 
+#include "common/channel.h"
+#if SUBSPACE_HAS_QNX_PMEM
+#include "common/pmem.h"
+#endif
+
 #include <cstdint>
 #include <functional>
 #include <string>
-
-#ifndef SUBSPACE_HAS_QNX_PMEM
-#if (defined(__QNXNTO__) && defined(SUBSPACE_ENABLE_QNX_PMEM)) ||            \
-    (defined(__linux__) && defined(SUBSPACE_ENABLE_LINUX_PMEM_SHIM))
-#define SUBSPACE_HAS_QNX_PMEM 1
-#else
-#define SUBSPACE_HAS_QNX_PMEM 0
-#endif
-#endif
 
 namespace subspace {
 
@@ -208,6 +204,12 @@ struct PublisherOptions {
     return *this;
   }
   bool PmemCacheEnabled() const { return pmem_cache_enabled; }
+
+  PublisherOptions &SetPmemBufferCallbacks(PmemBufferCallbacks callbacks) {
+    pmem_callbacks = std::move(callbacks);
+    return *this;
+  }
+  const PmemBufferCallbacks &PmemCallbacks() const { return pmem_callbacks; }
 #endif
 
   // If you use the new CreatePublisher API, set the slot size and num slots in
@@ -239,6 +241,7 @@ struct PublisherOptions {
   uint32_t pmem_alignment = 0;
   std::string pmem_pool_id;
   bool pmem_cache_enabled = false;
+  PmemBufferCallbacks pmem_callbacks;
 #endif
 };
 
@@ -366,6 +369,12 @@ struct SubscriberOptions {
     return *this;
   }
   bool PmemCacheEnabled() const { return pmem_cache_enabled; }
+
+  SubscriberOptions &SetPmemBufferCallbacks(PmemBufferCallbacks callbacks) {
+    pmem_callbacks = std::move(callbacks);
+    return *this;
+  }
+  const PmemBufferCallbacks &PmemCallbacks() const { return pmem_callbacks; }
 #endif
 
   bool reliable = false;
@@ -394,6 +403,7 @@ struct SubscriberOptions {
   uint32_t pmem_alignment = 0;
   std::string pmem_pool_id;
   bool pmem_cache_enabled = false;
+  PmemBufferCallbacks pmem_callbacks;
 #endif
 };
 

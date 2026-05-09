@@ -75,6 +75,48 @@ typedef struct {
   size_t type_length;
 } SubspaceTypeInfo;
 
+#if SUBSPACE_HAS_QNX_PMEM
+typedef struct {
+  const char *channel_name;
+  uint64_t session_id;
+  uint32_t buffer_index;
+  uint32_t slot_id;
+  bool is_prefix;
+  uint64_t full_size;
+  uint64_t allocation_size;
+  uintptr_t pmem_handle;
+  uint32_t pmem_alignment;
+  const char *pmem_pool_id;
+  size_t pmem_pool_id_length;
+  bool pmem_cache_enabled;
+} SubspacePmemBufferInfo;
+
+typedef struct {
+  uintptr_t handle;
+  void *address;
+  size_t size;
+  void *private_data;
+} SubspacePmemBufferMapping;
+
+typedef bool (*SubspacePmemAllocateCallback)(
+    const SubspacePmemBufferInfo *info, SubspacePmemBufferMapping *mapping,
+    void *user_data);
+typedef bool (*SubspacePmemMapCallback)(const SubspacePmemBufferInfo *info,
+                                        SubspacePmemBufferMapping *mapping,
+                                        void *user_data);
+typedef bool (*SubspacePmemReleaseCallback)(
+    const SubspacePmemBufferInfo *info,
+    const SubspacePmemBufferMapping *mapping, void *user_data);
+
+typedef struct {
+  SubspacePmemAllocateCallback allocate;
+  SubspacePmemMapCallback map;
+  SubspacePmemReleaseCallback unmap;
+  SubspacePmemReleaseCallback free;
+  void *user_data;
+} SubspacePmemBufferCallbacks;
+#endif
+
 // This is a received message.  The 'message' member is a pointer to a smart
 // message object that is used to manage the message.  The 'length' member is
 // the length of the message data in bytes and 'buffer' points to the start
@@ -130,6 +172,7 @@ typedef struct {
   const char *pmem_pool_id;
   size_t pmem_pool_id_length;
   bool pmem_cache_enabled;
+  SubspacePmemBufferCallbacks pmem_callbacks;
 #endif
 } SubspacePublisherOptions;
 
@@ -147,6 +190,7 @@ typedef struct {
   const char *pmem_pool_id;
   size_t pmem_pool_id_length;
   bool pmem_cache_enabled;
+  SubspacePmemBufferCallbacks pmem_callbacks;
 #endif
 } SubspaceSubscriberOptions;
 

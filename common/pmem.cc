@@ -93,6 +93,7 @@ PmemBufferMetadata FromProto(const PmemBufferMetadataProto &proto) {
   metadata.buffer_index = proto.buffer_index();
   metadata.full_size = proto.full_size();
   metadata.allocation_size = proto.allocation_size();
+  metadata.pmem_handle = static_cast<uintptr_t>(proto.pmem_handle());
   metadata.shadow_file = proto.shadow_file();
   metadata.object_name = proto.object_name();
 #if (defined(__QNXNTO__) && defined(SUBSPACE_ENABLE_QNX_PMEM)) ||            \
@@ -113,6 +114,7 @@ void ToProto(const PmemBufferMetadata &metadata,
   proto->set_buffer_index(metadata.buffer_index);
   proto->set_full_size(metadata.full_size);
   proto->set_allocation_size(metadata.allocation_size);
+  proto->set_pmem_handle(static_cast<uint64_t>(metadata.pmem_handle));
   proto->set_shadow_file(metadata.shadow_file);
   proto->set_object_name(metadata.object_name);
 #if (defined(__QNXNTO__) && defined(SUBSPACE_ENABLE_QNX_PMEM)) ||            \

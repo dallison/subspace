@@ -19,6 +19,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 
 namespace subspace {
@@ -29,6 +30,7 @@ struct PmemBufferMetadata {
   uint32_t buffer_index = 0;
   uint64_t full_size = 0;
   uint64_t allocation_size = 0;
+  uintptr_t pmem_handle = 0;
   std::string shadow_file;
   std::string object_name;
 #if (defined(__QNXNTO__) && defined(SUBSPACE_ENABLE_QNX_PMEM)) ||            \
@@ -39,6 +41,28 @@ struct PmemBufferMetadata {
   std::string pmem_pool_id;
   bool pmem_cache_enabled = false;
 #endif
+};
+
+struct PmemBufferMapping {
+  uintptr_t handle = 0;
+  void *address = nullptr;
+  size_t size = 0;
+  void *private_data = nullptr;
+};
+
+struct PmemBufferCallbacks {
+  std::function<absl::StatusOr<PmemBufferMapping>(
+      const PmemBufferMetadata &metadata)>
+      allocate;
+  std::function<absl::StatusOr<PmemBufferMapping>(
+      const PmemBufferMetadata &metadata)>
+      map;
+  std::function<absl::Status(const PmemBufferMetadata &metadata,
+                             const PmemBufferMapping &mapping)>
+      unmap;
+  std::function<absl::Status(const PmemBufferMetadata &metadata,
+                             const PmemBufferMapping &mapping)>
+      free;
 };
 
 PmemBufferMetadata FromProto(const PmemBufferMetadataProto &proto);

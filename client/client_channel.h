@@ -74,11 +74,13 @@ struct BufferSet {
   std::vector<char *> pmem_slot_buffers;
   std::vector<uint64_t> pmem_slot_sizes;
   std::vector<uintptr_t> pmem_handles;
+  std::vector<void *> pmem_private_data;
   std::vector<toolbelt::FileDescriptor> pmem_fds;
   std::vector<PmemBufferMetadata> pmem_metadata;
   toolbelt::FileDescriptor prefix_fd;
   PmemBufferMetadata prefix_metadata;
   bool owns_qnx_pmem = false;
+  bool uses_pmem_callbacks = false;
 #endif
 };
 
@@ -257,6 +259,10 @@ public:
     return *empty;
   }
   virtual bool PmemCacheEnabled() const { return false; }
+  virtual const PmemBufferCallbacks &PmemCallbacks() const {
+    static const PmemBufferCallbacks *callbacks = new PmemBufferCallbacks();
+    return *callbacks;
+  }
 #endif
 
   bool BuffersChanged() const {

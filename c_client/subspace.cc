@@ -7,7 +7,104 @@
 #include "client/message.h"
 #include "client/options.h"
 #include <chrono>
+#include <cstring>
 #include <memory>
+
+namespace {
+
+#if SUBSPACE_HAS_QNX_PMEM
+SubspacePmemBufferInfo ToCInfo(const subspace::PmemBufferMetadata &metadata) {
+  return {
+      .channel_name = metadata.channel_name.c_str(),
+      .session_id = metadata.session_id,
+      .buffer_index = metadata.buffer_index,
+      .slot_id = metadata.slot_id,
+      .is_prefix = metadata.is_prefix,
+      .full_size = metadata.full_size,
+      .allocation_size = metadata.allocation_size,
+      .pmem_handle = metadata.pmem_handle,
+      .pmem_alignment = metadata.pmem_alignment,
+      .pmem_pool_id = metadata.pmem_pool_id.c_str(),
+      .pmem_pool_id_length = metadata.pmem_pool_id.size(),
+      .pmem_cache_enabled = metadata.pmem_cache_enabled,
+  };
+}
+
+SubspacePmemBufferMapping ToCMapping(
+    const subspace::PmemBufferMapping &mapping) {
+  return {.handle = mapping.handle,
+          .address = mapping.address,
+          .size = mapping.size,
+          .private_data = mapping.private_data};
+}
+
+subspace::PmemBufferMapping ToCppMapping(
+    const SubspacePmemBufferMapping &mapping) {
+  return {.handle = mapping.handle,
+          .address = mapping.address,
+          .size = mapping.size,
+          .private_data = mapping.private_data};
+}
+
+subspace::PmemBufferCallbacks ToCppPmemCallbacks(
+    SubspacePmemBufferCallbacks callbacks) {
+  subspace::PmemBufferCallbacks cpp_callbacks;
+  if (callbacks.allocate != nullptr) {
+    cpp_callbacks.allocate =
+        [callbacks](const subspace::PmemBufferMetadata &metadata)
+        -> absl::StatusOr<subspace::PmemBufferMapping> {
+      SubspacePmemBufferInfo info = ToCInfo(metadata);
+      SubspacePmemBufferMapping mapping = {};
+      if (!callbacks.allocate(&info, &mapping, callbacks.user_data)) {
+        return absl::InternalError("QNX PMEM allocation callback failed");
+      }
+      return ToCppMapping(mapping);
+    };
+  }
+  if (callbacks.map != nullptr) {
+    cpp_callbacks.map =
+        [callbacks](const subspace::PmemBufferMetadata &metadata)
+        -> absl::StatusOr<subspace::PmemBufferMapping> {
+      SubspacePmemBufferInfo info = ToCInfo(metadata);
+      SubspacePmemBufferMapping mapping = {};
+      mapping.handle = metadata.pmem_handle;
+      if (!callbacks.map(&info, &mapping, callbacks.user_data)) {
+        return absl::InternalError("QNX PMEM map callback failed");
+      }
+      return ToCppMapping(mapping);
+    };
+  }
+  if (callbacks.unmap != nullptr) {
+    cpp_callbacks.unmap =
+        [callbacks](const subspace::PmemBufferMetadata &metadata,
+                    const subspace::PmemBufferMapping &mapping)
+        -> absl::Status {
+      SubspacePmemBufferInfo info = ToCInfo(metadata);
+      SubspacePmemBufferMapping c_mapping = ToCMapping(mapping);
+      if (!callbacks.unmap(&info, &c_mapping, callbacks.user_data)) {
+        return absl::InternalError("QNX PMEM unmap callback failed");
+      }
+      return absl::OkStatus();
+    };
+  }
+  if (callbacks.free != nullptr) {
+    cpp_callbacks.free =
+        [callbacks](const subspace::PmemBufferMetadata &metadata,
+                    const subspace::PmemBufferMapping &mapping)
+        -> absl::Status {
+      SubspacePmemBufferInfo info = ToCInfo(metadata);
+      SubspacePmemBufferMapping c_mapping = ToCMapping(mapping);
+      if (!callbacks.free(&info, &c_mapping, callbacks.user_data)) {
+        return absl::InternalError("QNX PMEM free callback failed");
+      }
+      return absl::OkStatus();
+    };
+  }
+  return cpp_callbacks;
+}
+#endif
+
+} // namespace
 
 #if defined(__cplusplus)
 extern "C" {
@@ -73,6 +170,7 @@ SubspaceSubscriberOptions subspace_subscriber_options_default(void) {
       .pmem_pool_id = nullptr,
       .pmem_pool_id_length = 0,
       .pmem_cache_enabled = false,
+      .pmem_callbacks = {},
 #endif
   };
   return options;
@@ -96,6 +194,7 @@ SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size,
       .pmem_pool_id = nullptr,
       .pmem_pool_id_length = 0,
       .pmem_cache_enabled = false,
+      .pmem_callbacks = {},
 #endif
   };
   return options;
@@ -118,6 +217,7 @@ subspace_create_subscriber(SubspaceClient client, const char *channel_name,
                           : std::string(options.pmem_pool_id,
                                         options.pmem_pool_id_length),
       .pmem_cache_enabled = options.pmem_cache_enabled,
+      .pmem_callbacks = ToCppPmemCallbacks(options.pmem_callbacks),
 #endif
   };
   subspace_clear_error();
@@ -160,6 +260,7 @@ SubspacePublisher subspace_create_publisher(SubspaceClient client,
                           : std::string(options.pmem_pool_id,
                                         options.pmem_pool_id_length),
       .pmem_cache_enabled = options.pmem_cache_enabled,
+      .pmem_callbacks = ToCppPmemCallbacks(options.pmem_callbacks),
 #endif
   };
   subspace_clear_error();

@@ -82,6 +82,9 @@ private:
   bool PmemCacheEnabled() const override {
     return options_.PmemCacheEnabled();
   }
+  const PmemBufferCallbacks &PmemCallbacks() const override {
+    return options_.PmemCallbacks();
+  }
 #endif
 
   std::string ResolvedName() const override {
