@@ -874,83 +874,6 @@ TEST_F(ClientTest, SplitBufferCallbacksAllocateMapUnmapAndFreePayloadSlots) {
   EXPECT_TRUE(state->allocations.empty());
 }
 
-TEST_F(ClientTest, SplitBufferServerCleanupUsesPlugin) {
-#ifdef __APPLE__
-  GTEST_SKIP() << "split-buffer cleanup test plugin is dlopen-only";
-#else
-  std::string log_path = Socket() + ".split_buffer_free.log";
-  (void)remove(log_path.c_str());
-  ASSERT_EQ(0, setenv("SUBSPACE_SPLIT_BUFFER_FREE_TEST_LOG", log_path.c_str(),
-                      /*overwrite=*/1));
-  ASSERT_OK(Server()->LoadPlugin("SPLIT_BUFFER_FREE_TEST",
-                                 "plugins/split_buffer_free_test_plugin.so"));
-
-  auto state = std::make_shared<TestSplitBufferState>();
-  const std::string channel = "split_buffers_plugin_cleanup";
-
-  subspace::Client pub_client;
-  subspace::Client sub_client;
-  ASSERT_OK(pub_client.Init(Socket()));
-  ASSERT_OK(sub_client.Init(Socket()));
-
-  subspace::PublisherOptions pub_options;
-  pub_options.SetSlotSize(96)
-      .SetNumSlots(3)
-      .SetUseSplitBuffers(true)
-      .SetBufferAllocator("test_allocator")
-      .SetSplitBufferCallbacks(MakeTestSplitBufferCallbacks(state));
-  absl::StatusOr<Publisher> pub =
-      pub_client.CreatePublisher(channel, pub_options);
-  ASSERT_OK(pub);
-  EXPECT_TRUE(pub->UsesSplitBuffers());
-  EXPECT_EQ(3, state->allocate_count);
-
-  // This round trip on the publisher client ensures the preceding one-way
-  // client-buffer registration messages have reached the server.
-  ASSERT_OK(pub_client.GetChannelInfo(channel));
-
-  subspace::SubscriberOptions sub_options;
-  sub_options.SetSplitBufferCallbacks(MakeTestSplitBufferCallbacks(state));
-  absl::StatusOr<Subscriber> sub =
-      sub_client.CreateSubscriber(channel, sub_options);
-  ASSERT_OK(sub);
-  EXPECT_TRUE(sub->UsesSplitBuffers());
-  EXPECT_EQ(3, state->map_count);
-
-  absl::StatusOr<void *> buffer = pub->GetMessageBuffer(64);
-  ASSERT_OK(buffer);
-  std::memcpy(*buffer, "plugin-split", 12);
-
-  uintptr_t publisher_handle = 0;
-  ASSERT_TRUE(
-      pub->GetSplitBufferHandleFromAddress(*buffer, &publisher_handle));
-  EXPECT_NE(state->allocations.end(), state->allocations.find(publisher_handle));
-
-  absl::StatusOr<const Message> pub_status = pub->PublishMessage(12);
-  ASSERT_OK(pub_status);
-  absl::StatusOr<Message> msg = sub->ReadMessage();
-  ASSERT_OK(msg);
-  ASSERT_EQ(12, msg->length);
-  EXPECT_EQ(0, std::memcmp(msg->buffer, "plugin-split", 12));
-
-  subspace::ServerChannel *server_channel = Server()->FindChannel(channel);
-  ASSERT_NE(nullptr, server_channel);
-  server_channel->RemoveBuffer(Server()->GetSessionId(), Server());
-
-  std::ifstream log(log_path);
-  ASSERT_TRUE(log.is_open());
-  std::string line;
-  int freed_slots = 0;
-  while (std::getline(log, line)) {
-    if (line.find(channel) != std::string::npos &&
-        line.find("split_callback") != std::string::npos) {
-      freed_slots++;
-    }
-  }
-  EXPECT_EQ(3, freed_slots);
-#endif
-}
-
 TEST_F(ClientTest, PublishSingleMessageWithPrefixAndRead) {
   subspace::Client pub_client;
   subspace::Client sub_client;
@@ -5363,6 +5286,143 @@ TEST_F(PluginTest, HeartbeatPublishes) {
     }
   }
   ASSERT_GE(received, kExpectedMessages);
+}
+
+class SplitBufferPluginTest : public ::testing::Test {
+public:
+  static void SetUpTestSuite() {
+    printf("Starting Subspace server with split-buffer test plugin\n");
+    char socket_name_template[] = "/tmp/subspaceXXXXXX"; // NOLINT
+    ::close(mkstemp(&socket_name_template[0]));
+    socket_ = &socket_name_template[0];
+
+    (void)pipe(server_pipe_);
+
+    server_ = std::make_unique<subspace::Server>(
+        scheduler_, socket_, "", 0, 0,
+        /*local=*/true, server_pipe_[1], /*initial_ordinal=*/1,
+        /*wait_for_clients=*/true);
+
+#ifndef __APPLE__
+    auto status = server_->LoadPlugin("SPLIT_BUFFER_FREE_TEST",
+                                      "plugins/split_buffer_free_test_plugin.so");
+    if (!status.ok()) {
+      fprintf(stderr, "Failed to load split-buffer test plugin: %s\n",
+              status.ToString().c_str());
+      exit(1);
+    }
+#endif
+
+    server_thread_ = std::thread([]() {
+      absl::Status s = server_->Run();
+      if (!s.ok()) {
+        fprintf(stderr, "Error running Subspace server: %s\n",
+                s.ToString().c_str());
+        exit(1);
+      }
+    });
+
+    char buf[8];
+    (void)::read(server_pipe_[0], buf, 8);
+  }
+
+  static void TearDownTestSuite() {
+    printf("Stopping Subspace server with split-buffer test plugin\n");
+    server_->Stop();
+
+    char buf[8];
+    (void)::read(server_pipe_[0], buf, 8);
+    server_thread_.join();
+    server_->CleanupAfterSession();
+    (void)remove(socket_.c_str());
+  }
+
+  void SetUp() override { signal(SIGPIPE, SIG_IGN); }
+
+  static const std::string &Socket() { return socket_; }
+  static subspace::Server *Server() { return server_.get(); }
+
+private:
+  inline static co::CoroutineScheduler scheduler_;
+  inline static std::string socket_;
+  inline static int server_pipe_[2];
+  inline static std::unique_ptr<subspace::Server> server_;
+  inline static std::thread server_thread_;
+};
+
+TEST_F(SplitBufferPluginTest, ServerCleanupUsesPluginEndToEnd) {
+#ifdef __APPLE__
+  GTEST_SKIP() << "split-buffer cleanup test plugin is dlopen-only";
+#else
+  std::string log_path = Socket() + ".split_buffer_free.log";
+  (void)remove(log_path.c_str());
+  ASSERT_EQ(0, setenv("SUBSPACE_SPLIT_BUFFER_FREE_TEST_LOG", log_path.c_str(),
+                      /*overwrite=*/1));
+
+  auto state = std::make_shared<TestSplitBufferState>();
+  const std::string channel = "split_buffers_plugin_cleanup";
+
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  subspace::PublisherOptions pub_options;
+  pub_options.SetSlotSize(96)
+      .SetNumSlots(3)
+      .SetUseSplitBuffers(true)
+      .SetBufferAllocator("test_allocator")
+      .SetSplitBufferCallbacks(MakeTestSplitBufferCallbacks(state));
+  absl::StatusOr<Publisher> pub =
+      pub_client.CreatePublisher(channel, pub_options);
+  ASSERT_OK(pub);
+  EXPECT_TRUE(pub->UsesSplitBuffers());
+  EXPECT_EQ(3, state->allocate_count);
+
+  // This round trip on the publisher client ensures the preceding one-way
+  // client-buffer registration messages have reached the server.
+  ASSERT_OK(pub_client.GetChannelInfo(channel));
+
+  subspace::SubscriberOptions sub_options;
+  sub_options.SetSplitBufferCallbacks(MakeTestSplitBufferCallbacks(state));
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber(channel, sub_options);
+  ASSERT_OK(sub);
+  EXPECT_TRUE(sub->UsesSplitBuffers());
+  EXPECT_EQ(3, state->map_count);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer(64);
+  ASSERT_OK(buffer);
+  std::memcpy(*buffer, "plugin-split", 12);
+
+  uintptr_t publisher_handle = 0;
+  ASSERT_TRUE(
+      pub->GetSplitBufferHandleFromAddress(*buffer, &publisher_handle));
+  EXPECT_NE(state->allocations.end(), state->allocations.find(publisher_handle));
+
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(12);
+  ASSERT_OK(pub_status);
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(12, msg->length);
+  EXPECT_EQ(0, std::memcmp(msg->buffer, "plugin-split", 12));
+
+  subspace::ServerChannel *server_channel = Server()->FindChannel(channel);
+  ASSERT_NE(nullptr, server_channel);
+  server_channel->RemoveBuffer(Server()->GetSessionId(), Server());
+
+  std::ifstream log(log_path);
+  ASSERT_TRUE(log.is_open());
+  std::string line;
+  int freed_slots = 0;
+  while (std::getline(log, line)) {
+    if (line.find(channel) != std::string::npos &&
+        line.find("split_callback") != std::string::npos) {
+      freed_slots++;
+    }
+  }
+  EXPECT_EQ(3, freed_slots);
+#endif
 }
 
 int main(int argc, char **argv) {

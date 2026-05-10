@@ -62,9 +62,6 @@ cc_test(
     name = "server_test",
     size = "small",
     srcs = ["server_test.cc"],
-    data = [
-        "//plugins:split_buffer_free_test_plugin.so",
-    ],
     deps = [
         ":server",
         "//client:subspace_client",

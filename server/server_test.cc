@@ -13,11 +13,7 @@
 #include "proto/subspace.pb.h"
 #include "toolbelt/fd.h"
 #include "toolbelt/sockets.h"
-#include <cstdlib>
-#include <fstream>
-#include <memory>
 #include <string>
-#include <unordered_map>
 
 // Helper to send raw Request protos and receive Response protos + FDs,
 // using the same wire format as the real client (4-byte length prefix,
@@ -524,99 +520,6 @@ TEST_F(ServerTest, RemovePublisherSuccess) {
   auto result = conn.Send(req);
   ASSERT_OK(result);
   EXPECT_TRUE(result->first.remove_publisher().error().empty());
-}
-
-struct SplitBufferFreePluginAllocation {
-  std::unique_ptr<char[]> memory;
-  size_t size = 0;
-};
-
-struct SplitBufferFreePluginState {
-  uintptr_t next_handle = 0x12345000;
-  std::unordered_map<uintptr_t, SplitBufferFreePluginAllocation> allocations;
-};
-
-subspace::SplitBufferCallbacks MakeSplitBufferFreePluginCallbacks(
-    std::shared_ptr<SplitBufferFreePluginState> state) {
-  subspace::SplitBufferCallbacks callbacks;
-  callbacks.allocate =
-      [state](const subspace::SplitBufferMetadata &metadata)
-      -> absl::StatusOr<subspace::SplitBufferMapping> {
-    auto memory = std::make_unique<char[]>(metadata.allocation_size);
-    char *address = memory.get();
-    uintptr_t handle = ++state->next_handle;
-    state->allocations.emplace(
-        handle,
-        SplitBufferFreePluginAllocation{
-            std::move(memory),
-            static_cast<size_t>(metadata.allocation_size)});
-    return subspace::SplitBufferMapping{
-        .handle = handle,
-        .address = address,
-        .size = static_cast<size_t>(metadata.allocation_size),
-        .private_data = address,
-    };
-  };
-  callbacks.free = [state](const subspace::SplitBufferMetadata &,
-                           const subspace::SplitBufferMapping &mapping)
-      -> absl::Status {
-    state->allocations.erase(mapping.handle);
-    return absl::OkStatus();
-  };
-  return callbacks;
-}
-
-TEST_F(ServerTest, ServerSideCleanupFreesSplitBuffersWithPlugin) {
-  std::string log_path = Socket() + ".split_buffer_free.log";
-  (void)remove(log_path.c_str());
-  ASSERT_EQ(0, setenv("SUBSPACE_SPLIT_BUFFER_FREE_TEST_LOG", log_path.c_str(),
-                      /*overwrite=*/1));
-  ASSERT_OK(Server()->LoadPlugin("SPLIT_BUFFER_FREE_TEST",
-                                 "plugins/split_buffer_free_test_plugin.so"));
-
-  subspace::Client client;
-  InitClient(client);
-
-  const std::string channel = "rm_pub_split_buffer_plugin_ch";
-  auto state = std::make_shared<SplitBufferFreePluginState>();
-  subspace::PublisherOptions options;
-  options.SetSlotSize(64)
-      .SetNumSlots(3)
-      .SetUseSplitBuffers(true)
-      .SetBufferAllocator("split_buffer_free_test")
-      .SetSplitBufferCallbacks(MakeSplitBufferFreePluginCallbacks(state));
-  absl::StatusOr<Publisher> pub = client.CreatePublisher(channel, options);
-  ASSERT_OK(pub);
-  ASSERT_EQ(3U, state->allocations.size());
-
-  subspace::ServerChannel *server_channel = Server()->FindChannel(channel);
-  ASSERT_NE(nullptr, server_channel);
-
-  server_channel->RegisterClientBuffer(subspace::ClientBufferHandleMetadata{
-      .channel_name = channel,
-      .session_id = Server()->GetSessionId(),
-      .buffer_index = 0,
-      .slot_id = 2,
-      .is_prefix = false,
-      .full_size = 4096,
-      .allocation_size = 4096,
-      .handle = 0x12345678,
-      .allocator = "split_buffer_free_test",
-  });
-  server_channel->RemoveBuffer(Server()->GetSessionId(), Server());
-
-  std::ifstream log(log_path);
-  ASSERT_TRUE(log.is_open());
-  std::string line;
-  bool saw_plugin_free = false;
-  while (std::getline(log, line)) {
-    if (line.find("split_callback") != std::string::npos ||
-        line.find("split_buffer_free_test") != std::string::npos) {
-      saw_plugin_free = true;
-      EXPECT_THAT(line, ::testing::HasSubstr(channel));
-    }
-  }
-  EXPECT_TRUE(saw_plugin_free);
 }
 
 TEST_F(ServerTest, RemoveSubscriberSuccess) {

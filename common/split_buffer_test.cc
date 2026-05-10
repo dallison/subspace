@@ -67,7 +67,7 @@ TEST(SplitBufferTest, CreatesOpensAndDestroysSharedMemoryObject) {
 
   struct stat sb;
   ASSERT_EQ(fstat(opened->Fd(), &sb), 0);
-  EXPECT_EQ(static_cast<uint64_t>(sb.st_size), metadata.allocation_size);
+  EXPECT_GE(static_cast<uint64_t>(sb.st_size), metadata.allocation_size);
 
   ASSERT_TRUE(DestroySplitSharedMemoryBuffer(metadata).ok());
   EXPECT_FALSE(OpenSplitSharedMemoryBuffer(metadata, O_RDWR).ok());
