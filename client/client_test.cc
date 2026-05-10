@@ -1571,7 +1571,7 @@ TEST_F(ClientTest, PublishConcurrentlyFromOneClientToOneSubscriber) {
 }
 
 TEST_F(ClientTest, PublishConcurrentlyToOneSubscriber) {
-  std::string channel_name = "checkin_channel";
+  std::string channel_name = "checkin_channel_multi_client";
   subspace::Client sub_client;
   ASSERT_OK(sub_client.Init(Socket()));
   auto sub = *sub_client.CreateSubscriber(channel_name);
@@ -1594,14 +1594,15 @@ TEST_F(ClientTest, PublishConcurrentlyToOneSubscriber) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
       }
       ASSERT_TRUE(connected);
-      auto pub = *pub_client.CreatePublisher(
+      absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
           channel_name,
           {.slot_size = 256, .num_slots = 2 * kNumPublishers + 16});
+      ASSERT_OK(pub);
       std::array<char, 16> msg = {};
       auto size = std::snprintf(msg.data(), msg.size(), "M%d", i);
-      auto buffer = pub.GetMessageBuffer(size);
+      auto buffer = pub->GetMessageBuffer(size);
       std::memcpy(*buffer, msg.data(), size);
-      ASSERT_OK(pub.PublishMessage(size));
+      ASSERT_OK(pub->PublishMessage(size));
     }));
   }
 
