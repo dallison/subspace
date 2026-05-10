@@ -59,7 +59,10 @@ cc_test(
         "//:macos_arm64": [],
         "//:macos_x86_64": [],
         "//:macos_default": [],
-        "//conditions:default": ["//plugins:nop_plugin.so"],
+        "//conditions:default": [
+            "//plugins:nop_plugin.so",
+            "//plugins:split_buffer_free_test_plugin.so",
+        ],
     }),
     copts = [
         "-Wno-missing-field-initializers",

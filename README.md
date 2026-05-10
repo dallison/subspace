@@ -10,8 +10,7 @@ transported over the network at sub-light speed.
 
 ## Acknowledgments
 
-Some of the code in this project was contributed by Cruise LLC and by
-General Motors.
+Some of the code in this project was contributed by Cruise LLC.
 
 ## Features
 
@@ -25,15 +24,14 @@ It has the following features:
 1.	No communication with server for message transfer.
 1.	Message type agnostic transmission – bring your own serialization.
 2.  Channel types, meaningful to user, not system.
-1.	Single lock shared memory channels using Linux `/dev/shm`, POSIX shared memory, or optional QNX PMEM buffers.
+1.	Single lock POSIX shared memory channels
 1.	Both unreliable and reliable communications between publishers and subscribers.
 1.	Ability to read the next or newest message in a channel.
 1.	File-descriptor-based event triggers.
 1.	Automatic UDP discovery and TCP bridging of channels between servers.
 1.	Shadow process for crash recovery -- the server can restart and resume without losing shared memory state.
 1.	Shared and weak pointers for message references.
-1.	Ports to MacOS, Linux, and QNX, ARM64 and x86_64 where supported.
-1.	Optional QNX PMEM message buffers, provided by General Motors.
+1.	Ports to MacOS and Linux, ARM64 and x86_64.
 1.	Builds using Bazel and uses Abseil and Protocol Buffers from Google.
 1.	Uses my C++ coroutine library (https://github.com/dallison/co)
 
@@ -42,7 +40,6 @@ See the file docs/subspace.pdf for full documentation.  Additional documentation
 - [Client Architecture](docs/client-architecture.md)
 - [Server Architecture](docs/server-architecture.md)
 - [Rust Client](docs/rust-client.md)
-- [QNX PMEM Support](docs/qnx-pmem.md)
 - [Shadow Process (Crash Recovery)](docs/shadow-process.md)
 
 # Building
@@ -69,26 +66,6 @@ might need to tell bazel what compiler to use.
 CC=clang bazel build ...
 ```
 
-### To build on QNX
-
-QNX builds use the same shared-memory channel model as other platforms. By default,
-QNX uses the POSIX-shadow shared-memory path. To enable PMEM-backed message
-buffers, build with the `qnx_pmem` config:
-
-```bash
-bazel build --config=qnx_pmem //server:subspace_server //client:subspace_client
-```
-
-PMEM support is optional at build time and must also be enabled per channel with
-`PublisherOptions::SetUseQnxPmem(true)` and matching subscriber options when
-subscribers require PMEM-backed channels. PMEM support is provided by General
-Motors.
-
-For CMake-based QNX builds, enable the equivalent option:
-
-```bash
-cmake -DSUBSPACE_QNX_PMEM=ON ..
-```
 
 ### Example: Ubuntu 20.04
 Build a minimal set of binaries:
@@ -196,17 +173,6 @@ bazel test //common/...
 bazel test //rust_client/...
 ```
 
-#### Testing the QNX PMEM Path on Linux
-
-The `linux_pmem_shim` Bazel config enables the QNX PMEM transport code on Linux
-while backing allocations with ordinary Linux shared memory. This is intended
-for development and CI coverage of the PMEM code path when a QNX target is not
-available:
-
-```bash
-bazel test --config=linux_pmem_shim //common:pmem_test //client:client_test //server:server_test
-```
-
 ## Building with CMake
 
 Subspace also supports building with CMake (version 3.15 or later). CMake uses FetchContent to automatically download and build all dependencies including Abseil, Protobuf, Googletest, cpp_toolbelt, and co.
@@ -233,9 +199,6 @@ You can customize the build with CMake options:
 ```bash
 cmake -DCMAKE_BUILD_TYPE=Release ..
 make -j$(nproc)
-
-# QNX only: enable PMEM-backed message buffers.
-cmake -DSUBSPACE_QNX_PMEM=ON ..
 ```
 
 ### Running Tests
@@ -339,7 +302,7 @@ will tell you what to put in for the hash when you first build it.
 
 ## Overview
 
-Subspace provides a high-performance, shared-memory based publish/subscribe IPC system. Messages are transmitted through shared memory with sub-microsecond latency. Linux uses `/dev/shm`, macOS and default QNX builds use POSIX shared memory, and QNX can optionally use PMEM-backed message buffers. The system supports both reliable and unreliable message delivery, allowing you to choose the appropriate semantics for your use case.
+Subspace provides a high-performance, shared-memory based publish/subscribe IPC system. Messages are transmitted through POSIX shared memory with sub-microsecond latency. The system supports both reliable and unreliable message delivery, allowing you to choose the appropriate semantics for your use case.
 
 ## Client API
 
@@ -889,10 +852,6 @@ auto pub = client->CreatePublisher("channel",
 | `checksum` / `SetChecksum()` | `bool` | `false` | If true, calculate checksums for all messages. |
 | `checksum_size` / `SetChecksumSize()` | `int32_t` | `4` | Number of bytes reserved for the checksum (starting at the `checksum` field of `MessagePrefix`). Default 4 for CRC32. Increase for larger checksums (e.g. 20 for SHA-1). |
 | `metadata_size` / `SetMetadataSize()` | `int32_t` | `0` | Number of bytes of user metadata stored immediately after the checksum area. Accessible via `Publisher::GetMetadata()` / `Subscriber::GetMetadata()`. |
-| `use_qnx_pmem` / `SetUseQnxPmem()` | `bool` | `false` | QNX PMEM builds only: allocate message buffers from QNX PMEM instead of POSIX shared memory. |
-| `pmem_alignment` / `SetPmemAlignment()` | `uint32_t` | `0` | QNX PMEM builds only: payload alignment. `0` uses the implementation default. |
-| `pmem_pool_id` / `SetPmemPoolId()` | `std::string` | `""` | QNX PMEM builds only: PMEM pool identifier. |
-| `pmem_cache_enabled` / `SetPmemCacheEnabled()` | `bool` | `false` | QNX PMEM builds only: request cacheable PMEM mappings when supported. |
 
 **Getter Methods:**
 - `int32_t SlotSize() const`
@@ -909,10 +868,6 @@ auto pub = client->CreatePublisher("channel",
 - `bool Checksum() const`
 - `int32_t ChecksumSize() const`
 - `int32_t MetadataSize() const`
-- `bool UseQnxPmem() const` (QNX PMEM builds)
-- `uint32_t PmemAlignment() const` (QNX PMEM builds)
-- `const std::string& PmemPoolId() const` (QNX PMEM builds)
-- `bool PmemCacheEnabled() const` (QNX PMEM builds)
 
 **Example: Creating a reliable publisher with checksums**
 ```cpp
@@ -1070,10 +1025,6 @@ auto sub = client->CreateSubscriber("channel",
 | `read_write` / `SetReadWrite()` | `bool` | `false` | If true, map buffers as read-write instead of read-only. |
 | `checksum` / `SetChecksum()` | `bool` | `false` | If true, verify checksums on received messages. |
 | `pass_checksum_errors` / `SetPassChecksumErrors()` | `bool` | `false` | If true, pass messages with checksum errors (with flag set). If false, return error. |
-| `use_qnx_pmem` / `SetUseQnxPmem()` | `bool` | `false` | QNX PMEM builds only: require the channel to use PMEM-backed buffers. |
-| `pmem_alignment` / `SetPmemAlignment()` | `uint32_t` | `0` | QNX PMEM builds only: required PMEM alignment. |
-| `pmem_pool_id` / `SetPmemPoolId()` | `std::string` | `""` | QNX PMEM builds only: required PMEM pool identifier. |
-| `pmem_cache_enabled` / `SetPmemCacheEnabled()` | `bool` | `false` | QNX PMEM builds only: require cacheable PMEM mappings when supported. |
 
 **Getter Methods:**
 - `bool IsReliable() const`
@@ -1088,10 +1039,6 @@ auto sub = client->CreateSubscriber("channel",
 - `bool ReadWrite() const`
 - `bool Checksum() const`
 - `bool PassChecksumErrors() const`
-- `bool UseQnxPmem() const` (QNX PMEM builds)
-- `uint32_t PmemAlignment() const` (QNX PMEM builds)
-- `const std::string& PmemPoolId() const` (QNX PMEM builds)
-- `bool PmemCacheEnabled() const` (QNX PMEM builds)
 
 **Example: Creating a reliable subscriber with checksum verification**
 ```cpp
@@ -1250,7 +1197,6 @@ SubspacePublisherOptions pub_opts = subspace_publisher_options_default(1024, 10)
 // pub_opts.activate = false
 // pub_opts.checksum_size = 4   (CRC32)
 // pub_opts.metadata_size = 0   (no user metadata)
-// On QNX PMEM builds, pub_opts.use_qnx_pmem defaults to false.
 
 // Customize options
 pub_opts.reliable = true;
@@ -1277,7 +1223,6 @@ SubspaceSubscriberOptions sub_opts = subspace_subscriber_options_default();
 // sub_opts.max_active_messages = 1
 // sub_opts.pass_activation = false
 // sub_opts.log_dropped_messages = false
-// On QNX PMEM builds, sub_opts.use_qnx_pmem defaults to false.
 
 // Customize options
 sub_opts.reliable = true;
@@ -1292,11 +1237,6 @@ if (sub.subscriber == NULL) {
     return 1;
 }
 ```
-
-When built with QNX PMEM support, the C options structs also expose
-`use_qnx_pmem`, `pmem_alignment`, `pmem_pool_id`, and `pmem_cache_enabled`.
-Set these on publishers to allocate PMEM-backed buffers and on subscribers to
-require compatible PMEM channel settings.
 
 ### Publishing Messages
 
@@ -1623,9 +1563,7 @@ assert_eq!(msg.length, 5);
 - Checksums (built-in CRC32 or custom callbacks) and per-message user metadata.
 - File-descriptor-based `wait()` for integration with event loops and `poll()`.
 - Slot retirement notification for reliable publishers.
-- Runs on Linux and macOS (ARM64 and x86_64). The Rust client currently uses
-  the standard shared-memory path; QNX PMEM options are exposed through the C++
-  and C clients.
+- Runs on Linux and macOS (ARM64 and x86_64).
 
 ### Building
 
@@ -1746,9 +1684,8 @@ its full state from whichever shadow is available.
 ### What Survives a Restart
 
 - Channel definitions (name, slot size, number of slots, type, flags).
-- Shared memory mappings -- buffers remain intact in `/dev/shm` (Linux),
-  POSIX shared memory (macOS and default QNX builds), or QNX PMEM-backed
-  mappings when PMEM support is enabled and the corresponding metadata remains.
+- Shared memory mappings -- buffers remain intact in `/dev/shm` (Linux) or
+  POSIX shared memory (macOS).
 - Publisher and subscriber metadata (IDs, trigger FDs, reliability settings,
   tunnel flags).
 - The session ID, so clients can detect a server restart and reclaim their

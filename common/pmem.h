@@ -2,13 +2,10 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-// PMEM support is provided by General Motors.
-
 #ifndef _xCOMMON_PMEM_H
 #define _xCOMMON_PMEM_H
 
-#if !((defined(__QNXNTO__) && defined(SUBSPACE_ENABLE_QNX_PMEM)) ||          \
-      (defined(__linux__) && defined(SUBSPACE_ENABLE_LINUX_PMEM_SHIM)))
+#if !(defined(__QNXNTO__) && defined(SUBSPACE_ENABLE_QNX_PMEM))
 #error "common/pmem.h is only available when PMEM support is compiled in"
 #endif
 
@@ -33,14 +30,11 @@ struct PmemBufferMetadata {
   uintptr_t pmem_handle = 0;
   std::string shadow_file;
   std::string object_name;
-#if (defined(__QNXNTO__) && defined(SUBSPACE_ENABLE_QNX_PMEM)) ||            \
-    (defined(__linux__) && defined(SUBSPACE_ENABLE_LINUX_PMEM_SHIM))
   uint32_t slot_id = 0;
   bool is_prefix = false;
   uint32_t pmem_alignment = 0;
   std::string pmem_pool_id;
   bool pmem_cache_enabled = false;
-#endif
 };
 
 struct PmemBufferMapping {
@@ -65,9 +59,9 @@ struct PmemBufferCallbacks {
       free;
 };
 
-PmemBufferMetadata FromProto(const PmemBufferMetadataProto &proto);
+PmemBufferMetadata FromProto(const ClientBufferHandleMetadataProto &proto);
 void ToProto(const PmemBufferMetadata &metadata,
-             PmemBufferMetadataProto *proto);
+             ClientBufferHandleMetadataProto *proto);
 
 absl::Status WritePmemMetadataFile(const PmemBufferMetadata &metadata);
 absl::StatusOr<PmemBufferMetadata>

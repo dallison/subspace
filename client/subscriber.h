@@ -52,8 +52,10 @@ public:
     // Preallocate to avoid malloc later.
     (void)GetOrdinalTracker(vchan_id_);
   }
+  ~SubscriberImpl() override { Unmap(); }
 
   void InitActiveMessages();
+  bool UsesSplitBuffers() const { return UseSplitBuffers(); }
 
   std::shared_ptr<SubscriberImpl> shared_from_this() {
     return std::static_pointer_cast<SubscriberImpl>(
@@ -255,19 +257,12 @@ private:
 
   bool IsSubscriber() const override { return true; }
   bool IsBridge() const override { return options_.IsBridge(); }
-#if SUBSPACE_HAS_QNX_PMEM
-  bool UseQnxPmem() const override { return options_.UseQnxPmem(); }
-  uint32_t PmemAlignment() const override { return options_.PmemAlignment(); }
-  const std::string &PmemPoolId() const override {
-    return options_.PmemPoolId();
+  bool UseSplitBuffers() const override {
+    return options_.UseSplitBuffers();
   }
-  bool PmemCacheEnabled() const override {
-    return options_.PmemCacheEnabled();
+  const SplitBufferCallbacks &SplitBuffersCallbacks() const override {
+    return options_.SplitBufferCallbackSet();
   }
-  const PmemBufferCallbacks &PmemCallbacks() const override {
-    return options_.PmemCallbacks();
-  }
-#endif
 
   void ClearPublishers() {
     std::unique_lock<std::mutex> lock(reliable_publishers_mutex_);

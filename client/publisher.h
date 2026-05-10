@@ -22,10 +22,12 @@ public:
                       std::move(session_id), std::move(type),
                       std::move(reload), user_id, group_id),
         publisher_id_(publisher_id), options_(options) {}
+  ~PublisherImpl() override { Unmap(); }
 
   bool IsReliable() const { return options_.IsReliable(); }
   bool IsLocal() const { return options_.IsLocal(); }
   bool IsFixedSize() const { return options_.IsFixedSize(); }
+  bool UsesSplitBuffers() const { return UseSplitBuffers(); }
 
   MessageSlot *FindFreeSlotUnreliable(int owner);
   MessageSlot *FindFreeSlotReliable(int owner);
@@ -73,19 +75,12 @@ private:
   bool IsPublisher() const override { return true; }
   bool IsBridge() const override { return options_.IsBridge(); }
   BufferMapMode MapMode() const override { return BufferMapMode::kReadWrite; }
-#if SUBSPACE_HAS_QNX_PMEM
-  bool UseQnxPmem() const override { return options_.UseQnxPmem(); }
-  uint32_t PmemAlignment() const override { return options_.PmemAlignment(); }
-  const std::string &PmemPoolId() const override {
-    return options_.PmemPoolId();
+  bool UseSplitBuffers() const override {
+    return options_.UseSplitBuffers();
   }
-  bool PmemCacheEnabled() const override {
-    return options_.PmemCacheEnabled();
+  const SplitBufferCallbacks &SplitBuffersCallbacks() const override {
+    return options_.SplitBufferCallbackSet();
   }
-  const PmemBufferCallbacks &PmemCallbacks() const override {
-    return options_.PmemCallbacks();
-  }
-#endif
 
   std::string ResolvedName() const override {
     return IsVirtual() ? options_.mux : Name();

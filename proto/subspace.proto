@@ -38,10 +38,16 @@ message CreatePublisherRequest {
   int32 checksum_size = 12;    // Bytes reserved for checksum.
   int32 metadata_size = 13;    // Bytes reserved for user metadata.
   int32 publisher_id = 14;     // -1 for new, >= 0 to reclaim existing.
-  bool use_qnx_pmem = 16;      // Payload slots are backed by QNX PMEM.
-  uint32 pmem_alignment = 17;  // 0 means implementation default.
-  string pmem_pool_id = 18;    // QNX PMEM pool identifier.
-  bool pmem_cache_enabled = 19;
+  bool use_split_buffers = 16; // Prefixes and payload slots are separate.
+  // Identifies who owns the split payload-buffer handles. For example, a
+  // publisher using Qualcomm memory pools might set this to "qcomm_pool" and
+  // put the pool details in buffer_allocator_metadata. The server does not know
+  // how to free or map that memory; it just echoes this value to subscribers and
+  // passes it to plugins so the qcomm plugin/subscriber callbacks can recognize
+  // and handle those buffers.
+  string buffer_allocator = 17;
+  google.protobuf.Any buffer_allocator_metadata = 18;
+  int32 max_publishers = 19;   // 0 means no explicit publisher limit.
 }
 
 message CreatePublisherResponse {
@@ -73,10 +79,6 @@ message CreateSubscriberRequest {
   bool for_tunnel = 9;
   string mux = 7;
   int32 vchan_id = 8;
-  bool use_qnx_pmem = 10;      // Require a QNX PMEM-backed channel.
-  uint32 pmem_alignment = 11;  // 0 means implementation default.
-  string pmem_pool_id = 12;    // QNX PMEM pool identifier.
-  bool pmem_cache_enabled = 13;
 }
 
 message CreateSubscriberResponse {
@@ -96,10 +98,13 @@ message CreateSubscriberResponse {
   repeated int32 retirement_fd_indexes = 14;
   int32 checksum_size = 15; // Bytes reserved for checksum (from publisher).
   int32 metadata_size = 16; // Bytes reserved for user metadata (from publisher).
-  bool use_qnx_pmem = 17;
-  uint32 pmem_alignment = 18;
-  string pmem_pool_id = 19;
-  bool pmem_cache_enabled = 20;
+  bool use_split_buffers = 17;
+  // Echoes CreatePublisherRequest.buffer_allocator. For example, if the
+  // publisher used "qcomm_pool", the subscriber can choose qcomm map callbacks
+  // when opening split payload buffers. The server still treats the value as an
+  // opaque string.
+  string buffer_allocator = 18;
+  google.protobuf.Any buffer_allocator_metadata = 19;
 }
 
 message GetTriggersRequest { string channel_name = 1; }
@@ -144,27 +149,29 @@ message GetChannelStatsResponse {
   repeated ChannelStatsProto channels = 2;
 }
 
-message PmemBufferMetadataProto {
+message ClientBufferHandleMetadataProto {
   string channel_name = 1;
   uint64 session_id = 2;
   uint32 buffer_index = 3;
-  uint64 full_size = 4;
-  uint64 allocation_size = 5;
-  string shadow_file = 6;
-  string object_name = 7;
-  uint32 slot_id = 8;
-  bool is_prefix = 9;
-  uint32 pmem_alignment = 10;
-  string pmem_pool_id = 11;
-  bool pmem_cache_enabled = 12;
-  uint64 pmem_handle = 13;
+  uint32 slot_id = 4;
+  bool is_prefix = 5;
+  uint64 full_size = 6;
+  uint64 allocation_size = 7;
+  uint64 handle = 8;
+  string shadow_file = 9;
+  string object_name = 10;
+  string allocator = 11;
+  string pool_id = 12;
+  bool cache_enabled = 13;
+  uint32 alignment = 14;
+  google.protobuf.Any allocator_metadata = 15;
 }
 
-message RegisterPmemBufferRequest {
-  PmemBufferMetadataProto metadata = 1;
+message RegisterClientBufferRequest {
+  ClientBufferHandleMetadataProto metadata = 1;
 }
 
-message UnregisterPmemBufferRequest {
+message UnregisterClientBufferRequest {
   string channel_name = 1;
   uint64 session_id = 2;
   uint32 buffer_index = 3;
@@ -180,8 +187,8 @@ message Request {
     RemoveSubscriberRequest remove_subscriber = 6;
     GetChannelInfoRequest get_channel_info = 9;
     GetChannelStatsRequest get_channel_stats = 10;
-    RegisterPmemBufferRequest register_pmem_buffer = 11;
-    UnregisterPmemBufferRequest unregister_pmem_buffer = 12;
+    RegisterClientBufferRequest register_client_buffer = 11;
+    UnregisterClientBufferRequest unregister_client_buffer = 12;
   }
 }
 
@@ -409,8 +416,6 @@ message ShadowEvent {
     ShadowRemoveSubscriber remove_subscriber = 7;
     ShadowStateDump state_dump = 8;
     ShadowStateDone state_done = 9;
-    ShadowRegisterPmemBuffer register_pmem_buffer = 10;
-    ShadowUnregisterPmemBuffer unregister_pmem_buffer = 11;
   }
 }
 
@@ -471,16 +476,6 @@ message ShadowAddSubscriber {
 message ShadowRemoveSubscriber {
   string channel_name = 1;
   int32 subscriber_id = 2;
-}
-
-message ShadowRegisterPmemBuffer {
-  PmemBufferMetadataProto metadata = 1;
-}
-
-message ShadowUnregisterPmemBuffer {
-  string channel_name = 1;
-  uint64 session_id = 2;
-  uint32 buffer_index = 3;
 }
 
 message ShadowStateDump {

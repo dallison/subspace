@@ -15,6 +15,8 @@
 #include <string.h>
 #include <sys/resource.h>
 #include <thread>
+#include <unordered_map>
+#include <vector>
 
 void SignalHandler(int sig) { printf("Signal %d", sig); }
 
@@ -170,6 +172,184 @@ TEST_F(ClientTest, PublishSingleMessageAndRead) {
   ASSERT_TRUE(subspace_remove_client(&pub_client));
   ASSERT_FALSE(subspace_remove_client(&pub_client));
   ASSERT_TRUE(subspace_remove_client(&sub_client));
+}
+
+struct TestCSplitAllocation {
+  std::unique_ptr<char[]> memory;
+  size_t size = 0;
+};
+
+struct TestCSplitBufferState {
+  uintptr_t next_handle = 5000;
+  std::unordered_map<uintptr_t, TestCSplitAllocation> allocations;
+  int allocate_count = 0;
+  int map_count = 0;
+  int unmap_count = 0;
+  int free_count = 0;
+};
+
+bool TestCSplitAllocate(const SubspaceSplitBufferInfo *info,
+                        SubspaceSplitBufferMapping *mapping, void *user_data) {
+  auto *state = static_cast<TestCSplitBufferState *>(user_data);
+  if (info == nullptr || mapping == nullptr || state == nullptr ||
+      info->allocation_size == 0) {
+    return false;
+  }
+
+  auto memory = std::make_unique<char[]>(info->allocation_size);
+  char *address = memory.get();
+  uintptr_t handle = ++state->next_handle;
+  state->allocations.emplace(
+      handle, TestCSplitAllocation{std::move(memory),
+                                   static_cast<size_t>(info->allocation_size)});
+  state->allocate_count++;
+
+  mapping->handle = handle;
+  mapping->address = address;
+  mapping->size = static_cast<size_t>(info->allocation_size);
+  mapping->private_data = address;
+  return true;
+}
+
+bool TestCSplitMap(const SubspaceSplitBufferInfo *info,
+                   SubspaceSplitBufferMapping *mapping, void *user_data) {
+  auto *state = static_cast<TestCSplitBufferState *>(user_data);
+  if (info == nullptr || mapping == nullptr || state == nullptr) {
+    return false;
+  }
+
+  auto it = state->allocations.find(info->handle);
+  if (it == state->allocations.end()) {
+    return false;
+  }
+
+  state->map_count++;
+  mapping->handle = info->handle;
+  mapping->address = it->second.memory.get();
+  mapping->size = it->second.size;
+  mapping->private_data = mapping->address;
+  return true;
+}
+
+bool TestCSplitUnmap(const SubspaceSplitBufferInfo *info,
+                     const SubspaceSplitBufferMapping *mapping,
+                     void *user_data) {
+  auto *state = static_cast<TestCSplitBufferState *>(user_data);
+  if (info == nullptr || mapping == nullptr || state == nullptr ||
+      mapping->address == nullptr || mapping->handle == 0) {
+    return false;
+  }
+
+  state->unmap_count++;
+  return true;
+}
+
+bool TestCSplitFree(const SubspaceSplitBufferInfo *info,
+                    const SubspaceSplitBufferMapping *mapping,
+                    void *user_data) {
+  auto *state = static_cast<TestCSplitBufferState *>(user_data);
+  if (info == nullptr || mapping == nullptr || state == nullptr ||
+      mapping->handle == 0) {
+    return false;
+  }
+
+  state->free_count++;
+  state->allocations.erase(mapping->handle);
+  return true;
+}
+
+TEST_F(ClientTest, SplitBufferCallbacksPublishAndRead) {
+  TestCSplitBufferState state;
+
+  auto pub_client = subspace_create_client_with_socket(Socket().c_str());
+  ASSERT_NE(nullptr, pub_client.client);
+  ASSERT_FALSE(subspace_has_error());
+  auto sub_client = subspace_create_client_with_socket(Socket().c_str());
+  ASSERT_NE(nullptr, sub_client.client);
+  ASSERT_FALSE(subspace_has_error());
+
+  SubspaceSplitBufferCallbacks callbacks = {
+      .allocate = TestCSplitAllocate,
+      .map = TestCSplitMap,
+      .unmap = TestCSplitUnmap,
+      .free = TestCSplitFree,
+      .user_data = &state,
+  };
+
+  const char allocator[] = "c_test_allocator";
+  SubspacePublisherOptions pub_opts =
+      subspace_publisher_options_default(96, 3);
+  pub_opts.use_split_buffers = true;
+  pub_opts.buffer_allocator = allocator;
+  pub_opts.buffer_allocator_length = strlen(allocator);
+  pub_opts.split_callbacks = callbacks;
+  SubspacePublisher pub =
+      subspace_create_publisher(pub_client, "c_split_buffers", pub_opts);
+  ASSERT_NE(nullptr, pub.publisher);
+  ASSERT_FALSE(subspace_has_error());
+  ASSERT_EQ(3, state.allocate_count);
+
+  uintptr_t *publisher_handles = nullptr;
+  size_t publisher_handle_count = 0;
+  ASSERT_TRUE(subspace_get_publisher_split_buffer_handles(
+      pub, &publisher_handles, &publisher_handle_count));
+  ASSERT_EQ(3U, publisher_handle_count);
+  ASSERT_NE(nullptr, publisher_handles);
+
+  SubspaceSubscriberOptions sub_opts = subspace_subscriber_options_default();
+  sub_opts.split_callbacks = callbacks;
+  SubspaceSubscriber sub =
+      subspace_create_subscriber(sub_client, "c_split_buffers", sub_opts);
+  ASSERT_NE(nullptr, sub.subscriber);
+  ASSERT_FALSE(subspace_has_error());
+  ASSERT_EQ(3, state.map_count);
+
+  uintptr_t *subscriber_handles = nullptr;
+  size_t subscriber_handle_count = 0;
+  ASSERT_TRUE(subspace_get_subscriber_split_buffer_handles(
+      sub, &subscriber_handles, &subscriber_handle_count));
+  ASSERT_EQ(3U, subscriber_handle_count);
+  ASSERT_NE(nullptr, subscriber_handles);
+  for (size_t i = 0; i < subscriber_handle_count; i++) {
+    ASSERT_NE(state.allocations.end(),
+              state.allocations.find(subscriber_handles[i]));
+  }
+
+  SubspaceMessageBuffer buffer = subspace_get_message_buffer(pub, 64);
+  ASSERT_FALSE(subspace_has_error());
+  ASSERT_NE(nullptr, buffer.buffer);
+  ASSERT_GE(buffer.buffer_size, 64U);
+  memcpy(buffer.buffer, "c-split", 7);
+
+  uintptr_t publisher_handle = 0;
+  ASSERT_TRUE(subspace_get_publisher_split_buffer_handle_from_address(
+      pub, buffer.buffer, &publisher_handle));
+  ASSERT_NE(state.allocations.end(), state.allocations.find(publisher_handle));
+
+  const SubspaceMessage pub_status = subspace_publish_message(pub, 7);
+  ASSERT_NE(0, pub_status.length);
+  ASSERT_FALSE(subspace_has_error());
+
+  SubspaceMessage msg = subspace_read_message(sub);
+  ASSERT_NE(nullptr, msg.message);
+  ASSERT_FALSE(subspace_has_error());
+  ASSERT_EQ(7, msg.length);
+  ASSERT_EQ(0, memcmp(msg.buffer, "c-split", 7));
+
+  uintptr_t subscriber_handle = 0;
+  ASSERT_TRUE(subspace_get_subscriber_split_buffer_handle_from_address(
+      sub, msg.buffer, &subscriber_handle));
+  ASSERT_EQ(publisher_handle, subscriber_handle);
+
+  subspace_free_message(&msg);
+  ASSERT_TRUE(subspace_remove_subscriber(&sub));
+  ASSERT_TRUE(subspace_remove_publisher(&pub));
+  ASSERT_TRUE(subspace_remove_client(&pub_client));
+  ASSERT_TRUE(subspace_remove_client(&sub_client));
+
+  ASSERT_EQ(3, state.unmap_count);
+  ASSERT_EQ(3, state.free_count);
+  ASSERT_TRUE(state.allocations.empty());
 }
 
 // Callback to read the messages.  Doesn't free them but instead stores

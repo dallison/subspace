@@ -5,35 +5,13 @@
 #include "server/server_channel.h"
 #include "absl/strings/str_format.h"
 #include "server/server.h"
+#include <utility>
 #include <sys/mman.h>
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX && defined(__APPLE__)
 #include <sys/posix_shm.h>
 #endif
 
 namespace subspace {
-namespace {
-#if SUBSPACE_HAS_QNX_PMEM
-constexpr uint32_t kDefaultQnxPmemAlignment = 4096;
-
-bool IsPowerOfTwo(uint32_t value) {
-  return value != 0 && (value & (value - 1)) == 0;
-}
-
-QnxPmemOptions NormalizeQnxPmemOptions(QnxPmemOptions options) {
-  if (!options.use_qnx_pmem) {
-    options.pmem_alignment = 0;
-    options.pmem_pool_id.clear();
-    options.pmem_cache_enabled = false;
-    return options;
-  }
-  if (options.pmem_alignment == 0) {
-    options.pmem_alignment = kDefaultQnxPmemAlignment;
-  }
-  return options;
-}
-#endif
-} // namespace
-
 ServerChannel::~ServerChannel() {
   if (is_virtual_ || skip_cleanup_) {
     return;
@@ -112,62 +90,87 @@ CreateSystemControlBlock(toolbelt::FileDescriptor &fd) {
   return scb;
 }
 
-#if SUBSPACE_HAS_QNX_PMEM
-absl::Status
-ServerChannel::ValidateOrSetQnxPmemOptions(const QnxPmemOptions &options,
-                                           bool set_if_missing,
-                                           const char *user_type) {
-  QnxPmemOptions normalized = NormalizeQnxPmemOptions(options);
-  if (normalized.use_qnx_pmem) {
-    if (!IsPowerOfTwo(normalized.pmem_alignment)) {
-      return absl::InvalidArgumentError(absl::StrFormat(
-          "Invalid QNX PMEM alignment %u for channel %s: alignment must be a "
-          "power of two",
-          normalized.pmem_alignment, Name()));
-    }
-    if (normalized.pmem_pool_id.empty()) {
-      return absl::InvalidArgumentError(
-          absl::StrFormat("QNX PMEM pool id is required for channel %s",
-                          Name()));
-    }
-  }
-
-  if (!qnx_pmem_options_set_) {
-    if (set_if_missing || normalized.use_qnx_pmem) {
-      qnx_pmem_options_ = std::move(normalized);
-      qnx_pmem_options_set_ = true;
+absl::Status ServerChannel::ValidateOrSetSplitBufferOptions(
+    const SplitBufferOptions &options, bool set_if_missing,
+    const char *user_type) {
+  if (!split_buffer_options_set_) {
+    if (set_if_missing || options.use_split_buffers) {
+      split_buffer_options_ = options;
+      split_buffer_options_set_ = true;
     }
     return absl::OkStatus();
   }
 
-  QnxPmemOptions existing = NormalizeQnxPmemOptions(qnx_pmem_options_);
-  if (existing.use_qnx_pmem != normalized.use_qnx_pmem) {
+  if (options.use_split_buffers &&
+      split_buffer_options_.use_split_buffers != options.use_split_buffers) {
     return absl::InvalidArgumentError(absl::StrFormat(
-        "Inconsistent QNX PMEM mode for %s on channel %s", user_type, Name()));
-  }
-  if (!existing.use_qnx_pmem) {
-    return absl::OkStatus();
-  }
-  if (existing.pmem_alignment != normalized.pmem_alignment) {
-    return absl::InvalidArgumentError(absl::StrFormat(
-        "Inconsistent QNX PMEM alignment for %s on channel %s: already %u, "
-        "not %u",
-        user_type, Name(), existing.pmem_alignment, normalized.pmem_alignment));
-  }
-  if (existing.pmem_pool_id != normalized.pmem_pool_id) {
-    return absl::InvalidArgumentError(absl::StrFormat(
-        "Inconsistent QNX PMEM pool id for %s on channel %s: already %s, not "
-        "%s",
-        user_type, Name(), existing.pmem_pool_id, normalized.pmem_pool_id));
-  }
-  if (existing.pmem_cache_enabled != normalized.pmem_cache_enabled) {
-    return absl::InvalidArgumentError(absl::StrFormat(
-        "Inconsistent QNX PMEM cache setting for %s on channel %s", user_type,
+        "Inconsistent split-buffer mode for %s on channel %s", user_type,
         Name()));
   }
   return absl::OkStatus();
 }
+
+absl::Status ServerChannel::ValidateOrSetMaxPublishers(
+    int32_t max_publishers, bool set_if_missing, const char *user_type) {
+  if (max_publishers < 0) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Invalid max_publishers %d for %s on channel %s: value must be "
+        "non-negative",
+        max_publishers, user_type, Name()));
+  }
+  if (!max_publishers_set_) {
+    if (set_if_missing || max_publishers > 0) {
+      max_publishers_ = max_publishers;
+      max_publishers_set_ = true;
+    }
+    return absl::OkStatus();
+  }
+  if (max_publishers_ != max_publishers) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Inconsistent max_publishers for %s on channel %s: already %d, not %d",
+        user_type, Name(), max_publishers_, max_publishers));
+  }
+  return absl::OkStatus();
+}
+
+void ServerChannel::RemoveBuffer(uint64_t session_id, Server *server) {
+  if (ccb_ == nullptr) {
+    return;
+  }
+  for (int i = 0; i < ccb_->num_buffers; i++) {
+    std::string filename = BufferSharedMemoryName(session_id, i);
+    for (const ClientBufferHandleMetadata &metadata : client_buffers_) {
+      if (metadata.session_id != session_id ||
+          metadata.buffer_index != static_cast<uint32_t>(i)) {
+        continue;
+      }
+      bool plugin_freed = false;
+      if (server != nullptr) {
+        absl::StatusOr<bool> freed =
+            server->FreeClientBufferWithPlugins(metadata);
+        if (freed.ok()) {
+          plugin_freed = *freed;
+        }
+      }
+      if (!plugin_freed && !metadata.object_name.empty()) {
+        (void)shm_unlink(metadata.object_name.c_str());
+      }
+      if (!metadata.shadow_file.empty()) {
+        (void)remove(metadata.shadow_file.c_str());
+      }
+    }
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
+    auto shm_name = PosixSharedMemoryName(filename);
+    if (shm_name.ok()) {
+      (void)shm_unlink(shm_name->c_str());
+    }
+    remove(filename.c_str());
+#else
+    (void)shm_unlink(filename.c_str());
 #endif
+  }
+  client_buffers_.clear();
+}
 
 absl::StatusOr<SharedMemoryFds>
 ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,

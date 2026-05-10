@@ -114,6 +114,18 @@ void OnRemoveSubscriber(subspace::Server & /*s*/,
                   subscriber_id, channel_name.c_str());
 }
 
+absl::StatusOr<bool> OnFreeClientBuffer(
+    subspace::Server & /*s*/,
+    const subspace::ClientBufferHandleMetadata &metadata,
+    subspace::PluginContext *ctx) {
+  ctx->logger.Log(toolbelt::LogLevel::kInfo,
+                  "NOP plugin: ignoring client buffer for channel %s buffer %u "
+                  "slot %u handle 0x%zx\n",
+                  metadata.channel_name.c_str(), metadata.buffer_index,
+                  metadata.slot_id, static_cast<size_t>(metadata.handle));
+  return false;
+}
+
 } // namespace nop_plugin
 
 extern "C" {
@@ -128,6 +140,7 @@ subspace::PluginInterface *NOP_Create() {
       .onRemovePublisher = nop_plugin::OnRemovePublisher,
       .onNewSubscriber = nop_plugin::OnNewSubscriber,
       .onRemoveSubscriber = nop_plugin::OnRemoveSubscriber,
+      .onFreeClientBuffer = nop_plugin::OnFreeClientBuffer,
   };
   auto iface = new subspace::PluginInterface(
       functions, std::make_unique<subspace::PluginContext>("nop_plugin"));

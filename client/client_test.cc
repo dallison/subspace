@@ -9,13 +9,18 @@
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
 #include "absl/hash/hash_testing.h"
+#include "absl/status/status.h"
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
 #include "toolbelt/pipe.h"
 #include <array>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <inttypes.h>
+#include <memory>
 #include <sys/resource.h>
+#include <unordered_map>
 
 ABSL_FLAG(bool, start_server, true, "Start the subspace server");
 ABSL_FLAG(std::string, server, "", "Path to server executable");
@@ -38,6 +43,77 @@ static void SignalHandler(int sig) {
 using InetAddress = toolbelt::InetAddress;
 
 class ClientTest : public SubspaceTestBase {};
+
+struct TestSplitAllocation {
+  std::unique_ptr<char[]> memory;
+  size_t size = 0;
+};
+
+struct TestSplitBufferState {
+  uintptr_t next_handle = 1000;
+  std::unordered_map<uintptr_t, TestSplitAllocation> allocations;
+  int allocate_count = 0;
+  int map_count = 0;
+  int unmap_count = 0;
+  int free_count = 0;
+};
+
+subspace::SplitBufferCallbacks MakeTestSplitBufferCallbacks(
+    std::shared_ptr<TestSplitBufferState> state) {
+  subspace::SplitBufferCallbacks callbacks;
+  callbacks.allocate =
+      [state](const subspace::SplitBufferMetadata &metadata)
+      -> absl::StatusOr<subspace::SplitBufferMapping> {
+    auto memory = std::make_unique<char[]>(metadata.allocation_size);
+    char *address = memory.get();
+    uintptr_t handle = ++state->next_handle;
+    state->allocations.emplace(
+        handle, TestSplitAllocation{std::move(memory),
+                                    static_cast<size_t>(
+                                        metadata.allocation_size)});
+    state->allocate_count++;
+    return subspace::SplitBufferMapping{
+        .handle = handle,
+        .address = address,
+        .size = static_cast<size_t>(metadata.allocation_size),
+        .private_data = address,
+    };
+  };
+  callbacks.map =
+      [state](const subspace::SplitBufferMetadata &metadata)
+      -> absl::StatusOr<subspace::SplitBufferMapping> {
+    auto it = state->allocations.find(metadata.handle);
+    if (it == state->allocations.end()) {
+      return absl::NotFoundError("split buffer handle not found");
+    }
+    state->map_count++;
+    return subspace::SplitBufferMapping{
+        .handle = metadata.handle,
+        .address = it->second.memory.get(),
+        .size = it->second.size,
+    };
+  };
+  callbacks.unmap = [state](const subspace::SplitBufferMetadata &,
+                            const subspace::SplitBufferMapping &mapping)
+      -> absl::Status {
+    if (mapping.address == nullptr || mapping.handle == 0) {
+      return absl::InvalidArgumentError("invalid split buffer mapping");
+    }
+    state->unmap_count++;
+    return absl::OkStatus();
+  };
+  callbacks.free = [state](const subspace::SplitBufferMetadata &,
+                           const subspace::SplitBufferMapping &mapping)
+      -> absl::Status {
+    if (mapping.handle == 0) {
+      return absl::InvalidArgumentError("invalid split buffer handle");
+    }
+    state->free_count++;
+    state->allocations.erase(mapping.handle);
+    return absl::OkStatus();
+  };
+  return callbacks;
+}
 
 static void SigQuitHandler(int signum) {
   ClientTest::Scheduler().Show();
@@ -285,6 +361,26 @@ TEST_F(ClientTest, TooManyPublishers) {
   // One more will fail.
   absl::StatusOr<Publisher> pub = client.CreatePublisher("dave0", 256, 10);
   ASSERT_FALSE(pub.ok());
+}
+
+TEST_F(ClientTest, MaxPublishersOptionLimitsPublisherCount) {
+  subspace::Client client;
+  InitClient(client);
+  subspace::PublisherOptions opts;
+  opts.SetMaxPublishers(2);
+
+  absl::StatusOr<Publisher> pub1 =
+      client.CreatePublisher("max_publishers", 256, 10, opts);
+  ASSERT_OK(pub1);
+  absl::StatusOr<Publisher> pub2 =
+      client.CreatePublisher("max_publishers", 256, 10, opts);
+  ASSERT_OK(pub2);
+
+  absl::StatusOr<Publisher> pub3 =
+      client.CreatePublisher("max_publishers", 256, 10, opts);
+  ASSERT_FALSE(pub3.ok());
+  EXPECT_THAT(pub3.status().message(),
+              ::testing::HasSubstr("maximum number of publishers"));
 }
 
 TEST_F(ClientTest, TooManySubscribers) {
@@ -614,8 +710,7 @@ TEST_F(ClientTest, PublishSingleMessageAndRead) {
   ASSERT_EQ(0, msg->length);
 }
 
-#if defined(__linux__) && defined(SUBSPACE_ENABLE_LINUX_PMEM_SHIM)
-TEST_F(ClientTest, LinuxPmemShimPublishesWithHandlesAndSeparatePrefix) {
+TEST_F(ClientTest, SplitBuffersPublishWithHandlesAndSeparatePrefix) {
   subspace::Client pub_client;
   subspace::Client sub_client;
   ASSERT_OK(pub_client.Init(Socket()));
@@ -625,20 +720,18 @@ TEST_F(ClientTest, LinuxPmemShimPublishesWithHandlesAndSeparatePrefix) {
   pub_options.SetSlotSize(128)
       .SetNumSlots(4)
       .SetMetadataSize(8)
-      .SetUseQnxPmem(true)
-      .SetPmemAlignment(4096)
-      .SetPmemPoolId("linux-test")
-      .SetPmemCacheEnabled(true);
+      .SetUseSplitBuffers(true);
   absl::StatusOr<Publisher> pub =
-      pub_client.CreatePublisher("linux_pmem_shim", pub_options);
+      pub_client.CreatePublisher("split_buffers", pub_options);
   ASSERT_OK(pub);
+  EXPECT_TRUE(pub->UsesSplitBuffers());
 
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer(64);
   ASSERT_OK(buffer);
   ASSERT_NE(nullptr, *buffer);
 
   uintptr_t publisher_handle = 0;
-  ASSERT_TRUE(pub->GetQnxPmemHandleFromAddress(*buffer, &publisher_handle));
+  ASSERT_TRUE(pub->GetSplitBufferHandleFromAddress(*buffer, &publisher_handle));
   EXPECT_NE(0U, publisher_handle);
 
   auto metadata = pub->GetMetadata();
@@ -655,19 +748,16 @@ TEST_F(ClientTest, LinuxPmemShimPublishesWithHandlesAndSeparatePrefix) {
   ASSERT_GE(pub_status->slot_id, 0);
 
   subspace::SubscriberOptions sub_options;
-  sub_options.SetMaxActiveMessages(2)
-      .SetUseQnxPmem(true)
-      .SetPmemAlignment(4096)
-      .SetPmemPoolId("linux-test")
-      .SetPmemCacheEnabled(true);
+  sub_options.SetMaxActiveMessages(2);
   absl::StatusOr<Subscriber> sub =
-      sub_client.CreateSubscriber("linux_pmem_shim", sub_options);
+      sub_client.CreateSubscriber("split_buffers", sub_options);
   ASSERT_OK(sub);
+  EXPECT_TRUE(sub->UsesSplitBuffers());
 
   uintptr_t *subscriber_handles = nullptr;
   size_t subscriber_handle_count = 0;
   ASSERT_TRUE(
-      sub->GetQnxPmemHandles(&subscriber_handles, &subscriber_handle_count));
+      sub->GetSplitBufferHandles(&subscriber_handles, &subscriber_handle_count));
   ASSERT_EQ(4U, subscriber_handle_count);
   ASSERT_NE(nullptr, subscriber_handles);
   for (size_t i = 0; i < subscriber_handle_count; i++) {
@@ -684,7 +774,182 @@ TEST_F(ClientTest, LinuxPmemShimPublishesWithHandlesAndSeparatePrefix) {
   EXPECT_EQ(
       0, std::memcmp(sub_metadata.data(), "metadata", sub_metadata.size()));
 }
+
+TEST_F(ClientTest, PlaceholderSubscriberLearnsSplitBuffersOnReload) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber("split_buffers_placeholder");
+  ASSERT_OK(sub);
+  EXPECT_FALSE(sub->UsesSplitBuffers());
+  EXPECT_TRUE(sub->IsPlaceholder());
+
+  subspace::PublisherOptions pub_options;
+  pub_options.SetSlotSize(128).SetNumSlots(4).SetUseSplitBuffers(true);
+  absl::StatusOr<Publisher> pub =
+      pub_client.CreatePublisher("split_buffers_placeholder", pub_options);
+  ASSERT_OK(pub);
+  EXPECT_TRUE(pub->UsesSplitBuffers());
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer(64);
+  ASSERT_OK(buffer);
+  std::memcpy(*buffer, "split", 5);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(5);
+  ASSERT_OK(pub_status);
+
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(5, msg->length);
+  EXPECT_TRUE(sub->UsesSplitBuffers());
+  EXPECT_FALSE(sub->IsPlaceholder());
+
+  subspace::MessagePrefix *sub_prefix =
+      sub->Prefix(sub->GetSlot(pub_status->slot_id));
+  ASSERT_NE(nullptr, sub_prefix);
+  EXPECT_NE(reinterpret_cast<const void *>(sub_prefix), msg->buffer);
+}
+
+TEST_F(ClientTest, SplitBufferCallbacksAllocateMapUnmapAndFreePayloadSlots) {
+  auto state = std::make_shared<TestSplitBufferState>();
+
+  {
+    subspace::Client pub_client;
+    subspace::Client sub_client;
+    ASSERT_OK(pub_client.Init(Socket()));
+    ASSERT_OK(sub_client.Init(Socket()));
+
+    subspace::PublisherOptions pub_options;
+    pub_options.SetSlotSize(96)
+        .SetNumSlots(3)
+        .SetUseSplitBuffers(true)
+        .SetBufferAllocator("test_allocator")
+        .SetSplitBufferCallbacks(MakeTestSplitBufferCallbacks(state));
+    absl::StatusOr<Publisher> pub =
+        pub_client.CreatePublisher("split_buffers_callbacks", pub_options);
+    ASSERT_OK(pub);
+    EXPECT_TRUE(pub->UsesSplitBuffers());
+    EXPECT_EQ(3, state->allocate_count);
+
+    subspace::SubscriberOptions sub_options;
+    sub_options.SetSplitBufferCallbacks(MakeTestSplitBufferCallbacks(state));
+    absl::StatusOr<Subscriber> sub =
+        sub_client.CreateSubscriber("split_buffers_callbacks", sub_options);
+    ASSERT_OK(sub);
+    EXPECT_TRUE(sub->UsesSplitBuffers());
+    EXPECT_EQ(3, state->map_count);
+
+    uintptr_t *subscriber_handles = nullptr;
+    size_t subscriber_handle_count = 0;
+    ASSERT_TRUE(sub->GetSplitBufferHandles(&subscriber_handles,
+                                           &subscriber_handle_count));
+    ASSERT_EQ(3U, subscriber_handle_count);
+    ASSERT_NE(nullptr, subscriber_handles);
+    for (size_t i = 0; i < subscriber_handle_count; i++) {
+      EXPECT_NE(state->allocations.end(),
+                state->allocations.find(subscriber_handles[i]));
+    }
+
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer(64);
+    ASSERT_OK(buffer);
+    std::memcpy(*buffer, "callback-split", 14);
+    uintptr_t publisher_handle = 0;
+    ASSERT_TRUE(
+        pub->GetSplitBufferHandleFromAddress(*buffer, &publisher_handle));
+    EXPECT_NE(state->allocations.end(),
+              state->allocations.find(publisher_handle));
+
+    absl::StatusOr<const Message> pub_status = pub->PublishMessage(14);
+    ASSERT_OK(pub_status);
+    absl::StatusOr<Message> msg = sub->ReadMessage();
+    ASSERT_OK(msg);
+    ASSERT_EQ(14, msg->length);
+    EXPECT_EQ(0, std::memcmp(msg->buffer, "callback-split", 14));
+  }
+
+  EXPECT_EQ(3, state->unmap_count);
+  EXPECT_EQ(3, state->free_count);
+  EXPECT_TRUE(state->allocations.empty());
+}
+
+TEST_F(ClientTest, SplitBufferServerCleanupUsesPlugin) {
+#ifdef __APPLE__
+  GTEST_SKIP() << "split-buffer cleanup test plugin is dlopen-only";
+#else
+  std::string log_path = Socket() + ".split_buffer_free.log";
+  (void)remove(log_path.c_str());
+  ASSERT_EQ(0, setenv("SUBSPACE_SPLIT_BUFFER_FREE_TEST_LOG", log_path.c_str(),
+                      /*overwrite=*/1));
+  ASSERT_OK(Server()->LoadPlugin("SPLIT_BUFFER_FREE_TEST",
+                                 "plugins/split_buffer_free_test_plugin.so"));
+
+  auto state = std::make_shared<TestSplitBufferState>();
+  const std::string channel = "split_buffers_plugin_cleanup";
+
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  subspace::PublisherOptions pub_options;
+  pub_options.SetSlotSize(96)
+      .SetNumSlots(3)
+      .SetUseSplitBuffers(true)
+      .SetBufferAllocator("test_allocator")
+      .SetSplitBufferCallbacks(MakeTestSplitBufferCallbacks(state));
+  absl::StatusOr<Publisher> pub =
+      pub_client.CreatePublisher(channel, pub_options);
+  ASSERT_OK(pub);
+  EXPECT_TRUE(pub->UsesSplitBuffers());
+  EXPECT_EQ(3, state->allocate_count);
+
+  // This round trip on the publisher client ensures the preceding one-way
+  // client-buffer registration messages have reached the server.
+  ASSERT_OK(pub_client.GetChannelInfo(channel));
+
+  subspace::SubscriberOptions sub_options;
+  sub_options.SetSplitBufferCallbacks(MakeTestSplitBufferCallbacks(state));
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber(channel, sub_options);
+  ASSERT_OK(sub);
+  EXPECT_TRUE(sub->UsesSplitBuffers());
+  EXPECT_EQ(3, state->map_count);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer(64);
+  ASSERT_OK(buffer);
+  std::memcpy(*buffer, "plugin-split", 12);
+
+  uintptr_t publisher_handle = 0;
+  ASSERT_TRUE(
+      pub->GetSplitBufferHandleFromAddress(*buffer, &publisher_handle));
+  EXPECT_NE(state->allocations.end(), state->allocations.find(publisher_handle));
+
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(12);
+  ASSERT_OK(pub_status);
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(12, msg->length);
+  EXPECT_EQ(0, std::memcmp(msg->buffer, "plugin-split", 12));
+
+  subspace::ServerChannel *server_channel = Server()->FindChannel(channel);
+  ASSERT_NE(nullptr, server_channel);
+  server_channel->RemoveBuffer(Server()->GetSessionId(), Server());
+
+  std::ifstream log(log_path);
+  ASSERT_TRUE(log.is_open());
+  std::string line;
+  int freed_slots = 0;
+  while (std::getline(log, line)) {
+    if (line.find(channel) != std::string::npos &&
+        line.find("split_callback") != std::string::npos) {
+      freed_slots++;
+    }
+  }
+  EXPECT_EQ(3, freed_slots);
 #endif
+}
 
 TEST_F(ClientTest, PublishSingleMessageWithPrefixAndRead) {
   subspace::Client pub_client;
@@ -4835,7 +5100,8 @@ TEST_F(ClientTest, PublisherOptionsChain) {
       .SetNotifyRetirement(true)
       .SetChecksum(true)
       .SetChecksumSize(8)
-      .SetMetadataSize(16);
+      .SetMetadataSize(16)
+      .SetMaxPublishers(3);
 
   ASSERT_EQ(128, opts.SlotSize());
   ASSERT_EQ(8, opts.NumSlots());
@@ -4851,6 +5117,7 @@ TEST_F(ClientTest, PublisherOptionsChain) {
   ASSERT_TRUE(opts.Checksum());
   ASSERT_EQ(8, opts.ChecksumSize());
   ASSERT_EQ(16, opts.MetadataSize());
+  ASSERT_EQ(3, opts.MaxPublishers());
 }
 
 TEST_F(ClientTest, SubscriberOptionsChain) {

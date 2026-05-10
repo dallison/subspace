@@ -16,6 +16,7 @@
 #include "client/subscriber.h"
 #include "co/coroutine.h"
 #include "common/channel.h"
+#include "common/client_buffer.h"
 #if SUBSPACE_HAS_QNX_PMEM
 #include "common/pmem.h"
 #endif
@@ -541,12 +542,11 @@ private:
   SendRequestReceiveResponse(const Request &req, Response &response,
                              std::vector<toolbelt::FileDescriptor> &fds);
   absl::Status SendOneWayRequest(const Request &req);
-#if SUBSPACE_HAS_QNX_PMEM
-  absl::Status RegisterPmemBuffer(const PmemBufferMetadata &metadata);
-  absl::Status UnregisterPmemBuffer(const std::string &channel_name,
-                                    uint64_t session_id,
-                                    uint32_t buffer_index);
-#endif
+  absl::Status RegisterClientBuffer(
+      const ClientBufferHandleMetadata &metadata);
+  absl::Status UnregisterClientBuffer(const std::string &channel_name,
+                                      uint64_t session_id,
+                                      uint32_t buffer_index);
 
   absl::Status Reconnect();
   absl::Status ReregisterPublisher(details::PublisherImpl *publisher);
@@ -835,6 +835,12 @@ public:
   bool IsLocal() const { return impl_->IsLocal(); }
   bool IsFixedSize() const { return impl_->IsFixedSize(); }
   bool ForTunnel() const { return impl_->ForTunnel(); }
+  // True when the channel stores prefixes separately from payload slots.
+  // In this mode each payload slot has an allocator-defined handle that can be
+  // passed to code outside Subspace. For example, if payloads were allocated
+  // from a Qualcomm memory pool, the handle is the value that qcomm-specific
+  // code needs to identify/map/free that slot.
+  bool UsesSplitBuffers() const { return impl_->UsesSplitBuffers(); }
 
   int32_t SlotSize() const { return impl_->SlotSize(); }
   int32_t NumSlots() const { return impl_->NumSlots(); }
@@ -916,15 +922,21 @@ public:
   MessageSlot *CurrentSlot() const { return impl_->CurrentSlot(); }
 
   MessagePrefix *Prefix(MessageSlot *slot) const { return impl_->Prefix(slot); }
-#if SUBSPACE_HAS_QNX_PMEM
-  bool GetQnxPmemHandleFromAddress(const void *address,
-                                   uintptr_t *handle) const {
-    return impl_->GetQnxPmemHandleFromAddress(address, handle);
+  // If `address` points at a split payload buffer owned by this publisher,
+  // writes that slot's allocator handle to `handle` and returns true. This is
+  // useful after GetMessageBuffer() when another API needs the handle for the
+  // payload memory instead of the mapped CPU address.
+  bool GetSplitBufferHandleFromAddress(const void *address,
+                                       uintptr_t *handle) const {
+    return impl_->GetSplitBufferHandleFromAddress(address, handle);
   }
-  bool GetQnxPmemHandles(uintptr_t **handles, size_t *count) {
-    return impl_->GetQnxPmemHandles(handles, count);
+  // Returns the handles for the current split-buffer set, one handle per slot.
+  // The returned array is owned by the publisher and remains valid until the
+  // publisher reloads, resizes, or is destroyed. Handles are meaningful only to
+  // the allocator/callbacks that created the payload buffers.
+  bool GetSplitBufferHandles(uintptr_t **handles, size_t *count) {
+    return impl_->GetSplitBufferHandles(handles, count);
   }
-#endif
 
   // Total prefix area size in bytes (always a multiple of 64).
   // Determined by ChecksumSize() and MetadataSize().
@@ -1196,6 +1208,12 @@ public:
   int64_t Timestamp() const { return impl_->Timestamp(); }
   bool IsReliable() const { return impl_->IsReliable(); }
   bool ForTunnel() const { return impl_->ForTunnel(); }
+  // True when the attached channel stores prefixes separately from payload
+  // slots. Subscribers learn this from the server response; they do not request
+  // it. In this mode each payload slot has an allocator-defined handle, such as
+  // a Qualcomm memory-pool handle, that matching map callbacks can use to map
+  // the payload into the subscriber process.
+  bool UsesSplitBuffers() const { return impl_->UsesSplitBuffers(); }
 
   int32_t SlotSize() const { return impl_->SlotSize(); }
   int32_t NumSlots() const { return impl_->NumSlots(); }
@@ -1226,15 +1244,22 @@ public:
 
   MessageSlot *GetSlot(int slot_id) const { return impl_->GetSlot(slot_id); }
   MessagePrefix *Prefix(MessageSlot *slot) const { return impl_->Prefix(slot); }
-#if SUBSPACE_HAS_QNX_PMEM
-  bool GetQnxPmemHandleFromAddress(const void *address,
-                                   uintptr_t *handle) const {
-    return impl_->GetQnxPmemHandleFromAddress(address, handle);
+  // If `address` points at a split payload buffer mapped by this subscriber,
+  // writes that slot's allocator handle to `handle` and returns true. Use this
+  // when handing the payload to another library that understands the allocator
+  // handle, not just the mapped CPU address.
+  bool GetSplitBufferHandleFromAddress(const void *address,
+                                       uintptr_t *handle) const {
+    return impl_->GetSplitBufferHandleFromAddress(address, handle);
   }
-  bool GetQnxPmemHandles(uintptr_t **handles, size_t *count) {
-    return impl_->GetQnxPmemHandles(handles, count);
+  // Returns the handles for the current split-buffer set, one handle per slot.
+  // The returned array is owned by the subscriber and remains valid until the
+  // subscriber reloads, the channel resizes, or the subscriber is destroyed.
+  // Handles are meaningful only to the allocator/callbacks that map the payload
+  // buffers.
+  bool GetSplitBufferHandles(uintptr_t **handles, size_t *count) {
+    return impl_->GetSplitBufferHandles(handles, count);
   }
-#endif
 
   // Total prefix area size in bytes (always a multiple of 64).
   // Determined by ChecksumSize() and MetadataSize().

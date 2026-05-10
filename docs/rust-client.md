@@ -10,10 +10,6 @@ with zero-copy semantics — the same architecture as the C++ client.
 The client is thread-safe: `Client`, `Publisher`, and `Subscriber` use
 `Arc<Mutex<...>>` internally and can be shared across threads.
 
-The Rust client currently uses the standard shared-memory path. QNX PMEM channel
-options are exposed by the C++ and C clients; Rust requests send non-PMEM
-defaults for those protocol fields.
-
 ## Getting Started
 
 ### Connecting to the Server

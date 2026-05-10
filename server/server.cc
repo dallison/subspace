@@ -132,6 +132,13 @@ Server::Server(co::CoroutineScheduler &scheduler,
 Server::~Server() {
   // Clear this before other data members get destroyed.
   client_handlers_.clear();
+  if (!simulate_crash_) {
+    for (auto &[name, channel] : channels_) {
+      if (channel != nullptr && !channel->IsVirtual()) {
+        channel->RemoveBuffer(session_id_, this);
+      }
+    }
+  }
 }
 
 void Server::Stop(bool force) {
@@ -232,21 +239,7 @@ void Server::CleanupAfterSession() {
   std::string session_shm_file_prefix =
       "subspace_." + std::to_string(session_id_);
 
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_QNX_PMEM
-  std::string qnx_pmem_prefix =
-      "subspace_" + std::to_string(session_id_) + "_";
-  for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
-    std::string filename = entry.path().filename().string();
-    if (filename.rfind(qnx_pmem_prefix, 0) == 0) {
-      auto metadata = ReadPmemMetadataFile(entry.path().string());
-      if (metadata.ok()) {
-        (void)DestroyQnxPmemBuffer(*metadata);
-      } else {
-        (void)std::filesystem::remove(entry.path());
-      }
-    }
-  }
-#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   // Remove all files starting with "subspace_SESSION" in /tmp.  These refer to
   // shared memory segments names "subspace_INODE".
   for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
@@ -287,18 +280,7 @@ void Server::CleanupAfterSession() {
 
 void Server::CleanupFilesystem() {
   logger_.Log(toolbelt::LogLevel::kInfo, "Cleaning up filesystem...");
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_QNX_PMEM
-  for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
-    if (entry.path().filename().string().rfind("subspace_", 0) == 0) {
-      auto metadata = ReadPmemMetadataFile(entry.path().string());
-      if (metadata.ok()) {
-        (void)DestroyQnxPmemBuffer(*metadata);
-      } else {
-        (void)std::filesystem::remove(entry.path());
-      }
-    }
-  }
-#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   // Remove all files starting with "subspace_" in /tmp.  These refer to
   // shared memory segments names "subspace_INODE".
   for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
@@ -473,13 +455,6 @@ absl::Status Server::Run() {
     if (recovered) {
       for (auto &[name, ch] : channels_) {
         shadow->SendCreateChannel(ch.get());
-#if SUBSPACE_HAS_QNX_PMEM
-        for (const PmemBufferMetadata &metadata : ch->GetPmemBuffers()) {
-          PmemBufferMetadataProto proto;
-          ToProto(metadata, &proto);
-          shadow->SendRegisterPmemBuffer(proto);
-        }
-#endif
         for (auto &[uid, user] : ch->GetUsers()) {
           if (user == nullptr) {
             continue;
@@ -826,12 +801,6 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
       channel->AddUser(rsub.id, std::move(sub));
     }
 
-#if SUBSPACE_HAS_QNX_PMEM
-    for (const auto &metadata : rch.pmem_buffers) {
-      channel->RegisterPmemBuffer(FromProto(metadata));
-    }
-#endif
-
     channels_.emplace(rch.name, channel);
     logger_.Log(toolbelt::LogLevel::kInfo,
                 "Recovered channel '%s' (id=%d, %d pubs, %d subs)",
@@ -848,7 +817,7 @@ void Server::RemoveChannel(ServerChannel *channel) {
     s->SendRemoveChannel(channel->Name(), channel->GetChannelId());
   });
   if (!simulate_crash_) {
-    channel->RemoveBuffer(session_id_);
+    channel->RemoveBuffer(session_id_, this);
   }
   channel_ids_.Clear(channel->GetChannelId());
   auto it = channels_.find(channel->Name());
@@ -2051,6 +2020,30 @@ void Server::OnRemoveSubscriber(const std::string &channel_name,
   for (const auto &plugin : plugins_) {
     plugin->interface->OnRemoveSubscriber(*this, channel_name, subscriber_id);
   }
+}
+
+absl::StatusOr<bool>
+Server::FreeClientBufferWithPlugins(
+    const ClientBufferHandleMetadata &metadata) {
+  std::lock_guard<std::mutex> lock(plugin_lock_);
+  for (const auto &plugin : plugins_) {
+    absl::StatusOr<bool> freed =
+        plugin->interface->OnFreeClientBuffer(*this, metadata);
+    if (!freed.ok()) {
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Plugin %s failed to free client buffer for channel %s "
+                  "buffer %u slot %u handle 0x%zx: %s",
+                  plugin->name.c_str(), metadata.channel_name.c_str(),
+                  metadata.buffer_index, metadata.slot_id,
+                  static_cast<size_t>(metadata.handle),
+                  freed.status().ToString().c_str());
+      continue;
+    }
+    if (*freed) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void Server::SetShadowSocket(const std::string &socket_name) {

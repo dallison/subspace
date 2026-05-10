@@ -20,8 +20,7 @@
 #include <sys/poll.h>
 
 #ifndef SUBSPACE_HAS_QNX_PMEM
-#if (defined(__QNXNTO__) && defined(SUBSPACE_ENABLE_QNX_PMEM)) ||            \
-    (defined(__linux__) && defined(SUBSPACE_ENABLE_LINUX_PMEM_SHIM))
+#if defined(__QNXNTO__) && defined(SUBSPACE_ENABLE_QNX_PMEM)
 #define SUBSPACE_HAS_QNX_PMEM 1
 #else
 #define SUBSPACE_HAS_QNX_PMEM 0
@@ -75,7 +74,6 @@ typedef struct {
   size_t type_length;
 } SubspaceTypeInfo;
 
-#if SUBSPACE_HAS_QNX_PMEM
 typedef struct {
   const char *channel_name;
   uint64_t session_id;
@@ -84,38 +82,35 @@ typedef struct {
   bool is_prefix;
   uint64_t full_size;
   uint64_t allocation_size;
-  uintptr_t pmem_handle;
-  uint32_t pmem_alignment;
-  const char *pmem_pool_id;
-  size_t pmem_pool_id_length;
-  bool pmem_cache_enabled;
-} SubspacePmemBufferInfo;
+  uintptr_t handle;
+  const char *allocator;
+  size_t allocator_length;
+} SubspaceSplitBufferInfo;
 
 typedef struct {
   uintptr_t handle;
   void *address;
   size_t size;
   void *private_data;
-} SubspacePmemBufferMapping;
+} SubspaceSplitBufferMapping;
 
-typedef bool (*SubspacePmemAllocateCallback)(
-    const SubspacePmemBufferInfo *info, SubspacePmemBufferMapping *mapping,
+typedef bool (*SubspaceSplitAllocateCallback)(
+    const SubspaceSplitBufferInfo *info, SubspaceSplitBufferMapping *mapping,
     void *user_data);
-typedef bool (*SubspacePmemMapCallback)(const SubspacePmemBufferInfo *info,
-                                        SubspacePmemBufferMapping *mapping,
-                                        void *user_data);
-typedef bool (*SubspacePmemReleaseCallback)(
-    const SubspacePmemBufferInfo *info,
-    const SubspacePmemBufferMapping *mapping, void *user_data);
+typedef bool (*SubspaceSplitMapCallback)(
+    const SubspaceSplitBufferInfo *info, SubspaceSplitBufferMapping *mapping,
+    void *user_data);
+typedef bool (*SubspaceSplitReleaseCallback)(
+    const SubspaceSplitBufferInfo *info,
+    const SubspaceSplitBufferMapping *mapping, void *user_data);
 
 typedef struct {
-  SubspacePmemAllocateCallback allocate;
-  SubspacePmemMapCallback map;
-  SubspacePmemReleaseCallback unmap;
-  SubspacePmemReleaseCallback free;
+  SubspaceSplitAllocateCallback allocate;
+  SubspaceSplitMapCallback map;
+  SubspaceSplitReleaseCallback unmap;
+  SubspaceSplitReleaseCallback free;
   void *user_data;
-} SubspacePmemBufferCallbacks;
-#endif
+} SubspaceSplitBufferCallbacks;
 
 // This is a received message.  The 'message' member is a pointer to a smart
 // message object that is used to manage the message.  The 'length' member is
@@ -164,16 +159,14 @@ typedef struct {
   // reproducing pre-fix benchmarks).
   bool prefer_retired_slots;
 
-#if SUBSPACE_HAS_QNX_PMEM
-  // QNX PMEM options.  When use_qnx_pmem is true, payload slots are backed by
-  // QNX PMEM.  Alignment 0 uses the implementation default.
-  bool use_qnx_pmem;
-  uint32_t pmem_alignment;
-  const char *pmem_pool_id;
-  size_t pmem_pool_id_length;
-  bool pmem_cache_enabled;
-  SubspacePmemBufferCallbacks pmem_callbacks;
-#endif
+  // Split-buffer options.  When use_split_buffers is true, Subspace keeps
+  // message prefixes in regular shared memory and delegates payload slot
+  // allocation/mapping/freeing to split_callbacks.
+  bool use_split_buffers;
+  const char *buffer_allocator;
+  size_t buffer_allocator_length;
+  int32_t max_publishers;
+  SubspaceSplitBufferCallbacks split_callbacks;
 } SubspacePublisherOptions;
 
 typedef struct {
@@ -183,15 +176,9 @@ typedef struct {
   bool pass_activation;    // Pass activation message in read.
   bool log_dropped_messages; // Log dropped messages to stderr.
 
-#if SUBSPACE_HAS_QNX_PMEM
-  // QNX PMEM expectations for the channel being attached to.
-  bool use_qnx_pmem;
-  uint32_t pmem_alignment;
-  const char *pmem_pool_id;
-  size_t pmem_pool_id_length;
-  bool pmem_cache_enabled;
-  SubspacePmemBufferCallbacks pmem_callbacks;
-#endif
+  // Optional callbacks used when the server reports that the publisher
+  // created split payload buffers.
+  SubspaceSplitBufferCallbacks split_callbacks;
 } SubspaceSubscriberOptions;
 
 typedef enum {
@@ -401,15 +388,21 @@ const void *subspace_get_subscriber_metadata(SubspaceSubscriber subscriber,
 int32_t subspace_get_publisher_metadata_size(SubspacePublisher publisher);
 int32_t subspace_get_subscriber_metadata_size(SubspaceSubscriber subscriber);
 
-#if SUBSPACE_HAS_QNX_PMEM
-// QNX PMEM handle accessors.  Returned handle arrays are owned by the publisher
-// / subscriber and remain valid until the channel changes buffers or is
-// destroyed.
-bool subspace_get_publisher_pmem_handle_from_address(
+// Split-buffer handle accessors. Handles are allocator-defined identifiers for
+// payload memory, not normal pointers. For example, a Qualcomm memory-pool
+// allocator may return handles that qcomm APIs can map or free. Returned handle
+// arrays are owned by the publisher / subscriber and remain valid until the
+// channel changes buffers or is destroyed.
+bool subspace_get_publisher_split_buffer_handle_from_address(
     SubspacePublisher publisher, const void *address, uintptr_t *handle);
-bool subspace_get_subscriber_pmem_handles(SubspaceSubscriber subscriber,
-                                          uintptr_t **handles, size_t *count);
-#endif
+bool subspace_get_publisher_split_buffer_handles(SubspacePublisher publisher,
+                                                 uintptr_t **handles,
+                                                 size_t *count);
+bool subspace_get_subscriber_split_buffer_handle_from_address(
+    SubspaceSubscriber subscriber, const void *address, uintptr_t *handle);
+bool subspace_get_subscriber_split_buffer_handles(SubspaceSubscriber subscriber,
+                                                  uintptr_t **handles,
+                                                  size_t *count);
 
 #if defined(__cplusplus)
 } // extern "C"

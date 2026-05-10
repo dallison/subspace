@@ -12,6 +12,7 @@
 #include <optional>
 #include <sys/stat.h>
 #include <thread>
+#include <utility>
 #include <unistd.h>
 
 namespace subspace {
@@ -20,14 +21,27 @@ namespace details {
 
 namespace {
 
-#if SUBSPACE_HAS_QNX_PMEM
 uint64_t AlignUp(uint64_t size, uint64_t alignment) {
   if (alignment == 0) {
     alignment = 4096;
   }
   return (size + alignment - 1) & ~(alignment - 1);
 }
-#endif
+
+ClientBufferHandleMetadata ClientBufferFromSplitMetadata(
+    const SplitBufferMetadata &metadata, std::string allocator) {
+  return {.channel_name = metadata.channel_name,
+          .session_id = metadata.session_id,
+          .buffer_index = metadata.buffer_index,
+          .slot_id = metadata.slot_id,
+          .is_prefix = metadata.is_prefix,
+          .full_size = metadata.full_size,
+          .allocation_size = metadata.allocation_size,
+          .handle = metadata.handle,
+          .shadow_file = metadata.shadow_file,
+          .object_name = metadata.object_name,
+          .allocator = std::move(allocator)};
+}
 
 } // namespace
 
@@ -92,7 +106,7 @@ absl::Status ClientChannel::Map(SharedMemoryFds fds,
 absl::Status ClientChannel::UnmapUnusedBuffers() {
   for (size_t i = 0; i + 1 < buffers_.size(); i++) {
     if (bcb_->refs[i] == 0) {
-      UnmapBufferSet(i, *buffers_[i], /*unregister_pmem=*/true);
+      UnmapBufferSet(i, *buffers_[i], /*unregister_client_buffer=*/true);
     }
   }
   return absl::OkStatus();
@@ -109,84 +123,86 @@ void ClientChannel::UnmapShmBufferSet(BufferSet &buffer) {
 }
 
 void ClientChannel::UnmapBufferSet(size_t buffer_index, BufferSet &buffer,
-                                   bool unregister_pmem) {
-#if SUBSPACE_HAS_QNX_PMEM
-  if (buffer.IsQnxPmem()) {
-    UnmapQnxPmemBufferSet(buffer_index, buffer, unregister_pmem);
+                                   bool unregister_client_buffer) {
+  if (buffer.IsSplitBuffers()) {
+    UnmapSplitBufferSet(buffer_index, buffer);
     return;
   }
-#else
   (void)buffer_index;
-  (void)unregister_pmem;
-#endif
+  (void)unregister_client_buffer;
   if (debug_ && buffer.full_size > 0 && buffer.buffer != nullptr) {
     fprintf(stderr, "%p: Unmapping buffer at index %zd\n", this, buffer_index);
   }
   UnmapShmBufferSet(buffer);
 }
 
-#if SUBSPACE_HAS_QNX_PMEM
-void ClientChannel::UnmapQnxPmemBufferSet(size_t buffer_index,
-                                          BufferSet &buffer,
-                                          bool unregister_pmem) {
-  for (size_t slot = 0; slot < buffer.pmem_slot_buffers.size(); slot++) {
-    if (buffer.pmem_slot_buffers[slot] != nullptr) {
-      PmemBufferMetadata metadata;
-      if (slot < buffer.pmem_metadata.size()) {
-        metadata = buffer.pmem_metadata[slot];
+void ClientChannel::UnmapSplitBufferSet(size_t buffer_index,
+                                        BufferSet &buffer) {
+  (void)buffer_index;
+  for (size_t slot = 0; slot < buffer.split_slot_buffers.size(); slot++) {
+    if (buffer.split_slot_buffers[slot] != nullptr) {
+      SplitBufferMetadata metadata;
+      if (slot < buffer.split_metadata.size()) {
+        metadata = buffer.split_metadata[slot];
       }
-      PmemBufferMapping mapping = {
-          .handle = slot < buffer.pmem_handles.size() ? buffer.pmem_handles[slot]
-                                                      : metadata.pmem_handle,
-          .address = buffer.pmem_slot_buffers[slot],
-          .size = slot < buffer.pmem_slot_sizes.size() ? buffer.pmem_slot_sizes[slot]
-                                                       : metadata.allocation_size,
-          .private_data = slot < buffer.pmem_private_data.size()
-                              ? buffer.pmem_private_data[slot]
+      SplitBufferMapping mapping = {
+          .handle = slot < buffer.split_handles.size() ? buffer.split_handles[slot]
+                                                       : metadata.handle,
+          .address = buffer.split_slot_buffers[slot],
+          .size = slot < buffer.split_slot_sizes.size()
+                      ? buffer.split_slot_sizes[slot]
+                      : metadata.allocation_size,
+          .private_data = slot < buffer.split_private_data.size()
+                              ? buffer.split_private_data[slot]
                               : nullptr,
       };
-      if (buffer.uses_pmem_callbacks && buffer.owns_qnx_pmem &&
-          PmemCallbacks().free) {
-        (void)PmemCallbacks().free(metadata, mapping);
-      } else if (buffer.uses_pmem_callbacks && PmemCallbacks().unmap) {
-        (void)PmemCallbacks().unmap(metadata, mapping);
+      if (buffer.uses_split_callbacks && buffer.owns_split_buffers &&
+          SplitBuffersCallbacks().free) {
+        (void)SplitBuffersCallbacks().free(metadata, mapping);
+      } else if (buffer.uses_split_callbacks && SplitBuffersCallbacks().unmap) {
+        (void)SplitBuffersCallbacks().unmap(metadata, mapping);
       } else {
-        UnmapMemory(buffer.pmem_slot_buffers[slot], buffer.pmem_slot_sizes[slot],
-                    "pmem slot");
+        UnmapMemory(buffer.split_slot_buffers[slot],
+                    buffer.split_slot_sizes[slot], "split slot");
       }
-      buffer.pmem_slot_buffers[slot] = nullptr;
+      buffer.split_slot_buffers[slot] = nullptr;
     }
-    if (buffer.owns_qnx_pmem && slot < buffer.pmem_metadata.size() &&
-        !buffer.uses_pmem_callbacks) {
-      (void)DestroyQnxPmemBuffer(buffer.pmem_metadata[slot]);
-    } else if (buffer.owns_qnx_pmem && slot < buffer.pmem_metadata.size()) {
-      (void)DestroyQnxPmemBuffer(buffer.pmem_metadata[slot]);
+    if (buffer.owns_split_buffers && slot < buffer.split_metadata.size() &&
+        !buffer.uses_split_callbacks) {
+      (void)DestroySplitSharedMemoryBuffer(buffer.split_metadata[slot]);
     }
   }
 
-  if (buffer.prefix_buffer != nullptr) {
-    UnmapMemory(buffer.prefix_buffer, buffer.prefix_buffer_size,
-                "pmem prefixes");
-    buffer.prefix_buffer = nullptr;
+  if (buffer.split_prefix_buffer != nullptr) {
+    UnmapMemory(buffer.split_prefix_buffer, buffer.split_prefix_buffer_size,
+                "split prefixes");
+    buffer.split_prefix_buffer = nullptr;
   }
-  if (buffer.owns_qnx_pmem && !buffer.prefix_metadata.object_name.empty()) {
-    (void)DestroyQnxPmemBuffer(buffer.prefix_metadata);
+  if (buffer.owns_split_buffers &&
+      !buffer.split_prefix_metadata.object_name.empty()) {
+    (void)DestroySplitSharedMemoryBuffer(buffer.split_prefix_metadata);
   }
-
-  if (unregister_pmem && buffer.owns_qnx_pmem &&
-      pmem_unregistration_callback_) {
-    (void)pmem_unregistration_callback_(ResolvedName(), session_id_,
-                                        static_cast<uint32_t>(buffer_index));
+  if (buffer.owns_split_buffers && client_buffer_unregistration_callback_) {
+    (void)client_buffer_unregistration_callback_(
+        ResolvedName(), session_id_, static_cast<uint32_t>(buffer_index));
   }
 
   buffer.full_size = 0;
   buffer.slot_size = 0;
 }
-#endif
 
 bool ClientChannel::ValidateSlotBuffer(MessageSlot *slot) {
   if (slot->buffer_index < 0) {
     return true;
+  }
+
+  if (static_cast<size_t>(slot->buffer_index) < buffers_.size() &&
+      buffers_[slot->buffer_index]->IsSplitBuffers()) {
+    return slot->id >= 0 &&
+           static_cast<size_t>(slot->id) <
+               buffers_[slot->buffer_index]->split_slot_buffers.size() &&
+           buffers_[slot->buffer_index]->split_slot_buffers[slot->id] !=
+               nullptr;
   }
 
   char *buf = Buffer(slot->id, false);
@@ -205,11 +221,9 @@ absl::Status ClientChannel::AttachBuffers() {
   // NOTE: the num_buffers variable in the CCB is atomic and could change while
   // we are in or after we are done with this loop.
   int num_buffers = ccb_->num_buffers;
-#if SUBSPACE_HAS_QNX_PMEM
-  if (UseQnxPmem()) {
-    return AttachQnxPmemBuffers(num_buffers);
+  if (UseSplitBuffers()) {
+    return AttachSplitBuffers(num_buffers);
   }
-#endif
   return AttachShmBuffers(num_buffers);
 }
 
@@ -263,22 +277,19 @@ absl::Status ClientChannel::AttachShmBuffers(int num_buffers) {
   return absl::OkStatus();
 }
 
-#if SUBSPACE_HAS_QNX_PMEM
-absl::Status ClientChannel::AttachQnxPmemBuffers(int num_buffers) {
+absl::Status ClientChannel::AttachSplitBuffers(int num_buffers) {
   while (buffers_.size() < size_t(num_buffers)) {
     size_t buffer_index = buffers_.size();
     uint64_t full_size = bcb_->sizes[buffer_index];
     uint64_t slot_size = BufferSizeToSlotSize(full_size);
-    auto pmem_buffer =
-        OpenQnxPmemBufferSet(buffer_index, full_size, slot_size);
-    if (!pmem_buffer.ok()) {
-      return pmem_buffer.status();
+    auto split_buffer = OpenSplitBufferSet(buffer_index, full_size, slot_size);
+    if (!split_buffer.ok()) {
+      return split_buffer.status();
     }
-    buffers_.push_back(std::move(*pmem_buffer));
+    buffers_.push_back(std::move(*split_buffer));
   }
   return absl::OkStatus();
 }
-#endif
 
 void ClientChannel::Unmap() {
   if (scb_ == nullptr) {
@@ -288,7 +299,7 @@ void ClientChannel::Unmap() {
   Channel::Unmap();
 
   for (size_t i = 0; i < buffers_.size(); i++) {
-    UnmapBufferSet(i, *buffers_[i], /*unregister_pmem=*/false);
+    UnmapBufferSet(i, *buffers_[i], /*unregister_client_buffer=*/false);
   }
   buffers_.clear();
 }
@@ -333,8 +344,6 @@ ClientChannel::CreateBuffer(int buffer_index, size_t size) {
 
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
   return CreateLinuxBuffer(filename, size);
-#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_QNX_PMEM
-  return CreateQnxPmemContiguousBuffer(buffer_index, filename, size);
 #else
   return CreatePosixBuffer(filename, size);
 #endif
@@ -378,42 +387,6 @@ ClientChannel::CreateLinuxBuffer(const std::string &filename, size_t size) {
     }
   }
 
-  return *shm_fd;
-}
-#endif
-
-#if SUBSPACE_HAS_QNX_PMEM
-absl::StatusOr<toolbelt::FileDescriptor>
-ClientChannel::CreateQnxPmemContiguousBuffer(int buffer_index,
-                                             const std::string &filename,
-                                             size_t size) {
-  PmemBufferMetadata metadata;
-  metadata.channel_name = ResolvedName();
-  metadata.session_id = session_id_;
-  metadata.buffer_index = buffer_index;
-  metadata.full_size = size;
-  metadata.allocation_size = AlignUp(size, 4096);
-  metadata.shadow_file = filename;
-  metadata.object_name = QnxPmemObjectName(filename);
-
-  auto shm_fd = CreateQnxPmemBuffer(metadata);
-  if (!shm_fd.ok()) {
-    return shm_fd.status();
-  }
-  if (!shm_fd->Valid()) {
-    return *shm_fd;
-  }
-  if (absl::Status status = WritePmemMetadataFile(metadata); !status.ok()) {
-    (void)DestroyQnxPmemBuffer(metadata);
-    return status;
-  }
-  if (pmem_registration_callback_) {
-    if (absl::Status status = pmem_registration_callback_(metadata);
-        !status.ok()) {
-      (void)DestroyQnxPmemBuffer(metadata);
-      return status;
-    }
-  }
   return *shm_fd;
 }
 #endif
@@ -469,18 +442,236 @@ ClientChannel::CreatePosixBuffer(const std::string &filename, size_t size) {
 }
 #endif
 
+absl::StatusOr<std::unique_ptr<BufferSet>>
+ClientChannel::CreateSplitBufferSet(size_t buffer_index, size_t full_size,
+                                    uint64_t slot_size) {
+  auto buffer = std::make_unique<BufferSet>(full_size, slot_size, nullptr);
+  buffer->owns_split_buffers = true;
+  uint64_t payload_size = AlignUp(slot_size, 4096);
+
+  std::string base = BufferSharedMemoryName(buffer_index);
+  std::string metadata_base = base.empty() || base[0] == '/' ? base
+                                                            : "/tmp/" + base;
+  std::string prefix_name = metadata_base + "_prefix";
+  SplitBufferMetadata prefix_metadata = {
+      .channel_name = ResolvedName(),
+      .session_id = session_id_,
+      .buffer_index = static_cast<uint32_t>(buffer_index),
+      .slot_id = 0,
+      .is_prefix = true,
+      .full_size = AlignUp(static_cast<uint64_t>(PrefixSize()) * NumSlots(),
+                           4096),
+      .allocation_size = AlignUp(static_cast<uint64_t>(PrefixSize()) *
+                                     NumSlots(),
+                                 4096),
+      .shadow_file = prefix_name,
+      .object_name = SplitBufferObjectName(prefix_name),
+  };
+  auto prefix_fd = CreateSplitSharedMemoryBuffer(prefix_metadata);
+  if (!prefix_fd.ok()) {
+    return prefix_fd.status();
+  }
+  if (!prefix_fd->Valid()) {
+    return absl::InternalError(
+        absl::StrFormat("Split buffer prefix already exists for channel %s",
+                        ResolvedName()));
+  }
+  auto prefix_addr =
+      MapBuffer(*prefix_fd, prefix_metadata.allocation_size,
+                BufferMapMode::kReadWrite);
+  if (!prefix_addr.ok()) {
+    return prefix_addr.status();
+  }
+  prefix_metadata.handle = static_cast<uintptr_t>(prefix_fd->Fd());
+  if (absl::Status status = WriteSplitBufferMetadataFile(prefix_metadata);
+      !status.ok()) {
+    return status;
+  }
+  if (client_buffer_registration_callback_) {
+    if (absl::Status status = client_buffer_registration_callback_(
+            ClientBufferFromSplitMetadata(prefix_metadata, "split_shm"));
+        !status.ok()) {
+      (void)DestroySplitSharedMemoryBuffer(prefix_metadata);
+      return status;
+    }
+  }
+  buffer->split_prefix_fd = std::move(*prefix_fd);
+  buffer->split_prefix_buffer = *prefix_addr;
+  buffer->split_prefix_buffer_size = prefix_metadata.allocation_size;
+  buffer->split_prefix_metadata = std::move(prefix_metadata);
+
+  buffer->split_slot_buffers.resize(NumSlots(), nullptr);
+  buffer->split_slot_sizes.resize(NumSlots(), payload_size);
+  buffer->split_handles.resize(NumSlots(), 0);
+  buffer->split_private_data.resize(NumSlots(), nullptr);
+  buffer->split_metadata.reserve(NumSlots());
+  buffer->split_fds.reserve(NumSlots());
+  buffer->uses_split_callbacks =
+      static_cast<bool>(SplitBuffersCallbacks().allocate);
+  for (int slot = 0; slot < NumSlots(); slot++) {
+    SplitBufferMetadata metadata;
+    metadata.channel_name = ResolvedName();
+    metadata.session_id = session_id_;
+    metadata.buffer_index = static_cast<uint32_t>(buffer_index);
+    metadata.slot_id = static_cast<uint32_t>(slot);
+    metadata.is_prefix = false;
+    metadata.full_size = payload_size;
+    metadata.allocation_size = payload_size;
+    metadata.shadow_file = absl::StrFormat("%s_slot_%d", metadata_base, slot);
+    metadata.object_name = SplitBufferObjectName(metadata.shadow_file);
+
+    char *slot_addr = nullptr;
+    uintptr_t slot_handle = 0;
+    uint64_t slot_mapped_size = payload_size;
+    void *slot_private_data = nullptr;
+    std::optional<toolbelt::FileDescriptor> slot_fd;
+    if (SplitBuffersCallbacks().allocate) {
+      auto mapping = SplitBuffersCallbacks().allocate(metadata);
+      if (!mapping.ok()) {
+        return mapping.status();
+      }
+      if (mapping->address == nullptr) {
+        return absl::InternalError(
+            "Split buffer allocation callback returned an empty mapping");
+      }
+      slot_addr = static_cast<char *>(mapping->address);
+      slot_handle = mapping->handle;
+      slot_mapped_size = mapping->size == 0
+                             ? payload_size
+                             : static_cast<uint64_t>(mapping->size);
+      slot_private_data = mapping->private_data;
+      metadata.handle = slot_handle;
+    } else {
+      auto created_fd = CreateSplitSharedMemoryBuffer(metadata);
+      if (!created_fd.ok()) {
+        return created_fd.status();
+      }
+      if (!created_fd->Valid()) {
+        return absl::InternalError(absl::StrFormat(
+            "Split buffer slot already exists for channel %s slot %d",
+            ResolvedName(), slot));
+      }
+      auto addr = MapBuffer(*created_fd, payload_size, MapMode());
+      if (!addr.ok()) {
+        return addr.status();
+      }
+      slot_addr = *addr;
+      slot_handle = static_cast<uintptr_t>(created_fd->Fd());
+      slot_fd.emplace(std::move(*created_fd));
+      metadata.handle = slot_handle;
+    }
+    if (absl::Status status = WriteSplitBufferMetadataFile(metadata);
+        !status.ok()) {
+      return status;
+    }
+    if (client_buffer_registration_callback_) {
+      if (absl::Status status = client_buffer_registration_callback_(
+              ClientBufferFromSplitMetadata(
+                  metadata, buffer->uses_split_callbacks ? "split_callback"
+                                                         : "split_shm"));
+          !status.ok()) {
+        return status;
+      }
+    }
+    buffer->split_handles[slot] = slot_handle;
+    buffer->split_slot_buffers[slot] = slot_addr;
+    buffer->split_slot_sizes[slot] = slot_mapped_size;
+    buffer->split_private_data[slot] = slot_private_data;
+    if (slot_fd.has_value()) {
+      buffer->split_fds.push_back(std::move(*slot_fd));
+    }
+    buffer->split_metadata.push_back(std::move(metadata));
+  }
+  return buffer;
+}
+
+absl::StatusOr<std::unique_ptr<BufferSet>>
+ClientChannel::OpenSplitBufferSet(size_t buffer_index, size_t full_size,
+                                  uint64_t slot_size) {
+  auto buffer = std::make_unique<BufferSet>(full_size, slot_size, nullptr);
+  uint64_t payload_size = AlignUp(slot_size, 4096);
+  std::string base = BufferSharedMemoryName(buffer_index);
+  std::string metadata_base = base.empty() || base[0] == '/' ? base
+                                                            : "/tmp/" + base;
+  std::string prefix_name = metadata_base + "_prefix";
+  auto prefix_metadata = ReadSplitBufferMetadataFile(prefix_name);
+  if (!prefix_metadata.ok()) {
+    return prefix_metadata.status();
+  }
+  auto prefix_fd = OpenSplitSharedMemoryBuffer(*prefix_metadata, O_RDWR);
+  if (!prefix_fd.ok()) {
+    return prefix_fd.status();
+  }
+  auto prefix_addr =
+      MapBuffer(*prefix_fd, prefix_metadata->allocation_size,
+                BufferMapMode::kReadWrite);
+  if (!prefix_addr.ok()) {
+    return prefix_addr.status();
+  }
+  buffer->split_prefix_fd = std::move(*prefix_fd);
+  buffer->split_prefix_buffer = *prefix_addr;
+  buffer->split_prefix_buffer_size = prefix_metadata->allocation_size;
+  buffer->split_prefix_metadata = std::move(*prefix_metadata);
+  buffer->split_slot_buffers.resize(NumSlots(), nullptr);
+  buffer->split_slot_sizes.resize(NumSlots(), payload_size);
+  buffer->split_handles.resize(NumSlots(), 0);
+  buffer->split_private_data.resize(NumSlots(), nullptr);
+  buffer->split_metadata.reserve(NumSlots());
+  buffer->split_fds.reserve(NumSlots());
+  buffer->uses_split_callbacks = static_cast<bool>(SplitBuffersCallbacks().map);
+  for (int slot = 0; slot < NumSlots(); slot++) {
+    std::string shadow_file = absl::StrFormat("%s_slot_%d", metadata_base, slot);
+    auto metadata = ReadSplitBufferMetadataFile(shadow_file);
+    if (!metadata.ok()) {
+      return metadata.status();
+    }
+    char *slot_addr = nullptr;
+    uintptr_t slot_handle = metadata->handle;
+    uint64_t slot_mapped_size = payload_size;
+    void *slot_private_data = nullptr;
+    if (SplitBuffersCallbacks().map) {
+      auto mapping = SplitBuffersCallbacks().map(*metadata);
+      if (!mapping.ok()) {
+        return mapping.status();
+      }
+      if (mapping->address == nullptr) {
+        return absl::InternalError(
+            "Split buffer map callback returned an empty mapping");
+      }
+      slot_addr = static_cast<char *>(mapping->address);
+      slot_handle = mapping->handle == 0 ? metadata->handle : mapping->handle;
+      slot_mapped_size = mapping->size == 0
+                             ? payload_size
+                             : static_cast<uint64_t>(mapping->size);
+      slot_private_data = mapping->private_data;
+    } else {
+      auto slot_fd = OpenSplitSharedMemoryBuffer(*metadata, O_RDWR);
+      if (!slot_fd.ok()) {
+        return slot_fd.status();
+      }
+      auto addr = MapBuffer(*slot_fd, payload_size, MapMode());
+      if (!addr.ok()) {
+        return addr.status();
+      }
+      slot_addr = *addr;
+      slot_handle = static_cast<uintptr_t>(slot_fd->Fd());
+      buffer->split_fds.push_back(std::move(*slot_fd));
+    }
+    buffer->split_handles[slot] = slot_handle;
+    buffer->split_slot_buffers[slot] = slot_addr;
+    buffer->split_slot_sizes[slot] = slot_mapped_size;
+    buffer->split_private_data[slot] = slot_private_data;
+    buffer->split_metadata.push_back(std::move(*metadata));
+  }
+  return buffer;
+}
+
 absl::StatusOr<toolbelt::FileDescriptor>
 ClientChannel::OpenBuffer(int buffer_index) {
   std::string filename = BufferSharedMemoryName(buffer_index);
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
   // Open the shared memory file.
   return OpenSharedMemoryFile(filename, O_RDWR);
-#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_QNX_PMEM
-  auto metadata = ReadPmemMetadataFile(filename);
-  if (!metadata.ok()) {
-    return metadata.status();
-  }
-  return OpenQnxPmemBuffer(*metadata, O_RDWR);
 #else
   auto shm_name = PosixSharedMemoryName(filename);
   if (!shm_name.ok()) {
@@ -505,15 +696,8 @@ ClientChannel::GetBufferSize(toolbelt::FileDescriptor &shm_fd,
                         strerror(errno)));
   }
   return sb.st_size;
-#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_QNX_PMEM
-  std::string filename = BufferSharedMemoryName(buffer_index);
-  auto metadata = ReadPmemMetadataFile(filename);
-  if (!metadata.ok()) {
-    return metadata.status();
-  }
-  return metadata->full_size;
 #else
-  std::string filename = BufferSharedMemoryName(buffer_index);
+  (void)buffer_index;
   struct stat sb;
   if (shim.fstat_fn(shm_fd.Fd(), &sb) == -1) {
     return absl::InternalError(
@@ -529,9 +713,6 @@ ClientChannel::MapBuffer(toolbelt::FileDescriptor &shm_fd, size_t size,
                          BufferMapMode mode) {
   int prot =
       mode == BufferMapMode::kReadOnly ? PROT_READ : (PROT_READ | PROT_WRITE);
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_QNX_PMEM && defined(PROT_NOCACHE)
-  prot |= PROT_NOCACHE;
-#endif
   void *p = MapMemory(shm_fd.Fd(), size, prot, "buffers");
   if (p == MAP_FAILED) {
     return absl::InternalError(
@@ -540,221 +721,6 @@ ClientChannel::MapBuffer(toolbelt::FileDescriptor &shm_fd, size_t size,
   }
   return reinterpret_cast<char *>(p);
 }
-
-#if SUBSPACE_HAS_QNX_PMEM
-absl::StatusOr<std::unique_ptr<BufferSet>>
-ClientChannel::CreateQnxPmemBufferSet(size_t buffer_index, size_t full_size,
-                                      uint64_t slot_size) {
-  auto buffer = std::make_unique<BufferSet>(full_size, slot_size, nullptr);
-  buffer->owns_qnx_pmem = true;
-  uint64_t alignment = PmemAlignment() == 0 ? 4096 : PmemAlignment();
-  uint64_t payload_size = AlignUp(slot_size, alignment);
-
-  std::string base = BufferSharedMemoryName(buffer_index);
-  std::string prefix_name = base + "_prefix";
-  std::string prefix_object_name = QnxPmemObjectName(prefix_name);
-  uint64_t prefix_size =
-      AlignUp(static_cast<uint64_t>(PrefixSize()) * NumSlots(), 4096);
-  auto prefix_fd =
-      OpenSharedMemoryFile(prefix_object_name, O_RDWR | O_CREAT | O_EXCL);
-  if (!prefix_fd.ok()) {
-    return prefix_fd.status();
-  }
-  if (GetSyscallShim().ftruncate_fn(prefix_fd->Fd(),
-                                    static_cast<off_t>(prefix_size)) == -1) {
-    return absl::InternalError(absl::StrFormat(
-        "Failed to size QNX PMEM prefix file %s: %s", prefix_object_name,
-        strerror(errno)));
-  }
-  auto prefix_addr = MapBuffer(*prefix_fd, prefix_size, BufferMapMode::kReadWrite);
-  if (!prefix_addr.ok()) {
-    return prefix_addr.status();
-  }
-  buffer->prefix_fd = std::move(*prefix_fd);
-  buffer->prefix_buffer = *prefix_addr;
-  buffer->prefix_buffer_size = prefix_size;
-  buffer->prefix_metadata = {
-      .channel_name = ResolvedName(),
-      .session_id = session_id_,
-      .buffer_index = static_cast<uint32_t>(buffer_index),
-      .full_size = prefix_size,
-      .allocation_size = prefix_size,
-      .shadow_file = prefix_name,
-      .object_name = prefix_object_name,
-      .slot_id = 0,
-      .is_prefix = true,
-      .pmem_alignment = static_cast<uint32_t>(alignment),
-      .pmem_pool_id = PmemPoolId(),
-      .pmem_cache_enabled = PmemCacheEnabled(),
-  };
-  if (absl::Status status = WritePmemMetadataFile(buffer->prefix_metadata);
-      !status.ok()) {
-    return status;
-  }
-  if (pmem_registration_callback_) {
-    if (absl::Status status = pmem_registration_callback_(buffer->prefix_metadata);
-        !status.ok()) {
-      return status;
-    }
-  }
-
-  buffer->pmem_slot_buffers.resize(NumSlots(), nullptr);
-  buffer->pmem_slot_sizes.resize(NumSlots(), payload_size);
-  buffer->pmem_handles.resize(NumSlots(), 0);
-  buffer->pmem_private_data.resize(NumSlots(), nullptr);
-  buffer->pmem_metadata.reserve(NumSlots());
-  buffer->pmem_fds.reserve(NumSlots());
-  buffer->uses_pmem_callbacks =
-      static_cast<bool>(PmemCallbacks().allocate);
-  for (int slot = 0; slot < NumSlots(); slot++) {
-    PmemBufferMetadata metadata;
-    metadata.channel_name = ResolvedName();
-    metadata.session_id = session_id_;
-    metadata.buffer_index = static_cast<uint32_t>(buffer_index);
-    metadata.full_size = payload_size;
-    metadata.allocation_size = payload_size;
-    metadata.shadow_file =
-        absl::StrFormat("%s_slot_%d", base, slot);
-    metadata.object_name = QnxPmemObjectName(metadata.shadow_file);
-    metadata.slot_id = static_cast<uint32_t>(slot);
-    metadata.is_prefix = false;
-    metadata.pmem_alignment = static_cast<uint32_t>(alignment);
-    metadata.pmem_pool_id = PmemPoolId();
-    metadata.pmem_cache_enabled = PmemCacheEnabled();
-
-    char *slot_addr = nullptr;
-    uintptr_t slot_handle = 0;
-    uint64_t slot_mapped_size = payload_size;
-    void *slot_private_data = nullptr;
-    std::optional<toolbelt::FileDescriptor> pmem_fd;
-    if (PmemCallbacks().allocate) {
-      auto mapping = PmemCallbacks().allocate(metadata);
-      if (!mapping.ok()) {
-        return mapping.status();
-      }
-      if (mapping->address == nullptr || mapping->handle == 0) {
-        return absl::InternalError(
-            "QNX PMEM allocation callback returned an empty mapping");
-      }
-      slot_addr = static_cast<char *>(mapping->address);
-      slot_handle = mapping->handle;
-      slot_mapped_size =
-          mapping->size == 0 ? payload_size : static_cast<uint64_t>(mapping->size);
-      slot_private_data = mapping->private_data;
-      metadata.pmem_handle = slot_handle;
-    } else {
-      auto created_fd = CreateQnxPmemBuffer(metadata);
-      if (!created_fd.ok()) {
-        return created_fd.status();
-      }
-      auto addr = MapBuffer(*created_fd, payload_size, MapMode());
-      if (!addr.ok()) {
-        return addr.status();
-      }
-      slot_addr = *addr;
-      slot_handle = static_cast<uintptr_t>(created_fd->Fd());
-      pmem_fd.emplace(std::move(*created_fd));
-      metadata.pmem_handle = slot_handle;
-    }
-    if (absl::Status status = WritePmemMetadataFile(metadata); !status.ok()) {
-      return status;
-    }
-    if (pmem_registration_callback_) {
-      if (absl::Status status = pmem_registration_callback_(metadata);
-          !status.ok()) {
-        return status;
-      }
-    }
-    buffer->pmem_handles[slot] = slot_handle;
-    buffer->pmem_slot_buffers[slot] = slot_addr;
-    buffer->pmem_slot_sizes[slot] = slot_mapped_size;
-    buffer->pmem_private_data[slot] = slot_private_data;
-    if (pmem_fd.has_value()) {
-      buffer->pmem_fds.push_back(std::move(*pmem_fd));
-    }
-    buffer->pmem_metadata.push_back(std::move(metadata));
-  }
-  return buffer;
-}
-#endif
-
-#if SUBSPACE_HAS_QNX_PMEM
-absl::StatusOr<std::unique_ptr<BufferSet>>
-ClientChannel::OpenQnxPmemBufferSet(size_t buffer_index, size_t full_size,
-                                    uint64_t slot_size) {
-  auto buffer = std::make_unique<BufferSet>(full_size, slot_size, nullptr);
-  uint64_t alignment = PmemAlignment() == 0 ? 4096 : PmemAlignment();
-  uint64_t payload_size = AlignUp(slot_size, alignment);
-  std::string base = BufferSharedMemoryName(buffer_index);
-  std::string prefix_name = base + "_prefix";
-  std::string prefix_object_name = QnxPmemObjectName(prefix_name);
-  auto prefix_fd = OpenSharedMemoryFile(prefix_object_name, O_RDWR);
-  if (!prefix_fd.ok()) {
-    return prefix_fd.status();
-  }
-  uint64_t prefix_size =
-      AlignUp(static_cast<uint64_t>(PrefixSize()) * NumSlots(), 4096);
-  auto prefix_addr = MapBuffer(*prefix_fd, prefix_size, BufferMapMode::kReadWrite);
-  if (!prefix_addr.ok()) {
-    return prefix_addr.status();
-  }
-  buffer->prefix_fd = std::move(*prefix_fd);
-  buffer->prefix_buffer = *prefix_addr;
-  buffer->prefix_buffer_size = prefix_size;
-  buffer->pmem_slot_buffers.resize(NumSlots(), nullptr);
-  buffer->pmem_slot_sizes.resize(NumSlots(), payload_size);
-  buffer->pmem_handles.resize(NumSlots(), 0);
-  buffer->pmem_private_data.resize(NumSlots(), nullptr);
-  buffer->pmem_metadata.reserve(NumSlots());
-  buffer->pmem_fds.reserve(NumSlots());
-  buffer->uses_pmem_callbacks = static_cast<bool>(PmemCallbacks().map);
-  for (int slot = 0; slot < NumSlots(); slot++) {
-    std::string shadow_file = absl::StrFormat("%s_slot_%d", base, slot);
-    auto metadata = ReadPmemMetadataFile(shadow_file);
-    if (!metadata.ok()) {
-      return metadata.status();
-    }
-    char *slot_addr = nullptr;
-    uintptr_t slot_handle = metadata->pmem_handle;
-    uint64_t slot_mapped_size = payload_size;
-    void *slot_private_data = nullptr;
-    if (PmemCallbacks().map) {
-      auto mapping = PmemCallbacks().map(*metadata);
-      if (!mapping.ok()) {
-        return mapping.status();
-      }
-      if (mapping->address == nullptr) {
-        return absl::InternalError(
-            "QNX PMEM map callback returned an empty mapping");
-      }
-      slot_addr = static_cast<char *>(mapping->address);
-      slot_handle =
-          mapping->handle == 0 ? metadata->pmem_handle : mapping->handle;
-      slot_mapped_size =
-          mapping->size == 0 ? payload_size : static_cast<uint64_t>(mapping->size);
-      slot_private_data = mapping->private_data;
-    } else {
-      auto pmem_fd = OpenQnxPmemBuffer(*metadata, O_RDWR);
-      if (!pmem_fd.ok()) {
-        return pmem_fd.status();
-      }
-      auto addr = MapBuffer(*pmem_fd, payload_size, MapMode());
-      if (!addr.ok()) {
-        return addr.status();
-      }
-      slot_addr = *addr;
-      slot_handle = static_cast<uintptr_t>(pmem_fd->Fd());
-      buffer->pmem_fds.push_back(std::move(*pmem_fd));
-    }
-    buffer->pmem_handles[slot] = slot_handle;
-    buffer->pmem_slot_buffers[slot] = slot_addr;
-    buffer->pmem_slot_sizes[slot] = slot_mapped_size;
-    buffer->pmem_private_data[slot] = slot_private_data;
-    buffer->pmem_metadata.push_back(std::move(*metadata));
-  }
-  return buffer;
-}
-#endif
 
 void ClientChannel::TriggerRetirement(int slot_id) {
   if (!has_retirement_triggers_) {

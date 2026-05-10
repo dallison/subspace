@@ -13,7 +13,11 @@
 #include "proto/subspace.pb.h"
 #include "toolbelt/fd.h"
 #include "toolbelt/sockets.h"
+#include <cstdlib>
+#include <fstream>
+#include <memory>
 #include <string>
+#include <unordered_map>
 
 // Helper to send raw Request protos and receive Response protos + FDs,
 // using the same wire format as the real client (4-byte length prefix,
@@ -72,7 +76,7 @@ public:
                   bool fixed_size = false, const std::string &mux = "",
                   int vchan_id = 0, bool for_tunnel = false,
                   bool notify_retirement = false, int checksum_size = 0,
-                  int metadata_size = 0) {
+                  int metadata_size = 0, int max_publishers = 0) {
     subspace::Request req;
     auto *cmd = req.mutable_create_publisher();
     cmd->set_channel_name(channel);
@@ -88,6 +92,7 @@ public:
     cmd->set_notify_retirement(notify_retirement);
     cmd->set_checksum_size(checksum_size);
     cmd->set_metadata_size(metadata_size);
+    cmd->set_max_publishers(max_publishers);
     cmd->set_publisher_id(-1);
     auto result = Send(req);
     return std::move(*result);
@@ -275,112 +280,45 @@ TEST_F(ServerTest, PubMetadataSizeInconsistent) {
               ::testing::HasSubstr("Inconsistent metadata_size"));
 }
 
-#if SUBSPACE_HAS_QNX_PMEM
-TEST_F(ServerTest, QnxPmemPublisherOptionsMustMatch) {
+TEST_F(ServerTest, PubMaxPublishersInconsistent) {
   RawConnection conn;
   ASSERT_OK(conn.Connect(Socket()));
   ASSERT_OK(conn.Init());
 
-  subspace::Request req;
-  auto *cmd = req.mutable_create_publisher();
-  cmd->set_channel_name("pmem_options");
-  cmd->set_slot_size(64);
-  cmd->set_num_slots(4);
-  cmd->set_is_local(true);
-  cmd->set_publisher_id(-1);
-  cmd->set_use_qnx_pmem(true);
-  cmd->set_pmem_alignment(4096);
-  cmd->set_pmem_pool_id("camera");
-  cmd->set_pmem_cache_enabled(true);
-  auto result = conn.Send(req);
-  ASSERT_TRUE(result.ok());
-  ASSERT_TRUE(result->first.create_publisher().error().empty());
-
-  subspace::Request req2;
-  auto *cmd2 = req2.mutable_create_publisher();
-  cmd2->set_channel_name("pmem_options");
-  cmd2->set_slot_size(64);
-  cmd2->set_num_slots(4);
-  cmd2->set_is_local(true);
-  cmd2->set_publisher_id(-1);
-  cmd2->set_use_qnx_pmem(true);
-  cmd2->set_pmem_alignment(8192);
-  cmd2->set_pmem_pool_id("camera");
-  cmd2->set_pmem_cache_enabled(true);
-  auto result2 = conn.Send(req2);
-  ASSERT_TRUE(result2.ok());
-  EXPECT_THAT(result2->first.create_publisher().error(),
-              ::testing::HasSubstr("Inconsistent QNX PMEM alignment"));
+  conn.CreatePublisher("max_pub_incon_ch", 64, 4, "", false, true, false, "",
+                       0, false, false, 0, 0, /*max_publishers=*/2);
+  auto [resp, fds] = conn.CreatePublisher(
+      "max_pub_incon_ch", 64, 4, "", false, true, false, "", 0, false, false,
+      0, 0, /*max_publishers=*/3);
+  EXPECT_THAT(resp.create_publisher().error(),
+              ::testing::HasSubstr("Inconsistent max_publishers"));
 }
 
-TEST_F(ServerTest, QnxPmemChannelAllowsOnlyOnePublisher) {
+TEST_F(ServerTest, PubMaxPublishersLimit) {
   RawConnection conn;
   ASSERT_OK(conn.Connect(Socket()));
   ASSERT_OK(conn.Init());
 
-  subspace::Request req;
-  auto *cmd = req.mutable_create_publisher();
-  cmd->set_channel_name("pmem_single_pub");
-  cmd->set_slot_size(64);
-  cmd->set_num_slots(4);
-  cmd->set_is_local(true);
-  cmd->set_publisher_id(-1);
-  cmd->set_use_qnx_pmem(true);
-  cmd->set_pmem_alignment(4096);
-  cmd->set_pmem_pool_id("camera");
-  auto result = conn.Send(req);
-  ASSERT_TRUE(result.ok());
-  ASSERT_TRUE(result->first.create_publisher().error().empty());
-
-  subspace::Request req2;
-  auto *cmd2 = req2.mutable_create_publisher();
-  cmd2->set_channel_name("pmem_single_pub");
-  cmd2->set_slot_size(64);
-  cmd2->set_num_slots(4);
-  cmd2->set_is_local(true);
-  cmd2->set_publisher_id(-1);
-  cmd2->set_use_qnx_pmem(true);
-  cmd2->set_pmem_alignment(4096);
-  cmd2->set_pmem_pool_id("camera");
-  auto result2 = conn.Send(req2);
-  ASSERT_TRUE(result2.ok());
-  EXPECT_THAT(result2->first.create_publisher().error(),
-              ::testing::HasSubstr("supports only one publisher"));
+  conn.CreatePublisher("max_pub_limit_ch", 64, 4, "", false, true, false, "",
+                       0, false, false, 0, 0, /*max_publishers=*/1);
+  auto [resp, fds] = conn.CreatePublisher(
+      "max_pub_limit_ch", 64, 4, "", false, true, false, "", 0, false, false,
+      0, 0, /*max_publishers=*/1);
+  EXPECT_THAT(resp.create_publisher().error(),
+              ::testing::HasSubstr("maximum number of publishers"));
 }
 
-TEST_F(ServerTest, QnxPmemSubscriberOptionsMustMatch) {
+TEST_F(ServerTest, PubMaxPublishersNegativeRejected) {
   RawConnection conn;
   ASSERT_OK(conn.Connect(Socket()));
   ASSERT_OK(conn.Init());
 
-  subspace::Request req;
-  auto *cmd = req.mutable_create_publisher();
-  cmd->set_channel_name("pmem_sub_options");
-  cmd->set_slot_size(64);
-  cmd->set_num_slots(4);
-  cmd->set_is_local(true);
-  cmd->set_publisher_id(-1);
-  cmd->set_use_qnx_pmem(true);
-  cmd->set_pmem_alignment(4096);
-  cmd->set_pmem_pool_id("camera");
-  auto result = conn.Send(req);
-  ASSERT_TRUE(result.ok());
-  ASSERT_TRUE(result->first.create_publisher().error().empty());
-
-  subspace::Request req2;
-  auto *sub = req2.mutable_create_subscriber();
-  sub->set_channel_name("pmem_sub_options");
-  sub->set_subscriber_id(-1);
-  sub->set_max_active_messages(1);
-  sub->set_use_qnx_pmem(true);
-  sub->set_pmem_alignment(4096);
-  sub->set_pmem_pool_id("video");
-  auto result2 = conn.Send(req2);
-  ASSERT_TRUE(result2.ok());
-  EXPECT_THAT(result2->first.create_subscriber().error(),
-              ::testing::HasSubstr("Inconsistent QNX PMEM pool id"));
+  auto [resp, fds] = conn.CreatePublisher(
+      "max_pub_negative_ch", 64, 4, "", false, true, false, "", 0, false,
+      false, 0, 0, /*max_publishers=*/-1);
+  EXPECT_THAT(resp.create_publisher().error(),
+              ::testing::HasSubstr("Invalid max_publishers"));
 }
-#endif
 
 TEST_F(ServerTest, PubToMuxChannelWithoutMuxName) {
   RawConnection conn;
@@ -586,6 +524,99 @@ TEST_F(ServerTest, RemovePublisherSuccess) {
   auto result = conn.Send(req);
   ASSERT_OK(result);
   EXPECT_TRUE(result->first.remove_publisher().error().empty());
+}
+
+struct SplitBufferFreePluginAllocation {
+  std::unique_ptr<char[]> memory;
+  size_t size = 0;
+};
+
+struct SplitBufferFreePluginState {
+  uintptr_t next_handle = 0x12345000;
+  std::unordered_map<uintptr_t, SplitBufferFreePluginAllocation> allocations;
+};
+
+subspace::SplitBufferCallbacks MakeSplitBufferFreePluginCallbacks(
+    std::shared_ptr<SplitBufferFreePluginState> state) {
+  subspace::SplitBufferCallbacks callbacks;
+  callbacks.allocate =
+      [state](const subspace::SplitBufferMetadata &metadata)
+      -> absl::StatusOr<subspace::SplitBufferMapping> {
+    auto memory = std::make_unique<char[]>(metadata.allocation_size);
+    char *address = memory.get();
+    uintptr_t handle = ++state->next_handle;
+    state->allocations.emplace(
+        handle,
+        SplitBufferFreePluginAllocation{
+            std::move(memory),
+            static_cast<size_t>(metadata.allocation_size)});
+    return subspace::SplitBufferMapping{
+        .handle = handle,
+        .address = address,
+        .size = static_cast<size_t>(metadata.allocation_size),
+        .private_data = address,
+    };
+  };
+  callbacks.free = [state](const subspace::SplitBufferMetadata &,
+                           const subspace::SplitBufferMapping &mapping)
+      -> absl::Status {
+    state->allocations.erase(mapping.handle);
+    return absl::OkStatus();
+  };
+  return callbacks;
+}
+
+TEST_F(ServerTest, ServerSideCleanupFreesSplitBuffersWithPlugin) {
+  std::string log_path = Socket() + ".split_buffer_free.log";
+  (void)remove(log_path.c_str());
+  ASSERT_EQ(0, setenv("SUBSPACE_SPLIT_BUFFER_FREE_TEST_LOG", log_path.c_str(),
+                      /*overwrite=*/1));
+  ASSERT_OK(Server()->LoadPlugin("SPLIT_BUFFER_FREE_TEST",
+                                 "plugins/split_buffer_free_test_plugin.so"));
+
+  subspace::Client client;
+  InitClient(client);
+
+  const std::string channel = "rm_pub_split_buffer_plugin_ch";
+  auto state = std::make_shared<SplitBufferFreePluginState>();
+  subspace::PublisherOptions options;
+  options.SetSlotSize(64)
+      .SetNumSlots(3)
+      .SetUseSplitBuffers(true)
+      .SetBufferAllocator("split_buffer_free_test")
+      .SetSplitBufferCallbacks(MakeSplitBufferFreePluginCallbacks(state));
+  absl::StatusOr<Publisher> pub = client.CreatePublisher(channel, options);
+  ASSERT_OK(pub);
+  ASSERT_EQ(3U, state->allocations.size());
+
+  subspace::ServerChannel *server_channel = Server()->FindChannel(channel);
+  ASSERT_NE(nullptr, server_channel);
+
+  server_channel->RegisterClientBuffer(subspace::ClientBufferHandleMetadata{
+      .channel_name = channel,
+      .session_id = Server()->GetSessionId(),
+      .buffer_index = 0,
+      .slot_id = 2,
+      .is_prefix = false,
+      .full_size = 4096,
+      .allocation_size = 4096,
+      .handle = 0x12345678,
+      .allocator = "split_buffer_free_test",
+  });
+  server_channel->RemoveBuffer(Server()->GetSessionId(), Server());
+
+  std::ifstream log(log_path);
+  ASSERT_TRUE(log.is_open());
+  std::string line;
+  bool saw_plugin_free = false;
+  while (std::getline(log, line)) {
+    if (line.find("split_callback") != std::string::npos ||
+        line.find("split_buffer_free_test") != std::string::npos) {
+      saw_plugin_free = true;
+      EXPECT_THAT(line, ::testing::HasSubstr(channel));
+    }
+  }
+  EXPECT_TRUE(saw_plugin_free);
 }
 
 TEST_F(ServerTest, RemoveSubscriberSuccess) {

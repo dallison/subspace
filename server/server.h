@@ -219,6 +219,8 @@ private:
   void OnRemovePublisher(const std::string &channel_name, int publisher_id);
   void OnNewSubscriber(const std::string &channel_name, int subscriber_id);
   void OnRemoveSubscriber(const std::string &channel_name, int subscriber_id);
+  absl::StatusOr<bool> FreeClientBufferWithPlugins(
+      const ClientBufferHandleMetadata &metadata);
 
   std::string socket_name_;
   uint64_t session_id_;

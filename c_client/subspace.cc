@@ -12,8 +12,8 @@
 
 namespace {
 
-#if SUBSPACE_HAS_QNX_PMEM
-SubspacePmemBufferInfo ToCInfo(const subspace::PmemBufferMetadata &metadata) {
+SubspaceSplitBufferInfo ToCInfo(const subspace::SplitBufferMetadata &metadata,
+                                const std::string &allocator) {
   return {
       .channel_name = metadata.channel_name.c_str(),
       .session_id = metadata.session_id,
@@ -22,87 +22,84 @@ SubspacePmemBufferInfo ToCInfo(const subspace::PmemBufferMetadata &metadata) {
       .is_prefix = metadata.is_prefix,
       .full_size = metadata.full_size,
       .allocation_size = metadata.allocation_size,
-      .pmem_handle = metadata.pmem_handle,
-      .pmem_alignment = metadata.pmem_alignment,
-      .pmem_pool_id = metadata.pmem_pool_id.c_str(),
-      .pmem_pool_id_length = metadata.pmem_pool_id.size(),
-      .pmem_cache_enabled = metadata.pmem_cache_enabled,
+      .handle = metadata.handle,
+      .allocator = allocator.c_str(),
+      .allocator_length = allocator.size(),
   };
 }
 
-SubspacePmemBufferMapping ToCMapping(
-    const subspace::PmemBufferMapping &mapping) {
+SubspaceSplitBufferMapping ToCMapping(
+    const subspace::SplitBufferMapping &mapping) {
   return {.handle = mapping.handle,
           .address = mapping.address,
           .size = mapping.size,
           .private_data = mapping.private_data};
 }
 
-subspace::PmemBufferMapping ToCppMapping(
-    const SubspacePmemBufferMapping &mapping) {
+subspace::SplitBufferMapping ToCppMapping(
+    const SubspaceSplitBufferMapping &mapping) {
   return {.handle = mapping.handle,
           .address = mapping.address,
           .size = mapping.size,
           .private_data = mapping.private_data};
 }
 
-subspace::PmemBufferCallbacks ToCppPmemCallbacks(
-    SubspacePmemBufferCallbacks callbacks) {
-  subspace::PmemBufferCallbacks cpp_callbacks;
+subspace::SplitBufferCallbacks ToCppSplitCallbacks(
+    SubspaceSplitBufferCallbacks callbacks, std::string allocator) {
+  subspace::SplitBufferCallbacks cpp_callbacks;
   if (callbacks.allocate != nullptr) {
     cpp_callbacks.allocate =
-        [callbacks](const subspace::PmemBufferMetadata &metadata)
-        -> absl::StatusOr<subspace::PmemBufferMapping> {
-      SubspacePmemBufferInfo info = ToCInfo(metadata);
-      SubspacePmemBufferMapping mapping = {};
+        [callbacks, allocator](const subspace::SplitBufferMetadata &metadata)
+        -> absl::StatusOr<subspace::SplitBufferMapping> {
+      SubspaceSplitBufferInfo info = ToCInfo(metadata, allocator);
+      SubspaceSplitBufferMapping mapping = {};
       if (!callbacks.allocate(&info, &mapping, callbacks.user_data)) {
-        return absl::InternalError("QNX PMEM allocation callback failed");
+        return absl::InternalError("Split-buffer allocation callback failed");
       }
       return ToCppMapping(mapping);
     };
   }
   if (callbacks.map != nullptr) {
     cpp_callbacks.map =
-        [callbacks](const subspace::PmemBufferMetadata &metadata)
-        -> absl::StatusOr<subspace::PmemBufferMapping> {
-      SubspacePmemBufferInfo info = ToCInfo(metadata);
-      SubspacePmemBufferMapping mapping = {};
-      mapping.handle = metadata.pmem_handle;
+        [callbacks, allocator](const subspace::SplitBufferMetadata &metadata)
+        -> absl::StatusOr<subspace::SplitBufferMapping> {
+      SubspaceSplitBufferInfo info = ToCInfo(metadata, allocator);
+      SubspaceSplitBufferMapping mapping = {};
+      mapping.handle = metadata.handle;
       if (!callbacks.map(&info, &mapping, callbacks.user_data)) {
-        return absl::InternalError("QNX PMEM map callback failed");
+        return absl::InternalError("Split-buffer map callback failed");
       }
       return ToCppMapping(mapping);
     };
   }
   if (callbacks.unmap != nullptr) {
     cpp_callbacks.unmap =
-        [callbacks](const subspace::PmemBufferMetadata &metadata,
-                    const subspace::PmemBufferMapping &mapping)
+        [callbacks, allocator](const subspace::SplitBufferMetadata &metadata,
+                               const subspace::SplitBufferMapping &mapping)
         -> absl::Status {
-      SubspacePmemBufferInfo info = ToCInfo(metadata);
-      SubspacePmemBufferMapping c_mapping = ToCMapping(mapping);
+      SubspaceSplitBufferInfo info = ToCInfo(metadata, allocator);
+      SubspaceSplitBufferMapping c_mapping = ToCMapping(mapping);
       if (!callbacks.unmap(&info, &c_mapping, callbacks.user_data)) {
-        return absl::InternalError("QNX PMEM unmap callback failed");
+        return absl::InternalError("Split-buffer unmap callback failed");
       }
       return absl::OkStatus();
     };
   }
   if (callbacks.free != nullptr) {
     cpp_callbacks.free =
-        [callbacks](const subspace::PmemBufferMetadata &metadata,
-                    const subspace::PmemBufferMapping &mapping)
+        [callbacks, allocator](const subspace::SplitBufferMetadata &metadata,
+                               const subspace::SplitBufferMapping &mapping)
         -> absl::Status {
-      SubspacePmemBufferInfo info = ToCInfo(metadata);
-      SubspacePmemBufferMapping c_mapping = ToCMapping(mapping);
+      SubspaceSplitBufferInfo info = ToCInfo(metadata, allocator);
+      SubspaceSplitBufferMapping c_mapping = ToCMapping(mapping);
       if (!callbacks.free(&info, &c_mapping, callbacks.user_data)) {
-        return absl::InternalError("QNX PMEM free callback failed");
+        return absl::InternalError("Split-buffer free callback failed");
       }
       return absl::OkStatus();
     };
   }
   return cpp_callbacks;
 }
-#endif
 
 } // namespace
 
@@ -164,14 +161,7 @@ SubspaceSubscriberOptions subspace_subscriber_options_default(void) {
       .max_active_messages = 1,
       .pass_activation = false,
       .log_dropped_messages = false,
-#if SUBSPACE_HAS_QNX_PMEM
-      .use_qnx_pmem = false,
-      .pmem_alignment = 0,
-      .pmem_pool_id = nullptr,
-      .pmem_pool_id_length = 0,
-      .pmem_cache_enabled = false,
-      .pmem_callbacks = {},
-#endif
+      .split_callbacks = {},
   };
   return options;
 }
@@ -188,14 +178,11 @@ SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size,
       .checksum_size = 4,
       .metadata_size = 0,
       .prefer_retired_slots = true,
-#if SUBSPACE_HAS_QNX_PMEM
-      .use_qnx_pmem = false,
-      .pmem_alignment = 0,
-      .pmem_pool_id = nullptr,
-      .pmem_pool_id_length = 0,
-      .pmem_cache_enabled = false,
-      .pmem_callbacks = {},
-#endif
+      .use_split_buffers = false,
+      .buffer_allocator = nullptr,
+      .buffer_allocator_length = 0,
+      .max_publishers = 0,
+      .split_callbacks = {},
   };
   return options;
 }
@@ -209,16 +196,8 @@ subspace_create_subscriber(SubspaceClient client, const char *channel_name,
       .max_active_messages = options.max_active_messages,
       .log_dropped_messages = options.log_dropped_messages,
       .pass_activation = options.pass_activation,
-#if SUBSPACE_HAS_QNX_PMEM
-      .use_qnx_pmem = options.use_qnx_pmem,
-      .pmem_alignment = options.pmem_alignment,
-      .pmem_pool_id = options.pmem_pool_id == nullptr
-                          ? std::string()
-                          : std::string(options.pmem_pool_id,
-                                        options.pmem_pool_id_length),
-      .pmem_cache_enabled = options.pmem_cache_enabled,
-      .pmem_callbacks = ToCppPmemCallbacks(options.pmem_callbacks),
-#endif
+      .split_buffer_callbacks = ToCppSplitCallbacks(
+          options.split_callbacks, std::string()),
   };
   subspace_clear_error();
   SubspaceSubscriber subscriber;
@@ -252,16 +231,19 @@ SubspacePublisher subspace_create_publisher(SubspaceClient client,
       .checksum_size = options.checksum_size,
       .metadata_size = options.metadata_size,
       .prefer_retired_slots = options.prefer_retired_slots,
-#if SUBSPACE_HAS_QNX_PMEM
-      .use_qnx_pmem = options.use_qnx_pmem,
-      .pmem_alignment = options.pmem_alignment,
-      .pmem_pool_id = options.pmem_pool_id == nullptr
-                          ? std::string()
-                          : std::string(options.pmem_pool_id,
-                                        options.pmem_pool_id_length),
-      .pmem_cache_enabled = options.pmem_cache_enabled,
-      .pmem_callbacks = ToCppPmemCallbacks(options.pmem_callbacks),
-#endif
+      .max_publishers = options.max_publishers,
+      .use_split_buffers = options.use_split_buffers,
+      .buffer_allocator =
+          options.buffer_allocator == nullptr
+              ? std::string()
+              : std::string(options.buffer_allocator,
+                            options.buffer_allocator_length),
+      .split_buffer_callbacks = ToCppSplitCallbacks(
+          options.split_callbacks,
+          options.buffer_allocator == nullptr
+              ? std::string()
+              : std::string(options.buffer_allocator,
+                            options.buffer_allocator_length)),
   };
   subspace_clear_error();
   SubspacePublisher publisher;
@@ -854,8 +836,7 @@ int32_t subspace_get_subscriber_metadata_size(SubspaceSubscriber subscriber) {
   return (*sub_ptr)->MetadataSize();
 }
 
-#if SUBSPACE_HAS_QNX_PMEM
-bool subspace_get_publisher_pmem_handle_from_address(
+bool subspace_get_publisher_split_buffer_handle_from_address(
     SubspacePublisher publisher, const void *address, uintptr_t *handle) {
   if (handle != nullptr) {
     *handle = 0;
@@ -866,12 +847,44 @@ bool subspace_get_publisher_pmem_handle_from_address(
   }
   auto pub_ptr = reinterpret_cast<std::shared_ptr<subspace::Publisher> *>(
       publisher.publisher);
-  return (*pub_ptr)->GetQnxPmemHandleFromAddress(address, handle);
+  return (*pub_ptr)->GetSplitBufferHandleFromAddress(address, handle);
 }
 
-bool subspace_get_subscriber_pmem_handles(SubspaceSubscriber subscriber,
-                                          uintptr_t **handles,
-                                          size_t *count) {
+bool subspace_get_publisher_split_buffer_handles(SubspacePublisher publisher,
+                                                 uintptr_t **handles,
+                                                 size_t *count) {
+  if (handles != nullptr) {
+    *handles = nullptr;
+  }
+  if (count != nullptr) {
+    *count = 0;
+  }
+  if (publisher.publisher == nullptr || handles == nullptr ||
+      count == nullptr) {
+    return false;
+  }
+  auto pub_ptr = reinterpret_cast<std::shared_ptr<subspace::Publisher> *>(
+      publisher.publisher);
+  return (*pub_ptr)->GetSplitBufferHandles(handles, count);
+}
+
+bool subspace_get_subscriber_split_buffer_handle_from_address(
+    SubspaceSubscriber subscriber, const void *address, uintptr_t *handle) {
+  if (handle != nullptr) {
+    *handle = 0;
+  }
+  if (subscriber.subscriber == nullptr || address == nullptr ||
+      handle == nullptr) {
+    return false;
+  }
+  auto sub_ptr = reinterpret_cast<std::shared_ptr<subspace::Subscriber> *>(
+      subscriber.subscriber);
+  return (*sub_ptr)->GetSplitBufferHandleFromAddress(address, handle);
+}
+
+bool subspace_get_subscriber_split_buffer_handles(SubspaceSubscriber subscriber,
+                                                  uintptr_t **handles,
+                                                  size_t *count) {
   if (handles != nullptr) {
     *handles = nullptr;
   }
@@ -884,9 +897,8 @@ bool subspace_get_subscriber_pmem_handles(SubspaceSubscriber subscriber,
   }
   auto sub_ptr = reinterpret_cast<std::shared_ptr<subspace::Subscriber> *>(
       subscriber.subscriber);
-  return (*sub_ptr)->GetQnxPmemHandles(handles, count);
+  return (*sub_ptr)->GetSplitBufferHandles(handles, count);
 }
-#endif
 
 #if defined(__cplusplus)
 } // extern "C"

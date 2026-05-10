@@ -14,7 +14,6 @@
 #include "toolbelt/sockets.h"
 #include <mutex>
 #include <string>
-#include <vector>
 
 namespace subspace {
 
@@ -59,7 +58,6 @@ struct ShadowChannel {
   toolbelt::FileDescriptor bcb_fd;
   absl::flat_hash_map<int, ShadowPublisher> publishers;
   absl::flat_hash_map<int, ShadowSubscriber> subscribers;
-  std::vector<PmemBufferMetadataProto> pmem_buffers;
 };
 
 // The Shadow process maintains a mirror of the server's channel database.
@@ -119,9 +117,6 @@ private:
   absl::Status HandleAddSubscriber(const ShadowAddSubscriber &msg,
                                    std::vector<toolbelt::FileDescriptor> &fds);
   absl::Status HandleRemoveSubscriber(const ShadowRemoveSubscriber &msg);
-  absl::Status HandleRegisterPmemBuffer(const ShadowRegisterPmemBuffer &msg);
-  absl::Status
-  HandleUnregisterPmemBuffer(const ShadowUnregisterPmemBuffer &msg);
 
   co::CoroutineScheduler &scheduler_;
   std::string socket_name_;

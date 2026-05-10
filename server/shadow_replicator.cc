@@ -5,7 +5,6 @@
 
 #include "server/shadow_replicator.h"
 #include "server/server_channel.h"
-#include <algorithm>
 #include <arpa/inet.h>
 
 namespace subspace {
@@ -174,24 +173,6 @@ void ShadowReplicator::SendRemoveSubscriber(const std::string &channel_name,
   SendEvent(event);
 }
 
-void ShadowReplicator::SendRegisterPmemBuffer(
-    const PmemBufferMetadataProto &metadata) {
-  ShadowEvent event;
-  *event.mutable_register_pmem_buffer()->mutable_metadata() = metadata;
-  SendEvent(event);
-}
-
-void ShadowReplicator::SendUnregisterPmemBuffer(const std::string &channel_name,
-                                                uint64_t session_id,
-                                                uint32_t buffer_index) {
-  ShadowEvent event;
-  auto *msg = event.mutable_unregister_pmem_buffer();
-  msg->set_channel_name(channel_name);
-  msg->set_session_id(session_id);
-  msg->set_buffer_index(buffer_index);
-  SendEvent(event);
-}
-
 absl::StatusOr<ShadowEvent> ShadowReplicator::ReceiveEvent(
     std::vector<toolbelt::FileDescriptor> &fds) {
   absl::StatusOr<std::vector<char>> recv =
@@ -354,36 +335,6 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
           .trigger_fd = std::move(fds[0]),
           .poll_fd = std::move(fds[1]),
       });
-      continue;
-    }
-
-    case ShadowEvent::kRegisterPmemBuffer: {
-      const auto &msg = event->register_pmem_buffer();
-      absl::StatusOr<RecoveredChannel *> ch =
-          find_channel(msg.metadata().channel_name());
-      if (!ch.ok()) {
-        return ch.status();
-      }
-      (*ch)->pmem_buffers.push_back(msg.metadata());
-      continue;
-    }
-
-    case ShadowEvent::kUnregisterPmemBuffer: {
-      const auto &msg = event->unregister_pmem_buffer();
-      absl::StatusOr<RecoveredChannel *> ch = find_channel(msg.channel_name());
-      if (!ch.ok()) {
-        return ch.status();
-      }
-      auto &buffers = (*ch)->pmem_buffers;
-      buffers.erase(std::remove_if(buffers.begin(), buffers.end(),
-                                   [&msg](const PmemBufferMetadataProto
-                                              &metadata) {
-                                     return metadata.session_id() ==
-                                                msg.session_id() &&
-                                            metadata.buffer_index() ==
-                                                msg.buffer_index();
-                                   }),
-                    buffers.end());
       continue;
     }
 

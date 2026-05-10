@@ -20,8 +20,3 @@ config_setting(
   values = {"define": "subspace_qnx_pmem=enabled"},
 )
 
-config_setting(
-  name = "linux_pmem_shim",
-  values = {"define": "subspace_linux_pmem_shim=enabled"},
-)
-

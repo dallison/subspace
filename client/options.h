@@ -6,9 +6,7 @@
 #define _xCLIENT_OPTIONS_H
 
 #include "common/channel.h"
-#if SUBSPACE_HAS_QNX_PMEM
-#include "common/pmem.h"
-#endif
+#include "common/split_buffer.h"
 
 #include <cstdint>
 #include <functional>
@@ -177,40 +175,38 @@ struct PublisherOptions {
   }
   bool PreferRetiredSlots() const { return prefer_retired_slots; }
 
-#if SUBSPACE_HAS_QNX_PMEM
-  // QNX PMEM options.  When use_qnx_pmem is true, payload slots are backed by
-  // PMEM allocations.  Alignment 0 uses the QNX PMEM default selected by the
-  // implementation.
-  PublisherOptions &SetUseQnxPmem(bool v) {
-    use_qnx_pmem = v;
+  // Maximum number of publishers allowed on the channel.  A value of 0 means
+  // no explicit limit beyond the server's normal channel capacity.
+  PublisherOptions &SetMaxPublishers(int32_t n) {
+    max_publishers = n;
     return *this;
   }
-  bool UseQnxPmem() const { return use_qnx_pmem; }
+  int32_t MaxPublishers() const { return max_publishers; }
 
-  PublisherOptions &SetPmemAlignment(uint32_t alignment) {
-    pmem_alignment = alignment;
+  // Split-buffer options.  When use_split_buffers is true, prefixes are stored
+  // in a separate shared-memory region and each payload slot is allocated as a
+  // separate block.  If callbacks are supplied, the publisher allocates payload
+  // slots through them and subscribers map those slots through their matching
+  // callbacks.  Prefixes remain regular shared memory.
+  PublisherOptions &SetUseSplitBuffers(bool v) {
+    use_split_buffers = v;
     return *this;
   }
-  uint32_t PmemAlignment() const { return pmem_alignment; }
+  bool UseSplitBuffers() const { return use_split_buffers; }
 
-  PublisherOptions &SetPmemPoolId(std::string pool_id) {
-    pmem_pool_id = std::move(pool_id);
+  PublisherOptions &SetSplitBufferCallbacks(
+      subspace::SplitBufferCallbacks callbacks) {
+    split_buffer_callbacks = std::move(callbacks);
     return *this;
   }
-  const std::string &PmemPoolId() const { return pmem_pool_id; }
-
-  PublisherOptions &SetPmemCacheEnabled(bool v) {
-    pmem_cache_enabled = v;
+  const subspace::SplitBufferCallbacks &SplitBufferCallbackSet() const {
+    return split_buffer_callbacks;
+  }
+  PublisherOptions &SetBufferAllocator(std::string allocator) {
+    buffer_allocator = std::move(allocator);
     return *this;
   }
-  bool PmemCacheEnabled() const { return pmem_cache_enabled; }
-
-  PublisherOptions &SetPmemBufferCallbacks(PmemBufferCallbacks callbacks) {
-    pmem_callbacks = std::move(callbacks);
-    return *this;
-  }
-  const PmemBufferCallbacks &PmemCallbacks() const { return pmem_callbacks; }
-#endif
+  const std::string &BufferAllocator() const { return buffer_allocator; }
 
   // If you use the new CreatePublisher API, set the slot size and num slots in
   // here.
@@ -235,14 +231,10 @@ struct PublisherOptions {
 
   // See SetPreferRetiredSlots() for description.
   bool prefer_retired_slots = false;
-
-#if SUBSPACE_HAS_QNX_PMEM
-  bool use_qnx_pmem = false;
-  uint32_t pmem_alignment = 0;
-  std::string pmem_pool_id;
-  bool pmem_cache_enabled = false;
-  PmemBufferCallbacks pmem_callbacks;
-#endif
+  int32_t max_publishers = 0;
+  bool use_split_buffers = false;
+  std::string buffer_allocator;
+  subspace::SplitBufferCallbacks split_buffer_callbacks;
 };
 
 struct SubscriberOptions {
@@ -343,39 +335,19 @@ struct SubscriberOptions {
   }
   bool KeepActiveMessage() const { return keep_active_message; }
 
-#if SUBSPACE_HAS_QNX_PMEM
-  // QNX PMEM expectations.  Subscribers use these to require that the channel
-  // they attach to has compatible PMEM settings.
-  SubscriberOptions &SetUseQnxPmem(bool v) {
-    use_qnx_pmem = v;
-    return *this;
-  }
-  bool UseQnxPmem() const { return use_qnx_pmem; }
+  // The server reports the channel layout on attach.  Subscribers do not
+  // request split buffers; this getter tells users what the publisher selected
+  // after subscriber creation or reload.
+  bool UseSplitBuffers() const { return use_split_buffers; }
 
-  SubscriberOptions &SetPmemAlignment(uint32_t alignment) {
-    pmem_alignment = alignment;
+  SubscriberOptions &SetSplitBufferCallbacks(
+      subspace::SplitBufferCallbacks callbacks) {
+    split_buffer_callbacks = std::move(callbacks);
     return *this;
   }
-  uint32_t PmemAlignment() const { return pmem_alignment; }
-
-  SubscriberOptions &SetPmemPoolId(std::string pool_id) {
-    pmem_pool_id = std::move(pool_id);
-    return *this;
+  const subspace::SplitBufferCallbacks &SplitBufferCallbackSet() const {
+    return split_buffer_callbacks;
   }
-  const std::string &PmemPoolId() const { return pmem_pool_id; }
-
-  SubscriberOptions &SetPmemCacheEnabled(bool v) {
-    pmem_cache_enabled = v;
-    return *this;
-  }
-  bool PmemCacheEnabled() const { return pmem_cache_enabled; }
-
-  SubscriberOptions &SetPmemBufferCallbacks(PmemBufferCallbacks callbacks) {
-    pmem_callbacks = std::move(callbacks);
-    return *this;
-  }
-  const PmemBufferCallbacks &PmemCallbacks() const { return pmem_callbacks; }
-#endif
 
   bool reliable = false;
   bool bridge = false;
@@ -397,14 +369,8 @@ struct SubscriberOptions {
   // around and you want to keep the message alive until you are done with it.
   // You should call ClearActiveMessage() to release the reference when you are done with it.
   bool keep_active_message = false;
-
-#if SUBSPACE_HAS_QNX_PMEM
-  bool use_qnx_pmem = false;
-  uint32_t pmem_alignment = 0;
-  std::string pmem_pool_id;
-  bool pmem_cache_enabled = false;
-  PmemBufferCallbacks pmem_callbacks;
-#endif
+  bool use_split_buffers = false;
+  subspace::SplitBufferCallbacks split_buffer_callbacks;
 };
 
 } // namespace subspace

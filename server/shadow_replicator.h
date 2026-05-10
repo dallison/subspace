@@ -62,7 +62,6 @@ struct RecoveredChannel {
   toolbelt::FileDescriptor bcb_fd;
   std::vector<RecoveredPublisher> publishers;
   std::vector<RecoveredSubscriber> subscribers;
-  std::vector<PmemBufferMetadataProto> pmem_buffers;
 };
 
 struct RecoveredState {
@@ -97,9 +96,6 @@ public:
   void SendAddSubscriber(const std::string &channel_name,
                          const SubscriberUser *sub);
   void SendRemoveSubscriber(const std::string &channel_name, int sub_id);
-  void SendRegisterPmemBuffer(const PmemBufferMetadataProto &metadata);
-  void SendUnregisterPmemBuffer(const std::string &channel_name,
-                                uint64_t session_id, uint32_t buffer_index);
 
 private:
   void SendEvent(const ShadowEvent &event,

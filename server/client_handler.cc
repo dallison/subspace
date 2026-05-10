@@ -9,21 +9,34 @@
 
 namespace subspace {
 namespace {
-#if SUBSPACE_HAS_QNX_PMEM
-QnxPmemOptions FromPublisherRequest(const CreatePublisherRequest &req) {
-  return {.use_qnx_pmem = req.use_qnx_pmem(),
-          .pmem_alignment = req.pmem_alignment(),
-          .pmem_pool_id = req.pmem_pool_id(),
-          .pmem_cache_enabled = req.pmem_cache_enabled()};
+ClientBufferHandleMetadata FromProto(
+    const ClientBufferHandleMetadataProto &proto) {
+  ClientBufferHandleMetadata metadata;
+  metadata.channel_name = proto.channel_name();
+  metadata.session_id = proto.session_id();
+  metadata.buffer_index = proto.buffer_index();
+  metadata.slot_id = proto.slot_id();
+  metadata.is_prefix = proto.is_prefix();
+  metadata.full_size = proto.full_size();
+  metadata.allocation_size = proto.allocation_size();
+  metadata.handle = static_cast<uintptr_t>(proto.handle());
+  metadata.shadow_file = proto.shadow_file();
+  metadata.object_name = proto.object_name();
+  metadata.allocator = proto.allocator();
+  metadata.pool_id = proto.pool_id();
+  metadata.cache_enabled = proto.cache_enabled();
+  metadata.alignment = proto.alignment();
+  metadata.allocator_metadata = proto.allocator_metadata();
+  return metadata;
 }
 
-QnxPmemOptions FromSubscriberRequest(const CreateSubscriberRequest &req) {
-  return {.use_qnx_pmem = req.use_qnx_pmem(),
-          .pmem_alignment = req.pmem_alignment(),
-          .pmem_pool_id = req.pmem_pool_id(),
-          .pmem_cache_enabled = req.pmem_cache_enabled()};
+SplitBufferOptions FromPublisherSplitBufferRequest(
+    const CreatePublisherRequest &req) {
+  return {.use_split_buffers = req.use_split_buffers(),
+          .allocator = req.buffer_allocator(),
+          .allocator_metadata = req.buffer_allocator_metadata()};
 }
-#endif
+
 } // namespace
 
 ClientHandler::~ClientHandler() { server_->RemoveAllUsersFor(this); }
@@ -53,26 +66,24 @@ void ClientHandler::Run() {
       }
     }
 
-#if SUBSPACE_HAS_QNX_PMEM
-    if (request.request_case() == subspace::Request::kRegisterPmemBuffer) {
+    if (request.request_case() == subspace::Request::kRegisterClientBuffer) {
       if (absl::Status s =
-              HandleRegisterPmemBuffer(request.register_pmem_buffer());
+              HandleRegisterClientBuffer(request.register_client_buffer());
           !s.ok()) {
         server_->logger_.Log(toolbelt::LogLevel::kError, "%s\n",
                              s.ToString().c_str());
       }
       continue;
     }
-    if (request.request_case() == subspace::Request::kUnregisterPmemBuffer) {
+    if (request.request_case() == subspace::Request::kUnregisterClientBuffer) {
       if (absl::Status s =
-              HandleUnregisterPmemBuffer(request.unregister_pmem_buffer());
+              HandleUnregisterClientBuffer(request.unregister_client_buffer());
           !s.ok()) {
         server_->logger_.Log(toolbelt::LogLevel::kError, "%s\n",
                              s.ToString().c_str());
       }
       continue;
     }
-#endif
 
     std::vector<toolbelt::FileDescriptor> fds;
     subspace::Response response;
@@ -145,18 +156,11 @@ ClientHandler::HandleMessage(const subspace::Request &req,
                           resp.mutable_get_channel_stats(), fds);
     break;
 
-#if SUBSPACE_HAS_QNX_PMEM
-  case subspace::Request::kRegisterPmemBuffer:
-    return HandleRegisterPmemBuffer(req.register_pmem_buffer());
+  case subspace::Request::kRegisterClientBuffer:
+    return HandleRegisterClientBuffer(req.register_client_buffer());
 
-  case subspace::Request::kUnregisterPmemBuffer:
-    return HandleUnregisterPmemBuffer(req.unregister_pmem_buffer());
-#else
-  case subspace::Request::kRegisterPmemBuffer:
-  case subspace::Request::kUnregisterPmemBuffer:
-    return absl::InvalidArgumentError(
-        "QNX PMEM requests are not supported on this platform");
-#endif
+  case subspace::Request::kUnregisterClientBuffer:
+    return HandleUnregisterClientBuffer(req.unregister_client_buffer());
 
   case subspace::Request::REQUEST_NOT_SET:
     return absl::InternalError("Protocol error: unknown request");
@@ -164,37 +168,30 @@ ClientHandler::HandleMessage(const subspace::Request &req,
   return absl::OkStatus();
 }
 
-#if SUBSPACE_HAS_QNX_PMEM
-absl::Status ClientHandler::HandleRegisterPmemBuffer(
-    const subspace::RegisterPmemBufferRequest &req) {
-  PmemBufferMetadata metadata = FromProto(req.metadata());
+absl::Status ClientHandler::HandleRegisterClientBuffer(
+    const subspace::RegisterClientBufferRequest &req) {
+  ClientBufferHandleMetadata metadata = FromProto(req.metadata());
   if (metadata.session_id != server_->GetSessionId()) {
     return absl::InternalError(absl::StrFormat(
-        "Ignoring QNX pmem registration for stale session %s",
+        "Ignoring client buffer registration for stale session %s",
         std::to_string(metadata.session_id)));
   }
 
   ServerChannel *channel = server_->FindChannel(metadata.channel_name);
   if (channel == nullptr) {
     return absl::InternalError(absl::StrFormat(
-        "Ignoring QNX pmem registration for unknown channel %s",
+        "Ignoring client buffer registration for unknown channel %s",
         metadata.channel_name));
   }
   if (channel->IsVirtual()) {
     channel = static_cast<VirtualChannel *>(channel)->GetMux();
   }
-  PmemBufferMetadataProto proto;
-  ToProto(metadata, &proto);
-  channel->RegisterPmemBuffer(std::move(metadata));
-  server_->ForEachShadow(
-      [&proto](const std::unique_ptr<ShadowReplicator> &shadow) {
-        shadow->SendRegisterPmemBuffer(proto);
-      });
+  channel->RegisterClientBuffer(std::move(metadata));
   return absl::OkStatus();
 }
 
-absl::Status ClientHandler::HandleUnregisterPmemBuffer(
-    const subspace::UnregisterPmemBufferRequest &req) {
+absl::Status ClientHandler::HandleUnregisterClientBuffer(
+    const subspace::UnregisterClientBufferRequest &req) {
   if (req.session_id() != server_->GetSessionId()) {
     return absl::OkStatus();
   }
@@ -205,14 +202,9 @@ absl::Status ClientHandler::HandleUnregisterPmemBuffer(
   if (channel->IsVirtual()) {
     channel = static_cast<VirtualChannel *>(channel)->GetMux();
   }
-  channel->UnregisterPmemBuffer(req.session_id(), req.buffer_index());
-  server_->ForEachShadow([&req](const std::unique_ptr<ShadowReplicator> &shadow) {
-    shadow->SendUnregisterPmemBuffer(req.channel_name(), req.session_id(),
-                                     req.buffer_index());
-  });
+  channel->UnregisterClientBuffer(req.session_id(), req.buffer_index());
   return absl::OkStatus();
 }
-#endif
 
 void ClientHandler::HandleInit(const subspace::InitRequest &req,
                                subspace::InitResponse *response,
@@ -389,35 +381,57 @@ void ClientHandler::HandleCreatePublisher(
     }
   }
 
-#if SUBSPACE_HAS_QNX_PMEM
-  ServerChannel *pmem_channel = channel->IsVirtual()
-                                    ? static_cast<VirtualChannel *>(channel)
-                                          ->GetMux()
-                                    : channel;
-  if (absl::Status status = pmem_channel->ValidateOrSetQnxPmemOptions(
-          FromPublisherRequest(req), /*set_if_missing=*/true, "publisher");
+  ServerChannel *split_channel =
+      channel->IsVirtual() ? static_cast<VirtualChannel *>(channel)->GetMux()
+                           : channel;
+  if (absl::Status status = split_channel->ValidateOrSetMaxPublishers(
+          req.max_publishers(), /*set_if_missing=*/true, "publisher");
       !status.ok()) {
     response->set_error(status.ToString());
     return;
   }
-  if (req.use_qnx_pmem() && req.publisher_id() < 0) {
+  if (req.publisher_id() < 0 && split_channel->MaxPublishers() > 0) {
+    int limit_num_pubs = 0;
+    int limit_num_subs = 0;
+    int limit_num_bridge_pubs = 0;
+    int limit_num_bridge_subs = 0;
+    int limit_num_tunnel_pubs = 0;
+    int limit_num_tunnel_subs = 0;
+    split_channel->CountUsers(limit_num_pubs, limit_num_subs,
+                              limit_num_bridge_pubs, limit_num_bridge_subs,
+                              limit_num_tunnel_pubs, limit_num_tunnel_subs);
+    if (limit_num_pubs >= split_channel->MaxPublishers()) {
+      response->set_error(absl::StrFormat(
+          "Channel %s already has the maximum number of publishers (%d)",
+          req.channel_name(), split_channel->MaxPublishers()));
+      return;
+    }
+  }
+  if (absl::Status status = split_channel->ValidateOrSetSplitBufferOptions(
+          FromPublisherSplitBufferRequest(req), /*set_if_missing=*/true,
+          "publisher");
+      !status.ok()) {
+    response->set_error(status.ToString());
+    return;
+  }
+  if (FromPublisherSplitBufferRequest(req).use_split_buffers &&
+      req.publisher_id() < 0) {
     int num_pubs = 0;
     int num_subs = 0;
     int num_bridge_pubs = 0;
     int num_bridge_subs = 0;
     int num_tunnel_pubs = 0;
     int num_tunnel_subs = 0;
-    pmem_channel->CountUsers(num_pubs, num_subs, num_bridge_pubs,
-                             num_bridge_subs, num_tunnel_pubs,
-                             num_tunnel_subs);
+    split_channel->CountUsers(num_pubs, num_subs, num_bridge_pubs,
+                              num_bridge_subs, num_tunnel_pubs,
+                              num_tunnel_subs);
     if (num_pubs + num_bridge_pubs + num_tunnel_pubs > 0) {
       response->set_error(absl::StrFormat(
-          "QNX PMEM channel %s supports only one publisher",
+          "Split-buffer channel %s supports only one publisher",
           req.channel_name()));
       return;
     }
   }
-#endif
 
   PublisherUser *pub = nullptr;
   bool reclaimed = false;
@@ -635,22 +649,6 @@ void ClientHandler::HandleCreateSubscriber(
       return;
     }
   }
-#if SUBSPACE_HAS_QNX_PMEM
-  if (req.use_qnx_pmem()) {
-    ServerChannel *pmem_channel = channel->IsVirtual()
-                                      ? static_cast<VirtualChannel *>(channel)
-                                            ->GetMux()
-                                      : channel;
-    if (absl::Status status = pmem_channel->ValidateOrSetQnxPmemOptions(
-            FromSubscriberRequest(req), /*set_if_missing=*/true,
-            "subscriber");
-        !status.ok()) {
-      response->set_error(status.ToString());
-      return;
-    }
-  }
-#endif
-
   SubscriberUser *sub;
   bool reclaimed = false;
   if (req.subscriber_id() != -1) {
@@ -738,18 +736,16 @@ void ClientHandler::HandleCreateSubscriber(
   response->set_num_slots(channel->NumSlots());
   response->set_checksum_size(channel->ChecksumSize());
   response->set_metadata_size(channel->MetadataSize());
-#if SUBSPACE_HAS_QNX_PMEM
-  ServerChannel *pmem_response_channel =
+  ServerChannel *split_response_channel =
       channel->IsVirtual() ? static_cast<VirtualChannel *>(channel)->GetMux()
                            : channel;
-  if (pmem_response_channel->HasQnxPmemOptions()) {
-    const QnxPmemOptions &pmem = pmem_response_channel->GetQnxPmemOptions();
-    response->set_use_qnx_pmem(pmem.use_qnx_pmem);
-    response->set_pmem_alignment(pmem.pmem_alignment);
-    response->set_pmem_pool_id(pmem.pmem_pool_id);
-    response->set_pmem_cache_enabled(pmem.pmem_cache_enabled);
+  if (split_response_channel->HasSplitBufferOptions()) {
+    const SplitBufferOptions &split =
+        split_response_channel->GetSplitBufferOptions();
+    response->set_use_split_buffers(split.use_split_buffers);
+    response->set_buffer_allocator(split.allocator);
+    *response->mutable_buffer_allocator_metadata() = split.allocator_metadata;
   }
-#endif
   // Add publisher trigger indexes.
   std::vector<toolbelt::FileDescriptor> pub_fds =
       channel->GetReliablePublisherTriggerFds();

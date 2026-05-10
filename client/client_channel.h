@@ -8,9 +8,7 @@
 #include "client/options.h"
 #include "co/coroutine.h"
 #include "common/channel.h"
-#if SUBSPACE_HAS_QNX_PMEM
-#include "common/pmem.h"
-#endif
+#include "common/client_buffer.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/clock.h"
 #include "toolbelt/fd.h"
@@ -60,28 +58,22 @@ struct BufferSet {
   BufferSet() = default;
   BufferSet(uint64_t full_sz, uint64_t slot_sz, char *buf)
       : full_size(full_sz), slot_size(slot_sz), buffer(buf) {}
-#if SUBSPACE_HAS_QNX_PMEM
-  bool IsQnxPmem() const { return !pmem_slot_buffers.empty(); }
-#else
-  bool IsQnxPmem() const { return false; }
-#endif
+  bool IsSplitBuffers() const { return !split_slot_buffers.empty(); }
   uint64_t full_size = 0;
   uint64_t slot_size = 0;
   char *buffer = nullptr;
-#if SUBSPACE_HAS_QNX_PMEM
-  char *prefix_buffer = nullptr;
-  uint64_t prefix_buffer_size = 0;
-  std::vector<char *> pmem_slot_buffers;
-  std::vector<uint64_t> pmem_slot_sizes;
-  std::vector<uintptr_t> pmem_handles;
-  std::vector<void *> pmem_private_data;
-  std::vector<toolbelt::FileDescriptor> pmem_fds;
-  std::vector<PmemBufferMetadata> pmem_metadata;
-  toolbelt::FileDescriptor prefix_fd;
-  PmemBufferMetadata prefix_metadata;
-  bool owns_qnx_pmem = false;
-  bool uses_pmem_callbacks = false;
-#endif
+  char *split_prefix_buffer = nullptr;
+  uint64_t split_prefix_buffer_size = 0;
+  std::vector<char *> split_slot_buffers;
+  std::vector<uint64_t> split_slot_sizes;
+  std::vector<uintptr_t> split_handles;
+  std::vector<void *> split_private_data;
+  std::vector<toolbelt::FileDescriptor> split_fds;
+  std::vector<SplitBufferMetadata> split_metadata;
+  toolbelt::FileDescriptor split_prefix_fd;
+  SplitBufferMetadata split_prefix_metadata;
+  bool owns_split_buffers = false;
+  bool uses_split_callbacks = false;
 };
 
 // This is a channel as seen by a client.  It's going to be either
@@ -122,14 +114,12 @@ public:
   // What is the address of the message buffer (after the prefix area)
   // for the slot given a slot id.
   void *GetBufferAddress(int slot_id) {
-#if SUBSPACE_HAS_QNX_PMEM
     int buffer_index = ccb_->slots[slot_id].buffer_index;
     if (buffer_index >= 0 &&
         static_cast<size_t>(buffer_index) < buffers_.size() &&
-        buffers_[buffer_index]->IsQnxPmem()) {
-      return buffers_[buffer_index]->pmem_slot_buffers[slot_id];
+        buffers_[buffer_index]->IsSplitBuffers()) {
+      return buffers_[buffer_index]->split_slot_buffers[slot_id];
     }
-#endif
     return Buffer(slot_id) +
            (PrefixSize() + Aligned<64>(SlotSize(slot_id))) * slot_id +
            PrefixSize();
@@ -140,14 +130,12 @@ public:
     if (slot == nullptr) {
       return nullptr;
     }
-#if SUBSPACE_HAS_QNX_PMEM
     int buffer_index = ccb_->slots[slot->id].buffer_index;
     if (buffer_index >= 0 &&
         static_cast<size_t>(buffer_index) < buffers_.size() &&
-        buffers_[buffer_index]->IsQnxPmem()) {
-      return buffers_[buffer_index]->pmem_slot_buffers[slot->id];
+        buffers_[buffer_index]->IsSplitBuffers()) {
+      return buffers_[buffer_index]->split_slot_buffers[slot->id];
     }
-#endif
     void *b =
         Buffer(slot->id) +
         (PrefixSize() + Aligned<64>(SlotSize(slot->id))) * slot->id +
@@ -160,16 +148,14 @@ public:
     if (slot == nullptr) {
       return nullptr;
     }
-#if SUBSPACE_HAS_QNX_PMEM
     int buffer_index = ccb_->slots[slot->id].buffer_index;
     if (buffer_index >= 0 &&
         static_cast<size_t>(buffer_index) < buffers_.size() &&
-        buffers_[buffer_index]->IsQnxPmem()) {
+        buffers_[buffer_index]->IsSplitBuffers()) {
       return reinterpret_cast<MessagePrefix *>(
-          buffers_[buffer_index]->prefix_buffer +
+          buffers_[buffer_index]->split_prefix_buffer +
           static_cast<size_t>(PrefixSize()) * slot->id);
     }
-#endif
     MessagePrefix *p = reinterpret_cast<MessagePrefix *>(
         Buffer(slot->id) +
         (PrefixSize() + Aligned<64>(SlotSize(slot->id))) * slot->id);
@@ -251,20 +237,11 @@ public:
   }
 
   virtual BufferMapMode MapMode() const = 0;
-#if SUBSPACE_HAS_QNX_PMEM
-  virtual bool UseQnxPmem() const { return false; }
-  virtual uint32_t PmemAlignment() const { return 0; }
-  virtual const std::string &PmemPoolId() const {
-    static const std::string *empty = new std::string();
-    return *empty;
-  }
-  virtual bool PmemCacheEnabled() const { return false; }
-  virtual const PmemBufferCallbacks &PmemCallbacks() const {
-    static const PmemBufferCallbacks *callbacks = new PmemBufferCallbacks();
+  virtual bool UseSplitBuffers() const { return false; }
+  virtual const SplitBufferCallbacks &SplitBuffersCallbacks() const {
+    static const SplitBufferCallbacks *callbacks = new SplitBufferCallbacks();
     return *callbacks;
   }
-#endif
-
   bool BuffersChanged() const {
     return ccb_->num_buffers != static_cast<int>(buffers_.size());
   }
@@ -272,9 +249,8 @@ public:
   const std::vector<std::unique_ptr<BufferSet>> &GetBuffers() const {
     return buffers_;
   }
-#if SUBSPACE_HAS_QNX_PMEM
-  bool GetQnxPmemHandleFromAddress(const void *address,
-                                   uintptr_t *handle) const {
+  bool GetSplitBufferHandleFromAddress(const void *address,
+                                       uintptr_t *handle) const {
     if (handle != nullptr) {
       *handle = 0;
     }
@@ -283,21 +259,18 @@ public:
     }
     const auto *addr = static_cast<const char *>(address);
     for (const auto &buffer : buffers_) {
-      if (!buffer->IsQnxPmem()) {
-        continue;
-      }
-      for (size_t slot = 0; slot < buffer->pmem_slot_buffers.size(); slot++) {
-        const char *base = buffer->pmem_slot_buffers[slot];
-        const char *end = base + buffer->pmem_slot_sizes[slot];
+      for (size_t slot = 0; slot < buffer->split_slot_buffers.size(); slot++) {
+        const char *base = buffer->split_slot_buffers[slot];
+        const char *end = base + buffer->split_slot_sizes[slot];
         if (addr >= base && addr < end) {
-          *handle = buffer->pmem_handles[slot];
+          *handle = buffer->split_handles[slot];
           return true;
         }
       }
     }
     return false;
   }
-  bool GetQnxPmemHandles(uintptr_t **handles, size_t *count) {
+  bool GetSplitBufferHandles(uintptr_t **handles, size_t *count) {
     if (handles != nullptr) {
       *handles = nullptr;
     }
@@ -308,14 +281,13 @@ public:
       return false;
     }
     BufferSet *latest = buffers_.back().get();
-    if (!latest->IsQnxPmem()) {
+    if (!latest->IsSplitBuffers()) {
       return false;
     }
-    *handles = latest->pmem_handles.data();
-    *count = latest->pmem_handles.size();
+    *handles = latest->split_handles.data();
+    *count = latest->split_handles.size();
     return true;
   }
-#endif
 
   absl::Status AttachBuffers();
 
@@ -335,17 +307,16 @@ public:
     return Channel::BufferSharedMemoryName(session_id_, buffer_index);
   }
 
-#if SUBSPACE_HAS_QNX_PMEM
-  void SetPmemRegistrationCallback(
-      std::function<absl::Status(const PmemBufferMetadata &)> callback) {
-    pmem_registration_callback_ = std::move(callback);
+  void SetClientBufferRegistrationCallback(
+      std::function<absl::Status(const ClientBufferHandleMetadata &)>
+          callback) {
+    client_buffer_registration_callback_ = std::move(callback);
   }
-  void SetPmemUnregistrationCallback(
+  void SetClientBufferUnregistrationCallback(
       std::function<absl::Status(const std::string &, uint64_t, uint32_t)>
           callback) {
-    pmem_unregistration_callback_ = std::move(callback);
+    client_buffer_unregistration_callback_ = std::move(callback);
   }
-#endif
 
   void RecordDroppedMessages(uint32_t num) {
     ccb_->total_drops += num; // Atomic increment.
@@ -373,14 +344,16 @@ protected:
   absl::StatusOr<toolbelt::FileDescriptor> CreateBuffer(int buffer_index,
                                                         size_t size);
   absl::Status AttachShmBuffers(int num_buffers);
+  absl::Status AttachSplitBuffers(int num_buffers);
   absl::StatusOr<toolbelt::FileDescriptor> OpenBuffer(int buffer_index);
   absl::StatusOr<size_t> GetBufferSize(toolbelt::FileDescriptor &shm_fd,
                                        int buffer_index) const;
   absl::StatusOr<char *> MapBuffer(toolbelt::FileDescriptor &shm_fd,
                                    size_t size, BufferMapMode mode);
   void UnmapShmBufferSet(BufferSet &buffer);
+  void UnmapSplitBufferSet(size_t buffer_index, BufferSet &buffer);
   void UnmapBufferSet(size_t buffer_index, BufferSet &buffer,
-                      bool unregister_pmem);
+                      bool unregister_client_buffer);
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
   absl::StatusOr<toolbelt::FileDescriptor>
   CreateLinuxBuffer(const std::string &filename, size_t size);
@@ -388,20 +361,12 @@ protected:
   absl::StatusOr<toolbelt::FileDescriptor>
   CreatePosixBuffer(const std::string &filename, size_t size);
 #endif
-#if SUBSPACE_HAS_QNX_PMEM
-  absl::Status AttachQnxPmemBuffers(int num_buffers);
-  void UnmapQnxPmemBufferSet(size_t buffer_index, BufferSet &buffer,
-                             bool unregister_pmem);
-  absl::StatusOr<toolbelt::FileDescriptor>
-  CreateQnxPmemContiguousBuffer(int buffer_index, const std::string &filename,
-                                size_t size);
   absl::StatusOr<std::unique_ptr<BufferSet>>
-  CreateQnxPmemBufferSet(size_t buffer_index, size_t full_size,
-                         uint64_t slot_size);
-  absl::StatusOr<std::unique_ptr<BufferSet>>
-  OpenQnxPmemBufferSet(size_t buffer_index, size_t full_size,
+  CreateSplitBufferSet(size_t buffer_index, size_t full_size,
                        uint64_t slot_size);
-#endif
+  absl::StatusOr<std::unique_ptr<BufferSet>>
+  OpenSplitBufferSet(size_t buffer_index, size_t full_size,
+                     uint64_t slot_size);
 
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   absl::StatusOr<std::string>
@@ -411,12 +376,10 @@ protected:
   MessageSlot *slot_ = nullptr; // Current slot.
   int vchan_id_ = -1;           // Virtual channel ID.
   uint64_t session_id_;
-#if SUBSPACE_HAS_QNX_PMEM
-  std::function<absl::Status(const PmemBufferMetadata &)>
-      pmem_registration_callback_ = nullptr;
+  std::function<absl::Status(const ClientBufferHandleMetadata &)>
+      client_buffer_registration_callback_ = nullptr;
   std::function<absl::Status(const std::string &, uint64_t, uint32_t)>
-      pmem_unregistration_callback_ = nullptr;
-#endif
+      client_buffer_unregistration_callback_ = nullptr;
   std::vector<std::unique_ptr<BufferSet>> buffers_ = {};
   int user_id_ = -1;
   int group_id_ = -1;

@@ -1,15 +1,17 @@
-# QNX PMEM Support
+# Split Buffers And QNX PMEM
 
-Subspace supports QNX as a target platform. Default QNX builds use the same
-POSIX-shadow shared-memory path used by other non-Linux platforms. PMEM-backed
-message buffers are available as an optional build-time and per-channel feature.
+Subspace supports split message buffers: prefixes live in regular shared memory
+and payload slots live in separately allocated blocks.  The payload allocator is
+selected by the publisher and identified with an opaque `buffer_allocator`
+string, such as `qcomm_pool` for Qualcomm memory pools.
 
 PMEM support is provided by General Motors.
 
 ## Build-Time Enablement
 
-PMEM code is compiled only when explicitly enabled. This keeps default QNX
-builds on the POSIX shared-memory path.
+Generic split buffers are always available.  QNX PMEM helper code is compiled
+only when explicitly enabled; allocator-specific PMEM cleanup should be provided
+by a server plugin through the generic client-buffer cleanup hook.
 
 With Bazel:
 
@@ -25,58 +27,51 @@ cmake -DSUBSPACE_QNX_PMEM=ON ..
 
 ## Runtime Channel Options
 
-PMEM is also opt-in per channel. Publishers request PMEM-backed buffers with:
+Split buffers are opt-in per channel. Publishers request split payload buffers
+with:
 
 ```cpp
 auto opts = subspace::PublisherOptions()
     .SetSlotSize(4096)
     .SetNumSlots(16)
-    .SetUseQnxPmem(true)
-    .SetPmemAlignment(4096)
-    .SetPmemPoolId("camera")
-    .SetPmemCacheEnabled(true);
+    .SetUseSplitBuffers(true)
+    .SetBufferAllocator("qcomm_pool")
+    .SetSplitBufferCallbacks(qcomm_callbacks);
 ```
 
-Subscribers can require compatible PMEM channel settings:
+Subscribers do not request split buffers.  They learn the channel mode from the
+server when they attach or reload, and can provide callbacks for allocators they
+know how to map:
 
 ```cpp
 auto opts = subspace::SubscriberOptions()
-    .SetUseQnxPmem(true)
-    .SetPmemAlignment(4096)
-    .SetPmemPoolId("camera")
-    .SetPmemCacheEnabled(true);
+    .SetSplitBufferCallbacks(qcomm_callbacks);
 ```
 
-If a channel already exists, the server validates that later publishers and
-subscribers request compatible PMEM settings.
+If a channel already exists, the server validates that later publishers use
+compatible split-buffer settings and publisher limits.
 
-The C API exposes the same settings through `SubspacePublisherOptions` and
-`SubspaceSubscriberOptions` when PMEM support is compiled in.
+The C API exposes the same generic split-buffer settings through
+`SubspacePublisherOptions` and `SubspaceSubscriberOptions`.
 
 ## How It Works
 
-For PMEM channels, the publisher still allocates message buffers client-side.
-The publisher creates PMEM objects and writes a shadow metadata file in `/tmp`
-using a name derived from the channel and buffer. Subscribers read the metadata
-to map the same PMEM objects.
+For split-buffer channels, the publisher still allocates message buffers
+client-side.  Prefixes are regular shared memory.  Payload slots are either
+regular split shared-memory objects or blocks returned by the publisher's
+callbacks.  Subscribers read the generic split-buffer metadata and either open
+the shared-memory object or map the allocator-specific handle via callbacks.
 
-The publisher also sends a fire-and-forget registration request to the server.
-The server records enough metadata to destroy PMEM objects when the channel is
-removed or when session cleanup runs. If shadow servers are configured, this
-metadata is replicated to them and restored to the server during crash recovery
-so recovered channels keep their PMEM cleanup records. Message transfer remains
-direct between clients through shared memory; the server is not on the message
-data path.
+The publisher also sends fire-and-forget registration requests to the server for
+client-owned buffers.  The server treats handles as opaque and offers them to
+plugins through `OnFreeClientBuffer` when cleanup is needed. Message transfer
+remains direct between clients; the server is not on the message data path.
 
-## Linux PMEM Shim
+## Linux Testing
 
-The `linux_pmem_shim` Bazel config enables the QNX PMEM transport code on Linux
-while backing the allocations with Linux shared memory. It is intended for
-development and CI testing when QNX hardware or a QNX runtime is unavailable:
+Generic split-buffer tests cover the Linux path.  On Linux, split buffers use
+`/dev/shm` when no custom callbacks are provided:
 
 ```bash
-bazel test --config=linux_pmem_shim //common:pmem_test //client:client_test //server:server_test
+bazelisk test //common:pmem_test //client:client_test //server:server_test
 ```
-
-The shim is a test facility. It should not be used as a production replacement
-for QNX PMEM.

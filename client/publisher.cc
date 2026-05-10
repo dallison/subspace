@@ -24,21 +24,19 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
     while (current_slot_size < final_slot_size ||
            buffers_.size() < size_t(num_buffers)) {
       size_t buffer_index = buffers_.size();
-#if SUBSPACE_HAS_QNX_PMEM
-      if (UseQnxPmem()) {
-        auto pmem_buffer =
-            CreateQnxPmemBufferSet(buffer_index, final_buffer_size,
-                                   final_slot_size);
-        if (!pmem_buffer.ok()) {
-          return pmem_buffer.status();
+      if (UseSplitBuffers()) {
+        auto split_buffer =
+            CreateSplitBufferSet(buffer_index, final_buffer_size,
+                                 final_slot_size);
+        if (!split_buffer.ok()) {
+          return split_buffer.status();
         }
         bcb_->sizes[buffers_.size()].store(final_buffer_size,
                                            std::memory_order_relaxed);
-        buffers_.push_back(std::move(*pmem_buffer));
+        buffers_.push_back(std::move(*split_buffer));
         current_slot_size = final_slot_size;
         continue;
       }
-#endif
       auto shm_fd = CreateBuffer(buffer_index, final_buffer_size);
       if (!shm_fd.ok()) {
         return shm_fd.status();

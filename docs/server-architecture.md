@@ -40,7 +40,6 @@ The server is only involved in **setup and teardown** — once channels are esta
 | `RemovePublisher` / `RemoveSubscriber` | Removes users from a channel |
 | `GetTriggers` | Returns trigger FDs for a channel |
 | `GetChannelInfo` / `GetChannelStats` | Returns channel metadata (includes bridge and tunnel user counts) |
-| `RegisterPmemBuffer` | QNX PMEM builds only: one-way registration of client-created PMEM buffers for server and shadow cleanup tracking |
 
 ## Channel Creation and Management
 
@@ -62,11 +61,7 @@ Subscribers can create channels before any publishers exist. These "placeholder"
 
 ## Shared Memory Allocation
 
-Each channel requires three control regions created via shared memory. Message
-buffers are allocated on demand by publishers. On Linux these buffers live in
-`/dev/shm`; on macOS and default QNX builds they use POSIX shared memory with
-shadow files; when QNX PMEM support is enabled, message payload buffers can be
-backed by QNX PMEM instead. PMEM support is provided by General Motors.
+Each channel requires three shared memory regions, created via `shm_open()` (POSIX shared memory):
 
 ### System Control Block (SCB)
 
@@ -92,19 +87,12 @@ backed by QNX PMEM instead. PMEM support is provided by General Motors.
 - Allocated on demand as channels grow.
 - Named: `subspace_<session_id>.<channel_id>.<buffer_index>`.
 - On Linux: stored in `/dev/shm/`.
-- On macOS and default QNX builds: represented by POSIX shared memory plus a
-  shadow metadata file.
-- On QNX PMEM builds: publishers allocate PMEM-backed payload buffers and
-  register metadata with the server and shadows so recovery and channel cleanup
-  can retain and destroy the PMEM objects correctly.
 
 ### Cleanup
 
 - On channel removal: shared memory is unlinked.
 - On session end: all session files are removed.
 - On server shutdown: all subspace files are cleaned up.
-- On QNX PMEM builds: registered PMEM objects and their `/tmp` shadow metadata
-  files are destroyed during channel and session cleanup.
 
 ## Publisher and Subscriber Registration
 
@@ -173,7 +161,6 @@ Server
 
 - **Single-threaded with coroutines** — avoids locking and race conditions; cooperative multitasking via the `co` library. All blocking operations (accept, receive, send) yield to the scheduler.
 - **File descriptor passing** — shared memory FDs are sent to clients via Unix socket SCM_RIGHTS messages, so clients map the same memory regions.
-- **Client-side buffer allocation** — publishers allocate message buffers as channels grow. QNX PMEM channels keep this model and add a one-way registration message so the server can clean up client-created PMEM objects.
 - **Discovery-based bridging** — UDP for lightweight discovery, TCP for reliable data transfer. Supports IPv4 and virtual addresses (VSOCK).
 - **Capacity management** — unreliable channels check capacity before adding subscribers to prevent buffer exhaustion.
 - **Retirement tracking** — for reliable channels, tracks message lifetimes across bridges to prevent premature slot reuse.

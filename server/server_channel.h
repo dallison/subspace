@@ -10,9 +10,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "common/channel.h"
-#if SUBSPACE_HAS_QNX_PMEM
-#include "common/pmem.h"
-#endif
+#include "common/client_buffer.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/bitset.h"
 #include "toolbelt/fd.h"
@@ -38,14 +36,11 @@ struct ResizeInfo {
   int new_slot_size;
 };
 
-#if SUBSPACE_HAS_QNX_PMEM
-struct QnxPmemOptions {
-  bool use_qnx_pmem = false;
-  uint32_t pmem_alignment = 0;
-  std::string pmem_pool_id;
-  bool pmem_cache_enabled = false;
+struct SplitBufferOptions {
+  bool use_split_buffers = false;
+  std::string allocator;
+  google::protobuf::Any allocator_metadata;
 };
-#endif
 
 // A user is a publisher or subscriber on a channel.  Each user has a
 // unique (per channel) user id.  A user might have a trigger fd
@@ -280,52 +275,20 @@ public:
     Channel::CleanupSlots(owner, reliable, is_pub, vchan_id);
   }
 
-  virtual void RemoveBuffer(uint64_t session_id) {
-    for (int i = 0; i < ccb_->num_buffers; i++) {
-      std::string filename = BufferSharedMemoryName(session_id, i);
-#if SUBSPACE_HAS_QNX_PMEM
-      bool removed_registered = false;
-      for (const PmemBufferMetadata &metadata : pmem_buffers_) {
-        if (metadata.buffer_index == static_cast<uint32_t>(i)) {
-          (void)DestroyQnxPmemBuffer(metadata);
-          removed_registered = true;
-        }
-      }
-      if (!removed_registered) {
-        (void)remove(filename.c_str());
-      }
-#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
-      auto shm_name = PosixSharedMemoryName(filename);
-      if (shm_name.ok()) {
-        (void)shm_unlink(shm_name->c_str());
-      }
-      remove(filename.c_str());
-#else
-      (void)shm_unlink(filename.c_str());
-#endif
-    }
-#if SUBSPACE_HAS_QNX_PMEM
-    pmem_buffers_.clear();
-#endif
+  virtual void RemoveBuffer(uint64_t session_id, Server *server = nullptr);
+  void RegisterClientBuffer(ClientBufferHandleMetadata metadata) {
+    client_buffers_.push_back(std::move(metadata));
   }
-#if SUBSPACE_HAS_QNX_PMEM
-  void RegisterPmemBuffer(PmemBufferMetadata metadata) {
-    pmem_buffers_.push_back(std::move(metadata));
-  }
-  const std::vector<PmemBufferMetadata> &GetPmemBuffers() const {
-    return pmem_buffers_;
-  }
-  void UnregisterPmemBuffer(uint64_t session_id, uint32_t buffer_index) {
-    pmem_buffers_.erase(
-        std::remove_if(pmem_buffers_.begin(), pmem_buffers_.end(),
+  void UnregisterClientBuffer(uint64_t session_id, uint32_t buffer_index) {
+    client_buffers_.erase(
+        std::remove_if(client_buffers_.begin(), client_buffers_.end(),
                        [session_id, buffer_index](
-                           const PmemBufferMetadata &metadata) {
+                           const ClientBufferHandleMetadata &metadata) {
                          return metadata.session_id == session_id &&
                                 metadata.buffer_index == buffer_index;
                        }),
-        pmem_buffers_.end());
+        client_buffers_.end());
   }
-#endif
   // This is true if all publishers are bridge publishers.
   bool IsBridgePublisher() const;
   bool IsBridgeSubscriber() const;
@@ -357,15 +320,17 @@ public:
   bool IsReliable() const;
   bool IsFixedSize() const;
 
-#if SUBSPACE_HAS_QNX_PMEM
-  bool HasQnxPmemOptions() const { return qnx_pmem_options_set_; }
-  const QnxPmemOptions &GetQnxPmemOptions() const {
-    return qnx_pmem_options_;
+  bool HasSplitBufferOptions() const { return split_buffer_options_set_; }
+  const SplitBufferOptions &GetSplitBufferOptions() const {
+    return split_buffer_options_;
   }
-  absl::Status ValidateOrSetQnxPmemOptions(const QnxPmemOptions &options,
-                                           bool set_if_missing,
-                                           const char *user_type);
-#endif
+  absl::Status ValidateOrSetSplitBufferOptions(
+      const SplitBufferOptions &options, bool set_if_missing,
+      const char *user_type);
+  absl::Status ValidateOrSetMaxPublishers(int32_t max_publishers,
+                                          bool set_if_missing,
+                                          const char *user_type);
+  int32_t MaxPublishers() const { return max_publishers_; }
 
   virtual void SetSharedMemoryFds(SharedMemoryFds fds) {
     shared_memory_fds_ = std::move(fds);
@@ -413,18 +378,16 @@ protected:
   absl::flat_hash_map<int, std::unique_ptr<User>> users_;
   toolbelt::BitSet<kMaxUsers> user_ids_;
   absl::flat_hash_map<ChannelTransmitter, std::string> bridged_publishers_;
-#if SUBSPACE_HAS_QNX_PMEM
-  std::vector<PmemBufferMetadata> pmem_buffers_;
-#endif
+  std::vector<ClientBufferHandleMetadata> client_buffers_;
   SharedMemoryFds shared_memory_fds_;
   bool is_virtual_ = false;
   bool skip_cleanup_ = false;
   int session_id_;
   mutable int32_t last_known_slot_size_ = 0;
-#if SUBSPACE_HAS_QNX_PMEM
-  bool qnx_pmem_options_set_ = false;
-  QnxPmemOptions qnx_pmem_options_;
-#endif
+  bool split_buffer_options_set_ = false;
+  SplitBufferOptions split_buffer_options_;
+  bool max_publishers_set_ = false;
+  int32_t max_publishers_ = 0;
 };
 
 class VirtualChannel;
@@ -445,11 +408,11 @@ public:
     return virtual_channels_.empty() && ServerChannel::IsEmpty();
   }
 
-  void RemoveBuffer(uint64_t session_id) override {
+  void RemoveBuffer(uint64_t session_id, Server *server = nullptr) override {
     if (!virtual_channels_.empty()) {
       return;
     }
-    ServerChannel::RemoveBuffer(session_id);
+    ServerChannel::RemoveBuffer(session_id, server);
   }
 
   void CountUsers(int &num_pubs, int &num_subs, int &num_bridge_pubs,
@@ -524,8 +487,8 @@ public:
   void SetMetadataSize(int32_t size) override { mux_->SetMetadataSize(size); }
 
   std::string ResolvedName() const override { return mux_->ResolvedName(); }
-  void RemoveBuffer(uint64_t session_id) override {
-    mux_->RemoveBuffer(session_id);
+  void RemoveBuffer(uint64_t session_id, Server *server = nullptr) override {
+    mux_->RemoveBuffer(session_id, server);
   }
 
   absl::Status
