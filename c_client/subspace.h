@@ -83,8 +83,6 @@ typedef struct {
   uint64_t full_size;
   uint64_t allocation_size;
   uintptr_t handle;
-  const char *allocator;
-  size_t allocator_length;
 } SubspaceSplitBufferInfo;
 
 typedef struct {
@@ -163,8 +161,6 @@ typedef struct {
   // message prefixes in regular shared memory and delegates payload slot
   // allocation/mapping/freeing to split_callbacks.
   bool use_split_buffers;
-  const char *buffer_allocator;
-  size_t buffer_allocator_length;
   int32_t max_publishers;
   SubspaceSplitBufferCallbacks split_callbacks;
 } SubspacePublisherOptions;

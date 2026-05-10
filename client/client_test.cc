@@ -825,7 +825,6 @@ TEST_F(ClientTest, SplitBufferCallbacksAllocateMapUnmapAndFreePayloadSlots) {
     pub_options.SetSlotSize(96)
         .SetNumSlots(3)
         .SetUseSplitBuffers(true)
-        .SetBufferAllocator("test_allocator")
         .SetSplitBufferCallbacks(MakeTestSplitBufferCallbacks(state));
     absl::StatusOr<Publisher> pub =
         pub_client.CreatePublisher("split_buffers_callbacks", pub_options);
@@ -5376,7 +5375,6 @@ TEST_F(SplitBufferPluginTest, ServerCleanupUsesPluginEndToEnd) {
   pub_options.SetSlotSize(96)
       .SetNumSlots(3)
       .SetUseSplitBuffers(true)
-      .SetBufferAllocator("test_allocator")
       .SetSplitBufferCallbacks(MakeTestSplitBufferCallbacks(state));
   absl::StatusOr<Publisher> pub =
       pub_client.CreatePublisher(channel, pub_options);

@@ -38,8 +38,6 @@ struct ResizeInfo {
 
 struct SplitBufferOptions {
   bool use_split_buffers = false;
-  std::string allocator;
-  google::protobuf::Any allocator_metadata;
 };
 
 // A user is a publisher or subscriber on a channel.  Each user has a

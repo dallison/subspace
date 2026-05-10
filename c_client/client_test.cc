@@ -276,12 +276,9 @@ TEST_F(ClientTest, SplitBufferCallbacksPublishAndRead) {
       .user_data = &state,
   };
 
-  const char allocator[] = "c_test_allocator";
   SubspacePublisherOptions pub_opts =
       subspace_publisher_options_default(96, 3);
   pub_opts.use_split_buffers = true;
-  pub_opts.buffer_allocator = allocator;
-  pub_opts.buffer_allocator_length = strlen(allocator);
   pub_opts.split_callbacks = callbacks;
   SubspacePublisher pub =
       subspace_create_publisher(pub_client, "c_split_buffers", pub_opts);

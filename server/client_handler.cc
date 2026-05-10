@@ -32,9 +32,7 @@ ClientBufferHandleMetadata FromProto(
 
 SplitBufferOptions FromPublisherSplitBufferRequest(
     const CreatePublisherRequest &req) {
-  return {.use_split_buffers = req.use_split_buffers(),
-          .allocator = req.buffer_allocator(),
-          .allocator_metadata = req.buffer_allocator_metadata()};
+  return {.use_split_buffers = req.use_split_buffers()};
 }
 
 } // namespace
@@ -743,8 +741,6 @@ void ClientHandler::HandleCreateSubscriber(
     const SplitBufferOptions &split =
         split_response_channel->GetSplitBufferOptions();
     response->set_use_split_buffers(split.use_split_buffers);
-    response->set_buffer_allocator(split.allocator);
-    *response->mutable_buffer_allocator_metadata() = split.allocator_metadata;
   }
   // Add publisher trigger indexes.
   std::vector<toolbelt::FileDescriptor> pub_fds =

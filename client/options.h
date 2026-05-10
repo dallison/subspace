@@ -202,11 +202,6 @@ struct PublisherOptions {
   const subspace::SplitBufferCallbacks &SplitBufferCallbackSet() const {
     return split_buffer_callbacks;
   }
-  PublisherOptions &SetBufferAllocator(std::string allocator) {
-    buffer_allocator = std::move(allocator);
-    return *this;
-  }
-  const std::string &BufferAllocator() const { return buffer_allocator; }
 
   // If you use the new CreatePublisher API, set the slot size and num slots in
   // here.
@@ -233,7 +228,6 @@ struct PublisherOptions {
   bool prefer_retired_slots = false;
   int32_t max_publishers = 0;
   bool use_split_buffers = false;
-  std::string buffer_allocator;
   subspace::SplitBufferCallbacks split_buffer_callbacks;
 };
 

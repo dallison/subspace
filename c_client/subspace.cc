@@ -12,8 +12,7 @@
 
 namespace {
 
-SubspaceSplitBufferInfo ToCInfo(const subspace::SplitBufferMetadata &metadata,
-                                const std::string &allocator) {
+SubspaceSplitBufferInfo ToCInfo(const subspace::SplitBufferMetadata &metadata) {
   return {
       .channel_name = metadata.channel_name.c_str(),
       .session_id = metadata.session_id,
@@ -23,8 +22,6 @@ SubspaceSplitBufferInfo ToCInfo(const subspace::SplitBufferMetadata &metadata,
       .full_size = metadata.full_size,
       .allocation_size = metadata.allocation_size,
       .handle = metadata.handle,
-      .allocator = allocator.c_str(),
-      .allocator_length = allocator.size(),
   };
 }
 
@@ -45,13 +42,13 @@ subspace::SplitBufferMapping ToCppMapping(
 }
 
 subspace::SplitBufferCallbacks ToCppSplitCallbacks(
-    SubspaceSplitBufferCallbacks callbacks, std::string allocator) {
+    SubspaceSplitBufferCallbacks callbacks) {
   subspace::SplitBufferCallbacks cpp_callbacks;
   if (callbacks.allocate != nullptr) {
     cpp_callbacks.allocate =
-        [callbacks, allocator](const subspace::SplitBufferMetadata &metadata)
+        [callbacks](const subspace::SplitBufferMetadata &metadata)
         -> absl::StatusOr<subspace::SplitBufferMapping> {
-      SubspaceSplitBufferInfo info = ToCInfo(metadata, allocator);
+      SubspaceSplitBufferInfo info = ToCInfo(metadata);
       SubspaceSplitBufferMapping mapping = {};
       if (!callbacks.allocate(&info, &mapping, callbacks.user_data)) {
         return absl::InternalError("Split-buffer allocation callback failed");
@@ -61,9 +58,9 @@ subspace::SplitBufferCallbacks ToCppSplitCallbacks(
   }
   if (callbacks.map != nullptr) {
     cpp_callbacks.map =
-        [callbacks, allocator](const subspace::SplitBufferMetadata &metadata)
+        [callbacks](const subspace::SplitBufferMetadata &metadata)
         -> absl::StatusOr<subspace::SplitBufferMapping> {
-      SubspaceSplitBufferInfo info = ToCInfo(metadata, allocator);
+      SubspaceSplitBufferInfo info = ToCInfo(metadata);
       SubspaceSplitBufferMapping mapping = {};
       mapping.handle = metadata.handle;
       if (!callbacks.map(&info, &mapping, callbacks.user_data)) {
@@ -74,10 +71,10 @@ subspace::SplitBufferCallbacks ToCppSplitCallbacks(
   }
   if (callbacks.unmap != nullptr) {
     cpp_callbacks.unmap =
-        [callbacks, allocator](const subspace::SplitBufferMetadata &metadata,
-                               const subspace::SplitBufferMapping &mapping)
+        [callbacks](const subspace::SplitBufferMetadata &metadata,
+                    const subspace::SplitBufferMapping &mapping)
         -> absl::Status {
-      SubspaceSplitBufferInfo info = ToCInfo(metadata, allocator);
+      SubspaceSplitBufferInfo info = ToCInfo(metadata);
       SubspaceSplitBufferMapping c_mapping = ToCMapping(mapping);
       if (!callbacks.unmap(&info, &c_mapping, callbacks.user_data)) {
         return absl::InternalError("Split-buffer unmap callback failed");
@@ -87,10 +84,10 @@ subspace::SplitBufferCallbacks ToCppSplitCallbacks(
   }
   if (callbacks.free != nullptr) {
     cpp_callbacks.free =
-        [callbacks, allocator](const subspace::SplitBufferMetadata &metadata,
-                               const subspace::SplitBufferMapping &mapping)
+        [callbacks](const subspace::SplitBufferMetadata &metadata,
+                    const subspace::SplitBufferMapping &mapping)
         -> absl::Status {
-      SubspaceSplitBufferInfo info = ToCInfo(metadata, allocator);
+      SubspaceSplitBufferInfo info = ToCInfo(metadata);
       SubspaceSplitBufferMapping c_mapping = ToCMapping(mapping);
       if (!callbacks.free(&info, &c_mapping, callbacks.user_data)) {
         return absl::InternalError("Split-buffer free callback failed");
@@ -179,8 +176,6 @@ SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size,
       .metadata_size = 0,
       .prefer_retired_slots = true,
       .use_split_buffers = false,
-      .buffer_allocator = nullptr,
-      .buffer_allocator_length = 0,
       .max_publishers = 0,
       .split_callbacks = {},
   };
@@ -196,8 +191,7 @@ subspace_create_subscriber(SubspaceClient client, const char *channel_name,
       .max_active_messages = options.max_active_messages,
       .log_dropped_messages = options.log_dropped_messages,
       .pass_activation = options.pass_activation,
-      .split_buffer_callbacks = ToCppSplitCallbacks(
-          options.split_callbacks, std::string()),
+      .split_buffer_callbacks = ToCppSplitCallbacks(options.split_callbacks),
   };
   subspace_clear_error();
   SubspaceSubscriber subscriber;
@@ -233,17 +227,7 @@ SubspacePublisher subspace_create_publisher(SubspaceClient client,
       .prefer_retired_slots = options.prefer_retired_slots,
       .max_publishers = options.max_publishers,
       .use_split_buffers = options.use_split_buffers,
-      .buffer_allocator =
-          options.buffer_allocator == nullptr
-              ? std::string()
-              : std::string(options.buffer_allocator,
-                            options.buffer_allocator_length),
-      .split_buffer_callbacks = ToCppSplitCallbacks(
-          options.split_callbacks,
-          options.buffer_allocator == nullptr
-              ? std::string()
-              : std::string(options.buffer_allocator,
-                            options.buffer_allocator_length)),
+      .split_buffer_callbacks = ToCppSplitCallbacks(options.split_callbacks),
   };
   subspace_clear_error();
   SubspacePublisher publisher;

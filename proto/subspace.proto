@@ -39,15 +39,7 @@ message CreatePublisherRequest {
   int32 metadata_size = 13;    // Bytes reserved for user metadata.
   int32 publisher_id = 14;     // -1 for new, >= 0 to reclaim existing.
   bool use_split_buffers = 16; // Prefixes and payload slots are separate.
-  // Identifies who owns the split payload-buffer handles. For example, a
-  // publisher using Qualcomm memory pools might set this to "qcomm_pool" and
-  // put the pool details in buffer_allocator_metadata. The server does not know
-  // how to free or map that memory; it just echoes this value to subscribers and
-  // passes it to plugins so the qcomm plugin/subscriber callbacks can recognize
-  // and handle those buffers.
-  string buffer_allocator = 17;
-  google.protobuf.Any buffer_allocator_metadata = 18;
-  int32 max_publishers = 19;   // 0 means no explicit publisher limit.
+  int32 max_publishers = 17;   // 0 means no explicit publisher limit.
 }
 
 message CreatePublisherResponse {
@@ -99,12 +91,6 @@ message CreateSubscriberResponse {
   int32 checksum_size = 15; // Bytes reserved for checksum (from publisher).
   int32 metadata_size = 16; // Bytes reserved for user metadata (from publisher).
   bool use_split_buffers = 17;
-  // Echoes CreatePublisherRequest.buffer_allocator. For example, if the
-  // publisher used "qcomm_pool", the subscriber can choose qcomm map callbacks
-  // when opening split payload buffers. The server still treats the value as an
-  // opaque string.
-  string buffer_allocator = 18;
-  google.protobuf.Any buffer_allocator_metadata = 19;
 }
 
 message GetTriggersRequest { string channel_name = 1; }

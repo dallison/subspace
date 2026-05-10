@@ -834,8 +834,6 @@ impl Client {
                     checksum_size: opts.checksum_size,
                     metadata_size: opts.metadata_size,
                     use_split_buffers: false,
-                    buffer_allocator: String::new(),
-                    buffer_allocator_metadata: None,
                     max_publishers: 0,
                     publisher_id: -1,
                 },

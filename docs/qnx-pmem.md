@@ -1,9 +1,9 @@
 # Split Buffers And QNX PMEM
 
 Subspace supports split message buffers: prefixes live in regular shared memory
-and payload slots live in separately allocated blocks.  The payload allocator is
-selected by the publisher and identified with an opaque `buffer_allocator`
-string, such as `qcomm_pool` for Qualcomm memory pools.
+and payload slots live in separately allocated blocks. Publishers and
+subscribers provide matching callbacks when payload slots come from a custom
+allocator such as Qualcomm memory pools.
 
 PMEM support is provided by General Motors.
 
@@ -35,7 +35,6 @@ auto opts = subspace::PublisherOptions()
     .SetSlotSize(4096)
     .SetNumSlots(16)
     .SetUseSplitBuffers(true)
-    .SetBufferAllocator("qcomm_pool")
     .SetSplitBufferCallbacks(qcomm_callbacks);
 ```
 
