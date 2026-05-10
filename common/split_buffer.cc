@@ -8,6 +8,7 @@
 #include "common/syscall_shim.h"
 
 #include <cerrno>
+#include <cstdint>
 #include <cstring>
 #include <fcntl.h>
 #include <string>
@@ -44,6 +45,15 @@ uint64_t PageAlignedSize(uint64_t size) {
   }
   uint64_t alignment = static_cast<uint64_t>(page_size);
   return (size + alignment - 1) & ~(alignment - 1);
+}
+
+uint64_t StableHash64(const std::string &value) {
+  uint64_t hash = 1469598103934665603ULL;
+  for (unsigned char c : value) {
+    hash ^= c;
+    hash *= 1099511628211ULL;
+  }
+  return hash;
 }
 
 } // namespace
@@ -162,16 +172,7 @@ ReadSplitBufferMetadataFile(const std::string &shadow_file) {
 }
 
 std::string SplitBufferObjectName(const std::string &shadow_file) {
-  std::string name = "subspace_split_buffer";
-  for (char c : shadow_file) {
-    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-        (c >= '0' && c <= '9')) {
-      name.push_back(c);
-    } else {
-      name.push_back('_');
-    }
-  }
-  return name;
+  return absl::StrFormat("subspace_sb_%016x", StableHash64(shadow_file));
 }
 
 absl::StatusOr<toolbelt::FileDescriptor>
