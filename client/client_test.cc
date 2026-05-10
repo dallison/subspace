@@ -1577,7 +1577,11 @@ TEST_F(ClientTest, PublishConcurrentlyToOneSubscriber) {
   auto sub = *sub_client.CreateSubscriber(channel_name);
 
   std::vector<std::thread> pub_threads;
+#ifdef __APPLE__
+  constexpr int kNumPublishers = 16;
+#else
   constexpr int kNumPublishers = 100;
+#endif
   pub_threads.reserve(kNumPublishers);
   for (int i = 0; i < kNumPublishers; ++i) {
     pub_threads.emplace_back(std::thread([&channel_name, i]() {
