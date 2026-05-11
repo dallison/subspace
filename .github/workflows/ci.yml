@@ -64,6 +64,7 @@ jobs:
           path: bazel-testlogs
 
   diagnostics:
+    name: diagnostics (${{ matrix.os }}, ${{ matrix.mode }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     continue-on-error: ${{ matrix.experimental }}

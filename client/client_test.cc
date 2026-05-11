@@ -1246,7 +1246,7 @@ TEST_F(ClientTest, PublishAndResize) {
   // Publish a bigger message.  This will cause a resize.
   absl::StatusOr<void *> buffer2 = pub->GetMessageBuffer(4000);
   ASSERT_OK(buffer2);
-  ASSERT_EQ(subspace::PageAlignedSize(4000), pub->SlotSize());
+  ASSERT_EQ(4096, pub->SlotSize());
 
   auto &pub_buffers = pub->GetBuffers();
   ASSERT_EQ(2, pub_buffers.size());
@@ -1259,7 +1259,7 @@ TEST_F(ClientTest, PublishAndResize) {
   absl::StatusOr<Message> msg2 = sub->ReadMessage();
   ASSERT_OK(msg2);
   ASSERT_EQ(12, msg2->length);
-  ASSERT_EQ(subspace::PageAlignedSize(4000), sub->SlotSize());
+  ASSERT_EQ(4096, sub->SlotSize());
 
   auto &sub_buffers = sub->GetBuffers();
   ASSERT_EQ(2, sub_buffers.size());
@@ -1291,7 +1291,7 @@ TEST_F(ClientTest, PublishVirtualAndResize) {
   // Publish a bigger message.  This will cause a resize.
   absl::StatusOr<void *> buffer2 = pub->GetMessageBuffer(4000);
   ASSERT_OK(buffer2);
-  ASSERT_EQ(subspace::PageAlignedSize(4000), pub->SlotSize());
+  ASSERT_EQ(4096, pub->SlotSize());
 
   auto &pub_buffers = pub->GetBuffers();
   ASSERT_EQ(2, pub_buffers.size());
@@ -1304,7 +1304,7 @@ TEST_F(ClientTest, PublishVirtualAndResize) {
   absl::StatusOr<Message> msg2 = sub->ReadMessage();
   ASSERT_OK(msg2);
   ASSERT_EQ(12, msg2->length);
-  ASSERT_EQ(subspace::PageAlignedSize(4000), sub->SlotSize());
+  ASSERT_EQ(4096, sub->SlotSize());
 
   auto &sub_buffers = sub->GetBuffers();
   ASSERT_EQ(2, sub_buffers.size());
@@ -1326,7 +1326,7 @@ TEST_F(ClientTest, PublishAndResize2) {
   // Publish a bigger message.  This will cause a resize.
   absl::StatusOr<void *> buffer2 = pub->GetMessageBuffer(4000);
   ASSERT_OK(buffer2);
-  ASSERT_EQ(subspace::PageAlignedSize(4000), pub->SlotSize());
+  ASSERT_EQ(4096, pub->SlotSize());
   memcpy(*buffer2, "barfoofoobar", 12);
 
   absl::StatusOr<const Message> pub_status2 = pub->PublishMessage(12);
@@ -1345,7 +1345,7 @@ TEST_F(ClientTest, PublishAndResize2) {
   absl::StatusOr<Message> msg2 = sub->ReadMessage();
   ASSERT_OK(msg2);
   ASSERT_EQ(12, msg2->length);
-  ASSERT_EQ(subspace::PageAlignedSize(4000), sub->SlotSize());
+  ASSERT_EQ(4096, sub->SlotSize());
 }
 
 TEST_F(ClientTest, PublishAndResizeUnmapBuffers) {
@@ -1367,7 +1367,7 @@ TEST_F(ClientTest, PublishAndResizeUnmapBuffers) {
   for (int i = 0; i < 10; i++) {
     absl::StatusOr<void *> buffer2 = pub->GetMessageBuffer(4000);
     ASSERT_OK(buffer2);
-    ASSERT_EQ(subspace::PageAlignedSize(4000), pub->SlotSize());
+    ASSERT_EQ(4096, pub->SlotSize());
     memcpy(*buffer2, "barfoofoobar", 12);
 
     absl::StatusOr<const Message> pub_status2 = pub->PublishMessage(12);
@@ -1409,7 +1409,7 @@ TEST_F(ClientTest, PublishAndResizeUnmapBuffers) {
   // immediatly after one that has been seen by subscribers.
   absl::StatusOr<void *> buffer3 = pub->GetMessageBuffer(4000);
   ASSERT_OK(buffer3);
-  ASSERT_EQ(subspace::PageAlignedSize(4000), pub->SlotSize());
+  ASSERT_EQ(4096, pub->SlotSize());
   memcpy(*buffer3, "barfoofoobar", 12);
 
   absl::StatusOr<const Message> pub_status3 = pub->PublishMessage(12);
@@ -1452,7 +1452,7 @@ TEST_F(ClientTest, PublishAndResizeSubscriberFirst) {
   // Publish a bigger message.  This will cause a resize.
   absl::StatusOr<void *> buffer2 = pub->GetMessageBuffer(4000);
   ASSERT_OK(buffer2);
-  ASSERT_EQ(subspace::PageAlignedSize(4000), pub->SlotSize());
+  ASSERT_EQ(4096, pub->SlotSize());
   memcpy(*buffer2, "barfoofoobar", 12);
 
   absl::StatusOr<const Message> pub_status2 = pub->PublishMessage(12);
@@ -1467,7 +1467,7 @@ TEST_F(ClientTest, PublishAndResizeSubscriberFirst) {
   absl::StatusOr<Message> msg2 = sub->ReadMessage();
   ASSERT_OK(msg2);
   ASSERT_EQ(12, msg2->length);
-  ASSERT_EQ(subspace::PageAlignedSize(4000), sub->SlotSize());
+  ASSERT_EQ(4096, sub->SlotSize());
 }
 
 TEST_F(ClientTest, PublishVirtualAndResizeSubscriberFirst) {
@@ -1494,7 +1494,7 @@ TEST_F(ClientTest, PublishVirtualAndResizeSubscriberFirst) {
   // Publish a bigger message.  This will cause a resize.
   absl::StatusOr<void *> buffer2 = pub->GetMessageBuffer(4000);
   ASSERT_OK(buffer2);
-  ASSERT_EQ(subspace::PageAlignedSize(4000), pub->SlotSize());
+  ASSERT_EQ(4096, pub->SlotSize());
   memcpy(*buffer2, "barfoofoobar", 12);
 
   absl::StatusOr<const Message> pub_status2 = pub->PublishMessage(12);
@@ -1509,7 +1509,7 @@ TEST_F(ClientTest, PublishVirtualAndResizeSubscriberFirst) {
   absl::StatusOr<Message> msg2 = sub->ReadMessage();
   ASSERT_OK(msg2);
   ASSERT_EQ(12, msg2->length);
-  ASSERT_EQ(subspace::PageAlignedSize(4000), sub->SlotSize());
+  ASSERT_EQ(4096, sub->SlotSize());
 }
 
 TEST_F(ClientTest, PublishAndResizeSubscriberConcurrently) {
