@@ -172,6 +172,31 @@ void ServerChannel::RemoveBuffer(uint64_t session_id, Server *server) {
   client_buffers_.clear();
 }
 
+uint64_t ServerChannel::GetVirtualMemoryUsage() const {
+  if (!split_buffer_options_set_ || !split_buffer_options_.use_split_buffers ||
+      ccb_ == nullptr || bcb_ == nullptr) {
+    return Channel::GetVirtualMemoryUsage();
+  }
+
+  uint64_t split_buffer_size = 0;
+  for (const ClientBufferHandleMetadata &metadata : client_buffers_) {
+    if (metadata.buffer_index >= static_cast<uint32_t>(ccb_->num_buffers)) {
+      continue;
+    }
+    if (bcb_->refs[metadata.buffer_index].load(std::memory_order_relaxed) <=
+        0) {
+      continue;
+    }
+    split_buffer_size += metadata.allocation_size;
+  }
+
+  if (split_buffer_size == 0) {
+    return Channel::GetVirtualMemoryUsage();
+  }
+  return sizeof(SystemControlBlock) + CcbSize(num_slots_) +
+         sizeof(BufferControlBlock) + split_buffer_size;
+}
+
 absl::StatusOr<SharedMemoryFds>
 ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
                         [[maybe_unused]] int slot_size, int num_slots,

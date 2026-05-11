@@ -391,8 +391,6 @@ impl RpcClient {
         req: &subspace_client::proto::RpcRequest,
         timeout: Option<Duration>,
     ) -> Result<()> {
-        async_io::wait_for_subscribers(&method.request_publisher, timeout).await?;
-
         let data = async_io::encode_to_vec(req);
         loop {
             match async_io::publish_message(&method.request_publisher, &data) {

@@ -72,5 +72,5 @@ Generic split-buffer tests cover the Linux path.  On Linux, split buffers use
 `/dev/shm` when no custom callbacks are provided:
 
 ```bash
-bazelisk test //common:pmem_test //client:client_test //server:server_test
+bazelisk test //client:client_test //server:server_test
 ```

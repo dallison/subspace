@@ -326,6 +326,31 @@ void ClientChannel::Dump(std::ostream &os) const {
   }
 }
 
+uint64_t ClientChannel::GetVirtualMemoryUsage() const {
+  if (!UseSplitBuffers() || ccb_ == nullptr || bcb_ == nullptr) {
+    return Channel::GetVirtualMemoryUsage();
+  }
+
+  uint64_t size = sizeof(SystemControlBlock) + CcbSize(num_slots_) +
+                  sizeof(BufferControlBlock);
+  for (int i = 0; i < ccb_->num_buffers; i++) {
+    if (bcb_->refs[i].load(std::memory_order_relaxed) <= 0) {
+      continue;
+    }
+    if (static_cast<size_t>(i) >= buffers_.size() ||
+        !buffers_[i]->IsSplitBuffers()) {
+      size += bcb_->sizes[i].load(std::memory_order_relaxed);
+      continue;
+    }
+    const BufferSet &buffer = *buffers_[i];
+    size += buffer.split_prefix_buffer_size;
+    for (uint64_t slot_size : buffer.split_slot_sizes) {
+      size += slot_size;
+    }
+  }
+  return size;
+}
+
 // Return a valid file descriptor if the shared memory file can be opened with
 // the given flags.  If we can't open it because it already exists, we return an
 // invalid file descriptor.  If we can't open it for any other reason, we return
@@ -549,6 +574,7 @@ ClientChannel::CreateSplitBufferSet(size_t buffer_index, size_t full_size,
                              : static_cast<uint64_t>(mapping->size);
       slot_private_data = mapping->private_data;
       metadata.handle = slot_handle;
+      metadata.allocation_size = slot_mapped_size;
     } else {
       auto created_fd = CreateSplitSharedMemoryBuffer(metadata);
       if (!created_fd.ok()) {

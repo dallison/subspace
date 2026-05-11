@@ -350,11 +350,6 @@ RpcClient::InvokeMethod(int method_id, const google::protobuf::Any &request,
 
   absl::StatusOr<void *> buffer;
   for (;;) {
-    if (method->request_publisher->NumSubscribers() == 0) {
-      Destroy();
-      co_return absl::InternalError(
-          "No subscribers; is the RPC server running?");
-    }
     buffer = method->request_publisher->GetMessageBuffer(
         int32_t(req.ByteSizeLong()));
     if (!buffer.ok()) {
@@ -451,11 +446,6 @@ boost::asio::awaitable<absl::Status> RpcClient::InvokeMethod(
 
   absl::StatusOr<void *> buffer;
   for (;;) {
-    if (method->request_publisher->NumSubscribers() == 0) {
-      Destroy();
-      co_return absl::InternalError(
-          "No subscribers; is the RPC server running?");
-    }
     buffer = method->request_publisher->GetMessageBuffer(
         int32_t(req.ByteSizeLong()));
     if (!buffer.ok()) {

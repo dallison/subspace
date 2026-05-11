@@ -272,11 +272,17 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
 }
 
 MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
+  int retries = num_slots_ * 1000;
   MessageSlot *slot = nullptr;
   int retired_slot = -1;
   int free_slot = -1;
   embargoed_slots_.ClearAll();
+  constexpr int max_cas_retries = 1000;
+  int cas_retries = 0;
   for (;;) {
+    slot = nullptr;
+    retired_slot = -1;
+    free_slot = -1;
     CheckReload();
 
     // Put all free slots into the active_slots vector.
@@ -369,6 +375,13 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
       }
       RetiredSlots().Clear(slot->id);
       break;
+    }
+    if (++cas_retries >= max_cas_retries) {
+      if (retries-- == 0) {
+        return nullptr;
+      }
+      cas_retries = 0;
+      std::this_thread::yield();
     }
   }
   slot->ordinal = 0;

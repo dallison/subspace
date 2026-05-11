@@ -8,6 +8,8 @@ add_library(subspace_common STATIC
     channel.cc
     channel.h
     fast_ring_buffer.h
+    split_buffer.cc
+    split_buffer.h
     syscall_shim.cc
     syscall_shim.h
     syscall_shim_test_helper.h
@@ -28,6 +30,7 @@ target_link_libraries(subspace_common PUBLIC
     absl::str_format
     toolbelt
     co
+    subspace_proto
     protobuf::libprotobuf # If common code uses protobuf
 )
 
@@ -35,9 +38,7 @@ add_executable(common_test common_test.cc)
 add_test(NAME common_test COMMAND common_test)
 target_link_libraries(common_test PUBLIC subspace_common gtest gtest_main)
 
-if(CMAKE_SYSTEM_NAME STREQUAL "QNX")
-    add_executable(pmem_test pmem_test.cc)
-    add_test(NAME pmem_test COMMAND pmem_test)
-    target_link_libraries(pmem_test PUBLIC subspace_common gtest gtest_main)
-endif()
+add_executable(split_buffer_test split_buffer_test.cc)
+add_test(NAME split_buffer_test COMMAND split_buffer_test)
+target_link_libraries(split_buffer_test PUBLIC subspace_common gtest gtest_main)
 

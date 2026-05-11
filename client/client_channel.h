@@ -100,6 +100,8 @@ public:
 
   void Dump(std::ostream &os) const override;
 
+  uint64_t GetVirtualMemoryUsage() const override;
+
   // Client-side channel mapping.  The SharedMemoryFds contains the
   // file descriptors for the CCB and buffers.  The num_slots_
   // member variable contains either 0 or the

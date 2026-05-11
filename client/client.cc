@@ -324,6 +324,16 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
   if (!pub_resp.error().empty()) {
     return absl::InternalError(pub_resp.error());
   }
+  auto remove_server_publisher = [&]() {
+    Request remove_req;
+    auto *cmd = remove_req.mutable_remove_publisher();
+    cmd->set_channel_name(channel_name);
+    cmd->set_publisher_id(pub_resp.publisher_id());
+
+    Response remove_resp;
+    std::vector<toolbelt::FileDescriptor> remove_fds;
+    (void)SendRequestReceiveResponse(remove_req, remove_resp, remove_fds);
+  };
 
   std::shared_ptr<PublisherImpl> channel = std::make_shared<PublisherImpl>(
       channel_name, opts.num_slots, pub_resp.channel_id(),
@@ -352,12 +362,14 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
                               std::move(fds[pub_resp.bcb_fd_index()]));
   if (absl::Status status = channel->Map(std::move(channel_fds), scb_fd_);
       !status.ok()) {
+    remove_server_publisher();
     return status;
   }
 
   if (absl::Status status =
           channel->CreateOrAttachBuffers(Aligned(opts.slot_size));
       !status.ok()) {
+    remove_server_publisher();
     return status;
   }
 
@@ -367,11 +379,13 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
     MessageSlot *slot =
         channel->FindFreeSlotUnreliable(channel->GetPublisherId());
     if (slot == nullptr) {
+      remove_server_publisher();
       return absl::InternalError("No slot available for publisher");
     }
     channel->SetSlot(slot);
     if (!opts.IsBridge() && opts.Activate()) {
       if (absl::Status status = ActivateChannel(channel.get()); !status.ok()) {
+        remove_server_publisher();
         return status;
       }
     }
@@ -381,12 +395,14 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
     // reliable publisher that has been activated.
     absl::Status status = ActivateReliableChannel(channel.get());
     if (!status.ok()) {
+      remove_server_publisher();
       return status;
     }
   }
 
   channel->TriggerSubscribers();
   if (absl::Status status = channel->UnmapUnusedBuffers(); !status.ok()) {
+    remove_server_publisher();
     return status;
   }
   channels_.insert(channel);
@@ -987,6 +1003,7 @@ absl::StatusOr<Message> ClientImpl::ReadMessage(SubscriberImpl *subscriber,
       subscriber->ClearPollFd();
       return Message();
     }
+    subscriber->TriggerReliablePublishers();
   }
 
   // Check if there are any new reliable publishers and if so, load their

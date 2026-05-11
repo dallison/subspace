@@ -486,6 +486,7 @@ impl Subscriber {
                 sub_impl.clear_poll_fd();
                 return Ok(Message::default());
             }
+            sub_impl.trigger_reliable_publishers();
         }
 
         reload_reliable_publishers_if_necessary(&mut *client, &mut sub_impl)?;

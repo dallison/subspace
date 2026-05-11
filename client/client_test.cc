@@ -28,6 +28,7 @@ ABSL_FLAG(std::string, server, "", "Path to server executable");
 ABSL_FLAG(bool, use_split_buffers, false,
           "Run publishers with split-buffer payload storage");
 
+#ifndef ADDRESS_SANITIZER
 static void SignalHandler(int sig) {
   fprintf(stderr, "Signal %d", sig);
   std::cerr.flush();
@@ -42,6 +43,7 @@ static void SignalHandler(int sig) {
   signal(sig, SIG_DFL);
   raise(sig);
 }
+#endif
 
 using InetAddress = toolbelt::InetAddress;
 
@@ -60,6 +62,20 @@ struct TestSplitBufferState {
   int unmap_count = 0;
   int free_count = 0;
 };
+
+uint64_t AlignPage(uint64_t size) {
+  constexpr uint64_t kPageSize = 4096;
+  return (size + kPageSize - 1) & ~(kPageSize - 1);
+}
+
+uint64_t ExpectedSplitBufferVirtualMemoryUsage(int num_slots,
+                                               uint64_t slot_size,
+                                               uint64_t prefix_size) {
+  return sizeof(subspace::SystemControlBlock) + subspace::CcbSize(num_slots) +
+         sizeof(subspace::BufferControlBlock) +
+         AlignPage(prefix_size * static_cast<uint64_t>(num_slots)) +
+         AlignPage(slot_size) * static_cast<uint64_t>(num_slots);
+}
 
 subspace::SplitBufferCallbacks MakeTestSplitBufferCallbacks(
     std::shared_ptr<TestSplitBufferState> state) {
@@ -364,6 +380,10 @@ TEST_F(ClientTest, TooManyPublishers) {
   // One more will fail.
   absl::StatusOr<Publisher> pub = client.CreatePublisher("dave0", 256, 10);
   ASSERT_FALSE(pub.ok());
+  absl::StatusOr<const subspace::ChannelInfo> info =
+      client.GetChannelInfo("dave0");
+  ASSERT_OK(info);
+  EXPECT_EQ(9, info->num_publishers);
 }
 
 TEST_F(ClientTest, MaxPublishersOptionLimitsPublisherCount) {
@@ -728,6 +748,9 @@ TEST_F(ClientTest, SplitBuffersPublishWithHandlesAndSeparatePrefix) {
       pub_client.CreatePublisher("split_buffers", pub_options);
   ASSERT_OK(pub);
   EXPECT_TRUE(pub->UsesSplitBuffers());
+  const uint64_t expected_vm = ExpectedSplitBufferVirtualMemoryUsage(
+      pub->NumSlots(), pub->SlotSize(), pub->PrefixSize());
+  EXPECT_EQ(expected_vm, pub->GetVirtualMemoryUsage());
 
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer(64);
   ASSERT_OK(buffer);
@@ -756,6 +779,7 @@ TEST_F(ClientTest, SplitBuffersPublishWithHandlesAndSeparatePrefix) {
       sub_client.CreateSubscriber("split_buffers", sub_options);
   ASSERT_OK(sub);
   EXPECT_TRUE(sub->UsesSplitBuffers());
+  EXPECT_EQ(expected_vm, sub->GetVirtualMemoryUsage());
 
   uintptr_t *subscriber_handles = nullptr;
   size_t subscriber_handle_count = 0;
@@ -5465,15 +5489,21 @@ int main(int argc, char **argv) {
   absl::ParseCommandLine(argc, argv);
   subspace::SetDefaultUseSplitBuffers(absl::GetFlag(FLAGS_use_split_buffers));
 
+  // Let sanitizers install their own crash handlers so they can report the
+  // original memory error instead of routing through Abseil's stack unwinder.
+#ifndef ADDRESS_SANITIZER
   signal(SIGSEGV, SignalHandler);
   signal(SIGBUS, SignalHandler);
+#endif
   signal(SIGQUIT, SigQuitHandler);
 
   absl::InitializeSymbolizer(argv[0]);
 
+#ifndef ADDRESS_SANITIZER
   absl::InstallFailureSignalHandler({
       .use_alternate_stack = false,
   });
+#endif
 
   return RUN_ALL_TESTS();
 }

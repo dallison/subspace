@@ -9,6 +9,7 @@ use subspace_client::options::{PublisherOptions, SubscriberOptions};
 use subspace_client::syscall_shim::{self, SyscallShim};
 use subspace_client::Client;
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 // ── FailingShim ─────────────────────────────────────────────────────────────
 //
@@ -23,6 +24,7 @@ static FTRUNCATE_COUNTDOWN: AtomicI32 = AtomicI32::new(-1);
 static FSTAT_COUNTDOWN: AtomicI32 = AtomicI32::new(-1);
 static STAT_COUNTDOWN: AtomicI32 = AtomicI32::new(-1);
 static POLL_COUNTDOWN: AtomicI32 = AtomicI32::new(-1);
+static SYSCALL_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Set `errno` for the current thread (replaces the `errno` crate for Bazel compatibility).
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -59,6 +61,12 @@ fn reset_counters() {
     FSTAT_COUNTDOWN.store(-1, Ordering::SeqCst);
     STAT_COUNTDOWN.store(-1, Ordering::SeqCst);
     POLL_COUNTDOWN.store(-1, Ordering::SeqCst);
+}
+
+fn prepare_test() -> MutexGuard<'static, ()> {
+    let guard = SYSCALL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset_counters();
+    guard
 }
 
 unsafe extern "C" fn failing_mmap(
@@ -356,7 +364,7 @@ fn new_client(name: &str) -> Client {
 
 #[test]
 fn mmap_fail_on_scb() {
-    reset_counters();
+    let _test_guard = prepare_test();
     let client = new_client("mmap_scb");
     let _guard = ScopedShim::install();
     MMAP_COUNTDOWN.store(0, Ordering::SeqCst);
@@ -367,7 +375,7 @@ fn mmap_fail_on_scb() {
 
 #[test]
 fn mmap_fail_on_ccb() {
-    reset_counters();
+    let _test_guard = prepare_test();
     let client = new_client("mmap_ccb");
     let _guard = ScopedShim::install();
     MMAP_COUNTDOWN.store(1, Ordering::SeqCst);
@@ -378,7 +386,7 @@ fn mmap_fail_on_ccb() {
 
 #[test]
 fn mmap_fail_on_bcb() {
-    reset_counters();
+    let _test_guard = prepare_test();
     let client = new_client("mmap_bcb");
     let _guard = ScopedShim::install();
     MMAP_COUNTDOWN.store(2, Ordering::SeqCst);
@@ -389,7 +397,7 @@ fn mmap_fail_on_bcb() {
 
 #[test]
 fn mmap_fail_on_buffer_map() {
-    reset_counters();
+    let _test_guard = prepare_test();
     let client = new_client("mmap_buf");
     let _guard = ScopedShim::install();
     // SCB, CCB, BCB succeed (0,1,2), then buffer map (3) fails.
@@ -401,7 +409,7 @@ fn mmap_fail_on_buffer_map() {
 
 #[test]
 fn open_fail_on_create_shm() {
-    reset_counters();
+    let _test_guard = prepare_test();
     let client = new_client("open_shm");
     let _guard = ScopedShim::install();
     // The first open call during create_publisher is for the buffer shared
@@ -414,7 +422,7 @@ fn open_fail_on_create_shm() {
 
 #[test]
 fn poll_fail_wait_for_subscriber() {
-    reset_counters();
+    let _test_guard = prepare_test();
     let client = new_client("poll_sub");
     let opts = PublisherOptions::new().set_slot_size(64).set_num_slots(16);
     let _pub = client.create_publisher("sf_poll_sub", &opts).unwrap();
@@ -429,7 +437,7 @@ fn poll_fail_wait_for_subscriber() {
 
 #[test]
 fn poll_fail_wait_for_reliable_publisher() {
-    reset_counters();
+    let _test_guard = prepare_test();
     let client = new_client("poll_rpub");
     let opts = PublisherOptions::new()
         .set_slot_size(64)
@@ -445,7 +453,7 @@ fn poll_fail_wait_for_reliable_publisher() {
 
 #[test]
 fn mmap_call_counting() {
-    reset_counters();
+    let _test_guard = prepare_test();
     let client = new_client("mmap_count");
     let _guard = ScopedShim::install();
     MMAP_CALL_COUNT.store(0, Ordering::SeqCst);
@@ -458,7 +466,7 @@ fn mmap_call_counting() {
 
 #[test]
 fn shim_restored_after_scope() {
-    reset_counters();
+    let _test_guard = prepare_test();
     {
         let _guard = ScopedShim::install();
         MMAP_COUNTDOWN.store(0, Ordering::SeqCst);
@@ -473,7 +481,7 @@ fn shim_restored_after_scope() {
 
 #[test]
 fn shim_countdown_decrements() {
-    reset_counters();
+    let _test_guard = prepare_test();
     // Set countdown to 2; calls 0 and 1 should succeed, call 2 should fail.
     MMAP_COUNTDOWN.store(2, Ordering::SeqCst);
     assert!(!should_fail(&MMAP_COUNTDOWN));
@@ -488,7 +496,7 @@ fn shim_countdown_decrements() {
 
 #[test]
 fn fstat_or_stat_fail_on_subscriber_attach() {
-    reset_counters();
+    let _test_guard = prepare_test();
     let client = new_client("get_shm_size_sub");
     let opts = PublisherOptions::new().set_slot_size(64).set_num_slots(16);
     let _pub = client.create_publisher("sf_get_shm_size_sub", &opts).unwrap();

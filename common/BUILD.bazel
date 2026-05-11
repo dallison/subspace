@@ -58,20 +58,6 @@ cc_test(
 )
 
 cc_test(
-    name = "pmem_test",
-    size = "small",
-    srcs = ["pmem_test.cc"],
-    target_compatible_with = select({
-        "//:qnx_pmem": [],
-        "//conditions:default": ["@platforms//:incompatible"],
-    }),
-    deps = [
-        ":subspace_common",
-        "@googletest//:gtest_main",
-    ],
-)
-
-cc_test(
     name = "split_buffer_test",
     size = "small",
     srcs = ["split_buffer_test.cc"],
