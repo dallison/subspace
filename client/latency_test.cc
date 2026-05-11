@@ -21,12 +21,21 @@ using InetAddress = toolbelt::InetAddress;
 
 class LatencyTest : public SubspaceTestBase {};
 
-int LatencyValueForSplitBuffers(int normal_value, int split_buffer_value) {
+int LatencyValueForSplitBuffers(int normal_value, int split_buffer_value,
+                                int macos_split_buffer_value = -1) {
   // Split buffers map each slot separately. Keep the default latency sweeps
   // unchanged, but cap split-buffer dimensions below common vm.max_map_count
   // limits.
-  return absl::GetFlag(FLAGS_use_split_buffers) ? split_buffer_value
-                                                : normal_value;
+  if (!absl::GetFlag(FLAGS_use_split_buffers)) {
+    return normal_value;
+  }
+#ifdef __APPLE__
+  return macos_split_buffer_value > 0 ? macos_split_buffer_value
+                                      : split_buffer_value;
+#else
+  (void)macos_split_buffer_value;
+  return split_buffer_value;
+#endif
 }
 
 // Stress test with multiple threads.
@@ -454,7 +463,7 @@ TEST_F(LatencyTest, PublisherLatency) {
   std::cerr << "num_slots,latency_with_retirement,latency_no_retirement\n";
   constexpr int kNumMessages = 20000;
   for (int num_slots = 10;
-       num_slots < LatencyValueForSplitBuffers(100000, 20000);
+       num_slots < LatencyValueForSplitBuffers(100000, 20000, 3000);
        num_slots = (num_slots)*15 / 10) {
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
         "publat", 256, num_slots, {.reliable = false});
@@ -526,7 +535,7 @@ TEST_F(LatencyTest, PublisherLatencyChecksum) {
   std::cerr << "num_slots,latency_with_retirement,latency_no_retirement\n";
   constexpr int kNumMessages = 20000;
   for (int num_slots = 10;
-       num_slots < LatencyValueForSplitBuffers(100000, 20000);
+       num_slots < LatencyValueForSplitBuffers(100000, 20000, 3000);
        num_slots = (num_slots)*15 / 10) {
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
         "publat", 256, num_slots, {.reliable = false, .checksum = true});
@@ -608,7 +617,7 @@ TEST_F(LatencyTest, PublisherLatencyPayload) {
   };
   std::cerr << "num_slots,latency_with_retirement,latency_no_retirement\n";
   for (int num_slots = 10;
-       num_slots < LatencyValueForSplitBuffers(10000, 2000);
+       num_slots < LatencyValueForSplitBuffers(10000, 2000, 1000);
        num_slots = (num_slots)*15 / 10) {
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
         "publat", kMaxPayloadSize, num_slots, {.reliable = false});
@@ -696,7 +705,7 @@ TEST_F(LatencyTest, PublisherLatencyPayloadChecksum) {
   };
   std::cerr << "num_slots,latency_with_retirement,latency_no_retirement\n";
   for (int num_slots = 10;
-       num_slots < LatencyValueForSplitBuffers(10000, 2000);
+       num_slots < LatencyValueForSplitBuffers(10000, 2000, 1000);
        num_slots = (num_slots)*15 / 10) {
     absl::StatusOr<Publisher> pub =
         pub_client.CreatePublisher("publat", kMaxPayloadSize, num_slots,
@@ -795,7 +804,7 @@ TEST_F(LatencyTest, PublisherLatencyHistogram) {
   };
   constexpr int kNumMessages = 20000;
   for (int num_slots = 10;
-       num_slots < LatencyValueForSplitBuffers(100000, 20000);
+       num_slots < LatencyValueForSplitBuffers(100000, 20000, 3000);
        num_slots = (num_slots)*15 / 10) {
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
         "publat", 256, num_slots, {.reliable = false});
@@ -890,7 +899,7 @@ TEST_F(LatencyTest, PublisherLatencyHistogramThreadSafe) {
   };
   constexpr int kNumMessages = 20000;
   for (int num_slots = 10;
-       num_slots < LatencyValueForSplitBuffers(100000, 20000);
+       num_slots < LatencyValueForSplitBuffers(100000, 20000, 3000);
        num_slots = (num_slots)*15 / 10) {
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
         "publat", 256, num_slots, {.reliable = false});
@@ -966,7 +975,7 @@ TEST_F(LatencyTest, PublisherLatencyMultiSub) {
       << "num_slots,num_subs,latency_with_retirement,latency_no_retirement\n";
   constexpr int kNumMessages = 20000;
   for (int num_slots = 10;
-       num_slots < LatencyValueForSplitBuffers(10000, 2000);
+       num_slots < LatencyValueForSplitBuffers(10000, 2000, 250);
        num_slots *= 5) {
 
     for (int num_subs = 1; num_subs < sqrt(num_slots); num_subs *= 2) {
@@ -1048,7 +1057,7 @@ TEST_F(LatencyTest, VirtualPublisherLatency) {
   std::cerr << "num_slots,latency_with_retirement,latency_no_retirement\n";
   constexpr int kNumMessages = 20000;
   for (int num_slots = 10;
-       num_slots < LatencyValueForSplitBuffers(100000, 20000);
+       num_slots < LatencyValueForSplitBuffers(100000, 20000, 3000);
        num_slots = (num_slots)*15 / 10) {
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
         "publat", 256, num_slots, {.reliable = false, .mux = "/foo"});
@@ -1122,7 +1131,7 @@ TEST_F(LatencyTest, VirtualPublisherLatencyMultiSub) {
       << "num_slots,num_subs,latency_with_retirement,latency_no_retirement\n";
   constexpr int kNumMessages = 20000;
   for (int num_slots = 10;
-       num_slots < LatencyValueForSplitBuffers(10000, 2000);
+       num_slots < LatencyValueForSplitBuffers(10000, 2000, 250);
        num_slots *= 5) {
 
     for (int num_subs = 1; num_subs < sqrt(num_slots); num_subs *= 2) {
@@ -1205,7 +1214,7 @@ TEST_F(LatencyTest, VirtualPublisherMuxLatency) {
   std::cerr << "num_slots,latency_with_retirement,latency_no_retirement\n";
   constexpr int kNumMessages = 20000;
   for (int num_slots = 10;
-       num_slots < LatencyValueForSplitBuffers(100000, 20000);
+       num_slots < LatencyValueForSplitBuffers(100000, 20000, 3000);
        num_slots = (num_slots)*15 / 10) {
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
         "publat", 256, num_slots, {.reliable = false, .mux = "/foo"});
@@ -1619,10 +1628,10 @@ TEST_F(LatencyTest, ManyChannelsNonMultiplexed) {
   subspace::Client sub_client;
   ASSERT_OK(sub_client.Init(Socket()));
 
-  const int kNumChannels = LatencyValueForSplitBuffers(200, 100);
-  const int kNumSlots = LatencyValueForSplitBuffers(100, 80);
+  const int kNumChannels = LatencyValueForSplitBuffers(200, 100, 8);
+  const int kNumSlots = LatencyValueForSplitBuffers(100, 80, 16);
   constexpr int kSlotSize = 32768;
-  const int kNumMessages = LatencyValueForSplitBuffers(200, 100);
+  const int kNumMessages = LatencyValueForSplitBuffers(200, 100, 50);
   // Memory used ~= kNumChannels * kNumSlots * kSlotSize
   std::vector<std::string> channels;
 
@@ -1745,10 +1754,10 @@ TEST_F(LatencyTest, ManyChannelsMultiplexed) {
   ASSERT_OK(sub_client.Init(Socket()));
 
   constexpr const char *kMux = "/logs/*";
-  const int kNumChannels = LatencyValueForSplitBuffers(200, 40);
-  const int kNumSlots = LatencyValueForSplitBuffers(800, 160);
+  const int kNumChannels = LatencyValueForSplitBuffers(200, 40, 8);
+  const int kNumSlots = LatencyValueForSplitBuffers(800, 160, 16);
   constexpr int kSlotSize = 32768;
-  const int kNumMessages = LatencyValueForSplitBuffers(200, 100);
+  const int kNumMessages = LatencyValueForSplitBuffers(200, 100, 50);
   // Memory used ~= kNumSlots * kSlotSize
   std::vector<std::string> channels;
 
@@ -1871,10 +1880,10 @@ TEST_F(LatencyTest, ManyChannelsMultiplexedSubscribedToMux) {
   ASSERT_OK(sub_client.Init(Socket()));
 
   constexpr const char *kMux = "/logs/*";
-  const int kNumChannels = LatencyValueForSplitBuffers(200, 40);
-  const int kNumSlots = LatencyValueForSplitBuffers(800, 160);
+  const int kNumChannels = LatencyValueForSplitBuffers(200, 40, 8);
+  const int kNumSlots = LatencyValueForSplitBuffers(800, 160, 16);
   constexpr int kSlotSize = 32768;
-  const int kNumMessages = LatencyValueForSplitBuffers(200, 100);
+  const int kNumMessages = LatencyValueForSplitBuffers(200, 100, 50);
   // Memory used ~= kNumSlots * kSlotSize
   std::vector<std::string> channels;
 

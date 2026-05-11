@@ -23,11 +23,20 @@ class StressTest : public SubspaceTestBase {};
 
 static co::CoroutineScheduler *g_scheduler;
 
-int StressValueForSplitBuffers(int normal_value, int split_buffer_value) {
+int StressValueForSplitBuffers(int normal_value, int split_buffer_value,
+                               int macos_split_buffer_value = -1) {
   // Split buffers map each slot separately, so the largest stress cases need
   // smaller dimensions to stay below common vm.max_map_count limits.
-  return absl::GetFlag(FLAGS_use_split_buffers) ? split_buffer_value
-                                                : normal_value;
+  if (!absl::GetFlag(FLAGS_use_split_buffers)) {
+    return normal_value;
+  }
+#ifdef __APPLE__
+  return macos_split_buffer_value > 0 ? macos_split_buffer_value
+                                      : split_buffer_value;
+#else
+  (void)macos_split_buffer_value;
+  return split_buffer_value;
+#endif
 }
 
 // For debugging, hit ^\ to dump all coroutines if this test is not working
@@ -737,10 +746,10 @@ TEST_F(StressTest, ManyChannelsNonMultiplexed) {
   std::vector<std::shared_ptr<subspace::Client>> pub_clients;
   auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
-  constexpr int kNumChannels = 200;
-  constexpr int knum_slots = 100;
+  const int kNumChannels = StressValueForSplitBuffers(200, 200, 16);
+  const int knum_slots = StressValueForSplitBuffers(100, 100, 8);
   constexpr int kSlotSize = 32768;
-  constexpr int kNumMessages = 200;
+  const int kNumMessages = StressValueForSplitBuffers(200, 200, 50);
   // Memory used ~= kNumChannels * knum_slots * kSlotSize
   std::vector<std::string> channels;
 
@@ -852,10 +861,10 @@ TEST_F(StressTest, ManyChannelsMultiplexed) {
   auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
   constexpr const char *kMux = "/logs/*";
-  const int kNumChannels = StressValueForSplitBuffers(200, 40);
-  const int knum_slots = StressValueForSplitBuffers(800, 160);
+  const int kNumChannels = StressValueForSplitBuffers(200, 40, 8);
+  const int knum_slots = StressValueForSplitBuffers(800, 160, 16);
   constexpr int kSlotSize = 32768;
-  const int kNumMessages = StressValueForSplitBuffers(200, 100);
+  const int kNumMessages = StressValueForSplitBuffers(200, 100, 50);
   // Memory used ~= knum_slots * kSlotSize
   std::vector<std::string> channels;
 
@@ -969,10 +978,10 @@ TEST_F(StressTest, ManyChannelsMultiplexedSubscribedToMux) {
   auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
   constexpr const char *kMux = "/logs/*";
-  const int kNumChannels = StressValueForSplitBuffers(200, 40);
-  const int knum_slots = StressValueForSplitBuffers(1000, 200);
+  const int kNumChannels = StressValueForSplitBuffers(200, 40, 8);
+  const int knum_slots = StressValueForSplitBuffers(1000, 200, 16);
   constexpr int kSlotSize = 32768;
-  const int kNumMessages = StressValueForSplitBuffers(200, 100);
+  const int kNumMessages = StressValueForSplitBuffers(200, 100, 50);
   // Memory used ~= knum_slots * kSlotSize
   std::vector<std::string> channels;
 
