@@ -23,6 +23,13 @@ class StressTest : public SubspaceTestBase {};
 
 static co::CoroutineScheduler *g_scheduler;
 
+int StressValueForSplitBuffers(int normal_value, int split_buffer_value) {
+  // Split buffers map each slot separately, so the largest stress cases need
+  // smaller dimensions to stay below common vm.max_map_count limits.
+  return absl::GetFlag(FLAGS_use_split_buffers) ? split_buffer_value
+                                                : normal_value;
+}
+
 // For debugging, hit ^\ to dump all coroutines if this test is not working
 // properly.
 static void SigQuitHandler(int sig) {
@@ -35,9 +42,10 @@ static void SigQuitHandler(int sig) {
 TEST_F(StressTest, Coroutines) {
   auto oldSig = signal(SIGQUIT, SigQuitHandler);
 
-  constexpr int kNumClients = 10;
-  constexpr int kNumChannels = 100; // Channels per client.
-  constexpr int kNumSlots = kNumChannels * 2 + 1;
+  const int kNumClients = StressValueForSplitBuffers(10, 4);
+  const int kNumChannels =
+      StressValueForSplitBuffers(100, 20); // Channels per client.
+  const int kNumSlots = kNumChannels * 2 + 1;
 
   struct Client {
     explicit Client(std::shared_ptr<subspace::Client> client)
@@ -168,12 +176,13 @@ TEST_F(StressTest, Threads) {
   // This tests uses threads so will be non-deterministic in the order
   // that things happen.
   //
-  constexpr int kNumClients = 10;
-  constexpr int kNumChannels = 100; // Channels per client.
+  const int kNumClients = StressValueForSplitBuffers(10, 4);
+  const int kNumChannels =
+      StressValueForSplitBuffers(100, 12); // Channels per client.
 
   constexpr int kMaxActiveMessages = 5;
   // Number of channels accounts for all publishers, subscribers and unique_ptrs
-  constexpr int kNumSlots = kNumChannels * (2 + kMaxActiveMessages) + 1;
+  const int kNumSlots = kNumChannels * (2 + kMaxActiveMessages) + 1;
 
   struct Client {
     explicit Client(std::shared_ptr<subspace::Client> client)
@@ -282,11 +291,12 @@ TEST_F(StressTest, ThreadSafety) {
   auto oldSig = signal(SIGQUIT, SigQuitHandler);
 
   // Uses one client with a thread per pub and sub.  Stress test the thread safety of the client.
-  constexpr int kNumChannels = 100; // Channels per client.
+  const int kNumChannels =
+      StressValueForSplitBuffers(100, 24); // Channels per client.
 
   constexpr int kMaxActiveMessages = 5;
   // Number of channels accounts for all publishers, subscribers and unique_ptrs
-  constexpr int kNumSlots = kNumChannels * (2 + kMaxActiveMessages) + 1;
+  const int kNumSlots = kNumChannels * (2 + kMaxActiveMessages) + 1;
 
   std::shared_ptr<subspace::Client> client;
 
@@ -656,11 +666,11 @@ TEST_F(StressTest, ActiveMessages2) {
 TEST_F(StressTest, VirtualChannels) {
   auto subClient = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
-  constexpr int kNumSlots = 3000;
-  constexpr int kNumThreads = 8;
-  constexpr int kVchansPerThread = 125;
-  constexpr int kNumVchans = kNumThreads * kVchansPerThread;
-  constexpr int kNumMessages = kNumThreads * kNumVchans;
+  const int kNumSlots = StressValueForSplitBuffers(3000, 160);
+  const int kNumThreads = StressValueForSplitBuffers(8, 4);
+  const int kVchansPerThread = StressValueForSplitBuffers(125, 10);
+  const int kNumVchans = kNumThreads * kVchansPerThread;
+  const int kNumMessages = kNumThreads * kNumVchans;
 
   std::vector<std::shared_ptr<subspace::Client>> clients;
   std::vector<subspace::Publisher> publishers;
@@ -679,7 +689,7 @@ TEST_F(StressTest, VirtualChannels) {
   ASSERT_OK(s);
 
   // Thread to read messages from the mux.
-  std::thread sub_thread([&s]() {
+  std::thread sub_thread([&s, kNumMessages]() {
     int num_messages = 0;
     while (num_messages < kNumMessages) {
       // Read all available messages.
@@ -761,7 +771,7 @@ TEST_F(StressTest, ManyChannelsNonMultiplexed) {
   std::atomic<int> num_messages = 0;
 
   // Create a thread to read from all subscribers.
-  std::thread sub_thread([&subs, &num_messages] {
+  std::thread sub_thread([&subs, &num_messages, kNumChannels, kNumMessages] {
     std::vector<struct pollfd> fds;
     for (auto &sub : subs) {
       struct pollfd fd = sub.GetPollFd();
@@ -798,7 +808,7 @@ TEST_F(StressTest, ManyChannelsNonMultiplexed) {
   // vector.
   std::vector<std::thread> pub_threads;
   for (int i = 0; i < kNumChannels; i++) {
-    pub_threads.emplace_back([i, &pubs, &periods]() {
+    pub_threads.emplace_back([i, &pubs, &periods, kNumMessages]() {
       int j = 0;
       while (j < kNumMessages) {
         absl::StatusOr<void *> buffer = pubs[i].GetMessageBuffer();
@@ -842,10 +852,10 @@ TEST_F(StressTest, ManyChannelsMultiplexed) {
   auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
   constexpr const char *kMux = "/logs/*";
-  constexpr int kNumChannels = 200;
-  constexpr int knum_slots = 800;
+  const int kNumChannels = StressValueForSplitBuffers(200, 40);
+  const int knum_slots = StressValueForSplitBuffers(800, 160);
   constexpr int kSlotSize = 32768;
-  constexpr int kNumMessages = 200;
+  const int kNumMessages = StressValueForSplitBuffers(200, 100);
   // Memory used ~= knum_slots * kSlotSize
   std::vector<std::string> channels;
 
@@ -877,7 +887,7 @@ TEST_F(StressTest, ManyChannelsMultiplexed) {
   std::atomic<int> num_messages = 0;
 
   // Create a thread to read from all subscribers.
-  std::thread sub_thread([&subs, &num_messages] {
+  std::thread sub_thread([&subs, &num_messages, kNumChannels, kNumMessages] {
     std::vector<struct pollfd> fds;
     for (auto &sub : subs) {
       struct pollfd fd = sub.GetPollFd();
@@ -914,7 +924,7 @@ TEST_F(StressTest, ManyChannelsMultiplexed) {
   // vector.
   std::vector<std::thread> pub_threads;
   for (int i = 0; i < kNumChannels; i++) {
-    pub_threads.emplace_back([i, &pubs, &periods]() {
+    pub_threads.emplace_back([i, &pubs, &periods, kNumMessages]() {
       int j = 0;
       while (j < kNumMessages) {
         absl::StatusOr<void *> buffer = pubs[i].GetMessageBuffer();
@@ -959,10 +969,10 @@ TEST_F(StressTest, ManyChannelsMultiplexedSubscribedToMux) {
   auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
   constexpr const char *kMux = "/logs/*";
-  constexpr int kNumChannels = 200;
-  constexpr int knum_slots = 1000;
+  const int kNumChannels = StressValueForSplitBuffers(200, 40);
+  const int knum_slots = StressValueForSplitBuffers(1000, 200);
   constexpr int kSlotSize = 32768;
-  constexpr int kNumMessages = 200;
+  const int kNumMessages = StressValueForSplitBuffers(200, 100);
   // Memory used ~= knum_slots * kSlotSize
   std::vector<std::string> channels;
 
@@ -992,11 +1002,11 @@ TEST_F(StressTest, ManyChannelsMultiplexedSubscribedToMux) {
   std::atomic<int> num_messages = 0;
 
   // Create a thread to read from the mux subscriber.
-  std::thread sub_thread([&sub, &num_messages] {
+  std::thread sub_thread([&sub, &num_messages, kNumChannels, kNumMessages] {
     struct pollfd pfd = sub->GetPollFd();
 
     int num_dropped = 0;
-    std::array<uint64_t, kNumChannels> last_ordinals{0};
+    std::vector<uint64_t> last_ordinals(kNumChannels, 0);
     while (num_messages < kNumMessages * kNumChannels - num_dropped) {
       poll(&pfd, 1, -1);
       if (pfd.revents & POLLIN) {
@@ -1024,7 +1034,7 @@ TEST_F(StressTest, ManyChannelsMultiplexedSubscribedToMux) {
   // vector.
   std::vector<std::thread> pub_threads;
   for (int i = 0; i < kNumChannels; i++) {
-    pub_threads.emplace_back([i, &pubs, &periods]() {
+    pub_threads.emplace_back([i, &pubs, &periods, kNumMessages]() {
       int j = 0;
       while (j < kNumMessages) {
         absl::StatusOr<void *> buffer = pubs[i].GetMessageBuffer();
