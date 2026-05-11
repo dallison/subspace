@@ -67,7 +67,6 @@ jobs:
     name: diagnostics (${{ matrix.os }}, ${{ matrix.mode }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
-    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
@@ -117,6 +116,7 @@ jobs:
 
       - name: Run ${{ matrix.mode }} client test
         run: |
+          set +e
           bazel test \
             //client:client_test \
             --verbose_failures \
@@ -124,10 +124,16 @@ jobs:
             --test_arg=--use_split_buffers \
             ${{ matrix.bazel_flags }} \
             ${{ matrix.run_under }}
+          status=$?
+          if [ "$status" -ne 0 ] && [ "${{ matrix.experimental }}" = "true" ]; then
+            echo "::warning::Experimental ${{ matrix.mode }} diagnostics failed with exit code $status"
+            exit 0
+          fi
+          exit "$status"
 
       - name: Upload diagnostic Bazel test logs
         uses: actions/upload-artifact@v7
-        if: failure()
+        if: ${{ failure() || matrix.experimental }}
         with:
           name: bazel-diagnostic-test-logs-${{ matrix.os }}-${{ matrix.mode }}
           path: bazel-testlogs
