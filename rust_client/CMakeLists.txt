@@ -34,3 +34,6 @@ add_test(
     COMMAND ${CARGO_EXECUTABLE} test -- --test-threads=1
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
+set_tests_properties(rust_client_test PROPERTIES
+    ENVIRONMENT "PATH=$<TARGET_FILE_DIR:subspace_server>:$ENV{PATH}"
+)
