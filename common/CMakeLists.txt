@@ -10,6 +10,8 @@ add_library(subspace_common STATIC
     fast_ring_buffer.h
     split_buffer.cc
     split_buffer.h
+    system_info.cc
+    system_info.h
     syscall_shim.cc
     syscall_shim.h
     syscall_shim_test_helper.h

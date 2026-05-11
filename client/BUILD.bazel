@@ -93,7 +93,6 @@ cc_test(
 cc_test(
     name = "latency_test",
     size = "large",
-    tags = ["manual"],
     srcs = ["latency_test.cc"],
     data = [
         "//server:subspace_server",
@@ -116,7 +115,6 @@ cc_test(
 cc_test(
     name = "stress_test",
     size = "large",
-    tags = ["manual"],
     srcs = ["stress_test.cc"],
     data = [
         "//server:subspace_server",

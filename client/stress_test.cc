@@ -9,7 +9,9 @@
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
 #include "toolbelt/pipe.h"
+#include <fstream>
 #include <inttypes.h>
+#include <limits>
 #include <sys/resource.h>
 
 ABSL_FLAG(bool, start_server, true, "Start the subspace server");
@@ -24,19 +26,32 @@ class StressTest : public SubspaceTestBase {};
 static co::CoroutineScheduler *g_scheduler;
 
 int StressValueForSplitBuffers(int normal_value, int split_buffer_value,
-                               int macos_split_buffer_value = -1) {
-  // Split buffers map each slot separately, so the largest stress cases need
-  // smaller dimensions to stay below common vm.max_map_count limits.
-  if (!absl::GetFlag(FLAGS_use_split_buffers)) {
+                               int low_resource_value = -1) {
+  static const uint64_t open_file_limit = [] {
+    struct rlimit limit;
+    if (getrlimit(RLIMIT_NOFILE, &limit) != 0 ||
+        limit.rlim_cur == RLIM_INFINITY) {
+      return std::numeric_limits<uint64_t>::max();
+    }
+    return static_cast<uint64_t>(limit.rlim_cur);
+  }();
+  static const uint64_t map_count_limit = [] {
+#ifdef __linux__
+    std::ifstream file("/proc/sys/vm/max_map_count");
+    uint64_t value = 0;
+    if (file >> value) {
+      return value;
+    }
+#endif
+    return std::numeric_limits<uint64_t>::max();
+  }();
+
+  const bool low_resource_host =
+      open_file_limit < 4096 || map_count_limit < 262144;
+  if (!absl::GetFlag(FLAGS_use_split_buffers) && !low_resource_host) {
     return normal_value;
   }
-#ifdef __APPLE__
-  return macos_split_buffer_value > 0 ? macos_split_buffer_value
-                                      : split_buffer_value;
-#else
-  (void)macos_split_buffer_value;
-  return split_buffer_value;
-#endif
+  return low_resource_value > 0 ? low_resource_value : split_buffer_value;
 }
 
 // For debugging, hit ^\ to dump all coroutines if this test is not working
@@ -862,7 +877,7 @@ TEST_F(StressTest, ManyChannelsMultiplexed) {
 
   constexpr const char *kMux = "/logs/*";
   const int kNumChannels = StressValueForSplitBuffers(200, 40, 4);
-  const int knum_slots = StressValueForSplitBuffers(800, 160, 8);
+  const int knum_slots = StressValueForSplitBuffers(800, 160, 16);
   constexpr int kSlotSize = 32768;
   const int kNumMessages = StressValueForSplitBuffers(200, 100, 50);
   // Memory used ~= knum_slots * kSlotSize
@@ -979,7 +994,7 @@ TEST_F(StressTest, ManyChannelsMultiplexedSubscribedToMux) {
 
   constexpr const char *kMux = "/logs/*";
   const int kNumChannels = StressValueForSplitBuffers(200, 40, 4);
-  const int knum_slots = StressValueForSplitBuffers(1000, 200, 8);
+  const int knum_slots = StressValueForSplitBuffers(1000, 200, 16);
   constexpr int kSlotSize = 32768;
   const int kNumMessages = StressValueForSplitBuffers(200, 100, 50);
   // Memory used ~= knum_slots * kSlotSize

@@ -6,6 +6,7 @@
 
 #include "absl/strings/str_format.h"
 #include "common/syscall_shim.h"
+#include "common/system_info.h"
 
 #include <cerrno>
 #include <cstdint>
@@ -36,15 +37,6 @@ absl::Status WriteAll(int fd, const std::string &contents,
     p += n;
   }
   return absl::OkStatus();
-}
-
-uint64_t PageAlignedSize(uint64_t size) {
-  long page_size = sysconf(_SC_PAGESIZE);
-  if (page_size <= 0) {
-    page_size = 4096;
-  }
-  uint64_t alignment = static_cast<uint64_t>(page_size);
-  return (size + alignment - 1) & ~(alignment - 1);
 }
 
 uint64_t StableHash64(const std::string &value) {

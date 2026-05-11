@@ -4,6 +4,7 @@
 
 #include "client/client_channel.h"
 #include "common/syscall_shim.h"
+#include "common/system_info.h"
 #include <sys/mman.h>
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX && defined(__APPLE__)
 #include <sys/posix_shm.h>
@@ -20,13 +21,6 @@ namespace subspace {
 namespace details {
 
 namespace {
-
-uint64_t AlignUp(uint64_t size, uint64_t alignment) {
-  if (alignment == 0) {
-    alignment = 4096;
-  }
-  return (size + alignment - 1) & ~(alignment - 1);
-}
 
 absl::StatusOr<SplitBufferMetadata>
 ReadSplitBufferMetadataFileWithRetry(const std::string &shadow_file) {
@@ -482,7 +476,7 @@ ClientChannel::CreateSplitBufferSet(size_t buffer_index, size_t full_size,
                                     uint64_t slot_size) {
   auto buffer = std::make_unique<BufferSet>(full_size, slot_size, nullptr);
   buffer->owns_split_buffers = true;
-  uint64_t payload_size = AlignUp(slot_size, 4096);
+  uint64_t payload_size = PageAlignedSize(slot_size);
 
   std::string base = BufferSharedMemoryName(buffer_index);
   std::string metadata_base = base.empty() || base[0] == '/' ? base
@@ -494,11 +488,10 @@ ClientChannel::CreateSplitBufferSet(size_t buffer_index, size_t full_size,
       .buffer_index = static_cast<uint32_t>(buffer_index),
       .slot_id = 0,
       .is_prefix = true,
-      .full_size = AlignUp(static_cast<uint64_t>(PrefixSize()) * NumSlots(),
-                           4096),
-      .allocation_size = AlignUp(static_cast<uint64_t>(PrefixSize()) *
-                                     NumSlots(),
-                                 4096),
+      .full_size =
+          PageAlignedSize(static_cast<uint64_t>(PrefixSize()) * NumSlots()),
+      .allocation_size =
+          PageAlignedSize(static_cast<uint64_t>(PrefixSize()) * NumSlots()),
       .shadow_file = prefix_name,
       .object_name = SplitBufferObjectName(prefix_name),
   };
@@ -623,7 +616,7 @@ absl::StatusOr<std::unique_ptr<BufferSet>>
 ClientChannel::OpenSplitBufferSet(size_t buffer_index, size_t full_size,
                                   uint64_t slot_size) {
   auto buffer = std::make_unique<BufferSet>(full_size, slot_size, nullptr);
-  uint64_t payload_size = AlignUp(slot_size, 4096);
+  uint64_t payload_size = PageAlignedSize(slot_size);
   std::string base = BufferSharedMemoryName(buffer_index);
   std::string metadata_base = base.empty() || base[0] == '/' ? base
                                                             : "/tmp/" + base;

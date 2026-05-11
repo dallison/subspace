@@ -9,7 +9,9 @@
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
 #include "toolbelt/pipe.h"
+#include <fstream>
 #include <inttypes.h>
+#include <limits>
 #include <sys/resource.h>
 
 ABSL_FLAG(bool, start_server, true, "Start the subspace server");
@@ -22,20 +24,32 @@ using InetAddress = toolbelt::InetAddress;
 class LatencyTest : public SubspaceTestBase {};
 
 int LatencyValueForSplitBuffers(int normal_value, int split_buffer_value,
-                                int macos_split_buffer_value = -1) {
-  // Split buffers map each slot separately. Keep the default latency sweeps
-  // unchanged, but cap split-buffer dimensions below common vm.max_map_count
-  // limits.
-  if (!absl::GetFlag(FLAGS_use_split_buffers)) {
+                                int low_resource_value = -1) {
+  static const uint64_t open_file_limit = [] {
+    struct rlimit limit;
+    if (getrlimit(RLIMIT_NOFILE, &limit) != 0 ||
+        limit.rlim_cur == RLIM_INFINITY) {
+      return std::numeric_limits<uint64_t>::max();
+    }
+    return static_cast<uint64_t>(limit.rlim_cur);
+  }();
+  static const uint64_t map_count_limit = [] {
+#ifdef __linux__
+    std::ifstream file("/proc/sys/vm/max_map_count");
+    uint64_t value = 0;
+    if (file >> value) {
+      return value;
+    }
+#endif
+    return std::numeric_limits<uint64_t>::max();
+  }();
+
+  const bool low_resource_host =
+      open_file_limit < 4096 || map_count_limit < 262144;
+  if (!absl::GetFlag(FLAGS_use_split_buffers) && !low_resource_host) {
     return normal_value;
   }
-#ifdef __APPLE__
-  return macos_split_buffer_value > 0 ? macos_split_buffer_value
-                                      : split_buffer_value;
-#else
-  (void)macos_split_buffer_value;
-  return split_buffer_value;
-#endif
+  return low_resource_value > 0 ? low_resource_value : split_buffer_value;
 }
 
 // Stress test with multiple threads.
@@ -1756,7 +1770,7 @@ TEST_F(LatencyTest, ManyChannelsMultiplexed) {
 
   constexpr const char *kMux = "/logs/*";
   const int kNumChannels = LatencyValueForSplitBuffers(200, 40, 4);
-  const int kNumSlots = LatencyValueForSplitBuffers(800, 160, 8);
+  const int kNumSlots = LatencyValueForSplitBuffers(800, 160, 16);
   constexpr int kSlotSize = 32768;
   const int kNumMessages = LatencyValueForSplitBuffers(200, 100, 50);
   // Memory used ~= kNumSlots * kSlotSize
@@ -1882,7 +1896,7 @@ TEST_F(LatencyTest, ManyChannelsMultiplexedSubscribedToMux) {
 
   constexpr const char *kMux = "/logs/*";
   const int kNumChannels = LatencyValueForSplitBuffers(200, 40, 4);
-  const int kNumSlots = LatencyValueForSplitBuffers(800, 160, 8);
+  const int kNumSlots = LatencyValueForSplitBuffers(800, 160, 16);
   constexpr int kSlotSize = 32768;
   const int kNumMessages = LatencyValueForSplitBuffers(200, 100, 50);
   // Memory used ~= kNumSlots * kSlotSize

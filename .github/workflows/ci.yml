@@ -35,9 +35,12 @@ jobs:
             --verbose_failures \
             ${{ matrix.bazel_flags }}
 
-      - name: Run tests
+      - name: Run tests, including latency and stress
         run: |
-          bazel test //... \
+          bazel test \
+            //... \
+            //client:latency_test \
+            //client:stress_test \
             --verbose_failures \
             --test_output=errors \
             ${{ matrix.bazel_flags }}
