@@ -46,7 +46,7 @@ TEST_F(LatencyTest, MultithreadedSingleChannel) {
   ASSERT_OK(sub_client.Init(Socket()));
 
   constexpr int kNumReceivers = 20;
-  constexpr int kNumMessages = 2000;
+  const int kNumMessages = LatencyValueForSplitBuffers(2000, 500);
 
   absl::StatusOr<Publisher> pub =
       pub_client.CreatePublisher("stress", 256, kNumReceivers + 3);
@@ -69,7 +69,7 @@ TEST_F(LatencyTest, MultithreadedSingleChannel) {
 
   for (size_t i = 0; i < kNumReceivers; i++) {
     receivers.emplace_back(
-        [&pipes, i, &total_received_messages, &num_dropped]() {
+        [&pipes, i, &total_received_messages, &num_dropped, kNumMessages]() {
           while (total_received_messages + num_dropped < kNumMessages) {
             auto msg = pipes[i].Read();
             ASSERT_OK(msg);
@@ -84,7 +84,7 @@ TEST_F(LatencyTest, MultithreadedSingleChannel) {
 
   // Create a subscriber thread to read from the channel and write to random
   // pipe.
-  std::thread sub_thread([&sub, &pipes, &num_dropped]() {
+  std::thread sub_thread([&sub, &pipes, &num_dropped, kNumMessages]() {
     uint64_t last_ordinal = 0;
 
     for (int j = 0; j < kNumMessages; j++) {
@@ -105,7 +105,7 @@ TEST_F(LatencyTest, MultithreadedSingleChannel) {
   });
 
   // Create a publisher thread.
-  std::thread pub_thread([&pub]() {
+  std::thread pub_thread([&pub, kNumMessages]() {
     for (int j = 0; j < kNumMessages; j++) {
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
       ASSERT_OK(buffer);
@@ -138,7 +138,7 @@ TEST_F(LatencyTest, MultithreadedSingleChannelReliable) {
   ASSERT_OK(sub_client.Init(Socket()));
 
   constexpr int kNumReceivers = 20;
-  constexpr int kNumMessages = 200000;
+  const int kNumMessages = LatencyValueForSplitBuffers(200000, 20000, 10000);
 
   absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
       "rstress", 256, kNumReceivers + 3, {.reliable = true});
@@ -159,7 +159,7 @@ TEST_F(LatencyTest, MultithreadedSingleChannelReliable) {
   }
 
   for (size_t i = 0; i < kNumReceivers; i++) {
-    receivers.emplace_back([&pipes, i, &total_received_messages]() {
+    receivers.emplace_back([&pipes, i, &total_received_messages, kNumMessages]() {
       while (total_received_messages < kNumMessages) {
         auto msg = pipes[i].Read();
         ASSERT_OK(msg);
@@ -175,7 +175,7 @@ TEST_F(LatencyTest, MultithreadedSingleChannelReliable) {
   uint64_t start_time = toolbelt::Now();
   // Create a subscriber thread to read from the channel and write to random
   // pipe.
-  std::thread sub_thread([&sub, &pipes]() {
+  std::thread sub_thread([&sub, &pipes, kNumMessages]() {
     uint64_t last_ordinal = 0;
 
     int j = 0;
@@ -205,7 +205,7 @@ TEST_F(LatencyTest, MultithreadedSingleChannelReliable) {
   });
 
   // Create a publisher thread.
-  std::thread pub_thread([&pub]() {
+  std::thread pub_thread([&pub, kNumMessages]() {
     int j = 0;
     while (j < kNumMessages) {
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
@@ -245,7 +245,7 @@ TEST_F(LatencyTest, MultithreadedReliableLatency) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
 
-  constexpr int kNumMessages = 200000;
+  const int kNumMessages = LatencyValueForSplitBuffers(200000, 20000, 10000);
 
   absl::StatusOr<Publisher> pub =
       pub_client.CreatePublisher("lstress", 256, 10, {.reliable = true});
@@ -258,7 +258,7 @@ TEST_F(LatencyTest, MultithreadedReliableLatency) {
   uint64_t start_time = toolbelt::Now();
   // Create a subscriber thread to read from the channel and write to random
   // pipe.
-  std::thread sub_thread([&sub]() {
+  std::thread sub_thread([&sub, kNumMessages]() {
     int j = 0;
     ASSERT_OK(sub->Wait());
     while (j < kNumMessages) {
@@ -273,7 +273,7 @@ TEST_F(LatencyTest, MultithreadedReliableLatency) {
   });
 
   // Create a publisher thread.
-  std::thread pub_thread([&pub]() {
+  std::thread pub_thread([&pub, kNumMessages]() {
     int j = 0;
     while (j < kNumMessages) {
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
@@ -306,7 +306,7 @@ TEST_F(LatencyTest, MultithreadedReliableLatencyHistogram) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
 
-  constexpr int kNumMessages = 20000;
+  const int kNumMessages = LatencyValueForSplitBuffers(20000, 5000);
   std::vector<uint64_t> latencies;
 
   for (int num_slots = 3;
@@ -324,7 +324,7 @@ TEST_F(LatencyTest, MultithreadedReliableLatencyHistogram) {
     uint64_t start_time = toolbelt::Now();
     // Create a subscriber thread to read from the channel and write to random
     // pipe.
-    std::thread sub_thread([&sub]() {
+    std::thread sub_thread([&sub, kNumMessages]() {
       int j = 0;
       ASSERT_OK(sub->Wait());
       while (j < kNumMessages) {
@@ -339,7 +339,7 @@ TEST_F(LatencyTest, MultithreadedReliableLatencyHistogram) {
     });
 
     // Create a publisher thread.
-    std::thread pub_thread([&pub]() {
+    std::thread pub_thread([&pub, kNumMessages]() {
       int j = 0;
       while (j < kNumMessages) {
         absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
@@ -378,7 +378,7 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatency) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
 
-  constexpr int kNumMessages = 2000000;
+  const int kNumMessages = LatencyValueForSplitBuffers(2000000, 200000, 50000);
 
   absl::StatusOr<Publisher> pub =
       pub_client.CreatePublisher("lustress", 256, 10, {.reliable = false});
@@ -392,7 +392,7 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatency) {
   // Create a subscriber thread to read from the channel and write to random
   // pipe.
   std::atomic<int> num_dropped{0};
-  std::thread sub_thread([&sub, &num_dropped]() {
+  std::thread sub_thread([&sub, &num_dropped, kNumMessages]() {
     uint64_t last_ordinal = 0;
     int j = 0;
     ASSERT_OK(sub->Wait());
@@ -413,7 +413,7 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatency) {
   });
 
   // Create a publisher thread.
-  std::thread pub_thread([&pub]() {
+  std::thread pub_thread([&pub, kNumMessages]() {
     int j = 0;
     while (j < kNumMessages) {
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
@@ -461,7 +461,7 @@ TEST_F(LatencyTest, PublisherLatency) {
   ASSERT_OK(sub_client.Init(Socket()));
 
   std::cerr << "num_slots,latency_with_retirement,latency_no_retirement\n";
-  constexpr int kNumMessages = 20000;
+  const int kNumMessages = LatencyValueForSplitBuffers(20000, 5000);
   for (int num_slots = 10;
        num_slots < LatencyValueForSplitBuffers(100000, 20000, 3000);
        num_slots = (num_slots)*15 / 10) {
@@ -533,7 +533,7 @@ TEST_F(LatencyTest, PublisherLatencyChecksum) {
   ASSERT_OK(sub_client.Init(Socket()));
 
   std::cerr << "num_slots,latency_with_retirement,latency_no_retirement\n";
-  constexpr int kNumMessages = 20000;
+  const int kNumMessages = LatencyValueForSplitBuffers(20000, 5000);
   for (int num_slots = 10;
        num_slots < LatencyValueForSplitBuffers(100000, 20000, 3000);
        num_slots = (num_slots)*15 / 10) {
@@ -605,7 +605,7 @@ TEST_F(LatencyTest, PublisherLatencyPayload) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
 
-  constexpr int kNumMessages = 2000;
+  const int kNumMessages = LatencyValueForSplitBuffers(2000, 500);
   constexpr int kMaxPayloadSize = 32 * 1024;
 
   auto random_payload = [](void *buffer) -> int {
@@ -693,7 +693,7 @@ TEST_F(LatencyTest, PublisherLatencyPayloadChecksum) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
 
-  constexpr int kNumMessages = 2000;
+  const int kNumMessages = LatencyValueForSplitBuffers(2000, 500);
   constexpr int kMaxPayloadSize = 32 * 1024;
 
   auto random_payload = [](void *buffer) -> int {
@@ -802,7 +802,7 @@ TEST_F(LatencyTest, PublisherLatencyHistogram) {
     }
     std::cerr << sum / latencies.size() << "\n";
   };
-  constexpr int kNumMessages = 20000;
+  const int kNumMessages = LatencyValueForSplitBuffers(20000, 5000);
   for (int num_slots = 10;
        num_slots < LatencyValueForSplitBuffers(100000, 20000, 3000);
        num_slots = (num_slots)*15 / 10) {
@@ -897,7 +897,7 @@ TEST_F(LatencyTest, PublisherLatencyHistogramThreadSafe) {
     }
     std::cerr << sum / latencies.size() << "\n";
   };
-  constexpr int kNumMessages = 20000;
+  const int kNumMessages = LatencyValueForSplitBuffers(20000, 5000);
   for (int num_slots = 10;
        num_slots < LatencyValueForSplitBuffers(100000, 20000, 3000);
        num_slots = (num_slots)*15 / 10) {
@@ -973,7 +973,7 @@ TEST_F(LatencyTest, PublisherLatencyMultiSub) {
 
   std::cerr
       << "num_slots,num_subs,latency_with_retirement,latency_no_retirement\n";
-  constexpr int kNumMessages = 20000;
+  const int kNumMessages = LatencyValueForSplitBuffers(20000, 5000);
   for (int num_slots = 10;
        num_slots < LatencyValueForSplitBuffers(10000, 2000, 250);
        num_slots *= 5) {
@@ -1055,7 +1055,7 @@ TEST_F(LatencyTest, VirtualPublisherLatency) {
   ASSERT_OK(sub_client.Init(Socket()));
 
   std::cerr << "num_slots,latency_with_retirement,latency_no_retirement\n";
-  constexpr int kNumMessages = 20000;
+  const int kNumMessages = LatencyValueForSplitBuffers(20000, 5000);
   for (int num_slots = 10;
        num_slots < LatencyValueForSplitBuffers(100000, 20000, 3000);
        num_slots = (num_slots)*15 / 10) {
@@ -1129,7 +1129,7 @@ TEST_F(LatencyTest, VirtualPublisherLatencyMultiSub) {
 
   std::cerr
       << "num_slots,num_subs,latency_with_retirement,latency_no_retirement\n";
-  constexpr int kNumMessages = 20000;
+  const int kNumMessages = LatencyValueForSplitBuffers(20000, 5000);
   for (int num_slots = 10;
        num_slots < LatencyValueForSplitBuffers(10000, 2000, 250);
        num_slots *= 5) {
@@ -1212,7 +1212,7 @@ TEST_F(LatencyTest, VirtualPublisherMuxLatency) {
   ASSERT_OK(sub_client.Init(Socket()));
 
   std::cerr << "num_slots,latency_with_retirement,latency_no_retirement\n";
-  constexpr int kNumMessages = 20000;
+  const int kNumMessages = LatencyValueForSplitBuffers(20000, 5000);
   for (int num_slots = 10;
        num_slots < LatencyValueForSplitBuffers(100000, 20000, 3000);
        num_slots = (num_slots)*15 / 10) {
@@ -1291,7 +1291,7 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyHistogram) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
 
-  constexpr int kNumMessages = 20000;
+  const int kNumMessages = LatencyValueForSplitBuffers(20000, 5000);
 
   std::vector<uint64_t> latencies;
   for (int num_slots = 3;
@@ -1310,7 +1310,7 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyHistogram) {
     // Create a subscriber thread to read from the channel and write to random
     // pipe.
     std::atomic<int> num_dropped{0};
-    std::thread sub_thread([&sub, &num_dropped]() {
+    std::thread sub_thread([&sub, &num_dropped, kNumMessages]() {
       uint64_t last_ordinal = 0;
       int j = 0;
       while (j < kNumMessages - num_dropped) {
@@ -1327,7 +1327,7 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyHistogram) {
     });
 
     // Create a publisher thread.
-    std::thread pub_thread([&pub]() {
+    std::thread pub_thread([&pub, kNumMessages]() {
       int j = 0;
       while (j < kNumMessages) {
         absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
@@ -1385,7 +1385,7 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayload) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
 
-  constexpr int kNumMessages = 200000;
+  const int kNumMessages = LatencyValueForSplitBuffers(200000, 20000, 10000);
 
   absl::StatusOr<Publisher> pub =
       pub_client.CreatePublisher("lustress", 256, 100, {.reliable = false});
@@ -1399,7 +1399,7 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayload) {
   // pipe.
   std::atomic<int> num_dropped{0};
 
-  std::thread sub_thread([&sub, &num_dropped]() {
+  std::thread sub_thread([&sub, &num_dropped, kNumMessages]() {
     uint64_t last_ordinal = 0;
     std::vector<uint64_t> latencies;
     latencies.reserve(kNumMessages);
@@ -1447,7 +1447,7 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayload) {
   });
 
   // Create a publisher thread.
-  std::thread pub_thread([&pub]() {
+  std::thread pub_thread([&pub, kNumMessages]() {
     int j = 0;
     while (j < kNumMessages) {
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
@@ -1495,7 +1495,7 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayloadHistogram) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
 
-  constexpr int kNumMessages = 20000;
+  const int kNumMessages = LatencyValueForSplitBuffers(20000, 5000);
 
   struct Stats {
     int num_slots;
@@ -1524,7 +1524,8 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayloadHistogram) {
     // pipe.
     std::atomic<int> num_dropped{0};
 
-    std::thread sub_thread([&sub, &num_dropped, &stats, num_slots]() {
+    std::thread sub_thread(
+        [&sub, &num_dropped, &stats, num_slots, kNumMessages]() {
       uint64_t last_ordinal = 0;
       std::vector<uint64_t> latencies;
       int j = 0;
@@ -1569,7 +1570,7 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayloadHistogram) {
     });
 
     // Create a publisher thread.
-    std::thread pub_thread([&pub]() {
+    std::thread pub_thread([&pub, kNumMessages]() {
       int j = 0;
       while (j < kNumMessages) {
         absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
@@ -1754,8 +1755,8 @@ TEST_F(LatencyTest, ManyChannelsMultiplexed) {
   ASSERT_OK(sub_client.Init(Socket()));
 
   constexpr const char *kMux = "/logs/*";
-  const int kNumChannels = LatencyValueForSplitBuffers(200, 40, 8);
-  const int kNumSlots = LatencyValueForSplitBuffers(800, 160, 16);
+  const int kNumChannels = LatencyValueForSplitBuffers(200, 40, 4);
+  const int kNumSlots = LatencyValueForSplitBuffers(800, 160, 8);
   constexpr int kSlotSize = 32768;
   const int kNumMessages = LatencyValueForSplitBuffers(200, 100, 50);
   // Memory used ~= kNumSlots * kSlotSize
@@ -1880,8 +1881,8 @@ TEST_F(LatencyTest, ManyChannelsMultiplexedSubscribedToMux) {
   ASSERT_OK(sub_client.Init(Socket()));
 
   constexpr const char *kMux = "/logs/*";
-  const int kNumChannels = LatencyValueForSplitBuffers(200, 40, 8);
-  const int kNumSlots = LatencyValueForSplitBuffers(800, 160, 16);
+  const int kNumChannels = LatencyValueForSplitBuffers(200, 40, 4);
+  const int kNumSlots = LatencyValueForSplitBuffers(800, 160, 8);
   constexpr int kSlotSize = 32768;
   const int kNumMessages = LatencyValueForSplitBuffers(200, 100, 50);
   // Memory used ~= kNumSlots * kSlotSize

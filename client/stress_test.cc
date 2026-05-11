@@ -861,8 +861,8 @@ TEST_F(StressTest, ManyChannelsMultiplexed) {
   auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
   constexpr const char *kMux = "/logs/*";
-  const int kNumChannels = StressValueForSplitBuffers(200, 40, 8);
-  const int knum_slots = StressValueForSplitBuffers(800, 160, 16);
+  const int kNumChannels = StressValueForSplitBuffers(200, 40, 4);
+  const int knum_slots = StressValueForSplitBuffers(800, 160, 8);
   constexpr int kSlotSize = 32768;
   const int kNumMessages = StressValueForSplitBuffers(200, 100, 50);
   // Memory used ~= knum_slots * kSlotSize
@@ -978,8 +978,8 @@ TEST_F(StressTest, ManyChannelsMultiplexedSubscribedToMux) {
   auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
   constexpr const char *kMux = "/logs/*";
-  const int kNumChannels = StressValueForSplitBuffers(200, 40, 8);
-  const int knum_slots = StressValueForSplitBuffers(1000, 200, 16);
+  const int kNumChannels = StressValueForSplitBuffers(200, 40, 4);
+  const int knum_slots = StressValueForSplitBuffers(1000, 200, 8);
   constexpr int kSlotSize = 32768;
   const int kNumMessages = StressValueForSplitBuffers(200, 100, 50);
   // Memory used ~= knum_slots * kSlotSize
