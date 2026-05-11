@@ -866,7 +866,9 @@ void Server::ChannelDirectoryCoroutine() {
 
   absl::StatusOr<Publisher> channel_directory = client.CreatePublisher(
       "/subspace/ChannelDirectory", kDirectorySlotSize, kDirectoryNumSlots,
-      PublisherOptions().SetType("subspace.ChannelDirectory"));
+      PublisherOptions()
+          .SetType("subspace.ChannelDirectory")
+          .SetUseSplitBuffers(false));
   if (!channel_directory.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to create channel directory channel: %s",
@@ -923,7 +925,9 @@ void Server::StatisticsCoroutine() {
 
   absl::StatusOr<Publisher> pub = client.CreatePublisher(
       "/subspace/Statistics", kStatsSlotSize, kStatsNumSlots,
-      PublisherOptions().SetType("subspace.Statistics"));
+      PublisherOptions()
+          .SetType("subspace.Statistics")
+          .SetUseSplitBuffers(false));
   if (!pub.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to create statistics channel: %s",
@@ -1684,7 +1688,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     // after the padding.
     size_t prefix_area = pub->PrefixSize();
     size_t adjusted_prefix_length = prefix_area - sizeof(int32_t);
-    MessagePrefix *prefix = pub->Prefix(pub->CurrentSlot());
+    MessagePrefix *prefix = pub->Prefix();
     if (prefix == nullptr) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to find message prefix for bridge receiver on %s",

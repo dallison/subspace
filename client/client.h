@@ -921,7 +921,9 @@ public:
 
   MessageSlot *CurrentSlot() const { return impl_->CurrentSlot(); }
 
-  MessagePrefix *Prefix(MessageSlot *slot) const { return impl_->Prefix(slot); }
+  MessagePrefix *Prefix(MessageSlot *slot = nullptr) const {
+    return impl_->Prefix(slot != nullptr ? slot : impl_->CurrentSlot());
+  }
   // If `address` points at a split payload buffer owned by this publisher,
   // writes that slot's allocator handle to `handle` and returns true. This is
   // useful after GetMessageBuffer() when another API needs the handle for the
@@ -1243,7 +1245,9 @@ public:
   void TriggerReliablePublishers() { impl_->TriggerReliablePublishers(); }
 
   MessageSlot *GetSlot(int slot_id) const { return impl_->GetSlot(slot_id); }
-  MessagePrefix *Prefix(MessageSlot *slot) const { return impl_->Prefix(slot); }
+  MessagePrefix *Prefix(MessageSlot *slot = nullptr) const {
+    return impl_->Prefix(slot != nullptr ? slot : impl_->CurrentSlot());
+  }
   // If `address` points at a split payload buffer mapped by this subscriber,
   // writes that slot's allocator handle to `handle` and returns true. Use this
   // when handing the payload to another library that understands the allocator

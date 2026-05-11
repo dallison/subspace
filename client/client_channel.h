@@ -351,9 +351,10 @@ protected:
   absl::StatusOr<char *> MapBuffer(toolbelt::FileDescriptor &shm_fd,
                                    size_t size, BufferMapMode mode);
   void UnmapShmBufferSet(BufferSet &buffer);
-  void UnmapSplitBufferSet(size_t buffer_index, BufferSet &buffer);
+  void UnmapSplitBufferSet(size_t buffer_index, BufferSet &buffer,
+                           bool destroy_owned_buffers);
   void UnmapBufferSet(size_t buffer_index, BufferSet &buffer,
-                      bool unregister_client_buffer);
+                      bool destroy_owned_buffers);
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
   absl::StatusOr<toolbelt::FileDescriptor>
   CreateLinuxBuffer(const std::string &filename, size_t size);

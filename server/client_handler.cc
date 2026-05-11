@@ -412,25 +412,6 @@ void ClientHandler::HandleCreatePublisher(
     response->set_error(status.ToString());
     return;
   }
-  if (FromPublisherSplitBufferRequest(req).use_split_buffers &&
-      req.publisher_id() < 0) {
-    int num_pubs = 0;
-    int num_subs = 0;
-    int num_bridge_pubs = 0;
-    int num_bridge_subs = 0;
-    int num_tunnel_pubs = 0;
-    int num_tunnel_subs = 0;
-    split_channel->CountUsers(num_pubs, num_subs, num_bridge_pubs,
-                              num_bridge_subs, num_tunnel_pubs,
-                              num_tunnel_subs);
-    if (num_pubs + num_bridge_pubs + num_tunnel_pubs > 0) {
-      response->set_error(absl::StrFormat(
-          "Split-buffer channel %s supports only one publisher",
-          req.channel_name()));
-      return;
-    }
-  }
-
   PublisherUser *pub = nullptr;
   bool reclaimed = false;
 

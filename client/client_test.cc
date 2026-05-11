@@ -14,6 +14,7 @@
 #include "toolbelt/hexdump.h"
 #include "toolbelt/pipe.h"
 #include <array>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -24,6 +25,8 @@
 
 ABSL_FLAG(bool, start_server, true, "Start the subspace server");
 ABSL_FLAG(std::string, server, "", "Path to server executable");
+ABSL_FLAG(bool, use_split_buffers, false,
+          "Run publishers with split-buffer payload storage");
 
 static void SignalHandler(int sig) {
   fprintf(stderr, "Signal %d", sig);
@@ -739,7 +742,7 @@ TEST_F(ClientTest, SplitBuffersPublishWithHandlesAndSeparatePrefix) {
   std::memcpy(metadata.data(), "metadata", metadata.size());
   std::memcpy(*buffer, "pmem-shim", 9);
 
-  subspace::MessagePrefix *prefix = pub->Prefix(pub->CurrentSlot());
+  subspace::MessagePrefix *prefix = pub->Prefix();
   ASSERT_NE(nullptr, prefix);
   EXPECT_NE(reinterpret_cast<void *>(prefix), *buffer);
 
@@ -900,7 +903,7 @@ TEST_F(ClientTest, PublishSingleMessageWithPrefixAndRead) {
   ASSERT_OK(buffer);
   memcpy(*buffer, "foobar", 6);
 
-  auto prefix = pub->Prefix(pub->CurrentSlot());
+  auto prefix = pub->Prefix();
   ASSERT_NE(nullptr, prefix);
   prefix->SetIsBridged();
   prefix->timestamp = 1234;
@@ -915,7 +918,7 @@ TEST_F(ClientTest, PublishSingleMessageWithPrefixAndRead) {
   ASSERT_OK(msg);
   ASSERT_EQ(6, msg->length);
 
-  auto prefix2 = sub->Prefix(sub->GetSlot(msg->slot_id));
+  auto prefix2 = sub->Prefix();
   ASSERT_NE(nullptr, prefix2);
   ASSERT_TRUE(prefix2->IsBridged());
   ASSERT_EQ(1234, prefix2->timestamp);
@@ -1368,7 +1371,12 @@ TEST_F(ClientTest, PublishAndResizeUnmapBuffers) {
     auto &sub_buffers = sub->GetBuffers();
     ASSERT_EQ(2, sub_buffers.size());
     ASSERT_EQ(nullptr, sub_buffers[0]->buffer);
-    ASSERT_NE(nullptr, sub_buffers[1]->buffer);
+    if (sub_buffers[1]->IsSplitBuffers()) {
+      ASSERT_FALSE(sub_buffers[1]->split_slot_buffers.empty());
+      ASSERT_NE(nullptr, sub_buffers[1]->split_slot_buffers[0]);
+    } else {
+      ASSERT_NE(nullptr, sub_buffers[1]->buffer);
+    }
   }
 
   // Publish one more that will check for free buffers and will unmap
@@ -1388,7 +1396,12 @@ TEST_F(ClientTest, PublishAndResizeUnmapBuffers) {
     auto &pub_buffers = pub->GetBuffers();
     ASSERT_EQ(2, pub_buffers.size());
     ASSERT_EQ(nullptr, pub_buffers[0]->buffer);
-    ASSERT_NE(nullptr, pub_buffers[1]->buffer);
+    if (pub_buffers[1]->IsSplitBuffers()) {
+      ASSERT_FALSE(pub_buffers[1]->split_slot_buffers.empty());
+      ASSERT_NE(nullptr, pub_buffers[1]->split_slot_buffers[0]);
+    } else {
+      ASSERT_NE(nullptr, pub_buffers[1]->buffer);
+    }
   }
 }
 
@@ -1579,11 +1592,14 @@ TEST_F(ClientTest, PublishConcurrentlyToOneSubscriber) {
 #ifdef __APPLE__
   constexpr int kNumPublishers = 16;
 #else
-  constexpr int kNumPublishers = 100;
+  const int kNumPublishers =
+      absl::GetFlag(FLAGS_use_split_buffers) ? 16 : 100;
 #endif
   pub_threads.reserve(kNumPublishers);
+  std::atomic<int> published{0};
   for (int i = 0; i < kNumPublishers; ++i) {
-    pub_threads.emplace_back(std::thread([&channel_name, i]() {
+    pub_threads.emplace_back(std::thread(
+        [&channel_name, &published, kNumPublishers, i]() {
       // We have a backlog of 10 hardcoded for the subscriber's listen socket.
       // We will get a connection refused if we exceed this so use a retry loop
       // with a delay if we get errors on connection.  Happens on MacOS.
@@ -1600,12 +1616,18 @@ TEST_F(ClientTest, PublishConcurrentlyToOneSubscriber) {
       absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
           channel_name,
           {.slot_size = 256, .num_slots = 2 * kNumPublishers + 16});
-      ASSERT_OK(pub);
+      ASSERT_OK(pub) << pub.status();
       std::array<char, 16> msg = {};
       auto size = std::snprintf(msg.data(), msg.size(), "M%d", i);
       auto buffer = pub->GetMessageBuffer(size);
+      ASSERT_OK(buffer) << buffer.status();
+      ASSERT_NE(nullptr, *buffer);
       std::memcpy(*buffer, msg.data(), size);
       ASSERT_OK(pub->PublishMessage(size));
+      published.fetch_add(1, std::memory_order_release);
+      while (published.load(std::memory_order_acquire) < kNumPublishers) {
+        std::this_thread::yield();
+      }
     }));
   }
 
@@ -3871,11 +3893,13 @@ TEST_F(ClientTest, ChecksumIgnoresPrefixPadding) {
   auto meta = pub->GetMetadata();
   memcpy(meta.data(), "0123456789abcdef", 16);
 
+  subspace::MessagePrefix *prefix = pub->Prefix();
+  ASSERT_NE(nullptr, prefix);
+  char *prefix_base = reinterpret_cast<char *>(prefix);
+
   absl::StatusOr<const Message> pub_status = pub->PublishMessage(7);
   ASSERT_OK(pub_status);
 
-  // The prefix lives immediately before the buffer.
-  char *prefix_base = reinterpret_cast<char *>(*buffer) - pub->PrefixSize();
   // Padding starts after checksum + metadata: offset 48 + 4 + 16 = 68.
   int32_t used = offsetof(subspace::MessagePrefix, checksum) +
                  pub->ChecksumSize() + pub->MetadataSize();
@@ -3922,11 +3946,14 @@ TEST_F(ClientTest, ChecksumIgnoresPrefixPaddingLargeChecksum) {
     meta[i] = static_cast<std::byte>(i);
   }
 
+  subspace::MessagePrefix *prefix = pub->Prefix();
+  ASSERT_NE(nullptr, prefix);
+  char *prefix_base = reinterpret_cast<char *>(prefix);
+
   absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
   ASSERT_OK(pub_status);
 
   // Scribble over the padding region.
-  char *prefix_base = reinterpret_cast<char *>(*buffer) - pub->PrefixSize();
   int32_t used = offsetof(subspace::MessagePrefix, checksum) +
                  pub->ChecksumSize() + pub->MetadataSize();
   int32_t pad_len = pub->PrefixSize() - used;
@@ -4357,8 +4384,8 @@ TEST_F(ClientTest, TunnelPublisherSetsCrossMachineFlag) {
   ASSERT_EQ(6, msg->length);
   ASSERT_EQ(0, memcmp(msg->buffer, "tunnel", 6));
 
-  auto prefix = reinterpret_cast<const subspace::MessagePrefix *>(
-      static_cast<const char *>(msg->buffer) - sub->PrefixSize());
+  const subspace::MessagePrefix *prefix = sub->Prefix();
+  ASSERT_NE(nullptr, prefix);
   ASSERT_TRUE(prefix->IsCrossMachine());
 
   // Verify tunnel counts via GetChannelInfo.
@@ -4393,8 +4420,8 @@ TEST_F(ClientTest, NonTunnelPublisherDoesNotSetCrossMachineFlag) {
   ASSERT_OK(msg);
   ASSERT_EQ(5, msg->length);
 
-  auto prefix = reinterpret_cast<const subspace::MessagePrefix *>(
-      static_cast<const char *>(msg->buffer) - sub->PrefixSize());
+  const subspace::MessagePrefix *prefix = sub->Prefix();
+  ASSERT_NE(nullptr, prefix);
   ASSERT_FALSE(prefix->IsCrossMachine());
 
   // Verify tunnel counts are zero.
@@ -5431,6 +5458,7 @@ TEST_F(SplitBufferPluginTest, ServerCleanupUsesPluginEndToEnd) {
 int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);
   absl::ParseCommandLine(argc, argv);
+  subspace::SetDefaultUseSplitBuffers(absl::GetFlag(FLAGS_use_split_buffers));
 
   signal(SIGSEGV, SignalHandler);
   signal(SIGBUS, SignalHandler);

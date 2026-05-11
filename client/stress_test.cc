@@ -14,6 +14,8 @@
 
 ABSL_FLAG(bool, start_server, true, "Start the subspace server");
 ABSL_FLAG(std::string, server, "", "Path to server executable");
+ABSL_FLAG(bool, use_split_buffers, false,
+          "Run publishers with split-buffer payload storage");
 
 using InetAddress = toolbelt::InetAddress;
 
@@ -1065,6 +1067,7 @@ TEST_F(StressTest, ManyChannelsMultiplexedSubscribedToMux) {
 int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);
   absl::ParseCommandLine(argc, argv);
+  subspace::SetDefaultUseSplitBuffers(absl::GetFlag(FLAGS_use_split_buffers));
 
   return RUN_ALL_TESTS();
 }

@@ -28,6 +28,20 @@ uint64_t AlignUp(uint64_t size, uint64_t alignment) {
   return (size + alignment - 1) & ~(alignment - 1);
 }
 
+absl::StatusOr<SplitBufferMetadata>
+ReadSplitBufferMetadataFileWithRetry(const std::string &shadow_file) {
+  absl::Status status;
+  for (int attempt = 0; attempt < 100; attempt++) {
+    auto metadata = ReadSplitBufferMetadataFile(shadow_file);
+    if (metadata.ok()) {
+      return metadata;
+    }
+    status = metadata.status();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return status;
+}
+
 ClientBufferHandleMetadata ClientBufferFromSplitMetadata(
     const SplitBufferMetadata &metadata, std::string allocator) {
   return {.channel_name = metadata.channel_name,
@@ -106,7 +120,7 @@ absl::Status ClientChannel::Map(SharedMemoryFds fds,
 absl::Status ClientChannel::UnmapUnusedBuffers() {
   for (size_t i = 0; i + 1 < buffers_.size(); i++) {
     if (bcb_->refs[i] == 0) {
-      UnmapBufferSet(i, *buffers_[i], /*unregister_client_buffer=*/true);
+      UnmapBufferSet(i, *buffers_[i], /*destroy_owned_buffers=*/false);
     }
   }
   return absl::OkStatus();
@@ -123,13 +137,13 @@ void ClientChannel::UnmapShmBufferSet(BufferSet &buffer) {
 }
 
 void ClientChannel::UnmapBufferSet(size_t buffer_index, BufferSet &buffer,
-                                   bool unregister_client_buffer) {
+                                   bool destroy_owned_buffers) {
   if (buffer.IsSplitBuffers()) {
-    UnmapSplitBufferSet(buffer_index, buffer);
+    UnmapSplitBufferSet(buffer_index, buffer, destroy_owned_buffers);
     return;
   }
   (void)buffer_index;
-  (void)unregister_client_buffer;
+  (void)destroy_owned_buffers;
   if (debug_ && buffer.full_size > 0 && buffer.buffer != nullptr) {
     fprintf(stderr, "%p: Unmapping buffer at index %zd\n", this, buffer_index);
   }
@@ -137,7 +151,8 @@ void ClientChannel::UnmapBufferSet(size_t buffer_index, BufferSet &buffer,
 }
 
 void ClientChannel::UnmapSplitBufferSet(size_t buffer_index,
-                                        BufferSet &buffer) {
+                                        BufferSet &buffer,
+                                        bool destroy_owned_buffers) {
   (void)buffer_index;
   for (size_t slot = 0; slot < buffer.split_slot_buffers.size(); slot++) {
     if (buffer.split_slot_buffers[slot] != nullptr) {
@@ -156,7 +171,8 @@ void ClientChannel::UnmapSplitBufferSet(size_t buffer_index,
                               ? buffer.split_private_data[slot]
                               : nullptr,
       };
-      if (buffer.uses_split_callbacks && buffer.owns_split_buffers &&
+      if (destroy_owned_buffers && buffer.uses_split_callbacks &&
+          buffer.owns_split_buffers &&
           SplitBuffersCallbacks().free) {
         (void)SplitBuffersCallbacks().free(metadata, mapping);
       } else if (buffer.uses_split_callbacks && SplitBuffersCallbacks().unmap) {
@@ -167,10 +183,6 @@ void ClientChannel::UnmapSplitBufferSet(size_t buffer_index,
       }
       buffer.split_slot_buffers[slot] = nullptr;
     }
-    if (buffer.owns_split_buffers && slot < buffer.split_metadata.size() &&
-        !buffer.uses_split_callbacks) {
-      (void)DestroySplitSharedMemoryBuffer(buffer.split_metadata[slot]);
-    }
   }
 
   if (buffer.split_prefix_buffer != nullptr) {
@@ -178,11 +190,9 @@ void ClientChannel::UnmapSplitBufferSet(size_t buffer_index,
                 "split prefixes");
     buffer.split_prefix_buffer = nullptr;
   }
-  if (buffer.owns_split_buffers &&
-      !buffer.split_prefix_metadata.object_name.empty()) {
-    (void)DestroySplitSharedMemoryBuffer(buffer.split_prefix_metadata);
-  }
-  if (buffer.owns_split_buffers && client_buffer_unregistration_callback_) {
+  if (destroy_owned_buffers && buffer.uses_split_callbacks &&
+      buffer.owns_split_buffers &&
+      client_buffer_unregistration_callback_) {
     (void)client_buffer_unregistration_callback_(
         ResolvedName(), session_id_, static_cast<uint32_t>(buffer_index));
   }
@@ -299,7 +309,7 @@ void ClientChannel::Unmap() {
   Channel::Unmap();
 
   for (size_t i = 0; i < buffers_.size(); i++) {
-    UnmapBufferSet(i, *buffers_[i], /*unregister_client_buffer=*/false);
+    UnmapBufferSet(i, *buffers_[i], /*destroy_owned_buffers=*/true);
   }
   buffers_.clear();
 }
@@ -472,9 +482,7 @@ ClientChannel::CreateSplitBufferSet(size_t buffer_index, size_t full_size,
     return prefix_fd.status();
   }
   if (!prefix_fd->Valid()) {
-    return absl::InternalError(
-        absl::StrFormat("Split buffer prefix already exists for channel %s",
-                        ResolvedName()));
+    return OpenSplitBufferSet(buffer_index, full_size, slot_size);
   }
   auto prefix_addr =
       MapBuffer(*prefix_fd, prefix_metadata.allocation_size,
@@ -594,7 +602,7 @@ ClientChannel::OpenSplitBufferSet(size_t buffer_index, size_t full_size,
   std::string metadata_base = base.empty() || base[0] == '/' ? base
                                                             : "/tmp/" + base;
   std::string prefix_name = metadata_base + "_prefix";
-  auto prefix_metadata = ReadSplitBufferMetadataFile(prefix_name);
+  auto prefix_metadata = ReadSplitBufferMetadataFileWithRetry(prefix_name);
   if (!prefix_metadata.ok()) {
     return prefix_metadata.status();
   }
@@ -621,7 +629,7 @@ ClientChannel::OpenSplitBufferSet(size_t buffer_index, size_t full_size,
   buffer->uses_split_callbacks = static_cast<bool>(SplitBuffersCallbacks().map);
   for (int slot = 0; slot < NumSlots(); slot++) {
     std::string shadow_file = absl::StrFormat("%s_slot_%d", metadata_base, slot);
-    auto metadata = ReadSplitBufferMetadataFile(shadow_file);
+    auto metadata = ReadSplitBufferMetadataFileWithRetry(shadow_file);
     if (!metadata.ok()) {
       return metadata.status();
     }

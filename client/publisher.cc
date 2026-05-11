@@ -7,6 +7,7 @@
 #include "client_channel.h"
 #include "toolbelt/clock.h"
 #include <atomic>
+#include <thread>
 namespace subspace {
 namespace details {
 
@@ -103,7 +104,9 @@ void PublisherImpl::SetSlotToBiggestBuffer(MessageSlot *slot) {
   if (slot->buffer_index != -1) {
     // If the slot has a buffer (it's not in the free list), decrement the
     // refs for the buffer.
-    DecrementBufferRefs(slot->buffer_index);
+    if (bcb_->refs[slot->buffer_index].load(std::memory_order_relaxed) > 0) {
+      DecrementBufferRefs(slot->buffer_index);
+    }
   }
   slot->buffer_index = buffers_.size() - 1; // Use biggest buffer.
   IncrementBufferRefs(slot->buffer_index);
@@ -131,6 +134,9 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
   // FreeSlots if the subscriber falls behind.
   const bool retired_first = options_.PreferRetiredSlots();
   for (;;) {
+    slot = nullptr;
+    retired_slot = -1;
+    free_slot = -1;
     CheckReload();
     bool tried_first = false;
     if (retired_first) {
@@ -230,8 +236,11 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
       break;
     }
     if (++cas_retries >= max_cas_retries) {
-      // Rather than spinning forever, let's just give up and return nullptr.
-      return nullptr;
+      if (retries-- == 0) {
+        return nullptr;
+      }
+      cas_retries = 0;
+      std::this_thread::yield();
     }
   }
   slot->ordinal = 0;

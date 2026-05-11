@@ -14,6 +14,9 @@
 
 namespace subspace {
 
+void SetDefaultUseSplitBuffers(bool use_split_buffers);
+bool DefaultUseSplitBuffers();
+
 // You can use the options in two ways depending on your
 // coding guidelines.  You can either use the Google/Java-style
 // chained setters method:
@@ -227,7 +230,7 @@ struct PublisherOptions {
   // See SetPreferRetiredSlots() for description.
   bool prefer_retired_slots = false;
   int32_t max_publishers = 0;
-  bool use_split_buffers = false;
+  bool use_split_buffers = DefaultUseSplitBuffers();
   subspace::SplitBufferCallbacks split_buffer_callbacks;
 };
 

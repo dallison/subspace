@@ -12,14 +12,27 @@
 #include "toolbelt/mutex.h"
 #include "toolbelt/sockets.h"
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstring>
 #include <inttypes.h>
 namespace subspace {
 
+namespace {
+std::atomic<bool> default_use_split_buffers{false};
+}
+
 using ClientChannel = details::ClientChannel;
 using SubscriberImpl = details::SubscriberImpl;
 using PublisherImpl = details::PublisherImpl;
+
+void SetDefaultUseSplitBuffers(bool use_split_buffers) {
+  default_use_split_buffers.store(use_split_buffers, std::memory_order_relaxed);
+}
+
+bool DefaultUseSplitBuffers() {
+  return default_use_split_buffers.load(std::memory_order_relaxed);
+}
 
 // Get the current thread as a 64 bit number.  pthread_t is integral on some
 // platforms (Linux glibc, QNX) and a pointer on others (macOS); on QNX it is
