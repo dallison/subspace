@@ -63,6 +63,74 @@ jobs:
           name: bazel-test-logs-${{ matrix.os }}
           path: bazel-testlogs
 
+  diagnostics:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            mode: asan
+            experimental: false
+            bazel_flags: --config=asan
+            run_under:
+          - os: macos-latest
+            mode: asan
+            experimental: false
+            bazel_flags: --config=macos_arm64 --config=asan
+            run_under:
+          - os: ubuntu-latest
+            mode: tsan
+            experimental: true
+            bazel_flags: --config=tsan
+            run_under:
+          - os: macos-latest
+            mode: tsan
+            experimental: true
+            bazel_flags: --config=macos_arm64 --config=tsan
+            run_under:
+          - os: ubuntu-latest
+            mode: valgrind
+            experimental: false
+            bazel_flags:
+            run_under: --run_under='valgrind --error-exitcode=1 --errors-for-leak-kinds=definite'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Bazel
+        uses: bazel-contrib/setup-bazel@0.18.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-${{ matrix.os }}-${{ matrix.mode }}
+          repository-cache: true
+
+      - name: Install Valgrind
+        if: matrix.mode == 'valgrind'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind
+
+      - name: Run ${{ matrix.mode }} client test
+        run: |
+          bazel test \
+            //client:client_test \
+            --verbose_failures \
+            --test_output=errors \
+            --test_arg=--use_split_buffers \
+            ${{ matrix.bazel_flags }} \
+            ${{ matrix.run_under }}
+
+      - name: Upload diagnostic Bazel test logs
+        uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: bazel-diagnostic-test-logs-${{ matrix.os }}-${{ matrix.mode }}
+          path: bazel-testlogs
+
   cmake:
     runs-on: ubuntu-latest
     timeout-minutes: 60
