@@ -5,11 +5,33 @@
 //! Syscall fault injection tests for the Rust subspace client.
 //! Mirrors the approach used by the C++ syscall_failure_test.
 
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use subspace_client::options::{PublisherOptions, SubscriberOptions};
 use subspace_client::syscall_shim::{self, SyscallShim};
 use subspace_client::Client;
-use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::{Mutex, MutexGuard};
+
+fn unique_socket_path() -> String {
+    let mut template = b"/tmp/ss_sf_XXXXXX\0".to_vec();
+    let fd = unsafe { libc::mkstemp(template.as_mut_ptr() as *mut libc::c_char) };
+    assert!(
+        fd >= 0,
+        "mkstemp failed: {}",
+        std::io::Error::last_os_error()
+    );
+    unsafe {
+        libc::close(fd);
+    }
+
+    let path = unsafe {
+        std::ffi::CStr::from_ptr(template.as_ptr() as *const libc::c_char)
+            .to_string_lossy()
+            .into_owned()
+    };
+    std::fs::remove_file(&path)
+        .unwrap_or_else(|e| panic!("failed to remove temporary socket placeholder {path}: {e}"));
+    path
+}
 
 // ── FailingShim ─────────────────────────────────────────────────────────────
 //
@@ -32,10 +54,7 @@ unsafe fn set_thread_errno(e: libc::c_int) {
     *libc::__errno_location() = e;
 }
 
-#[cfg(all(
-    unix,
-    not(any(target_os = "linux", target_os = "android")),
-))]
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android")),))]
 unsafe fn set_thread_errno(e: libc::c_int) {
     *libc::__error() = e;
 }
@@ -97,10 +116,7 @@ unsafe extern "C" fn failing_open(
     libc::open(path, flags, mode as libc::c_uint)
 }
 
-unsafe extern "C" fn failing_ftruncate(
-    fd: libc::c_int,
-    length: libc::off_t,
-) -> libc::c_int {
+unsafe extern "C" fn failing_ftruncate(fd: libc::c_int, length: libc::off_t) -> libc::c_int {
     if should_fail(&FTRUNCATE_COUNTDOWN) {
         set_thread_errno(libc::ENOSPC);
         return -1;
@@ -108,10 +124,7 @@ unsafe extern "C" fn failing_ftruncate(
     libc::ftruncate(fd, length)
 }
 
-unsafe extern "C" fn failing_fstat(
-    fd: libc::c_int,
-    buf: *mut libc::stat,
-) -> libc::c_int {
+unsafe extern "C" fn failing_fstat(fd: libc::c_int, buf: *mut libc::stat) -> libc::c_int {
     if should_fail(&FSTAT_COUNTDOWN) {
         set_thread_errno(libc::EBADF);
         return -1;
@@ -119,10 +132,7 @@ unsafe extern "C" fn failing_fstat(
     libc::fstat(fd, buf)
 }
 
-unsafe extern "C" fn failing_stat(
-    path: *const libc::c_char,
-    buf: *mut libc::stat,
-) -> libc::c_int {
+unsafe extern "C" fn failing_stat(path: *const libc::c_char, buf: *mut libc::stat) -> libc::c_int {
     if should_fail(&STAT_COUNTDOWN) {
         set_thread_errno(libc::EACCES);
         return -1;
@@ -204,7 +214,7 @@ unsafe impl Sync for ServerGuard {}
 #[cfg(server_ffi)]
 impl ServerGuard {
     fn start() -> Self {
-        let socket_path = format!("/tmp/ss_sf_{}", std::process::id());
+        let socket_path = unique_socket_path();
 
         let mut pipe_fds = [0 as libc::c_int; 2];
         assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
@@ -238,9 +248,7 @@ impl ServerGuard {
             );
         }
         let mut buf = [0u8; 8];
-        let n = unsafe {
-            libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, 8)
-        };
+        let n = unsafe { libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, 8) };
         assert_eq!(n, 8, "failed to read server ready notification");
 
         ServerGuard {
@@ -283,8 +291,7 @@ use std::process::{Child, Command, Stdio};
 
 #[cfg(not(server_ffi))]
 fn find_server_binary() -> String {
-    let manifest_dir =
-        std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     let workspace = std::path::Path::new(&manifest_dir)
         .parent()
         .unwrap_or(std::path::Path::new("."));
@@ -310,7 +317,7 @@ struct ServerGuard {
 #[cfg(not(server_ffi))]
 impl ServerGuard {
     fn start() -> Self {
-        let socket_path = format!("/tmp/ss_sf_{}", std::process::id());
+        let socket_path = unique_socket_path();
         let binary = find_server_binary();
         let child = Command::new(&binary)
             .arg(format!("--socket={}", socket_path))
@@ -320,9 +327,7 @@ impl ServerGuard {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .unwrap_or_else(|e| {
-                panic!("Failed to start server binary '{}': {}", binary, e)
-            });
+            .unwrap_or_else(|e| panic!("Failed to start server binary '{}': {}", binary, e));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             if std::time::Instant::now() > deadline {
@@ -448,7 +453,10 @@ fn poll_fail_wait_for_reliable_publisher() {
     let _guard = ScopedShim::install();
     POLL_COUNTDOWN.store(0, Ordering::SeqCst);
     let result = pub_handle.wait(Some(100));
-    assert!(result.is_err(), "expected poll failure on reliable pub wait");
+    assert!(
+        result.is_err(),
+        "expected poll failure on reliable pub wait"
+    );
 }
 
 #[test]
@@ -476,7 +484,11 @@ fn shim_restored_after_scope() {
     let client = new_client("shim_restored");
     let opts = PublisherOptions::new().set_slot_size(64).set_num_slots(4);
     let result = client.create_publisher("sf_restored", &opts);
-    assert!(result.is_ok(), "publisher creation should succeed after shim restore: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "publisher creation should succeed after shim restore: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -499,7 +511,9 @@ fn fstat_or_stat_fail_on_subscriber_attach() {
     let _test_guard = prepare_test();
     let client = new_client("get_shm_size_sub");
     let opts = PublisherOptions::new().set_slot_size(64).set_num_slots(16);
-    let _pub = client.create_publisher("sf_get_shm_size_sub", &opts).unwrap();
+    let _pub = client
+        .create_publisher("sf_get_shm_size_sub", &opts)
+        .unwrap();
 
     let _guard = ScopedShim::install();
     // get_shm_size is called during subscriber buffer attachment.

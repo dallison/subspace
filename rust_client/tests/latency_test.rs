@@ -19,6 +19,28 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+fn unique_socket_path() -> String {
+    let mut template = b"/tmp/ss_lat_XXXXXX\0".to_vec();
+    let fd = unsafe { libc::mkstemp(template.as_mut_ptr() as *mut libc::c_char) };
+    assert!(
+        fd >= 0,
+        "mkstemp failed: {}",
+        std::io::Error::last_os_error()
+    );
+    unsafe {
+        libc::close(fd);
+    }
+
+    let path = unsafe {
+        std::ffi::CStr::from_ptr(template.as_ptr() as *const libc::c_char)
+            .to_string_lossy()
+            .into_owned()
+    };
+    std::fs::remove_file(&path)
+        .unwrap_or_else(|e| panic!("failed to remove temporary socket placeholder {path}: {e}"));
+    path
+}
+
 // ── FFI server bindings (same as client_test.rs) ─────────────────────────────
 
 #[cfg(server_ffi)]
@@ -54,11 +76,7 @@ unsafe impl Sync for ServerGuard {}
 #[cfg(server_ffi)]
 impl ServerGuard {
     fn start() -> Self {
-        let tmp = std::env::temp_dir().join(format!(
-            "subspace_rust_latency_{}",
-            std::process::id()
-        ));
-        let socket_path = tmp.to_str().unwrap().to_string();
+        let socket_path = unique_socket_path();
 
         let mut pipe_fds = [0 as libc::c_int; 2];
         assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
@@ -92,8 +110,7 @@ impl ServerGuard {
             );
         }
         let mut buf = [0u8; 8];
-        let n =
-            unsafe { libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, 8) };
+        let n = unsafe { libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, 8) };
         assert_eq!(n, 8, "failed to read server ready notification");
 
         ServerGuard {
@@ -135,8 +152,7 @@ impl Drop for ServerGuard {
 
 #[cfg(not(server_ffi))]
 fn find_server_binary() -> String {
-    let manifest_dir =
-        std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     let workspace = std::path::Path::new(&manifest_dir)
         .parent()
         .unwrap_or(std::path::Path::new("."));
@@ -163,11 +179,7 @@ struct ServerGuard {
 #[cfg(not(server_ffi))]
 impl ServerGuard {
     fn start() -> Self {
-        let tmp = std::env::temp_dir().join(format!(
-            "subspace_rust_latency_{}",
-            std::process::id()
-        ));
-        let socket_path = tmp.to_str().unwrap().to_string();
+        let socket_path = unique_socket_path();
         let binary = find_server_binary();
         let child = Command::new(&binary)
             .arg(format!("--socket={}", socket_path))
@@ -255,9 +267,7 @@ fn stress_multithreaded_unreliable() {
     let pub_client = new_client("stress_unrel_p");
     let sub_client = new_client("stress_unrel_s");
 
-    let pub_opts = PublisherOptions::new()
-        .set_slot_size(256)
-        .set_num_slots(10);
+    let pub_opts = PublisherOptions::new().set_slot_size(256).set_num_slots(10);
     let publisher = pub_client
         .create_publisher("stress_unrel", &pub_opts)
         .unwrap();
@@ -282,10 +292,8 @@ fn stress_multithreaded_unreliable() {
             let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
             if msg.length > 0 {
                 if last_ordinal > 0 && msg.ordinal > last_ordinal + 1 {
-                    sub_dropped.fetch_add(
-                        (msg.ordinal - last_ordinal - 1) as i64,
-                        Ordering::Relaxed,
-                    );
+                    sub_dropped
+                        .fetch_add((msg.ordinal - last_ordinal - 1) as i64, Ordering::Relaxed);
                 }
                 last_ordinal = msg.ordinal;
                 sub_received.fetch_add(1, Ordering::Relaxed);
@@ -299,11 +307,7 @@ fn stress_multithreaded_unreliable() {
             let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
             let payload = format!("msg {i}");
             unsafe {
-                std::ptr::copy_nonoverlapping(
-                    payload.as_ptr(),
-                    buf,
-                    payload.len(),
-                );
+                std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
             }
             publisher.publish_message(payload.len() as i64).unwrap();
         }
@@ -387,11 +391,7 @@ fn stress_multithreaded_reliable() {
             let (buf, _) = result.unwrap();
             let payload = format!("rel {sent}");
             unsafe {
-                std::ptr::copy_nonoverlapping(
-                    payload.as_ptr(),
-                    buf,
-                    payload.len(),
-                );
+                std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
             }
             publisher.publish_message(payload.len() as i64).unwrap();
             sent += 1;
@@ -520,10 +520,8 @@ fn latency_unreliable_round_trip() {
             if msg.length >= std::mem::size_of::<u64>() {
                 let recv_time = now_ns();
                 if last_ordinal > 0 && msg.ordinal > last_ordinal + 1 {
-                    sub_dropped.fetch_add(
-                        (msg.ordinal - last_ordinal - 1) as i64,
-                        Ordering::Relaxed,
-                    );
+                    sub_dropped
+                        .fetch_add((msg.ordinal - last_ordinal - 1) as i64, Ordering::Relaxed);
                 }
                 last_ordinal = msg.ordinal;
                 let send_time = unsafe { *(msg.buffer as *const u64) };
@@ -557,14 +555,13 @@ fn latency_unreliable_round_trip() {
     let flush_publisher = flush_pub
         .create_publisher(
             "lat_unrel_rt",
-            &PublisherOptions::new().set_slot_size(256).set_num_slots(100),
+            &PublisherOptions::new()
+                .set_slot_size(256)
+                .set_num_slots(100),
         )
         .unwrap();
     for _ in 0..200 {
-        let (buf, _) = flush_publisher
-            .get_message_buffer(256)
-            .unwrap()
-            .unwrap();
+        let (buf, _) = flush_publisher.get_message_buffer(256).unwrap().unwrap();
         let t = now_ns();
         unsafe {
             std::ptr::copy_nonoverlapping(
@@ -714,12 +711,8 @@ fn latency_pub_sub_single_thread() {
 
     let mut num_messages = 100;
     while num_messages <= MAX_MESSAGES {
-        let pub_opts = PublisherOptions::new()
-            .set_slot_size(256)
-            .set_num_slots(10);
-        let publisher = pub_client
-            .create_publisher("lat_ps_st", &pub_opts)
-            .unwrap();
+        let pub_opts = PublisherOptions::new().set_slot_size(256).set_num_slots(10);
+        let publisher = pub_client.create_publisher("lat_ps_st", &pub_opts).unwrap();
 
         let sub_opts = SubscriberOptions::new().set_log_dropped_messages(false);
         let subscriber = sub_client
@@ -955,10 +948,7 @@ fn latency_publisher_histogram() {
             let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
             assert_eq!(msg.length, 100);
         }
-        show_histogram(
-            &format!("{num_slots},retired"),
-            &mut latencies,
-        );
+        show_histogram(&format!("{num_slots},retired"), &mut latencies);
 
         // Fill channel.
         for _ in 0..num_slots {
@@ -976,10 +966,7 @@ fn latency_publisher_histogram() {
             publisher.publish_message(100).unwrap();
             latencies.push(t0.elapsed().as_nanos() as u64);
         }
-        show_histogram(
-            &format!("{num_slots},full"),
-            &mut latencies,
-        );
+        show_histogram(&format!("{num_slots},full"), &mut latencies);
 
         num_slots = num_slots * 3 / 2;
     }
