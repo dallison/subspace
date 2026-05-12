@@ -4,6 +4,7 @@ on: [push, pull_request]
 
 jobs:
   test:
+    name: test (${{ matrix.os }}, ${{ matrix.mode }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60 # liberal upper bound to protect against tests stalling
     strategy:
@@ -11,9 +12,23 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
+            mode: fastbuild
+            bazel_flags:
+          - os: ubuntu-latest
+            mode: opt
+            bazel_flags: -c opt
           - os: ubuntu-24.04-arm
+            mode: fastbuild
+            bazel_flags:
+          - os: ubuntu-24.04-arm
+            mode: opt
+            bazel_flags: -c opt
           - os: macos-latest
+            mode: fastbuild
             bazel_flags: --config=macos_arm64
+          - os: macos-latest
+            mode: opt
+            bazel_flags: --config=macos_arm64 -c opt
 
     steps:
       - name: Checkout code
@@ -25,7 +40,7 @@ jobs:
           # Avoid downloading Bazel every time.
           bazelisk-cache: true
           # Store build cache per workflow.
-          disk-cache: ${{ github.workflow }}-${{ matrix.os }}
+          disk-cache: ${{ github.workflow }}-${{ matrix.os }}-${{ matrix.mode }}
           # Share repository cache between workflows.
           repository-cache: true
 
@@ -56,7 +71,7 @@ jobs:
         uses: actions/upload-artifact@v7
         if: failure() # Upload artifacts only if a step failed
         with:
-          name: bazel-test-logs-${{ matrix.os }}
+          name: bazel-test-logs-${{ matrix.os }}-${{ matrix.mode }}
           path: bazel-testlogs
 
   diagnostics:
@@ -135,8 +150,13 @@ jobs:
           path: bazel-testlogs
 
   cmake:
+    name: cmake (${{ matrix.build_type }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
 
     steps:
       - name: Checkout code
@@ -148,10 +168,10 @@ jobs:
           sudo apt-get install -y protobuf-compiler
 
       - name: Configure CMake
-        run: cmake -S . -B build/cmake -DCMAKE_BUILD_TYPE=Debug
+        run: cmake -S . -B build/cmake-${{ matrix.build_type }} -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
 
       - name: Build CMake targets
-        run: cmake --build build/cmake --parallel $(nproc)
+        run: cmake --build build/cmake-${{ matrix.build_type }} --parallel $(nproc)
 
       - name: Run CMake tests
-        run: ctest --test-dir build/cmake --output-on-failure
+        run: ctest --test-dir build/cmake-${{ matrix.build_type }} --output-on-failure
