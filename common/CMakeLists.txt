@@ -17,13 +17,6 @@ add_library(subspace_common STATIC
     syscall_shim_test_helper.h
 )
 
-if(CMAKE_SYSTEM_NAME STREQUAL "QNX")
-    target_sources(subspace_common PRIVATE
-        pmem.cc
-        pmem.h
-    )
-endif()
-
 target_link_libraries(subspace_common PUBLIC
     absl::base
     absl::flags

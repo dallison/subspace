@@ -9,10 +9,7 @@ cc_library(
         "split_buffer.cc",
         "system_info.cc",
         "syscall_shim.cc",
-    ] + select({
-        "//:qnx_pmem": ["pmem.cc"],
-        "//conditions:default": [],
-    }),
+    ],
     hdrs = [
         "atomic_bitset.h",
         "channel.h",
@@ -22,10 +19,7 @@ cc_library(
         "system_info.h",
         "syscall_shim.h",
         "syscall_shim_test_helper.h",
-    ] + select({
-        "//:qnx_pmem": ["pmem.h"],
-        "//conditions:default": [],
-    }),
+    ],
     linkopts = select({
         "//:macos_x86_64": [],
         "//:macos_arm64": [],

@@ -17,9 +17,6 @@
 #include "co/coroutine.h"
 #include "common/channel.h"
 #include "common/client_buffer.h"
-#if SUBSPACE_HAS_QNX_PMEM
-#include "common/pmem.h"
-#endif
 
 #include "toolbelt/fd.h"
 #include "toolbelt/logging.h"

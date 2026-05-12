@@ -767,7 +767,7 @@ TEST_F(ClientTest, SplitBuffersPublishWithHandlesAndSeparatePrefix) {
   auto metadata = pub->GetMetadata();
   ASSERT_EQ(8U, metadata.size());
   std::memcpy(metadata.data(), "metadata", metadata.size());
-  std::memcpy(*buffer, "pmem-shim", 9);
+  std::memcpy(*buffer, "split-buf", 9);
 
   subspace::MessagePrefix *prefix = pub->Prefix();
   ASSERT_NE(nullptr, prefix);

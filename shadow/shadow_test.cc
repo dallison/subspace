@@ -3,10 +3,10 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#include "shadow/shadow.h"
-#include "server/server.h"
-#include "client/client.h"
 #include "absl/status/status_matchers.h"
+#include "client/client.h"
+#include "server/server.h"
+#include "shadow/shadow.h"
 #include "gtest/gtest.h"
 #include <arpa/inet.h>
 #include <chrono>
@@ -31,7 +31,8 @@ using ::absl_testing::IsOk;
 // at that path.  Using a unique path per process means concurrent or
 // repeated test invocations don't collide on a fixed /tmp/<literal> path.
 static std::string MakeUniqueSocketPath(const char *tag) {
-  std::string templ = std::string("/tmp/subspace_shadow_test_") + tag + "_XXXXXX";
+  std::string templ =
+      std::string("/tmp/subspace_shadow_test_") + tag + "_XXXXXX";
   std::vector<char> buf(templ.begin(), templ.end());
   buf.push_back('\0');
   int fd = mkstemp(buf.data());
@@ -94,8 +95,8 @@ public:
 
     (void)pipe(shadow_pipe_);
 
-    shadow_ = std::make_unique<subspace::Shadow>(shadow_scheduler_,
-                                                  ShadowSocket());
+    shadow_ =
+        std::make_unique<subspace::Shadow>(shadow_scheduler_, ShadowSocket());
     shadow_->SetLogLevel("verbose");
     shadow_->SetNotifyFd(shadow_pipe_[1]);
 
@@ -204,8 +205,8 @@ std::unique_ptr<subspace::Shadow> ShadowTest::shadow_;
 std::thread ShadowTest::shadow_thread_;
 
 TEST_F(ShadowTest, ShadowReceivesInit) {
-  ASSERT_TRUE(WaitForShadowState(
-      []() { return GetShadow()->GetSessionId() != 0; }));
+  ASSERT_TRUE(
+      WaitForShadowState([]() { return GetShadow()->GetSessionId() != 0; }));
   EXPECT_NE(GetShadow()->GetSessionId(), 0u);
   EXPECT_TRUE(GetShadow()->GetScbFd().Valid());
 }
@@ -382,7 +383,7 @@ protected:
   void StartShadow() {
     (void)pipe(shadow_pipe_);
     shadow_ = std::make_unique<subspace::Shadow>(shadow_scheduler_,
-                                                  RecoveryShadowSocket());
+                                                 RecoveryShadowSocket());
     shadow_->SetLogLevel("verbose");
     shadow_->SetNotifyFd(shadow_pipe_[1]);
 
@@ -435,7 +436,7 @@ protected:
   }
 
   bool WaitForShadowState(std::function<bool()> condition,
-                           int timeout_ms = 5000) {
+                          int timeout_ms = 5000) {
     if (condition()) {
       return true;
     }
@@ -513,7 +514,8 @@ TEST_F(ShadowRecoveryTest, ServerRecoversStateFromShadow) {
 
   // Simulate a crash: disconnect the shadow replicators first so that
   // cleanup events from Stop() don't reach the shadow.
-  server_->ForEachShadow([](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
+  server_->ForEachShadow(
+      [](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
   StopServer();
 
   // Start a new server that connects to the same shadow.
@@ -539,11 +541,59 @@ TEST_F(ShadowRecoveryTest, ServerRecoversStateFromShadow) {
   EXPECT_EQ(server_->GetSessionId(), old_session_id);
 
   // Wait for the shadow to receive the new init from the second server.
-  ASSERT_TRUE(WaitForShadowState([this]() {
-    return shadow_->GetSessionId() == server_->GetSessionId();
-  }));
+  ASSERT_TRUE(WaitForShadowState(
+      [this]() { return shadow_->GetSessionId() == server_->GetSessionId(); }));
 
   // Clean up.
+  StopServer();
+  StopShadow();
+}
+
+TEST_F(ShadowRecoveryTest, ServerRecoversSplitBufferStateFromShadow) {
+  signal(SIGPIPE, SIG_IGN);
+
+  StartShadow();
+  StartServer();
+
+  subspace::Client client;
+  client.SetThreadSafe(true);
+  ASSERT_THAT(client.Init(RecoveryServerSocket()), IsOk());
+
+  subspace::PublisherOptions options;
+  options.SetSlotSize(256).SetNumSlots(4).SetUseSplitBuffers(true);
+  auto pub = client.CreatePublisher("shadow_split_buffers", options);
+  ASSERT_THAT(pub, IsOk());
+  ASSERT_TRUE(pub->UsesSplitBuffers());
+  ASSERT_THAT(pub->GetMessageBuffer(32), IsOk());
+  pub->CancelPublish();
+
+  ASSERT_TRUE(WaitForShadowState([this]() {
+    return shadow_->WithChannels([](auto &channels) {
+      auto it = channels.find("shadow_split_buffers");
+      return it != channels.end() && it->second.has_split_buffer_options &&
+             it->second.use_split_buffers &&
+             it->second.client_buffers.size() == 5;
+    });
+  }));
+
+  uint64_t old_session_id = shadow_->GetSessionId();
+  ASSERT_NE(old_session_id, 0u);
+
+  server_->ForEachShadow(
+      [](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
+  StopServer();
+
+  StartServer();
+
+  auto &recovered_channels = server_->GetChannels();
+  ASSERT_EQ(recovered_channels.count("shadow_split_buffers"), 1u);
+
+  auto *channel = recovered_channels.at("shadow_split_buffers").get();
+  ASSERT_TRUE(channel->HasSplitBufferOptions());
+  EXPECT_TRUE(channel->GetSplitBufferOptions().use_split_buffers);
+  EXPECT_EQ(channel->ClientBuffers().size(), 5u);
+  EXPECT_EQ(server_->GetSessionId(), old_session_id);
+
   StopServer();
   StopShadow();
 }
@@ -581,7 +631,8 @@ TEST_F(ShadowRecoveryTest, ServerFunctionalAfterRecovery) {
   }));
 
   // Simulate crash.
-  server_->ForEachShadow([](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
+  server_->ForEachShadow(
+      [](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
   StopServer();
 
   // Phase 2: Recovered server -- verify we can create new channels, publish
@@ -617,7 +668,6 @@ TEST_F(ShadowRecoveryTest, ServerFunctionalAfterRecovery) {
       EXPECT_EQ(msg->length, 10u);
       EXPECT_EQ(memcmp(msg->buffer, "hello_post", 10), 0);
     }
-
   }
 
   // (b) Create a publisher on the recovered channel and send/receive.
@@ -687,7 +737,8 @@ TEST_F(ShadowRecoveryTest, ClientReconnectsAfterServerRestart) {
 
   // Simulate crash: disconnect the shadow replicators so cleanup events
   // from Stop() don't reach the shadow, then stop the server.
-  server_->ForEachShadow([](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
+  server_->ForEachShadow(
+      [](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
   StopServer();
 
   // Phase 2: Restart the server (it recovers state from the shadow).
@@ -775,8 +826,8 @@ protected:
     server_scheduler_ = std::make_unique<co::CoroutineScheduler>();
     (void)pipe(server_pipe_);
     server_ = std::make_unique<subspace::Server>(
-        *server_scheduler_, DualServerSocket(), "", 0, 0, true,
-        server_pipe_[1], 1, true, false);
+        *server_scheduler_, DualServerSocket(), "", 0, 0, true, server_pipe_[1],
+        1, true, false);
     server_->SetShadowSockets(primary_shadow, secondary_shadow);
 
     server_thread_ = std::thread([this]() {
@@ -801,7 +852,7 @@ protected:
   }
 
   bool WaitForShadowState(int pipe_fd, std::function<bool()> condition,
-                           int timeout_ms = 5000) {
+                          int timeout_ms = 5000) {
     if (condition()) {
       return true;
     }
@@ -884,7 +935,8 @@ TEST_F(DualShadowRecoveryTest, RecoverFromPrimaryWhenBothHealthy) {
   ASSERT_NE(primary_session, 0u);
 
   // Simulate crash.
-  server_->ForEachShadow([](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
+  server_->ForEachShadow(
+      [](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
   StopServer();
 
   // Restart server -- both shadows are healthy, so primary should be used.
@@ -932,18 +984,17 @@ TEST_F(DualShadowRecoveryTest, RecoverFromSecondaryWhenPrimaryDown) {
 
   // Wait for both shadows to have the channel.
   ASSERT_TRUE(WaitForShadowState(primary_shadow_pipe_[0], [this]() {
-    return primary_shadow_->WithChannels([](auto &ch) {
-      return ch.count("dual_fallback_chan") > 0;
-    });
+    return primary_shadow_->WithChannels(
+        [](auto &ch) { return ch.count("dual_fallback_chan") > 0; });
   }));
   ASSERT_TRUE(WaitForShadowState(secondary_shadow_pipe_[0], [this]() {
-    return secondary_shadow_->WithChannels([](auto &ch) {
-      return ch.count("dual_fallback_chan") > 0;
-    });
+    return secondary_shadow_->WithChannels(
+        [](auto &ch) { return ch.count("dual_fallback_chan") > 0; });
   }));
 
   // Simulate crash.
-  server_->ForEachShadow([](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
+  server_->ForEachShadow(
+      [](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
   StopServer();
 
   // Stop the primary shadow before restarting the server.
@@ -1007,14 +1058,12 @@ TEST_F(DualShadowRecoveryTest, FreshStartWhenBothShadowsEmpty) {
 
   // Both shadows should have received the new state.
   ASSERT_TRUE(WaitForShadowState(primary_shadow_pipe_[0], [this]() {
-    return primary_shadow_->WithChannels([](auto &ch) {
-      return ch.count("fresh_chan") > 0;
-    });
+    return primary_shadow_->WithChannels(
+        [](auto &ch) { return ch.count("fresh_chan") > 0; });
   }));
   ASSERT_TRUE(WaitForShadowState(secondary_shadow_pipe_[0], [this]() {
-    return secondary_shadow_->WithChannels([](auto &ch) {
-      return ch.count("fresh_chan") > 0;
-    });
+    return secondary_shadow_->WithChannels(
+        [](auto &ch) { return ch.count("fresh_chan") > 0; });
   }));
 
   StopServer();
@@ -1092,7 +1141,7 @@ protected:
   void StartShadow() {
     (void)pipe(shadow_pipe_);
     shadow_ = std::make_unique<subspace::Shadow>(shadow_scheduler_,
-                                                  BridgeShadowSocket());
+                                                 BridgeShadowSocket());
     shadow_->SetLogLevel("verbose");
     shadow_->SetNotifyFd(shadow_pipe_[1]);
     shadow_thread_ = std::thread([this]() {
@@ -1177,7 +1226,7 @@ protected:
   }
 
   bool WaitForShadowState(std::function<bool()> condition,
-                           int timeout_ms = 5000) {
+                          int timeout_ms = 5000) {
     if (condition()) {
       return true;
     }
@@ -1272,8 +1321,7 @@ TEST_F(BridgeShadowRecoveryTest, BridgeRecoversAfterServerRestart) {
       ASSERT_THAT(sub->Wait(std::chrono::seconds(10)), IsOk());
       absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
       ASSERT_THAT(msg, IsOk());
-      if (msg->length == 9u &&
-          memcmp(msg->buffer, "pre_crash", 9) == 0) {
+      if (msg->length == 9u && memcmp(msg->buffer, "pre_crash", 9) == 0) {
         received = true;
       }
     }
@@ -1320,8 +1368,7 @@ TEST_F(BridgeShadowRecoveryTest, BridgeRecoversAfterServerRestart) {
     ASSERT_THAT(sub->Wait(std::chrono::seconds(10)), IsOk());
     absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
     ASSERT_THAT(msg, IsOk());
-    if (msg->length == 10u &&
-        memcmp(msg->buffer, "post_crash", 10) == 0) {
+    if (msg->length == 10u && memcmp(msg->buffer, "post_crash", 10) == 0) {
       received = true;
     }
   }

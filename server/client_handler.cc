@@ -9,8 +9,8 @@
 
 namespace subspace {
 namespace {
-ClientBufferHandleMetadata FromProto(
-    const ClientBufferHandleMetadataProto &proto) {
+ClientBufferHandleMetadata
+FromProto(const ClientBufferHandleMetadataProto &proto) {
   ClientBufferHandleMetadata metadata;
   metadata.channel_name = proto.channel_name();
   metadata.session_id = proto.session_id();
@@ -30,8 +30,8 @@ ClientBufferHandleMetadata FromProto(
   return metadata;
 }
 
-SplitBufferOptions FromPublisherSplitBufferRequest(
-    const CreatePublisherRequest &req) {
+SplitBufferOptions
+FromPublisherSplitBufferRequest(const CreatePublisherRequest &req) {
   return {.use_split_buffers = req.use_split_buffers()};
 }
 
@@ -184,7 +184,10 @@ absl::Status ClientHandler::HandleRegisterClientBuffer(
   if (channel->IsVirtual()) {
     channel = static_cast<VirtualChannel *>(channel)->GetMux();
   }
-  channel->RegisterClientBuffer(std::move(metadata));
+  channel->RegisterClientBuffer(metadata);
+  server_->ForEachShadow([&](const std::unique_ptr<ShadowReplicator> &shadow) {
+    shadow->SendRegisterClientBuffer(metadata);
+  });
   return absl::OkStatus();
 }
 
@@ -201,6 +204,10 @@ absl::Status ClientHandler::HandleUnregisterClientBuffer(
     channel = static_cast<VirtualChannel *>(channel)->GetMux();
   }
   channel->UnregisterClientBuffer(req.session_id(), req.buffer_index());
+  server_->ForEachShadow([&](const std::unique_ptr<ShadowReplicator> &shadow) {
+    shadow->SendUnregisterClientBuffer(req.channel_name(), req.session_id(),
+                                       req.buffer_index());
+  });
   return absl::OkStatus();
 }
 
@@ -412,6 +419,9 @@ void ClientHandler::HandleCreatePublisher(
     response->set_error(status.ToString());
     return;
   }
+  server_->ForEachShadow([&](const std::unique_ptr<ShadowReplicator> &shadow) {
+    shadow->SendCreateChannel(split_channel);
+  });
   PublisherUser *pub = nullptr;
   bool reclaimed = false;
 
@@ -435,10 +445,9 @@ void ClientHandler::HandleCreatePublisher(
                          client_name_.c_str(), req.channel_name().c_str(),
                          GetTotalVM().c_str());
     // Create the publisher.
-    absl::StatusOr<PublisherUser *> publisher =
-        channel->AddPublisher(this, req.is_reliable(), req.is_local(),
-                              req.is_bridge(), req.for_tunnel(),
-                              req.is_fixed_size());
+    absl::StatusOr<PublisherUser *> publisher = channel->AddPublisher(
+        this, req.is_reliable(), req.is_local(), req.is_bridge(),
+        req.for_tunnel(), req.is_fixed_size());
     if (!publisher.ok()) {
       response->set_error(publisher.status().ToString());
       return;
@@ -501,9 +510,10 @@ void ClientHandler::HandleCreatePublisher(
       }
     }
 
-    server_->ForEachShadow([&](const std::unique_ptr<ShadowReplicator> &shadow) {
-      shadow->SendAddPublisher(channel->Name(), pub);
-    });
+    server_->ForEachShadow(
+        [&](const std::unique_ptr<ShadowReplicator> &shadow) {
+          shadow->SendAddPublisher(channel->Name(), pub);
+        });
 
     channel->RecordUpdate(/*is_pub=*/true, /*add=*/true, req.is_reliable());
   }
@@ -559,9 +569,9 @@ void ClientHandler::HandleCreatePublisher(
     fds.push_back(fd);
   }
 
-  ServerChannel *resolved = channel->IsVirtual()
-      ? static_cast<VirtualChannel *>(channel)->GetMux()
-      : channel;
+  ServerChannel *resolved =
+      channel->IsVirtual() ? static_cast<VirtualChannel *>(channel)->GetMux()
+                           : channel;
   ChannelCounters &counters =
       resolved->GetScb()->counters[resolved->GetChannelId()];
   response->set_num_sub_updates(counters.num_sub_updates);
@@ -662,9 +672,9 @@ void ClientHandler::HandleCreateSubscriber(
                          "Client %s creating subscriber on channel %s: VM: %s",
                          client_name_.c_str(), req.channel_name().c_str(),
                          GetTotalVM().c_str());
-    absl::StatusOr<SubscriberUser *> subscriber = channel->AddSubscriber(
-        this, req.is_reliable(), req.is_bridge(), req.for_tunnel(),
-        req.max_active_messages());
+    absl::StatusOr<SubscriberUser *> subscriber =
+        channel->AddSubscriber(this, req.is_reliable(), req.is_bridge(),
+                               req.for_tunnel(), req.max_active_messages());
     if (!subscriber.ok()) {
       response->set_error(subscriber.status().ToString());
       return;
@@ -675,18 +685,19 @@ void ClientHandler::HandleCreateSubscriber(
 
   if (!reclaimed) {
     server_->OnNewSubscriber(channel->Name(), sub->GetId());
-    server_->ForEachShadow([&](const std::unique_ptr<ShadowReplicator> &shadow) {
-      shadow->SendAddSubscriber(channel->Name(), sub);
-    });
+    server_->ForEachShadow(
+        [&](const std::unique_ptr<ShadowReplicator> &shadow) {
+          shadow->SendAddSubscriber(channel->Name(), sub);
+        });
     server_->SendChannelDirectory();
   }
 
   channel->RegisterSubscriber(sub->GetId(), channel->GetVirtualChannelId(),
                               req.subscriber_id() == -1);
 
-  ServerChannel *resolved = channel->IsVirtual()
-      ? static_cast<VirtualChannel *>(channel)->GetMux()
-      : channel;
+  ServerChannel *resolved =
+      channel->IsVirtual() ? static_cast<VirtualChannel *>(channel)->GetMux()
+                           : channel;
   ChannelCounters &counters =
       resolved->GetScb()->counters[resolved->GetChannelId()];
   response->set_num_pub_updates(counters.num_pub_updates);

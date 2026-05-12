@@ -8,12 +8,14 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "co/coroutine.h"
+#include "common/client_buffer.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/fd.h"
 #include "toolbelt/logging.h"
 #include "toolbelt/sockets.h"
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace subspace {
 
@@ -54,8 +56,13 @@ struct ShadowChannel {
   int metadata_size = 0;
   std::string mux;
   int vchan_id = -1;
+  bool has_split_buffer_options = false;
+  bool use_split_buffers = false;
+  bool has_max_publishers = false;
+  int max_publishers = 0;
   toolbelt::FileDescriptor ccb_fd;
   toolbelt::FileDescriptor bcb_fd;
+  std::vector<ClientBufferHandleMetadata> client_buffers;
   absl::flat_hash_map<int, ShadowPublisher> publishers;
   absl::flat_hash_map<int, ShadowSubscriber> subscribers;
 };
@@ -83,8 +90,7 @@ public:
   // Thread-safe access to the channels map.  The callback is invoked while
   // holding the mutex, so the caller must not call back into Shadow methods
   // that also lock the mutex.
-  template <typename F>
-  auto WithChannels(F &&f) const {
+  template <typename F> auto WithChannels(F &&f) const {
     std::lock_guard<std::mutex> lock(mutex_);
     return f(channels_);
   }
@@ -100,8 +106,7 @@ private:
   void ListenerCoroutine();
   void ClientCoroutine(std::shared_ptr<toolbelt::UnixSocket> client_socket);
   absl::Status SendStateDump(toolbelt::UnixSocket &socket);
-  absl::Status SendEvent(toolbelt::UnixSocket &socket,
-                         const ShadowEvent &event,
+  absl::Status SendEvent(toolbelt::UnixSocket &socket, const ShadowEvent &event,
                          const std::vector<toolbelt::FileDescriptor> &fds = {});
 
   absl::Status HandleEvent(const ShadowEvent &event,
@@ -117,6 +122,10 @@ private:
   absl::Status HandleAddSubscriber(const ShadowAddSubscriber &msg,
                                    std::vector<toolbelt::FileDescriptor> &fds);
   absl::Status HandleRemoveSubscriber(const ShadowRemoveSubscriber &msg);
+  absl::Status
+  HandleRegisterClientBuffer(const ShadowRegisterClientBuffer &msg);
+  absl::Status
+  HandleUnregisterClientBuffer(const ShadowUnregisterClientBuffer &msg);
 
   co::CoroutineScheduler &scheduler_;
   std::string socket_name_;

@@ -402,6 +402,8 @@ message ShadowEvent {
     ShadowRemoveSubscriber remove_subscriber = 7;
     ShadowStateDump state_dump = 8;
     ShadowStateDone state_done = 9;
+    ShadowRegisterClientBuffer register_client_buffer = 10;
+    ShadowUnregisterClientBuffer unregister_client_buffer = 11;
   }
 }
 
@@ -423,6 +425,10 @@ message ShadowCreateChannel {
   int32 metadata_size = 10;
   string mux = 11;
   int32 vchan_id = 12;
+  bool has_split_buffer_options = 13;
+  bool use_split_buffers = 14;
+  bool has_max_publishers = 15;
+  int32 max_publishers = 16;
   // FDs sent via SCM_RIGHTS: [ccb_fd, bcb_fd]
 }
 
@@ -472,4 +478,14 @@ message ShadowStateDump {
 
 message ShadowStateDone {
   // Empty marker signaling the end of the state dump.
+}
+
+message ShadowRegisterClientBuffer {
+  ClientBufferHandleMetadataProto metadata = 1;
+}
+
+message ShadowUnregisterClientBuffer {
+  string channel_name = 1;
+  uint64 session_id = 2;
+  uint32 buffer_index = 3;
 }

@@ -178,14 +178,11 @@ public:
 
   absl::StatusOr<PublisherUser *> AddPublisher(ClientHandler *handler,
                                                bool is_reliable, bool is_local,
-                                               bool is_bridge,
-                                               bool for_tunnel,
+                                               bool is_bridge, bool for_tunnel,
                                                bool is_fixed_size);
-  absl::StatusOr<SubscriberUser *> AddSubscriber(ClientHandler *handler,
-                                                 bool is_reliable,
-                                                 bool is_bridge,
-                                                 bool for_tunnel,
-                                                 int max_active_messages);
+  absl::StatusOr<SubscriberUser *>
+  AddSubscriber(ClientHandler *handler, bool is_reliable, bool is_bridge,
+                bool for_tunnel, int max_active_messages);
 
   virtual std::string Type() const { return Channel::Type(); }
   virtual void SetType(const std::string &type) { Channel::SetType(type); }
@@ -277,6 +274,9 @@ public:
   void RegisterClientBuffer(ClientBufferHandleMetadata metadata) {
     client_buffers_.push_back(std::move(metadata));
   }
+  const std::vector<ClientBufferHandleMetadata> &ClientBuffers() const {
+    return client_buffers_;
+  }
   void UnregisterClientBuffer(uint64_t session_id, uint32_t buffer_index) {
     client_buffers_.erase(
         std::remove_if(client_buffers_.begin(), client_buffers_.end(),
@@ -322,9 +322,9 @@ public:
   const SplitBufferOptions &GetSplitBufferOptions() const {
     return split_buffer_options_;
   }
-  absl::Status ValidateOrSetSplitBufferOptions(
-      const SplitBufferOptions &options, bool set_if_missing,
-      const char *user_type);
+  absl::Status
+  ValidateOrSetSplitBufferOptions(const SplitBufferOptions &options,
+                                  bool set_if_missing, const char *user_type);
   absl::Status ValidateOrSetMaxPublishers(int32_t max_publishers,
                                           bool set_if_missing,
                                           const char *user_type);
@@ -431,9 +431,8 @@ private:
 // updates to the multiplexer SCB will be seen by all virtual channels.
 class VirtualChannel : public ServerChannel {
 public:
-  VirtualChannel(ChannelMultiplexer *mux, int vchan_id,
-                 const std::string &name, int num_slots, std::string type,
-                 int session_id)
+  VirtualChannel(ChannelMultiplexer *mux, int vchan_id, const std::string &name,
+                 int num_slots, std::string type, int session_id)
       : ServerChannel(mux->GetChannelId(), name, num_slots, type, true,
                       session_id),
         mux_(mux), vchan_id_(vchan_id) {}
@@ -518,7 +517,8 @@ public:
   }
 
   void GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
-                        uint32_t &max_message_size, uint32_t &total_drops) override {
+                        uint32_t &max_message_size,
+                        uint32_t &total_drops) override {
     mux_->GetStatsCounters(total_bytes, total_messages, max_message_size,
                            total_drops);
   }

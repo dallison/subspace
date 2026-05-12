@@ -19,14 +19,6 @@
 #include <stdint.h>
 #include <sys/poll.h>
 
-#ifndef SUBSPACE_HAS_QNX_PMEM
-#if defined(__QNXNTO__) && defined(SUBSPACE_ENABLE_QNX_PMEM)
-#define SUBSPACE_HAS_QNX_PMEM 1
-#else
-#define SUBSPACE_HAS_QNX_PMEM 0
-#endif
-#endif
-
 #if defined(__cplusplus)
 extern "C" {
 #endif

@@ -26,22 +26,13 @@ namespace subspace {
 #define SUBSPACE_SHMEM_MODE_POSIX 1
 #define SUBSPACE_SHMEM_MODE_LINUX 2
 
-// QNX PMEM support is compiled only for real QNX PMEM builds. Runtime
-// allocator selection is exposed through the generic split-buffer interface.
-#if defined(__QNXNTO__) && defined(SUBSPACE_ENABLE_QNX_PMEM)
-#define SUBSPACE_HAS_QNX_PMEM 1
-#else
-#define SUBSPACE_HAS_QNX_PMEM 0
-#endif
-
 // Change this if you want to use a different shared memory mode.
 #if defined(__linux__)
 // On Linux we can use /dev/shm directly for shared memory.
 #define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_LINUX
 #else
 // On other systems, including QNX, use a /tmp shadow file and regular shared
-// memory. QNX PMEM payloads are exposed through split-buffer callbacks instead
-// of a separate contiguous-buffer shared-memory mode.
+// memory.
 #define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_POSIX
 #endif
 

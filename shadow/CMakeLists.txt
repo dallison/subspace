@@ -10,6 +10,7 @@ target_include_directories(shadow_lib PUBLIC
 )
 
 target_link_libraries(shadow_lib PUBLIC
+    subspace_common
     subspace_proto
     absl::flat_hash_map
     absl::status

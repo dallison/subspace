@@ -1,29 +1,9 @@
-# Split Buffers And QNX PMEM
+# Split Buffers
 
 Subspace supports split message buffers: prefixes live in regular shared memory
 and payload slots live in separately allocated blocks. Publishers and
 subscribers provide matching callbacks when payload slots come from a custom
 allocator such as Qualcomm memory pools.
-
-PMEM support is provided by General Motors.
-
-## Build-Time Enablement
-
-Generic split buffers are always available.  QNX PMEM helper code is compiled
-only when explicitly enabled; allocator-specific PMEM cleanup should be provided
-by a server plugin through the generic client-buffer cleanup hook.
-
-With Bazel:
-
-```bash
-bazel build --config=qnx_pmem //server:subspace_server //client:subspace_client
-```
-
-With CMake:
-
-```bash
-cmake -DSUBSPACE_QNX_PMEM=ON ..
-```
 
 ## Runtime Channel Options
 
@@ -66,9 +46,9 @@ client-owned buffers.  The server treats handles as opaque and offers them to
 plugins through `OnFreeClientBuffer` when cleanup is needed. Message transfer
 remains direct between clients; the server is not on the message data path.
 
-## Linux Testing
+## Testing
 
-Generic split-buffer tests cover the Linux path.  On Linux, split buffers use
+Generic split-buffer tests cover the default path. On Linux, split buffers use
 `/dev/shm` when no custom callbacks are provided:
 
 ```bash
