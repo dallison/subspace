@@ -849,6 +849,43 @@ public:
     return client_->GetBuffers(impl_.get());
   }
 
+  bool GetAddresses(void ***addresses, size_t *count) {
+    if (addresses != nullptr) {
+      *addresses = nullptr;
+    }
+    if (count != nullptr) {
+      *count = 0;
+    }
+    if (addresses == nullptr || count == nullptr || impl_->IsPlaceholder() ||
+        impl_->GetBuffers().empty()) {
+      return false;
+    }
+    const details::BufferSet *latest = impl_->GetBuffers().back().get();
+    address_cache_.clear();
+    address_cache_.reserve(static_cast<size_t>(impl_->NumSlots()));
+    if (latest->IsSplitBuffers()) {
+      if (latest->split_slot_buffers.size() <
+          static_cast<size_t>(impl_->NumSlots())) {
+        return false;
+      }
+      for (int slot = 0; slot < impl_->NumSlots(); ++slot) {
+        address_cache_.push_back(latest->split_slot_buffers[slot]);
+      }
+    } else {
+      if (latest->buffer == nullptr) {
+        return false;
+      }
+      uint64_t stride = impl_->PrefixSize() + Aligned<64>(latest->slot_size);
+      for (int slot = 0; slot < impl_->NumSlots(); ++slot) {
+        address_cache_.push_back(latest->buffer + stride * slot +
+                                 impl_->PrefixSize());
+      }
+    }
+    *addresses = address_cache_.data();
+    *count = address_cache_.size();
+    return true;
+  }
+
   void GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
                         uint32_t &max_message_size, uint32_t &total_drops) {
     impl_->GetStatsCounters(total_bytes, total_messages, max_message_size,
@@ -974,6 +1011,7 @@ private:
   std::shared_ptr<ClientImpl> client_;
   std::shared_ptr<details::PublisherImpl> impl_;
   std::function<absl::Status(Publisher *, int, int)> resize_callback_ = nullptr;
+  std::vector<void *> address_cache_;
 };
 
 class Subscriber {
@@ -1224,6 +1262,43 @@ public:
     return client_->GetBuffers(impl_.get());
   }
 
+  bool GetAddresses(void ***addresses, size_t *count) {
+    if (addresses != nullptr) {
+      *addresses = nullptr;
+    }
+    if (count != nullptr) {
+      *count = 0;
+    }
+    if (addresses == nullptr || count == nullptr || impl_->IsPlaceholder() ||
+        impl_->GetBuffers().empty()) {
+      return false;
+    }
+    const details::BufferSet *latest = impl_->GetBuffers().back().get();
+    address_cache_.clear();
+    address_cache_.reserve(static_cast<size_t>(impl_->NumSlots()));
+    if (latest->IsSplitBuffers()) {
+      if (latest->split_slot_buffers.size() <
+          static_cast<size_t>(impl_->NumSlots())) {
+        return false;
+      }
+      for (int slot = 0; slot < impl_->NumSlots(); ++slot) {
+        address_cache_.push_back(latest->split_slot_buffers[slot]);
+      }
+    } else {
+      if (latest->buffer == nullptr) {
+        return false;
+      }
+      uint64_t stride = impl_->PrefixSize() + Aligned<64>(latest->slot_size);
+      for (int slot = 0; slot < impl_->NumSlots(); ++slot) {
+        address_cache_.push_back(latest->buffer + stride * slot +
+                                 impl_->PrefixSize());
+      }
+    }
+    *addresses = address_cache_.data();
+    *count = address_cache_.size();
+    return true;
+  }
+
   int NumActiveMessages() const { return impl_->NumActiveMessages(); }
 
   void DumpSlots(std::ostream &os) const { impl_->DumpSlots(os); }
@@ -1306,6 +1381,7 @@ private:
 
   std::shared_ptr<ClientImpl> client_;
   std::shared_ptr<details::SubscriberImpl> impl_;
+  std::vector<void *> address_cache_;
   std::function<void(Subscriber *, int64_t)> dropped_message_callback_ =
       nullptr;
   std::function<void(Subscriber *, Message)> message_callback_ = nullptr;

@@ -285,6 +285,11 @@ int subspace_get_subscriber_num_slots(SubspaceSubscriber subscriber);
 // until a message is available.
 bool subspace_wait_for_subscriber(SubspaceSubscriber subscriber);
 
+// Waits for a message to be available for up to timeout_ms.  Returns false on
+// timeout or error.
+bool subspace_wait_for_subscriber_with_timeout(SubspaceSubscriber subscriber,
+                                               uint64_t timeout_ms);
+
 // Waits with an additional file descriptor that can be used to interrupt the
 // wait.  Returns the integer fd value of the file descriptor that triggered
 // the wait.  Returns -1 on error.
@@ -383,6 +388,15 @@ const void *subspace_get_subscriber_metadata(SubspaceSubscriber subscriber,
 // the handle is invalid or metadata is not enabled.
 int32_t subspace_get_publisher_metadata_size(SubspacePublisher publisher);
 int32_t subspace_get_subscriber_metadata_size(SubspaceSubscriber subscriber);
+
+// Returns one payload address per slot for the mapped channel. The returned
+// array is owned by the publisher / subscriber handle and remains valid until
+// the channel buffers change, the function is called again on the same handle,
+// or the handle is destroyed.
+bool subspace_get_publisher_addresses(SubspacePublisher publisher,
+                                      void ***addresses, size_t *count);
+bool subspace_get_subscriber_addresses(SubspaceSubscriber subscriber,
+                                       void ***addresses, size_t *count);
 
 // Split-buffer handle accessors. Handles are allocator-defined identifiers for
 // payload memory, not normal pointers. For example, a Qualcomm memory-pool

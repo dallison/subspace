@@ -564,6 +564,26 @@ bool subspace_wait_for_subscriber(SubspaceSubscriber subscriber) {
   return true;
 }
 
+bool subspace_wait_for_subscriber_with_timeout(SubspaceSubscriber subscriber,
+                                               uint64_t timeout_ms) {
+  subspace_clear_error();
+  if (subscriber.subscriber == nullptr) {
+    subspace_set_error("Invalid subscriber");
+    return false;
+  }
+  // The subscriber contains a pointer to a shared_ptr to a shared_ptr to a
+  // subspace::Subscriber.
+  auto sub_ptr = reinterpret_cast<std::shared_ptr<subspace::Subscriber> *>(
+      subscriber.subscriber);
+  absl::Status status =
+      (*sub_ptr)->Wait(std::chrono::milliseconds(timeout_ms));
+  if (!status.ok()) {
+    subspace_set_error(status.ToString().c_str());
+    return false;
+  }
+  return true;
+}
+
 int subspace_wait_for_subscriber_with_fd(SubspaceSubscriber subscriber, int fd) {
   subspace_clear_error();
   if (subscriber.subscriber == nullptr) {
@@ -818,6 +838,52 @@ int32_t subspace_get_subscriber_metadata_size(SubspaceSubscriber subscriber) {
   auto sub_ptr = reinterpret_cast<std::shared_ptr<subspace::Subscriber> *>(
       subscriber.subscriber);
   return (*sub_ptr)->MetadataSize();
+}
+
+bool subspace_get_publisher_addresses(SubspacePublisher publisher,
+                                      void ***addresses, size_t *count) {
+  subspace_clear_error();
+  if (addresses != nullptr) {
+    *addresses = nullptr;
+  }
+  if (count != nullptr) {
+    *count = 0;
+  }
+  if (publisher.publisher == nullptr || addresses == nullptr ||
+      count == nullptr) {
+    subspace_set_error("Invalid publisher address arguments");
+    return false;
+  }
+  auto pub_ptr = reinterpret_cast<std::shared_ptr<subspace::Publisher> *>(
+      publisher.publisher);
+  if (!(*pub_ptr)->GetAddresses(addresses, count)) {
+    subspace_set_error("Unable to get publisher addresses");
+    return false;
+  }
+  return true;
+}
+
+bool subspace_get_subscriber_addresses(SubspaceSubscriber subscriber,
+                                       void ***addresses, size_t *count) {
+  subspace_clear_error();
+  if (addresses != nullptr) {
+    *addresses = nullptr;
+  }
+  if (count != nullptr) {
+    *count = 0;
+  }
+  if (subscriber.subscriber == nullptr || addresses == nullptr ||
+      count == nullptr) {
+    subspace_set_error("Invalid subscriber address arguments");
+    return false;
+  }
+  auto sub_ptr = reinterpret_cast<std::shared_ptr<subspace::Subscriber> *>(
+      subscriber.subscriber);
+  if (!(*sub_ptr)->GetAddresses(addresses, count)) {
+    subspace_set_error("Unable to get subscriber addresses");
+    return false;
+  }
+  return true;
 }
 
 bool subspace_get_publisher_split_buffer_handle_from_address(
