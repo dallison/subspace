@@ -740,7 +740,16 @@ ClientChannel::MapBuffer(toolbelt::FileDescriptor &shm_fd, size_t size,
                          BufferMapMode mode) {
   int prot =
       mode == BufferMapMode::kReadOnly ? PROT_READ : (PROT_READ | PROT_WRITE);
-  void *p = MapMemory(shm_fd.Fd(), size, prot, "buffers");
+  void *p = MAP_FAILED;
+  for (int attempt = 0; attempt < 100; attempt++) {
+    p = MapMemory(shm_fd.Fd(), size, prot, "buffers");
+    if (p != MAP_FAILED || errno != EINVAL) {
+      break;
+    }
+    // A concurrent creator can win shm_open(O_CREAT | O_EXCL) but not have
+    // completed ftruncate yet.  macOS reports mmap on that fd as EINVAL.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
   if (p == MAP_FAILED) {
     return absl::InternalError(
         absl::StrFormat("Failed to map shared memory from fd %d: %s",
