@@ -343,6 +343,13 @@ def append_delta_table(lines: list[str], deltas: list[dict], major_only: bool) -
         if not rows:
             lines.append("No matched PR-vs-baseline latency deltas exceeded 15%.")
             return
+        total_rows = len(rows)
+        rows = rows[:20]
+        lines.append(
+            f"Showing the {len(rows)} largest matched deltas over 15%"
+            + (f" out of {total_rows}." if total_rows > len(rows) else ".")
+        )
+        lines.append("")
     else:
         lines.extend(["", "## Largest PR vs Baseline Deltas", ""])
         rows = rows[:20]
