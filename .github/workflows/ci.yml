@@ -180,8 +180,11 @@ jobs:
           disk-cache: ${{ github.workflow }}-${{ matrix.os }}-latency-opt
           repository-cache: true
 
-      - name: Run optimized latency tests
+      - name: Run baseline optimized latency tests
+        if: github.event_name == 'pull_request'
         run: |
+          git fetch --no-tags --depth=1 origin ${{ github.event.pull_request.base.sha }}
+          git checkout --force ${{ github.event.pull_request.base.sha }}
           bazel test \
             //client:latency_test \
             --test_filter=LatencyTest.PublisherLatencyHistogram:LatencyTest.SubscriberLatency:LatencyTest.PubSubLatency \
@@ -189,9 +192,25 @@ jobs:
             --test_output=all \
             --test_env=SUBSPACE_LATENCY_OS=${{ matrix.platform }} \
             --test_env=SUBSPACE_LATENCY_MODE=opt \
+            --test_env=SUBSPACE_LATENCY_REVISION=baseline \
             ${{ matrix.bazel_flags }}
           mkdir -p latency-records
-          cp bazel-testlogs/client/latency_test/test.log latency-records/latency-${{ matrix.platform }}.log
+          cp bazel-testlogs/client/latency_test/test.log latency-records/latency-${{ matrix.platform }}-baseline.log
+
+      - name: Run optimized latency tests
+        run: |
+          git checkout --force "$GITHUB_SHA"
+          bazel test \
+            //client:latency_test \
+            --test_filter=LatencyTest.PublisherLatencyHistogram:LatencyTest.SubscriberLatency:LatencyTest.PubSubLatency \
+            --verbose_failures \
+            --test_output=all \
+            --test_env=SUBSPACE_LATENCY_OS=${{ matrix.platform }} \
+            --test_env=SUBSPACE_LATENCY_MODE=opt \
+            --test_env=SUBSPACE_LATENCY_REVISION=${{ github.event_name == 'pull_request' && 'pr' || 'current' }} \
+            ${{ matrix.bazel_flags }}
+          mkdir -p latency-records
+          cp bazel-testlogs/client/latency_test/test.log latency-records/latency-${{ matrix.platform }}-${{ github.event_name == 'pull_request' && 'pr' || 'current' }}.log
 
       - name: Upload latency records
         uses: actions/upload-artifact@v7

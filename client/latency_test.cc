@@ -43,7 +43,10 @@ void EmitLatencyMetric(const std::string &test, const std::string &series,
             << "\"os\":\"" << LatencyEnvOrDefault("SUBSPACE_LATENCY_OS", "local")
             << "\","
             << "\"mode\":\""
-            << LatencyEnvOrDefault("SUBSPACE_LATENCY_MODE", "local") << "\""
+            << LatencyEnvOrDefault("SUBSPACE_LATENCY_MODE", "local") << "\","
+            << "\"revision\":\""
+            << LatencyEnvOrDefault("SUBSPACE_LATENCY_REVISION", "current")
+            << "\""
             << "}\n";
 }
 

@@ -13,6 +13,7 @@ from typing import Iterable
 
 PREFIX = "LATENCY_JSON "
 MARKER = "<!-- subspace-latency-report -->"
+PUBLISHER_METRICS = ["min", "median", "p99", "max", "average"]
 
 
 def iter_input_files(paths: Iterable[Path]) -> Iterable[Path]:
@@ -23,20 +24,125 @@ def iter_input_files(paths: Iterable[Path]) -> Iterable[Path]:
             yield path
 
 
+def inferred_revision(path: Path) -> str:
+    name = path.as_posix().lower()
+    if "baseline" in name:
+        return "baseline"
+    if "-pr" in name or "/pr" in name:
+        return "pr"
+    return "current"
+
+
+def inferred_os(path: Path) -> str:
+    name = path.as_posix().lower()
+    if "macos" in name:
+        return "macos"
+    if "linux" in name or "ubuntu" in name:
+        return "linux"
+    return "local"
+
+
+def base_record(path: Path) -> dict:
+    return {
+        "os": inferred_os(path),
+        "mode": "opt",
+        "revision": inferred_revision(path),
+    }
+
+
+def parse_json_records(path: Path, lines: list[str]) -> list[dict]:
+    records: list[dict] = []
+    defaults = base_record(path)
+    for line in lines:
+        index = line.find(PREFIX)
+        if index == -1:
+            continue
+        payload = line[index + len(PREFIX) :].strip()
+        try:
+            record = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        for key, value in defaults.items():
+            record.setdefault(key, value)
+        records.append(record)
+    return records
+
+
+def parse_csv_records(path: Path, lines: list[str]) -> list[dict]:
+    records: list[dict] = []
+    defaults = base_record(path)
+    current_test = ""
+    publisher_row = 0
+    for line in lines:
+        stripped = line.strip()
+        if "[ RUN      ] LatencyTest." in stripped:
+            current_test = stripped.rsplit("LatencyTest.", 1)[1].split()[0]
+            publisher_row = 0
+            continue
+        if not stripped or stripped.startswith("[") or stripped.startswith("LATENCY_JSON "):
+            continue
+        if stripped in {
+            "num_slots,min,median,p99,max,average",
+            "num_slots,avg_latency_ns",
+            "num_messages,avg_latency_ns",
+        }:
+            continue
+        parts = stripped.split(",")
+        if not all(part.isdigit() for part in parts):
+            continue
+
+        if current_test == "PublisherLatencyHistogram" and len(parts) == 6:
+            series = "with_retirement" if publisher_row % 2 == 0 else "no_retirement"
+            publisher_row += 1
+            x = int(parts[0])
+            for metric, value in zip(PUBLISHER_METRICS, parts[1:]):
+                records.append(
+                    {
+                        **defaults,
+                        "test": "PublisherLatencyHistogram",
+                        "series": series,
+                        "x_name": "num_slots",
+                        "x": x,
+                        "metric": metric,
+                        "value_ns": int(value),
+                    }
+                )
+        elif current_test == "SubscriberLatency" and len(parts) == 2:
+            records.append(
+                {
+                    **defaults,
+                    "test": "SubscriberLatency",
+                    "series": "read_messages",
+                    "x_name": "num_slots",
+                    "x": int(parts[0]),
+                    "metric": "average",
+                    "value_ns": int(parts[1]),
+                }
+            )
+        elif current_test == "PubSubLatency" and len(parts) == 2:
+            records.append(
+                {
+                    **defaults,
+                    "test": "PubSubLatency",
+                    "series": "publish_and_read",
+                    "x_name": "num_messages",
+                    "x": int(parts[0]),
+                    "metric": "average",
+                    "value_ns": int(parts[1]),
+                }
+            )
+    return records
+
+
 def load_records(paths: Iterable[Path]) -> list[dict]:
     records: list[dict] = []
     for path in iter_input_files(paths):
-        with path.open("r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                index = line.find(PREFIX)
-                if index == -1:
-                    continue
-                payload = line[index + len(PREFIX) :].strip()
-                try:
-                    record = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
-                records.append(record)
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        json_records = parse_json_records(path, lines)
+        if json_records:
+            records.extend(json_records)
+        else:
+            records.extend(parse_csv_records(path, lines))
     return records
 
 
@@ -85,7 +191,15 @@ def svg_chart(test: str, metric: str, records: list[dict], width: int = 900, hei
 
     grouped: dict[str, list[dict]] = defaultdict(list)
     for record in records:
-        label = f"{record.get('os', 'unknown')} {record.get('series', '')}".strip()
+        label = " ".join(
+            str(part)
+            for part in [
+                record.get("os", "unknown"),
+                record.get("revision", "current"),
+                record.get("series", ""),
+            ]
+            if part
+        )
         grouped[label].append(record)
 
     palette = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c", "#0891b2"]
@@ -146,21 +260,109 @@ def svg_chart(test: str, metric: str, records: list[dict], width: int = 900, hei
     return "\n".join(parts)
 
 
-def summarize(records: list[dict]) -> list[tuple[str, str, str, str, float]]:
-    latest: dict[tuple[str, str, str, str], dict] = {}
+def summarize(records: list[dict]) -> list[tuple[str, str, str, str, str, float]]:
+    latest: dict[tuple[str, str, str, str, str], dict] = {}
     for record in records:
         key = (
             str(record.get("test", "")),
             str(record.get("metric", "")),
             str(record.get("os", "")),
+            str(record.get("revision", "current")),
             str(record.get("series", "")),
         )
         if key not in latest or int(record["x"]) > int(latest[key]["x"]):
             latest[key] = record
     rows = []
-    for (test, metric, os_name, series), record in sorted(latest.items()):
-        rows.append((test, metric, os_name, series, float(record["value_ns"])))
+    for (test, metric, os_name, revision, series), record in sorted(latest.items()):
+        rows.append((test, metric, os_name, revision, series, float(record["value_ns"])))
     return rows
+
+
+def compare_revisions(records: list[dict]) -> list[dict]:
+    by_key: dict[tuple[str, str, str, str, str, int], dict[str, dict]] = defaultdict(dict)
+    for record in records:
+        revision = str(record.get("revision", "current"))
+        if revision not in {"baseline", "pr"}:
+            continue
+        key = (
+            str(record.get("test", "")),
+            str(record.get("metric", "")),
+            str(record.get("os", "")),
+            str(record.get("series", "")),
+            str(record.get("x_name", "x")),
+            int(record["x"]),
+        )
+        by_key[key][revision] = record
+
+    rows = []
+    for (test, metric, os_name, series, x_name, x), pair in by_key.items():
+        if "baseline" not in pair or "pr" not in pair:
+            continue
+        baseline = float(pair["baseline"]["value_ns"])
+        current = float(pair["pr"]["value_ns"])
+        if baseline <= 0:
+            continue
+        percent = (current - baseline) * 100.0 / baseline
+        rows.append(
+            {
+                "test": test,
+                "metric": metric,
+                "os": os_name,
+                "series": series,
+                "x_name": x_name,
+                "x": x,
+                "baseline": baseline,
+                "pr": current,
+                "percent": percent,
+            }
+        )
+    return sorted(rows, key=lambda row: abs(float(row["percent"])), reverse=True)
+
+
+def change_label(percent: float, threshold: float = 15.0) -> str:
+    if percent >= threshold:
+        return "major regression"
+    if percent <= -threshold:
+        return "major improvement"
+    if percent > 0:
+        return "regression"
+    if percent < 0:
+        return "improvement"
+    return "unchanged"
+
+
+def append_delta_table(lines: list[str], deltas: list[dict], major_only: bool) -> None:
+    threshold = 15.0
+    rows = [
+        row
+        for row in deltas
+        if not major_only or abs(float(row["percent"])) >= threshold
+    ]
+    if major_only:
+        lines.extend(["", "## Major Performance Changes", ""])
+        if not rows:
+            lines.append("No matched PR-vs-baseline latency deltas exceeded 15%.")
+            return
+    else:
+        lines.extend(["", "## Largest PR vs Baseline Deltas", ""])
+        rows = rows[:20]
+        if not rows:
+            lines.append("No baseline records were available for comparison.")
+            return
+
+    lines.extend(
+        [
+            "| Change | Test | Metric | OS | Series | X | Baseline (ns) | PR (ns) | Delta |",
+            "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in rows:
+        percent = float(row["percent"])
+        lines.append(
+            f"| {change_label(percent)} | {row['test']} | {row['metric']} | "
+            f"{row['os']} | {row['series']} | {row['x_name']}={row['x']} | "
+            f"{row['baseline']:,.0f} | {row['pr']:,.0f} | {percent:+.1f}% |"
+        )
 
 
 def write_reports(records: list[dict], output_dir: Path, run_url: str) -> None:
@@ -186,18 +388,21 @@ def write_reports(records: list[dict], output_dir: Path, run_url: str) -> None:
     )
 
     rows = summarize(records)
+    deltas = compare_revisions(records)
     summary_lines = [
         "# Optimized Latency Report",
         "",
         f"Parsed {len(records)} latency records.",
         "",
-        "| Test | Metric | OS | Series | Latest Value (ns) |",
-        "| --- | --- | --- | --- | ---: |",
+        "| Test | Metric | OS | Revision | Series | Latest Value (ns) |",
+        "| --- | --- | --- | --- | --- | ---: |",
     ]
-    for test, metric, os_name, series, value in rows:
+    for test, metric, os_name, revision, series, value in rows:
         summary_lines.append(
-            f"| {test} | {metric} | {os_name} | {series} | {value:,.0f} |"
+            f"| {test} | {metric} | {os_name} | {revision} | {series} | {value:,.0f} |"
         )
+    append_delta_table(summary_lines, deltas, major_only=True)
+    append_delta_table(summary_lines, deltas, major_only=False)
     summary_lines.extend(["", "## Charts", ""])
     for chart_file in chart_files:
         rel = chart_file.relative_to(output_dir)
@@ -214,13 +419,14 @@ def write_reports(records: list[dict], output_dir: Path, run_url: str) -> None:
         "",
         f"Parsed {len(records)} latency records from optimized latency runs.",
         "",
-        "| Test | Metric | OS | Series | Latest Value (ns) |",
-        "| --- | --- | --- | --- | ---: |",
+        "| Test | Metric | OS | Revision | Series | Latest Value (ns) |",
+        "| --- | --- | --- | --- | --- | ---: |",
     ]
-    for test, metric, os_name, series, value in rows:
+    for test, metric, os_name, revision, series, value in rows:
         comment_lines.append(
-            f"| {test} | {metric} | {os_name} | {series} | {value:,.0f} |"
+            f"| {test} | {metric} | {os_name} | {revision} | {series} | {value:,.0f} |"
         )
+    append_delta_table(comment_lines, deltas, major_only=True)
     comment_lines.extend(
         [
             "",
