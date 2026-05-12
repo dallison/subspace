@@ -65,6 +65,7 @@ jobs:
         run: |
           bazel test \
             //client:client_test \
+            //c_client:client_test \
             --verbose_failures \
             --test_output=errors \
             --test_arg=--use_split_buffers \
@@ -109,7 +110,7 @@ jobs:
             mode: valgrind
             experimental: false
             bazel_flags:
-            run_under: --run_under='valgrind --error-exitcode=1 --errors-for-leak-kinds=definite'
+            run_under: --run_under='valgrind --tool=memcheck --leak-check=full --show-leak-kinds=definite,indirect --errors-for-leak-kinds=definite,indirect --error-exitcode=1'
 
     steps:
       - name: Checkout code
@@ -128,11 +129,28 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y valgrind
 
-      - name: Run ${{ matrix.mode }} client test
+      - name: Run ${{ matrix.mode }} C client test
+        run: |
+          set +e
+          bazel test \
+            //c_client:client_test \
+            --verbose_failures \
+            --test_output=errors \
+            ${{ matrix.bazel_flags }} \
+            ${{ matrix.run_under }}
+          status=$?
+          if [ "$status" -ne 0 ] && [ "${{ matrix.experimental }}" = "true" ]; then
+            echo "::warning::Experimental ${{ matrix.mode }} diagnostics failed with exit code $status"
+            exit 0
+          fi
+          exit "$status"
+
+      - name: Run ${{ matrix.mode }} split-buffer client tests
         run: |
           set +e
           bazel test \
             //client:client_test \
+            //c_client:client_test \
             --verbose_failures \
             --test_output=errors \
             --test_arg=--use_split_buffers \
