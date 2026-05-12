@@ -404,6 +404,7 @@ message ShadowEvent {
     ShadowStateDone state_done = 9;
     ShadowRegisterClientBuffer register_client_buffer = 10;
     ShadowUnregisterClientBuffer unregister_client_buffer = 11;
+    ShadowUpdateChannelOptions update_channel_options = 12;
   }
 }
 
@@ -488,4 +489,12 @@ message ShadowUnregisterClientBuffer {
   string channel_name = 1;
   uint64 session_id = 2;
   uint32 buffer_index = 3;
+}
+
+message ShadowUpdateChannelOptions {
+  string channel_name = 1;
+  bool has_split_buffer_options = 2;
+  bool use_split_buffers = 3;
+  bool has_max_publishers = 4;
+  int32 max_publishers = 5;
 }

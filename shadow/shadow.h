@@ -126,6 +126,8 @@ private:
   HandleRegisterClientBuffer(const ShadowRegisterClientBuffer &msg);
   absl::Status
   HandleUnregisterClientBuffer(const ShadowUnregisterClientBuffer &msg);
+  absl::Status
+  HandleUpdateChannelOptions(const ShadowUpdateChannelOptions &msg);
 
   co::CoroutineScheduler &scheduler_;
   std::string socket_name_;

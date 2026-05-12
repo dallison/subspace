@@ -10,9 +10,22 @@
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <vector>
 
 namespace subspace {
 namespace {
+
+std::string UniqueShadowFile(const std::string &suffix) {
+  std::string path = "/tmp/subspace_split_buffer_test_" + suffix + "_XXXXXX";
+  std::vector<char> buffer(path.begin(), path.end());
+  buffer.push_back('\0');
+  int fd = mkstemp(buffer.data());
+  if (fd >= 0) {
+    close(fd);
+    unlink(buffer.data());
+  }
+  return std::string(buffer.data());
+}
 
 SplitBufferMetadata TestMetadata(const std::string &suffix) {
   SplitBufferMetadata metadata;
@@ -24,8 +37,7 @@ SplitBufferMetadata TestMetadata(const std::string &suffix) {
   metadata.full_size = 123;
   metadata.allocation_size = 4096;
   metadata.handle = 1234;
-  metadata.shadow_file = "/tmp/subspace_split_buffer_test_" +
-                         std::to_string(getpid()) + "_" + suffix;
+  metadata.shadow_file = UniqueShadowFile(suffix);
   metadata.object_name = SplitBufferObjectName(metadata.shadow_file);
   return metadata;
 }

@@ -244,6 +244,22 @@ void ShadowReplicator::SendUnregisterClientBuffer(
   SendEvent(event);
 }
 
+void ShadowReplicator::SendUpdateChannelOptions(const ServerChannel *channel) {
+  ShadowEvent event;
+  auto *msg = event.mutable_update_channel_options();
+  msg->set_channel_name(channel->Name());
+  if (channel->HasSplitBufferOptions()) {
+    msg->set_has_split_buffer_options(true);
+    msg->set_use_split_buffers(
+        channel->GetSplitBufferOptions().use_split_buffers);
+  }
+  if (channel->MaxPublishers() > 0) {
+    msg->set_has_max_publishers(true);
+    msg->set_max_publishers(channel->MaxPublishers());
+  }
+  SendEvent(event);
+}
+
 absl::StatusOr<ShadowEvent>
 ShadowReplicator::ReceiveEvent(std::vector<toolbelt::FileDescriptor> &fds) {
   absl::StatusOr<std::vector<char>> recv =

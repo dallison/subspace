@@ -184,6 +184,8 @@ absl::Status Shadow::HandleEvent(const ShadowEvent &event,
     return HandleRegisterClientBuffer(event.register_client_buffer());
   case ShadowEvent::kUnregisterClientBuffer:
     return HandleUnregisterClientBuffer(event.unregister_client_buffer());
+  case ShadowEvent::kUpdateChannelOptions:
+    return HandleUpdateChannelOptions(event.update_channel_options());
   case ShadowEvent::kStateDump:
   case ShadowEvent::kStateDone:
     return absl::OkStatus();
@@ -413,6 +415,23 @@ Shadow::HandleUnregisterClientBuffer(const ShadowUnregisterClientBuffer &msg) {
                               buffer.buffer_index == msg.buffer_index();
                      }),
       buffers.end());
+  return absl::OkStatus();
+}
+
+absl::Status
+Shadow::HandleUpdateChannelOptions(const ShadowUpdateChannelOptions &msg) {
+  auto it = channels_.find(msg.channel_name());
+  if (it == channels_.end()) {
+    return absl::InternalError(absl::StrFormat(
+        "Shadow: update channel options for unknown channel '%s'",
+        msg.channel_name()));
+  }
+
+  ShadowChannel &channel = it->second;
+  channel.has_split_buffer_options = msg.has_split_buffer_options();
+  channel.use_split_buffers = msg.use_split_buffers();
+  channel.has_max_publishers = msg.has_max_publishers();
+  channel.max_publishers = msg.max_publishers();
   return absl::OkStatus();
 }
 

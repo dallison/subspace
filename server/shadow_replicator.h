@@ -104,6 +104,7 @@ public:
   void SendRegisterClientBuffer(const ClientBufferHandleMetadata &metadata);
   void SendUnregisterClientBuffer(const std::string &channel_name,
                                   uint64_t session_id, uint32_t buffer_index);
+  void SendUpdateChannelOptions(const ServerChannel *channel);
 
 private:
   void SendEvent(const ShadowEvent &event,

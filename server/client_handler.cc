@@ -420,7 +420,7 @@ void ClientHandler::HandleCreatePublisher(
     return;
   }
   server_->ForEachShadow([&](const std::unique_ptr<ShadowReplicator> &shadow) {
-    shadow->SendCreateChannel(split_channel);
+    shadow->SendUpdateChannelOptions(split_channel);
   });
   PublisherUser *pub = nullptr;
   bool reclaimed = false;
