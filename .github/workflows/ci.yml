@@ -152,6 +152,51 @@ jobs:
           name: bazel-diagnostic-test-logs-${{ matrix.os }}-${{ matrix.mode }}
           path: bazel-testlogs
 
+  latency:
+    name: latency (${{ matrix.platform }}, opt)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            bazel_flags: -c opt
+          - os: macos-latest
+            platform: macos
+            bazel_flags: --config=macos_arm64 -c opt
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Bazel
+        uses: bazel-contrib/setup-bazel@0.18.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-${{ matrix.os }}-latency-opt
+          repository-cache: true
+
+      - name: Run optimized latency tests
+        run: |
+          bazel test \
+            //client:latency_test \
+            --test_filter=LatencyTest.PublisherLatencyHistogram:LatencyTest.SubscriberLatency:LatencyTest.PubSubLatency \
+            --verbose_failures \
+            --test_output=all \
+            --test_env=SUBSPACE_LATENCY_OS=${{ matrix.platform }} \
+            --test_env=SUBSPACE_LATENCY_MODE=opt \
+            --test_env=SUBSPACE_LATENCY_REVISION=current \
+            ${{ matrix.bazel_flags }}
+
+      - name: Upload latency Bazel test logs
+        uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: bazel-latency-test-logs-${{ matrix.platform }}
+          path: bazel-testlogs/client/latency_test
+
   cmake:
     name: cmake (${{ matrix.build_type }})
     runs-on: ubuntu-latest
