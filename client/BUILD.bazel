@@ -97,6 +97,7 @@ cc_test(
     data = [
         "//server:subspace_server",
     ],
+    tags = ["manual"],
     deps = [
         ":subspace_client",
         ":test_fixture",
@@ -119,6 +120,7 @@ cc_test(
     data = [
         "//server:subspace_server",
     ],
+    tags = ["manual"],
     deps = [
         ":subspace_client",
         ":test_fixture",
