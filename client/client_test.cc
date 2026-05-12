@@ -48,6 +48,10 @@ static void SignalHandler(int sig) {
 
 using InetAddress = toolbelt::InetAddress;
 
+#ifdef __APPLE__
+extern "C" subspace::PluginInterface *NOP_Create();
+#endif
+
 class ClientTest : public SubspaceTestBase {};
 
 struct TestSplitAllocation {
@@ -1083,7 +1087,8 @@ TEST_F(ClientTest, PublishSingleMessageAndReadWithCallback) {
 
 TEST_F(ClientTest, PublishSingleMessageAndReadWithPlugin) {
 #ifdef __APPLE__
-  ASSERT_OK(Server()->LoadPlugin("NOP", "BUILTIN"));
+  ASSERT_OK(Server()->LoadBuiltinPlugin(
+      "NOP", std::unique_ptr<subspace::PluginInterface>(NOP_Create())));
 #else
   ASSERT_OK(Server()->LoadPlugin("NOP", "plugins/nop_plugin.so"));
 #endif
@@ -5268,7 +5273,8 @@ public:
         /*wait_for_clients=*/true);
 
 #ifdef __APPLE__
-    auto status = server_->LoadPlugin("NOP", "BUILTIN");
+    auto status = server_->LoadBuiltinPlugin(
+        "NOP", std::unique_ptr<subspace::PluginInterface>(NOP_Create()));
 #else
     auto status = server_->LoadPlugin("NOP", "plugins/nop_plugin.so");
 #endif

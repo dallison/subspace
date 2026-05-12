@@ -1948,16 +1948,29 @@ absl::Status Server::LoadPlugin(const std::string &name,
   // Call the init function to get the interface.
   using InitFunc = PluginInterface *(*)();
   InitFunc init = reinterpret_cast<InitFunc>(func);
-  auto interface = init();
+  std::unique_ptr<PluginInterface> interface(init());
 
+  return RegisterPlugin(name, handle, std::move(interface));
+}
+
+absl::Status
+Server::LoadBuiltinPlugin(const std::string &name,
+                          std::unique_ptr<PluginInterface> interface) {
+  std::lock_guard<std::mutex> lock(plugin_lock_);
+  return RegisterPlugin(name, nullptr, std::move(interface));
+}
+
+absl::Status
+Server::RegisterPlugin(const std::string &name, void *handle,
+                       std::unique_ptr<PluginInterface> interface) {
   // Call the OnStartup function in the loaded plugin.
   absl::Status status = interface->OnStartup(*this, name);
   if (!status.ok()) {
     return status;
   }
   interface->SetScheduler(scheduler_);
-  plugins_.push_back(std::make_unique<Plugin>(
-      name, handle, std::unique_ptr<PluginInterface>(interface)));
+  plugins_.push_back(
+      std::make_unique<Plugin>(name, handle, std::move(interface)));
   return absl::OkStatus();
 }
 

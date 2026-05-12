@@ -107,6 +107,8 @@ public:
   void CleanupAfterSession();
 
   absl::Status LoadPlugin(const std::string &name, const std::string &path);
+  absl::Status LoadBuiltinPlugin(const std::string &name,
+                                 std::unique_ptr<PluginInterface> interface);
   absl::Status UnloadPlugin(const std::string &name);
 
   virtual co::CoroutineScheduler &GetScheduler() { return scheduler_; }
@@ -203,6 +205,8 @@ private:
                          const toolbelt::InetAddress &sender,
                          const std::string &server_id);
   void GratuitousAdvertiseCoroutine();
+  absl::Status RegisterPlugin(const std::string &name, void *handle,
+                              std::unique_ptr<PluginInterface> interface);
   absl::Status SendSubscribeMessage(const std::string &channel_name,
                                     bool reliable,
                                     toolbelt::InetAddress publisher,
