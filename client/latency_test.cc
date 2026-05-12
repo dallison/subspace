@@ -9,9 +9,11 @@
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
 #include "toolbelt/pipe.h"
+#include <cstdlib>
 #include <fstream>
 #include <inttypes.h>
 #include <limits>
+#include <string>
 #include <sys/resource.h>
 
 ABSL_FLAG(bool, start_server, true, "Start the subspace server");
@@ -22,6 +24,28 @@ ABSL_FLAG(bool, use_split_buffers, false,
 using InetAddress = toolbelt::InetAddress;
 
 class LatencyTest : public SubspaceTestBase {};
+
+const char *LatencyEnvOrDefault(const char *name, const char *default_value) {
+  const char *value = std::getenv(name);
+  return value == nullptr || value[0] == '\0' ? default_value : value;
+}
+
+void EmitLatencyMetric(const std::string &test, const std::string &series,
+                       const std::string &x_name, uint64_t x,
+                       const std::string &metric, uint64_t value_ns) {
+  std::cerr << "LATENCY_JSON {"
+            << "\"test\":\"" << test << "\","
+            << "\"series\":\"" << series << "\","
+            << "\"x_name\":\"" << x_name << "\","
+            << "\"x\":" << x << ","
+            << "\"metric\":\"" << metric << "\","
+            << "\"value_ns\":" << value_ns << ","
+            << "\"os\":\"" << LatencyEnvOrDefault("SUBSPACE_LATENCY_OS", "local")
+            << "\","
+            << "\"mode\":\""
+            << LatencyEnvOrDefault("SUBSPACE_LATENCY_MODE", "local") << "\""
+            << "}\n";
+}
 
 int LatencyValueForSplitBuffers(int normal_value, int split_buffer_value,
                                 int low_resource_value = -1) {
@@ -798,23 +822,35 @@ TEST_F(LatencyTest, PublisherLatencyHistogram) {
   ASSERT_OK(sub_client.Init(Socket()));
 
   std::cerr << "num_slots,min,median,p99,max,average\n";
-  auto show_latencies = [](std::vector<uint64_t> &latencies) {
+  auto show_latencies = [](std::vector<uint64_t> &latencies,
+                           const std::string &test, const std::string &series,
+                           const std::string &x_name, uint64_t x) {
     // Sort latencies.
     std::sort(latencies.begin(), latencies.end());
     // Min latency.
-    std::cerr << latencies.front() << ",";
+    uint64_t min = latencies.front();
+    std::cerr << min << ",";
     // Median.
-    std::cerr << latencies[latencies.size() / 2] << ",";
+    uint64_t median = latencies[latencies.size() / 2];
+    std::cerr << median << ",";
     // P99 latency.
-    std::cerr << latencies[latencies.size() * 99 / 100] << ",";
+    uint64_t p99 = latencies[latencies.size() * 99 / 100];
+    std::cerr << p99 << ",";
     // Max latency.
-    std::cerr << latencies.back() << ",";
+    uint64_t max = latencies.back();
+    std::cerr << max << ",";
     // Average latency.
     uint64_t sum = 0;
     for (auto &l : latencies) {
       sum += l;
     }
-    std::cerr << sum / latencies.size() << "\n";
+    uint64_t average = sum / latencies.size();
+    std::cerr << average << "\n";
+    EmitLatencyMetric(test, series, x_name, x, "min", min);
+    EmitLatencyMetric(test, series, x_name, x, "median", median);
+    EmitLatencyMetric(test, series, x_name, x, "p99", p99);
+    EmitLatencyMetric(test, series, x_name, x, "max", max);
+    EmitLatencyMetric(test, series, x_name, x, "average", average);
   };
   const int kNumMessages = LatencyValueForSplitBuffers(20000, 5000);
   for (int num_slots = 10;
@@ -849,7 +885,8 @@ TEST_F(LatencyTest, PublisherLatencyHistogram) {
       ASSERT_EQ(100, msg->length);
     }
 
-    show_latencies(latencies);
+    show_latencies(latencies, "PublisherLatencyHistogram", "with_retirement",
+                   "num_slots", num_slots);
     latencies.clear();
     std::cerr << num_slots << ",";
 
@@ -880,7 +917,8 @@ TEST_F(LatencyTest, PublisherLatencyHistogram) {
       uint64_t end = toolbelt::Now();
       latencies.push_back(end - start_time);
     }
-    show_latencies(latencies);
+    show_latencies(latencies, "PublisherLatencyHistogram", "no_retirement",
+                   "num_slots", num_slots);
   }
 }
 
@@ -2044,7 +2082,10 @@ TEST_F(LatencyTest, SubscriberLatency) {
       ASSERT_EQ(100, msg->length);
     }
     uint64_t end = toolbelt::Now();
-    std::cerr << num_slots << "," << (end - start) / (num_slots - 1) << "\n";
+    uint64_t average = (end - start) / (num_slots - 1);
+    std::cerr << num_slots << "," << average << "\n";
+    EmitLatencyMetric("SubscriberLatency", "read_messages", "num_slots",
+                      num_slots, "average", average);
   }
 }
 
@@ -2079,7 +2120,10 @@ TEST_F(LatencyTest, PubSubLatency) {
       ASSERT_EQ(100, msg->length);
     }
     uint64_t end = toolbelt::Now();
-    std::cerr << num_messages << "," << (end - start) / num_messages << "\n";
+    uint64_t average = (end - start) / num_messages;
+    std::cerr << num_messages << "," << average << "\n";
+    EmitLatencyMetric("PubSubLatency", "publish_and_read", "num_messages",
+                      num_messages, "average", average);
   }
 }
 
