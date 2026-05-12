@@ -313,6 +313,7 @@ def compare_revisions(records: list[dict]) -> list[dict]:
                 "x": x,
                 "baseline": baseline,
                 "pr": current,
+                "delta_ns": current - baseline,
                 "percent": percent,
             }
         )
@@ -359,8 +360,8 @@ def append_delta_table(lines: list[str], deltas: list[dict], major_only: bool) -
 
     lines.extend(
         [
-            "| Change | Test | Metric | OS | Series | X | Baseline (ns) | PR (ns) | Delta |",
-            "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: |",
+            "| Change | Test | Metric | OS | Series | X | Baseline (ns) | PR (ns) | Delta (ns) | Delta (%) |",
+            "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for row in rows:
@@ -368,7 +369,8 @@ def append_delta_table(lines: list[str], deltas: list[dict], major_only: bool) -
         lines.append(
             f"| {change_label(percent)} | {row['test']} | {row['metric']} | "
             f"{row['os']} | {row['series']} | {row['x_name']}={row['x']} | "
-            f"{row['baseline']:,.0f} | {row['pr']:,.0f} | {percent:+.1f}% |"
+            f"{row['baseline']:,.0f} | {row['pr']:,.0f} | "
+            f"{row['delta_ns']:+,.0f} | {percent:+.1f}% |"
         )
 
 

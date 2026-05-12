@@ -4,8 +4,6 @@ on: [push, pull_request]
 
 permissions:
   contents: read
-  pull-requests: write
-  issues: write
 
 jobs:
   test:
@@ -153,117 +151,6 @@ jobs:
         with:
           name: bazel-diagnostic-test-logs-${{ matrix.os }}-${{ matrix.mode }}
           path: bazel-testlogs
-
-  latency:
-    name: latency (${{ matrix.platform }}, opt)
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            platform: linux
-            bazel_flags: -c opt
-          - os: macos-latest
-            platform: macos
-            bazel_flags: --config=macos_arm64 -c opt
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Install Bazel
-        uses: bazel-contrib/setup-bazel@0.18.0
-        with:
-          bazelisk-cache: true
-          disk-cache: ${{ github.workflow }}-${{ matrix.os }}-latency-opt
-          repository-cache: true
-
-      - name: Run baseline optimized latency tests
-        if: github.event_name == 'pull_request'
-        run: |
-          git fetch --no-tags --depth=1 origin ${{ github.event.pull_request.base.sha }}
-          git checkout --force ${{ github.event.pull_request.base.sha }}
-          bazel test \
-            //client:latency_test \
-            --test_filter=LatencyTest.PublisherLatencyHistogram:LatencyTest.SubscriberLatency:LatencyTest.PubSubLatency \
-            --verbose_failures \
-            --test_output=all \
-            --test_env=SUBSPACE_LATENCY_OS=${{ matrix.platform }} \
-            --test_env=SUBSPACE_LATENCY_MODE=opt \
-            --test_env=SUBSPACE_LATENCY_REVISION=baseline \
-            ${{ matrix.bazel_flags }}
-          mkdir -p latency-records
-          cp bazel-testlogs/client/latency_test/test.log latency-records/latency-${{ matrix.platform }}-baseline.log
-
-      - name: Run optimized latency tests
-        run: |
-          git checkout --force "$GITHUB_SHA"
-          bazel test \
-            //client:latency_test \
-            --test_filter=LatencyTest.PublisherLatencyHistogram:LatencyTest.SubscriberLatency:LatencyTest.PubSubLatency \
-            --verbose_failures \
-            --test_output=all \
-            --test_env=SUBSPACE_LATENCY_OS=${{ matrix.platform }} \
-            --test_env=SUBSPACE_LATENCY_MODE=opt \
-            --test_env=SUBSPACE_LATENCY_REVISION=${{ github.event_name == 'pull_request' && 'pr' || 'current' }} \
-            ${{ matrix.bazel_flags }}
-          mkdir -p latency-records
-          cp bazel-testlogs/client/latency_test/test.log latency-records/latency-${{ matrix.platform }}-${{ github.event_name == 'pull_request' && 'pr' || 'current' }}.log
-
-      - name: Upload latency records
-        uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: latency-records-${{ matrix.platform }}
-          path: latency-records
-
-  latency-report:
-    name: latency report
-    runs-on: ubuntu-latest
-    needs: latency
-    if: always() && !cancelled() && needs.latency.result == 'success'
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Download latency records
-        uses: actions/download-artifact@v7
-        with:
-          pattern: latency-records-*
-          path: latency-records
-          merge-multiple: true
-
-      - name: Render latency report
-        run: |
-          python3 tools/render_latency_report.py \
-            --output-dir latency-report \
-            --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            latency-records
-          cat latency-report/summary.md >> "${GITHUB_STEP_SUMMARY}"
-
-      - name: Upload latency report
-        uses: actions/upload-artifact@v7
-        with:
-          name: latency-report
-          path: latency-report
-
-      - name: Comment on PR
-        if: github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          marker='<!-- subspace-latency-report -->'
-          comment_id="$(gh api "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments" --jq "map(select(.user.type == \"Bot\" and (.body | contains(\"${marker}\"))))[0].id // \"\"")"
-          if [ -n "${comment_id}" ]; then
-            gh api -X PATCH "repos/${REPOSITORY}/issues/comments/${comment_id}" -f body="$(cat latency-report/comment.md)"
-          else
-            gh pr comment "${PR_NUMBER}" --body-file latency-report/comment.md
-          fi
 
   cmake:
     name: cmake (${{ matrix.build_type }})
