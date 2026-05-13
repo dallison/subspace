@@ -28,6 +28,7 @@ It has the following features:
 1.	Both unreliable and reliable communications between publishers and subscribers.
 1.	Ability to read the next or newest message in a channel.
 1.	File-descriptor-based event triggers.
+1.	Optional split payload buffers for external allocators and memory pools.
 1.	Automatic UDP discovery and TCP bridging of channels between servers.
 1.	Shadow process for crash recovery -- the server can restart and resume without losing shared memory state.
 1.	Shared and weak pointers for message references.
@@ -37,6 +38,8 @@ It has the following features:
 
 See the file docs/subspace.pdf for full documentation.  Additional documentation:
 - [Checksums and User Metadata](docs/checksums-and-metadata.md)
+- [Split Buffers](docs/split-buffers.md)
+- [C Client API](docs/c-client.md)
 - [Client Architecture](docs/client-architecture.md)
 - [Server Architecture](docs/server-architecture.md)
 - [Rust Client](docs/rust-client.md)
@@ -1143,6 +1146,10 @@ int main() {
 
 Subspace provides a C API (`c_client/subspace.h`) for applications that need to use Subspace from C code or integrate it into other language bindings. The C API is simpler and has fewer dependencies than the C++ API, making it easier to integrate into projects that don't use C++.
 
+For the full C API surface, including split buffers, metadata, checksum
+callbacks, bulk reads, stats, counters, and diagnostics, see
+[C Client API](docs/c-client.md).
+
 ### Error Handling
 
 The C API uses a thread-local error mechanism similar to `errno`. Most functions return a boolean indicating success (`true`) or failure (`false`). When a function fails, you can check for errors and retrieve the error message:
@@ -1474,12 +1481,17 @@ int main() {
 }
 ```
 
-### C API Reference
+### Core C API Reference
+
+This is a quick reference for the most common calls. See
+[C Client API](docs/c-client.md) for the complete current API.
 
 **Client Functions:**
 - `SubspaceClient subspace_create_client(void)`
 - `SubspaceClient subspace_create_client_with_socket(const char *socket_name)`
 - `SubspaceClient subspace_create_client_with_socket_and_name(const char *socket_name, const char *client_name)`
+- `bool subspace_set_client_debug(SubspaceClient client, bool debug)`
+- `bool subspace_channel_exists(SubspaceClient client, const char *channel_name, bool *exists)`
 - `bool subspace_remove_client(SubspaceClient *client)`
 
 **Publisher Functions:**
@@ -1487,10 +1499,15 @@ int main() {
 - `SubspacePublisher subspace_create_publisher(SubspaceClient client, const char *channel_name, SubspacePublisherOptions options)`
 - `SubspaceMessageBuffer subspace_get_message_buffer(SubspacePublisher publisher, size_t max_size)`
 - `const SubspaceMessage subspace_publish_message(SubspacePublisher publisher, size_t messageSize)`
+- `bool subspace_cancel_publish(SubspacePublisher publisher)`
 - `bool subspace_wait_for_publisher(SubspacePublisher publisher)`
+- `bool subspace_wait_for_publisher_with_timeout(SubspacePublisher publisher, uint64_t timeout_ms)`
 - `int subspace_wait_for_publisher_with_fd(SubspacePublisher publisher, int fd)`
 - `struct pollfd subspace_get_publisher_poll_fd(SubspacePublisher publisher)`
 - `int subspace_get_publisher_fd(SubspacePublisher publisher)`
+- `bool subspace_publisher_uses_split_buffers(SubspacePublisher publisher)`
+- `void *subspace_get_publisher_metadata(SubspacePublisher publisher, size_t *out_size)`
+- `bool subspace_register_publisher_checksum_callback(SubspacePublisher publisher, SubspaceChecksumCallback callback, void *user_data)`
 - `bool subspace_register_resize_callback(SubspacePublisher publisher, bool (*callback)(SubspacePublisher, int32_t, int32_t))`
 - `bool subspace_unregister_resize_callback(SubspacePublisher publisher)`
 - `bool subspace_remove_publisher(SubspacePublisher *publisher)`
@@ -1500,14 +1517,21 @@ int main() {
 - `SubspaceSubscriber subspace_create_subscriber(SubspaceClient client, const char *channel_name, SubspaceSubscriberOptions options)`
 - `SubspaceMessage subspace_read_message(SubspaceSubscriber subscriber)`
 - `SubspaceMessage subspace_read_message_with_mode(SubspaceSubscriber subscriber, SubspaceReadMode mode)`
+- `SubspaceMessage subspace_find_message(SubspaceSubscriber subscriber, uint64_t timestamp)`
+- `bool subspace_get_all_messages(SubspaceSubscriber subscriber, SubspaceReadMode mode, SubspaceMessage **messages, size_t *count)`
 - `bool subspace_free_message(SubspaceMessage *message)`
+- `bool subspace_free_messages(SubspaceMessage *messages, size_t count)`
 - `bool subspace_wait_for_subscriber(SubspaceSubscriber subscriber)`
+- `bool subspace_wait_for_subscriber_with_timeout(SubspaceSubscriber subscriber, uint64_t timeout_ms)`
 - `int subspace_wait_for_subscriber_with_fd(SubspaceSubscriber subscriber, int fd)`
 - `struct pollfd subspace_get_subscriber_poll_fd(SubspaceSubscriber subscriber)`
 - `int subspace_get_subscriber_fd(SubspaceSubscriber subscriber)`
 - `int32_t subspace_get_subscriber_slot_size(SubspaceSubscriber subscriber)`
 - `int subspace_get_subscriber_num_slots(SubspaceSubscriber subscriber)`
 - `SubspaceTypeInfo subspace_get_subscriber_type(SubspaceSubscriber subscriber)`
+- `bool subspace_subscriber_uses_split_buffers(SubspaceSubscriber subscriber)`
+- `const void *subspace_get_subscriber_metadata(SubspaceSubscriber subscriber, size_t *out_size)`
+- `bool subspace_register_subscriber_checksum_callback(SubspaceSubscriber subscriber, SubspaceChecksumCallback callback, void *user_data)`
 - `bool subspace_register_subscriber_callback(SubspaceSubscriber subscriber, void (*callback)(SubspaceSubscriber, SubspaceMessage))`
 - `bool subspace_remove_subscriber_callback(SubspaceSubscriber subscriber)`
 - `bool subspace_register_dropped_message_callback(SubspaceSubscriber subscriber, void (*callback)(SubspaceSubscriber, int64_t))`
