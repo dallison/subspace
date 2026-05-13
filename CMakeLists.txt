@@ -144,6 +144,14 @@ add_subdirectory(shadow)
 add_subdirectory(c_client)
 add_subdirectory(rust_client)
 
+if(TARGET client_test AND TARGET nop_plugin)
+    add_dependencies(client_test nop_plugin)
+endif()
+
+if(TARGET client_test AND TARGET split_buffer_free_test_plugin)
+    add_dependencies(client_test split_buffer_free_test_plugin)
+endif()
+
 # --- Python bindings and tests ---
 if(SUBSPACE_PYTHON)
     add_subdirectory(client/python)

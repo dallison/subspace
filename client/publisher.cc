@@ -7,6 +7,7 @@
 #include "client_channel.h"
 #include "toolbelt/clock.h"
 #include <atomic>
+#include <thread>
 namespace subspace {
 namespace details {
 
@@ -24,6 +25,19 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
     while (current_slot_size < final_slot_size ||
            buffers_.size() < size_t(num_buffers)) {
       size_t buffer_index = buffers_.size();
+      if (UseSplitBuffers()) {
+        auto split_buffer =
+            CreateSplitBufferSet(buffer_index, final_buffer_size,
+                                 final_slot_size);
+        if (!split_buffer.ok()) {
+          return split_buffer.status();
+        }
+        bcb_->sizes[buffers_.size()].store(final_buffer_size,
+                                           std::memory_order_relaxed);
+        buffers_.push_back(std::move(*split_buffer));
+        current_slot_size = final_slot_size;
+        continue;
+      }
       auto shm_fd = CreateBuffer(buffer_index, final_buffer_size);
       if (!shm_fd.ok()) {
         return shm_fd.status();
@@ -90,7 +104,9 @@ void PublisherImpl::SetSlotToBiggestBuffer(MessageSlot *slot) {
   if (slot->buffer_index != -1) {
     // If the slot has a buffer (it's not in the free list), decrement the
     // refs for the buffer.
-    DecrementBufferRefs(slot->buffer_index);
+    if (bcb_->refs[slot->buffer_index].load(std::memory_order_relaxed) > 0) {
+      DecrementBufferRefs(slot->buffer_index);
+    }
   }
   slot->buffer_index = buffers_.size() - 1; // Use biggest buffer.
   IncrementBufferRefs(slot->buffer_index);
@@ -118,6 +134,9 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
   // FreeSlots if the subscriber falls behind.
   const bool retired_first = options_.PreferRetiredSlots();
   for (;;) {
+    slot = nullptr;
+    retired_slot = -1;
+    free_slot = -1;
     CheckReload();
     bool tried_first = false;
     if (retired_first) {
@@ -217,8 +236,11 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
       break;
     }
     if (++cas_retries >= max_cas_retries) {
-      // Rather than spinning forever, let's just give up and return nullptr.
-      return nullptr;
+      if (retries-- == 0) {
+        return nullptr;
+      }
+      cas_retries = 0;
+      std::this_thread::yield();
     }
   }
   slot->ordinal = 0;
@@ -250,11 +272,17 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
 }
 
 MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
+  int retries = num_slots_ * 1000;
   MessageSlot *slot = nullptr;
   int retired_slot = -1;
   int free_slot = -1;
   embargoed_slots_.ClearAll();
+  constexpr int max_cas_retries = 1000;
+  int cas_retries = 0;
   for (;;) {
+    slot = nullptr;
+    retired_slot = -1;
+    free_slot = -1;
     CheckReload();
 
     // Put all free slots into the active_slots vector.
@@ -348,6 +376,13 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
       RetiredSlots().Clear(slot->id);
       break;
     }
+    if (++cas_retries >= max_cas_retries) {
+      if (retries-- == 0) {
+        return nullptr;
+      }
+      cas_retries = 0;
+      std::this_thread::yield();
+    }
   }
   slot->ordinal = 0;
   slot->timestamp = 0;
@@ -380,8 +415,7 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     MessageSlot *slot, bool reliable, bool is_activation, int owner,
     bool omit_prefix, bool use_prefix_slot_id, bool for_tunnel) {
   void *buffer = GetBufferAddress(slot);
-  MessagePrefix *prefix = reinterpret_cast<MessagePrefix *>(
-      static_cast<char *>(buffer) - PrefixSize());
+  MessagePrefix *prefix = Prefix(slot);
 
   slot->ordinal = ccb_->ordinals.Next(slot->vchan_id);
   slot->timestamp = toolbelt::Now();

@@ -5,13 +5,13 @@
 #include "server/server_channel.h"
 #include "absl/strings/str_format.h"
 #include "server/server.h"
+#include <utility>
 #include <sys/mman.h>
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX && defined(__APPLE__)
 #include <sys/posix_shm.h>
 #endif
 
 namespace subspace {
-
 ServerChannel::~ServerChannel() {
   if (is_virtual_ || skip_cleanup_) {
     return;
@@ -88,6 +88,113 @@ CreateSystemControlBlock(toolbelt::FileDescriptor &fd) {
   SystemControlBlock *scb = reinterpret_cast<SystemControlBlock *>(*s);
   memset(&scb->counters, 0, sizeof(scb->counters));
   return scb;
+}
+
+absl::Status ServerChannel::ValidateOrSetSplitBufferOptions(
+    const SplitBufferOptions &options, bool set_if_missing,
+    const char *user_type) {
+  if (!split_buffer_options_set_) {
+    if (set_if_missing || options.use_split_buffers) {
+      split_buffer_options_ = options;
+      split_buffer_options_set_ = true;
+    }
+    return absl::OkStatus();
+  }
+
+  if (options.use_split_buffers &&
+      split_buffer_options_.use_split_buffers != options.use_split_buffers) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Inconsistent split-buffer mode for %s on channel %s", user_type,
+        Name()));
+  }
+  return absl::OkStatus();
+}
+
+absl::Status ServerChannel::ValidateOrSetMaxPublishers(
+    int32_t max_publishers, bool set_if_missing, const char *user_type) {
+  if (max_publishers < 0) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Invalid max_publishers %d for %s on channel %s: value must be "
+        "non-negative",
+        max_publishers, user_type, Name()));
+  }
+  if (!max_publishers_set_) {
+    if (set_if_missing || max_publishers > 0) {
+      max_publishers_ = max_publishers;
+      max_publishers_set_ = true;
+    }
+    return absl::OkStatus();
+  }
+  if (max_publishers_ != max_publishers) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Inconsistent max_publishers for %s on channel %s: already %d, not %d",
+        user_type, Name(), max_publishers_, max_publishers));
+  }
+  return absl::OkStatus();
+}
+
+void ServerChannel::RemoveBuffer(uint64_t session_id, Server *server) {
+  if (ccb_ == nullptr) {
+    return;
+  }
+  for (int i = 0; i < ccb_->num_buffers; i++) {
+    std::string filename = BufferSharedMemoryName(session_id, i);
+    for (const ClientBufferHandleMetadata &metadata : client_buffers_) {
+      if (metadata.session_id != session_id ||
+          metadata.buffer_index != static_cast<uint32_t>(i)) {
+        continue;
+      }
+      bool plugin_freed = false;
+      if (server != nullptr) {
+        absl::StatusOr<bool> freed =
+            server->FreeClientBufferWithPlugins(metadata);
+        if (freed.ok()) {
+          plugin_freed = *freed;
+        }
+      }
+      if (!plugin_freed && !metadata.object_name.empty()) {
+        (void)shm_unlink(metadata.object_name.c_str());
+      }
+      if (!metadata.shadow_file.empty()) {
+        (void)remove(metadata.shadow_file.c_str());
+      }
+    }
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
+    auto shm_name = PosixSharedMemoryName(filename);
+    if (shm_name.ok()) {
+      (void)shm_unlink(shm_name->c_str());
+    }
+    remove(filename.c_str());
+#else
+    (void)shm_unlink(filename.c_str());
+#endif
+  }
+  client_buffers_.clear();
+}
+
+uint64_t ServerChannel::GetVirtualMemoryUsage() const {
+  if (!split_buffer_options_set_ || !split_buffer_options_.use_split_buffers ||
+      ccb_ == nullptr || bcb_ == nullptr) {
+    return Channel::GetVirtualMemoryUsage();
+  }
+
+  uint64_t split_buffer_size = 0;
+  for (const ClientBufferHandleMetadata &metadata : client_buffers_) {
+    if (metadata.buffer_index >= static_cast<uint32_t>(ccb_->num_buffers)) {
+      continue;
+    }
+    if (bcb_->refs[metadata.buffer_index].load(std::memory_order_relaxed) <=
+        0) {
+      continue;
+    }
+    split_buffer_size += metadata.allocation_size;
+  }
+
+  if (split_buffer_size == 0) {
+    return Channel::GetVirtualMemoryUsage();
+  }
+  return sizeof(SystemControlBlock) + CcbSize(num_slots_) +
+         sizeof(BufferControlBlock) + split_buffer_size;
 }
 
 absl::StatusOr<SharedMemoryFds>

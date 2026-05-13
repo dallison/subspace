@@ -5,9 +5,53 @@
 
 #include "shadow/shadow.h"
 #include "absl/strings/str_format.h"
+#include <algorithm>
 #include <unistd.h>
 
 namespace subspace {
+namespace {
+
+ClientBufferHandleMetadata
+FromProto(const ClientBufferHandleMetadataProto &proto) {
+  ClientBufferHandleMetadata metadata;
+  metadata.channel_name = proto.channel_name();
+  metadata.session_id = proto.session_id();
+  metadata.buffer_index = proto.buffer_index();
+  metadata.slot_id = proto.slot_id();
+  metadata.is_prefix = proto.is_prefix();
+  metadata.full_size = proto.full_size();
+  metadata.allocation_size = proto.allocation_size();
+  metadata.handle = static_cast<uintptr_t>(proto.handle());
+  metadata.shadow_file = proto.shadow_file();
+  metadata.object_name = proto.object_name();
+  metadata.allocator = proto.allocator();
+  metadata.pool_id = proto.pool_id();
+  metadata.cache_enabled = proto.cache_enabled();
+  metadata.alignment = proto.alignment();
+  metadata.allocator_metadata = proto.allocator_metadata();
+  return metadata;
+}
+
+void ToProto(const ClientBufferHandleMetadata &metadata,
+             ClientBufferHandleMetadataProto *proto) {
+  proto->set_channel_name(metadata.channel_name);
+  proto->set_session_id(metadata.session_id);
+  proto->set_buffer_index(metadata.buffer_index);
+  proto->set_slot_id(metadata.slot_id);
+  proto->set_is_prefix(metadata.is_prefix);
+  proto->set_full_size(metadata.full_size);
+  proto->set_allocation_size(metadata.allocation_size);
+  proto->set_handle(static_cast<uint64_t>(metadata.handle));
+  proto->set_shadow_file(metadata.shadow_file);
+  proto->set_object_name(metadata.object_name);
+  proto->set_allocator(metadata.allocator);
+  proto->set_pool_id(metadata.pool_id);
+  proto->set_cache_enabled(metadata.cache_enabled);
+  proto->set_alignment(metadata.alignment);
+  *proto->mutable_allocator_metadata() = metadata.allocator_metadata;
+}
+
+} // namespace
 
 Shadow::Shadow(co::CoroutineScheduler &scheduler,
                const std::string &socket_name)
@@ -56,8 +100,7 @@ void Shadow::ListenerCoroutine() {
     logger_.Log(toolbelt::LogLevel::kInfo,
                 "Shadow accepted connection from server");
 
-    auto client =
-        std::make_shared<toolbelt::UnixSocket>(std::move(*accepted));
+    auto client = std::make_shared<toolbelt::UnixSocket>(std::move(*accepted));
 
     scheduler_.Spawn([this, client]() { ClientCoroutine(client); },
                      {.name = "Shadow client"});
@@ -69,8 +112,7 @@ void Shadow::ClientCoroutine(
   // Send current state dump to the newly connected server.
   if (absl::Status s = SendStateDump(*client_socket); !s.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
-                "Shadow: failed to send state dump: %s",
-                s.ToString().c_str());
+                "Shadow: failed to send state dump: %s", s.ToString().c_str());
     return;
   }
 
@@ -90,8 +132,7 @@ void Shadow::ClientCoroutine(
     ShadowEvent event;
     if (!event.ParseFromArray(receive_buffer->data(),
                               int(receive_buffer->size()))) {
-      logger_.Log(toolbelt::LogLevel::kError,
-                  "Shadow: failed to parse event");
+      logger_.Log(toolbelt::LogLevel::kError, "Shadow: failed to parse event");
       break;
     }
 
@@ -102,8 +143,7 @@ void Shadow::ClientCoroutine(
     if (has_fds) {
       absl::Status fd_status = client_socket->ReceiveFds(fds, co::self);
       if (!fd_status.ok()) {
-        logger_.Log(toolbelt::LogLevel::kError,
-                    "Shadow: ReceiveFds failed: %s",
+        logger_.Log(toolbelt::LogLevel::kError, "Shadow: ReceiveFds failed: %s",
                     fd_status.ToString().c_str());
         break;
       }
@@ -140,6 +180,12 @@ absl::Status Shadow::HandleEvent(const ShadowEvent &event,
     return HandleAddSubscriber(event.add_subscriber(), fds);
   case ShadowEvent::kRemoveSubscriber:
     return HandleRemoveSubscriber(event.remove_subscriber());
+  case ShadowEvent::kRegisterClientBuffer:
+    return HandleRegisterClientBuffer(event.register_client_buffer());
+  case ShadowEvent::kUnregisterClientBuffer:
+    return HandleUnregisterClientBuffer(event.unregister_client_buffer());
+  case ShadowEvent::kUpdateChannelOptions:
+    return HandleUpdateChannelOptions(event.update_channel_options());
   case ShadowEvent::kStateDump:
   case ShadowEvent::kStateDone:
     return absl::OkStatus();
@@ -168,38 +214,48 @@ absl::Status
 Shadow::HandleCreateChannel(const ShadowCreateChannel &msg,
                             std::vector<toolbelt::FileDescriptor> &fds) {
   if (fds.size() < 2) {
-    return absl::InternalError(
-        absl::StrFormat("Shadow: create_channel '%s' missing CCB/BCB fds",
-                        msg.channel_name()));
+    return absl::InternalError(absl::StrFormat(
+        "Shadow: create_channel '%s' missing CCB/BCB fds", msg.channel_name()));
   }
 
-  ShadowChannel ch{
-      .name = msg.channel_name(),
-      .channel_id = msg.channel_id(),
-      .slot_size = msg.slot_size(),
-      .num_slots = msg.num_slots(),
-      .type = msg.type(),
-      .is_local = msg.is_local(),
-      .is_reliable = msg.is_reliable(),
-      .is_fixed_size = msg.is_fixed_size(),
-      .checksum_size = msg.checksum_size(),
-      .metadata_size = msg.metadata_size(),
-      .mux = msg.mux(),
-      .vchan_id = msg.vchan_id(),
-      .ccb_fd = std::move(fds[0]),
-      .bcb_fd = std::move(fds[1]),
+  auto apply_channel_metadata = [&](ShadowChannel &ch) {
+    ch.name = msg.channel_name();
+    ch.channel_id = msg.channel_id();
+    ch.slot_size = msg.slot_size();
+    ch.num_slots = msg.num_slots();
+    ch.type = msg.type();
+    ch.is_local = msg.is_local();
+    ch.is_reliable = msg.is_reliable();
+    ch.is_fixed_size = msg.is_fixed_size();
+    ch.checksum_size = msg.checksum_size();
+    ch.metadata_size = msg.metadata_size();
+    ch.mux = msg.mux();
+    ch.vchan_id = msg.vchan_id();
+    ch.has_split_buffer_options = msg.has_split_buffer_options();
+    ch.use_split_buffers = msg.use_split_buffers();
+    ch.has_max_publishers = msg.has_max_publishers();
+    ch.max_publishers = msg.max_publishers();
+    ch.ccb_fd = std::move(fds[0]);
+    ch.bcb_fd = std::move(fds[1]);
   };
+
+  auto it = channels_.find(msg.channel_name());
+  ShadowChannel ch;
+  ShadowChannel &channel = it == channels_.end() ? ch : it->second;
+  apply_channel_metadata(channel);
 
   logger_.Log(toolbelt::LogLevel::kDebug,
               "Shadow: create channel '%s' id=%d slots=%d/%d",
-              ch.name.c_str(), ch.channel_id, ch.num_slots, ch.slot_size);
+              channel.name.c_str(), channel.channel_id, channel.num_slots,
+              channel.slot_size);
 
-  channels_.emplace(ch.name, std::move(ch));
+  if (it == channels_.end()) {
+    channels_.emplace(channel.name, std::move(ch));
+  }
   return absl::OkStatus();
 }
 
-absl::Status
-Shadow::HandleRemoveChannel(const ShadowRemoveChannel &msg) {
+absl::Status Shadow::HandleRemoveChannel(const ShadowRemoveChannel &msg) {
   logger_.Log(toolbelt::LogLevel::kDebug, "Shadow: remove channel '%s' id=%d",
               msg.channel_name().c_str(), msg.channel_id());
 
@@ -212,18 +268,16 @@ Shadow::HandleAddPublisher(const ShadowAddPublisher &msg,
                            std::vector<toolbelt::FileDescriptor> &fds) {
   size_t expected_fds = msg.notify_retirement() ? 4 : 2;
   if (fds.size() < expected_fds) {
-    return absl::InternalError(
-        absl::StrFormat("Shadow: add_publisher '%s' pub_id=%d expected %d fds, "
-                        "got %d",
-                        msg.channel_name(), msg.publisher_id(), expected_fds,
-                        fds.size()));
+    return absl::InternalError(absl::StrFormat(
+        "Shadow: add_publisher '%s' pub_id=%d expected %d fds, "
+        "got %d",
+        msg.channel_name(), msg.publisher_id(), expected_fds, fds.size()));
   }
 
   auto it = channels_.find(msg.channel_name());
   if (it == channels_.end()) {
-    return absl::InternalError(
-        absl::StrFormat("Shadow: add_publisher for unknown channel '%s'",
-                        msg.channel_name()));
+    return absl::InternalError(absl::StrFormat(
+        "Shadow: add_publisher for unknown channel '%s'", msg.channel_name()));
   }
 
   ShadowPublisher pub{
@@ -236,10 +290,12 @@ Shadow::HandleAddPublisher(const ShadowAddPublisher &msg,
       .notify_retirement = msg.notify_retirement(),
       .poll_fd = std::move(fds[0]),
       .trigger_fd = std::move(fds[1]),
-      .retirement_read_fd = msg.notify_retirement() ? std::move(fds[2])
-                                                    : toolbelt::FileDescriptor(),
-      .retirement_write_fd = msg.notify_retirement() ? std::move(fds[3])
-                                                     : toolbelt::FileDescriptor(),
+      .retirement_read_fd = msg.notify_retirement()
+                                ? std::move(fds[2])
+                                : toolbelt::FileDescriptor(),
+      .retirement_write_fd = msg.notify_retirement()
+                                 ? std::move(fds[3])
+                                 : toolbelt::FileDescriptor(),
   };
 
   logger_.Log(toolbelt::LogLevel::kDebug,
@@ -250,8 +306,7 @@ Shadow::HandleAddPublisher(const ShadowAddPublisher &msg,
   return absl::OkStatus();
 }
 
-absl::Status
-Shadow::HandleRemovePublisher(const ShadowRemovePublisher &msg) {
+absl::Status Shadow::HandleRemovePublisher(const ShadowRemovePublisher &msg) {
   auto it = channels_.find(msg.channel_name());
   if (it == channels_.end()) {
     return absl::OkStatus();
@@ -276,9 +331,8 @@ Shadow::HandleAddSubscriber(const ShadowAddSubscriber &msg,
 
   auto it = channels_.find(msg.channel_name());
   if (it == channels_.end()) {
-    return absl::InternalError(
-        absl::StrFormat("Shadow: add_subscriber for unknown channel '%s'",
-                        msg.channel_name()));
+    return absl::InternalError(absl::StrFormat(
+        "Shadow: add_subscriber for unknown channel '%s'", msg.channel_name()));
   }
 
   ShadowSubscriber sub{
@@ -299,8 +353,7 @@ Shadow::HandleAddSubscriber(const ShadowAddSubscriber &msg,
   return absl::OkStatus();
 }
 
-absl::Status
-Shadow::HandleRemoveSubscriber(const ShadowRemoveSubscriber &msg) {
+absl::Status Shadow::HandleRemoveSubscriber(const ShadowRemoveSubscriber &msg) {
   auto it = channels_.find(msg.channel_name());
   if (it == channels_.end()) {
     return absl::OkStatus();
@@ -311,6 +364,74 @@ Shadow::HandleRemoveSubscriber(const ShadowRemoveSubscriber &msg) {
               msg.channel_name().c_str(), msg.subscriber_id());
 
   it->second.subscribers.erase(msg.subscriber_id());
+  return absl::OkStatus();
+}
+
+absl::Status
+Shadow::HandleRegisterClientBuffer(const ShadowRegisterClientBuffer &msg) {
+  ClientBufferHandleMetadata metadata = FromProto(msg.metadata());
+  auto it = channels_.find(metadata.channel_name);
+  if (it == channels_.end()) {
+    return absl::InternalError(absl::StrFormat(
+        "Shadow: register client buffer for unknown channel '%s'",
+        metadata.channel_name));
+  }
+
+  auto &buffers = it->second.client_buffers;
+  auto existing =
+      std::find_if(buffers.begin(), buffers.end(),
+                   [&metadata](const ClientBufferHandleMetadata &buffer) {
+                     return buffer.session_id == metadata.session_id &&
+                            buffer.buffer_index == metadata.buffer_index &&
+                            buffer.slot_id == metadata.slot_id &&
+                            buffer.is_prefix == metadata.is_prefix;
+                   });
+  if (existing != buffers.end()) {
+    *existing = std::move(metadata);
+  } else {
+    buffers.push_back(std::move(metadata));
+  }
+  logger_.Log(toolbelt::LogLevel::kDebug,
+              "Shadow: register client buffer '%s' session=%lu buffer=%u "
+              "slot=%u prefix=%d",
+              msg.metadata().channel_name().c_str(),
+              msg.metadata().session_id(), msg.metadata().buffer_index(),
+              msg.metadata().slot_id(), msg.metadata().is_prefix());
+  return absl::OkStatus();
+}
+
+absl::Status
+Shadow::HandleUnregisterClientBuffer(const ShadowUnregisterClientBuffer &msg) {
+  auto it = channels_.find(msg.channel_name());
+  if (it == channels_.end()) {
+    return absl::OkStatus();
+  }
+
+  auto &buffers = it->second.client_buffers;
+  buffers.erase(
+      std::remove_if(buffers.begin(), buffers.end(),
+                     [&msg](const ClientBufferHandleMetadata &buffer) {
+                       return buffer.session_id == msg.session_id() &&
+                              buffer.buffer_index == msg.buffer_index();
+                     }),
+      buffers.end());
+  return absl::OkStatus();
+}
+
+absl::Status
+Shadow::HandleUpdateChannelOptions(const ShadowUpdateChannelOptions &msg) {
+  auto it = channels_.find(msg.channel_name());
+  if (it == channels_.end()) {
+    return absl::InternalError(absl::StrFormat(
+        "Shadow: update channel options for unknown channel '%s'",
+        msg.channel_name()));
+  }
+
+  ShadowChannel &channel = it->second;
+  channel.has_split_buffer_options = msg.has_split_buffer_options();
+  channel.use_split_buffers = msg.use_split_buffers();
+  channel.has_max_publishers = msg.has_max_publishers();
+  channel.max_publishers = msg.max_publishers();
   return absl::OkStatus();
 }
 
@@ -375,11 +496,25 @@ absl::Status Shadow::SendStateDump(toolbelt::UnixSocket &socket) {
       msg->set_metadata_size(ch.metadata_size);
       msg->set_mux(ch.mux);
       msg->set_vchan_id(ch.vchan_id);
+      msg->set_has_split_buffer_options(ch.has_split_buffer_options);
+      msg->set_use_split_buffers(ch.use_split_buffers);
+      msg->set_has_max_publishers(ch.has_max_publishers);
+      msg->set_max_publishers(ch.max_publishers);
 
       std::vector<toolbelt::FileDescriptor> fds;
       fds.push_back(ch.ccb_fd);
       fds.push_back(ch.bcb_fd);
       if (absl::Status s = SendEvent(socket, event, fds); !s.ok()) {
+        return s;
+      }
+    }
+
+    // Client-owned split buffers.
+    for (const ClientBufferHandleMetadata &metadata : ch.client_buffers) {
+      ShadowEvent event;
+      auto *msg = event.mutable_register_client_buffer();
+      ToProto(metadata, msg->mutable_metadata());
+      if (absl::Status s = SendEvent(socket, event); !s.ok()) {
         return s;
       }
     }

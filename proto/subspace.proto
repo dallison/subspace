@@ -38,6 +38,8 @@ message CreatePublisherRequest {
   int32 checksum_size = 12;    // Bytes reserved for checksum.
   int32 metadata_size = 13;    // Bytes reserved for user metadata.
   int32 publisher_id = 14;     // -1 for new, >= 0 to reclaim existing.
+  bool use_split_buffers = 16; // Prefixes and payload slots are separate.
+  int32 max_publishers = 17;   // 0 means no explicit publisher limit.
 }
 
 message CreatePublisherResponse {
@@ -88,6 +90,7 @@ message CreateSubscriberResponse {
   repeated int32 retirement_fd_indexes = 14;
   int32 checksum_size = 15; // Bytes reserved for checksum (from publisher).
   int32 metadata_size = 16; // Bytes reserved for user metadata (from publisher).
+  bool use_split_buffers = 17;
 }
 
 message GetTriggersRequest { string channel_name = 1; }
@@ -132,6 +135,34 @@ message GetChannelStatsResponse {
   repeated ChannelStatsProto channels = 2;
 }
 
+message ClientBufferHandleMetadataProto {
+  string channel_name = 1;
+  uint64 session_id = 2;
+  uint32 buffer_index = 3;
+  uint32 slot_id = 4;
+  bool is_prefix = 5;
+  uint64 full_size = 6;
+  uint64 allocation_size = 7;
+  uint64 handle = 8;
+  string shadow_file = 9;
+  string object_name = 10;
+  string allocator = 11;
+  string pool_id = 12;
+  bool cache_enabled = 13;
+  uint32 alignment = 14;
+  google.protobuf.Any allocator_metadata = 15;
+}
+
+message RegisterClientBufferRequest {
+  ClientBufferHandleMetadataProto metadata = 1;
+}
+
+message UnregisterClientBufferRequest {
+  string channel_name = 1;
+  uint64 session_id = 2;
+  uint32 buffer_index = 3;
+}
+
 message Request {
   oneof request {
     InitRequest init = 1;
@@ -142,6 +173,8 @@ message Request {
     RemoveSubscriberRequest remove_subscriber = 6;
     GetChannelInfoRequest get_channel_info = 9;
     GetChannelStatsRequest get_channel_stats = 10;
+    RegisterClientBufferRequest register_client_buffer = 11;
+    UnregisterClientBufferRequest unregister_client_buffer = 12;
   }
 }
 
@@ -369,6 +402,9 @@ message ShadowEvent {
     ShadowRemoveSubscriber remove_subscriber = 7;
     ShadowStateDump state_dump = 8;
     ShadowStateDone state_done = 9;
+    ShadowRegisterClientBuffer register_client_buffer = 10;
+    ShadowUnregisterClientBuffer unregister_client_buffer = 11;
+    ShadowUpdateChannelOptions update_channel_options = 12;
   }
 }
 
@@ -390,6 +426,10 @@ message ShadowCreateChannel {
   int32 metadata_size = 10;
   string mux = 11;
   int32 vchan_id = 12;
+  bool has_split_buffer_options = 13;
+  bool use_split_buffers = 14;
+  bool has_max_publishers = 15;
+  int32 max_publishers = 16;
   // FDs sent via SCM_RIGHTS: [ccb_fd, bcb_fd]
 }
 
@@ -439,4 +479,22 @@ message ShadowStateDump {
 
 message ShadowStateDone {
   // Empty marker signaling the end of the state dump.
+}
+
+message ShadowRegisterClientBuffer {
+  ClientBufferHandleMetadataProto metadata = 1;
+}
+
+message ShadowUnregisterClientBuffer {
+  string channel_name = 1;
+  uint64 session_id = 2;
+  uint32 buffer_index = 3;
+}
+
+message ShadowUpdateChannelOptions {
+  string channel_name = 1;
+  bool has_split_buffer_options = 2;
+  bool use_split_buffers = 3;
+  bool has_max_publishers = 4;
+  int32 max_publishers = 5;
 }

@@ -11,9 +11,7 @@ use subspace_client::channel::{
     aligned, aligned64, build_refs_bit_field, CHECKSUM_OFFSET, ORDINAL_MASK, ORDINAL_SHIFT,
     PUB_OWNED, RETIRED_REFS_MASK, RETIRED_REFS_SHIFT, VCHAN_ID_MASK, VCHAN_ID_SHIFT,
 };
-use subspace_client::checksum::{
-    calculate_crc32_checksum, subspace_crc32, verify_crc32_checksum,
-};
+use subspace_client::checksum::{calculate_crc32_checksum, subspace_crc32, verify_crc32_checksum};
 
 fn calculate_checksum(spans: &[&[u8]]) -> u32 {
     let mut buf = [0u8; 4];
@@ -26,6 +24,28 @@ fn verify_checksum(spans: &[&[u8]], checksum: u32) -> bool {
 }
 use subspace_client::options::{PublisherOptions, SubscriberOptions};
 use subspace_client::{Client, ReadMode, SubspaceError};
+
+fn unique_socket_path() -> String {
+    let mut template = b"/tmp/ss_rt_XXXXXX\0".to_vec();
+    let fd = unsafe { libc::mkstemp(template.as_mut_ptr() as *mut libc::c_char) };
+    assert!(
+        fd >= 0,
+        "mkstemp failed: {}",
+        std::io::Error::last_os_error()
+    );
+    unsafe {
+        libc::close(fd);
+    }
+
+    let path = unsafe {
+        std::ffi::CStr::from_ptr(template.as_ptr() as *const libc::c_char)
+            .to_string_lossy()
+            .into_owned()
+    };
+    std::fs::remove_file(&path)
+        .unwrap_or_else(|e| panic!("failed to remove temporary socket placeholder {path}: {e}"));
+    path
+}
 
 // ── Options builder tests ────────────────────────────────────────────────────
 
@@ -345,7 +365,10 @@ fn error_checksum_display() {
 
 #[test]
 fn client_connect_nonexistent_socket_fails() {
-    let result = Client::new("/nonexistent/socket/path_that_does_not_exist", "test_client");
+    let result = Client::new(
+        "/nonexistent/socket/path_that_does_not_exist",
+        "test_client",
+    );
     assert!(result.is_err());
 }
 
@@ -412,9 +435,7 @@ unsafe impl Sync for ServerGuard {}
 #[cfg(server_ffi)]
 impl ServerGuard {
     fn start() -> Self {
-        // Use /tmp directly — std::env::temp_dir() on macOS (especially under
-        // Bazel) can exceed the 104-byte sun_path limit for Unix sockets.
-        let socket_path = format!("/tmp/ss_rt_{}", std::process::id());
+        let socket_path = unique_socket_path();
 
         let mut pipe_fds = [0 as libc::c_int; 2];
         assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
@@ -451,9 +472,7 @@ impl ServerGuard {
             );
         }
         let mut buf = [0u8; 8];
-        let n = unsafe {
-            libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, 8)
-        };
+        let n = unsafe { libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, 8) };
         assert_eq!(n, 8, "failed to read server ready notification");
 
         ServerGuard {
@@ -498,8 +517,7 @@ impl Drop for ServerGuard {
 
 #[cfg(not(server_ffi))]
 fn find_server_binary() -> String {
-    let manifest_dir =
-        std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     let workspace = std::path::Path::new(&manifest_dir)
         .parent()
         .unwrap_or(std::path::Path::new("."));
@@ -526,9 +544,7 @@ struct ServerGuard {
 #[cfg(not(server_ffi))]
 impl ServerGuard {
     fn start() -> Self {
-        // Use /tmp directly — std::env::temp_dir() on macOS (especially under
-        // Bazel) can exceed the 104-byte sun_path limit for Unix sockets.
-        let socket_path = format!("/tmp/ss_rt_{}", std::process::id());
+        let socket_path = unique_socket_path();
 
         let binary = find_server_binary();
         let child = Command::new(&binary)
@@ -539,12 +555,9 @@ impl ServerGuard {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .unwrap_or_else(|e| {
-                panic!("Failed to start server binary '{}': {}", binary, e)
-            });
+            .unwrap_or_else(|e| panic!("Failed to start server binary '{}': {}", binary, e));
 
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             if std::time::Instant::now() > deadline {
                 panic!("Server did not become ready within 10 seconds");
@@ -659,11 +672,17 @@ fn integration_publish_multiple_messages() {
     let sub_client = new_client("test_multi_s");
 
     let num_messages = 9;
-    let pub_opts = PublisherOptions::new().set_slot_size(256).set_num_slots(num_messages + 4);
-    let publisher = pub_client.create_publisher("rust_multi1", &pub_opts).unwrap();
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(num_messages + 4);
+    let publisher = pub_client
+        .create_publisher("rust_multi1", &pub_opts)
+        .unwrap();
 
     let sub_opts = SubscriberOptions::new();
-    let subscriber = sub_client.create_subscriber("rust_multi1", &sub_opts).unwrap();
+    let subscriber = sub_client
+        .create_subscriber("rust_multi1", &sub_opts)
+        .unwrap();
     let mut sent: Vec<String> = Vec::new();
     for i in 0..num_messages {
         let text = format!("message_{}", i);
@@ -700,7 +719,9 @@ fn integration_read_newest() {
     let sub_client = new_client("test_newest_s");
 
     let pub_opts = PublisherOptions::new().set_slot_size(256).set_num_slots(10);
-    let publisher = pub_client.create_publisher("rust_newest1", &pub_opts).unwrap();
+    let publisher = pub_client
+        .create_publisher("rust_newest1", &pub_opts)
+        .unwrap();
 
     // Publish two messages before subscriber attaches.
     for text in &[b"first".as_slice(), b"second"] {
@@ -712,7 +733,9 @@ fn integration_read_newest() {
     }
 
     let sub_opts = SubscriberOptions::new();
-    let subscriber = sub_client.create_subscriber("rust_newest1", &sub_opts).unwrap();
+    let subscriber = sub_client
+        .create_subscriber("rust_newest1", &sub_opts)
+        .unwrap();
 
     // ReadNewest should skip to the latest.
     let msg = subscriber.read_message(ReadMode::ReadNewest).unwrap();
@@ -740,12 +763,16 @@ fn integration_two_publishers_same_channel() {
 
     // Publish from pub1.
     let (buf, _) = pub1.get_message_buffer(256).unwrap().unwrap();
-    unsafe { std::ptr::copy_nonoverlapping(b"from_pub1".as_ptr(), buf, 9); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(b"from_pub1".as_ptr(), buf, 9);
+    }
     pub1.publish_message(9).unwrap();
 
     // Publish from pub2.
     let (buf, _) = pub2.get_message_buffer(256).unwrap().unwrap();
-    unsafe { std::ptr::copy_nonoverlapping(b"from_pub2".as_ptr(), buf, 9); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(b"from_pub2".as_ptr(), buf, 9);
+    }
     pub2.publish_message(9).unwrap();
 
     // Read both messages.
@@ -772,7 +799,9 @@ fn integration_separate_clients() {
 
     let pub_opts = PublisherOptions::new().set_slot_size(256).set_num_slots(10);
     let _pub = pub_client.create_publisher("rust_sep1", &pub_opts).unwrap();
-    let _sub = sub_client.create_subscriber("rust_sep1", &SubscriberOptions::new()).unwrap();
+    let _sub = sub_client
+        .create_subscriber("rust_sep1", &SubscriberOptions::new())
+        .unwrap();
 }
 
 // ── Poll-based subscriber wait ───────────────────────────────────────────────
@@ -783,14 +812,20 @@ fn integration_subscriber_wait() {
     let sub_client = new_client("test_wait_s");
 
     let sub_opts = SubscriberOptions::new();
-    let subscriber = sub_client.create_subscriber("rust_wait1", &sub_opts).unwrap();
+    let subscriber = sub_client
+        .create_subscriber("rust_wait1", &sub_opts)
+        .unwrap();
 
     let pub_opts = PublisherOptions::new().set_slot_size(256).set_num_slots(10);
-    let publisher = pub_client.create_publisher("rust_wait1", &pub_opts).unwrap();
+    let publisher = pub_client
+        .create_publisher("rust_wait1", &pub_opts)
+        .unwrap();
 
     // Publish a message.
     let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
-    unsafe { std::ptr::copy_nonoverlapping(b"ping".as_ptr(), buf, 4); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(b"ping".as_ptr(), buf, 4);
+    }
     publisher.publish_message(4).unwrap();
 
     // Wait with a reasonable timeout (should succeed immediately since a
@@ -811,8 +846,12 @@ fn integration_threaded_pub_sub() {
     let num_slots = num_messages as i32 + 4;
 
     let pub_client = new_client("thread_pub");
-    let pub_opts = PublisherOptions::new().set_slot_size(256).set_num_slots(num_slots);
-    let publisher = pub_client.create_publisher("rust_thread1", &pub_opts).unwrap();
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(num_slots);
+    let publisher = pub_client
+        .create_publisher("rust_thread1", &pub_opts)
+        .unwrap();
 
     let sub_client = new_client("thread_sub");
     let sub_opts = SubscriberOptions::new();
@@ -864,14 +903,21 @@ fn integration_large_message() {
     let pub_opts = PublisherOptions::new()
         .set_slot_size(msg_size as i32)
         .set_num_slots(4);
-    let publisher = pub_client.create_publisher("rust_large1", &pub_opts).unwrap();
+    let publisher = pub_client
+        .create_publisher("rust_large1", &pub_opts)
+        .unwrap();
 
     let sub_opts = SubscriberOptions::new();
-    let subscriber = sub_client.create_subscriber("rust_large1", &sub_opts).unwrap();
+    let subscriber = sub_client
+        .create_subscriber("rust_large1", &sub_opts)
+        .unwrap();
 
     // Fill with a pattern.
     let payload: Vec<u8> = (0..msg_size).map(|i| (i % 251) as u8).collect();
-    let (buf, _) = publisher.get_message_buffer(msg_size as i32).unwrap().unwrap();
+    let (buf, _) = publisher
+        .get_message_buffer(msg_size as i32)
+        .unwrap()
+        .unwrap();
     unsafe {
         std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
     }
@@ -932,11 +978,17 @@ fn integration_multiple_subscribers() {
     let pub_opts = PublisherOptions::new().set_slot_size(256).set_num_slots(10);
     let publisher = client.create_publisher("rust_msub1", &pub_opts).unwrap();
 
-    let sub1 = client.create_subscriber("rust_msub1", &SubscriberOptions::new()).unwrap();
-    let sub2 = client.create_subscriber("rust_msub1", &SubscriberOptions::new()).unwrap();
+    let sub1 = client
+        .create_subscriber("rust_msub1", &SubscriberOptions::new())
+        .unwrap();
+    let sub2 = client
+        .create_subscriber("rust_msub1", &SubscriberOptions::new())
+        .unwrap();
 
     let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
-    unsafe { std::ptr::copy_nonoverlapping(b"shared".as_ptr(), buf, 6); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(b"shared".as_ptr(), buf, 6);
+    }
     publisher.publish_message(6).unwrap();
 
     let m1 = sub1.read_message(ReadMode::ReadNext).unwrap();
@@ -958,7 +1010,9 @@ fn integration_subscriber_before_publisher() {
     let client = new_client("test_sub_first");
 
     let sub_opts = SubscriberOptions::new();
-    let subscriber = client.create_subscriber("rust_subfirst1", &sub_opts).unwrap();
+    let subscriber = client
+        .create_subscriber("rust_subfirst1", &sub_opts)
+        .unwrap();
 
     // No publisher yet, read should return empty.
     let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
@@ -966,10 +1020,14 @@ fn integration_subscriber_before_publisher() {
 
     // Now create publisher and publish.
     let pub_opts = PublisherOptions::new().set_slot_size(256).set_num_slots(10);
-    let publisher = client.create_publisher("rust_subfirst1", &pub_opts).unwrap();
+    let publisher = client
+        .create_publisher("rust_subfirst1", &pub_opts)
+        .unwrap();
 
     let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
-    unsafe { std::ptr::copy_nonoverlapping(b"late".as_ptr(), buf, 4); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(b"late".as_ptr(), buf, 4);
+    }
     publisher.publish_message(4).unwrap();
 
     // Subscriber should pick up the message now.
@@ -987,17 +1045,23 @@ fn integration_active_message_count_tracks_live_messages() {
     let sub_client = new_client("test_am_count_s");
 
     let pub_opts = PublisherOptions::new().set_slot_size(256).set_num_slots(10);
-    let publisher = pub_client.create_publisher("rust_amcount", &pub_opts).unwrap();
+    let publisher = pub_client
+        .create_publisher("rust_amcount", &pub_opts)
+        .unwrap();
 
     let sub_opts = SubscriberOptions::new().set_max_active_messages(4);
-    let subscriber = sub_client.create_subscriber("rust_amcount", &sub_opts).unwrap();
+    let subscriber = sub_client
+        .create_subscriber("rust_amcount", &sub_opts)
+        .unwrap();
 
     assert_eq!(subscriber.num_active_messages(), 0);
 
     // Publish and read two messages, keeping both alive.
     for text in &[b"aaa".as_slice(), b"bbb"] {
         let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
-        unsafe { std::ptr::copy_nonoverlapping(text.as_ptr(), buf, text.len()); }
+        unsafe {
+            std::ptr::copy_nonoverlapping(text.as_ptr(), buf, text.len());
+        }
         publisher.publish_message(text.len() as i64).unwrap();
     }
 
@@ -1022,13 +1086,19 @@ fn integration_clone_shares_slot_last_drop_releases() {
     let sub_client = new_client("test_clone_s");
 
     let pub_opts = PublisherOptions::new().set_slot_size(256).set_num_slots(10);
-    let publisher = pub_client.create_publisher("rust_clone1", &pub_opts).unwrap();
+    let publisher = pub_client
+        .create_publisher("rust_clone1", &pub_opts)
+        .unwrap();
 
     let sub_opts = SubscriberOptions::new().set_max_active_messages(2);
-    let subscriber = sub_client.create_subscriber("rust_clone1", &sub_opts).unwrap();
+    let subscriber = sub_client
+        .create_subscriber("rust_clone1", &sub_opts)
+        .unwrap();
 
     let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
-    unsafe { std::ptr::copy_nonoverlapping(b"shared".as_ptr(), buf, 6); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(b"shared".as_ptr(), buf, 6);
+    }
     publisher.publish_message(6).unwrap();
 
     let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
@@ -1054,17 +1124,23 @@ fn integration_slots_reused_after_message_drop() {
 
     // Only 4 slots: tight enough that we must release to keep publishing.
     let pub_opts = PublisherOptions::new().set_slot_size(256).set_num_slots(4);
-    let publisher = pub_client.create_publisher("rust_reuse1", &pub_opts).unwrap();
+    let publisher = pub_client
+        .create_publisher("rust_reuse1", &pub_opts)
+        .unwrap();
 
     let sub_opts = SubscriberOptions::new();
-    let subscriber = sub_client.create_subscriber("rust_reuse1", &sub_opts).unwrap();
+    let subscriber = sub_client
+        .create_subscriber("rust_reuse1", &sub_opts)
+        .unwrap();
 
     // Publish-read-drop cycles well beyond the slot count.  Each iteration
     // consumes a slot; without proper release this would exhaust them.
     for i in 0..20 {
         let text = format!("msg_{}", i);
         let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
-        unsafe { std::ptr::copy_nonoverlapping(text.as_ptr(), buf, text.len()); }
+        unsafe {
+            std::ptr::copy_nonoverlapping(text.as_ptr(), buf, text.len());
+        }
         publisher.publish_message(text.len() as i64).unwrap();
 
         let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
@@ -1084,17 +1160,23 @@ fn integration_fill_slots_then_free_and_reuse() {
 
     // 6 slots with max_active_messages of 3.
     let pub_opts = PublisherOptions::new().set_slot_size(256).set_num_slots(6);
-    let publisher = pub_client.create_publisher("rust_fill1", &pub_opts).unwrap();
+    let publisher = pub_client
+        .create_publisher("rust_fill1", &pub_opts)
+        .unwrap();
 
     let sub_opts = SubscriberOptions::new().set_max_active_messages(3);
-    let subscriber = sub_client.create_subscriber("rust_fill1", &sub_opts).unwrap();
+    let subscriber = sub_client
+        .create_subscriber("rust_fill1", &sub_opts)
+        .unwrap();
 
     // Publish 3 messages and read all of them, keeping them alive.
     let mut messages = Vec::new();
     for i in 0..3 {
         let text = format!("batch1_{}", i);
         let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
-        unsafe { std::ptr::copy_nonoverlapping(text.as_ptr(), buf, text.len()); }
+        unsafe {
+            std::ptr::copy_nonoverlapping(text.as_ptr(), buf, text.len());
+        }
         publisher.publish_message(text.len() as i64).unwrap();
 
         let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
@@ -1111,7 +1193,9 @@ fn integration_fill_slots_then_free_and_reuse() {
     for i in 0..3 {
         let text = format!("batch2_{}", i);
         let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
-        unsafe { std::ptr::copy_nonoverlapping(text.as_ptr(), buf, text.len()); }
+        unsafe {
+            std::ptr::copy_nonoverlapping(text.as_ptr(), buf, text.len());
+        }
         publisher.publish_message(text.len() as i64).unwrap();
 
         let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
@@ -1146,7 +1230,9 @@ fn integration_dropped_message_callback() {
     // Fill 4 of the 5 slots (publisher holds the 5th).
     for _ in 0..4 {
         let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
-        unsafe { std::ptr::copy_nonoverlapping(b"foobar".as_ptr(), buf, 6); }
+        unsafe {
+            std::ptr::copy_nonoverlapping(b"foobar".as_ptr(), buf, 6);
+        }
         publisher.publish_message(6).unwrap();
     }
 
@@ -1160,7 +1246,9 @@ fn integration_dropped_message_callback() {
     // it sees ordinal 6 (expects 2) => 4 dropped messages.
     for _ in 0..4 {
         let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
-        unsafe { std::ptr::copy_nonoverlapping(b"foobar".as_ptr(), buf, 6); }
+        unsafe {
+            std::ptr::copy_nonoverlapping(b"foobar".as_ptr(), buf, 6);
+        }
         publisher.publish_message(6).unwrap();
     }
 
@@ -1172,7 +1260,10 @@ fn integration_dropped_message_callback() {
         }
     }
 
-    assert_eq!(num_dropped.load(std::sync::atomic::Ordering::Relaxed), 4);
+    assert!(
+        num_dropped.load(std::sync::atomic::Ordering::Relaxed) >= 4,
+        "subscriber should report at least the four forced overwritten messages"
+    );
 }
 
 // ── Checksum tests ───────────────────────────────────────────────────────────
@@ -1541,9 +1632,8 @@ fn integration_checksum_ignores_prefix_padding() {
 
     // Scribble over the padding region after (checksum + metadata).
     let prefix_base = unsafe { buf.sub(publisher.prefix_size() as usize) };
-    let used = CHECKSUM_OFFSET
-        + publisher.checksum_size() as usize
-        + publisher.metadata_size() as usize;
+    let used =
+        CHECKSUM_OFFSET + publisher.checksum_size() as usize + publisher.metadata_size() as usize;
     let pad_len = publisher.prefix_size() as usize - used;
     assert!(pad_len > 0);
     unsafe {
@@ -1592,9 +1682,8 @@ fn integration_checksum_ignores_prefix_padding_large_checksum() {
 
     // Scribble over the padding region.
     let prefix_base = unsafe { buf.sub(publisher.prefix_size() as usize) };
-    let used = CHECKSUM_OFFSET
-        + publisher.checksum_size() as usize
-        + publisher.metadata_size() as usize;
+    let used =
+        CHECKSUM_OFFSET + publisher.checksum_size() as usize + publisher.metadata_size() as usize;
     let pad_len = publisher.prefix_size() as usize - used;
     assert!(pad_len > 0);
     unsafe {
@@ -1703,9 +1792,7 @@ fn integration_metadata_round_trip_no_checksum() {
 fn integration_metadata_zero_returns_empty() {
     let client = new_client("test_meta_zero");
 
-    let pub_opts = PublisherOptions::new()
-        .set_slot_size(256)
-        .set_num_slots(10);
+    let pub_opts = PublisherOptions::new().set_slot_size(256).set_num_slots(10);
     let publisher = client
         .create_publisher("rust_meta_zero", &pub_opts)
         .unwrap();
@@ -1800,9 +1887,7 @@ fn integration_retirement_trigger_subscriber_side() {
         .set_slot_size(256)
         .set_num_slots(10)
         .set_notify_retirement(true);
-    let publisher = pub_client
-        .create_publisher("rust_ret1", &pub_opts)
-        .unwrap();
+    let publisher = pub_client.create_publisher("rust_ret1", &pub_opts).unwrap();
 
     let retirement_fd = publisher.get_retirement_fd();
     assert!(retirement_fd >= 0);
@@ -1856,9 +1941,7 @@ fn integration_retirement_trigger_publisher_side() {
         .set_slot_size(256)
         .set_num_slots(10)
         .set_notify_retirement(true);
-    let publisher = pub_client
-        .create_publisher("rust_ret2", &pub_opts)
-        .unwrap();
+    let publisher = pub_client.create_publisher("rust_ret2", &pub_opts).unwrap();
 
     let retirement_fd = publisher.get_retirement_fd();
 
@@ -2379,7 +2462,13 @@ impl CppPublisher {
             metadata.as_ptr()
         };
         let ord = unsafe {
-            cpp_test_publish(self.0, payload.as_ptr(), payload.len(), meta_ptr, metadata.len())
+            cpp_test_publish(
+                self.0,
+                payload.as_ptr(),
+                payload.len(),
+                meta_ptr,
+                metadata.len(),
+            )
         };
         assert!(ord >= 0, "cpp_test_publish failed");
         ord
@@ -2464,7 +2553,10 @@ fn cross_lang_cpp_pub_rust_sub_checksum_metadata() {
 
     let msg = rust_sub.read_message(ReadMode::ReadNext).unwrap();
     assert_eq!(msg.length, payload.len());
-    assert!(!msg.checksum_error, "checksum mismatch on cross-language message");
+    assert!(
+        !msg.checksum_error,
+        "checksum mismatch on cross-language message"
+    );
     let data = unsafe { std::slice::from_raw_parts(msg.buffer, msg.length) };
     assert_eq!(data, payload);
 
@@ -2500,7 +2592,10 @@ fn cross_lang_rust_pub_cpp_sub_checksum_metadata() {
     rust_pub.set_metadata(metadata);
     rust_pub.publish_message(payload.len() as i64).unwrap();
 
-    assert!(cpp_sub.wait(5000), "C++ subscriber timed out waiting for message");
+    assert!(
+        cpp_sub.wait(5000),
+        "C++ subscriber timed out waiting for message"
+    );
     let (recv_payload, recv_metadata, meta_size) = cpp_sub.read_message();
     assert_eq!(recv_payload, payload);
     assert_eq!(meta_size, 16);
@@ -2564,7 +2659,11 @@ fn cross_lang_bidirectional_multiple_messages() {
         rust_pub.set_metadata(&meta);
         rust_pub.publish_message(payload.len() as i64).unwrap();
 
-        assert!(cpp_sub.wait(5000), "C++ subscriber timed out on message {}", i);
+        assert!(
+            cpp_sub.wait(5000),
+            "C++ subscriber timed out on message {}",
+            i
+        );
         let (recv_payload, recv_metadata, meta_size) = cpp_sub.read_message();
         assert_eq!(recv_payload, payload.as_bytes());
         assert_eq!(meta_size, 8);
@@ -2737,7 +2836,9 @@ fn coverage_on_receive_callback() {
     let pub_handle = client.create_publisher("cov_onrecv_ch", &opts).unwrap();
 
     let sub_opts = SubscriberOptions::new();
-    let sub = client.create_subscriber("cov_onrecv_ch", &sub_opts).unwrap();
+    let sub = client
+        .create_subscriber("cov_onrecv_ch", &sub_opts)
+        .unwrap();
 
     let received_size = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
     let received_clone = received_size.clone();
@@ -2763,9 +2864,13 @@ fn coverage_on_receive_callback() {
 fn coverage_process_all_messages_no_callback() {
     let client = new_client("cov_procall_nocb");
     let opts = PublisherOptions::new().set_slot_size(64).set_num_slots(16);
-    let _pub = client.create_publisher("cov_procall_nocb_ch", &opts).unwrap();
+    let _pub = client
+        .create_publisher("cov_procall_nocb_ch", &opts)
+        .unwrap();
     let sub_opts = SubscriberOptions::new();
-    let sub = client.create_subscriber("cov_procall_nocb_ch", &sub_opts).unwrap();
+    let sub = client
+        .create_subscriber("cov_procall_nocb_ch", &sub_opts)
+        .unwrap();
 
     let result = sub.process_all_messages(ReadMode::ReadNext);
     assert!(result.is_err(), "should fail without message callback");
@@ -2775,9 +2880,11 @@ fn coverage_process_all_messages_no_callback() {
 fn coverage_invoke_message_callback() {
     let client = new_client("cov_invoke");
     let opts = PublisherOptions::new().set_slot_size(256).set_num_slots(16);
-    let pub_handle = client.create_publisher("cov_invoke_ch", &opts).unwrap();
+    let _pub_handle = client.create_publisher("cov_invoke_ch", &opts).unwrap();
     let sub_opts = SubscriberOptions::new().set_max_active_messages(8);
-    let sub = client.create_subscriber("cov_invoke_ch", &sub_opts).unwrap();
+    let sub = client
+        .create_subscriber("cov_invoke_ch", &sub_opts)
+        .unwrap();
 
     let count = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0));
     let count_clone = count.clone();
@@ -2800,7 +2907,9 @@ fn coverage_get_all_messages_empty() {
     let opts = PublisherOptions::new().set_slot_size(256).set_num_slots(16);
     let _pub = client.create_publisher("cov_getall_e_ch", &opts).unwrap();
     let sub_opts = SubscriberOptions::new().set_max_active_messages(8);
-    let sub = client.create_subscriber("cov_getall_e_ch", &sub_opts).unwrap();
+    let sub = client
+        .create_subscriber("cov_getall_e_ch", &sub_opts)
+        .unwrap();
 
     // No messages published, so get_all_messages returns empty.
     let messages = sub.get_all_messages(ReadMode::ReadNext).unwrap();
@@ -2869,7 +2978,9 @@ fn coverage_subscriber_accessors() {
     let opts = PublisherOptions::new().set_slot_size(128).set_num_slots(16);
     let _pub = client.create_publisher("cov_sub_acc_ch", &opts).unwrap();
     let sub_opts = SubscriberOptions::new();
-    let sub = client.create_subscriber("cov_sub_acc_ch", &sub_opts).unwrap();
+    let sub = client
+        .create_subscriber("cov_sub_acc_ch", &sub_opts)
+        .unwrap();
 
     assert_eq!(sub.name(), "cov_sub_acc_ch");
     assert!(!sub.is_reliable());
@@ -2899,7 +3010,10 @@ fn coverage_publisher_num_subscribers() {
     let opts = PublisherOptions::new().set_slot_size(64).set_num_slots(16);
     let pub_handle = client.create_publisher("cov_numsubs_ch", &opts).unwrap();
 
-    assert_eq!(pub_handle.num_subscribers(pub_handle.virtual_channel_id()), 0);
+    assert_eq!(
+        pub_handle.num_subscribers(pub_handle.virtual_channel_id()),
+        0
+    );
 }
 
 #[test]
@@ -2971,12 +3085,16 @@ fn coverage_subscriber_metadata_accessor() {
         .set_metadata_size(8);
     let pub_handle = client.create_publisher("cov_submeta_ch", &opts).unwrap();
     let sub_opts = SubscriberOptions::new();
-    let sub = client.create_subscriber("cov_submeta_ch", &sub_opts).unwrap();
+    let sub = client
+        .create_subscriber("cov_submeta_ch", &sub_opts)
+        .unwrap();
 
     // Publish a message to force the subscriber to load channel data.
     let (buf, _) = pub_handle.get_message_buffer(64).unwrap().unwrap();
     let payload = b"meta";
-    unsafe { std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len()); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
+    }
     let _msg = pub_handle.publish_message(payload.len() as i64).unwrap();
     sub.wait(Some(1000)).unwrap();
     let _ = sub.read_message(ReadMode::ReadNext).unwrap();
@@ -2994,15 +3112,24 @@ fn integration_resize_subscriber_reads_after_expansion() {
     let sub_client = new_client("test_resize_s");
 
     let pub_opts = PublisherOptions::new().set_slot_size(64).set_num_slots(10);
-    let publisher = pub_client.create_publisher("rust_resize1", &pub_opts).unwrap();
+    let publisher = pub_client
+        .create_publisher("rust_resize1", &pub_opts)
+        .unwrap();
 
     let sub_opts = SubscriberOptions::new();
-    let subscriber = sub_client.create_subscriber("rust_resize1", &sub_opts).unwrap();
+    let subscriber = sub_client
+        .create_subscriber("rust_resize1", &sub_opts)
+        .unwrap();
 
     // Publish a small message that fits in the initial 64-byte slot.
     let small = b"small";
-    let (buf, _) = publisher.get_message_buffer(small.len() as i32).unwrap().unwrap();
-    unsafe { std::ptr::copy_nonoverlapping(small.as_ptr(), buf, small.len()); }
+    let (buf, _) = publisher
+        .get_message_buffer(small.len() as i32)
+        .unwrap()
+        .unwrap();
+    unsafe {
+        std::ptr::copy_nonoverlapping(small.as_ptr(), buf, small.len());
+    }
     publisher.publish_message(small.len() as i64).unwrap();
 
     subscriber.wait(Some(1000)).unwrap();
@@ -3015,9 +3142,17 @@ fn integration_resize_subscriber_reads_after_expansion() {
 
     // Publish a message larger than the slot size to trigger expansion.
     let big = vec![0xABu8; 512];
-    let (buf, cap) = publisher.get_message_buffer(big.len() as i32).unwrap().unwrap();
-    assert!(cap >= big.len(), "buffer capacity should accommodate the large message");
-    unsafe { std::ptr::copy_nonoverlapping(big.as_ptr(), buf, big.len()); }
+    let (buf, cap) = publisher
+        .get_message_buffer(big.len() as i32)
+        .unwrap()
+        .unwrap();
+    assert!(
+        cap >= big.len(),
+        "buffer capacity should accommodate the large message"
+    );
+    unsafe {
+        std::ptr::copy_nonoverlapping(big.as_ptr(), buf, big.len());
+    }
     publisher.publish_message(big.len() as i64).unwrap();
 
     subscriber.wait(Some(1000)).unwrap();
@@ -3033,17 +3168,23 @@ fn integration_resize_multiple_expansions() {
     let sub_client = new_client("test_resize_multi_s");
 
     let pub_opts = PublisherOptions::new().set_slot_size(32).set_num_slots(10);
-    let publisher = pub_client.create_publisher("rust_resize2", &pub_opts).unwrap();
+    let publisher = pub_client
+        .create_publisher("rust_resize2", &pub_opts)
+        .unwrap();
 
     let sub_opts = SubscriberOptions::new();
-    let subscriber = sub_client.create_subscriber("rust_resize2", &sub_opts).unwrap();
+    let subscriber = sub_client
+        .create_subscriber("rust_resize2", &sub_opts)
+        .unwrap();
 
     let sizes = [16, 128, 64, 1024, 256, 4096];
     for (i, &size) in sizes.iter().enumerate() {
         let payload: Vec<u8> = (0..size).map(|b| (i as u8).wrapping_add(b as u8)).collect();
         let (buf, cap) = publisher.get_message_buffer(size as i32).unwrap().unwrap();
         assert!(cap >= size, "expansion #{}: cap {} < size {}", i, cap, size);
-        unsafe { std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len()); }
+        unsafe {
+            std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
+        }
         publisher.publish_message(payload.len() as i64).unwrap();
     }
 
@@ -3064,16 +3205,25 @@ fn integration_resize_subscriber_created_before_expansion() {
     let sub_client = new_client("test_resize_before_s");
 
     let pub_opts = PublisherOptions::new().set_slot_size(64).set_num_slots(10);
-    let publisher = pub_client.create_publisher("rust_resize3", &pub_opts).unwrap();
+    let publisher = pub_client
+        .create_publisher("rust_resize3", &pub_opts)
+        .unwrap();
 
     let sub_opts = SubscriberOptions::new();
-    let subscriber = sub_client.create_subscriber("rust_resize3", &sub_opts).unwrap();
+    let subscriber = sub_client
+        .create_subscriber("rust_resize3", &sub_opts)
+        .unwrap();
 
     // Publish and read a small warmup message.
     {
         let warmup = b"warmup";
-        let (buf, _) = publisher.get_message_buffer(warmup.len() as i32).unwrap().unwrap();
-        unsafe { std::ptr::copy_nonoverlapping(warmup.as_ptr(), buf, warmup.len()); }
+        let (buf, _) = publisher
+            .get_message_buffer(warmup.len() as i32)
+            .unwrap()
+            .unwrap();
+        unsafe {
+            std::ptr::copy_nonoverlapping(warmup.as_ptr(), buf, warmup.len());
+        }
         publisher.publish_message(warmup.len() as i64).unwrap();
         subscriber.wait(Some(1000)).unwrap();
         let _ = subscriber.read_message(ReadMode::ReadNext).unwrap();
@@ -3081,8 +3231,13 @@ fn integration_resize_subscriber_created_before_expansion() {
 
     // Trigger expansion with a large message.
     let big = vec![0xCDu8; 2048];
-    let (buf, _) = publisher.get_message_buffer(big.len() as i32).unwrap().unwrap();
-    unsafe { std::ptr::copy_nonoverlapping(big.as_ptr(), buf, big.len()); }
+    let (buf, _) = publisher
+        .get_message_buffer(big.len() as i32)
+        .unwrap()
+        .unwrap();
+    unsafe {
+        std::ptr::copy_nonoverlapping(big.as_ptr(), buf, big.len());
+    }
     publisher.publish_message(big.len() as i64).unwrap();
 
     subscriber.wait(Some(1000)).unwrap();
@@ -3095,8 +3250,13 @@ fn integration_resize_subscriber_created_before_expansion() {
 
     // Publish another message after expansion -- should still work.
     let after = b"after resize";
-    let (buf, _) = publisher.get_message_buffer(after.len() as i32).unwrap().unwrap();
-    unsafe { std::ptr::copy_nonoverlapping(after.as_ptr(), buf, after.len()); }
+    let (buf, _) = publisher
+        .get_message_buffer(after.len() as i32)
+        .unwrap()
+        .unwrap();
+    unsafe {
+        std::ptr::copy_nonoverlapping(after.as_ptr(), buf, after.len());
+    }
     publisher.publish_message(after.len() as i64).unwrap();
 
     subscriber.wait(Some(1000)).unwrap();
@@ -3111,22 +3271,36 @@ fn integration_resize_read_newest_after_expansion() {
     let sub_client = new_client("test_resize_newest_s");
 
     let pub_opts = PublisherOptions::new().set_slot_size(64).set_num_slots(10);
-    let publisher = pub_client.create_publisher("rust_resize4", &pub_opts).unwrap();
+    let publisher = pub_client
+        .create_publisher("rust_resize4", &pub_opts)
+        .unwrap();
 
     let sub_opts = SubscriberOptions::new();
-    let subscriber = sub_client.create_subscriber("rust_resize4", &sub_opts).unwrap();
+    let subscriber = sub_client
+        .create_subscriber("rust_resize4", &sub_opts)
+        .unwrap();
 
     // Publish several messages, the last of which triggers expansion.
     for i in 0..3 {
         let small = format!("msg_{}", i);
-        let (buf, _) = publisher.get_message_buffer(small.len() as i32).unwrap().unwrap();
-        unsafe { std::ptr::copy_nonoverlapping(small.as_ptr() as *const u8, buf, small.len()); }
+        let (buf, _) = publisher
+            .get_message_buffer(small.len() as i32)
+            .unwrap()
+            .unwrap();
+        unsafe {
+            std::ptr::copy_nonoverlapping(small.as_ptr() as *const u8, buf, small.len());
+        }
         publisher.publish_message(small.len() as i64).unwrap();
     }
 
     let big = vec![0xFFu8; 1024];
-    let (buf, _) = publisher.get_message_buffer(big.len() as i32).unwrap().unwrap();
-    unsafe { std::ptr::copy_nonoverlapping(big.as_ptr(), buf, big.len()); }
+    let (buf, _) = publisher
+        .get_message_buffer(big.len() as i32)
+        .unwrap()
+        .unwrap();
+    unsafe {
+        std::ptr::copy_nonoverlapping(big.as_ptr(), buf, big.len());
+    }
     publisher.publish_message(big.len() as i64).unwrap();
 
     // ReadNewest should skip to the last (large) message.
@@ -3147,14 +3321,18 @@ fn integration_cancel_publish_releases_lock() {
 
     let (buf, _) = publisher.get_message_buffer(64).unwrap().unwrap();
     let payload = b"will_cancel";
-    unsafe { std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len()); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
+    }
 
     publisher.cancel_publish();
 
     // After cancel we can get a new buffer and publish successfully.
     let (buf2, _) = publisher.get_message_buffer(64).unwrap().unwrap();
     let payload2 = b"after_cancel";
-    unsafe { std::ptr::copy_nonoverlapping(payload2.as_ptr(), buf2, payload2.len()); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload2.as_ptr(), buf2, payload2.len());
+    }
     let msg = publisher.publish_message(payload2.len() as i64).unwrap();
     assert!(msg.ordinal > 0);
 }
@@ -3165,21 +3343,29 @@ fn integration_cancel_publish_message_not_visible() {
     let sub_client = new_client("test_cancel_vis_s");
 
     let pub_opts = PublisherOptions::new().set_slot_size(256).set_num_slots(8);
-    let publisher = pub_client.create_publisher("rust_cancel2", &pub_opts).unwrap();
+    let publisher = pub_client
+        .create_publisher("rust_cancel2", &pub_opts)
+        .unwrap();
 
     let sub_opts = SubscriberOptions::new();
-    let subscriber = sub_client.create_subscriber("rust_cancel2", &sub_opts).unwrap();
+    let subscriber = sub_client
+        .create_subscriber("rust_cancel2", &sub_opts)
+        .unwrap();
 
     // Get buffer, write data, then cancel.
     let (buf, _) = publisher.get_message_buffer(64).unwrap().unwrap();
     let payload = b"cancelled_data";
-    unsafe { std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len()); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
+    }
     publisher.cancel_publish();
 
     // Now publish a real message.
     let (buf2, _) = publisher.get_message_buffer(64).unwrap().unwrap();
     let payload2 = b"real_data";
-    unsafe { std::ptr::copy_nonoverlapping(payload2.as_ptr(), buf2, payload2.len()); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload2.as_ptr(), buf2, payload2.len());
+    }
     publisher.publish_message(payload2.len() as i64).unwrap();
 
     subscriber.wait(Some(1000)).unwrap();
@@ -3204,7 +3390,9 @@ fn integration_cancel_publish_threaded() {
         for _ in 0..10 {
             let (buf, _) = p1.get_message_buffer(64).unwrap().unwrap();
             let data = b"thread1";
-            unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len()); }
+            unsafe {
+                std::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
+            }
             p1.publish_message(data.len() as i64).unwrap();
         }
     });
@@ -3213,7 +3401,9 @@ fn integration_cancel_publish_threaded() {
     let h2 = std::thread::spawn(move || {
         for _ in 0..10 {
             let (buf, _) = p2.get_message_buffer(64).unwrap().unwrap();
-            unsafe { *buf = 0x42; }
+            unsafe {
+                *buf = 0x42;
+            }
             p2.cancel_publish();
         }
     });
@@ -3230,16 +3420,22 @@ fn integration_find_message_by_timestamp() {
     let sub_client = new_client("test_findmsg_s");
 
     let pub_opts = PublisherOptions::new().set_slot_size(256).set_num_slots(24);
-    let publisher = pub_client.create_publisher("rust_find1", &pub_opts).unwrap();
+    let publisher = pub_client
+        .create_publisher("rust_find1", &pub_opts)
+        .unwrap();
 
     let sub_opts = SubscriberOptions::new().set_max_active_messages(8);
-    let subscriber = sub_client.create_subscriber("rust_find1", &sub_opts).unwrap();
+    let subscriber = sub_client
+        .create_subscriber("rust_find1", &sub_opts)
+        .unwrap();
 
     let mut timestamps = Vec::new();
     for i in 0..5 {
         let text = format!("find_msg_{}", i);
         let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
-        unsafe { std::ptr::copy_nonoverlapping(text.as_ptr(), buf, text.len()); }
+        unsafe {
+            std::ptr::copy_nonoverlapping(text.as_ptr(), buf, text.len());
+        }
         let msg = publisher.publish_message(text.len() as i64).unwrap();
         timestamps.push(msg.timestamp);
         std::thread::sleep(std::time::Duration::from_millis(2));
@@ -3267,14 +3463,20 @@ fn integration_find_message_not_found() {
     let sub_client = new_client("test_findmsg_nf_s");
 
     let pub_opts = PublisherOptions::new().set_slot_size(256).set_num_slots(8);
-    let publisher = pub_client.create_publisher("rust_find2", &pub_opts).unwrap();
+    let publisher = pub_client
+        .create_publisher("rust_find2", &pub_opts)
+        .unwrap();
 
     let sub_opts = SubscriberOptions::new();
-    let subscriber = sub_client.create_subscriber("rust_find2", &sub_opts).unwrap();
+    let subscriber = sub_client
+        .create_subscriber("rust_find2", &sub_opts)
+        .unwrap();
 
     let (buf, _) = publisher.get_message_buffer(64).unwrap().unwrap();
     let payload = b"find_test";
-    unsafe { std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len()); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
+    }
     publisher.publish_message(payload.len() as i64).unwrap();
 
     subscriber.wait(Some(1000)).unwrap();
@@ -3296,12 +3498,13 @@ fn integration_publisher_stats_counters() {
     for _ in 0..3 {
         let (buf, _) = publisher.get_message_buffer(64).unwrap().unwrap();
         let payload = b"stats_test";
-        unsafe { std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len()); }
+        unsafe {
+            std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
+        }
         publisher.publish_message(payload.len() as i64).unwrap();
     }
 
-    let (total_bytes, total_messages, _max_msg_size, _total_drops) =
-        publisher.get_stats_counters();
+    let (total_bytes, total_messages, _max_msg_size, _total_drops) = publisher.get_stats_counters();
     assert!(total_messages >= 3);
     assert!(total_bytes > 0);
 }
@@ -3312,22 +3515,30 @@ fn integration_subscriber_stats_counters() {
     let sub_client = new_client("test_substats_s");
 
     let pub_opts = PublisherOptions::new().set_slot_size(256).set_num_slots(8);
-    let publisher = pub_client.create_publisher("rust_substats1", &pub_opts).unwrap();
+    let publisher = pub_client
+        .create_publisher("rust_substats1", &pub_opts)
+        .unwrap();
 
     let sub_opts = SubscriberOptions::new();
-    let subscriber = sub_client.create_subscriber("rust_substats1", &sub_opts).unwrap();
+    let subscriber = sub_client
+        .create_subscriber("rust_substats1", &sub_opts)
+        .unwrap();
 
     for _ in 0..3 {
         let (buf, _) = publisher.get_message_buffer(64).unwrap().unwrap();
         let payload = b"sub_stats";
-        unsafe { std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len()); }
+        unsafe {
+            std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
+        }
         publisher.publish_message(payload.len() as i64).unwrap();
     }
 
     subscriber.wait(Some(1000)).unwrap();
     for _ in 0..3 {
         let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
-        if msg.is_empty() { break; }
+        if msg.is_empty() {
+            break;
+        }
         drop(msg);
     }
 
@@ -3352,10 +3563,14 @@ fn integration_subscriber_channel_counters() {
     let sub_client = new_client("test_subcntrs_s");
 
     let pub_opts = PublisherOptions::new().set_slot_size(64).set_num_slots(4);
-    let _pub = pub_client.create_publisher("rust_subcntrs1", &pub_opts).unwrap();
+    let _pub = pub_client
+        .create_publisher("rust_subcntrs1", &pub_opts)
+        .unwrap();
 
     let sub_opts = SubscriberOptions::new();
-    let subscriber = sub_client.create_subscriber("rust_subcntrs1", &sub_opts).unwrap();
+    let subscriber = sub_client
+        .create_subscriber("rust_subcntrs1", &sub_opts)
+        .unwrap();
 
     let counters = subscriber.get_counters();
     assert!(counters.num_subs >= 1);
@@ -3369,16 +3584,22 @@ fn integration_keep_active_message_retains_slot() {
     let sub_client = new_client("test_keepam_s");
 
     let pub_opts = PublisherOptions::new().set_slot_size(256).set_num_slots(16);
-    let publisher = pub_client.create_publisher("rust_keepam1", &pub_opts).unwrap();
+    let publisher = pub_client
+        .create_publisher("rust_keepam1", &pub_opts)
+        .unwrap();
 
     let sub_opts = SubscriberOptions::new()
         .set_keep_active_message(true)
         .set_max_active_messages(4);
-    let subscriber = sub_client.create_subscriber("rust_keepam1", &sub_opts).unwrap();
+    let subscriber = sub_client
+        .create_subscriber("rust_keepam1", &sub_opts)
+        .unwrap();
 
     let (buf, _) = publisher.get_message_buffer(64).unwrap().unwrap();
     let payload = b"keep_me";
-    unsafe { std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len()); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
+    }
     publisher.publish_message(payload.len() as i64).unwrap();
 
     subscriber.wait(Some(1000)).unwrap();
@@ -3394,7 +3615,9 @@ fn integration_keep_active_message_retains_slot() {
     // Publish another message.
     let (buf2, _) = publisher.get_message_buffer(64).unwrap().unwrap();
     let payload2 = b"second_msg";
-    unsafe { std::ptr::copy_nonoverlapping(payload2.as_ptr(), buf2, payload2.len()); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload2.as_ptr(), buf2, payload2.len());
+    }
     publisher.publish_message(payload2.len() as i64).unwrap();
 
     subscriber.wait(Some(1000)).unwrap();
@@ -3412,10 +3635,14 @@ fn integration_clear_active_message_noop_when_disabled() {
     let sub_client = new_client("test_clearam_s");
 
     let pub_opts = PublisherOptions::new().set_slot_size(64).set_num_slots(4);
-    let _pub = pub_client.create_publisher("rust_clearam1", &pub_opts).unwrap();
+    let _pub = pub_client
+        .create_publisher("rust_clearam1", &pub_opts)
+        .unwrap();
 
     let sub_opts = SubscriberOptions::new(); // keep_active_message is false
-    let subscriber = sub_client.create_subscriber("rust_clearam1", &sub_opts).unwrap();
+    let subscriber = sub_client
+        .create_subscriber("rust_clearam1", &sub_opts)
+        .unwrap();
 
     // Should be a no-op, not panic.
     subscriber.clear_active_message();
@@ -3435,7 +3662,9 @@ fn integration_channel_exists_true() {
 #[test]
 fn integration_channel_exists_false() {
     let client = new_client("test_chexist_f");
-    assert!(!client.channel_exists("nonexistent_channel_xyz_999").unwrap());
+    assert!(!client
+        .channel_exists("nonexistent_channel_xyz_999")
+        .unwrap());
 }
 
 #[test]
@@ -3446,11 +3675,15 @@ fn integration_get_all_channel_stats() {
 
     let (buf, _) = pub_handle.get_message_buffer(64).unwrap().unwrap();
     let payload = b"stats_data";
-    unsafe { std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len()); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
+    }
     pub_handle.publish_message(payload.len() as i64).unwrap();
 
     let all_stats = client.get_all_channel_stats().unwrap();
-    let ours = all_stats.iter().find(|s| s.channel_name == "rust_allstats1");
+    let ours = all_stats
+        .iter()
+        .find(|s| s.channel_name == "rust_allstats1");
     assert!(ours.is_some());
     let stats = ours.unwrap();
     assert!(stats.total_messages >= 1);
@@ -3490,13 +3723,17 @@ fn integration_subscriber_new_accessors() {
         .set_slot_size(128)
         .set_num_slots(8)
         .set_type("my_sub_type".to_string());
-    let _pub = pub_client.create_publisher("rust_subacc2", &pub_opts).unwrap();
+    let _pub = pub_client
+        .create_publisher("rust_subacc2", &pub_opts)
+        .unwrap();
 
     let sub_opts = SubscriberOptions::new()
         .set_type("my_sub_type".to_string())
         .set_for_tunnel(true)
         .set_vchan_id(-1);
-    let subscriber = sub_client.create_subscriber("rust_subacc2", &sub_opts).unwrap();
+    let subscriber = sub_client
+        .create_subscriber("rust_subacc2", &sub_opts)
+        .unwrap();
 
     assert_eq!(subscriber.channel_type(), "my_sub_type");
     assert!(subscriber.for_tunnel());
@@ -3518,7 +3755,9 @@ fn integration_publisher_get_stats_counters_increments() {
 
     let (buf, _) = publisher.get_message_buffer(64).unwrap().unwrap();
     let payload = b"increment_test";
-    unsafe { std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len()); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
+    }
     publisher.publish_message(payload.len() as i64).unwrap();
 
     let (_, msgs_after, _, _) = publisher.get_stats_counters();

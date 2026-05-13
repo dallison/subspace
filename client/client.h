@@ -16,6 +16,7 @@
 #include "client/subscriber.h"
 #include "co/coroutine.h"
 #include "common/channel.h"
+#include "common/client_buffer.h"
 
 #include "toolbelt/fd.h"
 #include "toolbelt/logging.h"
@@ -537,6 +538,12 @@ private:
   absl::Status
   SendRequestReceiveResponse(const Request &req, Response &response,
                              std::vector<toolbelt::FileDescriptor> &fds);
+  absl::Status SendOneWayRequest(const Request &req);
+  absl::Status RegisterClientBuffer(
+      const ClientBufferHandleMetadata &metadata);
+  absl::Status UnregisterClientBuffer(const std::string &channel_name,
+                                      uint64_t session_id,
+                                      uint32_t buffer_index);
 
   absl::Status Reconnect();
   absl::Status ReregisterPublisher(details::PublisherImpl *publisher);
@@ -825,12 +832,55 @@ public:
   bool IsLocal() const { return impl_->IsLocal(); }
   bool IsFixedSize() const { return impl_->IsFixedSize(); }
   bool ForTunnel() const { return impl_->ForTunnel(); }
+  // True when the channel stores prefixes separately from payload slots.
+  // In this mode each payload slot has an allocator-defined handle that can be
+  // passed to code outside Subspace. For example, if payloads were allocated
+  // from a Qualcomm memory pool, the handle is the value that qcomm-specific
+  // code needs to identify/map/free that slot.
+  bool UsesSplitBuffers() const { return impl_->UsesSplitBuffers(); }
 
   int32_t SlotSize() const { return impl_->SlotSize(); }
   int32_t NumSlots() const { return impl_->NumSlots(); }
 
   const std::vector<std::unique_ptr<details::BufferSet>> &GetBuffers() const {
     return client_->GetBuffers(impl_.get());
+  }
+
+  bool GetAddresses(void ***addresses, size_t *count) {
+    if (addresses != nullptr) {
+      *addresses = nullptr;
+    }
+    if (count != nullptr) {
+      *count = 0;
+    }
+    if (addresses == nullptr || count == nullptr || impl_->IsPlaceholder() ||
+        impl_->GetBuffers().empty()) {
+      return false;
+    }
+    const details::BufferSet *latest = impl_->GetBuffers().back().get();
+    address_cache_.clear();
+    address_cache_.reserve(static_cast<size_t>(impl_->NumSlots()));
+    if (latest->IsSplitBuffers()) {
+      if (latest->split_slot_buffers.size() <
+          static_cast<size_t>(impl_->NumSlots())) {
+        return false;
+      }
+      for (int slot = 0; slot < impl_->NumSlots(); ++slot) {
+        address_cache_.push_back(latest->split_slot_buffers[slot]);
+      }
+    } else {
+      if (latest->buffer == nullptr) {
+        return false;
+      }
+      uint64_t stride = impl_->PrefixSize() + Aligned<64>(latest->slot_size);
+      for (int slot = 0; slot < impl_->NumSlots(); ++slot) {
+        address_cache_.push_back(latest->buffer + stride * slot +
+                                 impl_->PrefixSize());
+      }
+    }
+    *addresses = address_cache_.data();
+    *count = address_cache_.size();
+    return true;
   }
 
   void GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
@@ -905,6 +955,25 @@ public:
 
   MessageSlot *CurrentSlot() const { return impl_->CurrentSlot(); }
 
+  MessagePrefix *Prefix(MessageSlot *slot = nullptr) const {
+    return impl_->Prefix(slot != nullptr ? slot : impl_->CurrentSlot());
+  }
+  // If `address` points at a split payload buffer owned by this publisher,
+  // writes that slot's allocator handle to `handle` and returns true. This is
+  // useful after GetMessageBuffer() when another API needs the handle for the
+  // payload memory instead of the mapped CPU address.
+  bool GetSplitBufferHandleFromAddress(const void *address,
+                                       uintptr_t *handle) const {
+    return impl_->GetSplitBufferHandleFromAddress(address, handle);
+  }
+  // Returns the handles for the current split-buffer set, one handle per slot.
+  // The returned array is owned by the publisher and remains valid until the
+  // publisher reloads, resizes, or is destroyed. Handles are meaningful only to
+  // the allocator/callbacks that created the payload buffers.
+  bool GetSplitBufferHandles(uintptr_t **handles, size_t *count) {
+    return impl_->GetSplitBufferHandles(handles, count);
+  }
+
   // Total prefix area size in bytes (always a multiple of 64).
   // Determined by ChecksumSize() and MetadataSize().
   int32_t PrefixSize() const { return impl_->PrefixSize(); }
@@ -939,6 +1008,7 @@ private:
   std::shared_ptr<ClientImpl> client_;
   std::shared_ptr<details::PublisherImpl> impl_;
   std::function<absl::Status(Publisher *, int, int)> resize_callback_ = nullptr;
+  std::vector<void *> address_cache_;
 };
 
 class Subscriber {
@@ -1175,12 +1245,55 @@ public:
   int64_t Timestamp() const { return impl_->Timestamp(); }
   bool IsReliable() const { return impl_->IsReliable(); }
   bool ForTunnel() const { return impl_->ForTunnel(); }
+  // True when the attached channel stores prefixes separately from payload
+  // slots. Subscribers learn this from the server response; they do not request
+  // it. In this mode each payload slot has an allocator-defined handle, such as
+  // a Qualcomm memory-pool handle, that matching map callbacks can use to map
+  // the payload into the subscriber process.
+  bool UsesSplitBuffers() const { return impl_->UsesSplitBuffers(); }
 
   int32_t SlotSize() const { return impl_->SlotSize(); }
   int32_t NumSlots() const { return impl_->NumSlots(); }
 
   const std::vector<std::unique_ptr<details::BufferSet>> &GetBuffers() const {
     return client_->GetBuffers(impl_.get());
+  }
+
+  bool GetAddresses(void ***addresses, size_t *count) {
+    if (addresses != nullptr) {
+      *addresses = nullptr;
+    }
+    if (count != nullptr) {
+      *count = 0;
+    }
+    if (addresses == nullptr || count == nullptr || impl_->IsPlaceholder() ||
+        impl_->GetBuffers().empty()) {
+      return false;
+    }
+    const details::BufferSet *latest = impl_->GetBuffers().back().get();
+    address_cache_.clear();
+    address_cache_.reserve(static_cast<size_t>(impl_->NumSlots()));
+    if (latest->IsSplitBuffers()) {
+      if (latest->split_slot_buffers.size() <
+          static_cast<size_t>(impl_->NumSlots())) {
+        return false;
+      }
+      for (int slot = 0; slot < impl_->NumSlots(); ++slot) {
+        address_cache_.push_back(latest->split_slot_buffers[slot]);
+      }
+    } else {
+      if (latest->buffer == nullptr) {
+        return false;
+      }
+      uint64_t stride = impl_->PrefixSize() + Aligned<64>(latest->slot_size);
+      for (int slot = 0; slot < impl_->NumSlots(); ++slot) {
+        address_cache_.push_back(latest->buffer + stride * slot +
+                                 impl_->PrefixSize());
+      }
+    }
+    *addresses = address_cache_.data();
+    *count = address_cache_.size();
+    return true;
   }
 
   int NumActiveMessages() const { return impl_->NumActiveMessages(); }
@@ -1202,6 +1315,27 @@ public:
   void ClearActiveMessage() { impl_->ClearActiveMessage(); }
 
   void TriggerReliablePublishers() { impl_->TriggerReliablePublishers(); }
+
+  MessageSlot *GetSlot(int slot_id) const { return impl_->GetSlot(slot_id); }
+  MessagePrefix *Prefix(MessageSlot *slot = nullptr) const {
+    return impl_->Prefix(slot != nullptr ? slot : impl_->CurrentSlot());
+  }
+  // If `address` points at a split payload buffer mapped by this subscriber,
+  // writes that slot's allocator handle to `handle` and returns true. Use this
+  // when handing the payload to another library that understands the allocator
+  // handle, not just the mapped CPU address.
+  bool GetSplitBufferHandleFromAddress(const void *address,
+                                       uintptr_t *handle) const {
+    return impl_->GetSplitBufferHandleFromAddress(address, handle);
+  }
+  // Returns the handles for the current split-buffer set, one handle per slot.
+  // The returned array is owned by the subscriber and remains valid until the
+  // subscriber reloads, the channel resizes, or the subscriber is destroyed.
+  // Handles are meaningful only to the allocator/callbacks that map the payload
+  // buffers.
+  bool GetSplitBufferHandles(uintptr_t **handles, size_t *count) {
+    return impl_->GetSplitBufferHandles(handles, count);
+  }
 
   // Total prefix area size in bytes (always a multiple of 64).
   // Determined by ChecksumSize() and MetadataSize().
@@ -1244,6 +1378,7 @@ private:
 
   std::shared_ptr<ClientImpl> client_;
   std::shared_ptr<details::SubscriberImpl> impl_;
+  std::vector<void *> address_cache_;
   std::function<void(Subscriber *, int64_t)> dropped_message_callback_ =
       nullptr;
   std::function<void(Subscriber *, Message)> message_callback_ = nullptr;

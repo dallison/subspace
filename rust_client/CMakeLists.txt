@@ -35,5 +35,5 @@ add_test(
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 set_tests_properties(rust_client_test PROPERTIES
-    ENVIRONMENT "PATH=${CMAKE_BINARY_DIR}/server:$ENV{PATH}"
+    ENVIRONMENT "PATH=$<TARGET_FILE_DIR:subspace_server>:$ENV{PATH}"
 )

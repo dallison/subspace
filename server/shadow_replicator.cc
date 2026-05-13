@@ -8,6 +8,49 @@
 #include <arpa/inet.h>
 
 namespace subspace {
+namespace {
+
+ClientBufferHandleMetadata
+FromProto(const ClientBufferHandleMetadataProto &proto) {
+  ClientBufferHandleMetadata metadata;
+  metadata.channel_name = proto.channel_name();
+  metadata.session_id = proto.session_id();
+  metadata.buffer_index = proto.buffer_index();
+  metadata.slot_id = proto.slot_id();
+  metadata.is_prefix = proto.is_prefix();
+  metadata.full_size = proto.full_size();
+  metadata.allocation_size = proto.allocation_size();
+  metadata.handle = static_cast<uintptr_t>(proto.handle());
+  metadata.shadow_file = proto.shadow_file();
+  metadata.object_name = proto.object_name();
+  metadata.allocator = proto.allocator();
+  metadata.pool_id = proto.pool_id();
+  metadata.cache_enabled = proto.cache_enabled();
+  metadata.alignment = proto.alignment();
+  metadata.allocator_metadata = proto.allocator_metadata();
+  return metadata;
+}
+
+void ToProto(const ClientBufferHandleMetadata &metadata,
+             ClientBufferHandleMetadataProto *proto) {
+  proto->set_channel_name(metadata.channel_name);
+  proto->set_session_id(metadata.session_id);
+  proto->set_buffer_index(metadata.buffer_index);
+  proto->set_slot_id(metadata.slot_id);
+  proto->set_is_prefix(metadata.is_prefix);
+  proto->set_full_size(metadata.full_size);
+  proto->set_allocation_size(metadata.allocation_size);
+  proto->set_handle(static_cast<uint64_t>(metadata.handle));
+  proto->set_shadow_file(metadata.shadow_file);
+  proto->set_object_name(metadata.object_name);
+  proto->set_allocator(metadata.allocator);
+  proto->set_pool_id(metadata.pool_id);
+  proto->set_cache_enabled(metadata.cache_enabled);
+  proto->set_alignment(metadata.alignment);
+  *proto->mutable_allocator_metadata() = metadata.allocator_metadata;
+}
+
+} // namespace
 
 ShadowReplicator::ShadowReplicator(const std::string &shadow_socket_name,
                                    toolbelt::Logger &logger)
@@ -94,6 +137,15 @@ void ShadowReplicator::SendCreateChannel(ServerChannel *channel) {
     msg->set_mux(vchan->GetMux()->Name());
     msg->set_vchan_id(vchan->GetVirtualChannelId());
   }
+  if (channel->HasSplitBufferOptions()) {
+    msg->set_has_split_buffer_options(true);
+    msg->set_use_split_buffers(
+        channel->GetSplitBufferOptions().use_split_buffers);
+  }
+  if (channel->MaxPublishers() > 0) {
+    msg->set_has_max_publishers(true);
+    msg->set_max_publishers(channel->MaxPublishers());
+  }
 
   const SharedMemoryFds &channel_fds = channel->GetFds();
   std::vector<toolbelt::FileDescriptor> fds;
@@ -173,8 +225,43 @@ void ShadowReplicator::SendRemoveSubscriber(const std::string &channel_name,
   SendEvent(event);
 }
 
-absl::StatusOr<ShadowEvent> ShadowReplicator::ReceiveEvent(
-    std::vector<toolbelt::FileDescriptor> &fds) {
+void ShadowReplicator::SendRegisterClientBuffer(
+    const ClientBufferHandleMetadata &metadata) {
+  ShadowEvent event;
+  auto *msg = event.mutable_register_client_buffer();
+  ToProto(metadata, msg->mutable_metadata());
+  SendEvent(event);
+}
+
+void ShadowReplicator::SendUnregisterClientBuffer(
+    const std::string &channel_name, uint64_t session_id,
+    uint32_t buffer_index) {
+  ShadowEvent event;
+  auto *msg = event.mutable_unregister_client_buffer();
+  msg->set_channel_name(channel_name);
+  msg->set_session_id(session_id);
+  msg->set_buffer_index(buffer_index);
+  SendEvent(event);
+}
+
+void ShadowReplicator::SendUpdateChannelOptions(const ServerChannel *channel) {
+  ShadowEvent event;
+  auto *msg = event.mutable_update_channel_options();
+  msg->set_channel_name(channel->Name());
+  if (channel->HasSplitBufferOptions()) {
+    msg->set_has_split_buffer_options(true);
+    msg->set_use_split_buffers(
+        channel->GetSplitBufferOptions().use_split_buffers);
+  }
+  if (channel->MaxPublishers() > 0) {
+    msg->set_has_max_publishers(true);
+    msg->set_max_publishers(channel->MaxPublishers());
+  }
+  SendEvent(event);
+}
+
+absl::StatusOr<ShadowEvent>
+ShadowReplicator::ReceiveEvent(std::vector<toolbelt::FileDescriptor> &fds) {
   absl::StatusOr<std::vector<char>> recv =
       socket_.ReceiveVariableLengthMessage();
   if (!recv.ok()) {
@@ -189,8 +276,8 @@ absl::StatusOr<ShadowEvent> ShadowReplicator::ReceiveEvent(
     return absl::InternalError("Failed to parse shadow event");
   }
 
-  bool has_fds = event.has_create_channel() ||
-                 event.has_add_publisher() || event.has_add_subscriber();
+  bool has_fds = event.has_create_channel() || event.has_add_publisher() ||
+                 event.has_add_subscriber();
   if (has_fds) {
     absl::Status s = socket_.ReceiveFds(fds);
     if (!s.ok()) {
@@ -240,8 +327,8 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
       return event.status();
     }
 
-    auto find_channel = [&](const std::string &name)
-        -> absl::StatusOr<RecoveredChannel *> {
+    auto find_channel =
+        [&](const std::string &name) -> absl::StatusOr<RecoveredChannel *> {
       if (state.channels.empty()) {
         return absl::InternalError(
             absl::StrFormat("event for channel '%s' before any channel", name));
@@ -281,9 +368,25 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
           .metadata_size = msg.metadata_size(),
           .mux = msg.mux(),
           .vchan_id = msg.vchan_id(),
+          .has_split_buffer_options = msg.has_split_buffer_options(),
+          .use_split_buffers = msg.use_split_buffers(),
+          .has_max_publishers = msg.has_max_publishers(),
+          .max_publishers = msg.max_publishers(),
           .ccb_fd = std::move(fds[0]),
           .bcb_fd = std::move(fds[1]),
       });
+      continue;
+    }
+
+    case ShadowEvent::kRegisterClientBuffer: {
+      const auto &msg = event->register_client_buffer();
+      ClientBufferHandleMetadata metadata = FromProto(msg.metadata());
+      absl::StatusOr<RecoveredChannel *> ch =
+          find_channel(metadata.channel_name);
+      if (!ch.ok()) {
+        return ch.status();
+      }
+      (*ch)->client_buffers.push_back(std::move(metadata));
       continue;
     }
 

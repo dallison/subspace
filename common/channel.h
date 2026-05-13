@@ -31,7 +31,8 @@ namespace subspace {
 // On Linux we can use /dev/shm directly for shared memory.
 #define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_LINUX
 #else
-// On other systems we need to use a file in /tmp and then create a shared memory segment with the same name.
+// On other systems, including QNX, use a /tmp shadow file and regular shared
+// memory.
 #define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_POSIX
 #endif
 

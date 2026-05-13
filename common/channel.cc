@@ -102,9 +102,15 @@ void Channel::Unmap() {
     // Not yet mapped.
     return;
   }
-  UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
-  UnmapMemory(ccb_, CcbSize(num_slots_), "CCB");
-  UnmapMemory(bcb_, sizeof(BufferControlBlock), "BCB");
+  auto *scb = scb_;
+  auto *ccb = ccb_;
+  auto *bcb = bcb_;
+  scb_ = nullptr;
+  ccb_ = nullptr;
+  bcb_ = nullptr;
+  UnmapMemory(scb, sizeof(SystemControlBlock), "SCB");
+  UnmapMemory(ccb, CcbSize(num_slots_), "CCB");
+  UnmapMemory(bcb, sizeof(BufferControlBlock), "BCB");
 }
 
 std::string Channel::BufferSharedMemoryName(uint64_t session_id,

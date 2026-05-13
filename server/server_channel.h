@@ -5,16 +5,19 @@
 #ifndef _xSERVERSERVER_CHANNEL_H
 #define _xSERVERSERVER_CHANNEL_H
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "common/channel.h"
+#include "common/client_buffer.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/bitset.h"
 #include "toolbelt/fd.h"
 #include "toolbelt/pipe.h"
 #include "toolbelt/sockets.h"
 #include "toolbelt/triggerfd.h"
+#include <algorithm>
 #include <memory>
 #include <sys/mman.h>
 #include <vector>
@@ -31,6 +34,10 @@ CreateSystemControlBlock(toolbelt::FileDescriptor &fd);
 struct ResizeInfo {
   int old_slot_size;
   int new_slot_size;
+};
+
+struct SplitBufferOptions {
+  bool use_split_buffers = false;
 };
 
 // A user is a publisher or subscriber on a channel.  Each user has a
@@ -171,14 +178,11 @@ public:
 
   absl::StatusOr<PublisherUser *> AddPublisher(ClientHandler *handler,
                                                bool is_reliable, bool is_local,
-                                               bool is_bridge,
-                                               bool for_tunnel,
+                                               bool is_bridge, bool for_tunnel,
                                                bool is_fixed_size);
-  absl::StatusOr<SubscriberUser *> AddSubscriber(ClientHandler *handler,
-                                                 bool is_reliable,
-                                                 bool is_bridge,
-                                                 bool for_tunnel,
-                                                 int max_active_messages);
+  absl::StatusOr<SubscriberUser *>
+  AddSubscriber(ClientHandler *handler, bool is_reliable, bool is_bridge,
+                bool for_tunnel, int max_active_messages);
 
   virtual std::string Type() const { return Channel::Type(); }
   virtual void SetType(const std::string &type) { Channel::SetType(type); }
@@ -266,19 +270,22 @@ public:
     Channel::CleanupSlots(owner, reliable, is_pub, vchan_id);
   }
 
-  virtual void RemoveBuffer(uint64_t session_id) {
-    for (int i = 0; i < ccb_->num_buffers; i++) {
-      std::string filename = BufferSharedMemoryName(session_id, i);
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
-      auto shm_name = PosixSharedMemoryName(filename);
-      if (shm_name.ok()) {
-        (void)shm_unlink(shm_name->c_str());
-      }
-      remove(filename.c_str());
-#else
-      (void)shm_unlink(filename.c_str());
-#endif
-    }
+  virtual void RemoveBuffer(uint64_t session_id, Server *server = nullptr);
+  void RegisterClientBuffer(ClientBufferHandleMetadata metadata) {
+    client_buffers_.push_back(std::move(metadata));
+  }
+  const std::vector<ClientBufferHandleMetadata> &ClientBuffers() const {
+    return client_buffers_;
+  }
+  void UnregisterClientBuffer(uint64_t session_id, uint32_t buffer_index) {
+    client_buffers_.erase(
+        std::remove_if(client_buffers_.begin(), client_buffers_.end(),
+                       [session_id, buffer_index](
+                           const ClientBufferHandleMetadata &metadata) {
+                         return metadata.session_id == session_id &&
+                                metadata.buffer_index == buffer_index;
+                       }),
+        client_buffers_.end());
   }
   // This is true if all publishers are bridge publishers.
   bool IsBridgePublisher() const;
@@ -311,12 +318,24 @@ public:
   bool IsReliable() const;
   bool IsFixedSize() const;
 
+  bool HasSplitBufferOptions() const { return split_buffer_options_set_; }
+  const SplitBufferOptions &GetSplitBufferOptions() const {
+    return split_buffer_options_;
+  }
+  absl::Status
+  ValidateOrSetSplitBufferOptions(const SplitBufferOptions &options,
+                                  bool set_if_missing, const char *user_type);
+  absl::Status ValidateOrSetMaxPublishers(int32_t max_publishers,
+                                          bool set_if_missing,
+                                          const char *user_type);
+  int32_t MaxPublishers() const { return max_publishers_; }
+
   virtual void SetSharedMemoryFds(SharedMemoryFds fds) {
     shared_memory_fds_ = std::move(fds);
   }
 
   virtual const SharedMemoryFds &GetFds() { return shared_memory_fds_; }
-  uint64_t GetVirtualMemoryUsage() const override { return Channel::GetVirtualMemoryUsage(); }
+  uint64_t GetVirtualMemoryUsage() const override;
 
   // Allocate the shared memory for a channel.  The num_slots_
   // and slot_size_ member variables will either be 0 (for a subscriber
@@ -357,11 +376,16 @@ protected:
   absl::flat_hash_map<int, std::unique_ptr<User>> users_;
   toolbelt::BitSet<kMaxUsers> user_ids_;
   absl::flat_hash_map<ChannelTransmitter, std::string> bridged_publishers_;
+  std::vector<ClientBufferHandleMetadata> client_buffers_;
   SharedMemoryFds shared_memory_fds_;
   bool is_virtual_ = false;
   bool skip_cleanup_ = false;
   int session_id_;
   mutable int32_t last_known_slot_size_ = 0;
+  bool split_buffer_options_set_ = false;
+  SplitBufferOptions split_buffer_options_;
+  bool max_publishers_set_ = false;
+  int32_t max_publishers_ = 0;
 };
 
 class VirtualChannel;
@@ -382,11 +406,11 @@ public:
     return virtual_channels_.empty() && ServerChannel::IsEmpty();
   }
 
-  void RemoveBuffer(uint64_t session_id) override {
+  void RemoveBuffer(uint64_t session_id, Server *server = nullptr) override {
     if (!virtual_channels_.empty()) {
       return;
     }
-    ServerChannel::RemoveBuffer(session_id);
+    ServerChannel::RemoveBuffer(session_id, server);
   }
 
   void CountUsers(int &num_pubs, int &num_subs, int &num_bridge_pubs,
@@ -407,9 +431,8 @@ private:
 // updates to the multiplexer SCB will be seen by all virtual channels.
 class VirtualChannel : public ServerChannel {
 public:
-  VirtualChannel(ChannelMultiplexer *mux, int vchan_id,
-                 const std::string &name, int num_slots, std::string type,
-                 int session_id)
+  VirtualChannel(ChannelMultiplexer *mux, int vchan_id, const std::string &name,
+                 int num_slots, std::string type, int session_id)
       : ServerChannel(mux->GetChannelId(), name, num_slots, type, true,
                       session_id),
         mux_(mux), vchan_id_(vchan_id) {}
@@ -461,8 +484,8 @@ public:
   void SetMetadataSize(int32_t size) override { mux_->SetMetadataSize(size); }
 
   std::string ResolvedName() const override { return mux_->ResolvedName(); }
-  void RemoveBuffer(uint64_t session_id) override {
-    mux_->RemoveBuffer(session_id);
+  void RemoveBuffer(uint64_t session_id, Server *server = nullptr) override {
+    mux_->RemoveBuffer(session_id, server);
   }
 
   absl::Status
@@ -494,7 +517,8 @@ public:
   }
 
   void GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
-                        uint32_t &max_message_size, uint32_t &total_drops) override {
+                        uint32_t &max_message_size,
+                        uint32_t &total_drops) override {
     mux_->GetStatsCounters(total_bytes, total_messages, max_message_size,
                            total_drops);
   }

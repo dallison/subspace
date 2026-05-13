@@ -8,6 +8,7 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "common/client_buffer.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/fd.h"
 #include "toolbelt/logging.h"
@@ -58,8 +59,13 @@ struct RecoveredChannel {
   int metadata_size = 0;
   std::string mux;
   int vchan_id = -1;
+  bool has_split_buffer_options = false;
+  bool use_split_buffers = false;
+  bool has_max_publishers = false;
+  int max_publishers = 0;
   toolbelt::FileDescriptor ccb_fd;
   toolbelt::FileDescriptor bcb_fd;
+  std::vector<ClientBufferHandleMetadata> client_buffers;
   std::vector<RecoveredPublisher> publishers;
   std::vector<RecoveredSubscriber> subscribers;
 };
@@ -86,8 +92,7 @@ public:
   // Read the state dump that the shadow sends on connection.
   absl::StatusOr<RecoveredState> ReceiveStateDump();
 
-  void SendInit(uint64_t session_id,
-                const toolbelt::FileDescriptor &scb_fd);
+  void SendInit(uint64_t session_id, const toolbelt::FileDescriptor &scb_fd);
   void SendCreateChannel(ServerChannel *channel);
   void SendRemoveChannel(const std::string &name, int channel_id);
   void SendAddPublisher(const std::string &channel_name,
@@ -96,6 +101,10 @@ public:
   void SendAddSubscriber(const std::string &channel_name,
                          const SubscriberUser *sub);
   void SendRemoveSubscriber(const std::string &channel_name, int sub_id);
+  void SendRegisterClientBuffer(const ClientBufferHandleMetadata &metadata);
+  void SendUnregisterClientBuffer(const std::string &channel_name,
+                                  uint64_t session_id, uint32_t buffer_index);
+  void SendUpdateChannelOptions(const ServerChannel *channel);
 
 private:
   void SendEvent(const ShadowEvent &event,

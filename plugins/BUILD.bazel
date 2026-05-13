@@ -15,6 +15,17 @@ cc_binary(
     linkshared = True,
 )
 
+cc_binary(
+    name = "split_buffer_free_test_plugin.so",
+    srcs = ["split_buffer_free_test_plugin.cc"],
+    deps = [
+        "//server:server",
+        "@abseil-cpp//absl/status",
+    ],
+    linkstatic = False,
+    linkshared = True,
+)
+
 # Static library version of the NOP plugin for linking directly into binaries.
 # On macOS, dlopen'd plugins get their own copy of thread-local variables
 # (like co::self), breaking the coroutine scheduler.  Linking the plugin

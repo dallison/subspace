@@ -59,7 +59,10 @@ cc_test(
         "//:macos_arm64": [],
         "//:macos_x86_64": [],
         "//:macos_default": [],
-        "//conditions:default": ["//plugins:nop_plugin.so"],
+        "//conditions:default": [
+            "//plugins:nop_plugin.so",
+            "//plugins:split_buffer_free_test_plugin.so",
+        ],
     }),
     copts = [
         "-Wno-missing-field-initializers",
@@ -90,11 +93,11 @@ cc_test(
 cc_test(
     name = "latency_test",
     size = "large",
-    tags = ["manual"],
     srcs = ["latency_test.cc"],
     data = [
         "//server:subspace_server",
     ],
+    tags = ["manual"],
     deps = [
         ":subspace_client",
         ":test_fixture",
@@ -113,11 +116,11 @@ cc_test(
 cc_test(
     name = "stress_test",
     size = "large",
-    tags = ["manual"],
     srcs = ["stress_test.cc"],
     data = [
         "//server:subspace_server",
     ],
+    tags = ["manual"],
     deps = [
         ":subspace_client",
         ":test_fixture",

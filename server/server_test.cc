@@ -72,7 +72,7 @@ public:
                   bool fixed_size = false, const std::string &mux = "",
                   int vchan_id = 0, bool for_tunnel = false,
                   bool notify_retirement = false, int checksum_size = 0,
-                  int metadata_size = 0) {
+                  int metadata_size = 0, int max_publishers = 0) {
     subspace::Request req;
     auto *cmd = req.mutable_create_publisher();
     cmd->set_channel_name(channel);
@@ -88,6 +88,7 @@ public:
     cmd->set_notify_retirement(notify_retirement);
     cmd->set_checksum_size(checksum_size);
     cmd->set_metadata_size(metadata_size);
+    cmd->set_max_publishers(max_publishers);
     cmd->set_publisher_id(-1);
     auto result = Send(req);
     return std::move(*result);
@@ -273,6 +274,46 @@ TEST_F(ServerTest, PubMetadataSizeInconsistent) {
       0, /*metadata_size=*/32);
   EXPECT_THAT(resp.create_publisher().error(),
               ::testing::HasSubstr("Inconsistent metadata_size"));
+}
+
+TEST_F(ServerTest, PubMaxPublishersInconsistent) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  conn.CreatePublisher("max_pub_incon_ch", 64, 4, "", false, true, false, "",
+                       0, false, false, 0, 0, /*max_publishers=*/2);
+  auto [resp, fds] = conn.CreatePublisher(
+      "max_pub_incon_ch", 64, 4, "", false, true, false, "", 0, false, false,
+      0, 0, /*max_publishers=*/3);
+  EXPECT_THAT(resp.create_publisher().error(),
+              ::testing::HasSubstr("Inconsistent max_publishers"));
+}
+
+TEST_F(ServerTest, PubMaxPublishersLimit) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  conn.CreatePublisher("max_pub_limit_ch", 64, 4, "", false, true, false, "",
+                       0, false, false, 0, 0, /*max_publishers=*/1);
+  auto [resp, fds] = conn.CreatePublisher(
+      "max_pub_limit_ch", 64, 4, "", false, true, false, "", 0, false, false,
+      0, 0, /*max_publishers=*/1);
+  EXPECT_THAT(resp.create_publisher().error(),
+              ::testing::HasSubstr("maximum number of publishers"));
+}
+
+TEST_F(ServerTest, PubMaxPublishersNegativeRejected) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  auto [resp, fds] = conn.CreatePublisher(
+      "max_pub_negative_ch", 64, 4, "", false, true, false, "", 0, false,
+      false, 0, 0, /*max_publishers=*/-1);
+  EXPECT_THAT(resp.create_publisher().error(),
+              ::testing::HasSubstr("Invalid max_publishers"));
 }
 
 TEST_F(ServerTest, PubToMuxChannelWithoutMuxName) {

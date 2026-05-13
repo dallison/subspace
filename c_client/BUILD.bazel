@@ -30,7 +30,7 @@ cc_test(
         "@abseil-cpp//absl/hash:hash_testing",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
-        "@googletest//:gtest_main",
+        "@googletest//:gtest",
         "@coroutines//:co",
     ],
 )

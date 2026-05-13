@@ -486,6 +486,7 @@ impl Subscriber {
                 sub_impl.clear_poll_fd();
                 return Ok(Message::default());
             }
+            sub_impl.trigger_reliable_publishers();
         }
 
         reload_reliable_publishers_if_necessary(&mut *client, &mut sub_impl)?;
@@ -833,6 +834,8 @@ impl Client {
                     notify_retirement: opts.notify_retirement,
                     checksum_size: opts.checksum_size,
                     metadata_size: opts.metadata_size,
+                    use_split_buffers: false,
+                    max_publishers: 0,
                     publisher_id: -1,
                 },
             )),

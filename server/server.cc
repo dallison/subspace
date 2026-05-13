@@ -132,6 +132,13 @@ Server::Server(co::CoroutineScheduler &scheduler,
 Server::~Server() {
   // Clear this before other data members get destroyed.
   client_handlers_.clear();
+  if (!simulate_crash_) {
+    for (auto &[name, channel] : channels_) {
+      if (channel != nullptr && !channel->IsVirtual()) {
+        channel->RemoveBuffer(session_id_, this);
+      }
+    }
+  }
 }
 
 void Server::Stop(bool force) {
@@ -339,8 +346,9 @@ absl::Status Server::Run() {
   bool secondary_connected = false;
 
   // Helper to attempt recovery from a single shadow replicator.
-  auto try_recover_from = [this](const std::unique_ptr<ShadowReplicator> &replicator,
-                               const char *label) -> bool {
+  auto try_recover_from =
+      [this](const std::unique_ptr<ShadowReplicator> &replicator,
+             const char *label) -> bool {
     absl::Status status = replicator->Connect();
     if (!status.ok()) {
       logger_.Log(toolbelt::LogLevel::kWarning,
@@ -443,26 +451,31 @@ absl::Status Server::Run() {
 
   // Phase 4: Send init and re-replicate recovered state to all connected
   // shadows.
-  auto replicate_to_shadow = [this, recovered](const std::unique_ptr<ShadowReplicator> &shadow) {
-    shadow->SendInit(session_id_, scb_fd_);
-    if (recovered) {
-      for (auto &[name, ch] : channels_) {
-        shadow->SendCreateChannel(ch.get());
-        for (auto &[uid, user] : ch->GetUsers()) {
-          if (user == nullptr) {
-            continue;
-          }
-          if (user->IsPublisher()) {
-            shadow->SendAddPublisher(
-                name, static_cast<PublisherUser *>(user.get()));
-          } else if (user->IsSubscriber()) {
-            shadow->SendAddSubscriber(
-                name, static_cast<SubscriberUser *>(user.get()));
+  auto replicate_to_shadow =
+      [this, recovered](const std::unique_ptr<ShadowReplicator> &shadow) {
+        shadow->SendInit(session_id_, scb_fd_);
+        if (recovered) {
+          for (auto &[name, ch] : channels_) {
+            shadow->SendCreateChannel(ch.get());
+            for (const ClientBufferHandleMetadata &metadata :
+                 ch->ClientBuffers()) {
+              shadow->SendRegisterClientBuffer(metadata);
+            }
+            for (auto &[uid, user] : ch->GetUsers()) {
+              if (user == nullptr) {
+                continue;
+              }
+              if (user->IsPublisher()) {
+                shadow->SendAddPublisher(
+                    name, static_cast<PublisherUser *>(user.get()));
+              } else if (user->IsSubscriber()) {
+                shadow->SendAddSubscriber(
+                    name, static_cast<SubscriberUser *>(user.get()));
+              }
+            }
           }
         }
-      }
-    }
-  };
+      };
 
   if (primary_connected) {
     replicate_to_shadow(primary_shadow_replicator_);
@@ -539,9 +552,10 @@ absl::Status Server::Run() {
     }
   }
 
-  // TODO: why does this not work?  The BridgeSenderCoroutine causes a terminate because the co::AbortException
-  // is not caught in the coroutine caller.  This appears to be a bug somewhere as I can't find why the catch
-  // isn't working.  We don't need to abort handling anyway.
+  // TODO: why does this not work?  The BridgeSenderCoroutine causes a terminate
+  // because the co::AbortException is not caught in the coroutine caller.  This
+  // appears to be a bug somewhere as I can't find why the catch isn't working.
+  // We don't need to abort handling anyway.
   scheduler_.EnableAborts(false);
 
   // Start the listener coroutine.
@@ -757,12 +771,29 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
     channel->SetLastKnownSlotSize(rch.slot_size);
     channel->SetChecksumSize(rch.checksum_size);
     channel->SetMetadataSize(rch.metadata_size);
+    if (rch.has_split_buffer_options) {
+      if (absl::Status s = channel->ValidateOrSetSplitBufferOptions(
+              {.use_split_buffers = rch.use_split_buffers},
+              /*set_if_missing=*/true, "shadow recovery");
+          !s.ok()) {
+        return s;
+      }
+    }
+    if (rch.has_max_publishers) {
+      if (absl::Status s = channel->ValidateOrSetMaxPublishers(
+              rch.max_publishers, /*set_if_missing=*/true, "shadow recovery");
+          !s.ok()) {
+        return s;
+      }
+    }
 
-    if (absl::Status s =
-            channel->MapExisting(scb_fd_, std::move(rch.ccb_fd),
-                                 std::move(rch.bcb_fd));
+    if (absl::Status s = channel->MapExisting(scb_fd_, std::move(rch.ccb_fd),
+                                              std::move(rch.bcb_fd));
         !s.ok()) {
       return s;
+    }
+    for (ClientBufferHandleMetadata &metadata : rch.client_buffers) {
+      channel->RegisterClientBuffer(std::move(metadata));
     }
 
     for (auto &rpub : rch.publishers) {
@@ -785,8 +816,8 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
 
     for (auto &rsub : rch.subscribers) {
       auto sub = std::make_unique<SubscriberUser>(
-          nullptr, rsub.id, rsub.is_reliable, rsub.is_bridge,
-          rsub.for_tunnel, rsub.max_active_messages);
+          nullptr, rsub.id, rsub.is_reliable, rsub.is_bridge, rsub.for_tunnel,
+          rsub.max_active_messages);
 
       toolbelt::TriggerFd tfd(rsub.trigger_fd, rsub.poll_fd);
       sub->SetTriggerFd(std::move(tfd));
@@ -810,7 +841,7 @@ void Server::RemoveChannel(ServerChannel *channel) {
     s->SendRemoveChannel(channel->Name(), channel->GetChannelId());
   });
   if (!simulate_crash_) {
-    channel->RemoveBuffer(session_id_);
+    channel->RemoveBuffer(session_id_, this);
   }
   channel_ids_.Clear(channel->GetChannelId());
   auto it = channels_.find(channel->Name());
@@ -859,7 +890,9 @@ void Server::ChannelDirectoryCoroutine() {
 
   absl::StatusOr<Publisher> channel_directory = client.CreatePublisher(
       "/subspace/ChannelDirectory", kDirectorySlotSize, kDirectoryNumSlots,
-      PublisherOptions().SetType("subspace.ChannelDirectory"));
+      PublisherOptions()
+          .SetType("subspace.ChannelDirectory")
+          .SetUseSplitBuffers(false));
   if (!channel_directory.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to create channel directory channel: %s",
@@ -916,7 +949,9 @@ void Server::StatisticsCoroutine() {
 
   absl::StatusOr<Publisher> pub = client.CreatePublisher(
       "/subspace/Statistics", kStatsSlotSize, kStatsNumSlots,
-      PublisherOptions().SetType("subspace.Statistics"));
+      PublisherOptions()
+          .SetType("subspace.Statistics")
+          .SetUseSplitBuffers(false));
   if (!pub.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to create statistics channel: %s",
@@ -1259,10 +1294,17 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
       // The prefix area may be larger than sizeof(MessagePrefix) when
       // checksum_size or metadata_size requires additional 64-byte chunks.
       size_t prefix_area = sub->PrefixSize();
-      const char *prefix_addr =
-          reinterpret_cast<const char *>(msg->buffer) - prefix_area;
+      const MessageSlot *slot = sub->GetSlot(msg->slot_id);
       const MessagePrefix *prefix =
-          reinterpret_cast<const MessagePrefix *>(prefix_addr);
+          slot == nullptr ? nullptr
+                          : sub->Prefix(const_cast<MessageSlot *>(slot));
+      if (prefix == nullptr) {
+        logger_.Log(toolbelt::LogLevel::kError,
+                    "Failed to find message prefix for bridge message on %s",
+                    channel_name.c_str());
+        continue;
+      }
+      const char *prefix_addr = reinterpret_cast<const char *>(prefix);
       // NOTE: there's a question here about whether we want to send an
       // activation message across the bridge.  Currently we do send
       // it but the receiver will disregard it.  I don't think we need
@@ -1671,7 +1713,14 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     // after the padding.
     size_t prefix_area = pub->PrefixSize();
     size_t adjusted_prefix_length = prefix_area - sizeof(int32_t);
-    char *prefix_addr = reinterpret_cast<char *>(*buf) - prefix_area;
+    MessagePrefix *prefix = pub->Prefix();
+    if (prefix == nullptr) {
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to find message prefix for bridge receiver on %s",
+                  channel_name.c_str());
+      break;
+    }
+    char *prefix_addr = reinterpret_cast<char *>(prefix);
     char *after_padding = prefix_addr + sizeof(int32_t);
 
     absl::StatusOr<ssize_t> n = bridge->ReceiveMessage(
@@ -1688,7 +1737,6 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
 
     // Set the kMessageBridged flag in the prefix so that this message isn't
     // forwarded again over a bridge.
-    MessagePrefix *prefix = reinterpret_cast<MessagePrefix *>(prefix_addr);
     if ((prefix->flags & kMessageActivate) != 0) {
       // Since we have created a reliable publisher and it has sent an
       // activation message through, we don't send another one.
@@ -1806,8 +1854,7 @@ void Server::IncomingAdvertise(const Discovery::Advertise &advertise,
     // Remove any stale bridge entry from a previous server instance
     // before adding the new one.
     channel->second->RemoveBridgedAddress(sender, advertise.reliable());
-    channel->second->AddBridgedAddress(sender, advertise.reliable(),
-                                       server_id);
+    channel->second->AddBridgedAddress(sender, advertise.reliable(), server_id);
 
     int num_pubs, num_subs, num_bridge_pubs, num_bridge_subs;
     int num_tunnel_pubs, num_tunnel_subs;
@@ -1925,16 +1972,29 @@ absl::Status Server::LoadPlugin(const std::string &name,
   // Call the init function to get the interface.
   using InitFunc = PluginInterface *(*)();
   InitFunc init = reinterpret_cast<InitFunc>(func);
-  auto interface = init();
+  std::unique_ptr<PluginInterface> interface(init());
 
+  return RegisterPlugin(name, handle, std::move(interface));
+}
+
+absl::Status
+Server::LoadBuiltinPlugin(const std::string &name,
+                          std::unique_ptr<PluginInterface> interface) {
+  std::lock_guard<std::mutex> lock(plugin_lock_);
+  return RegisterPlugin(name, nullptr, std::move(interface));
+}
+
+absl::Status
+Server::RegisterPlugin(const std::string &name, void *handle,
+                       std::unique_ptr<PluginInterface> interface) {
   // Call the OnStartup function in the loaded plugin.
   absl::Status status = interface->OnStartup(*this, name);
   if (!status.ok()) {
     return status;
   }
   interface->SetScheduler(scheduler_);
-  plugins_.push_back(std::make_unique<Plugin>(
-      name, handle, std::unique_ptr<PluginInterface>(interface)));
+  plugins_.push_back(
+      std::make_unique<Plugin>(name, handle, std::move(interface)));
   return absl::OkStatus();
 }
 
@@ -2003,12 +2063,35 @@ void Server::OnRemoveSubscriber(const std::string &channel_name,
   }
 }
 
+absl::StatusOr<bool> Server::FreeClientBufferWithPlugins(
+    const ClientBufferHandleMetadata &metadata) {
+  std::lock_guard<std::mutex> lock(plugin_lock_);
+  for (const auto &plugin : plugins_) {
+    absl::StatusOr<bool> freed =
+        plugin->interface->OnFreeClientBuffer(*this, metadata);
+    if (!freed.ok()) {
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Plugin %s failed to free client buffer for channel %s "
+                  "buffer %u slot %u handle 0x%zx: %s",
+                  plugin->name.c_str(), metadata.channel_name.c_str(),
+                  metadata.buffer_index, metadata.slot_id,
+                  static_cast<size_t>(metadata.handle),
+                  freed.status().ToString().c_str());
+      continue;
+    }
+    if (*freed) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void Server::SetShadowSocket(const std::string &socket_name) {
   SetShadowSockets(socket_name, "");
 }
 
 void Server::SetShadowSockets(const std::string &primary,
-                               const std::string &secondary) {
+                              const std::string &secondary) {
   if (!primary.empty()) {
     primary_shadow_replicator_ =
         std::make_unique<ShadowReplicator>(primary, logger_);

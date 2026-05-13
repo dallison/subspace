@@ -5,10 +5,17 @@
 #ifndef _xCLIENT_OPTIONS_H
 #define _xCLIENT_OPTIONS_H
 
+#include "common/channel.h"
+#include "common/split_buffer.h"
+
+#include <cstdint>
 #include <functional>
 #include <string>
 
 namespace subspace {
+
+void SetDefaultUseSplitBuffers(bool use_split_buffers);
+bool DefaultUseSplitBuffers();
 
 // You can use the options in two ways depending on your
 // coding guidelines.  You can either use the Google/Java-style
@@ -171,6 +178,34 @@ struct PublisherOptions {
   }
   bool PreferRetiredSlots() const { return prefer_retired_slots; }
 
+  // Maximum number of publishers allowed on the channel.  A value of 0 means
+  // no explicit limit beyond the server's normal channel capacity.
+  PublisherOptions &SetMaxPublishers(int32_t n) {
+    max_publishers = n;
+    return *this;
+  }
+  int32_t MaxPublishers() const { return max_publishers; }
+
+  // Split-buffer options.  When use_split_buffers is true, prefixes are stored
+  // in a separate shared-memory region and each payload slot is allocated as a
+  // separate block.  If callbacks are supplied, the publisher allocates payload
+  // slots through them and subscribers map those slots through their matching
+  // callbacks.  Prefixes remain regular shared memory.
+  PublisherOptions &SetUseSplitBuffers(bool v) {
+    use_split_buffers = v;
+    return *this;
+  }
+  bool UseSplitBuffers() const { return use_split_buffers; }
+
+  PublisherOptions &SetSplitBufferCallbacks(
+      subspace::SplitBufferCallbacks callbacks) {
+    split_buffer_callbacks = std::move(callbacks);
+    return *this;
+  }
+  const subspace::SplitBufferCallbacks &SplitBufferCallbackSet() const {
+    return split_buffer_callbacks;
+  }
+
   // If you use the new CreatePublisher API, set the slot size and num slots in
   // here.
   int32_t slot_size = 0;
@@ -194,6 +229,9 @@ struct PublisherOptions {
 
   // See SetPreferRetiredSlots() for description.
   bool prefer_retired_slots = false;
+  int32_t max_publishers = 0;
+  bool use_split_buffers = DefaultUseSplitBuffers();
+  subspace::SplitBufferCallbacks split_buffer_callbacks;
 };
 
 struct SubscriberOptions {
@@ -294,6 +332,20 @@ struct SubscriberOptions {
   }
   bool KeepActiveMessage() const { return keep_active_message; }
 
+  // The server reports the channel layout on attach.  Subscribers do not
+  // request split buffers; this getter tells users what the publisher selected
+  // after subscriber creation or reload.
+  bool UseSplitBuffers() const { return use_split_buffers; }
+
+  SubscriberOptions &SetSplitBufferCallbacks(
+      subspace::SplitBufferCallbacks callbacks) {
+    split_buffer_callbacks = std::move(callbacks);
+    return *this;
+  }
+  const subspace::SplitBufferCallbacks &SplitBufferCallbackSet() const {
+    return split_buffer_callbacks;
+  }
+
   bool reliable = false;
   bool bridge = false;
   bool for_tunnel = false;
@@ -314,6 +366,8 @@ struct SubscriberOptions {
   // around and you want to keep the message alive until you are done with it.
   // You should call ClearActiveMessage() to release the reference when you are done with it.
   bool keep_active_message = false;
+  bool use_split_buffers = false;
+  subspace::SplitBufferCallbacks split_buffer_callbacks;
 };
 
 } // namespace subspace

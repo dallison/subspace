@@ -4,8 +4,10 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "common/client_buffer.h"
 #include "toolbelt/logging.h"
 #include <dlfcn.h>
+#include <memory>
 #include <string>
 
 namespace co {
@@ -38,6 +40,12 @@ struct PluginInterfaceFunctions {
   void (*onRemovePublisher)(Server &s, const std::string &channel_name, int publisher_id, PluginContext *ctx);
   void (*onNewSubscriber)(Server &s, const std::string &channel_name, int subscriber_id, PluginContext *ctx);
   void (*onRemoveSubscriber)(Server &s, const std::string &channel_name, int subscriber_id, PluginContext *ctx);
+  // Gives plugins a chance to release client-allocated memory by allocator
+  // handle. Return true if the plugin recognized and freed the allocation,
+  // false to let another plugin or the default cleanup handle it.
+  absl::StatusOr<bool> (*onFreeClientBuffer)(
+      Server &s, const ClientBufferHandleMetadata &metadata,
+      PluginContext *ctx);
 };
 
 class PluginInterface {
@@ -79,6 +87,14 @@ public:
   void OnRemoveSubscriber(Server &s, const std::string &channel_name,
                           int subscriber_id) {
     functions_.onRemoveSubscriber(s, channel_name, subscriber_id, ctx_.get());
+  }
+
+  absl::StatusOr<bool> OnFreeClientBuffer(
+      Server &s, const ClientBufferHandleMetadata &metadata) {
+    if (functions_.onFreeClientBuffer == nullptr) {
+      return false;
+    }
+    return functions_.onFreeClientBuffer(s, metadata, ctx_.get());
   }
 
   void SetScheduler(co::CoroutineScheduler &scheduler) {

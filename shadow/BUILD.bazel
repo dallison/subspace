@@ -11,6 +11,7 @@ cc_library(
         "shadow.h",
     ],
     deps = [
+        "//common:subspace_common",
         "//proto:subspace_cc_proto",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/status",
