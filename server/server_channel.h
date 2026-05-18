@@ -38,6 +38,7 @@ struct ResizeInfo {
 
 struct SplitBufferOptions {
   bool use_split_buffers = false;
+  bool split_buffers_over_bridge = false;
 };
 
 // A user is a publisher or subscriber on a channel.  Each user has a

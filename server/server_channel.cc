@@ -94,7 +94,8 @@ absl::Status ServerChannel::ValidateOrSetSplitBufferOptions(
     const SplitBufferOptions &options, bool set_if_missing,
     const char *user_type) {
   if (!split_buffer_options_set_) {
-    if (set_if_missing || options.use_split_buffers) {
+    if (set_if_missing || options.use_split_buffers ||
+        options.split_buffers_over_bridge) {
       split_buffer_options_ = options;
       split_buffer_options_set_ = true;
     }
@@ -105,6 +106,13 @@ absl::Status ServerChannel::ValidateOrSetSplitBufferOptions(
       split_buffer_options_.use_split_buffers != options.use_split_buffers) {
     return absl::InvalidArgumentError(absl::StrFormat(
         "Inconsistent split-buffer mode for %s on channel %s", user_type,
+        Name()));
+  }
+  if (options.split_buffers_over_bridge &&
+      split_buffer_options_.split_buffers_over_bridge !=
+          options.split_buffers_over_bridge) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Inconsistent bridge split-buffer mode for %s on channel %s", user_type,
         Name()));
   }
   return absl::OkStatus();

@@ -103,6 +103,7 @@ loop {
 | `checksum` | false | Compute CRC32 checksums on published messages. |
 | `checksum_size` | 4 | Bytes reserved for checksums (default: 4 for CRC32). |
 | `metadata_size` | 0 | Bytes reserved in each message prefix for user metadata. |
+| `split_buffers_over_bridge` | false | Ask receiving bridge servers to create their mirror publisher with split payload buffers. |
 
 All options use a builder pattern:
 

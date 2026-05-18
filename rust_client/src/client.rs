@@ -835,6 +835,7 @@ impl Client {
                     checksum_size: opts.checksum_size,
                     metadata_size: opts.metadata_size,
                     use_split_buffers: false,
+                    split_buffers_over_bridge: opts.split_buffers_over_bridge,
                     max_publishers: 0,
                     publisher_id: -1,
                 },

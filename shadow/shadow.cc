@@ -233,6 +233,7 @@ Shadow::HandleCreateChannel(const ShadowCreateChannel &msg,
     ch.vchan_id = msg.vchan_id();
     ch.has_split_buffer_options = msg.has_split_buffer_options();
     ch.use_split_buffers = msg.use_split_buffers();
+    ch.split_buffers_over_bridge = msg.split_buffers_over_bridge();
     ch.has_max_publishers = msg.has_max_publishers();
     ch.max_publishers = msg.max_publishers();
     ch.ccb_fd = std::move(fds[0]);
@@ -430,6 +431,7 @@ Shadow::HandleUpdateChannelOptions(const ShadowUpdateChannelOptions &msg) {
   ShadowChannel &channel = it->second;
   channel.has_split_buffer_options = msg.has_split_buffer_options();
   channel.use_split_buffers = msg.use_split_buffers();
+  channel.split_buffers_over_bridge = msg.split_buffers_over_bridge();
   channel.has_max_publishers = msg.has_max_publishers();
   channel.max_publishers = msg.max_publishers();
   return absl::OkStatus();
@@ -498,6 +500,7 @@ absl::Status Shadow::SendStateDump(toolbelt::UnixSocket &socket) {
       msg->set_vchan_id(ch.vchan_id);
       msg->set_has_split_buffer_options(ch.has_split_buffer_options);
       msg->set_use_split_buffers(ch.use_split_buffers);
+      msg->set_split_buffers_over_bridge(ch.split_buffers_over_bridge);
       msg->set_has_max_publishers(ch.has_max_publishers);
       msg->set_max_publishers(ch.max_publishers);
 

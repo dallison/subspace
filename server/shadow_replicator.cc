@@ -141,6 +141,8 @@ void ShadowReplicator::SendCreateChannel(ServerChannel *channel) {
     msg->set_has_split_buffer_options(true);
     msg->set_use_split_buffers(
         channel->GetSplitBufferOptions().use_split_buffers);
+    msg->set_split_buffers_over_bridge(
+        channel->GetSplitBufferOptions().split_buffers_over_bridge);
   }
   if (channel->MaxPublishers() > 0) {
     msg->set_has_max_publishers(true);
@@ -252,6 +254,8 @@ void ShadowReplicator::SendUpdateChannelOptions(const ServerChannel *channel) {
     msg->set_has_split_buffer_options(true);
     msg->set_use_split_buffers(
         channel->GetSplitBufferOptions().use_split_buffers);
+    msg->set_split_buffers_over_bridge(
+        channel->GetSplitBufferOptions().split_buffers_over_bridge);
   }
   if (channel->MaxPublishers() > 0) {
     msg->set_has_max_publishers(true);
@@ -370,6 +374,7 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
           .vchan_id = msg.vchan_id(),
           .has_split_buffer_options = msg.has_split_buffer_options(),
           .use_split_buffers = msg.use_split_buffers(),
+          .split_buffers_over_bridge = msg.split_buffers_over_bridge(),
           .has_max_publishers = msg.has_max_publishers(),
           .max_publishers = msg.max_publishers(),
           .ccb_fd = std::move(fds[0]),

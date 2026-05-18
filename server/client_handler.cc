@@ -32,7 +32,8 @@ FromProto(const ClientBufferHandleMetadataProto &proto) {
 
 SplitBufferOptions
 FromPublisherSplitBufferRequest(const CreatePublisherRequest &req) {
-  return {.use_split_buffers = req.use_split_buffers()};
+  return {.use_split_buffers = req.use_split_buffers(),
+          .split_buffers_over_bridge = req.split_buffers_over_bridge()};
 }
 
 } // namespace

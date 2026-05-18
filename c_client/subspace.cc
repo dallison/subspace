@@ -521,6 +521,7 @@ SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size,
       .metadata_size = 0,
       .prefer_retired_slots = true,
       .use_split_buffers = false,
+      .split_buffers_over_bridge = false,
       .max_publishers = 0,
       .split_callbacks = {},
   };
@@ -587,6 +588,7 @@ SubspacePublisher subspace_create_publisher(SubspaceClient client,
       .prefer_retired_slots = options.prefer_retired_slots,
       .max_publishers = options.max_publishers,
       .use_split_buffers = options.use_split_buffers,
+      .split_buffers_over_bridge = options.split_buffers_over_bridge,
       .split_buffer_callbacks = ToCppSplitCallbacks(options.split_callbacks),
   };
   subspace_clear_error();
