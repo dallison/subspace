@@ -100,6 +100,7 @@ Important publisher options:
 | `metadata_size` | Reserve per-message user metadata bytes in the prefix. |
 | `prefer_retired_slots` | Prefer recently retired slots for unreliable publishers. |
 | `use_split_buffers` | Store payloads in split payload buffers. |
+| `split_buffers_over_bridge` | Ask receiving bridge servers to create their mirror publisher with split payload buffers. |
 | `max_publishers` | Maximum publishers allowed on a split-buffer channel. |
 | `split_callbacks` | Optional allocator callbacks for split payload buffers. |
 

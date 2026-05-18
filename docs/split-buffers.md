@@ -45,6 +45,26 @@ Split buffers are a channel-level setting:
 - The server records split-buffer metadata in the shadow process so recovery can
   rebuild channel state after a server restart.
 
+## Bridged Channels
+
+Split-buffer behavior over a server bridge has two independent settings:
+
+- `use_split_buffers` controls the local channel layout on the server where the
+  publisher is created.
+- `split_buffers_over_bridge` controls the mirror publisher created by a
+  receiving bridge server.
+
+When the source channel uses split buffers, bridge messages are sent as two
+length-prefixed chunks: the `MessagePrefix` area first, then the payload buffer.
+When the source channel does not use split buffers, bridge messages keep the
+legacy single length-prefixed prefix-plus-payload chunk.
+
+Set `split_buffers_over_bridge` when the receiving server should create its
+bridge publisher with split payload buffers, even if the source channel itself
+does not use split buffers locally. The two flags can be set independently so a
+channel can use split buffers only on the source side, only on the receiving side,
+on both sides, or on neither side.
+
 ## C++ API
 
 Publishers enable split buffers through `PublisherOptions`:
@@ -57,6 +77,16 @@ auto opts = subspace::PublisherOptions()
     .SetMaxPublishers(4);
 
 auto pub = client.CreatePublisher("camera", opts);
+```
+
+To request split payload buffers for the remote mirror publisher created over a
+bridge, set `SetSplitBuffersOverBridge(true)`:
+
+```cpp
+auto opts = subspace::PublisherOptions()
+    .SetSlotSize(4096)
+    .SetNumSlots(16)
+    .SetSplitBuffersOverBridge(true);
 ```
 
 For a custom allocator, provide split-buffer callbacks. The allocator returns an
@@ -104,6 +134,7 @@ SubspacePublisherOptions pub_opts =
     subspace_publisher_options_default(4096, 16);
 pub_opts.use_split_buffers = true;
 pub_opts.max_publishers = 4;
+pub_opts.split_buffers_over_bridge = true;
 
 SubspacePublisher pub =
     subspace_create_publisher(client, "camera", pub_opts);
