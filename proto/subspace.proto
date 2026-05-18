@@ -40,6 +40,7 @@ message CreatePublisherRequest {
   int32 publisher_id = 14;     // -1 for new, >= 0 to reclaim existing.
   bool use_split_buffers = 16; // Prefixes and payload slots are separate.
   int32 max_publishers = 17;   // 0 means no explicit publisher limit.
+  bool split_buffers_over_bridge = 18; // Remote bridge publisher uses split buffers.
 }
 
 message CreatePublisherResponse {
@@ -259,6 +260,8 @@ message Subscribed {
   ChannelAddress retirement_socket = 6;
   int32 checksum_size = 7;  // Bytes reserved for checksum.
   int32 metadata_size = 8;  // Bytes reserved for user metadata.
+  bool split_buffers = 9; // Bridge messages are sent as prefix and payload chunks.
+  bool split_buffers_over_bridge = 10; // Receiving bridge publisher uses split buffers.
 }
 
 // This is sent over a TCP connection from the peer server when the
@@ -275,6 +278,7 @@ message Discovery {
     string channel_name = 1;
     bool reliable = 2;
     bool notify_retirement = 3; // Notify publisher when slots retire.
+    bool split_buffers = 4;     // Peer bridge publisher should use split buffers.
   }
 
   // Subscribe to the given channel.  The sender is listening
@@ -430,6 +434,7 @@ message ShadowCreateChannel {
   bool use_split_buffers = 14;
   bool has_max_publishers = 15;
   int32 max_publishers = 16;
+  bool split_buffers_over_bridge = 17;
   // FDs sent via SCM_RIGHTS: [ccb_fd, bcb_fd]
 }
 
@@ -497,4 +502,5 @@ message ShadowUpdateChannelOptions {
   bool use_split_buffers = 3;
   bool has_max_publishers = 4;
   int32 max_publishers = 5;
+  bool split_buffers_over_bridge = 6;
 }

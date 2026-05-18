@@ -197,6 +197,15 @@ struct PublisherOptions {
   }
   bool UseSplitBuffers() const { return use_split_buffers; }
 
+  // When true, bridge receivers that mirror this channel create their local
+  // bridge publisher with split payload buffers. This is independent of
+  // UseSplitBuffers(), which controls this server's local channel storage.
+  PublisherOptions &SetSplitBuffersOverBridge(bool v) {
+    split_buffers_over_bridge = v;
+    return *this;
+  }
+  bool SplitBuffersOverBridge() const { return split_buffers_over_bridge; }
+
   PublisherOptions &SetSplitBufferCallbacks(
       subspace::SplitBufferCallbacks callbacks) {
     split_buffer_callbacks = std::move(callbacks);
@@ -231,6 +240,7 @@ struct PublisherOptions {
   bool prefer_retired_slots = false;
   int32_t max_publishers = 0;
   bool use_split_buffers = DefaultUseSplitBuffers();
+  bool split_buffers_over_bridge = false;
   subspace::SplitBufferCallbacks split_buffer_callbacks;
 };
 

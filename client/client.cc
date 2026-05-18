@@ -1610,6 +1610,7 @@ void ClientImpl::FillCreatePublisherRequest(CreatePublisherRequest *cmd,
   cmd->set_publisher_id(publisher_id);
   cmd->set_max_publishers(opts.MaxPublishers());
   cmd->set_use_split_buffers(opts.UseSplitBuffers());
+  cmd->set_split_buffers_over_bridge(opts.SplitBuffersOverBridge());
 }
 
 void ClientImpl::ApplyPublisherResponseFds(

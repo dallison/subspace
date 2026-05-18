@@ -185,6 +185,7 @@ private:
                                   toolbelt::SocketAddress subscriber,
                                   bool notify_retirement);
   void BridgeReceiverCoroutine(std::string channel_name, bool sub_reliable,
+                               bool split_buffers_over_bridge,
                                toolbelt::InetAddress publisher);
   void RetirementCoroutine(
       const std::string &channel_name, toolbelt::FileDescriptor &&retirement_fd,
@@ -195,6 +196,7 @@ private:
       std::shared_ptr<std::vector<std::shared_ptr<ActiveMessage>>> active_retirement_msgs);
 
   void SubscribeOverBridge(ServerChannel *channel, bool reliable,
+                           bool split_buffers_over_bridge,
                            toolbelt::InetAddress publisher);
   void IncomingQuery(const Discovery::Query &query,
                      const toolbelt::InetAddress &sender);

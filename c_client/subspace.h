@@ -244,6 +244,9 @@ typedef struct {
   // message prefixes in regular shared memory and delegates payload slot
   // allocation/mapping/freeing to split_callbacks.
   bool use_split_buffers;
+  // If true, bridge receivers create their mirror publisher with split payload
+  // buffers. This is independent of use_split_buffers for the local channel.
+  bool split_buffers_over_bridge;
   int32_t max_publishers;
   SubspaceSplitBufferCallbacks split_callbacks;
 } SubspacePublisherOptions;

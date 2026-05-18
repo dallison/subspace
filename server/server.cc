@@ -34,6 +34,26 @@ void ClosePluginsOnShutdown() { close_plugins_on_shutdown = true; }
 
 bool ShouldClosePluginsOnShutdown() { return close_plugins_on_shutdown; }
 
+static const ServerChannel *SplitBufferOptionsChannel(
+    const ServerChannel *channel) {
+  if (channel->IsVirtual()) {
+    return static_cast<const VirtualChannel *>(channel)->GetMux();
+  }
+  return channel;
+}
+
+static bool ChannelUsesSplitBuffers(const ServerChannel *channel) {
+  const ServerChannel *split_channel = SplitBufferOptionsChannel(channel);
+  return split_channel->HasSplitBufferOptions() &&
+         split_channel->GetSplitBufferOptions().use_split_buffers;
+}
+
+static bool ChannelUsesSplitBuffersOverBridge(const ServerChannel *channel) {
+  const ServerChannel *split_channel = SplitBufferOptionsChannel(channel);
+  return split_channel->HasSplitBufferOptions() &&
+         split_channel->GetSplitBufferOptions().split_buffers_over_bridge;
+}
+
 // Look for the IP address and calculate the broadcast address
 // for the given interface.  If the interface name is empty
 // choose the first interface that supports broadcast and
@@ -773,7 +793,8 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
     channel->SetMetadataSize(rch.metadata_size);
     if (rch.has_split_buffer_options) {
       if (absl::Status s = channel->ValidateOrSetSplitBufferOptions(
-              {.use_split_buffers = rch.use_split_buffers},
+              {.use_split_buffers = rch.use_split_buffers,
+               .split_buffers_over_bridge = rch.split_buffers_over_bridge},
               /*set_if_missing=*/true, "shadow recovery");
           !s.ok()) {
         return s;
@@ -1049,6 +1070,10 @@ void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
         auto *advertise = disc.mutable_advertise();
         advertise->set_channel_name(channel_name);
         advertise->set_reliable(reliable);
+        if (auto it = channels_.find(channel_name); it != channels_.end()) {
+          advertise->set_split_buffers(
+              ChannelUsesSplitBuffersOverBridge(it->second.get()));
+        }
         bool ok = disc.SerializeToArray(buffer, sizeof(buffer));
         if (!ok) {
           logger_.Log(toolbelt::LogLevel::kError,
@@ -1150,6 +1175,10 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
   subscribed.set_reliable(pub_reliable);
   subscribed.set_checksum_size(channel->ChecksumSize());
   subscribed.set_metadata_size(channel->MetadataSize());
+  const bool wire_split_buffers = ChannelUsesSplitBuffers(channel);
+  subscribed.set_split_buffers(wire_split_buffers);
+  subscribed.set_split_buffers_over_bridge(
+      ChannelUsesSplitBuffersOverBridge(channel));
 
   toolbelt::StreamSocket retirement_listener;
   toolbelt::SocketAddress retirement_addr;
@@ -1313,13 +1342,6 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
         // This message came from bridge.  We don't forward them again.
         continue;
       }
-      // SendMessage uses the 4 bytes immediately below the buffer
-      // for the length of the messages.  The MessagePrefix struct
-      // contains a padding member for this purpose.  We don't
-      // count the padding in the length sent.
-      char *data_addr = const_cast<char *>(prefix_addr) + sizeof(int32_t);
-      size_t msglen = msg->length + prefix_area - sizeof(int32_t);
-
       // Note that for a reliable publisher where the subscriber is slower
       // we will get backpressure from the receiver because it won't
       // read from the socket.  We will keep transmitting until the TCP
@@ -1332,15 +1354,59 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
       // The backpressure received here will be applied upwards because
       // we will stop reading the messages from the channel and thus
       // backpressure any publishers writing to that channel.
-      if (absl::StatusOr<ssize_t> n_sent_2 =
-              bridge.SendMessage(data_addr, msglen, co::self);
-          !n_sent_2.ok()) {
-        done = true;
-        logger_.Log(toolbelt::LogLevel::kError,
-                    "Failed to send bridge message for %s: %s",
-                    channel_name.c_str(), n_sent_2.status().ToString().c_str());
-
-        break;
+      if (wire_split_buffers) {
+        char *prefix_without_padding =
+            const_cast<char *>(prefix_addr) + sizeof(int32_t);
+        size_t prefix_length = prefix_area - sizeof(int32_t);
+        if (absl::StatusOr<ssize_t> n_sent_2 =
+                bridge.SendMessage(prefix_without_padding, prefix_length,
+                                   co::self);
+            !n_sent_2.ok()) {
+          done = true;
+          logger_.Log(toolbelt::LogLevel::kError,
+                      "Failed to send bridge prefix for %s: %s",
+                      channel_name.c_str(),
+                      n_sent_2.status().ToString().c_str());
+          break;
+        }
+        int32_t payload_length = htonl(static_cast<int32_t>(msg->length));
+        if (absl::StatusOr<ssize_t> n_sent_3 = bridge.Send(
+                reinterpret_cast<const char *>(&payload_length),
+                sizeof(payload_length), co::self);
+            !n_sent_3.ok()) {
+          done = true;
+          logger_.Log(toolbelt::LogLevel::kError,
+                      "Failed to send bridge payload length for %s: %s",
+                      channel_name.c_str(),
+                      n_sent_3.status().ToString().c_str());
+          break;
+        }
+        if (absl::StatusOr<ssize_t> n_sent_4 = bridge.Send(
+                static_cast<const char *>(msg->buffer), msg->length, co::self);
+            !n_sent_4.ok()) {
+          done = true;
+          logger_.Log(toolbelt::LogLevel::kError,
+                      "Failed to send bridge payload for %s: %s",
+                      channel_name.c_str(),
+                      n_sent_4.status().ToString().c_str());
+          break;
+        }
+      } else {
+        // SendMessage uses the 4 bytes immediately below the buffer for the
+        // frame length. The MessagePrefix padding exists for this purpose, so
+        // the legacy bridge path can write prefix and payload in one chunk.
+        char *data_addr = const_cast<char *>(prefix_addr) + sizeof(int32_t);
+        size_t msglen = msg->length + prefix_area - sizeof(int32_t);
+        if (absl::StatusOr<ssize_t> n_sent_2 =
+                bridge.SendMessage(data_addr, msglen, co::self);
+            !n_sent_2.ok()) {
+          done = true;
+          logger_.Log(
+              toolbelt::LogLevel::kError,
+              "Failed to send bridge message for %s: %s", channel_name.c_str(),
+              n_sent_2.status().ToString().c_str());
+          break;
+        }
       }
       if (notifying_of_retirement) {
         // We need to keep track of the message so that we can retire it
@@ -1475,6 +1541,7 @@ Server::SendSubscribeMessage(const std::string &channel_name, bool reliable,
 // bridge and publishing them to the local channel.
 void Server::BridgeReceiverCoroutine(std::string channel_name,
                                      bool sub_reliable,
+                                     bool split_buffers_over_bridge,
                                      toolbelt::InetAddress publisher) {
   struct BridgeGuard {
     Server *server;
@@ -1543,6 +1610,8 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
                 "Failed to parse Subscribed message");
     return;
   }
+  const bool bridge_publisher_split_buffers =
+      split_buffers_over_bridge || subscribed.split_buffers_over_bridge();
 
   // Build a publisher to publish incoming bridge messages to the channel.
   Client client(co::self);
@@ -1614,7 +1683,8 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
           .SetBridge(true)
           .SetNotifyRetirement(subscribed.notify_retirement())
           .SetChecksumSize(bridge_cs)
-          .SetMetadataSize(bridge_ms));
+          .SetMetadataSize(bridge_ms)
+          .SetUseSplitBuffers(bridge_publisher_split_buffers));
   if (!pub.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to create bridge publisher for %s: %s",
@@ -1723,16 +1793,87 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     char *prefix_addr = reinterpret_cast<char *>(prefix);
     char *after_padding = prefix_addr + sizeof(int32_t);
 
-    absl::StatusOr<ssize_t> n = bridge->ReceiveMessage(
-        after_padding, subscribed.slot_size() + adjusted_prefix_length,
-        co::self);
-    if (!n.ok()) {
-      // This will happen when the bridge transmitter on the other
-      // side of the bridge terminates.
-      logger_.Log(toolbelt::LogLevel::kError,
-                  "Failed to read bridge message for %s: %s",
-                  channel_name.c_str(), n.status().ToString().c_str());
-      break;
+    size_t payload_length = 0;
+    if (subscribed.split_buffers()) {
+      absl::StatusOr<ssize_t> n = bridge->ReceiveMessage(
+          after_padding, adjusted_prefix_length, co::self);
+      if (!n.ok()) {
+        logger_.Log(toolbelt::LogLevel::kError,
+                    "Failed to read bridge prefix for %s: %s",
+                    channel_name.c_str(), n.status().ToString().c_str());
+        break;
+      }
+      if (static_cast<size_t>(*n) != adjusted_prefix_length) {
+        logger_.Log(toolbelt::LogLevel::kError,
+                    "Bridge prefix for %s has invalid length %zd, expected %zu",
+                    channel_name.c_str(), *n, adjusted_prefix_length);
+        break;
+      }
+      if (prefix->message_size > static_cast<uint64_t>(subscribed.slot_size())) {
+        logger_.Log(toolbelt::LogLevel::kError,
+                    "Bridge payload for %s is too large: %llu > %d",
+                    channel_name.c_str(),
+                    static_cast<unsigned long long>(prefix->message_size),
+                    subscribed.slot_size());
+        break;
+      }
+      absl::StatusOr<ssize_t> payload = bridge->ReceiveMessage(
+          static_cast<char *>(*buf), static_cast<size_t>(prefix->message_size),
+          co::self);
+      if (!payload.ok()) {
+        logger_.Log(toolbelt::LogLevel::kError,
+                    "Failed to read bridge payload for %s: %s",
+                    channel_name.c_str(), payload.status().ToString().c_str());
+        break;
+      }
+      payload_length = static_cast<size_t>(*payload);
+      if (payload_length != static_cast<size_t>(prefix->message_size)) {
+        logger_.Log(toolbelt::LogLevel::kError,
+                    "Bridge payload for %s has invalid length %zu, expected "
+                    "%llu",
+                    channel_name.c_str(), payload_length,
+                    static_cast<unsigned long long>(prefix->message_size));
+        break;
+      }
+    } else if (pub->UsesSplitBuffers()) {
+      std::vector<char> combined(subscribed.slot_size() +
+                                 adjusted_prefix_length);
+      absl::StatusOr<ssize_t> n =
+          bridge->ReceiveMessage(combined.data(), combined.size(), co::self);
+      if (!n.ok()) {
+        logger_.Log(toolbelt::LogLevel::kError,
+                    "Failed to read bridge message for %s: %s",
+                    channel_name.c_str(), n.status().ToString().c_str());
+        break;
+      }
+      if (static_cast<size_t>(*n) < adjusted_prefix_length) {
+        logger_.Log(toolbelt::LogLevel::kError,
+                    "Bridge message for %s is too short: %zd < %zu",
+                    channel_name.c_str(), *n, adjusted_prefix_length);
+        break;
+      }
+      memcpy(after_padding, combined.data(), adjusted_prefix_length);
+      payload_length = static_cast<size_t>(*n) - adjusted_prefix_length;
+      memcpy(*buf, combined.data() + adjusted_prefix_length, payload_length);
+    } else {
+      absl::StatusOr<ssize_t> n = bridge->ReceiveMessage(
+          after_padding, subscribed.slot_size() + adjusted_prefix_length,
+          co::self);
+      if (!n.ok()) {
+        // This will happen when the bridge transmitter on the other
+        // side of the bridge terminates.
+        logger_.Log(toolbelt::LogLevel::kError,
+                    "Failed to read bridge message for %s: %s",
+                    channel_name.c_str(), n.status().ToString().c_str());
+        break;
+      }
+      if (static_cast<size_t>(*n) < adjusted_prefix_length) {
+        logger_.Log(toolbelt::LogLevel::kError,
+                    "Bridge message for %s is too short: %zd < %zu",
+                    channel_name.c_str(), *n, adjusted_prefix_length);
+        break;
+      }
+      payload_length = static_cast<size_t>(*n) - adjusted_prefix_length;
     }
 
     // Set the kMessageBridged flag in the prefix so that this message isn't
@@ -1745,7 +1886,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     prefix->flags |= kMessageBridged;
 
     absl::StatusOr<const Message> pub_msg = pub->PublishMessageInternal(
-        *n - adjusted_prefix_length, /*omit_prefix=*/true,
+        payload_length, /*omit_prefix=*/true,
         /*omit_prefix_slot_id=*/true);
     if (!pub_msg.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
@@ -1813,10 +1954,12 @@ void Server::RetirementCoroutine(
 }
 
 void Server::SubscribeOverBridge(ServerChannel *channel, bool reliable,
+                                 bool split_buffers_over_bridge,
                                  toolbelt::InetAddress publisher) {
   scheduler_.Spawn(
-      [this, channel, reliable, publisher]() {
-        BridgeReceiverCoroutine(channel->Name(), reliable, publisher);
+      [this, channel, reliable, split_buffers_over_bridge, publisher]() {
+        BridgeReceiverCoroutine(channel->Name(), reliable,
+                                split_buffers_over_bridge, publisher);
       },
       {.name = absl::StrFormat("Bridge receiver for %s", channel->Name()),
        .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
@@ -1862,7 +2005,8 @@ void Server::IncomingAdvertise(const Discovery::Advertise &advertise,
                                 num_bridge_subs, num_tunnel_pubs,
                                 num_tunnel_subs);
     if (num_subs > 0) {
-      SubscribeOverBridge(channel->second.get(), advertise.reliable(), sender);
+      SubscribeOverBridge(channel->second.get(), advertise.reliable(),
+                          advertise.split_buffers(), sender);
     }
   }
 }

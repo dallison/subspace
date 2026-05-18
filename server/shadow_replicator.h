@@ -61,6 +61,7 @@ struct RecoveredChannel {
   int vchan_id = -1;
   bool has_split_buffer_options = false;
   bool use_split_buffers = false;
+  bool split_buffers_over_bridge = false;
   bool has_max_publishers = false;
   int max_publishers = 0;
   toolbelt::FileDescriptor ccb_fd;
