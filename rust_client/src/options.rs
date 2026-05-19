@@ -3,6 +3,12 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
+use crate::split_buffer::{
+    SplitBufferAllocateCallback, SplitBufferCallbacks, SplitBufferFreeCallback,
+    SplitBufferMapCallback, SplitBufferUnmapCallback,
+};
+use std::sync::Arc;
+
 #[derive(Debug, Clone)]
 pub struct PublisherOptions {
     pub slot_size: i32,
@@ -20,7 +26,9 @@ pub struct PublisherOptions {
     pub checksum: bool,
     pub checksum_size: i32,
     pub metadata_size: i32,
+    pub use_split_buffers: bool,
     pub split_buffers_over_bridge: bool,
+    pub split_buffer_callbacks: SplitBufferCallbacks,
 }
 
 impl Default for PublisherOptions {
@@ -41,7 +49,9 @@ impl Default for PublisherOptions {
             checksum: false,
             checksum_size: 4,
             metadata_size: 0,
+            use_split_buffers: false,
             split_buffers_over_bridge: false,
+            split_buffer_callbacks: SplitBufferCallbacks::default(),
         }
     }
 }
@@ -126,8 +136,46 @@ impl PublisherOptions {
         self
     }
 
+    pub fn set_use_split_buffers(mut self, v: bool) -> Self {
+        self.use_split_buffers = v;
+        self
+    }
+
     pub fn set_split_buffers_over_bridge(mut self, v: bool) -> Self {
         self.split_buffers_over_bridge = v;
+        self
+    }
+
+    pub fn set_split_buffer_callbacks(mut self, callbacks: SplitBufferCallbacks) -> Self {
+        self.split_buffer_callbacks = callbacks;
+        self
+    }
+
+    pub fn set_split_buffer_allocate_callback<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(
+                &crate::split_buffer::SplitBufferMetadata,
+            ) -> crate::error::Result<crate::split_buffer::SplitBufferMapping>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.split_buffer_callbacks.allocate =
+            Some(Arc::new(callback) as SplitBufferAllocateCallback);
+        self
+    }
+
+    pub fn set_split_buffer_free_callback<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(
+                &crate::split_buffer::SplitBufferMetadata,
+                &crate::split_buffer::SplitBufferMapping,
+            ) -> crate::error::Result<()>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.split_buffer_callbacks.free = Some(Arc::new(callback) as SplitBufferFreeCallback);
         self
     }
 }
@@ -147,6 +195,7 @@ pub struct SubscriberOptions {
     pub checksum: bool,
     pub pass_checksum_errors: bool,
     pub keep_active_message: bool,
+    pub split_buffer_callbacks: SplitBufferCallbacks,
 }
 
 impl Default for SubscriberOptions {
@@ -165,6 +214,7 @@ impl Default for SubscriberOptions {
             checksum: false,
             pass_checksum_errors: false,
             keep_active_message: false,
+            split_buffer_callbacks: SplitBufferCallbacks::default(),
         }
     }
 }
@@ -241,6 +291,38 @@ impl SubscriberOptions {
 
     pub fn set_keep_active_message(mut self, v: bool) -> Self {
         self.keep_active_message = v;
+        self
+    }
+
+    pub fn set_split_buffer_callbacks(mut self, callbacks: SplitBufferCallbacks) -> Self {
+        self.split_buffer_callbacks = callbacks;
+        self
+    }
+
+    pub fn set_split_buffer_map_callback<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(
+                &crate::split_buffer::SplitBufferMetadata,
+            ) -> crate::error::Result<crate::split_buffer::SplitBufferMapping>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.split_buffer_callbacks.map = Some(Arc::new(callback) as SplitBufferMapCallback);
+        self
+    }
+
+    pub fn set_split_buffer_unmap_callback<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(
+                &crate::split_buffer::SplitBufferMetadata,
+                &crate::split_buffer::SplitBufferMapping,
+            ) -> crate::error::Result<()>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.split_buffer_callbacks.unmap = Some(Arc::new(callback) as SplitBufferUnmapCallback);
         self
     }
 }

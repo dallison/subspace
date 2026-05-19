@@ -5,9 +5,16 @@
 
 use crate::channel::*;
 use crate::checksum;
-use crate::error::Result;
+use crate::error::{Result, SubspaceError};
 use crate::options::PublisherOptions;
-use crate::syscall_shim::{shim_close, shim_fstat, shim_ftruncate, shim_open, shim_read, shim_write};
+use crate::split_buffer::{
+    create_split_shared_memory_buffer, open_split_shared_memory_buffer, page_aligned_size,
+    read_split_buffer_metadata_file, split_buffer_object_name, write_split_buffer_metadata_file,
+    SplitBufferMetadata,
+};
+use crate::syscall_shim::{
+    shim_close, shim_fstat, shim_ftruncate, shim_open, shim_read, shim_write,
+};
 use nix::fcntl::OFlag;
 use nix::sys::mman::ProtFlags;
 use nix::sys::stat::Mode;
@@ -201,12 +208,7 @@ impl PublisherImpl {
 
                 if (*slot_ptr)
                     .refs
-                    .compare_exchange_weak(
-                        expected,
-                        ref_val,
-                        Ordering::Acquire,
-                        Ordering::Relaxed,
-                    )
+                    .compare_exchange_weak(expected, ref_val, Ordering::Acquire, Ordering::Relaxed)
                     .is_ok()
                 {
                     if !self.channel.validate_slot_buffer(si) {
@@ -332,9 +334,7 @@ impl PublisherImpl {
                 }
             }
 
-            self.channel
-                .active_slots
-                .sort_by_key(|s| s.timestamp);
+            self.channel.active_slots.sort_by_key(|s| s.timestamp);
 
             slot_idx = None;
             for active in &self.channel.active_slots {
@@ -369,12 +369,7 @@ impl PublisherImpl {
 
                 if (*slot_ptr)
                     .refs
-                    .compare_exchange_weak(
-                        expected,
-                        ref_val,
-                        Ordering::Acquire,
-                        Ordering::Relaxed,
-                    )
+                    .compare_exchange_weak(expected, ref_val, Ordering::Acquire, Ordering::Relaxed)
                     .is_ok()
                 {
                     if !self.channel.validate_slot_buffer(si) {
@@ -503,18 +498,14 @@ impl PublisherImpl {
                 .fetch_add(slot.message_size, Ordering::Relaxed);
 
             let msg_size = slot.message_size as u32;
-            let mut old_max = self
-                .channel
-                .ccb()
-                .max_message_size
-                .load(Ordering::Relaxed);
+            let mut old_max = self.channel.ccb().max_message_size.load(Ordering::Relaxed);
             while msg_size > old_max {
-                match self
-                    .channel
-                    .ccb()
-                    .max_message_size
-                    .compare_exchange_weak(old_max, msg_size, Ordering::Relaxed, Ordering::Relaxed)
-                {
+                match self.channel.ccb().max_message_size.compare_exchange_weak(
+                    old_max,
+                    msg_size,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
                     Ok(_) => break,
                     Err(v) => old_max = v,
                 }
@@ -537,9 +528,7 @@ impl PublisherImpl {
             {
                 return;
             }
-            self.channel
-                .get_available_slots(sub_id)
-                .set(slot_idx);
+            self.channel.get_available_slots(sub_id).set(slot_idx);
         });
 
         if reliable {
@@ -565,10 +554,14 @@ impl PublisherImpl {
         }
     }
 
-    pub fn create_or_attach_buffers(
-        &mut self,
-        final_slot_size: u64,
-    ) -> crate::error::Result<()> {
+    pub fn create_or_attach_buffers(&mut self, final_slot_size: u64) -> crate::error::Result<()> {
+        if self.options.use_split_buffers {
+            return self.create_or_attach_split_buffers(final_slot_size);
+        }
+        self.create_or_attach_shm_buffers(final_slot_size)
+    }
+
+    fn create_or_attach_shm_buffers(&mut self, final_slot_size: u64) -> crate::error::Result<()> {
         let final_slot_size = if final_slot_size == 0 {
             64
         } else {
@@ -576,20 +569,16 @@ impl PublisherImpl {
         };
         let final_buffer_size = self.channel.slot_size_to_buffer_size(final_slot_size);
         let mut current_slot_size: u64 = 0;
-        let mut num_buffers = self
-            .channel
-            .ccb()
-            .num_buffers
-            .load(Ordering::Relaxed);
+        let mut num_buffers = self.channel.ccb().num_buffers.load(Ordering::Relaxed);
 
         loop {
             while current_slot_size < final_slot_size
                 || self.channel.buffers.len() < num_buffers as usize
             {
                 let buffer_index = self.channel.buffers.len();
-                let shm_name =
-                    self.channel
-                        .buffer_shared_memory_name(self.resolved_name(), buffer_index);
+                let shm_name = self
+                    .channel
+                    .buffer_shared_memory_name(self.resolved_name(), buffer_index);
 
                 // Try to create the shared memory file.
                 match create_shm(&shm_name, final_buffer_size as usize) {
@@ -604,11 +593,11 @@ impl PublisherImpl {
                             ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
                         )?;
                         shim_close(fd);
-                        self.channel.buffers.push(BufferSet {
-                            full_size: final_buffer_size,
-                            slot_size: final_slot_size,
-                            buffer: addr,
-                        });
+                        self.channel.buffers.push(BufferSet::shared(
+                            final_buffer_size,
+                            final_slot_size,
+                            addr,
+                        ));
                         current_slot_size = final_slot_size;
                     }
                     Err(_) => {
@@ -617,11 +606,7 @@ impl PublisherImpl {
                         let size = get_shm_size(fd, &shm_name)?;
                         let cs = self.channel.buffer_size_to_slot_size(size as u64);
                         let addr = if cs > 0 {
-                            map_memory(
-                                fd,
-                                size,
-                                ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
-                            )?
+                            map_memory(fd, size, ProtFlags::PROT_READ | ProtFlags::PROT_WRITE)?
                         } else {
                             std::ptr::null_mut()
                         };
@@ -630,11 +615,9 @@ impl PublisherImpl {
                             (*self.channel.bcb).sizes[buffer_index]
                                 .store(final_buffer_size, Ordering::Relaxed);
                         }
-                        self.channel.buffers.push(BufferSet {
-                            full_size: size as u64,
-                            slot_size: cs,
-                            buffer: addr,
-                        });
+                        self.channel
+                            .buffers
+                            .push(BufferSet::shared(size as u64, cs, addr));
                         current_slot_size = cs;
                     }
                 }
@@ -655,13 +638,208 @@ impl PublisherImpl {
             {
                 break;
             }
-            num_buffers = self
+            num_buffers = self.channel.ccb().num_buffers.load(Ordering::Acquire);
+        }
+        Ok(())
+    }
+
+    fn create_or_attach_split_buffers(&mut self, final_slot_size: u64) -> crate::error::Result<()> {
+        let final_slot_size = if final_slot_size == 0 {
+            64
+        } else {
+            final_slot_size
+        };
+        let final_buffer_size = self.channel.slot_size_to_buffer_size(final_slot_size);
+        let mut current_slot_size: u64 = 0;
+        let mut num_buffers = self.channel.ccb().num_buffers.load(Ordering::Relaxed);
+
+        loop {
+            while current_slot_size < final_slot_size
+                || self.channel.buffers.len() < num_buffers as usize
+            {
+                let buffer_index = self.channel.buffers.len();
+                let split_buffer = self.create_or_open_split_buffer_set(
+                    buffer_index,
+                    final_buffer_size,
+                    final_slot_size,
+                )?;
+                unsafe {
+                    (*self.channel.bcb).sizes[buffer_index]
+                        .store(split_buffer.full_size, Ordering::Relaxed);
+                }
+                current_slot_size = split_buffer.slot_size;
+                self.channel.buffers.push(split_buffer);
+            }
+
+            let new_num_buffers = self.channel.buffers.len() as i32;
+            if self
                 .channel
                 .ccb()
                 .num_buffers
-                .load(Ordering::Acquire);
+                .compare_exchange(
+                    num_buffers,
+                    new_num_buffers,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                break;
+            }
+            num_buffers = self.channel.ccb().num_buffers.load(Ordering::Acquire);
         }
         Ok(())
+    }
+
+    fn create_or_open_split_buffer_set(
+        &mut self,
+        buffer_index: usize,
+        full_size: u64,
+        slot_size: u64,
+    ) -> crate::error::Result<BufferSet> {
+        match self.create_split_buffer_set(buffer_index, full_size, slot_size)? {
+            Some(buffer) => Ok(buffer),
+            None => open_split_buffer_set(
+                &self.channel,
+                self.resolved_name(),
+                buffer_index,
+                full_size,
+                slot_size,
+                true,
+            ),
+        }
+    }
+
+    fn create_split_buffer_set(
+        &mut self,
+        buffer_index: usize,
+        full_size: u64,
+        slot_size: u64,
+    ) -> crate::error::Result<Option<BufferSet>> {
+        let mut buffer = BufferSet::split(full_size, slot_size);
+        buffer.owns_split_buffers = true;
+        buffer.split_buffer_callbacks = self.options.split_buffer_callbacks.clone();
+        buffer.uses_split_callbacks = self.options.split_buffer_callbacks.allocate.is_some();
+        let payload_size = page_aligned_size(slot_size);
+
+        let base = self
+            .channel
+            .buffer_shared_memory_name(self.resolved_name(), buffer_index);
+        let metadata_base = if base.starts_with('/') {
+            base
+        } else {
+            format!("/tmp/{base}")
+        };
+        let prefix_name = format!("{metadata_base}_prefix");
+        let mut prefix_metadata = SplitBufferMetadata {
+            channel_name: self.resolved_name().to_string(),
+            session_id: self.channel.session_id,
+            buffer_index: buffer_index as u32,
+            slot_id: 0,
+            is_prefix: true,
+            full_size: page_aligned_size(
+                self.channel.prefix_size as u64 * self.channel.num_slots as u64,
+            ),
+            allocation_size: page_aligned_size(
+                self.channel.prefix_size as u64 * self.channel.num_slots as u64,
+            ),
+            handle: 0,
+            shadow_file: prefix_name.clone(),
+            object_name: split_buffer_object_name(&prefix_name),
+        };
+
+        let prefix_fd = match create_split_shared_memory_buffer(&prefix_metadata)? {
+            Some(fd) => fd,
+            None => return Ok(None),
+        };
+        let prefix_addr = map_memory(
+            prefix_fd,
+            prefix_metadata.allocation_size as usize,
+            ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
+        )?;
+        prefix_metadata.handle = prefix_fd as u64;
+        write_split_buffer_metadata_file(&prefix_metadata)?;
+        self.channel
+            .pending_client_buffer_registrations
+            .push(prefix_metadata.to_proto("split_shm"));
+        buffer.split_prefix_fd = prefix_fd;
+        buffer.split_prefix_buffer = prefix_addr;
+        buffer.split_prefix_buffer_size = prefix_metadata.allocation_size;
+        buffer.split_prefix_metadata = Some(prefix_metadata);
+
+        for slot in 0..self.channel.num_slots as usize {
+            let shadow_file = format!("{metadata_base}_slot_{slot}");
+            let mut metadata = SplitBufferMetadata {
+                channel_name: self.resolved_name().to_string(),
+                session_id: self.channel.session_id,
+                buffer_index: buffer_index as u32,
+                slot_id: slot as u32,
+                is_prefix: false,
+                full_size: payload_size,
+                allocation_size: payload_size,
+                handle: 0,
+                shadow_file: shadow_file.clone(),
+                object_name: split_buffer_object_name(&shadow_file),
+            };
+            let slot_fd;
+            let slot_addr;
+            let slot_handle;
+            let slot_mapped_size;
+            let slot_private_data;
+            if let Some(allocate) = &self.options.split_buffer_callbacks.allocate {
+                let mapping = allocate(&metadata)?;
+                if mapping.address.is_null() {
+                    return Err(SubspaceError::Internal(
+                        "Split buffer allocation callback returned an empty mapping".into(),
+                    ));
+                }
+                slot_fd = -1;
+                slot_addr = mapping.address;
+                slot_handle = mapping.handle;
+                slot_mapped_size = if mapping.size == 0 {
+                    payload_size
+                } else {
+                    mapping.size as u64
+                };
+                slot_private_data = mapping.private_data;
+                metadata.handle = slot_handle;
+                metadata.allocation_size = slot_mapped_size;
+            } else {
+                slot_fd = create_split_shared_memory_buffer(&metadata)?.ok_or_else(|| {
+                    SubspaceError::Internal(format!(
+                        "Split buffer slot already exists for channel {} slot {slot}",
+                        self.resolved_name()
+                    ))
+                })?;
+                slot_addr = map_memory(
+                    slot_fd,
+                    payload_size as usize,
+                    ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
+                )?;
+                slot_handle = slot_fd as u64;
+                slot_mapped_size = payload_size;
+                slot_private_data = 0;
+                metadata.handle = slot_handle;
+            }
+            write_split_buffer_metadata_file(&metadata)?;
+            self.channel
+                .pending_client_buffer_registrations
+                .push(metadata.to_proto(if buffer.uses_split_callbacks {
+                    "split_callback"
+                } else {
+                    "split_shm"
+                }));
+            buffer.split_handles.push(slot_handle);
+            buffer.split_slot_buffers.push(slot_addr);
+            buffer.split_slot_sizes.push(slot_mapped_size);
+            buffer.split_private_data.push(slot_private_data);
+            if slot_fd >= 0 {
+                buffer.split_fds.push(slot_fd);
+            }
+            buffer.split_metadata.push(metadata);
+        }
+
+        Ok(Some(buffer))
     }
 
     pub fn trigger_subscribers(&self) {
@@ -735,7 +913,11 @@ fn open_shm(name: &str) -> crate::error::Result<RawFd> {
 #[cfg(not(target_os = "linux"))]
 fn open_shm(name: &str) -> crate::error::Result<RawFd> {
     let shm_name = posix_shm_name(name)?;
-    let fd = crate::syscall_shim::shim_shm_open(shm_name.as_str(), OFlag::O_RDWR, nix::sys::stat::Mode::empty())?;
+    let fd = crate::syscall_shim::shim_shm_open(
+        shm_name.as_str(),
+        OFlag::O_RDWR,
+        nix::sys::stat::Mode::empty(),
+    )?;
     Ok(fd)
 }
 
@@ -775,6 +957,13 @@ pub fn clear_trigger(fd: RawFd) {
 }
 
 pub fn attach_buffers(channel: &mut Channel, read_write: bool) -> crate::error::Result<()> {
+    if channel.use_split_buffers {
+        return attach_split_buffers(channel, read_write);
+    }
+    attach_shm_buffers(channel, read_write)
+}
+
+fn attach_shm_buffers(channel: &mut Channel, read_write: bool) -> crate::error::Result<()> {
     let num_buffers = channel.ccb().num_buffers.load(Ordering::Acquire) as usize;
     let resolved_name = channel.name.clone();
     while channel.buffers.len() < num_buffers {
@@ -795,11 +984,118 @@ pub fn attach_buffers(channel: &mut Channel, read_write: bool) -> crate::error::
             std::ptr::null_mut()
         };
         shim_close(fd);
-        channel.buffers.push(BufferSet {
-            full_size: size as u64,
-            slot_size: cs,
-            buffer: addr,
-        });
+        channel
+            .buffers
+            .push(BufferSet::shared(size as u64, cs, addr));
     }
     Ok(())
+}
+
+fn attach_split_buffers(channel: &mut Channel, read_write: bool) -> crate::error::Result<()> {
+    let num_buffers = channel.ccb().num_buffers.load(Ordering::Acquire) as usize;
+    let resolved_name = channel.name.clone();
+    while channel.buffers.len() < num_buffers {
+        let buffer_index = channel.buffers.len();
+        let full_size = channel.bcb().sizes[buffer_index].load(Ordering::Acquire);
+        let slot_size = channel.buffer_size_to_slot_size(full_size);
+        let buffer = open_split_buffer_set(
+            channel,
+            &resolved_name,
+            buffer_index,
+            full_size,
+            slot_size,
+            read_write,
+        )?;
+        channel.buffers.push(buffer);
+    }
+    Ok(())
+}
+
+fn open_split_buffer_set(
+    channel: &Channel,
+    resolved_name: &str,
+    buffer_index: usize,
+    full_size: u64,
+    slot_size: u64,
+    read_write: bool,
+) -> crate::error::Result<BufferSet> {
+    let payload_size = page_aligned_size(slot_size);
+    let base = channel.buffer_shared_memory_name(resolved_name, buffer_index);
+    let metadata_base = if base.starts_with('/') {
+        base
+    } else {
+        format!("/tmp/{base}")
+    };
+    let prefix_name = format!("{metadata_base}_prefix");
+    let prefix_metadata = read_split_buffer_metadata_file(&prefix_name)?;
+    let prefix_fd = open_split_shared_memory_buffer(&prefix_metadata)?;
+    let prefix_addr = map_memory(
+        prefix_fd,
+        prefix_metadata.allocation_size as usize,
+        ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
+    )?;
+
+    let mut buffer = BufferSet::split(full_size, slot_size);
+    buffer.split_buffer_callbacks = channel.split_buffer_callbacks.clone();
+    buffer.uses_split_callbacks = channel.split_buffer_callbacks.map.is_some();
+    buffer.split_prefix_fd = prefix_fd;
+    buffer.split_prefix_buffer = prefix_addr;
+    buffer.split_prefix_buffer_size = prefix_metadata.allocation_size;
+    buffer.split_prefix_metadata = Some(prefix_metadata);
+
+    let prot = if read_write {
+        ProtFlags::PROT_READ | ProtFlags::PROT_WRITE
+    } else {
+        ProtFlags::PROT_READ
+    };
+    for slot in 0..channel.num_slots as usize {
+        let shadow_file = format!("{metadata_base}_slot_{slot}");
+        let metadata = read_split_buffer_metadata_file(&shadow_file)?;
+        let slot_fd;
+        let slot_addr;
+        let slot_handle;
+        let slot_size;
+        let slot_private_data;
+        if let Some(map) = &channel.split_buffer_callbacks.map {
+            let mapping = map(&metadata)?;
+            if mapping.address.is_null() {
+                return Err(SubspaceError::Internal(
+                    "Split buffer map callback returned an empty mapping".into(),
+                ));
+            }
+            slot_fd = -1;
+            slot_addr = mapping.address;
+            slot_handle = if mapping.handle == 0 {
+                metadata.handle
+            } else {
+                mapping.handle
+            };
+            slot_size = if mapping.size == 0 {
+                payload_size
+            } else {
+                mapping.size as u64
+            };
+            slot_private_data = mapping.private_data;
+        } else {
+            slot_fd = open_split_shared_memory_buffer(&metadata)?;
+            slot_addr = map_memory(slot_fd, metadata.allocation_size as usize, prot)?;
+            slot_handle = slot_fd as u64;
+            slot_size = if metadata.allocation_size == 0 {
+                payload_size
+            } else {
+                metadata.allocation_size
+            };
+            slot_private_data = 0;
+        }
+        buffer.split_handles.push(slot_handle);
+        buffer.split_slot_buffers.push(slot_addr);
+        buffer.split_slot_sizes.push(slot_size);
+        buffer.split_private_data.push(slot_private_data);
+        if slot_fd >= 0 {
+            buffer.split_fds.push(slot_fd);
+        }
+        buffer.split_metadata.push(metadata);
+    }
+
+    Ok(buffer)
 }

@@ -12,6 +12,7 @@ pub mod message;
 pub mod options;
 pub mod publisher;
 pub mod socket;
+pub mod split_buffer;
 pub mod subscriber;
 pub mod syscall_shim;
 
@@ -24,6 +25,7 @@ pub use client::{ChannelInfo, ChannelStats, Client, Publisher, Subscriber};
 pub use error::SubspaceError;
 pub use message::Message;
 pub use options::{PublisherOptions, SubscriberOptions};
+pub use split_buffer::{SplitBufferCallbacks, SplitBufferMapping, SplitBufferMetadata};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadMode {
