@@ -102,15 +102,13 @@ absl::Status ServerChannel::ValidateOrSetSplitBufferOptions(
     return absl::OkStatus();
   }
 
-  if (options.use_split_buffers &&
-      split_buffer_options_.use_split_buffers != options.use_split_buffers) {
+  if (split_buffer_options_.use_split_buffers != options.use_split_buffers) {
     return absl::InvalidArgumentError(absl::StrFormat(
         "Inconsistent split-buffer mode for %s on channel %s", user_type,
         Name()));
   }
-  if (options.split_buffers_over_bridge &&
-      split_buffer_options_.split_buffers_over_bridge !=
-          options.split_buffers_over_bridge) {
+  if (split_buffer_options_.split_buffers_over_bridge !=
+      options.split_buffers_over_bridge) {
     return absl::InvalidArgumentError(absl::StrFormat(
         "Inconsistent bridge split-buffer mode for %s on channel %s", user_type,
         Name()));

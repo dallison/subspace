@@ -598,6 +598,50 @@ TEST_F(ShadowRecoveryTest, ServerRecoversSplitBufferStateFromShadow) {
   StopShadow();
 }
 
+TEST_F(ShadowRecoveryTest, ShadowTracksPlaceholderRemap) {
+  signal(SIGPIPE, SIG_IGN);
+
+  StartShadow();
+  StartServer();
+
+  subspace::Client sub_client;
+  sub_client.SetThreadSafe(true);
+  ASSERT_THAT(sub_client.Init(RecoveryServerSocket()), IsOk());
+  auto sub = sub_client.CreateSubscriber("shadow_placeholder_remap",
+                                         {.max_active_messages = 2});
+  ASSERT_THAT(sub, IsOk());
+  ASSERT_TRUE(sub->IsPlaceholder());
+
+  ASSERT_TRUE(WaitForShadowState([this]() {
+    return shadow_->WithChannels([](auto &channels) {
+      auto it = channels.find("shadow_placeholder_remap");
+      return it != channels.end() && it->second.num_slots == 0 &&
+             it->second.slot_size == 0;
+    });
+  }));
+
+  subspace::Client pub_client;
+  pub_client.SetThreadSafe(true);
+  ASSERT_THAT(pub_client.Init(RecoveryServerSocket()), IsOk());
+  subspace::PublisherOptions options;
+  options.SetSlotSize(256).SetNumSlots(4).SetUseSplitBuffers(true);
+  auto pub = pub_client.CreatePublisher("shadow_placeholder_remap", options);
+  ASSERT_THAT(pub, IsOk());
+
+  ASSERT_TRUE(WaitForShadowState([this]() {
+    return shadow_->WithChannels([](auto &channels) {
+      auto it = channels.find("shadow_placeholder_remap");
+      return it != channels.end() && it->second.num_slots == 4 &&
+             it->second.slot_size == 256 &&
+             it->second.has_split_buffer_options &&
+             it->second.use_split_buffers;
+    });
+  }));
+
+  StopServer();
+  StopShadow();
+}
+
 TEST_F(ShadowRecoveryTest, ServerFunctionalAfterRecovery) {
   signal(SIGPIPE, SIG_IGN);
 
