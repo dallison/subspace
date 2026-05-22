@@ -974,6 +974,7 @@ absl::Status Server::RemapChannel(ServerChannel *channel, int slot_size,
   if (!fds.ok()) {
     return fds.status();
   }
+  channel->SetLastKnownSlotSize(slot_size);
   channel->SetSharedMemoryFds(std::move(*fds));
   // Remapping replaces the CCB/BCB FDs; shadow recovery must receive the
   // refreshed descriptors instead of retaining the placeholder mappings.
