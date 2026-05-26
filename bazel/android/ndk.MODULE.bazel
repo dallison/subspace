@@ -1,0 +1,13 @@
+# Android NDK module extension setup.
+#
+# To enable Android cross-compilation, add the following to a file named
+# MODULE.bazel.android in the workspace root (or append to MODULE.bazel):
+#
+#   android_ndk_repository_extension = use_extension(
+#       "@rules_android_ndk//:extension.bzl",
+#       "android_ndk_repository_extension",
+#   )
+#   use_repo(android_ndk_repository_extension, "androidndk")
+#   register_toolchains("@androidndk//:all")
+#
+# Then set ANDROID_NDK_HOME and build with --config=android.

@@ -36,6 +36,7 @@ cc_binary(
         "//:macos_x86_64": [],
         "//:macos_arm64": [],
         "//:macos_default": [],
+        "//:android": ["-llog"],
         "//conditions:default": ["-lrt"],
     }),
 )
@@ -62,6 +63,7 @@ cc_test(
         "//:macos_x86_64": [],
         "//:macos_arm64": [],
         "//:macos_default": [],
+        "//:android": ["-llog", "-ldl"],
         "//conditions:default": ["-lrt", "-ldl"],
     }),
 )

@@ -32,7 +32,9 @@ target_link_libraries(subspace_server PUBLIC
     absl::flags_parse
 )
 
-if(NOT APPLE)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
     target_link_libraries(subspace_server PRIVATE rt dl)
+elseif(ANDROID)
+    target_link_libraries(subspace_server PRIVATE dl log)
 endif()
 

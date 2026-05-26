@@ -16,8 +16,13 @@ void Signal(int sig) {
   raise(sig);
 }
 
+#if defined(__ANDROID__)
+ABSL_FLAG(std::string, socket, "/data/local/tmp/subspace",
+          "Name of Unix socket to listen on");
+#else
 ABSL_FLAG(std::string, socket, "/tmp/subspace",
           "Name of Unix socket to listen on");
+#endif
 ABSL_FLAG(int, disc_port, 6502, "Discovery UDP port");
 ABSL_FLAG(int, peer_port, 6502, "Discovery peer UDP port");
 ABSL_FLAG(std::string, peer_address, "", "Bridge peer hostname or IP address");
@@ -27,11 +32,10 @@ ABSL_FLAG(bool, local, false, "Use local computer only");
 ABSL_FLAG(int, notify_fd, -1, "File descriptor to notify of startup");
 ABSL_FLAG(std::string, machine, "", "Machine name");
 
-// macOS and QNX both use /tmp-shadowed POSIX shared memory, so it's safe and
-// useful to clean up the filesystem on startup there.  On Linux the server
-// uses /dev/shm directly and tests routinely run multiple instances, so we
-// keep it off by default.
-#if defined(__APPLE__) || defined(__QNX__) || defined(__QNXNTO__)
+// macOS, Android, and QNX all benefit from cleaning up the filesystem on
+// startup.  On Linux the server uses /dev/shm directly and tests routinely
+// run multiple instances, so we keep it off by default.
+#if defined(__APPLE__) || defined(__ANDROID__) || defined(__QNX__) || defined(__QNXNTO__)
 ABSL_FLAG(bool, cleanup_filesystem, true, "Cleanup the filesystem on server startup");
 #else
 ABSL_FLAG(bool, cleanup_filesystem, false, "Cleanup the filesystem on server startup");

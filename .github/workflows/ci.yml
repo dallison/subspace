@@ -266,3 +266,110 @@ jobs:
 
       - name: Run CMake tests
         run: ctest --test-dir build/cmake-${{ matrix.build_type }} --output-on-failure
+
+  cmake-android:
+    name: cmake-android (x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Android NDK
+        run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> $GITHUB_ENV
+
+      - name: Configure CMake for Android x86_64
+        run: |
+          cmake -S . -B build/android \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=x86_64 \
+            -DANDROID_PLATFORM=android-28 \
+            -DANDROID_STL=c++_shared \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build/android --parallel $(nproc)
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run tests on Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: google_apis
+          arch: x86_64
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          emulator-boot-timeout: 900
+          script: bash .github/scripts/cmake-android-test.sh
+
+  android:
+    name: android (x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Bazel
+        uses: bazel-contrib/setup-bazel@0.18.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-android
+          repository-cache: true
+
+      - name: Set up Android NDK
+        run: |
+          ANDROID_SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          # Find the installed NDK version
+          NDK_VERSION=$(ls "$ANDROID_SDK_ROOT/ndk" | sort -V | tail -1)
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Cross-compile for Android x86_64
+        run: |
+          bazel build \
+            //server:subspace_server \
+            //client:client_test \
+            //client:bridge_test \
+            //common:split_buffer_test \
+            //plugins:nop_plugin.so \
+            //plugins:split_buffer_free_test_plugin.so \
+            //coro_rpc/test:rpc_test \
+            //coro_rpc/server:server_test \
+            //coro_rpc/client:client_test \
+            //co20_rpc/test:rpc_test \
+            //co20_rpc/server:server_test \
+            //co20_rpc/client:client_test \
+            //asio_rpc/test:rpc_test \
+            //asio_rpc/server:server_test \
+            //asio_rpc/client:client_test \
+            --verbose_failures \
+            --config=android_x86_64
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run tests on Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: google_apis
+          arch: x86_64
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          emulator-boot-timeout: 900
+          script: bash .github/scripts/android-test.sh
+
+      - name: Upload Android test logs
+        uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: android-test-logs
+          path: bazel-testlogs

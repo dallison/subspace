@@ -217,6 +217,8 @@
     "https://bcr.bazel.build/modules/re2/2025-08-12.bcr.1/source.json": "a8ae7c09533bf67f9f6e5122d884d5741600b09d78dca6fc0f2f8d2ee0c2d957",
     "https://bcr.bazel.build/modules/rules_android/0.1.1/MODULE.bazel": "48809ab0091b07ad0182defb787c4c5328bd3a278938415c00a7b69b50c4d3a8",
     "https://bcr.bazel.build/modules/rules_android/0.1.1/source.json": "e6986b41626ee10bdc864937ffb6d6bf275bb5b9c65120e6137d56e6331f089e",
+    "https://bcr.bazel.build/modules/rules_android_ndk/0.1.5/MODULE.bazel": "ab43d418846060de6396e3f1b515a692e945bcd92a9d4541fddcddc8589004ce",
+    "https://bcr.bazel.build/modules/rules_android_ndk/0.1.5/source.json": "2950fc77b8e1f1e3874c4e073776f2258ce46926b43c236620c93517fd2e5865",
     "https://bcr.bazel.build/modules/rules_apple/3.16.0/MODULE.bazel": "0d1caf0b8375942ce98ea944be754a18874041e4e0459401d925577624d3a54a",
     "https://bcr.bazel.build/modules/rules_apple/4.1.0/MODULE.bazel": "76e10fd4a48038d3fc7c5dc6e63b7063bbf5304a2e3bd42edda6ec660eebea68",
     "https://bcr.bazel.build/modules/rules_apple/4.1.0/source.json": "8ee81e1708756f81b343a5eb2b2f0b953f1d25c4ab3d4a68dc02754872e80715",
@@ -236,6 +238,7 @@
     "https://bcr.bazel.build/modules/rules_cc/0.1.5/MODULE.bazel": "88dfc9361e8b5ae1008ac38f7cdfd45ad738e4fa676a3ad67d19204f045a1fd8",
     "https://bcr.bazel.build/modules/rules_cc/0.2.0/MODULE.bazel": "b5c17f90458caae90d2ccd114c81970062946f49f355610ed89bebf954f5783c",
     "https://bcr.bazel.build/modules/rules_cc/0.2.13/MODULE.bazel": "eecdd666eda6be16a8d9dc15e44b5c75133405e820f620a234acc4b1fdc5aa37",
+    "https://bcr.bazel.build/modules/rules_cc/0.2.14/MODULE.bazel": "353c99ed148887ee89c54a17d4100ae7e7e436593d104b668476019023b58df8",
     "https://bcr.bazel.build/modules/rules_cc/0.2.16/MODULE.bazel": "9242fa89f950c6ef7702801ab53922e99c69b02310c39fb6e62b2bd30df2a1d4",
     "https://bcr.bazel.build/modules/rules_cc/0.2.17/MODULE.bazel": "1849602c86cb60da8613d2de887f9566a6d354a6df6d7009f9d04a14402f9a84",
     "https://bcr.bazel.build/modules/rules_cc/0.2.17/source.json": "3832f45d145354049137c0090df04629d9c2b5493dc5c2bf46f1834040133a07",
@@ -321,6 +324,19 @@
   },
   "selectedYankedVersions": {},
   "moduleExtensions": {
+    "@@rules_android_ndk+//:extension.bzl%android_ndk_repository_extension": {
+      "general": {
+        "bzlTransitiveDigest": "j+NMXk5/a1vnDypModKL+ToEo/4o7DJeXSFhTfbJ7rI=",
+        "usagesDigest": "TItR9CHlQeATFb93dsFSm1Q0KP5bwlwGGfzE10p5D/c=",
+        "recordedInputs": [],
+        "generatedRepoSpecs": {
+          "androidndk": {
+            "repoRuleId": "@@rules_android_ndk+//:rules.bzl%android_ndk_repository",
+            "attributes": {}
+          }
+        }
+      }
+    },
     "@@rules_kotlin+//src/main/starlark/core/repositories:bzlmod_setup.bzl%rules_kotlin_extensions": {
       "general": {
         "bzlTransitiveDigest": "Ga4z8lQy1YQ5rAMy+dOl0dqcCEBnYNCXku8x3YQmDZI=",

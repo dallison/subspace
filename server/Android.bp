@@ -1,0 +1,72 @@
+// Copyright 2023-2026 David Allison
+// All Rights Reserved
+// See LICENSE file for licensing information.
+
+cc_library_static {
+    name: "libsubspace_server",
+    defaults: ["subspace_defaults"],
+    srcs: [
+        "server.cc",
+        "client_handler.cc",
+        "server_channel.cc",
+        "shadow_replicator.cc",
+    ],
+    export_include_dirs: ["."],
+    local_include_dirs: [".."],
+    static_libs: [
+        "libsubspace_common",
+        "libsubspace_proto",
+        "libcoroutines",
+        "libcpp_toolbelt",
+    ],
+    shared_libs: [
+        "libsubspace_client",
+        "libprotobuf-cpp-lite",
+        "liblog",
+    ],
+    header_libs: [
+        "libabseil-headers",
+    ],
+    whole_static_libs: [
+        "libabsl_status",
+        "libabsl_statusor",
+        "libabsl_strings",
+        "libabsl_str_format_internal",
+        "libabsl_flat_hash_map",
+        "libabsl_flat_hash_set",
+        "libabsl_flags",
+        "libabsl_flags_parse",
+    ],
+}
+
+cc_binary {
+    name: "subspace_server",
+    defaults: ["subspace_defaults"],
+    srcs: ["main.cc"],
+    static_libs: [
+        "libsubspace_server",
+        "libsubspace_common",
+        "libsubspace_proto",
+        "libcoroutines",
+        "libcpp_toolbelt",
+    ],
+    shared_libs: [
+        "libsubspace_client",
+        "libprotobuf-cpp-lite",
+        "liblog",
+        "libdl",
+    ],
+    header_libs: [
+        "libabseil-headers",
+    ],
+    whole_static_libs: [
+        "libabsl_status",
+        "libabsl_statusor",
+        "libabsl_strings",
+        "libabsl_str_format_internal",
+        "libabsl_flat_hash_map",
+        "libabsl_flat_hash_set",
+        "libabsl_flags",
+        "libabsl_flags_parse",
+    ],
+}

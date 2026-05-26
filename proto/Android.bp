@@ -1,0 +1,17 @@
+// Copyright 2023-2026 David Allison
+// All Rights Reserved
+// See LICENSE file for licensing information.
+
+// Generate C++ protobuf sources from subspace.proto.
+cc_library_static {
+    name: "libsubspace_proto",
+    defaults: ["subspace_defaults"],
+    srcs: ["subspace.proto"],
+    proto: {
+        type: "lite",
+        canonical_path_from_root: false,
+        export_proto_headers: true,
+    },
+    shared_libs: ["libprotobuf-cpp-lite"],
+    export_shared_lib_headers: ["libprotobuf-cpp-lite"],
+}

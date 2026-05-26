@@ -1,0 +1,18 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+cc_binary(
+    name = "libsubspace_jni.so",
+    srcs = ["subspace_jni.cc"],
+    deps = [
+        "//client:subspace_client",
+        "//common:subspace_common",
+    ],
+    linkopts = select({
+        "//:android": ["-llog"],
+        "//conditions:default": [],
+    }),
+    linkshared = True,
+    target_compatible_with = ["@platforms//os:android"],
+)

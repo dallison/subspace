@@ -1,0 +1,41 @@
+// Android.bp for cpp_toolbelt (https://github.com/dallison/cpp_toolbelt).
+// Place this file alongside the cpp_toolbelt source tree at
+// external/cpp_toolbelt/ in your AOSP checkout.
+
+cc_library_static {
+    name: "libcpp_toolbelt",
+    srcs: [
+        "toolbelt/color.cc",
+        "toolbelt/fd.cc",
+        "toolbelt/hexdump.cc",
+        "toolbelt/logging.cc",
+        "toolbelt/payload_buffer.cc",
+        "toolbelt/pipe.cc",
+        "toolbelt/sockets.cc",
+        "toolbelt/table.cc",
+        "toolbelt/triggerfd.cc",
+        "toolbelt/stacktrace.cc",
+    ],
+    export_include_dirs: ["."],
+    local_include_dirs: ["toolbelt"],
+    cflags: [
+        "-std=c++17",
+        "-Wall",
+        "-Wno-unused-parameter",
+    ],
+    static_libs: [
+        "libcoroutines",
+    ],
+    header_libs: [
+        "libabseil-headers",
+    ],
+    whole_static_libs: [
+        "libabsl_status",
+        "libabsl_statusor",
+        "libabsl_strings",
+        "libabsl_str_format_internal",
+        "libabsl_span",
+    ],
+    stl: "c++_shared",
+    min_sdk_version: "28",
+}

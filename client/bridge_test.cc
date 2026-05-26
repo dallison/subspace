@@ -25,6 +25,12 @@
 #include <thread>
 #include <unistd.h>
 
+#if defined(__ANDROID__)
+#define BRIDGE_TEST_TMP "/data/local/tmp"
+#else
+#define BRIDGE_TEST_TMP "/tmp"
+#endif
+
 ABSL_FLAG(bool, start_server, true, "Start the subspace servers");
 ABSL_FLAG(std::string, server, "", "Path to server executable");
 ABSL_FLAG(std::string, log_level, "debug", "Log level");
@@ -60,7 +66,7 @@ public:
     if (!absl::GetFlag(FLAGS_start_server)) {
       return;
     }
-    int lock_fd = ::open("/tmp/subspace_bridge_test_port.lock",
+    int lock_fd = ::open(BRIDGE_TEST_TMP "/subspace_bridge_test_port.lock",
                          O_CREAT | O_RDWR, 0666);
     ASSERT_NE(-1, lock_fd);
     ASSERT_EQ(0, ::flock(lock_fd, LOCK_EX));
@@ -76,7 +82,7 @@ public:
     }
     for (int i = 0; i < 2; i++) {
       printf("Starting Subspace server %d\n", i);
-      char socket_name_template[] = "/tmp/subspaceXXXXXX"; // NOLINT
+      char socket_name_template[] = BRIDGE_TEST_TMP "/subspaceXXXXXX"; // NOLINT
       ::close(mkstemp(&socket_name_template[0]));
       socket_[i] = &socket_name_template[0];
 
@@ -159,7 +165,7 @@ private:
 };
 
 co::CoroutineScheduler BridgeTest::scheduler_[2];
-std::string BridgeTest::socket_[2] = {"/tmp/subspace1", "/tmp/subspace2"};
+std::string BridgeTest::socket_[2] = {BRIDGE_TEST_TMP "/subspace1", BRIDGE_TEST_TMP "/subspace2"};
 int BridgeTest::server_pipe_[2][2];
 std::unique_ptr<subspace::Server> BridgeTest::server_[2];
 std::thread BridgeTest::server_thread_[2];

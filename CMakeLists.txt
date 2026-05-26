@@ -18,9 +18,19 @@ set(ABSL_BUILD_TEST_HELPERS ON CACHE INTERNAL "Enable Abseil TESTONLY+PUBLIC hel
 set(ABSL_USE_EXTERNAL_GOOGLETEST ON CACHE INTERNAL "Use our GoogleTest instead of Abseil downloading its own")
 set(ABSL_FIND_GOOGLETEST OFF CACHE INTERNAL "Don't find_package(GTest); we provide it via FetchContent")
 
+# When cross-compiling, don't build protoc (we use a host-native one).
+if(CMAKE_CROSSCOMPILING)
+    set(protobuf_BUILD_PROTOC_BINARIES OFF CACHE INTERNAL "Skip building protoc for target")
+endif()
+
 # Add common compile options as found in subspace/BUILD
 # These will apply to all targets in this CMakeLists.txt unless overridden.
 add_compile_options(-Wall -Wextra -Wno-missing-field-initializers -Wno-unused-parameter)
+
+# --- Android-specific settings ---
+if(ANDROID)
+    add_compile_definitions(SUBSPACE_ANDROID)
+endif()
 
 # --- Apple Silicon (ARM64) specific settings ---
 # Ensure that CMake targets the correct architecture when building on Apple platforms.
@@ -97,11 +107,10 @@ FetchContent_Declare(
     protobuf
     GIT_REPOSITORY https://github.com/protocolbuffers/protobuf.git
     GIT_TAG v29.5
-    # Protobuf's CMake build can be configured to build only necessary components
     CMAKE_ARGS
-        -Dprotobuf_BUILD_TESTS=OFF # Explicitly disable building tests to avoid gmock conflicts
+        -Dprotobuf_BUILD_TESTS=OFF
         -Dprotobuf_BUILD_EXAMPLES=OFF
-        -Dprotobuf_BUILD_SHARED_LIBS=OFF # Build static libs
+        -Dprotobuf_BUILD_SHARED_LIBS=OFF
         -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
 )
 FetchContent_MakeAvailable(protobuf)
@@ -124,10 +133,10 @@ if(SUBSPACE_PYTHON)
     FetchContent_MakeAvailable(pybind11)
 endif()
 
+#add to get proto/subspace.pb.h working (build dir first so generated files win)
+include_directories(${CMAKE_CURRENT_BINARY_DIR})
 #add to get */file.h includes working
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
-#add to get proto/subspace.pb.h working
-include_directories(${CMAKE_CURRENT_BINARY_DIR})
 # --- Subspace Tests Target ---
 # Corresponds to //subspace/tests:tests
 enable_testing() # Enable CTest for running tests

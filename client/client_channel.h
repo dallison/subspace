@@ -357,7 +357,10 @@ protected:
                            bool destroy_owned_buffers);
   void UnmapBufferSet(size_t buffer_index, BufferSet &buffer,
                       bool destroy_owned_buffers);
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+  absl::StatusOr<toolbelt::FileDescriptor>
+  CreateAndroidBuffer(const std::string &filename, size_t size);
+#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
   absl::StatusOr<toolbelt::FileDescriptor>
   CreateLinuxBuffer(const std::string &filename, size_t size);
 #elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX

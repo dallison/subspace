@@ -5,6 +5,7 @@
 #include "common/split_buffer.h"
 
 #include "absl/strings/str_format.h"
+#include "common/channel.h"
 #include "common/syscall_shim.h"
 #include "common/system_info.h"
 
@@ -169,8 +170,14 @@ std::string SplitBufferObjectName(const std::string &shadow_file) {
 
 absl::StatusOr<toolbelt::FileDescriptor>
 CreateSplitSharedMemoryBuffer(const SplitBufferMetadata &metadata) {
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+  std::string path = GetAndroidShmDir() + "/" + metadata.object_name;
+  int fd = GetSyscallShim().open_fn(path.c_str(),
+                                    O_RDWR | O_CREAT | O_EXCL, 0666);
+#else
   int fd = GetSyscallShim().shm_open_fn(metadata.object_name.c_str(),
                                         O_RDWR | O_CREAT | O_EXCL, 0666);
+#endif
   if (fd == -1) {
     if (errno == EEXIST) {
       return toolbelt::FileDescriptor();
@@ -186,7 +193,11 @@ CreateSplitSharedMemoryBuffer(const SplitBufferMetadata &metadata) {
                                     : PageAlignedSize(metadata.full_size);
   if (GetSyscallShim().ftruncate_fn(shm_fd.Fd(),
                                     static_cast<off_t>(allocation_size)) == -1) {
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+    (void)unlink(path.c_str());
+#else
     (void)GetSyscallShim().shm_unlink_fn(metadata.object_name.c_str());
+#endif
     return absl::InternalError(absl::StrFormat(
         "Failed to size split buffer object %s: %s", metadata.object_name,
         strerror(errno)));
@@ -197,8 +208,13 @@ CreateSplitSharedMemoryBuffer(const SplitBufferMetadata &metadata) {
 
 absl::StatusOr<toolbelt::FileDescriptor>
 OpenSplitSharedMemoryBuffer(const SplitBufferMetadata &metadata, int flags) {
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+  std::string path = GetAndroidShmDir() + "/" + metadata.object_name;
+  int fd = GetSyscallShim().open_fn(path.c_str(), flags, 0666);
+#else
   int fd = GetSyscallShim().shm_open_fn(metadata.object_name.c_str(), flags,
                                         0666);
+#endif
   if (fd == -1) {
     return absl::InternalError(absl::StrFormat(
         "Failed to open split buffer object %s: %s", metadata.object_name,
@@ -210,8 +226,13 @@ OpenSplitSharedMemoryBuffer(const SplitBufferMetadata &metadata, int flags) {
 absl::Status DestroySplitSharedMemoryBuffer(
     const SplitBufferMetadata &metadata) {
   absl::Status status = absl::OkStatus();
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+  std::string path = GetAndroidShmDir() + "/" + metadata.object_name;
+  if (unlink(path.c_str()) == -1 && errno != ENOENT) {
+#else
   if (GetSyscallShim().shm_unlink_fn(metadata.object_name.c_str()) == -1 &&
       errno != ENOENT) {
+#endif
     status = absl::InternalError(absl::StrFormat(
         "Failed to unlink split buffer object %s: %s", metadata.object_name,
         strerror(errno)));

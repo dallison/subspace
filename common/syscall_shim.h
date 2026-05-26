@@ -26,8 +26,10 @@ struct SyscallShim {
   int (*open_fn)(const char *, int, mode_t) = nullptr;
   int (*close_fn)(int) = ::close;
   int (*ftruncate_fn)(int, off_t) = ::ftruncate;
+#if !defined(__ANDROID__)
   int (*shm_open_fn)(const char *, int, mode_t) = nullptr;
   int (*shm_unlink_fn)(const char *) = ::shm_unlink;
+#endif
   int (*poll_fn)(struct pollfd *, nfds_t, int) = ::poll;
   int (*stat_fn)(const char *, struct stat *) = ::stat;
   int (*fstat_fn)(int, struct stat *) = ::fstat;
