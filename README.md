@@ -10,7 +10,8 @@ transported over the network at sub-light speed.
 
 ## Acknowledgments
 
-Some of the code in this project was contributed by Cruise LLC.
+Some of the code in this project was contributed by Cruise LLC and by
+General Motors Inc.
 
 ## Features
 
@@ -32,8 +33,8 @@ It has the following features:
 1.	Automatic UDP discovery and TCP bridging of channels between servers.
 1.	Shadow process for crash recovery -- the server can restart and resume without losing shared memory state.
 1.	Shared and weak pointers for message references.
-1.	Ports to MacOS and Linux, ARM64 and x86_64.
-1.	Builds using Bazel and uses Abseil and Protocol Buffers from Google.
+1.	Ports to MacOS, Linux, QNX and Android, for ARM64 and x86_64.
+1.	Builds using Bazel, cmake and Android Blueprints and uses Abseil and Protocol Buffers from Google.
 1.	Uses my C++ coroutine library (https://github.com/dallison/co)
 
 See the file docs/subspace.pdf for full documentation.  Additional documentation:
