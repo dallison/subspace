@@ -103,7 +103,9 @@ loop {
 | `checksum` | false | Compute CRC32 checksums on published messages. |
 | `checksum_size` | 4 | Bytes reserved for checksums (default: 4 for CRC32). |
 | `metadata_size` | 0 | Bytes reserved in each message prefix for user metadata. |
+| `use_split_buffers` | false | Store message prefixes separately from payload buffers using the built-in split shared-memory allocator. |
 | `split_buffers_over_bridge` | false | Ask receiving bridge servers to create their mirror publisher with split payload buffers. |
+| `split_buffer_callbacks` | none | Optional external allocator callbacks for split payload buffers. Publishers use `allocate`/`free`; subscribers use `map`/`unmap`. |
 
 All options use a builder pattern:
 

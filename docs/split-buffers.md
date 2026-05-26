@@ -124,6 +124,50 @@ auto sub_opts = subspace::SubscriberOptions()
 The exact callback type names and helper methods are defined in
 `client/client.h`.
 
+## Rust API
+
+Rust publishers can enable the built-in split shared-memory allocator:
+
+```rust
+let opts = PublisherOptions::new()
+    .set_slot_size(4096)
+    .set_num_slots(16)
+    .set_use_split_buffers(true);
+
+let publisher = client.create_publisher("camera", &opts)?;
+assert!(publisher.uses_split_buffers());
+```
+
+Rust subscribers learn split-buffer mode from the server, including channels
+created by C++ publishers:
+
+```rust
+let subscriber = client.create_subscriber("camera", &SubscriberOptions::new())?;
+if subscriber.uses_split_buffers() {
+    // Message buffers point at split payload buffers.
+}
+```
+
+Rust also supports external split payload allocators. Publishers provide
+`allocate`/`free` callbacks and subscribers provide `map`/`unmap` callbacks:
+
+```rust
+let pub_opts = PublisherOptions::new()
+    .set_slot_size(4096)
+    .set_num_slots(16)
+    .set_use_split_buffers(true)
+    .set_split_buffer_allocate_callback(|info| allocate_payload(info))
+    .set_split_buffer_free_callback(|info, mapping| free_payload(info, mapping));
+
+let sub_opts = SubscriberOptions::new()
+    .set_split_buffer_map_callback(|info| map_payload(info))
+    .set_split_buffer_unmap_callback(|info, mapping| unmap_payload(info, mapping));
+```
+
+Callbacks exchange `SplitBufferMetadata` and `SplitBufferMapping` values. The
+mapping contains an allocator-defined `handle`, mapped `address`, mapped `size`,
+and opaque `private_data` value.
+
 ## C API
 
 The C API exposes the same feature through `SubspacePublisherOptions` and

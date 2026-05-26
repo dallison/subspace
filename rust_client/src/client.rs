@@ -121,6 +121,10 @@ impl Publisher {
         self.imp.lock().unwrap().channel.current_slot_size()
     }
 
+    pub fn uses_split_buffers(&self) -> bool {
+        self.imp.lock().unwrap().channel.use_split_buffers
+    }
+
     pub fn num_slots(&self) -> i32 {
         self.imp.lock().unwrap().channel.num_slots
     }
@@ -164,6 +168,7 @@ impl Publisher {
                 }
 
                 pub_impl.create_or_attach_buffers(aligned64(new_slot_size as i64) as u64)?;
+                register_pending_client_buffers(&mut client, &mut pub_impl.channel)?;
                 if let Some(si) = pub_impl.channel.slot {
                     pub_impl.channel.set_slot_to_biggest_buffer(si);
                 }
@@ -172,11 +177,7 @@ impl Publisher {
             reload_subscribers_if_necessary(&mut *client, &mut pub_impl)?;
 
             if pub_impl.options.reliable && pub_impl.channel.slot.is_none() {
-                if pub_impl
-                    .channel
-                    .num_subscribers(pub_impl.channel.vchan_id)
-                    == 0
-                {
+                if pub_impl.channel.num_subscribers(pub_impl.channel.vchan_id) == 0 {
                     return Ok(None);
                 }
                 let owner = pub_impl.publisher_id;
@@ -239,9 +240,8 @@ impl Publisher {
             let reliable = pub_impl.options.reliable;
             let vchan_id = pub_impl.channel.vchan_id;
 
-            let published = pub_impl.activate_slot_and_get_another(
-                slot_idx, reliable, false, owner, false, false,
-            );
+            let published = pub_impl
+                .activate_slot_and_get_another(slot_idx, reliable, false, owner, false, false);
 
             pub_impl.channel.slot = published.new_slot;
             pub_impl.trigger_subscribers();
@@ -424,12 +424,36 @@ impl Publisher {
 impl Drop for Publisher {
     fn drop(&mut self) {
         let client = self.inner.lock().unwrap();
-        let pub_impl = self.imp.lock().unwrap();
+        let mut pub_impl = self.imp.lock().unwrap();
 
         let channel_name = pub_impl.channel.name.clone();
+        let resolved_name = pub_impl.resolved_name().to_string();
         let publisher_id = pub_impl.publisher_id;
+        let external_split_buffers: Vec<u32> = pub_impl
+            .channel
+            .buffers
+            .iter()
+            .enumerate()
+            .filter_map(|(buffer_index, buffer)| {
+                (buffer.owns_split_buffers && buffer.uses_split_callbacks)
+                    .then_some(buffer_index as u32)
+            })
+            .collect();
+        for buffer_index in &external_split_buffers {
+            if let Some(buffer) = pub_impl.channel.buffers.get_mut(*buffer_index as usize) {
+                buffer.cleanup_mappings();
+            }
+        }
         drop(pub_impl);
 
+        for buffer_index in external_split_buffers {
+            let _ = unregister_client_buffer_request(
+                &client,
+                &resolved_name,
+                client.session_id,
+                buffer_index,
+            );
+        }
         let _ = remove_publisher_request(&client, &channel_name, publisher_id);
     }
 }
@@ -453,6 +477,10 @@ impl Subscriber {
 
     pub fn is_placeholder(&self) -> bool {
         self.imp.lock().unwrap().channel.is_placeholder()
+    }
+
+    pub fn uses_split_buffers(&self) -> bool {
+        self.imp.lock().unwrap().channel.use_split_buffers
     }
 
     pub fn num_slots(&self) -> i32 {
@@ -786,7 +814,11 @@ impl Client {
 
         let init = match resp.response {
             Some(proto::response::Response::Init(init)) => init,
-            _ => return Err(SubspaceError::Internal("Unexpected response to Init".into())),
+            _ => {
+                return Err(SubspaceError::Internal(
+                    "Unexpected response to Init".into(),
+                ))
+            }
         };
 
         let scb_fd = fds[init.scb_fd_index as usize];
@@ -834,7 +866,7 @@ impl Client {
                     notify_retirement: opts.notify_retirement,
                     checksum_size: opts.checksum_size,
                     metadata_size: opts.metadata_size,
-                    use_split_buffers: false,
+                    use_split_buffers: opts.use_split_buffers,
                     split_buffers_over_bridge: opts.split_buffers_over_bridge,
                     max_publishers: 0,
                     publisher_id: -1,
@@ -867,10 +899,20 @@ impl Client {
             String::from_utf8_lossy(&pub_resp.r#type).to_string(),
             opts.clone(),
         );
+        pub_impl.channel.use_split_buffers = opts.use_split_buffers;
+        pub_impl.channel.split_buffer_callbacks = opts.split_buffer_callbacks.clone();
 
         {
-            let cs = if opts.checksum_size > 0 { opts.checksum_size } else { 4 };
-            let ms = if opts.metadata_size > 0 { opts.metadata_size } else { 0 };
+            let cs = if opts.checksum_size > 0 {
+                opts.checksum_size
+            } else {
+                4
+            };
+            let ms = if opts.metadata_size > 0 {
+                opts.metadata_size
+            } else {
+                0
+            };
             pub_impl.channel.checksum_size = cs;
             pub_impl.channel.metadata_size = ms;
             pub_impl.channel.prefix_size = compute_prefix_size(cs, ms);
@@ -885,6 +927,7 @@ impl Client {
         )?;
 
         pub_impl.create_or_attach_buffers(slot_size as u64)?;
+        register_pending_client_buffers(&mut client, &mut pub_impl.channel)?;
 
         pub_impl.trigger_fd = fds[pub_resp.pub_trigger_fd_index as usize];
         pub_impl.poll_fd = fds[pub_resp.pub_poll_fd_index as usize];
@@ -985,6 +1028,8 @@ impl Client {
             String::from_utf8_lossy(&sub_resp.r#type).to_string(),
             opts.clone(),
         );
+        sub_impl.channel.use_split_buffers = sub_resp.use_split_buffers;
+        sub_impl.channel.split_buffer_callbacks = opts.split_buffer_callbacks.clone();
 
         let prot = if opts.bridge || opts.read_write {
             ProtFlags::PROT_READ | ProtFlags::PROT_WRITE
@@ -993,11 +1038,22 @@ impl Client {
         };
 
         sub_impl.channel.num_slots = sub_resp.num_slots;
-        sub_impl.channel.embargoed_slots.resize(sub_resp.num_slots as usize);
+        sub_impl
+            .channel
+            .embargoed_slots
+            .resize(sub_resp.num_slots as usize);
 
         {
-            let cs = if sub_resp.checksum_size > 0 { sub_resp.checksum_size } else { 4 };
-            let ms = if sub_resp.metadata_size > 0 { sub_resp.metadata_size } else { 0 };
+            let cs = if sub_resp.checksum_size > 0 {
+                sub_resp.checksum_size
+            } else {
+                4
+            };
+            let ms = if sub_resp.metadata_size > 0 {
+                sub_resp.metadata_size
+            } else {
+                0
+            };
             sub_impl.channel.checksum_size = cs;
             sub_impl.channel.metadata_size = ms;
             sub_impl.channel.prefix_size = compute_prefix_size(cs, ms);
@@ -1214,6 +1270,39 @@ fn send_request_receive_response(
     client.socket.receive_response()
 }
 
+fn register_pending_client_buffers(client: &mut ClientInner, channel: &mut Channel) -> Result<()> {
+    let registrations = std::mem::take(&mut channel.pending_client_buffer_registrations);
+    for metadata in registrations {
+        let req = proto::Request {
+            request: Some(proto::request::Request::RegisterClientBuffer(
+                proto::RegisterClientBufferRequest {
+                    metadata: Some(metadata),
+                },
+            )),
+        };
+        client.socket.send_request(&req)?;
+    }
+    Ok(())
+}
+
+fn unregister_client_buffer_request(
+    client: &ClientInner,
+    channel_name: &str,
+    session_id: u64,
+    buffer_index: u32,
+) -> Result<()> {
+    let req = proto::Request {
+        request: Some(proto::request::Request::UnregisterClientBuffer(
+            proto::UnregisterClientBufferRequest {
+                channel_name: channel_name.to_string(),
+                session_id,
+                buffer_index,
+            },
+        )),
+    };
+    client.socket.send_request(&req)
+}
+
 fn read_message_internal(
     client: &mut ClientInner,
     sub: &mut SubscriberImpl,
@@ -1336,11 +1425,7 @@ fn read_message_internal(
         return Ok(Message::default());
     }
 
-    sub.claim_slot(
-        new_idx,
-        sub.channel.vchan_id,
-        mode == ReadMode::ReadNewest,
-    );
+    sub.claim_slot(new_idx, sub.channel.vchan_id, mode == ReadMode::ReadNewest);
 
     if checksum_error && !sub.options.pass_checksum_errors {
         return Err(SubspaceError::ChecksumError);
@@ -1401,11 +1486,22 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
         sub.channel.channel_type = String::from_utf8_lossy(&sub_resp.r#type).to_string();
     }
     sub.channel.num_slots = sub_resp.num_slots;
-    sub.channel.embargoed_slots.resize(sub_resp.num_slots as usize);
+    sub.channel
+        .embargoed_slots
+        .resize(sub_resp.num_slots as usize);
+    sub.channel.use_split_buffers = sub_resp.use_split_buffers;
 
     {
-        let cs = if sub_resp.checksum_size > 0 { sub_resp.checksum_size } else { 4 };
-        let ms = if sub_resp.metadata_size > 0 { sub_resp.metadata_size } else { 0 };
+        let cs = if sub_resp.checksum_size > 0 {
+            sub_resp.checksum_size
+        } else {
+            4
+        };
+        let ms = if sub_resp.metadata_size > 0 {
+            sub_resp.metadata_size
+        } else {
+            0
+        };
         sub.channel.checksum_size = cs;
         sub.channel.metadata_size = ms;
         sub.channel.prefix_size = compute_prefix_size(cs, ms);
@@ -1553,10 +1649,7 @@ fn activate_reliable_channel(publisher: &mut PublisherImpl) -> Result<()> {
 }
 
 fn activate_channel(publisher: &mut PublisherImpl) -> Result<()> {
-    if publisher
-        .channel
-        .is_activated(publisher.channel.vchan_id)
-    {
+    if publisher.channel.is_activated(publisher.channel.vchan_id) {
         return Ok(());
     }
 
