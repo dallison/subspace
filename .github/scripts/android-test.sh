@@ -1,9 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
-adb root
-sleep 2
+# Wait for device to be fully available after emulator boot
 adb wait-for-device
+adb root
+sleep 5
+adb wait-for-device
+adb shell "while [[ -z \$(getprop sys.boot_completed) ]]; do sleep 1; done"
 
 # Create shared memory directory
 adb shell "mkdir -p /dev/subspace && chmod 777 /dev/subspace"
