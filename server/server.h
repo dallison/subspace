@@ -101,6 +101,16 @@ public:
 
   absl::StatusOr<toolbelt::FileDescriptor> CreateBridgeNotificationPipe();
 
+  struct BridgePortRange {
+    int first_port = 0;
+    int last_port = 0;
+
+    bool Enabled() const { return first_port != 0 || last_port != 0; }
+  };
+
+  absl::Status SetBridgePortRange(int first_port, int last_port,
+                                  bool fallback_to_ephemeral = false);
+
   void SetCleanupFilesystem(bool v) { cleanup_filesystem_ = v; }
 
   void CleanupFilesystem();
@@ -207,6 +217,7 @@ private:
                          const toolbelt::InetAddress &sender,
                          const std::string &server_id);
   void GratuitousAdvertiseCoroutine();
+  absl::Status BindBridgeListener(toolbelt::StreamSocket &listener);
   absl::Status RegisterPlugin(const std::string &name, void *handle,
                               std::unique_ptr<PluginInterface> interface);
   absl::Status SendSubscribeMessage(const std::string &channel_name,
@@ -276,6 +287,8 @@ private:
   toolbelt::TriggerFd shutdown_trigger_fd_;
   std::string machine_name_;
   bool publish_server_channels_ = true;
+  BridgePortRange bridge_port_range_;
+  bool bridge_ports_fallback_to_ephemeral_ = false;
 
   std::unique_ptr<ShadowReplicator> primary_shadow_replicator_;
   std::unique_ptr<ShadowReplicator> secondary_shadow_replicator_;

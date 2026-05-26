@@ -5,7 +5,9 @@
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
 #include "server.h"
+#include <cerrno>
 #include <csignal>
+#include <cstdlib>
 #include <string>
 
 static co::CoroutineScheduler *g_scheduler;
@@ -21,6 +23,12 @@ ABSL_FLAG(std::string, socket, "/tmp/subspace",
 ABSL_FLAG(int, disc_port, 6502, "Discovery UDP port");
 ABSL_FLAG(int, peer_port, 6502, "Discovery peer UDP port");
 ABSL_FLAG(std::string, peer_address, "", "Bridge peer hostname or IP address");
+ABSL_FLAG(std::string, bridge_ports, "",
+          "TCP bridge port or inclusive port range START-END. Empty uses an "
+          "ephemeral port for each bridge listener.");
+ABSL_FLAG(bool, bridge_ports_fallback_ephemeral, false,
+          "If true, use an ephemeral TCP bridge port when --bridge_ports is "
+          "configured but unavailable.");
 ABSL_FLAG(std::string, log_level, "info", "Log level");
 ABSL_FLAG(std::string, interface, "", "Discovery network interface");
 ABSL_FLAG(bool, local, false, "Use local computer only");
@@ -42,6 +50,48 @@ ABSL_FLAG(std::string, shadow_socket, "",
           "Primary shadow process Unix socket (empty = disabled)");
 ABSL_FLAG(std::string, secondary_shadow_socket, "",
           "Secondary shadow process Unix socket (empty = disabled)");
+
+static bool ParsePort(const std::string &value, int *port) {
+  if (value.empty()) {
+    return false;
+  }
+
+  char *end = nullptr;
+  errno = 0;
+  long parsed = std::strtol(value.c_str(), &end, 10);
+  if (errno != 0 || end == value.c_str() || *end != '\0' || parsed <= 0 ||
+      parsed > 65535) {
+    return false;
+  }
+
+  *port = static_cast<int>(parsed);
+  return true;
+}
+
+static bool ParseBridgePorts(const std::string &value, int *first_port,
+                             int *last_port) {
+  if (value.empty()) {
+    *first_port = 0;
+    *last_port = 0;
+    return true;
+  }
+
+  size_t dash = value.find('-');
+  if (dash == std::string::npos) {
+    if (!ParsePort(value, first_port)) {
+      return false;
+    }
+    *last_port = *first_port;
+    return true;
+  }
+  if (value.find('-', dash + 1) != std::string::npos) {
+    return false;
+  }
+
+  return ParsePort(value.substr(0, dash), first_port) &&
+         ParsePort(value.substr(dash + 1), last_port) &&
+         *first_port <= *last_port;
+}
 
 int main(int argc, char **argv) {
   absl::ParseCommandLine(argc, argv);
@@ -72,6 +122,25 @@ int main(int argc, char **argv) {
   }
 
   server->SetLogLevel(absl::GetFlag(FLAGS_log_level));
+  int bridge_first_port = 0;
+  int bridge_last_port = 0;
+  if (!ParseBridgePorts(absl::GetFlag(FLAGS_bridge_ports), &bridge_first_port,
+                        &bridge_last_port)) {
+    fprintf(stderr,
+            "Invalid --bridge_ports value '%s'; expected PORT or START-END\n",
+            absl::GetFlag(FLAGS_bridge_ports).c_str());
+    exit(1);
+  }
+  if (bridge_first_port != 0) {
+    absl::Status status = server->SetBridgePortRange(
+        bridge_first_port, bridge_last_port,
+        absl::GetFlag(FLAGS_bridge_ports_fallback_ephemeral));
+    if (!status.ok()) {
+      fprintf(stderr, "Invalid bridge port range: %s\n",
+              status.ToString().c_str());
+      exit(1);
+    }
+  }
   if (absl::GetFlag(FLAGS_cleanup_filesystem)) {
     server->SetCleanupFilesystem(true);
   }

@@ -140,6 +140,13 @@ Created when the local server wants to subscribe to a remote channel:
 4. Creates a local publisher.
 5. Receives messages over TCP and publishes them locally.
 
+Bridge TCP listener ports are separate from the UDP discovery ports. By
+default each bridge listener uses an ephemeral TCP port, but deployments with
+firewalls can configure a fixed TCP bridge port or inclusive range with
+`--bridge_ports=PORT` or `--bridge_ports=START-END`. If the configured range is
+busy, `--bridge_ports_fallback_ephemeral` controls whether the server falls back
+to an ephemeral TCP port or fails that bridge setup.
+
 ### Gratuitous Advertise
 
 Every 5 seconds, broadcasts an `Advertise` for all local channels so late-joining subscribers can discover them.
