@@ -256,3 +256,137 @@ jobs:
 
       - name: Run CMake tests
         run: ctest --test-dir build/cmake-${{ matrix.build_type }} --output-on-failure
+
+  android:
+    name: android (x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Bazel
+        uses: bazel-contrib/setup-bazel@0.18.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-android
+          repository-cache: true
+
+      - name: Set up Android NDK
+        run: |
+          ANDROID_SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          # Find the installed NDK version
+          NDK_VERSION=$(ls "$ANDROID_SDK_ROOT/ndk" | sort -V | tail -1)
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Cross-compile for Android x86_64
+        run: |
+          bazel build \
+            //server:subspace_server \
+            //client:client_test \
+            //client:bridge_test \
+            //common:split_buffer_test \
+            //coro_rpc/test:rpc_test \
+            //coro_rpc/server:server_test \
+            //coro_rpc/client:client_test \
+            //co20_rpc/test:rpc_test \
+            //co20_rpc/server:server_test \
+            //co20_rpc/client:client_test \
+            //asio_rpc/test:rpc_test \
+            //asio_rpc/server:server_test \
+            //asio_rpc/client:client_test \
+            --verbose_failures \
+            --config=android_x86_64
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run tests on Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 28
+          arch: x86_64
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+          script: |
+            set -e
+            adb root
+            adb wait-for-device
+
+            # Create shared memory directory
+            adb shell "mkdir -p /dev/subspace && chmod 777 /dev/subspace"
+            adb shell "mkdir -p /data/local/tmp"
+
+            # Push shared libraries (dereference symlinks)
+            mkdir -p /tmp/android_libs
+            if [ -d bazel-bin/_solib_x86-64 ]; then
+              cp -L bazel-bin/_solib_x86-64/*.so /tmp/android_libs/ 2>/dev/null || true
+            fi
+            if [ -d bazel-bin/_solib_x86_64 ]; then
+              cp -L bazel-bin/_solib_x86_64/*.so /tmp/android_libs/ 2>/dev/null || true
+            fi
+            # Also grab any .so from common solib patterns
+            find bazel-bin/ -name "*.so" -path "*_solib*" -exec cp -L {} /tmp/android_libs/ \; 2>/dev/null || true
+            if [ "$(ls /tmp/android_libs/*.so 2>/dev/null)" ]; then
+              adb push /tmp/android_libs /data/local/tmp/android_libs
+            fi
+
+            LIB="LD_LIBRARY_PATH=/data/local/tmp/android_libs"
+
+            # Push test binaries
+            adb push bazel-bin/server/subspace_server /data/local/tmp/subspace_server
+            adb push bazel-bin/client/client_test /data/local/tmp/client_test
+            adb push bazel-bin/client/bridge_test /data/local/tmp/bridge_test
+            adb push bazel-bin/common/split_buffer_test /data/local/tmp/split_buffer_test
+            adb push bazel-bin/coro_rpc/test/rpc_test /data/local/tmp/coro_rpc_test
+            adb push bazel-bin/coro_rpc/server/server_test /data/local/tmp/coro_rpc_server_test
+            adb push bazel-bin/coro_rpc/client/client_test /data/local/tmp/coro_rpc_client_test
+            adb push bazel-bin/co20_rpc/test/rpc_test /data/local/tmp/co20_rpc_test
+            adb push bazel-bin/co20_rpc/server/server_test /data/local/tmp/co20_rpc_server_test
+            adb push bazel-bin/co20_rpc/client/client_test /data/local/tmp/co20_rpc_client_test
+            adb push bazel-bin/asio_rpc/test/rpc_test /data/local/tmp/asio_rpc_test
+            adb push bazel-bin/asio_rpc/server/server_test /data/local/tmp/asio_rpc_server_test
+            adb push bazel-bin/asio_rpc/client/client_test /data/local/tmp/asio_rpc_client_test
+
+            # Make binaries executable
+            adb shell "chmod +x /data/local/tmp/*_test /data/local/tmp/subspace_server"
+
+            # Push plugin shared libraries
+            find bazel-bin/plugins/ -name "*.so" -exec cp -L {} /tmp/android_libs/ \; 2>/dev/null || true
+            if [ "$(ls /tmp/android_libs/*.so 2>/dev/null)" ]; then
+              adb push /tmp/android_libs /data/local/tmp/android_libs
+            fi
+
+            echo "=== split_buffer_test ==="
+            adb shell "cd /data/local/tmp && $LIB ./split_buffer_test"
+
+            echo "=== client_test ==="
+            adb shell "cd /data/local/tmp && $LIB ./client_test"
+
+            echo "=== bridge_test ==="
+            adb shell "cd /data/local/tmp && $LIB ./bridge_test"
+
+            echo "=== coro_rpc tests ==="
+            adb shell "cd /data/local/tmp && $LIB ./coro_rpc_test"
+            adb shell "cd /data/local/tmp && $LIB ./coro_rpc_server_test"
+            adb shell "cd /data/local/tmp && $LIB ./coro_rpc_client_test"
+
+            echo "=== co20_rpc tests ==="
+            adb shell "cd /data/local/tmp && $LIB ./co20_rpc_test"
+            adb shell "cd /data/local/tmp && $LIB ./co20_rpc_server_test"
+            adb shell "cd /data/local/tmp && $LIB ./co20_rpc_client_test"
+
+            echo "=== asio_rpc tests ==="
+            adb shell "cd /data/local/tmp && $LIB ./asio_rpc_test"
+            adb shell "cd /data/local/tmp && $LIB ./asio_rpc_server_test"
+            adb shell "cd /data/local/tmp && $LIB ./asio_rpc_client_test"
+
+      - name: Upload Android test logs
+        uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: android-test-logs
+          path: bazel-testlogs

@@ -101,6 +101,9 @@ build:android_arm64 --extra_toolchains=@androidndk//:all
 build:android_x86_64 --platforms=//platform/android:android_x86_64
 build:android_x86_64 --action_env=ANDROID_NDK_HOME
 build:android_x86_64 --cxxopt=-D__ANDROID_API__=28
+build:android_x86_64 --cpu=x86_64
+build:android_x86_64 --linkopt=-lc++_static
+build:android_x86_64 --linkopt=-lc++abi
 build:android_x86_64 --extra_toolchains=@androidndk//:all
 
 build:android --config=android_arm64
