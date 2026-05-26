@@ -1,9 +1,9 @@
 package(default_visibility = ["//visibility:public"])
 
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_binary")
 
-cc_library(
-    name = "subspace_jni",
+cc_binary(
+    name = "libsubspace_jni.so",
     srcs = ["subspace_jni.cc"],
     deps = [
         "//client:subspace_client",
@@ -14,4 +14,5 @@ cc_library(
         "//conditions:default": [],
     }),
     linkshared = True,
+    target_compatible_with = ["@platforms//os:android"],
 )
