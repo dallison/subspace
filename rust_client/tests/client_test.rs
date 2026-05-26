@@ -63,6 +63,8 @@ fn publisher_options_defaults() {
     assert_eq!(opts.vchan_id, -1);
     assert!(opts.channel_type.is_empty());
     assert!(opts.mux.is_empty());
+    assert!(!opts.use_split_buffers);
+    assert!(!opts.split_buffers_over_bridge);
 }
 
 #[test]
@@ -74,6 +76,8 @@ fn publisher_options_builder_chain() {
         .set_local(true)
         .set_fixed_size(true)
         .set_checksum(true)
+        .set_use_split_buffers(true)
+        .set_split_buffers_over_bridge(true)
         .set_type("sensor".into())
         .set_mux("bus0".into())
         .set_vchan_id(3)
@@ -85,6 +89,8 @@ fn publisher_options_builder_chain() {
     assert!(opts.local);
     assert!(opts.fixed_size);
     assert!(opts.checksum);
+    assert!(opts.use_split_buffers);
+    assert!(opts.split_buffers_over_bridge);
     assert!(opts.activate);
     assert_eq!(opts.channel_type, "sensor");
     assert_eq!(opts.mux, "bus0");
@@ -662,6 +668,152 @@ fn integration_publish_single_message_and_read() {
     // A second read should return an empty message (length 0).
     let msg2 = subscriber.read_message(ReadMode::ReadNext).unwrap();
     assert_eq!(msg2.length, 0);
+}
+
+#[test]
+fn integration_split_buffers_publish_single_message_and_read() {
+    let pub_client = new_client("test_split_p");
+    let sub_client = new_client("test_split_s");
+
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(10)
+        .set_use_split_buffers(true);
+    let publisher = pub_client
+        .create_publisher("rust_split_rw1", &pub_opts)
+        .unwrap();
+    assert!(publisher.uses_split_buffers());
+
+    let subscriber = sub_client
+        .create_subscriber("rust_split_rw1", &SubscriberOptions::new())
+        .unwrap();
+    assert!(subscriber.uses_split_buffers());
+
+    let payload = b"hello from rust split buffers";
+    let (buf_ptr, cap) = publisher
+        .get_message_buffer(payload.len() as i32)
+        .unwrap()
+        .unwrap();
+    assert!(cap >= payload.len());
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), buf_ptr, payload.len());
+    }
+    let pub_msg = publisher.publish_message(payload.len() as i64).unwrap();
+    assert!(pub_msg.ordinal > 0);
+
+    let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(msg.length, payload.len());
+    let received = unsafe { std::slice::from_raw_parts(msg.buffer, msg.length) };
+    assert_eq!(received, payload);
+}
+
+#[test]
+fn integration_split_buffer_callbacks_allocate_map_unmap_and_free_payload_slots() {
+    #[derive(Default)]
+    struct CallbackState {
+        next_handle: u64,
+        allocations: std::collections::HashMap<u64, Vec<u8>>,
+        allocate_count: usize,
+        map_count: usize,
+        unmap_count: usize,
+        free_count: usize,
+    }
+
+    let state = std::sync::Arc::new(std::sync::Mutex::new(CallbackState::default()));
+    let pub_state = state.clone();
+    let free_state = state.clone();
+    let sub_state = state.clone();
+    let unmap_state = state.clone();
+
+    let pub_client = new_client("test_split_cb_p");
+    let sub_client = new_client("test_split_cb_s");
+    let channel_name = "rust_split_cb1";
+    let num_slots = 6;
+
+    {
+        let pub_opts = PublisherOptions::new()
+            .set_slot_size(256)
+            .set_num_slots(num_slots)
+            .set_use_split_buffers(true)
+            .set_split_buffer_allocate_callback(move |metadata| {
+                let mut state = pub_state.lock().unwrap();
+                state.next_handle += 1;
+                let handle = state.next_handle;
+                let mut allocation = vec![0u8; metadata.allocation_size as usize];
+                let address = allocation.as_mut_ptr();
+                state.allocations.insert(handle, allocation);
+                state.allocate_count += 1;
+                Ok(subspace_client::SplitBufferMapping {
+                    handle,
+                    address,
+                    size: metadata.allocation_size as usize,
+                    private_data: address as usize,
+                })
+            })
+            .set_split_buffer_free_callback(move |_metadata, mapping| {
+                let mut state = free_state.lock().unwrap();
+                state.free_count += 1;
+                state.allocations.remove(&mapping.handle);
+                Ok(())
+            });
+
+        let sub_opts = SubscriberOptions::new()
+            .set_split_buffer_map_callback(move |metadata| {
+                let mut state = sub_state.lock().unwrap();
+                let allocation = state
+                    .allocations
+                    .get_mut(&metadata.handle)
+                    .ok_or_else(|| SubspaceError::Internal("split handle not found".into()))?;
+                let address = allocation.as_mut_ptr();
+                let size = allocation.len();
+                state.map_count += 1;
+                Ok(subspace_client::SplitBufferMapping {
+                    handle: metadata.handle,
+                    address,
+                    size,
+                    private_data: 0,
+                })
+            })
+            .set_split_buffer_unmap_callback(move |_metadata, mapping| {
+                assert!(!mapping.address.is_null());
+                let mut state = unmap_state.lock().unwrap();
+                state.unmap_count += 1;
+                Ok(())
+            });
+
+        let publisher = pub_client
+            .create_publisher(channel_name, &pub_opts)
+            .unwrap();
+        assert!(publisher.uses_split_buffers());
+
+        let subscriber = sub_client
+            .create_subscriber(channel_name, &sub_opts)
+            .unwrap();
+        assert!(subscriber.uses_split_buffers());
+
+        let payload = b"rust external split buffer payload";
+        let (buf_ptr, cap) = publisher
+            .get_message_buffer(payload.len() as i32)
+            .unwrap()
+            .unwrap();
+        assert!(cap >= payload.len());
+        unsafe {
+            std::ptr::copy_nonoverlapping(payload.as_ptr(), buf_ptr, payload.len());
+        }
+        publisher.publish_message(payload.len() as i64).unwrap();
+
+        let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
+        assert_eq!(msg.length, payload.len());
+        let received = unsafe { std::slice::from_raw_parts(msg.buffer, msg.length) };
+        assert_eq!(received, payload);
+    }
+
+    let state = state.lock().unwrap();
+    assert_eq!(state.allocate_count, num_slots as usize);
+    assert_eq!(state.map_count, num_slots as usize);
+    assert_eq!(state.unmap_count, num_slots as usize);
+    assert_eq!(state.free_count, num_slots as usize);
+    assert!(state.allocations.is_empty());
 }
 
 // ── Publish multiple messages and read them all ──────────────────────────────
@@ -2379,6 +2531,15 @@ extern "C" {
         checksum_size: i32,
         metadata_size: i32,
     ) -> *mut std::ffi::c_void;
+    fn cpp_test_create_publisher_with_split(
+        client: *mut std::ffi::c_void,
+        channel: *const std::ffi::c_char,
+        slot_size: i32,
+        num_slots: std::ffi::c_int,
+        checksum_size: i32,
+        metadata_size: i32,
+        use_split_buffers: bool,
+    ) -> *mut std::ffi::c_void;
     fn cpp_test_destroy_publisher(handle: *mut std::ffi::c_void);
     fn cpp_test_publish(
         pub_handle: *mut std::ffi::c_void,
@@ -2452,6 +2613,31 @@ impl CppPublisher {
             )
         };
         assert!(!h.is_null(), "cpp_test_create_publisher failed");
+        CppPublisher(h)
+    }
+
+    fn new_with_split(
+        client: &CppClient,
+        channel: &str,
+        slot_size: i32,
+        num_slots: i32,
+        checksum_size: i32,
+        metadata_size: i32,
+        use_split_buffers: bool,
+    ) -> Self {
+        let c_ch = std::ffi::CString::new(channel).unwrap();
+        let h = unsafe {
+            cpp_test_create_publisher_with_split(
+                client.0,
+                c_ch.as_ptr(),
+                slot_size,
+                num_slots as std::ffi::c_int,
+                checksum_size,
+                metadata_size,
+                use_split_buffers,
+            )
+        };
+        assert!(!h.is_null(), "cpp_test_create_publisher_with_split failed");
         CppPublisher(h)
     }
 
@@ -2719,6 +2905,61 @@ fn cross_lang_plain_message() {
     assert_eq!(msg.length, payload.len());
     let data = unsafe { std::slice::from_raw_parts(msg.buffer, msg.length) };
     assert_eq!(data, payload);
+}
+
+#[cfg(server_ffi)]
+#[test]
+fn cross_lang_cpp_split_pub_rust_sub_plain_message() {
+    let cpp_client = CppClient::new("xl_cpp_split_pub");
+    let rust_client = new_client("xl_rust_split_sub");
+
+    let cpp_pub =
+        CppPublisher::new_with_split(&cpp_client, "xl_split_cpp_rust", 256, 10, 4, 0, true);
+    let rust_sub = rust_client
+        .create_subscriber("xl_split_cpp_rust", &SubscriberOptions::new())
+        .unwrap();
+    assert!(rust_sub.uses_split_buffers());
+
+    let payload = b"C++ split buffers to rust";
+    cpp_pub.publish(payload, &[]);
+
+    let msg = rust_sub.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(msg.length, payload.len());
+    let data = unsafe { std::slice::from_raw_parts(msg.buffer, msg.length) };
+    assert_eq!(data, payload);
+}
+
+#[cfg(server_ffi)]
+#[test]
+fn cross_lang_rust_split_pub_cpp_sub_plain_message() {
+    let rust_client = new_client("xl_rust_split_pub");
+    let cpp_client = CppClient::new("xl_cpp_split_sub");
+
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(10)
+        .set_use_split_buffers(true);
+    let rust_pub = rust_client
+        .create_publisher("xl_split_rust_cpp", &pub_opts)
+        .unwrap();
+    assert!(rust_pub.uses_split_buffers());
+
+    let cpp_sub = CppSubscriber::new(&cpp_client, "xl_split_rust_cpp", false);
+
+    let payload = b"rust split buffers to C++";
+    let (buf, cap) = rust_pub
+        .get_message_buffer(payload.len() as i32)
+        .unwrap()
+        .unwrap();
+    assert!(cap >= payload.len());
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
+    }
+    rust_pub.publish_message(payload.len() as i64).unwrap();
+
+    assert!(cpp_sub.wait(1000), "C++ subscriber did not become readable");
+    let (payload_out, _meta_out, _meta_size) = cpp_sub.read_message();
+    assert_eq!(payload_out, payload);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

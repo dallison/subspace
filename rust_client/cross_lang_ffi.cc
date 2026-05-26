@@ -32,12 +32,23 @@ CppPublisherHandle cpp_test_create_publisher(CppClientHandle client_handle,
                                              int32_t slot_size, int num_slots,
                                              int32_t checksum_size,
                                              int32_t metadata_size) {
+  return cpp_test_create_publisher_with_split(client_handle, channel, slot_size,
+                                              num_slots, checksum_size,
+                                              metadata_size,
+                                              /*use_split_buffers=*/false);
+}
+
+CppPublisherHandle cpp_test_create_publisher_with_split(
+    CppClientHandle client_handle, const char *channel, int32_t slot_size,
+    int num_slots, int32_t checksum_size, int32_t metadata_size,
+    bool use_split_buffers) {
   auto *client = static_cast<subspace::Client *>(client_handle);
   subspace::PublisherOptions opts{
       .slot_size = slot_size,
       .num_slots = num_slots,
       .checksum_size = checksum_size,
       .metadata_size = metadata_size,
+      .use_split_buffers = use_split_buffers,
   };
   auto status_or = client->CreatePublisher(channel, opts);
   if (!status_or.ok()) {

@@ -28,6 +28,10 @@ CppPublisherHandle cpp_test_create_publisher(CppClientHandle client,
                                              int32_t slot_size, int num_slots,
                                              int32_t checksum_size,
                                              int32_t metadata_size);
+CppPublisherHandle cpp_test_create_publisher_with_split(
+    CppClientHandle client, const char *channel, int32_t slot_size,
+    int num_slots, int32_t checksum_size, int32_t metadata_size,
+    bool use_split_buffers);
 void cpp_test_destroy_publisher(CppPublisherHandle handle);
 
 // Write payload and optional metadata, then publish.

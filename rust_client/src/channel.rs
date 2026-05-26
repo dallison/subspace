@@ -6,6 +6,8 @@
 use crate::bitset::{
     bits_to_words, sizeof_atomic_bitset, AtomicBitSet, DynamicBitSet, InPlaceAtomicBitSet,
 };
+use crate::proto;
+use crate::split_buffer::{SplitBufferCallbacks, SplitBufferMapping, SplitBufferMetadata};
 use crate::syscall_shim::{shim_mmap, shim_munmap};
 use nix::sys::mman::{MapFlags, ProtFlags};
 use std::num::NonZeroUsize;
@@ -276,6 +278,8 @@ pub struct Channel {
     pub prefix_size: i32,
     pub checksum_size: i32,
     pub metadata_size: i32,
+    pub use_split_buffers: bool,
+    pub split_buffer_callbacks: SplitBufferCallbacks,
 
     pub scb: *mut SystemControlBlock,
     pub ccb: *mut ChannelControlBlock,
@@ -286,6 +290,7 @@ pub struct Channel {
     bcb_size: usize,
 
     pub buffers: Vec<BufferSet>,
+    pub pending_client_buffer_registrations: Vec<proto::ClientBufferHandleMetadataProto>,
 
     pub active_slots: Vec<ActiveSlot>,
     pub embargoed_slots: DynamicBitSet,
@@ -299,10 +304,140 @@ pub struct BufferSet {
     pub full_size: u64,
     pub slot_size: u64,
     pub buffer: *mut u8,
+    pub split_prefix_buffer: *mut u8,
+    pub split_prefix_buffer_size: u64,
+    pub split_slot_buffers: Vec<*mut u8>,
+    pub split_slot_sizes: Vec<u64>,
+    pub split_handles: Vec<u64>,
+    pub split_private_data: Vec<usize>,
+    pub split_metadata: Vec<SplitBufferMetadata>,
+    pub split_fds: Vec<RawFd>,
+    pub split_prefix_fd: RawFd,
+    pub split_prefix_metadata: Option<SplitBufferMetadata>,
+    pub owns_split_buffers: bool,
+    pub uses_split_callbacks: bool,
+    pub split_buffer_callbacks: SplitBufferCallbacks,
 }
 
 unsafe impl Send for BufferSet {}
 unsafe impl Sync for BufferSet {}
+
+impl BufferSet {
+    pub fn shared(full_size: u64, slot_size: u64, buffer: *mut u8) -> Self {
+        Self {
+            full_size,
+            slot_size,
+            buffer,
+            split_prefix_buffer: std::ptr::null_mut(),
+            split_prefix_buffer_size: 0,
+            split_slot_buffers: Vec::new(),
+            split_slot_sizes: Vec::new(),
+            split_handles: Vec::new(),
+            split_private_data: Vec::new(),
+            split_metadata: Vec::new(),
+            split_fds: Vec::new(),
+            split_prefix_fd: -1,
+            split_prefix_metadata: None,
+            owns_split_buffers: false,
+            uses_split_callbacks: false,
+            split_buffer_callbacks: SplitBufferCallbacks::default(),
+        }
+    }
+
+    pub fn split(full_size: u64, slot_size: u64) -> Self {
+        Self {
+            full_size,
+            slot_size,
+            buffer: std::ptr::null_mut(),
+            split_prefix_buffer: std::ptr::null_mut(),
+            split_prefix_buffer_size: 0,
+            split_slot_buffers: Vec::new(),
+            split_slot_sizes: Vec::new(),
+            split_handles: Vec::new(),
+            split_private_data: Vec::new(),
+            split_metadata: Vec::new(),
+            split_fds: Vec::new(),
+            split_prefix_fd: -1,
+            split_prefix_metadata: None,
+            owns_split_buffers: false,
+            uses_split_callbacks: false,
+            split_buffer_callbacks: SplitBufferCallbacks::default(),
+        }
+    }
+
+    pub fn is_split_buffers(&self) -> bool {
+        !self.split_slot_buffers.is_empty()
+    }
+
+    pub fn cleanup_mappings(&mut self) {
+        if self.is_split_buffers() {
+            for (slot, addr) in self.split_slot_buffers.iter_mut().enumerate() {
+                if addr.is_null() {
+                    continue;
+                }
+                let metadata = self.split_metadata.get(slot).cloned().unwrap_or_default();
+                let mapping = SplitBufferMapping {
+                    handle: self
+                        .split_handles
+                        .get(slot)
+                        .copied()
+                        .unwrap_or(metadata.handle),
+                    address: *addr,
+                    size: self
+                        .split_slot_sizes
+                        .get(slot)
+                        .copied()
+                        .unwrap_or(self.slot_size) as usize,
+                    private_data: self.split_private_data.get(slot).copied().unwrap_or(0),
+                };
+                if self.uses_split_callbacks
+                    && self.owns_split_buffers
+                    && self.split_buffer_callbacks.free.is_some()
+                {
+                    if let Some(free) = &self.split_buffer_callbacks.free {
+                        let _ = free(&metadata, &mapping);
+                    }
+                } else if self.uses_split_callbacks && self.split_buffer_callbacks.unmap.is_some() {
+                    if let Some(unmap) = &self.split_buffer_callbacks.unmap {
+                        let _ = unmap(&metadata, &mapping);
+                    }
+                } else {
+                    unsafe {
+                        let _ = shim_munmap(NonNull::new_unchecked(*addr as *mut _), mapping.size);
+                    }
+                }
+                *addr = std::ptr::null_mut();
+            }
+            if !self.split_prefix_buffer.is_null() {
+                unsafe {
+                    let _ = shim_munmap(
+                        NonNull::new_unchecked(self.split_prefix_buffer as *mut _),
+                        self.split_prefix_buffer_size as usize,
+                    );
+                }
+                self.split_prefix_buffer = std::ptr::null_mut();
+            }
+            if self.split_prefix_fd >= 0 {
+                crate::syscall_shim::shim_close(self.split_prefix_fd);
+                self.split_prefix_fd = -1;
+            }
+            for fd in &mut self.split_fds {
+                if *fd >= 0 {
+                    crate::syscall_shim::shim_close(*fd);
+                    *fd = -1;
+                }
+            }
+        } else if !self.buffer.is_null() {
+            unsafe {
+                let _ = shim_munmap(
+                    NonNull::new_unchecked(self.buffer as *mut _),
+                    self.full_size as usize,
+                );
+            }
+            self.buffer = std::ptr::null_mut();
+        }
+    }
+}
 
 impl Channel {
     pub fn new(
@@ -325,6 +460,8 @@ impl Channel {
             prefix_size: std::mem::size_of::<MessagePrefix>() as i32,
             checksum_size: 4,
             metadata_size: 0,
+            use_split_buffers: false,
+            split_buffer_callbacks: SplitBufferCallbacks::default(),
             scb: std::ptr::null_mut(),
             ccb: std::ptr::null_mut(),
             bcb: std::ptr::null_mut(),
@@ -332,6 +469,7 @@ impl Channel {
             ccb_size: 0,
             bcb_size: 0,
             buffers: Vec::new(),
+            pending_client_buffer_registrations: Vec::new(),
             active_slots: Vec::with_capacity(ns),
             embargoed_slots: DynamicBitSet::new(ns),
             slot: None,
@@ -363,28 +501,19 @@ impl Channel {
     pub fn unmap(&mut self) {
         if !self.scb.is_null() {
             unsafe {
-                let _ = shim_munmap(
-                    NonNull::new_unchecked(self.scb as *mut _),
-                    self.scb_size,
-                );
+                let _ = shim_munmap(NonNull::new_unchecked(self.scb as *mut _), self.scb_size);
             }
             self.scb = std::ptr::null_mut();
         }
         if !self.ccb.is_null() {
             unsafe {
-                let _ = shim_munmap(
-                    NonNull::new_unchecked(self.ccb as *mut _),
-                    self.ccb_size,
-                );
+                let _ = shim_munmap(NonNull::new_unchecked(self.ccb as *mut _), self.ccb_size);
             }
             self.ccb = std::ptr::null_mut();
         }
         if !self.bcb.is_null() {
             unsafe {
-                let _ = shim_munmap(
-                    NonNull::new_unchecked(self.bcb as *mut _),
-                    self.bcb_size,
-                );
+                let _ = shim_munmap(NonNull::new_unchecked(self.bcb as *mut _), self.bcb_size);
             }
             self.bcb = std::ptr::null_mut();
         }
@@ -408,8 +537,7 @@ impl Channel {
 
     pub fn slot_ptr(&self, index: usize) -> *mut MessageSlot {
         unsafe {
-            let slots_start =
-                (self.ccb as *mut u8).add(std::mem::size_of::<ChannelControlBlock>());
+            let slots_start = (self.ccb as *mut u8).add(std::mem::size_of::<ChannelControlBlock>());
             (slots_start as *mut MessageSlot).add(index)
         }
     }
@@ -524,8 +652,7 @@ impl Channel {
             }
 
             let mut new_refs = (r & REF_COUNT_MASK) as i64;
-            let mut new_reliable_refs =
-                ((r >> RELIABLE_REF_COUNT_SHIFT) & REF_COUNT_MASK) as i64;
+            let mut new_reliable_refs = ((r >> RELIABLE_REF_COUNT_SHIFT) & REF_COUNT_MASK) as i64;
 
             if inc < 0 && new_refs == 0 {
                 return true;
@@ -536,8 +663,7 @@ impl Channel {
                 new_reliable_refs += inc as i64;
             }
 
-            let mut retired_refs =
-                ((r >> RETIRED_REFS_SHIFT) & RETIRED_REFS_MASK) as i32;
+            let mut retired_refs = ((r >> RETIRED_REFS_SHIFT) & RETIRED_REFS_MASK) as i32;
             if retire {
                 retired_refs += 1;
             }
@@ -574,13 +700,16 @@ impl Channel {
             return std::ptr::null_mut();
         }
         let buffer = &self.buffers[buf_idx as usize];
+        if buffer.is_split_buffers() {
+            return buffer
+                .split_slot_buffers
+                .get(slot_idx)
+                .copied()
+                .unwrap_or(std::ptr::null_mut());
+        }
         let ps = self.prefix_size as usize;
         let slot_size = aligned64(buffer.slot_size as i64) as usize;
-        unsafe {
-            buffer
-                .buffer
-                .add((ps + slot_size) * slot_idx + ps)
-        }
+        unsafe { buffer.buffer.add((ps + slot_size) * slot_idx + ps) }
     }
 
     pub fn get_prefix(&self, slot_idx: usize) -> *mut MessagePrefix {
@@ -590,6 +719,16 @@ impl Channel {
             return std::ptr::null_mut();
         }
         let buffer = &self.buffers[buf_idx as usize];
+        if buffer.is_split_buffers() {
+            if buffer.split_prefix_buffer.is_null() {
+                return std::ptr::null_mut();
+            }
+            return unsafe {
+                buffer
+                    .split_prefix_buffer
+                    .add(self.prefix_size as usize * slot_idx) as *mut MessagePrefix
+            };
+        }
         let ps = self.prefix_size as usize;
         let slot_size = aligned64(buffer.slot_size as i64) as usize;
         unsafe { buffer.buffer.add((ps + slot_size) * slot_idx) as *mut MessagePrefix }
@@ -643,7 +782,16 @@ impl Channel {
         if buf_idx < 0 {
             return true;
         }
-        (buf_idx as usize) < self.buffers.len()
+        if (buf_idx as usize) >= self.buffers.len() {
+            return false;
+        }
+        let buffer = &self.buffers[buf_idx as usize];
+        if buffer.is_split_buffers() {
+            return slot.id >= 0
+                && (slot.id as usize) < buffer.split_slot_buffers.len()
+                && !buffer.split_slot_buffers[slot.id as usize].is_null();
+        }
+        true
     }
 
     pub fn set_slot_to_biggest_buffer(&mut self, slot_idx: usize) {
@@ -704,11 +852,17 @@ impl Channel {
         let sanitized = resolved_name.replace('/', ".");
         #[cfg(target_os = "linux")]
         {
-            format!("subspace_{}_{}_{}",self.session_id, sanitized, buffer_index)
+            format!(
+                "subspace_{}_{}_{}",
+                self.session_id, sanitized, buffer_index
+            )
         }
         #[cfg(not(target_os = "linux"))]
         {
-            format!("/tmp/subspace_{}_{}_{}", self.session_id, sanitized, buffer_index)
+            format!(
+                "/tmp/subspace_{}_{}_{}",
+                self.session_id, sanitized, buffer_index
+            )
         }
     }
 }
@@ -716,16 +870,12 @@ impl Channel {
 impl Drop for Channel {
     fn drop(&mut self) {
         self.unmap();
-        for buf in &self.buffers {
-            if !buf.buffer.is_null() {
-                unsafe {
-                    let _ = shim_munmap(
-                        NonNull::new_unchecked(buf.buffer as *mut _),
-                        buf.full_size as usize,
-                    );
-                }
-            }
-        }
+    }
+}
+
+impl Drop for BufferSet {
+    fn drop(&mut self) {
+        self.cleanup_mappings();
     }
 }
 
