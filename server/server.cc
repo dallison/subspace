@@ -327,6 +327,20 @@ static absl::Status FindIPAddresses(const std::string &interface,
   return absl::OkStatus();
 }
 
+static absl::StatusOr<toolbelt::SocketAddress>
+BridgeAddressWithPort(const toolbelt::SocketAddress &addr, int port) {
+  switch (addr.Type()) {
+  case toolbelt::SocketAddress::kAddressInet:
+    return toolbelt::SocketAddress(
+        addr.GetInetAddress().IpAddressInNetworkOrder(), port);
+  case toolbelt::SocketAddress::kAddressVirtual:
+    return toolbelt::SocketAddress(addr.GetVirtualAddress().Cid(), port);
+  default:
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "unsupported bridge listener address: %s", addr.ToString()));
+  }
+}
+
 Server::Server(co::CoroutineScheduler &scheduler,
                const std::string &socket_name, const std::string &interface,
                int disc_port, int peer_port, bool local, int notify_fd,
@@ -353,6 +367,24 @@ Server::Server(co::CoroutineScheduler &scheduler,
       wait_for_clients_(wait_for_clients),
       publish_server_channels_(publish_server_channels) {
   CreateShutdownTrigger();
+}
+
+absl::Status Server::SetBridgePortRange(int first_port, int last_port,
+                                        bool fallback_to_ephemeral) {
+  if (first_port == 0 && last_port == 0) {
+    bridge_port_range_ = {};
+    bridge_ports_fallback_to_ephemeral_ = fallback_to_ephemeral;
+    return absl::OkStatus();
+  }
+  if (first_port <= 0 || last_port <= 0 || first_port > 65535 ||
+      last_port > 65535 || first_port > last_port) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "invalid bridge port range %d-%d", first_port, last_port));
+  }
+
+  bridge_port_range_ = {.first_port = first_port, .last_port = last_port};
+  bridge_ports_fallback_to_ephemeral_ = fallback_to_ephemeral;
+  return absl::OkStatus();
 }
 
 Server::~Server() {
@@ -392,6 +424,39 @@ void Server::CreateShutdownTrigger() {
     abort();
   }
   shutdown_trigger_fd_ = std::move(*fd);
+}
+
+absl::Status Server::BindBridgeListener(toolbelt::StreamSocket &listener) {
+  if (!bridge_port_range_.Enabled()) {
+    return listener.Bind(toolbelt::SocketAddress::AnyPort(my_address_), true);
+  }
+
+  absl::Status last_status = absl::UnavailableError("no ports tried");
+  for (int port = bridge_port_range_.first_port;
+       port <= bridge_port_range_.last_port; ++port) {
+    absl::StatusOr<toolbelt::SocketAddress> addr =
+        BridgeAddressWithPort(my_address_, port);
+    if (!addr.ok()) {
+      return addr.status();
+    }
+
+    toolbelt::StreamSocket candidate;
+    absl::Status status = candidate.Bind(*addr, true);
+    if (status.ok()) {
+      listener = std::move(candidate);
+      return absl::OkStatus();
+    }
+    last_status = status;
+  }
+
+  if (bridge_ports_fallback_to_ephemeral_) {
+    return listener.Bind(toolbelt::SocketAddress::AnyPort(my_address_), true);
+  }
+
+  return absl::UnavailableError(absl::StrFormat(
+      "unable to bind bridge listener in configured port range %d-%d: %s",
+      bridge_port_range_.first_port, bridge_port_range_.last_port,
+      last_status.ToString()));
 }
 
 absl::StatusOr<toolbelt::FileDescriptor>
@@ -1429,8 +1494,7 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
     // Allocate a listen socket to wait for an incoming connection from the
     // other server.
 
-    absl::Status s = retirement_listener.Bind(
-        toolbelt::SocketAddress::AnyPort(my_address_), true);
+    absl::Status s = BindBridgeListener(retirement_listener);
     if (!s.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Unable to bind socket for retirement receiver for %s: %s",
@@ -1751,13 +1815,12 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     }
   } bridge_guard{this, channel_name, publisher, sub_reliable};
 
-  // Open a listening TCP socket on a free port.
+  // Open a listening TCP socket for the incoming bridge connection.
   logger_.Log(toolbelt::LogLevel::kDebug, "BridgeReceiverCoroutine running");
   char buffer[kDiscoveryBufferSize];
 
   toolbelt::StreamSocket receiver_listener;
-  auto addr = toolbelt::SocketAddress::AnyPort(my_address_);
-  absl::Status s = receiver_listener.Bind(addr, true);
+  absl::Status s = BindBridgeListener(receiver_listener);
   if (!s.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Unable to bind socket for bridge receiver for %s: %s",
