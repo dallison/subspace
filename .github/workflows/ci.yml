@@ -258,9 +258,9 @@ jobs:
         run: ctest --test-dir build/cmake-${{ matrix.build_type }} --output-on-failure
 
   cmake-android:
-    name: cmake-android (arm64)
+    name: cmake-android (x86_64)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout code
@@ -269,17 +269,33 @@ jobs:
       - name: Set up Android NDK
         run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> $GITHUB_ENV
 
-      - name: Configure CMake for Android
+      - name: Configure CMake for Android x86_64
         run: |
           cmake -S . -B build/android \
             -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
-            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_ABI=x86_64 \
             -DANDROID_PLATFORM=android-28 \
             -DANDROID_STL=c++_shared \
             -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: cmake --build build/android --parallel $(nproc)
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run tests on Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: google_apis
+          arch: x86_64
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          emulator-boot-timeout: 900
+          script: bash .github/scripts/cmake-android-test.sh
 
   android:
     name: android (x86_64)
