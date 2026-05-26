@@ -1,0 +1,41 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+cc_test(
+    name = "server",
+    srcs = ["server.cc"],
+    copts = ["-std=c++20"],
+    data = [
+        "//server:subspace_server",
+    ],
+    tags = ["manual"],
+    deps = [
+        "//rpc/proto:rpc_test_cc_proto",
+        "//co20_rpc/proto:rpc_test_co20_rpc_server",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/flags:parse",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@coroutines//:co",
+    ],
+)
+
+cc_test(
+    name = "client",
+    srcs = ["client.cc"],
+    copts = ["-std=c++20"],
+    data = [
+        "//server:subspace_server",
+    ],
+    tags = ["manual"],
+    deps = [
+        "//rpc/proto:rpc_test_cc_proto",
+        "//co20_rpc/proto:rpc_test_co20_rpc_client",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/flags:parse",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@coroutines//:co",
+    ],
+)

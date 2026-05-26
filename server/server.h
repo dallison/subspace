@@ -107,6 +107,8 @@ public:
   void CleanupAfterSession();
 
   absl::Status LoadPlugin(const std::string &name, const std::string &path);
+  absl::Status LoadBuiltinPlugin(const std::string &name,
+                                 std::unique_ptr<PluginInterface> interface);
   absl::Status UnloadPlugin(const std::string &name);
 
   virtual co::CoroutineScheduler &GetScheduler() { return scheduler_; }
@@ -183,6 +185,7 @@ private:
                                   toolbelt::SocketAddress subscriber,
                                   bool notify_retirement);
   void BridgeReceiverCoroutine(std::string channel_name, bool sub_reliable,
+                               bool split_buffers_over_bridge,
                                toolbelt::InetAddress publisher);
   void RetirementCoroutine(
       const std::string &channel_name, toolbelt::FileDescriptor &&retirement_fd,
@@ -193,6 +196,7 @@ private:
       std::shared_ptr<std::vector<std::shared_ptr<ActiveMessage>>> active_retirement_msgs);
 
   void SubscribeOverBridge(ServerChannel *channel, bool reliable,
+                           bool split_buffers_over_bridge,
                            toolbelt::InetAddress publisher);
   void IncomingQuery(const Discovery::Query &query,
                      const toolbelt::InetAddress &sender);
@@ -203,6 +207,8 @@ private:
                          const toolbelt::InetAddress &sender,
                          const std::string &server_id);
   void GratuitousAdvertiseCoroutine();
+  absl::Status RegisterPlugin(const std::string &name, void *handle,
+                              std::unique_ptr<PluginInterface> interface);
   absl::Status SendSubscribeMessage(const std::string &channel_name,
                                     bool reliable,
                                     toolbelt::InetAddress publisher,
@@ -219,11 +225,12 @@ private:
   void OnRemovePublisher(const std::string &channel_name, int publisher_id);
   void OnNewSubscriber(const std::string &channel_name, int subscriber_id);
   void OnRemoveSubscriber(const std::string &channel_name, int subscriber_id);
+  absl::StatusOr<bool> FreeClientBufferWithPlugins(
+      const ClientBufferHandleMetadata &metadata);
 
   std::string socket_name_;
   uint64_t session_id_;
   std::vector<std::unique_ptr<ClientHandler>> client_handlers_;
-  bool running_ = false;
   std::string server_id_;
   std::string hostname_;
   std::string interface_;

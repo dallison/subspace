@@ -63,6 +63,10 @@ private:
   void HandleGetChannelStats(const subspace::GetChannelStatsRequest &req,
                              subspace::GetChannelStatsResponse *response,
                              std::vector<toolbelt::FileDescriptor> &fds);
+  absl::Status
+  HandleRegisterClientBuffer(const subspace::RegisterClientBufferRequest &req);
+  absl::Status HandleUnregisterClientBuffer(
+      const subspace::UnregisterClientBufferRequest &req);
   Server *server_;
   toolbelt::UnixSocket socket_;
   std::string client_name_;

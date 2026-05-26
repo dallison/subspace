@@ -110,9 +110,15 @@ void Channel::Unmap() {
     // Not yet mapped.
     return;
   }
-  UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
-  UnmapMemory(ccb_, CcbSize(num_slots_), "CCB");
-  UnmapMemory(bcb_, sizeof(BufferControlBlock), "BCB");
+  auto *scb = scb_;
+  auto *ccb = ccb_;
+  auto *bcb = bcb_;
+  scb_ = nullptr;
+  ccb_ = nullptr;
+  bcb_ = nullptr;
+  UnmapMemory(scb, sizeof(SystemControlBlock), "SCB");
+  UnmapMemory(ccb, CcbSize(num_slots_), "CCB");
+  UnmapMemory(bcb, sizeof(BufferControlBlock), "BCB");
 }
 
 std::string Channel::BufferSharedMemoryName(uint64_t session_id,
@@ -348,7 +354,10 @@ Channel::PosixSharedMemoryName(const std::string &shadow_file) {
                         shadow_file, strerror(errno)));
   }
   // Use the inode number (unique per file) to make the shm file name.
-  return absl::StrFormat("subspace_%d", st.st_ino);
+  // st_ino is unsigned and can be 64-bit on some systems (e.g. QNX), so
+  // promote to uint64_t before formatting.
+  return absl::StrFormat("subspace_%llu",
+                         static_cast<unsigned long long>(st.st_ino));
 }
 #endif
 

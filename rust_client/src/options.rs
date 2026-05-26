@@ -20,6 +20,7 @@ pub struct PublisherOptions {
     pub checksum: bool,
     pub checksum_size: i32,
     pub metadata_size: i32,
+    pub split_buffers_over_bridge: bool,
 }
 
 impl Default for PublisherOptions {
@@ -40,6 +41,7 @@ impl Default for PublisherOptions {
             checksum: false,
             checksum_size: 4,
             metadata_size: 0,
+            split_buffers_over_bridge: false,
         }
     }
 }
@@ -121,6 +123,11 @@ impl PublisherOptions {
 
     pub fn set_metadata_size(mut self, size: i32) -> Self {
         self.metadata_size = size;
+        self
+    }
+
+    pub fn set_split_buffers_over_bridge(mut self, v: bool) -> Self {
+        self.split_buffers_over_bridge = v;
         self
     }
 }

@@ -4,17 +4,54 @@
 
 #include "client/client_channel.h"
 #include "common/syscall_shim.h"
+#include "common/system_info.h"
 #include <sys/mman.h>
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX && defined(__APPLE__)
 #include <sys/posix_shm.h>
 #endif
 #include <chrono>
+#include <optional>
 #include <sys/stat.h>
 #include <thread>
+#include <utility>
+#include <unistd.h>
 
 namespace subspace {
 
 namespace details {
+
+namespace {
+
+absl::StatusOr<SplitBufferMetadata>
+ReadSplitBufferMetadataFileWithRetry(const std::string &shadow_file) {
+  absl::Status status;
+  for (int attempt = 0; attempt < 100; attempt++) {
+    auto metadata = ReadSplitBufferMetadataFile(shadow_file);
+    if (metadata.ok()) {
+      return metadata;
+    }
+    status = metadata.status();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return status;
+}
+
+ClientBufferHandleMetadata ClientBufferFromSplitMetadata(
+    const SplitBufferMetadata &metadata, std::string allocator) {
+  return {.channel_name = metadata.channel_name,
+          .session_id = metadata.session_id,
+          .buffer_index = metadata.buffer_index,
+          .slot_id = metadata.slot_id,
+          .is_prefix = metadata.is_prefix,
+          .full_size = metadata.full_size,
+          .allocation_size = metadata.allocation_size,
+          .handle = metadata.handle,
+          .shadow_file = metadata.shadow_file,
+          .object_name = metadata.object_name,
+          .allocator = std::move(allocator)};
+}
+
+} // namespace
 
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
 
@@ -76,29 +113,100 @@ absl::Status ClientChannel::Map(SharedMemoryFds fds,
 
 absl::Status ClientChannel::UnmapUnusedBuffers() {
   for (size_t i = 0; i + 1 < buffers_.size(); i++) {
-
-    if (buffers_[i]->buffer == nullptr) {
-      continue;
-    }
     if (bcb_->refs[i] == 0) {
-      if (buffers_[i]->full_size > 0) {
-        if (debug_) {
-          fprintf(stderr, "%p: Unmapping unused buffers at index %zd\n", this,
-                  i);
-        }
-        UnmapMemory(buffers_[i]->buffer, buffers_[i]->full_size, "buffers");
-        buffers_[i]->buffer = nullptr;
-        buffers_[i]->full_size = 0;
-        buffers_[i]->slot_size = 0;
-      }
+      UnmapBufferSet(i, *buffers_[i], /*destroy_owned_buffers=*/false);
     }
   }
   return absl::OkStatus();
 }
 
+void ClientChannel::UnmapShmBufferSet(BufferSet &buffer) {
+  if (buffer.full_size == 0 || buffer.buffer == nullptr) {
+    return;
+  }
+  UnmapMemory(buffer.buffer, buffer.full_size, "buffers");
+  buffer.buffer = nullptr;
+  buffer.full_size = 0;
+  buffer.slot_size = 0;
+}
+
+void ClientChannel::UnmapBufferSet(size_t buffer_index, BufferSet &buffer,
+                                   bool destroy_owned_buffers) {
+  if (buffer.IsSplitBuffers()) {
+    UnmapSplitBufferSet(buffer_index, buffer, destroy_owned_buffers);
+    return;
+  }
+  (void)buffer_index;
+  (void)destroy_owned_buffers;
+  if (debug_ && buffer.full_size > 0 && buffer.buffer != nullptr) {
+    fprintf(stderr, "%p: Unmapping buffer at index %zd\n", this, buffer_index);
+  }
+  UnmapShmBufferSet(buffer);
+}
+
+void ClientChannel::UnmapSplitBufferSet(size_t buffer_index,
+                                        BufferSet &buffer,
+                                        bool destroy_owned_buffers) {
+  (void)buffer_index;
+  for (size_t slot = 0; slot < buffer.split_slot_buffers.size(); slot++) {
+    if (buffer.split_slot_buffers[slot] != nullptr) {
+      SplitBufferMetadata metadata;
+      if (slot < buffer.split_metadata.size()) {
+        metadata = buffer.split_metadata[slot];
+      }
+      SplitBufferMapping mapping = {
+          .handle = slot < buffer.split_handles.size() ? buffer.split_handles[slot]
+                                                       : metadata.handle,
+          .address = buffer.split_slot_buffers[slot],
+          .size = slot < buffer.split_slot_sizes.size()
+                      ? buffer.split_slot_sizes[slot]
+                      : metadata.allocation_size,
+          .private_data = slot < buffer.split_private_data.size()
+                              ? buffer.split_private_data[slot]
+                              : nullptr,
+      };
+      if (destroy_owned_buffers && buffer.uses_split_callbacks &&
+          buffer.owns_split_buffers &&
+          SplitBuffersCallbacks().free) {
+        (void)SplitBuffersCallbacks().free(metadata, mapping);
+      } else if (buffer.uses_split_callbacks && SplitBuffersCallbacks().unmap) {
+        (void)SplitBuffersCallbacks().unmap(metadata, mapping);
+      } else {
+        UnmapMemory(buffer.split_slot_buffers[slot],
+                    buffer.split_slot_sizes[slot], "split slot");
+      }
+      buffer.split_slot_buffers[slot] = nullptr;
+    }
+  }
+
+  if (buffer.split_prefix_buffer != nullptr) {
+    UnmapMemory(buffer.split_prefix_buffer, buffer.split_prefix_buffer_size,
+                "split prefixes");
+    buffer.split_prefix_buffer = nullptr;
+  }
+  if (destroy_owned_buffers && buffer.uses_split_callbacks &&
+      buffer.owns_split_buffers &&
+      client_buffer_unregistration_callback_) {
+    (void)client_buffer_unregistration_callback_(
+        ResolvedName(), session_id_, static_cast<uint32_t>(buffer_index));
+  }
+
+  buffer.full_size = 0;
+  buffer.slot_size = 0;
+}
+
 bool ClientChannel::ValidateSlotBuffer(MessageSlot *slot) {
   if (slot->buffer_index < 0) {
     return true;
+  }
+
+  if (static_cast<size_t>(slot->buffer_index) < buffers_.size() &&
+      buffers_[slot->buffer_index]->IsSplitBuffers()) {
+    return slot->id >= 0 &&
+           static_cast<size_t>(slot->id) <
+               buffers_[slot->buffer_index]->split_slot_buffers.size() &&
+           buffers_[slot->buffer_index]->split_slot_buffers[slot->id] !=
+               nullptr;
   }
 
   char *buf = Buffer(slot->id, false);
@@ -116,8 +224,15 @@ bool ClientChannel::ValidateSlotBuffer(MessageSlot *slot) {
 absl::Status ClientChannel::AttachBuffers() {
   // NOTE: the num_buffers variable in the CCB is atomic and could change while
   // we are in or after we are done with this loop.
-  BufferMapMode mode = MapMode();
   int num_buffers = ccb_->num_buffers;
+  if (UseSplitBuffers()) {
+    return AttachSplitBuffers(num_buffers);
+  }
+  return AttachShmBuffers(num_buffers);
+}
+
+absl::Status ClientChannel::AttachShmBuffers(int num_buffers) {
+  BufferMapMode mode = MapMode();
   while (buffers_.size() < size_t(num_buffers)) {
     // We need to open the next buffer in the list.  The buffer index is
     size_t buffer_index = buffers_.size();
@@ -166,6 +281,20 @@ absl::Status ClientChannel::AttachBuffers() {
   return absl::OkStatus();
 }
 
+absl::Status ClientChannel::AttachSplitBuffers(int num_buffers) {
+  while (buffers_.size() < size_t(num_buffers)) {
+    size_t buffer_index = buffers_.size();
+    uint64_t full_size = bcb_->sizes[buffer_index];
+    uint64_t slot_size = BufferSizeToSlotSize(full_size);
+    auto split_buffer = OpenSplitBufferSet(buffer_index, full_size, slot_size);
+    if (!split_buffer.ok()) {
+      return split_buffer.status();
+    }
+    buffers_.push_back(std::move(*split_buffer));
+  }
+  return absl::OkStatus();
+}
+
 void ClientChannel::Unmap() {
   if (scb_ == nullptr) {
     // Not yet mapped.
@@ -173,10 +302,8 @@ void ClientChannel::Unmap() {
   }
   Channel::Unmap();
 
-  for (auto &buffer : buffers_) {
-    if (buffer->full_size > 0 && buffer->buffer != nullptr) {
-      UnmapMemory(buffer->buffer, buffer->full_size, "buffers");
-    }
+  for (size_t i = 0; i < buffers_.size(); i++) {
+    UnmapBufferSet(i, *buffers_[i], /*destroy_owned_buffers=*/true);
   }
   buffers_.clear();
 }
@@ -191,6 +318,31 @@ void ClientChannel::Dump(std::ostream &os) const {
        << buffer->slot_size << " " << reinterpret_cast<void *>(buffer->buffer)
        << std::endl;
   }
+}
+
+uint64_t ClientChannel::GetVirtualMemoryUsage() const {
+  if (!UseSplitBuffers() || ccb_ == nullptr || bcb_ == nullptr) {
+    return Channel::GetVirtualMemoryUsage();
+  }
+
+  uint64_t size = sizeof(SystemControlBlock) + CcbSize(num_slots_) +
+                  sizeof(BufferControlBlock);
+  for (int i = 0; i < ccb_->num_buffers; i++) {
+    if (bcb_->refs[i].load(std::memory_order_relaxed) <= 0) {
+      continue;
+    }
+    if (static_cast<size_t>(i) >= buffers_.size() ||
+        !buffers_[i]->IsSplitBuffers()) {
+      size += bcb_->sizes[i].load(std::memory_order_relaxed);
+      continue;
+    }
+    const BufferSet &buffer = *buffers_[i];
+    size += buffer.split_prefix_buffer_size;
+    for (uint64_t slot_size : buffer.split_slot_sizes) {
+      size += slot_size;
+    }
+  }
+  return size;
 }
 
 // Return a valid file descriptor if the shared memory file can be opened with
@@ -224,8 +376,19 @@ absl::StatusOr<toolbelt::FileDescriptor>
 ClientChannel::CreateBuffer(int buffer_index, size_t size) {
   std::string filename = BufferSharedMemoryName(buffer_index);
 
-  auto &shim = GetSyscallShim();
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+  return CreateAndroidBuffer(filename, size);
+#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
+  return CreateLinuxBuffer(filename, size);
+#else
+  return CreatePosixBuffer(filename, size);
+#endif
+}
+
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+absl::StatusOr<toolbelt::FileDescriptor>
+ClientChannel::CreateAndroidBuffer(const std::string &filename, size_t size) {
+  auto &shim = GetSyscallShim();
   // On Android, use regular files in the SHM directory.  The file persists so
   // that subscribers in other processes can open it by path.
   auto shm_fd = OpenSharedMemoryFile(filename, O_RDWR | O_CREAT | O_EXCL);
@@ -250,7 +413,14 @@ ClientChannel::CreateBuffer(int buffer_index, size_t size) {
                         filename, strerror(errno)));
   }
 
-#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
+  return *shm_fd;
+}
+#endif
+
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
+absl::StatusOr<toolbelt::FileDescriptor>
+ClientChannel::CreateLinuxBuffer(const std::string &filename, size_t size) {
+  auto &shim = GetSyscallShim();
   // Open the shared memory file.
   auto shm_fd = OpenSharedMemoryFile(filename, O_RDWR | O_CREAT | O_EXCL);
   if (!shm_fd.ok()) {
@@ -285,7 +455,14 @@ ClientChannel::CreateBuffer(int buffer_index, size_t size) {
     }
   }
 
-#else
+  return *shm_fd;
+}
+#endif
+
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
+absl::StatusOr<toolbelt::FileDescriptor>
+ClientChannel::CreatePosixBuffer(const std::string &filename, size_t size) {
+  auto &shim = GetSyscallShim();
   // On Posix we need to create a shadow file that has the same size as the
   // shared memory file.  This is because the fstat of the shm "file" returns a
   // page aligned size, which is not what we want.  The shadow file is used
@@ -329,8 +506,230 @@ ClientChannel::CreateBuffer(int buffer_index, size_t size) {
         absl::StrFormat("Failed to change owner of shared memory %s: %s", filename, strerror(errno)));
     }
   }
-#endif
   return *shm_fd;
+}
+#endif
+
+absl::StatusOr<std::unique_ptr<BufferSet>>
+ClientChannel::CreateSplitBufferSet(size_t buffer_index, size_t full_size,
+                                    uint64_t slot_size) {
+  auto buffer = std::make_unique<BufferSet>(full_size, slot_size, nullptr);
+  buffer->owns_split_buffers = true;
+  uint64_t payload_size = PageAlignedSize(slot_size);
+
+  std::string base = BufferSharedMemoryName(buffer_index);
+  std::string metadata_base = base.empty() || base[0] == '/' ? base
+                                                            : "/tmp/" + base;
+  std::string prefix_name = metadata_base + "_prefix";
+  SplitBufferMetadata prefix_metadata = {
+      .channel_name = ResolvedName(),
+      .session_id = session_id_,
+      .buffer_index = static_cast<uint32_t>(buffer_index),
+      .slot_id = 0,
+      .is_prefix = true,
+      .full_size =
+          PageAlignedSize(static_cast<uint64_t>(PrefixSize()) * NumSlots()),
+      .allocation_size =
+          PageAlignedSize(static_cast<uint64_t>(PrefixSize()) * NumSlots()),
+      .shadow_file = prefix_name,
+      .object_name = SplitBufferObjectName(prefix_name),
+  };
+  auto prefix_fd = CreateSplitSharedMemoryBuffer(prefix_metadata);
+  if (!prefix_fd.ok()) {
+    return prefix_fd.status();
+  }
+  if (!prefix_fd->Valid()) {
+    return OpenSplitBufferSet(buffer_index, full_size, slot_size);
+  }
+  auto prefix_addr =
+      MapBuffer(*prefix_fd, prefix_metadata.allocation_size,
+                BufferMapMode::kReadWrite);
+  if (!prefix_addr.ok()) {
+    return prefix_addr.status();
+  }
+  prefix_metadata.handle = static_cast<uintptr_t>(prefix_fd->Fd());
+  if (absl::Status status = WriteSplitBufferMetadataFile(prefix_metadata);
+      !status.ok()) {
+    return status;
+  }
+  if (client_buffer_registration_callback_) {
+    if (absl::Status status = client_buffer_registration_callback_(
+            ClientBufferFromSplitMetadata(prefix_metadata, "split_shm"));
+        !status.ok()) {
+      (void)DestroySplitSharedMemoryBuffer(prefix_metadata);
+      return status;
+    }
+  }
+  buffer->split_prefix_fd = std::move(*prefix_fd);
+  buffer->split_prefix_buffer = *prefix_addr;
+  buffer->split_prefix_buffer_size = prefix_metadata.allocation_size;
+  buffer->split_prefix_metadata = std::move(prefix_metadata);
+
+  buffer->split_slot_buffers.resize(NumSlots(), nullptr);
+  buffer->split_slot_sizes.resize(NumSlots(), payload_size);
+  buffer->split_handles.resize(NumSlots(), 0);
+  buffer->split_private_data.resize(NumSlots(), nullptr);
+  buffer->split_metadata.reserve(NumSlots());
+  buffer->split_fds.reserve(NumSlots());
+  buffer->uses_split_callbacks =
+      static_cast<bool>(SplitBuffersCallbacks().allocate);
+  for (int slot = 0; slot < NumSlots(); slot++) {
+    SplitBufferMetadata metadata;
+    metadata.channel_name = ResolvedName();
+    metadata.session_id = session_id_;
+    metadata.buffer_index = static_cast<uint32_t>(buffer_index);
+    metadata.slot_id = static_cast<uint32_t>(slot);
+    metadata.is_prefix = false;
+    metadata.full_size = payload_size;
+    metadata.allocation_size = payload_size;
+    metadata.shadow_file = absl::StrFormat("%s_slot_%d", metadata_base, slot);
+    metadata.object_name = SplitBufferObjectName(metadata.shadow_file);
+
+    char *slot_addr = nullptr;
+    uintptr_t slot_handle = 0;
+    uint64_t slot_mapped_size = payload_size;
+    void *slot_private_data = nullptr;
+    std::optional<toolbelt::FileDescriptor> slot_fd;
+    if (SplitBuffersCallbacks().allocate) {
+      auto mapping = SplitBuffersCallbacks().allocate(metadata);
+      if (!mapping.ok()) {
+        return mapping.status();
+      }
+      if (mapping->address == nullptr) {
+        return absl::InternalError(
+            "Split buffer allocation callback returned an empty mapping");
+      }
+      slot_addr = static_cast<char *>(mapping->address);
+      slot_handle = mapping->handle;
+      slot_mapped_size = mapping->size == 0
+                             ? payload_size
+                             : static_cast<uint64_t>(mapping->size);
+      slot_private_data = mapping->private_data;
+      metadata.handle = slot_handle;
+      metadata.allocation_size = slot_mapped_size;
+    } else {
+      auto created_fd = CreateSplitSharedMemoryBuffer(metadata);
+      if (!created_fd.ok()) {
+        return created_fd.status();
+      }
+      if (!created_fd->Valid()) {
+        return absl::InternalError(absl::StrFormat(
+            "Split buffer slot already exists for channel %s slot %d",
+            ResolvedName(), slot));
+      }
+      auto addr = MapBuffer(*created_fd, payload_size, MapMode());
+      if (!addr.ok()) {
+        return addr.status();
+      }
+      slot_addr = *addr;
+      slot_handle = static_cast<uintptr_t>(created_fd->Fd());
+      slot_fd.emplace(std::move(*created_fd));
+      metadata.handle = slot_handle;
+    }
+    if (absl::Status status = WriteSplitBufferMetadataFile(metadata);
+        !status.ok()) {
+      return status;
+    }
+    if (client_buffer_registration_callback_) {
+      if (absl::Status status = client_buffer_registration_callback_(
+              ClientBufferFromSplitMetadata(
+                  metadata, buffer->uses_split_callbacks ? "split_callback"
+                                                         : "split_shm"));
+          !status.ok()) {
+        return status;
+      }
+    }
+    buffer->split_handles[slot] = slot_handle;
+    buffer->split_slot_buffers[slot] = slot_addr;
+    buffer->split_slot_sizes[slot] = slot_mapped_size;
+    buffer->split_private_data[slot] = slot_private_data;
+    if (slot_fd.has_value()) {
+      buffer->split_fds.push_back(std::move(*slot_fd));
+    }
+    buffer->split_metadata.push_back(std::move(metadata));
+  }
+  return buffer;
+}
+
+absl::StatusOr<std::unique_ptr<BufferSet>>
+ClientChannel::OpenSplitBufferSet(size_t buffer_index, size_t full_size,
+                                  uint64_t slot_size) {
+  auto buffer = std::make_unique<BufferSet>(full_size, slot_size, nullptr);
+  uint64_t payload_size = PageAlignedSize(slot_size);
+  std::string base = BufferSharedMemoryName(buffer_index);
+  std::string metadata_base = base.empty() || base[0] == '/' ? base
+                                                            : "/tmp/" + base;
+  std::string prefix_name = metadata_base + "_prefix";
+  auto prefix_metadata = ReadSplitBufferMetadataFileWithRetry(prefix_name);
+  if (!prefix_metadata.ok()) {
+    return prefix_metadata.status();
+  }
+  auto prefix_fd = OpenSplitSharedMemoryBuffer(*prefix_metadata, O_RDWR);
+  if (!prefix_fd.ok()) {
+    return prefix_fd.status();
+  }
+  auto prefix_addr =
+      MapBuffer(*prefix_fd, prefix_metadata->allocation_size,
+                BufferMapMode::kReadWrite);
+  if (!prefix_addr.ok()) {
+    return prefix_addr.status();
+  }
+  buffer->split_prefix_fd = std::move(*prefix_fd);
+  buffer->split_prefix_buffer = *prefix_addr;
+  buffer->split_prefix_buffer_size = prefix_metadata->allocation_size;
+  buffer->split_prefix_metadata = std::move(*prefix_metadata);
+  buffer->split_slot_buffers.resize(NumSlots(), nullptr);
+  buffer->split_slot_sizes.resize(NumSlots(), payload_size);
+  buffer->split_handles.resize(NumSlots(), 0);
+  buffer->split_private_data.resize(NumSlots(), nullptr);
+  buffer->split_metadata.reserve(NumSlots());
+  buffer->split_fds.reserve(NumSlots());
+  buffer->uses_split_callbacks = static_cast<bool>(SplitBuffersCallbacks().map);
+  for (int slot = 0; slot < NumSlots(); slot++) {
+    std::string shadow_file = absl::StrFormat("%s_slot_%d", metadata_base, slot);
+    auto metadata = ReadSplitBufferMetadataFileWithRetry(shadow_file);
+    if (!metadata.ok()) {
+      return metadata.status();
+    }
+    char *slot_addr = nullptr;
+    uintptr_t slot_handle = metadata->handle;
+    uint64_t slot_mapped_size = payload_size;
+    void *slot_private_data = nullptr;
+    if (SplitBuffersCallbacks().map) {
+      auto mapping = SplitBuffersCallbacks().map(*metadata);
+      if (!mapping.ok()) {
+        return mapping.status();
+      }
+      if (mapping->address == nullptr) {
+        return absl::InternalError(
+            "Split buffer map callback returned an empty mapping");
+      }
+      slot_addr = static_cast<char *>(mapping->address);
+      slot_handle = mapping->handle == 0 ? metadata->handle : mapping->handle;
+      slot_mapped_size = mapping->size == 0
+                             ? payload_size
+                             : static_cast<uint64_t>(mapping->size);
+      slot_private_data = mapping->private_data;
+    } else {
+      auto slot_fd = OpenSplitSharedMemoryBuffer(*metadata, O_RDWR);
+      if (!slot_fd.ok()) {
+        return slot_fd.status();
+      }
+      auto addr = MapBuffer(*slot_fd, payload_size, MapMode());
+      if (!addr.ok()) {
+        return addr.status();
+      }
+      slot_addr = *addr;
+      slot_handle = static_cast<uintptr_t>(slot_fd->Fd());
+      buffer->split_fds.push_back(std::move(*slot_fd));
+    }
+    buffer->split_handles[slot] = slot_handle;
+    buffer->split_slot_buffers[slot] = slot_addr;
+    buffer->split_slot_sizes[slot] = slot_mapped_size;
+    buffer->split_private_data[slot] = slot_private_data;
+    buffer->split_metadata.push_back(std::move(*metadata));
+  }
+  return buffer;
 }
 
 absl::StatusOr<toolbelt::FileDescriptor>
@@ -367,7 +766,7 @@ ClientChannel::GetBufferSize(toolbelt::FileDescriptor &shm_fd,
   return sb.st_size;
 #else
   // On Linux and Android, fstat on the fd gives the correct size.
-  [[maybe_unused]] std::string filename = BufferSharedMemoryName(buffer_index);
+  (void)buffer_index;
   struct stat sb;
   if (shim.fstat_fn(shm_fd.Fd(), &sb) == -1) {
     return absl::InternalError(
@@ -383,7 +782,16 @@ ClientChannel::MapBuffer(toolbelt::FileDescriptor &shm_fd, size_t size,
                          BufferMapMode mode) {
   int prot =
       mode == BufferMapMode::kReadOnly ? PROT_READ : (PROT_READ | PROT_WRITE);
-  void *p = MapMemory(shm_fd.Fd(), size, prot, "buffers");
+  void *p = MAP_FAILED;
+  for (int attempt = 0; attempt < 100; attempt++) {
+    p = MapMemory(shm_fd.Fd(), size, prot, "buffers");
+    if (p != MAP_FAILED || errno != EINVAL) {
+      break;
+    }
+    // A concurrent creator can win shm_open(O_CREAT | O_EXCL) but not have
+    // completed ftruncate yet.  macOS reports mmap on that fd as EINVAL.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
   if (p == MAP_FAILED) {
     return absl::InternalError(
         absl::StrFormat("Failed to map shared memory from fd %d: %s",

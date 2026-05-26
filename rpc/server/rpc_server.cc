@@ -326,7 +326,7 @@ RpcServer::PublishRpcServerResponse(const subspace::RpcServerResponse &response,
 absl::Status RpcServer::HandleOpen(uint64_t client_id,
                                    const subspace::RpcOpenRequest &request,
                                    subspace::RpcOpenResponse *response,
-                                   co::Coroutine *c) {
+                                   co::Coroutine * /*c*/) {
   logger_.Log(toolbelt::LogLevel::kDebug,
               "Handling Open request from client %" PRId64 ", %s", client_id,
               request.DebugString().c_str());
@@ -366,8 +366,8 @@ absl::Status RpcServer::HandleOpen(uint64_t client_id,
 
 absl::Status RpcServer::HandleClose(uint64_t client_id,
                                     const subspace::RpcCloseRequest &request,
-                                    subspace::RpcCloseResponse *response,
-                                    co::Coroutine *c) {
+                                    subspace::RpcCloseResponse * /*response*/,
+                                    co::Coroutine * /*c*/) {
   logger_.Log(toolbelt::LogLevel::kDebug,
               "Handling Close request from client %" PRId64 ", %s", client_id,
               request.DebugString().c_str());

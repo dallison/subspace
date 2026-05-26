@@ -32,14 +32,12 @@ ABSL_FLAG(bool, local, false, "Use local computer only");
 ABSL_FLAG(int, notify_fd, -1, "File descriptor to notify of startup");
 ABSL_FLAG(std::string, machine, "", "Machine name");
 
-#if defined(__APPLE__)
-// Default true on Mac since it uses /tmp.
-ABSL_FLAG(bool, cleanup_filesystem, true, "Cleanup the filesystem on server startup");
-#elif defined(__ANDROID__)
-// Default true on Android to clean up the SHM directory on startup.
+// macOS, Android, and QNX all benefit from cleaning up the filesystem on
+// startup.  On Linux the server uses /dev/shm directly and tests routinely
+// run multiple instances, so we keep it off by default.
+#if defined(__APPLE__) || defined(__ANDROID__) || defined(__QNX__) || defined(__QNXNTO__)
 ABSL_FLAG(bool, cleanup_filesystem, true, "Cleanup the filesystem on server startup");
 #else
-// Default false on other OSes as it interferes with tests that run multiple servers.
 ABSL_FLAG(bool, cleanup_filesystem, false, "Cleanup the filesystem on server startup");
 #endif
 ABSL_FLAG(std::vector<std::string>, plugins, {},

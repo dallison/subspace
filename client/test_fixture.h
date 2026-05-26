@@ -48,9 +48,10 @@ public:
 
     (void)pipe(server_pipe_);
 
-    server_ = std::make_unique<subspace::Server>(scheduler_, socket_, "", 0, 0,
-                                                 /*local=*/true,
-                                                 server_pipe_[1]);
+    server_ = std::make_unique<subspace::Server>(
+        scheduler_, socket_, "", 0, 0,
+        /*local=*/true, server_pipe_[1], /*initial_ordinal=*/1,
+        /*wait_for_clients=*/true);
 
     server_thread_ = std::thread([]() {
       absl::Status s = server_->Run();

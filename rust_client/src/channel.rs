@@ -632,6 +632,11 @@ impl Channel {
         (buffer_size - prefix_total) / ns
     }
 
+    pub fn buffers_changed(&self) -> bool {
+        let shared_count = self.ccb().num_buffers.load(Ordering::Acquire) as usize;
+        shared_count != self.buffers.len()
+    }
+
     pub fn validate_slot_buffer(&self, slot_idx: usize) -> bool {
         let slot = self.slot_ref(slot_idx);
         let buf_idx = slot.buffer_index;

@@ -13,16 +13,23 @@
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
 #include "toolbelt/pipe.h"
+#include <array>
+#include <chrono>
 #include <gtest/gtest.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <memory>
 #include <signal.h>
+#include <sys/file.h>
 #include <sys/resource.h>
 #include <thread>
+#include <unistd.h>
 
 ABSL_FLAG(bool, start_server, true, "Start the subspace servers");
 ABSL_FLAG(std::string, server, "", "Path to server executable");
 ABSL_FLAG(std::string, log_level, "debug", "Log level");
+ABSL_FLAG(bool, use_split_buffers, false,
+          "Run publishers with split-buffer payload storage");
 
 void SignalHandler(int sig) { printf("Signal %d", sig); }
 
@@ -53,7 +60,20 @@ public:
     if (!absl::GetFlag(FLAGS_start_server)) {
       return;
     }
-    constexpr int kDiscPorts[2] = {6522, 6523};
+    int lock_fd = ::open("/tmp/subspace_bridge_test_port.lock",
+                         O_CREAT | O_RDWR, 0666);
+    ASSERT_NE(-1, lock_fd);
+    ASSERT_EQ(0, ::flock(lock_fd, LOCK_EX));
+
+    std::array<int, 2> disc_ports;
+    std::array<toolbelt::UDPSocket, 2> reserved_ports;
+    {
+      for (int i = 0; i < 2; i++) {
+        ASSERT_OK(reserved_ports[i].Bind(
+            toolbelt::InetAddress::AnyAddress(/*port=*/0)));
+        disc_ports[i] = reserved_ports[i].BoundAddress().Port();
+      }
+    }
     for (int i = 0; i < 2; i++) {
       printf("Starting Subspace server %d\n", i);
       char socket_name_template[] = "/tmp/subspaceXXXXXX"; // NOLINT
@@ -64,9 +84,10 @@ public:
       // has started and stopped.  This end of the pipe is blocking.
       (void)pipe(server_pipe_[i]);
 
-      int peer_port = kDiscPorts[(i + 1) % 2];
+      int peer_port = disc_ports[(i + 1) % 2];
+      reserved_ports[i].Close();
       server_[i] = std::make_unique<subspace::Server>(
-          scheduler_[i], socket_[i], "", kDiscPorts[i % 2], peer_port,
+          scheduler_[i], socket_[i], "", disc_ports[i], peer_port,
           /*local=*/false, server_pipe_[i][1]);
 
       server_[i]->SetLogLevel(absl::GetFlag(FLAGS_log_level));
@@ -89,6 +110,8 @@ public:
       char buf[8];
       (void)::read(server_pipe_[i][0], buf, 8);
     }
+    ASSERT_EQ(0, ::flock(lock_fd, LOCK_UN));
+    ::close(lock_fd);
   }
 
   static void TearDownTestSuite() {
@@ -172,6 +195,23 @@ void WaitForSubscribedMessage(toolbelt::FileDescriptor &bridge_pipe,
             << subscribed.channel_name() << std::endl;
 }
 
+absl::StatusOr<Message> ReadMessageEventually(Subscriber &sub) {
+  for (int i = 0; i < 100; i++) {
+    absl::StatusOr<Message> msg = sub.ReadMessage();
+    if (!msg.ok()) {
+      return msg.status();
+    }
+    if (msg->length != 0) {
+      return msg;
+    }
+    absl::Status status = sub.Wait(std::chrono::milliseconds(100));
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  return absl::DeadlineExceededError("Timed out waiting for bridge message");
+}
+
 TEST_F(BridgeTest, Basic) {
   subspace::Client client1;
   InitClient(client1, 0);
@@ -202,7 +242,7 @@ TEST_F(BridgeTest, Basic) {
   WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_channel");
 
   // Receive the message on the subscriber.
-  absl::StatusOr<Message> msg = sub->ReadMessage();
+  absl::StatusOr<Message> msg = ReadMessageEventually(*sub);
   ASSERT_OK(msg);
   ASSERT_EQ(6, msg->length);
   ASSERT_EQ(256, sub->SlotSize());
@@ -242,12 +282,12 @@ TEST_F(BridgeTest, TwoSubs) {
   WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_channel");
 
   // Receive the message on the subscriber.
-  absl::StatusOr<Message> msg = sub1->ReadMessage();
+  absl::StatusOr<Message> msg = ReadMessageEventually(*sub1);
   ASSERT_OK(msg);
   ASSERT_EQ(6, msg->length);
   ASSERT_EQ(256, sub1->SlotSize());
 
-  msg = sub2->ReadMessage();
+  msg = ReadMessageEventually(*sub2);
   ASSERT_OK(msg);
   ASSERT_EQ(6, msg->length);
   ASSERT_EQ(256, sub2->SlotSize());
@@ -289,7 +329,7 @@ TEST_F(BridgeTest, BasicRetirement) {
   ASSERT_TRUE(retirement_fd.Valid());
 
   // Receive the message on the subscriber.
-  absl::StatusOr<Message> msg = sub->ReadMessage();
+  absl::StatusOr<Message> msg = ReadMessageEventually(*sub);
   ASSERT_OK(msg);
   ASSERT_EQ(6, msg->length);
   ASSERT_EQ(256, sub->SlotSize());
@@ -507,6 +547,33 @@ void WaitForSubscribedMessageWithSizes(
             << " metadata_size: " << subscribed.metadata_size() << std::endl;
 }
 
+subspace::Subscribed
+ReadSubscribedMessage(toolbelt::FileDescriptor &bridge_pipe,
+                      const std::string &channel_name) {
+  std::cerr << "Waiting for bridge notification\n";
+  char buffer[4096];
+  int32_t length;
+  absl::StatusOr<ssize_t> n = bridge_pipe.Read(&length, sizeof(length));
+  if (!n.ok()) {
+    ADD_FAILURE() << n.status();
+    return {};
+  }
+  EXPECT_EQ(sizeof(int32_t), *n);
+  length = ntohl(length);
+  n = bridge_pipe.Read(buffer, length);
+  if (!n.ok()) {
+    ADD_FAILURE() << n.status();
+    return {};
+  }
+
+  subspace::Subscribed subscribed;
+  EXPECT_TRUE(subscribed.ParseFromArray(buffer, *n));
+  EXPECT_EQ(subscribed.channel_name(), channel_name);
+  std::cerr << "Received bridge notification for channel: "
+            << subscribed.channel_name() << std::endl;
+  return subscribed;
+}
+
 TEST_F(BridgeTest, LargeChecksumBridge) {
   subspace::Client client1;
   InitClient(client1, 0);
@@ -538,7 +605,7 @@ TEST_F(BridgeTest, LargeChecksumBridge) {
   toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
   WaitForSubscribedMessageWithSizes(recv_bridge_pipe, "/bridged_sizes", 20, 50);
 
-  absl::StatusOr<Message> msg = sub->ReadMessage();
+  absl::StatusOr<Message> msg = ReadMessageEventually(*sub);
   ASSERT_OK(msg);
   ASSERT_EQ(12, msg->length);
   ASSERT_EQ(0, memcmp("bridge_sizes", msg->buffer, 12));
@@ -578,7 +645,7 @@ TEST_F(BridgeTest, DefaultSizesBridge) {
   WaitForSubscribedMessageWithSizes(recv_bridge_pipe, "/bridged_def_sizes",
                                     4, 0);
 
-  absl::StatusOr<Message> msg = sub->ReadMessage();
+  absl::StatusOr<Message> msg = ReadMessageEventually(*sub);
   ASSERT_OK(msg);
   ASSERT_EQ(7, msg->length);
   ASSERT_EQ(0, memcmp("default", msg->buffer, 7));
@@ -622,7 +689,7 @@ TEST_F(BridgeTest, MetadataBridge) {
   toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
   WaitForSubscribedMessageWithSizes(recv_bridge_pipe, "/bridged_meta", 4, 24);
 
-  absl::StatusOr<Message> msg = sub->ReadMessage();
+  absl::StatusOr<Message> msg = ReadMessageEventually(*sub);
   ASSERT_OK(msg);
   ASSERT_EQ(10, msg->length);
   ASSERT_EQ(0, memcmp("bridgemeta", msg->buffer, 10));
@@ -674,7 +741,7 @@ TEST_F(BridgeTest, MetadataLargeBridge) {
   WaitForSubscribedMessageWithSizes(recv_bridge_pipe, "/bridged_meta_lg",
                                     20, 100);
 
-  absl::StatusOr<Message> msg = sub->ReadMessage();
+  absl::StatusOr<Message> msg = ReadMessageEventually(*sub);
   ASSERT_OK(msg);
   ASSERT_EQ(5, msg->length);
   ASSERT_EQ(192, sub->PrefixSize());
@@ -688,9 +755,90 @@ TEST_F(BridgeTest, MetadataLargeBridge) {
   }
 }
 
+TEST_F(BridgeTest, SplitBufferSourceBridge) {
+  subspace::Client client1;
+  InitClient(client1, 0);
+
+  subspace::Client client2;
+  InitClient(client2, 1);
+
+  absl::StatusOr<Publisher> pub = client1.CreatePublisher(
+      "/bridged_split_source",
+      {.slot_size = 256, .num_slots = 10, .local = false,
+       .use_split_buffers = true, .split_buffers_over_bridge = false});
+  ASSERT_OK(pub);
+  ASSERT_TRUE(pub->UsesSplitBuffers());
+
+  absl::StatusOr<Subscriber> sub = client2.CreateSubscriber(
+      "/bridged_split_source", {.max_active_messages = 2});
+  ASSERT_OK(sub);
+
+  subspace::Subscribed sent = ReadSubscribedMessage(
+      BridgeNotificationPipe(0), "/bridged_split_source");
+  ASSERT_TRUE(sent.split_buffers());
+  ASSERT_FALSE(sent.split_buffers_over_bridge());
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "split-source", 12);
+  ASSERT_OK(pub->PublishMessage(12));
+
+  subspace::Subscribed received = ReadSubscribedMessage(
+      BridgeNotificationPipe(1), "/bridged_split_source");
+  ASSERT_TRUE(received.split_buffers());
+  ASSERT_FALSE(received.split_buffers_over_bridge());
+
+  absl::StatusOr<Message> msg = ReadMessageEventually(*sub);
+  ASSERT_OK(msg);
+  ASSERT_EQ(12, msg->length);
+  ASSERT_EQ(0, memcmp("split-source", msg->buffer, 12));
+  ASSERT_FALSE(sub->UsesSplitBuffers());
+}
+
+TEST_F(BridgeTest, SplitBuffersOverBridge) {
+  subspace::Client client1;
+  InitClient(client1, 0);
+
+  subspace::Client client2;
+  InitClient(client2, 1);
+
+  absl::StatusOr<Publisher> pub = client1.CreatePublisher(
+      "/bridged_split_remote",
+      {.slot_size = 256, .num_slots = 10, .local = false,
+       .use_split_buffers = false, .split_buffers_over_bridge = true});
+  ASSERT_OK(pub);
+  ASSERT_FALSE(pub->UsesSplitBuffers());
+
+  absl::StatusOr<Subscriber> sub = client2.CreateSubscriber(
+      "/bridged_split_remote", {.max_active_messages = 2});
+  ASSERT_OK(sub);
+
+  subspace::Subscribed sent = ReadSubscribedMessage(
+      BridgeNotificationPipe(0), "/bridged_split_remote");
+  ASSERT_FALSE(sent.split_buffers());
+  ASSERT_TRUE(sent.split_buffers_over_bridge());
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "split-remote", 12);
+  ASSERT_OK(pub->PublishMessage(12));
+
+  subspace::Subscribed received = ReadSubscribedMessage(
+      BridgeNotificationPipe(1), "/bridged_split_remote");
+  ASSERT_FALSE(received.split_buffers());
+  ASSERT_TRUE(received.split_buffers_over_bridge());
+
+  absl::StatusOr<Message> msg = ReadMessageEventually(*sub);
+  ASSERT_OK(msg);
+  ASSERT_EQ(12, msg->length);
+  ASSERT_EQ(0, memcmp("split-remote", msg->buffer, 12));
+  ASSERT_TRUE(sub->UsesSplitBuffers());
+}
+
 int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);
   absl::ParseCommandLine(argc, argv);
+  subspace::SetDefaultUseSplitBuffers(absl::GetFlag(FLAGS_use_split_buffers));
 
   return RUN_ALL_TESTS();
 }

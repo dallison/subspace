@@ -153,7 +153,7 @@ static std::shared_ptr<subspace::RpcServer> BuildServer() {
   // Error method.
   s = server->RegisterMethod(
       "ErrorMethod", "subspace.TestRequest", "subspace.TestResponse",
-      [](const google::protobuf::Any &req, google::protobuf::Any *res,
+      [](const google::protobuf::Any &req, google::protobuf::Any * /*res*/,
          co::Coroutine *) -> absl::Status {
         std::cerr << "ErrorMethod called with request: " << req.DebugString()
                   << std::endl;
@@ -218,7 +218,7 @@ struct ServerContext {
 static uint64_t next_client_id = 1;
 static int next_request_id = 1;
 
-static void Open(std::shared_ptr<subspace::RpcServer> server,
+static void Open(std::shared_ptr<subspace::RpcServer> /*server*/,
                  subspace::RpcServerResponse &response, ServerContext &ctx,
                  co::Coroutine *c) {
   subspace::RpcServerRequest req;
@@ -273,7 +273,7 @@ static void Open(std::shared_ptr<subspace::RpcServer> server,
   }
 }
 
-static void Close(std::shared_ptr<subspace::RpcServer> server,
+static void Close(std::shared_ptr<subspace::RpcServer> /*server*/,
                   ServerContext &ctx, co::Coroutine *c) {
   subspace::RpcServerRequest req;
   req.set_client_id(ctx.client_id);

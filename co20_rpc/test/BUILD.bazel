@@ -1,0 +1,21 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+cc_test(
+    name = "rpc_test",
+    srcs = ["rpc_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        "//client:test_fixture",
+        "//co20_rpc/proto:rpc_test_co20_rpc_client",
+        "//co20_rpc/proto:rpc_test_co20_rpc_server",
+        "//rpc/proto:rpc_test_cc_proto",
+        "@abseil-cpp//absl/flags:parse",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@coroutines//:co",
+        "@googletest//:gtest",
+    ],
+)

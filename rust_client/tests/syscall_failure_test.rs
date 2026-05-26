@@ -5,10 +5,33 @@
 //! Syscall fault injection tests for the Rust subspace client.
 //! Mirrors the approach used by the C++ syscall_failure_test.
 
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use subspace_client::options::{PublisherOptions, SubscriberOptions};
 use subspace_client::syscall_shim::{self, SyscallShim};
 use subspace_client::Client;
-use std::sync::atomic::{AtomicI32, Ordering};
+
+fn unique_socket_path() -> String {
+    let mut template = b"/tmp/ss_sf_XXXXXX\0".to_vec();
+    let fd = unsafe { libc::mkstemp(template.as_mut_ptr() as *mut libc::c_char) };
+    assert!(
+        fd >= 0,
+        "mkstemp failed: {}",
+        std::io::Error::last_os_error()
+    );
+    unsafe {
+        libc::close(fd);
+    }
+
+    let path = unsafe {
+        std::ffi::CStr::from_ptr(template.as_ptr() as *const libc::c_char)
+            .to_string_lossy()
+            .into_owned()
+    };
+    std::fs::remove_file(&path)
+        .unwrap_or_else(|e| panic!("failed to remove temporary socket placeholder {path}: {e}"));
+    path
+}
 
 // ── FailingShim ─────────────────────────────────────────────────────────────
 //
@@ -23,6 +46,7 @@ static FTRUNCATE_COUNTDOWN: AtomicI32 = AtomicI32::new(-1);
 static FSTAT_COUNTDOWN: AtomicI32 = AtomicI32::new(-1);
 static STAT_COUNTDOWN: AtomicI32 = AtomicI32::new(-1);
 static POLL_COUNTDOWN: AtomicI32 = AtomicI32::new(-1);
+static SYSCALL_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Set `errno` for the current thread (replaces the `errno` crate for Bazel compatibility).
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -30,10 +54,7 @@ unsafe fn set_thread_errno(e: libc::c_int) {
     *libc::__errno_location() = e;
 }
 
-#[cfg(all(
-    unix,
-    not(any(target_os = "linux", target_os = "android")),
-))]
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android")),))]
 unsafe fn set_thread_errno(e: libc::c_int) {
     *libc::__error() = e;
 }
@@ -59,6 +80,12 @@ fn reset_counters() {
     FSTAT_COUNTDOWN.store(-1, Ordering::SeqCst);
     STAT_COUNTDOWN.store(-1, Ordering::SeqCst);
     POLL_COUNTDOWN.store(-1, Ordering::SeqCst);
+}
+
+fn prepare_test() -> MutexGuard<'static, ()> {
+    let guard = SYSCALL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset_counters();
+    guard
 }
 
 unsafe extern "C" fn failing_mmap(
@@ -89,10 +116,7 @@ unsafe extern "C" fn failing_open(
     libc::open(path, flags, mode as libc::c_uint)
 }
 
-unsafe extern "C" fn failing_ftruncate(
-    fd: libc::c_int,
-    length: libc::off_t,
-) -> libc::c_int {
+unsafe extern "C" fn failing_ftruncate(fd: libc::c_int, length: libc::off_t) -> libc::c_int {
     if should_fail(&FTRUNCATE_COUNTDOWN) {
         set_thread_errno(libc::ENOSPC);
         return -1;
@@ -100,10 +124,7 @@ unsafe extern "C" fn failing_ftruncate(
     libc::ftruncate(fd, length)
 }
 
-unsafe extern "C" fn failing_fstat(
-    fd: libc::c_int,
-    buf: *mut libc::stat,
-) -> libc::c_int {
+unsafe extern "C" fn failing_fstat(fd: libc::c_int, buf: *mut libc::stat) -> libc::c_int {
     if should_fail(&FSTAT_COUNTDOWN) {
         set_thread_errno(libc::EBADF);
         return -1;
@@ -111,10 +132,7 @@ unsafe extern "C" fn failing_fstat(
     libc::fstat(fd, buf)
 }
 
-unsafe extern "C" fn failing_stat(
-    path: *const libc::c_char,
-    buf: *mut libc::stat,
-) -> libc::c_int {
+unsafe extern "C" fn failing_stat(path: *const libc::c_char, buf: *mut libc::stat) -> libc::c_int {
     if should_fail(&STAT_COUNTDOWN) {
         set_thread_errno(libc::EACCES);
         return -1;
@@ -196,7 +214,7 @@ unsafe impl Sync for ServerGuard {}
 #[cfg(server_ffi)]
 impl ServerGuard {
     fn start() -> Self {
-        let socket_path = format!("/tmp/ss_sf_{}", std::process::id());
+        let socket_path = unique_socket_path();
 
         let mut pipe_fds = [0 as libc::c_int; 2];
         assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
@@ -230,9 +248,7 @@ impl ServerGuard {
             );
         }
         let mut buf = [0u8; 8];
-        let n = unsafe {
-            libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, 8)
-        };
+        let n = unsafe { libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, 8) };
         assert_eq!(n, 8, "failed to read server ready notification");
 
         ServerGuard {
@@ -275,8 +291,7 @@ use std::process::{Child, Command, Stdio};
 
 #[cfg(not(server_ffi))]
 fn find_server_binary() -> String {
-    let manifest_dir =
-        std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     let workspace = std::path::Path::new(&manifest_dir)
         .parent()
         .unwrap_or(std::path::Path::new("."));
@@ -302,7 +317,7 @@ struct ServerGuard {
 #[cfg(not(server_ffi))]
 impl ServerGuard {
     fn start() -> Self {
-        let socket_path = format!("/tmp/ss_sf_{}", std::process::id());
+        let socket_path = unique_socket_path();
         let binary = find_server_binary();
         let child = Command::new(&binary)
             .arg(format!("--socket={}", socket_path))
@@ -312,9 +327,7 @@ impl ServerGuard {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .unwrap_or_else(|e| {
-                panic!("Failed to start server binary '{}': {}", binary, e)
-            });
+            .unwrap_or_else(|e| panic!("Failed to start server binary '{}': {}", binary, e));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             if std::time::Instant::now() > deadline {
@@ -356,7 +369,7 @@ fn new_client(name: &str) -> Client {
 
 #[test]
 fn mmap_fail_on_scb() {
-    reset_counters();
+    let _test_guard = prepare_test();
     let client = new_client("mmap_scb");
     let _guard = ScopedShim::install();
     MMAP_COUNTDOWN.store(0, Ordering::SeqCst);
@@ -367,7 +380,7 @@ fn mmap_fail_on_scb() {
 
 #[test]
 fn mmap_fail_on_ccb() {
-    reset_counters();
+    let _test_guard = prepare_test();
     let client = new_client("mmap_ccb");
     let _guard = ScopedShim::install();
     MMAP_COUNTDOWN.store(1, Ordering::SeqCst);
@@ -378,7 +391,7 @@ fn mmap_fail_on_ccb() {
 
 #[test]
 fn mmap_fail_on_bcb() {
-    reset_counters();
+    let _test_guard = prepare_test();
     let client = new_client("mmap_bcb");
     let _guard = ScopedShim::install();
     MMAP_COUNTDOWN.store(2, Ordering::SeqCst);
@@ -389,7 +402,7 @@ fn mmap_fail_on_bcb() {
 
 #[test]
 fn mmap_fail_on_buffer_map() {
-    reset_counters();
+    let _test_guard = prepare_test();
     let client = new_client("mmap_buf");
     let _guard = ScopedShim::install();
     // SCB, CCB, BCB succeed (0,1,2), then buffer map (3) fails.
@@ -401,7 +414,7 @@ fn mmap_fail_on_buffer_map() {
 
 #[test]
 fn open_fail_on_create_shm() {
-    reset_counters();
+    let _test_guard = prepare_test();
     let client = new_client("open_shm");
     let _guard = ScopedShim::install();
     // The first open call during create_publisher is for the buffer shared
@@ -414,7 +427,7 @@ fn open_fail_on_create_shm() {
 
 #[test]
 fn poll_fail_wait_for_subscriber() {
-    reset_counters();
+    let _test_guard = prepare_test();
     let client = new_client("poll_sub");
     let opts = PublisherOptions::new().set_slot_size(64).set_num_slots(16);
     let _pub = client.create_publisher("sf_poll_sub", &opts).unwrap();
@@ -429,7 +442,7 @@ fn poll_fail_wait_for_subscriber() {
 
 #[test]
 fn poll_fail_wait_for_reliable_publisher() {
-    reset_counters();
+    let _test_guard = prepare_test();
     let client = new_client("poll_rpub");
     let opts = PublisherOptions::new()
         .set_slot_size(64)
@@ -440,12 +453,15 @@ fn poll_fail_wait_for_reliable_publisher() {
     let _guard = ScopedShim::install();
     POLL_COUNTDOWN.store(0, Ordering::SeqCst);
     let result = pub_handle.wait(Some(100));
-    assert!(result.is_err(), "expected poll failure on reliable pub wait");
+    assert!(
+        result.is_err(),
+        "expected poll failure on reliable pub wait"
+    );
 }
 
 #[test]
 fn mmap_call_counting() {
-    reset_counters();
+    let _test_guard = prepare_test();
     let client = new_client("mmap_count");
     let _guard = ScopedShim::install();
     MMAP_CALL_COUNT.store(0, Ordering::SeqCst);
@@ -458,7 +474,7 @@ fn mmap_call_counting() {
 
 #[test]
 fn shim_restored_after_scope() {
-    reset_counters();
+    let _test_guard = prepare_test();
     {
         let _guard = ScopedShim::install();
         MMAP_COUNTDOWN.store(0, Ordering::SeqCst);
@@ -468,12 +484,16 @@ fn shim_restored_after_scope() {
     let client = new_client("shim_restored");
     let opts = PublisherOptions::new().set_slot_size(64).set_num_slots(4);
     let result = client.create_publisher("sf_restored", &opts);
-    assert!(result.is_ok(), "publisher creation should succeed after shim restore: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "publisher creation should succeed after shim restore: {:?}",
+        result.err()
+    );
 }
 
 #[test]
 fn shim_countdown_decrements() {
-    reset_counters();
+    let _test_guard = prepare_test();
     // Set countdown to 2; calls 0 and 1 should succeed, call 2 should fail.
     MMAP_COUNTDOWN.store(2, Ordering::SeqCst);
     assert!(!should_fail(&MMAP_COUNTDOWN));
@@ -488,10 +508,12 @@ fn shim_countdown_decrements() {
 
 #[test]
 fn fstat_or_stat_fail_on_subscriber_attach() {
-    reset_counters();
+    let _test_guard = prepare_test();
     let client = new_client("get_shm_size_sub");
     let opts = PublisherOptions::new().set_slot_size(64).set_num_slots(16);
-    let _pub = client.create_publisher("sf_get_shm_size_sub", &opts).unwrap();
+    let _pub = client
+        .create_publisher("sf_get_shm_size_sub", &opts)
+        .unwrap();
 
     let _guard = ScopedShim::install();
     // get_shm_size is called during subscriber buffer attachment.

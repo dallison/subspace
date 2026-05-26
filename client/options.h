@@ -5,10 +5,17 @@
 #ifndef _xCLIENT_OPTIONS_H
 #define _xCLIENT_OPTIONS_H
 
+#include "common/channel.h"
+#include "common/split_buffer.h"
+
+#include <cstdint>
 #include <functional>
 #include <string>
 
 namespace subspace {
+
+void SetDefaultUseSplitBuffers(bool use_split_buffers);
+bool DefaultUseSplitBuffers();
 
 // You can use the options in two ways depending on your
 // coding guidelines.  You can either use the Google/Java-style
@@ -149,6 +156,65 @@ struct PublisherOptions {
   }
   int32_t MetadataSize() const { return metadata_size; }
 
+  // Free-slot allocator policy for unreliable publishers (no effect on
+  // reliable publishers).  When true, a publisher in FindFreeSlotUnreliable
+  // will prefer to recycle a slot from the RetiredSlots set before pulling
+  // a fresh slot from the never-touched FreeSlots pool.  Both choices are
+  // equally valid (a retired slot has been seen by every current subscriber)
+  // but a retired slot's pages are already cache-hot from the recent
+  // publish/consume cycle, while a fresh FreeSlots slot will demand-fault the
+  // kernel into allocating new physical pages on first write.  In steady
+  // state this lets the publisher cycle through a tiny working set of
+  // cache-hot slots regardless of how deep the channel's slot pool is
+  // configured, while still bursting into FreeSlots when the subscriber
+  // falls behind.  Defaults to false (FreeSlots-first) so multiple messages
+  // remain in distinct slots until the free pool is exhausted, which
+  // preserves behaviour for subscribers that attach after earlier messages
+  // were published and consumed by another subscriber on the same channel.
+  // Set true for the cache-friendly LIFO-style recycling behaviour.
+  PublisherOptions &SetPreferRetiredSlots(bool v) {
+    prefer_retired_slots = v;
+    return *this;
+  }
+  bool PreferRetiredSlots() const { return prefer_retired_slots; }
+
+  // Maximum number of publishers allowed on the channel.  A value of 0 means
+  // no explicit limit beyond the server's normal channel capacity.
+  PublisherOptions &SetMaxPublishers(int32_t n) {
+    max_publishers = n;
+    return *this;
+  }
+  int32_t MaxPublishers() const { return max_publishers; }
+
+  // Split-buffer options.  When use_split_buffers is true, prefixes are stored
+  // in a separate shared-memory region and each payload slot is allocated as a
+  // separate block.  If callbacks are supplied, the publisher allocates payload
+  // slots through them and subscribers map those slots through their matching
+  // callbacks.  Prefixes remain regular shared memory.
+  PublisherOptions &SetUseSplitBuffers(bool v) {
+    use_split_buffers = v;
+    return *this;
+  }
+  bool UseSplitBuffers() const { return use_split_buffers; }
+
+  // When true, bridge receivers that mirror this channel create their local
+  // bridge publisher with split payload buffers. This is independent of
+  // UseSplitBuffers(), which controls this server's local channel storage.
+  PublisherOptions &SetSplitBuffersOverBridge(bool v) {
+    split_buffers_over_bridge = v;
+    return *this;
+  }
+  bool SplitBuffersOverBridge() const { return split_buffers_over_bridge; }
+
+  PublisherOptions &SetSplitBufferCallbacks(
+      subspace::SplitBufferCallbacks callbacks) {
+    split_buffer_callbacks = std::move(callbacks);
+    return *this;
+  }
+  const subspace::SplitBufferCallbacks &SplitBufferCallbackSet() const {
+    return split_buffer_callbacks;
+  }
+
   // If you use the new CreatePublisher API, set the slot size and num slots in
   // here.
   int32_t slot_size = 0;
@@ -169,6 +235,13 @@ struct PublisherOptions {
   bool checksum = false;
   int32_t checksum_size = 4;
   int32_t metadata_size = 0;
+
+  // See SetPreferRetiredSlots() for description.
+  bool prefer_retired_slots = false;
+  int32_t max_publishers = 0;
+  bool use_split_buffers = DefaultUseSplitBuffers();
+  bool split_buffers_over_bridge = false;
+  subspace::SplitBufferCallbacks split_buffer_callbacks;
 };
 
 struct SubscriberOptions {
@@ -269,6 +342,20 @@ struct SubscriberOptions {
   }
   bool KeepActiveMessage() const { return keep_active_message; }
 
+  // The server reports the channel layout on attach.  Subscribers do not
+  // request split buffers; this getter tells users what the publisher selected
+  // after subscriber creation or reload.
+  bool UseSplitBuffers() const { return use_split_buffers; }
+
+  SubscriberOptions &SetSplitBufferCallbacks(
+      subspace::SplitBufferCallbacks callbacks) {
+    split_buffer_callbacks = std::move(callbacks);
+    return *this;
+  }
+  const subspace::SplitBufferCallbacks &SplitBufferCallbackSet() const {
+    return split_buffer_callbacks;
+  }
+
   bool reliable = false;
   bool bridge = false;
   bool for_tunnel = false;
@@ -289,6 +376,8 @@ struct SubscriberOptions {
   // around and you want to keep the message alive until you are done with it.
   // You should call ClearActiveMessage() to release the reference when you are done with it.
   bool keep_active_message = false;
+  bool use_split_buffers = false;
+  subspace::SplitBufferCallbacks split_buffer_callbacks;
 };
 
 } // namespace subspace

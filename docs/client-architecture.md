@@ -16,7 +16,7 @@ Each channel uses three shared memory structures:
 
 - **System Control Block (SCB)** — one per system, tracks channel-level counters for reload detection.
 - **Channel Control Block (CCB)** — one per channel, contains slot metadata, bitsets for available/retired/free slots, ordinals, and stats. Publishers map it read-write; subscribers map it read-only.
-- **Message Buffers** — the actual data. Stored in `/dev/shm/` (Linux) or POSIX shared memory. Publishers map read-write, subscribers read-only. Buffers can grow dynamically.
+- **Message Buffers** — the actual data. Stored in `/dev/shm/` (Linux) or POSIX shared memory. Publishers map read-write, subscribers read-only. Buffers can grow dynamically. Split-buffer channels keep prefixes in these buffers but place payload slots in separate payload allocations.
 
 ## Publishing Flow
 
@@ -45,15 +45,38 @@ Client (public API, copyable)
         └── Subscriber → SubscriberImpl → ClientChannel → Channel
 ```
 
+## Split Buffers
+
+Split-buffer channels separate the `MessagePrefix` from the payload bytes. The
+prefix remains in regular Subspace shared memory so ordinals, flags, checksums,
+metadata, and slot state use the same layout. Payload slots live in separate
+allocations that are either built-in shared-memory objects or application-owned
+allocator handles mapped through callbacks.
+
+Publishers opt in when creating the channel. Subscribers learn the channel mode
+from the server and provide mapping callbacks only when custom allocator handles
+are used. The server validates compatible options and replicates split-buffer
+metadata to the shadow process for crash recovery. See [Split Buffers](split-buffers.md).
+
 ## C Wrapper (`c_client/`)
 
-A thin C layer over the C++ API using opaque `void*` pointers and thread-local error strings. Functions like `subspace_create_publisher()`, `subspace_publish_message()`, and `subspace_read_message()` mirror the C++ API with C-style naming. Messages must be explicitly freed with `subspace_free_message()`.
+A C ABI layer over the C++ API using opaque `void*` pointers, plain structs, and
+thread-local error strings. Functions like `subspace_create_publisher()`,
+`subspace_publish_message()`, and `subspace_read_message()` mirror the C++ API
+with C-style naming. Messages must be explicitly freed with
+`subspace_free_message()`.
+
+The C wrapper also exposes channel introspection, stats/counters, timeout and
+fd-based waits, bulk reads, user metadata, checksum callbacks, split-buffer
+callbacks and handle lookup, transform callbacks, and slot/prefix diagnostics.
+See [C Client API](c-client.md).
 
 ## Other Notable Features
 
 - **Virtual channels** — multiplex logical channels on one physical channel.
 - **Coroutine support** — the client can yield when waiting for slots/messages (uses the `co` library).
 - **Checksums** — optional message integrity verification using CRC32 by default, with support for arbitrary-sized checksums via callbacks.  The `checksum_size` and `metadata_size` publisher options control the prefix layout; user metadata can be attached to each message through `GetMetadata()`.  See [Checksums and User Metadata](checksums-and-metadata.md) for details.
+- **Split buffers** — optional separate payload allocations for custom memory pools or handle-based mapping APIs. See [Split Buffers](split-buffers.md).
 - **Bridging** — forwards channels between servers over TCP for cross-machine communication.
 - **Tunnel support** — the `for_tunnel` publisher/subscriber option marks messages with the `kMessageCrossMachine` flag in the `MessagePrefix`, allowing external tunnel processes to distinguish locally and remotely generated messages.
 

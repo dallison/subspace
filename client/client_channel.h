@@ -8,6 +8,7 @@
 #include "client/options.h"
 #include "co/coroutine.h"
 #include "common/channel.h"
+#include "common/client_buffer.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/clock.h"
 #include "toolbelt/fd.h"
@@ -18,6 +19,7 @@
 
 #include <memory>
 #include <mutex>
+#include <functional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -43,18 +45,6 @@
 namespace subspace {
 
 
-#define SUBSPACE_SHMEM_MODE_POSIX 1
-#define SUBSPACE_SHMEM_MODE_LINUX 2
-#define SUBSPACE_SHMEM_MODE_ANDROID 3
-
-#if defined(__ANDROID__)
-#define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_ANDROID
-#elif defined(__linux__)
-#define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_LINUX
-#else
-#define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_POSIX
-#endif
-
 class ClientImpl;
 
 enum class BufferMapMode {
@@ -68,9 +58,22 @@ struct BufferSet {
   BufferSet() = default;
   BufferSet(uint64_t full_sz, uint64_t slot_sz, char *buf)
       : full_size(full_sz), slot_size(slot_sz), buffer(buf) {}
+  bool IsSplitBuffers() const { return !split_slot_buffers.empty(); }
   uint64_t full_size = 0;
   uint64_t slot_size = 0;
   char *buffer = nullptr;
+  char *split_prefix_buffer = nullptr;
+  uint64_t split_prefix_buffer_size = 0;
+  std::vector<char *> split_slot_buffers;
+  std::vector<uint64_t> split_slot_sizes;
+  std::vector<uintptr_t> split_handles;
+  std::vector<void *> split_private_data;
+  std::vector<toolbelt::FileDescriptor> split_fds;
+  std::vector<SplitBufferMetadata> split_metadata;
+  toolbelt::FileDescriptor split_prefix_fd;
+  SplitBufferMetadata split_prefix_metadata;
+  bool owns_split_buffers = false;
+  bool uses_split_callbacks = false;
 };
 
 // This is a channel as seen by a client.  It's going to be either
@@ -97,6 +100,8 @@ public:
 
   void Dump(std::ostream &os) const override;
 
+  uint64_t GetVirtualMemoryUsage() const override;
+
   // Client-side channel mapping.  The SharedMemoryFds contains the
   // file descriptors for the CCB and buffers.  The num_slots_
   // member variable contains either 0 or the
@@ -111,6 +116,12 @@ public:
   // What is the address of the message buffer (after the prefix area)
   // for the slot given a slot id.
   void *GetBufferAddress(int slot_id) {
+    int buffer_index = ccb_->slots[slot_id].buffer_index;
+    if (buffer_index >= 0 &&
+        static_cast<size_t>(buffer_index) < buffers_.size() &&
+        buffers_[buffer_index]->IsSplitBuffers()) {
+      return buffers_[buffer_index]->split_slot_buffers[slot_id];
+    }
     return Buffer(slot_id) +
            (PrefixSize() + Aligned<64>(SlotSize(slot_id))) * slot_id +
            PrefixSize();
@@ -121,6 +132,12 @@ public:
     if (slot == nullptr) {
       return nullptr;
     }
+    int buffer_index = ccb_->slots[slot->id].buffer_index;
+    if (buffer_index >= 0 &&
+        static_cast<size_t>(buffer_index) < buffers_.size() &&
+        buffers_[buffer_index]->IsSplitBuffers()) {
+      return buffers_[buffer_index]->split_slot_buffers[slot->id];
+    }
     void *b =
         Buffer(slot->id) +
         (PrefixSize() + Aligned<64>(SlotSize(slot->id))) * slot->id +
@@ -130,6 +147,17 @@ public:
 
   // Get a pointer to the MessagePrefix for a given slot.
   MessagePrefix *Prefix(MessageSlot *slot) override {
+    if (slot == nullptr) {
+      return nullptr;
+    }
+    int buffer_index = ccb_->slots[slot->id].buffer_index;
+    if (buffer_index >= 0 &&
+        static_cast<size_t>(buffer_index) < buffers_.size() &&
+        buffers_[buffer_index]->IsSplitBuffers()) {
+      return reinterpret_cast<MessagePrefix *>(
+          buffers_[buffer_index]->split_prefix_buffer +
+          static_cast<size_t>(PrefixSize()) * slot->id);
+    }
     MessagePrefix *p = reinterpret_cast<MessagePrefix *>(
         Buffer(slot->id) +
         (PrefixSize() + Aligned<64>(SlotSize(slot->id))) * slot->id);
@@ -211,13 +239,56 @@ public:
   }
 
   virtual BufferMapMode MapMode() const = 0;
-
+  virtual bool UseSplitBuffers() const { return false; }
+  virtual const SplitBufferCallbacks &SplitBuffersCallbacks() const {
+    static const SplitBufferCallbacks *callbacks = new SplitBufferCallbacks();
+    return *callbacks;
+  }
   bool BuffersChanged() const {
     return ccb_->num_buffers != static_cast<int>(buffers_.size());
   }
 
   const std::vector<std::unique_ptr<BufferSet>> &GetBuffers() const {
     return buffers_;
+  }
+  bool GetSplitBufferHandleFromAddress(const void *address,
+                                       uintptr_t *handle) const {
+    if (handle != nullptr) {
+      *handle = 0;
+    }
+    if (address == nullptr || handle == nullptr) {
+      return false;
+    }
+    const auto *addr = static_cast<const char *>(address);
+    for (const auto &buffer : buffers_) {
+      for (size_t slot = 0; slot < buffer->split_slot_buffers.size(); slot++) {
+        const char *base = buffer->split_slot_buffers[slot];
+        const char *end = base + buffer->split_slot_sizes[slot];
+        if (addr >= base && addr < end) {
+          *handle = buffer->split_handles[slot];
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+  bool GetSplitBufferHandles(uintptr_t **handles, size_t *count) {
+    if (handles != nullptr) {
+      *handles = nullptr;
+    }
+    if (count != nullptr) {
+      *count = 0;
+    }
+    if (handles == nullptr || count == nullptr || buffers_.empty()) {
+      return false;
+    }
+    BufferSet *latest = buffers_.back().get();
+    if (!latest->IsSplitBuffers()) {
+      return false;
+    }
+    *handles = latest->split_handles.data();
+    *count = latest->split_handles.size();
+    return true;
   }
 
   absl::Status AttachBuffers();
@@ -236,6 +307,17 @@ public:
 
   std::string BufferSharedMemoryName(int buffer_index) const {
     return Channel::BufferSharedMemoryName(session_id_, buffer_index);
+  }
+
+  void SetClientBufferRegistrationCallback(
+      std::function<absl::Status(const ClientBufferHandleMetadata &)>
+          callback) {
+    client_buffer_registration_callback_ = std::move(callback);
+  }
+  void SetClientBufferUnregistrationCallback(
+      std::function<absl::Status(const std::string &, uint64_t, uint32_t)>
+          callback) {
+    client_buffer_unregistration_callback_ = std::move(callback);
   }
 
   void RecordDroppedMessages(uint32_t num) {
@@ -263,11 +345,34 @@ protected:
 
   absl::StatusOr<toolbelt::FileDescriptor> CreateBuffer(int buffer_index,
                                                         size_t size);
+  absl::Status AttachShmBuffers(int num_buffers);
+  absl::Status AttachSplitBuffers(int num_buffers);
   absl::StatusOr<toolbelt::FileDescriptor> OpenBuffer(int buffer_index);
   absl::StatusOr<size_t> GetBufferSize(toolbelt::FileDescriptor &shm_fd,
                                        int buffer_index) const;
   absl::StatusOr<char *> MapBuffer(toolbelt::FileDescriptor &shm_fd,
                                    size_t size, BufferMapMode mode);
+  void UnmapShmBufferSet(BufferSet &buffer);
+  void UnmapSplitBufferSet(size_t buffer_index, BufferSet &buffer,
+                           bool destroy_owned_buffers);
+  void UnmapBufferSet(size_t buffer_index, BufferSet &buffer,
+                      bool destroy_owned_buffers);
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+  absl::StatusOr<toolbelt::FileDescriptor>
+  CreateAndroidBuffer(const std::string &filename, size_t size);
+#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
+  absl::StatusOr<toolbelt::FileDescriptor>
+  CreateLinuxBuffer(const std::string &filename, size_t size);
+#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
+  absl::StatusOr<toolbelt::FileDescriptor>
+  CreatePosixBuffer(const std::string &filename, size_t size);
+#endif
+  absl::StatusOr<std::unique_ptr<BufferSet>>
+  CreateSplitBufferSet(size_t buffer_index, size_t full_size,
+                       uint64_t slot_size);
+  absl::StatusOr<std::unique_ptr<BufferSet>>
+  OpenSplitBufferSet(size_t buffer_index, size_t full_size,
+                     uint64_t slot_size);
 
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   absl::StatusOr<std::string>
@@ -277,6 +382,10 @@ protected:
   MessageSlot *slot_ = nullptr; // Current slot.
   int vchan_id_ = -1;           // Virtual channel ID.
   uint64_t session_id_;
+  std::function<absl::Status(const ClientBufferHandleMetadata &)>
+      client_buffer_registration_callback_ = nullptr;
+  std::function<absl::Status(const std::string &, uint64_t, uint32_t)>
+      client_buffer_unregistration_callback_ = nullptr;
   std::vector<std::unique_ptr<BufferSet>> buffers_ = {};
   int user_id_ = -1;
   int group_id_ = -1;

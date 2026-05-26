@@ -36,16 +36,21 @@ public:
     std::string *error) const;
   bool GenerateServer(const google::protobuf::FileDescriptor *file, Generator& gen, google::protobuf::compiler::GeneratorContext *generator_context,
     std::string *error) const;
+  bool GenerateRustClient(const google::protobuf::FileDescriptor *file, Generator& gen, google::protobuf::compiler::GeneratorContext *generator_context,
+    std::string *error) const;
+  bool GenerateRustServer(const google::protobuf::FileDescriptor *file, Generator& gen, google::protobuf::compiler::GeneratorContext *generator_context,
+    std::string *error) const;
 
   mutable std::string added_namespace_;
   mutable std::string package_name_;
   mutable std::string target_name_;
+  mutable RpcStyle rpc_style_ = RpcStyle::kCo;
 };
 
 class Generator {
 public:
   Generator(const google::protobuf::FileDescriptor *file, const std::string &ns,
-            const std::string &pn, const std::string &tn);
+            const std::string &pn, const std::string &tn, RpcStyle rpc_style);
 
 
   void GenerateClientHeaders(std::ostream &os);
@@ -53,6 +58,9 @@ public:
 
    void GenerateServerHeaders(std::ostream &os);
   void GenerateServerSources(std::ostream &os);
+
+  void GenerateRustClientFile(std::ostream &os);
+  void GenerateRustServerFile(std::ostream &os);
 
 private:
   void OpenNamespace(std::ostream &os);
@@ -63,6 +71,7 @@ private:
   const std::string &added_namespace_;
   const std::string &package_name_;
   const std::string &target_name_;
+  RpcStyle rpc_style_;
 };
 
 } // namespace subspace

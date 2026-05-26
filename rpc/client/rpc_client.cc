@@ -50,7 +50,7 @@ absl::Status RpcClient::Open(std::chrono::nanoseconds timeout,
 }
 
 absl::Status RpcClient::Close(std::chrono::nanoseconds timeout,
-                              co::Coroutine *c) {
+                              co::Coroutine * /*c*/) {
   if (session_id_ == 0) {
     return absl::FailedPreconditionError("Session not initialized");
   }
@@ -305,10 +305,6 @@ RpcClient::InvokeMethod(int method_id, const google::protobuf::Any &request,
 
   absl::StatusOr<void *> buffer;
   for (;;) {
-    if (method->request_publisher->NumSubscribers() == 0) {
-      Destroy();
-      return absl::InternalError("No subscribers; is the RPC server running?");
-    }
     buffer = method->request_publisher->GetMessageBuffer(
         int32_t(req.ByteSizeLong()));
     if (!buffer.ok()) {
@@ -407,10 +403,6 @@ absl::Status RpcClient::InvokeMethod(
 
   absl::StatusOr<void *> buffer;
   for (;;) {
-    if (method->request_publisher->NumSubscribers() == 0) {
-      Destroy();
-      return absl::InternalError("No subscribers; is the RPC server running?");
-    }
     buffer = method->request_publisher->GetMessageBuffer(
         int32_t(req.ByteSizeLong()));
     if (!buffer.ok()) {
@@ -488,7 +480,8 @@ absl::Status RpcClient::InvokeMethod(
 }
 
 absl::Status
-RpcClient::CancelRequest(uint64_t client_id, int session_id, int request_id,
+RpcClient::CancelRequest(uint64_t /*client_id*/, int /*session_id*/,
+                         int request_id,
                          std::shared_ptr<client_internal::Method> method,
                          std::chrono::nanoseconds timeout, co::Coroutine *c) {
   if (closed_) {

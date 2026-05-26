@@ -11,17 +11,58 @@
 #include "toolbelt/hexdump.h"
 #include "toolbelt/mutex.h"
 #include "toolbelt/sockets.h"
+#include <algorithm>
+#include <atomic>
 #include <cerrno>
+#include <cstring>
 #include <inttypes.h>
 namespace subspace {
+
+namespace {
+std::atomic<bool> default_use_split_buffers{false};
+}
 
 using ClientChannel = details::ClientChannel;
 using SubscriberImpl = details::SubscriberImpl;
 using PublisherImpl = details::PublisherImpl;
 
-// Get the current thread as a 64 bit number.
+void SetDefaultUseSplitBuffers(bool use_split_buffers) {
+  default_use_split_buffers.store(use_split_buffers, std::memory_order_relaxed);
+}
+
+bool DefaultUseSplitBuffers() {
+  return default_use_split_buffers.load(std::memory_order_relaxed);
+}
+
+// Get the current thread as a 64 bit number.  pthread_t is integral on some
+// platforms (Linux glibc, QNX) and a pointer on others (macOS); on QNX it is
+// only 32 bits wide.  Use memcpy so the conversion is well-defined regardless
+// of the underlying type.
 static uint64_t GetThreadId() {
-  return reinterpret_cast<uint64_t>(pthread_self());
+  pthread_t tid = pthread_self();
+  uint64_t id = 0;
+  std::memcpy(&id, &tid,
+              sizeof(tid) < sizeof(id) ? sizeof(tid) : sizeof(id));
+  return id;
+}
+
+static void ToProto(const ClientBufferHandleMetadata &metadata,
+                    ClientBufferHandleMetadataProto *proto) {
+  proto->set_channel_name(metadata.channel_name);
+  proto->set_session_id(metadata.session_id);
+  proto->set_buffer_index(metadata.buffer_index);
+  proto->set_slot_id(metadata.slot_id);
+  proto->set_is_prefix(metadata.is_prefix);
+  proto->set_full_size(metadata.full_size);
+  proto->set_allocation_size(metadata.allocation_size);
+  proto->set_handle(static_cast<uint64_t>(metadata.handle));
+  proto->set_shadow_file(metadata.shadow_file);
+  proto->set_object_name(metadata.object_name);
+  proto->set_allocator(metadata.allocator);
+  proto->set_pool_id(metadata.pool_id);
+  proto->set_cache_enabled(metadata.cache_enabled);
+  proto->set_alignment(metadata.alignment);
+  *proto->mutable_allocator_metadata() = metadata.allocator_metadata;
 }
 
 ClientImpl::ClientLockGuard::ClientLockGuard(ClientImpl *client,
@@ -283,6 +324,16 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
   if (!pub_resp.error().empty()) {
     return absl::InternalError(pub_resp.error());
   }
+  auto remove_server_publisher = [&]() {
+    Request remove_req;
+    auto *cmd = remove_req.mutable_remove_publisher();
+    cmd->set_channel_name(channel_name);
+    cmd->set_publisher_id(pub_resp.publisher_id());
+
+    Response remove_resp;
+    std::vector<toolbelt::FileDescriptor> remove_fds;
+    (void)SendRequestReceiveResponse(remove_req, remove_resp, remove_fds);
+  };
 
   std::shared_ptr<PublisherImpl> channel = std::make_shared<PublisherImpl>(
       channel_name, opts.num_slots, pub_resp.channel_id(),
@@ -292,7 +343,15 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
         return CheckReload(static_cast<ClientChannel *>(c));
       },
       server_user_id_, server_group_id_);
-
+  channel->SetClientBufferRegistrationCallback(
+      [this](const ClientBufferHandleMetadata &metadata) {
+        return RegisterClientBuffer(metadata);
+      });
+  channel->SetClientBufferUnregistrationCallback(
+      [this](const std::string &channel_name, uint64_t session_id,
+             uint32_t buffer_index) {
+        return UnregisterClientBuffer(channel_name, session_id, buffer_index);
+      });
   int32_t cs = opts.ChecksumSize() > 0 ? opts.ChecksumSize() : 4;
   int32_t ms = opts.MetadataSize() > 0 ? opts.MetadataSize() : 0;
   channel->SetChecksumSize(cs);
@@ -303,12 +362,14 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
                               std::move(fds[pub_resp.bcb_fd_index()]));
   if (absl::Status status = channel->Map(std::move(channel_fds), scb_fd_);
       !status.ok()) {
+    remove_server_publisher();
     return status;
   }
 
   if (absl::Status status =
           channel->CreateOrAttachBuffers(Aligned(opts.slot_size));
       !status.ok()) {
+    remove_server_publisher();
     return status;
   }
 
@@ -318,11 +379,13 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
     MessageSlot *slot =
         channel->FindFreeSlotUnreliable(channel->GetPublisherId());
     if (slot == nullptr) {
+      remove_server_publisher();
       return absl::InternalError("No slot available for publisher");
     }
     channel->SetSlot(slot);
     if (!opts.IsBridge() && opts.Activate()) {
       if (absl::Status status = ActivateChannel(channel.get()); !status.ok()) {
+        remove_server_publisher();
         return status;
       }
     }
@@ -332,12 +395,14 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
     // reliable publisher that has been activated.
     absl::Status status = ActivateReliableChannel(channel.get());
     if (!status.ok()) {
+      remove_server_publisher();
       return status;
     }
   }
 
   channel->TriggerSubscribers();
   if (absl::Status status = channel->UnmapUnusedBuffers(); !status.ok()) {
+    remove_server_publisher();
     return status;
   }
   channels_.insert(channel);
@@ -382,10 +447,13 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
     return absl::InternalError(sub_resp.error());
   }
 
+  SubscriberOptions subscriber_options = opts;
+  subscriber_options.use_split_buffers = sub_resp.use_split_buffers();
+
   std::shared_ptr<SubscriberImpl> channel = std::make_shared<SubscriberImpl>(
       channel_name, sub_resp.num_slots(), sub_resp.channel_id(),
       sub_resp.subscriber_id(), sub_resp.vchan_id(), session_id_,
-      sub_resp.type(), opts,
+      sub_resp.type(), subscriber_options,
       [this](Channel *c) {
         return CheckReload(static_cast<ClientChannel *>(c));
       },
@@ -602,7 +670,7 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
                  publisher->VirtualChannelId(), false, old_slot_id, false);
 }
 
-void ClientImpl::CancelPublish(PublisherImpl *publisher) {
+void ClientImpl::CancelPublish(PublisherImpl * /*publisher*/) {
   // Creating this object will unlock the mutex when it goes out of scope.
   ClientLockGuard guard(this, LockMode::kMaybeLocked);
 }
@@ -935,6 +1003,7 @@ absl::StatusOr<Message> ClientImpl::ReadMessage(SubscriberImpl *subscriber,
       subscriber->ClearPollFd();
       return Message();
     }
+    subscriber->TriggerReliablePublishers();
   }
 
   // Check if there are any new reliable publishers and if so, load their
@@ -1087,6 +1156,7 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
   if (!sub_resp.type().empty()) {
     subscriber->SetType(sub_resp.type());
   }
+  subscriber->options_.use_split_buffers = sub_resp.use_split_buffers();
   subscriber->SetNumSlots(sub_resp.num_slots());
   {
     int32_t cs = sub_resp.checksum_size() > 0 ? sub_resp.checksum_size() : 4;
@@ -1538,6 +1608,9 @@ void ClientImpl::FillCreatePublisherRequest(CreatePublisherRequest *cmd,
   cmd->set_checksum_size(opts.ChecksumSize());
   cmd->set_metadata_size(opts.MetadataSize());
   cmd->set_publisher_id(publisher_id);
+  cmd->set_max_publishers(opts.MaxPublishers());
+  cmd->set_use_split_buffers(opts.UseSplitBuffers());
+  cmd->set_split_buffers_over_bridge(opts.SplitBuffersOverBridge());
 }
 
 void ClientImpl::ApplyPublisherResponseFds(
@@ -1742,6 +1815,49 @@ absl::Status ClientImpl::SendRequestReceiveResponse(
   }
 
   return s;
+}
+
+absl::Status ClientImpl::SendOneWayRequest(const Request &req) {
+  size_t msg_len = req.ByteSizeLong();
+  std::vector<char> send_msg(sizeof(int32_t) + msg_len);
+  char *sendbuf = send_msg.data() + sizeof(int32_t);
+
+  if (!req.SerializeToArray(sendbuf, msg_len)) {
+    return absl::InternalError("Failed to serialize one-way request");
+  }
+
+  absl::StatusOr<ssize_t> n = socket_.SendMessage(sendbuf, msg_len, co_);
+  if (!n.ok()) {
+    socket_.Close();
+    if (was_connected_ && !reconnecting_) {
+      if (absl::Status rs = Reconnect(); rs.ok()) {
+        return SendOneWayRequest(req);
+      } else {
+        return rs;
+      }
+    }
+    return n.status();
+  }
+  return absl::OkStatus();
+}
+
+absl::Status ClientImpl::RegisterClientBuffer(
+    const ClientBufferHandleMetadata &metadata) {
+  Request req;
+  ToProto(metadata, req.mutable_register_client_buffer()->mutable_metadata());
+  return SendOneWayRequest(req);
+}
+
+absl::Status
+ClientImpl::UnregisterClientBuffer(const std::string &channel_name,
+                                   uint64_t session_id,
+                                   uint32_t buffer_index) {
+  Request req;
+  auto *unregister = req.mutable_unregister_client_buffer();
+  unregister->set_channel_name(channel_name);
+  unregister->set_session_id(session_id);
+  unregister->set_buffer_index(buffer_index);
+  return SendOneWayRequest(req);
 }
 
 } // namespace subspace

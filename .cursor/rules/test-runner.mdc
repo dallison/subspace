@@ -1,0 +1,11 @@
+---
+description: Use Bazelisk for repository test commands
+alwaysApply: true
+---
+
+# Test Runner
+
+Use `bazelisk` rather than `bazel` for this repository.
+
+- Run the full test suite with `bazelisk test //...`.
+- Prefer `bazelisk test <target>` for focused Bazel test runs.

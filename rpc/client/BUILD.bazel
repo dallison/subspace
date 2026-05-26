@@ -15,6 +15,7 @@ cc_library(
         "//client:subspace_client",
         "//common:subspace_common",
         "//proto:subspace_cc_proto",
+        "//rpc/common:rpc_common",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/flags:flag",

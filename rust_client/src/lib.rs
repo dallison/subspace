@@ -19,6 +19,7 @@ pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/subspace.rs"));
 }
 
+pub use channel::ChannelCounters;
 pub use client::{ChannelInfo, ChannelStats, Client, Publisher, Subscriber};
 pub use error::SubspaceError;
 pub use message::Message;

@@ -1,0 +1,39 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+cc_test(
+    name = "server",
+    srcs = ["server.cc"],
+    data = [
+        "//server:subspace_server",
+    ],
+    tags = ["manual"],
+    deps = [
+        "//asio_rpc/proto:rpc_test_asio_rpc_server",
+        "//rpc/proto:rpc_test_cc_proto",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/flags:parse",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@boost.asio",
+    ],
+)
+
+cc_test(
+    name = "client",
+    srcs = ["client.cc"],
+    data = [
+        "//server:subspace_server",
+    ],
+    tags = ["manual"],
+    deps = [
+        "//asio_rpc/proto:rpc_test_asio_rpc_client",
+        "//rpc/proto:rpc_test_cc_proto",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/flags:parse",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@boost.asio",
+    ],
+)

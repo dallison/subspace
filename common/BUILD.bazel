@@ -6,12 +6,17 @@ cc_library(
     name = "subspace_common",
     srcs = [
         "channel.cc",
+        "split_buffer.cc",
+        "system_info.cc",
         "syscall_shim.cc",
     ],
     hdrs = [
         "atomic_bitset.h",
         "channel.h",
+        "client_buffer.h",
         "fast_ring_buffer.h",
+        "split_buffer.h",
+        "system_info.h",
         "syscall_shim.h",
         "syscall_shim_test_helper.h",
     ],
@@ -45,6 +50,16 @@ cc_test(
     ],
     deps = [
         "@abseil-cpp//absl/container:flat_hash_set",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "split_buffer_test",
+    size = "small",
+    srcs = ["split_buffer_test.cc"],
+    deps = [
+        ":subspace_common",
         "@googletest//:gtest_main",
     ],
 )

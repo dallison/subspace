@@ -33,8 +33,8 @@ int main(int argc, char **argv) {
     exit(1);
   }
 
-  sub->RegisterDroppedMessageCallback(
-      [](subspace::Subscriber *s, int64_t n) {
+  (void)sub->RegisterDroppedMessageCallback(
+      [](subspace::Subscriber * /*s*/, int64_t n) {
         printf("Dropped %" PRId64 " messages\n", n);
       });
 

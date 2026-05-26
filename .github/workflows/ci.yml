@@ -2,8 +2,12 @@ name: CI
 
 on: [push, pull_request]
 
+permissions:
+  contents: read
+
 jobs:
   test:
+    name: test (${{ matrix.os }}, ${{ matrix.mode }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60 # liberal upper bound to protect against tests stalling
     strategy:
@@ -11,9 +15,23 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
+            mode: fastbuild
+            bazel_flags:
+          - os: ubuntu-latest
+            mode: opt
+            bazel_flags: -c opt
           - os: ubuntu-24.04-arm
+            mode: fastbuild
+            bazel_flags:
+          - os: ubuntu-24.04-arm
+            mode: opt
+            bazel_flags: -c opt
           - os: macos-latest
-            bazel_flags: --config=apple_silicon
+            mode: fastbuild
+            bazel_flags: --config=macos_arm64
+          - os: macos-latest
+            mode: opt
+            bazel_flags: --config=macos_arm64 -c opt
 
     steps:
       - name: Checkout code
@@ -25,7 +43,7 @@ jobs:
           # Avoid downloading Bazel every time.
           bazelisk-cache: true
           # Store build cache per workflow.
-          disk-cache: ${{ github.workflow }}-${{ matrix.os }}
+          disk-cache: ${{ github.workflow }}-${{ matrix.os }}-${{ matrix.mode }}
           # Share repository cache between workflows.
           repository-cache: true
 
@@ -37,14 +55,204 @@ jobs:
 
       - name: Run tests
         run: |
-          bazel test //... \
+          bazel test \
+            //... \
             --verbose_failures \
             --test_output=errors \
+            ${{ matrix.bazel_flags }}
+
+      - name: Run split-buffer client tests
+        run: |
+          bazel test \
+            //client:client_test \
+            //c_client:client_test \
+            --verbose_failures \
+            --test_output=errors \
+            --test_arg=--use_split_buffers \
+            ${{ matrix.bazel_flags }}
+
+      - name: Run bridge tests with and without split buffers
+        run: |
+          bazel test \
+            //client:bridge_test \
+            --verbose_failures \
+            --test_output=errors \
+            --test_arg=--use_split_buffers=false \
+            ${{ matrix.bazel_flags }}
+          bazel test \
+            //client:bridge_test \
+            --verbose_failures \
+            --test_output=errors \
+            --test_arg=--use_split_buffers=true \
             ${{ matrix.bazel_flags }}
 
       - name: Upload Bazel test logs
         uses: actions/upload-artifact@v7
         if: failure() # Upload artifacts only if a step failed
         with:
-          name: bazel-test-logs-${{ matrix.os }}
+          name: bazel-test-logs-${{ matrix.os }}-${{ matrix.mode }}
           path: bazel-testlogs
+
+  diagnostics:
+    name: diagnostics (${{ matrix.os }}, ${{ matrix.mode }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            mode: asan
+            experimental: false
+            bazel_flags: --config=asan
+            run_under:
+          - os: macos-latest
+            mode: asan
+            experimental: false
+            bazel_flags: --config=macos_arm64 --config=asan
+            run_under:
+          - os: ubuntu-latest
+            mode: tsan
+            experimental: true
+            bazel_flags: --config=tsan
+            run_under:
+          - os: macos-latest
+            mode: tsan
+            experimental: true
+            bazel_flags: --config=macos_arm64 --config=tsan
+            run_under:
+          - os: ubuntu-latest
+            mode: valgrind
+            experimental: false
+            bazel_flags:
+            run_under: --run_under='valgrind --tool=memcheck --leak-check=full --show-leak-kinds=definite,indirect --errors-for-leak-kinds=definite,indirect --error-exitcode=1'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Bazel
+        uses: bazel-contrib/setup-bazel@0.18.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-${{ matrix.os }}-${{ matrix.mode }}
+          repository-cache: true
+
+      - name: Install Valgrind
+        if: matrix.mode == 'valgrind'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind
+
+      - name: Run ${{ matrix.mode }} C client test
+        run: |
+          set +e
+          bazel test \
+            //c_client:client_test \
+            --verbose_failures \
+            --test_output=errors \
+            ${{ matrix.bazel_flags }} \
+            ${{ matrix.run_under }}
+          status=$?
+          if [ "$status" -ne 0 ] && [ "${{ matrix.experimental }}" = "true" ]; then
+            echo "::warning::Experimental ${{ matrix.mode }} diagnostics failed with exit code $status"
+            exit 0
+          fi
+          exit "$status"
+
+      - name: Run ${{ matrix.mode }} split-buffer client tests
+        run: |
+          set +e
+          bazel test \
+            //client:client_test \
+            //c_client:client_test \
+            --verbose_failures \
+            --test_output=errors \
+            --test_arg=--use_split_buffers \
+            ${{ matrix.bazel_flags }} \
+            ${{ matrix.run_under }}
+          status=$?
+          if [ "$status" -ne 0 ] && [ "${{ matrix.experimental }}" = "true" ]; then
+            echo "::warning::Experimental ${{ matrix.mode }} diagnostics failed with exit code $status"
+            exit 0
+          fi
+          exit "$status"
+
+      - name: Upload diagnostic Bazel test logs
+        uses: actions/upload-artifact@v7
+        if: ${{ failure() || matrix.experimental }}
+        with:
+          name: bazel-diagnostic-test-logs-${{ matrix.os }}-${{ matrix.mode }}
+          path: bazel-testlogs
+
+  latency:
+    name: latency (${{ matrix.platform }}, opt)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            bazel_flags: -c opt
+          - os: macos-latest
+            platform: macos
+            bazel_flags: --config=macos_arm64 -c opt
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Bazel
+        uses: bazel-contrib/setup-bazel@0.18.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-${{ matrix.os }}-latency-opt
+          repository-cache: true
+
+      - name: Run optimized latency tests
+        run: |
+          bazel test \
+            //client:latency_test \
+            --test_filter=LatencyTest.PublisherLatencyHistogram:LatencyTest.SubscriberLatency:LatencyTest.PubSubLatency \
+            --verbose_failures \
+            --test_output=all \
+            --test_env=SUBSPACE_LATENCY_OS=${{ matrix.platform }} \
+            --test_env=SUBSPACE_LATENCY_MODE=opt \
+            --test_env=SUBSPACE_LATENCY_REVISION=current \
+            ${{ matrix.bazel_flags }}
+
+      - name: Upload latency Bazel test logs
+        uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: bazel-latency-test-logs-${{ matrix.platform }}
+          path: bazel-testlogs/client/latency_test
+
+  cmake:
+    name: cmake (${{ matrix.build_type }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install CMake build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Configure CMake
+        run: cmake -S . -B build/cmake-${{ matrix.build_type }} -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+
+      - name: Build CMake targets
+        run: cmake --build build/cmake-${{ matrix.build_type }} --parallel $(nproc)
+
+      - name: Run CMake tests
+        run: ctest --test-dir build/cmake-${{ matrix.build_type }} --output-on-failure

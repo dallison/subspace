@@ -17,7 +17,7 @@ ABSL_FLAG(std::string, log_level, "info", "Log level");
 
 static subspace::Shadow *g_shadow = nullptr;
 
-void HandleSignal(int sig) {
+void HandleSignal(int /*sig*/) {
   if (g_shadow != nullptr) {
     g_shadow->Stop();
   }

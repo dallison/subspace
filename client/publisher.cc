@@ -6,6 +6,8 @@
 #include "client/checksum.h"
 #include "client_channel.h"
 #include "toolbelt/clock.h"
+#include <atomic>
+#include <thread>
 namespace subspace {
 namespace details {
 
@@ -23,6 +25,19 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
     while (current_slot_size < final_slot_size ||
            buffers_.size() < size_t(num_buffers)) {
       size_t buffer_index = buffers_.size();
+      if (UseSplitBuffers()) {
+        auto split_buffer =
+            CreateSplitBufferSet(buffer_index, final_buffer_size,
+                                 final_slot_size);
+        if (!split_buffer.ok()) {
+          return split_buffer.status();
+        }
+        bcb_->sizes[buffers_.size()].store(final_buffer_size,
+                                           std::memory_order_relaxed);
+        buffers_.push_back(std::move(*split_buffer));
+        current_slot_size = final_slot_size;
+        continue;
+      }
       auto shm_fd = CreateBuffer(buffer_index, final_buffer_size);
       if (!shm_fd.ok()) {
         return shm_fd.status();
@@ -89,7 +104,9 @@ void PublisherImpl::SetSlotToBiggestBuffer(MessageSlot *slot) {
   if (slot->buffer_index != -1) {
     // If the slot has a buffer (it's not in the free list), decrement the
     // refs for the buffer.
-    DecrementBufferRefs(slot->buffer_index);
+    if (bcb_->refs[slot->buffer_index].load(std::memory_order_relaxed) > 0) {
+      DecrementBufferRefs(slot->buffer_index);
+    }
   }
   slot->buffer_index = buffers_.size() - 1; // Use biggest buffer.
   IncrementBufferRefs(slot->buffer_index);
@@ -103,24 +120,75 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
   int cas_retries = 0;
   int retired_slot = -1;
   int free_slot = -1;
+  // See PublisherOptions::SetPreferRetiredSlots() for the rationale.
+  // When true (the default) we prefer recycling a retired slot over
+  // pulling a fresh slot from the never-used pool.  Both are equally
+  // valid for an unreliable publisher (a retired slot has been seen
+  // by every current subscriber and dropped), but a retired slot's
+  // pages are already cache-hot from the recent publish/consume
+  // cycle; a slot out of FreeSlots will demand-fault the kernel into
+  // allocating new physical pages on first write, which dominates
+  // wall-time for large payloads.  In steady state the publisher
+  // cycles through a tiny working set of retired slots without ever
+  // consuming from FreeSlots, while still being able to burst into
+  // FreeSlots if the subscriber falls behind.
+  const bool retired_first = options_.PreferRetiredSlots();
   for (;;) {
+    slot = nullptr;
+    retired_slot = -1;
+    free_slot = -1;
     CheckReload();
-    // First look at free slots then at retired slots.  If there are no free or
-    // retired slots, look at all slots for the earliest unreferenced one.
-    if (!ccb_->free_slots_exhausted.load(std::memory_order_relaxed) &&
-        (free_slot = FreeSlots().FindFirstSet()) != -1) {
-      // Take a free slot if there is one.
-      slot = &ccb_->slots[free_slot];
-      FreeSlots().Clear(free_slot);
-      if (FreeSlots().IsEmpty()) {
-        ccb_->free_slots_exhausted.store(true, std::memory_order_relaxed);
-      }
-    } else if ((retired_slot = RetiredSlots().FindFirstSet()) != -1) {
-      // We have a retired slot.
+    bool tried_first = false;
+    if (retired_first) {
+      retired_slot = RetiredSlots().FindFirstSet();
+      tried_first = (retired_slot != -1);
+    } else if (!ccb_->free_slots_exhausted.load(std::memory_order_relaxed)) {
+      free_slot = FreeSlots().FindFirstSet();
+      tried_first = (free_slot != -1);
+    }
+
+    if (tried_first && retired_first) {
+      // Claim the retired slot.
       if (embargoed_slots_.IsSet(retired_slot)) {
         continue;
       }
-      RetiredSlots().Clear(retired_slot);
+      if (!RetiredSlots().ClearWasSet(retired_slot)) {
+        retired_slot = -1;
+        continue;
+      }
+      slot = &ccb_->slots[retired_slot];
+    } else if (tried_first && !retired_first) {
+      // Claim the free slot.
+      if (!FreeSlots().ClearWasSet(free_slot)) {
+        free_slot = -1;
+        continue;
+      }
+      slot = &ccb_->slots[free_slot];
+      if (FreeSlots().IsEmpty()) {
+        ccb_->free_slots_exhausted.store(true, std::memory_order_relaxed);
+      }
+    } else if (retired_first &&
+               !ccb_->free_slots_exhausted.load(std::memory_order_relaxed) &&
+               (free_slot = FreeSlots().FindFirstSet()) != -1) {
+      // Retired pool empty, fall back to FreeSlots.
+      if (!FreeSlots().ClearWasSet(free_slot)) {
+        free_slot = -1;
+        continue;
+      }
+      slot = &ccb_->slots[free_slot];
+      if (FreeSlots().IsEmpty()) {
+        ccb_->free_slots_exhausted.store(true, std::memory_order_relaxed);
+      }
+    } else if (!retired_first &&
+               (retired_slot = RetiredSlots().FindFirstSet()) != -1) {
+      // FreeSlots exhausted (legacy order), fall back to RetiredSlots.
+      if (embargoed_slots_.IsSet(retired_slot)) {
+        continue;
+      }
+      if (!RetiredSlots().ClearWasSet(retired_slot)) {
+        retired_slot = -1;
+        continue;
+      }
       slot = &ccb_->slots[retired_slot];
     } else {
       // Find the slot with refs == 0 and the oldest message.
@@ -149,8 +217,7 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
       }
       continue;
     }
-    // Claim the slot by setting the refs to kPubOwned with our owner in the
-    // bottom bits.
+    // Claim the slot by setting the kPubOwned bit and our owner.
     uint64_t old_refs = slot->refs.load(std::memory_order_relaxed);
     uint64_t ref = kPubOwned | owner;
     uint64_t expected = BuildRefsBitField(
@@ -169,8 +236,11 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
       break;
     }
     if (++cas_retries >= max_cas_retries) {
-      // Rather than spinning forever, let's just give up and return nullptr.
-      return nullptr;
+      if (retries-- == 0) {
+        return nullptr;
+      }
+      cas_retries = 0;
+      std::this_thread::yield();
     }
   }
   slot->ordinal = 0;
@@ -202,18 +272,30 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
 }
 
 MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
+  int retries = num_slots_ * 1000;
   MessageSlot *slot = nullptr;
   int retired_slot = -1;
   int free_slot = -1;
   embargoed_slots_.ClearAll();
+  constexpr int max_cas_retries = 1000;
+  int cas_retries = 0;
   for (;;) {
+    slot = nullptr;
+    retired_slot = -1;
+    free_slot = -1;
     CheckReload();
 
     // Put all free slots into the active_slots vector.
     active_slots_.clear();
     if (!ccb_->free_slots_exhausted.load(std::memory_order_relaxed) &&
         (free_slot = FreeSlots().FindFirstSet()) != -1) {
-      FreeSlots().Clear(free_slot);
+      // FindFirstSet uses relaxed loads; only the publisher whose
+      // ClearWasSet returns true actually owns this bit. See
+      // FindFreeSlotUnreliable for details.
+      if (!FreeSlots().ClearWasSet(free_slot)) {
+        free_slot = -1;
+        continue;
+      }
       if (FreeSlots().IsEmpty()) {
         ccb_->free_slots_exhausted.store(true, std::memory_order_relaxed);
       }
@@ -225,7 +307,10 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
       if (embargoed_slots_.IsSet(retired_slot)) {
         continue;
       }
-      RetiredSlots().Clear(retired_slot);
+      if (!RetiredSlots().ClearWasSet(retired_slot)) {
+        retired_slot = -1;
+        continue;
+      }
       MessageSlot *s = &ccb_->slots[retired_slot];
 
       ActiveSlot active_slot = {s, s->ordinal, s->timestamp};
@@ -291,6 +376,13 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
       RetiredSlots().Clear(slot->id);
       break;
     }
+    if (++cas_retries >= max_cas_retries) {
+      if (retries-- == 0) {
+        return nullptr;
+      }
+      cas_retries = 0;
+      std::this_thread::yield();
+    }
   }
   slot->ordinal = 0;
   slot->timestamp = 0;
@@ -323,8 +415,7 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     MessageSlot *slot, bool reliable, bool is_activation, int owner,
     bool omit_prefix, bool use_prefix_slot_id, bool for_tunnel) {
   void *buffer = GetBufferAddress(slot);
-  MessagePrefix *prefix = reinterpret_cast<MessagePrefix *>(
-      static_cast<char *>(buffer) - PrefixSize());
+  MessagePrefix *prefix = Prefix(slot);
 
   slot->ordinal = ccb_->ordinals.Next(slot->vchan_id);
   slot->timestamp = toolbelt::Now();
@@ -370,21 +461,24 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     }
   }
 
-  // Update counters.
-  if (!is_activation) {
-    ccb_->total_messages++;
-    ccb_->total_bytes += slot->message_size;
-
-    if (slot->message_size > ccb_->max_message_size) {
-      ccb_->max_message_size = slot->message_size;
-    }
-  }
-
   // Set the refs to the ordinal with no refs.
   slot->refs.store(BuildRefsBitField(slot->ordinal, vchan_id_, 0),
                    std::memory_order_release);
 
-  // Tell all subscribers that the slot is available.
+  // Tell all subscribers that the slot is available, BEFORE bumping
+  // total_messages.  SubscriberImpl::NextSlot() uses total_messages as
+  // a version stamp for its cached active_slots_ snapshot: a subscriber
+  // that observes a bumped total_messages must also observe every
+  // preceding bits.Set() so its CollectVisibleSlots() snapshot can't
+  // miss the just-published slot.  bits.Set() is relaxed, but the
+  // following total_messages++ is seq_cst, so the relaxed bit writes
+  // are sequenced-before the seq_cst increment and therefore
+  // happens-before any subscriber's seq_cst load of total_messages
+  // that observes the new value.  If we incremented total_messages
+  // first, a subscriber could read the new total, run
+  // CollectVisibleSlots() before the bit was visible, cache that
+  // snapshot under next_slot_cached_total_, and then reuse the stale
+  // cache forever (no further total bump arrives to invalidate it).
   ccb_->subscribers.Traverse([this, slot](int sub_id) {
     if (vchan_id_ != -1 && GetSubVchanId(sub_id) != -1 &&
         vchan_id_ != GetSubVchanId(sub_id)) {
@@ -392,6 +486,15 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     }
     GetAvailableSlots(sub_id).Set(slot->id);
   });
+
+  // Update counters AFTER setting the available-slot bits (see above).
+  if (!is_activation) {
+    ccb_->total_bytes += slot->message_size;
+    if (slot->message_size > ccb_->max_message_size) {
+      ccb_->max_message_size = slot->message_size;
+    }
+    ccb_->total_messages++;
+  }
 
   // A reliable publisher doesn't allocate a slot until it is asked for.
   if (reliable) {
