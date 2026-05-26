@@ -16,7 +16,11 @@ namespace subspace {
 namespace {
 
 std::string UniqueShadowFile(const std::string &suffix) {
+#if defined(__ANDROID__)
+  std::string path = "/data/local/tmp/subspace_split_buffer_test_" + suffix + "_XXXXXX";
+#else
   std::string path = "/tmp/subspace_split_buffer_test_" + suffix + "_XXXXXX";
+#endif
   std::vector<char> buffer(path.begin(), path.end());
   buffer.push_back('\0');
   int fd = mkstemp(buffer.data());

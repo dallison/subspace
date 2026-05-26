@@ -23,6 +23,12 @@ bazel_dep(name = "boost.coroutine", version = "1.87.0")
 bazel_dep(name = "rules_shell", version = "0.6.1") 
 bazel_dep(name = "rules_proto", version = "6.0.2")
 
+single_version_override(
+    module_name = "boost.asio",
+    patches = ["//patches:boost_asio_android_pthread.patch"],
+    patch_strip = 1,
+)
+
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(
     configure_coverage_tool = True,
