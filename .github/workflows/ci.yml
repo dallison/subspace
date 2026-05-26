@@ -287,6 +287,8 @@ jobs:
             //client:client_test \
             //client:bridge_test \
             //common:split_buffer_test \
+            //plugins:nop_plugin.so \
+            //plugins:split_buffer_free_test_plugin.so \
             //coro_rpc/test:rpc_test \
             //coro_rpc/server:server_test \
             //coro_rpc/client:client_test \

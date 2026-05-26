@@ -38,6 +38,10 @@ adb push bazel-bin/asio_rpc/test/rpc_test /data/local/tmp/asio_rpc_test
 adb push bazel-bin/asio_rpc/server/server_test /data/local/tmp/asio_rpc_server_test
 adb push bazel-bin/asio_rpc/client/client_test /data/local/tmp/asio_rpc_client_test
 
+# Push plugin .so files to relative path expected by tests
+adb shell "mkdir -p /data/local/tmp/plugins"
+find bazel-bin/plugins/ -name "*.so" -exec adb push {} /data/local/tmp/plugins/ \; 2>/dev/null || true
+
 # Make binaries executable
 adb shell "chmod +x /data/local/tmp/*_test /data/local/tmp/subspace_server"
 
