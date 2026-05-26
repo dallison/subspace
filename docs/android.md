@@ -170,6 +170,32 @@ Android enforces linker namespace restrictions. Shared libraries must be in a
 directory referenced by `LD_LIBRARY_PATH` or in the same directory as the
 executable. The `android_libs/` approach works for `/data/local/tmp/` binaries.
 
+## CMake Cross-Compilation
+
+Subspace can be cross-compiled for Android using CMake with the NDK toolchain:
+
+```bash
+export ANDROID_NDK_HOME=/path/to/ndk
+
+cmake -S . -B build/android \
+  -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+  -DANDROID_ABI=arm64-v8a \
+  -DANDROID_PLATFORM=android-28 \
+  -DANDROID_STL=c++_shared \
+  -DCMAKE_BUILD_TYPE=Release
+
+cmake --build build/android --parallel
+```
+
+Pre-generated protobuf files (`proto/subspace.pb.{cc,h}`) are included in the
+repository so cross-compilation works without needing a host-native `protoc`.
+If `subspace.proto` changes, regenerate them with a native build:
+
+```bash
+cmake -S . -B build/native && cmake --build build/native --target subspace_proto
+cp build/native/proto/subspace.pb.{cc,h} proto/
+```
+
 ## AOSP / Soong (Blueprint) Build
 
 Subspace provides `Android.bp` files for building as part of an AOSP source

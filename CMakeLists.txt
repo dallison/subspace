@@ -133,10 +133,10 @@ if(SUBSPACE_PYTHON)
     FetchContent_MakeAvailable(pybind11)
 endif()
 
+#add to get proto/subspace.pb.h working (build dir first so generated files win)
+include_directories(${CMAKE_CURRENT_BINARY_DIR})
 #add to get */file.h includes working
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
-#add to get proto/subspace.pb.h working
-include_directories(${CMAKE_CURRENT_BINARY_DIR})
 # --- Subspace Tests Target ---
 # Corresponds to //subspace/tests:tests
 enable_testing() # Enable CTest for running tests
