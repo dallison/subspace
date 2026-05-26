@@ -15,7 +15,7 @@ adb shell "mkdir -p /dev/subspace && chmod 777 /dev/subspace"
 adb shell "mkdir -p /data/local/tmp"
 
 # Push libc++_shared.so from NDK (needed since we built with ANDROID_STL=c++_shared)
-NDK_LIBCXX=$(find "$ANDROID_NDK_HOME" -name "libc++_shared.so" -path "*x86_64*" | head -1)
+NDK_LIBCXX=$(find "$ANDROID_NDK_HOME" -name "libc++_shared.so" -path "*/x86_64-linux-android/*" | head -1)
 if [ -n "$NDK_LIBCXX" ]; then
   adb push "$NDK_LIBCXX" /data/local/tmp/libc++_shared.so
 fi
