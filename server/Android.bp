@@ -15,12 +15,27 @@ cc_library_static {
     local_include_dirs: [".."],
     static_libs: [
         "libsubspace_common",
-        "libsubspace_client",
         "libsubspace_proto",
+        "libcoroutines",
+        "libcpp_toolbelt",
     ],
     shared_libs: [
+        "libsubspace_client",
         "libprotobuf-cpp-lite",
         "liblog",
+    ],
+    header_libs: [
+        "libabseil-headers",
+    ],
+    whole_static_libs: [
+        "libabsl_status",
+        "libabsl_statusor",
+        "libabsl_strings",
+        "libabsl_str_format_internal",
+        "libabsl_flat_hash_map",
+        "libabsl_flat_hash_set",
+        "libabsl_flags",
+        "libabsl_flags_parse",
     ],
 }
 
@@ -32,6 +47,8 @@ cc_binary {
         "libsubspace_server",
         "libsubspace_common",
         "libsubspace_proto",
+        "libcoroutines",
+        "libcpp_toolbelt",
     ],
     shared_libs: [
         "libsubspace_client",
@@ -39,6 +56,17 @@ cc_binary {
         "liblog",
         "libdl",
     ],
-    // cpp_toolbelt and coroutines must be vendored into the AOSP tree
-    // or provided as prebuilt modules.
+    header_libs: [
+        "libabseil-headers",
+    ],
+    whole_static_libs: [
+        "libabsl_status",
+        "libabsl_statusor",
+        "libabsl_strings",
+        "libabsl_str_format_internal",
+        "libabsl_flat_hash_map",
+        "libabsl_flat_hash_set",
+        "libabsl_flags",
+        "libabsl_flags_parse",
+    ],
 }

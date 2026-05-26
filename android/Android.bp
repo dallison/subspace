@@ -15,8 +15,13 @@ cc_library_shared {
     static_libs: [
         "libsubspace_common",
         "libsubspace_proto",
+        "libcoroutines",
+        "libcpp_toolbelt",
     ],
-    header_libs: ["jni_headers"],
+    header_libs: [
+        "jni_headers",
+        "libabseil-headers",
+    ],
 }
 
 // Java library for Android apps.

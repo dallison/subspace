@@ -17,6 +17,7 @@ cc_defaults {
             cflags: ["-DSUBSPACE_ANDROID"],
         },
     },
+    local_include_dirs: ["."],
     stl: "c++_shared",
     min_sdk_version: "28",
 }

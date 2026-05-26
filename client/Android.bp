@@ -19,13 +19,23 @@ cc_library_shared {
     static_libs: [
         "libsubspace_common",
         "libsubspace_proto",
+        "libcoroutines",
+        "libcpp_toolbelt",
     ],
     shared_libs: [
         "libprotobuf-cpp-lite",
         "liblog",
     ],
-    // cpp_toolbelt and coroutines must be vendored into the AOSP tree
-    // or provided as prebuilt modules.  Uncomment and adjust once available:
-    // static_libs: ["libcpp_toolbelt", "libcoroutines"],
-    // header_libs: ["libabseil-cpp"],
+    header_libs: [
+        "libabseil-headers",
+    ],
+    whole_static_libs: [
+        "libabsl_status",
+        "libabsl_statusor",
+        "libabsl_strings",
+        "libabsl_str_format_internal",
+        "libabsl_flat_hash_map",
+        "libabsl_flat_hash_set",
+        "libabsl_span",
+    ],
 }

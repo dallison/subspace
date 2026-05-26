@@ -169,3 +169,69 @@ buffers.
 Android enforces linker namespace restrictions. Shared libraries must be in a
 directory referenced by `LD_LIBRARY_PATH` or in the same directory as the
 executable. The `android_libs/` approach works for `/data/local/tmp/` binaries.
+
+## AOSP / Soong (Blueprint) Build
+
+Subspace provides `Android.bp` files for building as part of an AOSP source
+tree using the Soong build system. This is the recommended approach for
+integrating subspace into an Android platform image.
+
+### Directory Layout
+
+Place the subspace source tree in your AOSP checkout (e.g.,
+`external/subspace/`). The Blueprint files define these modules:
+
+| Module | Type | Description |
+|--------|------|-------------|
+| `libsubspace_common` | static lib | Core channel, shared memory, syscall shim |
+| `libsubspace_client` | shared lib | Client API (publisher/subscriber) |
+| `libsubspace_server` | static lib | Server implementation |
+| `subspace_server` | binary | Standalone server daemon |
+| `libsubspace_proto` | static lib | Protobuf message definitions |
+| `libsubspace_jni` | shared lib | JNI bindings for Java clients |
+| `subspace-java` | java lib | Java client wrapper |
+
+### External Dependencies
+
+Subspace requires two external libraries that must also be present in the AOSP
+tree:
+
+1. **coroutines** (`external/coroutines/`) — https://github.com/dallison/coroutines
+2. **cpp_toolbelt** (`external/cpp_toolbelt/`) — https://github.com/dallison/cpp_toolbelt
+
+Example `Android.bp` files for both are provided in `external/coroutines/Android.bp`
+and `external/cpp_toolbelt/Android.bp` within this repository. Copy these into
+the respective source trees in your AOSP checkout.
+
+### AOSP Dependencies
+
+The following modules must be available in the AOSP tree (they are part of
+standard AOSP):
+
+- `libprotobuf-cpp-lite` — Protocol Buffers runtime
+- `liblog` — Android logging
+- `libdl` — Dynamic linker
+- Abseil modules (`libabsl_status`, `libabsl_statusor`, `libabsl_strings`,
+  `libabsl_str_format_internal`, `libabsl_flat_hash_map`,
+  `libabsl_flat_hash_set`, `libabsl_flags`, `libabsl_flags_parse`,
+  `libabsl_span`)
+- `libabseil-headers` — Abseil header library
+- `jni_headers` — JNI headers (for the JNI module)
+
+### Building
+
+```bash
+# From your AOSP root:
+m subspace_server libsubspace_client libsubspace_jni subspace-java
+```
+
+### Integration Notes
+
+- The `subspace_defaults` module in the root `Android.bp` sets C++17 mode,
+  warning flags, and the `-DSUBSPACE_ANDROID` preprocessor define.
+- All modules use `stl: "c++_shared"` and `min_sdk_version: "28"`.
+- The server binary can be included in the system partition via
+  `PRODUCT_PACKAGES += subspace_server` in your device makefile.
+- The JNI library and Java wrapper can be included in apps via the standard
+  AOSP module dependency mechanism.
+
