@@ -75,4 +75,3 @@ android_ndk_repository_extension = use_extension(
     "android_ndk_repository_extension",
 )
 use_repo(android_ndk_repository_extension, "androidndk")
-register_toolchains("@androidndk//:all")
