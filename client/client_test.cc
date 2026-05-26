@@ -843,6 +843,45 @@ TEST_F(ClientTest, PlaceholderSubscriberLearnsSplitBuffersOnReload) {
   EXPECT_NE(reinterpret_cast<const void *>(sub_prefix), msg->buffer);
 }
 
+TEST_F(ClientTest, RejectsMixedSplitBufferPublisherOptions) {
+  subspace::Client client;
+  InitClient(client);
+
+  subspace::PublisherOptions split_options;
+  split_options.SetSlotSize(128).SetNumSlots(4).SetUseSplitBuffers(true);
+  absl::StatusOr<Publisher> split_pub =
+      client.CreatePublisher("mixed_split_publishers", split_options);
+  ASSERT_OK(split_pub);
+
+  subspace::PublisherOptions combined_options;
+  combined_options.SetSlotSize(128).SetNumSlots(4).SetUseSplitBuffers(false);
+  absl::StatusOr<Publisher> combined_pub =
+      client.CreatePublisher("mixed_split_publishers", combined_options);
+  ASSERT_FALSE(combined_pub.ok());
+  EXPECT_THAT(combined_pub.status().message(),
+              ::testing::HasSubstr("Inconsistent split-buffer mode"));
+
+  subspace::PublisherOptions bridge_split_options;
+  bridge_split_options.SetSlotSize(128)
+      .SetNumSlots(4)
+      .SetUseSplitBuffers(false)
+      .SetSplitBuffersOverBridge(true);
+  absl::StatusOr<Publisher> bridge_split_pub = client.CreatePublisher(
+      "mixed_bridge_split_publishers", bridge_split_options);
+  ASSERT_OK(bridge_split_pub);
+
+  subspace::PublisherOptions no_bridge_split_options;
+  no_bridge_split_options.SetSlotSize(128)
+      .SetNumSlots(4)
+      .SetUseSplitBuffers(false)
+      .SetSplitBuffersOverBridge(false);
+  absl::StatusOr<Publisher> no_bridge_split_pub = client.CreatePublisher(
+      "mixed_bridge_split_publishers", no_bridge_split_options);
+  ASSERT_FALSE(no_bridge_split_pub.ok());
+  EXPECT_THAT(no_bridge_split_pub.status().message(),
+              ::testing::HasSubstr("Inconsistent bridge split-buffer mode"));
+}
+
 TEST_F(ClientTest, SplitBufferCallbacksAllocateMapUnmapAndFreePayloadSlots) {
   auto state = std::make_shared<TestSplitBufferState>();
 

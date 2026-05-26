@@ -1073,7 +1073,13 @@ absl::Status Server::RemapChannel(ServerChannel *channel, int slot_size,
   if (!fds.ok()) {
     return fds.status();
   }
+  channel->SetLastKnownSlotSize(slot_size);
   channel->SetSharedMemoryFds(std::move(*fds));
+  // Remapping replaces the CCB/BCB FDs; shadow recovery must receive the
+  // refreshed descriptors instead of retaining the placeholder mappings.
+  ForEachShadow([channel](const std::unique_ptr<ShadowReplicator> &s) {
+    s->SendCreateChannel(channel);
+  });
   return absl::OkStatus();
 }
 
@@ -1868,8 +1874,16 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
                 "Failed to parse Subscribed message");
     return;
   }
-  const bool bridge_publisher_split_buffers =
+  bool bridge_publisher_split_buffers =
       split_buffers_over_bridge || subscribed.split_buffers_over_bridge();
+  if (auto it = channels_.find(channel_name); it != channels_.end()) {
+    const ServerChannel *split_channel =
+        SplitBufferOptionsChannel(it->second.get());
+    if (split_channel->HasSplitBufferOptions()) {
+      bridge_publisher_split_buffers =
+          split_channel->GetSplitBufferOptions().use_split_buffers;
+    }
+  }
 
   // Build a publisher to publish incoming bridge messages to the channel.
   Client client(co::self);
