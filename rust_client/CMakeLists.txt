@@ -12,6 +12,11 @@ if(NOT CARGO_EXECUTABLE)
     return()
 endif()
 
+if(CMAKE_CROSSCOMPILING)
+    message(STATUS "Cross-compiling -- skipping rust_client (no cross-Cargo support)")
+    return()
+endif()
+
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
     set(CARGO_BUILD_FLAG "--release")
     set(CARGO_TARGET_DIR "release")
