@@ -26,8 +26,14 @@ target_link_libraries(subspace_common PUBLIC
     toolbelt
     co
     subspace_proto
-    protobuf::libprotobuf # If common code uses protobuf
+    protobuf::libprotobuf
 )
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
+    target_link_libraries(subspace_common PUBLIC rt)
+elseif(ANDROID)
+    target_link_libraries(subspace_common PUBLIC log)
+endif()
 
 add_executable(common_test common_test.cc)
 add_test(NAME common_test COMMAND common_test)

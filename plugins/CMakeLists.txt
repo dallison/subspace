@@ -25,6 +25,10 @@ if(UNIX AND NOT APPLE)
     )
 endif()
 
+if(ANDROID)
+    target_link_libraries(nop_plugin PRIVATE log)
+endif()
+
 set_target_properties(nop_plugin PROPERTIES
     PREFIX ""
     OUTPUT_NAME "nop_plugin"
