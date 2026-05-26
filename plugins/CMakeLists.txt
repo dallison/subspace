@@ -14,19 +14,33 @@ target_include_directories(nop_plugin PRIVATE
 
 add_dependencies(nop_plugin subspace_proto)
 
-target_link_libraries(nop_plugin PRIVATE
-    absl::status
-    absl::str_format
-)
-
-if(UNIX AND NOT APPLE)
+if(ANDROID)
+    # Android's lld requires all symbols resolved at link time for .so files
+    target_link_libraries(nop_plugin PRIVATE
+        libserver
+        subspace_client
+        subspace_common
+        subspace_proto
+        co
+        toolbelt
+        absl::status
+        absl::str_format
+        protobuf::libprotobuf
+        log
+    )
+elseif(UNIX AND NOT APPLE)
+    target_link_libraries(nop_plugin PRIVATE
+        absl::status
+        absl::str_format
+    )
     target_link_options(nop_plugin PRIVATE
         "LINKER:--unresolved-symbols=ignore-all"
     )
-endif()
-
-if(ANDROID)
-    target_link_libraries(nop_plugin PRIVATE log)
+else()
+    target_link_libraries(nop_plugin PRIVATE
+        absl::status
+        absl::str_format
+    )
 endif()
 
 set_target_properties(nop_plugin PROPERTIES
@@ -50,13 +64,28 @@ target_include_directories(split_buffer_free_test_plugin PRIVATE
 
 add_dependencies(split_buffer_free_test_plugin subspace_proto)
 
-target_link_libraries(split_buffer_free_test_plugin PRIVATE
-    absl::status
-)
-
-if(UNIX AND NOT APPLE)
+if(ANDROID)
+    target_link_libraries(split_buffer_free_test_plugin PRIVATE
+        libserver
+        subspace_client
+        subspace_common
+        subspace_proto
+        co
+        toolbelt
+        absl::status
+        protobuf::libprotobuf
+        log
+    )
+elseif(UNIX AND NOT APPLE)
+    target_link_libraries(split_buffer_free_test_plugin PRIVATE
+        absl::status
+    )
     target_link_options(split_buffer_free_test_plugin PRIVATE
         "LINKER:--unresolved-symbols=ignore-all"
+    )
+else()
+    target_link_libraries(split_buffer_free_test_plugin PRIVATE
+        absl::status
     )
 endif()
 
