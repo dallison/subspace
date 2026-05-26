@@ -29,11 +29,11 @@ It has the following features:
 1.	Ability to read the next or newest message in a channel.
 1.	File-descriptor-based event triggers.
 1.	Optional split payload buffers for external allocators and memory pools.
-1.	Automatic UDP discovery and TCP bridging of channels between servers.
+1.	Automatic UDP discovery and TCP bridging of channels between servers, including fixed TCP bridge ports/ranges for firewall-friendly deployments.
 1.	Shadow process for crash recovery -- the server can restart and resume without losing shared memory state.
 1.	Shared and weak pointers for message references.
-1.	Ports to MacOS and Linux, ARM64 and x86_64.
-1.	Builds using Bazel and uses Abseil and Protocol Buffers from Google.
+1.	Ports to MacOS, Linux, and Android, ARM64 and x86_64.
+1.	Builds using Bazel, CMake, or Android Soong, and uses Abseil and Protocol Buffers from Google.
 1.	Uses my C++ coroutine library (https://github.com/dallison/co)
 
 See the file docs/subspace.pdf for full documentation.  Additional documentation:
@@ -44,6 +44,7 @@ See the file docs/subspace.pdf for full documentation.  Additional documentation
 - [Server Architecture](docs/server-architecture.md)
 - [Rust Client](docs/rust-client.md)
 - [Shadow Process (Crash Recovery)](docs/shadow-process.md)
+- [Android](docs/android.md)
 
 # Building
 
@@ -82,6 +83,33 @@ Then run each in a separate terminal:
  * `./bazel-bin/server/subspace_server`
  * `./bazel-bin/manual_tests/sub`
  * `./bazel-bin/manual_tests/pub`
+
+### To build for Android
+
+Subspace supports Android cross-compilation with Bazel using the Android NDK
+toolchain. Install the Android SDK/NDK, set `ANDROID_NDK_HOME`, and use one of
+the Android configs:
+
+```bash
+# ARM64 Android device or emulator
+bazel build //server:subspace_server //client:client_test --config=android_arm64
+
+# x86_64 Android emulator
+bazel build //server:subspace_server //client:client_test --config=android_x86_64
+```
+
+The default Android server socket is `/data/local/tmp/subspace`. Android does
+not provide POSIX `shm_open`, so Subspace uses files in `/dev/subspace` as the
+shared-memory backing store; create that directory on the device before running
+the server:
+
+```bash
+adb root
+adb shell "mkdir -p /dev/subspace && chmod 777 /dev/subspace"
+```
+
+See [docs/android.md](docs/android.md) for SDK setup, deployment, test running,
+CMake cross-compilation, and AOSP/Soong integration details.
 
 ### Running Tests with Bazel
 
@@ -204,6 +232,28 @@ cmake -DCMAKE_BUILD_TYPE=Release ..
 make -j$(nproc)
 ```
 
+### Android Cross-Compilation
+
+Subspace can also be cross-compiled for Android with CMake and the NDK
+toolchain:
+
+```bash
+export ANDROID_NDK_HOME=/path/to/ndk
+
+cmake -S . -B build/android \
+  -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+  -DANDROID_ABI=arm64-v8a \
+  -DANDROID_PLATFORM=android-28 \
+  -DANDROID_STL=c++_shared \
+  -DCMAKE_BUILD_TYPE=Release
+
+cmake --build build/android --parallel
+```
+
+For platform builds, the repository also includes `Android.bp` files for AOSP
+Soong modules such as `subspace_server`, `libsubspace_client`,
+`libsubspace_jni`, and `subspace-java`.
+
 ### Running Tests
 
 After building, you can run the tests:
@@ -305,7 +355,34 @@ will tell you what to put in for the hash when you first build it.
 
 ## Overview
 
-Subspace provides a high-performance, shared-memory based publish/subscribe IPC system. Messages are transmitted through POSIX shared memory with sub-microsecond latency. The system supports both reliable and unreliable message delivery, allowing you to choose the appropriate semantics for your use case.
+Subspace provides a high-performance, shared-memory based publish/subscribe IPC system. Messages are transmitted through POSIX shared memory with sub-microsecond latency, or through tmpfs-backed shared-memory files on Android. The system supports both reliable and unreliable message delivery, allowing you to choose the appropriate semantics for your use case.
+
+## Network Bridging
+
+Subspace can bridge non-local channels between servers. Discovery uses UDP
+(`--disc_port` and `--peer_port`), while message data is transferred over TCP
+connections created for each bridge. By default the TCP listener uses an
+ephemeral port.
+
+For deployments behind firewalls, pin bridge listeners to a fixed port or an
+inclusive range:
+
+```bash
+# Single TCP bridge port
+./bazel-bin/server/subspace_server --bridge_ports=7000
+
+# TCP bridge port range
+./bazel-bin/server/subspace_server --bridge_ports=7000-7010
+
+# Allow ephemeral fallback if the configured bridge ports are busy
+./bazel-bin/server/subspace_server \
+    --bridge_ports=7000-7010 \
+    --bridge_ports_fallback_ephemeral
+```
+
+The bridge TCP port configuration is separate from the UDP discovery ports, so
+firewall rules need to allow both the discovery UDP traffic and the configured
+TCP bridge port or range.
 
 ## Client API
 
