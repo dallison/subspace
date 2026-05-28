@@ -65,6 +65,27 @@ static void ToProto(const ClientBufferHandleMetadata &metadata,
   *proto->mutable_allocator_metadata() = metadata.allocator_metadata;
 }
 
+static ClientBufferHandleMetadata
+FromProto(const ClientBufferHandleMetadataProto &proto) {
+  ClientBufferHandleMetadata metadata;
+  metadata.channel_name = proto.channel_name();
+  metadata.session_id = proto.session_id();
+  metadata.buffer_index = proto.buffer_index();
+  metadata.slot_id = proto.slot_id();
+  metadata.is_prefix = proto.is_prefix();
+  metadata.full_size = proto.full_size();
+  metadata.allocation_size = proto.allocation_size();
+  metadata.handle = static_cast<uintptr_t>(proto.handle());
+  metadata.shadow_file = proto.shadow_file();
+  metadata.object_name = proto.object_name();
+  metadata.allocator = proto.allocator();
+  metadata.pool_id = proto.pool_id();
+  metadata.cache_enabled = proto.cache_enabled();
+  metadata.alignment = proto.alignment();
+  metadata.allocator_metadata = proto.allocator_metadata();
+  return metadata;
+}
+
 ClientImpl::ClientLockGuard::ClientLockGuard(ClientImpl *client,
                                              LockMode lock_mode)
     : client_(client), lock_mode_(lock_mode) {
@@ -344,8 +365,14 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
       },
       server_user_id_, server_group_id_);
   channel->SetClientBufferRegistrationCallback(
-      [this](const ClientBufferHandleMetadata &metadata) {
-        return RegisterClientBuffer(metadata);
+      [this](const ClientBufferHandleMetadata &metadata,
+             const toolbelt::FileDescriptor *fd) {
+        return RegisterClientBuffer(metadata, fd);
+      });
+  channel->SetClientBufferLookupCallback(
+      [this](const std::string &channel_name, uint64_t session_id,
+             uint32_t buffer_index) {
+        return GetClientBuffers(channel_name, session_id, buffer_index);
       });
   channel->SetClientBufferUnregistrationCallback(
       [this](const std::string &channel_name, uint64_t session_id,
@@ -458,6 +485,11 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
         return CheckReload(static_cast<ClientChannel *>(c));
       },
       server_user_id_, server_group_id_);
+  channel->SetClientBufferLookupCallback(
+      [this](const std::string &channel_name, uint64_t session_id,
+             uint32_t buffer_index) {
+        return GetClientBuffers(channel_name, session_id, buffer_index);
+      });
 
   channel->SetNumSlots(sub_resp.num_slots());
   {
@@ -1765,7 +1797,8 @@ absl::Status ClientImpl::ReregisterSubscriber(SubscriberImpl *subscriber) {
 
 absl::Status ClientImpl::SendRequestReceiveResponse(
     const Request &req, Response &response,
-    std::vector<toolbelt::FileDescriptor> &fds) {
+    std::vector<toolbelt::FileDescriptor> &fds,
+    const std::vector<toolbelt::FileDescriptor> &send_fds) {
 
   {
     size_t msg_len = req.ByteSizeLong();
@@ -1781,12 +1814,19 @@ absl::Status ClientImpl::SendRequestReceiveResponse(
       socket_.Close();
       if (was_connected_ && !reconnecting_) {
         if (absl::Status rs = Reconnect(); rs.ok()) {
-          return SendRequestReceiveResponse(req, response, fds);
+          return SendRequestReceiveResponse(req, response, fds, send_fds);
         } else {
           return rs;
         }
       }
       return n.status();
+    }
+    if (!send_fds.empty()) {
+      absl::Status status = socket_.SendFds(send_fds, co_);
+      if (!status.ok()) {
+        socket_.Close();
+        return status;
+      }
     }
   }
 
@@ -1796,7 +1836,7 @@ absl::Status ClientImpl::SendRequestReceiveResponse(
     socket_.Close();
     if (was_connected_ && !reconnecting_) {
       if (absl::Status rs = Reconnect(); rs.ok()) {
-        return SendRequestReceiveResponse(req, response, fds);
+        return SendRequestReceiveResponse(req, response, fds, send_fds);
       } else {
         return rs;
       }
@@ -1817,7 +1857,9 @@ absl::Status ClientImpl::SendRequestReceiveResponse(
   return s;
 }
 
-absl::Status ClientImpl::SendOneWayRequest(const Request &req) {
+absl::Status
+ClientImpl::SendOneWayRequest(const Request &req,
+                              const std::vector<toolbelt::FileDescriptor> &fds) {
   size_t msg_len = req.ByteSizeLong();
   std::vector<char> send_msg(sizeof(int32_t) + msg_len);
   char *sendbuf = send_msg.data() + sizeof(int32_t);
@@ -1831,21 +1873,83 @@ absl::Status ClientImpl::SendOneWayRequest(const Request &req) {
     socket_.Close();
     if (was_connected_ && !reconnecting_) {
       if (absl::Status rs = Reconnect(); rs.ok()) {
-        return SendOneWayRequest(req);
+        return SendOneWayRequest(req, fds);
       } else {
         return rs;
       }
     }
     return n.status();
   }
+  if (!fds.empty()) {
+    absl::Status status = socket_.SendFds(fds, co_);
+    if (!status.ok()) {
+      socket_.Close();
+      return status;
+    }
+  }
   return absl::OkStatus();
 }
 
 absl::Status ClientImpl::RegisterClientBuffer(
-    const ClientBufferHandleMetadata &metadata) {
+    const ClientBufferHandleMetadata &metadata,
+    const toolbelt::FileDescriptor *fd) {
   Request req;
-  ToProto(metadata, req.mutable_register_client_buffer()->mutable_metadata());
-  return SendOneWayRequest(req);
+  auto *register_buffer = req.mutable_register_client_buffer();
+  ToProto(metadata, register_buffer->mutable_metadata());
+  std::vector<toolbelt::FileDescriptor> fds;
+  if (fd != nullptr && fd->Valid()) {
+    register_buffer->set_has_fd(true);
+    register_buffer->set_fd_index(0);
+    fds.push_back(*fd);
+  }
+  Response response;
+  std::vector<toolbelt::FileDescriptor> response_fds;
+  if (absl::Status status =
+          SendRequestReceiveResponse(req, response, response_fds, fds);
+      !status.ok()) {
+    return status;
+  }
+  if (!response.register_client_buffer().error().empty()) {
+    return absl::InternalError(response.register_client_buffer().error());
+  }
+  return absl::OkStatus();
+}
+
+absl::StatusOr<std::vector<RegisteredClientBuffer>>
+ClientImpl::GetClientBuffers(const std::string &channel_name,
+                             uint64_t session_id, uint32_t buffer_index) {
+  Request req;
+  auto *get = req.mutable_get_client_buffers();
+  get->set_channel_name(channel_name);
+  get->set_session_id(session_id);
+  get->set_buffer_index(buffer_index);
+
+  Response response;
+  std::vector<toolbelt::FileDescriptor> fds;
+  if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
+      !status.ok()) {
+    return status;
+  }
+  const auto &get_resp = response.get_client_buffers();
+  if (!get_resp.error().empty()) {
+    return absl::InternalError(get_resp.error());
+  }
+  if (get_resp.metadata_size() != get_resp.fd_indexes_size()) {
+    return absl::InternalError("Malformed client buffer response");
+  }
+  std::vector<RegisteredClientBuffer> result;
+  result.reserve(get_resp.metadata_size());
+  for (int i = 0; i < get_resp.metadata_size(); ++i) {
+    RegisteredClientBuffer buffer{
+        .metadata = FromProto(get_resp.metadata(i)),
+    };
+    int fd_index = get_resp.fd_indexes(i);
+    if (fd_index >= 0 && static_cast<size_t>(fd_index) < fds.size()) {
+      buffer.fd = std::move(fds[size_t(fd_index)]);
+    }
+    result.push_back(std::move(buffer));
+  }
+  return result;
 }
 
 absl::Status

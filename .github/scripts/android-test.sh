@@ -8,8 +8,6 @@ sleep 5
 adb wait-for-device
 adb shell "while [[ -z \$(getprop sys.boot_completed) ]]; do sleep 1; done"
 
-# Create shared memory directory
-adb shell "mkdir -p /dev/subspace && chmod 777 /dev/subspace"
 adb shell "mkdir -p /data/local/tmp"
 
 # Collect shared libraries (dereference symlinks from bazel output)

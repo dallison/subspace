@@ -137,7 +137,9 @@ void Shadow::ClientCoroutine(
     }
 
     bool has_fds = event.has_init() || event.has_create_channel() ||
-                   event.has_add_publisher() || event.has_add_subscriber();
+                   event.has_add_publisher() || event.has_add_subscriber() ||
+                   (event.has_register_client_buffer() &&
+                    event.register_client_buffer().has_fd());
 
     std::vector<toolbelt::FileDescriptor> fds;
     if (has_fds) {
@@ -181,7 +183,7 @@ absl::Status Shadow::HandleEvent(const ShadowEvent &event,
   case ShadowEvent::kRemoveSubscriber:
     return HandleRemoveSubscriber(event.remove_subscriber());
   case ShadowEvent::kRegisterClientBuffer:
-    return HandleRegisterClientBuffer(event.register_client_buffer());
+    return HandleRegisterClientBuffer(event.register_client_buffer(), fds);
   case ShadowEvent::kUnregisterClientBuffer:
     return HandleUnregisterClientBuffer(event.unregister_client_buffer());
   case ShadowEvent::kUpdateChannelOptions:
@@ -369,7 +371,8 @@ absl::Status Shadow::HandleRemoveSubscriber(const ShadowRemoveSubscriber &msg) {
 }
 
 absl::Status
-Shadow::HandleRegisterClientBuffer(const ShadowRegisterClientBuffer &msg) {
+Shadow::HandleRegisterClientBuffer(const ShadowRegisterClientBuffer &msg,
+                                   std::vector<toolbelt::FileDescriptor> &fds) {
   ClientBufferHandleMetadata metadata = FromProto(msg.metadata());
   auto it = channels_.find(metadata.channel_name);
   if (it == channels_.end()) {
@@ -378,19 +381,27 @@ Shadow::HandleRegisterClientBuffer(const ShadowRegisterClientBuffer &msg) {
         metadata.channel_name));
   }
 
+  toolbelt::FileDescriptor fd;
+  if (msg.has_fd() && static_cast<size_t>(msg.fd_index()) < fds.size()) {
+    fd = std::move(fds[size_t(msg.fd_index())]);
+  }
+
   auto &buffers = it->second.client_buffers;
   auto existing =
       std::find_if(buffers.begin(), buffers.end(),
-                   [&metadata](const ClientBufferHandleMetadata &buffer) {
-                     return buffer.session_id == metadata.session_id &&
-                            buffer.buffer_index == metadata.buffer_index &&
-                            buffer.slot_id == metadata.slot_id &&
-                            buffer.is_prefix == metadata.is_prefix;
+                   [&metadata](const RegisteredClientBuffer &buffer) {
+                     return buffer.metadata.session_id == metadata.session_id &&
+                            buffer.metadata.buffer_index ==
+                                metadata.buffer_index &&
+                            buffer.metadata.slot_id == metadata.slot_id &&
+                            buffer.metadata.is_prefix == metadata.is_prefix;
                    });
+  RegisteredClientBuffer registered{.metadata = std::move(metadata),
+                                    .fd = std::move(fd)};
   if (existing != buffers.end()) {
-    *existing = std::move(metadata);
+    *existing = std::move(registered);
   } else {
-    buffers.push_back(std::move(metadata));
+    buffers.push_back(std::move(registered));
   }
   logger_.Log(toolbelt::LogLevel::kDebug,
               "Shadow: register client buffer '%s' session=%lu buffer=%u "
@@ -411,9 +422,10 @@ Shadow::HandleUnregisterClientBuffer(const ShadowUnregisterClientBuffer &msg) {
   auto &buffers = it->second.client_buffers;
   buffers.erase(
       std::remove_if(buffers.begin(), buffers.end(),
-                     [&msg](const ClientBufferHandleMetadata &buffer) {
-                       return buffer.session_id == msg.session_id() &&
-                              buffer.buffer_index == msg.buffer_index();
+                     [&msg](const RegisteredClientBuffer &buffer) {
+                       return buffer.metadata.session_id == msg.session_id() &&
+                              buffer.metadata.buffer_index ==
+                                  msg.buffer_index();
                      }),
       buffers.end());
   return absl::OkStatus();
@@ -513,11 +525,17 @@ absl::Status Shadow::SendStateDump(toolbelt::UnixSocket &socket) {
     }
 
     // Client-owned split buffers.
-    for (const ClientBufferHandleMetadata &metadata : ch.client_buffers) {
+  for (const RegisteredClientBuffer &buffer : ch.client_buffers) {
       ShadowEvent event;
       auto *msg = event.mutable_register_client_buffer();
-      ToProto(metadata, msg->mutable_metadata());
-      if (absl::Status s = SendEvent(socket, event); !s.ok()) {
+    ToProto(buffer.metadata, msg->mutable_metadata());
+    std::vector<toolbelt::FileDescriptor> fds;
+    if (buffer.fd.Valid()) {
+      msg->set_has_fd(true);
+      msg->set_fd_index(0);
+      fds.push_back(buffer.fd);
+    }
+    if (absl::Status s = SendEvent(socket, event, fds); !s.ok()) {
         return s;
       }
     }

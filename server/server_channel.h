@@ -272,19 +272,47 @@ public:
   }
 
   virtual void RemoveBuffer(uint64_t session_id, Server *server = nullptr);
-  void RegisterClientBuffer(ClientBufferHandleMetadata metadata) {
-    client_buffers_.push_back(std::move(metadata));
+  void RegisterClientBuffer(ClientBufferHandleMetadata metadata,
+                            toolbelt::FileDescriptor fd = {}) {
+    auto existing =
+        std::find_if(client_buffers_.begin(), client_buffers_.end(),
+                     [&metadata](const RegisteredClientBuffer &buffer) {
+                       return buffer.metadata.session_id ==
+                                  metadata.session_id &&
+                              buffer.metadata.buffer_index ==
+                                  metadata.buffer_index &&
+                              buffer.metadata.slot_id == metadata.slot_id &&
+                              buffer.metadata.is_prefix == metadata.is_prefix;
+                     });
+    RegisteredClientBuffer buffer{.metadata = std::move(metadata),
+                                  .fd = std::move(fd)};
+    if (existing != client_buffers_.end()) {
+      *existing = std::move(buffer);
+      return;
+    }
+    client_buffers_.push_back(std::move(buffer));
   }
-  const std::vector<ClientBufferHandleMetadata> &ClientBuffers() const {
+  const std::vector<RegisteredClientBuffer> &ClientBuffers() const {
     return client_buffers_;
+  }
+  std::vector<const RegisteredClientBuffer *>
+  FindClientBuffers(uint64_t session_id, uint32_t buffer_index) const {
+    std::vector<const RegisteredClientBuffer *> result;
+    for (const auto &buffer : client_buffers_) {
+      if (buffer.metadata.session_id == session_id &&
+          buffer.metadata.buffer_index == buffer_index) {
+        result.push_back(&buffer);
+      }
+    }
+    return result;
   }
   void UnregisterClientBuffer(uint64_t session_id, uint32_t buffer_index) {
     client_buffers_.erase(
         std::remove_if(client_buffers_.begin(), client_buffers_.end(),
                        [session_id, buffer_index](
-                           const ClientBufferHandleMetadata &metadata) {
-                         return metadata.session_id == session_id &&
-                                metadata.buffer_index == buffer_index;
+                           const RegisteredClientBuffer &buffer) {
+                         return buffer.metadata.session_id == session_id &&
+                                buffer.metadata.buffer_index == buffer_index;
                        }),
         client_buffers_.end());
   }
@@ -377,7 +405,7 @@ protected:
   absl::flat_hash_map<int, std::unique_ptr<User>> users_;
   toolbelt::BitSet<kMaxUsers> user_ids_;
   absl::flat_hash_map<ChannelTransmitter, std::string> bridged_publishers_;
-  std::vector<ClientBufferHandleMetadata> client_buffers_;
+  std::vector<RegisteredClientBuffer> client_buffers_;
   SharedMemoryFds shared_memory_fds_;
   bool is_virtual_ = false;
   bool skip_cleanup_ = false;

@@ -228,11 +228,18 @@ void ShadowReplicator::SendRemoveSubscriber(const std::string &channel_name,
 }
 
 void ShadowReplicator::SendRegisterClientBuffer(
-    const ClientBufferHandleMetadata &metadata) {
+    const ClientBufferHandleMetadata &metadata,
+    const toolbelt::FileDescriptor &fd) {
   ShadowEvent event;
   auto *msg = event.mutable_register_client_buffer();
   ToProto(metadata, msg->mutable_metadata());
-  SendEvent(event);
+  std::vector<toolbelt::FileDescriptor> fds;
+  if (fd.Valid()) {
+    msg->set_has_fd(true);
+    msg->set_fd_index(0);
+    fds.push_back(fd);
+  }
+  SendEvent(event, fds);
 }
 
 void ShadowReplicator::SendUnregisterClientBuffer(
@@ -281,7 +288,9 @@ ShadowReplicator::ReceiveEvent(std::vector<toolbelt::FileDescriptor> &fds) {
   }
 
   bool has_fds = event.has_create_channel() || event.has_add_publisher() ||
-                 event.has_add_subscriber();
+                 event.has_add_subscriber() ||
+                 (event.has_register_client_buffer() &&
+                  event.register_client_buffer().has_fd());
   if (has_fds) {
     absl::Status s = socket_.ReceiveFds(fds);
     if (!s.ok()) {
@@ -391,7 +400,13 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
       if (!ch.ok()) {
         return ch.status();
       }
-      (*ch)->client_buffers.push_back(std::move(metadata));
+      toolbelt::FileDescriptor fd;
+      if (msg.has_fd() && static_cast<size_t>(msg.fd_index()) < fds.size()) {
+        fd = std::move(fds[size_t(msg.fd_index())]);
+      }
+      (*ch)->client_buffers.push_back(
+          RegisteredClientBuffer{.metadata = std::move(metadata),
+                                 .fd = std::move(fd)});
       continue;
     }
 

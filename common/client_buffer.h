@@ -5,6 +5,7 @@
 #pragma once
 
 #include "google/protobuf/any.pb.h"
+#include "toolbelt/fd.h"
 
 #include <cstdint>
 #include <string>
@@ -30,6 +31,11 @@ struct ClientBufferHandleMetadata {
   bool cache_enabled = false;
   uint32_t alignment = 0;
   google::protobuf::Any allocator_metadata;
+};
+
+struct RegisteredClientBuffer {
+  ClientBufferHandleMetadata metadata;
+  toolbelt::FileDescriptor fd;
 };
 
 } // namespace subspace

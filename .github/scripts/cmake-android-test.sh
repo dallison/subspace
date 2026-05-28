@@ -10,8 +10,6 @@ sleep 5
 adb wait-for-device
 adb shell "while [[ -z \$(getprop sys.boot_completed) ]]; do sleep 1; done"
 
-# Create shared memory directory
-adb shell "mkdir -p /dev/subspace && chmod 777 /dev/subspace"
 adb shell "mkdir -p /data/local/tmp"
 
 # Push libc++_shared.so from NDK (needed since we built with ANDROID_STL=c++_shared)

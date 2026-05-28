@@ -13,12 +13,64 @@
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
+#include <mutex>
 #include <string>
 #include <sys/stat.h>
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+#include <sys/syscall.h>
+#include <unordered_map>
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+#endif
 #include <unistd.h>
 
 namespace subspace {
 namespace {
+
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+std::mutex &AndroidSplitBufferMutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+
+std::unordered_map<std::string, int> &AndroidSplitBufferFds() {
+  static std::unordered_map<std::string, int> fds;
+  return fds;
+}
+
+absl::StatusOr<toolbelt::FileDescriptor>
+CreateAndroidAnonymousObject(const std::string &name, uint64_t size) {
+  std::lock_guard<std::mutex> lock(AndroidSplitBufferMutex());
+  auto &fds = AndroidSplitBufferFds();
+  if (fds.find(name) != fds.end()) {
+    return toolbelt::FileDescriptor();
+  }
+#ifdef __NR_memfd_create
+  int fd = static_cast<int>(syscall(
+      __NR_memfd_create, name.c_str(), static_cast<unsigned int>(MFD_CLOEXEC)));
+  if (fd == -1) {
+    return absl::InternalError(absl::StrFormat(
+        "Failed to create split buffer object %s: %s", name, strerror(errno)));
+  }
+#else
+  return absl::UnimplementedError("memfd_create is not available");
+#endif
+  if (GetSyscallShim().ftruncate_fn(fd, static_cast<off_t>(size)) == -1) {
+    close(fd);
+    return absl::InternalError(absl::StrFormat(
+        "Failed to size split buffer object %s: %s", name, strerror(errno)));
+  }
+  int kept_fd = dup(fd);
+  if (kept_fd == -1) {
+    close(fd);
+    return absl::InternalError(absl::StrFormat(
+        "Failed to retain split buffer object %s: %s", name, strerror(errno)));
+  }
+  fds.emplace(name, kept_fd);
+  return toolbelt::FileDescriptor(fd);
+}
+#endif
 
 absl::Status WriteAll(int fd, const std::string &contents,
                       const std::string &path) {
@@ -171,13 +223,14 @@ std::string SplitBufferObjectName(const std::string &shadow_file) {
 absl::StatusOr<toolbelt::FileDescriptor>
 CreateSplitSharedMemoryBuffer(const SplitBufferMetadata &metadata) {
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
-  std::string path = GetAndroidShmDir() + "/" + metadata.object_name;
-  int fd = GetSyscallShim().open_fn(path.c_str(),
-                                    O_RDWR | O_CREAT | O_EXCL, 0666);
+  uint64_t allocation_size =
+      metadata.allocation_size != 0 ? metadata.allocation_size
+                                    : PageAlignedSize(metadata.full_size);
+  return CreateAndroidAnonymousObject(metadata.object_name,
+                                      PageAlignedSize(allocation_size));
 #else
   int fd = GetSyscallShim().shm_open_fn(metadata.object_name.c_str(),
                                         O_RDWR | O_CREAT | O_EXCL, 0666);
-#endif
   if (fd == -1) {
     if (errno == EEXIST) {
       return toolbelt::FileDescriptor();
@@ -204,13 +257,26 @@ CreateSplitSharedMemoryBuffer(const SplitBufferMetadata &metadata) {
   }
 
   return shm_fd;
+#endif
 }
 
 absl::StatusOr<toolbelt::FileDescriptor>
 OpenSplitSharedMemoryBuffer(const SplitBufferMetadata &metadata, int flags) {
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
-  std::string path = GetAndroidShmDir() + "/" + metadata.object_name;
-  int fd = GetSyscallShim().open_fn(path.c_str(), flags, 0666);
+  std::lock_guard<std::mutex> lock(AndroidSplitBufferMutex());
+  auto &fds = AndroidSplitBufferFds();
+  auto it = fds.find(metadata.object_name);
+  if (it == fds.end()) {
+    return absl::NotFoundError(absl::StrFormat(
+        "Failed to open split buffer object %s: not found",
+        metadata.object_name));
+  }
+  int fd = dup(it->second);
+  if (fd == -1) {
+    return absl::InternalError(absl::StrFormat(
+        "Failed to duplicate split buffer object %s: %s",
+        metadata.object_name, strerror(errno)));
+  }
 #else
   int fd = GetSyscallShim().shm_open_fn(metadata.object_name.c_str(), flags,
                                         0666);
@@ -227,16 +293,23 @@ absl::Status DestroySplitSharedMemoryBuffer(
     const SplitBufferMetadata &metadata) {
   absl::Status status = absl::OkStatus();
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
-  std::string path = GetAndroidShmDir() + "/" + metadata.object_name;
-  if (unlink(path.c_str()) == -1 && errno != ENOENT) {
+  {
+    std::lock_guard<std::mutex> lock(AndroidSplitBufferMutex());
+    auto &fds = AndroidSplitBufferFds();
+    auto it = fds.find(metadata.object_name);
+    if (it != fds.end()) {
+      close(it->second);
+      fds.erase(it);
+    }
+  }
 #else
   if (GetSyscallShim().shm_unlink_fn(metadata.object_name.c_str()) == -1 &&
       errno != ENOENT) {
-#endif
     status = absl::InternalError(absl::StrFormat(
         "Failed to unlink split buffer object %s: %s", metadata.object_name,
         strerror(errno)));
   }
+#endif
   if (unlink(metadata.shadow_file.c_str()) == -1 && errno != ENOENT &&
       status.ok()) {
     status = absl::InternalError(absl::StrFormat(

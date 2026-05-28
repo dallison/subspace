@@ -72,19 +72,6 @@ The emulator with `google_apis` images supports `adb root`:
 adb root
 ```
 
-### Create shared memory directory
-
-Subspace on Android uses regular files in a tmpfs-backed directory instead of
-POSIX `shm_open` (which is unavailable on Android). The default directory is
-`/dev/subspace` (defined by `kDefaultAndroidShmDir` in `common/channel.h`).
-
-```bash
-adb shell "mkdir -p /dev/subspace && chmod 777 /dev/subspace"
-```
-
-Without this directory, any channel creation will fail with a file-not-found
-error.
-
 ### Socket path
 
 The default server socket on Android is `/data/local/tmp/subspace` (defined by
@@ -122,8 +109,8 @@ adb push bazel-bin/plugins/split_buffer_free_test_plugin.so /data/local/tmp/plug
 adb shell "cd /data/local/tmp && ./subspace_server &"
 ```
 
-The server uses the default socket `/data/local/tmp/subspace` and shared memory
-directory `/dev/subspace` on Android. No flags are needed for local operation.
+The server uses the default socket `/data/local/tmp/subspace` on Android. Shared
+memory is fd-backed and does not require a device-visible directory.
 
 ### Run tests
 
@@ -148,21 +135,20 @@ adb shell "cd /data/local/tmp && LD_LIBRARY_PATH=/data/local/tmp/android_libs \
 Android lacks POSIX shared memory (`shm_open`/`shm_unlink`). Subspace uses
 `SUBSPACE_SHMEM_MODE_ANDROID` (defined in `common/channel.h`) which:
 
-- Creates regular files in the `kDefaultAndroidShmDir` (`/dev/subspace`)
-  directory using `open()`/`mkstemp()` instead of `shm_open()`
-- Uses `ftruncate()` + `mmap()` on those files (same as POSIX shm)
+- Creates anonymous `memfd_create()` regions for the SCB, CCB, BCB, and
+  client-owned message buffers.
+- Sizes them with `ftruncate()` and maps them with `mmap()`.
 - Passes file descriptors between processes via Unix domain sockets
-  (`SCM_RIGHTS`)
-- Cleans up with `unlink()` instead of `shm_unlink()`
-
-The directory should be on a tmpfs mount for performance. On the emulator,
-`/dev/` is typically tmpfs-backed.
+  (`SCM_RIGHTS`).
+- Keeps client-side buffer allocation and resize by registering publisher-owned
+  buffer FDs with the server, which brokers them to subscribers.
 
 ### Split Buffers
 
-Split buffer shared memory (`common/split_buffer.cc`) also uses the Android shm
-directory for its backing files, following the same pattern as regular channel
-buffers.
+Built-in split buffers also use anonymous FDs. The publisher registers the
+prefix and slot FDs with the server; subscribers fetch those descriptors when
+attaching to a new buffer generation. Custom split-buffer callbacks continue to
+use the callback-provided handles.
 
 ### Linker Namespaces
 

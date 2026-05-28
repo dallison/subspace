@@ -30,6 +30,25 @@ FromProto(const ClientBufferHandleMetadataProto &proto) {
   return metadata;
 }
 
+void ToProto(const ClientBufferHandleMetadata &metadata,
+             ClientBufferHandleMetadataProto *proto) {
+  proto->set_channel_name(metadata.channel_name);
+  proto->set_session_id(metadata.session_id);
+  proto->set_buffer_index(metadata.buffer_index);
+  proto->set_slot_id(metadata.slot_id);
+  proto->set_is_prefix(metadata.is_prefix);
+  proto->set_full_size(metadata.full_size);
+  proto->set_allocation_size(metadata.allocation_size);
+  proto->set_handle(static_cast<uint64_t>(metadata.handle));
+  proto->set_shadow_file(metadata.shadow_file);
+  proto->set_object_name(metadata.object_name);
+  proto->set_allocator(metadata.allocator);
+  proto->set_pool_id(metadata.pool_id);
+  proto->set_cache_enabled(metadata.cache_enabled);
+  proto->set_alignment(metadata.alignment);
+  *proto->mutable_allocator_metadata() = metadata.allocator_metadata;
+}
+
 SplitBufferOptions
 FromPublisherSplitBufferRequest(const CreatePublisherRequest &req) {
   return {.use_split_buffers = req.use_split_buffers(),
@@ -65,16 +84,31 @@ void ClientHandler::Run() {
       }
     }
 
+    std::vector<toolbelt::FileDescriptor> fds;
+    subspace::Response response;
     if (request.request_case() == subspace::Request::kRegisterClientBuffer) {
+      std::vector<toolbelt::FileDescriptor> register_fds;
+      if (request.register_client_buffer().has_fd()) {
+        if (absl::Status s = socket_.ReceiveFds(register_fds, co::self);
+            !s.ok()) {
+          server_->logger_.Log(toolbelt::LogLevel::kError, "%s\n",
+                               s.ToString().c_str());
+          return;
+        }
+      }
       if (absl::Status s =
-              HandleRegisterClientBuffer(request.register_client_buffer());
+              HandleRegisterClientBuffer(request.register_client_buffer(),
+                                         register_fds);
           !s.ok()) {
         server_->logger_.Log(toolbelt::LogLevel::kError, "%s\n",
                              s.ToString().c_str());
+        response.mutable_register_client_buffer()->set_error(
+            s.ToString());
+      } else {
+        response.mutable_register_client_buffer();
       }
-      continue;
-    }
-    if (request.request_case() == subspace::Request::kUnregisterClientBuffer) {
+    } else if (request.request_case() ==
+               subspace::Request::kUnregisterClientBuffer) {
       if (absl::Status s =
               HandleUnregisterClientBuffer(request.unregister_client_buffer());
           !s.ok()) {
@@ -82,14 +116,12 @@ void ClientHandler::Run() {
                              s.ToString().c_str());
       }
       continue;
-    }
-
-    std::vector<toolbelt::FileDescriptor> fds;
-    subspace::Response response;
-    if (absl::Status s = HandleMessage(request, response, fds); !s.ok()) {
-      server_->logger_.Log(toolbelt::LogLevel::kError, "%s\n",
-                           s.ToString().c_str());
-      return;
+    } else {
+      if (absl::Status s = HandleMessage(request, response, fds); !s.ok()) {
+        server_->logger_.Log(toolbelt::LogLevel::kError, "%s\n",
+                             s.ToString().c_str());
+        return;
+      }
     }
 
     size_t msglen = response.ByteSizeLong();
@@ -155,8 +187,13 @@ ClientHandler::HandleMessage(const subspace::Request &req,
                           resp.mutable_get_channel_stats(), fds);
     break;
 
+  case subspace::Request::kGetClientBuffers:
+    HandleGetClientBuffers(req.get_client_buffers(),
+                           resp.mutable_get_client_buffers(), fds);
+    break;
+
   case subspace::Request::kRegisterClientBuffer:
-    return HandleRegisterClientBuffer(req.register_client_buffer());
+    return HandleRegisterClientBuffer(req.register_client_buffer(), fds);
 
   case subspace::Request::kUnregisterClientBuffer:
     return HandleUnregisterClientBuffer(req.unregister_client_buffer());
@@ -168,7 +205,8 @@ ClientHandler::HandleMessage(const subspace::Request &req,
 }
 
 absl::Status ClientHandler::HandleRegisterClientBuffer(
-    const subspace::RegisterClientBufferRequest &req) {
+    const subspace::RegisterClientBufferRequest &req,
+    std::vector<toolbelt::FileDescriptor> &fds) {
   ClientBufferHandleMetadata metadata = FromProto(req.metadata());
   if (metadata.session_id != server_->GetSessionId()) {
     return absl::InternalError(absl::StrFormat(
@@ -185,8 +223,21 @@ absl::Status ClientHandler::HandleRegisterClientBuffer(
   if (channel->IsVirtual()) {
     channel = static_cast<VirtualChannel *>(channel)->GetMux();
   }
-  channel->RegisterClientBuffer(metadata);
+  toolbelt::FileDescriptor fd;
+  if (req.has_fd() && static_cast<size_t>(req.fd_index()) < fds.size()) {
+    fd = std::move(fds[size_t(req.fd_index())]);
+  }
+  channel->RegisterClientBuffer(metadata, std::move(fd));
   server_->ForEachShadow([&](const std::unique_ptr<ShadowReplicator> &shadow) {
+    const auto matches =
+        channel->FindClientBuffers(metadata.session_id, metadata.buffer_index);
+    for (const RegisteredClientBuffer *buffer : matches) {
+      if (buffer->metadata.slot_id == metadata.slot_id &&
+          buffer->metadata.is_prefix == metadata.is_prefix) {
+        shadow->SendRegisterClientBuffer(buffer->metadata, buffer->fd);
+        return;
+      }
+    }
     shadow->SendRegisterClientBuffer(metadata);
   });
   return absl::OkStatus();
@@ -210,6 +261,31 @@ absl::Status ClientHandler::HandleUnregisterClientBuffer(
                                        req.buffer_index());
   });
   return absl::OkStatus();
+}
+
+void ClientHandler::HandleGetClientBuffers(
+    const subspace::GetClientBuffersRequest &req,
+    subspace::GetClientBuffersResponse *response,
+    std::vector<toolbelt::FileDescriptor> &fds) {
+  ServerChannel *channel = server_->FindChannel(req.channel_name());
+  if (channel == nullptr) {
+    response->set_error(absl::StrFormat("Unknown channel %s",
+                                        req.channel_name()));
+    return;
+  }
+  if (channel->IsVirtual()) {
+    channel = static_cast<VirtualChannel *>(channel)->GetMux();
+  }
+  for (const RegisteredClientBuffer *buffer :
+       channel->FindClientBuffers(req.session_id(), req.buffer_index())) {
+    ToProto(buffer->metadata, response->add_metadata());
+    if (buffer->fd.Valid()) {
+      response->add_fd_indexes(static_cast<int32_t>(fds.size()));
+      fds.push_back(buffer->fd);
+    } else {
+      response->add_fd_indexes(-1);
+    }
+  }
 }
 
 void ClientHandler::HandleInit(const subspace::InitRequest &req,

@@ -63,8 +63,10 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
         } else {
           addr = nullptr;
         }
-        buffers_.emplace_back(
-            std::make_unique<BufferSet>(*size, current_slot_size, *addr));
+        auto buffer_set =
+            std::make_unique<BufferSet>(*size, current_slot_size, *addr);
+        buffer_set->fd = std::move(*shm_fd);
+        buffers_.push_back(std::move(buffer_set));
         bcb_->sizes[buffers_.size()].store(final_buffer_size,
                                            std::memory_order_relaxed);
       } else {
@@ -76,8 +78,10 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
         if (!addr.ok()) {
           return addr.status();
         }
-        buffers_.emplace_back(std::make_unique<BufferSet>(
-            final_buffer_size, final_slot_size, *addr));
+        auto buffer_set = std::make_unique<BufferSet>(
+            final_buffer_size, final_slot_size, *addr);
+        buffer_set->fd = std::move(*shm_fd);
+        buffers_.push_back(std::move(buffer_set));
         current_slot_size = final_slot_size;
       }
     }

@@ -543,10 +543,18 @@ private:
   absl::Status CheckConnected() const;
   absl::Status
   SendRequestReceiveResponse(const Request &req, Response &response,
-                             std::vector<toolbelt::FileDescriptor> &fds);
-  absl::Status SendOneWayRequest(const Request &req);
+                             std::vector<toolbelt::FileDescriptor> &fds,
+                             const std::vector<toolbelt::FileDescriptor>
+                                 &send_fds = {});
+  absl::Status
+  SendOneWayRequest(const Request &req,
+                    const std::vector<toolbelt::FileDescriptor> &fds = {});
   absl::Status RegisterClientBuffer(
-      const ClientBufferHandleMetadata &metadata);
+      const ClientBufferHandleMetadata &metadata,
+      const toolbelt::FileDescriptor *fd = nullptr);
+  absl::StatusOr<std::vector<RegisteredClientBuffer>>
+  GetClientBuffers(const std::string &channel_name, uint64_t session_id,
+                   uint32_t buffer_index);
   absl::Status UnregisterClientBuffer(const std::string &channel_name,
                                       uint64_t session_id,
                                       uint32_t buffer_index);
