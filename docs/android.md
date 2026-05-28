@@ -173,14 +173,9 @@ cmake -S . -B build/android \
 cmake --build build/android --parallel
 ```
 
-Pre-generated protobuf files (`proto/subspace.pb.{cc,h}`) are included in the
-repository so cross-compilation works without needing a host-native `protoc`.
-If `subspace.proto` changes, regenerate them with a native build:
-
-```bash
-cmake -S . -B build/native && cmake --build build/native --target subspace_proto
-cp build/native/proto/subspace.pb.{cc,h} proto/
-```
+CMake cross-compiles generate protobuf sources in the build tree. Ensure a
+host-native `protoc` is available on `PATH`, or pass it explicitly with
+`-DPROTOC_EXECUTABLE=/path/to/protoc`.
 
 ## AOSP / Soong (Blueprint) Build
 

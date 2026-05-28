@@ -275,7 +275,7 @@ public:
   ~ScopedBridgeServerPair() { Stop(); }
 
   void Start(const std::array<BridgeRangeConfig, 2> &ranges) {
-    int lock_fd = ::open("/tmp/subspace_bridge_test_port.lock",
+    int lock_fd = ::open(BRIDGE_TEST_TMP "/subspace_bridge_test_port.lock",
                          O_CREAT | O_RDWR, 0666);
     ASSERT_NE(-1, lock_fd);
     ASSERT_EQ(0, ::flock(lock_fd, LOCK_EX));
@@ -289,7 +289,7 @@ public:
     }
 
     for (int i = 0; i < 2; i++) {
-      char socket_name_template[] = "/tmp/subspaceXXXXXX"; // NOLINT
+      char socket_name_template[] = BRIDGE_TEST_TMP "/subspaceXXXXXX"; // NOLINT
       ::close(mkstemp(&socket_name_template[0]));
       socket_[i] = &socket_name_template[0];
 

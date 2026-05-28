@@ -86,6 +86,7 @@ TEST_F(SyscallFailureTest, MmapFailOnBcb) {
 // shm_open failures during CreateBuffer
 // ---------------------------------------------------------------------------
 
+#if !defined(__ANDROID__)
 TEST_F(SyscallFailureTest, ShmOpenFail) {
   auto client = EVAL_AND_ASSERT_OK(
       subspace::Client::Create(Socket(), "shm_open_test"));
@@ -101,6 +102,7 @@ TEST_F(SyscallFailureTest, ShmOpenFail) {
   EXPECT_THAT(pub.status().message(),
               ::testing::HasSubstr("Failed to open shared memory"));
 }
+#endif
 
 // ---------------------------------------------------------------------------
 // ftruncate failure after successful shm_open (should shm_unlink on cleanup)
@@ -123,13 +125,15 @@ TEST_F(SyscallFailureTest, FtruncateFailAfterShmOpen) {
       pub.status().message(),
       ::testing::AnyOf(
           ::testing::HasSubstr("Failed to set length of shared memory"),
-          ::testing::HasSubstr("Failed to truncate shadow file")));
+          ::testing::HasSubstr("Failed to truncate shadow file"),
+          ::testing::HasSubstr("Failed to size anonymous shared memory")));
 }
 
 // ---------------------------------------------------------------------------
 // chmod failure during CreateBuffer
 // ---------------------------------------------------------------------------
 
+#if !defined(__ANDROID__)
 TEST_F(SyscallFailureTest, ChmodFail) {
   auto client = EVAL_AND_ASSERT_OK(
       subspace::Client::Create(Socket(), "chmod_test"));
@@ -145,6 +149,7 @@ TEST_F(SyscallFailureTest, ChmodFail) {
   EXPECT_THAT(pub.status().message(),
               ::testing::HasSubstr("Failed to change permissions"));
 }
+#endif
 
 // ---------------------------------------------------------------------------
 // poll failures in WaitForSubscriber
@@ -244,12 +249,16 @@ TEST_F(SyscallFailureTest, ShimCallCounting) {
 
   // Verify that mmap was called at least 3 times (SCB, CCB, BCB).
   EXPECT_GE(shim.mmap_call_count, 3);
+#if !defined(__ANDROID__)
   // Verify that shm_open was called at least once (for buffer creation).
   EXPECT_GE(shim.shm_open_call_count, 1);
+#endif
   // Verify that ftruncate was called at least once.
   EXPECT_GE(shim.ftruncate_call_count, 1);
+#if !defined(__ANDROID__)
   // Verify that chmod was called at least once.
   EXPECT_GE(shim.chmod_call_count, 1);
+#endif
 }
 
 // ---------------------------------------------------------------------------

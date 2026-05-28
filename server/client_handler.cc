@@ -9,6 +9,39 @@
 
 namespace subspace {
 namespace {
+
+ClientBufferAllocatorKind FromProtoAllocator(ClientBufferAllocator allocator) {
+  switch (allocator) {
+  case CLIENT_BUFFER_ALLOCATOR_ANDROID_MEMFD:
+    return ClientBufferAllocatorKind::kAndroidMemfd;
+  case CLIENT_BUFFER_ALLOCATOR_SPLIT_SHM:
+    return ClientBufferAllocatorKind::kSplitShm;
+  case CLIENT_BUFFER_ALLOCATOR_SPLIT_CALLBACK:
+    return ClientBufferAllocatorKind::kSplitCallback;
+  case CLIENT_BUFFER_ALLOCATOR_SPLIT_BUFFER_FREE_TEST:
+    return ClientBufferAllocatorKind::kSplitBufferFreeTest;
+  case CLIENT_BUFFER_ALLOCATOR_UNSPECIFIED:
+  default:
+    return ClientBufferAllocatorKind::kUnspecified;
+  }
+}
+
+ClientBufferAllocator ToProtoAllocator(ClientBufferAllocatorKind allocator) {
+  switch (allocator) {
+  case ClientBufferAllocatorKind::kAndroidMemfd:
+    return CLIENT_BUFFER_ALLOCATOR_ANDROID_MEMFD;
+  case ClientBufferAllocatorKind::kSplitShm:
+    return CLIENT_BUFFER_ALLOCATOR_SPLIT_SHM;
+  case ClientBufferAllocatorKind::kSplitCallback:
+    return CLIENT_BUFFER_ALLOCATOR_SPLIT_CALLBACK;
+  case ClientBufferAllocatorKind::kSplitBufferFreeTest:
+    return CLIENT_BUFFER_ALLOCATOR_SPLIT_BUFFER_FREE_TEST;
+  case ClientBufferAllocatorKind::kUnspecified:
+  default:
+    return CLIENT_BUFFER_ALLOCATOR_UNSPECIFIED;
+  }
+}
+
 ClientBufferHandleMetadata
 FromProto(const ClientBufferHandleMetadataProto &proto) {
   ClientBufferHandleMetadata metadata;
@@ -22,11 +55,7 @@ FromProto(const ClientBufferHandleMetadataProto &proto) {
   metadata.handle = static_cast<uintptr_t>(proto.handle());
   metadata.shadow_file = proto.shadow_file();
   metadata.object_name = proto.object_name();
-  metadata.allocator = proto.allocator();
-  metadata.pool_id = proto.pool_id();
-  metadata.cache_enabled = proto.cache_enabled();
-  metadata.alignment = proto.alignment();
-  metadata.allocator_metadata = proto.allocator_metadata();
+  metadata.allocator = FromProtoAllocator(proto.allocator());
   return metadata;
 }
 
@@ -42,11 +71,7 @@ void ToProto(const ClientBufferHandleMetadata &metadata,
   proto->set_handle(static_cast<uint64_t>(metadata.handle));
   proto->set_shadow_file(metadata.shadow_file);
   proto->set_object_name(metadata.object_name);
-  proto->set_allocator(metadata.allocator);
-  proto->set_pool_id(metadata.pool_id);
-  proto->set_cache_enabled(metadata.cache_enabled);
-  proto->set_alignment(metadata.alignment);
-  *proto->mutable_allocator_metadata() = metadata.allocator_metadata;
+  proto->set_allocator(ToProtoAllocator(metadata.allocator));
 }
 
 SplitBufferOptions

@@ -43,7 +43,7 @@ ReadSplitBufferMetadataFileWithRetry(const std::string &shadow_file) {
 }
 
 ClientBufferHandleMetadata ClientBufferFromSplitMetadata(
-    const SplitBufferMetadata &metadata, std::string allocator) {
+    const SplitBufferMetadata &metadata, ClientBufferAllocatorKind allocator) {
   return {.channel_name = metadata.channel_name,
           .session_id = metadata.session_id,
           .buffer_index = metadata.buffer_index,
@@ -54,7 +54,21 @@ ClientBufferHandleMetadata ClientBufferFromSplitMetadata(
           .handle = metadata.handle,
           .shadow_file = metadata.shadow_file,
           .object_name = metadata.object_name,
-          .allocator = std::move(allocator)};
+          .allocator = allocator};
+}
+
+[[maybe_unused]] SplitBufferMetadata SplitMetadataFromClientBuffer(
+    const ClientBufferHandleMetadata &metadata) {
+  return {.channel_name = metadata.channel_name,
+          .session_id = metadata.session_id,
+          .buffer_index = metadata.buffer_index,
+          .slot_id = metadata.slot_id,
+          .is_prefix = metadata.is_prefix,
+          .full_size = metadata.full_size,
+          .allocation_size = metadata.allocation_size,
+          .handle = metadata.handle,
+          .shadow_file = metadata.shadow_file,
+          .object_name = metadata.object_name};
 }
 
 } // namespace
@@ -418,30 +432,7 @@ CreateAnonymousSharedMemory(const std::string &name, size_t size) {
 
 absl::StatusOr<toolbelt::FileDescriptor>
 ClientChannel::CreateAndroidBuffer(const std::string &filename, size_t size) {
-  auto shm_fd = CreateAnonymousSharedMemory(filename, size);
-  if (!shm_fd.ok()) {
-    return shm_fd.status();
-  }
-  if (client_buffer_registration_callback_) {
-    ClientBufferHandleMetadata metadata = {
-        .channel_name = ResolvedName(),
-        .session_id = session_id_,
-        .buffer_index = static_cast<uint32_t>(buffers_.size()),
-        .slot_id = 0,
-        .is_prefix = false,
-        .full_size = size,
-        .allocation_size = size,
-        .handle = static_cast<uintptr_t>(shm_fd->Fd()),
-        .allocator = "android_memfd",
-    };
-    if (absl::Status status =
-            client_buffer_registration_callback_(metadata, &*shm_fd);
-        !status.ok()) {
-      return status;
-    }
-  }
-
-  return *shm_fd;
+  return CreateAnonymousSharedMemory(filename, size);
 }
 
 absl::StatusOr<RegisteredClientBuffer>
@@ -450,25 +441,33 @@ ClientChannel::GetRegisteredClientBuffer(uint32_t buffer_index, bool is_prefix,
   if (!client_buffer_lookup_callback_) {
     return absl::InternalError("No client buffer lookup callback registered");
   }
-  absl::StatusOr<std::vector<RegisteredClientBuffer>> buffers =
-      client_buffer_lookup_callback_(ResolvedName(), session_id_, buffer_index);
-  if (!buffers.ok()) {
-    return buffers.status();
-  }
-  for (RegisteredClientBuffer &buffer : *buffers) {
-    if (buffer.metadata.is_prefix == is_prefix &&
-        buffer.metadata.slot_id == slot_id) {
-      if (!buffer.fd.Valid()) {
-        return absl::InternalError(absl::StrFormat(
-            "Registered client buffer %s/%u/%u missing FD", ResolvedName(),
-            buffer_index, slot_id));
-      }
-      return std::move(buffer);
+  absl::Status status;
+  for (int attempt = 0; attempt < 100; attempt++) {
+    absl::StatusOr<std::vector<RegisteredClientBuffer>> buffers =
+        client_buffer_lookup_callback_(ResolvedName(), session_id_,
+                                       buffer_index);
+    if (!buffers.ok()) {
+      return buffers.status();
     }
+    for (RegisteredClientBuffer &buffer : *buffers) {
+      if (buffer.metadata.is_prefix == is_prefix &&
+          buffer.metadata.slot_id == slot_id) {
+        if (!buffer.fd.Valid() &&
+            buffer.metadata.allocator !=
+                ClientBufferAllocatorKind::kSplitCallback) {
+          return absl::InternalError(absl::StrFormat(
+              "Registered client buffer %s/%u/%u missing FD", ResolvedName(),
+              buffer_index, slot_id));
+        }
+        return std::move(buffer);
+      }
+    }
+    status = absl::NotFoundError(absl::StrFormat(
+        "No registered client buffer for %s buffer %u slot %u prefix %d",
+        ResolvedName(), buffer_index, slot_id, is_prefix));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
-  return absl::NotFoundError(absl::StrFormat(
-      "No registered client buffer for %s buffer %u slot %u prefix %d",
-      ResolvedName(), buffer_index, slot_id, is_prefix));
+  return status;
 }
 #endif
 
@@ -619,7 +618,8 @@ ClientChannel::CreateSplitBufferSet(size_t buffer_index, size_t full_size,
 #endif
   if (client_buffer_registration_callback_) {
     if (absl::Status status = client_buffer_registration_callback_(
-            ClientBufferFromSplitMetadata(prefix_metadata, "split_shm"),
+            ClientBufferFromSplitMetadata(
+                prefix_metadata, ClientBufferAllocatorKind::kSplitShm),
             &*prefix_fd);
         !status.ok()) {
       (void)DestroySplitSharedMemoryBuffer(prefix_metadata);
@@ -709,8 +709,10 @@ ClientChannel::CreateSplitBufferSet(size_t buffer_index, size_t full_size,
     if (client_buffer_registration_callback_) {
       if (absl::Status status = client_buffer_registration_callback_(
               ClientBufferFromSplitMetadata(
-                  metadata, buffer->uses_split_callbacks ? "split_callback"
-                                                         : "split_shm"),
+                  metadata,
+                  buffer->uses_split_callbacks
+                      ? ClientBufferAllocatorKind::kSplitCallback
+                      : ClientBufferAllocatorKind::kSplitShm),
               slot_fd.has_value() ? &*slot_fd : nullptr);
           !status.ok()) {
         return status;
@@ -754,7 +756,8 @@ ClientChannel::OpenSplitBufferSet(size_t buffer_index, size_t full_size,
   buffer->split_prefix_buffer = *prefix_addr;
   buffer->split_prefix_buffer_size =
       prefix_registered->metadata.allocation_size;
-  buffer->split_prefix_metadata = std::move(prefix_registered->metadata);
+  buffer->split_prefix_metadata =
+      SplitMetadataFromClientBuffer(prefix_registered->metadata);
 #else
   auto prefix_metadata = ReadSplitBufferMetadataFileWithRetry(prefix_name);
   if (!prefix_metadata.ok()) {
@@ -791,7 +794,8 @@ ClientChannel::OpenSplitBufferSet(size_t buffer_index, size_t full_size,
     if (!registered.ok()) {
       return registered.status();
     }
-    SplitBufferMetadata metadata = std::move(registered->metadata);
+    SplitBufferMetadata metadata =
+        SplitMetadataFromClientBuffer(registered->metadata);
 #else
     std::string shadow_file = absl::StrFormat("%s_slot_%d", metadata_base, slot);
     auto metadata_or = ReadSplitBufferMetadataFileWithRetry(shadow_file);

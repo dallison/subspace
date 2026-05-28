@@ -136,6 +136,14 @@ message GetChannelStatsResponse {
   repeated ChannelStatsProto channels = 2;
 }
 
+enum ClientBufferAllocator {
+  CLIENT_BUFFER_ALLOCATOR_UNSPECIFIED = 0;
+  CLIENT_BUFFER_ALLOCATOR_ANDROID_MEMFD = 1;
+  CLIENT_BUFFER_ALLOCATOR_SPLIT_SHM = 2;
+  CLIENT_BUFFER_ALLOCATOR_SPLIT_CALLBACK = 3;
+  CLIENT_BUFFER_ALLOCATOR_SPLIT_BUFFER_FREE_TEST = 4;
+}
+
 message ClientBufferHandleMetadataProto {
   string channel_name = 1;
   uint64 session_id = 2;
@@ -147,11 +155,9 @@ message ClientBufferHandleMetadataProto {
   uint64 handle = 8;
   string shadow_file = 9;
   string object_name = 10;
-  string allocator = 11;
-  string pool_id = 12;
-  bool cache_enabled = 13;
-  uint32 alignment = 14;
-  google.protobuf.Any allocator_metadata = 15;
+  ClientBufferAllocator allocator = 11;
+  reserved 12 to 15;
+  reserved "pool_id", "cache_enabled", "alignment", "allocator_metadata";
 }
 
 message RegisterClientBufferRequest {

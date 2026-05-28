@@ -28,32 +28,20 @@ set(SUBSPACE_PROTO_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}")
 set(PROTO_SRC "${CMAKE_CURRENT_BINARY_DIR}/subspace.pb.cc")
 set(PROTO_HDR "${CMAKE_CURRENT_BINARY_DIR}/subspace.pb.h")
 
-# When cross-compiling, use pre-generated protobuf files to avoid needing
-# a host-native protoc that matches the library version.
 if(CMAKE_CROSSCOMPILING)
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/subspace.pb.cc")
-        set(PROTO_SRC "${CMAKE_CURRENT_SOURCE_DIR}/subspace.pb.cc")
-        set(PROTO_HDR "${CMAKE_CURRENT_SOURCE_DIR}/subspace.pb.h")
-        message(STATUS "Cross-compiling: using pre-generated protobuf files")
-    else()
-        find_program(PROTOC_EXECUTABLE protoc REQUIRED)
-        message(STATUS "Cross-compiling: using host protoc at ${PROTOC_EXECUTABLE}")
-        set(PROTO_SRC "${CMAKE_CURRENT_BINARY_DIR}/subspace.pb.cc")
-        set(PROTO_HDR "${CMAKE_CURRENT_BINARY_DIR}/subspace.pb.h")
-        add_custom_command(
-            OUTPUT ${PROTO_SRC} ${PROTO_HDR}
-            COMMAND ${PROTOC_EXECUTABLE}
-            ARGS --cpp_out=${CMAKE_CURRENT_BINARY_DIR}
-                 --proto_path=${CMAKE_CURRENT_SOURCE_DIR}
-                 --proto_path=${protobuf_SOURCE_DIR}/src
-                 ${CMAKE_CURRENT_SOURCE_DIR}/subspace.proto
-            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/subspace.proto
-            COMMENT "Generating C++ code from subspace.proto (cross-compile)"
-        )
-    endif()
+    find_program(PROTOC_EXECUTABLE protoc REQUIRED)
+    message(STATUS "Cross-compiling: using host protoc at ${PROTOC_EXECUTABLE}")
+    add_custom_command(
+        OUTPUT ${PROTO_SRC} ${PROTO_HDR}
+        COMMAND ${PROTOC_EXECUTABLE}
+        ARGS --cpp_out=${CMAKE_CURRENT_BINARY_DIR}
+             --proto_path=${CMAKE_CURRENT_SOURCE_DIR}
+             --proto_path=${protobuf_SOURCE_DIR}/src
+             ${CMAKE_CURRENT_SOURCE_DIR}/subspace.proto
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/subspace.proto
+        COMMENT "Generating C++ code from subspace.proto (cross-compile)"
+    )
 else()
-    set(PROTO_SRC "${CMAKE_CURRENT_BINARY_DIR}/subspace.pb.cc")
-    set(PROTO_HDR "${CMAKE_CURRENT_BINARY_DIR}/subspace.pb.h")
     add_custom_command(
         OUTPUT ${PROTO_SRC} ${PROTO_HDR}
         COMMAND $<TARGET_FILE:protobuf::protoc>
@@ -75,11 +63,8 @@ add_library(subspace_proto STATIC
 
 
 # Add the directory containing the generated headers to the include paths.
-# The parent dir is added so "proto/subspace.pb.h" resolves when using
-# pre-generated files from the source tree.
 target_include_directories(subspace_proto PUBLIC
     ${CMAKE_CURRENT_BINARY_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 # Link the generated library against the main Protobuf library
