@@ -1277,10 +1277,21 @@ fn register_pending_client_buffers(client: &mut ClientInner, channel: &mut Chann
             request: Some(proto::request::Request::RegisterClientBuffer(
                 proto::RegisterClientBufferRequest {
                     metadata: Some(metadata),
+                    has_fd: false,
+                    fd_index: 0,
                 },
             )),
         };
         client.socket.send_request(&req)?;
+        let (resp, _fds) = client.socket.receive_response()?;
+        match resp.response {
+            Some(proto::response::Response::RegisterClientBuffer(r)) => {
+                if !r.error.is_empty() {
+                    return Err(SubspaceError::ServerError(r.error));
+                }
+            }
+            _ => return Err(SubspaceError::Internal("Unexpected response".into())),
+        }
     }
     Ok(())
 }

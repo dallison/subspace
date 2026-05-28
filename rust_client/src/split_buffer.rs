@@ -74,6 +74,14 @@ impl std::fmt::Debug for SplitBufferCallbacks {
 
 impl SplitBufferMetadata {
     pub fn to_proto(&self, allocator: &str) -> proto::ClientBufferHandleMetadataProto {
+        let allocator = match allocator {
+            "split_shm" => proto::ClientBufferAllocator::SplitShm as i32,
+            "split_callback" => proto::ClientBufferAllocator::SplitCallback as i32,
+            "split_buffer_free_test" => {
+                proto::ClientBufferAllocator::SplitBufferFreeTest as i32
+            }
+            _ => proto::ClientBufferAllocator::Unspecified as i32,
+        };
         proto::ClientBufferHandleMetadataProto {
             channel_name: self.channel_name.clone(),
             session_id: self.session_id,
@@ -85,11 +93,7 @@ impl SplitBufferMetadata {
             handle: self.handle,
             shadow_file: self.shadow_file.clone(),
             object_name: self.object_name.clone(),
-            allocator: allocator.to_string(),
-            pool_id: String::new(),
-            cache_enabled: false,
-            alignment: 0,
-            allocator_metadata: None,
+            allocator,
         }
     }
 }
