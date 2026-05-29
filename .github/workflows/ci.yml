@@ -346,6 +346,7 @@ jobs:
             //plugins:nop_plugin.so \
             //plugins:split_buffer_free_test_plugin.so \
             //android/jni:libsubspace_jni.so \
+            //android/java:subspace-java \
             //android/java:subspace-java-test \
             //coro_rpc/test:rpc_test \
             //coro_rpc/server:server_test \
