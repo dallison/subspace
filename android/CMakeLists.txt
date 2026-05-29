@@ -1,3 +1,7 @@
+# Copyright 2026 General Motors Inc.
+# All Rights Reserved
+# See LICENSE file for licensing information.
+
 # Java wrapper for Android clients. The classes use JNI but do not depend on
 # Android SDK APIs, so they can be compiled with the host Java toolchain.
 
