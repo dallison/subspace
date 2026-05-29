@@ -279,6 +279,11 @@ jobs:
       - name: Set up Android NDK
         run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> $GITHUB_ENV
 
+      - name: Build host protoc for cross-compilation
+        run: |
+          cmake -S . -B build/host-protoc -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/host-protoc --target protoc --parallel $(nproc)
+
       - name: Configure CMake for Android x86_64
         run: |
           cmake -S . -B build/android \
@@ -286,7 +291,8 @@ jobs:
             -DANDROID_ABI=x86_64 \
             -DANDROID_PLATFORM=android-28 \
             -DANDROID_STL=c++_shared \
-            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPROTOC_EXECUTABLE="$PWD/build/host-protoc/_deps/protobuf-build/protoc"
 
       - name: Build
         run: cmake --build build/android --parallel $(nproc)
@@ -339,6 +345,8 @@ jobs:
             //common:split_buffer_test \
             //plugins:nop_plugin.so \
             //plugins:split_buffer_free_test_plugin.so \
+            //android/jni:libsubspace_jni.so \
+            //android/java:subspace-java-test \
             //coro_rpc/test:rpc_test \
             //coro_rpc/server:server_test \
             //coro_rpc/client:client_test \

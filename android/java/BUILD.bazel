@@ -1,0 +1,14 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_java//java:defs.bzl", "java_library")
+
+java_library(
+    name = "subspace-java",
+    srcs = glob(["com/subspace/*.java"]),
+)
+
+java_library(
+    name = "subspace-java-test",
+    srcs = glob(["com/subspace/test/*.java"]),
+    deps = [":subspace-java"],
+)

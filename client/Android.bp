@@ -15,27 +15,16 @@ cc_library_shared {
         "arm_crc32.S",
     ],
     export_include_dirs: ["."],
-    local_include_dirs: [".."],
+    include_dirs: ["external/subspace"],
     static_libs: [
         "libsubspace_common",
         "libsubspace_proto",
         "libcoroutines",
         "libcpp_toolbelt",
+        "libabsl",
     ],
     shared_libs: [
-        "libprotobuf-cpp-lite",
+        "libprotobuf-cpp-full",
         "liblog",
-    ],
-    header_libs: [
-        "libabseil-headers",
-    ],
-    whole_static_libs: [
-        "libabsl_status",
-        "libabsl_statusor",
-        "libabsl_strings",
-        "libabsl_str_format_internal",
-        "libabsl_flat_hash_map",
-        "libabsl_flat_hash_set",
-        "libabsl_span",
     ],
 }

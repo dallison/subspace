@@ -4,8 +4,9 @@
 
 cmake_minimum_required(VERSION 3.15)
 
-# Protobuf is already fetched by the parent CMakeLists.txt via FetchContent
-# The targets like protobuf::libprotobuf and protobuf::protoc are available directly
+# Protobuf is already fetched by the parent CMakeLists.txt via FetchContent.
+# Native builds use protobuf::protoc directly. Cross-compiles use a host-native
+# protoc that must match the fetched protobuf version.
 
 # Include FetchContent to get protobuf source directory for well-known types
 include(FetchContent)
@@ -30,7 +31,27 @@ set(PROTO_HDR "${CMAKE_CURRENT_BINARY_DIR}/subspace.pb.h")
 
 if(CMAKE_CROSSCOMPILING)
     find_program(PROTOC_EXECUTABLE protoc REQUIRED)
-    message(STATUS "Cross-compiling: using host protoc at ${PROTOC_EXECUTABLE}")
+    execute_process(
+        COMMAND ${PROTOC_EXECUTABLE} --version
+        OUTPUT_VARIABLE PROTOC_VERSION_OUTPUT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE PROTOC_VERSION_RESULT
+    )
+    if(NOT PROTOC_VERSION_RESULT EQUAL 0)
+        message(FATAL_ERROR "Failed to run host protoc at ${PROTOC_EXECUTABLE}")
+    endif()
+    string(REGEX MATCH "[0-9]+(\\.[0-9]+)+" PROTOC_VERSION "${PROTOC_VERSION_OUTPUT}")
+    if(NOT PROTOC_VERSION)
+        message(FATAL_ERROR "Could not parse host protoc version from: ${PROTOC_VERSION_OUTPUT}")
+    endif()
+    if(NOT PROTOC_VERSION VERSION_EQUAL SUBSPACE_PROTOBUF_VERSION)
+        message(FATAL_ERROR
+            "Host protoc version ${PROTOC_VERSION} does not match fetched protobuf "
+            "version ${SUBSPACE_PROTOBUF_VERSION}. Pass a matching compiler with "
+            "-DPROTOC_EXECUTABLE=/path/to/protoc."
+        )
+    endif()
+    message(STATUS "Cross-compiling: using host protoc ${PROTOC_VERSION} at ${PROTOC_EXECUTABLE}")
     add_custom_command(
         OUTPUT ${PROTO_SRC} ${PROTO_HDR}
         COMMAND ${PROTOC_EXECUTABLE}

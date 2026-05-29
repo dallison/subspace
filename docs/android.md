@@ -173,9 +173,11 @@ cmake -S . -B build/android \
 cmake --build build/android --parallel
 ```
 
-CMake cross-compiles generate protobuf sources in the build tree. Ensure a
-host-native `protoc` is available on `PATH`, or pass it explicitly with
-`-DPROTOC_EXECUTABLE=/path/to/protoc`.
+CMake cross-compiles generate protobuf sources in the build tree. Ensure the
+host-native `protoc` matches the protobuf version fetched by CMake, or pass a
+matching compiler explicitly with `-DPROTOC_EXECUTABLE=/path/to/protoc`. The CI
+build does this by building the native `protoc` target first and passing that
+binary into the Android configure step.
 
 ## AOSP / Soong (Blueprint) Build
 
@@ -206,36 +208,46 @@ tree:
 1. **coroutines** (`external/coroutines/`) — https://github.com/dallison/coroutines
 2. **cpp_toolbelt** (`external/cpp_toolbelt/`) — https://github.com/dallison/cpp_toolbelt
 
-Example `Android.bp` files for both are provided in `external/coroutines/Android.bp`
-and `external/cpp_toolbelt/Android.bp` within this repository. Copy these into
-the respective source trees in your AOSP checkout.
+Example Blueprint files for both are provided in
+`external/coroutines/Android.bp.example` and
+`external/cpp_toolbelt/Android.bp.example` within this repository. Copy these to
+`Android.bp` in the respective source trees in your AOSP checkout.
 
 ### AOSP Dependencies
 
 The following modules must be available in the AOSP tree (they are part of
 standard AOSP):
 
-- `libprotobuf-cpp-lite` — Protocol Buffers runtime
+- `libprotobuf-cpp-full` — Protocol Buffers runtime. `subspace.proto` uses
+  `google.protobuf.Any`, which is not available from the lite runtime.
 - `liblog` — Android logging
 - `libdl` — Dynamic linker
-- Abseil modules (`libabsl_status`, `libabsl_statusor`, `libabsl_strings`,
-  `libabsl_str_format_internal`, `libabsl_flat_hash_map`,
-  `libabsl_flat_hash_set`, `libabsl_flags`, `libabsl_flags_parse`,
-  `libabsl_span`)
-- `libabseil-headers` — Abseil header library
+- `libabsl` — Abseil runtime and headers
 - `jni_headers` — JNI headers (for the JNI module)
 
 ### Building
 
+Add Subspace to a product makefile:
+
+```make
+PRODUCT_SOONG_NAMESPACES += external/subspace
+PRODUCT_PACKAGES += subspace_server libsubspace_client libsubspace_jni subspace-java
+```
+
+Then build from your AOSP root:
+
 ```bash
-# From your AOSP root:
-m subspace_server libsubspace_client libsubspace_jni subspace-java
+m external.subspace-subspace_server-soong \
+  external.subspace-libsubspace_client-soong \
+  external.subspace-libsubspace_jni-soong \
+  external.subspace-subspace-java-soong
 ```
 
 ### Integration Notes
 
 - The `subspace_defaults` module in the root `Android.bp` sets C++17 mode,
-  warning flags, and the `-DSUBSPACE_ANDROID` preprocessor define.
+  warning flags, exceptions/RTTI, and the `-DSUBSPACE_ANDROID` preprocessor
+  define.
 - All modules use `stl: "c++_shared"` and `min_sdk_version: "28"`.
 - The server binary can be included in the system partition via
   `PRODUCT_PACKAGES += subspace_server` in your device makefile.

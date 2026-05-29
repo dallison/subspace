@@ -42,6 +42,7 @@ build:macos_x86_64 --extra_execution_platforms=//platform/host:darwin_x86_64
 
 # For all builds, use C++17
 build --cxxopt="-std=c++17"
+build --java_runtime_version=remotejdk_17
 
 # Statically link C++ deps into Rust binaries (avoids RPATH issues)
 build --@rules_rust//rust/settings:experimental_use_cc_common_link=True
