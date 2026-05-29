@@ -52,9 +52,14 @@ mkdir -p /tmp/subspace_java_test_dex
 (cd /tmp/subspace_java_test_dex && zip -q -r /tmp/subspace-java-test-dex.jar classes.dex)
 adb push /tmp/subspace-java-test-dex.jar /data/local/tmp/subspace-java-test.jar
 
-# Push plugin .so files to relative path expected by tests
-adb shell "mkdir -p /data/local/tmp/plugins"
-find bazel-bin/plugins/ -name "*.so" -exec adb push {} /data/local/tmp/plugins/ \; 2>/dev/null || true
+# Push plugin .so files to relative path expected by tests.  Remove the target
+# directory first so an old directory named nop_plugin.so cannot shadow the file.
+rm -rf /tmp/android_plugins
+mkdir -p /tmp/android_plugins
+cp -L bazel-bin/plugins/nop_plugin.so /tmp/android_plugins/
+cp -L bazel-bin/plugins/split_buffer_free_test_plugin.so /tmp/android_plugins/
+adb shell "rm -rf /data/local/tmp/plugins"
+adb push /tmp/android_plugins /data/local/tmp/plugins
 
 # Make binaries executable
 adb shell "chmod +x /data/local/tmp/*_test /data/local/tmp/subspace_server"
