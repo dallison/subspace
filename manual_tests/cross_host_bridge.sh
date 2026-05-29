@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# Copyright 2026 David Allison
-# All Rights Reserved
-# See LICENSE file for licensing information.
 #
 # Manual test for cross-host Subspace bridging using TCP unicast discovery.
 #
