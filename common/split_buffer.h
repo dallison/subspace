@@ -63,6 +63,11 @@ ReadSplitBufferMetadataFile(const std::string &shadow_file);
 
 std::string SplitBufferObjectName(const std::string &shadow_file);
 
+// On Android these objects are anonymous memfds: CreateSplitSharedMemoryBuffer
+// returns a caller-owned descriptor, and OpenSplitSharedMemoryBuffer is
+// unsupported because an anonymous memfd cannot be reopened by name (the client
+// shares its descriptors with subscribers via the server instead).  Other
+// platforms use named POSIX/Linux shared memory and support reopen by name.
 absl::StatusOr<toolbelt::FileDescriptor>
 CreateSplitSharedMemoryBuffer(const SplitBufferMetadata &metadata);
 absl::StatusOr<toolbelt::FileDescriptor>

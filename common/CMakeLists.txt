@@ -20,6 +20,7 @@ add_library(subspace_common STATIC
 target_link_libraries(subspace_common PUBLIC
     absl::base
     absl::flags
+    absl::flat_hash_map
     absl::flat_hash_set
     absl::strings
     absl::str_format
