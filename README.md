@@ -48,7 +48,7 @@ See the file docs/subspace.pdf for full documentation.  Additional documentation
 
 # Building
 
-Subspace can be built using either Bazel or CMake. Both build systems will automatically download and build all required dependencies.
+Subspace can be built using Bazel or CMake. Android platform integrations can also be built with Soong/Blueprint inside an AOSP tree; see [Running Subspace on Android](docs/android.md).
 
 ## Building with Bazel
 

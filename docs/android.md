@@ -47,13 +47,26 @@ emulator -avd subspace_test -no-window -no-audio -gpu swiftshader_indirect &
 adb wait-for-device
 ```
 
-## Cross-Compiling
+## Building With Bazel
 
-Build the server and tests for Android ARM64:
+Bazel is the simplest way to cross-compile Subspace Android artifacts from this
+repository because it fetches its own C++ dependencies and uses the NDK
+toolchain configured in `.bazelrc`.
+
+Build the server, native tests, JNI library, and Java client test for Android
+ARM64:
 
 ```bash
-bazelisk build //server:subspace_server //client:client_test \
-    --config=android_arm64
+bazelisk build \
+  //server:subspace_server \
+  //client:client_test \
+  //c_client:client_test \
+  //plugins:nop_plugin.so \
+  //plugins:split_buffer_free_test_plugin.so \
+  //android/jni:libsubspace_jni.so \
+  //android/java:subspace-java \
+  //android/java:subspace-java-test \
+  --config=android_arm64
 ```
 
 The `android_arm64` config in `.bazelrc` sets:
@@ -61,6 +74,8 @@ The `android_arm64` config in `.bazelrc` sets:
 - `--cpu=aarch64` (prevents legacy macOS config_settings from matching)
 - `--linkopt=-lc++_static --linkopt=-lc++abi` (NDK C++ stdlib)
 - `--action_env=ANDROID_NDK_HOME`
+
+For an x86_64 emulator or CI runner, use `--config=android_x86_64` instead.
 
 ## Device Setup
 
@@ -78,7 +93,7 @@ The default server socket on Android is `/data/local/tmp/subspace` (defined by
 `kDefaultServerSocket` in `client/client.h`). This path is writable without
 root.
 
-## Deploying Binaries
+## Deploying Bazel Binaries
 
 Bazel produces shared libraries as symlinks in `bazel-bin/_solib_arm64-v8a/`.
 You must dereference them before pushing to the device:
@@ -101,7 +116,7 @@ adb push bazel-bin/plugins/nop_plugin.so /data/local/tmp/plugins/
 adb push bazel-bin/plugins/split_buffer_free_test_plugin.so /data/local/tmp/plugins/
 ```
 
-## Running
+## Running Bazel-built Tests
 
 ### Start the server
 
@@ -156,34 +171,53 @@ Android enforces linker namespace restrictions. Shared libraries must be in a
 directory referenced by `LD_LIBRARY_PATH` or in the same directory as the
 executable. The `android_libs/` approach works for `/data/local/tmp/` binaries.
 
-## CMake Cross-Compilation
+## Building With CMake
 
-Subspace can be cross-compiled for Android using CMake with the NDK toolchain:
+Subspace can also be cross-compiled for Android using CMake with the NDK
+toolchain. CMake fetches the same third-party dependencies with
+`FetchContent`, but protobuf code generation requires a host-native `protoc`
+that matches the protobuf version used by the Android build.
 
 ```bash
 export ANDROID_NDK_HOME=/path/to/ndk
+
+# Build a host protoc matching Subspace's protobuf dependency.
+cmake -S . -B build/host-protoc -DCMAKE_BUILD_TYPE=Release
+cmake --build build/host-protoc --target protoc --parallel
 
 cmake -S . -B build/android \
   -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
   -DANDROID_ABI=arm64-v8a \
   -DANDROID_PLATFORM=android-28 \
   -DANDROID_STL=c++_shared \
-  -DCMAKE_BUILD_TYPE=Release
+  -DCMAKE_BUILD_TYPE=Release \
+  -DPROTOC_EXECUTABLE="$PWD/build/host-protoc/_deps/protobuf-build/protoc"
 
 cmake --build build/android --parallel
 ```
 
-CMake cross-compiles generate protobuf sources in the build tree. Ensure the
-host-native `protoc` matches the protobuf version fetched by CMake, or pass a
-matching compiler explicitly with `-DPROTOC_EXECUTABLE=/path/to/protoc`. The CI
-build does this by building the native `protoc` target first and passing that
-binary into the Android configure step.
+Use `-DANDROID_ABI=x86_64` for an x86_64 emulator. The Android CMake build
+produces the native test binaries plus the Java/JNI artifacts:
+
+- `build/android/server/subspace_server`
+- `build/android/client/client_test`
+- `build/android/c_client/c_client_test`
+- `build/android/android/libsubspace_jni.so`
+- `build/android/android/subspace-java.jar`
+- `build/android/android/subspace-java-test.jar`
+
+The CI helper script `.github/scripts/cmake-android-test.sh` shows the expected
+deployment layout and how to run the CMake-built tests on an emulator.
 
 ## AOSP / Soong (Blueprint) Build
 
 Subspace provides `Android.bp` files for building as part of an AOSP source
 tree using the Soong build system. This is the recommended approach for
 integrating subspace into an Android platform image.
+
+Soong builds require a full AOSP checkout. GitHub-hosted runners do not provide
+one by default; use a local AOSP tree or a self-hosted CI runner with AOSP
+already synced.
 
 ### Directory Layout
 
@@ -199,6 +233,7 @@ Place the subspace source tree in your AOSP checkout (e.g.,
 | `libsubspace_proto` | static lib | Protobuf message definitions |
 | `libsubspace_jni` | shared lib | JNI bindings for Java clients |
 | `subspace-java` | java lib | Java client wrapper |
+| `subspace_java_client_test` | java binary | Device-side Java integration test |
 
 ### External Dependencies
 
@@ -231,16 +266,32 @@ Add Subspace to a product makefile:
 
 ```make
 PRODUCT_SOONG_NAMESPACES += external/subspace
-PRODUCT_PACKAGES += subspace_server libsubspace_client libsubspace_jni subspace-java
+PRODUCT_PACKAGES += \
+    subspace_server \
+    libsubspace_client \
+    libsubspace_jni \
+    subspace-java \
+    subspace_java_client_test
 ```
 
 Then build from your AOSP root:
 
 ```bash
+source build/envsetup.sh
+lunch <product>-userdebug
+
 m external.subspace-subspace_server-soong \
   external.subspace-libsubspace_client-soong \
   external.subspace-libsubspace_jni-soong \
-  external.subspace-subspace-java-soong
+  external.subspace-subspace-java-soong \
+  external.subspace-subspace_java_client_test-soong
+```
+
+After flashing or installing those artifacts on a device image, the Java
+integration test can be run through its wrapper:
+
+```bash
+adb shell subspace_java_client_test
 ```
 
 ### Integration Notes
