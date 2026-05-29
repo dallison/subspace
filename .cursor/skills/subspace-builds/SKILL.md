@@ -7,8 +7,10 @@ description: Build and test Subspace across supported platforms and build system
 
 ## General Rules
 
-- Use `bazelisk`, not `bazel`, for repository Bazel commands.
-- Prefer focused targets while iterating; use `bazelisk test //...` only when broad verification is needed.
+- User-facing examples should use `bazel`; use `bazelisk` as a drop-in
+  replacement if `bazel` is not available.
+- Prefer focused targets while iterating; use `bazel test //...` only when
+  broad verification is needed.
 - Check `.bazelrc`, `.github/workflows/ci.yml`, and `docs/android.md` before changing platform build behavior.
 - Do not check in generated protobuf files.
 
@@ -17,8 +19,8 @@ description: Build and test Subspace across supported platforms and build system
 Linux:
 
 ```bash
-CC=clang bazelisk build //...
-bazelisk test //...
+CC=clang bazel build //...
+bazel test //...
 
 cmake -S . -B build/cmake-Debug -DCMAKE_BUILD_TYPE=Debug
 cmake --build build/cmake-Debug --parallel
@@ -28,15 +30,15 @@ ctest --test-dir build/cmake-Debug --output-on-failure
 macOS Apple Silicon:
 
 ```bash
-bazelisk build //... --config=macos_arm64
-bazelisk test //... --config=macos_arm64
+bazel build //... --config=macos_arm64
+bazel test //... --config=macos_arm64
 ```
 
 macOS Intel:
 
 ```bash
-bazelisk build //... --config=macos_x86_64
-bazelisk test //... --config=macos_x86_64
+bazel build //... --config=macos_x86_64
+bazel test //... --config=macos_x86_64
 ```
 
 ## Android With Bazel
@@ -44,7 +46,7 @@ bazelisk test //... --config=macos_x86_64
 Requires `ANDROID_NDK_HOME`.
 
 ```bash
-bazelisk build \
+bazel build \
   //server:subspace_server \
   //client:client_test \
   //c_client:client_test \
@@ -127,8 +129,8 @@ adb shell subspace_java_client_test
 Requires the QNX SDP and `QNX_SDP_PATH`.
 
 ```bash
-bazelisk build //... --config=qnx_aarch64
-bazelisk build //... --config=qnx_x86_64
+bazel build //... --config=qnx_aarch64
+bazel build //... --config=qnx_x86_64
 ```
 
 If the default path in `.bazelrc` is wrong, set `QNX_SDP_PATH` in the
