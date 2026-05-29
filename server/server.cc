@@ -12,7 +12,6 @@
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
 #include "toolbelt/sockets.h"
-#include <algorithm>
 #include <cerrno>
 #include <fcntl.h>
 #include <filesystem>
@@ -1439,16 +1438,12 @@ absl::Status Server::TransmitDiscovery(const Discovery &disc,
 }
 
 void Server::AddDiscoveryConnection(std::shared_ptr<DiscoveryConnection> conn) {
-  discovery_connections_.push_back(std::move(conn));
+  discovery_connections_.insert(std::move(conn));
 }
 
 void Server::RemoveDiscoveryConnection(
     const std::shared_ptr<DiscoveryConnection> &conn) {
-  auto it = std::find(discovery_connections_.begin(),
-                      discovery_connections_.end(), conn);
-  if (it != discovery_connections_.end()) {
-    discovery_connections_.erase(it);
-  }
+  discovery_connections_.erase(conn);
 }
 
 void Server::AdvertiseAllChannels() {

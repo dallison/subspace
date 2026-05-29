@@ -293,7 +293,8 @@ private:
   bool local_;
   bool tcp_discovery_ = false;
   toolbelt::InetAddress bridge_advertise_address_;
-  std::vector<std::shared_ptr<DiscoveryConnection>> discovery_connections_;
+  absl::flat_hash_set<std::shared_ptr<DiscoveryConnection>>
+      discovery_connections_;
   toolbelt::FileDescriptor notify_fd_;
 
   // Atomic only because of testing.
