@@ -305,3 +305,48 @@ adb shell subspace_java_client_test
 - The JNI library and Java wrapper can be included in apps via the standard
   AOSP module dependency mechanism.
 
+## Bridging Between the Emulator and the Host
+
+A Subspace server inside the emulator can bridge channels to a server running
+natively on the host, in both directions (publish on Android / subscribe on the
+host, and vice versa). The emulator's user‑mode network is a NAT where only the
+guest can initiate connections and UDP broadcast does not cross the boundary, so
+two server features are used:
+
+- `--tcp_discovery` — run discovery over a single TCP connection that the guest
+  dials to the host (instead of UDP broadcast/unicast). See
+  [`server-architecture.md`](server-architecture.md) for details.
+- `--bridge_advertise_address=127.0.0.1` — advertise a loopback endpoint for
+  bridge listeners, reached through `adb` port tunnels.
+
+The host and guest use **different** bridge ports so the `adb forward`/`reverse`
+loopback listeners never collide with a server's own listener. With the host
+acting as the discovery listener:
+
+```bash
+# Tunnels: guest dials out to the host (reverse); host dials into the guest (forward).
+adb reverse tcp:6502 tcp:6502   # discovery: guest -> host
+adb reverse tcp:7100 tcp:7100   # bridge data: guest publisher -> host subscriber
+adb forward tcp:7200 tcp:7200   # bridge data: host publisher -> guest subscriber
+
+# Host (discovery listener):
+./subspace_server --socket=/tmp/subspace_host --tcp_discovery --disc_port=6502 \
+    --bridge_ports=7100 --bridge_advertise_address=127.0.0.1 \
+    --cleanup_filesystem=false
+
+# Guest (discovery connector), inside the emulator:
+adb shell "/data/local/tmp/subspace_server --socket=/data/local/tmp/subspace \
+    --tcp_discovery --peer_address=127.0.0.1 --peer_port=6502 \
+    --bridge_ports=7200 --bridge_advertise_address=127.0.0.1"
+```
+
+Publishers must be created with `local=false` for their channels to bridge.
+
+The script `manual_tests/cross_host_bridge.sh` automates this end to end and
+verifies both directions:
+
+```bash
+manual_tests/cross_host_bridge.sh native     # two servers on the host (loopback)
+manual_tests/cross_host_bridge.sh emulator   # host <-> running emulator
+```
+

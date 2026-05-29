@@ -98,6 +98,10 @@ build:android_arm64 --cpu=aarch64
 build:android_arm64 --linkopt=-lc++_static
 build:android_arm64 --linkopt=-lc++abi
 build:android_arm64 --extra_toolchains=@androidndk//:all
+# Abseil strips flag names on Android by default (ABSL_FLAGS_STRIP_NAMES=1),
+# which breaks parsing flags by name (e.g. --socket) on the command line even
+# though GetFlag() still works.  Keep the names so server/tool flags work.
+build:android_arm64 --copt=-DABSL_FLAGS_STRIP_NAMES=0
 
 build:android_x86_64 --platforms=//platform/android:android_x86_64
 build:android_x86_64 --action_env=ANDROID_NDK_HOME
@@ -106,6 +110,8 @@ build:android_x86_64 --cpu=x86_64
 build:android_x86_64 --linkopt=-lc++_static
 build:android_x86_64 --linkopt=-lc++abi
 build:android_x86_64 --extra_toolchains=@androidndk//:all
+# See android_arm64 note above.
+build:android_x86_64 --copt=-DABSL_FLAGS_STRIP_NAMES=0
 
 build:android --config=android_arm64
 

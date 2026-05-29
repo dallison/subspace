@@ -12,6 +12,7 @@
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
 #include "toolbelt/sockets.h"
+#include <algorithm>
 #include <cerrno>
 #include <fcntl.h>
 #include <filesystem>
@@ -426,16 +427,27 @@ void Server::CreateShutdownTrigger() {
   shutdown_trigger_fd_ = std::move(*fd);
 }
 
+toolbelt::SocketAddress Server::BridgeBindBase() const {
+  // When advertising a separate (e.g. forwarded loopback) address, bind to the
+  // any-address so the listener is reachable both on the local interface and
+  // via a forwarded loopback port.  Otherwise bind to the local interface.
+  if (bridge_advertise_address_.Valid()) {
+    return toolbelt::InetAddress::AnyAddress(0);
+  }
+  return my_address_;
+}
+
 absl::Status Server::BindBridgeListener(toolbelt::StreamSocket &listener) {
+  toolbelt::SocketAddress bind_base = BridgeBindBase();
   if (!bridge_port_range_.Enabled()) {
-    return listener.Bind(toolbelt::SocketAddress::AnyPort(my_address_), true);
+    return listener.Bind(toolbelt::SocketAddress::AnyPort(bind_base), true);
   }
 
   absl::Status last_status = absl::UnavailableError("no ports tried");
   for (int port = bridge_port_range_.first_port;
        port <= bridge_port_range_.last_port; ++port) {
     absl::StatusOr<toolbelt::SocketAddress> addr =
-        BridgeAddressWithPort(my_address_, port);
+        BridgeAddressWithPort(bind_base, port);
     if (!addr.ok()) {
       return addr.status();
     }
@@ -450,7 +462,7 @@ absl::Status Server::BindBridgeListener(toolbelt::StreamSocket &listener) {
   }
 
   if (bridge_ports_fallback_to_ephemeral_) {
-    return listener.Bind(toolbelt::SocketAddress::AnyPort(my_address_), true);
+    return listener.Bind(toolbelt::SocketAddress::AnyPort(bind_base), true);
   }
 
   return absl::UnavailableError(absl::StrFormat(
@@ -818,35 +830,51 @@ absl::Status Server::Run() {
     if (absl::Status s =
             FindIPAddresses(interface_, ip_addr, bcast_addr, logger_);
         !s.ok()) {
-      return s;
-    }
-    logger_.Log(toolbelt::LogLevel::kInfo, "IPv4: %s, Broadcast: %s",
-                ip_addr.ToString().c_str(), bcast_addr.ToString().c_str());
-
-    my_address_ = ip_addr;
-    // Bind the discovery transmitter to the network and any free
-    // port on the requested interface.
-    if (absl::Status s = discovery_transmitter_.Bind(ip_addr); !s.ok()) {
-      return s;
-    }
-
-    if (peer_address_.Valid()) {
-      // If peer address is supplied, use it.
-      discovery_addr_ = peer_address_;
-    } else {
-      // Otherwise use the broadcast address.
-      discovery_addr_ = bcast_addr;
-      discovery_addr_.SetPort(discovery_peer_port_);
-      if (absl::Status s = discovery_transmitter_.SetBroadcast(); !s.ok()) {
+      // TCP discovery does not need a broadcast-capable interface, and when a
+      // bridge advertise address is configured we don't need the local
+      // interface address either.  Treat the failure as non-fatal in that
+      // case so loopback/NAT setups (e.g. an Android emulator) can run.
+      if (tcp_discovery_ && bridge_advertise_address_.Valid()) {
+        logger_.Log(toolbelt::LogLevel::kWarning,
+                    "Could not determine local interface address (%s); "
+                    "continuing with TCP discovery and advertised bridge "
+                    "address %s",
+                    s.ToString().c_str(),
+                    bridge_advertise_address_.ToString().c_str());
+      } else {
         return s;
       }
+    } else {
+      logger_.Log(toolbelt::LogLevel::kInfo, "IPv4: %s, Broadcast: %s",
+                  ip_addr.ToString().c_str(), bcast_addr.ToString().c_str());
+      my_address_ = ip_addr;
     }
 
-    // Open the discovery receiver socket.
-    if (absl::Status s = discovery_receiver_.Bind(
-            toolbelt::InetAddress::AnyAddress(discovery_port_));
-        !s.ok()) {
-      return s;
+    if (!tcp_discovery_) {
+      // Bind the discovery transmitter to the network and any free
+      // port on the requested interface.
+      if (absl::Status s = discovery_transmitter_.Bind(ip_addr); !s.ok()) {
+        return s;
+      }
+
+      if (peer_address_.Valid()) {
+        // If peer address is supplied, use it.
+        discovery_addr_ = peer_address_;
+      } else {
+        // Otherwise use the broadcast address.
+        discovery_addr_ = bcast_addr;
+        discovery_addr_.SetPort(discovery_peer_port_);
+        if (absl::Status s = discovery_transmitter_.SetBroadcast(); !s.ok()) {
+          return s;
+        }
+      }
+
+      // Open the discovery receiver socket.
+      if (absl::Status s = discovery_receiver_.Bind(
+              toolbelt::InetAddress::AnyAddress(discovery_port_));
+          !s.ok()) {
+        return s;
+      }
     }
   }
 
@@ -875,10 +903,26 @@ absl::Status Server::Run() {
   }
 
   if (!local_) {
-    // Start the discovery receiver coroutine.
-    scheduler_.Spawn([this]() { DiscoveryReceiverCoroutine(); },
-                     {.name = "Discovery receiver",
-                      .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+    if (tcp_discovery_) {
+      // TCP discovery: a server with a peer address dials it; otherwise we
+      // listen for an incoming discovery connection.
+      if (peer_address_.Valid()) {
+        scheduler_.Spawn(
+            [this]() { DiscoveryConnectorCoroutine(); },
+            {.name = "Discovery connector",
+             .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+      } else {
+        scheduler_.Spawn(
+            [this]() { DiscoveryListenerCoroutine(); },
+            {.name = "Discovery listener",
+             .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+      }
+    } else {
+      // Start the discovery receiver coroutine.
+      scheduler_.Spawn([this]() { DiscoveryReceiverCoroutine(); },
+                       {.name = "Discovery receiver",
+                        .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+    }
 
     // Start the gratuitous Advertiser coroutine.  This sends Advertise messages
     // every 5 seconds.
@@ -1311,23 +1355,14 @@ void Server::SendQuery(const std::string &channel_name) {
         logger_.Log(toolbelt::LogLevel::kDebug,
                     "Sending Query %s with discovery port %d",
                     channel_name.c_str(), discovery_port_);
-        char buffer[kDiscoveryBufferSize];
         Discovery disc;
         disc.set_server_id(server_id_);
         disc.set_port(discovery_port_);
         auto *query = disc.mutable_query();
         query->set_channel_name(channel_name);
 
-        bool ok = disc.SerializeToArray(buffer, sizeof(buffer));
-        if (!ok) {
-          logger_.Log(toolbelt::LogLevel::kError,
-                      "Failed to serialize Query message");
-          return;
-        }
-        int64_t length = disc.ByteSizeLong();
-        absl::Status s =
-            discovery_transmitter_.SendTo(discovery_addr_, buffer, length);
-        if (!s.ok()) {
+        if (absl::Status s = TransmitDiscovery(disc, discovery_addr_);
+            !s.ok()) {
           logger_.Log(toolbelt::LogLevel::kError, "Failed to send Query: %s",
                       s.ToString().c_str());
           return;
@@ -1348,7 +1383,6 @@ void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
         logger_.Log(toolbelt::LogLevel::kDebug,
                     "Sending Advertise %s with discovery port %d",
                     channel_name.c_str(), discovery_port_);
-        char buffer[kDiscoveryBufferSize];
         Discovery disc;
         disc.set_server_id(server_id_);
         disc.set_port(discovery_port_);
@@ -1359,16 +1393,8 @@ void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
           advertise->set_split_buffers(
               ChannelUsesSplitBuffersOverBridge(it->second.get()));
         }
-        bool ok = disc.SerializeToArray(buffer, sizeof(buffer));
-        if (!ok) {
-          logger_.Log(toolbelt::LogLevel::kError,
-                      "Failed to serialize Advertise message");
-          return;
-        }
-        int64_t length = disc.ByteSizeLong();
-        absl::Status s =
-            discovery_transmitter_.SendTo(discovery_addr_, buffer, length);
-        if (!s.ok()) {
+        if (absl::Status s = TransmitDiscovery(disc, discovery_addr_);
+            !s.ok()) {
           logger_.Log(toolbelt::LogLevel::kError,
                       "Failed to send Advertise: %s", s.ToString().c_str());
           return;
@@ -1376,6 +1402,197 @@ void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
       },
       {.name = "Send discovery advertise",
        .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+}
+
+absl::Status Server::TransmitDiscovery(const Discovery &disc,
+                                       const toolbelt::InetAddress &udp_dest) {
+  if (tcp_discovery_) {
+    int64_t length = disc.ByteSizeLong();
+    // SendMessage writes a 4-byte length prefix immediately before the
+    // payload, so reserve room for it at the front of the buffer.
+    std::vector<char> buffer(sizeof(int32_t) + length);
+    if (!disc.SerializeToArray(buffer.data() + sizeof(int32_t),
+                               static_cast<int>(length))) {
+      return absl::InternalError("Failed to serialize discovery message");
+    }
+    // Copy the connection list so a send that drops a connection can't
+    // invalidate the iterator.  Writes are blocking (no coroutine yield) so
+    // messages from different coroutines can't interleave on a connection.
+    auto connections = discovery_connections_;
+    for (const auto &conn : connections) {
+      absl::StatusOr<ssize_t> n =
+          conn->socket->SendMessage(buffer.data() + sizeof(int32_t), length);
+      if (!n.ok()) {
+        logger_.Log(toolbelt::LogLevel::kError,
+                    "Failed to send discovery message to %s: %s",
+                    conn->remote.ToString().c_str(), n.status().ToString().c_str());
+      }
+    }
+    return absl::OkStatus();
+  }
+
+  char buffer[kDiscoveryBufferSize];
+  if (!disc.SerializeToArray(buffer, sizeof(buffer))) {
+    return absl::InternalError("Failed to serialize discovery message");
+  }
+  return discovery_transmitter_.SendTo(udp_dest, buffer, disc.ByteSizeLong());
+}
+
+void Server::AddDiscoveryConnection(std::shared_ptr<DiscoveryConnection> conn) {
+  discovery_connections_.push_back(std::move(conn));
+}
+
+void Server::RemoveDiscoveryConnection(
+    const std::shared_ptr<DiscoveryConnection> &conn) {
+  auto it = std::find(discovery_connections_.begin(),
+                      discovery_connections_.end(), conn);
+  if (it != discovery_connections_.end()) {
+    discovery_connections_.erase(it);
+  }
+}
+
+void Server::AdvertiseAllChannels() {
+  for (auto &[name, ch] : channels_) {
+    if (!ch->IsLocal() && !ch->IsBridgePublisher()) {
+      SendAdvertise(name, ch->IsReliable());
+    }
+  }
+}
+
+// Reads length-delimited Discovery protobufs from a single TCP discovery
+// connection and dispatches them to the same handlers used by UDP discovery.
+// Returns when the connection is closed or fails.
+void Server::DiscoveryConnectionReaderLoop(
+    std::shared_ptr<DiscoveryConnection> conn) {
+  char buffer[kDiscoveryBufferSize];
+  for (;;) {
+    absl::StatusOr<ssize_t> n =
+        conn->socket->ReceiveMessage(buffer, sizeof(buffer), co::self);
+    if (!n.ok()) {
+      logger_.Log(toolbelt::LogLevel::kDebug,
+                  "Discovery connection to %s closed: %s",
+                  conn->remote.ToString().c_str(), n.status().ToString().c_str());
+      return;
+    }
+    if (*n == 0) {
+      logger_.Log(toolbelt::LogLevel::kDebug,
+                  "Discovery connection to %s closed by peer",
+                  conn->remote.ToString().c_str());
+      return;
+    }
+    Discovery disc;
+    if (!disc.ParseFromArray(buffer, static_cast<int>(*n))) {
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to parse discovery message");
+      continue;
+    }
+    if (disc.server_id() == server_id_) {
+      continue;
+    }
+    // Build the peer address used as a bridge dedup key, mirroring the UDP
+    // path where the sender port is replaced by the advertised discovery port.
+    toolbelt::InetAddress sender = conn->remote;
+    sender.SetPort(disc.port());
+    logger_.Log(toolbelt::LogLevel::kDebug, "Discovery message from %s\n%s",
+                sender.ToString().c_str(), disc.DebugString().c_str());
+    switch (disc.data_case()) {
+    case Discovery::kQuery:
+      IncomingQuery(disc.query(), sender);
+      break;
+    case Discovery::kAdvertise:
+      IncomingAdvertise(disc.advertise(), sender, disc.server_id());
+      break;
+    case Discovery::kSubscribe:
+      IncomingSubscribe(disc.subscribe(), sender, disc.server_id());
+      break;
+    default:
+      break;
+    }
+  }
+}
+
+// Listens for an incoming TCP discovery connection and serves each one with a
+// reader coroutine.  Used by the server that does not have a peer address.
+void Server::DiscoveryListenerCoroutine() {
+  toolbelt::StreamSocket listener;
+  if (absl::Status s = listener.Bind(
+          toolbelt::InetAddress::AnyAddress(discovery_port_), true);
+      !s.ok()) {
+    logger_.Log(toolbelt::LogLevel::kError,
+                "Failed to bind TCP discovery listener on port %d: %s",
+                discovery_port_, s.ToString().c_str());
+    return;
+  }
+  logger_.Log(toolbelt::LogLevel::kInfo,
+              "Listening for TCP discovery connections on port %d",
+              discovery_port_);
+  for (;;) {
+    absl::StatusOr<toolbelt::StreamSocket> incoming = listener.Accept(co::self);
+    if (!incoming.ok()) {
+      if (shutting_down_) {
+        return;
+      }
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to accept discovery connection: %s",
+                  incoming.status().ToString().c_str());
+      continue;
+    }
+    auto conn = std::make_shared<DiscoveryConnection>();
+    conn->socket =
+        std::make_shared<toolbelt::StreamSocket>(std::move(*incoming));
+    if (absl::StatusOr<toolbelt::SocketAddress> peer =
+            conn->socket->GetPeerName();
+        peer.ok() && peer->Type() == toolbelt::SocketAddress::kAddressInet) {
+      conn->remote = peer->GetInetAddress();
+    }
+    logger_.Log(toolbelt::LogLevel::kInfo,
+                "Accepted TCP discovery connection from %s",
+                conn->remote.ToString().c_str());
+    AddDiscoveryConnection(conn);
+    // Advertise our channels right away so the peer can bridge without waiting
+    // for the next gratuitous advertise cycle.
+    AdvertiseAllChannels();
+    scheduler_.Spawn(
+        [this, conn]() {
+          DiscoveryConnectionReaderLoop(conn);
+          RemoveDiscoveryConnection(conn);
+        },
+        {.name = "Discovery reader",
+         .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+  }
+}
+
+// Dials the configured peer for TCP discovery, retrying on failure, and serves
+// the connection inline.  Used by the server that has a peer address.
+void Server::DiscoveryConnectorCoroutine() {
+  constexpr int kRetrySecs = 1;
+  for (;;) {
+    if (shutting_down_) {
+      return;
+    }
+    auto socket = std::make_shared<toolbelt::StreamSocket>();
+    if (absl::Status s = socket->Connect(peer_address_); !s.ok()) {
+      logger_.Log(toolbelt::LogLevel::kDebug,
+                  "TCP discovery connect to %s failed: %s; retrying",
+                  peer_address_.ToString().c_str(), s.ToString().c_str());
+      co::Sleep(kRetrySecs);
+      continue;
+    }
+    auto conn = std::make_shared<DiscoveryConnection>();
+    conn->socket = socket;
+    conn->remote = peer_address_;
+    logger_.Log(toolbelt::LogLevel::kInfo,
+                "Connected TCP discovery to %s",
+                peer_address_.ToString().c_str());
+    AddDiscoveryConnection(conn);
+    AdvertiseAllChannels();
+    DiscoveryConnectionReaderLoop(conn);
+    RemoveDiscoveryConnection(conn);
+    if (shutting_down_) {
+      return;
+    }
+    co::Sleep(kRetrySecs);
+  }
 }
 
 // This coroutine receives discovery messages over UDP.
@@ -1489,7 +1706,9 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
     auto *ret_addr = subscribed.mutable_retirement_socket();
     switch (retirement_addr.Type()) {
     case toolbelt::SocketAddress::kAddressInet: {
-      in_addr ip_addr = retirement_addr.GetInetAddress().IpAddress();
+      in_addr ip_addr = bridge_advertise_address_.Valid()
+                            ? bridge_advertise_address_.IpAddress()
+                            : retirement_addr.GetInetAddress().IpAddress();
       ret_addr->set_address(&ip_addr, sizeof(ip_addr));
       break;
     }
@@ -1739,8 +1958,11 @@ Server::SendSubscribeMessage(const std::string &channel_name, bool reliable,
   auto *sub_addr = sub->mutable_receiver();
   switch (receiver_addr.Type()) {
   case toolbelt::SocketAddress::kAddressInet: {
-    // IPv4 address.
-    in_addr ip_addr = receiver_addr.GetInetAddress().IpAddress();
+    // IPv4 address.  Advertise the configured bridge address if set, so a
+    // NAT'd peer can reach us via a forwarded loopback endpoint.
+    in_addr ip_addr = bridge_advertise_address_.Valid()
+                          ? bridge_advertise_address_.IpAddress()
+                          : receiver_addr.GetInetAddress().IpAddress();
     sub_addr->set_address(&ip_addr, sizeof(ip_addr));
     break;
   }
@@ -1757,15 +1979,11 @@ Server::SendSubscribeMessage(const std::string &channel_name, bool reliable,
   }
   sub_addr->set_port(receiver_addr.Port());
 
-  bool ok = disc.SerializeToArray(buffer, static_cast<int>(buffer_size));
-  if (!ok) {
-    return absl::InternalError("Failed to serialize subscribe message");
-  }
-  int64_t length = disc.ByteSizeLong();
+  (void)buffer;
+  (void)buffer_size;
   logger_.Log(toolbelt::LogLevel::kDebug, "Sending subscribe to %s: %s",
               publisher.ToString().c_str(), disc.DebugString().c_str());
-  absl::Status s =
-      discovery_transmitter_.SendTo(publisher, buffer, length, co::self);
+  absl::Status s = TransmitDiscovery(disc, publisher);
   if (!s.ok()) {
     return absl::InternalError(
         absl::StrFormat("Failed to send subscribe: %s", s.ToString()));

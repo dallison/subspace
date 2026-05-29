@@ -37,6 +37,15 @@ ABSL_FLAG(bool, bridge_ports_fallback_ephemeral, false,
 ABSL_FLAG(std::string, log_level, "info", "Log level");
 ABSL_FLAG(std::string, interface, "", "Discovery network interface");
 ABSL_FLAG(bool, local, false, "Use local computer only");
+ABSL_FLAG(bool, tcp_discovery, false,
+          "Use a TCP connection for discovery instead of UDP broadcast/unicast. "
+          "A server with --peer_address dials it; a server without one listens "
+          "on --disc_port. Useful across NAT (e.g. an Android emulator/VM).");
+ABSL_FLAG(std::string, bridge_advertise_address, "",
+          "IP address to advertise to peers for this server's bridge "
+          "listeners, overriding the local interface address (e.g. 127.0.0.1 "
+          "reached via adb forward/reverse). Bridge listeners bind to the "
+          "any-address when this is set.");
 ABSL_FLAG(int, notify_fd, -1, "File descriptor to notify of startup");
 ABSL_FLAG(std::string, machine, "", "Machine name");
 
@@ -147,6 +156,20 @@ int main(int argc, char **argv) {
   }
   if (absl::GetFlag(FLAGS_cleanup_filesystem)) {
     server->SetCleanupFilesystem(true);
+  }
+  if (absl::GetFlag(FLAGS_tcp_discovery)) {
+    server->SetTcpDiscovery(true);
+  }
+  if (const std::string &bridge_advertise =
+          absl::GetFlag(FLAGS_bridge_advertise_address);
+      !bridge_advertise.empty()) {
+    toolbelt::InetAddress advertise_address(bridge_advertise, 0);
+    if (!advertise_address.Valid()) {
+      fprintf(stderr, "Invalid --bridge_advertise_address value '%s'\n",
+              bridge_advertise.c_str());
+      exit(1);
+    }
+    server->SetBridgeAdvertiseAddress(advertise_address);
   }
 
   // Load the plugins.  Each plugin is a name:path pair.

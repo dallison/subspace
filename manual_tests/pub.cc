@@ -13,9 +13,16 @@ ABSL_FLAG(int, num_msgs, 1, "Number of messages to send");
 ABSL_FLAG(double, frequency, 0, "Freqency to send at (Hz)");
 ABSL_FLAG(bool, reliable, false, "Use reliable transport");
 ABSL_FLAG(int, num_slots, 5, "Number of slots in channel");
+ABSL_FLAG(bool, local, true,
+          "Restrict the channel to the local machine. Set to false to allow "
+          "the channel to be bridged to other servers.");
+ABSL_FLAG(std::string, channel, "test", "Channel name to publish on");
 
 int main(int argc, char **argv) {
   absl::ParseCommandLine(argc, argv);
+  // Line-buffer stdout so progress is visible (and not lost on termination)
+  // when output is redirected to a file or pipe, e.g. in scripted tests.
+  setvbuf(stdout, nullptr, _IOLBF, 0);
 
   subspace::Client client;
   absl::Status init_status = client.Init(absl::GetFlag(FLAGS_socket));
@@ -26,10 +33,12 @@ int main(int argc, char **argv) {
   }
   bool reliable = absl::GetFlag(FLAGS_reliable);
   int num_slots = absl::GetFlag(FLAGS_num_slots);
+  bool local = absl::GetFlag(FLAGS_local);
+  std::string channel = absl::GetFlag(FLAGS_channel);
 
   absl::StatusOr<subspace::Publisher> pub = client.CreatePublisher(
-      "test", 256, num_slots,
-      subspace::PublisherOptions().SetLocal(true).SetReliable(reliable));
+      channel, 256, num_slots,
+      subspace::PublisherOptions().SetLocal(local).SetReliable(reliable));
   if (!pub.ok()) {
     fprintf(stderr, "Can't create publisher: %s\n",
             pub.status().ToString().c_str());
