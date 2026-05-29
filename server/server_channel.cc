@@ -189,30 +189,30 @@ void ServerChannel::RemoveBuffer(uint64_t session_id, Server *server) {
   }
   for (int i = 0; i < ccb_->num_buffers; i++) {
     std::string filename = BufferSharedMemoryName(session_id, i);
-    for (const RegisteredClientBuffer &buffer : client_buffers_) {
-      const ClientBufferHandleMetadata &metadata = buffer.metadata;
-      if (metadata.session_id != session_id ||
-          metadata.buffer_index != static_cast<uint32_t>(i)) {
-        continue;
-      }
-      bool plugin_freed = false;
-      if (server != nullptr) {
-        absl::StatusOr<bool> freed =
-            server->FreeClientBufferWithPlugins(metadata);
-        if (freed.ok()) {
-          plugin_freed = *freed;
+    auto group = client_buffers_.find(
+        ClientBufferGroupKey{session_id, static_cast<uint32_t>(i)});
+    if (group != client_buffers_.end()) {
+      for (const auto &[slot, buffer] : group->second) {
+        const ClientBufferHandleMetadata &metadata = buffer.metadata;
+        bool plugin_freed = false;
+        if (server != nullptr) {
+          absl::StatusOr<bool> freed =
+              server->FreeClientBufferWithPlugins(metadata);
+          if (freed.ok()) {
+            plugin_freed = *freed;
+          }
         }
-      }
-      if (!plugin_freed && !metadata.object_name.empty()) {
+        if (!plugin_freed && !metadata.object_name.empty()) {
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
-        // Anonymous fd-backed Android buffers are released when the server's
-        // registered fd is closed.
+          // Anonymous fd-backed Android buffers are released when the server's
+          // registered fd is closed.
 #else
-        (void)shm_unlink(metadata.object_name.c_str());
+          (void)shm_unlink(metadata.object_name.c_str());
 #endif
-      }
-      if (!metadata.shadow_file.empty()) {
-        (void)remove(metadata.shadow_file.c_str());
+        }
+        if (!metadata.shadow_file.empty()) {
+          (void)remove(metadata.shadow_file.c_str());
+        }
       }
     }
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
@@ -237,17 +237,17 @@ uint64_t ServerChannel::GetVirtualMemoryUsage() const {
   }
 
   uint64_t split_buffer_size = 0;
-  for (const RegisteredClientBuffer &buffer : client_buffers_) {
+  ForEachClientBuffer([&](const RegisteredClientBuffer &buffer) {
     const ClientBufferHandleMetadata &metadata = buffer.metadata;
     if (metadata.buffer_index >= static_cast<uint32_t>(ccb_->num_buffers)) {
-      continue;
+      return;
     }
     if (bcb_->refs[metadata.buffer_index].load(std::memory_order_relaxed) <=
         0) {
-      continue;
+      return;
     }
     split_buffer_size += metadata.allocation_size;
-  }
+  });
 
   if (split_buffer_size == 0) {
     return Channel::GetVirtualMemoryUsage();

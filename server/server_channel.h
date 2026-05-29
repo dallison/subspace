@@ -163,6 +163,39 @@ template <typename H> inline H AbslHashValue(H h, const ChannelTransmitter &a) {
   return H::combine(std::move(addr_hash), a.reliable_);
 }
 
+// Identifies the group of client buffers that share a (session, buffer)
+// pairing.  This is the key used for the partial-key lookups performed by
+// FindClientBuffers and UnregisterClientBuffer.
+struct ClientBufferGroupKey {
+  uint64_t session_id;
+  uint32_t buffer_index;
+
+  bool operator==(const ClientBufferGroupKey &other) const {
+    return session_id == other.session_id &&
+           buffer_index == other.buffer_index;
+  }
+
+  template <typename H>
+  friend H AbslHashValue(H h, const ClientBufferGroupKey &k) {
+    return H::combine(std::move(h), k.session_id, k.buffer_index);
+  }
+};
+
+// Identifies a single client buffer within a group.
+struct ClientBufferSlotKey {
+  uint32_t slot_id;
+  bool is_prefix;
+
+  bool operator==(const ClientBufferSlotKey &other) const {
+    return slot_id == other.slot_id && is_prefix == other.is_prefix;
+  }
+
+  template <typename H>
+  friend H AbslHashValue(H h, const ClientBufferSlotKey &k) {
+    return H::combine(std::move(h), k.slot_id, k.is_prefix);
+  }
+};
+
 // This is a channel maintained by the server.  The server creates the shared
 // memory for the channel and distributes the file descriptor associated with
 // it.
@@ -274,47 +307,43 @@ public:
   virtual void RemoveBuffer(uint64_t session_id, Server *server = nullptr);
   void RegisterClientBuffer(ClientBufferHandleMetadata metadata,
                             toolbelt::FileDescriptor fd = {}) {
-    auto existing =
-        std::find_if(client_buffers_.begin(), client_buffers_.end(),
-                     [&metadata](const RegisteredClientBuffer &buffer) {
-                       return buffer.metadata.session_id ==
-                                  metadata.session_id &&
-                              buffer.metadata.buffer_index ==
-                                  metadata.buffer_index &&
-                              buffer.metadata.slot_id == metadata.slot_id &&
-                              buffer.metadata.is_prefix == metadata.is_prefix;
-                     });
-    RegisteredClientBuffer buffer{.metadata = std::move(metadata),
-                                  .fd = std::move(fd)};
-    if (existing != client_buffers_.end()) {
-      *existing = std::move(buffer);
-      return;
-    }
-    client_buffers_.push_back(std::move(buffer));
+    ClientBufferGroupKey group{metadata.session_id, metadata.buffer_index};
+    ClientBufferSlotKey slot{metadata.slot_id, metadata.is_prefix};
+    client_buffers_[group][slot] = RegisteredClientBuffer{
+        .metadata = std::move(metadata), .fd = std::move(fd)};
   }
-  const std::vector<RegisteredClientBuffer> &ClientBuffers() const {
-    return client_buffers_;
+  // Invokes fn(const RegisteredClientBuffer&) for every registered buffer.  The
+  // iteration order is unspecified.
+  template <typename F> void ForEachClientBuffer(F &&fn) const {
+    for (const auto &[group, slots] : client_buffers_) {
+      for (const auto &[slot, buffer] : slots) {
+        fn(buffer);
+      }
+    }
+  }
+  size_t NumClientBuffers() const {
+    size_t n = 0;
+    for (const auto &[group, slots] : client_buffers_) {
+      n += slots.size();
+    }
+    return n;
   }
   std::vector<const RegisteredClientBuffer *>
   FindClientBuffers(uint64_t session_id, uint32_t buffer_index) const {
     std::vector<const RegisteredClientBuffer *> result;
-    for (const auto &buffer : client_buffers_) {
-      if (buffer.metadata.session_id == session_id &&
-          buffer.metadata.buffer_index == buffer_index) {
-        result.push_back(&buffer);
-      }
+    auto it =
+        client_buffers_.find(ClientBufferGroupKey{session_id, buffer_index});
+    if (it == client_buffers_.end()) {
+      return result;
+    }
+    result.reserve(it->second.size());
+    for (const auto &[slot, buffer] : it->second) {
+      result.push_back(&buffer);
     }
     return result;
   }
   void UnregisterClientBuffer(uint64_t session_id, uint32_t buffer_index) {
-    client_buffers_.erase(
-        std::remove_if(client_buffers_.begin(), client_buffers_.end(),
-                       [session_id, buffer_index](
-                           const RegisteredClientBuffer &buffer) {
-                         return buffer.metadata.session_id == session_id &&
-                                buffer.metadata.buffer_index == buffer_index;
-                       }),
-        client_buffers_.end());
+    client_buffers_.erase(ClientBufferGroupKey{session_id, buffer_index});
   }
   // This is true if all publishers are bridge publishers.
   bool IsBridgePublisher() const;
@@ -405,7 +434,10 @@ protected:
   absl::flat_hash_map<int, std::unique_ptr<User>> users_;
   toolbelt::BitSet<kMaxUsers> user_ids_;
   absl::flat_hash_map<ChannelTransmitter, std::string> bridged_publishers_;
-  std::vector<RegisteredClientBuffer> client_buffers_;
+  absl::flat_hash_map<ClientBufferGroupKey,
+                      absl::flat_hash_map<ClientBufferSlotKey,
+                                          RegisteredClientBuffer>>
+      client_buffers_;
   SharedMemoryFds shared_memory_fds_;
   bool is_virtual_ = false;
   bool skip_cleanup_ = false;

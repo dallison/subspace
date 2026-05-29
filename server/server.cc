@@ -767,9 +767,9 @@ absl::Status Server::Run() {
         if (recovered) {
           for (auto &[name, ch] : channels_) {
             shadow->SendCreateChannel(ch.get());
-            for (const RegisteredClientBuffer &buffer : ch->ClientBuffers()) {
+            ch->ForEachClientBuffer([&](const RegisteredClientBuffer &buffer) {
               shadow->SendRegisterClientBuffer(buffer.metadata, buffer.fd);
-            }
+            });
             for (auto &[uid, user] : ch->GetUsers()) {
               if (user == nullptr) {
                 continue;

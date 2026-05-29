@@ -601,7 +601,7 @@ TEST_F(ShadowRecoveryTest, ServerRecoversSplitBufferStateFromShadow) {
   auto *channel = recovered_channels.at("shadow_split_buffers").get();
   ASSERT_TRUE(channel->HasSplitBufferOptions());
   EXPECT_TRUE(channel->GetSplitBufferOptions().use_split_buffers);
-  EXPECT_EQ(channel->ClientBuffers().size(), 5u);
+  EXPECT_EQ(channel->NumClientBuffers(), 5u);
   EXPECT_EQ(server_->GetSessionId(), old_session_id);
 
   StopServer();
