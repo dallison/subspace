@@ -442,6 +442,9 @@ ClientChannel::GetRegisteredClientBuffer(uint32_t buffer_index, bool is_prefix,
     return absl::InternalError("No client buffer lookup callback registered");
   }
   absl::Status status;
+  // The CCB/BCB can make a buffer generation visible before the server has
+  // returned the registered Android memfd for that prefix/slot.  Poll briefly
+  // for the registration to catch up before treating it as missing.
   for (int attempt = 0; attempt < 100; attempt++) {
     absl::StatusOr<std::vector<RegisteredClientBuffer>> buffers =
         client_buffer_lookup_callback_(ResolvedName(), session_id_,
