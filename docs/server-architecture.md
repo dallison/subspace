@@ -151,6 +151,43 @@ to an ephemeral TCP port or fails that bridge setup.
 
 Every 5 seconds, broadcasts an `Advertise` for all local channels so late-joining subscribers can discover them.
 
+### TCP Unicast Discovery (across NAT / VMs)
+
+UDP discovery (broadcast or `--peer_address` unicast) assumes the two servers
+can exchange datagrams directly and that each server can be reached on the
+discovery port it advertises. That breaks when one server runs inside a NAT'd
+environment such as an Android emulator or a VM, where only the NAT'd side can
+initiate connections and the UDP "reply to the advertised port" assumption no
+longer holds.
+
+`--tcp_discovery` replaces UDP discovery with a single TCP connection that
+carries the same `Query`/`Advertise`/`Subscribe` messages (length‑delimited)
+in both directions:
+
+- A server **with** `--peer_address` set **dials** the peer's `--disc_port`,
+  retrying until it connects (`DiscoveryConnectorCoroutine`).
+- A server **without** a peer address **listens** on `--disc_port` for an
+  incoming discovery connection (`DiscoveryListenerCoroutine`).
+
+Because the handshake runs over one established connection, only the dialing
+(NAT'd) side needs to reach the other, and there is no source‑port rewriting.
+This also lets two servers run on the same host without contending for the UDP
+discovery port. UDP broadcast discovery remains the default for the
+zero‑configuration LAN case.
+
+### Advertising bridge listeners across NAT
+
+The bridge data channel is always TCP, with the transmitter (publisher side)
+dialing the receiver (subscriber side) listener. When a server is NAT'd, its
+listeners are only reachable through a forwarded loopback port (e.g. an
+`adb forward`/`adb reverse` tunnel). `--bridge_advertise_address=IP` makes the
+server advertise that address (typically `127.0.0.1`) for its bridge and
+retirement listeners instead of the local interface address, and binds those
+listeners to the any‑address so the forwarded loopback port reaches them.
+
+See `manual_tests/cross_host_bridge.sh` for a worked example that bridges a
+channel in both directions between a host and an Android emulator.
+
 ## Key Classes
 
 ```

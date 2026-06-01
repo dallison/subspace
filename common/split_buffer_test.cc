@@ -48,7 +48,7 @@ SplitBufferMetadata TestMetadata(const std::string &suffix) {
 
 TEST(SplitBufferTest, WritesAndReadsMetadata) {
   SplitBufferMetadata metadata = TestMetadata("metadata");
-  (void)DestroySplitSharedMemoryBuffer(metadata);
+  (void)unlink(metadata.shadow_file.c_str());
 
   ASSERT_TRUE(WriteSplitBufferMetadataFile(metadata).ok());
   auto read_metadata = ReadSplitBufferMetadataFile(metadata.shadow_file);
@@ -65,7 +65,7 @@ TEST(SplitBufferTest, WritesAndReadsMetadata) {
   EXPECT_EQ(read_metadata->shadow_file, metadata.shadow_file);
   EXPECT_EQ(read_metadata->object_name, metadata.object_name);
 
-  (void)DestroySplitSharedMemoryBuffer(metadata);
+  (void)unlink(metadata.shadow_file.c_str());
 }
 
 TEST(SplitBufferTest, CreatesOpensAndDestroysSharedMemoryObject) {
@@ -76,6 +76,16 @@ TEST(SplitBufferTest, CreatesOpensAndDestroysSharedMemoryObject) {
   ASSERT_TRUE(created.ok()) << created.status();
   ASSERT_TRUE(created->Valid());
 
+  struct stat created_sb;
+  ASSERT_EQ(fstat(created->Fd(), &created_sb), 0);
+  EXPECT_GE(static_cast<uint64_t>(created_sb.st_size), metadata.allocation_size);
+
+#if defined(__ANDROID__)
+  // Anonymous memfds cannot be reopened by name; the caller owns the descriptor
+  // returned by CreateSplitSharedMemoryBuffer instead.  There is no shadow file
+  // on Android.
+  EXPECT_FALSE(OpenSplitSharedMemoryBuffer(metadata, O_RDWR).ok());
+#else
   ASSERT_TRUE(WriteSplitBufferMetadataFile(metadata).ok());
   auto opened = OpenSplitSharedMemoryBuffer(metadata, O_RDWR);
   ASSERT_TRUE(opened.ok()) << opened.status();
@@ -84,9 +94,12 @@ TEST(SplitBufferTest, CreatesOpensAndDestroysSharedMemoryObject) {
   struct stat sb;
   ASSERT_EQ(fstat(opened->Fd(), &sb), 0);
   EXPECT_GE(static_cast<uint64_t>(sb.st_size), metadata.allocation_size);
+#endif
 
   ASSERT_TRUE(DestroySplitSharedMemoryBuffer(metadata).ok());
+#if !defined(__ANDROID__)
   EXPECT_FALSE(OpenSplitSharedMemoryBuffer(metadata, O_RDWR).ok());
+#endif
 }
 
 } // namespace

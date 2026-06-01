@@ -17,6 +17,7 @@ set(protobuf_BUILD_TESTS OFF CACHE INTERNAL "No protobuf tests")
 set(ABSL_BUILD_TEST_HELPERS ON CACHE INTERNAL "Enable Abseil TESTONLY+PUBLIC helpers (e.g. status_matchers)")
 set(ABSL_USE_EXTERNAL_GOOGLETEST ON CACHE INTERNAL "Use our GoogleTest instead of Abseil downloading its own")
 set(ABSL_FIND_GOOGLETEST OFF CACHE INTERNAL "Don't find_package(GTest); we provide it via FetchContent")
+set(SUBSPACE_PROTOBUF_VERSION 29.5)
 
 # When cross-compiling, don't build protoc (we use a host-native one).
 if(CMAKE_CROSSCOMPILING)
@@ -106,7 +107,7 @@ FetchContent_MakeAvailable(cpp_toolbelt)
 FetchContent_Declare(
     protobuf
     GIT_REPOSITORY https://github.com/protocolbuffers/protobuf.git
-    GIT_TAG v29.5
+    GIT_TAG v${SUBSPACE_PROTOBUF_VERSION}
     CMAKE_ARGS
         -Dprotobuf_BUILD_TESTS=OFF
         -Dprotobuf_BUILD_EXAMPLES=OFF
@@ -151,6 +152,7 @@ add_subdirectory(server)
 add_subdirectory(plugins)
 add_subdirectory(shadow)
 add_subdirectory(c_client)
+add_subdirectory(android)
 add_subdirectory(rust_client)
 
 if(TARGET client_test AND TARGET nop_plugin)

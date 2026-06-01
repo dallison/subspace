@@ -10,6 +10,38 @@
 namespace subspace {
 namespace {
 
+ClientBufferAllocatorKind FromProtoAllocator(ClientBufferAllocator allocator) {
+  switch (allocator) {
+  case CLIENT_BUFFER_ALLOCATOR_ANDROID_MEMFD:
+    return ClientBufferAllocatorKind::kAndroidMemfd;
+  case CLIENT_BUFFER_ALLOCATOR_SPLIT_SHM:
+    return ClientBufferAllocatorKind::kSplitShm;
+  case CLIENT_BUFFER_ALLOCATOR_SPLIT_CALLBACK:
+    return ClientBufferAllocatorKind::kSplitCallback;
+  case CLIENT_BUFFER_ALLOCATOR_SPLIT_BUFFER_FREE_TEST:
+    return ClientBufferAllocatorKind::kSplitBufferFreeTest;
+  case CLIENT_BUFFER_ALLOCATOR_UNSPECIFIED:
+  default:
+    return ClientBufferAllocatorKind::kUnspecified;
+  }
+}
+
+ClientBufferAllocator ToProtoAllocator(ClientBufferAllocatorKind allocator) {
+  switch (allocator) {
+  case ClientBufferAllocatorKind::kAndroidMemfd:
+    return CLIENT_BUFFER_ALLOCATOR_ANDROID_MEMFD;
+  case ClientBufferAllocatorKind::kSplitShm:
+    return CLIENT_BUFFER_ALLOCATOR_SPLIT_SHM;
+  case ClientBufferAllocatorKind::kSplitCallback:
+    return CLIENT_BUFFER_ALLOCATOR_SPLIT_CALLBACK;
+  case ClientBufferAllocatorKind::kSplitBufferFreeTest:
+    return CLIENT_BUFFER_ALLOCATOR_SPLIT_BUFFER_FREE_TEST;
+  case ClientBufferAllocatorKind::kUnspecified:
+  default:
+    return CLIENT_BUFFER_ALLOCATOR_UNSPECIFIED;
+  }
+}
+
 ClientBufferHandleMetadata
 FromProto(const ClientBufferHandleMetadataProto &proto) {
   ClientBufferHandleMetadata metadata;
@@ -23,11 +55,7 @@ FromProto(const ClientBufferHandleMetadataProto &proto) {
   metadata.handle = static_cast<uintptr_t>(proto.handle());
   metadata.shadow_file = proto.shadow_file();
   metadata.object_name = proto.object_name();
-  metadata.allocator = proto.allocator();
-  metadata.pool_id = proto.pool_id();
-  metadata.cache_enabled = proto.cache_enabled();
-  metadata.alignment = proto.alignment();
-  metadata.allocator_metadata = proto.allocator_metadata();
+  metadata.allocator = FromProtoAllocator(proto.allocator());
   return metadata;
 }
 
@@ -43,11 +71,7 @@ void ToProto(const ClientBufferHandleMetadata &metadata,
   proto->set_handle(static_cast<uint64_t>(metadata.handle));
   proto->set_shadow_file(metadata.shadow_file);
   proto->set_object_name(metadata.object_name);
-  proto->set_allocator(metadata.allocator);
-  proto->set_pool_id(metadata.pool_id);
-  proto->set_cache_enabled(metadata.cache_enabled);
-  proto->set_alignment(metadata.alignment);
-  *proto->mutable_allocator_metadata() = metadata.allocator_metadata;
+  proto->set_allocator(ToProtoAllocator(metadata.allocator));
 }
 
 } // namespace
@@ -228,11 +252,18 @@ void ShadowReplicator::SendRemoveSubscriber(const std::string &channel_name,
 }
 
 void ShadowReplicator::SendRegisterClientBuffer(
-    const ClientBufferHandleMetadata &metadata) {
+    const ClientBufferHandleMetadata &metadata,
+    const toolbelt::FileDescriptor &fd) {
   ShadowEvent event;
   auto *msg = event.mutable_register_client_buffer();
   ToProto(metadata, msg->mutable_metadata());
-  SendEvent(event);
+  std::vector<toolbelt::FileDescriptor> fds;
+  if (fd.Valid()) {
+    msg->set_has_fd(true);
+    msg->set_fd_index(0);
+    fds.push_back(fd);
+  }
+  SendEvent(event, fds);
 }
 
 void ShadowReplicator::SendUnregisterClientBuffer(
@@ -281,7 +312,9 @@ ShadowReplicator::ReceiveEvent(std::vector<toolbelt::FileDescriptor> &fds) {
   }
 
   bool has_fds = event.has_create_channel() || event.has_add_publisher() ||
-                 event.has_add_subscriber();
+                 event.has_add_subscriber() ||
+                 (event.has_register_client_buffer() &&
+                  event.register_client_buffer().has_fd());
   if (has_fds) {
     absl::Status s = socket_.ReceiveFds(fds);
     if (!s.ok()) {
@@ -391,7 +424,13 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
       if (!ch.ok()) {
         return ch.status();
       }
-      (*ch)->client_buffers.push_back(std::move(metadata));
+      toolbelt::FileDescriptor fd;
+      if (msg.has_fd() && static_cast<size_t>(msg.fd_index()) < fds.size()) {
+        fd = std::move(fds[size_t(msg.fd_index())]);
+      }
+      (*ch)->client_buffers.push_back(
+          RegisteredClientBuffer{.metadata = std::move(metadata),
+                                 .fd = std::move(fd)});
       continue;
     }
 

@@ -42,7 +42,11 @@ class SubspaceTestBase : public ::testing::Test {
 public:
   static void SetUpTestSuite() {
     printf("Starting Subspace server\n");
+#if defined(__ANDROID__)
+    char socket_name_template[] = "/data/local/tmp/subspaceXXXXXX"; // NOLINT
+#else
     char socket_name_template[] = "/tmp/subspaceXXXXXX"; // NOLINT
+#endif
     ::close(mkstemp(&socket_name_template[0]));
     socket_ = &socket_name_template[0];
 

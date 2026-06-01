@@ -8,16 +8,17 @@ sleep 5
 adb wait-for-device
 adb shell "while [[ -z \$(getprop sys.boot_completed) ]]; do sleep 1; done"
 
-# Create shared memory directory
-adb shell "mkdir -p /dev/subspace && chmod 777 /dev/subspace"
 adb shell "mkdir -p /data/local/tmp"
 
 # Collect shared libraries (dereference symlinks from bazel output)
+rm -rf /tmp/android_libs
 mkdir -p /tmp/android_libs
 find bazel-bin/ -name "*.so" -path "*_solib*" -exec cp -L {} /tmp/android_libs/ \; 2>/dev/null || true
 find bazel-bin/plugins/ -name "*.so" -exec cp -L {} /tmp/android_libs/ \; 2>/dev/null || true
+cp -L bazel-bin/android/jni/libsubspace_jni.so /tmp/android_libs/ 2>/dev/null || true
 
 if ls /tmp/android_libs/*.so 1>/dev/null 2>&1; then
+  adb shell "rm -rf /data/local/tmp/android_libs"
   adb push /tmp/android_libs /data/local/tmp/android_libs
 fi
 
@@ -38,9 +39,27 @@ adb push bazel-bin/asio_rpc/test/rpc_test /data/local/tmp/asio_rpc_test
 adb push bazel-bin/asio_rpc/server/server_test /data/local/tmp/asio_rpc_server_test
 adb push bazel-bin/asio_rpc/client/client_test /data/local/tmp/asio_rpc_client_test
 
-# Push plugin .so files to relative path expected by tests
-adb shell "mkdir -p /data/local/tmp/plugins"
-find bazel-bin/plugins/ -name "*.so" -exec adb push {} /data/local/tmp/plugins/ \; 2>/dev/null || true
+SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+BUILD_TOOLS_VERSION=$(ls "$SDK_ROOT/build-tools" | sort -V | tail -1)
+D8="$SDK_ROOT/build-tools/$BUILD_TOOLS_VERSION/d8"
+PLATFORM_VERSION=$(ls "$SDK_ROOT/platforms" | sort -V | tail -1)
+ANDROID_JAR="$SDK_ROOT/platforms/$PLATFORM_VERSION/android.jar"
+rm -rf /tmp/subspace_java_test_dex
+mkdir -p /tmp/subspace_java_test_dex
+"$D8" --lib "$ANDROID_JAR" --output /tmp/subspace_java_test_dex \
+  bazel-bin/android/java/libsubspace-java.jar \
+  bazel-bin/android/java/libsubspace-java-test.jar
+(cd /tmp/subspace_java_test_dex && zip -q -r /tmp/subspace-java-test-dex.jar classes.dex)
+adb push /tmp/subspace-java-test-dex.jar /data/local/tmp/subspace-java-test.jar
+
+# Push plugin .so files to relative path expected by tests.  Remove the target
+# directory first so an old directory named nop_plugin.so cannot shadow the file.
+rm -rf /tmp/android_plugins
+mkdir -p /tmp/android_plugins
+cp -L bazel-bin/plugins/nop_plugin.so /tmp/android_plugins/
+cp -L bazel-bin/plugins/split_buffer_free_test_plugin.so /tmp/android_plugins/
+adb shell "rm -rf /data/local/tmp/plugins"
+adb push /tmp/android_plugins /data/local/tmp/plugins
 
 # Make binaries executable
 adb shell "chmod +x /data/local/tmp/*_test /data/local/tmp/subspace_server"
@@ -68,5 +87,8 @@ echo "=== asio_rpc tests ==="
 adb shell "cd /data/local/tmp && $LIB ./asio_rpc_test"
 adb shell "cd /data/local/tmp && $LIB ./asio_rpc_server_test"
 adb shell "cd /data/local/tmp && $LIB ./asio_rpc_client_test"
+
+echo "=== subspace-java integration test ==="
+adb shell "cd /data/local/tmp && $LIB dalvikvm -cp /data/local/tmp/subspace-java-test.jar com.subspace.test.SubspaceJavaClientTest"
 
 echo "=== All Android tests passed ==="

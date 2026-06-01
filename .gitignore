@@ -4,3 +4,5 @@ build
 rust_client/target
 rust_rpc/target
 user.bazelrc
+proto/*.pb.cc
+proto/*.pb.h

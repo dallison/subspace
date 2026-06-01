@@ -25,14 +25,22 @@ namespace {
 
 using ::absl_testing::IsOk;
 
+static const char *TestTmpDir() {
+#if defined(__ANDROID__)
+  return "/data/local/tmp";
+#else
+  return "/tmp";
+#endif
+}
+
 // Returns a unique-per-process path for a unix socket.  mkstemp picks a
 // unique filename; we close and immediately unlink it (bind requires the
 // path to not exist) — Shadow::Run / Server then bind a real unix socket
 // at that path.  Using a unique path per process means concurrent or
 // repeated test invocations don't collide on a fixed /tmp/<literal> path.
 static std::string MakeUniqueSocketPath(const char *tag) {
-  std::string templ =
-      std::string("/tmp/subspace_shadow_test_") + tag + "_XXXXXX";
+  std::string templ = std::string(TestTmpDir()) + "/subspace_shadow_test_" +
+                      tag + "_XXXXXX";
   std::vector<char> buf(templ.begin(), templ.end());
   buf.push_back('\0');
   int fd = mkstemp(buf.data());
@@ -361,19 +369,21 @@ TEST_F(ShadowTest, ShadowReceivesRemoveChannel) {
 
 TEST_F(ShadowTest, ServerWithoutShadowSocketWorks) {
   co::CoroutineScheduler sched;
-  subspace::Server server(sched, "/tmp/subspace_noshadow", "", 0, 0, true, -1,
-                          1, false, false);
+  subspace::Server server(
+      sched, std::string(TestTmpDir()) + "/subspace_noshadow", "", 0, 0, true,
+      -1, 1, false, false);
   EXPECT_EQ(server.GetPrimaryShadowReplicator(), nullptr);
   EXPECT_EQ(server.GetSecondaryShadowReplicator(), nullptr);
 
   server.SetShadowSocket("");
   EXPECT_EQ(server.GetPrimaryShadowReplicator(), nullptr);
 
-  server.SetShadowSocket("/tmp/some_shadow");
+  server.SetShadowSocket(std::string(TestTmpDir()) + "/some_shadow");
   EXPECT_NE(server.GetPrimaryShadowReplicator(), nullptr);
   EXPECT_EQ(server.GetSecondaryShadowReplicator(), nullptr);
 
-  server.SetShadowSockets("/tmp/primary", "/tmp/secondary");
+  server.SetShadowSockets(std::string(TestTmpDir()) + "/primary",
+                          std::string(TestTmpDir()) + "/secondary");
   EXPECT_NE(server.GetPrimaryShadowReplicator(), nullptr);
   EXPECT_NE(server.GetSecondaryShadowReplicator(), nullptr);
 }
@@ -591,7 +601,7 @@ TEST_F(ShadowRecoveryTest, ServerRecoversSplitBufferStateFromShadow) {
   auto *channel = recovered_channels.at("shadow_split_buffers").get();
   ASSERT_TRUE(channel->HasSplitBufferOptions());
   EXPECT_TRUE(channel->GetSplitBufferOptions().use_split_buffers);
-  EXPECT_EQ(channel->ClientBuffers().size(), 5u);
+  EXPECT_EQ(channel->NumClientBuffers(), 5u);
   EXPECT_EQ(server_->GetSessionId(), old_session_id);
 
   StopServer();

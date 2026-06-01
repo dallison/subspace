@@ -63,7 +63,7 @@ struct ShadowChannel {
   int max_publishers = 0;
   toolbelt::FileDescriptor ccb_fd;
   toolbelt::FileDescriptor bcb_fd;
-  std::vector<ClientBufferHandleMetadata> client_buffers;
+  std::vector<RegisteredClientBuffer> client_buffers;
   absl::flat_hash_map<int, ShadowPublisher> publishers;
   absl::flat_hash_map<int, ShadowSubscriber> subscribers;
 };
@@ -124,7 +124,8 @@ private:
                                    std::vector<toolbelt::FileDescriptor> &fds);
   absl::Status HandleRemoveSubscriber(const ShadowRemoveSubscriber &msg);
   absl::Status
-  HandleRegisterClientBuffer(const ShadowRegisterClientBuffer &msg);
+  HandleRegisterClientBuffer(const ShadowRegisterClientBuffer &msg,
+                             std::vector<toolbelt::FileDescriptor> &fds);
   absl::Status
   HandleUnregisterClientBuffer(const ShadowUnregisterClientBuffer &msg);
   absl::Status

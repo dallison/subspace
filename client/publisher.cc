@@ -5,6 +5,7 @@
 #include "client/publisher.h"
 #include "client/checksum.h"
 #include "client_channel.h"
+#include "common/client_buffer.h"
 #include "toolbelt/clock.h"
 #include <atomic>
 #include <thread>
@@ -38,7 +39,14 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
         current_slot_size = final_slot_size;
         continue;
       }
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+      absl::StatusOr<toolbelt::FileDescriptor> shm_fd =
+          buffer_index < size_t(num_buffers)
+              ? OpenBuffer(buffer_index)
+              : CreateBuffer(buffer_index, final_buffer_size);
+#else
       auto shm_fd = CreateBuffer(buffer_index, final_buffer_size);
+#endif
       if (!shm_fd.ok()) {
         return shm_fd.status();
       }
@@ -63,8 +71,10 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
         } else {
           addr = nullptr;
         }
-        buffers_.emplace_back(
-            std::make_unique<BufferSet>(*size, current_slot_size, *addr));
+        auto buffer_set =
+            std::make_unique<BufferSet>(*size, current_slot_size, *addr);
+        buffer_set->fd = std::move(*shm_fd);
+        buffers_.push_back(std::move(buffer_set));
         bcb_->sizes[buffers_.size()].store(final_buffer_size,
                                            std::memory_order_relaxed);
       } else {
@@ -76,8 +86,10 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
         if (!addr.ok()) {
           return addr.status();
         }
-        buffers_.emplace_back(std::make_unique<BufferSet>(
-            final_buffer_size, final_slot_size, *addr));
+        auto buffer_set = std::make_unique<BufferSet>(
+            final_buffer_size, final_slot_size, *addr);
+        buffer_set->fd = std::move(*shm_fd);
+        buffers_.push_back(std::move(buffer_set));
         current_slot_size = final_slot_size;
       }
     }
@@ -85,12 +97,47 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
     // Update the atomic numBuffers in the CCB.  If this fails it means
     // something else got there before us and we just go back and remap any new
     // buffers.
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+    int old_num_buffers = num_buffers;
+#endif
     if (ccb_->num_buffers.compare_exchange_strong(num_buffers, new_num_buffers,
                                                   std::memory_order_release,
                                                   std::memory_order_relaxed)) {
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+      if (!UseSplitBuffers() && client_buffer_registration_callback_) {
+        for (int i = old_num_buffers; i < new_num_buffers; i++) {
+          BufferSet &buffer = *buffers_[i];
+          ClientBufferHandleMetadata metadata = {
+              .channel_name = ResolvedName(),
+              .session_id = session_id_,
+              .buffer_index = static_cast<uint32_t>(i),
+              .slot_id = 0,
+              .is_prefix = false,
+              .full_size = buffer.full_size,
+              .allocation_size = buffer.full_size,
+              .handle = static_cast<uintptr_t>(buffer.fd.Fd()),
+              .allocator = ClientBufferAllocatorKind::kAndroidMemfd,
+          };
+          if (absl::Status status =
+                  client_buffer_registration_callback_(metadata, &buffer.fd);
+              !status.ok()) {
+            return status;
+          }
+        }
+      }
+#endif
       // We successfully updated the number of buffers in the CCB.
       break;
     }
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+    if (!UseSplitBuffers()) {
+      for (size_t i = 0; i < buffers_.size(); i++) {
+        UnmapBufferSet(i, *buffers_[i], /*destroy_owned_buffers=*/false);
+      }
+      buffers_.clear();
+      current_slot_size = 0;
+    }
+#endif
     // Another thread has updated the number of buffers in the CCB.  We need to
     // retry.
   }

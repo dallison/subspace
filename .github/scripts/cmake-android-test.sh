@@ -10,8 +10,6 @@ sleep 5
 adb wait-for-device
 adb shell "while [[ -z \$(getprop sys.boot_completed) ]]; do sleep 1; done"
 
-# Create shared memory directory
-adb shell "mkdir -p /dev/subspace && chmod 777 /dev/subspace"
 adb shell "mkdir -p /data/local/tmp"
 
 # Push libc++_shared.so from NDK (needed since we built with ANDROID_STL=c++_shared)
@@ -29,6 +27,20 @@ adb push "$BUILD_DIR/common/split_buffer_test" /data/local/tmp/split_buffer_test
 adb push "$BUILD_DIR/common/common_test" /data/local/tmp/common_test
 adb push "$BUILD_DIR/c_client/c_client_test" /data/local/tmp/c_client_test
 adb push "$BUILD_DIR/shadow/shadow_test" /data/local/tmp/shadow_test
+adb push "$BUILD_DIR/android/libsubspace_jni.so" /data/local/tmp/libsubspace_jni.so
+
+SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+BUILD_TOOLS_VERSION=$(ls "$SDK_ROOT/build-tools" | sort -V | tail -1)
+D8="$SDK_ROOT/build-tools/$BUILD_TOOLS_VERSION/d8"
+PLATFORM_VERSION=$(ls "$SDK_ROOT/platforms" | sort -V | tail -1)
+ANDROID_JAR="$SDK_ROOT/platforms/$PLATFORM_VERSION/android.jar"
+rm -rf /tmp/subspace_cmake_java_test_dex
+mkdir -p /tmp/subspace_cmake_java_test_dex
+"$D8" --lib "$ANDROID_JAR" --output /tmp/subspace_cmake_java_test_dex \
+  "$BUILD_DIR/android/subspace-java.jar" \
+  "$BUILD_DIR/android/subspace-java-test.jar"
+(cd /tmp/subspace_cmake_java_test_dex && zip -q -r /tmp/subspace-cmake-java-test-dex.jar classes.dex)
+adb push /tmp/subspace-cmake-java-test-dex.jar /data/local/tmp/subspace-java-test.jar
 
 # Push plugin .so files
 adb shell "mkdir -p /data/local/tmp/plugins"
@@ -52,5 +64,8 @@ adb shell "cd /data/local/tmp && $LIB ./c_client_test"
 
 echo "=== shadow_test ==="
 adb shell "cd /data/local/tmp && $LIB ./shadow_test"
+
+echo "=== subspace-java integration test ==="
+adb shell "cd /data/local/tmp && $LIB dalvikvm -cp /data/local/tmp/subspace-java-test.jar com.subspace.test.SubspaceJavaClientTest"
 
 echo "=== All CMake Android tests passed ==="

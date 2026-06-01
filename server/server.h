@@ -21,6 +21,7 @@
 #include "toolbelt/clock.h"
 #include "toolbelt/fd.h"
 #include "toolbelt/logging.h"
+#include "toolbelt/sockets.h"
 #include "toolbelt/triggerfd.h"
 #include <memory>
 #include <mutex>
@@ -113,6 +114,23 @@ public:
 
   void SetCleanupFilesystem(bool v) { cleanup_filesystem_ = v; }
 
+  // Use a TCP connection (instead of UDP broadcast/unicast) for discovery.
+  // This is useful when the two servers cannot exchange UDP datagrams
+  // directly, for example when one of them runs inside a NAT'd virtual
+  // machine or Android emulator.  When enabled, a server with a peer address
+  // configured dials the peer; a server without one listens for an incoming
+  // discovery connection.
+  void SetTcpDiscovery(bool v) { tcp_discovery_ = v; }
+
+  // Address to advertise to peers for this server's bridge (and retirement)
+  // listeners, overriding the local interface address.  This lets a NAT'd
+  // server advertise a loopback/forwarded endpoint (e.g. 127.0.0.1 reached
+  // via `adb forward`/`adb reverse`).  When set, bridge listeners bind to the
+  // any-address so the forwarded loopback port reaches them.
+  void SetBridgeAdvertiseAddress(const toolbelt::InetAddress &addr) {
+    bridge_advertise_address_ = addr;
+  }
+
   void CleanupFilesystem();
   void CleanupAfterSession();
 
@@ -159,6 +177,15 @@ private:
   friend class VirtualChannel;
   static constexpr size_t kDiscoveryBufferSize = 1024;
 
+  // A single TCP discovery connection to a peer server.  Used only when
+  // tcp_discovery_ is enabled.
+  struct DiscoveryConnection {
+    std::shared_ptr<toolbelt::StreamSocket> socket;
+    // Remote address of the peer (without the discovery port, which is taken
+    // from each received message), used as a stable key for bridge dedup.
+    toolbelt::InetAddress remote;
+  };
+
   struct Plugin {
     Plugin(const std::string &n, void *h, std::unique_ptr<PluginInterface> i)
         : name(n), handle(h), interface(std::move(i)) {}
@@ -187,6 +214,20 @@ private:
   void SendChannelDirectory();
   void StatisticsCoroutine();
   void DiscoveryReceiverCoroutine();
+  void DiscoveryListenerCoroutine();
+  void DiscoveryConnectorCoroutine();
+  void DiscoveryConnectionReaderLoop(std::shared_ptr<DiscoveryConnection> conn);
+  void AddDiscoveryConnection(std::shared_ptr<DiscoveryConnection> conn);
+  void
+  RemoveDiscoveryConnection(const std::shared_ptr<DiscoveryConnection> &conn);
+  void AdvertiseAllChannels();
+  // Send a discovery message to peers.  In TCP mode it is written to every
+  // active discovery connection; in UDP mode it is sent to udp_dest.
+  absl::Status TransmitDiscovery(const Discovery &disc,
+                                 const toolbelt::InetAddress &udp_dest);
+  // The address bridge listeners bind to: the any-address when a bridge
+  // advertise address is configured, otherwise the local interface address.
+  toolbelt::SocketAddress BridgeBindBase() const;
   void PublisherCoroutine();
   void SendQuery(const std::string &channel_name);
   void SendAdvertise(const std::string &channel_name, bool reliable);
@@ -250,6 +291,10 @@ private:
   int discovery_port_;
   int discovery_peer_port_;
   bool local_;
+  bool tcp_discovery_ = false;
+  toolbelt::InetAddress bridge_advertise_address_;
+  absl::flat_hash_set<std::shared_ptr<DiscoveryConnection>>
+      discovery_connections_;
   toolbelt::FileDescriptor notify_fd_;
 
   // Atomic only because of testing.

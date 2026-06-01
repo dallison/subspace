@@ -7,6 +7,12 @@
 #include "server/server.h"
 #include <utility>
 #include <sys/mman.h>
+#if defined(__ANDROID__)
+#include <sys/syscall.h>
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+#endif
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX && defined(__APPLE__)
 #include <sys/posix_shm.h>
 #endif
@@ -28,21 +34,21 @@ static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
   int tmpfd;
 
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
-  // On Android, /dev/shm does not exist and shm_open is not usable for
-  // cross-process named memory.  Use regular files in a tmpfs-backed
-  // directory; the fd is passed to clients via SCM_RIGHTS.
-  const std::string &shm_dir = GetAndroidShmDir();
-  snprintf(shm_file, sizeof(shm_file), "%s/%d.%s.XXXXXX", shm_dir.c_str(), id,
-           suffix);
-  tmpfd = mkstemp(shm_file);
+  snprintf(shm_file, sizeof(shm_file), "subspace.%d.%s", id, suffix);
+#ifdef __NR_memfd_create
+  tmpfd = static_cast<int>(syscall(
+      __NR_memfd_create, shm_file, static_cast<unsigned int>(MFD_CLOEXEC)));
   if (tmpfd == -1) {
     return absl::InternalError(absl::StrFormat(
-        "Failed to create temp file %s: %s", shm_file, strerror(errno)));
+        "Failed to create anonymous shared memory %s: %s", shm_file,
+        strerror(errno)));
   }
+#else
+  return absl::UnimplementedError("memfd_create is not available");
+#endif
 
   int e = ftruncate(tmpfd, size);
   if (e == -1) {
-    unlink(shm_file);
     close(tmpfd);
     return absl::InternalError(
         absl::StrFormat("Failed to set length of shared memory %s: %s",
@@ -53,15 +59,12 @@ static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
   if (map) {
     p = MapMemory(tmpfd, size, PROT_READ | PROT_WRITE, suffix);
     if (p == MAP_FAILED) {
-      unlink(shm_file);
       close(tmpfd);
       return absl::InternalError(absl::StrFormat(
           "Failed to map shared memory %s: %s", shm_file, strerror(errno)));
     }
   }
 
-  // Unlink immediately; the fd remains valid for mmap and SCM_RIGHTS passing.
-  unlink(shm_file);
   fd.SetFd(tmpfd);
   return p;
 
@@ -186,29 +189,30 @@ void ServerChannel::RemoveBuffer(uint64_t session_id, Server *server) {
   }
   for (int i = 0; i < ccb_->num_buffers; i++) {
     std::string filename = BufferSharedMemoryName(session_id, i);
-    for (const ClientBufferHandleMetadata &metadata : client_buffers_) {
-      if (metadata.session_id != session_id ||
-          metadata.buffer_index != static_cast<uint32_t>(i)) {
-        continue;
-      }
-      bool plugin_freed = false;
-      if (server != nullptr) {
-        absl::StatusOr<bool> freed =
-            server->FreeClientBufferWithPlugins(metadata);
-        if (freed.ok()) {
-          plugin_freed = *freed;
+    auto group = client_buffers_.find(
+        ClientBufferGroupKey{session_id, static_cast<uint32_t>(i)});
+    if (group != client_buffers_.end()) {
+      for (const auto &[slot, buffer] : group->second) {
+        const ClientBufferHandleMetadata &metadata = buffer.metadata;
+        bool plugin_freed = false;
+        if (server != nullptr) {
+          absl::StatusOr<bool> freed =
+              server->FreeClientBufferWithPlugins(metadata);
+          if (freed.ok()) {
+            plugin_freed = *freed;
+          }
         }
-      }
-      if (!plugin_freed && !metadata.object_name.empty()) {
+        if (!plugin_freed && !metadata.object_name.empty()) {
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
-        std::string path = GetAndroidShmDir() + "/" + metadata.object_name;
-        (void)unlink(path.c_str());
+          // Anonymous fd-backed Android buffers are released when the server's
+          // registered fd is closed.
 #else
-        (void)shm_unlink(metadata.object_name.c_str());
+          (void)shm_unlink(metadata.object_name.c_str());
 #endif
-      }
-      if (!metadata.shadow_file.empty()) {
-        (void)remove(metadata.shadow_file.c_str());
+        }
+        if (!metadata.shadow_file.empty()) {
+          (void)remove(metadata.shadow_file.c_str());
+        }
       }
     }
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
@@ -233,16 +237,17 @@ uint64_t ServerChannel::GetVirtualMemoryUsage() const {
   }
 
   uint64_t split_buffer_size = 0;
-  for (const ClientBufferHandleMetadata &metadata : client_buffers_) {
+  ForEachClientBuffer([&](const RegisteredClientBuffer &buffer) {
+    const ClientBufferHandleMetadata &metadata = buffer.metadata;
     if (metadata.buffer_index >= static_cast<uint32_t>(ccb_->num_buffers)) {
-      continue;
+      return;
     }
     if (bcb_->refs[metadata.buffer_index].load(std::memory_order_relaxed) <=
         0) {
-      continue;
+      return;
     }
     split_buffer_size += metadata.allocation_size;
-  }
+  });
 
   if (split_buffer_size == 0) {
     return Channel::GetVirtualMemoryUsage();

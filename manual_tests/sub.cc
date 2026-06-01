@@ -11,10 +11,14 @@
 ABSL_FLAG(std::string, socket, "/tmp/subspace",
           "Name of Unix socket to listen on");
 ABSL_FLAG(bool, reliable, false, "Use reliable transport");
+ABSL_FLAG(std::string, channel, "test", "Channel name to subscribe to");
 
 int main(int argc, char **argv) {
   absl::ParseCommandLine(argc, argv);
   signal(SIGPIPE, SIG_IGN);
+  // Line-buffer stdout so progress is visible (and not lost on termination)
+  // when output is redirected to a file or pipe, e.g. in scripted tests.
+  setvbuf(stdout, nullptr, _IOLBF, 0);
 
   subspace::Client client;
 
@@ -24,9 +28,10 @@ int main(int argc, char **argv) {
     exit(1);
   }
   bool reliable = absl::GetFlag(FLAGS_reliable);
+  std::string channel = absl::GetFlag(FLAGS_channel);
 
   absl::StatusOr<subspace::Subscriber> sub = client.CreateSubscriber(
-      "test", subspace::SubscriberOptions().SetReliable(reliable));
+      channel, subspace::SubscriberOptions().SetReliable(reliable));
   if (!sub.ok()) {
     fprintf(stderr, "Can't create subscriber: %s\n",
             sub.status().ToString().c_str());

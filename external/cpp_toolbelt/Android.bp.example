@@ -23,19 +23,13 @@ cc_library_static {
         "-Wall",
         "-Wno-unused-parameter",
     ],
+    cppflags: ["-fexceptions"],
+    rtti: true,
     static_libs: [
         "libcoroutines",
-    ],
-    header_libs: [
-        "libabseil-headers",
-    ],
-    whole_static_libs: [
-        "libabsl_status",
-        "libabsl_statusor",
-        "libabsl_strings",
-        "libabsl_str_format_internal",
-        "libabsl_span",
+        "libabsl",
     ],
     stl: "c++_shared",
     min_sdk_version: "28",
+    compile_multilib: "64",
 }

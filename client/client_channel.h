@@ -62,6 +62,7 @@ struct BufferSet {
   uint64_t full_size = 0;
   uint64_t slot_size = 0;
   char *buffer = nullptr;
+  toolbelt::FileDescriptor fd;
   char *split_prefix_buffer = nullptr;
   uint64_t split_prefix_buffer_size = 0;
   std::vector<char *> split_slot_buffers;
@@ -310,9 +311,15 @@ public:
   }
 
   void SetClientBufferRegistrationCallback(
-      std::function<absl::Status(const ClientBufferHandleMetadata &)>
+      std::function<absl::Status(const ClientBufferHandleMetadata &,
+                                 const toolbelt::FileDescriptor *)>
           callback) {
     client_buffer_registration_callback_ = std::move(callback);
+  }
+  void SetClientBufferLookupCallback(
+      std::function<absl::StatusOr<std::vector<RegisteredClientBuffer>>(
+          const std::string &, uint64_t, uint32_t)> callback) {
+    client_buffer_lookup_callback_ = std::move(callback);
   }
   void SetClientBufferUnregistrationCallback(
       std::function<absl::Status(const std::string &, uint64_t, uint32_t)>
@@ -360,6 +367,9 @@ protected:
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
   absl::StatusOr<toolbelt::FileDescriptor>
   CreateAndroidBuffer(const std::string &filename, size_t size);
+  absl::StatusOr<RegisteredClientBuffer>
+  GetRegisteredClientBuffer(uint32_t buffer_index, bool is_prefix,
+                            uint32_t slot_id);
 #elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
   absl::StatusOr<toolbelt::FileDescriptor>
   CreateLinuxBuffer(const std::string &filename, size_t size);
@@ -382,8 +392,12 @@ protected:
   MessageSlot *slot_ = nullptr; // Current slot.
   int vchan_id_ = -1;           // Virtual channel ID.
   uint64_t session_id_;
-  std::function<absl::Status(const ClientBufferHandleMetadata &)>
+  std::function<absl::Status(const ClientBufferHandleMetadata &,
+                             const toolbelt::FileDescriptor *)>
       client_buffer_registration_callback_ = nullptr;
+  std::function<absl::StatusOr<std::vector<RegisteredClientBuffer>>(
+      const std::string &, uint64_t, uint32_t)>
+      client_buffer_lookup_callback_ = nullptr;
   std::function<absl::Status(const std::string &, uint64_t, uint32_t)>
       client_buffer_unregistration_callback_ = nullptr;
   std::vector<std::unique_ptr<BufferSet>> buffers_ = {};

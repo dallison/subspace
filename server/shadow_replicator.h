@@ -66,7 +66,7 @@ struct RecoveredChannel {
   int max_publishers = 0;
   toolbelt::FileDescriptor ccb_fd;
   toolbelt::FileDescriptor bcb_fd;
-  std::vector<ClientBufferHandleMetadata> client_buffers;
+  std::vector<RegisteredClientBuffer> client_buffers;
   std::vector<RecoveredPublisher> publishers;
   std::vector<RecoveredSubscriber> subscribers;
 };
@@ -102,7 +102,8 @@ public:
   void SendAddSubscriber(const std::string &channel_name,
                          const SubscriberUser *sub);
   void SendRemoveSubscriber(const std::string &channel_name, int sub_id);
-  void SendRegisterClientBuffer(const ClientBufferHandleMetadata &metadata);
+  void SendRegisterClientBuffer(const ClientBufferHandleMetadata &metadata,
+                                const toolbelt::FileDescriptor &fd = {});
   void SendUnregisterClientBuffer(const std::string &channel_name,
                                   uint64_t session_id, uint32_t buffer_index);
   void SendUpdateChannelOptions(const ServerChannel *channel);

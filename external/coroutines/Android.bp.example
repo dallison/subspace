@@ -15,13 +15,12 @@ cc_library_static {
         "-Wall",
         "-Wno-unused-parameter",
     ],
-    header_libs: [
-        "libabseil-headers",
-    ],
-    whole_static_libs: [
-        "libabsl_flat_hash_map",
-        "libabsl_flat_hash_set",
+    cppflags: ["-fexceptions"],
+    rtti: true,
+    static_libs: [
+        "libabsl",
     ],
     stl: "c++_shared",
     min_sdk_version: "28",
+    compile_multilib: "64",
 }

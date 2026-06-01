@@ -30,7 +30,7 @@ It has the following features:
 1.	Ability to read the next or newest message in a channel.
 1.	File-descriptor-based event triggers.
 1.	Optional split payload buffers for external allocators and memory pools.
-1.	Automatic UDP discovery and TCP bridging of channels between servers.
+1.	Automatic UDP discovery and TCP bridging of channels between servers, plus optional TCP unicast discovery for bridging across NAT/VMs/emulators.
 1.	Shadow process for crash recovery -- the server can restart and resume without losing shared memory state.
 1.	Shared and weak pointers for message references.
 1.	Ports to MacOS, Linux, QNX and Android, for ARM64 and x86_64.
@@ -45,10 +45,11 @@ See the file docs/subspace.pdf for full documentation.  Additional documentation
 - [Server Architecture](docs/server-architecture.md)
 - [Rust Client](docs/rust-client.md)
 - [Shadow Process (Crash Recovery)](docs/shadow-process.md)
+- [Running Subspace on Android](docs/android.md)
 
 # Building
 
-Subspace can be built using either Bazel or CMake. Both build systems will automatically download and build all required dependencies.
+Subspace can be built using Bazel or CMake. Android platform integrations can also be built with Soong/Blueprint inside an AOSP tree; see [Running Subspace on Android](docs/android.md).
 
 ## Building with Bazel
 
@@ -1653,6 +1654,71 @@ scheduler.Run();
 ```
 
 When using coroutines, `Wait()` operations will yield instead of blocking the thread.
+
+## Cross-Computer Bridging and Discovery
+
+A channel published on one server can be transparently mirrored to subscribers
+on another server. Servers find each other through *discovery*, then move
+message data over a TCP *bridge*. Discovery is only active when the server is
+**not** started with `--local`, and a channel is only bridged when its
+publisher is created with `local = false` (`PublisherOptions::SetLocal(false)`).
+
+### Discovery modes
+
+| Mode | How to enable | When to use |
+|------|---------------|-------------|
+| UDP broadcast (default) | nothing extra | Servers on the same LAN/subnet; zero configuration. |
+| UDP unicast | `--peer_address=HOST` | A specific peer is known but broadcast is undesirable/unavailable. |
+| TCP unicast | `--tcp_discovery` | Peers that cannot exchange UDP datagrams directly, e.g. across a NAT, a VM, or an Android emulator. |
+
+Common discovery/bridge flags:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--local` | `false` | Disable all network discovery/bridging (local machine only). |
+| `--disc_port` | `6502` | Discovery port (UDP, or TCP listen port with `--tcp_discovery`). |
+| `--peer_port` | `6502` | Peer discovery port to send/connect to. |
+| `--peer_address` | `""` | Peer host/IP. Unicast UDP, or the dial target with `--tcp_discovery`. |
+| `--interface` | `""` | Network interface for discovery (auto-detected if empty). |
+| `--tcp_discovery` | `false` | Run discovery over a single TCP connection instead of UDP. |
+| `--bridge_advertise_address` | `""` | Address to advertise for this server's bridge listeners (e.g. `127.0.0.1` for a forwarded loopback endpoint). |
+| `--bridge_ports` | `""` | Fixed TCP bridge port or inclusive range `START-END` (default: ephemeral per bridge). |
+
+### TCP unicast discovery (across NAT / VMs / emulators)
+
+UDP discovery assumes peers can exchange datagrams directly and be reached on
+the port they advertise. That fails behind a NAT (such as an Android emulator),
+where only one side can initiate connections. With `--tcp_discovery` the
+handshake runs over a single TCP connection:
+
+- the server **with** `--peer_address` set **dials** the peer's `--disc_port`;
+- the server **without** one **listens** on `--disc_port`.
+
+Because only the dialing (NAT'd) side needs to reach the other, this works
+where UDP cannot. When a server's listeners are only reachable through a
+forwarded loopback port (e.g. an `adb forward`/`adb reverse` tunnel), add
+`--bridge_advertise_address=127.0.0.1` so it advertises that endpoint and binds
+its bridge listeners to the any-address. See
+[Server Architecture](docs/server-architecture.md) and, for the emulator case,
+[Running Subspace on Android](docs/android.md).
+
+### Manual cross-computer test
+
+`manual_tests/cross_host_bridge.sh` brings up two servers and bridges a channel
+in **both** directions (publish on A / subscribe on B and vice versa), then
+checks that messages arrive:
+
+```bash
+# Two servers on this host over loopback (validates the TCP discovery path):
+manual_tests/cross_host_bridge.sh native
+
+# This host bridged to a running Android emulator (sets up the adb tunnels):
+manual_tests/cross_host_bridge.sh emulator
+```
+
+The `manual_tests/pub` tool takes `--local=false` and `--channel=NAME`, and
+`manual_tests/sub` takes `--channel=NAME`, so you can also drive bridging by
+hand against servers on two different computers.
 
 ## Shadow Server (Crash Recovery)
 

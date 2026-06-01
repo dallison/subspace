@@ -2,6 +2,8 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
+soong_namespace {}
+
 // Common defaults for all subspace native modules.
 cc_defaults {
     name: "subspace_defaults",
@@ -9,6 +11,7 @@ cc_defaults {
         "-std=c++17",
         "-Wall",
         "-Wextra",
+        "-Wno-sign-compare",
         "-Wno-missing-field-initializers",
         "-Wno-unused-parameter",
     ],
@@ -17,7 +20,27 @@ cc_defaults {
             cflags: ["-DSUBSPACE_ANDROID"],
         },
     },
+    cppflags: ["-fexceptions"],
     local_include_dirs: ["."],
+    include_dirs: ["external/subspace"],
+    rtti: true,
     stl: "c++_shared",
     min_sdk_version: "28",
+    compile_multilib: "64",
+}
+
+// Generate C++ protobuf sources from subspace.proto.
+cc_library_static {
+    name: "libsubspace_proto",
+    defaults: ["subspace_defaults"],
+    srcs: ["proto/subspace.proto"],
+    proto: {
+        type: "full",
+        canonical_path_from_root: false,
+        include_dirs: ["external/protobuf/src"],
+        export_proto_headers: true,
+    },
+    shared_libs: ["libprotobuf-cpp-full"],
+    export_shared_lib_headers: ["libprotobuf-cpp-full"],
+    rtti: false,
 }

@@ -7,7 +7,7 @@ cc_library_shared {
     name: "libsubspace_jni",
     defaults: ["subspace_defaults"],
     srcs: ["jni/subspace_jni.cc"],
-    local_include_dirs: [".."],
+    include_dirs: ["external/subspace"],
     shared_libs: [
         "libsubspace_client",
         "liblog",
@@ -17,10 +17,10 @@ cc_library_shared {
         "libsubspace_proto",
         "libcoroutines",
         "libcpp_toolbelt",
+        "libabsl",
     ],
     header_libs: [
         "jni_headers",
-        "libabseil-headers",
     ],
 }
 
@@ -30,4 +30,17 @@ java_library {
     srcs: ["java/com/subspace/*.java"],
     required: ["libsubspace_jni"],
     sdk_version: "current",
+    min_sdk_version: "28",
+}
+
+// Device-side integration test for the Java/JNI client.
+java_binary {
+    name: "subspace_java_client_test",
+    srcs: ["java/com/subspace/test/*.java"],
+    wrapper: "java/subspace_java_client_test.sh",
+    static_libs: ["subspace-java"],
+    jni_libs: ["libsubspace_jni"],
+    required: ["subspace_server"],
+    sdk_version: "current",
+    min_sdk_version: "28",
 }

@@ -37,8 +37,10 @@ absl::StatusOr<bool> OnFreeClientBuffer(
     subspace::Server & /*s*/,
     const subspace::ClientBufferHandleMetadata &metadata,
     subspace::PluginContext * /*ctx*/) {
-  if (metadata.allocator != "split_callback" &&
-      metadata.allocator != "split_buffer_free_test") {
+  if (metadata.allocator !=
+          subspace::ClientBufferAllocatorKind::kSplitCallback &&
+      metadata.allocator !=
+          subspace::ClientBufferAllocatorKind::kSplitBufferFreeTest) {
     return false;
   }
 
@@ -53,7 +55,8 @@ absl::StatusOr<bool> OnFreeClientBuffer(
   }
   log << metadata.channel_name << " " << metadata.session_id << " "
       << metadata.buffer_index << " " << metadata.slot_id << " "
-      << metadata.handle << " " << metadata.allocator << "\n";
+      << metadata.handle << " "
+      << subspace::ClientBufferAllocatorName(metadata.allocator) << "\n";
   return true;
 }
 

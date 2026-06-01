@@ -47,13 +47,26 @@ emulator -avd subspace_test -no-window -no-audio -gpu swiftshader_indirect &
 adb wait-for-device
 ```
 
-## Cross-Compiling
+## Building With Bazel
 
-Build the server and tests for Android ARM64:
+Bazel is the simplest way to cross-compile Subspace Android artifacts from this
+repository because it fetches its own C++ dependencies and uses the NDK
+toolchain configured in `.bazelrc`.
+
+Build the server, native tests, JNI library, and Java client test for Android
+ARM64:
 
 ```bash
-bazelisk build //server:subspace_server //client:client_test \
-    --config=android_arm64
+bazelisk build \
+  //server:subspace_server \
+  //client:client_test \
+  //c_client:client_test \
+  //plugins:nop_plugin.so \
+  //plugins:split_buffer_free_test_plugin.so \
+  //android/jni:libsubspace_jni.so \
+  //android/java:subspace-java \
+  //android/java:subspace-java-test \
+  --config=android_arm64
 ```
 
 The `android_arm64` config in `.bazelrc` sets:
@@ -61,6 +74,8 @@ The `android_arm64` config in `.bazelrc` sets:
 - `--cpu=aarch64` (prevents legacy macOS config_settings from matching)
 - `--linkopt=-lc++_static --linkopt=-lc++abi` (NDK C++ stdlib)
 - `--action_env=ANDROID_NDK_HOME`
+
+For an x86_64 emulator or CI runner, use `--config=android_x86_64` instead.
 
 ## Device Setup
 
@@ -72,26 +87,13 @@ The emulator with `google_apis` images supports `adb root`:
 adb root
 ```
 
-### Create shared memory directory
-
-Subspace on Android uses regular files in a tmpfs-backed directory instead of
-POSIX `shm_open` (which is unavailable on Android). The default directory is
-`/dev/subspace` (defined by `kDefaultAndroidShmDir` in `common/channel.h`).
-
-```bash
-adb shell "mkdir -p /dev/subspace && chmod 777 /dev/subspace"
-```
-
-Without this directory, any channel creation will fail with a file-not-found
-error.
-
 ### Socket path
 
 The default server socket on Android is `/data/local/tmp/subspace` (defined by
 `kDefaultServerSocket` in `client/client.h`). This path is writable without
 root.
 
-## Deploying Binaries
+## Deploying Bazel Binaries
 
 Bazel produces shared libraries as symlinks in `bazel-bin/_solib_arm64-v8a/`.
 You must dereference them before pushing to the device:
@@ -114,7 +116,7 @@ adb push bazel-bin/plugins/nop_plugin.so /data/local/tmp/plugins/
 adb push bazel-bin/plugins/split_buffer_free_test_plugin.so /data/local/tmp/plugins/
 ```
 
-## Running
+## Running Bazel-built Tests
 
 ### Start the server
 
@@ -122,8 +124,8 @@ adb push bazel-bin/plugins/split_buffer_free_test_plugin.so /data/local/tmp/plug
 adb shell "cd /data/local/tmp && ./subspace_server &"
 ```
 
-The server uses the default socket `/data/local/tmp/subspace` and shared memory
-directory `/dev/subspace` on Android. No flags are needed for local operation.
+The server uses the default socket `/data/local/tmp/subspace` on Android. Shared
+memory is fd-backed and does not require a device-visible directory.
 
 ### Run tests
 
@@ -148,21 +150,20 @@ adb shell "cd /data/local/tmp && LD_LIBRARY_PATH=/data/local/tmp/android_libs \
 Android lacks POSIX shared memory (`shm_open`/`shm_unlink`). Subspace uses
 `SUBSPACE_SHMEM_MODE_ANDROID` (defined in `common/channel.h`) which:
 
-- Creates regular files in the `kDefaultAndroidShmDir` (`/dev/subspace`)
-  directory using `open()`/`mkstemp()` instead of `shm_open()`
-- Uses `ftruncate()` + `mmap()` on those files (same as POSIX shm)
+- Creates anonymous `memfd_create()` regions for the SCB, CCB, BCB, and
+  client-owned message buffers.
+- Sizes them with `ftruncate()` and maps them with `mmap()`.
 - Passes file descriptors between processes via Unix domain sockets
-  (`SCM_RIGHTS`)
-- Cleans up with `unlink()` instead of `shm_unlink()`
-
-The directory should be on a tmpfs mount for performance. On the emulator,
-`/dev/` is typically tmpfs-backed.
+  (`SCM_RIGHTS`).
+- Keeps client-side buffer allocation and resize by registering publisher-owned
+  buffer FDs with the server, which brokers them to subscribers.
 
 ### Split Buffers
 
-Split buffer shared memory (`common/split_buffer.cc`) also uses the Android shm
-directory for its backing files, following the same pattern as regular channel
-buffers.
+Built-in split buffers also use anonymous FDs. The publisher registers the
+prefix and slot FDs with the server; subscribers fetch those descriptors when
+attaching to a new buffer generation. Custom split-buffer callbacks continue to
+use the callback-provided handles.
 
 ### Linker Namespaces
 
@@ -170,37 +171,53 @@ Android enforces linker namespace restrictions. Shared libraries must be in a
 directory referenced by `LD_LIBRARY_PATH` or in the same directory as the
 executable. The `android_libs/` approach works for `/data/local/tmp/` binaries.
 
-## CMake Cross-Compilation
+## Building With CMake
 
-Subspace can be cross-compiled for Android using CMake with the NDK toolchain:
+Subspace can also be cross-compiled for Android using CMake with the NDK
+toolchain. CMake fetches the same third-party dependencies with
+`FetchContent`, but protobuf code generation requires a host-native `protoc`
+that matches the protobuf version used by the Android build.
 
 ```bash
 export ANDROID_NDK_HOME=/path/to/ndk
+
+# Build a host protoc matching Subspace's protobuf dependency.
+cmake -S . -B build/host-protoc -DCMAKE_BUILD_TYPE=Release
+cmake --build build/host-protoc --target protoc --parallel
 
 cmake -S . -B build/android \
   -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
   -DANDROID_ABI=arm64-v8a \
   -DANDROID_PLATFORM=android-28 \
   -DANDROID_STL=c++_shared \
-  -DCMAKE_BUILD_TYPE=Release
+  -DCMAKE_BUILD_TYPE=Release \
+  -DPROTOC_EXECUTABLE="$PWD/build/host-protoc/_deps/protobuf-build/protoc"
 
 cmake --build build/android --parallel
 ```
 
-Pre-generated protobuf files (`proto/subspace.pb.{cc,h}`) are included in the
-repository so cross-compilation works without needing a host-native `protoc`.
-If `subspace.proto` changes, regenerate them with a native build:
+Use `-DANDROID_ABI=x86_64` for an x86_64 emulator. The Android CMake build
+produces the native test binaries plus the Java/JNI artifacts:
 
-```bash
-cmake -S . -B build/native && cmake --build build/native --target subspace_proto
-cp build/native/proto/subspace.pb.{cc,h} proto/
-```
+- `build/android/server/subspace_server`
+- `build/android/client/client_test`
+- `build/android/c_client/c_client_test`
+- `build/android/android/libsubspace_jni.so`
+- `build/android/android/subspace-java.jar`
+- `build/android/android/subspace-java-test.jar`
+
+The CI helper script `.github/scripts/cmake-android-test.sh` shows the expected
+deployment layout and how to run the CMake-built tests on an emulator.
 
 ## AOSP / Soong (Blueprint) Build
 
 Subspace provides `Android.bp` files for building as part of an AOSP source
 tree using the Soong build system. This is the recommended approach for
 integrating subspace into an Android platform image.
+
+Soong builds require a full AOSP checkout. GitHub-hosted runners do not provide
+one by default; use a local AOSP tree or a self-hosted CI runner with AOSP
+already synced.
 
 ### Directory Layout
 
@@ -216,6 +233,7 @@ Place the subspace source tree in your AOSP checkout (e.g.,
 | `libsubspace_proto` | static lib | Protobuf message definitions |
 | `libsubspace_jni` | shared lib | JNI bindings for Java clients |
 | `subspace-java` | java lib | Java client wrapper |
+| `subspace_java_client_test` | java binary | Device-side Java integration test |
 
 ### External Dependencies
 
@@ -225,39 +243,110 @@ tree:
 1. **coroutines** (`external/coroutines/`) — https://github.com/dallison/coroutines
 2. **cpp_toolbelt** (`external/cpp_toolbelt/`) — https://github.com/dallison/cpp_toolbelt
 
-Example `Android.bp` files for both are provided in `external/coroutines/Android.bp`
-and `external/cpp_toolbelt/Android.bp` within this repository. Copy these into
-the respective source trees in your AOSP checkout.
+Example Blueprint files for both are provided in
+`external/coroutines/Android.bp.example` and
+`external/cpp_toolbelt/Android.bp.example` within this repository. Copy these to
+`Android.bp` in the respective source trees in your AOSP checkout.
 
 ### AOSP Dependencies
 
 The following modules must be available in the AOSP tree (they are part of
 standard AOSP):
 
-- `libprotobuf-cpp-lite` — Protocol Buffers runtime
+- `libprotobuf-cpp-full` — Protocol Buffers runtime. `subspace.proto` uses
+  `google.protobuf.Any`, which is not available from the lite runtime.
 - `liblog` — Android logging
 - `libdl` — Dynamic linker
-- Abseil modules (`libabsl_status`, `libabsl_statusor`, `libabsl_strings`,
-  `libabsl_str_format_internal`, `libabsl_flat_hash_map`,
-  `libabsl_flat_hash_set`, `libabsl_flags`, `libabsl_flags_parse`,
-  `libabsl_span`)
-- `libabseil-headers` — Abseil header library
+- `libabsl` — Abseil runtime and headers
 - `jni_headers` — JNI headers (for the JNI module)
 
 ### Building
 
+Add Subspace to a product makefile:
+
+```make
+PRODUCT_SOONG_NAMESPACES += external/subspace
+PRODUCT_PACKAGES += \
+    subspace_server \
+    libsubspace_client \
+    libsubspace_jni \
+    subspace-java \
+    subspace_java_client_test
+```
+
+Then build from your AOSP root:
+
 ```bash
-# From your AOSP root:
-m subspace_server libsubspace_client libsubspace_jni subspace-java
+source build/envsetup.sh
+lunch <product>-userdebug
+
+m external.subspace-subspace_server-soong \
+  external.subspace-libsubspace_client-soong \
+  external.subspace-libsubspace_jni-soong \
+  external.subspace-subspace-java-soong \
+  external.subspace-subspace_java_client_test-soong
+```
+
+After flashing or installing those artifacts on a device image, the Java
+integration test can be run through its wrapper:
+
+```bash
+adb shell subspace_java_client_test
 ```
 
 ### Integration Notes
 
 - The `subspace_defaults` module in the root `Android.bp` sets C++17 mode,
-  warning flags, and the `-DSUBSPACE_ANDROID` preprocessor define.
+  warning flags, exceptions/RTTI, and the `-DSUBSPACE_ANDROID` preprocessor
+  define.
 - All modules use `stl: "c++_shared"` and `min_sdk_version: "28"`.
 - The server binary can be included in the system partition via
   `PRODUCT_PACKAGES += subspace_server` in your device makefile.
 - The JNI library and Java wrapper can be included in apps via the standard
   AOSP module dependency mechanism.
+
+## Bridging Between the Emulator and the Host
+
+A Subspace server inside the emulator can bridge channels to a server running
+natively on the host, in both directions (publish on Android / subscribe on the
+host, and vice versa). The emulator's user‑mode network is a NAT where only the
+guest can initiate connections and UDP broadcast does not cross the boundary, so
+two server features are used:
+
+- `--tcp_discovery` — run discovery over a single TCP connection that the guest
+  dials to the host (instead of UDP broadcast/unicast). See
+  [`server-architecture.md`](server-architecture.md) for details.
+- `--bridge_advertise_address=127.0.0.1` — advertise a loopback endpoint for
+  bridge listeners, reached through `adb` port tunnels.
+
+The host and guest use **different** bridge ports so the `adb forward`/`reverse`
+loopback listeners never collide with a server's own listener. With the host
+acting as the discovery listener:
+
+```bash
+# Tunnels: guest dials out to the host (reverse); host dials into the guest (forward).
+adb reverse tcp:6502 tcp:6502   # discovery: guest -> host
+adb reverse tcp:7100 tcp:7100   # bridge data: guest publisher -> host subscriber
+adb forward tcp:7200 tcp:7200   # bridge data: host publisher -> guest subscriber
+
+# Host (discovery listener):
+./subspace_server --socket=/tmp/subspace_host --tcp_discovery --disc_port=6502 \
+    --bridge_ports=7100 --bridge_advertise_address=127.0.0.1 \
+    --cleanup_filesystem=false
+
+# Guest (discovery connector), inside the emulator:
+adb shell "/data/local/tmp/subspace_server --socket=/data/local/tmp/subspace \
+    --tcp_discovery --peer_address=127.0.0.1 --peer_port=6502 \
+    --bridge_ports=7200 --bridge_advertise_address=127.0.0.1"
+```
+
+Publishers must be created with `local=false` for their channels to bridge.
+
+The script `manual_tests/cross_host_bridge.sh` automates this end to end and
+verifies both directions:
+
+```bash
+manual_tests/cross_host_bridge.sh native     # two servers on the host (loopback)
+manual_tests/cross_host_bridge.sh emulator   # host <-> running emulator
+```
 

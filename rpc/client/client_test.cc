@@ -58,7 +58,11 @@ public:
       return;
     }
     printf("Starting Subspace server\n");
+#if defined(__ANDROID__)
+    char socket_name_template[] = "/data/local/tmp/subspaceXXXXXX"; // NOLINT
+#else
     char socket_name_template[] = "/tmp/subspaceXXXXXX"; // NOLINT
+#endif
     ::close(mkstemp(&socket_name_template[0]));
     socket_ = &socket_name_template[0];
 
@@ -118,7 +122,11 @@ private:
 };
 
 co::CoroutineScheduler ClientTest::scheduler_;
+#if defined(__ANDROID__)
+std::string ClientTest::socket_ = "/data/local/tmp/subspace";
+#else
 std::string ClientTest::socket_ = "/tmp/subspace";
+#endif
 int ClientTest::server_pipe_[2];
 std::unique_ptr<subspace::Server> ClientTest::server_;
 std::thread ClientTest::server_thread_;
