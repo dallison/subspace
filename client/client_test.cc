@@ -2087,6 +2087,189 @@ TEST_F(ClientTest, ReliablePublisherActivation) {
   machine.Run();
 }
 
+// Two coroutines share a reliable publisher.  One coroutine ("publisher") is
+// in the middle of producing a message; the other ("waiter") wants the next
+// buffer.  A "buffer_busy" flag models the in-progress publish: the waiter must
+// not take a buffer until the buffer is both available *and* not busy, even
+// though a freed slot (and the publisher's fd trigger) becomes available while
+// the publish is still in flight.  After the publisher finishes it clears the
+// flag and calls TriggerReliableWait() to wake the waiter.
+TEST_F(ClientTest, ReliablePublisherBusyFlagTriggerWakeup) {
+  subspace::Client client;
+  InitClient(client);
+
+  absl::StatusOr<Publisher> pub = client.CreatePublisher(
+      "rel_busy", 32, 5, subspace::PublisherOptions().SetReliable(true));
+  ASSERT_OK(pub);
+  // A reliable subscriber that does not read keeps every slot busy, so the
+  // publisher cannot obtain a buffer until the subscriber drains them.
+  absl::StatusOr<Subscriber> sub = client.CreateSubscriber(
+      "rel_busy", subspace::SubscriberOptions().SetReliable(true));
+  ASSERT_OK(sub);
+
+  // Fill the channel until the publisher can no longer get a buffer.  At this
+  // point the buffer is unavailable.
+  int published = 0;
+  for (;;) {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_OK(buffer);
+    if (*buffer == nullptr) {
+      break;
+    }
+    memcpy(*buffer, "fill", 4);
+    ASSERT_OK(pub->PublishMessage(4));
+    published++;
+  }
+  ASSERT_GE(published, 4);
+
+  bool buffer_busy = true;
+  bool waiter_saw_busy = false;
+  bool waiter_published = false;
+
+  co::CoroutineScheduler machine;
+
+  // Waiter: wait until the buffer is available AND not busy before taking it.
+  co::Coroutine waiter(machine, [&](co::Coroutine *c) {
+    for (;;) {
+      absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+      ASSERT_OK(buffer);
+      if (*buffer != nullptr) {
+        if (!buffer_busy) {
+          memcpy(*buffer, "late", 4);
+          ASSERT_OK(pub->PublishMessage(4));
+          waiter_published = true;
+          return;
+        }
+        // Available but another coroutine still owns the in-progress publish.
+        // Release the buffer/lock and wait for the busy flag to clear.
+        waiter_saw_busy = true;
+        pub->CancelPublish();
+      }
+      struct pollfd fd = pub->GetPollFd();
+      c->Wait(fd.fd);
+    }
+  });
+
+  // Publisher: drain the subscriber to free slots (which triggers the
+  // publisher's fd), then publish while the waiter is still gated by the busy
+  // flag, and finally clear the flag and wake the waiter.
+  co::Coroutine publisher(machine, [&](co::Coroutine *c) {
+    for (int i = 0; i < published; i++) {
+      absl::StatusOr<Message> msg = sub->ReadMessage();
+      ASSERT_OK(msg);
+    }
+    // Give the waiter a chance to observe (available && busy) and go back to
+    // sleep.
+    c->Millisleep(50);
+
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_OK(buffer);
+    ASSERT_NE(nullptr, *buffer);
+    memcpy(*buffer, "main", 4);
+    ASSERT_OK(pub->PublishMessage(4));
+
+    buffer_busy = false;
+    pub->TriggerReliableWait();
+  });
+
+  machine.Run();
+
+  EXPECT_TRUE(waiter_saw_busy);
+  EXPECT_TRUE(waiter_published);
+}
+
+// Same scenario as ReliablePublisherBusyFlagTriggerWakeup but with a client
+// that is not in thread-safe mode (the typical single-threaded coroutine
+// setup).  Without thread-safe mode there is no client lock to commit, so the
+// waiter does not need to CancelPublish() the available-but-busy buffer; it
+// simply goes back to waiting.
+TEST_F(ClientTest, ReliablePublisherBusyFlagTriggerWakeupNotThreadSafe) {
+  subspace::Client client;
+  // Note: intentionally not calling InitClient(), which would enable
+  // thread-safe mode.  Initialize the client directly to leave it
+  // non-thread-safe.
+  ASSERT_OK(client.Init(Socket()));
+
+  absl::StatusOr<Publisher> pub = client.CreatePublisher(
+      "rel_busy_nts", 32, 5, subspace::PublisherOptions().SetReliable(true));
+  ASSERT_OK(pub);
+  // A reliable subscriber that does not read keeps every slot busy, so the
+  // publisher cannot obtain a buffer until the subscriber drains them.
+  absl::StatusOr<Subscriber> sub = client.CreateSubscriber(
+      "rel_busy_nts", subspace::SubscriberOptions().SetReliable(true));
+  ASSERT_OK(sub);
+
+  // Fill the channel until the publisher can no longer get a buffer.  At this
+  // point the buffer is unavailable.
+  int published = 0;
+  for (;;) {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_OK(buffer);
+    if (*buffer == nullptr) {
+      break;
+    }
+    memcpy(*buffer, "fill", 4);
+    ASSERT_OK(pub->PublishMessage(4));
+    published++;
+  }
+  ASSERT_GE(published, 4);
+
+  bool buffer_busy = true;
+  bool waiter_saw_busy = false;
+  bool waiter_published = false;
+
+  co::CoroutineScheduler machine;
+
+  // Waiter: wait until the buffer is available AND not busy before taking it.
+  co::Coroutine waiter(machine, [&](co::Coroutine *c) {
+    for (;;) {
+      absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+      ASSERT_OK(buffer);
+      if (*buffer != nullptr) {
+        if (!buffer_busy) {
+          memcpy(*buffer, "late", 4);
+          ASSERT_OK(pub->PublishMessage(4));
+          waiter_published = true;
+          return;
+        }
+        // Available but another coroutine still owns the in-progress publish.
+        // In non-thread-safe mode there is no lock to release, so just wait for
+        // the busy flag to clear.
+        waiter_saw_busy = true;
+      }
+      struct pollfd fd = pub->GetPollFd();
+      c->Wait(fd.fd);
+    }
+  });
+
+  // Publisher: drain the subscriber to free slots (which triggers the
+  // publisher's fd), then publish while the waiter is still gated by the busy
+  // flag, and finally clear the flag and wake the waiter.
+  co::Coroutine publisher(machine, [&](co::Coroutine *c) {
+    for (int i = 0; i < published; i++) {
+      absl::StatusOr<Message> msg = sub->ReadMessage();
+      ASSERT_OK(msg);
+    }
+    // Give the waiter a chance to observe (available && busy) and go back to
+    // sleep.
+    c->Millisleep(50);
+
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_OK(buffer);
+    ASSERT_NE(nullptr, *buffer);
+    memcpy(*buffer, "main", 4);
+    ASSERT_OK(pub->PublishMessage(4));
+
+    buffer_busy = false;
+    pub->TriggerReliableWait();
+  });
+
+  machine.Run();
+
+  EXPECT_TRUE(waiter_saw_busy);
+  EXPECT_TRUE(waiter_published);
+}
+
 TEST_F(ClientTest, DroppedMessage) {
   subspace::Client client;
   InitClient(client);
