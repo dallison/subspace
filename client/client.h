@@ -818,6 +818,12 @@ public:
     return client_->WaitForReliablePublisher(impl_.get(), fd, timeout, c);
   }
 
+  // Trigger the publisher's reliable event fd, waking anything that is waiting
+  // on it (for example a caller blocked in Wait()).  This exposes the trigger
+  // side of the publisher's triggerfd so that the caller of PublishMessage can
+  // explicitly wake a waiter.
+  void TriggerReliableWait() { impl_->TriggerReliable(); }
+
   struct pollfd GetPollFd() const {
     return client_->GetPollFd(impl_.get());
   }

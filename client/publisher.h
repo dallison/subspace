@@ -29,6 +29,12 @@ public:
   bool IsFixedSize() const { return options_.IsFixedSize(); }
   bool UsesSplitBuffers() const { return UseSplitBuffers(); }
 
+  // Trigger the publisher's reliable trigger fd, waking anything that is
+  // waiting on the publisher's reliable event fd (e.g. a reliable publisher
+  // blocked in Wait()).  This exposes the trigger side of the publisher's
+  // triggerfd.
+  void TriggerReliable() { trigger_.Trigger(); }
+
   MessageSlot *FindFreeSlotUnreliable(int owner);
   MessageSlot *FindFreeSlotReliable(int owner);
 
