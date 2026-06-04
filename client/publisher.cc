@@ -7,6 +7,7 @@
 #include "client_channel.h"
 #include "common/client_buffer.h"
 #include "toolbelt/clock.h"
+#include <algorithm>
 #include <atomic>
 #include <thread>
 namespace subspace {
@@ -121,6 +122,22 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
           if (absl::Status status =
                   client_buffer_registration_callback_(metadata, &buffer.fd);
               !status.ok()) {
+            int expected_num_buffers = new_num_buffers;
+            if (ccb_->num_buffers.compare_exchange_strong(
+                    expected_num_buffers, old_num_buffers,
+                    std::memory_order_acq_rel, std::memory_order_relaxed)) {
+              for (int j = old_num_buffers; j < new_num_buffers; j++) {
+                bcb_->sizes[j].store(0, std::memory_order_relaxed);
+              }
+            }
+            const size_t rollback_to =
+                std::min(static_cast<size_t>(old_num_buffers),
+                         buffers_.size());
+            for (size_t j = rollback_to; j < buffers_.size(); j++) {
+              UnmapBufferSet(j, *buffers_[j],
+                             /*destroy_owned_buffers=*/false);
+            }
+            buffers_.resize(rollback_to);
             return status;
           }
         }

@@ -12,7 +12,7 @@
 #include <chrono>
 #include <optional>
 #include <sys/stat.h>
-#if defined(__ANDROID__)
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
 #include <sys/syscall.h>
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U

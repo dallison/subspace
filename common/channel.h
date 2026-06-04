@@ -27,7 +27,9 @@ namespace subspace {
 #define SUBSPACE_SHMEM_MODE_LINUX 2
 #define SUBSPACE_SHMEM_MODE_ANDROID 3
 
-// Change this if you want to use a different shared memory mode.
+// Change this if you want to use a different shared memory mode. Builds may
+// define SUBSPACE_SHMEM_MODE explicitly to exercise a non-default backend.
+#ifndef SUBSPACE_SHMEM_MODE
 #if defined(__ANDROID__)
 // Android does not have /dev/shm; use anonymous fd-backed shared memory.
 #define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_ANDROID
@@ -38,6 +40,7 @@ namespace subspace {
 // On other systems, including QNX, use a /tmp shadow file and regular shared
 // memory.
 #define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_POSIX
+#endif
 #endif
 
 // Flag for flags field in MessagePrefix.
