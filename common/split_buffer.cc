@@ -192,9 +192,6 @@ CreateSplitSharedMemoryBuffer(const SplitBufferMetadata &metadata) {
         "Failed to create split buffer object %s: %s", metadata.object_name,
         strerror(errno)));
   }
-#else
-  return absl::UnimplementedError("memfd_create is not available");
-#endif
   toolbelt::FileDescriptor shm_fd(fd);
   if (GetSyscallShim().ftruncate_fn(
           shm_fd.Fd(), static_cast<off_t>(PageAlignedSize(allocation_size))) ==
@@ -204,6 +201,9 @@ CreateSplitSharedMemoryBuffer(const SplitBufferMetadata &metadata) {
         strerror(errno)));
   }
   return shm_fd;
+#else
+  return absl::UnimplementedError("memfd_create is not available");
+#endif
 #else
   int fd = GetSyscallShim().shm_open_fn(metadata.object_name.c_str(),
                                         O_RDWR | O_CREAT | O_EXCL, 0666);

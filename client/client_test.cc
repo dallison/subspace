@@ -10,18 +10,26 @@
 #include "absl/flags/parse.h"
 #include "absl/hash/hash_testing.h"
 #include "absl/status/status.h"
+#include "absl/strings/str_format.h"
 #include "common/system_info.h"
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
 #include "toolbelt/pipe.h"
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <inttypes.h>
 #include <memory>
 #include <sys/resource.h>
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+#include <sys/syscall.h>
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+#endif
 #include <unordered_map>
 
 ABSL_FLAG(bool, start_server, true, "Start the subspace server");
@@ -80,6 +88,28 @@ uint64_t ExpectedSplitBufferVirtualMemoryUsage(int num_slots,
          AlignPage(prefix_size * static_cast<uint64_t>(num_slots)) +
          AlignPage(slot_size) * static_cast<uint64_t>(num_slots);
 }
+
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+absl::StatusOr<toolbelt::FileDescriptor> CreateTestMemfd(const char *name,
+                                                         size_t size) {
+#ifdef __NR_memfd_create
+  int fd = static_cast<int>(
+      syscall(__NR_memfd_create, name, static_cast<unsigned int>(MFD_CLOEXEC)));
+  if (fd == -1) {
+    return absl::InternalError(absl::StrFormat(
+        "Failed to create test memfd %s: %s", name, strerror(errno)));
+  }
+  toolbelt::FileDescriptor result(fd);
+  if (ftruncate(result.Fd(), static_cast<off_t>(size)) == -1) {
+    return absl::InternalError(absl::StrFormat(
+        "Failed to size test memfd %s: %s", name, strerror(errno)));
+  }
+  return result;
+#else
+  return absl::UnimplementedError("memfd_create is not available");
+#endif
+}
+#endif
 
 subspace::SplitBufferCallbacks MakeTestSplitBufferCallbacks(
     std::shared_ptr<TestSplitBufferState> state) {
@@ -197,6 +227,67 @@ TEST_F(ClientTest, Resize1) {
   ASSERT_OK(buffer3);
   ASSERT_EQ(512, pub->SlotSize());
 }
+
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+TEST(AndroidBufferRegistrationTest, FailedRegistrationRollsBackNumBuffers) {
+  constexpr int kNumSlots = 2;
+  absl::StatusOr<toolbelt::FileDescriptor> scb_fd =
+      CreateTestMemfd("subspace_test_scb", sizeof(subspace::SystemControlBlock));
+  if (absl::IsUnimplemented(scb_fd.status())) {
+    GTEST_SKIP() << "memfd_create is not available on this platform";
+  }
+  ASSERT_OK(scb_fd);
+  absl::StatusOr<toolbelt::FileDescriptor> ccb_fd =
+      CreateTestMemfd("subspace_test_ccb", subspace::CcbSize(kNumSlots));
+  ASSERT_OK(ccb_fd);
+  absl::StatusOr<toolbelt::FileDescriptor> bcb_fd = CreateTestMemfd(
+      "subspace_test_bcb", sizeof(subspace::BufferControlBlock));
+  ASSERT_OK(bcb_fd);
+
+  subspace::PublisherOptions options;
+  subspace::details::PublisherImpl publisher(
+      "android_registration_rollback", kNumSlots, /*channel_id=*/0,
+      /*publisher_id=*/0, /*vchan_id=*/-1, /*session_id=*/123, "",
+      options, [](subspace::Channel *) { return false; },
+      /*user_id=*/0, /*group_id=*/0);
+  ASSERT_OK(publisher.Map(
+      subspace::SharedMemoryFds(std::move(*ccb_fd), std::move(*bcb_fd)),
+      *scb_fd));
+
+  int failed_registration_attempts = 0;
+  publisher.SetClientBufferRegistrationCallback(
+      [&](const subspace::ClientBufferHandleMetadata &metadata,
+          const toolbelt::FileDescriptor *fd) {
+        failed_registration_attempts++;
+        EXPECT_EQ(0u, metadata.buffer_index);
+        EXPECT_NE(nullptr, fd);
+        EXPECT_TRUE(fd->Valid());
+        return absl::InternalError("injected registration failure");
+      });
+
+  absl::Status status = publisher.CreateOrAttachBuffers(/*slot_size=*/128);
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(1, failed_registration_attempts);
+  EXPECT_EQ(0, publisher.GetCcb()->num_buffers.load(std::memory_order_relaxed));
+  EXPECT_TRUE(publisher.GetBuffers().empty());
+
+  std::vector<uint32_t> registered_indices;
+  publisher.SetClientBufferRegistrationCallback(
+      [&](const subspace::ClientBufferHandleMetadata &metadata,
+          const toolbelt::FileDescriptor *fd) {
+        EXPECT_NE(nullptr, fd);
+        EXPECT_TRUE(fd->Valid());
+        registered_indices.push_back(metadata.buffer_index);
+        return absl::OkStatus();
+      });
+
+  ASSERT_OK(publisher.CreateOrAttachBuffers(/*slot_size=*/128));
+  ASSERT_EQ(1u, registered_indices.size());
+  EXPECT_EQ(0u, registered_indices[0]);
+  EXPECT_EQ(1, publisher.GetCcb()->num_buffers.load(std::memory_order_relaxed));
+  EXPECT_EQ(1u, publisher.GetBuffers().size());
+}
+#endif
 
 TEST_F(ClientTest, ResizeCallback) {
   subspace::Client client;
