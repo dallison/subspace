@@ -233,6 +233,9 @@ TEST(AndroidBufferRegistrationTest, FailedRegistrationRollsBackNumBuffers) {
   constexpr int kNumSlots = 2;
   absl::StatusOr<toolbelt::FileDescriptor> scb_fd =
       CreateTestMemfd("subspace_test_scb", sizeof(subspace::SystemControlBlock));
+  if (absl::IsUnimplemented(scb_fd.status())) {
+    GTEST_SKIP() << "memfd_create is not available on this platform";
+  }
   ASSERT_OK(scb_fd);
   absl::StatusOr<toolbelt::FileDescriptor> ccb_fd =
       CreateTestMemfd("subspace_test_ccb", subspace::CcbSize(kNumSlots));
