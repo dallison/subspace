@@ -768,7 +768,8 @@ absl::Status Server::Run() {
           for (auto &[name, ch] : channels_) {
             shadow->SendCreateChannel(ch.get());
             ch->ForEachClientBuffer([&](const RegisteredClientBuffer &buffer) {
-              shadow->SendRegisterClientBuffer(buffer.metadata, buffer.fd);
+              shadow->SendRegisterClientBuffer(buffer.publisher_id,
+                                               buffer.metadata, buffer.fd);
             });
             for (auto &[uid, user] : ch->GetUsers()) {
               if (user == nullptr) {
@@ -1141,8 +1142,12 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
       return s;
     }
     for (RegisteredClientBuffer &buffer : rch.client_buffers) {
-      channel->RegisterClientBuffer(std::move(buffer.metadata),
-                                    std::move(buffer.fd));
+      if (absl::Status s = channel->RegisterClientBuffer(
+              buffer.publisher_id, std::move(buffer.metadata),
+              std::move(buffer.fd));
+          !s.ok()) {
+        return s;
+      }
     }
 
     for (auto &rpub : rch.publishers) {

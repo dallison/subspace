@@ -56,6 +56,7 @@ struct ClientBufferHandleMetadata {
 struct RegisteredClientBuffer {
   ClientBufferHandleMetadata metadata;
   toolbelt::FileDescriptor fd;
+  int publisher_id = -1;
 };
 
 } // namespace subspace

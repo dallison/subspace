@@ -119,8 +119,8 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
               .handle = static_cast<uintptr_t>(buffer.fd.Fd()),
               .allocator = ClientBufferAllocatorKind::kAndroidMemfd,
           };
-          if (absl::Status status =
-                  client_buffer_registration_callback_(metadata, &buffer.fd);
+          if (absl::Status status = client_buffer_registration_callback_(
+                  GetPublisherId(), metadata, &buffer.fd);
               !status.ok()) {
             int expected_num_buffers = new_num_buffers;
             if (ccb_->num_buffers.compare_exchange_strong(

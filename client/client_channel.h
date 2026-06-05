@@ -241,6 +241,7 @@ public:
 
   virtual BufferMapMode MapMode() const = 0;
   virtual bool UseSplitBuffers() const { return false; }
+  virtual int ClientBufferPublisherId() const { return -1; }
   virtual const SplitBufferCallbacks &SplitBuffersCallbacks() const {
     static const SplitBufferCallbacks *callbacks = new SplitBufferCallbacks();
     return *callbacks;
@@ -311,7 +312,7 @@ public:
   }
 
   void SetClientBufferRegistrationCallback(
-      std::function<absl::Status(const ClientBufferHandleMetadata &,
+      std::function<absl::Status(int, const ClientBufferHandleMetadata &,
                                  const toolbelt::FileDescriptor *)>
           callback) {
     client_buffer_registration_callback_ = std::move(callback);
@@ -322,7 +323,7 @@ public:
     client_buffer_lookup_callback_ = std::move(callback);
   }
   void SetClientBufferUnregistrationCallback(
-      std::function<absl::Status(const std::string &, uint64_t, uint32_t)>
+      std::function<absl::Status(int, const std::string &, uint64_t, uint32_t)>
           callback) {
     client_buffer_unregistration_callback_ = std::move(callback);
   }
@@ -392,13 +393,13 @@ protected:
   MessageSlot *slot_ = nullptr; // Current slot.
   int vchan_id_ = -1;           // Virtual channel ID.
   uint64_t session_id_;
-  std::function<absl::Status(const ClientBufferHandleMetadata &,
+  std::function<absl::Status(int, const ClientBufferHandleMetadata &,
                              const toolbelt::FileDescriptor *)>
       client_buffer_registration_callback_ = nullptr;
   std::function<absl::StatusOr<std::vector<RegisteredClientBuffer>>(
       const std::string &, uint64_t, uint32_t)>
       client_buffer_lookup_callback_ = nullptr;
-  std::function<absl::Status(const std::string &, uint64_t, uint32_t)>
+  std::function<absl::Status(int, const std::string &, uint64_t, uint32_t)>
       client_buffer_unregistration_callback_ = nullptr;
   std::vector<std::unique_ptr<BufferSet>> buffers_ = {};
   int user_id_ = -1;

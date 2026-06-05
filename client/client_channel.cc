@@ -208,7 +208,8 @@ void ClientChannel::UnmapSplitBufferSet(size_t buffer_index,
       buffer.owns_split_buffers &&
       client_buffer_unregistration_callback_) {
     (void)client_buffer_unregistration_callback_(
-        ResolvedName(), session_id_, static_cast<uint32_t>(buffer_index));
+        ClientBufferPublisherId(), ResolvedName(), session_id_,
+        static_cast<uint32_t>(buffer_index));
   }
 
   buffer.full_size = 0;
@@ -621,7 +622,7 @@ ClientChannel::CreateSplitBufferSet(size_t buffer_index, size_t full_size,
 #endif
   if (client_buffer_registration_callback_) {
     if (absl::Status status = client_buffer_registration_callback_(
-            ClientBufferFromSplitMetadata(
+            ClientBufferPublisherId(), ClientBufferFromSplitMetadata(
                 prefix_metadata, ClientBufferAllocatorKind::kSplitShm),
             &*prefix_fd);
         !status.ok()) {
@@ -711,7 +712,7 @@ ClientChannel::CreateSplitBufferSet(size_t buffer_index, size_t full_size,
 #endif
     if (client_buffer_registration_callback_) {
       if (absl::Status status = client_buffer_registration_callback_(
-              ClientBufferFromSplitMetadata(
+              ClientBufferPublisherId(), ClientBufferFromSplitMetadata(
                   metadata,
                   buffer->uses_split_callbacks
                       ? ClientBufferAllocatorKind::kSplitCallback

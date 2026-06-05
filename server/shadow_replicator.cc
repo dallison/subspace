@@ -252,11 +252,12 @@ void ShadowReplicator::SendRemoveSubscriber(const std::string &channel_name,
 }
 
 void ShadowReplicator::SendRegisterClientBuffer(
-    const ClientBufferHandleMetadata &metadata,
+    int publisher_id, const ClientBufferHandleMetadata &metadata,
     const toolbelt::FileDescriptor &fd) {
   ShadowEvent event;
   auto *msg = event.mutable_register_client_buffer();
   ToProto(metadata, msg->mutable_metadata());
+  msg->set_publisher_id(publisher_id);
   std::vector<toolbelt::FileDescriptor> fds;
   if (fd.Valid()) {
     msg->set_has_fd(true);
@@ -268,12 +269,13 @@ void ShadowReplicator::SendRegisterClientBuffer(
 
 void ShadowReplicator::SendUnregisterClientBuffer(
     const std::string &channel_name, uint64_t session_id,
-    uint32_t buffer_index) {
+    uint32_t buffer_index, int publisher_id) {
   ShadowEvent event;
   auto *msg = event.mutable_unregister_client_buffer();
   msg->set_channel_name(channel_name);
   msg->set_session_id(session_id);
   msg->set_buffer_index(buffer_index);
+  msg->set_publisher_id(publisher_id);
   SendEvent(event);
 }
 
@@ -430,7 +432,10 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
       }
       (*ch)->client_buffers.push_back(
           RegisteredClientBuffer{.metadata = std::move(metadata),
-                                 .fd = std::move(fd)});
+                                 .fd = std::move(fd),
+                                 .publisher_id = msg.has_publisher_id()
+                                                     ? msg.publisher_id()
+                                                     : -1});
       continue;
     }
 

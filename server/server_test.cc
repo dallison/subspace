@@ -31,12 +31,14 @@ public:
     if (!result.ok()) {
       return result.status();
     }
+    session_id_ = result->first.init().session_id();
     return absl::OkStatus();
   }
 
   absl::StatusOr<
       std::pair<subspace::Response, std::vector<toolbelt::FileDescriptor>>>
-  Send(const subspace::Request &req) {
+  Send(const subspace::Request &req,
+       const std::vector<toolbelt::FileDescriptor> &send_fds = {}) {
     size_t msg_len = req.ByteSizeLong();
     std::vector<char> buf(sizeof(int32_t) + msg_len);
     char *payload = buf.data() + sizeof(int32_t);
@@ -46,6 +48,11 @@ public:
     auto n = socket_.SendMessage(payload, msg_len);
     if (!n.ok()) {
       return n.status();
+    }
+    if (!send_fds.empty()) {
+      if (auto s = socket_.SendFds(send_fds); !s.ok()) {
+        return s;
+      }
     }
 
     auto recv = socket_.ReceiveVariableLengthMessage();
@@ -63,6 +70,27 @@ public:
     }
     return std::make_pair(std::move(resp), std::move(fds));
   }
+
+  absl::Status SendOneWay(
+      const subspace::Request &req,
+      const std::vector<toolbelt::FileDescriptor> &send_fds = {}) {
+    size_t msg_len = req.ByteSizeLong();
+    std::vector<char> buf(sizeof(int32_t) + msg_len);
+    char *payload = buf.data() + sizeof(int32_t);
+    if (!req.SerializeToArray(payload, msg_len)) {
+      return absl::InternalError("Failed to serialize request");
+    }
+    auto n = socket_.SendMessage(payload, msg_len);
+    if (!n.ok()) {
+      return n.status();
+    }
+    if (!send_fds.empty()) {
+      return socket_.SendFds(send_fds);
+    }
+    return absl::OkStatus();
+  }
+
+  uint64_t SessionId() const { return session_id_; }
 
   // Convenience: create a publisher and return the response.
   std::pair<subspace::Response, std::vector<toolbelt::FileDescriptor>>
@@ -116,6 +144,7 @@ public:
 
 private:
   toolbelt::UnixSocket socket_;
+  uint64_t session_id_ = 0;
 };
 
 class ServerTest : public SubspaceTestBase {};
@@ -724,6 +753,124 @@ TEST_F(ServerTest, SubGetsChannelProperties) {
   EXPECT_EQ("my_type", sub_resp.type());
   EXPECT_EQ(8, sub_resp.checksum_size());
   EXPECT_EQ(16, sub_resp.metadata_size());
+}
+
+TEST_F(ServerTest, ClientBufferRegisterRejectsForeignPublisherOverwrite) {
+  RawConnection owner;
+  ASSERT_OK(owner.Connect(Socket()));
+  ASSERT_OK(owner.Init("buffer_owner"));
+  auto [owner_resp, owner_fds] = owner.CreatePublisher("owned_buffer_ch");
+  ASSERT_TRUE(owner_resp.create_publisher().error().empty());
+  int owner_pub_id = owner_resp.create_publisher().publisher_id();
+
+  RawConnection attacker;
+  ASSERT_OK(attacker.Connect(Socket()));
+  ASSERT_OK(attacker.Init("buffer_attacker"));
+  auto [attacker_resp, attacker_fds] =
+      attacker.CreatePublisher("owned_buffer_ch");
+  ASSERT_TRUE(attacker_resp.create_publisher().error().empty());
+  int attacker_pub_id = attacker_resp.create_publisher().publisher_id();
+  ASSERT_NE(owner_pub_id, attacker_pub_id);
+
+  subspace::Request register_owner_req;
+  auto *register_owner = register_owner_req.mutable_register_client_buffer();
+  auto *owner_metadata = register_owner->mutable_metadata();
+  owner_metadata->set_channel_name("owned_buffer_ch");
+  owner_metadata->set_session_id(owner.SessionId());
+  owner_metadata->set_buffer_index(0);
+  owner_metadata->set_slot_id(0);
+  owner_metadata->set_full_size(64);
+  owner_metadata->set_allocation_size(64);
+  owner_metadata->set_object_name("owner-buffer");
+  register_owner->set_publisher_id(owner_pub_id);
+  auto owner_register_result = owner.Send(register_owner_req);
+  ASSERT_OK(owner_register_result);
+  ASSERT_TRUE(owner_register_result->first.register_client_buffer()
+                  .error()
+                  .empty());
+
+  subspace::Request register_attacker_req;
+  auto *register_attacker =
+      register_attacker_req.mutable_register_client_buffer();
+  auto *attacker_metadata = register_attacker->mutable_metadata();
+  attacker_metadata->set_channel_name("owned_buffer_ch");
+  attacker_metadata->set_session_id(owner.SessionId());
+  attacker_metadata->set_buffer_index(0);
+  attacker_metadata->set_slot_id(0);
+  attacker_metadata->set_full_size(64);
+  attacker_metadata->set_allocation_size(64);
+  attacker_metadata->set_object_name("attacker-buffer");
+  register_attacker->set_publisher_id(attacker_pub_id);
+  auto attacker_register_result = attacker.Send(register_attacker_req);
+  ASSERT_OK(attacker_register_result);
+  EXPECT_THAT(attacker_register_result->first.register_client_buffer().error(),
+              ::testing::HasSubstr("does not own client buffer group"));
+
+  subspace::Request get_req;
+  auto *get = get_req.mutable_get_client_buffers();
+  get->set_channel_name("owned_buffer_ch");
+  get->set_session_id(owner.SessionId());
+  get->set_buffer_index(0);
+  auto get_result = owner.Send(get_req);
+  ASSERT_OK(get_result);
+  const auto &get_resp = get_result->first.get_client_buffers();
+  ASSERT_TRUE(get_resp.error().empty());
+  ASSERT_EQ(1, get_resp.metadata_size());
+  EXPECT_EQ("owner-buffer", get_resp.metadata(0).object_name());
+}
+
+TEST_F(ServerTest, ClientBufferUnregisterRejectsForeignPublisher) {
+  RawConnection owner;
+  ASSERT_OK(owner.Connect(Socket()));
+  ASSERT_OK(owner.Init("unregister_owner"));
+  auto [owner_resp, owner_fds] = owner.CreatePublisher("owned_unregister_ch");
+  ASSERT_TRUE(owner_resp.create_publisher().error().empty());
+  int owner_pub_id = owner_resp.create_publisher().publisher_id();
+
+  RawConnection attacker;
+  ASSERT_OK(attacker.Connect(Socket()));
+  ASSERT_OK(attacker.Init("unregister_attacker"));
+  auto [attacker_resp, attacker_fds] =
+      attacker.CreatePublisher("owned_unregister_ch");
+  ASSERT_TRUE(attacker_resp.create_publisher().error().empty());
+  int attacker_pub_id = attacker_resp.create_publisher().publisher_id();
+  ASSERT_NE(owner_pub_id, attacker_pub_id);
+
+  subspace::Request register_req;
+  auto *register_buffer = register_req.mutable_register_client_buffer();
+  auto *metadata = register_buffer->mutable_metadata();
+  metadata->set_channel_name("owned_unregister_ch");
+  metadata->set_session_id(owner.SessionId());
+  metadata->set_buffer_index(0);
+  metadata->set_slot_id(0);
+  metadata->set_full_size(64);
+  metadata->set_allocation_size(64);
+  metadata->set_object_name("still-owned");
+  register_buffer->set_publisher_id(owner_pub_id);
+  auto register_result = owner.Send(register_req);
+  ASSERT_OK(register_result);
+  ASSERT_TRUE(
+      register_result->first.register_client_buffer().error().empty());
+
+  subspace::Request unregister_req;
+  auto *unregister = unregister_req.mutable_unregister_client_buffer();
+  unregister->set_channel_name("owned_unregister_ch");
+  unregister->set_session_id(owner.SessionId());
+  unregister->set_buffer_index(0);
+  unregister->set_publisher_id(attacker_pub_id);
+  ASSERT_OK(attacker.SendOneWay(unregister_req));
+
+  subspace::Request get_req;
+  auto *get = get_req.mutable_get_client_buffers();
+  get->set_channel_name("owned_unregister_ch");
+  get->set_session_id(owner.SessionId());
+  get->set_buffer_index(0);
+  auto get_result = owner.Send(get_req);
+  ASSERT_OK(get_result);
+  const auto &get_resp = get_result->first.get_client_buffers();
+  ASSERT_TRUE(get_resp.error().empty());
+  ASSERT_EQ(1, get_resp.metadata_size());
+  EXPECT_EQ("still-owned", get_resp.metadata(0).object_name());
 }
 
 int main(int argc, char **argv) {

@@ -256,7 +256,8 @@ TEST(AndroidBufferRegistrationTest, FailedRegistrationRollsBackNumBuffers) {
 
   int failed_registration_attempts = 0;
   publisher.SetClientBufferRegistrationCallback(
-      [&](const subspace::ClientBufferHandleMetadata &metadata,
+      [&](int /*publisher_id*/,
+          const subspace::ClientBufferHandleMetadata &metadata,
           const toolbelt::FileDescriptor *fd) {
         failed_registration_attempts++;
         EXPECT_EQ(0u, metadata.buffer_index);
@@ -273,7 +274,8 @@ TEST(AndroidBufferRegistrationTest, FailedRegistrationRollsBackNumBuffers) {
 
   std::vector<uint32_t> registered_indices;
   publisher.SetClientBufferRegistrationCallback(
-      [&](const subspace::ClientBufferHandleMetadata &metadata,
+      [&](int /*publisher_id*/,
+          const subspace::ClientBufferHandleMetadata &metadata,
           const toolbelt::FileDescriptor *fd) {
         EXPECT_NE(nullptr, fd);
         EXPECT_TRUE(fd->Valid());

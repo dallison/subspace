@@ -389,9 +389,9 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
       },
       server_user_id_, server_group_id_);
   channel->SetClientBufferRegistrationCallback(
-      [this](const ClientBufferHandleMetadata &metadata,
+      [this](int publisher_id, const ClientBufferHandleMetadata &metadata,
              const toolbelt::FileDescriptor *fd) {
-        return RegisterClientBuffer(metadata, fd);
+        return RegisterClientBuffer(publisher_id, metadata, fd);
       });
   channel->SetClientBufferLookupCallback(
       [this](const std::string &channel_name, uint64_t session_id,
@@ -399,9 +399,10 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
         return GetClientBuffers(channel_name, session_id, buffer_index);
       });
   channel->SetClientBufferUnregistrationCallback(
-      [this](const std::string &channel_name, uint64_t session_id,
-             uint32_t buffer_index) {
-        return UnregisterClientBuffer(channel_name, session_id, buffer_index);
+      [this](int publisher_id, const std::string &channel_name,
+             uint64_t session_id, uint32_t buffer_index) {
+        return UnregisterClientBuffer(publisher_id, channel_name, session_id,
+                                      buffer_index);
       });
   int32_t cs = opts.ChecksumSize() > 0 ? opts.ChecksumSize() : 4;
   int32_t ms = opts.MetadataSize() > 0 ? opts.MetadataSize() : 0;
@@ -1915,11 +1916,12 @@ ClientImpl::SendOneWayRequest(const Request &req,
 }
 
 absl::Status ClientImpl::RegisterClientBuffer(
-    const ClientBufferHandleMetadata &metadata,
+    int publisher_id, const ClientBufferHandleMetadata &metadata,
     const toolbelt::FileDescriptor *fd) {
   Request req;
   auto *register_buffer = req.mutable_register_client_buffer();
   ToProto(metadata, register_buffer->mutable_metadata());
+  register_buffer->set_publisher_id(publisher_id);
   std::vector<toolbelt::FileDescriptor> fds;
   if (fd != nullptr && fd->Valid()) {
     register_buffer->set_has_fd(true);
@@ -1977,7 +1979,8 @@ ClientImpl::GetClientBuffers(const std::string &channel_name,
 }
 
 absl::Status
-ClientImpl::UnregisterClientBuffer(const std::string &channel_name,
+ClientImpl::UnregisterClientBuffer(int publisher_id,
+                                   const std::string &channel_name,
                                    uint64_t session_id,
                                    uint32_t buffer_index) {
   Request req;
@@ -1985,6 +1988,7 @@ ClientImpl::UnregisterClientBuffer(const std::string &channel_name,
   unregister->set_channel_name(channel_name);
   unregister->set_session_id(session_id);
   unregister->set_buffer_index(buffer_index);
+  unregister->set_publisher_id(publisher_id);
   return SendOneWayRequest(req);
 }
 

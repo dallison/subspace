@@ -80,6 +80,49 @@ FromPublisherSplitBufferRequest(const CreatePublisherRequest &req) {
           .split_buffers_over_bridge = req.split_buffers_over_bridge()};
 }
 
+bool PublisherBelongsToHandler(ServerChannel *channel, int publisher_id,
+                               const ClientHandler *handler) {
+  absl::StatusOr<User *> user = channel->GetUser(publisher_id);
+  return user.ok() && (*user)->IsPublisher() && (*user)->GetHandler() == handler;
+}
+
+bool ClientBufferPublisherBelongsToHandler(Server *server,
+                                           ServerChannel *registered_channel,
+                                           int publisher_id,
+                                           const ClientHandler *handler) {
+  if (PublisherBelongsToHandler(registered_channel, publisher_id, handler)) {
+    return true;
+  }
+  if (!registered_channel->IsMux()) {
+    return false;
+  }
+
+  for (const auto &[name, channel] : server->GetChannels()) {
+    (void)name;
+    if (!channel->IsVirtual()) {
+      continue;
+    }
+    auto *vchan = static_cast<VirtualChannel *>(channel.get());
+    if (vchan->GetMux() == registered_channel &&
+        PublisherBelongsToHandler(vchan, publisher_id, handler)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ClientBufferRequiresFd(ClientBufferAllocatorKind allocator) {
+  if (allocator == ClientBufferAllocatorKind::kAndroidMemfd) {
+    return true;
+  }
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+  if (allocator == ClientBufferAllocatorKind::kSplitShm) {
+    return true;
+  }
+#endif
+  return false;
+}
+
 } // namespace
 
 ClientHandler::~ClientHandler() { server_->RemoveAllUsersFor(this); }
@@ -248,22 +291,49 @@ absl::Status ClientHandler::HandleRegisterClientBuffer(
   if (channel->IsVirtual()) {
     channel = static_cast<VirtualChannel *>(channel)->GetMux();
   }
-  toolbelt::FileDescriptor fd;
-  if (req.has_fd() && static_cast<size_t>(req.fd_index()) < fds.size()) {
-    fd = std::move(fds[size_t(req.fd_index())]);
+
+  if (!req.has_publisher_id()) {
+    return absl::InvalidArgumentError(
+        "Client buffer registration is missing publisher id");
   }
-  channel->RegisterClientBuffer(metadata, std::move(fd));
+  if (!ClientBufferPublisherBelongsToHandler(server_, channel,
+                                             req.publisher_id(), this)) {
+    return absl::PermissionDeniedError(absl::StrFormat(
+        "Publisher %d does not own client buffer registration for channel %s",
+        req.publisher_id(), metadata.channel_name));
+  }
+
+  toolbelt::FileDescriptor fd;
+  if (req.has_fd()) {
+    if (req.fd_index() < 0 || static_cast<size_t>(req.fd_index()) >= fds.size()) {
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "Client buffer registration for channel %s has invalid fd index %d",
+          metadata.channel_name, req.fd_index()));
+    }
+    fd = std::move(fds[size_t(req.fd_index())]);
+  } else if (ClientBufferRequiresFd(metadata.allocator)) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Client buffer registration for channel %s is missing a required fd",
+        metadata.channel_name));
+  }
+  if (absl::Status status =
+          channel->RegisterClientBuffer(req.publisher_id(), metadata,
+                                        std::move(fd));
+      !status.ok()) {
+    return status;
+  }
   server_->ForEachShadow([&](const std::unique_ptr<ShadowReplicator> &shadow) {
     const auto matches =
         channel->FindClientBuffers(metadata.session_id, metadata.buffer_index);
     for (const RegisteredClientBuffer *buffer : matches) {
       if (buffer->metadata.slot_id == metadata.slot_id &&
           buffer->metadata.is_prefix == metadata.is_prefix) {
-        shadow->SendRegisterClientBuffer(buffer->metadata, buffer->fd);
+        shadow->SendRegisterClientBuffer(buffer->publisher_id,
+                                         buffer->metadata, buffer->fd);
         return;
       }
     }
-    shadow->SendRegisterClientBuffer(metadata);
+    shadow->SendRegisterClientBuffer(req.publisher_id(), metadata);
   });
   return absl::OkStatus();
 }
@@ -280,10 +350,25 @@ absl::Status ClientHandler::HandleUnregisterClientBuffer(
   if (channel->IsVirtual()) {
     channel = static_cast<VirtualChannel *>(channel)->GetMux();
   }
-  channel->UnregisterClientBuffer(req.session_id(), req.buffer_index());
+  if (!req.has_publisher_id()) {
+    return absl::InvalidArgumentError(
+        "Client buffer unregistration is missing publisher id");
+  }
+  if (!ClientBufferPublisherBelongsToHandler(server_, channel,
+                                             req.publisher_id(), this)) {
+    return absl::PermissionDeniedError(absl::StrFormat(
+        "Publisher %d does not own client buffer registration for channel %s",
+        req.publisher_id(), req.channel_name()));
+  }
+  if (absl::Status status = channel->UnregisterClientBuffer(
+          req.publisher_id(), req.session_id(), req.buffer_index());
+      !status.ok()) {
+    return status;
+  }
   server_->ForEachShadow([&](const std::unique_ptr<ShadowReplicator> &shadow) {
     shadow->SendUnregisterClientBuffer(req.channel_name(), req.session_id(),
-                                       req.buffer_index());
+                                       req.buffer_index(),
+                                       req.publisher_id());
   });
   return absl::OkStatus();
 }
