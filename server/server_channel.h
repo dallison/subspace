@@ -9,6 +9,7 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_format.h"
 #include "common/channel.h"
 #include "common/client_buffer.h"
 #include "proto/subspace.pb.h"
@@ -305,12 +306,25 @@ public:
   }
 
   virtual void RemoveBuffer(uint64_t session_id, Server *server = nullptr);
-  void RegisterClientBuffer(ClientBufferHandleMetadata metadata,
-                            toolbelt::FileDescriptor fd = {}) {
+  absl::Status RegisterClientBuffer(int publisher_id,
+                                    ClientBufferHandleMetadata metadata,
+                                    toolbelt::FileDescriptor fd = {}) {
     ClientBufferGroupKey group{metadata.session_id, metadata.buffer_index};
     ClientBufferSlotKey slot{metadata.slot_id, metadata.is_prefix};
-    client_buffers_[group][slot] = RegisteredClientBuffer{
-        .metadata = std::move(metadata), .fd = std::move(fd)};
+    auto &slots = client_buffers_[group];
+    for (const auto &[existing_slot, buffer] : slots) {
+      (void)existing_slot;
+      if (buffer.publisher_id != publisher_id) {
+        return absl::PermissionDeniedError(absl::StrFormat(
+            "Publisher %d does not own client buffer group %s/%lu/%u",
+            publisher_id, metadata.channel_name, metadata.session_id,
+            metadata.buffer_index));
+      }
+    }
+    slots[slot] = RegisteredClientBuffer{.metadata = std::move(metadata),
+                                         .fd = std::move(fd),
+                                         .publisher_id = publisher_id};
+    return absl::OkStatus();
   }
   // Invokes fn(const RegisteredClientBuffer&) for every registered buffer.  The
   // iteration order is unspecified.
@@ -342,8 +356,23 @@ public:
     }
     return result;
   }
-  void UnregisterClientBuffer(uint64_t session_id, uint32_t buffer_index) {
-    client_buffers_.erase(ClientBufferGroupKey{session_id, buffer_index});
+  absl::Status UnregisterClientBuffer(int publisher_id, uint64_t session_id,
+                                      uint32_t buffer_index) {
+    ClientBufferGroupKey group{session_id, buffer_index};
+    auto it = client_buffers_.find(group);
+    if (it == client_buffers_.end()) {
+      return absl::OkStatus();
+    }
+    for (const auto &[slot, buffer] : it->second) {
+      (void)slot;
+      if (buffer.publisher_id != publisher_id) {
+        return absl::PermissionDeniedError(absl::StrFormat(
+            "Publisher %d does not own client buffer group %lu/%u",
+            publisher_id, session_id, buffer_index));
+      }
+    }
+    client_buffers_.erase(it);
+    return absl::OkStatus();
   }
   // This is true if all publishers are bridge publishers.
   bool IsBridgePublisher() const;

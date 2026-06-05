@@ -421,7 +421,10 @@ Shadow::HandleRegisterClientBuffer(const ShadowRegisterClientBuffer &msg,
                             buffer.metadata.is_prefix == metadata.is_prefix;
                    });
   RegisteredClientBuffer registered{.metadata = std::move(metadata),
-                                    .fd = std::move(fd)};
+                                    .fd = std::move(fd),
+                                    .publisher_id = msg.has_publisher_id()
+                                                        ? msg.publisher_id()
+                                                        : -1};
   if (existing != buffers.end()) {
     *existing = std::move(registered);
   } else {

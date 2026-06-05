@@ -84,6 +84,7 @@ private:
   bool UseSplitBuffers() const override {
     return options_.UseSplitBuffers();
   }
+  int ClientBufferPublisherId() const override { return publisher_id_; }
   const SplitBufferCallbacks &SplitBuffersCallbacks() const override {
     return options_.SplitBufferCallbackSet();
   }
