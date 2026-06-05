@@ -550,12 +550,13 @@ private:
   SendOneWayRequest(const Request &req,
                     const std::vector<toolbelt::FileDescriptor> &fds = {});
   absl::Status RegisterClientBuffer(
-      const ClientBufferHandleMetadata &metadata,
+      int publisher_id, const ClientBufferHandleMetadata &metadata,
       const toolbelt::FileDescriptor *fd = nullptr);
   absl::StatusOr<std::vector<RegisteredClientBuffer>>
   GetClientBuffers(const std::string &channel_name, uint64_t session_id,
                    uint32_t buffer_index);
-  absl::Status UnregisterClientBuffer(const std::string &channel_name,
+  absl::Status UnregisterClientBuffer(int publisher_id,
+                                      const std::string &channel_name,
                                       uint64_t session_id,
                                       uint32_t buffer_index);
 
