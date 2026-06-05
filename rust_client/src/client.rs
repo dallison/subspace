@@ -168,7 +168,8 @@ impl Publisher {
                 }
 
                 pub_impl.create_or_attach_buffers(aligned64(new_slot_size as i64) as u64)?;
-                register_pending_client_buffers(&mut client, &mut pub_impl.channel)?;
+                let publisher_id = pub_impl.publisher_id;
+                register_pending_client_buffers(&mut client, &mut pub_impl.channel, publisher_id)?;
                 if let Some(si) = pub_impl.channel.slot {
                     pub_impl.channel.set_slot_to_biggest_buffer(si);
                 }
@@ -452,6 +453,7 @@ impl Drop for Publisher {
                 &resolved_name,
                 client.session_id,
                 buffer_index,
+                publisher_id,
             );
         }
         let _ = remove_publisher_request(&client, &channel_name, publisher_id);
@@ -927,7 +929,7 @@ impl Client {
         )?;
 
         pub_impl.create_or_attach_buffers(slot_size as u64)?;
-        register_pending_client_buffers(&mut client, &mut pub_impl.channel)?;
+        register_pending_client_buffers(&mut client, &mut pub_impl.channel, pub_resp.publisher_id)?;
 
         pub_impl.trigger_fd = fds[pub_resp.pub_trigger_fd_index as usize];
         pub_impl.poll_fd = fds[pub_resp.pub_poll_fd_index as usize];
@@ -1270,7 +1272,11 @@ fn send_request_receive_response(
     client.socket.receive_response()
 }
 
-fn register_pending_client_buffers(client: &mut ClientInner, channel: &mut Channel) -> Result<()> {
+fn register_pending_client_buffers(
+    client: &mut ClientInner,
+    channel: &mut Channel,
+    publisher_id: i32,
+) -> Result<()> {
     let registrations = std::mem::take(&mut channel.pending_client_buffer_registrations);
     for metadata in registrations {
         let req = proto::Request {
@@ -1279,6 +1285,7 @@ fn register_pending_client_buffers(client: &mut ClientInner, channel: &mut Chann
                     metadata: Some(metadata),
                     has_fd: false,
                     fd_index: 0,
+                    publisher_id: Some(publisher_id),
                 },
             )),
         };
@@ -1301,6 +1308,7 @@ fn unregister_client_buffer_request(
     channel_name: &str,
     session_id: u64,
     buffer_index: u32,
+    publisher_id: i32,
 ) -> Result<()> {
     let req = proto::Request {
         request: Some(proto::request::Request::UnregisterClientBuffer(
@@ -1308,6 +1316,7 @@ fn unregister_client_buffer_request(
                 channel_name: channel_name.to_string(),
                 session_id,
                 buffer_index,
+                publisher_id: Some(publisher_id),
             },
         )),
     };
