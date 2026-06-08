@@ -1465,6 +1465,11 @@ public:
 
   Client(const co::Coroutine *c = nullptr)
       : impl_(std::make_shared<ClientImpl>(c)) {}
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  // Asio-backed client: the yield_context drives cooperative socket I/O.
+  explicit Client(async::Context ctx)
+      : impl_(std::make_shared<ClientImpl>(ctx)) {}
+#endif
   ~Client() = default;
 
   const std::string &GetName() const { return impl_->GetName(); }

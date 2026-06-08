@@ -65,6 +65,23 @@ public:
          int disc_port, int peer_port, bool local, int notify_fd = -1,
          int initial_ordinal = 1, bool wait_for_clients = false, bool publish_server_channels = true);
 
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  // Asio-backed server.  These mirror the co::CoroutineScheduler constructors
+  // above but take an externally-owned boost::asio::io_context that the
+  // embedder runs (e.g. from main.cc or a test).  They are additive: the co
+  // constructors are unchanged so existing code that builds a Server with a
+  // CoroutineScheduler continues to compile and work on the co backend.
+  Server(boost::asio::io_context &ioc, const std::string &socket_name,
+         const std::string &interface, int disc_port, int peer_port, bool local,
+         int notify_fd = -1, int initial_ordinal = 1,
+         bool wait_for_clients = false, bool publish_server_channels = true);
+  Server(boost::asio::io_context &ioc, const std::string &socket_name,
+         const std::string &interface, const toolbelt::InetAddress &peer,
+         int disc_port, int peer_port, bool local, int notify_fd = -1,
+         int initial_ordinal = 1, bool wait_for_clients = false,
+         bool publish_server_channels = true);
+#endif
+
   virtual ~Server();
   void SetLogLevel(const std::string &level) { logger_.SetLogLevel(level); }
   toolbelt::LogLevel GetLogLevel() const { return logger_.GetLogLevel(); }
@@ -161,7 +178,7 @@ public:
   size_t GetNumChannels() const { return channels_.size(); }
 
   absl::Status HandleIncomingConnection(async::Context ctx,
-                                        toolbelt::UnixSocket &listen_socket);
+                                        async::UnixSocket &listen_socket);
 
   // Create a channel in both process and shared memory.  For a placeholder
   // subscriber, the channel parameters are not known, so slot_size and
@@ -216,7 +233,7 @@ private:
   void CloseHandler(ClientHandler *handler);
   void NotifyViaFd(int64_t val);
   void CreateShutdownTrigger();
-  void ListenerCoroutine(async::Context ctx, toolbelt::UnixSocket &listen_socket);
+  void ListenerCoroutine(async::Context ctx, async::UnixSocket &listen_socket);
   void ChannelDirectoryCoroutine(async::Context ctx);
   void SendChannelDirectory();
   void StatisticsCoroutine(async::Context ctx);
@@ -230,11 +247,14 @@ private:
   RemoveDiscoveryConnection(const std::shared_ptr<DiscoveryConnection> &conn);
   void AdvertiseAllChannels();
   // Send a discovery message to peers.  In TCP mode it is written to every
-  // active discovery connection; in UDP mode it is sent to udp_dest.  Sends are
-  // blocking (no coroutine yield) so messages from different coroutines can't
-  // interleave on a connection, so this intentionally takes no Context.
+  // active discovery connection; in UDP mode it is sent to udp_dest.  On the co
+  // backend sends are blocking (no coroutine yield) so messages from different
+  // coroutines can't interleave on a connection (the Context is ignored).  On
+  // the Asio backend the single-threaded io_context can't block, so the Context
+  // drives cooperative non-blocking sends.
   absl::Status TransmitDiscovery(const Discovery &disc,
-                                 const toolbelt::InetAddress &udp_dest);
+                                 const toolbelt::InetAddress &udp_dest,
+                                 async::Context ctx);
   // The address bridge listeners bind to: the any-address when a bridge
   // advertise address is configured, otherwise the local interface address.
   toolbelt::SocketAddress BridgeBindBase() const;
@@ -277,7 +297,8 @@ private:
                                     bool reliable,
                                     toolbelt::InetAddress publisher,
                                     async::StreamSocket &receiver_listener,
-                                    char *buffer, size_t buffer_size);
+                                    char *buffer, size_t buffer_size,
+                                    async::Context ctx);
 
   static uint64_t AllocateSessionId() { return toolbelt::Now(); }
 

@@ -346,6 +346,7 @@ BridgeAddressWithPort(const toolbelt::SocketAddress &addr, int port) {
   }
 }
 
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO
 Server::Server(co::CoroutineScheduler &scheduler,
                const std::string &socket_name, const std::string &interface,
                int disc_port, int peer_port, bool local, int notify_fd,
@@ -373,6 +374,34 @@ Server::Server(co::CoroutineScheduler &scheduler,
       publish_server_channels_(publish_server_channels) {
   CreateShutdownTrigger();
 }
+#else  // SUBSPACE_CORO_BACKEND_ASIO
+Server::Server(boost::asio::io_context &ioc, const std::string &socket_name,
+               const std::string &interface, int disc_port, int peer_port,
+               bool local, int notify_fd, int initial_ordinal,
+               bool wait_for_clients, bool publish_server_channels)
+    : socket_name_(socket_name), interface_(interface),
+      discovery_port_(disc_port), discovery_peer_port_(peer_port),
+      local_(local), notify_fd_(notify_fd), runtime_(ioc),
+      logger_("Subspace server"), initial_ordinal_(initial_ordinal),
+      wait_for_clients_(wait_for_clients),
+      publish_server_channels_(publish_server_channels) {
+  CreateShutdownTrigger();
+}
+
+Server::Server(boost::asio::io_context &ioc, const std::string &socket_name,
+               const std::string &interface, const toolbelt::InetAddress &peer,
+               int disc_port, int peer_port, bool local, int notify_fd,
+               int initial_ordinal, bool wait_for_clients,
+               bool publish_server_channels)
+    : socket_name_(socket_name), interface_(interface), peer_address_(peer),
+      discovery_port_(disc_port), discovery_peer_port_(peer_port),
+      local_(local), notify_fd_(notify_fd), runtime_(ioc),
+      logger_("Subspace server"), initial_ordinal_(initial_ordinal),
+      wait_for_clients_(wait_for_clients),
+      publish_server_channels_(publish_server_channels) {
+  CreateShutdownTrigger();
+}
+#endif
 
 absl::Status Server::SetBridgePortRange(int first_port, int last_port,
                                         bool fallback_to_ephemeral) {
@@ -500,7 +529,7 @@ void Server::CloseHandler(ClientHandler *handler) {
 // UDS and spawns a handler coroutine to handle the communication with
 // the client.
 void Server::ListenerCoroutine(async::Context ctx,
-                               toolbelt::UnixSocket &listen_socket) {
+                               async::UnixSocket &listen_socket) {
   for (;;) {
     if (shutting_down_) {
       // Keep this running until all other coroutines have completed.
@@ -644,7 +673,7 @@ absl::Status Server::Run() {
   session_id_ = AllocateSessionId();
   uint64_t instance_nonce_ = session_id_;
 
-  toolbelt::UnixSocket listen_socket;
+  async::UnixSocket listen_socket;
   absl::Status status = listen_socket.Bind(socket_name_, true);
   if (!status.ok()) {
     return status;
@@ -963,8 +992,8 @@ absl::Status Server::Run() {
 
 absl::Status
 Server::HandleIncomingConnection(async::Context ctx,
-                                 toolbelt::UnixSocket &listen_socket) {
-  absl::StatusOr<toolbelt::UnixSocket> s = listen_socket.Accept(ctx);
+                                 async::UnixSocket &listen_socket) {
+  absl::StatusOr<async::UnixSocket> s = listen_socket.Accept(ctx);
   if (!s.ok()) {
     return s.status();
   }
@@ -973,8 +1002,8 @@ Server::HandleIncomingConnection(async::Context ctx,
   ClientHandler *handler_ptr = client_handlers_.back().get();
 
   runtime_.Spawn(
-      [this, handler_ptr](async::Context) {
-        handler_ptr->Run();
+      [this, handler_ptr](async::Context handler_ctx) {
+        handler_ptr->Run(handler_ctx);
         CloseHandler(handler_ptr);
       },
       {.name = "Client handler",
@@ -1364,7 +1393,7 @@ void Server::SendQuery(const std::string &channel_name) {
   }
   // Spawn a coroutine to send the Query message.
   runtime_.Spawn(
-      [this, channel_name](async::Context) {
+      [this, channel_name](async::Context ctx) {
         logger_.Log(toolbelt::LogLevel::kDebug,
                     "Sending Query %s with discovery port %d",
                     channel_name.c_str(), discovery_port_);
@@ -1374,7 +1403,7 @@ void Server::SendQuery(const std::string &channel_name) {
         auto *query = disc.mutable_query();
         query->set_channel_name(channel_name);
 
-        if (absl::Status s = TransmitDiscovery(disc, discovery_addr_);
+        if (absl::Status s = TransmitDiscovery(disc, discovery_addr_, ctx);
             !s.ok()) {
           logger_.Log(toolbelt::LogLevel::kError, "Failed to send Query: %s",
                       s.ToString().c_str());
@@ -1392,7 +1421,7 @@ void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
   }
   // Spawn a coroutine to send the Publish message.
   runtime_.Spawn(
-      [this, channel_name, reliable](async::Context) {
+      [this, channel_name, reliable](async::Context ctx) {
         logger_.Log(toolbelt::LogLevel::kDebug,
                     "Sending Advertise %s with discovery port %d",
                     channel_name.c_str(), discovery_port_);
@@ -1406,7 +1435,7 @@ void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
           advertise->set_split_buffers(
               ChannelUsesSplitBuffersOverBridge(it->second.get()));
         }
-        if (absl::Status s = TransmitDiscovery(disc, discovery_addr_);
+        if (absl::Status s = TransmitDiscovery(disc, discovery_addr_, ctx);
             !s.ok()) {
           logger_.Log(toolbelt::LogLevel::kError,
                       "Failed to send Advertise: %s", s.ToString().c_str());
@@ -1418,7 +1447,8 @@ void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
 }
 
 absl::Status Server::TransmitDiscovery(const Discovery &disc,
-                                       const toolbelt::InetAddress &udp_dest) {
+                                       const toolbelt::InetAddress &udp_dest,
+                                       [[maybe_unused]] async::Context ctx) {
   if (tcp_discovery_) {
     int64_t length = disc.ByteSizeLong();
     // SendMessage writes a 4-byte length prefix immediately before the
@@ -1433,8 +1463,13 @@ absl::Status Server::TransmitDiscovery(const Discovery &disc,
     // messages from different coroutines can't interleave on a connection.
     auto connections = discovery_connections_;
     for (const auto &conn : connections) {
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+      absl::StatusOr<ssize_t> n = conn->socket->SendMessage(
+          buffer.data() + sizeof(int32_t), length, ctx);
+#else
       absl::StatusOr<ssize_t> n =
           conn->socket->SendMessage(buffer.data() + sizeof(int32_t), length);
+#endif
       if (!n.ok()) {
         logger_.Log(toolbelt::LogLevel::kError,
                     "Failed to send discovery message to %s: %s",
@@ -1448,7 +1483,12 @@ absl::Status Server::TransmitDiscovery(const Discovery &disc,
   if (!disc.SerializeToArray(buffer, sizeof(buffer))) {
     return absl::InternalError("Failed to serialize discovery message");
   }
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  return discovery_transmitter_.SendTo(udp_dest, buffer, disc.ByteSizeLong(),
+                                       ctx);
+#else
   return discovery_transmitter_.SendTo(udp_dest, buffer, disc.ByteSizeLong());
+#endif
 }
 
 void Server::AddDiscoveryConnection(std::shared_ptr<DiscoveryConnection> conn) {
@@ -1954,7 +1994,8 @@ absl::Status
 Server::SendSubscribeMessage(const std::string &channel_name, bool reliable,
                              toolbelt::InetAddress publisher,
                              async::StreamSocket &receiver_listener,
-                             char *buffer, size_t buffer_size) {
+                             char *buffer, size_t buffer_size,
+                             async::Context ctx) {
   const toolbelt::SocketAddress &receiver_addr =
       receiver_listener.BoundAddress();
   logger_.Log(toolbelt::LogLevel::kDebug,
@@ -1994,7 +2035,7 @@ Server::SendSubscribeMessage(const std::string &channel_name, bool reliable,
   (void)buffer_size;
   logger_.Log(toolbelt::LogLevel::kDebug, "Sending subscribe to %s: %s",
               publisher.ToString().c_str(), disc.DebugString().c_str());
-  absl::Status s = TransmitDiscovery(disc, publisher);
+  absl::Status s = TransmitDiscovery(disc, publisher, ctx);
   if (!s.ok()) {
     return absl::InternalError(
         absl::StrFormat("Failed to send subscribe: %s", s.ToString()));
@@ -2043,7 +2084,7 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
               receiver_addr.ToString().c_str());
 
   s = SendSubscribeMessage(channel_name, sub_reliable, publisher,
-                           receiver_listener, buffer, sizeof(buffer));
+                           receiver_listener, buffer, sizeof(buffer), ctx);
   if (!s.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to send Subscribe message for channel %s: %s",
@@ -2293,12 +2334,27 @@ void Server::RetirementCoroutine(
               channel_name.c_str());
   for (;;) {
     int32_t slot_id;
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+    absl::StatusOr<ssize_t> n;
+    if (absl::Status w = async::WaitReadable(ctx, retirement_fd.Fd());
+        !w.ok()) {
+      return;
+    }
+    {
+      ssize_t r = ::read(retirement_fd.Fd(), &slot_id, sizeof(slot_id));
+      if (r < 0) {
+        return; // Failed to read the slot ID, we're done.
+      }
+      n = r;
+    }
+#else
     absl::StatusOr<ssize_t> n =
         retirement_fd.Read(&slot_id, sizeof(slot_id), ctx);
     if (!n.ok()) {
       // Failed to read the slot ID, we're done.
       return;
     }
+#endif
     if (*n == 0) {
       return; // EOF, we're done.
     }
