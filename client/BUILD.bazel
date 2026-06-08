@@ -26,6 +26,7 @@ cc_library(
     include_prefix = "subspace/client",
     deps = [
         "//common:subspace_common",
+        "//common/async:async",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/status",

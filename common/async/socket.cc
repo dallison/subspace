@@ -11,11 +11,14 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/posix/stream_descriptor.hpp>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <stddef.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 namespace subspace::async {
@@ -461,6 +464,395 @@ absl::StatusOr<ssize_t> UDPSocket::ReceiveFrom(InetAddress &sender, void *buffer
     }
     return absl::InternalError(
         absl::StrFormat("recvfrom() failed: %s", strerror(errno)));
+  }
+}
+
+// -------------------------------------------------------------------------
+// UnixSocket
+// -------------------------------------------------------------------------
+
+namespace {
+
+// Replicates toolbelt::BuildUnixSocketName so the Asio client/server addresses
+// the same socket as a co peer (Linux abstract namespace; filesystem path
+// elsewhere).
+struct sockaddr_un BuildUnixSocketName(const std::string &pathname) {
+  struct sockaddr_un addr;
+  std::memset(&addr, 0, sizeof(addr));
+  addr.sun_family = AF_UNIX;
+#ifdef __linux__
+  addr.sun_path[0] = '\0';
+  std::memcpy(addr.sun_path + 1, pathname.c_str(),
+              std::min(pathname.size(), sizeof(addr.sun_path) - 2));
+#else
+  std::memcpy(addr.sun_path, pathname.c_str(),
+              std::min(pathname.size(), sizeof(addr.sun_path) - 1));
+#endif
+  return addr;
+}
+
+// Send `length` bytes from `buffer`, yielding the coroutine on EAGAIN.
+absl::StatusOr<ssize_t> SendAll(int fd, Context ctx, const char *buffer,
+                                size_t length) {
+  size_t sent = 0;
+  while (sent < length) {
+    ssize_t n = ::send(fd, buffer + sent, length - sent, MSG_NOSIGNAL);
+    if (n > 0) {
+      sent += static_cast<size_t>(n);
+      continue;
+    }
+    if (n == 0) {
+      break;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+      if (absl::Status s = WaitFdWritable(ctx, fd); !s.ok()) {
+        return s;
+      }
+      continue;
+    }
+    return absl::InternalError(
+        absl::StrFormat("send() failed: %s", strerror(errno)));
+  }
+  return static_cast<ssize_t>(sent);
+}
+
+}  // namespace
+
+struct UnixSocket::Impl {
+  int fd = -1;
+  bool connected = false;
+  ~Impl() {
+    if (fd >= 0) {
+      ::close(fd);
+    }
+  }
+};
+
+UnixSocket::UnixSocket() {
+  int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+  impl_ = std::make_shared<Impl>();
+  impl_->fd = fd;
+}
+
+UnixSocket::UnixSocket(int fd, bool connected) {
+  impl_ = std::make_shared<Impl>();
+  impl_->fd = fd;
+  impl_->connected = connected;
+  if (fd >= 0) {
+    SetFdNonBlocking(fd);
+  }
+}
+
+absl::Status UnixSocket::Bind(const std::string &pathname, bool listen) {
+  if (impl_ == nullptr || impl_->fd < 0) {
+    return absl::FailedPreconditionError("Bind on invalid unix socket");
+  }
+  struct sockaddr_un addr = BuildUnixSocketName(pathname);
+  if (::bind(impl_->fd, reinterpret_cast<const sockaddr *>(&addr),
+             sizeof(addr)) < 0) {
+    return absl::InternalError(absl::StrFormat(
+        "Failed to bind unix socket to %s: %s", pathname, strerror(errno)));
+  }
+  if (listen && ::listen(impl_->fd, 10) < 0) {
+    return absl::InternalError(
+        absl::StrFormat("listen() failed: %s", strerror(errno)));
+  }
+  SetFdNonBlocking(impl_->fd);
+  bound_address_ = pathname;
+  return absl::OkStatus();
+}
+
+absl::Status UnixSocket::Connect(const std::string &pathname) {
+  if (impl_ == nullptr || impl_->fd < 0) {
+    return absl::FailedPreconditionError("Connect on invalid unix socket");
+  }
+  struct sockaddr_un addr = BuildUnixSocketName(pathname);
+  // Blocking connect (matches toolbelt); switch to non-blocking afterwards so
+  // all subsequent I/O cooperates with the io_context.
+  if (::connect(impl_->fd, reinterpret_cast<const sockaddr *>(&addr),
+                sizeof(addr)) < 0) {
+    return absl::InternalError(absl::StrFormat(
+        "Failed to connect unix socket to %s: %s", pathname, strerror(errno)));
+  }
+  SetFdNonBlocking(impl_->fd);
+  impl_->connected = true;
+  return absl::OkStatus();
+}
+
+absl::StatusOr<UnixSocket> UnixSocket::Accept(Context ctx) const {
+  if (impl_ == nullptr || impl_->fd < 0) {
+    return absl::FailedPreconditionError("Accept on invalid unix socket");
+  }
+  for (;;) {
+    struct sockaddr_un sender;
+    socklen_t slen = sizeof(sender);
+    int newfd =
+        ::accept(impl_->fd, reinterpret_cast<sockaddr *>(&sender), &slen);
+    if (newfd >= 0) {
+      return UnixSocket(newfd, /*connected=*/true);
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+      if (absl::Status s = WaitFdReadable(ctx, impl_->fd); !s.ok()) {
+        return s;
+      }
+      continue;
+    }
+    return absl::InternalError(
+        absl::StrFormat("accept() failed: %s", strerror(errno)));
+  }
+}
+
+absl::StatusOr<ssize_t> UnixSocket::Send(const char *buffer, size_t length,
+                                         Context ctx) {
+  if (impl_ == nullptr || impl_->fd < 0) {
+    return absl::FailedPreconditionError("Send on closed socket");
+  }
+  return SendAll(impl_->fd, ctx, buffer, length);
+}
+
+absl::StatusOr<ssize_t> UnixSocket::Receive(char *buffer, size_t buflen,
+                                            Context ctx) {
+  if (impl_ == nullptr || impl_->fd < 0) {
+    return absl::FailedPreconditionError("Receive on closed socket");
+  }
+  for (;;) {
+    ssize_t n = ::recv(impl_->fd, buffer, buflen, 0);
+    if (n >= 0) {
+      return n;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+      if (absl::Status s = WaitFdReadable(ctx, impl_->fd); !s.ok()) {
+        return s;
+      }
+      continue;
+    }
+    return absl::InternalError(
+        absl::StrFormat("recv() failed: %s", strerror(errno)));
+  }
+}
+
+absl::StatusOr<ssize_t> UnixSocket::SendMessage(char *buffer, size_t length,
+                                                Context ctx) {
+  if (impl_ == nullptr || impl_->fd < 0) {
+    return absl::FailedPreconditionError("SendMessage on closed socket");
+  }
+  char *start = buffer - sizeof(int32_t);
+  uint32_t net_len = htonl(static_cast<uint32_t>(length));
+  std::memcpy(start, &net_len, sizeof(net_len));
+  absl::StatusOr<ssize_t> n = SendAll(impl_->fd, ctx, start,
+                                      length + sizeof(int32_t));
+  if (!n.ok()) {
+    return n.status();
+  }
+  return static_cast<ssize_t>(length);
+}
+
+absl::StatusOr<ssize_t> UnixSocket::ReceiveMessage(char *buffer, size_t buflen,
+                                                   Context ctx) {
+  if (impl_ == nullptr || impl_->fd < 0) {
+    return absl::FailedPreconditionError("ReceiveMessage on closed socket");
+  }
+  char lenbuf[sizeof(int32_t)];
+  absl::StatusOr<size_t> got =
+      ReadExactly(impl_->fd, ctx, lenbuf, sizeof(lenbuf));
+  if (!got.ok()) {
+    return got.status();
+  }
+  if (*got == 0) {
+    return static_cast<ssize_t>(0);
+  }
+  if (*got < sizeof(lenbuf)) {
+    return absl::InternalError("short read on message length");
+  }
+  uint32_t net_len;
+  std::memcpy(&net_len, lenbuf, sizeof(net_len));
+  size_t length = ntohl(net_len);
+  if (length > buflen) {
+    return absl::InternalError(absl::StrFormat(
+        "message length %zu exceeds buffer size %zu", length, buflen));
+  }
+  absl::StatusOr<size_t> payload = ReadExactly(impl_->fd, ctx, buffer, length);
+  if (!payload.ok()) {
+    return payload.status();
+  }
+  if (*payload < length) {
+    return absl::InternalError("EOF in the middle of a message");
+  }
+  return static_cast<ssize_t>(length);
+}
+
+absl::StatusOr<std::vector<char>>
+UnixSocket::ReceiveVariableLengthMessage(Context ctx) {
+  if (impl_ == nullptr || impl_->fd < 0) {
+    return absl::FailedPreconditionError("Receive on closed socket");
+  }
+  char lenbuf[sizeof(int32_t)];
+  absl::StatusOr<size_t> got =
+      ReadExactly(impl_->fd, ctx, lenbuf, sizeof(lenbuf));
+  if (!got.ok()) {
+    return got.status();
+  }
+  if (*got < sizeof(lenbuf)) {
+    return absl::InternalError(
+        absl::StrFormat("Failed to read length from socket: socket closed"));
+  }
+  uint32_t net_len;
+  std::memcpy(&net_len, lenbuf, sizeof(net_len));
+  size_t length = ntohl(net_len);
+  std::vector<char> buffer(length);
+  absl::StatusOr<size_t> payload =
+      ReadExactly(impl_->fd, ctx, buffer.data(), buffer.size());
+  if (!payload.ok()) {
+    return payload.status();
+  }
+  if (*payload < length) {
+    return absl::InternalError("EOF in the middle of a message");
+  }
+  return buffer;
+}
+
+absl::Status
+UnixSocket::SendFds(const std::vector<toolbelt::FileDescriptor> &fds,
+                    Context ctx) {
+  if (impl_ == nullptr || impl_->fd < 0) {
+    return absl::FailedPreconditionError("SendFds on closed socket");
+  }
+  constexpr size_t kMaxFds = 252;
+  std::vector<char> control_buf(CMSG_SPACE(kMaxFds * sizeof(int)));
+
+  size_t remaining_fds = fds.size();
+  size_t first_fd = 0;
+  // At least one message is sent even when there are no fds (matches toolbelt).
+  do {
+    std::fill(control_buf.begin(), control_buf.end(), 0);
+    int32_t num_fds = static_cast<int32_t>(fds.size());
+    size_t fds_to_send = remaining_fds > kMaxFds ? kMaxFds : remaining_fds;
+    struct iovec iov = {.iov_base = reinterpret_cast<void *>(&num_fds),
+                        .iov_len = sizeof(int32_t)};
+    size_t fds_size = fds_to_send * sizeof(int);
+    struct msghdr msg = {};
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control_buf.data();
+    msg.msg_controllen = static_cast<socklen_t>(CMSG_SPACE(fds_size));
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(fds_size);
+    int *fdptr = reinterpret_cast<int *>(CMSG_DATA(cmsg));
+    for (size_t i = first_fd; i < first_fd + fds_to_send; i++) {
+      *fdptr++ = fds[i].Fd();
+    }
+    for (;;) {
+      ssize_t e = ::sendmsg(impl_->fd, &msg, MSG_NOSIGNAL);
+      if (e >= 0) {
+        break;
+      }
+      if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+        if (absl::Status s = WaitFdWritable(ctx, impl_->fd); !s.ok()) {
+          return s;
+        }
+        continue;
+      }
+      return absl::InternalError(absl::StrFormat(
+          "Failed to write fds to unix socket: %s", strerror(errno)));
+    }
+    remaining_fds -= fds_to_send;
+    first_fd += fds_to_send;
+  } while (remaining_fds > 0);
+  return absl::OkStatus();
+}
+
+absl::Status UnixSocket::ReceiveFds(std::vector<toolbelt::FileDescriptor> &fds,
+                                    Context ctx) {
+  if (impl_ == nullptr || impl_->fd < 0) {
+    return absl::FailedPreconditionError("ReceiveFds on closed socket");
+  }
+  constexpr size_t kMaxFds = 252;
+  std::vector<char> control_buf(CMSG_SPACE(kMaxFds * sizeof(int)));
+
+  int32_t num_fds_received = 0;
+  for (;;) {
+    std::fill(control_buf.begin(), control_buf.end(), 0);
+    int32_t total_fds = 0;
+    struct iovec iov = {.iov_base = reinterpret_cast<void *>(&total_fds),
+                        .iov_len = sizeof(int32_t)};
+    struct msghdr msg = {};
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control_buf.data();
+    msg.msg_controllen = static_cast<socklen_t>(control_buf.size());
+
+    ssize_t n;
+    for (;;) {
+      n = ::recvmsg(impl_->fd, &msg, 0);
+      if (n >= 0) {
+        break;
+      }
+      if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+        if (absl::Status s = WaitFdReadable(ctx, impl_->fd); !s.ok()) {
+          return s;
+        }
+        continue;
+      }
+      return absl::InternalError(absl::StrFormat(
+          "Failed to read fds from unix socket: %s", strerror(errno)));
+    }
+    if (n == 0) {
+      return absl::InternalError("EOF from socket while reading fds");
+    }
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    if (cmsg == nullptr) {
+      return absl::OkStatus();
+    }
+    int *fdptr = reinterpret_cast<int *>(CMSG_DATA(cmsg));
+    int num_fds = (cmsg->cmsg_len - sizeof(struct cmsghdr)) / sizeof(int);
+    for (int i = 0; i < num_fds; i++) {
+      fds.emplace_back(fdptr[i]);
+    }
+    num_fds_received += num_fds;
+    if (num_fds_received >= total_fds) {
+      break;
+    }
+  }
+  return absl::OkStatus();
+}
+
+absl::Status UnixSocket::SetNonBlocking() {
+  if (impl_ == nullptr || impl_->fd < 0) {
+    return absl::FailedPreconditionError("SetNonBlocking on closed socket");
+  }
+  SetFdNonBlocking(impl_->fd);
+  return absl::OkStatus();
+}
+
+absl::Status UnixSocket::SetCloseOnExec() {
+  if (impl_ == nullptr || impl_->fd < 0) {
+    return absl::FailedPreconditionError("SetCloseOnExec on closed socket");
+  }
+  int flags = ::fcntl(impl_->fd, F_GETFD, 0);
+  if (flags < 0 || ::fcntl(impl_->fd, F_SETFD, flags | FD_CLOEXEC) < 0) {
+    return absl::InternalError(
+        absl::StrFormat("fcntl FD_CLOEXEC failed: %s", strerror(errno)));
+  }
+  return absl::OkStatus();
+}
+
+toolbelt::FileDescriptor UnixSocket::GetFileDescriptor() const {
+  if (impl_ == nullptr || impl_->fd < 0) {
+    return toolbelt::FileDescriptor();
+  }
+  // Non-owning: the UnixSocket's Impl owns the fd.
+  return toolbelt::FileDescriptor(impl_->fd, /*owned=*/false);
+}
+
+bool UnixSocket::Connected() const {
+  return impl_ != nullptr && impl_->fd >= 0 && impl_->connected;
+}
+
+void UnixSocket::Close() {
+  if (impl_ != nullptr) {
+    impl_.reset();
   }
 }
 

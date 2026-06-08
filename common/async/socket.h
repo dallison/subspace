@@ -39,11 +39,14 @@ using SocketAddress = toolbelt::SocketAddress;
 
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
 
+#include "toolbelt/fd.h"
 #include <boost/asio/generic/datagram_protocol.hpp>
 #include <boost/asio/generic/stream_protocol.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/spawn.hpp>
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace subspace::async {
 
@@ -119,6 +122,52 @@ private:
   struct Impl;
   std::shared_ptr<Impl> impl_;
   InetAddress bound_address_;
+};
+
+// A Unix-domain stream socket over Boost.Asio with SCM_RIGHTS fd passing.
+// Mirrors the subset of toolbelt::UnixSocket the client RPC and the server's
+// client handler use, and replicates toolbelt's wire framing exactly (4-byte
+// big-endian length prefix for messages; the fd protocol of SendFds/ReceiveFds)
+// so an Asio client and a co server (or vice versa) interoperate.
+class UnixSocket {
+public:
+  // Like toolbelt::UnixSocket, the default constructor creates the underlying
+  // AF_UNIX/SOCK_STREAM fd so Bind()/Connect() can operate on it.
+  UnixSocket();
+  explicit UnixSocket(int fd, bool connected = false);
+  UnixSocket(UnixSocket &&) = default;
+  UnixSocket &operator=(UnixSocket &&) = default;
+  UnixSocket(const UnixSocket &) = delete;
+  UnixSocket &operator=(const UnixSocket &) = delete;
+
+  absl::Status Bind(const std::string &pathname, bool listen);
+  absl::Status Connect(const std::string &pathname);
+  absl::StatusOr<UnixSocket> Accept(Context ctx) const;
+
+  absl::StatusOr<ssize_t> Send(const char *buffer, size_t length, Context ctx);
+  absl::StatusOr<ssize_t> Receive(char *buffer, size_t buflen, Context ctx);
+  absl::StatusOr<ssize_t> SendMessage(char *buffer, size_t length, Context ctx);
+  absl::StatusOr<ssize_t> ReceiveMessage(char *buffer, size_t buflen,
+                                         Context ctx);
+  absl::StatusOr<std::vector<char>> ReceiveVariableLengthMessage(Context ctx);
+
+  absl::Status SendFds(const std::vector<toolbelt::FileDescriptor> &fds,
+                       Context ctx);
+  absl::Status ReceiveFds(std::vector<toolbelt::FileDescriptor> &fds,
+                          Context ctx);
+
+  absl::Status SetNonBlocking();
+  absl::Status SetCloseOnExec();
+  toolbelt::FileDescriptor GetFileDescriptor() const;
+
+  bool Connected() const;
+  void Close();
+  const std::string &BoundAddress() const { return bound_address_; }
+
+private:
+  struct Impl;
+  std::shared_ptr<Impl> impl_;
+  std::string bound_address_;
 };
 
 }  // namespace subspace::async

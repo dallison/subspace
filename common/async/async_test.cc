@@ -151,5 +151,73 @@ TEST(AsyncTest, StreamSocketLoopbackMessage) {
   EXPECT_EQ(received, "hello-bridge");
 }
 
+// Exercises the Unix-domain socket facade end to end: a framed message plus a
+// passed file descriptor (SCM_RIGHTS), mirroring the client<->server RPC.  The
+// wire framing matches toolbelt so this validates interop between backends.
+TEST(AsyncTest, UnixSocketMessageAndFdPassing) {
+  RuntimeFixture fx;
+  std::string received_msg;
+  std::string received_via_fd;
+
+  const std::string path =
+      "subspace_async_uds_test_" + std::to_string(::getpid());
+
+  UnixSocket listener;
+  ASSERT_TRUE(listener.Bind(path, /*listen=*/true).ok());
+
+  fx.runtime.Spawn([&](Context ctx) {
+    absl::StatusOr<UnixSocket> conn = listener.Accept(ctx);
+    if (!conn.ok()) {
+      return;
+    }
+    absl::StatusOr<std::vector<char>> msg =
+        conn->ReceiveVariableLengthMessage(ctx);
+    if (!msg.ok()) {
+      return;
+    }
+    received_msg.assign(msg->data(), msg->size());
+
+    std::vector<toolbelt::FileDescriptor> fds;
+    if (!conn->ReceiveFds(fds, ctx).ok() || fds.empty()) {
+      return;
+    }
+    char buf[16] = {};
+    ssize_t n = ::read(fds[0].Fd(), buf, sizeof(buf));
+    if (n > 0) {
+      received_via_fd.assign(buf, static_cast<size_t>(n));
+    }
+  });
+
+  fx.runtime.Spawn([&, path](Context ctx) {
+    UnixSocket client;
+    if (!client.Connect(path).ok()) {
+      return;
+    }
+    // A pipe whose read end we pass to the peer.
+    int p[2];
+    if (::pipe(p) != 0) {
+      return;
+    }
+    ASSERT_EQ(3, ::write(p[1], "FD!", 3));
+    ::close(p[1]);
+
+    char outbuf[64];
+    const char *payload = "hello-uds";
+    size_t len = std::strlen(payload);
+    std::memcpy(outbuf + sizeof(int32_t), payload, len);
+    if (!client.SendMessage(outbuf + sizeof(int32_t), len, ctx).ok()) {
+      return;
+    }
+    std::vector<toolbelt::FileDescriptor> fds;
+    fds.emplace_back(p[0], /*owned=*/false);
+    (void)client.SendFds(fds, ctx);
+    ::close(p[0]);
+  });
+
+  fx.Run();
+  EXPECT_EQ(received_msg, "hello-uds");
+  EXPECT_EQ(received_via_fd, "FD!");
+}
+
 }  // namespace
 }  // namespace subspace::async

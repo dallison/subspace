@@ -15,6 +15,9 @@
 #include "client/publisher.h"
 #include "client/subscriber.h"
 #include "co/coroutine.h"
+#include "common/async/context.h"
+#include "common/async/socket.h"
+#include "common/async/wait.h"
 #include "common/channel.h"
 #include "common/client_buffer.h"
 
@@ -27,6 +30,7 @@
 #include <cstddef>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <pthread.h>
 #include <string>
 #include <sys/poll.h>
@@ -277,6 +281,12 @@ public:
   // These are public so that they can be accessed by std::make_shared.
   // You shouldn't create these yourself - create a Client instead.
   ClientImpl(const co::Coroutine *c = nullptr) : co_(c) {}
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  // Asio-backed client.  The yield_context drives all cooperative socket I/O.
+  // The co coroutine pointer API is preserved for source compatibility but is
+  // unused on this backend.
+  explicit ClientImpl(async::Context ctx) : co_(nullptr), async_ctx_(ctx) {}
+#endif
   ~ClientImpl() = default;
 
 private:
@@ -610,7 +620,7 @@ private:
   std::string socket_name_;
   uint64_t session_id_ = 0;
 
-  toolbelt::UnixSocket socket_;
+  async::UnixSocket socket_;
   toolbelt::FileDescriptor scb_fd_; // System control block memory fd.
 
   // The client owns all the publishers and subscribers.
@@ -619,6 +629,19 @@ private:
   // If this is non-nullptr the client is coroutine aware and will cooperate
   // with all other coroutines to share the CPU.
   const co::Coroutine *co_; // Does not own the coroutine.
+
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  // On the Asio backend the cooperative context is a yield_context supplied at
+  // construction (the co pointer above is unused).
+  std::optional<async::Context> async_ctx_;
+
+  // The Context passed to socket I/O.  On Asio this is the stored
+  // yield_context; on co it is the co coroutine pointer (so the wire calls are
+  // identical to the historical code).
+  async::Context SocketContext() const { return *async_ctx_; }
+#else
+  const co::Coroutine *SocketContext() const { return co_; }
+#endif
 
   // Call this function when the given subscriber detects a dropped message.
   // This will only really happen when you have an unreliable subscriber
