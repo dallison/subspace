@@ -36,6 +36,32 @@ elseif(ANDROID)
     target_link_libraries(subspace_common PUBLIC log)
 endif()
 
+# --- Async abstraction layer ---
+# Build-time selectable coroutine/networking backend (see context.h).  The
+# SUBSPACE_CORO_BACKEND macro is set globally in the top-level CMakeLists.txt.
+add_library(subspace_async STATIC
+    async/context.h
+    async/runtime.h
+    async/socket.h
+    async/socket.cc
+    async/wait.h
+    async/wait.cc
+)
+target_link_libraries(subspace_async PUBLIC
+    absl::status
+    absl::statusor
+    absl::str_format
+    toolbelt
+    co
+)
+if(SUBSPACE_CORO_BACKEND STREQUAL "asio")
+    target_link_libraries(subspace_async PUBLIC Boost::asio Boost::coroutine)
+endif()
+
+add_executable(async_test async/async_test.cc)
+add_test(NAME async_test COMMAND async_test)
+target_link_libraries(async_test PUBLIC subspace_async gtest gtest_main)
+
 add_executable(common_test common_test.cc)
 add_test(NAME common_test COMMAND common_test)
 target_link_libraries(common_test PUBLIC subspace_common gtest gtest_main)

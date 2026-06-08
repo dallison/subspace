@@ -118,6 +118,36 @@ FetchContent_MakeAvailable(protobuf)
 # Protobuf provides targets like protobuf::libprotobuf and protobuf::protoc
 # These targets can be used directly without find_package
 
+# --- Option: coroutine/networking backend for the server ---
+# Mirrors the Bazel //:coro_backend flag.  "co" (default) builds against the co
+# coroutine library; "asio" builds the server against Boost.Asio.  The value is
+# translated into the SUBSPACE_CORO_BACKEND macro (see common/async/context.h)
+# and applied globally so every translation unit that includes the async
+# headers sees a consistent backend.
+set(SUBSPACE_CORO_BACKEND "co" CACHE STRING "Server coroutine backend: co or asio")
+set_property(CACHE SUBSPACE_CORO_BACKEND PROPERTY STRINGS "co" "asio")
+
+if(SUBSPACE_CORO_BACKEND STREQUAL "asio")
+    add_compile_definitions(SUBSPACE_CORO_BACKEND=2)
+    message(STATUS "Subspace coroutine backend: asio (Boost.Asio)")
+
+    # Boost.Asio is header-only but pulls in several Boost libraries.  Fetch a
+    # Boost release only when the asio backend is requested so the default co
+    # build does not pay for it.
+    FetchContent_Declare(
+        Boost
+        GIT_REPOSITORY https://github.com/boostorg/boost.git
+        GIT_TAG boost-1.87.0
+        CMAKE_ARGS
+            -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
+    )
+    set(BOOST_INCLUDE_LIBRARIES asio coroutine context)
+    FetchContent_MakeAvailable(Boost)
+else()
+    # co backend leaves SUBSPACE_CORO_BACKEND unset; context.h defaults to _CO.
+    message(STATUS "Subspace coroutine backend: co")
+endif()
+
 # --- Option: Python bindings ---
 option(SUBSPACE_PYTHON "Build Python bindings (requires Python3 and pybind11)" OFF)
 

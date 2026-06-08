@@ -12,6 +12,10 @@
 #include "client/message.h"
 #include "client_handler.h"
 #include "co/coroutine.h"
+#include "common/async/context.h"
+#include "common/async/runtime.h"
+#include "common/async/socket.h"
+#include "common/async/wait.h"
 #include "plugin.h"
 #include "proto/subspace.pb.h"
 #include "server/plugin.h"
@@ -139,7 +143,9 @@ public:
                                  std::unique_ptr<PluginInterface> interface);
   absl::Status UnloadPlugin(const std::string &name);
 
-  virtual co::CoroutineScheduler &GetScheduler() { return scheduler_; }
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO
+  virtual co::CoroutineScheduler &GetScheduler() { return runtime_.scheduler(); }
+#endif
 
   absl::flat_hash_map<std::string, std::unique_ptr<ServerChannel>> &
   GetChannels() {
@@ -154,7 +160,8 @@ public:
 
   size_t GetNumChannels() const { return channels_.size(); }
 
-  absl::Status HandleIncomingConnection(toolbelt::UnixSocket &listen_socket);
+  absl::Status HandleIncomingConnection(async::Context ctx,
+                                        toolbelt::UnixSocket &listen_socket);
 
   // Create a channel in both process and shared memory.  For a placeholder
   // subscriber, the channel parameters are not known, so slot_size and
@@ -180,7 +187,7 @@ private:
   // A single TCP discovery connection to a peer server.  Used only when
   // tcp_discovery_ is enabled.
   struct DiscoveryConnection {
-    std::shared_ptr<toolbelt::StreamSocket> socket;
+    std::shared_ptr<async::StreamSocket> socket;
     // Remote address of the peer (without the discovery port, which is taken
     // from each received message), used as a stable key for bridge dedup.
     toolbelt::InetAddress remote;
@@ -209,41 +216,46 @@ private:
   void CloseHandler(ClientHandler *handler);
   void NotifyViaFd(int64_t val);
   void CreateShutdownTrigger();
-  void ListenerCoroutine(toolbelt::UnixSocket &listen_socket);
-  void ChannelDirectoryCoroutine();
+  void ListenerCoroutine(async::Context ctx, toolbelt::UnixSocket &listen_socket);
+  void ChannelDirectoryCoroutine(async::Context ctx);
   void SendChannelDirectory();
-  void StatisticsCoroutine();
-  void DiscoveryReceiverCoroutine();
-  void DiscoveryListenerCoroutine();
-  void DiscoveryConnectorCoroutine();
-  void DiscoveryConnectionReaderLoop(std::shared_ptr<DiscoveryConnection> conn);
+  void StatisticsCoroutine(async::Context ctx);
+  void DiscoveryReceiverCoroutine(async::Context ctx);
+  void DiscoveryListenerCoroutine(async::Context ctx);
+  void DiscoveryConnectorCoroutine(async::Context ctx);
+  void DiscoveryConnectionReaderLoop(async::Context ctx,
+                                     std::shared_ptr<DiscoveryConnection> conn);
   void AddDiscoveryConnection(std::shared_ptr<DiscoveryConnection> conn);
   void
   RemoveDiscoveryConnection(const std::shared_ptr<DiscoveryConnection> &conn);
   void AdvertiseAllChannels();
   // Send a discovery message to peers.  In TCP mode it is written to every
-  // active discovery connection; in UDP mode it is sent to udp_dest.
+  // active discovery connection; in UDP mode it is sent to udp_dest.  Sends are
+  // blocking (no coroutine yield) so messages from different coroutines can't
+  // interleave on a connection, so this intentionally takes no Context.
   absl::Status TransmitDiscovery(const Discovery &disc,
                                  const toolbelt::InetAddress &udp_dest);
   // The address bridge listeners bind to: the any-address when a bridge
   // advertise address is configured, otherwise the local interface address.
   toolbelt::SocketAddress BridgeBindBase() const;
-  void PublisherCoroutine();
+  void PublisherCoroutine(async::Context ctx);
   void SendQuery(const std::string &channel_name);
   void SendAdvertise(const std::string &channel_name, bool reliable);
-  void BridgeTransmitterCoroutine(ServerChannel *channel, bool pub_reliable,
-                                  bool sub_reliable,
+  void BridgeTransmitterCoroutine(async::Context ctx, ServerChannel *channel,
+                                  bool pub_reliable, bool sub_reliable,
                                   toolbelt::SocketAddress subscriber,
                                   bool notify_retirement);
-  void BridgeReceiverCoroutine(std::string channel_name, bool sub_reliable,
+  void BridgeReceiverCoroutine(async::Context ctx, std::string channel_name,
+                               bool sub_reliable,
                                bool split_buffers_over_bridge,
                                toolbelt::InetAddress publisher);
   void RetirementCoroutine(
-      const std::string &channel_name, toolbelt::FileDescriptor &&retirement_fd,
-      std::unique_ptr<toolbelt::StreamSocket> retirement_transmitter);
+      async::Context ctx, const std::string &channel_name,
+      toolbelt::FileDescriptor &&retirement_fd,
+      std::unique_ptr<async::StreamSocket> retirement_transmitter);
 
   void RetirementReceiverCoroutine(
-      toolbelt::StreamSocket &retirement_listener,
+      async::Context ctx, async::StreamSocket &retirement_listener,
       std::shared_ptr<std::vector<std::shared_ptr<ActiveMessage>>> active_retirement_msgs);
 
   void SubscribeOverBridge(ServerChannel *channel, bool reliable,
@@ -257,14 +269,14 @@ private:
   void IncomingSubscribe(const Discovery::Subscribe &subscribe,
                          const toolbelt::InetAddress &sender,
                          const std::string &server_id);
-  void GratuitousAdvertiseCoroutine();
-  absl::Status BindBridgeListener(toolbelt::StreamSocket &listener);
+  void GratuitousAdvertiseCoroutine(async::Context ctx);
+  absl::Status BindBridgeListener(async::StreamSocket &listener);
   absl::Status RegisterPlugin(const std::string &name, void *handle,
                               std::unique_ptr<PluginInterface> interface);
   absl::Status SendSubscribeMessage(const std::string &channel_name,
                                     bool reliable,
                                     toolbelt::InetAddress publisher,
-                                    toolbelt::StreamSocket &receiver_listener,
+                                    async::StreamSocket &receiver_listener,
                                     char *buffer, size_t buffer_size);
 
   static uint64_t AllocateSessionId() { return toolbelt::Now(); }
@@ -305,12 +317,12 @@ private:
   SystemControlBlock *scb_;
   toolbelt::FileDescriptor scb_fd_;
   toolbelt::BitSet<kMaxChannels> channel_ids_;
-  co::CoroutineScheduler &scheduler_;
+  async::AsyncRuntime runtime_;
 
   toolbelt::TriggerFd channel_directory_trigger_fd_;
   toolbelt::InetAddress discovery_addr_;
-  toolbelt::UDPSocket discovery_transmitter_;
-  toolbelt::UDPSocket discovery_receiver_;
+  async::UDPSocket discovery_transmitter_;
+  async::UDPSocket discovery_receiver_;
   toolbelt::Logger logger_;
 
   // Optional pipe to allow test to be notified when discovery sets up a

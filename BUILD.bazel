@@ -1,5 +1,31 @@
 package(default_visibility = ["//visibility:public"])
 
+load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
+
+# Build-time selection of the coroutine/networking backend for the server (and
+# the client paths it relies on).  See common/async/context.h.  `co` is the
+# default; `asio` compiles the server against Boost.Asio.
+#
+#   bazelisk build --//:coro_backend=asio //server
+string_flag(
+    name = "coro_backend",
+    build_setting_default = "co",
+    values = [
+        "co",
+        "asio",
+    ],
+)
+
+config_setting(
+    name = "coro_backend_co",
+    flag_values = {":coro_backend": "co"},
+)
+
+config_setting(
+    name = "coro_backend_asio",
+    flag_values = {":coro_backend": "asio"},
+)
+
 config_setting(
   name = "macos_arm64",
   constraint_values = [

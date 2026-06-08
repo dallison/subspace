@@ -93,6 +93,43 @@ jobs:
           name: bazel-test-logs-${{ matrix.os }}-${{ matrix.mode }}
           path: bazel-testlogs
 
+  asio-backend:
+    name: asio-backend (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            bazel_flags:
+          - os: macos-latest
+            bazel_flags: --config=macos_arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Bazel
+        uses: bazel-contrib/setup-bazel@0.18.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-${{ matrix.os }}-asio
+          repository-cache: true
+
+      # Build and test the async abstraction layer with the Boost.Asio backend
+      # selected.  This exercises the asio WaitReadable/WaitEither/Sleep and the
+      # asio StreamSocket/UDPSocket facade (including the length-delimited
+      # framing) that the server's bridging will run over.
+      - name: Build and test async layer (asio backend)
+        run: |
+          bazel test \
+            //common/async:async_test \
+            --//:coro_backend=asio \
+            --verbose_failures \
+            --test_output=errors \
+            ${{ matrix.bazel_flags }}
+
   diagnostics:
     name: diagnostics (${{ matrix.os }}, ${{ matrix.mode }})
     runs-on: ${{ matrix.os }}
