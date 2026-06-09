@@ -395,15 +395,15 @@ TEST_F(BridgeTest, Basic) {
 
   // Create a non-local publisher on client 1.
   absl::StatusOr<Publisher> pub = client1.CreatePublisher(
-      "/bridged_channel", {.slot_size = 256, .num_slots = 10, .local = false});
+      "/bridged_basic", {.slot_size = 256, .num_slots = 10, .local = false});
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
-      client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
+      client2.CreateSubscriber("/bridged_basic", {.max_active_messages = 2});
   ASSERT_OK(sub);
 
   toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
-  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_channel");
+  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_basic");
 
   // Send a message on the publisher.
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
@@ -413,7 +413,7 @@ TEST_F(BridgeTest, Basic) {
   ASSERT_OK(pub_status);
 
   toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
-  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_channel");
+  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_basic");
 
   // Receive the message on the subscriber.
   absl::StatusOr<Message> msg = ReadMessageEventually(*sub);
@@ -565,19 +565,19 @@ TEST_F(BridgeTest, TwoSubs) {
 
   // Create a non-local publisher on client 1.
   absl::StatusOr<Publisher> pub = client1.CreatePublisher(
-      "/bridged_channel", {.slot_size = 256, .num_slots = 10, .local = false});
+      "/bridged_twosubs", {.slot_size = 256, .num_slots = 10, .local = false});
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub1 =
-      client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
+      client2.CreateSubscriber("/bridged_twosubs", {.max_active_messages = 2});
   ASSERT_OK(sub1);
 
   absl::StatusOr<Subscriber> sub2 =
-      client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
+      client2.CreateSubscriber("/bridged_twosubs", {.max_active_messages = 2});
   ASSERT_OK(sub2);
 
   toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
-  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_channel");
+  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_twosubs");
 
   // Send a message on the publisher.
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
@@ -587,7 +587,7 @@ TEST_F(BridgeTest, TwoSubs) {
   ASSERT_OK(pub_status);
 
   toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
-  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_channel");
+  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_twosubs");
 
   // Receive the message on the subscriber.
   absl::StatusOr<Message> msg = ReadMessageEventually(*sub1);
@@ -610,18 +610,18 @@ TEST_F(BridgeTest, BasicRetirement) {
 
   // Create a non-local publisher on client 1.
   absl::StatusOr<Publisher> pub =
-      client1.CreatePublisher("/bridged_channel", {.slot_size = 256,
+      client1.CreatePublisher("/bridged_basic_retire", {.slot_size = 256,
                                                    .num_slots = 10,
                                                    .local = false,
                                                    .notify_retirement = true});
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
-      client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
+      client2.CreateSubscriber("/bridged_basic_retire", {.max_active_messages = 2});
   ASSERT_OK(sub);
 
   toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
-  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_channel");
+  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_basic_retire");
 
   // Send a message on the publisher.
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
@@ -631,7 +631,7 @@ TEST_F(BridgeTest, BasicRetirement) {
   ASSERT_OK(pub_status);
 
   toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
-  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_channel");
+  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_basic_retire");
 
   auto retirement_fd = pub->GetRetirementFd();
   ASSERT_TRUE(retirement_fd.Valid());
@@ -665,24 +665,24 @@ TEST_F(BridgeTest, MultipleRetirement) {
   // retirement notifications for the correct slot ids.  This will use slot 0
   // so we will never receive a retirement notification for it.
   absl::StatusOr<Publisher> local_pub = client1.CreatePublisher(
-      "/bridged_channel",
+      "/bridged_retire1",
       {.slot_size = 256, .num_slots = kNumSlots, .local = false});
   ASSERT_OK(local_pub);
 
   // Create a non-local publisher on client 1.
   absl::StatusOr<Publisher> pub =
-      client1.CreatePublisher("/bridged_channel", {.slot_size = 256,
+      client1.CreatePublisher("/bridged_retire1", {.slot_size = 256,
                                                    .num_slots = kNumSlots,
                                                    .local = false,
                                                    .notify_retirement = true});
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
-      client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
+      client2.CreateSubscriber("/bridged_retire1", {.max_active_messages = 2});
   ASSERT_OK(sub);
 
   toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
-  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_channel");
+  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_retire1");
 
   constexpr int kNumMessages = 7;
   for (int i = 0; i < kNumMessages; i++) {
@@ -695,7 +695,7 @@ TEST_F(BridgeTest, MultipleRetirement) {
   }
 
   toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
-  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_channel");
+  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_retire1");
 
   auto retirement_fd = pub->GetRetirementFd();
   ASSERT_TRUE(retirement_fd.Valid());
@@ -754,7 +754,7 @@ TEST_F(BridgeTest, MultipleRetirement2) {
 
   // Create a non-local publisher on client 1.
   absl::StatusOr<Publisher> pub =
-      client1.CreatePublisher("/bridged_channel", {.slot_size = 256,
+      client1.CreatePublisher("/bridged_retire2", {.slot_size = 256,
                                                    .num_slots = kNumSlots,
                                                    .local = false,
                                                    .notify_retirement = true});
@@ -763,16 +763,16 @@ TEST_F(BridgeTest, MultipleRetirement2) {
   // Create publisher on the subscriber server.  This wil consume slot 0 on that
   // side.
   absl::StatusOr<Publisher> local_pub = client2.CreatePublisher(
-      "/bridged_channel",
+      "/bridged_retire2",
       {.slot_size = 256, .num_slots = kNumSlots, .local = false});
   ASSERT_OK(local_pub);
 
   absl::StatusOr<Subscriber> sub =
-      client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
+      client2.CreateSubscriber("/bridged_retire2", {.max_active_messages = 2});
   ASSERT_OK(sub);
 
   toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
-  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_channel");
+  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_retire2");
 
   constexpr int kNumMessages = 7;
   for (int i = 0; i < kNumMessages; i++) {
@@ -785,7 +785,7 @@ TEST_F(BridgeTest, MultipleRetirement2) {
   }
 
   toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
-  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_channel");
+  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_retire2");
 
   auto retirement_fd = pub->GetRetirementFd();
   ASSERT_TRUE(retirement_fd.Valid());
