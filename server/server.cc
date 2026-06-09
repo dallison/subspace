@@ -2444,20 +2444,38 @@ void Server::RetirementCoroutine(
     std::unique_ptr<async::StreamSocket> retirement_transmitter) {
   logger_.Log(toolbelt::LogLevel::kDebug, "Retirement coroutine for %s running",
               channel_name.c_str());
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  // The retirement fd is read on the io_context thread, so the read must never
+  // block it.  WaitReadable can report readiness that this reader cannot then
+  // satisfy with a blocking read - e.g. a spurious epoll edge, or a second
+  // retirement coroutine spawned for the same channel after the bridge
+  // re-establishes consuming the byte first.  A blocking read in that case
+  // would freeze the entire single-threaded server (every client handler,
+  // discovery and bridge coroutine stalls behind it), which manifested as an
+  // intermittent hang during client teardown.  Make the fd non-blocking and
+  // treat EAGAIN as "wait again", exactly like the socket facade does.
+  if (int fl = ::fcntl(retirement_fd.Fd(), F_GETFL, 0); fl >= 0) {
+    (void)::fcntl(retirement_fd.Fd(), F_SETFL, fl | O_NONBLOCK);
+  }
+#endif
   for (;;) {
     int32_t slot_id;
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
     absl::StatusOr<ssize_t> n;
-    if (absl::Status w = async::WaitReadable(ctx, retirement_fd.Fd());
-        !w.ok()) {
-      return;
-    }
-    {
+    for (;;) {
       ssize_t r = ::read(retirement_fd.Fd(), &slot_id, sizeof(slot_id));
-      if (r < 0) {
-        return; // Failed to read the slot ID, we're done.
+      if (r >= 0) {
+        n = r;
+        break;
       }
-      n = r;
+      if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+        if (absl::Status w = async::WaitReadable(ctx, retirement_fd.Fd());
+            !w.ok()) {
+          return; // Cancelled (graceful shutdown) or wait failed.
+        }
+        continue;
+      }
+      return; // Read error, we're done.
     }
 #else
     absl::StatusOr<ssize_t> n =
