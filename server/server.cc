@@ -1768,8 +1768,33 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
                                         BridgeChannelInfo info,
                                         bool pub_reliable, bool sub_reliable,
                                         toolbelt::SocketAddress subscriber,
+                                        toolbelt::InetAddress sender,
                                         bool notify_retirement) {
   logger_.Log(toolbelt::LogLevel::kDebug, "BridgeTransmitterCoroutine running");
+
+  // IncomingSubscribe added the bridged-publisher entry (keyed by the discovery
+  // `sender` address) before spawning us.  Remove it on every exit path - not
+  // just the normal end-of-stream teardown but also the early returns below
+  // (failed connect, bind, handshake, ...) - otherwise a failed bridge would
+  // leave the channel permanently marked as bridged and block re-establishment.
+  // bridged_publishers_ is owned by the client strand, so the erase is posted
+  // there; we look the channel up by name in case it was removed meanwhile.
+  struct BridgeGuard {
+    Server *server;
+    std::string channel_name;
+    toolbelt::InetAddress sender;
+    bool sub_reliable;
+    ~BridgeGuard() {
+      server->runtime_.RunOnStrand([server = server, channel_name = channel_name,
+                                    sender = sender, sub_reliable = sub_reliable]() {
+        auto it = server->channels_.find(channel_name);
+        if (it != server->channels_.end()) {
+          it->second->RemoveBridgedAddress(sender, sub_reliable);
+        }
+      });
+    }
+  } bridge_guard{this, info.channel_name, sender, sub_reliable};
+
   async::StreamSocket bridge;
   if (absl::Status status = bridge.Connect(subscriber); !status.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
@@ -2009,19 +2034,7 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
 
   logger_.Log(toolbelt::LogLevel::kDebug,
               "Bridge transmitter for %s terminating", channel_name.c_str());
-  // We're done reading messages from the channel, remove the bridge and
-  // subscriber.  bridged_publishers_ is owned by the client strand (discovery
-  // adds/looks up entries there), so the erase must happen on the strand too -
-  // this coroutine runs on the parallel io_context.  Look the channel up by
-  // name on the strand rather than capturing the raw pointer, in case the
-  // channel was removed in the meantime.
-  runtime_.RunOnStrand([this, channel_name = info.channel_name, subscriber,
-                        sub_reliable]() {
-    auto it = channels_.find(channel_name);
-    if (it != channels_.end()) {
-      it->second->RemoveBridgedAddress(subscriber, sub_reliable);
-    }
-  });
+  // bridge_guard removes the bridged-publisher entry (by `sender`) as we unwind.
 }
 
 // This coroutine reads retirement messages from the bridge and removes
@@ -2629,11 +2642,11 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
     };
     runtime_.SpawnOnNewStrand(
         [this, info = std::move(info), pub_reliable, sub_reliable,
-         subscriber_addr = std::move(subscriber_addr),
+         subscriber_addr = std::move(subscriber_addr), sender,
          notify_retirement](async::Context ctx) mutable {
           BridgeTransmitterCoroutine(ctx, std::move(info), pub_reliable,
                                      sub_reliable, std::move(subscriber_addr),
-                                     notify_retirement);
+                                     sender, notify_retirement);
         },
         {.name = absl::StrFormat("Bridge transmitter for %s", channel->first)
                      .c_str(),

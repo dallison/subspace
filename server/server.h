@@ -303,6 +303,7 @@ private:
   void BridgeTransmitterCoroutine(async::Context ctx, BridgeChannelInfo info,
                                   bool pub_reliable, bool sub_reliable,
                                   toolbelt::SocketAddress subscriber,
+                                  toolbelt::InetAddress sender,
                                   bool notify_retirement);
   void BridgeReceiverCoroutine(async::Context ctx, std::string channel_name,
                                bool sub_reliable,
