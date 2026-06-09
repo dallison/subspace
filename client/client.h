@@ -436,6 +436,35 @@ private:
       details::PublisherImpl *publisher, const toolbelt::FileDescriptor &fd,
       std::chrono::nanoseconds timeout, const co::Coroutine *c = nullptr);
 
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  // Asio overloads that take an async::Context (yield_context) directly so an
+  // Asio caller can cooperatively wait on a caller-supplied coroutine context,
+  // exactly as the co backend does with a co::Coroutine*.  On the co backend
+  // async::Context *is* co::Coroutine*, so these would redeclare the overloads
+  // above; they are therefore only present for the Asio backend.
+  absl::Status WaitForReliablePublisher(details::PublisherImpl *publisher,
+                                        async::Context ctx) {
+    return WaitForReliablePublisher(publisher, std::chrono::nanoseconds(0),
+                                    ctx);
+  }
+
+  absl::Status WaitForReliablePublisher(details::PublisherImpl *publisher,
+                                        std::chrono::nanoseconds timeout,
+                                        async::Context ctx);
+
+  absl::StatusOr<int>
+  WaitForReliablePublisher(details::PublisherImpl *publisher,
+                           const toolbelt::FileDescriptor &fd,
+                           async::Context ctx) {
+    return WaitForReliablePublisher(publisher, fd, std::chrono::nanoseconds(0),
+                                    ctx);
+  }
+
+  absl::StatusOr<int> WaitForReliablePublisher(
+      details::PublisherImpl *publisher, const toolbelt::FileDescriptor &fd,
+      std::chrono::nanoseconds timeout, async::Context ctx);
+#endif
+
   // Wait until there's a message available to be read by the
   // subscriber.  If the client is coroutine-aware, the coroutine
   // will wait.  If it's not, the function will block on a poll
@@ -463,6 +492,30 @@ private:
                                         const toolbelt::FileDescriptor &fd,
                                         std::chrono::nanoseconds timeout,
                                         const co::Coroutine *c = nullptr);
+
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  // Asio async::Context (yield_context) overloads; see the publisher overloads
+  // above for why these are Asio-only.
+  absl::Status WaitForSubscriber(details::SubscriberImpl *subscriber,
+                                 async::Context ctx) {
+    return WaitForSubscriber(subscriber, std::chrono::nanoseconds(0), ctx);
+  }
+
+  absl::Status WaitForSubscriber(details::SubscriberImpl *subscriber,
+                                 std::chrono::nanoseconds timeout,
+                                 async::Context ctx);
+
+  absl::StatusOr<int> WaitForSubscriber(details::SubscriberImpl *subscriber,
+                                        const toolbelt::FileDescriptor &fd,
+                                        async::Context ctx) {
+    return WaitForSubscriber(subscriber, fd, std::chrono::nanoseconds(0), ctx);
+  }
+
+  absl::StatusOr<int> WaitForSubscriber(details::SubscriberImpl *subscriber,
+                                        const toolbelt::FileDescriptor &fd,
+                                        std::chrono::nanoseconds timeout,
+                                        async::Context ctx);
+#endif
 
   // Read a message from a subscriber.  If there are no available messages
   // the 'length' field of the returned Message will be zero.  The 'buffer'
@@ -848,6 +901,29 @@ public:
     return client_->WaitForReliablePublisher(impl_.get(), fd, timeout, c);
   }
 
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  // Asio overloads: cooperatively wait on a caller-supplied yield_context, the
+  // direct analogue of the co::Coroutine* overloads above.
+  absl::Status Wait(async::Context ctx) {
+    return client_->WaitForReliablePublisher(impl_.get(), ctx);
+  }
+
+  absl::Status Wait(std::chrono::nanoseconds timeout, async::Context ctx) {
+    return client_->WaitForReliablePublisher(impl_.get(), timeout, ctx);
+  }
+
+  absl::StatusOr<int> Wait(const toolbelt::FileDescriptor &fd,
+                           async::Context ctx) {
+    return client_->WaitForReliablePublisher(impl_.get(), fd, ctx);
+  }
+
+  absl::StatusOr<int> Wait(const toolbelt::FileDescriptor &fd,
+                           std::chrono::nanoseconds timeout,
+                           async::Context ctx) {
+    return client_->WaitForReliablePublisher(impl_.get(), fd, timeout, ctx);
+  }
+#endif
+
   // Trigger the publisher's reliable event fd, waking anything that is waiting
   // on it (for example a caller blocked in Wait()).  This exposes the trigger
   // side of the publisher's triggerfd so that the caller of PublishMessage can
@@ -1146,6 +1222,29 @@ public:
                            const co::Coroutine *c = nullptr) {
     return client_->WaitForSubscriber(impl_.get(), fd, timeout, c);
   }
+
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  // Asio overloads: cooperatively wait on a caller-supplied yield_context, the
+  // direct analogue of the co::Coroutine* overloads above.
+  absl::Status Wait(async::Context ctx) {
+    return client_->WaitForSubscriber(impl_.get(), ctx);
+  }
+
+  absl::Status Wait(std::chrono::nanoseconds timeout, async::Context ctx) {
+    return client_->WaitForSubscriber(impl_.get(), timeout, ctx);
+  }
+
+  absl::StatusOr<int> Wait(const toolbelt::FileDescriptor &fd,
+                           async::Context ctx) {
+    return client_->WaitForSubscriber(impl_.get(), fd, ctx);
+  }
+
+  absl::StatusOr<int> Wait(const toolbelt::FileDescriptor &fd,
+                           std::chrono::nanoseconds timeout,
+                           async::Context ctx) {
+    return client_->WaitForSubscriber(impl_.get(), fd, timeout, ctx);
+  }
+#endif
 
   // Read a message from a subscriber.  If there are no available messages
   // the 'length' field of the returned Message will be zero.  The 'buffer'

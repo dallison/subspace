@@ -955,6 +955,80 @@ absl::StatusOr<int> ClientImpl::WaitForSubscriber(
   return result;
 }
 
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+// Asio overloads taking an async::Context (yield_context) directly.  Unlike the
+// co::Coroutine* overloads above, which fall back to the client's stored
+// context (SocketContext()), these wait cooperatively on the caller-supplied
+// context.  This lets an Asio caller wait from within an arbitrary coroutine,
+// mirroring how the co backend accepts a co::Coroutine*.
+absl::Status
+ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
+                                     std::chrono::nanoseconds timeout,
+                                     async::Context ctx) {
+  if (absl::Status status = CheckConnected(); !status.ok()) {
+    return status;
+  }
+  if (!publisher->IsReliable()) {
+    return absl::InternalError("Unreliable publishers can't wait");
+  }
+  // Check if there are any new subscribers and if so, load their trigger fds.
+  if (absl::Status status = ReloadSubscribersIfNecessary(publisher);
+      !status.ok()) {
+    return status;
+  }
+  absl::Status s =
+      async::WaitReadable(ctx, publisher->GetPollFd().Fd(), timeout);
+  if (absl::IsDeadlineExceeded(s)) {
+    return absl::InternalError("Timeout waiting for reliable publisher");
+  }
+  return s;
+}
+
+absl::StatusOr<int>
+ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
+                                     const toolbelt::FileDescriptor &fd,
+                                     std::chrono::nanoseconds timeout,
+                                     async::Context ctx) {
+  if (absl::Status status = CheckConnected(); !status.ok()) {
+    return status;
+  }
+  if (!publisher->IsReliable()) {
+    return absl::InternalError("Unreliable publishers can't wait");
+  }
+  // Check if there are any new subscribers and if so, load their trigger fds.
+  if (absl::Status status = ReloadSubscribersIfNecessary(publisher);
+      !status.ok()) {
+    return status;
+  }
+  // The Asio WaitEither has no timeout; it waits until one fd is ready.
+  return async::WaitEither(ctx, publisher->GetPollFd().Fd(), fd.Fd());
+}
+
+absl::Status ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
+                                           std::chrono::nanoseconds timeout,
+                                           async::Context ctx) {
+  if (absl::Status status = CheckConnected(); !status.ok()) {
+    return status;
+  }
+  absl::Status s =
+      async::WaitReadable(ctx, subscriber->GetPollFd().Fd(), timeout);
+  if (absl::IsDeadlineExceeded(s)) {
+    return absl::InternalError("Timeout waiting for subscriber");
+  }
+  return s;
+}
+
+absl::StatusOr<int> ClientImpl::WaitForSubscriber(
+    SubscriberImpl *subscriber, const toolbelt::FileDescriptor &fd,
+    std::chrono::nanoseconds timeout, async::Context ctx) {
+  if (absl::Status status = CheckConnected(); !status.ok()) {
+    return status;
+  }
+  // The Asio WaitEither has no timeout; it waits until one fd is ready.
+  return async::WaitEither(ctx, subscriber->GetPollFd().Fd(), fd.Fd());
+}
+#endif
+
 absl::StatusOr<Message>
 ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
                                 bool pass_activation, bool clear_trigger) {
