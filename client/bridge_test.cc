@@ -1233,10 +1233,14 @@ bool WaitForBridgesEstablished(toolbelt::FileDescriptor &pipe,
 }
 
 #if defined(__linux__) && defined(VMADDR_CID_LOCAL)
-// Probe whether vsock loopback actually works here.  Binds a listener on
-// (VMADDR_CID_ANY, ephemeral) and connects to it via VMADDR_CID_LOCAL, exactly
-// the pattern the vsock bridge uses for two servers on the same host.  Requires
-// a Linux kernel with the vsock_loopback module available.
+// Probe whether vsock loopback actually works here, using the *exact* bind the
+// server's bridge listener uses: (VMADDR_CID_ANY, port 0), then a connect to it
+// via VMADDR_CID_LOCAL.  vsock port 0 is a privileged port, so this bind fails
+// with EPERM for an unprivileged process even when vsock loopback is otherwise
+// usable; mirroring the server's bind here means the test skips precisely when
+// the server would not be able to establish the bridge (e.g. unprivileged CI
+// runners) and runs only where it actually works (e.g. running as root or in a
+// VM).  Requires a Linux kernel with the vsock_loopback module available.
 bool VsockLoopbackAvailable() {
   int lfd = ::socket(AF_VSOCK, SOCK_STREAM, 0);
   if (lfd < 0) {
@@ -1246,7 +1250,7 @@ bool VsockLoopbackAvailable() {
   memset(&laddr, 0, sizeof(laddr));
   laddr.svm_family = AF_VSOCK;
   laddr.svm_cid = VMADDR_CID_ANY;
-  laddr.svm_port = VMADDR_PORT_ANY;
+  laddr.svm_port = 0;
   bool ok = ::bind(lfd, reinterpret_cast<sockaddr *>(&laddr), sizeof(laddr)) ==
                 0 &&
             ::listen(lfd, 1) == 0;
