@@ -19,6 +19,7 @@ target_include_directories(libserver PUBLIC
 target_link_libraries(libserver PUBLIC
     subspace_common
     subspace_client
+    subspace_async
     protobuf::libprotobuf
 )
 
