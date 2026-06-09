@@ -12,6 +12,7 @@
 #include <vector>
 
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+#include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/bind_cancellation_slot.hpp>
 #include <boost/asio/bind_executor.hpp>
 #include <boost/asio/cancellation_signal.hpp>
@@ -182,14 +183,37 @@ private:
   void EmitCancellations() {
     bool any_cancellable = false;
     for (auto &entry : cancel_signals_) {
-      if (entry.cancellable) {
-        entry.signal.emit(boost::asio::cancellation_type::all);
-        any_cancellable = true;
+      if (!entry.cancellable) {
+        continue;
       }
+      any_cancellable = true;
+      // Post the emit onto the coroutine's OWN executor rather than emitting it
+      // here on client_strand_: a boost::asio::cancellation_signal is not
+      // thread-safe, and a tracked coroutine may run on a different strand
+      // (SpawnOnNewStrand) or, in multi-threaded mode, a different thread, so
+      // emitting from client_strand_ would race the coroutine's manipulation of
+      // its own slot.  The signal is held by shared_ptr so it stays valid even
+      // if the coroutine finishes and its registry entry is erased before the
+      // posted emit runs (emit on a finished operation is a harmless no-op).
+      //
+      // The wait primitives (common/async) deliberately do NOT let this signal
+      // cancel their underlying timer/descriptor operation directly; instead
+      // each wait installs a cancellation handler that wakes its sentinel timer
+      // through a single guarded cancel().  That makes re-emitting safe: emit
+      // only ever pokes that idempotent waker, never asio's per-operation timer
+      // cancellation (which would corrupt the timer queue when it races the
+      // wait's own natural completion - a use-after-free crash during shutdown).
+      auto signal = entry.signal;
+      boost::asio::post(entry.executor, [signal]() {
+        signal->emit(boost::asio::cancellation_type::all);
+      });
     }
     if (!any_cancellable) {
       return;
     }
+    // Re-emit on a short timer: a cancellation handler is only armed while a
+    // coroutine is actually suspended in a wait, so a coroutine that was between
+    // waits when we emitted is caught the next time it suspends.
     reemit_timer_ = std::make_unique<boost::asio::steady_timer>(
         client_strand_, std::chrono::milliseconds(2));
     reemit_timer_->async_wait(boost::asio::bind_executor(
@@ -212,15 +236,14 @@ private:
                                        name = std::move(name),
                                        fn = std::move(fn)]() mutable {
       auto it = cancel_signals_.emplace(cancel_signals_.end());
+      it->signal = std::make_shared<boost::asio::cancellation_signal>();
+      it->executor = ex;
       it->cancellable = cancellable;
       it->name = std::move(name);
-      if (stopping_ && cancellable) {
-        it->signal.emit(boost::asio::cancellation_type::all);
-      }
       boost::asio::spawn(
           ex, [fn = std::move(fn)](Context yield) { fn(yield); },
           boost::asio::bind_cancellation_slot(
-              it->signal.slot(),
+              it->signal->slot(),
               // Run the completion handler on the strand and erase the entry
               // immediately (no deferred post).  This closes the window in
               // which the re-emit timer could otherwise emit a cancellation on
@@ -231,6 +254,13 @@ private:
                   client_strand_, [this, it](std::exception_ptr) {
                     cancel_signals_.erase(it);
                   })));
+      // If a graceful stop is already underway, make sure the re-emit loop is
+      // running so this freshly-spawned cancellable coroutine is cancelled too
+      // (and does not keep the io_context alive).  EmitCancellations is
+      // inflight-gated, so calling it here cannot double-cancel anything.
+      if (stopping_ && cancellable) {
+        EmitCancellations();
+      }
     });
   }
 
@@ -238,7 +268,13 @@ private:
   // std::list keeps iterators stable so each coroutine can erase its own entry
   // on completion.
   struct CoroutineEntry {
-    boost::asio::cancellation_signal signal;
+    // Held by shared_ptr so a cancellation emit posted to the coroutine's
+    // executor can keep the signal alive past the erase of this entry.
+    std::shared_ptr<boost::asio::cancellation_signal> signal;
+    // The coroutine's own executor (its strand, or the io_context executor).
+    // Cancellation must be emitted here, never on client_strand_, because
+    // cancellation_signal is not thread-safe.
+    boost::asio::any_io_executor executor;
     bool cancellable = true;
     std::string name;
   };

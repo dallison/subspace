@@ -8,8 +8,11 @@
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
 
 #include "absl/strings/str_format.h"
+#include <boost/asio/bind_cancellation_slot.hpp>
 #include <boost/asio/bind_executor.hpp>
+#include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/posix/stream_descriptor.hpp>
 #include <boost/asio/steady_timer.hpp>
 
@@ -72,31 +75,62 @@ absl::Status WaitFdReady(Context yield, int fd,
   }
   auto sd = std::make_shared<boost::asio::posix::stream_descriptor>(ioc, fd);
   auto fd_ready = std::make_shared<bool>(false);
+  auto notified = std::make_shared<bool>(false);
 
-  boost::asio::steady_timer notifier(ioc);
-  notifier.expires_at(boost::asio::steady_timer::time_point::max());
+  // Shared so the cancellation handler installed below can hold it alive and
+  // safely poke it even if it fires after this frame unwinds.
+  auto notifier = std::make_shared<boost::asio::steady_timer>(ioc);
+  notifier->expires_at(boost::asio::steady_timer::time_point::max());
+
+  // Single, idempotent wake: fd-ready and graceful-shutdown cancellation both
+  // resume the coroutine through here, so notifier->cancel() is called exactly
+  // once and never races asio's per-operation timer cancellation.
+  auto wake = [notifier, notified]() {
+    if (!*notified) {
+      *notified = true;
+      notifier->cancel();
+    }
+  };
 
   // Bind the descriptor completion to the coroutine's own executor (its
   // strand).  Under a multi-threaded io_context the reactor would otherwise run
   // this handler on an arbitrary thread the instant the fd is ready - possibly
-  // before the coroutine below has registered notifier.async_wait().  The
-  // notifier.cancel() would then cancel nothing, and the subsequent async_wait
-  // on a never-expiring timer would hang forever (a missed wakeup).  Posting
-  // the handler onto the coroutine's strand serializes it with the async_wait
-  // registration, so the cancel can never be lost.
+  // before the coroutine below has registered notifier->async_wait().  The
+  // wake() would then cancel nothing, and the subsequent async_wait on a
+  // never-expiring timer would hang forever (a missed wakeup).  Posting the
+  // handler onto the coroutine's strand serializes it with the async_wait
+  // registration, so the wake can never be lost.
   sd->async_wait(
       cond, boost::asio::bind_executor(
                 yield.get_executor(),
-                [sd, fd_ready, &notifier](const boost::system::error_code &ec) {
+                [sd, fd_ready, wake](const boost::system::error_code &ec) {
                   if (!ec) {
                     *fd_ready = true;
                   }
-                  notifier.cancel();
+                  wake();
                 }));
 
-  boost::system::error_code ec;
-  notifier.async_wait(yield[ec]);
+  // Graceful shutdown routes through the same idempotent wake() rather than
+  // cancelling the notifier op directly: emitting a cancellation onto the
+  // notifier's timer operation races its natural completion and corrupts asio's
+  // timer queue (a use-after-free during shutdown).  We assign our own handler
+  // to the coroutine's cancellation slot and wait on the notifier with an
+  // *unconnected* slot so asio installs no per-operation timer cancellation.
+  auto exec = yield.get_executor();
+  yield.get_cancellation_slot().assign(
+      [exec, wake](boost::asio::cancellation_type) {
+        boost::asio::post(exec, [wake]() { wake(); });
+      });
 
+  boost::system::error_code ec;
+  notifier->async_wait(
+      boost::asio::bind_cancellation_slot(boost::asio::cancellation_slot(),
+                                          yield[ec]));
+
+  // Clear our handler so a late re-emit cannot poke a stale wake, then cancel
+  // the pending descriptor wait and release the real fd so destroying the
+  // shared descriptor does not close it.
+  yield.get_cancellation_slot().clear();
   boost::system::error_code ignored;
   sd->cancel(ignored);
   sd->release();
