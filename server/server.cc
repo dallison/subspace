@@ -1765,7 +1765,7 @@ void Server::DiscoveryReceiverCoroutine(async::Context ctx) {
 // enters a loop reading messages sent to the channel on this side of the
 // bridge and sending them over.
 void Server::BridgeTransmitterCoroutine(async::Context ctx,
-                                        ServerChannel *channel,
+                                        BridgeChannelInfo info,
                                         bool pub_reliable, bool sub_reliable,
                                         toolbelt::SocketAddress subscriber,
                                         bool notify_retirement) {
@@ -1782,7 +1782,7 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
     return;
   }
 
-  const std::string &channel_name = channel->Name();
+  const std::string &channel_name = info.channel_name;
 
   // Send a Subscribed message to the transmitter.
   logger_.Log(toolbelt::LogLevel::kDebug, "Sending subscribed to %s",
@@ -1795,15 +1795,14 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
 
   Subscribed subscribed;
   subscribed.set_channel_name(channel_name);
-  subscribed.set_slot_size(channel->SlotSize());
-  subscribed.set_num_slots(channel->NumSlots());
+  subscribed.set_slot_size(info.slot_size);
+  subscribed.set_num_slots(info.num_slots);
   subscribed.set_reliable(pub_reliable);
-  subscribed.set_checksum_size(channel->ChecksumSize());
-  subscribed.set_metadata_size(channel->MetadataSize());
-  const bool wire_split_buffers = ChannelUsesSplitBuffers(channel);
+  subscribed.set_checksum_size(info.checksum_size);
+  subscribed.set_metadata_size(info.metadata_size);
+  const bool wire_split_buffers = info.wire_split_buffers;
   subscribed.set_split_buffers(wire_split_buffers);
-  subscribed.set_split_buffers_over_bridge(
-      ChannelUsesSplitBuffersOverBridge(channel));
+  subscribed.set_split_buffers_over_bridge(info.split_buffers_over_bridge);
 
   async::StreamSocket retirement_listener;
   toolbelt::SocketAddress retirement_addr;
@@ -1893,11 +1892,11 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
   std::shared_ptr<std::vector<std::shared_ptr<ActiveMessage>>>
       active_retirement_msgs =
           std::make_shared<std::vector<std::shared_ptr<ActiveMessage>>>();
-  bool notifying_of_retirement = !channel->GetRetirementFds().empty();
+  bool notifying_of_retirement = notify_retirement;
 
   // Spawn a coroutine to read from the retirement connection.
   if (notifying_of_retirement) {
-    active_retirement_msgs->resize(channel->NumSlots());
+    active_retirement_msgs->resize(info.num_slots);
     runtime_.Spawn(
         [this, &retirement_listener,
          active_retirement_msgs](async::Context ret_ctx) mutable {
@@ -2010,9 +2009,19 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
 
   logger_.Log(toolbelt::LogLevel::kDebug,
               "Bridge transmitter for %s terminating", channel_name.c_str());
-  // We're done reading messages from the channel, remove the
-  // bridge and subscriber.
-  channel->RemoveBridgedAddress(subscriber, sub_reliable);
+  // We're done reading messages from the channel, remove the bridge and
+  // subscriber.  bridged_publishers_ is owned by the client strand (discovery
+  // adds/looks up entries there), so the erase must happen on the strand too -
+  // this coroutine runs on the parallel io_context.  Look the channel up by
+  // name on the strand rather than capturing the raw pointer, in case the
+  // channel was removed in the meantime.
+  runtime_.RunOnStrand([this, channel_name = info.channel_name, subscriber,
+                        sub_reliable]() {
+    auto it = channels_.find(channel_name);
+    if (it != channels_.end()) {
+      it->second->RemoveBridgedAddress(subscriber, sub_reliable);
+    }
+  });
 }
 
 // This coroutine reads retirement messages from the bridge and removes
@@ -2131,17 +2140,28 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
                                      std::string channel_name,
                                      bool sub_reliable,
                                      bool split_buffers_over_bridge,
-                                     toolbelt::InetAddress publisher) {
+                                     toolbelt::InetAddress publisher,
+                                     bool local_has_split_options,
+                                     bool local_use_split_buffers) {
+  // bridged_publishers_ and channels_ are owned by the client strand, but this
+  // coroutine runs on the parallel io_context.  Post the teardown bookkeeping
+  // onto the strand (capturing everything by value, since the guard's members
+  // are gone by the time the posted work runs) so it is serialized with
+  // discovery and the client handlers.
   struct BridgeGuard {
     Server *server;
-    const std::string &channel_name;
-    const toolbelt::InetAddress &publisher;
+    std::string channel_name;
+    toolbelt::InetAddress publisher;
     bool sub_reliable;
     ~BridgeGuard() {
-      auto it = server->channels_.find(channel_name);
-      if (it != server->channels_.end()) {
-        it->second->RemoveBridgedAddress(publisher, sub_reliable);
-      }
+      server->runtime_.RunOnStrand(
+          [server = server, channel_name = channel_name, publisher = publisher,
+           sub_reliable = sub_reliable]() {
+            auto it = server->channels_.find(channel_name);
+            if (it != server->channels_.end()) {
+              it->second->RemoveBridgedAddress(publisher, sub_reliable);
+            }
+          });
     }
   } bridge_guard{this, channel_name, publisher, sub_reliable};
 
@@ -2200,13 +2220,12 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
   }
   bool bridge_publisher_split_buffers =
       split_buffers_over_bridge || subscribed.split_buffers_over_bridge();
-  if (auto it = channels_.find(channel_name); it != channels_.end()) {
-    const ServerChannel *split_channel =
-        SplitBufferOptionsChannel(it->second.get());
-    if (split_channel->HasSplitBufferOptions()) {
-      bridge_publisher_split_buffers =
-          split_channel->GetSplitBufferOptions().use_split_buffers;
-    }
+  // The local channel's split-buffer preference was read on the client strand
+  // (in SubscribeOverBridge) and passed in; it overrides the wire value.  We
+  // must not look channels_ up here because this coroutine runs on the parallel
+  // io_context.
+  if (local_has_split_options) {
+    bridge_publisher_split_buffers = local_use_split_buffers;
   }
 
   // Build a publisher to publish incoming bridge messages to the channel.
@@ -2474,13 +2493,24 @@ void Server::RetirementCoroutine(
 void Server::SubscribeOverBridge(ServerChannel *channel, bool reliable,
                                  bool split_buffers_over_bridge,
                                  toolbelt::InetAddress publisher) {
+  // Read the local channel's split-buffer preference here, on the client
+  // strand, and pass it to the receiver coroutine (which runs on the parallel
+  // io_context and must not touch channels_).
+  const ServerChannel *split_channel = SplitBufferOptionsChannel(channel);
+  const bool local_has_split_options = split_channel->HasSplitBufferOptions();
+  const bool local_use_split_buffers =
+      local_has_split_options &&
+      split_channel->GetSplitBufferOptions().use_split_buffers;
+  std::string channel_name = channel->Name();
   runtime_.Spawn(
-      [this, channel, reliable, split_buffers_over_bridge,
-       publisher](async::Context ctx) {
-        BridgeReceiverCoroutine(ctx, channel->Name(), reliable,
-                                split_buffers_over_bridge, publisher);
+      [this, channel_name, reliable, split_buffers_over_bridge, publisher,
+       local_has_split_options, local_use_split_buffers](async::Context ctx) {
+        BridgeReceiverCoroutine(ctx, channel_name, reliable,
+                                split_buffers_over_bridge, publisher,
+                                local_has_split_options,
+                                local_use_split_buffers);
       },
-      {.name = absl::StrFormat("Bridge receiver for %s", channel->Name()),
+      {.name = absl::StrFormat("Bridge receiver for %s", channel_name),
        .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
 }
 
@@ -2585,12 +2615,24 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
     }
 
     bool notify_retirement = !channel->second->GetRetirementFds().empty();
+    // Snapshot the channel metadata the transmitter needs while we are still on
+    // the client strand.  The transmitter runs on the parallel io_context and
+    // must not touch the strand-confined ServerChannel for this state.
+    BridgeChannelInfo info{
+        .channel_name = ch->Name(),
+        .slot_size = ch->SlotSize(),
+        .num_slots = ch->NumSlots(),
+        .checksum_size = ch->ChecksumSize(),
+        .metadata_size = ch->MetadataSize(),
+        .wire_split_buffers = ChannelUsesSplitBuffers(ch),
+        .split_buffers_over_bridge = ChannelUsesSplitBuffersOverBridge(ch),
+    };
     runtime_.Spawn(
-        [this, ch, pub_reliable, sub_reliable,
+        [this, info = std::move(info), pub_reliable, sub_reliable,
          subscriber_addr = std::move(subscriber_addr),
-         notify_retirement](async::Context ctx) {
-          BridgeTransmitterCoroutine(ctx, ch, pub_reliable, sub_reliable,
-                                     std::move(subscriber_addr),
+         notify_retirement](async::Context ctx) mutable {
+          BridgeTransmitterCoroutine(ctx, std::move(info), pub_reliable,
+                                     sub_reliable, std::move(subscriber_addr),
                                      notify_retirement);
         },
         {.name = absl::StrFormat("Bridge transmitter for %s", channel->first)

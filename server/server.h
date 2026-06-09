@@ -287,14 +287,29 @@ private:
   void PublisherCoroutine(async::Context ctx);
   void SendQuery(const std::string &channel_name);
   void SendAdvertise(const std::string &channel_name, bool reliable);
-  void BridgeTransmitterCoroutine(async::Context ctx, ServerChannel *channel,
+  // Immutable snapshot of the channel state a bridge transmitter needs.  It is
+  // gathered on the client strand (in IncomingSubscribe) before the transmitter
+  // is spawned onto the parallel io_context, so the transmitter never has to
+  // touch the strand-confined ServerChannel for this metadata.
+  struct BridgeChannelInfo {
+    std::string channel_name;
+    int slot_size = 0;
+    int num_slots = 0;
+    int32_t checksum_size = 0;
+    int32_t metadata_size = 0;
+    bool wire_split_buffers = false;
+    bool split_buffers_over_bridge = false;
+  };
+  void BridgeTransmitterCoroutine(async::Context ctx, BridgeChannelInfo info,
                                   bool pub_reliable, bool sub_reliable,
                                   toolbelt::SocketAddress subscriber,
                                   bool notify_retirement);
   void BridgeReceiverCoroutine(async::Context ctx, std::string channel_name,
                                bool sub_reliable,
                                bool split_buffers_over_bridge,
-                               toolbelt::InetAddress publisher);
+                               toolbelt::InetAddress publisher,
+                               bool local_has_split_options,
+                               bool local_use_split_buffers);
   void RetirementCoroutine(
       async::Context ctx, const std::string &channel_name,
       toolbelt::FileDescriptor &&retirement_fd,

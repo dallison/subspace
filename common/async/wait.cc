@@ -27,64 +27,84 @@ boost::asio::io_context &IocFromYield(boost::asio::yield_context yield) {
 
 absl::Status WaitReadable(Context ctx, int fd, std::chrono::nanoseconds timeout) {
   boost::asio::io_context &ioc = IocFromYield(ctx);
+  // Fast path: if the fd is already readable, return immediately without
+  // suspending.  This keeps a persistently-readable fd (e.g. a triggered
+  // shutdown fd) from racing a graceful-shutdown cancellation that could
+  // otherwise repeatedly wake us before the reactor reports the readable fd,
+  // livelocking the coroutine so it never observes the fd and never exits.
+  {
+    struct pollfd pfd = {.fd = fd, .events = POLLIN, .revents = 0};
+    if (::poll(&pfd, 1, 0) > 0 && (pfd.revents & (POLLIN | POLLHUP)) != 0) {
+      return absl::OkStatus();
+    }
+  }
   // We register the caller's real fd with the reactor and release() it before
   // the descriptor is destroyed so we never close it.  We intentionally do NOT
   // ::dup(): dup'ing churns ephemeral fd numbers through the shared process fd
   // table, and two io_contexts (e.g. an in-process server + client) recycling
   // those numbers across their separate reactors can resume a coroutine owned
   // by the other io_context's thread.  The stable real fd avoids that.
-
-  if (timeout.count() == 0) {
-    boost::asio::posix::stream_descriptor sd(ioc, fd);
-    boost::system::error_code ec;
-    sd.async_wait(boost::asio::posix::stream_descriptor::wait_read, ctx[ec]);
-    sd.release();
-    if (ec) {
-      return absl::InternalError(
-          absl::StrFormat("WaitReadable error: %s", ec.message()));
-    }
-    return absl::OkStatus();
-  }
-
+  //
+  // The coroutine always suspends on a sentinel steady_timer (`notifier`),
+  // never directly on the stream_descriptor.  This is essential for graceful
+  // shutdown: a cancellation emitted onto the coroutine can complete a
+  // *descriptor* wait synchronously, re-entering and unwinding this coroutine
+  // (destroying this frame's descriptor) while asio is still walking the
+  // cancellation chain - a use-after-free.  Cancelling a steady_timer always
+  // posts its completion, so the coroutine only ever resumes on a clean stack.
+  // The descriptor (and the optional timeout timer) use plain handlers that
+  // merely wake the notifier, so a cancellation never reaches them directly.
   auto sd = std::make_shared<boost::asio::posix::stream_descriptor>(ioc, fd);
-  auto timer = std::make_shared<boost::asio::steady_timer>(ioc, timeout);
-  auto timed_out = std::make_shared<bool>(false);
   auto fd_ready = std::make_shared<bool>(false);
+  auto timed_out = std::make_shared<bool>(false);
 
   boost::asio::steady_timer notifier(ioc);
   notifier.expires_at(boost::asio::steady_timer::time_point::max());
+
+  std::shared_ptr<boost::asio::steady_timer> timer;
+  if (timeout.count() != 0) {
+    timer = std::make_shared<boost::asio::steady_timer>(ioc, timeout);
+  }
 
   sd->async_wait(boost::asio::posix::stream_descriptor::wait_read,
                  [sd, timer, fd_ready, timed_out,
                   &notifier](const boost::system::error_code &ec) {
                    if (!*timed_out && !ec) {
                      *fd_ready = true;
-                     timer->cancel();
-                     notifier.cancel();
                    }
+                   notifier.cancel();
                  });
 
-  timer->async_wait([sd, timed_out, fd_ready,
-                     &notifier](const boost::system::error_code &ec) {
-    if (!*fd_ready && !ec) {
-      *timed_out = true;
-      boost::system::error_code ignored;
-      sd->cancel(ignored);
-      notifier.cancel();
-    }
-  });
+  if (timer != nullptr) {
+    timer->async_wait([sd, timed_out, fd_ready,
+                       &notifier](const boost::system::error_code &ec) {
+      if (!*fd_ready && !ec) {
+        *timed_out = true;
+        notifier.cancel();
+      }
+    });
+  }
 
   boost::system::error_code ec;
   notifier.async_wait(ctx[ec]);
 
-  // Release the real fd so destroying the shared descriptor does not close it.
+  // The coroutine has resumed (fd ready, timed out, or cancelled).  Cancel any
+  // still-pending descriptor/timer waits and release the real fd so destroying
+  // the shared descriptor does not close it.
+  boost::system::error_code ignored;
+  sd->cancel(ignored);
   sd->release();
+  if (timer != nullptr) {
+    timer->cancel();
+  }
 
   if (*timed_out) {
     return absl::DeadlineExceededError("Timeout waiting for fd");
   }
   if (!*fd_ready) {
-    return absl::InternalError("WaitReadable: unexpected state");
+    // Resumed without the fd becoming readable and without timing out: the
+    // wait was cancelled (e.g. graceful shutdown).
+    return absl::InternalError("WaitReadable: operation canceled");
   }
   return absl::OkStatus();
 }

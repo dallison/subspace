@@ -87,6 +87,16 @@ public:
                  std::move(opts.name));
   }
 
+  // Run `fn` on the client strand.  This lets code running on the parallel
+  // io_context (e.g. the bridge transmitter/receiver coroutines) mutate
+  // strand-confined server state - the channels_ / bridged_publishers_ hash
+  // maps - without a mutex: the work is serialized with the client handlers
+  // and the discovery coroutines, which also run on the strand.  It is
+  // fire-and-forget, so `fn` must capture everything it needs by value.
+  void RunOnStrand(std::function<void()> fn) {
+    boost::asio::post(client_strand_, std::move(fn));
+  }
+
   // Run the io_context on `num_threads` threads (the calling thread plus
   // num_threads-1 helpers).  Blocks until the io_context runs out of work or is
   // stopped, exactly like the single-threaded ioc_.run().
@@ -197,10 +207,17 @@ private:
       boost::asio::spawn(
           ex, [fn = std::move(fn)](Context yield) { fn(yield); },
           boost::asio::bind_cancellation_slot(
-              it->signal.slot(), [this, it](std::exception_ptr) {
-                boost::asio::post(client_strand_,
-                                  [this, it]() { cancel_signals_.erase(it); });
-              }));
+              it->signal.slot(),
+              // Run the completion handler on the strand and erase the entry
+              // immediately (no deferred post).  This closes the window in
+              // which the re-emit timer could otherwise emit a cancellation on
+              // a coroutine that has already finished but whose entry has not
+              // yet been removed - the source of a use-after-free during
+              // graceful shutdown.
+              boost::asio::bind_executor(
+                  client_strand_, [this, it](std::exception_ptr) {
+                    cancel_signals_.erase(it);
+                  })));
     });
   }
 
@@ -237,6 +254,10 @@ private:
   void SpawnOnStrand(std::function<void(Context)> fn, SpawnOptions opts = {}) {
     Spawn(std::move(fn), std::move(opts));
   }
+
+  // The co backend is single-threaded, so there is no concurrency to serialize
+  // against: run `fn` inline.
+  void RunOnStrand(std::function<void()> fn) { fn(); }
 
   // The co scheduler is single-threaded; num_threads is ignored.
   void Run(int /*num_threads*/ = 1) { scheduler_.Run(); }

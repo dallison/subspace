@@ -10,12 +10,15 @@
 #include "absl/strings/str_format.h"
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/posix/stream_descriptor.hpp>
+#include <boost/asio/steady_timer.hpp>
 
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
+#include <memory>
 #include <netinet/in.h>
+#include <poll.h>
 #include <stddef.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -30,36 +33,82 @@ boost::asio::io_context &IocFromYield(Context yield) {
       yield.get_executor().context());
 }
 
-// Wait until `fd` is readable, yielding the coroutine.  The stream_descriptor
-// is given the caller's real fd and `release()`d before it is destroyed so it
-// never closes the caller's fd.  We deliberately do NOT ::dup() the fd: dup'ing
-// churns ephemeral fd numbers through the shared process fd table, and when two
-// io_contexts (e.g. an in-process server and client) recycle those numbers
-// across their separate reactors a completion can resume a coroutine owned by
-// the other io_context's thread.  Using the stable real fd keeps each
-// descriptor registered in exactly one reactor.
-absl::Status WaitFdReadable(Context yield, int fd) {
-  boost::asio::posix::stream_descriptor sd(IocFromYield(yield), fd);
+// Wait until `fd` is ready for `cond` (wait_read / wait_write), yielding the
+// coroutine.  The stream_descriptor is given the caller's real fd and
+// `release()`d before it is destroyed so it never closes the caller's fd.  We
+// deliberately do NOT ::dup() the fd: dup'ing churns ephemeral fd numbers
+// through the shared process fd table, and when two io_contexts (e.g. an
+// in-process server and client) recycle those numbers across their separate
+// reactors a completion can resume a coroutine owned by the other io_context's
+// thread.  Using the stable real fd keeps each descriptor registered in
+// exactly one reactor.
+//
+// The coroutine suspends on a sentinel steady_timer (`notifier`), never
+// directly on the descriptor.  This is essential for graceful shutdown: a
+// cancellation emitted onto the coroutine can complete a *descriptor* wait
+// synchronously, re-entering and unwinding this coroutine (destroying this
+// frame's descriptor) while asio is still walking the cancellation chain - a
+// use-after-free.  Cancelling a steady_timer always posts its completion, so
+// the coroutine only ever resumes on a clean stack; the descriptor uses a
+// plain handler that merely wakes the notifier, so a cancellation never reaches
+// it directly.
+absl::Status WaitFdReady(Context yield, int fd,
+                         boost::asio::posix::descriptor_base::wait_type cond,
+                         const char *what) {
+  boost::asio::io_context &ioc = IocFromYield(yield);
+  // Fast path: if the fd is already ready, return immediately without
+  // suspending.  This keeps a persistently-ready fd from racing a
+  // graceful-shutdown cancellation that could otherwise repeatedly wake us
+  // before the reactor reports readiness, livelocking the coroutine.
+  {
+    const short ev =
+        (cond == boost::asio::posix::stream_descriptor::wait_read) ? POLLIN
+                                                                   : POLLOUT;
+    struct pollfd pfd = {.fd = fd, .events = ev, .revents = 0};
+    if (::poll(&pfd, 1, 0) > 0 && (pfd.revents & (ev | POLLHUP)) != 0) {
+      return absl::OkStatus();
+    }
+  }
+  auto sd = std::make_shared<boost::asio::posix::stream_descriptor>(ioc, fd);
+  auto fd_ready = std::make_shared<bool>(false);
+
+  boost::asio::steady_timer notifier(ioc);
+  notifier.expires_at(boost::asio::steady_timer::time_point::max());
+
+  sd->async_wait(cond, [sd, fd_ready,
+                        &notifier](const boost::system::error_code &ec) {
+    if (!ec) {
+      *fd_ready = true;
+    }
+    notifier.cancel();
+  });
+
   boost::system::error_code ec;
-  sd.async_wait(boost::asio::posix::stream_descriptor::wait_read, yield[ec]);
-  sd.release();
-  if (ec) {
+  notifier.async_wait(yield[ec]);
+
+  boost::system::error_code ignored;
+  sd->cancel(ignored);
+  sd->release();
+
+  if (!*fd_ready) {
+    // Resumed without the fd becoming ready: the wait was cancelled (e.g.
+    // graceful shutdown).
     return absl::InternalError(
-        absl::StrFormat("wait_read error: %s", ec.message()));
+        absl::StrFormat("%s error: Operation canceled", what));
   }
   return absl::OkStatus();
 }
 
+absl::Status WaitFdReadable(Context yield, int fd) {
+  return WaitFdReady(yield, fd,
+                     boost::asio::posix::stream_descriptor::wait_read,
+                     "wait_read");
+}
+
 absl::Status WaitFdWritable(Context yield, int fd) {
-  boost::asio::posix::stream_descriptor sd(IocFromYield(yield), fd);
-  boost::system::error_code ec;
-  sd.async_wait(boost::asio::posix::stream_descriptor::wait_write, yield[ec]);
-  sd.release();
-  if (ec) {
-    return absl::InternalError(
-        absl::StrFormat("wait_write error: %s", ec.message()));
-  }
-  return absl::OkStatus();
+  return WaitFdReady(yield, fd,
+                     boost::asio::posix::stream_descriptor::wait_write,
+                     "wait_write");
 }
 
 // Fill a sockaddr_storage from a SocketAddress.  Returns the length.
