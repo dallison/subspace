@@ -1413,9 +1413,18 @@ TEST(BridgeStressTest, MultiThreadedBridging) {
         pubs_ready++;
         return;
       }
+      // Explicitly opt out of split buffers regardless of the global
+      // --use_split_buffers default.  This stress test sizes the channel to
+      // hold the whole burst (kNumSlots ~= kNumMessages) so the data plane can
+      // be exercised without ring-buffer wrap.  Split buffers allocate one
+      // shared-memory file per slot, so kNumChannels x kNumSlots files would
+      // exhaust the process fd limit (macOS defaults are low) - and this test
+      // targets the multi-threaded bridge data plane, not split buffers.
       absl::StatusOr<Publisher> pub = client.CreatePublisher(
-          channel_name(ch),
-          {.slot_size = kSlotSize, .num_slots = kNumSlots, .local = false});
+          channel_name(ch), {.slot_size = kSlotSize,
+                             .num_slots = kNumSlots,
+                             .local = false,
+                             .use_split_buffers = false});
       if (!pub.ok()) {
         ADD_FAILURE() << "CreatePublisher: " << pub.status();
         failed = true;
