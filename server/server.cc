@@ -1897,7 +1897,7 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
   // Spawn a coroutine to read from the retirement connection.
   if (notifying_of_retirement) {
     active_retirement_msgs->resize(info.num_slots);
-    runtime_.Spawn(
+    runtime_.SpawnOnNewStrand(
         [this, &retirement_listener,
          active_retirement_msgs](async::Context ret_ctx) mutable {
           return RetirementReceiverCoroutine(ret_ctx, retirement_listener,
@@ -2321,7 +2321,7 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
 
     // Add a coroutine to listen for retirement notifications and send them to
     // the socket connected to the other server.
-    runtime_.Spawn(
+    runtime_.SpawnOnNewStrand(
         [this, retirement_fd = std::move(retirement_fd),
          &retirement_transmitter, channel_name](async::Context ret_ctx) mutable {
           RetirementCoroutine(ret_ctx, channel_name, std::move(retirement_fd),
@@ -2502,7 +2502,7 @@ void Server::SubscribeOverBridge(ServerChannel *channel, bool reliable,
       local_has_split_options &&
       split_channel->GetSplitBufferOptions().use_split_buffers;
   std::string channel_name = channel->Name();
-  runtime_.Spawn(
+  runtime_.SpawnOnNewStrand(
       [this, channel_name, reliable, split_buffers_over_bridge, publisher,
        local_has_split_options, local_use_split_buffers](async::Context ctx) {
         BridgeReceiverCoroutine(ctx, channel_name, reliable,
@@ -2627,7 +2627,7 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
         .wire_split_buffers = ChannelUsesSplitBuffers(ch),
         .split_buffers_over_bridge = ChannelUsesSplitBuffersOverBridge(ch),
     };
-    runtime_.Spawn(
+    runtime_.SpawnOnNewStrand(
         [this, info = std::move(info), pub_reliable, sub_reliable,
          subscriber_addr = std::move(subscriber_addr),
          notify_retirement](async::Context ctx) mutable {

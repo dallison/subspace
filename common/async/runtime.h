@@ -97,6 +97,19 @@ public:
     boost::asio::post(client_strand_, std::move(fn));
   }
 
+  // Spawn a coroutine on a fresh, private strand.  Different coroutines spawned
+  // this way can run in parallel on different io_context threads (so bridge
+  // load still spreads across cores), but each coroutine's own async operations
+  // are serialized within its strand.  That serialization is required for the
+  // WaitFdReady/WaitReadable handshake (see common/async): the descriptor
+  // completion is bound to the coroutine's executor, so it must be a strand or
+  // a multi-threaded reactor could deliver the readiness on another thread
+  // before the coroutine registers its notifier wait, hanging it forever.
+  void SpawnOnNewStrand(std::function<void(Context)> fn, SpawnOptions opts = {}) {
+    SpawnTracked(boost::asio::make_strand(ioc_), std::move(fn),
+                 opts.cancellable, std::move(opts.name));
+  }
+
   // Run the io_context on `num_threads` threads (the calling thread plus
   // num_threads-1 helpers).  Blocks until the io_context runs out of work or is
   // stopped, exactly like the single-threaded ioc_.run().
@@ -258,6 +271,12 @@ private:
   // The co backend is single-threaded, so there is no concurrency to serialize
   // against: run `fn` inline.
   void RunOnStrand(std::function<void()> fn) { fn(); }
+
+  // The co backend is single-threaded; a private strand is meaningless, so this
+  // is just a normal spawn.
+  void SpawnOnNewStrand(std::function<void(Context)> fn, SpawnOptions opts = {}) {
+    Spawn(std::move(fn), std::move(opts));
+  }
 
   // The co scheduler is single-threaded; num_threads is ignored.
   void Run(int /*num_threads*/ = 1) { scheduler_.Run(); }

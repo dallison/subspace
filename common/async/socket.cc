@@ -8,6 +8,7 @@
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
 
 #include "absl/strings/str_format.h"
+#include <boost/asio/bind_executor.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/posix/stream_descriptor.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -75,13 +76,23 @@ absl::Status WaitFdReady(Context yield, int fd,
   boost::asio::steady_timer notifier(ioc);
   notifier.expires_at(boost::asio::steady_timer::time_point::max());
 
-  sd->async_wait(cond, [sd, fd_ready,
-                        &notifier](const boost::system::error_code &ec) {
-    if (!ec) {
-      *fd_ready = true;
-    }
-    notifier.cancel();
-  });
+  // Bind the descriptor completion to the coroutine's own executor (its
+  // strand).  Under a multi-threaded io_context the reactor would otherwise run
+  // this handler on an arbitrary thread the instant the fd is ready - possibly
+  // before the coroutine below has registered notifier.async_wait().  The
+  // notifier.cancel() would then cancel nothing, and the subsequent async_wait
+  // on a never-expiring timer would hang forever (a missed wakeup).  Posting
+  // the handler onto the coroutine's strand serializes it with the async_wait
+  // registration, so the cancel can never be lost.
+  sd->async_wait(
+      cond, boost::asio::bind_executor(
+                yield.get_executor(),
+                [sd, fd_ready, &notifier](const boost::system::error_code &ec) {
+                  if (!ec) {
+                    *fd_ready = true;
+                  }
+                  notifier.cancel();
+                }));
 
   boost::system::error_code ec;
   notifier.async_wait(yield[ec]);

@@ -10,6 +10,7 @@
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
 
 #include "absl/strings/str_format.h"
+#include <boost/asio/bind_executor.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/posix/stream_descriptor.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -66,23 +67,34 @@ absl::Status WaitReadable(Context ctx, int fd, std::chrono::nanoseconds timeout)
     timer = std::make_shared<boost::asio::steady_timer>(ioc, timeout);
   }
 
-  sd->async_wait(boost::asio::posix::stream_descriptor::wait_read,
-                 [sd, timer, fd_ready, timed_out,
-                  &notifier](const boost::system::error_code &ec) {
-                   if (!*timed_out && !ec) {
-                     *fd_ready = true;
-                   }
-                   notifier.cancel();
-                 });
+  // Bind the descriptor (and timeout-timer) completions to the coroutine's own
+  // executor (its strand).  Under a multi-threaded io_context the reactor would
+  // otherwise run these handlers on an arbitrary thread the instant the fd is
+  // ready - possibly before the coroutine below registers notifier.async_wait()
+  // - so the notifier.cancel() would cancel nothing and the coroutine would
+  // hang forever on the never-expiring notifier (a missed wakeup).  Serializing
+  // them with the async_wait registration on the strand makes the cancel safe.
+  sd->async_wait(
+      boost::asio::posix::stream_descriptor::wait_read,
+      boost::asio::bind_executor(
+          ctx.get_executor(),
+          [sd, timer, fd_ready, timed_out,
+           &notifier](const boost::system::error_code &ec) {
+            if (!*timed_out && !ec) {
+              *fd_ready = true;
+            }
+            notifier.cancel();
+          }));
 
   if (timer != nullptr) {
-    timer->async_wait([sd, timed_out, fd_ready,
-                       &notifier](const boost::system::error_code &ec) {
-      if (!*fd_ready && !ec) {
-        *timed_out = true;
-        notifier.cancel();
-      }
-    });
+    timer->async_wait(boost::asio::bind_executor(
+        ctx.get_executor(), [sd, timed_out, fd_ready,
+                             &notifier](const boost::system::error_code &ec) {
+          if (!*fd_ready && !ec) {
+            *timed_out = true;
+            notifier.cancel();
+          }
+        }));
   }
 
   boost::system::error_code ec;
@@ -121,29 +133,38 @@ absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2) {
   boost::asio::steady_timer notifier(ioc);
   notifier.expires_at(boost::asio::steady_timer::time_point::max());
 
+  // Bind both descriptor completions to the coroutine's executor (its strand)
+  // so they are serialized with the notifier.async_wait() registration below
+  // and with each other; otherwise a multi-threaded io_context could run a
+  // completion on another thread before the wait is registered (missed wakeup)
+  // or run both concurrently and race on `done`/`notifier`.
   sd1->async_wait(boost::asio::posix::stream_descriptor::wait_read,
-                  [sd1, sd2, result_fd, done, &notifier,
-                   fd1](const boost::system::error_code &ec) {
-                    if (!*done && !ec) {
-                      *done = true;
-                      *result_fd = fd1;
-                      boost::system::error_code ignored;
-                      sd2->cancel(ignored);
-                      notifier.cancel();
-                    }
-                  });
+                  boost::asio::bind_executor(
+                      ctx.get_executor(),
+                      [sd1, sd2, result_fd, done, &notifier,
+                       fd1](const boost::system::error_code &ec) {
+                        if (!*done && !ec) {
+                          *done = true;
+                          *result_fd = fd1;
+                          boost::system::error_code ignored;
+                          sd2->cancel(ignored);
+                          notifier.cancel();
+                        }
+                      }));
 
   sd2->async_wait(boost::asio::posix::stream_descriptor::wait_read,
-                  [sd1, sd2, result_fd, done, &notifier,
-                   fd2](const boost::system::error_code &ec) {
-                    if (!*done && !ec) {
-                      *done = true;
-                      *result_fd = fd2;
-                      boost::system::error_code ignored;
-                      sd1->cancel(ignored);
-                      notifier.cancel();
-                    }
-                  });
+                  boost::asio::bind_executor(
+                      ctx.get_executor(),
+                      [sd1, sd2, result_fd, done, &notifier,
+                       fd2](const boost::system::error_code &ec) {
+                        if (!*done && !ec) {
+                          *done = true;
+                          *result_fd = fd2;
+                          boost::system::error_code ignored;
+                          sd1->cancel(ignored);
+                          notifier.cancel();
+                        }
+                      }));
 
   boost::system::error_code ec;
   notifier.async_wait(ctx[ec]);
