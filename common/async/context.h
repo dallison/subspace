@@ -35,6 +35,7 @@
 
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
 
+#include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/spawn.hpp>
 
 namespace subspace::async {
@@ -43,6 +44,15 @@ namespace subspace::async {
 // that is threaded down the call chain (there is no thread-local "current
 // coroutine").  Functions take a Context by value.
 using Context = boost::asio::yield_context;
+
+// A placeholder Context for code paths that never actually suspend (e.g. a
+// blocking client whose socket fds are left blocking, so the EAGAIN -> yield
+// path is never reached).  The returned value MUST NOT be used to drive an
+// asynchronous operation - it has no associated coroutine.  This mirrors the
+// co backend where a null co::Coroutine* means "block, don't yield".
+inline Context NullContext() {
+  return boost::asio::yield_context(nullptr, boost::asio::any_io_executor());
+}
 
 }  // namespace subspace::async
 
@@ -57,6 +67,9 @@ namespace subspace::async {
 // accept (const co::Coroutine *), so the co socket facade can be a thin alias
 // over toolbelt and call sites pass the Context straight through.
 using Context = const co::Coroutine *;
+
+// A null coroutine pointer means "block, don't yield" in the co backend.
+inline Context NullContext() { return nullptr; }
 
 }  // namespace subspace::async
 

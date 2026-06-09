@@ -12,12 +12,32 @@
 #include <vector>
 
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+#include <boost/asio/bind_cancellation_slot.hpp>
+#include <boost/asio/bind_executor.hpp>
+#include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/spawn.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/strand.hpp>
+#include <chrono>
+#include <list>
+#include <memory>
+#include <thread>
 #endif
 
 namespace subspace::async {
+
+// The execution engine an embedder provides to a Server (and to AsyncRuntime).
+// Under the co backend this is a co::CoroutineScheduler; under Asio it is a
+// boost::asio::io_context.  Exposed so callers (and tests) can declare an
+// engine variable in a backend-agnostic way and pass it to the Server.
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+using RuntimeEngine = boost::asio::io_context;
+#else
+using RuntimeEngine = co::CoroutineScheduler;
+#endif
 
 // Options that mirror the subset of co::CoroutineOptions the server uses when
 // spawning coroutines.  Under Asio `interrupt_fd` and `name` are advisory (Asio
@@ -26,6 +46,14 @@ namespace subspace::async {
 struct SpawnOptions {
   std::string name;
   int interrupt_fd = -1;
+  // Asio only: when false, the coroutine is tracked for the shutdown drain
+  // count but is NOT force-cancelled by StopGracefully().  Client handlers use
+  // this so that, during shutdown, they stay alive to service the orderly
+  // disconnect of the server's in-process clients (statistics / channel
+  // directory) instead of being killed out from under them (which would make
+  // those clients auto-reconnect and recreate channels).  They exit on their
+  // own when their peer closes the connection.  Ignored on the co backend.
+  bool cancellable = true;
 };
 
 // AsyncRuntime wraps the backend's execution engine.  Under the co backend it
@@ -36,29 +64,161 @@ struct SpawnOptions {
 class AsyncRuntime {
 public:
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
-  explicit AsyncRuntime(boost::asio::io_context &ioc) : ioc_(ioc) {}
+  explicit AsyncRuntime(boost::asio::io_context &ioc)
+      : ioc_(ioc), client_strand_(boost::asio::make_strand(ioc)) {}
 
   boost::asio::io_context &io_context() { return ioc_; }
 
-  // Spawn a coroutine running `fn(ctx)`.  The Asio implementation detaches the
-  // coroutine onto the io_context; the embedder owns running it.
-  void Spawn(std::function<void(Context)> fn, SpawnOptions = {}) {
-    boost::asio::spawn(
-        ioc_, [fn = std::move(fn)](Context yield) { fn(yield); },
-        boost::asio::detached);
+  // Spawn a coroutine running `fn(ctx)` directly on the io_context.  In
+  // multi-threaded mode (Run(n>1)) such a coroutine may run on any of the
+  // io_context threads and several may run concurrently.
+  void Spawn(std::function<void(Context)> fn, SpawnOptions opts = {}) {
+    SpawnTracked(ioc_.get_executor(), std::move(fn), opts.cancellable,
+                 std::move(opts.name));
   }
 
-  // Run/Stop drive the io_context.  When the embedder owns the io_context it
-  // can run it directly instead.
-  void Run() { ioc_.run(); }
+  // Spawn a coroutine on the client strand.  All coroutines spawned this way
+  // are serialized with respect to one another (Asio guarantees a strand runs
+  // at most one handler at a time), even when the io_context is run on multiple
+  // threads.  This is how the single-threaded invariant of the client handlers
+  // (and the listener that creates them) is preserved without any mutexes.
+  void SpawnOnStrand(std::function<void(Context)> fn, SpawnOptions opts = {}) {
+    SpawnTracked(client_strand_, std::move(fn), opts.cancellable,
+                 std::move(opts.name));
+  }
+
+  // Run the io_context on `num_threads` threads (the calling thread plus
+  // num_threads-1 helpers).  Blocks until the io_context runs out of work or is
+  // stopped, exactly like the single-threaded ioc_.run().
+  void Run(int num_threads = 1) {
+    if (num_threads <= 1) {
+      ioc_.run();
+      return;
+    }
+    std::vector<std::thread> threads;
+    threads.reserve(num_threads - 1);
+    for (int i = 0; i < num_threads - 1; i++) {
+      threads.emplace_back([this]() { ioc_.run(); });
+    }
+    ioc_.run();
+    for (auto &t : threads) {
+      t.join();
+    }
+  }
+
+  // Forcibly stop the io_context, abandoning any suspended coroutines.  Prefer
+  // StopGracefully() for a clean shutdown.
   void Stop() { ioc_.stop(); }
 
-  // No-ops / empty results under Asio; provided for source compatibility.
+  // Gracefully stop: cancel every tracked coroutine so its pending async
+  // operation completes with operation_aborted.  Each coroutine then unwinds
+  // its `while(!shutting_down_)` loop and returns while the owning objects are
+  // still alive, so no coroutine touches destroyed state (unlike a forced
+  // Stop()).  Once all coroutines have returned the io_context has no work left
+  // and Run() returns on its own.  Safe to call from another thread: the work
+  // is posted onto the strand and runs on an io_context thread.  This is the
+  // Asio analogue of the co backend's per-coroutine interrupt fd.
+  void StopGracefully() {
+    boost::asio::post(client_strand_, [this]() {
+      stopping_ = true;
+      EmitCancellations();
+    });
+  }
+
+  // No-op under Asio; provided for source compatibility.
   void EnableAborts(bool) {}
-  std::vector<std::string> AllCoroutineStrings() const { return {}; }
+
+  // Returns one (empty) string per live coroutine.  Only the size is
+  // meaningful: it is the number of coroutines currently tracked for
+  // cancellation, used by the listener to decide when it is the last coroutine
+  // standing during shutdown.  MUST be called from a coroutine running on the
+  // client strand (the listener is), since cancel_signals_ is strand-confined.
+  std::vector<std::string> AllCoroutineStrings() const {
+    std::vector<std::string> names;
+    names.reserve(cancel_signals_.size());
+    for (const auto &entry : cancel_signals_) {
+      names.push_back(entry.name);
+    }
+    return names;
+  }
 
 private:
+  // Emit cancellation to every live cancellable coroutine, then re-schedule
+  // ourselves while any cancellable coroutine is still alive.  This MUST run on
+  // the client strand.  Re-emitting is essential: boost::asio cancellation
+  // signals are not sticky - emit() only cancels the operation a coroutine is
+  // suspended on at that instant.  A coroutine that is between async operations
+  // (e.g. publishing, or processing a message) when we first emit would
+  // otherwise miss the cancellation entirely and then block forever in its next
+  // wait.  Re-emitting on a short timer keeps catching each coroutine the next
+  // time it suspends, playing the role the persistently-readable interrupt fd
+  // plays on the co backend.  The loop self-terminates once no cancellable
+  // coroutine remains (the non-cancellable client handlers exit on their own
+  // when their peers disconnect, and the listener stops once it is the last
+  // coroutine standing).
+  void EmitCancellations() {
+    bool any_cancellable = false;
+    for (auto &entry : cancel_signals_) {
+      if (entry.cancellable) {
+        entry.signal.emit(boost::asio::cancellation_type::all);
+        any_cancellable = true;
+      }
+    }
+    if (!any_cancellable) {
+      return;
+    }
+    reemit_timer_ = std::make_unique<boost::asio::steady_timer>(
+        client_strand_, std::chrono::milliseconds(2));
+    reemit_timer_->async_wait(boost::asio::bind_executor(
+        client_strand_, [this](const boost::system::error_code &ec) {
+          if (!ec) {
+            EmitCancellations();
+          }
+        }));
+  }
+
+  // Register a per-coroutine cancellation_signal (on the strand, so the
+  // registry needs no mutex even with multiple io_context threads), spawn the
+  // coroutine bound to that signal's slot, and deregister on completion.  If a
+  // graceful stop is already in progress the new coroutine is cancelled at
+  // once so it does not keep the io_context alive.
+  template <typename Executor>
+  void SpawnTracked(const Executor &ex, std::function<void(Context)> fn,
+                    bool cancellable, std::string name) {
+    boost::asio::post(client_strand_, [this, ex, cancellable,
+                                       name = std::move(name),
+                                       fn = std::move(fn)]() mutable {
+      auto it = cancel_signals_.emplace(cancel_signals_.end());
+      it->cancellable = cancellable;
+      it->name = std::move(name);
+      if (stopping_ && cancellable) {
+        it->signal.emit(boost::asio::cancellation_type::all);
+      }
+      boost::asio::spawn(
+          ex, [fn = std::move(fn)](Context yield) { fn(yield); },
+          boost::asio::bind_cancellation_slot(
+              it->signal.slot(), [this, it](std::exception_ptr) {
+                boost::asio::post(client_strand_,
+                                  [this, it]() { cancel_signals_.erase(it); });
+              }));
+    });
+  }
+
+  // One entry per live coroutine.  Only ever touched on client_strand_.
+  // std::list keeps iterators stable so each coroutine can erase its own entry
+  // on completion.
+  struct CoroutineEntry {
+    boost::asio::cancellation_signal signal;
+    bool cancellable = true;
+    std::string name;
+  };
+
   boost::asio::io_context &ioc_;
+  boost::asio::strand<boost::asio::io_context::executor_type> client_strand_;
+  std::list<CoroutineEntry> cancel_signals_;
+  bool stopping_ = false;
+  // Drives the periodic re-emit of cancellations during graceful shutdown.
+  std::unique_ptr<boost::asio::steady_timer> reemit_timer_;
 
 #else  // SUBSPACE_CORO_BACKEND_CO
   explicit AsyncRuntime(co::CoroutineScheduler &scheduler)
@@ -72,8 +232,18 @@ private:
                       .interrupt_fd = opts.interrupt_fd});
   }
 
-  void Run() { scheduler_.Run(); }
+  // The co backend is single-threaded, so there is no strand: spawning "on the
+  // strand" is identical to a normal spawn.
+  void SpawnOnStrand(std::function<void(Context)> fn, SpawnOptions opts = {}) {
+    Spawn(std::move(fn), std::move(opts));
+  }
+
+  // The co scheduler is single-threaded; num_threads is ignored.
+  void Run(int /*num_threads*/ = 1) { scheduler_.Run(); }
   void Stop() { scheduler_.Stop(); }
+  // The co backend drives graceful shutdown through per-coroutine interrupt fds
+  // (see Server::Stop); there is no separate runtime-level graceful stop.
+  void StopGracefully() { scheduler_.Stop(); }
   void EnableAborts(bool enabled) { scheduler_.EnableAborts(enabled); }
   std::vector<std::string> AllCoroutineStrings() const {
     return scheduler_.AllCoroutineStrings();

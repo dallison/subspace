@@ -1,6 +1,8 @@
 #include "client/client.h"
+#include "common/async/wait.h"
 #include "server/server.h"
 
+#include <chrono>
 #include <cstring>
 
 namespace nop_plugin {
@@ -9,13 +11,13 @@ constexpr int kHeartbeatSlotSize = 256;
 constexpr int kHeartbeatNumSlots = 16;
 constexpr uint64_t kHeartbeatPeriodNs = 1000000000ULL; // 1 second
 
-void HeartbeatCoroutine(subspace::Server &server,
-                        subspace::PluginContext *ctx) {
+void HeartbeatCoroutine(subspace::Server &server, subspace::PluginContext *ctx,
+                        subspace::async::Context coro_ctx) {
   if (server.ShuttingDown()) {
     return;
   }
 
-  subspace::Client client(co::self);
+  subspace::Client client(coro_ctx);
   absl::Status status = client.Init(server.GetSocketName());
   if (!status.ok()) {
     ctx->logger.Log(toolbelt::LogLevel::kError,
@@ -35,8 +37,13 @@ void HeartbeatCoroutine(subspace::Server &server,
 
   uint64_t seq = 0;
   for (;;) {
-    int fd = co::Wait(server.GetShutdownTriggerFd(), POLLIN, kHeartbeatPeriodNs);
-    if (fd != -1) {
+    // Wait up to one period for the shutdown fd.  Ok() means it became
+    // readable (shutting down); DeadlineExceeded means it is time to emit a
+    // heartbeat.
+    absl::Status wait_status = subspace::async::WaitReadable(
+        coro_ctx, server.GetShutdownTriggerFd(),
+        std::chrono::nanoseconds(kHeartbeatPeriodNs));
+    if (wait_status.ok()) {
       break;
     }
 
@@ -68,10 +75,11 @@ absl::Status OnStartup(subspace::Server & /*s*/, const std::string &name,
 void OnReady(subspace::Server &s, subspace::PluginContext *ctx) {
   ctx->logger.Log(toolbelt::LogLevel::kInfo, "NOP plugin ready\n");
 
-  s.GetScheduler().Spawn(
-      [&s, ctx]() { HeartbeatCoroutine(s, ctx); },
-      {.name = "NOP heartbeat",
-       .interrupt_fd = s.GetShutdownTriggerFd()});
+  s.SpawnCoroutine(
+      [&s, ctx](subspace::async::Context coro_ctx) {
+        HeartbeatCoroutine(s, ctx, coro_ctx);
+      },
+      {.name = "NOP heartbeat", .interrupt_fd = s.GetShutdownTriggerFd()});
 }
 
 void OnShutdown(subspace::PluginContext *ctx) {

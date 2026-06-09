@@ -23,7 +23,9 @@ using InetAddress = toolbelt::InetAddress;
 
 class StressTest : public SubspaceTestBase {};
 
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO
 static co::CoroutineScheduler *g_scheduler;
+#endif
 
 int StressValueForSplitBuffers(int normal_value, int split_buffer_value,
                                int low_resource_value = -1) {
@@ -57,8 +59,10 @@ int StressValueForSplitBuffers(int normal_value, int split_buffer_value,
 // For debugging, hit ^\ to dump all coroutines if this test is not working
 // properly.
 static void SigQuitHandler(int sig) {
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO
   std::cout << "\nAll coroutines:" << std::endl;
   g_scheduler->Show();
+#endif
   signal(sig, SIG_DFL);
   (void)raise(sig);
 }
@@ -80,8 +84,10 @@ TEST_F(StressTest, Coroutines) {
     std::vector<subspace::Subscriber> subs;
   };
 
-  co::CoroutineScheduler scheduler;
-  g_scheduler = &scheduler;
+  TestCoroMachine machine;
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO
+  g_scheduler = &machine.Scheduler();
+#endif
 
   std::vector<Client> clients;
   for (int i = 0; i < kNumClients; i++) {
@@ -107,10 +113,8 @@ TEST_F(StressTest, Coroutines) {
     }
   }
 
-  std::vector<std::unique_ptr<co::Coroutine>> coroutines;
-
   // Publish messages
-  auto publish = [&](co::Coroutine *c, int client_id, int pubId) {
+  auto publish = [&](TestCoroContext &c, int client_id, int pubId) {
     for (int i = 0; i < kNumSlots - 1; i++) {
       absl::StatusOr<void *> buffer =
           clients[client_id].pubs[pubId].GetMessageBuffer();
@@ -123,31 +127,27 @@ TEST_F(StressTest, Coroutines) {
   };
 
   // Publish all messages from all publishers in all clients.
-  auto publish_all = [&](co::Coroutine *c, int client_id) {
+  auto publish_all = [&](TestCoroContext &c, int client_id) {
     for (int i = 0; i < kNumChannels; i++) {
-      coroutines.push_back(std::make_unique<co::Coroutine>(
-          scheduler,
-          [&publish, client_id, i](co::Coroutine *c1) {
-            publish(c1, client_id, i);
-          },
-          absl::StrFormat("pub/%d/%d", client_id, i)));
-      c->Yield();
+      machine.Spawn([&publish, client_id, i](TestCoroContext &c1) {
+        publish(c1, client_id, i);
+      });
+      c.Yield();
     }
   };
 
   // Publish messages.
   for (int i = 0; i < kNumClients; i++) {
-    coroutines.push_back(std::make_unique<co::Coroutine>(
-        scheduler, [&publish_all, i](co::Coroutine *c) { publish_all(c, i); },
-        absl::StrFormat("publish_all/%d", i)));
+    machine.Spawn(
+        [&publish_all, i](TestCoroContext &c) { publish_all(c, i); });
   }
 
   // Read all messages from a single subscriber.
-  auto read = [&](co::Coroutine *c, int client_id, int subId) {
+  auto read = [&](TestCoroContext &c, int client_id, int subId) {
     int num_messages = 0;
     while (num_messages < kNumSlots - 1) {
       // Wait for notification of a message.
-      ASSERT_OK(clients[client_id].subs[subId].Wait(c));
+      c.Wait(clients[client_id].subs[subId].GetPollFd().fd);
       // Read all available messages.
       for (;;) {
         absl::StatusOr<Message> m =
@@ -164,23 +164,20 @@ TEST_F(StressTest, Coroutines) {
   };
 
   // Read all messages in all clients.
-  auto readAll = [&](co::Coroutine *c, int client_id) {
+  auto readAll = [&](TestCoroContext &c, int client_id) {
     for (int i = 0; i < kNumChannels; i++) {
-      coroutines.push_back(std::make_unique<co::Coroutine>(
-          scheduler,
-          [&read, client_id, i](co::Coroutine *c1) { read(c1, client_id, i); },
-          absl::StrFormat("sub/%d/%d", client_id, i)));
+      machine.Spawn([&read, client_id, i](TestCoroContext &c1) {
+        read(c1, client_id, i);
+      });
     }
   };
 
   // Read messages.
   for (int i = 0; i < kNumClients; i++) {
-    coroutines.push_back(std::make_unique<co::Coroutine>(
-        scheduler, [&readAll, i](co::Coroutine *c) { readAll(c, i); },
-        "readall"));
+    machine.Spawn([&readAll, i](TestCoroContext &c) { readAll(c, i); });
   }
 
-  scheduler.Run();
+  machine.Run();
 
   signal(SIGQUIT, oldSig);
 }

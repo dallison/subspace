@@ -30,16 +30,19 @@ boost::asio::io_context &IocFromYield(Context yield) {
       yield.get_executor().context());
 }
 
-// Wait until `fd` is readable, yielding the coroutine.  Operates on a dup so it
-// never closes the caller's fd.
+// Wait until `fd` is readable, yielding the coroutine.  The stream_descriptor
+// is given the caller's real fd and `release()`d before it is destroyed so it
+// never closes the caller's fd.  We deliberately do NOT ::dup() the fd: dup'ing
+// churns ephemeral fd numbers through the shared process fd table, and when two
+// io_contexts (e.g. an in-process server and client) recycle those numbers
+// across their separate reactors a completion can resume a coroutine owned by
+// the other io_context's thread.  Using the stable real fd keeps each
+// descriptor registered in exactly one reactor.
 absl::Status WaitFdReadable(Context yield, int fd) {
-  int dup_fd = ::dup(fd);
-  if (dup_fd < 0) {
-    return absl::InternalError("dup failed");
-  }
-  boost::asio::posix::stream_descriptor sd(IocFromYield(yield), dup_fd);
+  boost::asio::posix::stream_descriptor sd(IocFromYield(yield), fd);
   boost::system::error_code ec;
   sd.async_wait(boost::asio::posix::stream_descriptor::wait_read, yield[ec]);
+  sd.release();
   if (ec) {
     return absl::InternalError(
         absl::StrFormat("wait_read error: %s", ec.message()));
@@ -48,13 +51,10 @@ absl::Status WaitFdReadable(Context yield, int fd) {
 }
 
 absl::Status WaitFdWritable(Context yield, int fd) {
-  int dup_fd = ::dup(fd);
-  if (dup_fd < 0) {
-    return absl::InternalError("dup failed");
-  }
-  boost::asio::posix::stream_descriptor sd(IocFromYield(yield), dup_fd);
+  boost::asio::posix::stream_descriptor sd(IocFromYield(yield), fd);
   boost::system::error_code ec;
   sd.async_wait(boost::asio::posix::stream_descriptor::wait_write, yield[ec]);
+  sd.release();
   if (ec) {
     return absl::InternalError(
         absl::StrFormat("wait_write error: %s", ec.message()));
@@ -131,8 +131,11 @@ absl::Status StreamSocket::Bind(const SocketAddress &addr, bool listen) {
     return absl::InternalError(
         absl::StrFormat("socket() failed: %s", strerror(errno)));
   }
-  int one = 1;
-  ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+  // NB: intentionally do NOT set SO_REUSEADDR here.  toolbelt's TCPSocket::Bind
+  // (the co backend) does not set it by default, and the bridge port-range
+  // logic relies on a bind to an already-occupied port failing.  Setting
+  // SO_REUSEADDR would let a specific-IP bind coexist with a wildcard listener
+  // on the same port, breaking that behavior.
   if (::bind(fd, reinterpret_cast<sockaddr *>(&ss), *len) < 0) {
     int e = errno;
     ::close(fd);
@@ -521,6 +524,8 @@ absl::StatusOr<ssize_t> SendAll(int fd, Context ctx, const char *buffer,
 struct UnixSocket::Impl {
   int fd = -1;
   bool connected = false;
+  // When true the fd is left blocking and socket I/O never yields.
+  bool blocking = false;
   ~Impl() {
     if (fd >= 0) {
       ::close(fd);
@@ -532,6 +537,12 @@ UnixSocket::UnixSocket() {
   int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
   impl_ = std::make_shared<Impl>();
   impl_->fd = fd;
+}
+
+void UnixSocket::SetBlocking(bool blocking) {
+  if (impl_ != nullptr) {
+    impl_->blocking = blocking;
+  }
 }
 
 UnixSocket::UnixSocket(int fd, bool connected) {
@@ -557,7 +568,9 @@ absl::Status UnixSocket::Bind(const std::string &pathname, bool listen) {
     return absl::InternalError(
         absl::StrFormat("listen() failed: %s", strerror(errno)));
   }
-  SetFdNonBlocking(impl_->fd);
+  if (!impl_->blocking) {
+    SetFdNonBlocking(impl_->fd);
+  }
   bound_address_ = pathname;
   return absl::OkStatus();
 }
@@ -574,7 +587,9 @@ absl::Status UnixSocket::Connect(const std::string &pathname) {
     return absl::InternalError(absl::StrFormat(
         "Failed to connect unix socket to %s: %s", pathname, strerror(errno)));
   }
-  SetFdNonBlocking(impl_->fd);
+  if (!impl_->blocking) {
+    SetFdNonBlocking(impl_->fd);
+  }
   impl_->connected = true;
   return absl::OkStatus();
 }

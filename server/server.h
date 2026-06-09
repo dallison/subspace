@@ -86,7 +86,13 @@ public:
   void SetLogLevel(const std::string &level) { logger_.SetLogLevel(level); }
   toolbelt::LogLevel GetLogLevel() const { return logger_.GetLogLevel(); }
 
-  absl::Status Run();
+  // Run the server.  On the Asio backend `num_asio_threads` controls how many
+  // threads run the io_context (default 1, i.e. inline on the calling thread).
+  // Client handlers and the listener are confined to a strand, so they remain
+  // serialized regardless of the thread count; other coroutines (discovery,
+  // bridging) can run concurrently across the threads.  The argument is ignored
+  // on the co backend, which is always single-threaded.
+  absl::Status Run(int num_asio_threads = 1);
   void Stop(bool force = false);
 
   // The machine name can be used to distinguish between multiple servers
@@ -152,6 +158,17 @@ public:
     bridge_advertise_address_ = addr;
   }
 
+  // Enable vsock (AF_VSOCK) for bridge and retirement connections instead of
+  // TCP.  Discovery still runs over IP (UDP/TCP); only the per-channel bridge
+  // data connections switch to vsock.  `advertise_cid` is the context id this
+  // server advertises to peers as the address they should connect to - i.e.
+  // this server's own local CID (e.g. the guest CID assigned by the
+  // hypervisor, VMADDR_CID_HOST on the host, or VMADDR_CID_LOCAL for loopback).
+  void SetVsockBridging(bool enable, uint32_t advertise_cid) {
+    use_vsock_ = enable;
+    vsock_cid_ = advertise_cid;
+  }
+
   void CleanupFilesystem();
   void CleanupAfterSession();
 
@@ -163,6 +180,15 @@ public:
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO
   virtual co::CoroutineScheduler &GetScheduler() { return runtime_.scheduler(); }
 #endif
+
+  // Backend-agnostic way for plugins (and internal code) to spawn a coroutine
+  // on the server's runtime.  The spawned function receives the active
+  // async::Context (a co::Coroutine* under the co backend, a yield_context
+  // under Asio) which it threads into client/socket/wait calls.
+  void SpawnCoroutine(std::function<void(async::Context)> fn,
+                      async::SpawnOptions opts = {}) {
+    runtime_.Spawn(std::move(fn), std::move(opts));
+  }
 
   absl::flat_hash_map<std::string, std::unique_ptr<ServerChannel>> &
   GetChannels() {
@@ -326,6 +352,12 @@ private:
   bool local_;
   bool tcp_discovery_ = false;
   toolbelt::InetAddress bridge_advertise_address_;
+  // When true, bridge (and retirement) connections use vsock instead of TCP.
+  // Discovery still runs over IP; only the bridge data connections change.
+  // vsock_cid_ is the context id this server advertises to peers as the one
+  // they should connect to (its own local CID).
+  bool use_vsock_ = false;
+  uint32_t vsock_cid_ = 0;
   absl::flat_hash_set<std::shared_ptr<DiscoveryConnection>>
       discovery_connections_;
   toolbelt::FileDescriptor notify_fd_;

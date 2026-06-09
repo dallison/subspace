@@ -332,6 +332,11 @@ static absl::Status FindIPAddresses(const std::string &interface,
   return absl::OkStatus();
 }
 
+// VMADDR_CID_ANY (== (uint32_t)-1) without requiring <linux/vm_sockets.h>,
+// which is Linux-only.  Used to bind a vsock listener that accepts connections
+// to any of the host's local context ids.
+static constexpr uint32_t kVsockCidAny = 0xFFFFFFFFu;
+
 static absl::StatusOr<toolbelt::SocketAddress>
 BridgeAddressWithPort(const toolbelt::SocketAddress &addr, int port) {
   switch (addr.Type()) {
@@ -437,6 +442,23 @@ void Server::Stop(bool force) {
   if (shutting_down_) {
     return;
   }
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  // The Asio backend replaces the co scheduler's per-coroutine interrupt fd
+  // with Asio cancellation.  Mark shutdown so the coroutines' `while
+  // (!shutting_down_)` loops exit, let plugins react, trigger the shutdown fd
+  // (for anything that also watches it), then ask the runtime to cancel every
+  // live coroutine.  Each coroutine's pending wait completes with
+  // operation_aborted and it returns while the server is still alive, so
+  // nothing touches destroyed state.  Once they have all returned the
+  // io_context drains and Run() returns on its own.
+  (void)force;
+  shutting_down_ = true;
+  for (auto &plugin : plugins_) {
+    plugin->interface->OnShutdown();
+  }
+  shutdown_trigger_fd_.Trigger();
+  runtime_.StopGracefully();
+#else
   if (force || !wait_for_clients_) {
     runtime_.Stop();
     return;
@@ -447,6 +469,7 @@ void Server::Stop(bool force) {
   }
   shutdown_trigger_fd_.Trigger();
   NotifyViaFd(kServerWaiting);
+#endif
 }
 
 void Server::CreateShutdownTrigger() {
@@ -461,6 +484,13 @@ void Server::CreateShutdownTrigger() {
 }
 
 toolbelt::SocketAddress Server::BridgeBindBase() const {
+  // vsock bridging: bind the listener to (VMADDR_CID_ANY, 0) so it accepts
+  // connections addressed to any of this host's local CIDs and the kernel
+  // assigns an ephemeral vsock port.  The CID we advertise to peers (vsock_cid_)
+  // is handled separately at advertise time.
+  if (use_vsock_) {
+    return toolbelt::SocketAddress(kVsockCidAny, /*port=*/0);
+  }
   // When advertising a separate (e.g. forwarded loopback) address, bind to the
   // any-address so the listener is reachable both on the local interface and
   // via a forwarded loopback port.  Otherwise bind to the local interface.
@@ -532,14 +562,28 @@ void Server::ListenerCoroutine(async::Context ctx,
                                async::UnixSocket &listen_socket) {
   for (;;) {
     if (shutting_down_) {
-      // Keep this running until all other coroutines have completed.
-      // This is to make sure that other coroutines that have publisher
-      // and subscribers are able to connect to the server and delete them
-      // on shutdown.
+      // Keep this running until all other coroutines have completed.  This
+      // makes sure that other coroutines that own publishers and subscribers
+      // are able to connect to the server and delete them on shutdown.  On the
+      // co backend the count comes from the scheduler; on Asio it is the number
+      // of live (cancellation-tracked) coroutines.  When this listener is the
+      // only one left, it is safe to stop.
       auto strings = runtime_.AllCoroutineStrings();
       if (strings.size() == 1) {
         break;
       }
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+      // Shutdown was signalled (our Accept was cancelled by StopGracefully).
+      // Stop accepting new connections and instead poll the drain count,
+      // yielding the strand via a short sleep so the remaining coroutines
+      // (notably the client handlers that service the orderly disconnect of
+      // the in-process clients) can run and finish.  Asio cancellation is
+      // one-shot, so we cannot simply re-block in Accept and expect to wake
+      // again; this poll plays the role the persistently-readable interrupt fd
+      // plays on the co backend.
+      async::Sleep(ctx, std::chrono::milliseconds(5));
+      continue;
+#endif
     }
     absl::Status status = HandleIncomingConnection(ctx, listen_socket);
     if (!status.ok()) {
@@ -661,7 +705,7 @@ void Server::CleanupFilesystem() {
 #endif
 }
 
-absl::Status Server::Run() {
+absl::Status Server::Run(int num_asio_threads) {
   std::vector<struct pollfd> poll_fds;
 
 #ifndef __linux__
@@ -918,23 +962,33 @@ absl::Status Server::Run() {
   // We don't need to abort handling anyway.
   runtime_.EnableAborts(false);
 
-  // Start the listener coroutine.
-  runtime_.Spawn(
+  // Start the listener coroutine.  It runs on the client strand so that it is
+  // serialized with the client handlers it spawns (they all share the
+  // client_handlers_ vector and the server's channel state).
+  runtime_.SpawnOnStrand(
       [this, &listen_socket](async::Context ctx) {
         ListenerCoroutine(ctx, listen_socket);
       },
       {.name = "Listener UDS",
        .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
 
+  // All of the coroutines below run on the client strand because they read or
+  // mutate server-wide state (the channels_ map, channel_ids_, per-channel
+  // bridge bookkeeping and the shared discovery sockets) that the client
+  // handlers also touch.  Confining them to the same strand keeps that state
+  // mutex-free even when the io_context runs on multiple threads.  Only the
+  // bridge data-plane coroutines (transmitter/receiver and their retirement
+  // helpers) run directly on the io_context so their I/O can spread across
+  // threads.
   if (publish_server_channels_) {
     // Start the channel directory coroutine.
-    runtime_.Spawn(
+    runtime_.SpawnOnStrand(
         [this](async::Context ctx) { ChannelDirectoryCoroutine(ctx); },
         {.name = "Channel directory",
          .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
 
     // Start the channel stats coroutine.
-    runtime_.Spawn(
+    runtime_.SpawnOnStrand(
         [this](async::Context ctx) { StatisticsCoroutine(ctx); },
         {.name = "Channel stats",
          .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
@@ -945,19 +999,19 @@ absl::Status Server::Run() {
       // TCP discovery: a server with a peer address dials it; otherwise we
       // listen for an incoming discovery connection.
       if (peer_address_.Valid()) {
-        runtime_.Spawn(
+        runtime_.SpawnOnStrand(
             [this](async::Context ctx) { DiscoveryConnectorCoroutine(ctx); },
             {.name = "Discovery connector",
              .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
       } else {
-        runtime_.Spawn(
+        runtime_.SpawnOnStrand(
             [this](async::Context ctx) { DiscoveryListenerCoroutine(ctx); },
             {.name = "Discovery listener",
              .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
       }
     } else {
       // Start the discovery receiver coroutine.
-      runtime_.Spawn(
+      runtime_.SpawnOnStrand(
           [this](async::Context ctx) { DiscoveryReceiverCoroutine(ctx); },
           {.name = "Discovery receiver",
            .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
@@ -965,7 +1019,7 @@ absl::Status Server::Run() {
 
     // Start the gratuitous Advertiser coroutine.  This sends Advertise messages
     // every 5 seconds.
-    runtime_.Spawn(
+    runtime_.SpawnOnStrand(
         [this](async::Context ctx) { GratuitousAdvertiseCoroutine(ctx); },
         {.name = "Gratuitous advertiser",
          .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
@@ -983,7 +1037,7 @@ absl::Status Server::Run() {
   }
 
   // Run the coroutine main loop.
-  runtime_.Run();
+  runtime_.Run(num_asio_threads);
 
   // Notify listener that we're stopped.
   NotifyViaFd(kServerStopped);
@@ -1001,14 +1055,24 @@ Server::HandleIncomingConnection(async::Context ctx,
       std::make_unique<ClientHandler>(this, std::move(*s)));
   ClientHandler *handler_ptr = client_handlers_.back().get();
 
-  runtime_.Spawn(
+  // Client handlers run on the client strand so they are serialized with one
+  // another and with the listener.  This preserves the single-threaded
+  // invariant for all client-handler logic and the shared server state they
+  // touch, without any mutexes, even when the io_context runs on many threads.
+  runtime_.SpawnOnStrand(
       [this, handler_ptr](async::Context handler_ctx) {
         handler_ptr->Run(handler_ctx);
         CloseHandler(handler_ptr);
       },
       {.name = "Client handler",
        .interrupt_fd =
-           wait_for_clients_ ? shutdown_trigger_fd_.GetPollFd().Fd() : -1});
+           wait_for_clients_ ? shutdown_trigger_fd_.GetPollFd().Fd() : -1,
+       // On Asio, do not force-cancel client handlers at shutdown: they must
+       // stay alive to service the orderly disconnect of the server's
+       // in-process clients (statistics / channel directory).  They exit on
+       // their own when the peer closes the connection, and the listener waits
+       // for them via the drain count before stopping.
+       .cancellable = false});
 
   return absl::OkStatus();
 }
@@ -1391,8 +1455,10 @@ void Server::SendQuery(const std::string &channel_name) {
   if (local_) {
     return;
   }
-  // Spawn a coroutine to send the Query message.
-  runtime_.Spawn(
+  // Spawn a coroutine to send the Query message.  Runs on the client strand:
+  // it shares the discovery sockets/connections with the discovery coroutines
+  // and is itself invoked from client handlers (also on the strand).
+  runtime_.SpawnOnStrand(
       [this, channel_name](async::Context ctx) {
         logger_.Log(toolbelt::LogLevel::kDebug,
                     "Sending Query %s with discovery port %d",
@@ -1419,8 +1485,10 @@ void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
   if (local_) {
     return;
   }
-  // Spawn a coroutine to send the Publish message.
-  runtime_.Spawn(
+  // Spawn a coroutine to send the Publish message.  Runs on the client strand
+  // (shares the discovery sockets/connections with the discovery coroutines and
+  // is invoked from client handlers).
+  runtime_.SpawnOnStrand(
       [this, channel_name, reliable](async::Context ctx) {
         logger_.Log(toolbelt::LogLevel::kDebug,
                     "Sending Advertise %s with discovery port %d",
@@ -1601,7 +1669,9 @@ void Server::DiscoveryListenerCoroutine(async::Context ctx) {
     // Advertise our channels right away so the peer can bridge without waiting
     // for the next gratuitous advertise cycle.
     AdvertiseAllChannels();
-    runtime_.Spawn(
+    // Runs on the client strand: the reader handles incoming Advertise/Subscribe
+    // messages which mutate channels_ and channel_ids_.
+    runtime_.SpawnOnStrand(
         [this, conn](async::Context reader_ctx) {
           DiscoveryConnectionReaderLoop(reader_ctx, conn);
           RemoveDiscoveryConnection(conn);
@@ -1653,6 +1723,9 @@ void Server::DiscoveryReceiverCoroutine(async::Context ctx) {
     absl::StatusOr<ssize_t> n = discovery_receiver_.ReceiveFrom(
         sender, buffer, sizeof(buffer), ctx);
     if (!n.ok()) {
+      if (shutting_down_) {
+        return;
+      }
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to read discovery message: %s",
                   n.status().ToString().c_str());
@@ -1760,11 +1833,14 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
                             ? bridge_advertise_address_.IpAddress()
                             : retirement_addr.GetInetAddress().IpAddress();
       ret_addr->set_address(&ip_addr, sizeof(ip_addr));
+      ret_addr->set_family(ChannelAddress::FAMILY_INET);
       break;
     }
     case toolbelt::SocketAddress::kAddressVirtual: {
-      uint32_t cid = retirement_addr.GetVirtualAddress().Cid();
+      // vsock: advertise our configured local CID (see SendSubscribeMessage).
+      uint32_t cid = vsock_cid_;
       ret_addr->set_address(&cid, sizeof(cid));
+      ret_addr->set_family(ChannelAddress::FAMILY_VSOCK);
       break;
     }
     default:
@@ -2016,12 +2092,15 @@ Server::SendSubscribeMessage(const std::string &channel_name, bool reliable,
                           ? bridge_advertise_address_.IpAddress()
                           : receiver_addr.GetInetAddress().IpAddress();
     sub_addr->set_address(&ip_addr, sizeof(ip_addr));
+    sub_addr->set_family(ChannelAddress::FAMILY_INET);
     break;
   }
   case toolbelt::SocketAddress::kAddressVirtual: {
-    // Virtual address.
-    uint32_t cid = receiver_addr.GetVirtualAddress().Cid();
+    // vsock: advertise our configured local CID (the listener is bound to
+    // VMADDR_CID_ANY, so its own CID is not the one peers should dial).
+    uint32_t cid = vsock_cid_;
     sub_addr->set_address(&cid, sizeof(cid));
+    sub_addr->set_family(ChannelAddress::FAMILY_VSOCK);
     break;
   }
   default:
@@ -2145,8 +2224,10 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
   if (subscribed.notify_retirement()) {
     retirement_transmitter = std::make_unique<async::StreamSocket>();
     toolbelt::SocketAddress retirement_addr;
-    switch (my_address_.Type()) {
-    case toolbelt::SocketAddress::kAddressInet: {
+    // The address family travels in the message (see SendSubscribeMessage);
+    // unset defaults to FAMILY_INET for compatibility with older peers.
+    switch (subscribed.retirement_socket().family()) {
+    case ChannelAddress::FAMILY_INET: {
       // IPv4 address.
       struct sockaddr_in tmp_addr;
       memset(&tmp_addr, 0, sizeof(tmp_addr));
@@ -2157,7 +2238,7 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
       retirement_addr = toolbelt::SocketAddress(tmp_addr);
       break;
     }
-    case toolbelt::SocketAddress::kAddressVirtual: {
+    case ChannelAddress::FAMILY_VSOCK: {
       // Virtual address.
       struct sockaddr_vm tmp_addr;
       memset(&tmp_addr, 0, sizeof(tmp_addr));
@@ -2170,8 +2251,7 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
     }
     default:
       logger_.Log(toolbelt::LogLevel::kError,
-                  "Unsupported address type for retirement notification: %s",
-                  my_address_.ToString().c_str());
+                  "Unsupported address family for retirement notification");
       return;
     }
 
@@ -2474,11 +2554,14 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
     channel->second->RemoveBridgedAddress(sender, sub_reliable);
     channel->second->AddBridgedAddress(sender, sub_reliable, server_id);
 
-    // The subscribe message contains the IP address and port of the
-    // socket listening for our connection for the channel.  Extract it.
+    // The subscribe message contains the address and port of the socket
+    // listening for our connection for the channel.  The address family is
+    // carried in the message itself (FAMILY_INET for TCP, FAMILY_VSOCK for
+    // vsock) so the two servers do not have to share the same local address
+    // type.  Older peers leave family unset, which defaults to FAMILY_INET.
     toolbelt::SocketAddress subscriber_addr;
-    switch (my_address_.Type()) {
-    case toolbelt::SocketAddress::kAddressInet: {
+    switch (subscribe.receiver().family()) {
+    case ChannelAddress::FAMILY_INET: {
       in_addr subscriber_ip;
       memcpy(&subscriber_ip, subscribe.receiver().address().data(),
              sizeof(subscriber_ip));
@@ -2488,7 +2571,7 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
           toolbelt::SocketAddress(subscriber_ip, subscribe.receiver().port());
       break;
     }
-    case toolbelt::SocketAddress::kAddressVirtual: {
+    case ChannelAddress::FAMILY_VSOCK: {
       uint32_t cid = *reinterpret_cast<const uint32_t *>(
           subscribe.receiver().address().data());
       subscriber_addr =
@@ -2497,7 +2580,7 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
     }
     default:
       logger_.Log(toolbelt::LogLevel::kError,
-                  "Unknown address type for subscribe receiver");
+                  "Unknown address family for subscribe receiver");
       return;
     }
 
@@ -2522,8 +2605,11 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
 
 void Server::GratuitousAdvertiseCoroutine(async::Context ctx) {
   constexpr int kPeriodSecs = 5;
-  for (;;) {
+  while (!shutting_down_) {
     async::Sleep(ctx, kPeriodSecs);
+    if (shutting_down_) {
+      break;
+    }
     for (auto &channel : channels_) {
       if (!channel.second->IsLocal() && !channel.second->IsBridgePublisher()) {
         SendAdvertise(channel.first, channel.second->IsReliable());

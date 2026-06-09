@@ -7,9 +7,23 @@
 #include "server.h"
 #include <cerrno>
 #include <csignal>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 
+#if defined(__linux__)
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#if __has_include(<linux/vm_sockets.h>)
+#include <linux/vm_sockets.h>
+#endif
+#endif
+
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+#include <boost/asio/io_context.hpp>
+#else
 static co::CoroutineScheduler *g_scheduler;
 void Signal(int sig) {
   printf("\nAll coroutines:\n");
@@ -17,6 +31,7 @@ void Signal(int sig) {
   signal(sig, SIG_DFL);
   raise(sig);
 }
+#endif
 
 #if defined(__ANDROID__)
 ABSL_FLAG(std::string, socket, "/data/local/tmp/subspace",
@@ -48,6 +63,20 @@ ABSL_FLAG(std::string, bridge_advertise_address, "",
           "any-address when this is set.");
 ABSL_FLAG(int, notify_fd, -1, "File descriptor to notify of startup");
 ABSL_FLAG(std::string, machine, "", "Machine name");
+ABSL_FLAG(bool, vsock, false,
+          "Use vsock (AF_VSOCK) instead of TCP for the per-channel bridge (and "
+          "retirement) connections. Discovery still runs over IP. Linux only.");
+ABSL_FLAG(int, vsock_cid, -1,
+          "Local vsock context id (CID) to advertise to peers as the address "
+          "they should connect to for bridges. -1 (default) auto-detects this "
+          "server's local CID via /dev/vsock. Well-known CIDs: 1 = local "
+          "(loopback), 2 = host. Only used when --vsock is set.");
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+ABSL_FLAG(int, num_asio_threads, 1,
+          "Number of threads that run the io_context. Client handlers and the "
+          "UDS listener are confined to a strand so they stay serialized; "
+          "discovery/bridging coroutines spread across the threads.");
+#endif
 
 // macOS, Android, and QNX all benefit from cleaning up the filesystem on
 // startup.  On Linux the server uses /dev/shm directly and tests routinely
@@ -63,6 +92,33 @@ ABSL_FLAG(std::string, shadow_socket, "",
           "Primary shadow process Unix socket (empty = disabled)");
 ABSL_FLAG(std::string, secondary_shadow_socket, "",
           "Secondary shadow process Unix socket (empty = disabled)");
+
+// Look up this host's local vsock context id (CID) so we can advertise it to
+// bridge peers.  Only meaningful on Linux with vsock support.
+static bool ResolveLocalVsockCid(uint32_t *cid_out, std::string *err) {
+#if defined(__linux__) && defined(IOCTL_VM_SOCKETS_GET_LOCAL_CID)
+  int fd = ::open("/dev/vsock", O_RDONLY | O_CLOEXEC);
+  if (fd < 0) {
+    *err = std::string("open(/dev/vsock): ") + strerror(errno);
+    return false;
+  }
+  unsigned int cid = 0;
+  int r = ::ioctl(fd, IOCTL_VM_SOCKETS_GET_LOCAL_CID, &cid);
+  int e = errno;
+  ::close(fd);
+  if (r < 0) {
+    *err = std::string("ioctl(IOCTL_VM_SOCKETS_GET_LOCAL_CID): ") + strerror(e);
+    return false;
+  }
+  *cid_out = static_cast<uint32_t>(cid);
+  return true;
+#else
+  (void)cid_out;
+  *err = "vsock local CID auto-detection is only supported on Linux; pass "
+         "--vsock_cid explicitly";
+  return false;
+#endif
+}
 
 static bool ParsePort(const std::string &value, int *port) {
   if (value.empty()) {
@@ -109,11 +165,17 @@ static bool ParseBridgePorts(const std::string &value, int *first_port,
 int main(int argc, char **argv) {
   absl::ParseCommandLine(argc, argv);
 
-  co::CoroutineScheduler scheduler;
-
-  g_scheduler = &scheduler; // For signal handler.
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  // The execution engine for the asio backend is an io_context that Server::Run
+  // drives.
+  boost::asio::io_context engine;
+  signal(SIGPIPE, SIG_IGN);
+#else
+  co::CoroutineScheduler engine;
+  g_scheduler = &engine; // For signal handler.
   signal(SIGPIPE, SIG_IGN);
   signal(SIGQUIT, Signal);
+#endif
 
   // Close the plugins when the server is shutting down.
   subspace::ClosePluginsOnShutdown();
@@ -122,13 +184,13 @@ int main(int argc, char **argv) {
 
   if (absl::GetFlag(FLAGS_peer_address).empty()) {
     server = std::make_unique<subspace::Server>(
-        scheduler, absl::GetFlag(FLAGS_socket), absl::GetFlag(FLAGS_interface),
+        engine, absl::GetFlag(FLAGS_socket), absl::GetFlag(FLAGS_interface),
         absl::GetFlag(FLAGS_disc_port), absl::GetFlag(FLAGS_peer_port),
         absl::GetFlag(FLAGS_local), absl::GetFlag(FLAGS_notify_fd));
   } else {
     toolbelt::InetAddress peer_address(absl::GetFlag(FLAGS_peer_address), absl::GetFlag(FLAGS_peer_port));
     server = std::make_unique<subspace::Server>(
-        scheduler, absl::GetFlag(FLAGS_socket), absl::GetFlag(FLAGS_interface),
+        engine, absl::GetFlag(FLAGS_socket), absl::GetFlag(FLAGS_interface),
         peer_address, absl::GetFlag(FLAGS_disc_port),
         absl::GetFlag(FLAGS_peer_port), absl::GetFlag(FLAGS_local),
         absl::GetFlag(FLAGS_notify_fd));
@@ -189,11 +251,35 @@ int main(int argc, char **argv) {
     }
   }
 
+  if (absl::GetFlag(FLAGS_vsock)) {
+    int cid_flag = absl::GetFlag(FLAGS_vsock_cid);
+    uint32_t cid = 0;
+    if (cid_flag >= 0) {
+      cid = static_cast<uint32_t>(cid_flag);
+    } else {
+      std::string err;
+      if (!ResolveLocalVsockCid(&cid, &err)) {
+        fprintf(stderr, "Failed to determine local vsock CID: %s\n",
+                err.c_str());
+        exit(1);
+      }
+    }
+    server->SetVsockBridging(true, cid);
+  }
+
   server->SetMachineName(absl::GetFlag(FLAGS_machine));
   server->SetShadowSockets(absl::GetFlag(FLAGS_shadow_socket),
                             absl::GetFlag(FLAGS_secondary_shadow_socket));
 
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  int num_asio_threads = absl::GetFlag(FLAGS_num_asio_threads);
+  if (num_asio_threads < 1) {
+    num_asio_threads = 1;
+  }
+  absl::Status s = server->Run(num_asio_threads);
+#else
   absl::Status s = server->Run();
+#endif
   if (!s.ok()) {
     fprintf(stderr, "Error running Subspace server: %s\n",
             s.ToString().c_str());

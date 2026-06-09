@@ -27,17 +27,18 @@ boost::asio::io_context &IocFromYield(boost::asio::yield_context yield) {
 
 absl::Status WaitReadable(Context ctx, int fd, std::chrono::nanoseconds timeout) {
   boost::asio::io_context &ioc = IocFromYield(ctx);
-  // Dup the fd so the posix::stream_descriptor can own/close its own copy
-  // without disturbing the caller's fd.
-  int dup_fd = ::dup(fd);
-  if (dup_fd < 0) {
-    return absl::InternalError("Failed to dup fd for WaitReadable");
-  }
+  // We register the caller's real fd with the reactor and release() it before
+  // the descriptor is destroyed so we never close it.  We intentionally do NOT
+  // ::dup(): dup'ing churns ephemeral fd numbers through the shared process fd
+  // table, and two io_contexts (e.g. an in-process server + client) recycling
+  // those numbers across their separate reactors can resume a coroutine owned
+  // by the other io_context's thread.  The stable real fd avoids that.
 
   if (timeout.count() == 0) {
-    boost::asio::posix::stream_descriptor sd(ioc, dup_fd);
+    boost::asio::posix::stream_descriptor sd(ioc, fd);
     boost::system::error_code ec;
     sd.async_wait(boost::asio::posix::stream_descriptor::wait_read, ctx[ec]);
+    sd.release();
     if (ec) {
       return absl::InternalError(
           absl::StrFormat("WaitReadable error: %s", ec.message()));
@@ -45,7 +46,7 @@ absl::Status WaitReadable(Context ctx, int fd, std::chrono::nanoseconds timeout)
     return absl::OkStatus();
   }
 
-  auto sd = std::make_shared<boost::asio::posix::stream_descriptor>(ioc, dup_fd);
+  auto sd = std::make_shared<boost::asio::posix::stream_descriptor>(ioc, fd);
   auto timer = std::make_shared<boost::asio::steady_timer>(ioc, timeout);
   auto timed_out = std::make_shared<bool>(false);
   auto fd_ready = std::make_shared<bool>(false);
@@ -76,6 +77,9 @@ absl::Status WaitReadable(Context ctx, int fd, std::chrono::nanoseconds timeout)
   boost::system::error_code ec;
   notifier.async_wait(ctx[ec]);
 
+  // Release the real fd so destroying the shared descriptor does not close it.
+  sd->release();
+
   if (*timed_out) {
     return absl::DeadlineExceededError("Timeout waiting for fd");
   }
@@ -87,18 +91,10 @@ absl::Status WaitReadable(Context ctx, int fd, std::chrono::nanoseconds timeout)
 
 absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2) {
   boost::asio::io_context &ioc = IocFromYield(ctx);
-  int dup1 = ::dup(fd1);
-  int dup2 = ::dup(fd2);
-  if (dup1 < 0 || dup2 < 0) {
-    if (dup1 >= 0)
-      ::close(dup1);
-    if (dup2 >= 0)
-      ::close(dup2);
-    return absl::InternalError("Failed to dup fds for WaitEither");
-  }
-
-  auto sd1 = std::make_shared<boost::asio::posix::stream_descriptor>(ioc, dup1);
-  auto sd2 = std::make_shared<boost::asio::posix::stream_descriptor>(ioc, dup2);
+  // Register the caller's real fds (no ::dup(); see WaitReadable) and release()
+  // them before the descriptors are destroyed so we never close them.
+  auto sd1 = std::make_shared<boost::asio::posix::stream_descriptor>(ioc, fd1);
+  auto sd2 = std::make_shared<boost::asio::posix::stream_descriptor>(ioc, fd2);
 
   auto result_fd = std::make_shared<int>(-1);
   auto done = std::make_shared<bool>(false);
@@ -131,6 +127,11 @@ absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2) {
 
   boost::system::error_code ec;
   notifier.async_wait(ctx[ec]);
+
+  // Release the real fds so destroying the shared descriptors does not close
+  // them.  cancel() above already completed any outstanding wait.
+  sd1->release();
+  sd2->release();
 
   if (*result_fd < 0) {
     return absl::InternalError("WaitEither: no fd became ready");

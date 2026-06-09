@@ -8,13 +8,115 @@
 #include "absl/status/status_matchers.h"
 #include "client/client.h"
 #include "co/coroutine.h"
+#include "common/async/runtime.h"
 #include "server/server.h"
+#include <chrono>
 #include <cstdio>
+#include <functional>
 #include <gtest/gtest.h>
 #include <memory>
 #include <signal.h>
 #include <thread>
 #include <unistd.h>
+#include <vector>
+
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+#include <boost/asio/detached.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/posix/stream_descriptor.hpp>
+#include <boost/asio/post.hpp>
+#include <boost/asio/spawn.hpp>
+#include <boost/asio/steady_timer.hpp>
+#endif
+
+// A tiny backend-agnostic cooperative-coroutine harness for tests that need to
+// interleave two flows that wait on poll fds (e.g. publisher/subscriber
+// trigger fds).  Under the co backend it wraps co::CoroutineScheduler /
+// co::Coroutine; under Asio it wraps an io_context + spawn(yield_context).  The
+// context exposes only the small surface the tests use: Wait(fd) and
+// Millisleep(ms).
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+class TestCoroContext {
+public:
+  explicit TestCoroContext(boost::asio::yield_context yield) : yield_(yield) {}
+
+  void Wait(int fd) {
+    auto &ioc = static_cast<boost::asio::io_context &>(
+        yield_.get_executor().context());
+    boost::asio::posix::stream_descriptor sd(ioc, fd);
+    boost::system::error_code ec;
+    sd.async_wait(boost::asio::posix::stream_descriptor::wait_read, yield_[ec]);
+    sd.release();
+  }
+
+  void Millisleep(int ms) {
+    auto &ioc = static_cast<boost::asio::io_context &>(
+        yield_.get_executor().context());
+    boost::asio::steady_timer timer(ioc, std::chrono::milliseconds(ms));
+    boost::system::error_code ec;
+    timer.async_wait(yield_[ec]);
+  }
+
+  // Cooperatively yield to other coroutines on the same io_context.
+  void Yield() {
+    auto &ioc = static_cast<boost::asio::io_context &>(
+        yield_.get_executor().context());
+    boost::asio::post(ioc, yield_);
+  }
+
+private:
+  boost::asio::yield_context yield_;
+};
+
+class TestCoroMachine {
+public:
+  void Spawn(std::function<void(TestCoroContext &)> fn) {
+    boost::asio::spawn(
+        ioc_,
+        [fn = std::move(fn)](boost::asio::yield_context yield) {
+          TestCoroContext ctx(yield);
+          fn(ctx);
+        },
+        boost::asio::detached);
+  }
+
+  void Run() { ioc_.run(); }
+
+private:
+  boost::asio::io_context ioc_;
+};
+#else
+class TestCoroContext {
+public:
+  explicit TestCoroContext(co::Coroutine *c) : c_(c) {}
+  void Wait(int fd) { c_->Wait(fd); }
+  void Millisleep(int ms) { c_->Millisleep(ms); }
+  void Yield() { c_->Yield(); }
+
+private:
+  co::Coroutine *c_;
+};
+
+class TestCoroMachine {
+public:
+  void Spawn(std::function<void(TestCoroContext &)> fn) {
+    coroutines_.push_back(std::make_unique<co::Coroutine>(
+        machine_, [fn = std::move(fn)](co::Coroutine *c) {
+          TestCoroContext ctx(c);
+          fn(ctx);
+        }));
+  }
+
+  void Run() { machine_.Run(); }
+
+  // co-only: exposes the underlying scheduler (e.g. for ^\ debug dumps).
+  co::CoroutineScheduler &Scheduler() { return machine_; }
+
+private:
+  co::CoroutineScheduler machine_;
+  std::vector<std::unique_ptr<co::Coroutine>> coroutines_;
+};
+#endif
 
 using Publisher = subspace::Publisher;
 using Subscriber = subspace::Subscriber;
@@ -53,7 +155,7 @@ public:
     (void)pipe(server_pipe_);
 
     server_ = std::make_unique<subspace::Server>(
-        scheduler_, socket_, "", 0, 0,
+        engine_, socket_, "", 0, 0,
         /*local=*/true, server_pipe_[1], /*initial_ordinal=*/1,
         /*wait_for_clients=*/true);
 
@@ -88,12 +190,12 @@ public:
     ASSERT_OK(client.Init(Socket()));
   }
 
-  static co::CoroutineScheduler &Scheduler() { return scheduler_; }
+  static subspace::async::RuntimeEngine &Engine() { return engine_; }
   static const std::string &Socket() { return socket_; }
   static subspace::Server *Server() { return server_.get(); }
 
 private:
-  inline static co::CoroutineScheduler scheduler_;
+  inline static subspace::async::RuntimeEngine engine_;
   inline static std::string socket_;
   inline static int server_pipe_[2];
   inline static std::unique_ptr<subspace::Server> server_;

@@ -636,9 +636,16 @@ private:
   std::optional<async::Context> async_ctx_;
 
   // The Context passed to socket I/O.  On Asio this is the stored
-  // yield_context; on co it is the co coroutine pointer (so the wire calls are
-  // identical to the historical code).
-  async::Context SocketContext() const { return *async_ctx_; }
+  // yield_context for a cooperative client; for a blocking client (no
+  // yield_context) the socket is in blocking mode and never yields, so we hand
+  // it a NullContext() placeholder that is never used.
+  async::Context SocketContext() const {
+    return async_ctx_.has_value() ? *async_ctx_ : async::NullContext();
+  }
+
+  // True when this client cooperates with a coroutine (has a yield_context);
+  // false for a blocking client that uses synchronous socket I/O + poll().
+  bool IsCooperative() const { return async_ctx_.has_value(); }
 #else
   const co::Coroutine *SocketContext() const { return co_; }
 #endif

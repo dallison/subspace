@@ -188,6 +188,11 @@ absl::Status ClientImpl::Init(const std::string &server_socket,
     return absl::InternalError("Client is already connected to the server; "
                                "Init() called twice perhaps?");
   }
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  // A client without a yield_context is not driven by a coroutine: use blocking
+  // socket I/O so it works without an io_context (the common case).
+  socket_.SetBlocking(!IsCooperative());
+#endif
   absl::Status status = socket_.Connect(server_socket);
   if (!status.ok()) {
     return status;
@@ -748,7 +753,7 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
   }
   uint64_t timeout_ns = timeout.count();
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
-  {
+  if (IsCooperative()) {
     absl::Status s =
         async::WaitReadable(SocketContext(), publisher->GetPollFd().Fd(),
                             std::chrono::nanoseconds(timeout_ns));
@@ -806,7 +811,7 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
   int result = -1;
   uint64_t timeout_ns = timeout.count();
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
-  {
+  if (IsCooperative()) {
     // The Asio WaitEither has no timeout; it waits until one fd is ready.
     absl::StatusOr<int> r = async::WaitEither(
         SocketContext(), publisher->GetPollFd().Fd(), fd.Fd());
@@ -858,7 +863,7 @@ absl::Status ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
 
   uint64_t timeout_ns = timeout.count();
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
-  {
+  if (IsCooperative()) {
     absl::Status s =
         async::WaitReadable(SocketContext(), subscriber->GetPollFd().Fd(),
                             std::chrono::nanoseconds(timeout_ns));
@@ -905,7 +910,7 @@ absl::StatusOr<int> ClientImpl::WaitForSubscriber(
   int result = -1;
   uint64_t timeout_ns = timeout.count();
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
-  {
+  if (IsCooperative()) {
     // The Asio WaitEither has no timeout; it waits until one fd is ready.
     absl::StatusOr<int> r = async::WaitEither(
         SocketContext(), subscriber->GetPollFd().Fd(), fd.Fd());
@@ -1777,6 +1782,9 @@ absl::Status ClientImpl::Reconnect() {
 
   socket_.Close();
   socket_ = async::UnixSocket();
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  socket_.SetBlocking(!IsCooperative());
+#endif
 
   absl::Status status = socket_.Connect(socket_name_);
   if (!status.ok()) {

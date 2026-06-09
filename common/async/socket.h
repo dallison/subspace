@@ -144,6 +144,14 @@ public:
   absl::Status Connect(const std::string &pathname);
   absl::StatusOr<UnixSocket> Accept(Context ctx) const;
 
+  // Put the socket in blocking mode.  In blocking mode the underlying fd is
+  // left blocking so socket calls never return EAGAIN and therefore never
+  // yield (the Context passed to the I/O methods is ignored).  This lets a
+  // client that is not driven by a coroutine (no yield_context) use the socket
+  // synchronously, exactly like the co backend's null-coroutine path.  Must be
+  // called before Connect()/Bind().
+  void SetBlocking(bool blocking);
+
   absl::StatusOr<ssize_t> Send(const char *buffer, size_t length, Context ctx);
   absl::StatusOr<ssize_t> Receive(char *buffer, size_t buflen, Context ctx);
   absl::StatusOr<ssize_t> SendMessage(char *buffer, size_t length, Context ctx);
