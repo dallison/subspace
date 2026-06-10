@@ -194,6 +194,13 @@ if(SUBSPACE_ASIO_RPC)
     add_subdirectory(asio_rpc)
 endif()
 
+# coro_rpc (C++20 boost::asio::awaitable backend) also reuses subspace_rpc_plugin
+# and builds on Boost.Asio, which is fetched under SUBSPACE_ASIO_RPC, so gate it
+# on the same option and add it after rpc.
+if(SUBSPACE_ASIO_RPC)
+    add_subdirectory(coro_rpc)
+endif()
+
 # co20_rpc likewise reuses the subspace_rpc_plugin host tool, so it must follow
 # rpc as well.
 if(SUBSPACE_CO20_RPC)
