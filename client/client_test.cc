@@ -24,7 +24,7 @@
 #include <inttypes.h>
 #include <memory>
 #include <sys/resource.h>
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
 #include <sys/syscall.h>
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
@@ -89,7 +89,7 @@ uint64_t ExpectedSplitBufferVirtualMemoryUsage(int num_slots,
          AlignPage(slot_size) * static_cast<uint64_t>(num_slots);
 }
 
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
 absl::StatusOr<toolbelt::FileDescriptor> CreateTestMemfd(const char *name,
                                                          size_t size) {
 #ifdef __NR_memfd_create
@@ -228,7 +228,7 @@ TEST_F(ClientTest, Resize1) {
   ASSERT_EQ(512, pub->SlotSize());
 }
 
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
 TEST(AndroidBufferRegistrationTest, FailedRegistrationRollsBackNumBuffers) {
   constexpr int kNumSlots = 2;
   absl::StatusOr<toolbelt::FileDescriptor> scb_fd =

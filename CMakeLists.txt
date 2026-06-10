@@ -33,6 +33,21 @@ if(ANDROID)
     add_compile_definitions(SUBSPACE_ANDROID)
 endif()
 
+# --- Shared-memory backend selection ---
+# On Linux the default backend uses named /dev/shm objects (mapped by name,
+# without the server in the loop).  Enable this option to use anonymous
+# memfd_create-backed shared memory instead (no /dev/shm files; descriptors are
+# passed via the server).  Android always uses memfd; macOS/QNX are unaffected.
+# This is a global definition because SUBSPACE_SHMEM_MODE affects shared struct
+# layout and must be consistent across every translation unit.
+option(SUBSPACE_LINUX_USE_MEMFD
+       "On Linux, use anonymous memfd_create shared memory instead of /dev/shm"
+       OFF)
+if(SUBSPACE_LINUX_USE_MEMFD AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
+    add_compile_definitions(SUBSPACE_LINUX_USE_MEMFD)
+    message(STATUS "Linux shared-memory backend: anonymous memfd_create")
+endif()
+
 # --- Apple Silicon (ARM64) specific settings ---
 # Ensure that CMake targets the correct architecture when building on Apple platforms.
 # This value will be propagated to sub-dependencies.

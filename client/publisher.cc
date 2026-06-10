@@ -40,7 +40,7 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
         current_slot_size = final_slot_size;
         continue;
       }
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
       absl::StatusOr<toolbelt::FileDescriptor> shm_fd =
           buffer_index < size_t(num_buffers)
               ? OpenBuffer(buffer_index)
@@ -98,13 +98,13 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
     // Update the atomic numBuffers in the CCB.  If this fails it means
     // something else got there before us and we just go back and remap any new
     // buffers.
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
     int old_num_buffers = num_buffers;
 #endif
     if (ccb_->num_buffers.compare_exchange_strong(num_buffers, new_num_buffers,
                                                   std::memory_order_release,
                                                   std::memory_order_relaxed)) {
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
       if (!UseSplitBuffers() && client_buffer_registration_callback_) {
         for (int i = old_num_buffers; i < new_num_buffers; i++) {
           BufferSet &buffer = *buffers_[i];
@@ -146,7 +146,7 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
       // We successfully updated the number of buffers in the CCB.
       break;
     }
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
     if (!UseSplitBuffers()) {
       for (size_t i = 0; i < buffers_.size(); i++) {
         UnmapBufferSet(i, *buffers_[i], /*destroy_owned_buffers=*/false);

@@ -15,7 +15,7 @@
 #include <fcntl.h>
 #include <string>
 #include <sys/stat.h>
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
 #include <sys/syscall.h>
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
@@ -179,7 +179,7 @@ CreateSplitSharedMemoryBuffer(const SplitBufferMetadata &metadata) {
   uint64_t allocation_size =
       metadata.allocation_size != 0 ? metadata.allocation_size
                                     : PageAlignedSize(metadata.full_size);
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
   // Android has no named shared memory, so back the buffer with an anonymous
   // memfd.  Ownership of the descriptor is returned to the caller; subscribers
   // receive their own copy of it from the server rather than reopening by name.
@@ -231,7 +231,7 @@ CreateSplitSharedMemoryBuffer(const SplitBufferMetadata &metadata) {
 
 absl::StatusOr<toolbelt::FileDescriptor>
 OpenSplitSharedMemoryBuffer(const SplitBufferMetadata &metadata, int flags) {
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
   (void)flags;
   // Anonymous memfds cannot be reopened by name; the client obtains its
   // descriptors directly (from creation or via the server) instead.
@@ -252,8 +252,8 @@ OpenSplitSharedMemoryBuffer(const SplitBufferMetadata &metadata, int flags) {
 
 absl::Status DestroySplitSharedMemoryBuffer(
     const SplitBufferMetadata &metadata) {
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
-  // Android buffers are anonymous memfds with no backing name and no shadow
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
+  // memfd buffers are anonymous memfds with no backing name and no shadow
   // metadata file (subscribers receive descriptors from the server, not by
   // name).  The memory is released when the owning descriptor and all mappings
   // are dropped, so there is nothing to remove.
