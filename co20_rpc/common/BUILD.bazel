@@ -1,0 +1,15 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "shared_ptr_pipe",
+    hdrs = ["shared_ptr_pipe.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        "//rpc/common:shared_ptr_pipe_base",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@coroutines//co:co_cpp20",
+    ],
+)

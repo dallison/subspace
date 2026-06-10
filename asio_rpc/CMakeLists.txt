@@ -21,6 +21,20 @@ endif()
 include(FetchContent)
 FetchContent_GetProperties(protobuf)
 
+# Where the asio-flavored stubs are generated.  Its layout reproduces the Bazel
+# include path "asio_rpc/proto/rpc_test_asio_rpc/rpc/proto/rpc_test.subspace.*".
+# The plugin keeps the proto's "rpc/proto/" prefix, so this root must hold the
+# files exactly where the sources #include them.
+set(ASIO_RPC_GEN_ROOT ${CMAKE_BINARY_DIR}/asio_rpc/proto/rpc_test_asio_rpc)
+
+# The rpc/ build also emits a "rpc/proto/rpc_test.subspace.rpc_*.h" under
+# ${CMAKE_BINARY_DIR} (the co::Coroutine flavor), which the top-level
+# include_directories(${CMAKE_BINARY_DIR}) puts on the search path ahead of any
+# target-level include directory.  Prepend the asio gen root for this whole
+# subdirectory so the asio-flavored headers win over the co/ ones for the
+# shared "rpc/proto/..." include path.
+include_directories(BEFORE ${ASIO_RPC_GEN_ROOT})
+
 # --- Runtime libraries ---
 
 # common/async_wait: Asio FD-readiness helpers.
@@ -96,11 +110,6 @@ set(ASIO_RPC_PROTOC $<TARGET_FILE:protobuf::protoc>)
 set(ASIO_RPC_PLUGIN $<TARGET_FILE:subspace_rpc_plugin>)
 
 # --- Generated asio RPC stubs ---
-# Generate into a directory whose layout reproduces the Bazel include path
-# "asio_rpc/proto/rpc_test_asio_rpc/rpc/proto/rpc_test.subspace.rpc_*.h".  The
-# plugin keeps the proto's "rpc/proto/" prefix, so pointing the output at
-# .../rpc_test_asio_rpc lands the files exactly where the sources #include them.
-set(ASIO_RPC_GEN_ROOT ${CMAKE_BINARY_DIR}/asio_rpc/proto/rpc_test_asio_rpc)
 set(ASIO_RPC_PROTO_FILE ${CMAKE_SOURCE_DIR}/rpc/proto/rpc_test.proto)
 
 set(ASIO_RPC_CLIENT_SRC ${ASIO_RPC_GEN_ROOT}/rpc/proto/rpc_test.subspace.rpc_client.cc)
