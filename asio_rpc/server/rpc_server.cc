@@ -45,15 +45,22 @@ absl::Status RpcServer::RegisterMethod(
                                boost::asio::yield_context)>
         callback,
     MethodOptions &&options) {
-  if (methods_.find(method) != methods_.end()) {
-    return absl::AlreadyExistsError("Method already registered: " + method);
-  }
-
-  methods_[method] = std::make_shared<Method>(
-      this, method, std::string{request_type}, std::string{response_type},
-      options.slot_size, options.num_slots, std::move(callback),
-      options.id == -1 ? ++next_method_id_ : options.id);
-  return absl::OkStatus();
+  return RegisterMethodAsync(
+      method,
+      [method, callback = std::move(callback)](
+          const google::protobuf::Any &req, boost::asio::yield_context yield,
+          std::function<void(std::unique_ptr<google::protobuf::Any>)> reply,
+          std::function<void(std::string)> error_reply) {
+        auto res = std::make_unique<google::protobuf::Any>();
+        auto status = callback(req, res.get(), yield);
+        if (!status.ok()) {
+          error_reply(absl::StrFormat("Error executing method %s: %s", method,
+                                      status.ToString()));
+          return;
+        }
+        reply(std::move(res));
+      },
+      std::move(options), request_type, response_type);
 }
 
 absl::Status RpcServer::RegisterMethod(
@@ -62,22 +69,41 @@ absl::Status RpcServer::RegisterMethod(
                                boost::asio::yield_context)>
         callback,
     MethodOptions &&options) {
+  return RegisterMethodAsync(
+      method,
+      [method, callback = std::move(callback)](
+          const google::protobuf::Any &req, boost::asio::yield_context yield,
+          std::function<void(std::unique_ptr<google::protobuf::Any>)> reply,
+          std::function<void(std::string)> error_reply) {
+        auto status = callback(req, yield);
+        if (!status.ok()) {
+          error_reply(absl::StrFormat("Error executing method %s: %s", method,
+                                      status.ToString()));
+          return;
+        }
+        auto res = std::make_unique<google::protobuf::Any>();
+        res->PackFrom(VoidMessage());
+        reply(std::move(res));
+      },
+      std::move(options), request_type, "subspace.VoidMessage");
+}
+
+absl::Status RpcServer::RegisterMethodAsync(
+    const std::string &method,
+    std::function<void(
+        const google::protobuf::Any &, boost::asio::yield_context,
+        std::function<void(std::unique_ptr<google::protobuf::Any>)>,
+        std::function<void(std::string)>)>
+        callback,
+    MethodOptions &&options, std::string_view request_type,
+    std::string_view response_type) {
   if (methods_.find(method) != methods_.end()) {
     return absl::AlreadyExistsError("Method already registered: " + method);
   }
+
   methods_[method] = std::make_shared<Method>(
-      this, method, std::string{request_type}, "subspace.VoidMessage",
-      options.slot_size, options.num_slots,
-      [callback](const google::protobuf::Any &req,
-                 google::protobuf::Any *res,
-                 boost::asio::yield_context yield) {
-        auto status = callback(req, yield);
-        if (!status.ok()) {
-          return status;
-        }
-        res->PackFrom(VoidMessage());
-        return absl::OkStatus();
-      },
+      this, method, std::string{request_type}, std::string{response_type},
+      options.slot_size, options.num_slots, std::move(callback),
       options.id == -1 ? ++next_method_id_ : options.id);
   return absl::OkStatus();
 }
@@ -444,19 +470,47 @@ RpcServer::CreateSession(uint64_t client_id,
 
     session->methods.insert({method->id, method_instance});
 
-    boost::asio::spawn(
-        *io_context_,
-        [server = shared_from_this(), session,
-         method_instance](boost::asio::yield_context yield) {
-          if (method_instance->method->IsStreaming()) {
+    if (method->IsStreaming()) {
+      boost::asio::spawn(
+          *io_context_,
+          [server = shared_from_this(), session,
+           method_instance](boost::asio::yield_context yield) {
             SessionStreamingMethodCoroutine(std::move(server), session,
                                             method_instance, yield);
-          } else {
-            SessionMethodCoroutine(std::move(server), session, method_instance,
-                                   yield);
-          }
-        },
-        boost::asio::detached);
+          },
+          boost::asio::detached);
+    } else {
+      // Non-streaming methods use a two-coroutine pipeline: a request coroutine
+      // that invokes the (possibly async) handler and a response coroutine that
+      // publishes completed replies.  They communicate via a SharedPtrPipe of
+      // ReplyItems.
+      auto pipe = SharedPtrPipe<internal::ReplyItem>::Create();
+      if (!pipe.ok()) {
+        logger_.Log(toolbelt::LogLevel::kError,
+                    "Failed to create reply queue for method %s: %s",
+                    method->name.c_str(), pipe.status().ToString().c_str());
+        return pipe.status();
+      }
+      method_instance->reply_queue =
+          std::make_shared<internal::ReplyQueue>(std::move(*pipe));
+
+      boost::asio::spawn(
+          *io_context_,
+          [server = shared_from_this(), session,
+           method_instance](boost::asio::yield_context yield) {
+            SessionRequestCoroutine(std::move(server), session, method_instance,
+                                    yield);
+          },
+          boost::asio::detached);
+      boost::asio::spawn(
+          *io_context_,
+          [server = shared_from_this(), session,
+           method_instance](boost::asio::yield_context yield) {
+            SessionResponseCoroutine(std::move(server), session,
+                                     method_instance, yield);
+          },
+          boost::asio::detached);
+    }
   }
   sessions_[session->session_id] = session;
   logger_.Log(toolbelt::LogLevel::kDebug, "Created session: %d",
@@ -469,7 +523,7 @@ absl::Status RpcServer::DestroySession(int session_id) {
   return absl::OkStatus();
 }
 
-void RpcServer::SessionMethodCoroutine(
+void RpcServer::SessionRequestCoroutine(
     std::shared_ptr<RpcServer> server, std::shared_ptr<Session> session,
     std::shared_ptr<MethodInstance> method_instance,
     boost::asio::yield_context yield) {
@@ -488,8 +542,9 @@ void RpcServer::SessionMethodCoroutine(
     if (*s == interrupt_fd) {
       break;
     }
-    subspace::RpcRequest request;
-    bool request_ok = false;
+    // Drain all requests currently available for this method.  Requests for
+    // other sessions can share the same channel, so only this session's
+    // messages are dispatched to the handler below.
     for (;;) {
       auto m = method_instance->request_subscriber->ReadMessage();
       if (!m.ok()) {
@@ -502,43 +557,109 @@ void RpcServer::SessionMethodCoroutine(
       if (m->length == 0) {
         break;
       }
+      subspace::RpcRequest request;
       if (!request.ParseFromArray(m->buffer, m->length)) {
         server->logger_.Log(toolbelt::LogLevel::kError,
-                            "Error parsing request for method %s: %s",
-                            method_instance->method->name.c_str(),
-                            m.status().ToString().c_str());
+                            "Error parsing request for method %s",
+                            method_instance->method->name.c_str());
         continue;
       }
-      if (request.session_id() == session->session_id) {
-        request_ok = true;
-        break;
+      if (request.session_id() != session->session_id) {
+        continue;
       }
+
+      // Give the handler reply handles tied to this request.  The handler runs
+      // on this request coroutine (yield), so the completed result is pushed
+      // into the reply queue from here and the response coroutine routes it
+      // back to the client that issued this request.  Writes pass yield so
+      // that, if the reply pipe is momentarily full, the write suspends this
+      // coroutine (letting the response coroutine drain it) instead of blocking
+      // the io_context thread.  No locking is needed: the server runs on a
+      // single io_context thread.  Reply functions must only be invoked from
+      // this coroutine.
+      auto queue = method_instance->reply_queue;
+      auto reply_fn =
+          [queue, yield, session_id = session->session_id,
+           request_id = request.request_id(), client_id = request.client_id()](
+              std::unique_ptr<google::protobuf::Any> response) mutable {
+            auto item = std::make_shared<internal::ReplyItem>();
+            item->session_id = session_id;
+            item->request_id = request_id;
+            item->client_id = client_id;
+            item->response = std::move(response);
+            (void)queue->pipe.Write(std::move(item), yield);
+          };
+      auto error_fn =
+          [queue, yield, session_id = session->session_id,
+           request_id = request.request_id(),
+           client_id = request.client_id()](std::string error_msg) mutable {
+            auto item = std::make_shared<internal::ReplyItem>();
+            item->session_id = session_id;
+            item->request_id = request_id;
+            item->client_id = client_id;
+            item->error_message = std::move(error_msg);
+            (void)queue->pipe.Write(std::move(item), yield);
+          };
+
+      server->logger_.Log(toolbelt::LogLevel::kDebug, "Calling method %s",
+                          method_instance->method->name.c_str());
+      method_instance->method->async_callback(
+          request.argument(), yield, std::move(reply_fn), std::move(error_fn));
     }
-    if (!request_ok) {
-      continue;
+  }
+}
+
+void RpcServer::SessionResponseCoroutine(
+    std::shared_ptr<RpcServer> server,
+    [[maybe_unused]] std::shared_ptr<Session> session,
+    std::shared_ptr<MethodInstance> method_instance,
+    boost::asio::yield_context yield) {
+  auto &queue = *method_instance->reply_queue;
+  // dup the interrupt fd so this coroutine can wait on it concurrently with the
+  // request coroutine without two waiters racing on the same descriptor.
+  int interrupt_fd = ::dup(server->interrupt_pipe_.ReadFd().Fd());
+  toolbelt::FileDescriptor interrupt(interrupt_fd);
+
+  while (server->running_) {
+    auto fd = async_wait_either(*server->io_context_, queue.pipe.ReadFd(),
+                                interrupt.Fd(), yield);
+    if (!fd.ok()) {
+      server->logger_.Log(toolbelt::LogLevel::kError,
+                          "Error waiting for queued response: %s",
+                          fd.status().ToString().c_str());
+      return;
+    }
+    if (*fd == interrupt.Fd()) {
+      break;
     }
 
-    subspace::RpcResponse response;
-    response.set_session_id(session->session_id);
-    response.set_request_id(request.request_id());
-    response.set_client_id(request.client_id());
-    auto *result = response.mutable_result();
-    server->logger_.Log(toolbelt::LogLevel::kDebug, "Calling method %s",
-                        method_instance->method->name.c_str());
-    absl::Status method_status =
-        method_instance->method->callback(request.argument(), result, yield);
-    if (!method_status.ok()) {
+    auto item_or = queue.pipe.Read(yield);
+    if (!item_or.ok()) {
       server->logger_.Log(toolbelt::LogLevel::kError,
-                          "Error executing method %s: %s",
+                          "Error reading queued response for method %s: %s",
                           method_instance->method->name.c_str(),
-                          method_status.ToString().c_str());
-      response.set_error(absl::StrFormat("Error executing method %s: %s",
-                                         method_instance->method->name,
-                                         method_status.ToString()));
+                          item_or.status().ToString().c_str());
+      continue;
+    }
+    auto item = std::move(*item_or);
+
+    // Convert the completed handler result into the protocol response expected
+    // by the waiting client.
+    subspace::RpcResponse response;
+    response.set_session_id(item->session_id);
+    response.set_request_id(item->request_id);
+    response.set_client_id(item->client_id);
+    if (!item->error_message.empty()) {
+      response.set_error(item->error_message);
+    } else if (item->response != nullptr) {
+      response.mutable_result()->CopyFrom(*item->response);
+    } else {
+      response.set_error("handler produced a null response");
     }
 
     uint64_t length = response.ByteSizeLong();
     absl::StatusOr<void *> buffer;
+    bool got_buffer = false;
     for (;;) {
       buffer = method_instance->response_publisher->GetMessageBuffer(
           int32_t(length));
@@ -547,35 +668,38 @@ void RpcServer::SessionMethodCoroutine(
                             "Error getting buffer for method %s: %s",
                             method_instance->method->name.c_str(),
                             buffer.status().ToString().c_str());
-        response.set_error(absl::StrFormat(
-            "Error getting buffer for method %s: %s",
-            method_instance->method->name, buffer.status().ToString()));
-        return;
+        break;
       }
       if (*buffer != nullptr) {
+        got_buffer = true;
         break;
       }
       if (!server->interrupt_pipe_.ReadFd().Valid()) {
         return;
       }
+      // The response channel is temporarily full; wait for the client to free a
+      // slot or for shutdown.
       int pub_fd = method_instance->response_publisher->GetPollFd().fd;
       auto status = async_wait_either(*server->io_context_, pub_fd,
-                                      interrupt_fd, yield);
+                                      interrupt.Fd(), yield);
       if (!status.ok()) {
         server->logger_.Log(toolbelt::LogLevel::kError,
                             "Error waiting for buffer: %s",
                             status.status().ToString().c_str());
         return;
       }
-      if (*status == interrupt_fd) {
+      if (*status == interrupt.Fd()) {
         return;
       }
+    }
+    if (!got_buffer) {
+      continue;
     }
     if (!response.SerializeToArray(*buffer, length)) {
       server->logger_.Log(toolbelt::LogLevel::kError,
                           "Error serializing response for method %s",
                           method_instance->method->name.c_str());
-      break;
+      continue;
     }
     server->logger_.Log(
         toolbelt::LogLevel::kDebug, "Publishing response for method %s: %s",

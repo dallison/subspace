@@ -103,6 +103,33 @@ static std::shared_ptr<subspace::asio_rpc::RpcServer> BuildServer() {
       });
   EXPECT_TRUE(s.ok());
 
+  // Async method registered via the async API.  It does some async work
+  // (suspending the coroutine on a timer) before completing the reply,
+  // exercising the asynchronous reply path through the request/response
+  // coroutine pipeline.
+  s = server->RegisterMethodAsync(
+      "AsyncMethod",
+      [](const google::protobuf::Any &req, boost::asio::yield_context yield,
+         std::function<void(std::unique_ptr<google::protobuf::Any>)> reply,
+         std::function<void(std::string)> /*error_reply*/) {
+        rpc::TestRequest test;
+        (void)req.UnpackTo(&test);
+        // Simulate async work; the io_context runs other coroutines while we
+        // wait, then we complete the reply.
+        boost::asio::steady_timer timer(
+            static_cast<boost::asio::io_context &>(
+                yield.get_executor().context()),
+            std::chrono::milliseconds(50));
+        timer.async_wait(yield);
+        rpc::TestResponse r;
+        r.set_message("Hello from AsyncMethod");
+        auto any = std::make_unique<google::protobuf::Any>();
+        any->PackFrom(r);
+        reply(std::move(any));
+      },
+      {}, "subspace.TestRequest", "subspace.TestResponse");
+  EXPECT_TRUE(s.ok());
+
   return server;
 }
 
@@ -309,6 +336,92 @@ TEST_F(AsioServerTest, OpenAndCall) {
                 rpc::TestResponse response_message;
                 rpc_response.result().UnpackTo(&response_message);
                 EXPECT_EQ("Hello from TestMethod", response_message.message());
+                done = true;
+                break;
+              }
+              continue;
+            }
+            break;
+          }
+        }
+
+        Close(server, ctx, yield);
+        server->Stop();
+      },
+      boost::asio::detached);
+
+  ioc.run();
+}
+
+TEST_F(AsioServerTest, CallAsyncMethod) {
+  boost::asio::io_context ioc;
+
+  auto server = BuildServer();
+  ASSERT_OK(server->Run(&ioc));
+
+  boost::asio::spawn(
+      ioc,
+      [&](boost::asio::yield_context yield) {
+        ServerContext ctx;
+        subspace::RpcServerResponse response;
+        Open(server, response, ctx, yield);
+
+        auto *method = FindMethod(response.open(), "AsyncMethod");
+        ASSERT_NE(method, nullptr);
+
+        subspace::RpcRequest req;
+        req.set_client_id(ctx.client_id);
+        req.set_session_id(response.open().session_id());
+        int request_id = next_request_id++;
+        req.set_request_id(request_id);
+        req.set_method(method->id());
+        auto *arg = req.mutable_argument();
+
+        rpc::TestRequest test_request;
+        test_request.set_message("Hello, async world!");
+        arg->PackFrom(test_request);
+
+        subspace::Client client;
+        InitClient(client);
+
+        auto pub = client.CreatePublisher(
+            method->request_channel().name(),
+            method->request_channel().slot_size(),
+            method->request_channel().num_slots(),
+            {.reliable = true, .type = method->request_channel().type()});
+        ASSERT_OK(pub);
+
+        auto sub = client.CreateSubscriber(
+            method->response_channel().name(),
+            {.reliable = true, .type = method->response_channel().type()});
+        ASSERT_OK(sub);
+
+        auto buffer = pub->GetMessageBuffer(int32_t(req.ByteSizeLong()));
+        ASSERT_OK(buffer);
+        ASSERT_TRUE(req.SerializeToArray(*buffer, req.ByteSizeLong()));
+        ASSERT_OK(pub->PublishMessage(int(req.ByteSizeLong())));
+
+        bool done = false;
+        while (!done) {
+          int sub_fd = sub->GetPollFd().fd;
+          ASSERT_OK(
+              subspace::asio_rpc::async_wait_readable(sub_fd, yield));
+          for (;;) {
+            auto m = sub->ReadMessage();
+            ASSERT_OK(m);
+            if (m->length > 0) {
+              subspace::Message msg = std::move(*m);
+              subspace::RpcResponse rpc_response;
+              ASSERT_TRUE(
+                  rpc_response.ParseFromArray(msg.buffer, msg.length));
+              if (rpc_response.client_id() == ctx.client_id &&
+                  rpc_response.request_id() == request_id) {
+                EXPECT_EQ("", rpc_response.error());
+                rpc::TestResponse response_message;
+                ASSERT_TRUE(
+                    rpc_response.result().UnpackTo(&response_message));
+                EXPECT_EQ("Hello from AsyncMethod",
+                          response_message.message());
                 done = true;
                 break;
               }
