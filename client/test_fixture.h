@@ -160,7 +160,15 @@ public:
         /*wait_for_clients=*/true);
 
     server_thread_ = std::thread([]() {
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+      // Run the io_context on several threads in asio mode so the test suites
+      // exercise the multi-threaded server path (client handlers serialized on
+      // the client strand, other coroutines spread across threads).  The co
+      // backend is always single-threaded and ignores the thread count.
+      absl::Status s = server_->Run(/*num_asio_threads=*/4);
+#else
       absl::Status s = server_->Run();
+#endif
       if (!s.ok()) {
         fprintf(stderr, "Error running Subspace server: %s\n",
                 s.ToString().c_str());
