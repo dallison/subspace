@@ -22,6 +22,19 @@ if(NOT protobuf_POPULATED)
     message(FATAL_ERROR "protobuf must be populated before rpc/CMakeLists.txt is processed")
 endif()
 
+# The subspace_rpc plugin is a host tool that must run during the build to
+# generate the RPC stubs.  When cross-compiling we cannot run a target-arch
+# plugin on the build host, so a host-native plugin must be supplied via
+# -DSUBSPACE_RPC_PLUGIN.  If one isn't provided, skip the rpc tree entirely
+# (it is not part of the cross-compiled deliverables, matching the Bazel build
+# which doesn't build //rpc for Android) rather than failing the configure.
+if(CMAKE_CROSSCOMPILING AND NOT SUBSPACE_RPC_PLUGIN)
+    message(STATUS
+        "Skipping rpc/ CMake build: cross-compiling without -DSUBSPACE_RPC_PLUGIN "
+        "(the subspace_rpc plugin must run on the build host).")
+    return()
+endif()
+
 # --- protoc selection (native vs cross-compile), matching proto/CMakeLists.txt ---
 if(CMAKE_CROSSCOMPILING)
     if(NOT PROTOC_EXECUTABLE)
@@ -57,15 +70,10 @@ target_link_libraries(subspace_rpc_plugin PRIVATE
 # headers (e.g. google/protobuf/compiler/code_generator.h), so add them.
 target_include_directories(subspace_rpc_plugin PRIVATE ${protobuf_SOURCE_DIR}/src)
 
-# When cross-compiling we cannot run a target-architecture plugin on the build
-# host, so require a prebuilt host plugin to be supplied (mirrors how a host
-# protoc is required for cross builds).
+# Cross-compiles use the host plugin supplied via -DSUBSPACE_RPC_PLUGIN (the
+# early guard above guarantees it is set here); native builds use the plugin we
+# just defined.
 if(CMAKE_CROSSCOMPILING)
-    if(NOT SUBSPACE_RPC_PLUGIN)
-        message(FATAL_ERROR
-            "When cross-compiling, set -DSUBSPACE_RPC_PLUGIN=/path/to/host/subspace_rpc_plugin "
-            "(a host-native build of //rpc/idl_compiler:subspace_rpc).")
-    endif()
     set(RPC_PLUGIN ${SUBSPACE_RPC_PLUGIN})
     set(RPC_PLUGIN_DEP "")
 else()
