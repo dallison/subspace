@@ -4,6 +4,7 @@
 
 #include "rpc/idl_compiler/service_gen.h"
 #include "absl/strings/ascii.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_replace.h"
 #include <algorithm>
