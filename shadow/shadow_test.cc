@@ -5,6 +5,7 @@
 
 #include "absl/status/status_matchers.h"
 #include "client/client.h"
+#include "common/channel.h"
 #include "server/server.h"
 #include "shadow/shadow.h"
 #include "gtest/gtest.h"
@@ -607,6 +608,88 @@ TEST_F(ShadowRecoveryTest, ServerRecoversSplitBufferStateFromShadow) {
   StopServer();
   StopShadow();
 }
+
+// End-to-end check that an actual message payload published through a split
+// buffer survives a server restart and is readable afterwards.  With split
+// buffers the payload lives in a client-allocated buffer whose fd is handed to
+// the server and replicated to the shadow.  In the memfd backend that buffer is
+// an anonymous memfd that only survives the restart because the shadow holds
+// its fd and hands it back during recovery; this exercises that path rather
+// than just checking replicated metadata.
+//
+// This is only meaningful for the memfd backend: in the named backends (POSIX
+// /tmp shadow files, Linux /dev/shm) the split-buffer object is mapped by name
+// and that name is unlinked at creation, so a restarted server cannot re-open
+// it -- shadow recovery of the payload relies on fd passing, i.e. memfd.
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
+TEST_F(ShadowRecoveryTest, SplitBufferMessageDataSurvivesRecovery) {
+  signal(SIGPIPE, SIG_IGN);
+
+  StartShadow();
+  StartServer();
+
+  // Keep this client (and therefore the publisher's split-buffer fds) alive
+  // across the restart so the buffer's only other holder is the shadow.
+  subspace::Client client;
+  client.SetThreadSafe(true);
+  ASSERT_THAT(client.Init(RecoveryServerSocket()), IsOk());
+
+  subspace::PublisherOptions options;
+  options.SetSlotSize(256).SetNumSlots(4).SetUseSplitBuffers(true);
+  auto pub = client.CreatePublisher("shadow_split_data", options);
+  ASSERT_THAT(pub, IsOk());
+  ASSERT_TRUE(pub->UsesSplitBuffers());
+
+  static constexpr char kPayload[] = "split_buffer_survives_crash";
+  static constexpr size_t kPayloadLen = sizeof(kPayload) - 1;
+  {
+    absl::StatusOr<void *> buf = pub->GetMessageBuffer(kPayloadLen);
+    ASSERT_THAT(buf, IsOk());
+    ASSERT_NE(*buf, nullptr);
+    memcpy(*buf, kPayload, kPayloadLen);
+    ASSERT_THAT(pub->PublishMessage(kPayloadLen), IsOk());
+  }
+
+  // Wait for the shadow to learn about the channel and its split buffers.
+  ASSERT_TRUE(WaitForShadowState([this]() {
+    return shadow_->WithChannels([](auto &channels) {
+      auto it = channels.find("shadow_split_data");
+      return it != channels.end() && it->second.use_split_buffers &&
+             !it->second.client_buffers.empty();
+    });
+  }));
+
+  uint64_t old_session_id = shadow_->GetSessionId();
+  ASSERT_NE(old_session_id, 0u);
+
+  // Simulate a crash and restart; the server recovers the channel and its
+  // split buffers (including the payload buffer fd) from the shadow.
+  server_->ForEachShadow(
+      [](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
+  StopServer();
+
+  StartServer();
+  ASSERT_EQ(server_->GetSessionId(), old_session_id);
+  ASSERT_EQ(server_->GetChannels().count("shadow_split_data"), 1u);
+
+  // A fresh client/subscriber on the recovered channel must be able to read the
+  // pre-crash payload back out of the recovered split buffer.
+  subspace::Client reader;
+  reader.SetThreadSafe(true);
+  ASSERT_THAT(reader.Init(RecoveryServerSocket()), IsOk());
+  auto sub = reader.CreateSubscriber("shadow_split_data");
+  ASSERT_THAT(sub, IsOk()) << "CreateSubscriber failed: " << sub.status();
+
+  absl::StatusOr<subspace::Message> msg =
+      sub->ReadMessage(subspace::ReadMode::kReadNewest);
+  ASSERT_THAT(msg, IsOk());
+  ASSERT_EQ(msg->length, kPayloadLen);
+  EXPECT_EQ(memcmp(msg->buffer, kPayload, kPayloadLen), 0);
+
+  StopServer();
+  StopShadow();
+}
+#endif // SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
 
 TEST_F(ShadowRecoveryTest, ShadowTracksPlaceholderRemap) {
   signal(SIGPIPE, SIG_IGN);
