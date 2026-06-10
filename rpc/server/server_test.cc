@@ -212,6 +212,28 @@ static std::shared_ptr<subspace::RpcServer> BuildServer() {
       });
   EXPECT_TRUE(s.ok());
 
+  // Async method registered via the async API.  It does some coroutine work
+  // (yielding the scheduler) before completing the reply, exercising the
+  // asynchronous reply path through the request/response coroutine pipeline.
+  s = server->RegisterMethodAsync(
+      "AsyncMethod",
+      [](const google::protobuf::Any &req, co::Coroutine *c,
+         std::function<void(std::unique_ptr<google::protobuf::Any>)> reply,
+         std::function<void(std::string)> /*error_reply*/) {
+        rpc::TestRequest test;
+        (void)req.UnpackTo(&test);
+        // Simulate async work; the scheduler runs other coroutines while we
+        // sleep, then we complete the reply.
+        c->Millisleep(50);
+        rpc::TestResponse r;
+        r.set_message("Hello from AsyncMethod");
+        auto any = std::make_unique<google::protobuf::Any>();
+        any->PackFrom(r);
+        reply(std::move(any));
+      },
+      {}, "subspace.TestRequest", "subspace.TestResponse");
+  EXPECT_TRUE(s.ok());
+
   return server;
 }
 
@@ -491,6 +513,85 @@ TEST_F(ServerTest, OpenAndCall) {
 
     Close(server, ctx, c);
 
+    server->Stop();
+  });
+
+  scheduler.Run();
+}
+
+TEST_F(ServerTest, CallAsyncMethod) {
+  co::CoroutineScheduler scheduler;
+
+  auto server = BuildServer();
+  ASSERT_OK(server->Run(&scheduler));
+
+  co::Coroutine test(scheduler, [&](co::Coroutine *c) {
+    ServerContext ctx;
+    subspace::RpcServerResponse response;
+    Open(server, response, ctx, c);
+
+    // Find the async method in the response.
+    auto *method = FindMethod(response.open(), "AsyncMethod");
+    ASSERT_NE(method, nullptr);
+
+    subspace::RpcRequest req;
+    req.set_client_id(ctx.client_id);
+    req.set_session_id(response.open().session_id());
+    int request_id = next_request_id++;
+    req.set_request_id(request_id);
+    req.set_method(method->id());
+    auto *arg = req.mutable_argument();
+
+    rpc::TestRequest test_request;
+    test_request.set_message("Hello, async world!");
+    arg->PackFrom(test_request);
+
+    subspace::Client client;
+    InitClient(client);
+
+    auto pub = client.CreatePublisher(
+        method->request_channel().name(), method->request_channel().slot_size(),
+        method->request_channel().num_slots(),
+        {.reliable = true, .type = method->request_channel().type()});
+    ASSERT_OK(pub);
+
+    auto sub = client.CreateSubscriber(
+        method->response_channel().name(),
+        {.reliable = true, .type = method->response_channel().type()});
+    ASSERT_OK(sub);
+
+    auto buffer = pub->GetMessageBuffer(int32_t(req.ByteSizeLong()));
+    ASSERT_OK(buffer);
+    ASSERT_TRUE(req.SerializeToArray(*buffer, req.ByteSizeLong()));
+    ASSERT_OK(pub->PublishMessage(int(req.ByteSizeLong())));
+
+    subspace::Message msg;
+    bool done = false;
+    while (!done) {
+      ASSERT_OK(sub->Wait(c));
+      for (;;) {
+        auto m = sub->ReadMessage();
+        ASSERT_OK(m);
+        if (m->length > 0) {
+          msg = std::move(*m);
+          subspace::RpcResponse rpc_response;
+          ASSERT_TRUE(rpc_response.ParseFromArray(msg.buffer, msg.length));
+          if (rpc_response.client_id() == ctx.client_id &&
+              rpc_response.request_id() == request_id) {
+            EXPECT_EQ("", rpc_response.error());
+            rpc::TestResponse response_message;
+            ASSERT_TRUE(rpc_response.result().UnpackTo(&response_message));
+            EXPECT_EQ("Hello from AsyncMethod", response_message.message());
+            done = true;
+            break;
+          }
+          continue;
+        }
+        break;
+      }
+    }
+
+    Close(server, ctx, c);
     server->Stop();
   });
 
