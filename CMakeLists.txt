@@ -154,6 +154,7 @@ add_subdirectory(shadow)
 add_subdirectory(c_client)
 add_subdirectory(android)
 add_subdirectory(rust_client)
+add_subdirectory(rpc)
 
 if(TARGET client_test AND TARGET nop_plugin)
     add_dependencies(client_test nop_plugin)
