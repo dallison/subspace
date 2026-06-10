@@ -118,6 +118,38 @@ FetchContent_MakeAvailable(protobuf)
 # Protobuf provides targets like protobuf::libprotobuf and protobuf::protoc
 # These targets can be used directly without find_package
 
+# --- Option: asio_rpc backend (Boost.Asio RPC) ---
+# The asio_rpc backend needs Boost.Asio plus the compiled Boost.Coroutine /
+# Boost.Context libraries.  Boost is large and Boost.Context's assembly stubs do
+# not cross-compile cleanly, so this is fetched only for native builds and only
+# when explicitly enabled.
+option(SUBSPACE_ASIO_RPC "Build the asio_rpc backend (fetches Boost via FetchContent)" ON)
+
+if(SUBSPACE_ASIO_RPC AND CMAKE_CROSSCOMPILING)
+    message(STATUS "Disabling SUBSPACE_ASIO_RPC: Boost.Context does not cross-compile cleanly.")
+    set(SUBSPACE_ASIO_RPC OFF)
+endif()
+
+if(SUBSPACE_ASIO_RPC)
+    # Build only the Boost libraries asio_rpc needs; the Boost CMake superproject
+    # pulls in their transitive dependencies automatically.
+    set(BOOST_INCLUDE_LIBRARIES asio coroutine context system CACHE INTERNAL "Boost libs for asio_rpc")
+    FetchContent_Declare(
+        Boost
+        URL https://github.com/boostorg/boost/releases/download/boost-1.87.0/boost-1.87.0-cmake.tar.xz
+        CMAKE_ARGS
+            -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
+    )
+    FetchContent_MakeAvailable(Boost)
+endif()
+
+# --- Option: co20_rpc backend (C++20 stackless coroutine RPC) ---
+# The co20_rpc backend only needs co_cpp20 (already fetched with co), so it has
+# no extra third-party dependency.  It does require the subspace_rpc plugin host
+# tool to generate its stubs, so it is skipped when cross-compiling without a
+# host plugin (handled inside co20_rpc/CMakeLists.txt).
+option(SUBSPACE_CO20_RPC "Build the co20_rpc backend (C++20 coroutine RPC)" ON)
+
 # --- Option: Python bindings ---
 option(SUBSPACE_PYTHON "Build Python bindings (requires Python3 and pybind11)" OFF)
 
@@ -155,6 +187,25 @@ add_subdirectory(c_client)
 add_subdirectory(android)
 add_subdirectory(rust_client)
 add_subdirectory(rpc)
+
+# asio_rpc must follow rpc: it reuses the subspace_rpc_plugin host tool defined
+# there to generate its RPC stubs.
+if(SUBSPACE_ASIO_RPC)
+    add_subdirectory(asio_rpc)
+endif()
+
+# coro_rpc (C++20 boost::asio::awaitable backend) also reuses subspace_rpc_plugin
+# and builds on Boost.Asio, which is fetched under SUBSPACE_ASIO_RPC, so gate it
+# on the same option and add it after rpc.
+if(SUBSPACE_ASIO_RPC)
+    add_subdirectory(coro_rpc)
+endif()
+
+# co20_rpc likewise reuses the subspace_rpc_plugin host tool, so it must follow
+# rpc as well.
+if(SUBSPACE_CO20_RPC)
+    add_subdirectory(co20_rpc)
+endif()
 
 if(TARGET client_test AND TARGET nop_plugin)
     add_dependencies(client_test nop_plugin)

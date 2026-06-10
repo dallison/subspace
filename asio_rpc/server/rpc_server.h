@@ -6,6 +6,7 @@
 #pragma once
 #include "absl/container/flat_hash_map.h"
 #include "absl/types/span.h"
+#include "asio_rpc/common/shared_ptr_pipe.h"
 #include "client/client.h"
 #include "google/protobuf/any.pb.h"
 #include "rpc/common/rpc_common.h"
@@ -47,17 +48,46 @@ struct AnyStreamWriter {
   bool is_cancelled = false;
 };
 
+// An item pushed by either the reply function or the error function of an
+// async method handler.  Exactly one of response or error_message is
+// meaningful: a non-empty error_message produces an error response, otherwise
+// `response` owns the result Any.  The session/request/client ids are copied
+// from the originating RpcRequest so the response coroutine can build the
+// RpcResponse without keeping the original request alive.
+struct ReplyItem {
+  std::unique_ptr<google::protobuf::Any> response;
+  int32_t session_id;
+  int32_t request_id;
+  uint64_t client_id;
+  std::string error_message;
+};
+
+// Completed replies for a single non-streaming method instance are pushed into
+// this queue by the request coroutine (or by a later async completion) and
+// drained by the response coroutine.  The whole RPC server runs on a single
+// io_context thread, so no locking is needed: only one coroutine runs at a time
+// and a small SharedPtrPipe write does not yield, so writes never interleave.
+struct ReplyQueue {
+  explicit ReplyQueue(SharedPtrPipe<ReplyItem> pipe) : pipe(std::move(pipe)) {}
+
+  SharedPtrPipe<ReplyItem> pipe;
+};
+
 struct Method {
+  // Async handler: receives the request Any, a yield_context (usable for inline
+  // async work), a reply function for success and an error function for
+  // failure.  Exactly one of reply/error_reply should be called.
   Method(RpcServer *server, std::string name, std::string request_type,
          std::string response_type, int32_t slot_size, int32_t num_slots,
-         std::function<absl::Status(const google::protobuf::Any &,
-                                    google::protobuf::Any *,
-                                    boost::asio::yield_context)>
+         std::function<void(
+             const google::protobuf::Any &, boost::asio::yield_context,
+             std::function<void(std::unique_ptr<google::protobuf::Any>)>,
+             std::function<void(std::string)>)>
              callback,
          int id)
       : name(std::move(name)), request_type(std::move(request_type)),
         response_type(std::move(response_type)), slot_size(slot_size),
-        num_slots(num_slots), callback(std::move(callback)), id(id) {
+        num_slots(num_slots), async_callback(std::move(callback)), id(id) {
     MakeChannelNames(server);
   }
 
@@ -84,10 +114,12 @@ struct Method {
   std::string response_type;
   int32_t slot_size;
   int32_t num_slots;
-  std::function<absl::Status(const google::protobuf::Any &,
-                             google::protobuf::Any *,
-                             boost::asio::yield_context)>
-      callback;
+  // Async handler for a normal, non-streaming method.  See the constructor
+  // above for the calling convention.
+  std::function<void(const google::protobuf::Any &, boost::asio::yield_context,
+                     std::function<void(std::unique_ptr<google::protobuf::Any>)>,
+                     std::function<void(std::string)>)>
+      async_callback;
   std::function<absl::Status(const google::protobuf::Any &,
                              internal::AnyStreamWriter &,
                              boost::asio::yield_context)>
@@ -103,6 +135,9 @@ struct MethodInstance {
   std::shared_ptr<subspace::Subscriber> request_subscriber;
   std::shared_ptr<subspace::Publisher> response_publisher;
   std::shared_ptr<subspace::Subscriber> cancel_subscriber;
+  // Non-null for non-streaming methods: completed responses are pushed here by
+  // the request coroutine and drained by the response coroutine.
+  std::shared_ptr<ReplyQueue> reply_queue;
 };
 
 struct Session {
@@ -187,6 +222,25 @@ public:
           callback,
       MethodOptions &&options = {});
 
+  // Register an async handler.  The callback receives the request Any, a
+  // yield_context (usable for inline async work), a reply function for success
+  // and an error function for failure.  Exactly one of reply/error should be
+  // called.  The reply/error functions must be invoked from the request
+  // coroutine (the one whose yield_context is passed to the callback); they
+  // push the completed result into the method's reply queue, which the response
+  // coroutine drains and publishes.  request_type and response_type are the
+  // protobuf type names advertised to clients.
+  absl::Status RegisterMethodAsync(
+      const std::string &method,
+      std::function<void(
+          const google::protobuf::Any &, boost::asio::yield_context,
+          std::function<void(std::unique_ptr<google::protobuf::Any>)>,
+          std::function<void(std::string)>)>
+          callback,
+      MethodOptions &&options = {},
+      std::string_view request_type = "subspace.RawMessage",
+      std::string_view response_type = "subspace.RawMessage");
+
   absl::Status UnregisterMethod(const std::string &method) {
     auto it = methods_.find(method);
     if (it == methods_.end()) {
@@ -252,7 +306,18 @@ private:
   CreateSession(uint64_t client_id, boost::asio::yield_context yield);
   absl::Status DestroySession(int session_id);
 
-  static void SessionMethodCoroutine(
+  // Request coroutine for non-streaming methods: reads incoming requests and
+  // invokes the method's async_callback.  The callback may reply immediately or
+  // keep the reply function and complete later within the same coroutine.
+  static void SessionRequestCoroutine(
+      std::shared_ptr<RpcServer> server,
+      std::shared_ptr<internal::Session> session,
+      std::shared_ptr<internal::MethodInstance> method_instance,
+      boost::asio::yield_context yield);
+
+  // Response coroutine for non-streaming methods: drains the reply queue and
+  // publishes responses via the Subspace response publisher.
+  static void SessionResponseCoroutine(
       std::shared_ptr<RpcServer> server,
       std::shared_ptr<internal::Session> session,
       std::shared_ptr<internal::MethodInstance> method_instance,

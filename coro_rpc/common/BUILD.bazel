@@ -14,3 +14,16 @@ cc_library(
         "@boost.asio//:boost.asio",
     ],
 )
+
+cc_library(
+    name = "shared_ptr_pipe",
+    hdrs = ["shared_ptr_pipe.h"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":async_wait",
+        "//rpc/common:shared_ptr_pipe_base",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@boost.asio//:boost.asio",
+    ],
+)
