@@ -244,7 +244,13 @@ TEST(AndroidBufferRegistrationTest, FailedRegistrationRollsBackNumBuffers) {
       "subspace_test_bcb", sizeof(subspace::BufferControlBlock));
   ASSERT_OK(bcb_fd);
 
+  // This test exercises the non-split single-buffer registration rollback path
+  // (publisher.cc, gated on !UseSplitBuffers()).  Force the non-split layout so
+  // it is deterministic even when the suite runs with --use_split_buffers, and
+  // because the harness only wires a registration callback, not the lookup
+  // callback that split buffers require.
   subspace::PublisherOptions options;
+  options.SetUseSplitBuffers(false);
   subspace::details::PublisherImpl publisher(
       "android_registration_rollback", kNumSlots, /*channel_id=*/0,
       /*publisher_id=*/0, /*vchan_id=*/-1, /*session_id=*/123, "",
