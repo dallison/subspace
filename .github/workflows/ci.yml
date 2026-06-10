@@ -124,7 +124,7 @@ jobs:
           bazel build \
             --config=linux_memfd \
             --verbose_failures \
-            -- //... -//rust_client/... -//rust_rpc/...
+            -- //... -//rust_client/...
 
       - name: Run tests (memfd backend, excluding Rust)
         run: |
@@ -132,7 +132,7 @@ jobs:
             --config=linux_memfd \
             --verbose_failures \
             --test_output=errors \
-            -- //... -//rust_client/... -//rust_rpc/...
+            -- //... -//rust_client/...
 
       - name: Run split-buffer client tests (memfd backend)
         run: |
