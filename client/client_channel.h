@@ -364,9 +364,9 @@ protected:
                            bool destroy_owned_buffers);
   void UnmapBufferSet(size_t buffer_index, BufferSet &buffer,
                       bool destroy_owned_buffers);
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
   absl::StatusOr<toolbelt::FileDescriptor>
-  CreateAndroidBuffer(const std::string &filename, size_t size);
+  CreateMemfdBuffer(const std::string &filename, size_t size);
   absl::StatusOr<RegisteredClientBuffer>
   GetRegisteredClientBuffer(uint32_t buffer_index, bool is_prefix,
                             uint32_t slot_id);

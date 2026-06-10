@@ -23,22 +23,36 @@
 
 namespace subspace {
 
+// Shared-memory backends.  These name the *mechanism*, not the platform:
+//   POSIX  - a named shm_open object plus a /tmp shadow file (BSD/macOS/QNX).
+//   LINUX  - a named /dev/shm object (mapped by name, server-free).
+//   MEMFD  - an anonymous memfd_create object (no name; the fd is passed to
+//            other clients via the server).  This is a Linux mechanism that
+//            Android must use because it has no /dev/shm.
 #define SUBSPACE_SHMEM_MODE_POSIX 1
 #define SUBSPACE_SHMEM_MODE_LINUX 2
-#define SUBSPACE_SHMEM_MODE_ANDROID 3
+#define SUBSPACE_SHMEM_MODE_MEMFD 3
 
-// Change this if you want to use a different shared memory mode. Builds may
-// define SUBSPACE_SHMEM_MODE explicitly to exercise a non-default backend.
+// The backend is chosen at build time.  A build may either define
+// SUBSPACE_SHMEM_MODE directly, or (on Linux) define SUBSPACE_LINUX_USE_MEMFD
+// to opt the Linux build into the anonymous memfd backend instead of the
+// default /dev/shm one.  See //:linux_memfd (Bazel) and the
+// SUBSPACE_LINUX_USE_MEMFD CMake option.
 #ifndef SUBSPACE_SHMEM_MODE
 #if defined(__ANDROID__)
-// Android does not have /dev/shm; use anonymous fd-backed shared memory.
-#define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_ANDROID
+// Android has no /dev/shm, so it always uses anonymous memfd shared memory.
+#define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_MEMFD
 #elif defined(__linux__)
-// On Linux we can use /dev/shm directly for shared memory.
-#define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_LINUX
+#if defined(SUBSPACE_LINUX_USE_MEMFD)
+// Opt-in: anonymous memfd shared memory on Linux (no /dev/shm files).
+#define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_MEMFD
 #else
-// On other systems, including QNX, use a /tmp shadow file and regular shared
-// memory.
+// Default on Linux: named /dev/shm shared memory.
+#define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_LINUX
+#endif
+#else
+// On other systems, including QNX and macOS, use a /tmp shadow file and
+// regular shared memory.
 #define SUBSPACE_SHMEM_MODE SUBSPACE_SHMEM_MODE_POSIX
 #endif
 #endif

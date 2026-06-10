@@ -2,6 +2,7 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
+#include "common/channel.h"
 #include "common/split_buffer.h"
 
 #include "gtest/gtest.h"
@@ -80,10 +81,10 @@ TEST(SplitBufferTest, CreatesOpensAndDestroysSharedMemoryObject) {
   ASSERT_EQ(fstat(created->Fd(), &created_sb), 0);
   EXPECT_GE(static_cast<uint64_t>(created_sb.st_size), metadata.allocation_size);
 
-#if defined(__ANDROID__)
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
   // Anonymous memfds cannot be reopened by name; the caller owns the descriptor
   // returned by CreateSplitSharedMemoryBuffer instead.  There is no shadow file
-  // on Android.
+  // in memfd mode.
   EXPECT_FALSE(OpenSplitSharedMemoryBuffer(metadata, O_RDWR).ok());
 #else
   ASSERT_TRUE(WriteSplitBufferMetadataFile(metadata).ok());
@@ -97,7 +98,7 @@ TEST(SplitBufferTest, CreatesOpensAndDestroysSharedMemoryObject) {
 #endif
 
   ASSERT_TRUE(DestroySplitSharedMemoryBuffer(metadata).ok());
-#if !defined(__ANDROID__)
+#if SUBSPACE_SHMEM_MODE != SUBSPACE_SHMEM_MODE_MEMFD
   EXPECT_FALSE(OpenSplitSharedMemoryBuffer(metadata, O_RDWR).ok());
 #endif
 }

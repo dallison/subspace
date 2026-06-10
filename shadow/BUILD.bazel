@@ -52,6 +52,7 @@ cc_test(
     deps = [
         ":shadow_lib",
         "//client:subspace_client",
+        "//common:subspace_common",
         "//server",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:status_matchers",
