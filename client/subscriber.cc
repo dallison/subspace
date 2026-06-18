@@ -236,6 +236,16 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
     // This avoids the O(K) bitset traversal and O(K log K) timestamp sort on
     // every receive, which dominates throughput when the queue is deep.
     //
+    // If the caller explicitly requested the poll fd, keep a stable snapshot
+    // for each drain even if publishers append more messages while the
+    // subscriber is draining it. Poll-driven callers commonly hold the fd for
+    // the subscriber lifetime, drain until ReadMessage() returns an empty
+    // message, then yield back to their event loop. Chasing concurrently
+    // published messages here can keep a slow reliable subscriber in the drain
+    // loop forever and starve unrelated work in that process. Direct
+    // ReadMessage() callers that never request the fd keep the live
+    // total_messages refresh behavior.
+    //
     // Correctness invariant: when we observe total_messages == T we must
     // also observe every bits.Set() done by the publisher for ordinals
     // <= T. PublisherImpl::ActivateSlotAndGetAnother sets the
@@ -244,7 +254,9 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
     // happens-before this seq_cst load and visible to the relaxed
     // bits.Traverse() inside CollectVisibleSlots().
     const uint64_t total = ccb_->total_messages;
-    if (!next_slot_cache_valid_ || total != next_slot_cached_total_) {
+    const bool stable_poll_drain = PollDrainPending();
+    if (!next_slot_cache_valid_ ||
+        (!stable_poll_drain && total != next_slot_cached_total_)) {
       CollectVisibleSlots(bits);
       std::sort(active_slots_.begin(), active_slots_.end(),
                        [](const ActiveSlot &a, const ActiveSlot &b) {
@@ -274,6 +286,7 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
       ++next_slot_cursor_;
     }
     if (new_slot == nullptr) {
+      next_slot_cache_valid_ = false;
       return nullptr;
     }
     if (print_errors) {

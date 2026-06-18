@@ -1853,6 +1853,92 @@ TEST_F(ClientTest, PublishSingleMessagePollAndReadSubscriberFirst) {
   ASSERT_EQ(0, msg->length);
 }
 
+TEST_F(ClientTest, PublishSingleMessagePollAndReadAfterPlaceholderRead) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("placeholder_read");
+  ASSERT_OK(sub);
+
+  struct pollfd fd = sub->GetPollFd();
+  ASSERT_EQ(1, ::poll(&fd, 1, 1000));
+
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(0, msg->length);
+
+  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher("placeholder_read", 256, 10);
+  ASSERT_OK(pub);
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "foobar", 6);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+  ASSERT_OK(pub_status);
+
+  fd = sub->GetPollFd();
+  ASSERT_EQ(1, ::poll(&fd, 1, 1000));
+
+  msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(6, msg->length);
+}
+
+TEST_F(ClientTest, SlowReliableSubscriberDrainReachesEmptyRead) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
+      "slow_reliable_drain",
+      subspace::SubscriberOptions().SetReliable(true).SetMaxActiveMessages(2));
+  ASSERT_OK(sub);
+
+  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
+      "slow_reliable_drain",
+      subspace::PublisherOptions().SetReliable(true).SetSlotSize(64).SetNumSlots(4));
+  ASSERT_OK(pub);
+
+  std::atomic<bool> stop_publisher{false};
+  std::thread publisher([&] {
+    uint64_t seq = 0;
+    while (!stop_publisher.load()) {
+      absl::StatusOr<void *> buffer = pub->GetMessageBuffer(sizeof(seq));
+      ASSERT_OK(buffer);
+      if (*buffer == nullptr) {
+        (void)pub->Wait(std::chrono::milliseconds(100));
+        continue;
+      }
+      std::memcpy(*buffer, &seq, sizeof(seq));
+      ASSERT_OK(pub->PublishMessage(sizeof(seq)));
+      ++seq;
+    }
+  });
+
+  struct pollfd fd = sub->GetPollFd();
+  ASSERT_EQ(1, ::poll(&fd, 1, 1000));
+
+  int reads_before_empty = 0;
+  constexpr int kMaxReadsBeforeEmpty = 20;
+  for (; reads_before_empty < kMaxReadsBeforeEmpty; ++reads_before_empty) {
+    absl::StatusOr<Message> msg = sub->ReadMessage();
+    ASSERT_OK(msg);
+    if (msg->length == 0) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+
+  stop_publisher.store(true);
+  publisher.join();
+
+  EXPECT_LT(reads_before_empty, kMaxReadsBeforeEmpty)
+      << "a slow reliable subscriber should finish draining the poll-triggered "
+         "batch instead of continuously chasing messages published during the drain";
+}
+
 TEST_F(ClientTest, PublishSingleMessagePollAndReadPublisherFirst) {
   subspace::Client pub_client;
   subspace::Client sub_client;

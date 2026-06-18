@@ -294,8 +294,13 @@ private:
     return LastSlot(CurrentSlot(), IsReliable(), subscriber_id_);
   }
 
-  toolbelt::FileDescriptor &GetPollFd() { return trigger_.GetPollFd(); }
+  toolbelt::FileDescriptor &GetPollFd() {
+    poll_drain_pending_ = true;
+    return trigger_.GetPollFd();
+  }
   void ClearPollFd() { trigger_.Clear(); }
+  bool PollDrainPending() const { return poll_drain_pending_; }
+  void ClearPollDrainPending() { poll_drain_pending_ = false; }
 
   MessageSlot *FindMessage(uint64_t timestamp) {
     MessageSlot *slot =
@@ -359,6 +364,7 @@ private:
   uint64_t next_slot_cached_total_ = 0;
   size_t next_slot_cursor_ = 0;
   bool next_slot_cache_valid_ = false;
+  bool poll_drain_pending_ = false;
 };
 } // namespace details
 } // namespace subspace
