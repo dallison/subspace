@@ -1939,6 +1939,111 @@ TEST_F(ClientTest, SlowReliableSubscriberDrainReachesEmptyRead) {
          "batch instead of continuously chasing messages published during the drain";
 }
 
+// Reproduces the external-epoll pattern: fetch the poll fd ONCE before the
+// loop, then poll on that fd and read, WITHOUT ever calling GetPollFd() again.
+// Verifies that messages published across many separate poll cycles are all
+// eventually observed (i.e. the stable poll-drain snapshot does not strand a
+// caller that never re-fetches the fd).
+TEST_F(ClientTest, ExternalPollLoopGetPollFdOnceReadOnce) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("ext_poll1");
+  ASSERT_OK(sub);
+  absl::StatusOr<Publisher> pub =
+      pub_client.CreatePublisher("ext_poll1", 256, 10);
+  ASSERT_OK(pub);
+
+  constexpr int kNum = 20;
+  std::atomic<int> published{0};
+  std::thread publisher([&] {
+    for (int i = 0; i < kNum; i++) {
+      // Pace publishes so they land in distinct poll cycles.
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      absl::StatusOr<void *> buf = pub->GetMessageBuffer();
+      ASSERT_OK(buf);
+      int len = snprintf(static_cast<char *>(*buf), 256, "m%d", i);
+      ASSERT_OK(pub->PublishMessage(len + 1));
+      published.fetch_add(1);
+    }
+  });
+
+  // Fetch the poll fd exactly once, before the loop.
+  struct pollfd fd = sub->GetPollFd();
+
+  std::set<std::string> received;
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+  while (static_cast<int>(received.size()) < kNum &&
+         std::chrono::steady_clock::now() < deadline) {
+    int e = ::poll(&fd, 1, 500);
+    if (e <= 0) {
+      continue;
+    }
+    // Read a SINGLE message per wake; never re-fetch the poll fd.
+    absl::StatusOr<Message> msg = sub->ReadMessage();
+    ASSERT_OK(msg);
+    if (msg->length > 0) {
+      received.insert(
+          std::string(reinterpret_cast<const char *>(msg->buffer)));
+    }
+  }
+  publisher.join();
+  EXPECT_EQ(static_cast<int>(received.size()), kNum)
+      << "external-poll reader that never re-fetches the fd missed messages";
+}
+
+// As above, but drains until empty on each poll wake (still GetPollFd once).
+TEST_F(ClientTest, ExternalPollLoopGetPollFdOnceDrainUntilEmpty) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("ext_poll2");
+  ASSERT_OK(sub);
+  absl::StatusOr<Publisher> pub =
+      pub_client.CreatePublisher("ext_poll2", 256, 10);
+  ASSERT_OK(pub);
+
+  constexpr int kNum = 20;
+  std::thread publisher([&] {
+    for (int i = 0; i < kNum; i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      absl::StatusOr<void *> buf = pub->GetMessageBuffer();
+      ASSERT_OK(buf);
+      int len = snprintf(static_cast<char *>(*buf), 256, "m%d", i);
+      ASSERT_OK(pub->PublishMessage(len + 1));
+    }
+  });
+
+  struct pollfd fd = sub->GetPollFd();
+
+  std::set<std::string> received;
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+  while (static_cast<int>(received.size()) < kNum &&
+         std::chrono::steady_clock::now() < deadline) {
+    int e = ::poll(&fd, 1, 500);
+    if (e <= 0) {
+      continue;
+    }
+    for (;;) {
+      absl::StatusOr<Message> msg = sub->ReadMessage();
+      ASSERT_OK(msg);
+      if (msg->length == 0) {
+        break;
+      }
+      received.insert(
+          std::string(reinterpret_cast<const char *>(msg->buffer)));
+    }
+  }
+  publisher.join();
+  EXPECT_EQ(static_cast<int>(received.size()), kNum)
+      << "external-poll drain reader that never re-fetches the fd missed "
+         "messages";
+}
+
 TEST_F(ClientTest, PublishSingleMessagePollAndReadPublisherFirst) {
   subspace::Client pub_client;
   subspace::Client sub_client;
