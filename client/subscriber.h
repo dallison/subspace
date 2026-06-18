@@ -295,12 +295,19 @@ private:
   }
 
   toolbelt::FileDescriptor &GetPollFd() {
+    // Fetching the poll fd marks the start of a new poll-driven drain burst.
+    // Invalidate the cached active-slot snapshot so the upcoming drain observes
+    // every message published since the previous burst (e.g. a caller that
+    // waits, reads a single message, then waits again must see the next
+    // message). Reads *within* a burst do not re-fetch the fd, so they keep the
+    // stable snapshot and cannot be kept chasing concurrently published
+    // messages forever.
     poll_drain_pending_ = true;
+    next_slot_cache_valid_ = false;
     return trigger_.GetPollFd();
   }
   void ClearPollFd() { trigger_.Clear(); }
   bool PollDrainPending() const { return poll_drain_pending_; }
-  void ClearPollDrainPending() { poll_drain_pending_ = false; }
 
   MessageSlot *FindMessage(uint64_t timestamp) {
     MessageSlot *slot =

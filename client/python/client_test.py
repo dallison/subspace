@@ -650,6 +650,10 @@ class TestSubspaceClient(unittest.TestCase):
         for i in range(20):
             pub.publish_message(f"flood{i}".encode()[:6])
 
+        # Start a fresh poll-driven drain burst so the subscriber re-snapshots
+        # and observes the flooded messages (and the drops between them).
+        sub.wait()
+
         # Drain all available messages.
         while True:
             data = sub.read_message()
