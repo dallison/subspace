@@ -287,6 +287,16 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
     }
     if (new_slot == nullptr) {
       next_slot_cache_valid_ = false;
+      // If we suppressed newer messages to keep a stable poll-drain snapshot,
+      // re-arm the trigger so the next poll/Wait wakes promptly and
+      // re-snapshots them. ClearPollFd() during the drain may already have
+      // drained the publisher trigger for those messages, so without this a
+      // caller that drains until empty and then re-waits (e.g. the bridge
+      // transmitter) can block forever on the final message of a batch.
+      if (stable_poll_drain &&
+          ccb_->total_messages != next_slot_cached_total_) {
+        Trigger();
+      }
       return nullptr;
     }
     if (print_errors) {
