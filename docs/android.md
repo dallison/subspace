@@ -148,7 +148,7 @@ adb shell "cd /data/local/tmp && LD_LIBRARY_PATH=/data/local/tmp/android_libs \
 ### Shared Memory
 
 Android lacks POSIX shared memory (`shm_open`/`shm_unlink`). Subspace uses
-`SUBSPACE_SHMEM_MODE_ANDROID` (defined in `common/channel.h`) which:
+`SUBSPACE_SHMEM_MODE_MEMFD` (defined in `common/channel.h`) which:
 
 - Creates anonymous `memfd_create()` regions for the SCB, CCB, BCB, and
   client-owned message buffers.
@@ -157,6 +157,15 @@ Android lacks POSIX shared memory (`shm_open`/`shm_unlink`). Subspace uses
   (`SCM_RIGHTS`).
 - Keeps client-side buffer allocation and resize by registering publisher-owned
   buffer FDs with the server, which brokers them to subscribers.
+
+`SUBSPACE_SHMEM_MODE_MEMFD` names the mechanism, not the platform: Android always
+uses it, but it can also be selected on Linux (independently of Android) by
+building with `--config=linux_memfd` (Bazel) or `-DSUBSPACE_LINUX_USE_MEMFD=ON`
+(CMake). The default Linux backend remains named `/dev/shm` objects
+(`SUBSPACE_SHMEM_MODE_LINUX`); macOS/QNX (`SUBSPACE_SHMEM_MODE_POSIX`) are
+unaffected. Note that memfd mode routes buffer creation/resize through the
+server (anonymous FDs must be passed via `SCM_RIGHTS`), whereas the named
+`/dev/shm` backend maps buffers directly by name without server round-trips.
 
 ### Split Buffers
 
@@ -234,6 +243,16 @@ Place the subspace source tree in your AOSP checkout (e.g.,
 | `libsubspace_jni` | shared lib | JNI bindings for Java clients |
 | `subspace-java` | java lib | Java client wrapper |
 | `subspace_java_client_test` | java binary | Device-side Java integration test |
+| `subspace_rpc` | host binary | RPC IDL compiler (protoc plugin) |
+| `librpc_server` | static lib | co::Coroutine RPC server runtime |
+| `librpc_client` | static lib | co::Coroutine RPC client runtime |
+| `librpc_test_proto` | static lib | Test-service protobuf messages |
+| `librpc_test_subspace_rpc` | static lib | Generated test-service client/server stubs |
+
+The RPC modules live in `rpc/Android.bp`. To build an RPC service for Android,
+link `librpc_client` / `librpc_server` and generate stubs from your `.proto`
+files with the `subspace_rpc` plugin via a `genrule` (see
+`librpc_test_subspace_rpc_gen` in `rpc/Android.bp` for the protoc invocation).
 
 ### External Dependencies
 

@@ -309,7 +309,17 @@ public:
                             toolbelt::FileDescriptor fd = {}) {
     ClientBufferGroupKey group{metadata.session_id, metadata.buffer_index};
     ClientBufferSlotKey slot{metadata.slot_id, metadata.is_prefix};
-    client_buffers_[group][slot] = RegisteredClientBuffer{
+    auto &slots = client_buffers_[group];
+    // First registration wins.  With anonymous memfd-backed split buffers,
+    // every publisher on a channel creates and registers its own descriptors
+    // for the same (session, buffer_index, slot); they must all converge on a
+    // single shared buffer.  Keep the first registration and ignore later
+    // duplicates - the losing publishers re-fetch this authoritative buffer
+    // instead of using the descriptor they just created.
+    if (slots.find(slot) != slots.end()) {
+      return;
+    }
+    slots[slot] = RegisteredClientBuffer{
         .metadata = std::move(metadata), .fd = std::move(fd)};
   }
   // Invokes fn(const RegisteredClientBuffer&) for every registered buffer.  The

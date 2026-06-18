@@ -16,6 +16,13 @@ build:tsan --copt -g
 build:tsan --copt -fno-omit-frame-pointer
 build:tsan --linkopt -fsanitize=thread
 
+# Linux: use anonymous memfd_create-backed shared memory instead of the default
+# named /dev/shm objects.  Build with --config=linux_memfd.  This is a global
+# copt because SUBSPACE_SHMEM_MODE affects shared struct layout and must be
+# consistent across every translation unit.  Android always uses memfd and is
+# unaffected; macOS/QNX (POSIX) are unaffected.
+build:linux_memfd --copt=-DSUBSPACE_LINUX_USE_MEMFD
+
 # Enable the built-in platform-specific configuration feature
 common --enable_platform_specific_config
 

@@ -33,6 +33,21 @@ if(ANDROID)
     add_compile_definitions(SUBSPACE_ANDROID)
 endif()
 
+# --- Shared-memory backend selection ---
+# On Linux the default backend uses named /dev/shm objects (mapped by name,
+# without the server in the loop).  Enable this option to use anonymous
+# memfd_create-backed shared memory instead (no /dev/shm files; descriptors are
+# passed via the server).  Android always uses memfd; macOS/QNX are unaffected.
+# This is a global definition because SUBSPACE_SHMEM_MODE affects shared struct
+# layout and must be consistent across every translation unit.
+option(SUBSPACE_LINUX_USE_MEMFD
+       "On Linux, use anonymous memfd_create shared memory instead of /dev/shm"
+       OFF)
+if(SUBSPACE_LINUX_USE_MEMFD AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
+    add_compile_definitions(SUBSPACE_LINUX_USE_MEMFD)
+    message(STATUS "Linux shared-memory backend: anonymous memfd_create")
+endif()
+
 # --- Apple Silicon (ARM64) specific settings ---
 # Ensure that CMake targets the correct architecture when building on Apple platforms.
 # This value will be propagated to sub-dependencies.
@@ -130,23 +145,50 @@ set_property(CACHE SUBSPACE_CORO_BACKEND PROPERTY STRINGS "co" "asio")
 if(SUBSPACE_CORO_BACKEND STREQUAL "asio")
     add_compile_definitions(SUBSPACE_CORO_BACKEND=2)
     message(STATUS "Subspace coroutine backend: asio (Boost.Asio)")
+elseif(SUBSPACE_CORO_BACKEND STREQUAL "co")
+    # co backend leaves SUBSPACE_CORO_BACKEND unset; context.h defaults to _CO.
+    message(STATUS "Subspace coroutine backend: co")
+else()
+    message(FATAL_ERROR "SUBSPACE_CORO_BACKEND must be 'co' or 'asio'")
+endif()
 
-    # Boost.Asio is header-only but pulls in several Boost libraries.  Fetch a
-    # Boost release only when the asio backend is requested so the default co
-    # build does not pay for it.
+# --- Option: asio_rpc backend (Boost.Asio RPC) ---
+# The asio_rpc backend needs Boost.Asio plus the compiled Boost.Coroutine /
+# Boost.Context libraries.  Boost is large and Boost.Context's assembly stubs do
+# not cross-compile cleanly, so this is fetched only for native builds and only
+# when explicitly enabled.
+option(SUBSPACE_ASIO_RPC "Build the asio_rpc backend (fetches Boost via FetchContent)" ON)
+
+if(SUBSPACE_ASIO_RPC AND CMAKE_CROSSCOMPILING)
+    message(STATUS "Disabling SUBSPACE_ASIO_RPC: Boost.Context does not cross-compile cleanly.")
+    set(SUBSPACE_ASIO_RPC OFF)
+endif()
+
+set(SUBSPACE_NEEDS_BOOST OFF)
+if(SUBSPACE_CORO_BACKEND STREQUAL "asio" OR SUBSPACE_ASIO_RPC)
+    set(SUBSPACE_NEEDS_BOOST ON)
+endif()
+
+if(SUBSPACE_NEEDS_BOOST)
+    # Build only the Boost libraries needed by the asio server/RPC backends; the
+    # Boost CMake superproject pulls in their transitive dependencies
+    # automatically.
+    set(BOOST_INCLUDE_LIBRARIES asio coroutine context system CACHE INTERNAL "Boost libs for asio_rpc")
     FetchContent_Declare(
         Boost
-        GIT_REPOSITORY https://github.com/boostorg/boost.git
-        GIT_TAG boost-1.87.0
+        URL https://github.com/boostorg/boost/releases/download/boost-1.87.0/boost-1.87.0-cmake.tar.xz
         CMAKE_ARGS
             -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
     )
-    set(BOOST_INCLUDE_LIBRARIES asio coroutine context)
     FetchContent_MakeAvailable(Boost)
-else()
-    # co backend leaves SUBSPACE_CORO_BACKEND unset; context.h defaults to _CO.
-    message(STATUS "Subspace coroutine backend: co")
 endif()
+
+# --- Option: co20_rpc backend (C++20 stackless coroutine RPC) ---
+# The co20_rpc backend only needs co_cpp20 (already fetched with co), so it has
+# no extra third-party dependency.  It does require the subspace_rpc plugin host
+# tool to generate its stubs, so it is skipped when cross-compiling without a
+# host plugin (handled inside co20_rpc/CMakeLists.txt).
+option(SUBSPACE_CO20_RPC "Build the co20_rpc backend (C++20 coroutine RPC)" ON)
 
 # --- Option: Python bindings ---
 option(SUBSPACE_PYTHON "Build Python bindings (requires Python3 and pybind11)" OFF)
@@ -184,6 +226,26 @@ add_subdirectory(shadow)
 add_subdirectory(c_client)
 add_subdirectory(android)
 add_subdirectory(rust_client)
+add_subdirectory(rpc)
+
+# asio_rpc must follow rpc: it reuses the subspace_rpc_plugin host tool defined
+# there to generate its RPC stubs.
+if(SUBSPACE_ASIO_RPC)
+    add_subdirectory(asio_rpc)
+endif()
+
+# coro_rpc (C++20 boost::asio::awaitable backend) also reuses subspace_rpc_plugin
+# and builds on Boost.Asio, which is fetched under SUBSPACE_ASIO_RPC, so gate it
+# on the same option and add it after rpc.
+if(SUBSPACE_ASIO_RPC)
+    add_subdirectory(coro_rpc)
+endif()
+
+# co20_rpc likewise reuses the subspace_rpc_plugin host tool, so it must follow
+# rpc as well.
+if(SUBSPACE_CO20_RPC)
+    add_subdirectory(co20_rpc)
+endif()
 
 if(TARGET client_test AND TARGET nop_plugin)
     add_dependencies(client_test nop_plugin)

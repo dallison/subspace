@@ -11,3 +11,14 @@ cc_library(
         "//client:subspace_client",
     ],
 )
+
+cc_library(
+    name = "shared_ptr_pipe_base",
+    hdrs = [
+        "shared_ptr_pipe_base.h",
+    ],
+    deps = [
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+    ],
+)

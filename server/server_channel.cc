@@ -7,7 +7,7 @@
 #include "server/server.h"
 #include <utility>
 #include <sys/mman.h>
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
 #include <sys/syscall.h>
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
@@ -33,7 +33,7 @@ static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
   char shm_file[NAME_MAX]; // Unique file in file system.
   int tmpfd;
 
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
   snprintf(shm_file, sizeof(shm_file), "subspace.%d.%s", id, suffix);
 #ifdef __NR_memfd_create
   tmpfd = static_cast<int>(syscall(
@@ -203,8 +203,8 @@ void ServerChannel::RemoveBuffer(uint64_t session_id, Server *server) {
           }
         }
         if (!plugin_freed && !metadata.object_name.empty()) {
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
-          // Anonymous fd-backed Android buffers are released when the server's
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
+          // Anonymous fd-backed memfd buffers are released when the server's
           // registered fd is closed.
 #else
           (void)shm_unlink(metadata.object_name.c_str());
@@ -221,7 +221,7 @@ void ServerChannel::RemoveBuffer(uint64_t session_id, Server *server) {
       (void)shm_unlink(shm_name->c_str());
     }
     remove(filename.c_str());
-#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
     (void)unlink(filename.c_str());
 #else
     (void)shm_unlink(filename.c_str());

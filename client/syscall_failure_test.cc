@@ -8,6 +8,7 @@
 // up correctly.
 
 #include "client/test_fixture.h"
+#include "common/channel.h"
 
 #include "common/syscall_shim.h"
 #include "common/syscall_shim_test_helper.h"
@@ -86,7 +87,7 @@ TEST_F(SyscallFailureTest, MmapFailOnBcb) {
 // shm_open failures during CreateBuffer
 // ---------------------------------------------------------------------------
 
-#if !defined(__ANDROID__)
+#if SUBSPACE_SHMEM_MODE != SUBSPACE_SHMEM_MODE_MEMFD
 TEST_F(SyscallFailureTest, ShmOpenFail) {
   auto client = EVAL_AND_ASSERT_OK(
       subspace::Client::Create(Socket(), "shm_open_test"));
@@ -133,7 +134,7 @@ TEST_F(SyscallFailureTest, FtruncateFailAfterShmOpen) {
 // chmod failure during CreateBuffer
 // ---------------------------------------------------------------------------
 
-#if !defined(__ANDROID__)
+#if SUBSPACE_SHMEM_MODE != SUBSPACE_SHMEM_MODE_MEMFD
 TEST_F(SyscallFailureTest, ChmodFail) {
   auto client = EVAL_AND_ASSERT_OK(
       subspace::Client::Create(Socket(), "chmod_test"));
@@ -249,13 +250,13 @@ TEST_F(SyscallFailureTest, ShimCallCounting) {
 
   // Verify that mmap was called at least 3 times (SCB, CCB, BCB).
   EXPECT_GE(shim.mmap_call_count, 3);
-#if !defined(__ANDROID__)
+#if SUBSPACE_SHMEM_MODE != SUBSPACE_SHMEM_MODE_MEMFD
   // Verify that shm_open was called at least once (for buffer creation).
   EXPECT_GE(shim.shm_open_call_count, 1);
 #endif
   // Verify that ftruncate was called at least once.
   EXPECT_GE(shim.ftruncate_call_count, 1);
-#if !defined(__ANDROID__)
+#if SUBSPACE_SHMEM_MODE != SUBSPACE_SHMEM_MODE_MEMFD
   // Verify that chmod was called at least once.
   EXPECT_GE(shim.chmod_call_count, 1);
 #endif

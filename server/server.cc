@@ -620,7 +620,7 @@ void Server::CleanupAfterSession() {
   std::string session_shm_file_prefix =
       "subspace_." + std::to_string(session_id_);
 
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
   // Android uses anonymous fd-backed shared memory; there are no shm files to
   // remove for a session.
 
@@ -665,7 +665,7 @@ void Server::CleanupAfterSession() {
 
 void Server::CleanupFilesystem() {
   logger_.Log(toolbelt::LogLevel::kInfo, "Cleaning up filesystem...");
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
   // Android uses anonymous fd-backed shared memory; there are no shm files to
   // remove.
 

@@ -118,7 +118,7 @@ std::string Channel::BufferSharedMemoryName(uint64_t session_id,
   std::string sanitized_name =
       absl::StrReplaceAll(ResolvedName(), {{"/", "."}});
 
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_ANDROID
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
   return absl::StrFormat("subspace_%d_%s_%d", session_id, sanitized_name,
                          buffer_index);
 #elif defined(__APPLE__)

@@ -8,6 +8,7 @@
 #include "absl/types/span.h"
 #include "client/client.h"
 #include "co/coroutine_cpp20.h"
+#include "co20_rpc/common/shared_ptr_pipe.h"
 #include "google/protobuf/any.pb.h"
 #include "rpc/common/rpc_common.h"
 #include "toolbelt/logging.h"
@@ -44,16 +45,46 @@ struct AnyStreamWriter {
   bool is_cancelled = false;
 };
 
+// An item pushed by either the reply function or the error function of an
+// async method handler.  Exactly one of response or error_message is
+// meaningful: a non-empty error_message produces an error response, otherwise
+// `response` owns the result Any.  The session/request/client ids are copied
+// from the originating RpcRequest so the response coroutine can build the
+// RpcResponse without keeping the original request alive.
+struct ReplyItem {
+  std::unique_ptr<google::protobuf::Any> response;
+  int32_t session_id;
+  int32_t request_id;
+  uint64_t client_id;
+  std::string error_message;
+};
+
+// Completed replies for a single non-streaming method instance are pushed into
+// this queue by the request coroutine (via the handler's reply/error callbacks)
+// and drained by the response coroutine.  The whole RPC server runs on a single
+// scheduler thread, so no locking is needed.
+struct ReplyQueue {
+  explicit ReplyQueue(SharedPtrPipe<ReplyItem> pipe) : pipe(std::move(pipe)) {}
+
+  SharedPtrPipe<ReplyItem> pipe;
+};
+
 struct Method {
+  // Async handler: receives the request Any, a reply function for success and
+  // an error function for failure.  The handler is itself a coroutine
+  // (co20::ValueTask) so it may co_await work before calling exactly one of
+  // reply/error_reply.
   Method(RpcServer *server, std::string name, std::string request_type,
          std::string response_type, int32_t slot_size, int32_t num_slots,
-         std::function<co20::ValueTask<absl::Status>(
-             const google::protobuf::Any &, google::protobuf::Any *)>
+         std::function<co20::ValueTask<void>(
+             const google::protobuf::Any &,
+             std::function<void(std::unique_ptr<google::protobuf::Any>)>,
+             std::function<void(std::string)>)>
              callback,
          int id)
       : name(std::move(name)), request_type(std::move(request_type)),
         response_type(std::move(response_type)), slot_size(slot_size),
-        num_slots(num_slots), callback(std::move(callback)), id(id) {
+        num_slots(num_slots), async_callback(std::move(callback)), id(id) {
     MakeChannelNames(server);
   }
 
@@ -78,9 +109,13 @@ struct Method {
   std::string response_type;
   int32_t slot_size;
   int32_t num_slots;
-  std::function<co20::ValueTask<absl::Status>(const google::protobuf::Any &,
-                                              google::protobuf::Any *)>
-      callback;
+  // Async handler for a normal, non-streaming method.  See the constructor
+  // above for the calling convention.
+  std::function<co20::ValueTask<void>(
+      const google::protobuf::Any &,
+      std::function<void(std::unique_ptr<google::protobuf::Any>)>,
+      std::function<void(std::string)>)>
+      async_callback;
   std::function<co20::ValueTask<absl::Status>(const google::protobuf::Any &,
                                               internal::AnyStreamWriter &)>
       stream_callback;
@@ -95,6 +130,9 @@ struct MethodInstance {
   std::shared_ptr<subspace::Subscriber> request_subscriber;
   std::shared_ptr<subspace::Publisher> response_publisher;
   std::shared_ptr<subspace::Subscriber> cancel_subscriber;
+  // Non-null for non-streaming methods: completed responses are pushed here by
+  // the request coroutine and drained by the response coroutine.
+  std::shared_ptr<ReplyQueue> reply_queue;
 };
 
 struct Session {
@@ -175,6 +213,24 @@ public:
           callback,
       MethodOptions &&options = {});
 
+  // Register an async handler.  The callback is a coroutine that receives the
+  // request Any plus a reply function for success and an error function for
+  // failure; it may co_await work before calling exactly one of them.  The
+  // reply/error functions must be invoked from the request coroutine; they push
+  // the completed result into the method's reply queue, which the response
+  // coroutine drains and publishes.  request_type and response_type are the
+  // protobuf type names advertised to clients.
+  absl::Status RegisterMethodAsync(
+      const std::string &method,
+      std::function<co20::ValueTask<void>(
+          const google::protobuf::Any &,
+          std::function<void(std::unique_ptr<google::protobuf::Any>)>,
+          std::function<void(std::string)>)>
+          callback,
+      MethodOptions &&options = {},
+      std::string_view request_type = "subspace.RawMessage",
+      std::string_view response_type = "subspace.RawMessage");
+
   absl::Status UnregisterMethod(const std::string &method) {
     auto it = methods_.find(method);
     if (it == methods_.end()) {
@@ -238,7 +294,18 @@ private:
 
   absl::Status DestroySession(int session_id);
 
-  static co20::ValueTask<void> SessionMethodCoroutine(
+  // Request coroutine for non-streaming methods: reads incoming requests and
+  // invokes the method's async_callback (itself a coroutine).  The handler
+  // replies via the reply/error callbacks, which enqueue into the reply queue.
+  static co20::ValueTask<void> SessionRequestCoroutine(
+      std::shared_ptr<RpcServer> server,
+      std::shared_ptr<internal::Session> session,
+      std::shared_ptr<internal::MethodInstance> method_instance,
+      co20::Coroutine &co);
+
+  // Response coroutine for non-streaming methods: drains the reply queue and
+  // publishes responses via the Subspace response publisher.
+  static co20::ValueTask<void> SessionResponseCoroutine(
       std::shared_ptr<RpcServer> server,
       std::shared_ptr<internal::Session> session,
       std::shared_ptr<internal::MethodInstance> method_instance,

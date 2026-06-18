@@ -44,16 +44,49 @@ struct AnyStreamWriter {
   bool is_cancelled = false;
 };
 
+// An item pushed by either the reply function or the error function of an
+// async method handler.  Exactly one of response or error_message is
+// meaningful: a non-empty error_message produces an error response, otherwise
+// `response` owns the result Any.  The session/request/client ids are copied
+// from the originating RpcRequest so the response coroutine can build the
+// RpcResponse without keeping the original request alive.
+struct ReplyItem {
+  std::unique_ptr<google::protobuf::Any> response;
+  int32_t session_id;
+  int32_t request_id;
+  uint64_t client_id;
+  std::string error_message;
+};
+
+// Completed replies for a single non-streaming method instance are pushed into
+// this queue by the request coroutine (or by a later async completion from
+// another coroutine) and drained by the response coroutine.  The whole RPC
+// server runs on a single coroutine scheduler thread, so no locking is needed:
+// only one coroutine runs at a time and a small SharedPtrPipe write does not
+// yield, so writes never interleave.
+struct ReplyQueue {
+  explicit ReplyQueue(toolbelt::SharedPtrPipe<ReplyItem> pipe)
+      : pipe(std::move(pipe)) {}
+
+  toolbelt::SharedPtrPipe<ReplyItem> pipe;
+};
+
 struct Method {
+  // Async handler: receives the request Any, a coroutine pointer (usable for
+  // inline async work), a reply function for success and an error function for
+  // failure.  Exactly one of reply/error_reply should be called.  They may be
+  // called immediately, or kept and invoked later from any thread.
   Method(RpcServer *server, std::string name, std::string request_type,
          std::string response_type, int32_t slot_size, int32_t num_slots,
-         std::function<absl::Status(const google::protobuf::Any &,
-                                    google::protobuf::Any *, co::Coroutine *)>
+         std::function<void(
+             const google::protobuf::Any &, co::Coroutine *,
+             std::function<void(std::unique_ptr<google::protobuf::Any>)>,
+             std::function<void(std::string)>)>
              callback,
          int id)
       : name(std::move(name)), request_type(std::move(request_type)),
         response_type(std::move(response_type)), slot_size(slot_size),
-        num_slots(num_slots), callback(std::move(callback)), id(id) {
+        num_slots(num_slots), async_callback(std::move(callback)), id(id) {
     MakeChannelNames(server);
   }
   // Streaming method constructor.
@@ -79,11 +112,12 @@ struct Method {
   std::string response_type;
   int32_t slot_size;
   int32_t num_slots;
-  // Callback for normal, non-streaming method that is called and returns a
-  // single result.
-  std::function<absl::Status(const google::protobuf::Any &,
-                             google::protobuf::Any *, co::Coroutine *)>
-      callback;
+  // Async handler for a normal, non-streaming method.  See the constructor
+  // above for the calling convention.
+  std::function<void(const google::protobuf::Any &, co::Coroutine *,
+                     std::function<void(std::unique_ptr<google::protobuf::Any>)>,
+                     std::function<void(std::string)>)>
+      async_callback;
   // Callback for a streaming method that produces multiple responses.
   std::function<absl::Status(const google::protobuf::Any &,
                              internal::AnyStreamWriter &, co::Coroutine *)>
@@ -99,6 +133,9 @@ struct MethodInstance {
   std::shared_ptr<subspace::Subscriber> request_subscriber;
   std::shared_ptr<subspace::Publisher> response_publisher;
   std::shared_ptr<subspace::Subscriber> cancel_subscriber;
+  // Non-null for non-streaming methods: completed responses are pushed here by
+  // the request coroutine and drained by the response coroutine.
+  std::shared_ptr<ReplyQueue> reply_queue;
 };
 
 struct Session {
@@ -200,6 +237,26 @@ public:
           callback,
       MethodOptions &&options = {});
 
+  // Register an async handler.  The callback receives the request Any, a
+  // coroutine pointer (usable for inline async work), a reply function for
+  // success and an error function for failure.  Exactly one of reply/error
+  // should be called.  Unlike the synchronous RegisterMethod overloads, the
+  // callback does not have to produce its result before returning: it may keep
+  // the reply/error functions and invoke one of them later, possibly from
+  // another thread.  request_type and response_type are the protobuf type
+  // names advertised to clients; by default async methods exchange RawMessage
+  // payloads.
+  absl::Status RegisterMethodAsync(
+      const std::string &method,
+      std::function<void(
+          const google::protobuf::Any &, co::Coroutine *,
+          std::function<void(std::unique_ptr<google::protobuf::Any>)>,
+          std::function<void(std::string)>)>
+          callback,
+      MethodOptions &&options = {},
+      std::string_view request_type = "subspace.RawMessage",
+      std::string_view response_type = "subspace.RawMessage");
+
   absl::Status UnregisterMethod(const std::string &method) {
     auto it = methods_.find(method);
     if (it == methods_.end()) {
@@ -271,7 +328,18 @@ private:
   CreateSession(uint64_t client_id);
   absl::Status DestroySession(int session_id);
 
-  static void SessionMethodCoroutine(
+  // Request coroutine for non-streaming methods: reads incoming requests and
+  // invokes the method's async_callback.  The callback may reply immediately or
+  // keep the reply function and complete later, possibly from another thread.
+  static void SessionRequestCoroutine(
+      std::shared_ptr<RpcServer> server,
+      std::shared_ptr<internal::Session> session,
+      std::shared_ptr<internal::MethodInstance> method_instance,
+      co::Coroutine *c);
+
+  // Response coroutine for non-streaming methods: drains the reply queue and
+  // publishes responses via the Subspace response publisher.
+  static void SessionResponseCoroutine(
       std::shared_ptr<RpcServer> server,
       std::shared_ptr<internal::Session> session,
       std::shared_ptr<internal::MethodInstance> method_instance,

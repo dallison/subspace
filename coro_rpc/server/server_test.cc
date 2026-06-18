@@ -127,6 +127,30 @@ static std::shared_ptr<subspace::coro_rpc::RpcServer> BuildServer() {
       });
   EXPECT_TRUE(s.ok());
 
+  // Async method registered through the async API.  It does some async work
+  // (suspends on a timer) before completing the reply, exercising the
+  // asynchronous reply path through the request/response coroutine pipeline.
+  s = server->RegisterMethodAsync(
+      "AsyncMethod",
+      [](const google::protobuf::Any &req,
+         std::function<void(std::unique_ptr<google::protobuf::Any>)> reply,
+         std::function<void(std::string)> /*error_reply*/)
+          -> boost::asio::awaitable<void> {
+        rpc::TestRequest test;
+        (void)req.UnpackTo(&test);
+        auto executor = co_await boost::asio::this_coro::executor;
+        boost::asio::steady_timer timer(executor,
+                                        std::chrono::milliseconds(50));
+        co_await timer.async_wait(boost::asio::use_awaitable);
+        rpc::TestResponse r;
+        r.set_message("Hello from AsyncMethod");
+        auto any = std::make_unique<google::protobuf::Any>();
+        any->PackFrom(r);
+        reply(std::move(any));
+      },
+      {}, "subspace.TestRequest", "subspace.TestResponse");
+  EXPECT_TRUE(s.ok());
+
   return server;
 }
 
@@ -505,6 +529,91 @@ TEST_F(CoroServerTest, CallError) {
             break;
           }
         }
+        co_await Close(server, ctx);
+        server->Stop();
+      },
+      boost::asio::detached);
+
+  ioc.run();
+}
+
+TEST_F(CoroServerTest, CallAsyncMethod) {
+  boost::asio::io_context ioc;
+
+  auto server = BuildServer();
+  ASSERT_OK(server->Run(&ioc));
+
+  boost::asio::co_spawn(
+      ioc,
+      [&]() -> boost::asio::awaitable<void> {
+        ServerContext ctx;
+        subspace::RpcServerResponse response;
+        co_await Open(server, response, ctx);
+
+        auto *method = FindMethod(response.open(), "AsyncMethod");
+        CO_EXPECT_NE(method, nullptr);
+
+        subspace::RpcRequest req;
+        req.set_client_id(ctx.client_id);
+        req.set_session_id(response.open().session_id());
+        int request_id = next_request_id++;
+        req.set_request_id(request_id);
+        req.set_method(method->id());
+        auto *arg = req.mutable_argument();
+
+        rpc::TestRequest test_request;
+        test_request.set_message("Hello, async world!");
+        arg->PackFrom(test_request);
+
+        subspace::Client client;
+        InitClient(client);
+
+        auto pub = client.CreatePublisher(
+            method->request_channel().name(),
+            method->request_channel().slot_size(),
+            method->request_channel().num_slots(),
+            {.reliable = true, .type = method->request_channel().type()});
+        CO_EXPECT_OK(pub);
+
+        auto sub = client.CreateSubscriber(
+            method->response_channel().name(),
+            {.reliable = true, .type = method->response_channel().type()});
+        CO_EXPECT_OK(sub);
+
+        auto buffer = pub->GetMessageBuffer(int32_t(req.ByteSizeLong()));
+        CO_EXPECT_OK(buffer);
+        CO_EXPECT_TRUE(req.SerializeToArray(*buffer, req.ByteSizeLong()));
+        CO_EXPECT_OK(pub->PublishMessage(int(req.ByteSizeLong())));
+
+        bool done = false;
+        while (!done) {
+          int sub_fd = sub->GetPollFd().fd;
+          CO_EXPECT_OK(
+              co_await subspace::coro_rpc::async_wait_readable(sub_fd));
+          for (;;) {
+            auto m = sub->ReadMessage();
+            CO_EXPECT_OK(m);
+            if (m->length > 0) {
+              subspace::Message msg = std::move(*m);
+              subspace::RpcResponse rpc_response;
+              CO_EXPECT_TRUE(
+                  rpc_response.ParseFromArray(msg.buffer, msg.length));
+              if (rpc_response.client_id() == ctx.client_id &&
+                  rpc_response.request_id() == request_id) {
+                EXPECT_EQ("", rpc_response.error());
+                rpc::TestResponse response_message;
+                rpc_response.result().UnpackTo(&response_message);
+                EXPECT_EQ("Hello from AsyncMethod",
+                          response_message.message());
+                done = true;
+                break;
+              }
+              continue;
+            }
+            break;
+          }
+        }
+
         co_await Close(server, ctx);
         server->Stop();
       },

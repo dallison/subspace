@@ -135,6 +135,79 @@ jobs:
             --test_output=errors \
             ${{ matrix.bazel_flags }}
 
+  # Exercises the anonymous memfd_create shared-memory backend on Linux
+  # (--config=linux_memfd, i.e. SUBSPACE_SHMEM_MODE_MEMFD).  This is the same
+  # mechanism Android always uses; running it on native Linux guards against
+  # regressions in the fd-passing buffer path without needing an emulator.
+  # The Rust client only supports the named /dev/shm backend, so its tests are
+  # excluded (the C++ memfd path is exercised here and on Android).
+  memfd:
+    name: memfd (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60 # liberal upper bound to protect against tests stalling
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Bazel
+        uses: bazel-contrib/setup-bazel@0.18.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-${{ matrix.os }}-memfd
+          repository-cache: true
+
+      - name: Build all targets (memfd backend, excluding Rust)
+        run: |
+          bazel build \
+            --config=linux_memfd \
+            --verbose_failures \
+            -- //... -//rust_client/...
+
+      - name: Run tests (memfd backend, excluding Rust)
+        run: |
+          bazel test \
+            --config=linux_memfd \
+            --verbose_failures \
+            --test_output=errors \
+            -- //... -//rust_client/...
+
+      - name: Run split-buffer client tests (memfd backend)
+        run: |
+          bazel test \
+            --config=linux_memfd \
+            //client:client_test \
+            //c_client:client_test \
+            --verbose_failures \
+            --test_output=errors \
+            --test_arg=--use_split_buffers
+
+      - name: Run bridge tests with and without split buffers (memfd backend)
+        run: |
+          bazel test \
+            --config=linux_memfd \
+            //client:bridge_test \
+            --verbose_failures \
+            --test_output=errors \
+            --test_arg=--use_split_buffers=false
+          bazel test \
+            --config=linux_memfd \
+            //client:bridge_test \
+            --verbose_failures \
+            --test_output=errors \
+            --test_arg=--use_split_buffers=true
+
+      - name: Upload memfd Bazel test logs
+        uses: actions/upload-artifact@v7
+        if: failure() # Upload artifacts only if a step failed
+        with:
+          name: bazel-memfd-test-logs-${{ matrix.os }}
+          path: bazel-testlogs
+
   diagnostics:
     name: diagnostics (${{ matrix.os }}, ${{ matrix.mode }})
     runs-on: ${{ matrix.os }}
@@ -283,13 +356,24 @@ jobs:
           path: bazel-testlogs/client/latency_test
 
   cmake:
-    name: cmake (${{ matrix.build_type }})
+    name: cmake (${{ matrix.variant }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        build_type: [Debug, Release]
+        include:
+          - variant: Debug
+            build_type: Debug
+            cmake_flags: ""
+          - variant: Release
+            build_type: Release
+            cmake_flags: ""
+          # Exercises the anonymous memfd_create shared-memory backend through
+          # the CMake build path (mirrors the --config=linux_memfd Bazel job).
+          - variant: Release-memfd
+            build_type: Release
+            cmake_flags: "-DSUBSPACE_LINUX_USE_MEMFD=ON"
 
     steps:
       - name: Checkout code
@@ -301,13 +385,13 @@ jobs:
           sudo apt-get install -y protobuf-compiler
 
       - name: Configure CMake
-        run: cmake -S . -B build/cmake-${{ matrix.build_type }} -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        run: cmake -S . -B build/cmake-${{ matrix.variant }} -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} ${{ matrix.cmake_flags }}
 
       - name: Build CMake targets
-        run: cmake --build build/cmake-${{ matrix.build_type }} --parallel $(nproc)
+        run: cmake --build build/cmake-${{ matrix.variant }} --parallel $(nproc)
 
       - name: Run CMake tests
-        run: ctest --test-dir build/cmake-${{ matrix.build_type }} --output-on-failure
+        run: ctest --test-dir build/cmake-${{ matrix.variant }} --output-on-failure
 
   cmake-android:
     name: cmake-android (x86_64)
