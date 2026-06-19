@@ -30,6 +30,7 @@ set_source_files_properties(arm_crc32.S PROPERTIES
 # Link against other internal libraries (e.g., common) or external dependencies if needed:
 target_link_libraries(subspace_client PUBLIC
     subspace_common
+    subspace_async
     subspace_proto
     absl::flags
     absl::flat_hash_map

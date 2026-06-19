@@ -1,0 +1,60 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+# The async abstraction layer.  One macro (SUBSPACE_CORO_BACKEND) selects
+# between the `co` coroutine backend (default) and the Boost.Asio backend.
+# The macro is propagated to dependents via `defines` because the headers
+# (context.h / socket.h) are included by the server and client translation
+# units and must see the same backend selection.
+cc_library(
+    name = "async",
+    srcs = [
+        "socket.cc",
+        "wait.cc",
+    ],
+    hdrs = [
+        "context.h",
+        "runtime.h",
+        "socket.h",
+        "wait.h",
+    ],
+    defines = select({
+        # SUBSPACE_CORO_BACKEND_ASIO == 2 (see context.h).
+        "//:coro_backend_asio": ["SUBSPACE_CORO_BACKEND=2"],
+        # co backend leaves the macro unset; context.h defaults to _CO.
+        "//conditions:default": [],
+    }),
+    deps = [
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings:str_format",
+        "@coroutines//co:co",
+        "@cpp_toolbelt//toolbelt",
+    ] + select({
+        "//:coro_backend_asio": [
+            "@boost.asio//:boost.asio",
+            "@boost.coroutine//:boost.coroutine",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+cc_test(
+    name = "async_test",
+    size = "small",
+    srcs = ["async_test.cc"],
+    deps = [
+        ":async",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@coroutines//co:co",
+        "@googletest//:gtest_main",
+    ] + select({
+        "//:coro_backend_asio": [
+            "@boost.asio//:boost.asio",
+            "@boost.coroutine//:boost.coroutine",
+        ],
+        "//conditions:default": [],
+    }),
+)

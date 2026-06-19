@@ -19,8 +19,16 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <memory>
+#include <poll.h>
+#include <set>
 #include <signal.h>
 #include <sys/file.h>
+#if defined(__linux__)
+#include <sys/socket.h>
+#if __has_include(<linux/vm_sockets.h>)
+#include <linux/vm_sockets.h>
+#endif
+#endif
 #include <sys/resource.h>
 #include <thread>
 #include <unistd.h>
@@ -157,7 +165,7 @@ public:
   }
 
 private:
-  static co::CoroutineScheduler scheduler_[2];
+  static subspace::async::RuntimeEngine scheduler_[2];
   static std::string socket_[2];
   static int server_pipe_[2][2];
   static std::unique_ptr<subspace::Server> server_[2];
@@ -165,20 +173,24 @@ private:
   static toolbelt::FileDescriptor bridge_notification_pipe_[2];
 };
 
-co::CoroutineScheduler BridgeTest::scheduler_[2];
+subspace::async::RuntimeEngine BridgeTest::scheduler_[2];
 std::string BridgeTest::socket_[2] = {BRIDGE_TEST_TMP "/subspace1", BRIDGE_TEST_TMP "/subspace2"};
 int BridgeTest::server_pipe_[2][2];
 std::unique_ptr<subspace::Server> BridgeTest::server_[2];
 std::thread BridgeTest::server_thread_[2];
 toolbelt::FileDescriptor BridgeTest::bridge_notification_pipe_[2];
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO
 static co::CoroutineScheduler *g_scheduler[2];
+#endif
 
 // For debugging, hit ^\ to dump all coroutines if this test is not working
 // properly.
 static void SigQuitHandler(int sig) {
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO
   std::cout << "\nAll coroutines:" << std::endl;
   g_scheduler[0]->Show();
   g_scheduler[1]->Show();
+#endif
   signal(sig, SIG_DFL);
   (void)raise(sig);
 }
@@ -274,7 +286,9 @@ class ScopedBridgeServerPair {
 public:
   ~ScopedBridgeServerPair() { Stop(); }
 
-  void Start(const std::array<BridgeRangeConfig, 2> &ranges) {
+  void Start(const std::array<BridgeRangeConfig, 2> &ranges,
+             int num_asio_threads = 1, bool use_vsock = false,
+             uint32_t vsock_cid = 0) {
     int lock_fd = ::open(BRIDGE_TEST_TMP "/subspace_bridge_test_port.lock",
                          O_CREAT | O_RDWR, 0666);
     ASSERT_NE(-1, lock_fd);
@@ -300,6 +314,10 @@ public:
           /*local=*/false, server_pipe_[i][1]);
       server_[i]->SetLogLevel(absl::GetFlag(FLAGS_log_level));
 
+      if (use_vsock) {
+        server_[i]->SetVsockBridging(true, vsock_cid);
+      }
+
       if (ranges[i].first_port != 0) {
         ASSERT_OK(server_[i]->SetBridgePortRange(
             ranges[i].first_port, ranges[i].last_port,
@@ -316,8 +334,8 @@ public:
     }
 
     for (int i = 0; i < 2; i++) {
-      server_thread_[i] = std::thread([this, i]() {
-        absl::Status s = server_[i]->Run();
+      server_thread_[i] = std::thread([this, i, num_asio_threads]() {
+        absl::Status s = server_[i]->Run(num_asio_threads);
         if (!s.ok()) {
           fprintf(stderr, "Error running Subspace server: %s\n",
                   s.ToString().c_str());
@@ -352,12 +370,14 @@ public:
     ASSERT_OK(client.Init(socket_[server]));
   }
 
+  const std::string &Socket(int server) const { return socket_[server]; }
+
   toolbelt::FileDescriptor &BridgeNotificationPipe(int server) {
     return bridge_notification_pipe_[server];
   }
 
 private:
-  co::CoroutineScheduler scheduler_[2];
+  subspace::async::RuntimeEngine scheduler_[2];
   std::string socket_[2];
   int server_pipe_[2][2];
   std::unique_ptr<subspace::Server> server_[2];
@@ -375,15 +395,15 @@ TEST_F(BridgeTest, Basic) {
 
   // Create a non-local publisher on client 1.
   absl::StatusOr<Publisher> pub = client1.CreatePublisher(
-      "/bridged_channel", {.slot_size = 256, .num_slots = 10, .local = false});
+      "/bridged_basic", {.slot_size = 256, .num_slots = 10, .local = false});
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
-      client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
+      client2.CreateSubscriber("/bridged_basic", {.max_active_messages = 2});
   ASSERT_OK(sub);
 
   toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
-  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_channel");
+  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_basic");
 
   // Send a message on the publisher.
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
@@ -393,7 +413,7 @@ TEST_F(BridgeTest, Basic) {
   ASSERT_OK(pub_status);
 
   toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
-  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_channel");
+  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_basic");
 
   // Receive the message on the subscriber.
   absl::StatusOr<Message> msg = ReadMessageEventually(*sub);
@@ -545,19 +565,19 @@ TEST_F(BridgeTest, TwoSubs) {
 
   // Create a non-local publisher on client 1.
   absl::StatusOr<Publisher> pub = client1.CreatePublisher(
-      "/bridged_channel", {.slot_size = 256, .num_slots = 10, .local = false});
+      "/bridged_twosubs", {.slot_size = 256, .num_slots = 10, .local = false});
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub1 =
-      client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
+      client2.CreateSubscriber("/bridged_twosubs", {.max_active_messages = 2});
   ASSERT_OK(sub1);
 
   absl::StatusOr<Subscriber> sub2 =
-      client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
+      client2.CreateSubscriber("/bridged_twosubs", {.max_active_messages = 2});
   ASSERT_OK(sub2);
 
   toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
-  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_channel");
+  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_twosubs");
 
   // Send a message on the publisher.
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
@@ -567,7 +587,7 @@ TEST_F(BridgeTest, TwoSubs) {
   ASSERT_OK(pub_status);
 
   toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
-  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_channel");
+  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_twosubs");
 
   // Receive the message on the subscriber.
   absl::StatusOr<Message> msg = ReadMessageEventually(*sub1);
@@ -590,18 +610,18 @@ TEST_F(BridgeTest, BasicRetirement) {
 
   // Create a non-local publisher on client 1.
   absl::StatusOr<Publisher> pub =
-      client1.CreatePublisher("/bridged_channel", {.slot_size = 256,
+      client1.CreatePublisher("/bridged_basic_retire", {.slot_size = 256,
                                                    .num_slots = 10,
                                                    .local = false,
                                                    .notify_retirement = true});
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
-      client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
+      client2.CreateSubscriber("/bridged_basic_retire", {.max_active_messages = 2});
   ASSERT_OK(sub);
 
   toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
-  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_channel");
+  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_basic_retire");
 
   // Send a message on the publisher.
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
@@ -611,7 +631,7 @@ TEST_F(BridgeTest, BasicRetirement) {
   ASSERT_OK(pub_status);
 
   toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
-  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_channel");
+  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_basic_retire");
 
   auto retirement_fd = pub->GetRetirementFd();
   ASSERT_TRUE(retirement_fd.Valid());
@@ -645,24 +665,24 @@ TEST_F(BridgeTest, MultipleRetirement) {
   // retirement notifications for the correct slot ids.  This will use slot 0
   // so we will never receive a retirement notification for it.
   absl::StatusOr<Publisher> local_pub = client1.CreatePublisher(
-      "/bridged_channel",
+      "/bridged_retire1",
       {.slot_size = 256, .num_slots = kNumSlots, .local = false});
   ASSERT_OK(local_pub);
 
   // Create a non-local publisher on client 1.
   absl::StatusOr<Publisher> pub =
-      client1.CreatePublisher("/bridged_channel", {.slot_size = 256,
+      client1.CreatePublisher("/bridged_retire1", {.slot_size = 256,
                                                    .num_slots = kNumSlots,
                                                    .local = false,
                                                    .notify_retirement = true});
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
-      client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
+      client2.CreateSubscriber("/bridged_retire1", {.max_active_messages = 2});
   ASSERT_OK(sub);
 
   toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
-  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_channel");
+  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_retire1");
 
   constexpr int kNumMessages = 7;
   for (int i = 0; i < kNumMessages; i++) {
@@ -675,7 +695,7 @@ TEST_F(BridgeTest, MultipleRetirement) {
   }
 
   toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
-  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_channel");
+  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_retire1");
 
   auto retirement_fd = pub->GetRetirementFd();
   ASSERT_TRUE(retirement_fd.Valid());
@@ -734,7 +754,7 @@ TEST_F(BridgeTest, MultipleRetirement2) {
 
   // Create a non-local publisher on client 1.
   absl::StatusOr<Publisher> pub =
-      client1.CreatePublisher("/bridged_channel", {.slot_size = 256,
+      client1.CreatePublisher("/bridged_retire2", {.slot_size = 256,
                                                    .num_slots = kNumSlots,
                                                    .local = false,
                                                    .notify_retirement = true});
@@ -743,16 +763,16 @@ TEST_F(BridgeTest, MultipleRetirement2) {
   // Create publisher on the subscriber server.  This wil consume slot 0 on that
   // side.
   absl::StatusOr<Publisher> local_pub = client2.CreatePublisher(
-      "/bridged_channel",
+      "/bridged_retire2",
       {.slot_size = 256, .num_slots = kNumSlots, .local = false});
   ASSERT_OK(local_pub);
 
   absl::StatusOr<Subscriber> sub =
-      client2.CreateSubscriber("/bridged_channel", {.max_active_messages = 2});
+      client2.CreateSubscriber("/bridged_retire2", {.max_active_messages = 2});
   ASSERT_OK(sub);
 
   toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
-  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_channel");
+  WaitForSubscribedMessage(send_bridge_pipe, "/bridged_retire2");
 
   constexpr int kNumMessages = 7;
   for (int i = 0; i < kNumMessages; i++) {
@@ -765,7 +785,7 @@ TEST_F(BridgeTest, MultipleRetirement2) {
   }
 
   toolbelt::FileDescriptor &recv_bridge_pipe = BridgeNotificationPipe(1);
-  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_channel");
+  WaitForSubscribedMessage(recv_bridge_pipe, "/bridged_retire2");
 
   auto retirement_fd = pub->GetRetirementFd();
   ASSERT_TRUE(retirement_fd.Valid());
@@ -1122,6 +1142,417 @@ TEST_F(BridgeTest, SplitBuffersOverBridge) {
   ASSERT_EQ(0, memcmp("split-remote", msg->buffer, 12));
   ASSERT_TRUE(sub->UsesSplitBuffers());
 }
+
+// Self-validating payload sent over the bridge during the multi-threaded stress
+// test.  Each message carries its channel index, a per-channel sequence number
+// and a checksum computed over the whole payload.  A data race in the
+// multi-threaded (Asio) bridge data plane that corrupted a message, mixed up
+// channels, or torn-wrote a slot would show up as a checksum mismatch, a wrong
+// channel id, or a non-monotonic sequence number on the receiving side.
+namespace {
+
+constexpr uint32_t kStressMagic = 0xC0FFEEu;
+constexpr int kStressFillWords = 45; // sizeof(StressPayload) == 196 bytes.
+
+struct StressPayload {
+  uint32_t magic;
+  uint32_t channel;
+  uint32_t seq;
+  uint32_t fill[kStressFillWords];
+  uint32_t checksum;
+};
+
+uint32_t StressChecksum(const StressPayload &p) {
+  uint32_t c = p.magic ^ (p.channel * 2654435761u) ^ (p.seq * 40503u);
+  for (int i = 0; i < kStressFillWords; i++) {
+    c = c * 31u + p.fill[i];
+  }
+  return c;
+}
+
+void FillStressPayload(StressPayload &p, uint32_t channel, uint32_t seq) {
+  p.magic = kStressMagic;
+  p.channel = channel;
+  p.seq = seq;
+  for (int i = 0; i < kStressFillWords; i++) {
+    p.fill[i] = (channel << 24) ^ (seq * 2246822519u) ^ static_cast<uint32_t>(i);
+  }
+  p.checksum = StressChecksum(p);
+}
+
+// Drains "Subscribed" bridge notifications from `pipe` (the same length-prefixed
+// framing WaitForSubscribedMessage uses) until every channel in `expected` has
+// been seen, or `timeout` elapses.  poll() bounds the wait so a missing
+// notification fails the test instead of hanging.  Returns true if all expected
+// channels were observed.
+bool WaitForBridgesEstablished(toolbelt::FileDescriptor &pipe,
+                               std::set<std::string> expected,
+                               std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (!expected.empty()) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      return false;
+    }
+    int ms = static_cast<int>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
+            .count());
+    struct pollfd pfd = {pipe.Fd(), POLLIN, 0};
+    int r = ::poll(&pfd, 1, ms);
+    if (r < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return false;
+    }
+    if (r == 0) {
+      return false; // Timed out.
+    }
+
+    int32_t length = 0;
+    absl::StatusOr<ssize_t> n = pipe.Read(&length, sizeof(length));
+    if (!n.ok() || *n != sizeof(length)) {
+      return false;
+    }
+    length = ntohl(length); // Length is network byte order.
+    char buffer[4096];
+    if (length <= 0 || length > static_cast<int32_t>(sizeof(buffer))) {
+      return false;
+    }
+    n = pipe.Read(buffer, length);
+    if (!n.ok()) {
+      return false;
+    }
+    subspace::Subscribed subscribed;
+    if (!subscribed.ParseFromArray(buffer, *n)) {
+      continue;
+    }
+    expected.erase(subscribed.channel_name());
+  }
+  return true;
+}
+
+#if defined(__linux__) && defined(VMADDR_CID_LOCAL)
+// Probe whether vsock loopback actually works here, using the *exact* bind the
+// server's bridge listener uses: (VMADDR_CID_ANY, port 0), then a connect to it
+// via VMADDR_CID_LOCAL.  vsock port 0 is a privileged port, so this bind fails
+// with EPERM for an unprivileged process even when vsock loopback is otherwise
+// usable; mirroring the server's bind here means the test skips precisely when
+// the server would not be able to establish the bridge (e.g. unprivileged CI
+// runners) and runs only where it actually works (e.g. running as root or in a
+// VM).  Requires a Linux kernel with the vsock_loopback module available.
+bool VsockLoopbackAvailable() {
+  int lfd = ::socket(AF_VSOCK, SOCK_STREAM, 0);
+  if (lfd < 0) {
+    return false;
+  }
+  sockaddr_vm laddr;
+  memset(&laddr, 0, sizeof(laddr));
+  laddr.svm_family = AF_VSOCK;
+  laddr.svm_cid = VMADDR_CID_ANY;
+  laddr.svm_port = 0;
+  bool ok = ::bind(lfd, reinterpret_cast<sockaddr *>(&laddr), sizeof(laddr)) ==
+                0 &&
+            ::listen(lfd, 1) == 0;
+  socklen_t len = sizeof(laddr);
+  if (ok &&
+      ::getsockname(lfd, reinterpret_cast<sockaddr *>(&laddr), &len) != 0) {
+    ok = false;
+  }
+  if (ok) {
+    int cfd = ::socket(AF_VSOCK, SOCK_STREAM, 0);
+    if (cfd < 0) {
+      ok = false;
+    } else {
+      sockaddr_vm caddr;
+      memset(&caddr, 0, sizeof(caddr));
+      caddr.svm_family = AF_VSOCK;
+      caddr.svm_cid = VMADDR_CID_LOCAL;
+      caddr.svm_port = laddr.svm_port;
+      ok = ::connect(cfd, reinterpret_cast<sockaddr *>(&caddr),
+                     sizeof(caddr)) == 0;
+      ::close(cfd);
+    }
+  }
+  ::close(lfd);
+  return ok;
+}
+#endif
+
+} // namespace
+
+// Drive many bridged channels concurrently while the servers run their Asio
+// io_context on several threads, to flush out data races in the multi-threaded
+// bridge path.  On the co backend num_asio_threads is ignored and the servers
+// run single-threaded, so this still exercises the bridge but without the
+// threading dimension.
+TEST(BridgeStressTest, MultiThreadedBridging) {
+  using namespace std::chrono;
+  constexpr int kNumChannels = 8;
+  constexpr int kNumMessages = 1000; // per channel
+  // Size the channel so the whole burst fits without the ring buffer wrapping.
+  // The point of this test is to stress the multi-threaded bridge data plane
+  // (concurrent bridges on their own strands) and verify it never corrupts,
+  // reorders or cross-wires messages - not to measure unreliable drop
+  // behaviour.  With a small buffer a bridge transmitter that happens to be
+  // starved for the whole burst under heavy contention can miss an entire
+  // channel and deliver zero messages, which is legitimate unreliable
+  // behaviour but makes the per-channel liveness check (received > 0) flaky.
+  // A buffer that holds the full burst removes that flake while keeping the
+  // checksum / ordering / cross-channel correctness checks fully meaningful.
+  constexpr int kNumSlots = kNumMessages + 24;
+  constexpr int kSlotSize = 256;
+  constexpr int kNumAsioThreads = 4;
+
+  static_assert(sizeof(StressPayload) <= kSlotSize,
+                "payload must fit in a slot");
+
+  ScopedBridgeServerPair servers;
+  servers.Start({BridgeRangeConfig{}, BridgeRangeConfig{}}, kNumAsioThreads);
+
+  auto channel_name = [](int ch) { return "/stress/" + std::to_string(ch); };
+
+  std::atomic<int> subs_ready{0};
+  std::atomic<int> pubs_ready{0};
+  std::atomic<bool> go{false};
+  std::atomic<bool> pubs_done{false};
+  std::atomic<bool> failed{false};
+  std::array<std::atomic<int>, kNumChannels> received{};
+
+  std::vector<std::thread> sub_threads;
+  std::vector<std::thread> pub_threads;
+
+  // Subscribers (on server 1) come up first so the bridge can discover them
+  // before any publishing starts.
+  for (int ch = 0; ch < kNumChannels; ch++) {
+    sub_threads.emplace_back([&, ch]() {
+      subspace::Client client;
+      if (absl::Status s = client.Init(servers.Socket(1)); !s.ok()) {
+        ADD_FAILURE() << "subscriber Init: " << s;
+        failed = true;
+        subs_ready++;
+        return;
+      }
+      absl::StatusOr<Subscriber> sub =
+          client.CreateSubscriber(channel_name(ch), {.max_active_messages = 8});
+      if (!sub.ok()) {
+        ADD_FAILURE() << "CreateSubscriber: " << sub.status();
+        failed = true;
+        subs_ready++;
+        return;
+      }
+      subs_ready++;
+
+      while (!go.load()) {
+        std::this_thread::sleep_for(milliseconds(1));
+      }
+
+      int64_t last_seq = -1;
+      auto last_rx = steady_clock::now();
+      const auto start = steady_clock::now();
+      for (;;) {
+        absl::StatusOr<Message> msg = sub->ReadMessage();
+        if (!msg.ok()) {
+          ADD_FAILURE() << "channel " << ch << " ReadMessage: " << msg.status();
+          failed = true;
+          break;
+        }
+        if (msg->length == 0) {
+          // No message available.  Stop once publishing is done and the channel
+          // has been idle for a while, or after an overall deadline.
+          if (pubs_done.load() && steady_clock::now() - last_rx > seconds(2)) {
+            break;
+          }
+          if (steady_clock::now() - start > seconds(90)) {
+            break;
+          }
+          (void)sub->Wait(milliseconds(100));
+          continue;
+        }
+        if (msg->length != sizeof(StressPayload)) {
+          ADD_FAILURE() << "channel " << ch << " bad length " << msg->length;
+          failed = true;
+          break;
+        }
+        StressPayload p;
+        memcpy(&p, msg->buffer, sizeof(p));
+        if (p.magic != kStressMagic || p.channel != static_cast<uint32_t>(ch) ||
+            p.checksum != StressChecksum(p)) {
+          ADD_FAILURE() << "channel " << ch
+                        << " corrupt/cross-channel message: magic=" << p.magic
+                        << " channel=" << p.channel << " seq=" << p.seq;
+          failed = true;
+          break;
+        }
+        // The bridge preserves order, so even with dropped messages the
+        // received sequence numbers must be strictly increasing.
+        if (static_cast<int64_t>(p.seq) <= last_seq) {
+          ADD_FAILURE() << "channel " << ch << " out-of-order seq " << p.seq
+                        << " after " << last_seq;
+          failed = true;
+          break;
+        }
+        last_seq = p.seq;
+        received[ch]++;
+        last_rx = steady_clock::now();
+      }
+    });
+  }
+
+  while (subs_ready.load() < kNumChannels) {
+    std::this_thread::sleep_for(milliseconds(1));
+  }
+
+  // Publishers on server 0.
+  for (int ch = 0; ch < kNumChannels; ch++) {
+    pub_threads.emplace_back([&, ch]() {
+      subspace::Client client;
+      if (absl::Status s = client.Init(servers.Socket(0)); !s.ok()) {
+        ADD_FAILURE() << "publisher Init: " << s;
+        failed = true;
+        pubs_ready++;
+        return;
+      }
+      // Explicitly opt out of split buffers regardless of the global
+      // --use_split_buffers default.  This stress test sizes the channel to
+      // hold the whole burst (kNumSlots ~= kNumMessages) so the data plane can
+      // be exercised without ring-buffer wrap.  Split buffers allocate one
+      // shared-memory file per slot, so kNumChannels x kNumSlots files would
+      // exhaust the process fd limit (macOS defaults are low) - and this test
+      // targets the multi-threaded bridge data plane, not split buffers.
+      absl::StatusOr<Publisher> pub = client.CreatePublisher(
+          channel_name(ch), {.slot_size = kSlotSize,
+                             .num_slots = kNumSlots,
+                             .local = false,
+                             .use_split_buffers = false});
+      if (!pub.ok()) {
+        ADD_FAILURE() << "CreatePublisher: " << pub.status();
+        failed = true;
+        pubs_ready++;
+        return;
+      }
+      pubs_ready++;
+
+      while (!go.load()) {
+        std::this_thread::sleep_for(milliseconds(1));
+      }
+
+      for (int seq = 0; seq < kNumMessages; seq++) {
+        absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+        if (!buffer.ok()) {
+          ADD_FAILURE() << "channel " << ch << " GetMessageBuffer: "
+                        << buffer.status();
+          failed = true;
+          break;
+        }
+        StressPayload p;
+        FillStressPayload(p, ch, seq);
+        memcpy(*buffer, &p, sizeof(p));
+        absl::StatusOr<const Message> st = pub->PublishMessage(sizeof(p));
+        if (!st.ok()) {
+          ADD_FAILURE() << "channel " << ch << " PublishMessage: "
+                        << st.status();
+          failed = true;
+          break;
+        }
+        // Pace publishing so the unreliable bridge has time to forward each
+        // message before its slot is recycled.  Without this the whole burst
+        // can be overwritten before a (cooperative, single-threaded) co-backend
+        // server forwards anything.  Spreading the burst over time also keeps
+        // sustained, overlapping traffic on all channels, which is what we want
+        // to exercise the multi-threaded Asio data plane.
+        std::this_thread::sleep_for(microseconds(250));
+      }
+    });
+  }
+
+  while (pubs_ready.load() < kNumChannels) {
+    std::this_thread::sleep_for(milliseconds(1));
+  }
+  // Wait until the send-side bridge transmitter is established for every channel
+  // (server 0 emits a Subscribed notification once it discovers the remote
+  // subscriber).  This removes the race where publishing starts before the
+  // bridge exists and the early burst is dropped.
+  std::set<std::string> expected;
+  for (int ch = 0; ch < kNumChannels; ch++) {
+    expected.insert(channel_name(ch));
+  }
+  ASSERT_TRUE(WaitForBridgesEstablished(servers.BridgeNotificationPipe(0),
+                                        expected, seconds(30)))
+      << "timed out waiting for bridges to be established";
+  go.store(true);
+
+  for (auto &t : pub_threads) {
+    t.join();
+  }
+  pubs_done.store(true);
+  for (auto &t : sub_threads) {
+    t.join();
+  }
+
+  EXPECT_FALSE(failed.load());
+  int total = 0;
+  for (int ch = 0; ch < kNumChannels; ch++) {
+    int n = received[ch].load();
+    EXPECT_GT(n, 0) << "channel " << ch << " received no messages";
+    total += n;
+  }
+  std::cerr << "Bridge stress: received " << total << " of "
+            << (kNumChannels * kNumMessages) << " messages across "
+            << kNumChannels << " channels (" << kNumAsioThreads
+            << " asio threads/server)" << std::endl;
+}
+
+#if defined(__linux__) && defined(VMADDR_CID_LOCAL)
+// End-to-end bridge over vsock instead of TCP.  Both servers run on the same
+// host and advertise VMADDR_CID_LOCAL (the loopback CID), so the publisher-side
+// bridge transmitter connects back to the subscriber-side listener over vsock.
+// Discovery still runs over UDP/IP exactly as for the TCP bridge tests.
+//
+// Gated to Linux and skipped at runtime unless vsock loopback is usable (needs
+// the vsock_loopback kernel module), so it is a no-op on machines without it.
+TEST(VsockBridgeTest, BridgeOverVsockLoopback) {
+  if (!VsockLoopbackAvailable()) {
+    GTEST_SKIP() << "vsock loopback (VMADDR_CID_LOCAL) is not available; load "
+                    "the vsock_loopback kernel module to run this test";
+  }
+
+  ScopedBridgeServerPair servers;
+  servers.Start({BridgeRangeConfig{}, BridgeRangeConfig{}},
+                /*num_asio_threads=*/1, /*use_vsock=*/true,
+                /*vsock_cid=*/VMADDR_CID_LOCAL);
+
+  subspace::Client client1;
+  servers.InitClient(client1, 0);
+  subspace::Client client2;
+  servers.InitClient(client2, 1);
+
+  // Non-local publisher on server 0; subscriber on server 1.  Bridging the two
+  // requires a vsock data connection between the servers.
+  absl::StatusOr<Publisher> pub = client1.CreatePublisher(
+      "/vsock_bridged", {.slot_size = 256, .num_slots = 10, .local = false});
+  ASSERT_OK(pub);
+
+  absl::StatusOr<Subscriber> sub =
+      client2.CreateSubscriber("/vsock_bridged", {.max_active_messages = 2});
+  ASSERT_OK(sub);
+
+  ASSERT_TRUE(WaitForBridgesEstablished(servers.BridgeNotificationPipe(0),
+                                        {"/vsock_bridged"},
+                                        std::chrono::seconds(30)))
+      << "timed out waiting for vsock bridge to be established";
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "vsock!", 6);
+  ASSERT_OK(pub->PublishMessage(6));
+
+  absl::StatusOr<Message> msg = ReadMessageEventually(*sub);
+  ASSERT_OK(msg);
+  ASSERT_EQ(6, msg->length);
+  ASSERT_EQ(0, memcmp("vsock!", msg->buffer, 6));
+}
+#endif // __linux__ && VMADDR_CID_LOCAL
 
 int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);

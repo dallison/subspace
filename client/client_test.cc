@@ -169,7 +169,9 @@ subspace::SplitBufferCallbacks MakeTestSplitBufferCallbacks(
 }
 
 static void SigQuitHandler(int signum) {
-  ClientTest::Scheduler().Show();
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO
+  ClientTest::Engine().Show();
+#endif
   signal(signum, SIG_DFL);
   raise(signum);
 }
@@ -2165,12 +2167,12 @@ TEST_F(ClientTest, ReliablePublisher1) {
 
   msg->Reset();
 
-  co::CoroutineScheduler machine;
+  TestCoroMachine machine;
 
   // Wait for trigger event in coroutine.
-  co::Coroutine c1(machine, [&pub](co::Coroutine *c) {
+  machine.Spawn([&pub](TestCoroContext &c) {
     struct pollfd fd = pub->GetPollFd();
-    c->Wait(fd.fd);
+    c.Wait(fd.fd);
 
     absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
     ASSERT_OK(buffer);
@@ -2181,7 +2183,7 @@ TEST_F(ClientTest, ReliablePublisher1) {
   });
 
   // Read messages in coroutine.
-  co::Coroutine c2(machine, [&sub](co::Coroutine *c) {
+  machine.Spawn([&sub](TestCoroContext &c) {
     for (int i = 0; i < 4; i++) {
       absl::StatusOr<Message> msg = sub->ReadMessage();
       std::cerr << msg.status() << std::endl;
@@ -2250,13 +2252,13 @@ TEST_F(ClientTest, ReliablePublisher2) {
 
   msg->Reset();
 
-  co::CoroutineScheduler machine;
+  TestCoroMachine machine;
 
   // Wait for trigger event in coroutine.
-  co::Coroutine c1(machine, [&pub](co::Coroutine *c) {
+  machine.Spawn([&pub](TestCoroContext &c) {
     absl::StatusOr<struct pollfd> fd = pub->GetPollFd();
     ASSERT_OK(fd);
-    c->Wait(fd->fd);
+    c.Wait(fd->fd);
     absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
     ASSERT_OK(buffer);
     ASSERT_NE(nullptr, *buffer);
@@ -2266,7 +2268,7 @@ TEST_F(ClientTest, ReliablePublisher2) {
   });
 
   // Read another message in coroutine.
-  co::Coroutine c2(machine, [&sub](co::Coroutine *c) {
+  machine.Spawn([&sub](TestCoroContext &c) {
     for (int i = 0; i < 4; i++) {
       absl::StatusOr<Message> msg = sub->ReadMessage();
       ASSERT_OK(msg);
@@ -2343,12 +2345,12 @@ TEST_F(ClientTest, ReliablePublisherActivation) {
 
   msg->Reset();
 
-  co::CoroutineScheduler machine;
+  TestCoroMachine machine;
 
   // Wait for trigger event in coroutine.
-  co::Coroutine c1(machine, [&pub](co::Coroutine *c) {
+  machine.Spawn([&pub](TestCoroContext &c) {
     struct pollfd fd = pub->GetPollFd();
-    c->Wait(fd.fd);
+    c.Wait(fd.fd);
 
     absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
     ASSERT_OK(buffer);
@@ -2359,7 +2361,7 @@ TEST_F(ClientTest, ReliablePublisherActivation) {
   });
 
   // Read messages in coroutine.
-  co::Coroutine c2(machine, [&sub](co::Coroutine *c) {
+  machine.Spawn([&sub](TestCoroContext &c) {
     for (int i = 0; i < 4; i++) {
       absl::StatusOr<Message> msg = sub->ReadMessage();
       std::cerr << msg.status() << std::endl;
@@ -2414,10 +2416,10 @@ TEST_F(ClientTest, ReliablePublisherBusyFlagTriggerWakeup) {
   bool waiter_saw_busy = false;
   bool waiter_published = false;
 
-  co::CoroutineScheduler machine;
+  TestCoroMachine machine;
 
   // Waiter: wait until the buffer is available AND not busy before taking it.
-  co::Coroutine waiter(machine, [&](co::Coroutine *c) {
+  machine.Spawn([&](TestCoroContext &c) {
     for (;;) {
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
       ASSERT_OK(buffer);
@@ -2434,21 +2436,21 @@ TEST_F(ClientTest, ReliablePublisherBusyFlagTriggerWakeup) {
         pub->CancelPublish();
       }
       struct pollfd fd = pub->GetPollFd();
-      c->Wait(fd.fd);
+      c.Wait(fd.fd);
     }
   });
 
   // Publisher: drain the subscriber to free slots (which triggers the
   // publisher's fd), then publish while the waiter is still gated by the busy
   // flag, and finally clear the flag and wake the waiter.
-  co::Coroutine publisher(machine, [&](co::Coroutine *c) {
+  machine.Spawn([&](TestCoroContext &c) {
     for (int i = 0; i < published; i++) {
       absl::StatusOr<Message> msg = sub->ReadMessage();
       ASSERT_OK(msg);
     }
     // Give the waiter a chance to observe (available && busy) and go back to
     // sleep.
-    c->Millisleep(50);
+    c.Millisleep(50);
 
     absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
     ASSERT_OK(buffer);
@@ -2506,10 +2508,10 @@ TEST_F(ClientTest, ReliablePublisherBusyFlagTriggerWakeupNotThreadSafe) {
   bool waiter_saw_busy = false;
   bool waiter_published = false;
 
-  co::CoroutineScheduler machine;
+  TestCoroMachine machine;
 
   // Waiter: wait until the buffer is available AND not busy before taking it.
-  co::Coroutine waiter(machine, [&](co::Coroutine *c) {
+  machine.Spawn([&](TestCoroContext &c) {
     for (;;) {
       absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
       ASSERT_OK(buffer);
@@ -2526,21 +2528,21 @@ TEST_F(ClientTest, ReliablePublisherBusyFlagTriggerWakeupNotThreadSafe) {
         waiter_saw_busy = true;
       }
       struct pollfd fd = pub->GetPollFd();
-      c->Wait(fd.fd);
+      c.Wait(fd.fd);
     }
   });
 
   // Publisher: drain the subscriber to free slots (which triggers the
   // publisher's fd), then publish while the waiter is still gated by the busy
   // flag, and finally clear the flag and wake the waiter.
-  co::Coroutine publisher(machine, [&](co::Coroutine *c) {
+  machine.Spawn([&](TestCoroContext &c) {
     for (int i = 0; i < published; i++) {
       absl::StatusOr<Message> msg = sub->ReadMessage();
       ASSERT_OK(msg);
     }
     // Give the waiter a chance to observe (available && busy) and go back to
     // sleep.
-    c->Millisleep(50);
+    c.Millisleep(50);
 
     absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
     ASSERT_OK(buffer);
@@ -5782,7 +5784,7 @@ public:
     (void)pipe(server_pipe_);
 
     server_ = std::make_unique<subspace::Server>(
-        scheduler_, socket_, "", 0, 0,
+        engine_, socket_, "", 0, 0,
         /*local=*/true, server_pipe_[1], /*initial_ordinal=*/1,
         /*wait_for_clients=*/true);
 
@@ -5828,7 +5830,7 @@ public:
   static subspace::Server *Server() { return server_.get(); }
 
 private:
-  inline static co::CoroutineScheduler scheduler_;
+  inline static subspace::async::RuntimeEngine engine_;
   inline static std::string socket_;
   inline static int server_pipe_[2];
   inline static std::unique_ptr<subspace::Server> server_;
@@ -5883,7 +5885,7 @@ public:
     (void)pipe(server_pipe_);
 
     server_ = std::make_unique<subspace::Server>(
-        scheduler_, socket_, "", 0, 0,
+        engine_, socket_, "", 0, 0,
         /*local=*/true, server_pipe_[1], /*initial_ordinal=*/1,
         /*wait_for_clients=*/true);
 
@@ -5927,7 +5929,7 @@ public:
   static subspace::Server *Server() { return server_.get(); }
 
 private:
-  inline static co::CoroutineScheduler scheduler_;
+  inline static subspace::async::RuntimeEngine engine_;
   inline static std::string socket_;
   inline static int server_pipe_[2];
   inline static std::unique_ptr<subspace::Server> server_;

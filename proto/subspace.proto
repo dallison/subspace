@@ -269,8 +269,17 @@ message Statistics {
 }
 
 message ChannelAddress {
+  // Address family of the endpoint described below.  Defaults to INET so that
+  // peers predating vsock bridge support (which never set this field) are
+  // interpreted as IPv4, exactly as before.
+  enum Family {
+    FAMILY_INET = 0;  // `address` holds a 4-byte IPv4 in_addr.
+    FAMILY_VSOCK = 1; // `address` holds a 4-byte vsock context id (CID).
+  }
+
   bytes address = 1; // In host byte order.
   int32 port = 2;    // In host byte order.
+  Family family = 3;
 }
 
 // This is sent over the connected channel TCP bridge when the

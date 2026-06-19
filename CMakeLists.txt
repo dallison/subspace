@@ -133,6 +133,25 @@ FetchContent_MakeAvailable(protobuf)
 # Protobuf provides targets like protobuf::libprotobuf and protobuf::protoc
 # These targets can be used directly without find_package
 
+# --- Option: coroutine/networking backend for the server ---
+# Mirrors the Bazel //:coro_backend flag.  "co" (default) builds against the co
+# coroutine library; "asio" builds the server against Boost.Asio.  The value is
+# translated into the SUBSPACE_CORO_BACKEND macro (see common/async/context.h)
+# and applied globally so every translation unit that includes the async
+# headers sees a consistent backend.
+set(SUBSPACE_CORO_BACKEND "co" CACHE STRING "Server coroutine backend: co or asio")
+set_property(CACHE SUBSPACE_CORO_BACKEND PROPERTY STRINGS "co" "asio")
+
+if(SUBSPACE_CORO_BACKEND STREQUAL "asio")
+    add_compile_definitions(SUBSPACE_CORO_BACKEND=2)
+    message(STATUS "Subspace coroutine backend: asio (Boost.Asio)")
+elseif(SUBSPACE_CORO_BACKEND STREQUAL "co")
+    # co backend leaves SUBSPACE_CORO_BACKEND unset; context.h defaults to _CO.
+    message(STATUS "Subspace coroutine backend: co")
+else()
+    message(FATAL_ERROR "SUBSPACE_CORO_BACKEND must be 'co' or 'asio'")
+endif()
+
 # --- Option: asio_rpc backend (Boost.Asio RPC) ---
 # The asio_rpc backend needs Boost.Asio plus the compiled Boost.Coroutine /
 # Boost.Context libraries.  Boost is large and Boost.Context's assembly stubs do
@@ -145,9 +164,15 @@ if(SUBSPACE_ASIO_RPC AND CMAKE_CROSSCOMPILING)
     set(SUBSPACE_ASIO_RPC OFF)
 endif()
 
-if(SUBSPACE_ASIO_RPC)
-    # Build only the Boost libraries asio_rpc needs; the Boost CMake superproject
-    # pulls in their transitive dependencies automatically.
+set(SUBSPACE_NEEDS_BOOST OFF)
+if(SUBSPACE_CORO_BACKEND STREQUAL "asio" OR SUBSPACE_ASIO_RPC)
+    set(SUBSPACE_NEEDS_BOOST ON)
+endif()
+
+if(SUBSPACE_NEEDS_BOOST)
+    # Build only the Boost libraries needed by the asio server/RPC backends; the
+    # Boost CMake superproject pulls in their transitive dependencies
+    # automatically.
     set(BOOST_INCLUDE_LIBRARIES asio coroutine context system CACHE INTERNAL "Boost libs for asio_rpc")
     FetchContent_Declare(
         Boost

@@ -66,7 +66,8 @@ struct BridgeReceivedMessage {
   size_t payload_length = 0;
 };
 
-static absl::Status SendSplitBridgeMessage(toolbelt::StreamSocket &bridge,
+static absl::Status SendSplitBridgeMessage(async::Context ctx,
+                                           async::StreamSocket &bridge,
                                            const Message &msg,
                                            const MessagePrefix *prefix,
                                            size_t prefix_area) {
@@ -75,7 +76,7 @@ static absl::Status SendSplitBridgeMessage(toolbelt::StreamSocket &bridge,
       const_cast<char *>(prefix_addr) + sizeof(int32_t);
   size_t prefix_length = prefix_area - sizeof(int32_t);
   if (absl::StatusOr<ssize_t> n =
-          bridge.SendMessage(prefix_without_padding, prefix_length, co::self);
+          bridge.SendMessage(prefix_without_padding, prefix_length, ctx);
       !n.ok()) {
     return absl::InternalError(
         absl::StrFormat("failed to send bridge prefix: %s",
@@ -85,7 +86,7 @@ static absl::Status SendSplitBridgeMessage(toolbelt::StreamSocket &bridge,
   int32_t payload_length = htonl(static_cast<int32_t>(msg.length));
   if (absl::StatusOr<ssize_t> n =
           bridge.Send(reinterpret_cast<const char *>(&payload_length),
-                      sizeof(payload_length), co::self);
+                      sizeof(payload_length), ctx);
       !n.ok()) {
     return absl::InternalError(
         absl::StrFormat("failed to send bridge payload length: %s",
@@ -93,7 +94,7 @@ static absl::Status SendSplitBridgeMessage(toolbelt::StreamSocket &bridge,
   }
   if (absl::StatusOr<ssize_t> n =
           bridge.Send(static_cast<const char *>(msg.buffer), msg.length,
-                      co::self);
+                      ctx);
       !n.ok()) {
     return absl::InternalError(
         absl::StrFormat("failed to send bridge payload: %s",
@@ -102,7 +103,8 @@ static absl::Status SendSplitBridgeMessage(toolbelt::StreamSocket &bridge,
   return absl::OkStatus();
 }
 
-static absl::Status SendCombinedBridgeMessage(toolbelt::StreamSocket &bridge,
+static absl::Status SendCombinedBridgeMessage(async::Context ctx,
+                                              async::StreamSocket &bridge,
                                               const Message &msg,
                                               const MessagePrefix *prefix,
                                               size_t prefix_area) {
@@ -113,7 +115,7 @@ static absl::Status SendCombinedBridgeMessage(toolbelt::StreamSocket &bridge,
   char *data_addr = const_cast<char *>(prefix_addr) + sizeof(int32_t);
   size_t message_length = msg.length + prefix_area - sizeof(int32_t);
   if (absl::StatusOr<ssize_t> n =
-          bridge.SendMessage(data_addr, message_length, co::self);
+          bridge.SendMessage(data_addr, message_length, ctx);
       !n.ok()) {
     return absl::InternalError(
         absl::StrFormat("failed to send bridge message: %s",
@@ -122,23 +124,24 @@ static absl::Status SendCombinedBridgeMessage(toolbelt::StreamSocket &bridge,
   return absl::OkStatus();
 }
 
-static absl::Status SendBridgeMessage(toolbelt::StreamSocket &bridge,
+static absl::Status SendBridgeMessage(async::Context ctx,
+                                      async::StreamSocket &bridge,
                                       const Message &msg,
                                       const MessagePrefix *prefix,
                                       size_t prefix_area,
                                       bool split_buffers_on_wire) {
   if (split_buffers_on_wire) {
-    return SendSplitBridgeMessage(bridge, msg, prefix, prefix_area);
+    return SendSplitBridgeMessage(ctx, bridge, msg, prefix, prefix_area);
   }
-  return SendCombinedBridgeMessage(bridge, msg, prefix, prefix_area);
+  return SendCombinedBridgeMessage(ctx, bridge, msg, prefix, prefix_area);
 }
 
 static absl::StatusOr<size_t>
-ReceiveSplitBridgeMessage(toolbelt::StreamSocket &bridge,
+ReceiveSplitBridgeMessage(async::Context ctx, async::StreamSocket &bridge,
                           const Subscribed &subscribed,
                           const BridgeReceiveTarget &target) {
   absl::StatusOr<ssize_t> prefix = bridge.ReceiveMessage(
-      target.prefix_without_padding, target.prefix_length, co::self);
+      target.prefix_without_padding, target.prefix_length, ctx);
   if (!prefix.ok()) {
     return absl::InternalError(absl::StrFormat(
         "failed to read bridge prefix: %s", prefix.status().ToString()));
@@ -159,7 +162,7 @@ ReceiveSplitBridgeMessage(toolbelt::StreamSocket &bridge,
   absl::StatusOr<ssize_t> payload =
       bridge.ReceiveMessage(static_cast<char *>(target.payload),
                             static_cast<size_t>(target.prefix->message_size),
-                            co::self);
+                            ctx);
   if (!payload.ok()) {
     return absl::InternalError(absl::StrFormat(
         "failed to read bridge payload: %s", payload.status().ToString()));
@@ -174,12 +177,13 @@ ReceiveSplitBridgeMessage(toolbelt::StreamSocket &bridge,
 }
 
 static absl::StatusOr<size_t>
-ReceiveCombinedBridgeMessageForSplitPublisher(toolbelt::StreamSocket &bridge,
+ReceiveCombinedBridgeMessageForSplitPublisher(async::Context ctx,
+                                              async::StreamSocket &bridge,
                                               const Subscribed &subscribed,
                                               const BridgeReceiveTarget &target) {
   std::vector<char> combined(subscribed.slot_size() + target.prefix_length);
   absl::StatusOr<ssize_t> n =
-      bridge.ReceiveMessage(combined.data(), combined.size(), co::self);
+      bridge.ReceiveMessage(combined.data(), combined.size(), ctx);
   if (!n.ok()) {
     return absl::InternalError(absl::StrFormat(
         "failed to read bridge message: %s", n.status().ToString()));
@@ -197,12 +201,12 @@ ReceiveCombinedBridgeMessageForSplitPublisher(toolbelt::StreamSocket &bridge,
 }
 
 static absl::StatusOr<size_t>
-ReceiveCombinedBridgeMessage(toolbelt::StreamSocket &bridge,
+ReceiveCombinedBridgeMessage(async::Context ctx, async::StreamSocket &bridge,
                              const Subscribed &subscribed,
                              const BridgeReceiveTarget &target) {
   absl::StatusOr<ssize_t> n = bridge.ReceiveMessage(
       target.prefix_without_padding,
-      subscribed.slot_size() + target.prefix_length, co::self);
+      subscribed.slot_size() + target.prefix_length, ctx);
   if (!n.ok()) {
     return absl::InternalError(absl::StrFormat(
         "failed to read bridge message: %s", n.status().ToString()));
@@ -215,8 +219,9 @@ ReceiveCombinedBridgeMessage(toolbelt::StreamSocket &bridge,
 }
 
 static absl::StatusOr<BridgeReceivedMessage>
-ReceiveBridgeMessage(toolbelt::StreamSocket &bridge, Publisher &pub,
-                     const Subscribed &subscribed, void *payload_buffer) {
+ReceiveBridgeMessage(async::Context ctx, async::StreamSocket &bridge,
+                     Publisher &pub, const Subscribed &subscribed,
+                     void *payload_buffer) {
   // The MessagePrefix struct contains 4 bytes of padding at offset 0. This is
   // to allow SendMessage to use it for the length in the combined wire format.
   size_t prefix_area = pub.PrefixSize();
@@ -234,7 +239,7 @@ ReceiveBridgeMessage(toolbelt::StreamSocket &bridge, Publisher &pub,
 
   if (subscribed.split_buffers()) {
     absl::StatusOr<size_t> payload_length =
-        ReceiveSplitBridgeMessage(bridge, subscribed, target);
+        ReceiveSplitBridgeMessage(ctx, bridge, subscribed, target);
     if (!payload_length.ok()) {
       return payload_length.status();
     }
@@ -243,7 +248,7 @@ ReceiveBridgeMessage(toolbelt::StreamSocket &bridge, Publisher &pub,
   }
   if (pub.UsesSplitBuffers()) {
     absl::StatusOr<size_t> payload_length =
-        ReceiveCombinedBridgeMessageForSplitPublisher(bridge, subscribed,
+        ReceiveCombinedBridgeMessageForSplitPublisher(ctx, bridge, subscribed,
                                                       target);
     if (!payload_length.ok()) {
       return payload_length.status();
@@ -252,7 +257,7 @@ ReceiveBridgeMessage(toolbelt::StreamSocket &bridge, Publisher &pub,
                                  .payload_length = *payload_length};
   }
   absl::StatusOr<size_t> payload_length =
-      ReceiveCombinedBridgeMessage(bridge, subscribed, target);
+      ReceiveCombinedBridgeMessage(ctx, bridge, subscribed, target);
   if (!payload_length.ok()) {
     return payload_length.status();
   }
@@ -327,6 +332,11 @@ static absl::Status FindIPAddresses(const std::string &interface,
   return absl::OkStatus();
 }
 
+// VMADDR_CID_ANY (== (uint32_t)-1) without requiring <linux/vm_sockets.h>,
+// which is Linux-only.  Used to bind a vsock listener that accepts connections
+// to any of the host's local context ids.
+static constexpr uint32_t kVsockCidAny = 0xFFFFFFFFu;
+
 static absl::StatusOr<toolbelt::SocketAddress>
 BridgeAddressWithPort(const toolbelt::SocketAddress &addr, int port) {
   switch (addr.Type()) {
@@ -341,6 +351,7 @@ BridgeAddressWithPort(const toolbelt::SocketAddress &addr, int port) {
   }
 }
 
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO
 Server::Server(co::CoroutineScheduler &scheduler,
                const std::string &socket_name, const std::string &interface,
                int disc_port, int peer_port, bool local, int notify_fd,
@@ -348,7 +359,7 @@ Server::Server(co::CoroutineScheduler &scheduler,
                bool publish_server_channels)
     : socket_name_(socket_name), interface_(interface),
       discovery_port_(disc_port), discovery_peer_port_(peer_port),
-      local_(local), notify_fd_(notify_fd), scheduler_(scheduler),
+      local_(local), notify_fd_(notify_fd), runtime_(scheduler),
       logger_("Subspace server"), initial_ordinal_(initial_ordinal),
       wait_for_clients_(wait_for_clients),
       publish_server_channels_(publish_server_channels) {
@@ -362,12 +373,40 @@ Server::Server(co::CoroutineScheduler &scheduler,
                bool wait_for_clients, bool publish_server_channels)
     : socket_name_(socket_name), interface_(interface), peer_address_(peer),
       discovery_port_(disc_port), discovery_peer_port_(peer_port),
-      local_(local), notify_fd_(notify_fd), scheduler_(scheduler),
+      local_(local), notify_fd_(notify_fd), runtime_(scheduler),
       logger_("Subspace server"), initial_ordinal_(initial_ordinal),
       wait_for_clients_(wait_for_clients),
       publish_server_channels_(publish_server_channels) {
   CreateShutdownTrigger();
 }
+#else  // SUBSPACE_CORO_BACKEND_ASIO
+Server::Server(boost::asio::io_context &ioc, const std::string &socket_name,
+               const std::string &interface, int disc_port, int peer_port,
+               bool local, int notify_fd, int initial_ordinal,
+               bool wait_for_clients, bool publish_server_channels)
+    : socket_name_(socket_name), interface_(interface),
+      discovery_port_(disc_port), discovery_peer_port_(peer_port),
+      local_(local), notify_fd_(notify_fd), runtime_(ioc),
+      logger_("Subspace server"), initial_ordinal_(initial_ordinal),
+      wait_for_clients_(wait_for_clients),
+      publish_server_channels_(publish_server_channels) {
+  CreateShutdownTrigger();
+}
+
+Server::Server(boost::asio::io_context &ioc, const std::string &socket_name,
+               const std::string &interface, const toolbelt::InetAddress &peer,
+               int disc_port, int peer_port, bool local, int notify_fd,
+               int initial_ordinal, bool wait_for_clients,
+               bool publish_server_channels)
+    : socket_name_(socket_name), interface_(interface), peer_address_(peer),
+      discovery_port_(disc_port), discovery_peer_port_(peer_port),
+      local_(local), notify_fd_(notify_fd), runtime_(ioc),
+      logger_("Subspace server"), initial_ordinal_(initial_ordinal),
+      wait_for_clients_(wait_for_clients),
+      publish_server_channels_(publish_server_channels) {
+  CreateShutdownTrigger();
+}
+#endif
 
 absl::Status Server::SetBridgePortRange(int first_port, int last_port,
                                         bool fallback_to_ephemeral) {
@@ -403,8 +442,25 @@ void Server::Stop(bool force) {
   if (shutting_down_) {
     return;
   }
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  // The Asio backend replaces the co scheduler's per-coroutine interrupt fd
+  // with Asio cancellation.  Mark shutdown so the coroutines' `while
+  // (!shutting_down_)` loops exit, let plugins react, trigger the shutdown fd
+  // (for anything that also watches it), then ask the runtime to cancel every
+  // live coroutine.  Each coroutine's pending wait completes with
+  // operation_aborted and it returns while the server is still alive, so
+  // nothing touches destroyed state.  Once they have all returned the
+  // io_context drains and Run() returns on its own.
+  (void)force;
+  shutting_down_ = true;
+  for (auto &plugin : plugins_) {
+    plugin->interface->OnShutdown();
+  }
+  shutdown_trigger_fd_.Trigger();
+  runtime_.StopGracefully();
+#else
   if (force || !wait_for_clients_) {
-    scheduler_.Stop();
+    runtime_.Stop();
     return;
   }
   shutting_down_ = true;
@@ -413,6 +469,7 @@ void Server::Stop(bool force) {
   }
   shutdown_trigger_fd_.Trigger();
   NotifyViaFd(kServerWaiting);
+#endif
 }
 
 void Server::CreateShutdownTrigger() {
@@ -427,6 +484,13 @@ void Server::CreateShutdownTrigger() {
 }
 
 toolbelt::SocketAddress Server::BridgeBindBase() const {
+  // vsock bridging: bind the listener to (VMADDR_CID_ANY, 0) so it accepts
+  // connections addressed to any of this host's local CIDs and the kernel
+  // assigns an ephemeral vsock port.  The CID we advertise to peers (vsock_cid_)
+  // is handled separately at advertise time.
+  if (use_vsock_) {
+    return toolbelt::SocketAddress(kVsockCidAny, /*port=*/0);
+  }
   // When advertising a separate (e.g. forwarded loopback) address, bind to the
   // any-address so the listener is reachable both on the local interface and
   // via a forwarded loopback port.  Otherwise bind to the local interface.
@@ -436,7 +500,7 @@ toolbelt::SocketAddress Server::BridgeBindBase() const {
   return my_address_;
 }
 
-absl::Status Server::BindBridgeListener(toolbelt::StreamSocket &listener) {
+absl::Status Server::BindBridgeListener(async::StreamSocket &listener) {
   toolbelt::SocketAddress bind_base = BridgeBindBase();
   if (!bridge_port_range_.Enabled()) {
     return listener.Bind(toolbelt::SocketAddress::AnyPort(bind_base), true);
@@ -451,7 +515,7 @@ absl::Status Server::BindBridgeListener(toolbelt::StreamSocket &listener) {
       return addr.status();
     }
 
-    toolbelt::StreamSocket candidate;
+    async::StreamSocket candidate;
     absl::Status status = candidate.Bind(*addr, true);
     if (status.ok()) {
       listener = std::move(candidate);
@@ -494,19 +558,34 @@ void Server::CloseHandler(ClientHandler *handler) {
 // This coroutine listens for incoming client connections on the given
 // UDS and spawns a handler coroutine to handle the communication with
 // the client.
-void Server::ListenerCoroutine(toolbelt::UnixSocket &listen_socket) {
+void Server::ListenerCoroutine(async::Context ctx,
+                               async::UnixSocket &listen_socket) {
   for (;;) {
     if (shutting_down_) {
-      // Keep this running until all other coroutines have completed.
-      // This is to make sure that other coroutines that have publisher
-      // and subscribers are able to connect to the server and delete them
-      // on shutdown.
-      auto strings = scheduler_.AllCoroutineStrings();
+      // Keep this running until all other coroutines have completed.  This
+      // makes sure that other coroutines that own publishers and subscribers
+      // are able to connect to the server and delete them on shutdown.  On the
+      // co backend the count comes from the scheduler; on Asio it is the number
+      // of live (cancellation-tracked) coroutines.  When this listener is the
+      // only one left, it is safe to stop.
+      auto strings = runtime_.AllCoroutineStrings();
       if (strings.size() == 1) {
         break;
       }
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+      // Shutdown was signalled (our Accept was cancelled by StopGracefully).
+      // Stop accepting new connections and instead poll the drain count,
+      // yielding the strand via a short sleep so the remaining coroutines
+      // (notably the client handlers that service the orderly disconnect of
+      // the in-process clients) can run and finish.  Asio cancellation is
+      // one-shot, so we cannot simply re-block in Accept and expect to wake
+      // again; this poll plays the role the persistently-readable interrupt fd
+      // plays on the co backend.
+      async::Sleep(ctx, std::chrono::milliseconds(5));
+      continue;
+#endif
     }
-    absl::Status status = HandleIncomingConnection(listen_socket);
+    absl::Status status = HandleIncomingConnection(ctx, listen_socket);
     if (!status.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Unable to make incoming connection: %s",
@@ -626,7 +705,7 @@ void Server::CleanupFilesystem() {
 #endif
 }
 
-absl::Status Server::Run() {
+absl::Status Server::Run(int num_asio_threads) {
   std::vector<struct pollfd> poll_fds;
 
 #ifndef __linux__
@@ -638,7 +717,7 @@ absl::Status Server::Run() {
   session_id_ = AllocateSessionId();
   uint64_t instance_nonce_ = session_id_;
 
-  toolbelt::UnixSocket listen_socket;
+  async::UnixSocket listen_socket;
   absl::Status status = listen_socket.Bind(socket_name_, true);
   if (!status.ok()) {
     return status;
@@ -647,7 +726,7 @@ absl::Status Server::Run() {
   // Notify listener that the server is ready.  Do this in a coroutine so that
   // it executes when we start running.
   if (notify_fd_.Valid()) {
-    scheduler_.Spawn([this]() { NotifyViaFd(kServerReady); });
+    runtime_.Spawn([this](async::Context) { NotifyViaFd(kServerReady); });
   }
   OnReady();
 
@@ -881,24 +960,38 @@ absl::Status Server::Run() {
   // because the co::AbortException is not caught in the coroutine caller.  This
   // appears to be a bug somewhere as I can't find why the catch isn't working.
   // We don't need to abort handling anyway.
-  scheduler_.EnableAborts(false);
+  runtime_.EnableAborts(false);
 
-  // Start the listener coroutine.
-  scheduler_.Spawn(
-      [this, &listen_socket]() { ListenerCoroutine(listen_socket); },
+  // Start the listener coroutine.  It runs on the client strand so that it is
+  // serialized with the client handlers it spawns (they all share the
+  // client_handlers_ vector and the server's channel state).
+  runtime_.SpawnOnStrand(
+      [this, &listen_socket](async::Context ctx) {
+        ListenerCoroutine(ctx, listen_socket);
+      },
       {.name = "Listener UDS",
        .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
 
+  // All of the coroutines below run on the client strand because they read or
+  // mutate server-wide state (the channels_ map, channel_ids_, per-channel
+  // bridge bookkeeping and the shared discovery sockets) that the client
+  // handlers also touch.  Confining them to the same strand keeps that state
+  // mutex-free even when the io_context runs on multiple threads.  Only the
+  // bridge data-plane coroutines (transmitter/receiver and their retirement
+  // helpers) run directly on the io_context so their I/O can spread across
+  // threads.
   if (publish_server_channels_) {
     // Start the channel directory coroutine.
-    scheduler_.Spawn([this]() { ChannelDirectoryCoroutine(); },
-                     {.name = "Channel directory",
-                      .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+    runtime_.SpawnOnStrand(
+        [this](async::Context ctx) { ChannelDirectoryCoroutine(ctx); },
+        {.name = "Channel directory",
+         .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
 
     // Start the channel stats coroutine.
-    scheduler_.Spawn([this]() { StatisticsCoroutine(); },
-                     {.name = "Channel stats",
-                      .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+    runtime_.SpawnOnStrand(
+        [this](async::Context ctx) { StatisticsCoroutine(ctx); },
+        {.name = "Channel stats",
+         .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
   }
 
   if (!local_) {
@@ -906,28 +999,30 @@ absl::Status Server::Run() {
       // TCP discovery: a server with a peer address dials it; otherwise we
       // listen for an incoming discovery connection.
       if (peer_address_.Valid()) {
-        scheduler_.Spawn(
-            [this]() { DiscoveryConnectorCoroutine(); },
+        runtime_.SpawnOnStrand(
+            [this](async::Context ctx) { DiscoveryConnectorCoroutine(ctx); },
             {.name = "Discovery connector",
              .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
       } else {
-        scheduler_.Spawn(
-            [this]() { DiscoveryListenerCoroutine(); },
+        runtime_.SpawnOnStrand(
+            [this](async::Context ctx) { DiscoveryListenerCoroutine(ctx); },
             {.name = "Discovery listener",
              .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
       }
     } else {
       // Start the discovery receiver coroutine.
-      scheduler_.Spawn([this]() { DiscoveryReceiverCoroutine(); },
-                       {.name = "Discovery receiver",
-                        .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+      runtime_.SpawnOnStrand(
+          [this](async::Context ctx) { DiscoveryReceiverCoroutine(ctx); },
+          {.name = "Discovery receiver",
+           .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
     }
 
     // Start the gratuitous Advertiser coroutine.  This sends Advertise messages
     // every 5 seconds.
-    scheduler_.Spawn([this]() { GratuitousAdvertiseCoroutine(); },
-                     {.name = "Gratuitous advertiser",
-                      .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+    runtime_.SpawnOnStrand(
+        [this](async::Context ctx) { GratuitousAdvertiseCoroutine(ctx); },
+        {.name = "Gratuitous advertiser",
+         .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
 
     // If we recovered channels, immediately advertise them so that
     // bridges can be re-established without waiting for the first
@@ -942,7 +1037,7 @@ absl::Status Server::Run() {
   }
 
   // Run the coroutine main loop.
-  scheduler_.Run();
+  runtime_.Run(num_asio_threads);
 
   // Notify listener that we're stopped.
   NotifyViaFd(kServerStopped);
@@ -950,8 +1045,9 @@ absl::Status Server::Run() {
 }
 
 absl::Status
-Server::HandleIncomingConnection(toolbelt::UnixSocket &listen_socket) {
-  absl::StatusOr<toolbelt::UnixSocket> s = listen_socket.Accept(co::self);
+Server::HandleIncomingConnection(async::Context ctx,
+                                 async::UnixSocket &listen_socket) {
+  absl::StatusOr<async::UnixSocket> s = listen_socket.Accept(ctx);
   if (!s.ok()) {
     return s.status();
   }
@@ -959,14 +1055,24 @@ Server::HandleIncomingConnection(toolbelt::UnixSocket &listen_socket) {
       std::make_unique<ClientHandler>(this, std::move(*s)));
   ClientHandler *handler_ptr = client_handlers_.back().get();
 
-  scheduler_.Spawn(
-      [this, handler_ptr]() {
-        handler_ptr->Run();
+  // Client handlers run on the client strand so they are serialized with one
+  // another and with the listener.  This preserves the single-threaded
+  // invariant for all client-handler logic and the shared server state they
+  // touch, without any mutexes, even when the io_context runs on many threads.
+  runtime_.SpawnOnStrand(
+      [this, handler_ptr](async::Context handler_ctx) {
+        handler_ptr->Run(handler_ctx);
         CloseHandler(handler_ptr);
       },
       {.name = "Client handler",
        .interrupt_fd =
-           wait_for_clients_ ? shutdown_trigger_fd_.GetPollFd().Fd() : -1});
+           wait_for_clients_ ? shutdown_trigger_fd_.GetPollFd().Fd() : -1,
+       // On Asio, do not force-cancel client handlers at shutdown: they must
+       // stay alive to service the orderly disconnect of the server's
+       // in-process clients (statistics / channel directory).  They exit on
+       // their own when the peer closes the connection, and the listener waits
+       // for them via the drain count before stopping.
+       .cancellable = false});
 
   return absl::OkStatus();
 }
@@ -1223,9 +1329,9 @@ void Server::RemoveAllUsersFor(ClientHandler *handler) {
   }
 }
 
-void Server::ChannelDirectoryCoroutine() {
+void Server::ChannelDirectoryCoroutine(async::Context ctx) {
   // Coroutine aware client.
-  Client client(co::self);
+  Client client(ctx);
   absl::Status status = client.Init(socket_name_);
   if (!status.ok()) {
     logger_.Log(
@@ -1249,7 +1355,8 @@ void Server::ChannelDirectoryCoroutine() {
     return;
   }
   while (!shutting_down_) {
-    co::Wait(channel_directory_trigger_fd_.GetPollFd().Fd(), POLLIN);
+    (void)async::WaitReadable(ctx,
+                              channel_directory_trigger_fd_.GetPollFd().Fd());
     channel_directory_trigger_fd_.Clear();
 
     ChannelDirectory directory;
@@ -1284,8 +1391,8 @@ void Server::ChannelDirectoryCoroutine() {
 
 void Server::SendChannelDirectory() { channel_directory_trigger_fd_.Trigger(); }
 
-void Server::StatisticsCoroutine() {
-  Client client(co::self);
+void Server::StatisticsCoroutine(async::Context ctx) {
+  Client client(ctx);
   absl::Status status = client.Init(socket_name_);
   if (!status.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
@@ -1310,7 +1417,7 @@ void Server::StatisticsCoroutine() {
 
   constexpr int kPeriodSecs = 2;
   while (!shutting_down_) {
-    co::Sleep(kPeriodSecs);
+    async::Sleep(ctx, kPeriodSecs);
     Statistics stats;
     stats.set_timestamp(toolbelt::Now());
     stats.set_server_id(server_id_);
@@ -1348,9 +1455,11 @@ void Server::SendQuery(const std::string &channel_name) {
   if (local_) {
     return;
   }
-  // Spawn a coroutine to send the Query message.
-  scheduler_.Spawn(
-      [this, channel_name]() {
+  // Spawn a coroutine to send the Query message.  Runs on the client strand:
+  // it shares the discovery sockets/connections with the discovery coroutines
+  // and is itself invoked from client handlers (also on the strand).
+  runtime_.SpawnOnStrand(
+      [this, channel_name](async::Context ctx) {
         logger_.Log(toolbelt::LogLevel::kDebug,
                     "Sending Query %s with discovery port %d",
                     channel_name.c_str(), discovery_port_);
@@ -1360,7 +1469,7 @@ void Server::SendQuery(const std::string &channel_name) {
         auto *query = disc.mutable_query();
         query->set_channel_name(channel_name);
 
-        if (absl::Status s = TransmitDiscovery(disc, discovery_addr_);
+        if (absl::Status s = TransmitDiscovery(disc, discovery_addr_, ctx);
             !s.ok()) {
           logger_.Log(toolbelt::LogLevel::kError, "Failed to send Query: %s",
                       s.ToString().c_str());
@@ -1376,9 +1485,11 @@ void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
   if (local_) {
     return;
   }
-  // Spawn a coroutine to send the Publish message.
-  scheduler_.Spawn(
-      [this, channel_name, reliable]() {
+  // Spawn a coroutine to send the Publish message.  Runs on the client strand
+  // (shares the discovery sockets/connections with the discovery coroutines and
+  // is invoked from client handlers).
+  runtime_.SpawnOnStrand(
+      [this, channel_name, reliable](async::Context ctx) {
         logger_.Log(toolbelt::LogLevel::kDebug,
                     "Sending Advertise %s with discovery port %d",
                     channel_name.c_str(), discovery_port_);
@@ -1392,7 +1503,7 @@ void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
           advertise->set_split_buffers(
               ChannelUsesSplitBuffersOverBridge(it->second.get()));
         }
-        if (absl::Status s = TransmitDiscovery(disc, discovery_addr_);
+        if (absl::Status s = TransmitDiscovery(disc, discovery_addr_, ctx);
             !s.ok()) {
           logger_.Log(toolbelt::LogLevel::kError,
                       "Failed to send Advertise: %s", s.ToString().c_str());
@@ -1404,7 +1515,8 @@ void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
 }
 
 absl::Status Server::TransmitDiscovery(const Discovery &disc,
-                                       const toolbelt::InetAddress &udp_dest) {
+                                       const toolbelt::InetAddress &udp_dest,
+                                       [[maybe_unused]] async::Context ctx) {
   if (tcp_discovery_) {
     int64_t length = disc.ByteSizeLong();
     // SendMessage writes a 4-byte length prefix immediately before the
@@ -1419,8 +1531,13 @@ absl::Status Server::TransmitDiscovery(const Discovery &disc,
     // messages from different coroutines can't interleave on a connection.
     auto connections = discovery_connections_;
     for (const auto &conn : connections) {
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+      absl::StatusOr<ssize_t> n = conn->socket->SendMessage(
+          buffer.data() + sizeof(int32_t), length, ctx);
+#else
       absl::StatusOr<ssize_t> n =
           conn->socket->SendMessage(buffer.data() + sizeof(int32_t), length);
+#endif
       if (!n.ok()) {
         logger_.Log(toolbelt::LogLevel::kError,
                     "Failed to send discovery message to %s: %s",
@@ -1434,7 +1551,12 @@ absl::Status Server::TransmitDiscovery(const Discovery &disc,
   if (!disc.SerializeToArray(buffer, sizeof(buffer))) {
     return absl::InternalError("Failed to serialize discovery message");
   }
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  return discovery_transmitter_.SendTo(udp_dest, buffer, disc.ByteSizeLong(),
+                                       ctx);
+#else
   return discovery_transmitter_.SendTo(udp_dest, buffer, disc.ByteSizeLong());
+#endif
 }
 
 void Server::AddDiscoveryConnection(std::shared_ptr<DiscoveryConnection> conn) {
@@ -1458,11 +1580,11 @@ void Server::AdvertiseAllChannels() {
 // connection and dispatches them to the same handlers used by UDP discovery.
 // Returns when the connection is closed or fails.
 void Server::DiscoveryConnectionReaderLoop(
-    std::shared_ptr<DiscoveryConnection> conn) {
+    async::Context ctx, std::shared_ptr<DiscoveryConnection> conn) {
   char buffer[kDiscoveryBufferSize];
   for (;;) {
     absl::StatusOr<ssize_t> n =
-        conn->socket->ReceiveMessage(buffer, sizeof(buffer), co::self);
+        conn->socket->ReceiveMessage(buffer, sizeof(buffer), ctx);
     if (!n.ok()) {
       logger_.Log(toolbelt::LogLevel::kDebug,
                   "Discovery connection to %s closed: %s",
@@ -1508,8 +1630,8 @@ void Server::DiscoveryConnectionReaderLoop(
 
 // Listens for an incoming TCP discovery connection and serves each one with a
 // reader coroutine.  Used by the server that does not have a peer address.
-void Server::DiscoveryListenerCoroutine() {
-  toolbelt::StreamSocket listener;
+void Server::DiscoveryListenerCoroutine(async::Context ctx) {
+  async::StreamSocket listener;
   if (absl::Status s = listener.Bind(
           toolbelt::InetAddress::AnyAddress(discovery_port_), true);
       !s.ok()) {
@@ -1522,7 +1644,7 @@ void Server::DiscoveryListenerCoroutine() {
               "Listening for TCP discovery connections on port %d",
               discovery_port_);
   for (;;) {
-    absl::StatusOr<toolbelt::StreamSocket> incoming = listener.Accept(co::self);
+    absl::StatusOr<async::StreamSocket> incoming = listener.Accept(ctx);
     if (!incoming.ok()) {
       if (shutting_down_) {
         return;
@@ -1534,7 +1656,7 @@ void Server::DiscoveryListenerCoroutine() {
     }
     auto conn = std::make_shared<DiscoveryConnection>();
     conn->socket =
-        std::make_shared<toolbelt::StreamSocket>(std::move(*incoming));
+        std::make_shared<async::StreamSocket>(std::move(*incoming));
     if (absl::StatusOr<toolbelt::SocketAddress> peer =
             conn->socket->GetPeerName();
         peer.ok() && peer->Type() == toolbelt::SocketAddress::kAddressInet) {
@@ -1547,9 +1669,11 @@ void Server::DiscoveryListenerCoroutine() {
     // Advertise our channels right away so the peer can bridge without waiting
     // for the next gratuitous advertise cycle.
     AdvertiseAllChannels();
-    scheduler_.Spawn(
-        [this, conn]() {
-          DiscoveryConnectionReaderLoop(conn);
+    // Runs on the client strand: the reader handles incoming Advertise/Subscribe
+    // messages which mutate channels_ and channel_ids_.
+    runtime_.SpawnOnStrand(
+        [this, conn](async::Context reader_ctx) {
+          DiscoveryConnectionReaderLoop(reader_ctx, conn);
           RemoveDiscoveryConnection(conn);
         },
         {.name = "Discovery reader",
@@ -1559,18 +1683,18 @@ void Server::DiscoveryListenerCoroutine() {
 
 // Dials the configured peer for TCP discovery, retrying on failure, and serves
 // the connection inline.  Used by the server that has a peer address.
-void Server::DiscoveryConnectorCoroutine() {
+void Server::DiscoveryConnectorCoroutine(async::Context ctx) {
   constexpr int kRetrySecs = 1;
   for (;;) {
     if (shutting_down_) {
       return;
     }
-    auto socket = std::make_shared<toolbelt::StreamSocket>();
+    auto socket = std::make_shared<async::StreamSocket>();
     if (absl::Status s = socket->Connect(peer_address_); !s.ok()) {
       logger_.Log(toolbelt::LogLevel::kDebug,
                   "TCP discovery connect to %s failed: %s; retrying",
                   peer_address_.ToString().c_str(), s.ToString().c_str());
-      co::Sleep(kRetrySecs);
+      async::Sleep(ctx, kRetrySecs);
       continue;
     }
     auto conn = std::make_shared<DiscoveryConnection>();
@@ -1581,24 +1705,27 @@ void Server::DiscoveryConnectorCoroutine() {
                 peer_address_.ToString().c_str());
     AddDiscoveryConnection(conn);
     AdvertiseAllChannels();
-    DiscoveryConnectionReaderLoop(conn);
+    DiscoveryConnectionReaderLoop(ctx, conn);
     RemoveDiscoveryConnection(conn);
     if (shutting_down_) {
       return;
     }
-    co::Sleep(kRetrySecs);
+    async::Sleep(ctx, kRetrySecs);
   }
 }
 
 // This coroutine receives discovery messages over UDP.
-void Server::DiscoveryReceiverCoroutine() {
+void Server::DiscoveryReceiverCoroutine(async::Context ctx) {
   char buffer[kDiscoveryBufferSize];
 
   for (;;) {
     toolbelt::InetAddress sender;
     absl::StatusOr<ssize_t> n = discovery_receiver_.ReceiveFrom(
-        sender, buffer, sizeof(buffer), co::self);
+        sender, buffer, sizeof(buffer), ctx);
     if (!n.ok()) {
+      if (shutting_down_) {
+        return;
+      }
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to read discovery message: %s",
                   n.status().ToString().c_str());
@@ -1637,12 +1764,38 @@ void Server::DiscoveryReceiverCoroutine() {
 // a 'Subscribed' message detailing the information about the channel then
 // enters a loop reading messages sent to the channel on this side of the
 // bridge and sending them over.
-void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
+void Server::BridgeTransmitterCoroutine(async::Context ctx,
+                                        BridgeChannelInfo info,
                                         bool pub_reliable, bool sub_reliable,
                                         toolbelt::SocketAddress subscriber,
+                                        toolbelt::InetAddress sender,
                                         bool notify_retirement) {
   logger_.Log(toolbelt::LogLevel::kDebug, "BridgeTransmitterCoroutine running");
-  toolbelt::StreamSocket bridge;
+
+  // IncomingSubscribe added the bridged-publisher entry (keyed by the discovery
+  // `sender` address) before spawning us.  Remove it on every exit path - not
+  // just the normal end-of-stream teardown but also the early returns below
+  // (failed connect, bind, handshake, ...) - otherwise a failed bridge would
+  // leave the channel permanently marked as bridged and block re-establishment.
+  // bridged_publishers_ is owned by the client strand, so the erase is posted
+  // there; we look the channel up by name in case it was removed meanwhile.
+  struct BridgeGuard {
+    Server *server;
+    std::string channel_name;
+    toolbelt::InetAddress sender;
+    bool sub_reliable;
+    ~BridgeGuard() {
+      server->runtime_.RunOnStrand([server = server, channel_name = channel_name,
+                                    sender = sender, sub_reliable = sub_reliable]() {
+        auto it = server->channels_.find(channel_name);
+        if (it != server->channels_.end()) {
+          it->second->RemoveBridgedAddress(sender, sub_reliable);
+        }
+      });
+    }
+  } bridge_guard{this, info.channel_name, sender, sub_reliable};
+
+  async::StreamSocket bridge;
   if (absl::Status status = bridge.Connect(subscriber); !status.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to connect to bridge subscriber: %s",
@@ -1654,7 +1807,7 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
     return;
   }
 
-  const std::string &channel_name = channel->Name();
+  const std::string &channel_name = info.channel_name;
 
   // Send a Subscribed message to the transmitter.
   logger_.Log(toolbelt::LogLevel::kDebug, "Sending subscribed to %s",
@@ -1667,17 +1820,16 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
 
   Subscribed subscribed;
   subscribed.set_channel_name(channel_name);
-  subscribed.set_slot_size(channel->SlotSize());
-  subscribed.set_num_slots(channel->NumSlots());
+  subscribed.set_slot_size(info.slot_size);
+  subscribed.set_num_slots(info.num_slots);
   subscribed.set_reliable(pub_reliable);
-  subscribed.set_checksum_size(channel->ChecksumSize());
-  subscribed.set_metadata_size(channel->MetadataSize());
-  const bool wire_split_buffers = ChannelUsesSplitBuffers(channel);
+  subscribed.set_checksum_size(info.checksum_size);
+  subscribed.set_metadata_size(info.metadata_size);
+  const bool wire_split_buffers = info.wire_split_buffers;
   subscribed.set_split_buffers(wire_split_buffers);
-  subscribed.set_split_buffers_over_bridge(
-      ChannelUsesSplitBuffersOverBridge(channel));
+  subscribed.set_split_buffers_over_bridge(info.split_buffers_over_bridge);
 
-  toolbelt::StreamSocket retirement_listener;
+  async::StreamSocket retirement_listener;
   toolbelt::SocketAddress retirement_addr;
 
   if (notify_retirement) {
@@ -1705,11 +1857,14 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
                             ? bridge_advertise_address_.IpAddress()
                             : retirement_addr.GetInetAddress().IpAddress();
       ret_addr->set_address(&ip_addr, sizeof(ip_addr));
+      ret_addr->set_family(ChannelAddress::FAMILY_INET);
       break;
     }
     case toolbelt::SocketAddress::kAddressVirtual: {
-      uint32_t cid = retirement_addr.GetVirtualAddress().Cid();
+      // vsock: advertise our configured local CID (see SendSubscribeMessage).
+      uint32_t cid = vsock_cid_;
       ret_addr->set_address(&cid, sizeof(cid));
+      ret_addr->set_family(ChannelAddress::FAMILY_VSOCK);
       break;
     }
     default:
@@ -1730,7 +1885,7 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
   }
   int64_t length = subscribed.ByteSizeLong();
   absl::StatusOr<ssize_t> n_sent_1 =
-      bridge.SendMessage(databuf, length, co::self);
+      bridge.SendMessage(databuf, length, ctx);
   if (!n_sent_1.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to send subscribed for %s: %s", channel_name.c_str(),
@@ -1738,7 +1893,7 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
     return;
   }
 
-  Client client(co::self);
+  Client client(ctx);
   if (absl::Status s = client.Init(socket_name_); !s.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to connect to Subspace server: %s",
@@ -1762,14 +1917,15 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
   std::shared_ptr<std::vector<std::shared_ptr<ActiveMessage>>>
       active_retirement_msgs =
           std::make_shared<std::vector<std::shared_ptr<ActiveMessage>>>();
-  bool notifying_of_retirement = !channel->GetRetirementFds().empty();
+  bool notifying_of_retirement = notify_retirement;
 
   // Spawn a coroutine to read from the retirement connection.
   if (notifying_of_retirement) {
-    active_retirement_msgs->resize(channel->NumSlots());
-    scheduler_.Spawn(
-        [this, &retirement_listener, active_retirement_msgs]() mutable {
-          return RetirementReceiverCoroutine(retirement_listener,
+    active_retirement_msgs->resize(info.num_slots);
+    runtime_.SpawnOnNewStrand(
+        [this, &retirement_listener,
+         active_retirement_msgs](async::Context ret_ctx) mutable {
+          return RetirementReceiverCoroutine(ret_ctx, retirement_listener,
                                              active_retirement_msgs);
         },
         {.name = absl::StrFormat("Retirement listener for %s", channel_name),
@@ -1852,7 +2008,7 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
       // we will stop reading the messages from the channel and thus
       // backpressure any publishers writing to that channel.
       if (absl::Status status =
-              SendBridgeMessage(bridge, *msg, prefix, prefix_area,
+              SendBridgeMessage(ctx, bridge, *msg, prefix, prefix_area,
                                 wire_split_buffers);
           !status.ok()) {
         done = true;
@@ -1878,9 +2034,7 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
 
   logger_.Log(toolbelt::LogLevel::kDebug,
               "Bridge transmitter for %s terminating", channel_name.c_str());
-  // We're done reading messages from the channel, remove the
-  // bridge and subscriber.
-  channel->RemoveBridgedAddress(subscriber, sub_reliable);
+  // bridge_guard removes the bridged-publisher entry (by `sender`) as we unwind.
 }
 
 // This coroutine reads retirement messages from the bridge and removes
@@ -1889,12 +2043,12 @@ void Server::BridgeTransmitterCoroutine(ServerChannel *channel,
 // If these references are the last reference to the slot, it will be retired
 // on this side and the publisher's retirement FD is sent the slot.
 void Server::RetirementReceiverCoroutine(
-    toolbelt::StreamSocket &retirement_listener,
+    async::Context ctx, async::StreamSocket &retirement_listener,
     std::shared_ptr<std::vector<std::shared_ptr<ActiveMessage>>>
         active_retirement_msgs) {
   // Accept connection on the retirement listener socket.
-  absl::StatusOr<toolbelt::StreamSocket> retirement_socket =
-      retirement_listener.Accept(co::self);
+  absl::StatusOr<async::StreamSocket> retirement_socket =
+      retirement_listener.Accept(ctx);
   if (!retirement_socket.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to accept retirement connection: %s",
@@ -1906,7 +2060,7 @@ void Server::RetirementReceiverCoroutine(
   char buffer[kDiscoveryBufferSize];
   for (;;) {
     absl::StatusOr<ssize_t> n_recv =
-        retirement_socket->ReceiveMessage(buffer, sizeof(buffer), co::self);
+        retirement_socket->ReceiveMessage(buffer, sizeof(buffer), ctx);
     if (!n_recv.ok()) {
       return;
     }
@@ -1937,8 +2091,9 @@ void Server::RetirementReceiverCoroutine(
 absl::Status
 Server::SendSubscribeMessage(const std::string &channel_name, bool reliable,
                              toolbelt::InetAddress publisher,
-                             toolbelt::StreamSocket &receiver_listener,
-                             char *buffer, size_t buffer_size) {
+                             async::StreamSocket &receiver_listener,
+                             char *buffer, size_t buffer_size,
+                             async::Context ctx) {
   const toolbelt::SocketAddress &receiver_addr =
       receiver_listener.BoundAddress();
   logger_.Log(toolbelt::LogLevel::kDebug,
@@ -1959,12 +2114,15 @@ Server::SendSubscribeMessage(const std::string &channel_name, bool reliable,
                           ? bridge_advertise_address_.IpAddress()
                           : receiver_addr.GetInetAddress().IpAddress();
     sub_addr->set_address(&ip_addr, sizeof(ip_addr));
+    sub_addr->set_family(ChannelAddress::FAMILY_INET);
     break;
   }
   case toolbelt::SocketAddress::kAddressVirtual: {
-    // Virtual address.
-    uint32_t cid = receiver_addr.GetVirtualAddress().Cid();
+    // vsock: advertise our configured local CID (the listener is bound to
+    // VMADDR_CID_ANY, so its own CID is not the one peers should dial).
+    uint32_t cid = vsock_cid_;
     sub_addr->set_address(&cid, sizeof(cid));
+    sub_addr->set_family(ChannelAddress::FAMILY_VSOCK);
     break;
   }
   default:
@@ -1978,7 +2136,7 @@ Server::SendSubscribeMessage(const std::string &channel_name, bool reliable,
   (void)buffer_size;
   logger_.Log(toolbelt::LogLevel::kDebug, "Sending subscribe to %s: %s",
               publisher.ToString().c_str(), disc.DebugString().c_str());
-  absl::Status s = TransmitDiscovery(disc, publisher);
+  absl::Status s = TransmitDiscovery(disc, publisher, ctx);
   if (!s.ok()) {
     return absl::InternalError(
         absl::StrFormat("Failed to send subscribe: %s", s.ToString()));
@@ -1991,20 +2149,32 @@ Server::SendSubscribeMessage(const std::string &channel_name, bool reliable,
 // is sent intact to the channel.  It first receives a 'Subscribed' message
 // with the channel details, then enters a loop reading message from the
 // bridge and publishing them to the local channel.
-void Server::BridgeReceiverCoroutine(std::string channel_name,
+void Server::BridgeReceiverCoroutine(async::Context ctx,
+                                     std::string channel_name,
                                      bool sub_reliable,
                                      bool split_buffers_over_bridge,
-                                     toolbelt::InetAddress publisher) {
+                                     toolbelt::InetAddress publisher,
+                                     bool local_has_split_options,
+                                     bool local_use_split_buffers) {
+  // bridged_publishers_ and channels_ are owned by the client strand, but this
+  // coroutine runs on the parallel io_context.  Post the teardown bookkeeping
+  // onto the strand (capturing everything by value, since the guard's members
+  // are gone by the time the posted work runs) so it is serialized with
+  // discovery and the client handlers.
   struct BridgeGuard {
     Server *server;
-    const std::string &channel_name;
-    const toolbelt::InetAddress &publisher;
+    std::string channel_name;
+    toolbelt::InetAddress publisher;
     bool sub_reliable;
     ~BridgeGuard() {
-      auto it = server->channels_.find(channel_name);
-      if (it != server->channels_.end()) {
-        it->second->RemoveBridgedAddress(publisher, sub_reliable);
-      }
+      server->runtime_.RunOnStrand(
+          [server = server, channel_name = channel_name, publisher = publisher,
+           sub_reliable = sub_reliable]() {
+            auto it = server->channels_.find(channel_name);
+            if (it != server->channels_.end()) {
+              it->second->RemoveBridgedAddress(publisher, sub_reliable);
+            }
+          });
     }
   } bridge_guard{this, channel_name, publisher, sub_reliable};
 
@@ -2012,7 +2182,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
   logger_.Log(toolbelt::LogLevel::kDebug, "BridgeReceiverCoroutine running");
   char buffer[kDiscoveryBufferSize];
 
-  toolbelt::StreamSocket receiver_listener;
+  async::StreamSocket receiver_listener;
   absl::Status s = BindBridgeListener(receiver_listener);
   if (!s.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
@@ -2026,7 +2196,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
               receiver_addr.ToString().c_str());
 
   s = SendSubscribeMessage(channel_name, sub_reliable, publisher,
-                           receiver_listener, buffer, sizeof(buffer));
+                           receiver_listener, buffer, sizeof(buffer), ctx);
   if (!s.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to send Subscribe message for channel %s: %s",
@@ -2035,8 +2205,8 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
   }
 
   // Accept connection on listen socket.
-  absl::StatusOr<toolbelt::StreamSocket> bridge =
-      receiver_listener.Accept(co::self);
+  absl::StatusOr<async::StreamSocket> bridge =
+      receiver_listener.Accept(ctx);
   if (!bridge.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to accept incoming bridge connection: %s",
@@ -2049,7 +2219,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
   // Recieve it into offset 3 in buffer so that we can write the length for
   // sending it out again to the bridge notification pipe.
   absl::StatusOr<ssize_t> n_recv = bridge->ReceiveMessage(
-      buffer + sizeof(int32_t), sizeof(buffer) - sizeof(int32_t), co::self);
+      buffer + sizeof(int32_t), sizeof(buffer) - sizeof(int32_t), ctx);
   if (!n_recv.ok()) {
     logger_.Log(toolbelt::LogLevel::kError, "Failed to receive Subscribed: %s",
                 n_recv.status().ToString().c_str());
@@ -2063,17 +2233,16 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
   }
   bool bridge_publisher_split_buffers =
       split_buffers_over_bridge || subscribed.split_buffers_over_bridge();
-  if (auto it = channels_.find(channel_name); it != channels_.end()) {
-    const ServerChannel *split_channel =
-        SplitBufferOptionsChannel(it->second.get());
-    if (split_channel->HasSplitBufferOptions()) {
-      bridge_publisher_split_buffers =
-          split_channel->GetSplitBufferOptions().use_split_buffers;
-    }
+  // The local channel's split-buffer preference was read on the client strand
+  // (in SubscribeOverBridge) and passed in; it overrides the wire value.  We
+  // must not look channels_ up here because this coroutine runs on the parallel
+  // io_context.
+  if (local_has_split_options) {
+    bridge_publisher_split_buffers = local_use_split_buffers;
   }
 
   // Build a publisher to publish incoming bridge messages to the channel.
-  Client client(co::self);
+  Client client(ctx);
   s = client.Init(socket_name_);
   if (!s.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
@@ -2082,13 +2251,15 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     return;
   }
 
-  std::unique_ptr<toolbelt::StreamSocket> retirement_transmitter;
+  std::unique_ptr<async::StreamSocket> retirement_transmitter;
 
   if (subscribed.notify_retirement()) {
-    retirement_transmitter = std::make_unique<toolbelt::StreamSocket>();
+    retirement_transmitter = std::make_unique<async::StreamSocket>();
     toolbelt::SocketAddress retirement_addr;
-    switch (my_address_.Type()) {
-    case toolbelt::SocketAddress::kAddressInet: {
+    // The address family travels in the message (see SendSubscribeMessage);
+    // unset defaults to FAMILY_INET for compatibility with older peers.
+    switch (subscribed.retirement_socket().family()) {
+    case ChannelAddress::FAMILY_INET: {
       // IPv4 address.
       struct sockaddr_in tmp_addr;
       memset(&tmp_addr, 0, sizeof(tmp_addr));
@@ -2099,7 +2270,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
       retirement_addr = toolbelt::SocketAddress(tmp_addr);
       break;
     }
-    case toolbelt::SocketAddress::kAddressVirtual: {
+    case ChannelAddress::FAMILY_VSOCK: {
       // Virtual address.
       struct sockaddr_vm tmp_addr;
       memset(&tmp_addr, 0, sizeof(tmp_addr));
@@ -2112,8 +2283,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     }
     default:
       logger_.Log(toolbelt::LogLevel::kError,
-                  "Unsupported address type for retirement notification: %s",
-                  my_address_.ToString().c_str());
+                  "Unsupported address family for retirement notification");
       return;
     }
 
@@ -2164,10 +2334,10 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
 
     // Add a coroutine to listen for retirement notifications and send them to
     // the socket connected to the other server.
-    scheduler_.Spawn(
+    runtime_.SpawnOnNewStrand(
         [this, retirement_fd = std::move(retirement_fd),
-         &retirement_transmitter, channel_name]() mutable {
-          RetirementCoroutine(channel_name, std::move(retirement_fd),
+         &retirement_transmitter, channel_name](async::Context ret_ctx) mutable {
+          RetirementCoroutine(ret_ctx, channel_name, std::move(retirement_fd),
                               std::move(retirement_transmitter));
         },
         {.name = absl::StrFormat("Retirement notifier for %s", channel_name),
@@ -2231,7 +2401,7 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
     }
 
     absl::StatusOr<BridgeReceivedMessage> bridge_msg =
-        ReceiveBridgeMessage(*bridge, *pub, subscribed, *buf);
+        ReceiveBridgeMessage(ctx, *bridge, *pub, subscribed, *buf);
     if (!bridge_msg.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to read bridge message for %s: %s",
@@ -2269,18 +2439,52 @@ void Server::BridgeReceiverCoroutine(std::string channel_name,
 // original message, not this side's slot.  That is held in the MessagePrefix
 // which is kept intact.
 void Server::RetirementCoroutine(
-    const std::string &channel_name, toolbelt::FileDescriptor &&retirement_fd,
-    std::unique_ptr<toolbelt::StreamSocket> retirement_transmitter) {
+    async::Context ctx, const std::string &channel_name,
+    toolbelt::FileDescriptor &&retirement_fd,
+    std::unique_ptr<async::StreamSocket> retirement_transmitter) {
   logger_.Log(toolbelt::LogLevel::kDebug, "Retirement coroutine for %s running",
               channel_name.c_str());
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  // The retirement fd is read on the io_context thread, so the read must never
+  // block it.  WaitReadable can report readiness that this reader cannot then
+  // satisfy with a blocking read - e.g. a spurious epoll edge, or a second
+  // retirement coroutine spawned for the same channel after the bridge
+  // re-establishes consuming the byte first.  A blocking read in that case
+  // would freeze the entire single-threaded server (every client handler,
+  // discovery and bridge coroutine stalls behind it), which manifested as an
+  // intermittent hang during client teardown.  Make the fd non-blocking and
+  // treat EAGAIN as "wait again", exactly like the socket facade does.
+  if (int fl = ::fcntl(retirement_fd.Fd(), F_GETFL, 0); fl >= 0) {
+    (void)::fcntl(retirement_fd.Fd(), F_SETFL, fl | O_NONBLOCK);
+  }
+#endif
   for (;;) {
     int32_t slot_id;
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+    absl::StatusOr<ssize_t> n;
+    for (;;) {
+      ssize_t r = ::read(retirement_fd.Fd(), &slot_id, sizeof(slot_id));
+      if (r >= 0) {
+        n = r;
+        break;
+      }
+      if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+        if (absl::Status w = async::WaitReadable(ctx, retirement_fd.Fd());
+            !w.ok()) {
+          return; // Cancelled (graceful shutdown) or wait failed.
+        }
+        continue;
+      }
+      return; // Read error, we're done.
+    }
+#else
     absl::StatusOr<ssize_t> n =
-        retirement_fd.Read(&slot_id, sizeof(slot_id), co::self);
+        retirement_fd.Read(&slot_id, sizeof(slot_id), ctx);
     if (!n.ok()) {
       // Failed to read the slot ID, we're done.
       return;
     }
+#endif
     if (*n == 0) {
       return; // EOF, we're done.
     }
@@ -2307,7 +2511,7 @@ void Server::RetirementCoroutine(
       return;
     }
     absl::StatusOr<ssize_t> nsent = retirement_transmitter->SendMessage(
-        buffer + sizeof(int32_t), msg.ByteSizeLong(), co::self);
+        buffer + sizeof(int32_t), msg.ByteSizeLong(), ctx);
     if (!nsent.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to send retirement fd for %s: %s",
@@ -2320,12 +2524,24 @@ void Server::RetirementCoroutine(
 void Server::SubscribeOverBridge(ServerChannel *channel, bool reliable,
                                  bool split_buffers_over_bridge,
                                  toolbelt::InetAddress publisher) {
-  scheduler_.Spawn(
-      [this, channel, reliable, split_buffers_over_bridge, publisher]() {
-        BridgeReceiverCoroutine(channel->Name(), reliable,
-                                split_buffers_over_bridge, publisher);
+  // Read the local channel's split-buffer preference here, on the client
+  // strand, and pass it to the receiver coroutine (which runs on the parallel
+  // io_context and must not touch channels_).
+  const ServerChannel *split_channel = SplitBufferOptionsChannel(channel);
+  const bool local_has_split_options = split_channel->HasSplitBufferOptions();
+  const bool local_use_split_buffers =
+      local_has_split_options &&
+      split_channel->GetSplitBufferOptions().use_split_buffers;
+  std::string channel_name = channel->Name();
+  runtime_.SpawnOnNewStrand(
+      [this, channel_name, reliable, split_buffers_over_bridge, publisher,
+       local_has_split_options, local_use_split_buffers](async::Context ctx) {
+        BridgeReceiverCoroutine(ctx, channel_name, reliable,
+                                split_buffers_over_bridge, publisher,
+                                local_has_split_options,
+                                local_use_split_buffers);
       },
-      {.name = absl::StrFormat("Bridge receiver for %s", channel->Name()),
+      {.name = absl::StrFormat("Bridge receiver for %s", channel_name),
        .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
 }
 
@@ -2399,11 +2615,14 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
     channel->second->RemoveBridgedAddress(sender, sub_reliable);
     channel->second->AddBridgedAddress(sender, sub_reliable, server_id);
 
-    // The subscribe message contains the IP address and port of the
-    // socket listening for our connection for the channel.  Extract it.
+    // The subscribe message contains the address and port of the socket
+    // listening for our connection for the channel.  The address family is
+    // carried in the message itself (FAMILY_INET for TCP, FAMILY_VSOCK for
+    // vsock) so the two servers do not have to share the same local address
+    // type.  Older peers leave family unset, which defaults to FAMILY_INET.
     toolbelt::SocketAddress subscriber_addr;
-    switch (my_address_.Type()) {
-    case toolbelt::SocketAddress::kAddressInet: {
+    switch (subscribe.receiver().family()) {
+    case ChannelAddress::FAMILY_INET: {
       in_addr subscriber_ip;
       memcpy(&subscriber_ip, subscribe.receiver().address().data(),
              sizeof(subscriber_ip));
@@ -2413,7 +2632,7 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
           toolbelt::SocketAddress(subscriber_ip, subscribe.receiver().port());
       break;
     }
-    case toolbelt::SocketAddress::kAddressVirtual: {
+    case ChannelAddress::FAMILY_VSOCK: {
       uint32_t cid = *reinterpret_cast<const uint32_t *>(
           subscribe.receiver().address().data());
       subscriber_addr =
@@ -2422,17 +2641,30 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
     }
     default:
       logger_.Log(toolbelt::LogLevel::kError,
-                  "Unknown address type for subscribe receiver");
+                  "Unknown address family for subscribe receiver");
       return;
     }
 
     bool notify_retirement = !channel->second->GetRetirementFds().empty();
-    scheduler_.Spawn(
-        [this, ch, pub_reliable, sub_reliable,
-         subscriber_addr = std::move(subscriber_addr), notify_retirement]() {
-          BridgeTransmitterCoroutine(ch, pub_reliable, sub_reliable,
-                                     std::move(subscriber_addr),
-                                     notify_retirement);
+    // Snapshot the channel metadata the transmitter needs while we are still on
+    // the client strand.  The transmitter runs on the parallel io_context and
+    // must not touch the strand-confined ServerChannel for this state.
+    BridgeChannelInfo info{
+        .channel_name = ch->Name(),
+        .slot_size = ch->SlotSize(),
+        .num_slots = ch->NumSlots(),
+        .checksum_size = ch->ChecksumSize(),
+        .metadata_size = ch->MetadataSize(),
+        .wire_split_buffers = ChannelUsesSplitBuffers(ch),
+        .split_buffers_over_bridge = ChannelUsesSplitBuffersOverBridge(ch),
+    };
+    runtime_.SpawnOnNewStrand(
+        [this, info = std::move(info), pub_reliable, sub_reliable,
+         subscriber_addr = std::move(subscriber_addr), sender,
+         notify_retirement](async::Context ctx) mutable {
+          BridgeTransmitterCoroutine(ctx, std::move(info), pub_reliable,
+                                     sub_reliable, std::move(subscriber_addr),
+                                     sender, notify_retirement);
         },
         {.name = absl::StrFormat("Bridge transmitter for %s", channel->first)
                      .c_str(),
@@ -2444,10 +2676,13 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
   }
 }
 
-void Server::GratuitousAdvertiseCoroutine() {
+void Server::GratuitousAdvertiseCoroutine(async::Context ctx) {
   constexpr int kPeriodSecs = 5;
-  for (;;) {
-    co::Sleep(kPeriodSecs);
+  while (!shutting_down_) {
+    async::Sleep(ctx, kPeriodSecs);
+    if (shutting_down_) {
+      break;
+    }
     for (auto &channel : channels_) {
       if (!channel.second->IsLocal() && !channel.second->IsBridgePublisher()) {
         SendAdvertise(channel.first, channel.second->IsReliable());
@@ -2500,7 +2735,9 @@ Server::RegisterPlugin(const std::string &name, void *handle,
   if (!status.ok()) {
     return status;
   }
-  interface->SetScheduler(scheduler_);
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO
+  interface->SetScheduler(runtime_.scheduler());
+#endif
   plugins_.push_back(
       std::make_unique<Plugin>(name, handle, std::move(interface)));
   return absl::OkStatus();

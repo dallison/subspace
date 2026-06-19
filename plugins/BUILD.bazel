@@ -7,6 +7,7 @@ cc_binary(
     srcs = ["nop_plugin.cc"],
     deps = [
         "//client:subspace_client",
+        "//common/async:async",
         "//server:server",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/strings:str_format",
@@ -35,6 +36,7 @@ cc_library(
     srcs = ["nop_plugin.cc"],
     deps = [
         "//client:subspace_client",
+        "//common/async:async",
         "//server:server",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/strings:str_format",

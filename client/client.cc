@@ -188,6 +188,11 @@ absl::Status ClientImpl::Init(const std::string &server_socket,
     return absl::InternalError("Client is already connected to the server; "
                                "Init() called twice perhaps?");
   }
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  // A client without a yield_context is not driven by a coroutine: use blocking
+  // socket I/O so it works without an io_context (the common case).
+  socket_.SetBlocking(!IsCooperative());
+#endif
   absl::Status status = socket_.Connect(server_socket);
   if (!status.ok()) {
     return status;
@@ -747,6 +752,17 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
     return status;
   }
   uint64_t timeout_ns = timeout.count();
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  if (IsCooperative()) {
+    absl::Status s =
+        async::WaitReadable(SocketContext(), publisher->GetPollFd().Fd(),
+                            std::chrono::nanoseconds(timeout_ns));
+    if (absl::IsDeadlineExceeded(s)) {
+      return absl::InternalError("Timeout waiting for reliable publisher");
+    }
+    return s;
+  }
+#endif
   int result = -1;
   if (c != nullptr) {
     result = c->Wait(publisher->GetPollFd().Fd(), POLLIN, timeout_ns);
@@ -794,6 +810,17 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
   }
   int result = -1;
   uint64_t timeout_ns = timeout.count();
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  if (IsCooperative()) {
+    // The Asio WaitEither has no timeout; it waits until one fd is ready.
+    absl::StatusOr<int> r = async::WaitEither(
+        SocketContext(), publisher->GetPollFd().Fd(), fd.Fd());
+    if (!r.ok()) {
+      return r.status();
+    }
+    return *r;
+  }
+#endif
   if (c != nullptr) {
     result =
         c->Wait({publisher->GetPollFd().Fd(), fd.Fd()}, POLLIN, timeout_ns);
@@ -835,6 +862,17 @@ absl::Status ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
   }
 
   uint64_t timeout_ns = timeout.count();
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  if (IsCooperative()) {
+    absl::Status s =
+        async::WaitReadable(SocketContext(), subscriber->GetPollFd().Fd(),
+                            std::chrono::nanoseconds(timeout_ns));
+    if (absl::IsDeadlineExceeded(s)) {
+      return absl::InternalError("Timeout waiting for subscriber");
+    }
+    return s;
+  }
+#endif
   int result = -1;
   if (c != nullptr) {
     // Coroutine aware.  Yield control back until the poll fd is triggered.
@@ -871,6 +909,17 @@ absl::StatusOr<int> ClientImpl::WaitForSubscriber(
   }
   int result = -1;
   uint64_t timeout_ns = timeout.count();
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  if (IsCooperative()) {
+    // The Asio WaitEither has no timeout; it waits until one fd is ready.
+    absl::StatusOr<int> r = async::WaitEither(
+        SocketContext(), subscriber->GetPollFd().Fd(), fd.Fd());
+    if (!r.ok()) {
+      return r.status();
+    }
+    return *r;
+  }
+#endif
   if (c != nullptr) {
     // Coroutine aware.  Yield control back until the poll fd is triggered.
     result =
@@ -905,6 +954,80 @@ absl::StatusOr<int> ClientImpl::WaitForSubscriber(
   }
   return result;
 }
+
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+// Asio overloads taking an async::Context (yield_context) directly.  Unlike the
+// co::Coroutine* overloads above, which fall back to the client's stored
+// context (SocketContext()), these wait cooperatively on the caller-supplied
+// context.  This lets an Asio caller wait from within an arbitrary coroutine,
+// mirroring how the co backend accepts a co::Coroutine*.
+absl::Status
+ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
+                                     std::chrono::nanoseconds timeout,
+                                     async::Context ctx) {
+  if (absl::Status status = CheckConnected(); !status.ok()) {
+    return status;
+  }
+  if (!publisher->IsReliable()) {
+    return absl::InternalError("Unreliable publishers can't wait");
+  }
+  // Check if there are any new subscribers and if so, load their trigger fds.
+  if (absl::Status status = ReloadSubscribersIfNecessary(publisher);
+      !status.ok()) {
+    return status;
+  }
+  absl::Status s =
+      async::WaitReadable(ctx, publisher->GetPollFd().Fd(), timeout);
+  if (absl::IsDeadlineExceeded(s)) {
+    return absl::InternalError("Timeout waiting for reliable publisher");
+  }
+  return s;
+}
+
+absl::StatusOr<int>
+ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
+                                     const toolbelt::FileDescriptor &fd,
+                                     std::chrono::nanoseconds timeout,
+                                     async::Context ctx) {
+  if (absl::Status status = CheckConnected(); !status.ok()) {
+    return status;
+  }
+  if (!publisher->IsReliable()) {
+    return absl::InternalError("Unreliable publishers can't wait");
+  }
+  // Check if there are any new subscribers and if so, load their trigger fds.
+  if (absl::Status status = ReloadSubscribersIfNecessary(publisher);
+      !status.ok()) {
+    return status;
+  }
+  // The Asio WaitEither has no timeout; it waits until one fd is ready.
+  return async::WaitEither(ctx, publisher->GetPollFd().Fd(), fd.Fd());
+}
+
+absl::Status ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
+                                           std::chrono::nanoseconds timeout,
+                                           async::Context ctx) {
+  if (absl::Status status = CheckConnected(); !status.ok()) {
+    return status;
+  }
+  absl::Status s =
+      async::WaitReadable(ctx, subscriber->GetPollFd().Fd(), timeout);
+  if (absl::IsDeadlineExceeded(s)) {
+    return absl::InternalError("Timeout waiting for subscriber");
+  }
+  return s;
+}
+
+absl::StatusOr<int> ClientImpl::WaitForSubscriber(
+    SubscriberImpl *subscriber, const toolbelt::FileDescriptor &fd,
+    std::chrono::nanoseconds timeout, async::Context ctx) {
+  if (absl::Status status = CheckConnected(); !status.ok()) {
+    return status;
+  }
+  // The Asio WaitEither has no timeout; it waits until one fd is ready.
+  return async::WaitEither(ctx, subscriber->GetPollFd().Fd(), fd.Fd());
+}
+#endif
 
 absl::StatusOr<Message>
 ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
@@ -1732,7 +1855,10 @@ absl::Status ClientImpl::Reconnect() {
   auto cleanup = [this]() { reconnecting_ = false; };
 
   socket_.Close();
-  socket_ = toolbelt::UnixSocket();
+  socket_ = async::UnixSocket();
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  socket_.SetBlocking(!IsCooperative());
+#endif
 
   absl::Status status = socket_.Connect(socket_name_);
   if (!status.ok()) {
@@ -1833,7 +1959,8 @@ absl::Status ClientImpl::SendRequestReceiveResponse(
       return absl::InternalError("Failed to serialize request");
     }
 
-    absl::StatusOr<ssize_t> n = socket_.SendMessage(sendbuf, msg_len, co_);
+    absl::StatusOr<ssize_t> n =
+        socket_.SendMessage(sendbuf, msg_len, SocketContext());
     if (!n.ok()) {
       socket_.Close();
       if (was_connected_ && !reconnecting_) {
@@ -1846,7 +1973,7 @@ absl::Status ClientImpl::SendRequestReceiveResponse(
       return n.status();
     }
     if (!send_fds.empty()) {
-      absl::Status status = socket_.SendFds(send_fds, co_);
+      absl::Status status = socket_.SendFds(send_fds, SocketContext());
       if (!status.ok()) {
         socket_.Close();
         return status;
@@ -1855,7 +1982,7 @@ absl::Status ClientImpl::SendRequestReceiveResponse(
   }
 
   absl::StatusOr<std::vector<char>> recv_msg =
-      socket_.ReceiveVariableLengthMessage(co_);
+      socket_.ReceiveVariableLengthMessage(SocketContext());
   if (!recv_msg.ok()) {
     socket_.Close();
     if (was_connected_ && !reconnecting_) {
@@ -1873,7 +2000,7 @@ absl::Status ClientImpl::SendRequestReceiveResponse(
     return absl::InternalError("Failed to parse response");
   }
 
-  absl::Status s = socket_.ReceiveFds(fds, co_);
+  absl::Status s = socket_.ReceiveFds(fds, SocketContext());
   if (!s.ok()) {
     socket_.Close();
   }
@@ -1892,7 +2019,8 @@ ClientImpl::SendOneWayRequest(const Request &req,
     return absl::InternalError("Failed to serialize one-way request");
   }
 
-  absl::StatusOr<ssize_t> n = socket_.SendMessage(sendbuf, msg_len, co_);
+  absl::StatusOr<ssize_t> n =
+      socket_.SendMessage(sendbuf, msg_len, SocketContext());
   if (!n.ok()) {
     socket_.Close();
     if (was_connected_ && !reconnecting_) {
@@ -1905,7 +2033,7 @@ ClientImpl::SendOneWayRequest(const Request &req,
     return n.status();
   }
   if (!fds.empty()) {
-    absl::Status status = socket_.SendFds(fds, co_);
+    absl::Status status = socket_.SendFds(fds, SocketContext());
     if (!status.ok()) {
       socket_.Close();
       return status;

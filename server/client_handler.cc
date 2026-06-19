@@ -84,7 +84,7 @@ FromPublisherSplitBufferRequest(const CreatePublisherRequest &req) {
 
 ClientHandler::~ClientHandler() { server_->RemoveAllUsersFor(this); }
 
-void ClientHandler::Run() {
+void ClientHandler::Run(async::Context ctx) {
   // The data is placed 4 bytes into the buffer.  The first 4
   // bytes of the buffer are used by SendMessage and ReceiveMessage
   // for the length of the data.
@@ -93,7 +93,7 @@ void ClientHandler::Run() {
 
     {
       absl::StatusOr<std::vector<char>> receive_buffer =
-          socket_.ReceiveVariableLengthMessage(co::self);
+          socket_.ReceiveVariableLengthMessage(ctx);
       if (!receive_buffer.ok()) {
         return;
       }
@@ -114,7 +114,7 @@ void ClientHandler::Run() {
     if (request.request_case() == subspace::Request::kRegisterClientBuffer) {
       std::vector<toolbelt::FileDescriptor> register_fds;
       if (request.register_client_buffer().has_fd()) {
-        if (absl::Status s = socket_.ReceiveFds(register_fds, co::self);
+        if (absl::Status s = socket_.ReceiveFds(register_fds, ctx);
             !s.ok()) {
           server_->logger_.Log(toolbelt::LogLevel::kError, "%s\n",
                                s.ToString().c_str());
@@ -159,11 +159,11 @@ void ClientHandler::Run() {
     }
 
     absl::StatusOr<ssize_t> n_sent = socket_.SendMessage(
-        send_buffer.data() + sizeof(int32_t), msglen, co::self);
+        send_buffer.data() + sizeof(int32_t), msglen, ctx);
     if (!n_sent.ok()) {
       return;
     }
-    if (absl::Status status = socket_.SendFds(fds, co::self); !status.ok()) {
+    if (absl::Status status = socket_.SendFds(fds, ctx); !status.ok()) {
       server_->logger_.Log(toolbelt::LogLevel::kError, "%s\n",
                            status.ToString().c_str());
       return;

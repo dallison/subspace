@@ -6,6 +6,8 @@
 #define _xSERVERCLIENT_HANDLER_H
 
 #include "absl/status/status.h"
+#include "common/async/context.h"
+#include "common/async/socket.h"
 #include "common/channel.h"
 #include "co/coroutine.h"
 #include "proto/subspace.pb.h"
@@ -19,13 +21,14 @@ class Server;
 
 class ClientHandler {
 public:
-  ClientHandler(Server *server, toolbelt::UnixSocket socket)
+  ClientHandler(Server *server, async::UnixSocket socket)
       : server_(server), socket_(std::move(socket)) {}
   ~ClientHandler();
 
   // Run the client handler receiver in a coroutine.  Terminates
-  // when the connection to the client is closed.
-  void Run();
+  // when the connection to the client is closed.  The Context drives the
+  // cooperative socket I/O for the active backend.
+  void Run(async::Context ctx);
 
 private:
   std::string GetTotalVM();
@@ -72,7 +75,7 @@ private:
                               subspace::GetClientBuffersResponse *response,
                               std::vector<toolbelt::FileDescriptor> &fds);
   Server *server_;
-  toolbelt::UnixSocket socket_;
+  async::UnixSocket socket_;
   std::string client_name_;
 };
 

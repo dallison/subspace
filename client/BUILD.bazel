@@ -26,6 +26,7 @@ cc_library(
     include_prefix = "subspace/client",
     deps = [
         "//common:subspace_common",
+        "//common/async:async",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/status",
@@ -42,11 +43,18 @@ cc_library(
     hdrs = ["test_fixture.h"],
     deps = [
         ":subspace_client",
+        "//common/async:async",
         "//server",
         "@abseil-cpp//absl/status:status_matchers",
         "@coroutines//:co",
         "@googletest//:gtest",
-    ],
+    ] + select({
+        "//:coro_backend_asio": [
+            "@boost.asio//:boost.asio",
+            "@boost.coroutine//:boost.coroutine",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 cc_test(
@@ -155,6 +163,26 @@ cc_test(
         "@abseil-cpp//absl/status:statusor",
         "@googletest//:gtest",
         "@coroutines//:co",
+    ],
+)
+
+cc_test(
+    name = "asio_client_test",
+    size = "small",
+    timeout = "moderate",
+    srcs = ["asio_client_test.cc"],
+    copts = [
+        "-Wno-missing-field-initializers",
+        "-Wno-unused-parameter",
+    ],
+    deps = [
+        ":subspace_client",
+        "//common/async:async",
+        "//server",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@coroutines//:co",
+        "@googletest//:gtest_main",
     ],
 )
 

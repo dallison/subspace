@@ -93,6 +93,48 @@ jobs:
           name: bazel-test-logs-${{ matrix.os }}-${{ matrix.mode }}
           path: bazel-testlogs
 
+  asio-backend:
+    name: asio-backend (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            bazel_flags:
+          - os: macos-latest
+            bazel_flags: --config=macos_arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Bazel
+        uses: bazel-contrib/setup-bazel@0.18.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-${{ matrix.os }}-asio
+          repository-cache: true
+
+      # Test the full backend-dependent suite with the Boost.Asio backend
+      # selected.  async_test exercises the asio WaitReadable/WaitEither/Sleep
+      # and the StreamSocket/UDPSocket facade; client_test and bridge_test run
+      # the real asio client/server port (including discovery, bridging and the
+      # multi-threaded data plane) end to end.
+      - name: Build and test asio backend
+        run: |
+          bazel test \
+            //common/async:async_test \
+            //common:split_buffer_test \
+            //client:client_test \
+            //client:bridge_test \
+            //server:server_test \
+            --//:coro_backend=asio \
+            --verbose_failures \
+            --test_output=errors \
+            ${{ matrix.bazel_flags }}
+
   # Exercises the anonymous memfd_create shared-memory backend on Linux
   # (--config=linux_memfd, i.e. SUBSPACE_SHMEM_MODE_MEMFD).  This is the same
   # mechanism Android always uses; running it on native Linux guards against
@@ -465,4 +507,68 @@ jobs:
         if: failure()
         with:
           name: android-test-logs
+          path: bazel-testlogs
+
+  android-asio:
+    name: android-asio (x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Bazel
+        uses: bazel-contrib/setup-bazel@0.18.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-android-asio
+          repository-cache: true
+
+      - name: Set up Android NDK
+        run: |
+          ANDROID_SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          # Find the installed NDK version
+          NDK_VERSION=$(ls "$ANDROID_SDK_ROOT/ndk" | sort -V | tail -1)
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      # Cross-compile only the backend-dependent targets with the Boost.Asio
+      # backend selected; the co backend is covered by the `android` job.
+      - name: Cross-compile for Android x86_64 (asio backend)
+        run: |
+          bazel build \
+            //server:subspace_server \
+            //client:client_test \
+            //client:bridge_test \
+            //common:split_buffer_test \
+            //plugins:nop_plugin.so \
+            //plugins:split_buffer_free_test_plugin.so \
+            //asio_rpc/test:rpc_test \
+            //asio_rpc/server:server_test \
+            //asio_rpc/client:client_test \
+            --verbose_failures \
+            --config=android_x86_64 \
+            --//:coro_backend=asio
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run asio tests on Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: google_apis
+          arch: x86_64
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          emulator-boot-timeout: 900
+          script: bash .github/scripts/android-asio-test.sh
+
+      - name: Upload Android asio test logs
+        uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: android-asio-test-logs
           path: bazel-testlogs

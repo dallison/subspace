@@ -12,6 +12,10 @@
 #include "client/message.h"
 #include "client_handler.h"
 #include "co/coroutine.h"
+#include "common/async/context.h"
+#include "common/async/runtime.h"
+#include "common/async/socket.h"
+#include "common/async/wait.h"
 #include "plugin.h"
 #include "proto/subspace.pb.h"
 #include "server/plugin.h"
@@ -61,11 +65,34 @@ public:
          int disc_port, int peer_port, bool local, int notify_fd = -1,
          int initial_ordinal = 1, bool wait_for_clients = false, bool publish_server_channels = true);
 
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  // Asio-backed server.  These mirror the co::CoroutineScheduler constructors
+  // above but take an externally-owned boost::asio::io_context that the
+  // embedder runs (e.g. from main.cc or a test).  They are additive: the co
+  // constructors are unchanged so existing code that builds a Server with a
+  // CoroutineScheduler continues to compile and work on the co backend.
+  Server(boost::asio::io_context &ioc, const std::string &socket_name,
+         const std::string &interface, int disc_port, int peer_port, bool local,
+         int notify_fd = -1, int initial_ordinal = 1,
+         bool wait_for_clients = false, bool publish_server_channels = true);
+  Server(boost::asio::io_context &ioc, const std::string &socket_name,
+         const std::string &interface, const toolbelt::InetAddress &peer,
+         int disc_port, int peer_port, bool local, int notify_fd = -1,
+         int initial_ordinal = 1, bool wait_for_clients = false,
+         bool publish_server_channels = true);
+#endif
+
   virtual ~Server();
   void SetLogLevel(const std::string &level) { logger_.SetLogLevel(level); }
   toolbelt::LogLevel GetLogLevel() const { return logger_.GetLogLevel(); }
 
-  absl::Status Run();
+  // Run the server.  On the Asio backend `num_asio_threads` controls how many
+  // threads run the io_context (default 1, i.e. inline on the calling thread).
+  // Client handlers and the listener are confined to a strand, so they remain
+  // serialized regardless of the thread count; other coroutines (discovery,
+  // bridging) can run concurrently across the threads.  The argument is ignored
+  // on the co backend, which is always single-threaded.
+  absl::Status Run(int num_asio_threads = 1);
   void Stop(bool force = false);
 
   // The machine name can be used to distinguish between multiple servers
@@ -131,6 +158,17 @@ public:
     bridge_advertise_address_ = addr;
   }
 
+  // Enable vsock (AF_VSOCK) for bridge and retirement connections instead of
+  // TCP.  Discovery still runs over IP (UDP/TCP); only the per-channel bridge
+  // data connections switch to vsock.  `advertise_cid` is the context id this
+  // server advertises to peers as the address they should connect to - i.e.
+  // this server's own local CID (e.g. the guest CID assigned by the
+  // hypervisor, VMADDR_CID_HOST on the host, or VMADDR_CID_LOCAL for loopback).
+  void SetVsockBridging(bool enable, uint32_t advertise_cid) {
+    use_vsock_ = enable;
+    vsock_cid_ = advertise_cid;
+  }
+
   void CleanupFilesystem();
   void CleanupAfterSession();
 
@@ -139,7 +177,18 @@ public:
                                  std::unique_ptr<PluginInterface> interface);
   absl::Status UnloadPlugin(const std::string &name);
 
-  virtual co::CoroutineScheduler &GetScheduler() { return scheduler_; }
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO
+  virtual co::CoroutineScheduler &GetScheduler() { return runtime_.scheduler(); }
+#endif
+
+  // Backend-agnostic way for plugins (and internal code) to spawn a coroutine
+  // on the server's runtime.  The spawned function receives the active
+  // async::Context (a co::Coroutine* under the co backend, a yield_context
+  // under Asio) which it threads into client/socket/wait calls.
+  void SpawnCoroutine(std::function<void(async::Context)> fn,
+                      async::SpawnOptions opts = {}) {
+    runtime_.Spawn(std::move(fn), std::move(opts));
+  }
 
   absl::flat_hash_map<std::string, std::unique_ptr<ServerChannel>> &
   GetChannels() {
@@ -154,7 +203,8 @@ public:
 
   size_t GetNumChannels() const { return channels_.size(); }
 
-  absl::Status HandleIncomingConnection(toolbelt::UnixSocket &listen_socket);
+  absl::Status HandleIncomingConnection(async::Context ctx,
+                                        async::UnixSocket &listen_socket);
 
   // Create a channel in both process and shared memory.  For a placeholder
   // subscriber, the channel parameters are not known, so slot_size and
@@ -180,7 +230,7 @@ private:
   // A single TCP discovery connection to a peer server.  Used only when
   // tcp_discovery_ is enabled.
   struct DiscoveryConnection {
-    std::shared_ptr<toolbelt::StreamSocket> socket;
+    std::shared_ptr<async::StreamSocket> socket;
     // Remote address of the peer (without the discovery port, which is taken
     // from each received message), used as a stable key for bridge dedup.
     toolbelt::InetAddress remote;
@@ -209,41 +259,65 @@ private:
   void CloseHandler(ClientHandler *handler);
   void NotifyViaFd(int64_t val);
   void CreateShutdownTrigger();
-  void ListenerCoroutine(toolbelt::UnixSocket &listen_socket);
-  void ChannelDirectoryCoroutine();
+  void ListenerCoroutine(async::Context ctx, async::UnixSocket &listen_socket);
+  void ChannelDirectoryCoroutine(async::Context ctx);
   void SendChannelDirectory();
-  void StatisticsCoroutine();
-  void DiscoveryReceiverCoroutine();
-  void DiscoveryListenerCoroutine();
-  void DiscoveryConnectorCoroutine();
-  void DiscoveryConnectionReaderLoop(std::shared_ptr<DiscoveryConnection> conn);
+  void StatisticsCoroutine(async::Context ctx);
+  void DiscoveryReceiverCoroutine(async::Context ctx);
+  void DiscoveryListenerCoroutine(async::Context ctx);
+  void DiscoveryConnectorCoroutine(async::Context ctx);
+  void DiscoveryConnectionReaderLoop(async::Context ctx,
+                                     std::shared_ptr<DiscoveryConnection> conn);
   void AddDiscoveryConnection(std::shared_ptr<DiscoveryConnection> conn);
   void
   RemoveDiscoveryConnection(const std::shared_ptr<DiscoveryConnection> &conn);
   void AdvertiseAllChannels();
   // Send a discovery message to peers.  In TCP mode it is written to every
-  // active discovery connection; in UDP mode it is sent to udp_dest.
+  // active discovery connection; in UDP mode it is sent to udp_dest.  On the co
+  // backend sends are blocking (no coroutine yield) so messages from different
+  // coroutines can't interleave on a connection (the Context is ignored).  On
+  // the Asio backend the single-threaded io_context can't block, so the Context
+  // drives cooperative non-blocking sends.
   absl::Status TransmitDiscovery(const Discovery &disc,
-                                 const toolbelt::InetAddress &udp_dest);
+                                 const toolbelt::InetAddress &udp_dest,
+                                 async::Context ctx);
   // The address bridge listeners bind to: the any-address when a bridge
   // advertise address is configured, otherwise the local interface address.
   toolbelt::SocketAddress BridgeBindBase() const;
-  void PublisherCoroutine();
+  void PublisherCoroutine(async::Context ctx);
   void SendQuery(const std::string &channel_name);
   void SendAdvertise(const std::string &channel_name, bool reliable);
-  void BridgeTransmitterCoroutine(ServerChannel *channel, bool pub_reliable,
-                                  bool sub_reliable,
+  // Immutable snapshot of the channel state a bridge transmitter needs.  It is
+  // gathered on the client strand (in IncomingSubscribe) before the transmitter
+  // is spawned onto the parallel io_context, so the transmitter never has to
+  // touch the strand-confined ServerChannel for this metadata.
+  struct BridgeChannelInfo {
+    std::string channel_name;
+    int slot_size = 0;
+    int num_slots = 0;
+    int32_t checksum_size = 0;
+    int32_t metadata_size = 0;
+    bool wire_split_buffers = false;
+    bool split_buffers_over_bridge = false;
+  };
+  void BridgeTransmitterCoroutine(async::Context ctx, BridgeChannelInfo info,
+                                  bool pub_reliable, bool sub_reliable,
                                   toolbelt::SocketAddress subscriber,
+                                  toolbelt::InetAddress sender,
                                   bool notify_retirement);
-  void BridgeReceiverCoroutine(std::string channel_name, bool sub_reliable,
+  void BridgeReceiverCoroutine(async::Context ctx, std::string channel_name,
+                               bool sub_reliable,
                                bool split_buffers_over_bridge,
-                               toolbelt::InetAddress publisher);
+                               toolbelt::InetAddress publisher,
+                               bool local_has_split_options,
+                               bool local_use_split_buffers);
   void RetirementCoroutine(
-      const std::string &channel_name, toolbelt::FileDescriptor &&retirement_fd,
-      std::unique_ptr<toolbelt::StreamSocket> retirement_transmitter);
+      async::Context ctx, const std::string &channel_name,
+      toolbelt::FileDescriptor &&retirement_fd,
+      std::unique_ptr<async::StreamSocket> retirement_transmitter);
 
   void RetirementReceiverCoroutine(
-      toolbelt::StreamSocket &retirement_listener,
+      async::Context ctx, async::StreamSocket &retirement_listener,
       std::shared_ptr<std::vector<std::shared_ptr<ActiveMessage>>> active_retirement_msgs);
 
   void SubscribeOverBridge(ServerChannel *channel, bool reliable,
@@ -257,15 +331,16 @@ private:
   void IncomingSubscribe(const Discovery::Subscribe &subscribe,
                          const toolbelt::InetAddress &sender,
                          const std::string &server_id);
-  void GratuitousAdvertiseCoroutine();
-  absl::Status BindBridgeListener(toolbelt::StreamSocket &listener);
+  void GratuitousAdvertiseCoroutine(async::Context ctx);
+  absl::Status BindBridgeListener(async::StreamSocket &listener);
   absl::Status RegisterPlugin(const std::string &name, void *handle,
                               std::unique_ptr<PluginInterface> interface);
   absl::Status SendSubscribeMessage(const std::string &channel_name,
                                     bool reliable,
                                     toolbelt::InetAddress publisher,
-                                    toolbelt::StreamSocket &receiver_listener,
-                                    char *buffer, size_t buffer_size);
+                                    async::StreamSocket &receiver_listener,
+                                    char *buffer, size_t buffer_size,
+                                    async::Context ctx);
 
   static uint64_t AllocateSessionId() { return toolbelt::Now(); }
 
@@ -293,6 +368,12 @@ private:
   bool local_;
   bool tcp_discovery_ = false;
   toolbelt::InetAddress bridge_advertise_address_;
+  // When true, bridge (and retirement) connections use vsock instead of TCP.
+  // Discovery still runs over IP; only the bridge data connections change.
+  // vsock_cid_ is the context id this server advertises to peers as the one
+  // they should connect to (its own local CID).
+  bool use_vsock_ = false;
+  uint32_t vsock_cid_ = 0;
   absl::flat_hash_set<std::shared_ptr<DiscoveryConnection>>
       discovery_connections_;
   toolbelt::FileDescriptor notify_fd_;
@@ -305,12 +386,12 @@ private:
   SystemControlBlock *scb_;
   toolbelt::FileDescriptor scb_fd_;
   toolbelt::BitSet<kMaxChannels> channel_ids_;
-  co::CoroutineScheduler &scheduler_;
+  async::AsyncRuntime runtime_;
 
   toolbelt::TriggerFd channel_directory_trigger_fd_;
   toolbelt::InetAddress discovery_addr_;
-  toolbelt::UDPSocket discovery_transmitter_;
-  toolbelt::UDPSocket discovery_receiver_;
+  async::UDPSocket discovery_transmitter_;
+  async::UDPSocket discovery_receiver_;
   toolbelt::Logger logger_;
 
   // Optional pipe to allow test to be notified when discovery sets up a
