@@ -1972,13 +1972,14 @@ TEST_F(ClientTest, ExternalPollLoopGetPollFdOnceReadOnce) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
 
+  constexpr int kNum = 20;
+  constexpr int kNumSlots = kNum + 1;
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("ext_poll1");
   ASSERT_OK(sub);
   absl::StatusOr<Publisher> pub =
-      pub_client.CreatePublisher("ext_poll1", 256, 10);
+      pub_client.CreatePublisher("ext_poll1", 256, kNumSlots);
   ASSERT_OK(pub);
 
-  constexpr int kNum = 20;
   std::atomic<int> published{0};
   std::thread publisher([&] {
     for (int i = 0; i < kNum; i++) {
@@ -2023,13 +2024,14 @@ TEST_F(ClientTest, ExternalPollLoopGetPollFdOnceDrainUntilEmpty) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
 
+  constexpr int kNum = 20;
+  constexpr int kNumSlots = kNum + 1;
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("ext_poll2");
   ASSERT_OK(sub);
   absl::StatusOr<Publisher> pub =
-      pub_client.CreatePublisher("ext_poll2", 256, 10);
+      pub_client.CreatePublisher("ext_poll2", 256, kNumSlots);
   ASSERT_OK(pub);
 
-  constexpr int kNum = 20;
   std::thread publisher([&] {
     for (int i = 0; i < kNum; i++) {
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
