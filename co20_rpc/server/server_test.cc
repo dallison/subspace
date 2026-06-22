@@ -135,6 +135,18 @@ static std::shared_ptr<subspace::co20_rpc::RpcServer> BuildServer() {
   return server;
 }
 
+TEST_F(Co20ServerTest, StreamWriterOwnsRequestMetadata) {
+  std::unique_ptr<subspace::co20_rpc::internal::AnyStreamWriter> writer;
+  {
+    subspace::RpcRequest request;
+    request.set_request_id(1234);
+    writer = std::make_unique<subspace::co20_rpc::internal::AnyStreamWriter>(
+        nullptr, nullptr, nullptr, request);
+  }
+
+  EXPECT_EQ(1234, writer->request.request_id());
+}
+
 struct ServerContext {
   std::shared_ptr<subspace::Client> client;
   std::shared_ptr<subspace::Publisher> pub;
