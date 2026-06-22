@@ -12,6 +12,8 @@
 #include "toolbelt/logging.h"
 #include "toolbelt/pipe.h"
 
+#include <atomic>
+
 namespace subspace {
 
 class RpcServer;
@@ -21,27 +23,34 @@ namespace internal {
 struct Session;
 struct MethodInstance;
 
+struct StreamWriterState {
+  std::atomic_bool is_cancelled{false};
+};
+
 struct AnyStreamWriter {
   AnyStreamWriter(std::shared_ptr<RpcServer> server,
                   std::shared_ptr<Session> session,
                   std::shared_ptr<MethodInstance> method_instance,
                   const RpcRequest &request)
       : server(std::move(server)), session(std::move(session)),
-        method_instance(std::move(method_instance)), request(request) {}
+        method_instance(std::move(method_instance)), request(request),
+        state(std::make_shared<StreamWriterState>()) {}
 
   // Returns true if the write worked, false if the request was cancelled.
   bool Write(std::unique_ptr<google::protobuf::Any> res, co::Coroutine *c);
   void Finish(co::Coroutine *c);
 
-  void Cancel() { is_cancelled = true; }
+  void Cancel() { state->is_cancelled.store(true, std::memory_order_release); }
 
-  bool IsCancelled() const { return is_cancelled; }
+  bool IsCancelled() const {
+    return state->is_cancelled.load(std::memory_order_acquire);
+  }
 
   std::shared_ptr<RpcServer> server;
   std::shared_ptr<Session> session;
   std::shared_ptr<MethodInstance> method_instance;
-  const RpcRequest &request;
-  bool is_cancelled = false;
+  RpcRequest request;
+  std::shared_ptr<StreamWriterState> state;
 };
 
 // An item pushed by either the reply function or the error function of an
