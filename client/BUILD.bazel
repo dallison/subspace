@@ -77,10 +77,6 @@ cc_test(
         "-Wno-missing-field-initializers",
         "-Wno-unused-parameter",
     ],
-    linkopts = select({
-        "//:qnx": ["-lsocket"],
-        "//conditions:default": [],
-    }),
     deps = [
         ":subspace_client",
         ":test_fixture",
