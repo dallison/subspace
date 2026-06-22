@@ -139,4 +139,3 @@ build:qnx_x86_64 --cxxopt=-D__QNX__
 # QNX common flags
 build:qnx --cxxopt=-std=c++17
 build:qnx --cxxopt=-Wno-sign-compare
-build:qnx --linkopt=-lsocket
