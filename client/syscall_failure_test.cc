@@ -41,7 +41,7 @@ TEST_F(SyscallFailureTest, MmapFailOnScb) {
   ScopedSyscallShim guard(&shim);
 
   auto pub = client->CreatePublisher("/mmap_scb_test",
-                                     {.slot_size = 64, .num_slots = 4});
+                                     subspace::PublisherOptions().SetSlotSize(64).SetNumSlots(4));
   ASSERT_FALSE(pub.ok());
   EXPECT_THAT(pub.status().message(),
               ::testing::HasSubstr("Failed to map SystemControlBlock"));
@@ -57,7 +57,7 @@ TEST_F(SyscallFailureTest, MmapFailOnCcb) {
   ScopedSyscallShim guard(&shim);
 
   auto pub = client->CreatePublisher("/mmap_ccb_test",
-                                     {.slot_size = 64, .num_slots = 4});
+                                     subspace::PublisherOptions().SetSlotSize(64).SetNumSlots(4));
   ASSERT_FALSE(pub.ok());
   EXPECT_THAT(pub.status().message(),
               ::testing::HasSubstr("Failed to map ChannelControlBlock"));
@@ -75,7 +75,7 @@ TEST_F(SyscallFailureTest, MmapFailOnBcb) {
   ScopedSyscallShim guard(&shim);
 
   auto pub = client->CreatePublisher("/mmap_bcb_test",
-                                     {.slot_size = 64, .num_slots = 4});
+                                     subspace::PublisherOptions().SetSlotSize(64).SetNumSlots(4));
   ASSERT_FALSE(pub.ok());
   EXPECT_THAT(pub.status().message(),
               ::testing::HasSubstr("Failed to map BufferControlBlock"));
@@ -98,7 +98,7 @@ TEST_F(SyscallFailureTest, ShmOpenFail) {
   ScopedSyscallShim guard(&shim);
 
   auto pub = client->CreatePublisher("/shm_open_test",
-                                     {.slot_size = 64, .num_slots = 4});
+                                     subspace::PublisherOptions().SetSlotSize(64).SetNumSlots(4));
   ASSERT_FALSE(pub.ok());
   EXPECT_THAT(pub.status().message(),
               ::testing::HasSubstr("Failed to open shared memory"));
@@ -119,7 +119,7 @@ TEST_F(SyscallFailureTest, FtruncateFailAfterShmOpen) {
   ScopedSyscallShim guard(&shim);
 
   auto pub = client->CreatePublisher("/ftrunc_test",
-                                     {.slot_size = 64, .num_slots = 4});
+                                     subspace::PublisherOptions().SetSlotSize(64).SetNumSlots(4));
   ASSERT_FALSE(pub.ok());
   // On Linux ftruncate is on the shm fd; on POSIX/macOS it's on the shadow file.
   EXPECT_THAT(
@@ -145,7 +145,7 @@ TEST_F(SyscallFailureTest, ChmodFail) {
   ScopedSyscallShim guard(&shim);
 
   auto pub = client->CreatePublisher("/chmod_test",
-                                     {.slot_size = 64, .num_slots = 4});
+                                     subspace::PublisherOptions().SetSlotSize(64).SetNumSlots(4));
   ASSERT_FALSE(pub.ok());
   EXPECT_THAT(pub.status().message(),
               ::testing::HasSubstr("Failed to change permissions"));
@@ -160,7 +160,7 @@ TEST_F(SyscallFailureTest, PollFailWaitForSubscriber) {
   auto client = EVAL_AND_ASSERT_OK(
       subspace::Client::Create(Socket(), "poll_sub_test"));
   auto sub = EVAL_AND_ASSERT_OK(client->CreateSubscriber(
-      "/poll_sub_test", {.max_active_messages = 2}));
+      "/poll_sub_test", subspace::SubscriberOptions().SetMaxActiveMessages(2)));
 
   FailingShim shim;
   shim.poll_fail_countdown = 0;
@@ -182,7 +182,7 @@ TEST_F(SyscallFailureTest, PollFailWaitForReliablePublisher) {
       subspace::Client::Create(Socket(), "poll_pub_test"));
   auto pub = EVAL_AND_ASSERT_OK(client->CreatePublisher(
       "/poll_pub_test",
-      {.slot_size = 64, .num_slots = 4, .reliable = true}));
+      subspace::PublisherOptions().SetSlotSize(64).SetNumSlots(4).SetReliable(true)));
 
   FailingShim shim;
   shim.poll_fail_countdown = 0;
@@ -208,7 +208,7 @@ TEST_F(SyscallFailureTest, FstatFailInGetBufferSize) {
 
   // First create a publisher (without the shim) so the channel exists.
   auto pub = EVAL_AND_ASSERT_OK(client->CreatePublisher(
-      "/fstat_test", {.slot_size = 64, .num_slots = 4}));
+      "/fstat_test", subspace::PublisherOptions().SetSlotSize(64).SetNumSlots(4)));
 
   // Now publish a message so buffers are created.
   auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
@@ -246,7 +246,7 @@ TEST_F(SyscallFailureTest, ShimCallCounting) {
   ScopedSyscallShim guard(&shim);
 
   auto pub = EVAL_AND_ASSERT_OK(client->CreatePublisher(
-      "/count_test", {.slot_size = 64, .num_slots = 4}));
+      "/count_test", subspace::PublisherOptions().SetSlotSize(64).SetNumSlots(4)));
 
   // Verify that mmap was called at least 3 times (SCB, CCB, BCB).
   EXPECT_GE(shim.mmap_call_count, 3);
@@ -277,7 +277,7 @@ TEST_F(SyscallFailureTest, ShimRestoredAfterGuard) {
   auto client = EVAL_AND_ASSERT_OK(
       subspace::Client::Create(Socket(), "restore_test"));
   auto pub = EVAL_AND_ASSERT_OK(client->CreatePublisher(
-      "/restore_test", {.slot_size = 64, .num_slots = 4}));
+      "/restore_test", subspace::PublisherOptions().SetSlotSize(64).SetNumSlots(4)));
   // If the shim wasn't restored, this would have used the FailingShim
   // (which was destroyed) and likely crashed.
 }
@@ -296,7 +296,7 @@ TEST_F(SyscallFailureTest, MmapFailOnBufferMap) {
   ScopedSyscallShim guard(&shim);
 
   auto pub = client->CreatePublisher("/bufmap_test",
-                                     {.slot_size = 64, .num_slots = 4});
+                                     subspace::PublisherOptions().SetSlotSize(64).SetNumSlots(4));
   ASSERT_FALSE(pub.ok());
   EXPECT_THAT(pub.status().message(),
               ::testing::HasSubstr("Failed to map shared memory"));

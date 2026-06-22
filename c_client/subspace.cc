@@ -485,50 +485,36 @@ bool subspace_get_all_channel_stats(SubspaceClient client,
 }
 
 SubspaceSubscriberOptions subspace_subscriber_options_default(void) {
-  SubspaceSubscriberOptions options = {
-      .reliable = false,
-      .bridge = false,
-      .for_tunnel = false,
-      .type = {.type = nullptr, .type_length = 0},
-      .max_active_messages = 1,
-      .pass_activation = false,
-      .log_dropped_messages = false,
-      .read_write = false,
-      .mux = nullptr,
-      .mux_length = 0,
-      .vchan_id = -1,
-      .checksum = false,
-      .pass_checksum_errors = false,
-      .keep_active_message = false,
-      .split_callbacks = {},
-  };
+  SubspaceSubscriberOptions options = {};
+  options.max_active_messages = 1;
+  options.vchan_id = -1;
   return options;
 }
 
 SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size,
                                                             int num_slots) {
   SubspacePublisherOptions options = {
-      .slot_size = slot_size,
-      .num_slots = num_slots,
-      .local = false,
-      .reliable = false,
-      .bridge = false,
-      .for_tunnel = false,
-      .fixed_size = false,
-      .type = {.type = nullptr, .type_length = 0},
-      .activate = false,
-      .mux = nullptr,
-      .mux_length = 0,
-      .vchan_id = -1,
-      .notify_retirement = false,
-      .checksum = false,
-      .checksum_size = 4,
-      .metadata_size = 0,
-      .prefer_retired_slots = true,
-      .use_split_buffers = false,
-      .split_buffers_over_bridge = false,
-      .max_publishers = 0,
-      .split_callbacks = {},
+      slot_size,
+      num_slots,
+      false,
+      false,
+      false,
+      false,
+      false,
+      SubspaceTypeInfo{},
+      false,
+      nullptr,
+      0,
+      -1,
+      false,
+      false,
+      4,
+      0,
+      true,
+      false,
+      false,
+      0,
+      SubspaceSplitBufferCallbacks{},
   };
   return options;
 }
@@ -536,22 +522,21 @@ SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size,
 SubspaceSubscriber
 subspace_create_subscriber(SubspaceClient client, const char *channel_name,
                            SubspaceSubscriberOptions options) {
-  subspace::SubscriberOptions subspace_options = {
-      .reliable = options.reliable,
-      .bridge = options.bridge,
-      .for_tunnel = options.for_tunnel,
-      .type = StringFromPointer(options.type.type, options.type.type_length),
-      .max_active_messages = options.max_active_messages,
-      .log_dropped_messages = options.log_dropped_messages,
-      .pass_activation = options.pass_activation,
-      .read_write = options.read_write,
-      .mux = StringFromPointer(options.mux, options.mux_length),
-      .vchan_id = options.vchan_id,
-      .checksum = options.checksum,
-      .pass_checksum_errors = options.pass_checksum_errors,
-      .keep_active_message = options.keep_active_message,
-      .split_buffer_callbacks = ToCppSplitCallbacks(options.split_callbacks),
-  };
+  subspace::SubscriberOptions subspace_options;
+  subspace_options.SetReliable(options.reliable)
+      .SetBridge(options.bridge)
+      .SetForTunnel(options.for_tunnel)
+      .SetType(StringFromPointer(options.type.type, options.type.type_length))
+      .SetMaxActiveMessages(options.max_active_messages)
+      .SetPassActivation(options.pass_activation)
+      .SetReadWrite(options.read_write)
+      .SetMux(StringFromPointer(options.mux, options.mux_length))
+      .SetVchanId(options.vchan_id)
+      .SetChecksum(options.checksum)
+      .SetPassChecksumErrors(options.pass_checksum_errors)
+      .SetKeepActiveMessage(options.keep_active_message)
+      .SetSplitBufferCallbacks(ToCppSplitCallbacks(options.split_callbacks));
+  subspace_options.SetLogDroppedMessages(options.log_dropped_messages);
   subspace_clear_error();
   SubspaceSubscriber subscriber;
   memset(&subscriber, 0, sizeof(subscriber));
@@ -574,28 +559,27 @@ subspace_create_subscriber(SubspaceClient client, const char *channel_name,
 SubspacePublisher subspace_create_publisher(SubspaceClient client,
                                             const char *channel_name,
                                             SubspacePublisherOptions options) {
-  subspace::PublisherOptions subspace_options = {
-      .slot_size = options.slot_size,
-      .num_slots = options.num_slots,
-      .local = options.local,
-      .reliable = options.reliable,
-      .bridge = options.bridge,
-      .for_tunnel = options.for_tunnel,
-      .fixed_size = options.fixed_size,
-      .type = StringFromPointer(options.type.type, options.type.type_length),
-      .activate = options.activate,
-      .mux = StringFromPointer(options.mux, options.mux_length),
-      .vchan_id = options.vchan_id,
-      .notify_retirement = options.notify_retirement,
-      .checksum = options.checksum,
-      .checksum_size = options.checksum_size,
-      .metadata_size = options.metadata_size,
-      .prefer_retired_slots = options.prefer_retired_slots,
-      .max_publishers = options.max_publishers,
-      .use_split_buffers = options.use_split_buffers,
-      .split_buffers_over_bridge = options.split_buffers_over_bridge,
-      .split_buffer_callbacks = ToCppSplitCallbacks(options.split_callbacks),
-  };
+  subspace::PublisherOptions subspace_options;
+  subspace_options.SetSlotSize(options.slot_size)
+      .SetNumSlots(options.num_slots)
+      .SetLocal(options.local)
+      .SetReliable(options.reliable)
+      .SetBridge(options.bridge)
+      .SetForTunnel(options.for_tunnel)
+      .SetFixedSize(options.fixed_size)
+      .SetType(StringFromPointer(options.type.type, options.type.type_length))
+      .SetActivate(options.activate)
+      .SetMux(StringFromPointer(options.mux, options.mux_length))
+      .SetVchanId(options.vchan_id)
+      .SetNotifyRetirement(options.notify_retirement)
+      .SetChecksum(options.checksum)
+      .SetChecksumSize(options.checksum_size)
+      .SetMetadataSize(options.metadata_size)
+      .SetPreferRetiredSlots(options.prefer_retired_slots)
+      .SetMaxPublishers(options.max_publishers)
+      .SetUseSplitBuffers(options.use_split_buffers)
+      .SetSplitBuffersOverBridge(options.split_buffers_over_bridge)
+      .SetSplitBufferCallbacks(ToCppSplitCallbacks(options.split_callbacks));
   subspace_clear_error();
   SubspacePublisher publisher;
   memset(&publisher, 0, sizeof(publisher));

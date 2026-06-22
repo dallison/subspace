@@ -209,10 +209,7 @@ RpcClient::OpenService(std::chrono::nanoseconds timeout) {
   logger_.Log(toolbelt::LogLevel::kDebug, "Creating publisher to channel: %s",
               request_name.c_str());
   auto pub = client_->CreatePublisher(request_name,
-                                      {.slot_size = kRpcRequestSlotSize,
-                                       .num_slots = kRpcRequestNumSlots,
-                                       .reliable = true,
-                                       .type = "subspace.RpcServerRequest"});
+                                      subspace::PublisherOptions().SetSlotSize(kRpcRequestSlotSize).SetNumSlots(kRpcRequestNumSlots).SetReliable(true).SetType("subspace.RpcServerRequest"));
   if (!pub.ok()) {
     co_return absl::InternalError(absl::StrFormat(
         "Failed to create request publisher: %s", pub.status().ToString()));
@@ -221,7 +218,7 @@ RpcClient::OpenService(std::chrono::nanoseconds timeout) {
 
   auto sub = client_->CreateSubscriber(
       absl::StrFormat("/rpc/%s/response", service_),
-      {.reliable = true, .type = "subspace.RpcServerResponse"});
+      subspace::SubscriberOptions().SetReliable(true).SetType("subspace.RpcServerResponse"));
   if (!sub.ok()) {
     co_return absl::InternalError(absl::StrFormat(
         "Failed to create response subscriber: %s", sub.status().ToString()));
@@ -258,7 +255,7 @@ RpcClient::OpenService(std::chrono::nanoseconds timeout) {
 
     auto pub = client_->CreatePublisher(
         method.request_channel().name(), m->slot_size, m->num_slots,
-        {.reliable = true, .type = method.request_channel().type()});
+        subspace::PublisherOptions().SetReliable(true).SetType(method.request_channel().type()));
     if (!pub.ok()) {
       co_return absl::InternalError(absl::StrFormat(
           "Failed to create request publisher: %s", pub.status().ToString()));
@@ -268,7 +265,7 @@ RpcClient::OpenService(std::chrono::nanoseconds timeout) {
 
     auto sub = client_->CreateSubscriber(
         method.response_channel().name(),
-        {.reliable = true, .type = method.response_channel().type()});
+        subspace::SubscriberOptions().SetReliable(true).SetType(method.response_channel().type()));
     if (!sub.ok()) {
       co_return absl::InternalError(absl::StrFormat(
           "Failed to create response subscriber: %s",
@@ -281,9 +278,7 @@ RpcClient::OpenService(std::chrono::nanoseconds timeout) {
       auto cpub = client_->CreatePublisher(method.cancel_channel(),
                                            kCancelChannelSlotSize,
                                            kCancelChannelNumSlots,
-                                           {
-                                               .reliable = true,
-                                           });
+                                           subspace::PublisherOptions().SetReliable(true));
       if (!cpub.ok()) {
         co_return absl::InternalError(absl::StrFormat(
             "Failed to create cancel publisher: %s",

@@ -21,6 +21,7 @@ cc_binary(
         "//:macos_arm64": [],
         "//:macos_default": [],
         "//:android": ["-llog"],
+        "//:qnx": [],
         "//conditions:default": ["-lrt"],
     }),
 )
@@ -45,6 +46,7 @@ cc_binary(
         "//:macos_arm64": [],
         "//:macos_default": [],
         "//:android": ["-llog"],
+        "//:qnx": [],
         "//conditions:default": ["-lrt"],
     }),
 )
@@ -69,6 +71,7 @@ cc_binary(
         "//:macos_arm64": [],
         "//:macos_default": [],
         "//:android": ["-llog"],
+        "//:qnx": [],
         "//conditions:default": ["-lrt"],
     }),
 )
@@ -92,6 +95,7 @@ cc_binary(
         "//:macos_arm64": [],
         "//:macos_default": [],
         "//:android": ["-llog"],
+        "//:qnx": [],
         "//conditions:default": ["-lrt"],
     }),
 )
@@ -114,6 +118,7 @@ cc_binary(
         "//:macos_arm64": [],
         "//:macos_default": [],
         "//:android": ["-llog"],
+        "//:qnx": [],
         "//conditions:default": ["-lrt"],
     }),
 )
@@ -136,6 +141,7 @@ cc_binary(
         "//:macos_arm64": [],
         "//:macos_default": [],
         "//:android": ["-llog"],
+        "//:qnx": [],
         "//conditions:default": ["-lrt"],
     }),
 )
@@ -159,6 +165,7 @@ cc_binary(
         "//:macos_arm64": [],
         "//:macos_default": [],
         "//:android": ["-llog"],
+        "//:qnx": [],
         "//conditions:default": ["-lrt"],
     }),
 )
