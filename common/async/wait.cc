@@ -122,13 +122,15 @@ absl::Status WaitReadable(Context ctx, int fd, std::chrono::nanoseconds timeout)
   // handler to the coroutine's cancellation slot and wait on the notifier with
   // an *unconnected* slot so asio installs no per-operation timer cancellation.
   auto exec = ctx.get_executor();
-  ctx.get_cancellation_slot().assign(
-      [exec, wake, cancelled](boost::asio::cancellation_type) {
-        boost::asio::post(exec, [wake, cancelled]() {
-          *cancelled = true;
-          wake();
-        });
+  auto cancel_slot = ctx.get_cancellation_slot();
+  if (cancel_slot.is_connected()) {
+    cancel_slot.assign([exec, wake, cancelled](boost::asio::cancellation_type) {
+      boost::asio::post(exec, [wake, cancelled]() {
+        *cancelled = true;
+        wake();
       });
+    });
+  }
 
   boost::system::error_code ec;
   notifier->async_wait(
@@ -139,7 +141,9 @@ absl::Status WaitReadable(Context ctx, int fd, std::chrono::nanoseconds timeout)
   // cancellation handler so a late re-emit cannot poke a stale wake, then cancel
   // any still-pending descriptor/timer waits and release the real fd so
   // destroying the shared descriptor does not close it.
-  ctx.get_cancellation_slot().clear();
+  if (cancel_slot.is_connected()) {
+    cancel_slot.clear();
+  }
   boost::system::error_code ignored;
   sd->cancel(ignored);
   sd->release();
@@ -262,13 +266,15 @@ absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2,
   // Graceful shutdown routes through the same idempotent wake() rather than
   // cancelling the notifier op directly (see WaitReadable).
   auto exec = ctx.get_executor();
-  ctx.get_cancellation_slot().assign(
-      [exec, wake, cancelled](boost::asio::cancellation_type) {
-        boost::asio::post(exec, [wake, cancelled]() {
-          *cancelled = true;
-          wake();
-        });
+  auto cancel_slot = ctx.get_cancellation_slot();
+  if (cancel_slot.is_connected()) {
+    cancel_slot.assign([exec, wake, cancelled](boost::asio::cancellation_type) {
+      boost::asio::post(exec, [wake, cancelled]() {
+        *cancelled = true;
+        wake();
       });
+    });
+  }
 
   boost::system::error_code ec;
   notifier->async_wait(
@@ -277,7 +283,9 @@ absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2,
 
   // Clear our handler so a late re-emit cannot poke a stale wake, then release
   // the real fds so destroying the shared descriptors does not close them.
-  ctx.get_cancellation_slot().clear();
+  if (cancel_slot.is_connected()) {
+    cancel_slot.clear();
+  }
   boost::system::error_code ignored;
   sd1->cancel(ignored);
   sd2->cancel(ignored);
@@ -312,15 +320,19 @@ void Sleep(Context ctx, std::chrono::nanoseconds duration) {
     }
   };
   auto exec = ctx.get_executor();
-  ctx.get_cancellation_slot().assign(
-      [exec, wake](boost::asio::cancellation_type) {
-        boost::asio::post(exec, [wake]() { wake(); });
-      });
+  auto cancel_slot = ctx.get_cancellation_slot();
+  if (cancel_slot.is_connected()) {
+    cancel_slot.assign([exec, wake](boost::asio::cancellation_type) {
+      boost::asio::post(exec, [wake]() { wake(); });
+    });
+  }
   boost::system::error_code ec;
   timer->async_wait(
       boost::asio::bind_cancellation_slot(boost::asio::cancellation_slot(),
                                           ctx[ec]));
-  ctx.get_cancellation_slot().clear();
+  if (cancel_slot.is_connected()) {
+    cancel_slot.clear();
+  }
 }
 
 }  // namespace subspace::async
