@@ -24,7 +24,7 @@
 namespace subspace {
 
 // Shared-memory backends.  These name the *mechanism*, not the platform:
-//   POSIX  - a named shm_open object plus a /tmp shadow file (BSD/macOS/QNX).
+//   POSIX  - a named shm_open object plus a /tmp shadow file.
 //   LINUX  - a named /dev/shm object (mapped by name, server-free).
 //   MEMFD  - an anonymous memfd_create object (no name; the fd is passed to
 //            other clients via the server).  This is a Linux mechanism that

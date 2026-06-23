@@ -29,7 +29,7 @@ class ClientHandler;
 class Server;
 
 absl::StatusOr<SystemControlBlock *>
-CreateSystemControlBlock(toolbelt::FileDescriptor &fd);
+CreateSystemControlBlock(toolbelt::FileDescriptor &fd, uint64_t session_id);
 
 struct ResizeInfo {
   int old_slot_size;

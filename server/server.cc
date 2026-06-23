@@ -639,13 +639,15 @@ void Server::CleanupAfterSession() {
       (void)std::filesystem::remove(entry.path());
     }
   }
-  // Remove all files in /tmp that contain .scb., .ccb. or .bcb. in the name.
-  std::string ccb_shm_prefix = absl::StrFormat(".%d.ccb.", session_id_);
-  std::string bcb_shm_prefix = absl::StrFormat(".%d.bcb.", session_id_);
+  // Remove shadow files for the session's POSIX shm objects.
+  std::string session_shm_prefix =
+      absl::StrFormat("%08x.", static_cast<uint32_t>(session_id_));
   for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
     std::string filename = entry.path().filename().string();
-    if (filename.find(ccb_shm_prefix) != std::string::npos ||
-        filename.find(bcb_shm_prefix) != std::string::npos) {
+    if (filename.rfind(session_shm_prefix, 0) == 0 &&
+        (filename.find(".scb.") != std::string::npos ||
+         filename.find(".ccb.") != std::string::npos ||
+         filename.find(".bcb.") != std::string::npos)) {
       (void)std::filesystem::remove(entry.path());
       // There is also a shm segment with the same name as the file.
       (void)shm_unlink(entry.path().filename().c_str());
@@ -686,7 +688,8 @@ void Server::CleanupFilesystem() {
   // Remove all files in /tmp that contain .scb., .ccb. or .bcb. in the name.
   for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
     std::string filename = entry.path().filename().string();
-    if (filename.find(".ccb.") != std::string::npos ||
+    if (filename.find(".scb.") != std::string::npos ||
+        filename.find(".ccb.") != std::string::npos ||
         filename.find(".bcb.") != std::string::npos) {
       (void)std::filesystem::remove(entry.path());
       // There is also a shm segment with the same name as the file.
@@ -805,7 +808,7 @@ absl::Status Server::Run(int num_asio_threads) {
       CleanupFilesystem();
     }
     absl::StatusOr<SystemControlBlock *> scb =
-        CreateSystemControlBlock(scb_fd_);
+        CreateSystemControlBlock(scb_fd_, session_id_);
     if (!scb.ok()) {
       return absl::InternalError(absl::StrFormat(
           "Failed to create SystemControlBlock in shared memory: %s",
