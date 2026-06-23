@@ -221,7 +221,7 @@ absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2,
                           boost::system::error_code ignored;
                           sd2->cancel(ignored);
                           if (timer != nullptr) {
-                            timer->cancel(ignored);
+                            timer->cancel();
                           }
                         }
                         wake();
@@ -239,7 +239,7 @@ absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2,
                           boost::system::error_code ignored;
                           sd1->cancel(ignored);
                           if (timer != nullptr) {
-                            timer->cancel(ignored);
+                            timer->cancel();
                           }
                         }
                         wake();
