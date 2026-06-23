@@ -812,9 +812,11 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
   uint64_t timeout_ns = timeout.count();
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
   if (IsCooperative()) {
-    // The Asio WaitEither has no timeout; it waits until one fd is ready.
     absl::StatusOr<int> r = async::WaitEither(
-        SocketContext(), publisher->GetPollFd().Fd(), fd.Fd());
+        SocketContext(), publisher->GetPollFd().Fd(), fd.Fd(), timeout);
+    if (absl::IsDeadlineExceeded(r.status())) {
+      return absl::InternalError("Timeout waiting for reliable publisher");
+    }
     if (!r.ok()) {
       return r.status();
     }
@@ -911,9 +913,11 @@ absl::StatusOr<int> ClientImpl::WaitForSubscriber(
   uint64_t timeout_ns = timeout.count();
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
   if (IsCooperative()) {
-    // The Asio WaitEither has no timeout; it waits until one fd is ready.
     absl::StatusOr<int> r = async::WaitEither(
-        SocketContext(), subscriber->GetPollFd().Fd(), fd.Fd());
+        SocketContext(), subscriber->GetPollFd().Fd(), fd.Fd(), timeout);
+    if (absl::IsDeadlineExceeded(r.status())) {
+      return absl::InternalError("Timeout waiting for subscriber");
+    }
     if (!r.ok()) {
       return r.status();
     }
@@ -1000,8 +1004,12 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
       !status.ok()) {
     return status;
   }
-  // The Asio WaitEither has no timeout; it waits until one fd is ready.
-  return async::WaitEither(ctx, publisher->GetPollFd().Fd(), fd.Fd());
+  absl::StatusOr<int> r =
+      async::WaitEither(ctx, publisher->GetPollFd().Fd(), fd.Fd(), timeout);
+  if (absl::IsDeadlineExceeded(r.status())) {
+    return absl::InternalError("Timeout waiting for reliable publisher");
+  }
+  return r;
 }
 
 absl::Status ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
@@ -1024,8 +1032,12 @@ absl::StatusOr<int> ClientImpl::WaitForSubscriber(
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
-  // The Asio WaitEither has no timeout; it waits until one fd is ready.
-  return async::WaitEither(ctx, subscriber->GetPollFd().Fd(), fd.Fd());
+  absl::StatusOr<int> r =
+      async::WaitEither(ctx, subscriber->GetPollFd().Fd(), fd.Fd(), timeout);
+  if (absl::IsDeadlineExceeded(r.status())) {
+    return absl::InternalError("Timeout waiting for subscriber");
+  }
+  return r;
 }
 #endif
 

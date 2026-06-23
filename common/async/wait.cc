@@ -158,8 +158,23 @@ absl::Status WaitReadable(Context ctx, int fd, std::chrono::nanoseconds timeout)
   return absl::InternalError("WaitReadable: operation canceled");
 }
 
-absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2) {
+absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2,
+                               std::chrono::nanoseconds timeout) {
   boost::asio::io_context &ioc = IocFromYield(ctx);
+  // Fast path: if either fd is already readable, return immediately without
+  // suspending (see WaitReadable for why real-fd waits need this).
+  {
+    struct pollfd fds[2] = {{.fd = fd1, .events = POLLIN, .revents = 0},
+                            {.fd = fd2, .events = POLLIN, .revents = 0}};
+    if (::poll(fds, 2, 0) > 0) {
+      if ((fds[0].revents & (POLLIN | POLLHUP)) != 0) {
+        return fd1;
+      }
+      if ((fds[1].revents & (POLLIN | POLLHUP)) != 0) {
+        return fd2;
+      }
+    }
+  }
   // Register the caller's real fds (no ::dup(); see WaitReadable) and release()
   // them before the descriptors are destroyed so we never close them.
   auto sd1 = std::make_shared<boost::asio::posix::stream_descriptor>(ioc, fd1);
@@ -167,6 +182,8 @@ absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2) {
 
   auto result_fd = std::make_shared<int>(-1);
   auto done = std::make_shared<bool>(false);
+  auto timed_out = std::make_shared<bool>(false);
+  auto cancelled = std::make_shared<bool>(false);
   auto notified = std::make_shared<bool>(false);
   // Shared so the cancellation handler can keep it alive past this frame.
   auto notifier = std::make_shared<boost::asio::steady_timer>(ioc);
@@ -182,6 +199,11 @@ absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2) {
     }
   };
 
+  std::shared_ptr<boost::asio::steady_timer> timer;
+  if (timeout.count() != 0) {
+    timer = std::make_shared<boost::asio::steady_timer>(ioc, timeout);
+  }
+
   // Bind both descriptor completions to the coroutine's executor (its strand)
   // so they are serialized with the notifier->async_wait() registration below
   // and with each other; otherwise a multi-threaded io_context could run a
@@ -190,13 +212,17 @@ absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2) {
   sd1->async_wait(boost::asio::posix::stream_descriptor::wait_read,
                   boost::asio::bind_executor(
                       ctx.get_executor(),
-                      [sd1, sd2, result_fd, done, wake,
+                      [sd1, sd2, timer, result_fd, done, timed_out, cancelled,
+                       wake,
                        fd1](const boost::system::error_code &ec) {
-                        if (!*done && !ec) {
+                        if (!*done && !*timed_out && !*cancelled && !ec) {
                           *done = true;
                           *result_fd = fd1;
                           boost::system::error_code ignored;
                           sd2->cancel(ignored);
+                          if (timer != nullptr) {
+                            timer->cancel(ignored);
+                          }
                         }
                         wake();
                       }));
@@ -204,23 +230,44 @@ absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2) {
   sd2->async_wait(boost::asio::posix::stream_descriptor::wait_read,
                   boost::asio::bind_executor(
                       ctx.get_executor(),
-                      [sd1, sd2, result_fd, done, wake,
+                      [sd1, sd2, timer, result_fd, done, timed_out, cancelled,
+                       wake,
                        fd2](const boost::system::error_code &ec) {
-                        if (!*done && !ec) {
+                        if (!*done && !*timed_out && !*cancelled && !ec) {
                           *done = true;
                           *result_fd = fd2;
                           boost::system::error_code ignored;
                           sd1->cancel(ignored);
+                          if (timer != nullptr) {
+                            timer->cancel(ignored);
+                          }
                         }
                         wake();
                       }));
+
+  if (timer != nullptr) {
+    timer->async_wait(boost::asio::bind_executor(
+        ctx.get_executor(), [sd1, sd2, done, timed_out, cancelled,
+                             wake](const boost::system::error_code &ec) {
+          if (!*done && !*cancelled && !ec) {
+            *timed_out = true;
+            boost::system::error_code ignored;
+            sd1->cancel(ignored);
+            sd2->cancel(ignored);
+          }
+          wake();
+        }));
+  }
 
   // Graceful shutdown routes through the same idempotent wake() rather than
   // cancelling the notifier op directly (see WaitReadable).
   auto exec = ctx.get_executor();
   ctx.get_cancellation_slot().assign(
-      [exec, wake](boost::asio::cancellation_type) {
-        boost::asio::post(exec, [wake]() { wake(); });
+      [exec, wake, cancelled](boost::asio::cancellation_type) {
+        boost::asio::post(exec, [wake, cancelled]() {
+          *cancelled = true;
+          wake();
+        });
       });
 
   boost::system::error_code ec;
@@ -236,8 +283,14 @@ absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2) {
   sd2->cancel(ignored);
   sd1->release();
   sd2->release();
+  if (timer != nullptr) {
+    timer->cancel();
+  }
 
   if (*result_fd < 0) {
+    if (*timed_out) {
+      return absl::DeadlineExceededError("Timeout waiting for fd");
+    }
     return absl::InternalError("WaitEither: no fd became ready");
   }
   return *result_fd;
@@ -284,9 +337,14 @@ absl::Status WaitReadable(Context ctx, int fd, std::chrono::nanoseconds timeout)
   return absl::OkStatus();
 }
 
-absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2) {
-  int r = ctx->Wait(std::vector<int>{fd1, fd2}, POLLIN);
+absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2,
+                               std::chrono::nanoseconds timeout) {
+  int r = ctx->Wait(std::vector<int>{fd1, fd2}, POLLIN,
+                    static_cast<uint64_t>(timeout.count()));
   if (r == -1) {
+    if (timeout.count() != 0) {
+      return absl::DeadlineExceededError("Timeout waiting for fd");
+    }
     return absl::InternalError("WaitEither: no fd became ready");
   }
   return r;

@@ -106,6 +106,28 @@ TEST(AsyncTest, WaitEitherReturnsReadyFd) {
   ::close(b[1]);
 }
 
+TEST(AsyncTest, WaitEitherTimeout) {
+  int a[2], b[2];
+  ASSERT_EQ(0, ::pipe(a));
+  ASSERT_EQ(0, ::pipe(b));
+
+  RuntimeFixture fx;
+  bool timed_out = false;
+
+  fx.runtime.Spawn([&](Context ctx) {
+    absl::StatusOr<int> r =
+        WaitEither(ctx, a[0], b[0], std::chrono::milliseconds(20));
+    timed_out = absl::IsDeadlineExceeded(r.status());
+  });
+
+  fx.Run();
+  EXPECT_TRUE(timed_out);
+  ::close(a[0]);
+  ::close(a[1]);
+  ::close(b[0]);
+  ::close(b[1]);
+}
+
 // A round-trip over the stream socket facade, exercising the length-delimited
 // framing on the loopback interface.
 TEST(AsyncTest, StreamSocketLoopbackMessage) {
