@@ -32,6 +32,8 @@ namespace subspace::async {
 
 namespace {
 
+constexpr bool kSocketDebugEnabled = false;
+
 boost::asio::io_context &IocFromYield(Context yield) {
   return static_cast<boost::asio::io_context &>(
       yield.get_executor().context());
@@ -839,6 +841,16 @@ UnixSocket::SendFds(const std::vector<toolbelt::FileDescriptor> &fds,
     struct iovec iov = {.iov_base = reinterpret_cast<void *>(&num_fds),
                         .iov_len = sizeof(int32_t)};
     size_t fds_size = fds_to_send * sizeof(int);
+    if constexpr (kSocketDebugEnabled) {
+      fprintf(stderr,
+              "SUBSPACE_SHM_DEBUG: SendFds socket=%d total=%zu first=%zu "
+              "count=%zu values=",
+              impl_->fd, fds.size(), first_fd, fds_to_send);
+      for (size_t i = first_fd; i < first_fd + fds_to_send; i++) {
+        fprintf(stderr, "%s%d", i == first_fd ? "" : ",", fds[i].Fd());
+      }
+      fprintf(stderr, "\n");
+    }
     struct msghdr msg = {};
     msg.msg_iov = &iov;
     msg.msg_iovlen = 1;
@@ -910,16 +922,65 @@ absl::Status UnixSocket::ReceiveFds(std::vector<toolbelt::FileDescriptor> &fds,
     if (n == 0) {
       return absl::InternalError("EOF from socket while reading fds");
     }
-    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-    if (cmsg == nullptr) {
-      return absl::OkStatus();
+    if constexpr (kSocketDebugEnabled) {
+      fprintf(stderr,
+              "SUBSPACE_SHM_DEBUG: ReceiveFds socket=%d n=%zd total_fds=%d "
+              "msg_flags=0x%x msg_controllen=%zu\n",
+              impl_->fd, n, total_fds, msg.msg_flags,
+              static_cast<size_t>(msg.msg_controllen));
     }
-    int *fdptr = reinterpret_cast<int *>(CMSG_DATA(cmsg));
-    int num_fds = (cmsg->cmsg_len - sizeof(struct cmsghdr)) / sizeof(int);
-    for (int i = 0; i < num_fds; i++) {
-      fds.emplace_back(fdptr[i]);
+    if ((msg.msg_flags & MSG_CTRUNC) != 0) {
+      return absl::InternalError(
+          "Control data was truncated while reading fds from unix socket");
     }
-    num_fds_received += num_fds;
+
+    bool saw_rights = false;
+    for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg); cmsg != nullptr;
+         cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+      if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) {
+        if constexpr (kSocketDebugEnabled) {
+          fprintf(stderr,
+                  "SUBSPACE_SHM_DEBUG: ReceiveFds skipping cmsg level=%d "
+                  "type=%d len=%zu\n",
+                  cmsg->cmsg_level, cmsg->cmsg_type,
+                  static_cast<size_t>(cmsg->cmsg_len));
+        }
+        continue;
+      }
+      saw_rights = true;
+      if (cmsg->cmsg_len < CMSG_LEN(0)) {
+        return absl::InternalError(absl::StrFormat(
+            "Invalid SCM_RIGHTS control length %zu while reading fds",
+            static_cast<size_t>(cmsg->cmsg_len)));
+      }
+      size_t data_len = cmsg->cmsg_len - CMSG_LEN(0);
+      if constexpr (kSocketDebugEnabled) {
+        fprintf(stderr,
+                "SUBSPACE_SHM_DEBUG: ReceiveFds SCM_RIGHTS len=%zu "
+                "data_len=%zu\n",
+                static_cast<size_t>(cmsg->cmsg_len), data_len);
+      }
+      if (data_len % sizeof(int) != 0) {
+        return absl::InternalError(absl::StrFormat(
+            "Misaligned SCM_RIGHTS control length %zu while reading fds",
+            static_cast<size_t>(cmsg->cmsg_len)));
+      }
+      int *fdptr = reinterpret_cast<int *>(CMSG_DATA(cmsg));
+      int num_fds = static_cast<int>(data_len / sizeof(int));
+      for (int i = 0; i < num_fds; i++) {
+        if constexpr (kSocketDebugEnabled) {
+          fprintf(stderr, "SUBSPACE_SHM_DEBUG: ReceiveFds fd[%d]=%d\n",
+                  num_fds_received + i, fdptr[i]);
+        }
+        fds.emplace_back(fdptr[i]);
+      }
+      num_fds_received += num_fds;
+    }
+    if (!saw_rights && total_fds > 0) {
+      return absl::InternalError(absl::StrFormat(
+          "Expected %d fds from unix socket but received no SCM_RIGHTS message",
+          total_fds));
+    }
     if (num_fds_received >= total_fds) {
       break;
     }

@@ -105,24 +105,36 @@ absl::Status ClientChannel::Map(SharedMemoryFds fds,
       scb_fd.Fd(), sizeof(SystemControlBlock), PROT_READ | PROT_WRITE, "SCB"));
   if (scb_ == MAP_FAILED) {
     return absl::InternalError(absl::StrFormat(
-        "Failed to map SystemControlBlock: %s", strerror(errno)));
+        "Failed to map SystemControlBlock: %s (scb_fd=%d, ccb_fd=%d, "
+        "bcb_fd=%d, scb_size=%zu, ccb_size=%zu, bcb_size=%zu)",
+        strerror(errno), scb_fd.Fd(), fds.ccb.Fd(), fds.bcb.Fd(),
+        sizeof(SystemControlBlock), CcbSize(num_slots_),
+        sizeof(BufferControlBlock)));
   }
 
   ccb_ = reinterpret_cast<ChannelControlBlock *>(MapMemory(
       fds.ccb.Fd(), CcbSize(num_slots_), PROT_READ | PROT_WRITE, "CCB"));
   if (ccb_ == MAP_FAILED) {
+    int mmap_errno = errno;
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
     return absl::InternalError(absl::StrFormat(
-        "Failed to map ChannelControlBlock: %s", strerror(errno)));
+        "Failed to map ChannelControlBlock: %s (scb_fd=%d, ccb_fd=%d, "
+        "bcb_fd=%d, ccb_size=%zu)",
+        strerror(mmap_errno), scb_fd.Fd(), fds.ccb.Fd(), fds.bcb.Fd(),
+        CcbSize(num_slots_)));
   }
 
   bcb_ = reinterpret_cast<BufferControlBlock *>(MapMemory(
       fds.bcb.Fd(), sizeof(BufferControlBlock), PROT_READ | PROT_WRITE, "BCB"));
   if (bcb_ == MAP_FAILED) {
+    int mmap_errno = errno;
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
     UnmapMemory(ccb_, CcbSize(num_slots_), "CCB");
     return absl::InternalError(absl::StrFormat(
-        "Failed to map BufferControlBlock: %s", strerror(errno)));
+        "Failed to map BufferControlBlock: %s (scb_fd=%d, ccb_fd=%d, "
+        "bcb_fd=%d, bcb_size=%zu)",
+        strerror(mmap_errno), scb_fd.Fd(), fds.ccb.Fd(), fds.bcb.Fd(),
+        sizeof(BufferControlBlock)));
   }
   if (debug_) {
     printf("Channel mapped: scb: %p, ccb: %p\n", scb_, ccb_);

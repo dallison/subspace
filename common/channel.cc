@@ -10,13 +10,14 @@
 #include "toolbelt/mutex.h"
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #if defined(__APPLE__)
 #include <sys/posix_shm.h>
-#include <sys/stat.h>
 #endif
 #include "absl/container/flat_hash_map.h"
 #include "absl/strings/str_replace.h"
 #include <cassert>
+#include <cstdlib>
 #include <inttypes.h>
 #include <mutex>
 #include <unistd.h>
@@ -30,6 +31,42 @@ namespace subspace {
 // is only valid when NDEBUG is not defined (in debug mode).
 #define DEBUG_MMAPS 0
 
+namespace {
+
+bool ShmDebugEnabled() {
+  const char *value = getenv("SUBSPACE_SHM_DEBUG");
+  return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
+void PrintFdDebug(const char *operation, const char *purpose, int fd,
+                  size_t size, int prot, void *result, int saved_errno) {
+  struct stat st {};
+  int fstat_result = fstat(fd, &st);
+  int fstat_errno = errno;
+  int flags = fcntl(fd, F_GETFL);
+  int fcntl_errno = errno;
+
+  fprintf(stderr,
+          "SUBSPACE_SHM_DEBUG: %s purpose=%s fd=%d size=%zu prot=0x%x "
+          "result=%p errno=%d (%s) fstat=%d",
+          operation, purpose, fd, size, prot, result, saved_errno,
+          saved_errno == 0 ? "none" : strerror(saved_errno), fstat_result);
+  if (fstat_result == 0) {
+    fprintf(stderr, " mode=0%o file_size=%lld", static_cast<unsigned>(st.st_mode),
+            static_cast<long long>(st.st_size));
+  } else {
+    fprintf(stderr, " fstat_errno=%d (%s)", fstat_errno, strerror(fstat_errno));
+  }
+  if (flags >= 0) {
+    fprintf(stderr, " fd_flags=0x%x", flags);
+  } else {
+    fprintf(stderr, " fcntl_errno=%d (%s)", fcntl_errno, strerror(fcntl_errno));
+  }
+  fprintf(stderr, "\n");
+}
+
+} // namespace
+
 #if !NDEBUG && DEBUG_MMAPS
 // NOTE: due to C++'s undefined initialization and destruction order
 // these can't be actual instances.  They will be allocated on the
@@ -40,7 +77,13 @@ static std::mutex *region_lock;
 
 void *MapMemory(int fd, size_t size, int prot,
                 [[maybe_unused]] const char *purpose) {
+  errno = 0;
   void *p = GetSyscallShim().mmap_fn(NULL, size, prot, MAP_SHARED, fd, 0);
+  int saved_errno = errno;
+  if (p == MAP_FAILED || ShmDebugEnabled()) {
+    PrintFdDebug("mmap", purpose, fd, size, prot, p, saved_errno);
+  }
+  errno = saved_errno;
 #if SHOW_MMAPS
   printf("%d: mapping %s with size %zd: %p -> %p\n", getpid(), purpose, size, p,
          reinterpret_cast<char *>(p) + size);
@@ -62,6 +105,12 @@ void *MapMemory(int fd, size_t size, int prot,
 
 void UnmapMemory(void *p, size_t size,
                  [[maybe_unused]] const char *purpose) {
+  if (p == nullptr || p == MAP_FAILED) {
+    fprintf(stderr, "SUBSPACE_SHM_DEBUG: skipping munmap of invalid %s mapping "
+                    "at %p with size %zu\n",
+            purpose, p, size);
+    return;
+  }
 #if SHOW_MMAPS
   printf("%d: unmapping %s with size %zd: %p -> %p\n", getpid(), purpose, size,
          p, reinterpret_cast<char *>(p) + size);

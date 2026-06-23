@@ -30,6 +30,12 @@ single_version_override(
     patch_strip = 1,
 )
 
+git_override(
+    module_name = "cpp_toolbelt",
+    remote = "https://github.com/dallison/cpp_toolbelt.git",
+    commit = "cd72868b04bc8483b7131cb3b7f11bb43c820a0a",
+)
+
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(
     configure_coverage_tool = True,
