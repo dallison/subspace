@@ -1226,6 +1226,7 @@ absl::Status Server::RemapChannel(ServerChannel *channel, int slot_size,
   }
   channel->SetLastKnownSlotSize(slot_size);
   channel->SetSharedMemoryFds(std::move(*fds));
+  channel->RegisterExistingSubscribers();
   // Remapping replaces the CCB/BCB FDs; shadow recovery must receive the
   // refreshed descriptors instead of retaining the placeholder mappings.
   ForEachShadow([channel](const std::unique_ptr<ShadowReplicator> &s) {

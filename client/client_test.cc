@@ -956,6 +956,43 @@ TEST_F(ClientTest, PlaceholderSubscriberLearnsSplitBuffersOnReload) {
   EXPECT_NE(reinterpret_cast<const void *>(sub_prefix), msg->buffer);
 }
 
+TEST_F(ClientTest, PlaceholderSubscriberReloadRebuildsCcbSubscriberCount) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  constexpr char kChannel[] = "placeholder_subscriber_count";
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(kChannel);
+  ASSERT_OK(sub);
+  ASSERT_TRUE(sub->IsPlaceholder());
+
+  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(kChannel, 128, 4);
+  ASSERT_OK(pub);
+
+  subspace::ServerChannel *server_channel = Server()->FindChannel(kChannel);
+  ASSERT_NE(nullptr, server_channel);
+  server_channel->GetCcb()->subscribers.ClearAll();
+  server_channel->GetCcb()->num_subs = subspace::SubscriberCounter();
+  ASSERT_EQ(0, pub->NumSubscribers());
+
+  absl::StatusOr<Message> empty = sub->ReadMessage();
+  ASSERT_OK(empty);
+  ASSERT_EQ(0, empty->length);
+  EXPECT_FALSE(sub->IsPlaceholder());
+  EXPECT_EQ(1, sub->NumSubscribers());
+  EXPECT_EQ(1, pub->NumSubscribers());
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  std::memcpy(*buffer, "count", 5);
+  ASSERT_OK(pub->PublishMessage(5));
+
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(5, msg->length);
+}
+
 TEST_F(ClientTest, RejectsMixedSplitBufferPublisherOptions) {
   subspace::Client client;
   InitClient(client);
