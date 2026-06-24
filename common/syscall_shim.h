@@ -7,6 +7,7 @@
 
 #include <fcntl.h>
 #include <poll.h>
+#include <stdio.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -37,6 +38,8 @@ struct SyscallShim {
   int (*chown_fn)(const char *, uid_t, gid_t) = ::chown;
   ssize_t (*write_fn)(int, const void *, size_t) = ::write;
   ssize_t (*read_fn)(int, void *, size_t) = ::read;
+  int (*rename_fn)(const char *, const char *) = ::rename;
+  int (*unlink_fn)(const char *) = ::unlink;
 
   SyscallShim();
 };

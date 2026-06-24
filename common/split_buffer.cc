@@ -28,10 +28,11 @@ namespace {
 
 absl::Status WriteAll(int fd, const std::string &contents,
                       const std::string &path) {
+  auto &shim = GetSyscallShim();
   const char *p = contents.data();
   size_t remaining = contents.size();
   while (remaining > 0) {
-    ssize_t n = write(fd, p, remaining);
+    ssize_t n = shim.write_fn(fd, p, remaining);
     if (n < 0) {
       if (errno == EINTR) {
         continue;
@@ -44,6 +45,28 @@ absl::Status WriteAll(int fd, const std::string &contents,
     p += n;
   }
   return absl::OkStatus();
+}
+
+absl::Status WriteMetadataContents(const std::string &path,
+                                   const std::string &contents) {
+  auto &shim = GetSyscallShim();
+  int fd = shim.open_fn(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  if (fd == -1) {
+    return absl::InternalError(absl::StrFormat(
+        "Failed to create split buffer metadata %s: %s", path,
+        strerror(errno)));
+  }
+
+  absl::Status status = WriteAll(fd, contents, path);
+  if (shim.close_fn(fd) == -1 && status.ok()) {
+    status = absl::InternalError(absl::StrFormat(
+        "Failed to close split buffer metadata %s: %s", path,
+        strerror(errno)));
+  }
+  if (!status.ok()) {
+    shim.unlink_fn(path.c_str());
+  }
+  return status;
 }
 
 uint64_t StableHash64(const std::string &value) {
@@ -97,30 +120,22 @@ absl::Status WriteSplitBufferMetadataFile(
     return absl::InternalError("Failed to serialize split buffer metadata");
   }
 
+  auto &shim = GetSyscallShim();
   std::string tmp = metadata.shadow_file + ".tmp";
-  int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
-  if (fd == -1) {
-    return absl::InternalError(absl::StrFormat(
-        "Failed to create split buffer metadata %s: %s", tmp,
-        strerror(errno)));
-  }
-
-  absl::Status status = WriteAll(fd, contents, tmp);
-  if (close(fd) == -1 && status.ok()) {
-    status = absl::InternalError(absl::StrFormat(
-        "Failed to close split buffer metadata %s: %s", tmp,
-        strerror(errno)));
-  }
+  absl::Status status = WriteMetadataContents(tmp, contents);
   if (!status.ok()) {
-    unlink(tmp.c_str());
     return status;
   }
 
-  if (rename(tmp.c_str(), metadata.shadow_file.c_str()) == -1) {
-    unlink(tmp.c_str());
+  if (shim.rename_fn(tmp.c_str(), metadata.shadow_file.c_str()) == -1) {
+    int saved_errno = errno;
+    shim.unlink_fn(tmp.c_str());
+    if (saved_errno == EXDEV) {
+      return WriteMetadataContents(metadata.shadow_file, contents);
+    }
     return absl::InternalError(absl::StrFormat(
         "Failed to publish split buffer metadata %s: %s",
-        metadata.shadow_file, strerror(errno)));
+        metadata.shadow_file, strerror(saved_errno)));
   }
   return absl::OkStatus();
 }
@@ -267,8 +282,8 @@ absl::Status DestroySplitSharedMemoryBuffer(
         "Failed to unlink split buffer object %s: %s", metadata.object_name,
         strerror(errno)));
   }
-  if (unlink(metadata.shadow_file.c_str()) == -1 && errno != ENOENT &&
-      status.ok()) {
+  if (GetSyscallShim().unlink_fn(metadata.shadow_file.c_str()) == -1 &&
+      errno != ENOENT && status.ok()) {
     status = absl::InternalError(absl::StrFormat(
         "Failed to remove split buffer metadata %s: %s", metadata.shadow_file,
         strerror(errno)));

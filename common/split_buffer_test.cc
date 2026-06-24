@@ -4,9 +4,12 @@
 
 #include "common/channel.h"
 #include "common/split_buffer.h"
+#include "common/syscall_shim.h"
+#include "common/syscall_shim_test_helper.h"
 
 #include "gtest/gtest.h"
 
+#include <cerrno>
 #include <fcntl.h>
 #include <string>
 #include <sys/stat.h>
@@ -47,6 +50,11 @@ SplitBufferMetadata TestMetadata(const std::string &suffix) {
   return metadata;
 }
 
+int RenameFailsWithExdev(const char *, const char *) {
+  errno = EXDEV;
+  return -1;
+}
+
 TEST(SplitBufferTest, WritesAndReadsMetadata) {
   SplitBufferMetadata metadata = TestMetadata("metadata");
   (void)unlink(metadata.shadow_file.c_str());
@@ -55,6 +63,33 @@ TEST(SplitBufferTest, WritesAndReadsMetadata) {
   auto read_metadata = ReadSplitBufferMetadataFile(metadata.shadow_file);
   ASSERT_TRUE(read_metadata.ok()) << read_metadata.status();
 
+  EXPECT_EQ(read_metadata->channel_name, metadata.channel_name);
+  EXPECT_EQ(read_metadata->session_id, metadata.session_id);
+  EXPECT_EQ(read_metadata->buffer_index, metadata.buffer_index);
+  EXPECT_EQ(read_metadata->slot_id, metadata.slot_id);
+  EXPECT_EQ(read_metadata->is_prefix, metadata.is_prefix);
+  EXPECT_EQ(read_metadata->full_size, metadata.full_size);
+  EXPECT_EQ(read_metadata->allocation_size, metadata.allocation_size);
+  EXPECT_EQ(read_metadata->handle, metadata.handle);
+  EXPECT_EQ(read_metadata->shadow_file, metadata.shadow_file);
+  EXPECT_EQ(read_metadata->object_name, metadata.object_name);
+
+  (void)unlink(metadata.shadow_file.c_str());
+}
+
+TEST(SplitBufferTest, WritesMetadataWhenAtomicRenameReturnsExdev) {
+  SplitBufferMetadata metadata = TestMetadata("metadata_exdev");
+  (void)unlink(metadata.shadow_file.c_str());
+
+  SyscallShim shim;
+  shim.rename_fn = RenameFailsWithExdev;
+  {
+    testing::ScopedSyscallShim scoped_shim(&shim);
+    ASSERT_TRUE(WriteSplitBufferMetadataFile(metadata).ok());
+  }
+
+  auto read_metadata = ReadSplitBufferMetadataFile(metadata.shadow_file);
+  ASSERT_TRUE(read_metadata.ok()) << read_metadata.status();
   EXPECT_EQ(read_metadata->channel_name, metadata.channel_name);
   EXPECT_EQ(read_metadata->session_id, metadata.session_id);
   EXPECT_EQ(read_metadata->buffer_index, metadata.buffer_index);
