@@ -466,12 +466,14 @@ public:
   std::string BufferSharedMemoryName(uint64_t session_id,
                                      int buffer_index) const;
 
-  void RegisterSubscriber(int sub_id, int vchan_id, bool is_new) {
+  void RegisterSubscriber(int sub_id, int vchan_id, bool /*is_new*/) {
     ccb_->subscribers.Set(sub_id);
     ccb_->sub_vchan_ids[sub_id] = vchan_id;
-    if (is_new) {
-      ccb_->num_subs.AddSubscriber(vchan_id);
-    }
+    SubscriberCounter num_subs;
+    ccb_->subscribers.Traverse([this, &num_subs](size_t id) {
+      num_subs.AddSubscriber(ccb_->sub_vchan_ids[id]);
+    });
+    ccb_->num_subs = num_subs;
   }
 
   int GetSubVchanId(int32_t i) const { return ccb_->sub_vchan_ids[i]; }
