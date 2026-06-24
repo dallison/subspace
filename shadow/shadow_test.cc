@@ -9,6 +9,7 @@
 #include "server/server.h"
 #include "shadow/shadow.h"
 #include "gtest/gtest.h"
+#include <algorithm>
 #include <arpa/inet.h>
 #include <chrono>
 #include <csignal>
@@ -650,12 +651,30 @@ TEST_F(ShadowRecoveryTest, SplitBufferMessageDataSurvivesRecovery) {
     ASSERT_THAT(pub->PublishMessage(kPayloadLen), IsOk());
   }
 
-  // Wait for the shadow to learn about the channel and its split buffers.
+  // Wait for the shadow to learn about the channel and all data split-buffer
+  // slots.  Seeing just one registration is not enough; a fast restart can
+  // otherwise race the remaining registration events.
   ASSERT_TRUE(WaitForShadowState([this]() {
     return shadow_->WithChannels([](auto &channels) {
       auto it = channels.find("shadow_split_data");
-      return it != channels.end() && it->second.use_split_buffers &&
-             !it->second.client_buffers.empty();
+      if (it == channels.end() || !it->second.use_split_buffers) {
+        return false;
+      }
+      for (uint32_t slot_id = 0; slot_id < 4; ++slot_id) {
+        auto slot_registered =
+            std::find_if(it->second.client_buffers.begin(),
+                         it->second.client_buffers.end(),
+                         [slot_id](const subspace::RegisteredClientBuffer
+                                       &buffer) {
+                           return buffer.metadata.buffer_index == 0 &&
+                                  buffer.metadata.slot_id == slot_id &&
+                                  !buffer.metadata.is_prefix;
+                         });
+        if (slot_registered == it->second.client_buffers.end()) {
+          return false;
+        }
+      }
+      return true;
     });
   }));
 
