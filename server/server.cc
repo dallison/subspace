@@ -1829,7 +1829,7 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
   subscribed.set_split_buffers(wire_split_buffers);
   subscribed.set_split_buffers_over_bridge(info.split_buffers_over_bridge);
 
-  async::StreamSocket retirement_listener;
+  std::shared_ptr<async::StreamSocket> retirement_listener;
   toolbelt::SocketAddress retirement_addr;
 
   if (notify_retirement) {
@@ -1838,14 +1838,15 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
     // Allocate a listen socket to wait for an incoming connection from the
     // other server.
 
-    absl::Status s = BindBridgeListener(retirement_listener);
+    retirement_listener = std::make_shared<async::StreamSocket>();
+    absl::Status s = BindBridgeListener(*retirement_listener);
     if (!s.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Unable to bind socket for retirement receiver for %s: %s",
                   channel_name.c_str(), s.ToString().c_str());
       return;
     }
-    retirement_addr = retirement_listener.BoundAddress();
+    retirement_addr = retirement_listener->BoundAddress();
     logger_.Log(toolbelt::LogLevel::kDebug, "Retirement listener: %s",
                 retirement_addr.ToString().c_str());
 
@@ -1923,9 +1924,9 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
   if (notifying_of_retirement) {
     active_retirement_msgs->resize(info.num_slots);
     runtime_.SpawnOnNewStrand(
-        [this, &retirement_listener,
+        [this, retirement_listener,
          active_retirement_msgs](async::Context ret_ctx) mutable {
-          return RetirementReceiverCoroutine(ret_ctx, retirement_listener,
+          return RetirementReceiverCoroutine(ret_ctx, *retirement_listener,
                                              active_retirement_msgs);
         },
         {.name = absl::StrFormat("Retirement listener for %s", channel_name),

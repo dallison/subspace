@@ -771,27 +771,39 @@ void RpcServer::SessionStreamingMethodCoroutine(
                         method_instance->method->name.c_str());
 
     AnyStreamWriter writer(server, session, method_instance, request);
+    auto stream_state = writer.State();
+    auto stop_pipe = toolbelt::Pipe::Create();
+    if (!stop_pipe.ok()) {
+      server->logger_.Log(toolbelt::LogLevel::kError,
+                          "Failed to create stream cancel stop pipe: %s",
+                          stop_pipe.status().ToString().c_str());
+      SendRpcError(server, session, method_instance, request,
+                   "Failed to create stream cancel watcher", yield);
+      continue;
+    }
+    auto cancel_stop_pipe =
+        std::make_shared<toolbelt::Pipe>(std::move(*stop_pipe));
 
     // Spawn a coroutine to read the cancellation channel.
     boost::asio::spawn(
         *server->io_context_,
-        [server, session, method_instance, &writer,
-         &request](boost::asio::yield_context yield) {
-          int dup_interrupt =
-              ::dup(server->interrupt_pipe_.ReadFd().Fd());
-          toolbelt::FileDescriptor interrupt(dup_interrupt);
-          while (!writer.IsCancelled()) {
+        [server, session, method_instance, stream_state,
+         cancel_stop_pipe](boost::asio::yield_context yield) {
+          while (!stream_state->ShouldStopWatcher() &&
+                 !stream_state->IsCancelled()) {
             int cancel_fd =
                 method_instance->cancel_subscriber->GetPollFd().fd;
-            auto s = async_wait_either(*server->io_context_, cancel_fd,
-                                       interrupt.Fd(), yield);
+            int stop_fd = cancel_stop_pipe->ReadFd().Fd();
+            auto s =
+                async_wait_either(*server->io_context_, cancel_fd, stop_fd,
+                                  yield);
             if (!s.ok()) {
               server->logger_.Log(toolbelt::LogLevel::kError,
                                   "Error waiting for cancel: %s",
                                   s.status().ToString().c_str());
               return;
             }
-            if (*s == interrupt.Fd()) {
+            if (*s == stop_fd || stream_state->ShouldStopWatcher()) {
               break;
             }
             bool cancel_ok = false;
@@ -814,13 +826,13 @@ void RpcServer::SessionStreamingMethodCoroutine(
                 continue;
               }
               if (cancel.session_id() == session->session_id &&
-                  cancel.request_id() == request.request_id()) {
+                  cancel.request_id() == stream_state->request.request_id()) {
                 cancel_ok = true;
                 break;
               }
             }
             if (cancel_ok) {
-              writer.Cancel();
+              stream_state->Cancel();
             }
           }
         },
@@ -829,6 +841,9 @@ void RpcServer::SessionStreamingMethodCoroutine(
     absl::Status method_status =
         method_instance->method->stream_callback(request.argument(), writer,
                                                  yield);
+    stream_state->StopWatcher();
+    char stop_byte = 1;
+    (void)::write(cancel_stop_pipe->WriteFd().Fd(), &stop_byte, 1);
     if (!method_status.ok()) {
       server->logger_.Log(toolbelt::LogLevel::kError,
                           "Error executing method %s: %s",
@@ -977,14 +992,16 @@ bool AnyStreamWriter::Write(std::unique_ptr<google::protobuf::Any> res,
   if (IsCancelled()) {
     return false;
   }
-  RpcServer::SendStreamRpcResponse(server, session, method_instance, request,
-                                   std::move(res), false, IsCancelled(), yield);
+  RpcServer::SendStreamRpcResponse(server, session, method_instance,
+                                   state->request, std::move(res), false,
+                                   IsCancelled(), yield);
   return true;
 }
 
 void AnyStreamWriter::Finish(boost::asio::yield_context yield) {
-  RpcServer::SendStreamRpcResponse(server, session, method_instance, request,
-                                   nullptr, true, IsCancelled(), yield);
+  RpcServer::SendStreamRpcResponse(server, session, method_instance,
+                                   state->request, nullptr, true,
+                                   IsCancelled(), yield);
 }
 
 void Method::MakeChannelNames(RpcServer *server) {
