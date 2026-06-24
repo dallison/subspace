@@ -7,6 +7,13 @@
 namespace subspace {
 namespace details {
 
+static bool ActiveSlotLess(const ActiveSlot &a, const ActiveSlot &b) {
+  if (a.timestamp != b.timestamp) {
+    return a.timestamp < b.timestamp;
+  }
+  return a.ordinal < b.ordinal;
+}
+
 void SubscriberImpl::InitActiveMessages() {
   active_messages_.resize(NumSlots());
   int slot_id = 0;
@@ -258,10 +265,7 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
     if (!next_slot_cache_valid_ ||
         (!stable_poll_drain && total != next_slot_cached_total_)) {
       CollectVisibleSlots(bits);
-      std::sort(active_slots_.begin(), active_slots_.end(),
-                       [](const ActiveSlot &a, const ActiveSlot &b) {
-                         return a.timestamp < b.timestamp;
-                       });
+      std::sort(active_slots_.begin(), active_slots_.end(), ActiveSlotLess);
       next_slot_cached_total_ = total;
       next_slot_cursor_ = 0;
       next_slot_cache_valid_ = true;
@@ -356,10 +360,7 @@ MessageSlot *SubscriberImpl::LastSlot(MessageSlot *slot, bool reliable,
     CollectVisibleSlots(bits);
 
     // Sort the active slots by timestamp.
-    std::sort(active_slots_.begin(), active_slots_.end(),
-                     [](const ActiveSlot &a, const ActiveSlot &b) {
-                       return a.timestamp < b.timestamp;
-                     });
+    std::sort(active_slots_.begin(), active_slots_.end(), ActiveSlotLess);
 
     ActiveSlot *new_slot = nullptr;
     if (!active_slots_.empty()) {
@@ -408,14 +409,11 @@ MessageSlot *SubscriberImpl::FindActiveSlotByTimestamp(
       MessageSlot *s = &ccb_->slots[i];
       uint64_t refs = s->refs.load(std::memory_order_relaxed);
       if (s->ordinal != 0 && (refs & kPubOwned) == 0) {
-        buffer.push_back({s, 0, Prefix(s)->timestamp});
+        buffer.push_back({s, s->ordinal, Prefix(s)->timestamp, s->vchan_id});
       }
     }
     // Sort by timestamp.
-    std::sort(buffer.begin(), buffer.end(),
-                     [](const ActiveSlot &a, const ActiveSlot &b) {
-                       return a.timestamp < b.timestamp;
-                     });
+    std::sort(buffer.begin(), buffer.end(), ActiveSlotLess);
 
     // Apparently, lower_bound will return the first in the range if
     // the value is less than the whole range.  That's unexpected.
@@ -429,6 +427,9 @@ MessageSlot *SubscriberImpl::FindActiveSlotByTimestamp(
         [](ActiveSlot &s, uint64_t t) { return s.timestamp < t; });
     if (it == buffer.end()) {
       // Not found, nothing changes.
+      return nullptr;
+    }
+    if (it->timestamp != timestamp) {
       return nullptr;
     }
 

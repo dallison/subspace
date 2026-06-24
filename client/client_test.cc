@@ -2913,8 +2913,13 @@ TEST_F(ClientTest, FindMessage) {
     ASSERT_OK(buffer);
     char *buf = reinterpret_cast<char *>(*buffer);
     int len = snprintf(buf, 256, "foobar %d", i);
+    subspace::MessagePrefix *prefix = pub->Prefix();
+    ASSERT_NE(nullptr, prefix);
+    prefix->ordinal = static_cast<uint64_t>(i + 1);
+    prefix->timestamp = static_cast<uint64_t>(123456789 + i);
 
-    absl::StatusOr<const Message> pub_status = pub->PublishMessage(len + 1);
+    absl::StatusOr<const Message> pub_status = pub->PublishMessageWithPrefix(
+        len + 1, /*use_slot_id_from_prefix=*/false);
     ASSERT_OK(pub_status);
     msgs.push_back(std::move(*pub_status));
   }

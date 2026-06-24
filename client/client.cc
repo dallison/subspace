@@ -16,10 +16,29 @@
 #include <cerrno>
 #include <cstring>
 #include <inttypes.h>
+#if defined(__QNX__) || defined(__QNXNTO__)
+#include <sys/neutrino.h>
+#endif
 namespace subspace {
 
 namespace {
 std::atomic<bool> default_use_split_buffers{false};
+
+#if defined(__QNX__) || defined(__QNXNTO__)
+void ConfigureQnxClockPeriod() {
+  static std::atomic<bool> attempted{false};
+  bool expected = false;
+  if (!attempted.compare_exchange_strong(expected, true,
+                                         std::memory_order_relaxed)) {
+    return;
+  }
+
+  struct _clockperiod period;
+  period.nsec = 10000U;
+  period.fract = 0;
+  (void)ClockPeriod(CLOCK_REALTIME, &period, nullptr, 0);
+}
+#endif
 
 ClientBufferAllocatorKind FromProtoAllocator(ClientBufferAllocator allocator) {
   switch (allocator) {
@@ -199,6 +218,9 @@ absl::Status ClientImpl::CheckConnected() const {
 
 absl::Status ClientImpl::Init(const std::string &server_socket,
                               const std::string &client_name) {
+#if defined(__QNX__) || defined(__QNXNTO__)
+  ConfigureQnxClockPeriod();
+#endif
   ClientLockGuard guard(this);
   if (socket_.Connected()) {
     return absl::InternalError("Client is already connected to the server; "
