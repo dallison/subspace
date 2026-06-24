@@ -759,27 +759,38 @@ boost::asio::awaitable<void> RpcServer::SessionStreamingMethodCoroutine(
                         method_instance->method->name.c_str());
 
     AnyStreamWriter writer(server, session, method_instance, request);
+    auto stream_state = writer.State();
+    auto stop_pipe = toolbelt::Pipe::Create();
+    if (!stop_pipe.ok()) {
+      server->logger_.Log(toolbelt::LogLevel::kError,
+                          "Failed to create stream cancel stop pipe: %s",
+                          stop_pipe.status().ToString().c_str());
+      co_await SendRpcError(server, session, method_instance, request,
+                            "Failed to create stream cancel watcher");
+      continue;
+    }
+    auto cancel_stop_pipe =
+        std::make_shared<toolbelt::Pipe>(std::move(*stop_pipe));
 
     // Spawn a coroutine to read the cancellation channel.
     boost::asio::co_spawn(
         *server->io_context_,
-        [server, session, method_instance, &writer,
-         &request]() -> boost::asio::awaitable<void> {
-          int dup_interrupt =
-              ::dup(server->interrupt_pipe_.ReadFd().Fd());
-          toolbelt::FileDescriptor interrupt(dup_interrupt);
-          while (!writer.IsCancelled()) {
+        [server, session, method_instance, stream_state,
+         cancel_stop_pipe]() -> boost::asio::awaitable<void> {
+          while (!stream_state->ShouldStopWatcher() &&
+                 !stream_state->IsCancelled()) {
             int cancel_fd =
                 method_instance->cancel_subscriber->GetPollFd().fd;
+            int stop_fd = cancel_stop_pipe->ReadFd().Fd();
             auto s =
-                co_await async_wait_either(cancel_fd, interrupt.Fd());
+                co_await async_wait_either(cancel_fd, stop_fd);
             if (!s.ok()) {
               server->logger_.Log(toolbelt::LogLevel::kError,
                                   "Error waiting for cancel: %s",
                                   s.status().ToString().c_str());
               co_return;
             }
-            if (*s == interrupt.Fd()) {
+            if (*s == stop_fd || stream_state->ShouldStopWatcher()) {
               break;
             }
             bool cancel_ok = false;
@@ -802,13 +813,13 @@ boost::asio::awaitable<void> RpcServer::SessionStreamingMethodCoroutine(
                 continue;
               }
               if (cancel.session_id() == session->session_id &&
-                  cancel.request_id() == request.request_id()) {
+                  cancel.request_id() == stream_state->request.request_id()) {
                 cancel_ok = true;
                 break;
               }
             }
             if (cancel_ok) {
-              writer.Cancel();
+              stream_state->Cancel();
             }
           }
         },
@@ -817,6 +828,9 @@ boost::asio::awaitable<void> RpcServer::SessionStreamingMethodCoroutine(
     absl::Status method_status =
         co_await method_instance->method->stream_callback(request.argument(),
                                                           writer);
+    stream_state->StopWatcher();
+    char stop_byte = 1;
+    (void)::write(cancel_stop_pipe->WriteFd().Fd(), &stop_byte, 1);
     if (!method_status.ok()) {
       server->logger_.Log(toolbelt::LogLevel::kError,
                           "Error executing method %s: %s",
@@ -962,14 +976,14 @@ AnyStreamWriter::Write(std::unique_ptr<google::protobuf::Any> res) {
     co_return false;
   }
   co_await RpcServer::SendStreamRpcResponse(server, session, method_instance,
-                                            request, std::move(res), false,
-                                            IsCancelled());
+                                            state->request, std::move(res),
+                                            false, IsCancelled());
   co_return true;
 }
 
 boost::asio::awaitable<void> AnyStreamWriter::Finish() {
   co_await RpcServer::SendStreamRpcResponse(server, session, method_instance,
-                                            request, nullptr, true,
+                                            state->request, nullptr, true,
                                             IsCancelled());
 }
 

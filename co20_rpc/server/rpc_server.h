@@ -14,6 +14,8 @@
 #include "toolbelt/logging.h"
 #include "toolbelt/pipe.h"
 
+#include <atomic>
+
 namespace subspace::co20_rpc {
 
 class RpcServer;
@@ -23,26 +25,44 @@ namespace internal {
 struct Session;
 struct MethodInstance;
 
+struct StreamCallState {
+  explicit StreamCallState(const RpcRequest &request) : request(request) {}
+
+  void Cancel() { is_cancelled.store(true, std::memory_order_relaxed); }
+  bool IsCancelled() const {
+    return is_cancelled.load(std::memory_order_relaxed);
+  }
+  void StopWatcher() { stop_watcher.store(true, std::memory_order_relaxed); }
+  bool ShouldStopWatcher() const {
+    return stop_watcher.load(std::memory_order_relaxed);
+  }
+
+  RpcRequest request;
+  std::atomic<bool> is_cancelled{false};
+  std::atomic<bool> stop_watcher{false};
+};
+
 struct AnyStreamWriter {
   AnyStreamWriter(std::shared_ptr<RpcServer> server,
                   std::shared_ptr<Session> session,
                   std::shared_ptr<MethodInstance> method_instance,
                   const RpcRequest &request)
       : server(std::move(server)), session(std::move(session)),
-        method_instance(std::move(method_instance)), request(request) {}
+        method_instance(std::move(method_instance)),
+        state(std::make_shared<StreamCallState>(request)) {}
 
   co20::ValueTask<bool> Write(std::unique_ptr<google::protobuf::Any> res);
   co20::ValueTask<void> Finish();
 
-  void Cancel() { is_cancelled = true; }
+  void Cancel() { state->Cancel(); }
 
-  bool IsCancelled() const { return is_cancelled; }
+  bool IsCancelled() const { return state->IsCancelled(); }
+  std::shared_ptr<StreamCallState> State() const { return state; }
 
   std::shared_ptr<RpcServer> server;
   std::shared_ptr<Session> session;
   std::shared_ptr<MethodInstance> method_instance;
-  const RpcRequest &request;
-  bool is_cancelled = false;
+  std::shared_ptr<StreamCallState> state;
 };
 
 // An item pushed by either the reply function or the error function of an

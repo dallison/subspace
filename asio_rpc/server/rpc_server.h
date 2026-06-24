@@ -13,6 +13,7 @@
 #include "toolbelt/logging.h"
 #include "toolbelt/pipe.h"
 
+#include <atomic>
 #include <boost/asio.hpp>
 #include <boost/asio/spawn.hpp>
 
@@ -25,27 +26,45 @@ namespace internal {
 struct Session;
 struct MethodInstance;
 
+struct StreamCallState {
+  explicit StreamCallState(const RpcRequest &request) : request(request) {}
+
+  void Cancel() { is_cancelled.store(true, std::memory_order_relaxed); }
+  bool IsCancelled() const {
+    return is_cancelled.load(std::memory_order_relaxed);
+  }
+  void StopWatcher() { stop_watcher.store(true, std::memory_order_relaxed); }
+  bool ShouldStopWatcher() const {
+    return stop_watcher.load(std::memory_order_relaxed);
+  }
+
+  RpcRequest request;
+  std::atomic<bool> is_cancelled{false};
+  std::atomic<bool> stop_watcher{false};
+};
+
 struct AnyStreamWriter {
   AnyStreamWriter(std::shared_ptr<RpcServer> server,
                   std::shared_ptr<Session> session,
                   std::shared_ptr<MethodInstance> method_instance,
                   const RpcRequest &request)
       : server(std::move(server)), session(std::move(session)),
-        method_instance(std::move(method_instance)), request(request) {}
+        method_instance(std::move(method_instance)),
+        state(std::make_shared<StreamCallState>(request)) {}
 
   bool Write(std::unique_ptr<google::protobuf::Any> res,
              boost::asio::yield_context yield);
   void Finish(boost::asio::yield_context yield);
 
-  void Cancel() { is_cancelled = true; }
+  void Cancel() { state->Cancel(); }
 
-  bool IsCancelled() const { return is_cancelled; }
+  bool IsCancelled() const { return state->IsCancelled(); }
+  std::shared_ptr<StreamCallState> State() const { return state; }
 
   std::shared_ptr<RpcServer> server;
   std::shared_ptr<Session> session;
   std::shared_ptr<MethodInstance> method_instance;
-  const RpcRequest &request;
-  bool is_cancelled = false;
+  std::shared_ptr<StreamCallState> state;
 };
 
 // An item pushed by either the reply function or the error function of an
