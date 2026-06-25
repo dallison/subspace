@@ -183,9 +183,7 @@ absl::Status RpcServer::CreateChannels() {
   logger_.Log(toolbelt::LogLevel::kDebug, "Creating subscriber for %s",
               request_name.c_str());
   auto receiver = client_->CreateSubscriber(
-      request_name, {.reliable = true,
-                     .type = "subspace.RpcServerRequest",
-                     .max_active_messages = 1});
+      request_name, subspace::SubscriberOptions().SetReliable(true).SetType("subspace.RpcServerRequest").SetMaxActiveMessages(1));
   if (!receiver.ok()) {
     return receiver.status();
   }
@@ -196,10 +194,7 @@ absl::Status RpcServer::CreateChannels() {
   logger_.Log(toolbelt::LogLevel::kDebug, "Creating publisher for %s",
               response_name.c_str());
   auto publisher = client_->CreatePublisher(
-      response_name, {.slot_size = kRpcResponseSlotSize,
-                      .num_slots = kRpcResponseNumSlots,
-                      .reliable = true,
-                      .type = "subspace.RpcServerResponse"});
+      response_name, subspace::PublisherOptions().SetSlotSize(kRpcResponseSlotSize).SetNumSlots(kRpcResponseNumSlots).SetReliable(true).SetType("subspace.RpcServerResponse"));
   if (!publisher.ok()) {
     return publisher.status();
   }
@@ -413,7 +408,7 @@ RpcServer::CreateSession(uint64_t client_id) {
     absl::StatusOr<subspace::Subscriber> sub = client_->CreateSubscriber(
         absl::StrFormat("%s/%d/%d", method->request_channel,
                         session->client_id, session->session_id),
-        {.reliable = true, .type = method->request_type});
+        subspace::SubscriberOptions().SetReliable(true).SetType(method->request_type));
     if (!sub.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to create subscriber for method %s: %s",
@@ -426,10 +421,7 @@ RpcServer::CreateSession(uint64_t client_id) {
     absl::StatusOr<subspace::Publisher> pub = client_->CreatePublisher(
         absl::StrFormat("%s/%d/%d", method->response_channel,
                         session->client_id, session->session_id),
-        {.slot_size = method->slot_size,
-         .num_slots = method->num_slots,
-         .reliable = true,
-         .type = method->response_type});
+        subspace::PublisherOptions().SetSlotSize(method->slot_size).SetNumSlots(method->num_slots).SetReliable(true).SetType(method->response_type));
     if (!pub.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to create publisher for method %s: %s",
@@ -444,7 +436,7 @@ RpcServer::CreateSession(uint64_t client_id) {
           client_->CreateSubscriber(
               absl::StrFormat("%s/%d/%d", method->cancel_channel,
                               session->client_id, session->session_id),
-              {.reliable = true, .type = "subspace.RpcCancelRequest"});
+              subspace::SubscriberOptions().SetReliable(true).SetType("subspace.RpcCancelRequest"));
       if (!cancel_sub.ok()) {
         logger_.Log(toolbelt::LogLevel::kError,
                     "Failed to create cancel subscriber for method %s: %s",

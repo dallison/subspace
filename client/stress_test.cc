@@ -103,7 +103,7 @@ TEST_F(StressTest, Coroutines) {
       clients[i].pubs.emplace_back(
           EVAL_AND_ASSERT_OK(clients[i].client->CreatePublisher(
               clients[i].channels[j],
-              {.slot_size = 32, .num_slots = kNumSlots})));
+              subspace::PublisherOptions().SetSlotSize(32).SetNumSlots(kNumSlots))));
     }
 
     // Create the subscribers.
@@ -228,7 +228,7 @@ TEST_F(StressTest, Threads) {
       clients[i].pubs.emplace_back(
           EVAL_AND_ASSERT_OK(clients[i].client->CreatePublisher(
               clients[i].channels[j],
-              {.slot_size = 32, .num_slots = kNumSlots})));
+              subspace::PublisherOptions().SetSlotSize(32).SetNumSlots(kNumSlots))));
     }
 
     // Create the subscribers.
@@ -236,7 +236,7 @@ TEST_F(StressTest, Threads) {
       clients[i].subs.emplace_back(
           EVAL_AND_ASSERT_OK(clients[i].client->CreateSubscriber(
               clients[i].channels[j],
-              {.max_active_messages = kMaxActiveMessages})));
+              subspace::SubscriberOptions().SetMaxActiveMessages(kMaxActiveMessages))));
     }
   }
 
@@ -336,13 +336,13 @@ TEST_F(StressTest, ThreadSafety) {
   // Create the publishers.
   for (int j = 0; j < kNumChannels; j++) {
     pubs.emplace_back(EVAL_AND_ASSERT_OK(client->CreatePublisher(
-        channels[j], {.slot_size = 32, .num_slots = kNumSlots})));
+        channels[j], subspace::PublisherOptions().SetSlotSize(32).SetNumSlots(kNumSlots))));
   }
 
   // Create the subscribers.
   for (int j = 0; j < kNumChannels; j++) {
     subs.emplace_back(EVAL_AND_ASSERT_OK(client->CreateSubscriber(
-        channels[j], {.max_active_messages = kMaxActiveMessages})));
+        channels[j], subspace::SubscriberOptions().SetMaxActiveMessages(kMaxActiveMessages))));
   }
 
   std::vector<std::thread> threads;
@@ -423,11 +423,10 @@ TEST_F(StressTest, ActiveMessages) {
   client.channel = "/foobar";
   client.pub = std::make_unique<subspace::Publisher>(
       EVAL_AND_ASSERT_OK(client.client->CreatePublisher(
-          client.channel, {.slot_size = 32, .num_slots = kNumSlots})));
+          client.channel, subspace::PublisherOptions().SetSlotSize(32).SetNumSlots(kNumSlots))));
   client.sub = std::make_unique<subspace::Subscriber>(
       EVAL_AND_ASSERT_OK(client.client->CreateSubscriber(
-          client.channel, {.max_active_messages = kMaxActiveMessages,
-                           .log_dropped_messages = false})));
+          client.channel, ([] { subspace::SubscriberOptions opts; opts.SetMaxActiveMessages(kMaxActiveMessages); opts.SetLogDroppedMessages(false); return opts; }()))));
 
   struct Receiver {
     std::thread thread;
@@ -573,11 +572,10 @@ TEST_F(StressTest, ActiveMessages2) {
   client.channel = "/foobar";
   client.pub = std::make_unique<subspace::Publisher>(
       EVAL_AND_ASSERT_OK(client.client->CreatePublisher(
-          client.channel, {.slot_size = 32, .num_slots = kNumSlots})));
+          client.channel, subspace::PublisherOptions().SetSlotSize(32).SetNumSlots(kNumSlots))));
   client.sub = std::make_unique<subspace::Subscriber>(
       EVAL_AND_ASSERT_OK(client.client->CreateSubscriber(
-          client.channel, {.max_active_messages = kMaxActiveMessages,
-                           .log_dropped_messages = false})));
+          client.channel, ([] { subspace::SubscriberOptions opts; opts.SetMaxActiveMessages(kMaxActiveMessages); opts.SetLogDroppedMessages(false); return opts; }()))));
 
   struct Receiver {
     std::thread thread;
@@ -700,7 +698,7 @@ TEST_F(StressTest, VirtualChannels) {
         subspace::Client::Create(Socket(), absl::StrFormat("client%d", i))));
     absl::StatusOr<Publisher> p = clients[i]->CreatePublisher(
         absl::StrFormat("/foobar/%d", i),
-        {.slot_size = 64, .num_slots = kNumSlots, .mux = "/foobar"});
+        subspace::PublisherOptions().SetSlotSize(64).SetNumSlots(kNumSlots).SetMux("/foobar"));
     ASSERT_OK(p);
     publishers.push_back(std::move(*p));
   }
@@ -774,7 +772,7 @@ TEST_F(StressTest, ManyChannelsNonMultiplexed) {
   std::vector<Publisher> pubs;
   for (int i = 0; i < kNumChannels; i++) {
     absl::StatusOr<Publisher> pub = pub_clients[i]->CreatePublisher(
-        channels[i], {.slot_size = kSlotSize, .num_slots = knum_slots});
+        channels[i], subspace::PublisherOptions().SetSlotSize(kSlotSize).SetNumSlots(knum_slots));
     ASSERT_OK(pub);
     pubs.push_back(std::move(*pub));
   }
@@ -783,7 +781,7 @@ TEST_F(StressTest, ManyChannelsNonMultiplexed) {
   std::vector<Subscriber> subs;
   for (int i = 0; i < kNumChannels; i++) {
     absl::StatusOr<Subscriber> sub = sub_client->CreateSubscriber(
-        channels[i], {.log_dropped_messages = false});
+        channels[i], ([] { subspace::SubscriberOptions opts; opts.SetLogDroppedMessages(false); return opts; }()));
     // std::cerr << "sub status " << sub.status() << "\n";
     ASSERT_OK(sub);
     subs.push_back(std::move(*sub));
@@ -890,7 +888,7 @@ TEST_F(StressTest, ManyChannelsMultiplexed) {
   for (int i = 0; i < kNumChannels; i++) {
     absl::StatusOr<Publisher> pub = pub_clients[i]->CreatePublisher(
         channels[i],
-        {.slot_size = kSlotSize, .num_slots = knum_slots, .mux = kMux});
+        subspace::PublisherOptions().SetSlotSize(kSlotSize).SetNumSlots(knum_slots).SetMux(kMux));
     ASSERT_OK(pub);
     pubs.push_back(std::move(*pub));
   }
@@ -899,7 +897,7 @@ TEST_F(StressTest, ManyChannelsMultiplexed) {
   std::vector<Subscriber> subs;
   for (int i = 0; i < kNumChannels; i++) {
     absl::StatusOr<Subscriber> sub = sub_client->CreateSubscriber(
-        channels[i], {.log_dropped_messages = false, .mux = kMux});
+        channels[i], ([] { subspace::SubscriberOptions opts; opts.SetLogDroppedMessages(false); opts.SetMux(kMux); return opts; }()));
     // std::cerr << "sub status " << sub.status() << "\n";
     ASSERT_OK(sub);
     subs.push_back(std::move(*sub));
@@ -1006,17 +1004,14 @@ TEST_F(StressTest, ManyChannelsMultiplexedSubscribedToMux) {
   std::vector<Publisher> pubs;
   for (int i = 0; i < kNumChannels; i++) {
     absl::StatusOr<Publisher> pub =
-        pub_clients[i]->CreatePublisher(channels[i], {.slot_size = kSlotSize,
-                                                      .num_slots = knum_slots,
-                                                      .activate = true,
-                                                      .mux = kMux});
+        pub_clients[i]->CreatePublisher(channels[i], subspace::PublisherOptions().SetSlotSize(kSlotSize).SetNumSlots(knum_slots).SetActivate(true).SetMux(kMux));
     ASSERT_OK(pub);
     pubs.push_back(std::move(*pub));
   }
 
   // Create subscriber to multiplexer.
   absl::StatusOr<Subscriber> sub =
-      sub_client->CreateSubscriber(kMux, {.log_dropped_messages = false});
+      sub_client->CreateSubscriber(kMux, ([] { subspace::SubscriberOptions opts; opts.SetLogDroppedMessages(false); return opts; }()));
   // std::cerr << "sub status " << sub.status() << "\n";
   ASSERT_OK(sub);
 

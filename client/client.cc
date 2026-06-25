@@ -16,10 +16,29 @@
 #include <cerrno>
 #include <cstring>
 #include <inttypes.h>
+#if defined(__QNX__) || defined(__QNXNTO__)
+#include <sys/neutrino.h>
+#endif
 namespace subspace {
 
 namespace {
 std::atomic<bool> default_use_split_buffers{false};
+
+#if defined(__QNX__) || defined(__QNXNTO__)
+void ConfigureQnxClockPeriod() {
+  static std::atomic<bool> attempted{false};
+  bool expected = false;
+  if (!attempted.compare_exchange_strong(expected, true,
+                                         std::memory_order_relaxed)) {
+    return;
+  }
+
+  struct _clockperiod period;
+  period.nsec = 10000U;
+  period.fract = 0;
+  (void)ClockPeriod(CLOCK_REALTIME, &period, nullptr, 0);
+}
+#endif
 
 ClientBufferAllocatorKind FromProtoAllocator(ClientBufferAllocator allocator) {
   switch (allocator) {
@@ -110,6 +129,22 @@ FromProto(const ClientBufferHandleMetadataProto &proto) {
   return metadata;
 }
 
+static absl::Status CheckFdIndex(
+    const std::vector<toolbelt::FileDescriptor> &fds, int index,
+    const char *field, const char *response_name) {
+  if (index < 0 || static_cast<size_t>(index) >= fds.size()) {
+    return absl::InternalError(absl::StrFormat(
+        "%s references fd index %d for %s, but response included %zu fds",
+        response_name, index, field, fds.size()));
+  }
+  if (!fds[static_cast<size_t>(index)].Valid()) {
+    return absl::InternalError(absl::StrFormat(
+        "%s references invalid fd at index %d for %s", response_name, index,
+        field));
+  }
+  return absl::OkStatus();
+}
+
 ClientImpl::ClientLockGuard::ClientLockGuard(ClientImpl *client,
                                              LockMode lock_mode)
     : client_(client), lock_mode_(lock_mode) {
@@ -183,6 +218,9 @@ absl::Status ClientImpl::CheckConnected() const {
 
 absl::Status ClientImpl::Init(const std::string &server_socket,
                               const std::string &client_name) {
+#if defined(__QNX__) || defined(__QNXNTO__)
+  ConfigureQnxClockPeriod();
+#endif
   ClientLockGuard guard(this);
   if (socket_.Connected()) {
     return absl::InternalError("Client is already connected to the server; "
@@ -208,6 +246,12 @@ absl::Status ClientImpl::Init(const std::string &server_socket,
   status = SendRequestReceiveResponse(req, resp, fds);
   if (!status.ok()) {
     return status;
+  }
+  if (absl::Status fd_status =
+          CheckFdIndex(fds, resp.init().scb_fd_index(), "scb_fd",
+                       "InitResponse");
+      !fd_status.ok()) {
+    return fd_status;
   }
   scb_fd_ = std::move(fds[resp.init().scb_fd_index()]);
   session_id_ = resp.init().session_id();
@@ -414,6 +458,20 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
   channel->SetMetadataSize(ms);
   channel->SetPrefixSize(Channel::ComputePrefixSize(cs, ms));
 
+  if (absl::Status fd_status =
+          CheckFdIndex(fds, pub_resp.ccb_fd_index(), "ccb_fd",
+                       "CreatePublisherResponse");
+      !fd_status.ok()) {
+    remove_server_publisher();
+    return fd_status;
+  }
+  if (absl::Status fd_status =
+          CheckFdIndex(fds, pub_resp.bcb_fd_index(), "bcb_fd",
+                       "CreatePublisherResponse");
+      !fd_status.ok()) {
+    remove_server_publisher();
+    return fd_status;
+  }
   SharedMemoryFds channel_fds(std::move(fds[pub_resp.ccb_fd_index()]),
                               std::move(fds[pub_resp.bcb_fd_index()]));
   if (absl::Status status = channel->Map(std::move(channel_fds), scb_fd_);
@@ -530,6 +588,18 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
     channel->AllocateChecksumBuffer();
   }
 
+  if (absl::Status fd_status =
+          CheckFdIndex(fds, sub_resp.ccb_fd_index(), "ccb_fd",
+                       "CreateSubscriberResponse");
+      !fd_status.ok()) {
+    return fd_status;
+  }
+  if (absl::Status fd_status =
+          CheckFdIndex(fds, sub_resp.bcb_fd_index(), "bcb_fd",
+                       "CreateSubscriberResponse");
+      !fd_status.ok()) {
+    return fd_status;
+  }
   SharedMemoryFds channel_fds(std::move(fds[sub_resp.ccb_fd_index()]),
                               std::move(fds[sub_resp.bcb_fd_index()]));
   if (absl::Status status = channel->Map(std::move(channel_fds), scb_fd_);

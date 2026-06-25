@@ -89,6 +89,15 @@ uint64_t ExpectedSplitBufferVirtualMemoryUsage(int num_slots,
          AlignPage(slot_size) * static_cast<uint64_t>(num_slots);
 }
 
+subspace::PublisherOptions PubOpts(int32_t slot_size = 0,
+                                   int32_t num_slots = 0) {
+  return subspace::PublisherOptions()
+      .SetSlotSize(slot_size)
+      .SetNumSlots(num_slots);
+}
+
+subspace::SubscriberOptions SubOpts() { return subspace::SubscriberOptions(); }
+
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
 absl::StatusOr<toolbelt::FileDescriptor> CreateTestMemfd(const char *name,
                                                          size_t size) {
@@ -125,12 +134,12 @@ subspace::SplitBufferCallbacks MakeTestSplitBufferCallbacks(
                                     static_cast<size_t>(
                                         metadata.allocation_size)});
     state->allocate_count++;
-    return subspace::SplitBufferMapping{
-        .handle = handle,
-        .address = address,
-        .size = static_cast<size_t>(metadata.allocation_size),
-        .private_data = address,
-    };
+    subspace::SplitBufferMapping mapping;
+    mapping.handle = handle;
+    mapping.address = address;
+    mapping.size = static_cast<size_t>(metadata.allocation_size);
+    mapping.private_data = address;
+    return mapping;
   };
   callbacks.map =
       [state](const subspace::SplitBufferMetadata &metadata)
@@ -140,11 +149,11 @@ subspace::SplitBufferCallbacks MakeTestSplitBufferCallbacks(
       return absl::NotFoundError("split buffer handle not found");
     }
     state->map_count++;
-    return subspace::SplitBufferMapping{
-        .handle = metadata.handle,
-        .address = it->second.memory.get(),
-        .size = it->second.size,
-    };
+    subspace::SplitBufferMapping mapping;
+    mapping.handle = metadata.handle;
+    mapping.address = it->second.memory.get();
+    mapping.size = it->second.size;
+    return mapping;
   };
   callbacks.unmap = [state](const subspace::SplitBufferMetadata &,
                             const subspace::SplitBufferMapping &mapping)
@@ -177,14 +186,13 @@ static void SigQuitHandler(int signum) {
 }
 
 TEST_F(ClientTest, InetAddressSupportsAbslHash) {
-  struct sockaddr_in addr = {
+  struct sockaddr_in addr = {};
 #if defined(__APPLE__)
-    .sin_len = sizeof(int),
+  addr.sin_len = sizeof(int);
 #endif
-    .sin_family = AF_INET,
-    .sin_port = htons(1234),
-    .sin_addr = {.s_addr = htonl(0x12345678)}
-  };
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(1234);
+  addr.sin_addr.s_addr = htonl(0x12345678);
 
   EXPECT_TRUE(absl::VerifyTypeImplementsAbslHashCorrectly({
       toolbelt::InetAddress(),
@@ -356,7 +364,7 @@ TEST_F(ClientTest, CreateVirtualPublisherWithType) {
   InitClient(client);
   {
     absl::StatusOr<Publisher> pub = client.CreatePublisher(
-        "dave0", 256, 100, {.type = "foobar", .mux = "mainmux"});
+        "dave0", 256, 100, PubOpts().SetType("foobar").SetMux("mainmux"));
     std::cerr << pub.status() << std::endl;
     ASSERT_OK(pub);
     ASSERT_EQ("foobar", pub->Type());
@@ -367,7 +375,7 @@ TEST_F(ClientTest, CreateVirtualPublisherWithType) {
   // Create again with different type.
   {
     absl::StatusOr<Publisher> pub = client.CreatePublisher(
-        "dave0", 256, 10, {.type = "foobar1", .mux = "mainmux"});
+        "dave0", 256, 10, PubOpts().SetType("foobar1").SetMux("mainmux"));
     ASSERT_OK(pub);
     ASSERT_EQ("foobar1", pub->Type());
   }
@@ -381,19 +389,20 @@ TEST_F(ClientTest, TooManyVirtualPublishers) {
   std::vector<Publisher> pubs;
   for (int i = 0; i < kMuxCapacity - 1; i++) {
     absl::StatusOr<Publisher> pub = client.CreatePublisher(
-        "dave0", 256, 10, {.type = "foobar", .mux = "mainmux"});
+        "dave0", 256, 10, PubOpts().SetType("foobar").SetMux("mainmux"));
     ASSERT_OK(pub);
     ASSERT_EQ("foobar", pub->Type());
     pubs.push_back(std::move(*pub));
   }
   // Publisher on the mux will fail
   absl::StatusOr<Publisher> mux_pub =
-      client.CreatePublisher("mainmux", 256, 10, {.type = "foobar"});
+      client.CreatePublisher("mainmux", 256, 10,
+                             PubOpts().SetType("foobar"));
   ASSERT_FALSE(mux_pub.ok());
 
   // One more virtual publisher will fail.
   absl::StatusOr<Publisher> pub = client.CreatePublisher(
-      "dave0", 256, 10, {.type = "foobar", .mux = "mainmux"});
+      "dave0", 256, 10, PubOpts().SetType("foobar").SetMux("mainmux"));
   ASSERT_FALSE(pub.ok());
 }
 
@@ -401,18 +410,19 @@ TEST_F(ClientTest, CreateVirtualPublisherMuxMismatch) {
   subspace::Client client;
   InitClient(client);
   absl::StatusOr<Publisher> pub = client.CreatePublisher(
-      "dave0", 256, 100, {.type = "foobar", .mux = "mainmux"});
+      "dave0", 256, 100, PubOpts().SetType("foobar").SetMux("mainmux"));
   ASSERT_OK(pub);
   ASSERT_EQ("foobar", pub->Type());
 
   // Different mux.
   absl::StatusOr<Publisher> pub2 = client.CreatePublisher(
-      "dave0", 256, 100, {.type = "foobar", .mux = "diffmux"});
+      "dave0", 256, 100, PubOpts().SetType("foobar").SetMux("diffmux"));
   ASSERT_FALSE(pub2.ok());
 
   // No mux.
   absl::StatusOr<Publisher> pub3 =
-      client.CreatePublisher("dave0", 256, 100, {.type = "foobar"});
+      client.CreatePublisher("dave0", 256, 100,
+                             PubOpts().SetType("foobar"));
   ASSERT_FALSE(pub3.ok());
 
   // Creating a channel with same name as mux should fail.
@@ -427,7 +437,7 @@ TEST_F(ClientTest, CreateMultipleVirtualPublisherSameVchan) {
   int last_vchan = -1;
   for (int i = 0; i < 10; i++) {
     absl::StatusOr<Publisher> pub = client.CreatePublisher(
-        "dave0", 256, 100, {.type = "foobar", .mux = "mainmux"});
+        "dave0", 256, 100, PubOpts().SetType("foobar").SetMux("mainmux"));
     ASSERT_OK(pub);
     if (last_vchan == -1) {
       last_vchan = pub->VirtualChannelId();
@@ -446,7 +456,7 @@ TEST_F(ClientTest, CreateMultipleVirtualPublisherDiffVchan) {
   for (int i = 0; i < 10; i++) {
     std::string name = "dave" + std::to_string(i);
     absl::StatusOr<Publisher> pub = client.CreatePublisher(
-        name, 256, 100, {.type = "foobar", .mux = "mainmux"});
+        name, 256, 100, PubOpts().SetType("foobar").SetMux("mainmux"));
     ASSERT_OK(pub);
     if (last_vchan == -1) {
       last_vchan = pub->VirtualChannelId();
@@ -533,14 +543,15 @@ TEST_F(ClientTest, TooManyVirtualSubscribers) {
 
   // 1 publisher.
   absl::StatusOr<Publisher> pub =
-      client.CreatePublisher("dave0", 256, kNumSlots, {.mux = "foobar"});
+      client.CreatePublisher("dave0", 256, kNumSlots,
+                             PubOpts().SetMux("foobar"));
   ASSERT_OK(pub);
 
   // 6 subscribers.
   std::vector<Subscriber> subs;
   for (int i = 0; i < kNumSlots - 3; i++) {
     absl::StatusOr<Subscriber> sub =
-        client.CreateSubscriber("dave0", {.mux = "foobar"});
+        client.CreateSubscriber("dave0", SubOpts().SetMux("foobar"));
     ASSERT_OK(sub);
     subs.push_back(std::move(*sub));
   }
@@ -551,7 +562,7 @@ TEST_F(ClientTest, TooManyVirtualSubscribers) {
 
   // One more will fail.
   absl::StatusOr<Subscriber> sub =
-      client.CreateSubscriber("dave0", {.mux = "foobar"});
+      client.CreateSubscriber("dave0", SubOpts().SetMux("foobar"));
   ASSERT_FALSE(sub.ok());
 }
 
@@ -609,17 +620,17 @@ TEST_F(ClientTest, BadPublisherParameters) {
 
   // Fixed size.
   absl::StatusOr<Publisher> pub4 =
-      client.CreatePublisher("dave1", 256, 10, {.fixed_size = true});
+      client.CreatePublisher("dave1", 256, 10, PubOpts().SetFixedSize(true));
   ASSERT_OK(pub4);
 
   // Not fixed size - mismatch fixed size option, same slot size.
   absl::StatusOr<Publisher> pub5 =
-      client.CreatePublisher("dave1", 256, 10, {.fixed_size = false});
+      client.CreatePublisher("dave1", 256, 10, PubOpts().SetFixedSize(false));
   ASSERT_FALSE(pub5.ok());
 
   // Different slot size - we are fixed size, this will fail.
   absl::StatusOr<Publisher> pub6 =
-      client.CreatePublisher("dave1", 512, 10, {.fixed_size = true});
+      client.CreatePublisher("dave1", 512, 10, PubOpts().SetFixedSize(true));
   ASSERT_FALSE(pub6.ok());
 }
 
@@ -636,10 +647,11 @@ TEST_F(ClientTest, CreatePublisherThenSubscriber) {
 TEST_F(ClientTest, CreateVirtualPublisherThenSubscriber) {
   subspace::Client client;
   InitClient(client);
-  auto p = client.CreatePublisher("dave1", 256, 10, {.mux = "foobar"});
+  auto p = client.CreatePublisher("dave1", 256, 10,
+                                  PubOpts().SetMux("foobar"));
   ASSERT_OK(p);
 
-  auto s = client.CreateSubscriber("dave1", {.mux = "foobar"});
+  auto s = client.CreateSubscriber("dave1", SubOpts().SetMux("foobar"));
   ASSERT_OK(s);
 }
 
@@ -647,23 +659,25 @@ TEST_F(ClientTest, CreateVirtualSubscriberThenPublisher) {
   subspace::Client client;
   InitClient(client);
 
-  auto s = client.CreateSubscriber("dave1", {.mux = "foobar"});
+  auto s = client.CreateSubscriber("dave1", SubOpts().SetMux("foobar"));
   ASSERT_OK(s);
-  auto p = client.CreatePublisher("dave1", 256, 10, {.mux = "foobar"});
+  auto p = client.CreatePublisher("dave1", 256, 10,
+                                  PubOpts().SetMux("foobar"));
   ASSERT_OK(p);
 }
 
 TEST_F(ClientTest, CreateVirtualPublisherThenSubscriberMuxMismatch) {
   subspace::Client client;
   InitClient(client);
-  auto p1 = client.CreatePublisher("dave1", 256, 10, {.mux = "foobar"});
+  auto p1 = client.CreatePublisher("dave1", 256, 10,
+                                   PubOpts().SetMux("foobar"));
   ASSERT_OK(p1);
 
-  auto s1 = client.CreateSubscriber("dave1", {.mux = "foobar"});
+  auto s1 = client.CreateSubscriber("dave1", SubOpts().SetMux("foobar"));
   ASSERT_OK(s1);
 
   // Different mux.
-  auto s2 = client.CreateSubscriber("dave1", {.mux = "diffmux"});
+  auto s2 = client.CreateSubscriber("dave1", SubOpts().SetMux("diffmux"));
   ASSERT_FALSE(s2.ok());
 
   // No mux.
@@ -1085,7 +1099,7 @@ TEST_F(ClientTest, PublishSingleMessageWithPrefixAndRead) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
   absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-      "dave6", {.slot_size = 256, .num_slots = 10, .type = "foobar"});
+      "dave6", PubOpts(256, 10).SetType("foobar"));
   ASSERT_OK(pub);
 
   ASSERT_EQ("foobar", pub->TypeView());
@@ -1167,7 +1181,8 @@ TEST_F(ClientTest, PublishSingleMessageAndReadNewest) {
   ASSERT_OK(pub_status);
 
   absl::StatusOr<Subscriber> sub =
-      sub_client.CreateSubscriber("dave6", {.max_active_messages = 2});
+      sub_client.CreateSubscriber("dave6",
+                                  SubOpts().SetMaxActiveMessages(2));
   ASSERT_OK(sub);
 
   // Another message.
@@ -1198,7 +1213,7 @@ TEST_F(ClientTest, PublishSingleMessageAndReadWithActivation) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
   absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-      "dave6", {.slot_size = 256, .num_slots = 10, .activate = true});
+      "dave6", PubOpts(256, 10).SetActivate(true));
   ASSERT_OK(pub);
 
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
@@ -1207,7 +1222,7 @@ TEST_F(ClientTest, PublishSingleMessageAndReadWithActivation) {
   absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
   ASSERT_OK(pub_status);
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-      "dave6", {.max_active_messages = 2, .pass_activation = true});
+      "dave6", SubOpts().SetMaxActiveMessages(2).SetPassActivation(true));
   ASSERT_OK(sub);
 
   // Read activation message.
@@ -1305,7 +1320,8 @@ TEST_F(ClientTest, VirtualPublishSingleMessageAndRead) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
   absl::StatusOr<Publisher> pub =
-      pub_client.CreatePublisher("dave6", 256, 10, {.mux = "mainmux"});
+      pub_client.CreatePublisher("dave6", 256, 10,
+                                 PubOpts().SetMux("mainmux"));
   ASSERT_OK(pub);
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
   ASSERT_OK(buffer);
@@ -1314,7 +1330,7 @@ TEST_F(ClientTest, VirtualPublishSingleMessageAndRead) {
   ASSERT_OK(pub_status);
 
   absl::StatusOr<Subscriber> sub =
-      sub_client.CreateSubscriber("dave6", {.mux = "mainmux"});
+      sub_client.CreateSubscriber("dave6", SubOpts().SetMux("mainmux"));
   ASSERT_OK(sub);
 
   absl::StatusOr<Message> msg = sub->ReadMessage();
@@ -1344,7 +1360,8 @@ TEST_F(ClientTest, VirtualPublishMultiple) {
   for (int i = 0; i < 10; i++) {
     std::string name = "dave" + std::to_string(i);
     absl::StatusOr<Publisher> pub =
-        pub_client.CreatePublisher(name, 256, 100, {.mux = "mainmux"});
+        pub_client.CreatePublisher(name, 256, 100,
+                                   PubOpts().SetMux("mainmux"));
     ASSERT_OK(pub);
     pubs.push_back(std::move(*pub));
   }
@@ -1353,7 +1370,7 @@ TEST_F(ClientTest, VirtualPublishMultiple) {
   for (int i = 0; i < 10; i++) {
     std::string name = "dave" + std::to_string(i);
     absl::StatusOr<Subscriber> sub =
-        sub_client.CreateSubscriber(name, {.mux = "mainmux"});
+        sub_client.CreateSubscriber(name, SubOpts().SetMux("mainmux"));
     ASSERT_OK(sub);
     subs.push_back(std::move(*sub));
   }
@@ -1415,7 +1432,8 @@ TEST_F(ClientTest, PublishAndResize) {
   ASSERT_OK(pub_status);
 
   absl::StatusOr<Subscriber> sub =
-      sub_client.CreateSubscriber("dave6", {.max_active_messages = 2});
+      sub_client.CreateSubscriber("dave6",
+                                  SubOpts().SetMaxActiveMessages(2));
   ASSERT_OK(sub);
 
   absl::StatusOr<Message> msg = sub->ReadMessage();
@@ -1451,7 +1469,8 @@ TEST_F(ClientTest, PublishVirtualAndResize) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
   absl::StatusOr<Publisher> pub =
-      pub_client.CreatePublisher("dave6", 256, 10, {.mux = "mainmux"});
+      pub_client.CreatePublisher("dave6", 256, 10,
+                                 PubOpts().SetMux("mainmux"));
   ASSERT_OK(pub);
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
   ASSERT_OK(buffer);
@@ -1460,7 +1479,7 @@ TEST_F(ClientTest, PublishVirtualAndResize) {
   ASSERT_OK(pub_status);
 
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-      "dave6", {.max_active_messages = 2, .mux = "mainmux"});
+      "dave6", SubOpts().SetMaxActiveMessages(2).SetMux("mainmux"));
   ASSERT_OK(sub);
 
   absl::StatusOr<Message> msg = sub->ReadMessage();
@@ -1514,7 +1533,8 @@ TEST_F(ClientTest, PublishAndResize2) {
 
   // Now create subscriber and read both messages.
   absl::StatusOr<Subscriber> sub =
-      sub_client.CreateSubscriber("dave6", {.max_active_messages = 2});
+      sub_client.CreateSubscriber("dave6",
+                                  SubOpts().SetMaxActiveMessages(2));
   ASSERT_OK(sub);
 
   absl::StatusOr<Message> msg = sub->ReadMessage();
@@ -1617,7 +1637,8 @@ TEST_F(ClientTest, PublishAndResizeSubscriberFirst) {
 
   // First create subscriber.
   absl::StatusOr<Subscriber> sub =
-      sub_client.CreateSubscriber("dave6", {.max_active_messages = 2});
+      sub_client.CreateSubscriber("dave6",
+                                  SubOpts().SetMaxActiveMessages(2));
   ASSERT_OK(sub);
   ASSERT_EQ(0, sub->SlotSize()); // No buffers yet.
 
@@ -1658,12 +1679,13 @@ TEST_F(ClientTest, PublishVirtualAndResizeSubscriberFirst) {
 
   // First create subscriber.
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-      "dave6", {.max_active_messages = 2, .mux = "mainmux"});
+      "dave6", SubOpts().SetMaxActiveMessages(2).SetMux("mainmux"));
   ASSERT_OK(sub);
   ASSERT_EQ(0, sub->SlotSize()); // No buffers yet.
 
   absl::StatusOr<Publisher> pub =
-      pub_client.CreatePublisher("dave6", 256, 10, {.mux = "mainmux"});
+      pub_client.CreatePublisher("dave6", 256, 10,
+                                 PubOpts().SetMux("mainmux"));
   ASSERT_OK(pub);
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
   ASSERT_OK(buffer);
@@ -1703,7 +1725,7 @@ TEST_F(ClientTest, PublishAndResizeSubscriberConcurrently) {
 
   auto t1 = std::thread([&]() {
     auto client1_pub = *client1.CreatePublisher(
-        channel_name, {.slot_size = 1, .num_slots = 4});
+        channel_name, PubOpts(1, 4));
     for (int i = 1; i < 24; i++) {
       std::size_t size = std::pow(2, i);
       auto buffer = client1_pub.GetMessageBuffer(size);
@@ -1750,8 +1772,7 @@ TEST_F(ClientTest, PublishConcurrentlyFromOneClientToOneSubscriber) {
   ASSERT_OK(pub_client.Init(Socket()));
   for (int i = 0; i < kNumPublishers; ++i) {
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-        channel_name,
-        {.slot_size = 256, .num_slots = 2 * kNumPublishers + 16});
+        channel_name, PubOpts(256, 2 * kNumPublishers + 16));
     ASSERT_OK(pub) << pub.status();
     pubs.emplace_back(std::move(*pub));
   }
@@ -1823,8 +1844,7 @@ TEST_F(ClientTest, PublishConcurrentlyToOneSubscriber) {
       }
       ASSERT_TRUE(connected);
       absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-          channel_name,
-          {.slot_size = 256, .num_slots = 2 * kNumPublishers + 16});
+          channel_name, PubOpts(256, 2 * kNumPublishers + 16));
       ASSERT_OK(pub) << pub.status();
       std::array<char, 16> msg = {};
       auto size = std::snprintf(msg.data(), msg.size(), "M%d", i);
@@ -1989,13 +2009,14 @@ TEST_F(ClientTest, ExternalPollLoopGetPollFdOnceReadOnce) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
 
+  constexpr int kNum = 20;
+  constexpr int kNumSlots = kNum + 1;
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("ext_poll1");
   ASSERT_OK(sub);
   absl::StatusOr<Publisher> pub =
-      pub_client.CreatePublisher("ext_poll1", 256, 10);
+      pub_client.CreatePublisher("ext_poll1", 256, kNumSlots);
   ASSERT_OK(pub);
 
-  constexpr int kNum = 20;
   std::atomic<int> published{0};
   std::thread publisher([&] {
     for (int i = 0; i < kNum; i++) {
@@ -2040,13 +2061,14 @@ TEST_F(ClientTest, ExternalPollLoopGetPollFdOnceDrainUntilEmpty) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
 
+  constexpr int kNum = 20;
+  constexpr int kNumSlots = kNum + 1;
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("ext_poll2");
   ASSERT_OK(sub);
   absl::StatusOr<Publisher> pub =
-      pub_client.CreatePublisher("ext_poll2", 256, 10);
+      pub_client.CreatePublisher("ext_poll2", 256, kNumSlots);
   ASSERT_OK(pub);
 
-  constexpr int kNum = 20;
   std::thread publisher([&] {
     for (int i = 0; i < kNum; i++) {
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -2328,7 +2350,7 @@ TEST_F(ClientTest, ReliablePublisherActivation) {
           true));
   ASSERT_OK(pub);
   absl::StatusOr<Subscriber> sub = client.CreateSubscriber(
-      "rel_dave", {.reliable = true, .pass_activation = true});
+      "rel_dave", SubOpts().SetReliable(true).SetPassActivation(true));
   ASSERT_OK(sub);
 
   auto &counters = pub->GetChannelCounters();
@@ -2602,7 +2624,7 @@ TEST_F(ClientTest, DroppedMessage) {
   InitClient(client);
 
   absl::StatusOr<Subscriber> sub =
-      client.CreateSubscriber("rel_dave", {.keep_active_message = true});
+      client.CreateSubscriber("rel_dave", SubOpts().SetKeepActiveMessage(true));
   ASSERT_OK(sub);
 
   int num_dropped_messages = 0;
@@ -2928,8 +2950,13 @@ TEST_F(ClientTest, FindMessage) {
     ASSERT_OK(buffer);
     char *buf = reinterpret_cast<char *>(*buffer);
     int len = snprintf(buf, 256, "foobar %d", i);
+    subspace::MessagePrefix *prefix = pub->Prefix();
+    ASSERT_NE(nullptr, prefix);
+    prefix->ordinal = static_cast<uint64_t>(i + 1);
+    prefix->timestamp = static_cast<uint64_t>(123456789 + i);
 
-    absl::StatusOr<const Message> pub_status = pub->PublishMessage(len + 1);
+    absl::StatusOr<const Message> pub_status = pub->PublishMessageWithPrefix(
+        len + 1, /*use_slot_id_from_prefix=*/false);
     ASSERT_OK(pub_status);
     msgs.push_back(std::move(*pub_status));
   }
@@ -3094,19 +3121,14 @@ TEST_F(ClientTest, RetirementTrigger1) {
   auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
   absl::StatusOr<Publisher> p = pub_client->CreatePublisher(
-      "dave6", {.slot_size = 256, .num_slots = 10, .notify_retirement = true});
+      "dave6", PubOpts(256, 10).SetNotifyRetirement(true));
   ASSERT_OK(p);
   auto pub = std::move(*p);
 
   {
     // You can't create a virtual publisher with notify_retirement.
     absl::StatusOr<Publisher> p2 =
-        pub_client->CreatePublisher("dave6v", {
-                                                  .slot_size = 256,
-                                                  .num_slots = 10,
-                                                  .mux = "/foobar",
-                                                  .notify_retirement = true,
-                                              });
+        pub_client->CreatePublisher("dave6v", PubOpts(256, 10).SetMux("/foobar").SetNotifyRetirement(true));
     ASSERT_FALSE(p2.ok());
   }
   const toolbelt::FileDescriptor &retirement_fd = pub.GetRetirementFd();
@@ -3119,12 +3141,12 @@ TEST_F(ClientTest, RetirementTrigger1) {
   ASSERT_OK(pub_status);
 
   absl::StatusOr<Subscriber> s1 =
-      sub_client->CreateSubscriber("dave6", {.max_active_messages = 1});
+      sub_client->CreateSubscriber("dave6", SubOpts().SetMaxActiveMessages(1));
   ASSERT_OK(s1);
   auto sub1 = std::move(*s1);
 
   absl::StatusOr<Subscriber> s2 =
-      sub_client->CreateSubscriber("dave6", {.max_active_messages = 1});
+      sub_client->CreateSubscriber("dave6", SubOpts().SetMaxActiveMessages(1));
   ASSERT_OK(s2);
   auto sub2 = std::move(*s2);
 
@@ -3150,7 +3172,9 @@ TEST_F(ClientTest, RetirementTrigger1) {
   ptr2.Reset();
 
   // Read the retirement fd and expect it to contain slot 0.
-  struct pollfd fd = {.fd = retirement_fd.Fd(), .events = POLLIN};
+  struct pollfd fd = {};
+  fd.fd = retirement_fd.Fd();
+  fd.events = POLLIN;
   int e = ::poll(&fd, 1, -1);
   ASSERT_EQ(1, e);
   ASSERT_TRUE(fd.revents & POLLIN);
@@ -3174,19 +3198,19 @@ TEST_F(ClientTest, RetirementTrigger2) {
   auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
   absl::StatusOr<Publisher> p = pub_client->CreatePublisher(
-      "dave6", {.slot_size = 256, .num_slots = 10, .notify_retirement = true});
+      "dave6", PubOpts(256, 10).SetNotifyRetirement(true));
   ASSERT_OK(p);
   auto pub = std::move(*p);
 
   const toolbelt::FileDescriptor &retirement_fd = pub.GetRetirementFd();
 
   absl::StatusOr<Subscriber> s1 =
-      sub_client->CreateSubscriber("dave6", {.max_active_messages = 1, .keep_active_message = true});
+      sub_client->CreateSubscriber("dave6", SubOpts().SetMaxActiveMessages(1).SetKeepActiveMessage(true));
   ASSERT_OK(s1);
   auto sub1 = std::move(*s1);
 
   absl::StatusOr<Subscriber> s2 =
-      sub_client->CreateSubscriber("dave6", {.max_active_messages = 1, .keep_active_message = true});
+      sub_client->CreateSubscriber("dave6", SubOpts().SetMaxActiveMessages(1).SetKeepActiveMessage(true));
   ASSERT_OK(s2);
   auto sub2 = std::move(*s2);
 
@@ -3220,7 +3244,9 @@ TEST_F(ClientTest, RetirementTrigger2) {
   }
 
   // There should be nothing in the retirement fd.
-  struct pollfd fd = {.fd = retirement_fd.Fd(), .events = POLLIN};
+  struct pollfd fd = {};
+  fd.fd = retirement_fd.Fd();
+  fd.events = POLLIN;
   int e = ::poll(&fd, 1, 0);
   ASSERT_EQ(0, e);
   ASSERT_FALSE(fd.revents & POLLIN);
@@ -3281,13 +3307,13 @@ TEST_F(ClientTest, RetirementTrigger3) {
   auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
   absl::StatusOr<Publisher> p = pub_client->CreatePublisher(
-      "dave6", {.slot_size = 256, .num_slots = 10, .notify_retirement = true});
+      "dave6", PubOpts(256, 10).SetNotifyRetirement(true));
   ASSERT_OK(p);
   auto pub = std::move(*p);
 
   // Another publisher on a different client.
   absl::StatusOr<Publisher> pp2 = pub2Client->CreatePublisher(
-      "dave6", {.slot_size = 256, .num_slots = 10, .notify_retirement = true});
+      "dave6", PubOpts(256, 10).SetNotifyRetirement(true));
   ASSERT_OK(pp2);
   auto pub2 = std::move(*pp2);
 
@@ -3302,12 +3328,12 @@ TEST_F(ClientTest, RetirementTrigger3) {
   ASSERT_OK(pub_status);
 
   absl::StatusOr<Subscriber> s1 =
-      sub_client->CreateSubscriber("dave6", {.max_active_messages = 1});
+      sub_client->CreateSubscriber("dave6", SubOpts().SetMaxActiveMessages(1));
   ASSERT_OK(s1);
   auto sub1 = std::move(*s1);
 
   absl::StatusOr<Subscriber> s2 =
-      sub_client->CreateSubscriber("dave6", {.max_active_messages = 1});
+      sub_client->CreateSubscriber("dave6", SubOpts().SetMaxActiveMessages(1));
   ASSERT_OK(s2);
   auto sub2 = std::move(*s2);
 
@@ -3331,7 +3357,9 @@ TEST_F(ClientTest, RetirementTrigger3) {
   ptr2.Reset();
 
   // Read the retirement fd and expect it to contain slot 0.
-  struct pollfd fd = {.fd = retirement_fd.Fd(), .events = POLLIN};
+  struct pollfd fd = {};
+  fd.fd = retirement_fd.Fd();
+  fd.events = POLLIN;
   int e = ::poll(&fd, 1, -1);
   ASSERT_EQ(1, e);
   ASSERT_TRUE(fd.revents & POLLIN);
@@ -3352,13 +3380,13 @@ TEST_F(ClientTest, RetirementTrigger4) {
   auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
   absl::StatusOr<Publisher> p = pub_client->CreatePublisher(
-      "dave6", {.slot_size = 256, .num_slots = 10, .notify_retirement = true});
+      "dave6", PubOpts(256, 10).SetNotifyRetirement(true));
   ASSERT_OK(p);
   auto pub = std::move(*p);
 
   // Another publisher on a different client.
   absl::StatusOr<Publisher> pp2 = pub2Client->CreatePublisher(
-      "dave6", {.slot_size = 256, .num_slots = 10, .notify_retirement = true});
+      "dave6", PubOpts(256, 10).SetNotifyRetirement(true));
   ASSERT_OK(pp2);
   auto pub2 = std::move(*pp2);
 
@@ -3367,12 +3395,12 @@ TEST_F(ClientTest, RetirementTrigger4) {
   const toolbelt::FileDescriptor &retirement_fd = pub2.GetRetirementFd();
 
   absl::StatusOr<Subscriber> s1 =
-      sub_client->CreateSubscriber("dave6", {.max_active_messages = 1, .keep_active_message = true});
+      sub_client->CreateSubscriber("dave6", SubOpts().SetMaxActiveMessages(1).SetKeepActiveMessage(true));
   ASSERT_OK(s1);
   auto sub1 = std::move(*s1);
 
   absl::StatusOr<Subscriber> s2 =
-      sub_client->CreateSubscriber("dave6", {.max_active_messages = 1, .keep_active_message = true});
+      sub_client->CreateSubscriber("dave6", SubOpts().SetMaxActiveMessages(1).SetKeepActiveMessage(true));
   ASSERT_OK(s2);
   auto sub2 = std::move(*s2);
 
@@ -3404,7 +3432,9 @@ TEST_F(ClientTest, RetirementTrigger4) {
   }
 
   // There should be nothing in the retirement fd.
-  struct pollfd fd = {.fd = retirement_fd.Fd(), .events = POLLIN};
+  struct pollfd fd = {};
+  fd.fd = retirement_fd.Fd();
+  fd.events = POLLIN;
   int e = ::poll(&fd, 1, 0);
   ASSERT_EQ(0, e);
   ASSERT_FALSE(fd.revents & POLLIN);
@@ -3461,11 +3491,11 @@ TEST_F(ClientTest, ChannelDirectory) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
   absl::StatusOr<Publisher> p1 =
-      client->CreatePublisher("chan1", {.slot_size = 256, .num_slots = 10});
+      client->CreatePublisher("chan1", PubOpts(256, 10));
   ASSERT_OK(p1);
 
   absl::StatusOr<Publisher> p2 =
-      client->CreatePublisher("chan2", {.slot_size = 256, .num_slots = 10});
+      client->CreatePublisher("chan2", PubOpts(256, 10));
   ASSERT_OK(p2);
 
   absl::StatusOr<Subscriber> s1 = client->CreateSubscriber("chan1");
@@ -3518,7 +3548,7 @@ TEST_F(ClientTest, MessageGetters) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
-      "chan1", {.slot_size = 256, .num_slots = 10, .type = "test-type"});
+      "chan1", PubOpts(256, 10).SetType("test-type"));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub = client->CreateSubscriber("chan1");
@@ -3547,12 +3577,12 @@ TEST_F(ClientTest, ChecksumVerification) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
-      "chan1", {.slot_size = 256, .num_slots = 10, .checksum = true});
+      "chan1", PubOpts(256, 10).SetChecksum(true));
   ASSERT_OK(pub);
 
   // Create a second publisher that doesn't calculate a checksum.
   absl::StatusOr<Publisher> pub2 =
-      client->CreatePublisher("chan1", {.slot_size = 256, .num_slots = 10});
+      client->CreatePublisher("chan1", PubOpts(256, 10));
   ASSERT_OK(pub2);
 
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
@@ -3562,7 +3592,7 @@ TEST_F(ClientTest, ChecksumVerification) {
   ASSERT_OK(pub_status);
 
   absl::StatusOr<Subscriber> sub =
-      client->CreateSubscriber("chan1", {.checksum = true});
+      client->CreateSubscriber("chan1", SubOpts().SetChecksum(true));
   ASSERT_OK(sub);
 
   {
@@ -3627,7 +3657,7 @@ TEST_F(ClientTest, ChecksumVerification) {
 
   // Create another subscriber with pass checksum errors.
   absl::StatusOr<Subscriber> sub2 = client->CreateSubscriber(
-      "chan1", {.checksum = true, .pass_checksum_errors = true});
+      "chan1", SubOpts().SetChecksum(true).SetPassChecksumErrors(true));
   ASSERT_OK(sub2);
 
   // First message will be fine since the checksum is good.
@@ -3668,11 +3698,11 @@ TEST_F(ClientTest, ChecksumCallback) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
-      "chan_cb", {.slot_size = 256, .num_slots = 10, .checksum = true});
+      "chan_cb", PubOpts(256, 10).SetChecksum(true));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
-      client->CreateSubscriber("chan_cb", {.checksum = true});
+      client->CreateSubscriber("chan_cb", SubOpts().SetChecksum(true));
   ASSERT_OK(sub);
 
   auto fake_crc =
@@ -3724,11 +3754,11 @@ TEST_F(ClientTest, ChecksumCallbackPassErrors) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
-      "chan_cb_pass", {.slot_size = 256, .num_slots = 10, .checksum = true});
+      "chan_cb_pass", PubOpts(256, 10).SetChecksum(true));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub = client->CreateSubscriber(
-      "chan_cb_pass", {.checksum = true, .pass_checksum_errors = true});
+      "chan_cb_pass", SubOpts().SetChecksum(true).SetPassChecksumErrors(true));
   ASSERT_OK(sub);
 
   auto fake_crc =
@@ -3766,11 +3796,11 @@ TEST_F(ClientTest, ChecksumCallbackReset) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
-      "chan_cb_reset", {.slot_size = 256, .num_slots = 10, .checksum = true});
+      "chan_cb_reset", PubOpts(256, 10).SetChecksum(true));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
-      client->CreateSubscriber("chan_cb_reset", {.checksum = true});
+      client->CreateSubscriber("chan_cb_reset", SubOpts().SetChecksum(true));
   ASSERT_OK(sub);
 
   auto fake_crc =
@@ -3830,11 +3860,11 @@ TEST_F(ClientTest, ChecksumCallbackPublisherOnly) {
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
       "chan_cb_pub_only",
-      {.slot_size = 256, .num_slots = 10, .checksum = true});
+      PubOpts(256, 10).SetChecksum(true));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
-      client->CreateSubscriber("chan_cb_pub_only", {.checksum = true});
+      client->CreateSubscriber("chan_cb_pub_only", SubOpts().SetChecksum(true));
   ASSERT_OK(sub);
 
   auto fake_crc =
@@ -3870,11 +3900,11 @@ TEST_F(ClientTest, Checksum20Byte) {
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
       "chan_ck20",
-      {.slot_size = 256, .num_slots = 10, .checksum = true, .checksum_size = 20});
+      PubOpts(256, 10).SetChecksum(true).SetChecksumSize(20));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
-      client->CreateSubscriber("chan_ck20", {.checksum = true});
+      client->CreateSubscriber("chan_ck20", SubOpts().SetChecksum(true));
   ASSERT_OK(sub);
 
   ASSERT_EQ(128, pub->PrefixSize());
@@ -3935,7 +3965,7 @@ TEST_F(ClientTest, ChecksumSizeDefault) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
-      "chan_cs_def", {.slot_size = 256, .num_slots = 10});
+      "chan_cs_def", PubOpts(256, 10));
   ASSERT_OK(pub);
   ASSERT_EQ(64, pub->PrefixSize());
   ASSERT_EQ(4, pub->ChecksumSize());
@@ -3947,7 +3977,7 @@ TEST_F(ClientTest, LargeChecksumSize) {
 
   // checksum_size=32 → Aligned<64>(48 + 32) = 128 bytes prefix.
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
-      "chan_cs_big", {.slot_size = 256, .num_slots = 10, .checksum_size = 32});
+      "chan_cs_big", PubOpts(256, 10).SetChecksumSize(32));
   ASSERT_OK(pub);
   ASSERT_EQ(128, pub->PrefixSize());
   ASSERT_EQ(32, pub->ChecksumSize());
@@ -3958,7 +3988,7 @@ TEST_F(ClientTest, MetadataSize) {
 
   // metadata_size=100 → Aligned<64>(48 + 4 + 100) = Aligned<64>(152) = 192.
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
-      "chan_meta", {.slot_size = 256, .num_slots = 10, .metadata_size = 100});
+      "chan_meta", PubOpts(256, 10).SetMetadataSize(100));
   ASSERT_OK(pub);
   ASSERT_EQ(192, pub->PrefixSize());
   ASSERT_EQ(4, pub->ChecksumSize());
@@ -3970,13 +4000,13 @@ TEST_F(ClientTest, PrefixSizeInconsistent) {
 
   absl::StatusOr<Publisher> pub1 = client->CreatePublisher(
       "chan_ps_incon",
-      {.slot_size = 256, .num_slots = 10, .checksum_size = 20});
+      PubOpts(256, 10).SetChecksumSize(20));
   ASSERT_OK(pub1);
 
   // A second publisher with different sizes should fail.
   absl::StatusOr<Publisher> pub2 = client->CreatePublisher(
       "chan_ps_incon",
-      {.slot_size = 256, .num_slots = 10, .checksum_size = 32});
+      PubOpts(256, 10).SetChecksumSize(32));
   ASSERT_FALSE(pub2.ok());
 }
 
@@ -3991,8 +4021,7 @@ TEST_F(ClientTest, VirtualChannelMuxPrefixIsShared) {
   // First publisher on vchan_a with checksum_size=20, metadata_size=50:
   //   48 + 20 + 50 = 118 → Aligned<64> = 128.
   absl::StatusOr<Publisher> pub_a = client->CreatePublisher(
-      "vchan_a", {.slot_size = 256, .num_slots = 10, .mux = "shared_mux",
-                  .checksum_size = 20, .metadata_size = 50});
+      "vchan_a", PubOpts(256, 10).SetMux("shared_mux").SetChecksumSize(20).SetMetadataSize(50));
   ASSERT_OK(pub_a);
   ASSERT_EQ(128, pub_a->PrefixSize());
   ASSERT_EQ(20, pub_a->ChecksumSize());
@@ -4001,7 +4030,7 @@ TEST_F(ClientTest, VirtualChannelMuxPrefixIsShared) {
   // A subscriber on a different vchan on the same mux must see the mux's
   // sizes, not the per-vchan defaults (4/0/64).
   absl::StatusOr<Subscriber> sub_b =
-      client->CreateSubscriber("vchan_b", {.mux = "shared_mux"});
+      client->CreateSubscriber("vchan_b", SubOpts().SetMux("shared_mux"));
   ASSERT_OK(sub_b);
   ASSERT_EQ(128, sub_b->PrefixSize());
   ASSERT_EQ(20, sub_b->ChecksumSize());
@@ -4010,21 +4039,18 @@ TEST_F(ClientTest, VirtualChannelMuxPrefixIsShared) {
   // A second publisher on a different vchan on the same mux with matching
   // sizes must succeed and report the same prefix layout.
   absl::StatusOr<Publisher> pub_b = client->CreatePublisher(
-      "vchan_b", {.slot_size = 256, .num_slots = 10, .mux = "shared_mux",
-                  .checksum_size = 20, .metadata_size = 50});
+      "vchan_b", PubOpts(256, 10).SetMux("shared_mux").SetChecksumSize(20).SetMetadataSize(50));
   ASSERT_OK(pub_b);
   ASSERT_EQ(128, pub_b->PrefixSize());
 
   // A second publisher on yet another vchan with mismatching cs/ms must be
   // rejected, because virtual channels on a mux cannot disagree on layout.
   absl::StatusOr<Publisher> pub_c = client->CreatePublisher(
-      "vchan_c", {.slot_size = 256, .num_slots = 10, .mux = "shared_mux",
-                  .checksum_size = 32});
+      "vchan_c", PubOpts(256, 10).SetMux("shared_mux").SetChecksumSize(32));
   ASSERT_FALSE(pub_c.ok());
 
   absl::StatusOr<Publisher> pub_d = client->CreatePublisher(
-      "vchan_d", {.slot_size = 256, .num_slots = 10, .mux = "shared_mux",
-                  .metadata_size = 100});
+      "vchan_d", PubOpts(256, 10).SetMux("shared_mux").SetMetadataSize(100));
   ASSERT_FALSE(pub_d.ok());
 }
 
@@ -4036,18 +4062,17 @@ TEST_F(ClientTest, VirtualChannelMuxPrefixSubscriberFirst) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
   absl::StatusOr<Subscriber> sub_a =
-      client->CreateSubscriber("vchan_a", {.mux = "sub_first_mux"});
+      client->CreateSubscriber("vchan_a", SubOpts().SetMux("sub_first_mux"));
   ASSERT_OK(sub_a);
 
   absl::StatusOr<Publisher> pub_a = client->CreatePublisher(
-      "vchan_a", {.slot_size = 256, .num_slots = 10, .mux = "sub_first_mux",
-                  .checksum_size = 20, .metadata_size = 50});
+      "vchan_a", PubOpts(256, 10).SetMux("sub_first_mux").SetChecksumSize(20).SetMetadataSize(50));
   ASSERT_OK(pub_a);
   ASSERT_EQ(128, pub_a->PrefixSize());
 
   // Subscriber on a sibling vchan should now see the mux's sizes.
   absl::StatusOr<Subscriber> sub_b =
-      client->CreateSubscriber("vchan_b", {.mux = "sub_first_mux"});
+      client->CreateSubscriber("vchan_b", SubOpts().SetMux("sub_first_mux"));
   ASSERT_OK(sub_b);
   ASSERT_EQ(128, sub_b->PrefixSize());
   ASSERT_EQ(20, sub_b->ChecksumSize());
@@ -4059,8 +4084,7 @@ TEST_F(ClientTest, SubscriberGetsSizes) {
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
       "chan_sub_sizes",
-      {.slot_size = 256, .num_slots = 10, .checksum_size = 20,
-       .metadata_size = 50});
+      PubOpts(256, 10).SetChecksumSize(20).SetMetadataSize(50));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
@@ -4077,7 +4101,7 @@ TEST_F(ClientTest, MetadataSmall) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
-      "chan_meta_s", {.slot_size = 256, .num_slots = 10, .metadata_size = 8});
+      "chan_meta_s", PubOpts(256, 10).SetMetadataSize(8));
   ASSERT_OK(pub);
   ASSERT_EQ(64, pub->PrefixSize());
   ASSERT_EQ(8, pub->MetadataSize());
@@ -4115,7 +4139,7 @@ TEST_F(ClientTest, MetadataExactFit) {
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
       "chan_meta_ex",
-      {.slot_size = 256, .num_slots = 10, .metadata_size = 12});
+      PubOpts(256, 10).SetMetadataSize(12));
   ASSERT_OK(pub);
   ASSERT_EQ(64, pub->PrefixSize());
 
@@ -4147,7 +4171,7 @@ TEST_F(ClientTest, MetadataSpillsToSecondChunk) {
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
       "chan_meta_sp",
-      {.slot_size = 256, .num_slots = 10, .metadata_size = 13});
+      PubOpts(256, 10).SetMetadataSize(13));
   ASSERT_OK(pub);
   ASSERT_EQ(128, pub->PrefixSize());
 
@@ -4179,8 +4203,7 @@ TEST_F(ClientTest, MetadataLargeWithLargeChecksum) {
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
       "chan_meta_lg",
-      {.slot_size = 512, .num_slots = 10, .checksum_size = 32,
-       .metadata_size = 200});
+      PubOpts(512, 10).SetChecksumSize(32).SetMetadataSize(200));
   ASSERT_OK(pub);
   ASSERT_EQ(320, pub->PrefixSize());
   ASSERT_EQ(32, pub->ChecksumSize());
@@ -4222,7 +4245,7 @@ TEST_F(ClientTest, ChecksumSizeTooLarge) {
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
       "chan_cs_big_fail",
-      {.slot_size = 256, .num_slots = 10, .checksum_size = 0x10000});
+      PubOpts(256, 10).SetChecksumSize(0x10000));
   ASSERT_FALSE(pub.ok());
 }
 
@@ -4231,7 +4254,7 @@ TEST_F(ClientTest, MetadataSizeTooLarge) {
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
       "chan_ms_big_fail",
-      {.slot_size = 256, .num_slots = 10, .metadata_size = 0x10000});
+      PubOpts(256, 10).SetMetadataSize(0x10000));
   ASSERT_FALSE(pub.ok());
 }
 
@@ -4240,7 +4263,7 @@ TEST_F(ClientTest, ChecksumSizeAtMax) {
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
       "chan_cs_max",
-      {.slot_size = 0x20000, .num_slots = 2, .checksum_size = 0xFFFF});
+      PubOpts(0x20000, 2).SetChecksumSize(0xFFFF));
   ASSERT_OK(pub);
   ASSERT_EQ(0xFFFF, pub->ChecksumSize());
 }
@@ -4250,7 +4273,7 @@ TEST_F(ClientTest, MetadataSizeAtMax) {
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
       "chan_ms_max",
-      {.slot_size = 0x20000, .num_slots = 2, .metadata_size = 0xFFFF});
+      PubOpts(0x20000, 2).SetMetadataSize(0xFFFF));
   ASSERT_OK(pub);
   ASSERT_EQ(0xFFFF, pub->MetadataSize());
 }
@@ -4260,7 +4283,7 @@ TEST_F(ClientTest, MetadataZero) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
-      "chan_meta_z", {.slot_size = 256, .num_slots = 10});
+      "chan_meta_z", PubOpts(256, 10));
   ASSERT_OK(pub);
   ASSERT_EQ(64, pub->PrefixSize());
   ASSERT_EQ(0, pub->MetadataSize());
@@ -4278,7 +4301,7 @@ TEST_F(ClientTest, MetadataMultipleMessages) {
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
       "chan_meta_mm",
-      {.slot_size = 256, .num_slots = 10, .metadata_size = 16});
+      PubOpts(256, 10).SetMetadataSize(16));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
@@ -4319,8 +4342,7 @@ TEST_F(ClientTest, ChecksumWithMetadata) {
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
       "chan_cs_meta",
-      {.slot_size = 256, .num_slots = 10, .checksum = true,
-       .metadata_size = 16});
+      PubOpts(256, 10).SetChecksum(true).SetMetadataSize(16));
   ASSERT_OK(pub);
   ASSERT_EQ(4, pub->ChecksumSize());
   ASSERT_EQ(16, pub->MetadataSize());
@@ -4328,7 +4350,7 @@ TEST_F(ClientTest, ChecksumWithMetadata) {
   ASSERT_EQ(128, pub->PrefixSize());
 
   absl::StatusOr<Subscriber> sub =
-      client->CreateSubscriber("chan_cs_meta", {.checksum = true});
+      client->CreateSubscriber("chan_cs_meta", SubOpts().SetChecksum(true));
   ASSERT_OK(sub);
 
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
@@ -4358,12 +4380,11 @@ TEST_F(ClientTest, ChecksumWithMetadataCorruptPayload) {
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
       "chan_cs_meta_cp",
-      {.slot_size = 256, .num_slots = 10, .checksum = true,
-       .metadata_size = 16});
+      PubOpts(256, 10).SetChecksum(true).SetMetadataSize(16));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
-      client->CreateSubscriber("chan_cs_meta_cp", {.checksum = true});
+      client->CreateSubscriber("chan_cs_meta_cp", SubOpts().SetChecksum(true));
   ASSERT_OK(sub);
 
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
@@ -4390,12 +4411,11 @@ TEST_F(ClientTest, ChecksumWithMetadataCorruptMetadata) {
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
       "chan_cs_meta_cm",
-      {.slot_size = 256, .num_slots = 10, .checksum = true,
-       .metadata_size = 16});
+      PubOpts(256, 10).SetChecksum(true).SetMetadataSize(16));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
-      client->CreateSubscriber("chan_cs_meta_cm", {.checksum = true});
+      client->CreateSubscriber("chan_cs_meta_cm", SubOpts().SetChecksum(true));
   ASSERT_OK(sub);
 
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
@@ -4423,12 +4443,11 @@ TEST_F(ClientTest, ChecksumWithMetadataCorruptMetadataPassError) {
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
       "chan_cs_meta_pe",
-      {.slot_size = 256, .num_slots = 10, .checksum = true,
-       .metadata_size = 16});
+      PubOpts(256, 10).SetChecksum(true).SetMetadataSize(16));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub = client->CreateSubscriber(
-      "chan_cs_meta_pe", {.checksum = true, .pass_checksum_errors = true});
+      "chan_cs_meta_pe", SubOpts().SetChecksum(true).SetPassChecksumErrors(true));
   ASSERT_OK(sub);
 
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
@@ -4460,13 +4479,12 @@ TEST_F(ClientTest, ChecksumIgnoresPrefixPadding) {
   // Padding region is bytes [68..128) relative to prefix start.
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
       "chan_cs_pad",
-      {.slot_size = 256, .num_slots = 10, .checksum = true,
-       .metadata_size = 16});
+      PubOpts(256, 10).SetChecksum(true).SetMetadataSize(16));
   ASSERT_OK(pub);
   ASSERT_EQ(128, pub->PrefixSize());
 
   absl::StatusOr<Subscriber> sub =
-      client->CreateSubscriber("chan_cs_pad", {.checksum = true});
+      client->CreateSubscriber("chan_cs_pad", SubOpts().SetChecksum(true));
   ASSERT_OK(sub);
 
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
@@ -4508,15 +4526,14 @@ TEST_F(ClientTest, ChecksumIgnoresPrefixPaddingLargeChecksum) {
   // Padding region is bytes [100..128).
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
       "chan_cs_pad_lg",
-      {.slot_size = 256, .num_slots = 10, .checksum = true,
-       .checksum_size = 20, .metadata_size = 32});
+      PubOpts(256, 10).SetChecksum(true).SetChecksumSize(20).SetMetadataSize(32));
   ASSERT_OK(pub);
   ASSERT_EQ(128, pub->PrefixSize());
   ASSERT_EQ(20, pub->ChecksumSize());
   ASSERT_EQ(32, pub->MetadataSize());
 
   absl::StatusOr<Subscriber> sub =
-      client->CreateSubscriber("chan_cs_pad_lg", {.checksum = true});
+      client->CreateSubscriber("chan_cs_pad_lg", SubOpts().SetChecksum(true));
   ASSERT_OK(sub);
 
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
@@ -4802,14 +4819,13 @@ TEST_F(ClientTest, ChecksumAes128CmacWithMetadata) {
   // checksum_size=16 for the 128-bit CMAC output.
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
       "chan_cmac",
-      {.slot_size = 256, .num_slots = 10, .checksum = true,
-       .checksum_size = 16, .metadata_size = 24});
+      PubOpts(256, 10).SetChecksum(true).SetChecksumSize(16).SetMetadataSize(24));
   ASSERT_OK(pub);
   ASSERT_EQ(16, pub->ChecksumSize());
   ASSERT_EQ(24, pub->MetadataSize());
 
   absl::StatusOr<Subscriber> sub =
-      client->CreateSubscriber("chan_cmac", {.checksum = true});
+      client->CreateSubscriber("chan_cmac", SubOpts().SetChecksum(true));
   ASSERT_OK(sub);
 
   pub->SetChecksumCallback(CmacChecksumCallback);
@@ -4842,12 +4858,11 @@ TEST_F(ClientTest, ChecksumAes128CmacCorruptPayload) {
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
       "chan_cmac_cp",
-      {.slot_size = 256, .num_slots = 10, .checksum = true,
-       .checksum_size = 16, .metadata_size = 24});
+      PubOpts(256, 10).SetChecksum(true).SetChecksumSize(16).SetMetadataSize(24));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
-      client->CreateSubscriber("chan_cmac_cp", {.checksum = true});
+      client->CreateSubscriber("chan_cmac_cp", SubOpts().SetChecksum(true));
   ASSERT_OK(sub);
 
   pub->SetChecksumCallback(CmacChecksumCallback);
@@ -4876,12 +4891,11 @@ TEST_F(ClientTest, ChecksumAes128CmacCorruptMetadata) {
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
       "chan_cmac_cm",
-      {.slot_size = 256, .num_slots = 10, .checksum = true,
-       .checksum_size = 16, .metadata_size = 24});
+      PubOpts(256, 10).SetChecksum(true).SetChecksumSize(16).SetMetadataSize(24));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
-      client->CreateSubscriber("chan_cmac_cm", {.checksum = true});
+      client->CreateSubscriber("chan_cmac_cm", SubOpts().SetChecksum(true));
   ASSERT_OK(sub);
 
   pub->SetChecksumCallback(CmacChecksumCallback);
@@ -4910,12 +4924,11 @@ TEST_F(ClientTest, ChecksumAes128CmacCorruptMetadataPassError) {
 
   absl::StatusOr<Publisher> pub = client->CreatePublisher(
       "chan_cmac_pe",
-      {.slot_size = 256, .num_slots = 10, .checksum = true,
-       .checksum_size = 16, .metadata_size = 24});
+      PubOpts(256, 10).SetChecksum(true).SetChecksumSize(16).SetMetadataSize(24));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub = client->CreateSubscriber(
-      "chan_cmac_pe", {.checksum = true, .pass_checksum_errors = true});
+      "chan_cmac_pe", SubOpts().SetChecksum(true).SetPassChecksumErrors(true));
   ASSERT_OK(sub);
 
   pub->SetChecksumCallback(CmacChecksumCallback);
@@ -4947,12 +4960,12 @@ TEST_F(ClientTest, TunnelPublisherSetsCrossMachineFlag) {
 
   absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
       "tunnel_test1",
-      {.slot_size = 256, .num_slots = 10, .for_tunnel = true});
+      PubOpts(256, 10).SetForTunnel(true));
   ASSERT_OK(pub);
   ASSERT_TRUE(pub->ForTunnel());
 
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-      "tunnel_test1", {.for_tunnel = true});
+      "tunnel_test1", SubOpts().SetForTunnel(true));
   ASSERT_OK(sub);
   ASSERT_TRUE(sub->ForTunnel());
 
@@ -4986,7 +4999,7 @@ TEST_F(ClientTest, NonTunnelPublisherDoesNotSetCrossMachineFlag) {
   ASSERT_OK(sub_client.Init(Socket()));
 
   absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-      "tunnel_test2", {.slot_size = 256, .num_slots = 10});
+      "tunnel_test2", PubOpts(256, 10));
   ASSERT_OK(pub);
   ASSERT_FALSE(pub->ForTunnel());
 
@@ -5029,7 +5042,7 @@ TEST_F(ClientTest, InitTwiceFails) {
 
 TEST_F(ClientTest, CheckConnectedBeforeInit) {
   subspace::Client client;
-  auto pub = client.CreatePublisher("no_init_chan", {.slot_size = 64, .num_slots = 4});
+  auto pub = client.CreatePublisher("no_init_chan", PubOpts(64, 4));
   ASSERT_FALSE(pub.ok());
   EXPECT_THAT(pub.status().message(), ::testing::HasSubstr("not connected"));
 }
@@ -5037,7 +5050,7 @@ TEST_F(ClientTest, CheckConnectedBeforeInit) {
 TEST_F(ClientTest, ChannelExistsTrue) {
   subspace::Client client;
   ASSERT_OK(client.Init(Socket()));
-  auto pub = client.CreatePublisher("exists_test", {.slot_size = 64, .num_slots = 4});
+  auto pub = client.CreatePublisher("exists_test", PubOpts(64, 4));
   ASSERT_OK(pub);
   auto exists = client.ChannelExists("exists_test");
   ASSERT_OK(exists);
@@ -5056,7 +5069,7 @@ TEST_F(ClientTest, GetChannelStatsByName) {
   subspace::Client client;
   ASSERT_OK(client.Init(Socket()));
   auto pub = EVAL_AND_ASSERT_OK(
-      client.CreatePublisher("stats_test", {.slot_size = 256, .num_slots = 4}));
+      client.CreatePublisher("stats_test", PubOpts(256, 4)));
   auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
   memset(buf, 'x', 100);
   auto msg = pub.PublishMessage(100);
@@ -5074,9 +5087,9 @@ TEST_F(ClientTest, GetChannelStatsAll) {
   subspace::Client client;
   ASSERT_OK(client.Init(Socket()));
   auto pub1 = EVAL_AND_ASSERT_OK(
-      client.CreatePublisher("allstats1", {.slot_size = 64, .num_slots = 4}));
+      client.CreatePublisher("allstats1", PubOpts(64, 4)));
   auto pub2 = EVAL_AND_ASSERT_OK(
-      client.CreatePublisher("allstats2", {.slot_size = 64, .num_slots = 4}));
+      client.CreatePublisher("allstats2", PubOpts(64, 4)));
 
   auto buf1 = EVAL_AND_ASSERT_OK(pub1.GetMessageBuffer());
   memset(buf1, 'a', 10);
@@ -5109,7 +5122,7 @@ TEST_F(ClientTest, GetChannelCountersByName) {
   subspace::Client client;
   ASSERT_OK(client.Init(Socket()));
   auto pub = EVAL_AND_ASSERT_OK(
-      client.CreatePublisher("counters_name", {.slot_size = 64, .num_slots = 4}));
+      client.CreatePublisher("counters_name", PubOpts(64, 4)));
   auto counters = client.GetChannelCounters("counters_name");
   ASSERT_OK(counters);
   ASSERT_EQ(1, counters->num_pubs);
@@ -5127,7 +5140,7 @@ TEST_F(ClientTest, GetChannelInfoAll) {
   subspace::Client client;
   ASSERT_OK(client.Init(Socket()));
   auto pub = EVAL_AND_ASSERT_OK(
-      client.CreatePublisher("infoall_test", {.slot_size = 64, .num_slots = 4}));
+      client.CreatePublisher("infoall_test", PubOpts(64, 4)));
 
   auto all_info = client.GetChannelInfo();
   ASSERT_OK(all_info);
@@ -5148,7 +5161,7 @@ TEST_F(ClientTest, GetCurrentOrdinal) {
   ASSERT_OK(sub_client.Init(Socket()));
 
   auto pub = EVAL_AND_ASSERT_OK(
-      pub_client.CreatePublisher("ordinal_test", {.slot_size = 64, .num_slots = 4}));
+      pub_client.CreatePublisher("ordinal_test", PubOpts(64, 4)));
   auto sub = EVAL_AND_ASSERT_OK(
       sub_client.CreateSubscriber("ordinal_test"));
 
@@ -5172,7 +5185,7 @@ TEST_F(ClientTest, SetDebugDoesNotCrash) {
   ASSERT_OK(client.Init(Socket()));
   client.SetDebug(true);
   auto pub = EVAL_AND_ASSERT_OK(
-      client.CreatePublisher("debug_test", {.slot_size = 64, .num_slots = 4}));
+      client.CreatePublisher("debug_test", PubOpts(64, 4)));
   auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
   memset(buf, 'y', 5);
   ASSERT_OK(pub.PublishMessage(5));
@@ -5187,7 +5200,7 @@ TEST_F(ClientTest, UnreliablePublisherFileDescriptorAndPollFd) {
   subspace::Client client;
   ASSERT_OK(client.Init(Socket()));
   auto pub = EVAL_AND_ASSERT_OK(
-      client.CreatePublisher("unreliable_fd", {.slot_size = 64, .num_slots = 4}));
+      client.CreatePublisher("unreliable_fd", PubOpts(64, 4)));
   ASSERT_FALSE(pub.IsReliable());
   auto fd = pub.GetFileDescriptor();
   ASSERT_FALSE(fd.Valid());
@@ -5202,7 +5215,7 @@ TEST_F(ClientTest, UnreliablePublisherGetFileDescriptorInvalid) {
   subspace::Client client;
   ASSERT_OK(client.Init(Socket()));
   auto pub = EVAL_AND_ASSERT_OK(
-      client.CreatePublisher("unreliable_fd2", {.slot_size = 64, .num_slots = 4}));
+      client.CreatePublisher("unreliable_fd2", PubOpts(64, 4)));
   ASSERT_FALSE(pub.IsReliable());
   auto fd = pub.GetFileDescriptor();
   ASSERT_FALSE(fd.Valid());
@@ -5212,7 +5225,7 @@ TEST_F(ClientTest, PublishZeroSizeFails) {
   subspace::Client client;
   ASSERT_OK(client.Init(Socket()));
   auto pub = EVAL_AND_ASSERT_OK(
-      client.CreatePublisher("zero_pub", {.slot_size = 64, .num_slots = 4}));
+      client.CreatePublisher("zero_pub", PubOpts(64, 4)));
   [[maybe_unused]] auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
   auto msg = pub.PublishMessage(0);
   ASSERT_FALSE(msg.ok());
@@ -5235,7 +5248,7 @@ TEST_F(ClientTest, OnSendCallbackSuccess) {
   subspace::Client client;
   ASSERT_OK(client.Init(Socket()));
   auto pub = EVAL_AND_ASSERT_OK(
-      client.CreatePublisher("onsend_test", {.slot_size = 256, .num_slots = 4}));
+      client.CreatePublisher("onsend_test", PubOpts(256, 4)));
 
   bool callback_called = false;
   pub.SetOnSendCallback(
@@ -5255,7 +5268,7 @@ TEST_F(ClientTest, OnSendCallbackError) {
   subspace::Client client;
   ASSERT_OK(client.Init(Socket()));
   auto pub = EVAL_AND_ASSERT_OK(
-      client.CreatePublisher("onsend_err", {.slot_size = 256, .num_slots = 4}));
+      client.CreatePublisher("onsend_err", PubOpts(256, 4)));
 
   pub.SetOnSendCallback(
       [](void *, int64_t) -> absl::StatusOr<int64_t> {
@@ -5274,7 +5287,7 @@ TEST_F(ClientTest, WaitForUnreliablePublisherFails) {
   subspace::Client client;
   ASSERT_OK(client.Init(Socket()));
   auto pub = EVAL_AND_ASSERT_OK(
-      client.CreatePublisher("unreliable_wait", {.slot_size = 64, .num_slots = 4}));
+      client.CreatePublisher("unreliable_wait", PubOpts(64, 4)));
   ASSERT_FALSE(pub.IsReliable());
   absl::Status s = pub.Wait();
   ASSERT_FALSE(s.ok());
@@ -5314,7 +5327,7 @@ TEST_F(ClientTest, WaitForSubscriberTimeout) {
 
   // Create pub first so channel exists, then subscriber.
   auto pub = EVAL_AND_ASSERT_OK(pub_client.CreatePublisher(
-      "sub_timeout", {.slot_size = 64, .num_slots = 4}));
+      "sub_timeout", PubOpts(64, 4)));
   auto sub = EVAL_AND_ASSERT_OK(sub_client.CreateSubscriber("sub_timeout"));
 
   // Read any initial trigger to drain the subscriber fd.
@@ -5350,7 +5363,7 @@ TEST_F(ClientTest, OnReceiveCallbackSuccess) {
   ASSERT_OK(sub_client.Init(Socket()));
 
   auto pub = EVAL_AND_ASSERT_OK(pub_client.CreatePublisher(
-      "onrecv_test", {.slot_size = 256, .num_slots = 4}));
+      "onrecv_test", PubOpts(256, 4)));
   auto sub = EVAL_AND_ASSERT_OK(sub_client.CreateSubscriber("onrecv_test"));
 
   bool callback_called = false;
@@ -5378,7 +5391,7 @@ TEST_F(ClientTest, OnReceiveCallbackError) {
   ASSERT_OK(sub_client.Init(Socket()));
 
   auto pub = EVAL_AND_ASSERT_OK(pub_client.CreatePublisher(
-      "onrecv_err", {.slot_size = 256, .num_slots = 4}));
+      "onrecv_err", PubOpts(256, 4)));
   auto sub = EVAL_AND_ASSERT_OK(sub_client.CreateSubscriber("onrecv_err"));
 
   sub.SetOnReceiveCallback(
@@ -5413,7 +5426,7 @@ TEST_F(ClientTest, WaitForSubscriberWithExtraFd) {
   ASSERT_OK(sub_client.Init(Socket()));
 
   auto pub = EVAL_AND_ASSERT_OK(pub_client.CreatePublisher(
-      "twofd_test", {.slot_size = 64, .num_slots = 4}));
+      "twofd_test", PubOpts(64, 4)));
   auto sub = EVAL_AND_ASSERT_OK(sub_client.CreateSubscriber("twofd_test"));
 
   auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
@@ -5438,7 +5451,7 @@ TEST_F(ClientTest, WaitForSubscriberExtraFdFires) {
   ASSERT_OK(sub_client.Init(Socket()));
 
   auto pub = EVAL_AND_ASSERT_OK(pub_client.CreatePublisher(
-      "twofd_extra", {.slot_size = 64, .num_slots = 4}));
+      "twofd_extra", PubOpts(64, 4)));
   auto sub = EVAL_AND_ASSERT_OK(sub_client.CreateSubscriber("twofd_extra"));
 
   // Drain any initial trigger.
@@ -5543,7 +5556,7 @@ TEST_F(ClientTest, DoubleRegisterResizeCallback) {
   subspace::Client client;
   ASSERT_OK(client.Init(Socket()));
   auto pub = EVAL_AND_ASSERT_OK(
-      client.CreatePublisher("double_resize", {.slot_size = 64, .num_slots = 4}));
+      client.CreatePublisher("double_resize", PubOpts(64, 4)));
 
   ASSERT_OK(pub.RegisterResizeCallback(
       [](Publisher *, int, int) -> absl::Status { return absl::OkStatus(); }));
@@ -5558,7 +5571,7 @@ TEST_F(ClientTest, UnregisterResizeCallbackNotRegistered) {
   subspace::Client client;
   ASSERT_OK(client.Init(Socket()));
   auto pub = EVAL_AND_ASSERT_OK(
-      client.CreatePublisher("unreg_resize", {.slot_size = 64, .num_slots = 4}));
+      client.CreatePublisher("unreg_resize", PubOpts(64, 4)));
   absl::Status s = pub.UnregisterResizeCallback();
   ASSERT_FALSE(s.ok());
   EXPECT_THAT(s.message(), ::testing::HasSubstr("No resize callback"));
@@ -5584,7 +5597,7 @@ TEST_F(ClientTest, MessageCopyAndMove) {
   ASSERT_OK(sub_client.Init(Socket()));
 
   auto pub = EVAL_AND_ASSERT_OK(pub_client.CreatePublisher(
-      "msg_copy", {.slot_size = 64, .num_slots = 4}));
+      "msg_copy", PubOpts(64, 4)));
   auto sub = EVAL_AND_ASSERT_OK(sub_client.CreateSubscriber("msg_copy"));
 
   auto buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
@@ -5721,7 +5734,7 @@ TEST_F(ClientTest, ResizeCallbackReturnsError) {
   subspace::Client client;
   ASSERT_OK(client.Init(Socket()));
   auto pub = EVAL_AND_ASSERT_OK(
-      client.CreatePublisher("resize_err", {.slot_size = 64, .num_slots = 4}));
+      client.CreatePublisher("resize_err", PubOpts(64, 4)));
 
   ASSERT_OK(pub.RegisterResizeCallback(
       [](Publisher *, int, int) -> absl::Status {
@@ -5741,7 +5754,7 @@ TEST_F(ClientTest, ResizeCallbackReturnsError) {
 
 TEST_F(ClientTest, FreeCreatePublisher) {
   auto pub_or = subspace::CreatePublisher(
-      "free_pub", {.slot_size = 256, .num_slots = 10}, Socket());
+      "free_pub", PubOpts(256, 10), Socket());
   ASSERT_OK(pub_or);
   auto pub = std::move(*pub_or);
   ASSERT_EQ(256, pub.SlotSize());
@@ -5772,7 +5785,7 @@ TEST_F(ClientTest, FreeCreateSubscriber) {
 
 TEST_F(ClientTest, FreeCreatePublisherAndSubscriberRoundTrip) {
   auto pub_or = subspace::CreatePublisher(
-      "free_rt", {.slot_size = 256, .num_slots = 10}, Socket());
+      "free_rt", PubOpts(256, 10), Socket());
   ASSERT_OK(pub_or);
   auto pub = std::move(*pub_or);
 
@@ -5793,7 +5806,7 @@ TEST_F(ClientTest, FreeCreatePublisherAndSubscriberRoundTrip) {
 
 TEST_F(ClientTest, FreeCreatePublisherBadSocket) {
   auto pub_or = subspace::CreatePublisher(
-      "bad_pub", {.slot_size = 256, .num_slots = 10},
+      "bad_pub", PubOpts(256, 10),
       "/tmp/no_such_subspace_socket");
   ASSERT_FALSE(pub_or.ok());
 }

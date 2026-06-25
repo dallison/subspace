@@ -43,13 +43,12 @@ CppPublisherHandle cpp_test_create_publisher_with_split(
     int num_slots, int32_t checksum_size, int32_t metadata_size,
     bool use_split_buffers) {
   auto *client = static_cast<subspace::Client *>(client_handle);
-  subspace::PublisherOptions opts{
-      .slot_size = slot_size,
-      .num_slots = num_slots,
-      .checksum_size = checksum_size,
-      .metadata_size = metadata_size,
-      .use_split_buffers = use_split_buffers,
-  };
+  subspace::PublisherOptions opts;
+  opts.SetSlotSize(slot_size)
+      .SetNumSlots(num_slots)
+      .SetChecksumSize(checksum_size)
+      .SetMetadataSize(metadata_size)
+      .SetUseSplitBuffers(use_split_buffers);
   auto status_or = client->CreatePublisher(channel, opts);
   if (!status_or.ok()) {
     return nullptr;
@@ -89,8 +88,8 @@ CppSubscriberHandle cpp_test_create_subscriber(CppClientHandle client_handle,
                                                const char *channel,
                                                bool checksum) {
   auto *client = static_cast<subspace::Client *>(client_handle);
-  subspace::SubscriberOptions opts{};
-  opts.checksum = checksum;
+  subspace::SubscriberOptions opts;
+  opts.SetChecksum(checksum);
   auto status_or = client->CreateSubscriber(channel, opts);
   if (!status_or.ok()) {
     return nullptr;

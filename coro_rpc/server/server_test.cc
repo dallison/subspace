@@ -183,13 +183,13 @@ Open([[maybe_unused]] std::shared_ptr<subspace::coro_rpc::RpcServer> server,
 
   auto pub = ctx.client->CreatePublisher(
       "/rpc/CoroTestService/request", 1024, 10,
-      {.reliable = true, .type = "subspace.RpcServerRequest"});
+      subspace::PublisherOptions().SetReliable(true).SetType("subspace.RpcServerRequest"));
   CO_EXPECT_OK(pub);
 
   ctx.pub = std::make_shared<subspace::Publisher>(std::move(*pub));
   auto sub = ctx.client->CreateSubscriber(
       "/rpc/CoroTestService/response",
-      {.reliable = true, .type = "subspace.RpcServerResponse"});
+      subspace::SubscriberOptions().SetReliable(true).SetType("subspace.RpcServerResponse"));
   CO_EXPECT_OK(sub);
 
   ctx.sub = std::make_shared<subspace::Subscriber>(std::move(*sub));
@@ -327,12 +327,12 @@ TEST_F(CoroServerTest, OpenAndCall) {
             method->request_channel().name(),
             method->request_channel().slot_size(),
             method->request_channel().num_slots(),
-            {.reliable = true, .type = method->request_channel().type()});
+            subspace::PublisherOptions().SetReliable(true).SetType(method->request_channel().type()));
         CO_EXPECT_OK(pub);
 
         auto sub = client.CreateSubscriber(
             method->response_channel().name(),
-            {.reliable = true, .type = method->response_channel().type()});
+            subspace::SubscriberOptions().SetReliable(true).SetType(method->response_channel().type()));
         CO_EXPECT_OK(sub);
 
         auto buffer = pub->GetMessageBuffer(int32_t(req.ByteSizeLong()));
@@ -410,12 +410,12 @@ TEST_F(CoroServerTest, CallVoidMethod) {
             method->request_channel().name(),
             method->request_channel().slot_size(),
             method->request_channel().num_slots(),
-            {.reliable = true, .type = method->request_channel().type()});
+            subspace::PublisherOptions().SetReliable(true).SetType(method->request_channel().type()));
         CO_EXPECT_OK(pub);
 
         auto sub = client.CreateSubscriber(
             method->response_channel().name(),
-            {.reliable = true, .type = method->response_channel().type()});
+            subspace::SubscriberOptions().SetReliable(true).SetType(method->response_channel().type()));
         CO_EXPECT_OK(sub);
 
         auto buffer = pub->GetMessageBuffer(int32_t(req.ByteSizeLong()));
@@ -489,12 +489,12 @@ TEST_F(CoroServerTest, CallError) {
             method->request_channel().name(),
             method->request_channel().slot_size(),
             method->request_channel().num_slots(),
-            {.reliable = true, .type = method->request_channel().type()});
+            subspace::PublisherOptions().SetReliable(true).SetType(method->request_channel().type()));
         CO_EXPECT_OK(pub);
 
         auto sub = client.CreateSubscriber(
             method->response_channel().name(),
-            {.reliable = true, .type = method->response_channel().type()});
+            subspace::SubscriberOptions().SetReliable(true).SetType(method->response_channel().type()));
         CO_EXPECT_OK(sub);
 
         auto buffer = pub->GetMessageBuffer(int32_t(req.ByteSizeLong()));
@@ -572,12 +572,12 @@ TEST_F(CoroServerTest, CallAsyncMethod) {
             method->request_channel().name(),
             method->request_channel().slot_size(),
             method->request_channel().num_slots(),
-            {.reliable = true, .type = method->request_channel().type()});
+            subspace::PublisherOptions().SetReliable(true).SetType(method->request_channel().type()));
         CO_EXPECT_OK(pub);
 
         auto sub = client.CreateSubscriber(
             method->response_channel().name(),
-            {.reliable = true, .type = method->response_channel().type()});
+            subspace::SubscriberOptions().SetReliable(true).SetType(method->response_channel().type()));
         CO_EXPECT_OK(sub);
 
         auto buffer = pub->GetMessageBuffer(int32_t(req.ByteSizeLong()));
@@ -657,12 +657,12 @@ TEST_F(CoroServerTest, Stream) {
             method->request_channel().name(),
             method->request_channel().slot_size(),
             method->request_channel().num_slots(),
-            {.reliable = true, .type = method->request_channel().type()});
+            subspace::PublisherOptions().SetReliable(true).SetType(method->request_channel().type()));
         CO_EXPECT_OK(pub);
 
         auto sub = client.CreateSubscriber(
             method->response_channel().name(),
-            {.reliable = true, .type = method->response_channel().type()});
+            subspace::SubscriberOptions().SetReliable(true).SetType(method->response_channel().type()));
         CO_EXPECT_OK(sub);
 
         auto buffer = pub->GetMessageBuffer(int32_t(req.ByteSizeLong()));
@@ -743,16 +743,16 @@ TEST_F(CoroServerTest, CancelStream) {
             method->request_channel().name(),
             method->request_channel().slot_size(),
             method->request_channel().num_slots(),
-            {.reliable = true, .type = method->request_channel().type()});
+            subspace::PublisherOptions().SetReliable(true).SetType(method->request_channel().type()));
         CO_EXPECT_OK(pub);
 
         auto cancel_pub = client.CreatePublisher(
-            method->cancel_channel(), 64, 10, {.reliable = true});
+            method->cancel_channel(), 64, 10, subspace::PublisherOptions().SetReliable(true));
         CO_EXPECT_OK(cancel_pub);
 
         auto sub = client.CreateSubscriber(
             method->response_channel().name(),
-            {.reliable = true, .type = method->response_channel().type()});
+            subspace::SubscriberOptions().SetReliable(true).SetType(method->response_channel().type()));
         CO_EXPECT_OK(sub);
 
         auto buffer = pub->GetMessageBuffer(int32_t(req.ByteSizeLong()));

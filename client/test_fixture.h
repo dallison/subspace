@@ -135,7 +135,16 @@ using Message = subspace::Message;
     std::move(*result);                                                        \
   })
 
-#define ASSERT_OK(e) ASSERT_THAT(e, ::absl_testing::IsOk())
+template<typename T>
+std::string StatusToString(const absl::StatusOr<T> &status) {
+  return status.status().ToString();
+}
+
+std::string StatusToString(const absl::Status &status) {
+  return status.ToString();
+}
+
+#define ASSERT_OK(e) ASSERT_THAT(e, ::absl_testing::IsOk()) << StatusToString(e) << " failed"
 
 // Base test fixture that starts a single local Subspace server for the
 // duration of the test suite.  Concrete fixtures inherit from this and

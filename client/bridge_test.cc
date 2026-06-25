@@ -395,11 +395,11 @@ TEST_F(BridgeTest, Basic) {
 
   // Create a non-local publisher on client 1.
   absl::StatusOr<Publisher> pub = client1.CreatePublisher(
-      "/bridged_basic", {.slot_size = 256, .num_slots = 10, .local = false});
+      "/bridged_basic", subspace::PublisherOptions().SetSlotSize(256).SetNumSlots(10).SetLocal(false));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
-      client2.CreateSubscriber("/bridged_basic", {.max_active_messages = 2});
+      client2.CreateSubscriber("/bridged_basic", subspace::SubscriberOptions().SetMaxActiveMessages(2));
   ASSERT_OK(sub);
 
   toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
@@ -447,14 +447,12 @@ TEST(BridgePortRangeTest, StaticBridgePortRangeSucceeds) {
 
   absl::StatusOr<Publisher> pub =
       client1.CreatePublisher("/bridged_static_range",
-                              {.slot_size = 256,
-                               .num_slots = 10,
-                               .local = false});
+                              subspace::PublisherOptions().SetSlotSize(256).SetNumSlots(10).SetLocal(false));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
       client2.CreateSubscriber("/bridged_static_range",
-                               {.max_active_messages = 2});
+                               subspace::SubscriberOptions().SetMaxActiveMessages(2));
   ASSERT_OK(sub);
 
   WaitForSubscribedMessage(servers.BridgeNotificationPipe(0),
@@ -492,14 +490,12 @@ TEST(BridgePortRangeTest, FallsBackWhenConfiguredRangeIsBusy) {
 
   absl::StatusOr<Publisher> pub =
       client1.CreatePublisher("/bridged_fallback_range",
-                              {.slot_size = 256,
-                               .num_slots = 10,
-                               .local = false});
+                              subspace::PublisherOptions().SetSlotSize(256).SetNumSlots(10).SetLocal(false));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
       client2.CreateSubscriber("/bridged_fallback_range",
-                               {.max_active_messages = 2});
+                               subspace::SubscriberOptions().SetMaxActiveMessages(2));
   ASSERT_OK(sub);
 
   WaitForSubscribedMessage(servers.BridgeNotificationPipe(0),
@@ -537,14 +533,12 @@ TEST(BridgePortRangeTest, FailsWhenConfiguredRangeIsBusyAndFallbackDisabled) {
 
   absl::StatusOr<Publisher> pub =
       client1.CreatePublisher("/bridged_exhausted_range",
-                              {.slot_size = 256,
-                               .num_slots = 10,
-                               .local = false});
+                              subspace::PublisherOptions().SetSlotSize(256).SetNumSlots(10).SetLocal(false));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
       client2.CreateSubscriber("/bridged_exhausted_range",
-                               {.max_active_messages = 2});
+                               subspace::SubscriberOptions().SetMaxActiveMessages(2));
   ASSERT_OK(sub);
 
   absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
@@ -565,15 +559,15 @@ TEST_F(BridgeTest, TwoSubs) {
 
   // Create a non-local publisher on client 1.
   absl::StatusOr<Publisher> pub = client1.CreatePublisher(
-      "/bridged_twosubs", {.slot_size = 256, .num_slots = 10, .local = false});
+      "/bridged_twosubs", subspace::PublisherOptions().SetSlotSize(256).SetNumSlots(10).SetLocal(false));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub1 =
-      client2.CreateSubscriber("/bridged_twosubs", {.max_active_messages = 2});
+      client2.CreateSubscriber("/bridged_twosubs", subspace::SubscriberOptions().SetMaxActiveMessages(2));
   ASSERT_OK(sub1);
 
   absl::StatusOr<Subscriber> sub2 =
-      client2.CreateSubscriber("/bridged_twosubs", {.max_active_messages = 2});
+      client2.CreateSubscriber("/bridged_twosubs", subspace::SubscriberOptions().SetMaxActiveMessages(2));
   ASSERT_OK(sub2);
 
   toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
@@ -610,14 +604,11 @@ TEST_F(BridgeTest, BasicRetirement) {
 
   // Create a non-local publisher on client 1.
   absl::StatusOr<Publisher> pub =
-      client1.CreatePublisher("/bridged_basic_retire", {.slot_size = 256,
-                                                   .num_slots = 10,
-                                                   .local = false,
-                                                   .notify_retirement = true});
+      client1.CreatePublisher("/bridged_basic_retire", subspace::PublisherOptions().SetSlotSize(256).SetNumSlots(10).SetLocal(false).SetNotifyRetirement(true));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
-      client2.CreateSubscriber("/bridged_basic_retire", {.max_active_messages = 2});
+      client2.CreateSubscriber("/bridged_basic_retire", subspace::SubscriberOptions().SetMaxActiveMessages(2));
   ASSERT_OK(sub);
 
   toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
@@ -666,19 +657,16 @@ TEST_F(BridgeTest, MultipleRetirement) {
   // so we will never receive a retirement notification for it.
   absl::StatusOr<Publisher> local_pub = client1.CreatePublisher(
       "/bridged_retire1",
-      {.slot_size = 256, .num_slots = kNumSlots, .local = false});
+      subspace::PublisherOptions().SetSlotSize(256).SetNumSlots(kNumSlots).SetLocal(false));
   ASSERT_OK(local_pub);
 
   // Create a non-local publisher on client 1.
   absl::StatusOr<Publisher> pub =
-      client1.CreatePublisher("/bridged_retire1", {.slot_size = 256,
-                                                   .num_slots = kNumSlots,
-                                                   .local = false,
-                                                   .notify_retirement = true});
+      client1.CreatePublisher("/bridged_retire1", subspace::PublisherOptions().SetSlotSize(256).SetNumSlots(kNumSlots).SetLocal(false).SetNotifyRetirement(true));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
-      client2.CreateSubscriber("/bridged_retire1", {.max_active_messages = 2});
+      client2.CreateSubscriber("/bridged_retire1", subspace::SubscriberOptions().SetMaxActiveMessages(2));
   ASSERT_OK(sub);
 
   toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
@@ -754,21 +742,18 @@ TEST_F(BridgeTest, MultipleRetirement2) {
 
   // Create a non-local publisher on client 1.
   absl::StatusOr<Publisher> pub =
-      client1.CreatePublisher("/bridged_retire2", {.slot_size = 256,
-                                                   .num_slots = kNumSlots,
-                                                   .local = false,
-                                                   .notify_retirement = true});
+      client1.CreatePublisher("/bridged_retire2", subspace::PublisherOptions().SetSlotSize(256).SetNumSlots(kNumSlots).SetLocal(false).SetNotifyRetirement(true));
   ASSERT_OK(pub);
 
   // Create publisher on the subscriber server.  This wil consume slot 0 on that
   // side.
   absl::StatusOr<Publisher> local_pub = client2.CreatePublisher(
       "/bridged_retire2",
-      {.slot_size = 256, .num_slots = kNumSlots, .local = false});
+      subspace::PublisherOptions().SetSlotSize(256).SetNumSlots(kNumSlots).SetLocal(false));
   ASSERT_OK(local_pub);
 
   absl::StatusOr<Subscriber> sub =
-      client2.CreateSubscriber("/bridged_retire2", {.max_active_messages = 2});
+      client2.CreateSubscriber("/bridged_retire2", subspace::SubscriberOptions().SetMaxActiveMessages(2));
   ASSERT_OK(sub);
 
   toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
@@ -892,13 +877,12 @@ TEST_F(BridgeTest, LargeChecksumBridge) {
   // checksum_size=20, metadata_size=50 → prefix = Aligned<64>(48+20+50) = 128.
   absl::StatusOr<Publisher> pub = client1.CreatePublisher(
       "/bridged_sizes",
-      {.slot_size = 256, .num_slots = 10, .local = false,
-       .checksum_size = 20, .metadata_size = 50});
+      subspace::PublisherOptions().SetSlotSize(256).SetNumSlots(10).SetLocal(false).SetChecksumSize(20).SetMetadataSize(50));
   ASSERT_OK(pub);
   ASSERT_EQ(128, pub->PrefixSize());
 
   absl::StatusOr<Subscriber> sub =
-      client2.CreateSubscriber("/bridged_sizes", {.max_active_messages = 2});
+      client2.CreateSubscriber("/bridged_sizes", subspace::SubscriberOptions().SetMaxActiveMessages(2));
   ASSERT_OK(sub);
 
   toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
@@ -931,12 +915,12 @@ TEST_F(BridgeTest, DefaultSizesBridge) {
 
   absl::StatusOr<Publisher> pub = client1.CreatePublisher(
       "/bridged_def_sizes",
-      {.slot_size = 256, .num_slots = 10, .local = false});
+      subspace::PublisherOptions().SetSlotSize(256).SetNumSlots(10).SetLocal(false));
   ASSERT_OK(pub);
   ASSERT_EQ(64, pub->PrefixSize());
 
   absl::StatusOr<Subscriber> sub = client2.CreateSubscriber(
-      "/bridged_def_sizes", {.max_active_messages = 2});
+      "/bridged_def_sizes", subspace::SubscriberOptions().SetMaxActiveMessages(2));
   ASSERT_OK(sub);
 
   toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
@@ -971,13 +955,13 @@ TEST_F(BridgeTest, MetadataBridge) {
 
   absl::StatusOr<Publisher> pub = client1.CreatePublisher(
       "/bridged_meta",
-      {.slot_size = 256, .num_slots = 10, .local = false, .metadata_size = 24});
+      subspace::PublisherOptions().SetSlotSize(256).SetNumSlots(10).SetLocal(false).SetMetadataSize(24));
   ASSERT_OK(pub);
   ASSERT_EQ(128, pub->PrefixSize());
   ASSERT_EQ(24, pub->MetadataSize());
 
   absl::StatusOr<Subscriber> sub =
-      client2.CreateSubscriber("/bridged_meta", {.max_active_messages = 2});
+      client2.CreateSubscriber("/bridged_meta", subspace::SubscriberOptions().SetMaxActiveMessages(2));
   ASSERT_OK(sub);
 
   toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
@@ -1019,13 +1003,12 @@ TEST_F(BridgeTest, MetadataLargeBridge) {
 
   absl::StatusOr<Publisher> pub = client1.CreatePublisher(
       "/bridged_meta_lg",
-      {.slot_size = 256, .num_slots = 10, .local = false,
-       .checksum_size = 20, .metadata_size = 100});
+      subspace::PublisherOptions().SetSlotSize(256).SetNumSlots(10).SetLocal(false).SetChecksumSize(20).SetMetadataSize(100));
   ASSERT_OK(pub);
   ASSERT_EQ(192, pub->PrefixSize());
 
   absl::StatusOr<Subscriber> sub =
-      client2.CreateSubscriber("/bridged_meta_lg", {.max_active_messages = 2});
+      client2.CreateSubscriber("/bridged_meta_lg", subspace::SubscriberOptions().SetMaxActiveMessages(2));
   ASSERT_OK(sub);
 
   toolbelt::FileDescriptor &send_bridge_pipe = BridgeNotificationPipe(0);
@@ -1072,13 +1055,12 @@ TEST_F(BridgeTest, SplitBufferSourceBridge) {
 
   absl::StatusOr<Publisher> pub = client1.CreatePublisher(
       "/bridged_split_source",
-      {.slot_size = 256, .num_slots = 10, .local = false,
-       .use_split_buffers = true, .split_buffers_over_bridge = false});
+      subspace::PublisherOptions().SetSlotSize(256).SetNumSlots(10).SetLocal(false).SetUseSplitBuffers(true).SetSplitBuffersOverBridge(false));
   ASSERT_OK(pub);
   ASSERT_TRUE(pub->UsesSplitBuffers());
 
   absl::StatusOr<Subscriber> sub = client2.CreateSubscriber(
-      "/bridged_split_source", {.max_active_messages = 2});
+      "/bridged_split_source", subspace::SubscriberOptions().SetMaxActiveMessages(2));
   ASSERT_OK(sub);
 
   subspace::Subscribed sent = ReadSubscribedMessage(
@@ -1112,13 +1094,12 @@ TEST_F(BridgeTest, SplitBuffersOverBridge) {
 
   absl::StatusOr<Publisher> pub = client1.CreatePublisher(
       "/bridged_split_remote",
-      {.slot_size = 256, .num_slots = 10, .local = false,
-       .use_split_buffers = false, .split_buffers_over_bridge = true});
+      subspace::PublisherOptions().SetSlotSize(256).SetNumSlots(10).SetLocal(false).SetUseSplitBuffers(false).SetSplitBuffersOverBridge(true));
   ASSERT_OK(pub);
   ASSERT_FALSE(pub->UsesSplitBuffers());
 
   absl::StatusOr<Subscriber> sub = client2.CreateSubscriber(
-      "/bridged_split_remote", {.max_active_messages = 2});
+      "/bridged_split_remote", subspace::SubscriberOptions().SetMaxActiveMessages(2));
   ASSERT_OK(sub);
 
   subspace::Subscribed sent = ReadSubscribedMessage(
@@ -1334,7 +1315,7 @@ TEST(BridgeStressTest, MultiThreadedBridging) {
         return;
       }
       absl::StatusOr<Subscriber> sub =
-          client.CreateSubscriber(channel_name(ch), {.max_active_messages = 8});
+          client.CreateSubscriber(channel_name(ch), subspace::SubscriberOptions().SetMaxActiveMessages(8));
       if (!sub.ok()) {
         ADD_FAILURE() << "CreateSubscriber: " << sub.status();
         failed = true;
@@ -1421,10 +1402,7 @@ TEST(BridgeStressTest, MultiThreadedBridging) {
       // exhaust the process fd limit (macOS defaults are low) - and this test
       // targets the multi-threaded bridge data plane, not split buffers.
       absl::StatusOr<Publisher> pub = client.CreatePublisher(
-          channel_name(ch), {.slot_size = kSlotSize,
-                             .num_slots = kNumSlots,
-                             .local = false,
-                             .use_split_buffers = false});
+          channel_name(ch), subspace::PublisherOptions().SetSlotSize(kSlotSize).SetNumSlots(kNumSlots).SetLocal(false).SetUseSplitBuffers(false));
       if (!pub.ok()) {
         ADD_FAILURE() << "CreatePublisher: " << pub.status();
         failed = true;
@@ -1530,11 +1508,11 @@ TEST(VsockBridgeTest, BridgeOverVsockLoopback) {
   // Non-local publisher on server 0; subscriber on server 1.  Bridging the two
   // requires a vsock data connection between the servers.
   absl::StatusOr<Publisher> pub = client1.CreatePublisher(
-      "/vsock_bridged", {.slot_size = 256, .num_slots = 10, .local = false});
+      "/vsock_bridged", subspace::PublisherOptions().SetSlotSize(256).SetNumSlots(10).SetLocal(false));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
-      client2.CreateSubscriber("/vsock_bridged", {.max_active_messages = 2});
+      client2.CreateSubscriber("/vsock_bridged", subspace::SubscriberOptions().SetMaxActiveMessages(2));
   ASSERT_OK(sub);
 
   ASSERT_TRUE(WaitForBridgesEstablished(servers.BridgeNotificationPipe(0),

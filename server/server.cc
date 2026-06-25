@@ -7,6 +7,7 @@
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_format.h"
 #include "client/client.h"
+#include "common/split_buffer.h"
 #include "client_handler.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/clock.h"
@@ -47,6 +48,40 @@ static bool ChannelUsesSplitBuffers(const ServerChannel *channel) {
   return split_channel->HasSplitBufferOptions() &&
          split_channel->GetSplitBufferOptions().use_split_buffers;
 }
+
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
+static bool CleanupSplitBufferMetadataFile(const std::filesystem::path &path) {
+  absl::StatusOr<SplitBufferMetadata> metadata =
+      ReadSplitBufferMetadataFile(path.string());
+  if (!metadata.ok() || metadata->object_name.empty()) {
+    return false;
+  }
+
+  (void)DestroySplitSharedMemoryBuffer(*metadata);
+  return true;
+}
+
+static void CleanupPosixShadowFile(const std::filesystem::path &path) {
+  auto status = Channel::PosixSharedMemoryName(path.string());
+  if (status.ok()) {
+    (void)shm_unlink(status->c_str());
+  }
+  (void)std::filesystem::remove(path);
+}
+
+static void CleanupSubspaceTmpFile(const std::filesystem::path &path) {
+  if (CleanupSplitBufferMetadataFile(path)) {
+    return;
+  }
+  CleanupPosixShadowFile(path);
+}
+
+static void CleanupSplitBufferObjectFile(const std::filesystem::path &path) {
+  std::string object_name = path.filename().string();
+  (void)shm_unlink(object_name.c_str());
+  (void)std::filesystem::remove(path);
+}
+#endif
 
 static bool ChannelUsesSplitBuffersOverBridge(const ServerChannel *channel) {
   const ServerChannel *split_channel = SplitBufferOptionsChannel(channel);
@@ -618,34 +653,30 @@ void Server::ForeachChannel(std::function<void(ServerChannel *)> func) {
 
 void Server::CleanupAfterSession() {
   std::string session_shm_file_prefix =
-      "subspace_." + std::to_string(session_id_);
+      "subspace_" + std::to_string(session_id_);
 
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
   // Android uses anonymous fd-backed shared memory; there are no shm files to
   // remove for a session.
 
 #elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
-  // Remove all files starting with "subspace_SESSION" in /tmp.  These refer to
-  // shared memory segments names "subspace_INODE".
+  // Remove this session's /tmp shadow files.  Split-buffer metadata shadows are
+  // parsed first so their paired subspace_sb_* shm objects can be removed too.
   for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
     if (entry.path().filename().string().rfind(session_shm_file_prefix, 0) ==
         0) {
-      // Extrace the node and remove the shared memory segment.
-      // The name of the shared memory segment is "subspace_<inode>".
-      auto status = Channel::PosixSharedMemoryName(entry.path().string());
-      if (status.ok()) {
-        shm_unlink(status->c_str());
-      }
-      (void)std::filesystem::remove(entry.path());
+      CleanupSubspaceTmpFile(entry.path());
     }
   }
-  // Remove all files in /tmp that contain .scb., .ccb. or .bcb. in the name.
-  std::string ccb_shm_prefix = absl::StrFormat(".%d.ccb.", session_id_);
-  std::string bcb_shm_prefix = absl::StrFormat(".%d.bcb.", session_id_);
+  // Remove shadow files for the session's POSIX shm objects.
+  std::string session_shm_prefix =
+      absl::StrFormat("%08x.", static_cast<uint32_t>(session_id_));
   for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
     std::string filename = entry.path().filename().string();
-    if (filename.find(ccb_shm_prefix) != std::string::npos ||
-        filename.find(bcb_shm_prefix) != std::string::npos) {
+    if (filename.rfind(session_shm_prefix, 0) == 0 &&
+        (filename.find(".scb.") != std::string::npos ||
+         filename.find(".ccb.") != std::string::npos ||
+         filename.find(".bcb.") != std::string::npos)) {
       (void)std::filesystem::remove(entry.path());
       // There is also a shm segment with the same name as the file.
       (void)shm_unlink(entry.path().filename().c_str());
@@ -670,23 +701,21 @@ void Server::CleanupFilesystem() {
   // remove.
 
 #elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
-  // Remove all files starting with "subspace_" in /tmp.  These refer to
-  // shared memory segments names "subspace_INODE".
+  // Remove Subspace /tmp artifacts.  Split-buffer metadata shadows are parsed
+  // before deletion so their paired subspace_sb_* shm objects can be removed.
   for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
-    if (entry.path().filename().string().rfind("subspace_", 0) == 0) {
-      // Extrace the node and remove the shared memory segment.
-      // The name of the shared memory segment is "subspace_<inode>".
-      auto status = Channel::PosixSharedMemoryName(entry.path().string());
-      if (status.ok()) {
-        shm_unlink(status->c_str());
-      }
-      (void)std::filesystem::remove(entry.path());
+    std::string filename = entry.path().filename().string();
+    if (filename.rfind("subspace_sb_", 0) == 0) {
+      CleanupSplitBufferObjectFile(entry.path());
+    } else if (filename.rfind("subspace_", 0) == 0) {
+      CleanupSubspaceTmpFile(entry.path());
     }
   }
   // Remove all files in /tmp that contain .scb., .ccb. or .bcb. in the name.
   for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
     std::string filename = entry.path().filename().string();
-    if (filename.find(".ccb.") != std::string::npos ||
+    if (filename.find(".scb.") != std::string::npos ||
+        filename.find(".ccb.") != std::string::npos ||
         filename.find(".bcb.") != std::string::npos) {
       (void)std::filesystem::remove(entry.path());
       // There is also a shm segment with the same name as the file.
@@ -805,7 +834,7 @@ absl::Status Server::Run(int num_asio_threads) {
       CleanupFilesystem();
     }
     absl::StatusOr<SystemControlBlock *> scb =
-        CreateSystemControlBlock(scb_fd_);
+        CreateSystemControlBlock(scb_fd_, session_id_);
     if (!scb.ok()) {
       return absl::InternalError(absl::StrFormat(
           "Failed to create SystemControlBlock in shared memory: %s",

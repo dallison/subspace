@@ -29,7 +29,7 @@ ServerChannel::~ServerChannel() {
 static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
                                                  int64_t size, bool map,
                                                  toolbelt::FileDescriptor &fd,
-                                                 [[maybe_unused]] int session_id = 0) {
+                                                 [[maybe_unused]] uint64_t session_id = 0) {
   char shm_file[NAME_MAX]; // Unique file in file system.
   int tmpfd;
 
@@ -70,19 +70,13 @@ static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
 
 #else
   char *shm_name;          // Name passed to shm_* (starts with /)
-#if defined(__linux__)
-  // On Linux we have actual files in /dev/shm so we can create a unique file.
-  snprintf(shm_file, sizeof(shm_file), "/dev/shm/%d.%s.XXXXXX", id, suffix);
-  tmpfd = mkstemp(shm_file);
-  shm_name = shm_file + 8; // After /dev/shm
-#else
-  // On other systems (BSD, MacOS, etc), we need to use a file in /tmp.
-  // This is just used to ensure uniqueness.
-  snprintf(shm_file, sizeof(shm_file), "/tmp/%d.%d.%s.XXXXXX", session_id, id,
-           suffix);
+  // Create a shadow file in /tmp for uniqueness.  The shm object name is
+  // derived from this path and unlinked while the shadow file stays around for
+  // lifetime/cleanup bookkeeping.
+  snprintf(shm_file, sizeof(shm_file), "/tmp/%08x.%d.%s.XXXXXX",
+           static_cast<uint32_t>(session_id), id, suffix);
   tmpfd = mkstemp(shm_file);
   shm_name = shm_file + 4; // After /tmp
-#endif
   // Remove any existing shared memory.
   shm_unlink(shm_name);
 
@@ -123,9 +117,9 @@ static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
 }
 
 absl::StatusOr<SystemControlBlock *>
-CreateSystemControlBlock(toolbelt::FileDescriptor &fd) {
+CreateSystemControlBlock(toolbelt::FileDescriptor &fd, uint64_t session_id) {
   absl::StatusOr<void *> s = CreateSharedMemory(
-      0, "scb", sizeof(SystemControlBlock), /*map=*/true, fd, 0);
+      0, "scb", sizeof(SystemControlBlock), /*map=*/true, fd, session_id);
   if (!s.ok()) {
     return s.status();
   }

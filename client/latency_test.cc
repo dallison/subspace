@@ -94,7 +94,7 @@ TEST_F(LatencyTest, MultithreadedSingleChannel) {
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-      "stress", {.max_active_messages = kNumReceivers + 1});
+      "stress", subspace::SubscriberOptions().SetMaxActiveMessages(kNumReceivers + 1));
   ASSERT_OK(sub);
 
   std::vector<std::thread> receivers;
@@ -182,11 +182,11 @@ TEST_F(LatencyTest, MultithreadedSingleChannelReliable) {
   const int kNumMessages = LatencyValueForSplitBuffers(200000, 20000, 10000);
 
   absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-      "rstress", 256, kNumReceivers + 3, {.reliable = true});
+      "rstress", 256, kNumReceivers + 3, subspace::PublisherOptions().SetReliable(true));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-      "rstress", {.reliable = true, .max_active_messages = kNumReceivers + 1});
+      "rstress", subspace::SubscriberOptions().SetReliable(true).SetMaxActiveMessages(kNumReceivers + 1));
   ASSERT_OK(sub);
 
   std::vector<std::thread> receivers;
@@ -289,11 +289,11 @@ TEST_F(LatencyTest, MultithreadedReliableLatency) {
   const int kNumMessages = LatencyValueForSplitBuffers(200000, 20000, 10000);
 
   absl::StatusOr<Publisher> pub =
-      pub_client.CreatePublisher("lstress", 256, 10, {.reliable = true});
+      pub_client.CreatePublisher("lstress", 256, 10, subspace::PublisherOptions().SetReliable(true));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
-      sub_client.CreateSubscriber("lstress", {.reliable = true});
+      sub_client.CreateSubscriber("lstress", subspace::SubscriberOptions().SetReliable(true));
   ASSERT_OK(sub);
 
   uint64_t start_time = toolbelt::Now();
@@ -355,11 +355,11 @@ TEST_F(LatencyTest, MultithreadedReliableLatencyHistogram) {
        num_slots *= 2) {
     std::cerr << "num_slots: " << num_slots << "\n";
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-        "lstress", 256, num_slots, {.reliable = true});
+        "lstress", 256, num_slots, subspace::PublisherOptions().SetReliable(true));
     ASSERT_OK(pub);
 
     absl::StatusOr<Subscriber> sub =
-        sub_client.CreateSubscriber("lstress", {.reliable = true});
+        sub_client.CreateSubscriber("lstress", subspace::SubscriberOptions().SetReliable(true));
     ASSERT_OK(sub);
 
     uint64_t start_time = toolbelt::Now();
@@ -422,11 +422,11 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatency) {
   const int kNumMessages = LatencyValueForSplitBuffers(2000000, 200000, 50000);
 
   absl::StatusOr<Publisher> pub =
-      pub_client.CreatePublisher("lustress", 256, 10, {.reliable = false});
+      pub_client.CreatePublisher("lustress", 256, 10, subspace::PublisherOptions().SetReliable(false));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-      "lustress", {.reliable = false, .log_dropped_messages = false});
+      "lustress", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); return opts; }()));
   ASSERT_OK(sub);
 
   uint64_t start_time = toolbelt::Now();
@@ -507,12 +507,12 @@ TEST_F(LatencyTest, PublisherLatency) {
        num_slots < LatencyValueForSplitBuffers(100000, 20000, 3000);
        num_slots = (num_slots)*15 / 10) {
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-        "publat", 256, num_slots, {.reliable = false});
+        "publat", 256, num_slots, subspace::PublisherOptions().SetReliable(false));
     ASSERT_OK(pub);
 
     std::cerr << num_slots << ",";
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        "publat", {.reliable = false, .log_dropped_messages = false});
+        "publat", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); return opts; }()));
     ASSERT_OK(sub);
 
     uint64_t total_time = 0;
@@ -579,13 +579,13 @@ TEST_F(LatencyTest, PublisherLatencyChecksum) {
        num_slots < LatencyValueForSplitBuffers(100000, 20000, 3000);
        num_slots = (num_slots)*15 / 10) {
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-        "publat", 256, num_slots, {.reliable = false, .checksum = true});
+        "publat", 256, num_slots, subspace::PublisherOptions().SetReliable(false).SetChecksum(true));
     ASSERT_OK(pub);
 
     std::cerr << num_slots << ",";
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
         "publat",
-        {.reliable = false, .log_dropped_messages = false, .checksum = true});
+        ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetChecksum(true); return opts; }()));
     ASSERT_OK(sub);
 
     uint64_t total_time = 0;
@@ -661,12 +661,12 @@ TEST_F(LatencyTest, PublisherLatencyPayload) {
        num_slots < LatencyValueForSplitBuffers(10000, 2000, 1000);
        num_slots = (num_slots)*15 / 10) {
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-        "publat", kMaxPayloadSize, num_slots, {.reliable = false});
+        "publat", kMaxPayloadSize, num_slots, subspace::PublisherOptions().SetReliable(false));
     ASSERT_OK(pub);
 
     std::cerr << num_slots << ",";
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        "publat", {.reliable = false, .log_dropped_messages = false});
+        "publat", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); return opts; }()));
     ASSERT_OK(sub);
 
     uint64_t total_time = 0;
@@ -750,13 +750,13 @@ TEST_F(LatencyTest, PublisherLatencyPayloadChecksum) {
        num_slots = (num_slots)*15 / 10) {
     absl::StatusOr<Publisher> pub =
         pub_client.CreatePublisher("publat", kMaxPayloadSize, num_slots,
-                                   {.reliable = false, .checksum = true});
+                                   subspace::PublisherOptions().SetReliable(false).SetChecksum(true));
     ASSERT_OK(pub);
 
     std::cerr << num_slots << ",";
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
         "publat",
-        {.reliable = false, .log_dropped_messages = false, .checksum = true});
+        ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetChecksum(true); return opts; }()));
     ASSERT_OK(sub);
 
     uint64_t total_time = 0;
@@ -860,12 +860,12 @@ TEST_F(LatencyTest, PublisherLatencyHistogram) {
        num_slots < LatencyValueForSplitBuffers(100000, 20000, 3000);
        num_slots = (num_slots)*15 / 10) {
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-        "publat", 256, num_slots, {.reliable = false});
+        "publat", 256, num_slots, subspace::PublisherOptions().SetReliable(false));
     ASSERT_OK(pub);
 
     std::cerr << num_slots << ",";
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        "publat", {.reliable = false, .log_dropped_messages = false});
+        "publat", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); return opts; }()));
     ASSERT_OK(sub);
 
     std::vector<uint64_t> latencies;
@@ -957,12 +957,12 @@ TEST_F(LatencyTest, PublisherLatencyHistogramThreadSafe) {
        num_slots < LatencyValueForSplitBuffers(100000, 20000, 3000);
        num_slots = (num_slots)*15 / 10) {
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-        "publat", 256, num_slots, {.reliable = false});
+        "publat", 256, num_slots, subspace::PublisherOptions().SetReliable(false));
     ASSERT_OK(pub);
 
     std::cerr << num_slots << ",";
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        "publat", {.reliable = false, .log_dropped_messages = false});
+        "publat", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); return opts; }()));
     ASSERT_OK(sub);
 
     std::vector<uint64_t> latencies;
@@ -1035,7 +1035,7 @@ TEST_F(LatencyTest, PublisherLatencyMultiSub) {
 
     for (int num_subs = 1; num_subs < sqrt(num_slots); num_subs *= 2) {
       absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-          "publat", 256, num_slots, {.reliable = false});
+          "publat", 256, num_slots, subspace::PublisherOptions().SetReliable(false));
       ASSERT_OK(pub);
 
       std::cerr << num_slots << "," << num_subs << ",";
@@ -1043,7 +1043,7 @@ TEST_F(LatencyTest, PublisherLatencyMultiSub) {
 
       for (int i = 0; i < num_subs; i++) {
         absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-            "publat", {.reliable = false, .log_dropped_messages = false});
+            "publat", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); return opts; }()));
         ASSERT_OK(sub);
         subs.push_back(std::move(*sub));
       }
@@ -1115,13 +1115,13 @@ TEST_F(LatencyTest, VirtualPublisherLatency) {
        num_slots < LatencyValueForSplitBuffers(100000, 20000, 3000);
        num_slots = (num_slots)*15 / 10) {
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-        "publat", 256, num_slots, {.reliable = false, .mux = "/foo"});
+        "publat", 256, num_slots, subspace::PublisherOptions().SetReliable(false).SetMux("/foo"));
     ASSERT_OK(pub);
 
     std::cerr << num_slots << ",";
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
         "publat",
-        {.reliable = false, .log_dropped_messages = false, .mux = "/foo"});
+        ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetMux("/foo"); return opts; }()));
     ASSERT_OK(sub);
 
     uint64_t total_time = 0;
@@ -1191,7 +1191,7 @@ TEST_F(LatencyTest, VirtualPublisherLatencyMultiSub) {
 
     for (int num_subs = 1; num_subs < sqrt(num_slots); num_subs *= 2) {
       absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-          "publat", 256, num_slots, {.reliable = false, .mux = "/foo"});
+          "publat", 256, num_slots, subspace::PublisherOptions().SetReliable(false).SetMux("/foo"));
       ASSERT_OK(pub);
 
       std::cerr << num_slots << "," << num_subs << ",";
@@ -1200,7 +1200,7 @@ TEST_F(LatencyTest, VirtualPublisherLatencyMultiSub) {
       for (int i = 0; i < num_subs; i++) {
         absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
             "publat",
-            {.reliable = false, .log_dropped_messages = false, .mux = "/foo"});
+            ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetMux("/foo"); return opts; }()));
         ASSERT_OK(sub);
         subs.push_back(std::move(*sub));
       }
@@ -1272,18 +1272,18 @@ TEST_F(LatencyTest, VirtualPublisherMuxLatency) {
        num_slots < LatencyValueForSplitBuffers(100000, 20000, 3000);
        num_slots = (num_slots)*15 / 10) {
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-        "publat", 256, num_slots, {.reliable = false, .mux = "/foo"});
+        "publat", 256, num_slots, subspace::PublisherOptions().SetReliable(false).SetMux("/foo"));
     ASSERT_OK(pub);
 
     std::cerr << num_slots << ",";
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
         "publat",
-        {.reliable = false, .log_dropped_messages = false, .mux = "/foo"});
+        ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetMux("/foo"); return opts; }()));
     ASSERT_OK(sub);
 
     // Mux subscriber.
     absl::StatusOr<Subscriber> mux_sub = sub_client.CreateSubscriber(
-        "/foo", {.reliable = false, .log_dropped_messages = false});
+        "/foo", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); return opts; }()));
     ASSERT_OK(mux_sub);
 
     uint64_t total_time = 0;
@@ -1354,11 +1354,11 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyHistogram) {
        num_slots *= 2) {
     std::cerr << "num_slots: " << num_slots << "\n";
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-        "lustress", 256, num_slots, {.reliable = false});
+        "lustress", 256, num_slots, subspace::PublisherOptions().SetReliable(false));
     ASSERT_OK(pub);
 
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        "lustress", {.reliable = false, .log_dropped_messages = false});
+        "lustress", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); return opts; }()));
     ASSERT_OK(sub);
 
     uint64_t start_time = toolbelt::Now();
@@ -1443,11 +1443,11 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayload) {
   const int kNumMessages = LatencyValueForSplitBuffers(200000, 20000, 10000);
 
   absl::StatusOr<Publisher> pub =
-      pub_client.CreatePublisher("lustress", 256, 100, {.reliable = false});
+      pub_client.CreatePublisher("lustress", 256, 100, subspace::PublisherOptions().SetReliable(false));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-      "lustress", {.reliable = false, .log_dropped_messages = false});
+      "lustress", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); return opts; }()));
   ASSERT_OK(sub);
 
   // Create a subscriber thread to read from the channel and write to random
@@ -1568,11 +1568,11 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayloadHistogram) {
        num_slots *= 2) {
     std::cerr << "Testing with num_slots: " << num_slots << "\n";
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-        "lustress", 256, num_slots, {.reliable = false});
+        "lustress", 256, num_slots, subspace::PublisherOptions().SetReliable(false));
     ASSERT_OK(pub);
 
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        "lustress", {.reliable = false, .log_dropped_messages = false});
+        "lustress", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); return opts; }()));
     ASSERT_OK(sub);
 
     // Create a subscriber thread to read from the channel and write to random
@@ -1710,7 +1710,7 @@ TEST_F(LatencyTest, ManyChannelsNonMultiplexed) {
   std::vector<Subscriber> subs;
   for (int i = 0; i < kNumChannels; i++) {
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        channels[i], {.log_dropped_messages = false});
+        channels[i], ([] { subspace::SubscriberOptions opts; opts.SetLogDroppedMessages(false); return opts; }()));
     // std::cerr << "sub status " << sub.status() << "\n";
     ASSERT_OK(sub);
     subs.push_back(std::move(*sub));
@@ -1827,7 +1827,7 @@ TEST_F(LatencyTest, ManyChannelsMultiplexed) {
   std::vector<Publisher> pubs;
   for (int i = 0; i < kNumChannels; i++) {
     absl::StatusOr<Publisher> pub = pub_clients[i].CreatePublisher(
-        channels[i], kSlotSize, kNumSlots, {.mux = kMux});
+        channels[i], kSlotSize, kNumSlots, subspace::PublisherOptions().SetMux(kMux));
     ASSERT_OK(pub);
     pubs.push_back(std::move(*pub));
   }
@@ -1836,7 +1836,7 @@ TEST_F(LatencyTest, ManyChannelsMultiplexed) {
   std::vector<Subscriber> subs;
   for (int i = 0; i < kNumChannels; i++) {
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        channels[i], {.log_dropped_messages = false, .mux = kMux});
+        channels[i], ([] { subspace::SubscriberOptions opts; opts.SetLogDroppedMessages(false); opts.SetMux(kMux); return opts; }()));
     // std::cerr << "sub status " << sub.status() << "\n";
     ASSERT_OK(sub);
     subs.push_back(std::move(*sub));
@@ -1953,14 +1953,14 @@ TEST_F(LatencyTest, ManyChannelsMultiplexedSubscribedToMux) {
   std::vector<Publisher> pubs;
   for (int i = 0; i < kNumChannels; i++) {
     absl::StatusOr<Publisher> pub = pub_clients[i].CreatePublisher(
-        channels[i], kSlotSize, kNumSlots, {.mux = kMux});
+        channels[i], kSlotSize, kNumSlots, subspace::PublisherOptions().SetMux(kMux));
     ASSERT_OK(pub);
     pubs.push_back(std::move(*pub));
   }
 
   // Create subscriber to multiplexer.
   absl::StatusOr<Subscriber> sub =
-      sub_client.CreateSubscriber(kMux, {.log_dropped_messages = false});
+      sub_client.CreateSubscriber(kMux, ([] { subspace::SubscriberOptions opts; opts.SetLogDroppedMessages(false); return opts; }()));
   // std::cerr << "sub status " << sub.status() << "\n";
   ASSERT_OK(sub);
 
@@ -2062,11 +2062,11 @@ TEST_F(LatencyTest, SubscriberLatency) {
        num_slots += 100) {
     // Create publisher.
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-        "sublat", 256, num_slots, {.reliable = false});
+        "sublat", 256, num_slots, subspace::PublisherOptions().SetReliable(false));
     ASSERT_OK(pub);
     // Create subscriber.
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        "sublat", {.reliable = false, .log_dropped_messages = false});
+        "sublat", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); return opts; }()));
     ASSERT_OK(sub);
 
     // Fill channel.
@@ -2103,11 +2103,11 @@ TEST_F(LatencyTest, PubSubLatency) {
        num_messages <= LatencyValueForSplitBuffers(20000, 5000);
        num_messages += 100) {
     absl::StatusOr<Publisher> pub =
-        pub_client.CreatePublisher("pubsublat", 256, 10, {.reliable = false});
+        pub_client.CreatePublisher("pubsublat", 256, 10, subspace::PublisherOptions().SetReliable(false));
     ASSERT_OK(pub);
     // Create subscriber.
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        "pubsublat", {.reliable = false, .log_dropped_messages = false});
+        "pubsublat", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); return opts; }()));
     ASSERT_OK(sub);
 
     // Send and receive messages, measuring time taken.

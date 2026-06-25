@@ -9,6 +9,7 @@
 #include "server/server.h"
 #include "shadow/shadow.h"
 #include "gtest/gtest.h"
+#include <algorithm>
 #include <arpa/inet.h>
 #include <chrono>
 #include <csignal>
@@ -650,12 +651,30 @@ TEST_F(ShadowRecoveryTest, SplitBufferMessageDataSurvivesRecovery) {
     ASSERT_THAT(pub->PublishMessage(kPayloadLen), IsOk());
   }
 
-  // Wait for the shadow to learn about the channel and its split buffers.
+  // Wait for the shadow to learn about the channel and all data split-buffer
+  // slots.  Seeing just one registration is not enough; a fast restart can
+  // otherwise race the remaining registration events.
   ASSERT_TRUE(WaitForShadowState([this]() {
     return shadow_->WithChannels([](auto &channels) {
       auto it = channels.find("shadow_split_data");
-      return it != channels.end() && it->second.use_split_buffers &&
-             !it->second.client_buffers.empty();
+      if (it == channels.end() || !it->second.use_split_buffers) {
+        return false;
+      }
+      for (uint32_t slot_id = 0; slot_id < 4; ++slot_id) {
+        auto slot_registered =
+            std::find_if(it->second.client_buffers.begin(),
+                         it->second.client_buffers.end(),
+                         [slot_id](const subspace::RegisteredClientBuffer
+                                       &buffer) {
+                           return buffer.metadata.buffer_index == 0 &&
+                                  buffer.metadata.slot_id == slot_id &&
+                                  !buffer.metadata.is_prefix;
+                         });
+        if (slot_registered == it->second.client_buffers.end()) {
+          return false;
+        }
+      }
+      return true;
     });
   }));
 
@@ -701,7 +720,7 @@ TEST_F(ShadowRecoveryTest, ShadowTracksPlaceholderRemap) {
   sub_client.SetThreadSafe(true);
   ASSERT_THAT(sub_client.Init(RecoveryServerSocket()), IsOk());
   auto sub = sub_client.CreateSubscriber("shadow_placeholder_remap",
-                                         {.max_active_messages = 2});
+                                         subspace::SubscriberOptions().SetMaxActiveMessages(2));
   ASSERT_THAT(sub, IsOk());
   ASSERT_TRUE(sub->IsPlaceholder());
 
@@ -1426,7 +1445,7 @@ TEST_F(BridgeShadowRecoveryTest, BridgeRecoversAfterServerRestart) {
 
   auto pub = client0.CreatePublisher(
       "/bridge_recovery_chan",
-      {.slot_size = 256, .num_slots = 10, .local = false});
+      subspace::PublisherOptions().SetSlotSize(256).SetNumSlots(10).SetLocal(false));
   ASSERT_THAT(pub, IsOk());
 
   // Client 1 on server 1: create a subscriber.
@@ -1435,7 +1454,7 @@ TEST_F(BridgeShadowRecoveryTest, BridgeRecoversAfterServerRestart) {
   ASSERT_THAT(client1.Init(BridgeServer1Socket()), IsOk());
 
   auto sub = client1.CreateSubscriber("/bridge_recovery_chan",
-                                      {.max_active_messages = 2});
+                                      subspace::SubscriberOptions().SetMaxActiveMessages(2));
   ASSERT_THAT(sub, IsOk());
 
   // Wait for bridge to be established.  Server 1's BridgeReceiverCoroutine

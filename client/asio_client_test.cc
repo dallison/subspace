@@ -77,7 +77,7 @@ TEST(AsioClientServer, PubSubRoundTrip) {
           return;
         }
         absl::StatusOr<subspace::Publisher> pub = client.CreatePublisher(
-            "asio_chan", {.slot_size = 256, .num_slots = 10, .activate = true});
+            "asio_chan", subspace::PublisherOptions().SetSlotSize(256).SetNumSlots(10).SetActivate(true));
         if (!pub.ok()) {
           init_error = pub.status().ToString();
           return;
@@ -94,7 +94,7 @@ TEST(AsioClientServer, PubSubRoundTrip) {
         }
 
         absl::StatusOr<subspace::Subscriber> sub = client.CreateSubscriber(
-            "asio_chan", {.max_active_messages = 2, .pass_activation = true});
+            "asio_chan", subspace::SubscriberOptions().SetMaxActiveMessages(2).SetPassActivation(true));
         if (!sub.ok()) {
           init_error = sub.status().ToString();
           return;

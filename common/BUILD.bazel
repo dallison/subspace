@@ -25,6 +25,7 @@ cc_library(
         "//:macos_arm64": [],
         "//:macos_default": [],
         "//:android": ["-llog"],
+        "//:qnx": ["-lsocket"],
         "//conditions:default": ["-lrt"],
     }),
     deps = [

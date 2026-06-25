@@ -265,13 +265,13 @@ static void Open(std::shared_ptr<subspace::RpcServer> /*server*/,
 
   auto pub = ctx.client->CreatePublisher(
       "/rpc/TestService/request", 1024, 10,
-      {.reliable = true, .type = "subspace.RpcServerRequest"});
+      subspace::PublisherOptions().SetReliable(true).SetType("subspace.RpcServerRequest"));
   ASSERT_OK(pub);
 
   ctx.pub = std::make_shared<subspace::Publisher>(std::move(*pub));
   auto sub = ctx.client->CreateSubscriber(
       "/rpc/TestService/response",
-      {.reliable = true, .type = "subspace.RpcServerResponse"});
+      subspace::SubscriberOptions().SetReliable(true).SetType("subspace.RpcServerResponse"));
   ASSERT_OK(sub);
 
   ctx.sub = std::make_shared<subspace::Subscriber>(std::move(*sub));
@@ -409,7 +409,7 @@ TEST_F(ServerTest, OpenAndCallNoResponseRead) {
     auto pub = client.CreatePublisher(
         method->request_channel().name(), method->request_channel().slot_size(),
         method->request_channel().num_slots(),
-        {.reliable = true, .type = method->request_channel().type()});
+        subspace::PublisherOptions().SetReliable(true).SetType(method->request_channel().type()));
     ASSERT_OK(pub);
 
     std::cerr << "publishing " << req.DebugString();
@@ -462,14 +462,14 @@ TEST_F(ServerTest, OpenAndCall) {
     auto pub = client.CreatePublisher(
         method->request_channel().name(), method->request_channel().slot_size(),
         method->request_channel().num_slots(),
-        {.reliable = true, .type = method->request_channel().type()});
+        subspace::PublisherOptions().SetReliable(true).SetType(method->request_channel().type()));
     ASSERT_OK(pub);
 
     std::cerr << "subscribing to " << method->response_channel().name()
               << std::endl;
     auto sub = client.CreateSubscriber(
         method->response_channel().name(),
-        {.reliable = true, .type = method->response_channel().type()});
+        subspace::SubscriberOptions().SetReliable(true).SetType(method->response_channel().type()));
     ASSERT_OK(sub);
 
     std::cerr << "publishing " << req.DebugString();
@@ -552,12 +552,12 @@ TEST_F(ServerTest, CallAsyncMethod) {
     auto pub = client.CreatePublisher(
         method->request_channel().name(), method->request_channel().slot_size(),
         method->request_channel().num_slots(),
-        {.reliable = true, .type = method->request_channel().type()});
+        subspace::PublisherOptions().SetReliable(true).SetType(method->request_channel().type()));
     ASSERT_OK(pub);
 
     auto sub = client.CreateSubscriber(
         method->response_channel().name(),
-        {.reliable = true, .type = method->response_channel().type()});
+        subspace::SubscriberOptions().SetReliable(true).SetType(method->response_channel().type()));
     ASSERT_OK(sub);
 
     auto buffer = pub->GetMessageBuffer(int32_t(req.ByteSizeLong()));
@@ -632,12 +632,12 @@ TEST_F(ServerTest, CallVoidMethod) {
     auto pub = client.CreatePublisher(
         method->request_channel().name(), method->request_channel().slot_size(),
         method->request_channel().num_slots(),
-        {.reliable = true, .type = method->request_channel().type()});
+        subspace::PublisherOptions().SetReliable(true).SetType(method->request_channel().type()));
     ASSERT_OK(pub);
 
     auto sub = client.CreateSubscriber(
         method->response_channel().name(),
-        {.reliable = true, .type = method->response_channel().type()});
+        subspace::SubscriberOptions().SetReliable(true).SetType(method->response_channel().type()));
     ASSERT_OK(sub);
 
     std::cerr << "publishing " << req.DebugString();
@@ -721,12 +721,12 @@ TEST_F(ServerTest, CallError) {
     auto pub = client.CreatePublisher(
         method->request_channel().name(), method->request_channel().slot_size(),
         method->request_channel().num_slots(),
-        {.reliable = true, .type = method->request_channel().type()});
+        subspace::PublisherOptions().SetReliable(true).SetType(method->request_channel().type()));
     ASSERT_OK(pub);
 
     auto sub = client.CreateSubscriber(
         method->response_channel().name(),
-        {.reliable = true, .type = method->response_channel().type()});
+        subspace::SubscriberOptions().SetReliable(true).SetType(method->response_channel().type()));
     ASSERT_OK(sub);
 
     std::cerr << "publishing " << req.DebugString();
@@ -811,14 +811,14 @@ TEST_F(ServerTest, Stream) {
     auto pub = client.CreatePublisher(
         method->request_channel().name(), method->request_channel().slot_size(),
         method->request_channel().num_slots(),
-        {.reliable = true, .type = method->request_channel().type()});
+        subspace::PublisherOptions().SetReliable(true).SetType(method->request_channel().type()));
     ASSERT_OK(pub);
 
     std::cerr << "subscribing to " << method->response_channel().name()
               << std::endl;
     auto sub = client.CreateSubscriber(
         method->response_channel().name(),
-        {.reliable = true, .type = method->response_channel().type()});
+        subspace::SubscriberOptions().SetReliable(true).SetType(method->response_channel().type()));
     ASSERT_OK(sub);
 
     std::cerr << "publishing " << req.DebugString();
@@ -907,18 +907,18 @@ TEST_F(ServerTest, CancelStream) {
     auto pub = client.CreatePublisher(
         method->request_channel().name(), method->request_channel().slot_size(),
         method->request_channel().num_slots(),
-        {.reliable = true, .type = method->request_channel().type()});
+        subspace::PublisherOptions().SetReliable(true).SetType(method->request_channel().type()));
     ASSERT_OK(pub);
 
     auto cancel_pub = client.CreatePublisher(method->cancel_channel(), 64, 10,
-                                             {.reliable = true});
+                                             subspace::PublisherOptions().SetReliable(true));
     ASSERT_OK(cancel_pub);
 
     std::cerr << "subscribing to " << method->response_channel().name()
               << std::endl;
     auto sub = client.CreateSubscriber(
         method->response_channel().name(),
-        {.reliable = true, .type = method->response_channel().type()});
+        subspace::SubscriberOptions().SetReliable(true).SetType(method->response_channel().type()));
     ASSERT_OK(sub);
 
     std::cerr << "publishing " << req.DebugString();
