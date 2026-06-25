@@ -217,6 +217,7 @@ public:
   absl::StatusOr<SubscriberUser *>
   AddSubscriber(ClientHandler *handler, bool is_reliable, bool is_bridge,
                 bool for_tunnel, int max_active_messages);
+  virtual void RegisterExistingSubscribers();
 
   virtual std::string Type() const { return Channel::Type(); }
   virtual void SetType(const std::string &type) { Channel::SetType(type); }
@@ -473,6 +474,7 @@ public:
   void RemoveVirtualChannel(VirtualChannel *vchan);
 
   bool IsMux() const override { return true; }
+  void RegisterExistingSubscribers() override;
   bool IsEmpty() const override {
     return virtual_channels_.empty() && ServerChannel::IsEmpty();
   }

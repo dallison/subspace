@@ -260,11 +260,6 @@ absl::StatusOr<SharedMemoryFds>
 ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
                         [[maybe_unused]] int slot_size, int num_slots,
                         int initial_ordinal) {
-  SubscriberCounter num_subs;
-
-  if (scb_ != nullptr) {
-    num_subs = ccb_->num_subs;
-  }
   // Unmap existing memory.
   Unmap();
 
@@ -298,7 +293,7 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
     return p.status();
   }
   ccb_ = reinterpret_cast<ChannelControlBlock *>(*p);
-  ccb_->num_subs = num_subs;
+  ccb_->num_subs = SubscriberCounter();
 
   // Create buffer control block.
   p = CreateSharedMemory(channel_id_, "bcb", sizeof(BufferControlBlock),
@@ -477,6 +472,22 @@ ServerChannel::AddSubscriber(ClientHandler *handler, bool is_reliable,
   SubscriberUser *result = sub.get();
   AddUser(*user_id, std::move(sub));
   return result;
+}
+
+void ServerChannel::RegisterExistingSubscribers() {
+  for (auto &[id, user] : users_) {
+    if (user == nullptr || !user->IsSubscriber()) {
+      continue;
+    }
+    RegisterSubscriber(id, GetVirtualChannelId(), /*is_new=*/true);
+  }
+}
+
+void ChannelMultiplexer::RegisterExistingSubscribers() {
+  ServerChannel::RegisterExistingSubscribers();
+  for (VirtualChannel *vchan : virtual_channels_) {
+    vchan->RegisterExistingSubscribers();
+  }
 }
 
 void ServerChannel::TriggerAllSubscribers() {
