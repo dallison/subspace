@@ -1309,6 +1309,7 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
 
       channel->AddUser(rsub.id, std::move(sub));
     }
+    channel->RegisterExistingSubscribers();
 
     channels_.emplace(rch.name, channel);
     logger_.Log(toolbelt::LogLevel::kInfo,
