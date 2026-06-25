@@ -603,18 +603,11 @@ TEST_F(ShadowRecoveryTest, RecoveryRebuildsCcbSubscriberRegistrations) {
   ASSERT_NE(nullptr, recovered);
   EXPECT_EQ(1, recovered->NumSubscribers(-1));
 
-  subspace::Client post_client;
-  post_client.SetThreadSafe(true);
-  ASSERT_THAT(post_client.Init(RecoveryServerSocket()), IsOk());
-
-  auto post_pub = post_client.CreatePublisher(kChannel, 256, 8);
-  ASSERT_THAT(post_pub, IsOk());
-
   constexpr char kPayload[] = "after_recovery";
-  absl::StatusOr<void *> buffer = post_pub->GetMessageBuffer();
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
   ASSERT_THAT(buffer, IsOk());
   memcpy(*buffer, kPayload, sizeof(kPayload) - 1);
-  ASSERT_THAT(post_pub->PublishMessage(sizeof(kPayload) - 1), IsOk());
+  ASSERT_THAT(pub->PublishMessage(sizeof(kPayload) - 1), IsOk());
 
   absl::StatusOr<subspace::Message> msg =
       sub->ReadMessage(subspace::ReadMode::kReadNewest);
