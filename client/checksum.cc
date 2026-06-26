@@ -5,11 +5,9 @@
 #include "client/checksum.h"
 #include <cstddef>
 #include <cstdint>
-#include <iostream>
+#include <cstring>
 
 namespace subspace {
-
-extern "C" {
 
 #if defined(__x86_64__) && !defined(__SSE4_2__)
 // On Intel crc is only available when SSE4.2 is enabled
@@ -21,41 +19,125 @@ extern "C" {
 #undef SUBSPACE_HARDWARE_CRC
 #endif
 
-
 #if defined(SUBSPACE_HARDWARE_CRC) && defined(__aarch64__)
 
-// Whether to use the hand-written assembly version of the CRC32 function
-// in arm_crc32.S
-#define ARM_ASM_CRC32 1
+extern "C" uint32_t SubspaceCRC32ArmScalar(uint32_t crc, const uint8_t *data,
+                                           size_t length);
+extern "C" void SubspaceCRC32ArmFourLane(
+    const uint8_t *p0, const uint8_t *p1, const uint8_t *p2,
+    const uint8_t *p3, size_t chunk_size, uint32_t *crc0, uint32_t *crc1,
+    uint32_t *crc2, uint32_t *crc3);
 
-#if !defined(ARM_ASM_CRC32)
-#include <arm_acle.h>
-uint32_t SubspaceCRC32(uint32_t crc, const uint8_t *data, size_t length) {
-  size_t i = 0;
+namespace {
 
-  // Process 8 bytes at a time.
-  for (; i + 8 <= length; i += 8) {
-    crc = __crc32d(crc, *reinterpret_cast<const uint64_t *>(data + i));
+constexpr size_t kMinParallelCRC32Bytes = 256 * 1024;
+
+uint32_t GF2MatrixTimes(const uint32_t *matrix, uint32_t vector) {
+  uint32_t sum = 0;
+  while (vector != 0) {
+    if ((vector & 1U) != 0) {
+      sum ^= *matrix;
+    }
+    vector >>= 1;
+    ++matrix;
   }
-
-  // Process remaining 4 bytes.
-  if (i + 4 <= length) {
-    crc = __crc32w(crc, *reinterpret_cast<const uint32_t *>(data + i));
-    i += 4;
-  }
-
-  // Process remaining bytes one at a time.
-  for (; i < length; i++) {
-    crc = __crc32b(crc, data[i]);
-  }
-
-  return crc;
+  return sum;
 }
-#endif  // !defined(ARM_ASM_CRC32)
+
+void GF2MatrixSquare(uint32_t *square, const uint32_t *matrix) {
+  for (int i = 0; i < 32; ++i) {
+    square[i] = GF2MatrixTimes(matrix, matrix[i]);
+  }
+}
+
+void BuildCRC32ByteAdvanceMatrix(uint32_t *advance, size_t length) {
+  for (int i = 0; i < 32; ++i) {
+    advance[i] = 1U << i;
+  }
+  if (length == 0) {
+    return;
+  }
+
+  uint32_t power[32];
+  uint32_t composed[32];
+  uint32_t odd[32];
+  uint32_t even[32];
+
+  odd[0] = 0xEDB88320U;
+  uint32_t row = 1;
+  for (int i = 1; i < 32; ++i) {
+    odd[i] = row;
+    row <<= 1;
+  }
+
+  GF2MatrixSquare(even, odd);  // two zero bits
+  GF2MatrixSquare(odd, even);  // four zero bits
+  GF2MatrixSquare(power, odd); // one zero byte
+
+  while (length != 0) {
+    if ((length & 1U) != 0) {
+      for (int i = 0; i < 32; ++i) {
+        composed[i] = GF2MatrixTimes(power, advance[i]);
+      }
+      std::memcpy(advance, composed, sizeof(composed));
+    }
+    length >>= 1;
+    if (length != 0) {
+      GF2MatrixSquare(composed, power);
+      std::memcpy(power, composed, sizeof(composed));
+    }
+  }
+}
+
+uint32_t CombineRawCRC32(const uint32_t *advance, uint32_t crc1,
+                         uint32_t crc2) {
+  return GF2MatrixTimes(advance, crc1) ^ crc2;
+}
+
+uint32_t ParallelCRC32(uint32_t crc, const uint8_t *data, size_t length) {
+  if (length < kMinParallelCRC32Bytes) {
+    return SubspaceCRC32ArmScalar(crc, data, length);
+  }
+
+  const size_t chunk_size = (length / 4) & ~size_t{7};
+  if (chunk_size == 0) {
+    return SubspaceCRC32ArmScalar(crc, data, length);
+  }
+
+  const uint8_t *p0 = data;
+  const uint8_t *p1 = p0 + chunk_size;
+  const uint8_t *p2 = p1 + chunk_size;
+  const uint8_t *p3 = p2 + chunk_size;
+  uint32_t crc0 = crc;
+  uint32_t crc1 = 0;
+  uint32_t crc2 = 0;
+  uint32_t crc3 = 0;
+
+  SubspaceCRC32ArmFourLane(p0, p1, p2, p3, chunk_size, &crc0, &crc1, &crc2,
+                           &crc3);
+
+  uint32_t advance[32];
+  BuildCRC32ByteAdvanceMatrix(advance, chunk_size);
+  uint32_t combined = CombineRawCRC32(advance, crc0, crc1);
+  combined = CombineRawCRC32(advance, combined, crc2);
+  combined = CombineRawCRC32(advance, combined, crc3);
+
+  const size_t processed = chunk_size * 4;
+  return SubspaceCRC32ArmScalar(combined, data + processed,
+                                length - processed);
+}
+
+} // namespace
+
+extern "C" uint32_t SubspaceCRC32ArmParallel(uint32_t crc, const uint8_t *data,
+                                             size_t length) {
+  return ParallelCRC32(crc, data, length);
+}
 
 #elif defined(SUBSPACE_HARDWARE_CRC) && defined(__x86_64__)
 #include <nmmintrin.h>
-uint32_t SubspaceCRC32(uint32_t crc, const uint8_t *data, size_t length) {
+extern "C" uint32_t SubspaceCRC32(uint32_t crc, const uint8_t *data,
+                                  size_t length) {
   size_t i = 0;
   // Process 8 bytes at a time.
   for (; i + 8 <= length; i += 8) {
@@ -122,12 +204,12 @@ static const uint32_t crc32_table[256] = {
     0xB40BBE37, 0xC30C8EA1, 0x5A05DF1B, 0x2D02EF8D};
 
 // Generic CRC32 calculation using lookup table.
-uint32_t SubspaceCRC32(uint32_t crc, const uint8_t *data, size_t length) {
+extern "C" uint32_t SubspaceCRC32(uint32_t crc, const uint8_t *data,
+                                  size_t length) {
   for (size_t i = 0; i < length; i++) {
     crc = (crc >> 8) ^ crc32_table[(crc ^ data[i]) & 0xFF];
   }
   return crc;
 }
 #endif
-} // extern "C"
 } // namespace subspace

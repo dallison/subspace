@@ -169,3 +169,21 @@ cc_binary(
         "//conditions:default": ["-lrt"],
     }),
 )
+
+cc_binary(
+    name = "crc32_perf",
+    srcs = [
+        "crc32_perf.cc",
+    ],
+    deps = [
+        "//client:subspace_client",
+    ],
+    linkopts = select({
+        "//:macos_x86_64": [],
+        "//:macos_arm64": [],
+        "//:macos_default": [],
+        "//:android": ["-llog"],
+        "//:qnx": [],
+        "//conditions:default": ["-lrt"],
+    }),
+)
