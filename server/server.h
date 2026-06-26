@@ -44,6 +44,9 @@ constexpr int64_t kServerWaiting = 3;
 void ClosePluginsOnShutdown();
 bool ShouldClosePluginsOnShutdown();
 
+absl::StatusOr<toolbelt::SocketAddress>
+ParseChannelAddress(const ChannelAddress &address, const char *field_name);
+
 // The Subspace server.
 // This is a single-threaded, coroutine-based server that maintains shared
 // memory IPC channels and communicates with other servers to allow for
