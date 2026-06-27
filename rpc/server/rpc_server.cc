@@ -4,6 +4,9 @@
 
 #include "rpc/server/rpc_server.h"
 #include "proto/subspace.pb.h"
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <poll.h>
 #include <stdio.h>
@@ -16,6 +19,116 @@ using Method = internal::Method;
 using Session = internal::Session;
 using MethodInstance = internal::MethodInstance;
 using AnyStreamWriter = internal::AnyStreamWriter;
+
+namespace internal {
+namespace {
+
+absl::Status SetNonBlocking(toolbelt::FileDescriptor &fd) {
+  int flags = ::fcntl(fd.Fd(), F_GETFL, 0);
+  if (flags == -1 || ::fcntl(fd.Fd(), F_SETFL, flags | O_NONBLOCK) == -1) {
+    return absl::InternalError(std::string("Failed to set pipe non-blocking: ") +
+                               ::strerror(errno));
+  }
+  return absl::OkStatus();
+}
+
+} // namespace
+
+absl::StatusOr<std::shared_ptr<ReplyQueue>> ReplyQueue::Create() {
+  auto pipe = toolbelt::Pipe::Create();
+  if (!pipe.ok()) {
+    return pipe.status();
+  }
+  if (absl::Status status = SetNonBlocking(pipe->ReadFd()); !status.ok()) {
+    return status;
+  }
+  if (absl::Status status = SetNonBlocking(pipe->WriteFd()); !status.ok()) {
+    return status;
+  }
+  return std::shared_ptr<ReplyQueue>(new ReplyQueue(std::move(*pipe)));
+}
+
+absl::Status ReplyQueue::Push(std::shared_ptr<ReplyItem> item) {
+  if (item == nullptr) {
+    return absl::InvalidArgumentError("cannot enqueue null reply item");
+  }
+
+  bool should_wake = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    items_.push(std::move(item));
+    if (!wake_pending_) {
+      wake_pending_ = true;
+      should_wake = true;
+    }
+  }
+
+  if (should_wake) {
+    return Wake();
+  }
+  return absl::OkStatus();
+}
+
+void ReplyQueue::AcknowledgeWake() {
+  char buffer[64];
+  for (;;) {
+    ssize_t n = ::read(wake_pipe_.ReadFd().Fd(), buffer, sizeof(buffer));
+    if (n > 0) {
+      continue;
+    }
+    if (n == 0) {
+      return;
+    }
+    if (errno == EINTR) {
+      continue;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      return;
+    }
+    return;
+  }
+}
+
+absl::StatusOr<std::shared_ptr<ReplyItem>> ReplyQueue::Pop() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (items_.empty()) {
+    return absl::NotFoundError("reply queue is empty");
+  }
+  auto item = std::move(items_.front());
+  items_.pop();
+  return item;
+}
+
+bool ReplyQueue::MarkIdleIfEmpty() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!items_.empty()) {
+    return false;
+  }
+  wake_pending_ = false;
+  return true;
+}
+
+absl::Status ReplyQueue::Wake() {
+  char byte = 1;
+  for (;;) {
+    ssize_t n = ::write(wake_pipe_.WriteFd().Fd(), &byte, 1);
+    if (n == 1) {
+      return absl::OkStatus();
+    }
+    if (n == -1 && errno == EINTR) {
+      continue;
+    }
+    if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      // A wake byte is already pending, so the response coroutine will drain
+      // the queue without requiring another notification.
+      return absl::OkStatus();
+    }
+    return absl::InternalError(std::string("Failed to wake reply queue: ") +
+                               ::strerror(errno));
+  }
+}
+
+} // namespace internal
 
 RpcServer::RpcServer(std::string service_name,
                      std::string subspace_server_socket)
@@ -476,17 +589,15 @@ RpcServer::CreateSession(uint64_t client_id) {
     } else {
       // Non-streaming methods use a two-coroutine pipeline: a request
       // coroutine that invokes the (possibly async) handler and a response
-      // coroutine that publishes completed replies.  They communicate via a
-      // SharedPtrPipe of ReplyItems.
-      auto pipe = toolbelt::SharedPtrPipe<internal::ReplyItem>::Create();
-      if (!pipe.ok()) {
+      // coroutine that publishes completed replies.
+      auto queue = internal::ReplyQueue::Create();
+      if (!queue.ok()) {
         logger_.Log(toolbelt::LogLevel::kError,
                     "Failed to create reply queue for method %s: %s",
-                    method->name.c_str(), pipe.status().ToString().c_str());
-        return pipe.status();
+                    method->name.c_str(), queue.status().ToString().c_str());
+        return queue.status();
       }
-      method_instance->reply_queue =
-          std::make_shared<internal::ReplyQueue>(std::move(*pipe));
+      method_instance->reply_queue = std::move(*queue);
 
       AddCoroutine(std::make_unique<co::Coroutine>(
           *scheduler_,
@@ -562,17 +673,12 @@ void RpcServer::SessionRequestCoroutine(
         continue;
       }
 
-      // Give the handler reply handles tied to this request.  The handler runs
-      // on this request coroutine (c), so the completed result is pushed into
-      // the reply queue from c and the response coroutine routes it back to the
-      // client that issued this request.  Writes pass c so that, if the reply
-      // pipe is momentarily full, the write yields this coroutine (letting the
-      // response coroutine drain it) instead of blocking the scheduler thread.
-      // No locking is needed: the server runs on a single coroutine scheduler
-      // thread.  Reply functions must only be invoked from c.
+      // Give the handler reply handles tied to this request.  The handler may
+      // keep these handles and complete from a worker thread, so Push() must not
+      // touch coroutine scheduler state.
       auto queue = method_instance->reply_queue;
       auto reply_fn =
-          [queue, c, session_id = session->session_id,
+          [queue, session_id = session->session_id,
            request_id = request.request_id(), client_id = request.client_id()](
               std::unique_ptr<google::protobuf::Any> response) mutable {
             auto item = std::make_shared<internal::ReplyItem>();
@@ -580,10 +686,10 @@ void RpcServer::SessionRequestCoroutine(
             item->request_id = request_id;
             item->client_id = client_id;
             item->response = std::move(response);
-            (void)queue->pipe.Write(std::move(item), c);
+            (void)queue->Push(std::move(item));
           };
       auto error_fn =
-          [queue, c, session_id = session->session_id,
+          [queue, session_id = session->session_id,
            request_id = request.request_id(),
            client_id = request.client_id()](std::string error_msg) mutable {
             auto item = std::make_shared<internal::ReplyItem>();
@@ -591,7 +697,7 @@ void RpcServer::SessionRequestCoroutine(
             item->request_id = request_id;
             item->client_id = client_id;
             item->error_message = std::move(error_msg);
-            (void)queue->pipe.Write(std::move(item), c);
+            (void)queue->Push(std::move(item));
           };
 
       server->logger_.Log(toolbelt::LogLevel::kDebug, "Calling method %s",
@@ -614,95 +720,105 @@ void RpcServer::SessionResponseCoroutine(
 
   while (server->running_) {
     // Wait for the next completed reply for this method, or for shutdown.
-    int fd = c->Wait(std::vector<int>{queue.pipe.ReadFd().Fd(), interrupt.Fd()},
+    int fd = c->Wait(std::vector<int>{queue.ReadFd(), interrupt.Fd()},
                      POLLIN);
     if (fd == interrupt.Fd()) {
       break;
     }
-    if (fd != queue.pipe.ReadFd().Fd()) {
+    if (fd != queue.ReadFd()) {
       continue;
     }
 
-    auto item_or = queue.pipe.Read(c);
-    if (!item_or.ok()) {
-      server->logger_.Log(toolbelt::LogLevel::kError,
-                          "Error reading queued response for method %s: %s",
-                          method_instance->method->name.c_str(),
-                          item_or.status().ToString().c_str());
-      continue;
-    }
-    auto item = std::move(*item_or);
-
-    // Convert the completed handler result into the protocol response expected
-    // by the waiting client.
-    subspace::RpcResponse response;
-    response.set_session_id(item->session_id);
-    response.set_request_id(item->request_id);
-    response.set_client_id(item->client_id);
-    if (!item->error_message.empty()) {
-      response.set_error(item->error_message);
-    } else if (item->response != nullptr) {
-      response.mutable_result()->CopyFrom(*item->response);
-    } else {
-      response.set_error("handler produced a null response");
-    }
-
-    uint64_t length = response.ByteSizeLong();
-    absl::StatusOr<void *> buffer;
-    bool got_buffer = false;
     for (;;) {
-      buffer = method_instance->response_publisher->GetMessageBuffer(
-          int32_t(length));
-      if (!buffer.ok()) {
+      queue.AcknowledgeWake();
+      auto item_or = queue.Pop();
+      if (!item_or.ok()) {
+        if (absl::IsNotFound(item_or.status())) {
+          if (queue.MarkIdleIfEmpty()) {
+            break;
+          }
+          continue;
+        }
         server->logger_.Log(toolbelt::LogLevel::kError,
-                            "Error getting buffer for method %s: %s",
+                            "Error reading queued response for method %s: %s",
                             method_instance->method->name.c_str(),
-                            buffer.status().ToString().c_str());
+                            item_or.status().ToString().c_str());
         break;
       }
-      if (*buffer != nullptr) {
-        got_buffer = true;
-        break;
+      auto item = std::move(*item_or);
+
+      // Convert the completed handler result into the protocol response
+      // expected by the waiting client.
+      subspace::RpcResponse response;
+      response.set_session_id(item->session_id);
+      response.set_request_id(item->request_id);
+      response.set_client_id(item->client_id);
+      if (!item->error_message.empty()) {
+        response.set_error(item->error_message);
+      } else if (item->response != nullptr) {
+        response.mutable_result()->CopyFrom(*item->response);
+      } else {
+        response.set_error("handler produced a null response");
       }
-      if (!server->interrupt_pipe_.ReadFd().Valid()) {
-        return;
+
+      uint64_t length = response.ByteSizeLong();
+      absl::StatusOr<void *> buffer;
+      bool got_buffer = false;
+      for (;;) {
+        buffer = method_instance->response_publisher->GetMessageBuffer(
+            int32_t(length));
+        if (!buffer.ok()) {
+          server->logger_.Log(toolbelt::LogLevel::kError,
+                              "Error getting buffer for method %s: %s",
+                              method_instance->method->name.c_str(),
+                              buffer.status().ToString().c_str());
+          break;
+        }
+        if (*buffer != nullptr) {
+          got_buffer = true;
+          break;
+        }
+        if (!server->interrupt_pipe_.ReadFd().Valid()) {
+          return;
+        }
+        // The response channel is temporarily full; wait for the client to free
+        // a slot or for shutdown.
+        auto status = method_instance->response_publisher->Wait(interrupt, c);
+        if (!status.ok()) {
+          server->logger_.Log(toolbelt::LogLevel::kError,
+                              "Error waiting for buffer: %s",
+                              status.status().ToString().c_str());
+          return;
+        }
+        if (*status == interrupt.Fd()) {
+          return;
+        }
       }
-      // The response channel is temporarily full; wait for the client to free
-      // a slot or for shutdown.
-      auto status = method_instance->response_publisher->Wait(interrupt, c);
-      if (!status.ok()) {
+      if (!got_buffer) {
+        continue;
+      }
+      if (!response.SerializeToArray(*buffer, length)) {
         server->logger_.Log(toolbelt::LogLevel::kError,
-                            "Error waiting for buffer: %s",
-                            status.status().ToString().c_str());
-        return;
+                            "Error serializing response for method %s",
+                            method_instance->method->name.c_str());
+        continue;
       }
-      if (*status == interrupt.Fd()) {
-        return;
+      server->logger_.Log(
+          toolbelt::LogLevel::kDebug, "Publishing response for method %s: %s",
+          method_instance->method->name.c_str(),
+          response.DebugString().c_str());
+      auto pub_result =
+          method_instance->response_publisher->PublishMessage(length);
+      if (!pub_result.ok()) {
+        server->logger_.Log(toolbelt::LogLevel::kError,
+                            "Error publishing response for method %s: %s",
+                            method_instance->method->name.c_str(),
+                            pub_result.status().ToString().c_str());
       }
-    }
-    if (!got_buffer) {
-      continue;
-    }
-    if (!response.SerializeToArray(*buffer, length)) {
-      server->logger_.Log(toolbelt::LogLevel::kError,
-                          "Error serializing response for method %s",
+      server->logger_.Log(toolbelt::LogLevel::kDebug,
+                          "Published response for method %s",
                           method_instance->method->name.c_str());
-      continue;
     }
-    server->logger_.Log(
-        toolbelt::LogLevel::kDebug, "Publishing response for method %s: %s",
-        method_instance->method->name.c_str(), response.DebugString().c_str());
-    auto pub_result =
-        method_instance->response_publisher->PublishMessage(length);
-    if (!pub_result.ok()) {
-      server->logger_.Log(toolbelt::LogLevel::kError,
-                          "Error publishing response for method %s: %s",
-                          method_instance->method->name.c_str(),
-                          pub_result.status().ToString().c_str());
-    }
-    server->logger_.Log(toolbelt::LogLevel::kDebug,
-                        "Published response for method %s",
-                        method_instance->method->name.c_str());
   }
 }
 

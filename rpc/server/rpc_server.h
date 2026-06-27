@@ -3,6 +3,7 @@
 // See LICENSE file for licensing information.
 
 #pragma once
+#include "absl/status/statusor.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/types/span.h"
 #include "client/client.h"
@@ -11,6 +12,9 @@
 #include "rpc/common/rpc_common.h"
 #include "toolbelt/logging.h"
 #include "toolbelt/pipe.h"
+
+#include <mutex>
+#include <queue>
 
 namespace subspace {
 
@@ -59,16 +63,29 @@ struct ReplyItem {
 };
 
 // Completed replies for a single non-streaming method instance are pushed into
-// this queue by the request coroutine (or by a later async completion from
-// another coroutine) and drained by the response coroutine.  The whole RPC
-// server runs on a single coroutine scheduler thread, so no locking is needed:
-// only one coroutine runs at a time and a small SharedPtrPipe write does not
-// yield, so writes never interleave.
+// this queue by async completions and drained by the response coroutine.
+// RegisterMethodAsync permits completions from worker threads, so the queue
+// protects the in-memory items with a mutex and uses a pipe only as a wakeup fd
+// for the scheduler thread.
 struct ReplyQueue {
-  explicit ReplyQueue(toolbelt::SharedPtrPipe<ReplyItem> pipe)
-      : pipe(std::move(pipe)) {}
+  static absl::StatusOr<std::shared_ptr<ReplyQueue>> Create();
 
-  toolbelt::SharedPtrPipe<ReplyItem> pipe;
+  int ReadFd() const { return wake_pipe_.ReadFd().Fd(); }
+  absl::Status Push(std::shared_ptr<ReplyItem> item);
+  void AcknowledgeWake();
+  absl::StatusOr<std::shared_ptr<ReplyItem>> Pop();
+  bool MarkIdleIfEmpty();
+
+private:
+  explicit ReplyQueue(toolbelt::Pipe wake_pipe)
+      : wake_pipe_(std::move(wake_pipe)) {}
+
+  absl::Status Wake();
+
+  toolbelt::Pipe wake_pipe_;
+  std::mutex mutex_;
+  std::queue<std::shared_ptr<ReplyItem>> items_;
+  bool wake_pending_ = false;
 };
 
 struct Method {

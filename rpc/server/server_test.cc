@@ -15,12 +15,15 @@
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
 #include "toolbelt/pipe.h"
+#include <condition_variable>
 #include <gtest/gtest.h>
 #include <inttypes.h>
 #include <memory>
+#include <mutex>
 #include <signal.h>
 #include <sys/resource.h>
 #include <thread>
+#include <vector>
 
 ABSL_FLAG(bool, start_server, true, "Start the subspace server");
 ABSL_FLAG(std::string, server, "", "Path to server executable");
@@ -596,6 +599,197 @@ TEST_F(ServerTest, CallAsyncMethod) {
   });
 
   scheduler.Run();
+}
+
+class DeferredThreadReplyState {
+public:
+  using ReplyFn =
+      std::function<void(std::unique_ptr<google::protobuf::Any>)>;
+
+  explicit DeferredThreadReplyState(int expected) : expected_(expected) {}
+
+  ~DeferredThreadReplyState() { Stop(); }
+
+  void Start() {
+    worker_ = std::thread([this]() {
+      std::vector<ReplyFn> replies;
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [this]() {
+          return stop_ || (released_ &&
+                           static_cast<int>(replies_.size()) == expected_);
+        });
+        if (stop_) {
+          return;
+        }
+        replies = std::move(replies_);
+      }
+
+      for (auto &reply : replies) {
+        rpc::TestResponse r;
+        r.set_message("Hello from worker thread");
+        auto any = std::make_unique<google::protobuf::Any>();
+        any->PackFrom(r);
+        reply(std::move(any));
+      }
+    });
+  }
+
+  void AddReply(ReplyFn reply) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      replies_.push_back(std::move(reply));
+    }
+    cv_.notify_all();
+  }
+
+  int Count() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return static_cast<int>(replies_.size());
+  }
+
+  void Release() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      released_ = true;
+    }
+    cv_.notify_all();
+  }
+
+  void Stop() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stop_ = true;
+    }
+    cv_.notify_all();
+    if (worker_.joinable()) {
+      worker_.join();
+    }
+  }
+
+private:
+  const int expected_;
+  mutable std::mutex mutex_;
+  std::condition_variable cv_;
+  std::vector<ReplyFn> replies_;
+  bool released_ = false;
+  bool stop_ = false;
+  std::thread worker_;
+};
+
+TEST_F(ServerTest, CallAsyncMethodRepliesFromWorkerThreadUnderBackpressure) {
+  constexpr int kNumRequests = 6000;
+  co::CoroutineScheduler scheduler;
+
+  auto state = std::make_shared<DeferredThreadReplyState>(kNumRequests);
+  state->Start();
+
+  auto server =
+      std::make_shared<subspace::RpcServer>("TestService", ServerTest::Socket());
+  subspace::MethodOptions options;
+  options.slot_size = 256;
+  options.num_slots = 128;
+  ASSERT_OK(server->RegisterMethodAsync(
+      "ThreadedAsyncMethod",
+      [state](const google::protobuf::Any & /*req*/, co::Coroutine * /*c*/,
+              DeferredThreadReplyState::ReplyFn reply,
+              std::function<void(std::string)> /*error_reply*/) {
+        state->AddReply(std::move(reply));
+      },
+      std::move(options), "subspace.TestRequest", "subspace.TestResponse"));
+  ASSERT_OK(server->Run(&scheduler));
+
+  co::Coroutine test(scheduler, [&](co::Coroutine *c) {
+    ServerContext ctx;
+    subspace::RpcServerResponse response;
+    Open(server, response, ctx, c);
+
+    auto *method = FindMethod(response.open(), "ThreadedAsyncMethod");
+    ASSERT_NE(method, nullptr);
+
+    subspace::Client client;
+    InitClient(client);
+
+    auto pub = client.CreatePublisher(
+        method->request_channel().name(), method->request_channel().slot_size(),
+        method->request_channel().num_slots(),
+        subspace::PublisherOptions().SetReliable(true).SetType(
+            method->request_channel().type()));
+    ASSERT_OK(pub);
+
+    auto sub = client.CreateSubscriber(
+        method->response_channel().name(),
+        subspace::SubscriberOptions().SetReliable(true).SetType(
+            method->response_channel().type()));
+    ASSERT_OK(sub);
+
+    int first_request_id = next_request_id;
+    for (int i = 0; i < kNumRequests; ++i) {
+      subspace::RpcRequest req;
+      req.set_client_id(ctx.client_id);
+      req.set_session_id(response.open().session_id());
+      req.set_request_id(next_request_id++);
+      req.set_method(method->id());
+
+      rpc::TestRequest test_request;
+      test_request.set_message("Hello, worker thread!");
+      req.mutable_argument()->PackFrom(test_request);
+
+      void *buffer = nullptr;
+      while (buffer == nullptr) {
+        auto buffer_or = pub->GetMessageBuffer(int32_t(req.ByteSizeLong()));
+        ASSERT_OK(buffer_or);
+        buffer = *buffer_or;
+        if (buffer == nullptr) {
+          ASSERT_OK(pub->Wait(c));
+        }
+      }
+      ASSERT_TRUE(req.SerializeToArray(buffer, req.ByteSizeLong()));
+      ASSERT_OK(pub->PublishMessage(int(req.ByteSizeLong())));
+    }
+
+    for (int i = 0; i < 500 && state->Count() != kNumRequests; ++i) {
+      c->Millisleep(10);
+    }
+    ASSERT_EQ(kNumRequests, state->Count());
+
+    state->Release();
+    c->Millisleep(200);
+
+    std::vector<bool> seen(kNumRequests, false);
+    int received = 0;
+    while (received < kNumRequests) {
+      ASSERT_OK(sub->Wait(c));
+      for (;;) {
+        auto m = sub->ReadMessage();
+        ASSERT_OK(m);
+        if (m->length == 0) {
+          break;
+        }
+        subspace::RpcResponse rpc_response;
+        ASSERT_TRUE(rpc_response.ParseFromArray(m->buffer, m->length));
+        if (rpc_response.client_id() != ctx.client_id) {
+          continue;
+        }
+        int index = rpc_response.request_id() - first_request_id;
+        if (index < 0 || index >= kNumRequests || seen[index]) {
+          continue;
+        }
+        EXPECT_EQ("", rpc_response.error());
+        rpc::TestResponse response_message;
+        ASSERT_TRUE(rpc_response.result().UnpackTo(&response_message));
+        EXPECT_EQ("Hello from worker thread", response_message.message());
+        seen[index] = true;
+        ++received;
+      }
+    }
+
+    Close(server, ctx, c);
+    server->Stop();
+  });
+
+  scheduler.Run();
+  state->Stop();
 }
 
 TEST_F(ServerTest, CallVoidMethod) {
