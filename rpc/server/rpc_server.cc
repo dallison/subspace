@@ -709,7 +709,8 @@ void RpcServer::SessionRequestCoroutine(
 }
 
 void RpcServer::SessionResponseCoroutine(
-    std::shared_ptr<RpcServer> server, std::shared_ptr<Session> session,
+    std::shared_ptr<RpcServer> server,
+    [[maybe_unused]] std::shared_ptr<Session> session,
     std::shared_ptr<MethodInstance> method_instance, co::Coroutine *c) {
   auto &queue = *method_instance->reply_queue;
   // dup the interrupt fd so this coroutine can wait on it concurrently with

@@ -70,7 +70,7 @@ struct ReplyItem {
 struct ReplyQueue {
   static absl::StatusOr<std::shared_ptr<ReplyQueue>> Create();
 
-  int ReadFd() const { return wake_pipe_.ReadFd().Fd(); }
+  int ReadFd() { return wake_pipe_.ReadFd().Fd(); }
   absl::Status Push(std::shared_ptr<ReplyItem> item);
   void AcknowledgeWake();
   absl::StatusOr<std::shared_ptr<ReplyItem>> Pop();
