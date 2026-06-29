@@ -119,10 +119,12 @@ absl::Status WaitFdReady(Context yield, int fd,
   // to the coroutine's cancellation slot and wait on the notifier with an
   // *unconnected* slot so asio installs no per-operation timer cancellation.
   auto exec = yield.get_executor();
-  yield.get_cancellation_slot().assign(
-      [exec, wake](boost::asio::cancellation_type) {
-        boost::asio::post(exec, [wake]() { wake(); });
-      });
+  auto cancel_slot = yield.get_cancellation_slot();
+  if (cancel_slot.is_connected()) {
+    cancel_slot.assign([exec, wake](boost::asio::cancellation_type) {
+      boost::asio::post(exec, [wake]() { wake(); });
+    });
+  }
 
   boost::system::error_code ec;
   notifier->async_wait(
@@ -132,7 +134,7 @@ absl::Status WaitFdReady(Context yield, int fd,
   // Clear our handler so a late re-emit cannot poke a stale wake, then cancel
   // the pending descriptor wait and release the real fd so destroying the
   // shared descriptor does not close it.
-  yield.get_cancellation_slot().clear();
+  cancel_slot.clear();
   boost::system::error_code ignored;
   sd->cancel(ignored);
   sd->release();

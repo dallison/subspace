@@ -12,7 +12,10 @@
 #include <unistd.h>
 
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+#include <boost/asio/detached.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/spawn.hpp>
+#include <boost/asio/steady_timer.hpp>
 #endif
 
 namespace subspace::async {
@@ -77,6 +80,36 @@ TEST(AsyncTest, WaitReadableTimeout) {
   ::close(fds[0]);
   ::close(fds[1]);
 }
+
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+TEST(AsyncTest, WaitReadableAllowsUnconnectedCancellationSlot) {
+  int fds[2];
+  ASSERT_EQ(0, ::pipe(fds));
+
+  boost::asio::io_context ioc;
+  boost::asio::steady_timer writer(ioc, std::chrono::milliseconds(10));
+  bool got_data = false;
+
+  boost::asio::spawn(
+      ioc,
+      [&](Context ctx) {
+        ASSERT_TRUE(WaitReadable(ctx, fds[0]).ok());
+        char buf[1] = {};
+        ssize_t n = ::read(fds[0], buf, sizeof(buf));
+        got_data = (n == 1 && buf[0] == 'x');
+      },
+      boost::asio::detached);
+
+  writer.async_wait([&](const boost::system::error_code &) {
+    ASSERT_EQ(1, ::write(fds[1], "x", 1));
+  });
+
+  ioc.run();
+  EXPECT_TRUE(got_data);
+  ::close(fds[0]);
+  ::close(fds[1]);
+}
+#endif
 
 TEST(AsyncTest, WaitEitherReturnsReadyFd) {
   int a[2], b[2];
