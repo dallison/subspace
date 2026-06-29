@@ -1859,7 +1859,7 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
   subscribed.set_split_buffers(wire_split_buffers);
   subscribed.set_split_buffers_over_bridge(info.split_buffers_over_bridge);
 
-  async::StreamSocket retirement_listener;
+  std::shared_ptr<async::StreamSocket> retirement_listener;
   toolbelt::SocketAddress retirement_addr;
 
   if (notify_retirement) {
@@ -1868,14 +1868,15 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
     // Allocate a listen socket to wait for an incoming connection from the
     // other server.
 
-    absl::Status s = BindBridgeListener(retirement_listener);
+    retirement_listener = std::make_shared<async::StreamSocket>();
+    absl::Status s = BindBridgeListener(*retirement_listener);
     if (!s.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Unable to bind socket for retirement receiver for %s: %s",
                   channel_name.c_str(), s.ToString().c_str());
       return;
     }
-    retirement_addr = retirement_listener.BoundAddress();
+    retirement_addr = retirement_listener->BoundAddress();
     logger_.Log(toolbelt::LogLevel::kDebug, "Retirement listener: %s",
                 retirement_addr.ToString().c_str());
 
@@ -1952,8 +1953,10 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
   // Spawn a coroutine to read from the retirement connection.
   if (notifying_of_retirement) {
     active_retirement_msgs->resize(info.num_slots);
+    // SpawnOnNewStrand is deferred under Asio, so the listener must outlive
+    // this parent bridge coroutine's stack frame.
     runtime_.SpawnOnNewStrand(
-        [this, &retirement_listener,
+        [this, retirement_listener,
          active_retirement_msgs](async::Context ret_ctx) mutable {
           return RetirementReceiverCoroutine(ret_ctx, retirement_listener,
                                              active_retirement_msgs);
@@ -2073,12 +2076,12 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
 // If these references are the last reference to the slot, it will be retired
 // on this side and the publisher's retirement FD is sent the slot.
 void Server::RetirementReceiverCoroutine(
-    async::Context ctx, async::StreamSocket &retirement_listener,
+    async::Context ctx, std::shared_ptr<async::StreamSocket> retirement_listener,
     std::shared_ptr<std::vector<std::shared_ptr<ActiveMessage>>>
         active_retirement_msgs) {
   // Accept connection on the retirement listener socket.
   absl::StatusOr<async::StreamSocket> retirement_socket =
-      retirement_listener.Accept(ctx);
+      retirement_listener->Accept(ctx);
   if (!retirement_socket.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to accept retirement connection: %s",
@@ -2281,10 +2284,10 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
     return;
   }
 
-  std::unique_ptr<async::StreamSocket> retirement_transmitter;
+  std::shared_ptr<async::StreamSocket> retirement_transmitter;
 
   if (subscribed.notify_retirement()) {
-    retirement_transmitter = std::make_unique<async::StreamSocket>();
+    retirement_transmitter = std::make_shared<async::StreamSocket>();
     toolbelt::SocketAddress retirement_addr;
     // The address family travels in the message (see SendSubscribeMessage);
     // unset defaults to FAMILY_INET for compatibility with older peers.
@@ -2364,11 +2367,13 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
 
     // Add a coroutine to listen for retirement notifications and send them to
     // the socket connected to the other server.
+    // SpawnOnNewStrand is deferred under Asio, so capture the connected socket
+    // by value instead of referencing this parent coroutine's local variable.
     runtime_.SpawnOnNewStrand(
         [this, retirement_fd = std::move(retirement_fd),
-         &retirement_transmitter, channel_name](async::Context ret_ctx) mutable {
+         retirement_transmitter, channel_name](async::Context ret_ctx) mutable {
           RetirementCoroutine(ret_ctx, channel_name, std::move(retirement_fd),
-                              std::move(retirement_transmitter));
+                              retirement_transmitter);
         },
         {.name = absl::StrFormat("Retirement notifier for %s", channel_name),
          .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
@@ -2471,7 +2476,7 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
 void Server::RetirementCoroutine(
     async::Context ctx, const std::string &channel_name,
     toolbelt::FileDescriptor &&retirement_fd,
-    std::unique_ptr<async::StreamSocket> retirement_transmitter) {
+    std::shared_ptr<async::StreamSocket> retirement_transmitter) {
   logger_.Log(toolbelt::LogLevel::kDebug, "Retirement coroutine for %s running",
               channel_name.c_str());
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
