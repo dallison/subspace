@@ -167,6 +167,8 @@
     "https://bcr.bazel.build/modules/buildozer/8.5.1/source.json": "e3386e6ff4529f2442800dee47ad28d3e6487f36a1f75ae39ae56c70f0cd2fbd",
     "https://bcr.bazel.build/modules/coroutines/3.3.2/MODULE.bazel": "ad1395ae9758ee5d113acab755b4d972c368c4dab66513bfe31423136f3ee608",
     "https://bcr.bazel.build/modules/coroutines/3.3.2/source.json": "fb47a4c3e13d730a1a58ed6a34add8f6aaeef655a47d0f179427f71bf58ba150",
+    "https://bcr.bazel.build/modules/cpp_toolbelt/2.1.3/MODULE.bazel": "3358a96b2be79b5d73d052fc6b6d71737836db8f7fb81469d3c6b7e97b4661e5",
+    "https://bcr.bazel.build/modules/cpp_toolbelt/2.1.3/source.json": "c400ed2b6e7e93c31c79019b04678b85ffb226518a671b45af2a11f367dac0ad",
     "https://bcr.bazel.build/modules/google_benchmark/1.8.2/MODULE.bazel": "a70cf1bba851000ba93b58ae2f6d76490a9feb74192e57ab8e8ff13c34ec50cb",
     "https://bcr.bazel.build/modules/googletest/1.11.0/MODULE.bazel": "3a83f095183f66345ca86aa13c58b59f9f94a2f81999c093d4eeaa2d262d12f4",
     "https://bcr.bazel.build/modules/googletest/1.14.0.bcr.1/MODULE.bazel": "22c31a561553727960057361aa33bf20fb2e98584bc4fec007906e27053f80c6",
@@ -592,8 +594,8 @@
     },
     "@@rules_rust+//crate_universe:extensions.bzl%crate": {
       "general": {
-        "bzlTransitiveDigest": "KnoFc60aLWU0GPkk2YxX0MzTPpyFIWzv8bMO30Tfq6E=",
-        "usagesDigest": "/BgLa1QXl04f1VN+daWFRiA9R2aF6eCMLnYpzYfQsgU=",
+        "bzlTransitiveDigest": "qD4RshABgOGJEdLYZOfeternLk7PjIxk+jQHfa/mw+Q=",
+        "usagesDigest": "T1KvYgrcuwKmkZg2IhlD9N2SwGQXg0dwwWw2RuTtdXc=",
         "recordedInputs": [
           "ENV:CARGO_BAZEL_DEBUG \\0",
           "ENV:CARGO_BAZEL_GENERATOR_SHA256 \\0",
