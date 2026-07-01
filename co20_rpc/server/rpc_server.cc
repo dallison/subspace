@@ -759,9 +759,8 @@ co20::ValueTask<void> RpcServer::SessionStreamingMethodCoroutine(
             while (!writer->IsCancelled()) {
               int cancel_fd =
                   method_instance->cancel_subscriber->GetPollFd().fd;
-              int fd = co_await cancel_co.Wait(
-                  {cancel_fd, cancel_interrupt->ReadFd().Fd()}, POLLIN);
-              if (fd == cancel_interrupt->ReadFd().Fd()) {
+              int fd = co_await cancel_co.Wait(cancel_fd, POLLIN);
+              if (fd == cancel_co.GetInterruptFd()) {
                 break;
               }
               bool cancel_ok = false;
@@ -795,7 +794,7 @@ co20::ValueTask<void> RpcServer::SessionStreamingMethodCoroutine(
             }
             co_return;
           },
-          "cancel_watcher", server->interrupt_pipe_.ReadFd().Fd());
+          "cancel_watcher", cancel_interrupt->ReadFd().Fd());
     }
 
     absl::Status method_status =
