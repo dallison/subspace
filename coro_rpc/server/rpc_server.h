@@ -13,6 +13,8 @@
 #include "toolbelt/logging.h"
 #include "toolbelt/pipe.h"
 
+#include <atomic>
+
 #include <boost/asio.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -38,15 +40,15 @@ struct AnyStreamWriter {
   boost::asio::awaitable<bool> Write(std::unique_ptr<google::protobuf::Any> res);
   boost::asio::awaitable<void> Finish();
 
-  void Cancel() { is_cancelled = true; }
+  void Cancel() { is_cancelled.store(true); }
 
-  bool IsCancelled() const { return is_cancelled; }
+  bool IsCancelled() const { return is_cancelled.load(); }
 
   std::shared_ptr<RpcServer> server;
   std::shared_ptr<Session> session;
   std::shared_ptr<MethodInstance> method_instance;
-  const RpcRequest &request;
-  bool is_cancelled = false;
+  RpcRequest request;
+  std::atomic<bool> is_cancelled{false};
 };
 
 // An item pushed by either the reply function or the error function of an
