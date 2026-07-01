@@ -737,55 +737,74 @@ co20::ValueTask<void> RpcServer::SessionStreamingMethodCoroutine(
     server->logger_.Log(toolbelt::LogLevel::kDebug, "Calling method %s",
                         method_instance->method->name.c_str());
 
-    AnyStreamWriter writer(server, session, method_instance, request);
+    auto writer =
+        std::make_shared<AnyStreamWriter>(server, session, method_instance,
+                                          request);
+    auto cancel_interrupt_status = toolbelt::Pipe::Create();
+    std::shared_ptr<toolbelt::Pipe> cancel_interrupt;
+    if (!cancel_interrupt_status.ok()) {
+      server->logger_.Log(toolbelt::LogLevel::kError,
+                          "Failed to create cancel interrupt pipe: %s",
+                          cancel_interrupt_status.status().ToString().c_str());
+    } else {
+      cancel_interrupt = std::make_shared<toolbelt::Pipe>(
+          std::move(*cancel_interrupt_status));
+    }
 
     // Spawn a coroutine to read the cancellation channel.
-    server->scheduler_->Spawn(
-        [server, session, method_instance, &writer,
-         &request](co20::Coroutine &cancel_co) -> co20::Task {
-          while (!writer.IsCancelled()) {
-            int cancel_fd =
-                method_instance->cancel_subscriber->GetPollFd().fd;
-            int fd = co_await cancel_co.Wait(cancel_fd, POLLIN);
-            if (fd == cancel_co.GetInterruptFd()) {
-              break;
-            }
-            bool cancel_ok = false;
-            while (!cancel_ok) {
-              auto msg = method_instance->cancel_subscriber->ReadMessage();
-              if (!msg.ok()) {
-                server->logger_.Log(toolbelt::LogLevel::kError,
-                                    "Error reading cancel message: %s",
-                                    msg.status().ToString().c_str());
-                continue;
-              }
-              if (msg->length == 0) {
+    if (cancel_interrupt != nullptr) {
+      server->scheduler_->Spawn(
+          [server, session, method_instance, writer,
+           cancel_interrupt](co20::Coroutine &cancel_co) -> co20::Task {
+            while (!writer->IsCancelled()) {
+              int cancel_fd =
+                  method_instance->cancel_subscriber->GetPollFd().fd;
+              int fd = co_await cancel_co.Wait(cancel_fd, POLLIN);
+              if (fd == cancel_co.GetInterruptFd()) {
                 break;
               }
-              RpcCancelRequest cancel;
-              if (!cancel.ParseFromArray(msg->buffer, msg->length)) {
-                server->logger_.Log(toolbelt::LogLevel::kError,
-                                    "Error parsing cancel message: %s",
-                                    msg.status().ToString().c_str());
-                continue;
+              bool cancel_ok = false;
+              while (!cancel_ok) {
+                auto msg = method_instance->cancel_subscriber->ReadMessage();
+                if (!msg.ok()) {
+                  server->logger_.Log(toolbelt::LogLevel::kError,
+                                      "Error reading cancel message: %s",
+                                      msg.status().ToString().c_str());
+                  continue;
+                }
+                if (msg->length == 0) {
+                  break;
+                }
+                RpcCancelRequest cancel;
+                if (!cancel.ParseFromArray(msg->buffer, msg->length)) {
+                  server->logger_.Log(toolbelt::LogLevel::kError,
+                                      "Error parsing cancel message: %s",
+                                      msg.status().ToString().c_str());
+                  continue;
+                }
+                if (cancel.session_id() == session->session_id &&
+                    cancel.request_id() == writer->request.request_id()) {
+                  cancel_ok = true;
+                  break;
+                }
               }
-              if (cancel.session_id() == session->session_id &&
-                  cancel.request_id() == request.request_id()) {
-                cancel_ok = true;
-                break;
+              if (cancel_ok) {
+                writer->Cancel();
               }
             }
-            if (cancel_ok) {
-              writer.Cancel();
-            }
-          }
-          co_return;
-        },
-        "cancel_watcher", server->interrupt_pipe_.ReadFd().Fd());
+            co_return;
+          },
+          "cancel_watcher", cancel_interrupt->ReadFd().Fd());
+    }
 
     absl::Status method_status =
         co_await method_instance->method->stream_callback(request.argument(),
-                                                          writer);
+                                                          *writer);
+    writer->Cancel();
+    if (cancel_interrupt != nullptr) {
+      char buf = 1;
+      (void)::write(cancel_interrupt->WriteFd().Fd(), &buf, 1);
+    }
     if (!method_status.ok()) {
       server->logger_.Log(toolbelt::LogLevel::kError,
                           "Error executing method %s: %s",

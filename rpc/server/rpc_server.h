@@ -12,6 +12,8 @@
 #include "toolbelt/logging.h"
 #include "toolbelt/pipe.h"
 
+#include <atomic>
+
 namespace subspace {
 
 class RpcServer;
@@ -33,15 +35,15 @@ struct AnyStreamWriter {
   bool Write(std::unique_ptr<google::protobuf::Any> res, co::Coroutine *c);
   void Finish(co::Coroutine *c);
 
-  void Cancel() { is_cancelled = true; }
+  void Cancel() { is_cancelled.store(true); }
 
-  bool IsCancelled() const { return is_cancelled; }
+  bool IsCancelled() const { return is_cancelled.load(); }
 
   std::shared_ptr<RpcServer> server;
   std::shared_ptr<Session> session;
   std::shared_ptr<MethodInstance> method_instance;
-  const RpcRequest &request;
-  bool is_cancelled = false;
+  RpcRequest request;
+  std::atomic<bool> is_cancelled{false};
 };
 
 // An item pushed by either the reply function or the error function of an
