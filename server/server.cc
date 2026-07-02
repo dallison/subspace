@@ -1860,6 +1860,14 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
   subscribed.set_split_buffers_over_bridge(info.split_buffers_over_bridge);
 
   std::shared_ptr<async::StreamSocket> retirement_listener;
+  struct CloseRetirementListenerOnExit {
+    std::shared_ptr<async::StreamSocket> &socket;
+    ~CloseRetirementListenerOnExit() {
+      if (socket != nullptr) {
+        socket->Close();
+      }
+    }
+  } close_retirement_listener_on_exit{retirement_listener};
   toolbelt::SocketAddress retirement_addr;
 
   if (notify_retirement) {
@@ -2284,6 +2292,14 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
   }
 
   std::shared_ptr<async::StreamSocket> retirement_transmitter;
+  struct CloseRetirementTransmitterOnExit {
+    std::shared_ptr<async::StreamSocket> &socket;
+    ~CloseRetirementTransmitterOnExit() {
+      if (socket != nullptr) {
+        socket->Close();
+      }
+    }
+  } close_retirement_transmitter_on_exit{retirement_transmitter};
 
   if (subscribed.notify_retirement()) {
     retirement_transmitter = std::make_shared<async::StreamSocket>();
