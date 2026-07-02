@@ -643,6 +643,48 @@ TEST_F(BridgeTest, BasicRetirement) {
   ASSERT_EQ(0, slot_id);
 }
 
+TEST(BridgeRetirementLifetimeTest, ShutdownWithOutstandingRetirementBridge) {
+  ScopedBridgeServerPair servers;
+  servers.Start({BridgeRangeConfig{}, BridgeRangeConfig{}});
+
+  subspace::Client client1;
+  servers.InitClient(client1, 0);
+  subspace::Client client2;
+  servers.InitClient(client2, 1);
+
+  absl::StatusOr<Publisher> pub = client1.CreatePublisher(
+      "/bridged_retire_shutdown",
+      subspace::PublisherOptions()
+          .SetSlotSize(256)
+          .SetNumSlots(10)
+          .SetLocal(false)
+          .SetNotifyRetirement(true));
+  ASSERT_OK(pub);
+
+  absl::StatusOr<Subscriber> sub =
+      client2.CreateSubscriber("/bridged_retire_shutdown",
+                               subspace::SubscriberOptions()
+                                   .SetMaxActiveMessages(2));
+  ASSERT_OK(sub);
+
+  WaitForSubscribedMessage(servers.BridgeNotificationPipe(0),
+                           "/bridged_retire_shutdown");
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "foobar", 6);
+  ASSERT_OK(pub->PublishMessage(6));
+
+  WaitForSubscribedMessage(servers.BridgeNotificationPipe(1),
+                           "/bridged_retire_shutdown");
+
+  absl::StatusOr<Message> msg = ReadMessageEventually(*sub);
+  ASSERT_OK(msg);
+  msg->Reset();
+
+  servers.Stop();
+}
+
 TEST_F(BridgeTest, MultipleRetirement) {
   subspace::Client client1;
   InitClient(client1, 0);
