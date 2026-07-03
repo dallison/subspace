@@ -259,6 +259,7 @@ typedef struct {
   int max_active_messages; // Max number of message that can be active at once.
   bool pass_activation;    // Pass activation message in read.
   bool log_dropped_messages; // Log dropped messages to stderr.
+  bool detect_dropped_messages; // Detect and count ordinal gaps internally.
   bool read_write;           // Map buffers writable for this subscriber.
   const char *mux;           // Optional mux channel name for virtual channels.
   size_t mux_length;

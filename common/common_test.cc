@@ -1,5 +1,10 @@
 #include "common/atomic_bitset.h"
+#include "common/channel.h"
 #include "common/fast_ring_buffer.h"
+
+#include <cstddef>
+#include <memory>
+#include <new>
 
 #include <gtest/gtest.h>
 
@@ -48,6 +53,27 @@ TEST(CommonTest, FastRingBuffer) {
   EXPECT_TRUE(buffer.Contains(2));
   EXPECT_TRUE(buffer.Contains(3));
   EXPECT_TRUE(buffer.Contains(4));
+}
+
+TEST(CommonTest, InPlaceSlotQueueEvictsOldestOnOverflow) {
+  constexpr size_t kCapacity = 2;
+  std::unique_ptr<std::byte[]> storage(
+      new std::byte[subspace::SizeofSlotQueue(kCapacity)]);
+  auto *queue = new (storage.get()) subspace::InPlaceSlotQueue(kCapacity);
+
+  EXPECT_TRUE(queue->Push(1, 10));
+  EXPECT_TRUE(queue->Push(2, 20));
+  EXPECT_TRUE(queue->Push(3, 30));
+  EXPECT_TRUE(queue->ConsumeOverflow());
+
+  subspace::QueuedSlot slot;
+  ASSERT_TRUE(queue->TryPop(slot));
+  EXPECT_EQ(slot.slot_id, 2);
+  EXPECT_EQ(slot.ordinal, 20);
+  ASSERT_TRUE(queue->TryPop(slot));
+  EXPECT_EQ(slot.slot_id, 3);
+  EXPECT_EQ(slot.ordinal, 30);
+  EXPECT_FALSE(queue->TryPop(slot));
 }
 
 TEST(CommonTest, BitsetTraverse1) {

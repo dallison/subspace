@@ -188,6 +188,7 @@ pub struct SubscriberOptions {
     pub channel_type: String,
     pub max_active_messages: i32,
     pub log_dropped_messages: bool,
+    pub detect_dropped_messages: bool,
     pub pass_activation: bool,
     pub read_write: bool,
     pub mux: String,
@@ -207,6 +208,7 @@ impl Default for SubscriberOptions {
             channel_type: String::new(),
             max_active_messages: 1,
             log_dropped_messages: true,
+            detect_dropped_messages: true,
             pass_activation: false,
             read_write: false,
             mux: String::new(),
@@ -246,6 +248,11 @@ impl SubscriberOptions {
 
     pub fn set_log_dropped_messages(mut self, v: bool) -> Self {
         self.log_dropped_messages = v;
+        self
+    }
+
+    pub fn set_detect_dropped_messages(mut self, v: bool) -> Self {
+        self.detect_dropped_messages = v;
         self
     }
 

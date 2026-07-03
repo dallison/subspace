@@ -337,13 +337,19 @@ impl PublisherImpl {
             self.channel.active_slots.sort_by_key(|s| s.timestamp);
 
             slot_idx = None;
+            let require_reliable_seen =
+                self.channel.scb().counters[self.channel.channel_id as usize].num_reliable_subs
+                    != 0;
             for active in &self.channel.active_slots {
                 let s = self.channel.slot_ref(active.slot_index);
                 let refs = s.refs.load(Ordering::Relaxed);
                 if ((refs >> RELIABLE_REF_COUNT_SHIFT) & REF_COUNT_MASK) != 0 {
                     break;
                 }
-                if active.ordinal != 0 && (s.flags & MESSAGE_SEEN) == 0 {
+                if require_reliable_seen
+                    && active.ordinal != 0
+                    && (s.flags & MESSAGE_SEEN_BY_RELIABLE) == 0
+                {
                     break;
                 }
                 if (refs & REFS_MASK) == 0 {

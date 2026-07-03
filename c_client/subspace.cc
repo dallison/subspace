@@ -487,6 +487,7 @@ bool subspace_get_all_channel_stats(SubspaceClient client,
 SubspaceSubscriberOptions subspace_subscriber_options_default(void) {
   SubspaceSubscriberOptions options = {};
   options.max_active_messages = 1;
+  options.detect_dropped_messages = true;
   options.vchan_id = -1;
   return options;
 }
@@ -535,6 +536,7 @@ subspace_create_subscriber(SubspaceClient client, const char *channel_name,
       .SetChecksum(options.checksum)
       .SetPassChecksumErrors(options.pass_checksum_errors)
       .SetKeepActiveMessage(options.keep_active_message)
+      .SetDetectDroppedMessages(options.detect_dropped_messages)
       .SetSplitBufferCallbacks(ToCppSplitCallbacks(options.split_callbacks));
   subspace_options.SetLogDroppedMessages(options.log_dropped_messages);
   subspace_clear_error();

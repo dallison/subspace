@@ -24,9 +24,11 @@ pub const MESSAGE_HAS_CHECKSUM: i64 = 4;
 
 pub const MESSAGE_SEEN: u32 = 1;
 pub const MESSAGE_IS_ACTIVATION: u32 = 2;
+pub const MESSAGE_SEEN_BY_RELIABLE: u32 = 4;
 
 pub const MAX_CHANNELS: usize = 1024;
 pub const MAX_SLOT_OWNERS: usize = 1024;
+pub const MAX_AVAILABLE_SLOT_QUEUE_CAPACITY: usize = 1024;
 pub const MAX_VCHAN_ID: usize = 1023;
 pub const MAX_CHANNEL_NAME: usize = 64;
 pub const MAX_BUFFERS: usize = 1024;
@@ -136,6 +138,30 @@ pub struct ActiveSlot {
     pub ordinal: u64,
     pub timestamp: u64,
     pub vchan_id: i32,
+}
+
+#[repr(C)]
+pub struct SlotQueueEntry {
+    sequence: AtomicU64,
+    ordinal: AtomicU64,
+    slot_id: AtomicI32,
+}
+
+#[repr(C)]
+pub struct SlotQueueHeader {
+    capacity: usize,
+    head: AtomicU64,
+    tail: AtomicU64,
+    overflow: AtomicBool,
+}
+
+pub fn sizeof_slot_queue(capacity: usize) -> usize {
+    std::mem::size_of::<SlotQueueHeader>()
+        + std::mem::size_of::<SlotQueueEntry>() * capacity
+}
+
+pub fn available_slot_queue_capacity(num_slots: usize) -> usize {
+    std::cmp::min(num_slots, MAX_AVAILABLE_SLOT_QUEUE_CAPACITY)
 }
 
 // ── ChannelCounters ─────────────────────────────────────────────────────────
@@ -261,6 +287,8 @@ pub fn ccb_size(num_slots: i32) -> usize {
     ) as usize;
     base + aligned64(sizeof_atomic_bitset(ns) as i64) as usize * 2
         + sizeof_atomic_bitset(ns) * MAX_SLOT_OWNERS
+        + aligned64(sizeof_slot_queue(available_slot_queue_capacity(ns)) as i64) as usize
+            * MAX_SLOT_OWNERS
 }
 
 // ── Channel: shared memory accessor ─────────────────────────────────────────

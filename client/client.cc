@@ -1144,7 +1144,8 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     printf("read new_slot: %d: %" PRId64 "\n", new_slot->id, new_slot->ordinal);
   }
 
-  if (mode == ReadMode::kReadNext && last_ordinal != -1) {
+  if (mode == ReadMode::kReadNext && last_ordinal != -1 &&
+      subscriber->options_.DetectDroppedMessages()) {
     int drops = subscriber->DetectDrops(new_slot->vchan_id);
     if (drops > 0) {
       // We dropped a message.  If we have a callback registered for this

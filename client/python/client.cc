@@ -156,6 +156,12 @@ PYBIND11_MODULE(subspace, m) {
            "Sets whether the subscriber logs dropped messages.")
       .def("log_dropped_messages", &SubscriberOptions::LogDroppedMessages,
            "Get whether the subscriber logs dropped messages.")
+      .def("set_detect_dropped_messages",
+           &SubscriberOptions::SetDetectDroppedMessages,
+           "Sets whether the subscriber detects dropped messages internally.")
+      .def("detect_dropped_messages",
+           &SubscriberOptions::DetectDroppedMessages,
+           "Get whether the subscriber detects dropped messages internally.")
       .def("set_bridge", &SubscriberOptions::SetBridge,
            "Set whether the subscriber is a bridge.")
       .def("is_bridge", &SubscriberOptions::IsBridge,

@@ -98,11 +98,17 @@ public:
   void UnreadSlot(MessageSlot *slot);
   void RememberOrdinal(uint64_t ordinal, int vchan_id);
   void CollectVisibleSlots(InPlaceAtomicBitset &bits);
+  MessageSlot *FindNextQueuedSlot(uint64_t max_ordinal);
+  MessageSlot *FindNextVisibleSlot(InPlaceAtomicBitset &bits,
+                                   uint64_t max_ordinal);
 
   void IgnoreActivation(MessageSlot *slot) {
     RememberOrdinal(slot->ordinal, slot->vchan_id);
     DecrementSlotRef(slot, true);
     slot->flags |= kMessageSeen;
+    if (IsReliable()) {
+      slot->flags |= kMessageSeenByReliable;
+    }
   }
   // A subscriber wants to find a slot with a message in it.  There are
   // two ways to get this:

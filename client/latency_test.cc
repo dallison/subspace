@@ -426,7 +426,7 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatency) {
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-      "lustress", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); return opts; }()));
+      "lustress", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetDetectDroppedMessages(false); return opts; }()));
   ASSERT_OK(sub);
 
   uint64_t start_time = toolbelt::Now();
@@ -512,7 +512,7 @@ TEST_F(LatencyTest, PublisherLatency) {
 
     std::cerr << num_slots << ",";
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        "publat", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); return opts; }()));
+        "publat", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetDetectDroppedMessages(false); return opts; }()));
     ASSERT_OK(sub);
 
     uint64_t total_time = 0;
@@ -585,7 +585,7 @@ TEST_F(LatencyTest, PublisherLatencyChecksum) {
     std::cerr << num_slots << ",";
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
         "publat",
-        ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetChecksum(true); return opts; }()));
+        ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetDetectDroppedMessages(false); opts.SetChecksum(true); return opts; }()));
     ASSERT_OK(sub);
 
     uint64_t total_time = 0;
@@ -666,7 +666,7 @@ TEST_F(LatencyTest, PublisherLatencyPayload) {
 
     std::cerr << num_slots << ",";
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        "publat", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); return opts; }()));
+        "publat", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetDetectDroppedMessages(false); return opts; }()));
     ASSERT_OK(sub);
 
     uint64_t total_time = 0;
@@ -756,7 +756,7 @@ TEST_F(LatencyTest, PublisherLatencyPayloadChecksum) {
     std::cerr << num_slots << ",";
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
         "publat",
-        ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetChecksum(true); return opts; }()));
+        ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetDetectDroppedMessages(false); opts.SetChecksum(true); return opts; }()));
     ASSERT_OK(sub);
 
     uint64_t total_time = 0;
@@ -865,7 +865,7 @@ TEST_F(LatencyTest, PublisherLatencyHistogram) {
 
     std::cerr << num_slots << ",";
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        "publat", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); return opts; }()));
+        "publat", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetDetectDroppedMessages(false); return opts; }()));
     ASSERT_OK(sub);
 
     std::vector<uint64_t> latencies;
@@ -962,7 +962,7 @@ TEST_F(LatencyTest, PublisherLatencyHistogramThreadSafe) {
 
     std::cerr << num_slots << ",";
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        "publat", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); return opts; }()));
+        "publat", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetDetectDroppedMessages(false); return opts; }()));
     ASSERT_OK(sub);
 
     std::vector<uint64_t> latencies;
@@ -1043,7 +1043,7 @@ TEST_F(LatencyTest, PublisherLatencyMultiSub) {
 
       for (int i = 0; i < num_subs; i++) {
         absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-            "publat", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); return opts; }()));
+            "publat", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetDetectDroppedMessages(false); return opts; }()));
         ASSERT_OK(sub);
         subs.push_back(std::move(*sub));
       }
@@ -1121,7 +1121,7 @@ TEST_F(LatencyTest, VirtualPublisherLatency) {
     std::cerr << num_slots << ",";
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
         "publat",
-        ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetMux("/foo"); return opts; }()));
+        ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetDetectDroppedMessages(false); opts.SetMux("/foo"); return opts; }()));
     ASSERT_OK(sub);
 
     uint64_t total_time = 0;
@@ -1200,7 +1200,7 @@ TEST_F(LatencyTest, VirtualPublisherLatencyMultiSub) {
       for (int i = 0; i < num_subs; i++) {
         absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
             "publat",
-            ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetMux("/foo"); return opts; }()));
+            ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetDetectDroppedMessages(false); opts.SetMux("/foo"); return opts; }()));
         ASSERT_OK(sub);
         subs.push_back(std::move(*sub));
       }
@@ -1278,12 +1278,12 @@ TEST_F(LatencyTest, VirtualPublisherMuxLatency) {
     std::cerr << num_slots << ",";
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
         "publat",
-        ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetMux("/foo"); return opts; }()));
+        ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetDetectDroppedMessages(false); opts.SetMux("/foo"); return opts; }()));
     ASSERT_OK(sub);
 
     // Mux subscriber.
     absl::StatusOr<Subscriber> mux_sub = sub_client.CreateSubscriber(
-        "/foo", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); return opts; }()));
+        "/foo", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetDetectDroppedMessages(false); return opts; }()));
     ASSERT_OK(mux_sub);
 
     uint64_t total_time = 0;
@@ -1358,7 +1358,7 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyHistogram) {
     ASSERT_OK(pub);
 
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        "lustress", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); return opts; }()));
+        "lustress", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetDetectDroppedMessages(false); return opts; }()));
     ASSERT_OK(sub);
 
     uint64_t start_time = toolbelt::Now();
@@ -1447,7 +1447,7 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayload) {
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-      "lustress", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); return opts; }()));
+      "lustress", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetDetectDroppedMessages(false); return opts; }()));
   ASSERT_OK(sub);
 
   // Create a subscriber thread to read from the channel and write to random
@@ -1572,7 +1572,7 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayloadHistogram) {
     ASSERT_OK(pub);
 
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        "lustress", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); return opts; }()));
+        "lustress", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetDetectDroppedMessages(false); return opts; }()));
     ASSERT_OK(sub);
 
     // Create a subscriber thread to read from the channel and write to random
@@ -1710,7 +1710,7 @@ TEST_F(LatencyTest, ManyChannelsNonMultiplexed) {
   std::vector<Subscriber> subs;
   for (int i = 0; i < kNumChannels; i++) {
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        channels[i], ([] { subspace::SubscriberOptions opts; opts.SetLogDroppedMessages(false); return opts; }()));
+        channels[i], ([] { subspace::SubscriberOptions opts; opts.SetLogDroppedMessages(false); opts.SetDetectDroppedMessages(false); return opts; }()));
     // std::cerr << "sub status " << sub.status() << "\n";
     ASSERT_OK(sub);
     subs.push_back(std::move(*sub));
@@ -1836,7 +1836,7 @@ TEST_F(LatencyTest, ManyChannelsMultiplexed) {
   std::vector<Subscriber> subs;
   for (int i = 0; i < kNumChannels; i++) {
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        channels[i], ([] { subspace::SubscriberOptions opts; opts.SetLogDroppedMessages(false); opts.SetMux(kMux); return opts; }()));
+        channels[i], ([] { subspace::SubscriberOptions opts; opts.SetLogDroppedMessages(false); opts.SetDetectDroppedMessages(false); opts.SetMux(kMux); return opts; }()));
     // std::cerr << "sub status " << sub.status() << "\n";
     ASSERT_OK(sub);
     subs.push_back(std::move(*sub));
@@ -1960,7 +1960,7 @@ TEST_F(LatencyTest, ManyChannelsMultiplexedSubscribedToMux) {
 
   // Create subscriber to multiplexer.
   absl::StatusOr<Subscriber> sub =
-      sub_client.CreateSubscriber(kMux, ([] { subspace::SubscriberOptions opts; opts.SetLogDroppedMessages(false); return opts; }()));
+      sub_client.CreateSubscriber(kMux, ([] { subspace::SubscriberOptions opts; opts.SetLogDroppedMessages(false); opts.SetDetectDroppedMessages(false); return opts; }()));
   // std::cerr << "sub status " << sub.status() << "\n";
   ASSERT_OK(sub);
 
@@ -2066,7 +2066,7 @@ TEST_F(LatencyTest, SubscriberLatency) {
     ASSERT_OK(pub);
     // Create subscriber.
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        "sublat", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); return opts; }()));
+        "sublat", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetDetectDroppedMessages(false); return opts; }()));
     ASSERT_OK(sub);
 
     // Fill channel.
@@ -2107,7 +2107,7 @@ TEST_F(LatencyTest, PubSubLatency) {
     ASSERT_OK(pub);
     // Create subscriber.
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        "pubsublat", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); return opts; }()));
+        "pubsublat", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetDetectDroppedMessages(false); return opts; }()));
     ASSERT_OK(sub);
 
     // Send and receive messages, measuring time taken.

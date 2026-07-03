@@ -2258,6 +2258,35 @@ TEST_F(ClientTest, ReliablePublisher1) {
   machine.Run();
 }
 
+TEST_F(ClientTest, ReliablePublisherDoesNotBlockOnUnreliableSubscriber) {
+  subspace::Client client;
+  InitClient(client);
+
+  constexpr int kNumSlots = 5;
+  absl::StatusOr<Publisher> pub = client.CreatePublisher(
+      "rel_pub_unrel_sub", 32, kNumSlots,
+      subspace::PublisherOptions().SetReliable(true));
+  ASSERT_OK(pub);
+  absl::StatusOr<Subscriber> sub = client.CreateSubscriber(
+      "rel_pub_unrel_sub", subspace::SubscriberOptions().SetReliable(false));
+  ASSERT_OK(sub);
+
+  const auto &counters = pub->GetChannelCounters();
+  ASSERT_EQ(1, counters.num_reliable_pubs);
+  ASSERT_EQ(0, counters.num_reliable_subs);
+
+  // An unreliable subscriber may fall behind and drop messages, but it must not
+  // make reliable publishers wait for every old slot to be observed.
+  for (int i = 0; i < kNumSlots * 4; i++) {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_OK(buffer);
+    ASSERT_NE(nullptr, *buffer) << "publish " << i;
+    memcpy(*buffer, "foobar", 6);
+    absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+    ASSERT_OK(pub_status);
+  }
+}
+
 TEST_F(ClientTest, ReliablePublisher2) {
   subspace::Client client;
   InitClient(client);
@@ -2693,6 +2722,61 @@ TEST_F(ClientTest, DroppedMessage) {
     }
   }
   ASSERT_EQ(4, num_dropped_messages);
+}
+
+TEST_F(ClientTest, DroppedMessageDetectionCanBeDisabled) {
+  subspace::Client client;
+  InitClient(client);
+
+  absl::StatusOr<Subscriber> sub = client.CreateSubscriber(
+      "drop_detection_disabled",
+      SubOpts().SetKeepActiveMessage(true).SetDetectDroppedMessages(false));
+  ASSERT_OK(sub);
+
+  int num_dropped_messages = 0;
+  ASSERT_OK(sub->RegisterDroppedMessageCallback(
+      [&num_dropped_messages](Subscriber *, int64_t num_dropped) {
+        num_dropped_messages += num_dropped;
+      }));
+
+  absl::StatusOr<Publisher> pub =
+      client.CreatePublisher("drop_detection_disabled", 32, 5);
+  ASSERT_OK(pub);
+
+  for (int i = 0; i < 4; i++) {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_OK(buffer);
+    memcpy(*buffer, "foobar", 6);
+    ASSERT_OK(pub->PublishMessage(6));
+  }
+
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(6, msg->length);
+
+  for (int i = 0; i < 4; i++) {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_OK(buffer);
+    memcpy(*buffer, "foobar", 6);
+    ASSERT_OK(pub->PublishMessage(6));
+  }
+
+  for (;;) {
+    msg = sub->ReadMessage();
+    ASSERT_OK(msg);
+    if (msg->length == 0) {
+      break;
+    }
+  }
+  ASSERT_EQ(0, num_dropped_messages);
+
+  uint64_t total_bytes = 0;
+  uint64_t total_messages = 0;
+  uint32_t max_message_size = 0;
+  uint32_t total_drops = 0;
+  pub->GetStatsCounters(total_bytes, total_messages, max_message_size,
+                        total_drops);
+  ASSERT_EQ(0u, total_drops);
 }
 
 TEST_F(ClientTest, PublishSingleMessageAndReadSharedPtr) {
@@ -5683,7 +5767,8 @@ TEST_F(ClientTest, SubscriberOptionsChain) {
       .SetReadWrite(true)
       .SetChecksum(true)
       .SetPassChecksumErrors(true)
-      .SetKeepActiveMessage(true);
+      .SetKeepActiveMessage(true)
+      .SetDetectDroppedMessages(false);
   opts.SetLogDroppedMessages(true);
 
   ASSERT_TRUE(opts.IsReliable());
@@ -5691,6 +5776,7 @@ TEST_F(ClientTest, SubscriberOptionsChain) {
   ASSERT_EQ(19, opts.MaxSharedPtrs());
   ASSERT_EQ(20, opts.MaxActiveMessages());
   ASSERT_TRUE(opts.LogDroppedMessages());
+  ASSERT_FALSE(opts.DetectDroppedMessages());
   ASSERT_TRUE(opts.IsBridge());
   ASSERT_TRUE(opts.ForTunnel());
   ASSERT_EQ("/submux", opts.Mux());

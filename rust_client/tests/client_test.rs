@@ -104,6 +104,7 @@ fn subscriber_options_defaults() {
     assert!(!opts.bridge);
     assert_eq!(opts.max_active_messages, 1);
     assert!(opts.log_dropped_messages);
+    assert!(opts.detect_dropped_messages);
     assert!(!opts.pass_activation);
     assert!(!opts.read_write);
     assert!(!opts.checksum);
@@ -118,6 +119,7 @@ fn subscriber_options_builder_chain() {
         .set_reliable(true)
         .set_max_active_messages(8)
         .set_log_dropped_messages(false)
+        .set_detect_dropped_messages(false)
         .set_pass_activation(true)
         .set_checksum(true)
         .set_pass_checksum_errors(true)
@@ -128,6 +130,7 @@ fn subscriber_options_builder_chain() {
     assert!(opts.reliable);
     assert_eq!(opts.max_active_messages, 8);
     assert!(!opts.log_dropped_messages);
+    assert!(!opts.detect_dropped_messages);
     assert!(opts.pass_activation);
     assert!(opts.checksum);
     assert!(opts.pass_checksum_errors);

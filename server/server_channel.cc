@@ -332,6 +332,8 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
 
     for (int i = 0; i < kMaxSlotOwners; i++) {
       new (GetAvailableSlotsAddress(i)) InPlaceAtomicBitset(num_slots_);
+      new (GetAvailableSlotQueueAddress(i))
+          InPlaceSlotQueue(AvailableSlotQueueCapacity(num_slots_));
     }
   }
 

@@ -277,6 +277,11 @@ struct SubscriberOptions {
   int MaxActiveMessages() const { return max_active_messages; }
   bool LogDroppedMessages() const { return log_dropped_messages; }
   void SetLogDroppedMessages(bool v) { log_dropped_messages = v; }
+  bool DetectDroppedMessages() const { return detect_dropped_messages; }
+  SubscriberOptions &SetDetectDroppedMessages(bool v) {
+    detect_dropped_messages = v;
+    return *this;
+  }
 
   SubscriberOptions &SetBridge(bool v) {
     bridge = v;
@@ -362,6 +367,7 @@ struct SubscriberOptions {
   std::string type;
   int max_active_messages = 1;
   bool log_dropped_messages = true;
+  bool detect_dropped_messages = true;
   bool pass_activation = false; // If true, the subscriber will pass activation
                                 // messages to the user.
   bool read_write = false;

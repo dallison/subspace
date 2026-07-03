@@ -1346,7 +1346,10 @@ fn read_message_internal(
 
     sub.channel.slot = Some(new_idx);
 
-    if mode == ReadMode::ReadNext && last_ordinal != -1 {
+    if mode == ReadMode::ReadNext
+        && last_ordinal != -1
+        && sub.options.detect_dropped_messages
+    {
         let new_vchan_id = sub.channel.slot_ref(new_idx).vchan_id as i32;
         let drops = sub.detect_drops(new_vchan_id);
         if drops > 0 {

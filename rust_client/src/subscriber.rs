@@ -224,6 +224,9 @@ impl SubscriberImpl {
 
     pub fn remember_ordinal(&mut self, ordinal: u64, vchan_id: i32) {
         let tracker = self.get_or_create_tracker(self.channel.vchan_id);
+        if ordinal > tracker.last_ordinal_seen {
+            tracker.last_ordinal_seen = ordinal;
+        }
         tracker.ring.insert(OrdinalAndVchanId {
             ordinal,
             vchan_id,
@@ -529,10 +532,14 @@ impl SubscriberImpl {
         let ordinal = slot.ordinal;
         self.remember_ordinal(ordinal, vchan_id);
         self.channel.slot_mut(slot_idx).flags |= MESSAGE_SEEN;
+        if self.options.reliable {
+            self.channel.slot_mut(slot_idx).flags |= MESSAGE_SEEN_BY_RELIABLE;
+        }
     }
 
     pub fn unread_slot(&self, slot_idx: usize) {
-        self.channel.slot_mut(slot_idx).flags &= !MESSAGE_SEEN;
+        self.channel.slot_mut(slot_idx).flags &=
+            !(MESSAGE_SEEN | MESSAGE_SEEN_BY_RELIABLE);
         self.decrement_slot_ref(slot_idx, false);
     }
 
@@ -543,6 +550,9 @@ impl SubscriberImpl {
         self.remember_ordinal(ordinal, vchan_id);
         self.decrement_slot_ref(slot_idx, true);
         self.channel.slot_mut(slot_idx).flags |= MESSAGE_SEEN;
+        if self.options.reliable {
+            self.channel.slot_mut(slot_idx).flags |= MESSAGE_SEEN_BY_RELIABLE;
+        }
     }
 
     pub fn decrement_slot_ref(&self, slot_idx: usize, retire: bool) {
@@ -683,6 +693,9 @@ impl SubscriberImpl {
                 }
                 let slot = self.channel.slot_mut(active.slot_index);
                 slot.flags |= MESSAGE_SEEN;
+                if reliable {
+                    slot.flags |= MESSAGE_SEEN_BY_RELIABLE;
+                }
                 slot.sub_owners.set(self.subscriber_id as usize);
                 return Some(active.slot_index);
             }

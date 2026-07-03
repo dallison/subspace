@@ -4,6 +4,8 @@
 
 #include "client/subscriber.h"
 
+#include <limits>
+
 namespace subspace {
 namespace details {
 
@@ -109,49 +111,39 @@ SubscriberImpl::GetOrdinalTracker(int vchan_id) {
 }
 
 int SubscriberImpl::DetectDrops(int vchan_id) {
-  std::vector<OrdinalAndVchanId> ordinals;
-  auto &tracker = GetOrdinalTracker(vchan_id_);
-  ordinals.reserve(tracker.ordinals.Size());
-  tracker.ordinals.Traverse(
-      [&tracker, &ordinals, vchan_id](const OrdinalAndVchanId &o) {
-        if (vchan_id == o.vchan_id && o.ordinal >= tracker.last_ordinal_seen) {
-          ordinals.push_back(o);
-        }
-      });
-  if (ordinals.empty()) {
+  auto &tracker = GetOrdinalTracker(vchan_id);
+  const uint64_t ordinal = CurrentOrdinal();
+  if (ordinal == 0 || ordinal <= tracker.last_ordinal_seen) {
     return 0;
   }
-  std::sort(ordinals.begin(), ordinals.end());
-  tracker.last_ordinal_seen = ordinals.back().ordinal;
-
-  // Look for gaps in the ordinals.
-  int drops = 0;
-  for (size_t i = 1; i < ordinals.size(); i++) {
-    if (ordinals[i].vchan_id != vchan_id) {
-      // Must be same vchan_id as ordinals are per vchan.
-      continue;
-    }
-    if (ordinals[i].ordinal - ordinals[i - 1].ordinal == 1) {
-      continue;
-    }
-    drops +=
-        static_cast<int>(ordinals[i].ordinal - ordinals[i - 1].ordinal - 1);
+  const uint64_t last_seen = tracker.last_ordinal_seen;
+  tracker.last_ordinal_seen = ordinal;
+  if (last_seen == 0 || ordinal == last_seen + 1) {
+    return 0;
   }
-  return drops;
+  return static_cast<int>(ordinal - last_seen - 1);
 }
 
 void SubscriberImpl::RememberOrdinal(uint64_t ordinal, int vchan_id) {
-  auto &tracker = GetOrdinalTracker(vchan_id_);
+  auto &tracker = GetOrdinalTracker(vchan_id);
+  if (ordinal > tracker.last_ordinal_seen) {
+    tracker.last_ordinal_seen = ordinal;
+  }
   tracker.ordinals.Insert(OrdinalAndVchanId{ordinal, vchan_id});
 }
 
 const ActiveSlot *SubscriberImpl::FindUnseenOrdinal() {
   // Traverse the active slots looking for the first ordinal that is not zero
   // and has not been seen by a subscriber.
-  auto &tracker = GetOrdinalTracker(vchan_id_);
+  int cached_vchan_id = std::numeric_limits<int>::min();
+  OrdinalTracker *cached_tracker = nullptr;
   for (auto &s : active_slots_) {
+    if (s.vchan_id != cached_vchan_id) {
+      cached_vchan_id = s.vchan_id;
+      cached_tracker = &GetOrdinalTracker(s.vchan_id);
+    }
     if (s.ordinal != 0 &&
-        !tracker.ordinals.Contains(OrdinalAndVchanId{s.ordinal, s.vchan_id})) {
+        !cached_tracker->ordinals.Contains(OrdinalAndVchanId{s.ordinal, s.vchan_id})) {
       // std::cerr << absl::StrFormat("Found unseen ordinal %d in slot %d\n", s.ordinal, s.slot->id);
       return &s;
     }
@@ -172,10 +164,13 @@ void SubscriberImpl::ClaimSlot(MessageSlot *slot, int vchan_id,
   }
   RememberOrdinal(slot->ordinal, vchan_id);
   slot->flags |= kMessageSeen;
+  if (IsReliable()) {
+    slot->flags |= kMessageSeenByReliable;
+  }
 }
 
 void SubscriberImpl::UnreadSlot(MessageSlot *slot) {
-  slot->flags &= ~kMessageSeen;
+  slot->flags &= ~(kMessageSeen | kMessageSeenByReliable);
   DecrementSlotRef(slot, false);
   // NextSlot()'s cache advanced next_slot_cursor_ past this slot when it
   // returned, on the assumption that ReadMessageInternal would either
@@ -213,6 +208,102 @@ void SubscriberImpl::CollectVisibleSlots(InPlaceAtomicBitset &bits) {
   } while (num_messages != ccb_->total_messages);
 }
 
+MessageSlot *SubscriberImpl::FindNextQueuedSlot(uint64_t max_ordinal) {
+  InPlaceSlotQueue &queue = GetAvailableSlotQueue(subscriber_id_);
+  if (queue.Capacity() == 0) {
+    return nullptr;
+  }
+
+  int cached_vchan_id = std::numeric_limits<int>::min();
+  OrdinalTracker *cached_tracker = nullptr;
+
+  QueuedSlot queued;
+  for (size_t i = 0; i < queue.Capacity(); i++) {
+    if (!queue.TryPeek(queued)) {
+      return nullptr;
+    }
+    if (queued.slot_id < 0 || queued.slot_id >= NumSlots()) {
+      queue.DropFront();
+      continue;
+    }
+    if (queued.ordinal > max_ordinal) {
+      return nullptr;
+    }
+
+    QueuedSlot popped;
+    if (!queue.TryPop(popped)) {
+      continue;
+    }
+    queued = popped;
+    if (queued.slot_id < 0 || queued.slot_id >= NumSlots()) {
+      continue;
+    }
+    if (queued.ordinal > max_ordinal) {
+      return nullptr;
+    }
+
+    MessageSlot *s = &ccb_->slots[queued.slot_id];
+    const uint64_t ordinal = s->ordinal;
+    if (ordinal == 0 || ordinal != queued.ordinal ||
+        !VirtualChannelIdMatch(s, vchan_id_)) {
+      continue;
+    }
+
+    const uint64_t refs = s->refs.load(std::memory_order_relaxed);
+    if ((refs & kPubOwned) != 0 || s->buffer_index == -1) {
+      continue;
+    }
+    if (s->vchan_id != cached_vchan_id) {
+      cached_vchan_id = s->vchan_id;
+      cached_tracker = &GetOrdinalTracker(s->vchan_id);
+    }
+    if (ordinal <= cached_tracker->last_ordinal_seen) {
+      continue;
+    }
+    return s;
+  }
+
+  return nullptr;
+}
+
+MessageSlot *SubscriberImpl::FindNextVisibleSlot(InPlaceAtomicBitset &bits,
+                                                 uint64_t max_ordinal) {
+  MessageSlot *best_slot = nullptr;
+  uint64_t best_ordinal = 0;
+  int cached_vchan_id = std::numeric_limits<int>::min();
+  OrdinalTracker *cached_tracker = nullptr;
+
+  bits.Traverse([this, &best_slot, &best_ordinal, &cached_vchan_id,
+                 &cached_tracker, max_ordinal](size_t i) {
+    if (embargoed_slots_.IsSet(i)) {
+      return;
+    }
+    MessageSlot *s = &ccb_->slots[i];
+    const uint64_t ordinal = s->ordinal;
+    if (ordinal == 0 || ordinal > max_ordinal ||
+        !VirtualChannelIdMatch(s, vchan_id_)) {
+      return;
+    }
+    const uint64_t refs = s->refs.load(std::memory_order_relaxed);
+    if ((refs & kPubOwned) != 0 || s->buffer_index == -1) {
+      return;
+    }
+    if (s->vchan_id != cached_vchan_id) {
+      cached_vchan_id = s->vchan_id;
+      cached_tracker = &GetOrdinalTracker(s->vchan_id);
+    }
+    if (ordinal <= cached_tracker->last_ordinal_seen) {
+      return;
+    }
+    if (best_slot == nullptr || ordinal < best_ordinal) {
+      best_slot = s;
+      best_ordinal = ordinal;
+    }
+  });
+
+  return best_slot;
+}
+
 MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
                                       int owner) {
 
@@ -233,6 +324,46 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
     if (slot == nullptr) {
       // Prepopulate the active slots.
       PopulateActiveSlots(bits);
+    }
+
+    if (!reliable) {
+      const bool stable_poll_drain = PollDrainPending();
+      if (stable_poll_drain && !next_slot_cache_valid_) {
+        next_slot_cached_total_ = ccb_->total_messages;
+        next_slot_cache_valid_ = true;
+      }
+      const uint64_t max_ordinal =
+          stable_poll_drain ? next_slot_cached_total_
+                            : std::numeric_limits<uint64_t>::max();
+      MessageSlot *new_slot = FindNextQueuedSlot(max_ordinal);
+      if (new_slot == nullptr) {
+        if (stable_poll_drain && ccb_->total_messages != next_slot_cached_total_) {
+          Trigger();
+        }
+        next_slot_cache_valid_ = false;
+        return nullptr;
+      }
+      const uint64_t ordinal = new_slot->ordinal;
+      const int vchan_id = new_slot->vchan_id;
+      if (AtomicIncRefCount(new_slot, reliable, 1, ordinal, vchan_id, false)) {
+        if (!ValidateSlotBuffer(new_slot) || new_slot->buffer_index == -1) {
+          if (print_errors) {
+            std::cerr << "Subscriber for " << Name()
+                      << " detected buffer failure on slot: "
+                      << new_slot->id
+                      << " buffer index: " << new_slot->buffer_index;
+            new_slot->Dump(std::cerr);
+          }
+          embargoed_slots_.Set(new_slot->id);
+          AtomicIncRefCount(new_slot, reliable, -1, ordinal, vchan_id, false);
+          continue;
+        }
+        if (!stable_poll_drain) {
+          next_slot_cache_valid_ = false;
+        }
+        return new_slot;
+      }
+      continue;
     }
 
     // Fast path: if the publisher hasn't appended any new messages since the
@@ -273,16 +404,21 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
 
     // Walk forward from the cursor, skipping anything we've embargoed in
     // this NextSlot() invocation or already delivered to this subscriber.
-    auto &tracker = GetOrdinalTracker(vchan_id_);
     const ActiveSlot *new_slot = nullptr;
+    int cached_vchan_id = std::numeric_limits<int>::min();
+    OrdinalTracker *cached_tracker = nullptr;
     while (next_slot_cursor_ < active_slots_.size()) {
       const ActiveSlot &s = active_slots_[next_slot_cursor_];
       if (embargoed_slots_.IsSet(s.slot->id)) {
         ++next_slot_cursor_;
         continue;
       }
+      if (s.vchan_id != cached_vchan_id) {
+        cached_vchan_id = s.vchan_id;
+        cached_tracker = &GetOrdinalTracker(s.vchan_id);
+      }
       if (s.ordinal != 0 &&
-          !tracker.ordinals.Contains(
+          !cached_tracker->ordinals.Contains(
               OrdinalAndVchanId{s.ordinal, s.vchan_id})) {
         new_slot = &s;
         break;
@@ -445,6 +581,9 @@ MessageSlot *SubscriberImpl::FindActiveSlotByTimestamp(
         continue;
       }
       it->slot->flags |= kMessageSeen;
+      if (reliable) {
+        it->slot->flags |= kMessageSeenByReliable;
+      }
       it->slot->sub_owners.Set(owner);
       return it->slot;
     }
