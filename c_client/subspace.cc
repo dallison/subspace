@@ -98,19 +98,17 @@ SubspaceMessage ToCMessage(const subspace::Message &msg,
           .checksum_error = msg.checksum_error};
 }
 
-SubspaceMessage TakeCMessage(subspace::Message &&msg) {
-  subspace::Message *stored = new subspace::Message(std::move(msg));
-  auto *handle = new std::shared_ptr<subspace::Message>(stored);
-  return ToCMessage(*stored, handle);
+SubspaceMessage OwnCMessage(subspace::Message &&msg) {
+  auto *handle = new subspace::Message(std::move(msg));
+  return ToCMessage(*handle, handle);
 }
 
 void FreeMessageStorage(SubspaceMessage *message) {
   if (message == nullptr || message->message == nullptr) {
     return;
   }
-  auto msg_ptr =
-      reinterpret_cast<std::shared_ptr<subspace::Message> *>(message->message);
-  delete msg_ptr;
+  auto *msg = reinterpret_cast<subspace::Message *>(message->message);
+  delete msg;
   *message = EmptyMessage();
 }
 
@@ -624,7 +622,7 @@ SubspaceMessage subspace_read_message_with_mode(SubspaceSubscriber subscriber,
   if (status_or_msg->length == 0) {
     return message;
   }
-  return TakeCMessage(std::move(*status_or_msg));
+  return OwnCMessage(std::move(*status_or_msg));
 }
 
 SubspaceMessage subspace_read_message(SubspaceSubscriber subscriber) {
@@ -648,7 +646,7 @@ SubspaceMessage subspace_find_message(SubspaceSubscriber subscriber,
   if (status_or_msg->length == 0) {
     return EmptyMessage();
   }
-  return TakeCMessage(std::move(*status_or_msg));
+  return OwnCMessage(std::move(*status_or_msg));
 }
 
 bool subspace_get_all_messages(SubspaceSubscriber subscriber,
@@ -682,7 +680,7 @@ bool subspace_get_all_messages(SubspaceSubscriber subscriber,
   cache.messages.reserve(status_or_messages->size());
   for (subspace::Message &message : *status_or_messages) {
     if (message.length != 0) {
-      cache.messages.push_back(TakeCMessage(std::move(message)));
+      cache.messages.push_back(OwnCMessage(std::move(message)));
     }
   }
   *messages = cache.messages.data();
@@ -730,9 +728,9 @@ bool subspace_register_subscriber_callback(SubspaceSubscriber subscriber,
   absl::Status status = (*sub_ptr)->RegisterMessageCallback(
       [subscriber, callback](const subspace::Subscriber *,
                              subspace::Message msg) {
-        // This takes ownership of the message.  It must be freed by calline
-        // subspace_free_message. by the callback function.
-        callback(subscriber, TakeCMessage(std::move(msg)));
+        // This takes ownership of the message. The callback must release it
+        // with subspace_free_message.
+        callback(subscriber, OwnCMessage(std::move(msg)));
       });
   if (!status.ok()) {
     subspace_set_error(status.ToString().c_str());
@@ -842,12 +840,11 @@ bool subspace_invoke_subscriber_callback(SubspaceSubscriber subscriber,
   }
   auto sub_ptr = reinterpret_cast<std::shared_ptr<subspace::Subscriber> *>(
       subscriber.subscriber);
-  auto msg_ptr =
-      reinterpret_cast<std::shared_ptr<subspace::Message> *>(message.message);
+  auto *msg = reinterpret_cast<subspace::Message *>(message.message);
   // InvokeMessageCallback takes the Message by value; the copy increments the
   // active-message refcount so the caller's SubspaceMessage retains ownership
   // and is still its responsibility to subspace_free_message.
-  (*sub_ptr)->InvokeMessageCallback(**msg_ptr);
+  (*sub_ptr)->InvokeMessageCallback(*msg);
   return true;
 }
 
