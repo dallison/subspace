@@ -41,11 +41,12 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
         continue;
       }
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
+      bool opened_existing_buffer = buffer_index < size_t(num_buffers);
       absl::StatusOr<toolbelt::FileDescriptor> shm_fd =
-          buffer_index < size_t(num_buffers)
-              ? OpenBuffer(buffer_index)
-              : CreateBuffer(buffer_index, final_buffer_size);
+          opened_existing_buffer ? OpenBuffer(buffer_index)
+                                 : CreateBuffer(buffer_index, final_buffer_size);
 #else
+      bool opened_existing_buffer = false;
       auto shm_fd = CreateBuffer(buffer_index, final_buffer_size);
 #endif
       if (!shm_fd.ok()) {
@@ -54,10 +55,13 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
       if (!shm_fd->Valid()) {
         // This means that the file in /dev/shm already exists so we need to
         // attach to it.
+        opened_existing_buffer = true;
         shm_fd = OpenBuffer(buffer_index);
         if (!shm_fd.ok()) {
           return shm_fd.status();
         }
+      }
+      if (opened_existing_buffer) {
         auto size = GetBufferSize(*shm_fd, buffer_index);
         if (!size.ok()) {
           return size.status();
@@ -76,12 +80,11 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
             std::make_unique<BufferSet>(*size, current_slot_size, *addr);
         buffer_set->fd = std::move(*shm_fd);
         buffers_.push_back(std::move(buffer_set));
-        bcb_->sizes[buffers_.size()].store(final_buffer_size,
-                                           std::memory_order_relaxed);
+        bcb_->sizes[buffer_index].store(*size, std::memory_order_relaxed);
       } else {
         // We successfully created the /dev/shm file.
-        bcb_->sizes[buffers_.size()].store(final_buffer_size,
-                                           std::memory_order_relaxed);
+        bcb_->sizes[buffer_index].store(final_buffer_size,
+                                        std::memory_order_relaxed);
         auto addr =
             MapBuffer(*shm_fd, final_buffer_size, BufferMapMode::kReadWrite);
         if (!addr.ok()) {

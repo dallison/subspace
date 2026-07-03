@@ -238,6 +238,36 @@ TEST_F(ClientTest, Resize1) {
   ASSERT_EQ(512, pub->SlotSize());
 }
 
+TEST_F(ClientTest, AttachingPublisherPreservesResizedSlotSize) {
+  subspace::Client client1;
+  InitClient(client1);
+  subspace::PublisherOptions options = PubOpts(256, 10);
+  options.SetUseSplitBuffers(false);
+
+  absl::StatusOr<Publisher> pub1 =
+      client1.CreatePublisher("attach_preserves_resize", options);
+  ASSERT_OK(pub1);
+  ASSERT_OK(pub1->GetMessageBuffer(300));
+  ASSERT_EQ(512, pub1->SlotSize());
+
+  absl::StatusOr<const subspace::ChannelInfo> info =
+      client1.GetChannelInfo("attach_preserves_resize");
+  ASSERT_OK(info);
+  ASSERT_EQ(512u, info->slot_size);
+
+  subspace::Client client2;
+  InitClient(client2);
+  absl::StatusOr<Publisher> pub2 =
+      client2.CreatePublisher("attach_preserves_resize", options);
+  ASSERT_OK(pub2);
+  EXPECT_EQ(512, pub2->SlotSize());
+
+  absl::StatusOr<const subspace::ChannelInfo> updated_info =
+      client1.GetChannelInfo("attach_preserves_resize");
+  ASSERT_OK(updated_info);
+  EXPECT_EQ(512u, updated_info->slot_size);
+}
+
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
 TEST(AndroidBufferRegistrationTest, FailedRegistrationRollsBackNumBuffers) {
   constexpr int kNumSlots = 2;
