@@ -249,6 +249,7 @@ TEST_F(ClientTest, AttachingPublisherPreservesResizedSlotSize) {
   ASSERT_OK(pub1);
   ASSERT_OK(pub1->GetMessageBuffer(300));
   ASSERT_EQ(512, pub1->SlotSize());
+  pub1->CancelPublish();
 
   absl::StatusOr<const subspace::ChannelInfo> info =
       client1.GetChannelInfo("attach_preserves_resize");
