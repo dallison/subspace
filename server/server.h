@@ -314,10 +314,10 @@ private:
   void RetirementCoroutine(
       async::Context ctx, const std::string &channel_name,
       toolbelt::FileDescriptor &&retirement_fd,
-      std::unique_ptr<async::StreamSocket> retirement_transmitter);
+      std::shared_ptr<async::StreamSocket> retirement_transmitter);
 
   void RetirementReceiverCoroutine(
-      async::Context ctx, async::StreamSocket &retirement_listener,
+      async::Context ctx, std::shared_ptr<async::StreamSocket> retirement_listener,
       std::shared_ptr<std::vector<std::shared_ptr<ActiveMessage>>> active_retirement_msgs);
 
   void SubscribeOverBridge(ServerChannel *channel, bool reliable,
