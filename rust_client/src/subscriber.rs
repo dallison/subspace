@@ -115,6 +115,7 @@ impl SubscriberImpl {
     pub fn new(
         name: String,
         num_slots: i32,
+        subscriber_queue_size: i32,
         channel_id: i32,
         subscriber_id: i32,
         vchan_id: i32,
@@ -126,6 +127,7 @@ impl SubscriberImpl {
             channel: Channel::new(
                 name,
                 num_slots,
+                subscriber_queue_size,
                 channel_id,
                 channel_type,
                 vchan_id,
@@ -361,6 +363,82 @@ impl SubscriberImpl {
         None
     }
 
+    fn next_queued_slot(&mut self) -> Option<usize> {
+        if self.options.reliable {
+            return None;
+        }
+
+        let _ = self
+            .channel
+            .get_available_slot_queue(self.subscriber_id as usize)
+            .consume_overflow();
+        loop {
+            let Some((slot_id, ordinal)) = self
+                .channel
+                .get_available_slot_queue(self.subscriber_id as usize)
+                .try_pop()
+            else {
+                break;
+            };
+            if slot_id < 0 || slot_id as usize >= self.channel.num_slots as usize {
+                continue;
+            }
+            let slot_idx = slot_id as usize;
+            let slot = self.channel.slot_ref(slot_idx);
+            if slot.ordinal != ordinal || slot.ordinal == 0 {
+                continue;
+            }
+            if !virtual_channel_id_match(slot.vchan_id, self.channel.vchan_id) {
+                continue;
+            }
+            let refs = slot.refs.load(Ordering::Acquire);
+            if (refs & PUB_OWNED) != 0 {
+                continue;
+            }
+
+            let vchan_id = slot.vchan_id as i32;
+            if self.channel.atomic_inc_ref_count::<fn()>(
+                slot_idx,
+                false,
+                1,
+                ordinal,
+                vchan_id,
+                false,
+                None,
+            ) {
+                if !self.channel.validate_slot_buffer(slot_idx)
+                    || self.channel.slot_ref(slot_idx).buffer_index == -1
+                {
+                    if self.channel.buffers_changed() {
+                        self.channel.atomic_inc_ref_count::<fn()>(
+                            slot_idx,
+                            false,
+                            -1,
+                            ordinal,
+                            vchan_id,
+                            false,
+                            None,
+                        );
+                        self.reload_buffers_if_necessary();
+                        continue;
+                    }
+                    self.channel.atomic_inc_ref_count::<fn()>(
+                        slot_idx,
+                        false,
+                        -1,
+                        ordinal,
+                        vchan_id,
+                        false,
+                        None,
+                    );
+                    continue;
+                }
+                return Some(slot_idx);
+            }
+        }
+        None
+    }
+
     pub fn next_slot(&mut self) -> Option<usize> {
         let bits = self
             .channel
@@ -374,6 +452,10 @@ impl SubscriberImpl {
             retries += 1;
 
             self.reload_buffers_if_necessary();
+
+            if let Some(slot_idx) = self.next_queued_slot() {
+                return Some(slot_idx);
+            }
 
             if self.channel.slot.is_none() {
                 self.populate_active_slots(&bits);

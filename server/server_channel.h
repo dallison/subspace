@@ -202,9 +202,10 @@ struct ClientBufferSlotKey {
 class ServerChannel : public Channel {
 public:
   ServerChannel(int id, const std::string &name, int num_slots,
-                std::string type, bool is_virtual, int session_id)
-      : Channel(name, num_slots, id, std::move(type)), is_virtual_(is_virtual),
-        session_id_(session_id) {}
+                int subscriber_queue_size, std::string type, bool is_virtual,
+                int session_id)
+      : Channel(name, num_slots, id, subscriber_queue_size, std::move(type)),
+        is_virtual_(is_virtual), session_id_(session_id) {}
 
   virtual ~ServerChannel();
 
@@ -415,7 +416,7 @@ public:
   // this channel.  This is only used in the server.
   virtual absl::StatusOr<SharedMemoryFds>
   Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size, int num_slots,
-           int initial_ordinal);
+           int subscriber_queue_size, int initial_ordinal);
 
   // Map existing shared memory from recovered FDs (after a server crash).
   // Does not initialize CCB/BCB -- they already contain valid data.
@@ -465,8 +466,10 @@ class VirtualChannel;
 class ChannelMultiplexer : public ServerChannel {
 public:
   ChannelMultiplexer(int id, const std::string &name, int num_slots,
-                     std::string type, int session_id)
-      : ServerChannel(id, name, num_slots, type, false, session_id) {}
+                     int subscriber_queue_size, std::string type,
+                     int session_id)
+      : ServerChannel(id, name, num_slots, subscriber_queue_size, type, false,
+                      session_id) {}
 
   absl::StatusOr<std::unique_ptr<VirtualChannel>>
   CreateVirtualChannel(Server &server, const std::string &name, int vchan_id);
@@ -506,8 +509,8 @@ class VirtualChannel : public ServerChannel {
 public:
   VirtualChannel(ChannelMultiplexer *mux, int vchan_id, const std::string &name,
                  int num_slots, std::string type, int session_id)
-      : ServerChannel(mux->GetChannelId(), name, num_slots, type, true,
-                      session_id),
+      : ServerChannel(mux->GetChannelId(), name, num_slots,
+                      mux->SubscriberQueueSize(), type, true, session_id),
         mux_(mux), vchan_id_(vchan_id) {}
 
   std::string Type() const override { return mux_->Type(); }
@@ -536,6 +539,10 @@ public:
   int GetVirtualChannelId() const override { return vchan_id_; }
 
   bool IsPlaceholder() const override { return mux_->IsPlaceholder(); }
+  int SubscriberQueueSize() const override { return mux_->SubscriberQueueSize(); }
+  void SetSubscriberQueueSize(int n) override {
+    mux_->SetSubscriberQueueSize(n);
+  }
 
   const SharedMemoryFds &GetFds() override { return mux_->GetFds(); }
 

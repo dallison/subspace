@@ -127,6 +127,7 @@ SubspaceChannelInfo ToCChannelInfo(const subspace::ChannelInfo &info,
           .type = ToCString(type),
           .slot_size = info.slot_size,
           .num_slots = info.num_slots,
+          .subscriber_queue_size = info.subscriber_queue_size,
           .reliable = info.reliable};
 }
 
@@ -497,6 +498,7 @@ SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size,
   SubspacePublisherOptions options = {
       slot_size,
       num_slots,
+      0,
       false,
       false,
       false,
@@ -577,6 +579,7 @@ SubspacePublisher subspace_create_publisher(SubspaceClient client,
       .SetChecksum(options.checksum)
       .SetChecksumSize(options.checksum_size)
       .SetMetadataSize(options.metadata_size)
+      .SetSubscriberQueueSize(options.subscriber_queue_size)
       .SetPreferRetiredSlots(options.prefer_retired_slots)
       .SetMaxPublishers(options.max_publishers)
       .SetUseSplitBuffers(options.use_split_buffers)
@@ -1444,6 +1447,13 @@ int32_t subspace_get_publisher_num_slots(SubspacePublisher publisher) {
   return (*PublisherPtr(publisher))->NumSlots();
 }
 
+int32_t subspace_get_publisher_queue_size(SubspacePublisher publisher) {
+  if (publisher.publisher == nullptr) {
+    return 0;
+  }
+  return (*PublisherPtr(publisher))->SubscriberQueueSize();
+}
+
 SubspaceString subspace_get_publisher_name(SubspacePublisher publisher) {
   if (publisher.publisher == nullptr) {
     return {};
@@ -1596,6 +1606,14 @@ int subspace_get_subscriber_num_slots(SubspaceSubscriber subscriber) {
   auto sub_ptr = reinterpret_cast<std::shared_ptr<subspace::Subscriber> *>(
       subscriber.subscriber);
   return (*sub_ptr)->NumSlots();
+}
+
+int32_t
+subspace_get_subscriber_queue_size(SubspaceSubscriber subscriber) {
+  if (subscriber.subscriber == nullptr) {
+    return 0;
+  }
+  return (*SubscriberPtr(subscriber))->SubscriberQueueSize();
 }
 
 int64_t subspace_get_subscriber_current_ordinal(SubspaceSubscriber subscriber) {

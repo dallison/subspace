@@ -13,6 +13,7 @@ use std::sync::Arc;
 pub struct PublisherOptions {
     pub slot_size: i32,
     pub num_slots: i32,
+    pub subscriber_queue_size: i32,
     pub local: bool,
     pub reliable: bool,
     pub bridge: bool,
@@ -36,6 +37,7 @@ impl Default for PublisherOptions {
         Self {
             slot_size: 0,
             num_slots: 0,
+            subscriber_queue_size: 0,
             local: false,
             reliable: false,
             bridge: false,
@@ -68,6 +70,16 @@ impl PublisherOptions {
 
     pub fn set_num_slots(mut self, num: i32) -> Self {
         self.num_slots = num;
+        self
+    }
+
+    /// Set each subscriber's per-subscriber slot queue capacity.
+    ///
+    /// A value of 0 disables the queue and uses the available-slot bitset.
+    /// Larger values allow subscribers to absorb more publisher/subscriber skew
+    /// at the cost of shared memory in every subscriber queue.
+    pub fn set_subscriber_queue_size(mut self, size: i32) -> Self {
+        self.subscriber_queue_size = size;
         self
     }
 

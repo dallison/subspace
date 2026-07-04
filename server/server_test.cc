@@ -72,7 +72,8 @@ public:
                   bool fixed_size = false, const std::string &mux = "",
                   int vchan_id = 0, bool for_tunnel = false,
                   bool notify_retirement = false, int checksum_size = 0,
-                  int metadata_size = 0, int max_publishers = 0) {
+                  int metadata_size = 0, int max_publishers = 0,
+                  int subscriber_queue_size = 0) {
     subspace::Request req;
     auto *cmd = req.mutable_create_publisher();
     cmd->set_channel_name(channel);
@@ -89,6 +90,7 @@ public:
     cmd->set_checksum_size(checksum_size);
     cmd->set_metadata_size(metadata_size);
     cmd->set_max_publishers(max_publishers);
+    cmd->set_subscriber_queue_size(subscriber_queue_size);
     cmd->set_publisher_id(-1);
     auto result = Send(req);
     return std::move(*result);
@@ -198,6 +200,47 @@ TEST_F(ServerTest, PubNumSlotsIncrease) {
   auto [resp, fds] = conn.CreatePublisher("slots_ch", 64, 8);
   EXPECT_THAT(resp.create_publisher().error(),
               ::testing::HasSubstr("more slots"));
+}
+
+TEST_F(ServerTest, PubSubscriberQueueSizeMismatchFromDisabled) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  conn.CreatePublisher("queue_size_disabled_ch", 64, 4);
+  auto [resp, fds] = conn.CreatePublisher(
+      "queue_size_disabled_ch", 64, 4, "", false, true, false, "", 0, false,
+      false, 0, 0, 0, /*subscriber_queue_size=*/8);
+  EXPECT_THAT(resp.create_publisher().error(),
+              ::testing::HasSubstr("subscriber queue size"));
+}
+
+TEST_F(ServerTest, PubSubscriberQueueSizeMismatchToDisabled) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  conn.CreatePublisher("queue_size_enabled_ch", 64, 4, "", false, true, false,
+                       "", 0, false, false, 0, 0, 0,
+                       /*subscriber_queue_size=*/8);
+  auto [resp, fds] = conn.CreatePublisher("queue_size_enabled_ch", 64, 4);
+  EXPECT_THAT(resp.create_publisher().error(),
+              ::testing::HasSubstr("subscriber queue size"));
+}
+
+TEST_F(ServerTest, PubSubscriberQueueSizeMismatchForMux) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  conn.CreatePublisher("queue_size_vchan1", 64, 4, "", false, true, false,
+                       "/queue_size_mux", 0, false, false, 0, 0, 0,
+                       /*subscriber_queue_size=*/8);
+  auto [resp, fds] = conn.CreatePublisher(
+      "queue_size_vchan2", 64, 4, "", false, true, false, "/queue_size_mux",
+      1, false, false, 0, 0, 0, /*subscriber_queue_size=*/16);
+  EXPECT_THAT(resp.create_publisher().error(),
+              ::testing::HasSubstr("subscriber queue size"));
 }
 
 TEST_F(ServerTest, PubSlotSizeIncreaseOnFixedSize) {

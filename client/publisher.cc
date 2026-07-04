@@ -533,8 +533,9 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
                    std::memory_order_release);
 
   // Tell all subscribers that the slot is available, BEFORE bumping
-  // total_messages.  Unreliable C++ subscribers consume the per-subscriber
-  // queue, while reliable subscribers still use the available-slot bitset.
+  // total_messages.  When subscriber queues are enabled, unreliable C++
+  // subscribers consume the per-subscriber queue. Otherwise they use the
+  // available-slot bitset, just like reliable subscribers.
   //
   // Reliable SubscriberImpl::NextSlot() uses total_messages as a version stamp
   // for its cached active_slots_ snapshot: a reliable subscriber that observes
@@ -546,16 +547,20 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
   // that observes the new value.
   const bool notify_reliable_subscribers =
       GetCounters().num_reliable_subs != 0;
+  const bool use_subscriber_queues = SubscriberQueueSize() > 0;
   ccb_->subscribers.Traverse(
-      [this, slot, notify_reliable_subscribers](int sub_id) {
+      [this, slot, notify_reliable_subscribers,
+       use_subscriber_queues](int sub_id) {
         if (vchan_id_ != -1 && GetSubVchanId(sub_id) != -1 &&
             vchan_id_ != GetSubVchanId(sub_id)) {
           return;
         }
-        if (notify_reliable_subscribers) {
+        if (notify_reliable_subscribers || !use_subscriber_queues) {
           GetAvailableSlots(sub_id).Set(slot->id);
         }
-        GetAvailableSlotQueue(sub_id).Push(slot->id, slot->ordinal);
+        if (use_subscriber_queues) {
+          GetAvailableSlotQueue(sub_id).Push(slot->id, slot->ordinal);
+        }
       });
 
   // Update counters AFTER notifying subscribers (see above).

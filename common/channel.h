@@ -15,6 +15,7 @@
 #include "toolbelt/bitset.h"
 #include "toolbelt/fd.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <iostream>
@@ -124,7 +125,7 @@ constexpr int kMaxChannels = 1024;
 // and publisher reference.  Best if it's a multiple of 64 because
 // it's used as the size in a toolbelt::BitSet.
 constexpr int kMaxSlotOwners = 1024;
-constexpr size_t kMaxAvailableSlotQueueCapacity = 1024;
+constexpr size_t kDefaultMaxAvailableSlotQueueCapacity = 1024;
 
 // This limits the number of virtual channels.  Each virtual channel
 // needs its own ordinal counter in the CCB (8 bytes each).
@@ -412,10 +413,12 @@ inline size_t SizeofSlotQueue(size_t capacity) {
   return sizeof(InPlaceSlotQueue) + sizeof(SlotQueueEntry) * capacity;
 }
 
-inline size_t AvailableSlotQueueCapacity(int num_slots) {
-  return static_cast<size_t>(num_slots) < kMaxAvailableSlotQueueCapacity
-             ? static_cast<size_t>(num_slots)
-             : kMaxAvailableSlotQueueCapacity;
+inline int ResolveSubscriberQueueSize(int num_slots,
+                                      int subscriber_queue_size) {
+  if (num_slots <= 0 || subscriber_queue_size <= 0) {
+    return 0;
+  }
+  return subscriber_queue_size;
 }
 
 struct BufferControlBlock {
@@ -534,6 +537,7 @@ struct ChannelControlBlock {          // a.k.a CCB
   char channel_name[kMaxChannelName]; // So that you can see the name in a
                                       // debugger or hexdump.
   int num_slots;
+  int subscriber_queue_size; // Entries in each per-subscriber slot queue.
   OrdinalAccumulator ordinals; // Ordinal accumulator for virtual channels.
   ActivationTracker activation_tracker; // Tracks which vchan_ids have been
                                         // activated by a publisher.
@@ -573,16 +577,23 @@ inline size_t AvailableSlotsSize(int num_slots) {
   return SizeofAtomicBitSet(num_slots) * kMaxSlotOwners;
 }
 
-inline size_t AvailableSlotQueuesSize(int num_slots) {
-  return Aligned(SizeofSlotQueue(AvailableSlotQueueCapacity(num_slots))) *
+inline size_t AvailableSlotQueuesSize(int subscriber_queue_size) {
+  return Aligned(SizeofSlotQueue(static_cast<size_t>(subscriber_queue_size))) *
          kMaxSlotOwners;
 }
 
-inline size_t CcbSize(int num_slots) {
+inline size_t CcbSize(int num_slots, int subscriber_queue_size) {
+  subscriber_queue_size =
+      ResolveSubscriberQueueSize(num_slots, subscriber_queue_size);
   return Aligned(sizeof(ChannelControlBlock) +
                  num_slots * sizeof(MessageSlot)) +
          Aligned(SizeofAtomicBitSet(num_slots)) * 2 +
-         AvailableSlotsSize(num_slots) + AvailableSlotQueuesSize(num_slots);
+         AvailableSlotsSize(num_slots) +
+         AvailableSlotQueuesSize(subscriber_queue_size);
+}
+
+inline size_t CcbSize(int num_slots) {
+  return CcbSize(num_slots, /*subscriber_queue_size=*/0);
 }
 
 struct SlotBuffer {
@@ -642,7 +653,8 @@ public:
   };
 
   Channel(const std::string &name, int num_slots, int channel_id,
-          std::string type, std::function<bool(Channel *)> reload = nullptr);
+          int subscriber_queue_size, std::string type,
+          std::function<bool(Channel *)> reload = nullptr);
   virtual ~Channel() { Unmap(); }
 
   virtual void Unmap();
@@ -763,6 +775,10 @@ public:
   // Get the number of slots in the channel (can't be changed)
   int NumSlots() const { return num_slots_; }
   virtual void SetNumSlots(int n) { num_slots_ = n; }
+  virtual int SubscriberQueueSize() const { return subscriber_queue_size_; }
+  virtual void SetSubscriberQueueSize(int n) {
+    subscriber_queue_size_ = ResolveSubscriberQueueSize(num_slots_, n);
+  }
   std::string SlotType() const { return type_; }
 
   void CleanupSlots(int owner, bool reliable, bool is_pub, int vchan_id);
@@ -853,7 +869,8 @@ public:
   InPlaceSlotQueue *GetAvailableSlotQueueAddress(int sub_id) {
     return reinterpret_cast<InPlaceSlotQueue *>(
         EndOfAvailableSlots() +
-        Aligned(SizeofSlotQueue(AvailableSlotQueueCapacity(num_slots_))) *
+        Aligned(SizeofSlotQueue(
+            static_cast<size_t>(subscriber_queue_size_))) *
             sub_id);
   }
 
@@ -889,6 +906,7 @@ protected:
 
   std::string name_;
   int num_slots_;
+  int subscriber_queue_size_;
 
   int channel_id_; // ID allocated from server.
   std::string type_;

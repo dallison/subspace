@@ -160,8 +160,116 @@ pub fn sizeof_slot_queue(capacity: usize) -> usize {
         + std::mem::size_of::<SlotQueueEntry>() * capacity
 }
 
+impl SlotQueueHeader {
+    fn entries(&self) -> *mut SlotQueueEntry {
+        unsafe { (self as *const Self as *mut u8).add(std::mem::size_of::<Self>()) as *mut SlotQueueEntry }
+    }
+
+    fn drop_front(&self) -> bool {
+        if self.capacity == 0 {
+            return false;
+        }
+        let mut head = self.head.load(Ordering::Relaxed);
+        loop {
+            let entry = unsafe { &*self.entries().add((head % self.capacity as u64) as usize) };
+            if entry.sequence.load(Ordering::Acquire) != head + 1 {
+                return false;
+            }
+            match self.head.compare_exchange_weak(
+                head,
+                head + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    entry
+                        .sequence
+                        .store(head + self.capacity as u64, Ordering::Release);
+                    return true;
+                }
+                Err(v) => head = v,
+            }
+        }
+    }
+
+    pub fn push(&self, slot_id: i32, ordinal: u64) -> bool {
+        if self.capacity == 0 {
+            self.overflow.store(true, Ordering::Relaxed);
+            return false;
+        }
+
+        let mut tail = self.tail.load(Ordering::Relaxed);
+        loop {
+            let head = self.head.load(Ordering::Acquire);
+            if tail - head >= self.capacity as u64 {
+                if !self.drop_front() {
+                    self.overflow.store(true, Ordering::Release);
+                    return false;
+                }
+                self.overflow.store(true, Ordering::Release);
+                tail = self.tail.load(Ordering::Relaxed);
+                continue;
+            }
+            match self.tail.compare_exchange_weak(
+                tail,
+                tail + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(v) => tail = v,
+            }
+        }
+
+        let entry = unsafe { &*self.entries().add((tail % self.capacity as u64) as usize) };
+        while entry.sequence.load(Ordering::Acquire) != tail {
+            std::thread::yield_now();
+        }
+        entry.slot_id.store(slot_id, Ordering::Relaxed);
+        entry.ordinal.store(ordinal, Ordering::Relaxed);
+        entry.sequence.store(tail + 1, Ordering::Release);
+        true
+    }
+
+    pub fn try_pop(&self) -> Option<(i32, u64)> {
+        if self.capacity == 0 {
+            return None;
+        }
+
+        let mut head = self.head.load(Ordering::Relaxed);
+        loop {
+            let entry = unsafe { &*self.entries().add((head % self.capacity as u64) as usize) };
+            if entry.sequence.load(Ordering::Acquire) != head + 1 {
+                return None;
+            }
+            let candidate = (
+                entry.slot_id.load(Ordering::Relaxed),
+                entry.ordinal.load(Ordering::Relaxed),
+            );
+            match self.head.compare_exchange_weak(
+                head,
+                head + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    entry
+                        .sequence
+                        .store(head + self.capacity as u64, Ordering::Release);
+                    return Some(candidate);
+                }
+                Err(v) => head = v,
+            }
+        }
+    }
+
+    pub fn consume_overflow(&self) -> bool {
+        self.overflow.swap(false, Ordering::AcqRel)
+    }
+}
+
 pub fn available_slot_queue_capacity(num_slots: usize) -> usize {
-    std::cmp::min(num_slots, MAX_AVAILABLE_SLOT_QUEUE_CAPACITY)
+    resolve_subscriber_queue_size(num_slots as i32, 0) as usize
 }
 
 // ── ChannelCounters ─────────────────────────────────────────────────────────
@@ -260,6 +368,7 @@ impl SubscriberCounter {
 pub struct ChannelControlBlock {
     pub channel_name: [u8; MAX_CHANNEL_NAME],
     pub num_slots: i32,
+    pub subscriber_queue_size: i32,
     pub ordinals: OrdinalAccumulator,
     pub activation_tracker: ActivationTracker,
     pub buffer_index: i32,
@@ -279,15 +388,24 @@ pub struct ChannelControlBlock {
     // Accessed via unsafe pointer arithmetic.
 }
 
-pub fn ccb_size(num_slots: i32) -> usize {
+pub fn resolve_subscriber_queue_size(num_slots: i32, subscriber_queue_size: i32) -> i32 {
+    if num_slots <= 0 || subscriber_queue_size <= 0 {
+        0
+    } else {
+        subscriber_queue_size
+    }
+}
+
+pub fn ccb_size(num_slots: i32, subscriber_queue_size: i32) -> usize {
     let ns = num_slots as usize;
+    let queue_size = resolve_subscriber_queue_size(num_slots, subscriber_queue_size) as usize;
     let base = aligned64(
         (std::mem::size_of::<ChannelControlBlock>() + ns * std::mem::size_of::<MessageSlot>())
             as i64,
     ) as usize;
     base + aligned64(sizeof_atomic_bitset(ns) as i64) as usize * 2
         + sizeof_atomic_bitset(ns) * MAX_SLOT_OWNERS
-        + aligned64(sizeof_slot_queue(available_slot_queue_capacity(ns)) as i64) as usize
+        + aligned64(sizeof_slot_queue(queue_size) as i64) as usize
             * MAX_SLOT_OWNERS
 }
 
@@ -297,6 +415,7 @@ pub fn ccb_size(num_slots: i32) -> usize {
 pub struct Channel {
     pub name: String,
     pub num_slots: i32,
+    pub subscriber_queue_size: i32,
     pub channel_id: i32,
     pub channel_type: String,
     pub vchan_id: i32,
@@ -471,6 +590,7 @@ impl Channel {
     pub fn new(
         name: String,
         num_slots: i32,
+        subscriber_queue_size: i32,
         channel_id: i32,
         channel_type: String,
         vchan_id: i32,
@@ -480,6 +600,7 @@ impl Channel {
         Self {
             name,
             num_slots,
+            subscriber_queue_size: resolve_subscriber_queue_size(num_slots, subscriber_queue_size),
             channel_id,
             channel_type,
             vchan_id,
@@ -512,7 +633,7 @@ impl Channel {
         prot: ProtFlags,
     ) -> crate::error::Result<()> {
         let scb_sz = std::mem::size_of::<SystemControlBlock>();
-        let ccb_sz = ccb_size(self.num_slots);
+        let ccb_sz = ccb_size(self.num_slots, self.subscriber_queue_size);
         let bcb_sz = std::mem::size_of::<BufferControlBlock>();
 
         self.scb = map_memory(scb_fd, scb_sz, ProtFlags::PROT_READ | ProtFlags::PROT_WRITE)?
@@ -616,6 +737,19 @@ impl Channel {
             let offset = sizeof_atomic_bitset(self.num_slots as usize) * sub_id;
             InPlaceAtomicBitSet::new(base.add(offset))
         }
+    }
+
+    fn end_of_available_slots(&self) -> *mut u8 {
+        unsafe {
+            self.end_of_free_slots().add(
+                sizeof_atomic_bitset(self.num_slots as usize) * MAX_SLOT_OWNERS,
+            )
+        }
+    }
+
+    pub fn get_available_slot_queue(&self, sub_id: usize) -> &SlotQueueHeader {
+        let stride = aligned64(sizeof_slot_queue(self.subscriber_queue_size as usize) as i64) as usize;
+        unsafe { &*(self.end_of_available_slots().add(stride * sub_id) as *const SlotQueueHeader) }
     }
 
     pub fn num_subscribers(&self, vchan_id: i32) -> i32 {

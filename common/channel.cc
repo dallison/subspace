@@ -142,8 +142,12 @@ void UnmapMemory(void *p, size_t size,
 }
 
 Channel::Channel(const std::string &name, int num_slots, int channel_id,
-                 std::string type, std::function<bool(Channel *)> reload)
-    : name_(name), num_slots_(num_slots), channel_id_(channel_id),
+                 int subscriber_queue_size, std::string type,
+                 std::function<bool(Channel *)> reload)
+    : name_(name), num_slots_(num_slots),
+      subscriber_queue_size_(
+          ResolveSubscriberQueueSize(num_slots, subscriber_queue_size)),
+      channel_id_(channel_id),
       type_(std::move(type)), reload_callback_(std::move(reload)) {}
 
 void Channel::Unmap() {
@@ -158,7 +162,7 @@ void Channel::Unmap() {
   ccb_ = nullptr;
   bcb_ = nullptr;
   UnmapMemory(scb, sizeof(SystemControlBlock), "SCB");
-  UnmapMemory(ccb, CcbSize(num_slots_), "CCB");
+  UnmapMemory(ccb, CcbSize(num_slots_, subscriber_queue_size_), "CCB");
   UnmapMemory(bcb, sizeof(BufferControlBlock), "BCB");
 }
 
@@ -301,7 +305,7 @@ void Channel::Dump(std::ostream &os) const {
   toolbelt::Hexdump(scb_, 64);
 
   os << "CCB:\n";
-  toolbelt::Hexdump(ccb_, CcbSize(num_slots_));
+  toolbelt::Hexdump(ccb_, CcbSize(num_slots_, subscriber_queue_size_));
 
   os << "Slots:\n";
   DumpSlots(os);
@@ -334,8 +338,9 @@ void Channel::GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
 }
 
 uint64_t Channel::GetVirtualMemoryUsage() const {
-  uint64_t size = sizeof(SystemControlBlock) + CcbSize(num_slots_) +
-                  sizeof(BufferControlBlock);
+  uint64_t size =
+      sizeof(SystemControlBlock) + CcbSize(num_slots_, subscriber_queue_size_) +
+      sizeof(BufferControlBlock);
   for (int i = 0; i < ccb_->num_buffers; i++) {
     if (bcb_->refs[i] > 0) {
       size += bcb_->sizes[i];

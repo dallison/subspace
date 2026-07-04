@@ -92,6 +92,7 @@ typedef struct {
   SubspaceString type;
   uint64_t slot_size;
   int num_slots;
+  int subscriber_queue_size;
   bool reliable;
 } SubspaceChannelInfo;
 
@@ -211,6 +212,10 @@ typedef struct {
 typedef struct {
   const int32_t slot_size; // Initial size of slots (might be resized).
   const int num_slots;     // Number of slots (never changes)
+  // Capacity of each subscriber's per-subscriber slot queue. 0 disables the
+  // queue and uses the available-slot bitset. The value applies to every
+  // subscriber queue in the channel CCB.
+  int32_t subscriber_queue_size;
   bool local;              // If true, messages stay local to this machine.
   bool reliable;           // Reliable publisher.
   bool bridge;             // This publisher is for the bridge.
@@ -399,6 +404,8 @@ int subspace_get_subscriber_fd(SubspaceSubscriber subscriber);
 // is received.
 int32_t subspace_get_subscriber_slot_size(SubspaceSubscriber subscriber);
 int subspace_get_subscriber_num_slots(SubspaceSubscriber subscriber);
+int32_t
+subspace_get_subscriber_queue_size(SubspaceSubscriber subscriber);
 
 // This is a shortcut to wait for a message to be available.  It will block
 // until a message is available.
@@ -533,6 +540,7 @@ bool subspace_is_publisher_for_tunnel(SubspacePublisher publisher);
 bool subspace_publisher_uses_split_buffers(SubspacePublisher publisher);
 int32_t subspace_get_publisher_slot_size(SubspacePublisher publisher);
 int32_t subspace_get_publisher_num_slots(SubspacePublisher publisher);
+int32_t subspace_get_publisher_queue_size(SubspacePublisher publisher);
 SubspaceString subspace_get_publisher_name(SubspacePublisher publisher);
 SubspaceString subspace_get_publisher_type(SubspacePublisher publisher);
 SubspaceString subspace_get_publisher_mux(SubspacePublisher publisher);

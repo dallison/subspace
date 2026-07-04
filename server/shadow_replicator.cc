@@ -149,6 +149,7 @@ void ShadowReplicator::SendCreateChannel(ServerChannel *channel) {
   msg->set_channel_id(channel->GetChannelId());
   msg->set_slot_size(channel->SlotSize());
   msg->set_num_slots(channel->NumSlots());
+  msg->set_subscriber_queue_size(channel->SubscriberQueueSize());
   msg->set_type(channel->Type());
   msg->set_is_local(channel->IsLocal());
   msg->set_is_reliable(channel->IsReliable());
@@ -397,6 +398,7 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
           .channel_id = msg.channel_id(),
           .slot_size = msg.slot_size(),
           .num_slots = msg.num_slots(),
+          .subscriber_queue_size = msg.subscriber_queue_size(),
           .type = msg.type(),
           .is_local = msg.is_local(),
           .is_reliable = msg.is_reliable(),

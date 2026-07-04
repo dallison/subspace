@@ -38,12 +38,26 @@ class Subscriber;
 struct PublisherOptions {
   int32_t SlotSize() const { return slot_size; }
   int32_t NumSlots() const { return num_slots; }
+  int32_t SubscriberQueueSize() const { return subscriber_queue_size; }
   PublisherOptions &SetSlotSize(int32_t size) {
     slot_size = size;
     return *this;
   }
   PublisherOptions &SetNumSlots(int32_t num) {
     num_slots = num;
+    return *this;
+  }
+  // Capacity of each subscriber's per-subscriber slot queue, in entries.
+  //
+  // When this is greater than 0, unreliable subscribers read this queue instead
+  // of scanning the channel's available-slot bitset. The value applies to every
+  // subscriber queue in the channel CCB, so all publishers on the same channel
+  // must agree on it. A value of 0 disables the queue and uses the existing
+  // available-slot bitset path. Larger values tolerate more
+  // publisher/subscriber skew and stale recycled-slot hints at the cost of
+  // shared memory in every subscriber queue.
+  PublisherOptions &SetSubscriberQueueSize(int32_t size) {
+    subscriber_queue_size = size;
     return *this;
   }
 
@@ -219,6 +233,7 @@ struct PublisherOptions {
   // here.
   int32_t slot_size = 0;
   int32_t num_slots = 0;
+  int32_t subscriber_queue_size = 0;
 
   bool local = false;
   bool reliable = false;

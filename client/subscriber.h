@@ -40,12 +40,13 @@ template <typename H> inline H AbslHashValue(H h, const OrdinalAndVchanId &x) {
 // shared memory.
 class SubscriberImpl : public ClientChannel {
 public:
-  SubscriberImpl(const std::string &name, int num_slots, int channel_id,
-                 int subscriber_id, int vchan_id, uint64_t session_id,
-                 std::string type, const SubscriberOptions &options,
+  SubscriberImpl(const std::string &name, int num_slots,
+                 int subscriber_queue_size, int channel_id, int subscriber_id,
+                 int vchan_id, uint64_t session_id, std::string type,
+                 const SubscriberOptions &options,
                  std::function<bool(Channel *)> reload, int user_id,
                  int group_id)
-      : ClientChannel(name, num_slots, channel_id, vchan_id,
+      : ClientChannel(name, num_slots, subscriber_queue_size, channel_id, vchan_id,
                       std::move(session_id), std::move(type), std::move(reload),
                       user_id, group_id),
         subscriber_id_(subscriber_id), options_(options) {
@@ -99,6 +100,7 @@ public:
   void RememberOrdinal(uint64_t ordinal, int vchan_id);
   void CollectVisibleSlots(InPlaceAtomicBitset &bits);
   MessageSlot *FindNextQueuedSlot(uint64_t max_ordinal);
+  MessageSlot *FindNewestQueuedSlot();
   MessageSlot *FindNextVisibleSlot(InPlaceAtomicBitset &bits,
                                    uint64_t max_ordinal);
 

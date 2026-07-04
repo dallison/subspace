@@ -71,6 +71,7 @@ pub struct ChannelInfo {
     pub channel_type: String,
     pub slot_size: u64,
     pub num_slots: i32,
+    pub subscriber_queue_size: i32,
     pub reliable: bool,
 }
 
@@ -127,6 +128,10 @@ impl Publisher {
 
     pub fn num_slots(&self) -> i32 {
         self.imp.lock().unwrap().channel.num_slots
+    }
+
+    pub fn subscriber_queue_size(&self) -> i32 {
+        self.imp.lock().unwrap().channel.subscriber_queue_size
     }
 
     /// Get a mutable pointer to the message buffer for writing.
@@ -485,6 +490,10 @@ impl Subscriber {
 
     pub fn num_slots(&self) -> i32 {
         self.imp.lock().unwrap().channel.num_slots
+    }
+
+    pub fn subscriber_queue_size(&self) -> i32 {
+        self.imp.lock().unwrap().channel.subscriber_queue_size
     }
 
     pub fn current_ordinal(&self) -> i64 {
@@ -868,6 +877,7 @@ impl Client {
                     metadata_size: opts.metadata_size,
                     use_split_buffers: opts.use_split_buffers,
                     split_buffers_over_bridge: opts.split_buffers_over_bridge,
+                    subscriber_queue_size: opts.subscriber_queue_size,
                     max_publishers: 0,
                     publisher_id: -1,
                 },
@@ -892,6 +902,7 @@ impl Client {
         let mut pub_impl = PublisherImpl::new(
             channel_name.to_string(),
             opts.num_slots,
+            pub_resp.subscriber_queue_size,
             pub_resp.channel_id,
             pub_resp.publisher_id,
             pub_resp.vchan_id,
@@ -1021,6 +1032,7 @@ impl Client {
         let mut sub_impl = SubscriberImpl::new(
             channel_name.to_string(),
             sub_resp.num_slots,
+            sub_resp.subscriber_queue_size,
             sub_resp.channel_id,
             sub_resp.subscriber_id,
             sub_resp.vchan_id,
@@ -1038,6 +1050,7 @@ impl Client {
         };
 
         sub_impl.channel.num_slots = sub_resp.num_slots;
+        sub_impl.channel.subscriber_queue_size = sub_resp.subscriber_queue_size;
         sub_impl
             .channel
             .embargoed_slots
@@ -1138,6 +1151,7 @@ impl Client {
             channel_type: String::from_utf8_lossy(&info.r#type).to_string(),
             slot_size: info.slot_size as u64,
             num_slots: info.num_slots,
+            subscriber_queue_size: info.subscriber_queue_size,
             reliable: info.is_reliable,
         })
     }
@@ -1176,6 +1190,7 @@ impl Client {
                 channel_type: String::from_utf8_lossy(&info.r#type).to_string(),
                 slot_size: info.slot_size as u64,
                 num_slots: info.num_slots,
+                subscriber_queue_size: info.subscriber_queue_size,
                 reliable: info.is_reliable,
             })
             .collect())
@@ -1330,6 +1345,10 @@ fn read_message_internal(
         Some(si) => sub.channel.slot_ref(si).ordinal as i64,
         None => -1,
     };
+    let last_vchan_id: i32 = match old_slot {
+        Some(si) => sub.channel.slot_ref(si).vchan_id as i32,
+        None => -1,
+    };
 
     let new_slot_idx = match mode {
         ReadMode::ReadNext => sub.next_slot(),
@@ -1351,7 +1370,13 @@ fn read_message_internal(
         && sub.options.detect_dropped_messages
     {
         let new_vchan_id = sub.channel.slot_ref(new_idx).vchan_id as i32;
-        let drops = sub.detect_drops(new_vchan_id);
+        let new_ordinal = sub.channel.slot_ref(new_idx).ordinal as i64;
+        let direct_gap = if new_vchan_id == last_vchan_id && new_ordinal > last_ordinal + 1 {
+            new_ordinal - last_ordinal - 1
+        } else {
+            0
+        };
+        let drops = direct_gap as i32 + sub.detect_drops(new_vchan_id);
         if drops > 0 {
             if let Some(ref cb) = sub.dropped_message_callback {
                 cb(drops as i64);
@@ -1500,6 +1525,7 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
         sub.channel.channel_type = String::from_utf8_lossy(&sub_resp.r#type).to_string();
     }
     sub.channel.num_slots = sub_resp.num_slots;
+    sub.channel.subscriber_queue_size = sub_resp.subscriber_queue_size;
     sub.channel
         .embargoed_slots
         .resize(sub_resp.num_slots as usize);
@@ -1757,7 +1783,7 @@ fn expand_slot_size(slot_size: u64) -> u64 {
 
 fn get_virtual_memory_usage(channel: &Channel) -> u64 {
     let mut size = std::mem::size_of::<SystemControlBlock>() as u64
-        + ccb_size(channel.num_slots) as u64
+        + ccb_size(channel.num_slots, channel.subscriber_queue_size) as u64
         + std::mem::size_of::<BufferControlBlock>() as u64;
     if !channel.bcb.is_null() {
         let bcb = unsafe { &*channel.bcb };

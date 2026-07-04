@@ -54,6 +54,7 @@ fn publisher_options_defaults() {
     let opts = PublisherOptions::new();
     assert_eq!(opts.slot_size, 0);
     assert_eq!(opts.num_slots, 0);
+    assert_eq!(opts.subscriber_queue_size, 0);
     assert!(!opts.local);
     assert!(!opts.reliable);
     assert!(!opts.bridge);
@@ -72,6 +73,7 @@ fn publisher_options_builder_chain() {
     let opts = PublisherOptions::new()
         .set_slot_size(4096)
         .set_num_slots(16)
+        .set_subscriber_queue_size(32)
         .set_reliable(true)
         .set_local(true)
         .set_fixed_size(true)
@@ -85,6 +87,7 @@ fn publisher_options_builder_chain() {
 
     assert_eq!(opts.slot_size, 4096);
     assert_eq!(opts.num_slots, 16);
+    assert_eq!(opts.subscriber_queue_size, 32);
     assert!(opts.reliable);
     assert!(opts.local);
     assert!(opts.fixed_size);
@@ -3202,6 +3205,7 @@ fn coverage_publisher_accessors() {
     let opts = PublisherOptions::new()
         .set_slot_size(128)
         .set_num_slots(8)
+        .set_subscriber_queue_size(5)
         .set_type("pub_type".to_string())
         .set_fixed_size(true);
     let pub_handle = client.create_publisher("cov_pub_acc_ch", &opts).unwrap();
@@ -3210,6 +3214,7 @@ fn coverage_publisher_accessors() {
     assert!(!pub_handle.is_reliable());
     assert!(pub_handle.is_fixed_size());
     assert_eq!(pub_handle.num_slots(), 8);
+    assert_eq!(pub_handle.subscriber_queue_size(), 5);
     assert!(pub_handle.slot_size() > 0);
     assert!(pub_handle.get_poll_fd() >= 0);
     assert!(pub_handle.prefix_size() > 0);
@@ -3219,7 +3224,10 @@ fn coverage_publisher_accessors() {
 #[test]
 fn coverage_subscriber_accessors() {
     let client = new_client("cov_sub_acc");
-    let opts = PublisherOptions::new().set_slot_size(128).set_num_slots(16);
+    let opts = PublisherOptions::new()
+        .set_slot_size(128)
+        .set_num_slots(16)
+        .set_subscriber_queue_size(6);
     let _pub = client.create_publisher("cov_sub_acc_ch", &opts).unwrap();
     let sub_opts = SubscriberOptions::new();
     let sub = client
@@ -3230,6 +3238,7 @@ fn coverage_subscriber_accessors() {
     assert!(!sub.is_reliable());
     assert!(!sub.is_placeholder());
     assert!(sub.num_slots() > 0);
+    assert_eq!(sub.subscriber_queue_size(), 6);
     assert!(sub.get_poll_fd() >= 0);
     assert!(sub.prefix_size() > 0);
     assert!(sub.checksum_size() > 0);

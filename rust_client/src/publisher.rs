@@ -12,9 +12,9 @@ use crate::split_buffer::{
     read_split_buffer_metadata_file, split_buffer_object_name, write_split_buffer_metadata_file,
     SplitBufferMetadata,
 };
-use crate::syscall_shim::{
-    shim_close, shim_fstat, shim_ftruncate, shim_open, shim_read, shim_write,
-};
+#[cfg(target_os = "linux")]
+use crate::syscall_shim::shim_fstat;
+use crate::syscall_shim::{shim_close, shim_ftruncate, shim_open, shim_read, shim_write};
 use nix::fcntl::OFlag;
 use nix::sys::mman::ProtFlags;
 use nix::sys::stat::Mode;
@@ -50,6 +50,7 @@ impl PublisherImpl {
     pub fn new(
         name: String,
         num_slots: i32,
+        subscriber_queue_size: i32,
         channel_id: i32,
         publisher_id: i32,
         vchan_id: i32,
@@ -61,6 +62,7 @@ impl PublisherImpl {
             channel: Channel::new(
                 name,
                 num_slots,
+                subscriber_queue_size,
                 channel_id,
                 channel_type,
                 vchan_id,
@@ -527,6 +529,9 @@ impl PublisherImpl {
 
         // Tell all subscribers the slot is available.
         let ccb = self.channel.ccb();
+        let notify_reliable_subscribers =
+            self.channel.scb().counters[self.channel.channel_id as usize].num_reliable_subs != 0;
+        let use_subscriber_queues = self.channel.subscriber_queue_size > 0;
         ccb.subscribers.traverse(|sub_id| {
             if vchan_id != -1
                 && self.channel.get_sub_vchan_id(sub_id) != -1
@@ -534,7 +539,14 @@ impl PublisherImpl {
             {
                 return;
             }
-            self.channel.get_available_slots(sub_id).set(slot_idx);
+            if notify_reliable_subscribers || !use_subscriber_queues {
+                self.channel.get_available_slots(sub_id).set(slot_idx);
+            }
+            if use_subscriber_queues {
+                self.channel
+                    .get_available_slot_queue(sub_id)
+                    .push(slot.id, slot.ordinal);
+            }
         });
 
         if reliable {

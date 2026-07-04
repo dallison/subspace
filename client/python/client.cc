@@ -57,6 +57,8 @@ PYBIND11_MODULE(subspace, m) {
       .def_readonly("type", &ChannelInfo::type)
       .def_readonly("slot_size", &ChannelInfo::slot_size)
       .def_readonly("num_slots", &ChannelInfo::num_slots)
+      .def_readonly("subscriber_queue_size",
+                    &ChannelInfo::subscriber_queue_size)
       .def_readonly("reliable", &ChannelInfo::reliable);
 
   // ChannelStats struct.
@@ -109,6 +111,11 @@ PYBIND11_MODULE(subspace, m) {
            "Set the number of slots for the publisher.")
       .def("num_slots", &PublisherOptions::NumSlots,
            "Get the number of slots for the publisher.")
+      .def("set_subscriber_queue_size",
+           &PublisherOptions::SetSubscriberQueueSize,
+           "Set each subscriber queue's capacity. 0 disables the queue.")
+      .def("subscriber_queue_size", &PublisherOptions::SubscriberQueueSize,
+           "Get each subscriber queue's configured capacity.")
       .def("set_notify_retirement", &PublisherOptions::SetNotifyRetirement,
            "Set whether the publisher notifies on message retirement.")
       .def("notify_retirement", &PublisherOptions::NotifyRetirement,
@@ -295,6 +302,10 @@ PYBIND11_MODULE(subspace, m) {
 
   publisher_class.def("num_slots", &Publisher::NumSlots,
                       "Get the number of message slots.");
+
+  publisher_class.def("subscriber_queue_size",
+                      &Publisher::SubscriberQueueSize,
+                      "Get each subscriber queue's resolved capacity.");
 
   publisher_class.def("virtual_channel_id", &Publisher::VirtualChannelId,
                       "Get the virtual channel ID assigned to this publisher.");
@@ -570,6 +581,10 @@ checksum_error).  Use as a context manager to auto-release the slot:
 
   subscriber_class.def("num_slots", &Subscriber::NumSlots,
                        "Get the number of message slots.");
+
+  subscriber_class.def("subscriber_queue_size",
+                       &Subscriber::SubscriberQueueSize,
+                       "Get each subscriber queue's resolved capacity.");
 
   subscriber_class.def("get_current_ordinal", &Subscriber::GetCurrentOrdinal,
                        "Get the most recently received ordinal.");

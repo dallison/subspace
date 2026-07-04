@@ -328,6 +328,12 @@ void ClientHandler::HandleCreatePublisher(
     const subspace::CreatePublisherRequest &req,
     subspace::CreatePublisherResponse *response,
     std::vector<toolbelt::FileDescriptor> &fds) {
+  if (req.subscriber_queue_size() < 0) {
+    response->set_error("subscriber_queue_size must be >= 0");
+    return;
+  }
+  const int subscriber_queue_size =
+      ResolveSubscriberQueueSize(req.num_slots(), req.subscriber_queue_size());
   ServerChannel *channel = server_->FindChannel(req.channel_name());
   if (channel == nullptr) {
     server_->logger_.Log(toolbelt::LogLevel::kDebug,
@@ -337,8 +343,8 @@ void ClientHandler::HandleCreatePublisher(
                          req.slot_size(), req.num_slots(), req.type().size(),
                          server_->GetNumChannels());
     absl::StatusOr<ServerChannel *> ch = server_->CreateChannel(
-        req.channel_name(), req.slot_size(), req.num_slots(), req.mux(),
-        req.vchan_id(), req.type());
+        req.channel_name(), req.slot_size(), req.num_slots(),
+        subscriber_queue_size, req.mux(), req.vchan_id(), req.type());
     if (!ch.ok()) {
       response->set_error(ch.status().ToString());
       return;
@@ -353,8 +359,8 @@ void ClientHandler::HandleCreatePublisher(
         req.num_slots(), req.type().size(), server_->GetNumChannels());
     // Channel exists, but it's just a placeholder.  Remap the memory now
     // that we know the slots.
-    absl::Status status =
-        server_->RemapChannel(channel, req.slot_size(), req.num_slots());
+    absl::Status status = server_->RemapChannel(
+        channel, req.slot_size(), req.num_slots(), subscriber_queue_size);
     if (!status.ok()) {
       response->set_error(status.ToString());
       return;
@@ -453,11 +459,21 @@ void ClientHandler::HandleCreatePublisher(
     bool slot_size_changed =
         channel->SlotSize() != 0 && req.slot_size() > channel->SlotSize();
     bool num_slots_changed = req.num_slots() > current_num_slots;
+    bool subscriber_queue_size_changed =
+        subscriber_queue_size != channel->SubscriberQueueSize();
     if (num_slots_changed) {
       response->set_error(absl::StrFormat(
           "Failed to add publisher to %s with more slots (%d) than the current "
           "number (%d)",
           req.channel_name(), req.num_slots(), current_num_slots));
+      return;
+    }
+    if (subscriber_queue_size_changed) {
+      response->set_error(absl::StrFormat(
+          "Inconsistent publisher parameters for channel %s: subscriber queue "
+          "size is %d, not %d",
+          req.channel_name(), channel->SubscriberQueueSize(),
+          subscriber_queue_size));
       return;
     }
 
@@ -624,6 +640,7 @@ void ClientHandler::HandleCreatePublisher(
   response->set_type(channel->Type());
   response->set_vchan_id(channel->GetVirtualChannelId());
   response->set_publisher_id(pub->GetId());
+  response->set_subscriber_queue_size(channel->SubscriberQueueSize());
 
   const SharedMemoryFds &channel_fds = channel->GetFds();
   response->set_ccb_fd_index(0);
@@ -692,7 +709,7 @@ void ClientHandler::HandleCreateSubscriber(
                          client_name_.c_str(), req.channel_name().c_str(),
                          req.type().size(), server_->GetNumChannels());
     absl::StatusOr<ServerChannel *> ch = server_->CreateChannel(
-        req.channel_name(), 0, 0, req.mux(), req.vchan_id(), req.type());
+        req.channel_name(), 0, 0, 0, req.mux(), req.vchan_id(), req.type());
     if (!ch.ok()) {
       response->set_error(ch.status().ToString());
       return;
@@ -826,6 +843,7 @@ void ClientHandler::HandleCreateSubscriber(
 
   response->set_slot_size(channel->SlotSize());
   response->set_num_slots(channel->NumSlots());
+  response->set_subscriber_queue_size(channel->SubscriberQueueSize());
   response->set_checksum_size(channel->ChecksumSize());
   response->set_metadata_size(channel->MetadataSize());
   ServerChannel *split_response_channel =

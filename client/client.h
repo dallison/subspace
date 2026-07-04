@@ -69,6 +69,7 @@ struct ChannelInfo {
   std::string type;
   uint64_t slot_size;
   int num_slots;
+  int subscriber_queue_size;
   bool reliable;
 };
 
@@ -967,6 +968,7 @@ public:
 
   int32_t SlotSize() const { return impl_->SlotSize(); }
   int32_t NumSlots() const { return impl_->NumSlots(); }
+  int32_t SubscriberQueueSize() const { return impl_->SubscriberQueueSize(); }
 
   const std::vector<std::unique_ptr<details::BufferSet>> &GetBuffers() const {
     return client_->GetBuffers(impl_.get());
@@ -1403,6 +1405,7 @@ public:
 
   int32_t SlotSize() const { return impl_->SlotSize(); }
   int32_t NumSlots() const { return impl_->NumSlots(); }
+  int32_t SubscriberQueueSize() const { return impl_->SubscriberQueueSize(); }
 
   const std::vector<std::unique_ptr<details::BufferSet>> &GetBuffers() const {
     return client_->GetBuffers(impl_.get());

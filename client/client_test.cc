@@ -850,6 +850,53 @@ TEST_F(ClientTest, PublishSingleMessageAndRead) {
   ASSERT_EQ(0, msg->length);
 }
 
+TEST_F(ClientTest, PublishAndReadWithSubscriberQueue) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
+      "subscriber_queue_read",
+      subspace::PublisherOptions()
+          .SetSlotSize(256)
+          .SetNumSlots(10)
+          .SetSubscriberQueueSize(4));
+  ASSERT_OK(pub);
+
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber("subscriber_queue_read");
+  ASSERT_OK(sub);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "queued1", 7);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(7);
+  ASSERT_OK(pub_status);
+
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(7, msg->length);
+  ASSERT_EQ(0, memcmp(msg->buffer, "queued1", 7));
+
+  buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "queued2", 7);
+  absl::StatusOr<const Message> pub_status2 = pub->PublishMessage(7);
+  ASSERT_OK(pub_status2);
+
+  buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "queued3", 7);
+  absl::StatusOr<const Message> pub_status3 = pub->PublishMessage(7);
+  ASSERT_OK(pub_status3);
+
+  msg = sub->ReadMessage(subspace::ReadMode::kReadNewest);
+  ASSERT_OK(msg);
+  ASSERT_EQ(7, msg->length);
+  ASSERT_EQ(0, memcmp(msg->buffer, "queued3", 7));
+}
+
 TEST_F(ClientTest, SplitBuffersPublishWithHandlesAndSeparatePrefix) {
   subspace::Client pub_client;
   subspace::Client sub_client;
@@ -5723,6 +5770,7 @@ TEST_F(ClientTest, PublisherOptionsChain) {
   subspace::PublisherOptions opts;
   opts.SetSlotSize(128)
       .SetNumSlots(8)
+      .SetSubscriberQueueSize(32)
       .SetReliable(true)
       .SetLocal(true)
       .SetFixedSize(true)
@@ -5739,6 +5787,7 @@ TEST_F(ClientTest, PublisherOptionsChain) {
 
   ASSERT_EQ(128, opts.SlotSize());
   ASSERT_EQ(8, opts.NumSlots());
+  ASSERT_EQ(32, opts.SubscriberQueueSize());
   ASSERT_TRUE(opts.IsReliable());
   ASSERT_TRUE(opts.IsLocal());
   ASSERT_TRUE(opts.IsFixedSize());
@@ -5752,6 +5801,36 @@ TEST_F(ClientTest, PublisherOptionsChain) {
   ASSERT_EQ(8, opts.ChecksumSize());
   ASSERT_EQ(16, opts.MetadataSize());
   ASSERT_EQ(3, opts.MaxPublishers());
+}
+
+TEST_F(ClientTest, PublisherSubscriberQueueSizeOption) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  auto pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "subscriber_queue_size",
+      subspace::PublisherOptions()
+          .SetSlotSize(128)
+          .SetNumSlots(8)
+          .SetSubscriberQueueSize(32)));
+  EXPECT_EQ(8, pub.NumSlots());
+  EXPECT_EQ(32, pub.SubscriberQueueSize());
+
+  auto sub = EVAL_AND_ASSERT_OK(
+      client.CreateSubscriber("subscriber_queue_size"));
+  EXPECT_EQ(32, sub.SubscriberQueueSize());
+
+  auto info = EVAL_AND_ASSERT_OK(client.GetChannelInfo("subscriber_queue_size"));
+  EXPECT_EQ(32, info.subscriber_queue_size);
+
+  auto default_pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "subscriber_queue_size_default",
+      subspace::PublisherOptions().SetSlotSize(128).SetNumSlots(8)));
+  EXPECT_EQ(8, default_pub.NumSlots());
+  EXPECT_EQ(0, default_pub.SubscriberQueueSize());
+  auto default_info =
+      EVAL_AND_ASSERT_OK(client.GetChannelInfo("subscriber_queue_size_default"));
+  EXPECT_EQ(0, default_info.subscriber_queue_size);
 }
 
 TEST_F(ClientTest, SubscriberOptionsChain) {

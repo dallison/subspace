@@ -266,6 +266,53 @@ MessageSlot *SubscriberImpl::FindNextQueuedSlot(uint64_t max_ordinal) {
   return nullptr;
 }
 
+MessageSlot *SubscriberImpl::FindNewestQueuedSlot() {
+  InPlaceSlotQueue &queue = GetAvailableSlotQueue(subscriber_id_);
+  if (queue.Capacity() == 0) {
+    return nullptr;
+  }
+
+  int cached_vchan_id = std::numeric_limits<int>::min();
+  OrdinalTracker *cached_tracker = nullptr;
+  MessageSlot *best_slot = nullptr;
+  uint64_t best_timestamp = 0;
+
+  QueuedSlot queued;
+  for (size_t i = 0; i < queue.Capacity(); i++) {
+    if (!queue.TryPop(queued)) {
+      break;
+    }
+    if (queued.slot_id < 0 || queued.slot_id >= NumSlots()) {
+      continue;
+    }
+
+    MessageSlot *s = &ccb_->slots[queued.slot_id];
+    const uint64_t ordinal = s->ordinal;
+    if (ordinal == 0 || ordinal != queued.ordinal ||
+        !VirtualChannelIdMatch(s, vchan_id_)) {
+      continue;
+    }
+    const uint64_t refs = s->refs.load(std::memory_order_relaxed);
+    if ((refs & kPubOwned) != 0 || s->buffer_index == -1) {
+      continue;
+    }
+    if (s->vchan_id != cached_vchan_id) {
+      cached_vchan_id = s->vchan_id;
+      cached_tracker = &GetOrdinalTracker(s->vchan_id);
+    }
+    if (ordinal <= cached_tracker->last_ordinal_seen) {
+      continue;
+    }
+    if (best_slot == nullptr || s->timestamp > best_timestamp ||
+        (s->timestamp == best_timestamp && ordinal > best_slot->ordinal)) {
+      best_slot = s;
+      best_timestamp = s->timestamp;
+    }
+  }
+
+  return best_slot;
+}
+
 MessageSlot *SubscriberImpl::FindNextVisibleSlot(InPlaceAtomicBitset &bits,
                                                  uint64_t max_ordinal) {
   MessageSlot *best_slot = nullptr;
@@ -326,7 +373,7 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
       PopulateActiveSlots(bits);
     }
 
-    if (!reliable) {
+    if (!reliable && SubscriberQueueSize() > 0) {
       const bool stable_poll_drain = PollDrainPending();
       if (stable_poll_drain && !next_slot_cache_valid_) {
         next_slot_cached_total_ = ccb_->total_messages;
@@ -489,6 +536,21 @@ MessageSlot *SubscriberImpl::LastSlot(MessageSlot *slot, bool reliable,
   embargoed_slots_.ClearAll();
   for (;;) {
     CheckReload();
+    if (!reliable && SubscriberQueueSize() > 0) {
+      if (MessageSlot *queued_slot = FindNewestQueuedSlot();
+          queued_slot != nullptr &&
+          (slot == nullptr || slot != queued_slot)) {
+        if (AtomicIncRefCount(queued_slot, reliable, 1, queued_slot->ordinal,
+                              queued_slot->vchan_id, false)) {
+          if (!ValidateSlotBuffer(queued_slot) || queued_slot->buffer_index == -1) {
+            AtomicIncRefCount(queued_slot, reliable, -1, queued_slot->ordinal,
+                              queued_slot->vchan_id, false);
+          } else {
+            return queued_slot;
+          }
+        }
+      }
+    }
     if (slot == nullptr) {
       // Prepopulate the active slots.
       PopulateActiveSlots(bits);

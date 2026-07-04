@@ -246,14 +246,14 @@ uint64_t ServerChannel::GetVirtualMemoryUsage() const {
   if (split_buffer_size == 0) {
     return Channel::GetVirtualMemoryUsage();
   }
-  return sizeof(SystemControlBlock) + CcbSize(num_slots_) +
+  return sizeof(SystemControlBlock) + CcbSize(num_slots_, subscriber_queue_size_) +
          sizeof(BufferControlBlock) + split_buffer_size;
 }
 
 absl::StatusOr<SharedMemoryFds>
 ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
                         [[maybe_unused]] int slot_size, int num_slots,
-                        int initial_ordinal) {
+                        int subscriber_queue_size, int initial_ordinal) {
   // Unmap existing memory.
   Unmap();
 
@@ -267,6 +267,7 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
   } else {
     num_slots_ = num_slots;
   }
+  SetSubscriberQueueSize(subscriber_queue_size);
 
   // Map SCB into process memory.
   scb_ = reinterpret_cast<SystemControlBlock *>(MapMemory(
@@ -279,9 +280,9 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
   SharedMemoryFds fds;
 
   // Create CCB in shared memory and map into process memory.
-  absl::StatusOr<void *> p =
-      CreateSharedMemory(channel_id_, "ccb", CcbSize(num_slots_), /*map=*/true,
-                         fds.ccb, session_id_);
+  absl::StatusOr<void *> p = CreateSharedMemory(
+      channel_id_, "ccb", CcbSize(num_slots_, subscriber_queue_size_),
+      /*map=*/true, fds.ccb, session_id_);
   if (!p.ok()) {
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
     return p.status();
@@ -294,7 +295,7 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
                          /*map=*/true, fds.bcb, session_id_);
   if (!p.ok()) {
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
-    UnmapMemory(ccb_, CcbSize(num_slots_), "CCB");
+    UnmapMemory(ccb_, CcbSize(num_slots_, subscriber_queue_size_), "CCB");
     return p.status();
   }
   bcb_ = reinterpret_cast<BufferControlBlock *>(*p);
@@ -305,6 +306,7 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
   // of debugging (you can see it in all processes).
   strncpy(ccb_->channel_name, name_.c_str(), kMaxChannelName - 1);
   ccb_->num_slots = num_slots_;
+  ccb_->subscriber_queue_size = subscriber_queue_size_;
 
   // Initialize all ordinals.
   ccb_->ordinals.Init(initial_ordinal);
@@ -333,7 +335,7 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
     for (int i = 0; i < kMaxSlotOwners; i++) {
       new (GetAvailableSlotsAddress(i)) InPlaceAtomicBitset(num_slots_);
       new (GetAvailableSlotQueueAddress(i))
-          InPlaceSlotQueue(AvailableSlotQueueCapacity(num_slots_));
+          InPlaceSlotQueue(static_cast<size_t>(subscriber_queue_size_));
     }
   }
 
@@ -355,8 +357,9 @@ ServerChannel::MapExisting(const toolbelt::FileDescriptor &scb_fd,
         "Failed to map recovered SCB: %s", strerror(errno)));
   }
 
-  ccb_ = reinterpret_cast<ChannelControlBlock *>(MapMemory(
-      ccb_fd.Fd(), CcbSize(num_slots_), PROT_READ | PROT_WRITE, "CCB"));
+  ccb_ = reinterpret_cast<ChannelControlBlock *>(
+      MapMemory(ccb_fd.Fd(), CcbSize(num_slots_, subscriber_queue_size_),
+                PROT_READ | PROT_WRITE, "CCB"));
   if (ccb_ == MAP_FAILED) {
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
     return absl::InternalError(absl::StrFormat(
@@ -367,7 +370,7 @@ ServerChannel::MapExisting(const toolbelt::FileDescriptor &scb_fd,
       bcb_fd.Fd(), sizeof(BufferControlBlock), PROT_READ | PROT_WRITE, "BCB"));
   if (bcb_ == MAP_FAILED) {
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
-    UnmapMemory(ccb_, CcbSize(num_slots_), "CCB");
+    UnmapMemory(ccb_, CcbSize(num_slots_, subscriber_queue_size_), "CCB");
     return absl::InternalError(absl::StrFormat(
         "Failed to map recovered BCB: %s", strerror(errno)));
   }
@@ -722,6 +725,7 @@ void ServerChannel::GetChannelInfo(subspace::ChannelInfoProto *info) {
   info->set_name(Name());
   info->set_slot_size(SlotSize());
   info->set_num_slots(NumSlots());
+  info->set_subscriber_queue_size(SubscriberQueueSize());
   info->set_type(Type());
 
   int num_pubs, num_subs, num_bridge_pubs, num_bridge_subs;

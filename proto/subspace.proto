@@ -41,6 +41,8 @@ message CreatePublisherRequest {
   bool use_split_buffers = 16; // Prefixes and payload slots are separate.
   int32 max_publishers = 17;   // 0 means no explicit publisher limit.
   bool split_buffers_over_bridge = 18; // Remote bridge publisher uses split buffers.
+  // Entries in each subscriber's CCB slot queue. 0 disables the queue.
+  int32 subscriber_queue_size = 19;
 }
 
 message CreatePublisherResponse {
@@ -57,6 +59,7 @@ message CreatePublisherResponse {
   int32 vchan_id = 11;
   int32 retirement_fd_index = 12; // My retirement fd index (read end)
   repeated int32 retirement_fd_indexes = 13; // Write end of all retirement fds.
+  int32 subscriber_queue_size = 14; // Resolved capacity; 0 means disabled.
 }
 
 // This is used both to create a new subscriber and to reload
@@ -92,6 +95,7 @@ message CreateSubscriberResponse {
   int32 checksum_size = 15; // Bytes reserved for checksum (from publisher).
   int32 metadata_size = 16; // Bytes reserved for user metadata (from publisher).
   bool use_split_buffers = 17;
+  int32 subscriber_queue_size = 18; // Resolved capacity; 0 means disabled.
 }
 
 message GetTriggersRequest { string channel_name = 1; }
@@ -239,6 +243,7 @@ message ChannelInfoProto {
   // Only if is_virtual is true.
   int32 vchan_id = 13; // Virtual channel ID.
   string mux = 14;
+  int32 subscriber_queue_size = 15;
 }
 
 // This is published to the /subspace/ChannelDirectory channel.
@@ -299,6 +304,7 @@ message Subscribed {
   int32 metadata_size = 8;  // Bytes reserved for user metadata.
   bool split_buffers = 9; // Bridge messages are sent as prefix and payload chunks.
   bool split_buffers_over_bridge = 10; // Receiving bridge publisher uses split buffers.
+  int32 subscriber_queue_size = 11;
 }
 
 // This is sent over a TCP connection from the peer server when the
@@ -472,6 +478,7 @@ message ShadowCreateChannel {
   bool has_max_publishers = 15;
   int32 max_publishers = 16;
   bool split_buffers_over_bridge = 17;
+  int32 subscriber_queue_size = 18;
   // FDs sent via SCM_RIGHTS: [ccb_fd, bcb_fd]
 }
 

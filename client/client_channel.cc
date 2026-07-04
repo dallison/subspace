@@ -108,12 +108,13 @@ absl::Status ClientChannel::Map(SharedMemoryFds fds,
         "Failed to map SystemControlBlock: %s (scb_fd=%d, ccb_fd=%d, "
         "bcb_fd=%d, scb_size=%zu, ccb_size=%zu, bcb_size=%zu)",
         strerror(errno), scb_fd.Fd(), fds.ccb.Fd(), fds.bcb.Fd(),
-        sizeof(SystemControlBlock), CcbSize(num_slots_),
+        sizeof(SystemControlBlock), CcbSize(num_slots_, subscriber_queue_size_),
         sizeof(BufferControlBlock)));
   }
 
-  ccb_ = reinterpret_cast<ChannelControlBlock *>(MapMemory(
-      fds.ccb.Fd(), CcbSize(num_slots_), PROT_READ | PROT_WRITE, "CCB"));
+  ccb_ = reinterpret_cast<ChannelControlBlock *>(
+      MapMemory(fds.ccb.Fd(), CcbSize(num_slots_, subscriber_queue_size_),
+                PROT_READ | PROT_WRITE, "CCB"));
   if (ccb_ == MAP_FAILED) {
     int mmap_errno = errno;
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
@@ -121,7 +122,7 @@ absl::Status ClientChannel::Map(SharedMemoryFds fds,
         "Failed to map ChannelControlBlock: %s (scb_fd=%d, ccb_fd=%d, "
         "bcb_fd=%d, ccb_size=%zu)",
         strerror(mmap_errno), scb_fd.Fd(), fds.ccb.Fd(), fds.bcb.Fd(),
-        CcbSize(num_slots_)));
+        CcbSize(num_slots_, subscriber_queue_size_)));
   }
 
   bcb_ = reinterpret_cast<BufferControlBlock *>(MapMemory(
@@ -129,7 +130,7 @@ absl::Status ClientChannel::Map(SharedMemoryFds fds,
   if (bcb_ == MAP_FAILED) {
     int mmap_errno = errno;
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
-    UnmapMemory(ccb_, CcbSize(num_slots_), "CCB");
+    UnmapMemory(ccb_, CcbSize(num_slots_, subscriber_queue_size_), "CCB");
     return absl::InternalError(absl::StrFormat(
         "Failed to map BufferControlBlock: %s (scb_fd=%d, ccb_fd=%d, "
         "bcb_fd=%d, bcb_size=%zu)",
@@ -359,8 +360,9 @@ uint64_t ClientChannel::GetVirtualMemoryUsage() const {
     return Channel::GetVirtualMemoryUsage();
   }
 
-  uint64_t size = sizeof(SystemControlBlock) + CcbSize(num_slots_) +
-                  sizeof(BufferControlBlock);
+  uint64_t size =
+      sizeof(SystemControlBlock) + CcbSize(num_slots_, subscriber_queue_size_) +
+      sizeof(BufferControlBlock);
   for (int i = 0; i < ccb_->num_buffers; i++) {
     if (bcb_->refs[i].load(std::memory_order_relaxed) <= 0) {
       continue;

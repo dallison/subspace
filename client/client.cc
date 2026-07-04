@@ -430,9 +430,9 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
   };
 
   std::shared_ptr<PublisherImpl> channel = std::make_shared<PublisherImpl>(
-      channel_name, opts.num_slots, pub_resp.channel_id(),
-      pub_resp.publisher_id(), pub_resp.vchan_id(), session_id_,
-      pub_resp.type(), opts,
+      channel_name, opts.num_slots, pub_resp.subscriber_queue_size(),
+      pub_resp.channel_id(), pub_resp.publisher_id(), pub_resp.vchan_id(),
+      session_id_, pub_resp.type(), opts,
       [this](Channel *c) {
         return CheckReload(static_cast<ClientChannel *>(c));
       },
@@ -565,9 +565,9 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
   subscriber_options.use_split_buffers = sub_resp.use_split_buffers();
 
   std::shared_ptr<SubscriberImpl> channel = std::make_shared<SubscriberImpl>(
-      channel_name, sub_resp.num_slots(), sub_resp.channel_id(),
-      sub_resp.subscriber_id(), sub_resp.vchan_id(), session_id_,
-      sub_resp.type(), subscriber_options,
+      channel_name, sub_resp.num_slots(), sub_resp.subscriber_queue_size(),
+      sub_resp.channel_id(), sub_resp.subscriber_id(), sub_resp.vchan_id(),
+      session_id_, sub_resp.type(), subscriber_options,
       [this](Channel *c) {
         return CheckReload(static_cast<ClientChannel *>(c));
       },
@@ -579,6 +579,7 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
       });
 
   channel->SetNumSlots(sub_resp.num_slots());
+  channel->SetSubscriberQueueSize(sub_resp.subscriber_queue_size());
   {
     int32_t cs = sub_resp.checksum_size() > 0 ? sub_resp.checksum_size() : 4;
     int32_t ms = sub_resp.metadata_size() > 0 ? sub_resp.metadata_size() : 0;
@@ -1408,6 +1409,7 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
   }
   subscriber->options_.use_split_buffers = sub_resp.use_split_buffers();
   subscriber->SetNumSlots(sub_resp.num_slots());
+  subscriber->SetSubscriberQueueSize(sub_resp.subscriber_queue_size());
   {
     int32_t cs = sub_resp.checksum_size() > 0 ? sub_resp.checksum_size() : 4;
     int32_t ms = sub_resp.metadata_size() > 0 ? sub_resp.metadata_size() : 0;
@@ -1701,6 +1703,7 @@ ClientImpl::GetChannelInfo(const std::string &channel) {
   result.type = info.type();
   result.slot_size = info.slot_size();
   result.num_slots = info.num_slots();
+  result.subscriber_queue_size = info.subscriber_queue_size();
   return result;
 }
 
@@ -1737,6 +1740,7 @@ absl::StatusOr<const std::vector<ChannelInfo>> ClientImpl::GetChannelInfo() {
     result.type = info.type();
     result.slot_size = info.slot_size();
     result.num_slots = info.num_slots();
+    result.subscriber_queue_size = info.subscriber_queue_size();
     r.push_back(result);
   }
   return r;
@@ -1861,6 +1865,7 @@ void ClientImpl::FillCreatePublisherRequest(CreatePublisherRequest *cmd,
   cmd->set_max_publishers(opts.MaxPublishers());
   cmd->set_use_split_buffers(opts.UseSplitBuffers());
   cmd->set_split_buffers_over_bridge(opts.SplitBuffersOverBridge());
+  cmd->set_subscriber_queue_size(opts.SubscriberQueueSize());
 }
 
 void ClientImpl::ApplyPublisherResponseFds(
