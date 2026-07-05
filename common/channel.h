@@ -275,8 +275,8 @@ public:
 
   // Push a published slot. Multiple publishers may call this concurrently.
   // If the queue is full, evict the oldest queued slot and enqueue the newest
-  // one, matching Iceoryx's SOFI-style "keep latest" behavior for unreliable
-  // subscribers. Returns false only when an entry could not be reserved.
+  // one so unreliable subscribers preserve the latest data. Returns false only
+  // when an entry could not be reserved.
   bool Push(int32_t slot_id, uint64_t ordinal) {
     if (capacity_ == 0) {
       overflow_.store(true, std::memory_order_relaxed);

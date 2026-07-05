@@ -1679,6 +1679,171 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyPayloadHistogram) {
   }
 }
 
+TEST_F(LatencyTest, FlatOutSubscriberQueueLatency) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  const int kNumMessages = std::atoi(
+      LatencyEnvOrDefault("SUBSPACE_QUEUE_SWEEP_MESSAGES", "50000"));
+  const int kNumSlots = std::atoi(
+      LatencyEnvOrDefault("SUBSPACE_QUEUE_SWEEP_SLOTS", "1024"));
+  const std::vector<int> queue_sizes = {0,  1,   2,   4,   8,   16,
+                                        32, 64, 128, 256, 512, 1024};
+
+  struct Stats {
+    int subscriber_queue_size = 0;
+    int received = 0;
+    int dropped = 0;
+    uint64_t min = 0;
+    uint64_t max = 0;
+    uint64_t p50 = 0;
+    uint64_t p99 = 0;
+    uint64_t avg = 0;
+    uint64_t publish_avg = 0;
+    uint64_t elapsed = 0;
+  };
+
+  auto publish_timestamp = [](Publisher &pub) {
+    for (;;) {
+      absl::StatusOr<void *> buffer = pub.GetMessageBuffer();
+      ASSERT_OK(buffer);
+      if (*buffer == nullptr) {
+        ASSERT_OK(pub.Wait());
+        continue;
+      }
+      const uint64_t send_time = toolbelt::Now();
+      memcpy(*buffer, &send_time, sizeof(send_time));
+      absl::StatusOr<const Message> pub_status =
+          pub.PublishMessage(sizeof(send_time));
+      ASSERT_OK(pub_status);
+      return;
+    }
+  };
+
+  std::vector<Stats> stats;
+  stats.reserve(queue_sizes.size());
+  for (int subscriber_queue_size : queue_sizes) {
+    const std::string channel_name =
+        absl::StrFormat("flatout_queue_latency_%d", subscriber_queue_size);
+    absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
+        channel_name,
+        subspace::PublisherOptions()
+            .SetSlotSize(256)
+            .SetNumSlots(kNumSlots)
+            .SetSubscriberQueueSize(subscriber_queue_size)
+            .SetReliable(false));
+    ASSERT_OK(pub);
+
+    absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
+        channel_name, [] {
+          subspace::SubscriberOptions opts;
+          opts.SetReliable(false);
+          opts.SetLogDroppedMessages(false);
+          opts.SetDetectDroppedMessages(false);
+          return opts;
+        }());
+    ASSERT_OK(sub);
+
+    Stats result;
+    result.subscriber_queue_size = subscriber_queue_size;
+    std::atomic<int> received{0};
+    std::atomic<int> dropped{0};
+    std::vector<uint64_t> latencies;
+    latencies.reserve(kNumMessages);
+
+    const uint64_t start_time = toolbelt::Now();
+    std::thread sub_thread([&sub, &received, &dropped, &latencies,
+                            kNumMessages]() {
+      uint64_t last_ordinal = 0;
+      ASSERT_OK(sub->Wait());
+      while (last_ordinal < static_cast<uint64_t>(kNumMessages)) {
+        absl::StatusOr<Message> msg = sub->ReadMessage();
+        ASSERT_OK(msg);
+        if (msg->length == 0) {
+          continue;
+        }
+
+        const uint64_t receive_time = toolbelt::Now();
+        const uint64_t ordinal = msg->ordinal;
+        if (ordinal > last_ordinal + 1) {
+          const uint64_t last_original_ordinal =
+              std::min<uint64_t>(ordinal - 1, kNumMessages);
+          dropped += last_original_ordinal - last_ordinal;
+        }
+        last_ordinal = ordinal;
+
+        if (ordinal <= static_cast<uint64_t>(kNumMessages)) {
+          const uint64_t send_time =
+              *reinterpret_cast<const uint64_t *>(msg->buffer);
+          latencies.push_back(receive_time - send_time);
+          received++;
+        }
+      }
+    });
+
+    const uint64_t publish_start = toolbelt::Now();
+    for (int i = 0; i < kNumMessages; i++) {
+      publish_timestamp(*pub);
+    }
+    const uint64_t publish_end = toolbelt::Now();
+
+    // If the subscriber missed the final run of original messages, publish a
+    // few extra wakeups so it can observe the ordinal gap and terminate.
+    for (int i = 0; i < 1000; i++) {
+      publish_timestamp(*pub);
+      if (received.load() + dropped.load() >= kNumMessages) {
+        break;
+      }
+    }
+    sub_thread.join();
+    result.elapsed = toolbelt::Now() - start_time;
+    result.publish_avg = (publish_end - publish_start) / kNumMessages;
+    result.received = received.load();
+    result.dropped = dropped.load();
+
+    if (!latencies.empty()) {
+      std::sort(latencies.begin(), latencies.end());
+      result.min = latencies.front();
+      result.max = latencies.back();
+      result.p50 = latencies[latencies.size() / 2];
+      result.p99 = latencies[latencies.size() * 99 / 100];
+      uint64_t sum = 0;
+      for (uint64_t latency : latencies) {
+        sum += latency;
+      }
+      result.avg = sum / latencies.size();
+    }
+    stats.push_back(result);
+
+    EmitLatencyMetric("FlatOutSubscriberQueueLatency", "receive_latency",
+                      "subscriber_queue_size", subscriber_queue_size, "min",
+                      result.min);
+    EmitLatencyMetric("FlatOutSubscriberQueueLatency", "receive_latency",
+                      "subscriber_queue_size", subscriber_queue_size, "median",
+                      result.p50);
+    EmitLatencyMetric("FlatOutSubscriberQueueLatency", "receive_latency",
+                      "subscriber_queue_size", subscriber_queue_size, "p99",
+                      result.p99);
+    EmitLatencyMetric("FlatOutSubscriberQueueLatency", "receive_latency",
+                      "subscriber_queue_size", subscriber_queue_size, "average",
+                      result.avg);
+    EmitLatencyMetric("FlatOutSubscriberQueueLatency", "publisher_latency",
+                      "subscriber_queue_size", subscriber_queue_size, "average",
+                      result.publish_avg);
+  }
+
+  std::cerr << "subscriber_queue_size,received,dropped,min_ns,p50_ns,p99_ns,"
+               "max_ns,avg_ns,publish_avg_ns,elapsed_ns\n";
+  for (const Stats &result : stats) {
+    std::cerr << result.subscriber_queue_size << "," << result.received << ","
+              << result.dropped << "," << result.min << "," << result.p50
+              << "," << result.p99 << "," << result.max << "," << result.avg
+              << "," << result.publish_avg << "," << result.elapsed << "\n";
+  }
+}
+
 TEST_F(LatencyTest, ManyChannelsNonMultiplexed) {
   std::vector<subspace::Client> pub_clients;
   subspace::Client sub_client;
