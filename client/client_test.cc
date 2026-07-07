@@ -878,6 +878,7 @@ TEST_F(ClientTest, PublishAndReadWithSubscriberQueue) {
   ASSERT_OK(msg);
   ASSERT_EQ(7, msg->length);
   ASSERT_EQ(0, memcmp(msg->buffer, "queued1", 7));
+  msg->Reset();
 
   buffer = pub->GetMessageBuffer();
   ASSERT_OK(buffer);
