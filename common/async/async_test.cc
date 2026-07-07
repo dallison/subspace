@@ -12,7 +12,9 @@
 #include <unistd.h>
 
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+#include <boost/asio/detached.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/spawn.hpp>
 #endif
 
 namespace subspace::async {
@@ -78,6 +80,40 @@ TEST(AsyncTest, WaitReadableTimeout) {
   ::close(fds[1]);
 }
 
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+TEST(AsyncTest, WaitReadableWorksWithoutCancellationSlot) {
+  int fds[2];
+  ASSERT_EQ(0, ::pipe(fds));
+
+  boost::asio::io_context ioc;
+  bool got_data = false;
+
+  boost::asio::spawn(
+      ioc,
+      [&](Context ctx) {
+        ASSERT_TRUE(
+            WaitReadable(ctx, fds[0], std::chrono::milliseconds(100)).ok());
+        char buf[8] = {};
+        ssize_t n = ::read(fds[0], buf, sizeof(buf));
+        got_data = (n == 1 && buf[0] == 'x');
+      },
+      boost::asio::detached);
+
+  boost::asio::spawn(
+      ioc,
+      [&](Context ctx) {
+        Sleep(ctx, std::chrono::milliseconds(10));
+        ASSERT_EQ(1, ::write(fds[1], "x", 1));
+      },
+      boost::asio::detached);
+
+  ioc.run();
+  EXPECT_TRUE(got_data);
+  ::close(fds[0]);
+  ::close(fds[1]);
+}
+#endif
+
 TEST(AsyncTest, WaitEitherReturnsReadyFd) {
   int a[2], b[2];
   ASSERT_EQ(0, ::pipe(a));
@@ -100,6 +136,28 @@ TEST(AsyncTest, WaitEitherReturnsReadyFd) {
 
   fx.Run();
   EXPECT_EQ(ready, b[0]);
+  ::close(a[0]);
+  ::close(a[1]);
+  ::close(b[0]);
+  ::close(b[1]);
+}
+
+TEST(AsyncTest, WaitEitherTimeout) {
+  int a[2], b[2];
+  ASSERT_EQ(0, ::pipe(a));
+  ASSERT_EQ(0, ::pipe(b));
+
+  RuntimeFixture fx;
+  bool timed_out = false;
+
+  fx.runtime.Spawn([&](Context ctx) {
+    absl::StatusOr<int> r =
+        WaitEither(ctx, a[0], b[0], std::chrono::milliseconds(20));
+    timed_out = absl::IsDeadlineExceeded(r.status());
+  });
+
+  fx.Run();
+  EXPECT_TRUE(timed_out);
   ::close(a[0]);
   ::close(a[1]);
   ::close(b[0]);
