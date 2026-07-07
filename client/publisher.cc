@@ -41,29 +41,39 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
         continue;
       }
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
+      bool opened_existing_buffer = buffer_index < size_t(num_buffers);
       absl::StatusOr<toolbelt::FileDescriptor> shm_fd =
-          buffer_index < size_t(num_buffers)
+          opened_existing_buffer
               ? OpenBuffer(buffer_index)
               : CreateBuffer(buffer_index, final_buffer_size);
 #else
+      bool opened_existing_buffer = false;
       auto shm_fd = CreateBuffer(buffer_index, final_buffer_size);
 #endif
       if (!shm_fd.ok()) {
         return shm_fd.status();
       }
       if (!shm_fd->Valid()) {
-        // This means that the file in /dev/shm already exists so we need to
-        // attach to it.
+        // The named shared memory already exists so we attach to it instead of
+        // creating it.
+        opened_existing_buffer = true;
         shm_fd = OpenBuffer(buffer_index);
         if (!shm_fd.ok()) {
           return shm_fd.status();
         }
+      }
+      if (opened_existing_buffer) {
+        // Attaching to a buffer another publisher already created.  Its real
+        // size may be larger than our requested size (for example the channel
+        // was resized before we joined), so use the buffer's actual size and
+        // record it under its own index rather than clobbering a neighbouring
+        // slot with our smaller requested size.
         auto size = GetBufferSize(*shm_fd, buffer_index);
         if (!size.ok()) {
           return size.status();
         }
-        absl::StatusOr<char *> addr;
         current_slot_size = BufferSizeToSlotSize(*size);
+        absl::StatusOr<char *> addr;
         if (current_slot_size > 0) {
           addr = MapBuffer(*shm_fd, *size, BufferMapMode::kReadWrite);
           if (!addr.ok()) {
@@ -76,12 +86,11 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
             std::make_unique<BufferSet>(*size, current_slot_size, *addr);
         buffer_set->fd = std::move(*shm_fd);
         buffers_.push_back(std::move(buffer_set));
-        bcb_->sizes[buffers_.size()].store(final_buffer_size,
-                                           std::memory_order_relaxed);
+        bcb_->sizes[buffer_index].store(*size, std::memory_order_relaxed);
       } else {
-        // We successfully created the /dev/shm file.
-        bcb_->sizes[buffers_.size()].store(final_buffer_size,
-                                           std::memory_order_relaxed);
+        // We successfully created the shared memory.
+        bcb_->sizes[buffer_index].store(final_buffer_size,
+                                        std::memory_order_relaxed);
         auto addr =
             MapBuffer(*shm_fd, final_buffer_size, BufferMapMode::kReadWrite);
         if (!addr.ok()) {

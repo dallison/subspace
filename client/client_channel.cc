@@ -78,8 +78,17 @@ ClientBufferHandleMetadata ClientBufferFromSplitMetadata(
 absl::StatusOr<std::string>
 ClientChannel::CreatePosixSharedMemoryFile(const std::string &filename,
                                            off_t size) {
-  // Create a file in /tmp and make it the same size as the shared memory.  This
-  // will not actually allocate any disk space.
+  // Create a file in /tmp whose size records the real size of the shared memory
+  // segment (fstat on the shm object returns a page-aligned size, so the shadow
+  // file is the authoritative record; see GetBufferSize).  This will not
+  // actually allocate any disk space.
+  //
+  // Only set the size if it has not been set yet.  Several publishers may open
+  // the same buffer's shadow file: the one that creates the buffer sizes it,
+  // and a publisher attaching later must not resize it.  In particular a
+  // publisher joining with a smaller requested slot size must not shrink a
+  // buffer that an earlier publisher already created larger (e.g. after a
+  // resize), which would corrupt the recorded buffer size.
   auto &shim = GetSyscallShim();
   int fd = shim.open_fn(filename.c_str(), O_RDWR | O_CREAT, 0666);
   if (fd < 0) {
@@ -87,11 +96,20 @@ ClientChannel::CreatePosixSharedMemoryFile(const std::string &filename,
         absl::StrFormat("Failed to open shadow file %s: %s", filename.c_str(),
                         strerror(errno)));
   }
-  if (shim.ftruncate_fn(fd, size) < 0) {
+  struct stat sb;
+  if (shim.fstat_fn(fd, &sb) < 0) {
     shim.close_fn(fd);
     return absl::InternalError(
-        absl::StrFormat("Failed to truncate shadow file %s to size %zd: %s",
-                        filename.c_str(), size, strerror(errno)));
+        absl::StrFormat("Failed to stat shadow file %s: %s", filename.c_str(),
+                        strerror(errno)));
+  }
+  if (sb.st_size == 0 && size > 0) {
+    if (shim.ftruncate_fn(fd, size) < 0) {
+      shim.close_fn(fd);
+      return absl::InternalError(
+          absl::StrFormat("Failed to truncate shadow file %s to size %zd: %s",
+                          filename.c_str(), size, strerror(errno)));
+    }
   }
   shim.close_fn(fd);
 
