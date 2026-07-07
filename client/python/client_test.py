@@ -114,6 +114,9 @@ class TestSubspaceClient(unittest.TestCase):
         opts.set_num_slots(8)
         opts.set_type("my_type")
         opts.set_subscriber_queue_size(11)
+        self.assertTrue(opts.apply_profile())
+        opts.set_apply_profile(False)
+        self.assertFalse(opts.apply_profile())
         pub = client.create_publisher(channel_name="ch_pub_acc",
                                       options=opts)
         self.assertEqual(pub.type(), "my_type")
@@ -138,6 +141,10 @@ class TestSubspaceClient(unittest.TestCase):
                                       options=opts)
         sub = client.create_subscriber(channel_name="ch_sub_acc",
                                        type="sub_type")
+        sub_opts = subspace.SubscriberOptions()
+        self.assertTrue(sub_opts.apply_profile())
+        sub_opts.set_apply_profile(False)
+        self.assertFalse(sub_opts.apply_profile())
 
         pub.publish_message(b"probe")
         sub.wait()

@@ -277,6 +277,19 @@ SubspaceSubscriberOptions CSubscriberOptionsDefault() {
   return options;
 }
 
+TEST_F(ClientTest, ProfileOptionDefaults) {
+  SubspacePublisherOptions pub_opts =
+      subspace_publisher_options_default(128, 4);
+  EXPECT_TRUE(pub_opts.apply_profile);
+  pub_opts.apply_profile = false;
+  EXPECT_FALSE(pub_opts.apply_profile);
+
+  SubspaceSubscriberOptions sub_opts = subspace_subscriber_options_default();
+  EXPECT_TRUE(sub_opts.apply_profile);
+  sub_opts.apply_profile = false;
+  EXPECT_FALSE(sub_opts.apply_profile);
+}
+
 TEST_F(ClientTest, CreatePublisherThenSubscriber) {
   SubspaceClient client = subspace_create_client_with_socket(Socket().c_str());
   ASSERT_NE(nullptr, client.client);

@@ -29,6 +29,7 @@ cc_library(
         "@abseil-cpp//absl/flags:flag",
         "@abseil-cpp//absl/flags:parse",
         "@coroutines//co:co",
+        "@protobuf//:protobuf",
     ],
 )
 

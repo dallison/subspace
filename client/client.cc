@@ -429,8 +429,12 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
     (void)SendRequestReceiveResponse(remove_req, remove_resp, remove_fds);
   };
 
+  const int resolved_num_slots =
+      pub_resp.num_slots() > 0 ? pub_resp.num_slots() : opts.num_slots;
+  const int resolved_slot_size =
+      pub_resp.slot_size() > 0 ? pub_resp.slot_size() : Aligned(opts.slot_size);
   std::shared_ptr<PublisherImpl> channel = std::make_shared<PublisherImpl>(
-      channel_name, opts.num_slots, pub_resp.subscriber_queue_size(),
+      channel_name, resolved_num_slots, pub_resp.subscriber_queue_size(),
       pub_resp.channel_id(), pub_resp.publisher_id(), pub_resp.vchan_id(),
       session_id_, pub_resp.type(), opts,
       [this](Channel *c) {
@@ -481,7 +485,7 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
   }
 
   if (absl::Status status =
-          channel->CreateOrAttachBuffers(Aligned(opts.slot_size));
+          channel->CreateOrAttachBuffers(Aligned(resolved_slot_size));
       !status.ok()) {
     remove_server_publisher();
     return status;
@@ -562,6 +566,9 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
   }
 
   SubscriberOptions subscriber_options = opts;
+  if (sub_resp.max_active_messages() > 0) {
+    subscriber_options.max_active_messages = sub_resp.max_active_messages();
+  }
   subscriber_options.use_split_buffers = sub_resp.use_split_buffers();
 
   std::shared_ptr<SubscriberImpl> channel = std::make_shared<SubscriberImpl>(
@@ -1385,7 +1392,14 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
   auto *cmd = req.mutable_create_subscriber();
   cmd->set_channel_name(subscriber->Name());
   cmd->set_subscriber_id(subscriber->GetSubscriberId());
-  cmd->set_mux(subscriber->options_.mux);
+  cmd->set_is_reliable(subscriber->options_.IsReliable());
+  cmd->set_is_bridge(subscriber->options_.IsBridge());
+  cmd->set_for_tunnel(subscriber->options_.ForTunnel());
+  cmd->set_type(subscriber->options_.Type());
+  cmd->set_max_active_messages(subscriber->options_.MaxActiveMessages());
+  cmd->set_mux(subscriber->options_.Mux());
+  cmd->set_vchan_id(subscriber->options_.VchanId());
+  cmd->set_apply_profile(subscriber->options_.ApplyProfile());
 
   // Send request to server and wait for response.
   Response resp;
@@ -1406,6 +1420,9 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
 
   if (!sub_resp.type().empty()) {
     subscriber->SetType(sub_resp.type());
+  }
+  if (sub_resp.max_active_messages() > 0) {
+    subscriber->options_.max_active_messages = sub_resp.max_active_messages();
   }
   subscriber->options_.use_split_buffers = sub_resp.use_split_buffers();
   subscriber->SetNumSlots(sub_resp.num_slots());
@@ -1866,6 +1883,7 @@ void ClientImpl::FillCreatePublisherRequest(CreatePublisherRequest *cmd,
   cmd->set_use_split_buffers(opts.UseSplitBuffers());
   cmd->set_split_buffers_over_bridge(opts.SplitBuffersOverBridge());
   cmd->set_subscriber_queue_size(opts.SubscriberQueueSize());
+  cmd->set_apply_profile(opts.ApplyProfile());
 }
 
 void ClientImpl::ApplyPublisherResponseFds(
@@ -1905,6 +1923,7 @@ void ClientImpl::FillCreateSubscriberRequest(CreateSubscriberRequest *cmd,
   cmd->set_max_active_messages(opts.MaxActiveMessages());
   cmd->set_mux(opts.Mux());
   cmd->set_vchan_id(opts.VchanId());
+  cmd->set_apply_profile(opts.ApplyProfile());
 }
 
 void ClientImpl::ApplySubscriberResponseFds(

@@ -50,6 +50,9 @@ ABSL_FLAG(bool, bridge_ports_fallback_ephemeral, false,
           "If true, use an ephemeral TCP bridge port when --bridge_ports is "
           "configured but unavailable.");
 ABSL_FLAG(std::string, log_level, "info", "Log level");
+ABSL_FLAG(std::string, profile_file, "",
+          "Optional channel profile textproto file. Empty disables profile "
+          "loading, writing, and sizing overrides.");
 ABSL_FLAG(std::string, interface, "", "Discovery network interface");
 ABSL_FLAG(bool, local, false, "Use local computer only");
 ABSL_FLAG(bool, tcp_discovery, false,
@@ -197,6 +200,7 @@ int main(int argc, char **argv) {
   }
 
   server->SetLogLevel(absl::GetFlag(FLAGS_log_level));
+  server->SetProfileFile(absl::GetFlag(FLAGS_profile_file));
   int bridge_first_port = 0;
   int bridge_last_port = 0;
   if (!ParseBridgePorts(absl::GetFlag(FLAGS_bridge_ports), &bridge_first_port,

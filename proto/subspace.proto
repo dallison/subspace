@@ -43,6 +43,9 @@ message CreatePublisherRequest {
   bool split_buffers_over_bridge = 18; // Remote bridge publisher uses split buffers.
   // Entries in each subscriber's CCB slot queue. 0 disables the queue.
   int32 subscriber_queue_size = 19;
+  // If true, the server may use a loaded channel profile to override requested
+  // sizing values. If false, requested values are treated as authoritative.
+  bool apply_profile = 20;
 }
 
 message CreatePublisherResponse {
@@ -60,6 +63,8 @@ message CreatePublisherResponse {
   int32 retirement_fd_index = 12; // My retirement fd index (read end)
   repeated int32 retirement_fd_indexes = 13; // Write end of all retirement fds.
   int32 subscriber_queue_size = 14; // Resolved capacity; 0 means disabled.
+  int32 slot_size = 15; // Resolved slot size.
+  int32 num_slots = 16; // Resolved number of slots.
 }
 
 // This is used both to create a new subscriber and to reload
@@ -75,6 +80,9 @@ message CreateSubscriberRequest {
   bool for_tunnel = 7;
   string mux = 8;
   int32 vchan_id = 9;
+  // If true, the server may use a loaded channel profile to override requested
+  // sizing values. If false, requested values are treated as authoritative.
+  bool apply_profile = 10;
 }
 
 message CreateSubscriberResponse {
@@ -96,6 +104,7 @@ message CreateSubscriberResponse {
   int32 metadata_size = 16; // Bytes reserved for user metadata (from publisher).
   bool use_split_buffers = 17;
   int32 subscriber_queue_size = 18; // Resolved capacity; 0 means disabled.
+  int32 max_active_messages = 19; // Resolved max active messages.
 }
 
 message GetTriggersRequest { string channel_name = 1; }
@@ -264,6 +273,41 @@ message ChannelStatsProto {
   uint32 total_drops = 9;
   int32 num_bridge_pubs = 10; // Number of publishers that are bridges.
   int32 num_bridge_subs = 11; // Number of subscribers that are bridges.
+}
+
+message ChannelProfileObservation {
+  int32 slot_size = 1;
+  int32 num_slots = 2;
+  int32 subscriber_queue_size = 3;
+  uint32 max_message_size = 4;
+  uint64 total_messages = 5;
+  uint64 total_drops = 6;
+  uint32 num_resizes = 7;
+  int32 num_pubs = 8;
+  int32 num_subs = 9;
+  int32 num_reliable_pubs = 10;
+  int32 num_reliable_subs = 11;
+  uint64 sample_count = 12;
+  int32 max_active_messages = 13;
+}
+
+message ChannelProfileRecommendation {
+  int32 slot_size = 1;
+  int32 num_slots = 2;
+  int32 subscriber_queue_size = 3;
+  int32 max_active_messages = 4;
+  string reason = 5;
+}
+
+message ChannelProfile {
+  string channel_name = 1;
+  ChannelProfileObservation observed = 2;
+  ChannelProfileRecommendation recommended = 3;
+}
+
+message ChannelProfileFile {
+  int32 version = 1;
+  repeated ChannelProfile channels = 2;
 }
 
 // This is published to the /subspace/Statistics channel.

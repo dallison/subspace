@@ -76,8 +76,7 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
             std::make_unique<BufferSet>(*size, current_slot_size, *addr);
         buffer_set->fd = std::move(*shm_fd);
         buffers_.push_back(std::move(buffer_set));
-        bcb_->sizes[buffers_.size()].store(final_buffer_size,
-                                           std::memory_order_relaxed);
+        bcb_->sizes[buffer_index].store(*size, std::memory_order_relaxed);
       } else {
         // We successfully created the /dev/shm file.
         bcb_->sizes[buffers_.size()].store(final_buffer_size,

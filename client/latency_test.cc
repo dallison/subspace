@@ -824,6 +824,9 @@ TEST_F(LatencyTest, PublisherLatencyHistogram) {
   ASSERT_OK(pub_client.Init(Socket()));
   ASSERT_OK(sub_client.Init(Socket()));
 
+  const int subscriber_queue_size = std::atoi(
+      LatencyEnvOrDefault("SUBSPACE_SUBSCRIBER_QUEUE_SIZE", "0"));
+  std::cerr << "subscriber_queue_size: " << subscriber_queue_size << "\n";
   std::cerr << "num_slots,min,median,p99,max,average\n";
   auto show_latencies = [](std::vector<uint64_t> &latencies,
                            const std::string &test, const std::string &series,
@@ -860,7 +863,10 @@ TEST_F(LatencyTest, PublisherLatencyHistogram) {
        num_slots < LatencyValueForSplitBuffers(100000, 20000, 3000);
        num_slots = (num_slots)*15 / 10) {
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-        "publat", 256, num_slots, subspace::PublisherOptions().SetReliable(false));
+        "publat", 256, num_slots,
+        subspace::PublisherOptions()
+            .SetReliable(false)
+            .SetSubscriberQueueSize(subscriber_queue_size));
     ASSERT_OK(pub);
 
     std::cerr << num_slots << ",";

@@ -13,7 +13,11 @@
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
 #include "toolbelt/sockets.h"
+#include "google/protobuf/text_format.h"
+#include <algorithm>
 #include <cerrno>
+#include <cstdio>
+#include <fstream>
 #include <fcntl.h>
 #include <filesystem>
 #include <ifaddrs.h>
@@ -27,6 +31,118 @@
 #include <vector>
 
 namespace subspace {
+namespace {
+
+constexpr int kChannelProfileVersion = 1;
+
+int Align64(int value) {
+  if (value <= 0) {
+    return 0;
+  }
+  return (value + 63) & ~63;
+}
+
+ChannelProfile *FindMutableProfile(ChannelProfileFile *profile,
+                                   const std::string &channel_name) {
+  for (auto &channel : *profile->mutable_channels()) {
+    if (channel.channel_name() == channel_name) {
+      return &channel;
+    }
+  }
+  ChannelProfile *channel = profile->add_channels();
+  channel->set_channel_name(channel_name);
+  return channel;
+}
+
+const ChannelProfile *FindProfile(const ChannelProfileFile &profile,
+                                  const std::string &channel_name) {
+  for (const auto &channel : profile.channels()) {
+    if (channel.channel_name() == channel_name) {
+      return &channel;
+    }
+  }
+  return nullptr;
+}
+
+std::string BuildRecommendationReason(const ChannelProfileObservation &obs) {
+  std::vector<std::string> reasons;
+  if (obs.total_drops() > 0) {
+    reasons.push_back("drops");
+  }
+  if (obs.num_resizes() > 0) {
+    reasons.push_back("resizes");
+  }
+  if (obs.max_message_size() > static_cast<uint32_t>(obs.slot_size())) {
+    reasons.push_back("message-size");
+  }
+  if (reasons.empty()) {
+    return "observed";
+  }
+  std::string reason = reasons.front();
+  for (size_t i = 1; i < reasons.size(); ++i) {
+    reason += ",";
+    reason += reasons[i];
+  }
+  return reason;
+}
+
+void ComputeRecommendation(const ChannelProfileObservation &obs,
+                           ChannelProfileRecommendation *rec) {
+  const int current_slot_size = std::max(0, obs.slot_size());
+  int recommended_slot_size = current_slot_size;
+  if (obs.max_message_size() > 0) {
+    const int with_headroom =
+        Align64(static_cast<int>(obs.max_message_size()) +
+                std::max(64, static_cast<int>(obs.max_message_size() / 8)));
+    recommended_slot_size = std::max(recommended_slot_size, with_headroom);
+  }
+  if (rec->slot_size() > 0) {
+    recommended_slot_size = std::max(recommended_slot_size, rec->slot_size());
+  }
+
+  const int current_max_active = std::max(1, obs.max_active_messages());
+  int recommended_num_slots = std::max(0, obs.num_slots());
+  const int capacity_floor =
+      std::max(recommended_num_slots,
+               obs.num_pubs() + obs.num_subs() + current_max_active + 8);
+  recommended_num_slots = std::max(recommended_num_slots, capacity_floor);
+  if (obs.total_drops() > 0) {
+    recommended_num_slots =
+        std::max(recommended_num_slots, std::max(1, obs.num_slots()) * 3 / 2 + 8);
+  }
+  if (rec->num_slots() > 0) {
+    recommended_num_slots = std::max(recommended_num_slots, rec->num_slots());
+  }
+
+  int recommended_queue_size = std::max(0, obs.subscriber_queue_size());
+  if (obs.total_drops() > 0 && obs.num_reliable_subs() == 0) {
+    if (recommended_queue_size == 0) {
+      recommended_queue_size = 4;
+    } else {
+      recommended_queue_size = std::min(std::max(recommended_queue_size * 2, 1),
+                                        std::max(recommended_num_slots, 1));
+    }
+    recommended_queue_size = std::min(recommended_queue_size, 1024);
+  }
+  if (rec->subscriber_queue_size() > 0) {
+    recommended_queue_size =
+        std::max(recommended_queue_size, rec->subscriber_queue_size());
+  }
+
+  int recommended_max_active = current_max_active;
+  if (rec->max_active_messages() > 0) {
+    recommended_max_active =
+        std::max(recommended_max_active, rec->max_active_messages());
+  }
+
+  rec->set_slot_size(recommended_slot_size);
+  rec->set_num_slots(recommended_num_slots);
+  rec->set_subscriber_queue_size(recommended_queue_size);
+  rec->set_max_active_messages(recommended_max_active);
+  rec->set_reason(BuildRecommendationReason(obs));
+}
+
+} // namespace
 
 // In multithreaded tests we can't dlclose the plugins because the dynamic
 // linker doesn't play well with threads.
@@ -473,6 +589,159 @@ Server::~Server() {
   }
 }
 
+void Server::SetProfileFile(std::string path) {
+  profile_file_ = std::move(path);
+}
+
+absl::Status Server::LoadProfileFile() {
+  profile_.Clear();
+  profile_.set_version(kChannelProfileVersion);
+  profile_loaded_ = false;
+
+  if (profile_file_.empty()) {
+    return absl::OkStatus();
+  }
+  if (!std::filesystem::exists(profile_file_)) {
+    profile_loaded_ = true;
+    return absl::OkStatus();
+  }
+
+  std::ifstream input(profile_file_);
+  if (!input.is_open()) {
+    return absl::InternalError(
+        absl::StrFormat("Failed to open profile file %s", profile_file_));
+  }
+  std::string text((std::istreambuf_iterator<char>(input)),
+                   std::istreambuf_iterator<char>());
+  if (text.empty()) {
+    profile_loaded_ = true;
+    return absl::OkStatus();
+  }
+  ChannelProfileFile loaded;
+  if (!google::protobuf::TextFormat::ParseFromString(text, &loaded)) {
+    return absl::InvalidArgumentError(
+        absl::StrFormat("Failed to parse profile file %s", profile_file_));
+  }
+  if (loaded.version() != kChannelProfileVersion) {
+    logger_.Log(toolbelt::LogLevel::kWarning,
+                "Ignoring channel profile %s with unsupported version %d",
+                profile_file_.c_str(), loaded.version());
+    profile_.Clear();
+    profile_.set_version(kChannelProfileVersion);
+    return absl::OkStatus();
+  }
+
+  profile_ = std::move(loaded);
+  profile_loaded_ = true;
+  return absl::OkStatus();
+}
+
+absl::Status Server::SaveProfileFile() {
+  if (profile_file_.empty()) {
+    return absl::OkStatus();
+  }
+
+  std::string text;
+  profile_.set_version(kChannelProfileVersion);
+  if (!google::protobuf::TextFormat::PrintToString(profile_, &text)) {
+    return absl::InternalError("Failed to serialize channel profile");
+  }
+
+  const std::string tmp_file = profile_file_ + ".tmp";
+  {
+    std::ofstream output(tmp_file, std::ios::out | std::ios::trunc);
+    if (!output.is_open()) {
+      return absl::InternalError(
+          absl::StrFormat("Failed to open temporary profile file %s",
+                          tmp_file.c_str()));
+    }
+    output << text;
+    output.flush();
+    if (!output.good()) {
+      return absl::InternalError(
+          absl::StrFormat("Failed to write profile file %s", tmp_file.c_str()));
+    }
+  }
+  if (std::rename(tmp_file.c_str(), profile_file_.c_str()) != 0) {
+    return absl::InternalError(
+        absl::StrFormat("Failed to rename %s to %s: %s", tmp_file.c_str(),
+                        profile_file_.c_str(), strerror(errno)));
+  }
+  return absl::OkStatus();
+}
+
+void Server::SampleChannelProfiles() {
+  profile_.set_version(kChannelProfileVersion);
+  for (const auto &[name, channel] : channels_) {
+    if (channel == nullptr || channel->IsVirtual()) {
+      continue;
+    }
+
+    auto *profile = FindMutableProfile(&profile_, name);
+    auto *obs = profile->mutable_observed();
+    obs->set_slot_size(channel->SlotSize());
+    obs->set_num_slots(channel->NumSlots());
+    obs->set_subscriber_queue_size(channel->SubscriberQueueSize());
+
+    uint64_t total_bytes = 0;
+    uint64_t total_messages = 0;
+    uint32_t max_message_size = 0;
+    uint32_t total_drops = 0;
+    channel->GetStatsCounters(total_bytes, total_messages, max_message_size,
+                              total_drops);
+    obs->set_total_messages(total_messages);
+    obs->set_total_drops(total_drops);
+    obs->set_max_message_size(max_message_size);
+
+    const ChannelCounters &counters = scb_->counters[channel->GetChannelId()];
+    obs->set_num_resizes(counters.num_resizes);
+    obs->set_num_pubs(counters.num_pubs);
+    obs->set_num_subs(counters.num_subs);
+    obs->set_num_reliable_pubs(counters.num_reliable_pubs);
+    obs->set_num_reliable_subs(counters.num_reliable_subs);
+    obs->set_sample_count(obs->sample_count() + 1);
+
+    int max_active_messages = obs->max_active_messages();
+    for (const auto &[id, user] : channel->GetUsers()) {
+      (void)id;
+      if (user->IsSubscriber()) {
+        max_active_messages =
+            std::max(max_active_messages,
+                     static_cast<const SubscriberUser *>(user.get())
+                         ->MaxActiveMessages());
+      }
+    }
+    obs->set_max_active_messages(std::max(max_active_messages, 1));
+
+    ComputeRecommendation(*obs, profile->mutable_recommended());
+  }
+}
+
+void Server::ProfileCoroutine(async::Context ctx) {
+  constexpr int kProfilePeriodSecs = 2;
+  while (!shutting_down_) {
+    async::Sleep(ctx, kProfilePeriodSecs);
+    SampleChannelProfiles();
+    if (absl::Status status = SaveProfileFile(); !status.ok()) {
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to save channel profile: %s",
+                  status.ToString().c_str());
+    }
+  }
+}
+
+const ChannelProfileRecommendation *
+Server::GetProfileRecommendation(const std::string &channel_name) const {
+  if (profile_file_.empty() || !profile_loaded_) {
+    return nullptr;
+  }
+  const ChannelProfile *profile = FindProfile(profile_, channel_name);
+  if (profile == nullptr || !profile->has_recommended()) {
+    return nullptr;
+  }
+  return &profile->recommended();
+}
+
 void Server::Stop(bool force) {
   if (shutting_down_) {
     return;
@@ -843,6 +1112,17 @@ absl::Status Server::Run(int num_asio_threads) {
     scb_ = *scb;
   }
 
+  if (!profile_file_.empty()) {
+    if (absl::Status profile_status = LoadProfileFile(); !profile_status.ok()) {
+      logger_.Log(toolbelt::LogLevel::kWarning,
+                  "Ignoring channel profile %s: %s", profile_file_.c_str(),
+                  profile_status.ToString().c_str());
+      profile_.Clear();
+      profile_.set_version(kChannelProfileVersion);
+      profile_loaded_ = true;
+    }
+  }
+
   // Connect any shadow that wasn't tried during recovery so it can
   // receive the re-replication.
   if (!primary_connected && primary_shadow_replicator_ != nullptr) {
@@ -1020,6 +1300,13 @@ absl::Status Server::Run(int num_asio_threads) {
     runtime_.SpawnOnStrand(
         [this](async::Context ctx) { StatisticsCoroutine(ctx); },
         {.name = "Channel stats",
+         .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+  }
+
+  if (!profile_file_.empty()) {
+    runtime_.SpawnOnStrand(
+        [this](async::Context ctx) { ProfileCoroutine(ctx); },
+        {.name = "Channel profile",
          .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
   }
 

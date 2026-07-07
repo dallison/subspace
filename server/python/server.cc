@@ -19,8 +19,9 @@ namespace py = pybind11;
 // any of those details.
 class ServerWrapper {
 public:
-  ServerWrapper(std::string socket_name, bool local)
-      : socket_name_(std::move(socket_name)), local_(local) {}
+  ServerWrapper(std::string socket_name, bool local, std::string profile_file)
+      : socket_name_(std::move(socket_name)), local_(local),
+        profile_file_(std::move(profile_file)) {}
 
   ~ServerWrapper() {
     if (running_) {
@@ -44,6 +45,7 @@ public:
                                        /*disc_port=*/0,
                                        /*peer_port=*/0, local_,
                                        /*notify_fd=*/pipe_fds[1]);
+    server_->SetProfileFile(profile_file_);
 
     server_thread_ = std::thread([this]() {
       absl::Status s = server_->Run();
@@ -93,6 +95,7 @@ private:
 
   std::string socket_name_;
   bool local_;
+  std::string profile_file_;
   co::CoroutineScheduler scheduler_;
   std::unique_ptr<Server> server_;
   std::thread server_thread_;
@@ -119,13 +122,15 @@ Or as a context manager:
     with subspace_server.Server("/tmp/my_socket", local=True) as server:
         # ... run tests against server.socket_name ...
 )doc")
-      .def(py::init<std::string, bool>(),
+      .def(py::init<std::string, bool, std::string>(),
            R"doc(Create a server bound to the given Unix-domain socket path.
 
 Args:
     socket_name: Path for the Unix-domain socket.
-    local: If True the server will not attempt network discovery.)doc",
-           py::arg("socket_name"), py::arg("local") = true)
+    local: If True the server will not attempt network discovery.
+    profile_file: Optional channel profile textproto path.)doc",
+           py::arg("socket_name"), py::arg("local") = true,
+           py::arg("profile_file") = "")
       .def("start", &ServerWrapper::Start,
            "Start the server on a background thread.  Blocks until the "
            "server is ready to accept connections.")

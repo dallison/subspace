@@ -490,6 +490,7 @@ SubspaceSubscriberOptions subspace_subscriber_options_default(void) {
   options.max_active_messages = 1;
   options.detect_dropped_messages = true;
   options.vchan_id = -1;
+  options.apply_profile = true;
   return options;
 }
 
@@ -518,6 +519,7 @@ SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size,
       false,
       0,
       SubspaceSplitBufferCallbacks{},
+      true,
   };
   return options;
 }
@@ -539,6 +541,7 @@ subspace_create_subscriber(SubspaceClient client, const char *channel_name,
       .SetPassChecksumErrors(options.pass_checksum_errors)
       .SetKeepActiveMessage(options.keep_active_message)
       .SetDetectDroppedMessages(options.detect_dropped_messages)
+      .SetApplyProfile(options.apply_profile)
       .SetSplitBufferCallbacks(ToCppSplitCallbacks(options.split_callbacks));
   subspace_options.SetLogDroppedMessages(options.log_dropped_messages);
   subspace_clear_error();
@@ -584,6 +587,7 @@ SubspacePublisher subspace_create_publisher(SubspaceClient client,
       .SetMaxPublishers(options.max_publishers)
       .SetUseSplitBuffers(options.use_split_buffers)
       .SetSplitBuffersOverBridge(options.split_buffers_over_bridge)
+      .SetApplyProfile(options.apply_profile)
       .SetSplitBufferCallbacks(ToCppSplitCallbacks(options.split_callbacks));
   subspace_clear_error();
   SubspacePublisher publisher;

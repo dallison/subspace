@@ -55,6 +55,7 @@ fn publisher_options_defaults() {
     assert_eq!(opts.slot_size, 0);
     assert_eq!(opts.num_slots, 0);
     assert_eq!(opts.subscriber_queue_size, 0);
+    assert!(opts.apply_profile);
     assert!(!opts.local);
     assert!(!opts.reliable);
     assert!(!opts.bridge);
@@ -74,6 +75,7 @@ fn publisher_options_builder_chain() {
         .set_slot_size(4096)
         .set_num_slots(16)
         .set_subscriber_queue_size(32)
+        .set_apply_profile(false)
         .set_reliable(true)
         .set_local(true)
         .set_fixed_size(true)
@@ -88,6 +90,7 @@ fn publisher_options_builder_chain() {
     assert_eq!(opts.slot_size, 4096);
     assert_eq!(opts.num_slots, 16);
     assert_eq!(opts.subscriber_queue_size, 32);
+    assert!(!opts.apply_profile);
     assert!(opts.reliable);
     assert!(opts.local);
     assert!(opts.fixed_size);
@@ -106,6 +109,7 @@ fn subscriber_options_defaults() {
     assert!(!opts.reliable);
     assert!(!opts.bridge);
     assert_eq!(opts.max_active_messages, 1);
+    assert!(opts.apply_profile);
     assert!(opts.log_dropped_messages);
     assert!(opts.detect_dropped_messages);
     assert!(!opts.pass_activation);
@@ -121,6 +125,7 @@ fn subscriber_options_builder_chain() {
     let opts = SubscriberOptions::new()
         .set_reliable(true)
         .set_max_active_messages(8)
+        .set_apply_profile(false)
         .set_log_dropped_messages(false)
         .set_detect_dropped_messages(false)
         .set_pass_activation(true)
@@ -132,6 +137,7 @@ fn subscriber_options_builder_chain() {
 
     assert!(opts.reliable);
     assert_eq!(opts.max_active_messages, 8);
+    assert!(!opts.apply_profile);
     assert!(!opts.log_dropped_messages);
     assert!(!opts.detect_dropped_messages);
     assert!(opts.pass_activation);
