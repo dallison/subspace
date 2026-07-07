@@ -39,6 +39,7 @@ struct PublisherOptions {
   int32_t SlotSize() const { return slot_size; }
   int32_t NumSlots() const { return num_slots; }
   int32_t SubscriberQueueSize() const { return subscriber_queue_size; }
+  bool ApplyProfile() const { return apply_profile; }
   PublisherOptions &SetSlotSize(int32_t size) {
     slot_size = size;
     return *this;
@@ -58,6 +59,12 @@ struct PublisherOptions {
   // shared memory in every subscriber queue.
   PublisherOptions &SetSubscriberQueueSize(int32_t size) {
     subscriber_queue_size = size;
+    return *this;
+  }
+  // Allow the server to use channel profile data to override sizing values
+  // when a profile file is configured. Set false to force the requested sizes.
+  PublisherOptions &SetApplyProfile(bool v) {
+    apply_profile = v;
     return *this;
   }
 
@@ -234,6 +241,7 @@ struct PublisherOptions {
   int32_t slot_size = 0;
   int32_t num_slots = 0;
   int32_t subscriber_queue_size = 0;
+  bool apply_profile = true;
 
   bool local = false;
   bool reliable = false;
@@ -290,6 +298,13 @@ struct SubscriberOptions {
   const std::string &Type() const { return type; }
   int MaxSharedPtrs() const { return max_active_messages - 1; }
   int MaxActiveMessages() const { return max_active_messages; }
+  bool ApplyProfile() const { return apply_profile; }
+  // Allow the server to use channel profile data to override sizing values
+  // when a profile file is configured. Set false to force the requested values.
+  SubscriberOptions &SetApplyProfile(bool v) {
+    apply_profile = v;
+    return *this;
+  }
   bool LogDroppedMessages() const { return log_dropped_messages; }
   void SetLogDroppedMessages(bool v) { log_dropped_messages = v; }
   bool DetectDroppedMessages() const { return detect_dropped_messages; }
@@ -381,6 +396,7 @@ struct SubscriberOptions {
   bool for_tunnel = false;
   std::string type;
   int max_active_messages = 1;
+  bool apply_profile = true;
   bool log_dropped_messages = true;
   bool detect_dropped_messages = true;
   bool pass_activation = false; // If true, the subscriber will pass activation

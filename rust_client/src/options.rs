@@ -14,6 +14,7 @@ pub struct PublisherOptions {
     pub slot_size: i32,
     pub num_slots: i32,
     pub subscriber_queue_size: i32,
+    pub apply_profile: bool,
     pub local: bool,
     pub reliable: bool,
     pub bridge: bool,
@@ -38,6 +39,7 @@ impl Default for PublisherOptions {
             slot_size: 0,
             num_slots: 0,
             subscriber_queue_size: 0,
+            apply_profile: true,
             local: false,
             reliable: false,
             bridge: false,
@@ -80,6 +82,11 @@ impl PublisherOptions {
     /// at the cost of shared memory in every subscriber queue.
     pub fn set_subscriber_queue_size(mut self, size: i32) -> Self {
         self.subscriber_queue_size = size;
+        self
+    }
+
+    pub fn set_apply_profile(mut self, v: bool) -> Self {
+        self.apply_profile = v;
         self
     }
 
@@ -199,6 +206,7 @@ pub struct SubscriberOptions {
     pub for_tunnel: bool,
     pub channel_type: String,
     pub max_active_messages: i32,
+    pub apply_profile: bool,
     pub log_dropped_messages: bool,
     pub detect_dropped_messages: bool,
     pub pass_activation: bool,
@@ -219,6 +227,7 @@ impl Default for SubscriberOptions {
             for_tunnel: false,
             channel_type: String::new(),
             max_active_messages: 1,
+            apply_profile: true,
             log_dropped_messages: true,
             detect_dropped_messages: true,
             pass_activation: false,
@@ -255,6 +264,11 @@ impl SubscriberOptions {
 
     pub fn set_max_active_messages(mut self, n: i32) -> Self {
         self.max_active_messages = n;
+        self
+    }
+
+    pub fn set_apply_profile(mut self, v: bool) -> Self {
+        self.apply_profile = v;
         self
     }
 

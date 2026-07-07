@@ -878,6 +878,7 @@ impl Client {
                     use_split_buffers: opts.use_split_buffers,
                     split_buffers_over_bridge: opts.split_buffers_over_bridge,
                     subscriber_queue_size: opts.subscriber_queue_size,
+                    apply_profile: opts.apply_profile,
                     max_publishers: 0,
                     publisher_id: -1,
                 },
@@ -899,9 +900,19 @@ impl Client {
             return Err(SubspaceError::ServerError(pub_resp.error));
         }
 
+        let resolved_num_slots = if pub_resp.num_slots > 0 {
+            pub_resp.num_slots
+        } else {
+            opts.num_slots
+        };
+        let resolved_slot_size = if pub_resp.slot_size > 0 {
+            pub_resp.slot_size as u64
+        } else {
+            slot_size as u64
+        };
         let mut pub_impl = PublisherImpl::new(
             channel_name.to_string(),
-            opts.num_slots,
+            resolved_num_slots,
             pub_resp.subscriber_queue_size,
             pub_resp.channel_id,
             pub_resp.publisher_id,
@@ -937,7 +948,7 @@ impl Client {
             prot,
         )?;
 
-        pub_impl.create_or_attach_buffers(slot_size as u64)?;
+        pub_impl.create_or_attach_buffers(resolved_slot_size)?;
         register_pending_client_buffers(&mut client, &mut pub_impl.channel)?;
 
         pub_impl.trigger_fd = fds[pub_resp.pub_trigger_fd_index as usize];
@@ -1010,6 +1021,7 @@ impl Client {
                     max_active_messages: opts.max_active_messages,
                     mux: opts.mux.clone(),
                     vchan_id: opts.vchan_id,
+                    apply_profile: opts.apply_profile,
                 },
             )),
         };
@@ -1029,6 +1041,10 @@ impl Client {
             return Err(SubspaceError::ServerError(sub_resp.error));
         }
 
+        let mut resolved_options = opts.clone();
+        if sub_resp.max_active_messages > 0 {
+            resolved_options.max_active_messages = sub_resp.max_active_messages;
+        }
         let mut sub_impl = SubscriberImpl::new(
             channel_name.to_string(),
             sub_resp.num_slots,
@@ -1038,7 +1054,7 @@ impl Client {
             sub_resp.vchan_id,
             client.session_id,
             String::from_utf8_lossy(&sub_resp.r#type).to_string(),
-            opts.clone(),
+            resolved_options,
         );
         sub_impl.channel.use_split_buffers = sub_resp.use_split_buffers;
         sub_impl.channel.split_buffer_callbacks = opts.split_buffer_callbacks.clone();
@@ -1505,8 +1521,14 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
             proto::CreateSubscriberRequest {
                 channel_name: sub.channel.name.clone(),
                 subscriber_id: sub.subscriber_id,
+                is_reliable: sub.options.reliable,
+                is_bridge: sub.options.bridge,
+                for_tunnel: sub.options.for_tunnel,
+                r#type: sub.options.channel_type.as_bytes().to_vec(),
+                max_active_messages: sub.options.max_active_messages,
                 mux: sub.options.mux.clone(),
-                ..Default::default()
+                vchan_id: sub.options.vchan_id,
+                apply_profile: sub.options.apply_profile,
             },
         )),
     };
@@ -1526,6 +1548,9 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
     }
     sub.channel.num_slots = sub_resp.num_slots;
     sub.channel.subscriber_queue_size = sub_resp.subscriber_queue_size;
+    if sub_resp.max_active_messages > 0 {
+        sub.options.max_active_messages = sub_resp.max_active_messages;
+    }
     sub.channel
         .embargoed_slots
         .resize(sub_resp.num_slots as usize);

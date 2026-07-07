@@ -29,6 +29,7 @@
 #include "toolbelt/triggerfd.h"
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace subspace {
@@ -140,6 +141,7 @@ public:
                                   bool fallback_to_ephemeral = false);
 
   void SetCleanupFilesystem(bool v) { cleanup_filesystem_ = v; }
+  void SetProfileFile(std::string path);
 
   // Use a TCP connection (instead of UDP broadcast/unicast) for discovery.
   // This is useful when the two servers cannot exchange UDP datagrams
@@ -265,6 +267,12 @@ private:
   void ChannelDirectoryCoroutine(async::Context ctx);
   void SendChannelDirectory();
   void StatisticsCoroutine(async::Context ctx);
+  void ProfileCoroutine(async::Context ctx);
+  absl::Status LoadProfileFile();
+  absl::Status SaveProfileFile();
+  void SampleChannelProfiles();
+  const ChannelProfileRecommendation *
+  GetProfileRecommendation(const std::string &channel_name) const;
   void DiscoveryReceiverCoroutine(async::Context ctx);
   void DiscoveryListenerCoroutine(async::Context ctx);
   void DiscoveryConnectorCoroutine(async::Context ctx);
@@ -418,6 +426,9 @@ private:
   bool publish_server_channels_ = true;
   BridgePortRange bridge_port_range_;
   bool bridge_ports_fallback_to_ephemeral_ = false;
+  std::string profile_file_;
+  ChannelProfileFile profile_;
+  bool profile_loaded_ = false;
 
   std::unique_ptr<ShadowReplicator> primary_shadow_replicator_;
   std::unique_ptr<ShadowReplicator> secondary_shadow_replicator_;

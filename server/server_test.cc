@@ -13,7 +13,11 @@
 #include "proto/subspace.pb.h"
 #include "toolbelt/fd.h"
 #include "toolbelt/sockets.h"
+#include <chrono>
+#include <cstring>
+#include <fstream>
 #include <string>
+#include <thread>
 
 // Helper to send raw Request protos and receive Response protos + FDs,
 // using the same wire format as the real client (4-byte length prefix,
@@ -73,7 +77,7 @@ public:
                   int vchan_id = 0, bool for_tunnel = false,
                   bool notify_retirement = false, int checksum_size = 0,
                   int metadata_size = 0, int max_publishers = 0,
-                  int subscriber_queue_size = 0) {
+                  int subscriber_queue_size = 0, bool apply_profile = true) {
     subspace::Request req;
     auto *cmd = req.mutable_create_publisher();
     cmd->set_channel_name(channel);
@@ -91,6 +95,7 @@ public:
     cmd->set_metadata_size(metadata_size);
     cmd->set_max_publishers(max_publishers);
     cmd->set_subscriber_queue_size(subscriber_queue_size);
+    cmd->set_apply_profile(apply_profile);
     cmd->set_publisher_id(-1);
     auto result = Send(req);
     return std::move(*result);
@@ -101,7 +106,8 @@ public:
   CreateSubscriber(const std::string &channel,
                    const std::string &type = "", bool reliable = false,
                    int max_active_messages = 4, const std::string &mux = "",
-                   int vchan_id = 0, bool for_tunnel = false) {
+                   int vchan_id = 0, bool for_tunnel = false,
+                   bool apply_profile = true) {
     subspace::Request req;
     auto *cmd = req.mutable_create_subscriber();
     cmd->set_channel_name(channel);
@@ -112,6 +118,7 @@ public:
     cmd->set_mux(mux);
     cmd->set_vchan_id(vchan_id);
     cmd->set_for_tunnel(for_tunnel);
+    cmd->set_apply_profile(apply_profile);
     auto result = Send(req);
     return std::move(*result);
   }
@@ -121,6 +128,102 @@ private:
 };
 
 class ServerTest : public SubspaceTestBase {};
+
+class ProfileServerHarness {
+public:
+  explicit ProfileServerHarness(std::string profile_file)
+      : profile_file_(std::move(profile_file)) {
+#if defined(__ANDROID__)
+    char socket_name_template[] = "/data/local/tmp/subspace_profileXXXXXX"; // NOLINT
+#else
+    char socket_name_template[] = "/tmp/subspace_profileXXXXXX"; // NOLINT
+#endif
+    int fd = mkstemp(&socket_name_template[0]);
+    if (fd >= 0) {
+      ::close(fd);
+    }
+    socket_ = &socket_name_template[0];
+    (void)remove(socket_.c_str());
+    (void)pipe(server_pipe_);
+    server_ = std::make_unique<subspace::Server>(
+        engine_, socket_, "", 0, 0, /*local=*/true, server_pipe_[1],
+        /*initial_ordinal=*/1, /*wait_for_clients=*/false);
+    server_->SetProfileFile(profile_file_);
+    server_thread_ = std::thread([this]() {
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+      absl::Status s = server_->Run(/*num_asio_threads=*/1);
+#else
+      absl::Status s = server_->Run();
+#endif
+      if (!s.ok()) {
+        fprintf(stderr, "Profile server error: %s\n", s.ToString().c_str());
+      }
+    });
+    char buf[8];
+    (void)::read(server_pipe_[0], buf, 8);
+  }
+
+  ~ProfileServerHarness() { Stop(); }
+
+  void Stop() {
+    if (stopped_) {
+      return;
+    }
+    server_->Stop();
+    char buf[8];
+    (void)::read(server_pipe_[0], buf, 8);
+    server_thread_.join();
+    server_->CleanupAfterSession();
+    (void)remove(socket_.c_str());
+    (void)::close(server_pipe_[0]);
+    (void)::close(server_pipe_[1]);
+    stopped_ = true;
+  }
+
+  const std::string &Socket() const { return socket_; }
+
+private:
+  subspace::async::RuntimeEngine engine_;
+  std::string socket_;
+  std::string profile_file_;
+  int server_pipe_[2] = {-1, -1};
+  std::unique_ptr<subspace::Server> server_;
+  std::thread server_thread_;
+  bool stopped_ = false;
+};
+
+std::string TempPath(const char *prefix) {
+#if defined(__ANDROID__)
+  std::string pattern = std::string("/data/local/tmp/") + prefix + "XXXXXX";
+#else
+  std::string pattern = std::string("/tmp/") + prefix + "XXXXXX";
+#endif
+  std::vector<char> buffer(pattern.begin(), pattern.end());
+  buffer.push_back('\0');
+  int fd = mkstemp(buffer.data());
+  if (fd >= 0) {
+    ::close(fd);
+  }
+  std::string path(buffer.data());
+  (void)remove(path.c_str());
+  return path;
+}
+
+void WriteProfile(const std::string &path, const std::string &channel,
+                  int slot_size, int num_slots, int subscriber_queue_size,
+                  int max_active_messages, int version = 1) {
+  std::ofstream out(path);
+  out << "version: " << version << "\n"
+      << "channels {\n"
+      << "  channel_name: \"" << channel << "\"\n"
+      << "  recommended {\n"
+      << "    slot_size: " << slot_size << "\n"
+      << "    num_slots: " << num_slots << "\n"
+      << "    subscriber_queue_size: " << subscriber_queue_size << "\n"
+      << "    max_active_messages: " << max_active_messages << "\n"
+      << "  }\n"
+      << "}\n";
+}
 
 // ---------------------------------------------------------------------------
 // Protocol-level tests
@@ -162,6 +265,201 @@ TEST_F(ServerTest, CreateSubscriberSuccess) {
   ASSERT_TRUE(resp.create_subscriber().error().empty());
   ASSERT_GE(resp.create_subscriber().subscriber_id(), 0);
   ASSERT_GE(static_cast<int>(fds.size()), 4);
+}
+
+TEST(ServerProfileTest, PublisherProfileOverrideReturnsResolvedValues) {
+  std::string profile_file = TempPath("subspace_profile_");
+  WriteProfile(profile_file, "profile_pub_override", /*slot_size=*/256,
+               /*num_slots=*/12, /*subscriber_queue_size=*/4,
+               /*max_active_messages=*/8);
+  ProfileServerHarness server(profile_file);
+
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(server.Socket()));
+  ASSERT_OK(conn.Init());
+  auto [resp, fds] =
+      conn.CreatePublisher("profile_pub_override", /*slot_size=*/64,
+                           /*num_slots=*/4, "", false, true, false, "", 0,
+                           false, false, 0, 0, 0,
+                           /*subscriber_queue_size=*/0,
+                           /*apply_profile=*/true);
+
+  ASSERT_TRUE(resp.create_publisher().error().empty());
+  EXPECT_EQ(resp.create_publisher().slot_size(), 256);
+  EXPECT_EQ(resp.create_publisher().num_slots(), 12);
+  EXPECT_EQ(resp.create_publisher().subscriber_queue_size(), 4);
+  server.Stop();
+  (void)remove(profile_file.c_str());
+}
+
+TEST(ServerProfileTest, PublisherProfileOptOutPreservesRequestedValues) {
+  std::string profile_file = TempPath("subspace_profile_");
+  WriteProfile(profile_file, "profile_pub_optout", /*slot_size=*/256,
+               /*num_slots=*/12, /*subscriber_queue_size=*/4,
+               /*max_active_messages=*/8);
+  ProfileServerHarness server(profile_file);
+
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(server.Socket()));
+  ASSERT_OK(conn.Init());
+  auto [resp, fds] =
+      conn.CreatePublisher("profile_pub_optout", /*slot_size=*/64,
+                           /*num_slots=*/4, "", false, true, false, "", 0,
+                           false, false, 0, 0, 0,
+                           /*subscriber_queue_size=*/0,
+                           /*apply_profile=*/false);
+
+  ASSERT_TRUE(resp.create_publisher().error().empty());
+  EXPECT_EQ(resp.create_publisher().slot_size(), 64);
+  EXPECT_EQ(resp.create_publisher().num_slots(), 4);
+  EXPECT_EQ(resp.create_publisher().subscriber_queue_size(), 0);
+  server.Stop();
+  (void)remove(profile_file.c_str());
+}
+
+TEST(ServerProfileTest, SubscriberProfileOverrideReturnsResolvedMaxActive) {
+  std::string profile_file = TempPath("subspace_profile_");
+  WriteProfile(profile_file, "profile_sub_override", /*slot_size=*/256,
+               /*num_slots=*/12, /*subscriber_queue_size=*/4,
+               /*max_active_messages=*/8);
+  ProfileServerHarness server(profile_file);
+
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(server.Socket()));
+  ASSERT_OK(conn.Init());
+  auto [resp, fds] =
+      conn.CreateSubscriber("profile_sub_override", "", false,
+                            /*max_active_messages=*/2, "", 0, false,
+                            /*apply_profile=*/true);
+
+  ASSERT_TRUE(resp.create_subscriber().error().empty());
+  EXPECT_EQ(resp.create_subscriber().max_active_messages(), 8);
+  server.Stop();
+  (void)remove(profile_file.c_str());
+}
+
+TEST(ServerProfileTest, CppClientHandlesReportResolvedProfileValues) {
+  std::string profile_file = TempPath("subspace_profile_");
+  WriteProfile(profile_file, "profile_cpp_client", /*slot_size=*/256,
+               /*num_slots=*/12, /*subscriber_queue_size=*/4,
+               /*max_active_messages=*/8);
+  ProfileServerHarness server(profile_file);
+
+  {
+    subspace::Client client;
+    ASSERT_OK(client.Init(server.Socket()));
+    auto pub = client.CreatePublisher(
+        "profile_cpp_client",
+        subspace::PublisherOptions()
+            .SetSlotSize(64)
+            .SetNumSlots(4)
+            .SetSubscriberQueueSize(0)
+            .SetApplyProfile(true));
+    ASSERT_OK(pub);
+    EXPECT_EQ(pub->SlotSize(), 256);
+    EXPECT_EQ(pub->NumSlots(), 12);
+    EXPECT_EQ(pub->SubscriberQueueSize(), 4);
+
+    auto sub = client.CreateSubscriber(
+        "profile_cpp_client",
+        subspace::SubscriberOptions()
+            .SetMaxActiveMessages(2)
+            .SetApplyProfile(true));
+    ASSERT_OK(sub);
+    EXPECT_EQ(sub->NumSlots(), 12);
+    EXPECT_EQ(sub->SubscriberQueueSize(), 4);
+    EXPECT_EQ(sub->MaxActiveMessages(), 8);
+  }
+
+  server.Stop();
+  (void)remove(profile_file.c_str());
+}
+
+TEST(ServerProfileTest, SubscriberProfileOptOutPreservesRequestedMaxActive) {
+  std::string profile_file = TempPath("subspace_profile_");
+  WriteProfile(profile_file, "profile_sub_optout", /*slot_size=*/256,
+               /*num_slots=*/12, /*subscriber_queue_size=*/4,
+               /*max_active_messages=*/8);
+  ProfileServerHarness server(profile_file);
+
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(server.Socket()));
+  ASSERT_OK(conn.Init());
+  auto [resp, fds] =
+      conn.CreateSubscriber("profile_sub_optout", "", false,
+                            /*max_active_messages=*/2, "", 0, false,
+                            /*apply_profile=*/false);
+
+  ASSERT_TRUE(resp.create_subscriber().error().empty());
+  EXPECT_EQ(resp.create_subscriber().max_active_messages(), 2);
+  server.Stop();
+  (void)remove(profile_file.c_str());
+}
+
+TEST(ServerProfileTest, ProfileVersionMismatchIsIgnored) {
+  std::string profile_file = TempPath("subspace_profile_");
+  WriteProfile(profile_file, "profile_version_mismatch", /*slot_size=*/256,
+               /*num_slots=*/12, /*subscriber_queue_size=*/4,
+               /*max_active_messages=*/8, /*version=*/99);
+  ProfileServerHarness server(profile_file);
+
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(server.Socket()));
+  ASSERT_OK(conn.Init());
+  auto [resp, fds] =
+      conn.CreatePublisher("profile_version_mismatch", /*slot_size=*/64,
+                           /*num_slots=*/4, "", false, true, false, "", 0,
+                           false, false, 0, 0, 0,
+                           /*subscriber_queue_size=*/0,
+                           /*apply_profile=*/true);
+
+  ASSERT_TRUE(resp.create_publisher().error().empty());
+  EXPECT_EQ(resp.create_publisher().slot_size(), 64);
+  EXPECT_EQ(resp.create_publisher().num_slots(), 4);
+  EXPECT_EQ(resp.create_publisher().subscriber_queue_size(), 0);
+  server.Stop();
+  (void)remove(profile_file.c_str());
+}
+
+TEST(ServerProfileTest, ProfilePersistsAndAppliesAfterRestart) {
+  std::string profile_file = TempPath("subspace_profile_");
+  const char *channel = "profile_restart";
+  {
+    ProfileServerHarness server(profile_file);
+    {
+      subspace::Client client;
+      ASSERT_OK(client.Init(server.Socket()));
+      auto pub = client.CreatePublisher(
+          channel, subspace::PublisherOptions()
+                       .SetSlotSize(64)
+                       .SetNumSlots(4)
+                       .SetApplyProfile(true));
+      ASSERT_OK(pub);
+      auto buffer = pub->GetMessageBuffer(32);
+      ASSERT_OK(buffer);
+      memset(*buffer, 0xAB, 32);
+      auto msg = pub->PublishMessage(32);
+      ASSERT_OK(msg);
+      std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+    }
+    server.Stop();
+  }
+
+  {
+    ProfileServerHarness server(profile_file);
+    RawConnection conn;
+    ASSERT_OK(conn.Connect(server.Socket()));
+    ASSERT_OK(conn.Init());
+    auto [resp, fds] =
+        conn.CreatePublisher(channel, /*slot_size=*/64, /*num_slots=*/4, "",
+                             false, true, false, "", 0, false, false, 0, 0, 0,
+                             /*subscriber_queue_size=*/0,
+                             /*apply_profile=*/true);
+    ASSERT_TRUE(resp.create_publisher().error().empty());
+    EXPECT_GE(resp.create_publisher().num_slots(), 10);
+    server.Stop();
+  }
+  (void)remove(profile_file.c_str());
 }
 
 // ---------------------------------------------------------------------------

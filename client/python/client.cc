@@ -116,6 +116,10 @@ PYBIND11_MODULE(subspace, m) {
            "Set each subscriber queue's capacity. 0 disables the queue.")
       .def("subscriber_queue_size", &PublisherOptions::SubscriberQueueSize,
            "Get each subscriber queue's configured capacity.")
+      .def("set_apply_profile", &PublisherOptions::SetApplyProfile,
+           "Set whether the server may apply channel profile sizing.")
+      .def("apply_profile", &PublisherOptions::ApplyProfile,
+           "Get whether the server may apply channel profile sizing.")
       .def("set_notify_retirement", &PublisherOptions::SetNotifyRetirement,
            "Set whether the publisher notifies on message retirement.")
       .def("notify_retirement", &PublisherOptions::NotifyRetirement,
@@ -158,6 +162,10 @@ PYBIND11_MODULE(subspace, m) {
            "Set the maximum number of active messages for the subscriber.")
       .def("max_active_messages", &SubscriberOptions::MaxActiveMessages,
            "Get the maximum number of active messages for the subscriber.")
+      .def("set_apply_profile", &SubscriberOptions::SetApplyProfile,
+           "Set whether the server may apply channel profile sizing.")
+      .def("apply_profile", &SubscriberOptions::ApplyProfile,
+           "Get whether the server may apply channel profile sizing.")
       .def("set_log_dropped_messages",
            &SubscriberOptions::SetLogDroppedMessages,
            "Sets whether the subscriber logs dropped messages.")
@@ -585,6 +593,9 @@ checksum_error).  Use as a context manager to auto-release the slot:
   subscriber_class.def("subscriber_queue_size",
                        &Subscriber::SubscriberQueueSize,
                        "Get each subscriber queue's resolved capacity.");
+
+  subscriber_class.def("max_active_messages", &Subscriber::MaxActiveMessages,
+                       "Get the resolved max active message count.");
 
   subscriber_class.def("get_current_ordinal", &Subscriber::GetCurrentOrdinal,
                        "Get the most recently received ordinal.");

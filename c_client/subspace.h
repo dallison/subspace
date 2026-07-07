@@ -254,6 +254,8 @@ typedef struct {
   bool split_buffers_over_bridge;
   int32_t max_publishers;
   SubspaceSplitBufferCallbacks split_callbacks;
+  // If true, a server with a profile file may override sizing values.
+  bool apply_profile;
 } SubspacePublisherOptions;
 
 typedef struct {
@@ -277,6 +279,8 @@ typedef struct {
   // Optional callbacks used when the server reports that the publisher
   // created split payload buffers.
   SubspaceSplitBufferCallbacks split_callbacks;
+  // If true, a server with a profile file may override sizing values.
+  bool apply_profile;
 } SubspaceSubscriberOptions;
 
 typedef enum {

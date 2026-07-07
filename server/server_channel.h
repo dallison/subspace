@@ -88,6 +88,7 @@ public:
         max_active_messages_(max_active_messages) {}
   bool IsSubscriber() const override { return true; }
   int MaxActiveMessages() const { return max_active_messages_; }
+  void SetMaxActiveMessages(int n) { max_active_messages_ = n; }
 
 private:
   int max_active_messages_;

@@ -1406,6 +1406,7 @@ public:
   int32_t SlotSize() const { return impl_->SlotSize(); }
   int32_t NumSlots() const { return impl_->NumSlots(); }
   int32_t SubscriberQueueSize() const { return impl_->SubscriberQueueSize(); }
+  int32_t MaxActiveMessages() const { return impl_->MaxActiveMessages(); }
 
   const std::vector<std::unique_ptr<details::BufferSet>> &GetBuffers() const {
     return client_->GetBuffers(impl_.get());

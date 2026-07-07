@@ -81,8 +81,11 @@ ClientChannel::CreatePosixSharedMemoryFile(const std::string &filename,
   // Create a file in /tmp and make it the same size as the shared memory.  This
   // will not actually allocate any disk space.
   auto &shim = GetSyscallShim();
-  int fd = shim.open_fn(filename.c_str(), O_RDWR | O_CREAT, 0666);
+  int fd = shim.open_fn(filename.c_str(), O_RDWR | O_CREAT | O_EXCL, 0666);
   if (fd < 0) {
+    if (errno == EEXIST) {
+      return PosixSharedMemoryName(filename);
+    }
     return absl::InternalError(
         absl::StrFormat("Failed to open shadow file %s: %s", filename.c_str(),
                         strerror(errno)));
@@ -537,14 +540,13 @@ ClientChannel::CreatePosixBuffer(const std::string &filename, size_t size) {
   // On Posix we need to create a shadow file that has the same size as the
   // shared memory file.  This is because the fstat of the shm "file" returns a
   // page aligned size, which is not what we want.  The shadow file is used
-  // to determine the size of the shared memory segment.
+  // to determine the size of the shared memory segment. If the shadow already
+  // exists, do not truncate it because it records the existing generation size.
   absl::StatusOr<std::string> shm_name =
       CreatePosixSharedMemoryFile(filename, off_t(size));
   if (!shm_name.ok()) {
     return shm_name.status();
   }
-
-  // shm_name is the name of the shared memory.
   auto shm_fd = OpenSharedMemoryFile(*shm_name, O_RDWR | O_CREAT | O_EXCL);
   if (!shm_fd.ok()) {
     return shm_fd.status();
@@ -557,7 +559,7 @@ ClientChannel::CreatePosixBuffer(const std::string &filename, size_t size) {
   // Make it the appropriate size.
   int e = shim.ftruncate_fn(shm_fd->Fd(), off_t(size));
   if (e == -1) {
-    (void)shim.shm_unlink_fn(filename.c_str());
+    (void)shim.shm_unlink_fn(shm_name->c_str());
     return absl::InternalError(
         absl::StrFormat("Failed to set length of shared memory %s: %s",
                         filename, strerror(errno)));
