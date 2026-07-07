@@ -152,8 +152,8 @@ typedef struct {
   void *user_data;
 } SubspaceSplitBufferCallbacks;
 
-// This is a received message.  The 'message' member is a pointer to a smart
-// message object that is used to manage the message.  The 'length' member is
+// This is a received message.  The 'message' member is an opaque owned message
+// handle that is used to manage the message.  The 'length' member is
 // the length of the message data in bytes and 'buffer' points to the start
 // address of the message in shared memory.  If there is no message read, the
 // length member will be zero and buffer will be nullptr.
@@ -166,7 +166,7 @@ typedef struct {
 // message, the subscriber will run out of slots and you will be unable to read
 // any more messages.
 typedef struct {
-  void *message;      // Smart message pointer
+  void *message;      // Opaque owned message handle.
   size_t length;      // Length of the message
   const void *buffer; // Address of the message payload
   uint64_t ordinal;   // Monotonic number of the message
