@@ -845,6 +845,21 @@ void ChannelMultiplexer::RemoveVirtualChannel(VirtualChannel *vchan) {
   virtual_channels_.erase(vchan);
 }
 
+bool ChannelMultiplexer::HasPublisherOwnedBy(
+    const ClientHandler *handler) const {
+  // Publishers backed by a mux's storage are created on its virtual channels,
+  // not on the mux itself, so consult them as well as any direct users.
+  if (ServerChannel::HasPublisherOwnedBy(handler)) {
+    return true;
+  }
+  for (const VirtualChannel *vchan : virtual_channels_) {
+    if (vchan->HasPublisherOwnedBy(handler)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void ChannelMultiplexer::CountUsers(int &num_pubs, int &num_subs,
                                     int &num_bridge_pubs, int &num_bridge_subs,
                                     int &num_tunnel_pubs,

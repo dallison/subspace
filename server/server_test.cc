@@ -13,7 +13,9 @@
 #include "proto/subspace.pb.h"
 #include "toolbelt/fd.h"
 #include "toolbelt/sockets.h"
+#include <fcntl.h>
 #include <string>
+#include <vector>
 
 // Helper to send raw Request protos and receive Response protos + FDs,
 // using the same wire format as the real client (4-byte length prefix,
@@ -31,12 +33,22 @@ public:
     if (!result.ok()) {
       return result.status();
     }
+    session_id_ = result->first.init().session_id();
     return absl::OkStatus();
   }
+
+  uint64_t SessionId() const { return session_id_; }
 
   absl::StatusOr<
       std::pair<subspace::Response, std::vector<toolbelt::FileDescriptor>>>
   Send(const subspace::Request &req) {
+    return SendWithFds(req, {});
+  }
+
+  absl::StatusOr<
+      std::pair<subspace::Response, std::vector<toolbelt::FileDescriptor>>>
+  SendWithFds(const subspace::Request &req,
+              const std::vector<toolbelt::FileDescriptor> &send_fds) {
     size_t msg_len = req.ByteSizeLong();
     std::vector<char> buf(sizeof(int32_t) + msg_len);
     char *payload = buf.data() + sizeof(int32_t);
@@ -46,6 +58,11 @@ public:
     auto n = socket_.SendMessage(payload, msg_len);
     if (!n.ok()) {
       return n.status();
+    }
+    if (!send_fds.empty()) {
+      if (auto s = socket_.SendFds(send_fds); !s.ok()) {
+        return s;
+      }
     }
 
     auto recv = socket_.ReceiveVariableLengthMessage();
@@ -62,6 +79,72 @@ public:
       return s;
     }
     return std::make_pair(std::move(resp), std::move(fds));
+  }
+
+  // Build a RegisterClientBuffer request for the given (channel, session,
+  // buffer_index, slot_id).  When send_fd is true a backing fd is attached and
+  // fd_index is used as-is (allowing tests to inject an out-of-range index).
+  subspace::Request
+  MakeRegisterRequest(const std::string &channel, uint64_t session_id,
+                      uint32_t buffer_index, uint32_t slot_id, bool has_fd,
+                      int fd_index) {
+    subspace::Request req;
+    auto *r = req.mutable_register_client_buffer();
+    auto *m = r->mutable_metadata();
+    m->set_channel_name(channel);
+    m->set_session_id(session_id);
+    m->set_buffer_index(buffer_index);
+    m->set_slot_id(slot_id);
+    r->set_has_fd(has_fd);
+    r->set_fd_index(fd_index);
+    return req;
+  }
+
+  subspace::Request MakeUnregisterRequest(const std::string &channel,
+                                          uint64_t session_id,
+                                          uint32_t buffer_index) {
+    subspace::Request req;
+    auto *u = req.mutable_unregister_client_buffer();
+    u->set_channel_name(channel);
+    u->set_session_id(session_id);
+    u->set_buffer_index(buffer_index);
+    return req;
+  }
+
+  // Sends a one-way request that the server does not reply to (e.g.
+  // UnregisterClientBuffer), then issues a round-trip GetClientBuffers on the
+  // same connection so the caller can observe the resulting server state.  The
+  // ordered processing on a single connection guarantees the one-way request
+  // has been handled by the time the query returns.
+  absl::StatusOr<subspace::GetClientBuffersResponse>
+  SendOneWayThenGetBuffers(const subspace::Request &one_way,
+                           const std::string &channel, uint64_t session_id,
+                           uint32_t buffer_index) {
+    size_t msg_len = one_way.ByteSizeLong();
+    std::vector<char> buf(sizeof(int32_t) + msg_len);
+    char *payload = buf.data() + sizeof(int32_t);
+    if (!one_way.SerializeToArray(payload, msg_len)) {
+      return absl::InternalError("Failed to serialize request");
+    }
+    if (auto n = socket_.SendMessage(payload, msg_len); !n.ok()) {
+      return n.status();
+    }
+    return GetClientBuffers(channel, session_id, buffer_index);
+  }
+
+  absl::StatusOr<subspace::GetClientBuffersResponse>
+  GetClientBuffers(const std::string &channel, uint64_t session_id,
+                   uint32_t buffer_index) {
+    subspace::Request req;
+    auto *g = req.mutable_get_client_buffers();
+    g->set_channel_name(channel);
+    g->set_session_id(session_id);
+    g->set_buffer_index(buffer_index);
+    auto result = Send(req);
+    if (!result.ok()) {
+      return result.status();
+    }
+    return result->first.get_client_buffers();
   }
 
   // Convenience: create a publisher and return the response.
@@ -116,6 +199,7 @@ public:
 
 private:
   toolbelt::UnixSocket socket_;
+  uint64_t session_id_ = 0;
 };
 
 class ServerTest : public SubspaceTestBase {};
@@ -724,6 +808,115 @@ TEST_F(ServerTest, SubGetsChannelProperties) {
   EXPECT_EQ("my_type", sub_resp.type());
   EXPECT_EQ(8, sub_resp.checksum_size());
   EXPECT_EQ(16, sub_resp.metadata_size());
+}
+
+// ---------------------------------------------------------------------------
+// Client buffer registration ownership
+// ---------------------------------------------------------------------------
+
+// A publisher's own connection may register a client buffer for its channel.
+TEST_F(ServerTest, RegisterClientBufferOwnerSucceeds) {
+  RawConnection owner;
+  ASSERT_OK(owner.Connect(Socket()));
+  ASSERT_OK(owner.Init());
+  auto [presp, pfds] = owner.CreatePublisher("cbreg_owner", 64, 4);
+  ASSERT_TRUE(presp.create_publisher().error().empty());
+
+  auto result = owner.Send(owner.MakeRegisterRequest(
+      "cbreg_owner", owner.SessionId(), /*buffer_index=*/0, /*slot_id=*/0,
+      /*has_fd=*/false, /*fd_index=*/-1));
+  ASSERT_OK(result);
+  EXPECT_TRUE(result->first.register_client_buffer().error().empty());
+
+  auto buffers = owner.GetClientBuffers("cbreg_owner", owner.SessionId(), 0);
+  ASSERT_OK(buffers);
+  EXPECT_EQ(1, buffers->metadata_size());
+}
+
+// A client that owns no publisher on the channel cannot register a buffer for
+// it, so it cannot inject a bogus (or fd-less) registration that other clients
+// would then map.
+TEST_F(ServerTest, RegisterClientBufferForeignRejected) {
+  RawConnection owner;
+  ASSERT_OK(owner.Connect(Socket()));
+  ASSERT_OK(owner.Init());
+  auto [presp, pfds] = owner.CreatePublisher("cbreg_foreign", 64, 4);
+  ASSERT_TRUE(presp.create_publisher().error().empty());
+
+  RawConnection foreign;
+  ASSERT_OK(foreign.Connect(Socket()));
+  ASSERT_OK(foreign.Init());
+
+  auto result = foreign.Send(foreign.MakeRegisterRequest(
+      "cbreg_foreign", foreign.SessionId(), 0, 0, /*has_fd=*/false, -1));
+  ASSERT_OK(result);
+  EXPECT_THAT(result->first.register_client_buffer().error(),
+              ::testing::HasSubstr("does not own a publisher"));
+
+  // Nothing was registered.
+  auto buffers =
+      foreign.GetClientBuffers("cbreg_foreign", foreign.SessionId(), 0);
+  ASSERT_OK(buffers);
+  EXPECT_EQ(0, buffers->metadata_size());
+}
+
+// A foreign client cannot erase another publisher's buffer registrations.
+TEST_F(ServerTest, UnregisterClientBufferForeignRejected) {
+  RawConnection owner;
+  ASSERT_OK(owner.Connect(Socket()));
+  ASSERT_OK(owner.Init());
+  auto [presp, pfds] = owner.CreatePublisher("cbunreg_foreign", 64, 4);
+  ASSERT_TRUE(presp.create_publisher().error().empty());
+
+  auto reg = owner.Send(owner.MakeRegisterRequest(
+      "cbunreg_foreign", owner.SessionId(), 0, 0, /*has_fd=*/false, -1));
+  ASSERT_OK(reg);
+  ASSERT_TRUE(reg->first.register_client_buffer().error().empty());
+
+  RawConnection foreign;
+  ASSERT_OK(foreign.Connect(Socket()));
+  ASSERT_OK(foreign.Init());
+
+  // UnregisterClientBuffer is a one-way request; observe the result via a
+  // follow-up query on the same (foreign) connection.
+  auto after = foreign.SendOneWayThenGetBuffers(
+      foreign.MakeUnregisterRequest("cbunreg_foreign", foreign.SessionId(), 0),
+      "cbunreg_foreign", foreign.SessionId(), 0);
+  ASSERT_OK(after);
+  EXPECT_EQ(1, after->metadata_size());
+
+  // The owner can still see its buffer.
+  auto owner_view =
+      owner.GetClientBuffers("cbunreg_foreign", owner.SessionId(), 0);
+  ASSERT_OK(owner_view);
+  EXPECT_EQ(1, owner_view->metadata_size());
+}
+
+// An fd-backed registration that names an out-of-range fd index is rejected
+// rather than silently registered without its backing fd.
+TEST_F(ServerTest, RegisterClientBufferInvalidFdIndexRejected) {
+  RawConnection owner;
+  ASSERT_OK(owner.Connect(Socket()));
+  ASSERT_OK(owner.Init());
+  auto [presp, pfds] = owner.CreatePublisher("cbreg_badfd", 64, 4);
+  ASSERT_TRUE(presp.create_publisher().error().empty());
+
+  // Send one real fd but claim it is at index 5.
+  int raw = ::open("/dev/null", O_RDONLY);
+  ASSERT_GE(raw, 0);
+  std::vector<toolbelt::FileDescriptor> send_fds;
+  send_fds.emplace_back(raw);
+  auto result = owner.SendWithFds(
+      owner.MakeRegisterRequest("cbreg_badfd", owner.SessionId(), 0, 0,
+                                /*has_fd=*/true, /*fd_index=*/5),
+      send_fds);
+  ASSERT_OK(result);
+  EXPECT_THAT(result->first.register_client_buffer().error(),
+              ::testing::HasSubstr("invalid fd index"));
+
+  auto buffers = owner.GetClientBuffers("cbreg_badfd", owner.SessionId(), 0);
+  ASSERT_OK(buffers);
+  EXPECT_EQ(0, buffers->metadata_size());
 }
 
 int main(int argc, char **argv) {
