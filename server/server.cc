@@ -446,6 +446,34 @@ BridgeAddressWithPort(const toolbelt::SocketAddress &addr, int port) {
   }
 }
 
+absl::StatusOr<toolbelt::SocketAddress>
+ParseChannelAddress(const ChannelAddress &address, const char *field_name) {
+  constexpr size_t kAddressSize = sizeof(uint32_t);
+  if (address.address().size() != kAddressSize) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "%s has invalid address length %zu; expected %zu", field_name,
+        address.address().size(), kAddressSize));
+  }
+
+  switch (address.family()) {
+  case ChannelAddress::FAMILY_INET: {
+    in_addr ip_addr;
+    memcpy(&ip_addr, address.address().data(), sizeof(ip_addr));
+    // ChannelAddress stores IPv4 bytes in host order on the wire.
+    ip_addr.s_addr = ntohl(ip_addr.s_addr);
+    return toolbelt::SocketAddress(ip_addr, address.port());
+  }
+  case ChannelAddress::FAMILY_VSOCK: {
+    uint32_t cid;
+    memcpy(&cid, address.address().data(), sizeof(cid));
+    return toolbelt::SocketAddress(cid, address.port());
+  }
+  default:
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "%s has unsupported address family %d", field_name, address.family()));
+  }
+}
+
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO
 Server::Server(co::CoroutineScheduler &scheduler,
                const std::string &socket_name, const std::string &interface,
@@ -2360,39 +2388,18 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
 
   if (subscribed.notify_retirement()) {
     retirement_transmitter = std::make_shared<async::StreamSocket>();
-    toolbelt::SocketAddress retirement_addr;
     // The address family travels in the message (see SendSubscribeMessage);
     // unset defaults to FAMILY_INET for compatibility with older peers.
-    switch (subscribed.retirement_socket().family()) {
-    case ChannelAddress::FAMILY_INET: {
-      // IPv4 address.
-      struct sockaddr_in tmp_addr;
-      memset(&tmp_addr, 0, sizeof(tmp_addr));
-      tmp_addr.sin_family = AF_INET;
-      tmp_addr.sin_port = htons(subscribed.retirement_socket().port());
-      tmp_addr.sin_addr.s_addr = ntohl(*reinterpret_cast<const uint32_t *>(
-          subscribed.retirement_socket().address().data()));
-      retirement_addr = toolbelt::SocketAddress(tmp_addr);
-      break;
-    }
-    case ChannelAddress::FAMILY_VSOCK: {
-      // Virtual address.
-      struct sockaddr_vm tmp_addr;
-      memset(&tmp_addr, 0, sizeof(tmp_addr));
-      tmp_addr.svm_family = AF_VSOCK;
-      tmp_addr.svm_port = subscribed.retirement_socket().port();
-      tmp_addr.svm_cid = *reinterpret_cast<const uint32_t *>(
-          subscribed.retirement_socket().address().data());
-      retirement_addr = toolbelt::SocketAddress(tmp_addr);
-      break;
-    }
-    default:
+    absl::StatusOr<toolbelt::SocketAddress> retirement_addr =
+        ParseChannelAddress(subscribed.retirement_socket(), "retirement socket");
+    if (!retirement_addr.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
-                  "Unsupported address family for retirement notification");
+                  "Invalid retirement socket for %s: %s", channel_name.c_str(),
+                  retirement_addr.status().ToString().c_str());
       return;
     }
 
-    s = retirement_transmitter->Connect(retirement_addr);
+    s = retirement_transmitter->Connect(*retirement_addr);
     if (!s.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to connect to retirement socket for %s: %s",
@@ -2726,28 +2733,13 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
     // carried in the message itself (FAMILY_INET for TCP, FAMILY_VSOCK for
     // vsock) so the two servers do not have to share the same local address
     // type.  Older peers leave family unset, which defaults to FAMILY_INET.
-    toolbelt::SocketAddress subscriber_addr;
-    switch (subscribe.receiver().family()) {
-    case ChannelAddress::FAMILY_INET: {
-      in_addr subscriber_ip;
-      memcpy(&subscriber_ip, subscribe.receiver().address().data(),
-             sizeof(subscriber_ip));
-      // Need this in host byte order.
-      subscriber_ip.s_addr = ntohl(subscriber_ip.s_addr);
-      subscriber_addr =
-          toolbelt::SocketAddress(subscriber_ip, subscribe.receiver().port());
-      break;
-    }
-    case ChannelAddress::FAMILY_VSOCK: {
-      uint32_t cid = *reinterpret_cast<const uint32_t *>(
-          subscribe.receiver().address().data());
-      subscriber_addr =
-          toolbelt::SocketAddress(cid, subscribe.receiver().port());
-      break;
-    }
-    default:
+    absl::StatusOr<toolbelt::SocketAddress> subscriber_addr =
+        ParseChannelAddress(subscribe.receiver(), "subscribe receiver");
+    if (!subscriber_addr.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
-                  "Unknown address family for subscribe receiver");
+                  "Invalid subscribe receiver for %s: %s",
+                  subscribe.channel_name().c_str(),
+                  subscriber_addr.status().ToString().c_str());
       return;
     }
 
@@ -2766,7 +2758,7 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
     };
     runtime_.SpawnOnNewStrand(
         [this, info = std::move(info), pub_reliable, sub_reliable,
-         subscriber_addr = std::move(subscriber_addr), sender,
+         subscriber_addr = std::move(*subscriber_addr), sender,
          notify_retirement](async::Context ctx) mutable {
           BridgeTransmitterCoroutine(ctx, std::move(info), pub_reliable,
                                      sub_reliable, std::move(subscriber_addr),

@@ -138,6 +138,47 @@ TEST_F(ServerTest, InitSuccess) {
   ASSERT_FALSE(fds.empty());
 }
 
+TEST(ChannelAddressParsingTest, ParsesValidInetAddress) {
+  subspace::ChannelAddress address;
+  in_addr ip_addr;
+  ip_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.set_address(&ip_addr, sizeof(ip_addr));
+  address.set_port(12345);
+  address.set_family(subspace::ChannelAddress::FAMILY_INET);
+
+  absl::StatusOr<toolbelt::SocketAddress> parsed =
+      subspace::ParseChannelAddress(address, "test address");
+  ASSERT_OK(parsed);
+  EXPECT_EQ(parsed->Type(), toolbelt::SocketAddress::kAddressInet);
+  EXPECT_EQ(parsed->Port(), 12345);
+}
+
+TEST(ChannelAddressParsingTest, RejectsShortInetAddress) {
+  subspace::ChannelAddress address;
+  address.set_address("x");
+  address.set_port(12345);
+  address.set_family(subspace::ChannelAddress::FAMILY_INET);
+
+  absl::StatusOr<toolbelt::SocketAddress> parsed =
+      subspace::ParseChannelAddress(address, "test address");
+  ASSERT_FALSE(parsed.ok());
+  EXPECT_THAT(parsed.status().message(),
+              ::testing::HasSubstr("invalid address length"));
+}
+
+TEST(ChannelAddressParsingTest, RejectsShortVsockAddress) {
+  subspace::ChannelAddress address;
+  address.set_address("x");
+  address.set_port(12345);
+  address.set_family(subspace::ChannelAddress::FAMILY_VSOCK);
+
+  absl::StatusOr<toolbelt::SocketAddress> parsed =
+      subspace::ParseChannelAddress(address, "test address");
+  ASSERT_FALSE(parsed.ok());
+  EXPECT_THAT(parsed.status().message(),
+              ::testing::HasSubstr("invalid address length"));
+}
+
 TEST_F(ServerTest, CreatePublisherSuccess) {
   RawConnection conn;
   ASSERT_OK(conn.Connect(Socket()));
