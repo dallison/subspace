@@ -4,6 +4,7 @@
 
 #include "server/server_channel.h"
 #include "absl/strings/str_format.h"
+#include "server/client_handler.h"
 #include "server/server.h"
 #include <utility>
 #include <sys/mman.h>
@@ -721,6 +722,7 @@ void ServerChannel::GetChannelInfo(subspace::ChannelInfoProto *info) {
   info->set_slot_size(SlotSize());
   info->set_num_slots(NumSlots());
   info->set_type(Type());
+  info->set_channel_id(GetChannelId());
 
   int num_pubs, num_subs, num_bridge_pubs, num_bridge_subs;
   int num_tunnel_pubs, num_tunnel_subs;
@@ -739,6 +741,21 @@ void ServerChannel::GetChannelInfo(subspace::ChannelInfoProto *info) {
     VirtualChannel *vchan = static_cast<VirtualChannel *>(this);
     info->set_vchan_id(GetVirtualChannelId());
     info->set_mux(vchan->GetMux()->Name());
+  }
+
+  for (const auto &[id, user] : users_) {
+    if (user == nullptr || user->GetHandler() == nullptr) {
+      continue;
+    }
+    ChannelParticipantInfoProto *participant = info->add_participants();
+    participant->set_id(id);
+    participant->set_pid(user->GetHandler()->PeerPid());
+    participant->set_program_name(user->GetHandler()->ClientName());
+    participant->set_is_publisher(user->IsPublisher());
+    participant->set_is_subscriber(user->IsSubscriber());
+    participant->set_is_reliable(user->IsReliable());
+    participant->set_is_bridge(user->IsBridge());
+    participant->set_for_tunnel(user->ForTunnel());
   }
 }
 

@@ -6,9 +6,24 @@
 #include "absl/strings/str_format.h"
 #include "client_handler.h"
 #include "server/server.h"
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 namespace subspace {
 namespace {
+
+uint64_t GetPeerPid(const async::UnixSocket &socket) {
+#if defined(__linux__) && !defined(__ANDROID__)
+  struct ucred cred;
+  socklen_t len = sizeof(cred);
+  if (getsockopt(socket.GetFileDescriptor().Fd(), SOL_SOCKET, SO_PEERCRED,
+                 &cred, &len) == 0) {
+    return static_cast<uint64_t>(cred.pid);
+  }
+#endif
+  return 0;
+}
 
 ClientBufferAllocatorKind FromProtoAllocator(ClientBufferAllocator allocator) {
   switch (allocator) {
@@ -319,6 +334,7 @@ void ClientHandler::HandleInit(const subspace::InitRequest &req,
   response->set_scb_fd_index(0);
   fds.push_back(server_->scb_fd_);
   client_name_ = req.client_name();
+  peer_pid_ = GetPeerPid(socket_);
   response->set_session_id(server_->GetSessionId());
   response->set_user_id(getuid());
   response->set_group_id(getgid());
