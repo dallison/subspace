@@ -1,0 +1,7 @@
+# Publish to BCR configuration.
+#
+# The MODULE.bazel that is published lives at the repository root, so the
+# default moduleRoots of ["."] is correct and no configuration is required
+# here.  This file is intentionally (almost) empty; see
+# https://github.com/bazel-contrib/publish-to-bcr/tree/main/templates for the
+# available options (e.g. moduleRoots for multi-module repos).
