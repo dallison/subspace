@@ -431,7 +431,7 @@ absl::StatusOr<int> ServerChannel::AllocateUserId(const char *type) {
 absl::StatusOr<PublisherUser *>
 ServerChannel::AddPublisher(ClientHandler *handler, bool is_reliable,
                             bool is_local, bool is_bridge, bool for_tunnel,
-                            bool is_fixed_size) {
+                            bool is_fixed_size, uint64_t process_id) {
   absl::StatusOr<int> user_id = AllocateUserId("publisher");
   if (!user_id.ok()) {
     return user_id.status();
@@ -439,6 +439,7 @@ ServerChannel::AddPublisher(ClientHandler *handler, bool is_reliable,
   std::unique_ptr<PublisherUser> pub = std::make_unique<PublisherUser>(
       handler, *user_id, is_reliable, is_local, is_bridge, for_tunnel,
       is_fixed_size);
+  pub->SetProcessId(process_id);
   absl::Status status = pub->Init();
   if (!status.ok()) {
     return status;
@@ -452,7 +453,7 @@ ServerChannel::AddPublisher(ClientHandler *handler, bool is_reliable,
 absl::StatusOr<SubscriberUser *>
 ServerChannel::AddSubscriber(ClientHandler *handler, bool is_reliable,
                              bool is_bridge, bool for_tunnel,
-                             int max_active_messages) {
+                             int max_active_messages, uint64_t process_id) {
   absl::StatusOr<int> user_id = AllocateUserId("subscriber");
   if (!user_id.ok()) {
     return user_id.status();
@@ -460,6 +461,7 @@ ServerChannel::AddSubscriber(ClientHandler *handler, bool is_reliable,
   std::unique_ptr<SubscriberUser> sub = std::make_unique<SubscriberUser>(
       handler, *user_id, is_reliable, is_bridge, for_tunnel,
       max_active_messages);
+  sub->SetProcessId(process_id);
   absl::Status status = sub->Init();
   if (!status.ok()) {
     return status;
@@ -749,7 +751,7 @@ void ServerChannel::GetChannelInfo(subspace::ChannelInfoProto *info) {
     }
     ChannelParticipantInfoProto *participant = info->add_participants();
     participant->set_id(id);
-    participant->set_pid(user->GetHandler()->PeerPid());
+    participant->set_pid(user->ProcessId());
     participant->set_program_name(user->GetHandler()->ClientName());
     participant->set_is_publisher(user->IsPublisher());
     participant->set_is_subscriber(user->IsSubscriber());

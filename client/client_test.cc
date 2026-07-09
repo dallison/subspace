@@ -3540,11 +3540,7 @@ TEST_F(ClientTest, ChannelDirectory) {
       for (const subspace::ChannelParticipantInfoProto &participant :
            info.participants()) {
         EXPECT_EQ(kClientName, participant.program_name());
-#if defined(__linux__) && !defined(__ANDROID__)
         EXPECT_EQ(static_cast<uint64_t>(getpid()), participant.pid());
-#else
-        EXPECT_EQ(0u, participant.pid());
-#endif
         EXPECT_GE(participant.id(), 0);
         EXPECT_NE(participant.is_publisher(), participant.is_subscriber());
         found_publisher |= participant.is_publisher();

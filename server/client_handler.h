@@ -31,7 +31,6 @@ public:
   // cooperative socket I/O for the active backend.
   void Run(async::Context ctx);
   const std::string &ClientName() const { return client_name_; }
-  uint64_t PeerPid() const { return peer_pid_; }
 
 private:
   std::string GetTotalVM();
@@ -80,7 +79,6 @@ private:
   Server *server_;
   async::UnixSocket socket_;
   std::string client_name_;
-  uint64_t peer_pid_ = 0;
 };
 
 } // namespace subspace

@@ -6,24 +6,10 @@
 #include "absl/strings/str_format.h"
 #include "client_handler.h"
 #include "server/server.h"
-#include <sys/socket.h>
-#include <sys/types.h>
 #include <unistd.h>
 
 namespace subspace {
 namespace {
-
-uint64_t GetPeerPid(const async::UnixSocket &socket) {
-#if defined(__linux__) && !defined(__ANDROID__)
-  struct ucred cred;
-  socklen_t len = sizeof(cred);
-  if (getsockopt(socket.GetFileDescriptor().Fd(), SOL_SOCKET, SO_PEERCRED,
-                 &cred, &len) == 0) {
-    return static_cast<uint64_t>(cred.pid);
-  }
-#endif
-  return 0;
-}
 
 ClientBufferAllocatorKind FromProtoAllocator(ClientBufferAllocator allocator) {
   switch (allocator) {
@@ -334,7 +320,6 @@ void ClientHandler::HandleInit(const subspace::InitRequest &req,
   response->set_scb_fd_index(0);
   fds.push_back(server_->scb_fd_);
   client_name_ = req.client_name();
-  peer_pid_ = GetPeerPid(socket_);
   response->set_session_id(server_->GetSessionId());
   response->set_user_id(getuid());
   response->set_group_id(getgid());
@@ -549,6 +534,7 @@ void ClientHandler::HandleCreatePublisher(
     if (user.ok() && (*user)->GetHandler() == nullptr) {
       pub = static_cast<PublisherUser *>(*user);
       pub->SetHandler(this);
+      pub->SetProcessId(req.process_id());
       reclaimed = true;
       server_->logger_.Log(toolbelt::LogLevel::kDebug,
                            "Client %s reclaiming publisher %d on channel %s",
@@ -565,7 +551,7 @@ void ClientHandler::HandleCreatePublisher(
     // Create the publisher.
     absl::StatusOr<PublisherUser *> publisher = channel->AddPublisher(
         this, req.is_reliable(), req.is_local(), req.is_bridge(),
-        req.for_tunnel(), req.is_fixed_size());
+        req.for_tunnel(), req.is_fixed_size(), req.process_id());
     if (!publisher.ok()) {
       response->set_error(publisher.status().ToString());
       return;
@@ -768,6 +754,7 @@ void ClientHandler::HandleCreateSubscriber(
     sub = static_cast<SubscriberUser *>(*user);
     if (sub->GetHandler() == nullptr) {
       sub->SetHandler(this);
+      sub->SetProcessId(req.process_id());
       reclaimed = true;
       server_->logger_.Log(toolbelt::LogLevel::kDebug,
                            "Client %s reclaiming subscriber %d on channel %s",
@@ -792,7 +779,8 @@ void ClientHandler::HandleCreateSubscriber(
                          GetTotalVM().c_str());
     absl::StatusOr<SubscriberUser *> subscriber =
         channel->AddSubscriber(this, req.is_reliable(), req.is_bridge(),
-                               req.for_tunnel(), req.max_active_messages());
+                               req.for_tunnel(), req.max_active_messages(),
+                               req.process_id());
     if (!subscriber.ok()) {
       response->set_error(subscriber.status().ToString());
       return;

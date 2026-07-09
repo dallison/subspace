@@ -41,6 +41,7 @@ message CreatePublisherRequest {
   bool use_split_buffers = 16; // Prefixes and payload slots are separate.
   int32 max_publishers = 17;   // 0 means no explicit publisher limit.
   bool split_buffers_over_bridge = 18; // Remote bridge publisher uses split buffers.
+  uint64 process_id = 19;      // Client process id for introspection.
 }
 
 message CreatePublisherResponse {
@@ -72,6 +73,7 @@ message CreateSubscriberRequest {
   bool for_tunnel = 7;
   string mux = 8;
   int32 vchan_id = 9;
+  uint64 process_id = 10; // Client process id for introspection.
 }
 
 message CreateSubscriberResponse {
