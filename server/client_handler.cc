@@ -6,6 +6,7 @@
 #include "absl/strings/str_format.h"
 #include "client_handler.h"
 #include "server/server.h"
+#include <unistd.h>
 
 namespace subspace {
 namespace {
@@ -533,6 +534,7 @@ void ClientHandler::HandleCreatePublisher(
     if (user.ok() && (*user)->GetHandler() == nullptr) {
       pub = static_cast<PublisherUser *>(*user);
       pub->SetHandler(this);
+      pub->SetProcessId(req.process_id());
       reclaimed = true;
       server_->logger_.Log(toolbelt::LogLevel::kDebug,
                            "Client %s reclaiming publisher %d on channel %s",
@@ -549,7 +551,7 @@ void ClientHandler::HandleCreatePublisher(
     // Create the publisher.
     absl::StatusOr<PublisherUser *> publisher = channel->AddPublisher(
         this, req.is_reliable(), req.is_local(), req.is_bridge(),
-        req.for_tunnel(), req.is_fixed_size());
+        req.for_tunnel(), req.is_fixed_size(), req.process_id());
     if (!publisher.ok()) {
       response->set_error(publisher.status().ToString());
       return;
@@ -752,6 +754,7 @@ void ClientHandler::HandleCreateSubscriber(
     sub = static_cast<SubscriberUser *>(*user);
     if (sub->GetHandler() == nullptr) {
       sub->SetHandler(this);
+      sub->SetProcessId(req.process_id());
       reclaimed = true;
       server_->logger_.Log(toolbelt::LogLevel::kDebug,
                            "Client %s reclaiming subscriber %d on channel %s",
@@ -776,7 +779,8 @@ void ClientHandler::HandleCreateSubscriber(
                          GetTotalVM().c_str());
     absl::StatusOr<SubscriberUser *> subscriber =
         channel->AddSubscriber(this, req.is_reliable(), req.is_bridge(),
-                               req.for_tunnel(), req.max_active_messages());
+                               req.for_tunnel(), req.max_active_messages(),
+                               req.process_id());
     if (!subscriber.ok()) {
       response->set_error(subscriber.status().ToString());
       return;
