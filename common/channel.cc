@@ -375,9 +375,6 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
     // Remove the subscriber from the subscriber bitset.
     ccb_->subscribers.Clear(owner);
     ccb_->num_subs.RemoveSubscriber(vchan_id);
-    if (!IsPlaceholder()) {
-      GetAvailableSlotQueue(owner).Reset();
-    }
 
     // Go through all the slots and remove the owner from the owners bitset.
     for (int i = 0; i < NumSlots(); i++) {

@@ -13,6 +13,21 @@
 namespace subspace {
 namespace details {
 
+class SubscriberQueuePublishGuard {
+public:
+  SubscriberQueuePublishGuard(Channel &channel, int publisher_id)
+      : channel_(channel), publisher_id_(publisher_id) {
+    channel_.BeginSubscriberQueuePublish(publisher_id_);
+  }
+  ~SubscriberQueuePublishGuard() {
+    channel_.EndSubscriberQueuePublish(publisher_id_);
+  }
+
+private:
+  Channel &channel_;
+  int publisher_id_;
+};
+
 absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
   if (final_slot_size == 0) {
     // If we are being asked for a slot size of 0, we will just use 64 bytes.
@@ -534,8 +549,9 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
 
   // Tell all subscribers that the slot is available, BEFORE bumping
   // total_messages.  When subscriber queues are enabled, unreliable C++
-  // subscribers consume the per-subscriber queue. Otherwise they use the
-  // available-slot bitset, just like reliable subscribers.
+  // subscribers consume the per-subscriber queue first. The available-slot
+  // bitset remains authoritative and provides recovery when queue insertion
+  // fails or entries are evicted.
   //
   // Reliable SubscriberImpl::NextSlot() uses total_messages as a version stamp
   // for its cached active_slots_ snapshot: a reliable subscriber that observes
@@ -545,23 +561,21 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
   // the relaxed bit writes are sequenced-before the seq_cst increment and
   // therefore happens-before any subscriber's seq_cst load of total_messages
   // that observes the new value.
-  const bool notify_reliable_subscribers =
-      GetCounters().num_reliable_subs != 0;
-  const bool use_subscriber_queues = SubscriberQueueSize() > 0;
-  ccb_->subscribers.Traverse(
-      [this, slot, notify_reliable_subscribers,
-       use_subscriber_queues](int sub_id) {
+  SubscriberQueuePublishGuard publish_guard(*this, owner);
+  ccb_->subscribers.TraverseSeqCst([this, slot](int sub_id) {
         if (vchan_id_ != -1 && GetSubVchanId(sub_id) != -1 &&
             vchan_id_ != GetSubVchanId(sub_id)) {
           return;
         }
-        if (notify_reliable_subscribers || !use_subscriber_queues) {
-          GetAvailableSlots(sub_id).Set(slot->id);
+        // The bitset is the authoritative delivery record. The queue is an
+        // acceleration index and may reject an insertion under contention or
+        // after a peer dies mid-operation.
+        GetAvailableSlots(sub_id).Set(slot->id);
+        InPlaceSlotQueue *queue = GetAvailableSlotQueueAddress(sub_id);
+        if (queue != nullptr) {
+          queue->Push(slot->id, slot->ordinal);
         }
-        if (use_subscriber_queues) {
-          GetAvailableSlotQueue(sub_id).Push(slot->id, slot->ordinal);
-        }
-      });
+  });
 
   // Update counters AFTER notifying subscribers (see above).
   if (!is_activation) {

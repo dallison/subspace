@@ -787,6 +787,7 @@ TEST_F(ClientTest, ClientPublisherSubscriberIntrospection) {
   ASSERT_NE(nullptr, pub.publisher);
 
   SubspaceSubscriberOptions sub_opts = CSubscriberOptionsDefault();
+  sub_opts.subscriber_queue_size = 4;
   sub_opts.type.type = type;
   sub_opts.type.type_length = strlen(type);
   sub_opts.mux = mux;
@@ -862,7 +863,7 @@ TEST_F(ClientTest, ClientPublisherSubscriberIntrospection) {
   ASSERT_EQ(0, subspace_get_subscriber_num_active_messages(sub));
   ASSERT_EQ(8, subspace_get_subscriber_metadata_size(sub));
   ASSERT_EQ(4, subspace_get_subscriber_checksum_size(sub));
-  ASSERT_EQ(12, subspace_get_subscriber_queue_size(sub));
+  ASSERT_EQ(4, subspace_get_subscriber_queue_size(sub));
   ASSERT_GE(subspace_get_subscriber_prefix_size(sub), 64);
   ASSERT_GE(subspace_get_subscriber_virtual_memory_usage(sub), 0U);
 

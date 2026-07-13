@@ -527,6 +527,7 @@ subspace_create_subscriber(SubspaceClient client, const char *channel_name,
                            SubspaceSubscriberOptions options) {
   subspace::SubscriberOptions subspace_options;
   subspace_options.SetReliable(options.reliable)
+      .SetSubscriberQueueSize(options.subscriber_queue_size)
       .SetBridge(options.bridge)
       .SetForTunnel(options.for_tunnel)
       .SetType(StringFromPointer(options.type.type, options.type.type_length))

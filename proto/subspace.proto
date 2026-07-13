@@ -41,7 +41,8 @@ message CreatePublisherRequest {
   bool use_split_buffers = 16; // Prefixes and payload slots are separate.
   int32 max_publishers = 17;   // 0 means no explicit publisher limit.
   bool split_buffers_over_bridge = 18; // Remote bridge publisher uses split buffers.
-  // Entries in each subscriber's CCB slot queue. 0 disables the queue.
+  // Default entries in a subscriber's CCB slot queue. Also provisions the
+  // packed queue arena; 0 selects the bitset path by default.
   int32 subscriber_queue_size = 19;
 }
 
@@ -75,6 +76,8 @@ message CreateSubscriberRequest {
   bool for_tunnel = 7;
   string mux = 8;
   int32 vchan_id = 9;
+  // Requested queue capacity. 0 uses the publisher's channel default.
+  int32 subscriber_queue_size = 10;
 }
 
 message CreateSubscriberResponse {
@@ -95,7 +98,9 @@ message CreateSubscriberResponse {
   int32 checksum_size = 15; // Bytes reserved for checksum (from publisher).
   int32 metadata_size = 16; // Bytes reserved for user metadata (from publisher).
   bool use_split_buffers = 17;
-  int32 subscriber_queue_size = 18; // Resolved capacity; 0 means disabled.
+  int32 subscriber_queue_size = 18; // This subscriber's resolved capacity.
+  // Publisher default used to size the shared queue arena.
+  int32 default_subscriber_queue_size = 19;
 }
 
 message GetTriggersRequest { string channel_name = 1; }
@@ -512,6 +517,8 @@ message ShadowAddSubscriber {
   bool is_bridge = 4;
   int32 max_active_messages = 5;
   bool for_tunnel = 6;
+  // Requested capacity. 0 uses the publisher's channel default.
+  int32 subscriber_queue_size = 7;
   // FDs sent via SCM_RIGHTS: [trigger_fd, poll_fd]
 }
 

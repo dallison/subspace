@@ -145,6 +145,13 @@ PYBIND11_MODULE(subspace, m) {
       .def(py::init<>())
       .def("set_reliable", &SubscriberOptions::SetReliable,
            "Set whether the subscriber is reliable.")
+      .def("set_subscriber_queue_size",
+           &SubscriberOptions::SetSubscriberQueueSize,
+           "Set this subscriber's queue capacity; zero uses the publisher "
+           "default.")
+      .def("subscriber_queue_size",
+           &SubscriberOptions::SubscriberQueueSize,
+           "Get this subscriber's requested queue capacity.")
       .def("set_pass_activation", &SubscriberOptions::SetPassActivation,
            "Set whether the subscriber passes activation messages.")
       .def("is_reliable", &SubscriberOptions::IsReliable,

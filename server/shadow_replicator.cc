@@ -236,6 +236,7 @@ void ShadowReplicator::SendAddSubscriber(const std::string &channel_name,
   msg->set_is_bridge(sub->IsBridge());
   msg->set_for_tunnel(sub->ForTunnel());
   msg->set_max_active_messages(sub->MaxActiveMessages());
+  msg->set_subscriber_queue_size(sub->SubscriberQueueSize());
 
   std::vector<toolbelt::FileDescriptor> fds;
   fds.push_back(const_cast<SubscriberUser *>(sub)->GetTriggerFd());
@@ -430,9 +431,8 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
       if (msg.has_fd() && static_cast<size_t>(msg.fd_index()) < fds.size()) {
         fd = std::move(fds[size_t(msg.fd_index())]);
       }
-      (*ch)->client_buffers.push_back(
-          RegisteredClientBuffer{.metadata = std::move(metadata),
-                                 .fd = std::move(fd)});
+      (*ch)->client_buffers.push_back(RegisteredClientBuffer{
+          .metadata = std::move(metadata), .fd = std::move(fd)});
       continue;
     }
 
@@ -481,6 +481,7 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
           .is_bridge = msg.is_bridge(),
           .for_tunnel = msg.for_tunnel(),
           .max_active_messages = msg.max_active_messages(),
+          .subscriber_queue_size = msg.subscriber_queue_size(),
           .trigger_fd = std::move(fds[0]),
           .poll_fd = std::move(fds[1]),
       });

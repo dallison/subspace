@@ -83,14 +83,19 @@ private:
 class SubscriberUser : public User {
 public:
   SubscriberUser(ClientHandler *handler, int id, bool is_reliable,
-                 bool is_bridge, bool for_tunnel, int max_active_messages)
+                 bool is_bridge, bool for_tunnel, int max_active_messages,
+                 int subscriber_queue_size)
       : User(handler, id, is_reliable, is_bridge, for_tunnel),
-        max_active_messages_(max_active_messages) {}
+        max_active_messages_(max_active_messages),
+        subscriber_queue_size_(subscriber_queue_size) {}
   bool IsSubscriber() const override { return true; }
   int MaxActiveMessages() const { return max_active_messages_; }
+  int SubscriberQueueSize() const { return subscriber_queue_size_; }
 
 private:
   int max_active_messages_;
+  // Requested capacity. Zero means use the publisher's channel default.
+  int subscriber_queue_size_;
 };
 
 class PublisherUser : public User {
@@ -217,8 +222,9 @@ public:
                                                bool is_fixed_size);
   absl::StatusOr<SubscriberUser *>
   AddSubscriber(ClientHandler *handler, bool is_reliable, bool is_bridge,
-                bool for_tunnel, int max_active_messages);
-  virtual void RegisterExistingSubscribers();
+                bool for_tunnel, int max_active_messages,
+                int subscriber_queue_size);
+  virtual std::vector<std::string> RegisterExistingSubscribers();
 
   virtual std::string Type() const { return Channel::Type(); }
   virtual void SetType(const std::string &type) { Channel::SetType(type); }
@@ -302,9 +308,7 @@ public:
 
   virtual int NumSlots() const { return Channel::NumSlots(); }
   virtual void CleanupSlots(int owner, bool reliable, bool is_pub,
-                            int vchan_id) {
-    Channel::CleanupSlots(owner, reliable, is_pub, vchan_id);
-  }
+                            int vchan_id);
 
   virtual void RemoveBuffer(uint64_t session_id, Server *server = nullptr);
   void RegisterClientBuffer(ClientBufferHandleMetadata metadata,
@@ -443,6 +447,10 @@ public:
   }
 
 protected:
+  absl::Status AllocateSubscriberQueue(int sub_id,
+                                       int subscriber_queue_size);
+  void RetireSubscriberQueue(int sub_id);
+
   absl::flat_hash_map<int, std::unique_ptr<User>> users_;
   toolbelt::BitSet<kMaxUsers> user_ids_;
   absl::flat_hash_map<ChannelTransmitter, std::string> bridged_publishers_;
@@ -477,7 +485,7 @@ public:
   void RemoveVirtualChannel(VirtualChannel *vchan);
 
   bool IsMux() const override { return true; }
-  void RegisterExistingSubscribers() override;
+  std::vector<std::string> RegisterExistingSubscribers() override;
   bool IsEmpty() const override {
     return virtual_channels_.empty() && ServerChannel::IsEmpty();
   }
@@ -540,6 +548,9 @@ public:
 
   bool IsPlaceholder() const override { return mux_->IsPlaceholder(); }
   int SubscriberQueueSize() const override { return mux_->SubscriberQueueSize(); }
+  int SubscriberQueueSize(int sub_id) const override {
+    return mux_->SubscriberQueueSize(sub_id);
+  }
   void SetSubscriberQueueSize(int n) override {
     mux_->SetSubscriberQueueSize(n);
   }

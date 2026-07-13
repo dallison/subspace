@@ -565,9 +565,11 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
   subscriber_options.use_split_buffers = sub_resp.use_split_buffers();
 
   std::shared_ptr<SubscriberImpl> channel = std::make_shared<SubscriberImpl>(
-      channel_name, sub_resp.num_slots(), sub_resp.subscriber_queue_size(),
-      sub_resp.channel_id(), sub_resp.subscriber_id(), sub_resp.vchan_id(),
-      session_id_, sub_resp.type(), subscriber_options,
+      channel_name, sub_resp.num_slots(),
+      sub_resp.default_subscriber_queue_size(),
+      sub_resp.subscriber_queue_size(), sub_resp.channel_id(),
+      sub_resp.subscriber_id(), sub_resp.vchan_id(), session_id_,
+      sub_resp.type(), subscriber_options,
       [this](Channel *c) {
         return CheckReload(static_cast<ClientChannel *>(c));
       },
@@ -579,7 +581,7 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
       });
 
   channel->SetNumSlots(sub_resp.num_slots());
-  channel->SetSubscriberQueueSize(sub_resp.subscriber_queue_size());
+  channel->SetEffectiveSubscriberQueueSize(sub_resp.subscriber_queue_size());
   {
     int32_t cs = sub_resp.checksum_size() > 0 ? sub_resp.checksum_size() : 4;
     int32_t ms = sub_resp.metadata_size() > 0 ? sub_resp.metadata_size() : 0;
@@ -1145,25 +1147,6 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     printf("read new_slot: %d: %" PRId64 "\n", new_slot->id, new_slot->ordinal);
   }
 
-  if (mode == ReadMode::kReadNext && last_ordinal != -1 &&
-      subscriber->options_.DetectDroppedMessages()) {
-    int drops = subscriber->DetectDrops(new_slot->vchan_id);
-    if (drops > 0) {
-      // We dropped a message.  If we have a callback registered for this
-      // channel, call it with the number of dropped messages.
-      auto it = dropped_message_callbacks_.find(subscriber);
-      if (it != dropped_message_callbacks_.end()) {
-        it->second(subscriber, drops);
-      }
-      subscriber->RecordDroppedMessages(drops);
-      if (subscriber->options_.log_dropped_messages) {
-        logger_.Log(toolbelt::LogLevel::kWarning,
-                    "Dropped %d message%s on channel %s", drops,
-                    drops == 1 ? "" : "s", subscriber->Name().c_str());
-      }
-    }
-  }
-
   MessagePrefix *prefix = subscriber->Prefix(new_slot);
 
   bool is_activation = false;
@@ -1219,8 +1202,28 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     subscriber->UnreadSlot(new_slot);
     // Subscriber does not have a slot now but the slot it had is still active.
   } else {
+    if (mode == ReadMode::kReadNext &&
+        subscriber->options_.DetectDroppedMessages()) {
+      int drops = subscriber->ConsumeQueueDrops();
+      if (last_ordinal != -1) {
+        drops = std::max(drops,
+                         subscriber->DetectDrops(new_slot->vchan_id));
+      }
+      if (drops > 0) {
+        auto it = dropped_message_callbacks_.find(subscriber);
+        if (it != dropped_message_callbacks_.end()) {
+          it->second(subscriber, drops);
+        }
+        subscriber->RecordDroppedMessages(drops);
+        if (subscriber->options_.log_dropped_messages) {
+          logger_.Log(toolbelt::LogLevel::kWarning,
+                      "Dropped %d message%s on channel %s", drops,
+                      drops == 1 ? "" : "s", subscriber->Name().c_str());
+        }
+      }
+    }
     // We have a slot, claim it.
-    subscriber->ClaimSlot(new_slot, subscriber->VirtualChannelId(),
+    subscriber->ClaimSlot(new_slot, new_slot->vchan_id,
                           mode == ReadMode::kReadNewest);
   }
   auto ret_msg = Message(msg);
@@ -1386,6 +1389,8 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
   cmd->set_channel_name(subscriber->Name());
   cmd->set_subscriber_id(subscriber->GetSubscriberId());
   cmd->set_mux(subscriber->options_.mux);
+  cmd->set_subscriber_queue_size(
+      subscriber->options_.SubscriberQueueSize());
 
   // Send request to server and wait for response.
   Response resp;
@@ -1409,7 +1414,10 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
   }
   subscriber->options_.use_split_buffers = sub_resp.use_split_buffers();
   subscriber->SetNumSlots(sub_resp.num_slots());
-  subscriber->SetSubscriberQueueSize(sub_resp.subscriber_queue_size());
+  subscriber->SetSubscriberQueueSize(
+      sub_resp.default_subscriber_queue_size());
+  subscriber->SetEffectiveSubscriberQueueSize(
+      sub_resp.subscriber_queue_size());
   {
     int32_t cs = sub_resp.checksum_size() > 0 ? sub_resp.checksum_size() : 4;
     int32_t ms = sub_resp.metadata_size() > 0 ? sub_resp.metadata_size() : 0;
@@ -1905,6 +1913,7 @@ void ClientImpl::FillCreateSubscriberRequest(CreateSubscriberRequest *cmd,
   cmd->set_max_active_messages(opts.MaxActiveMessages());
   cmd->set_mux(opts.Mux());
   cmd->set_vchan_id(opts.VchanId());
+  cmd->set_subscriber_queue_size(opts.SubscriberQueueSize());
 }
 
 void ClientImpl::ApplySubscriberResponseFds(

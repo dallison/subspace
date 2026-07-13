@@ -23,6 +23,7 @@ pub type OnReceiveCallback = Box<dyn Fn(*mut u8, i64) -> Result<i64> + Send + Sy
 pub struct SubscriberImpl {
     pub channel: Channel,
     pub subscriber_id: i32,
+    pub subscriber_queue_size: i32,
     pub options: SubscriberOptions,
 
     pub poll_fd: RawFd,
@@ -42,6 +43,13 @@ pub struct SubscriberImpl {
     pub(crate) on_receive_callback: Option<OnReceiveCallback>,
     pub(crate) checksum_callback: Option<checksum::ChecksumCallback>,
     pub checksum_tmp: Vec<u8>,
+    pub poll_drain_pending: bool,
+    pub(crate) poll_drain_exhausted: bool,
+    pub(crate) queue_drain_tail: Option<u64>,
+    pub(crate) poll_snapshot_valid: bool,
+    poll_snapshot_total: u64,
+    poll_snapshot: Vec<ActiveSlot>,
+    pub(crate) pending_queue_drops: i32,
 }
 
 struct OrdinalTracker {
@@ -94,15 +102,6 @@ impl FastRingBuffer {
         self.set.contains(value)
     }
 
-    fn traverse<F: FnMut(&OrdinalAndVchanId)>(&self, mut func: F) {
-        for v in &self.buffer {
-            func(v);
-        }
-    }
-
-    fn size(&self) -> usize {
-        self.buffer.len()
-    }
 }
 
 fn virtual_channel_id_match(slot_vchan_id: i16, subscriber_vchan_id: i32) -> bool {
@@ -115,6 +114,7 @@ impl SubscriberImpl {
     pub fn new(
         name: String,
         num_slots: i32,
+        default_subscriber_queue_size: i32,
         subscriber_queue_size: i32,
         channel_id: i32,
         subscriber_id: i32,
@@ -127,13 +127,14 @@ impl SubscriberImpl {
             channel: Channel::new(
                 name,
                 num_slots,
-                subscriber_queue_size,
+                default_subscriber_queue_size,
                 channel_id,
                 channel_type,
                 vchan_id,
                 session_id,
             ),
             subscriber_id,
+            subscriber_queue_size,
             options,
             poll_fd: -1,
             trigger_fd: -1,
@@ -149,6 +150,13 @@ impl SubscriberImpl {
             on_receive_callback: None,
             checksum_callback: None,
             checksum_tmp: vec![0u8; 4],
+            poll_drain_pending: false,
+            poll_drain_exhausted: false,
+            queue_drain_tail: None,
+            poll_snapshot_valid: false,
+            poll_snapshot_total: 0,
+            poll_snapshot: Vec::new(),
+            pending_queue_drops: 0,
         };
         s.get_or_create_tracker(vchan_id);
         s
@@ -225,7 +233,7 @@ impl SubscriberImpl {
     }
 
     pub fn remember_ordinal(&mut self, ordinal: u64, vchan_id: i32) {
-        let tracker = self.get_or_create_tracker(self.channel.vchan_id);
+        let tracker = self.get_or_create_tracker(vchan_id);
         if ordinal > tracker.last_ordinal_seen {
             tracker.last_ordinal_seen = ordinal;
         }
@@ -349,34 +357,56 @@ impl SubscriberImpl {
     }
 
     fn find_unseen_ordinal(&self) -> Option<usize> {
-        let tracker = self.ordinal_trackers.get(&self.channel.vchan_id)?;
         for (i, active) in self.channel.active_slots.iter().enumerate() {
-            if active.ordinal != 0
-                && !tracker.ring.contains(&OrdinalAndVchanId {
-                    ordinal: active.ordinal,
-                    vchan_id: active.vchan_id,
-                })
-            {
+            let seen = self.ordinal_trackers.get(&active.vchan_id).is_some_and(
+                |tracker| {
+                    active.ordinal <= tracker.last_ordinal_seen
+                        || tracker.ring.contains(&OrdinalAndVchanId {
+                            ordinal: active.ordinal,
+                            vchan_id: active.vchan_id,
+                        })
+                },
+            );
+            if active.ordinal != 0 && !seen {
                 return Some(i);
             }
         }
         None
     }
 
-    fn next_queued_slot(&mut self) -> Option<usize> {
+    fn next_queued_slot(&mut self, max_queue_position: u64) -> Option<usize> {
         if self.options.reliable {
             return None;
         }
 
-        let _ = self
+        let Some(queue) = self
             .channel
             .get_available_slot_queue(self.subscriber_id as usize)
-            .consume_overflow();
+        else {
+            return None;
+        };
+        let queue_drops = queue.consume_overflow();
+        if self.options.detect_dropped_messages {
+            self.pending_queue_drops = self
+                .pending_queue_drops
+                .saturating_add(queue_drops as i32);
+        }
+        queue.consume_insertion_failure();
         loop {
+            let queue_at_boundary = match self
+                .channel
+                .get_available_slot_queue(self.subscriber_id as usize)
+            {
+                Some(queue) => queue.head() >= max_queue_position,
+                None => true,
+            };
+            if queue_at_boundary {
+                break;
+            }
             let Some((slot_id, ordinal)) = self
                 .channel
                 .get_available_slot_queue(self.subscriber_id as usize)
-                .try_pop()
+                .and_then(|queue| queue.try_pop())
             else {
                 break;
             };
@@ -397,6 +427,13 @@ impl SubscriberImpl {
             }
 
             let vchan_id = slot.vchan_id as i32;
+            if self
+                .ordinal_trackers
+                .get(&vchan_id)
+                .is_some_and(|tracker| ordinal <= tracker.last_ordinal_seen)
+            {
+                continue;
+            }
             if self.channel.atomic_inc_ref_count::<fn()>(
                 slot_idx,
                 false,
@@ -453,7 +490,34 @@ impl SubscriberImpl {
 
             self.reload_buffers_if_necessary();
 
-            if let Some(slot_idx) = self.next_queued_slot() {
+            if self.poll_drain_pending && self.poll_drain_exhausted {
+                if self.channel.ccb().total_messages.load(Ordering::SeqCst)
+                    != self.poll_snapshot_total
+                {
+                    self.poll_drain_exhausted = false;
+                    self.queue_drain_tail = None;
+                    self.poll_snapshot_valid = false;
+                } else {
+                    return None;
+                }
+            }
+
+            if self.poll_drain_pending && !self.poll_snapshot_valid {
+                self.collect_visible_slots(&bits);
+                self.channel
+                    .active_slots
+                    .sort_by_key(|slot| (slot.timestamp, slot.ordinal));
+                self.poll_snapshot.clone_from(&self.channel.active_slots);
+                self.poll_snapshot_total =
+                    self.channel.ccb().total_messages.load(Ordering::SeqCst);
+                self.poll_snapshot_valid = true;
+                self.queue_drain_tail = self
+                    .channel
+                    .get_available_slot_queue(self.subscriber_id as usize)
+                    .map(|queue| queue.tail());
+            }
+            let max_queue_position = self.queue_drain_tail.unwrap_or(u64::MAX);
+            if let Some(slot_idx) = self.next_queued_slot(max_queue_position) {
                 return Some(slot_idx);
             }
 
@@ -461,15 +525,21 @@ impl SubscriberImpl {
                 self.populate_active_slots(&bits);
             }
 
-            self.collect_visible_slots(&bits);
+            if self.poll_drain_pending && self.poll_snapshot_valid {
+                self.channel
+                    .active_slots
+                    .clone_from(&self.poll_snapshot);
+            } else {
+                self.collect_visible_slots(&bits);
+            }
 
             self.channel
                 .active_slots
-                .sort_by_key(|s| s.timestamp);
+                .sort_by_key(|s| (s.timestamp, s.ordinal));
 
             let unseen_idx = match self.find_unseen_ordinal() {
                 Some(idx) => idx,
-                None => return None,
+                None => break,
             };
 
             let active = self.channel.active_slots[unseen_idx].clone();
@@ -515,6 +585,15 @@ impl SubscriberImpl {
                 return Some(active.slot_index);
             }
         }
+        if self.poll_drain_pending
+            && self.channel.ccb().total_messages.load(Ordering::SeqCst)
+                != self.poll_snapshot_total
+        {
+            self.trigger();
+        }
+        if self.poll_drain_pending {
+            self.poll_drain_exhausted = true;
+        }
         None
     }
 
@@ -523,6 +602,18 @@ impl SubscriberImpl {
             .channel
             .get_available_slots(self.subscriber_id as usize);
         self.channel.embargoed_slots.clear_all();
+        if let Some(queue) = self
+            .channel
+            .get_available_slot_queue(self.subscriber_id as usize)
+        {
+            let queue_drops = queue.consume_overflow();
+            if self.options.detect_dropped_messages {
+                self.pending_queue_drops = self
+                    .pending_queue_drops
+                    .saturating_add(queue_drops as i32);
+            }
+            queue.consume_insertion_failure();
+        }
 
         loop {
             self.reload_buffers_if_necessary();
@@ -535,7 +626,7 @@ impl SubscriberImpl {
 
             self.channel
                 .active_slots
-                .sort_by_key(|s| s.timestamp);
+                .sort_by_key(|s| (s.timestamp, s.ordinal));
 
             let new_active = if let Some(last) = self.channel.active_slots.last() {
                 if let Some(current_idx) = self.channel.slot {
@@ -647,48 +738,21 @@ impl SubscriberImpl {
     }
 
     pub fn detect_drops(&mut self, vchan_id: i32) -> i32 {
-        let tracker_vchan = self.channel.vchan_id;
-        let tracker = match self.ordinal_trackers.get(&tracker_vchan) {
-            Some(t) => t,
-            None => return 0,
+        let Some(slot_idx) = self.channel.slot else {
+            return 0;
         };
-
-        let mut ordinals: Vec<OrdinalAndVchanId> = Vec::with_capacity(tracker.ring.size());
-        let last_seen = tracker.last_ordinal_seen;
-        tracker.ring.traverse(|o| {
-            if o.vchan_id == vchan_id && o.ordinal >= last_seen {
-                ordinals.push(*o);
-            }
-        });
-
-        if ordinals.is_empty() {
+        let ordinal = self.channel.slot_ref(slot_idx).ordinal;
+        let tracker = self.get_or_create_tracker(vchan_id);
+        if ordinal == 0 || ordinal <= tracker.last_ordinal_seen {
             return 0;
         }
-
-        ordinals.sort_by(|a, b| {
-            a.vchan_id
-                .cmp(&b.vchan_id)
-                .then(a.ordinal.cmp(&b.ordinal))
-        });
-
-        let last_ordinal = ordinals.last().unwrap().ordinal;
-
-        let mut drops: i32 = 0;
-        for i in 1..ordinals.len() {
-            if ordinals[i].vchan_id != vchan_id {
-                continue;
-            }
-            let gap = ordinals[i].ordinal.wrapping_sub(ordinals[i - 1].ordinal);
-            if gap > 1 {
-                drops += (gap - 1) as i32;
-            }
+        let last_seen = tracker.last_ordinal_seen;
+        tracker.last_ordinal_seen = ordinal;
+        if last_seen == 0 || ordinal == last_seen + 1 {
+            0
+        } else {
+            (ordinal - last_seen - 1) as i32
         }
-
-        // Update last_ordinal_seen.
-        let tracker = self.ordinal_trackers.get_mut(&tracker_vchan).unwrap();
-        tracker.last_ordinal_seen = last_ordinal;
-
-        drops
     }
 
     pub fn find_active_slot_by_timestamp(

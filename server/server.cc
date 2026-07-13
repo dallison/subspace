@@ -1132,6 +1132,10 @@ Server::CreateMultiplexer(const std::string &channel_name, int slot_size,
   }
   channel->SetSharedMemoryFds(std::move(*fds));
   channels_.emplace(std::make_pair(channel_name, channel));
+  OnNewChannel(channel_name);
+  ForEachShadow([channel](const std::unique_ptr<ShadowReplicator> &s) {
+    s->SendCreateChannel(channel);
+  });
   return channel;
 }
 
@@ -1247,7 +1251,9 @@ absl::Status Server::RemapChannel(ServerChannel *channel, int slot_size,
   }
   channel->SetLastKnownSlotSize(slot_size);
   channel->SetSharedMemoryFds(std::move(*fds));
-  channel->RegisterExistingSubscribers();
+  for (const std::string &warning : channel->RegisterExistingSubscribers()) {
+    logger_.Log(toolbelt::LogLevel::kWarning, "%s", warning.c_str());
+  }
   // Remapping replaces the CCB/BCB FDs; shadow recovery must receive the
   // refreshed descriptors instead of retaining the placeholder mappings.
   ForEachShadow([channel](const std::unique_ptr<ShadowReplicator> &s) {
@@ -1265,12 +1271,9 @@ ServerChannel *Server::FindChannel(const std::string &channel_name) {
 }
 
 absl::Status Server::RecoverFromShadow(RecoveredState &state) {
-  for (auto &rch : state.channels) {
-    channel_ids_.Set(rch.channel_id);
-
-    auto *channel = new ServerChannel(rch.channel_id, rch.name, rch.num_slots,
-                                      rch.subscriber_queue_size, rch.type,
-                                      false, session_id_);
+  auto configure_channel = [this](ServerChannel *channel,
+                                  RecoveredChannel &rch,
+                                  bool map_storage) -> absl::Status {
     channel->SetDebug(logger_.GetLogLevel() <=
                       toolbelt::LogLevel::kVerboseDebug);
     channel->SetLastKnownSlotSize(rch.slot_size);
@@ -1293,16 +1296,21 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
       }
     }
 
-    if (absl::Status s = channel->MapExisting(scb_fd_, std::move(rch.ccb_fd),
-                                              std::move(rch.bcb_fd));
-        !s.ok()) {
-      return s;
+    if (map_storage) {
+      if (absl::Status s = channel->MapExisting(
+              scb_fd_, std::move(rch.ccb_fd), std::move(rch.bcb_fd));
+          !s.ok()) {
+        return s;
+      }
+      for (RegisteredClientBuffer &buffer : rch.client_buffers) {
+        channel->RegisterClientBuffer(std::move(buffer.metadata),
+                                      std::move(buffer.fd));
+      }
     }
-    for (RegisteredClientBuffer &buffer : rch.client_buffers) {
-      channel->RegisterClientBuffer(std::move(buffer.metadata),
-                                    std::move(buffer.fd));
-    }
+    return absl::OkStatus();
+  };
 
+  auto restore_users = [](ServerChannel *channel, RecoveredChannel &rch) {
     for (auto &rpub : rch.publishers) {
       auto pub = std::make_unique<PublisherUser>(
           nullptr, rpub.id, rpub.is_reliable, rpub.is_local, rpub.is_bridge,
@@ -1324,18 +1332,126 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
     for (auto &rsub : rch.subscribers) {
       auto sub = std::make_unique<SubscriberUser>(
           nullptr, rsub.id, rsub.is_reliable, rsub.is_bridge, rsub.for_tunnel,
-          rsub.max_active_messages);
+          rsub.max_active_messages, rsub.subscriber_queue_size);
 
       toolbelt::TriggerFd tfd(rsub.trigger_fd, rsub.poll_fd);
       sub->SetTriggerFd(std::move(tfd));
 
       channel->AddUser(rsub.id, std::move(sub));
     }
+  };
 
+  absl::flat_hash_set<std::string> mux_names;
+  for (const RecoveredChannel &rch : state.channels) {
+    if (!rch.mux.empty()) {
+      mux_names.insert(rch.mux);
+    }
+  }
+
+  absl::flat_hash_map<std::string, ChannelMultiplexer *> recovered_muxes;
+  absl::flat_hash_map<int, std::string> physical_channel_ids;
+
+  // Recover physical channels first so virtual channels can attach to their
+  // single shared CCB/BCB mapping.
+  for (RecoveredChannel &rch : state.channels) {
+    if (!rch.mux.empty()) {
+      continue;
+    }
+    if (channels_.contains(rch.name) ||
+        physical_channel_ids.contains(rch.channel_id)) {
+      return absl::FailedPreconditionError(absl::StrFormat(
+          "duplicate recovered physical channel mapping for %s (id=%d)",
+          rch.name, rch.channel_id));
+    }
+    physical_channel_ids.emplace(rch.channel_id, rch.name);
+    channel_ids_.Set(rch.channel_id);
+    ServerChannel *channel = nullptr;
+    if (mux_names.contains(rch.name)) {
+      auto *mux = new ChannelMultiplexer(
+          rch.channel_id, rch.name, rch.num_slots, rch.subscriber_queue_size,
+          rch.type, session_id_);
+      channel = mux;
+      recovered_muxes.emplace(rch.name, mux);
+    } else {
+      channel = new ServerChannel(
+          rch.channel_id, rch.name, rch.num_slots, rch.subscriber_queue_size,
+          rch.type, false, session_id_);
+    }
+    if (absl::Status status = configure_channel(channel, rch, true);
+        !status.ok()) {
+      delete channel;
+      return status;
+    }
+    restore_users(channel, rch);
     channels_.emplace(rch.name, channel);
     logger_.Log(toolbelt::LogLevel::kInfo,
                 "Recovered channel '%s' (id=%d, %d pubs, %d subs)",
                 rch.name.c_str(), rch.channel_id,
+                static_cast<int>(rch.publishers.size()),
+                static_cast<int>(rch.subscribers.size()));
+  }
+
+  // Older shadow state may contain only virtual-channel records. In that case
+  // infer and create the physical mux from the first virtual record.
+  for (RecoveredChannel &rch : state.channels) {
+    if (rch.mux.empty()) {
+      continue;
+    }
+    ChannelMultiplexer *mux = nullptr;
+    auto mux_it = recovered_muxes.find(rch.mux);
+    if (mux_it == recovered_muxes.end()) {
+      if (channels_.contains(rch.mux) ||
+          physical_channel_ids.contains(rch.channel_id)) {
+        return absl::FailedPreconditionError(absl::StrFormat(
+            "duplicate recovered mux mapping for %s (id=%d)", rch.mux,
+            rch.channel_id));
+      }
+      physical_channel_ids.emplace(rch.channel_id, rch.mux);
+      channel_ids_.Set(rch.channel_id);
+      mux = new ChannelMultiplexer(
+          rch.channel_id, rch.mux, rch.num_slots, rch.subscriber_queue_size,
+          rch.type, session_id_);
+      if (absl::Status status = configure_channel(mux, rch, true);
+          !status.ok()) {
+        delete mux;
+        return status;
+      }
+      channels_.emplace(rch.mux, mux);
+      recovered_muxes.emplace(rch.mux, mux);
+    } else {
+      mux = mux_it->second;
+      if (rch.channel_id != mux->GetChannelId() ||
+          rch.num_slots != mux->NumSlots() ||
+          rch.subscriber_queue_size != mux->SubscriberQueueSize()) {
+        return absl::FailedPreconditionError(absl::StrFormat(
+            "inconsistent recovered virtual channel %s for mux %s", rch.name,
+            rch.mux));
+      }
+    }
+
+    if (channels_.contains(rch.name)) {
+      return absl::FailedPreconditionError(
+          absl::StrFormat("duplicate recovered virtual channel %s", rch.name));
+    }
+    absl::StatusOr<std::unique_ptr<VirtualChannel>> recovered_vchan =
+        mux->CreateVirtualChannel(*this, rch.name, rch.vchan_id);
+    if (!recovered_vchan.ok()) {
+      return recovered_vchan.status();
+    }
+    VirtualChannel *vchan = recovered_vchan->get();
+    if (absl::Status status = configure_channel(vchan, rch, false);
+        !status.ok()) {
+      return status;
+    }
+    restore_users(vchan, rch);
+    for (const auto &entry : vchan->GetUsers()) {
+      mux->AddUserId(entry.first);
+    }
+    channels_.emplace(rch.name, std::move(*recovered_vchan));
+    logger_.Log(toolbelt::LogLevel::kInfo,
+                "Recovered virtual channel '%s' on mux '%s' "
+                "(%d pubs, %d subs)",
+                rch.name.c_str(), rch.mux.c_str(),
                 static_cast<int>(rch.publishers.size()),
                 static_cast<int>(rch.subscribers.size()));
   }

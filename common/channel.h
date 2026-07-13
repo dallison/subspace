@@ -19,9 +19,9 @@
 #include <atomic>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
-#include <thread>
 
 namespace subspace {
 
@@ -126,6 +126,9 @@ constexpr int kMaxChannels = 1024;
 // it's used as the size in a toolbelt::BitSet.
 constexpr int kMaxSlotOwners = 1024;
 constexpr size_t kDefaultMaxAvailableSlotQueueCapacity = 1024;
+constexpr size_t kMaxSlotQueueCasAttempts = 64;
+constexpr uint32_t kChannelControlBlockVersion = 2;
+constexpr size_t kMaxChannelControlBlockSize = 1ULL << 30;
 
 // This limits the number of virtual channels.  Each virtual channel
 // needs its own ordinal counter in the CCB (8 bytes each).
@@ -242,6 +245,10 @@ struct SlotQueueEntry {
   std::atomic<uint64_t> ordinal;
   std::atomic<int32_t> slot_id;
 };
+static_assert(sizeof(SlotQueueEntry) == 24);
+static_assert(offsetof(SlotQueueEntry, sequence) == 0);
+static_assert(offsetof(SlotQueueEntry, ordinal) == 8);
+static_assert(offsetof(SlotQueueEntry, slot_id) == 16);
 
 // A bounded MPSC queue stored in shared memory after the available-slots
 // bitsets. Publishers push slot IDs as they publish; the single owning
@@ -259,7 +266,8 @@ public:
     capacity_ = capacity;
     head_.store(0, std::memory_order_relaxed);
     tail_.store(0, std::memory_order_relaxed);
-    overflow_.store(false, std::memory_order_relaxed);
+    overflow_count_.store(0, std::memory_order_relaxed);
+    insertion_failed_.store(false, std::memory_order_relaxed);
     for (size_t i = 0; i < capacity_; i++) {
       entries_[i].sequence.store(i, std::memory_order_relaxed);
       entries_[i].ordinal.store(0, std::memory_order_relaxed);
@@ -272,6 +280,8 @@ public:
   void Reset() { Init(capacity_); }
 
   size_t Capacity() const { return capacity_; }
+  uint64_t Head() const { return head_.load(std::memory_order_acquire); }
+  uint64_t Tail() const { return tail_.load(std::memory_order_acquire); }
 
   // Push a published slot. Multiple publishers may call this concurrently.
   // If the queue is full, evict the oldest queued slot and enqueue the newest
@@ -279,36 +289,47 @@ public:
   // when an entry could not be reserved.
   bool Push(int32_t slot_id, uint64_t ordinal) {
     if (capacity_ == 0) {
-      overflow_.store(true, std::memory_order_relaxed);
+      insertion_failed_.store(true, std::memory_order_relaxed);
       return false;
     }
 
+    SlotQueueEntry *entry = nullptr;
     uint64_t tail = tail_.load(std::memory_order_relaxed);
-    for (;;) {
+    for (size_t attempt = 0; attempt < kMaxSlotQueueCasAttempts; ++attempt) {
       const uint64_t head = head_.load(std::memory_order_acquire);
       if (tail - head >= capacity_) {
         if (!DropFront()) {
-          overflow_.store(true, std::memory_order_release);
+          insertion_failed_.store(true, std::memory_order_release);
           return false;
         }
-        overflow_.store(true, std::memory_order_release);
+        overflow_count_.fetch_add(1, std::memory_order_release);
         tail = tail_.load(std::memory_order_relaxed);
         continue;
       }
-      if (tail_.compare_exchange_weak(tail, tail + 1,
-                                      std::memory_order_acq_rel,
-                                      std::memory_order_relaxed)) {
+      SlotQueueEntry &candidate = entries_[tail % capacity_];
+      // A consumer publishes the reusable sequence after advancing head_. It
+      // may be paused or terminated between those operations. Do not reserve
+      // the entry until it is reusable: reserving first would force this
+      // producer to wait indefinitely for that consumer.
+      if (candidate.sequence.load(std::memory_order_acquire) != tail) {
+        insertion_failed_.store(true, std::memory_order_release);
+        return false;
+      }
+      if (tail_.compare_exchange_strong(tail, tail + 1,
+                                        std::memory_order_acq_rel,
+                                        std::memory_order_relaxed)) {
+        entry = &candidate;
         break;
       }
     }
-
-    SlotQueueEntry &entry = entries_[tail % capacity_];
-    while (entry.sequence.load(std::memory_order_acquire) != tail) {
-      std::this_thread::yield();
+    if (entry == nullptr) {
+      insertion_failed_.store(true, std::memory_order_release);
+      return false;
     }
-    entry.slot_id.store(slot_id, std::memory_order_relaxed);
-    entry.ordinal.store(ordinal, std::memory_order_relaxed);
-    entry.sequence.store(tail + 1, std::memory_order_release);
+
+    entry->slot_id.store(slot_id, std::memory_order_relaxed);
+    entry->ordinal.store(ordinal, std::memory_order_relaxed);
+    entry->sequence.store(tail + 1, std::memory_order_release);
     return true;
   }
 
@@ -345,7 +366,7 @@ public:
     }
 
     uint64_t head = head_.load(std::memory_order_relaxed);
-    for (;;) {
+    for (size_t attempt = 0; attempt < kMaxSlotQueueCasAttempts; ++attempt) {
       SlotQueueEntry &entry = entries_[head % capacity_];
       if (entry.sequence.load(std::memory_order_acquire) != head + 1) {
         return false;
@@ -357,6 +378,7 @@ public:
         return true;
       }
     }
+    return false;
   }
 
   // Pop one slot for the owning subscriber. There is exactly one consumer per
@@ -368,7 +390,7 @@ public:
     }
 
     uint64_t head = head_.load(std::memory_order_relaxed);
-    for (;;) {
+    for (size_t attempt = 0; attempt < kMaxSlotQueueCasAttempts; ++attempt) {
       SlotQueueEntry &entry = entries_[head % capacity_];
       if (entry.sequence.load(std::memory_order_acquire) != head + 1) {
         return false;
@@ -385,12 +407,17 @@ public:
         return true;
       }
     }
+    return false;
   }
 
-  // Return and clear the overflow flag. Overflow means at least one older
-  // queued slot was evicted to preserve the newest data.
-  bool ConsumeOverflow() {
-    return overflow_.exchange(false, std::memory_order_acq_rel);
+  // Return and clear the number of older queued slots evicted to preserve the
+  // newest data.
+  uint32_t ConsumeOverflow() {
+    return overflow_count_.exchange(0, std::memory_order_acq_rel);
+  }
+
+  bool ConsumeInsertionFailure() {
+    return insertion_failed_.exchange(false, std::memory_order_acq_rel);
   }
 
 private:
@@ -401,17 +428,19 @@ private:
   std::atomic<uint64_t> head_{0};
   // Next sequence number producers will reserve for Push().
   std::atomic<uint64_t> tail_{0};
-  // Set when Push() evicts the oldest entry or cannot reserve an entry. The
-  // queue preserves newest data and existing ordinal-gap detection reports
-  // dropped messages when the subscriber next observes a later ordinal.
-  std::atomic<bool> overflow_{false};
+  std::atomic<uint32_t> overflow_count_{0};
+  std::atomic<bool> insertion_failed_{false};
   // Flexible array of `capacity_` entries stored immediately after the header.
   SlotQueueEntry entries_[0];
 };
+static_assert(sizeof(InPlaceSlotQueue) == 32);
 
 inline size_t SizeofSlotQueue(size_t capacity) {
   return sizeof(InPlaceSlotQueue) + sizeof(SlotQueueEntry) * capacity;
 }
+
+constexpr uint64_t kInvalidSlotQueueOffset =
+    std::numeric_limits<uint64_t>::max();
 
 inline int ResolveSubscriberQueueSize(int num_slots,
                                       int subscriber_queue_size) {
@@ -538,6 +567,7 @@ struct ChannelControlBlock {          // a.k.a CCB
                                       // debugger or hexdump.
   int num_slots;
   int subscriber_queue_size; // Entries in each per-subscriber slot queue.
+  uint32_t version;
   OrdinalAccumulator ordinals; // Ordinal accumulator for virtual channels.
   ActivationTracker activation_tracker; // Tracks which vchan_ids have been
                                         // activated by a publisher.
@@ -569,16 +599,62 @@ struct ChannelControlBlock {          // a.k.a CCB
   // Followed by:
   // AtomicBitSet<0> availableSlots[kMaxSlotOwners];
   // Followed by:
-  // InPlaceSlotQueue availableSlotQueues[kMaxSlotOwners];
+  // AvailableSlotQueueIndex availableSlotQueueIndex;
+  // Followed by:
+  // A packed arena of variable-capacity InPlaceSlotQueue objects.
   //
 };
+static_assert(offsetof(ChannelControlBlock, version) == 72);
+
+// Locates each subscriber's variable-capacity queue in the packed queue arena.
+// Offsets are relative to the start of the arena.
+struct AvailableSlotQueueIndex {
+  std::atomic<uint64_t> next_offset;
+  std::array<std::atomic<uint64_t>, kMaxSlotOwners> offsets;
+  std::array<std::atomic<uint32_t>, kMaxSlotOwners> active_publishers;
+};
+static_assert(offsetof(AvailableSlotQueueIndex, next_offset) == 0);
+static_assert(offsetof(AvailableSlotQueueIndex, offsets) == 8);
+static_assert(offsetof(AvailableSlotQueueIndex, active_publishers) == 8200);
+static_assert(sizeof(AvailableSlotQueueIndex) == 12296);
 
 inline size_t AvailableSlotsSize(int num_slots) {
   return SizeofAtomicBitSet(num_slots) * kMaxSlotOwners;
 }
 
+inline size_t AvailableSlotQueueIndexSize() {
+  return Aligned(sizeof(AvailableSlotQueueIndex));
+}
+
+enum class SlotQueueBlockState : uint32_t {
+  kAllocated = 0,
+  kRetired = 1,
+  kFree = 2,
+};
+
+struct alignas(64) SlotQueueBlockHeader {
+  uint64_t block_size = 0;
+  std::atomic<uint32_t> state{
+      static_cast<uint32_t>(SlotQueueBlockState::kFree)};
+  uint32_t reserved = 0;
+  AtomicBitSet<kMaxSlotOwners> waiting_publishers;
+};
+static_assert(sizeof(SlotQueueBlockHeader) == 192);
+static_assert(offsetof(SlotQueueBlockHeader, waiting_publishers) == 16);
+
+inline size_t SlotQueueBlockHeaderSize() {
+  return Aligned(sizeof(SlotQueueBlockHeader));
+}
+
+inline size_t SlotQueueBlockSize(size_t capacity) {
+  return SlotQueueBlockHeaderSize() + Aligned(SizeofSlotQueue(capacity));
+}
+
+// The publisher's default capacity also provisions the queue arena.  Packing
+// queues by their actual subscriber capacities lets overrides share the same
+// memory budget that the old fixed-stride layout reserved.
 inline size_t AvailableSlotQueuesSize(int subscriber_queue_size) {
-  return Aligned(SizeofSlotQueue(static_cast<size_t>(subscriber_queue_size))) *
+  return SlotQueueBlockSize(static_cast<size_t>(subscriber_queue_size)) *
          kMaxSlotOwners;
 }
 
@@ -589,11 +665,41 @@ inline size_t CcbSize(int num_slots, int subscriber_queue_size) {
                  num_slots * sizeof(MessageSlot)) +
          Aligned(SizeofAtomicBitSet(num_slots)) * 2 +
          AvailableSlotsSize(num_slots) +
+         AvailableSlotQueueIndexSize() +
          AvailableSlotQueuesSize(subscriber_queue_size);
 }
 
 inline size_t CcbSize(int num_slots) {
   return CcbSize(num_slots, /*subscriber_queue_size=*/0);
+}
+
+inline absl::StatusOr<size_t>
+CheckedCcbSize(int num_slots, int subscriber_queue_size) {
+  if (num_slots < 0) {
+    return absl::InvalidArgumentError("num_slots must be non-negative");
+  }
+  if (subscriber_queue_size < 0 ||
+      static_cast<size_t>(subscriber_queue_size) >
+          kDefaultMaxAvailableSlotQueueCapacity) {
+    return absl::InvalidArgumentError(
+        "subscriber_queue_size is outside the supported range");
+  }
+  const size_t slots = static_cast<size_t>(num_slots);
+  if (slots > kMaxChannelControlBlockSize / sizeof(MessageSlot)) {
+    return absl::ResourceExhaustedError(
+        "num_slots exceeds the channel control block limit");
+  }
+  if (slots > (std::numeric_limits<size_t>::max() -
+               sizeof(ChannelControlBlock)) /
+                  sizeof(MessageSlot)) {
+    return absl::ResourceExhaustedError("channel control block size overflow");
+  }
+  const size_t size = CcbSize(num_slots, subscriber_queue_size);
+  if (size > kMaxChannelControlBlockSize) {
+    return absl::ResourceExhaustedError(
+        "channel control block exceeds the 1 GiB limit");
+  }
+  return size;
 }
 
 struct SlotBuffer {
@@ -682,7 +788,10 @@ public:
     ccb_->sub_vchan_ids[sub_id] = vchan_id;
     if (is_new && !IsPlaceholder()) {
       GetAvailableSlots(sub_id).ClearAll();
-      GetAvailableSlotQueue(sub_id).Reset();
+      if (InPlaceSlotQueue *queue = GetAvailableSlotQueueAddress(sub_id);
+          queue != nullptr) {
+        queue->Reset();
+      }
     }
     ccb_->subscribers.Set(sub_id);
     if (is_new && !IsPlaceholder()) {
@@ -699,7 +808,7 @@ public:
 
   void SeedAvailableSlotQueue(int sub_id, int vchan_id) {
     InPlaceAtomicBitset &bits = GetAvailableSlots(sub_id);
-    InPlaceSlotQueue &queue = GetAvailableSlotQueue(sub_id);
+    InPlaceSlotQueue *queue = GetAvailableSlotQueueAddress(sub_id);
     auto visible = [vchan_id](MessageSlot &slot) {
       if (slot.ordinal == 0 || slot.buffer_index == -1) {
         return false;
@@ -727,7 +836,9 @@ public:
         return;
       }
       bits.Set(best->id);
-      queue.Push(best->id, best->ordinal);
+      if (queue != nullptr) {
+        queue->Push(best->id, best->ordinal);
+      }
       last_ordinal = best->ordinal;
     }
   }
@@ -828,6 +939,9 @@ public:
   char *EndOfAvailableSlots() const {
     return EndOfFreeSlots() + AvailableSlotsSize(num_slots_);
   }
+  char *EndOfAvailableSlotQueueIndex() const {
+    return EndOfAvailableSlots() + AvailableSlotQueueIndexSize();
+  }
 
   InPlaceAtomicBitset *RetiredSlotsAddr() {
     return reinterpret_cast<InPlaceAtomicBitset *>(EndOfSlots());
@@ -862,16 +976,59 @@ public:
         EndOfFreeSlots() + SizeofAtomicBitSet(num_slots_) * sub_id);
   }
 
-  InPlaceSlotQueue &GetAvailableSlotQueue(int sub_id) {
-    return *GetAvailableSlotQueueAddress(sub_id);
+  AvailableSlotQueueIndex *GetAvailableSlotQueueIndexAddress() {
+    return reinterpret_cast<AvailableSlotQueueIndex *>(EndOfAvailableSlots());
+  }
+
+  const AvailableSlotQueueIndex *GetAvailableSlotQueueIndexAddress() const {
+    return reinterpret_cast<const AvailableSlotQueueIndex *>(
+        EndOfAvailableSlots());
   }
 
   InPlaceSlotQueue *GetAvailableSlotQueueAddress(int sub_id) {
+    uint64_t offset = GetAvailableSlotQueueIndexAddress()
+                          ->offsets[sub_id]
+                          .load(std::memory_order_acquire);
+    if (offset == kInvalidSlotQueueOffset) {
+      return nullptr;
+    }
     return reinterpret_cast<InPlaceSlotQueue *>(
-        EndOfAvailableSlots() +
-        Aligned(SizeofSlotQueue(
-            static_cast<size_t>(subscriber_queue_size_))) *
-            sub_id);
+        EndOfAvailableSlotQueueIndex() + offset);
+  }
+
+  const InPlaceSlotQueue *GetAvailableSlotQueueAddress(int sub_id) const {
+    uint64_t offset = GetAvailableSlotQueueIndexAddress()
+                          ->offsets[sub_id]
+                          .load(std::memory_order_acquire);
+    if (offset == kInvalidSlotQueueOffset) {
+      return nullptr;
+    }
+    return reinterpret_cast<const InPlaceSlotQueue *>(
+        EndOfAvailableSlotQueueIndex() + offset);
+  }
+
+  virtual int SubscriberQueueSize(int sub_id) const {
+    const InPlaceSlotQueue *queue = GetAvailableSlotQueueAddress(sub_id);
+    return queue == nullptr ? 0 : static_cast<int>(queue->Capacity());
+  }
+
+  void BeginSubscriberQueuePublish(int pub_id) {
+    GetAvailableSlotQueueIndexAddress()
+        ->active_publishers[pub_id]
+        .fetch_add(1, std::memory_order_seq_cst);
+  }
+
+  void EndSubscriberQueuePublish(int pub_id) {
+    auto &counter =
+        GetAvailableSlotQueueIndexAddress()->active_publishers[pub_id];
+    uint32_t active = counter.load(std::memory_order_seq_cst);
+    while (active != 0) {
+      if (counter.compare_exchange_strong(active, active - 1,
+                                          std::memory_order_seq_cst,
+                                          std::memory_order_seq_cst)) {
+        return;
+      }
+    }
   }
 
   bool IsActivated(int vchan_id) const {

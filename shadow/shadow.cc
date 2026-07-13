@@ -369,6 +369,7 @@ Shadow::HandleAddSubscriber(const ShadowAddSubscriber &msg,
       .is_bridge = msg.is_bridge(),
       .for_tunnel = msg.for_tunnel(),
       .max_active_messages = msg.max_active_messages(),
+      .subscriber_queue_size = msg.subscriber_queue_size(),
       .trigger_fd = std::move(fds[0]),
       .poll_fd = std::move(fds[1]),
   };
@@ -601,6 +602,7 @@ absl::Status Shadow::SendStateDump(toolbelt::UnixSocket &socket) {
       msg->set_is_bridge(sub.is_bridge);
       msg->set_for_tunnel(sub.for_tunnel);
       msg->set_max_active_messages(sub.max_active_messages);
+      msg->set_subscriber_queue_size(sub.subscriber_queue_size);
 
       std::vector<toolbelt::FileDescriptor> fds;
       fds.push_back(sub.trigger_fd);

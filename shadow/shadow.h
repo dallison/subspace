@@ -39,6 +39,7 @@ struct ShadowSubscriber {
   bool is_bridge = false;
   bool for_tunnel = false;
   int max_active_messages = 0;
+  int subscriber_queue_size = 0;
   toolbelt::FileDescriptor trigger_fd;
   toolbelt::FileDescriptor poll_fd;
 };

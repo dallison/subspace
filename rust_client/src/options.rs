@@ -195,6 +195,7 @@ impl PublisherOptions {
 #[derive(Debug, Clone)]
 pub struct SubscriberOptions {
     pub reliable: bool,
+    pub subscriber_queue_size: i32,
     pub bridge: bool,
     pub for_tunnel: bool,
     pub channel_type: String,
@@ -215,6 +216,7 @@ impl Default for SubscriberOptions {
     fn default() -> Self {
         Self {
             reliable: false,
+            subscriber_queue_size: 0,
             bridge: false,
             for_tunnel: false,
             channel_type: String::new(),
@@ -240,6 +242,11 @@ impl SubscriberOptions {
 
     pub fn set_reliable(mut self, v: bool) -> Self {
         self.reliable = v;
+        self
+    }
+
+    pub fn set_subscriber_queue_size(mut self, size: i32) -> Self {
+        self.subscriber_queue_size = size;
         self
     }
 

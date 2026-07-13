@@ -8,6 +8,7 @@
 #include "common/fast_ring_buffer.h"
 #include <cstring>
 #include <mutex>
+#include <utility>
 
 namespace subspace {
 namespace details {
@@ -41,15 +42,17 @@ template <typename H> inline H AbslHashValue(H h, const OrdinalAndVchanId &x) {
 class SubscriberImpl : public ClientChannel {
 public:
   SubscriberImpl(const std::string &name, int num_slots,
-                 int subscriber_queue_size, int channel_id, int subscriber_id,
-                 int vchan_id, uint64_t session_id, std::string type,
+                 int default_subscriber_queue_size, int subscriber_queue_size,
+                 int channel_id, int subscriber_id, int vchan_id,
+                 uint64_t session_id, std::string type,
                  const SubscriberOptions &options,
                  std::function<bool(Channel *)> reload, int user_id,
                  int group_id)
-      : ClientChannel(name, num_slots, subscriber_queue_size, channel_id, vchan_id,
-                      std::move(session_id), std::move(type), std::move(reload),
-                      user_id, group_id),
-        subscriber_id_(subscriber_id), options_(options) {
+      : ClientChannel(name, num_slots, default_subscriber_queue_size, channel_id,
+                      vchan_id, std::move(session_id), std::move(type),
+                      std::move(reload), user_id, group_id),
+        subscriber_id_(subscriber_id),
+        subscriber_queue_size_(subscriber_queue_size), options_(options) {
     // Preallocate to avoid malloc later.
     (void)GetOrdinalTracker(vchan_id_);
   }
@@ -71,6 +74,10 @@ public:
     return slot == nullptr ? 0 : slot->timestamp;
   }
   bool IsReliable() const { return options_.IsReliable(); }
+  int SubscriberQueueSize() const override { return subscriber_queue_size_; }
+  void SetEffectiveSubscriberQueueSize(int size) {
+    subscriber_queue_size_ = ResolveSubscriberQueueSize(NumSlots(), size);
+  }
 
   int32_t SlotSize() const { return ClientChannel::SlotSize(CurrentSlot()); }
 
@@ -99,7 +106,7 @@ public:
   void UnreadSlot(MessageSlot *slot);
   void RememberOrdinal(uint64_t ordinal, int vchan_id);
   void CollectVisibleSlots(InPlaceAtomicBitset &bits);
-  MessageSlot *FindNextQueuedSlot(uint64_t max_ordinal);
+  MessageSlot *FindNextQueuedSlot(uint64_t max_queue_position);
   MessageSlot *FindNewestQueuedSlot();
   MessageSlot *FindNextVisibleSlot(InPlaceAtomicBitset &bits,
                                    uint64_t max_ordinal);
@@ -181,6 +188,9 @@ public:
   }
 
   int DetectDrops(int vchan_id);
+  int ConsumeQueueDrops() {
+    return std::exchange(pending_queue_drops_, 0);
+  }
 
   // Search the active list for a message with the given timestamp.  If found,
   // take ownership of the slot found.  Return nullptr if nothing found in which
@@ -311,6 +321,8 @@ private:
     // stable snapshot and cannot be kept chasing concurrently published
     // messages forever.
     poll_drain_pending_ = true;
+    poll_drain_exhausted_ = false;
+    queue_drain_tail_valid_ = false;
     next_slot_cache_valid_ = false;
     return trigger_.GetPollFd();
   }
@@ -334,6 +346,7 @@ private:
   }
 
   int subscriber_id_;
+  int subscriber_queue_size_ = 0;
   toolbelt::TriggerFd trigger_;
   std::vector<toolbelt::TriggerFd> reliable_publishers_;
   SubscriberOptions options_;
@@ -380,6 +393,10 @@ private:
   size_t next_slot_cursor_ = 0;
   bool next_slot_cache_valid_ = false;
   bool poll_drain_pending_ = false;
+  bool poll_drain_exhausted_ = false;
+  int pending_queue_drops_ = 0;
+  uint64_t queue_drain_tail_ = 0;
+  bool queue_drain_tail_valid_ = false;
 };
 } // namespace details
 } // namespace subspace

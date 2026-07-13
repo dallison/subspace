@@ -212,9 +212,8 @@ typedef struct {
 typedef struct {
   const int32_t slot_size; // Initial size of slots (might be resized).
   const int num_slots;     // Number of slots (never changes)
-  // Capacity of each subscriber's per-subscriber slot queue. 0 disables the
-  // queue and uses the available-slot bitset. The value applies to every
-  // subscriber queue in the channel CCB.
+  // Default capacity of a subscriber's per-subscriber slot queue. 0 selects
+  // the available-slot bitset by default. Subscribers may override this value.
   int32_t subscriber_queue_size;
   bool local;              // If true, messages stay local to this machine.
   bool reliable;           // Reliable publisher.
@@ -258,6 +257,9 @@ typedef struct {
 
 typedef struct {
   bool reliable;           // Reliable subscriber.
+  // Capacity of this subscriber's CCB slot queue. 0 uses the publisher
+  // default.
+  int32_t subscriber_queue_size;
   bool bridge;             // This subscriber is for the bridge.
   bool for_tunnel;         // Mark subscriptions for external tunnels.
   SubspaceTypeInfo type;   // Type of the message.  This is an opaque string.

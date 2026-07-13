@@ -142,7 +142,7 @@ const ActiveSlot *SubscriberImpl::FindUnseenOrdinal() {
       cached_vchan_id = s.vchan_id;
       cached_tracker = &GetOrdinalTracker(s.vchan_id);
     }
-    if (s.ordinal != 0 &&
+    if (s.ordinal > cached_tracker->last_ordinal_seen &&
         !cached_tracker->ordinals.Contains(OrdinalAndVchanId{s.ordinal, s.vchan_id})) {
       // std::cerr << absl::StrFormat("Found unseen ordinal %d in slot %d\n", s.ordinal, s.slot->id);
       return &s;
@@ -208,40 +208,42 @@ void SubscriberImpl::CollectVisibleSlots(InPlaceAtomicBitset &bits) {
   } while (num_messages != ccb_->total_messages);
 }
 
-MessageSlot *SubscriberImpl::FindNextQueuedSlot(uint64_t max_ordinal) {
-  InPlaceSlotQueue &queue = GetAvailableSlotQueue(subscriber_id_);
-  if (queue.Capacity() == 0) {
+MessageSlot *
+SubscriberImpl::FindNextQueuedSlot(uint64_t max_queue_position) {
+  InPlaceSlotQueue *queue = GetAvailableSlotQueueAddress(subscriber_id_);
+  if (queue == nullptr || queue->Capacity() == 0) {
     return nullptr;
   }
+  if (options_.DetectDroppedMessages()) {
+    pending_queue_drops_ += static_cast<int>(queue->ConsumeOverflow());
+  } else {
+    queue->ConsumeOverflow();
+  }
+  queue->ConsumeInsertionFailure();
 
   int cached_vchan_id = std::numeric_limits<int>::min();
   OrdinalTracker *cached_tracker = nullptr;
 
   QueuedSlot queued;
-  for (size_t i = 0; i < queue.Capacity(); i++) {
-    if (!queue.TryPeek(queued)) {
+  for (size_t i = 0; i < queue->Capacity(); i++) {
+    if (queue->Head() >= max_queue_position) {
+      return nullptr;
+    }
+    if (!queue->TryPeek(queued)) {
       return nullptr;
     }
     if (queued.slot_id < 0 || queued.slot_id >= NumSlots()) {
-      queue.DropFront();
+      queue->DropFront();
       continue;
     }
-    if (queued.ordinal > max_ordinal) {
-      return nullptr;
-    }
-
     QueuedSlot popped;
-    if (!queue.TryPop(popped)) {
+    if (!queue->TryPop(popped)) {
       continue;
     }
     queued = popped;
     if (queued.slot_id < 0 || queued.slot_id >= NumSlots()) {
       continue;
     }
-    if (queued.ordinal > max_ordinal) {
-      return nullptr;
-    }
-
     MessageSlot *s = &ccb_->slots[queued.slot_id];
     const uint64_t ordinal = s->ordinal;
     if (ordinal == 0 || ordinal != queued.ordinal ||
@@ -267,10 +269,16 @@ MessageSlot *SubscriberImpl::FindNextQueuedSlot(uint64_t max_ordinal) {
 }
 
 MessageSlot *SubscriberImpl::FindNewestQueuedSlot() {
-  InPlaceSlotQueue &queue = GetAvailableSlotQueue(subscriber_id_);
-  if (queue.Capacity() == 0) {
+  InPlaceSlotQueue *queue = GetAvailableSlotQueueAddress(subscriber_id_);
+  if (queue == nullptr || queue->Capacity() == 0) {
     return nullptr;
   }
+  if (options_.DetectDroppedMessages()) {
+    pending_queue_drops_ += static_cast<int>(queue->ConsumeOverflow());
+  } else {
+    queue->ConsumeOverflow();
+  }
+  queue->ConsumeInsertionFailure();
 
   int cached_vchan_id = std::numeric_limits<int>::min();
   OrdinalTracker *cached_tracker = nullptr;
@@ -278,8 +286,8 @@ MessageSlot *SubscriberImpl::FindNewestQueuedSlot() {
   uint64_t best_timestamp = 0;
 
   QueuedSlot queued;
-  for (size_t i = 0; i < queue.Capacity(); i++) {
-    if (!queue.TryPop(queued)) {
+  for (size_t i = 0; i < queue->Capacity(); i++) {
+    if (!queue->TryPop(queued)) {
       break;
     }
     if (queued.slot_id < 0 || queued.slot_id >= NumSlots()) {
@@ -368,49 +376,62 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
     const bool print_errors = false;
 #endif
     CheckReload();
+    const bool stable_poll_drain = PollDrainPending();
+    if (stable_poll_drain && poll_drain_exhausted_) {
+      if (ccb_->total_messages != next_slot_cached_total_) {
+        poll_drain_exhausted_ = false;
+        queue_drain_tail_valid_ = false;
+        next_slot_cache_valid_ = false;
+      } else {
+        return nullptr;
+      }
+    }
     if (slot == nullptr) {
       // Prepopulate the active slots.
       PopulateActiveSlots(bits);
     }
 
     if (!reliable && SubscriberQueueSize() > 0) {
-      const bool stable_poll_drain = PollDrainPending();
-      if (stable_poll_drain && !next_slot_cache_valid_) {
+      InPlaceSlotQueue *queue =
+          GetAvailableSlotQueueAddress(subscriber_id_);
+      if (stable_poll_drain && !queue_drain_tail_valid_) {
+        CollectVisibleSlots(bits);
+        std::sort(active_slots_.begin(), active_slots_.end(), ActiveSlotLess);
         next_slot_cached_total_ = ccb_->total_messages;
+        next_slot_cursor_ = 0;
         next_slot_cache_valid_ = true;
+        queue_drain_tail_ = queue == nullptr ? 0 : queue->Tail();
+        queue_drain_tail_valid_ = true;
       }
-      const uint64_t max_ordinal =
-          stable_poll_drain ? next_slot_cached_total_
+      const uint64_t max_queue_position =
+          stable_poll_drain ? queue_drain_tail_
                             : std::numeric_limits<uint64_t>::max();
-      MessageSlot *new_slot = FindNextQueuedSlot(max_ordinal);
-      if (new_slot == nullptr) {
-        if (stable_poll_drain && ccb_->total_messages != next_slot_cached_total_) {
-          Trigger();
-        }
-        next_slot_cache_valid_ = false;
-        return nullptr;
-      }
-      const uint64_t ordinal = new_slot->ordinal;
-      const int vchan_id = new_slot->vchan_id;
-      if (AtomicIncRefCount(new_slot, reliable, 1, ordinal, vchan_id, false)) {
-        if (!ValidateSlotBuffer(new_slot) || new_slot->buffer_index == -1) {
-          if (print_errors) {
-            std::cerr << "Subscriber for " << Name()
-                      << " detected buffer failure on slot: "
-                      << new_slot->id
-                      << " buffer index: " << new_slot->buffer_index;
-            new_slot->Dump(std::cerr);
+      MessageSlot *new_slot = FindNextQueuedSlot(max_queue_position);
+      if (new_slot != nullptr) {
+        const uint64_t ordinal = new_slot->ordinal;
+        const int vchan_id = new_slot->vchan_id;
+        if (AtomicIncRefCount(new_slot, reliable, 1, ordinal, vchan_id, false)) {
+          if (!ValidateSlotBuffer(new_slot) || new_slot->buffer_index == -1) {
+            if (print_errors) {
+              std::cerr << "Subscriber for " << Name()
+                        << " detected buffer failure on slot: " << new_slot->id
+                        << " buffer index: " << new_slot->buffer_index;
+              new_slot->Dump(std::cerr);
+            }
+            embargoed_slots_.Set(new_slot->id);
+            AtomicIncRefCount(new_slot, reliable, -1, ordinal, vchan_id, false);
+            continue;
           }
-          embargoed_slots_.Set(new_slot->id);
-          AtomicIncRefCount(new_slot, reliable, -1, ordinal, vchan_id, false);
-          continue;
+          if (!stable_poll_drain) {
+            next_slot_cache_valid_ = false;
+          }
+          return new_slot;
         }
-        if (!stable_poll_drain) {
-          next_slot_cache_valid_ = false;
-        }
-        return new_slot;
+        continue;
       }
-      continue;
+      // Push() may fail after a peer dies or loses a bounded CAS race. The
+      // publisher always records the slot in the bitset, so continue below and
+      // recover it through the authoritative path.
     }
 
     // Fast path: if the publisher hasn't appended any new messages since the
@@ -439,7 +460,6 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
     // happens-before this seq_cst load and visible to the relaxed
     // bits.Traverse() inside CollectVisibleSlots().
     const uint64_t total = ccb_->total_messages;
-    const bool stable_poll_drain = PollDrainPending();
     if (!next_slot_cache_valid_ ||
         (!stable_poll_drain && total != next_slot_cached_total_)) {
       CollectVisibleSlots(bits);
@@ -464,7 +484,7 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
         cached_vchan_id = s.vchan_id;
         cached_tracker = &GetOrdinalTracker(s.vchan_id);
       }
-      if (s.ordinal != 0 &&
+      if (s.ordinal > cached_tracker->last_ordinal_seen &&
           !cached_tracker->ordinals.Contains(
               OrdinalAndVchanId{s.ordinal, s.vchan_id})) {
         new_slot = &s;
@@ -473,7 +493,11 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
       ++next_slot_cursor_;
     }
     if (new_slot == nullptr) {
-      next_slot_cache_valid_ = false;
+      if (stable_poll_drain) {
+        poll_drain_exhausted_ = true;
+      } else {
+        next_slot_cache_valid_ = false;
+      }
       // If we suppressed newer messages to keep a stable poll-drain snapshot,
       // re-arm the trigger so the next poll/Wait wakes promptly and
       // re-snapshots them. ClearPollFd() during the drain may already have
@@ -513,7 +537,11 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
         embargoed_slots_.Set(new_slot->slot->id);
         AtomicIncRefCount(new_slot->slot, reliable, -1, new_slot->ordinal,
                           new_slot->vchan_id, false);
-        next_slot_cache_valid_ = false;
+        if (stable_poll_drain) {
+          ++next_slot_cursor_;
+        } else {
+          next_slot_cache_valid_ = false;
+        }
         continue;
       }
       // Successful claim. Advance the cursor so the next NextSlot() call
@@ -523,7 +551,11 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
     }
     // CAS failed: another subscriber raced us, or the slot was retired and
     // overwritten with a new ordinal. Drop the cache and re-snapshot.
-    next_slot_cache_valid_ = false;
+    if (stable_poll_drain) {
+      ++next_slot_cursor_;
+    } else {
+      next_slot_cache_valid_ = false;
+    }
   }
   return nullptr;
 }

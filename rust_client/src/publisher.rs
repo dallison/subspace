@@ -30,6 +30,28 @@ pub struct PublishedMessage {
     pub timestamp: u64,
 }
 
+struct SubscriberQueuePublishGuard<'a> {
+    channel: &'a Channel,
+    publisher_id: usize,
+}
+
+impl<'a> SubscriberQueuePublishGuard<'a> {
+    fn new(channel: &'a Channel, publisher_id: usize) -> Self {
+        channel.begin_subscriber_queue_publish(publisher_id);
+        Self {
+            channel,
+            publisher_id,
+        }
+    }
+}
+
+impl Drop for SubscriberQueuePublishGuard<'_> {
+    fn drop(&mut self) {
+        self.channel
+            .end_subscriber_queue_publish(self.publisher_id);
+    }
+}
+
 pub struct PublisherImpl {
     pub channel: Channel,
     pub publisher_id: i32,
@@ -494,17 +516,38 @@ impl PublisherImpl {
             }
         }
 
+        // Release the slot: store refs with ordinal, no PUB_OWNED.
         let slot = self.channel.slot_ref(slot_idx);
+        slot.refs.store(
+            build_refs_bit_field(slot.ordinal, vchan_id, 0),
+            Ordering::Release,
+        );
+
+        // Tell all subscribers the slot is available.
+        let ccb = self.channel.ccb();
+        {
+            let _publish_guard =
+                SubscriberQueuePublishGuard::new(&self.channel, owner as usize);
+            ccb.subscribers.traverse_seq_cst(|sub_id| {
+                if vchan_id != -1
+                    && self.channel.get_sub_vchan_id(sub_id) != -1
+                    && vchan_id != self.channel.get_sub_vchan_id(sub_id)
+                {
+                    return;
+                }
+                self.channel.get_available_slots(sub_id).set(slot_idx);
+                let queue = self.channel.get_available_slot_queue(sub_id);
+                if let Some(queue) = queue {
+                    queue.push(slot.id, slot.ordinal);
+                }
+            });
+        }
+
         if !is_activation {
-            self.channel
-                .ccb()
-                .total_messages
-                .fetch_add(1, Ordering::Relaxed);
             self.channel
                 .ccb()
                 .total_bytes
                 .fetch_add(slot.message_size, Ordering::Relaxed);
-
             let msg_size = slot.message_size as u32;
             let mut old_max = self.channel.ccb().max_message_size.load(Ordering::Relaxed);
             while msg_size > old_max {
@@ -518,36 +561,11 @@ impl PublisherImpl {
                     Err(v) => old_max = v,
                 }
             }
+            self.channel
+                .ccb()
+                .total_messages
+                .fetch_add(1, Ordering::SeqCst);
         }
-
-        // Release the slot: store refs with ordinal, no PUB_OWNED.
-        let slot = self.channel.slot_ref(slot_idx);
-        slot.refs.store(
-            build_refs_bit_field(slot.ordinal, vchan_id, 0),
-            Ordering::Release,
-        );
-
-        // Tell all subscribers the slot is available.
-        let ccb = self.channel.ccb();
-        let notify_reliable_subscribers =
-            self.channel.scb().counters[self.channel.channel_id as usize].num_reliable_subs != 0;
-        let use_subscriber_queues = self.channel.subscriber_queue_size > 0;
-        ccb.subscribers.traverse(|sub_id| {
-            if vchan_id != -1
-                && self.channel.get_sub_vchan_id(sub_id) != -1
-                && vchan_id != self.channel.get_sub_vchan_id(sub_id)
-            {
-                return;
-            }
-            if notify_reliable_subscribers || !use_subscriber_queues {
-                self.channel.get_available_slots(sub_id).set(slot_idx);
-            }
-            if use_subscriber_queues {
-                self.channel
-                    .get_available_slot_queue(sub_id)
-                    .push(slot.id, slot.ordinal);
-            }
-        });
 
         if reliable {
             return PublishedMessage {

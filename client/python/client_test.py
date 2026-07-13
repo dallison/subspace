@@ -309,6 +309,7 @@ class TestSubspaceClient(unittest.TestCase):
     def test_subscriber_options(self):
         opts = subspace.SubscriberOptions()
         opts.set_reliable(True)
+        opts.set_subscriber_queue_size(3)
         opts.set_type("sub_opts_type")
         opts.set_max_active_messages(5)
         opts.set_checksum(True)
@@ -316,6 +317,7 @@ class TestSubspaceClient(unittest.TestCase):
         opts.set_keep_active_message(True)
 
         self.assertTrue(opts.is_reliable())
+        self.assertEqual(opts.subscriber_queue_size(), 3)
         self.assertEqual(opts.type(), "sub_opts_type")
         self.assertEqual(opts.max_active_messages(), 5)
         self.assertTrue(opts.checksum())

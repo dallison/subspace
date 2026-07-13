@@ -493,7 +493,7 @@ impl Subscriber {
     }
 
     pub fn subscriber_queue_size(&self) -> i32 {
-        self.imp.lock().unwrap().channel.subscriber_queue_size
+        self.imp.lock().unwrap().subscriber_queue_size
     }
 
     pub fn current_ordinal(&self) -> i64 {
@@ -549,7 +549,12 @@ impl Subscriber {
     }
 
     pub fn get_poll_fd(&self) -> RawFd {
-        self.imp.lock().unwrap().poll_fd
+        let mut imp = self.imp.lock().unwrap();
+        imp.poll_drain_pending = true;
+        imp.poll_drain_exhausted = false;
+        imp.queue_drain_tail = None;
+        imp.poll_snapshot_valid = false;
+        imp.poll_fd
     }
 
     pub fn trigger(&self) {
@@ -1010,6 +1015,7 @@ impl Client {
                     max_active_messages: opts.max_active_messages,
                     mux: opts.mux.clone(),
                     vchan_id: opts.vchan_id,
+                    subscriber_queue_size: opts.subscriber_queue_size,
                 },
             )),
         };
@@ -1032,6 +1038,7 @@ impl Client {
         let mut sub_impl = SubscriberImpl::new(
             channel_name.to_string(),
             sub_resp.num_slots,
+            sub_resp.default_subscriber_queue_size,
             sub_resp.subscriber_queue_size,
             sub_resp.channel_id,
             sub_resp.subscriber_id,
@@ -1050,7 +1057,8 @@ impl Client {
         };
 
         sub_impl.channel.num_slots = sub_resp.num_slots;
-        sub_impl.channel.subscriber_queue_size = sub_resp.subscriber_queue_size;
+        sub_impl.channel.subscriber_queue_size = sub_resp.default_subscriber_queue_size;
+        sub_impl.subscriber_queue_size = sub_resp.subscriber_queue_size;
         sub_impl
             .channel
             .embargoed_slots
@@ -1345,11 +1353,6 @@ fn read_message_internal(
         Some(si) => sub.channel.slot_ref(si).ordinal as i64,
         None => -1,
     };
-    let last_vchan_id: i32 = match old_slot {
-        Some(si) => sub.channel.slot_ref(si).vchan_id as i32,
-        None => -1,
-    };
-
     let new_slot_idx = match mode {
         ReadMode::ReadNext => sub.next_slot(),
         ReadMode::ReadNewest => sub.last_slot(),
@@ -1364,37 +1367,6 @@ fn read_message_internal(
     };
 
     sub.channel.slot = Some(new_idx);
-
-    if mode == ReadMode::ReadNext
-        && last_ordinal != -1
-        && sub.options.detect_dropped_messages
-    {
-        let new_vchan_id = sub.channel.slot_ref(new_idx).vchan_id as i32;
-        let new_ordinal = sub.channel.slot_ref(new_idx).ordinal as i64;
-        let direct_gap = if new_vchan_id == last_vchan_id && new_ordinal > last_ordinal + 1 {
-            new_ordinal - last_ordinal - 1
-        } else {
-            0
-        };
-        let drops = direct_gap as i32 + sub.detect_drops(new_vchan_id);
-        if drops > 0 {
-            if let Some(ref cb) = sub.dropped_message_callback {
-                cb(drops as i64);
-            }
-            if sub.options.log_dropped_messages {
-                log::warn!(
-                    "Dropped {} message{} on channel {}",
-                    drops,
-                    if drops == 1 { "" } else { "s" },
-                    sub.channel.name
-                );
-            }
-            sub.channel
-                .ccb()
-                .total_drops
-                .fetch_add(drops as u32, Ordering::Relaxed);
-        }
-    }
 
     let prefix = sub.channel.get_prefix(new_idx);
     let mut is_activation = false;
@@ -1464,7 +1436,31 @@ fn read_message_internal(
         return Ok(Message::default());
     }
 
-    sub.claim_slot(new_idx, sub.channel.vchan_id, mode == ReadMode::ReadNewest);
+    if mode == ReadMode::ReadNext && sub.options.detect_dropped_messages {
+        let mut drops = std::mem::take(&mut sub.pending_queue_drops);
+        if last_ordinal != -1 {
+            drops = drops.max(sub.detect_drops(vchan_id));
+        }
+        if drops > 0 {
+            if let Some(ref cb) = sub.dropped_message_callback {
+                cb(drops as i64);
+            }
+            if sub.options.log_dropped_messages {
+                log::warn!(
+                    "Dropped {} message{} on channel {}",
+                    drops,
+                    if drops == 1 { "" } else { "s" },
+                    sub.channel.name
+                );
+            }
+            sub.channel
+                .ccb()
+                .total_drops
+                .fetch_add(drops as u32, Ordering::Relaxed);
+        }
+    }
+
+    sub.claim_slot(new_idx, vchan_id, mode == ReadMode::ReadNewest);
 
     if checksum_error && !sub.options.pass_checksum_errors {
         return Err(SubspaceError::ChecksumError);
@@ -1506,6 +1502,7 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
                 channel_name: sub.channel.name.clone(),
                 subscriber_id: sub.subscriber_id,
                 mux: sub.options.mux.clone(),
+                subscriber_queue_size: sub.options.subscriber_queue_size,
                 ..Default::default()
             },
         )),
@@ -1525,7 +1522,8 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
         sub.channel.channel_type = String::from_utf8_lossy(&sub_resp.r#type).to_string();
     }
     sub.channel.num_slots = sub_resp.num_slots;
-    sub.channel.subscriber_queue_size = sub_resp.subscriber_queue_size;
+    sub.channel.subscriber_queue_size = sub_resp.default_subscriber_queue_size;
+    sub.subscriber_queue_size = sub_resp.subscriber_queue_size;
     sub.channel
         .embargoed_slots
         .resize(sub_resp.num_slots as usize);

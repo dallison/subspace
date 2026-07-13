@@ -13,6 +13,7 @@
 #include "proto/subspace.pb.h"
 #include "toolbelt/fd.h"
 #include "toolbelt/sockets.h"
+#include <limits>
 #include <string>
 
 // Helper to send raw Request protos and receive Response protos + FDs,
@@ -101,7 +102,8 @@ public:
   CreateSubscriber(const std::string &channel,
                    const std::string &type = "", bool reliable = false,
                    int max_active_messages = 4, const std::string &mux = "",
-                   int vchan_id = 0, bool for_tunnel = false) {
+                   int vchan_id = 0, bool for_tunnel = false,
+                   int subscriber_queue_size = 0) {
     subspace::Request req;
     auto *cmd = req.mutable_create_subscriber();
     cmd->set_channel_name(channel);
@@ -112,6 +114,7 @@ public:
     cmd->set_mux(mux);
     cmd->set_vchan_id(vchan_id);
     cmd->set_for_tunnel(for_tunnel);
+    cmd->set_subscriber_queue_size(subscriber_queue_size);
     auto result = Send(req);
     return std::move(*result);
   }
@@ -213,6 +216,30 @@ TEST_F(ServerTest, PubSubscriberQueueSizeMismatchFromDisabled) {
       false, 0, 0, 0, /*subscriber_queue_size=*/8);
   EXPECT_THAT(resp.create_publisher().error(),
               ::testing::HasSubstr("subscriber queue size"));
+}
+
+TEST_F(ServerTest, PubSubscriberQueueSizeTooLarge) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  auto [resp, fds] = conn.CreatePublisher(
+      "queue_size_too_large", 64, 4, "", false, true, false, "", 0, false,
+      false, 0, 0, 0, /*subscriber_queue_size=*/1025);
+  EXPECT_THAT(resp.create_publisher().error(),
+              ::testing::HasSubstr("subscriber_queue_size must be <= 1024"));
+}
+
+TEST_F(ServerTest, PubCcbSizeLimitIsEnforced) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  auto [resp, fds] =
+      conn.CreatePublisher("ccb_too_large", 64,
+                           std::numeric_limits<int>::max());
+  EXPECT_THAT(resp.create_publisher().error(),
+              ::testing::HasSubstr("channel control block limit"));
 }
 
 TEST_F(ServerTest, PubSubscriberQueueSizeMismatchToDisabled) {
@@ -426,6 +453,32 @@ TEST_F(ServerTest, PubVirtualRetirementNotSupported) {
 // ---------------------------------------------------------------------------
 // CreateSubscriber error paths
 // ---------------------------------------------------------------------------
+
+TEST_F(ServerTest, SubNegativeSubscriberQueueSize) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  conn.CreatePublisher("sub_negative_queue_size", 64, 4);
+  auto [resp, fds] = conn.CreateSubscriber(
+      "sub_negative_queue_size", "", false, 4, "", 0, false,
+      /*subscriber_queue_size=*/-1);
+  EXPECT_THAT(resp.create_subscriber().error(),
+              ::testing::HasSubstr("subscriber_queue_size must be >= 0"));
+}
+
+TEST_F(ServerTest, SubQueueSizeTooLarge) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  conn.CreatePublisher("sub_queue_size_too_large", 64, 4);
+  auto [resp, fds] = conn.CreateSubscriber(
+      "sub_queue_size_too_large", "", false, 4, "", 0, false,
+      /*subscriber_queue_size=*/1025);
+  EXPECT_THAT(resp.create_subscriber().error(),
+              ::testing::HasSubstr("subscriber_queue_size must be <= 1024"));
+}
 
 TEST_F(ServerTest, SubTypeMismatch) {
   RawConnection conn;
