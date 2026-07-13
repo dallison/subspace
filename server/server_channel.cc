@@ -1007,13 +1007,44 @@ ServerChannel::HasSufficientCapacity(int new_max_active_messages) const {
 }
 
 absl::Status ServerChannel::CapacityError(const CapacityInfo &info) const {
-  return absl::InternalError(absl::StrFormat(
+  std::string message = absl::StrFormat(
       "there are %d slots with %d publisher%s and %d "
       "subscriber%s with %d additional active message%s; you "
       "need at least %d slots",
       NumSlots(), info.num_pubs, (info.num_pubs == 1 ? "" : "s"), info.num_subs,
       (info.num_subs == 1 ? "" : "s"), info.max_active_messages,
-      (info.max_active_messages == 1 ? "" : "s"), info.slots_needed + 1));
+      (info.max_active_messages == 1 ? "" : "s"), info.slots_needed + 1);
+
+  auto append_users = [this, &message](bool publishers) {
+    message += publishers ? "; publishers=[" : "; subscribers=[";
+    bool first = true;
+    for (int id = 0; id < kMaxUsers; ++id) {
+      auto it = users_.find(id);
+      if (it == users_.end() || it->second == nullptr ||
+          it->second->IsPublisher() != publishers) {
+        continue;
+      }
+      const User &user = *it->second;
+      const ClientHandler *handler = user.GetHandler();
+      const std::string client_name =
+          handler == nullptr ? std::string("<disconnected>")
+                             : handler->ClientName();
+      message += absl::StrFormat(
+          "%s{pid=%llu, client=\"%s\"", first ? "" : ", ",
+          static_cast<unsigned long long>(user.ProcessId()), client_name);
+      if (user.IsSubscriber()) {
+        const auto &subscriber = static_cast<const SubscriberUser &>(user);
+        message += absl::StrFormat(
+            ", max_active_messages=%d", subscriber.MaxActiveMessages());
+      }
+      message += "}";
+      first = false;
+    }
+    message += "]";
+  };
+  append_users(/*publishers=*/true);
+  append_users(/*publishers=*/false);
+  return absl::InternalError(message);
 }
 
 void ServerChannel::GetChannelInfo(subspace::ChannelInfoProto *info) {

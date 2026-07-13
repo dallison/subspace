@@ -5978,6 +5978,43 @@ TEST_F(ClientTest, MaxActiveMessagesTooSmall) {
               ::testing::HasSubstr("MaxActiveMessages"));
 }
 
+TEST_F(ClientTest, CapacityErrorIdentifiesExistingClients) {
+  auto publisher_client_a = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "capacity-publisher-a"));
+  auto publisher_client_b = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "capacity-publisher-b"));
+  auto subscriber_client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "capacity-subscriber"));
+  auto rejected_client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "capacity-rejected"));
+
+  [[maybe_unused]] auto publisher_a = EVAL_AND_ASSERT_OK(
+      publisher_client_a->CreatePublisher("capacity_clients", PubOpts(64, 6)));
+  [[maybe_unused]] auto subscriber =
+      EVAL_AND_ASSERT_OK(subscriber_client->CreateSubscriber(
+          "capacity_clients", SubOpts().SetMaxActiveMessages(2)));
+  [[maybe_unused]] auto publisher_b = EVAL_AND_ASSERT_OK(
+      publisher_client_b->CreatePublisher("capacity_clients", PubOpts(64, 6)));
+
+  auto rejected = rejected_client->CreateSubscriber(
+      "capacity_clients", SubOpts().SetMaxActiveMessages(2));
+  ASSERT_FALSE(rejected.ok());
+  const std::string error(rejected.status().message());
+  EXPECT_THAT(error, ::testing::HasSubstr("publishers=["));
+  EXPECT_THAT(error,
+              ::testing::HasSubstr("client=\"capacity-publisher-a\""));
+  EXPECT_THAT(error,
+              ::testing::HasSubstr("client=\"capacity-publisher-b\""));
+  EXPECT_THAT(error, ::testing::HasSubstr("subscribers=["));
+  EXPECT_THAT(error, ::testing::HasSubstr("client=\"capacity-subscriber\""));
+  EXPECT_THAT(error, ::testing::HasSubstr("max_active_messages=2"));
+  EXPECT_THAT(error,
+              ::testing::HasSubstr(absl::StrFormat(
+                  "pid=%llu", static_cast<unsigned long long>(getpid()))));
+  EXPECT_EQ(std::string::npos, error.find("{id="));
+  EXPECT_EQ(std::string::npos, error.find("reliable="));
+}
+
 TEST_F(ClientTest, OnReceiveCallbackSuccess) {
   subspace::Client pub_client;
   subspace::Client sub_client;
