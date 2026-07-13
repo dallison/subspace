@@ -4094,7 +4094,8 @@ TEST_F(ClientTest, RetirementTrigger4) {
 }
 
 TEST_F(ClientTest, ChannelDirectory) {
-  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+  constexpr char kClientName[] = "channel-directory-test";
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket(), kClientName));
 
   absl::StatusOr<Publisher> p1 =
       client->CreatePublisher("chan1", PubOpts(256, 10));
@@ -4138,6 +4139,21 @@ TEST_F(ClientTest, ChannelDirectory) {
       ASSERT_EQ(10, info.num_slots());
       ASSERT_EQ(1, info.num_pubs());
       ASSERT_EQ(1, info.num_subs());
+      ASSERT_GE(info.channel_id(), 0);
+      ASSERT_EQ(2, info.participants_size());
+      bool found_publisher = false;
+      bool found_subscriber = false;
+      for (const subspace::ChannelParticipantInfoProto &participant :
+           info.participants()) {
+        EXPECT_EQ(kClientName, participant.program_name());
+        EXPECT_EQ(static_cast<uint64_t>(getpid()), participant.pid());
+        EXPECT_GE(participant.id(), 0);
+        EXPECT_NE(participant.is_publisher(), participant.is_subscriber());
+        found_publisher |= participant.is_publisher();
+        found_subscriber |= participant.is_subscriber();
+      }
+      EXPECT_TRUE(found_publisher);
+      EXPECT_TRUE(found_subscriber);
     } else if (info.name() == "chan2") {
       found_chan2 = true;
       ASSERT_EQ(256, info.slot_size());

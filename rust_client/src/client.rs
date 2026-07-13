@@ -885,6 +885,7 @@ impl Client {
                     subscriber_queue_size: opts.subscriber_queue_size,
                     max_publishers: 0,
                     publisher_id: -1,
+                    process_id: std::process::id() as u64,
                 },
             )),
         };
@@ -1016,6 +1017,7 @@ impl Client {
                     mux: opts.mux.clone(),
                     vchan_id: opts.vchan_id,
                     subscriber_queue_size: opts.subscriber_queue_size,
+                    process_id: std::process::id() as u64,
                 },
             )),
         };
@@ -1503,6 +1505,7 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
                 subscriber_id: sub.subscriber_id,
                 mux: sub.options.mux.clone(),
                 subscriber_queue_size: sub.options.subscriber_queue_size,
+                process_id: std::process::id() as u64,
                 ..Default::default()
             },
         )),

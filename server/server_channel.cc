@@ -4,6 +4,7 @@
 
 #include "server/server_channel.h"
 #include "absl/strings/str_format.h"
+#include "server/client_handler.h"
 #include "server/server.h"
 #include <utility>
 #include <sys/mman.h>
@@ -511,7 +512,7 @@ absl::StatusOr<int> ServerChannel::AllocateUserId(const char *type) {
 absl::StatusOr<PublisherUser *>
 ServerChannel::AddPublisher(ClientHandler *handler, bool is_reliable,
                             bool is_local, bool is_bridge, bool for_tunnel,
-                            bool is_fixed_size) {
+                            bool is_fixed_size, uint64_t process_id) {
   absl::StatusOr<int> user_id = AllocateUserId("publisher");
   if (!user_id.ok()) {
     return user_id.status();
@@ -519,6 +520,7 @@ ServerChannel::AddPublisher(ClientHandler *handler, bool is_reliable,
   std::unique_ptr<PublisherUser> pub = std::make_unique<PublisherUser>(
       handler, *user_id, is_reliable, is_local, is_bridge, for_tunnel,
       is_fixed_size);
+  pub->SetProcessId(process_id);
   absl::Status status = pub->Init();
   if (!status.ok()) {
     return status;
@@ -533,7 +535,7 @@ absl::StatusOr<SubscriberUser *>
 ServerChannel::AddSubscriber(ClientHandler *handler, bool is_reliable,
                              bool is_bridge, bool for_tunnel,
                              int max_active_messages,
-                             int subscriber_queue_size) {
+                             int subscriber_queue_size, uint64_t process_id) {
   absl::StatusOr<int> user_id = AllocateUserId("subscriber");
   if (!user_id.ok()) {
     return user_id.status();
@@ -547,6 +549,7 @@ ServerChannel::AddSubscriber(ClientHandler *handler, bool is_reliable,
   std::unique_ptr<SubscriberUser> sub = std::make_unique<SubscriberUser>(
       handler, *user_id, is_reliable, is_bridge, for_tunnel,
       max_active_messages, subscriber_queue_size);
+  sub->SetProcessId(process_id);
   absl::Status status = sub->Init();
   if (!status.ok()) {
     RetireSubscriberQueue(*user_id);
@@ -1019,6 +1022,7 @@ void ServerChannel::GetChannelInfo(subspace::ChannelInfoProto *info) {
   info->set_num_slots(NumSlots());
   info->set_subscriber_queue_size(SubscriberQueueSize());
   info->set_type(Type());
+  info->set_channel_id(GetChannelId());
 
   int num_pubs, num_subs, num_bridge_pubs, num_bridge_subs;
   int num_tunnel_pubs, num_tunnel_subs;
@@ -1037,6 +1041,21 @@ void ServerChannel::GetChannelInfo(subspace::ChannelInfoProto *info) {
     VirtualChannel *vchan = static_cast<VirtualChannel *>(this);
     info->set_vchan_id(GetVirtualChannelId());
     info->set_mux(vchan->GetMux()->Name());
+  }
+
+  for (const auto &[id, user] : users_) {
+    if (user == nullptr || user->GetHandler() == nullptr) {
+      continue;
+    }
+    ChannelParticipantInfoProto *participant = info->add_participants();
+    participant->set_id(id);
+    participant->set_pid(user->ProcessId());
+    participant->set_program_name(user->GetHandler()->ClientName());
+    participant->set_is_publisher(user->IsPublisher());
+    participant->set_is_subscriber(user->IsSubscriber());
+    participant->set_is_reliable(user->IsReliable());
+    participant->set_is_bridge(user->IsBridge());
+    participant->set_for_tunnel(user->ForTunnel());
   }
 }
 

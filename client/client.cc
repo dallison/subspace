@@ -16,6 +16,7 @@
 #include <cerrno>
 #include <cstring>
 #include <inttypes.h>
+#include <unistd.h>
 #if defined(__QNX__) || defined(__QNXNTO__)
 #include <sys/neutrino.h>
 #endif
@@ -1874,6 +1875,7 @@ void ClientImpl::FillCreatePublisherRequest(CreatePublisherRequest *cmd,
   cmd->set_use_split_buffers(opts.UseSplitBuffers());
   cmd->set_split_buffers_over_bridge(opts.SplitBuffersOverBridge());
   cmd->set_subscriber_queue_size(opts.SubscriberQueueSize());
+  cmd->set_process_id(static_cast<uint64_t>(getpid()));
 }
 
 void ClientImpl::ApplyPublisherResponseFds(
@@ -1914,6 +1916,7 @@ void ClientImpl::FillCreateSubscriberRequest(CreateSubscriberRequest *cmd,
   cmd->set_mux(opts.Mux());
   cmd->set_vchan_id(opts.VchanId());
   cmd->set_subscriber_queue_size(opts.SubscriberQueueSize());
+  cmd->set_process_id(static_cast<uint64_t>(getpid()));
 }
 
 void ClientImpl::ApplySubscriberResponseFds(
