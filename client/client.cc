@@ -431,7 +431,8 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
   };
 
   std::shared_ptr<PublisherImpl> channel = std::make_shared<PublisherImpl>(
-      channel_name, opts.num_slots, pub_resp.channel_id(),
+      channel_name, opts.num_slots, pub_resp.subscriber_queue_size(),
+      pub_resp.subscriber_queue_arena_size(), pub_resp.channel_id(),
       pub_resp.publisher_id(), pub_resp.vchan_id(), session_id_,
       pub_resp.type(), opts,
       [this](Channel *c) {
@@ -566,9 +567,12 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
   subscriber_options.use_split_buffers = sub_resp.use_split_buffers();
 
   std::shared_ptr<SubscriberImpl> channel = std::make_shared<SubscriberImpl>(
-      channel_name, sub_resp.num_slots(), sub_resp.channel_id(),
-      sub_resp.subscriber_id(), sub_resp.vchan_id(), session_id_,
-      sub_resp.type(), subscriber_options,
+      channel_name, sub_resp.num_slots(),
+      sub_resp.default_subscriber_queue_size(),
+      sub_resp.subscriber_queue_arena_size(),
+      sub_resp.subscriber_queue_size(), sub_resp.channel_id(),
+      sub_resp.subscriber_id(), sub_resp.vchan_id(), session_id_, sub_resp.type(),
+      subscriber_options,
       [this](Channel *c) {
         return CheckReload(static_cast<ClientChannel *>(c));
       },
@@ -580,6 +584,7 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
       });
 
   channel->SetNumSlots(sub_resp.num_slots());
+  channel->SetEffectiveSubscriberQueueSize(sub_resp.subscriber_queue_size());
   {
     int32_t cs = sub_resp.checksum_size() > 0 ? sub_resp.checksum_size() : 4;
     int32_t ms = sub_resp.metadata_size() > 0 ? sub_resp.metadata_size() : 0;
@@ -765,7 +770,7 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
   if (debug_) {
     if (old_slot != nullptr) {
       printf("publish old slot: %d: %" PRId64 "\n", old_slot->id,
-             old_slot->ordinal);
+             old_slot->ordinal.load(std::memory_order_relaxed));
     }
   }
 
@@ -795,7 +800,7 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
 
   if (debug_) {
     printf("publish new slot: %d: %" PRId64 "\n", msg.new_slot->id,
-           msg.new_slot->ordinal);
+           msg.new_slot->ordinal.load(std::memory_order_relaxed));
   }
 
   return Message(message_size, nullptr, msg.ordinal, msg.timestamp,
@@ -1111,7 +1116,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
   MessageSlot *old_slot = subscriber->CurrentSlot();
   int64_t last_ordinal = -1;
   if (old_slot != nullptr) {
-    last_ordinal = old_slot->ordinal;
+    last_ordinal = old_slot->ordinal.load(std::memory_order_relaxed);
     if (debug_) {
       printf("read old slot: %d: %" PRId64 "\n", old_slot->id, last_ordinal);
     }
@@ -1140,27 +1145,13 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     return Message();
   }
   subscriber->SetSlot(new_slot);
+  int64_t delivered_message_size =
+      static_cast<int64_t>(
+          new_slot->message_size.load(std::memory_order_relaxed));
 
   if (debug_) {
-    printf("read new_slot: %d: %" PRId64 "\n", new_slot->id, new_slot->ordinal);
-  }
-
-  if (mode == ReadMode::kReadNext && last_ordinal != -1) {
-    int drops = subscriber->DetectDrops(new_slot->vchan_id);
-    if (drops > 0) {
-      // We dropped a message.  If we have a callback registered for this
-      // channel, call it with the number of dropped messages.
-      auto it = dropped_message_callbacks_.find(subscriber);
-      if (it != dropped_message_callbacks_.end()) {
-        it->second(subscriber, drops);
-      }
-      subscriber->RecordDroppedMessages(drops);
-      if (subscriber->options_.log_dropped_messages) {
-        logger_.Log(toolbelt::LogLevel::kWarning,
-                    "Dropped %d message%s on channel %s", drops,
-                    drops == 1 ? "" : "s", subscriber->Name().c_str());
-      }
-    }
+    printf("read new_slot: %d: %" PRId64 "\n", new_slot->id,
+           new_slot->ordinal.load(std::memory_order_relaxed));
   }
 
   MessagePrefix *prefix = subscriber->Prefix(new_slot);
@@ -1171,7 +1162,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     if (prefix->HasChecksum()) {
       auto data =
           GetMessageChecksumData(prefix, subscriber->GetCurrentBufferAddress(),
-                                 new_slot->message_size,
+                                 delivered_message_size,
                                  subscriber->ChecksumSize(),
                                  subscriber->MetadataSize());
       absl::Span<const std::byte> cksum =
@@ -1194,13 +1185,17 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
   // Call the on receive callback.
   if (subscriber->on_receive_callback_ != nullptr) {
     absl::StatusOr<int64_t> status_or_size = subscriber->on_receive_callback_(
-        subscriber->GetCurrentBufferAddress(), new_slot->message_size);
+        subscriber->GetCurrentBufferAddress(), delivered_message_size);
     if (!status_or_size.ok()) {
+      subscriber->UnreadSlot(new_slot);
+      subscriber->SetSlot(nullptr);
       return status_or_size.status();
     }
-    new_slot->message_size = status_or_size.value();
+    delivered_message_size = status_or_size.value();
   }
-  if (new_slot->message_size <= 0) {
+  if (delivered_message_size <= 0) {
+    subscriber->UnreadSlot(new_slot);
+    subscriber->SetSlot(nullptr);
     return Message();
   }
   // We have a new slot, clear the subscriber's slot.
@@ -1208,19 +1203,47 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
 
   // Allocate a new active message for the slot.
   auto msg = subscriber->SetActiveMessage(
-      new_slot->message_size, new_slot, subscriber->GetCurrentBufferAddress(),
+      delivered_message_size, new_slot, subscriber->GetCurrentBufferAddress(),
       subscriber->CurrentOrdinal(), subscriber->Timestamp(new_slot),
-      new_slot->vchan_id, is_activation, checksum_error);
+      new_slot->vchan_id.load(std::memory_order_relaxed), is_activation,
+      checksum_error);
 
   // If we are unable to allocate a new message (due to message limits)
   // restore the slot so that we pick it up next time.
   if (msg->length == 0) {
     subscriber->UnreadSlot(new_slot);
     // Subscriber does not have a slot now but the slot it had is still active.
+    // Do not wrap the reusable ActiveMessage in an empty Message. A caller may
+    // retain that empty handle while this slot is retried, which would keep an
+    // extra reference after the ActiveMessage becomes valid and prevent its
+    // active-message count from being released.
+    return Message();
   } else {
+    if (mode == ReadMode::kReadNext &&
+        subscriber->options_.DetectDroppedMessages()) {
+      int drops = subscriber->ConsumeQueueDrops();
+      if (last_ordinal != -1) {
+        drops = std::max(
+            drops, subscriber->DetectDrops(
+                       new_slot->vchan_id.load(std::memory_order_relaxed)));
+      }
+      if (drops > 0) {
+        auto it = dropped_message_callbacks_.find(subscriber);
+        if (it != dropped_message_callbacks_.end()) {
+          it->second(subscriber, drops);
+        }
+        subscriber->RecordDroppedMessages(drops);
+        if (subscriber->options_.log_dropped_messages) {
+          logger_.Log(toolbelt::LogLevel::kWarning,
+                      "Dropped %d message%s on channel %s", drops,
+                      drops == 1 ? "" : "s", subscriber->Name().c_str());
+        }
+      }
+    }
     // We have a slot, claim it.
-    subscriber->ClaimSlot(new_slot, subscriber->VirtualChannelId(),
-                          mode == ReadMode::kReadNewest);
+    subscriber->ClaimSlot(
+        new_slot, new_slot->vchan_id.load(std::memory_order_relaxed),
+        mode == ReadMode::kReadNewest);
   }
   auto ret_msg = Message(msg);
   if (subscriber->IsBridge()) {
@@ -1276,7 +1299,8 @@ ClientImpl::FindMessageInternal(SubscriberImpl *subscriber,
     // Not found.
     return Message();
   }
-  return Message(new_slot->message_size, subscriber->GetCurrentBufferAddress(),
+  return Message(new_slot->message_size.load(std::memory_order_relaxed),
+                 subscriber->GetCurrentBufferAddress(),
                  subscriber->CurrentOrdinal(), subscriber->Timestamp(),
                  subscriber->VirtualChannelId(), false, new_slot->id, false);
 }
@@ -1341,7 +1365,7 @@ int64_t ClientImpl::GetCurrentOrdinal(SubscriberImpl *sub) {
   if (slot == nullptr) {
     return -1;
   }
-  return slot->ordinal;
+  return slot->ordinal.load(std::memory_order_relaxed);
 }
 
 bool ClientImpl::CheckReload(ClientChannel *channel) {
@@ -1375,8 +1399,6 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
   if (subscriber->NumUpdates() == updates) {
     return absl::OkStatus();
   }
-  subscriber->SetNumUpdates(updates);
-
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -1385,6 +1407,8 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
   cmd->set_channel_name(subscriber->Name());
   cmd->set_subscriber_id(subscriber->GetSubscriberId());
   cmd->set_mux(subscriber->options_.mux);
+  cmd->set_subscriber_queue_size(
+      subscriber->options_.SubscriberQueueSize());
 
   // Send request to server and wait for response.
   Response resp;
@@ -1400,14 +1424,26 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
     return absl::InternalError(sub_resp.error());
   }
 
-  // Unmap the channel memory.
-  subscriber->Unmap();
+  // A subscriber-created placeholder is the only case where the server
+  // replaces the CCB. Once num_slots is non-zero, publisher updates retain the
+  // existing CCB and only require refreshed descriptors and buffers.
+  const bool remap_ccb = subscriber->NumSlots() == 0;
+  if (remap_ccb) {
+    subscriber->ResetDeliveryState();
+    subscriber->Unmap();
+  }
 
   if (!sub_resp.type().empty()) {
     subscriber->SetType(sub_resp.type());
   }
   subscriber->options_.use_split_buffers = sub_resp.use_split_buffers();
   subscriber->SetNumSlots(sub_resp.num_slots());
+  subscriber->SetSubscriberQueueSize(
+      sub_resp.default_subscriber_queue_size());
+  subscriber->SetSubscriberQueueArenaSize(
+      sub_resp.subscriber_queue_arena_size());
+  subscriber->SetEffectiveSubscriberQueueSize(
+      sub_resp.subscriber_queue_size());
   {
     int32_t cs = sub_resp.checksum_size() > 0 ? sub_resp.checksum_size() : 4;
     int32_t ms = sub_resp.metadata_size() > 0 ? sub_resp.metadata_size() : 0;
@@ -1417,15 +1453,15 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
     subscriber->AllocateChecksumBuffer();
   }
 
-  SharedMemoryFds channel_fds(std::move(fds[sub_resp.ccb_fd_index()]),
-                              std::move(fds[sub_resp.bcb_fd_index()]));
-  // subscriber->SetSlots(sub_resp.slot_size(), sub_resp.num_slots());
-
-  if (absl::Status status = subscriber->Map(std::move(channel_fds), scb_fd_);
-      !status.ok()) {
-    return status;
+  if (remap_ccb) {
+    SharedMemoryFds channel_fds(std::move(fds[sub_resp.ccb_fd_index()]),
+                                std::move(fds[sub_resp.bcb_fd_index()]));
+    if (absl::Status status = subscriber->Map(std::move(channel_fds), scb_fd_);
+        !status.ok()) {
+      return status;
+    }
+    subscriber->InitActiveMessages();
   }
-  subscriber->InitActiveMessages();
 
   if (absl::Status status = subscriber->AttachBuffers(); !status.ok()) {
     return status;
@@ -1445,6 +1481,7 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
     subscriber->AddRetirementTrigger(fds[size_t(index)]);
   }
 
+  subscriber->SetNumUpdates(updates);
   // subscriber->Dump();
   return absl::OkStatus();
 }
@@ -1551,7 +1588,7 @@ absl::Status ClientImpl::ActivateReliableChannel(PublisherImpl *publisher) {
     return absl::InternalError(
         absl::StrFormat("Channel %s has no buffer", publisher->Name()));
   }
-  slot->message_size = 1;
+  slot->message_size.store(1, std::memory_order_relaxed);
 
   publisher->ActivateSlotAndGetAnother(
       /*reliable=*/true,
@@ -1574,7 +1611,7 @@ absl::Status ClientImpl::ActivateChannel(PublisherImpl *publisher) {
         absl::StrFormat("3 Channel %s has no buffer", publisher->Name()));
   }
   MessageSlot *slot = publisher->CurrentSlot();
-  slot->message_size = 1;
+  slot->message_size.store(1, std::memory_order_relaxed);
 
   Channel::PublishedMessage msg = publisher->ActivateSlotAndGetAnother(
       /*reliable=*/false,
@@ -1701,6 +1738,9 @@ ClientImpl::GetChannelInfo(const std::string &channel) {
   result.type = info.type();
   result.slot_size = info.slot_size();
   result.num_slots = info.num_slots();
+  result.subscriber_queue_size = info.subscriber_queue_size();
+  result.subscriber_queue_arena_size =
+      info.subscriber_queue_arena_size();
   return result;
 }
 
@@ -1737,6 +1777,9 @@ absl::StatusOr<const std::vector<ChannelInfo>> ClientImpl::GetChannelInfo() {
     result.type = info.type();
     result.slot_size = info.slot_size();
     result.num_slots = info.num_slots();
+    result.subscriber_queue_size = info.subscriber_queue_size();
+    result.subscriber_queue_arena_size =
+        info.subscriber_queue_arena_size();
     r.push_back(result);
   }
   return r;
@@ -1861,6 +1904,7 @@ void ClientImpl::FillCreatePublisherRequest(CreatePublisherRequest *cmd,
   cmd->set_max_publishers(opts.MaxPublishers());
   cmd->set_use_split_buffers(opts.UseSplitBuffers());
   cmd->set_split_buffers_over_bridge(opts.SplitBuffersOverBridge());
+  cmd->set_subscriber_queue_arena_size(opts.SubscriberQueueArenaSize());
   cmd->set_process_id(static_cast<uint64_t>(getpid()));
 }
 
@@ -1901,6 +1945,7 @@ void ClientImpl::FillCreateSubscriberRequest(CreateSubscriberRequest *cmd,
   cmd->set_max_active_messages(opts.MaxActiveMessages());
   cmd->set_mux(opts.Mux());
   cmd->set_vchan_id(opts.VchanId());
+  cmd->set_subscriber_queue_size(opts.SubscriberQueueSize());
   cmd->set_process_id(static_cast<uint64_t>(getpid()));
 }
 
@@ -1979,6 +2024,8 @@ absl::Status ClientImpl::ReregisterPublisher(PublisherImpl *publisher) {
   FillCreatePublisherRequest(req.mutable_create_publisher(), publisher->Name(),
                              publisher->options_,
                              publisher->GetPublisherId());
+  req.mutable_create_publisher()->set_active_queue_publish_depth(
+      publisher->ActiveQueuePublishDepth());
 
   Response resp;
   std::vector<toolbelt::FileDescriptor> fds;

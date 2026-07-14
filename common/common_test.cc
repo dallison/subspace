@@ -1,7 +1,23 @@
 #include "common/atomic_bitset.h"
+#include "common/channel.h"
 #include "common/fast_ring_buffer.h"
 
+#include <cstddef>
+#include <memory>
+#include <new>
+
 #include <gtest/gtest.h>
+
+TEST(CommonTest, SubscriberQueueArenaSizeIsExplicitBytes) {
+  constexpr int kNumSlots = 8;
+  constexpr uint64_t kArenaSize = 12'345;
+  EXPECT_EQ(kArenaSize,
+            subspace::CcbSize(kNumSlots, kArenaSize) -
+                subspace::CcbSize(kNumSlots, 0));
+  EXPECT_EQ(100 * subspace::SlotQueueBlockSize(
+                      subspace::kDefaultSubscriberQueueSize),
+            subspace::kDefaultSubscriberQueueArenaSize);
+}
 
 TEST(CommonTest, AtomicBitset) {
   subspace::AtomicBitSet<6144> bitset;
@@ -48,6 +64,100 @@ TEST(CommonTest, FastRingBuffer) {
   EXPECT_TRUE(buffer.Contains(2));
   EXPECT_TRUE(buffer.Contains(3));
   EXPECT_TRUE(buffer.Contains(4));
+}
+
+TEST(CommonTest, InPlaceSlotQueueEvictsOldestOnOverflow) {
+  constexpr size_t kCapacity = 2;
+  std::unique_ptr<std::byte[]> storage(
+      new std::byte[subspace::SizeofSlotQueue(kCapacity)]);
+  auto *queue = new (storage.get()) subspace::InPlaceSlotQueue(kCapacity);
+
+  EXPECT_TRUE(queue->Push(1, 10));
+  EXPECT_TRUE(queue->Push(2, 20));
+  EXPECT_TRUE(queue->Push(3, 30));
+  EXPECT_EQ(1, queue->OverflowCount());
+  EXPECT_EQ(1, queue->OverflowCount());
+  EXPECT_EQ(1, queue->ConsumeOverflow());
+  EXPECT_EQ(0, queue->OverflowCount());
+
+  subspace::QueuedSlot slot;
+  ASSERT_TRUE(queue->TryPop(slot));
+  EXPECT_EQ(slot.slot_id, 2);
+  EXPECT_EQ(slot.ordinal, 20);
+  ASSERT_TRUE(queue->TryPop(slot));
+  EXPECT_EQ(slot.slot_id, 3);
+  EXPECT_EQ(slot.ordinal, 30);
+  EXPECT_FALSE(queue->TryPop(slot));
+}
+
+TEST(CommonTest, InPlaceSlotQueueCanRejectOverflowWithoutEviction) {
+  constexpr size_t kCapacity = 2;
+  std::unique_ptr<std::byte[]> storage(
+      new std::byte[subspace::SizeofSlotQueue(kCapacity)]);
+  auto *queue =
+      new (storage.get()) subspace::InPlaceSlotQueue(kCapacity, false);
+
+  EXPECT_TRUE(queue->Push(1, 10));
+  EXPECT_TRUE(queue->Push(2, 20));
+  EXPECT_FALSE(queue->Push(3, 30));
+  EXPECT_TRUE(queue->ConsumeInsertionFailure());
+  EXPECT_EQ(0, queue->ConsumeOverflow());
+
+  subspace::QueuedSlot slot;
+  ASSERT_TRUE(queue->TryPop(slot));
+  EXPECT_EQ(slot.slot_id, 1);
+  EXPECT_EQ(slot.ordinal, 10);
+  ASSERT_TRUE(queue->TryPop(slot));
+  EXPECT_EQ(slot.slot_id, 2);
+  EXPECT_EQ(slot.ordinal, 20);
+  EXPECT_FALSE(queue->TryPop(slot));
+}
+
+TEST(CommonTest, InPlaceSlotQueueDoesNotWaitForUnreleasedEntry) {
+  constexpr size_t kCapacity = 2;
+  std::unique_ptr<std::byte[]> storage(
+      new std::byte[subspace::SizeofSlotQueue(kCapacity)]);
+  auto *queue = new (storage.get()) subspace::InPlaceSlotQueue(kCapacity);
+  auto *entries = reinterpret_cast<subspace::SlotQueueEntry *>(
+      storage.get() + sizeof(subspace::InPlaceSlotQueue));
+
+  ASSERT_TRUE(queue->Push(1, 10));
+  ASSERT_TRUE(queue->Push(2, 20));
+  subspace::QueuedSlot slot;
+  ASSERT_TRUE(queue->TryPop(slot));
+
+  // Model a consumer that advanced head but did not mark the entry reusable.
+  entries[0].sequence.store(1, std::memory_order_release);
+  EXPECT_FALSE(queue->Push(3, 30));
+  EXPECT_TRUE(queue->ConsumeInsertionFailure());
+  EXPECT_EQ(0, queue->ConsumeOverflow());
+
+  // Once the consumer releases the entry, producers can use it again.
+  entries[0].sequence.store(2, std::memory_order_release);
+  EXPECT_TRUE(queue->Push(3, 30));
+  ASSERT_TRUE(queue->TryPop(slot));
+  EXPECT_EQ(slot.slot_id, 2);
+  ASSERT_TRUE(queue->TryPop(slot));
+  EXPECT_EQ(slot.slot_id, 3);
+}
+
+TEST(CommonTest, InPlaceSlotQueueDoesNotWaitAfterProducerReservationDeath) {
+  constexpr size_t kCapacity = 2;
+  std::unique_ptr<std::byte[]> storage(
+      new std::byte[subspace::SizeofSlotQueue(kCapacity)]);
+  auto *queue = new (storage.get()) subspace::InPlaceSlotQueue(kCapacity);
+
+  // Model a producer that advanced tail from 0 to 1 and died before publishing
+  // entry 0's sequence. No operation may wait indefinitely behind the hole.
+  auto *tail = reinterpret_cast<std::atomic<uint64_t> *>(
+      storage.get() + sizeof(size_t) + sizeof(std::atomic<uint64_t>));
+  tail->store(1, std::memory_order_release);
+
+  EXPECT_TRUE(queue->Push(2, 20));
+  subspace::QueuedSlot slot;
+  EXPECT_FALSE(queue->TryPop(slot));
+  EXPECT_FALSE(queue->Push(3, 30));
+  EXPECT_TRUE(queue->ConsumeInsertionFailure());
 }
 
 TEST(CommonTest, BitsetTraverse1) {

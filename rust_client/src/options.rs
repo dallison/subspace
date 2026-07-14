@@ -9,10 +9,16 @@ use crate::split_buffer::{
 };
 use std::sync::Arc;
 
+/// Fixed queue depth inherited by subscribers when an arena is provisioned.
+pub const DEFAULT_SUBSCRIBER_QUEUE_SIZE: i32 = 16;
+/// Default packed subscriber queue arena size in bytes.
+pub const DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE: u64 = 64_000;
+
 #[derive(Debug, Clone)]
 pub struct PublisherOptions {
     pub slot_size: i32,
     pub num_slots: i32,
+    pub subscriber_queue_arena_size: u64,
     pub local: bool,
     pub reliable: bool,
     pub bridge: bool,
@@ -36,6 +42,7 @@ impl Default for PublisherOptions {
         Self {
             slot_size: 0,
             num_slots: 0,
+            subscriber_queue_arena_size: DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE,
             local: false,
             reliable: false,
             bridge: false,
@@ -68,6 +75,15 @@ impl PublisherOptions {
 
     pub fn set_num_slots(mut self, num: i32) -> Self {
         self.num_slots = num;
+        self
+    }
+
+    /// Set each subscriber's per-subscriber slot queue capacity.
+    ///
+    /// Set the bytes reserved for packed per-subscriber queues in the CCB.
+    /// Explicitly setting zero selects the available-slot bitset by default.
+    pub fn set_subscriber_queue_arena_size(mut self, size: u64) -> Self {
+        self.subscriber_queue_arena_size = size;
         self
     }
 
@@ -183,11 +199,13 @@ impl PublisherOptions {
 #[derive(Debug, Clone)]
 pub struct SubscriberOptions {
     pub reliable: bool,
+    pub subscriber_queue_size: i32,
     pub bridge: bool,
     pub for_tunnel: bool,
     pub channel_type: String,
     pub max_active_messages: i32,
     pub log_dropped_messages: bool,
+    pub detect_dropped_messages: bool,
     pub pass_activation: bool,
     pub read_write: bool,
     pub mux: String,
@@ -202,11 +220,13 @@ impl Default for SubscriberOptions {
     fn default() -> Self {
         Self {
             reliable: false,
+            subscriber_queue_size: 0,
             bridge: false,
             for_tunnel: false,
             channel_type: String::new(),
             max_active_messages: 1,
             log_dropped_messages: true,
+            detect_dropped_messages: true,
             pass_activation: false,
             read_write: false,
             mux: String::new(),
@@ -229,6 +249,11 @@ impl SubscriberOptions {
         self
     }
 
+    pub fn set_subscriber_queue_size(mut self, size: i32) -> Self {
+        self.subscriber_queue_size = size;
+        self
+    }
+
     pub fn set_type(mut self, t: String) -> Self {
         self.channel_type = t;
         self
@@ -246,6 +271,11 @@ impl SubscriberOptions {
 
     pub fn set_log_dropped_messages(mut self, v: bool) -> Self {
         self.log_dropped_messages = v;
+        self
+    }
+
+    pub fn set_detect_dropped_messages(mut self, v: bool) -> Self {
+        self.detect_dropped_messages = v;
         self
     }
 

@@ -57,6 +57,10 @@ PYBIND11_MODULE(subspace, m) {
       .def_readonly("type", &ChannelInfo::type)
       .def_readonly("slot_size", &ChannelInfo::slot_size)
       .def_readonly("num_slots", &ChannelInfo::num_slots)
+      .def_readonly("subscriber_queue_size",
+                    &ChannelInfo::subscriber_queue_size)
+      .def_readonly("subscriber_queue_arena_size",
+                    &ChannelInfo::subscriber_queue_arena_size)
       .def_readonly("reliable", &ChannelInfo::reliable);
 
   // ChannelStats struct.
@@ -109,6 +113,13 @@ PYBIND11_MODULE(subspace, m) {
            "Set the number of slots for the publisher.")
       .def("num_slots", &PublisherOptions::NumSlots,
            "Get the number of slots for the publisher.")
+      .def("set_subscriber_queue_arena_size",
+           &PublisherOptions::SetSubscriberQueueArenaSize,
+           "Set the bytes reserved for packed subscriber queues. Explicitly "
+           "setting 0 disables queues by default.")
+      .def("subscriber_queue_arena_size",
+           &PublisherOptions::SubscriberQueueArenaSize,
+           "Get the configured subscriber queue arena size in bytes.")
       .def("set_notify_retirement", &PublisherOptions::SetNotifyRetirement,
            "Set whether the publisher notifies on message retirement.")
       .def("notify_retirement", &PublisherOptions::NotifyRetirement,
@@ -138,6 +149,13 @@ PYBIND11_MODULE(subspace, m) {
       .def(py::init<>())
       .def("set_reliable", &SubscriberOptions::SetReliable,
            "Set whether the subscriber is reliable.")
+      .def("set_subscriber_queue_size",
+           &SubscriberOptions::SetSubscriberQueueSize,
+           "Set this subscriber's queue capacity; zero uses the publisher "
+           "default.")
+      .def("subscriber_queue_size",
+           &SubscriberOptions::SubscriberQueueSize,
+           "Get this subscriber's requested queue capacity.")
       .def("set_pass_activation", &SubscriberOptions::SetPassActivation,
            "Set whether the subscriber passes activation messages.")
       .def("is_reliable", &SubscriberOptions::IsReliable,
@@ -156,6 +174,12 @@ PYBIND11_MODULE(subspace, m) {
            "Sets whether the subscriber logs dropped messages.")
       .def("log_dropped_messages", &SubscriberOptions::LogDroppedMessages,
            "Get whether the subscriber logs dropped messages.")
+      .def("set_detect_dropped_messages",
+           &SubscriberOptions::SetDetectDroppedMessages,
+           "Sets whether the subscriber detects dropped messages internally.")
+      .def("detect_dropped_messages",
+           &SubscriberOptions::DetectDroppedMessages,
+           "Get whether the subscriber detects dropped messages internally.")
       .def("set_bridge", &SubscriberOptions::SetBridge,
            "Set whether the subscriber is a bridge.")
       .def("is_bridge", &SubscriberOptions::IsBridge,
@@ -289,6 +313,13 @@ PYBIND11_MODULE(subspace, m) {
 
   publisher_class.def("num_slots", &Publisher::NumSlots,
                       "Get the number of message slots.");
+
+  publisher_class.def("subscriber_queue_size",
+                      &Publisher::SubscriberQueueSize,
+                      "Get each subscriber queue's resolved capacity.");
+  publisher_class.def("subscriber_queue_arena_size",
+                      &Publisher::SubscriberQueueArenaSize,
+                      "Get the subscriber queue arena size in bytes.");
 
   publisher_class.def("virtual_channel_id", &Publisher::VirtualChannelId,
                       "Get the virtual channel ID assigned to this publisher.");
@@ -564,6 +595,10 @@ checksum_error).  Use as a context manager to auto-release the slot:
 
   subscriber_class.def("num_slots", &Subscriber::NumSlots,
                        "Get the number of message slots.");
+
+  subscriber_class.def("subscriber_queue_size",
+                       &Subscriber::SubscriberQueueSize,
+                       "Get each subscriber queue's resolved capacity.");
 
   subscriber_class.def("get_current_ordinal", &Subscriber::GetCurrentOrdinal,
                        "Get the most recently received ordinal.");

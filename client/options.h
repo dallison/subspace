@@ -38,12 +38,24 @@ class Subscriber;
 struct PublisherOptions {
   int32_t SlotSize() const { return slot_size; }
   int32_t NumSlots() const { return num_slots; }
+  uint64_t SubscriberQueueArenaSize() const {
+    return subscriber_queue_arena_size;
+  }
   PublisherOptions &SetSlotSize(int32_t size) {
     slot_size = size;
     return *this;
   }
   PublisherOptions &SetNumSlots(int32_t num) {
     num_slots = num;
+    return *this;
+  }
+  // Total bytes reserved for packed per-subscriber queues in the CCB. A
+  // non-empty arena gives subscribers that do not request an override the fixed
+  // kDefaultSubscriberQueueSize capacity. Explicitly setting zero selects the
+  // available-slot bitset path by default. All publishers on a channel must
+  // agree on this value.
+  PublisherOptions &SetSubscriberQueueArenaSize(uint64_t size) {
+    subscriber_queue_arena_size = size;
     return *this;
   }
 
@@ -219,6 +231,7 @@ struct PublisherOptions {
   // here.
   int32_t slot_size = 0;
   int32_t num_slots = 0;
+  uint64_t subscriber_queue_arena_size = kDefaultSubscriberQueueArenaSize;
 
   bool local = false;
   bool reliable = false;
@@ -245,6 +258,14 @@ struct PublisherOptions {
 };
 
 struct SubscriberOptions {
+  // Capacity of this subscriber's CCB slot queue. Zero uses the publisher's
+  // channel default.
+  SubscriberOptions &SetSubscriberQueueSize(int32_t size) {
+    subscriber_queue_size = size;
+    return *this;
+  }
+  int32_t SubscriberQueueSize() const { return subscriber_queue_size; }
+
   // A reliable subscriber will never miss a message from a reliable
   // publisher.
   SubscriberOptions &SetReliable(bool v) {
@@ -277,6 +298,11 @@ struct SubscriberOptions {
   int MaxActiveMessages() const { return max_active_messages; }
   bool LogDroppedMessages() const { return log_dropped_messages; }
   void SetLogDroppedMessages(bool v) { log_dropped_messages = v; }
+  bool DetectDroppedMessages() const { return detect_dropped_messages; }
+  SubscriberOptions &SetDetectDroppedMessages(bool v) {
+    detect_dropped_messages = v;
+    return *this;
+  }
 
   SubscriberOptions &SetBridge(bool v) {
     bridge = v;
@@ -357,11 +383,13 @@ struct SubscriberOptions {
   }
 
   bool reliable = false;
+  int32_t subscriber_queue_size = 0;
   bool bridge = false;
   bool for_tunnel = false;
   std::string type;
   int max_active_messages = 1;
   bool log_dropped_messages = true;
+  bool detect_dropped_messages = true;
   bool pass_activation = false; // If true, the subscriber will pass activation
                                 // messages to the user.
   bool read_write = false;

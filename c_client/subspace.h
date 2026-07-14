@@ -92,6 +92,8 @@ typedef struct {
   SubspaceString type;
   uint64_t slot_size;
   int num_slots;
+  int subscriber_queue_size;
+  uint64_t subscriber_queue_arena_size;
   bool reliable;
 } SubspaceChannelInfo;
 
@@ -211,6 +213,10 @@ typedef struct {
 typedef struct {
   const int32_t slot_size; // Initial size of slots (might be resized).
   const int num_slots;     // Number of slots (never changes)
+  // Total bytes reserved for packed per-subscriber queues in the CCB. The
+  // options factory selects 64,000 bytes; zero selects the bitset path by
+  // default.
+  uint64_t subscriber_queue_arena_size;
   bool local;              // If true, messages stay local to this machine.
   bool reliable;           // Reliable publisher.
   bool bridge;             // This publisher is for the bridge.
@@ -253,12 +259,16 @@ typedef struct {
 
 typedef struct {
   bool reliable;           // Reliable subscriber.
+  // Capacity of this subscriber's CCB slot queue. 0 uses the publisher
+  // default.
+  int32_t subscriber_queue_size;
   bool bridge;             // This subscriber is for the bridge.
   bool for_tunnel;         // Mark subscriptions for external tunnels.
   SubspaceTypeInfo type;   // Type of the message.  This is an opaque string.
   int max_active_messages; // Max number of message that can be active at once.
   bool pass_activation;    // Pass activation message in read.
   bool log_dropped_messages; // Log dropped messages to stderr.
+  bool detect_dropped_messages; // Detect and count ordinal gaps internally.
   bool read_write;           // Map buffers writable for this subscriber.
   const char *mux;           // Optional mux channel name for virtual channels.
   size_t mux_length;
@@ -398,6 +408,8 @@ int subspace_get_subscriber_fd(SubspaceSubscriber subscriber);
 // is received.
 int32_t subspace_get_subscriber_slot_size(SubspaceSubscriber subscriber);
 int subspace_get_subscriber_num_slots(SubspaceSubscriber subscriber);
+int32_t
+subspace_get_subscriber_queue_size(SubspaceSubscriber subscriber);
 
 // This is a shortcut to wait for a message to be available.  It will block
 // until a message is available.
@@ -532,6 +544,9 @@ bool subspace_is_publisher_for_tunnel(SubspacePublisher publisher);
 bool subspace_publisher_uses_split_buffers(SubspacePublisher publisher);
 int32_t subspace_get_publisher_slot_size(SubspacePublisher publisher);
 int32_t subspace_get_publisher_num_slots(SubspacePublisher publisher);
+int32_t subspace_get_publisher_queue_size(SubspacePublisher publisher);
+uint64_t
+subspace_get_publisher_queue_arena_size(SubspacePublisher publisher);
 SubspaceString subspace_get_publisher_name(SubspacePublisher publisher);
 SubspaceString subspace_get_publisher_type(SubspacePublisher publisher);
 SubspaceString subspace_get_publisher_mux(SubspacePublisher publisher);

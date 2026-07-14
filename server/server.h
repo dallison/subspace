@@ -211,13 +211,16 @@ public:
   // num_slots will be zero.
   absl::StatusOr<ServerChannel *> CreateChannel(const std::string &channel_name,
                                                 int slot_size, int num_slots,
+                                                uint64_t subscriber_queue_arena_size,
                                                 const std::string &mux,
                                                 int vchan_id, std::string type);
   absl::StatusOr<ServerChannel *>
   CreateMultiplexer(const std::string &channel_name, int slot_size,
-                    int num_slots, std::string type);
+                    int num_slots, uint64_t subscriber_queue_arena_size,
+                    std::string type);
   absl::Status RemapChannel(ServerChannel *channel, int slot_size,
-                            int num_slots);
+                            int num_slots,
+                            uint64_t subscriber_queue_arena_size);
   ServerChannel *FindChannel(const std::string &channel_name);
   void RemoveChannel(ServerChannel *channel);
 
@@ -295,6 +298,7 @@ private:
     std::string channel_name;
     int slot_size = 0;
     int num_slots = 0;
+    uint64_t subscriber_queue_arena_size = 0;
     int32_t checksum_size = 0;
     int32_t metadata_size = 0;
     bool wire_split_buffers = false;

@@ -83,7 +83,9 @@ uint64_t AlignPage(uint64_t size) {
 uint64_t ExpectedSplitBufferVirtualMemoryUsage(int num_slots,
                                                uint64_t slot_size,
                                                uint64_t prefix_size) {
-  return sizeof(subspace::SystemControlBlock) + subspace::CcbSize(num_slots) +
+  return sizeof(subspace::SystemControlBlock) +
+         subspace::CcbSize(num_slots,
+                           subspace::kDefaultSubscriberQueueArenaSize) +
          sizeof(subspace::BufferControlBlock) +
          AlignPage(prefix_size * static_cast<uint64_t>(num_slots)) +
          AlignPage(slot_size) * static_cast<uint64_t>(num_slots);
@@ -250,6 +252,12 @@ TEST(AndroidBufferRegistrationTest, FailedRegistrationRollsBackNumBuffers) {
   absl::StatusOr<toolbelt::FileDescriptor> ccb_fd =
       CreateTestMemfd("subspace_test_ccb", subspace::CcbSize(kNumSlots));
   ASSERT_OK(ccb_fd);
+  auto *ccb = reinterpret_cast<subspace::ChannelControlBlock *>(
+      subspace::MapMemory(ccb_fd->Fd(), subspace::CcbSize(kNumSlots),
+                          PROT_READ | PROT_WRITE, "test CCB"));
+  ASSERT_NE(MAP_FAILED, ccb);
+  ccb->version = subspace::kChannelControlBlockVersion;
+  subspace::UnmapMemory(ccb, subspace::CcbSize(kNumSlots), "test CCB");
   absl::StatusOr<toolbelt::FileDescriptor> bcb_fd = CreateTestMemfd(
       "subspace_test_bcb", sizeof(subspace::BufferControlBlock));
   ASSERT_OK(bcb_fd);
@@ -262,7 +270,9 @@ TEST(AndroidBufferRegistrationTest, FailedRegistrationRollsBackNumBuffers) {
   subspace::PublisherOptions options;
   options.SetUseSplitBuffers(false);
   subspace::details::PublisherImpl publisher(
-      "android_registration_rollback", kNumSlots, /*channel_id=*/0,
+      "android_registration_rollback", kNumSlots,
+      /*subscriber_queue_size=*/0, /*subscriber_queue_arena_size=*/0,
+      /*channel_id=*/0,
       /*publisher_id=*/0, /*vchan_id=*/-1, /*session_id=*/123, "",
       options, [](subspace::Channel *) { return false; },
       /*user_id=*/0, /*group_id=*/0);
@@ -848,6 +858,615 @@ TEST_F(ClientTest, PublishSingleMessageAndRead) {
   msg = sub->ReadMessage();
   ASSERT_OK(msg);
   ASSERT_EQ(0, msg->length);
+}
+
+TEST_F(ClientTest, PublishAndReadWithSubscriberQueue) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
+      "subscriber_queue_read",
+      subspace::PublisherOptions()
+          .SetSlotSize(256)
+          .SetNumSlots(40)
+          .SetSubscriberQueueArenaSize(
+              subspace::kDefaultSubscriberQueueArenaSize));
+  ASSERT_OK(pub);
+
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber("subscriber_queue_read");
+  ASSERT_OK(sub);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "queued1", 7);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(7);
+  ASSERT_OK(pub_status);
+
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(7, msg->length);
+  ASSERT_EQ(0, memcmp(msg->buffer, "queued1", 7));
+  msg->Reset();
+
+  buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "queued2", 7);
+  absl::StatusOr<const Message> pub_status2 = pub->PublishMessage(7);
+  ASSERT_OK(pub_status2);
+
+  buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "queued3", 7);
+  absl::StatusOr<const Message> pub_status3 = pub->PublishMessage(7);
+  ASSERT_OK(pub_status3);
+
+  msg = sub->ReadMessage(subspace::ReadMode::kReadNewest);
+  ASSERT_OK(msg);
+  ASSERT_EQ(7, msg->length);
+  ASSERT_EQ(0, memcmp(msg->buffer, "queued3", 7));
+}
+
+TEST_F(ClientTest, SubscribersUseDifferentQueueSizes) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  auto pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "different_subscriber_queue_sizes",
+      subspace::PublisherOptions()
+          .SetSlotSize(64)
+          .SetNumSlots(40)
+          .SetSubscriberQueueArenaSize(
+              subspace::kDefaultSubscriberQueueArenaSize)));
+  auto small = EVAL_AND_ASSERT_OK(client.CreateSubscriber(
+      "different_subscriber_queue_sizes",
+      subspace::SubscriberOptions().SetSubscriberQueueSize(2)));
+  auto defaults = EVAL_AND_ASSERT_OK(
+      client.CreateSubscriber("different_subscriber_queue_sizes"));
+
+  EXPECT_EQ(2, small.SubscriberQueueSize());
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
+            defaults.SubscriberQueueSize());
+
+  for (uint8_t value = 1; value <= 4; ++value) {
+    void *buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+    *static_cast<uint8_t *>(buffer) = value;
+    ASSERT_OK(pub.PublishMessage(1));
+  }
+
+  Message small_message = EVAL_AND_ASSERT_OK(small.ReadMessage());
+  ASSERT_EQ(1, small_message.length);
+  EXPECT_EQ(3, *static_cast<const uint8_t *>(small_message.buffer));
+  small_message.Reset();
+
+  Message default_message = EVAL_AND_ASSERT_OK(defaults.ReadMessage());
+  ASSERT_EQ(1, default_message.length);
+  EXPECT_EQ(1, *static_cast<const uint8_t *>(default_message.buffer));
+}
+
+TEST_F(ClientTest, PublisherQueueArenaRemainsFixedWithoutPublishers) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  constexpr char kChannel[] = "publisher_queue_default_without_publishers";
+  std::unique_ptr<Subscriber> subscriber;
+  {
+    auto publisher = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+        kChannel, subspace::PublisherOptions()
+                      .SetSlotSize(64)
+                      .SetNumSlots(8)
+                      .SetSubscriberQueueArenaSize(4096)));
+    EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
+              publisher.SubscriberQueueSize());
+    subscriber = std::make_unique<Subscriber>(
+        EVAL_AND_ASSERT_OK(client.CreateSubscriber(kChannel)));
+  }
+
+  auto mismatched = client.CreatePublisher(
+      kChannel, subspace::PublisherOptions()
+                    .SetSlotSize(64)
+                    .SetNumSlots(8)
+                    .SetSubscriberQueueArenaSize(8192));
+  ASSERT_FALSE(mismatched.ok());
+  EXPECT_THAT(mismatched.status().message(),
+              ::testing::HasSubstr(
+                  "subscriber queue arena size is 4096, not 8192"));
+}
+
+TEST_F(ClientTest, PublisherQueueArenaMatchesAcrossVirtualChannels) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  constexpr char kMux[] = "publisher_queue_default_mux";
+  auto first = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "publisher_queue_default_vchan_a",
+      subspace::PublisherOptions()
+          .SetSlotSize(64)
+          .SetNumSlots(16)
+          .SetSubscriberQueueArenaSize(4096)
+          .SetMux(kMux)));
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
+            first.SubscriberQueueSize());
+  auto second_vchan_subscriber =
+      EVAL_AND_ASSERT_OK(client.CreateSubscriber(
+          "publisher_queue_default_vchan_b",
+          subspace::SubscriberOptions().SetMux(kMux)));
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
+            second_vchan_subscriber.SubscriberQueueSize());
+
+  auto mismatched = client.CreatePublisher(
+      "publisher_queue_default_vchan_b",
+      subspace::PublisherOptions()
+          .SetSlotSize(64)
+          .SetNumSlots(16)
+          .SetSubscriberQueueArenaSize(8192)
+          .SetMux(kMux));
+  ASSERT_FALSE(mismatched.ok());
+  EXPECT_THAT(mismatched.status().message(),
+              ::testing::HasSubstr(
+                  "subscriber queue arena size is 4096, not 8192"));
+}
+
+TEST_F(ClientTest, FailedSubscriberQueuePushFallsBackToBitset) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  constexpr char kChannel[] = "subscriber_queue_push_fallback";
+  auto pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      kChannel, subspace::PublisherOptions()
+                    .SetSlotSize(64)
+                    .SetNumSlots(8)
+                    .SetSubscriberQueueArenaSize(
+                        subspace::kDefaultSubscriberQueueArenaSize)));
+  auto sub = EVAL_AND_ASSERT_OK(client.CreateSubscriber(
+      kChannel, subspace::SubscriberOptions().SetSubscriberQueueSize(2)));
+
+  subspace::ServerChannel *server_channel = Server()->FindChannel(kChannel);
+  ASSERT_NE(nullptr, server_channel);
+  int sub_id = -1;
+  server_channel->GetCcb()->subscribers.Traverse(
+      [&sub_id](int id) { sub_id = id; });
+  ASSERT_GE(sub_id, 0);
+  subspace::InPlaceSlotQueue *queue =
+      server_channel->GetAvailableSlotQueueAddress(sub_id);
+  ASSERT_NE(nullptr, queue);
+  auto *entries = reinterpret_cast<subspace::SlotQueueEntry *>(
+      reinterpret_cast<std::byte *>(queue) +
+      sizeof(subspace::InPlaceSlotQueue));
+  // Model a consumer that advanced head but died before releasing the entry.
+  entries[0].sequence.store(1, std::memory_order_release);
+
+  void *buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  memcpy(buffer, "fallback", 8);
+  ASSERT_OK(pub.PublishMessage(8));
+
+  Message message = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_EQ(8, message.length);
+  EXPECT_EQ(0, memcmp(message.buffer, "fallback", 8));
+}
+
+TEST_F(ClientTest, ConcurrentQueueReservationOrderDoesNotDropOlderOrdinal) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  constexpr char kChannel[] = "subscriber_queue_out_of_order";
+  auto pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      kChannel, subspace::PublisherOptions().SetSlotSize(64).SetNumSlots(8)));
+  auto sub = EVAL_AND_ASSERT_OK(client.CreateSubscriber(kChannel));
+
+  for (uint8_t value = 1; value <= 2; ++value) {
+    void *buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+    *static_cast<uint8_t *>(buffer) = value;
+    ASSERT_OK(pub.PublishMessage(1));
+  }
+
+  subspace::ServerChannel *server_channel = Server()->FindChannel(kChannel);
+  ASSERT_NE(nullptr, server_channel);
+  int sub_id = -1;
+  server_channel->GetCcb()->subscribers.Traverse(
+      [&sub_id](int id) { sub_id = id; });
+  ASSERT_GE(sub_id, 0);
+  subspace::InPlaceSlotQueue *queue =
+      server_channel->GetAvailableSlotQueueAddress(sub_id);
+  ASSERT_NE(nullptr, queue);
+
+  std::vector<subspace::MessageSlot *> data_slots;
+  for (int i = 0; i < server_channel->NumSlots(); ++i) {
+    subspace::MessageSlot *slot = &server_channel->GetCcb()->slots[i];
+    if (slot->message_size.load(std::memory_order_relaxed) == 1) {
+      data_slots.push_back(slot);
+    }
+  }
+  ASSERT_EQ(2u, data_slots.size());
+  std::sort(
+      data_slots.begin(), data_slots.end(), [](const auto *a, const auto *b) {
+        return a->ordinal.load(std::memory_order_relaxed) <
+               b->ordinal.load(std::memory_order_relaxed);
+      });
+
+  // Concurrent publishers reserve queue positions independently of ordinal
+  // assignment. Recreate the resulting newer-before-older hint order while
+  // retaining the authoritative bits written by PublishMessage().
+  queue->DiscardAll();
+  ASSERT_TRUE(queue->Push(
+      data_slots[1]->id,
+      data_slots[1]->ordinal.load(std::memory_order_relaxed)));
+  ASSERT_TRUE(queue->Push(
+      data_slots[0]->id,
+      data_slots[0]->ordinal.load(std::memory_order_relaxed)));
+
+  for (uint8_t expected = 1; expected <= 2; ++expected) {
+    Message message = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+    ASSERT_EQ(1, message.length);
+    EXPECT_EQ(expected, *static_cast<const uint8_t *>(message.buffer));
+  }
+}
+
+TEST_F(ClientTest, SubscriberQueueOverflowReportsDroppedMessages) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  constexpr char kChannel[] = "subscriber_queue_overflow_reporting";
+  auto pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      kChannel, subspace::PublisherOptions()
+                    .SetSlotSize(64)
+                    .SetNumSlots(8)
+                    .SetSubscriberQueueArenaSize(
+                        subspace::kDefaultSubscriberQueueArenaSize)));
+  auto sub = EVAL_AND_ASSERT_OK(client.CreateSubscriber(
+      kChannel, subspace::SubscriberOptions().SetSubscriberQueueSize(2)));
+  int64_t reported_drops = 0;
+  ASSERT_OK(sub.RegisterDroppedMessageCallback(
+      [&reported_drops](Subscriber *, int64_t drops) {
+        reported_drops += drops;
+      }));
+
+  for (uint8_t value = 1; value <= 4; ++value) {
+    void *buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+    *static_cast<uint8_t *>(buffer) = value;
+    ASSERT_OK(pub.PublishMessage(1));
+  }
+
+  Message message = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_EQ(1, message.length);
+  EXPECT_EQ(3, *static_cast<const uint8_t *>(message.buffer));
+  EXPECT_EQ(2, reported_drops);
+}
+
+TEST_F(ClientTest, QueueMessageSurvivesMaxActiveMessageRejection) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  constexpr char kChannel[] = "subscriber_queue_max_active";
+  auto pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      kChannel, subspace::PublisherOptions()
+                    .SetSlotSize(64)
+                    .SetNumSlots(8)
+                    .SetSubscriberQueueArenaSize(
+                        subspace::kDefaultSubscriberQueueArenaSize)));
+  subspace::SubscriberOptions options;
+  options.SetSubscriberQueueSize(4).SetMaxActiveMessages(1);
+  auto sub =
+      EVAL_AND_ASSERT_OK(client.CreateSubscriber(kChannel, options));
+
+  for (uint8_t value = 1; value <= 3; ++value) {
+    void *buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+    *static_cast<uint8_t *>(buffer) = value;
+    ASSERT_OK(pub.PublishMessage(1));
+  }
+
+  Message first = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_EQ(1, first.length);
+  EXPECT_EQ(1, *static_cast<const uint8_t *>(first.buffer));
+
+  Message blocked = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  EXPECT_EQ(0, blocked.length);
+  first.Reset();
+
+  Message recovered = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_EQ(1, recovered.length);
+  EXPECT_EQ(2, *static_cast<const uint8_t *>(recovered.buffer));
+  recovered.Reset();
+
+  Message next = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_EQ(1, next.length);
+  EXPECT_EQ(3, *static_cast<const uint8_t *>(next.buffer));
+}
+
+TEST_F(ClientTest, SubscriberQueuePollDrainHandlesActivationOrdinals) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  constexpr char kChannel[] = "subscriber_queue_poll_activation";
+  auto sub = EVAL_AND_ASSERT_OK(client.CreateSubscriber(
+      kChannel, subspace::SubscriberOptions().SetSubscriberQueueSize(4)));
+  ASSERT_GE(sub.GetPollFd().fd, 0);
+
+  auto pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      kChannel, subspace::PublisherOptions()
+                    .SetSlotSize(64)
+                    .SetNumSlots(8)
+                    .SetSubscriberQueueArenaSize(
+                        subspace::kDefaultSubscriberQueueArenaSize)
+                    .SetActivate(true)));
+  subspace::ServerChannel *server_channel = Server()->FindChannel(kChannel);
+  ASSERT_NE(nullptr, server_channel);
+  EXPECT_EQ(1, server_channel->GetCcb()->total_messages.load());
+  void *buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  memcpy(buffer, "visible", 7);
+  ASSERT_OK(pub.PublishMessage(7));
+  EXPECT_EQ(2, server_channel->GetCcb()->total_messages.load());
+
+  Message message = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_EQ(7, message.length);
+  EXPECT_EQ(0, memcmp(message.buffer, "visible", 7));
+}
+
+TEST_F(ClientTest, SubscriberQueueOverrideExhaustingArenaIsRejected) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  auto pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "subscriber_queue_arena_exhaustion",
+      subspace::PublisherOptions()
+          .SetSlotSize(64)
+          .SetNumSlots(40)
+          .SetSubscriberQueueArenaSize(
+              2 * subspace::SlotQueueBlockSize(1024) +
+              subspace::SlotQueueBlockSize(
+                  subspace::kDefaultSubscriberQueueSize))));
+
+  std::vector<Subscriber> large_subscribers;
+  bool exhausted = false;
+  for (int i = 0; i < 32; ++i) {
+    auto subscriber = client.CreateSubscriber(
+        "subscriber_queue_arena_exhaustion",
+        subspace::SubscriberOptions().SetSubscriberQueueSize(1024));
+    if (!subscriber.ok()) {
+      EXPECT_THAT(subscriber.status().message(),
+                  ::testing::HasSubstr("does not fit"));
+      exhausted = true;
+      break;
+    }
+    large_subscribers.push_back(std::move(*subscriber));
+  }
+  ASSERT_TRUE(exhausted);
+
+  // Retiring one queue makes its arena block available to the next subscriber.
+  large_subscribers.pop_back();
+  auto replacement = EVAL_AND_ASSERT_OK(client.CreateSubscriber(
+      "subscriber_queue_arena_exhaustion",
+      subspace::SubscriberOptions().SetSubscriberQueueSize(1024)));
+  EXPECT_EQ(1024, replacement.SubscriberQueueSize());
+
+  auto defaults = EVAL_AND_ASSERT_OK(
+      client.CreateSubscriber("subscriber_queue_arena_exhaustion"));
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
+            defaults.SubscriberQueueSize());
+}
+
+TEST_F(ClientTest, SubscriberQueueReuseWaitsForPublisherTraversal) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  constexpr char kChannel[] = "subscriber_queue_hazard_reuse";
+  auto pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      kChannel, subspace::PublisherOptions()
+                    .SetSlotSize(64)
+                    .SetNumSlots(16)
+                    .SetSubscriberQueueArenaSize(
+                        3 * subspace::SlotQueueBlockSize(1024))));
+  subspace::ServerChannel *channel = Server()->FindChannel(kChannel);
+  ASSERT_NE(nullptr, channel);
+
+  int publisher_id = -1;
+  for (const auto &entry : channel->GetUsers()) {
+    if (entry.second->IsPublisher()) {
+      publisher_id = entry.first;
+    }
+  }
+  ASSERT_GE(publisher_id, 0);
+
+  uint64_t first_offset = 0;
+  {
+    auto first = EVAL_AND_ASSERT_OK(client.CreateSubscriber(
+        kChannel,
+        subspace::SubscriberOptions().SetSubscriberQueueSize(1024)));
+    int subscriber_id = -1;
+    channel->GetCcb()->subscribers.Traverse(
+        [&subscriber_id](int id) { subscriber_id = id; });
+    ASSERT_GE(subscriber_id, 0);
+    first_offset = channel->GetAvailableSlotQueueIndexAddress()
+                       ->offsets[subscriber_id]
+                       .load(std::memory_order_acquire);
+    channel->BeginSubscriberQueuePublish(publisher_id);
+  }
+
+  uint64_t second_offset = 0;
+  {
+    auto second = EVAL_AND_ASSERT_OK(client.CreateSubscriber(
+        kChannel,
+        subspace::SubscriberOptions().SetSubscriberQueueSize(1024)));
+    int subscriber_id = -1;
+    channel->GetCcb()->subscribers.Traverse(
+        [&subscriber_id](int id) { subscriber_id = id; });
+    ASSERT_GE(subscriber_id, 0);
+    second_offset = channel->GetAvailableSlotQueueIndexAddress()
+                        ->offsets[subscriber_id]
+                        .load(std::memory_order_acquire);
+    EXPECT_NE(first_offset, second_offset);
+  }
+
+  channel->EndSubscriberQueuePublish(publisher_id);
+  auto reclaimed = EVAL_AND_ASSERT_OK(client.CreateSubscriber(
+      kChannel, subspace::SubscriberOptions().SetSubscriberQueueSize(1024)));
+  int reclaimed_id = -1;
+  channel->GetCcb()->subscribers.Traverse(
+      [&reclaimed_id](int id) { reclaimed_id = id; });
+  ASSERT_GE(reclaimed_id, 0);
+  const uint64_t reclaimed_offset =
+      channel->GetAvailableSlotQueueIndexAddress()
+          ->offsets[reclaimed_id]
+          .load(std::memory_order_acquire);
+  EXPECT_EQ(first_offset, reclaimed_offset);
+}
+
+TEST_F(ClientTest, SubscriberQueueArenaCoalescesAdjacentBlocks) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  constexpr char kChannel[] = "subscriber_queue_coalesce";
+  auto pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      kChannel, subspace::PublisherOptions()
+                    .SetSlotSize(64)
+                    .SetNumSlots(16)
+                    .SetSubscriberQueueArenaSize(
+                        2 * subspace::SlotQueueBlockSize(512))));
+  subspace::ServerChannel *channel = Server()->FindChannel(kChannel);
+  ASSERT_NE(nullptr, channel);
+
+  auto first = std::make_unique<Subscriber>(
+      EVAL_AND_ASSERT_OK(client.CreateSubscriber(
+          kChannel,
+          subspace::SubscriberOptions().SetSubscriberQueueSize(512))));
+  auto second = std::make_unique<Subscriber>(
+      EVAL_AND_ASSERT_OK(client.CreateSubscriber(
+          kChannel,
+          subspace::SubscriberOptions().SetSubscriberQueueSize(512))));
+  std::vector<uint64_t> queue_offsets;
+  channel->GetCcb()->subscribers.Traverse([channel, &queue_offsets](int id) {
+    queue_offsets.push_back(channel->GetAvailableSlotQueueIndexAddress()
+                                ->offsets[id]
+                                .load(std::memory_order_acquire));
+  });
+  ASSERT_EQ(2, queue_offsets.size());
+  const uint64_t first_offset = queue_offsets[0];
+  const uint64_t second_offset = queue_offsets[1];
+  const uint64_t lower_offset = std::min(first_offset, second_offset);
+  first.reset();
+  second.reset();
+
+  auto coalesced = EVAL_AND_ASSERT_OK(client.CreateSubscriber(
+      kChannel, subspace::SubscriberOptions().SetSubscriberQueueSize(1024)));
+  int coalesced_id = -1;
+  channel->GetCcb()->subscribers.Traverse(
+      [&coalesced_id](int id) { coalesced_id = id; });
+  ASSERT_GE(coalesced_id, 0);
+  const uint64_t coalesced_offset =
+      channel->GetAvailableSlotQueueIndexAddress()
+          ->offsets[coalesced_id]
+          .load(std::memory_order_acquire);
+  EXPECT_EQ(lower_offset, coalesced_offset);
+}
+
+TEST_F(ClientTest, SubscriberFirstQueueOverrideSurvivesPlaceholderRemap) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  constexpr char kChannel[] = "subscriber_first_queue_override";
+  auto sub = EVAL_AND_ASSERT_OK(sub_client.CreateSubscriber(
+      kChannel, subspace::SubscriberOptions().SetSubscriberQueueSize(2)));
+  EXPECT_TRUE(sub.IsPlaceholder());
+  EXPECT_EQ(0, sub.SubscriberQueueSize());
+
+  auto pub = EVAL_AND_ASSERT_OK(pub_client.CreatePublisher(
+      kChannel, subspace::PublisherOptions()
+                    .SetSlotSize(64)
+                    .SetNumSlots(32)
+                    .SetSubscriberQueueArenaSize(
+                        subspace::kDefaultSubscriberQueueArenaSize)));
+  for (uint8_t value = 1; value <= 4; ++value) {
+    void *buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+    *static_cast<uint8_t *>(buffer) = value;
+    ASSERT_OK(pub.PublishMessage(1));
+  }
+
+  Message message = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_EQ(1, message.length);
+  EXPECT_EQ(3, *static_cast<const uint8_t *>(message.buffer));
+  EXPECT_FALSE(sub.IsPlaceholder());
+  EXPECT_EQ(2, sub.SubscriberQueueSize());
+}
+
+TEST_F(ClientTest, SubscriberFirstOversizedQueueFallsBackToBitset) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  constexpr char kChannel[] = "subscriber_first_oversized_queue";
+  std::vector<Subscriber> subscribers;
+  for (int i = 0; i < 16; ++i) {
+    subscribers.push_back(EVAL_AND_ASSERT_OK(sub_client.CreateSubscriber(
+        kChannel, subspace::SubscriberOptions().SetSubscriberQueueSize(1024))));
+    ASSERT_TRUE(subscribers.back().IsPlaceholder());
+  }
+
+  auto pub = EVAL_AND_ASSERT_OK(pub_client.CreatePublisher(
+      kChannel, subspace::PublisherOptions()
+                    .SetSlotSize(64)
+                    .SetNumSlots(32)
+                    .SetSubscriberQueueArenaSize(
+                        8 * subspace::SlotQueueBlockSize(1024))));
+  for (uint8_t value = 1; value <= 4; ++value) {
+    void *buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+    *static_cast<uint8_t *>(buffer) = value;
+    ASSERT_OK(pub.PublishMessage(1));
+  }
+
+  int queued = 0;
+  int bitset = 0;
+  for (Subscriber &sub : subscribers) {
+    Message message =
+        EVAL_AND_ASSERT_OK(sub.ReadMessage(subspace::ReadMode::kReadNewest));
+    ASSERT_EQ(1, message.length);
+    EXPECT_EQ(4, *static_cast<const uint8_t *>(message.buffer));
+    EXPECT_FALSE(sub.IsPlaceholder());
+    if (sub.SubscriberQueueSize() == 0) {
+      ++bitset;
+    } else {
+      EXPECT_EQ(1024, sub.SubscriberQueueSize());
+      ++queued;
+    }
+  }
+  EXPECT_GT(queued, 0);
+  EXPECT_GT(bitset, 0);
+}
+
+TEST_F(ClientTest, SubscriberQueueChurnKeepsQueuesIndependent) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  constexpr char kChannel[] = "subscriber_queue_churn";
+  auto pub = EVAL_AND_ASSERT_OK(pub_client.CreatePublisher(
+      kChannel, subspace::PublisherOptions()
+                    .SetSlotSize(64)
+                    .SetNumSlots(64)
+                    .SetSubscriberQueueArenaSize(
+                        subspace::kDefaultSubscriberQueueArenaSize)));
+
+  for (int iteration = 1; iteration <= 1100; ++iteration) {
+    const int queue_size = 1 + iteration % 4;
+    auto sub = EVAL_AND_ASSERT_OK(sub_client.CreateSubscriber(
+        kChannel,
+        subspace::SubscriberOptions().SetSubscriberQueueSize(queue_size)));
+    EXPECT_EQ(queue_size, sub.SubscriberQueueSize());
+
+    void *buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+    memcpy(buffer, &iteration, sizeof(iteration));
+    ASSERT_OK(pub.PublishMessage(sizeof(iteration)));
+
+    Message message =
+        EVAL_AND_ASSERT_OK(sub.ReadMessage(subspace::ReadMode::kReadNewest));
+    ASSERT_EQ(sizeof(iteration), message.length);
+    EXPECT_EQ(iteration, *static_cast<const int *>(message.buffer));
+  }
 }
 
 TEST_F(ClientTest, SplitBuffersPublishWithHandlesAndSeparatePrefix) {
@@ -2258,6 +2877,35 @@ TEST_F(ClientTest, ReliablePublisher1) {
   machine.Run();
 }
 
+TEST_F(ClientTest, ReliablePublisherDoesNotBlockOnUnreliableSubscriber) {
+  subspace::Client client;
+  InitClient(client);
+
+  constexpr int kNumSlots = 5;
+  absl::StatusOr<Publisher> pub = client.CreatePublisher(
+      "rel_pub_unrel_sub", 32, kNumSlots,
+      subspace::PublisherOptions().SetReliable(true));
+  ASSERT_OK(pub);
+  absl::StatusOr<Subscriber> sub = client.CreateSubscriber(
+      "rel_pub_unrel_sub", subspace::SubscriberOptions().SetReliable(false));
+  ASSERT_OK(sub);
+
+  const auto &counters = pub->GetChannelCounters();
+  ASSERT_EQ(1, counters.num_reliable_pubs);
+  ASSERT_EQ(0, counters.num_reliable_subs);
+
+  // An unreliable subscriber may fall behind and drop messages, but it must not
+  // make reliable publishers wait for every old slot to be observed.
+  for (int i = 0; i < kNumSlots * 4; i++) {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_OK(buffer);
+    ASSERT_NE(nullptr, *buffer) << "publish " << i;
+    memcpy(*buffer, "foobar", 6);
+    absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+    ASSERT_OK(pub_status);
+  }
+}
+
 TEST_F(ClientTest, ReliablePublisher2) {
   subspace::Client client;
   InitClient(client);
@@ -2693,6 +3341,61 @@ TEST_F(ClientTest, DroppedMessage) {
     }
   }
   ASSERT_EQ(4, num_dropped_messages);
+}
+
+TEST_F(ClientTest, DroppedMessageDetectionCanBeDisabled) {
+  subspace::Client client;
+  InitClient(client);
+
+  absl::StatusOr<Subscriber> sub = client.CreateSubscriber(
+      "drop_detection_disabled",
+      SubOpts().SetKeepActiveMessage(true).SetDetectDroppedMessages(false));
+  ASSERT_OK(sub);
+
+  int num_dropped_messages = 0;
+  ASSERT_OK(sub->RegisterDroppedMessageCallback(
+      [&num_dropped_messages](Subscriber *, int64_t num_dropped) {
+        num_dropped_messages += num_dropped;
+      }));
+
+  absl::StatusOr<Publisher> pub =
+      client.CreatePublisher("drop_detection_disabled", 32, 5);
+  ASSERT_OK(pub);
+
+  for (int i = 0; i < 4; i++) {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_OK(buffer);
+    memcpy(*buffer, "foobar", 6);
+    ASSERT_OK(pub->PublishMessage(6));
+  }
+
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(6, msg->length);
+
+  for (int i = 0; i < 4; i++) {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_OK(buffer);
+    memcpy(*buffer, "foobar", 6);
+    ASSERT_OK(pub->PublishMessage(6));
+  }
+
+  for (;;) {
+    msg = sub->ReadMessage();
+    ASSERT_OK(msg);
+    if (msg->length == 0) {
+      break;
+    }
+  }
+  ASSERT_EQ(0, num_dropped_messages);
+
+  uint64_t total_bytes = 0;
+  uint64_t total_messages = 0;
+  uint32_t max_message_size = 0;
+  uint32_t total_drops = 0;
+  pub->GetStatsCounters(total_bytes, total_messages, max_message_size,
+                        total_drops);
+  ASSERT_EQ(0u, total_drops);
 }
 
 TEST_F(ClientTest, PublishSingleMessageAndReadSharedPtr) {
@@ -5372,6 +6075,43 @@ TEST_F(ClientTest, MaxActiveMessagesTooSmall) {
               ::testing::HasSubstr("MaxActiveMessages"));
 }
 
+TEST_F(ClientTest, CapacityErrorIdentifiesExistingClients) {
+  auto publisher_client_a = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "capacity-publisher-a"));
+  auto publisher_client_b = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "capacity-publisher-b"));
+  auto subscriber_client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "capacity-subscriber"));
+  auto rejected_client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "capacity-rejected"));
+
+  [[maybe_unused]] auto publisher_a = EVAL_AND_ASSERT_OK(
+      publisher_client_a->CreatePublisher("capacity_clients", PubOpts(64, 6)));
+  [[maybe_unused]] auto subscriber =
+      EVAL_AND_ASSERT_OK(subscriber_client->CreateSubscriber(
+          "capacity_clients", SubOpts().SetMaxActiveMessages(2)));
+  [[maybe_unused]] auto publisher_b = EVAL_AND_ASSERT_OK(
+      publisher_client_b->CreatePublisher("capacity_clients", PubOpts(64, 6)));
+
+  auto rejected = rejected_client->CreateSubscriber(
+      "capacity_clients", SubOpts().SetMaxActiveMessages(2));
+  ASSERT_FALSE(rejected.ok());
+  const std::string error(rejected.status().message());
+  EXPECT_THAT(error, ::testing::HasSubstr("publishers=["));
+  EXPECT_THAT(error,
+              ::testing::HasSubstr("client=\"capacity-publisher-a\""));
+  EXPECT_THAT(error,
+              ::testing::HasSubstr("client=\"capacity-publisher-b\""));
+  EXPECT_THAT(error, ::testing::HasSubstr("subscribers=["));
+  EXPECT_THAT(error, ::testing::HasSubstr("client=\"capacity-subscriber\""));
+  EXPECT_THAT(error, ::testing::HasSubstr("max_active_messages=2"));
+  EXPECT_THAT(error,
+              ::testing::HasSubstr(absl::StrFormat(
+                  "pid=%llu", static_cast<unsigned long long>(getpid()))));
+  EXPECT_EQ(std::string::npos, error.find("{id="));
+  EXPECT_EQ(std::string::npos, error.find("reliable="));
+}
+
 TEST_F(ClientTest, OnReceiveCallbackSuccess) {
   subspace::Client pub_client;
   subspace::Client sub_client;
@@ -5424,6 +6164,36 @@ TEST_F(ClientTest, OnReceiveCallbackError) {
   EXPECT_THAT(msg.status().message(),
               ::testing::HasSubstr("receive callback failed"));
   sub.ClearOnReceiveCallback();
+
+  // The callback runs after NextSlot has claimed a shared slot ref. The error
+  // path must roll that ref back without clearing the subscriber bit so the
+  // same message remains readable.
+  Message retried = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_EQ(10, retried.length);
+  EXPECT_EQ(0, memcmp(retried.buffer, "qqqqqqqqqq", 10));
+}
+
+TEST_F(ClientTest, OnReceiveCallbackZeroSizeReleasesSlot) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  auto pub = EVAL_AND_ASSERT_OK(
+      client.CreatePublisher("onrecv_zero", PubOpts(64, 4)));
+  auto sub =
+      EVAL_AND_ASSERT_OK(client.CreateSubscriber("onrecv_zero"));
+  sub.SetOnReceiveCallback(
+      [](void *, int64_t) -> absl::StatusOr<int64_t> { return 0; });
+
+  void *buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  memcpy(buffer, "retry", 5);
+  ASSERT_OK(pub.PublishMessage(5));
+  Message empty = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  EXPECT_EQ(0, empty.length);
+
+  sub.ClearOnReceiveCallback();
+  Message retried = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_EQ(5, retried.length);
+  EXPECT_EQ(0, memcmp(retried.buffer, "retry", 5));
 }
 
 TEST_F(ClientTest, ProcessAllMessagesWithoutCallback) {
@@ -5655,6 +6425,7 @@ TEST_F(ClientTest, PublisherOptionsChain) {
   subspace::PublisherOptions opts;
   opts.SetSlotSize(128)
       .SetNumSlots(8)
+      .SetSubscriberQueueArenaSize(32'000)
       .SetReliable(true)
       .SetLocal(true)
       .SetFixedSize(true)
@@ -5671,6 +6442,7 @@ TEST_F(ClientTest, PublisherOptionsChain) {
 
   ASSERT_EQ(128, opts.SlotSize());
   ASSERT_EQ(8, opts.NumSlots());
+  ASSERT_EQ(32'000, opts.SubscriberQueueArenaSize());
   ASSERT_TRUE(opts.IsReliable());
   ASSERT_TRUE(opts.IsLocal());
   ASSERT_TRUE(opts.IsFixedSize());
@@ -5686,9 +6458,67 @@ TEST_F(ClientTest, PublisherOptionsChain) {
   ASSERT_EQ(3, opts.MaxPublishers());
 }
 
+TEST_F(ClientTest, PublisherSubscriberQueueArenaSizeOption) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  auto pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "subscriber_queue_size",
+      subspace::PublisherOptions()
+          .SetSlotSize(128)
+          .SetNumSlots(8)
+          .SetSubscriberQueueArenaSize(32'000)));
+  EXPECT_EQ(8, pub.NumSlots());
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
+            pub.SubscriberQueueSize());
+  EXPECT_EQ(32'000, pub.SubscriberQueueArenaSize());
+
+  auto sub = EVAL_AND_ASSERT_OK(
+      client.CreateSubscriber("subscriber_queue_size"));
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
+            sub.SubscriberQueueSize());
+
+  auto info = EVAL_AND_ASSERT_OK(client.GetChannelInfo("subscriber_queue_size"));
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
+            info.subscriber_queue_size);
+  EXPECT_EQ(32'000, info.subscriber_queue_arena_size);
+
+  auto default_pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "subscriber_queue_size_default",
+      subspace::PublisherOptions().SetSlotSize(128).SetNumSlots(8)));
+  EXPECT_EQ(8, default_pub.NumSlots());
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
+            default_pub.SubscriberQueueSize());
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueArenaSize,
+            default_pub.SubscriberQueueArenaSize());
+  auto default_sub = EVAL_AND_ASSERT_OK(
+      client.CreateSubscriber("subscriber_queue_size_default"));
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
+            default_sub.SubscriberQueueSize());
+  auto default_info =
+      EVAL_AND_ASSERT_OK(client.GetChannelInfo("subscriber_queue_size_default"));
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
+            default_info.subscriber_queue_size);
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueArenaSize,
+            default_info.subscriber_queue_arena_size);
+
+  auto disabled_pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "subscriber_queue_size_disabled",
+      subspace::PublisherOptions()
+          .SetSlotSize(128)
+          .SetNumSlots(8)
+          .SetSubscriberQueueArenaSize(0)));
+  EXPECT_EQ(0, disabled_pub.SubscriberQueueSize());
+  EXPECT_EQ(0, disabled_pub.SubscriberQueueArenaSize());
+  auto disabled_sub = EVAL_AND_ASSERT_OK(
+      client.CreateSubscriber("subscriber_queue_size_disabled"));
+  EXPECT_EQ(0, disabled_sub.SubscriberQueueSize());
+}
+
 TEST_F(ClientTest, SubscriberOptionsChain) {
   subspace::SubscriberOptions opts;
   opts.SetReliable(true)
+      .SetSubscriberQueueSize(12)
       .SetType("sub_type")
       .SetMaxActiveMessages(20)
       .SetBridge(true)
@@ -5699,14 +6529,17 @@ TEST_F(ClientTest, SubscriberOptionsChain) {
       .SetReadWrite(true)
       .SetChecksum(true)
       .SetPassChecksumErrors(true)
-      .SetKeepActiveMessage(true);
+      .SetKeepActiveMessage(true)
+      .SetDetectDroppedMessages(false);
   opts.SetLogDroppedMessages(true);
 
   ASSERT_TRUE(opts.IsReliable());
+  ASSERT_EQ(12, opts.SubscriberQueueSize());
   ASSERT_EQ("sub_type", opts.Type());
   ASSERT_EQ(19, opts.MaxSharedPtrs());
   ASSERT_EQ(20, opts.MaxActiveMessages());
   ASSERT_TRUE(opts.LogDroppedMessages());
+  ASSERT_FALSE(opts.DetectDroppedMessages());
   ASSERT_TRUE(opts.IsBridge());
   ASSERT_TRUE(opts.ForTunnel());
   ASSERT_EQ("/submux", opts.Mux());

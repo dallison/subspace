@@ -50,6 +50,7 @@ cc_test(
         "fast_ring_buffer.h",
     ],
     deps = [
+        ":subspace_common",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@googletest//:gtest_main",
     ],

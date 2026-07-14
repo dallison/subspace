@@ -249,6 +249,7 @@ Shadow::HandleCreateChannel(const ShadowCreateChannel &msg,
     ch.channel_id = msg.channel_id();
     ch.slot_size = msg.slot_size();
     ch.num_slots = msg.num_slots();
+    ch.subscriber_queue_arena_size = msg.subscriber_queue_arena_size();
     ch.type = msg.type();
     ch.is_local = msg.is_local();
     ch.is_reliable = msg.is_reliable();
@@ -315,6 +316,7 @@ Shadow::HandleAddPublisher(const ShadowAddPublisher &msg,
       .for_tunnel = msg.for_tunnel(),
       .is_fixed_size = msg.is_fixed_size(),
       .notify_retirement = msg.notify_retirement(),
+      .process_id = msg.process_id(),
       .poll_fd = std::move(fds[0]),
       .trigger_fd = std::move(fds[1]),
       .retirement_read_fd = msg.notify_retirement()
@@ -368,6 +370,8 @@ Shadow::HandleAddSubscriber(const ShadowAddSubscriber &msg,
       .is_bridge = msg.is_bridge(),
       .for_tunnel = msg.for_tunnel(),
       .max_active_messages = msg.max_active_messages(),
+      .subscriber_queue_size = msg.subscriber_queue_size(),
+      .process_id = msg.process_id(),
       .trigger_fd = std::move(fds[0]),
       .poll_fd = std::move(fds[1]),
   };
@@ -526,6 +530,8 @@ absl::Status Shadow::SendStateDump(toolbelt::UnixSocket &socket) {
       msg->set_channel_id(ch.channel_id);
       msg->set_slot_size(ch.slot_size);
       msg->set_num_slots(ch.num_slots);
+      msg->set_subscriber_queue_arena_size(
+          ch.subscriber_queue_arena_size);
       msg->set_type(ch.type);
       msg->set_is_local(ch.is_local);
       msg->set_is_reliable(ch.is_reliable);
@@ -576,6 +582,7 @@ absl::Status Shadow::SendStateDump(toolbelt::UnixSocket &socket) {
       msg->set_for_tunnel(pub.for_tunnel);
       msg->set_is_fixed_size(pub.is_fixed_size);
       msg->set_notify_retirement(pub.notify_retirement);
+      msg->set_process_id(pub.process_id);
 
       std::vector<toolbelt::FileDescriptor> fds;
       fds.push_back(pub.poll_fd);
@@ -599,6 +606,8 @@ absl::Status Shadow::SendStateDump(toolbelt::UnixSocket &socket) {
       msg->set_is_bridge(sub.is_bridge);
       msg->set_for_tunnel(sub.for_tunnel);
       msg->set_max_active_messages(sub.max_active_messages);
+      msg->set_subscriber_queue_size(sub.subscriber_queue_size);
+      msg->set_process_id(sub.process_id);
 
       std::vector<toolbelt::FileDescriptor> fds;
       fds.push_back(sub.trigger_fd);

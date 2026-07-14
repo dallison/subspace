@@ -399,6 +399,283 @@ TEST_F(StressTest, ThreadSafety) {
   signal(SIGQUIT, oldSig);
 }
 
+TEST_F(StressTest, SubscriberQueuesManyPublishersAndSubscribers) {
+  const int kNumPublishers = StressValueForSplitBuffers(8, 4);
+  const int kNumSubscribers = StressValueForSplitBuffers(16, 8);
+  const int kMessagesPerPublisher =
+      StressValueForSplitBuffers(10000, 2000);
+  const int kNumSlots = StressValueForSplitBuffers(256, 128);
+  constexpr int kDefaultQueueSize = 64;
+  constexpr uint64_t kMagic = 0x5155455545535452;
+  constexpr char kChannel[] = "/subscriber_queue_stress";
+
+  struct Payload {
+    uint64_t magic;
+    uint32_t publisher;
+    uint32_t sequence;
+    uint64_t checksum;
+  };
+
+  std::vector<std::shared_ptr<subspace::Client>> publisher_clients;
+  std::vector<subspace::Publisher> publishers;
+  publisher_clients.reserve(kNumPublishers);
+  publishers.reserve(kNumPublishers);
+  for (int i = 0; i < kNumPublishers; ++i) {
+    publisher_clients.push_back(
+        EVAL_AND_ASSERT_OK(subspace::Client::Create(
+            Socket(), absl::StrFormat("queue_publisher_%d", i))));
+    publishers.push_back(
+        EVAL_AND_ASSERT_OK(publisher_clients.back()->CreatePublisher(
+            kChannel,
+            subspace::PublisherOptions()
+                .SetSlotSize(sizeof(Payload))
+                .SetNumSlots(kNumSlots)
+                .SetSubscriberQueueArenaSize(
+                    subspace::kDefaultSubscriberQueueArenaSize))));
+  }
+
+  std::vector<std::shared_ptr<subspace::Client>> subscriber_clients;
+  std::vector<subspace::Subscriber> subscribers;
+  subscriber_clients.reserve(kNumSubscribers);
+  subscribers.reserve(kNumSubscribers);
+  for (int i = 0; i < kNumSubscribers; ++i) {
+    const int queue_size = 1 << (i % 7);
+    subscriber_clients.push_back(
+        EVAL_AND_ASSERT_OK(subspace::Client::Create(
+            Socket(), absl::StrFormat("queue_subscriber_%d", i))));
+    subspace::SubscriberOptions options;
+    options.SetSubscriberQueueSize(queue_size);
+    options.SetLogDroppedMessages(false);
+    subscribers.push_back(
+        EVAL_AND_ASSERT_OK(subscriber_clients.back()->CreateSubscriber(
+            kChannel, options)));
+    ASSERT_EQ(queue_size, subscribers.back().SubscriberQueueSize());
+  }
+
+  std::atomic<bool> start = false;
+  std::atomic<bool> publishers_done = false;
+  std::atomic<int> failures = 0;
+  std::vector<int> received(kNumSubscribers, 0);
+  std::vector<std::thread> subscriber_threads;
+  subscriber_threads.reserve(kNumSubscribers);
+  for (int sub_id = 0; sub_id < kNumSubscribers; ++sub_id) {
+    subscriber_threads.emplace_back([&, sub_id]() {
+      std::vector<int64_t> last_sequence(kNumPublishers, -1);
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      for (;;) {
+        absl::StatusOr<Message> message = subscribers[sub_id].ReadMessage();
+        if (!message.ok()) {
+          ++failures;
+          return;
+        }
+        if (message->length == 0) {
+          if (publishers_done.load(std::memory_order_acquire)) {
+            return;
+          }
+          std::this_thread::yield();
+          continue;
+        }
+        if (message->length != sizeof(Payload)) {
+          ++failures;
+          continue;
+        }
+
+        Payload payload;
+        memcpy(&payload, message->buffer, sizeof(payload));
+        const uint64_t checksum =
+            payload.magic ^
+            (static_cast<uint64_t>(payload.publisher) << 32) ^
+            payload.sequence;
+        if (payload.magic != kMagic ||
+            payload.publisher >= static_cast<uint32_t>(kNumPublishers) ||
+            payload.sequence >=
+                static_cast<uint32_t>(kMessagesPerPublisher) ||
+            payload.checksum != checksum) {
+          ++failures;
+          continue;
+        }
+        if (static_cast<int64_t>(payload.sequence) <=
+            last_sequence[payload.publisher]) {
+          ++failures;
+          continue;
+        }
+        last_sequence[payload.publisher] = payload.sequence;
+        ++received[sub_id];
+      }
+    });
+  }
+
+  std::vector<std::thread> publisher_threads;
+  publisher_threads.reserve(kNumPublishers);
+  for (int pub_id = 0; pub_id < kNumPublishers; ++pub_id) {
+    publisher_threads.emplace_back([&, pub_id]() {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      for (int sequence = 0; sequence < kMessagesPerPublisher; ++sequence) {
+        Payload payload = {
+            kMagic,
+            static_cast<uint32_t>(pub_id),
+            static_cast<uint32_t>(sequence),
+            kMagic ^ (static_cast<uint64_t>(pub_id) << 32) ^
+                static_cast<uint32_t>(sequence),
+        };
+        absl::StatusOr<void *> buffer =
+            publishers[pub_id].GetMessageBuffer(sizeof(payload));
+        if (!buffer.ok()) {
+          ++failures;
+          return;
+        }
+        memcpy(*buffer, &payload, sizeof(payload));
+        if (!publishers[pub_id].PublishMessage(sizeof(payload)).ok()) {
+          ++failures;
+          return;
+        }
+      }
+    });
+  }
+
+  start.store(true, std::memory_order_release);
+  for (auto &thread : publisher_threads) {
+    thread.join();
+  }
+  publishers_done.store(true, std::memory_order_release);
+  for (auto &thread : subscriber_threads) {
+    thread.join();
+  }
+
+  EXPECT_EQ(0, failures.load());
+  for (int sub_id = 0; sub_id < kNumSubscribers; ++sub_id) {
+    EXPECT_GT(received[sub_id], 0) << "subscriber " << sub_id;
+  }
+}
+
+TEST_F(StressTest, SubscriberQueueChurnDuringConcurrentPublishing) {
+  const int kNumPublishers = StressValueForSplitBuffers(4, 2);
+  const int kNumSubscriberThreads = StressValueForSplitBuffers(8, 4);
+  const int kCyclesPerThread = StressValueForSplitBuffers(800, 1400);
+  constexpr int kDefaultQueueSize = 64;
+  constexpr int kNumSlots = 128;
+  constexpr char kChannel[] = "/subscriber_queue_churn_stress";
+
+  std::vector<std::shared_ptr<subspace::Client>> publisher_clients;
+  std::vector<subspace::Publisher> publishers;
+  publisher_clients.reserve(kNumPublishers);
+  publishers.reserve(kNumPublishers);
+  for (int i = 0; i < kNumPublishers; ++i) {
+    publisher_clients.push_back(
+        EVAL_AND_ASSERT_OK(subspace::Client::Create(
+            Socket(), absl::StrFormat("queue_churn_publisher_%d", i))));
+    publishers.push_back(
+        EVAL_AND_ASSERT_OK(publisher_clients.back()->CreatePublisher(
+            kChannel,
+            subspace::PublisherOptions()
+                .SetSlotSize(sizeof(uint64_t))
+                .SetNumSlots(kNumSlots)
+                .SetSubscriberQueueArenaSize(
+                    subspace::kDefaultSubscriberQueueArenaSize))));
+  }
+
+  std::vector<std::shared_ptr<subspace::Client>> subscriber_clients;
+  subscriber_clients.reserve(kNumSubscriberThreads);
+  for (int i = 0; i < kNumSubscriberThreads; ++i) {
+    subscriber_clients.push_back(
+        EVAL_AND_ASSERT_OK(subspace::Client::Create(
+            Socket(), absl::StrFormat("queue_churn_subscriber_%d", i))));
+  }
+
+  std::atomic<bool> start = false;
+  std::atomic<bool> stop_publishers = false;
+  std::atomic<int> failures = 0;
+  std::atomic<int> messages_published = 0;
+  std::atomic<int> messages_received = 0;
+
+  std::vector<std::thread> publisher_threads;
+  publisher_threads.reserve(kNumPublishers);
+  for (int pub_id = 0; pub_id < kNumPublishers; ++pub_id) {
+    publisher_threads.emplace_back([&, pub_id]() {
+      uint64_t sequence = static_cast<uint64_t>(pub_id) << 56;
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      while (!stop_publishers.load(std::memory_order_acquire)) {
+        absl::StatusOr<void *> buffer =
+            publishers[pub_id].GetMessageBuffer(sizeof(sequence));
+        if (!buffer.ok()) {
+          ++failures;
+          return;
+        }
+        memcpy(*buffer, &sequence, sizeof(sequence));
+        if (!publishers[pub_id].PublishMessage(sizeof(sequence)).ok()) {
+          ++failures;
+          return;
+        }
+        ++sequence;
+        ++messages_published;
+      }
+    });
+  }
+
+  std::vector<std::thread> subscriber_threads;
+  subscriber_threads.reserve(kNumSubscriberThreads);
+  for (int thread_id = 0; thread_id < kNumSubscriberThreads; ++thread_id) {
+    subscriber_threads.emplace_back([&, thread_id]() {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      for (int cycle = 0; cycle < kCyclesPerThread; ++cycle) {
+        const int queue_size = 1 << ((thread_id + cycle) % 6);
+        subspace::SubscriberOptions options;
+        options.SetSubscriberQueueSize(queue_size);
+        options.SetLogDroppedMessages(false);
+        absl::StatusOr<subspace::Subscriber> subscriber =
+            subscriber_clients[thread_id]->CreateSubscriber(
+                kChannel, options);
+        if (!subscriber.ok()) {
+          ++failures;
+          return;
+        }
+        if (subscriber->SubscriberQueueSize() != queue_size) {
+          ++failures;
+          return;
+        }
+
+        for (int attempt = 0; attempt < 32; ++attempt) {
+          const subspace::ReadMode mode =
+              (cycle + attempt) % 2 == 0
+                  ? subspace::ReadMode::kReadNext
+                  : subspace::ReadMode::kReadNewest;
+          absl::StatusOr<Message> message = subscriber->ReadMessage(mode);
+          if (!message.ok()) {
+            ++failures;
+            return;
+          }
+          if (message->length == sizeof(uint64_t)) {
+            ++messages_received;
+            break;
+          }
+          std::this_thread::yield();
+        }
+      }
+    });
+  }
+
+  start.store(true, std::memory_order_release);
+  for (auto &thread : subscriber_threads) {
+    thread.join();
+  }
+  stop_publishers.store(true, std::memory_order_release);
+  for (auto &thread : publisher_threads) {
+    thread.join();
+  }
+
+  EXPECT_EQ(0, failures.load());
+  EXPECT_GT(messages_published.load(), 0);
+  EXPECT_GT(messages_received.load(), 0);
+}
+
 TEST_F(StressTest, ActiveMessages) {
   auto oldSig = signal(SIGQUIT, SigQuitHandler);
 

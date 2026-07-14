@@ -86,14 +86,19 @@ private:
 class SubscriberUser : public User {
 public:
   SubscriberUser(ClientHandler *handler, int id, bool is_reliable,
-                 bool is_bridge, bool for_tunnel, int max_active_messages)
+                 bool is_bridge, bool for_tunnel, int max_active_messages,
+                 int subscriber_queue_size)
       : User(handler, id, is_reliable, is_bridge, for_tunnel),
-        max_active_messages_(max_active_messages) {}
+        max_active_messages_(max_active_messages),
+        subscriber_queue_size_(subscriber_queue_size) {}
   bool IsSubscriber() const override { return true; }
   int MaxActiveMessages() const { return max_active_messages_; }
+  int SubscriberQueueSize() const { return subscriber_queue_size_; }
 
 private:
   int max_active_messages_;
+  // Requested capacity. Zero means use the publisher's channel default.
+  int subscriber_queue_size_;
 };
 
 class PublisherUser : public User {
@@ -205,9 +210,12 @@ struct ClientBufferSlotKey {
 class ServerChannel : public Channel {
 public:
   ServerChannel(int id, const std::string &name, int num_slots,
-                std::string type, bool is_virtual, int session_id)
-      : Channel(name, num_slots, id, std::move(type)), is_virtual_(is_virtual),
-        session_id_(session_id) {}
+                int subscriber_queue_size,
+                uint64_t subscriber_queue_arena_size, std::string type,
+                bool is_virtual, int session_id)
+      : Channel(name, num_slots, id, subscriber_queue_size,
+                subscriber_queue_arena_size, std::move(type)),
+        is_virtual_(is_virtual), session_id_(session_id) {}
 
   virtual ~ServerChannel();
 
@@ -220,8 +228,12 @@ public:
                                                uint64_t process_id);
   absl::StatusOr<SubscriberUser *>
   AddSubscriber(ClientHandler *handler, bool is_reliable, bool is_bridge,
-                bool for_tunnel, int max_active_messages, uint64_t process_id);
-  virtual void RegisterExistingSubscribers();
+                bool for_tunnel, int max_active_messages,
+                int subscriber_queue_size, uint64_t process_id);
+  virtual std::vector<std::string> RegisterExistingSubscribers();
+  absl::Status ReconcileSubscriberQueueArena();
+  void ClearPublisherQueueHazardIfDead(int publisher_id,
+                                       uint64_t process_id);
 
   virtual std::string Type() const { return Channel::Type(); }
   virtual void SetType(const std::string &type) { Channel::SetType(type); }
@@ -305,9 +317,7 @@ public:
 
   virtual int NumSlots() const { return Channel::NumSlots(); }
   virtual void CleanupSlots(int owner, bool reliable, bool is_pub,
-                            int vchan_id) {
-    Channel::CleanupSlots(owner, reliable, is_pub, vchan_id);
-  }
+                            int vchan_id);
 
   virtual void RemoveBuffer(uint64_t session_id, Server *server = nullptr);
   void RegisterClientBuffer(ClientBufferHandleMetadata metadata,
@@ -419,7 +429,7 @@ public:
   // this channel.  This is only used in the server.
   virtual absl::StatusOr<SharedMemoryFds>
   Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size, int num_slots,
-           int initial_ordinal);
+           uint64_t subscriber_queue_arena_size, int initial_ordinal);
 
   // Map existing shared memory from recovered FDs (after a server crash).
   // Does not initialize CCB/BCB -- they already contain valid data.
@@ -446,6 +456,10 @@ public:
   }
 
 protected:
+  absl::Status AllocateSubscriberQueue(int sub_id,
+                                       int subscriber_queue_size);
+  void RetireSubscriberQueue(int sub_id);
+
   absl::flat_hash_map<int, std::unique_ptr<User>> users_;
   toolbelt::BitSet<kMaxUsers> user_ids_;
   absl::flat_hash_map<ChannelTransmitter, std::string> bridged_publishers_;
@@ -469,8 +483,11 @@ class VirtualChannel;
 class ChannelMultiplexer : public ServerChannel {
 public:
   ChannelMultiplexer(int id, const std::string &name, int num_slots,
-                     std::string type, int session_id)
-      : ServerChannel(id, name, num_slots, type, false, session_id) {}
+                     int subscriber_queue_size,
+                     uint64_t subscriber_queue_arena_size, std::string type,
+                     int session_id)
+      : ServerChannel(id, name, num_slots, subscriber_queue_size,
+                      subscriber_queue_arena_size, type, false, session_id) {}
 
   absl::StatusOr<std::unique_ptr<VirtualChannel>>
   CreateVirtualChannel(Server &server, const std::string &name, int vchan_id);
@@ -478,7 +495,7 @@ public:
   void RemoveVirtualChannel(VirtualChannel *vchan);
 
   bool IsMux() const override { return true; }
-  void RegisterExistingSubscribers() override;
+  std::vector<std::string> RegisterExistingSubscribers() override;
   bool IsEmpty() const override {
     return virtual_channels_.empty() && ServerChannel::IsEmpty();
   }
@@ -510,8 +527,9 @@ class VirtualChannel : public ServerChannel {
 public:
   VirtualChannel(ChannelMultiplexer *mux, int vchan_id, const std::string &name,
                  int num_slots, std::string type, int session_id)
-      : ServerChannel(mux->GetChannelId(), name, num_slots, type, true,
-                      session_id),
+      : ServerChannel(mux->GetChannelId(), name, num_slots,
+                      mux->SubscriberQueueSize(),
+                      mux->SubscriberQueueArenaSize(), type, true, session_id),
         mux_(mux), vchan_id_(vchan_id) {}
 
   std::string Type() const override { return mux_->Type(); }
@@ -540,6 +558,19 @@ public:
   int GetVirtualChannelId() const override { return vchan_id_; }
 
   bool IsPlaceholder() const override { return mux_->IsPlaceholder(); }
+  int SubscriberQueueSize() const override { return mux_->SubscriberQueueSize(); }
+  int SubscriberQueueSize(int sub_id) const override {
+    return mux_->SubscriberQueueSize(sub_id);
+  }
+  void SetSubscriberQueueSize(int n) override {
+    mux_->SetSubscriberQueueSize(n);
+  }
+  uint64_t SubscriberQueueArenaSize() const override {
+    return mux_->SubscriberQueueArenaSize();
+  }
+  void SetSubscriberQueueArenaSize(uint64_t size) override {
+    mux_->SetSubscriberQueueArenaSize(size);
+  }
 
   const SharedMemoryFds &GetFds() override { return mux_->GetFds(); }
 

@@ -852,6 +852,74 @@ TEST_F(ShadowRecoveryTest, ServerFunctionalAfterRecovery) {
   StopShadow();
 }
 
+TEST_F(ShadowRecoveryTest, RecoversMuxSubscriberQueueTopology) {
+  signal(SIGPIPE, SIG_IGN);
+
+  StartShadow();
+  StartServer();
+
+  constexpr char kMux[] = "/queue_recovery/*";
+  constexpr char kVchan[] = "/queue_recovery/0";
+  subspace::Client pre_client;
+  pre_client.SetThreadSafe(true);
+  ASSERT_THAT(pre_client.Init(RecoveryServerSocket()), IsOk());
+
+  subspace::PublisherOptions pub_options;
+  pub_options.SetSlotSize(64)
+      .SetNumSlots(32)
+      .SetSubscriberQueueArenaSize(
+          subspace::kDefaultSubscriberQueueArenaSize)
+      .SetMux(kMux);
+  auto pre_pub = pre_client.CreatePublisher(kVchan, pub_options);
+  ASSERT_THAT(pre_pub, IsOk());
+  subspace::SubscriberOptions sub_options;
+  sub_options.SetSubscriberQueueSize(4);
+  auto pre_sub = pre_client.CreateSubscriber(kMux, sub_options);
+  ASSERT_THAT(pre_sub, IsOk());
+
+  ASSERT_TRUE(WaitForShadowState([this]() {
+    return shadow_->WithChannels([](auto &channels) {
+      return channels.contains("/queue_recovery/*") &&
+             channels.contains("/queue_recovery/0");
+    });
+  }));
+
+  server_->ForEachShadow(
+      [](const std::unique_ptr<subspace::ShadowReplicator> &shadow) {
+        shadow->Close();
+      });
+  StopServer();
+  StartServer();
+
+  subspace::ServerChannel *mux = server_->FindChannel(kMux);
+  subspace::ServerChannel *vchan = server_->FindChannel(kVchan);
+  ASSERT_NE(nullptr, mux);
+  ASSERT_NE(nullptr, vchan);
+  EXPECT_TRUE(mux->IsMux());
+  EXPECT_TRUE(vchan->IsVirtual());
+
+  subspace::Client post_client;
+  post_client.SetThreadSafe(true);
+  ASSERT_THAT(post_client.Init(RecoveryServerSocket()), IsOk());
+  auto post_pub = post_client.CreatePublisher(kVchan, pub_options);
+  ASSERT_THAT(post_pub, IsOk());
+  auto post_sub = post_client.CreateSubscriber(kMux, sub_options);
+  ASSERT_THAT(post_sub, IsOk());
+  EXPECT_EQ(4, post_sub->SubscriberQueueSize());
+
+  auto buffer = post_pub->GetMessageBuffer();
+  ASSERT_THAT(buffer, IsOk());
+  memcpy(*buffer, "recovered_queue", 15);
+  ASSERT_THAT(post_pub->PublishMessage(15), IsOk());
+  auto message = post_sub->ReadMessage(subspace::ReadMode::kReadNewest);
+  ASSERT_THAT(message, IsOk());
+  ASSERT_EQ(15, message->length);
+  EXPECT_EQ(0, memcmp(message->buffer, "recovered_queue", 15));
+
+  StopServer();
+  StopShadow();
+}
+
 TEST_F(ShadowRecoveryTest, ClientReconnectsAfterServerRestart) {
   signal(SIGPIPE, SIG_IGN);
 

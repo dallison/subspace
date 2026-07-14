@@ -101,27 +101,45 @@ ClientChannel::CreatePosixSharedMemoryFile(const std::string &filename,
 
 absl::Status ClientChannel::Map(SharedMemoryFds fds,
                                 const toolbelt::FileDescriptor &scb_fd) {
+  absl::StatusOr<size_t> checked_ccb_size =
+      CheckedCcbSize(num_slots_, subscriber_queue_arena_size_);
+  if (!checked_ccb_size.ok()) {
+    return checked_ccb_size.status();
+  }
   scb_ = reinterpret_cast<SystemControlBlock *>(MapMemory(
       scb_fd.Fd(), sizeof(SystemControlBlock), PROT_READ | PROT_WRITE, "SCB"));
   if (scb_ == MAP_FAILED) {
+    scb_ = nullptr;
     return absl::InternalError(absl::StrFormat(
         "Failed to map SystemControlBlock: %s (scb_fd=%d, ccb_fd=%d, "
         "bcb_fd=%d, scb_size=%zu, ccb_size=%zu, bcb_size=%zu)",
         strerror(errno), scb_fd.Fd(), fds.ccb.Fd(), fds.bcb.Fd(),
-        sizeof(SystemControlBlock), CcbSize(num_slots_),
+        sizeof(SystemControlBlock), *checked_ccb_size,
         sizeof(BufferControlBlock)));
   }
 
-  ccb_ = reinterpret_cast<ChannelControlBlock *>(MapMemory(
-      fds.ccb.Fd(), CcbSize(num_slots_), PROT_READ | PROT_WRITE, "CCB"));
+  ccb_ = reinterpret_cast<ChannelControlBlock *>(
+      MapMemory(fds.ccb.Fd(), *checked_ccb_size, PROT_READ | PROT_WRITE, "CCB"));
   if (ccb_ == MAP_FAILED) {
     int mmap_errno = errno;
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+    scb_ = nullptr;
+    ccb_ = nullptr;
     return absl::InternalError(absl::StrFormat(
         "Failed to map ChannelControlBlock: %s (scb_fd=%d, ccb_fd=%d, "
         "bcb_fd=%d, ccb_size=%zu)",
         strerror(mmap_errno), scb_fd.Fd(), fds.ccb.Fd(), fds.bcb.Fd(),
-        CcbSize(num_slots_)));
+        *checked_ccb_size));
+  }
+  if (ccb_->version != kChannelControlBlockVersion) {
+    const uint32_t version = ccb_->version;
+    UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+    UnmapMemory(ccb_, *checked_ccb_size, "CCB");
+    scb_ = nullptr;
+    ccb_ = nullptr;
+    return absl::FailedPreconditionError(absl::StrFormat(
+        "unsupported channel control block version %u (expected %u)",
+        version, kChannelControlBlockVersion));
   }
 
   bcb_ = reinterpret_cast<BufferControlBlock *>(MapMemory(
@@ -129,7 +147,10 @@ absl::Status ClientChannel::Map(SharedMemoryFds fds,
   if (bcb_ == MAP_FAILED) {
     int mmap_errno = errno;
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
-    UnmapMemory(ccb_, CcbSize(num_slots_), "CCB");
+    UnmapMemory(ccb_, *checked_ccb_size, "CCB");
+    scb_ = nullptr;
+    ccb_ = nullptr;
+    bcb_ = nullptr;
     return absl::InternalError(absl::StrFormat(
         "Failed to map BufferControlBlock: %s (scb_fd=%d, ccb_fd=%d, "
         "bcb_fd=%d, bcb_size=%zu)",
@@ -228,16 +249,18 @@ void ClientChannel::UnmapSplitBufferSet(size_t buffer_index,
 }
 
 bool ClientChannel::ValidateSlotBuffer(MessageSlot *slot) {
-  if (slot->buffer_index < 0) {
+  const int buffer_index =
+      slot->buffer_index.load(std::memory_order_relaxed);
+  if (buffer_index < 0) {
     return true;
   }
 
-  if (static_cast<size_t>(slot->buffer_index) < buffers_.size() &&
-      buffers_[slot->buffer_index]->IsSplitBuffers()) {
+  if (static_cast<size_t>(buffer_index) < buffers_.size() &&
+      buffers_[buffer_index]->IsSplitBuffers()) {
     return slot->id >= 0 &&
            static_cast<size_t>(slot->id) <
-               buffers_[slot->buffer_index]->split_slot_buffers.size() &&
-           buffers_[slot->buffer_index]->split_slot_buffers[slot->id] !=
+               buffers_[buffer_index]->split_slot_buffers.size() &&
+           buffers_[buffer_index]->split_slot_buffers[slot->id] !=
                nullptr;
   }
 
@@ -359,8 +382,10 @@ uint64_t ClientChannel::GetVirtualMemoryUsage() const {
     return Channel::GetVirtualMemoryUsage();
   }
 
-  uint64_t size = sizeof(SystemControlBlock) + CcbSize(num_slots_) +
-                  sizeof(BufferControlBlock);
+  uint64_t size =
+      sizeof(SystemControlBlock) +
+      CcbSize(num_slots_, subscriber_queue_arena_size_) +
+      sizeof(BufferControlBlock);
   for (int i = 0; i < ccb_->num_buffers; i++) {
     if (bcb_->refs[i].load(std::memory_order_relaxed) <= 0) {
       continue;
@@ -1015,7 +1040,8 @@ void ClientChannel::TriggerRetirement(int slot_id) {
     return;
   }
   MessageSlot *slot = GetSlot(slot_id);
-  if ((slot->flags & kMessageIsActivation) != 0) {
+  if ((slot->flags.load(std::memory_order_relaxed) &
+       kMessageIsActivation) != 0) {
     // Don't retire activation messages.
     return;
   }

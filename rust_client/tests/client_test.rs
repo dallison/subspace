@@ -22,7 +22,10 @@ fn calculate_checksum(spans: &[&[u8]]) -> u32 {
 fn verify_checksum(spans: &[&[u8]], checksum: u32) -> bool {
     verify_crc32_checksum(spans, &checksum.to_ne_bytes())
 }
-use subspace_client::options::{PublisherOptions, SubscriberOptions};
+use subspace_client::options::{
+    PublisherOptions, SubscriberOptions, DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE,
+    DEFAULT_SUBSCRIBER_QUEUE_SIZE,
+};
 use subspace_client::{Client, ReadMode, SubspaceError};
 
 fn unique_socket_path() -> String {
@@ -54,6 +57,10 @@ fn publisher_options_defaults() {
     let opts = PublisherOptions::new();
     assert_eq!(opts.slot_size, 0);
     assert_eq!(opts.num_slots, 0);
+    assert_eq!(
+        opts.subscriber_queue_arena_size,
+        DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE
+    );
     assert!(!opts.local);
     assert!(!opts.reliable);
     assert!(!opts.bridge);
@@ -72,6 +79,7 @@ fn publisher_options_builder_chain() {
     let opts = PublisherOptions::new()
         .set_slot_size(4096)
         .set_num_slots(16)
+        .set_subscriber_queue_arena_size(32_000)
         .set_reliable(true)
         .set_local(true)
         .set_fixed_size(true)
@@ -85,6 +93,7 @@ fn publisher_options_builder_chain() {
 
     assert_eq!(opts.slot_size, 4096);
     assert_eq!(opts.num_slots, 16);
+    assert_eq!(opts.subscriber_queue_arena_size, 32_000);
     assert!(opts.reliable);
     assert!(opts.local);
     assert!(opts.fixed_size);
@@ -101,9 +110,11 @@ fn publisher_options_builder_chain() {
 fn subscriber_options_defaults() {
     let opts = SubscriberOptions::new();
     assert!(!opts.reliable);
+    assert_eq!(opts.subscriber_queue_size, 0);
     assert!(!opts.bridge);
     assert_eq!(opts.max_active_messages, 1);
     assert!(opts.log_dropped_messages);
+    assert!(opts.detect_dropped_messages);
     assert!(!opts.pass_activation);
     assert!(!opts.read_write);
     assert!(!opts.checksum);
@@ -116,8 +127,10 @@ fn subscriber_options_defaults() {
 fn subscriber_options_builder_chain() {
     let opts = SubscriberOptions::new()
         .set_reliable(true)
+        .set_subscriber_queue_size(3)
         .set_max_active_messages(8)
         .set_log_dropped_messages(false)
+        .set_detect_dropped_messages(false)
         .set_pass_activation(true)
         .set_checksum(true)
         .set_pass_checksum_errors(true)
@@ -126,8 +139,10 @@ fn subscriber_options_builder_chain() {
         .set_type("image".into());
 
     assert!(opts.reliable);
+    assert_eq!(opts.subscriber_queue_size, 3);
     assert_eq!(opts.max_active_messages, 8);
     assert!(!opts.log_dropped_messages);
+    assert!(!opts.detect_dropped_messages);
     assert!(opts.pass_activation);
     assert!(opts.checksum);
     assert!(opts.pass_checksum_errors);
@@ -861,6 +876,119 @@ fn integration_publish_multiple_messages() {
     for (s, r) in sent.iter().zip(received.iter()) {
         assert_eq!(s, r);
     }
+}
+
+#[test]
+fn integration_subscriber_queue_overflow_preserves_newest() {
+    let client = new_client("rust_queue_overflow");
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(64)
+        .set_num_slots(8)
+        .set_subscriber_queue_arena_size(DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE);
+    let publisher = client
+        .create_publisher("rust_queue_overflow_ch", &pub_opts)
+        .unwrap();
+    let sub_opts = SubscriberOptions::new().set_subscriber_queue_size(2);
+    let subscriber = client
+        .create_subscriber("rust_queue_overflow_ch", &sub_opts)
+        .unwrap();
+    let reported_drops =
+        std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
+    let callback_drops = reported_drops.clone();
+    subscriber.register_dropped_message_callback(move |drops| {
+        callback_drops.fetch_add(drops, std::sync::atomic::Ordering::Relaxed);
+    });
+
+    for value in 1u8..=4 {
+        let (buffer, _) = publisher.get_message_buffer(1).unwrap().unwrap();
+        unsafe {
+            *buffer = value;
+        }
+        publisher.publish_message(1).unwrap();
+    }
+
+    let first = subscriber.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(unsafe { *first.buffer }, 3);
+    assert_eq!(
+        reported_drops.load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
+    drop(first);
+    let second = subscriber.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(unsafe { *second.buffer }, 4);
+    drop(second);
+    assert!(subscriber
+        .read_message(ReadMode::ReadNext)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn integration_default_subscriber_queue_overflow_recovers_from_bitset() {
+    let client = new_client("rust_default_queue_overflow");
+    let publisher = client
+        .create_publisher(
+            "rust_default_queue_overflow_ch",
+            &PublisherOptions::new()
+                .set_slot_size(64)
+                .set_num_slots(64),
+        )
+        .unwrap();
+    let subscriber = client
+        .create_subscriber(
+            "rust_default_queue_overflow_ch",
+            &SubscriberOptions::new(),
+        )
+        .unwrap();
+
+    for value in 1u8..=32 {
+        let (buffer, _) = publisher.get_message_buffer(1).unwrap().unwrap();
+        unsafe {
+            *buffer = value;
+        }
+        publisher.publish_message(1).unwrap();
+    }
+
+    for expected in 1u8..=32 {
+        let message = subscriber.read_message(ReadMode::ReadNext).unwrap();
+        assert_eq!(unsafe { *message.buffer }, expected);
+    }
+    assert!(subscriber
+        .read_message(ReadMode::ReadNext)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn integration_subscriber_queue_read_newest_does_not_redeliver_old_entries() {
+    let client = new_client("rust_queue_newest");
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(64)
+        .set_num_slots(8)
+        .set_subscriber_queue_arena_size(DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE);
+    let publisher = client
+        .create_publisher("rust_queue_newest_ch", &pub_opts)
+        .unwrap();
+    let sub_opts = SubscriberOptions::new().set_subscriber_queue_size(4);
+    let subscriber = client
+        .create_subscriber("rust_queue_newest_ch", &sub_opts)
+        .unwrap();
+
+    for value in 1u8..=3 {
+        let (buffer, _) = publisher.get_message_buffer(1).unwrap().unwrap();
+        unsafe {
+            *buffer = value;
+        }
+        publisher.publish_message(1).unwrap();
+    }
+
+    let newest = subscriber.read_message(ReadMode::ReadNewest).unwrap();
+    assert_eq!(unsafe { *newest.buffer }, 3);
+    drop(newest);
+    assert!(subscriber
+        .read_message(ReadMode::ReadNext)
+        .unwrap()
+        .is_empty());
 }
 
 // ── Read newest skips intermediate messages ──────────────────────────────────
@@ -3199,6 +3327,7 @@ fn coverage_publisher_accessors() {
     let opts = PublisherOptions::new()
         .set_slot_size(128)
         .set_num_slots(8)
+        .set_subscriber_queue_arena_size(5_000)
         .set_type("pub_type".to_string())
         .set_fixed_size(true);
     let pub_handle = client.create_publisher("cov_pub_acc_ch", &opts).unwrap();
@@ -3207,6 +3336,11 @@ fn coverage_publisher_accessors() {
     assert!(!pub_handle.is_reliable());
     assert!(pub_handle.is_fixed_size());
     assert_eq!(pub_handle.num_slots(), 8);
+    assert_eq!(
+        pub_handle.subscriber_queue_size(),
+        DEFAULT_SUBSCRIBER_QUEUE_SIZE
+    );
+    assert_eq!(pub_handle.subscriber_queue_arena_size(), 5_000);
     assert!(pub_handle.slot_size() > 0);
     assert!(pub_handle.get_poll_fd() >= 0);
     assert!(pub_handle.prefix_size() > 0);
@@ -3216,9 +3350,12 @@ fn coverage_publisher_accessors() {
 #[test]
 fn coverage_subscriber_accessors() {
     let client = new_client("cov_sub_acc");
-    let opts = PublisherOptions::new().set_slot_size(128).set_num_slots(16);
+    let opts = PublisherOptions::new()
+        .set_slot_size(128)
+        .set_num_slots(16)
+        .set_subscriber_queue_arena_size(DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE);
     let _pub = client.create_publisher("cov_sub_acc_ch", &opts).unwrap();
-    let sub_opts = SubscriberOptions::new();
+    let sub_opts = SubscriberOptions::new().set_subscriber_queue_size(3);
     let sub = client
         .create_subscriber("cov_sub_acc_ch", &sub_opts)
         .unwrap();
@@ -3227,6 +3364,7 @@ fn coverage_subscriber_accessors() {
     assert!(!sub.is_reliable());
     assert!(!sub.is_placeholder());
     assert!(sub.num_slots() > 0);
+    assert_eq!(sub.subscriber_queue_size(), 3);
     assert!(sub.get_poll_fd() >= 0);
     assert!(sub.prefix_size() > 0);
     assert!(sub.checksum_size() > 0);

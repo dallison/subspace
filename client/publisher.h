@@ -14,11 +14,15 @@ namespace details {
 // messages to be published.
 class PublisherImpl : public ClientChannel {
 public:
-  PublisherImpl(const std::string &name, int num_slots, int channel_id,
+  PublisherImpl(const std::string &name, int num_slots,
+                int subscriber_queue_size,
+                uint64_t subscriber_queue_arena_size, int channel_id,
                 int publisher_id, int vchan_id, uint64_t session_id,
-                std::string type, const PublisherOptions &options,
+                std::string type,
+                const PublisherOptions &options,
                 std::function<bool(Channel *)> reload, int user_id, int group_id)
-      : ClientChannel(name, num_slots, channel_id, vchan_id,
+      : ClientChannel(name, num_slots, subscriber_queue_size,
+                      subscriber_queue_arena_size, channel_id, vchan_id,
                       std::move(session_id), std::move(type),
                       std::move(reload), user_id, group_id),
         publisher_id_(publisher_id), options_(options) {}
@@ -28,6 +32,17 @@ public:
   bool IsLocal() const { return options_.IsLocal(); }
   bool IsFixedSize() const { return options_.IsFixedSize(); }
   bool UsesSplitBuffers() const { return UseSplitBuffers(); }
+  void BeginSubscriberQueuePublish() {
+    active_queue_publish_depth_.fetch_add(1, std::memory_order_seq_cst);
+    Channel::BeginSubscriberQueuePublish(publisher_id_);
+  }
+  void EndSubscriberQueuePublish() {
+    Channel::EndSubscriberQueuePublish(publisher_id_);
+    active_queue_publish_depth_.fetch_sub(1, std::memory_order_seq_cst);
+  }
+  uint32_t ActiveQueuePublishDepth() const {
+    return active_queue_publish_depth_.load(std::memory_order_seq_cst);
+  }
 
   // Trigger the publisher's reliable trigger fd, waking anything that is
   // waiting on the publisher's reliable event fd (e.g. a reliable publisher
@@ -148,6 +163,7 @@ private:
 
   toolbelt::TriggerFd trigger_;
   int publisher_id_;
+  std::atomic<uint32_t> active_queue_publish_depth_{0};
   std::vector<toolbelt::TriggerFd> subscribers_;
   PublisherOptions options_;
   toolbelt::FileDescriptor retirement_fd_ = {};
