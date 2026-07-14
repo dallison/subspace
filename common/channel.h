@@ -125,13 +125,16 @@ constexpr int kMaxChannels = 1024;
 // and publisher reference.  Best if it's a multiple of 64 because
 // it's used as the size in a toolbelt::BitSet.
 constexpr int kMaxSlotOwners = 1024;
-// Default queue depth selected by publisher client APIs. This reserves 640 KiB
-// in the CCB queue arena, enough for 1024 subscribers with 16 entries each.
-// Explicitly selecting zero keeps the available-slot bitset path.
+// Default per-subscriber queue depth used whenever the publisher provisions a
+// non-empty arena and the subscriber does not request an override.
 constexpr int kDefaultSubscriberQueueSize = 16;
+// Default packed arena size selected by publisher client APIs. This fits 100
+// default-sized (16-entry) queues. Explicitly selecting zero keeps the
+// available-slot bitset path and omits the queue arena.
+constexpr uint64_t kDefaultSubscriberQueueArenaSize = 64'000;
 constexpr size_t kDefaultMaxAvailableSlotQueueCapacity = 1024;
 constexpr size_t kMaxSlotQueueCasAttempts = 64;
-constexpr uint32_t kChannelControlBlockVersion = 3;
+constexpr uint32_t kChannelControlBlockVersion = 4;
 constexpr size_t kMaxChannelControlBlockSize = 1ULL << 30;
 
 // This limits the number of virtual channels.  Each virtual channel
@@ -625,7 +628,7 @@ struct ChannelControlBlock {          // a.k.a CCB
   char channel_name[kMaxChannelName]; // So that you can see the name in a
                                       // debugger or hexdump.
   int num_slots;
-  int subscriber_queue_size; // Entries in each per-subscriber slot queue.
+  int subscriber_queue_size; // Fixed inherited per-subscriber queue capacity.
   uint32_t version;
   OrdinalAccumulator ordinals; // Ordinal accumulator for virtual channels.
   ActivationTracker activation_tracker; // Tracks which vchan_ids have been
@@ -711,39 +714,23 @@ inline size_t SlotQueueBlockSize(size_t capacity) {
   return SlotQueueBlockHeaderSize() + Aligned(SizeofSlotQueue(capacity));
 }
 
-// The publisher's default capacity also provisions the queue arena.  Packing
-// queues by their actual subscriber capacities lets overrides share the same
-// memory budget that the old fixed-stride layout reserved.
-inline size_t AvailableSlotQueuesSize(int subscriber_queue_size) {
-  return SlotQueueBlockSize(static_cast<size_t>(subscriber_queue_size)) *
-         kMaxSlotOwners;
-}
-
-inline size_t CcbSize(int num_slots, int subscriber_queue_size) {
-  subscriber_queue_size =
-      ResolveSubscriberQueueSize(num_slots, subscriber_queue_size);
+inline size_t CcbSize(int num_slots, uint64_t subscriber_queue_arena_size) {
   return Aligned(sizeof(ChannelControlBlock) +
                  num_slots * sizeof(MessageSlot)) +
          Aligned(SizeofAtomicBitSet(num_slots)) * 2 +
          AvailableSlotsSize(num_slots) +
          AvailableSlotQueueIndexSize() +
-         AvailableSlotQueuesSize(subscriber_queue_size);
+         static_cast<size_t>(subscriber_queue_arena_size);
 }
 
 inline size_t CcbSize(int num_slots) {
-  return CcbSize(num_slots, /*subscriber_queue_size=*/0);
+  return CcbSize(num_slots, /*subscriber_queue_arena_size=*/0);
 }
 
 inline absl::StatusOr<size_t>
-CheckedCcbSize(int num_slots, int subscriber_queue_size) {
+CheckedCcbSize(int num_slots, uint64_t subscriber_queue_arena_size) {
   if (num_slots < 0) {
     return absl::InvalidArgumentError("num_slots must be non-negative");
-  }
-  if (subscriber_queue_size < 0 ||
-      static_cast<size_t>(subscriber_queue_size) >
-          kDefaultMaxAvailableSlotQueueCapacity) {
-    return absl::InvalidArgumentError(
-        "subscriber_queue_size is outside the supported range");
   }
   const size_t slots = static_cast<size_t>(num_slots);
   if (slots > kMaxChannelControlBlockSize / sizeof(MessageSlot)) {
@@ -755,12 +742,14 @@ CheckedCcbSize(int num_slots, int subscriber_queue_size) {
                   sizeof(MessageSlot)) {
     return absl::ResourceExhaustedError("channel control block size overflow");
   }
-  const size_t size = CcbSize(num_slots, subscriber_queue_size);
-  if (size > kMaxChannelControlBlockSize) {
+  const size_t base_size = CcbSize(num_slots, 0);
+  if (base_size > kMaxChannelControlBlockSize ||
+      subscriber_queue_arena_size >
+          kMaxChannelControlBlockSize - base_size) {
     return absl::ResourceExhaustedError(
         "channel control block exceeds the 1 GiB limit");
   }
-  return size;
+  return base_size + static_cast<size_t>(subscriber_queue_arena_size);
 }
 
 struct SlotBuffer {
@@ -820,7 +809,8 @@ public:
   };
 
   Channel(const std::string &name, int num_slots, int channel_id,
-          int subscriber_queue_size, std::string type,
+          int subscriber_queue_size, uint64_t subscriber_queue_arena_size,
+          std::string type,
           std::function<bool(Channel *)> reload = nullptr);
   virtual ~Channel() { Unmap(); }
 
@@ -962,6 +952,12 @@ public:
   virtual int SubscriberQueueSize() const { return subscriber_queue_size_; }
   virtual void SetSubscriberQueueSize(int n) {
     subscriber_queue_size_ = ResolveSubscriberQueueSize(num_slots_, n);
+  }
+  virtual uint64_t SubscriberQueueArenaSize() const {
+    return subscriber_queue_arena_size_;
+  }
+  virtual void SetSubscriberQueueArenaSize(uint64_t size) {
+    subscriber_queue_arena_size_ = size;
   }
   std::string SlotType() const { return type_; }
 
@@ -1137,6 +1133,7 @@ protected:
   std::string name_;
   int num_slots_;
   int subscriber_queue_size_;
+  uint64_t subscriber_queue_arena_size_;
 
   int channel_id_; // ID allocated from server.
   std::string type_;

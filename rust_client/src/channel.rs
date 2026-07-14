@@ -32,7 +32,7 @@ pub const MAX_CHANNELS: usize = 1024;
 pub const MAX_SLOT_OWNERS: usize = 1024;
 pub const MAX_AVAILABLE_SLOT_QUEUE_CAPACITY: usize = 1024;
 const MAX_SLOT_QUEUE_CAS_ATTEMPTS: usize = 64;
-pub const CHANNEL_CONTROL_BLOCK_VERSION: u32 = 3;
+pub const CHANNEL_CONTROL_BLOCK_VERSION: u32 = 4;
 pub const MAX_VCHAN_ID: usize = 1023;
 pub const MAX_CHANNEL_NAME: usize = 64;
 pub const MAX_BUFFERS: usize = 1024;
@@ -575,14 +575,6 @@ pub struct SlotQueueBlockHeader {
 const _: () = assert!(std::mem::size_of::<SlotQueueBlockHeader>() == 192);
 const _: () = assert!(std::mem::offset_of!(SlotQueueBlockHeader, waiting_publishers) == 16);
 
-fn slot_queue_block_header_size() -> usize {
-    aligned64(std::mem::size_of::<SlotQueueBlockHeader>() as i64) as usize
-}
-
-fn slot_queue_block_size(capacity: usize) -> usize {
-    slot_queue_block_header_size() + aligned64(sizeof_slot_queue(capacity) as i64) as usize
-}
-
 pub fn resolve_subscriber_queue_size(num_slots: i32, subscriber_queue_size: i32) -> i32 {
     if num_slots <= 0 || subscriber_queue_size <= 0 {
         0
@@ -591,9 +583,8 @@ pub fn resolve_subscriber_queue_size(num_slots: i32, subscriber_queue_size: i32)
     }
 }
 
-pub fn ccb_size(num_slots: i32, subscriber_queue_size: i32) -> usize {
+pub fn ccb_size(num_slots: i32, subscriber_queue_arena_size: u64) -> usize {
     let ns = num_slots as usize;
-    let queue_size = resolve_subscriber_queue_size(num_slots, subscriber_queue_size) as usize;
     let base = aligned64(
         (std::mem::size_of::<ChannelControlBlock>() + ns * std::mem::size_of::<MessageSlot>())
             as i64,
@@ -601,7 +592,7 @@ pub fn ccb_size(num_slots: i32, subscriber_queue_size: i32) -> usize {
     base + aligned64(sizeof_atomic_bitset(ns) as i64) as usize * 2
         + sizeof_atomic_bitset(ns) * MAX_SLOT_OWNERS
         + available_slot_queue_index_size()
-        + slot_queue_block_size(queue_size) * MAX_SLOT_OWNERS
+        + subscriber_queue_arena_size as usize
 }
 
 // ── Channel: shared memory accessor ─────────────────────────────────────────
@@ -611,6 +602,7 @@ pub struct Channel {
     pub name: String,
     pub num_slots: i32,
     pub subscriber_queue_size: i32,
+    pub subscriber_queue_arena_size: u64,
     pub channel_id: i32,
     pub channel_type: String,
     pub vchan_id: i32,
@@ -786,6 +778,7 @@ impl Channel {
         name: String,
         num_slots: i32,
         subscriber_queue_size: i32,
+        subscriber_queue_arena_size: u64,
         channel_id: i32,
         channel_type: String,
         vchan_id: i32,
@@ -796,6 +789,7 @@ impl Channel {
             name,
             num_slots,
             subscriber_queue_size: resolve_subscriber_queue_size(num_slots, subscriber_queue_size),
+            subscriber_queue_arena_size,
             channel_id,
             channel_type,
             vchan_id,
@@ -828,7 +822,7 @@ impl Channel {
         prot: ProtFlags,
     ) -> crate::error::Result<()> {
         let scb_sz = std::mem::size_of::<SystemControlBlock>();
-        let ccb_sz = ccb_size(self.num_slots, self.subscriber_queue_size);
+        let ccb_sz = ccb_size(self.num_slots, self.subscriber_queue_arena_size);
         let bcb_sz = std::mem::size_of::<BufferControlBlock>();
 
         self.scb = map_memory(scb_fd, scb_sz, ProtFlags::PROT_READ | ProtFlags::PROT_WRITE)?

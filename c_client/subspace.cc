@@ -128,6 +128,8 @@ SubspaceChannelInfo ToCChannelInfo(const subspace::ChannelInfo &info,
           .slot_size = info.slot_size,
           .num_slots = info.num_slots,
           .subscriber_queue_size = info.subscriber_queue_size,
+          .subscriber_queue_arena_size =
+              info.subscriber_queue_arena_size,
           .reliable = info.reliable};
 }
 
@@ -498,7 +500,7 @@ SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size,
   SubspacePublisherOptions options = {
       slot_size,
       num_slots,
-      subspace::kDefaultSubscriberQueueSize,
+      subspace::kDefaultSubscriberQueueArenaSize,
       false,
       false,
       false,
@@ -580,7 +582,7 @@ SubspacePublisher subspace_create_publisher(SubspaceClient client,
       .SetChecksum(options.checksum)
       .SetChecksumSize(options.checksum_size)
       .SetMetadataSize(options.metadata_size)
-      .SetSubscriberQueueSize(options.subscriber_queue_size)
+      .SetSubscriberQueueArenaSize(options.subscriber_queue_arena_size)
       .SetPreferRetiredSlots(options.prefer_retired_slots)
       .SetMaxPublishers(options.max_publishers)
       .SetUseSplitBuffers(options.use_split_buffers)
@@ -1453,6 +1455,14 @@ int32_t subspace_get_publisher_queue_size(SubspacePublisher publisher) {
     return 0;
   }
   return (*PublisherPtr(publisher))->SubscriberQueueSize();
+}
+
+uint64_t
+subspace_get_publisher_queue_arena_size(SubspacePublisher publisher) {
+  if (publisher.publisher == nullptr) {
+    return 0;
+  }
+  return (*PublisherPtr(publisher))->SubscriberQueueArenaSize();
 }
 
 SubspaceString subspace_get_publisher_name(SubspacePublisher publisher) {

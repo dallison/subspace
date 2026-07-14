@@ -102,7 +102,7 @@ ClientChannel::CreatePosixSharedMemoryFile(const std::string &filename,
 absl::Status ClientChannel::Map(SharedMemoryFds fds,
                                 const toolbelt::FileDescriptor &scb_fd) {
   absl::StatusOr<size_t> checked_ccb_size =
-      CheckedCcbSize(num_slots_, subscriber_queue_size_);
+      CheckedCcbSize(num_slots_, subscriber_queue_arena_size_);
   if (!checked_ccb_size.ok()) {
     return checked_ccb_size.status();
   }
@@ -374,7 +374,8 @@ uint64_t ClientChannel::GetVirtualMemoryUsage() const {
   }
 
   uint64_t size =
-      sizeof(SystemControlBlock) + CcbSize(num_slots_, subscriber_queue_size_) +
+      sizeof(SystemControlBlock) +
+      CcbSize(num_slots_, subscriber_queue_arena_size_) +
       sizeof(BufferControlBlock);
   for (int i = 0; i < ccb_->num_buffers; i++) {
     if (bcb_->refs[i].load(std::memory_order_relaxed) <= 0) {

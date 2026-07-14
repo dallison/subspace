@@ -38,7 +38,9 @@ class Subscriber;
 struct PublisherOptions {
   int32_t SlotSize() const { return slot_size; }
   int32_t NumSlots() const { return num_slots; }
-  int32_t SubscriberQueueSize() const { return subscriber_queue_size; }
+  uint64_t SubscriberQueueArenaSize() const {
+    return subscriber_queue_arena_size;
+  }
   PublisherOptions &SetSlotSize(int32_t size) {
     slot_size = size;
     return *this;
@@ -47,17 +49,13 @@ struct PublisherOptions {
     num_slots = num;
     return *this;
   }
-  // Default capacity of a subscriber's per-subscriber slot queue, in entries.
-  //
-  // When this is greater than 0, unreliable subscribers read this queue instead
-  // of scanning the channel's available-slot bitset. Subscribers may override
-  // this value; it also provisions the total packed queue arena, so all
-  // publishers on the same channel must agree on it. The default is 16 entries;
-  // explicitly setting 0 selects the available-slot bitset path. Larger values
-  // tolerate more publisher/subscriber skew and stale recycled-slot hints at
-  // the cost of shared memory in every subscriber queue.
-  PublisherOptions &SetSubscriberQueueSize(int32_t size) {
-    subscriber_queue_size = size;
+  // Total bytes reserved for packed per-subscriber queues in the CCB. A
+  // non-empty arena gives subscribers that do not request an override the fixed
+  // kDefaultSubscriberQueueSize capacity. Explicitly setting zero selects the
+  // available-slot bitset path by default. All publishers on a channel must
+  // agree on this value.
+  PublisherOptions &SetSubscriberQueueArenaSize(uint64_t size) {
+    subscriber_queue_arena_size = size;
     return *this;
   }
 
@@ -233,7 +231,7 @@ struct PublisherOptions {
   // here.
   int32_t slot_size = 0;
   int32_t num_slots = 0;
-  int32_t subscriber_queue_size = kDefaultSubscriberQueueSize;
+  uint64_t subscriber_queue_arena_size = kDefaultSubscriberQueueArenaSize;
 
   bool local = false;
   bool reliable = false;

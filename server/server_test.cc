@@ -74,7 +74,7 @@ public:
                   int vchan_id = 0, bool for_tunnel = false,
                   bool notify_retirement = false, int checksum_size = 0,
                   int metadata_size = 0, int max_publishers = 0,
-                  int subscriber_queue_size = 0) {
+                  uint64_t subscriber_queue_arena_size = 0) {
     subspace::Request req;
     auto *cmd = req.mutable_create_publisher();
     cmd->set_channel_name(channel);
@@ -91,7 +91,7 @@ public:
     cmd->set_checksum_size(checksum_size);
     cmd->set_metadata_size(metadata_size);
     cmd->set_max_publishers(max_publishers);
-    cmd->set_subscriber_queue_size(subscriber_queue_size);
+    cmd->set_subscriber_queue_arena_size(subscriber_queue_arena_size);
     cmd->set_publisher_id(-1);
     auto result = Send(req);
     return std::move(*result);
@@ -205,7 +205,7 @@ TEST_F(ServerTest, PubNumSlotsIncrease) {
               ::testing::HasSubstr("more slots"));
 }
 
-TEST_F(ServerTest, PubSubscriberQueueSizeMismatchFromDisabled) {
+TEST_F(ServerTest, PubSubscriberQueueArenaSizeMismatchFromDisabled) {
   RawConnection conn;
   ASSERT_OK(conn.Connect(Socket()));
   ASSERT_OK(conn.Init());
@@ -213,21 +213,23 @@ TEST_F(ServerTest, PubSubscriberQueueSizeMismatchFromDisabled) {
   conn.CreatePublisher("queue_size_disabled_ch", 64, 4);
   auto [resp, fds] = conn.CreatePublisher(
       "queue_size_disabled_ch", 64, 4, "", false, true, false, "", 0, false,
-      false, 0, 0, 0, /*subscriber_queue_size=*/8);
+      false, 0, 0, 0, /*subscriber_queue_arena_size=*/8000);
   EXPECT_THAT(resp.create_publisher().error(),
-              ::testing::HasSubstr("subscriber queue size"));
+              ::testing::HasSubstr("subscriber queue arena size"));
 }
 
-TEST_F(ServerTest, PubSubscriberQueueSizeTooLarge) {
+TEST_F(ServerTest, PubSubscriberQueueArenaSizeTooLarge) {
   RawConnection conn;
   ASSERT_OK(conn.Connect(Socket()));
   ASSERT_OK(conn.Init());
 
   auto [resp, fds] = conn.CreatePublisher(
       "queue_size_too_large", 64, 4, "", false, true, false, "", 0, false,
-      false, 0, 0, 0, /*subscriber_queue_size=*/1025);
+      false, 0, 0, 0,
+      /*subscriber_queue_arena_size=*/
+      subspace::kMaxChannelControlBlockSize + 1);
   EXPECT_THAT(resp.create_publisher().error(),
-              ::testing::HasSubstr("subscriber_queue_size must be <= 1024"));
+              ::testing::HasSubstr("channel control block exceeds"));
 }
 
 TEST_F(ServerTest, PubCcbSizeLimitIsEnforced) {
@@ -242,32 +244,33 @@ TEST_F(ServerTest, PubCcbSizeLimitIsEnforced) {
               ::testing::HasSubstr("channel control block limit"));
 }
 
-TEST_F(ServerTest, PubSubscriberQueueSizeMismatchToDisabled) {
+TEST_F(ServerTest, PubSubscriberQueueArenaSizeMismatchToDisabled) {
   RawConnection conn;
   ASSERT_OK(conn.Connect(Socket()));
   ASSERT_OK(conn.Init());
 
   conn.CreatePublisher("queue_size_enabled_ch", 64, 4, "", false, true, false,
                        "", 0, false, false, 0, 0, 0,
-                       /*subscriber_queue_size=*/8);
+                       /*subscriber_queue_arena_size=*/8000);
   auto [resp, fds] = conn.CreatePublisher("queue_size_enabled_ch", 64, 4);
   EXPECT_THAT(resp.create_publisher().error(),
-              ::testing::HasSubstr("subscriber queue size"));
+              ::testing::HasSubstr("subscriber queue arena size"));
 }
 
-TEST_F(ServerTest, PubSubscriberQueueSizeMismatchForMux) {
+TEST_F(ServerTest, PubSubscriberQueueArenaSizeMismatchForMux) {
   RawConnection conn;
   ASSERT_OK(conn.Connect(Socket()));
   ASSERT_OK(conn.Init());
 
   conn.CreatePublisher("queue_size_vchan1", 64, 4, "", false, true, false,
                        "/queue_size_mux", 0, false, false, 0, 0, 0,
-                       /*subscriber_queue_size=*/8);
+                       /*subscriber_queue_arena_size=*/8000);
   auto [resp, fds] = conn.CreatePublisher(
       "queue_size_vchan2", 64, 4, "", false, true, false, "/queue_size_mux",
-      1, false, false, 0, 0, 0, /*subscriber_queue_size=*/16);
+      1, false, false, 0, 0, 0,
+      /*subscriber_queue_arena_size=*/16000);
   EXPECT_THAT(resp.create_publisher().error(),
-              ::testing::HasSubstr("subscriber queue size"));
+              ::testing::HasSubstr("subscriber queue arena size"));
 }
 
 TEST_F(ServerTest, PubSlotSizeIncreaseOnFixedSize) {

@@ -9,14 +9,16 @@ use crate::split_buffer::{
 };
 use std::sync::Arc;
 
-/// Default per-subscriber queue depth selected by publisher options.
+/// Fixed queue depth inherited by subscribers when an arena is provisioned.
 pub const DEFAULT_SUBSCRIBER_QUEUE_SIZE: i32 = 16;
+/// Default packed subscriber queue arena size in bytes.
+pub const DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE: u64 = 64_000;
 
 #[derive(Debug, Clone)]
 pub struct PublisherOptions {
     pub slot_size: i32,
     pub num_slots: i32,
-    pub subscriber_queue_size: i32,
+    pub subscriber_queue_arena_size: u64,
     pub local: bool,
     pub reliable: bool,
     pub bridge: bool,
@@ -40,7 +42,7 @@ impl Default for PublisherOptions {
         Self {
             slot_size: 0,
             num_slots: 0,
-            subscriber_queue_size: DEFAULT_SUBSCRIBER_QUEUE_SIZE,
+            subscriber_queue_arena_size: DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE,
             local: false,
             reliable: false,
             bridge: false,
@@ -78,12 +80,10 @@ impl PublisherOptions {
 
     /// Set each subscriber's per-subscriber slot queue capacity.
     ///
-    /// Publisher options default to 16 entries. Explicitly setting 0 disables
-    /// the queue and uses the available-slot bitset. Larger values allow
-    /// subscribers to absorb more publisher/subscriber skew at the cost of
-    /// shared memory in every subscriber queue.
-    pub fn set_subscriber_queue_size(mut self, size: i32) -> Self {
-        self.subscriber_queue_size = size;
+    /// Set the bytes reserved for packed per-subscriber queues in the CCB.
+    /// Explicitly setting zero selects the available-slot bitset by default.
+    pub fn set_subscriber_queue_arena_size(mut self, size: u64) -> Self {
+        self.subscriber_queue_arena_size = size;
         self
     }
 

@@ -430,7 +430,8 @@ TEST_F(StressTest, SubscriberQueuesManyPublishersAndSubscribers) {
             subspace::PublisherOptions()
                 .SetSlotSize(sizeof(Payload))
                 .SetNumSlots(kNumSlots)
-                .SetSubscriberQueueSize(kDefaultQueueSize))));
+                .SetSubscriberQueueArenaSize(
+                    subspace::kDefaultSubscriberQueueArenaSize))));
   }
 
   std::vector<std::shared_ptr<subspace::Client>> subscriber_clients;
@@ -573,7 +574,8 @@ TEST_F(StressTest, SubscriberQueueChurnDuringConcurrentPublishing) {
             subspace::PublisherOptions()
                 .SetSlotSize(sizeof(uint64_t))
                 .SetNumSlots(kNumSlots)
-                .SetSubscriberQueueSize(kDefaultQueueSize))));
+                .SetSubscriberQueueArenaSize(
+                    subspace::kDefaultSubscriberQueueArenaSize))));
   }
 
   std::vector<std::shared_ptr<subspace::Client>> subscriber_clients;

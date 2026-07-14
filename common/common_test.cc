@@ -8,6 +8,17 @@
 
 #include <gtest/gtest.h>
 
+TEST(CommonTest, SubscriberQueueArenaSizeIsExplicitBytes) {
+  constexpr int kNumSlots = 8;
+  constexpr uint64_t kArenaSize = 12'345;
+  EXPECT_EQ(kArenaSize,
+            subspace::CcbSize(kNumSlots, kArenaSize) -
+                subspace::CcbSize(kNumSlots, 0));
+  EXPECT_EQ(100 * subspace::SlotQueueBlockSize(
+                      subspace::kDefaultSubscriberQueueSize),
+            subspace::kDefaultSubscriberQueueArenaSize);
+}
+
 TEST(CommonTest, AtomicBitset) {
   subspace::AtomicBitSet<6144> bitset;
   bitset.Set(0);

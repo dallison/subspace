@@ -15,11 +15,14 @@ namespace details {
 class PublisherImpl : public ClientChannel {
 public:
   PublisherImpl(const std::string &name, int num_slots,
-                int subscriber_queue_size, int channel_id, int publisher_id,
-                int vchan_id, uint64_t session_id, std::string type,
+                int subscriber_queue_size,
+                uint64_t subscriber_queue_arena_size, int channel_id,
+                int publisher_id, int vchan_id, uint64_t session_id,
+                std::string type,
                 const PublisherOptions &options,
                 std::function<bool(Channel *)> reload, int user_id, int group_id)
-      : ClientChannel(name, num_slots, subscriber_queue_size, channel_id, vchan_id,
+      : ClientChannel(name, num_slots, subscriber_queue_size,
+                      subscriber_queue_arena_size, channel_id, vchan_id,
                       std::move(session_id), std::move(type),
                       std::move(reload), user_id, group_id),
         publisher_id_(publisher_id), options_(options) {}

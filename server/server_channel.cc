@@ -261,14 +261,16 @@ uint64_t ServerChannel::GetVirtualMemoryUsage() const {
   if (split_buffer_size == 0) {
     return Channel::GetVirtualMemoryUsage();
   }
-  return sizeof(SystemControlBlock) + CcbSize(num_slots_, subscriber_queue_size_) +
+  return sizeof(SystemControlBlock) +
+         CcbSize(num_slots_, subscriber_queue_arena_size_) +
          sizeof(BufferControlBlock) + split_buffer_size;
 }
 
 absl::StatusOr<SharedMemoryFds>
 ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
                         [[maybe_unused]] int slot_size, int num_slots,
-                        int subscriber_queue_size, int initial_ordinal) {
+                        uint64_t subscriber_queue_arena_size,
+                        int initial_ordinal) {
   // Unmap existing memory.
   Unmap();
 
@@ -282,7 +284,10 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
   } else {
     num_slots_ = num_slots;
   }
-  SetSubscriberQueueSize(subscriber_queue_size);
+  SetSubscriberQueueArenaSize(subscriber_queue_arena_size);
+  SetSubscriberQueueSize(subscriber_queue_arena_size == 0
+                             ? 0
+                             : kDefaultSubscriberQueueSize);
 
   // Map SCB into process memory.
   scb_ = reinterpret_cast<SystemControlBlock *>(MapMemory(
@@ -296,7 +301,7 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
 
   // Create CCB in shared memory and map into process memory.
   absl::StatusOr<size_t> checked_ccb_size =
-      CheckedCcbSize(num_slots_, subscriber_queue_size_);
+      CheckedCcbSize(num_slots_, subscriber_queue_arena_size_);
   if (!checked_ccb_size.ok()) {
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
     return checked_ccb_size.status();
@@ -316,7 +321,7 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
                          /*map=*/true, fds.bcb, session_id_);
   if (!p.ok()) {
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
-    UnmapMemory(ccb_, CcbSize(num_slots_, subscriber_queue_size_), "CCB");
+    UnmapMemory(ccb_, CcbSize(num_slots_, subscriber_queue_arena_size_), "CCB");
     return p.status();
   }
   bcb_ = reinterpret_cast<BufferControlBlock *>(*p);
@@ -393,7 +398,7 @@ ServerChannel::MapExisting(const toolbelt::FileDescriptor &scb_fd,
   }
 
   absl::StatusOr<size_t> checked_ccb_size =
-      CheckedCcbSize(num_slots_, subscriber_queue_size_);
+      CheckedCcbSize(num_slots_, subscriber_queue_arena_size_);
   if (!checked_ccb_size.ok()) {
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
     return checked_ccb_size.status();
@@ -413,7 +418,7 @@ ServerChannel::MapExisting(const toolbelt::FileDescriptor &scb_fd,
         ccb_->version, kChannelControlBlockVersion));
   }
   AvailableSlotQueueIndex *queue_index = GetAvailableSlotQueueIndexAddress();
-  const uint64_t arena_size = AvailableSlotQueuesSize(SubscriberQueueSize());
+  const uint64_t arena_size = SubscriberQueueArenaSize();
   const uint64_t next_offset =
       queue_index->next_offset.load(std::memory_order_acquire);
   if (next_offset > arena_size) {
@@ -605,7 +610,7 @@ ServerChannel::AllocateSubscriberQueue(int sub_id,
 
   const size_t allocation_size =
       SlotQueueBlockSize(static_cast<size_t>(capacity));
-  const size_t arena_size = AvailableSlotQueuesSize(SubscriberQueueSize());
+  const size_t arena_size = SubscriberQueueArenaSize();
   uint64_t next_offset =
       index->next_offset.load(std::memory_order_relaxed);
   char *arena = EndOfAvailableSlotQueueIndex();
@@ -1198,6 +1203,7 @@ void ServerChannel::GetChannelInfo(subspace::ChannelInfoProto *info) {
   info->set_slot_size(SlotSize());
   info->set_num_slots(NumSlots());
   info->set_subscriber_queue_size(SubscriberQueueSize());
+  info->set_subscriber_queue_arena_size(SubscriberQueueArenaSize());
   info->set_type(Type());
   info->set_channel_id(GetChannelId());
 

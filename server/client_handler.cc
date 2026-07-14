@@ -329,29 +329,16 @@ void ClientHandler::HandleCreatePublisher(
     const subspace::CreatePublisherRequest &req,
     subspace::CreatePublisherResponse *response,
     std::vector<toolbelt::FileDescriptor> &fds) {
-  if (req.subscriber_queue_size() < 0) {
-    response->set_error("subscriber_queue_size must be >= 0");
-    return;
-  }
   if (req.num_slots() <= 0 || req.slot_size() <= 0) {
     response->set_error("num_slots and slot_size must be greater than 0");
     return;
   }
-  if (static_cast<size_t>(req.subscriber_queue_size()) >
-      kDefaultMaxAvailableSlotQueueCapacity) {
-    response->set_error(absl::StrFormat(
-        "subscriber_queue_size must be <= %zu",
-        kDefaultMaxAvailableSlotQueueCapacity));
-    return;
-  }
   absl::StatusOr<size_t> checked_ccb_size =
-      CheckedCcbSize(req.num_slots(), req.subscriber_queue_size());
+      CheckedCcbSize(req.num_slots(), req.subscriber_queue_arena_size());
   if (!checked_ccb_size.ok()) {
     response->set_error(checked_ccb_size.status().ToString());
     return;
   }
-  const int subscriber_queue_size =
-      ResolveSubscriberQueueSize(req.num_slots(), req.subscriber_queue_size());
   ServerChannel *channel = server_->FindChannel(req.channel_name());
   if (channel == nullptr) {
     server_->logger_.Log(toolbelt::LogLevel::kDebug,
@@ -362,7 +349,8 @@ void ClientHandler::HandleCreatePublisher(
                          server_->GetNumChannels());
     absl::StatusOr<ServerChannel *> ch = server_->CreateChannel(
         req.channel_name(), req.slot_size(), req.num_slots(),
-        subscriber_queue_size, req.mux(), req.vchan_id(), req.type());
+        req.subscriber_queue_arena_size(), req.mux(), req.vchan_id(),
+        req.type());
     if (!ch.ok()) {
       response->set_error(ch.status().ToString());
       return;
@@ -378,7 +366,8 @@ void ClientHandler::HandleCreatePublisher(
     // Channel exists, but it's just a placeholder.  Remap the memory now
     // that we know the slots.
     absl::Status status = server_->RemapChannel(
-        channel, req.slot_size(), req.num_slots(), subscriber_queue_size);
+        channel, req.slot_size(), req.num_slots(),
+        req.subscriber_queue_arena_size());
     if (!status.ok()) {
       response->set_error(status.ToString());
       return;
@@ -462,16 +451,19 @@ void ClientHandler::HandleCreatePublisher(
   int num_tunnel_pubs, num_tunnel_subs;
   channel->CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs,
                       num_tunnel_pubs, num_tunnel_subs);
-  // The subscriber queue size defines the physical CCB arena layout and must
+  // The subscriber queue arena size defines the physical CCB layout and must
   // remain fixed even when this channel currently has no publishers. Virtual
-  // channels delegate SubscriberQueueSize() to their shared multiplexer, so
+  // channels delegate SubscriberQueueArenaSize() to their shared multiplexer,
+  // so
   // this also enforces consistency across all vchans on a mux.
-  if (subscriber_queue_size != channel->SubscriberQueueSize()) {
+  if (req.subscriber_queue_arena_size() !=
+      channel->SubscriberQueueArenaSize()) {
     response->set_error(absl::StrFormat(
         "Inconsistent publisher parameters for channel %s: subscriber queue "
-        "size is %d, not %d",
-        req.channel_name(), channel->SubscriberQueueSize(),
-        subscriber_queue_size));
+        "arena size is %llu, not %llu",
+        req.channel_name(),
+        static_cast<unsigned long long>(channel->SubscriberQueueArenaSize()),
+        static_cast<unsigned long long>(req.subscriber_queue_arena_size())));
     return;
   }
   // Check consistency of publisher parameters.
@@ -664,6 +656,8 @@ void ClientHandler::HandleCreatePublisher(
   response->set_vchan_id(channel->GetVirtualChannelId());
   response->set_publisher_id(pub->GetId());
   response->set_subscriber_queue_size(channel->SubscriberQueueSize());
+  response->set_subscriber_queue_arena_size(
+      channel->SubscriberQueueArenaSize());
 
   const SharedMemoryFds &channel_fds = channel->GetFds();
   response->set_ccb_fd_index(0);
@@ -882,6 +876,8 @@ void ClientHandler::HandleCreateSubscriber(
   response->set_subscriber_queue_size(
       channel->SubscriberQueueSize(sub->GetId()));
   response->set_default_subscriber_queue_size(channel->SubscriberQueueSize());
+  response->set_subscriber_queue_arena_size(
+      channel->SubscriberQueueArenaSize());
   response->set_checksum_size(channel->ChecksumSize());
   response->set_metadata_size(channel->MetadataSize());
   ServerChannel *split_response_channel =

@@ -72,6 +72,7 @@ pub struct ChannelInfo {
     pub slot_size: u64,
     pub num_slots: i32,
     pub subscriber_queue_size: i32,
+    pub subscriber_queue_arena_size: u64,
     pub reliable: bool,
 }
 
@@ -132,6 +133,14 @@ impl Publisher {
 
     pub fn subscriber_queue_size(&self) -> i32 {
         self.imp.lock().unwrap().channel.subscriber_queue_size
+    }
+
+    pub fn subscriber_queue_arena_size(&self) -> u64 {
+        self.imp
+            .lock()
+            .unwrap()
+            .channel
+            .subscriber_queue_arena_size
     }
 
     /// Get a mutable pointer to the message buffer for writing.
@@ -884,7 +893,7 @@ impl Client {
                     metadata_size: opts.metadata_size,
                     use_split_buffers: opts.use_split_buffers,
                     split_buffers_over_bridge: opts.split_buffers_over_bridge,
-                    subscriber_queue_size: opts.subscriber_queue_size,
+                    subscriber_queue_arena_size: opts.subscriber_queue_arena_size,
                     max_publishers: 0,
                     publisher_id: -1,
                     process_id: std::process::id() as u64,
@@ -912,6 +921,7 @@ impl Client {
             channel_name.to_string(),
             opts.num_slots,
             pub_resp.subscriber_queue_size,
+            pub_resp.subscriber_queue_arena_size,
             pub_resp.channel_id,
             pub_resp.publisher_id,
             pub_resp.vchan_id,
@@ -1044,6 +1054,7 @@ impl Client {
             channel_name.to_string(),
             sub_resp.num_slots,
             sub_resp.default_subscriber_queue_size,
+            sub_resp.subscriber_queue_arena_size,
             sub_resp.subscriber_queue_size,
             sub_resp.channel_id,
             sub_resp.subscriber_id,
@@ -1063,6 +1074,8 @@ impl Client {
 
         sub_impl.channel.num_slots = sub_resp.num_slots;
         sub_impl.channel.subscriber_queue_size = sub_resp.default_subscriber_queue_size;
+        sub_impl.channel.subscriber_queue_arena_size =
+            sub_resp.subscriber_queue_arena_size;
         sub_impl.subscriber_queue_size = sub_resp.subscriber_queue_size;
         sub_impl
             .channel
@@ -1165,6 +1178,7 @@ impl Client {
             slot_size: info.slot_size as u64,
             num_slots: info.num_slots,
             subscriber_queue_size: info.subscriber_queue_size,
+            subscriber_queue_arena_size: info.subscriber_queue_arena_size,
             reliable: info.is_reliable,
         })
     }
@@ -1204,6 +1218,7 @@ impl Client {
                 slot_size: info.slot_size as u64,
                 num_slots: info.num_slots,
                 subscriber_queue_size: info.subscriber_queue_size,
+                subscriber_queue_arena_size: info.subscriber_queue_arena_size,
                 reliable: info.is_reliable,
             })
             .collect())
@@ -1546,6 +1561,8 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
     }
     sub.channel.num_slots = sub_resp.num_slots;
     sub.channel.subscriber_queue_size = sub_resp.default_subscriber_queue_size;
+    sub.channel.subscriber_queue_arena_size =
+        sub_resp.subscriber_queue_arena_size;
     sub.subscriber_queue_size = sub_resp.subscriber_queue_size;
     sub.channel
         .embargoed_slots
@@ -1809,7 +1826,7 @@ fn expand_slot_size(slot_size: u64) -> u64 {
 
 fn get_virtual_memory_usage(channel: &Channel) -> u64 {
     let mut size = std::mem::size_of::<SystemControlBlock>() as u64
-        + ccb_size(channel.num_slots, channel.subscriber_queue_size) as u64
+        + ccb_size(channel.num_slots, channel.subscriber_queue_arena_size) as u64
         + std::mem::size_of::<BufferControlBlock>() as u64;
     if !channel.bcb.is_null() {
         let bcb = unsafe { &*channel.bcb };

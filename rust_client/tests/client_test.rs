@@ -23,7 +23,8 @@ fn verify_checksum(spans: &[&[u8]], checksum: u32) -> bool {
     verify_crc32_checksum(spans, &checksum.to_ne_bytes())
 }
 use subspace_client::options::{
-    PublisherOptions, SubscriberOptions, DEFAULT_SUBSCRIBER_QUEUE_SIZE,
+    PublisherOptions, SubscriberOptions, DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE,
+    DEFAULT_SUBSCRIBER_QUEUE_SIZE,
 };
 use subspace_client::{Client, ReadMode, SubspaceError};
 
@@ -57,8 +58,8 @@ fn publisher_options_defaults() {
     assert_eq!(opts.slot_size, 0);
     assert_eq!(opts.num_slots, 0);
     assert_eq!(
-        opts.subscriber_queue_size,
-        DEFAULT_SUBSCRIBER_QUEUE_SIZE
+        opts.subscriber_queue_arena_size,
+        DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE
     );
     assert!(!opts.local);
     assert!(!opts.reliable);
@@ -78,7 +79,7 @@ fn publisher_options_builder_chain() {
     let opts = PublisherOptions::new()
         .set_slot_size(4096)
         .set_num_slots(16)
-        .set_subscriber_queue_size(32)
+        .set_subscriber_queue_arena_size(32_000)
         .set_reliable(true)
         .set_local(true)
         .set_fixed_size(true)
@@ -92,7 +93,7 @@ fn publisher_options_builder_chain() {
 
     assert_eq!(opts.slot_size, 4096);
     assert_eq!(opts.num_slots, 16);
-    assert_eq!(opts.subscriber_queue_size, 32);
+    assert_eq!(opts.subscriber_queue_arena_size, 32_000);
     assert!(opts.reliable);
     assert!(opts.local);
     assert!(opts.fixed_size);
@@ -883,7 +884,7 @@ fn integration_subscriber_queue_overflow_preserves_newest() {
     let pub_opts = PublisherOptions::new()
         .set_slot_size(64)
         .set_num_slots(8)
-        .set_subscriber_queue_size(4);
+        .set_subscriber_queue_arena_size(DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE);
     let publisher = client
         .create_publisher("rust_queue_overflow_ch", &pub_opts)
         .unwrap();
@@ -964,7 +965,7 @@ fn integration_subscriber_queue_read_newest_does_not_redeliver_old_entries() {
     let pub_opts = PublisherOptions::new()
         .set_slot_size(64)
         .set_num_slots(8)
-        .set_subscriber_queue_size(8);
+        .set_subscriber_queue_arena_size(DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE);
     let publisher = client
         .create_publisher("rust_queue_newest_ch", &pub_opts)
         .unwrap();
@@ -3326,7 +3327,7 @@ fn coverage_publisher_accessors() {
     let opts = PublisherOptions::new()
         .set_slot_size(128)
         .set_num_slots(8)
-        .set_subscriber_queue_size(5)
+        .set_subscriber_queue_arena_size(5_000)
         .set_type("pub_type".to_string())
         .set_fixed_size(true);
     let pub_handle = client.create_publisher("cov_pub_acc_ch", &opts).unwrap();
@@ -3335,7 +3336,11 @@ fn coverage_publisher_accessors() {
     assert!(!pub_handle.is_reliable());
     assert!(pub_handle.is_fixed_size());
     assert_eq!(pub_handle.num_slots(), 8);
-    assert_eq!(pub_handle.subscriber_queue_size(), 5);
+    assert_eq!(
+        pub_handle.subscriber_queue_size(),
+        DEFAULT_SUBSCRIBER_QUEUE_SIZE
+    );
+    assert_eq!(pub_handle.subscriber_queue_arena_size(), 5_000);
     assert!(pub_handle.slot_size() > 0);
     assert!(pub_handle.get_poll_fd() >= 0);
     assert!(pub_handle.prefix_size() > 0);
@@ -3348,7 +3353,7 @@ fn coverage_subscriber_accessors() {
     let opts = PublisherOptions::new()
         .set_slot_size(128)
         .set_num_slots(16)
-        .set_subscriber_queue_size(6);
+        .set_subscriber_queue_arena_size(DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE);
     let _pub = client.create_publisher("cov_sub_acc_ch", &opts).unwrap();
     let sub_opts = SubscriberOptions::new().set_subscriber_queue_size(3);
     let sub = client

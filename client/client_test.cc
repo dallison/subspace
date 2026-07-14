@@ -85,7 +85,7 @@ uint64_t ExpectedSplitBufferVirtualMemoryUsage(int num_slots,
                                                uint64_t prefix_size) {
   return sizeof(subspace::SystemControlBlock) +
          subspace::CcbSize(num_slots,
-                           subspace::kDefaultSubscriberQueueSize) +
+                           subspace::kDefaultSubscriberQueueArenaSize) +
          sizeof(subspace::BufferControlBlock) +
          AlignPage(prefix_size * static_cast<uint64_t>(num_slots)) +
          AlignPage(slot_size) * static_cast<uint64_t>(num_slots);
@@ -863,7 +863,8 @@ TEST_F(ClientTest, PublishAndReadWithSubscriberQueue) {
       subspace::PublisherOptions()
           .SetSlotSize(256)
           .SetNumSlots(40)
-          .SetSubscriberQueueSize(4));
+          .SetSubscriberQueueArenaSize(
+              subspace::kDefaultSubscriberQueueArenaSize));
   ASSERT_OK(pub);
 
   absl::StatusOr<Subscriber> sub =
@@ -909,7 +910,8 @@ TEST_F(ClientTest, SubscribersUseDifferentQueueSizes) {
       subspace::PublisherOptions()
           .SetSlotSize(64)
           .SetNumSlots(40)
-          .SetSubscriberQueueSize(8)));
+          .SetSubscriberQueueArenaSize(
+              subspace::kDefaultSubscriberQueueArenaSize)));
   auto small = EVAL_AND_ASSERT_OK(client.CreateSubscriber(
       "different_subscriber_queue_sizes",
       subspace::SubscriberOptions().SetSubscriberQueueSize(2)));
@@ -917,7 +919,8 @@ TEST_F(ClientTest, SubscribersUseDifferentQueueSizes) {
       client.CreateSubscriber("different_subscriber_queue_sizes"));
 
   EXPECT_EQ(2, small.SubscriberQueueSize());
-  EXPECT_EQ(8, defaults.SubscriberQueueSize());
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
+            defaults.SubscriberQueueSize());
 
   for (uint8_t value = 1; value <= 4; ++value) {
     void *buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
@@ -935,7 +938,7 @@ TEST_F(ClientTest, SubscribersUseDifferentQueueSizes) {
   EXPECT_EQ(1, *static_cast<const uint8_t *>(default_message.buffer));
 }
 
-TEST_F(ClientTest, PublisherQueueDefaultRemainsFixedWithoutPublishers) {
+TEST_F(ClientTest, PublisherQueueArenaRemainsFixedWithoutPublishers) {
   subspace::Client client;
   ASSERT_OK(client.Init(Socket()));
 
@@ -946,8 +949,9 @@ TEST_F(ClientTest, PublisherQueueDefaultRemainsFixedWithoutPublishers) {
         kChannel, subspace::PublisherOptions()
                       .SetSlotSize(64)
                       .SetNumSlots(8)
-                      .SetSubscriberQueueSize(4)));
-    EXPECT_EQ(4, publisher.SubscriberQueueSize());
+                      .SetSubscriberQueueArenaSize(4096)));
+    EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
+              publisher.SubscriberQueueSize());
     subscriber = std::make_unique<Subscriber>(
         EVAL_AND_ASSERT_OK(client.CreateSubscriber(kChannel)));
   }
@@ -956,13 +960,14 @@ TEST_F(ClientTest, PublisherQueueDefaultRemainsFixedWithoutPublishers) {
       kChannel, subspace::PublisherOptions()
                     .SetSlotSize(64)
                     .SetNumSlots(8)
-                    .SetSubscriberQueueSize(8));
+                    .SetSubscriberQueueArenaSize(8192));
   ASSERT_FALSE(mismatched.ok());
   EXPECT_THAT(mismatched.status().message(),
-              ::testing::HasSubstr("subscriber queue size is 4, not 8"));
+              ::testing::HasSubstr(
+                  "subscriber queue arena size is 4096, not 8192"));
 }
 
-TEST_F(ClientTest, PublisherQueueDefaultMatchesAcrossVirtualChannels) {
+TEST_F(ClientTest, PublisherQueueArenaMatchesAcrossVirtualChannels) {
   subspace::Client client;
   ASSERT_OK(client.Init(Socket()));
 
@@ -972,25 +977,28 @@ TEST_F(ClientTest, PublisherQueueDefaultMatchesAcrossVirtualChannels) {
       subspace::PublisherOptions()
           .SetSlotSize(64)
           .SetNumSlots(16)
-          .SetSubscriberQueueSize(4)
+          .SetSubscriberQueueArenaSize(4096)
           .SetMux(kMux)));
-  EXPECT_EQ(4, first.SubscriberQueueSize());
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
+            first.SubscriberQueueSize());
   auto second_vchan_subscriber =
       EVAL_AND_ASSERT_OK(client.CreateSubscriber(
           "publisher_queue_default_vchan_b",
           subspace::SubscriberOptions().SetMux(kMux)));
-  EXPECT_EQ(4, second_vchan_subscriber.SubscriberQueueSize());
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
+            second_vchan_subscriber.SubscriberQueueSize());
 
   auto mismatched = client.CreatePublisher(
       "publisher_queue_default_vchan_b",
       subspace::PublisherOptions()
           .SetSlotSize(64)
           .SetNumSlots(16)
-          .SetSubscriberQueueSize(8)
+          .SetSubscriberQueueArenaSize(8192)
           .SetMux(kMux));
   ASSERT_FALSE(mismatched.ok());
   EXPECT_THAT(mismatched.status().message(),
-              ::testing::HasSubstr("subscriber queue size is 4, not 8"));
+              ::testing::HasSubstr(
+                  "subscriber queue arena size is 4096, not 8192"));
 }
 
 TEST_F(ClientTest, FailedSubscriberQueuePushFallsBackToBitset) {
@@ -1002,7 +1010,8 @@ TEST_F(ClientTest, FailedSubscriberQueuePushFallsBackToBitset) {
       kChannel, subspace::PublisherOptions()
                     .SetSlotSize(64)
                     .SetNumSlots(8)
-                    .SetSubscriberQueueSize(2)));
+                    .SetSubscriberQueueArenaSize(
+                        subspace::kDefaultSubscriberQueueArenaSize)));
   auto sub = EVAL_AND_ASSERT_OK(client.CreateSubscriber(
       kChannel, subspace::SubscriberOptions().SetSubscriberQueueSize(2)));
 
@@ -1039,7 +1048,8 @@ TEST_F(ClientTest, SubscriberQueueOverflowReportsDroppedMessages) {
       kChannel, subspace::PublisherOptions()
                     .SetSlotSize(64)
                     .SetNumSlots(8)
-                    .SetSubscriberQueueSize(4)));
+                    .SetSubscriberQueueArenaSize(
+                        subspace::kDefaultSubscriberQueueArenaSize)));
   auto sub = EVAL_AND_ASSERT_OK(client.CreateSubscriber(
       kChannel, subspace::SubscriberOptions().SetSubscriberQueueSize(2)));
   int64_t reported_drops = 0;
@@ -1069,7 +1079,8 @@ TEST_F(ClientTest, QueueMessageSurvivesMaxActiveMessageRejection) {
       kChannel, subspace::PublisherOptions()
                     .SetSlotSize(64)
                     .SetNumSlots(8)
-                    .SetSubscriberQueueSize(4)));
+                    .SetSubscriberQueueArenaSize(
+                        subspace::kDefaultSubscriberQueueArenaSize)));
   subspace::SubscriberOptions options;
   options.SetSubscriberQueueSize(4).SetMaxActiveMessages(1);
   auto sub =
@@ -1112,7 +1123,8 @@ TEST_F(ClientTest, SubscriberQueuePollDrainHandlesActivationOrdinals) {
       kChannel, subspace::PublisherOptions()
                     .SetSlotSize(64)
                     .SetNumSlots(8)
-                    .SetSubscriberQueueSize(4)
+                    .SetSubscriberQueueArenaSize(
+                        subspace::kDefaultSubscriberQueueArenaSize)
                     .SetActivate(true)));
   subspace::ServerChannel *server_channel = Server()->FindChannel(kChannel);
   ASSERT_NE(nullptr, server_channel);
@@ -1136,7 +1148,10 @@ TEST_F(ClientTest, SubscriberQueueOverrideExhaustingArenaIsRejected) {
       subspace::PublisherOptions()
           .SetSlotSize(64)
           .SetNumSlots(40)
-          .SetSubscriberQueueSize(1)));
+          .SetSubscriberQueueArenaSize(
+              2 * subspace::SlotQueueBlockSize(1024) +
+              subspace::SlotQueueBlockSize(
+                  subspace::kDefaultSubscriberQueueSize))));
 
   std::vector<Subscriber> large_subscribers;
   bool exhausted = false;
@@ -1163,7 +1178,8 @@ TEST_F(ClientTest, SubscriberQueueOverrideExhaustingArenaIsRejected) {
 
   auto defaults = EVAL_AND_ASSERT_OK(
       client.CreateSubscriber("subscriber_queue_arena_exhaustion"));
-  EXPECT_EQ(1, defaults.SubscriberQueueSize());
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
+            defaults.SubscriberQueueSize());
 }
 
 TEST_F(ClientTest, SubscriberQueueReuseWaitsForPublisherTraversal) {
@@ -1175,7 +1191,8 @@ TEST_F(ClientTest, SubscriberQueueReuseWaitsForPublisherTraversal) {
       kChannel, subspace::PublisherOptions()
                     .SetSlotSize(64)
                     .SetNumSlots(16)
-                    .SetSubscriberQueueSize(1)));
+                    .SetSubscriberQueueArenaSize(
+                        3 * subspace::SlotQueueBlockSize(1024))));
   subspace::ServerChannel *channel = Server()->FindChannel(kChannel);
   ASSERT_NE(nullptr, channel);
 
@@ -1240,7 +1257,8 @@ TEST_F(ClientTest, SubscriberQueueArenaCoalescesAdjacentBlocks) {
       kChannel, subspace::PublisherOptions()
                     .SetSlotSize(64)
                     .SetNumSlots(16)
-                    .SetSubscriberQueueSize(1)));
+                    .SetSubscriberQueueArenaSize(
+                        2 * subspace::SlotQueueBlockSize(512))));
   subspace::ServerChannel *channel = Server()->FindChannel(kChannel);
   ASSERT_NE(nullptr, channel);
 
@@ -1294,7 +1312,8 @@ TEST_F(ClientTest, SubscriberFirstQueueOverrideSurvivesPlaceholderRemap) {
       kChannel, subspace::PublisherOptions()
                     .SetSlotSize(64)
                     .SetNumSlots(32)
-                    .SetSubscriberQueueSize(8)));
+                    .SetSubscriberQueueArenaSize(
+                        subspace::kDefaultSubscriberQueueArenaSize)));
   for (uint8_t value = 1; value <= 4; ++value) {
     void *buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
     *static_cast<uint8_t *>(buffer) = value;
@@ -1326,7 +1345,8 @@ TEST_F(ClientTest, SubscriberFirstOversizedQueueFallsBackToBitset) {
       kChannel, subspace::PublisherOptions()
                     .SetSlotSize(64)
                     .SetNumSlots(32)
-                    .SetSubscriberQueueSize(1)));
+                    .SetSubscriberQueueArenaSize(
+                        8 * subspace::SlotQueueBlockSize(1024))));
   for (uint8_t value = 1; value <= 4; ++value) {
     void *buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
     *static_cast<uint8_t *>(buffer) = value;
@@ -1363,7 +1383,8 @@ TEST_F(ClientTest, SubscriberQueueChurnKeepsQueuesIndependent) {
       kChannel, subspace::PublisherOptions()
                     .SetSlotSize(64)
                     .SetNumSlots(64)
-                    .SetSubscriberQueueSize(8)));
+                    .SetSubscriberQueueArenaSize(
+                        subspace::kDefaultSubscriberQueueArenaSize)));
 
   for (int iteration = 1; iteration <= 1100; ++iteration) {
     const int queue_size = 1 + iteration % 4;
@@ -6339,7 +6360,7 @@ TEST_F(ClientTest, PublisherOptionsChain) {
   subspace::PublisherOptions opts;
   opts.SetSlotSize(128)
       .SetNumSlots(8)
-      .SetSubscriberQueueSize(32)
+      .SetSubscriberQueueArenaSize(32'000)
       .SetReliable(true)
       .SetLocal(true)
       .SetFixedSize(true)
@@ -6356,7 +6377,7 @@ TEST_F(ClientTest, PublisherOptionsChain) {
 
   ASSERT_EQ(128, opts.SlotSize());
   ASSERT_EQ(8, opts.NumSlots());
-  ASSERT_EQ(32, opts.SubscriberQueueSize());
+  ASSERT_EQ(32'000, opts.SubscriberQueueArenaSize());
   ASSERT_TRUE(opts.IsReliable());
   ASSERT_TRUE(opts.IsLocal());
   ASSERT_TRUE(opts.IsFixedSize());
@@ -6372,7 +6393,7 @@ TEST_F(ClientTest, PublisherOptionsChain) {
   ASSERT_EQ(3, opts.MaxPublishers());
 }
 
-TEST_F(ClientTest, PublisherSubscriberQueueSizeOption) {
+TEST_F(ClientTest, PublisherSubscriberQueueArenaSizeOption) {
   subspace::Client client;
   ASSERT_OK(client.Init(Socket()));
 
@@ -6381,16 +6402,21 @@ TEST_F(ClientTest, PublisherSubscriberQueueSizeOption) {
       subspace::PublisherOptions()
           .SetSlotSize(128)
           .SetNumSlots(8)
-          .SetSubscriberQueueSize(32)));
+          .SetSubscriberQueueArenaSize(32'000)));
   EXPECT_EQ(8, pub.NumSlots());
-  EXPECT_EQ(32, pub.SubscriberQueueSize());
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
+            pub.SubscriberQueueSize());
+  EXPECT_EQ(32'000, pub.SubscriberQueueArenaSize());
 
   auto sub = EVAL_AND_ASSERT_OK(
       client.CreateSubscriber("subscriber_queue_size"));
-  EXPECT_EQ(32, sub.SubscriberQueueSize());
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
+            sub.SubscriberQueueSize());
 
   auto info = EVAL_AND_ASSERT_OK(client.GetChannelInfo("subscriber_queue_size"));
-  EXPECT_EQ(32, info.subscriber_queue_size);
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
+            info.subscriber_queue_size);
+  EXPECT_EQ(32'000, info.subscriber_queue_arena_size);
 
   auto default_pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
       "subscriber_queue_size_default",
@@ -6398,6 +6424,8 @@ TEST_F(ClientTest, PublisherSubscriberQueueSizeOption) {
   EXPECT_EQ(8, default_pub.NumSlots());
   EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
             default_pub.SubscriberQueueSize());
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueArenaSize,
+            default_pub.SubscriberQueueArenaSize());
   auto default_sub = EVAL_AND_ASSERT_OK(
       client.CreateSubscriber("subscriber_queue_size_default"));
   EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
@@ -6406,14 +6434,17 @@ TEST_F(ClientTest, PublisherSubscriberQueueSizeOption) {
       EVAL_AND_ASSERT_OK(client.GetChannelInfo("subscriber_queue_size_default"));
   EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
             default_info.subscriber_queue_size);
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueArenaSize,
+            default_info.subscriber_queue_arena_size);
 
   auto disabled_pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
       "subscriber_queue_size_disabled",
       subspace::PublisherOptions()
           .SetSlotSize(128)
           .SetNumSlots(8)
-          .SetSubscriberQueueSize(0)));
+          .SetSubscriberQueueArenaSize(0)));
   EXPECT_EQ(0, disabled_pub.SubscriberQueueSize());
+  EXPECT_EQ(0, disabled_pub.SubscriberQueueArenaSize());
   auto disabled_sub = EVAL_AND_ASSERT_OK(
       client.CreateSubscriber("subscriber_queue_size_disabled"));
   EXPECT_EQ(0, disabled_sub.SubscriberQueueSize());

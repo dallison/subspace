@@ -1362,7 +1362,10 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyHistogram) {
             .SetSlotSize(256)
             .SetNumSlots(num_slots)
             .SetReliable(false)
-            .SetSubscriberQueueSize(subscriber_queue_size));
+            .SetSubscriberQueueArenaSize(
+                subscriber_queue_size == 0
+                    ? 0
+                    : subspace::SlotQueueBlockSize(subscriber_queue_size)));
     ASSERT_OK(pub);
 
     subspace::SubscriberOptions subscriber_options;
@@ -1745,18 +1748,20 @@ TEST_F(LatencyTest, FlatOutSubscriberQueueLatency) {
         subspace::PublisherOptions()
             .SetSlotSize(256)
             .SetNumSlots(kNumSlots)
-            .SetSubscriberQueueSize(subscriber_queue_size)
+            .SetSubscriberQueueArenaSize(
+                subscriber_queue_size == 0
+                    ? 0
+                    : subspace::SlotQueueBlockSize(subscriber_queue_size))
             .SetReliable(false));
     ASSERT_OK(pub);
 
-    absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        channel_name, [] {
-          subspace::SubscriberOptions opts;
-          opts.SetReliable(false);
-          opts.SetLogDroppedMessages(false);
-          opts.SetDetectDroppedMessages(false);
-          return opts;
-        }());
+    subspace::SubscriberOptions subscriber_options;
+    subscriber_options.SetReliable(false);
+    subscriber_options.SetSubscriberQueueSize(subscriber_queue_size);
+    subscriber_options.SetLogDroppedMessages(false);
+    subscriber_options.SetDetectDroppedMessages(false);
+    absl::StatusOr<Subscriber> sub =
+        sub_client.CreateSubscriber(channel_name, subscriber_options);
     ASSERT_OK(sub);
 
     Stats result;

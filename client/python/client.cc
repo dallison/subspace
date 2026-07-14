@@ -59,6 +59,8 @@ PYBIND11_MODULE(subspace, m) {
       .def_readonly("num_slots", &ChannelInfo::num_slots)
       .def_readonly("subscriber_queue_size",
                     &ChannelInfo::subscriber_queue_size)
+      .def_readonly("subscriber_queue_arena_size",
+                    &ChannelInfo::subscriber_queue_arena_size)
       .def_readonly("reliable", &ChannelInfo::reliable);
 
   // ChannelStats struct.
@@ -111,12 +113,13 @@ PYBIND11_MODULE(subspace, m) {
            "Set the number of slots for the publisher.")
       .def("num_slots", &PublisherOptions::NumSlots,
            "Get the number of slots for the publisher.")
-      .def("set_subscriber_queue_size",
-           &PublisherOptions::SetSubscriberQueueSize,
-           "Set each subscriber queue's capacity. The default is 16; "
-           "explicitly setting 0 disables the queue.")
-      .def("subscriber_queue_size", &PublisherOptions::SubscriberQueueSize,
-           "Get each subscriber queue's configured capacity.")
+      .def("set_subscriber_queue_arena_size",
+           &PublisherOptions::SetSubscriberQueueArenaSize,
+           "Set the bytes reserved for packed subscriber queues. Explicitly "
+           "setting 0 disables queues by default.")
+      .def("subscriber_queue_arena_size",
+           &PublisherOptions::SubscriberQueueArenaSize,
+           "Get the configured subscriber queue arena size in bytes.")
       .def("set_notify_retirement", &PublisherOptions::SetNotifyRetirement,
            "Set whether the publisher notifies on message retirement.")
       .def("notify_retirement", &PublisherOptions::NotifyRetirement,
@@ -314,6 +317,9 @@ PYBIND11_MODULE(subspace, m) {
   publisher_class.def("subscriber_queue_size",
                       &Publisher::SubscriberQueueSize,
                       "Get each subscriber queue's resolved capacity.");
+  publisher_class.def("subscriber_queue_arena_size",
+                      &Publisher::SubscriberQueueArenaSize,
+                      "Get the subscriber queue arena size in bytes.");
 
   publisher_class.def("virtual_channel_id", &Publisher::VirtualChannelId,
                       "Get the virtual channel ID assigned to this publisher.");

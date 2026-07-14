@@ -1108,10 +1108,11 @@ Server::HandleIncomingConnection(async::Context ctx,
 
 absl::StatusOr<ServerChannel *>
 Server::CreateMultiplexer(const std::string &channel_name, int slot_size,
-                          int num_slots, int subscriber_queue_size,
+                          int num_slots,
+                          uint64_t subscriber_queue_arena_size,
                           std::string type) {
-  subscriber_queue_size =
-      ResolveSubscriberQueueSize(num_slots, subscriber_queue_size);
+  const int subscriber_queue_size =
+      subscriber_queue_arena_size == 0 ? 0 : kDefaultSubscriberQueueSize;
   absl::StatusOr<int> channel_id = channel_ids_.Allocate("mux");
   if (!channel_id.ok()) {
     return channel_id.status();
@@ -1121,12 +1122,12 @@ Server::CreateMultiplexer(const std::string &channel_name, int slot_size,
               num_slots);
   ServerChannel *channel = new ChannelMultiplexer(
       *channel_id, channel_name, num_slots, subscriber_queue_size,
-      std::move(type), session_id_);
+      subscriber_queue_arena_size, std::move(type), session_id_);
   channel->SetDebug(logger_.GetLogLevel() <= toolbelt::LogLevel::kVerboseDebug);
 
   absl::StatusOr<SharedMemoryFds> fds =
-      channel->Allocate(scb_fd_, slot_size, num_slots, subscriber_queue_size,
-                        initial_ordinal_);
+      channel->Allocate(scb_fd_, slot_size, num_slots,
+                        subscriber_queue_arena_size, initial_ordinal_);
   if (!fds.ok()) {
     return fds.status();
   }
@@ -1141,17 +1142,17 @@ Server::CreateMultiplexer(const std::string &channel_name, int slot_size,
 
 absl::StatusOr<ServerChannel *>
 Server::CreateChannel(const std::string &channel_name, int slot_size,
-                      int num_slots, int subscriber_queue_size,
+                      int num_slots, uint64_t subscriber_queue_arena_size,
                       const std::string &mux, int vchan_id, std::string type) {
-  subscriber_queue_size =
-      ResolveSubscriberQueueSize(num_slots, subscriber_queue_size);
+  const int subscriber_queue_size =
+      subscriber_queue_arena_size == 0 ? 0 : kDefaultSubscriberQueueSize;
   if (!mux.empty()) {
     ServerChannel *mux_channel = FindChannel(mux);
     if (mux_channel == nullptr) {
       // No mux found, create one.
       absl::StatusOr<ServerChannel *> m =
-          CreateMultiplexer(mux, slot_size, num_slots, subscriber_queue_size,
-                            type);
+          CreateMultiplexer(mux, slot_size, num_slots,
+                            subscriber_queue_arena_size, type);
       if (!m.ok()) {
         return m.status();
       }
@@ -1162,16 +1163,21 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
           absl::StrFormat("Channel %s is not a multiplexer", mux));
     }
     if (!mux_channel->IsPlaceholder() && num_slots > 0 &&
-        subscriber_queue_size != mux_channel->SubscriberQueueSize()) {
+        subscriber_queue_arena_size !=
+            mux_channel->SubscriberQueueArenaSize()) {
       return absl::InternalError(absl::StrFormat(
           "Inconsistent publisher parameters for mux %s: subscriber queue "
-          "size is %d, not %d",
-          mux, mux_channel->SubscriberQueueSize(), subscriber_queue_size));
+          "arena size is %llu, not %llu",
+          mux,
+          static_cast<unsigned long long>(
+              mux_channel->SubscriberQueueArenaSize()),
+          static_cast<unsigned long long>(subscriber_queue_arena_size)));
     }
     if (mux_channel->IsPlaceholder()) {
       // Remap the memory now that we know the slots.
       absl::Status status =
-          RemapChannel(mux_channel, slot_size, num_slots, subscriber_queue_size);
+          RemapChannel(mux_channel, slot_size, num_slots,
+                       subscriber_queue_arena_size);
       if (!status.ok()) {
         return status;
       }
@@ -1203,14 +1209,14 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
   }
   ServerChannel *channel =
       new ServerChannel(*channel_id, channel_name, num_slots,
-                        subscriber_queue_size, std::move(type), false,
-                        session_id_);
+                        subscriber_queue_size, subscriber_queue_arena_size,
+                        std::move(type), false, session_id_);
   channel->SetDebug(logger_.GetLogLevel() <= toolbelt::LogLevel::kVerboseDebug);
   channel->SetLastKnownSlotSize(slot_size);
 
   absl::StatusOr<SharedMemoryFds> fds =
-      channel->Allocate(scb_fd_, slot_size, num_slots, subscriber_queue_size,
-                        initial_ordinal_);
+      channel->Allocate(scb_fd_, slot_size, num_slots,
+                        subscriber_queue_arena_size, initial_ordinal_);
   if (!fds.ok()) {
     return fds.status();
   }
@@ -1233,19 +1239,19 @@ uint64_t Server::GetVirtualMemoryUsage() const {
 }
 
 absl::Status Server::RemapChannel(ServerChannel *channel, int slot_size,
-                                  int num_slots, int subscriber_queue_size) {
-  subscriber_queue_size =
-      ResolveSubscriberQueueSize(num_slots, subscriber_queue_size);
+                                  int num_slots,
+                                  uint64_t subscriber_queue_arena_size) {
   if (channel->IsVirtual()) {
     ChannelMultiplexer *mux = static_cast<VirtualChannel *>(channel)->GetMux();
     logger_.Log(toolbelt::LogLevel::kDebug,
                 "Remapping multiplexer %s with %d slots",
                 channel->Name().c_str(), num_slots);
-    return RemapChannel(mux, slot_size, num_slots, subscriber_queue_size);
+    return RemapChannel(mux, slot_size, num_slots,
+                        subscriber_queue_arena_size);
   }
   absl::StatusOr<SharedMemoryFds> fds =
-      channel->Allocate(scb_fd_, slot_size, num_slots, subscriber_queue_size,
-                        initial_ordinal_);
+      channel->Allocate(scb_fd_, slot_size, num_slots,
+                        subscriber_queue_arena_size, initial_ordinal_);
   if (!fds.ok()) {
     return fds.status();
   }
@@ -1371,14 +1377,18 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
     ServerChannel *channel = nullptr;
     if (mux_names.contains(rch.name)) {
       auto *mux = new ChannelMultiplexer(
-          rch.channel_id, rch.name, rch.num_slots, rch.subscriber_queue_size,
-          rch.type, session_id_);
+          rch.channel_id, rch.name, rch.num_slots,
+          rch.subscriber_queue_arena_size == 0 ? 0
+                                               : kDefaultSubscriberQueueSize,
+          rch.subscriber_queue_arena_size, rch.type, session_id_);
       channel = mux;
       recovered_muxes.emplace(rch.name, mux);
     } else {
       channel = new ServerChannel(
-          rch.channel_id, rch.name, rch.num_slots, rch.subscriber_queue_size,
-          rch.type, false, session_id_);
+          rch.channel_id, rch.name, rch.num_slots,
+          rch.subscriber_queue_arena_size == 0 ? 0
+                                               : kDefaultSubscriberQueueSize,
+          rch.subscriber_queue_arena_size, rch.type, false, session_id_);
     }
     if (absl::Status status = configure_channel(channel, rch, true);
         !status.ok()) {
@@ -1412,8 +1422,10 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
       physical_channel_ids.emplace(rch.channel_id, rch.mux);
       channel_ids_.Set(rch.channel_id);
       mux = new ChannelMultiplexer(
-          rch.channel_id, rch.mux, rch.num_slots, rch.subscriber_queue_size,
-          rch.type, session_id_);
+          rch.channel_id, rch.mux, rch.num_slots,
+          rch.subscriber_queue_arena_size == 0 ? 0
+                                               : kDefaultSubscriberQueueSize,
+          rch.subscriber_queue_arena_size, rch.type, session_id_);
       if (absl::Status status = configure_channel(mux, rch, true);
           !status.ok()) {
         delete mux;
@@ -1425,7 +1437,8 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
       mux = mux_it->second;
       if (rch.channel_id != mux->GetChannelId() ||
           rch.num_slots != mux->NumSlots() ||
-          rch.subscriber_queue_size != mux->SubscriberQueueSize()) {
+          rch.subscriber_queue_arena_size !=
+              mux->SubscriberQueueArenaSize()) {
         return absl::FailedPreconditionError(absl::StrFormat(
             "inconsistent recovered virtual channel %s for mux %s", rch.name,
             rch.mux));
@@ -2002,7 +2015,8 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
   subscribed.set_channel_name(channel_name);
   subscribed.set_slot_size(info.slot_size);
   subscribed.set_num_slots(info.num_slots);
-  subscribed.set_subscriber_queue_size(info.subscriber_queue_size);
+  subscribed.set_subscriber_queue_arena_size(
+      info.subscriber_queue_arena_size);
   subscribed.set_reliable(pub_reliable);
   subscribed.set_checksum_size(info.checksum_size);
   subscribed.set_metadata_size(info.metadata_size);
@@ -2489,7 +2503,8 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
   absl::StatusOr<Publisher> pub = client.CreatePublisher(
       channel_name, subscribed.slot_size(), subscribed.num_slots(),
       PublisherOptions()
-          .SetSubscriberQueueSize(subscribed.subscriber_queue_size())
+          .SetSubscriberQueueArenaSize(
+              subscribed.subscriber_queue_arena_size())
           .SetReliable(subscribed.reliable())
           .SetBridge(true)
           .SetNotifyRetirement(subscribed.notify_retirement())
@@ -2835,7 +2850,7 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
         .channel_name = ch->Name(),
         .slot_size = ch->SlotSize(),
         .num_slots = ch->NumSlots(),
-        .subscriber_queue_size = ch->SubscriberQueueSize(),
+        .subscriber_queue_arena_size = ch->SubscriberQueueArenaSize(),
         .checksum_size = ch->ChecksumSize(),
         .metadata_size = ch->MetadataSize(),
         .wire_split_buffers = ChannelUsesSplitBuffers(ch),

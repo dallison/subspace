@@ -74,15 +74,18 @@ Each channel requires three shared memory regions, created via `shm_open()` (POS
 
 - One per channel.
 - Contains: channel name, num_slots, ordinals, activation tracker.
-- CCB version 3 uses atomic slot metadata. `total_messages` advances for every
+- CCB version 4 uses atomic slot metadata. `total_messages` advances for every
   completed publication, including activation messages, and also versions
   subscriber delivery snapshots.
 - Variable-length: `MessageSlot` array, retired/free/available bitsets, a
   subscriber queue index, and a packed subscriber queue arena.
-- Size: `CcbSize(num_slots, subscriber_queue_size)`. Publisher client APIs
-  default to 16 queue entries, reserving a 640 KiB arena for up to 1024
-  subscribers. Explicitly selecting zero omits the arena and uses the
-  available-slot bitset path.
+- Size: `CcbSize(num_slots, subscriber_queue_arena_size)`. Publisher client
+  APIs explicitly configure the packed arena in bytes and default to 64,000
+  bytes, enough for 100 default-sized queues. A subscriber that does not
+  request an override gets the fixed 16-entry default. Subscriber IDs still
+  support the full 1024 owner limit, but queue allocation fails once the packed
+  arena is full. Explicitly selecting a zero-byte arena omits it and uses the
+  available-slot bitset path by default.
 - Per-subscriber queues are acceleration hints. The available-slot bitset is
   authoritative, and consumers fall back to an ordinal-ordered bitset snapshot
   if queue overflow or insertion failure races a claim.

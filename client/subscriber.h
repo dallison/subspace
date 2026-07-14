@@ -49,15 +49,17 @@ template <typename H> inline H AbslHashValue(H h, const OrdinalAndVchanId &x) {
 class SubscriberImpl : public ClientChannel {
 public:
   SubscriberImpl(const std::string &name, int num_slots,
-                 int default_subscriber_queue_size, int subscriber_queue_size,
-                 int channel_id, int subscriber_id, int vchan_id,
-                 uint64_t session_id, std::string type,
+                 int default_subscriber_queue_size,
+                 uint64_t subscriber_queue_arena_size,
+                 int subscriber_queue_size, int channel_id, int subscriber_id,
+                 int vchan_id, uint64_t session_id, std::string type,
                  const SubscriberOptions &options,
                  std::function<bool(Channel *)> reload, int user_id,
                  int group_id)
-      : ClientChannel(name, num_slots, default_subscriber_queue_size, channel_id,
-                      vchan_id, std::move(session_id), std::move(type),
-                      std::move(reload), user_id, group_id),
+      : ClientChannel(name, num_slots, default_subscriber_queue_size,
+                      subscriber_queue_arena_size, channel_id, vchan_id,
+                      std::move(session_id), std::move(type), std::move(reload),
+                      user_id, group_id),
         subscriber_id_(subscriber_id),
         subscriber_queue_size_(subscriber_queue_size), options_(options) {
     // Preallocate to avoid malloc later.

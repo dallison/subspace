@@ -867,7 +867,8 @@ TEST_F(ShadowRecoveryTest, RecoversMuxSubscriberQueueTopology) {
   subspace::PublisherOptions pub_options;
   pub_options.SetSlotSize(64)
       .SetNumSlots(32)
-      .SetSubscriberQueueSize(8)
+      .SetSubscriberQueueArenaSize(
+          subspace::kDefaultSubscriberQueueArenaSize)
       .SetMux(kMux);
   auto pre_pub = pre_client.CreatePublisher(kVchan, pub_options);
   ASSERT_THAT(pre_pub, IsOk());

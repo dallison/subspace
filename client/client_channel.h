@@ -82,10 +82,12 @@ struct BufferSet {
 class ClientChannel : public Channel {
 public:
   ClientChannel(const std::string &name, int num_slots,
-                int subscriber_queue_size, int channel_id, int vchan_id,
-                uint64_t session_id, std::string type,
+                int subscriber_queue_size,
+                uint64_t subscriber_queue_arena_size, int channel_id,
+                int vchan_id, uint64_t session_id, std::string type,
                 std::function<bool(Channel *)> reload, int user_id, int group_id)
-      : Channel(name, num_slots, channel_id, subscriber_queue_size, std::move(type),
+      : Channel(name, num_slots, channel_id, subscriber_queue_size,
+                subscriber_queue_arena_size, std::move(type),
                 std::move(reload)),
         vchan_id_(vchan_id), session_id_(std::move(session_id)), user_id_(user_id), group_id_(group_id) {
           active_slots_.reserve(num_slots);

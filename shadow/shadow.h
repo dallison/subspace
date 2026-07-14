@@ -51,7 +51,7 @@ struct ShadowChannel {
   int channel_id = 0;
   int slot_size = 0;
   int num_slots = 0;
-  int subscriber_queue_size = 0;
+  uint64_t subscriber_queue_arena_size = 0;
   std::string type;
   bool is_local = false;
   bool is_reliable = false;
