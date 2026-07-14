@@ -35,6 +35,23 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "pmem_split_buffer_test",
+    size = "small",
+    srcs = ["pmem_split_buffer_test.cc"],
+    data = [
+        "//server:subspace_server",
+    ],
+    deps = [
+        ":subspace_c_client",
+        "//server",
+        "@abseil-cpp//absl/flags:parse",
+        "@abseil-cpp//absl/status",
+        "@googletest//:gtest",
+        "@coroutines//:co",
+    ],
+)
+
 cc_binary(
     name = "subspace_c_client.so",
     srcs = [
