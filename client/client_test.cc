@@ -252,6 +252,12 @@ TEST(AndroidBufferRegistrationTest, FailedRegistrationRollsBackNumBuffers) {
   absl::StatusOr<toolbelt::FileDescriptor> ccb_fd =
       CreateTestMemfd("subspace_test_ccb", subspace::CcbSize(kNumSlots));
   ASSERT_OK(ccb_fd);
+  auto *ccb = reinterpret_cast<subspace::ChannelControlBlock *>(
+      subspace::MapMemory(ccb_fd->Fd(), subspace::CcbSize(kNumSlots),
+                          PROT_READ | PROT_WRITE, "test CCB"));
+  ASSERT_NE(MAP_FAILED, ccb);
+  ccb->version = subspace::kChannelControlBlockVersion;
+  subspace::UnmapMemory(ccb, subspace::CcbSize(kNumSlots), "test CCB");
   absl::StatusOr<toolbelt::FileDescriptor> bcb_fd = CreateTestMemfd(
       "subspace_test_bcb", sizeof(subspace::BufferControlBlock));
   ASSERT_OK(bcb_fd);

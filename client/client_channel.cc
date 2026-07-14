@@ -109,6 +109,7 @@ absl::Status ClientChannel::Map(SharedMemoryFds fds,
   scb_ = reinterpret_cast<SystemControlBlock *>(MapMemory(
       scb_fd.Fd(), sizeof(SystemControlBlock), PROT_READ | PROT_WRITE, "SCB"));
   if (scb_ == MAP_FAILED) {
+    scb_ = nullptr;
     return absl::InternalError(absl::StrFormat(
         "Failed to map SystemControlBlock: %s (scb_fd=%d, ccb_fd=%d, "
         "bcb_fd=%d, scb_size=%zu, ccb_size=%zu, bcb_size=%zu)",
@@ -122,6 +123,8 @@ absl::Status ClientChannel::Map(SharedMemoryFds fds,
   if (ccb_ == MAP_FAILED) {
     int mmap_errno = errno;
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+    scb_ = nullptr;
+    ccb_ = nullptr;
     return absl::InternalError(absl::StrFormat(
         "Failed to map ChannelControlBlock: %s (scb_fd=%d, ccb_fd=%d, "
         "bcb_fd=%d, ccb_size=%zu)",
@@ -129,11 +132,14 @@ absl::Status ClientChannel::Map(SharedMemoryFds fds,
         *checked_ccb_size));
   }
   if (ccb_->version != kChannelControlBlockVersion) {
+    const uint32_t version = ccb_->version;
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
     UnmapMemory(ccb_, *checked_ccb_size, "CCB");
+    scb_ = nullptr;
+    ccb_ = nullptr;
     return absl::FailedPreconditionError(absl::StrFormat(
         "unsupported channel control block version %u (expected %u)",
-        ccb_->version, kChannelControlBlockVersion));
+        version, kChannelControlBlockVersion));
   }
 
   bcb_ = reinterpret_cast<BufferControlBlock *>(MapMemory(
@@ -142,6 +148,9 @@ absl::Status ClientChannel::Map(SharedMemoryFds fds,
     int mmap_errno = errno;
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
     UnmapMemory(ccb_, *checked_ccb_size, "CCB");
+    scb_ = nullptr;
+    ccb_ = nullptr;
+    bcb_ = nullptr;
     return absl::InternalError(absl::StrFormat(
         "Failed to map BufferControlBlock: %s (scb_fd=%d, ccb_fd=%d, "
         "bcb_fd=%d, bcb_size=%zu)",
