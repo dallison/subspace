@@ -24,6 +24,7 @@
 #include <inttypes.h>
 #include <memory>
 #include <sys/resource.h>
+#include <sys/wait.h>
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
 #include <sys/syscall.h>
 #ifndef MFD_CLOEXEC
@@ -6074,6 +6075,283 @@ TEST_F(SplitBufferPluginTest, ServerCleanupUsesPluginEndToEnd) {
   }
   EXPECT_EQ(3, freed_slots);
 #endif
+}
+
+// ---------------------------------------------------------------------------
+// Cross-process split-buffer test.
+//
+// Split buffers keep message prefixes in the channel's regular shared memory
+// while placing each payload slot in a separately-mapped payload buffer.  All
+// existing split-buffer tests run the publisher and subscriber in the *same*
+// process, so they never exercise a subscriber mapping payload buffers that
+// were created by a publisher living in a different process.  This test does
+// exactly that: the publisher runs in the parent process and the subscriber
+// runs in a forked child process, both talking to a server hosted by the
+// parent.  The child verifies the full payload of every message so any
+// cross-process mapping/aliasing bug in the split-buffer path shows up as a
+// payload mismatch (or crash) rather than silently passing.
+//
+// A control variant runs the same flow with split buffers disabled so we can
+// tell whether a failure is specific to split buffers or a more general
+// cross-process problem.
+namespace {
+
+constexpr int kXProcNumMessages = 8;
+constexpr int32_t kXProcSlotSize = 4096;
+constexpr int32_t kXProcNumSlots = 32;
+constexpr int32_t kXProcPayloadSize = 4000;
+
+// Deterministic payload byte for message `msg_index` at offset `offset`.
+inline uint8_t XProcPayloadByte(int msg_index, int offset) {
+  return static_cast<uint8_t>((msg_index * 131 + offset * 7 + 17) & 0xff);
+}
+
+struct ScopeGuard {
+  std::function<void()> fn;
+  ~ScopeGuard() {
+    if (fn) {
+      fn();
+    }
+  }
+};
+
+// Body of the subscriber child process.  Uses plain checks + stderr logging
+// (not gtest macros) and returns a process exit code: 0 on success.
+int RunXProcSubscriberChild(const std::string &socket,
+                            const std::string &channel, int ready_fd,
+                            int ack_fd) {
+  // Wait until the parent has created the server and the channel.
+  char token = 0;
+  if (::read(ready_fd, &token, 1) != 1) {
+    fprintf(stderr, "[sub] failed to read ready token\n");
+    return 10;
+  }
+
+  subspace::Client client;
+  if (absl::Status s = client.Init(socket); !s.ok()) {
+    fprintf(stderr, "[sub] client Init failed: %s\n", s.ToString().c_str());
+    return 11;
+  }
+
+  absl::StatusOr<Subscriber> sub =
+      client.CreateSubscriber(channel, subspace::SubscriberOptions());
+  if (!sub.ok()) {
+    fprintf(stderr, "[sub] CreateSubscriber failed: %s\n",
+            sub.status().ToString().c_str());
+    return 12;
+  }
+
+  // Tell the parent the subscriber is attached so it can start publishing.
+  token = 'S';
+  if (::write(ack_fd, &token, 1) != 1) {
+    fprintf(stderr, "[sub] failed to write ack token\n");
+    return 14;
+  }
+
+  std::vector<bool> seen(kXProcNumMessages, false);
+  int received = 0;
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+  while (received < kXProcNumMessages) {
+    // Drain everything currently available.
+    for (;;) {
+      absl::StatusOr<Message> msg = sub->ReadMessage();
+      if (!msg.ok()) {
+        fprintf(stderr, "[sub] ReadMessage failed: %s\n",
+                msg.status().ToString().c_str());
+        return 15;
+      }
+      if (msg->length == 0) {
+        break; // Nothing more right now.
+      }
+      if (msg->length != kXProcPayloadSize) {
+        fprintf(stderr, "[sub] bad message length %lld (want %d)\n",
+                static_cast<long long>(msg->length), kXProcPayloadSize);
+        return 16;
+      }
+      const uint8_t *data = static_cast<const uint8_t *>(msg->buffer);
+      int idx = static_cast<int>(data[0]) | (static_cast<int>(data[1]) << 8) |
+                (static_cast<int>(data[2]) << 16) |
+                (static_cast<int>(data[3]) << 24);
+      if (idx < 0 || idx >= kXProcNumMessages) {
+        fprintf(stderr, "[sub] bad message index %d\n", idx);
+        return 17;
+      }
+      for (int j = 4; j < kXProcPayloadSize; j++) {
+        uint8_t want = XProcPayloadByte(idx, j);
+        if (data[j] != want) {
+          fprintf(stderr,
+                  "[sub] payload mismatch msg %d offset %d: got %u want %u\n",
+                  idx, j, data[j], want);
+          return 18;
+        }
+      }
+      if (!seen[idx]) {
+        seen[idx] = true;
+        received++;
+      }
+    }
+    if (received >= kXProcNumMessages) {
+      break;
+    }
+    auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      fprintf(stderr, "[sub] timed out after receiving %d/%d messages\n",
+              received, kXProcNumMessages);
+      return 19;
+    }
+    (void)sub->Wait(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        deadline - now));
+  }
+  return 0;
+}
+
+void RunCrossProcessSplitBufferTest(bool use_split_buffers) {
+  signal(SIGPIPE, SIG_IGN);
+
+  char socket_template[] = "/tmp/subspace_xprocXXXXXX"; // NOLINT
+  int tmpfd = mkstemp(socket_template);
+  ASSERT_GE(tmpfd, 0);
+  ::close(tmpfd);
+  ::remove(socket_template); // We want the unique name, not the file.
+  std::string socket = socket_template;
+  std::string channel = use_split_buffers ? "xproc_split" : "xproc_single";
+
+  int ready_pipe[2]; // parent -> child
+  int ack_pipe[2];   // child -> parent
+  ASSERT_EQ(0, pipe(ready_pipe));
+  ASSERT_EQ(0, pipe(ack_pipe));
+
+  // Fork the subscriber while the process is still single-threaded (before the
+  // server thread starts), so the child gets a clean address space with no
+  // locks held by background threads.
+  pid_t child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    ::close(ready_pipe[1]);
+    ::close(ack_pipe[0]);
+    int code =
+        RunXProcSubscriberChild(socket, channel, ready_pipe[0], ack_pipe[1]);
+    ::close(ready_pipe[0]);
+    ::close(ack_pipe[1]);
+    _exit(code);
+  }
+
+  // Parent (server host + publisher).
+  ::close(ready_pipe[0]);
+  ::close(ack_pipe[1]);
+
+  subspace::async::RuntimeEngine engine;
+  std::unique_ptr<subspace::Server> server;
+  std::thread server_thread;
+  int server_pipe[2] = {-1, -1};
+  bool child_reaped = false;
+
+  // Guard destructs *after* the client/publisher declared below it (reverse
+  // declaration order), so on any early ASSERT return the publisher is torn
+  // down against a live server before the server itself is stopped.
+  ScopeGuard guard{[&]() {
+    if (!child_reaped) {
+      ::kill(child, SIGKILL);
+      int st = 0;
+      (void)::waitpid(child, &st, 0);
+    }
+    if (server) {
+      server->Stop();
+      if (server_pipe[0] >= 0) {
+        char b[8];
+        (void)::read(server_pipe[0], b, 8);
+      }
+      if (server_thread.joinable()) {
+        server_thread.join();
+      }
+      server->CleanupAfterSession();
+    }
+    if (server_pipe[0] >= 0) {
+      ::close(server_pipe[0]);
+    }
+    if (server_pipe[1] >= 0) {
+      ::close(server_pipe[1]);
+    }
+    ::close(ready_pipe[1]);
+    ::close(ack_pipe[0]);
+    ::remove(socket.c_str());
+  }};
+
+  ASSERT_EQ(0, pipe(server_pipe));
+  server = std::make_unique<subspace::Server>(
+      engine, socket, "", 0, 0, /*local=*/true, server_pipe[1],
+      /*initial_ordinal=*/1, /*wait_for_clients=*/true);
+  server_thread = std::thread([&]() {
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+    absl::Status s = server->Run(/*num_asio_threads=*/4);
+#else
+    absl::Status s = server->Run();
+#endif
+    if (!s.ok()) {
+      fprintf(stderr, "Error running Subspace server: %s\n",
+              s.ToString().c_str());
+    }
+  });
+  char buf[8];
+  (void)::read(server_pipe[0], buf, 8); // Wait until the server is ready.
+
+  // Declared after the guard so they are destroyed before the server stops.
+  subspace::Client client;
+  ASSERT_OK(client.Init(socket));
+
+  subspace::PublisherOptions pub_options;
+  pub_options.SetSlotSize(kXProcSlotSize)
+      .SetNumSlots(kXProcNumSlots)
+      .SetUseSplitBuffers(use_split_buffers);
+  absl::StatusOr<Publisher> pub = client.CreatePublisher(channel, pub_options);
+  ASSERT_OK(pub);
+  ASSERT_EQ(use_split_buffers, pub->UsesSplitBuffers());
+
+  // Tell the child the server + channel exist.
+  char token = 'R';
+  ASSERT_EQ(1, ::write(ready_pipe[1], &token, 1));
+
+  // Wait for the subscriber to attach before publishing so no messages are
+  // dropped (the channel is unreliable, but the slot pool is deep enough to
+  // hold every message the subscriber will read).
+  token = 0;
+  ASSERT_EQ(1, ::read(ack_pipe[0], &token, 1));
+  ASSERT_EQ('S', token);
+
+  for (int i = 0; i < kXProcNumMessages; i++) {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer(kXProcPayloadSize);
+    ASSERT_OK(buffer);
+    ASSERT_NE(nullptr, *buffer);
+    uint8_t *data = static_cast<uint8_t *>(*buffer);
+    data[0] = static_cast<uint8_t>(i & 0xff);
+    data[1] = static_cast<uint8_t>((i >> 8) & 0xff);
+    data[2] = static_cast<uint8_t>((i >> 16) & 0xff);
+    data[3] = static_cast<uint8_t>((i >> 24) & 0xff);
+    for (int j = 4; j < kXProcPayloadSize; j++) {
+      data[j] = XProcPayloadByte(i, j);
+    }
+    ASSERT_OK(pub->PublishMessage(kXProcPayloadSize));
+  }
+
+  // Wait for the subscriber process to finish (while the server is still up)
+  // and report its result.
+  int status = 0;
+  ASSERT_EQ(child, waitpid(child, &status, 0));
+  child_reaped = true;
+  ASSERT_TRUE(WIFEXITED(status))
+      << "subscriber process did not exit normally (status " << status << ")";
+  EXPECT_EQ(0, WEXITSTATUS(status))
+      << "subscriber process reported failure code " << WEXITSTATUS(status);
+}
+
+} // namespace
+
+TEST(CrossProcessSplitBufferTest, PublisherAndSubscriberInSeparateProcesses) {
+  RunCrossProcessSplitBufferTest(/*use_split_buffers=*/true);
+}
+
+TEST(CrossProcessSplitBufferTest, ControlSingleBufferInSeparateProcesses) {
+  RunCrossProcessSplitBufferTest(/*use_split_buffers=*/false);
 }
 
 int main(int argc, char **argv) {

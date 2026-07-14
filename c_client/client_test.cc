@@ -11,12 +11,15 @@
 #include "toolbelt/hexdump.h"
 #include "toolbelt/pipe.h"
 #include <algorithm>
+#include <chrono>
+#include <functional>
 #include <gtest/gtest.h>
 #include <inttypes.h>
 #include <memory>
 #include <signal.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 #include <unordered_map>
@@ -1624,6 +1627,277 @@ TEST_F(ClientTest, DroppedMessage) {
   ASSERT_TRUE(subspace_remove_publisher(&pub));
   ASSERT_TRUE(subspace_remove_client(&pub_client));
   ASSERT_TRUE(subspace_remove_client(&sub_client));
+}
+
+// ---------------------------------------------------------------------------
+// Cross-process split-buffer test (C client).
+//
+// This mirrors the C++ cross-process split-buffer test but drives everything
+// through the C API (c_client/subspace.h).  The publisher runs in the parent
+// process and the subscriber runs in a forked child process; both talk to a
+// server hosted by the parent.  It uses the *built-in* shared-memory split
+// buffers (use_split_buffers = true with no split_callbacks) because those are
+// the only split payload buffers that are visible across process boundaries --
+// the callback-based test allocators in this file back payloads with process
+// heap memory, which a separate process could not map.
+//
+// The child verifies the full payload of every message, so any bug in the C
+// client's cross-process split-buffer mapping shows up as a payload mismatch or
+// crash rather than passing silently.  A control variant runs the same flow
+// with split buffers disabled.
+namespace {
+
+constexpr int kCXProcNumMessages = 8;
+constexpr int32_t kCXProcSlotSize = 4096;
+constexpr int kCXProcNumSlots = 32;
+constexpr int32_t kCXProcPayloadSize = 4000;
+
+inline uint8_t CXProcPayloadByte(int msg_index, int offset) {
+  return static_cast<uint8_t>((msg_index * 131 + offset * 7 + 17) & 0xff);
+}
+
+struct CScopeGuard {
+  std::function<void()> fn;
+  ~CScopeGuard() {
+    if (fn) {
+      fn();
+    }
+  }
+};
+
+// Body of the subscriber child process.  Returns a process exit code (0 = ok).
+int RunCXProcSubscriberChild(const std::string &socket,
+                             const std::string &channel, int ready_fd,
+                             int ack_fd) {
+  char token = 0;
+  if (::read(ready_fd, &token, 1) != 1) {
+    fprintf(stderr, "[sub] failed to read ready token\n");
+    return 10;
+  }
+
+  SubspaceClient client = subspace_create_client_with_socket(socket.c_str());
+  if (client.client == nullptr) {
+    fprintf(stderr, "[sub] create client failed: %s\n",
+            subspace_get_last_error());
+    return 11;
+  }
+
+  SubspaceSubscriberOptions opts = subspace_subscriber_options_default();
+  SubspaceSubscriber sub =
+      subspace_create_subscriber(client, channel.c_str(), opts);
+  if (sub.subscriber == nullptr) {
+    fprintf(stderr, "[sub] create subscriber failed: %s\n",
+            subspace_get_last_error());
+    return 12;
+  }
+
+  token = 'S';
+  if (::write(ack_fd, &token, 1) != 1) {
+    fprintf(stderr, "[sub] failed to write ack token\n");
+    return 14;
+  }
+
+  std::vector<bool> seen(kCXProcNumMessages, false);
+  int received = 0;
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+  while (received < kCXProcNumMessages) {
+    for (;;) {
+      SubspaceMessage msg = subspace_read_message(sub);
+      if (subspace_has_error()) {
+        fprintf(stderr, "[sub] read_message failed: %s\n",
+                subspace_get_last_error());
+        return 15;
+      }
+      if (msg.length == 0) {
+        break; // Nothing more right now.
+      }
+      if (static_cast<int32_t>(msg.length) != kCXProcPayloadSize) {
+        fprintf(stderr, "[sub] bad message length %zu (want %d)\n", msg.length,
+                kCXProcPayloadSize);
+        return 16;
+      }
+      const uint8_t *data = static_cast<const uint8_t *>(msg.buffer);
+      int idx = static_cast<int>(data[0]) | (static_cast<int>(data[1]) << 8) |
+                (static_cast<int>(data[2]) << 16) |
+                (static_cast<int>(data[3]) << 24);
+      if (idx < 0 || idx >= kCXProcNumMessages) {
+        fprintf(stderr, "[sub] bad message index %d\n", idx);
+        return 17;
+      }
+      for (int j = 4; j < kCXProcPayloadSize; j++) {
+        uint8_t want = CXProcPayloadByte(idx, j);
+        if (data[j] != want) {
+          fprintf(stderr,
+                  "[sub] payload mismatch msg %d offset %d: got %u want %u\n",
+                  idx, j, data[j], want);
+          return 18;
+        }
+      }
+      if (!seen[idx]) {
+        seen[idx] = true;
+        received++;
+      }
+      subspace_free_message(&msg);
+    }
+    if (received >= kCXProcNumMessages) {
+      break;
+    }
+    auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      fprintf(stderr, "[sub] timed out after receiving %d/%d messages\n",
+              received, kCXProcNumMessages);
+      return 19;
+    }
+    uint64_t ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
+            .count());
+    subspace_wait_for_subscriber_with_timeout(sub, ms);
+  }
+  return 0;
+}
+
+void RunCrossProcessCSplitBufferTest(bool use_split_buffers) {
+  signal(SIGPIPE, SIG_IGN);
+
+  char socket_template[] = "/tmp/subspace_cxprocXXXXXX"; // NOLINT
+  int tmpfd = mkstemp(socket_template);
+  ASSERT_GE(tmpfd, 0);
+  ::close(tmpfd);
+  ::remove(socket_template);
+  std::string socket = socket_template;
+  std::string channel = use_split_buffers ? "c_xproc_split" : "c_xproc_single";
+
+  int ready_pipe[2]; // parent -> child
+  int ack_pipe[2];   // child -> parent
+  ASSERT_EQ(0, pipe(ready_pipe));
+  ASSERT_EQ(0, pipe(ack_pipe));
+
+  // Fork the subscriber while single-threaded (before the server thread
+  // starts) so the child inherits a clean address space.
+  pid_t child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    ::close(ready_pipe[1]);
+    ::close(ack_pipe[0]);
+    int code =
+        RunCXProcSubscriberChild(socket, channel, ready_pipe[0], ack_pipe[1]);
+    ::close(ready_pipe[0]);
+    ::close(ack_pipe[1]);
+    _exit(code);
+  }
+
+  ::close(ready_pipe[0]);
+  ::close(ack_pipe[1]);
+
+  co::CoroutineScheduler scheduler;
+  std::unique_ptr<subspace::Server> server;
+  std::thread server_thread;
+  int server_pipe[2] = {-1, -1};
+  bool child_reaped = false;
+
+  CScopeGuard guard{[&]() {
+    if (!child_reaped) {
+      ::kill(child, SIGKILL);
+      int st = 0;
+      (void)::waitpid(child, &st, 0);
+    }
+    if (server) {
+      server->Stop();
+      if (server_pipe[0] >= 0) {
+        char b[8];
+        (void)::read(server_pipe[0], b, 8);
+      }
+      if (server_thread.joinable()) {
+        server_thread.join();
+      }
+      server->CleanupAfterSession();
+    }
+    if (server_pipe[0] >= 0) {
+      ::close(server_pipe[0]);
+    }
+    if (server_pipe[1] >= 0) {
+      ::close(server_pipe[1]);
+    }
+    ::close(ready_pipe[1]);
+    ::close(ack_pipe[0]);
+    ::remove(socket.c_str());
+  }};
+
+  ASSERT_EQ(0, pipe(server_pipe));
+  server = std::make_unique<subspace::Server>(
+      scheduler, socket, "", 0, 0, /*local=*/true, server_pipe[1],
+      /*initial_ordinal=*/1, /*wait_for_clients=*/true);
+  server_thread = std::thread([&]() {
+    absl::Status s = server->Run();
+    if (!s.ok()) {
+      fprintf(stderr, "Error running Subspace server: %s\n",
+              s.ToString().c_str());
+    }
+  });
+  char buf[8];
+  (void)::read(server_pipe[0], buf, 8);
+
+  SubspaceClient client = subspace_create_client_with_socket(socket.c_str());
+  ASSERT_NE(nullptr, client.client);
+  ASSERT_FALSE(subspace_has_error());
+
+  SubspacePublisherOptions pub_opts =
+      subspace_publisher_options_default(kCXProcSlotSize, kCXProcNumSlots);
+  pub_opts.use_split_buffers = use_split_buffers;
+  SubspacePublisher pub =
+      subspace_create_publisher(client, channel.c_str(), pub_opts);
+  ASSERT_NE(nullptr, pub.publisher);
+  ASSERT_FALSE(subspace_has_error());
+  ASSERT_EQ(use_split_buffers, subspace_publisher_uses_split_buffers(pub));
+
+  char token = 'R';
+  ASSERT_EQ(1, ::write(ready_pipe[1], &token, 1));
+
+  token = 0;
+  ASSERT_EQ(1, ::read(ack_pipe[0], &token, 1));
+  ASSERT_EQ('S', token);
+
+  for (int i = 0; i < kCXProcNumMessages; i++) {
+    SubspaceMessageBuffer buffer =
+        subspace_get_message_buffer(pub, kCXProcPayloadSize);
+    ASSERT_FALSE(subspace_has_error());
+    ASSERT_NE(nullptr, buffer.buffer);
+    ASSERT_GE(buffer.buffer_size, static_cast<size_t>(kCXProcPayloadSize));
+    uint8_t *data = static_cast<uint8_t *>(buffer.buffer);
+    data[0] = static_cast<uint8_t>(i & 0xff);
+    data[1] = static_cast<uint8_t>((i >> 8) & 0xff);
+    data[2] = static_cast<uint8_t>((i >> 16) & 0xff);
+    data[3] = static_cast<uint8_t>((i >> 24) & 0xff);
+    for (int j = 4; j < kCXProcPayloadSize; j++) {
+      data[j] = CXProcPayloadByte(i, j);
+    }
+    SubspaceMessage status = subspace_publish_message(pub, kCXProcPayloadSize);
+    ASSERT_NE(0, status.length);
+    ASSERT_FALSE(subspace_has_error());
+  }
+
+  int status = 0;
+  ASSERT_EQ(child, waitpid(child, &status, 0));
+  child_reaped = true;
+  ASSERT_TRUE(WIFEXITED(status))
+      << "subscriber process did not exit normally (status " << status << ")";
+  EXPECT_EQ(0, WEXITSTATUS(status))
+      << "subscriber process reported failure code " << WEXITSTATUS(status);
+
+  // Tear down the C client handles while the server is still up (the guard
+  // stops the server afterwards).
+  subspace_remove_publisher(&pub);
+  subspace_remove_client(&client);
+}
+
+} // namespace
+
+TEST(CrossProcessCSplitBufferTest, PublisherAndSubscriberInSeparateProcesses) {
+  RunCrossProcessCSplitBufferTest(/*use_split_buffers=*/true);
+}
+
+TEST(CrossProcessCSplitBufferTest, ControlSingleBufferInSeparateProcesses) {
+  RunCrossProcessCSplitBufferTest(/*use_split_buffers=*/false);
 }
 
 int main(int argc, char **argv) {
