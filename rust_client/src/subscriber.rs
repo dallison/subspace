@@ -467,12 +467,20 @@ impl SubscriberImpl {
                 .ordinal_trackers
                 .get(&vchan_id)
                 .map_or(0, |tracker| tracker.last_ordinal_seen);
-            if ordinal <= last_ordinal_seen {
+            let queued_key = OrdinalAndVchanId { ordinal, vchan_id };
+            let already_seen = self
+                .ordinal_trackers
+                .get(&vchan_id)
+                .is_some_and(|tracker| tracker.ring.contains(&queued_key));
+            // Concurrent publishers can reserve queue positions out of ordinal
+            // order. Only discard a lower ordinal when this subscriber has
+            // actually delivered that exact generation.
+            if ordinal <= last_ordinal_seen && already_seen {
                 continue;
             }
             if self.options.subscriber_queue_size == 0
-                && last_ordinal_seen != 0
-                && ordinal > last_ordinal_seen + 1
+                && ordinal > last_ordinal_seen
+                && ordinal - last_ordinal_seen > 1
                 && self.has_visible_ordinal_before(
                     vchan_id,
                     last_ordinal_seen,

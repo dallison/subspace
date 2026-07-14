@@ -315,16 +315,20 @@ SubscriberImpl::FindNextQueuedSlot(uint64_t max_queue_position) {
       cached_vchan_id = ref_vchan_id;
       cached_tracker = &GetOrdinalTracker(ref_vchan_id);
     }
-    if (queued.ordinal <= cached_tracker->last_ordinal_seen) {
+    const OrdinalAndVchanId queued_key{queued.ordinal, ref_vchan_id};
+    if (queued.ordinal <= cached_tracker->last_ordinal_seen &&
+        cached_tracker->ordinals.Contains(queued_key)) {
       continue;
     }
     if (options_.SubscriberQueueSize() == 0 &&
-        cached_tracker->last_ordinal_seen != 0 &&
-        queued.ordinal > cached_tracker->last_ordinal_seen + 1) {
-      // A coalesced or concurrently consumed failure signal must never allow a
-      // newer queue hint to jump over an older authoritative bit. This check is
-      // only paid on an ordinal gap and closes the final observation window
-      // without slowing the normal contiguous queue path.
+        queued.ordinal > cached_tracker->last_ordinal_seen &&
+        queued.ordinal - cached_tracker->last_ordinal_seen > 1) {
+      // Queue reservations from concurrent publishers need not follow ordinal
+      // order. Before accepting a gap, including the first queued ordinal,
+      // recover any older authoritative bit in ordinal order. If an older
+      // queue entry arrives after a newer one was already delivered, the exact
+      // ordinal tracker above still permits that unseen entry instead of
+      // silently discarding it.
       InPlaceAtomicBitset &bits = GetAvailableSlots(subscriber_id_);
       if (FindNextVisibleSlot(bits, queued.ordinal - 1) != nullptr) {
         queue_bitset_fallback_ = true;

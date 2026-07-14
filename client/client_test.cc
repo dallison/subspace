@@ -1047,6 +1047,63 @@ TEST_F(ClientTest, FailedSubscriberQueuePushFallsBackToBitset) {
   EXPECT_EQ(0, memcmp(message.buffer, "fallback", 8));
 }
 
+TEST_F(ClientTest, ConcurrentQueueReservationOrderDoesNotDropOlderOrdinal) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  constexpr char kChannel[] = "subscriber_queue_out_of_order";
+  auto pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      kChannel, subspace::PublisherOptions().SetSlotSize(64).SetNumSlots(8)));
+  auto sub = EVAL_AND_ASSERT_OK(client.CreateSubscriber(kChannel));
+
+  for (uint8_t value = 1; value <= 2; ++value) {
+    void *buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+    *static_cast<uint8_t *>(buffer) = value;
+    ASSERT_OK(pub.PublishMessage(1));
+  }
+
+  subspace::ServerChannel *server_channel = Server()->FindChannel(kChannel);
+  ASSERT_NE(nullptr, server_channel);
+  int sub_id = -1;
+  server_channel->GetCcb()->subscribers.Traverse(
+      [&sub_id](int id) { sub_id = id; });
+  ASSERT_GE(sub_id, 0);
+  subspace::InPlaceSlotQueue *queue =
+      server_channel->GetAvailableSlotQueueAddress(sub_id);
+  ASSERT_NE(nullptr, queue);
+
+  std::vector<subspace::MessageSlot *> data_slots;
+  for (int i = 0; i < server_channel->NumSlots(); ++i) {
+    subspace::MessageSlot *slot = &server_channel->GetCcb()->slots[i];
+    if (slot->message_size.load(std::memory_order_relaxed) == 1) {
+      data_slots.push_back(slot);
+    }
+  }
+  ASSERT_EQ(2u, data_slots.size());
+  std::sort(
+      data_slots.begin(), data_slots.end(), [](const auto *a, const auto *b) {
+        return a->ordinal.load(std::memory_order_relaxed) <
+               b->ordinal.load(std::memory_order_relaxed);
+      });
+
+  // Concurrent publishers reserve queue positions independently of ordinal
+  // assignment. Recreate the resulting newer-before-older hint order while
+  // retaining the authoritative bits written by PublishMessage().
+  queue->DiscardAll();
+  ASSERT_TRUE(queue->Push(
+      data_slots[1]->id,
+      data_slots[1]->ordinal.load(std::memory_order_relaxed)));
+  ASSERT_TRUE(queue->Push(
+      data_slots[0]->id,
+      data_slots[0]->ordinal.load(std::memory_order_relaxed)));
+
+  for (uint8_t expected = 1; expected <= 2; ++expected) {
+    Message message = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+    ASSERT_EQ(1, message.length);
+    EXPECT_EQ(expected, *static_cast<const uint8_t *>(message.buffer));
+  }
+}
+
 TEST_F(ClientTest, SubscriberQueueOverflowReportsDroppedMessages) {
   subspace::Client client;
   ASSERT_OK(client.Init(Socket()));
