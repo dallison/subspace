@@ -569,6 +569,9 @@ void ClientHandler::HandleCreatePublisher(
       pub = static_cast<PublisherUser *>(*user);
       pub->SetHandler(this);
       pub->SetProcessId(req.process_id());
+      split_channel->GetAvailableSlotQueueIndexAddress()
+          ->active_publishers[req.publisher_id()]
+          .store(req.active_queue_publish_depth(), std::memory_order_seq_cst);
       reclaimed = true;
       server_->logger_.Log(toolbelt::LogLevel::kDebug,
                            "Client %s reclaiming publisher %d on channel %s",

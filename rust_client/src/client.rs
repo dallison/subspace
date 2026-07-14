@@ -239,7 +239,9 @@ impl Publisher {
             }
 
             let slot_idx = pub_impl.channel.slot.unwrap();
-            pub_impl.channel.slot_mut(slot_idx).message_size = message_size as u64;
+            pub_impl.channel
+                .slot_ref(slot_idx)
+                .set_message_size(message_size as u64);
 
             let owner = pub_impl.publisher_id;
             let reliable = pub_impl.options.reliable;
@@ -499,7 +501,7 @@ impl Subscriber {
     pub fn current_ordinal(&self) -> i64 {
         let sub = self.imp.lock().unwrap();
         match sub.channel.slot {
-            Some(si) => sub.channel.slot_ref(si).ordinal as i64,
+            Some(si) => sub.channel.slot_ref(si).ordinal() as i64,
             None => -1,
         }
     }
@@ -507,7 +509,7 @@ impl Subscriber {
     pub fn timestamp(&self) -> u64 {
         let sub = self.imp.lock().unwrap();
         match sub.channel.slot {
-            Some(si) => sub.channel.slot_ref(si).timestamp,
+            Some(si) => sub.channel.slot_ref(si).timestamp(),
             None => 0,
         }
     }
@@ -716,15 +718,15 @@ impl Subscriber {
         sub_impl.channel.slot = Some(slot_idx);
 
         let slot = sub_impl.channel.slot_ref(slot_idx);
-        if slot.message_size == 0 {
+        if slot.message_size() == 0 {
             return Ok(Message::default());
         }
 
         let buffer = sub_impl.channel.get_buffer_address(slot_idx);
-        let msg_size = slot.message_size as usize;
-        let ordinal = slot.ordinal;
-        let timestamp = slot.timestamp;
-        let vchan_id = slot.vchan_id as i32;
+        let msg_size = slot.message_size() as usize;
+        let ordinal = slot.ordinal();
+        let timestamp = slot.timestamp();
+        let vchan_id = slot.vchan_id() as i32;
         let slot_id = slot.id;
 
         Ok(Message {
@@ -886,6 +888,7 @@ impl Client {
                     max_publishers: 0,
                     publisher_id: -1,
                     process_id: std::process::id() as u64,
+                    active_queue_publish_depth: 0,
                 },
             )),
         };
@@ -1352,7 +1355,7 @@ fn read_message_internal(
 
     let old_slot = sub.channel.slot;
     let last_ordinal: i64 = match old_slot {
-        Some(si) => sub.channel.slot_ref(si).ordinal as i64,
+        Some(si) => sub.channel.slot_ref(si).ordinal() as i64,
         None => -1,
     };
     let new_slot_idx = match mode {
@@ -1371,6 +1374,10 @@ fn read_message_internal(
     sub.channel.slot = Some(new_idx);
 
     let prefix = sub.channel.get_prefix(new_idx);
+    let slot = sub.channel.slot_ref(new_idx);
+    let frozen_ordinal = slot.ordinal();
+    let frozen_vchan_id = slot.vchan_id() as i32;
+    let mut delivered_message_size = slot.message_size() as i64;
     let mut is_activation = false;
     let mut checksum_error = false;
 
@@ -1379,13 +1386,12 @@ fn read_message_internal(
             let p = &*prefix;
             if p.has_checksum() && sub.options.checksum {
                 let buffer = sub.channel.get_buffer_address(new_idx);
-                let slot = sub.channel.slot_ref(new_idx);
                 let cs = sub.channel.checksum_size;
                 let ms = sub.channel.metadata_size;
                 let data = checksum::get_message_checksum_data(
                     prefix,
                     buffer,
-                    slot.message_size as usize,
+                    delivered_message_size as usize,
                     cs,
                     ms,
                 );
@@ -1403,6 +1409,7 @@ fn read_message_internal(
                 is_activation = true;
                 if !pass_activation {
                     sub.ignore_activation(new_idx);
+                    sub.channel.slot = old_slot;
                     if sub.options.reliable {
                         sub.trigger_reliable_publishers();
                     }
@@ -1414,27 +1421,35 @@ fn read_message_internal(
 
     if let Some(ref cb) = sub.on_receive_callback {
         let buffer = sub.channel.get_buffer_address(new_idx);
-        let slot = sub.channel.slot_ref(new_idx);
-        let new_size = cb(buffer as *mut u8, slot.message_size as i64)?;
-        sub.channel.slot_mut(new_idx).message_size = new_size as u64;
+        delivered_message_size = match cb(buffer as *mut u8, delivered_message_size) {
+            Ok(size) => size,
+            Err(e) => {
+                sub.release_unclaimed_slot(new_idx, frozen_ordinal, frozen_vchan_id);
+                sub.channel.slot = old_slot;
+                return Err(e);
+            }
+        };
     }
 
-    let slot = sub.channel.slot_ref(new_idx);
-    if slot.message_size == 0 {
+    if delivered_message_size <= 0 {
+        sub.release_unclaimed_slot(new_idx, frozen_ordinal, frozen_vchan_id);
+        sub.channel.slot = old_slot;
         return Ok(Message::default());
     }
 
     let buffer = sub.channel.get_buffer_address(new_idx);
-    let msg_size = slot.message_size as usize;
-    let ordinal = slot.ordinal;
-    let timestamp = slot.timestamp;
-    let vchan_id = slot.vchan_id as i32;
+    let slot = sub.channel.slot_ref(new_idx);
+    let msg_size = delivered_message_size as usize;
+    let ordinal = frozen_ordinal;
+    let timestamp = slot.timestamp();
+    let vchan_id = frozen_vchan_id;
     let slot_id = slot.id;
 
     sub.clear_active_message();
 
     if !sub.add_active_message() {
-        sub.unread_slot(new_idx);
+        sub.unread_slot(new_idx, frozen_ordinal, frozen_vchan_id);
+        sub.channel.slot = old_slot;
         return Ok(Message::default());
     }
 
@@ -1496,8 +1511,6 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
     if sub.channel.num_updates == updates {
         return Ok(());
     }
-    sub.channel.num_updates = updates;
-
     let req = proto::Request {
         request: Some(proto::request::Request::CreateSubscriber(
             proto::CreateSubscriberRequest {
@@ -1520,7 +1533,14 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
         return Err(SubspaceError::ServerError(sub_resp.error));
     }
 
-    sub.channel.unmap();
+    // A subscriber-created placeholder is the only case where the server
+    // replaces the CCB. Established channels retain their CCB across
+    // publisher updates.
+    let remap_ccb = sub.channel.num_slots == 0;
+    if remap_ccb {
+        sub.reset_delivery_state();
+        sub.channel.unmap();
+    }
     if !sub_resp.r#type.is_empty() {
         sub.channel.channel_type = String::from_utf8_lossy(&sub_resp.r#type).to_string();
     }
@@ -1549,13 +1569,15 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
         sub.checksum_tmp = vec![0u8; cs as usize];
     }
 
-    let prot = ProtFlags::PROT_READ | ProtFlags::PROT_WRITE;
-    sub.channel.map(
-        client.scb_fd,
-        fds[sub_resp.ccb_fd_index as usize],
-        fds[sub_resp.bcb_fd_index as usize],
-        prot,
-    )?;
+    if remap_ccb {
+        let prot = ProtFlags::PROT_READ | ProtFlags::PROT_WRITE;
+        sub.channel.map(
+            client.scb_fd,
+            fds[sub_resp.ccb_fd_index as usize],
+            fds[sub_resp.bcb_fd_index as usize],
+            prot,
+        )?;
+    }
 
     sub.attach_buffers()?;
 
@@ -1575,7 +1597,10 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
         sub.retirement_trigger_fds.push(fds[idx as usize]);
     }
 
-    sub.init_active_messages();
+    if remap_ccb {
+        sub.init_active_messages();
+    }
+    sub.channel.num_updates = updates;
 
     Ok(())
 }
@@ -1679,7 +1704,7 @@ fn activate_reliable_channel(publisher: &mut PublisherImpl) -> Result<()> {
             publisher.channel.name
         )));
     }
-    publisher.channel.slot_mut(si).message_size = 1;
+    publisher.channel.slot_ref(si).set_message_size(1);
 
     let owner = publisher.publisher_id;
     publisher.activate_slot_and_get_another(si, true, true, owner, false, false);
@@ -1702,7 +1727,7 @@ fn activate_channel(publisher: &mut PublisherImpl) -> Result<()> {
             publisher.channel.name
         )));
     }
-    publisher.channel.slot_mut(si).message_size = 1;
+    publisher.channel.slot_ref(si).set_message_size(1);
 
     let owner = publisher.publisher_id;
     let published = publisher.activate_slot_and_get_another(si, false, true, owner, false, false);

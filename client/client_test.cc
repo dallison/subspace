@@ -83,7 +83,9 @@ uint64_t AlignPage(uint64_t size) {
 uint64_t ExpectedSplitBufferVirtualMemoryUsage(int num_slots,
                                                uint64_t slot_size,
                                                uint64_t prefix_size) {
-  return sizeof(subspace::SystemControlBlock) + subspace::CcbSize(num_slots) +
+  return sizeof(subspace::SystemControlBlock) +
+         subspace::CcbSize(num_slots,
+                           subspace::kDefaultSubscriberQueueSize) +
          sizeof(subspace::BufferControlBlock) +
          AlignPage(prefix_size * static_cast<uint64_t>(num_slots)) +
          AlignPage(slot_size) * static_cast<uint64_t>(num_slots);
@@ -1073,7 +1075,7 @@ TEST_F(ClientTest, QueueMessageSurvivesMaxActiveMessageRejection) {
   auto sub =
       EVAL_AND_ASSERT_OK(client.CreateSubscriber(kChannel, options));
 
-  for (uint8_t value = 1; value <= 2; ++value) {
+  for (uint8_t value = 1; value <= 3; ++value) {
     void *buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
     *static_cast<uint8_t *>(buffer) = value;
     ASSERT_OK(pub.PublishMessage(1));
@@ -1090,6 +1092,11 @@ TEST_F(ClientTest, QueueMessageSurvivesMaxActiveMessageRejection) {
   Message recovered = EVAL_AND_ASSERT_OK(sub.ReadMessage());
   ASSERT_EQ(1, recovered.length);
   EXPECT_EQ(2, *static_cast<const uint8_t *>(recovered.buffer));
+  recovered.Reset();
+
+  Message next = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_EQ(1, next.length);
+  EXPECT_EQ(3, *static_cast<const uint8_t *>(next.buffer));
 }
 
 TEST_F(ClientTest, SubscriberQueuePollDrainHandlesActivationOrdinals) {
@@ -1107,9 +1114,13 @@ TEST_F(ClientTest, SubscriberQueuePollDrainHandlesActivationOrdinals) {
                     .SetNumSlots(8)
                     .SetSubscriberQueueSize(4)
                     .SetActivate(true)));
+  subspace::ServerChannel *server_channel = Server()->FindChannel(kChannel);
+  ASSERT_NE(nullptr, server_channel);
+  EXPECT_EQ(1, server_channel->GetCcb()->total_messages.load());
   void *buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
   memcpy(buffer, "visible", 7);
   ASSERT_OK(pub.PublishMessage(7));
+  EXPECT_EQ(2, server_channel->GetCcb()->total_messages.load());
 
   Message message = EVAL_AND_ASSERT_OK(sub.ReadMessage());
   ASSERT_EQ(7, message.length);
@@ -6067,6 +6078,36 @@ TEST_F(ClientTest, OnReceiveCallbackError) {
   EXPECT_THAT(msg.status().message(),
               ::testing::HasSubstr("receive callback failed"));
   sub.ClearOnReceiveCallback();
+
+  // The callback runs after NextSlot has claimed a shared slot ref. The error
+  // path must roll that ref back without clearing the subscriber bit so the
+  // same message remains readable.
+  Message retried = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_EQ(10, retried.length);
+  EXPECT_EQ(0, memcmp(retried.buffer, "qqqqqqqqqq", 10));
+}
+
+TEST_F(ClientTest, OnReceiveCallbackZeroSizeReleasesSlot) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  auto pub = EVAL_AND_ASSERT_OK(
+      client.CreatePublisher("onrecv_zero", PubOpts(64, 4)));
+  auto sub =
+      EVAL_AND_ASSERT_OK(client.CreateSubscriber("onrecv_zero"));
+  sub.SetOnReceiveCallback(
+      [](void *, int64_t) -> absl::StatusOr<int64_t> { return 0; });
+
+  void *buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  memcpy(buffer, "retry", 5);
+  ASSERT_OK(pub.PublishMessage(5));
+  Message empty = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  EXPECT_EQ(0, empty.length);
+
+  sub.ClearOnReceiveCallback();
+  Message retried = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_EQ(5, retried.length);
+  EXPECT_EQ(0, memcmp(retried.buffer, "retry", 5));
 }
 
 TEST_F(ClientTest, ProcessAllMessagesWithoutCallback) {
@@ -6355,10 +6396,27 @@ TEST_F(ClientTest, PublisherSubscriberQueueSizeOption) {
       "subscriber_queue_size_default",
       subspace::PublisherOptions().SetSlotSize(128).SetNumSlots(8)));
   EXPECT_EQ(8, default_pub.NumSlots());
-  EXPECT_EQ(0, default_pub.SubscriberQueueSize());
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
+            default_pub.SubscriberQueueSize());
+  auto default_sub = EVAL_AND_ASSERT_OK(
+      client.CreateSubscriber("subscriber_queue_size_default"));
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
+            default_sub.SubscriberQueueSize());
   auto default_info =
       EVAL_AND_ASSERT_OK(client.GetChannelInfo("subscriber_queue_size_default"));
-  EXPECT_EQ(0, default_info.subscriber_queue_size);
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
+            default_info.subscriber_queue_size);
+
+  auto disabled_pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "subscriber_queue_size_disabled",
+      subspace::PublisherOptions()
+          .SetSlotSize(128)
+          .SetNumSlots(8)
+          .SetSubscriberQueueSize(0)));
+  EXPECT_EQ(0, disabled_pub.SubscriberQueueSize());
+  auto disabled_sub = EVAL_AND_ASSERT_OK(
+      client.CreateSubscriber("subscriber_queue_size_disabled"));
+  EXPECT_EQ(0, disabled_sub.SubscriberQueueSize());
 }
 
 TEST_F(ClientTest, SubscriberOptionsChain) {

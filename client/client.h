@@ -1508,8 +1508,10 @@ public:
   bool AtomicIncRefCount(int slot_id, int inc) {
     MessageSlot *slot = impl_->GetSlot(slot_id);
     if (slot != nullptr) {
-      return impl_->AtomicIncRefCount(slot, IsReliable(), inc, slot->ordinal,
-                                      slot->vchan_id, false);
+      return impl_->AtomicIncRefCount(
+          slot, IsReliable(), inc,
+          slot->ordinal.load(std::memory_order_relaxed),
+          slot->vchan_id.load(std::memory_order_relaxed), false);
     }
     return false;
   }

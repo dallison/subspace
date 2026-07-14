@@ -46,9 +46,11 @@ pub struct SubscriberImpl {
     pub poll_drain_pending: bool,
     pub(crate) poll_drain_exhausted: bool,
     pub(crate) queue_drain_tail: Option<u64>,
+    queue_bitset_fallback: bool,
     pub(crate) poll_snapshot_valid: bool,
     poll_snapshot_total: u64,
     poll_snapshot: Vec<ActiveSlot>,
+    newest_snapshot: Option<Vec<ActiveSlot>>,
     pub(crate) pending_queue_drops: i32,
 }
 
@@ -153,9 +155,11 @@ impl SubscriberImpl {
             poll_drain_pending: false,
             poll_drain_exhausted: false,
             queue_drain_tail: None,
+            queue_bitset_fallback: false,
             poll_snapshot_valid: false,
             poll_snapshot_total: 0,
             poll_snapshot: Vec::new(),
+            newest_snapshot: None,
             pending_queue_drops: 0,
         };
         s.get_or_create_tracker(vchan_id);
@@ -181,6 +185,26 @@ impl SubscriberImpl {
                 }
             }))));
         }
+    }
+
+    pub fn reset_delivery_state(&mut self) {
+        self.channel.active_slots.clear();
+        self.channel.embargoed_slots.clear_all();
+        self.channel.slot = None;
+        self.poll_snapshot_valid = false;
+        self.poll_snapshot_total = 0;
+        self.poll_snapshot.clear();
+        self.poll_drain_exhausted = false;
+        self.queue_drain_tail = None;
+        self.queue_bitset_fallback = false;
+        self.pending_queue_drops = 0;
+        self.newest_snapshot = None;
+        self.ordinal_trackers.clear();
+        self.get_or_create_tracker(self.channel.vchan_id);
+    }
+
+    pub fn total_messages(&self) -> u64 {
+        self.channel.ccb().total_messages.load(Ordering::SeqCst)
     }
 
     pub fn resolved_name(&self) -> &str {
@@ -255,9 +279,9 @@ impl SubscriberImpl {
     pub fn remove_active_message(&self, slot_idx: usize) {
         let slot = self.channel.slot_ref(slot_idx);
         slot.sub_owners.clear(self.subscriber_id as usize);
-        let ordinal = slot.ordinal;
-        let vchan_id = slot.vchan_id as i32;
-        let bridged_slot_id = slot.bridged_slot_id;
+        let ordinal = slot.ordinal();
+        let vchan_id = slot.vchan_id() as i32;
+        let bridged_slot_id = slot.bridged_slot_id();
         let reliable = self.options.reliable;
 
         self.channel.atomic_inc_ref_count(
@@ -286,43 +310,32 @@ impl SubscriberImpl {
 
     pub fn populate_active_slots(&self, bits: &crate::bitset::InPlaceAtomicBitSet) {
         loop {
-            let num_messages = self
-                .channel
-                .ccb()
-                .total_messages
-                .load(Ordering::Relaxed);
+            let total = self.total_messages();
             bits.clear_all();
 
             for i in 0..self.channel.num_slots as usize {
                 let s = self.channel.slot_ref(i);
-                let refs = s.refs.load(Ordering::Relaxed);
-                if virtual_channel_id_match(s.vchan_id, self.channel.vchan_id)
-                    && s.ordinal != 0
+                let refs = s.refs.load(Ordering::Acquire);
+                if virtual_channel_id_match(s.vchan_id(), self.channel.vchan_id)
+                    && s.ordinal() != 0
                     && (refs & PUB_OWNED) == 0
                 {
                     bits.set(i);
                 }
             }
 
-            if num_messages
-                == self
-                    .channel
-                    .ccb()
-                    .total_messages
-                    .load(Ordering::Relaxed)
-            {
+            if total == self.total_messages() {
                 break;
             }
         }
     }
 
-    pub fn collect_visible_slots(&mut self, bits: &crate::bitset::InPlaceAtomicBitSet) {
+    pub fn collect_visible_slots(
+        &mut self,
+        bits: &crate::bitset::InPlaceAtomicBitSet,
+    ) -> u64 {
         loop {
-            let num_messages = self
-                .channel
-                .ccb()
-                .total_messages
-                .load(Ordering::Relaxed);
+            let total = self.total_messages();
             self.channel.active_slots.clear();
 
             bits.traverse(|i| {
@@ -330,28 +343,22 @@ impl SubscriberImpl {
                     return;
                 }
                 let s = self.channel.slot_ref(i);
-                if !virtual_channel_id_match(s.vchan_id, self.channel.vchan_id) {
+                if !virtual_channel_id_match(s.vchan_id(), self.channel.vchan_id) {
                     return;
                 }
-                if s.buffer_index == -1 {
+                if s.buffer_index() == -1 {
                     return;
                 }
                 self.channel.active_slots.push(ActiveSlot {
                     slot_index: i,
-                    ordinal: s.ordinal,
-                    timestamp: s.timestamp,
-                    vchan_id: s.vchan_id as i32,
+                    ordinal: s.ordinal(),
+                    timestamp: s.timestamp(),
+                    vchan_id: s.vchan_id() as i32,
                 });
             });
 
-            if num_messages
-                == self
-                    .channel
-                    .ccb()
-                    .total_messages
-                    .load(Ordering::Relaxed)
-            {
-                break;
+            if total == self.total_messages() {
+                return total;
             }
         }
     }
@@ -374,24 +381,50 @@ impl SubscriberImpl {
         None
     }
 
-    fn next_queued_slot(&mut self, max_queue_position: u64) -> Option<usize> {
+    fn has_visible_ordinal_before(
+        &self,
+        vchan_id: i32,
+        last_ordinal_seen: u64,
+        max_ordinal: u64,
+    ) -> bool {
+        let bits = self
+            .channel
+            .get_available_slots(self.subscriber_id as usize);
+        let mut found = false;
+        bits.traverse(|slot_idx| {
+            if found {
+                return;
+            }
+            let slot = self.channel.slot_ref(slot_idx);
+            let ordinal = slot.ordinal();
+            if ordinal > last_ordinal_seen
+                && ordinal <= max_ordinal
+                && (slot.refs.load(Ordering::Acquire) & PUB_OWNED) == 0
+                && slot.vchan_id() as i32 == vchan_id
+                && slot.buffer_index() != -1
+            {
+                found = true;
+            }
+        });
+        found
+    }
+
+    fn next_queued_slot(
+        &mut self,
+        max_queue_position: u64,
+        overflow_baseline: u32,
+    ) -> Option<usize> {
         if self.options.reliable {
             return None;
         }
 
-        let Some(queue) = self
+        if self
             .channel
             .get_available_slot_queue(self.subscriber_id as usize)
-        else {
+            .is_none()
+        {
             return None;
-        };
-        let queue_drops = queue.consume_overflow();
-        if self.options.detect_dropped_messages {
-            self.pending_queue_drops = self
-                .pending_queue_drops
-                .saturating_add(queue_drops as i32);
         }
-        queue.consume_insertion_failure();
         loop {
             let queue_at_boundary = match self
                 .channel
@@ -415,24 +448,38 @@ impl SubscriberImpl {
             }
             let slot_idx = slot_id as usize;
             let slot = self.channel.slot_ref(slot_idx);
-            if slot.ordinal != ordinal || slot.ordinal == 0 {
-                continue;
-            }
-            if !virtual_channel_id_match(slot.vchan_id, self.channel.vchan_id) {
-                continue;
-            }
             let refs = slot.refs.load(Ordering::Acquire);
             if (refs & PUB_OWNED) != 0 {
                 continue;
             }
+            let slot_ordinal = slot.ordinal();
+            if slot_ordinal != ordinal || slot_ordinal == 0 {
+                continue;
+            }
+            if !virtual_channel_id_match(slot.vchan_id(), self.channel.vchan_id) {
+                continue;
+            }
 
-            let vchan_id = slot.vchan_id as i32;
-            if self
+            let vchan_id = slot.vchan_id() as i32;
+            let last_ordinal_seen = self
                 .ordinal_trackers
                 .get(&vchan_id)
-                .is_some_and(|tracker| ordinal <= tracker.last_ordinal_seen)
-            {
+                .map_or(0, |tracker| tracker.last_ordinal_seen);
+            if ordinal <= last_ordinal_seen {
                 continue;
+            }
+            if self.options.subscriber_queue_size == 0
+                && last_ordinal_seen != 0
+                && ordinal > last_ordinal_seen + 1
+                && self.has_visible_ordinal_before(
+                    vchan_id,
+                    last_ordinal_seen,
+                    ordinal - 1,
+                )
+            {
+                self.queue_bitset_fallback = true;
+                self.poll_snapshot_valid = false;
+                return None;
             }
             if self.channel.atomic_inc_ref_count::<fn()>(
                 slot_idx,
@@ -443,8 +490,63 @@ impl SubscriberImpl {
                 false,
                 None,
             ) {
+                if self.channel.slot_ref(slot_idx).ordinal() != ordinal
+                    || self.channel.slot_ref(slot_idx).vchan_id() as i32 != vchan_id
+                {
+                    self.channel.atomic_inc_ref_count::<fn()>(
+                        slot_idx,
+                        false,
+                        -1,
+                        ordinal,
+                        vchan_id,
+                        false,
+                        None,
+                    );
+                    continue;
+                }
+                if let Some(queue) = self
+                    .channel
+                    .get_available_slot_queue(self.subscriber_id as usize)
+                {
+                    if queue.insertion_failed() {
+                        self.channel.atomic_inc_ref_count::<fn()>(
+                            slot_idx,
+                            false,
+                            -1,
+                            ordinal,
+                            vchan_id,
+                            false,
+                            None,
+                        );
+                        queue.consume_insertion_failure();
+                        self.queue_bitset_fallback = true;
+                        self.poll_snapshot_valid = false;
+                        return None;
+                    }
+                }
+                if self.options.subscriber_queue_size == 0 {
+                    if let Some(queue) = self
+                        .channel
+                        .get_available_slot_queue(self.subscriber_id as usize)
+                    {
+                        if queue.overflow_count() != overflow_baseline {
+                            self.channel.atomic_inc_ref_count::<fn()>(
+                                slot_idx,
+                                false,
+                                -1,
+                                ordinal,
+                                vchan_id,
+                                false,
+                                None,
+                            );
+                            self.queue_bitset_fallback = true;
+                            self.poll_snapshot_valid = false;
+                            return None;
+                        }
+                    }
+                }
                 if !self.channel.validate_slot_buffer(slot_idx)
-                    || self.channel.slot_ref(slot_idx).buffer_index == -1
+                    || self.channel.slot_ref(slot_idx).buffer_index() == -1
                 {
                     if self.channel.buffers_changed() {
                         self.channel.atomic_inc_ref_count::<fn()>(
@@ -470,6 +572,18 @@ impl SubscriberImpl {
                     );
                     continue;
                 }
+                if self.options.subscriber_queue_size != 0 {
+                    let concurrent_drops = self
+                        .channel
+                        .get_available_slot_queue(self.subscriber_id as usize)
+                        .map(|queue| queue.consume_overflow())
+                        .unwrap_or(0);
+                    if self.options.detect_dropped_messages {
+                        self.pending_queue_drops = self
+                            .pending_queue_drops
+                            .saturating_add(concurrent_drops as i32);
+                    }
+                }
                 return Some(slot_idx);
             }
         }
@@ -491,9 +605,7 @@ impl SubscriberImpl {
             self.reload_buffers_if_necessary();
 
             if self.poll_drain_pending && self.poll_drain_exhausted {
-                if self.channel.ccb().total_messages.load(Ordering::SeqCst)
-                    != self.poll_snapshot_total
-                {
+                if self.total_messages() != self.poll_snapshot_total {
                     self.poll_drain_exhausted = false;
                     self.queue_drain_tail = None;
                     self.poll_snapshot_valid = false;
@@ -503,22 +615,56 @@ impl SubscriberImpl {
             }
 
             if self.poll_drain_pending && !self.poll_snapshot_valid {
-                self.collect_visible_slots(&bits);
+                self.poll_snapshot_total = self.collect_visible_slots(&bits);
                 self.channel
                     .active_slots
                     .sort_by_key(|slot| (slot.timestamp, slot.ordinal));
                 self.poll_snapshot.clone_from(&self.channel.active_slots);
-                self.poll_snapshot_total =
-                    self.channel.ccb().total_messages.load(Ordering::SeqCst);
                 self.poll_snapshot_valid = true;
                 self.queue_drain_tail = self
                     .channel
                     .get_available_slot_queue(self.subscriber_id as usize)
                     .map(|queue| queue.tail());
             }
+            let mut queue_overflow_baseline = 0;
+            let queue_status = self
+                .channel
+                .get_available_slot_queue(self.subscriber_id as usize)
+                .map(|queue| {
+                    let queue_drops = queue.consume_overflow();
+                    let insertion_failed = queue.consume_insertion_failure();
+                    let overflow_after_consume = queue.overflow_count();
+                    (
+                        queue_drops,
+                        insertion_failed,
+                        overflow_after_consume,
+                    )
+                });
+            if let Some((
+                queue_drops,
+                insertion_failed,
+                overflow_after_consume,
+            )) = queue_status
+            {
+                queue_overflow_baseline = overflow_after_consume;
+                let recover_overflow = self.options.subscriber_queue_size == 0
+                    && (queue_drops != 0 || overflow_after_consume != 0);
+                if self.options.detect_dropped_messages && !recover_overflow {
+                    self.pending_queue_drops = self
+                        .pending_queue_drops
+                        .saturating_add(queue_drops as i32);
+                }
+                if recover_overflow || insertion_failed {
+                    self.queue_bitset_fallback = true;
+                }
+            }
             let max_queue_position = self.queue_drain_tail.unwrap_or(u64::MAX);
-            if let Some(slot_idx) = self.next_queued_slot(max_queue_position) {
-                return Some(slot_idx);
+            if !self.queue_bitset_fallback {
+                if let Some(slot_idx) =
+                    self.next_queued_slot(max_queue_position, queue_overflow_baseline)
+                {
+                    return Some(slot_idx);
+                }
             }
 
             if self.channel.slot.is_none() {
@@ -533,13 +679,28 @@ impl SubscriberImpl {
                 self.collect_visible_slots(&bits);
             }
 
-            self.channel
-                .active_slots
-                .sort_by_key(|s| (s.timestamp, s.ordinal));
+            if self.queue_bitset_fallback {
+                self.channel.active_slots.sort_by_key(|s| s.ordinal);
+            } else {
+                self.channel
+                    .active_slots
+                    .sort_by_key(|s| (s.timestamp, s.ordinal));
+            }
 
             let unseen_idx = match self.find_unseen_ordinal() {
                 Some(idx) => idx,
-                None => break,
+                None => {
+                    if self.queue_bitset_fallback {
+                        if let Some(queue) = self
+                            .channel
+                            .get_available_slot_queue(self.subscriber_id as usize)
+                        {
+                            queue.discard_all();
+                        }
+                        self.queue_bitset_fallback = false;
+                    }
+                    break;
+                }
             };
 
             let active = self.channel.active_slots[unseen_idx].clone();
@@ -555,7 +716,7 @@ impl SubscriberImpl {
                 None,
             ) {
                 if !self.channel.validate_slot_buffer(active.slot_index)
-                    || self.channel.slot_ref(active.slot_index).buffer_index == -1
+                    || self.channel.slot_ref(active.slot_index).buffer_index() == -1
                 {
                     if self.channel.buffers_changed() {
                         self.channel.atomic_inc_ref_count::<fn()>(
@@ -585,10 +746,7 @@ impl SubscriberImpl {
                 return Some(active.slot_index);
             }
         }
-        if self.poll_drain_pending
-            && self.channel.ccb().total_messages.load(Ordering::SeqCst)
-                != self.poll_snapshot_total
-        {
+        if self.poll_drain_pending && self.total_messages() != self.poll_snapshot_total {
             self.trigger();
         }
         if self.poll_drain_pending {
@@ -602,6 +760,7 @@ impl SubscriberImpl {
             .channel
             .get_available_slots(self.subscriber_id as usize);
         self.channel.embargoed_slots.clear_all();
+        self.newest_snapshot = None;
         if let Some(queue) = self
             .channel
             .get_available_slot_queue(self.subscriber_id as usize)
@@ -647,6 +806,8 @@ impl SubscriberImpl {
                 None => return None,
             };
 
+            self.newest_snapshot = Some(self.channel.active_slots.clone());
+
             let reliable = self.options.reliable;
             if self.channel.atomic_inc_ref_count::<fn()>(
                 active.slot_index,
@@ -658,7 +819,7 @@ impl SubscriberImpl {
                 None,
             ) {
                 if !self.channel.validate_slot_buffer(active.slot_index)
-                    || self.channel.slot_ref(active.slot_index).buffer_index == -1
+                    || self.channel.slot_ref(active.slot_index).buffer_index() == -1
                 {
                     if self.channel.buffers_changed() {
                         self.channel.atomic_inc_ref_count::<fn()>(
@@ -691,57 +852,120 @@ impl SubscriberImpl {
     }
 
     pub fn claim_slot(&mut self, slot_idx: usize, vchan_id: i32, was_newest: bool) {
-        let slot = self.channel.slot_ref(slot_idx);
-        slot.sub_owners.set(self.subscriber_id as usize);
+        let ordinal = self.channel.slot_ref(slot_idx).ordinal();
+        self.channel
+            .slot_ref(slot_idx)
+            .sub_owners
+            .set(self.subscriber_id as usize);
+        let bits = self
+            .channel
+            .get_available_slots(self.subscriber_id as usize);
         if was_newest {
-            self.channel
-                .get_available_slots(self.subscriber_id as usize)
-                .clear_all();
+            let mut skipped = Vec::new();
+            if let Some(snapshot) = self.newest_snapshot.take() {
+                for active in snapshot {
+                    let pinned = active.slot_index == slot_idx
+                        || self.channel.atomic_inc_ref_count::<fn()>(
+                            active.slot_index,
+                            self.options.reliable,
+                            1,
+                            active.ordinal,
+                            active.vchan_id,
+                            false,
+                            None,
+                        );
+                    if pinned {
+                        bits.clear(active.slot_index);
+                        skipped.push((active.ordinal, active.vchan_id));
+                        if active.slot_index != slot_idx {
+                            self.channel.atomic_inc_ref_count::<fn()>(
+                                active.slot_index,
+                                self.options.reliable,
+                                -1,
+                                active.ordinal,
+                                active.vchan_id,
+                                false,
+                                None,
+                            );
+                        }
+                    }
+                }
+            } else {
+                bits.clear(slot_idx);
+            }
+            for (skipped_ordinal, skipped_vchan_id) in skipped {
+                self.remember_ordinal(skipped_ordinal, skipped_vchan_id);
+            }
         } else {
-            self.channel
-                .get_available_slots(self.subscriber_id as usize)
-                .clear(slot_idx);
+            bits.clear(slot_idx);
         }
-        let ordinal = slot.ordinal;
         self.remember_ordinal(ordinal, vchan_id);
-        self.channel.slot_mut(slot_idx).flags |= MESSAGE_SEEN;
+        let slot = self.channel.slot_ref(slot_idx);
+        slot.set_flag(MESSAGE_SEEN);
         if self.options.reliable {
-            self.channel.slot_mut(slot_idx).flags |= MESSAGE_SEEN_BY_RELIABLE;
+            slot.set_flag(MESSAGE_SEEN_BY_RELIABLE);
         }
     }
 
-    pub fn unread_slot(&self, slot_idx: usize) {
-        self.channel.slot_mut(slot_idx).flags &=
-            !(MESSAGE_SEEN | MESSAGE_SEEN_BY_RELIABLE);
-        self.decrement_slot_ref(slot_idx, false);
+    pub fn unread_slot(&mut self, slot_idx: usize, ordinal: u64, vchan_id: i32) {
+        self.decrement_slot_ref(slot_idx, ordinal, vchan_id, false);
+        if self
+            .channel
+            .get_available_slot_queue(self.subscriber_id as usize)
+            .is_some()
+        {
+            // The queue entry was already popped. Recover the rejected ordinal
+            // from the authoritative bitset before accepting newer hints.
+            self.queue_bitset_fallback = true;
+        }
+        self.poll_snapshot_valid = false;
+        self.newest_snapshot = None;
     }
 
     pub fn ignore_activation(&mut self, slot_idx: usize) {
-        let slot = self.channel.slot_ref(slot_idx);
-        let ordinal = slot.ordinal;
-        let vchan_id = slot.vchan_id as i32;
+        let ordinal = self.channel.slot_ref(slot_idx).ordinal();
+        let vchan_id = self.channel.slot_ref(slot_idx).vchan_id() as i32;
         self.remember_ordinal(ordinal, vchan_id);
-        self.decrement_slot_ref(slot_idx, true);
-        self.channel.slot_mut(slot_idx).flags |= MESSAGE_SEEN;
+        self.decrement_slot_ref(slot_idx, ordinal, vchan_id, true);
+        self.channel.slot_ref(slot_idx).set_flag(MESSAGE_SEEN);
         if self.options.reliable {
-            self.channel.slot_mut(slot_idx).flags |= MESSAGE_SEEN_BY_RELIABLE;
+            self.channel.slot_ref(slot_idx).set_flag(MESSAGE_SEEN_BY_RELIABLE);
         }
     }
 
-    pub fn decrement_slot_ref(&self, slot_idx: usize, retire: bool) {
-        let slot = self.channel.slot_ref(slot_idx);
-        let ordinal = slot.ordinal & ORDINAL_MASK;
-        let vchan_id = self.channel.vchan_id;
+    pub fn decrement_slot_ref(
+        &self,
+        slot_idx: usize,
+        ordinal: u64,
+        vchan_id: i32,
+        retire: bool,
+    ) {
         let reliable = self.options.reliable;
-        self.channel
-            .atomic_inc_ref_count::<fn()>(slot_idx, reliable, -1, ordinal, vchan_id, retire, None);
+        self.channel.atomic_inc_ref_count::<fn()>(
+            slot_idx,
+            reliable,
+            -1,
+            ordinal & ORDINAL_MASK,
+            vchan_id,
+            retire,
+            None,
+        );
+    }
+
+    pub fn release_unclaimed_slot(
+        &self,
+        slot_idx: usize,
+        ordinal: u64,
+        vchan_id: i32,
+    ) {
+        self.decrement_slot_ref(slot_idx, ordinal, vchan_id, false);
     }
 
     pub fn detect_drops(&mut self, vchan_id: i32) -> i32 {
         let Some(slot_idx) = self.channel.slot else {
             return 0;
         };
-        let ordinal = self.channel.slot_ref(slot_idx).ordinal;
+        let ordinal = self.channel.slot_ref(slot_idx).ordinal();
         let tracker = self.get_or_create_tracker(vchan_id);
         if ordinal == 0 || ordinal <= tracker.last_ordinal_seen {
             return 0;
@@ -770,19 +994,20 @@ impl SubscriberImpl {
                     continue;
                 }
                 let s = self.channel.slot_ref(i);
-                let refs = s.refs.load(Ordering::Relaxed);
-                if s.ordinal != 0 && (refs & PUB_OWNED) == 0 {
+                let refs = s.refs.load(Ordering::Acquire);
+                let ordinal = s.ordinal();
+                if ordinal != 0 && (refs & PUB_OWNED) == 0 {
                     let prefix = self.channel.get_prefix(i);
                     let ts = if !prefix.is_null() {
                         unsafe { (*prefix).timestamp }
                     } else {
-                        s.timestamp
+                        s.timestamp()
                     };
                     buffer.push(ActiveSlot {
                         slot_index: i,
-                        ordinal: 0,
+                        ordinal,
                         timestamp: ts,
-                        vchan_id: s.vchan_id as i32,
+                        vchan_id: s.vchan_id() as i32,
                     });
                 }
             }
@@ -810,7 +1035,7 @@ impl SubscriberImpl {
                 None,
             ) {
                 if !self.channel.validate_slot_buffer(active.slot_index)
-                    || self.channel.slot_ref(active.slot_index).buffer_index == -1
+                    || self.channel.slot_ref(active.slot_index).buffer_index() == -1
                 {
                     if self.channel.buffers_changed() {
                         self.channel.atomic_inc_ref_count::<fn()>(
@@ -837,10 +1062,10 @@ impl SubscriberImpl {
                     );
                     continue;
                 }
-                let slot = self.channel.slot_mut(active.slot_index);
-                slot.flags |= MESSAGE_SEEN;
+                let slot = self.channel.slot_ref(active.slot_index);
+                slot.set_flag(MESSAGE_SEEN);
                 if reliable {
-                    slot.flags |= MESSAGE_SEEN_BY_RELIABLE;
+                    slot.set_flag(MESSAGE_SEEN_BY_RELIABLE);
                 }
                 slot.sub_owners.set(self.subscriber_id as usize);
                 return Some(active.slot_index);
@@ -895,6 +1120,7 @@ impl SubscriberImpl {
 
     pub fn attach_buffers(&mut self) -> crate::error::Result<()> {
         let read_write = self.options.bridge || self.options.read_write;
-        attach_buffers(&mut self.channel, read_write)
+        let resolved_name = self.resolved_name().to_string();
+        attach_buffers(&mut self.channel, &resolved_name, read_write)
     }
 }

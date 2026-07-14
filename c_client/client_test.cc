@@ -282,6 +282,7 @@ TEST_F(ClientTest, CreatePublisherThenSubscriber) {
   ASSERT_NE(nullptr, client.client);
 
   SubspacePublisherOptions pub_opts = CPublisherOptionsDefault(256, 10);
+  ASSERT_EQ(16, pub_opts.subscriber_queue_size);
   pub_opts.type.type = "foo";
   pub_opts.type.type_length = strlen(pub_opts.type.type);
   SubspacePublisher pub = subspace_create_publisher(client, "dave1", pub_opts);
@@ -300,6 +301,8 @@ TEST_F(ClientTest, CreatePublisherThenSubscriber) {
       subspace_create_subscriber(client, "dave1", CSubscriberOptionsDefault());
   ASSERT_NE(nullptr, sub.subscriber);
   ASSERT_FALSE(subspace_has_error());
+  ASSERT_EQ(16, subspace_get_publisher_queue_size(pub));
+  ASSERT_EQ(16, subspace_get_subscriber_queue_size(sub));
 
   ASSERT_TRUE(subspace_remove_subscriber(&sub));
   ASSERT_TRUE(subspace_remove_publisher(&pub));

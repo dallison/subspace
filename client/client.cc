@@ -768,7 +768,7 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
   if (debug_) {
     if (old_slot != nullptr) {
       printf("publish old slot: %d: %" PRId64 "\n", old_slot->id,
-             old_slot->ordinal);
+             old_slot->ordinal.load(std::memory_order_relaxed));
     }
   }
 
@@ -798,7 +798,7 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
 
   if (debug_) {
     printf("publish new slot: %d: %" PRId64 "\n", msg.new_slot->id,
-           msg.new_slot->ordinal);
+           msg.new_slot->ordinal.load(std::memory_order_relaxed));
   }
 
   return Message(message_size, nullptr, msg.ordinal, msg.timestamp,
@@ -1114,7 +1114,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
   MessageSlot *old_slot = subscriber->CurrentSlot();
   int64_t last_ordinal = -1;
   if (old_slot != nullptr) {
-    last_ordinal = old_slot->ordinal;
+    last_ordinal = old_slot->ordinal.load(std::memory_order_relaxed);
     if (debug_) {
       printf("read old slot: %d: %" PRId64 "\n", old_slot->id, last_ordinal);
     }
@@ -1143,9 +1143,13 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     return Message();
   }
   subscriber->SetSlot(new_slot);
+  int64_t delivered_message_size =
+      static_cast<int64_t>(
+          new_slot->message_size.load(std::memory_order_relaxed));
 
   if (debug_) {
-    printf("read new_slot: %d: %" PRId64 "\n", new_slot->id, new_slot->ordinal);
+    printf("read new_slot: %d: %" PRId64 "\n", new_slot->id,
+           new_slot->ordinal.load(std::memory_order_relaxed));
   }
 
   MessagePrefix *prefix = subscriber->Prefix(new_slot);
@@ -1156,7 +1160,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     if (prefix->HasChecksum()) {
       auto data =
           GetMessageChecksumData(prefix, subscriber->GetCurrentBufferAddress(),
-                                 new_slot->message_size,
+                                 delivered_message_size,
                                  subscriber->ChecksumSize(),
                                  subscriber->MetadataSize());
       absl::Span<const std::byte> cksum =
@@ -1179,13 +1183,17 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
   // Call the on receive callback.
   if (subscriber->on_receive_callback_ != nullptr) {
     absl::StatusOr<int64_t> status_or_size = subscriber->on_receive_callback_(
-        subscriber->GetCurrentBufferAddress(), new_slot->message_size);
+        subscriber->GetCurrentBufferAddress(), delivered_message_size);
     if (!status_or_size.ok()) {
+      subscriber->UnreadSlot(new_slot);
+      subscriber->SetSlot(nullptr);
       return status_or_size.status();
     }
-    new_slot->message_size = status_or_size.value();
+    delivered_message_size = status_or_size.value();
   }
-  if (new_slot->message_size <= 0) {
+  if (delivered_message_size <= 0) {
+    subscriber->UnreadSlot(new_slot);
+    subscriber->SetSlot(nullptr);
     return Message();
   }
   // We have a new slot, clear the subscriber's slot.
@@ -1193,9 +1201,10 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
 
   // Allocate a new active message for the slot.
   auto msg = subscriber->SetActiveMessage(
-      new_slot->message_size, new_slot, subscriber->GetCurrentBufferAddress(),
+      delivered_message_size, new_slot, subscriber->GetCurrentBufferAddress(),
       subscriber->CurrentOrdinal(), subscriber->Timestamp(new_slot),
-      new_slot->vchan_id, is_activation, checksum_error);
+      new_slot->vchan_id.load(std::memory_order_relaxed), is_activation,
+      checksum_error);
 
   // If we are unable to allocate a new message (due to message limits)
   // restore the slot so that we pick it up next time.
@@ -1207,8 +1216,9 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
         subscriber->options_.DetectDroppedMessages()) {
       int drops = subscriber->ConsumeQueueDrops();
       if (last_ordinal != -1) {
-        drops = std::max(drops,
-                         subscriber->DetectDrops(new_slot->vchan_id));
+        drops = std::max(
+            drops, subscriber->DetectDrops(
+                       new_slot->vchan_id.load(std::memory_order_relaxed)));
       }
       if (drops > 0) {
         auto it = dropped_message_callbacks_.find(subscriber);
@@ -1224,8 +1234,9 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
       }
     }
     // We have a slot, claim it.
-    subscriber->ClaimSlot(new_slot, new_slot->vchan_id,
-                          mode == ReadMode::kReadNewest);
+    subscriber->ClaimSlot(
+        new_slot, new_slot->vchan_id.load(std::memory_order_relaxed),
+        mode == ReadMode::kReadNewest);
   }
   auto ret_msg = Message(msg);
   if (subscriber->IsBridge()) {
@@ -1281,7 +1292,8 @@ ClientImpl::FindMessageInternal(SubscriberImpl *subscriber,
     // Not found.
     return Message();
   }
-  return Message(new_slot->message_size, subscriber->GetCurrentBufferAddress(),
+  return Message(new_slot->message_size.load(std::memory_order_relaxed),
+                 subscriber->GetCurrentBufferAddress(),
                  subscriber->CurrentOrdinal(), subscriber->Timestamp(),
                  subscriber->VirtualChannelId(), false, new_slot->id, false);
 }
@@ -1346,7 +1358,7 @@ int64_t ClientImpl::GetCurrentOrdinal(SubscriberImpl *sub) {
   if (slot == nullptr) {
     return -1;
   }
-  return slot->ordinal;
+  return slot->ordinal.load(std::memory_order_relaxed);
 }
 
 bool ClientImpl::CheckReload(ClientChannel *channel) {
@@ -1380,8 +1392,6 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
   if (subscriber->NumUpdates() == updates) {
     return absl::OkStatus();
   }
-  subscriber->SetNumUpdates(updates);
-
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -1407,8 +1417,14 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
     return absl::InternalError(sub_resp.error());
   }
 
-  // Unmap the channel memory.
-  subscriber->Unmap();
+  // A subscriber-created placeholder is the only case where the server
+  // replaces the CCB. Once num_slots is non-zero, publisher updates retain the
+  // existing CCB and only require refreshed descriptors and buffers.
+  const bool remap_ccb = subscriber->NumSlots() == 0;
+  if (remap_ccb) {
+    subscriber->ResetDeliveryState();
+    subscriber->Unmap();
+  }
 
   if (!sub_resp.type().empty()) {
     subscriber->SetType(sub_resp.type());
@@ -1428,15 +1444,15 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
     subscriber->AllocateChecksumBuffer();
   }
 
-  SharedMemoryFds channel_fds(std::move(fds[sub_resp.ccb_fd_index()]),
-                              std::move(fds[sub_resp.bcb_fd_index()]));
-  // subscriber->SetSlots(sub_resp.slot_size(), sub_resp.num_slots());
-
-  if (absl::Status status = subscriber->Map(std::move(channel_fds), scb_fd_);
-      !status.ok()) {
-    return status;
+  if (remap_ccb) {
+    SharedMemoryFds channel_fds(std::move(fds[sub_resp.ccb_fd_index()]),
+                                std::move(fds[sub_resp.bcb_fd_index()]));
+    if (absl::Status status = subscriber->Map(std::move(channel_fds), scb_fd_);
+        !status.ok()) {
+      return status;
+    }
+    subscriber->InitActiveMessages();
   }
-  subscriber->InitActiveMessages();
 
   if (absl::Status status = subscriber->AttachBuffers(); !status.ok()) {
     return status;
@@ -1456,6 +1472,7 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
     subscriber->AddRetirementTrigger(fds[size_t(index)]);
   }
 
+  subscriber->SetNumUpdates(updates);
   // subscriber->Dump();
   return absl::OkStatus();
 }
@@ -1562,7 +1579,7 @@ absl::Status ClientImpl::ActivateReliableChannel(PublisherImpl *publisher) {
     return absl::InternalError(
         absl::StrFormat("Channel %s has no buffer", publisher->Name()));
   }
-  slot->message_size = 1;
+  slot->message_size.store(1, std::memory_order_relaxed);
 
   publisher->ActivateSlotAndGetAnother(
       /*reliable=*/true,
@@ -1585,7 +1602,7 @@ absl::Status ClientImpl::ActivateChannel(PublisherImpl *publisher) {
         absl::StrFormat("3 Channel %s has no buffer", publisher->Name()));
   }
   MessageSlot *slot = publisher->CurrentSlot();
-  slot->message_size = 1;
+  slot->message_size.store(1, std::memory_order_relaxed);
 
   Channel::PublishedMessage msg = publisher->ActivateSlotAndGetAnother(
       /*reliable=*/false,
@@ -1994,6 +2011,8 @@ absl::Status ClientImpl::ReregisterPublisher(PublisherImpl *publisher) {
   FillCreatePublisherRequest(req.mutable_create_publisher(), publisher->Name(),
                              publisher->options_,
                              publisher->GetPublisherId());
+  req.mutable_create_publisher()->set_active_queue_publish_depth(
+      publisher->ActiveQueuePublishDepth());
 
   Response resp;
   std::vector<toolbelt::FileDescriptor> fds;

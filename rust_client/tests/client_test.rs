@@ -22,7 +22,9 @@ fn calculate_checksum(spans: &[&[u8]]) -> u32 {
 fn verify_checksum(spans: &[&[u8]], checksum: u32) -> bool {
     verify_crc32_checksum(spans, &checksum.to_ne_bytes())
 }
-use subspace_client::options::{PublisherOptions, SubscriberOptions};
+use subspace_client::options::{
+    PublisherOptions, SubscriberOptions, DEFAULT_SUBSCRIBER_QUEUE_SIZE,
+};
 use subspace_client::{Client, ReadMode, SubspaceError};
 
 fn unique_socket_path() -> String {
@@ -54,7 +56,10 @@ fn publisher_options_defaults() {
     let opts = PublisherOptions::new();
     assert_eq!(opts.slot_size, 0);
     assert_eq!(opts.num_slots, 0);
-    assert_eq!(opts.subscriber_queue_size, 0);
+    assert_eq!(
+        opts.subscriber_queue_size,
+        DEFAULT_SUBSCRIBER_QUEUE_SIZE
+    );
     assert!(!opts.local);
     assert!(!opts.reliable);
     assert!(!opts.bridge);
@@ -911,6 +916,42 @@ fn integration_subscriber_queue_overflow_preserves_newest() {
     let second = subscriber.read_message(ReadMode::ReadNext).unwrap();
     assert_eq!(unsafe { *second.buffer }, 4);
     drop(second);
+    assert!(subscriber
+        .read_message(ReadMode::ReadNext)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn integration_default_subscriber_queue_overflow_recovers_from_bitset() {
+    let client = new_client("rust_default_queue_overflow");
+    let publisher = client
+        .create_publisher(
+            "rust_default_queue_overflow_ch",
+            &PublisherOptions::new()
+                .set_slot_size(64)
+                .set_num_slots(64),
+        )
+        .unwrap();
+    let subscriber = client
+        .create_subscriber(
+            "rust_default_queue_overflow_ch",
+            &SubscriberOptions::new(),
+        )
+        .unwrap();
+
+    for value in 1u8..=32 {
+        let (buffer, _) = publisher.get_message_buffer(1).unwrap().unwrap();
+        unsafe {
+            *buffer = value;
+        }
+        publisher.publish_message(1).unwrap();
+    }
+
+    for expected in 1u8..=32 {
+        let message = subscriber.read_message(ReadMode::ReadNext).unwrap();
+        assert_eq!(unsafe { *message.buffer }, expected);
+    }
     assert!(subscriber
         .read_message(ReadMode::ReadNext)
         .unwrap()

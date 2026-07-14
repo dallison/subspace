@@ -118,7 +118,8 @@ public:
   // What is the address of the message buffer (after the prefix area)
   // for the slot given a slot id.
   void *GetBufferAddress(int slot_id) {
-    int buffer_index = ccb_->slots[slot_id].buffer_index;
+    const int buffer_index =
+        ccb_->slots[slot_id].buffer_index.load(std::memory_order_relaxed);
     if (buffer_index >= 0 &&
         static_cast<size_t>(buffer_index) < buffers_.size() &&
         buffers_[buffer_index]->IsSplitBuffers()) {
@@ -134,7 +135,8 @@ public:
     if (slot == nullptr) {
       return nullptr;
     }
-    int buffer_index = ccb_->slots[slot->id].buffer_index;
+    const int buffer_index =
+        ccb_->slots[slot->id].buffer_index.load(std::memory_order_relaxed);
     if (buffer_index >= 0 &&
         static_cast<size_t>(buffer_index) < buffers_.size() &&
         buffers_[buffer_index]->IsSplitBuffers()) {
@@ -152,7 +154,8 @@ public:
     if (slot == nullptr) {
       return nullptr;
     }
-    int buffer_index = ccb_->slots[slot->id].buffer_index;
+    const int buffer_index =
+        ccb_->slots[slot->id].buffer_index.load(std::memory_order_relaxed);
     if (buffer_index >= 0 &&
         static_cast<size_t>(buffer_index) < buffers_.size() &&
         buffers_[buffer_index]->IsSplitBuffers()) {
@@ -175,13 +178,13 @@ public:
 
   // Get the size associated with the given slot id.
   int SlotSize(int slot_id) const {
-    if (ccb_->slots[slot_id].buffer_index < 0 ||
-        static_cast<size_t>(ccb_->slots[slot_id].buffer_index) >= buffers_.size()) {
+    const int buffer_index =
+        ccb_->slots[slot_id].buffer_index.load(std::memory_order_relaxed);
+    if (buffer_index < 0 ||
+        static_cast<size_t>(buffer_index) >= buffers_.size()) {
       return 0;
     }
-    return buffers_.empty()
-               ? 0
-               : buffers_[ccb_->slots[slot_id].buffer_index]->slot_size;
+    return buffers_.empty() ? 0 : buffers_[buffer_index]->slot_size;
   }
 
   int SlotSize(MessageSlot *slot) const {
@@ -191,11 +194,13 @@ public:
     if (buffers_.empty()) {
       return 0;
     }
-    if (ccb_->slots[slot->id].buffer_index < 0 ||
-        static_cast<size_t>(ccb_->slots[slot->id].buffer_index) >= buffers_.size()) {
+    const int buffer_index =
+        ccb_->slots[slot->id].buffer_index.load(std::memory_order_relaxed);
+    if (buffer_index < 0 ||
+        static_cast<size_t>(buffer_index) >= buffers_.size()) {
       return 0;
     }
-    return buffers_[ccb_->slots[slot->id].buffer_index]->slot_size;
+    return buffers_[buffer_index]->slot_size;
   }
   // Get the biggest slot size for the channel.
   int SlotSize() const {
@@ -216,8 +221,9 @@ public:
     constexpr int kMaxRetries = 1000;
     int retries = 0;
     while (retries < kMaxRetries) {
-      size_t index = ccb_->slots[slot_id].buffer_index;
-      if (index != -1ULL && index < buffers_.size()) {
+      const int index =
+          ccb_->slots[slot_id].buffer_index.load(std::memory_order_relaxed);
+      if (index >= 0 && static_cast<size_t>(index) < buffers_.size()) {
         return buffers_.empty() ? nullptr : (buffers_[index]->buffer);
       }
       CheckReload();
@@ -227,7 +233,8 @@ public:
     if (abort_on_range) {
       // If the index is out of range, we have a problem.
       // This should never happen.
-      int index = ccb_->slots[slot_id].buffer_index;
+      const int index =
+          ccb_->slots[slot_id].buffer_index.load(std::memory_order_relaxed);
       std::cerr << this << " Invalid buffer index for slot " << slot_id << ": "
                 << index << " there are " << buffers_.size() << " buffers"
                 << std::endl;
@@ -345,7 +352,7 @@ protected:
   bool ValidateSlotBuffer(MessageSlot *slot);
 
   void SetMessageSize(int64_t message_size) {
-    slot_->message_size = message_size;
+    slot_->message_size.store(message_size, std::memory_order_relaxed);
   }
 
   bool IsVirtual() const { return vchan_id_ != -1; }

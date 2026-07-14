@@ -229,6 +229,9 @@ public:
                 bool for_tunnel, int max_active_messages,
                 int subscriber_queue_size, uint64_t process_id);
   virtual std::vector<std::string> RegisterExistingSubscribers();
+  absl::Status ReconcileSubscriberQueueArena();
+  void ClearPublisherQueueHazardIfDead(int publisher_id,
+                                       uint64_t process_id);
 
   virtual std::string Type() const { return Channel::Type(); }
   virtual void SetType(const std::string &type) { Channel::SetType(type); }

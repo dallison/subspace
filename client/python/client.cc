@@ -113,7 +113,8 @@ PYBIND11_MODULE(subspace, m) {
            "Get the number of slots for the publisher.")
       .def("set_subscriber_queue_size",
            &PublisherOptions::SetSubscriberQueueSize,
-           "Set each subscriber queue's capacity. 0 disables the queue.")
+           "Set each subscriber queue's capacity. The default is 16; "
+           "explicitly setting 0 disables the queue.")
       .def("subscriber_queue_size", &PublisherOptions::SubscriberQueueSize,
            "Get each subscriber queue's configured capacity.")
       .def("set_notify_retirement", &PublisherOptions::SetNotifyRetirement,

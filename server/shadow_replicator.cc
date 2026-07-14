@@ -201,6 +201,7 @@ void ShadowReplicator::SendAddPublisher(const std::string &channel_name,
   msg->set_is_bridge(pub->IsBridge());
   msg->set_for_tunnel(pub->ForTunnel());
   msg->set_is_fixed_size(pub->IsFixedSize());
+  msg->set_process_id(pub->ProcessId());
 
   std::vector<toolbelt::FileDescriptor> fds;
   fds.push_back(const_cast<PublisherUser *>(pub)->GetPollFd());
@@ -237,6 +238,7 @@ void ShadowReplicator::SendAddSubscriber(const std::string &channel_name,
   msg->set_for_tunnel(sub->ForTunnel());
   msg->set_max_active_messages(sub->MaxActiveMessages());
   msg->set_subscriber_queue_size(sub->SubscriberQueueSize());
+  msg->set_process_id(sub->ProcessId());
 
   std::vector<toolbelt::FileDescriptor> fds;
   fds.push_back(const_cast<SubscriberUser *>(sub)->GetTriggerFd());
@@ -454,6 +456,7 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
           .for_tunnel = msg.for_tunnel(),
           .is_fixed_size = msg.is_fixed_size(),
           .notify_retirement = msg.notify_retirement(),
+          .process_id = msg.process_id(),
           .poll_fd = std::move(fds[0]),
           .trigger_fd = std::move(fds[1]),
           .retirement_read_fd = msg.notify_retirement()
@@ -482,6 +485,7 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
           .for_tunnel = msg.for_tunnel(),
           .max_active_messages = msg.max_active_messages(),
           .subscriber_queue_size = msg.subscriber_queue_size(),
+          .process_id = msg.process_id(),
           .trigger_fd = std::move(fds[0]),
           .poll_fd = std::move(fds[1]),
       });

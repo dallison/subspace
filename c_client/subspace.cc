@@ -498,7 +498,7 @@ SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size,
   SubspacePublisherOptions options = {
       slot_size,
       num_slots,
-      0,
+      subspace::kDefaultSubscriberQueueSize,
       false,
       false,
       false,
@@ -1865,13 +1865,19 @@ bool subspace_snapshot_message_slot(SubspaceMessageSlot slot,
   }
   auto *message_slot = reinterpret_cast<subspace::MessageSlot *>(slot.slot);
   *snapshot = {.id = message_slot->id,
-               .ordinal = message_slot->ordinal,
-               .message_size = message_slot->message_size,
-               .buffer_index = message_slot->buffer_index,
-               .vchan_id = message_slot->vchan_id,
-               .timestamp = message_slot->timestamp,
-               .flags = message_slot->flags,
-               .bridged_slot_id = message_slot->bridged_slot_id};
+               .ordinal =
+                   message_slot->ordinal.load(std::memory_order_relaxed),
+               .message_size =
+                   message_slot->message_size.load(std::memory_order_relaxed),
+               .buffer_index =
+                   message_slot->buffer_index.load(std::memory_order_relaxed),
+               .vchan_id =
+                   message_slot->vchan_id.load(std::memory_order_relaxed),
+               .timestamp =
+                   message_slot->timestamp.load(std::memory_order_relaxed),
+               .flags = message_slot->flags.load(std::memory_order_relaxed),
+               .bridged_slot_id = message_slot->bridged_slot_id.load(
+                   std::memory_order_relaxed)};
   return true;
 }
 

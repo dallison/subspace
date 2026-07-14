@@ -1315,6 +1315,7 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
       auto pub = std::make_unique<PublisherUser>(
           nullptr, rpub.id, rpub.is_reliable, rpub.is_local, rpub.is_bridge,
           rpub.for_tunnel, rpub.is_fixed_size);
+      pub->SetProcessId(rpub.process_id);
 
       toolbelt::TriggerFd tfd(rpub.poll_fd, rpub.trigger_fd);
       pub->SetTriggerFd(std::move(tfd));
@@ -1327,12 +1328,14 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
       }
 
       channel->AddUser(rpub.id, std::move(pub));
+      channel->ClearPublisherQueueHazardIfDead(rpub.id, rpub.process_id);
     }
 
     for (auto &rsub : rch.subscribers) {
       auto sub = std::make_unique<SubscriberUser>(
           nullptr, rsub.id, rsub.is_reliable, rsub.is_bridge, rsub.for_tunnel,
           rsub.max_active_messages, rsub.subscriber_queue_size);
+      sub->SetProcessId(rsub.process_id);
 
       toolbelt::TriggerFd tfd(rsub.trigger_fd, rsub.poll_fd);
       sub->SetTriggerFd(std::move(tfd));
@@ -1454,6 +1457,15 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
                 rch.name.c_str(), rch.mux.c_str(),
                 static_cast<int>(rch.publishers.size()),
                 static_cast<int>(rch.subscribers.size()));
+  }
+  for (auto &[name, channel] : channels_) {
+    (void)name;
+    if (!channel->IsVirtual()) {
+      if (absl::Status status = channel->ReconcileSubscriberQueueArena();
+          !status.ok()) {
+        return status;
+      }
+    }
   }
   return absl::OkStatus();
 }

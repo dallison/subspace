@@ -14,7 +14,9 @@ use std::num::NonZeroUsize;
 use std::os::fd::BorrowedFd;
 use std::os::unix::io::RawFd;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI16, AtomicI32, AtomicU32, AtomicU64, Ordering,
+};
 
 // ── Flag constants ──────────────────────────────────────────────────────────
 
@@ -30,7 +32,7 @@ pub const MAX_CHANNELS: usize = 1024;
 pub const MAX_SLOT_OWNERS: usize = 1024;
 pub const MAX_AVAILABLE_SLOT_QUEUE_CAPACITY: usize = 1024;
 const MAX_SLOT_QUEUE_CAS_ATTEMPTS: usize = 64;
-pub const CHANNEL_CONTROL_BLOCK_VERSION: u32 = 2;
+pub const CHANNEL_CONTROL_BLOCK_VERSION: u32 = 3;
 pub const MAX_VCHAN_ID: usize = 1023;
 pub const MAX_CHANNEL_NAME: usize = 64;
 pub const MAX_BUFFERS: usize = 1024;
@@ -123,15 +125,96 @@ const SLOT_OWNER_WORDS: usize = bits_to_words(MAX_SLOT_OWNERS);
 #[repr(C)]
 pub struct MessageSlot {
     pub refs: AtomicU64,
-    pub ordinal: u64,
-    pub message_size: u64,
+    pub ordinal: AtomicU64,
+    pub message_size: AtomicU64,
     pub id: i32,
-    pub buffer_index: i16,
-    pub vchan_id: i16,
+    pub buffer_index: AtomicI16,
+    pub vchan_id: AtomicI16,
     pub sub_owners: AtomicBitSet<SLOT_OWNER_WORDS>,
-    pub timestamp: u64,
-    pub flags: u32,
-    pub bridged_slot_id: i32,
+    pub timestamp: AtomicU64,
+    pub flags: AtomicU32,
+    pub bridged_slot_id: AtomicI32,
+}
+const _: () = assert!(std::mem::size_of::<MessageSlot>() == 184);
+const _: () = assert!(std::mem::offset_of!(MessageSlot, refs) == 0);
+const _: () = assert!(std::mem::offset_of!(MessageSlot, ordinal) == 8);
+const _: () = assert!(std::mem::offset_of!(MessageSlot, message_size) == 16);
+const _: () = assert!(std::mem::offset_of!(MessageSlot, id) == 24);
+const _: () = assert!(std::mem::offset_of!(MessageSlot, buffer_index) == 28);
+const _: () = assert!(std::mem::offset_of!(MessageSlot, vchan_id) == 30);
+const _: () = assert!(std::mem::offset_of!(MessageSlot, sub_owners) == 32);
+const _: () = assert!(
+    std::mem::offset_of!(MessageSlot, timestamp)
+        == std::mem::offset_of!(MessageSlot, sub_owners)
+            + std::mem::size_of::<AtomicBitSet<SLOT_OWNER_WORDS>>()
+);
+const _: () = assert!(std::mem::offset_of!(MessageSlot, flags) == 176);
+const _: () = assert!(std::mem::offset_of!(MessageSlot, bridged_slot_id) == 180);
+
+impl MessageSlot {
+    pub fn ordinal(&self) -> u64 {
+        self.ordinal.load(Ordering::Relaxed)
+    }
+
+    pub fn set_ordinal(&self, v: u64) {
+        self.ordinal.store(v, Ordering::Relaxed);
+    }
+
+    pub fn message_size(&self) -> u64 {
+        self.message_size.load(Ordering::Relaxed)
+    }
+
+    pub fn set_message_size(&self, v: u64) {
+        self.message_size.store(v, Ordering::Relaxed);
+    }
+
+    pub fn buffer_index(&self) -> i16 {
+        self.buffer_index.load(Ordering::Relaxed)
+    }
+
+    pub fn set_buffer_index(&self, v: i16) {
+        self.buffer_index.store(v, Ordering::Relaxed);
+    }
+
+    pub fn vchan_id(&self) -> i16 {
+        self.vchan_id.load(Ordering::Relaxed)
+    }
+
+    pub fn set_vchan_id(&self, v: i16) {
+        self.vchan_id.store(v, Ordering::Relaxed);
+    }
+
+    pub fn timestamp(&self) -> u64 {
+        self.timestamp.load(Ordering::Relaxed)
+    }
+
+    pub fn set_timestamp(&self, v: u64) {
+        self.timestamp.store(v, Ordering::Relaxed);
+    }
+
+    pub fn flags(&self) -> u32 {
+        self.flags.load(Ordering::Relaxed)
+    }
+
+    pub fn set_flags(&self, v: u32) {
+        self.flags.store(v, Ordering::Relaxed);
+    }
+
+    pub fn set_flag(&self, flag: u32) {
+        self.flags.fetch_or(flag, Ordering::Relaxed);
+    }
+
+    pub fn clear_flags(&self, mask: u32) {
+        self.flags.fetch_and(!mask, Ordering::Relaxed);
+    }
+
+    pub fn bridged_slot_id(&self) -> i32 {
+        self.bridged_slot_id.load(Ordering::Relaxed)
+    }
+
+    pub fn set_bridged_slot_id(&self, v: i32) {
+        self.bridged_slot_id.store(v, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone)]
@@ -160,6 +243,7 @@ pub struct SlotQueueHeader {
     tail: AtomicU64,
     overflow_count: AtomicU32,
     insertion_failed: AtomicBool,
+    drop_oldest: bool,
 }
 const _: () = assert!(std::mem::size_of::<SlotQueueHeader>() == 32);
 
@@ -209,9 +293,24 @@ impl SlotQueueHeader {
         false
     }
 
-    pub fn push(&self, slot_id: i32, ordinal: u64) -> bool {
+    pub fn discard_all(&self) {
+        for _ in 0..self.capacity {
+            if !self.drop_front() {
+                return;
+            }
+        }
+    }
+
+    pub fn push(
+        &self,
+        slot_id: i32,
+        ordinal: u64,
+        report_insertion_failure: bool,
+    ) -> bool {
         if self.capacity == 0 {
-            self.insertion_failed.store(true, Ordering::Relaxed);
+            if report_insertion_failure {
+                self.mark_insertion_failure();
+            }
             return false;
         }
 
@@ -220,8 +319,16 @@ impl SlotQueueHeader {
         for _ in 0..MAX_SLOT_QUEUE_CAS_ATTEMPTS {
             let head = self.head.load(Ordering::Acquire);
             if tail - head >= self.capacity as u64 {
+                if !self.drop_oldest {
+                    if report_insertion_failure {
+                        self.mark_insertion_failure();
+                    }
+                    return false;
+                }
                 if !self.drop_front() {
-                    self.insertion_failed.store(true, Ordering::Release);
+                    if report_insertion_failure {
+                        self.mark_insertion_failure();
+                    }
                     return false;
                 }
                 self.overflow_count.fetch_add(1, Ordering::Release);
@@ -234,7 +341,9 @@ impl SlotQueueHeader {
             // the reusable sequence. Reserve only entries that are already
             // reusable so a dead consumer cannot make this producer wait.
             if candidate.sequence.load(Ordering::Acquire) != tail {
-                self.insertion_failed.store(true, Ordering::Release);
+                if report_insertion_failure {
+                    self.mark_insertion_failure();
+                }
                 return false;
             }
             match self.tail.compare_exchange(
@@ -251,7 +360,9 @@ impl SlotQueueHeader {
             }
         }
         let Some(entry) = reserved_entry else {
-            self.insertion_failed.store(true, Ordering::Release);
+            if report_insertion_failure {
+                self.mark_insertion_failure();
+            }
             return false;
         };
 
@@ -259,6 +370,10 @@ impl SlotQueueHeader {
         entry.ordinal.store(ordinal, Ordering::Relaxed);
         entry.sequence.store(tail + 1, Ordering::Release);
         true
+    }
+
+    pub fn mark_insertion_failure(&self) {
+        self.insertion_failed.store(true, Ordering::Release);
     }
 
     pub fn try_pop(&self) -> Option<(i32, u64)> {
@@ -298,8 +413,16 @@ impl SlotQueueHeader {
         self.overflow_count.swap(0, Ordering::AcqRel)
     }
 
+    pub fn overflow_count(&self) -> u32 {
+        self.overflow_count.load(Ordering::Acquire)
+    }
+
     pub fn consume_insertion_failure(&self) -> bool {
         self.insertion_failed.swap(false, Ordering::AcqRel)
+    }
+
+    pub fn insertion_failed(&self) -> bool {
+        self.insertion_failed.load(Ordering::Acquire)
     }
 }
 
@@ -984,7 +1107,7 @@ impl Channel {
     /// Get the buffer address for a slot, accounting for prefix.
     pub fn get_buffer_address(&self, slot_idx: usize) -> *mut u8 {
         let slot = self.slot_ref(slot_idx);
-        let buf_idx = slot.buffer_index;
+        let buf_idx = slot.buffer_index();
         if buf_idx < 0 || buf_idx as usize >= self.buffers.len() {
             return std::ptr::null_mut();
         }
@@ -1003,7 +1126,7 @@ impl Channel {
 
     pub fn get_prefix(&self, slot_idx: usize) -> *mut MessagePrefix {
         let slot = self.slot_ref(slot_idx);
-        let buf_idx = slot.buffer_index;
+        let buf_idx = slot.buffer_index();
         if buf_idx < 0 || buf_idx as usize >= self.buffers.len() {
             return std::ptr::null_mut();
         }
@@ -1032,7 +1155,7 @@ impl Channel {
 
     pub fn slot_size_for_slot(&self, slot_idx: usize) -> u64 {
         let slot = self.slot_ref(slot_idx);
-        let buf_idx = slot.buffer_index;
+        let buf_idx = slot.buffer_index();
         if buf_idx < 0 || buf_idx as usize >= self.buffers.len() {
             return 0;
         }
@@ -1067,7 +1190,7 @@ impl Channel {
 
     pub fn validate_slot_buffer(&self, slot_idx: usize) -> bool {
         let slot = self.slot_ref(slot_idx);
-        let buf_idx = slot.buffer_index;
+        let buf_idx = slot.buffer_index();
         if buf_idx < 0 {
             return true;
         }
@@ -1084,12 +1207,13 @@ impl Channel {
     }
 
     pub fn set_slot_to_biggest_buffer(&mut self, slot_idx: usize) {
-        let slot = self.slot_mut(slot_idx);
-        if slot.buffer_index != -1 {
-            self.decrement_buffer_refs(slot.buffer_index as usize);
+        let slot = self.slot_ref(slot_idx);
+        if slot.buffer_index() != -1 {
+            self.decrement_buffer_refs(slot.buffer_index() as usize);
         }
-        slot.buffer_index = (self.buffers.len() - 1) as i16;
-        self.increment_buffer_refs(slot.buffer_index as usize);
+        let new_index = (self.buffers.len() - 1) as i16;
+        slot.set_buffer_index(new_index);
+        self.increment_buffer_refs(new_index as usize);
     }
 
     pub fn decrement_buffer_refs(&self, buffer_index: usize) {
@@ -1110,8 +1234,8 @@ impl Channel {
                 let slot = self.slot_ref(i);
                 let refs = slot.refs.load(Ordering::Relaxed);
                 if refs == (PUB_OWNED | owner as u64) {
-                    self.slot_mut(i).ordinal = 0;
-                    slot.refs.store(0, Ordering::SeqCst);
+                    self.slot_ref(i).set_ordinal(0);
+                    slot.refs.store(0, Ordering::Release);
 
                     let ccb = self.ccb();
                     ccb.subscribers.traverse(|sub_id| {

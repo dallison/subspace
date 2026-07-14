@@ -64,7 +64,10 @@ TEST(CommonTest, InPlaceSlotQueueEvictsOldestOnOverflow) {
   EXPECT_TRUE(queue->Push(1, 10));
   EXPECT_TRUE(queue->Push(2, 20));
   EXPECT_TRUE(queue->Push(3, 30));
+  EXPECT_EQ(1, queue->OverflowCount());
+  EXPECT_EQ(1, queue->OverflowCount());
   EXPECT_EQ(1, queue->ConsumeOverflow());
+  EXPECT_EQ(0, queue->OverflowCount());
 
   subspace::QueuedSlot slot;
   ASSERT_TRUE(queue->TryPop(slot));
@@ -73,6 +76,29 @@ TEST(CommonTest, InPlaceSlotQueueEvictsOldestOnOverflow) {
   ASSERT_TRUE(queue->TryPop(slot));
   EXPECT_EQ(slot.slot_id, 3);
   EXPECT_EQ(slot.ordinal, 30);
+  EXPECT_FALSE(queue->TryPop(slot));
+}
+
+TEST(CommonTest, InPlaceSlotQueueCanRejectOverflowWithoutEviction) {
+  constexpr size_t kCapacity = 2;
+  std::unique_ptr<std::byte[]> storage(
+      new std::byte[subspace::SizeofSlotQueue(kCapacity)]);
+  auto *queue =
+      new (storage.get()) subspace::InPlaceSlotQueue(kCapacity, false);
+
+  EXPECT_TRUE(queue->Push(1, 10));
+  EXPECT_TRUE(queue->Push(2, 20));
+  EXPECT_FALSE(queue->Push(3, 30));
+  EXPECT_TRUE(queue->ConsumeInsertionFailure());
+  EXPECT_EQ(0, queue->ConsumeOverflow());
+
+  subspace::QueuedSlot slot;
+  ASSERT_TRUE(queue->TryPop(slot));
+  EXPECT_EQ(slot.slot_id, 1);
+  EXPECT_EQ(slot.ordinal, 10);
+  ASSERT_TRUE(queue->TryPop(slot));
+  EXPECT_EQ(slot.slot_id, 2);
+  EXPECT_EQ(slot.ordinal, 20);
   EXPECT_FALSE(queue->TryPop(slot));
 }
 

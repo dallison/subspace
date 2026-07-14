@@ -1337,9 +1337,10 @@ TEST_F(LatencyTest, VirtualPublisherMuxLatency) {
   }
 }
 
-// This measures unreliable latency by sending as fast as possible.  It will
-// drop messages because the publisher will run faster than the subscriber
-// most of the time.
+// This measures unreliable latency by sending as fast as possible. It uses a
+// subscriber queue large enough to track every retained slot (up to the
+// supported queue limit), but can still drop messages when the publisher
+// overwrites slots faster than the subscriber consumes them.
 TEST_F(LatencyTest, MultithreadedUnreliableLatencyHistogram) {
   subspace::Client pub_client;
   subspace::Client sub_client;
@@ -1352,13 +1353,25 @@ TEST_F(LatencyTest, MultithreadedUnreliableLatencyHistogram) {
   for (int num_slots = 3;
        num_slots < LatencyValueForSplitBuffers(20000, 4096);
        num_slots *= 2) {
-    std::cerr << "num_slots: " << num_slots << "\n";
+    const int subscriber_queue_size = std::min(num_slots, 1024);
+    std::cerr << "num_slots: " << num_slots
+              << ", subscriber_queue_size: " << subscriber_queue_size << "\n";
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-        "lustress", 256, num_slots, subspace::PublisherOptions().SetReliable(false));
+        "lustress",
+        subspace::PublisherOptions()
+            .SetSlotSize(256)
+            .SetNumSlots(num_slots)
+            .SetReliable(false)
+            .SetSubscriberQueueSize(subscriber_queue_size));
     ASSERT_OK(pub);
 
+    subspace::SubscriberOptions subscriber_options;
+    subscriber_options.SetReliable(false);
+    subscriber_options.SetLogDroppedMessages(false);
+    subscriber_options.SetDetectDroppedMessages(false);
+    subscriber_options.SetSubscriberQueueSize(subscriber_queue_size);
     absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(
-        "lustress", ([] { subspace::SubscriberOptions opts; opts.SetReliable(false); opts.SetLogDroppedMessages(false); opts.SetDetectDroppedMessages(false); return opts; }()));
+        "lustress", subscriber_options);
     ASSERT_OK(sub);
 
     uint64_t start_time = toolbelt::Now();

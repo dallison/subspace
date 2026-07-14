@@ -9,6 +9,9 @@ use crate::split_buffer::{
 };
 use std::sync::Arc;
 
+/// Default per-subscriber queue depth selected by publisher options.
+pub const DEFAULT_SUBSCRIBER_QUEUE_SIZE: i32 = 16;
+
 #[derive(Debug, Clone)]
 pub struct PublisherOptions {
     pub slot_size: i32,
@@ -37,7 +40,7 @@ impl Default for PublisherOptions {
         Self {
             slot_size: 0,
             num_slots: 0,
-            subscriber_queue_size: 0,
+            subscriber_queue_size: DEFAULT_SUBSCRIBER_QUEUE_SIZE,
             local: false,
             reliable: false,
             bridge: false,
@@ -75,9 +78,10 @@ impl PublisherOptions {
 
     /// Set each subscriber's per-subscriber slot queue capacity.
     ///
-    /// A value of 0 disables the queue and uses the available-slot bitset.
-    /// Larger values allow subscribers to absorb more publisher/subscriber skew
-    /// at the cost of shared memory in every subscriber queue.
+    /// Publisher options default to 16 entries. Explicitly setting 0 disables
+    /// the queue and uses the available-slot bitset. Larger values allow
+    /// subscribers to absorb more publisher/subscriber skew at the cost of
+    /// shared memory in every subscriber queue.
     pub fn set_subscriber_queue_size(mut self, size: i32) -> Self {
         self.subscriber_queue_size = size;
         self

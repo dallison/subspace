@@ -52,10 +52,10 @@ struct PublisherOptions {
   // When this is greater than 0, unreliable subscribers read this queue instead
   // of scanning the channel's available-slot bitset. Subscribers may override
   // this value; it also provisions the total packed queue arena, so all
-  // publishers on the same channel must agree on it. A value of 0 selects the
-  // available-slot bitset path by default. Larger values tolerate more
-  // publisher/subscriber skew and stale recycled-slot hints at the cost of
-  // shared memory in every subscriber queue.
+  // publishers on the same channel must agree on it. The default is 16 entries;
+  // explicitly setting 0 selects the available-slot bitset path. Larger values
+  // tolerate more publisher/subscriber skew and stale recycled-slot hints at
+  // the cost of shared memory in every subscriber queue.
   PublisherOptions &SetSubscriberQueueSize(int32_t size) {
     subscriber_queue_size = size;
     return *this;
@@ -233,7 +233,7 @@ struct PublisherOptions {
   // here.
   int32_t slot_size = 0;
   int32_t num_slots = 0;
-  int32_t subscriber_queue_size = 0;
+  int32_t subscriber_queue_size = kDefaultSubscriberQueueSize;
 
   bool local = false;
   bool reliable = false;

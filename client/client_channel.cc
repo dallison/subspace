@@ -240,16 +240,18 @@ void ClientChannel::UnmapSplitBufferSet(size_t buffer_index,
 }
 
 bool ClientChannel::ValidateSlotBuffer(MessageSlot *slot) {
-  if (slot->buffer_index < 0) {
+  const int buffer_index =
+      slot->buffer_index.load(std::memory_order_relaxed);
+  if (buffer_index < 0) {
     return true;
   }
 
-  if (static_cast<size_t>(slot->buffer_index) < buffers_.size() &&
-      buffers_[slot->buffer_index]->IsSplitBuffers()) {
+  if (static_cast<size_t>(buffer_index) < buffers_.size() &&
+      buffers_[buffer_index]->IsSplitBuffers()) {
     return slot->id >= 0 &&
            static_cast<size_t>(slot->id) <
-               buffers_[slot->buffer_index]->split_slot_buffers.size() &&
-           buffers_[slot->buffer_index]->split_slot_buffers[slot->id] !=
+               buffers_[buffer_index]->split_slot_buffers.size() &&
+           buffers_[buffer_index]->split_slot_buffers[slot->id] !=
                nullptr;
   }
 
@@ -1028,7 +1030,8 @@ void ClientChannel::TriggerRetirement(int slot_id) {
     return;
   }
   MessageSlot *slot = GetSlot(slot_id);
-  if ((slot->flags & kMessageIsActivation) != 0) {
+  if ((slot->flags.load(std::memory_order_relaxed) &
+       kMessageIsActivation) != 0) {
     // Don't retire activation messages.
     return;
   }

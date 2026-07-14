@@ -212,8 +212,9 @@ typedef struct {
 typedef struct {
   const int32_t slot_size; // Initial size of slots (might be resized).
   const int num_slots;     // Number of slots (never changes)
-  // Default capacity of a subscriber's per-subscriber slot queue. 0 selects
-  // the available-slot bitset by default. Subscribers may override this value.
+  // Default capacity of a subscriber's per-subscriber slot queue. The options
+  // factory selects 16; explicitly setting 0 selects the available-slot bitset.
+  // Subscribers may override this value.
   int32_t subscriber_queue_size;
   bool local;              // If true, messages stay local to this machine.
   bool reliable;           // Reliable publisher.

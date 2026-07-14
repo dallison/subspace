@@ -74,8 +74,22 @@ Each channel requires three shared memory regions, created via `shm_open()` (POS
 
 - One per channel.
 - Contains: channel name, num_slots, ordinals, activation tracker.
-- Variable-length: `MessageSlot` array + bitsets for retired/free/available slots.
-- Size: `CcbSize(num_slots)` = base + slots + bitsets.
+- CCB version 3 uses atomic slot metadata. `total_messages` advances for every
+  completed publication, including activation messages, and also versions
+  subscriber delivery snapshots.
+- Variable-length: `MessageSlot` array, retired/free/available bitsets, a
+  subscriber queue index, and a packed subscriber queue arena.
+- Size: `CcbSize(num_slots, subscriber_queue_size)`. Publisher client APIs
+  default to 16 queue entries, reserving a 640 KiB arena for up to 1024
+  subscribers. Explicitly selecting zero omits the arena and uses the
+  available-slot bitset path.
+- Per-subscriber queues are acceleration hints. The available-slot bitset is
+  authoritative, and consumers fall back to an ordinal-ordered bitset snapshot
+  if queue overflow or insertion failure races a claim.
+- Queue blocks are retired before reuse while publisher traversal hazards are
+  active. Shadow recovery reconciles subscriber offsets with allocated blocks,
+  conservatively retires orphan blocks, and only reclaims them after their
+  recorded publisher hazards have quiesced.
 
 ### Buffer Control Block (BCB)
 

@@ -42,9 +42,14 @@ message CreatePublisherRequest {
   int32 max_publishers = 17;   // 0 means no explicit publisher limit.
   bool split_buffers_over_bridge = 18; // Remote bridge publisher uses split buffers.
   // Default entries in a subscriber's CCB slot queue. Also provisions the
-  // packed queue arena; 0 selects the bitset path by default.
+  // packed queue arena. Client APIs normally send 16; 0 explicitly selects the
+  // bitset path.
   uint64 process_id = 19;      // Client process id for introspection.
   int32 subscriber_queue_size = 20;
+  // Local number of subscriber-queue traversals in progress when reclaiming
+  // after server failover. Reclaim runs under the client lock, so a zero value
+  // proves that a stale shared-memory hazard counter can be cleared.
+  uint32 active_queue_publish_depth = 21;
 }
 
 message CreatePublisherResponse {
@@ -516,6 +521,7 @@ message ShadowAddPublisher {
   bool is_fixed_size = 6;
   bool notify_retirement = 7;
   bool for_tunnel = 8;
+  uint64 process_id = 9;
   // FDs sent via SCM_RIGHTS: [poll_fd, trigger_fd]
   // If notify_retirement: also [retirement_read_fd, retirement_write_fd]
 }
@@ -534,6 +540,7 @@ message ShadowAddSubscriber {
   bool for_tunnel = 6;
   // Requested capacity. 0 uses the publisher's channel default.
   int32 subscriber_queue_size = 7;
+  uint64 process_id = 8;
   // FDs sent via SCM_RIGHTS: [trigger_fd, poll_fd]
 }
 

@@ -27,6 +27,7 @@ struct ShadowPublisher {
   bool for_tunnel = false;
   bool is_fixed_size = false;
   bool notify_retirement = false;
+  uint64_t process_id = 0;
   toolbelt::FileDescriptor poll_fd;
   toolbelt::FileDescriptor trigger_fd;
   toolbelt::FileDescriptor retirement_read_fd;
@@ -40,6 +41,7 @@ struct ShadowSubscriber {
   bool for_tunnel = false;
   int max_active_messages = 0;
   int subscriber_queue_size = 0;
+  uint64_t process_id = 0;
   toolbelt::FileDescriptor trigger_fd;
   toolbelt::FileDescriptor poll_fd;
 };

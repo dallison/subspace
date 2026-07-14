@@ -6,6 +6,8 @@
 #include "absl/strings/str_format.h"
 #include "server/client_handler.h"
 #include "server/server.h"
+#include <cerrno>
+#include <csignal>
 #include <utility>
 #include <sys/mman.h>
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
@@ -19,6 +21,18 @@
 #endif
 
 namespace subspace {
+namespace {
+
+bool ProcessDefinitelyDead(uint64_t process_id) {
+  if (process_id == 0) {
+    return false;
+  }
+  errno = 0;
+  return kill(static_cast<pid_t>(process_id), 0) == -1 && errno == ESRCH;
+}
+
+} // namespace
+
 ServerChannel::~ServerChannel() {
   if (is_virtual_ || skip_cleanup_) {
     return;
@@ -334,9 +348,15 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
   for (int32_t i = 0; i < num_slots_; i++) {
     MessageSlot *slot = &ccb_->slots[i];
     slot->id = i;
-    slot->refs = 0;
-    slot->vchan_id = -1;
-    slot->buffer_index = -1; // No buffer in the free list.
+    slot->refs.store(0, std::memory_order_relaxed);
+    slot->ordinal.store(0, std::memory_order_relaxed);
+    slot->message_size.store(0, std::memory_order_relaxed);
+    slot->vchan_id.store(-1, std::memory_order_relaxed);
+    slot->buffer_index.store(-1,
+                             std::memory_order_relaxed); // No buffer in the free list.
+    slot->timestamp.store(0, std::memory_order_relaxed);
+    slot->flags.store(0, std::memory_order_relaxed);
+    slot->bridged_slot_id.store(-1, std::memory_order_relaxed);
     new (&slot->sub_owners) AtomicBitSet<kMaxSlotOwners>();
   }
 
@@ -687,7 +707,8 @@ ServerChannel::AllocateSubscriberQueue(int sub_id,
       std::memory_order_relaxed);
   const uint64_t queue_offset = block_offset + SlotQueueBlockHeaderSize();
   new (arena + queue_offset)
-      InPlaceSlotQueue(static_cast<size_t>(capacity));
+      InPlaceSlotQueue(static_cast<size_t>(capacity),
+                       /*drop_oldest=*/subscriber_queue_size != 0);
   index->offsets[sub_id].store(queue_offset, std::memory_order_release);
   return absl::OkStatus();
 }
@@ -728,22 +749,124 @@ void ServerChannel::RetireSubscriberQueue(int sub_id) {
       std::memory_order_release);
 }
 
+absl::Status ServerChannel::ReconcileSubscriberQueueArena() {
+  if (IsVirtual()) {
+    return static_cast<VirtualChannel *>(this)
+        ->GetMux()
+        ->ReconcileSubscriberQueueArena();
+  }
+  if (IsPlaceholder()) {
+    return absl::OkStatus();
+  }
+
+  AvailableSlotQueueIndex *index = GetAvailableSlotQueueIndexAddress();
+  const uint64_t next_offset =
+      index->next_offset.load(std::memory_order_acquire);
+  char *arena = EndOfAvailableSlotQueueIndex();
+  auto block_at = [arena](uint64_t offset) {
+    return reinterpret_cast<SlotQueueBlockHeader *>(arena + offset);
+  };
+
+  absl::flat_hash_map<uint64_t, int> owners;
+  for (int sub_id = 0; sub_id < kMaxSlotOwners; ++sub_id) {
+    const uint64_t queue_offset =
+        index->offsets[sub_id].load(std::memory_order_acquire);
+    if (queue_offset == kInvalidSlotQueueOffset) {
+      continue;
+    }
+    if (!ccb_->subscribers.IsSet(sub_id)) {
+      RetireSubscriberQueue(sub_id);
+      continue;
+    }
+    const uint64_t block_offset = queue_offset - SlotQueueBlockHeaderSize();
+    if (!owners.emplace(block_offset, sub_id).second) {
+      return absl::FailedPreconditionError(absl::StrFormat(
+          "subscriber queue arena for channel %s has duplicate ownership of "
+          "block offset %llu",
+          Name(), static_cast<unsigned long long>(block_offset)));
+    }
+  }
+
+  for (uint64_t offset = 0; offset < next_offset;) {
+    SlotQueueBlockHeader *block = block_at(offset);
+    SlotQueueBlockState state = static_cast<SlotQueueBlockState>(
+        block->state.load(std::memory_order_acquire));
+    if (state == SlotQueueBlockState::kAllocated &&
+        !owners.contains(offset)) {
+      // A crash may occur after constructing a block but before publishing its
+      // subscriber offset, or after clearing the offset but before retirement.
+      // Retire conservatively against every publisher that may still hold an
+      // arena pointer.
+      block->waiting_publishers.ClearAll();
+      for (int pub_id = 0; pub_id < kMaxSlotOwners; ++pub_id) {
+        if (index->active_publishers[pub_id].load(
+                std::memory_order_seq_cst) != 0) {
+          block->waiting_publishers.Set(pub_id);
+        }
+      }
+      state = block->waiting_publishers.IsEmpty()
+                  ? SlotQueueBlockState::kFree
+                  : SlotQueueBlockState::kRetired;
+      block->state.store(static_cast<uint32_t>(state),
+                         std::memory_order_release);
+    }
+    if (state == SlotQueueBlockState::kRetired) {
+      block->waiting_publishers.Traverse([block, index](int pub_id) {
+        if (index->active_publishers[pub_id].load(
+                std::memory_order_seq_cst) == 0) {
+          block->waiting_publishers.Clear(pub_id);
+        }
+      });
+      if (block->waiting_publishers.IsEmpty()) {
+        block->state.store(static_cast<uint32_t>(SlotQueueBlockState::kFree),
+                           std::memory_order_release);
+      }
+    }
+    offset += block->block_size;
+  }
+
+  for (uint64_t offset = 0; offset < next_offset;) {
+    SlotQueueBlockHeader *block = block_at(offset);
+    if (static_cast<SlotQueueBlockState>(
+            block->state.load(std::memory_order_acquire)) ==
+        SlotQueueBlockState::kFree) {
+      while (offset + block->block_size < next_offset) {
+        SlotQueueBlockHeader *next = block_at(offset + block->block_size);
+        if (static_cast<SlotQueueBlockState>(
+                next->state.load(std::memory_order_acquire)) !=
+            SlotQueueBlockState::kFree) {
+          break;
+        }
+        block->block_size += next->block_size;
+      }
+    }
+    offset += block->block_size;
+  }
+  return absl::OkStatus();
+}
+
+void ServerChannel::ClearPublisherQueueHazardIfDead(int publisher_id,
+                                                    uint64_t process_id) {
+  if (!ProcessDefinitelyDead(process_id) || IsPlaceholder()) {
+    return;
+  }
+  ServerChannel *storage_channel =
+      IsVirtual()
+          ? static_cast<ServerChannel *>(
+                static_cast<VirtualChannel *>(this)->GetMux())
+          : this;
+  storage_channel->GetAvailableSlotQueueIndexAddress()
+      ->active_publishers[publisher_id]
+      .store(0, std::memory_order_seq_cst);
+}
+
 void ServerChannel::CleanupSlots(int owner, bool reliable, bool is_pub,
                                  int vchan_id) {
   if (!is_pub) {
     ccb_->subscribers.ClearSeqCst(owner);
   }
   Channel::CleanupSlots(owner, reliable, is_pub, vchan_id);
-  if (is_pub && !IsPlaceholder()) {
-    ServerChannel *storage_channel =
-        IsVirtual()
-            ? static_cast<ServerChannel *>(
-                  static_cast<VirtualChannel *>(this)->GetMux())
-            : this;
-    storage_channel->GetAvailableSlotQueueIndexAddress()
-        ->active_publishers[owner]
-        .store(0, std::memory_order_seq_cst);
-  } else if (!is_pub) {
+  if (!is_pub) {
     RetireSubscriberQueue(owner);
   }
 }
@@ -825,6 +948,18 @@ void ServerChannel::RemoveUser(Server *server, int user_id) {
   }
   CleanupSlots(user->GetId(), user->IsReliable(), user->IsPublisher(),
                GetVirtualChannelId());
+  if (user->IsPublisher() && !IsPlaceholder()) {
+    ServerChannel *storage_channel =
+        IsVirtual()
+            ? static_cast<ServerChannel *>(
+                  static_cast<VirtualChannel *>(this)->GetMux())
+            : this;
+    // RemoveUser is an explicit client request serialized with publication, so
+    // no local SubscriberQueuePublishGuard can still be live.
+    storage_channel->GetAvailableSlotQueueIndexAddress()
+        ->active_publishers[user->GetId()]
+        .store(0, std::memory_order_seq_cst);
+  }
   RemoveUserId(user->GetId());
   RecordUpdate(user->IsPublisher(), /*add=*/false, user->IsReliable());
   if (user->IsPublisher()) {
@@ -845,6 +980,17 @@ void ServerChannel::RemoveAllUsersFor(ClientHandler *handler) {
     if (user->GetHandler() == handler) {
       CleanupSlots(user->GetId(), user->IsReliable(), user->IsPublisher(),
                    GetVirtualChannelId());
+      if (user->IsPublisher() && !IsPlaceholder() &&
+          ProcessDefinitelyDead(user->ProcessId())) {
+        ServerChannel *storage_channel =
+            IsVirtual()
+                ? static_cast<ServerChannel *>(
+                      static_cast<VirtualChannel *>(this)->GetMux())
+                : this;
+        storage_channel->GetAvailableSlotQueueIndexAddress()
+            ->active_publishers[user->GetId()]
+            .store(0, std::memory_order_seq_cst);
+      }
       RemoveUserId(user->GetId());
       RecordUpdate(user->IsPublisher(), /*add=*/false, user->IsReliable());
       if (user->IsPublisher()) {
