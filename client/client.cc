@@ -1213,6 +1213,11 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
   if (msg->length == 0) {
     subscriber->UnreadSlot(new_slot);
     // Subscriber does not have a slot now but the slot it had is still active.
+    // Do not wrap the reusable ActiveMessage in an empty Message. A caller may
+    // retain that empty handle while this slot is retried, which would keep an
+    // extra reference after the ActiveMessage becomes valid and prevent its
+    // active-message count from being released.
+    return Message();
   } else {
     if (mode == ReadMode::kReadNext &&
         subscriber->options_.DetectDroppedMessages()) {

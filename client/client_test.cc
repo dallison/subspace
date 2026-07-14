@@ -264,7 +264,9 @@ TEST(AndroidBufferRegistrationTest, FailedRegistrationRollsBackNumBuffers) {
   subspace::PublisherOptions options;
   options.SetUseSplitBuffers(false);
   subspace::details::PublisherImpl publisher(
-      "android_registration_rollback", kNumSlots, /*channel_id=*/0,
+      "android_registration_rollback", kNumSlots,
+      /*subscriber_queue_size=*/0, /*subscriber_queue_arena_size=*/0,
+      /*channel_id=*/0,
       /*publisher_id=*/0, /*vchan_id=*/-1, /*session_id=*/123, "",
       options, [](subspace::Channel *) { return false; },
       /*user_id=*/0, /*group_id=*/0);
