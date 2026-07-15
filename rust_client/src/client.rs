@@ -870,6 +870,7 @@ impl Client {
                     split_buffers_over_bridge: opts.split_buffers_over_bridge,
                     max_publishers: 0,
                     publisher_id: -1,
+                    process_id: std::process::id() as u64,
                 },
             )),
         };
@@ -999,6 +1000,7 @@ impl Client {
                     max_active_messages: opts.max_active_messages,
                     mux: opts.mux.clone(),
                     vchan_id: opts.vchan_id,
+                    process_id: std::process::id() as u64,
                 },
             )),
         };
@@ -1478,6 +1480,7 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
                 channel_name: sub.channel.name.clone(),
                 subscriber_id: sub.subscriber_id,
                 mux: sub.options.mux.clone(),
+                process_id: std::process::id() as u64,
                 ..Default::default()
             },
         )),

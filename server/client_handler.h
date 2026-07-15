@@ -12,6 +12,7 @@
 #include "co/coroutine.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/sockets.h"
+#include <cstdint>
 #include <sys/poll.h>
 #include <vector>
 
@@ -29,6 +30,7 @@ public:
   // when the connection to the client is closed.  The Context drives the
   // cooperative socket I/O for the active backend.
   void Run(async::Context ctx);
+  const std::string &ClientName() const { return client_name_; }
 
 private:
   std::string GetTotalVM();

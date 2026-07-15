@@ -27,6 +27,8 @@ struct SplitBufferMetadata {
   uintptr_t handle = 0;
   std::string shadow_file;
   std::string object_name;
+  int registration_fd = -1;
+  int64_t map_offset = 0;
 };
 
 struct SplitBufferMapping {
@@ -34,6 +36,8 @@ struct SplitBufferMapping {
   void *address = nullptr;
   size_t size = 0;
   void *private_data = nullptr;
+  int fd = -1;
+  int64_t map_offset = 0;
 };
 
 struct SplitBufferCallbacks {

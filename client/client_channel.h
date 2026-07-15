@@ -367,10 +367,11 @@ protected:
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
   absl::StatusOr<toolbelt::FileDescriptor>
   CreateMemfdBuffer(const std::string &filename, size_t size);
+#endif
   absl::StatusOr<RegisteredClientBuffer>
   GetRegisteredClientBuffer(uint32_t buffer_index, bool is_prefix,
                             uint32_t slot_id);
-#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
   absl::StatusOr<toolbelt::FileDescriptor>
   CreateLinuxBuffer(const std::string &filename, size_t size);
 #elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX

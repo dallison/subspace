@@ -93,6 +93,7 @@ SplitBufferMetadata SplitBufferMetadataFromProto(
   metadata.handle = static_cast<uintptr_t>(proto.handle());
   metadata.shadow_file = proto.shadow_file();
   metadata.object_name = proto.object_name();
+  metadata.map_offset = proto.map_offset();
   return metadata;
 }
 
@@ -108,6 +109,7 @@ void SplitBufferMetadataToProto(const SplitBufferMetadata &metadata,
   proto->set_handle(static_cast<uint64_t>(metadata.handle));
   proto->set_shadow_file(metadata.shadow_file);
   proto->set_object_name(metadata.object_name);
+  proto->set_map_offset(metadata.map_offset);
 }
 
 absl::Status WriteSplitBufferMetadataFile(

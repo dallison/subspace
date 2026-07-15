@@ -111,6 +111,8 @@ typedef struct {
   uint64_t full_size;
   uint64_t allocation_size;
   uintptr_t handle;
+  int registration_fd;
+  int64_t map_offset;
 } SubspaceSplitBufferInfo;
 
 typedef struct {
@@ -118,6 +120,8 @@ typedef struct {
   void *address;
   size_t size;
   void *private_data;
+  int fd;
+  int64_t map_offset;
 } SubspaceSplitBufferMapping;
 
 typedef struct {

@@ -746,6 +746,7 @@ impl PublisherImpl {
             handle: 0,
             shadow_file: prefix_name.clone(),
             object_name: split_buffer_object_name(&prefix_name),
+            map_offset: 0,
         };
 
         let prefix_fd = match create_split_shared_memory_buffer(&prefix_metadata)? {
@@ -780,6 +781,7 @@ impl PublisherImpl {
                 handle: 0,
                 shadow_file: shadow_file.clone(),
                 object_name: split_buffer_object_name(&shadow_file),
+                map_offset: 0,
             };
             let slot_fd;
             let slot_addr;
@@ -804,6 +806,7 @@ impl PublisherImpl {
                 slot_private_data = mapping.private_data;
                 metadata.handle = slot_handle;
                 metadata.allocation_size = slot_mapped_size;
+                metadata.map_offset = mapping.map_offset;
             } else {
                 slot_fd = create_split_shared_memory_buffer(&metadata)?.ok_or_else(|| {
                     SubspaceError::Internal(format!(

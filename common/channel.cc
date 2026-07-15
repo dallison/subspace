@@ -170,13 +170,19 @@ std::string Channel::BufferSharedMemoryName(uint64_t session_id,
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
   return absl::StrFormat("subspace_%d_%s_%d", session_id, sanitized_name,
                          buffer_index);
-#elif defined(__APPLE__)
-  // Since you can't actually see any shared memory names in the MacOS
-  // filesystem we need to use /tmp to create a shadow file that is mapped to a
-  // shared memory name.
+#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
+  // In POSIX mode (macOS and QNX) the shared memory object name is derived
+  // from a "shadow" file on disk: its length records the buffer's true size
+  // (fstat on the shm object itself is page-aligned) and its inode is used to
+  // name the shm object (see PosixSharedMemoryName).  This is an actual
+  // filesystem path, so anchor it in /tmp; a bare relative name would create
+  // the shadow file in the process's current working directory and, worse,
+  // would make the server's cleanup miss it (and leak the shm object) whenever
+  // the server and publisher run from different directories.
   return absl::StrFormat("/tmp/subspace_%d_%s_%d", session_id, sanitized_name,
                          buffer_index);
 #else
+  // Linux (/dev/shm): this is a shm_open object name, not a filesystem path.
   return absl::StrFormat("subspace_%d_%s_%d", session_id, sanitized_name,
                          buffer_index);
 #endif

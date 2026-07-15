@@ -41,6 +41,7 @@ message CreatePublisherRequest {
   bool use_split_buffers = 16; // Prefixes and payload slots are separate.
   int32 max_publishers = 17;   // 0 means no explicit publisher limit.
   bool split_buffers_over_bridge = 18; // Remote bridge publisher uses split buffers.
+  uint64 process_id = 19;      // Client process id for introspection.
 }
 
 message CreatePublisherResponse {
@@ -72,6 +73,7 @@ message CreateSubscriberRequest {
   bool for_tunnel = 7;
   string mux = 8;
   int32 vchan_id = 9;
+  uint64 process_id = 10; // Client process id for introspection.
 }
 
 message CreateSubscriberResponse {
@@ -156,6 +158,7 @@ message ClientBufferHandleMetadataProto {
   string shadow_file = 9;
   string object_name = 10;
   ClientBufferAllocator allocator = 11;
+  int64 map_offset = 12;
 }
 
 message RegisterClientBufferRequest {
@@ -222,6 +225,17 @@ message Response {
 
 // These messages are carried on Subspace channels published by
 // the server.
+message ChannelParticipantInfoProto {
+  int32 id = 1;             // Publisher/subscriber id assigned by the server.
+  uint64 pid = 2;           // Kernel-reported client process id, if available.
+  string program_name = 3;  // Client-provided program/name from InitRequest.
+  bool is_publisher = 4;
+  bool is_subscriber = 5;
+  bool is_reliable = 6;
+  bool is_bridge = 7;
+  bool for_tunnel = 8;
+}
+
 message ChannelInfoProto {
   string name = 1;
   int32 slot_size = 2;
@@ -239,6 +253,8 @@ message ChannelInfoProto {
   // Only if is_virtual is true.
   int32 vchan_id = 13; // Virtual channel ID.
   string mux = 14;
+  int32 channel_id = 15;
+  repeated ChannelParticipantInfoProto participants = 16;
 }
 
 // This is published to the /subspace/ChannelDirectory channel.

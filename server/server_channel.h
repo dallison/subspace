@@ -66,10 +66,12 @@ public:
   bool IsReliable() const { return is_reliable_; }
   bool IsBridge() const { return is_bridge_; }
   bool ForTunnel() const { return for_tunnel_; }
+  uint64_t ProcessId() const { return process_id_; }
   void Trigger() { trigger_fd_.Trigger(); }
 
   void SetTriggerFd(toolbelt::TriggerFd fd) { trigger_fd_ = std::move(fd); }
   void SetHandler(ClientHandler *handler) { handler_ = handler; }
+  void SetProcessId(uint64_t process_id) { process_id_ = process_id; }
 
 private:
   ClientHandler *handler_;
@@ -78,6 +80,7 @@ private:
   bool is_reliable_;
   bool is_bridge_; // This is used to send or receive over a bridge.
   bool for_tunnel_ = false;
+  uint64_t process_id_ = 0;
 };
 
 class SubscriberUser : public User {
@@ -213,10 +216,11 @@ public:
   absl::StatusOr<PublisherUser *> AddPublisher(ClientHandler *handler,
                                                bool is_reliable, bool is_local,
                                                bool is_bridge, bool for_tunnel,
-                                               bool is_fixed_size);
+                                               bool is_fixed_size,
+                                               uint64_t process_id);
   absl::StatusOr<SubscriberUser *>
   AddSubscriber(ClientHandler *handler, bool is_reliable, bool is_bridge,
-                bool for_tunnel, int max_active_messages);
+                bool for_tunnel, int max_active_messages, uint64_t process_id);
   virtual void RegisterExistingSubscribers();
 
   virtual std::string Type() const { return Channel::Type(); }
