@@ -389,6 +389,7 @@ impl BufferSet {
                         .copied()
                         .unwrap_or(self.slot_size) as usize,
                     private_data: self.split_private_data.get(slot).copied().unwrap_or(0),
+                    map_offset: metadata.map_offset,
                 };
                 if self.uses_split_callbacks
                     && self.owns_split_buffers
