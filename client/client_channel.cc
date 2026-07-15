@@ -54,7 +54,8 @@ ClientBufferHandleMetadata ClientBufferFromSplitMetadata(
           .handle = metadata.handle,
           .shadow_file = metadata.shadow_file,
           .object_name = metadata.object_name,
-          .allocator = allocator};
+          .allocator = allocator,
+          .map_offset = metadata.map_offset};
 }
 
 [[maybe_unused]] SplitBufferMetadata SplitMetadataFromClientBuffer(
@@ -68,7 +69,8 @@ ClientBufferHandleMetadata ClientBufferFromSplitMetadata(
           .allocation_size = metadata.allocation_size,
           .handle = metadata.handle,
           .shadow_file = metadata.shadow_file,
-          .object_name = metadata.object_name};
+          .object_name = metadata.object_name,
+          .map_offset = metadata.map_offset};
 }
 
 } // namespace
@@ -446,6 +448,7 @@ absl::StatusOr<toolbelt::FileDescriptor>
 ClientChannel::CreateMemfdBuffer(const std::string &filename, size_t size) {
   return CreateAnonymousSharedMemory(filename, size);
 }
+#endif
 
 absl::StatusOr<RegisteredClientBuffer>
 ClientChannel::GetRegisteredClientBuffer(uint32_t buffer_index, bool is_prefix,
@@ -484,7 +487,6 @@ ClientChannel::GetRegisteredClientBuffer(uint32_t buffer_index, bool is_prefix,
   }
   return status;
 }
-#endif
 
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
 absl::StatusOr<toolbelt::FileDescriptor>
@@ -725,6 +727,10 @@ ClientChannel::CreateSplitBufferSet(size_t buffer_index, size_t full_size,
       slot_private_data = mapping->private_data;
       metadata.handle = slot_handle;
       metadata.allocation_size = slot_mapped_size;
+      metadata.map_offset = mapping->map_offset;
+      if (mapping->fd >= 0) {
+        slot_fd.emplace(mapping->fd, /*owned=*/false);
+      }
     } else {
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
       // Create and register our own memfd, then adopt the server's first-wins
@@ -881,6 +887,7 @@ ClientChannel::OpenSplitBufferSet(size_t buffer_index, size_t full_size,
     }
     SplitBufferMetadata metadata =
         SplitMetadataFromClientBuffer(registered->metadata);
+    metadata.registration_fd = registered->fd.Fd();
 #else
     std::string shadow_file = absl::StrFormat("%s_slot_%d", metadata_base, slot);
     auto metadata_or = ReadSplitBufferMetadataFileWithRetry(shadow_file);
@@ -893,7 +900,22 @@ ClientChannel::OpenSplitBufferSet(size_t buffer_index, size_t full_size,
     uintptr_t slot_handle = metadata.handle;
     uint64_t slot_mapped_size = payload_size;
     void *slot_private_data = nullptr;
+    std::optional<toolbelt::FileDescriptor> registered_fd;
     if (SplitBuffersCallbacks().map) {
+#if SUBSPACE_SHMEM_MODE != SUBSPACE_SHMEM_MODE_MEMFD
+      absl::StatusOr<RegisteredClientBuffer> registered =
+          GetRegisteredClientBuffer(static_cast<uint32_t>(buffer_index),
+                                    /*is_prefix=*/false,
+                                    static_cast<uint32_t>(slot));
+      if (!registered.ok()) {
+        return registered.status();
+      }
+      metadata = SplitMetadataFromClientBuffer(registered->metadata);
+      registered_fd.emplace(std::move(registered->fd));
+#endif
+      if (registered_fd.has_value()) {
+        metadata.registration_fd = registered_fd->Fd();
+      }
       auto mapping = SplitBuffersCallbacks().map(metadata);
       if (!mapping.ok()) {
         return mapping.status();
@@ -925,6 +947,9 @@ ClientChannel::OpenSplitBufferSet(size_t buffer_index, size_t full_size,
       slot_addr = *addr;
       slot_handle = static_cast<uintptr_t>(slot_fd.Fd());
       buffer->split_fds.push_back(std::move(slot_fd));
+    }
+    if (registered_fd.has_value()) {
+      buffer->split_fds.push_back(std::move(*registered_fd));
     }
     buffer->split_handles[slot] = slot_handle;
     buffer->split_slot_buffers[slot] = slot_addr;

@@ -158,6 +158,7 @@ message ClientBufferHandleMetadataProto {
   string shadow_file = 9;
   string object_name = 10;
   ClientBufferAllocator allocator = 11;
+  int64 map_offset = 12;
 }
 
 message RegisterClientBufferRequest {
