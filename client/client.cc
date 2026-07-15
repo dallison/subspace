@@ -111,6 +111,7 @@ static void ToProto(const ClientBufferHandleMetadata &metadata,
   proto->set_shadow_file(metadata.shadow_file);
   proto->set_object_name(metadata.object_name);
   proto->set_allocator(ToProtoAllocator(metadata.allocator));
+  proto->set_map_offset(metadata.map_offset);
 }
 
 static ClientBufferHandleMetadata
@@ -127,6 +128,7 @@ FromProto(const ClientBufferHandleMetadataProto &proto) {
   metadata.shadow_file = proto.shadow_file();
   metadata.object_name = proto.object_name();
   metadata.allocator = FromProtoAllocator(proto.allocator());
+  metadata.map_offset = proto.map_offset();
   return metadata;
 }
 

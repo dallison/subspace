@@ -51,6 +51,7 @@ struct ClientBufferHandleMetadata {
   std::string shadow_file;
   std::string object_name;
   ClientBufferAllocatorKind allocator = ClientBufferAllocatorKind::kUnspecified;
+  int64_t map_offset = 0;
 };
 
 struct RegisteredClientBuffer {
