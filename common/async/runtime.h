@@ -111,6 +111,22 @@ public:
                  opts.cancellable, std::move(opts.name));
   }
 
+  // Spawn a coroutine on the SAME strand as the currently-running coroutine
+  // (identified by its Context).  Use this when a child coroutine shares
+  // mutable state with its parent and must be serialized with it: because both
+  // run on the one strand, Asio never runs them concurrently, even in
+  // multi-threaded mode, so the shared state needs no mutex.  They still
+  // interleave cooperatively at every async suspension point, so a child that
+  // must make progress while the parent is parked in a wait (e.g. a retirement
+  // reader draining backpressure while its transmitter is blocked on POLLOUT)
+  // is not starved.  Like SpawnOnNewStrand the executor is a strand, so the
+  // WaitFdReady/WaitReadable handshake requirement is satisfied.
+  void SpawnOnCurrentStrand(Context ctx, std::function<void(Context)> fn,
+                            SpawnOptions opts = {}) {
+    SpawnTracked(ctx.get_executor(), std::move(fn), opts.cancellable,
+                 std::move(opts.name));
+  }
+
   // Run the io_context on `num_threads` threads (the calling thread plus
   // num_threads-1 helpers).  Blocks until the io_context runs out of work or is
   // stopped, exactly like the single-threaded ioc_.run().
@@ -311,6 +327,13 @@ private:
   // The co backend is single-threaded; a private strand is meaningless, so this
   // is just a normal spawn.
   void SpawnOnNewStrand(std::function<void(Context)> fn, SpawnOptions opts = {}) {
+    Spawn(std::move(fn), std::move(opts));
+  }
+
+  // The co backend is single-threaded, so there is no strand to share: this is
+  // just a normal spawn.
+  void SpawnOnCurrentStrand(Context /*ctx*/, std::function<void(Context)> fn,
+                            SpawnOptions opts = {}) {
     Spawn(std::move(fn), std::move(opts));
   }
 

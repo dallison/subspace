@@ -49,17 +49,19 @@ static bool ChannelUsesSplitBuffers(const ServerChannel *channel) {
          split_channel->GetSplitBufferOptions().use_split_buffers;
 }
 
+// Tracks the ActiveMessages that a bridge transmitter has sent but whose slots
+// the peer has not yet retired, indexed by slot_id.  It is touched by two
+// coroutines - the transmitter (Track/Release) and its retirement reader
+// (Release) - but both are spawned on the same strand (see
+// SpawnOnCurrentStrand at the retirement-reader spawn site), so their accesses
+// are serialized by the strand and need no mutex, even when the io_context runs
+// on multiple threads.
 struct Server::BridgeRetirementState {
   explicit BridgeRetirementState(size_t num_slots)
       : active_messages(num_slots) {}
 
   ~BridgeRetirementState() {
-    std::vector<std::shared_ptr<ActiveMessage>> remaining;
-    {
-      std::lock_guard<std::mutex> lock(mu);
-      remaining.swap(active_messages);
-    }
-    for (auto &active : remaining) {
+    for (auto &active : active_messages) {
       if (active != nullptr) {
         active->DecRef();
       }
@@ -70,42 +72,31 @@ struct Server::BridgeRetirementState {
     if (active == nullptr) {
       return;
     }
-    std::shared_ptr<ActiveMessage> previous;
-    bool tracked = false;
-    {
-      std::lock_guard<std::mutex> lock(mu);
-      if (slot_id >= 0 &&
-          static_cast<size_t>(slot_id) < active_messages.size()) {
-        previous = std::move(active_messages[slot_id]);
-        active_messages[slot_id] = std::move(active);
-        tracked = true;
-      }
-    }
-    if (!tracked) {
+    if (slot_id < 0 ||
+        static_cast<size_t>(slot_id) >= active_messages.size()) {
       active->DecRef();
       return;
     }
+    std::shared_ptr<ActiveMessage> previous =
+        std::move(active_messages[slot_id]);
+    active_messages[slot_id] = std::move(active);
     if (previous != nullptr) {
       previous->DecRef();
     }
   }
 
   void Release(int slot_id) {
-    std::shared_ptr<ActiveMessage> active;
-    {
-      std::lock_guard<std::mutex> lock(mu);
-      if (slot_id < 0 ||
-          static_cast<size_t>(slot_id) >= active_messages.size()) {
-        return;
-      }
-      active = std::move(active_messages[slot_id]);
+    if (slot_id < 0 ||
+        static_cast<size_t>(slot_id) >= active_messages.size()) {
+      return;
     }
+    std::shared_ptr<ActiveMessage> active =
+        std::move(active_messages[slot_id]);
     if (active != nullptr) {
       active->DecRef();
     }
   }
 
-  std::mutex mu;
   std::vector<std::shared_ptr<ActiveMessage>> active_messages;
 };
 
@@ -2045,10 +2036,17 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
   std::shared_ptr<BridgeRetirementState> retirement_state;
   bool notifying_of_retirement = notify_retirement;
 
-  // Spawn a coroutine to read from the retirement connection.
+  // Spawn a coroutine to read from the retirement connection.  It runs on this
+  // transmitter's own strand (not a fresh one) so that its Release calls are
+  // serialized with our Track/Release on the shared retirement_state without a
+  // mutex.  The two still interleave cooperatively: whenever this transmitter
+  // is parked in a wait (subscriber trigger, or POLLOUT under bridge
+  // backpressure) the strand is free to run the retirement reader, so incoming
+  // retirements keep relieving that backpressure.
   if (notifying_of_retirement) {
     retirement_state = std::make_shared<BridgeRetirementState>(info.num_slots);
-    runtime_.SpawnOnNewStrand(
+    runtime_.SpawnOnCurrentStrand(
+        ctx,
         [this, retirement_listener,
          retirement_state](async::Context ret_ctx) mutable {
           return RetirementReceiverCoroutine(ret_ctx, retirement_listener,
