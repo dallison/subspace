@@ -49,6 +49,57 @@ static bool ChannelUsesSplitBuffers(const ServerChannel *channel) {
          split_channel->GetSplitBufferOptions().use_split_buffers;
 }
 
+// Tracks the ActiveMessages that a bridge transmitter has sent but whose slots
+// the peer has not yet retired, indexed by slot_id.  It is touched by two
+// coroutines - the transmitter (Track/Release) and its retirement reader
+// (Release) - but both are spawned on the same strand (see
+// SpawnOnCurrentStrand at the retirement-reader spawn site), so their accesses
+// are serialized by the strand and need no mutex, even when the io_context runs
+// on multiple threads.
+struct Server::BridgeRetirementState {
+  explicit BridgeRetirementState(size_t num_slots)
+      : active_messages(num_slots) {}
+
+  ~BridgeRetirementState() {
+    for (auto &active : active_messages) {
+      if (active != nullptr) {
+        active->DecRef();
+      }
+    }
+  }
+
+  void Track(int slot_id, std::shared_ptr<ActiveMessage> active) {
+    if (active == nullptr) {
+      return;
+    }
+    if (slot_id < 0 ||
+        static_cast<size_t>(slot_id) >= active_messages.size()) {
+      active->DecRef();
+      return;
+    }
+    std::shared_ptr<ActiveMessage> previous =
+        std::move(active_messages[slot_id]);
+    active_messages[slot_id] = std::move(active);
+    if (previous != nullptr) {
+      previous->DecRef();
+    }
+  }
+
+  void Release(int slot_id) {
+    if (slot_id < 0 ||
+        static_cast<size_t>(slot_id) >= active_messages.size()) {
+      return;
+    }
+    std::shared_ptr<ActiveMessage> active =
+        std::move(active_messages[slot_id]);
+    if (active != nullptr) {
+      active->DecRef();
+    }
+  }
+
+  std::vector<std::shared_ptr<ActiveMessage>> active_messages;
+};
+
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
 static bool CleanupSplitBufferMetadataFile(const std::filesystem::path &path) {
   absl::StatusOr<SplitBufferMetadata> metadata =
@@ -383,6 +434,34 @@ BridgeAddressWithPort(const toolbelt::SocketAddress &addr, int port) {
   default:
     return absl::InvalidArgumentError(absl::StrFormat(
         "unsupported bridge listener address: %s", addr.ToString()));
+  }
+}
+
+absl::StatusOr<toolbelt::SocketAddress>
+ParseChannelAddress(const ChannelAddress &address, const char *field_name) {
+  constexpr size_t kAddressSize = sizeof(uint32_t);
+  if (address.address().size() != kAddressSize) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "%s has invalid address length %zu; expected %zu", field_name,
+        address.address().size(), kAddressSize));
+  }
+
+  switch (address.family()) {
+  case ChannelAddress::FAMILY_INET: {
+    in_addr ip_addr;
+    memcpy(&ip_addr, address.address().data(), sizeof(ip_addr));
+    // ChannelAddress stores IPv4 bytes in host order on the wire.
+    ip_addr.s_addr = ntohl(ip_addr.s_addr);
+    return toolbelt::SocketAddress(ip_addr, address.port());
+  }
+  case ChannelAddress::FAMILY_VSOCK: {
+    uint32_t cid;
+    memcpy(&cid, address.address().data(), sizeof(cid));
+    return toolbelt::SocketAddress(cid, address.port());
+  }
+  default:
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "%s has unsupported address family %d", field_name, address.family()));
   }
 }
 
@@ -1309,6 +1388,7 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
 
       channel->AddUser(rsub.id, std::move(sub));
     }
+    channel->RegisterExistingSubscribers();
 
     channels_.emplace(rch.name, channel);
     logger_.Log(toolbelt::LogLevel::kInfo,
@@ -1859,7 +1939,15 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
   subscribed.set_split_buffers(wire_split_buffers);
   subscribed.set_split_buffers_over_bridge(info.split_buffers_over_bridge);
 
-  async::StreamSocket retirement_listener;
+  std::shared_ptr<async::StreamSocket> retirement_listener;
+  struct CloseRetirementListenerOnExit {
+    std::shared_ptr<async::StreamSocket> &socket;
+    ~CloseRetirementListenerOnExit() {
+      if (socket != nullptr) {
+        socket->Close();
+      }
+    }
+  } close_retirement_listener_on_exit{retirement_listener};
   toolbelt::SocketAddress retirement_addr;
 
   if (notify_retirement) {
@@ -1867,15 +1955,16 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
     subscribed.set_notify_retirement(true);
     // Allocate a listen socket to wait for an incoming connection from the
     // other server.
+    retirement_listener = std::make_shared<async::StreamSocket>();
 
-    absl::Status s = BindBridgeListener(retirement_listener);
+    absl::Status s = BindBridgeListener(*retirement_listener);
     if (!s.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Unable to bind socket for retirement receiver for %s: %s",
                   channel_name.c_str(), s.ToString().c_str());
       return;
     }
-    retirement_addr = retirement_listener.BoundAddress();
+    retirement_addr = retirement_listener->BoundAddress();
     logger_.Log(toolbelt::LogLevel::kDebug, "Retirement listener: %s",
                 retirement_addr.ToString().c_str());
 
@@ -1944,19 +2033,24 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
   // send over the bridge.  This extends the lifetime of the AciveMessage until
   // the other side of the bridge sends us a retirement notification for the
   // message's slot.
-  std::shared_ptr<std::vector<std::shared_ptr<ActiveMessage>>>
-      active_retirement_msgs =
-          std::make_shared<std::vector<std::shared_ptr<ActiveMessage>>>();
+  std::shared_ptr<BridgeRetirementState> retirement_state;
   bool notifying_of_retirement = notify_retirement;
 
-  // Spawn a coroutine to read from the retirement connection.
+  // Spawn a coroutine to read from the retirement connection.  It runs on this
+  // transmitter's own strand (not a fresh one) so that its Release calls are
+  // serialized with our Track/Release on the shared retirement_state without a
+  // mutex.  The two still interleave cooperatively: whenever this transmitter
+  // is parked in a wait (subscriber trigger, or POLLOUT under bridge
+  // backpressure) the strand is free to run the retirement reader, so incoming
+  // retirements keep relieving that backpressure.
   if (notifying_of_retirement) {
-    active_retirement_msgs->resize(info.num_slots);
-    runtime_.SpawnOnNewStrand(
-        [this, &retirement_listener,
-         active_retirement_msgs](async::Context ret_ctx) mutable {
+    retirement_state = std::make_shared<BridgeRetirementState>(info.num_slots);
+    runtime_.SpawnOnCurrentStrand(
+        ctx,
+        [this, retirement_listener,
+         retirement_state](async::Context ret_ctx) mutable {
           return RetirementReceiverCoroutine(ret_ctx, retirement_listener,
-                                             active_retirement_msgs);
+                                             retirement_state);
         },
         {.name = absl::StrFormat("Retirement listener for %s", channel_name),
          .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
@@ -2037,21 +2131,25 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
       // The backpressure received here will be applied upwards because
       // we will stop reading the messages from the channel and thus
       // backpressure any publishers writing to that channel.
+      const int32_t slot_id = msg->slot_id;
+      if (notifying_of_retirement) {
+        // Track before sending: the peer can consume and retire the bridged
+        // slot on the separate retirement socket as soon as SendBridgeMessage
+        // returns.
+        retirement_state->Track(slot_id, std::move(msg->active_message));
+      }
       if (absl::Status status =
               SendBridgeMessage(ctx, bridge, *msg, prefix, prefix_area,
                                 wire_split_buffers);
           !status.ok()) {
+        if (notifying_of_retirement) {
+          retirement_state->Release(slot_id);
+        }
         done = true;
         logger_.Log(toolbelt::LogLevel::kError,
                     "Failed to send bridge message for %s: %s",
                     channel_name.c_str(), status.ToString().c_str());
         break;
-      }
-      if (notifying_of_retirement) {
-        // We need to keep track of the message so that we can retire it
-        // when the other side retires the slot.
-        (*active_retirement_msgs)[msg->slot_id] =
-            std::move(msg->active_message);
       }
     }
 
@@ -2073,12 +2171,12 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
 // If these references are the last reference to the slot, it will be retired
 // on this side and the publisher's retirement FD is sent the slot.
 void Server::RetirementReceiverCoroutine(
-    async::Context ctx, async::StreamSocket &retirement_listener,
-    std::shared_ptr<std::vector<std::shared_ptr<ActiveMessage>>>
-        active_retirement_msgs) {
+    async::Context ctx,
+    std::shared_ptr<async::StreamSocket> retirement_listener,
+    std::shared_ptr<BridgeRetirementState> retirement_state) {
   // Accept connection on the retirement listener socket.
   absl::StatusOr<async::StreamSocket> retirement_socket =
-      retirement_listener.Accept(ctx);
+      retirement_listener->Accept(ctx);
   if (!retirement_socket.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to accept retirement connection: %s",
@@ -2109,11 +2207,7 @@ void Server::RetirementReceiverCoroutine(
     // being sent (which is serialized as 0 bytes.  Remove the adustment.
     slot_id -= 1;
 
-    if (slot_id < 0 ||
-        static_cast<size_t>(slot_id) >= active_retirement_msgs->size()) {
-      continue;
-    }
-    (*active_retirement_msgs)[slot_id]->DecRef();
+    retirement_state->Release(slot_id);
   }
 }
 
@@ -2281,43 +2375,30 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
     return;
   }
 
-  std::unique_ptr<async::StreamSocket> retirement_transmitter;
+  std::shared_ptr<async::StreamSocket> retirement_transmitter;
+  struct CloseRetirementTransmitterOnExit {
+    std::shared_ptr<async::StreamSocket> &socket;
+    ~CloseRetirementTransmitterOnExit() {
+      if (socket != nullptr) {
+        socket->Close();
+      }
+    }
+  } close_retirement_transmitter_on_exit{retirement_transmitter};
 
   if (subscribed.notify_retirement()) {
-    retirement_transmitter = std::make_unique<async::StreamSocket>();
-    toolbelt::SocketAddress retirement_addr;
+    retirement_transmitter = std::make_shared<async::StreamSocket>();
     // The address family travels in the message (see SendSubscribeMessage);
     // unset defaults to FAMILY_INET for compatibility with older peers.
-    switch (subscribed.retirement_socket().family()) {
-    case ChannelAddress::FAMILY_INET: {
-      // IPv4 address.
-      struct sockaddr_in tmp_addr;
-      memset(&tmp_addr, 0, sizeof(tmp_addr));
-      tmp_addr.sin_family = AF_INET;
-      tmp_addr.sin_port = htons(subscribed.retirement_socket().port());
-      tmp_addr.sin_addr.s_addr = ntohl(*reinterpret_cast<const uint32_t *>(
-          subscribed.retirement_socket().address().data()));
-      retirement_addr = toolbelt::SocketAddress(tmp_addr);
-      break;
-    }
-    case ChannelAddress::FAMILY_VSOCK: {
-      // Virtual address.
-      struct sockaddr_vm tmp_addr;
-      memset(&tmp_addr, 0, sizeof(tmp_addr));
-      tmp_addr.svm_family = AF_VSOCK;
-      tmp_addr.svm_port = subscribed.retirement_socket().port();
-      tmp_addr.svm_cid = *reinterpret_cast<const uint32_t *>(
-          subscribed.retirement_socket().address().data());
-      retirement_addr = toolbelt::SocketAddress(tmp_addr);
-      break;
-    }
-    default:
+    absl::StatusOr<toolbelt::SocketAddress> retirement_addr =
+        ParseChannelAddress(subscribed.retirement_socket(), "retirement socket");
+    if (!retirement_addr.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
-                  "Unsupported address family for retirement notification");
+                  "Invalid retirement socket for %s: %s", channel_name.c_str(),
+                  retirement_addr.status().ToString().c_str());
       return;
     }
 
-    s = retirement_transmitter->Connect(retirement_addr);
+    s = retirement_transmitter->Connect(*retirement_addr);
     if (!s.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to connect to retirement socket for %s: %s",
@@ -2366,9 +2447,10 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
     // the socket connected to the other server.
     runtime_.SpawnOnNewStrand(
         [this, retirement_fd = std::move(retirement_fd),
-         &retirement_transmitter, channel_name](async::Context ret_ctx) mutable {
+         retirement_transmitter,
+         channel_name](async::Context ret_ctx) mutable {
           RetirementCoroutine(ret_ctx, channel_name, std::move(retirement_fd),
-                              std::move(retirement_transmitter));
+                              retirement_transmitter);
         },
         {.name = absl::StrFormat("Retirement notifier for %s", channel_name),
          .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
@@ -2471,7 +2553,7 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
 void Server::RetirementCoroutine(
     async::Context ctx, const std::string &channel_name,
     toolbelt::FileDescriptor &&retirement_fd,
-    std::unique_ptr<async::StreamSocket> retirement_transmitter) {
+    std::shared_ptr<async::StreamSocket> retirement_transmitter) {
   logger_.Log(toolbelt::LogLevel::kDebug, "Retirement coroutine for %s running",
               channel_name.c_str());
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
@@ -2650,28 +2732,13 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
     // carried in the message itself (FAMILY_INET for TCP, FAMILY_VSOCK for
     // vsock) so the two servers do not have to share the same local address
     // type.  Older peers leave family unset, which defaults to FAMILY_INET.
-    toolbelt::SocketAddress subscriber_addr;
-    switch (subscribe.receiver().family()) {
-    case ChannelAddress::FAMILY_INET: {
-      in_addr subscriber_ip;
-      memcpy(&subscriber_ip, subscribe.receiver().address().data(),
-             sizeof(subscriber_ip));
-      // Need this in host byte order.
-      subscriber_ip.s_addr = ntohl(subscriber_ip.s_addr);
-      subscriber_addr =
-          toolbelt::SocketAddress(subscriber_ip, subscribe.receiver().port());
-      break;
-    }
-    case ChannelAddress::FAMILY_VSOCK: {
-      uint32_t cid = *reinterpret_cast<const uint32_t *>(
-          subscribe.receiver().address().data());
-      subscriber_addr =
-          toolbelt::SocketAddress(cid, subscribe.receiver().port());
-      break;
-    }
-    default:
+    absl::StatusOr<toolbelt::SocketAddress> subscriber_addr =
+        ParseChannelAddress(subscribe.receiver(), "subscribe receiver");
+    if (!subscriber_addr.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
-                  "Unknown address family for subscribe receiver");
+                  "Invalid subscribe receiver for %s: %s",
+                  subscribe.channel_name().c_str(),
+                  subscriber_addr.status().ToString().c_str());
       return;
     }
 
@@ -2690,7 +2757,7 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
     };
     runtime_.SpawnOnNewStrand(
         [this, info = std::move(info), pub_reliable, sub_reliable,
-         subscriber_addr = std::move(subscriber_addr), sender,
+         subscriber_addr = std::move(*subscriber_addr), sender,
          notify_retirement](async::Context ctx) mutable {
           BridgeTransmitterCoroutine(ctx, std::move(info), pub_reliable,
                                      sub_reliable, std::move(subscriber_addr),

@@ -44,6 +44,9 @@ constexpr int64_t kServerWaiting = 3;
 void ClosePluginsOnShutdown();
 bool ShouldClosePluginsOnShutdown();
 
+absl::StatusOr<toolbelt::SocketAddress>
+ParseChannelAddress(const ChannelAddress &address, const char *field_name);
+
 // The Subspace server.
 // This is a single-threaded, coroutine-based server that maintains shared
 // memory IPC channels and communicates with other servers to allow for
@@ -300,6 +303,7 @@ private:
     bool wire_split_buffers = false;
     bool split_buffers_over_bridge = false;
   };
+  struct BridgeRetirementState;
   void BridgeTransmitterCoroutine(async::Context ctx, BridgeChannelInfo info,
                                   bool pub_reliable, bool sub_reliable,
                                   toolbelt::SocketAddress subscriber,
@@ -314,11 +318,12 @@ private:
   void RetirementCoroutine(
       async::Context ctx, const std::string &channel_name,
       toolbelt::FileDescriptor &&retirement_fd,
-      std::unique_ptr<async::StreamSocket> retirement_transmitter);
+      std::shared_ptr<async::StreamSocket> retirement_transmitter);
 
   void RetirementReceiverCoroutine(
-      async::Context ctx, async::StreamSocket &retirement_listener,
-      std::shared_ptr<std::vector<std::shared_ptr<ActiveMessage>>> active_retirement_msgs);
+      async::Context ctx,
+      std::shared_ptr<async::StreamSocket> retirement_listener,
+      std::shared_ptr<BridgeRetirementState> retirement_state);
 
   void SubscribeOverBridge(ServerChannel *channel, bool reliable,
                            bool split_buffers_over_bridge,
