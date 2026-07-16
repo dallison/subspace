@@ -310,6 +310,24 @@ public:
   }
 
   virtual void RemoveBuffer(uint64_t session_id, Server *server = nullptr);
+
+  // Returns true if the given client connection owns a publisher that is
+  // backed by this channel's storage.  Only such a connection is permitted to
+  // register or unregister client buffers for the channel; this prevents an
+  // unrelated client from injecting, overwriting or erasing another
+  // publisher's fd-backed buffer registrations (which on Android/memfd would
+  // let a subscriber map the wrong or a missing backing fd).  Multiplexer
+  // channels override this to also consult their virtual channels, which is
+  // where publishers backed by the mux's storage actually live.
+  virtual bool HasPublisherOwnedBy(const ClientHandler *handler) const {
+    for (const auto &[id, user] : users_) {
+      if (user->IsPublisher() && user->GetHandler() == handler) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   void RegisterClientBuffer(ClientBufferHandleMetadata metadata,
                             toolbelt::FileDescriptor fd = {}) {
     ClientBufferGroupKey group{metadata.session_id, metadata.buffer_index};
@@ -478,6 +496,7 @@ public:
   void RemoveVirtualChannel(VirtualChannel *vchan);
 
   bool IsMux() const override { return true; }
+  bool HasPublisherOwnedBy(const ClientHandler *handler) const override;
   void RegisterExistingSubscribers() override;
   bool IsEmpty() const override {
     return virtual_channels_.empty() && ServerChannel::IsEmpty();

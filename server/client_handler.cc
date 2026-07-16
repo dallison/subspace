@@ -251,8 +251,21 @@ absl::Status ClientHandler::HandleRegisterClientBuffer(
   if (channel->IsVirtual()) {
     channel = static_cast<VirtualChannel *>(channel)->GetMux();
   }
+  if (!channel->HasPublisherOwnedBy(this)) {
+    return absl::PermissionDeniedError(absl::StrFormat(
+        "Ignoring client buffer registration for channel %s from a client "
+        "that does not own a publisher on it",
+        metadata.channel_name));
+  }
   toolbelt::FileDescriptor fd;
-  if (req.has_fd() && static_cast<size_t>(req.fd_index()) < fds.size()) {
+  if (req.has_fd()) {
+    if (req.fd_index() < 0 ||
+        static_cast<size_t>(req.fd_index()) >= fds.size()) {
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "Client buffer registration for channel %s claims an fd but has an "
+          "invalid fd index %d",
+          metadata.channel_name, req.fd_index()));
+    }
     fd = std::move(fds[size_t(req.fd_index())]);
   }
   channel->RegisterClientBuffer(metadata, std::move(fd));
@@ -282,6 +295,12 @@ absl::Status ClientHandler::HandleUnregisterClientBuffer(
   }
   if (channel->IsVirtual()) {
     channel = static_cast<VirtualChannel *>(channel)->GetMux();
+  }
+  if (!channel->HasPublisherOwnedBy(this)) {
+    return absl::PermissionDeniedError(absl::StrFormat(
+        "Ignoring client buffer unregistration for channel %s from a client "
+        "that does not own a publisher on it",
+        req.channel_name()));
   }
   channel->UnregisterClientBuffer(req.session_id(), req.buffer_index());
   server_->ForEachShadow([&](const std::unique_ptr<ShadowReplicator> &shadow) {
