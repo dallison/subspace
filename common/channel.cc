@@ -401,7 +401,14 @@ Channel::PosixSharedMemoryName(const std::string &shadow_file) {
   // Use the inode number (unique per file) to make the shm file name.
   // st_ino is unsigned and can be 64-bit on some systems (e.g. QNX), so
   // promote to uint64_t before formatting.
-  return absl::StrFormat("subspace_%llu",
+  //
+  // The leading '/' is required: POSIX shm_open names that do not start with
+  // '/' are implementation-defined. On QNX they resolve relative to the
+  // process cwd, so a publisher started under
+  // /applications/install/opt/<App>/ creates objects that a subscriber
+  // started from '/' cannot open (ENOENT). A leading slash places the object
+  // in the global shm namespace (macOS also requires a leading '/').
+  return absl::StrFormat("/subspace_%llu",
                          static_cast<unsigned long long>(st.st_ino));
 }
 #endif
