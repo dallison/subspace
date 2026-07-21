@@ -880,7 +880,9 @@ fn create_shm(name: &str, size: usize) -> crate::error::Result<RawFd> {
 #[cfg(not(target_os = "linux"))]
 fn posix_shm_name(shadow_path: &str) -> crate::error::Result<String> {
     let stat = crate::syscall_shim::shim_stat(shadow_path)?;
-    Ok(format!("subspace_{}", stat.st_ino))
+    // POSIX shm names must use the global namespace so Rust and C++ clients
+    // resolve the same object even when their working directories differ.
+    Ok(format!("/subspace_{}", stat.st_ino))
 }
 
 #[cfg(not(target_os = "linux"))]
