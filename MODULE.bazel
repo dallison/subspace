@@ -16,7 +16,20 @@ bazel_dep(name = "rules_android_ndk", version = "0.1.5")
 bazel_dep(name = "zlib", version = "1.3.1.bcr.5")
 bazel_dep(name = "coroutines", version = "3.3.2")
 bazel_dep(name = "cpp_toolbelt", version = "2.1.3")
+bazel_dep(name = "retro", version = "0.0.0")
 bazel_dep(name = "rules_python", version = "1.7.0")
+
+git_override(
+    module_name = "coroutines",
+    commit = "70e5c3f866fb84f512fdc70f92ab86522f1a59db",
+    remote = "https://github.com/dallison/co.git",
+)
+
+git_override(
+    module_name = "retro",
+    commit = "783128ecfbb652a586d00a6b916aa39fd6d3688c",
+    remote = "https://github.com/dallison/retro.git",
+)
 
 # Boost (for asio_rpc)
 bazel_dep(name = "boost.asio", version = "1.87.0.bcr.1")

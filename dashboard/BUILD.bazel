@@ -1,0 +1,71 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+
+DESKTOP_COMPATIBILITY = select({
+    "//:android": ["@platforms//:incompatible"],
+    "//:qnx": ["@platforms//:incompatible"],
+    "//conditions:default": [],
+})
+
+cc_library(
+    name = "dashboard_lib",
+    srcs = [
+        "engine.cc",
+        "metrics.cc",
+        "ui.cc",
+    ],
+    hdrs = [
+        "engine.h",
+        "metrics.h",
+        "ui.h",
+    ],
+    copts = ["-std=c++20"],
+    target_compatible_with = DESKTOP_COMPATIBILITY,
+    deps = [
+        "//client:subspace_client",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings:str_format",
+        "@coroutines//co:co_cpp20",
+        "@cpp_toolbelt//toolbelt",
+        "@retro//retro:retro",
+    ],
+)
+
+cc_binary(
+    name = "dashboard",
+    srcs = ["main.cc"],
+    copts = ["-std=c++20"],
+    target_compatible_with = DESKTOP_COMPATIBILITY,
+    deps = [
+        ":dashboard_lib",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/flags:parse",
+    ],
+)
+
+cc_test(
+    name = "dashboard_test",
+    size = "small",
+    srcs = ["dashboard_test.cc"],
+    copts = ["-std=c++20"],
+    target_compatible_with = DESKTOP_COMPATIBILITY,
+    deps = [
+        ":dashboard_lib",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "engine_test",
+    size = "small",
+    timeout = "moderate",
+    srcs = ["engine_test.cc"],
+    copts = ["-std=c++20"],
+    target_compatible_with = DESKTOP_COMPATIBILITY,
+    deps = [
+        ":dashboard_lib",
+        "//client:test_fixture",
+        "@googletest//:gtest_main",
+    ],
+)

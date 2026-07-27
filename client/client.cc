@@ -729,15 +729,22 @@ ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int32_t max_size,
 }
 
 absl::StatusOr<const Message>
-ClientImpl::PublishMessage(PublisherImpl *publisher, int64_t message_size) {
+ClientImpl::PublishMessage(PublisherImpl *publisher, int64_t message_size,
+                           bool notify_subscribers) {
   return PublishMessageInternal(publisher, message_size, /*omit_prefix=*/false,
-                                /*use_prefix_slot_id=*/false);
+                                /*use_prefix_slot_id=*/false,
+                                notify_subscribers);
+}
+
+void ClientImpl::NotifySubscribers(PublisherImpl *publisher) {
+  publisher->TriggerSubscribers();
 }
 
 absl::StatusOr<const Message>
 ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
                                    int64_t message_size, bool omit_prefix,
-                                   bool use_prefix_slot_id) {
+                                   bool use_prefix_slot_id,
+                                   bool notify_subscribers) {
   // Lock is already held by the call to GetMessageBufferSpan.  This RAII
   // instance wil relesas the lock when we return from this function.
   ClientLockGuard guard(this, LockMode::kMaybeLocked);
@@ -780,7 +787,9 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
 
   publisher->SetSlot(msg.new_slot);
 
-  publisher->TriggerSubscribers();
+  if (notify_subscribers) {
+    publisher->TriggerSubscribers();
+  }
   if (absl::Status status = publisher->UnmapUnusedBuffers(); !status.ok()) {
     return status;
   }
@@ -1280,6 +1289,14 @@ absl::StatusOr<Message> ClientImpl::ReadMessage(SubscriberImpl *subscriber,
   return ReadMessageInternal(subscriber, mode,
                              subscriber->options_.pass_activation,
                              /*clear_trigger=*/true);
+}
+
+absl::StatusOr<Message>
+ClientImpl::ReadMessageFromBatch(SubscriberImpl *subscriber, ReadMode mode) {
+  ClientLockGuard guard(this);
+  return ReadMessageInternal(subscriber, mode,
+                             subscriber->options_.pass_activation,
+                             /*clear_trigger=*/false);
 }
 
 absl::StatusOr<Message>

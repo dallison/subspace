@@ -1943,6 +1943,48 @@ TEST_F(ClientTest, PublishSingleMessagePollAndReadSubscriberFirst) {
   ASSERT_EQ(0, msg->length);
 }
 
+TEST_F(ClientTest, PublishBatchNotifiesOnceAndDrainsWithoutRepolling) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+  auto sub = EVAL_AND_ASSERT_OK(
+      sub_client.CreateSubscriber("publish_batch_notification"));
+  auto pub = EVAL_AND_ASSERT_OK(
+      pub_client.CreatePublisher("publish_batch_notification", 64, 8));
+
+  ASSERT_EQ(0, EVAL_AND_ASSERT_OK(sub.ReadMessage()).length);
+  auto buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  std::memcpy(buffer, "a", 1);
+  ASSERT_OK(pub.PublishMessage(1, /*notify_subscribers=*/false));
+
+  struct pollfd fd = sub.GetPollFd();
+  EXPECT_EQ(0, ::poll(&fd, 1, 0));
+
+  buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  std::memcpy(buffer, "b", 1);
+  ASSERT_OK(pub.PublishMessage(1, /*notify_subscribers=*/false));
+  fd = sub.GetPollFd();
+  EXPECT_EQ(0, ::poll(&fd, 1, 0));
+
+  pub.NotifySubscribers();
+  fd = sub.GetPollFd();
+  ASSERT_EQ(1, ::poll(&fd, 1, 1000));
+
+  {
+    auto first = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+    ASSERT_EQ(1, first.length);
+    EXPECT_EQ('a', *static_cast<const char *>(first.buffer));
+  }
+  {
+    auto second = EVAL_AND_ASSERT_OK(sub.ReadMessageFromBatch());
+    ASSERT_EQ(1, second.length);
+    EXPECT_EQ('b', *static_cast<const char *>(second.buffer));
+  }
+  auto empty = EVAL_AND_ASSERT_OK(sub.ReadMessageFromBatch());
+  EXPECT_EQ(0, empty.length);
+}
+
 TEST_F(ClientTest, PublishSingleMessagePollAndReadAfterPlaceholderRead) {
   subspace::Client pub_client;
   subspace::Client sub_client;

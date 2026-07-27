@@ -165,8 +165,6 @@
     "https://bcr.bazel.build/modules/boringssl/0.20240913.0/source.json": "540753d29c271a302442a3d3c6ccd4faace597e7bcf0f77049fe59535782ce9f",
     "https://bcr.bazel.build/modules/buildozer/8.5.1/MODULE.bazel": "a35d9561b3fc5b18797c330793e99e3b834a473d5fbd3d7d7634aafc9bdb6f8f",
     "https://bcr.bazel.build/modules/buildozer/8.5.1/source.json": "e3386e6ff4529f2442800dee47ad28d3e6487f36a1f75ae39ae56c70f0cd2fbd",
-    "https://bcr.bazel.build/modules/coroutines/3.3.2/MODULE.bazel": "ad1395ae9758ee5d113acab755b4d972c368c4dab66513bfe31423136f3ee608",
-    "https://bcr.bazel.build/modules/coroutines/3.3.2/source.json": "fb47a4c3e13d730a1a58ed6a34add8f6aaeef655a47d0f179427f71bf58ba150",
     "https://bcr.bazel.build/modules/cpp_toolbelt/2.1.3/MODULE.bazel": "3358a96b2be79b5d73d052fc6b6d71737836db8f7fb81469d3c6b7e97b4661e5",
     "https://bcr.bazel.build/modules/cpp_toolbelt/2.1.3/source.json": "c400ed2b6e7e93c31c79019b04678b85ffb226518a671b45af2a11f367dac0ad",
     "https://bcr.bazel.build/modules/google_benchmark/1.8.2/MODULE.bazel": "a70cf1bba851000ba93b58ae2f6d76490a9feb74192e57ab8e8ff13c34ec50cb",
