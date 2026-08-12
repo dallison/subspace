@@ -84,8 +84,7 @@ uint64_t ExpectedSplitBufferVirtualMemoryUsage(int num_slots,
                                                uint64_t slot_size,
                                                uint64_t prefix_size) {
   return sizeof(subspace::SystemControlBlock) +
-         subspace::CcbSize(num_slots,
-                           subspace::kDefaultSubscriberQueueArenaSize) +
+         subspace::CcbSize(num_slots, /*subscriber_queue_arena_size=*/0) +
          sizeof(subspace::BufferControlBlock) +
          AlignPage(prefix_size * static_cast<uint64_t>(num_slots)) +
          AlignPage(slot_size) * static_cast<uint64_t>(num_slots);
@@ -1053,7 +1052,11 @@ TEST_F(ClientTest, ConcurrentQueueReservationOrderDoesNotDropOlderOrdinal) {
 
   constexpr char kChannel[] = "subscriber_queue_out_of_order";
   auto pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
-      kChannel, subspace::PublisherOptions().SetSlotSize(64).SetNumSlots(8)));
+      kChannel, subspace::PublisherOptions()
+                    .SetSlotSize(64)
+                    .SetNumSlots(8)
+                    .SetSubscriberQueueArenaSize(
+                        subspace::kDefaultSubscriberQueueArenaSize)));
   auto sub = EVAL_AND_ASSERT_OK(client.CreateSubscriber(kChannel));
 
   for (uint8_t value = 1; value <= 2; ++value) {
@@ -6487,20 +6490,15 @@ TEST_F(ClientTest, PublisherSubscriberQueueArenaSizeOption) {
       "subscriber_queue_size_default",
       subspace::PublisherOptions().SetSlotSize(128).SetNumSlots(8)));
   EXPECT_EQ(8, default_pub.NumSlots());
-  EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
-            default_pub.SubscriberQueueSize());
-  EXPECT_EQ(subspace::kDefaultSubscriberQueueArenaSize,
-            default_pub.SubscriberQueueArenaSize());
+  EXPECT_EQ(0, default_pub.SubscriberQueueSize());
+  EXPECT_EQ(0, default_pub.SubscriberQueueArenaSize());
   auto default_sub = EVAL_AND_ASSERT_OK(
       client.CreateSubscriber("subscriber_queue_size_default"));
-  EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
-            default_sub.SubscriberQueueSize());
+  EXPECT_EQ(0, default_sub.SubscriberQueueSize());
   auto default_info =
       EVAL_AND_ASSERT_OK(client.GetChannelInfo("subscriber_queue_size_default"));
-  EXPECT_EQ(subspace::kDefaultSubscriberQueueSize,
-            default_info.subscriber_queue_size);
-  EXPECT_EQ(subspace::kDefaultSubscriberQueueArenaSize,
-            default_info.subscriber_queue_arena_size);
+  EXPECT_EQ(0, default_info.subscriber_queue_size);
+  EXPECT_EQ(0, default_info.subscriber_queue_arena_size);
 
   auto disabled_pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
       "subscriber_queue_size_disabled",

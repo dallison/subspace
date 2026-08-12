@@ -500,7 +500,7 @@ SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size,
   SubspacePublisherOptions options = {
       slot_size,
       num_slots,
-      subspace::kDefaultSubscriberQueueArenaSize,
+      0,
       false,
       false,
       false,

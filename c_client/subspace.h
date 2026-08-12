@@ -214,8 +214,7 @@ typedef struct {
   const int32_t slot_size; // Initial size of slots (might be resized).
   const int num_slots;     // Number of slots (never changes)
   // Total bytes reserved for packed per-subscriber queues in the CCB. The
-  // options factory selects 64,000 bytes; zero selects the bitset path by
-  // default.
+  // options factory selects zero, disabling queues in favor of the bitset path.
   uint64_t subscriber_queue_arena_size;
   bool local;              // If true, messages stay local to this machine.
   bool reliable;           // Reliable publisher.

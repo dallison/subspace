@@ -80,12 +80,12 @@ Each channel requires three shared memory regions, created via `shm_open()` (POS
 - Variable-length: `MessageSlot` array, retired/free/available bitsets, a
   subscriber queue index, and a packed subscriber queue arena.
 - Size: `CcbSize(num_slots, subscriber_queue_arena_size)`. Publisher client
-  APIs explicitly configure the packed arena in bytes and default to 64,000
-  bytes, enough for 100 default-sized queues. A subscriber that does not
-  request an override gets the fixed 16-entry default. Subscriber IDs still
-  support the full 1024 owner limit, but queue allocation fails once the packed
-  arena is full. Explicitly selecting a zero-byte arena omits it and uses the
-  available-slot bitset path by default.
+  APIs explicitly configure the packed arena in bytes and default to zero,
+  omitting subscriber queues and using the available-slot bitset path. Opting
+  into the standard 64,000-byte arena supports 100 default-sized queues. A
+  subscriber that does not request an override then gets the fixed 16-entry
+  default. Subscriber IDs still support the full 1024 owner limit, but queue
+  allocation fails once the packed arena is full.
 - Per-subscriber queues are acceleration hints. The available-slot bitset is
   authoritative, and consumers fall back to an ordinal-ordered bitset snapshot
   if queue overflow or insertion failure races a claim.

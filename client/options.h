@@ -49,11 +49,10 @@ struct PublisherOptions {
     num_slots = num;
     return *this;
   }
-  // Total bytes reserved for packed per-subscriber queues in the CCB. A
-  // non-empty arena gives subscribers that do not request an override the fixed
-  // kDefaultSubscriberQueueSize capacity. Explicitly setting zero selects the
-  // available-slot bitset path by default. All publishers on a channel must
-  // agree on this value.
+  // Total bytes reserved for packed per-subscriber queues in the CCB. Queues
+  // are disabled by default. A non-empty arena gives subscribers that do not
+  // request an override the fixed kDefaultSubscriberQueueSize capacity. All
+  // publishers on a channel must agree on this value.
   PublisherOptions &SetSubscriberQueueArenaSize(uint64_t size) {
     subscriber_queue_arena_size = size;
     return *this;
@@ -231,7 +230,7 @@ struct PublisherOptions {
   // here.
   int32_t slot_size = 0;
   int32_t num_slots = 0;
-  uint64_t subscriber_queue_arena_size = kDefaultSubscriberQueueArenaSize;
+  uint64_t subscriber_queue_arena_size = 0;
 
   bool local = false;
   bool reliable = false;

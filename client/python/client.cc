@@ -115,8 +115,8 @@ PYBIND11_MODULE(subspace, m) {
            "Get the number of slots for the publisher.")
       .def("set_subscriber_queue_arena_size",
            &PublisherOptions::SetSubscriberQueueArenaSize,
-           "Set the bytes reserved for packed subscriber queues. Explicitly "
-           "setting 0 disables queues by default.")
+           "Set the bytes reserved for packed subscriber queues. Queues are "
+           "disabled by default; a non-zero size enables them.")
       .def("subscriber_queue_arena_size",
            &PublisherOptions::SubscriberQueueArenaSize,
            "Get the configured subscriber queue arena size in bytes.")

@@ -134,6 +134,7 @@ class TestSubspaceClient(unittest.TestCase):
         opts.set_slot_size(256)
         opts.set_num_slots(10)
         opts.set_type("sub_type")
+        opts.set_subscriber_queue_arena_size(11_000)
         pub = client.create_publisher(channel_name="ch_sub_acc",
                                       options=opts)
         sub_opts = subspace.SubscriberOptions()
@@ -291,6 +292,7 @@ class TestSubspaceClient(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_publisher_options(self):
         opts = subspace.PublisherOptions()
+        self.assertEqual(opts.subscriber_queue_arena_size(), 0)
         opts.set_slot_size(1024)
         opts.set_num_slots(4)
         opts.set_reliable(True)

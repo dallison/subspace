@@ -57,10 +57,7 @@ fn publisher_options_defaults() {
     let opts = PublisherOptions::new();
     assert_eq!(opts.slot_size, 0);
     assert_eq!(opts.num_slots, 0);
-    assert_eq!(
-        opts.subscriber_queue_arena_size,
-        DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE
-    );
+    assert_eq!(opts.subscriber_queue_arena_size, 0);
     assert!(!opts.local);
     assert!(!opts.reliable);
     assert!(!opts.bridge);

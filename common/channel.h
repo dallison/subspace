@@ -128,9 +128,9 @@ constexpr int kMaxSlotOwners = 1024;
 // Default per-subscriber queue depth used whenever the publisher provisions a
 // non-empty arena and the subscriber does not request an override.
 constexpr int kDefaultSubscriberQueueSize = 16;
-// Default packed arena size selected by publisher client APIs. This fits 100
-// default-sized (16-entry) queues. Explicitly selecting zero keeps the
-// available-slot bitset path and omits the queue arena.
+// Standard packed arena size for callers that opt into subscriber queues. This
+// fits 100 default-sized (16-entry) queues. Publisher options default to zero,
+// which keeps the available-slot bitset path and omits the queue arena.
 constexpr uint64_t kDefaultSubscriberQueueArenaSize = 64'000;
 constexpr size_t kDefaultMaxAvailableSlotQueueCapacity = 1024;
 constexpr size_t kMaxSlotQueueCasAttempts = 64;

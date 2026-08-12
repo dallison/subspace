@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 /// Fixed queue depth inherited by subscribers when an arena is provisioned.
 pub const DEFAULT_SUBSCRIBER_QUEUE_SIZE: i32 = 16;
-/// Default packed subscriber queue arena size in bytes.
+/// Standard packed subscriber queue arena size for callers that opt in.
 pub const DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE: u64 = 64_000;
 
 #[derive(Debug, Clone)]
@@ -42,7 +42,7 @@ impl Default for PublisherOptions {
         Self {
             slot_size: 0,
             num_slots: 0,
-            subscriber_queue_arena_size: DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE,
+            subscriber_queue_arena_size: 0,
             local: false,
             reliable: false,
             bridge: false,
@@ -78,10 +78,8 @@ impl PublisherOptions {
         self
     }
 
-    /// Set each subscriber's per-subscriber slot queue capacity.
-    ///
     /// Set the bytes reserved for packed per-subscriber queues in the CCB.
-    /// Explicitly setting zero selects the available-slot bitset by default.
+    /// Subscriber queues are disabled by default; a non-zero size opts in.
     pub fn set_subscriber_queue_arena_size(mut self, size: u64) -> Self {
         self.subscriber_queue_arena_size = size;
         self
