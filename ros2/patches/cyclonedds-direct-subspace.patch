@@ -1,0 +1,2278 @@
+diff --git a/package.xml b/package.xml
+index 3fa926c..5f4515e 100644
+--- a/package.xml
++++ b/package.xml
+@@ -17,9 +17,7 @@
+     <build_depend>libssl-dev</build_depend>
+     <exec_depend>openssl</exec_depend>
+
+-    <depend>iceoryx_binding_c</depend>
+-    <depend>iceoryx_posh</depend>
+-    <depend>iceoryx_hoofs</depend>
++    <depend>subspace_vendor</depend>
+
+     <doc_depend>doxygen</doc_depend>
+     <doc_depend>python3-breathe</doc_depend>
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index a0edd71..417ca53 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -40,26 +40,28 @@ if(ENABLE_SOURCE_SPECIFIC_MULTICAST)
+   set(ENABLE_SSM ON)
+ endif()
+
+-# Prefer iceoryx integration but do not require it.
++# Prefer direct Subspace integration but do not require it.
+ if(${CMAKE_SYSTEM_NAME} MATCHES "Windows")
+   set(ENABLE_SHM "OFF" CACHE STRING "Disable shared memory support")
+-  message(STATUS "Warning: iceoryx binding for Windows currently not supported")
++  message(STATUS "Warning: Subspace shared memory backend for Windows currently not supported")
+ else()
+   set(ENABLE_SHM "AUTO" CACHE STRING "Enable shared memory support")
+ endif()
+
+ set_property(CACHE ENABLE_SHM PROPERTY STRINGS ON OFF AUTO)
+ if(ENABLE_SHM)
+-  if(NOT ENABLE_SHM STREQUAL "AUTO")
+-    set(iceoryx_required REQUIRED)
+-  else()
+-    set(iceoryx_required QUIET)
++  set(SUBSPACE_SOURCE_DIR "" CACHE PATH "Path to the Subspace source tree")
++  if(NOT SUBSPACE_SOURCE_DIR AND DEFINED ENV{SUBSPACE_SOURCE_DIR})
++    set(SUBSPACE_SOURCE_DIR "$ENV{SUBSPACE_SOURCE_DIR}" CACHE PATH "Path to the Subspace source tree" FORCE)
++  elseif(NOT SUBSPACE_SOURCE_DIR AND EXISTS "/subspace/CMakeLists.txt")
++    set(SUBSPACE_SOURCE_DIR "/subspace" CACHE PATH "Path to the Subspace source tree" FORCE)
+   endif()
+-  find_package(iceoryx_binding_c ${iceoryx_required})
+-  set(ENABLE_SHM ${iceoryx_binding_c_FOUND} CACHE STRING "" FORCE)
+-  if(ENABLE_SHM AND APPLE)
+-    get_filename_component(iceoryx_libdir "${ICEORYX_LIB}" DIRECTORY)
+-    set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_RPATH};${iceoryx_libdir}")
++  if(SUBSPACE_SOURCE_DIR)
++    set(ENABLE_SHM ON CACHE STRING "" FORCE)
++  elseif(ENABLE_SHM STREQUAL "AUTO")
++    set(ENABLE_SHM OFF CACHE STRING "" FORCE)
++  else()
++    message(FATAL_ERROR "ENABLE_SHM=ON requires -DSUBSPACE_SOURCE_DIR=<subspace source tree>")
+   endif()
+ endif()
+
+diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
+index 0f7a713..50492d7 100644
+--- a/src/core/CMakeLists.txt
++++ b/src/core/CMakeLists.txt
+@@ -59,7 +59,34 @@ if(ENABLE_SECURITY)
+ endif()
+
+ if(ENABLE_SHM)
+-  target_link_libraries(ddsc PRIVATE iceoryx_binding_c::iceoryx_binding_c)
++  enable_language(CXX)
++  set(CMAKE_CXX_STANDARD 17)
++  set(CMAKE_CXX_STANDARD_REQUIRED ON)
++
++  set(SUBSPACE_SOURCE_DIR "" CACHE PATH "Path to the Subspace source tree")
++  if(NOT SUBSPACE_SOURCE_DIR AND DEFINED ENV{SUBSPACE_SOURCE_DIR})
++    set(SUBSPACE_SOURCE_DIR "$ENV{SUBSPACE_SOURCE_DIR}" CACHE PATH "Path to the Subspace source tree" FORCE)
++  elseif(NOT SUBSPACE_SOURCE_DIR AND EXISTS "/subspace/CMakeLists.txt")
++    set(SUBSPACE_SOURCE_DIR "/subspace" CACHE PATH "Path to the Subspace source tree" FORCE)
++  endif()
++  if(NOT SUBSPACE_SOURCE_DIR)
++    message(FATAL_ERROR "ENABLE_SHM with direct Subspace backend requires -DSUBSPACE_SOURCE_DIR=<subspace source tree>")
++  endif()
++
++  set(SUBSPACE_PYTHON OFF CACHE BOOL "" FORCE)
++  set(SUBSPACE_ASIO_RPC OFF CACHE BOOL "" FORCE)
++  set(SUBSPACE_CO20_RPC OFF CACHE BOOL "" FORCE)
++
++  add_subdirectory(
++    "${SUBSPACE_SOURCE_DIR}"
++    "${CMAKE_CURRENT_BINARY_DIR}/subspace"
++    EXCLUDE_FROM_ALL)
++
++  target_link_libraries(ddsc PRIVATE subspace_client)
++  target_include_directories(ddsc PRIVATE
++    "${SUBSPACE_SOURCE_DIR}"
++    "${CMAKE_CURRENT_BINARY_DIR}/subspace")
++  target_compile_features(ddsc PRIVATE cxx_std_17)
+ endif()
+
+ include(ddsi/CMakeLists.txt)
+diff --git a/src/core/ddsc/src/dds__data_allocator.h b/src/core/ddsc/src/dds__data_allocator.h
+index cdd0856..f240e08 100644
+--- a/src/core/ddsc/src/dds__data_allocator.h
++++ b/src/core/ddsc/src/dds__data_allocator.h
+@@ -22,8 +22,7 @@ extern "C" {
+
+ #ifdef DDS_HAS_SHM
+
+-#include "iceoryx_binding_c/publisher.h"
+-#include "iceoryx_binding_c/subscriber.h"
++#include "dds/ddsi/ddsi_shm_transport.h"
+
+ typedef enum dds_iox_allocator_kind {
+   DDS_IOX_ALLOCATOR_KIND_FINI,
+@@ -35,8 +34,8 @@ typedef enum dds_iox_allocator_kind {
+ typedef struct dds_iox_allocator {
+   enum dds_iox_allocator_kind kind;
+   union {
+-    iox_pub_t pub;
+-    iox_sub_t sub;
++    dds_subspace_pub_t pub;
++    dds_subspace_sub_t sub;
+   } ref;
+   ddsrt_mutex_t mutex;
+ } dds_iox_allocator_t;
+diff --git a/src/core/ddsc/src/dds__types.h b/src/core/ddsc/src/dds__types.h
+index e290ec6..b06054a 100644
+--- a/src/core/ddsc/src/dds__types.h
++++ b/src/core/ddsc/src/dds__types.h
+@@ -24,8 +24,6 @@
+
+ #ifdef DDS_HAS_SHM
+ #include "dds/ddsi/ddsi_shm_transport.h"
+-#include "iceoryx_binding_c/publisher.h"
+-#include "iceoryx_binding_c/subscriber.h"
+ #include "shm__monitor.h"
+ #define MAX_PUB_LOANS 8
+ #endif
+@@ -342,8 +340,8 @@ typedef struct dds_reader {
+   uint32_t m_loan_size;
+   unsigned m_wrapped_sertopic : 1; /* set iff reader's topic is a wrapped ddsi_sertopic for backwards compatibility */
+ #ifdef DDS_HAS_SHM
+-  iox_sub_context_t m_iox_sub_context;
+-  iox_sub_t m_iox_sub;
++  dds_subspace_sub_context_t m_iox_sub_context;
++  dds_subspace_sub_t m_iox_sub;
+ #endif
+
+   /* Status metrics */
+@@ -364,7 +362,7 @@ typedef struct dds_writer {
+   struct whc *m_whc; /* FIXME: ownership still with underlying DDSI writer (cos of DDSI built-in writers )*/
+   bool whc_batch; /* FIXME: channels + latency budget */
+ #ifdef DDS_HAS_SHM
+-  iox_pub_t m_iox_pub;
++  dds_subspace_pub_t m_iox_pub;
+   void *m_iox_pub_loans[MAX_PUB_LOANS];
+ #endif
+
+diff --git a/src/core/ddsc/src/dds_data_allocator.c b/src/core/ddsc/src/dds_data_allocator.c
+index 100dd19..27ad39f 100644
+--- a/src/core/ddsc/src/dds_data_allocator.c
++++ b/src/core/ddsc/src/dds_data_allocator.c
+@@ -114,7 +114,7 @@ void *dds_data_allocator_alloc (dds_data_allocator_t *data_allocator, size_t siz
+         return NULL;
+       else {
+         ddsrt_mutex_lock(&d->mutex);
+-        // NB: This creates an iceoryx header in addition to the allocation.
++        // NB: This creates a Subspace SHM header in addition to the allocation.
+         //     This may be undesirable, especially for small allocations...
+         // The header contains the size of the allocation and other information,
+         // e.g. whether the memory is uninitialized or contains data.
+@@ -152,16 +152,16 @@ dds_return_t dds_data_allocator_free (dds_data_allocator_t *data_allocator, void
+       case DDS_IOX_ALLOCATOR_KIND_SUBSCRIBER:
+         if (ptr != NULL) {
+           ddsrt_mutex_lock(&d->mutex);
+-          shm_lock_iox_sub(d->ref.sub);
+-          iox_sub_release_chunk(d->ref.sub, ptr);
+-          shm_unlock_iox_sub(d->ref.sub);
++          shm_lock_subspace_sub(d->ref.sub);
++          dds_subspace_sub_release(d->ref.sub, ptr);
++          shm_unlock_subspace_sub(d->ref.sub);
+           ddsrt_mutex_unlock(&d->mutex);
+         }
+         break;
+       case DDS_IOX_ALLOCATOR_KIND_PUBLISHER:
+         if (ptr != NULL) {
+           ddsrt_mutex_lock(&d->mutex);
+-          iox_pub_release_chunk(d->ref.pub, ptr);
++          dds_subspace_pub_release(d->ref.pub, ptr);
+           ddsrt_mutex_unlock(&d->mutex);
+         }
+         break;
+diff --git a/src/core/ddsc/src/dds_loan.c b/src/core/ddsc/src/dds_loan.c
+index 39ceae4..fc3e27d 100644
+--- a/src/core/ddsc/src/dds_loan.c
++++ b/src/core/ddsc/src/dds_loan.c
+@@ -10,7 +10,6 @@
+
+ #ifdef DDS_HAS_SHM
+ #include "dds/ddsi/ddsi_shm_transport.h"
+-#include "iceoryx_binding_c/chunk.h"
+ #endif
+
+ bool dds_is_shared_memory_available(const dds_entity_t entity) {
+@@ -86,7 +85,7 @@ bool is_loan_available(const dds_entity_t entity) {
+ #ifdef DDS_HAS_SHM
+
+ static void release_iox_chunk(dds_writer *wr, void *sample) {
+-  iox_pub_release_chunk(wr->m_iox_pub, sample);
++  dds_subspace_pub_release(wr->m_iox_pub, sample);
+ }
+
+ void register_pub_loan(dds_writer *wr, void *pub_loan) {
+@@ -124,7 +123,7 @@ static void *dds_writer_loan_chunk(dds_writer *wr, size_t size) {
+     // Unfortunate, since the chunk is not actually filled at this point.
+     // We should ensure that we cannot circumvent the write API
+     // (API redesign).
+-    shm_set_data_state(chunk, IOX_CHUNK_CONTAINS_RAW_DATA);
++    shm_set_data_state(chunk, DDS_SUBSPACE_CHUNK_CONTAINS_RAW_DATA);
+     return chunk;
+   }
+   return NULL;
+@@ -155,7 +154,7 @@ dds_return_t dds_loan_shared_memory_buffer(dds_entity_t writer, size_t size,
+     if (*buffer == NULL) {
+       ret = DDS_RETCODE_ERROR; // could not obtain buffer memory
+     }
+-    shm_set_data_state(*buffer, IOX_CHUNK_UNINITIALIZED);
++    shm_set_data_state(*buffer, DDS_SUBSPACE_CHUNK_UNINITIALIZED);
+   } else {
+     ret = DDS_RETCODE_UNSUPPORTED;
+   }
+diff --git a/src/core/ddsc/src/dds_reader.c b/src/core/ddsc/src/dds_reader.c
+index 4e1c725..205cf35 100644
+--- a/src/core/ddsc/src/dds_reader.c
++++ b/src/core/ddsc/src/dds_reader.c
+@@ -44,7 +44,6 @@
+ #include "dds/ddsrt/md5.h"
+ #include "dds/ddsrt/sync.h"
+ #include "dds/ddsrt/threads.h"
+-#include "iceoryx_binding_c/wait_set.h"
+ #include "shm__monitor.h"
+ #endif
+
+@@ -69,7 +68,7 @@ static void dds_reader_close (dds_entity *e)
+ #ifdef DDS_HAS_SHM
+   if (rd->m_iox_sub)
+   {
+-  //will wait for any runing callback using the iceoryx subscriber of this reader
++  //will wait for any running callback using the Subspace subscriber of this reader
+     shm_monitor_detach_reader(&rd->m_entity.m_domain->m_shm_monitor, rd);
+   //from now on no callbacks on this reader will run
+   }
+@@ -107,10 +106,10 @@ static dds_return_t dds_reader_delete (dds_entity *e)
+   if (rd->m_iox_sub)
+   {
+     // deletion must happen at the very end after the reader cache is not used anymore
+-    // since the mutex is needed and the data needs to be released using the iceoryx subscriber
+-    DDS_CLOG (DDS_LC_SHM, &e->m_domain->gv.logconfig, "Release iceoryx's subscriber\n");
+-    iox_sub_deinit(rd->m_iox_sub);
+-    iox_sub_context_fini(&rd->m_iox_sub_context);
++    // since the mutex is needed and the data needs to be released using the Subspace subscriber
++    DDS_CLOG (DDS_LC_SHM, &e->m_domain->gv.logconfig, "Release Subspace subscriber\n");
++    dds_subspace_sub_deinit(rd->m_iox_sub);
++    dds_subspace_sub_context_fini(&rd->m_iox_sub_context);
+   }
+ #endif
+
+@@ -539,42 +538,8 @@ static bool dds_reader_support_shm(const struct ddsi_config* cfg, const dds_qos_
+           DDS_INFINITY == qos->deadline.deadline);
+ }
+
+-static iox_sub_options_t create_iox_sub_options(const dds_qos_t* qos) {
+-
+-  iox_sub_options_t opts;
+-  iox_sub_options_init(&opts);
+-
+-  const uint32_t max_sub_queue_capacity = iox_cfg_max_subscriber_queue_capacity();
+-
+-  // NB: We may lose data after history.depth many samples are received (if we
+-  // are not taking them fast enough from the iceoryx queue and move them in
+-  // the reader history cache), but this is valid behavior for volatile.
+-  // It may still lead to undesired behavior as the queues are filled very
+-  // fast if data is published as fast as possible.
+-  // NB: If the history depth is larger than the queue capacity, we still use
+-  // shared memory but limit the queueCapacity accordingly (otherwise iceoryx
+-  // emits a warning and limits it itself)
+-
+-  if ((uint32_t) qos->history.depth <= max_sub_queue_capacity) {
+-    opts.queueCapacity = (uint64_t)qos->history.depth;
+-  } else {
+-    opts.queueCapacity = max_sub_queue_capacity;
+-  }
+-
+-  // with BEST EFFORT DDS requires that no historical
+-  // data is received (regardless of durability)
+-  if(qos->reliability.kind == DDS_RELIABILITY_BEST_EFFORT ||
+-     qos->durability.kind == DDS_DURABILITY_VOLATILE) {
+-    opts.historyRequest = 0;
+-  } else {
+-    // TRANSIENT LOCAL and stronger
+-    opts.historyRequest = (uint64_t) qos->history.depth;
+-    // if the publisher does not support historicial data
+-    // it will not be connected by iceoryx
+-    opts.requirePublisherHistorySupport = true;
+-  }
+-
+-  return opts;
++static uint64_t subspace_sub_queue_capacity(const dds_qos_t* qos) {
++  return qos->history.depth <= 0 ? 1 : (uint64_t) qos->history.depth;
+ }
+ #endif
+
+@@ -742,42 +707,42 @@ static dds_entity_t dds_create_reader_int (dds_entity_t participant_or_subscribe
+ #ifdef DDS_HAS_SHM
+   if (rd->m_rd->has_iceoryx)
+   {
+-    DDS_CLOG (DDS_LC_SHM, &rd->m_entity.m_domain->gv.logconfig, "Reader's topic name will be DDS:Cyclone:%s\n", rd->m_topic->m_name);
++    DDS_CLOG (DDS_LC_SHM, &rd->m_entity.m_domain->gv.logconfig, "Subspace reader topic name will be DDS:Cyclone:%s\n", rd->m_topic->m_name);
+
+-    iox_sub_context_init(&rd->m_iox_sub_context);
++    dds_subspace_sub_context_init(&rd->m_iox_sub_context);
+
+-    iox_sub_options_t opts = create_iox_sub_options(rqos);
++    rd->m_iox_sub_context.monitor = &rd->m_entity.m_domain->m_shm_monitor;
++    rd->m_iox_sub_context.parent_reader = rd;
+
+-    // NB: This may fail due to icoeryx being out of internal resources for subsribers.
+-    //     In this case terminate is called by iox_sub_init.
+-    //     it is currently (iceoryx 2.0 and lower) not possible to change this to
+-    //     e.g. return a nullptr and handle the error here.
+-    rd->m_iox_sub = iox_sub_init(&(iox_sub_storage_t){0}, gv->config.iceoryx_service, rd->m_topic->m_stype->type_name, rd->m_topic->m_name, &opts);
++    rd->m_iox_sub = dds_subspace_sub_init(
++      &gv->config, gv->config.iceoryx_service, rd->m_topic->m_stype->type_name,
++      rd->m_topic->m_name, subspace_sub_queue_capacity(rqos),
++      rqos->reliability.kind == DDS_RELIABILITY_RELIABLE);
++    if (rd->m_iox_sub == NULL)
++    {
++      rd->m_rd->has_iceoryx = false;
++      dds_subspace_sub_context_fini(&rd->m_iox_sub_context);
++      DDS_CLOG (DDS_LC_WARNING | DDS_LC_SHM,
++                &rd->m_entity.m_domain->gv.logconfig,
++                "Failed to create Subspace subscriber, falling back to DDS transport\n");
++    }
++  }
+
+-    // NB: Due to some storage paradigm change of iceoryx structs
+-    // we now have a pointer 8 bytes before m_iox_sub
+-    // We use this address to store a pointer to the context.
+-    iox_sub_context_t **context = iox_sub_context_ptr(rd->m_iox_sub);
+-    *context = &rd->m_iox_sub_context;
++  if (rd->m_iox_sub != NULL)
++  {
+
+     rc = shm_monitor_attach_reader(&rd->m_entity.m_domain->m_shm_monitor, rd);
+
+     if (rc != DDS_RETCODE_OK) {
+       // we fail if we cannot attach to the listener (as we would get no data)
+-      iox_sub_deinit(rd->m_iox_sub);
++      dds_subspace_sub_deinit(rd->m_iox_sub);
+       rd->m_iox_sub = NULL;
++      rd->m_rd->has_iceoryx = false;
++      dds_subspace_sub_context_fini(&rd->m_iox_sub_context);
+       DDS_CLOG(DDS_LC_WARNING | DDS_LC_SHM,
+                &rd->m_entity.m_domain->gv.logconfig,
+-               "Failed to attach iox subscriber to iox listener\n");
+-      // FIXME: We need to clean up everything created up to now.
+-      //        Currently there is only partial cleanup, we need to extend it.
+-      goto err_bad_qos;
++               "Failed to attach Subspace subscriber to SHM monitor, falling back to DDS transport\n");
+     }
+-
+-    // those are set once and never changed
+-    // they are used to access reader and monitor from the callback when data is received
+-    rd->m_iox_sub_context.monitor = &rd->m_entity.m_domain->m_shm_monitor;
+-    rd->m_iox_sub_context.parent_reader = rd;
+   }
+ #endif
+
+diff --git a/src/core/ddsc/src/dds_write.c b/src/core/ddsc/src/dds_write.c
+index 1a168b1..b4eed91 100644
+--- a/src/core/ddsc/src/dds_write.c
++++ b/src/core/ddsc/src/dds_write.c
+@@ -39,7 +39,7 @@
+ #endif
+
+ struct ddsi_serdata_plain { struct ddsi_serdata p; };
+-struct ddsi_serdata_iox   { struct ddsi_serdata x; };
++struct ddsi_serdata_subspace   { struct ddsi_serdata x; };
+ struct ddsi_serdata_any   { struct ddsi_serdata a; };
+
+ dds_return_t dds_write (dds_entity_t writer, const void *data)
+@@ -198,24 +198,22 @@ static dds_return_t deliver_locally (struct ddsi_writer *wr, struct ddsi_serdata
+ }
+
+ #if DDS_HAS_SHM
+-static void deliver_data_via_iceoryx (dds_writer *wr, struct ddsi_serdata_iox *d)
++static void deliver_data_via_subspace (dds_writer *wr, struct ddsi_serdata_subspace *d)
+ {
+-  iox_chunk_header_t *chunk_header =
+-  iox_chunk_header_from_user_payload(d->x.iox_chunk);
+-  iceoryx_header_t *ice_hdr = iox_chunk_header_to_user_header(chunk_header);
++  dds_subspace_header_t *shm_hdr = dds_subspace_header_from_chunk(d->x.iox_chunk);
+
+-  // Local readers go through Iceoryx as well (because the Iceoryx support
++  // Local readers go through Subspace as well (because the SHM support
+   // code doesn't exclude that), which means we should suppress the internal
+   // path
+-  ice_hdr->guid = wr->m_wr->e.guid;
+-  ice_hdr->tstamp = d->x.timestamp.v;
+-  ice_hdr->statusinfo = d->x.statusinfo;
+-  ice_hdr->data_kind = (unsigned char)d->x.kind;
+-  ddsi_serdata_get_keyhash(&d->x, &ice_hdr->keyhash, false);
+-  // iox_pub_publish_chunk takes ownership, storing a null pointer here
++  shm_hdr->guid = wr->m_wr->e.guid;
++  shm_hdr->tstamp = d->x.timestamp.v;
++  shm_hdr->statusinfo = d->x.statusinfo;
++  shm_hdr->data_kind = (unsigned char)d->x.kind;
++  ddsi_serdata_get_keyhash(&d->x, &shm_hdr->keyhash, false);
++  // dds_subspace_pub_publish takes ownership, storing a null pointer here
+   // doesn't preclude the existence of race conditions on this, but it
+   // certainly improves the chances of detecting them
+-  iox_pub_publish_chunk(wr->m_iox_pub, d->x.iox_chunk);
++  dds_subspace_pub_publish(wr->m_iox_pub, d->x.iox_chunk);
+   d->x.iox_chunk = NULL;
+ }
+ #endif
+@@ -277,8 +275,8 @@ static dds_return_t deliver_data_any (struct thread_state * const thrst, struct
+ #ifdef DDS_HAS_SHM
+   if (d->a.iox_chunk != NULL)
+   {
+-    // delivers to all iceoryx readers, including local ones
+-    deliver_data_via_iceoryx (wr, (struct ddsi_serdata_iox *) d);
++    // delivers to all Subspace readers, including local ones
++    deliver_data_via_subspace (wr, (struct ddsi_serdata_subspace *) d);
+   }
+ #else
+   (void) wr;
+@@ -309,7 +307,7 @@ static dds_return_t dds_writecdr_impl_common (struct ddsi_writer *ddsi_wr, struc
+   ddsi_serdata_ref (&d->a); // d = din: refc(d) = r + 1, otherwise refc(d) = 2
+
+ #ifdef DDS_HAS_SHM
+-  // transfer ownership of an iceoryx chunk if it exists
++  // transfer ownership of a Subspace chunk if it exists
+   // din and d may alias each other
+   // note: use those assignments instead of if-statement (jump) for efficiency
+   void* iox_chunk = din->a.iox_chunk;
+@@ -381,18 +379,18 @@ static bool fill_iox_chunk(dds_writer *wr, const void *sample, void *iox_chunk,
+ {
+   bool has_fixed_size_type = wr->m_topic->m_stype->fixed_size;
+   bool ret = true;
+-  iceoryx_header_t *iox_header = iceoryx_header_from_chunk(iox_chunk);
++  dds_subspace_header_t *iox_header = dds_subspace_header_from_chunk(iox_chunk);
+   if (has_fixed_size_type) {
+     memcpy(iox_chunk, sample, sample_size);
+-    iox_header->shm_data_state = IOX_CHUNK_CONTAINS_RAW_DATA;
++    iox_header->shm_data_state = DDS_SUBSPACE_CHUNK_CONTAINS_RAW_DATA;
+   } else {
+     size_t size = iox_header->data_size;
+     ret = ddsi_sertype_serialize_into(wr->m_wr->type, sample, iox_chunk, size);
+     if(ret) {
+-      iox_header->shm_data_state = IOX_CHUNK_CONTAINS_SERIALIZED_DATA;
++      iox_header->shm_data_state = DDS_SUBSPACE_CHUNK_CONTAINS_SERIALIZED_DATA;
+     } else {
+        // data is in invalid state
+-       iox_header->shm_data_state = IOX_CHUNK_UNINITIALIZED;
++       iox_header->shm_data_state = DDS_SUBSPACE_CHUNK_UNINITIALIZED;
+     }
+   }
+   return ret;
+@@ -423,8 +421,8 @@ static dds_return_t get_iox_chunk (dds_writer *wr, const void *data, void **iox_
+     // This requires the user to adhere to the contract, we cannot enforce this
+     // with the given API.
+     *iox_chunk = (void *) data;
+-    iceoryx_header_t *iox_header = iceoryx_header_from_chunk (*iox_chunk);
+-    iox_header->shm_data_state = IOX_CHUNK_CONTAINS_RAW_DATA;
++    dds_subspace_header_t *iox_header = dds_subspace_header_from_chunk (*iox_chunk);
++    iox_header->shm_data_state = DDS_SUBSPACE_CHUNK_CONTAINS_RAW_DATA;
+     return DDS_RETCODE_OK;
+   }
+ }
+@@ -499,7 +497,7 @@ static dds_return_t dds_write_impl_iox (dds_writer *wr, struct ddsi_writer *ddsi
+   // 4. Prepare serdata
+   // avoid serialization for volatile writers if there are no network readers
+
+-  struct ddsi_serdata_iox *d = NULL;
++  struct ddsi_serdata_subspace *d = NULL;
+   if (use_only_iceoryx)
+   {
+     // note: If we could keep ownership of the loaned data after iox publish we could implement lazy
+@@ -508,7 +506,7 @@ static dds_return_t dds_write_impl_iox (dds_writer *wr, struct ddsi_writer *ddsi
+     // where we either have network readers (requiring serialization) or not.
+
+     // do not serialize yet (may not need it if only using iceoryx or no readers)
+-    d = (struct ddsi_serdata_iox *) ddsi_serdata_from_loaned_sample (ddsi_wr->type, writekey ? SDK_KEY : SDK_DATA, iox_chunk);
++    d = (struct ddsi_serdata_subspace *) ddsi_serdata_from_loaned_sample (ddsi_wr->type, writekey ? SDK_KEY : SDK_DATA, iox_chunk);
+   }
+   else
+   {
+@@ -523,12 +521,12 @@ static dds_return_t dds_write_impl_iox (dds_writer *wr, struct ddsi_writer *ddsi
+       // In this case d was created by ddsi_serdata_from_sample and we need
+       // to set the iceoryx chunk.
+       dtmp->iox_chunk = iox_chunk;
+-      d = (struct ddsi_serdata_iox *) dtmp;
++      d = (struct ddsi_serdata_subspace *) dtmp;
+     }
+   }
+   if (d == NULL)
+   {
+-    iox_pub_release_chunk (wr->m_iox_pub, iox_chunk);
++    dds_subspace_pub_release (wr->m_iox_pub, iox_chunk);
+     return DDS_RETCODE_BAD_PARAMETER;
+   }
+   assert (d->x.iox_chunk != NULL);
+@@ -538,10 +536,10 @@ static dds_return_t dds_write_impl_iox (dds_writer *wr, struct ddsi_writer *ddsi
+
+   // 5. Deliver the data
+   if(use_only_iceoryx) {
+-    // deliver via iceoryx only
++    // deliver via Subspace only
+     // TODO: can we avoid constructing d in this case?
+     // There are no local non-iceoryx readers in this case.
+-    deliver_data_via_iceoryx (wr, d);
++    deliver_data_via_subspace (wr, d);
+     ddsi_serdata_unref (&d->x); // refc(d) = 0
+   } else {
+     // this may convert the input data if needed (convert_serdata) and then deliver it using
+@@ -549,7 +547,7 @@ static dds_return_t dds_write_impl_iox (dds_writer *wr, struct ddsi_writer *ddsi
+     // d refc(d) = 1, call will reduce refcount by 1
+     ret = dds_writecdr_impl_common (ddsi_wr, wr->m_xp, (struct ddsi_serdata_any *) d, !wr->whc_batch, wr);
+     if (ret != DDS_RETCODE_OK)
+-      iox_pub_release_chunk (wr->m_iox_pub, d->x.iox_chunk);
++      dds_subspace_pub_release (wr->m_iox_pub, d->x.iox_chunk);
+   }
+   return ret;
+ }
+diff --git a/src/core/ddsc/src/dds_writer.c b/src/core/ddsc/src/dds_writer.c
+index 3e10455..9e2d9f0 100644
+--- a/src/core/ddsc/src/dds_writer.c
++++ b/src/core/ddsc/src/dds_writer.c
+@@ -222,9 +222,9 @@ static dds_return_t dds_writer_delete (dds_entity *e)
+ #ifdef DDS_HAS_SHM
+   if (wr->m_iox_pub)
+   {
+-    DDS_CLOG(DDS_LC_SHM, &e->m_domain->gv.logconfig, "Release iceoryx's publisher\n");
+-    iox_pub_stop_offer(wr->m_iox_pub);
+-    iox_pub_deinit(wr->m_iox_pub);
++    DDS_CLOG(DDS_LC_SHM, &e->m_domain->gv.logconfig, "Release Subspace publisher\n");
++    dds_subspace_pub_stop_offer(wr->m_iox_pub);
++    dds_subspace_pub_deinit(wr->m_iox_pub);
+   }
+ #endif
+   /* FIXME: not freeing WHC here because it is owned by the DDSI entity */
+@@ -328,14 +328,6 @@ static bool dds_writer_support_shm(const struct ddsi_config* cfg, const dds_qos_
+   if(qos->history.kind != DDS_HISTORY_KEEP_LAST) {
+     return false;
+   }
+-  // we cannot support the required history with iceoryx
+-  if (qos->durability.kind == DDS_DURABILITY_TRANSIENT_LOCAL &&
+-      qos->durability_service.history.kind == DDS_HISTORY_KEEP_LAST &&
+-      qos->durability_service.history.depth >
+-          (int32_t)iox_cfg_max_publisher_history()) {
+-    return false;
+-  }
+-
+   if (qos->ignorelocal.value != DDS_IGNORELOCAL_NONE) {
+     return false;
+   }
+@@ -345,23 +337,17 @@ static bool dds_writer_support_shm(const struct ddsi_config* cfg, const dds_qos_
+           DDS_INFINITY == qos->deadline.deadline);
+ }
+
+-static iox_pub_options_t create_iox_pub_options(const dds_qos_t* qos) {
+-
+-  iox_pub_options_t opts;
+-  iox_pub_options_init(&opts);
+-
++static uint64_t subspace_pub_history_depth(const dds_qos_t* qos) {
+   if(qos->durability.kind == DDS_DURABILITY_VOLATILE) {
+-    opts.historyCapacity = 0;
++    return 0;
+   } else {
+     // Transient Local and stronger
+     if (qos->durability_service.history.kind == DDS_HISTORY_KEEP_LAST) {
+-      opts.historyCapacity = (uint64_t)qos->durability_service.history.depth;
++      return (uint64_t)qos->durability_service.history.depth;
+     } else {
+-      opts.historyCapacity = 0;
++      return 0;
+     }
+   }
+-
+-  return opts;
+ }
+ #endif
+
+@@ -497,14 +483,18 @@ dds_entity_t dds_create_writer (dds_entity_t participant_or_publisher, dds_entit
+ #ifdef DDS_HAS_SHM
+   if (wr->m_wr->has_iceoryx)
+   {
+-    DDS_CLOG (DDS_LC_SHM, &wr->m_entity.m_domain->gv.logconfig, "Writer's topic name will be DDS:Cyclone:%s\n", wr->m_topic->m_name);
+-    iox_pub_options_t opts = create_iox_pub_options(wqos);
+-
+-    // NB: This may fail due to icoeryx being out of internal resources for publishers
+-    //     In this case terminate is called by iox_pub_init.
+-    //     it is currently (iceoryx 2.0 and lower) not possible to change this to
+-    //     e.g. return a nullptr and handle the error here.
+-    wr->m_iox_pub = iox_pub_init(&(iox_pub_storage_t){0}, gv->config.iceoryx_service, wr->m_topic->m_stype->type_name, wr->m_topic->m_name, &opts);
++    DDS_CLOG (DDS_LC_SHM, &wr->m_entity.m_domain->gv.logconfig, "Subspace writer topic name will be DDS:Cyclone:%s\n", wr->m_topic->m_name);
++    wr->m_iox_pub = dds_subspace_pub_init(
++      &gv->config, gv->config.iceoryx_service, wr->m_topic->m_stype->type_name,
++      wr->m_topic->m_name, subspace_pub_history_depth(wqos),
++      wqos->reliability.kind == DDS_RELIABILITY_RELIABLE);
++    if (wr->m_iox_pub == NULL)
++    {
++      wr->m_wr->has_iceoryx = false;
++      DDS_CLOG (DDS_LC_WARNING | DDS_LC_SHM,
++                &wr->m_entity.m_domain->gv.logconfig,
++                "Failed to create Subspace publisher, falling back to DDS transport\n");
++    }
+     memset(wr->m_iox_pub_loans, 0, sizeof(wr->m_iox_pub_loans));
+   }
+ #endif
+diff --git a/src/core/ddsc/src/shm__monitor.h b/src/core/ddsc/src/shm__monitor.h
+index 7505e94..48f55d4 100644
+--- a/src/core/ddsc/src/shm__monitor.h
++++ b/src/core/ddsc/src/shm__monitor.h
+@@ -12,9 +12,6 @@
+ #ifndef _SHM_monitor_H_
+ #define _SHM_monitor_H_
+
+-#include "iceoryx_binding_c/subscriber.h"
+-#include "iceoryx_binding_c/listener.h"
+-
+ #include "dds/ddsi/ddsi_shm_transport.h"
+ #include "dds/ddsrt/sync.h"
+ #include "dds/ddsrt/threads.h"
+@@ -40,10 +37,10 @@ enum shm_monitor_states {
+ ///        thread responsible for reacting on received data via shared memory
+ struct shm_monitor {
+     ddsrt_mutex_t m_lock;
+-    iox_listener_t m_listener;
++    dds_subspace_listener_t m_listener;
+
+     //use this if we wait but want to wake up for some reason e.g. terminate
+-    iox_user_trigger_t m_wakeup_trigger;
++    dds_subspace_user_trigger_t m_wakeup_trigger;
+
+     uint32_t m_number_of_attached_readers;
+     uint32_t m_state;
+diff --git a/src/core/ddsc/src/shm_monitor.c b/src/core/ddsc/src/shm_monitor.c
+index b6edd6e..e2c858b 100644
+--- a/src/core/ddsc/src/shm_monitor.c
++++ b/src/core/ddsc/src/shm_monitor.c
+@@ -22,21 +22,19 @@
+ #include "dds/ddsi/q_xmsg.h"
+ #include "dds/ddsi/ddsi_tkmap.h"
+ #include "dds/ddsi/ddsi_rhc.h"
+-#include "iceoryx_binding_c/chunk.h"
+
+ #if defined (__cplusplus)
+ extern "C" {
+ #endif
+
+-static void shm_subscriber_callback(iox_sub_t subscriber, void * context_data);
++static void shm_subscriber_callback(dds_subspace_sub_t subscriber, void * context_data);
+
+ void shm_monitor_init(shm_monitor_t* monitor)
+ {
+     ddsrt_mutex_init(&monitor->m_lock);
+
+-    // storage is ignored internally now but we cannot pass a nullptr
+-    monitor->m_listener = iox_listener_init(&(iox_listener_storage_t){0});
+-    monitor->m_wakeup_trigger = iox_user_trigger_init(&(iox_user_trigger_storage_t){0});
++    dds_subspace_listener_init(&monitor->m_listener);
++    dds_subspace_user_trigger_init(&monitor->m_wakeup_trigger);
+
+     monitor->m_state = SHM_MONITOR_RUNNING;
+ }
+@@ -49,33 +47,33 @@ void shm_monitor_destroy(shm_monitor_t* monitor)
+     // the deinit will wait for the internal listener thread to join,
+     // any remaining callbacks will be executed
+
+-    iox_listener_deinit(monitor->m_listener);
+-    iox_user_trigger_deinit(monitor->m_wakeup_trigger);
++    dds_subspace_listener_deinit(monitor->m_listener);
++    dds_subspace_user_trigger_deinit(monitor->m_wakeup_trigger);
+     ddsrt_mutex_destroy(&monitor->m_lock);
+ }
+
+ dds_return_t shm_monitor_wake_and_disable(shm_monitor_t* monitor)
+ {
+     monitor->m_state = SHM_MONITOR_NOT_RUNNING;
+-    iox_user_trigger_trigger(monitor->m_wakeup_trigger);
++    dds_subspace_user_trigger_trigger(monitor->m_wakeup_trigger);
+     return DDS_RETCODE_OK;
+ }
+
+ dds_return_t shm_monitor_wake_and_enable(shm_monitor_t* monitor)
+ {
+     monitor->m_state = SHM_MONITOR_RUNNING;
+-    iox_user_trigger_trigger(monitor->m_wakeup_trigger);
++    dds_subspace_user_trigger_trigger(monitor->m_wakeup_trigger);
+     return DDS_RETCODE_OK;
+ }
+
+ dds_return_t shm_monitor_attach_reader(shm_monitor_t* monitor, struct dds_reader* reader)
+ {
+
+-    if(iox_listener_attach_subscriber_event_with_context_data(monitor->m_listener,
++    if(dds_subspace_listener_attach_subscriber_event_with_context_data(monitor->m_listener,
+                                                               reader->m_iox_sub,
+-                                                              SubscriberEvent_DATA_RECEIVED,
++                                                              DDS_SUBSPACE_SUBSCRIBER_DATA_RECEIVED,
+                                                               shm_subscriber_callback,
+-                                                              &reader->m_iox_sub_context) != ListenerResult_SUCCESS) {
++                                                              &reader->m_iox_sub_context) != DDS_SUBSPACE_LISTENER_SUCCESS) {
+         DDS_CLOG(DDS_LC_SHM, &reader->m_rd->e.gv->logconfig, "error attaching reader\n");
+         return DDS_RETCODE_OUT_OF_RESOURCES;
+     }
+@@ -86,7 +84,7 @@ dds_return_t shm_monitor_attach_reader(shm_monitor_t* monitor, struct dds_reader
+
+ dds_return_t shm_monitor_detach_reader(shm_monitor_t* monitor, struct dds_reader* reader)
+ {
+-    iox_listener_detach_subscriber_event(monitor->m_listener, reader->m_iox_sub, SubscriberEvent_DATA_RECEIVED);
++    dds_subspace_listener_detach_subscriber_event(monitor->m_listener, reader->m_iox_sub, DDS_SUBSPACE_SUBSCRIBER_DATA_RECEIVED);
+     --monitor->m_number_of_attached_readers;
+     return DDS_RETCODE_OK;
+ }
+@@ -99,34 +97,26 @@ static void receive_data_wakeup_handler(struct dds_reader* rd)
+
+   while (true)
+   {
+-    shm_lock_iox_sub(rd->m_iox_sub);
+-    enum iox_ChunkReceiveResult take_result = iox_sub_take_chunk(rd->m_iox_sub, (const void** const)&chunk);
+-    shm_unlock_iox_sub(rd->m_iox_sub);
++    shm_lock_subspace_sub(rd->m_iox_sub);
++    enum dds_subspace_chunk_receive_result take_result = dds_subspace_sub_take(rd->m_iox_sub, (const void** const)&chunk);
++    shm_unlock_subspace_sub(rd->m_iox_sub);
+
+     // NB: If we cannot take the chunk (sample) the user may lose data.
+     // Since the subscriber queue can overflow and will evict the least recent sample.
+     // This entirely depends on the producer and consumer frequency (and the queue size if they are close).
+     // The consumer here is essentially the reader history cache.
+-    if (ChunkReceiveResult_SUCCESS != take_result)
++    if (DDS_SUBSPACE_CHUNK_RECEIVE_SUCCESS != take_result)
+     {
+       switch(take_result)
+       {
+-        case ChunkReceiveResult_TOO_MANY_CHUNKS_HELD_IN_PARALLEL :
+-        {
+-          // we hold to many chunks and cannot get more
+-          DDS_CLOG (DDS_LC_WARNING | DDS_LC_SHM, &rd->m_entity.m_domain->gv.logconfig,
+-              "DDS reader with topic %s : iceoryx subscriber - TOO_MANY_CHUNKS_HELD_IN_PARALLEL -"
+-              "could not take sample\n", rd->m_topic->m_name);
+-          break;
+-        }
+-        case ChunkReceiveResult_NO_CHUNK_AVAILABLE: {
++        case DDS_SUBSPACE_CHUNK_RECEIVE_NO_CHUNK_AVAILABLE: {
+           // no more chunks to take, ok
+           break;
+         }
+         default : {
+           // some unkown error occurred
+           DDS_CLOG(DDS_LC_WARNING | DDS_LC_SHM, &rd->m_entity.m_domain->gv.logconfig,
+-              "DDS reader with topic %s : iceoryx subscriber - UNKNOWN ERROR -"
++              "DDS reader with topic %s : Subspace subscriber - UNKNOWN ERROR -"
+               "could not take sample\n", rd->m_topic->m_name);
+         }
+       }
+@@ -134,24 +124,24 @@ static void receive_data_wakeup_handler(struct dds_reader* rd)
+       break;
+     }
+
+-    const iceoryx_header_t* ice_hdr = iceoryx_header_from_chunk(chunk);
++    const dds_subspace_header_t* shm_hdr = dds_subspace_header_from_chunk(chunk);
+
+     // Get writer or proxy writer
+-    struct ddsi_entity_common * e = entidx_lookup_guid_untyped (gv->entity_index, &ice_hdr->guid);
++    struct ddsi_entity_common * e = entidx_lookup_guid_untyped (gv->entity_index, &shm_hdr->guid);
+     if (e == NULL || (e->kind != DDSI_EK_PROXY_WRITER && e->kind != DDSI_EK_WRITER))
+     {
+       // Ignore that doesn't match a known writer or proxy writer
+       DDS_CLOG (DDS_LC_SHM, &gv->logconfig, "unknown source entity, ignore.\n");
+-      shm_lock_iox_sub(rd->m_iox_sub);
+-      iox_sub_release_chunk(rd->m_iox_sub, chunk);
+-      shm_unlock_iox_sub(rd->m_iox_sub);
++      shm_lock_subspace_sub(rd->m_iox_sub);
++      dds_subspace_sub_release(rd->m_iox_sub, chunk);
++      shm_unlock_subspace_sub(rd->m_iox_sub);
+       continue;
+     }
+
+     // Create struct ddsi_serdata
+-    struct ddsi_serdata* d = ddsi_serdata_from_iox(rd->m_topic->m_stype, ice_hdr->data_kind, &rd->m_iox_sub, chunk);
+-    d->timestamp.v = ice_hdr->tstamp;
+-    d->statusinfo = ice_hdr->statusinfo;
++    struct ddsi_serdata* d = ddsi_serdata_from_iox(rd->m_topic->m_stype, shm_hdr->data_kind, &rd->m_iox_sub, chunk);
++    d->timestamp.v = shm_hdr->tstamp;
++    d->statusinfo = shm_hdr->statusinfo;
+
+     // Get struct ddsi_tkmap_instance
+     struct ddsi_tkmap_instance* tk;
+@@ -180,11 +170,11 @@ release:
+   thread_state_asleep(lookup_thread_state());
+ }
+
+-static void shm_subscriber_callback(iox_sub_t subscriber, void * context_data)
++static void shm_subscriber_callback(dds_subspace_sub_t subscriber, void * context_data)
+ {
+     (void)subscriber;
+     // we know it is actually in extended storage since we created it like this
+-    iox_sub_context_t *context = (iox_sub_context_t*) context_data;
++    dds_subspace_sub_context_t *context = (dds_subspace_sub_context_t*) context_data;
+     if(context->monitor->m_state == SHM_MONITOR_RUNNING) {
+         receive_data_wakeup_handler(context->parent_reader);
+     }
+diff --git a/src/core/ddsc/tests/CMakeLists.txt b/src/core/ddsc/tests/CMakeLists.txt
+index 332610f..30fb267 100644
+--- a/src/core/ddsc/tests/CMakeLists.txt
++++ b/src/core/ddsc/tests/CMakeLists.txt
+@@ -115,12 +115,6 @@ target_include_directories(
+   "$<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/src/include/>"
+   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../ddsc/src>"
+   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../ddsi/include>")
+-if(ENABLE_SHM)
+-  target_include_directories(
+-    cunit_ddsc PRIVATE
+-    "$<BUILD_INTERFACE:$<TARGET_PROPERTY:iceoryx_binding_c::iceoryx_binding_c,INTERFACE_INCLUDE_DIRECTORIES>>")
+-endif()
+-
+ target_link_libraries(cunit_ddsc PRIVATE
+   RoundTrip Space TypesArrayKey WriteTypes InstanceHandleTypes RWData CreateWriter DataRepresentationTypes MinXcdrVersion CdrStreamOptimize ddsc)
+
+@@ -155,18 +149,12 @@ target_include_directories(
+   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../ddsc/src>"
+   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../ddsi/include>")
+
+-if(ENABLE_SHM)
+-  target_include_directories(
+-    oneliner PRIVATE
+-    "$<BUILD_INTERFACE:$<TARGET_PROPERTY:iceoryx_binding_c::iceoryx_binding_c,INTERFACE_INCLUDE_DIRECTORIES>>")
+-endif()
+-
+ target_link_libraries(oneliner PRIVATE RoundTrip Space ddsc)
+
+ # Iceoryx itself isn't really supported yet on Windows, so it
+ # better not be part of the tests.  That also saves us from
+ # having to figure out now how to start/stop RouDi on Windows.
+-if(ENABLE_SHM AND NOT DEFINED ENV{COLCON})
++if(FALSE)
+   idlc_generate(TARGET Array100 FILES Array100.idl WARNINGS no-implicit-extensibility)
+   idlc_generate(TARGET DynamicData FILES DynamicData.idl WARNINGS no-implicit-extensibility)
+
+@@ -178,8 +166,7 @@ if(ENABLE_SHM AND NOT DEFINED ENV{COLCON})
+     cunit_ddsc_iox PRIVATE
+     "$<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/src/include/>"
+     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../ddsc/src>"
+-    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../ddsi/include>"
+-    "$<BUILD_INTERFACE:$<TARGET_PROPERTY:iceoryx_binding_c::iceoryx_binding_c,INTERFACE_INCLUDE_DIRECTORIES>>")
++    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../ddsi/include>")
+
+   target_link_libraries(cunit_ddsc_iox PRIVATE RoundTrip Space Array100 DynamicData ddsc)
+
+@@ -191,8 +178,7 @@ if(ENABLE_SHM AND NOT DEFINED ENV{COLCON})
+     cunit_ddsc_shm_serialization PRIVATE
+     "$<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/src/include/>"
+     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../ddsc/src>"
+-    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../ddsi/include>"
+-    "$<BUILD_INTERFACE:$<TARGET_PROPERTY:iceoryx_binding_c::iceoryx_binding_c,INTERFACE_INCLUDE_DIRECTORIES>>")
++    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../ddsi/include>")
+
+   target_link_libraries(cunit_ddsc_shm_serialization PRIVATE RoundTrip Space DynamicData ddsc)
+
+diff --git a/src/core/ddsi/CMakeLists.txt b/src/core/ddsi/CMakeLists.txt
+index 34fa996..1012ca3 100644
+--- a/src/core/ddsi/CMakeLists.txt
++++ b/src/core/ddsi/CMakeLists.txt
+@@ -186,7 +186,7 @@ if(ENABLE_SECURITY)
+   list(APPEND hdrs_private_ddsi ddsi_security_msg.h ddsi_security_exchange.h)
+ endif()
+ if(ENABLE_SHM)
+-  list(APPEND srcs_ddsi ddsi_shm_transport.c)
++  list(APPEND srcs_ddsi ddsi_shm_transport.c ddsi_subspace_backend.cc)
+   list(APPEND hdrs_private_ddsi ddsi_shm_transport.h)
+ endif()
+
+diff --git a/src/core/ddsi/defconfig.c b/src/core/ddsi/defconfig.c
+index 964c5c9..a5847a5 100644
+--- a/src/core/ddsi/defconfig.c
++++ b/src/core/ddsi/defconfig.c
+@@ -102,11 +102,17 @@ void ddsi_config_init_default (struct ddsi_config *cfg)
+   cfg->shm_locator = "";
+   cfg->iceoryx_service = "DDS_CYCLONE";
+   cfg->shm_log_lvl = INT32_C (4);
++  cfg->subspace_socket = "";
++  cfg->subspace_slot_size = UINT32_C (256);
++  cfg->subspace_expected_subscribers = UINT32_C (1);
++  cfg->subspace_max_slots = UINT32_C (4096);
++  cfg->subspace_reliable = "false";
++  cfg->subspace_detect_dropped_messages = 1;
+ #endif /* DDS_HAS_SHM */
+ }
+-/* generated from ddsi_config.h[87da706bc9c463a87326e87b311d8291d5761d43] */
++/* generated from ddsi_config.h[67e6d72882b1587225b695cb69710690319ca6a3] */
+ /* generated from ddsi_cfgunits.h[fc550f1620aa20dcd9244ef4e24299d5001efbb4] */
+-/* generated from ddsi_cfgelems.h[779636e47ae3db4f970aae732353db6d7ba9583f] */
++/* generated from ddsi_cfgelems.h[656b813c4704e74af4f7afc61da5af24b53c1a8b] */
+ /* generated from ddsi_config.c[f1481cfdb01fe1010eabd34a879d5aa2c2262bec] */
+ /* generated from _confgen.h[01ffa8a2e53b2309451756861466551cfe28c8ce] */
+ /* generated from _confgen.c[13cd40932d695abae1470202a42c18dc4d09ea84] */
+diff --git a/src/core/ddsi/include/dds/ddsi/ddsi_cfgelems.h b/src/core/ddsi/include/dds/ddsi/ddsi_cfgelems.h
+index d7003f1..cbb072b 100644
+--- a/src/core/ddsi/include/dds/ddsi/ddsi_cfgelems.h
++++ b/src/core/ddsi/include/dds/ddsi/ddsi_cfgelems.h
+@@ -1787,6 +1787,71 @@ static struct cfgelem ssl_cfgelems[] = {
+ #endif
+
+ #ifdef DDS_HAS_SHM
++static struct cfgelem subspace_cfgelems[] = {
++  STRING("Socket", NULL, 1, "",
++    MEMBER(subspace_socket),
++    FUNCTIONS(0, uf_string, ff_free, pf_string),
++    DESCRIPTION(
++      "<p>Subspace server socket path. An empty value uses Subspace's default socket.</p>"
++    )),
++  INT("SlotSize", NULL, 1, "256",
++    MEMBER(subspace_slot_size),
++    FUNCTIONS(0, uf_uint, 0, pf_uint),
++    DESCRIPTION(
++      "<p>Subspace publisher slot size in bytes.</p>"
++    )),
++  INT("Slots", NULL, 1, "0",
++    MEMBER(subspace_slots),
++    FUNCTIONS(0, uf_uint, 0, pf_uint),
++    DESCRIPTION(
++      "<p>Subspace publisher slot count. When 0, CycloneDDS computes a conservative slot count from history depth and ExpectedSubscribers.</p>"
++    )),
++  INT("MaxActiveMessages", NULL, 1, "0",
++    MEMBER(subspace_max_active_messages),
++    FUNCTIONS(0, uf_uint, 0, pf_uint),
++    DESCRIPTION(
++      "<p>Subspace subscriber active-message limit. When 0, CycloneDDS derives it from reader queue capacity.</p>"
++    )),
++  INT("ExpectedSubscribers", NULL, 1, "1",
++    MEMBER(subspace_expected_subscribers),
++    FUNCTIONS(0, uf_uint, 0, pf_uint),
++    DESCRIPTION(
++      "<p>Fallback publisher sizing helper used only when Slots is 0.</p>"
++    )),
++  INT("MaxSlots", NULL, 1, "4096",
++    MEMBER(subspace_max_slots),
++    FUNCTIONS(0, uf_uint, 0, pf_uint),
++    DESCRIPTION(
++      "<p>Upper bound for computed Subspace slot counts.</p>"
++    )),
++  BOOL("FixedSize", NULL, 1, "false",
++    MEMBER(subspace_fixed_size),
++    FUNCTIONS(0, uf_boolean, 0, pf_boolean),
++    DESCRIPTION(
++      "<p>Pass Subspace fixed-size publisher mode through directly.</p>"
++    )),
++  ENUM("Reliable", NULL, 1, "false",
++    MEMBER(subspace_reliable),
++    FUNCTIONS(0, uf_string, ff_free, pf_string),
++    DESCRIPTION(
++      "<p>Subspace reliability mode. auto follows DDS reliability QoS.</p>"
++    ),
++    VALUES("auto","false","true")),
++  BOOL("LogDroppedMessages", NULL, 1, "false",
++    MEMBER(subspace_log_dropped_messages),
++    FUNCTIONS(0, uf_boolean, 0, pf_boolean),
++    DESCRIPTION(
++      "<p>Reserved for enabling Subspace dropped-message diagnostics.</p>"
++    )),
++  BOOL("DetectDroppedMessages", NULL, 1, "true",
++    MEMBER(subspace_detect_dropped_messages),
++    FUNCTIONS(0, uf_boolean, 0, pf_boolean),
++    DESCRIPTION(
++      "<p>Enable Subspace internal dropped-message detection and counters.</p>"
++    )),
++  END_MARKER
++};
++
+ static struct cfgelem shmem_cfgelems[] = {
+   BOOL("Enable", NULL, 1, "false",
+     MEMBER(enable_shm),
+@@ -1796,8 +1855,8 @@ static struct cfgelem shmem_cfgelems[] = {
+     MEMBER(shm_locator),
+     FUNCTIONS(0, uf_string, ff_free, pf_string),
+     DESCRIPTION(
+-      "<p>Explicitly set the Iceoryx locator used by Cyclone to check whether "
+-      "a pair of processes is attached to the same Iceoryx shared memory.  The "
++      "<p>Explicitly set the SHM locator used by Cyclone to check whether "
++      "a pair of processes is attached to the same Subspace shared memory.  The "
+       "default is to use one of the MAC addresses of the machine, which should "
+       "work well in most cases.</p>"
+     )),
+@@ -1805,7 +1864,7 @@ static struct cfgelem shmem_cfgelems[] = {
+     MEMBER(iceoryx_service),
+     FUNCTIONS(0, uf_string, ff_free, pf_string),
+     DESCRIPTION(
+-      "<p>Override the Iceoryx service name used by Cyclone.</p>"
++      "<p>Override the Subspace channel prefix used by Cyclone.</p>"
+     )),
+   ENUM("LogLevel", NULL, 1, "info",
+     MEMBER(shm_log_lvl),
+@@ -1823,6 +1882,12 @@ static struct cfgelem shmem_cfgelems[] = {
+     VALUES(
+       "off","fatal","error","warn","info","debug","verbose"
+     )),
++  GROUP("Subspace", subspace_cfgelems, NULL, 1,
++    NOMEMBER,
++    NOFUNCTIONS,
++    DESCRIPTION(
++      "<p>Subspace-native shared-memory transport configuration.</p>"
++    )),
+   END_MARKER
+ };
+ #endif
+diff --git a/src/core/ddsi/include/dds/ddsi/ddsi_config.h b/src/core/ddsi/include/dds/ddsi/ddsi_config.h
+index 6e0ef81..493c5d9 100644
+--- a/src/core/ddsi/include/dds/ddsi/ddsi_config.h
++++ b/src/core/ddsi/include/dds/ddsi/ddsi_config.h
+@@ -435,6 +435,16 @@ struct ddsi_config
+   char *shm_locator;
+   char *iceoryx_service;
+   enum ddsi_shm_loglevel shm_log_lvl;
++  char *subspace_socket;
++  uint32_t subspace_slot_size;
++  uint32_t subspace_slots;
++  uint32_t subspace_max_active_messages;
++  uint32_t subspace_expected_subscribers;
++  uint32_t subspace_max_slots;
++  int subspace_fixed_size;
++  char *subspace_reliable;
++  int subspace_log_dropped_messages;
++  int subspace_detect_dropped_messages;
+ #endif
+
+   enum ddsi_config_entity_naming_mode entity_naming_mode;
+diff --git a/src/core/ddsi/include/dds/ddsi/ddsi_shm_transport.h b/src/core/ddsi/include/dds/ddsi/ddsi_shm_transport.h
+index acc5efb..ff5fc99 100644
+--- a/src/core/ddsi/include/dds/ddsi/ddsi_shm_transport.h
++++ b/src/core/ddsi/include/dds/ddsi/ddsi_shm_transport.h
+@@ -15,38 +15,64 @@
+ #include "dds/export.h"
+ #include "dds/features.h"
+
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
+ #include "dds/ddsi/ddsi_config.h"
+ #include "dds/ddsi/ddsi_keyhash.h"
+ #include "dds/ddsi/ddsi_tran.h"
+ #include "dds/ddsi/q_protocol.h" /* for, e.g., SubmessageKind_t */
+ #include "dds/ddsrt/sync.h"
+
+-#include "iceoryx_binding_c/chunk.h"
+-#include "iceoryx_binding_c/publisher.h"
+-#include "iceoryx_binding_c/subscriber.h"
+-#include "iceoryx_binding_c/config.h"
+-
+ #if defined(__cplusplus)
+ extern "C" {
+ #endif
+
+ typedef enum {
+-  IOX_CHUNK_UNINITIALIZED,
+-  IOX_CHUNK_CONTAINS_RAW_DATA,
+-  IOX_CHUNK_CONTAINS_SERIALIZED_DATA
+-} iox_shm_data_state_t;
++  DDS_SUBSPACE_CHUNK_UNINITIALIZED,
++  DDS_SUBSPACE_CHUNK_CONTAINS_RAW_DATA,
++  DDS_SUBSPACE_CHUNK_CONTAINS_SERIALIZED_DATA
++} dds_subspace_data_state_t;
+
+-struct iceoryx_header {
++struct dds_subspace_header {
+   struct ddsi_guid guid;
+   dds_time_t tstamp;
+   uint32_t statusinfo;
+   uint32_t data_size;
+   unsigned char data_kind;
+   ddsi_keyhash_t keyhash;
+-  iox_shm_data_state_t shm_data_state;
++  dds_subspace_data_state_t shm_data_state;
++};
++
++typedef struct dds_subspace_header dds_subspace_header_t;
++
++typedef struct dds_subspace_publisher *dds_subspace_pub_t;
++typedef struct dds_subspace_subscriber *dds_subspace_sub_t;
++typedef struct dds_subspace_listener *dds_subspace_listener_t;
++typedef struct dds_subspace_user_trigger *dds_subspace_user_trigger_t;
++
++enum dds_subspace_allocation_result {
++  DDS_SUBSPACE_ALLOCATION_SUCCESS,
++  DDS_SUBSPACE_ALLOCATION_ERROR
++};
++
++enum dds_subspace_chunk_receive_result {
++  DDS_SUBSPACE_CHUNK_RECEIVE_SUCCESS,
++  DDS_SUBSPACE_CHUNK_RECEIVE_NO_CHUNK_AVAILABLE,
++  DDS_SUBSPACE_CHUNK_RECEIVE_ERROR
+ };
+
+-typedef struct iceoryx_header iceoryx_header_t;
++enum dds_subspace_listener_result {
++  DDS_SUBSPACE_LISTENER_SUCCESS,
++  DDS_SUBSPACE_LISTENER_ERROR
++};
++
++enum dds_subspace_subscriber_event {
++  DDS_SUBSPACE_SUBSCRIBER_DATA_RECEIVED
++};
++
++typedef void (*dds_subspace_subscriber_callback_t)(dds_subspace_sub_t, void *);
+
+ struct dds_reader;
+ struct shm_monitor;
+@@ -55,32 +81,90 @@ typedef struct {
+   ddsrt_mutex_t mutex;
+   struct shm_monitor *monitor;
+   struct dds_reader *parent_reader;
+-} iox_sub_context_t;
++} dds_subspace_sub_context_t;
+
+-DDS_EXPORT iox_sub_context_t **iox_sub_context_ptr(iox_sub_t sub);
++DDS_EXPORT void dds_subspace_runtime_init(const char *process_name);
+
+-DDS_EXPORT void iox_sub_context_init(iox_sub_context_t *context);
++DDS_EXPORT void dds_subspace_set_loglevel(enum ddsi_shm_loglevel level);
+
+-DDS_EXPORT void
+-iox_sub_context_fini(iox_sub_context_t *context);
++DDS_EXPORT dds_subspace_pub_t dds_subspace_pub_init(
++    const struct ddsi_config *config, const char *service,
++    const char *type_name, const char *topic_name, uint64_t history_depth,
++    bool dds_reliable);
+
+-// lock and unlock for individual subscribers
+-DDS_EXPORT void shm_lock_iox_sub(iox_sub_t sub);
++DDS_EXPORT void dds_subspace_pub_stop_offer(dds_subspace_pub_t pub);
++
++DDS_EXPORT void dds_subspace_pub_deinit(dds_subspace_pub_t pub);
++
++DDS_EXPORT enum dds_subspace_allocation_result dds_subspace_pub_loan(
++    dds_subspace_pub_t pub, void **payload, uint32_t payload_size,
++    uint32_t payload_alignment, uint32_t user_header_size,
++    uint32_t user_header_alignment);
++
++DDS_EXPORT void dds_subspace_pub_publish(dds_subspace_pub_t pub, void *payload);
+
+-DDS_EXPORT void shm_unlock_iox_sub(iox_sub_t sub);
++DDS_EXPORT void dds_subspace_pub_release(dds_subspace_pub_t pub, void *payload);
++
++DDS_EXPORT dds_subspace_sub_t dds_subspace_sub_init(
++    const struct ddsi_config *config, const char *service,
++    const char *type_name, const char *topic_name, uint64_t queue_capacity,
++    bool dds_reliable);
++
++DDS_EXPORT void dds_subspace_sub_deinit(dds_subspace_sub_t sub);
++
++DDS_EXPORT enum dds_subspace_chunk_receive_result dds_subspace_sub_take(
++    dds_subspace_sub_t sub, const void **payload);
++
++DDS_EXPORT void dds_subspace_sub_release(dds_subspace_sub_t sub,
++                                         const void *payload);
++
++DDS_EXPORT void dds_subspace_listener_init(dds_subspace_listener_t *listener);
++
++DDS_EXPORT void dds_subspace_listener_deinit(dds_subspace_listener_t listener);
++
++DDS_EXPORT enum dds_subspace_listener_result
++dds_subspace_listener_attach_subscriber_event_with_context_data(
++    dds_subspace_listener_t listener, dds_subspace_sub_t sub,
++    enum dds_subspace_subscriber_event event,
++    dds_subspace_subscriber_callback_t callback, void *context);
++
++DDS_EXPORT void dds_subspace_listener_detach_subscriber_event(
++    dds_subspace_listener_t listener, dds_subspace_sub_t sub,
++    enum dds_subspace_subscriber_event event);
++
++DDS_EXPORT void dds_subspace_user_trigger_init(
++    dds_subspace_user_trigger_t *trigger);
++
++DDS_EXPORT void dds_subspace_user_trigger_deinit(
++    dds_subspace_user_trigger_t trigger);
++
++DDS_EXPORT void dds_subspace_user_trigger_trigger(
++    dds_subspace_user_trigger_t trigger);
++
++DDS_EXPORT void dds_subspace_sub_context_init(
++    dds_subspace_sub_context_t *context);
++
++DDS_EXPORT void dds_subspace_sub_context_fini(
++    dds_subspace_sub_context_t *context);
++
++// lock and unlock for individual subscribers
++DDS_EXPORT void shm_lock_subspace_sub(dds_subspace_sub_t sub);
+
+-DDS_EXPORT void free_iox_chunk(iox_sub_t *iox_sub, void **iox_chunk);
++DDS_EXPORT void shm_unlock_subspace_sub(dds_subspace_sub_t sub);
+
+-DDS_EXPORT iceoryx_header_t *iceoryx_header_from_chunk(const void *iox_chunk);
++DDS_EXPORT void free_subspace_chunk(dds_subspace_sub_t *subspace_sub,
++                                    void **chunk);
+
+-DDS_EXPORT void shm_set_loglevel(enum ddsi_shm_loglevel);
++DDS_EXPORT dds_subspace_header_t *dds_subspace_header_from_chunk(
++    const void *chunk);
+
+-DDS_EXPORT void *shm_create_chunk(iox_pub_t iox_pub, size_t size);
++DDS_EXPORT void *shm_create_chunk(dds_subspace_pub_t subspace_pub,
++                                  size_t size);
+
+-DDS_EXPORT void shm_set_data_state(void *iox_chunk,
+-                                   iox_shm_data_state_t data_state);
++DDS_EXPORT void shm_set_data_state(void *chunk,
++                                   dds_subspace_data_state_t data_state);
+
+-DDS_EXPORT iox_shm_data_state_t shm_get_data_state(void *iox_chunk);
++DDS_EXPORT dds_subspace_data_state_t shm_get_data_state(void *chunk);
+
+ #if defined(__cplusplus)
+ }
+diff --git a/src/core/ddsi/src/ddsi_serdata_default.c b/src/core/ddsi/src/ddsi_serdata_default.c
+index ca356b8..ebbbc29 100644
+--- a/src/core/ddsi/src/ddsi_serdata_default.c
++++ b/src/core/ddsi/src/ddsi_serdata_default.c
+@@ -29,7 +29,6 @@
+ #ifdef DDS_HAS_SHM
+ #include "dds/ddsi/ddsi_shm_transport.h"
+ #include "dds/ddsi/q_xmsg.h"
+-#include "iceoryx_binding_c/chunk.h"
+ #endif
+
+ /* 8k entries in the freelist seems to be roughly the amount needed to send
+@@ -149,7 +148,7 @@ static void serdata_default_free(struct ddsi_serdata *dcmn)
+     ddsrt_free(d->key.u.dynbuf);
+
+ #ifdef DDS_HAS_SHM
+-  free_iox_chunk(d->c.iox_subscriber, &d->c.iox_chunk);
++  free_subspace_chunk(d->c.iox_subscriber, &d->c.iox_chunk);
+ #endif
+
+   if (d->size > MAX_SIZE_FOR_POOL || !nn_freelist_push (&d->serpool->freelist, d))
+@@ -472,12 +471,12 @@ static struct ddsi_serdata *ddsi_serdata_from_keyhash_cdr_nokey (const struct dd
+ static struct ddsi_serdata_default *serdata_default_from_iox_common (const struct ddsi_sertype *tpcmn, enum ddsi_serdata_kind kind, void *sub, void *iox_buffer)
+ {
+   struct ddsi_sertype_default const * const tp = (const struct ddsi_sertype_default *) tpcmn;
+-  iceoryx_header_t const * const ice_hdr = iceoryx_header_from_chunk (iox_buffer);
+-  struct ddsi_serdata_default * const d = serdata_default_new_size (tp, kind, ice_hdr->data_size, tp->write_encoding_version);
++  dds_subspace_header_t const * const shm_hdr = dds_subspace_header_from_chunk (iox_buffer);
++  struct ddsi_serdata_default * const d = serdata_default_new_size (tp, kind, shm_hdr->data_size, tp->write_encoding_version);
+   // note: we do not deserialize or memcpy here, just take ownership of the chunk
+   d->c.iox_chunk = iox_buffer;
+   d->c.iox_subscriber = sub;
+-  if (ice_hdr->shm_data_state != IOX_CHUNK_CONTAINS_SERIALIZED_DATA)
++  if (shm_hdr->shm_data_state != DDS_SUBSPACE_CHUNK_CONTAINS_SERIALIZED_DATA)
+     gen_serdata_key_from_sample (tp, &d->key, iox_buffer);
+   else
+   {
+@@ -485,7 +484,7 @@ static struct ddsi_serdata_default *serdata_default_from_iox_common (const struc
+     // somewhere, just not here.  This is not the time to change the serdata interface and we have
+     // to make do with what is available.
+     dds_istream_t is;
+-    dds_istream_init (&is, ice_hdr->data_size, iox_buffer, tp->write_encoding_version);
++    dds_istream_init (&is, shm_hdr->data_size, iox_buffer, tp->write_encoding_version);
+     gen_serdata_key_from_cdr (&is, &d->key, tp, kind == SDK_KEY);
+   }
+   return d;
+@@ -653,8 +652,8 @@ static bool serdata_default_to_sample_cdr (const struct ddsi_serdata *serdata_co
+   if (d->c.iox_chunk)
+   {
+     void* iox_chunk = d->c.iox_chunk;
+-    iceoryx_header_t* hdr = iceoryx_header_from_chunk(iox_chunk);
+-    if(hdr->shm_data_state == IOX_CHUNK_CONTAINS_SERIALIZED_DATA) {
++    dds_subspace_header_t* hdr = dds_subspace_header_from_chunk(iox_chunk);
++    if(hdr->shm_data_state == DDS_SUBSPACE_CHUNK_CONTAINS_SERIALIZED_DATA) {
+       dds_istream_init (&is, hdr->data_size, iox_chunk, ddsi_sertype_enc_id_xcdr_version(d->hdr.identifier));
+       assert (CDR_ENC_IS_NATIVE (d->hdr.identifier));
+       if (d->c.kind == SDK_KEY)
+diff --git a/src/core/ddsi/src/ddsi_shm_transport.c b/src/core/ddsi/src/ddsi_shm_transport.c
+index e0d56e8..77d2ccb 100644
+--- a/src/core/ddsi/src/ddsi_shm_transport.c
++++ b/src/core/ddsi/src/ddsi_shm_transport.c
+@@ -10,82 +10,50 @@
+  * SPDX-License-Identifier: EPL-2.0 OR BSD-3-Clause
+  */
+ #include "dds/ddsi/ddsi_shm_transport.h"
+-#include "iceoryx_binding_c/log.h"
+
+-void iox_sub_context_init(iox_sub_context_t *context)
++void dds_subspace_sub_context_init(dds_subspace_sub_context_t *context)
+ {
+   context->monitor = NULL;
+   context->parent_reader = NULL;
+   ddsrt_mutex_init(&context->mutex);
+ }
+
+-void iox_sub_context_fini(iox_sub_context_t* context)
++void dds_subspace_sub_context_fini(dds_subspace_sub_context_t* context)
+ {
+   ddsrt_mutex_destroy(&context->mutex);
+ }
+
+-iox_sub_context_t **iox_sub_context_ptr(iox_sub_t sub) {
+-  // we know that 8 bytes in front of sub there is a pointer to the context
+-  char* p = (char*) sub - sizeof(void *);
+-  return (iox_sub_context_t **)p;
+-}
+-
+-void shm_lock_iox_sub(iox_sub_t sub)
++void shm_lock_subspace_sub(dds_subspace_sub_t sub)
+ {
+-  iox_sub_context_t **context = iox_sub_context_ptr(sub);
+-  ddsrt_mutex_lock(&(*context)->mutex);
++  (void) sub;
+ }
+
+-void shm_unlock_iox_sub(iox_sub_t sub)
++void shm_unlock_subspace_sub(dds_subspace_sub_t sub)
+ {
+-  iox_sub_context_t **context = iox_sub_context_ptr(sub);
+-  ddsrt_mutex_unlock(&(*context)->mutex);
+-}
+-
+-iceoryx_header_t *iceoryx_header_from_chunk(const void *iox_chunk) {
+-  iox_chunk_header_t *chunk_header =
+-      iox_chunk_header_from_user_payload((void*) iox_chunk);
+-  return iox_chunk_header_to_user_header(chunk_header);
+-}
+-
+-static enum iox_LogLevel to_iox_loglevel(enum ddsi_shm_loglevel level) {
+-    switch(level) {
+-        case DDSI_SHM_OFF : return Iceoryx_LogLevel_Off;
+-        case DDSI_SHM_FATAL : return Iceoryx_LogLevel_Fatal;
+-        case DDSI_SHM_ERROR : return Iceoryx_LogLevel_Error;
+-        case DDSI_SHM_WARN : return Iceoryx_LogLevel_Warn;
+-        case DDSI_SHM_INFO : return Iceoryx_LogLevel_Info;
+-        case DDSI_SHM_DEBUG : return Iceoryx_LogLevel_Debug;
+-        case DDSI_SHM_VERBOSE : return Iceoryx_LogLevel_Verbose;
+-    }
+-    return Iceoryx_LogLevel_Off;
+-}
+-
+-void shm_set_loglevel(enum ddsi_shm_loglevel level) {
+-    iox_set_loglevel(to_iox_loglevel(level));
++  (void) sub;
+ }
+
+-void free_iox_chunk(iox_sub_t *iox_sub, void **iox_chunk) {
+-  if (*iox_chunk)
++void free_subspace_chunk(dds_subspace_sub_t *subspace_sub, void **chunk) {
++  if (*chunk)
+   {
+-    // assume *iox_chunk is only set to NULL while holding this lock
++    // assume *chunk is only set to NULL while holding this lock
+     // (we could also use an atomic exchange)
+-    // actually all reads on *iox_chunk must be atomic ...
+-    shm_lock_iox_sub(*iox_sub);
+-    void* chunk = *iox_chunk;
+-    if (chunk)
++    // actually all reads on *chunk must be atomic ...
++    shm_lock_subspace_sub(*subspace_sub);
++    void* payload = *chunk;
++    if (payload)
+     {
+-      iox_sub_release_chunk(*iox_sub, chunk);
+-      *iox_chunk = NULL;
++      dds_subspace_sub_release(*subspace_sub, payload);
++      *chunk = NULL;
+     }
+-    shm_unlock_iox_sub(*iox_sub);
++    shm_unlock_subspace_sub(*subspace_sub);
+   }
+ }
+
+ // TODO: further consolidation of shared memory allocation logic
+-void *shm_create_chunk(iox_pub_t iox_pub, size_t size) {
+-  iceoryx_header_t *ice_hdr;
+-  void *iox_chunk;
++void *shm_create_chunk(dds_subspace_pub_t subspace_pub, size_t size) {
++  dds_subspace_header_t *shm_hdr;
++  void *chunk;
+
+   // TODO: use a proper timeout to control the time it is allowed to take to
+   // obtain a chunk more accurately but for now only try a limited number of
+@@ -96,13 +64,12 @@ void *shm_create_chunk(iox_pub_t iox_pub, size_t size) {
+       10; // try 10 times over at least 10ms, considering the wait time below
+
+   while (true) {
+-    enum iox_AllocationResult alloc_result =
+-        iox_pub_loan_aligned_chunk_with_user_header(
+-            iox_pub, &iox_chunk, (uint32_t)size,
+-            IOX_C_CHUNK_DEFAULT_USER_PAYLOAD_ALIGNMENT,
+-            sizeof(iceoryx_header_t), 8);
++    enum dds_subspace_allocation_result alloc_result =
++        dds_subspace_pub_loan(
++            subspace_pub, &chunk, (uint32_t)size,
++            8, sizeof(dds_subspace_header_t), 8);
+
+-    if (AllocationResult_SUCCESS == alloc_result)
++    if (DDS_SUBSPACE_ALLOCATION_SUCCESS == alloc_result)
+       break;
+
+     if (--number_of_tries <= 0) {
+@@ -112,20 +79,18 @@ void *shm_create_chunk(iox_pub_t iox_pub, size_t size) {
+     dds_sleepfor(DDS_MSECS(1));
+   }
+
+-  iox_chunk_header_t *iox_chunk_header =
+-      iox_chunk_header_from_user_payload(iox_chunk);
+-  ice_hdr = iox_chunk_header_to_user_header(iox_chunk_header);
+-  ice_hdr->data_size = (uint32_t)size;
+-  ice_hdr->shm_data_state = IOX_CHUNK_UNINITIALIZED;
+-  return iox_chunk;
++  shm_hdr = dds_subspace_header_from_chunk(chunk);
++  shm_hdr->data_size = (uint32_t)size;
++  shm_hdr->shm_data_state = DDS_SUBSPACE_CHUNK_UNINITIALIZED;
++  return chunk;
+ }
+
+-void shm_set_data_state(void *iox_chunk, iox_shm_data_state_t data_state) {
+-  iceoryx_header_t *iox_hdr = iceoryx_header_from_chunk(iox_chunk);
+-  iox_hdr->shm_data_state = data_state;
++void shm_set_data_state(void *chunk, dds_subspace_data_state_t data_state) {
++  dds_subspace_header_t *shm_hdr = dds_subspace_header_from_chunk(chunk);
++  shm_hdr->shm_data_state = data_state;
+ }
+
+-iox_shm_data_state_t shm_get_data_state(void *iox_chunk) {
+-  iceoryx_header_t *iox_hdr = iceoryx_header_from_chunk(iox_chunk);
+-  return iox_hdr->shm_data_state;
++dds_subspace_data_state_t shm_get_data_state(void *chunk) {
++  dds_subspace_header_t *shm_hdr = dds_subspace_header_from_chunk(chunk);
++  return shm_hdr->shm_data_state;
+ }
+diff --git a/src/core/ddsi/src/ddsi_subspace_backend.cc b/src/core/ddsi/src/ddsi_subspace_backend.cc
+new file mode 100644
+index 0000000..015b961
+--- /dev/null
++++ b/src/core/ddsi/src/ddsi_subspace_backend.cc
+@@ -0,0 +1,697 @@
++#include "dds/ddsi/ddsi_shm_transport.h"
++
++#include "client/client.h"
++
++#include <poll.h>
++
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <cstddef>
++#include <cstdint>
++#include <cstdio>
++#include <cstring>
++#include <mutex>
++#include <optional>
++#include <string>
++#include <thread>
++#include <vector>
++
++namespace {
++
++constexpr uint32_t kDefaultSlotSize = 256;
++constexpr uint32_t kDefaultMaxSlots = 4096;
++constexpr int kPollTimeoutMs = 100;
++constexpr size_t kHeaderAlignment = alignof(std::max_align_t);
++
++struct ActiveMessage {
++  void *payload = nullptr;
++  subspace::Message message{};
++};
++
++struct PayloadLookupEntry {
++  const void *payload = nullptr;
++  size_t slot_id = 0;
++};
++
++const void *const kDeletedPayload = reinterpret_cast<const void *>(UINTPTR_MAX);
++
++uint64_t fnv1a64(const std::string &value) {
++  uint64_t hash = 14695981039346656037ULL;
++  for (unsigned char c : value) {
++    hash ^= c;
++    hash *= 1099511628211ULL;
++  }
++  return hash;
++}
++
++std::string hex64(uint64_t value) {
++  static constexpr char kHex[] = "0123456789abcdef";
++  std::string out(16, '0');
++  for (int i = 15; i >= 0; --i) {
++    out[static_cast<size_t>(i)] = kHex[value & 0xfU];
++    value >>= 4;
++  }
++  return out;
++}
++
++std::string join_name(const char *service, const char *type, const char *topic) {
++  std::string raw = service ? service : "";
++  raw.push_back('|');
++  raw += type ? type : "";
++  raw.push_back('|');
++  raw += topic ? topic : "";
++  return raw;
++}
++
++std::string make_channel_name(const char *service, const char *type, const char *topic) {
++  return "ros2_subspace_" + hex64(fnv1a64(join_name(service, type, topic)));
++}
++
++uint32_t config_or_default(uint32_t value, uint32_t fallback) {
++  return value == 0 ? fallback : value;
++}
++
++constexpr size_t align_up(size_t value, size_t alignment) {
++  return (value + alignment - 1) & ~(alignment - 1);
++}
++
++constexpr size_t header_prefix_size() {
++  return align_up(sizeof(dds_subspace_header_t), kHeaderAlignment);
++}
++
++uint32_t slot_size_from_config(const ddsi_config *config) {
++  if (config == nullptr || config->subspace_slot_size == 0) {
++    return kDefaultSlotSize;
++  }
++  return config->subspace_slot_size;
++}
++
++uint32_t subspace_slot_size_from_config(const ddsi_config *config) {
++  const uint64_t slot_size = static_cast<uint64_t>(slot_size_from_config(config)) +
++                             static_cast<uint64_t>(header_prefix_size());
++  return static_cast<uint32_t>(std::min<uint64_t>(slot_size, UINT32_MAX));
++}
++
++uint32_t max_slots_from_config(const ddsi_config *config) {
++  if (config == nullptr || config->subspace_max_slots == 0) {
++    return kDefaultMaxSlots;
++  }
++  return config->subspace_max_slots;
++}
++
++uint32_t publisher_slots_from_config(const ddsi_config *config, uint64_t history_depth) {
++  if (config != nullptr && config->subspace_slots != 0) {
++    return config->subspace_slots;
++  }
++  const uint64_t queue_capacity = history_depth == 0 ? 1 : history_depth;
++  const uint64_t expected_subscribers =
++      config_or_default(config ? config->subspace_expected_subscribers : 0, 1);
++  const uint64_t slots = expected_subscribers * (queue_capacity + 2) + 3;
++  return static_cast<uint32_t>(std::min<uint64_t>(slots, max_slots_from_config(config)));
++}
++
++uint32_t max_active_messages_from_config(const ddsi_config *config, uint64_t queue_capacity) {
++  if (config != nullptr && config->subspace_max_active_messages != 0) {
++    return config->subspace_max_active_messages;
++  }
++  return static_cast<uint32_t>(std::min<uint64_t>(queue_capacity + 2, max_slots_from_config(config)));
++}
++
++dds_subspace_header_t *header_from_payload(const void *payload) {
++  if (payload == nullptr) {
++    return nullptr;
++  }
++  auto *bytes = static_cast<const unsigned char *>(payload);
++  return reinterpret_cast<dds_subspace_header_t *>(
++      const_cast<unsigned char *>(bytes - header_prefix_size()));
++}
++
++void *payload_from_buffer(void *buffer) {
++  auto *bytes = static_cast<unsigned char *>(buffer);
++  return bytes + header_prefix_size();
++}
++
++const void *payload_from_buffer(const void *buffer) {
++  auto *bytes = static_cast<const unsigned char *>(buffer);
++  return bytes + header_prefix_size();
++}
++
++size_t next_power_of_two(size_t value) {
++  size_t result = 1;
++  while (result < value) {
++    result <<= 1;
++  }
++  return result;
++}
++
++size_t payload_hash(const void *payload) {
++  uintptr_t value = reinterpret_cast<uintptr_t>(payload);
++  return (value >> 4) * 11400714819323198485ull;
++}
++
++bool string_equals(const char *lhs, const char *rhs) {
++  return lhs != nullptr && std::strcmp(lhs, rhs) == 0;
++}
++
++bool reliable_from_config(const ddsi_config *config, bool dds_reliable) {
++  if (config == nullptr || config->subspace_reliable == nullptr ||
++      string_equals(config->subspace_reliable, "auto")) {
++    return dds_reliable;
++  }
++  if (string_equals(config->subspace_reliable, "true")) {
++    return true;
++  }
++  if (string_equals(config->subspace_reliable, "false")) {
++    return false;
++  }
++  return dds_reliable;
++}
++
++const char *socket_from_config(const ddsi_config *config) {
++  if (config == nullptr || config->subspace_socket == nullptr ||
++      config->subspace_socket[0] == '\0') {
++    return subspace::kDefaultServerSocket;
++  }
++  return config->subspace_socket;
++}
++
++void log_subspace_error(
++    const char *operation, const std::string &channel_name, const absl::Status &status) {
++  std::fprintf(
++      stderr, "CycloneDDS(Subspace): %s failed for %s: %s\n",
++      operation, channel_name.c_str(), status.ToString().c_str());
++}
++
++} // namespace
++
++struct dds_subspace_publisher {
++  subspace::Client client;
++  std::optional<subspace::Publisher> publisher;
++  std::string channel_name;
++  std::string type_name;
++  void *current_buffer = nullptr;
++  void *current_payload = nullptr;
++  dds_subspace_header_t *current_header = nullptr;
++  uint32_t current_payload_size = 0;
++};
++
++struct dds_subspace_subscriber {
++  subspace::Client client;
++  std::optional<subspace::Subscriber> subscriber;
++  std::vector<ActiveMessage> active_messages;
++  std::vector<PayloadLookupEntry> payload_lookup;
++  std::thread worker;
++  std::atomic<bool> stop_worker{false};
++  std::atomic<uint64_t> take_attempts{0};
++  std::atomic<uint64_t> empty_takes{0};
++  std::atomic<uint64_t> take_errors{0};
++  dds_subspace_subscriber_callback_t callback = nullptr;
++  void *callback_context = nullptr;
++};
++
++struct dds_subspace_listener {
++  std::mutex mutex;
++  std::vector<dds_subspace_sub_t> subscribers;
++};
++
++struct dds_subspace_user_trigger {
++  std::atomic<uint64_t> triggers{0};
++};
++
++void stop_subscriber_worker(dds_subspace_sub_t subscriber) {
++  if (subscriber == nullptr) {
++    return;
++  }
++  subscriber->stop_worker.store(true);
++  if (subscriber->worker.joinable()) {
++    subscriber->worker.join();
++  }
++  subscriber->callback = nullptr;
++  subscriber->callback_context = nullptr;
++  subscriber->stop_worker.store(false);
++}
++
++void init_payload_lookup(dds_subspace_sub_t subscriber, size_t num_slots) {
++  const size_t lookup_size = next_power_of_two(std::max<size_t>(16, num_slots * 2));
++  subscriber->payload_lookup.assign(lookup_size, PayloadLookupEntry{});
++}
++
++void payload_lookup_erase(dds_subspace_sub_t subscriber, const void *payload) {
++  if (payload == nullptr || subscriber->payload_lookup.empty()) {
++    return;
++  }
++  const size_t mask = subscriber->payload_lookup.size() - 1;
++  size_t index = payload_hash(payload) & mask;
++  for (size_t i = 0; i < subscriber->payload_lookup.size(); ++i) {
++    auto &entry = subscriber->payload_lookup[index];
++    if (entry.payload == payload) {
++      entry.payload = kDeletedPayload;
++      entry.slot_id = 0;
++      return;
++    }
++    if (entry.payload == nullptr) {
++      return;
++    }
++    index = (index + 1) & mask;
++  }
++}
++
++void payload_lookup_insert(dds_subspace_sub_t subscriber, const void *payload, size_t slot_id) {
++  if (payload == nullptr || subscriber->payload_lookup.empty()) {
++    return;
++  }
++  const size_t mask = subscriber->payload_lookup.size() - 1;
++  size_t index = payload_hash(payload) & mask;
++  size_t deleted_index = SIZE_MAX;
++  for (size_t i = 0; i < subscriber->payload_lookup.size(); ++i) {
++    auto &entry = subscriber->payload_lookup[index];
++    if (entry.payload == kDeletedPayload) {
++      if (deleted_index == SIZE_MAX) {
++        deleted_index = index;
++      }
++      index = (index + 1) & mask;
++      continue;
++    }
++    if (entry.payload == nullptr || entry.payload == payload) {
++      if (entry.payload == nullptr && deleted_index != SIZE_MAX) {
++        index = deleted_index;
++      }
++      auto &target = subscriber->payload_lookup[index];
++      target.payload = payload;
++      target.slot_id = slot_id;
++      return;
++    }
++    index = (index + 1) & mask;
++  }
++  if (deleted_index != SIZE_MAX) {
++    auto &entry = subscriber->payload_lookup[deleted_index];
++    entry.payload = payload;
++    entry.slot_id = slot_id;
++  }
++}
++
++size_t payload_lookup_find(dds_subspace_sub_t subscriber, const void *payload) {
++  if (payload == nullptr || subscriber->payload_lookup.empty()) {
++    return SIZE_MAX;
++  }
++  const size_t mask = subscriber->payload_lookup.size() - 1;
++  size_t index = payload_hash(payload) & mask;
++  for (size_t i = 0; i < subscriber->payload_lookup.size(); ++i) {
++    const auto &entry = subscriber->payload_lookup[index];
++    if (entry.payload == payload) {
++      return entry.slot_id;
++    }
++    if (entry.payload == nullptr) {
++      return SIZE_MAX;
++    }
++    index = (index + 1) & mask;
++  }
++  return SIZE_MAX;
++}
++
++void start_subscriber_worker(
++    dds_subspace_sub_t subscriber, dds_subspace_subscriber_callback_t callback,
++    void *context_data) {
++  stop_subscriber_worker(subscriber);
++  subscriber->callback = callback;
++  subscriber->callback_context = context_data;
++  subscriber->worker = std::thread([subscriber]() {
++    while (!subscriber->stop_worker.load()) {
++      if (!subscriber->subscriber.has_value()) {
++        break;
++      }
++      pollfd pfd = subscriber->subscriber->GetPollFd();
++      if (pfd.fd < 0) {
++        std::this_thread::sleep_for(std::chrono::milliseconds(kPollTimeoutMs));
++        continue;
++      }
++      const int ready = poll(&pfd, 1, kPollTimeoutMs);
++      if (ready > 0 && (pfd.revents & POLLIN) != 0) {
++        while (!subscriber->stop_worker.load()) {
++          auto callback_fn = subscriber->callback;
++          if (callback_fn == nullptr) {
++            break;
++          }
++
++          const uint64_t attempts_before =
++              subscriber->take_attempts.load(std::memory_order_relaxed);
++          const uint64_t empty_before =
++              subscriber->empty_takes.load(std::memory_order_relaxed);
++          callback_fn(subscriber, subscriber->callback_context);
++
++          const uint64_t attempts_after =
++              subscriber->take_attempts.load(std::memory_order_relaxed);
++          const uint64_t empty_after =
++              subscriber->empty_takes.load(std::memory_order_relaxed);
++          if (empty_after != empty_before || attempts_after == attempts_before) {
++            break;
++          }
++        }
++      }
++    }
++  });
++}
++
++extern "C" {
++
++void dds_subspace_runtime_init(const char *process_name) {
++  (void) process_name;
++}
++
++void dds_subspace_set_loglevel(enum ddsi_shm_loglevel level) {
++  (void) level;
++}
++
++dds_subspace_pub_t dds_subspace_pub_init(
++    const ddsi_config *config, const char *service, const char *type_name,
++    const char *topic_name, uint64_t history_depth, bool dds_reliable) {
++  auto *publisher = new dds_subspace_publisher;
++  publisher->channel_name = make_channel_name(service, type_name, topic_name);
++  publisher->type_name = join_name(service, type_name, topic_name);
++
++  absl::Status status =
++      publisher->client.Init(socket_from_config(config), "cyclonedds_subspace_pub");
++  if (!status.ok()) {
++    log_subspace_error("create client", publisher->channel_name, status);
++    delete publisher;
++    return nullptr;
++  }
++
++  subspace::PublisherOptions pub_options;
++  pub_options
++      .SetSlotSize(static_cast<int32_t>(subspace_slot_size_from_config(config)))
++      .SetNumSlots(static_cast<int32_t>(publisher_slots_from_config(config, history_depth)))
++      .SetLocal(true)
++      .SetFixedSize(config ? config->subspace_fixed_size != 0 : false)
++      .SetReliable(reliable_from_config(config, dds_reliable))
++      .SetType(publisher->type_name);
++
++  auto status_or_publisher =
++      publisher->client.CreatePublisher(publisher->channel_name, pub_options);
++  if (!status_or_publisher.ok()) {
++    log_subspace_error("create publisher", publisher->channel_name, status_or_publisher.status());
++    delete publisher;
++    return nullptr;
++  }
++  publisher->publisher.emplace(std::move(*status_or_publisher));
++  return publisher;
++}
++
++void dds_subspace_pub_stop_offer(dds_subspace_pub_t publisher) {
++  (void) publisher;
++}
++
++void dds_subspace_pub_deinit(dds_subspace_pub_t publisher) {
++  if (publisher == nullptr) {
++    return;
++  }
++  if (publisher->current_payload != nullptr && publisher->publisher.has_value()) {
++    publisher->publisher->CancelPublish();
++  }
++  publisher->current_buffer = nullptr;
++  publisher->current_payload = nullptr;
++  publisher->current_header = nullptr;
++  publisher->current_payload_size = 0;
++  publisher->publisher.reset();
++  delete publisher;
++}
++
++enum dds_subspace_allocation_result dds_subspace_pub_loan(
++    dds_subspace_pub_t publisher, void **user_payload, uint32_t payload_size,
++    uint32_t payload_alignment, uint32_t user_header_size,
++    uint32_t user_header_alignment) {
++  if (publisher == nullptr || user_payload == nullptr ||
++      !publisher->publisher.has_value() || publisher->current_payload != nullptr) {
++    return DDS_SUBSPACE_ALLOCATION_ERROR;
++  }
++
++  (void)payload_alignment;
++  if (user_header_size > sizeof(dds_subspace_header_t) || user_header_alignment > 8) {
++    return DDS_SUBSPACE_ALLOCATION_ERROR;
++  }
++
++  const size_t allocation_size = header_prefix_size() + payload_size;
++  auto status_or_buffer =
++      publisher->publisher->GetMessageBuffer(static_cast<int32_t>(allocation_size));
++  if (!status_or_buffer.ok()) {
++    log_subspace_error("get message buffer", publisher->channel_name, status_or_buffer.status());
++    return DDS_SUBSPACE_ALLOCATION_ERROR;
++  }
++  if (*status_or_buffer == nullptr) {
++    return DDS_SUBSPACE_ALLOCATION_ERROR;
++  }
++
++  publisher->current_header =
++      reinterpret_cast<dds_subspace_header_t *>(*status_or_buffer);
++  std::memset(publisher->current_header, 0, sizeof(*publisher->current_header));
++  publisher->current_buffer = *status_or_buffer;
++  publisher->current_payload = payload_from_buffer(*status_or_buffer);
++  publisher->current_payload_size = payload_size;
++  *user_payload = publisher->current_payload;
++  return DDS_SUBSPACE_ALLOCATION_SUCCESS;
++}
++
++void dds_subspace_pub_publish(dds_subspace_pub_t publisher, void *user_payload) {
++  if (publisher == nullptr || user_payload == nullptr ||
++      publisher->current_payload != user_payload || !publisher->publisher.has_value()) {
++    return;
++  }
++  const uint32_t message_size =
++      publisher->current_header != nullptr && publisher->current_header->data_size != 0
++          ? publisher->current_header->data_size
++          : publisher->current_payload_size;
++  auto status_or_message = publisher->publisher->PublishMessage(
++      static_cast<uint32_t>(header_prefix_size()) + message_size);
++  if (!status_or_message.ok()) {
++    log_subspace_error("publish message", publisher->channel_name, status_or_message.status());
++  }
++  publisher->current_buffer = nullptr;
++  publisher->current_payload = nullptr;
++  publisher->current_header = nullptr;
++  publisher->current_payload_size = 0;
++}
++
++void dds_subspace_pub_release(dds_subspace_pub_t publisher, void *user_payload) {
++  if (publisher == nullptr || user_payload == nullptr) {
++    return;
++  }
++  if (publisher->current_payload == user_payload) {
++    if (publisher->publisher.has_value()) {
++      publisher->publisher->CancelPublish();
++    }
++    publisher->current_buffer = nullptr;
++    publisher->current_payload = nullptr;
++    publisher->current_header = nullptr;
++    publisher->current_payload_size = 0;
++  }
++}
++
++dds_subspace_sub_t dds_subspace_sub_init(
++    const ddsi_config *config, const char *service, const char *type_name,
++    const char *topic_name, uint64_t queue_capacity, bool dds_reliable) {
++  auto *subscriber = new dds_subspace_subscriber;
++  const std::string channel_name = make_channel_name(service, type_name, topic_name);
++  const std::string joined_type_name = join_name(service, type_name, topic_name);
++
++  absl::Status status =
++      subscriber->client.Init(socket_from_config(config), "cyclonedds_subspace_sub");
++  if (!status.ok()) {
++    log_subspace_error("create client", channel_name, status);
++    delete subscriber;
++    return nullptr;
++  }
++
++  subspace::SubscriberOptions sub_options;
++  sub_options
++      .SetMaxActiveMessages(static_cast<int32_t>(
++          max_active_messages_from_config(config, queue_capacity == 0 ? 1 : queue_capacity)))
++      .SetReliable(reliable_from_config(config, dds_reliable))
++      .SetType(joined_type_name)
++      .SetDetectDroppedMessages(config == nullptr || config->subspace_detect_dropped_messages != 0);
++  sub_options.SetLogDroppedMessages(config ? config->subspace_log_dropped_messages != 0 : false);
++
++  subspace::PublisherOptions provision_options;
++  provision_options
++      .SetSlotSize(static_cast<int32_t>(subspace_slot_size_from_config(config)))
++      .SetNumSlots(static_cast<int32_t>(
++          publisher_slots_from_config(config, queue_capacity == 0 ? 1 : queue_capacity)))
++      .SetLocal(true)
++      .SetFixedSize(config ? config->subspace_fixed_size != 0 : false)
++      .SetReliable(reliable_from_config(config, dds_reliable))
++      .SetType(joined_type_name);
++  auto status_or_provisioner =
++      subscriber->client.CreatePublisher(channel_name, provision_options);
++  if (!status_or_provisioner.ok()) {
++    log_subspace_error("provision channel", channel_name, status_or_provisioner.status());
++  }
++
++  auto status_or_subscriber =
++      subscriber->client.CreateSubscriber(channel_name, sub_options);
++  if (!status_or_subscriber.ok()) {
++    log_subspace_error("create subscriber", channel_name, status_or_subscriber.status());
++    delete subscriber;
++    return nullptr;
++  }
++  subscriber->subscriber.emplace(std::move(*status_or_subscriber));
++  if (subscriber->subscriber->NumSlots() > 0) {
++    subscriber->active_messages.resize(static_cast<size_t>(subscriber->subscriber->NumSlots()));
++    init_payload_lookup(subscriber, subscriber->active_messages.size());
++  }
++  return subscriber;
++}
++
++void dds_subspace_sub_deinit(dds_subspace_sub_t subscriber) {
++  if (subscriber == nullptr) {
++    return;
++  }
++  stop_subscriber_worker(subscriber);
++  for (auto &entry : subscriber->active_messages) {
++    entry.message.Reset();
++    entry.payload = nullptr;
++  }
++  subscriber->active_messages.clear();
++  subscriber->payload_lookup.clear();
++  subscriber->subscriber.reset();
++  delete subscriber;
++}
++
++enum dds_subspace_chunk_receive_result dds_subspace_sub_take(
++    dds_subspace_sub_t subscriber, const void **user_payload) {
++  if (subscriber == nullptr || user_payload == nullptr ||
++      !subscriber->subscriber.has_value()) {
++    return DDS_SUBSPACE_CHUNK_RECEIVE_ERROR;
++  }
++  subscriber->take_attempts.fetch_add(1, std::memory_order_relaxed);
++  auto status_or_message = subscriber->subscriber->ReadMessage();
++  if (!status_or_message.ok()) {
++    log_subspace_error("read message", "subscriber", status_or_message.status());
++    return DDS_SUBSPACE_CHUNK_RECEIVE_ERROR;
++  }
++  subspace::Message message = std::move(*status_or_message);
++  if (message.buffer == nullptr || message.length <= header_prefix_size()) {
++    subscriber->empty_takes.fetch_add(1, std::memory_order_relaxed);
++    return DDS_SUBSPACE_CHUNK_RECEIVE_NO_CHUNK_AVAILABLE;
++  }
++  if (message.slot_id < 0) {
++    if (subscriber->take_errors.fetch_add(1, std::memory_order_relaxed) < 8) {
++      std::fprintf(
++          stderr,
++          "CycloneDDS(Subspace): invalid received message length=%zu slot_id=%d\n",
++          message.length, message.slot_id);
++    }
++    return DDS_SUBSPACE_CHUNK_RECEIVE_ERROR;
++  }
++  void *payload = const_cast<void *>(payload_from_buffer(message.buffer));
++  const size_t slot_id = static_cast<size_t>(message.slot_id);
++  if (slot_id >= subscriber->active_messages.size()) {
++    if (subscriber->take_errors.fetch_add(1, std::memory_order_relaxed) < 8) {
++      std::fprintf(
++          stderr,
++          "CycloneDDS(Subspace): received slot_id=%zu beyond subscriber slots=%zu\n",
++          slot_id, subscriber->active_messages.size());
++    }
++    return DDS_SUBSPACE_CHUNK_RECEIVE_ERROR;
++  }
++  auto &entry = subscriber->active_messages[slot_id];
++  payload_lookup_erase(subscriber, entry.payload);
++  entry.message.Reset();
++  entry.payload = payload;
++  payload_lookup_insert(subscriber, payload, slot_id);
++  entry.message = std::move(message);
++  *user_payload = payload;
++  return DDS_SUBSPACE_CHUNK_RECEIVE_SUCCESS;
++}
++
++void dds_subspace_sub_release(dds_subspace_sub_t subscriber, const void *user_payload) {
++  if (subscriber == nullptr || user_payload == nullptr) {
++    return;
++  }
++  const size_t slot_id = payload_lookup_find(subscriber, user_payload);
++  if (slot_id < subscriber->active_messages.size()) {
++    auto &entry = subscriber->active_messages[slot_id];
++    if (entry.payload == user_payload) {
++      payload_lookup_erase(subscriber, entry.payload);
++      entry.message.Reset();
++      entry.payload = nullptr;
++    }
++  }
++}
++
++void dds_subspace_listener_init(dds_subspace_listener_t *listener) {
++  if (listener != nullptr) {
++    *listener = new dds_subspace_listener;
++  }
++}
++
++void dds_subspace_listener_deinit(dds_subspace_listener_t listener) {
++  if (listener == nullptr) {
++    return;
++  }
++  std::vector<dds_subspace_sub_t> subscribers;
++  {
++    std::lock_guard<std::mutex> lock(listener->mutex);
++    subscribers = listener->subscribers;
++    listener->subscribers.clear();
++  }
++  for (dds_subspace_sub_t subscriber : subscribers) {
++    stop_subscriber_worker(subscriber);
++  }
++  delete listener;
++}
++
++enum dds_subspace_listener_result
++dds_subspace_listener_attach_subscriber_event_with_context_data(
++    dds_subspace_listener_t listener, dds_subspace_sub_t subscriber,
++    enum dds_subspace_subscriber_event event,
++    dds_subspace_subscriber_callback_t callback, void *context_data) {
++  if (listener == nullptr || subscriber == nullptr || callback == nullptr ||
++      event != DDS_SUBSPACE_SUBSCRIBER_DATA_RECEIVED) {
++    return DDS_SUBSPACE_LISTENER_ERROR;
++  }
++  {
++    std::lock_guard<std::mutex> lock(listener->mutex);
++    listener->subscribers.push_back(subscriber);
++  }
++  start_subscriber_worker(subscriber, callback, context_data);
++  return DDS_SUBSPACE_LISTENER_SUCCESS;
++}
++
++void dds_subspace_listener_detach_subscriber_event(
++    dds_subspace_listener_t listener, dds_subspace_sub_t subscriber,
++    enum dds_subspace_subscriber_event event) {
++  if (listener == nullptr || subscriber == nullptr ||
++      event != DDS_SUBSPACE_SUBSCRIBER_DATA_RECEIVED) {
++    return;
++  }
++  {
++    std::lock_guard<std::mutex> lock(listener->mutex);
++    auto &subscribers = listener->subscribers;
++    subscribers.erase(
++        std::remove(subscribers.begin(), subscribers.end(), subscriber),
++        subscribers.end());
++  }
++  stop_subscriber_worker(subscriber);
++}
++
++void dds_subspace_user_trigger_init(dds_subspace_user_trigger_t *trigger) {
++  if (trigger != nullptr) {
++    *trigger = new dds_subspace_user_trigger;
++  }
++}
++
++void dds_subspace_user_trigger_deinit(dds_subspace_user_trigger_t trigger) {
++  delete trigger;
++}
++
++void dds_subspace_user_trigger_trigger(dds_subspace_user_trigger_t trigger) {
++  if (trigger != nullptr) {
++    trigger->triggers.fetch_add(1);
++  }
++}
++
++dds_subspace_header_t *dds_subspace_header_from_chunk(const void *user_payload) {
++  return header_from_payload(user_payload);
++}
++
++} // extern "C"
+diff --git a/src/core/ddsi/src/q_init.c b/src/core/ddsi/src/q_init.c
+index 617da5a..8925ebd 100644
+--- a/src/core/ddsi/src/q_init.c
++++ b/src/core/ddsi/src/q_init.c
+@@ -77,7 +77,6 @@
+ #ifdef DDS_HAS_SHM
+ #include "dds/ddsi/ddsi_shm_transport.h"
+ #include "dds/ddsrt/io.h"
+-#include "iceoryx_binding_c/runtime.h"
+ #endif
+
+ static void add_peer_addresses (const struct ddsi_domaingv *gv, struct addrset *as, const struct ddsi_config_peer_listelem *list)
+@@ -1088,25 +1087,25 @@ static void free_conns (struct ddsi_domaingv *gv)
+ }
+
+ #ifdef DDS_HAS_SHM
+-static int iceoryx_init (struct ddsi_domaingv *gv)
++static int subspace_init (struct ddsi_domaingv *gv)
+ {
+-  shm_set_loglevel(gv->config.shm_log_lvl);
++  dds_subspace_set_loglevel(gv->config.shm_log_lvl);
+
+   char *sptr;
+-  ddsrt_asprintf (&sptr, "iceoryx_rt_%"PRIdPID"_%"PRId64, ddsrt_getpid (), gv->tstart.v);
+-  GVLOG (DDS_LC_SHM, "Current process name for iceoryx is %s\n", sptr);
+-  iox_runtime_init (sptr);
++  ddsrt_asprintf (&sptr, "subspace_rt_%"PRIdPID"_%"PRId64, ddsrt_getpid (), gv->tstart.v);
++  GVLOG (DDS_LC_SHM, "Current process name for Subspace is %s\n", sptr);
++  dds_subspace_runtime_init (sptr);
+   free(sptr);
+
+   // FIXME: this can be done more elegantly when properly supporting multiple transports
+-  if (ddsi_vnet_init (gv, "iceoryx", NN_LOCATOR_KIND_SHEM) < 0)
++  if (ddsi_vnet_init (gv, "subspace", NN_LOCATOR_KIND_SHEM) < 0)
+     return -1;
+-  ddsi_factory_find (gv, "iceoryx")->m_enable = true;
++  ddsi_factory_find (gv, "subspace")->m_enable = true;
+
+   if (gv->config.shm_locator && *gv->config.shm_locator)
+   {
+     enum ddsi_locator_from_string_result res;
+-    res = ddsi_locator_from_string (gv, &gv->loc_iceoryx_addr, gv->config.shm_locator, ddsi_factory_find (gv, "iceoryx"));
++    res = ddsi_locator_from_string (gv, &gv->loc_iceoryx_addr, gv->config.shm_locator, ddsi_factory_find (gv, "subspace"));
+     switch (res)
+     {
+       case AFSR_OK:
+@@ -1144,7 +1143,7 @@ static int iceoryx_init (struct ddsi_domaingv *gv)
+     memset (gv->loc_iceoryx_addr.address, 0, sizeof (gv->loc_iceoryx_addr.address));
+     if (ddsrt_eth_get_mac_addr (gv->interfaces[if_index].name, gv->loc_iceoryx_addr.address))
+     {
+-      GVERROR ("Unable to get MAC address for iceoryx\n");
++      GVERROR ("Unable to get MAC address for Subspace SHM locator\n");
+       return -1;
+     }
+     gv->loc_iceoryx_addr.kind = NN_LOCATOR_KIND_SHEM;
+@@ -1153,12 +1152,12 @@ static int iceoryx_init (struct ddsi_domaingv *gv)
+
+   {
+     char buf[DDSI_LOCSTRLEN];
+-    GVLOG (DDS_LC_CONFIG | DDS_LC_SHM, "My iceoryx address: %s\n", ddsi_locator_to_string (buf, sizeof (buf), &gv->loc_iceoryx_addr));
++    GVLOG (DDS_LC_CONFIG | DDS_LC_SHM, "My Subspace SHM address: %s\n", ddsi_locator_to_string (buf, sizeof (buf), &gv->loc_iceoryx_addr));
+   }
+
+   if (gv->n_interfaces == MAX_XMIT_CONNS)
+   {
+-    GVERROR ("maximum number of interfaces reached, can't add virtual one for iceoryx\n");
++    GVERROR ("maximum number of interfaces reached, can't add virtual one for Subspace\n");
+     return -1;
+   }
+   struct nn_interface *intf = &gv->interfaces[gv->n_interfaces];
+@@ -1174,7 +1173,7 @@ static int iceoryx_init (struct ddsi_domaingv *gv)
+   intf->loopback = false;
+   intf->mc_capable = true; // FIXME: matters most for discovery, this avoids auto-lack-of-multicast-mitigation
+   intf->mc_flaky = false;
+-  intf->name = ddsrt_strdup ("iceoryx");
++  intf->name = ddsrt_strdup ("subspace");
+   intf->point_to_point = false;
+   intf->netmask.kind = NN_LOCATOR_KIND_INVALID;
+   intf->netmask.port = NN_LOCATOR_PORT_INVALID;
+@@ -1382,7 +1381,7 @@ int rtps_init (struct ddsi_domaingv *gv)
+ #ifdef DDS_HAS_SHM
+   if (gv->config.enable_shm)
+   {
+-    if (iceoryx_init (gv) < 0)
++    if (subspace_init (gv) < 0)
+       goto err_iceoryx;
+   }
+ #endif
+diff --git a/src/core/ddsi/tests/CMakeLists.txt b/src/core/ddsi/tests/CMakeLists.txt
+index 1d0610a..41a7af9 100644
+--- a/src/core/ddsi/tests/CMakeLists.txt
++++ b/src/core/ddsi/tests/CMakeLists.txt
+@@ -31,9 +31,4 @@ target_include_directories(
+   cunit_ddsi PRIVATE
+     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../ddsc/src>"
+     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../ddsi/include>")
+-if(ENABLE_SHM)
+-  target_include_directories(
+-    cunit_ddsi PRIVATE
+-    "$<BUILD_INTERFACE:$<TARGET_PROPERTY:iceoryx_binding_c::iceoryx_binding_c,INTERFACE_INCLUDE_DIRECTORIES>>")
+-endif()
+ target_link_libraries(cunit_ddsi PRIVATE ddsc)
+diff --git a/src/core/xtests/rhc_torture/CMakeLists.txt b/src/core/xtests/rhc_torture/CMakeLists.txt
+index b54334b..7e79896 100644
+--- a/src/core/xtests/rhc_torture/CMakeLists.txt
++++ b/src/core/xtests/rhc_torture/CMakeLists.txt
+@@ -18,12 +18,6 @@ target_include_directories(
+   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../ddsc/src>"
+   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../../ddsi/include>")
+
+-if(ENABLE_SHM)
+-  target_include_directories(
+-    rhc_torture PRIVATE
+-    "$<BUILD_INTERFACE:$<TARGET_PROPERTY:iceoryx_binding_c::iceoryx_binding_c,INTERFACE_INCLUDE_DIRECTORIES>>")
+-endif()
+-
+ target_link_libraries(rhc_torture RhcTypes ddsc)
+
+ add_test(
+diff --git a/src/security/core/tests/CMakeLists.txt b/src/security/core/tests/CMakeLists.txt
+index 139d7cb..ee3a74e 100644
+--- a/src/security/core/tests/CMakeLists.txt
++++ b/src/security/core/tests/CMakeLists.txt
+@@ -115,12 +115,6 @@ if(ENABLE_SSL AND OPENSSL_FOUND)
+       "$<BUILD_INTERFACE:$<TARGET_PROPERTY:security_openssl,INTERFACE_INCLUDE_DIRECTORIES>>"
+   )
+ endif()
+-if(ENABLE_SHM)
+-  target_include_directories(
+-    cunit_security_core PRIVATE
+-    "$<BUILD_INTERFACE:$<TARGET_PROPERTY:iceoryx_binding_c::iceoryx_binding_c,INTERFACE_INCLUDE_DIRECTORIES>>")
+-endif()
+-
+ set(common_etc_dir "${CMAKE_CURRENT_SOURCE_DIR}/common/etc")
+ set(plugin_wrapper_lib_dir "${CMAKE_CURRENT_BINARY_DIR}")
+ configure_file("common/config_env.h.in" "common/config_env.h")

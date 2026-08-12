@@ -1,0 +1,152 @@
+diff --git a/rmw_cyclonedds_cpp/CMakeLists.txt b/rmw_cyclonedds_cpp/CMakeLists.txt
+index cc98f39..bb863f9 100644
+--- a/rmw_cyclonedds_cpp/CMakeLists.txt
++++ b/rmw_cyclonedds_cpp/CMakeLists.txt
+@@ -35,11 +35,9 @@ find_package(tracetools REQUIRED)
+ find_package(CycloneDDS QUIET CONFIG)
+ if(CycloneDDS_FOUND)
+   # Support for shared memory in RMW depends on support for shared memory being compiled in
+-  # Cyclone DDS and iceoryx_binding_c being available
++  # Cyclone DDS. The local SHM backend is provided by CycloneDDS itself.
+   get_target_property(_cyclonedds_has_shm CycloneDDS::ddsc SHM_SUPPORT_IS_AVAILABLE)
+-  if(_cyclonedds_has_shm)
+-    find_package(iceoryx_binding_c REQUIRED)
+-  else()
++  if(NOT _cyclonedds_has_shm)
+     message(STATUS "Cyclone DDS is NOT compiled with support for shared memory")
+   endif()
+ else()
+@@ -54,9 +52,6 @@ find_package(rosidl_runtime_c REQUIRED)
+ find_package(rosidl_typesupport_introspection_c REQUIRED)
+ find_package(rosidl_typesupport_introspection_cpp REQUIRED)
+
+-if(_cyclonedds_has_shm)
+-  ament_export_dependencies(iceoryx_binding_c)
+-endif()
+ ament_export_dependencies(CycloneDDS)
+ ament_export_dependencies(rcutils)
+ ament_export_dependencies(rcpputils)
+@@ -94,10 +89,6 @@ target_link_libraries(rmw_cyclonedds_cpp PRIVATE
+   tracetools::tracetools
+ )
+
+-if(_cyclonedds_has_shm)
+-  target_link_libraries(rmw_cyclonedds_cpp PRIVATE iceoryx_binding_c::iceoryx_binding_c)
+-endif()
+-
+ if(CMAKE_GENERATOR_PLATFORM)
+   set(TARGET_ARCH "${CMAKE_GENERATOR_PLATFORM}")
+ else()
+diff --git a/rmw_cyclonedds_cpp/package.xml b/rmw_cyclonedds_cpp/package.xml
+index f90082e..7ae9e2a 100644
+--- a/rmw_cyclonedds_cpp/package.xml
++++ b/rmw_cyclonedds_cpp/package.xml
+@@ -15,7 +15,6 @@
+   <buildtool_depend>ament_cmake_ros</buildtool_depend>
+
+   <depend>cyclonedds</depend>
+-  <depend>iceoryx_binding_c</depend>
+   <depend>rcutils</depend>
+   <depend>rcpputils</depend>
+   <depend>rmw</depend>
+diff --git a/rmw_cyclonedds_cpp/src/rmw_node.cpp b/rmw_cyclonedds_cpp/src/rmw_node.cpp
+index 91ccba1..0ba1a89 100644
+--- a/rmw_cyclonedds_cpp/src/rmw_node.cpp
++++ b/rmw_cyclonedds_cpp/src/rmw_node.cpp
+@@ -2004,7 +2004,7 @@ extern "C" rmw_ret_t rmw_publish_serialized_message(
+     auto sample_ptr = init_and_alloc_sample(pub, serialized_message->buffer_length);
+     RET_NULL_X(sample_ptr, return RMW_RET_ERROR);
+     memcpy(sample_ptr, serialized_message->buffer, serialized_message->buffer_length);
+-    shm_set_data_state(sample_ptr, IOX_CHUNK_CONTAINS_SERIALIZED_DATA);
++    shm_set_data_state(sample_ptr, DDS_SUBSPACE_CHUNK_CONTAINS_SERIALIZED_DATA);
+     d->iox_chunk = sample_ptr;
+   }
+ #endif
+@@ -2043,7 +2043,7 @@ static rmw_ret_t publish_loaned_int(
+     auto d = new serdata_rmw(cdds_publisher->sertype, ddsi_serdata_kind::SDK_DATA);
+     d->iox_chunk = ros_message;
+     // since we write the loaned chunk here, set the data state to raw
+-    shm_set_data_state(d->iox_chunk, IOX_CHUNK_CONTAINS_RAW_DATA);
++    shm_set_data_state(d->iox_chunk, DDS_SUBSPACE_CHUNK_CONTAINS_RAW_DATA);
+     const dds_time_t tstamp = dds_time();
+     d->timestamp.v = tstamp;
+     d->statusinfo = 0;
+@@ -3451,8 +3451,8 @@ static rmw_ret_t rmw_take_ser_int(
+       // taking a serialized msg from shared memory
+ #ifdef DDS_HAS_SHM
+       if (d->iox_chunk != nullptr) {
+-        auto iox_header = iceoryx_header_from_chunk(d->iox_chunk);
+-        if (iox_header->shm_data_state == IOX_CHUNK_CONTAINS_SERIALIZED_DATA) {
++        auto iox_header = dds_subspace_header_from_chunk(d->iox_chunk);
++        if (iox_header->shm_data_state == DDS_SUBSPACE_CHUNK_CONTAINS_SERIALIZED_DATA) {
+           const size_t size = iox_header->data_size;
+           if (rmw_serialized_message_resize(serialized_message, size) != RMW_RET_OK) {
+             ddsi_serdata_unref(d);
+@@ -3470,7 +3470,7 @@ static rmw_ret_t rmw_take_ser_int(
+             (message_info ? message_info->source_timestamp : 0LL),
+             *taken);
+           return RMW_RET_OK;
+-        } else if (iox_header->shm_data_state == IOX_CHUNK_CONTAINS_RAW_DATA) {
++        } else if (iox_header->shm_data_state == DDS_SUBSPACE_CHUNK_CONTAINS_RAW_DATA) {
+           if (rmw_serialize(d->iox_chunk, &sub->type_supports, serialized_message) != RMW_RET_OK) {
+             RMW_SET_ERROR_MSG("Failed to serialize sample from loaned memory");
+             ddsi_serdata_unref(d);
+@@ -3492,7 +3492,7 @@ static rmw_ret_t rmw_take_ser_int(
+           return RMW_RET_ERROR;
+         }
+         // release the chunk
+-        free_iox_chunk(static_cast<iox_sub_t *>(d->iox_subscriber), &d->iox_chunk);
++        free_subspace_chunk(static_cast<dds_subspace_sub_t *>(d->iox_subscriber), &d->iox_chunk);
+       } else  // NOLINT
+ #endif
+       {
+@@ -3563,9 +3563,9 @@ static rmw_ret_t rmw_take_loan_int(
+       if (d->iox_chunk != nullptr) {
+         // the iox chunk has data, based on the kind of the data return the data accordingly to
+         // the user
+-        auto iox_header = iceoryx_header_from_chunk(d->iox_chunk);
++        auto iox_header = dds_subspace_header_from_chunk(d->iox_chunk);
+         // if the iox chunk has the data in serialized form
+-        if (iox_header->shm_data_state == IOX_CHUNK_CONTAINS_SERIALIZED_DATA) {
++        if (iox_header->shm_data_state == DDS_SUBSPACE_CHUNK_CONTAINS_SERIALIZED_DATA) {
+           rmw_serialized_message_t ser_msg;
+           ser_msg.buffer_length = iox_header->data_size;
+           ser_msg.buffer = static_cast<uint8_t *>(d->iox_chunk);
+@@ -3577,7 +3577,7 @@ static rmw_ret_t rmw_take_loan_int(
+             *taken = false;
+             return RMW_RET_ERROR;
+           }
+-        } else if (iox_header->shm_data_state == IOX_CHUNK_CONTAINS_RAW_DATA) {
++        } else if (iox_header->shm_data_state == DDS_SUBSPACE_CHUNK_CONTAINS_RAW_DATA) {
+           *loaned_message = d->iox_chunk;
+         } else {
+           RMW_SET_ERROR_MSG("Received iox chunk is uninitialized");
+diff --git a/rmw_cyclonedds_cpp/src/serdata.cpp b/rmw_cyclonedds_cpp/src/serdata.cpp
+index 93dd19f..d204a2b 100644
+--- a/rmw_cyclonedds_cpp/src/serdata.cpp
++++ b/rmw_cyclonedds_cpp/src/serdata.cpp
+@@ -147,12 +147,12 @@ static void serialize_into_serdata_rmw_on_demand(serdata_rmw * d)
+   {
+     std::lock_guard<std::mutex> lock(type->serialize_lock);
+     if (d->iox_chunk && d->data() == nullptr) {
+-      auto iox_header = iceoryx_header_from_chunk(d->iox_chunk);
++      auto iox_header = dds_subspace_header_from_chunk(d->iox_chunk);
+       // if the iox chunk has the data in serialized form
+-      if (iox_header->shm_data_state == IOX_CHUNK_CONTAINS_SERIALIZED_DATA) {
++      if (iox_header->shm_data_state == DDS_SUBSPACE_CHUNK_CONTAINS_SERIALIZED_DATA) {
+         d->resize(iox_header->data_size);
+         memcpy(d->data(), d->iox_chunk, iox_header->data_size);
+-      } else if (iox_header->shm_data_state == IOX_CHUNK_CONTAINS_RAW_DATA) {
++      } else if (iox_header->shm_data_state == DDS_SUBSPACE_CHUNK_CONTAINS_RAW_DATA) {
+         serialize_into_serdata_rmw(const_cast<serdata_rmw *>(d), d->iox_chunk);
+       } else {
+         RMW_SET_ERROR_MSG("Received iox chunk is uninitialized");
+@@ -179,7 +179,7 @@ static void serdata_rmw_free(struct ddsi_serdata * dcmn)
+
+ #ifdef DDS_HAS_SHM
+   if (d->iox_chunk && d->iox_subscriber) {
+-    free_iox_chunk(static_cast<iox_sub_t *>(d->iox_subscriber), &d->iox_chunk);
++    free_subspace_chunk(static_cast<dds_subspace_sub_t *>(d->iox_subscriber), &d->iox_chunk);
+     d->iox_chunk = nullptr;
+   }
+ #endif

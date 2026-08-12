@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CycloneDDS xmlns="https://cdds.io/config"
+            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xsi:schemaLocation="https://cdds.io/config https://raw.githubusercontent.com/eclipse-cyclonedds/cyclonedds/releases/0.10.x/etc/cyclonedds.xsd">
+  <Domain Id="any">
+    <SharedMemory>
+      <Enable>true</Enable>
+      <LogLevel>info</LogLevel>
+      <Subspace>
+        <Socket>/tmp/subspace</Socket>
+        <SlotSize>256</SlotSize>
+        <Slots>132</Slots>
+        <MaxActiveMessages>64</MaxActiveMessages>
+        <ExpectedSubscribers>1</ExpectedSubscribers>
+        <FixedSize>false</FixedSize>
+        <Reliable>false</Reliable>
+        <LogDroppedMessages>false</LogDroppedMessages>
+        <DetectDroppedMessages>false</DetectDroppedMessages>
+      </Subspace>
+    </SharedMemory>
+  </Domain>
+</CycloneDDS>
