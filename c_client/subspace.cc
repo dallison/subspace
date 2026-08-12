@@ -173,6 +173,8 @@ SubspaceSplitBufferInfo ToCInfo(const subspace::SplitBufferMetadata &metadata) {
       .full_size = metadata.full_size,
       .allocation_size = metadata.allocation_size,
       .handle = metadata.handle,
+      .registration_fd = metadata.registration_fd,
+      .map_offset = metadata.map_offset,
   };
 }
 
@@ -181,7 +183,9 @@ ToCMapping(const subspace::SplitBufferMapping &mapping) {
   return {.handle = mapping.handle,
           .address = mapping.address,
           .size = mapping.size,
-          .private_data = mapping.private_data};
+          .private_data = mapping.private_data,
+          .fd = mapping.fd,
+          .map_offset = mapping.map_offset};
 }
 
 subspace::SplitBufferMapping
@@ -189,7 +193,9 @@ ToCppMapping(const SubspaceSplitBufferMapping &mapping) {
   return {.handle = mapping.handle,
           .address = mapping.address,
           .size = mapping.size,
-          .private_data = mapping.private_data};
+          .private_data = mapping.private_data,
+          .fd = mapping.fd,
+          .map_offset = mapping.map_offset};
 }
 
 subspace::SplitBufferCallbacks

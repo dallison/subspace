@@ -25,8 +25,11 @@ absl::Status WaitReadable(Context ctx, int fd,
                               std::chrono::nanoseconds(0));
 
 // Wait until either `fd1` or `fd2` becomes readable.  Returns the raw fd that
-// became ready.
-absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2);
+// became ready.  A non-zero timeout returns DeadlineExceededError if neither fd
+// is ready in time; a zero timeout waits forever.
+absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2,
+                               std::chrono::nanoseconds timeout =
+                                   std::chrono::nanoseconds(0));
 
 // Suspend the current coroutine for `duration`.
 void Sleep(Context ctx, std::chrono::nanoseconds duration);

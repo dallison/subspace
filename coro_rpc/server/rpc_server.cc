@@ -8,6 +8,7 @@
 #include "proto/subspace.pb.h"
 #include <inttypes.h>
 #include <stdio.h>
+#include <unistd.h>
 
 namespace subspace::coro_rpc {
 
@@ -751,27 +752,36 @@ boost::asio::awaitable<void> RpcServer::SessionStreamingMethodCoroutine(
                         method_instance->method->name.c_str());
 
     AnyStreamWriter writer(server, session, method_instance, request);
+    auto stop_pipe_or = toolbelt::Pipe::Create();
+    if (!stop_pipe_or.ok()) {
+      server->logger_.Log(toolbelt::LogLevel::kError,
+                          "Failed to create stream cancellation stop pipe: %s",
+                          stop_pipe_or.status().ToString().c_str());
+      continue;
+    }
+    auto stop_pipe =
+        std::make_shared<toolbelt::Pipe>(std::move(*stop_pipe_or));
+    auto writer_state = writer.state;
+    const int32_t session_id = session->session_id;
+    const int32_t request_id = request.request_id();
 
     // Spawn a coroutine to read the cancellation channel.
     boost::asio::co_spawn(
         *server->io_context_,
-        [server, session, method_instance, &writer,
-         &request]() -> boost::asio::awaitable<void> {
-          int dup_interrupt =
-              ::dup(server->interrupt_pipe_.ReadFd().Fd());
-          toolbelt::FileDescriptor interrupt(dup_interrupt);
-          while (!writer.IsCancelled()) {
+        [server, method_instance, stop_pipe, writer_state, session_id,
+         request_id]() -> boost::asio::awaitable<void> {
+          while (!writer_state->is_cancelled.load(std::memory_order_acquire)) {
             int cancel_fd =
                 method_instance->cancel_subscriber->GetPollFd().fd;
             auto s =
-                co_await async_wait_either(cancel_fd, interrupt.Fd());
+                co_await async_wait_either(cancel_fd, stop_pipe->ReadFd().Fd());
             if (!s.ok()) {
               server->logger_.Log(toolbelt::LogLevel::kError,
                                   "Error waiting for cancel: %s",
                                   s.status().ToString().c_str());
               co_return;
             }
-            if (*s == interrupt.Fd()) {
+            if (*s == stop_pipe->ReadFd().Fd()) {
               break;
             }
             bool cancel_ok = false;
@@ -793,14 +803,14 @@ boost::asio::awaitable<void> RpcServer::SessionStreamingMethodCoroutine(
                                     msg.status().ToString().c_str());
                 continue;
               }
-              if (cancel.session_id() == session->session_id &&
-                  cancel.request_id() == request.request_id()) {
+              if (cancel.session_id() == session_id &&
+                  cancel.request_id() == request_id) {
                 cancel_ok = true;
                 break;
               }
             }
             if (cancel_ok) {
-              writer.Cancel();
+              writer_state->is_cancelled.store(true, std::memory_order_release);
             }
           }
         },
@@ -820,6 +830,8 @@ boost::asio::awaitable<void> RpcServer::SessionStreamingMethodCoroutine(
                           method_instance->method->name,
                           method_status.ToString()));
     }
+    char stop = 1;
+    (void)::write(stop_pipe->WriteFd().Fd(), &stop, 1);
   }
 }
 

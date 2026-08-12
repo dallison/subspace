@@ -561,6 +561,64 @@ TEST_F(ShadowRecoveryTest, ServerRecoversStateFromShadow) {
   StopShadow();
 }
 
+TEST_F(ShadowRecoveryTest, RecoveryRebuildsCcbSubscriberRegistrations) {
+  signal(SIGPIPE, SIG_IGN);
+
+  StartShadow();
+  StartServer();
+
+  constexpr char kChannel[] = "recovery_subscriber_registrations";
+
+  subspace::Client client;
+  client.SetThreadSafe(true);
+  ASSERT_THAT(client.Init(RecoveryServerSocket()), IsOk());
+
+  auto pub = client.CreatePublisher(kChannel, 256, 8);
+  ASSERT_THAT(pub, IsOk());
+
+  auto sub = client.CreateSubscriber(kChannel);
+  ASSERT_THAT(sub, IsOk());
+
+  ASSERT_TRUE(WaitForShadowState([this]() {
+    return shadow_->WithChannels([](auto &channels) {
+      auto it = channels.find("recovery_subscriber_registrations");
+      return it != channels.end() && it->second.publishers.size() == 1 &&
+             it->second.subscribers.size() == 1;
+    });
+  }));
+
+  subspace::ServerChannel *channel = server_->FindChannel(kChannel);
+  ASSERT_NE(nullptr, channel);
+  channel->GetCcb()->subscribers.ClearAll();
+  channel->GetCcb()->num_subs = subspace::SubscriberCounter();
+  ASSERT_EQ(0, channel->NumSubscribers(-1));
+
+  server_->ForEachShadow(
+      [](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
+  StopServer();
+
+  StartServer();
+
+  subspace::ServerChannel *recovered = server_->FindChannel(kChannel);
+  ASSERT_NE(nullptr, recovered);
+  EXPECT_EQ(1, recovered->NumSubscribers(-1));
+
+  constexpr char kPayload[] = "after_recovery";
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_THAT(buffer, IsOk());
+  memcpy(*buffer, kPayload, sizeof(kPayload) - 1);
+  ASSERT_THAT(pub->PublishMessage(sizeof(kPayload) - 1), IsOk());
+
+  absl::StatusOr<subspace::Message> msg =
+      sub->ReadMessage(subspace::ReadMode::kReadNewest);
+  ASSERT_THAT(msg, IsOk());
+  ASSERT_EQ(msg->length, sizeof(kPayload) - 1);
+  EXPECT_EQ(memcmp(msg->buffer, kPayload, sizeof(kPayload) - 1), 0);
+
+  StopServer();
+  StopShadow();
+}
+
 TEST_F(ShadowRecoveryTest, ServerRecoversSplitBufferStateFromShadow) {
   signal(SIGPIPE, SIG_IGN);
 

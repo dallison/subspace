@@ -760,6 +760,7 @@ fn integration_split_buffer_callbacks_allocate_map_unmap_and_free_payload_slots(
                     address,
                     size: metadata.allocation_size as usize,
                     private_data: address as usize,
+                    map_offset: 0,
                 })
             })
             .set_split_buffer_free_callback(move |_metadata, mapping| {
@@ -784,6 +785,7 @@ fn integration_split_buffer_callbacks_allocate_map_unmap_and_free_payload_slots(
                     address,
                     size,
                     private_data: 0,
+                    map_offset: 0,
                 })
             })
             .set_split_buffer_unmap_callback(move |_metadata, mapping| {

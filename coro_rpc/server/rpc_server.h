@@ -17,6 +17,7 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <atomic>
 
 namespace subspace::coro_rpc {
 
@@ -27,26 +28,33 @@ namespace internal {
 struct Session;
 struct MethodInstance;
 
+struct StreamWriterState {
+  std::atomic_bool is_cancelled{false};
+};
+
 struct AnyStreamWriter {
   AnyStreamWriter(std::shared_ptr<RpcServer> server,
                   std::shared_ptr<Session> session,
                   std::shared_ptr<MethodInstance> method_instance,
                   const RpcRequest &request)
       : server(std::move(server)), session(std::move(session)),
-        method_instance(std::move(method_instance)), request(request) {}
+        method_instance(std::move(method_instance)), request(request),
+        state(std::make_shared<StreamWriterState>()) {}
 
   boost::asio::awaitable<bool> Write(std::unique_ptr<google::protobuf::Any> res);
   boost::asio::awaitable<void> Finish();
 
-  void Cancel() { is_cancelled = true; }
+  void Cancel() { state->is_cancelled.store(true, std::memory_order_release); }
 
-  bool IsCancelled() const { return is_cancelled; }
+  bool IsCancelled() const {
+    return state->is_cancelled.load(std::memory_order_acquire);
+  }
 
   std::shared_ptr<RpcServer> server;
   std::shared_ptr<Session> session;
   std::shared_ptr<MethodInstance> method_instance;
-  const RpcRequest &request;
-  bool is_cancelled = false;
+  RpcRequest request;
+  std::shared_ptr<StreamWriterState> state;
 };
 
 // An item pushed by either the reply function or the error function of an

@@ -23,6 +23,7 @@ pub struct SplitBufferMetadata {
     pub handle: u64,
     pub shadow_file: String,
     pub object_name: String,
+    pub map_offset: i64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -31,6 +32,7 @@ pub struct SplitBufferMapping {
     pub address: *mut u8,
     pub size: usize,
     pub private_data: usize,
+    pub map_offset: i64,
 }
 
 impl Default for SplitBufferMapping {
@@ -40,6 +42,7 @@ impl Default for SplitBufferMapping {
             address: std::ptr::null_mut(),
             size: 0,
             private_data: 0,
+            map_offset: 0,
         }
     }
 }
@@ -94,6 +97,7 @@ impl SplitBufferMetadata {
             shadow_file: self.shadow_file.clone(),
             object_name: self.object_name.clone(),
             allocator,
+            map_offset: self.map_offset,
         }
     }
 }
@@ -111,6 +115,7 @@ impl From<proto::ClientBufferHandleMetadataProto> for SplitBufferMetadata {
             handle: proto.handle,
             shadow_file: proto.shadow_file,
             object_name: proto.object_name,
+            map_offset: proto.map_offset,
         }
     }
 }

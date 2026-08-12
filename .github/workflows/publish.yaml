@@ -1,0 +1,45 @@
+name: Publish to BCR
+
+# Mirrors each GitHub release of Subspace to the Bazel Central Registry by
+# opening a pull request against bazelbuild/bazel-central-registry.  The entry
+# is generated from the templates in the .bcr/ folder of this repository.
+#
+# The old "Publish to BCR" GitHub App was discontinued on 2026-06-30; this uses
+# its replacement, the bazel-contrib/publish-to-bcr reusable workflow.
+#
+# One-time setup required for this to work (see the PR description):
+#   * A fork of bazelbuild/bazel-central-registry must exist at
+#     dallison/bazel-central-registry (this is where the PR branch is pushed).
+#   * A repository secret named BCR_PUBLISH_TOKEN must contain a *classic*
+#     Personal Access Token (fine-grained PATs cannot open pull requests
+#     against public repositories) with the "repo" and "workflow" scopes, able
+#     to push to the fork and open a PR against bazelbuild/bazel-central-registry.
+
+on:
+  release:
+    types: [published]
+  # Allow re-publishing a specific existing tag by hand, e.g. to retry after a
+  # transient failure or after fixing the .bcr templates.
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: The release tag to publish to the BCR (e.g. 2.10.0)
+        required: true
+        type: string
+
+jobs:
+  publish:
+    uses: bazel-contrib/publish-to-bcr/.github/workflows/publish.yaml@v1.4.2
+    with:
+      tag_name: ${{ inputs.tag_name || github.event.release.tag_name }}
+      # Fork of bazelbuild/bazel-central-registry that the PR branch is pushed to.
+      registry_fork: dallison/bazel-central-registry
+      # The release archive is uploaded by the existing release process rather
+      # than by bazel-contrib's release workflow, so entry-file attestation is
+      # not produced here (matching the existing Subspace BCR entries).  Flip to
+      # true (and re-add the id-token/attestations permissions below) to enable.
+      attest: false
+    permissions:
+      contents: write
+    secrets:
+      publish_token: ${{ secrets.BCR_PUBLISH_TOKEN }}
