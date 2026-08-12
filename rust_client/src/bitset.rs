@@ -82,6 +82,24 @@ impl<const WORDS: usize> AtomicBitSet<WORDS> {
             }
         }
     }
+
+    pub fn traverse_seq_cst<F: FnMut(usize)>(&self, mut func: F) {
+        let num_bits = self.num_bits;
+        for i in 0..WORDS {
+            let mut shift = 0usize;
+            let mut bit = i * 64;
+            while bit < num_bits && shift < 64 {
+                let word = self.bits[i].load(Ordering::SeqCst) >> shift;
+                let n = ffs64(word);
+                if n == 0 {
+                    break;
+                }
+                bit += n;
+                func(bit - 1);
+                shift += n;
+            }
+        }
+    }
 }
 
 /// In-place atomic bitset accessor for shared memory.

@@ -71,6 +71,8 @@ pub struct ChannelInfo {
     pub channel_type: String,
     pub slot_size: u64,
     pub num_slots: i32,
+    pub subscriber_queue_size: i32,
+    pub subscriber_queue_arena_size: u64,
     pub reliable: bool,
 }
 
@@ -127,6 +129,18 @@ impl Publisher {
 
     pub fn num_slots(&self) -> i32 {
         self.imp.lock().unwrap().channel.num_slots
+    }
+
+    pub fn subscriber_queue_size(&self) -> i32 {
+        self.imp.lock().unwrap().channel.subscriber_queue_size
+    }
+
+    pub fn subscriber_queue_arena_size(&self) -> u64 {
+        self.imp
+            .lock()
+            .unwrap()
+            .channel
+            .subscriber_queue_arena_size
     }
 
     /// Get a mutable pointer to the message buffer for writing.
@@ -234,7 +248,9 @@ impl Publisher {
             }
 
             let slot_idx = pub_impl.channel.slot.unwrap();
-            pub_impl.channel.slot_mut(slot_idx).message_size = message_size as u64;
+            pub_impl.channel
+                .slot_ref(slot_idx)
+                .set_message_size(message_size as u64);
 
             let owner = pub_impl.publisher_id;
             let reliable = pub_impl.options.reliable;
@@ -487,10 +503,14 @@ impl Subscriber {
         self.imp.lock().unwrap().channel.num_slots
     }
 
+    pub fn subscriber_queue_size(&self) -> i32 {
+        self.imp.lock().unwrap().subscriber_queue_size
+    }
+
     pub fn current_ordinal(&self) -> i64 {
         let sub = self.imp.lock().unwrap();
         match sub.channel.slot {
-            Some(si) => sub.channel.slot_ref(si).ordinal as i64,
+            Some(si) => sub.channel.slot_ref(si).ordinal() as i64,
             None => -1,
         }
     }
@@ -498,7 +518,7 @@ impl Subscriber {
     pub fn timestamp(&self) -> u64 {
         let sub = self.imp.lock().unwrap();
         match sub.channel.slot {
-            Some(si) => sub.channel.slot_ref(si).timestamp,
+            Some(si) => sub.channel.slot_ref(si).timestamp(),
             None => 0,
         }
     }
@@ -540,7 +560,12 @@ impl Subscriber {
     }
 
     pub fn get_poll_fd(&self) -> RawFd {
-        self.imp.lock().unwrap().poll_fd
+        let mut imp = self.imp.lock().unwrap();
+        imp.poll_drain_pending = true;
+        imp.poll_drain_exhausted = false;
+        imp.queue_drain_tail = None;
+        imp.poll_snapshot_valid = false;
+        imp.poll_fd
     }
 
     pub fn trigger(&self) {
@@ -702,15 +727,15 @@ impl Subscriber {
         sub_impl.channel.slot = Some(slot_idx);
 
         let slot = sub_impl.channel.slot_ref(slot_idx);
-        if slot.message_size == 0 {
+        if slot.message_size() == 0 {
             return Ok(Message::default());
         }
 
         let buffer = sub_impl.channel.get_buffer_address(slot_idx);
-        let msg_size = slot.message_size as usize;
-        let ordinal = slot.ordinal;
-        let timestamp = slot.timestamp;
-        let vchan_id = slot.vchan_id as i32;
+        let msg_size = slot.message_size() as usize;
+        let ordinal = slot.ordinal();
+        let timestamp = slot.timestamp();
+        let vchan_id = slot.vchan_id() as i32;
         let slot_id = slot.id;
 
         Ok(Message {
@@ -868,9 +893,11 @@ impl Client {
                     metadata_size: opts.metadata_size,
                     use_split_buffers: opts.use_split_buffers,
                     split_buffers_over_bridge: opts.split_buffers_over_bridge,
+                    subscriber_queue_arena_size: opts.subscriber_queue_arena_size,
                     max_publishers: 0,
                     publisher_id: -1,
                     process_id: std::process::id() as u64,
+                    active_queue_publish_depth: 0,
                 },
             )),
         };
@@ -893,6 +920,8 @@ impl Client {
         let mut pub_impl = PublisherImpl::new(
             channel_name.to_string(),
             opts.num_slots,
+            pub_resp.subscriber_queue_size,
+            pub_resp.subscriber_queue_arena_size,
             pub_resp.channel_id,
             pub_resp.publisher_id,
             pub_resp.vchan_id,
@@ -1000,6 +1029,7 @@ impl Client {
                     max_active_messages: opts.max_active_messages,
                     mux: opts.mux.clone(),
                     vchan_id: opts.vchan_id,
+                    subscriber_queue_size: opts.subscriber_queue_size,
                     process_id: std::process::id() as u64,
                 },
             )),
@@ -1023,6 +1053,9 @@ impl Client {
         let mut sub_impl = SubscriberImpl::new(
             channel_name.to_string(),
             sub_resp.num_slots,
+            sub_resp.default_subscriber_queue_size,
+            sub_resp.subscriber_queue_arena_size,
+            sub_resp.subscriber_queue_size,
             sub_resp.channel_id,
             sub_resp.subscriber_id,
             sub_resp.vchan_id,
@@ -1040,6 +1073,10 @@ impl Client {
         };
 
         sub_impl.channel.num_slots = sub_resp.num_slots;
+        sub_impl.channel.subscriber_queue_size = sub_resp.default_subscriber_queue_size;
+        sub_impl.channel.subscriber_queue_arena_size =
+            sub_resp.subscriber_queue_arena_size;
+        sub_impl.subscriber_queue_size = sub_resp.subscriber_queue_size;
         sub_impl
             .channel
             .embargoed_slots
@@ -1140,6 +1177,8 @@ impl Client {
             channel_type: String::from_utf8_lossy(&info.r#type).to_string(),
             slot_size: info.slot_size as u64,
             num_slots: info.num_slots,
+            subscriber_queue_size: info.subscriber_queue_size,
+            subscriber_queue_arena_size: info.subscriber_queue_arena_size,
             reliable: info.is_reliable,
         })
     }
@@ -1178,6 +1217,8 @@ impl Client {
                 channel_type: String::from_utf8_lossy(&info.r#type).to_string(),
                 slot_size: info.slot_size as u64,
                 num_slots: info.num_slots,
+                subscriber_queue_size: info.subscriber_queue_size,
+                subscriber_queue_arena_size: info.subscriber_queue_arena_size,
                 reliable: info.is_reliable,
             })
             .collect())
@@ -1329,10 +1370,9 @@ fn read_message_internal(
 
     let old_slot = sub.channel.slot;
     let last_ordinal: i64 = match old_slot {
-        Some(si) => sub.channel.slot_ref(si).ordinal as i64,
+        Some(si) => sub.channel.slot_ref(si).ordinal() as i64,
         None => -1,
     };
-
     let new_slot_idx = match mode {
         ReadMode::ReadNext => sub.next_slot(),
         ReadMode::ReadNewest => sub.last_slot(),
@@ -1348,9 +1388,91 @@ fn read_message_internal(
 
     sub.channel.slot = Some(new_idx);
 
-    if mode == ReadMode::ReadNext && last_ordinal != -1 {
-        let new_vchan_id = sub.channel.slot_ref(new_idx).vchan_id as i32;
-        let drops = sub.detect_drops(new_vchan_id);
+    let prefix = sub.channel.get_prefix(new_idx);
+    let slot = sub.channel.slot_ref(new_idx);
+    let frozen_ordinal = slot.ordinal();
+    let frozen_vchan_id = slot.vchan_id() as i32;
+    let mut delivered_message_size = slot.message_size() as i64;
+    let mut is_activation = false;
+    let mut checksum_error = false;
+
+    if !prefix.is_null() {
+        unsafe {
+            let p = &*prefix;
+            if p.has_checksum() && sub.options.checksum {
+                let buffer = sub.channel.get_buffer_address(new_idx);
+                let cs = sub.channel.checksum_size;
+                let ms = sub.channel.metadata_size;
+                let data = checksum::get_message_checksum_data(
+                    prefix,
+                    buffer,
+                    delivered_message_size as usize,
+                    cs,
+                    ms,
+                );
+                let stored_cksum = checksum::get_checksum_slice_const(prefix, cs);
+                if let Some(ref cb) = sub.checksum_callback {
+                    sub.checksum_tmp.fill(0);
+                    cb(&data, &mut sub.checksum_tmp);
+                    checksum_error = sub.checksum_tmp != stored_cksum;
+                } else {
+                    checksum_error = !checksum::verify_crc32_checksum(&data, stored_cksum);
+                }
+            }
+
+            if (p.flags & MESSAGE_ACTIVATE) != 0 {
+                is_activation = true;
+                if !pass_activation {
+                    sub.ignore_activation(new_idx);
+                    sub.channel.slot = old_slot;
+                    if sub.options.reliable {
+                        sub.trigger_reliable_publishers();
+                    }
+                    return read_message_internal(client, sub, mode, false, false);
+                }
+            }
+        }
+    }
+
+    if let Some(ref cb) = sub.on_receive_callback {
+        let buffer = sub.channel.get_buffer_address(new_idx);
+        delivered_message_size = match cb(buffer as *mut u8, delivered_message_size) {
+            Ok(size) => size,
+            Err(e) => {
+                sub.release_unclaimed_slot(new_idx, frozen_ordinal, frozen_vchan_id);
+                sub.channel.slot = old_slot;
+                return Err(e);
+            }
+        };
+    }
+
+    if delivered_message_size <= 0 {
+        sub.release_unclaimed_slot(new_idx, frozen_ordinal, frozen_vchan_id);
+        sub.channel.slot = old_slot;
+        return Ok(Message::default());
+    }
+
+    let buffer = sub.channel.get_buffer_address(new_idx);
+    let slot = sub.channel.slot_ref(new_idx);
+    let msg_size = delivered_message_size as usize;
+    let ordinal = frozen_ordinal;
+    let timestamp = slot.timestamp();
+    let vchan_id = frozen_vchan_id;
+    let slot_id = slot.id;
+
+    sub.clear_active_message();
+
+    if !sub.add_active_message() {
+        sub.unread_slot(new_idx, frozen_ordinal, frozen_vchan_id);
+        sub.channel.slot = old_slot;
+        return Ok(Message::default());
+    }
+
+    if mode == ReadMode::ReadNext && sub.options.detect_dropped_messages {
+        let mut drops = std::mem::take(&mut sub.pending_queue_drops);
+        if last_ordinal != -1 {
+            drops = drops.max(sub.detect_drops(vchan_id));
+        }
         if drops > 0 {
             if let Some(ref cb) = sub.dropped_message_callback {
                 cb(drops as i64);
@@ -1370,75 +1492,7 @@ fn read_message_internal(
         }
     }
 
-    let prefix = sub.channel.get_prefix(new_idx);
-    let mut is_activation = false;
-    let mut checksum_error = false;
-
-    if !prefix.is_null() {
-        unsafe {
-            let p = &*prefix;
-            if p.has_checksum() && sub.options.checksum {
-                let buffer = sub.channel.get_buffer_address(new_idx);
-                let slot = sub.channel.slot_ref(new_idx);
-                let cs = sub.channel.checksum_size;
-                let ms = sub.channel.metadata_size;
-                let data = checksum::get_message_checksum_data(
-                    prefix,
-                    buffer,
-                    slot.message_size as usize,
-                    cs,
-                    ms,
-                );
-                let stored_cksum = checksum::get_checksum_slice_const(prefix, cs);
-                if let Some(ref cb) = sub.checksum_callback {
-                    sub.checksum_tmp.fill(0);
-                    cb(&data, &mut sub.checksum_tmp);
-                    checksum_error = sub.checksum_tmp != stored_cksum;
-                } else {
-                    checksum_error = !checksum::verify_crc32_checksum(&data, stored_cksum);
-                }
-            }
-
-            if (p.flags & MESSAGE_ACTIVATE) != 0 {
-                is_activation = true;
-                if !pass_activation {
-                    sub.ignore_activation(new_idx);
-                    if sub.options.reliable {
-                        sub.trigger_reliable_publishers();
-                    }
-                    return read_message_internal(client, sub, mode, false, false);
-                }
-            }
-        }
-    }
-
-    if let Some(ref cb) = sub.on_receive_callback {
-        let buffer = sub.channel.get_buffer_address(new_idx);
-        let slot = sub.channel.slot_ref(new_idx);
-        let new_size = cb(buffer as *mut u8, slot.message_size as i64)?;
-        sub.channel.slot_mut(new_idx).message_size = new_size as u64;
-    }
-
-    let slot = sub.channel.slot_ref(new_idx);
-    if slot.message_size == 0 {
-        return Ok(Message::default());
-    }
-
-    let buffer = sub.channel.get_buffer_address(new_idx);
-    let msg_size = slot.message_size as usize;
-    let ordinal = slot.ordinal;
-    let timestamp = slot.timestamp;
-    let vchan_id = slot.vchan_id as i32;
-    let slot_id = slot.id;
-
-    sub.clear_active_message();
-
-    if !sub.add_active_message() {
-        sub.unread_slot(new_idx);
-        return Ok(Message::default());
-    }
-
-    sub.claim_slot(new_idx, sub.channel.vchan_id, mode == ReadMode::ReadNewest);
+    sub.claim_slot(new_idx, vchan_id, mode == ReadMode::ReadNewest);
 
     if checksum_error && !sub.options.pass_checksum_errors {
         return Err(SubspaceError::ChecksumError);
@@ -1472,14 +1526,13 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
     if sub.channel.num_updates == updates {
         return Ok(());
     }
-    sub.channel.num_updates = updates;
-
     let req = proto::Request {
         request: Some(proto::request::Request::CreateSubscriber(
             proto::CreateSubscriberRequest {
                 channel_name: sub.channel.name.clone(),
                 subscriber_id: sub.subscriber_id,
                 mux: sub.options.mux.clone(),
+                subscriber_queue_size: sub.options.subscriber_queue_size,
                 process_id: std::process::id() as u64,
                 ..Default::default()
             },
@@ -1495,11 +1548,22 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
         return Err(SubspaceError::ServerError(sub_resp.error));
     }
 
-    sub.channel.unmap();
+    // A subscriber-created placeholder is the only case where the server
+    // replaces the CCB. Established channels retain their CCB across
+    // publisher updates.
+    let remap_ccb = sub.channel.num_slots == 0;
+    if remap_ccb {
+        sub.reset_delivery_state();
+        sub.channel.unmap();
+    }
     if !sub_resp.r#type.is_empty() {
         sub.channel.channel_type = String::from_utf8_lossy(&sub_resp.r#type).to_string();
     }
     sub.channel.num_slots = sub_resp.num_slots;
+    sub.channel.subscriber_queue_size = sub_resp.default_subscriber_queue_size;
+    sub.channel.subscriber_queue_arena_size =
+        sub_resp.subscriber_queue_arena_size;
+    sub.subscriber_queue_size = sub_resp.subscriber_queue_size;
     sub.channel
         .embargoed_slots
         .resize(sub_resp.num_slots as usize);
@@ -1522,13 +1586,15 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
         sub.checksum_tmp = vec![0u8; cs as usize];
     }
 
-    let prot = ProtFlags::PROT_READ | ProtFlags::PROT_WRITE;
-    sub.channel.map(
-        client.scb_fd,
-        fds[sub_resp.ccb_fd_index as usize],
-        fds[sub_resp.bcb_fd_index as usize],
-        prot,
-    )?;
+    if remap_ccb {
+        let prot = ProtFlags::PROT_READ | ProtFlags::PROT_WRITE;
+        sub.channel.map(
+            client.scb_fd,
+            fds[sub_resp.ccb_fd_index as usize],
+            fds[sub_resp.bcb_fd_index as usize],
+            prot,
+        )?;
+    }
 
     sub.attach_buffers()?;
 
@@ -1548,7 +1614,10 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
         sub.retirement_trigger_fds.push(fds[idx as usize]);
     }
 
-    sub.init_active_messages();
+    if remap_ccb {
+        sub.init_active_messages();
+    }
+    sub.channel.num_updates = updates;
 
     Ok(())
 }
@@ -1652,7 +1721,7 @@ fn activate_reliable_channel(publisher: &mut PublisherImpl) -> Result<()> {
             publisher.channel.name
         )));
     }
-    publisher.channel.slot_mut(si).message_size = 1;
+    publisher.channel.slot_ref(si).set_message_size(1);
 
     let owner = publisher.publisher_id;
     publisher.activate_slot_and_get_another(si, true, true, owner, false, false);
@@ -1675,7 +1744,7 @@ fn activate_channel(publisher: &mut PublisherImpl) -> Result<()> {
             publisher.channel.name
         )));
     }
-    publisher.channel.slot_mut(si).message_size = 1;
+    publisher.channel.slot_ref(si).set_message_size(1);
 
     let owner = publisher.publisher_id;
     let published = publisher.activate_slot_and_get_another(si, false, true, owner, false, false);
@@ -1757,7 +1826,7 @@ fn expand_slot_size(slot_size: u64) -> u64 {
 
 fn get_virtual_memory_usage(channel: &Channel) -> u64 {
     let mut size = std::mem::size_of::<SystemControlBlock>() as u64
-        + ccb_size(channel.num_slots) as u64
+        + ccb_size(channel.num_slots, channel.subscriber_queue_arena_size) as u64
         + std::mem::size_of::<BufferControlBlock>() as u64;
     if !channel.bcb.is_null() {
         let bcb = unsafe { &*channel.bcb };

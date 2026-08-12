@@ -158,7 +158,7 @@ The CCB contains:
 - **OrdinalAccumulator** — per-virtual-channel atomic ordinal counters.
 - **ActivationTracker** — bitset of activated virtual channels.
 - **Subscriber tracking** — bitset of active subscribers, per-subscriber vchan_id array, subscriber counter per vchan.
-- **Statistics** — `total_bytes`, `total_messages`, `max_message_size`, `total_drops` (atomics).
+- **Statistics** — `total_bytes`, `total_messages`, `max_message_size`, `total_drops` (atomics). `total_messages` includes activations and also versions subscriber snapshots.
 - **free_slots_exhausted** — atomic bool, optimization to skip scanning the free-slots bitset.
 
 Following the slot array (with 64-byte alignment):
@@ -259,9 +259,15 @@ Message msg = subscriber.ReadMessage(ReadMode::kReadNext);
 2. If reliable publisher triggers need refreshing (detected via SCB counters), reload them.
 3. Clear the subscriber's poll trigger.
 4. **Slot selection:**
-   - `kReadNext`: Scans `AvailableSlots` for this subscriber, collects all slots with non-zero ordinal that are not publisher-owned and match the vchan_id filter. Sorts by timestamp. Returns the first slot whose ordinal has not been seen.
-   - `kReadNewest`: Same scan, but returns only the most recent slot.
-5. **Claim the slot:** `AtomicIncRefCount(slot, +1)` increments the ref count via CAS. If the CAS fails (slot was recycled), retries from scratch.
+   - `kReadNext`: Unreliable subscribers normally pop their per-subscriber
+     queue, carrying the queued `(slot_id, ordinal, vchan_id)` generation
+     through the ref-count CAS. The `AvailableSlots` bitset remains
+     authoritative and is scanned in ordinal order after queue overflow or
+     insertion failure.
+   - `kReadNewest`: Selects the most recent slot from an authoritative bitset
+     snapshot. Snapshot entries are temporarily pinned before their bits are
+     cleared, so a concurrently recycled generation is not erased.
+5. **Claim the slot:** `AtomicIncRefCount(slot, +1)` increments the ref count via CAS using the frozen ordinal and vchan. If the CAS fails (slot was recycled), retries from scratch.
 6. **Dropped message detection:** Compares the new message's ordinal against the ordinal tracker. Gaps indicate dropped messages; the dropped-message callback is invoked with the count.
 7. **Checksum verification:** If the prefix has the `kMessageHasChecksum` flag:
    - Computes the checksum over the same three data regions used by the publisher.
@@ -485,7 +491,7 @@ Publishers and subscribers can specify a `type` string. The server enforces:
 
 ### 13.1 Subscriber Polling
 
-Each subscriber has a trigger file descriptor (pipe or eventfd). Publishers write to this fd when a new message is published. Subscribers use `GetPollFd()` to get a `struct pollfd` for use with `poll()` or `epoll()`, or call `Wait()` to block until a message is available.
+Each subscriber has a trigger file descriptor (pipe or eventfd). Publishers write to this fd when a new message is published. Subscribers use `GetPollFd()` to get a `struct pollfd` for use with `poll()` or `epoll()`, or call `Wait()` to block until a message is available. A poll-driven drain uses a bounded queue-tail/bitset snapshot; `total_messages`, which includes activations, re-arms the next poll burst when a publication arrives after that snapshot.
 
 **Important:** After `Wait()` returns, the subscriber should read **all** available messages before waiting again. The trigger fd may not be re-armed until all messages are consumed.
 
@@ -751,7 +757,7 @@ monitoring tools to distinguish between local, bridged, and tunneled users.
 ### Channel Statistics (from CCB)
 
 - `total_bytes`: Total bytes published.
-- `total_messages`: Total messages published.
+- `total_messages`: Total publications, including activations.
 - `max_message_size`: Largest message seen.
 - `total_drops`: Total messages dropped by unreliable publishers.
 

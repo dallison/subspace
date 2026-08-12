@@ -19,6 +19,12 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+fn latency_subscriber_options() -> SubscriberOptions {
+    SubscriberOptions::new()
+        .set_log_dropped_messages(false)
+        .set_detect_dropped_messages(false)
+}
+
 fn unique_socket_path() -> String {
     let mut template = b"/tmp/ss_lat_XXXXXX\0".to_vec();
     let fd = unsafe { libc::mkstemp(template.as_mut_ptr() as *mut libc::c_char) };
@@ -272,7 +278,7 @@ fn stress_multithreaded_unreliable() {
         .create_publisher("stress_unrel", &pub_opts)
         .unwrap();
 
-    let sub_opts = SubscriberOptions::new().set_log_dropped_messages(false);
+    let sub_opts = latency_subscriber_options();
     let subscriber = sub_client
         .create_subscriber("stress_unrel", &sub_opts)
         .unwrap();
@@ -502,7 +508,7 @@ fn latency_unreliable_round_trip() {
         .create_publisher("lat_unrel_rt", &pub_opts)
         .unwrap();
 
-    let sub_opts = SubscriberOptions::new().set_log_dropped_messages(false);
+    let sub_opts = latency_subscriber_options();
     let subscriber = sub_client
         .create_subscriber("lat_unrel_rt", &sub_opts)
         .unwrap();
@@ -609,7 +615,7 @@ fn latency_publisher_with_retirement() {
             .create_publisher("lat_pub_ret", &pub_opts)
             .unwrap();
 
-        let sub_opts = SubscriberOptions::new().set_log_dropped_messages(false);
+        let sub_opts = latency_subscriber_options();
         let subscriber = sub_client
             .create_subscriber("lat_pub_ret", &sub_opts)
             .unwrap();
@@ -674,7 +680,8 @@ fn latency_publisher_checksum() {
 
     let sub_opts = SubscriberOptions::new()
         .set_checksum(true)
-        .set_log_dropped_messages(false);
+        .set_log_dropped_messages(false)
+        .set_detect_dropped_messages(false);
     let subscriber = sub_client
         .create_subscriber("lat_pub_csum", &sub_opts)
         .unwrap();
@@ -714,7 +721,7 @@ fn latency_pub_sub_single_thread() {
         let pub_opts = PublisherOptions::new().set_slot_size(256).set_num_slots(10);
         let publisher = pub_client.create_publisher("lat_ps_st", &pub_opts).unwrap();
 
-        let sub_opts = SubscriberOptions::new().set_log_dropped_messages(false);
+        let sub_opts = latency_subscriber_options();
         let subscriber = sub_client
             .create_subscriber("lat_ps_st", &sub_opts)
             .unwrap();
@@ -756,7 +763,7 @@ fn latency_subscriber_drain() {
             .create_publisher("lat_sub_drain", &pub_opts)
             .unwrap();
 
-        let sub_opts = SubscriberOptions::new().set_log_dropped_messages(false);
+        let sub_opts = latency_subscriber_options();
         let subscriber = sub_client
             .create_subscriber("lat_sub_drain", &sub_opts)
             .unwrap();
@@ -885,7 +892,7 @@ fn latency_publisher_multi_subscriber() {
 
         let mut subscribers = Vec::new();
         for _ in 0..num_subs {
-            let sub_opts = SubscriberOptions::new().set_log_dropped_messages(false);
+            let sub_opts = latency_subscriber_options();
             subscribers.push(
                 sub_client
                     .create_subscriber("lat_pub_msub", &sub_opts)
@@ -932,7 +939,7 @@ fn latency_publisher_histogram() {
             .create_publisher("lat_pub_hist", &pub_opts)
             .unwrap();
 
-        let sub_opts = SubscriberOptions::new().set_log_dropped_messages(false);
+        let sub_opts = latency_subscriber_options();
         let subscriber = sub_client
             .create_subscriber("lat_pub_hist", &sub_opts)
             .unwrap();
