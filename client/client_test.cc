@@ -2468,6 +2468,66 @@ TEST_F(ClientTest, PublishConcurrentlyFromOneClientToOneSubscriber) {
   EXPECT_EQ(last_uniq - all_recv_msgs.begin(), kNumPublishers);
 }
 
+TEST_F(ClientTest, PublishConcurrentlyFromOneClientToOneQueuedSubscriber) {
+  std::string channel_name = "checkin_channel_queued";
+  subspace::Client sub_client;
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  const int kNumPublishers =
+      absl::GetFlag(FLAGS_use_split_buffers) ? 16 : 100;
+  std::vector<Publisher> pubs;
+  pubs.reserve(kNumPublishers);
+  subspace::Client pub_client;
+  InitClient(pub_client);
+  for (int i = 0; i < kNumPublishers; ++i) {
+    absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
+        channel_name,
+        PubOpts(256, 2 * kNumPublishers + 16)
+            .SetSubscriberQueueArenaSize(
+                subspace::kDefaultSubscriberQueueArenaSize));
+    ASSERT_OK(pub) << pub.status();
+    pubs.emplace_back(std::move(*pub));
+  }
+  auto sub = EVAL_AND_ASSERT_OK(sub_client.CreateSubscriber(
+      channel_name,
+      SubOpts().SetSubscriberQueueSize(kNumPublishers)));
+  ASSERT_EQ(kNumPublishers, sub.SubscriberQueueSize());
+
+  std::vector<std::thread> pub_threads;
+  pub_threads.reserve(kNumPublishers);
+  for (int i = 0; i < kNumPublishers; ++i) {
+    pub_threads.emplace_back(std::thread([&pubs, i]() {
+      std::array<char, 16> msg = {};
+      auto size = std::snprintf(msg.data(), msg.size(), "M%d", i);
+      auto buffer = pubs[i].GetMessageBuffer(size);
+      ASSERT_OK(buffer) << buffer.status();
+      ASSERT_NE(nullptr, *buffer);
+      std::memcpy(*buffer, msg.data(), size);
+      ASSERT_OK(pubs[i].PublishMessage(size));
+    }));
+  }
+
+  for (auto &t : pub_threads) {
+    t.join();
+  }
+
+  std::vector<std::string> all_recv_msgs;
+  all_recv_msgs.reserve(kNumPublishers);
+  while (true) {
+    auto message = *sub.ReadMessage();
+    size_t size = message.length;
+    if (size == 0) {
+      break;
+    }
+    all_recv_msgs.emplace_back(std::string(
+        reinterpret_cast<const char *>(message.buffer), message.length));
+  }
+  EXPECT_EQ(all_recv_msgs.size(), kNumPublishers);
+  std::sort(all_recv_msgs.begin(), all_recv_msgs.end());
+  auto last_uniq = std::unique(all_recv_msgs.begin(), all_recv_msgs.end());
+  EXPECT_EQ(last_uniq - all_recv_msgs.begin(), kNumPublishers);
+}
+
 TEST_F(ClientTest, PublishConcurrentlyToOneSubscriber) {
   std::string channel_name = "checkin_channel_multi_client";
   subspace::Client sub_client;
@@ -2522,6 +2582,105 @@ TEST_F(ClientTest, PublishConcurrentlyToOneSubscriber) {
     t.join();
   }
   ASSERT_EQ(0, sub.SubscriberQueueSize());
+
+  std::vector<std::string> all_recv_msgs;
+  all_recv_msgs.reserve(kNumPublishers);
+  while (true) {
+    auto message = *sub.ReadMessage();
+    size_t size = message.length;
+    if (size == 0) {
+      break;
+    }
+    all_recv_msgs.emplace_back(std::string(
+        reinterpret_cast<const char *>(message.buffer), message.length));
+  }
+  EXPECT_EQ(all_recv_msgs.size(), kNumPublishers);
+  std::sort(all_recv_msgs.begin(), all_recv_msgs.end());
+  auto last_uniq = std::unique(all_recv_msgs.begin(), all_recv_msgs.end());
+  EXPECT_EQ(last_uniq - all_recv_msgs.begin(), kNumPublishers);
+}
+
+TEST_F(ClientTest, PublishConcurrentlyToOneQueuedSubscriber) {
+  std::string channel_name = "checkin_channel_multi_client_queued";
+  subspace::Client sub_client;
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  std::vector<std::thread> pub_threads;
+#ifdef __APPLE__
+  constexpr int kNumPublishers = 16;
+#else
+  const int kNumPublishers =
+      absl::GetFlag(FLAGS_use_split_buffers) ? 16 : 100;
+#endif
+  auto channel_publisher = EVAL_AND_ASSERT_OK(sub_client.CreatePublisher(
+      channel_name,
+      PubOpts(256, 2 * kNumPublishers + 16)
+          .SetSubscriberQueueArenaSize(
+              subspace::kDefaultSubscriberQueueArenaSize)));
+  ASSERT_EQ(subspace::kDefaultSubscriberQueueArenaSize,
+            channel_publisher.SubscriberQueueArenaSize());
+  auto sub = EVAL_AND_ASSERT_OK(sub_client.CreateSubscriber(
+      channel_name,
+      SubOpts().SetSubscriberQueueSize(kNumPublishers)));
+  ASSERT_EQ(kNumPublishers, sub.SubscriberQueueSize());
+
+  pub_threads.reserve(kNumPublishers);
+  std::atomic<int> publishers_finished{0};
+  for (int i = 0; i < kNumPublishers; ++i) {
+    pub_threads.emplace_back(std::thread(
+        [&channel_name, &publishers_finished, kNumPublishers, i]() {
+      // Keep every publisher alive until all messages have been published.
+      subspace::Client pub_client;
+      absl::StatusOr<Publisher> pub =
+          absl::UnknownError("publisher not created");
+      [&]() {
+        bool connected = false;
+        for (int attempt = 0; attempt < 100; ++attempt) {
+          if (pub_client.Init(Socket()).ok()) {
+            connected = true;
+            break;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (!connected) {
+          ADD_FAILURE() << "Failed to connect publisher " << i;
+          return;
+        }
+        pub = pub_client.CreatePublisher(
+            channel_name,
+            PubOpts(256, 2 * kNumPublishers + 16)
+                .SetSubscriberQueueArenaSize(
+                    subspace::kDefaultSubscriberQueueArenaSize));
+        if (!pub.ok()) {
+          ADD_FAILURE() << pub.status();
+          return;
+        }
+        std::array<char, 16> msg = {};
+        auto size = std::snprintf(msg.data(), msg.size(), "M%d", i);
+        auto buffer = pub->GetMessageBuffer(size);
+        if (!buffer.ok() || *buffer == nullptr) {
+          ADD_FAILURE() << buffer.status();
+          return;
+        }
+        std::memcpy(*buffer, msg.data(), size);
+        auto publish_status = pub->PublishMessage(size);
+        if (!publish_status.ok()) {
+          ADD_FAILURE() << publish_status.status();
+          return;
+        }
+      }();
+      publishers_finished.fetch_add(1, std::memory_order_release);
+      while (publishers_finished.load(std::memory_order_acquire) <
+             kNumPublishers) {
+        std::this_thread::yield();
+      }
+    }));
+  }
+
+  for (auto &t : pub_threads) {
+    t.join();
+  }
+  ASSERT_EQ(kNumPublishers, sub.SubscriberQueueSize());
 
   std::vector<std::string> all_recv_msgs;
   all_recv_msgs.reserve(kNumPublishers);
