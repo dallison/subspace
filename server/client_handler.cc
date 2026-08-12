@@ -350,6 +350,20 @@ void ClientHandler::HandleCreatePublisher(
     const subspace::CreatePublisherRequest &req,
     subspace::CreatePublisherResponse *response,
     std::vector<toolbelt::FileDescriptor> &fds) {
+  int max_outstanding_slot_leases = req.max_outstanding_slot_leases();
+  // Zero is the protobuf default used by clients predating explicit leases.
+  if (max_outstanding_slot_leases == 0) {
+    max_outstanding_slot_leases = 1;
+  }
+  if (max_outstanding_slot_leases < 1 ||
+      max_outstanding_slot_leases > req.num_slots()) {
+    response->set_error(absl::StrFormat(
+        "Invalid max_outstanding_slot_leases %d for channel %s: value must be "
+        "between 1 and num_slots (%d)",
+        max_outstanding_slot_leases, req.channel_name(), req.num_slots()));
+    return;
+  }
+
   ServerChannel *channel = server_->FindChannel(req.channel_name());
   if (channel == nullptr) {
     server_->logger_.Log(toolbelt::LogLevel::kDebug,
@@ -443,17 +457,6 @@ void ClientHandler::HandleCreatePublisher(
   }
   if (channel->Type().empty()) {
     channel->SetType(req.type());
-  }
-
-  // Check capacity of channel for unreliable channels.
-  if (!req.is_reliable()) {
-    absl::Status cap_ok = channel->HasSufficientCapacity(0);
-    if (!cap_ok.ok()) {
-      response->set_error(absl::StrFormat(
-          "Insufficient capacity to add a new publisher to channel %s: %s",
-          req.channel_name(), cap_ok.ToString()));
-      return;
-    }
   }
 
   int num_pubs, num_subs, num_bridge_pubs, num_bridge_subs;
@@ -565,6 +568,19 @@ void ClientHandler::HandleCreatePublisher(
   }
 
   if (!reclaimed) {
+    // Reclaimed publishers are already included in capacity usage. Any request
+    // that creates a new publisher, including a failed reclaim, must reserve
+    // its configured lease budget.
+    if (!req.is_reliable()) {
+      absl::Status cap_ok =
+          channel->HasSufficientCapacity(0, max_outstanding_slot_leases);
+      if (!cap_ok.ok()) {
+        response->set_error(absl::StrFormat(
+            "Insufficient capacity to add a new publisher to channel %s: %s",
+            req.channel_name(), cap_ok.ToString()));
+        return;
+      }
+    }
     server_->logger_.Log(toolbelt::LogLevel::kDebug,
                          "Client %s creating publisher on channel %s: VM: %s",
                          client_name_.c_str(), req.channel_name().c_str(),
@@ -572,7 +588,8 @@ void ClientHandler::HandleCreatePublisher(
     // Create the publisher.
     absl::StatusOr<PublisherUser *> publisher = channel->AddPublisher(
         this, req.is_reliable(), req.is_local(), req.is_bridge(),
-        req.for_tunnel(), req.is_fixed_size(), req.process_id());
+        req.for_tunnel(), req.is_fixed_size(), max_outstanding_slot_leases,
+        req.process_id());
     if (!publisher.ok()) {
       response->set_error(publisher.status().ToString());
       return;
@@ -763,6 +780,35 @@ void ClientHandler::HandleCreateSubscriber(
       return;
     }
   }
+  ServerChannel *limit_channel =
+      channel->IsVirtual() ? static_cast<VirtualChannel *>(channel)->GetMux()
+                           : channel;
+  if (absl::Status status = limit_channel->ValidateOrSetMaxSubscribers(
+          req.max_subscribers(), /*set_if_missing=*/true, "subscriber");
+      !status.ok()) {
+    response->set_error(status.ToString());
+    return;
+  }
+  server_->ForEachShadow([&](const std::unique_ptr<ShadowReplicator> &shadow) {
+    shadow->SendUpdateChannelOptions(limit_channel);
+  });
+  if (req.subscriber_id() < 0 && limit_channel->MaxSubscribers() > 0) {
+    int limit_num_pubs = 0;
+    int limit_num_subs = 0;
+    int limit_num_bridge_pubs = 0;
+    int limit_num_bridge_subs = 0;
+    int limit_num_tunnel_pubs = 0;
+    int limit_num_tunnel_subs = 0;
+    limit_channel->CountUsers(
+        limit_num_pubs, limit_num_subs, limit_num_bridge_pubs,
+        limit_num_bridge_subs, limit_num_tunnel_pubs, limit_num_tunnel_subs);
+    if (limit_num_subs >= limit_channel->MaxSubscribers()) {
+      response->set_error(absl::StrFormat(
+          "Channel %s already has the maximum number of subscribers (%d)",
+          req.channel_name(), limit_channel->MaxSubscribers()));
+      return;
+    }
+  }
   SubscriberUser *sub;
   bool reclaimed = false;
   if (req.subscriber_id() != -1) {
@@ -785,7 +831,7 @@ void ClientHandler::HandleCreateSubscriber(
   } else {
     if (!req.is_reliable()) {
       absl::Status cap_ok =
-          channel->HasSufficientCapacity(req.max_active_messages() - 1);
+          channel->HasSufficientCapacity(req.max_active_messages(), 0);
       if (!cap_ok.ok()) {
         response->set_error(absl::StrFormat(
             "Insufficient capacity to add a new subscriber to channel %s: %s",

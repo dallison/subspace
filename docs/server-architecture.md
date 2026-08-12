@@ -98,19 +98,47 @@ Each channel requires three shared memory regions, created via `shm_open()` (POS
 
 ### Adding a Publisher
 
-1. Allocate a user ID from the channel's `user_ids_` bitset.
-2. Create a `PublisherUser` with reliability/local/bridge/tunnel flags.
-3. Initialize a trigger FD for reliable publishers.
-4. Update SCB counters.
-5. Return the publisher ID and file descriptors (CCB, BCB, trigger, poll, retirement FDs).
+1. Normalize `max_outstanding_slot_leases` (`0` from an older client means
+   `1`) and validate it against the channel slot count.
+2. For a new unreliable publisher, check capacity using its entire lease
+   budget. A reclaimed publisher is already included in the channel's usage.
+3. Allocate a user ID from the channel's `user_ids_` bitset.
+4. Create a `PublisherUser` with reliability/local/bridge/tunnel flags and its
+   maximum lease count.
+5. Initialize trigger and optional retirement FDs.
+6. Update SCB counters and replicate the publisher metadata to each shadow.
+7. Return the publisher ID and file descriptors (CCB, BCB, trigger, poll,
+   retirement FDs).
 
 ### Adding a Subscriber
 
-1. Allocate a user ID similarly.
-2. Check capacity for unreliable channels: `slots_needed = num_pubs + num_subs + max_active_messages + 1`.
-3. Create a `SubscriberUser` with a trigger FD.
+1. Validate or establish the channel's `max_subscribers` setting. The first
+   subscriber fixes the value; `0` means no explicit limit. Reject a new
+   subscriber when the nonzero limit is already reached.
+2. Check capacity for unreliable subscribers using their complete
+   `max_active_messages` budget.
+3. Allocate a user ID and create a `SubscriberUser` with a trigger FD.
 4. Register the subscriber in the CCB.
-5. Return file descriptors (CCB, BCB, trigger, all subscriber trigger FDs, retirement FDs).
+5. Return file descriptors (CCB, BCB, trigger, all subscriber trigger FDs,
+   retirement FDs).
+
+### Capacity Accounting
+
+The server admits an unreliable publisher or subscriber only when:
+
+```text
+slots_needed =
+    sum(publisher.max_outstanding_slot_leases)
+  + sum(subscriber.max_active_messages)
+
+slots_needed <= num_slots - 1
+```
+
+The calculation uses configured maxima so a publisher below its lease limit can
+always acquire another slot even when every subscriber holds its maximum active
+messages. `ChannelMultiplexer` includes users from every virtual channel that
+shares its storage. The default one lease per publisher reproduces the previous
+single-current-slot accounting.
 
 ## Bridge and Discovery System
 
@@ -206,8 +234,9 @@ Server
 - **Single-threaded with coroutines** — avoids locking and race conditions; cooperative multitasking via the `co` library. All blocking operations (accept, receive, send) yield to the scheduler.
 - **File descriptor passing** — shared memory FDs are sent to clients via Unix socket SCM_RIGHTS messages, so clients map the same memory regions.
 - **Discovery-based bridging** — UDP for lightweight discovery, TCP for reliable data transfer. Supports IPv4 and virtual addresses (VSOCK).
-- **Capacity management** — unreliable channels check capacity before adding subscribers to prevent buffer exhaustion.
+- **Capacity management** — unreliable channels reserve publisher lease budgets and subscriber active-message budgets before admitting users.
 - **Retirement tracking** — for reliable channels, tracks message lifetimes across bridges to prevent premature slot reuse.
+- **Subscriber limits** — the server enforces a consistent channel-level `max_subscribers` value, including across virtual channels sharing a mux.
 - **Tunnel tracking** — publishers and subscribers can be flagged as tunnel endpoints (`for_tunnel`). The server tracks tunnel user counts separately and reports them via `GetChannelInfo` (`num_tunnel_pubs`, `num_tunnel_subs`), allowing monitoring tools to distinguish between local, bridged, and tunneled users.
 - **Plugin system** — loadable modules with callbacks (OnReady, OnNewChannel, OnNewPublisher, etc.) for extensibility.
 

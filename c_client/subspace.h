@@ -226,6 +226,8 @@ typedef struct {
   size_t mux_length;
   int vchan_id;           // Virtual channel id, or -1 for server-assigned.
   bool notify_retirement; // Notify publisher when slots retire.
+  int32_t max_outstanding_slot_leases; // Explicit unpublished lease limit.
+  bool notify_retirement_on_forced_reuse; // Include publisher-forced reuse.
   bool checksum;          // Calculate and attach message checksums.
   int32_t checksum_size;  // Bytes reserved for checksum (default 4).
   int32_t metadata_size;  // Bytes reserved for user metadata (default 0).
@@ -261,6 +263,7 @@ typedef struct {
   bool for_tunnel;         // Mark subscriptions for external tunnels.
   SubspaceTypeInfo type;   // Type of the message.  This is an opaque string.
   int max_active_messages; // Max number of message that can be active at once.
+  int32_t max_subscribers; // 0 means no explicit subscriber limit.
   bool pass_activation;    // Pass activation message in read.
   bool log_dropped_messages; // Log dropped messages to stderr.
   bool read_write;           // Map buffers writable for this subscriber.
@@ -295,6 +298,15 @@ typedef struct {
   void *buffer;
   size_t buffer_size;
 } SubspaceMessageBuffer;
+
+// A specific publisher-owned slot. The token becomes invalid after publish or
+// release; lease_id prevents stale tokens from operating on a reused slot.
+typedef struct {
+  void *buffer;
+  size_t buffer_size;
+  int32_t slot_id;
+  uint64_t lease_id;
+} SubspacePublisherBufferLease;
 
 // Get the last error message from the subspace library.  This will return
 // a pointer to a string that is owned by the library.  The string will be
@@ -510,6 +522,20 @@ subspace_publish_message_with_prefix(SubspacePublisher publisher,
                                      size_t message_size,
                                      bool use_slot_id_from_prefix);
 bool subspace_cancel_publish(SubspacePublisher publisher);
+
+SubspacePublisherBufferLease
+subspace_acquire_publisher_buffer(SubspacePublisher publisher);
+SubspacePublisherBufferLease
+subspace_reclaim_publisher_buffer(SubspacePublisher publisher, int32_t slot_id);
+const SubspaceMessage
+subspace_publish_publisher_buffer(SubspacePublisher publisher,
+                                  SubspacePublisherBufferLease lease,
+                                  size_t message_size);
+bool subspace_release_publisher_buffer(SubspacePublisher publisher,
+                                       SubspacePublisherBufferLease lease);
+void *subspace_get_publisher_buffer_metadata(
+    SubspacePublisher publisher, SubspacePublisherBufferLease lease,
+    size_t *metadata_size);
 
 // Reliable publishers that cannot send a message at the present time can be
 // waited for using this function.  It will block until the publisher is able to

@@ -353,7 +353,8 @@ uint64_t Channel::GetVirtualMemoryUsage() const {
 void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
                            int vchan_id) {
   if (is_pub) {
-    // Look for a slot with kPubOwned set and clear it.
+    // Clear every slot owned by this publisher. Explicit multi-slot leases can
+    // leave more than one slot publisher-owned when a process exits.
     for (int i = 0; i < NumSlots(); i++) {
       MessageSlot *slot = &ccb_->slots[i];
       uint64_t refs = slot->refs.load(std::memory_order_relaxed);
@@ -368,7 +369,6 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
         ccb_->subscribers.Traverse([this, slot](int sub_id) {
           GetAvailableSlots(sub_id).Clear(slot->id);
         });
-        return;
       }
     }
   } else {

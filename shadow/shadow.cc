@@ -264,6 +264,8 @@ Shadow::HandleCreateChannel(const ShadowCreateChannel &msg,
     ch.split_buffers_over_bridge = msg.split_buffers_over_bridge();
     ch.has_max_publishers = msg.has_max_publishers();
     ch.max_publishers = msg.max_publishers();
+    ch.has_max_subscribers = msg.has_max_subscribers();
+    ch.max_subscribers = msg.max_subscribers();
     ch.ccb_fd = std::move(fds[0]);
     ch.bcb_fd = std::move(fds[1]);
   };
@@ -317,6 +319,10 @@ Shadow::HandleAddPublisher(const ShadowAddPublisher &msg,
       .for_tunnel = msg.for_tunnel(),
       .is_fixed_size = msg.is_fixed_size(),
       .notify_retirement = msg.notify_retirement(),
+      .max_outstanding_slot_leases =
+          msg.max_outstanding_slot_leases() > 0
+              ? msg.max_outstanding_slot_leases()
+              : 1,
       .poll_fd = std::move(fds[0]),
       .trigger_fd = std::move(fds[1]),
       .retirement_read_fd = msg.notify_retirement()
@@ -472,6 +478,8 @@ Shadow::HandleUpdateChannelOptions(const ShadowUpdateChannelOptions &msg) {
   channel.split_buffers_over_bridge = msg.split_buffers_over_bridge();
   channel.has_max_publishers = msg.has_max_publishers();
   channel.max_publishers = msg.max_publishers();
+  channel.has_max_subscribers = msg.has_max_subscribers();
+  channel.max_subscribers = msg.max_subscribers();
   return absl::OkStatus();
 }
 
@@ -541,6 +549,8 @@ absl::Status Shadow::SendStateDump(toolbelt::UnixSocket &socket) {
       msg->set_split_buffers_over_bridge(ch.split_buffers_over_bridge);
       msg->set_has_max_publishers(ch.has_max_publishers);
       msg->set_max_publishers(ch.max_publishers);
+      msg->set_has_max_subscribers(ch.has_max_subscribers);
+      msg->set_max_subscribers(ch.max_subscribers);
 
       std::vector<toolbelt::FileDescriptor> fds;
       fds.push_back(ch.ccb_fd);
@@ -578,6 +588,8 @@ absl::Status Shadow::SendStateDump(toolbelt::UnixSocket &socket) {
       msg->set_for_tunnel(pub.for_tunnel);
       msg->set_is_fixed_size(pub.is_fixed_size);
       msg->set_notify_retirement(pub.notify_retirement);
+      msg->set_max_outstanding_slot_leases(
+          pub.max_outstanding_slot_leases);
 
       std::vector<toolbelt::FileDescriptor> fds;
       fds.push_back(pub.poll_fd);

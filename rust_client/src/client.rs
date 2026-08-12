@@ -59,6 +59,48 @@ impl Drop for PublishLock {
     }
 }
 
+struct PublishUnlockGuard<'a> {
+    lock: &'a PublishLock,
+    armed: bool,
+}
+
+impl<'a> PublishUnlockGuard<'a> {
+    fn new(lock: &'a PublishLock) -> Self {
+        Self { lock, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PublishUnlockGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.lock.unlock();
+        }
+    }
+}
+
+#[cfg(test)]
+mod publish_lock_tests {
+    use super::{PublishLock, PublishUnlockGuard};
+
+    #[test]
+    fn unlock_guard_releases_lock_during_unwind() {
+        let lock = PublishLock::new();
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            lock.lock();
+            let _guard = PublishUnlockGuard::new(&lock);
+            panic!("exercise unwind-safe publisher unlocking");
+        }));
+        assert!(panic.is_err());
+
+        lock.lock();
+        lock.unlock();
+    }
+}
+
 // ── Info / Stats types ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -97,11 +139,42 @@ struct ClientInner {
 
 // ── Publisher wrapper ───────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy)]
+pub struct PublisherBufferLease {
+    pub buffer: *mut u8,
+    pub buffer_size: usize,
+    pub slot_id: i32,
+    pub lease_id: u64,
+}
+
+impl PublisherBufferLease {
+    pub fn is_valid(&self) -> bool {
+        !self.buffer.is_null() && self.slot_id >= 0 && self.lease_id != 0
+    }
+
+    /// Returns the writable payload area for this lease.
+    ///
+    /// # Safety
+    ///
+    /// The publisher must remain alive, the lease must still be active, and
+    /// no other reference may access this payload buffer for the returned
+    /// slice's lifetime.
+    pub unsafe fn as_mut_slice(&mut self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.buffer, self.buffer_size) }
+    }
+}
+
 #[derive(Clone)]
 pub struct Publisher {
     inner: Arc<Mutex<ClientInner>>,
     pub(crate) imp: Arc<Mutex<PublisherImpl>>,
     publish_lock: Arc<PublishLock>,
+    _lifetime: Arc<PublisherLifetime>,
+}
+
+struct PublisherLifetime {
+    inner: Arc<Mutex<ClientInner>>,
+    imp: Arc<Mutex<PublisherImpl>>,
 }
 
 impl Publisher {
@@ -137,6 +210,7 @@ impl Publisher {
     /// obtaining the same buffer concurrently.
     pub fn get_message_buffer(&self, max_size: i32) -> Result<Option<(*mut u8, usize)>> {
         self.publish_lock.lock();
+        let mut unlock_guard = PublishUnlockGuard::new(&self.publish_lock);
 
         let result = (|| -> Result<Option<(*mut u8, usize)>> {
             let mut client = self.inner.lock().unwrap();
@@ -181,7 +255,7 @@ impl Publisher {
                     return Ok(None);
                 }
                 let owner = pub_impl.publisher_id;
-                let slot = pub_impl.find_free_slot_reliable(owner);
+                let slot = pub_impl.find_free_slot_reliable(owner, true);
                 if slot.is_none() {
                     return Ok(None);
                 }
@@ -198,9 +272,8 @@ impl Publisher {
             Ok(Some((buffer, span_size)))
         })();
 
-        match &result {
-            Ok(Some(_)) => {}
-            _ => self.publish_lock.unlock(),
+        if matches!(&result, Ok(Some(_))) {
+            unlock_guard.disarm();
         }
 
         result
@@ -209,6 +282,7 @@ impl Publisher {
     /// Publish the message that was written into the buffer.
     /// Releases the publish lock acquired by `get_message_buffer`.
     pub fn publish_message(&self, message_size: i64) -> Result<Message> {
+        let _unlock_guard = PublishUnlockGuard::new(&self.publish_lock);
         let result = (|| -> Result<Message> {
             let mut client = self.inner.lock().unwrap();
             let mut pub_impl = self.imp.lock().unwrap();
@@ -240,8 +314,9 @@ impl Publisher {
             let reliable = pub_impl.options.reliable;
             let vchan_id = pub_impl.channel.vchan_id;
 
-            let published = pub_impl
-                .activate_slot_and_get_another(slot_idx, reliable, false, owner, false, false);
+            let published = pub_impl.activate_slot_and_get_another(
+                slot_idx, reliable, false, owner, false, false, true,
+            );
 
             pub_impl.channel.slot = published.new_slot;
             pub_impl.trigger_subscribers();
@@ -266,7 +341,6 @@ impl Publisher {
             })
         })();
 
-        self.publish_lock.unlock();
         result
     }
 
@@ -274,6 +348,195 @@ impl Publisher {
     /// Call this after `get_message_buffer` if you decide not to publish.
     pub fn cancel_publish(&self) {
         self.publish_lock.unlock();
+    }
+
+    /// Acquire an unpublished slot without holding the publish lock for the
+    /// lifetime of the returned lease.
+    pub fn acquire_buffer_lease(&self) -> Result<Option<PublisherBufferLease>> {
+        self.publish_lock.lock();
+        let _unlock_guard = PublishUnlockGuard::new(&self.publish_lock);
+        let result = (|| -> Result<Option<PublisherBufferLease>> {
+            let mut client = self.inner.lock().unwrap();
+            let mut pub_impl = self.imp.lock().unwrap();
+
+            if pub_impl.num_leases() >= pub_impl.options.max_outstanding_slot_leases as usize {
+                return Ok(None);
+            }
+            reload_subscribers_if_necessary(&mut client, &mut pub_impl)?;
+
+            let slot_idx = if let Some(slot_idx) = pub_impl.channel.slot.take() {
+                slot_idx
+            } else {
+                if pub_impl.options.reliable
+                    && pub_impl.channel.num_subscribers(pub_impl.channel.vchan_id) == 0
+                {
+                    return Ok(None);
+                }
+                let owner = pub_impl.publisher_id;
+                let slot = if pub_impl.options.reliable {
+                    pub_impl.find_free_slot_reliable(owner, false)
+                } else {
+                    pub_impl.find_free_slot_unreliable(owner, false)
+                };
+                match slot {
+                    Some(slot_idx) => slot_idx,
+                    None => return Ok(None),
+                }
+            };
+
+            let lease_id = pub_impl.register_lease(slot_idx);
+            Ok(Some(PublisherBufferLease {
+                buffer: pub_impl.channel.get_buffer_address(slot_idx),
+                buffer_size: pub_impl.channel.slot_size_for_slot(slot_idx) as usize,
+                slot_id: pub_impl.channel.slot_ref(slot_idx).id,
+                lease_id,
+            }))
+        })();
+        result
+    }
+
+    /// Reclaim a specific retired slot. Returns `None` while the slot is not
+    /// reclaimable or the publisher is already at its lease limit.
+    pub fn reclaim_buffer_lease(&self, slot_id: i32) -> Result<Option<PublisherBufferLease>> {
+        self.publish_lock.lock();
+        let _unlock_guard = PublishUnlockGuard::new(&self.publish_lock);
+        let result = (|| -> Result<Option<PublisherBufferLease>> {
+            let mut client = self.inner.lock().unwrap();
+            let mut pub_impl = self.imp.lock().unwrap();
+
+            if pub_impl.num_leases() >= pub_impl.options.max_outstanding_slot_leases as usize {
+                return Ok(None);
+            }
+            reload_subscribers_if_necessary(&mut client, &mut pub_impl)?;
+            let slot_idx = match pub_impl.claim_retired_slot(slot_id) {
+                Some(slot_idx) => slot_idx,
+                None => return Ok(None),
+            };
+            let lease_id = pub_impl.register_lease(slot_idx);
+            Ok(Some(PublisherBufferLease {
+                buffer: pub_impl.channel.get_buffer_address(slot_idx),
+                buffer_size: pub_impl.channel.slot_size_for_slot(slot_idx) as usize,
+                slot_id: pub_impl.channel.slot_ref(slot_idx).id,
+                lease_id,
+            }))
+        })();
+        result
+    }
+
+    /// Publish data written into an explicit lease. The token becomes stale
+    /// after a successful publish.
+    pub fn publish_buffer_lease(
+        &self,
+        lease: &PublisherBufferLease,
+        message_size: i64,
+    ) -> Result<Message> {
+        self.publish_lock.lock();
+        let _unlock_guard = PublishUnlockGuard::new(&self.publish_lock);
+        let result = (|| -> Result<Message> {
+            if message_size <= 0 {
+                return Err(SubspaceError::InvalidArgument(
+                    "Message size must be greater than 0".into(),
+                ));
+            }
+
+            let mut client = self.inner.lock().unwrap();
+            let mut pub_impl = self.imp.lock().unwrap();
+            let slot_idx = pub_impl
+                .find_lease(lease.slot_id, lease.lease_id)
+                .ok_or_else(|| {
+                    SubspaceError::FailedPrecondition("Invalid or stale publisher lease".into())
+                })?;
+            if message_size > pub_impl.channel.slot_size_for_slot(slot_idx) as i64 {
+                return Err(SubspaceError::InvalidArgument(
+                    "Message size exceeds leased slot size".into(),
+                ));
+            }
+            reload_subscribers_if_necessary(&mut client, &mut pub_impl)?;
+
+            let mut message_size = message_size;
+            if let Some(ref cb) = pub_impl.on_send_callback {
+                let buffer = pub_impl.channel.get_buffer_address(slot_idx);
+                message_size = cb(buffer, message_size)?;
+            }
+            pub_impl.channel.slot_mut(slot_idx).message_size = message_size as u64;
+
+            let owner = pub_impl.publisher_id;
+            let reliable = pub_impl.options.reliable;
+            let vchan_id = pub_impl.channel.vchan_id;
+            let published = pub_impl.activate_slot_and_get_another(
+                slot_idx, reliable, false, owner, false, false, false,
+            );
+            pub_impl.remove_lease(lease.slot_id);
+            pub_impl.trigger_subscribers();
+            if pub_impl.channel.num_subscribers(vchan_id) == 0 {
+                pub_impl.retire_published_slot_immediately(slot_idx);
+            }
+
+            Ok(Message {
+                length: message_size as usize,
+                buffer: std::ptr::null(),
+                ordinal: published.ordinal,
+                timestamp: published.timestamp,
+                vchan_id,
+                is_activation: false,
+                slot_id: lease.slot_id,
+                checksum_error: false,
+                active_message: None,
+            })
+        })();
+        result
+    }
+
+    /// Discard an unpublished explicit lease. The token becomes stale after a
+    /// successful release.
+    pub fn release_buffer_lease(&self, lease: &PublisherBufferLease) -> Result<()> {
+        self.publish_lock.lock();
+        let _unlock_guard = PublishUnlockGuard::new(&self.publish_lock);
+        let result = (|| -> Result<()> {
+            let mut pub_impl = self.imp.lock().unwrap();
+            let slot_idx = pub_impl
+                .find_lease(lease.slot_id, lease.lease_id)
+                .ok_or_else(|| {
+                    SubspaceError::FailedPrecondition("Invalid or stale publisher lease".into())
+                })?;
+            if !pub_impl.release_leased_slot(slot_idx) {
+                return Err(SubspaceError::Internal(
+                    "Failed to release publisher lease".into(),
+                ));
+            }
+            pub_impl.remove_lease(lease.slot_id);
+            Ok(())
+        })();
+        result
+    }
+
+    pub fn get_lease_metadata(&self, lease: &PublisherBufferLease) -> Result<Vec<u8>> {
+        let mut pub_impl = self.imp.lock().unwrap();
+        let slot_idx = pub_impl
+            .find_lease(lease.slot_id, lease.lease_id)
+            .ok_or_else(|| {
+                SubspaceError::FailedPrecondition("Invalid or stale publisher lease".into())
+            })?;
+        Ok(pub_impl.get_metadata_for_slot(slot_idx).to_vec())
+    }
+
+    pub fn set_lease_metadata(&self, lease: &PublisherBufferLease, data: &[u8]) -> Result<()> {
+        let mut pub_impl = self.imp.lock().unwrap();
+        let slot_idx = pub_impl
+            .find_lease(lease.slot_id, lease.lease_id)
+            .ok_or_else(|| {
+                SubspaceError::FailedPrecondition("Invalid or stale publisher lease".into())
+            })?;
+        let metadata = pub_impl.get_metadata_for_slot(slot_idx);
+        if data.len() > metadata.len() {
+            return Err(SubspaceError::InvalidArgument(format!(
+                "Metadata too large: {} bytes vs {} available",
+                data.len(),
+                metadata.len()
+            )));
+        }
+        metadata[..data.len()].copy_from_slice(data);
+        Ok(())
     }
 
     /// Wait until a reliable publisher can try sending again.
@@ -421,7 +684,7 @@ impl Publisher {
     }
 }
 
-impl Drop for Publisher {
+impl Drop for PublisherLifetime {
     fn drop(&mut self) {
         let client = self.inner.lock().unwrap();
         let mut pub_impl = self.imp.lock().unwrap();
@@ -847,6 +1110,13 @@ impl Client {
     ) -> Result<Publisher> {
         let mut client = self.inner.lock().unwrap();
 
+        if opts.max_outstanding_slot_leases < 1 || opts.max_outstanding_slot_leases > opts.num_slots
+        {
+            return Err(SubspaceError::InvalidArgument(
+                "MaxOutstandingSlotLeases must be between 1 and NumSlots".into(),
+            ));
+        }
+
         let slot_size = aligned64(opts.slot_size as i64);
 
         let req = proto::Request {
@@ -871,6 +1141,7 @@ impl Client {
                     max_publishers: 0,
                     publisher_id: -1,
                     process_id: std::process::id() as u64,
+                    max_outstanding_slot_leases: opts.max_outstanding_slot_leases,
                 },
             )),
         };
@@ -943,7 +1214,7 @@ impl Client {
         if !opts.reliable {
             let owner = pub_impl.publisher_id;
 
-            let slot = pub_impl.find_free_slot_unreliable(owner);
+            let slot = pub_impl.find_free_slot_unreliable(owner, true);
             if slot.is_none() {
                 return Err(SubspaceError::Internal(
                     "No slot available for publisher".into(),
@@ -968,10 +1239,15 @@ impl Client {
         pub_impl.trigger_subscribers();
 
         let pub_arc = Arc::new(Mutex::new(pub_impl));
+        let publisher_lifetime = Arc::new(PublisherLifetime {
+            inner: self.inner.clone(),
+            imp: pub_arc.clone(),
+        });
         Ok(Publisher {
             inner: self.inner.clone(),
             imp: pub_arc,
             publish_lock: Arc::new(PublishLock::new()),
+            _lifetime: publisher_lifetime,
         })
     }
 
@@ -1001,6 +1277,7 @@ impl Client {
                     mux: opts.mux.clone(),
                     vchan_id: opts.vchan_id,
                     process_id: std::process::id() as u64,
+                    max_subscribers: opts.max_subscribers,
                 },
             )),
         };
@@ -1636,7 +1913,7 @@ fn reload_reliable_publishers_if_necessary(
 
 fn activate_reliable_channel(publisher: &mut PublisherImpl) -> Result<()> {
     let owner = publisher.publisher_id;
-    let slot = publisher.find_free_slot_reliable(owner);
+    let slot = publisher.find_free_slot_reliable(owner, true);
     if slot.is_none() {
         return Err(SubspaceError::Internal(format!(
             "Channel {} has no free slots",
@@ -1655,7 +1932,7 @@ fn activate_reliable_channel(publisher: &mut PublisherImpl) -> Result<()> {
     publisher.channel.slot_mut(si).message_size = 1;
 
     let owner = publisher.publisher_id;
-    publisher.activate_slot_and_get_another(si, true, true, owner, false, false);
+    publisher.activate_slot_and_get_another(si, true, true, owner, false, false, true);
     publisher.channel.slot = None;
     publisher.trigger_subscribers();
 
@@ -1678,7 +1955,8 @@ fn activate_channel(publisher: &mut PublisherImpl) -> Result<()> {
     publisher.channel.slot_mut(si).message_size = 1;
 
     let owner = publisher.publisher_id;
-    let published = publisher.activate_slot_and_get_another(si, false, true, owner, false, false);
+    let published =
+        publisher.activate_slot_and_get_another(si, false, true, owner, false, false, true);
     publisher.channel.slot = published.new_slot;
     publisher.trigger_subscribers();
 

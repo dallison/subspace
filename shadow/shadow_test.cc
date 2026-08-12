@@ -249,7 +249,12 @@ TEST_F(ShadowTest, ShadowReceivesAddPublisher) {
   subspace::Client client;
   InitClient(client);
 
-  auto pub = client.CreatePublisher("shadow_test_chan2", 128, 2);
+  auto pub = client.CreatePublisher(
+      "shadow_test_chan2",
+      subspace::PublisherOptions()
+          .SetSlotSize(128)
+          .SetNumSlots(5)
+          .SetMaxOutstandingSlotLeases(3));
   ASSERT_THAT(pub, IsOk());
 
   ASSERT_TRUE(WaitForShadowState([]() {
@@ -265,6 +270,7 @@ TEST_F(ShadowTest, ShadowReceivesAddPublisher) {
     EXPECT_EQ(it->second.publishers.size(), 1u);
 
     auto &pub_entry = it->second.publishers.begin()->second;
+    EXPECT_EQ(pub_entry.max_outstanding_slot_leases, 3);
     EXPECT_TRUE(pub_entry.poll_fd.Valid());
     EXPECT_TRUE(pub_entry.trigger_fd.Valid());
   });

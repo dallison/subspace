@@ -174,6 +174,10 @@ void ShadowReplicator::SendCreateChannel(ServerChannel *channel) {
     msg->set_has_max_publishers(true);
     msg->set_max_publishers(channel->MaxPublishers());
   }
+  if (channel->MaxSubscribers() > 0) {
+    msg->set_has_max_subscribers(true);
+    msg->set_max_subscribers(channel->MaxSubscribers());
+  }
 
   const SharedMemoryFds &channel_fds = channel->GetFds();
   std::vector<toolbelt::FileDescriptor> fds;
@@ -202,6 +206,8 @@ void ShadowReplicator::SendAddPublisher(const std::string &channel_name,
   msg->set_is_bridge(pub->IsBridge());
   msg->set_for_tunnel(pub->ForTunnel());
   msg->set_is_fixed_size(pub->IsFixedSize());
+  msg->set_max_outstanding_slot_leases(
+      pub->MaxOutstandingSlotLeases());
 
   std::vector<toolbelt::FileDescriptor> fds;
   fds.push_back(const_cast<PublisherUser *>(pub)->GetPollFd());
@@ -293,6 +299,10 @@ void ShadowReplicator::SendUpdateChannelOptions(const ServerChannel *channel) {
   if (channel->MaxPublishers() > 0) {
     msg->set_has_max_publishers(true);
     msg->set_max_publishers(channel->MaxPublishers());
+  }
+  if (channel->MaxSubscribers() > 0) {
+    msg->set_has_max_subscribers(true);
+    msg->set_max_subscribers(channel->MaxSubscribers());
   }
   SendEvent(event);
 }
@@ -412,6 +422,8 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
           .split_buffers_over_bridge = msg.split_buffers_over_bridge(),
           .has_max_publishers = msg.has_max_publishers(),
           .max_publishers = msg.max_publishers(),
+          .has_max_subscribers = msg.has_max_subscribers(),
+          .max_subscribers = msg.max_subscribers(),
           .ccb_fd = std::move(fds[0]),
           .bcb_fd = std::move(fds[1]),
       });
@@ -454,6 +466,10 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
           .for_tunnel = msg.for_tunnel(),
           .is_fixed_size = msg.is_fixed_size(),
           .notify_retirement = msg.notify_retirement(),
+          .max_outstanding_slot_leases =
+              msg.max_outstanding_slot_leases() > 0
+                  ? msg.max_outstanding_slot_leases()
+                  : 1,
           .poll_fd = std::move(fds[0]),
           .trigger_fd = std::move(fds[1]),
           .retirement_read_fd = msg.notify_retirement()

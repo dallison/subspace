@@ -1,5 +1,30 @@
 # CHANGELOG.md
 
+## Unreleased
+
+### Publisher Buffer Leases
+- Added explicit C++, C, Python, and Rust APIs to acquire multiple unpublished
+  publisher slots, publish or release individual leases, and reject stale lease
+  tokens.
+- Added exact-slot reclamation from retirement notifications and per-lease
+  metadata access.
+- Added `max_outstanding_slot_leases` and
+  `notify_retirement_on_forced_reuse` publisher options.
+- Hardened lease concurrency and lifetime handling: C++ metadata lookup is
+  synchronized, Python exported views cannot mutate reused slots, and Rust
+  clone teardown and publisher locking are ownership- and unwind-safe.
+
+### Channel Admission
+- Added server-enforced `max_subscribers` limits, including virtual channels
+  sharing a multiplexer.
+- Channel capacity now reserves every publisher's maximum lease budget and
+  every subscriber's maximum active-message budget.
+- Lease budgets and subscriber limits survive shadow-server recovery.
+
+### Split Buffers
+- QNX and macOS split-buffer shared-memory object names now use the portable
+  leading-slash form required by `shm_open`.
+
 ## Subspace Version 2.2.0
 
 ### Client API Improvements

@@ -25,11 +25,13 @@ It has the following features:
 1.	No communication with server for message transfer.
 1.	Message type agnostic transmission – bring your own serialization.
 2.  Channel types, meaningful to user, not system.
-1.	Single lock POSIX shared memory channels
+1.	Lock-free shared memory data
 1.	Both unreliable and reliable communications between publishers and subscribers.
 1.	Ability to read the next or newest message in a channel.
 1.	File-descriptor-based event triggers.
 1.	Optional split payload buffers for external allocators and memory pools.
+1.	Explicit multi-slot publisher buffer leases with exact-slot reclamation.
+1.	Server-enforced publisher and subscriber limits with lease-aware channel capacity.
 1.	Automatic UDP discovery and TCP bridging of channels between servers, plus optional TCP unicast discovery for bridging across NAT/VMs/emulators.
 1.	Shadow process for crash recovery -- the server can restart and resume without losing shared memory state.
 1.	Shared and weak pointers for message references.
@@ -40,6 +42,7 @@ It has the following features:
 See the file docs/subspace.pdf for full documentation.  Additional documentation:
 - [Checksums and User Metadata](docs/checksums-and-metadata.md)
 - [Split Buffers](docs/split-buffers.md)
+- [Publisher Buffer Leases](docs/publisher-buffer-leases.md)
 - [C Client API](docs/c-client.md)
 - [Client Architecture](docs/client-architecture.md)
 - [Server Architecture](docs/server-architecture.md)
@@ -485,6 +488,83 @@ MyMessageType* msg = reinterpret_cast<MyMessageType*>(span.data());
 pub.PublishMessage(sizeof(MyMessageType));
 ```
 
+### Explicit Publisher Buffer Leases
+
+The C++, C, Python, and Rust clients can explicitly lease several unpublished
+slots instead of using the implicit single-buffer workflow. This is useful for
+asynchronous producers and external memory pipelines. Configure the maximum
+before creating the publisher:
+
+```cpp
+auto pub_or = client->CreatePublisher(
+    "camera",
+    subspace::PublisherOptions()
+        .SetSlotSize(4096)
+        .SetNumSlots(16)
+        .SetMetadataSize(16)
+        .SetMaxOutstandingSlotLeases(3)
+        .SetNotifyRetirement(true)
+        .SetNotifyRetirementOnForcedReuse(false));
+auto pub = *std::move(pub_or);
+
+auto lease_or = pub.AcquireBufferLease();
+if (!lease_or.ok() || !*lease_or) {
+    // Error, or no slot is currently available.
+    return;
+}
+subspace::PublisherBufferLease lease = *lease_or;
+std::memcpy(lease.buffer, payload, payload_size);
+auto metadata = pub.GetMetadata(lease);
+
+auto status = pub.PublishBufferLease(lease, payload_size);
+// Or discard an unpublished lease with pub.ReleaseBufferLease(lease).
+```
+
+The Python API exposes the same lifecycle with a writable staging
+`memoryview`. The requested bytes are copied into the leased shared-memory
+slot by `publish_buffer_lease()`:
+
+```python
+options = subspace.PublisherOptions()
+options.set_slot_size(4096)
+options.set_num_slots(16)
+options.set_max_outstanding_slot_leases(3)
+
+pub = client.create_publisher("camera", options=options)
+lease = pub.acquire_buffer_lease()
+if lease is not None:
+    lease.buffer[:len(payload)] = payload
+    pub.publish_buffer_lease(lease, len(payload))
+```
+
+Rust returns the same temporary-unavailability result as `Ok(None)`:
+
+```rust
+let options = PublisherOptions::new()
+    .set_slot_size(4096)
+    .set_num_slots(16)
+    .set_max_outstanding_slot_leases(3);
+let publisher = client.create_publisher("camera", &options)?;
+
+if let Some(mut lease) = publisher.acquire_buffer_lease()? {
+    unsafe {
+        lease.as_mut_slice()[..payload.len()].copy_from_slice(payload);
+    }
+    publisher.publish_buffer_lease(&lease, payload.len() as i64)?;
+}
+```
+
+Publishing or releasing invalidates the lease. Its `lease_id` prevents a stale
+token from operating on a reused slot. When retirement notifications are
+enabled, read an `int32_t` slot ID from `GetRetirementFd()` and pass it to
+`ReclaimBufferLease(slot_id)` to reacquire that exact retired slot with a new
+lease ID.
+
+An empty lease is a temporary availability result, not an error. Do not mix the
+explicit lease workflow with the implicit `GetMessageBuffer()` workflow on the
+same publisher. See [Publisher Buffer Leases](docs/publisher-buffer-leases.md)
+for lifecycle, retirement, capacity, and C API details.
+
 ### Publisher Methods
 
 ```cpp
@@ -496,6 +576,14 @@ public:
     
     // Publish a message
     absl::StatusOr<const Message> PublishMessage(int64_t message_size);
+
+    // Explicit unpublished-slot leases
+    absl::StatusOr<PublisherBufferLease> AcquireBufferLease();
+    absl::StatusOr<PublisherBufferLease> ReclaimBufferLease(int32_t slot_id);
+    absl::StatusOr<const Message> PublishBufferLease(
+        const PublisherBufferLease &lease, int64_t message_size);
+    absl::Status ReleaseBufferLease(const PublisherBufferLease &lease);
+    absl::Span<std::byte> GetMetadata(const PublisherBufferLease &lease);
     
     // Cancel a publish (releases lock in thread-safe mode)
     void CancelPublish();
@@ -777,7 +865,8 @@ Unreliable channels provide best-effort delivery with no guarantees. If a subscr
 
 **Characteristics:**
 - Messages may be dropped if subscriber is slow
-- Publishers never block (always get a slot immediately)
+- The implicit publish path keeps a slot reserved, so publishers normally get a buffer immediately
+- Explicit lease acquisition can temporarily return an empty lease when every reusable slot is subscriber-held or already leased
 - Lower memory usage
 - Highest performance
 
@@ -803,6 +892,22 @@ You can mix reliable and unreliable publishers/subscribers on the same channel:
 - **Reliable subscriber + Unreliable publisher**: Best effort (may drop)
 - **Unreliable subscriber + Reliable publisher**: May drop if slow
 - **Unreliable subscriber + Unreliable publisher**: Best effort, may drop
+
+### Channel Capacity
+
+For unreliable channels, the server reserves each publisher's configured lease
+budget and each subscriber's active-message budget:
+
+```text
+sum(max_outstanding_slot_leases) + sum(max_active_messages)
+    <= num_slots - 1
+```
+
+Admission fails if adding a publisher or subscriber would exceed that limit.
+This guarantees that a publisher below its lease limit can acquire another
+lease even when subscribers hold their maximum active messages. Capacity is
+aggregated across virtual channels sharing a multiplexer. With the default
+single lease per publisher, this preserves the previous capacity behavior.
 
 ## PublisherOptions
 
@@ -855,6 +960,8 @@ auto pub = client->CreatePublisher("channel",
 | `vchan_id` / `SetVchanId()` | `int` | `-1` | Virtual channel ID (-1 for server-assigned). |
 | `activate` / `SetActivate()` | `bool` | `false` | If true, channel is activated even if unreliable. |
 | `notify_retirement` / `SetNotifyRetirement()` | `bool` | `false` | If true, notify when slots are retired. |
+| `max_outstanding_slot_leases` / `SetMaxOutstandingSlotLeases()` | `int32_t` | `1` | Maximum unpublished slots owned through `AcquireBufferLease()`. This does not change the implicit `GetMessageBuffer()` workflow. |
+| `notify_retirement_on_forced_reuse` / `SetNotifyRetirementOnForcedReuse()` | `bool` | `true` | Include notifications caused by an unreliable publisher forcibly reusing an unread slot. Set false when retirement notifications drive exact-slot reclamation. |
 | `checksum` / `SetChecksum()` | `bool` | `false` | If true, calculate checksums for all messages. |
 | `checksum_size` / `SetChecksumSize()` | `int32_t` | `4` | Number of bytes reserved for the checksum (starting at the `checksum` field of `MessagePrefix`). Default 4 for CRC32. Increase for larger checksums (e.g. 20 for SHA-1). |
 | `metadata_size` / `SetMetadataSize()` | `int32_t` | `0` | Number of bytes of user metadata stored immediately after the checksum area. Accessible via `Publisher::GetMetadata()` / `Subscriber::GetMetadata()`. |
@@ -871,6 +978,8 @@ auto pub = client->CreatePublisher("channel",
 - `int VchanId() const`
 - `bool Activate() const`
 - `bool NotifyRetirement() const`
+- `int32_t MaxOutstandingSlotLeases() const`
+- `bool NotifyRetirementOnForcedReuse() const`
 - `bool Checksum() const`
 - `int32_t ChecksumSize() const`
 - `int32_t MetadataSize() const`
@@ -1023,6 +1132,7 @@ auto sub = client->CreateSubscriber("channel",
 | `type` / `SetType()` | `std::string` | `""` | User-defined message type identifier. Must match publisher type. |
 | `max_active_messages` / `SetMaxActiveMessages()` | `int` | `1` | Maximum number of active messages (shared_ptrs) that can be held simultaneously. |
 | `max_active_messages` / `SetMaxSharedPtrs()` | `int` | `0` | Alias: sets max_active_messages to n+1. |
+| `max_subscribers` / `SetMaxSubscribers()` | `int32_t` | `0` | Server-enforced channel subscriber limit; 0 means unlimited. The first subscriber establishes the value and later subscribers must use the same value. |
 | `log_dropped_messages` / `SetLogDroppedMessages()` | `bool` | `true` | If true, log when messages are dropped. |
 | `bridge` / `SetBridge()` | `bool` | `false` | Internal: marks this as a bridge subscriber. |
 | `mux` / `SetMux()` | `std::string` | `""` | Multiplexer name for virtual channels. |
@@ -1037,6 +1147,7 @@ auto sub = client->CreateSubscriber("channel",
 - `const std::string& Type() const`
 - `int MaxActiveMessages() const`
 - `int MaxSharedPtrs() const`
+- `int MaxSubscribers() const`
 - `bool LogDroppedMessages() const`
 - `bool IsBridge() const`
 - `const std::string& Mux() const`
@@ -1205,12 +1316,17 @@ SubspacePublisherOptions pub_opts = subspace_publisher_options_default(1024, 10)
 // pub_opts.reliable = false
 // pub_opts.fixed_size = false
 // pub_opts.activate = false
+// pub_opts.max_outstanding_slot_leases = 1
+// pub_opts.notify_retirement_on_forced_reuse = true
 // pub_opts.checksum_size = 4   (CRC32)
 // pub_opts.metadata_size = 0   (no user metadata)
 
 // Customize options
 pub_opts.reliable = true;
 pub_opts.fixed_size = false;
+pub_opts.max_outstanding_slot_leases = 3;
+pub_opts.notify_retirement = true;
+pub_opts.notify_retirement_on_forced_reuse = false;
 pub_opts.type.type = "MyMessageType";
 pub_opts.type.type_length = strlen(pub_opts.type.type);
 pub_opts.checksum_size = 20;   // e.g. 20-byte digest
@@ -1231,12 +1347,14 @@ if (pub.publisher == NULL) {
 SubspaceSubscriberOptions sub_opts = subspace_subscriber_options_default();
 // sub_opts.reliable = false
 // sub_opts.max_active_messages = 1
+// sub_opts.max_subscribers = 0  (no explicit limit)
 // sub_opts.pass_activation = false
 // sub_opts.log_dropped_messages = false
 
 // Customize options
 sub_opts.reliable = true;
 sub_opts.max_active_messages = 10;
+sub_opts.max_subscribers = 4;
 sub_opts.type.type = "MyMessageType";
 sub_opts.type.type_length = strlen(sub_opts.type.type);
 
@@ -1278,6 +1396,34 @@ if (pub_status.length == 0) {
 // pub_status.ordinal contains the message sequence number
 // pub_status.timestamp contains the publish timestamp
 ```
+
+### Publishing with Explicit Leases
+
+```c
+SubspacePublisherBufferLease lease =
+    subspace_acquire_publisher_buffer(pub);
+if (lease.buffer == NULL) {
+    if (subspace_has_error()) {
+        fprintf(stderr, "Lease failed: %s\n", subspace_get_last_error());
+    }
+    // Otherwise no slot is currently available; wait for retirement and retry.
+    return;
+}
+
+memcpy(lease.buffer, payload, payload_size);
+size_t metadata_size = 0;
+void *metadata =
+    subspace_get_publisher_buffer_metadata(pub, lease, &metadata_size);
+
+SubspaceMessage status =
+    subspace_publish_publisher_buffer(pub, lease, payload_size);
+// Or discard it with subspace_release_publisher_buffer(pub, lease).
+```
+
+If retirement notifications are enabled,
+`subspace_get_publisher_retirement_fd()` emits `int32_t` slot IDs.
+`subspace_reclaim_publisher_buffer(pub, slot_id)` reacquires the exact retired
+slot with a new lease token.
 
 ### Reading Messages
 
@@ -1503,6 +1649,12 @@ This is a quick reference for the most common calls. See
 - `SubspaceMessageBuffer subspace_get_message_buffer(SubspacePublisher publisher, size_t max_size)`
 - `const SubspaceMessage subspace_publish_message(SubspacePublisher publisher, size_t messageSize)`
 - `bool subspace_cancel_publish(SubspacePublisher publisher)`
+- `SubspacePublisherBufferLease subspace_acquire_publisher_buffer(SubspacePublisher publisher)`
+- `SubspacePublisherBufferLease subspace_reclaim_publisher_buffer(SubspacePublisher publisher, int32_t slot_id)`
+- `const SubspaceMessage subspace_publish_publisher_buffer(SubspacePublisher publisher, SubspacePublisherBufferLease lease, size_t message_size)`
+- `bool subspace_release_publisher_buffer(SubspacePublisher publisher, SubspacePublisherBufferLease lease)`
+- `void *subspace_get_publisher_buffer_metadata(SubspacePublisher publisher, SubspacePublisherBufferLease lease, size_t *metadata_size)`
+- `int subspace_get_publisher_retirement_fd(SubspacePublisher publisher)`
 - `bool subspace_wait_for_publisher(SubspacePublisher publisher)`
 - `bool subspace_wait_for_publisher_with_timeout(SubspacePublisher publisher, uint64_t timeout_ms)`
 - `int subspace_wait_for_publisher_with_fd(SubspacePublisher publisher, int fd)`
@@ -1588,6 +1740,8 @@ assert_eq!(msg.length, 5);
 - Full pub/sub support: unreliable and reliable channels, read-next and
   read-newest modes, activation messages, virtual channels.
 - Checksums (built-in CRC32 or custom callbacks) and per-message user metadata.
+- Explicit multi-slot publisher leases with exact-slot reclamation.
+- Server-enforced subscriber limits and lease-aware capacity admission.
 - File-descriptor-based `wait()` for integration with event loops and `poll()`.
 - Slot retirement notification for reliable publishers.
 - Runs on Linux and macOS (ARM64 and x86_64).
@@ -1779,7 +1933,7 @@ its full state from whichever shadow is available.
 - Shared memory mappings -- buffers remain intact in `/dev/shm` (Linux) or
   POSIX shared memory (macOS).
 - Publisher and subscriber metadata (IDs, trigger FDs, reliability settings,
-  tunnel flags).
+  tunnel flags, publisher lease budgets, and subscriber limits).
 - The session ID, so clients can detect a server restart and reclaim their
   connections.
 

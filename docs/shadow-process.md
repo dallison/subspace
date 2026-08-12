@@ -89,8 +89,8 @@ All messages are wrapped in a `ShadowEvent` protobuf oneof. File descriptors acc
 | Event | Direction | FDs | Purpose |
 |---|---|---|---|
 | `ShadowStateDump` | Shadow -> Server | `[scb_fd]` if session_id != 0 | Header sent on new connection; contains the shadow's session ID and channel count |
-| `ShadowCreateChannel` | Both | `[ccb_fd, bcb_fd]` | Channel metadata + shared memory FDs |
-| `ShadowAddPublisher` | Both | `[poll_fd, trigger_fd, ...]` | Publisher metadata + notification FDs |
+| `ShadowCreateChannel` | Both | `[ccb_fd, bcb_fd]` | Channel metadata, subscriber limit, and shared memory FDs |
+| `ShadowAddPublisher` | Both | `[poll_fd, trigger_fd, ...]` | Publisher metadata, lease budget, and notification FDs |
 | `ShadowAddSubscriber` | Both | `[trigger_fd, poll_fd]` | Subscriber metadata + notification FDs |
 | `ShadowStateDone` | Shadow -> Server | none | End-of-dump marker |
 | `ShadowInit` | Server -> Shadow | `[scb_fd]` | New session; clears shadow state |
@@ -151,7 +151,7 @@ If the shadow has no prior state (first startup), it sends `session_id=0` with n
 - **Reserves the channel ID** in the server's ID bitmap (so new channels don't collide).
 - **Constructs a `ServerChannel`** with the recovered metadata (name, slot size, num_slots, type, etc.).
 - **Maps existing shared memory** via `ServerChannel::MapExisting()` — this maps the recovered CCB and BCB file descriptors into the server's address space without reinitializing them, preserving all message data.
-- **Reconstructs publishers and subscribers** with `handler=nullptr` (orphaned users — they have no client connection yet). Their trigger FDs and retirement pipes are restored from the recovered file descriptors.
+- **Reconstructs publishers and subscribers** with `handler=nullptr` (orphaned users — they have no client connection yet). Their trigger FDs and retirement pipes are restored from the recovered file descriptors. Publisher `max_outstanding_slot_leases` values and channel `max_subscribers` limits are restored so admission behavior is unchanged after recovery.
 - **Inserts the channel** into the server's channel map.
 
 ### 4. Server re-replicates to both shadows
@@ -167,8 +167,8 @@ The server proceeds with its normal startup (spawning coroutines, accepting clie
 | Survives | Does not survive |
 |---|---|
 | Shared memory regions (SCB, CCB, BCB) | Client TCP/socket connections |
-| Channel metadata (name, slot config, type) | In-flight RPC state |
-| Publisher/subscriber registration (IDs, flags) | Coroutine state |
+| Channel metadata (name, slot config, type, subscriber limit) | In-flight RPC state |
+| Publisher/subscriber registration (IDs, flags, publisher lease budgets) | Coroutine state |
 | Message data already written to shared memory | Publisher/subscriber client handlers |
 | Event notification FDs (trigger, poll, retirement) | |
 

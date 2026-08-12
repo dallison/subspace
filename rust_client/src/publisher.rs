@@ -18,6 +18,7 @@ use crate::syscall_shim::{
 use nix::fcntl::OFlag;
 use nix::sys::mman::ProtFlags;
 use nix::sys::stat::Mode;
+use std::collections::HashMap;
 use std::os::unix::io::RawFd;
 use std::sync::atomic::Ordering;
 
@@ -40,6 +41,8 @@ pub struct PublisherImpl {
     pub trigger_fd: RawFd,
     pub retirement_fd: RawFd,
     pub retirement_trigger_fds: Vec<RawFd>,
+    leased_slots: HashMap<i32, u64>,
+    next_lease_id: u64,
 
     pub(crate) on_send_callback: Option<OnSendCallback>,
     pub(crate) resize_callback: Option<ResizeCallback>,
@@ -73,6 +76,8 @@ impl PublisherImpl {
             trigger_fd: -1,
             retirement_fd: -1,
             retirement_trigger_fds: Vec::new(),
+            leased_slots: HashMap::new(),
+            next_lease_id: 1,
             on_send_callback: None,
             resize_callback: None,
             checksum_callback: None,
@@ -122,7 +127,137 @@ impl PublisherImpl {
         }
     }
 
-    pub fn find_free_slot_unreliable(&mut self, owner: i32) -> Option<usize> {
+    pub fn get_metadata_for_slot(&mut self, slot_idx: usize) -> &mut [u8] {
+        if self.channel.metadata_size == 0 {
+            return &mut [];
+        }
+        let prefix = self.channel.get_prefix(slot_idx);
+        if prefix.is_null() {
+            return &mut [];
+        }
+        unsafe {
+            checksum::get_metadata_slice(
+                prefix,
+                self.channel.checksum_size,
+                self.channel.metadata_size,
+            )
+        }
+    }
+
+    pub fn num_leases(&self) -> usize {
+        self.leased_slots.len()
+    }
+
+    pub fn register_lease(&mut self, slot_idx: usize) -> u64 {
+        let mut lease_id = self.next_lease_id;
+        self.next_lease_id = self.next_lease_id.wrapping_add(1);
+        if lease_id == 0 {
+            lease_id = self.next_lease_id;
+            self.next_lease_id = self.next_lease_id.wrapping_add(1);
+        }
+        self.leased_slots
+            .insert(self.channel.slot_ref(slot_idx).id, lease_id);
+        lease_id
+    }
+
+    pub fn find_lease(&self, slot_id: i32, lease_id: u64) -> Option<usize> {
+        if self.leased_slots.get(&slot_id) != Some(&lease_id)
+            || slot_id < 0
+            || slot_id >= self.channel.num_slots
+        {
+            return None;
+        }
+        let slot_idx = slot_id as usize;
+        let refs = self.channel.slot_ref(slot_idx).refs.load(Ordering::Acquire);
+        (refs == (PUB_OWNED | self.publisher_id as u64)).then_some(slot_idx)
+    }
+
+    pub fn remove_lease(&mut self, slot_id: i32) {
+        self.leased_slots.remove(&slot_id);
+    }
+
+    pub fn claim_retired_slot(&mut self, slot_id: i32) -> Option<usize> {
+        if slot_id < 0
+            || slot_id >= self.channel.num_slots
+            || !self.channel.retired_slots().is_set(slot_id as usize)
+        {
+            return None;
+        }
+
+        let slot_idx = slot_id as usize;
+        let slot_ptr = self.channel.slot_ptr(slot_idx);
+        unsafe {
+            let old_refs = (*slot_ptr).refs.load(Ordering::Acquire);
+            if (old_refs & (PUB_OWNED | REFS_MASK)) != 0 {
+                return None;
+            }
+            let expected = build_refs_bit_field(
+                (*slot_ptr).ordinal,
+                ((old_refs >> VCHAN_ID_SHIFT) & VCHAN_ID_MASK) as i32,
+                ((old_refs >> RETIRED_REFS_SHIFT) & RETIRED_REFS_MASK) as i32,
+            );
+            if (*slot_ptr)
+                .refs
+                .compare_exchange(
+                    expected,
+                    PUB_OWNED | self.publisher_id as u64,
+                    Ordering::Acquire,
+                    Ordering::Relaxed,
+                )
+                .is_err()
+            {
+                return None;
+            }
+        }
+
+        self.channel.retired_slots().clear(slot_idx);
+        let vchan_id = self.channel.vchan_id;
+        let slot = self.channel.slot_mut(slot_idx);
+        slot.ordinal = 0;
+        slot.timestamp = 0;
+        slot.vchan_id = vchan_id as i16;
+        self.channel.set_slot_to_biggest_buffer(slot_idx);
+
+        let prefix = self.channel.get_prefix(slot_idx);
+        if !prefix.is_null() {
+            unsafe {
+                (*prefix).flags = 0;
+                (*prefix).vchan_id = vchan_id;
+            }
+        }
+        self.channel.ccb().subscribers.traverse(|sub_id| {
+            self.channel.get_available_slots(sub_id).clear(slot_idx);
+        });
+        Some(slot_idx)
+    }
+
+    pub fn release_leased_slot(&mut self, slot_idx: usize) -> bool {
+        if self.channel.slot_ref(slot_idx).refs.load(Ordering::Acquire)
+            != (PUB_OWNED | self.publisher_id as u64)
+        {
+            return false;
+        }
+        let slot = self.channel.slot_mut(slot_idx);
+        slot.ordinal = 0;
+        slot.timestamp = 0;
+        slot.refs.store(0, Ordering::Release);
+        self.channel.ccb().subscribers.traverse(|sub_id| {
+            self.channel.get_available_slots(sub_id).clear(slot_idx);
+        });
+        self.channel.retired_slots().set(slot_idx);
+        true
+    }
+
+    pub fn retire_published_slot_immediately(&self, slot_idx: usize) {
+        self.channel.retired_slots().set(slot_idx);
+        self.trigger_retirement(slot_idx);
+    }
+
+    pub fn find_free_slot_unreliable(
+        &mut self,
+        owner: i32,
+        set_current_slot: bool,
+    ) -> Option<usize> {
         let max_retries = self.channel.num_slots as usize * 1000;
         let mut retries = max_retries;
         let mut slot_idx: Option<usize> = None;
@@ -253,15 +388,17 @@ impl PublisherImpl {
             self.channel.get_available_slots(sub_id).clear(si);
         });
 
-        if free_slot == -1 && retired_slot == -1 {
+        if free_slot == -1 && retired_slot == -1 && self.options.notify_retirement_on_forced_reuse {
             self.trigger_retirement(si);
         }
 
-        self.channel.slot = Some(si);
+        if set_current_slot {
+            self.channel.slot = Some(si);
+        }
         Some(si)
     }
 
-    pub fn find_free_slot_reliable(&mut self, owner: i32) -> Option<usize> {
+    pub fn find_free_slot_reliable(&mut self, owner: i32, set_current_slot: bool) -> Option<usize> {
         let mut slot_idx: Option<usize>;
         self.channel.embargoed_slots.clear_all();
         let mut retired_slot: i32;
@@ -408,11 +545,13 @@ impl PublisherImpl {
             self.channel.get_available_slots(sub_id).clear(si);
         });
 
-        if free_slot == -1 && retired_slot == -1 {
+        if free_slot == -1 && retired_slot == -1 && self.options.notify_retirement_on_forced_reuse {
             self.trigger_retirement(si);
         }
 
-        self.channel.slot = Some(si);
+        if set_current_slot {
+            self.channel.slot = Some(si);
+        }
         Some(si)
     }
 
@@ -424,6 +563,7 @@ impl PublisherImpl {
         owner: i32,
         omit_prefix: bool,
         use_prefix_slot_id: bool,
+        acquire_next: bool,
     ) -> PublishedMessage {
         let slot = self.channel.slot_mut(slot_idx);
         let vchan_id = self.channel.vchan_id;
@@ -486,32 +626,6 @@ impl PublisherImpl {
             }
         }
 
-        let slot = self.channel.slot_ref(slot_idx);
-        if !is_activation {
-            self.channel
-                .ccb()
-                .total_messages
-                .fetch_add(1, Ordering::Relaxed);
-            self.channel
-                .ccb()
-                .total_bytes
-                .fetch_add(slot.message_size, Ordering::Relaxed);
-
-            let msg_size = slot.message_size as u32;
-            let mut old_max = self.channel.ccb().max_message_size.load(Ordering::Relaxed);
-            while msg_size > old_max {
-                match self.channel.ccb().max_message_size.compare_exchange_weak(
-                    old_max,
-                    msg_size,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => break,
-                    Err(v) => old_max = v,
-                }
-            }
-        }
-
         // Release the slot: store refs with ordinal, no PUB_OWNED.
         let slot = self.channel.slot_ref(slot_idx);
         slot.refs.store(
@@ -531,21 +645,54 @@ impl PublisherImpl {
             self.channel.get_available_slots(sub_id).set(slot_idx);
         });
 
-        if reliable {
-            return PublishedMessage {
-                new_slot: None,
-                ordinal: unsafe { (*prefix).ordinal },
-                timestamp: unsafe { (*prefix).timestamp },
-            };
-        }
+        if !is_activation {
+            self.channel
+                .ccb()
+                .total_bytes
+                .fetch_add(slot.message_size, Ordering::Relaxed);
 
-        let new_slot = self.find_free_slot_unreliable(owner);
+            let msg_size = slot.message_size as u32;
+            let mut old_max = self.channel.ccb().max_message_size.load(Ordering::Relaxed);
+            while msg_size > old_max {
+                match self.channel.ccb().max_message_size.compare_exchange_weak(
+                    old_max,
+                    msg_size,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(v) => old_max = v,
+                }
+            }
+            self.channel
+                .ccb()
+                .total_messages
+                .fetch_add(1, Ordering::SeqCst);
+        }
 
         let (ordinal, timestamp) = if !prefix.is_null() {
             unsafe { ((*prefix).ordinal, (*prefix).timestamp) }
         } else {
             (0, 0)
         };
+
+        if !acquire_next {
+            return PublishedMessage {
+                new_slot: None,
+                ordinal,
+                timestamp,
+            };
+        }
+
+        if reliable {
+            return PublishedMessage {
+                new_slot: None,
+                ordinal,
+                timestamp,
+            };
+        }
+
+        let new_slot = self.find_free_slot_unreliable(owner, true);
 
         PublishedMessage {
             new_slot,

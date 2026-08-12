@@ -99,13 +99,19 @@ private:
 class PublisherUser : public User {
 public:
   PublisherUser(ClientHandler *handler, int id, bool is_reliable, bool is_local,
-                bool is_bridge, bool for_tunnel, bool is_fixed_size)
+                bool is_bridge, bool for_tunnel, bool is_fixed_size,
+                int max_outstanding_slot_leases)
       : User(handler, id, is_reliable, is_bridge, for_tunnel),
-        is_local_(is_local), is_fixed_size_(is_fixed_size) {}
+        is_local_(is_local), is_fixed_size_(is_fixed_size),
+        max_outstanding_slot_leases_(
+            max_outstanding_slot_leases > 0 ? max_outstanding_slot_leases : 1) {}
 
   bool IsPublisher() const override { return true; }
   bool IsLocal() const { return is_local_; }
   bool IsFixedSize() const { return is_fixed_size_; }
+  int MaxOutstandingSlotLeases() const {
+    return max_outstanding_slot_leases_;
+  }
 
   toolbelt::FileDescriptor &GetRetirementFdWriter() {
     return retirement_pipe_.WriteFd();
@@ -135,6 +141,7 @@ public:
 private:
   bool is_local_;
   bool is_fixed_size_;
+  int max_outstanding_slot_leases_;
   toolbelt::Pipe retirement_pipe_;
 };
 
@@ -217,6 +224,7 @@ public:
                                                bool is_reliable, bool is_local,
                                                bool is_bridge, bool for_tunnel,
                                                bool is_fixed_size,
+                                               int max_outstanding_slot_leases,
                                                uint64_t process_id);
   absl::StatusOr<SubscriberUser *>
   AddSubscriber(ClientHandler *handler, bool is_reliable, bool is_bridge,
@@ -281,10 +289,15 @@ public:
   void RemoveUser(Server *server, int user_id);
   void RemoveAllUsersFor(ClientHandler *handler);
   virtual bool IsEmpty() const { return user_ids_.IsEmpty(); }
-  virtual absl::Status HasSufficientCapacity(int new_max_active_messages) const;
+  virtual absl::Status
+  HasSufficientCapacity(int new_max_active_messages,
+                        int new_max_outstanding_slot_leases) const;
   virtual void CountUsers(int &num_pubs, int &num_subs, int &num_bridge_pubs,
                           int &num_bridge_subs, int &num_tunnel_pubs,
                           int &num_tunnel_subs) const;
+  virtual void
+  CountCapacityUsage(int &max_active_messages,
+                     int &max_outstanding_slot_leases) const;
   virtual void GetChannelInfo(subspace::ChannelInfoProto *info);
   virtual void GetChannelStats(subspace::ChannelStatsProto *stats);
   void TriggerAllSubscribers();
@@ -420,6 +433,10 @@ public:
                                           bool set_if_missing,
                                           const char *user_type);
   int32_t MaxPublishers() const { return max_publishers_; }
+  absl::Status ValidateOrSetMaxSubscribers(int32_t max_subscribers,
+                                           bool set_if_missing,
+                                           const char *user_type);
+  int32_t MaxSubscribers() const { return max_subscribers_; }
 
   virtual void SetSharedMemoryFds(SharedMemoryFds fds) {
     shared_memory_fds_ = std::move(fds);
@@ -450,10 +467,13 @@ public:
     int num_pubs;
     int num_subs;
     int max_active_messages;
+    int max_outstanding_slot_leases;
     int slots_needed;
   };
 
-  CapacityInfo HasSufficientCapacityInternal(int new_max_active_messages) const;
+  CapacityInfo
+  HasSufficientCapacityInternal(int new_max_active_messages,
+                                int new_max_outstanding_slot_leases) const;
   absl::Status CapacityError(const CapacityInfo &info) const;
 
   virtual void GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
@@ -480,6 +500,8 @@ protected:
   SplitBufferOptions split_buffer_options_;
   bool max_publishers_set_ = false;
   int32_t max_publishers_ = 0;
+  bool max_subscribers_set_ = false;
+  int32_t max_subscribers_ = 0;
 };
 
 class VirtualChannel;
@@ -512,6 +534,8 @@ public:
   void CountUsers(int &num_pubs, int &num_subs, int &num_bridge_pubs,
                   int &num_bridge_subs, int &num_tunnel_pubs,
                   int &num_tunnel_subs) const override;
+  void CountCapacityUsage(int &max_active_messages,
+                          int &max_outstanding_slot_leases) const override;
 
 private:
   int next_vchan_id_ = 0;
@@ -585,8 +609,10 @@ public:
   }
 
   absl::Status
-  HasSufficientCapacity(int new_max_active_messages) const override {
-    return mux_->HasSufficientCapacity(new_max_active_messages);
+  HasSufficientCapacity(int new_max_active_messages,
+                        int new_max_outstanding_slot_leases) const override {
+    return mux_->HasSufficientCapacity(new_max_active_messages,
+                                       new_max_outstanding_slot_leases);
   };
 
   ChannelCounters &RecordUpdate(bool is_pub, bool add, bool reliable) override {

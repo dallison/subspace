@@ -30,6 +30,7 @@ struct RecoveredPublisher {
   bool for_tunnel = false;
   bool is_fixed_size = false;
   bool notify_retirement = false;
+  int max_outstanding_slot_leases = 1;
   toolbelt::FileDescriptor poll_fd;
   toolbelt::FileDescriptor trigger_fd;
   toolbelt::FileDescriptor retirement_read_fd;
@@ -64,6 +65,8 @@ struct RecoveredChannel {
   bool split_buffers_over_bridge = false;
   bool has_max_publishers = false;
   int max_publishers = 0;
+  bool has_max_subscribers = false;
+  int max_subscribers = 0;
   toolbelt::FileDescriptor ccb_fd;
   toolbelt::FileDescriptor bcb_fd;
   std::vector<RegisteredClientBuffer> client_buffers;

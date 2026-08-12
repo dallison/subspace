@@ -21,7 +21,7 @@ pub mod proto {
 }
 
 pub use channel::ChannelCounters;
-pub use client::{ChannelInfo, ChannelStats, Client, Publisher, Subscriber};
+pub use client::{ChannelInfo, ChannelStats, Client, Publisher, PublisherBufferLease, Subscriber};
 pub use error::SubspaceError;
 pub use message::Message;
 pub use options::{PublisherOptions, SubscriberOptions};

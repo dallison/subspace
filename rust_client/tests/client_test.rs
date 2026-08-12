@@ -65,6 +65,8 @@ fn publisher_options_defaults() {
     assert!(opts.mux.is_empty());
     assert!(!opts.use_split_buffers);
     assert!(!opts.split_buffers_over_bridge);
+    assert_eq!(opts.max_outstanding_slot_leases, 1);
+    assert!(opts.notify_retirement_on_forced_reuse);
 }
 
 #[test]
@@ -76,6 +78,8 @@ fn publisher_options_builder_chain() {
         .set_local(true)
         .set_fixed_size(true)
         .set_checksum(true)
+        .set_max_outstanding_slot_leases(3)
+        .set_notify_retirement_on_forced_reuse(false)
         .set_use_split_buffers(true)
         .set_split_buffers_over_bridge(true)
         .set_type("sensor".into())
@@ -89,6 +93,8 @@ fn publisher_options_builder_chain() {
     assert!(opts.local);
     assert!(opts.fixed_size);
     assert!(opts.checksum);
+    assert_eq!(opts.max_outstanding_slot_leases, 3);
+    assert!(!opts.notify_retirement_on_forced_reuse);
     assert!(opts.use_split_buffers);
     assert!(opts.split_buffers_over_bridge);
     assert!(opts.activate);
@@ -110,6 +116,7 @@ fn subscriber_options_defaults() {
     assert!(!opts.pass_checksum_errors);
     assert!(!opts.keep_active_message);
     assert_eq!(opts.vchan_id, -1);
+    assert_eq!(opts.max_subscribers, 0);
 }
 
 #[test]
@@ -117,6 +124,7 @@ fn subscriber_options_builder_chain() {
     let opts = SubscriberOptions::new()
         .set_reliable(true)
         .set_max_active_messages(8)
+        .set_max_subscribers(3)
         .set_log_dropped_messages(false)
         .set_pass_activation(true)
         .set_checksum(true)
@@ -127,6 +135,7 @@ fn subscriber_options_builder_chain() {
 
     assert!(opts.reliable);
     assert_eq!(opts.max_active_messages, 8);
+    assert_eq!(opts.max_subscribers, 3);
     assert!(!opts.log_dropped_messages);
     assert!(opts.pass_activation);
     assert!(opts.checksum);
@@ -2027,6 +2036,184 @@ fn read_retired_slot(fd: i32) -> i32 {
     slot_id
 }
 
+// ── Explicit publisher buffer lease tests ───────────────────────────────────
+
+#[test]
+fn integration_explicit_publisher_buffer_leases() {
+    let pub_client = new_client("test_lease_p");
+    let sub_client = new_client("test_lease_s");
+
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(128)
+        .set_num_slots(6)
+        .set_metadata_size(8)
+        .set_max_outstanding_slot_leases(3)
+        .set_notify_retirement(true)
+        .set_notify_retirement_on_forced_reuse(false);
+    let publisher = pub_client
+        .create_publisher("rust_explicit_leases", &pub_opts)
+        .unwrap();
+    let subscriber = sub_client
+        .create_subscriber(
+            "rust_explicit_leases",
+            &SubscriberOptions::new().set_max_active_messages(2),
+        )
+        .unwrap();
+
+    let publisher_clone = publisher.clone();
+    drop(publisher_clone);
+    assert_eq!(publisher.get_counters().num_pubs, 1);
+
+    let mut leases = Vec::new();
+    for _ in 0..3 {
+        leases.push(publisher.acquire_buffer_lease().unwrap().unwrap());
+    }
+    assert_eq!(
+        leases
+            .iter()
+            .map(|lease| lease.slot_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3
+    );
+    assert!(leases.iter().all(|lease| lease.buffer_size == 128));
+    assert!(publisher.acquire_buffer_lease().unwrap().is_none());
+
+    let lease = leases[1];
+    let payload = b"lease-two";
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), lease.buffer, payload.len());
+    }
+    publisher.set_lease_metadata(&lease, b"lease-md").unwrap();
+    assert_eq!(publisher.get_lease_metadata(&lease).unwrap(), b"lease-md");
+
+    let published = publisher
+        .publish_buffer_lease(&lease, payload.len() as i64)
+        .unwrap();
+    assert_eq!(published.slot_id, lease.slot_id);
+    assert!(matches!(
+        publisher.publish_buffer_lease(&lease, payload.len() as i64),
+        Err(SubspaceError::FailedPrecondition(_))
+    ));
+
+    let received = subscriber.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(unsafe { received.as_slice() }, payload);
+    assert_eq!(subscriber.get_metadata(), b"lease-md");
+    drop(received);
+
+    let retirement_fd = publisher.get_retirement_fd();
+    assert!(retirement_fd_readable(retirement_fd, 1000));
+    let retired_slot = read_retired_slot(retirement_fd);
+    assert_eq!(retired_slot, lease.slot_id);
+
+    let reclaimed = publisher
+        .reclaim_buffer_lease(retired_slot)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reclaimed.slot_id, lease.slot_id);
+    assert_ne!(reclaimed.lease_id, lease.lease_id);
+
+    publisher.release_buffer_lease(&leases[0]).unwrap();
+    publisher.release_buffer_lease(&leases[2]).unwrap();
+    publisher.release_buffer_lease(&reclaimed).unwrap();
+    assert!(matches!(
+        publisher.release_buffer_lease(&reclaimed),
+        Err(SubspaceError::FailedPrecondition(_))
+    ));
+}
+
+#[test]
+fn integration_lease_without_subscribers_retires_immediately() {
+    let client = new_client("test_lease_no_sub");
+    let publisher = client
+        .create_publisher(
+            "rust_lease_no_sub",
+            &PublisherOptions::new()
+                .set_slot_size(128)
+                .set_num_slots(4)
+                .set_max_outstanding_slot_leases(2)
+                .set_notify_retirement(true)
+                .set_notify_retirement_on_forced_reuse(false),
+        )
+        .unwrap();
+
+    let lease = publisher.acquire_buffer_lease().unwrap().unwrap();
+    let original_buffer = lease.buffer;
+    unsafe {
+        std::ptr::copy_nonoverlapping(b"solo".as_ptr(), lease.buffer, 4);
+    }
+    publisher.publish_buffer_lease(&lease, 4).unwrap();
+
+    let retirement_fd = publisher.get_retirement_fd();
+    assert!(retirement_fd_readable(retirement_fd, 1000));
+    let retired_slot = read_retired_slot(retirement_fd);
+    assert_eq!(retired_slot, lease.slot_id);
+
+    let reclaimed = publisher
+        .reclaim_buffer_lease(retired_slot)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reclaimed.buffer, original_buffer);
+    assert_ne!(reclaimed.lease_id, lease.lease_id);
+    publisher.release_buffer_lease(&reclaimed).unwrap();
+}
+
+#[test]
+fn integration_lease_budget_is_in_channel_capacity() {
+    let client = new_client("test_lease_capacity");
+    let publisher = client
+        .create_publisher(
+            "rust_lease_capacity",
+            &PublisherOptions::new()
+                .set_slot_size(64)
+                .set_num_slots(5)
+                .set_max_outstanding_slot_leases(3),
+        )
+        .unwrap();
+
+    let error = match client.create_subscriber(
+        "rust_lease_capacity",
+        &SubscriberOptions::new().set_max_active_messages(2),
+    ) {
+        Ok(_) => panic!("subscriber creation unexpectedly fit channel capacity"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("3 slot leases"));
+    drop(publisher);
+}
+
+#[test]
+fn integration_max_subscribers_limits_count_and_still_delivers() {
+    let client = new_client("test_max_subscribers");
+    let publisher = client
+        .create_publisher(
+            "rust_max_subscribers",
+            &PublisherOptions::new().set_slot_size(64).set_num_slots(6),
+        )
+        .unwrap();
+    let sub_opts = SubscriberOptions::new().set_max_subscribers(1);
+    let subscriber = client
+        .create_subscriber("rust_max_subscribers", &sub_opts)
+        .unwrap();
+    let error = match client.create_subscriber("rust_max_subscribers", &sub_opts) {
+        Ok(_) => panic!("subscriber creation unexpectedly exceeded channel limit"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("maximum number of subscribers"));
+
+    let payload = b"limit-ok";
+    let (buffer, _) = publisher
+        .get_message_buffer(payload.len() as i32)
+        .unwrap()
+        .unwrap();
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), buffer, payload.len());
+    }
+    publisher.publish_message(payload.len() as i64).unwrap();
+    let received = subscriber.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(unsafe { received.as_slice() }, payload);
+}
+
 // ── Retirement trigger tests ─────────────────────────────────────────────────
 
 /// One publisher with retirement notification and two subscribers.
@@ -2168,6 +2355,57 @@ fn integration_retirement_trigger_publisher_side() {
     let r1 = read_retired_slot(retirement_fd);
     assert_eq!(r0, 1);
     assert_eq!(r1, 2);
+
+    assert!(!retirement_fd_readable(retirement_fd, 0));
+}
+
+#[test]
+fn integration_forced_reuse_retirement_can_be_suppressed() {
+    let pub_client = new_client("test_ret_no_forced_p");
+    let sub_client = new_client("test_ret_no_forced_s");
+
+    let publisher = pub_client
+        .create_publisher(
+            "rust_ret_no_forced",
+            &PublisherOptions::new()
+                .set_slot_size(256)
+                .set_num_slots(10)
+                .set_notify_retirement(true)
+                .set_notify_retirement_on_forced_reuse(false),
+        )
+        .unwrap();
+    let retirement_fd = publisher.get_retirement_fd();
+    let subscriber = sub_client
+        .create_subscriber(
+            "rust_ret_no_forced",
+            &SubscriberOptions::new().set_log_dropped_messages(false),
+        )
+        .unwrap();
+    let _slow_subscriber = sub_client
+        .create_subscriber(
+            "rust_ret_no_forced",
+            &SubscriberOptions::new().set_log_dropped_messages(false),
+        )
+        .unwrap();
+
+    for _ in 0..7 {
+        let (buffer, _) = publisher.get_message_buffer(256).unwrap().unwrap();
+        unsafe {
+            std::ptr::copy_nonoverlapping(b"foobar".as_ptr(), buffer, 6);
+        }
+        publisher.publish_message(6).unwrap();
+    }
+    for _ in 0..2 {
+        let message = subscriber.read_message(ReadMode::ReadNext).unwrap();
+        assert_eq!(message.length, 6);
+    }
+    for _ in 0..3 {
+        let (buffer, _) = publisher.get_message_buffer(256).unwrap().unwrap();
+        unsafe {
+            std::ptr::copy_nonoverlapping(b"foobar".as_ptr(), buffer, 6);
+        }
+        publisher.publish_message(6).unwrap();
+    }
 
     assert!(!retirement_fd_readable(retirement_fd, 0));
 }

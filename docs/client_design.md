@@ -176,7 +176,7 @@ Following the slot array (with 64-byte alignment):
 `Client::CreatePublisher(channel_name, slot_size, num_slots, options)`:
 
 1. Sends a `CreatePublisher` RPC to the server.
-2. The server creates the channel (if new) with the specified slot size and slot count, validates options (type matching, checksum/metadata size limits), and returns file descriptors for CCB, BCB, and buffer shared memory.
+2. The server creates the channel (if new) with the specified slot size and slot count, validates options (type matching, checksum/metadata size limits, and `max_outstanding_slot_leases`), and returns file descriptors for CCB, BCB, and buffer shared memory.
 3. The client maps all shared memory regions.
 4. For **unreliable** publishers: a free slot is immediately claimed via `FindFreeSlotUnreliable`. If `options.activate` is set, an activation message is published.
 5. For **reliable** publishers: an activation message is published via `ActivateReliableChannel`, **unless** the publisher is a bridge or tunnel publisher (they skip activation because the original local publisher has already activated the channel).
@@ -196,7 +196,7 @@ void* buf = publisher.GetMessageBuffer(max_size);
 
 - If `max_size` exceeds the current slot size, the channel is resized (see Section 8).
 - For reliable publishers, returns `nullptr` when no slot is available.
-- For unreliable publishers, always returns a buffer (may recycle a slot with unread messages).
+- For unreliable publishers using this implicit path, always returns a buffer (may recycle a slot with unread messages).
 
 **Phase 2: Publish**
 
@@ -228,9 +228,56 @@ Internally, `ActivateSlotAndGetAnother`:
 
 ### 4.5 Retirement Notifications
 
-If `notify_retirement` is set, the publisher receives a pipe file descriptor. When a slot is fully retired (all subscribers have released it), the slot ID is written to this pipe. The publisher can poll `GetRetirementFd()` to learn which slots have been retired.
+If `notify_retirement` is set, the publisher receives a pipe file descriptor.
+When a slot is fully retired (all subscribers have released it), the slot ID is
+written to this pipe. A leased publication with no subscribers retires
+immediately. The publisher can poll `GetRetirementFd()` to learn which slots
+have been retired.
 
-### 4.6 On-Send Callback
+For an unreliable publisher, `notify_retirement_on_forced_reuse` controls
+whether overwriting an unread slot also emits a notification. The default is
+true for compatibility. Set it false when notifications drive external-resource
+lifetime or `ReclaimBufferLease()`, because a forced-reuse notification may
+refer to a slot that the publisher has already reused.
+
+### 4.6 Explicit Buffer Leases
+
+`AcquireBufferLease()` moves the publisher's current slot into an explicit
+`PublisherBufferLease`, or claims another slot when there is no current slot.
+The returned token contains the payload address, buffer size, slot ID, and a
+monotonic lease ID. The lease ID prevents a stale token from operating on the
+same slot after reuse.
+
+A publisher can own up to `max_outstanding_slot_leases` unpublished slots. The
+lease remains publisher-owned until one of these terminal operations:
+
+- `PublishBufferLease(lease, size)` activates the slot without implicitly
+  acquiring a replacement.
+- `ReleaseBufferLease(lease)` returns the unpublished slot to the retired pool.
+
+`ReclaimBufferLease(slot_id)` claims a specific retired slot reported through
+the retirement fd and assigns a new lease ID. `GetMetadata(lease)` returns the
+writable metadata span for a valid leased slot.
+
+Unlike `GetMessageBuffer()`, leases do not hold the thread-safe client's mutex
+across the producer's write interval. An empty successful lease means no slot
+is currently available. The application should wait for retirement and retry.
+The implicit and explicit workflows should not be mixed on one publisher.
+
+For unreliable channel admission, the server requires:
+
+```text
+sum(publisher.max_outstanding_slot_leases)
+  + sum(subscriber.max_active_messages)
+  <= num_slots - 1
+```
+
+This reserves enough capacity for every configured lease and active-message
+maximum, including users on virtual channels sharing a mux.
+
+See [Publisher Buffer Leases](publisher-buffer-leases.md) for examples.
+
+### 4.7 On-Send Callback
 
 `Publisher::SetOnSendCallback(callback)` registers a callback invoked just before publish. The callback receives the buffer pointer and message size, and returns the (possibly modified) message size. Returning an error aborts the publish.
 
@@ -243,9 +290,12 @@ If `notify_retirement` is set, the publisher receives a pipe file descriptor. Wh
 `Client::CreateSubscriber(channel_name, options)`:
 
 1. Sends a `CreateSubscriber` RPC to the server.
-2. If no publisher exists for the channel, a **placeholder** subscriber is created with `num_slots = 0`. The placeholder is automatically reloaded when a publisher appears (detected via SCB counter changes).
-3. Otherwise, the client maps CCB, BCB, and buffer shared memory. The subscriber registers itself in the CCB's subscriber bitset and initializes its `AvailableSlots` bitset.
-4. Trigger file descriptors are set up for poll-based notification.
+2. The server validates `max_subscribers`. The first subscriber establishes the
+   channel-level value; `0` means unlimited. Later subscribers must request the
+   same value and are rejected once a nonzero limit is reached.
+3. If no publisher exists for the channel, a **placeholder** subscriber is created with `num_slots = 0`. The placeholder is automatically reloaded when a publisher appears (detected via SCB counter changes).
+4. Otherwise, the client maps CCB, BCB, and buffer shared memory. The subscriber registers itself in the CCB's subscriber bitset and initializes its `AvailableSlots` bitset.
+5. Trigger file descriptors are set up for poll-based notification.
 
 ### 5.2 Reading Messages
 

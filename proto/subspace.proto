@@ -42,6 +42,7 @@ message CreatePublisherRequest {
   int32 max_publishers = 17;   // 0 means no explicit publisher limit.
   bool split_buffers_over_bridge = 18; // Remote bridge publisher uses split buffers.
   uint64 process_id = 19;      // Client process id for introspection.
+  int32 max_outstanding_slot_leases = 20; // Unpublished slots reserved by this publisher.
 }
 
 message CreatePublisherResponse {
@@ -74,6 +75,7 @@ message CreateSubscriberRequest {
   string mux = 8;
   int32 vchan_id = 9;
   uint64 process_id = 10; // Client process id for introspection.
+  int32 max_subscribers = 11; // 0 means no explicit subscriber limit.
 }
 
 message CreateSubscriberResponse {
@@ -488,6 +490,8 @@ message ShadowCreateChannel {
   bool has_max_publishers = 15;
   int32 max_publishers = 16;
   bool split_buffers_over_bridge = 17;
+  bool has_max_subscribers = 18;
+  int32 max_subscribers = 19;
   // FDs sent via SCM_RIGHTS: [ccb_fd, bcb_fd]
 }
 
@@ -505,6 +509,7 @@ message ShadowAddPublisher {
   bool is_fixed_size = 6;
   bool notify_retirement = 7;
   bool for_tunnel = 8;
+  int32 max_outstanding_slot_leases = 9;
   // FDs sent via SCM_RIGHTS: [poll_fd, trigger_fd]
   // If notify_retirement: also [retirement_read_fd, retirement_write_fd]
 }
@@ -559,4 +564,6 @@ message ShadowUpdateChannelOptions {
   bool has_max_publishers = 4;
   int32 max_publishers = 5;
   bool split_buffers_over_bridge = 6;
+  bool has_max_subscribers = 7;
+  int32 max_subscribers = 8;
 }
