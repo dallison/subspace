@@ -541,38 +541,61 @@ TEST_F(ClientTest, PublisherLeaseCapacityReservesSubscriberHeadroom) {
   Subscriber sub = EVAL_AND_ASSERT_OK(client.CreateSubscriber(
       "lease_capacity_exact", SubOpts().SetMaxActiveMessages(2)));
 
-  subspace::PublisherBufferLease lease1 =
-      EVAL_AND_ASSERT_OK(pub.AcquireBufferLease());
-  subspace::PublisherBufferLease lease2 =
-      EVAL_AND_ASSERT_OK(pub.AcquireBufferLease());
-  subspace::PublisherBufferLease lease3 =
-      EVAL_AND_ASSERT_OK(pub.AcquireBufferLease());
+  subspace::ScopedPublisherBufferLease lease1 =
+      EVAL_AND_ASSERT_OK(pub.AcquireScopedBufferLease());
+  subspace::ScopedPublisherBufferLease lease2 =
+      EVAL_AND_ASSERT_OK(pub.AcquireScopedBufferLease());
+  subspace::ScopedPublisherBufferLease lease3 =
+      EVAL_AND_ASSERT_OK(pub.AcquireScopedBufferLease());
   ASSERT_TRUE(lease1);
   ASSERT_TRUE(lease2);
   ASSERT_TRUE(lease3);
 
-  memcpy(lease1.buffer, "one", 3);
-  ASSERT_OK(pub.PublishBufferLease(lease1, 3));
+  memcpy(lease1.buffer(), "one", 3);
+  ASSERT_OK(lease1.Publish(3));
   Message message1 = EVAL_AND_ASSERT_OK(sub.ReadMessage());
   ASSERT_EQ(3, message1.length);
 
-  memcpy(lease2.buffer, "two", 3);
-  ASSERT_OK(pub.PublishBufferLease(lease2, 3));
+  memcpy(lease2.buffer(), "two", 3);
+  ASSERT_OK(lease2.Publish(3));
   Message message2 = EVAL_AND_ASSERT_OK(sub.ReadMessage());
   ASSERT_EQ(3, message2.length);
 
   // Two subscriber-held messages plus these three leases consume every usable
   // slot. Capacity admission guarantees both acquisitions still succeed.
-  subspace::PublisherBufferLease lease4 =
-      EVAL_AND_ASSERT_OK(pub.AcquireBufferLease());
-  subspace::PublisherBufferLease lease5 =
-      EVAL_AND_ASSERT_OK(pub.AcquireBufferLease());
+  subspace::ScopedPublisherBufferLease lease4 =
+      EVAL_AND_ASSERT_OK(pub.AcquireScopedBufferLease());
+  subspace::ScopedPublisherBufferLease lease5 =
+      EVAL_AND_ASSERT_OK(pub.AcquireScopedBufferLease());
   ASSERT_TRUE(lease4);
   ASSERT_TRUE(lease5);
+}
 
-  ASSERT_OK(pub.ReleaseBufferLease(lease3));
-  ASSERT_OK(pub.ReleaseBufferLease(lease4));
-  ASSERT_OK(pub.ReleaseBufferLease(lease5));
+TEST_F(ClientTest, ScopedPublisherLeaseReleasesOnDestruction) {
+  subspace::Client client;
+  InitClient(client);
+  Publisher pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "scoped_publisher_lease", PubOpts(64, 2).SetMaxOutstandingSlotLeases(1)));
+
+  {
+    subspace::ScopedPublisherBufferLease lease =
+        EVAL_AND_ASSERT_OK(pub.AcquireScopedBufferLease());
+    ASSERT_TRUE(lease);
+    EXPECT_EQ(lease.buffer_size(), 64);
+
+    auto unavailable = EVAL_AND_ASSERT_OK(pub.AcquireBufferLease());
+    EXPECT_FALSE(unavailable);
+
+    subspace::ScopedPublisherBufferLease moved(std::move(lease));
+    EXPECT_FALSE(lease);
+    EXPECT_TRUE(moved);
+  }
+
+  subspace::ScopedPublisherBufferLease lease =
+      EVAL_AND_ASSERT_OK(pub.AcquireScopedBufferLease());
+  EXPECT_TRUE(lease);
+  ASSERT_OK(lease.Release());
+  EXPECT_FALSE(lease);
 }
 
 TEST_F(ClientTest, PublisherLeaseCapacitySumsAcrossVirtualPublishers) {

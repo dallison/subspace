@@ -49,27 +49,36 @@ if (!pub_or.ok()) {
 }
 subspace::Publisher pub = *std::move(pub_or);
 
-auto lease_or = pub.AcquireBufferLease();
+auto lease_or = pub.AcquireScopedBufferLease();
 if (!lease_or.ok()) {
   return lease_or.status();
 }
-subspace::PublisherBufferLease lease = *lease_or;
+subspace::ScopedPublisherBufferLease lease = *std::move(lease_or);
 if (!lease) {
   // No slot is currently available. Retry after a retirement notification.
   return absl::UnavailableError("no publisher slot available");
 }
 
-std::memcpy(lease.buffer, payload, payload_size);
-absl::Span<std::byte> metadata = pub.GetMetadata(lease);
+std::memcpy(lease.buffer(), payload, payload_size);
+absl::Span<std::byte> metadata = lease.GetMetadata();
 // Fill metadata when configured.
 
-auto message_or = pub.PublishBufferLease(lease, payload_size);
+auto message_or = lease.Publish(payload_size);
 if (!message_or.ok()) {
   return message_or.status();
 }
 ```
 
-`PublisherBufferLease` contains:
+`ScopedPublisherBufferLease` automatically releases an active unpublished
+lease when it leaves scope. Successful `Publish()`, `PublishCopy()`, or
+`Release()` invalidates the scoped lease, so no additional cleanup is needed.
+It is movable but not copyable. The originating `Publisher` must not be moved
+or destroyed while one of its scoped leases is alive.
+
+Use `AcquireScopedBufferLease()` for any available slot and
+`ReclaimScopedBufferLease(slot_id)` for an exact retired slot. The low-level
+`AcquireBufferLease()` and `ReclaimBufferLease()` methods instead return a
+manually managed `PublisherBufferLease`, which contains:
 
 | Field | Meaning |
 | --- | --- |
@@ -84,6 +93,9 @@ query metadata with an old lease. To discard an unpublished buffer, call:
 ```cpp
 absl::Status status = pub.ReleaseBufferLease(lease);
 ```
+
+Prefer the scoped interface unless ownership must cross an API boundary that
+cannot carry the RAII object.
 
 ## Python Example
 
@@ -165,10 +177,11 @@ int32_t slot_id;
 ssize_t count =
     read(pub.GetRetirementFd().Fd(), &slot_id, sizeof(slot_id));
 if (count == sizeof(slot_id)) {
-  auto reclaimed_or = pub.ReclaimBufferLease(slot_id);
+  auto reclaimed_or = pub.ReclaimScopedBufferLease(slot_id);
   if (reclaimed_or.ok() && *reclaimed_or) {
-    subspace::PublisherBufferLease reclaimed = *reclaimed_or;
-    // reclaimed.slot_id is slot_id and reclaimed.lease_id is a new token.
+    subspace::ScopedPublisherBufferLease reclaimed =
+        *std::move(reclaimed_or);
+    // reclaimed.slot_id() is slot_id and reclaimed.lease_id() is a new token.
   }
 }
 ```

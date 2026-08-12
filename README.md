@@ -507,18 +507,25 @@ auto pub_or = client->CreatePublisher(
         .SetNotifyRetirementOnForcedReuse(false));
 auto pub = *std::move(pub_or);
 
-auto lease_or = pub.AcquireBufferLease();
+auto lease_or = pub.AcquireScopedBufferLease();
 if (!lease_or.ok() || !*lease_or) {
     // Error, or no slot is currently available.
     return;
 }
-subspace::PublisherBufferLease lease = *lease_or;
-std::memcpy(lease.buffer, payload, payload_size);
-auto metadata = pub.GetMetadata(lease);
+subspace::ScopedPublisherBufferLease lease = *std::move(lease_or);
+std::memcpy(lease.buffer(), payload, payload_size);
+auto metadata = lease.GetMetadata();
 
-auto status = pub.PublishBufferLease(lease, payload_size);
-// Or discard an unpublished lease with pub.ReleaseBufferLease(lease).
+auto status = lease.Publish(payload_size);
+// Or call lease.Release(). If neither is called, destruction releases it.
 ```
+
+`ScopedPublisherBufferLease` is the recommended C++ interface. It releases an
+active unpublished lease when it leaves scope, and successful `Publish()`,
+`PublishCopy()`, or `Release()` invalidates it. The originating `Publisher`
+must not be moved or destroyed while its scoped leases are alive. The raw
+`PublisherBufferLease` API remains available for integrations that manage the
+lifecycle themselves.
 
 The Python API exposes the same lifecycle with a writable staging
 `memoryview`. The requested bytes are copied into the leased shared-memory
@@ -578,6 +585,9 @@ public:
     absl::StatusOr<const Message> PublishMessage(int64_t message_size);
 
     // Explicit unpublished-slot leases
+    absl::StatusOr<ScopedPublisherBufferLease> AcquireScopedBufferLease();
+    absl::StatusOr<ScopedPublisherBufferLease> ReclaimScopedBufferLease(
+        int32_t slot_id);
     absl::StatusOr<PublisherBufferLease> AcquireBufferLease();
     absl::StatusOr<PublisherBufferLease> ReclaimBufferLease(int32_t slot_id);
     absl::StatusOr<const Message> PublishBufferLease(

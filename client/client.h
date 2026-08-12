@@ -263,6 +263,47 @@ struct PublisherBufferLease {
   }
 };
 
+// RAII owner for an explicitly leased publisher slot. Unless the lease is
+// published or explicitly released first, destruction releases it back to the
+// publisher. The Publisher must not be moved or destroyed while one of its
+// scoped leases is alive.
+class ScopedPublisherBufferLease {
+public:
+  ScopedPublisherBufferLease() = default;
+  ~ScopedPublisherBufferLease();
+
+  ScopedPublisherBufferLease(const ScopedPublisherBufferLease &) = delete;
+  ScopedPublisherBufferLease &
+  operator=(const ScopedPublisherBufferLease &) = delete;
+  ScopedPublisherBufferLease(ScopedPublisherBufferLease &&other) noexcept;
+  ScopedPublisherBufferLease &
+  operator=(ScopedPublisherBufferLease &&other) = delete;
+
+  explicit operator bool() const {
+    return publisher_ != nullptr && static_cast<bool>(lease_);
+  }
+  void *buffer() const { return lease_.buffer; }
+  size_t buffer_size() const { return lease_.buffer_size; }
+  int32_t slot_id() const { return lease_.slot_id; }
+  uint64_t lease_id() const { return lease_.lease_id; }
+  absl::Span<std::byte> GetMetadata();
+  absl::StatusOr<const Message> Publish(int64_t message_size);
+  absl::StatusOr<const Message> PublishCopy(absl::Span<const std::byte> payload);
+  absl::Status Release();
+
+private:
+  friend class Publisher;
+  ScopedPublisherBufferLease(Publisher *publisher, PublisherBufferLease lease)
+      : publisher_(publisher), lease_(lease) {}
+  void Invalidate() {
+    publisher_ = nullptr;
+    lease_ = {};
+  }
+
+  Publisher *publisher_ = nullptr;
+  PublisherBufferLease lease_;
+};
+
 // This is an Subspace client.  It must be initialized by calling Init()
 // before it can be used.  The Init() function connects it to an Subspace
 // server that is listening on the same Unix Domain Socket.
@@ -893,9 +934,26 @@ public:
     return client_->AcquirePublisherBuffer(impl_.get());
   }
 
+  absl::StatusOr<ScopedPublisherBufferLease> AcquireScopedBufferLease() & {
+    auto lease = AcquireBufferLease();
+    if (!lease.ok()) {
+      return lease.status();
+    }
+    return ScopedPublisherBufferLease(this, *lease);
+  }
+
   // Reclaim a specific slot reported by the retirement fd.
   absl::StatusOr<PublisherBufferLease> ReclaimBufferLease(int32_t slot_id) {
     return client_->ReclaimPublisherBuffer(impl_.get(), slot_id);
+  }
+
+  absl::StatusOr<ScopedPublisherBufferLease>
+  ReclaimScopedBufferLease(int32_t slot_id) & {
+    auto lease = ReclaimBufferLease(slot_id);
+    if (!lease.ok()) {
+      return lease.status();
+    }
+    return ScopedPublisherBufferLease(this, *lease);
   }
 
   absl::StatusOr<const Message>
@@ -1200,6 +1258,61 @@ private:
   std::function<absl::Status(Publisher *, int, int)> resize_callback_ = nullptr;
   std::vector<void *> address_cache_;
 };
+
+inline ScopedPublisherBufferLease::~ScopedPublisherBufferLease() {
+  Release().IgnoreError();
+}
+
+inline ScopedPublisherBufferLease::ScopedPublisherBufferLease(
+    ScopedPublisherBufferLease &&other) noexcept
+    : publisher_(other.publisher_), lease_(other.lease_) {
+  other.Invalidate();
+}
+
+inline absl::Span<std::byte> ScopedPublisherBufferLease::GetMetadata() {
+  if (!*this) {
+    return {};
+  }
+  return publisher_->GetMetadata(lease_);
+}
+
+inline absl::StatusOr<const Message>
+ScopedPublisherBufferLease::Publish(int64_t message_size) {
+  if (!*this) {
+    return absl::FailedPreconditionError(
+        "publisher buffer lease is not active");
+  }
+  auto result = publisher_->PublishBufferLease(lease_, message_size);
+  if (result.ok()) {
+    Invalidate();
+  }
+  return result;
+}
+
+inline absl::StatusOr<const Message>
+ScopedPublisherBufferLease::PublishCopy(
+    absl::Span<const std::byte> payload) {
+  if (!*this) {
+    return absl::FailedPreconditionError(
+        "publisher buffer lease is not active");
+  }
+  auto result = publisher_->PublishBufferLeaseCopy(lease_, payload);
+  if (result.ok()) {
+    Invalidate();
+  }
+  return result;
+}
+
+inline absl::Status ScopedPublisherBufferLease::Release() {
+  if (!*this) {
+    return absl::OkStatus();
+  }
+  absl::Status status = publisher_->ReleaseBufferLease(lease_);
+  if (status.ok()) {
+    Invalidate();
+  }
+  return status;
+}
 
 class Subscriber {
 public:
