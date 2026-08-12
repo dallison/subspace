@@ -169,8 +169,8 @@ const ActiveSlot *SubscriberImpl::FindUnseenOrdinal() {
       cached_vchan_id = s.vchan_id;
       cached_tracker = &GetOrdinalTracker(s.vchan_id);
     }
-    if (s.ordinal > cached_tracker->last_ordinal_seen &&
-        !cached_tracker->ordinals.Contains(OrdinalAndVchanId{s.ordinal, s.vchan_id})) {
+    if (!cached_tracker->ordinals.Contains(
+            OrdinalAndVchanId{s.ordinal, s.vchan_id})) {
       // std::cerr << absl::StrFormat("Found unseen ordinal %d in slot %d\n", s.ordinal, s.slot->id);
       return &s;
     }
@@ -387,7 +387,8 @@ MessageSlot *SubscriberImpl::FindNextVisibleSlot(InPlaceAtomicBitset &bits,
       cached_vchan_id = slot_vchan_id;
       cached_tracker = &GetOrdinalTracker(slot_vchan_id);
     }
-    if (ordinal <= cached_tracker->last_ordinal_seen) {
+    if (cached_tracker->ordinals.Contains(
+            OrdinalAndVchanId{ordinal, slot_vchan_id})) {
       return;
     }
     if (best_slot == nullptr || ordinal < best_ordinal) {
@@ -576,8 +577,11 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
         cached_vchan_id = s.vchan_id;
         cached_tracker = &GetOrdinalTracker(s.vchan_id);
       }
-      if (s.ordinal > cached_tracker->last_ordinal_seen &&
-          !cached_tracker->ordinals.Contains(
+      // Concurrent publishers can reserve ordinals in one order and publish
+      // them in another. The bitset is the authoritative unread-message
+      // record, so an older ordinal remains deliverable until its exact
+      // ordinal has been claimed.
+      if (!cached_tracker->ordinals.Contains(
               OrdinalAndVchanId{s.ordinal, s.vchan_id})) {
         new_slot = &s;
         break;

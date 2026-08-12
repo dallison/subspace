@@ -2425,10 +2425,13 @@ TEST_F(ClientTest, PublishConcurrentlyFromOneClientToOneSubscriber) {
   ASSERT_OK(pub_client.Init(Socket()));
   for (int i = 0; i < kNumPublishers; ++i) {
     absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-        channel_name, PubOpts(256, 2 * kNumPublishers + 16));
+        channel_name,
+        PubOpts(256, 2 * kNumPublishers + 16)
+            .SetSubscriberQueueArenaSize(0));
     ASSERT_OK(pub) << pub.status();
     pubs.emplace_back(std::move(*pub));
   }
+  ASSERT_EQ(0, sub.SubscriberQueueSize());
 
   std::vector<std::thread> pub_threads;
   pub_threads.reserve(kNumPublishers);
@@ -2497,7 +2500,9 @@ TEST_F(ClientTest, PublishConcurrentlyToOneSubscriber) {
       }
       ASSERT_TRUE(connected);
       absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
-          channel_name, PubOpts(256, 2 * kNumPublishers + 16));
+          channel_name,
+          PubOpts(256, 2 * kNumPublishers + 16)
+              .SetSubscriberQueueArenaSize(0));
       ASSERT_OK(pub) << pub.status();
       std::array<char, 16> msg = {};
       auto size = std::snprintf(msg.data(), msg.size(), "M%d", i);
@@ -2516,6 +2521,7 @@ TEST_F(ClientTest, PublishConcurrentlyToOneSubscriber) {
   for (auto &t : pub_threads) {
     t.join();
   }
+  ASSERT_EQ(0, sub.SubscriberQueueSize());
 
   std::vector<std::string> all_recv_msgs;
   all_recv_msgs.reserve(kNumPublishers);
