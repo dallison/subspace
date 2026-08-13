@@ -8,6 +8,8 @@
 #include "common/fast_ring_buffer.h"
 #include <cstring>
 #include <mutex>
+#include <optional>
+#include <utility>
 
 namespace subspace {
 namespace details {
@@ -32,6 +34,12 @@ struct OrdinalAndVchanId {
   }
 };
 
+struct ClaimedQueuedSlot {
+  MessageSlot *slot = nullptr;
+  uint64_t ordinal = 0;
+  int vchan_id = -1;
+};
+
 template <typename H> inline H AbslHashValue(H h, const OrdinalAndVchanId &x) {
   return H::combine(std::move(h), x.ordinal, x.vchan_id);
 }
@@ -40,21 +48,27 @@ template <typename H> inline H AbslHashValue(H h, const OrdinalAndVchanId &x) {
 // shared memory.
 class SubscriberImpl : public ClientChannel {
 public:
-  SubscriberImpl(const std::string &name, int num_slots, int channel_id,
-                 int subscriber_id, int vchan_id, uint64_t session_id,
-                 std::string type, const SubscriberOptions &options,
+  SubscriberImpl(const std::string &name, int num_slots,
+                 int default_subscriber_queue_size,
+                 uint64_t subscriber_queue_arena_size,
+                 int subscriber_queue_size, int channel_id, int subscriber_id,
+                 int vchan_id, uint64_t session_id, std::string type,
+                 const SubscriberOptions &options,
                  std::function<bool(Channel *)> reload, int user_id,
                  int group_id)
-      : ClientChannel(name, num_slots, channel_id, vchan_id,
+      : ClientChannel(name, num_slots, default_subscriber_queue_size,
+                      subscriber_queue_arena_size, channel_id, vchan_id,
                       std::move(session_id), std::move(type), std::move(reload),
                       user_id, group_id),
-        subscriber_id_(subscriber_id), options_(options) {
+        subscriber_id_(subscriber_id),
+        subscriber_queue_size_(subscriber_queue_size), options_(options) {
     // Preallocate to avoid malloc later.
     (void)GetOrdinalTracker(vchan_id_);
   }
   ~SubscriberImpl() override { Unmap(); }
 
   void InitActiveMessages();
+  void ResetDeliveryState();
   bool UsesSplitBuffers() const { return UseSplitBuffers(); }
 
   std::shared_ptr<SubscriberImpl> shared_from_this() {
@@ -63,13 +77,23 @@ public:
   }
 
   int64_t CurrentOrdinal() const {
-    return CurrentSlot() == nullptr ? -1 : CurrentSlot()->ordinal;
+    return CurrentSlot() == nullptr
+               ? -1
+               : static_cast<int64_t>(
+                     CurrentSlot()->ordinal.load(std::memory_order_relaxed));
   }
   int64_t Timestamp() const { return Timestamp(CurrentSlot()); }
   int64_t Timestamp(MessageSlot *slot) const {
-    return slot == nullptr ? 0 : slot->timestamp;
+    return slot == nullptr
+               ? 0
+               : static_cast<int64_t>(
+                     slot->timestamp.load(std::memory_order_relaxed));
   }
   bool IsReliable() const { return options_.IsReliable(); }
+  int SubscriberQueueSize() const override { return subscriber_queue_size_; }
+  void SetEffectiveSubscriberQueueSize(int size) {
+    subscriber_queue_size_ = ResolveSubscriberQueueSize(NumSlots(), size);
+  }
 
   int32_t SlotSize() const { return ClientChannel::SlotSize(CurrentSlot()); }
 
@@ -97,12 +121,20 @@ public:
   void ClaimSlot(MessageSlot *slot, int vchan_id, bool was_newest);
   void UnreadSlot(MessageSlot *slot);
   void RememberOrdinal(uint64_t ordinal, int vchan_id);
-  void CollectVisibleSlots(InPlaceAtomicBitset &bits);
+  uint64_t CollectVisibleSlots(InPlaceAtomicBitset &bits);
+  std::optional<ClaimedQueuedSlot>
+  FindNextQueuedSlot(uint64_t max_queue_position);
+  MessageSlot *FindNextVisibleSlot(InPlaceAtomicBitset &bits,
+                                   uint64_t max_ordinal);
 
   void IgnoreActivation(MessageSlot *slot) {
-    RememberOrdinal(slot->ordinal, slot->vchan_id);
+    RememberOrdinal(slot->ordinal.load(std::memory_order_relaxed),
+                    slot->vchan_id.load(std::memory_order_relaxed));
     DecrementSlotRef(slot, true);
-    slot->flags |= kMessageSeen;
+    slot->flags.fetch_or(kMessageSeen, std::memory_order_relaxed);
+    if (IsReliable()) {
+      slot->flags.fetch_or(kMessageSeenByReliable, std::memory_order_relaxed);
+    }
   }
   // A subscriber wants to find a slot with a message in it.  There are
   // two ways to get this:
@@ -141,12 +173,14 @@ public:
   }
 
   void DecrementSlotRef(MessageSlot *slot, bool retire) {
-    AtomicIncRefCount(slot, IsReliable(), -1, slot->ordinal & kOrdinalMask,
-                      vchan_id_, retire);
+    AtomicIncRefCount(slot, IsReliable(), -1,
+                      slot->ordinal.load(std::memory_order_relaxed) &
+                          kOrdinalMask,
+                      slot->vchan_id.load(std::memory_order_relaxed), retire);
   }
 
   bool SlotExpired(MessageSlot *slot, uint32_t ordinal) {
-    return slot->ordinal != ordinal;
+    return slot->ordinal.load(std::memory_order_relaxed) != ordinal;
   }
 
   std::shared_ptr<ActiveMessage> LockWeakMessage(MessageSlot *slot,
@@ -154,7 +188,7 @@ public:
     if (slot == nullptr) {
       return nullptr;
     }
-    if (slot->ordinal != ordinal) {
+    if (slot->ordinal.load(std::memory_order_relaxed) != ordinal) {
       return nullptr;
     }
     // If we are still holding on to the same active message, return it.
@@ -163,8 +197,10 @@ public:
       return active_message_;
     }
     std::shared_ptr<ActiveMessage> &msg = active_messages_[slot->id];
-    msg->Set(slot->message_size, GetBufferAddress(slot), slot->ordinal,
-               Timestamp(slot), slot->vchan_id, false, false);
+    msg->Set(slot->message_size.load(std::memory_order_relaxed),
+             GetBufferAddress(slot),
+             slot->ordinal.load(std::memory_order_relaxed), Timestamp(slot),
+             slot->vchan_id.load(std::memory_order_relaxed), false, false);
     if (msg->length == 0) {
       // Failed to get an active message, return an empty shared_ptr.
       return nullptr;
@@ -173,6 +209,9 @@ public:
   }
 
   int DetectDrops(int vchan_id);
+  int ConsumeQueueDrops() {
+    return std::exchange(pending_queue_drops_, 0);
+  }
 
   // Search the active list for a message with the given timestamp.  If found,
   // take ownership of the slot found.  Return nullptr if nothing found in which
@@ -303,6 +342,8 @@ private:
     // stable snapshot and cannot be kept chasing concurrently published
     // messages forever.
     poll_drain_pending_ = true;
+    poll_drain_exhausted_ = false;
+    queue_drain_tail_valid_ = false;
     next_slot_cache_valid_ = false;
     return trigger_.GetPollFd();
   }
@@ -326,6 +367,7 @@ private:
   }
 
   int subscriber_id_;
+  int subscriber_queue_size_ = 0;
   toolbelt::TriggerFd trigger_;
   std::vector<toolbelt::TriggerFd> reliable_publishers_;
   SubscriberOptions options_;
@@ -336,6 +378,10 @@ private:
   // will keep the memory allocation to the first search on a subscriber.  Most
   // subscribers won't use this.
   std::vector<ActiveSlot> search_buffer_;
+  // Generation snapshots skipped by a successful ReadNewest. ClaimSlot
+  // temporarily pins each entry before clearing its bit so a concurrent slot
+  // recycle cannot have its newly published bit cleared.
+  std::vector<ActiveSlot> newest_snapshot_;
 
   // We have one active message per slot.  These are allocated when the
   // subscriber is created to avoid memory allocation for every message we
@@ -372,6 +418,14 @@ private:
   size_t next_slot_cursor_ = 0;
   bool next_slot_cache_valid_ = false;
   bool poll_drain_pending_ = false;
+  bool poll_drain_exhausted_ = false;
+  // Queue overflow can remove an older hint while its slot is still readable.
+  // Stay on the ordered bitset path until that retained backlog is exhausted,
+  // otherwise a newer queue entry would advance last_ordinal_seen past it.
+  bool queue_bitset_fallback_ = false;
+  int pending_queue_drops_ = 0;
+  uint64_t queue_drain_tail_ = 0;
+  bool queue_drain_tail_valid_ = false;
 };
 } // namespace details
 } // namespace subspace

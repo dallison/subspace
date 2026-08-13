@@ -14,6 +14,7 @@
 #include "toolbelt/fd.h"
 #include "toolbelt/sockets.h"
 #include <fcntl.h>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -155,7 +156,8 @@ public:
                   bool fixed_size = false, const std::string &mux = "",
                   int vchan_id = 0, bool for_tunnel = false,
                   bool notify_retirement = false, int checksum_size = 0,
-                  int metadata_size = 0, int max_publishers = 0) {
+                  int metadata_size = 0, int max_publishers = 0,
+                  uint64_t subscriber_queue_arena_size = 0) {
     subspace::Request req;
     auto *cmd = req.mutable_create_publisher();
     cmd->set_channel_name(channel);
@@ -172,6 +174,7 @@ public:
     cmd->set_checksum_size(checksum_size);
     cmd->set_metadata_size(metadata_size);
     cmd->set_max_publishers(max_publishers);
+    cmd->set_subscriber_queue_arena_size(subscriber_queue_arena_size);
     cmd->set_publisher_id(-1);
     auto result = Send(req);
     return std::move(*result);
@@ -182,7 +185,8 @@ public:
   CreateSubscriber(const std::string &channel,
                    const std::string &type = "", bool reliable = false,
                    int max_active_messages = 4, const std::string &mux = "",
-                   int vchan_id = 0, bool for_tunnel = false) {
+                   int vchan_id = 0, bool for_tunnel = false,
+                   int subscriber_queue_size = 0) {
     subspace::Request req;
     auto *cmd = req.mutable_create_subscriber();
     cmd->set_channel_name(channel);
@@ -193,6 +197,7 @@ public:
     cmd->set_mux(mux);
     cmd->set_vchan_id(vchan_id);
     cmd->set_for_tunnel(for_tunnel);
+    cmd->set_subscriber_queue_size(subscriber_queue_size);
     auto result = Send(req);
     return std::move(*result);
   }
@@ -323,6 +328,74 @@ TEST_F(ServerTest, PubNumSlotsIncrease) {
   auto [resp, fds] = conn.CreatePublisher("slots_ch", 64, 8);
   EXPECT_THAT(resp.create_publisher().error(),
               ::testing::HasSubstr("more slots"));
+}
+
+TEST_F(ServerTest, PubSubscriberQueueArenaSizeMismatchFromDisabled) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  conn.CreatePublisher("queue_size_disabled_ch", 64, 4);
+  auto [resp, fds] = conn.CreatePublisher(
+      "queue_size_disabled_ch", 64, 4, "", false, true, false, "", 0, false,
+      false, 0, 0, 0, /*subscriber_queue_arena_size=*/8000);
+  EXPECT_THAT(resp.create_publisher().error(),
+              ::testing::HasSubstr("subscriber queue arena size"));
+}
+
+TEST_F(ServerTest, PubSubscriberQueueArenaSizeTooLarge) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  auto [resp, fds] = conn.CreatePublisher(
+      "queue_size_too_large", 64, 4, "", false, true, false, "", 0, false,
+      false, 0, 0, 0,
+      /*subscriber_queue_arena_size=*/
+      subspace::kMaxChannelControlBlockSize + 1);
+  EXPECT_THAT(resp.create_publisher().error(),
+              ::testing::HasSubstr("channel control block exceeds"));
+}
+
+TEST_F(ServerTest, PubCcbSizeLimitIsEnforced) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  auto [resp, fds] =
+      conn.CreatePublisher("ccb_too_large", 64,
+                           std::numeric_limits<int>::max());
+  EXPECT_THAT(resp.create_publisher().error(),
+              ::testing::HasSubstr("channel control block limit"));
+}
+
+TEST_F(ServerTest, PubSubscriberQueueArenaSizeMismatchToDisabled) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  conn.CreatePublisher("queue_size_enabled_ch", 64, 4, "", false, true, false,
+                       "", 0, false, false, 0, 0, 0,
+                       /*subscriber_queue_arena_size=*/8000);
+  auto [resp, fds] = conn.CreatePublisher("queue_size_enabled_ch", 64, 4);
+  EXPECT_THAT(resp.create_publisher().error(),
+              ::testing::HasSubstr("subscriber queue arena size"));
+}
+
+TEST_F(ServerTest, PubSubscriberQueueArenaSizeMismatchForMux) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  conn.CreatePublisher("queue_size_vchan1", 64, 4, "", false, true, false,
+                       "/queue_size_mux", 0, false, false, 0, 0, 0,
+                       /*subscriber_queue_arena_size=*/8000);
+  auto [resp, fds] = conn.CreatePublisher(
+      "queue_size_vchan2", 64, 4, "", false, true, false, "/queue_size_mux",
+      1, false, false, 0, 0, 0,
+      /*subscriber_queue_arena_size=*/16000);
+  EXPECT_THAT(resp.create_publisher().error(),
+              ::testing::HasSubstr("subscriber queue arena size"));
 }
 
 TEST_F(ServerTest, PubSlotSizeIncreaseOnFixedSize) {
@@ -508,6 +581,32 @@ TEST_F(ServerTest, PubVirtualRetirementNotSupported) {
 // ---------------------------------------------------------------------------
 // CreateSubscriber error paths
 // ---------------------------------------------------------------------------
+
+TEST_F(ServerTest, SubNegativeSubscriberQueueSize) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  conn.CreatePublisher("sub_negative_queue_size", 64, 4);
+  auto [resp, fds] = conn.CreateSubscriber(
+      "sub_negative_queue_size", "", false, 4, "", 0, false,
+      /*subscriber_queue_size=*/-1);
+  EXPECT_THAT(resp.create_subscriber().error(),
+              ::testing::HasSubstr("subscriber_queue_size must be >= 0"));
+}
+
+TEST_F(ServerTest, SubQueueSizeTooLarge) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  conn.CreatePublisher("sub_queue_size_too_large", 64, 4);
+  auto [resp, fds] = conn.CreateSubscriber(
+      "sub_queue_size_too_large", "", false, 4, "", 0, false,
+      /*subscriber_queue_size=*/1025);
+  EXPECT_THAT(resp.create_subscriber().error(),
+              ::testing::HasSubstr("subscriber_queue_size must be <= 1024"));
+}
 
 TEST_F(ServerTest, SubTypeMismatch) {
   RawConnection conn;

@@ -282,6 +282,7 @@ TEST_F(ClientTest, CreatePublisherThenSubscriber) {
   ASSERT_NE(nullptr, client.client);
 
   SubspacePublisherOptions pub_opts = CPublisherOptionsDefault(256, 10);
+  ASSERT_EQ(0, pub_opts.subscriber_queue_arena_size);
   pub_opts.type.type = "foo";
   pub_opts.type.type_length = strlen(pub_opts.type.type);
   SubspacePublisher pub = subspace_create_publisher(client, "dave1", pub_opts);
@@ -300,6 +301,9 @@ TEST_F(ClientTest, CreatePublisherThenSubscriber) {
       subspace_create_subscriber(client, "dave1", CSubscriberOptionsDefault());
   ASSERT_NE(nullptr, sub.subscriber);
   ASSERT_FALSE(subspace_has_error());
+  ASSERT_EQ(0, subspace_get_publisher_queue_size(pub));
+  ASSERT_EQ(0, subspace_get_publisher_queue_arena_size(pub));
+  ASSERT_EQ(0, subspace_get_subscriber_queue_size(sub));
 
   ASSERT_TRUE(subspace_remove_subscriber(&sub));
   ASSERT_TRUE(subspace_remove_publisher(&pub));
@@ -537,6 +541,7 @@ TEST_F(ClientTest, ExplicitSplitBufferLeasesRetireAndReclaimExactSlot) {
   pub_opts.notify_retirement = true;
   pub_opts.notify_retirement_on_forced_reuse = false;
   pub_opts.max_outstanding_slot_leases = 3;
+  pub_opts.subscriber_queue_arena_size = 64'000;
   pub_opts.metadata_size = 8;
   pub_opts.split_callbacks = {
       .allocate = TestCSplitAllocate,
@@ -550,11 +555,13 @@ TEST_F(ClientTest, ExplicitSplitBufferLeasesRetireAndReclaimExactSlot) {
   ASSERT_NE(nullptr, pub.publisher) << subspace_get_last_error();
 
   SubspaceSubscriberOptions sub_opts = subspace_subscriber_options_default();
+  sub_opts.subscriber_queue_size = 4;
   sub_opts.max_active_messages = 2;
   sub_opts.split_callbacks = pub_opts.split_callbacks;
   SubspaceSubscriber sub =
       subspace_create_subscriber(sub_client, "c_explicit_leases", sub_opts);
   ASSERT_NE(nullptr, sub.subscriber) << subspace_get_last_error();
+  EXPECT_EQ(4, subspace_get_subscriber_queue_size(sub));
 
   SubspacePublisherBufferLease leases[3];
   for (int i = 0; i < 3; ++i) {
@@ -913,11 +920,13 @@ TEST_F(ClientTest, ClientPublisherSubscriberIntrospection) {
   pub_opts.mux = mux;
   pub_opts.mux_length = strlen(mux);
   pub_opts.metadata_size = 8;
+  pub_opts.subscriber_queue_arena_size = 12'000;
   SubspacePublisher pub =
       subspace_create_publisher(client, "c_introspection", pub_opts);
   ASSERT_NE(nullptr, pub.publisher);
 
   SubspaceSubscriberOptions sub_opts = CSubscriberOptionsDefault();
+  sub_opts.subscriber_queue_size = 4;
   sub_opts.type.type = type;
   sub_opts.type.type_length = strlen(type);
   sub_opts.mux = mux;
@@ -968,6 +977,8 @@ TEST_F(ClientTest, ClientPublisherSubscriberIntrospection) {
   ASSERT_FALSE(subspace_is_publisher_for_tunnel(pub));
   ASSERT_EQ(192, subspace_get_publisher_slot_size(pub));
   ASSERT_EQ(6, subspace_get_publisher_num_slots(pub));
+  ASSERT_EQ(16, subspace_get_publisher_queue_size(pub));
+  ASSERT_EQ(12'000, subspace_get_publisher_queue_arena_size(pub));
   ASSERT_TRUE(SubspaceStringEquals(subspace_get_publisher_name(pub),
                                    "c_introspection"));
   ASSERT_TRUE(SubspaceStringEquals(subspace_get_publisher_type(pub), type));
@@ -992,6 +1003,7 @@ TEST_F(ClientTest, ClientPublisherSubscriberIntrospection) {
   ASSERT_EQ(0, subspace_get_subscriber_num_active_messages(sub));
   ASSERT_EQ(8, subspace_get_subscriber_metadata_size(sub));
   ASSERT_EQ(4, subspace_get_subscriber_checksum_size(sub));
+  ASSERT_EQ(4, subspace_get_subscriber_queue_size(sub));
   ASSERT_GE(subspace_get_subscriber_prefix_size(sub), 64);
   ASSERT_GE(subspace_get_subscriber_virtual_memory_usage(sub), 0U);
 
@@ -1606,8 +1618,11 @@ TEST_F(ClientTest, InvalidArgumentsReportErrors) {
   ASSERT_EQ(-1, subspace_get_publisher_retirement_fd(invalid_publisher));
   ASSERT_EQ(0, subspace_get_subscriber_slot_size(invalid_subscriber));
   ASSERT_EQ(0, subspace_get_subscriber_num_slots(invalid_subscriber));
+  ASSERT_EQ(0, subspace_get_subscriber_queue_size(invalid_subscriber));
   ASSERT_EQ(0, subspace_get_publisher_slot_size(invalid_publisher));
   ASSERT_EQ(0, subspace_get_publisher_num_slots(invalid_publisher));
+  ASSERT_EQ(0, subspace_get_publisher_queue_size(invalid_publisher));
+  ASSERT_EQ(0, subspace_get_publisher_queue_arena_size(invalid_publisher));
   ASSERT_EQ(0, subspace_get_publisher_metadata_size(invalid_publisher));
   ASSERT_EQ(0, subspace_get_subscriber_metadata_size(invalid_subscriber));
   ASSERT_EQ(0, subspace_get_publisher_prefix_size(invalid_publisher));

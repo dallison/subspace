@@ -12,15 +12,15 @@ use crate::split_buffer::{
     read_split_buffer_metadata_file, split_buffer_object_name, write_split_buffer_metadata_file,
     SplitBufferMetadata,
 };
-use crate::syscall_shim::{
-    shim_close, shim_fstat, shim_ftruncate, shim_open, shim_read, shim_write,
-};
+#[cfg(target_os = "linux")]
+use crate::syscall_shim::shim_fstat;
+use crate::syscall_shim::{shim_close, shim_ftruncate, shim_open, shim_read, shim_write};
 use nix::fcntl::OFlag;
 use nix::sys::mman::ProtFlags;
 use nix::sys::stat::Mode;
 use std::collections::HashMap;
 use std::os::unix::io::RawFd;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 pub type OnSendCallback = Box<dyn Fn(*mut u8, i64) -> Result<i64> + Send + Sync>;
 pub type ResizeCallback = Box<dyn Fn(i32, i32) -> Result<()> + Send + Sync>;
@@ -31,10 +31,37 @@ pub struct PublishedMessage {
     pub timestamp: u64,
 }
 
+struct SubscriberQueuePublishGuard<'a> {
+    channel: &'a Channel,
+    publisher_id: usize,
+    local_depth: &'a AtomicU32,
+}
+
+impl<'a> SubscriberQueuePublishGuard<'a> {
+    fn new(channel: &'a Channel, publisher_id: usize, local_depth: &'a AtomicU32) -> Self {
+        local_depth.fetch_add(1, Ordering::SeqCst);
+        channel.begin_subscriber_queue_publish(publisher_id);
+        Self {
+            channel,
+            publisher_id,
+            local_depth,
+        }
+    }
+}
+
+impl Drop for SubscriberQueuePublishGuard<'_> {
+    fn drop(&mut self) {
+        self.channel
+            .end_subscriber_queue_publish(self.publisher_id);
+        self.local_depth.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 pub struct PublisherImpl {
     pub channel: Channel,
     pub publisher_id: i32,
     pub options: PublisherOptions,
+    pub active_queue_publish_depth: AtomicU32,
 
     pub subscriber_trigger_fds: Vec<RawFd>,
     pub poll_fd: RawFd,
@@ -53,6 +80,8 @@ impl PublisherImpl {
     pub fn new(
         name: String,
         num_slots: i32,
+        subscriber_queue_size: i32,
+        subscriber_queue_arena_size: u64,
         channel_id: i32,
         publisher_id: i32,
         vchan_id: i32,
@@ -64,6 +93,8 @@ impl PublisherImpl {
             channel: Channel::new(
                 name,
                 num_slots,
+                subscriber_queue_size,
+                subscriber_queue_arena_size,
                 channel_id,
                 channel_type,
                 vchan_id,
@@ -71,6 +102,7 @@ impl PublisherImpl {
             ),
             publisher_id,
             options,
+            active_queue_publish_depth: AtomicU32::new(0),
             subscriber_trigger_fds: Vec::new(),
             poll_fd: -1,
             trigger_fd: -1,
@@ -192,7 +224,7 @@ impl PublisherImpl {
                 return None;
             }
             let expected = build_refs_bit_field(
-                (*slot_ptr).ordinal,
+                (*slot_ptr).ordinal(),
                 ((old_refs >> VCHAN_ID_SHIFT) & VCHAN_ID_MASK) as i32,
                 ((old_refs >> RETIRED_REFS_SHIFT) & RETIRED_REFS_MASK) as i32,
             );
@@ -212,10 +244,10 @@ impl PublisherImpl {
 
         self.channel.retired_slots().clear(slot_idx);
         let vchan_id = self.channel.vchan_id;
-        let slot = self.channel.slot_mut(slot_idx);
-        slot.ordinal = 0;
-        slot.timestamp = 0;
-        slot.vchan_id = vchan_id as i16;
+        let slot = self.channel.slot_ref(slot_idx);
+        slot.set_ordinal(0);
+        slot.set_timestamp(0);
+        slot.set_vchan_id(vchan_id as i16);
         self.channel.set_slot_to_biggest_buffer(slot_idx);
 
         let prefix = self.channel.get_prefix(slot_idx);
@@ -237,9 +269,9 @@ impl PublisherImpl {
         {
             return false;
         }
-        let slot = self.channel.slot_mut(slot_idx);
-        slot.ordinal = 0;
-        slot.timestamp = 0;
+        let slot = self.channel.slot_ref(slot_idx);
+        slot.set_ordinal(0);
+        slot.set_timestamp(0);
         slot.refs.store(0, Ordering::Release);
         self.channel.ccb().subscribers.traverse(|sub_id| {
             self.channel.get_available_slots(sub_id).clear(slot_idx);
@@ -315,9 +347,9 @@ impl PublisherImpl {
                     if (refs & PUB_OWNED) != 0 {
                         continue;
                     }
-                    if (refs & REFS_MASK) == 0 && s.timestamp < earliest_timestamp {
+                    if (refs & REFS_MASK) == 0 && s.timestamp() < earliest_timestamp {
                         slot_idx = Some(i);
-                        earliest_timestamp = s.timestamp;
+                        earliest_timestamp = s.timestamp();
                     }
                 }
             }
@@ -336,7 +368,7 @@ impl PublisherImpl {
                 let old_refs = (*slot_ptr).refs.load(Ordering::Relaxed);
                 let ref_val = PUB_OWNED | owner as u64;
                 let expected = build_refs_bit_field(
-                    (*slot_ptr).ordinal,
+                    (*slot_ptr).ordinal(),
                     ((old_refs >> VCHAN_ID_SHIFT) & VCHAN_ID_MASK) as i32,
                     ((old_refs >> RETIRED_REFS_SHIFT) & RETIRED_REFS_MASK) as i32,
                 );
@@ -363,10 +395,10 @@ impl PublisherImpl {
         }
 
         let si = slot_idx.unwrap();
-        let slot = self.channel.slot_mut(si);
-        slot.ordinal = 0;
-        slot.timestamp = 0;
-        slot.vchan_id = self.channel.vchan_id as i16;
+        let slot = self.channel.slot_ref(si);
+        slot.set_ordinal(0);
+        slot.set_timestamp(0);
+        slot.set_vchan_id(self.channel.vchan_id as i16);
         self.channel.set_slot_to_biggest_buffer(si);
 
         let prefix = self.channel.get_prefix(si);
@@ -428,9 +460,9 @@ impl PublisherImpl {
                     let s = self.channel.slot_ref(fs);
                     self.channel.active_slots.push(ActiveSlot {
                         slot_index: fs,
-                        ordinal: s.ordinal,
-                        timestamp: s.timestamp,
-                        vchan_id: s.vchan_id as i32,
+                        ordinal: s.ordinal(),
+                        timestamp: s.timestamp(),
+                        vchan_id: s.vchan_id() as i32,
                     });
                 }
             }
@@ -443,9 +475,9 @@ impl PublisherImpl {
                         let s = self.channel.slot_ref(rs);
                         self.channel.active_slots.push(ActiveSlot {
                             slot_index: rs,
-                            ordinal: s.ordinal,
-                            timestamp: s.timestamp,
-                            vchan_id: s.vchan_id as i32,
+                            ordinal: s.ordinal(),
+                            timestamp: s.timestamp(),
+                            vchan_id: s.vchan_id() as i32,
                         });
                     } else {
                         continue;
@@ -463,9 +495,9 @@ impl PublisherImpl {
                     if (refs & PUB_OWNED) == 0 {
                         self.channel.active_slots.push(ActiveSlot {
                             slot_index: i,
-                            ordinal: s.ordinal,
-                            timestamp: s.timestamp,
-                            vchan_id: s.vchan_id as i32,
+                            ordinal: s.ordinal(),
+                            timestamp: s.timestamp(),
+                            vchan_id: s.vchan_id() as i32,
                         });
                     }
                 }
@@ -474,13 +506,19 @@ impl PublisherImpl {
             self.channel.active_slots.sort_by_key(|s| s.timestamp);
 
             slot_idx = None;
+            let require_reliable_seen =
+                self.channel.scb().counters[self.channel.channel_id as usize].num_reliable_subs
+                    != 0;
             for active in &self.channel.active_slots {
                 let s = self.channel.slot_ref(active.slot_index);
                 let refs = s.refs.load(Ordering::Relaxed);
                 if ((refs >> RELIABLE_REF_COUNT_SHIFT) & REF_COUNT_MASK) != 0 {
                     break;
                 }
-                if active.ordinal != 0 && (s.flags & MESSAGE_SEEN) == 0 {
+                if require_reliable_seen
+                    && active.ordinal != 0
+                    && (s.flags() & MESSAGE_SEEN_BY_RELIABLE) == 0
+                {
                     break;
                 }
                 if (refs & REFS_MASK) == 0 {
@@ -499,7 +537,7 @@ impl PublisherImpl {
                 let old_refs = (*slot_ptr).refs.load(Ordering::Relaxed);
                 let ref_val = PUB_OWNED | owner as u64;
                 let expected = build_refs_bit_field(
-                    (*slot_ptr).ordinal,
+                    (*slot_ptr).ordinal(),
                     ((old_refs >> VCHAN_ID_SHIFT) & VCHAN_ID_MASK) as i32,
                     ((old_refs >> RETIRED_REFS_SHIFT) & RETIRED_REFS_MASK) as i32,
                 );
@@ -521,10 +559,10 @@ impl PublisherImpl {
         }
 
         let si = slot_idx.unwrap();
-        let slot = self.channel.slot_mut(si);
-        slot.ordinal = 0;
-        slot.timestamp = 0;
-        slot.vchan_id = self.channel.vchan_id as i16;
+        let slot = self.channel.slot_ref(si);
+        slot.set_ordinal(0);
+        slot.set_timestamp(0);
+        slot.set_vchan_id(self.channel.vchan_id as i16);
         self.channel.set_slot_to_biggest_buffer(si);
 
         let prefix = self.channel.get_prefix(si);
@@ -565,42 +603,48 @@ impl PublisherImpl {
         use_prefix_slot_id: bool,
         acquire_next: bool,
     ) -> PublishedMessage {
-        let slot = self.channel.slot_mut(slot_idx);
+        let slot = self.channel.slot_ref(slot_idx);
         let vchan_id = self.channel.vchan_id;
+        let slot_vchan_id = slot.vchan_id();
 
-        slot.ordinal = self.channel.ccb().ordinals.next(slot.vchan_id as i32);
-        slot.timestamp = now_ns();
-        slot.flags = 0;
+        let ordinal = self.channel.ccb().ordinals.next(slot_vchan_id as i32);
+        slot.set_ordinal(ordinal);
+        slot.set_timestamp(now_ns());
+        slot.set_flags(0);
 
         let prefix = self.channel.get_prefix(slot_idx);
         if !prefix.is_null() {
             unsafe {
                 let p = &mut *prefix;
                 if omit_prefix {
-                    let slot = self.channel.slot_mut(slot_idx);
-                    slot.timestamp = p.timestamp;
-                    slot.vchan_id = p.vchan_id as i16;
-                    slot.bridged_slot_id = if use_prefix_slot_id {
+                    slot.set_timestamp(p.timestamp);
+                    slot.set_vchan_id(p.vchan_id as i16);
+                    slot.set_bridged_slot_id(if use_prefix_slot_id {
                         p.slot_id
                     } else {
                         slot.id
-                    };
+                    });
                 } else {
-                    let slot = self.channel.slot_ref(slot_idx);
-                    p.message_size = slot.message_size;
-                    p.ordinal = slot.ordinal;
-                    p.timestamp = slot.timestamp;
-                    p.vchan_id = slot.vchan_id as i32;
+                    let message_size = slot.message_size();
+                    let ordinal = slot.ordinal();
+                    let timestamp = slot.timestamp();
+                    let vchan_id_i16 = slot.vchan_id();
+                    p.message_size = message_size;
+                    p.ordinal = ordinal;
+                    p.timestamp = timestamp;
+                    p.vchan_id = vchan_id_i16 as i32;
                     p.checksum_size = self.channel.checksum_size as u16;
                     p.metadata_size = self.channel.metadata_size as u16;
                     p.flags = 0;
                     p.slot_id = slot.id;
-                    let slot = self.channel.slot_mut(slot_idx);
-                    slot.bridged_slot_id = slot.id;
+                    slot.set_bridged_slot_id(slot.id);
                     if is_activation {
                         p.set_is_activation();
-                        slot.flags |= MESSAGE_IS_ACTIVATION;
-                        self.channel.ccb().activation_tracker.activate(vchan_id);
+                        slot.set_flag(MESSAGE_IS_ACTIVATION);
+                        self.channel
+                            .ccb()
+                            .activation_tracker
+                            .activate(vchan_id);
                     }
                     if self.options.checksum {
                         p.set_has_checksum();
@@ -610,7 +654,7 @@ impl PublisherImpl {
                         let data = checksum::get_message_checksum_data(
                             prefix,
                             buffer,
-                            slot.message_size as usize,
+                            message_size as usize,
                             cs,
                             ms,
                         );
@@ -627,31 +671,53 @@ impl PublisherImpl {
         }
 
         // Release the slot: store refs with ordinal, no PUB_OWNED.
-        let slot = self.channel.slot_ref(slot_idx);
+        let ordinal = slot.ordinal();
         slot.refs.store(
-            build_refs_bit_field(slot.ordinal, vchan_id, 0),
+            build_refs_bit_field(ordinal, vchan_id, 0),
             Ordering::Release,
         );
 
         // Tell all subscribers the slot is available.
         let ccb = self.channel.ccb();
-        ccb.subscribers.traverse(|sub_id| {
-            if vchan_id != -1
-                && self.channel.get_sub_vchan_id(sub_id) != -1
-                && vchan_id != self.channel.get_sub_vchan_id(sub_id)
-            {
-                return;
+        {
+            let _publish_guard = SubscriberQueuePublishGuard::new(
+                &self.channel,
+                owner as usize,
+                &self.active_queue_publish_depth,
+            );
+            let mut failed_queues: Vec<*const SlotQueueHeader> = Vec::new();
+            ccb.subscribers.traverse_seq_cst(|sub_id| {
+                if vchan_id != -1
+                    && self.channel.get_sub_vchan_id(sub_id) != -1
+                    && vchan_id != self.channel.get_sub_vchan_id(sub_id)
+                {
+                    return;
+                }
+                self.channel.get_available_slots(sub_id).set(slot_idx);
+                let queue = self.channel.get_available_slot_queue(sub_id);
+                if let Some(queue) = queue {
+                    if !queue.push(
+                        slot.id,
+                        ordinal,
+                        /* report_insertion_failure= */ false,
+                    ) {
+                        failed_queues.push(queue as *const SlotQueueHeader);
+                    }
+                }
+            });
+            ccb.total_messages.fetch_add(1, Ordering::SeqCst);
+            for queue in failed_queues {
+                unsafe { (&*queue).mark_insertion_failure() };
             }
-            self.channel.get_available_slots(sub_id).set(slot_idx);
-        });
+        }
 
         if !is_activation {
+            let message_size = slot.message_size();
             self.channel
                 .ccb()
                 .total_bytes
-                .fetch_add(slot.message_size, Ordering::Relaxed);
-
-            let msg_size = slot.message_size as u32;
+                .fetch_add(message_size, Ordering::Relaxed);
+            let msg_size = message_size as u32;
             let mut old_max = self.channel.ccb().max_message_size.load(Ordering::Relaxed);
             while msg_size > old_max {
                 match self.channel.ccb().max_message_size.compare_exchange_weak(
@@ -664,10 +730,6 @@ impl PublisherImpl {
                     Err(v) => old_max = v,
                 }
             }
-            self.channel
-                .ccb()
-                .total_messages
-                .fetch_add(1, Ordering::SeqCst);
         }
 
         let (ordinal, timestamp) = if !prefix.is_null() {
@@ -1108,19 +1170,26 @@ pub fn clear_trigger(fd: RawFd) {
     }
 }
 
-pub fn attach_buffers(channel: &mut Channel, read_write: bool) -> crate::error::Result<()> {
+pub fn attach_buffers(
+    channel: &mut Channel,
+    resolved_name: &str,
+    read_write: bool,
+) -> crate::error::Result<()> {
     if channel.use_split_buffers {
-        return attach_split_buffers(channel, read_write);
+        return attach_split_buffers(channel, resolved_name, read_write);
     }
-    attach_shm_buffers(channel, read_write)
+    attach_shm_buffers(channel, resolved_name, read_write)
 }
 
-fn attach_shm_buffers(channel: &mut Channel, read_write: bool) -> crate::error::Result<()> {
+fn attach_shm_buffers(
+    channel: &mut Channel,
+    resolved_name: &str,
+    read_write: bool,
+) -> crate::error::Result<()> {
     let num_buffers = channel.ccb().num_buffers.load(Ordering::Acquire) as usize;
-    let resolved_name = channel.name.clone();
     while channel.buffers.len() < num_buffers {
         let buffer_index = channel.buffers.len();
-        let shm_name = channel.buffer_shared_memory_name(&resolved_name, buffer_index);
+        let shm_name = channel.buffer_shared_memory_name(resolved_name, buffer_index);
 
         let fd = open_shm(&shm_name)?;
         let size = get_shm_size(fd, &shm_name)?;
@@ -1143,16 +1212,19 @@ fn attach_shm_buffers(channel: &mut Channel, read_write: bool) -> crate::error::
     Ok(())
 }
 
-fn attach_split_buffers(channel: &mut Channel, read_write: bool) -> crate::error::Result<()> {
+fn attach_split_buffers(
+    channel: &mut Channel,
+    resolved_name: &str,
+    read_write: bool,
+) -> crate::error::Result<()> {
     let num_buffers = channel.ccb().num_buffers.load(Ordering::Acquire) as usize;
-    let resolved_name = channel.name.clone();
     while channel.buffers.len() < num_buffers {
         let buffer_index = channel.buffers.len();
         let full_size = channel.bcb().sizes[buffer_index].load(Ordering::Acquire);
         let slot_size = channel.buffer_size_to_slot_size(full_size);
         let buffer = open_split_buffer_set(
             channel,
-            &resolved_name,
+            resolved_name,
             buffer_index,
             full_size,
             slot_size,

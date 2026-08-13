@@ -127,6 +127,9 @@ SubspaceChannelInfo ToCChannelInfo(const subspace::ChannelInfo &info,
           .type = ToCString(type),
           .slot_size = info.slot_size,
           .num_slots = info.num_slots,
+          .subscriber_queue_size = info.subscriber_queue_size,
+          .subscriber_queue_arena_size =
+              info.subscriber_queue_arena_size,
           .reliable = info.reliable};
 }
 
@@ -493,6 +496,7 @@ bool subspace_get_all_channel_stats(SubspaceClient client,
 SubspaceSubscriberOptions subspace_subscriber_options_default(void) {
   SubspaceSubscriberOptions options = {};
   options.max_active_messages = 1;
+  options.detect_dropped_messages = true;
   options.vchan_id = -1;
   return options;
 }
@@ -503,6 +507,7 @@ SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size,
       .slot_size = slot_size,
       .num_slots = num_slots,
   };
+  options.subscriber_queue_arena_size = 0;
   options.vchan_id = -1;
   options.max_outstanding_slot_leases = 1;
   options.notify_retirement_on_forced_reuse = true;
@@ -516,6 +521,7 @@ subspace_create_subscriber(SubspaceClient client, const char *channel_name,
                            SubspaceSubscriberOptions options) {
   subspace::SubscriberOptions subspace_options;
   subspace_options.SetReliable(options.reliable)
+      .SetSubscriberQueueSize(options.subscriber_queue_size)
       .SetBridge(options.bridge)
       .SetForTunnel(options.for_tunnel)
       .SetType(StringFromPointer(options.type.type, options.type.type_length))
@@ -528,6 +534,7 @@ subspace_create_subscriber(SubspaceClient client, const char *channel_name,
       .SetChecksum(options.checksum)
       .SetPassChecksumErrors(options.pass_checksum_errors)
       .SetKeepActiveMessage(options.keep_active_message)
+      .SetDetectDroppedMessages(options.detect_dropped_messages)
       .SetSplitBufferCallbacks(ToCppSplitCallbacks(options.split_callbacks));
   subspace_options.SetLogDroppedMessages(options.log_dropped_messages);
   subspace_clear_error();
@@ -571,6 +578,7 @@ SubspacePublisher subspace_create_publisher(SubspaceClient client,
       .SetChecksum(options.checksum)
       .SetChecksumSize(options.checksum_size)
       .SetMetadataSize(options.metadata_size)
+      .SetSubscriberQueueArenaSize(options.subscriber_queue_arena_size)
       .SetPreferRetiredSlots(options.prefer_retired_slots)
       .SetMaxPublishers(options.max_publishers)
       .SetUseSplitBuffers(options.use_split_buffers)
@@ -1545,6 +1553,21 @@ int32_t subspace_get_publisher_num_slots(SubspacePublisher publisher) {
   return (*PublisherPtr(publisher))->NumSlots();
 }
 
+int32_t subspace_get_publisher_queue_size(SubspacePublisher publisher) {
+  if (publisher.publisher == nullptr) {
+    return 0;
+  }
+  return (*PublisherPtr(publisher))->SubscriberQueueSize();
+}
+
+uint64_t
+subspace_get_publisher_queue_arena_size(SubspacePublisher publisher) {
+  if (publisher.publisher == nullptr) {
+    return 0;
+  }
+  return (*PublisherPtr(publisher))->SubscriberQueueArenaSize();
+}
+
 SubspaceString subspace_get_publisher_name(SubspacePublisher publisher) {
   if (publisher.publisher == nullptr) {
     return {};
@@ -1697,6 +1720,14 @@ int subspace_get_subscriber_num_slots(SubspaceSubscriber subscriber) {
   auto sub_ptr = reinterpret_cast<std::shared_ptr<subspace::Subscriber> *>(
       subscriber.subscriber);
   return (*sub_ptr)->NumSlots();
+}
+
+int32_t
+subspace_get_subscriber_queue_size(SubspaceSubscriber subscriber) {
+  if (subscriber.subscriber == nullptr) {
+    return 0;
+  }
+  return (*SubscriberPtr(subscriber))->SubscriberQueueSize();
 }
 
 int64_t subspace_get_subscriber_current_ordinal(SubspaceSubscriber subscriber) {
@@ -1947,13 +1978,19 @@ bool subspace_snapshot_message_slot(SubspaceMessageSlot slot,
   }
   auto *message_slot = reinterpret_cast<subspace::MessageSlot *>(slot.slot);
   *snapshot = {.id = message_slot->id,
-               .ordinal = message_slot->ordinal,
-               .message_size = message_slot->message_size,
-               .buffer_index = message_slot->buffer_index,
-               .vchan_id = message_slot->vchan_id,
-               .timestamp = message_slot->timestamp,
-               .flags = message_slot->flags,
-               .bridged_slot_id = message_slot->bridged_slot_id};
+               .ordinal =
+                   message_slot->ordinal.load(std::memory_order_relaxed),
+               .message_size =
+                   message_slot->message_size.load(std::memory_order_relaxed),
+               .buffer_index =
+                   message_slot->buffer_index.load(std::memory_order_relaxed),
+               .vchan_id =
+                   message_slot->vchan_id.load(std::memory_order_relaxed),
+               .timestamp =
+                   message_slot->timestamp.load(std::memory_order_relaxed),
+               .flags = message_slot->flags.load(std::memory_order_relaxed),
+               .bridged_slot_id = message_slot->bridged_slot_id.load(
+                   std::memory_order_relaxed)};
   return true;
 }
 

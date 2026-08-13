@@ -110,12 +110,18 @@ class TestSubspaceClient(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_publisher_accessors(self):
         client = self._make_client("pub_acc")
+        opts = subspace.PublisherOptions()
+        opts.set_slot_size(512)
+        opts.set_num_slots(8)
+        opts.set_type("my_type")
+        opts.set_subscriber_queue_arena_size(11_000)
         pub = client.create_publisher(channel_name="ch_pub_acc",
-                                      slot_size=512, num_slots=8,
-                                      type="my_type")
+                                      options=opts)
         self.assertEqual(pub.type(), "my_type")
         self.assertEqual(pub.slot_size(), 512)
         self.assertEqual(pub.num_slots(), 8)
+        self.assertEqual(pub.subscriber_queue_size(), 16)
+        self.assertEqual(pub.subscriber_queue_arena_size(), 11_000)
         self.assertFalse(pub.is_reliable())
         self.assertFalse(pub.is_fixed_size())
         self.assertEqual(pub.name(), "ch_pub_acc")
@@ -125,11 +131,18 @@ class TestSubspaceClient(unittest.TestCase):
 
     def test_subscriber_accessors(self):
         client = self._make_client("sub_acc")
+        opts = subspace.PublisherOptions()
+        opts.set_slot_size(256)
+        opts.set_num_slots(10)
+        opts.set_type("sub_type")
+        opts.set_subscriber_queue_arena_size(11_000)
         pub = client.create_publisher(channel_name="ch_sub_acc",
-                                      slot_size=256, num_slots=10,
-                                      type="sub_type")
+                                      options=opts)
+        sub_opts = subspace.SubscriberOptions()
+        sub_opts.set_subscriber_queue_size(7)
+        sub_opts.set_type("sub_type")
         sub = client.create_subscriber(channel_name="ch_sub_acc",
-                                       type="sub_type")
+                                       options=sub_opts)
 
         pub.publish_message(b"probe")
         sub.wait()
@@ -139,6 +152,7 @@ class TestSubspaceClient(unittest.TestCase):
         self.assertFalse(sub.is_reliable())
         self.assertEqual(sub.slot_size(), 256)
         self.assertEqual(sub.num_slots(), 10)
+        self.assertEqual(sub.subscriber_queue_size(), 7)
         self.assertEqual(sub.name(), "ch_sub_acc")
         self.assertIsInstance(sub.get_virtual_memory_usage(), int)
         self.assertGreater(sub.get_virtual_memory_usage(), 0)
@@ -282,15 +296,18 @@ class TestSubspaceClient(unittest.TestCase):
         pub_opts.set_num_slots(6)
         pub_opts.set_metadata_size(8)
         pub_opts.set_max_outstanding_slot_leases(3)
+        pub_opts.set_subscriber_queue_arena_size(64_000)
         pub_opts.set_notify_retirement(True)
         pub_opts.set_notify_retirement_on_forced_reuse(False)
         pub = client.create_publisher(channel_name="ch_leases",
                                       options=pub_opts)
 
         sub_opts = subspace.SubscriberOptions()
+        sub_opts.set_subscriber_queue_size(4)
         sub_opts.set_max_active_messages(2)
         sub = client.create_subscriber(channel_name="ch_leases",
                                        options=sub_opts)
+        self.assertEqual(sub.subscriber_queue_size(), 4)
 
         leases = [pub.acquire_buffer_lease() for _ in range(3)]
         self.assertTrue(all(lease is not None for lease in leases))
@@ -346,6 +363,7 @@ class TestSubspaceClient(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_publisher_options(self):
         opts = subspace.PublisherOptions()
+        self.assertEqual(opts.subscriber_queue_arena_size(), 0)
         opts.set_slot_size(1024)
         opts.set_num_slots(4)
         opts.set_reliable(True)
@@ -355,9 +373,11 @@ class TestSubspaceClient(unittest.TestCase):
         opts.set_checksum(True)
         opts.set_max_outstanding_slot_leases(3)
         opts.set_notify_retirement_on_forced_reuse(False)
+        opts.set_subscriber_queue_arena_size(9_000)
 
         self.assertEqual(opts.slot_size(), 1024)
         self.assertEqual(opts.num_slots(), 4)
+        self.assertEqual(opts.subscriber_queue_arena_size(), 9_000)
         self.assertTrue(opts.is_reliable())
         self.assertEqual(opts.type(), "opts_type")
         self.assertTrue(opts.is_local())
@@ -369,6 +389,7 @@ class TestSubspaceClient(unittest.TestCase):
     def test_subscriber_options(self):
         opts = subspace.SubscriberOptions()
         opts.set_reliable(True)
+        opts.set_subscriber_queue_size(3)
         opts.set_type("sub_opts_type")
         opts.set_max_active_messages(5)
         opts.set_checksum(True)
@@ -377,6 +398,7 @@ class TestSubspaceClient(unittest.TestCase):
         opts.set_max_subscribers(2)
 
         self.assertTrue(opts.is_reliable())
+        self.assertEqual(opts.subscriber_queue_size(), 3)
         self.assertEqual(opts.type(), "sub_opts_type")
         self.assertEqual(opts.max_active_messages(), 5)
         self.assertTrue(opts.checksum())
@@ -424,11 +446,14 @@ class TestSubspaceClient(unittest.TestCase):
         opts.set_slot_size(128)
         opts.set_num_slots(6)
         opts.set_type("opt_chan_type")
+        opts.set_subscriber_queue_arena_size(13_000)
 
         pub = client.create_publisher(channel_name="ch_opts_pub",
                                       options=opts)
         self.assertEqual(pub.slot_size(), 128)
         self.assertEqual(pub.num_slots(), 6)
+        self.assertEqual(pub.subscriber_queue_size(), 16)
+        self.assertEqual(pub.subscriber_queue_arena_size(), 13_000)
         self.assertEqual(pub.type(), "opt_chan_type")
         pub = None
 

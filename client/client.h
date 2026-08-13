@@ -69,6 +69,8 @@ struct ChannelInfo {
   std::string type;
   uint64_t slot_size;
   int num_slots;
+  int subscriber_queue_size;
+  uint64_t subscriber_queue_arena_size;
   bool reliable;
 };
 
@@ -1089,6 +1091,10 @@ public:
 
   int32_t SlotSize() const { return impl_->SlotSize(); }
   int32_t NumSlots() const { return impl_->NumSlots(); }
+  int32_t SubscriberQueueSize() const { return impl_->SubscriberQueueSize(); }
+  uint64_t SubscriberQueueArenaSize() const {
+    return impl_->SubscriberQueueArenaSize();
+  }
 
   const std::vector<std::unique_ptr<details::BufferSet>> &GetBuffers() const {
     return client_->GetBuffers(impl_.get());
@@ -1580,6 +1586,7 @@ public:
 
   int32_t SlotSize() const { return impl_->SlotSize(); }
   int32_t NumSlots() const { return impl_->NumSlots(); }
+  int32_t SubscriberQueueSize() const { return impl_->SubscriberQueueSize(); }
 
   const std::vector<std::unique_ptr<details::BufferSet>> &GetBuffers() const {
     return client_->GetBuffers(impl_.get());
@@ -1682,8 +1689,10 @@ public:
   bool AtomicIncRefCount(int slot_id, int inc) {
     MessageSlot *slot = impl_->GetSlot(slot_id);
     if (slot != nullptr) {
-      return impl_->AtomicIncRefCount(slot, IsReliable(), inc, slot->ordinal,
-                                      slot->vchan_id, false);
+      return impl_->AtomicIncRefCount(
+          slot, IsReliable(), inc,
+          slot->ordinal.load(std::memory_order_relaxed),
+          slot->vchan_id.load(std::memory_order_relaxed), false);
     }
     return false;
   }
