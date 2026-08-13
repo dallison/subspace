@@ -136,6 +136,28 @@ struct PublisherOptions {
     return *this;
   }
 
+  // Maximum number of explicitly leased unpublished slots. Existing
+  // GetMessageBuffer()/PublishMessage() users retain their single-slot
+  // behavior; this limit applies to AcquireBufferLease().
+  PublisherOptions &SetMaxOutstandingSlotLeases(int32_t n) {
+    max_outstanding_slot_leases = n;
+    return *this;
+  }
+  int32_t MaxOutstandingSlotLeases() const {
+    return max_outstanding_slot_leases;
+  }
+
+  // When false, retirement notifications are emitted only after subscriber
+  // release (or immediately for a publication with no subscribers), never
+  // merely because an unreliable publisher forcibly reuses an old slot.
+  PublisherOptions &SetNotifyRetirementOnForcedReuse(bool v) {
+    notify_retirement_on_forced_reuse = v;
+    return *this;
+  }
+  bool NotifyRetirementOnForcedReuse() const {
+    return notify_retirement_on_forced_reuse;
+  }
+
   // If this is set to true all messages published will have a checksum
   // calculated and placed in the MessagePrefix metadata.  If subscribers want
   // to verify the checksum the must set the SubscriberOptions.Checksum to true.
@@ -244,6 +266,8 @@ struct PublisherOptions {
   std::string mux;
   int vchan_id = -1; // If -1, server will assign.
   bool notify_retirement = false;
+  int32_t max_outstanding_slot_leases = 1;
+  bool notify_retirement_on_forced_reuse = true;
   bool checksum = false;
   int32_t checksum_size = 4;
   int32_t metadata_size = 0;
@@ -295,6 +319,11 @@ struct SubscriberOptions {
   const std::string &Type() const { return type; }
   int MaxSharedPtrs() const { return max_active_messages - 1; }
   int MaxActiveMessages() const { return max_active_messages; }
+  SubscriberOptions &SetMaxSubscribers(int n) {
+    max_subscribers = n;
+    return *this;
+  }
+  int MaxSubscribers() const { return max_subscribers; }
   bool LogDroppedMessages() const { return log_dropped_messages; }
   void SetLogDroppedMessages(bool v) { log_dropped_messages = v; }
   bool DetectDroppedMessages() const { return detect_dropped_messages; }
@@ -387,6 +416,7 @@ struct SubscriberOptions {
   bool for_tunnel = false;
   std::string type;
   int max_active_messages = 1;
+  int32_t max_subscribers = 0;
   bool log_dropped_messages = true;
   bool detect_dropped_messages = true;
   bool pass_activation = false; // If true, the subscriber will pass activation

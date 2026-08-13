@@ -29,6 +29,8 @@ pub struct PublisherOptions {
     pub mux: String,
     pub vchan_id: i32,
     pub notify_retirement: bool,
+    pub max_outstanding_slot_leases: i32,
+    pub notify_retirement_on_forced_reuse: bool,
     pub checksum: bool,
     pub checksum_size: i32,
     pub metadata_size: i32,
@@ -53,6 +55,8 @@ impl Default for PublisherOptions {
             mux: String::new(),
             vchan_id: -1,
             notify_retirement: false,
+            max_outstanding_slot_leases: 1,
+            notify_retirement_on_forced_reuse: true,
             checksum: false,
             checksum_size: 4,
             metadata_size: 0,
@@ -135,6 +139,16 @@ impl PublisherOptions {
         self
     }
 
+    pub fn set_max_outstanding_slot_leases(mut self, n: i32) -> Self {
+        self.max_outstanding_slot_leases = n;
+        self
+    }
+
+    pub fn set_notify_retirement_on_forced_reuse(mut self, v: bool) -> Self {
+        self.notify_retirement_on_forced_reuse = v;
+        self
+    }
+
     pub fn set_checksum(mut self, v: bool) -> Self {
         self.checksum = v;
         self
@@ -202,6 +216,7 @@ pub struct SubscriberOptions {
     pub for_tunnel: bool,
     pub channel_type: String,
     pub max_active_messages: i32,
+    pub max_subscribers: i32,
     pub log_dropped_messages: bool,
     pub detect_dropped_messages: bool,
     pub pass_activation: bool,
@@ -223,6 +238,7 @@ impl Default for SubscriberOptions {
             for_tunnel: false,
             channel_type: String::new(),
             max_active_messages: 1,
+            max_subscribers: 0,
             log_dropped_messages: true,
             detect_dropped_messages: true,
             pass_activation: false,
@@ -264,6 +280,11 @@ impl SubscriberOptions {
 
     pub fn set_max_active_messages(mut self, n: i32) -> Self {
         self.max_active_messages = n;
+        self
+    }
+
+    pub fn set_max_subscribers(mut self, n: i32) -> Self {
+        self.max_subscribers = n;
         self
     }
 

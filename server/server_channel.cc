@@ -192,6 +192,30 @@ absl::Status ServerChannel::ValidateOrSetMaxPublishers(
   return absl::OkStatus();
 }
 
+absl::Status ServerChannel::ValidateOrSetMaxSubscribers(
+    int32_t max_subscribers, bool set_if_missing, const char *user_type) {
+  if (max_subscribers < 0) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Invalid max_subscribers %d for %s on channel %s: value must be "
+        "non-negative",
+        max_subscribers, user_type, Name()));
+  }
+  if (!max_subscribers_set_) {
+    if (set_if_missing || max_subscribers > 0) {
+      max_subscribers_ = max_subscribers;
+      max_subscribers_set_ = true;
+    }
+    return absl::OkStatus();
+  }
+  if (max_subscribers_ != max_subscribers) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Inconsistent max_subscribers for %s on channel %s: already %d, not "
+        "%d",
+        user_type, Name(), max_subscribers_, max_subscribers));
+  }
+  return absl::OkStatus();
+}
+
 void ServerChannel::RemoveBuffer(uint64_t session_id, Server *server) {
   if (ccb_ == nullptr) {
     return;
@@ -537,14 +561,16 @@ absl::StatusOr<int> ServerChannel::AllocateUserId(const char *type) {
 absl::StatusOr<PublisherUser *>
 ServerChannel::AddPublisher(ClientHandler *handler, bool is_reliable,
                             bool is_local, bool is_bridge, bool for_tunnel,
-                            bool is_fixed_size, uint64_t process_id) {
+                            bool is_fixed_size,
+                            int max_outstanding_slot_leases,
+                            uint64_t process_id) {
   absl::StatusOr<int> user_id = AllocateUserId("publisher");
   if (!user_id.ok()) {
     return user_id.status();
   }
   std::unique_ptr<PublisherUser> pub = std::make_unique<PublisherUser>(
       handler, *user_id, is_reliable, is_local, is_bridge, for_tunnel,
-      is_fixed_size);
+      is_fixed_size, max_outstanding_slot_leases);
   pub->SetProcessId(process_id);
   absl::Status status = pub->Init();
   if (!status.ok()) {
@@ -602,6 +628,41 @@ ServerChannel::AllocateSubscriberQueue(int sub_id,
                                                  ? SubscriberQueueSize()
                                                  : subscriber_queue_size);
   AvailableSlotQueueIndex *index = GetAvailableSlotQueueIndexAddress();
+  const uint64_t existing_queue_offset =
+      index->offsets[sub_id].load(std::memory_order_acquire);
+  uint64_t next_offset =
+      index->next_offset.load(std::memory_order_relaxed);
+  char *arena = EndOfAvailableSlotQueueIndex();
+  if (existing_queue_offset != kInvalidSlotQueueOffset) {
+    if (capacity == 0 ||
+        existing_queue_offset < SlotQueueBlockHeaderSize()) {
+      return absl::FailedPreconditionError(absl::StrFormat(
+          "invalid existing subscriber queue for subscriber %d on channel %s",
+          sub_id, Name()));
+    }
+    const uint64_t block_offset =
+        existing_queue_offset - SlotQueueBlockHeaderSize();
+    if (block_offset >= next_offset) {
+      return absl::FailedPreconditionError(absl::StrFormat(
+          "existing subscriber queue for subscriber %d on channel %s is "
+          "outside the queue arena",
+          sub_id, Name()));
+    }
+    auto *block =
+        reinterpret_cast<SlotQueueBlockHeader *>(arena + block_offset);
+    auto *queue =
+        reinterpret_cast<InPlaceSlotQueue *>(arena + existing_queue_offset);
+    if (static_cast<SlotQueueBlockState>(
+            block->state.load(std::memory_order_acquire)) !=
+            SlotQueueBlockState::kAllocated ||
+        queue->Capacity() != static_cast<size_t>(capacity)) {
+      return absl::FailedPreconditionError(absl::StrFormat(
+          "existing subscriber queue for subscriber %d on channel %s has "
+          "inconsistent allocation metadata",
+          sub_id, Name()));
+    }
+    return absl::OkStatus();
+  }
   if (capacity == 0) {
     index->offsets[sub_id].store(kInvalidSlotQueueOffset,
                                  std::memory_order_release);
@@ -611,9 +672,6 @@ ServerChannel::AllocateSubscriberQueue(int sub_id,
   const size_t allocation_size =
       SlotQueueBlockSize(static_cast<size_t>(capacity));
   const size_t arena_size = SubscriberQueueArenaSize();
-  uint64_t next_offset =
-      index->next_offset.load(std::memory_order_relaxed);
-  char *arena = EndOfAvailableSlotQueueIndex();
   auto block_at = [arena](uint64_t offset) {
     return reinterpret_cast<SlotQueueBlockHeader *>(arena + offset);
   };
@@ -883,6 +941,14 @@ std::vector<std::string> ServerChannel::RegisterExistingSubscribers() {
       continue;
     }
     auto *sub = static_cast<SubscriberUser *>(user.get());
+    ServerChannel *storage_channel =
+        IsVirtual()
+            ? static_cast<ServerChannel *>(
+                  static_cast<VirtualChannel *>(this)->GetMux())
+            : this;
+    const bool was_registered =
+        !IsPlaceholder() &&
+        storage_channel->GetCcb()->subscribers.IsSet(id);
     if (absl::Status status =
             AllocateSubscriberQueue(id, sub->SubscriberQueueSize());
         !status.ok()) {
@@ -895,7 +961,8 @@ std::vector<std::string> ServerChannel::RegisterExistingSubscribers() {
           "publisher-provisioned arena cannot fit it; using the bitset path: %s",
           id, Name(), sub->SubscriberQueueSize(), status.ToString()));
     }
-    RegisterSubscriber(id, GetVirtualChannelId(), /*is_new=*/true);
+    RegisterSubscriber(id, GetVirtualChannelId(),
+                       /*is_new=*/!was_registered);
   }
   return warnings;
 }
@@ -1036,6 +1103,25 @@ void ServerChannel::CountUsers(int &num_pubs, int &num_subs,
   }
 }
 
+void ServerChannel::CountCapacityUsage(
+    int &max_active_messages, int &max_outstanding_slot_leases) const {
+  max_active_messages = 0;
+  max_outstanding_slot_leases = 0;
+  for (const auto &[id, user] : users_) {
+    if (user == nullptr) {
+      continue;
+    }
+    if (user->IsPublisher()) {
+      max_outstanding_slot_leases +=
+          static_cast<const PublisherUser *>(user.get())
+              ->MaxOutstandingSlotLeases();
+    } else {
+      max_active_messages +=
+          static_cast<const SubscriberUser *>(user.get())->MaxActiveMessages();
+    }
+  }
+}
+
 // Channel is public if there are any public publishers.
 bool ServerChannel::IsLocal() const {
   for (auto &[id, user] : users_) {
@@ -1122,9 +1208,10 @@ bool ServerChannel::IsBridgeSubscriber() const {
 }
 
 ServerChannel::CapacityInfo ServerChannel::HasSufficientCapacityInternal(
-    int new_max_active_messages) const {
+    int new_max_active_messages,
+    int new_max_outstanding_slot_leases) const {
   if (NumSlots() == 0) {
-    return CapacityInfo{true, 0, 0, 0, 0};
+    return CapacityInfo{true, 0, 0, 0, 0, 0};
   }
   // Count number of publishers and subscribers.
   int num_pubs, num_subs, num_bridge_pubs, num_bridge_subs;
@@ -1132,25 +1219,23 @@ ServerChannel::CapacityInfo ServerChannel::HasSufficientCapacityInternal(
   CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs,
              num_tunnel_pubs, num_tunnel_subs);
 
-  // Add in the total active message maximums.
-  int max_active_messages = new_max_active_messages;
-  for (auto &[id, user] : users_) {
-    if (user == nullptr) {
-      continue;
-    }
-    if (user->IsSubscriber()) {
-      SubscriberUser *sub = static_cast<SubscriberUser *>(user.get());
-      max_active_messages += sub->MaxActiveMessages() - 1;
-    }
-  }
-  int slots_needed = num_pubs + num_subs + max_active_messages + 1;
+  int max_active_messages;
+  int max_outstanding_slot_leases;
+  CountCapacityUsage(max_active_messages, max_outstanding_slot_leases);
+  max_active_messages += new_max_active_messages;
+  max_outstanding_slot_leases += new_max_outstanding_slot_leases;
+  int slots_needed = max_active_messages + max_outstanding_slot_leases;
   return CapacityInfo{slots_needed <= NumSlots() - 1, num_pubs, num_subs,
-                      max_active_messages, slots_needed};
+                      max_active_messages, max_outstanding_slot_leases,
+                      slots_needed};
 }
 
 absl::Status
-ServerChannel::HasSufficientCapacity(int new_max_active_messages) const {
-  auto info = HasSufficientCapacityInternal(new_max_active_messages);
+ServerChannel::HasSufficientCapacity(
+    int new_max_active_messages,
+    int new_max_outstanding_slot_leases) const {
+  auto info = HasSufficientCapacityInternal(
+      new_max_active_messages, new_max_outstanding_slot_leases);
   if (info.capacity_ok) {
     return absl::OkStatus();
   }
@@ -1159,10 +1244,12 @@ ServerChannel::HasSufficientCapacity(int new_max_active_messages) const {
 
 absl::Status ServerChannel::CapacityError(const CapacityInfo &info) const {
   std::string message = absl::StrFormat(
-      "there are %d slots with %d publisher%s and %d "
-      "subscriber%s with %d additional active message%s; you "
+      "there are %d slots with %d publisher%s reserving %d slot lease%s and "
+      "%d subscriber%s reserving %d active message%s; you "
       "need at least %d slots",
-      NumSlots(), info.num_pubs, (info.num_pubs == 1 ? "" : "s"), info.num_subs,
+      NumSlots(), info.num_pubs, (info.num_pubs == 1 ? "" : "s"),
+      info.max_outstanding_slot_leases,
+      (info.max_outstanding_slot_leases == 1 ? "" : "s"), info.num_subs,
       (info.num_subs == 1 ? "" : "s"), info.max_active_messages,
       (info.max_active_messages == 1 ? "" : "s"), info.slots_needed + 1);
 
@@ -1183,7 +1270,12 @@ absl::Status ServerChannel::CapacityError(const CapacityInfo &info) const {
       message += absl::StrFormat(
           "%s{pid=%llu, client=\"%s\"", first ? "" : ", ",
           static_cast<unsigned long long>(user.ProcessId()), client_name);
-      if (user.IsSubscriber()) {
+      if (user.IsPublisher()) {
+        const auto &publisher = static_cast<const PublisherUser &>(user);
+        message += absl::StrFormat(
+            ", max_outstanding_slot_leases=%d",
+            publisher.MaxOutstandingSlotLeases());
+      } else {
         const auto &subscriber = static_cast<const SubscriberUser &>(user);
         message += absl::StrFormat(
             ", max_active_messages=%d", subscriber.MaxActiveMessages());
@@ -1393,5 +1485,19 @@ void ChannelMultiplexer::CountUsers(int &num_pubs, int &num_subs,
   num_bridge_subs += total_bridge_subs;
   num_tunnel_pubs += total_tunnel_pubs;
   num_tunnel_subs += total_tunnel_subs;
+}
+
+void ChannelMultiplexer::CountCapacityUsage(
+    int &max_active_messages, int &max_outstanding_slot_leases) const {
+  ServerChannel::CountCapacityUsage(max_active_messages,
+                                    max_outstanding_slot_leases);
+  for (const VirtualChannel *vchan : virtual_channels_) {
+    int vchan_active_messages;
+    int vchan_outstanding_slot_leases;
+    vchan->CountCapacityUsage(vchan_active_messages,
+                              vchan_outstanding_slot_leases);
+    max_active_messages += vchan_active_messages;
+    max_outstanding_slot_leases += vchan_outstanding_slot_leases;
+  }
 }
 } // namespace subspace

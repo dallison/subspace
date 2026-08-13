@@ -2,6 +2,7 @@
 import client.python.subspace as subspace
 import server.python.subspace_server as subspace_server
 import os
+import select
 import struct
 import tempfile
 import unittest
@@ -287,6 +288,76 @@ class TestSubspaceClient(unittest.TestCase):
         pub = None
         sub = None
 
+    def test_explicit_publisher_buffer_leases(self):
+        client = self._make_client("leases")
+
+        pub_opts = subspace.PublisherOptions()
+        pub_opts.set_slot_size(128)
+        pub_opts.set_num_slots(6)
+        pub_opts.set_metadata_size(8)
+        pub_opts.set_max_outstanding_slot_leases(3)
+        pub_opts.set_subscriber_queue_arena_size(64_000)
+        pub_opts.set_notify_retirement(True)
+        pub_opts.set_notify_retirement_on_forced_reuse(False)
+        pub = client.create_publisher(channel_name="ch_leases",
+                                      options=pub_opts)
+
+        sub_opts = subspace.SubscriberOptions()
+        sub_opts.set_subscriber_queue_size(4)
+        sub_opts.set_max_active_messages(2)
+        sub = client.create_subscriber(channel_name="ch_leases",
+                                       options=sub_opts)
+        self.assertEqual(sub.subscriber_queue_size(), 4)
+
+        leases = [pub.acquire_buffer_lease() for _ in range(3)]
+        self.assertTrue(all(lease is not None for lease in leases))
+        self.assertEqual(len({lease.slot_id for lease in leases}), 3)
+        self.assertTrue(all(lease.buffer_size == 128 for lease in leases))
+        self.assertIsNone(pub.acquire_buffer_lease())
+
+        lease = leases[1]
+        slot_id = lease.slot_id
+        lease_id = lease.lease_id
+        payload = b"lease-two"
+        stale_view = lease.buffer
+        stale_view[:len(payload)] = payload
+        pub.set_metadata(lease, b"lease-md")
+        self.assertEqual(pub.get_metadata(lease), b"lease-md")
+
+        published = pub.publish_buffer_lease(lease, len(payload))
+        self.assertEqual(published.slot_id, slot_id)
+        self.assertFalse(lease.valid)
+        # Exported views remain backed by private staging memory after publish;
+        # writing through one must not corrupt the now-visible shared slot.
+        stale_view[:len(payload)] = b"corrupt!!"
+        with self.assertRaises(RuntimeError):
+            pub.publish_buffer_lease(lease, len(payload))
+
+        sub.wait()
+        with sub.read_message_object() as received:
+            self.assertEqual(received.buffer, payload)
+            self.assertEqual(sub.get_metadata(), b"lease-md")
+
+        retirement_fd = pub.get_retirement_fd()
+        poller = select.poll()
+        poller.register(retirement_fd, select.POLLIN)
+        self.assertTrue(poller.poll(1000))
+        retired_slot, = struct.unpack("i", os.read(retirement_fd, 4))
+        self.assertEqual(retired_slot, slot_id)
+
+        reclaimed = pub.reclaim_buffer_lease(retired_slot)
+        self.assertIsNotNone(reclaimed)
+        self.assertEqual(reclaimed.slot_id, slot_id)
+        self.assertNotEqual(reclaimed.lease_id, lease_id)
+
+        pub.release_buffer_lease(leases[0])
+        pub.release_buffer_lease(leases[2])
+        pub.release_buffer_lease(reclaimed)
+        self.assertFalse(reclaimed.valid)
+
+        pub = None
+        sub = None
+
     # ------------------------------------------------------------------
     # PublisherOptions / SubscriberOptions
     # ------------------------------------------------------------------
@@ -300,6 +371,8 @@ class TestSubspaceClient(unittest.TestCase):
         opts.set_local(True)
         opts.set_fixed_size(True)
         opts.set_checksum(True)
+        opts.set_max_outstanding_slot_leases(3)
+        opts.set_notify_retirement_on_forced_reuse(False)
         opts.set_subscriber_queue_arena_size(9_000)
 
         self.assertEqual(opts.slot_size(), 1024)
@@ -310,6 +383,8 @@ class TestSubspaceClient(unittest.TestCase):
         self.assertTrue(opts.is_local())
         self.assertTrue(opts.is_fixed_size())
         self.assertTrue(opts.checksum())
+        self.assertEqual(opts.max_outstanding_slot_leases(), 3)
+        self.assertFalse(opts.notify_retirement_on_forced_reuse())
 
     def test_subscriber_options(self):
         opts = subspace.SubscriberOptions()
@@ -320,6 +395,7 @@ class TestSubspaceClient(unittest.TestCase):
         opts.set_checksum(True)
         opts.set_pass_checksum_errors(True)
         opts.set_keep_active_message(True)
+        opts.set_max_subscribers(2)
 
         self.assertTrue(opts.is_reliable())
         self.assertEqual(opts.subscriber_queue_size(), 3)
@@ -328,6 +404,41 @@ class TestSubspaceClient(unittest.TestCase):
         self.assertTrue(opts.checksum())
         self.assertTrue(opts.pass_checksum_errors())
         self.assertTrue(opts.keep_active_message())
+        self.assertEqual(opts.max_subscribers(), 2)
+
+    def test_max_subscribers_option(self):
+        client = self._make_client("max_subscribers")
+        pub = client.create_publisher(channel_name="ch_max_subscribers",
+                                      slot_size=64, num_slots=6)
+
+        opts = subspace.SubscriberOptions()
+        opts.set_max_subscribers(1)
+        sub = client.create_subscriber(channel_name="ch_max_subscribers",
+                                       options=opts)
+        with self.assertRaisesRegex(RuntimeError,
+                                    "maximum number of subscribers"):
+            client.create_subscriber(channel_name="ch_max_subscribers",
+                                     options=opts)
+
+        pub = None
+        sub = None
+
+    def test_lease_budget_is_in_channel_capacity(self):
+        client = self._make_client("lease_capacity")
+        pub_opts = subspace.PublisherOptions()
+        pub_opts.set_slot_size(64)
+        pub_opts.set_num_slots(5)
+        pub_opts.set_max_outstanding_slot_leases(3)
+        pub = client.create_publisher(channel_name="ch_lease_capacity",
+                                      options=pub_opts)
+
+        sub_opts = subspace.SubscriberOptions()
+        sub_opts.set_max_active_messages(2)
+        with self.assertRaisesRegex(RuntimeError, "3 slot leases"):
+            client.create_subscriber(channel_name="ch_lease_capacity",
+                                     options=sub_opts)
+
+        pub = None
 
     def test_create_publisher_with_options(self):
         client = self._make_client("opts_pub")

@@ -1236,7 +1236,6 @@ impl Channel {
                     ccb.subscribers.traverse(|sub_id| {
                         self.get_available_slots(sub_id).clear(slot.id as usize);
                     });
-                    return;
                 }
             }
         } else {

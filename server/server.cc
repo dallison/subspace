@@ -1380,6 +1380,14 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
         return s;
       }
     }
+    if (rch.has_max_subscribers) {
+      if (absl::Status s = channel->ValidateOrSetMaxSubscribers(
+              rch.max_subscribers, /*set_if_missing=*/true,
+              "shadow recovery");
+          !s.ok()) {
+        return s;
+      }
+    }
 
     if (map_storage) {
       if (absl::Status s = channel->MapExisting(
@@ -1399,7 +1407,8 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
     for (auto &rpub : rch.publishers) {
       auto pub = std::make_unique<PublisherUser>(
           nullptr, rpub.id, rpub.is_reliable, rpub.is_local, rpub.is_bridge,
-          rpub.for_tunnel, rpub.is_fixed_size);
+          rpub.for_tunnel, rpub.is_fixed_size,
+          rpub.max_outstanding_slot_leases);
       pub->SetProcessId(rpub.process_id);
 
       toolbelt::TriggerFd tfd(rpub.poll_fd, rpub.trigger_fd);

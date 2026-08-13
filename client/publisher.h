@@ -7,7 +7,10 @@
 #include "client/client_channel.h"
 #include "client/message.h"
 
+#include <unordered_map>
+
 namespace subspace {
+class Publisher;
 namespace details {
 
 // This is a publisher.  It maps in the channel's memory and allows
@@ -87,11 +90,19 @@ public:
     return GetMetadataSpan(prefix, ChecksumSize(), MetadataSize());
   }
 
+  absl::Span<std::byte> GetMetadata(MessageSlot *slot) {
+    if (MetadataSize() == 0 || slot == nullptr) {
+      return {};
+    }
+    return GetMetadataSpan(Prefix(slot), ChecksumSize(), MetadataSize());
+  }
+
   std::string Mux() const { return options_.Mux(); }
   bool ForTunnel() const { return options_.ForTunnel(); }
 
 private:
   friend class ::subspace::ClientImpl;
+  friend class ::subspace::Publisher;
 
   bool IsPublisher() const override { return true; }
   bool IsBridge() const override { return options_.IsBridge(); }
@@ -106,6 +117,20 @@ private:
   std::string ResolvedName() const override {
     return IsVirtual() ? options_.mux : Name();
   }
+
+  MessageSlot *ClaimRetiredSlot(int32_t slot_id);
+  bool ReleaseLeasedSlot(MessageSlot *slot);
+  uint64_t RegisterLease(MessageSlot *slot);
+  MessageSlot *FindLease(int32_t slot_id, uint64_t lease_id) const;
+  void RemoveLease(int32_t slot_id);
+  size_t NumLeases() const { return leased_slots_.size(); }
+  int32_t MaxOutstandingSlotLeases() const {
+    return options_.MaxOutstandingSlotLeases();
+  }
+  bool NotifyRetirementOnForcedReuse() const {
+    return options_.NotifyRetirementOnForcedReuse();
+  }
+  void RetirePublishedSlotImmediately(MessageSlot *slot);
 
   // A publisher is done with its busy slot (it now contains a message).  The
   // slot is moved from the busy list to the end of the active list and other
@@ -126,7 +151,8 @@ private:
   Channel::PublishedMessage
   ActivateSlotAndGetAnother(MessageSlot *slot, bool reliable,
                             bool is_activation, int owner, bool omit_prefix,
-                            bool use_prefix_slot_id, bool for_tunnel = false);
+                            bool use_prefix_slot_id, bool for_tunnel = false,
+                            bool acquire_next = true);
 
   Channel::PublishedMessage ActivateSlotAndGetAnother(bool reliable,
                                                       bool is_activation,
@@ -170,6 +196,8 @@ private:
   std::function<absl::StatusOr<int64_t>(void *buffer, int64_t size)>
       on_send_callback_ = nullptr;
   ChecksumCallback checksum_callback_ = nullptr;
+  std::unordered_map<int32_t, uint64_t> leased_slots_;
+  uint64_t next_lease_id_ = 1;
 
 };
 

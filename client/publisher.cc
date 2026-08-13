@@ -200,6 +200,93 @@ void PublisherImpl::SetSlotToBiggestBuffer(MessageSlot *slot) {
   IncrementBufferRefs(new_buffer_index);
 }
 
+uint64_t PublisherImpl::RegisterLease(MessageSlot *slot) {
+  if (slot == nullptr) {
+    return 0;
+  }
+  uint64_t lease_id = next_lease_id_++;
+  if (lease_id == 0) {
+    lease_id = next_lease_id_++;
+  }
+  leased_slots_[slot->id] = lease_id;
+  return lease_id;
+}
+
+MessageSlot *PublisherImpl::FindLease(int32_t slot_id,
+                                      uint64_t lease_id) const {
+  auto it = leased_slots_.find(slot_id);
+  if (it == leased_slots_.end() || it->second != lease_id) {
+    return nullptr;
+  }
+  MessageSlot *slot = GetSlot(slot_id);
+  if (slot == nullptr ||
+      slot->refs.load(std::memory_order_acquire) !=
+          (kPubOwned | uint64_t(publisher_id_))) {
+    return nullptr;
+  }
+  return slot;
+}
+
+void PublisherImpl::RemoveLease(int32_t slot_id) {
+  leased_slots_.erase(slot_id);
+}
+
+MessageSlot *PublisherImpl::ClaimRetiredSlot(int32_t slot_id) {
+  MessageSlot *slot = GetSlot(slot_id);
+  if (slot == nullptr || !RetiredSlots().IsSet(slot_id)) {
+    return nullptr;
+  }
+
+  uint64_t old_refs = slot->refs.load(std::memory_order_acquire);
+  if ((old_refs & (kPubOwned | kRefsMask)) != 0) {
+    return nullptr;
+  }
+  uint64_t expected = BuildRefsBitField(
+      slot->ordinal, (old_refs >> kVchanIdShift) & kVchanIdMask,
+      (old_refs >> kRetiredRefsShift) & kRetiredRefsMask);
+  if (!slot->refs.compare_exchange_strong(
+          expected, kPubOwned | uint64_t(publisher_id_),
+          std::memory_order_acquire, std::memory_order_relaxed)) {
+    return nullptr;
+  }
+  RetiredSlots().Clear(slot_id);
+  slot->ordinal = 0;
+  slot->timestamp = 0;
+  slot->vchan_id = vchan_id_;
+  SetSlotToBiggestBuffer(slot);
+  MessagePrefix *prefix = Prefix(slot);
+  prefix->flags = 0;
+  prefix->vchan_id = vchan_id_;
+  ccb_->subscribers.Traverse([this, slot](int sub_id) {
+    GetAvailableSlots(sub_id).Clear(slot->id);
+  });
+  return slot;
+}
+
+bool PublisherImpl::ReleaseLeasedSlot(MessageSlot *slot) {
+  if (slot == nullptr ||
+      slot->refs.load(std::memory_order_acquire) !=
+          (kPubOwned | uint64_t(publisher_id_))) {
+    return false;
+  }
+  slot->ordinal = 0;
+  slot->timestamp = 0;
+  slot->refs.store(0, std::memory_order_release);
+  ccb_->subscribers.Traverse([this, slot](int sub_id) {
+    GetAvailableSlots(sub_id).Clear(slot->id);
+  });
+  RetiredSlots().Set(slot->id);
+  return true;
+}
+
+void PublisherImpl::RetirePublishedSlotImmediately(MessageSlot *slot) {
+  if (slot == nullptr) {
+    return;
+  }
+  RetiredSlots().Set(slot->id);
+  TriggerRetirement(slot->id);
+}
+
 MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
   int retries = num_slots_ * 1000;
   MessageSlot *slot = nullptr;
@@ -358,7 +445,8 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
   // If we took a slot that wasn't retired we must trigger the retirement fd.
   // This happens when we recycle a slot that has not yet been seen by all
   // subscribers.
-  if (free_slot == -1 && retired_slot == -1) {
+  if (free_slot == -1 && retired_slot == -1 &&
+      NotifyRetirementOnForcedReuse()) {
     TriggerRetirement(slot->id);
   }
   return slot;
@@ -511,7 +599,8 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
   // If we took a slot that wasn't retired we must trigger the retirement fd.
   // This happens when we recycle a slot that has not yet been seen by all
   // subscribers.
-  if (free_slot == -1 && retired_slot == -1) {
+  if (free_slot == -1 && retired_slot == -1 &&
+      NotifyRetirementOnForcedReuse()) {
     TriggerRetirement(slot->id);
   }
   return slot;
@@ -519,7 +608,8 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
 
 Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     MessageSlot *slot, bool reliable, bool is_activation, int owner,
-    bool omit_prefix, bool use_prefix_slot_id, bool for_tunnel) {
+    bool omit_prefix, bool use_prefix_slot_id, bool for_tunnel,
+    bool acquire_next) {
   void *buffer = GetBufferAddress(slot);
   MessagePrefix *prefix = Prefix(slot);
 
@@ -631,6 +721,10 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
   // ahead of the failed ordinal.
   for (InPlaceSlotQueue *queue : failed_queues) {
     queue->MarkInsertionFailure();
+  }
+
+  if (!acquire_next) {
+    return {nullptr, prefix->ordinal, prefix->timestamp};
   }
 
   // A reliable publisher doesn't allocate a slot until it is asked for.

@@ -249,7 +249,12 @@ TEST_F(ShadowTest, ShadowReceivesAddPublisher) {
   subspace::Client client;
   InitClient(client);
 
-  auto pub = client.CreatePublisher("shadow_test_chan2", 128, 2);
+  auto pub = client.CreatePublisher(
+      "shadow_test_chan2",
+      subspace::PublisherOptions()
+          .SetSlotSize(128)
+          .SetNumSlots(5)
+          .SetMaxOutstandingSlotLeases(3));
   ASSERT_THAT(pub, IsOk());
 
   ASSERT_TRUE(WaitForShadowState([]() {
@@ -265,6 +270,7 @@ TEST_F(ShadowTest, ShadowReceivesAddPublisher) {
     EXPECT_EQ(it->second.publishers.size(), 1u);
 
     auto &pub_entry = it->second.publishers.begin()->second;
+    EXPECT_EQ(pub_entry.max_outstanding_slot_leases, 3);
     EXPECT_TRUE(pub_entry.poll_fd.Valid());
     EXPECT_TRUE(pub_entry.trigger_fd.Valid());
   });
@@ -927,13 +933,29 @@ TEST_F(ShadowRecoveryTest, RecoversMuxSubscriberQueueTopology) {
       .SetNumSlots(32)
       .SetSubscriberQueueArenaSize(
           subspace::kDefaultSubscriberQueueArenaSize)
+      .SetMaxOutstandingSlotLeases(3)
       .SetMux(kMux);
   auto pre_pub = pre_client.CreatePublisher(kVchan, pub_options);
   ASSERT_THAT(pre_pub, IsOk());
   subspace::SubscriberOptions sub_options;
-  sub_options.SetSubscriberQueueSize(4);
+  sub_options.SetSubscriberQueueSize(4).SetMaxSubscribers(2);
   auto pre_sub = pre_client.CreateSubscriber(kMux, sub_options);
   ASSERT_THAT(pre_sub, IsOk());
+  subspace::ServerChannel *pre_mux = server_->FindChannel(kMux);
+  ASSERT_NE(nullptr, pre_mux);
+  int pre_subscriber_id = -1;
+  pre_mux->GetCcb()->subscribers.Traverse(
+      [&pre_subscriber_id](int id) { pre_subscriber_id = id; });
+  ASSERT_GE(pre_subscriber_id, 0);
+  const uint64_t pre_queue_offset =
+      pre_mux->GetAvailableSlotQueueIndexAddress()
+          ->offsets[pre_subscriber_id]
+          .load(std::memory_order_acquire);
+  ASSERT_NE(subspace::kInvalidSlotQueueOffset, pre_queue_offset);
+  auto pre_buffer = pre_pub->GetMessageBuffer();
+  ASSERT_THAT(pre_buffer, IsOk());
+  memcpy(*pre_buffer, "queued_before_restart", 21);
+  ASSERT_THAT(pre_pub->PublishMessage(21), IsOk());
 
   ASSERT_TRUE(WaitForShadowState([this]() {
     return shadow_->WithChannels([](auto &channels) {
@@ -955,6 +977,36 @@ TEST_F(ShadowRecoveryTest, RecoversMuxSubscriberQueueTopology) {
   ASSERT_NE(nullptr, vchan);
   EXPECT_TRUE(mux->IsMux());
   EXPECT_TRUE(vchan->IsVirtual());
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueArenaSize,
+            mux->SubscriberQueueArenaSize());
+  EXPECT_EQ(2, mux->MaxSubscribers());
+  EXPECT_EQ(pre_queue_offset,
+            mux->GetAvailableSlotQueueIndexAddress()
+                ->offsets[pre_subscriber_id]
+                .load(std::memory_order_acquire));
+
+  int max_active_messages = 0;
+  int max_outstanding_slot_leases = 0;
+  mux->CountCapacityUsage(max_active_messages, max_outstanding_slot_leases);
+  EXPECT_EQ(1, max_active_messages);
+  EXPECT_EQ(3, max_outstanding_slot_leases);
+
+  ASSERT_EQ(1u, mux->GetUsers().size());
+  const auto *recovered_subscriber = static_cast<const subspace::SubscriberUser *>(
+      mux->GetUsers().begin()->second.get());
+  EXPECT_EQ(4, recovered_subscriber->SubscriberQueueSize());
+  EXPECT_NE(0u, recovered_subscriber->ProcessId());
+  ASSERT_EQ(1u, vchan->GetUsers().size());
+  const auto *recovered_publisher = static_cast<const subspace::PublisherUser *>(
+      vchan->GetUsers().begin()->second.get());
+  EXPECT_EQ(3, recovered_publisher->MaxOutstandingSlotLeases());
+  EXPECT_NE(0u, recovered_publisher->ProcessId());
+
+  auto recovered_pre_message = pre_sub->ReadMessage();
+  ASSERT_THAT(recovered_pre_message, IsOk());
+  ASSERT_EQ(21, recovered_pre_message->length);
+  EXPECT_EQ(
+      0, memcmp(recovered_pre_message->buffer, "queued_before_restart", 21));
 
   subspace::Client post_client;
   post_client.SetThreadSafe(true);

@@ -252,6 +252,60 @@ inline shared_ptr<T, Aliaser>::shared_ptr(const weak_ptr<T, Aliaser> &p)
 class Publisher;
 class Subscriber;
 
+// An explicitly leased publisher slot. The lease remains publisher-owned until
+// it is published or released. lease_id prevents stale slot-id reuse.
+struct PublisherBufferLease {
+  void *buffer = nullptr;
+  size_t buffer_size = 0;
+  int32_t slot_id = -1;
+  uint64_t lease_id = 0;
+
+  explicit operator bool() const {
+    return buffer != nullptr && slot_id >= 0 && lease_id != 0;
+  }
+};
+
+// RAII owner for an explicitly leased publisher slot. Unless the lease is
+// published or explicitly released first, destruction releases it back to the
+// publisher. The Publisher must not be moved or destroyed while one of its
+// scoped leases is alive.
+class ScopedPublisherBufferLease {
+public:
+  ScopedPublisherBufferLease() = default;
+  ~ScopedPublisherBufferLease();
+
+  ScopedPublisherBufferLease(const ScopedPublisherBufferLease &) = delete;
+  ScopedPublisherBufferLease &
+  operator=(const ScopedPublisherBufferLease &) = delete;
+  ScopedPublisherBufferLease(ScopedPublisherBufferLease &&other) noexcept;
+  ScopedPublisherBufferLease &
+  operator=(ScopedPublisherBufferLease &&other) = delete;
+
+  explicit operator bool() const {
+    return publisher_ != nullptr && static_cast<bool>(lease_);
+  }
+  void *buffer() const { return lease_.buffer; }
+  size_t buffer_size() const { return lease_.buffer_size; }
+  int32_t slot_id() const { return lease_.slot_id; }
+  uint64_t lease_id() const { return lease_.lease_id; }
+  absl::Span<std::byte> GetMetadata();
+  absl::StatusOr<const Message> Publish(int64_t message_size);
+  absl::StatusOr<const Message> PublishCopy(absl::Span<const std::byte> payload);
+  absl::Status Release();
+
+private:
+  friend class Publisher;
+  ScopedPublisherBufferLease(Publisher *publisher, PublisherBufferLease lease)
+      : publisher_(publisher), lease_(lease) {}
+  void Invalidate() {
+    publisher_ = nullptr;
+    lease_ = {};
+  }
+
+  Publisher *publisher_ = nullptr;
+  PublisherBufferLease lease_;
+};
+
 // This is an Subspace client.  It must be initialized by calling Init()
 // before it can be used.  The Init() function connects it to an Subspace
 // server that is listening on the same Unix Domain Socket.
@@ -406,6 +460,27 @@ private:
   // the publisher cannot access the message once it's been published.
   absl::StatusOr<const Message>
   PublishMessage(details::PublisherImpl *publisher, int64_t message_size);
+
+  absl::StatusOr<PublisherBufferLease>
+  AcquirePublisherBuffer(details::PublisherImpl *publisher);
+  absl::StatusOr<PublisherBufferLease>
+  ReclaimPublisherBuffer(details::PublisherImpl *publisher, int32_t slot_id);
+  absl::StatusOr<const Message>
+  PublishPublisherBuffer(details::PublisherImpl *publisher,
+                         const PublisherBufferLease &lease,
+                         int64_t message_size);
+  absl::StatusOr<const Message>
+  PublishPublisherBufferCopy(details::PublisherImpl *publisher,
+                             const PublisherBufferLease &lease,
+                             absl::Span<const std::byte> payload);
+  absl::StatusOr<const Message> PublishPublisherBufferInternal(
+      details::PublisherImpl *publisher, const PublisherBufferLease &lease,
+      int64_t message_size, const std::byte *payload);
+  absl::Status ReleasePublisherBuffer(details::PublisherImpl *publisher,
+                                      const PublisherBufferLease &lease);
+  absl::Span<std::byte>
+  GetPublisherBufferMetadata(details::PublisherImpl *publisher,
+                             const PublisherBufferLease &lease);
 
   // In thread-safe mode, if you don't want to publish the message, you must
   // cancel the publish.  This will release the lock.
@@ -606,17 +681,16 @@ private:
   int64_t GetCurrentOrdinal(details::SubscriberImpl *sub);
 
   absl::Status CheckConnected() const;
-  absl::Status
-  SendRequestReceiveResponse(const Request &req, Response &response,
-                             std::vector<toolbelt::FileDescriptor> &fds,
-                             const std::vector<toolbelt::FileDescriptor>
-                                 &send_fds = {});
+  absl::Status SendRequestReceiveResponse(
+      const Request &req, Response &response,
+      std::vector<toolbelt::FileDescriptor> &fds,
+      const std::vector<toolbelt::FileDescriptor> &send_fds = {});
   absl::Status
   SendOneWayRequest(const Request &req,
                     const std::vector<toolbelt::FileDescriptor> &fds = {});
-  absl::Status RegisterClientBuffer(
-      const ClientBufferHandleMetadata &metadata,
-      const toolbelt::FileDescriptor *fd = nullptr);
+  absl::Status
+  RegisterClientBuffer(const ClientBufferHandleMetadata &metadata,
+                       const toolbelt::FileDescriptor *fd = nullptr);
   absl::StatusOr<std::vector<RegisteredClientBuffer>>
   GetClientBuffers(const std::string &channel_name, uint64_t session_id,
                    uint32_t buffer_index);
@@ -853,6 +927,54 @@ public:
   // CancelPublish.
   absl::StatusOr<const Message> PublishMessage(int64_t message_size) {
     return client_->PublishMessage(impl_.get(), message_size);
+  }
+
+  // Lease multiple unpublished slots without holding the client's thread-safe
+  // mutex across the lease lifetime. The maximum is configured by
+  // PublisherOptions::SetMaxOutstandingSlotLeases().
+  absl::StatusOr<PublisherBufferLease> AcquireBufferLease() {
+    return client_->AcquirePublisherBuffer(impl_.get());
+  }
+
+  absl::StatusOr<ScopedPublisherBufferLease> AcquireScopedBufferLease() & {
+    auto lease = AcquireBufferLease();
+    if (!lease.ok()) {
+      return lease.status();
+    }
+    return ScopedPublisherBufferLease(this, *lease);
+  }
+
+  // Reclaim a specific slot reported by the retirement fd.
+  absl::StatusOr<PublisherBufferLease> ReclaimBufferLease(int32_t slot_id) {
+    return client_->ReclaimPublisherBuffer(impl_.get(), slot_id);
+  }
+
+  absl::StatusOr<ScopedPublisherBufferLease>
+  ReclaimScopedBufferLease(int32_t slot_id) & {
+    auto lease = ReclaimBufferLease(slot_id);
+    if (!lease.ok()) {
+      return lease.status();
+    }
+    return ScopedPublisherBufferLease(this, *lease);
+  }
+
+  absl::StatusOr<const Message>
+  PublishBufferLease(const PublisherBufferLease &lease, int64_t message_size) {
+    return client_->PublishPublisherBuffer(impl_.get(), lease, message_size);
+  }
+
+  absl::StatusOr<const Message>
+  PublishBufferLeaseCopy(const PublisherBufferLease &lease,
+                         absl::Span<const std::byte> payload) {
+    return client_->PublishPublisherBufferCopy(impl_.get(), lease, payload);
+  }
+
+  absl::Status ReleaseBufferLease(const PublisherBufferLease &lease) {
+    return client_->ReleasePublisherBuffer(impl_.get(), lease);
+  }
+
+  absl::Span<std::byte> GetMetadata(const PublisherBufferLease &lease) {
+    return client_->GetPublisherBufferMetadata(impl_.get(), lease);
   }
 
   // Publish a message that already includes a prefix.  You have the option to
@@ -1142,6 +1264,61 @@ private:
   std::function<absl::Status(Publisher *, int, int)> resize_callback_ = nullptr;
   std::vector<void *> address_cache_;
 };
+
+inline ScopedPublisherBufferLease::~ScopedPublisherBufferLease() {
+  Release().IgnoreError();
+}
+
+inline ScopedPublisherBufferLease::ScopedPublisherBufferLease(
+    ScopedPublisherBufferLease &&other) noexcept
+    : publisher_(other.publisher_), lease_(other.lease_) {
+  other.Invalidate();
+}
+
+inline absl::Span<std::byte> ScopedPublisherBufferLease::GetMetadata() {
+  if (!*this) {
+    return {};
+  }
+  return publisher_->GetMetadata(lease_);
+}
+
+inline absl::StatusOr<const Message>
+ScopedPublisherBufferLease::Publish(int64_t message_size) {
+  if (!*this) {
+    return absl::FailedPreconditionError(
+        "publisher buffer lease is not active");
+  }
+  auto result = publisher_->PublishBufferLease(lease_, message_size);
+  if (result.ok()) {
+    Invalidate();
+  }
+  return result;
+}
+
+inline absl::StatusOr<const Message>
+ScopedPublisherBufferLease::PublishCopy(
+    absl::Span<const std::byte> payload) {
+  if (!*this) {
+    return absl::FailedPreconditionError(
+        "publisher buffer lease is not active");
+  }
+  auto result = publisher_->PublishBufferLeaseCopy(lease_, payload);
+  if (result.ok()) {
+    Invalidate();
+  }
+  return result;
+}
+
+inline absl::Status ScopedPublisherBufferLease::Release() {
+  if (!*this) {
+    return absl::OkStatus();
+  }
+  absl::Status status = publisher_->ReleaseBufferLease(lease_);
+  if (status.ok()) {
+    Invalidate();
+  }
+  return status;
+}
 
 class Subscriber {
 public:

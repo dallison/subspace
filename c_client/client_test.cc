@@ -526,6 +526,141 @@ TEST_F(ClientTest, MuxAndChecksumOptions) {
   ASSERT_TRUE(subspace_remove_client(&sub_client));
 }
 
+TEST_F(ClientTest, ExplicitSplitBufferLeasesRetireAndReclaimExactSlot) {
+  SubspaceClient pub_client =
+      subspace_create_client_with_socket(Socket().c_str());
+  SubspaceClient sub_client =
+      subspace_create_client_with_socket(Socket().c_str());
+  ASSERT_NE(nullptr, pub_client.client);
+  ASSERT_NE(nullptr, sub_client.client);
+
+  TestCSplitBufferState split_state;
+  SubspacePublisherOptions pub_opts =
+      subspace_publisher_options_default(128, 6);
+  pub_opts.use_split_buffers = true;
+  pub_opts.notify_retirement = true;
+  pub_opts.notify_retirement_on_forced_reuse = false;
+  pub_opts.max_outstanding_slot_leases = 3;
+  pub_opts.subscriber_queue_arena_size = 64'000;
+  pub_opts.metadata_size = 8;
+  pub_opts.split_callbacks = {
+      .allocate = TestCSplitAllocate,
+      .map = TestCSplitMap,
+      .unmap = TestCSplitUnmap,
+      .free = TestCSplitFree,
+      .user_data = &split_state,
+  };
+  SubspacePublisher pub =
+      subspace_create_publisher(pub_client, "c_explicit_leases", pub_opts);
+  ASSERT_NE(nullptr, pub.publisher) << subspace_get_last_error();
+
+  SubspaceSubscriberOptions sub_opts = subspace_subscriber_options_default();
+  sub_opts.subscriber_queue_size = 4;
+  sub_opts.max_active_messages = 2;
+  sub_opts.split_callbacks = pub_opts.split_callbacks;
+  SubspaceSubscriber sub =
+      subspace_create_subscriber(sub_client, "c_explicit_leases", sub_opts);
+  ASSERT_NE(nullptr, sub.subscriber) << subspace_get_last_error();
+  EXPECT_EQ(4, subspace_get_subscriber_queue_size(sub));
+
+  SubspacePublisherBufferLease leases[3];
+  for (int i = 0; i < 3; ++i) {
+    leases[i] = subspace_acquire_publisher_buffer(pub);
+    ASSERT_NE(nullptr, leases[i].buffer) << subspace_get_last_error();
+    EXPECT_EQ(128U, leases[i].buffer_size);
+    for (int j = 0; j < i; ++j) {
+      EXPECT_NE(leases[j].buffer, leases[i].buffer);
+      EXPECT_NE(leases[j].slot_id, leases[i].slot_id);
+    }
+  }
+  SubspacePublisherBufferLease exhausted =
+      subspace_acquire_publisher_buffer(pub);
+  EXPECT_EQ(nullptr, exhausted.buffer);
+  EXPECT_FALSE(subspace_has_error());
+
+  size_t metadata_size = 0;
+  void *metadata =
+      subspace_get_publisher_buffer_metadata(pub, leases[1], &metadata_size);
+  ASSERT_NE(nullptr, metadata);
+  ASSERT_EQ(8U, metadata_size);
+  memcpy(metadata, "lease-md", 8);
+  memcpy(leases[1].buffer, "lease-two", 9);
+
+  SubspaceMessage published =
+      subspace_publish_publisher_buffer(pub, leases[1], 9);
+  ASSERT_EQ(9, published.length) << subspace_get_last_error();
+  EXPECT_EQ(leases[1].slot_id, published.slot_id);
+
+  ASSERT_TRUE(subspace_wait_for_subscriber_with_timeout(sub, 1000));
+  SubspaceMessage received = subspace_read_message(sub);
+  ASSERT_EQ(9, received.length);
+  EXPECT_EQ(0, memcmp(received.buffer, "lease-two", 9));
+
+  int retirement_fd = subspace_get_publisher_retirement_fd(pub);
+  ASSERT_GE(retirement_fd, 0);
+  struct pollfd poll_fd = {.fd = retirement_fd, .events = POLLIN};
+  EXPECT_EQ(0, poll(&poll_fd, 1, 0));
+
+  ASSERT_TRUE(subspace_free_message(&received));
+  ASSERT_EQ(1, poll(&poll_fd, 1, 1000));
+  int32_t retired_slot = -1;
+  ASSERT_EQ(ssize_t(sizeof(retired_slot)),
+            read(retirement_fd, &retired_slot, sizeof(retired_slot)));
+  ASSERT_EQ(leases[1].slot_id, retired_slot);
+
+  SubspacePublisherBufferLease reclaimed =
+      subspace_reclaim_publisher_buffer(pub, retired_slot);
+  ASSERT_NE(nullptr, reclaimed.buffer) << subspace_get_last_error();
+  EXPECT_EQ(leases[1].buffer, reclaimed.buffer);
+  EXPECT_NE(leases[1].lease_id, reclaimed.lease_id);
+
+  EXPECT_FALSE(subspace_release_publisher_buffer(pub, leases[1]));
+  EXPECT_TRUE(subspace_has_error());
+  EXPECT_TRUE(subspace_release_publisher_buffer(pub, leases[0]));
+  EXPECT_TRUE(subspace_release_publisher_buffer(pub, leases[2]));
+  EXPECT_TRUE(subspace_release_publisher_buffer(pub, reclaimed));
+
+  ASSERT_TRUE(subspace_remove_subscriber(&sub));
+  ASSERT_TRUE(subspace_remove_publisher(&pub));
+  ASSERT_TRUE(subspace_remove_client(&pub_client));
+  ASSERT_TRUE(subspace_remove_client(&sub_client));
+}
+
+TEST_F(ClientTest, ExplicitLeaseWithNoSubscribersRetiresImmediately) {
+  SubspaceClient client = subspace_create_client_with_socket(Socket().c_str());
+  ASSERT_NE(nullptr, client.client);
+  SubspacePublisherOptions options =
+      subspace_publisher_options_default(64, 4);
+  options.notify_retirement = true;
+  options.notify_retirement_on_forced_reuse = false;
+  options.max_outstanding_slot_leases = 2;
+  SubspacePublisher pub =
+      subspace_create_publisher(client, "c_no_subscriber_retirement", options);
+  ASSERT_NE(nullptr, pub.publisher) << subspace_get_last_error();
+
+  SubspacePublisherBufferLease lease =
+      subspace_acquire_publisher_buffer(pub);
+  ASSERT_NE(nullptr, lease.buffer);
+  memcpy(lease.buffer, "none", 4);
+  ASSERT_EQ(4, subspace_publish_publisher_buffer(pub, lease, 4).length);
+
+  int fd = subspace_get_publisher_retirement_fd(pub);
+  struct pollfd poll_fd = {.fd = fd, .events = POLLIN};
+  ASSERT_EQ(1, poll(&poll_fd, 1, 1000));
+  int32_t slot_id = -1;
+  ASSERT_EQ(ssize_t(sizeof(slot_id)), read(fd, &slot_id, sizeof(slot_id)));
+  EXPECT_EQ(lease.slot_id, slot_id);
+
+  SubspacePublisherBufferLease reclaimed =
+      subspace_reclaim_publisher_buffer(pub, slot_id);
+  ASSERT_NE(nullptr, reclaimed.buffer);
+  EXPECT_EQ(lease.buffer, reclaimed.buffer);
+  EXPECT_TRUE(subspace_release_publisher_buffer(pub, reclaimed));
+
+  ASSERT_TRUE(subspace_remove_publisher(&pub));
+  ASSERT_TRUE(subspace_remove_client(&client));
+}
+
 TEST_F(ClientTest, ChecksumCallbacks) {
   auto pub_client = subspace_create_client_with_socket(Socket().c_str());
   ASSERT_NE(nullptr, pub_client.client);
@@ -1209,6 +1344,82 @@ TEST_F(ClientTest, SubscriberCallbacks) {
   }
   messages_read.clear();
 
+  ASSERT_TRUE(subspace_remove_subscriber(&sub));
+  ASSERT_TRUE(subspace_remove_publisher(&pub));
+  ASSERT_TRUE(subspace_remove_client(&pub_client));
+  ASSERT_TRUE(subspace_remove_client(&sub_client));
+}
+
+TEST_F(ClientTest, SubscriberCallbacksFromWorkerThread) {
+  messages_read.clear();
+  auto pub_client = subspace_create_client_with_socket(Socket().c_str());
+  auto sub_client = subspace_create_client_with_socket(Socket().c_str());
+  ASSERT_NE(nullptr, pub_client.client);
+  ASSERT_NE(nullptr, sub_client.client);
+
+  SubspaceSubscriberOptions sub_options = CSubscriberOptionsDefault();
+  sub_options.max_subscribers = 1;
+  SubspaceSubscriber sub = subspace_create_subscriber(
+      sub_client, "worker_callback", sub_options);
+  ASSERT_NE(nullptr, sub.subscriber);
+  SubspacePublisher pub = subspace_create_publisher(
+      pub_client, "worker_callback", CPublisherOptionsDefault(256, 4));
+  ASSERT_NE(nullptr, pub.publisher);
+  ASSERT_EQ(1, subspace_get_publisher_num_subscribers(pub, -1));
+  ASSERT_TRUE(subspace_register_subscriber_callback(sub, MessageCallback));
+
+  SubspaceMessageBuffer buffer = subspace_get_message_buffer(pub, 256);
+  ASSERT_NE(nullptr, buffer.buffer);
+  memcpy(buffer.buffer, "foobar", 6);
+  ASSERT_EQ(6, subspace_publish_message(pub, 6).length);
+  bool processed = false;
+  std::thread worker(
+      [&] { processed = subspace_process_all_messages(sub); });
+  worker.join();
+
+  ASSERT_TRUE(processed);
+  ASSERT_EQ(1, messages_read.size());
+  ASSERT_EQ(6, messages_read.front().length);
+  ASSERT_EQ(0, memcmp(messages_read.front().buffer, "foobar", 6));
+  ASSERT_TRUE(subspace_free_message(&messages_read.front()));
+  messages_read.clear();
+
+  ASSERT_TRUE(subspace_remove_subscriber(&sub));
+  ASSERT_TRUE(subspace_remove_publisher(&pub));
+  ASSERT_TRUE(subspace_remove_client(&pub_client));
+  ASSERT_TRUE(subspace_remove_client(&sub_client));
+}
+
+TEST_F(ClientTest, SubscriberLimitStillDeliversMessages) {
+  auto pub_client = subspace_create_client_with_socket(Socket().c_str());
+  auto sub_client = subspace_create_client_with_socket(Socket().c_str());
+  ASSERT_NE(nullptr, pub_client.client);
+  ASSERT_NE(nullptr, sub_client.client);
+
+  SubspaceSubscriberOptions options = CSubscriberOptionsDefault();
+  options.max_subscribers = 1;
+  SubspaceSubscriber sub =
+      subspace_create_subscriber(sub_client, "limited_delivery", options);
+  ASSERT_NE(nullptr, sub.subscriber);
+  SubspacePublisher pub = subspace_create_publisher(
+      pub_client, "limited_delivery", CPublisherOptionsDefault(64, 10));
+  ASSERT_NE(nullptr, pub.publisher);
+
+  SubspaceMessageBuffer buffer = subspace_get_message_buffer(pub, 64);
+  ASSERT_NE(nullptr, buffer.buffer);
+  memcpy(buffer.buffer, "limit", 5);
+  ASSERT_EQ(5, subspace_publish_message(pub, 5).length);
+
+  SubspaceMessage message = {};
+  for (int i = 0; i < 10 && message.length == 0; ++i) {
+    if (message.message != nullptr) {
+      ASSERT_TRUE(subspace_free_message(&message));
+    }
+    message = subspace_read_message(sub);
+  }
+  ASSERT_EQ(5, message.length);
+  ASSERT_EQ(0, memcmp(message.buffer, "limit", 5));
+  ASSERT_TRUE(subspace_free_message(&message));
   ASSERT_TRUE(subspace_remove_subscriber(&sub));
   ASSERT_TRUE(subspace_remove_publisher(&pub));
   ASSERT_TRUE(subspace_remove_client(&pub_client));

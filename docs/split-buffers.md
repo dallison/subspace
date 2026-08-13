@@ -79,6 +79,24 @@ auto opts = subspace::PublisherOptions()
 auto pub = client.CreatePublisher("camera", opts);
 ```
 
+Split-buffer publishers can use explicit buffer leases to keep several payload
+slots in an external producer pipeline and to reclaim the exact payload slot
+reported by retirement:
+
+```cpp
+auto opts = subspace::PublisherOptions()
+    .SetSlotSize(4096)
+    .SetNumSlots(16)
+    .SetUseSplitBuffers(true)
+    .SetMaxOutstandingSlotLeases(3)
+    .SetNotifyRetirement(true)
+    .SetNotifyRetirementOnForcedReuse(false);
+```
+
+The lease's `buffer` points at the split payload allocation; metadata remains in
+the corresponding prefix slot. See
+[Publisher Buffer Leases](publisher-buffer-leases.md).
+
 To request split payload buffers for the remote mirror publisher created over a
 bridge, set `SetSplitBuffersOverBridge(true)`:
 

@@ -70,7 +70,18 @@ If you set the `notify_retirement` option in `PublisherOptions`, the system will
 
 Say you have a message that contains a pointer to something in the GPU (a number).  The publisher will allocate the GPU memory, put a reference to it in the message and publish it.  The publisher needs to know when it can free up the GPU memory and reuse it, otherwise you would run of memory.  So the publisher process will set the `notify_retirement` option and call `GetRetirementFd` to get the file descriptor for the read-end of the pipe.
 
-Then, when all the subscribers have processed the message (or the message is dropped), the `slot ID` of the slot containing the message will be written to the pipe.  The publisher process can then read the slot ID from the pipe and correlate that number with the GPU pointer (it will need to keep that mapping).  It can then safely free up the GPU pointer.
+Then, when all the subscribers have processed the message, the `slot ID` of the
+slot containing the message will be written to the pipe. An unreliable
+publisher can also request notifications when it forcibly reuses an unread
+slot; this legacy behavior is controlled by
+`notify_retirement_on_forced_reuse`.
+
+The explicit publisher lease API can pass a retired slot ID to
+`ReclaimBufferLease()` and reacquire that exact slot with a new lease token.
+Applications using notifications for exact-slot reclamation or
+external-resource lifetime should disable forced-reuse notifications so every
+notification represents subscriber-completed retirement. See
+[Publisher Buffer Leases](publisher-buffer-leases.md).
 
 ## Multiplexed virtual channels
 There is a style of IPC usage that insists on only one publisher per channel.  If you are a proponent of this, you will probably be creating a bunch of channels, perhaps a set of them per process/node that all have one publisher and a few subscribers.  In an IPC system that uses TCP for transport this isn't a big deal since they will use the kernel's pre-allocated TCP buffers for their message storage, but in a shared memory IPC system, each channel will have a ring buffer of shared memory allocated for them.

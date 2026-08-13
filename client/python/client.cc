@@ -4,13 +4,39 @@
 #include "pybind11/functional.h"
 #include "pybind11/pybind11.h"
 #include "pybind11/stl.h"
+#include <cstring>
+#include <optional>
 #include <stdexcept>
 #include <string_view>
+#include <vector>
 
 namespace subspace {
 namespace python {
 
 namespace py = pybind11;
+
+class PythonPublisherBufferLease {
+public:
+  explicit PythonPublisherBufferLease(PublisherBufferLease lease)
+      : lease_(lease), staging_(lease.buffer_size) {}
+
+  explicit operator bool() const { return static_cast<bool>(lease_); }
+  PublisherBufferLease &Lease() { return lease_; }
+  const PublisherBufferLease &Lease() const { return lease_; }
+  std::vector<std::byte> &Staging() { return staging_; }
+  size_t BufferSize() const { return staging_.size(); }
+  int32_t SlotId() const { return lease_.slot_id; }
+  uint64_t LeaseId() const { return lease_.lease_id; }
+
+  void Invalidate() { lease_ = PublisherBufferLease{}; }
+
+private:
+  PublisherBufferLease lease_;
+  // Python memoryviews point into this stable staging allocation rather than
+  // shared memory. Existing views therefore remain harmless after the token is
+  // invalidated; publish copies the requested payload bytes into the lease.
+  std::vector<std::byte> staging_;
+};
 
 PYBIND11_MODULE(subspace, m) {
 
@@ -18,8 +44,9 @@ PYBIND11_MODULE(subspace, m) {
             "inter-process communication protocol.";
 
   // ReadMode enum.
-  py::enum_<ReadMode>(m, "ReadMode", "Mode for reading messages from a "
-                                     "subscriber.")
+  py::enum_<ReadMode>(m, "ReadMode",
+                      "Mode for reading messages from a "
+                      "subscriber.")
       .value("READ_NEXT", ReadMode::kReadNext,
              "Read the next available message.")
       .value("READ_NEWEST", ReadMode::kReadNewest,
@@ -124,6 +151,20 @@ PYBIND11_MODULE(subspace, m) {
            "Set whether the publisher notifies on message retirement.")
       .def("notify_retirement", &PublisherOptions::NotifyRetirement,
            "Get whether the publisher notifies on message retirement.")
+      .def("set_max_outstanding_slot_leases",
+           &PublisherOptions::SetMaxOutstandingSlotLeases,
+           "Set the maximum number of explicitly leased unpublished slots.")
+      .def("max_outstanding_slot_leases",
+           &PublisherOptions::MaxOutstandingSlotLeases,
+           "Get the maximum number of explicitly leased unpublished slots.")
+      .def("set_notify_retirement_on_forced_reuse",
+           &PublisherOptions::SetNotifyRetirementOnForcedReuse,
+           "Set whether unreliable forced slot reuse emits retirement "
+           "notifications.")
+      .def("notify_retirement_on_forced_reuse",
+           &PublisherOptions::NotifyRetirementOnForcedReuse,
+           "Get whether unreliable forced slot reuse emits retirement "
+           "notifications.")
       .def("set_checksum", &PublisherOptions::SetChecksum,
            "Set whether published messages include a checksum.")
       .def("checksum", &PublisherOptions::Checksum,
@@ -136,10 +177,11 @@ PYBIND11_MODULE(subspace, m) {
            "Set the metadata size in bytes.")
       .def("metadata_size", &PublisherOptions::MetadataSize,
            "Get the metadata size in bytes.")
-      .def("set_for_tunnel", &PublisherOptions::SetForTunnel,
-           "Set whether this publisher is for an external tunnel process. "
-           "Tunnel publishers mark messages with a cross-machine flag so "
-           "subscribers can distinguish locally vs remotely generated messages.")
+      .def(
+          "set_for_tunnel", &PublisherOptions::SetForTunnel,
+          "Set whether this publisher is for an external tunnel process. "
+          "Tunnel publishers mark messages with a cross-machine flag so "
+          "subscribers can distinguish locally vs remotely generated messages.")
       .def("for_tunnel", &PublisherOptions::ForTunnel,
            "Get whether this publisher is for an external tunnel process.");
 
@@ -169,6 +211,10 @@ PYBIND11_MODULE(subspace, m) {
            "Set the maximum number of active messages for the subscriber.")
       .def("max_active_messages", &SubscriberOptions::MaxActiveMessages,
            "Get the maximum number of active messages for the subscriber.")
+      .def("set_max_subscribers", &SubscriberOptions::SetMaxSubscribers,
+           "Set the server-enforced subscriber limit for the channel.")
+      .def("max_subscribers", &SubscriberOptions::MaxSubscribers,
+           "Get the server-enforced subscriber limit for the channel.")
       .def("set_log_dropped_messages",
            &SubscriberOptions::SetLogDroppedMessages,
            "Sets whether the subscriber logs dropped messages.")
@@ -241,19 +287,18 @@ PYBIND11_MODULE(subspace, m) {
                     "The virtual channel ID of the message. This is used to "
                     "identify the virtual channel in which the message was "
                     "sent.")
-      .def_property_readonly("buffer",
-                             [](const Message &self) {
-                               return py::bytes(
-                                   reinterpret_cast<const char *>(self.buffer),
-                                   self.length);
-                             },
-                             "The buffer containing the message data.")
+      .def_property_readonly(
+          "buffer",
+          [](const Message &self) {
+            return py::bytes(reinterpret_cast<const char *>(self.buffer),
+                             self.length);
+          },
+          "The buffer containing the message data.")
       .def("Reset", &Message::Reset,
            "Release the message slot. Called automatically by __exit__.")
       .def_readonly("is_activation", &Message::is_activation,
                     "Whether this is a channel activation message.")
-      .def_readonly("slot_id", &Message::slot_id,
-                    "The slot ID of the message.")
+      .def_readonly("slot_id", &Message::slot_id, "The slot ID of the message.")
       .def_readonly("checksum_error", &Message::checksum_error,
                     "Whether a checksum error was detected for this message.")
       .def("channel_type", &Message::ChannelType,
@@ -262,6 +307,40 @@ PYBIND11_MODULE(subspace, m) {
            "Get the number of message slots in this message's channel.")
       .def("slot_size", &Message::SlotSize,
            "Get the slot size in bytes for this message's channel.");
+
+  py::class_<PythonPublisherBufferLease>(
+      m, "PublisherBufferLease",
+      "An explicitly leased unpublished publisher slot.")
+      .def_property_readonly(
+          "buffer",
+          [](PythonPublisherBufferLease &self) -> py::memoryview {
+            if (!self) {
+              throw std::runtime_error(
+                  "Publisher buffer lease is invalid or no longer active");
+            }
+            std::vector<std::byte> &staging = self.Staging();
+            return py::memoryview::from_memory(
+                staging.data(), static_cast<Py_ssize_t>(staging.size()));
+          },
+          "Writable staging memoryview copied to the leased slot on publish.",
+          py::keep_alive<0, 1>())
+      .def_property_readonly("buffer_size",
+                             &PythonPublisherBufferLease::BufferSize,
+                             "Capacity of the leased payload buffer.")
+      .def_property_readonly("slot_id", &PythonPublisherBufferLease::SlotId,
+                             "Channel slot ID owned by this lease.")
+      .def_property_readonly("lease_id", &PythonPublisherBufferLease::LeaseId,
+                             "Generation token used to reject stale leases.")
+      .def("__bool__",
+           [](const PythonPublisherBufferLease &self) {
+             return static_cast<bool>(self);
+           })
+      .def_property_readonly(
+          "valid",
+          [](const PythonPublisherBufferLease &self) {
+            return static_cast<bool>(self);
+          },
+          "Whether this lease is still locally valid.");
 
   // -------------------------------------------------------------------------
   // Publisher
@@ -386,12 +465,81 @@ actually written.)doc",
                       "Cancel a pending zero-copy publish and release the "
                       "buffer lock.");
 
+  publisher_class.def(
+      "acquire_buffer_lease",
+      [](Publisher *self) -> std::optional<PythonPublisherBufferLease> {
+        absl::StatusOr<PublisherBufferLease> result =
+            self->AcquireBufferLease();
+        if (!result.ok()) {
+          throw std::runtime_error(result.status().ToString());
+        }
+        if (!*result) {
+          return std::nullopt;
+        }
+        return PythonPublisherBufferLease(*result);
+      },
+      R"doc(Acquire an unpublished publisher slot without holding the client
+lock. Returns None when no slot is currently available.)doc",
+      py::keep_alive<0, 1>());
+
+  publisher_class.def(
+      "reclaim_buffer_lease",
+      [](Publisher *self,
+         int32_t slot_id) -> std::optional<PythonPublisherBufferLease> {
+        absl::StatusOr<PublisherBufferLease> result =
+            self->ReclaimBufferLease(slot_id);
+        if (!result.ok()) {
+          throw std::runtime_error(result.status().ToString());
+        }
+        if (!*result) {
+          return std::nullopt;
+        }
+        return PythonPublisherBufferLease(*result);
+      },
+      R"doc(Reclaim a specific retired slot. Returns None if the slot is not
+currently reclaimable.)doc",
+      py::arg("slot_id"), py::keep_alive<0, 1>());
+
+  publisher_class.def(
+      "publish_buffer_lease",
+      [](Publisher *self, PythonPublisherBufferLease &lease,
+         int64_t message_size) -> Message {
+        absl::StatusOr<const Message> result =
+            message_size > 0 &&
+                    static_cast<size_t>(message_size) <= lease.Staging().size()
+                ? self->PublishBufferLeaseCopy(
+                      lease.Lease(), absl::Span<const std::byte>(
+                                         lease.Staging().data(),
+                                         static_cast<size_t>(message_size)))
+                : self->PublishBufferLease(lease.Lease(), message_size);
+        if (!result.ok()) {
+          throw std::runtime_error(result.status().ToString());
+        }
+        lease.Invalidate();
+        return *result;
+      },
+      R"doc(Publish data written into an explicit lease. A successful publish
+invalidates the Python lease object.)doc",
+      py::arg("lease"), py::arg("message_size"));
+
+  publisher_class.def(
+      "release_buffer_lease",
+      [](Publisher *self, PythonPublisherBufferLease &lease) {
+        absl::Status result = self->ReleaseBufferLease(lease.Lease());
+        if (!result.ok()) {
+          throw std::runtime_error(result.ToString());
+        }
+        lease.Invalidate();
+      },
+      R"doc(Discard an unpublished explicit lease. A successful release
+invalidates the Python lease object.)doc",
+      py::arg("lease"));
+
   // Wait variants with timeout and extra fd.
   publisher_class.def(
       "wait_with_timeout",
       [](Publisher *self, int64_t timeout_ns) {
-        absl::Status result =
-            self->Wait(std::chrono::nanoseconds(timeout_ns));
+        absl::Status result = self->Wait(std::chrono::nanoseconds(timeout_ns));
         if (!result.ok()) {
           throw std::runtime_error(result.ToString());
         }
@@ -425,16 +573,12 @@ interrupt the wait. Returns the fd that triggered the wake-up.)doc",
 
   publisher_class.def(
       "get_file_descriptor",
-      [](Publisher *self) -> int {
-        return self->GetFileDescriptor().Fd();
-      },
+      [](Publisher *self) -> int { return self->GetFileDescriptor().Fd(); },
       "Get the underlying trigger file descriptor.");
 
   publisher_class.def(
       "get_retirement_fd",
-      [](Publisher *self) -> int {
-        return self->GetRetirementFd().Fd();
-      },
+      [](Publisher *self) -> int { return self->GetRetirementFd().Fd(); },
       "Get the file descriptor notified when message slots are retired.");
 
   // Resize callback.
@@ -442,7 +586,8 @@ interrupt the wait. Returns the fd that triggered the wake-up.)doc",
       "register_resize_callback",
       [](Publisher *self, py::function callback) {
         absl::Status result = self->RegisterResizeCallback(
-            [callback](Publisher *, int old_size, int new_size) -> absl::Status {
+            [callback](Publisher *, int old_size,
+                       int new_size) -> absl::Status {
               py::gil_scoped_acquire acquire;
               py::object ret = callback(old_size, new_size);
               if (py::isinstance<py::bool_>(ret) && !ret.cast<bool>()) {
@@ -494,6 +639,20 @@ get_message_buffer() and publish_buffer() to read the current
 metadata contents.)doc");
 
   publisher_class.def(
+      "get_metadata",
+      [](Publisher *self,
+         const PythonPublisherBufferLease &lease) -> py::bytes {
+        absl::Span<std::byte> span = self->GetMetadata(lease.Lease());
+        if (span.empty() && self->MetadataSize() != 0) {
+          throw std::runtime_error("Invalid or stale publisher buffer lease");
+        }
+        return py::bytes(reinterpret_cast<const char *>(span.data()),
+                         span.size());
+      },
+      R"doc(Get a copy of the metadata area for an active explicit lease.)doc",
+      py::arg("lease"));
+
+  publisher_class.def(
       "set_metadata",
       [](Publisher *self, py::bytes data) {
         auto view = static_cast<std::string_view>(data);
@@ -509,6 +668,26 @@ metadata contents.)doc");
 between get_message_buffer() and publish_buffer().  The data
 must not exceed metadata_size() bytes.)doc",
       py::arg("data"));
+
+  publisher_class.def(
+      "set_metadata",
+      [](Publisher *self, const PythonPublisherBufferLease &lease,
+         py::bytes data) {
+        auto view = static_cast<std::string_view>(data);
+        absl::Span<std::byte> span = self->GetMetadata(lease.Lease());
+        if (span.empty() && self->MetadataSize() != 0) {
+          throw std::runtime_error("Invalid or stale publisher buffer lease");
+        }
+        if (view.size() > span.size()) {
+          throw std::runtime_error(
+              "Metadata too large: " + std::to_string(view.size()) +
+              " bytes vs " + std::to_string(span.size()) + " available");
+        }
+        std::memcpy(span.data(), view.data(), view.size());
+      },
+      R"doc(Write metadata into an active explicit lease. The data must not
+exceed metadata_size() bytes.)doc",
+      py::arg("lease"), py::arg("data"));
 
   publisher_class.def(
       "get_stats_counters",
@@ -666,8 +845,7 @@ checksum_error).  Use as a context manager to auto-release the slot:
   subscriber_class.def(
       "wait_with_timeout",
       [](Subscriber *self, int64_t timeout_ns) {
-        absl::Status result =
-            self->Wait(std::chrono::nanoseconds(timeout_ns));
+        absl::Status result = self->Wait(std::chrono::nanoseconds(timeout_ns));
         if (!result.ok()) {
           throw std::runtime_error(result.ToString());
         }
@@ -700,9 +878,7 @@ interrupt the wait. Returns the fd that triggered the wake-up.)doc",
 
   subscriber_class.def(
       "get_file_descriptor",
-      [](Subscriber *self) -> int {
-        return self->GetFileDescriptor().Fd();
-      },
+      [](Subscriber *self) -> int { return self->GetFileDescriptor().Fd(); },
       "Get the underlying trigger file descriptor.");
 
   // Batch message processing.
@@ -831,18 +1007,18 @@ is listening on the same Unix Domain Socket.)doc");
   client_class.def(py::init<>());
 
   // Existing: init.
-  client_class.def("init",
-                   [](Client *self, const std::string &server_socket,
-                      const std::string &client_name) {
-                     absl::Status result =
-                         self->Init(server_socket, client_name);
-                     if (!result.ok()) {
-                       throw std::runtime_error(result.ToString());
-                     }
-                   },
-                   "Initialize the client by connecting to the server.",
-                   py::arg("server_socket") = std::string("/tmp/subspace"),
-                   py::arg("client_name") = std::string(""));
+  client_class.def(
+      "init",
+      [](Client *self, const std::string &server_socket,
+         const std::string &client_name) {
+        absl::Status result = self->Init(server_socket, client_name);
+        if (!result.ok()) {
+          throw std::runtime_error(result.ToString());
+        }
+      },
+      "Initialize the client by connecting to the server.",
+      py::arg("server_socket") = std::string("/tmp/subspace"),
+      py::arg("client_name") = std::string(""));
 
   // Existing: create_publisher overload 1 (slot_size, num_slots, flags).
   client_class.def(
@@ -937,8 +1113,7 @@ are any publishers on the channel.)doc",
       py::return_value_policy::move);
 
   // New client methods.
-  client_class.def("get_name", &Client::GetName,
-                   "Get the name of this client.",
+  client_class.def("get_name", &Client::GetName, "Get the name of this client.",
                    py::return_value_policy::copy);
 
   client_class.def("set_debug", &Client::SetDebug,
@@ -1021,8 +1196,7 @@ are any publishers on the channel.)doc",
         }
         return *result;
       },
-      "Check whether a channel exists on the server.",
-      py::arg("channel_name"));
+      "Check whether a channel exists on the server.", py::arg("channel_name"));
 }
 
 } // namespace python

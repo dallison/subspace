@@ -48,6 +48,7 @@ message CreatePublisherRequest {
   // after server failover. Reclaim runs under the client lock, so a zero value
   // proves that a stale shared-memory hazard counter can be cleared.
   uint32 active_queue_publish_depth = 21;
+  int32 max_outstanding_slot_leases = 22; // Unpublished slots reserved by this publisher.
 }
 
 message CreatePublisherResponse {
@@ -84,6 +85,7 @@ message CreateSubscriberRequest {
   // Requested queue capacity. 0 uses the publisher's channel default.
   uint64 process_id = 10; // Client process id for introspection.
   int32 subscriber_queue_size = 11;
+  int32 max_subscribers = 12; // 0 means no explicit subscriber limit.
 }
 
 message CreateSubscriberResponse {
@@ -506,6 +508,8 @@ message ShadowCreateChannel {
   int32 max_publishers = 16;
   bool split_buffers_over_bridge = 17;
   uint64 subscriber_queue_arena_size = 18;
+  bool has_max_subscribers = 19;
+  int32 max_subscribers = 20;
   // FDs sent via SCM_RIGHTS: [ccb_fd, bcb_fd]
 }
 
@@ -524,6 +528,7 @@ message ShadowAddPublisher {
   bool notify_retirement = 7;
   bool for_tunnel = 8;
   uint64 process_id = 9;
+  int32 max_outstanding_slot_leases = 10;
   // FDs sent via SCM_RIGHTS: [poll_fd, trigger_fd]
   // If notify_retirement: also [retirement_read_fd, retirement_write_fd]
 }
@@ -581,4 +586,6 @@ message ShadowUpdateChannelOptions {
   bool has_max_publishers = 4;
   int32 max_publishers = 5;
   bool split_buffers_over_bridge = 6;
+  bool has_max_subscribers = 7;
+  int32 max_subscribers = 8;
 }

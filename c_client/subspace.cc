@@ -504,29 +504,15 @@ SubspaceSubscriberOptions subspace_subscriber_options_default(void) {
 SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size,
                                                             int num_slots) {
   SubspacePublisherOptions options = {
-      slot_size,
-      num_slots,
-      0,
-      false,
-      false,
-      false,
-      false,
-      false,
-      SubspaceTypeInfo{},
-      false,
-      nullptr,
-      0,
-      -1,
-      false,
-      false,
-      4,
-      0,
-      true,
-      false,
-      false,
-      0,
-      SubspaceSplitBufferCallbacks{},
+      .slot_size = slot_size,
+      .num_slots = num_slots,
   };
+  options.subscriber_queue_arena_size = 0;
+  options.vchan_id = -1;
+  options.max_outstanding_slot_leases = 1;
+  options.notify_retirement_on_forced_reuse = true;
+  options.checksum_size = 4;
+  options.prefer_retired_slots = true;
   return options;
 }
 
@@ -540,6 +526,7 @@ subspace_create_subscriber(SubspaceClient client, const char *channel_name,
       .SetForTunnel(options.for_tunnel)
       .SetType(StringFromPointer(options.type.type, options.type.type_length))
       .SetMaxActiveMessages(options.max_active_messages)
+      .SetMaxSubscribers(options.max_subscribers)
       .SetPassActivation(options.pass_activation)
       .SetReadWrite(options.read_write)
       .SetMux(StringFromPointer(options.mux, options.mux_length))
@@ -585,6 +572,9 @@ SubspacePublisher subspace_create_publisher(SubspaceClient client,
       .SetMux(StringFromPointer(options.mux, options.mux_length))
       .SetVchanId(options.vchan_id)
       .SetNotifyRetirement(options.notify_retirement)
+      .SetMaxOutstandingSlotLeases(options.max_outstanding_slot_leases)
+      .SetNotifyRetirementOnForcedReuse(
+          options.notify_retirement_on_forced_reuse)
       .SetChecksum(options.checksum)
       .SetChecksumSize(options.checksum_size)
       .SetMetadataSize(options.metadata_size)
@@ -973,6 +963,113 @@ bool subspace_cancel_publish(SubspacePublisher publisher) {
   }
   (*PublisherPtr(publisher))->CancelPublish();
   return true;
+}
+
+SubspacePublisherBufferLease
+subspace_acquire_publisher_buffer(SubspacePublisher publisher) {
+  subspace_clear_error();
+  SubspacePublisherBufferLease result = {};
+  result.slot_id = -1;
+  if (publisher.publisher == nullptr) {
+    subspace_set_error("Invalid publisher");
+    return result;
+  }
+  absl::StatusOr<subspace::PublisherBufferLease> lease =
+      (*PublisherPtr(publisher))->AcquireBufferLease();
+  if (!lease.ok()) {
+    subspace_set_error(lease.status().ToString().c_str());
+    return result;
+  }
+  result.buffer = lease->buffer;
+  result.buffer_size = lease->buffer_size;
+  result.slot_id = lease->slot_id;
+  result.lease_id = lease->lease_id;
+  return result;
+}
+
+SubspacePublisherBufferLease
+subspace_reclaim_publisher_buffer(SubspacePublisher publisher,
+                                  int32_t slot_id) {
+  subspace_clear_error();
+  SubspacePublisherBufferLease result = {};
+  result.slot_id = -1;
+  if (publisher.publisher == nullptr) {
+    subspace_set_error("Invalid publisher");
+    return result;
+  }
+  absl::StatusOr<subspace::PublisherBufferLease> lease =
+      (*PublisherPtr(publisher))->ReclaimBufferLease(slot_id);
+  if (!lease.ok()) {
+    subspace_set_error(lease.status().ToString().c_str());
+    return result;
+  }
+  result.buffer = lease->buffer;
+  result.buffer_size = lease->buffer_size;
+  result.slot_id = lease->slot_id;
+  result.lease_id = lease->lease_id;
+  return result;
+}
+
+static subspace::PublisherBufferLease
+ToCppPublisherLease(SubspacePublisherBufferLease lease) {
+  return {
+      .buffer = lease.buffer,
+      .buffer_size = lease.buffer_size,
+      .slot_id = lease.slot_id,
+      .lease_id = lease.lease_id,
+  };
+}
+
+const SubspaceMessage
+subspace_publish_publisher_buffer(SubspacePublisher publisher,
+                                  SubspacePublisherBufferLease lease,
+                                  size_t message_size) {
+  subspace_clear_error();
+  if (publisher.publisher == nullptr) {
+    subspace_set_error("Invalid publisher");
+    return EmptyMessage();
+  }
+  absl::StatusOr<const subspace::Message> message =
+      (*PublisherPtr(publisher))
+          ->PublishBufferLease(ToCppPublisherLease(lease), message_size);
+  if (!message.ok()) {
+    subspace_set_error(message.status().ToString().c_str());
+    return EmptyMessage();
+  }
+  return ToCMessage(*message);
+}
+
+bool subspace_release_publisher_buffer(SubspacePublisher publisher,
+                                       SubspacePublisherBufferLease lease) {
+  subspace_clear_error();
+  if (publisher.publisher == nullptr) {
+    subspace_set_error("Invalid publisher");
+    return false;
+  }
+  absl::Status status = (*PublisherPtr(publisher))
+                            ->ReleaseBufferLease(ToCppPublisherLease(lease));
+  if (!status.ok()) {
+    subspace_set_error(status.ToString().c_str());
+    return false;
+  }
+  return true;
+}
+
+void *subspace_get_publisher_buffer_metadata(
+    SubspacePublisher publisher, SubspacePublisherBufferLease lease,
+    size_t *metadata_size) {
+  subspace_clear_error();
+  if (metadata_size != nullptr) {
+    *metadata_size = 0;
+  }
+  if (publisher.publisher == nullptr || metadata_size == nullptr) {
+    subspace_set_error("Invalid publisher or metadata_size");
+    return nullptr;
+  }
+  absl::Span<std::byte> metadata =
+      (*PublisherPtr(publisher))->GetMetadata(ToCppPublisherLease(lease));
+  *metadata_size = metadata.size();
+  return metadata.empty() ? nullptr : metadata.data();
 }
 
 bool subspace_remove_subscriber(SubspaceSubscriber *subscriber) {

@@ -72,7 +72,7 @@ ClientBufferAllocator ToProtoAllocator(ClientBufferAllocatorKind allocator) {
     return CLIENT_BUFFER_ALLOCATOR_UNSPECIFIED;
   }
 }
-}
+} // namespace
 
 using ClientChannel = details::ClientChannel;
 using SubscriberImpl = details::SubscriberImpl;
@@ -93,8 +93,7 @@ bool DefaultUseSplitBuffers() {
 static uint64_t GetThreadId() {
   pthread_t tid = pthread_self();
   uint64_t id = 0;
-  std::memcpy(&id, &tid,
-              sizeof(tid) < sizeof(id) ? sizeof(tid) : sizeof(id));
+  std::memcpy(&id, &tid, sizeof(tid) < sizeof(id) ? sizeof(tid) : sizeof(id));
   return id;
 }
 
@@ -132,18 +131,18 @@ FromProto(const ClientBufferHandleMetadataProto &proto) {
   return metadata;
 }
 
-static absl::Status CheckFdIndex(
-    const std::vector<toolbelt::FileDescriptor> &fds, int index,
-    const char *field, const char *response_name) {
+static absl::Status
+CheckFdIndex(const std::vector<toolbelt::FileDescriptor> &fds, int index,
+             const char *field, const char *response_name) {
   if (index < 0 || static_cast<size_t>(index) >= fds.size()) {
     return absl::InternalError(absl::StrFormat(
         "%s references fd index %d for %s, but response included %zu fds",
         response_name, index, field, fds.size()));
   }
   if (!fds[static_cast<size_t>(index)].Valid()) {
-    return absl::InternalError(absl::StrFormat(
-        "%s references invalid fd at index %d for %s", response_name, index,
-        field));
+    return absl::InternalError(
+        absl::StrFormat("%s references invalid fd at index %d for %s",
+                        response_name, index, field));
   }
   return absl::OkStatus();
 }
@@ -250,9 +249,8 @@ absl::Status ClientImpl::Init(const std::string &server_socket,
   if (!status.ok()) {
     return status;
   }
-  if (absl::Status fd_status =
-          CheckFdIndex(fds, resp.init().scb_fd_index(), "scb_fd",
-                       "InitResponse");
+  if (absl::Status fd_status = CheckFdIndex(fds, resp.init().scb_fd_index(),
+                                            "scb_fd", "InitResponse");
       !fd_status.ok()) {
     return fd_status;
   }
@@ -405,6 +403,11 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
+  if (opts.MaxOutstandingSlotLeases() < 1 ||
+      opts.MaxOutstandingSlotLeases() > opts.NumSlots()) {
+    return absl::InvalidArgumentError(
+        "MaxOutstandingSlotLeases must be between 1 and NumSlots");
+  }
   Request req;
   FillCreatePublisherRequest(req.mutable_create_publisher(), channel_name, opts,
                              -1);
@@ -446,11 +449,11 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
              const toolbelt::FileDescriptor *fd) {
         return RegisterClientBuffer(metadata, fd);
       });
-  channel->SetClientBufferLookupCallback(
-      [this](const std::string &channel_name, uint64_t session_id,
-             uint32_t buffer_index) {
-        return GetClientBuffers(channel_name, session_id, buffer_index);
-      });
+  channel->SetClientBufferLookupCallback([this](const std::string &channel_name,
+                                                uint64_t session_id,
+                                                uint32_t buffer_index) {
+    return GetClientBuffers(channel_name, session_id, buffer_index);
+  });
   channel->SetClientBufferUnregistrationCallback(
       [this](const std::string &channel_name, uint64_t session_id,
              uint32_t buffer_index) {
@@ -462,16 +465,14 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
   channel->SetMetadataSize(ms);
   channel->SetPrefixSize(Channel::ComputePrefixSize(cs, ms));
 
-  if (absl::Status fd_status =
-          CheckFdIndex(fds, pub_resp.ccb_fd_index(), "ccb_fd",
-                       "CreatePublisherResponse");
+  if (absl::Status fd_status = CheckFdIndex(
+          fds, pub_resp.ccb_fd_index(), "ccb_fd", "CreatePublisherResponse");
       !fd_status.ok()) {
     remove_server_publisher();
     return fd_status;
   }
-  if (absl::Status fd_status =
-          CheckFdIndex(fds, pub_resp.bcb_fd_index(), "bcb_fd",
-                       "CreatePublisherResponse");
+  if (absl::Status fd_status = CheckFdIndex(
+          fds, pub_resp.bcb_fd_index(), "bcb_fd", "CreatePublisherResponse");
       !fd_status.ok()) {
     remove_server_publisher();
     return fd_status;
@@ -579,11 +580,11 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
         return CheckReload(static_cast<ClientChannel *>(c));
       },
       server_user_id_, server_group_id_);
-  channel->SetClientBufferLookupCallback(
-      [this](const std::string &channel_name, uint64_t session_id,
-             uint32_t buffer_index) {
-        return GetClientBuffers(channel_name, session_id, buffer_index);
-      });
+  channel->SetClientBufferLookupCallback([this](const std::string &channel_name,
+                                                uint64_t session_id,
+                                                uint32_t buffer_index) {
+    return GetClientBuffers(channel_name, session_id, buffer_index);
+  });
 
   channel->SetNumSlots(sub_resp.num_slots());
   channel->SetEffectiveSubscriberQueueSize(sub_resp.subscriber_queue_size());
@@ -596,15 +597,13 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
     channel->AllocateChecksumBuffer();
   }
 
-  if (absl::Status fd_status =
-          CheckFdIndex(fds, sub_resp.ccb_fd_index(), "ccb_fd",
-                       "CreateSubscriberResponse");
+  if (absl::Status fd_status = CheckFdIndex(
+          fds, sub_resp.ccb_fd_index(), "ccb_fd", "CreateSubscriberResponse");
       !fd_status.ok()) {
     return fd_status;
   }
-  if (absl::Status fd_status =
-          CheckFdIndex(fds, sub_resp.bcb_fd_index(), "bcb_fd",
-                       "CreateSubscriberResponse");
+  if (absl::Status fd_status = CheckFdIndex(
+          fds, sub_resp.bcb_fd_index(), "bcb_fd", "CreateSubscriberResponse");
       !fd_status.ok()) {
     return fd_status;
   }
@@ -733,6 +732,152 @@ ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int32_t max_size,
                                span_size);
 }
 
+absl::StatusOr<PublisherBufferLease>
+ClientImpl::AcquirePublisherBuffer(PublisherImpl *publisher) {
+  ClientLockGuard guard(this);
+  if (publisher->NumLeases() >= size_t(publisher->MaxOutstandingSlotLeases())) {
+    return PublisherBufferLease{};
+  }
+  if (absl::Status status = ReloadSubscribersIfNecessary(publisher);
+      !status.ok()) {
+    return status;
+  }
+
+  MessageSlot *slot = publisher->CurrentSlot();
+  if (slot != nullptr) {
+    publisher->SetSlot(nullptr);
+  } else {
+    if (publisher->IsReliable() &&
+        publisher->NumSubscribers(publisher->VirtualChannelId()) == 0) {
+      return PublisherBufferLease{};
+    }
+    slot = publisher->IsReliable()
+               ? publisher->FindFreeSlotReliable(publisher->GetPublisherId())
+               : publisher->FindFreeSlotUnreliable(publisher->GetPublisherId());
+  }
+  if (slot == nullptr) {
+    return PublisherBufferLease{};
+  }
+  uint64_t lease_id = publisher->RegisterLease(slot);
+  return PublisherBufferLease{
+      .buffer = publisher->GetBufferAddress(slot),
+      .buffer_size = size_t(publisher->SlotSize(slot)),
+      .slot_id = slot->id,
+      .lease_id = lease_id,
+  };
+}
+
+absl::StatusOr<PublisherBufferLease>
+ClientImpl::ReclaimPublisherBuffer(PublisherImpl *publisher, int32_t slot_id) {
+  ClientLockGuard guard(this);
+  if (publisher->NumLeases() >= size_t(publisher->MaxOutstandingSlotLeases())) {
+    return PublisherBufferLease{};
+  }
+  if (absl::Status status = ReloadSubscribersIfNecessary(publisher);
+      !status.ok()) {
+    return status;
+  }
+  MessageSlot *slot = publisher->ClaimRetiredSlot(slot_id);
+  if (slot == nullptr) {
+    return PublisherBufferLease{};
+  }
+  uint64_t lease_id = publisher->RegisterLease(slot);
+  return PublisherBufferLease{
+      .buffer = publisher->GetBufferAddress(slot),
+      .buffer_size = size_t(publisher->SlotSize(slot)),
+      .slot_id = slot->id,
+      .lease_id = lease_id,
+  };
+}
+
+absl::StatusOr<const Message>
+ClientImpl::PublishPublisherBuffer(PublisherImpl *publisher,
+                                   const PublisherBufferLease &lease,
+                                   int64_t message_size) {
+  ClientLockGuard guard(this);
+  return PublishPublisherBufferInternal(publisher, lease, message_size,
+                                        /*payload=*/nullptr);
+}
+
+absl::StatusOr<const Message>
+ClientImpl::PublishPublisherBufferCopy(PublisherImpl *publisher,
+                                       const PublisherBufferLease &lease,
+                                       absl::Span<const std::byte> payload) {
+  ClientLockGuard guard(this);
+  return PublishPublisherBufferInternal(
+      publisher, lease, static_cast<int64_t>(payload.size()), payload.data());
+}
+
+absl::StatusOr<const Message> ClientImpl::PublishPublisherBufferInternal(
+    PublisherImpl *publisher, const PublisherBufferLease &lease,
+    int64_t message_size, const std::byte *payload) {
+  if (message_size <= 0) {
+    return absl::InvalidArgumentError("Message size must be greater than 0");
+  }
+  MessageSlot *slot = publisher->FindLease(lease.slot_id, lease.lease_id);
+  if (slot == nullptr) {
+    return absl::FailedPreconditionError("Invalid or stale publisher lease");
+  }
+  if (message_size > publisher->SlotSize(slot)) {
+    return absl::InvalidArgumentError("Message size exceeds leased slot size");
+  }
+  if (absl::Status status = ReloadSubscribersIfNecessary(publisher);
+      !status.ok()) {
+    return status;
+  }
+  if (payload != nullptr) {
+    std::memmove(publisher->GetBufferAddress(slot), payload,
+                 static_cast<size_t>(message_size));
+  }
+  if (publisher->on_send_callback_ != nullptr) {
+    absl::StatusOr<int64_t> status_or_size = publisher->on_send_callback_(
+        publisher->GetBufferAddress(slot), message_size);
+    if (!status_or_size.ok()) {
+      return status_or_size.status();
+    }
+    message_size = status_or_size.value();
+  }
+  slot->message_size = message_size;
+  Channel::PublishedMessage msg = publisher->ActivateSlotAndGetAnother(
+      slot, publisher->IsReliable(), /*is_activation=*/false,
+      publisher->GetPublisherId(), /*omit_prefix=*/false,
+      /*use_prefix_slot_id=*/false, publisher->ForTunnel(),
+      /*acquire_next=*/false);
+  publisher->RemoveLease(lease.slot_id);
+  publisher->TriggerSubscribers();
+  if (publisher->NumSubscribers(publisher->VirtualChannelId()) == 0) {
+    publisher->RetirePublishedSlotImmediately(slot);
+  }
+  if (absl::Status status = publisher->UnmapUnusedBuffers(); !status.ok()) {
+    return status;
+  }
+  return Message(message_size, nullptr, msg.ordinal, msg.timestamp,
+                 publisher->VirtualChannelId(), false, lease.slot_id, false);
+}
+
+absl::Status
+ClientImpl::ReleasePublisherBuffer(PublisherImpl *publisher,
+                                   const PublisherBufferLease &lease) {
+  ClientLockGuard guard(this);
+  MessageSlot *slot = publisher->FindLease(lease.slot_id, lease.lease_id);
+  if (slot == nullptr) {
+    return absl::FailedPreconditionError("Invalid or stale publisher lease");
+  }
+  if (!publisher->ReleaseLeasedSlot(slot)) {
+    return absl::InternalError("Failed to release publisher lease");
+  }
+  publisher->RemoveLease(lease.slot_id);
+  return absl::OkStatus();
+}
+
+absl::Span<std::byte>
+ClientImpl::GetPublisherBufferMetadata(PublisherImpl *publisher,
+                                       const PublisherBufferLease &lease) {
+  ClientLockGuard guard(this);
+  MessageSlot *slot = publisher->FindLease(lease.slot_id, lease.lease_id);
+  return publisher->GetMetadata(slot);
+}
+
 absl::StatusOr<const Message>
 ClientImpl::PublishMessage(PublisherImpl *publisher, int64_t message_size) {
   return PublishMessageInternal(publisher, message_size, /*omit_prefix=*/false,
@@ -849,7 +994,8 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
     result = co_->Wait(publisher->GetPollFd().Fd(), POLLIN, timeout_ns);
   } else {
     struct pollfd fd = {.fd = publisher->GetPollFd().Fd(), .events = POLLIN};
-    int e = GetSyscallShim().poll_fn(&fd, 1, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
+    int e = GetSyscallShim().poll_fn(
+        &fd, 1, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
     // Since we are waiting forever will can only get the value 1 from the poll.
     // We will never get 0 since there is no timeout.  Anything else (can only
     // be -1) will be an error.
@@ -912,7 +1058,8 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
     struct pollfd fds[2] = {
         {.fd = publisher->GetPollFd().Fd(), .events = POLLIN},
         {.fd = fd.Fd(), .events = POLLIN}};
-    int e = GetSyscallShim().poll_fn(fds, 2, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
+    int e = GetSyscallShim().poll_fn(
+        fds, 2, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
     if (timeout_ns == 0 && e == 0) {
       return absl::InternalError("Timeout waiting for reliable publisher");
     }
@@ -962,7 +1109,8 @@ absl::Status ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
     result = co_->Wait(subscriber->GetPollFd().Fd(), POLLIN, timeout_ns);
   } else {
     struct pollfd fd = {.fd = subscriber->GetPollFd().Fd(), .events = POLLIN};
-    int e = GetSyscallShim().poll_fn(&fd, 1, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
+    int e = GetSyscallShim().poll_fn(
+        &fd, 1, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
     // Since we are waiting forever will can only get the value 1 from the poll.
     // We will never get 0 since there is no timeout.  Anything else (can only
     // be -1) will be an error.
@@ -1014,7 +1162,8 @@ absl::StatusOr<int> ClientImpl::WaitForSubscriber(
     struct pollfd fds[2] = {
         {.fd = subscriber->GetPollFd().Fd(), .events = POLLIN},
         {.fd = fd.Fd(), .events = POLLIN}};
-    int e = GetSyscallShim().poll_fn(fds, 2, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
+    int e = GetSyscallShim().poll_fn(
+        fds, 2, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
     if (timeout_ns == 0 && e == 0) {
       return absl::InternalError("Timeout waiting for subscriber");
     }
@@ -1066,11 +1215,9 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
   return s;
 }
 
-absl::StatusOr<int>
-ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
-                                     const toolbelt::FileDescriptor &fd,
-                                     std::chrono::nanoseconds timeout,
-                                     async::Context ctx) {
+absl::StatusOr<int> ClientImpl::WaitForReliablePublisher(
+    PublisherImpl *publisher, const toolbelt::FileDescriptor &fd,
+    std::chrono::nanoseconds timeout, async::Context ctx) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -1236,7 +1383,13 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     if (mode == ReadMode::kReadNext &&
         subscriber->options_.DetectDroppedMessages()) {
       int drops = subscriber->ConsumeQueueDrops();
-      if (last_ordinal != -1) {
+      // Explicit bounded queues report their own evictions. Their MPSC
+      // reservation order can differ from ordinal assignment under concurrent
+      // publishers, so an ordinal gap is not evidence of a dropped message.
+      // Queue-disabled and inherited-default subscribers retain ordinal-based
+      // detection because they deliver through the ordered bitset path.
+      if (last_ordinal != -1 &&
+          subscriber->options_.SubscriberQueueSize() == 0) {
         drops = std::max(
             drops, subscriber->DetectDrops(
                        new_slot->vchan_id.load(std::memory_order_relaxed)));
@@ -1417,12 +1570,9 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
     return status;
   }
   Request req;
-  auto *cmd = req.mutable_create_subscriber();
-  cmd->set_channel_name(subscriber->Name());
-  cmd->set_subscriber_id(subscriber->GetSubscriberId());
-  cmd->set_mux(subscriber->options_.mux);
-  cmd->set_subscriber_queue_size(
-      subscriber->options_.SubscriberQueueSize());
+  FillCreateSubscriberRequest(req.mutable_create_subscriber(),
+                              subscriber->Name(), subscriber->options_,
+                              subscriber->GetSubscriberId());
 
   // Send request to server and wait for response.
   Response resp;
@@ -1897,9 +2047,9 @@ absl::Status ClientImpl::ResizeChannel(PublisherImpl *publisher,
 }
 
 void ClientImpl::FillCreatePublisherRequest(CreatePublisherRequest *cmd,
-                                             const std::string &channel_name,
-                                             const PublisherOptions &opts,
-                                             int publisher_id) {
+                                            const std::string &channel_name,
+                                            const PublisherOptions &opts,
+                                            int publisher_id) {
   cmd->set_channel_name(channel_name);
   cmd->set_slot_size(Aligned(opts.slot_size));
   cmd->set_num_slots(opts.num_slots);
@@ -1920,6 +2070,7 @@ void ClientImpl::FillCreatePublisherRequest(CreatePublisherRequest *cmd,
   cmd->set_split_buffers_over_bridge(opts.SplitBuffersOverBridge());
   cmd->set_subscriber_queue_arena_size(opts.SubscriberQueueArenaSize());
   cmd->set_process_id(static_cast<uint64_t>(getpid()));
+  cmd->set_max_outstanding_slot_leases(opts.MaxOutstandingSlotLeases());
 }
 
 void ClientImpl::ApplyPublisherResponseFds(
@@ -1947,9 +2098,9 @@ void ClientImpl::ApplyPublisherResponseFds(
 }
 
 void ClientImpl::FillCreateSubscriberRequest(CreateSubscriberRequest *cmd,
-                                              const std::string &channel_name,
-                                              const SubscriberOptions &opts,
-                                              int subscriber_id) {
+                                             const std::string &channel_name,
+                                             const SubscriberOptions &opts,
+                                             int subscriber_id) {
   cmd->set_channel_name(channel_name);
   cmd->set_subscriber_id(subscriber_id);
   cmd->set_is_reliable(opts.IsReliable());
@@ -1957,6 +2108,7 @@ void ClientImpl::FillCreateSubscriberRequest(CreateSubscriberRequest *cmd,
   cmd->set_for_tunnel(opts.ForTunnel());
   cmd->set_type(opts.Type());
   cmd->set_max_active_messages(opts.MaxActiveMessages());
+  cmd->set_max_subscribers(opts.MaxSubscribers());
   cmd->set_mux(opts.Mux());
   cmd->set_vchan_id(opts.VchanId());
   cmd->set_subscriber_queue_size(opts.SubscriberQueueSize());
@@ -2142,9 +2294,8 @@ absl::Status ClientImpl::SendRequestReceiveResponse(
   return s;
 }
 
-absl::Status
-ClientImpl::SendOneWayRequest(const Request &req,
-                              const std::vector<toolbelt::FileDescriptor> &fds) {
+absl::Status ClientImpl::SendOneWayRequest(
+    const Request &req, const std::vector<toolbelt::FileDescriptor> &fds) {
   size_t msg_len = req.ByteSizeLong();
   std::vector<char> send_msg(sizeof(int32_t) + msg_len);
   char *sendbuf = send_msg.data() + sizeof(int32_t);
@@ -2176,9 +2327,9 @@ ClientImpl::SendOneWayRequest(const Request &req,
   return absl::OkStatus();
 }
 
-absl::Status ClientImpl::RegisterClientBuffer(
-    const ClientBufferHandleMetadata &metadata,
-    const toolbelt::FileDescriptor *fd) {
+absl::Status
+ClientImpl::RegisterClientBuffer(const ClientBufferHandleMetadata &metadata,
+                                 const toolbelt::FileDescriptor *fd) {
   Request req;
   auto *register_buffer = req.mutable_register_client_buffer();
   ToProto(metadata, register_buffer->mutable_metadata());
@@ -2238,10 +2389,9 @@ ClientImpl::GetClientBuffers(const std::string &channel_name,
   return result;
 }
 
-absl::Status
-ClientImpl::UnregisterClientBuffer(const std::string &channel_name,
-                                   uint64_t session_id,
-                                   uint32_t buffer_index) {
+absl::Status ClientImpl::UnregisterClientBuffer(const std::string &channel_name,
+                                                uint64_t session_id,
+                                                uint32_t buffer_index) {
   Request req;
   auto *unregister = req.mutable_unregister_client_buffer();
   unregister->set_channel_name(channel_name);
