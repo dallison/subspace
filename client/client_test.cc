@@ -2179,6 +2179,48 @@ TEST_F(ClientTest, PublishSingleMessageAndReadNewest) {
   ASSERT_EQ(0, msg->length);
 }
 
+TEST_F(ClientTest, ReadNewestRecognizesReusedCurrentSlotAsNewGeneration) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  auto pub = EVAL_AND_ASSERT_OK(
+      pub_client.CreatePublisher("read_newest_reused_slot", 256, 3));
+  auto sub = EVAL_AND_ASSERT_OK(
+      sub_client.CreateSubscriber("read_newest_reused_slot"));
+
+  void *buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  memcpy(buffer, "first", 5);
+  ASSERT_OK(pub.PublishMessage(5));
+
+  Message first =
+      EVAL_AND_ASSERT_OK(sub.ReadMessage(subspace::ReadMode::kReadNewest));
+  const int32_t first_slot_id = first.slot_id;
+  const uint64_t first_ordinal = first.ordinal;
+  first.Reset();
+
+  Message reused_slot_message;
+  for (int i = 0; i < 3; ++i) {
+    buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+    memcpy(buffer, "newest", 6);
+    Message published = EVAL_AND_ASSERT_OK(pub.PublishMessage(6));
+    if (published.slot_id == first_slot_id) {
+      reused_slot_message = published;
+      break;
+    }
+  }
+  ASSERT_EQ(first_slot_id, reused_slot_message.slot_id);
+  ASSERT_GT(reused_slot_message.ordinal, first_ordinal);
+
+  Message newest =
+      EVAL_AND_ASSERT_OK(sub.ReadMessage(subspace::ReadMode::kReadNewest));
+  EXPECT_EQ(reused_slot_message.slot_id, newest.slot_id);
+  EXPECT_EQ(reused_slot_message.ordinal, newest.ordinal);
+  EXPECT_EQ("newest",
+            std::string(static_cast<const char *>(newest.buffer), newest.length));
+}
+
 TEST_F(ClientTest, PublishSingleMessageAndReadWithActivation) {
   subspace::Client pub_client;
   subspace::Client sub_client;
