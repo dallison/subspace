@@ -698,8 +698,12 @@ MessageSlot *SubscriberImpl::LastSlot(MessageSlot *slot, bool reliable,
     if (!active_slots_.empty()) {
       new_slot = &active_slots_.back();
 
-      if (slot != nullptr && slot == new_slot->slot) {
-        // Same slot, nothing changes.
+      auto &tracker = GetOrdinalTracker(new_slot->vchan_id);
+      if (slot != nullptr &&
+          tracker.ordinals.Contains(
+              OrdinalAndVchanId{new_slot->ordinal, new_slot->vchan_id})) {
+        // A released current slot may have been reused for a newer message.
+        // Compare message generations rather than physical slots.
         new_slot = nullptr;
       }
     }
