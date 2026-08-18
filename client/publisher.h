@@ -119,6 +119,7 @@ private:
   }
 
   MessageSlot *ClaimRetiredSlot(int32_t slot_id);
+  MessageSlot *ClaimAnyRetiredSlot();
   bool ReleaseLeasedSlot(MessageSlot *slot);
   uint64_t RegisterLease(MessageSlot *slot);
   MessageSlot *FindLease(int32_t slot_id, uint64_t lease_id) const;

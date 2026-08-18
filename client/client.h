@@ -465,6 +465,8 @@ private:
   AcquirePublisherBuffer(details::PublisherImpl *publisher);
   absl::StatusOr<PublisherBufferLease>
   ReclaimPublisherBuffer(details::PublisherImpl *publisher, int32_t slot_id);
+  absl::StatusOr<PublisherBufferLease>
+  ReclaimAnyPublisherBuffer(details::PublisherImpl *publisher);
   absl::StatusOr<const Message>
   PublishPublisherBuffer(details::PublisherImpl *publisher,
                          const PublisherBufferLease &lease,
@@ -947,6 +949,11 @@ public:
   // Reclaim a specific slot reported by the retirement fd.
   absl::StatusOr<PublisherBufferLease> ReclaimBufferLease(int32_t slot_id) {
     return client_->ReclaimPublisherBuffer(impl_.get(), slot_id);
+  }
+
+  // Reclaim any slot currently marked retired when fd notifications are stale.
+  absl::StatusOr<PublisherBufferLease> ReclaimAnyBufferLease() {
+    return client_->ReclaimAnyPublisherBuffer(impl_.get());
   }
 
   absl::StatusOr<ScopedPublisherBufferLease>

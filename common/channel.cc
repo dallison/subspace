@@ -361,8 +361,9 @@ uint64_t Channel::GetVirtualMemoryUsage() const {
   return size;
 }
 
-void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
-                           int vchan_id) {
+void Channel::CleanupSlots(
+    int owner, bool reliable, bool is_pub, int vchan_id,
+    std::function<void(int32_t)> retire_callback) {
   if (is_pub) {
     // Clear every slot owned by this publisher. Explicit multi-slot leases can
     // leave more than one slot publisher-owned when a process exits.
@@ -392,7 +393,18 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
       MessageSlot *slot = &ccb_->slots[i];
       if (slot->sub_owners.IsSet(owner)) {
         slot->sub_owners.Clear(owner);
-        AtomicIncRefCount(slot, reliable, -1, 0, 0, true);
+        std::function<void()> notify_retirement;
+        if (retire_callback &&
+            (slot->flags.load(std::memory_order_relaxed) &
+             kMessageIsActivation) == 0) {
+          const int32_t slot_id =
+              slot->bridged_slot_id.load(std::memory_order_relaxed);
+          notify_retirement = [&retire_callback, slot_id]() {
+            retire_callback(slot_id);
+          };
+        }
+        AtomicIncRefCount(slot, reliable, -1, 0, 0, true,
+                          std::move(notify_retirement));
       }
     }
   }

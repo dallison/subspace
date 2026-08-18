@@ -925,13 +925,38 @@ void ServerChannel::ClearPublisherQueueHazardIfDead(int publisher_id,
 
 void ServerChannel::CleanupSlots(int owner, bool reliable, bool is_pub,
                                  int vchan_id) {
-  if (!is_pub) {
-    ccb_->subscribers.ClearSeqCst(owner);
+  if (is_pub) {
+    Channel::CleanupSlots(owner, reliable, is_pub, vchan_id);
+    return;
   }
-  Channel::CleanupSlots(owner, reliable, is_pub, vchan_id);
-  if (!is_pub) {
-    RetireSubscriberQueue(owner);
-  }
+
+  ccb_->subscribers.ClearSeqCst(owner);
+  Channel::CleanupSlots(
+      owner, reliable, is_pub, vchan_id, [this](int32_t slot_id) {
+        for (auto &[id, user] : users_) {
+          if (user == nullptr || !user->IsPublisher()) {
+            continue;
+          }
+          auto &fd =
+              static_cast<PublisherUser *>(user.get())->GetRetirementFdWriter();
+          if (!fd.Valid()) {
+            continue;
+          }
+          absl::StatusOr<ssize_t> written =
+              fd.Write(&slot_id, sizeof(slot_id));
+          if (!written.ok()) {
+            logger_.Log(toolbelt::LogLevel::kError,
+                        "Failed to trigger retirement for slot %d: %s", slot_id,
+                        written.status().ToString().c_str());
+          } else if (*written != sizeof(slot_id)) {
+            logger_.Log(toolbelt::LogLevel::kError,
+                        "Failed to trigger retirement for slot %d: wrote %zd "
+                        "bytes, expected %zu bytes",
+                        slot_id, *written, sizeof(slot_id));
+          }
+        }
+      });
+  RetireSubscriberQueue(owner);
 }
 
 std::vector<std::string> ServerChannel::RegisterExistingSubscribers() {

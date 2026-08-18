@@ -538,6 +538,8 @@ SubspacePublisherBufferLease
 subspace_acquire_publisher_buffer(SubspacePublisher publisher);
 SubspacePublisherBufferLease
 subspace_reclaim_publisher_buffer(SubspacePublisher publisher, int32_t slot_id);
+SubspacePublisherBufferLease
+subspace_reclaim_any_publisher_buffer(SubspacePublisher publisher);
 const SubspaceMessage
 subspace_publish_publisher_buffer(SubspacePublisher publisher,
                                   SubspacePublisherBufferLease lease,
