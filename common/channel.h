@@ -961,7 +961,9 @@ public:
   }
   std::string SlotType() const { return type_; }
 
-  void CleanupSlots(int owner, bool reliable, bool is_pub, int vchan_id);
+  void CleanupSlots(
+      int owner, bool reliable, bool is_pub, int vchan_id,
+      std::function<void(int32_t)> retire_callback = {});
 
   int NumSubscribers(int vchan_id) const {
     return ccb_->num_subs.NumSubscribers(vchan_id);

@@ -790,6 +790,30 @@ ClientImpl::ReclaimPublisherBuffer(PublisherImpl *publisher, int32_t slot_id) {
   };
 }
 
+absl::StatusOr<PublisherBufferLease>
+ClientImpl::ReclaimAnyPublisherBuffer(PublisherImpl *publisher) {
+  ClientLockGuard guard(this);
+  if (publisher->NumLeases() >=
+      size_t(publisher->MaxOutstandingSlotLeases())) {
+    return PublisherBufferLease{};
+  }
+  if (absl::Status status = ReloadSubscribersIfNecessary(publisher);
+      !status.ok()) {
+    return status;
+  }
+  MessageSlot *slot = publisher->ClaimAnyRetiredSlot();
+  if (slot == nullptr) {
+    return PublisherBufferLease{};
+  }
+  uint64_t lease_id = publisher->RegisterLease(slot);
+  return PublisherBufferLease{
+      .buffer = publisher->GetBufferAddress(slot),
+      .buffer_size = size_t(publisher->SlotSize(slot)),
+      .slot_id = slot->id,
+      .lease_id = lease_id,
+  };
+}
+
 absl::StatusOr<const Message>
 ClientImpl::PublishPublisherBuffer(PublisherImpl *publisher,
                                    const PublisherBufferLease &lease,

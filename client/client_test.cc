@@ -23,6 +23,7 @@
 #include <fstream>
 #include <inttypes.h>
 #include <memory>
+#include <optional>
 #include <sys/resource.h>
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
 #include <sys/syscall.h>
@@ -4447,6 +4448,45 @@ TEST_F(ClientTest, RetirementTrigger1) {
   e = ::poll(&fd, 1, 0);
   ASSERT_EQ(0, e);
   ASSERT_FALSE(fd.revents & POLLIN);
+}
+
+TEST_F(ClientTest, SubscriberRemovalTriggersServerRetirement) {
+  auto pub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+  auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  auto pub = EVAL_AND_ASSERT_OK(pub_client->CreatePublisher(
+      "server_retirement", PubOpts(256, 10).SetNotifyRetirement(true)));
+  std::optional<Subscriber> sub = EVAL_AND_ASSERT_OK(
+      sub_client->CreateSubscriber(
+          "server_retirement", SubOpts().SetMaxActiveMessages(1)));
+
+  auto buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  memcpy(buffer, "foobar", 6);
+  ASSERT_OK(pub.PublishMessage(6));
+
+  auto message = EVAL_AND_ASSERT_OK(sub->ReadMessage());
+  ASSERT_STREQ("foobar", reinterpret_cast<const char *>(message.buffer));
+
+  const toolbelt::FileDescriptor &retirement_fd = pub.GetRetirementFd();
+  ASSERT_TRUE(retirement_fd.Valid());
+  struct pollfd fd = {
+      .fd = retirement_fd.Fd(),
+      .events = POLLIN,
+  };
+  ASSERT_EQ(0, ::poll(&fd, 1, 0));
+
+  // Keep the message alive while removing the subscriber. The server owns
+  // teardown of the subscriber's slot references and retirement notification.
+  sub.reset();
+
+  ASSERT_EQ(1, ::poll(&fd, 1, 1000));
+  ASSERT_TRUE(fd.revents & POLLIN);
+  int retired_slot = -1;
+  ASSERT_EQ(sizeof(retired_slot),
+            ::read(retirement_fd.Fd(), &retired_slot, sizeof(retired_slot)));
+  EXPECT_EQ(message.slot_id, retired_slot);
+
+  message.Reset();
 }
 
 // This tests retirement from the the publisher side using dropped messages.  We
