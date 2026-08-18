@@ -1201,7 +1201,7 @@ Server::CreateMultiplexer(const std::string &channel_name, int slot_size,
               num_slots);
   ServerChannel *channel = new ChannelMultiplexer(
       *channel_id, channel_name, num_slots, subscriber_queue_size,
-      subscriber_queue_arena_size, std::move(type), session_id_);
+      subscriber_queue_arena_size, std::move(type), session_id_, logger_);
   channel->SetDebug(logger_.GetLogLevel() <= toolbelt::LogLevel::kVerboseDebug);
 
   absl::StatusOr<SharedMemoryFds> fds =
@@ -1289,7 +1289,7 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
   ServerChannel *channel =
       new ServerChannel(*channel_id, channel_name, num_slots,
                         subscriber_queue_size, subscriber_queue_arena_size,
-                        std::move(type), false, session_id_);
+                        std::move(type), false, session_id_, logger_);
   channel->SetDebug(logger_.GetLogLevel() <= toolbelt::LogLevel::kVerboseDebug);
   channel->SetLastKnownSlotSize(slot_size);
 
@@ -1472,7 +1472,7 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
           rch.channel_id, rch.name, rch.num_slots,
           rch.subscriber_queue_arena_size == 0 ? 0
                                                : kDefaultSubscriberQueueSize,
-          rch.subscriber_queue_arena_size, rch.type, session_id_);
+          rch.subscriber_queue_arena_size, rch.type, session_id_, logger_);
       channel = mux;
       recovered_muxes.emplace(rch.name, mux);
     } else {
@@ -1480,7 +1480,8 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
           rch.channel_id, rch.name, rch.num_slots,
           rch.subscriber_queue_arena_size == 0 ? 0
                                                : kDefaultSubscriberQueueSize,
-          rch.subscriber_queue_arena_size, rch.type, false, session_id_);
+          rch.subscriber_queue_arena_size, rch.type, false, session_id_,
+          logger_);
     }
     if (absl::Status status = configure_channel(channel, rch, true);
         !status.ok()) {
@@ -1517,7 +1518,7 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
           rch.channel_id, rch.mux, rch.num_slots,
           rch.subscriber_queue_arena_size == 0 ? 0
                                                : kDefaultSubscriberQueueSize,
-          rch.subscriber_queue_arena_size, rch.type, session_id_);
+          rch.subscriber_queue_arena_size, rch.type, session_id_, logger_);
       if (absl::Status status = configure_channel(mux, rch, true);
           !status.ok()) {
         delete mux;

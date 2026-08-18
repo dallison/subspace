@@ -1010,6 +1010,28 @@ subspace_reclaim_publisher_buffer(SubspacePublisher publisher,
   return result;
 }
 
+SubspacePublisherBufferLease
+subspace_reclaim_any_publisher_buffer(SubspacePublisher publisher) {
+  subspace_clear_error();
+  SubspacePublisherBufferLease result = {};
+  result.slot_id = -1;
+  if (publisher.publisher == nullptr) {
+    subspace_set_error("Invalid publisher");
+    return result;
+  }
+  absl::StatusOr<subspace::PublisherBufferLease> lease =
+      (*PublisherPtr(publisher))->ReclaimAnyBufferLease();
+  if (!lease.ok()) {
+    subspace_set_error(lease.status().ToString().c_str());
+    return result;
+  }
+  result.buffer = lease->buffer;
+  result.buffer_size = lease->buffer_size;
+  result.slot_id = lease->slot_id;
+  result.lease_id = lease->lease_id;
+  return result;
+}
+
 static subspace::PublisherBufferLease
 ToCppPublisherLease(SubspacePublisherBufferLease lease) {
   return {

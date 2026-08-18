@@ -263,6 +263,16 @@ MessageSlot *PublisherImpl::ClaimRetiredSlot(int32_t slot_id) {
   return slot;
 }
 
+MessageSlot *PublisherImpl::ClaimAnyRetiredSlot() {
+  MessageSlot *claimed = nullptr;
+  RetiredSlots().Traverse([this, &claimed](size_t slot_id) {
+    if (claimed == nullptr) {
+      claimed = ClaimRetiredSlot(static_cast<int32_t>(slot_id));
+    }
+  });
+  return claimed;
+}
+
 bool PublisherImpl::ReleaseLeasedSlot(MessageSlot *slot) {
   if (slot == nullptr ||
       slot->refs.load(std::memory_order_acquire) !=

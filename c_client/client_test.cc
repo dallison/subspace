@@ -609,8 +609,9 @@ TEST_F(ClientTest, ExplicitSplitBufferLeasesRetireAndReclaimExactSlot) {
   ASSERT_EQ(leases[1].slot_id, retired_slot);
 
   SubspacePublisherBufferLease reclaimed =
-      subspace_reclaim_publisher_buffer(pub, retired_slot);
+      subspace_reclaim_any_publisher_buffer(pub);
   ASSERT_NE(nullptr, reclaimed.buffer) << subspace_get_last_error();
+  EXPECT_EQ(retired_slot, reclaimed.slot_id);
   EXPECT_EQ(leases[1].buffer, reclaimed.buffer);
   EXPECT_NE(leases[1].lease_id, reclaimed.lease_id);
 

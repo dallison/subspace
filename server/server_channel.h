@@ -14,6 +14,7 @@
 #include "proto/subspace.pb.h"
 #include "toolbelt/bitset.h"
 #include "toolbelt/fd.h"
+#include "toolbelt/logging.h"
 #include "toolbelt/pipe.h"
 #include "toolbelt/sockets.h"
 #include "toolbelt/triggerfd.h"
@@ -219,10 +220,10 @@ public:
   ServerChannel(int id, const std::string &name, int num_slots,
                 int subscriber_queue_size,
                 uint64_t subscriber_queue_arena_size, std::string type,
-                bool is_virtual, int session_id)
+                bool is_virtual, int session_id, toolbelt::Logger &logger)
       : Channel(name, num_slots, id, subscriber_queue_size,
                 subscriber_queue_arena_size, std::move(type)),
-        is_virtual_(is_virtual), session_id_(session_id) {}
+        is_virtual_(is_virtual), session_id_(session_id), logger_(logger) {}
 
   virtual ~ServerChannel();
 
@@ -258,6 +259,7 @@ public:
   const absl::flat_hash_map<int, std::unique_ptr<User>> &GetUsers() const {
     return users_;
   }
+  toolbelt::Logger &GetLogger() { return logger_; }
 
   void SetLastKnownSlotSize(int32_t slot_size) {
     last_known_slot_size_ = slot_size;
@@ -516,6 +518,7 @@ protected:
   int32_t max_publishers_ = 0;
   bool max_subscribers_set_ = false;
   int32_t max_subscribers_ = 0;
+  toolbelt::Logger &logger_;
 };
 
 class VirtualChannel;
@@ -525,9 +528,10 @@ public:
   ChannelMultiplexer(int id, const std::string &name, int num_slots,
                      int subscriber_queue_size,
                      uint64_t subscriber_queue_arena_size, std::string type,
-                     int session_id)
+                     int session_id, toolbelt::Logger &logger)
       : ServerChannel(id, name, num_slots, subscriber_queue_size,
-                      subscriber_queue_arena_size, type, false, session_id) {}
+                      subscriber_queue_arena_size, type, false, session_id,
+                      logger) {}
 
   absl::StatusOr<std::unique_ptr<VirtualChannel>>
   CreateVirtualChannel(Server &server, const std::string &name, int vchan_id);
@@ -572,7 +576,8 @@ public:
                  int num_slots, std::string type, int session_id)
       : ServerChannel(mux->GetChannelId(), name, num_slots,
                       mux->SubscriberQueueSize(),
-                      mux->SubscriberQueueArenaSize(), type, true, session_id),
+                      mux->SubscriberQueueArenaSize(), type, true, session_id,
+                      mux->GetLogger()),
         mux_(mux), vchan_id_(vchan_id) {}
 
   std::string Type() const override { return mux_->Type(); }
