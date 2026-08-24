@@ -261,9 +261,9 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
       //   "%d: AtomicIncRefCount: %s slot %d ordinal %d retired_refs: %d NumSubscribers: %d retire: %d\n", getpid(), Name(), slot->id, ordinal, retired_refs, NumSubscribers(ref_vchan_id), retire);
       // std::cerr << details;
       if (retire && new_refs == 0 && new_reliable_refs == 0 &&
-          retired_refs >= NumSubscribers(ref_vchan_id)) {
+          retired_refs >= NumSubscribers(ref_vchan_id) &&
+          RetiredSlots().SetWasClear(slot->id)) {
         // All subscribers have seen the slot, retire it.
-        RetiredSlots().Set(slot->id);
         if (retire_callback) {
           // std::cerr << "Calling retire callback for slot " << slot->id
           //           << std::endl;
@@ -361,9 +361,8 @@ uint64_t Channel::GetVirtualMemoryUsage() const {
   return size;
 }
 
-void Channel::CleanupSlots(
-    int owner, bool reliable, bool is_pub, int vchan_id,
-    std::function<void(int32_t)> retire_callback) {
+void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
+                           int vchan_id) {
   if (is_pub) {
     // Clear every slot owned by this publisher. Explicit multi-slot leases can
     // leave more than one slot publisher-owned when a process exits.
@@ -388,26 +387,50 @@ void Channel::CleanupSlots(
     ccb_->subscribers.Clear(owner);
     ccb_->num_subs.RemoveSubscriber(vchan_id);
 
-    // Go through all the slots and remove the owner from the owners bitset.
+    InPlaceAtomicBitset &available = GetAvailableSlots(owner);
     for (int i = 0; i < NumSlots(); i++) {
       MessageSlot *slot = &ccb_->slots[i];
-      if (slot->sub_owners.IsSet(owner)) {
-        slot->sub_owners.Clear(owner);
-        std::function<void()> notify_retirement;
-        if (retire_callback &&
-            (slot->flags.load(std::memory_order_relaxed) &
-             kMessageIsActivation) == 0) {
-          const int32_t slot_id =
-              slot->bridged_slot_id.load(std::memory_order_relaxed);
-          notify_retirement = [&retire_callback, slot_id]() {
-            retire_callback(slot_id);
-          };
-        }
-        AtomicIncRefCount(slot, reliable, -1, 0, 0, true,
-                          std::move(notify_retirement));
+
+      // The available-slot bitset is the authoritative delivery record. A
+      // process may die before reading a published slot, in which case there
+      // is no sub_owners entry to clean up. Removing the subscriber changes
+      // the retirement threshold, so every unread slot must be re-evaluated.
+      available.ClearWasSet(i);
+
+      if (slot->sub_owners.ClearWasSet(owner)) {
+        // The subscriber has already been removed from NumSubscribers above,
+        // so lowering the retirement threshold accounts for this owner.
+        AtomicIncRefCount(slot, reliable, -1, 0, 0, false);
       }
     }
   }
+}
+
+bool Channel::TryRetireSlot(MessageSlot *slot) {
+  if (slot->ordinal.load(std::memory_order_relaxed) == 0) {
+    return false;
+  }
+
+  const uint64_t refs = slot->refs.load(std::memory_order_acquire);
+  if ((refs & kPubOwned) != 0) {
+    return false;
+  }
+
+  const uint64_t ref_count = refs & kRefCountMask;
+  const uint64_t reliable_ref_count =
+      (refs >> kReliableRefCountShift) & kRefCountMask;
+  const uint64_t retired_refs =
+      (refs >> kRetiredRefsShift) & kRetiredRefsMask;
+  int ref_vchan_id = (refs >> kVchanIdShift) & kVchanIdMask;
+  if (ref_vchan_id == kVchanIdMask) {
+    ref_vchan_id = -1;
+  }
+
+  if (ref_count != 0 || reliable_ref_count != 0 ||
+      retired_refs < static_cast<uint64_t>(NumSubscribers(ref_vchan_id))) {
+    return false;
+  }
+  return RetiredSlots().SetWasClear(slot->id);
 }
 
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX

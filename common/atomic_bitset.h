@@ -43,6 +43,15 @@ public:
     bits_[word].fetch_or(1ULL << offset, std::memory_order_relaxed);
   }
 
+  // Atomically set a bit and return whether it was previously clear.
+  bool SetWasClear(size_t bit) {
+    size_t word = bit / 64;
+    size_t offset = bit % 64;
+    uint64_t mask = 1ULL << offset;
+    uint64_t old = bits_[word].fetch_or(mask, std::memory_order_release);
+    return (old & mask) == 0;
+  }
+
   void Clear(size_t bit) {
     size_t word = bit / 64;
     size_t offset = bit % 64;
@@ -75,6 +84,12 @@ public:
     size_t word = bit / 64;
     size_t offset = bit % 64;
     return bits_[word].load(std::memory_order_relaxed) & (1ULL << offset);
+  }
+
+  bool IsSetSeqCst(size_t bit) const {
+    size_t word = bit / 64;
+    size_t offset = bit % 64;
+    return bits_[word].load(std::memory_order_seq_cst) & (1ULL << offset);
   }
 
   void ClearAll() {

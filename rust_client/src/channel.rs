@@ -32,7 +32,7 @@ pub const MAX_CHANNELS: usize = 1024;
 pub const MAX_SLOT_OWNERS: usize = 1024;
 pub const MAX_AVAILABLE_SLOT_QUEUE_CAPACITY: usize = 1024;
 const MAX_SLOT_QUEUE_CAS_ATTEMPTS: usize = 64;
-pub const CHANNEL_CONTROL_BLOCK_VERSION: u32 = 4;
+pub const CHANNEL_CONTROL_BLOCK_VERSION: u32 = 5;
 pub const MAX_VCHAN_ID: usize = 1023;
 pub const MAX_CHANNEL_NAME: usize = 64;
 pub const MAX_BUFFERS: usize = 1024;
@@ -376,6 +376,23 @@ impl SlotQueueHeader {
         self.insertion_failed.store(true, Ordering::Release);
     }
 
+    pub fn try_peek(&self) -> Option<(i32, u64)> {
+        if self.capacity == 0 {
+            return None;
+        }
+
+        let head = self.head.load(Ordering::Acquire);
+        let entry =
+            unsafe { &*self.entries().add((head % self.capacity as u64) as usize) };
+        if entry.sequence.load(Ordering::Acquire) != head + 1 {
+            return None;
+        }
+        Some((
+            entry.slot_id.load(Ordering::Relaxed),
+            entry.ordinal.load(Ordering::Relaxed),
+        ))
+    }
+
     pub fn try_pop(&self) -> Option<(i32, u64)> {
         if self.capacity == 0 {
             return None;
@@ -498,24 +515,71 @@ impl ActivationTracker {
 
 #[repr(C)]
 pub struct SubscriberCounter {
-    num_subs: [i32; MAX_VCHAN_ID + 1],
+    sequence: AtomicU64,
+    num_subs: [AtomicI32; MAX_VCHAN_ID + 1],
 }
 
 impl SubscriberCounter {
-    pub fn add_subscriber(&mut self, vchan_id: i32) {
-        self.num_subs[(vchan_id + 1) as usize] += 1;
+    fn replace(&self, counts: &[i32; MAX_VCHAN_ID + 1]) {
+        let sequence = self.sequence.load(Ordering::Relaxed) & !1;
+        self.sequence.store(sequence + 1, Ordering::Release);
+        for (count, value) in self.num_subs.iter().zip(counts.iter()) {
+            count.store(*value, Ordering::Relaxed);
+        }
+        self.sequence.store(sequence + 2, Ordering::Release);
     }
 
-    pub fn remove_subscriber(&mut self, vchan_id: i32) {
-        self.num_subs[(vchan_id + 1) as usize] -= 1;
+    pub fn add_subscriber(&self, vchan_id: i32) {
+        self.sequence.fetch_add(1, Ordering::AcqRel);
+        self.num_subs[(vchan_id + 1) as usize].fetch_add(1, Ordering::Relaxed);
+        self.sequence.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn remove_subscriber(&self, vchan_id: i32) {
+        self.sequence.fetch_add(1, Ordering::AcqRel);
+        self.num_subs[(vchan_id + 1) as usize].fetch_sub(1, Ordering::Relaxed);
+        self.sequence.fetch_add(1, Ordering::Release);
     }
 
     pub fn num_subscribers(&self, vchan_id: i32) -> i32 {
-        let n = self.num_subs[0];
+        loop {
+            let before = self.sequence.load(Ordering::Acquire);
+            if (before & 1) != 0 {
+                // A server may die during a write. Conservatively prevent
+                // retirement until recovery rebuilds the counter.
+                return MAX_SLOT_OWNERS as i32;
+            }
+            let mux_count = self.num_subs[0].load(Ordering::Relaxed);
+            let count = if vchan_id == -1 {
+                mux_count
+            } else {
+                mux_count
+                    + self.num_subs[(vchan_id + 1) as usize].load(Ordering::Relaxed)
+            };
+            if self.sequence.load(Ordering::Acquire) == before {
+                return count;
+            }
+        }
+    }
+}
+
+#[repr(C)]
+pub struct SubscriberCleanupGeneration {
+    generations: [AtomicU64; MAX_VCHAN_ID + 1],
+}
+
+impl SubscriberCleanupGeneration {
+    pub fn increment(&self, vchan_id: i32) {
+        self.generations[(vchan_id + 1) as usize].fetch_add(1, Ordering::Release);
+    }
+
+    pub fn get(&self, vchan_id: i32) -> u64 {
+        let mux_generation = self.generations[0].load(Ordering::Acquire);
         if vchan_id == -1 {
-            n
+            mux_generation
         } else {
-            n + self.num_subs[(vchan_id + 1) as usize]
+            mux_generation
+                + self.generations[(vchan_id + 1) as usize].load(Ordering::Acquire)
         }
     }
 }
@@ -538,6 +602,7 @@ pub struct ChannelControlBlock {
     pub sub_vchan_ids: [i16; MAX_SLOT_OWNERS],
 
     pub num_subs: SubscriberCounter,
+    pub subscriber_cleanup_generation: SubscriberCleanupGeneration,
 
     pub total_bytes: AtomicU64,
     pub total_messages: AtomicU64,
@@ -1011,14 +1076,21 @@ impl Channel {
 
     pub fn register_subscriber(&self, sub_id: usize, vchan_id: i32, is_new: bool) {
         let ccb = self.ccb();
-        ccb.subscribers.set(sub_id);
+        let was_registered = ccb.subscribers.is_set(sub_id);
+        let register_membership = is_new || !was_registered;
         unsafe {
             let ccb_mut = &mut *self.ccb;
             ccb_mut.sub_vchan_ids[sub_id] = vchan_id as i16;
-            if is_new {
-                ccb_mut.num_subs.add_subscriber(vchan_id);
-            }
         }
+        let mut counts = [0i32; MAX_VCHAN_ID + 1];
+        ccb.subscribers.traverse(|id| {
+            counts[(ccb.sub_vchan_ids[id] + 1) as usize] += 1;
+        });
+        if register_membership && !was_registered {
+            counts[(vchan_id + 1) as usize] += 1;
+        }
+        ccb.num_subs.replace(&counts);
+        ccb.subscribers.set(sub_id);
     }
 
     /// Atomically increment/decrement the ref count on a slot.
@@ -1088,8 +1160,8 @@ impl Channel {
                     && new_refs == 0
                     && new_reliable_refs == 0
                     && retired_refs >= self.num_subscribers(ref_vchan_id)
+                    && self.retired_slots().set_was_clear(slot.id as usize)
                 {
-                    self.retired_slots().set(slot.id as usize);
                     if let Some(cb) = retire_callback {
                         cb();
                     }
@@ -1097,6 +1169,36 @@ impl Channel {
                 return true;
             }
         }
+    }
+
+    pub fn try_retire_slot(&self, slot_idx: usize) -> bool {
+        let slot = self.slot_ref(slot_idx);
+        if slot.ordinal() == 0 {
+            return false;
+        }
+
+        let refs = slot.refs.load(Ordering::Acquire);
+        if (refs & PUB_OWNED) != 0 {
+            return false;
+        }
+
+        let ref_count = refs & REF_COUNT_MASK;
+        let reliable_ref_count = (refs >> RELIABLE_REF_COUNT_SHIFT) & REF_COUNT_MASK;
+        let retired_refs = (refs >> RETIRED_REFS_SHIFT) & RETIRED_REFS_MASK;
+        let encoded_vchan_id = (refs >> VCHAN_ID_SHIFT) & VCHAN_ID_MASK;
+        let ref_vchan_id = if encoded_vchan_id == VCHAN_ID_MASK {
+            -1
+        } else {
+            encoded_vchan_id as i32
+        };
+
+        if ref_count != 0
+            || reliable_ref_count != 0
+            || retired_refs < self.num_subscribers(ref_vchan_id) as u64
+        {
+            return false;
+        }
+        self.retired_slots().set_was_clear(slot_idx)
     }
 
     /// Get the buffer address for a slot, accounting for prefix.
@@ -1241,16 +1343,25 @@ impl Channel {
         } else {
             let ccb = self.ccb();
             ccb.subscribers.clear(owner as usize);
-            unsafe {
-                (*self.ccb).num_subs.remove_subscriber(vchan_id);
-            }
+            ccb.num_subs.remove_subscriber(vchan_id);
 
             for i in 0..self.num_slots as usize {
                 let slot = self.slot_ref(i);
-                if slot.sub_owners.is_set(owner as usize) {
-                    slot.sub_owners.clear(owner as usize);
-                    self.atomic_inc_ref_count::<fn()>(i, reliable, -1, 0, 0, true, None);
+                self.get_available_slots(owner as usize).clear_was_set(i);
+                if slot.sub_owners.clear_was_set(owner as usize) {
+                    self.atomic_inc_ref_count::<fn()>(i, reliable, -1, 0, 0, false, None);
                 }
+            }
+            ccb.subscriber_cleanup_generation.increment(vchan_id);
+            for i in 0..self.num_slots as usize {
+                let slot = self.slot_ref(i);
+                if (slot.flags() & MESSAGE_IS_ACTIVATION) != 0 {
+                    continue;
+                }
+                if vchan_id != -1 && i32::from(slot.vchan_id()) != vchan_id {
+                    continue;
+                }
+                self.try_retire_slot(i);
             }
         }
     }

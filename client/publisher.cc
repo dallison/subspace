@@ -293,8 +293,11 @@ void PublisherImpl::RetirePublishedSlotImmediately(MessageSlot *slot) {
   if (slot == nullptr) {
     return;
   }
-  RetiredSlots().Set(slot->id);
-  TriggerRetirement(slot->id);
+  const int32_t retirement_slot_id =
+      slot->bridged_slot_id.load(std::memory_order_relaxed);
+  if (TryRetireSlot(slot)) {
+    TriggerRetirement(retirement_slot_id);
+  }
 }
 
 MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
@@ -675,26 +678,26 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     }
   }
 
-  // Set the refs to the ordinal with no refs.
-  slot->refs.store(
-      BuildRefsBitField(slot->ordinal.load(std::memory_order_relaxed),
-                        vchan_id_, 0),
-      std::memory_order_release);
+  const uint64_t published_ordinal =
+      slot->ordinal.load(std::memory_order_relaxed);
+  const uint64_t published_timestamp =
+      slot->timestamp.load(std::memory_order_relaxed);
+  const int32_t retirement_slot_id =
+      slot->bridged_slot_id.load(std::memory_order_relaxed);
+  const uint64_t cleanup_generation =
+      SubscriberCleanupGenerationFor(vchan_id_);
 
-  // Tell all subscribers that the slot is available, BEFORE bumping
-  // total_messages. When subscriber queues are enabled, unreliable C++
-  // subscribers consume the per-subscriber queue first. The available-slot
-  // bitset remains authoritative and provides recovery when queue insertion
-  // fails or entries are evicted.
+  // Tell all subscribers that the slot is available while it remains
+  // publisher-owned. The kPubOwned bit is the publication commit barrier:
+  // subscribers preserve the delivery record but cannot claim the slot, and
+  // server cleanup cannot retire it until all delivery records and accounting
+  // below are complete.
   //
-  // SubscriberImpl::NextSlot() uses total_messages as a version stamp
-  // for its cached active_slots_ snapshot: a reliable subscriber that observes
-  // a bumped count must also observe every preceding bits.Set() so its
-  // CollectVisibleSlots() snapshot can't miss the just-published slot.
-  // bits.Set() is relaxed, but the following counter increment is seq_cst, so
-  // the relaxed bit writes are sequenced-before the seq_cst increment and
-  // therefore happens-before any subscriber's seq_cst load of total_messages
-  // that observes the new value.
+  // The available-slot bitset remains authoritative when queue insertion
+  // fails or entries are evicted. A subscriber can disappear after
+  // TraverseSeqCst observes its bit, so recheck membership after setting the
+  // delivery bit. Either this recheck clears a stale write, or the server's
+  // later ClearWasSet observes it.
   SubscriberQueuePublishGuard publish_guard(*this);
   std::vector<InPlaceSlotQueue *> failed_queues;
   ccb_->subscribers.TraverseSeqCst([this, slot, &failed_queues](int sub_id) {
@@ -702,10 +705,13 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
         vchan_id_ != GetSubVchanId(sub_id)) {
       return;
     }
-    // The bitset is the authoritative delivery record. The queue is an
-    // acceleration index and may reject an insertion under contention or
-    // after a peer dies mid-operation.
-    GetAvailableSlots(sub_id).Set(slot->id);
+    InPlaceAtomicBitset &available = GetAvailableSlots(sub_id);
+    available.Set(slot->id);
+    if (!ccb_->subscribers.IsSetSeqCst(sub_id)) {
+      available.Clear(slot->id);
+      return;
+    }
+
     InPlaceSlotQueue *queue = GetAvailableSlotQueueAddress(sub_id);
     if (queue != nullptr &&
         !queue->Push(slot->id,
@@ -715,7 +721,7 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     }
   });
 
-  // Update counters AFTER notifying subscribers (see above).
+  // Finish all slot and queue bookkeeping before making the slot claimable.
   if (!is_activation) {
     const uint64_t message_size =
         slot->message_size.load(std::memory_order_relaxed);
@@ -724,17 +730,32 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
       ccb_->max_message_size = message_size;
     }
   }
-  ccb_->total_messages.fetch_add(1, std::memory_order_seq_cst);
-  // Publish queue failure only after this message's bit and version are
-  // visible. Otherwise a subscriber can consume the failure, take an older
-  // bitset snapshot, leave fallback, and then deliver a newer queue entry
-  // ahead of the failed ordinal.
   for (InPlaceSlotQueue *queue : failed_queues) {
     queue->MarkInsertionFailure();
   }
 
+  // Commit the publication. A subscriber that observes the subsequent
+  // total_messages increment must also observe this release and all preceding
+  // delivery-record writes. PopulateActiveSlots preserves bits for
+  // publisher-owned slots, and queue consumers leave current-generation
+  // entries at the head until this store completes.
+  slot->refs.store(BuildRefsBitField(published_ordinal, vchan_id_, 0),
+                   std::memory_order_release);
+
+  // SubscriberImpl::NextSlot() uses total_messages as a version stamp for its
+  // cached active_slots_ snapshot.
+  ccb_->total_messages.fetch_add(1, std::memory_order_seq_cst);
+
+  // Subscriber removal and publication commit race safely: the operation that
+  // happens second re-evaluates retirement using the current subscriber count.
+  if (!is_activation &&
+      SubscriberCleanupGenerationFor(vchan_id_) != cleanup_generation &&
+      TryRetireSlot(slot)) {
+    TriggerRetirement(retirement_slot_id);
+  }
+
   if (!acquire_next) {
-    return {nullptr, prefix->ordinal, prefix->timestamp};
+    return {nullptr, published_ordinal, published_timestamp};
   }
 
   // A reliable publisher doesn't allocate a slot until it is asked for.
@@ -745,7 +766,7 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
   // Find a new slot.x
   MessageSlot *new_slot = FindFreeSlotUnreliable(owner);
 
-  return {new_slot, prefix->ordinal, prefix->timestamp};
+  return {new_slot, published_ordinal, published_timestamp};
 }
 
 } // namespace details
