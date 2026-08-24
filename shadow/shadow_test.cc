@@ -959,8 +959,18 @@ TEST_F(ShadowRecoveryTest, RecoversMuxSubscriberQueueTopology) {
 
   ASSERT_TRUE(WaitForShadowState([this]() {
     return shadow_->WithChannels([](auto &channels) {
-      return channels.contains("/queue_recovery/*") &&
-             channels.contains("/queue_recovery/0");
+      auto mux = channels.find("/queue_recovery/*");
+      auto vchan = channels.find("/queue_recovery/0");
+      if (mux == channels.end() || vchan == channels.end() ||
+          !mux->second.has_max_subscribers ||
+          mux->second.max_subscribers != 2 ||
+          mux->second.subscribers.size() != 1 ||
+          vchan->second.publishers.size() != 1) {
+        return false;
+      }
+      return mux->second.subscribers.begin()->second.subscriber_queue_size == 4 &&
+             vchan->second.publishers.begin()
+                     ->second.max_outstanding_slot_leases == 3;
     });
   }));
 
