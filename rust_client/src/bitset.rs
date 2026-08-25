@@ -33,6 +33,12 @@ impl<const WORDS: usize> AtomicBitSet<WORDS> {
         self.bits[word].fetch_or(1u64 << offset, Ordering::Relaxed);
     }
 
+    pub fn set_seq_cst(&self, bit: usize) {
+        let word = bit / 64;
+        let offset = bit % 64;
+        self.bits[word].fetch_or(1u64 << offset, Ordering::SeqCst);
+    }
+
     pub fn clear(&self, bit: usize) {
         let word = bit / 64;
         let offset = bit % 64;

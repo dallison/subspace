@@ -709,7 +709,15 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     available.Set(slot->id);
     if (!ccb_->subscribers.IsSetSeqCst(sub_id)) {
       available.Clear(slot->id);
-      return;
+      // The subscriber ID may have been reused after the first membership
+      // check. Registration publishes membership before seeding this bit. If
+      // the new subscriber is already visible, restore the bit that the stale
+      // cleanup above may have cleared; otherwise its later seed handles the
+      // in-progress generation.
+      if (!ccb_->subscribers.IsSetSeqCst(sub_id)) {
+        return;
+      }
+      available.Set(slot->id);
     }
 
     InPlaceSlotQueue *queue = GetAvailableSlotQueueAddress(sub_id);

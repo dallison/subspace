@@ -707,7 +707,13 @@ impl PublisherImpl {
                 available.set(slot_idx);
                 if !ccb.subscribers.is_set_seq_cst(sub_id) {
                     available.clear(slot_idx);
-                    return;
+                    // Registration publishes membership before seeding the
+                    // in-progress generation. Restore a bit cleared for the
+                    // previous occupant if this subscriber ID was reused.
+                    if !ccb.subscribers.is_set_seq_cst(sub_id) {
+                        return;
+                    }
+                    available.set(slot_idx);
                 }
 
                 let queue = self.channel.get_available_slot_queue(sub_id);

@@ -43,6 +43,12 @@ public:
     bits_[word].fetch_or(1ULL << offset, std::memory_order_relaxed);
   }
 
+  void SetSeqCst(size_t bit) {
+    size_t word = bit / 64;
+    size_t offset = bit % 64;
+    bits_[word].fetch_or(1ULL << offset, std::memory_order_seq_cst);
+  }
+
   // Atomically set a bit and return whether it was previously clear.
   bool SetWasClear(size_t bit) {
     size_t word = bit / 64;

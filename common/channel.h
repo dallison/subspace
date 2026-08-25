@@ -952,7 +952,7 @@ public:
       // subscriber visible to publishers.
     }
     ccb_->num_subs = num_subs;
-    ccb_->subscribers.Set(sub_id);
+    ccb_->subscribers.SetSeqCst(sub_id);
     if (register_membership && !was_registered && !IsPlaceholder()) {
       SeedAvailableSlotQueue(sub_id, vchan_id);
     }

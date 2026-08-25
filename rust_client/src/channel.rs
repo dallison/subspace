@@ -1090,7 +1090,7 @@ impl Channel {
             counts[(vchan_id + 1) as usize] += 1;
         }
         ccb.num_subs.replace(&counts);
-        ccb.subscribers.set(sub_id);
+        ccb.subscribers.set_seq_cst(sub_id);
     }
 
     /// Atomically increment/decrement the ref count on a slot.
