@@ -346,6 +346,14 @@ struct SubscriberOptions {
   }
   bool ForTunnel() const { return for_tunnel; }
 
+  // Subscribe to server-generated telemetry for the named channel instead of
+  // subscribing to the channel's payloads.
+  SubscriberOptions &SetTelemetry(bool v) {
+    telemetry = v;
+    return *this;
+  }
+  bool Telemetry() const { return telemetry; }
+
   SubscriberOptions &SetMux(std::string m) {
     mux = std::move(m);
     return *this;
@@ -414,6 +422,7 @@ struct SubscriberOptions {
   int32_t subscriber_queue_size = 0;
   bool bridge = false;
   bool for_tunnel = false;
+  bool telemetry = false;
   std::string type;
   int max_active_messages = 1;
   int32_t max_subscribers = 0;

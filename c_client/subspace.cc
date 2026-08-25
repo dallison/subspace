@@ -524,6 +524,7 @@ subspace_create_subscriber(SubspaceClient client, const char *channel_name,
       .SetSubscriberQueueSize(options.subscriber_queue_size)
       .SetBridge(options.bridge)
       .SetForTunnel(options.for_tunnel)
+      .SetTelemetry(options.telemetry)
       .SetType(StringFromPointer(options.type.type, options.type.type_length))
       .SetMaxActiveMessages(options.max_active_messages)
       .SetMaxSubscribers(options.max_subscribers)

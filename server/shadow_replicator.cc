@@ -180,6 +180,10 @@ void ShadowReplicator::SendCreateChannel(ServerChannel *channel) {
     msg->set_has_max_subscribers(true);
     msg->set_max_subscribers(channel->MaxSubscribers());
   }
+  msg->set_hidden(channel->IsHidden());
+  if (channel->IsTelemetryChannel()) {
+    msg->set_telemetry_target(channel->TelemetryTarget());
+  }
 
   const SharedMemoryFds &channel_fds = channel->GetFds();
   std::vector<toolbelt::FileDescriptor> fds;
@@ -431,6 +435,8 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
           .max_publishers = msg.max_publishers(),
           .has_max_subscribers = msg.has_max_subscribers(),
           .max_subscribers = msg.max_subscribers(),
+          .hidden = msg.hidden(),
+          .telemetry_target = msg.telemetry_target(),
           .ccb_fd = std::move(fds[0]),
           .bcb_fd = std::move(fds[1]),
       });

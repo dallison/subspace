@@ -1489,7 +1489,7 @@ public:
     return impl_->GetVirtualMemoryUsage();
   }
 
-  std::string Name() const { return impl_->Name(); }
+  std::string Name() const { return impl_->RequestName(); }
   std::string Type() const { return impl_->Type(); }
   std::string_view TypeView() const { return impl_->TypeView(); }
 

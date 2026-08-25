@@ -8,8 +8,8 @@
 #include "server/server.h"
 #include <cerrno>
 #include <csignal>
-#include <utility>
 #include <sys/mman.h>
+#include <utility>
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
 #include <sys/syscall.h>
 #ifndef MFD_CLOEXEC
@@ -1009,7 +1009,8 @@ std::vector<std::string> ServerChannel::RegisterExistingSubscribers() {
       RetireSubscriberQueue(id);
       warnings.push_back(absl::StrFormat(
           "Subscriber %d on channel %s requested queue capacity %d but the "
-          "publisher-provisioned arena cannot fit it; using the bitset path: %s",
+          "publisher-provisioned arena cannot fit it; using the bitset path: "
+          "%s",
           id, Name(), sub->SubscriberQueueSize(), status.ToString()));
     }
     RegisterSubscriber(id, GetVirtualChannelId(),
@@ -1065,16 +1066,22 @@ void ServerChannel::RemoveUser(Server *server, int user_id) {
   }
   if (user->IsPublisher()) {
     server->OnRemovePublisher(Name(), user->GetId());
-    server->ForEachShadow(
-        [this, &user](const std::unique_ptr<ShadowReplicator> &shadow) {
-          shadow->SendRemovePublisher(Name(), user->GetId());
-        });
+    if (!IsTelemetryChannel()) {
+      // Telemetry publishers are ephemeral and are never shadowed.
+      server->ForEachShadow(
+          [this, &user](const std::unique_ptr<ShadowReplicator> &shadow) {
+            shadow->SendRemovePublisher(Name(), user->GetId());
+          });
+    }
   } else {
     server->OnRemoveSubscriber(Name(), user->GetId());
     server->ForEachShadow(
         [this, &user](const std::unique_ptr<ShadowReplicator> &shadow) {
           shadow->SendRemoveSubscriber(Name(), user->GetId());
         });
+    if (IsTelemetryChannel()) {
+      server->TelemetrySubscriberRemoved(this);
+    }
   }
   CleanupSlots(user->GetId(), user->IsReliable(), user->IsPublisher(),
                GetVirtualChannelId());
@@ -1096,18 +1103,34 @@ void ServerChannel::RemoveUser(Server *server, int user_id) {
     TriggerAllSubscribers();
   }
   users_.erase(it);
-  if (IsEmpty()) {
+  // The telemetry coroutine removes its hidden channel after its publisher is
+  // fully destroyed.
+  if (IsEmpty() && !IsTelemetryChannel()) {
     server->RemoveChannel(this);
   }
   server->SendChannelDirectory();
 }
 
-void ServerChannel::RemoveAllUsersFor(ClientHandler *handler) {
+void ServerChannel::RemoveAllUsersFor(Server *server, ClientHandler *handler) {
   for (auto &[id, user] : users_) {
     if (user == nullptr) {
       continue;
     }
     if (user->GetHandler() == handler) {
+      if (IsHidden()) {
+        // Hidden channels bypass public plugin callbacks, so mirror the
+        // subscriber cleanup explicitly on disconnect.
+        if (user->IsSubscriber() && IsTelemetryChannel()) {
+          server->ForEachShadow(
+              [this, &user](const std::unique_ptr<ShadowReplicator> &shadow) {
+                shadow->SendRemoveSubscriber(Name(), user->GetId());
+              });
+          server->TelemetrySubscriberRemoved(this);
+        }
+      } else {
+        server->RecordTelemetryParticipantChange(this, user.get(),
+                                                 /*added=*/false);
+      }
       CleanupSlots(user->GetId(), user->IsReliable(), user->IsPublisher(),
                    GetVirtualChannelId());
       if (user->IsPublisher() && !IsPlaceholder() &&

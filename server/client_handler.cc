@@ -376,6 +376,12 @@ void ClientHandler::HandleCreatePublisher(
   }
 
   ServerChannel *channel = server_->FindChannel(req.channel_name());
+  if (channel != nullptr && channel->IsHidden() &&
+      client_name_ != "subspace-telemetry-internal") {
+    response->set_error(
+        absl::StrFormat("No such channel %s", req.channel_name()));
+    return;
+  }
   if (channel == nullptr) {
     server_->logger_.Log(toolbelt::LogLevel::kDebug,
                          "Publisher %s is creating new channel %s with size "
@@ -682,10 +688,13 @@ void ClientHandler::HandleCreatePublisher(
       }
     }
 
-    server_->ForEachShadow(
-        [&](const std::unique_ptr<ShadowReplicator> &shadow) {
-          shadow->SendAddPublisher(channel->Name(), pub);
-        });
+    if (!channel->IsTelemetryChannel()) {
+      // The per-channel coroutine recreates its ephemeral publisher.
+      server_->ForEachShadow(
+          [&](const std::unique_ptr<ShadowReplicator> &shadow) {
+            shadow->SendAddPublisher(channel->Name(), pub);
+          });
+    }
 
     channel->RecordUpdate(/*is_pub=*/true, /*add=*/true, req.is_reliable());
   }
@@ -767,53 +776,93 @@ void ClientHandler::HandleCreateSubscriber(
         kDefaultMaxAvailableSlotQueueCapacity));
     return;
   }
-  ServerChannel *channel = server_->FindChannel(req.channel_name());
-  if (channel == nullptr) {
-    // No channel exists, map an empty channel.
-    server_->logger_.Log(toolbelt::LogLevel::kDebug,
-                         "Subscriber %s is creating new placeholder channel %s "
-                         "with type length %zu (total of %zu channels)",
-                         client_name_.c_str(), req.channel_name().c_str(),
-                         req.type().size(), server_->GetNumChannels());
-    absl::StatusOr<ServerChannel *> ch = server_->CreateChannel(
-        req.channel_name(), 0, 0, 0, req.mux(), req.vchan_id(), req.type());
-    if (!ch.ok()) {
-      response->set_error(ch.status().ToString());
-      return;
-    }
-    channel = *ch;
-  } else {
-    // Check that the channel types match, if they are provided and
-    // already set in the channel.
-    if (!req.type().empty() && !channel->Type().empty() &&
-        channel->Type() != req.type()) {
+  ServerChannel *channel = nullptr;
+  if (req.telemetry()) {
+    // The server owns the hidden channel's type; the requested target type is
+    // intentionally ignored for telemetry subscriptions.
+    if (req.is_bridge() || req.for_tunnel() || !req.mux().empty()) {
       response->set_error(
-          absl::StrFormat("Inconsistent channel types for channel %s: "
-                          "type has been set as %s, not %s\n",
-                          req.channel_name(), channel->Type(), req.type()));
+          "Telemetry subscribers cannot be bridges, tunnels, or virtual "
+          "channel subscribers");
       return;
     }
-    if (channel->Type().empty()) {
-      channel->SetType(req.type());
+    if (req.subscriber_id() == -1) {
+      ServerChannel *target = server_->FindChannel(req.channel_name());
+      if (!server_->IsPublicChannel(target)) {
+        response->set_error(
+            absl::StrFormat("No such channel %s", req.channel_name()));
+        return;
+      }
+      absl::StatusOr<ServerChannel *> telemetry_channel =
+          server_->FindOrCreateTelemetryChannel(req.channel_name());
+      if (!telemetry_channel.ok()) {
+        response->set_error(telemetry_channel.status().ToString());
+        return;
+      }
+      channel = *telemetry_channel;
+    } else {
+      channel = server_->FindTelemetryChannel(req.channel_name());
+      if (channel == nullptr) {
+        response->set_error(
+            absl::StrFormat("No telemetry channel for %s", req.channel_name()));
+        return;
+      }
+    }
+  } else {
+    channel = server_->FindChannel(req.channel_name());
+    if (channel != nullptr && channel->IsHidden()) {
+      response->set_error(
+          absl::StrFormat("No such channel %s", req.channel_name()));
+      return;
+    }
+    if (channel == nullptr) {
+      // No channel exists, map an empty channel.
+      server_->logger_.Log(
+          toolbelt::LogLevel::kDebug,
+          "Subscriber %s is creating new placeholder channel %s "
+          "with type length %zu (total of %zu channels)",
+          client_name_.c_str(), req.channel_name().c_str(), req.type().size(),
+          server_->GetNumChannels());
+      absl::StatusOr<ServerChannel *> ch = server_->CreateChannel(
+          req.channel_name(), 0, 0, 0, req.mux(), req.vchan_id(), req.type());
+      if (!ch.ok()) {
+        response->set_error(ch.status().ToString());
+        return;
+      }
+      channel = *ch;
+    } else {
+      // Check that the channel types match, if they are provided and
+      // already set in the channel.
+      if (!req.type().empty() && !channel->Type().empty() &&
+          channel->Type() != req.type()) {
+        response->set_error(
+            absl::StrFormat("Inconsistent channel types for channel %s: "
+                            "type has been set as %s, not %s\n",
+                            req.channel_name(), channel->Type(), req.type()));
+        return;
+      }
+      if (channel->Type().empty()) {
+        channel->SetType(req.type());
+      }
     }
   }
   // Check the virtuality settings.  We can't mix virtual and non-virtual
   // channels with the same name or on different multiplexer channels.
-  if (req.mux().empty() && channel->IsVirtual()) {
+  if (!req.telemetry() && req.mux().empty() && channel->IsVirtual()) {
     response->set_error(
         absl::StrFormat("Channel %s is virtual, but no multiplexer was "
                         "specified for the subscriber",
                         req.channel_name()));
     return;
   }
-  if (!req.mux().empty() && !channel->IsVirtual()) {
+  if (!req.telemetry() && !req.mux().empty() && !channel->IsVirtual()) {
     response->set_error(
         absl::StrFormat("Channel %s is not virtual, but a multiplexer was "
                         "specified for the subscriber",
                         req.channel_name()));
     return;
   }
-  if (channel->IsVirtual()) {
+  if (!req.telemetry() && channel->IsVirtual()) {
     VirtualChannel *vchan = static_cast<VirtualChannel *>(channel);
     if (vchan->GetMux()->Name() != req.mux()) {
       response->set_error(absl::StrFormat(
@@ -827,10 +876,16 @@ void ClientHandler::HandleCreateSubscriber(
   ServerChannel *limit_channel =
       channel->IsVirtual() ? static_cast<VirtualChannel *>(channel)->GetMux()
                            : channel;
+  auto remove_unused_telemetry_channel = [&]() {
+    if (req.telemetry() && channel->IsEmpty()) {
+      server_->RemoveChannel(channel);
+    }
+  };
   if (absl::Status status = limit_channel->ValidateOrSetMaxSubscribers(
           req.max_subscribers(), /*set_if_missing=*/true, "subscriber");
       !status.ok()) {
     response->set_error(status.ToString());
+    remove_unused_telemetry_channel();
     return;
   }
   server_->ForEachShadow([&](const std::unique_ptr<ShadowReplicator> &shadow) {
@@ -843,13 +898,14 @@ void ClientHandler::HandleCreateSubscriber(
     int limit_num_bridge_subs = 0;
     int limit_num_tunnel_pubs = 0;
     int limit_num_tunnel_subs = 0;
-    limit_channel->CountUsers(
-        limit_num_pubs, limit_num_subs, limit_num_bridge_pubs,
-        limit_num_bridge_subs, limit_num_tunnel_pubs, limit_num_tunnel_subs);
+    limit_channel->CountUsers(limit_num_pubs, limit_num_subs,
+                              limit_num_bridge_pubs, limit_num_bridge_subs,
+                              limit_num_tunnel_pubs, limit_num_tunnel_subs);
     if (limit_num_subs >= limit_channel->MaxSubscribers()) {
       response->set_error(absl::StrFormat(
           "Channel %s already has the maximum number of subscribers (%d)",
           req.channel_name(), limit_channel->MaxSubscribers()));
+      remove_unused_telemetry_channel();
       return;
     }
   }
@@ -860,6 +916,7 @@ void ClientHandler::HandleCreateSubscriber(
     absl::StatusOr<User *> user = channel->GetUser(req.subscriber_id());
     if (!user.ok()) {
       response->set_error(user.status().ToString());
+      remove_unused_telemetry_channel();
       return;
     }
     sub = static_cast<SubscriberUser *>(*user);
@@ -880,6 +937,7 @@ void ClientHandler::HandleCreateSubscriber(
         response->set_error(absl::StrFormat(
             "Insufficient capacity to add a new subscriber to channel %s: %s",
             req.channel_name(), cap_ok.ToString()));
+        remove_unused_telemetry_channel();
         return;
       }
     }
@@ -894,6 +952,7 @@ void ClientHandler::HandleCreateSubscriber(
                                req.subscriber_queue_size(), req.process_id());
     if (!subscriber.ok()) {
       response->set_error(subscriber.status().ToString());
+      remove_unused_telemetry_channel();
       return;
     }
     channel->RecordUpdate(/*is_pub=*/false, /*add=*/true, req.is_reliable());
@@ -911,6 +970,9 @@ void ClientHandler::HandleCreateSubscriber(
 
   channel->RegisterSubscriber(sub->GetId(), channel->GetVirtualChannelId(),
                               req.subscriber_id() == -1);
+  if (req.telemetry() && req.subscriber_id() == -1) {
+    server_->TelemetrySubscriberAdded(channel);
+  }
 
   ServerChannel *resolved =
       channel->IsVirtual() ? static_cast<VirtualChannel *>(channel)->GetMux()
@@ -922,6 +984,7 @@ void ClientHandler::HandleCreateSubscriber(
   response->set_channel_id(channel->GetChannelId());
   response->set_subscriber_id(sub->GetId());
   response->set_type(channel->Type());
+  response->set_resolved_channel_name(channel->Name());
   response->set_vchan_id(channel->GetVirtualChannelId());
 
   const SharedMemoryFds &channel_fds = channel->GetFds();
@@ -983,7 +1046,7 @@ void ClientHandler::HandleCreateSubscriber(
     }
   }
 
-  if (!req.is_bridge()) {
+  if (!req.is_bridge() && !req.telemetry()) {
     // Send Query to subscribe to public channels on other servers.
     server_->SendQuery(req.channel_name());
   }
@@ -1055,7 +1118,9 @@ void ClientHandler::HandleRemoveSubscriber(
     const subspace::RemoveSubscriberRequest &req,
     subspace::RemoveSubscriberResponse *response,
     [[maybe_unused]] std::vector<toolbelt::FileDescriptor> &fds) {
-  ServerChannel *channel = server_->FindChannel(req.channel_name());
+  ServerChannel *channel =
+      req.telemetry() ? server_->FindTelemetryChannel(req.channel_name())
+                      : server_->FindChannel(req.channel_name());
   if (channel == nullptr) {
     response->set_error(
         absl::StrFormat("No such channel %s", req.channel_name()));
@@ -1078,7 +1143,7 @@ void ClientHandler::HandleGetChannelInfo(
     return;
   }
   ServerChannel *channel = server_->FindChannel(req.channel_name());
-  if (channel == nullptr) {
+  if (!server_->IsPublicChannel(channel)) {
     response->set_error(
         absl::StrFormat("No such channel %s", req.channel_name()));
     return;
@@ -1101,7 +1166,7 @@ void ClientHandler::HandleGetChannelStats(
     return;
   }
   ServerChannel *channel = server_->FindChannel(req.channel_name());
-  if (channel == nullptr) {
+  if (!server_->IsPublicChannel(channel)) {
     response->set_error(
         absl::StrFormat("No such channel %s", req.channel_name()));
     return;

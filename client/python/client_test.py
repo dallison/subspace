@@ -5,6 +5,7 @@ import os
 import select
 import struct
 import tempfile
+import time
 import unittest
 
 
@@ -388,6 +389,7 @@ class TestSubspaceClient(unittest.TestCase):
 
     def test_subscriber_options(self):
         opts = subspace.SubscriberOptions()
+        self.assertFalse(opts.telemetry())
         opts.set_reliable(True)
         opts.set_subscriber_queue_size(3)
         opts.set_type("sub_opts_type")
@@ -396,6 +398,7 @@ class TestSubspaceClient(unittest.TestCase):
         opts.set_pass_checksum_errors(True)
         opts.set_keep_active_message(True)
         opts.set_max_subscribers(2)
+        opts.set_telemetry(True)
 
         self.assertTrue(opts.is_reliable())
         self.assertEqual(opts.subscriber_queue_size(), 3)
@@ -405,6 +408,7 @@ class TestSubspaceClient(unittest.TestCase):
         self.assertTrue(opts.pass_checksum_errors())
         self.assertTrue(opts.keep_active_message())
         self.assertEqual(opts.max_subscribers(), 2)
+        self.assertTrue(opts.telemetry())
 
     def test_max_subscribers_option(self):
         client = self._make_client("max_subscribers")
@@ -1017,6 +1021,29 @@ class TestSubspaceClient(unittest.TestCase):
         self.assertFalse(opts.for_tunnel())
         opts.set_for_tunnel(True)
         self.assertTrue(opts.for_tunnel())
+
+    def test_telemetry_subscriber_smoke(self):
+        pub_client = self._make_client("telemetry_pub")
+        watcher_client = self._make_client("telemetry_watch")
+        pub = pub_client.create_publisher(channel_name="ch_telemetry_smoke",
+                                          slot_size=128, num_slots=4)
+        opts = subspace.SubscriberOptions()
+        opts.set_telemetry(True)
+        telemetry = watcher_client.create_subscriber(
+            channel_name="ch_telemetry_smoke", options=opts)
+
+        self.assertEqual(telemetry.type(), "subspace.Telemetry")
+        deadline = time.monotonic() + 5.0
+        data = b""
+        while time.monotonic() < deadline:
+            data = telemetry.read_message()
+            if len(data) > 0:
+                break
+            time.sleep(0.05)
+        self.assertGreater(len(data), 0)
+
+        pub = None
+        telemetry = None
 
     def test_for_tunnel_publisher_accessor(self):
         client = self._make_client("tunnel_pub")

@@ -568,9 +568,15 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
 
   SubscriberOptions subscriber_options = opts;
   subscriber_options.use_split_buffers = sub_resp.use_split_buffers();
+  // Telemetry subscribers map the hidden server channel while retaining the
+  // requested target name for reload, trigger, and removal requests.
+  const std::string mapped_channel_name =
+      sub_resp.resolved_channel_name().empty()
+          ? channel_name
+          : sub_resp.resolved_channel_name();
 
   std::shared_ptr<SubscriberImpl> channel = std::make_shared<SubscriberImpl>(
-      channel_name, sub_resp.num_slots(),
+      mapped_channel_name, sub_resp.num_slots(),
       sub_resp.default_subscriber_queue_size(),
       sub_resp.subscriber_queue_arena_size(),
       sub_resp.subscriber_queue_size(), sub_resp.channel_id(),
@@ -580,6 +586,7 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
         return CheckReload(static_cast<ClientChannel *>(c));
       },
       server_user_id_, server_group_id_);
+  channel->SetRequestName(channel_name);
   channel->SetClientBufferLookupCallback([this](const std::string &channel_name,
                                                 uint64_t session_id,
                                                 uint32_t buffer_index) {
@@ -1595,7 +1602,7 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
   }
   Request req;
   FillCreateSubscriberRequest(req.mutable_create_subscriber(),
-                              subscriber->Name(), subscriber->options_,
+                              subscriber->RequestName(), subscriber->options_,
                               subscriber->GetSubscriberId());
 
   // Send request to server and wait for response.
@@ -1853,8 +1860,9 @@ absl::Status ClientImpl::RemoveSubscriber(SubscriberImpl *subscriber) {
   }
   Request req;
   auto *cmd = req.mutable_remove_subscriber();
-  cmd->set_channel_name(subscriber->Name());
+  cmd->set_channel_name(subscriber->RequestName());
   cmd->set_subscriber_id(subscriber->GetSubscriberId());
+  cmd->set_telemetry(subscriber->options_.Telemetry());
 
   // Send request to server and wait for response.
   Response response;
@@ -2130,6 +2138,7 @@ void ClientImpl::FillCreateSubscriberRequest(CreateSubscriberRequest *cmd,
   cmd->set_is_reliable(opts.IsReliable());
   cmd->set_is_bridge(opts.IsBridge());
   cmd->set_for_tunnel(opts.ForTunnel());
+  cmd->set_telemetry(opts.Telemetry());
   cmd->set_type(opts.Type());
   cmd->set_max_active_messages(opts.MaxActiveMessages());
   cmd->set_max_subscribers(opts.MaxSubscribers());

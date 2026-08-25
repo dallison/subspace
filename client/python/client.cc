@@ -266,7 +266,12 @@ PYBIND11_MODULE(subspace, m) {
            "Tunnel subscribers need to know whether messages are locally or "
            "remotely generated via the cross-machine flag.")
       .def("for_tunnel", &SubscriberOptions::ForTunnel,
-           "Get whether this subscriber is for an external tunnel process.");
+           "Get whether this subscriber is for an external tunnel process.")
+      .def("set_telemetry", &SubscriberOptions::SetTelemetry,
+           "Set whether the subscriber receives server-generated telemetry "
+           "for the channel instead of payload messages.")
+      .def("telemetry", &SubscriberOptions::Telemetry,
+           "Get whether the subscriber receives server-generated telemetry.");
 
   // Message class returned from read_message.
   py::class_<Message>(m, "Message",

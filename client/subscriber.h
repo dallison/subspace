@@ -61,7 +61,8 @@ public:
                       std::move(session_id), std::move(type), std::move(reload),
                       user_id, group_id),
         subscriber_id_(subscriber_id),
-        subscriber_queue_size_(subscriber_queue_size), options_(options) {
+        subscriber_queue_size_(subscriber_queue_size), options_(options),
+        request_name_(name) {
     // Preallocate to avoid malloc later.
     (void)GetOrdinalTracker(vchan_id_);
   }
@@ -70,6 +71,9 @@ public:
   void InitActiveMessages();
   void ResetDeliveryState();
   bool UsesSplitBuffers() const { return UseSplitBuffers(); }
+  // The public requested name may differ from the mapped telemetry channel.
+  const std::string &RequestName() const { return request_name_; }
+  void SetRequestName(std::string name) { request_name_ = std::move(name); }
 
   std::shared_ptr<SubscriberImpl> shared_from_this() {
     return std::static_pointer_cast<SubscriberImpl>(
@@ -371,6 +375,7 @@ private:
   toolbelt::TriggerFd trigger_;
   std::vector<toolbelt::TriggerFd> reliable_publishers_;
   SubscriberOptions options_;
+  std::string request_name_;
   std::atomic<int> num_active_messages_{0};
   std::mutex reliable_publishers_mutex_;
 

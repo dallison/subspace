@@ -269,6 +269,7 @@ typedef struct {
   int32_t subscriber_queue_size;
   bool bridge;             // This subscriber is for the bridge.
   bool for_tunnel;         // Mark subscriptions for external tunnels.
+  bool telemetry;          // Subscribe to server-generated telemetry.
   SubspaceTypeInfo type;   // Type of the message.  This is an opaque string.
   int max_active_messages; // Max number of message that can be active at once.
   int32_t max_subscribers; // 0 means no explicit subscriber limit.

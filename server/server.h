@@ -33,14 +33,16 @@
 
 namespace subspace {
 
+class Publisher;
+
 // Values written to the notify_fd when the server is ready and
 // is stopped.
 constexpr int64_t kServerReady = 1;
 constexpr int64_t kServerStopped = 2;
 constexpr int64_t kServerWaiting = 3;
 
-// In multithreaded tests we can't dlclose the plugins because the dynamic linker doesn't
-// play well with threads.
+// In multithreaded tests we can't dlclose the plugins because the dynamic
+// linker doesn't play well with threads.
 void ClosePluginsOnShutdown();
 bool ShouldClosePluginsOnShutdown();
 
@@ -216,7 +218,9 @@ public:
                                                 int slot_size, int num_slots,
                                                 uint64_t subscriber_queue_arena_size,
                                                 const std::string &mux,
-                                                int vchan_id, std::string type);
+                                                int vchan_id, std::string type,
+                                                bool hidden = false,
+                                                std::string telemetry_target = {});
   absl::StatusOr<ServerChannel *>
   CreateMultiplexer(const std::string &channel_name, int slot_size,
                     int num_slots, uint64_t subscriber_queue_arena_size,
@@ -257,9 +261,61 @@ private:
     std::unique_ptr<PluginInterface> interface;
   };
 
+  struct PendingTelemetryParticipant {
+    std::string name;
+    bool publisher = false;
+    Telemetry::Change change = Telemetry::NONE;
+  };
+
+  // Per-target state shared with that target's telemetry coroutine. The
+  // shared_ptr in telemetry_states_ keeps it stable across coroutine yields.
+  struct TelemetryState {
+    std::string hidden_channel_name;
+    int subscriber_count = 0;
+    bool snapshot_requested = false;
+    bool coroutine_running = false;
+    int target_channel_id = -1;
+    uint32_t last_total_drops = 0;
+    size_t resize_count = 0;
+    toolbelt::TriggerFd trigger;
+    absl::flat_hash_map<uint64_t, std::string> participants;
+    std::vector<PendingTelemetryParticipant> pending_participants;
+  };
+
   absl::Status RecoverFromShadow(RecoveredState &state);
 
-  void ForeachChannel(std::function<void(ServerChannel*)> func);
+  // Public iteration excludes internal telemetry transport channels.
+  void ForeachChannel(std::function<void(ServerChannel *)> func);
+  bool IsPublicChannel(const ServerChannel *channel) const {
+    return channel != nullptr && !channel->IsHidden();
+  }
+
+  // Finds the hidden telemetry channel monitoring target_name.
+  ServerChannel *FindTelemetryChannel(const std::string &target_name);
+  // Creates the hidden channel and its state, but not its lazy publisher.
+  absl::StatusOr<ServerChannel *>
+  FindOrCreateTelemetryChannel(const std::string &target_name);
+  // Maintain the lazy coroutine on telemetry subscriber count transitions.
+  void TelemetrySubscriberAdded(ServerChannel *channel);
+  void TelemetrySubscriberRemoved(ServerChannel *channel);
+  // Queue a target-channel participant change for the next batch.
+  void RecordTelemetryParticipantChange(ServerChannel *channel, User *user,
+                                        bool added);
+  void StartTelemetryCoroutine(const std::string &target_name,
+                               const std::shared_ptr<TelemetryState> &state);
+  // Restarts coroutines whose subscribers were recovered from the shadow.
+  void StartRecoveredTelemetryCoroutines();
+  // Owns the internal publisher and emits at most one batch per second.
+  void TelemetryCoroutine(async::Context ctx, std::string target_name,
+                          std::shared_ptr<TelemetryState> state);
+  void PublishTelemetryBatch(const std::string &target_name,
+                             const std::shared_ptr<TelemetryState> &state,
+                             Publisher &publisher);
+  void ReconcileTelemetryParticipants(const std::string &target_name,
+                                      TelemetryState &state);
+  void QueueTelemetrySnapshot(const std::string &target_name,
+                              TelemetryState &state);
+  static uint64_t TelemetryParticipantKey(const User *user);
 
   void RemoveAllUsersFor(ClientHandler *handler);
   void CloseHandler(ClientHandler *handler);
@@ -398,6 +454,9 @@ private:
   async::AsyncRuntime runtime_;
 
   toolbelt::TriggerFd channel_directory_trigger_fd_;
+  // Stable state is required because coroutines suspend while the map changes.
+  absl::flat_hash_map<std::string, std::shared_ptr<TelemetryState>>
+      telemetry_states_;
   toolbelt::InetAddress discovery_addr_;
   async::UDPSocket discovery_transmitter_;
   async::UDPSocket discovery_receiver_;

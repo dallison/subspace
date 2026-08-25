@@ -6,6 +6,7 @@
 #include "absl/status/status_matchers.h"
 #include "client/client.h"
 #include "common/channel.h"
+#include "proto/subspace.pb.h"
 #include "server/server.h"
 #include "shadow/shadow.h"
 #include "gtest/gtest.h"
@@ -96,6 +97,30 @@ static const std::string &BridgeServer1Socket() {
 static const std::string &BridgeShadowSocket() {
   static const std::string s = MakeUniqueSocketPath("bridge_shd");
   return s;
+}
+
+static const subspace::ShadowChannel *FindShadowTelemetryChannel(
+    const absl::flat_hash_map<std::string, subspace::ShadowChannel> &channels,
+    const std::string &target) {
+  for (const auto &[name, ch] : channels) {
+    (void)name;
+    if (ch.hidden && ch.telemetry_target == target) {
+      return &ch;
+    }
+  }
+  return nullptr;
+}
+
+static subspace::ServerChannel *
+FindServerTelemetryChannel(subspace::Server &server,
+                           const std::string &target) {
+  for (auto &[name, ch] : server.GetChannels()) {
+    (void)name;
+    if (ch->IsTelemetryChannel() && ch->TelemetryTarget() == target) {
+      return ch.get();
+    }
+  }
+  return nullptr;
 }
 
 class ShadowTest : public ::testing::Test {
@@ -327,6 +352,43 @@ TEST_F(ShadowTest, ShadowReceivesRemovePublisher) {
   }));
 }
 
+TEST_F(ShadowTest, ShadowReplicatesHiddenTelemetryMetadata) {
+  constexpr char kTarget[] = "shadow_telemetry_metadata";
+
+  subspace::Client target_client;
+  InitClient(target_client);
+  auto pub = target_client.CreatePublisher(kTarget, 128, 4);
+  ASSERT_THAT(pub, IsOk());
+
+  subspace::Client watcher_client;
+  InitClient(watcher_client);
+  auto telemetry = watcher_client.CreateSubscriber(
+      kTarget, subspace::SubscriberOptions().SetTelemetry(true));
+  ASSERT_THAT(telemetry, IsOk());
+  EXPECT_EQ(kTarget, telemetry->Name());
+  EXPECT_EQ("subspace.Telemetry", telemetry->Type());
+
+  ASSERT_TRUE(WaitForShadowState([kTarget]() {
+    return GetShadow()->WithChannels([&](auto &channels) {
+      const auto *hidden = FindShadowTelemetryChannel(channels, kTarget);
+      return hidden != nullptr && hidden->hidden &&
+             hidden->telemetry_target == kTarget &&
+             hidden->subscribers.size() == 1 && hidden->publishers.empty();
+    });
+  }));
+
+  GetShadow()->WithChannels([&](auto &channels) {
+    EXPECT_NE(channels.find(kTarget), channels.end());
+    const auto *hidden = FindShadowTelemetryChannel(channels, kTarget);
+    ASSERT_NE(nullptr, hidden);
+    EXPECT_TRUE(hidden->hidden);
+    EXPECT_EQ(kTarget, hidden->telemetry_target);
+    EXPECT_EQ("subspace.Telemetry", hidden->type);
+    EXPECT_EQ(1u, hidden->subscribers.size());
+    EXPECT_TRUE(hidden->publishers.empty());
+  });
+}
+
 TEST_F(ShadowTest, ShadowReceivesRemoveSubscriber) {
   subspace::Client client;
   InitClient(client);
@@ -492,6 +554,107 @@ protected:
   std::unique_ptr<subspace::Shadow> shadow_;
   std::thread shadow_thread_;
 };
+
+TEST_F(ShadowRecoveryTest, RecoversHiddenTelemetryChannelAndSubscribers) {
+  signal(SIGPIPE, SIG_IGN);
+
+  StartShadow();
+  StartServer();
+
+  constexpr char kTarget[] = "shadow_telemetry_recovery";
+
+  subspace::Client target_client;
+  target_client.SetThreadSafe(true);
+  ASSERT_THAT(target_client.Init(RecoveryServerSocket()), IsOk());
+  auto pub = target_client.CreatePublisher(kTarget, 128, 8);
+  ASSERT_THAT(pub, IsOk());
+
+  subspace::Client watcher_client;
+  watcher_client.SetThreadSafe(true);
+  ASSERT_THAT(watcher_client.Init(RecoveryServerSocket()), IsOk());
+  auto telemetry = watcher_client.CreateSubscriber(
+      kTarget, subspace::SubscriberOptions().SetTelemetry(true));
+  ASSERT_THAT(telemetry, IsOk());
+
+  ASSERT_TRUE(WaitForShadowState([this, kTarget]() {
+    return shadow_->WithChannels([&](auto &channels) {
+      const auto *hidden = FindShadowTelemetryChannel(channels, kTarget);
+      return hidden != nullptr && hidden->hidden &&
+             hidden->telemetry_target == kTarget &&
+             hidden->subscribers.size() == 1 && hidden->publishers.empty();
+    });
+  }));
+
+  std::string hidden_channel_name = shadow_->WithChannels([&](auto &channels) {
+    const auto *hidden = FindShadowTelemetryChannel(channels, kTarget);
+    EXPECT_NE(nullptr, hidden);
+    return hidden->name;
+  });
+
+  subspace::ServerChannel *pre_hidden =
+      FindServerTelemetryChannel(*server_, kTarget);
+  ASSERT_NE(nullptr, pre_hidden);
+  EXPECT_TRUE(pre_hidden->IsHidden());
+  EXPECT_EQ(kTarget, pre_hidden->TelemetryTarget());
+
+  server_->ForEachShadow(
+      [](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
+  StopServer();
+
+  StartServer();
+
+  subspace::ServerChannel *recovered_hidden =
+      FindServerTelemetryChannel(*server_, kTarget);
+  ASSERT_NE(nullptr, recovered_hidden);
+  EXPECT_TRUE(recovered_hidden->IsHidden());
+  EXPECT_EQ(kTarget, recovered_hidden->TelemetryTarget());
+  EXPECT_EQ(hidden_channel_name, recovered_hidden->Name());
+
+  int num_pubs = 0, num_subs = 0, num_bridge_pubs = 0, num_bridge_subs = 0;
+  int num_tunnel_pubs = 0, num_tunnel_subs = 0;
+  recovered_hidden->CountUsers(num_pubs, num_subs, num_bridge_pubs,
+                               num_bridge_subs, num_tunnel_pubs,
+                               num_tunnel_subs);
+  EXPECT_EQ(0, num_pubs);
+  EXPECT_EQ(1, num_subs);
+
+  ASSERT_TRUE(WaitForShadowState([this, kTarget]() {
+    return shadow_->WithChannels([&](auto &channels) {
+      const auto *hidden = FindShadowTelemetryChannel(channels, kTarget);
+      return hidden != nullptr && hidden->hidden &&
+             hidden->telemetry_target == kTarget &&
+             hidden->subscribers.size() == 1 && hidden->publishers.empty();
+    });
+  }));
+
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  bool ephemeral_publisher_created = false;
+  while (std::chrono::steady_clock::now() < deadline) {
+    recovered_hidden = FindServerTelemetryChannel(*server_, kTarget);
+    ASSERT_NE(nullptr, recovered_hidden);
+    num_pubs = num_subs = num_bridge_pubs = num_bridge_subs = 0;
+    num_tunnel_pubs = num_tunnel_subs = 0;
+    recovered_hidden->CountUsers(num_pubs, num_subs, num_bridge_pubs,
+                                 num_bridge_subs, num_tunnel_pubs,
+                                 num_tunnel_subs);
+    if (num_pubs == 1 && num_subs >= 1) {
+      ephemeral_publisher_created = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  EXPECT_TRUE(ephemeral_publisher_created);
+
+  ASSERT_TRUE(WaitForShadowState([this, kTarget]() {
+    return shadow_->WithChannels([&](auto &channels) {
+      const auto *hidden = FindShadowTelemetryChannel(channels, kTarget);
+      return hidden != nullptr && hidden->publishers.empty();
+    });
+  }));
+
+  StopServer();
+  StopShadow();
+}
 
 TEST_F(ShadowRecoveryTest, ServerRecoversStateFromShadow) {
   signal(SIGPIPE, SIG_IGN);
