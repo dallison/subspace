@@ -18,11 +18,13 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <inttypes.h>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sys/resource.h>
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
@@ -1151,6 +1153,81 @@ TEST_F(ClientTest, PublishAndReadWithSubscriberQueue) {
   ASSERT_OK(msg);
   ASSERT_EQ(7, msg->length);
   ASSERT_EQ(0, memcmp(msg->buffer, "queued3", 7));
+}
+
+TEST_F(ClientTest, SubscriberJoiningDuringPublishReceivesCommittedMessage) {
+  auto pub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+  auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  constexpr char kChannel[] = "subscriber_joins_during_publish";
+  auto pub = EVAL_AND_ASSERT_OK(pub_client->CreatePublisher(
+      kChannel,
+      PubOpts(256, 10)
+          .SetChecksum(true)
+          .SetSubscriberQueueArenaSize(subspace::SlotQueueBlockSize(16))));
+
+  std::mutex mutex;
+  std::condition_variable callback_entered_cv;
+  std::condition_variable resume_publish_cv;
+  bool callback_entered = false;
+  bool resume_publish = false;
+  pub.SetChecksumCallback(
+      [&](const std::array<absl::Span<const uint8_t>, 3> &,
+          absl::Span<std::byte> checksum) {
+        std::unique_lock<std::mutex> lock(mutex);
+        callback_entered = true;
+        callback_entered_cv.notify_one();
+        resume_publish_cv.wait(lock, [&] { return resume_publish; });
+        std::fill(checksum.begin(), checksum.end(), std::byte{0});
+      });
+
+  absl::Status publish_status = absl::UnknownError("publish did not run");
+  std::thread publish_thread([&] {
+    absl::StatusOr<void *> buffer = pub.GetMessageBuffer();
+    if (!buffer.ok()) {
+      publish_status = buffer.status();
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        callback_entered = true;
+      }
+      callback_entered_cv.notify_one();
+      return;
+    }
+    memcpy(*buffer, "joined", 7);
+    publish_status = pub.PublishMessage(7).status();
+  });
+
+  {
+    std::unique_lock<std::mutex> lock(mutex);
+    callback_entered_cv.wait(lock, [&] { return callback_entered; });
+  }
+
+  // Registration seeds the pending publisher-owned generation. The
+  // subscriber must preserve that bit and queue entry until commit.
+  absl::StatusOr<Subscriber> sub_status = sub_client->CreateSubscriber(
+      kChannel, SubOpts().SetSubscriberQueueSize(16).SetChecksum(true));
+  if (sub_status.ok()) {
+    sub_status->SetChecksumCallback(
+        [](const std::array<absl::Span<const uint8_t>, 3> &,
+           absl::Span<std::byte> checksum) {
+          std::fill(checksum.begin(), checksum.end(), std::byte{0});
+        });
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    resume_publish = true;
+  }
+  resume_publish_cv.notify_one();
+  publish_thread.join();
+  ASSERT_OK(publish_status);
+  ASSERT_OK(sub_status);
+  auto sub = std::move(*sub_status);
+
+  auto message = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_GT(message.length, 0);
+  EXPECT_EQ(7, message.length);
+  EXPECT_EQ(0, memcmp(message.buffer, "joined", 7));
 }
 
 TEST_F(ClientTest, SubscribersUseDifferentQueueSizes) {
@@ -4487,6 +4564,83 @@ TEST_F(ClientTest, SubscriberRemovalTriggersServerRetirement) {
   EXPECT_EQ(message.slot_id, retired_slot);
 
   message.Reset();
+}
+
+TEST_F(ClientTest, SubscriberRemovalCanRacePublisherCommit) {
+  auto pub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+  auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  constexpr char kChannel[] = "server_retirement_during_publish";
+  auto pub = EVAL_AND_ASSERT_OK(pub_client->CreatePublisher(
+      kChannel,
+      PubOpts(256, 10)
+          .SetNotifyRetirement(true)
+          .SetSubscriberQueueArenaSize(subspace::SlotQueueBlockSize(16))));
+  std::optional<Subscriber> sub = EVAL_AND_ASSERT_OK(
+      sub_client->CreateSubscriber(
+          kChannel, SubOpts().SetSubscriberQueueSize(16)));
+
+  subspace::ServerChannel *channel = Server()->FindChannel(kChannel);
+  ASSERT_NE(nullptr, channel);
+
+  int publisher_id = -1;
+  for (const auto &[id, user] : channel->GetUsers()) {
+    if (user != nullptr && user->IsPublisher()) {
+      publisher_id = id;
+      break;
+    }
+  }
+  ASSERT_GE(publisher_id, 0);
+
+  int subscriber_id = -1;
+  channel->GetCcb()->subscribers.Traverse(
+      [&subscriber_id](int id) { subscriber_id = id; });
+  ASSERT_GE(subscriber_id, 0);
+
+  subspace::MessageSlot *slot = nullptr;
+  for (int i = 0; i < channel->NumSlots(); ++i) {
+    subspace::MessageSlot *candidate = &channel->GetCcb()->slots[i];
+    if (candidate->refs.load(std::memory_order_acquire) ==
+        (subspace::kPubOwned | static_cast<uint64_t>(publisher_id))) {
+      slot = candidate;
+      break;
+    }
+  }
+  ASSERT_NE(nullptr, slot);
+
+  const uint64_t cleanup_generation =
+      channel->SubscriberCleanupGenerationFor(-1);
+  slot->ordinal.store(1, std::memory_order_relaxed);
+  slot->vchan_id.store(-1, std::memory_order_relaxed);
+  slot->bridged_slot_id.store(slot->id, std::memory_order_relaxed);
+  channel->GetAvailableSlots(subscriber_id).Set(slot->id);
+  channel->BeginSubscriberQueuePublish(publisher_id);
+
+  // Cleanup must return without waiting for the synthetic in-flight publisher.
+  // Its retirement scan observes kPubOwned and leaves this slot alone.
+  sub.reset();
+  EXPECT_FALSE(channel->RetiredSlots().IsSet(slot->id));
+  EXPECT_NE(cleanup_generation, channel->SubscriberCleanupGenerationFor(-1));
+
+  // Publication commit is the second side of the handshake and therefore
+  // performs the retirement that the server scan could not.
+  slot->refs.store(subspace::BuildRefsBitField(1, -1, 0),
+                   std::memory_order_release);
+  ASSERT_TRUE(channel->TryRetireSlot(slot));
+  channel->EndSubscriberQueuePublish(publisher_id);
+  channel->NotifyPublisherRetirement(slot->id);
+
+  const toolbelt::FileDescriptor &retirement_fd = pub.GetRetirementFd();
+  struct pollfd fd = {
+      .fd = retirement_fd.Fd(),
+      .events = POLLIN,
+  };
+  ASSERT_EQ(1, ::poll(&fd, 1, 1000));
+  int retired_slot = -1;
+  ASSERT_EQ(sizeof(retired_slot),
+            ::read(retirement_fd.Fd(), &retired_slot, sizeof(retired_slot)));
+  EXPECT_EQ(slot->id, retired_slot);
+  EXPECT_EQ(0, ::poll(&fd, 1, 0));
 }
 
 // This tests retirement from the the publisher side using dropped messages.  We

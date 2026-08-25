@@ -283,6 +283,7 @@ public:
   std::vector<toolbelt::FileDescriptor> GetReliablePublisherTriggerFds() const;
 
   std::vector<toolbelt::FileDescriptor> GetRetirementFds() const;
+  virtual void NotifyPublisherRetirement(int32_t slot_id);
 
   // Translate a user id into a User pointer.  The pointer ownership
   // is kept by the ServerChannel.
@@ -541,6 +542,7 @@ public:
   bool IsMux() const override { return true; }
   bool HasPublisherOwnedBy(const ClientHandler *handler) const override;
   std::vector<std::string> RegisterExistingSubscribers() override;
+  void NotifyPublisherRetirement(int32_t slot_id) override;
   bool IsEmpty() const override {
     return virtual_channels_.empty() && ServerChannel::IsEmpty();
   }

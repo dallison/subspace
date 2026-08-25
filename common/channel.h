@@ -134,7 +134,7 @@ constexpr int kDefaultSubscriberQueueSize = 16;
 constexpr uint64_t kDefaultSubscriberQueueArenaSize = 64'000;
 constexpr size_t kDefaultMaxAvailableSlotQueueCapacity = 1024;
 constexpr size_t kMaxSlotQueueCasAttempts = 64;
-constexpr uint32_t kChannelControlBlockVersion = 4;
+constexpr uint32_t kChannelControlBlockVersion = 5;
 constexpr size_t kMaxChannelControlBlockSize = 1ULL << 30;
 
 // This limits the number of virtual channels.  Each virtual channel
@@ -575,23 +575,119 @@ GetMetadataSpan(const MessagePrefix *prefix, int32_t checksum_size,
 // This counts the number of subscribers given a virtual channel id.
 class SubscriberCounter {
 public:
-  void AddSubscriber(int vchan_id) { num_subs_[vchan_id + 1]++; }
+  SubscriberCounter() {
+    sequence_.store(0, std::memory_order_relaxed);
+    ResetCounts();
+  }
 
-  void RemoveSubscriber(int vchan_id) { num_subs_[vchan_id + 1]--; }
+  SubscriberCounter(const SubscriberCounter &other) {
+    sequence_.store(0, std::memory_order_relaxed);
+    for (size_t i = 0; i < num_subs_.size(); ++i) {
+      num_subs_[i].store(
+          other.num_subs_[i].load(std::memory_order_acquire),
+          std::memory_order_relaxed);
+    }
+  }
+
+  SubscriberCounter &operator=(const SubscriberCounter &other) {
+    if (this == &other) {
+      return *this;
+    }
+    const uint64_t sequence =
+        sequence_.load(std::memory_order_relaxed) & ~uint64_t{1};
+    sequence_.store(sequence + 1, std::memory_order_release);
+    for (size_t i = 0; i < num_subs_.size(); ++i) {
+      num_subs_[i].store(
+          other.num_subs_[i].load(std::memory_order_acquire),
+          std::memory_order_relaxed);
+    }
+    sequence_.store(sequence + 2, std::memory_order_release);
+    return *this;
+  }
+
+  void Reset() {
+    BeginWrite();
+    ResetCounts();
+    EndWrite();
+  }
+
+  void AddSubscriber(int vchan_id) {
+    BeginWrite();
+    num_subs_[vchan_id + 1].fetch_add(1, std::memory_order_relaxed);
+    EndWrite();
+  }
+
+  void RemoveSubscriber(int vchan_id) {
+    BeginWrite();
+    num_subs_[vchan_id + 1].fetch_sub(1, std::memory_order_relaxed);
+    EndWrite();
+  }
 
   // If vchan_id is valid we also count the number of subscribers to the
   // multiplexer itself.
   int NumSubscribers(int vchan_id) {
-    int n = num_subs_[0];
-    if (vchan_id == -1) {
-      return n;
+    for (;;) {
+      const uint64_t before = sequence_.load(std::memory_order_acquire);
+      if ((before & 1) != 0) {
+        // A server process can die between BeginWrite and EndWrite. Treat an
+        // interrupted update conservatively instead of making surviving
+        // clients spin forever; the recovered server rebuilds the counter.
+        return kMaxSlotOwners;
+      }
+      const int mux_count = num_subs_[0].load(std::memory_order_relaxed);
+      const int count =
+          vchan_id == -1
+              ? mux_count
+              : mux_count +
+                    num_subs_[vchan_id + 1].load(std::memory_order_relaxed);
+      if (sequence_.load(std::memory_order_acquire) == before) {
+        return count;
+      }
     }
-    return n + num_subs_[vchan_id + 1];
   }
 
 private:
+  void BeginWrite() {
+    sequence_.fetch_add(1, std::memory_order_acq_rel);
+  }
+
+  void EndWrite() { sequence_.fetch_add(1, std::memory_order_release); }
+
+  void ResetCounts() {
+    for (auto &count : num_subs_) {
+      count.store(0, std::memory_order_relaxed);
+    }
+  }
+
   // Vchan ID -1 means invalid vchan ID so we just use element 0 for that.
-  std::array<int, kMaxVchanId + 1> num_subs_ = {};
+  std::atomic<uint64_t> sequence_;
+  std::array<std::atomic<int>, kMaxVchanId + 1> num_subs_;
+};
+
+class SubscriberCleanupGeneration {
+public:
+  SubscriberCleanupGeneration() {
+    for (auto &generation : generations_) {
+      generation.store(0, std::memory_order_relaxed);
+    }
+  }
+
+  void Increment(int vchan_id) {
+    generations_[vchan_id + 1].fetch_add(1, std::memory_order_release);
+  }
+
+  uint64_t Get(int vchan_id) const {
+    const uint64_t mux_generation =
+        generations_[0].load(std::memory_order_acquire);
+    if (vchan_id == -1) {
+      return mux_generation;
+    }
+    return mux_generation +
+           generations_[vchan_id + 1].load(std::memory_order_acquire);
+  }
+
+private:
+  std::array<std::atomic<uint64_t>, kMaxVchanId + 1> generations_;
 };
 
 class OrdinalAccumulator {
@@ -641,6 +737,10 @@ struct ChannelControlBlock {          // a.k.a CCB
   std::array<int16_t, kMaxSlotOwners> sub_vchan_ids;
 
   SubscriberCounter num_subs;
+  // Incremented by the server after removing a subscriber and before its
+  // all-slot retirement scan. Publishers use this to determine whether
+  // subscriber cleanup raced their publication commit.
+  SubscriberCleanupGeneration subscriber_cleanup_generation;
 
   // Statistics counters.
   std::atomic<uint64_t> total_bytes;
@@ -837,18 +937,25 @@ public:
 
   void RegisterSubscriber(int sub_id, int vchan_id, bool is_new) {
     ccb_->sub_vchan_ids[sub_id] = vchan_id;
-    if (is_new && !IsPlaceholder()) {
-      GetAvailableSlots(sub_id).ClearAll();
-    }
-    ccb_->subscribers.Set(sub_id);
-    if (is_new && !IsPlaceholder()) {
-      SeedAvailableSlotQueue(sub_id, vchan_id);
-    }
+    const bool was_registered = ccb_->subscribers.IsSet(sub_id);
+    const bool register_membership = is_new || !was_registered;
     SubscriberCounter num_subs;
     ccb_->subscribers.Traverse([this, &num_subs](size_t id) {
       num_subs.AddSubscriber(ccb_->sub_vchan_ids[id]);
     });
+    if (register_membership && !was_registered) {
+      num_subs.AddSubscriber(vchan_id);
+      if (!IsPlaceholder()) {
+        GetAvailableSlots(sub_id).ClearAll();
+      }
+      // Publish the increased retirement threshold before making the
+      // subscriber visible to publishers.
+    }
     ccb_->num_subs = num_subs;
+    ccb_->subscribers.SetSeqCst(sub_id);
+    if (register_membership && !was_registered && !IsPlaceholder()) {
+      SeedAvailableSlotQueue(sub_id, vchan_id);
+    }
   }
 
   int GetSubVchanId(int32_t i) const { return ccb_->sub_vchan_ids[i]; }
@@ -856,11 +963,12 @@ public:
   void SeedAvailableSlotQueue(int sub_id, int vchan_id) {
     InPlaceAtomicBitset &bits = GetAvailableSlots(sub_id);
     InPlaceSlotQueue *queue = GetAvailableSlotQueueAddress(sub_id);
+    // Include a non-zero publisher-owned generation. This closes the inverse
+    // registration race: a publisher may have snapshotted subscribers before
+    // this subscriber is registered, while the registration scan happens
+    // before that publisher commits. Consumers preserve the bit/queue entry
+    // until kPubOwned is cleared.
     auto visible = [vchan_id](MessageSlot &slot) {
-      const uint64_t refs = slot.refs.load(std::memory_order_acquire);
-      if ((refs & kPubOwned) != 0) {
-        return false;
-      }
       const uint64_t ordinal = slot.ordinal.load(std::memory_order_relaxed);
       const int buffer_index =
           slot.buffer_index.load(std::memory_order_relaxed);
@@ -961,12 +1069,16 @@ public:
   }
   std::string SlotType() const { return type_; }
 
-  void CleanupSlots(
-      int owner, bool reliable, bool is_pub, int vchan_id,
-      std::function<void(int32_t)> retire_callback = {});
+  void CleanupSlots(int owner, bool reliable, bool is_pub, int vchan_id);
+
+  bool TryRetireSlot(MessageSlot *slot);
 
   int NumSubscribers(int vchan_id) const {
     return ccb_->num_subs.NumSubscribers(vchan_id);
+  }
+
+  uint64_t SubscriberCleanupGenerationFor(int vchan_id) const {
+    return ccb_->subscriber_cleanup_generation.Get(vchan_id);
   }
 
   int GetChannelId() const { return channel_id_; }
