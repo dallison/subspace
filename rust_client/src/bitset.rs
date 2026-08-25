@@ -33,16 +33,36 @@ impl<const WORDS: usize> AtomicBitSet<WORDS> {
         self.bits[word].fetch_or(1u64 << offset, Ordering::Relaxed);
     }
 
+    pub fn set_seq_cst(&self, bit: usize) {
+        let word = bit / 64;
+        let offset = bit % 64;
+        self.bits[word].fetch_or(1u64 << offset, Ordering::SeqCst);
+    }
+
     pub fn clear(&self, bit: usize) {
         let word = bit / 64;
         let offset = bit % 64;
         self.bits[word].fetch_and(!(1u64 << offset), Ordering::Relaxed);
     }
 
+    pub fn clear_was_set(&self, bit: usize) -> bool {
+        let word = bit / 64;
+        let offset = bit % 64;
+        self.bits[word].fetch_and(!(1u64 << offset), Ordering::Acquire)
+            & (1u64 << offset)
+            != 0
+    }
+
     pub fn is_set(&self, bit: usize) -> bool {
         let word = bit / 64;
         let offset = bit % 64;
         self.bits[word].load(Ordering::Relaxed) & (1u64 << offset) != 0
+    }
+
+    pub fn is_set_seq_cst(&self, bit: usize) -> bool {
+        let word = bit / 64;
+        let offset = bit % 64;
+        self.bits[word].load(Ordering::SeqCst) & (1u64 << offset) != 0
     }
 
     pub fn clear_all(&self) {
@@ -157,11 +177,29 @@ impl InPlaceAtomicBitSet {
             .fetch_or(1u64 << offset, Ordering::Relaxed);
     }
 
+    pub fn set_was_clear(&self, bit: usize) -> bool {
+        let word_idx = bit / 64;
+        let offset = bit % 64;
+        self.word(word_idx)
+            .fetch_or(1u64 << offset, Ordering::Release)
+            & (1u64 << offset)
+            == 0
+    }
+
     pub fn clear(&self, bit: usize) {
         let word_idx = bit / 64;
         let offset = bit % 64;
         self.word(word_idx)
             .fetch_and(!(1u64 << offset), Ordering::Relaxed);
+    }
+
+    pub fn clear_was_set(&self, bit: usize) -> bool {
+        let word_idx = bit / 64;
+        let offset = bit % 64;
+        self.word(word_idx)
+            .fetch_and(!(1u64 << offset), Ordering::Acquire)
+            & (1u64 << offset)
+            != 0
     }
 
     pub fn is_set(&self, bit: usize) -> bool {

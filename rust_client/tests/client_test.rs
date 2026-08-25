@@ -1727,6 +1727,75 @@ fn integration_custom_checksum_callback() {
     assert!(msg2.checksum_error);
 }
 
+#[test]
+fn integration_subscriber_joining_during_publish_receives_message() {
+    use std::sync::{Arc, Condvar, Mutex};
+
+    let pub_client = new_client("test_join_publish_p");
+    let sub_client = new_client("test_join_publish_s");
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(10)
+        .set_checksum(true)
+        .set_subscriber_queue_arena_size(DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE);
+    let publisher = pub_client
+        .create_publisher("rust_join_during_publish", &pub_opts)
+        .unwrap();
+
+    let state = Arc::new((Mutex::new((false, false)), Condvar::new()));
+    let callback_state = Arc::clone(&state);
+    publisher.set_checksum_callback(move |spans: &[&[u8]], checksum: &mut [u8]| {
+        let (lock, cv) = &*callback_state;
+        let mut state = lock.lock().unwrap();
+        state.0 = true;
+        cv.notify_all();
+        while !state.1 {
+            state = cv.wait(state).unwrap();
+        }
+        drop(state);
+        calculate_crc32_checksum(spans, checksum);
+    });
+
+    let publisher_thread = publisher.clone();
+    let publish_thread = std::thread::spawn(move || {
+        let payload = b"joined";
+        let (buffer, _) = publisher_thread
+            .get_message_buffer(payload.len() as i32)
+            .unwrap()
+            .unwrap();
+        unsafe {
+            std::ptr::copy_nonoverlapping(payload.as_ptr(), buffer, payload.len());
+        }
+        publisher_thread
+            .publish_message(payload.len() as i64)
+            .unwrap();
+    });
+
+    let (lock, cv) = &*state;
+    let mut state_guard = lock.lock().unwrap();
+    while !state_guard.0 {
+        state_guard = cv.wait(state_guard).unwrap();
+    }
+    drop(state_guard);
+
+    let sub_opts = SubscriberOptions::new()
+        .set_subscriber_queue_size(16)
+        .set_checksum(true);
+    let subscriber = sub_client
+        .create_subscriber("rust_join_during_publish", &sub_opts)
+        .unwrap();
+
+    let mut state_guard = lock.lock().unwrap();
+    state_guard.1 = true;
+    cv.notify_all();
+    drop(state_guard);
+    publish_thread.join().unwrap();
+
+    let message = subscriber.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(message.length, 6);
+    assert_eq!(unsafe { message.as_slice() }, b"joined");
+}
+
 // ── Checksum + metadata tests ────────────────────────────────────────────────
 
 #[test]

@@ -281,8 +281,10 @@ impl PublisherImpl {
     }
 
     pub fn retire_published_slot_immediately(&self, slot_idx: usize) {
-        self.channel.retired_slots().set(slot_idx);
-        self.trigger_retirement(slot_idx);
+        let retirement_slot_id = self.channel.slot_ref(slot_idx).bridged_slot_id();
+        if self.channel.try_retire_slot(slot_idx) {
+            self.trigger_retirement(retirement_slot_id as usize);
+        }
     }
 
     pub fn find_free_slot_unreliable(
@@ -670,14 +672,22 @@ impl PublisherImpl {
             }
         }
 
-        // Release the slot: store refs with ordinal, no PUB_OWNED.
         let ordinal = slot.ordinal();
-        slot.refs.store(
-            build_refs_bit_field(ordinal, vchan_id, 0),
-            Ordering::Release,
-        );
+        let retirement_slot_id = slot.bridged_slot_id();
+        let (return_ordinal, return_timestamp) = if !prefix.is_null() {
+            unsafe { ((*prefix).ordinal, (*prefix).timestamp) }
+        } else {
+            (0, 0)
+        };
+        let cleanup_generation = self
+            .channel
+            .ccb()
+            .subscriber_cleanup_generation
+            .get(vchan_id);
 
-        // Tell all subscribers the slot is available.
+        // Prepare every delivery record and statistic while the slot remains
+        // PUB_OWNED. Subscribers preserve the bit/queue entry but cannot claim
+        // the slot, and server cleanup cannot retire it before commit.
         let ccb = self.channel.ccb();
         {
             let _publish_guard = SubscriberQueuePublishGuard::new(
@@ -693,7 +703,19 @@ impl PublisherImpl {
                 {
                     return;
                 }
-                self.channel.get_available_slots(sub_id).set(slot_idx);
+                let available = self.channel.get_available_slots(sub_id);
+                available.set(slot_idx);
+                if !ccb.subscribers.is_set_seq_cst(sub_id) {
+                    available.clear(slot_idx);
+                    // Registration publishes membership before seeding the
+                    // in-progress generation. Restore a bit cleared for the
+                    // previous occupant if this subscriber ID was reused.
+                    if !ccb.subscribers.is_set_seq_cst(sub_id) {
+                        return;
+                    }
+                    available.set(slot_idx);
+                }
+
                 let queue = self.channel.get_available_slot_queue(sub_id);
                 if let Some(queue) = queue {
                     if !queue.push(
@@ -705,52 +727,62 @@ impl PublisherImpl {
                     }
                 }
             });
-            ccb.total_messages.fetch_add(1, Ordering::SeqCst);
+
+            if !is_activation {
+                let message_size = slot.message_size();
+                ccb.total_bytes.fetch_add(message_size, Ordering::Relaxed);
+                let msg_size = message_size as u32;
+                let mut old_max = ccb.max_message_size.load(Ordering::Relaxed);
+                while msg_size > old_max {
+                    match ccb.max_message_size.compare_exchange_weak(
+                        old_max,
+                        msg_size,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(v) => old_max = v,
+                    }
+                }
+            }
+
             for queue in failed_queues {
                 unsafe { (&*queue).mark_insertion_failure() };
             }
-        }
 
-        if !is_activation {
-            let message_size = slot.message_size();
-            self.channel
-                .ccb()
-                .total_bytes
-                .fetch_add(message_size, Ordering::Relaxed);
-            let msg_size = message_size as u32;
-            let mut old_max = self.channel.ccb().max_message_size.load(Ordering::Relaxed);
-            while msg_size > old_max {
-                match self.channel.ccb().max_message_size.compare_exchange_weak(
-                    old_max,
-                    msg_size,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => break,
-                    Err(v) => old_max = v,
-                }
+            // Commit only after all delivery state is ready.
+            slot.refs.store(
+                build_refs_bit_field(ordinal, vchan_id, 0),
+                Ordering::Release,
+            );
+            ccb.total_messages.fetch_add(1, Ordering::SeqCst);
+
+            // Whichever happens second, subscriber cleanup or this commit,
+            // completes retirement using the current subscriber count.
+            if !is_activation
+                && ccb
+                    .subscriber_cleanup_generation
+                    .get(vchan_id)
+                    != cleanup_generation
+                && self.channel.try_retire_slot(slot_idx)
+            {
+                self.trigger_retirement(retirement_slot_id as usize);
             }
         }
-
-        let (ordinal, timestamp) = if !prefix.is_null() {
-            unsafe { ((*prefix).ordinal, (*prefix).timestamp) }
-        } else {
-            (0, 0)
-        };
 
         if !acquire_next {
             return PublishedMessage {
                 new_slot: None,
-                ordinal,
-                timestamp,
+                ordinal: return_ordinal,
+                timestamp: return_timestamp,
             };
         }
 
         if reliable {
             return PublishedMessage {
                 new_slot: None,
-                ordinal,
-                timestamp,
+                ordinal: return_ordinal,
+                timestamp: return_timestamp,
             };
         }
 
@@ -758,8 +790,8 @@ impl PublisherImpl {
 
         PublishedMessage {
             new_slot,
-            ordinal,
-            timestamp,
+            ordinal: return_ordinal,
+            timestamp: return_timestamp,
         }
     }
 

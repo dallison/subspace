@@ -338,7 +338,8 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
     return p.status();
   }
   ccb_ = reinterpret_cast<ChannelControlBlock *>(*p);
-  ccb_->num_subs = SubscriberCounter();
+  new (&ccb_->num_subs) SubscriberCounter();
+  new (&ccb_->subscriber_cleanup_generation) SubscriberCleanupGeneration();
 
   // Create buffer control block.
   p = CreateSharedMemory(channel_id_, "bcb", sizeof(BufferControlBlock),
@@ -552,6 +553,31 @@ std::vector<toolbelt::FileDescriptor> ServerChannel::GetRetirementFds() const {
   }
   return r;
 }
+
+void ServerChannel::NotifyPublisherRetirement(int32_t slot_id) {
+  for (auto &[id, user] : users_) {
+    if (user == nullptr || !user->IsPublisher()) {
+      continue;
+    }
+    auto &fd =
+        static_cast<PublisherUser *>(user.get())->GetRetirementFdWriter();
+    if (!fd.Valid()) {
+      continue;
+    }
+    absl::StatusOr<ssize_t> written = fd.Write(&slot_id, sizeof(slot_id));
+    if (!written.ok()) {
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to trigger retirement for slot %d: %s", slot_id,
+                  written.status().ToString().c_str());
+    } else if (*written != sizeof(slot_id)) {
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to trigger retirement for slot %d: wrote %zd "
+                  "bytes, expected %zu bytes",
+                  slot_id, *written, sizeof(slot_id));
+    }
+  }
+}
+
 // User ids are allocated from the multiplexer as all virtual channels
 // on the mux share the same CCB.
 absl::StatusOr<int> ServerChannel::AllocateUserId(const char *type) {
@@ -931,32 +957,32 @@ void ServerChannel::CleanupSlots(int owner, bool reliable, bool is_pub,
   }
 
   ccb_->subscribers.ClearSeqCst(owner);
-  Channel::CleanupSlots(
-      owner, reliable, is_pub, vchan_id, [this](int32_t slot_id) {
-        for (auto &[id, user] : users_) {
-          if (user == nullptr || !user->IsPublisher()) {
-            continue;
-          }
-          auto &fd =
-              static_cast<PublisherUser *>(user.get())->GetRetirementFdWriter();
-          if (!fd.Valid()) {
-            continue;
-          }
-          absl::StatusOr<ssize_t> written =
-              fd.Write(&slot_id, sizeof(slot_id));
-          if (!written.ok()) {
-            logger_.Log(toolbelt::LogLevel::kError,
-                        "Failed to trigger retirement for slot %d: %s", slot_id,
-                        written.status().ToString().c_str());
-          } else if (*written != sizeof(slot_id)) {
-            logger_.Log(toolbelt::LogLevel::kError,
-                        "Failed to trigger retirement for slot %d: wrote %zd "
-                        "bytes, expected %zu bytes",
-                        slot_id, *written, sizeof(slot_id));
-          }
-        }
-      });
   RetireSubscriberQueue(owner);
+
+  Channel::CleanupSlots(owner, reliable, is_pub, vchan_id);
+  ccb_->subscriber_cleanup_generation.Increment(vchan_id);
+
+  // Re-evaluate every published slot after lowering the subscriber count.
+  // Publication commit performs the same check. If this scan encounters a
+  // publisher-owned slot it leaves it alone; the publisher's later commit
+  // observes the new count and completes retirement. If commit happened first,
+  // this scan completes retirement.
+  for (int i = 0; i < NumSlots(); ++i) {
+    MessageSlot *slot = &ccb_->slots[i];
+    if ((slot->flags.load(std::memory_order_relaxed) &
+         kMessageIsActivation) != 0) {
+      continue;
+    }
+    if (vchan_id != -1 &&
+        slot->vchan_id.load(std::memory_order_relaxed) != vchan_id) {
+      continue;
+    }
+
+    if (TryRetireSlot(slot)) {
+      NotifyPublisherRetirement(
+          slot->bridged_slot_id.load(std::memory_order_relaxed));
+    }
+  }
 }
 
 std::vector<std::string> ServerChannel::RegisterExistingSubscribers() {
@@ -1002,6 +1028,13 @@ std::vector<std::string> ChannelMultiplexer::RegisterExistingSubscribers() {
                     vchan_warnings.end());
   }
   return warnings;
+}
+
+void ChannelMultiplexer::NotifyPublisherRetirement(int32_t slot_id) {
+  ServerChannel::NotifyPublisherRetirement(slot_id);
+  for (VirtualChannel *vchan : virtual_channels_) {
+    vchan->NotifyPublisherRetirement(slot_id);
+  }
 }
 
 void ServerChannel::TriggerAllSubscribers() {

@@ -74,11 +74,11 @@ void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
     // std::cerr << this << " remove active message " << slot->id << " "
     //           << slot->ordinal << " refs " << std::hex << slot->refs.load() <<
     //           std::dec << "\n";
-  slot->sub_owners.Clear(subscriber_id_);
-  AtomicIncRefCount(slot, IsReliable(), -1,
-                    slot->ordinal.load(std::memory_order_relaxed),
-                    slot->vchan_id.load(std::memory_order_relaxed), true,
-                    [this, slot]() {
+  if (slot->sub_owners.ClearWasSet(subscriber_id_)) {
+    AtomicIncRefCount(slot, IsReliable(), -1,
+                      slot->ordinal.load(std::memory_order_relaxed),
+                      slot->vchan_id.load(std::memory_order_relaxed), true,
+                      [this, slot]() {
                       // When a slot retires we want to use the slot id that was
                       // originally used for the message.  If the message came
                       // in from a bridge we want to notify the original sender
@@ -95,9 +95,10 @@ void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
                       //   slot->bridged_slot_id, slot->ordinal,
                       //   slot->vchan_id);
                       // std::cerr << details;
-                      TriggerRetirement(
-                          slot->bridged_slot_id.load(std::memory_order_relaxed));
-                    });
+                        TriggerRetirement(slot->bridged_slot_id.load(
+                            std::memory_order_relaxed));
+                      });
+  }
   if (--num_active_messages_ < options_.MaxActiveMessages()) {
     Trigger();
     if (IsReliable()) {
@@ -110,15 +111,21 @@ void SubscriberImpl::PopulateActiveSlots(InPlaceAtomicBitset &bits) {
   uint64_t num_messages = 0;
   do {
     num_messages = ccb_->total_messages.load(std::memory_order_seq_cst);
-    bits.ClearAll();
 
     for (int i = 0; i < NumSlots(); i++) {
       MessageSlot *s = &ccb_->slots[i];
       uint64_t refs = s->refs.load(std::memory_order_acquire);
+      if ((refs & kPubOwned) != 0) {
+        // A publisher may already have installed this generation's delivery
+        // bit while still preparing queue entries and accounting. Preserve the
+        // bit until the publisher commits and advances total_messages.
+        continue;
+      }
       if (VirtualChannelIdMatch(s, vchan_id_) &&
-          s->ordinal.load(std::memory_order_relaxed) != 0 &&
-          (refs & kPubOwned) == 0) {
+          s->ordinal.load(std::memory_order_relaxed) != 0) {
         bits.Set(i);
+      } else {
+        bits.Clear(i);
       }
     }
   } while (num_messages !=
@@ -214,7 +221,9 @@ void SubscriberImpl::ClaimSlot(MessageSlot *slot, int vchan_id,
 }
 
 void SubscriberImpl::UnreadSlot(MessageSlot *slot) {
-  DecrementSlotRef(slot, false);
+  if (slot->sub_owners.ClearWasSet(subscriber_id_)) {
+    DecrementSlotRef(slot, false);
+  }
   // A queued hint has already been consumed by NextSlot(). If delivery is
   // rejected (for example at max_active_messages), the slot remains unread in
   // the authoritative bitset but is no longer present in the queue. Stay on
@@ -283,9 +292,18 @@ SubscriberImpl::FindNextQueuedSlot(uint64_t max_queue_position) {
     if (!queue->TryPeek(queued)) {
       return std::nullopt;
     }
-    if (queued.slot_id < 0 || queued.slot_id >= NumSlots()) {
-      queue->DropFront();
-      continue;
+    if (queued.slot_id >= 0 && queued.slot_id < NumSlots()) {
+      MessageSlot *peeked_slot = &ccb_->slots[queued.slot_id];
+      const uint64_t peeked_ordinal =
+          peeked_slot->ordinal.load(std::memory_order_relaxed);
+      if ((peeked_slot->refs.load(std::memory_order_acquire) & kPubOwned) !=
+              0 &&
+          peeked_ordinal == queued.ordinal) {
+        // The queue entry belongs to the generation currently being
+        // published. Leave it at the head until the publisher's release store
+        // makes the slot claimable.
+        return std::nullopt;
+      }
     }
     QueuedSlot popped;
     if (!queue->TryPop(popped)) {
@@ -512,6 +530,10 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
         if (!stable_poll_drain) {
           next_slot_cache_valid_ = false;
         }
+        // Record ownership before returning the pinned slot. If the process
+        // dies before ClientImpl can allocate and claim the ActiveMessage, the
+        // server must still be able to identify and release this reference.
+        new_slot->sub_owners.Set(subscriber_id_);
         return new_slot;
       }
       // Push() may fail after a peer dies or loses a bounded CAS race. The
@@ -653,6 +675,9 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
       // Successful claim. Advance the cursor so the next NextSlot() call
       // picks up the next ordinal in the cached, sorted list.
       ++next_slot_cursor_;
+      // Record ownership before returning the pinned slot. This closes the
+      // crash window between AtomicIncRefCount and ClaimSlot.
+      new_slot->slot->sub_owners.Set(subscriber_id_);
       return new_slot->slot;
     }
     // CAS failed: another subscriber raced us, or the slot was retired and
@@ -725,6 +750,9 @@ MessageSlot *SubscriberImpl::LastSlot(MessageSlot *slot, bool reliable,
                           new_slot->vchan_id, false);
         continue;
       }
+      // ReadNewest also returns a pinned slot through ClientImpl before
+      // ClaimSlot runs, so make that transient reference server-visible.
+      new_slot->slot->sub_owners.Set(subscriber_id_);
       return new_slot->slot;
     }
     newest_snapshot_.clear();

@@ -280,23 +280,27 @@ impl SubscriberImpl {
 
     pub fn remove_active_message(&self, slot_idx: usize) {
         let slot = self.channel.slot_ref(slot_idx);
-        slot.sub_owners.clear(self.subscriber_id as usize);
-        let ordinal = slot.ordinal();
-        let vchan_id = slot.vchan_id() as i32;
-        let bridged_slot_id = slot.bridged_slot_id();
         let reliable = self.options.reliable;
 
-        self.channel.atomic_inc_ref_count(
-            slot_idx,
-            reliable,
-            -1,
-            ordinal,
-            vchan_id,
-            true,
-            Some(|| {
-                self.trigger_retirement(bridged_slot_id as usize);
-            }),
-        );
+        if slot
+            .sub_owners
+            .clear_was_set(self.subscriber_id as usize)
+        {
+            let ordinal = slot.ordinal();
+            let vchan_id = slot.vchan_id() as i32;
+            let bridged_slot_id = slot.bridged_slot_id();
+            self.channel.atomic_inc_ref_count(
+                slot_idx,
+                reliable,
+                -1,
+                ordinal,
+                vchan_id,
+                true,
+                Some(|| {
+                    self.trigger_retirement(bridged_slot_id as usize);
+                }),
+            );
+        }
         let new_count = self.num_active_messages.fetch_sub(1, Ordering::Relaxed) - 1;
         if new_count < self.options.max_active_messages {
             self.trigger();
@@ -313,16 +317,22 @@ impl SubscriberImpl {
     pub fn populate_active_slots(&self, bits: &crate::bitset::InPlaceAtomicBitSet) {
         loop {
             let total = self.total_messages();
-            bits.clear_all();
 
             for i in 0..self.channel.num_slots as usize {
                 let s = self.channel.slot_ref(i);
                 let refs = s.refs.load(Ordering::Acquire);
+                if (refs & PUB_OWNED) != 0 {
+                    // Preserve a delivery bit installed by an in-progress
+                    // publisher. The total_messages commit will force a fresh
+                    // snapshot after PUB_OWNED is cleared.
+                    continue;
+                }
                 if virtual_channel_id_match(s.vchan_id(), self.channel.vchan_id)
                     && s.ordinal() != 0
-                    && (refs & PUB_OWNED) == 0
                 {
                     bits.set(i);
+                } else {
+                    bits.clear(i);
                 }
             }
 
@@ -428,15 +438,27 @@ impl SubscriberImpl {
             return None;
         }
         loop {
-            let queue_at_boundary = match self
+            let queue = match self
                 .channel
                 .get_available_slot_queue(self.subscriber_id as usize)
             {
-                Some(queue) => queue.head() >= max_queue_position,
-                None => true,
+                Some(queue) => queue,
+                None => break,
             };
-            if queue_at_boundary {
+            if queue.head() >= max_queue_position {
                 break;
+            }
+            if let Some((slot_id, ordinal)) = queue.try_peek() {
+                if slot_id >= 0 && (slot_id as usize) < self.channel.num_slots as usize {
+                    let slot = self.channel.slot_ref(slot_id as usize);
+                    if (slot.refs.load(Ordering::Acquire) & PUB_OWNED) != 0
+                        && slot.ordinal() == ordinal
+                    {
+                        // Leave the current generation at the queue head until
+                        // the publisher commits it.
+                        break;
+                    }
+                }
             }
             let Some((slot_id, ordinal)) = self
                 .channel
@@ -594,6 +616,10 @@ impl SubscriberImpl {
                             .saturating_add(concurrent_drops as i32);
                     }
                 }
+                self.channel
+                    .slot_ref(slot_idx)
+                    .sub_owners
+                    .set(self.subscriber_id as usize);
                 return Some(slot_idx);
             }
         }
@@ -753,6 +779,10 @@ impl SubscriberImpl {
                     );
                     continue;
                 }
+                self.channel
+                    .slot_ref(active.slot_index)
+                    .sub_owners
+                    .set(self.subscriber_id as usize);
                 return Some(active.slot_index);
             }
         }
@@ -856,6 +886,10 @@ impl SubscriberImpl {
                     );
                     continue;
                 }
+                self.channel
+                    .slot_ref(active.slot_index)
+                    .sub_owners
+                    .set(self.subscriber_id as usize);
                 return Some(active.slot_index);
             }
         }
@@ -918,7 +952,14 @@ impl SubscriberImpl {
     }
 
     pub fn unread_slot(&mut self, slot_idx: usize, ordinal: u64, vchan_id: i32) {
-        self.decrement_slot_ref(slot_idx, ordinal, vchan_id, false);
+        if self
+            .channel
+            .slot_ref(slot_idx)
+            .sub_owners
+            .clear_was_set(self.subscriber_id as usize)
+        {
+            self.decrement_slot_ref(slot_idx, ordinal, vchan_id, false);
+        }
         if self
             .channel
             .get_available_slot_queue(self.subscriber_id as usize)

@@ -74,7 +74,8 @@ Each channel requires three shared memory regions, created via `shm_open()` (POS
 
 - One per channel.
 - Contains: channel name, num_slots, ordinals, activation tracker.
-- CCB version 4 uses atomic slot metadata. `total_messages` advances for every
+- CCB version 5 uses atomic slot metadata and subscriber counters.
+  `total_messages` advances for every
   completed publication, including activation messages, and also versions
   subscriber delivery snapshots.
 - Variable-length: `MessageSlot` array, retired/free/available bitsets, a
@@ -93,6 +94,16 @@ Each channel requires three shared memory regions, created via `shm_open()` (POS
   active. Shadow recovery reconciles subscriber offsets with allocated blocks,
   conservatively retires orphan blocks, and only reclaims them after their
   recorded publisher hazards have quiesced.
+- A slot remains publisher-owned while its available-slot bits and queue hints
+  are prepared. Subscribers preserve those records but cannot claim the slot
+  until the publisher commits it with a release store and advances
+  `total_messages`. Subscriber registration also seeds non-zero
+  publisher-owned generations so a join racing publication cannot miss the
+  message.
+- Subscriber removal does not wait for in-progress publishers. It releases the
+  dead subscriber's references and re-evaluates every slot. Publication commit
+  performs the same retirement check when a cleanup generation changed, so the
+  operation that finishes second safely completes retirement.
 
 ### Buffer Control Block (BCB)
 
