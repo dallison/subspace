@@ -254,6 +254,10 @@ if (msg.length > 0) {
 SubspaceMessage newest =
     subspace_read_message_with_mode(sub, kSubspaceReadNewest);
 subspace_free_message(&newest);
+
+SubspaceMessage kept = subspace_read_message_with_mode_and_trigger(
+    sub, kSubspaceReadNext, kSubspaceNoClearTrigger);
+subspace_free_message(&kept);
 ```
 
 Every non-empty `SubspaceMessage` must be released with
@@ -277,6 +281,7 @@ Related subscriber APIs:
 | `subspace_read_telemetry_message` | Read and decode the next telemetry message; a null `telemetry` field means no message is available. |
 | `subspace_read_telemetry_message_with_mode` | Read and decode telemetry using next or newest mode. |
 | `subspace_free_telemetry` | Release a non-empty decoded telemetry result. |
+| `subspace_read_message_with_mode_and_trigger` | Same as `subspace_read_message_with_mode`, with control over whether the subscriber trigger fd is consumed. |
 | `subspace_find_message` | Find a message by timestamp. |
 | `subspace_wait_for_subscriber` | Wait indefinitely for a message. |
 | `subspace_wait_for_subscriber_with_timeout` | Wait with a timeout. |

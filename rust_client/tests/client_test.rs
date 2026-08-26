@@ -26,7 +26,7 @@ use subspace_client::options::{
     PublisherOptions, SubscriberOptions, DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE,
     DEFAULT_SUBSCRIBER_QUEUE_SIZE,
 };
-use subspace_client::{Client, ReadMode, SubspaceError};
+use subspace_client::{ClearTrigger, Client, ReadMode, SubspaceError};
 
 fn unique_socket_path() -> String {
     let mut template = b"/tmp/ss_rt_XXXXXX\0".to_vec();
@@ -366,6 +366,14 @@ fn read_mode_clone() {
     assert_eq!(mode, cloned);
 }
 
+#[test]
+fn clear_trigger_equality() {
+    assert_eq!(ClearTrigger::ClearTrigger, ClearTrigger::ClearTrigger);
+    assert_eq!(ClearTrigger::NoClearTrigger, ClearTrigger::NoClearTrigger);
+    assert_ne!(ClearTrigger::ClearTrigger, ClearTrigger::NoClearTrigger);
+    assert_eq!(ClearTrigger::default(), ClearTrigger::ClearTrigger);
+}
+
 // ── Error type tests ─────────────────────────────────────────────────────────
 
 #[test]
@@ -695,6 +703,48 @@ fn integration_publish_single_message_and_read() {
     // A second read should return an empty message (length 0).
     let msg2 = subscriber.read_message(ReadMode::ReadNext).unwrap();
     assert_eq!(msg2.length, 0);
+}
+
+fn poll_fd_readable(fd: i32, timeout_ms: i32) -> bool {
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+    ret > 0 && (pfd.revents & libc::POLLIN) != 0
+}
+
+#[test]
+fn integration_read_message_no_clear_trigger() {
+    let pub_client = new_client("test_no_clear_p");
+    let sub_client = new_client("test_no_clear_s");
+
+    let publisher = pub_client
+        .create_publisher(
+            "rust_no_clear",
+            &PublisherOptions::new().set_slot_size(256).set_num_slots(10),
+        )
+        .unwrap();
+    let subscriber = sub_client
+        .create_subscriber("rust_no_clear", &SubscriberOptions::new())
+        .unwrap();
+
+    let fd = subscriber.get_poll_fd();
+    let payload = b"keep trigger";
+    let (buf_ptr, _cap) = publisher.get_message_buffer(256).unwrap().unwrap();
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), buf_ptr, payload.len());
+    }
+    publisher.publish_message(payload.len() as i64).unwrap();
+
+    assert!(poll_fd_readable(fd, 1000));
+
+    let msg = subscriber
+        .read_message_with_trigger(ReadMode::ReadNext, ClearTrigger::NoClearTrigger)
+        .unwrap();
+    assert_eq!(msg.length as usize, payload.len());
+    assert!(poll_fd_readable(fd, 0));
 }
 
 #[test]

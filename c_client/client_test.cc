@@ -17,6 +17,7 @@
 #include <memory>
 #include <signal.h>
 #include <string.h>
+#include <sys/poll.h>
 #include <sys/resource.h>
 #include <thread>
 #include <unistd.h>
@@ -424,6 +425,47 @@ TEST_F(ClientTest, ReadTelemetryMessage) {
   EXPECT_TRUE(subspace_remove_publisher(&publisher));
   EXPECT_TRUE(subspace_remove_client(&publisher_client));
   EXPECT_TRUE(subspace_remove_client(&watcher_client));
+}
+
+TEST_F(ClientTest, ReadMessageNoClearTriggerLeavesEventFdReadable) {
+  auto pub_client = subspace_create_client_with_socket(Socket().c_str());
+  ASSERT_NE(nullptr, pub_client.client);
+  ASSERT_FALSE(subspace_has_error());
+  auto sub_client = subspace_create_client_with_socket(Socket().c_str());
+  ASSERT_NE(nullptr, sub_client.client);
+  ASSERT_FALSE(subspace_has_error());
+
+  SubspacePublisher pub = subspace_create_publisher(
+      pub_client, "c_no_clear", CPublisherOptionsDefault(256, 10));
+  ASSERT_NE(nullptr, pub.publisher);
+  SubspaceSubscriber sub = subspace_create_subscriber(
+      sub_client, "c_no_clear", CSubscriberOptionsDefault());
+  ASSERT_NE(nullptr, sub.subscriber);
+
+  struct pollfd pfd = subspace_get_subscriber_poll_fd(sub);
+  ASSERT_GT(pfd.fd, 0);
+
+  SubspaceMessageBuffer buffer = subspace_get_message_buffer(pub, 6);
+  ASSERT_NE(nullptr, buffer.buffer);
+  memcpy(buffer.buffer, "foobar", 6);
+  const SubspaceMessage pub_status = subspace_publish_message(pub, 6);
+  ASSERT_NE(0, pub_status.length);
+
+  ASSERT_EQ(1, ::poll(&pfd, 1, 1000));
+
+  SubspaceMessage msg = subspace_read_message_with_mode_and_trigger(
+      sub, kSubspaceReadNext, kSubspaceNoClearTrigger);
+  ASSERT_FALSE(subspace_has_error());
+  ASSERT_EQ(6, msg.length);
+  subspace_free_message(&msg);
+
+  pfd.revents = 0;
+  ASSERT_EQ(1, ::poll(&pfd, 1, 0));
+
+  ASSERT_TRUE(subspace_remove_subscriber(&sub));
+  ASSERT_TRUE(subspace_remove_publisher(&pub));
+  ASSERT_TRUE(subspace_remove_client(&pub_client));
+  ASSERT_TRUE(subspace_remove_client(&sub_client));
 }
 
 TEST_F(ClientTest, MetadataAddressesAndDescriptorHelpers) {

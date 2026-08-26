@@ -712,6 +712,16 @@ auto msg_or = sub.ReadMessage(subspace::ReadMode::kReadNewest);
 // This skips to the most recent message, discarding older ones
 ```
 
+**Leave the subscriber trigger fd unread**
+```cpp
+auto msg_or = sub.ReadMessage(subspace::ReadMode::kReadNext,
+                              subspace::ClearTrigger::kNoClearTrigger);
+```
+By default `ReadMessage` consumes the subscriber trigger fd (eventfd or pipe)
+so a later `poll`/`Wait` blocks until a new message is published. Pass
+`ClearTrigger::kNoClearTrigger` when the caller is managing that fd from an
+external event loop.
+
 **Method 3: Typed read (returns shared_ptr)**
 ```cpp
 auto msg_ptr_or = sub.ReadMessage<MyMessageType>();
@@ -778,9 +788,13 @@ if (fd_or.ok()) {
 class Subscriber {
 public:
     // Read messages
-    absl::StatusOr<Message> ReadMessage(ReadMode mode = ReadMode::kReadNext);
+    absl::StatusOr<Message> ReadMessage(
+        ReadMode mode = ReadMode::kReadNext,
+        ClearTrigger clear_trigger = ClearTrigger::kClearTrigger);
     template <typename T>
-    absl::StatusOr<shared_ptr<T>> ReadMessage(ReadMode mode = ReadMode::kReadNext);
+    absl::StatusOr<shared_ptr<T>> ReadMessage(
+        ReadMode mode = ReadMode::kReadNext,
+        ClearTrigger clear_trigger = ClearTrigger::kClearTrigger);
     absl::StatusOr<std::shared_ptr<Telemetry>>
         ReadTelemetryMessage(ReadMode mode = ReadMode::kReadNext);
     
@@ -1493,6 +1507,12 @@ if (newest.length > 0) {
     // Process message
     subspace_free_message(&newest);
 }
+
+// Leave the subscriber trigger fd unread (for example when poll/epoll
+// already consumed it, or another waiter should still observe it).
+SubspaceMessage kept = subspace_read_message_with_mode_and_trigger(
+    sub, kSubspaceReadNext, kSubspaceNoClearTrigger);
+subspace_free_message(&kept);
 ```
 
 **Important:** You must call `subspace_free_message()` when done with a message. The `max_active_messages` option determines how many messages you can hold simultaneously. If you don't free messages, the subscriber will run out of slots and be unable to read more messages.
@@ -1710,6 +1730,7 @@ This is a quick reference for the most common calls. See
 - `SubspaceSubscriber subspace_create_subscriber(SubspaceClient client, const char *channel_name, SubspaceSubscriberOptions options)`
 - `SubspaceMessage subspace_read_message(SubspaceSubscriber subscriber)`
 - `SubspaceMessage subspace_read_message_with_mode(SubspaceSubscriber subscriber, SubspaceReadMode mode)`
+- `SubspaceMessage subspace_read_message_with_mode_and_trigger(SubspaceSubscriber subscriber, SubspaceReadMode mode, SubspaceClearTrigger clear_trigger)`
 - `SubspaceMessage subspace_find_message(SubspaceSubscriber subscriber, uint64_t timestamp)`
 - `bool subspace_get_all_messages(SubspaceSubscriber subscriber, SubspaceReadMode mode, SubspaceMessage **messages, size_t *count)`
 - `bool subspace_free_message(SubspaceMessage *message)`
@@ -1771,6 +1792,9 @@ let subscriber = client.create_subscriber("sensor_data", &sub_opts)?;
 // Read a message.
 let msg = subscriber.read_message(ReadMode::ReadNext)?;
 assert_eq!(msg.length, 5);
+
+// Leave the subscriber trigger fd unread:
+// subscriber.read_message_with_trigger(ReadMode::ReadNext, ClearTrigger::NoClearTrigger)?;
 ```
 
 ### Features

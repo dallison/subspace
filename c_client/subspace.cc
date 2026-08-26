@@ -196,6 +196,12 @@ subspace::ReadMode ToCppReadMode(SubspaceReadMode mode) {
                                      : subspace::ReadMode::kReadNext;
 }
 
+subspace::ClearTrigger ToCppClearTrigger(SubspaceClearTrigger clear_trigger) {
+  return clear_trigger == kSubspaceNoClearTrigger
+             ? subspace::ClearTrigger::kNoClearTrigger
+             : subspace::ClearTrigger::kClearTrigger;
+}
+
 subspace::ChecksumCallback
 ToCppChecksumCallback(SubspaceChecksumCallback callback, void *user_data) {
   return [callback,
@@ -653,8 +659,9 @@ SubspacePublisher subspace_create_publisher(SubspaceClient client,
   return publisher;
 }
 
-SubspaceMessage subspace_read_message_with_mode(SubspaceSubscriber subscriber,
-                                                SubspaceReadMode mode) {
+SubspaceMessage subspace_read_message_with_mode_and_trigger(
+    SubspaceSubscriber subscriber, SubspaceReadMode mode,
+    SubspaceClearTrigger clear_trigger) {
   SubspaceMessage message = EmptyMessage();
   if (subscriber.subscriber == nullptr) {
     return message;
@@ -664,8 +671,8 @@ SubspaceMessage subspace_read_message_with_mode(SubspaceSubscriber subscriber,
   // subspace::Subscriber.
   auto sub_ptr = reinterpret_cast<std::shared_ptr<subspace::Subscriber> *>(
       subscriber.subscriber);
-  absl::StatusOr<subspace::Message> status_or_msg =
-      (*sub_ptr)->ReadMessage(ToCppReadMode(mode));
+  absl::StatusOr<subspace::Message> status_or_msg = (*sub_ptr)->ReadMessage(
+      ToCppReadMode(mode), ToCppClearTrigger(clear_trigger));
   if (!status_or_msg.ok()) {
     subspace_set_error(status_or_msg.status().ToString().c_str());
     return message;
@@ -678,6 +685,12 @@ SubspaceMessage subspace_read_message_with_mode(SubspaceSubscriber subscriber,
     return message;
   }
   return TakeCMessage(std::move(*status_or_msg));
+}
+
+SubspaceMessage subspace_read_message_with_mode(SubspaceSubscriber subscriber,
+                                                SubspaceReadMode mode) {
+  return subspace_read_message_with_mode_and_trigger(subscriber, mode,
+                                                     kSubspaceClearTrigger);
 }
 
 SubspaceMessage subspace_read_message(SubspaceSubscriber subscriber) {

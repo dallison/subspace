@@ -980,6 +980,33 @@ class TestSubspaceClient(unittest.TestCase):
         self.assertNotEqual(subspace.ReadMode.READ_NEXT,
                             subspace.ReadMode.READ_NEWEST)
 
+    def test_clear_trigger_enum(self):
+        self.assertIsNotNone(subspace.ClearTrigger.CLEAR_TRIGGER)
+        self.assertIsNotNone(subspace.ClearTrigger.NO_CLEAR_TRIGGER)
+        self.assertNotEqual(subspace.ClearTrigger.CLEAR_TRIGGER,
+                            subspace.ClearTrigger.NO_CLEAR_TRIGGER)
+
+    def test_read_message_no_clear_trigger(self):
+        client = self._make_client("no_clear")
+        pub = client.create_publisher(channel_name="ch_no_clear",
+                                      slot_size=256, num_slots=10)
+        sub = client.create_subscriber(channel_name="ch_no_clear")
+
+        fd = sub.get_file_descriptor()
+        poller = select.poll()
+        poller.register(fd, select.POLLIN)
+
+        pub.publish_message(b"hello")
+        self.assertTrue(poller.poll(1000))
+
+        data = sub.read_message(
+            clear_trigger=subspace.ClearTrigger.NO_CLEAR_TRIGGER)
+        self.assertEqual(data, b"hello")
+        self.assertTrue(poller.poll(0))
+
+        pub = None
+        sub = None
+
     # ------------------------------------------------------------------
     # Large message
     # ------------------------------------------------------------------
