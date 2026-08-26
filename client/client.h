@@ -58,6 +58,16 @@ enum class ReadMode {
   kReadNewest,
 };
 
+// Controls whether ReadMessage consumes the subscriber trigger fd (eventfd
+// or pipe). The default, kClearTrigger, reads the fd so a later poll/Wait
+// blocks until a new message is published. kNoClearTrigger leaves the fd
+// unread, which is useful when the caller is managing it from an external
+// event loop.
+enum class ClearTrigger {
+  kClearTrigger,
+  kNoClearTrigger,
+};
+
 struct ChannelInfo {
   std::string channel_name;
   int num_publishers;
@@ -602,15 +612,19 @@ private:
   // memory which is read-only.  If the read is triggered by the PollFd,
   // you must read all the avaiable messages from the subscriber as the
   // PollFd is only triggered when a new message is published.
-  absl::StatusOr<Message> ReadMessage(details::SubscriberImpl *subscriber,
-                                      ReadMode mode = ReadMode::kReadNext);
+  // Pass ClearTrigger::kNoClearTrigger to leave the subscriber trigger fd
+  // unread.
+  absl::StatusOr<Message> ReadMessage(
+      details::SubscriberImpl *subscriber, ReadMode mode = ReadMode::kReadNext,
+      ClearTrigger clear_trigger = ClearTrigger::kClearTrigger);
 
   // As ReadMessage above but returns a shared_ptr to the typed message.
   // NOTE: this is subspace::shared_ptr, not std::shared_ptr.
   template <typename T, typename Aliaser = DefaultAliaser>
   absl::StatusOr<shared_ptr<T, Aliaser>>
   ReadMessage(details::SubscriberImpl *subscriber,
-              ReadMode mode = ReadMode::kReadNext);
+              ReadMode mode = ReadMode::kReadNext,
+              ClearTrigger clear_trigger = ClearTrigger::kClearTrigger);
 
   // Find a message given a timestamp.
   absl::StatusOr<Message> FindMessage(details::SubscriberImpl *subscriber,
@@ -829,8 +843,9 @@ private:
 // you need to as it may prevent a publisher getting a slot.
 template <typename T, typename Aliaser>
 inline absl::StatusOr<::subspace::shared_ptr<T, Aliaser>>
-ClientImpl::ReadMessage(details::SubscriberImpl *subscriber, ReadMode mode) {
-  absl::StatusOr<Message> msg = ReadMessage(subscriber, mode);
+ClientImpl::ReadMessage(details::SubscriberImpl *subscriber, ReadMode mode,
+                        ClearTrigger clear_trigger) {
+  absl::StatusOr<Message> msg = ReadMessage(subscriber, mode, clear_trigger);
   if (!msg.ok()) {
     return msg.status();
   }
@@ -1442,15 +1457,20 @@ public:
   // memory which is read-only.  If the read is triggered by the PollFd,
   // you must read all the avaiable messages from the subscriber as the
   // PollFd is only triggered when a new message is published.
-  absl::StatusOr<Message> ReadMessage(ReadMode mode = ReadMode::kReadNext) {
-    return client_->ReadMessage(impl_.get(), mode);
+  // Pass ClearTrigger::kNoClearTrigger to leave the subscriber trigger fd
+  // unread.
+  absl::StatusOr<Message>
+  ReadMessage(ReadMode mode = ReadMode::kReadNext,
+              ClearTrigger clear_trigger = ClearTrigger::kClearTrigger) {
+    return client_->ReadMessage(impl_.get(), mode, clear_trigger);
   }
 
   // As ReadMessage above but returns a shared_ptr to the typed message.
   // NOTE: this is subspace::shared_ptr, not std::shared_ptr.
   template <typename T, typename Aliaser = DefaultAliaser>
   absl::StatusOr<shared_ptr<T, Aliaser>>
-  ReadMessage(ReadMode mode = ReadMode::kReadNext);
+  ReadMessage(ReadMode mode = ReadMode::kReadNext,
+              ClearTrigger clear_trigger = ClearTrigger::kClearTrigger);
 
   bool AddActiveMessage(int32_t slot_id) {
     return impl_->AddActiveMessage(impl_->GetSlot(slot_id));
@@ -1728,8 +1748,8 @@ private:
 
 template <typename T, typename Aliaser>
 inline absl::StatusOr<::subspace::shared_ptr<T, Aliaser>>
-Subscriber::ReadMessage(ReadMode mode) {
-  return client_->ReadMessage<T, Aliaser>(impl_.get(), mode);
+Subscriber::ReadMessage(ReadMode mode, ClearTrigger clear_trigger) {
+  return client_->ReadMessage<T, Aliaser>(impl_.get(), mode, clear_trigger);
 }
 
 template <typename T, typename Aliaser>

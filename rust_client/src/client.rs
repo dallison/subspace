@@ -12,7 +12,7 @@ use crate::proto;
 use crate::publisher::{clear_trigger, PublisherImpl};
 use crate::socket::SocketConnection;
 use crate::subscriber::SubscriberImpl;
-use crate::ReadMode;
+use crate::{ClearTrigger, ReadMode};
 use nix::sys::mman::ProtFlags;
 use std::cell::UnsafeCell;
 use std::os::unix::io::RawFd;
@@ -789,15 +789,30 @@ impl Subscriber {
         }
     }
 
-    /// Read the next (or newest) message.
+    /// Read the next (or newest) message. The subscriber trigger fd is
+    /// consumed (cleared).
     pub fn read_message(&self, mode: ReadMode) -> Result<Message> {
+        self.read_message_with_trigger(mode, ClearTrigger::ClearTrigger)
+    }
+
+    /// Read the next (or newest) message, optionally leaving the subscriber
+    /// trigger fd unread. Pass `ClearTrigger::NoClearTrigger` when the caller
+    /// is managing the fd from an external event loop.
+    pub fn read_message_with_trigger(
+        &self,
+        mode: ReadMode,
+        clear_trigger: ClearTrigger,
+    ) -> Result<Message> {
         let mut client = self.inner.lock().unwrap();
         let mut sub_impl = self.imp.lock().unwrap();
+        let should_clear_trigger = clear_trigger == ClearTrigger::ClearTrigger;
 
         if sub_impl.channel.is_placeholder() {
             reload_subscriber(&mut *client, &mut sub_impl)?;
             if sub_impl.channel.is_placeholder() {
-                sub_impl.clear_poll_fd();
+                if should_clear_trigger {
+                    sub_impl.clear_poll_fd();
+                }
                 return Ok(Message::default());
             }
             sub_impl.trigger_reliable_publishers();
@@ -806,7 +821,13 @@ impl Subscriber {
         reload_reliable_publishers_if_necessary(&mut *client, &mut sub_impl)?;
 
         let pass_activation = sub_impl.options.pass_activation;
-        read_message_internal(&mut *client, &mut sub_impl, mode, pass_activation, true)
+        read_message_internal(
+            &mut *client,
+            &mut sub_impl,
+            mode,
+            pass_activation,
+            should_clear_trigger,
+        )
     }
 
     /// Wait until there's a message available.

@@ -52,6 +52,15 @@ PYBIND11_MODULE(subspace, m) {
       .value("READ_NEWEST", ReadMode::kReadNewest,
              "Read the newest available message.");
 
+  // ClearTrigger enum.
+  py::enum_<ClearTrigger>(m, "ClearTrigger",
+                          "Whether ReadMessage consumes the subscriber "
+                          "trigger fd.")
+      .value("CLEAR_TRIGGER", ClearTrigger::kClearTrigger,
+             "Read (clear) the subscriber trigger fd.")
+      .value("NO_CLEAR_TRIGGER", ClearTrigger::kNoClearTrigger,
+             "Leave the subscriber trigger fd unread.");
+
   // ChannelCounters struct.
   py::class_<ChannelCounters>(m, "ChannelCounters",
                               "Live counters for a channel stored in shared "
@@ -717,9 +726,10 @@ total_drops.)doc");
   // Existing: read_message(skip_to_newest) - returns bytes.
   subscriber_class.def(
       "read_message",
-      [](Subscriber *self, bool skip_to_newest) {
+      [](Subscriber *self, bool skip_to_newest, ClearTrigger clear_trigger) {
         absl::StatusOr<Message> read_result = self->ReadMessage(
-            skip_to_newest ? ReadMode::kReadNewest : ReadMode::kReadNext);
+            skip_to_newest ? ReadMode::kReadNewest : ReadMode::kReadNext,
+            clear_trigger);
         if (!read_result.ok()) {
           throw std::runtime_error(read_result.status().ToString());
         }
@@ -731,8 +741,12 @@ total_drops.)doc");
       R"doc("Read a message from a subscriber. If there are no available messages,
 the returned bytes will have zero length. Setting the 'skip_to_newest' argument
 to True, causes the read to skip ahead to the newest available message, otherwise,
-it reads the next available message (oldest message not read yet).)doc",
-      py::arg("skip_to_newest") = false, py::return_value_policy::copy);
+it reads the next available message (oldest message not read yet). Pass
+clear_trigger=ClearTrigger.NO_CLEAR_TRIGGER to leave the subscriber trigger fd
+unread.)doc",
+      py::arg("skip_to_newest") = false,
+      py::arg("clear_trigger") = ClearTrigger::kClearTrigger,
+      py::return_value_policy::copy);
 
   // Existing: wait().
   subscriber_class.def(
@@ -753,9 +767,11 @@ it reads the next available message (oldest message not read yet).)doc",
   // New: read_message_object - returns a full Message with metadata.
   subscriber_class.def(
       "read_message_object",
-      [](Subscriber *self, bool skip_to_newest) -> Message {
+      [](Subscriber *self, bool skip_to_newest,
+         ClearTrigger clear_trigger) -> Message {
         absl::StatusOr<Message> read_result = self->ReadMessage(
-            skip_to_newest ? ReadMode::kReadNewest : ReadMode::kReadNext);
+            skip_to_newest ? ReadMode::kReadNewest : ReadMode::kReadNext,
+            clear_trigger);
         if (!read_result.ok()) {
           throw std::runtime_error(read_result.status().ToString());
         }
@@ -765,8 +781,12 @@ it reads the next available message (oldest message not read yet).)doc",
 (length, buffer, timestamp, ordinal, vchan_id, is_activation, slot_id,
 checksum_error).  Use as a context manager to auto-release the slot:
     with sub.read_message_object() as msg:
-        process(msg.buffer))doc",
-      py::arg("skip_to_newest") = false, py::return_value_policy::move);
+        process(msg.buffer)
+Pass clear_trigger=ClearTrigger.NO_CLEAR_TRIGGER to leave the subscriber
+trigger fd unread.)doc",
+      py::arg("skip_to_newest") = false,
+      py::arg("clear_trigger") = ClearTrigger::kClearTrigger,
+      py::return_value_policy::move);
 
   // New accessors.
   subscriber_class.def("name", &Subscriber::Name,

@@ -36,7 +36,7 @@ fd. Lease IDs prevent stale tokens from operating on reused slots. See
 ## Subscribing Flow
 
 1. **Create subscriber** — similar RPC to the server, gets back FDs for shared memory and a trigger FD.
-2. **`ReadMessage()`** — scans the `available_slots` bitset in the CCB, finds the next unseen ordinal, atomically increments the slot's reference count, and returns a pointer directly into shared memory (zero-copy read).
+2. **`ReadMessage()`** — scans the `available_slots` bitset in the CCB, finds the next unseen ordinal, atomically increments the slot's reference count, and returns a pointer directly into shared memory (zero-copy read). By default this also consumes the subscriber trigger fd; pass `ClearTrigger::kNoClearTrigger` to leave it unread.
 3. **Message lifetime** — the returned `Message` object holds a reference count on the slot. The slot can't be reused by a publisher until all subscribers release it.
 
 ## Reliable vs. Unreliable

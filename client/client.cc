@@ -1453,9 +1453,12 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
 }
 
 absl::StatusOr<Message> ClientImpl::ReadMessage(SubscriberImpl *subscriber,
-                                                ReadMode mode) {
+                                                ReadMode mode,
+                                                ClearTrigger clear_trigger) {
 
   ClientLockGuard guard(this);
+  const bool should_clear_trigger =
+      clear_trigger == ClearTrigger::kClearTrigger;
   // If the channel is a placeholder (no publishers present), look
   // in the SCB to see if a new publisher has been created and if so,
   // talk to the server to get the information to reload the shared
@@ -1464,7 +1467,9 @@ absl::StatusOr<Message> ClientImpl::ReadMessage(SubscriberImpl *subscriber,
   if (subscriber->IsPlaceholder()) {
     absl::Status status = ReloadSubscriber(subscriber);
     if (!status.ok() || subscriber->IsPlaceholder()) {
-      subscriber->ClearPollFd();
+      if (should_clear_trigger) {
+        subscriber->ClearPollFd();
+      }
       return Message();
     }
     subscriber->TriggerReliablePublishers();
@@ -1479,7 +1484,7 @@ absl::StatusOr<Message> ClientImpl::ReadMessage(SubscriberImpl *subscriber,
 
   return ReadMessageInternal(subscriber, mode,
                              subscriber->options_.pass_activation,
-                             /*clear_trigger=*/true);
+                             should_clear_trigger);
 }
 
 absl::StatusOr<Message>

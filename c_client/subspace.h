@@ -294,6 +294,14 @@ typedef enum {
   kSubspaceReadNewest = 1, // Read the newest message.
 } SubspaceReadMode;
 
+// Controls whether a read consumes the subscriber trigger fd (eventfd or
+// pipe). kSubspaceClearTrigger is the default and matches existing
+// subspace_read_message / subspace_read_message_with_mode behavior.
+typedef enum {
+  kSubspaceClearTrigger = 0,   // Read (clear) the subscriber trigger fd.
+  kSubspaceNoClearTrigger = 1, // Leave the subscriber trigger fd unread.
+} SubspaceClearTrigger;
+
 // This is a message buffer that is used to publish a message.  The 'buffer'
 // member is a pointer to the message buffer that can be used to publish a
 // message which has size 'buffer_size' bytes.  The buffer is read/write and can
@@ -398,6 +406,13 @@ bool subspace_remove_client(SubspaceClient *client);
 SubspaceMessage subspace_read_message(SubspaceSubscriber subscriber);
 SubspaceMessage subspace_read_message_with_mode(SubspaceSubscriber subscriber,
                                                 SubspaceReadMode mode);
+// Same as subspace_read_message_with_mode, with control over whether the
+// subscriber trigger fd is consumed. Pass kSubspaceNoClearTrigger to leave
+// the fd unread, for example when the caller is managing it from an
+// external event loop.
+SubspaceMessage subspace_read_message_with_mode_and_trigger(
+    SubspaceSubscriber subscriber, SubspaceReadMode mode,
+    SubspaceClearTrigger clear_trigger);
 SubspaceMessage subspace_find_message(SubspaceSubscriber subscriber,
                                       uint64_t timestamp);
 bool subspace_get_all_messages(SubspaceSubscriber subscriber,

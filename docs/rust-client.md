@@ -120,6 +120,20 @@ loop {
 - **`ReadMode::ReadNext`** — returns the next unread message in order.
 - **`ReadMode::ReadNewest`** — skips to the latest message, discarding older ones.
 
+### Trigger clearing
+
+By default `read_message` consumes the subscriber trigger fd (eventfd or pipe)
+so a later `wait`/`poll` blocks until a new message is published. Pass
+`ClearTrigger::NoClearTrigger` to leave the fd unread:
+
+```rust
+use subspace_client::{ClearTrigger, ReadMode};
+
+let msg = subscriber
+    .read_message_with_trigger(ReadMode::ReadNext, ClearTrigger::NoClearTrigger)
+    .unwrap();
+```
+
 ## Publisher Options
 
 | Option | Default | Description |
