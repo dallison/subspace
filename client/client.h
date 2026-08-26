@@ -20,6 +20,7 @@
 #include "common/async/wait.h"
 #include "common/channel.h"
 #include "common/client_buffer.h"
+#include "proto/subspace.pb.h"
 
 #include "toolbelt/fd.h"
 #include "toolbelt/logging.h"
@@ -1445,6 +1446,11 @@ public:
   absl::StatusOr<Message> ReadMessage(ReadMode mode = ReadMode::kReadNext) {
     return client_->ReadMessage(impl_.get(), mode);
   }
+
+  // Read and deserialize a telemetry message. Returns nullptr when no message
+  // is currently available.
+  absl::StatusOr<std::shared_ptr<Telemetry>>
+  ReadTelemetryMessage(ReadMode mode = ReadMode::kReadNext);
 
   // As ReadMessage above but returns a shared_ptr to the typed message.
   // NOTE: this is subspace::shared_ptr, not std::shared_ptr.

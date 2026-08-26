@@ -273,6 +273,39 @@ PYBIND11_MODULE(subspace, m) {
       .def("telemetry", &SubscriberOptions::Telemetry,
            "Get whether the subscriber receives server-generated telemetry.");
 
+  py::enum_<Telemetry::Change>(m, "TelemetryChange")
+      .value("NONE", Telemetry::NONE)
+      .value("ADDED", Telemetry::ADDED)
+      .value("REMOVED", Telemetry::REMOVED);
+
+  py::class_<Telemetry::Publisher>(m, "TelemetryPublisher")
+      .def_property_readonly("name", &Telemetry::Publisher::name)
+      .def_property_readonly("change", &Telemetry::Publisher::change);
+  py::class_<Telemetry::Subscriber>(m, "TelemetrySubscriber")
+      .def_property_readonly("name", &Telemetry::Subscriber::name)
+      .def_property_readonly("change", &Telemetry::Subscriber::change);
+  py::class_<Telemetry::Drop>(m, "TelemetryDrop")
+      .def_property_readonly("num_drops", &Telemetry::Drop::num_drops);
+  py::class_<Telemetry::Resize>(m, "TelemetryResize")
+      .def_property_readonly("new_size", &Telemetry::Resize::new_size);
+  py::class_<Telemetry, std::shared_ptr<Telemetry>>(m, "Telemetry")
+      .def_property_readonly("publishers", [](const Telemetry &self) {
+        return std::vector<Telemetry::Publisher>(self.publishers().begin(),
+                                                 self.publishers().end());
+      })
+      .def_property_readonly("subscribers", [](const Telemetry &self) {
+        return std::vector<Telemetry::Subscriber>(self.subscribers().begin(),
+                                                  self.subscribers().end());
+      })
+      .def_property_readonly("drops", [](const Telemetry &self) {
+        return std::vector<Telemetry::Drop>(self.drops().begin(),
+                                            self.drops().end());
+      })
+      .def_property_readonly("resizes", [](const Telemetry &self) {
+        return std::vector<Telemetry::Resize>(self.resizes().begin(),
+                                              self.resizes().end());
+      });
+
   // Message class returned from read_message.
   py::class_<Message>(m, "Message",
                       "A message is a single message sent over a channel.")
@@ -738,6 +771,21 @@ the returned bytes will have zero length. Setting the 'skip_to_newest' argument
 to True, causes the read to skip ahead to the newest available message, otherwise,
 it reads the next available message (oldest message not read yet).)doc",
       py::arg("skip_to_newest") = false, py::return_value_policy::copy);
+
+  subscriber_class.def(
+      "read_telemetry_message",
+      [](Subscriber *self, bool skip_to_newest) {
+        absl::StatusOr<std::shared_ptr<Telemetry>> result =
+            self->ReadTelemetryMessage(skip_to_newest ? ReadMode::kReadNewest
+                                                      : ReadMode::kReadNext);
+        if (!result.ok()) {
+          throw std::runtime_error(result.status().ToString());
+        }
+        return *result;
+      },
+      R"doc(Read and deserialize a server-generated telemetry message.
+Returns None when no message is currently available.)doc",
+      py::arg("skip_to_newest") = false);
 
   // Existing: wait().
   subscriber_class.def(

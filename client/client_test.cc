@@ -105,17 +105,13 @@ WaitForTelemetry(Subscriber &subscriber,
                  std::chrono::milliseconds timeout = std::chrono::seconds(3)) {
   auto deadline = std::chrono::steady_clock::now() + timeout;
   while (std::chrono::steady_clock::now() < deadline) {
-    absl::StatusOr<Message> message =
-        subscriber.ReadMessage(subspace::ReadMode::kReadNext);
-    if (!message.ok()) {
-      return message.status();
+    absl::StatusOr<std::shared_ptr<subspace::Telemetry>> telemetry =
+        subscriber.ReadTelemetryMessage(subspace::ReadMode::kReadNext);
+    if (!telemetry.ok()) {
+      return telemetry.status();
     }
-    if (message->length != 0) {
-      subspace::Telemetry telemetry;
-      if (!telemetry.ParseFromArray(message->buffer, int(message->length))) {
-        return absl::DataLossError("Failed to parse telemetry message");
-      }
-      return telemetry;
+    if (*telemetry != nullptr) {
+      return **telemetry;
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -5142,9 +5138,9 @@ TEST_F(ClientTest, TelemetrySnapshotsAndBatchesParticipantChanges) {
     EXPECT_TRUE(found_removed);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));
-    Message no_message = EVAL_AND_ASSERT_OK(
-        telemetry.ReadMessage(subspace::ReadMode::kReadNewest));
-    EXPECT_EQ(0, no_message.length);
+    std::shared_ptr<subspace::Telemetry> no_message = EVAL_AND_ASSERT_OK(
+        telemetry.ReadTelemetryMessage(subspace::ReadMode::kReadNewest));
+    EXPECT_EQ(nullptr, no_message);
 
     Subscriber second = EVAL_AND_ASSERT_OK(watcher_client->CreateSubscriber(
         kChannel, SubOpts().SetTelemetry(true)));

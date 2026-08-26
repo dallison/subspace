@@ -410,6 +410,32 @@ class TestSubspaceClient(unittest.TestCase):
         self.assertEqual(opts.max_subscribers(), 2)
         self.assertTrue(opts.telemetry())
 
+    def test_read_telemetry_message(self):
+        publisher_client = self._make_client("python-telemetry-publisher")
+        watcher_client = self._make_client("python-telemetry-watcher")
+        publisher = publisher_client.create_publisher(
+            channel_name="ch_python_telemetry", slot_size=128, num_slots=4)
+        options = subspace.SubscriberOptions().set_telemetry(True)
+        telemetry_subscriber = watcher_client.create_subscriber(
+            channel_name="ch_python_telemetry", options=options)
+
+        deadline = time.monotonic() + 5
+        telemetry = None
+        while telemetry is None and time.monotonic() < deadline:
+            telemetry = telemetry_subscriber.read_telemetry_message()
+            if telemetry is None:
+                time.sleep(0.05)
+
+        self.assertIsInstance(telemetry, subspace.Telemetry)
+        self.assertTrue(any(
+            entry.name == "python-telemetry-publisher"
+            and entry.change == subspace.TelemetryChange.NONE
+            for entry in telemetry.publishers))
+        self.assertIsNone(telemetry_subscriber.read_telemetry_message())
+
+        telemetry_subscriber = None
+        publisher = None
+
     def test_max_subscribers_option(self):
         client = self._make_client("max_subscribers")
         pub = client.create_publisher(channel_name="ch_max_subscribers",

@@ -809,6 +809,17 @@ impl Subscriber {
         read_message_internal(&mut *client, &mut sub_impl, mode, pass_activation, true)
     }
 
+    /// Read and deserialize a server-generated telemetry message.
+    pub fn read_telemetry_message(&self, mode: ReadMode) -> Result<Option<proto::Telemetry>> {
+        let message = self.read_message(mode)?;
+        if message.is_empty() {
+            return Ok(None);
+        }
+        let telemetry =
+            <proto::Telemetry as prost::Message>::decode(unsafe { message.as_slice() })?;
+        Ok(Some(telemetry))
+    }
+
     /// Wait until there's a message available.
     pub fn wait(&self, timeout_ms: Option<i64>) -> Result<()> {
         let sub_impl = self.imp.lock().unwrap();

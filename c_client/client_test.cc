@@ -372,6 +372,60 @@ TEST_F(ClientTest, PublishSingleMessageAndRead) {
   ASSERT_TRUE(subspace_remove_client(&sub_client));
 }
 
+TEST_F(ClientTest, ReadTelemetryMessage) {
+  SubspaceClient publisher_client =
+      subspace_create_client_with_socket_and_name(Socket().c_str(),
+                                                  "c-telemetry-publisher");
+  SubspaceClient watcher_client =
+      subspace_create_client_with_socket_and_name(Socket().c_str(),
+                                                  "c-telemetry-watcher");
+  ASSERT_NE(nullptr, publisher_client.client);
+  ASSERT_NE(nullptr, watcher_client.client);
+
+  SubspacePublisher publisher = subspace_create_publisher(
+      publisher_client, "c_telemetry",
+      CPublisherOptionsDefault(/*slot_size=*/128, /*num_slots=*/4));
+  ASSERT_NE(nullptr, publisher.publisher) << subspace_get_last_error();
+  SubspaceSubscriberOptions options = CSubscriberOptionsDefault();
+  options.telemetry = true;
+  SubspaceSubscriber subscriber =
+      subspace_create_subscriber(watcher_client, "c_telemetry", options);
+  ASSERT_NE(nullptr, subscriber.subscriber) << subspace_get_last_error();
+
+  SubspaceTelemetry telemetry = {};
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (telemetry.telemetry == nullptr &&
+         std::chrono::steady_clock::now() < deadline) {
+    telemetry = subspace_read_telemetry_message(subscriber);
+    ASSERT_FALSE(subspace_has_error()) << subspace_get_last_error();
+    if (telemetry.telemetry == nullptr) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+  }
+  ASSERT_NE(nullptr, telemetry.telemetry);
+  bool found_publisher = false;
+  for (size_t i = 0; i < telemetry.num_publishers; ++i) {
+    const SubspaceTelemetryParticipant &entry = telemetry.publishers[i];
+    found_publisher |=
+        std::string(entry.name.data, entry.name.length) ==
+            "c-telemetry-publisher" &&
+        entry.change == kSubspaceTelemetryNoChange;
+  }
+  EXPECT_TRUE(found_publisher);
+  EXPECT_TRUE(subspace_free_telemetry(&telemetry));
+  EXPECT_EQ(nullptr, telemetry.telemetry);
+
+  telemetry = subspace_read_telemetry_message_with_mode(
+      subscriber, kSubspaceReadNewest);
+  EXPECT_EQ(nullptr, telemetry.telemetry);
+  EXPECT_FALSE(subspace_has_error());
+
+  EXPECT_TRUE(subspace_remove_subscriber(&subscriber));
+  EXPECT_TRUE(subspace_remove_publisher(&publisher));
+  EXPECT_TRUE(subspace_remove_client(&publisher_client));
+  EXPECT_TRUE(subspace_remove_client(&watcher_client));
+}
+
 TEST_F(ClientTest, MetadataAddressesAndDescriptorHelpers) {
   auto pub_client = subspace_create_client_with_socket(Socket().c_str());
   ASSERT_NE(nullptr, pub_client.client);

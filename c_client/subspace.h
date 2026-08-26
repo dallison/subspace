@@ -182,6 +182,41 @@ typedef struct {
   bool checksum_error;
 } SubspaceMessage;
 
+typedef enum {
+  kSubspaceTelemetryNoChange = 0,
+  kSubspaceTelemetryAdded = 1,
+  kSubspaceTelemetryRemoved = 2,
+} SubspaceTelemetryChange;
+
+typedef struct {
+  SubspaceString name;
+  SubspaceTelemetryChange change;
+} SubspaceTelemetryParticipant;
+
+typedef struct {
+  int32_t num_drops;
+} SubspaceTelemetryDrop;
+
+typedef struct {
+  int64_t new_size;
+} SubspaceTelemetryResize;
+
+// A decoded server-generated telemetry message. The telemetry pointer owns the
+// arrays and strings exposed by this struct. Release a non-empty result with
+// subspace_free_telemetry. A null telemetry pointer means no message is
+// currently available.
+typedef struct {
+  void *telemetry;
+  const SubspaceTelemetryParticipant *publishers;
+  size_t num_publishers;
+  const SubspaceTelemetryParticipant *subscribers;
+  size_t num_subscribers;
+  const SubspaceTelemetryDrop *drops;
+  size_t num_drops;
+  const SubspaceTelemetryResize *resizes;
+  size_t num_resizes;
+} SubspaceTelemetry;
+
 typedef struct {
   void *slot;
 } SubspaceMessageSlot;
@@ -399,6 +434,11 @@ bool subspace_remove_client(SubspaceClient *client);
 SubspaceMessage subspace_read_message(SubspaceSubscriber subscriber);
 SubspaceMessage subspace_read_message_with_mode(SubspaceSubscriber subscriber,
                                                 SubspaceReadMode mode);
+SubspaceTelemetry
+subspace_read_telemetry_message(SubspaceSubscriber subscriber);
+SubspaceTelemetry subspace_read_telemetry_message_with_mode(
+    SubspaceSubscriber subscriber, SubspaceReadMode mode);
+bool subspace_free_telemetry(SubspaceTelemetry *telemetry);
 SubspaceMessage subspace_find_message(SubspaceSubscriber subscriber,
                                       uint64_t timestamp);
 bool subspace_get_all_messages(SubspaceSubscriber subscriber,

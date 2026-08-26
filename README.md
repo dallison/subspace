@@ -32,6 +32,7 @@ It has the following features:
 1.	Optional split payload buffers for external allocators and memory pools.
 1.	Explicit multi-slot publisher buffer leases with exact-slot reclamation.
 1.	Server-enforced publisher and subscriber limits with lease-aware channel capacity.
+1.	Server-generated channel telemetry for participant, drop, and resize changes.
 1.	Automatic UDP discovery and TCP bridging of channels between servers, plus optional TCP unicast discovery for bridging across NAT/VMs/emulators.
 1.	Shadow process for crash recovery -- the server can restart and resume without losing shared memory state.
 1.	Shared and weak pointers for message references.
@@ -41,6 +42,7 @@ It has the following features:
 
 See the file docs/subspace.pdf for full documentation.  Additional documentation:
 - [Checksums and User Metadata](docs/checksums-and-metadata.md)
+- [Channel Telemetry](docs/channel-telemetry.md)
 - [Split Buffers](docs/split-buffers.md)
 - [Publisher Buffer Leases](docs/publisher-buffer-leases.md)
 - [C Client API](docs/c-client.md)
@@ -723,6 +725,28 @@ auto msg_ptr = msg_ptr_or.value();
 // Message is automatically released when msg_ptr goes out of scope
 ```
 
+**Method 4: Read server-generated channel telemetry**
+```cpp
+auto telemetry_sub = client->CreateSubscriber(
+    "my_channel",
+    subspace::SubscriberOptions().SetTelemetry(true)).value();
+
+auto telemetry_or = telemetry_sub.ReadTelemetryMessage();
+if (!telemetry_or.ok()) {
+    // Handle a read or protobuf decoding error
+    return;
+}
+std::shared_ptr<subspace::Telemetry> telemetry = *telemetry_or;
+if (telemetry == nullptr) {
+    // No telemetry message is currently available
+    return;
+}
+```
+
+The monitored channel must already exist. The server sends an initial
+participant snapshot and then batches participant, drop, and resize changes at
+one-second intervals. See [Channel Telemetry](docs/channel-telemetry.md).
+
 ### Waiting for Messages
 
 ```cpp
@@ -757,6 +781,8 @@ public:
     absl::StatusOr<Message> ReadMessage(ReadMode mode = ReadMode::kReadNext);
     template <typename T>
     absl::StatusOr<shared_ptr<T>> ReadMessage(ReadMode mode = ReadMode::kReadNext);
+    absl::StatusOr<std::shared_ptr<Telemetry>>
+        ReadTelemetryMessage(ReadMode mode = ReadMode::kReadNext);
     
     // Find message by timestamp
     absl::StatusOr<Message> FindMessage(uint64_t timestamp);
@@ -1139,6 +1165,7 @@ auto sub = client->CreateSubscriber("channel",
 | Field/Method | Type | Default | Description |
 |--------------|------|---------|-------------|
 | `reliable` / `SetReliable()` | `bool` | `false` | If true, reliable delivery (see Reliable Channels section). |
+| `telemetry` / `SetTelemetry()` | `bool` | `false` | Subscribe to server-generated telemetry for the named existing channel instead of its payloads. |
 | `type` / `SetType()` | `std::string` | `""` | User-defined message type identifier. Must match publisher type. |
 | `max_active_messages` / `SetMaxActiveMessages()` | `int` | `1` | Maximum number of active messages (shared_ptrs) that can be held simultaneously. |
 | `max_active_messages` / `SetMaxSharedPtrs()` | `int` | `0` | Alias: sets max_active_messages to n+1. |
@@ -1154,6 +1181,7 @@ auto sub = client->CreateSubscriber("channel",
 
 **Getter Methods:**
 - `bool IsReliable() const`
+- `bool Telemetry() const`
 - `const std::string& Type() const`
 - `int MaxActiveMessages() const`
 - `int MaxSharedPtrs() const`

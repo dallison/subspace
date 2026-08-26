@@ -1489,6 +1489,24 @@ absl::StatusOr<Message> ClientImpl::ReadMessage(SubscriberImpl *subscriber,
                              /*clear_trigger=*/true);
 }
 
+absl::StatusOr<std::shared_ptr<Telemetry>>
+Subscriber::ReadTelemetryMessage(ReadMode mode) {
+  absl::StatusOr<Message> message = ReadMessage(mode);
+  if (!message.ok()) {
+    return message.status();
+  }
+  if (message->length == 0) {
+    return std::shared_ptr<Telemetry>();
+  }
+
+  auto telemetry = std::make_shared<Telemetry>();
+  if (!telemetry->ParseFromArray(message->buffer,
+                                 static_cast<int>(message->length))) {
+    return absl::DataLossError("Failed to parse telemetry message");
+  }
+  return telemetry;
+}
+
 absl::StatusOr<Message>
 ClientImpl::FindMessageInternal(SubscriberImpl *subscriber,
                                 uint64_t timestamp) {

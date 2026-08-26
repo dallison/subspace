@@ -4486,18 +4486,25 @@ fn integration_telemetry_subscriber_smoke() {
 
     assert_eq!(telemetry.channel_type(), "subspace.Telemetry");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut message_length = 0usize;
-    while message_length == 0 && std::time::Instant::now() < deadline {
-        message_length = telemetry
-            .read_message(ReadMode::ReadNext)
-            .unwrap()
-            .length;
-        if message_length > 0 {
+    let mut snapshot = None;
+    while snapshot.is_none() && std::time::Instant::now() < deadline {
+        snapshot = telemetry
+            .read_telemetry_message(ReadMode::ReadNext)
+            .unwrap();
+        if snapshot.is_some() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    assert!(message_length > 0, "timed out waiting for telemetry payload");
+    let snapshot = snapshot.expect("timed out waiting for telemetry payload");
+    assert!(snapshot
+        .publishers
+        .iter()
+        .any(|publisher| publisher.name == "rust_telemetry_pub"));
+    assert!(telemetry
+        .read_telemetry_message(ReadMode::ReadNext)
+        .unwrap()
+        .is_none());
 }
 
 #[test]

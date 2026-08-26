@@ -30,6 +30,14 @@ struct HandleCache {
   std::vector<SubspaceMessage> messages;
 };
 
+struct TelemetryStorage {
+  std::shared_ptr<subspace::Telemetry> message;
+  std::vector<SubspaceTelemetryParticipant> publishers;
+  std::vector<SubspaceTelemetryParticipant> subscribers;
+  std::vector<SubspaceTelemetryDrop> drops;
+  std::vector<SubspaceTelemetryResize> resizes;
+};
+
 std::unordered_map<void *, ClientCache> client_caches;
 std::unordered_map<void *, HandleCache> publisher_caches;
 std::unordered_map<void *, HandleCache> subscriber_caches;
@@ -59,6 +67,48 @@ SubscriberPtr(SubspaceSubscriber subscriber) {
 
 SubspaceString ToCString(const std::string &s) {
   return {.data = s.data(), .length = s.size()};
+}
+
+SubspaceTelemetry TakeCTelemetry(
+    std::shared_ptr<subspace::Telemetry> message) {
+  if (message == nullptr) {
+    return {};
+  }
+
+  auto *storage = new TelemetryStorage;
+  storage->message = std::move(message);
+  storage->publishers.reserve(storage->message->publishers_size());
+  for (const auto &publisher : storage->message->publishers()) {
+    storage->publishers.push_back(
+        {.name = ToCString(publisher.name()),
+         .change =
+             static_cast<SubspaceTelemetryChange>(publisher.change())});
+  }
+  storage->subscribers.reserve(storage->message->subscribers_size());
+  for (const auto &subscriber : storage->message->subscribers()) {
+    storage->subscribers.push_back(
+        {.name = ToCString(subscriber.name()),
+         .change =
+             static_cast<SubspaceTelemetryChange>(subscriber.change())});
+  }
+  storage->drops.reserve(storage->message->drops_size());
+  for (const auto &drop : storage->message->drops()) {
+    storage->drops.push_back({.num_drops = drop.num_drops()});
+  }
+  storage->resizes.reserve(storage->message->resizes_size());
+  for (const auto &resize : storage->message->resizes()) {
+    storage->resizes.push_back({.new_size = resize.new_size()});
+  }
+
+  return {.telemetry = storage,
+          .publishers = storage->publishers.data(),
+          .num_publishers = storage->publishers.size(),
+          .subscribers = storage->subscribers.data(),
+          .num_subscribers = storage->subscribers.size(),
+          .drops = storage->drops.data(),
+          .num_drops = storage->drops.size(),
+          .resizes = storage->resizes.data(),
+          .num_resizes = storage->resizes.size()};
 }
 
 SubspaceChannelCounters ToCCounters(const subspace::ChannelCounters &counters) {
@@ -632,6 +682,41 @@ SubspaceMessage subspace_read_message_with_mode(SubspaceSubscriber subscriber,
 
 SubspaceMessage subspace_read_message(SubspaceSubscriber subscriber) {
   return subspace_read_message_with_mode(subscriber, kSubspaceReadNext);
+}
+
+SubspaceTelemetry subspace_read_telemetry_message_with_mode(
+    SubspaceSubscriber subscriber, SubspaceReadMode mode) {
+  subspace_clear_error();
+  if (subscriber.subscriber == nullptr) {
+    subspace_set_error("Invalid subscriber");
+    return {};
+  }
+
+  auto sub_ptr = SubscriberPtr(subscriber);
+  absl::StatusOr<std::shared_ptr<subspace::Telemetry>> telemetry =
+      (*sub_ptr)->ReadTelemetryMessage(ToCppReadMode(mode));
+  if (!telemetry.ok()) {
+    subspace_set_error(telemetry.status().ToString().c_str());
+    return {};
+  }
+  return TakeCTelemetry(std::move(*telemetry));
+}
+
+SubspaceTelemetry
+subspace_read_telemetry_message(SubspaceSubscriber subscriber) {
+  return subspace_read_telemetry_message_with_mode(subscriber,
+                                                   kSubspaceReadNext);
+}
+
+bool subspace_free_telemetry(SubspaceTelemetry *telemetry) {
+  subspace_clear_error();
+  if (telemetry == nullptr || telemetry->telemetry == nullptr) {
+    subspace_set_error("Invalid telemetry parameter");
+    return false;
+  }
+  delete reinterpret_cast<TelemetryStorage *>(telemetry->telemetry);
+  *telemetry = {};
+  return true;
 }
 
 SubspaceMessage subspace_find_message(SubspaceSubscriber subscriber,
