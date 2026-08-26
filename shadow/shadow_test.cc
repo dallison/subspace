@@ -615,7 +615,8 @@ TEST_F(ShadowRecoveryTest, RecoversHiddenTelemetryChannelAndSubscribers) {
   recovered_hidden->CountUsers(num_pubs, num_subs, num_bridge_pubs,
                                num_bridge_subs, num_tunnel_pubs,
                                num_tunnel_subs);
-  EXPECT_EQ(0, num_pubs);
+  // The coroutine may already have recreated its ephemeral publisher.
+  EXPECT_LE(num_pubs, 1);
   EXPECT_EQ(1, num_subs);
 
   ASSERT_TRUE(WaitForShadowState([this, kTarget]() {
