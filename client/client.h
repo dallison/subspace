@@ -20,6 +20,7 @@
 #include "common/async/wait.h"
 #include "common/channel.h"
 #include "common/client_buffer.h"
+#include "proto/subspace.pb.h"
 
 #include "toolbelt/fd.h"
 #include "toolbelt/logging.h"
@@ -1465,6 +1466,11 @@ public:
     return client_->ReadMessage(impl_.get(), mode, clear_trigger);
   }
 
+  // Read and deserialize a telemetry message. Returns nullptr when no message
+  // is currently available.
+  absl::StatusOr<std::shared_ptr<Telemetry>>
+  ReadTelemetryMessage(ReadMode mode = ReadMode::kReadNext);
+
   // As ReadMessage above but returns a shared_ptr to the typed message.
   // NOTE: this is subspace::shared_ptr, not std::shared_ptr.
   template <typename T, typename Aliaser = DefaultAliaser>
@@ -1509,7 +1515,7 @@ public:
     return impl_->GetVirtualMemoryUsage();
   }
 
-  std::string Name() const { return impl_->Name(); }
+  std::string Name() const { return impl_->RequestName(); }
   std::string Type() const { return impl_->Type(); }
   std::string_view TypeView() const { return impl_->TypeView(); }
 

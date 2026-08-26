@@ -228,6 +228,14 @@ public:
   virtual ~ServerChannel();
 
   void SetSkipCleanup(bool v) { skip_cleanup_ = v; }
+  // Marks this as an internal channel carrying telemetry for target.
+  void SetTelemetryTarget(std::string target) {
+    hidden_ = true;
+    telemetry_target_ = std::move(target);
+  }
+  bool IsHidden() const { return hidden_; }
+  bool IsTelemetryChannel() const { return !telemetry_target_.empty(); }
+  const std::string &TelemetryTarget() const { return telemetry_target_; }
 
   absl::StatusOr<PublisherUser *> AddPublisher(ClientHandler *handler,
                                                bool is_reliable, bool is_local,
@@ -302,7 +310,7 @@ public:
   virtual ChannelCounters &RecordUpdate(bool is_pub, bool add, bool reliable);
 
   void RemoveUser(Server *server, int user_id);
-  void RemoveAllUsersFor(ClientHandler *handler);
+  void RemoveAllUsersFor(Server *server,ClientHandler *handler);
   virtual bool IsEmpty() const { return user_ids_.IsEmpty(); }
   virtual absl::Status
   HasSufficientCapacity(int new_max_active_messages,
@@ -511,6 +519,8 @@ protected:
   SharedMemoryFds shared_memory_fds_;
   bool is_virtual_ = false;
   bool skip_cleanup_ = false;
+  bool hidden_ = false;
+  std::string telemetry_target_;
   int session_id_;
   mutable int32_t last_known_slot_size_ = 0;
   bool split_buffer_options_set_ = false;

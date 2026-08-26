@@ -214,6 +214,7 @@ pub struct SubscriberOptions {
     pub subscriber_queue_size: i32,
     pub bridge: bool,
     pub for_tunnel: bool,
+    pub telemetry: bool,
     pub channel_type: String,
     pub max_active_messages: i32,
     pub max_subscribers: i32,
@@ -236,6 +237,7 @@ impl Default for SubscriberOptions {
             subscriber_queue_size: 0,
             bridge: false,
             for_tunnel: false,
+            telemetry: false,
             channel_type: String::new(),
             max_active_messages: 1,
             max_subscribers: 0,
@@ -305,6 +307,11 @@ impl SubscriberOptions {
 
     pub fn set_for_tunnel(mut self, v: bool) -> Self {
         self.for_tunnel = v;
+        self
+    }
+
+    pub fn set_telemetry(mut self, v: bool) -> Self {
+        self.telemetry = v;
         self
     }
 

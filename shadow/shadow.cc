@@ -267,6 +267,8 @@ Shadow::HandleCreateChannel(const ShadowCreateChannel &msg,
     ch.max_publishers = msg.max_publishers();
     ch.has_max_subscribers = msg.has_max_subscribers();
     ch.max_subscribers = msg.max_subscribers();
+    ch.hidden = msg.hidden();
+    ch.telemetry_target = msg.telemetry_target();
     ch.ccb_fd = std::move(fds[0]);
     ch.bcb_fd = std::move(fds[1]);
   };
@@ -557,6 +559,8 @@ absl::Status Shadow::SendStateDump(toolbelt::UnixSocket &socket) {
       msg->set_max_publishers(ch.max_publishers);
       msg->set_has_max_subscribers(ch.has_max_subscribers);
       msg->set_max_subscribers(ch.max_subscribers);
+      msg->set_hidden(ch.hidden);
+      msg->set_telemetry_target(ch.telemetry_target);
 
       std::vector<toolbelt::FileDescriptor> fds;
       fds.push_back(ch.ccb_fd);

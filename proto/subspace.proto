@@ -86,6 +86,7 @@ message CreateSubscriberRequest {
   uint64 process_id = 10; // Client process id for introspection.
   int32 subscriber_queue_size = 11;
   int32 max_subscribers = 12; // 0 means no explicit subscriber limit.
+  bool telemetry = 13; // Subscribe to telemetry for channel_name.
 }
 
 message CreateSubscriberResponse {
@@ -110,6 +111,9 @@ message CreateSubscriberResponse {
   // Fixed publisher default used when subscriber_queue_size is zero.
   int32 default_subscriber_queue_size = 19;
   uint64 subscriber_queue_arena_size = 20;
+  // Actual server channel backing this subscription. This differs from the
+  // requested name for telemetry subscriptions.
+  string resolved_channel_name = 21;
 }
 
 message GetTriggersRequest { string channel_name = 1; }
@@ -131,6 +135,7 @@ message RemovePublisherResponse { string error = 1; }
 message RemoveSubscriberRequest {
   string channel_name = 1;
   int32 subscriber_id = 2;
+  bool telemetry = 3;
 }
 
 message RemoveSubscriberResponse { string error = 1; }
@@ -510,6 +515,10 @@ message ShadowCreateChannel {
   uint64 subscriber_queue_arena_size = 18;
   bool has_max_subscribers = 19;
   int32 max_subscribers = 20;
+  // Hidden channels are omitted from public directory and statistics data.
+  bool hidden = 21;
+  // Non-empty only for a hidden channel monitoring this public channel.
+  string telemetry_target = 22;
   // FDs sent via SCM_RIGHTS: [ccb_fd, bcb_fd]
 }
 
@@ -588,4 +597,35 @@ message ShadowUpdateChannelOptions {
   bool split_buffers_over_bridge = 6;
   bool has_max_subscribers = 7;
   int32 max_subscribers = 8;
+}
+
+message Telemetry {
+  enum Change {
+    NONE = 0;
+    ADDED = 1;
+    REMOVED = 2;
+  }
+
+  message Publisher {
+    string name = 1;
+    Change change = 2;
+  }
+
+  message Subscriber {
+    string name = 1;
+    Change change = 2;
+  }
+
+  message Drop {
+    int32 num_drops = 1;
+  }
+
+  message Resize {
+    int64 new_size = 1;
+  }
+
+  repeated Publisher publishers = 1;
+  repeated Subscriber subscribers = 2;
+  repeated Drop drops = 3;
+  repeated Resize resizes = 4;
 }

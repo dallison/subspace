@@ -19,6 +19,7 @@ The main handle types are opaque wrappers:
 | `SubspacePublisher` | Publisher attached to a channel. |
 | `SubspaceSubscriber` | Subscriber attached to a channel. |
 | `SubspaceMessage` | A received message reference. |
+| `SubspaceTelemetry` | An owned, decoded channel telemetry message. |
 | `SubspaceMessageBuffer` | A writable publish buffer returned by a publisher. |
 | `SubspacePublisherBufferLease` | A specific unpublished publisher slot plus a stale-token guard. |
 
@@ -214,6 +215,7 @@ Important subscriber options:
 | Field | Purpose |
 | --- | --- |
 | `reliable` | Participate in reliable slot lifetime tracking. |
+| `telemetry` | Subscribe to server-generated telemetry for the named existing channel instead of its payloads. |
 | `bridge`, `for_tunnel` | Mark bridge/tunnel subscribers. |
 | `type` | Required type string when type matching is used. |
 | `max_active_messages` | Maximum simultaneously held `SubspaceMessage` values. |
@@ -230,6 +232,11 @@ Important subscriber options:
 Subscribers do not request split-buffer mode. They learn the channel mode from
 the server and use `split_callbacks` only if the publisher used a custom split
 payload allocator.
+
+For channel monitoring, set `telemetry = true` and use
+`subspace_read_telemetry_message` to receive a decoded `SubspaceTelemetry`.
+See [Channel Telemetry](channel-telemetry.md) for message semantics, ownership,
+and lifecycle.
 
 ## Reading Messages
 
@@ -271,6 +278,9 @@ Related subscriber APIs:
 
 | Function | Purpose |
 | --- | --- |
+| `subspace_read_telemetry_message` | Read and decode the next telemetry message; a null `telemetry` field means no message is available. |
+| `subspace_read_telemetry_message_with_mode` | Read and decode telemetry using next or newest mode. |
+| `subspace_free_telemetry` | Release a non-empty decoded telemetry result. |
 | `subspace_read_message_with_mode_and_trigger` | Same as `subspace_read_message_with_mode`, with control over whether the subscriber trigger fd is consumed. |
 | `subspace_find_message` | Find a message by timestamp. |
 | `subspace_wait_for_subscriber` | Wait indefinitely for a message. |

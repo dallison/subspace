@@ -115,6 +115,33 @@ loop {
 }
 ```
 
+### Channel Telemetry
+
+Set `telemetry` to monitor an existing channel instead of receiving its payload
+messages:
+
+```rust
+let options = SubscriberOptions::new().set_telemetry(true);
+let telemetry = client
+    .create_subscriber("my_channel", &options)
+    .unwrap();
+
+if let Some(message) = telemetry
+    .read_telemetry_message(ReadMode::ReadNext)
+    .unwrap()
+{
+    for publisher in message.publishers {
+        println!("{} {}", publisher.name, publisher.change);
+    }
+}
+```
+
+`read_telemetry_message` returns `Result<Option<proto::Telemetry>>`; `None`
+means no message is currently available. The server sends an initial
+participant snapshot and batches later participant, drop, and resize changes
+once per second. See [Channel Telemetry](channel-telemetry.md) for the complete
+behavior.
+
 ### Read Modes
 
 - **`ReadMode::ReadNext`** — returns the next unread message in order.
@@ -174,6 +201,7 @@ let opts = PublisherOptions::new()
 | Option | Default | Description |
 |--------|---------|-------------|
 | `reliable` | false | Reliable mode — slots are held until the subscriber releases them. |
+| `telemetry` | false | Subscribe to server-generated telemetry for the named existing channel instead of its payloads. |
 | `bridge` | false | Subscriber is used for server-to-server bridging. |
 | `for_tunnel` | false | Subscriber is used by an external tunnel process. |
 | `channel_type` | "" | Must match the publisher's type string. |

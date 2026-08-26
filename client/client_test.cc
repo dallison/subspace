@@ -18,6 +18,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
@@ -98,6 +99,25 @@ subspace::PublisherOptions PubOpts(int32_t slot_size = 0,
 }
 
 subspace::SubscriberOptions SubOpts() { return subspace::SubscriberOptions(); }
+
+absl::StatusOr<subspace::Telemetry>
+WaitForTelemetry(Subscriber &subscriber,
+                 std::chrono::milliseconds timeout = std::chrono::seconds(3)) {
+  auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    absl::StatusOr<std::shared_ptr<subspace::Telemetry>> telemetry =
+        subscriber.ReadTelemetryMessage(subspace::ReadMode::kReadNext);
+    if (!telemetry.ok()) {
+      return telemetry.status();
+    }
+    if (*telemetry != nullptr) {
+      return **telemetry;
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  return absl::DeadlineExceededError("Timed out waiting for telemetry");
+}
 
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
 absl::StatusOr<toolbelt::FileDescriptor> CreateTestMemfd(const char *name,
@@ -5047,6 +5067,210 @@ TEST_F(ClientTest, ChannelDirectory) {
   ASSERT_TRUE(found_chan2);
 }
 
+TEST_F(ClientTest, TelemetryRequiresExistingChannel) {
+  auto client =
+      EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket(), "telemetry-watch"));
+  absl::StatusOr<Subscriber> telemetry = client->CreateSubscriber(
+      "telemetry_missing", SubOpts().SetTelemetry(true));
+  EXPECT_FALSE(telemetry.ok());
+}
+
+TEST_F(ClientTest, TelemetryDoesNotEnforceRequestedType) {
+  auto client =
+      EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket(), "telemetry-type"));
+  Publisher publisher = EVAL_AND_ASSERT_OK(
+      client->CreatePublisher("telemetry_type", PubOpts(128, 4)));
+  Subscriber telemetry = EVAL_AND_ASSERT_OK(client->CreateSubscriber(
+      "telemetry_type",
+      SubOpts().SetType("application-data").SetTelemetry(true)));
+  EXPECT_EQ("subspace.Telemetry", telemetry.Type());
+}
+
+TEST_F(ClientTest, FailedTelemetrySubscriberRemovesHiddenChannel) {
+  constexpr char kChannel[] = "telemetry_failed_subscriber";
+  auto client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "telemetry-failure"));
+  Publisher publisher =
+      EVAL_AND_ASSERT_OK(client->CreatePublisher(kChannel, PubOpts(128, 4)));
+
+  absl::StatusOr<Subscriber> telemetry = client->CreateSubscriber(
+      kChannel, SubOpts().SetTelemetry(true).SetMaxActiveMessages(1000));
+  EXPECT_FALSE(telemetry.ok());
+  for (const auto &[name, channel] : Server()->GetChannels()) {
+    (void)name;
+    EXPECT_FALSE(channel->IsTelemetryChannel() &&
+                 channel->TelemetryTarget() == kChannel);
+  }
+}
+
+TEST_F(ClientTest, TelemetrySnapshotsAndBatchesParticipantChanges) {
+  constexpr char kChannel[] = "telemetry_participants";
+  auto publisher_client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "telemetry-publisher"));
+  auto subscriber_client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "telemetry-subscriber"));
+  auto watcher_client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "telemetry-watcher"));
+
+  Publisher publisher = EVAL_AND_ASSERT_OK(
+      publisher_client->CreatePublisher(kChannel, PubOpts(128, 8)));
+  Subscriber subscriber =
+      EVAL_AND_ASSERT_OK(subscriber_client->CreateSubscriber(kChannel));
+  {
+    Subscriber telemetry = EVAL_AND_ASSERT_OK(watcher_client->CreateSubscriber(
+        kChannel, SubOpts().SetTelemetry(true)));
+    EXPECT_EQ(kChannel, telemetry.Name());
+    EXPECT_EQ("subspace.Telemetry", telemetry.Type());
+
+    subspace::Telemetry snapshot =
+        EVAL_AND_ASSERT_OK(WaitForTelemetry(telemetry));
+    bool found_publisher = false;
+    bool found_subscriber = false;
+    for (const auto &entry : snapshot.publishers()) {
+      if (entry.name() == "telemetry-publisher" &&
+          entry.change() == subspace::Telemetry::NONE) {
+        found_publisher = true;
+      }
+    }
+    for (const auto &entry : snapshot.subscribers()) {
+      if (entry.name() == "telemetry-subscriber" &&
+          entry.change() == subspace::Telemetry::NONE) {
+        found_subscriber = true;
+      }
+    }
+    EXPECT_TRUE(found_publisher);
+    EXPECT_TRUE(found_subscriber);
+
+    auto added_client = EVAL_AND_ASSERT_OK(
+        subspace::Client::Create(Socket(), "telemetry-added"));
+    {
+      Publisher added = EVAL_AND_ASSERT_OK(
+          added_client->CreatePublisher(kChannel, PubOpts(128, 8)));
+      subspace::Telemetry update =
+          EVAL_AND_ASSERT_OK(WaitForTelemetry(telemetry));
+      bool found_added = false;
+      for (const auto &entry : update.publishers()) {
+        if (entry.name() == "telemetry-added" &&
+            entry.change() == subspace::Telemetry::ADDED) {
+          found_added = true;
+        }
+      }
+      EXPECT_TRUE(found_added);
+    }
+
+    subspace::Telemetry removal =
+        EVAL_AND_ASSERT_OK(WaitForTelemetry(telemetry));
+    bool found_removed = false;
+    for (const auto &entry : removal.publishers()) {
+      if (entry.name() == "telemetry-added" &&
+          entry.change() == subspace::Telemetry::REMOVED) {
+        found_removed = true;
+      }
+    }
+    EXPECT_TRUE(found_removed);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    std::shared_ptr<subspace::Telemetry> no_message = EVAL_AND_ASSERT_OK(
+        telemetry.ReadTelemetryMessage(subspace::ReadMode::kReadNewest));
+    EXPECT_EQ(nullptr, no_message);
+
+    Subscriber second = EVAL_AND_ASSERT_OK(watcher_client->CreateSubscriber(
+        kChannel, SubOpts().SetTelemetry(true)));
+    subspace::Telemetry refreshed =
+        EVAL_AND_ASSERT_OK(WaitForTelemetry(second));
+    EXPECT_GT(refreshed.publishers_size(), 0);
+
+    auto infos = EVAL_AND_ASSERT_OK(watcher_client->GetChannelInfo());
+    for (const subspace::ChannelInfo &info : infos) {
+      EXPECT_EQ(std::string::npos,
+                info.channel_name.find("/subspace/telemetry/"));
+    }
+    auto stats = EVAL_AND_ASSERT_OK(watcher_client->GetChannelStats());
+    for (const subspace::ChannelStats &stat : stats) {
+      EXPECT_EQ(std::string::npos,
+                stat.channel_name.find("/subspace/telemetry/"));
+    }
+  }
+
+  bool telemetry_channel_exists = true;
+  for (int attempt = 0; attempt < 40 && telemetry_channel_exists; ++attempt) {
+    telemetry_channel_exists = false;
+    for (const auto &[name, channel] : Server()->GetChannels()) {
+      (void)name;
+      if (channel->IsTelemetryChannel() &&
+          channel->TelemetryTarget() == kChannel) {
+        telemetry_channel_exists = true;
+        break;
+      }
+    }
+    if (telemetry_channel_exists) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+  }
+  EXPECT_FALSE(telemetry_channel_exists);
+}
+
+TEST_F(ClientTest, TelemetryReportsDropDeltasAndResizes) {
+  constexpr char kChannel[] = "telemetry_drop_resize";
+  auto target_client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "telemetry-target"));
+  auto watcher_client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "telemetry-metrics-watcher"));
+
+  Subscriber target_sub = EVAL_AND_ASSERT_OK(target_client->CreateSubscriber(
+      kChannel, SubOpts().SetKeepActiveMessage(true)));
+  Publisher target_pub = EVAL_AND_ASSERT_OK(
+      target_client->CreatePublisher(kChannel, PubOpts(32, 5)));
+  Subscriber telemetry = EVAL_AND_ASSERT_OK(
+      watcher_client->CreateSubscriber(kChannel, SubOpts().SetTelemetry(true)));
+  ASSERT_OK(WaitForTelemetry(telemetry).status());
+
+  absl::StatusOr<void *> resized = target_pub.GetMessageBuffer(4000);
+  ASSERT_OK(resized);
+  ASSERT_NE(nullptr, *resized);
+  *static_cast<char *>(*resized) = 'r';
+  ASSERT_OK(target_pub.PublishMessage(1));
+
+  for (int i = 0; i < 4; ++i) {
+    absl::StatusOr<void *> buffer = target_pub.GetMessageBuffer();
+    ASSERT_OK(buffer);
+    ASSERT_NE(nullptr, *buffer);
+    memset(*buffer, i, 1);
+    ASSERT_OK(target_pub.PublishMessage(1));
+  }
+  ASSERT_OK(target_sub.ReadMessage());
+  for (int i = 0; i < 4; ++i) {
+    absl::StatusOr<void *> buffer = target_pub.GetMessageBuffer();
+    ASSERT_OK(buffer);
+    ASSERT_NE(nullptr, *buffer);
+    memset(*buffer, i, 1);
+    ASSERT_OK(target_pub.PublishMessage(1));
+  }
+  for (;;) {
+    absl::StatusOr<Message> message = target_sub.ReadMessage();
+    ASSERT_OK(message);
+    if (message->length == 0) {
+      break;
+    }
+  }
+
+  bool found_drop = false;
+  bool found_resize = false;
+  for (int attempt = 0; attempt < 3 && (!found_drop || !found_resize);
+       ++attempt) {
+    subspace::Telemetry update =
+        EVAL_AND_ASSERT_OK(WaitForTelemetry(telemetry));
+    for (const auto &drop : update.drops()) {
+      found_drop = found_drop || drop.num_drops() > 0;
+    }
+    for (const auto &resize : update.resizes()) {
+      found_resize = found_resize || resize.new_size() >= 4000;
+    }
+  }
+  EXPECT_TRUE(found_drop);
+  EXPECT_TRUE(found_resize);
+}
+
 TEST_F(ClientTest, MessageGetters) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
@@ -7294,6 +7518,7 @@ TEST_F(ClientTest, SubscriberOptionsChain) {
       .SetMaxActiveMessages(20)
       .SetBridge(true)
       .SetForTunnel(true)
+      .SetTelemetry(true)
       .SetMux("/submux")
       .SetVchanId(3)
       .SetPassActivation(true)
@@ -7313,6 +7538,7 @@ TEST_F(ClientTest, SubscriberOptionsChain) {
   ASSERT_FALSE(opts.DetectDroppedMessages());
   ASSERT_TRUE(opts.IsBridge());
   ASSERT_TRUE(opts.ForTunnel());
+  ASSERT_TRUE(opts.Telemetry());
   ASSERT_EQ("/submux", opts.Mux());
   ASSERT_EQ(3, opts.VchanId());
   ASSERT_TRUE(opts.PassActivation());

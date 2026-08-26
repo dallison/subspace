@@ -750,7 +750,7 @@ pub struct Subscriber {
 
 impl Subscriber {
     pub fn name(&self) -> String {
-        self.imp.lock().unwrap().channel.name.clone()
+        self.imp.lock().unwrap().request_name.clone()
     }
 
     pub fn is_reliable(&self) -> bool {
@@ -828,6 +828,17 @@ impl Subscriber {
             pass_activation,
             should_clear_trigger,
         )
+    }
+
+    /// Read and deserialize a server-generated telemetry message.
+    pub fn read_telemetry_message(&self, mode: ReadMode) -> Result<Option<proto::Telemetry>> {
+        let message = self.read_message(mode)?;
+        if message.is_empty() {
+            return Ok(None);
+        }
+        let telemetry =
+            <proto::Telemetry as prost::Message>::decode(unsafe { message.as_slice() })?;
+        Ok(Some(telemetry))
     }
 
     /// Wait until there's a message available.
@@ -955,7 +966,7 @@ impl Subscriber {
             if sub.message_callback.is_none() {
                 return Err(SubspaceError::Internal(format!(
                     "No message callback registered for channel {}",
-                    sub.channel.name
+                    sub.request_name
                 )));
             }
         }
@@ -1097,11 +1108,12 @@ impl Drop for Subscriber {
         let client = self.inner.lock().unwrap();
         let sub_impl = self.imp.lock().unwrap();
 
-        let channel_name = sub_impl.channel.name.clone();
+        let channel_name = sub_impl.request_name.clone();
         let subscriber_id = sub_impl.subscriber_id;
+        let opts = sub_impl.options.clone();
         drop(sub_impl);
 
-        let _ = remove_subscriber_request(&client, &channel_name, subscriber_id);
+        let _ = remove_subscriber_request(&client, &channel_name, subscriber_id, &opts);
     }
 }
 
@@ -1325,6 +1337,7 @@ impl Client {
                     is_reliable: opts.reliable,
                     is_bridge: opts.bridge,
                     for_tunnel: opts.for_tunnel,
+                    telemetry: opts.telemetry,
                     r#type: opts.channel_type.as_bytes().to_vec(),
                     max_active_messages: opts.max_active_messages,
                     mux: opts.mux.clone(),
@@ -1351,8 +1364,13 @@ impl Client {
             return Err(SubspaceError::ServerError(sub_resp.error));
         }
 
+        let request_name = channel_name.to_string();
+        let channel_name =
+            resolved_subscriber_channel_name(&request_name, &sub_resp.resolved_channel_name);
+
         let mut sub_impl = SubscriberImpl::new(
-            channel_name.to_string(),
+            request_name,
+            channel_name,
             sub_resp.num_slots,
             sub_resp.default_subscriber_queue_size,
             sub_resp.subscriber_queue_arena_size,
@@ -1787,7 +1805,7 @@ fn read_message_internal(
                     "Dropped {} message{} on channel {}",
                     drops,
                     if drops == 1 { "" } else { "s" },
-                    sub.channel.name
+                    sub.request_name
                 );
             }
             sub.channel
@@ -1824,6 +1842,18 @@ fn read_message_internal(
     })
 }
 
+// Telemetry subscribers map a hidden channel while keeping request_name public.
+fn resolved_subscriber_channel_name(
+    request_name: &str,
+    resolved_channel_name: &str,
+) -> String {
+    if resolved_channel_name.is_empty() {
+        request_name.to_string()
+    } else {
+        resolved_channel_name.to_string()
+    }
+}
+
 fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Result<()> {
     let scb = sub.channel.scb();
     let channel_id = sub.channel.channel_id as usize;
@@ -1834,10 +1864,11 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
     let req = proto::Request {
         request: Some(proto::request::Request::CreateSubscriber(
             proto::CreateSubscriberRequest {
-                channel_name: sub.channel.name.clone(),
+                channel_name: sub.request_name.clone(),
                 subscriber_id: sub.subscriber_id,
                 mux: sub.options.mux.clone(),
                 subscriber_queue_size: sub.options.subscriber_queue_size,
+                telemetry: sub.options.telemetry,
                 process_id: std::process::id() as u64,
                 ..Default::default()
             },
@@ -1851,6 +1882,10 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
     };
     if !sub_resp.error.is_empty() {
         return Err(SubspaceError::ServerError(sub_resp.error));
+    }
+
+    if !sub_resp.resolved_channel_name.is_empty() {
+        sub.channel.name = sub_resp.resolved_channel_name.clone();
     }
 
     // A subscriber-created placeholder is the only case where the server
@@ -2087,12 +2122,14 @@ fn remove_subscriber_request(
     client: &ClientInner,
     channel_name: &str,
     subscriber_id: i32,
+    opts: &SubscriberOptions,
 ) -> Result<()> {
     let req = proto::Request {
         request: Some(proto::request::Request::RemoveSubscriber(
             proto::RemoveSubscriberRequest {
                 channel_name: channel_name.to_string(),
                 subscriber_id,
+                telemetry: opts.telemetry,
             },
         )),
     };

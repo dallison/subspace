@@ -115,6 +115,8 @@ fn subscriber_options_defaults() {
     assert!(!opts.reliable);
     assert_eq!(opts.subscriber_queue_size, 0);
     assert!(!opts.bridge);
+    assert!(!opts.for_tunnel);
+    assert!(!opts.telemetry);
     assert_eq!(opts.max_active_messages, 1);
     assert!(opts.log_dropped_messages);
     assert!(opts.detect_dropped_messages);
@@ -141,6 +143,8 @@ fn subscriber_options_builder_chain() {
         .set_pass_checksum_errors(true)
         .set_keep_active_message(true)
         .set_vchan_id(7)
+        .set_for_tunnel(true)
+        .set_telemetry(true)
         .set_type("image".into());
 
     assert!(opts.reliable);
@@ -154,6 +158,8 @@ fn subscriber_options_builder_chain() {
     assert!(opts.pass_checksum_errors);
     assert!(opts.keep_active_message);
     assert_eq!(opts.vchan_id, 7);
+    assert!(opts.for_tunnel);
+    assert!(opts.telemetry);
     assert_eq!(opts.channel_type, "image");
 }
 
@@ -4508,6 +4514,47 @@ fn integration_publisher_new_accessors() {
     // current_slot_id should be valid after creation (publisher gets a slot).
     let slot_id = publisher.current_slot_id();
     assert!(slot_id >= 0);
+}
+
+#[test]
+fn integration_telemetry_subscriber_smoke() {
+    let pub_client = new_client("rust_telemetry_pub");
+    let watcher_client = new_client("rust_telemetry_watch");
+    let _pub = pub_client
+        .create_publisher(
+            "rust_telemetry_smoke",
+            &PublisherOptions::new().set_slot_size(128).set_num_slots(4),
+        )
+        .unwrap();
+
+    let telemetry = watcher_client
+        .create_subscriber(
+            "rust_telemetry_smoke",
+            &SubscriberOptions::new().set_telemetry(true),
+        )
+        .unwrap();
+
+    assert_eq!(telemetry.channel_type(), "subspace.Telemetry");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut snapshot = None;
+    while snapshot.is_none() && std::time::Instant::now() < deadline {
+        snapshot = telemetry
+            .read_telemetry_message(ReadMode::ReadNext)
+            .unwrap();
+        if snapshot.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let snapshot = snapshot.expect("timed out waiting for telemetry payload");
+    assert!(snapshot
+        .publishers
+        .iter()
+        .any(|publisher| publisher.name == "rust_telemetry_pub"));
+    assert!(telemetry
+        .read_telemetry_message(ReadMode::ReadNext)
+        .unwrap()
+        .is_none());
 }
 
 #[test]
