@@ -307,7 +307,7 @@ Message msg = subscriber.ReadMessage(ReadMode::kReadNext);
 
 1. If the subscriber is a placeholder, attempt to reload it by contacting the server.
 2. If reliable publisher triggers need refreshing (detected via SCB counters), reload them.
-3. Clear the subscriber's poll trigger.
+3. Clear the subscriber's poll trigger unless `ClearTrigger::kNoClearTrigger` was passed.
 4. **Slot selection:**
    - `kReadNext`: Unreliable subscribers normally pop their per-subscriber
      queue, carrying the queued `(slot_id, ordinal, vchan_id)` generation

@@ -32,3 +32,13 @@ pub enum ReadMode {
     ReadNext,
     ReadNewest,
 }
+
+/// Controls whether `read_message` consumes the subscriber trigger fd
+/// (eventfd or pipe). `ClearTrigger` is the default and matches existing
+/// `read_message` behavior. `NoClearTrigger` leaves the fd unread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClearTrigger {
+    #[default]
+    ClearTrigger,
+    NoClearTrigger,
+}

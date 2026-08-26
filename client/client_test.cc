@@ -3159,6 +3159,38 @@ TEST_F(ClientTest, PublishSingleMessagePollAndReadSubscriberFirst) {
   ASSERT_EQ(0, msg->length);
 }
 
+TEST_F(ClientTest, ReadMessageNoClearTriggerLeavesEventFdReadable) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber("no_clear_trigger");
+  ASSERT_OK(sub);
+  absl::StatusOr<Publisher> pub =
+      pub_client.CreatePublisher("no_clear_trigger", 256, 10);
+  ASSERT_OK(pub);
+
+  struct pollfd fd = sub->GetPollFd();
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "foobar", 6);
+  ASSERT_OK(pub->PublishMessage(6));
+
+  ASSERT_EQ(1, ::poll(&fd, 1, 1000));
+
+  absl::StatusOr<Message> msg = sub->ReadMessage(
+      subspace::ReadMode::kReadNext, subspace::ClearTrigger::kNoClearTrigger);
+  ASSERT_OK(msg);
+  ASSERT_EQ(6, msg->length);
+
+  // The trigger fd was not consumed, so poll still reports ready.
+  fd.revents = 0;
+  ASSERT_EQ(1, ::poll(&fd, 1, 0));
+}
+
 TEST_F(ClientTest, PublishSingleMessagePollAndReadAfterPlaceholderRead) {
   subspace::Client pub_client;
   subspace::Client sub_client;
