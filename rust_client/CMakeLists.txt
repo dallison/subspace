@@ -31,14 +31,21 @@ add_custom_target(subspace_client_rust ALL
     COMMENT "Building Rust client library via Cargo"
 )
 
-# Optionally run Rust tests (cargo test) as a CTest entry.
-# These tests use the subprocess server fallback since there is no FFI linkage
-# in the Cargo build.  Build the server first so the binary is available.
-add_test(
-    NAME rust_client_test
-    COMMAND ${CARGO_EXECUTABLE} test -- --test-threads=1
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-)
-set_tests_properties(rust_client_test PROPERTIES
-    ENVIRONMENT "PATH=$<TARGET_FILE_DIR:subspace_server>:$ENV{PATH}"
-)
+# The Rust client opens named /dev/shm buffers and cannot consume buffers
+# created by a server using the anonymous memfd backend. This mirrors the Bazel
+# memfd job, which excludes the Rust tests for the same reason.
+if(SUBSPACE_LINUX_USE_MEMFD AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
+    message(STATUS "Skipping Rust client tests with the memfd server backend")
+else()
+    # These tests use the subprocess server fallback since there is no FFI
+    # linkage in the Cargo build. Build the server first so the binary is
+    # available.
+    add_test(
+        NAME rust_client_test
+        COMMAND ${CARGO_EXECUTABLE} test -- --test-threads=1
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    set_tests_properties(rust_client_test PROPERTIES
+        ENVIRONMENT "PATH=$<TARGET_FILE_DIR:subspace_server>:$ENV{PATH}"
+    )
+endif()
