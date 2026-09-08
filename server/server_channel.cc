@@ -364,6 +364,10 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
   ccb_->ordinals.Init(initial_ordinal);
 
   new (&ccb_->subscribers) AtomicBitSet<kMaxSlotOwners>();
+  // Load-bearing, exactly as for `subscribers`: AtomicBitSet keeps a runtime
+  // num_bits_, and an unconstructed raw-shm member traverses zero words
+  // (writes land, reads see nothing).
+  new (&ccb_->reliable_subscribers) AtomicBitSet<kMaxSlotOwners>();
   auto *queue_index =
       new (GetAvailableSlotQueueIndexAddress()) AvailableSlotQueueIndex;
   queue_index->next_offset.store(0, std::memory_order_relaxed);
@@ -957,6 +961,9 @@ void ServerChannel::CleanupSlots(int owner, bool reliable, bool is_pub,
   }
 
   ccb_->subscribers.ClearSeqCst(owner);
+  // A dead reliable subscriber must stop gating FindFreeSlotReliable, or its
+  // permanently-pending slots would block every reliable publisher forever.
+  ccb_->reliable_subscribers.ClearSeqCst(owner);
   RetireSubscriberQueue(owner);
 
   Channel::CleanupSlots(owner, reliable, is_pub, vchan_id);
@@ -1014,7 +1021,7 @@ std::vector<std::string> ServerChannel::RegisterExistingSubscribers() {
           id, Name(), sub->SubscriberQueueSize(), status.ToString()));
     }
     RegisterSubscriber(id, GetVirtualChannelId(),
-                       /*is_new=*/!was_registered);
+                       /*is_new=*/!was_registered, sub->IsReliable());
   }
   return warnings;
 }

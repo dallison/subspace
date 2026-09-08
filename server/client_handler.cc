@@ -969,7 +969,7 @@ void ClientHandler::HandleCreateSubscriber(
   }
 
   channel->RegisterSubscriber(sub->GetId(), channel->GetVirtualChannelId(),
-                              req.subscriber_id() == -1);
+                              req.subscriber_id() == -1, req.is_reliable());
   if (req.telemetry() && req.subscriber_id() == -1) {
     server_->TelemetrySubscriberAdded(channel);
   }

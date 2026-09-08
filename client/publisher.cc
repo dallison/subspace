@@ -552,6 +552,34 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
            kMessageSeenByReliable) == 0) {
         break;
       }
+      // Don't go past a slot still undelivered to any RELIABLE subscriber.
+      // kMessageSeenByReliable is set by the FIRST reliable subscriber to
+      // read the slot, and a reliable subscriber's ref only covers the slot
+      // it is currently reading — so with two or more reliable subscribers,
+      // a slower one's unread backlog (seen by a faster one; zero refs while
+      // the slow one sits between messages) would otherwise be reclaimed
+      // here and its messages silently lost. The per-subscriber
+      // available-slot bitsets are the authoritative pending state: set at
+      // publication, cleared when that subscriber claims the slot (or
+      // deliberately skips it via kReadNewest). Activation messages are
+      // exempt: subscribers skip them without claiming, so their delivery
+      // bits can remain set forever, and reclaiming them loses no data.
+      // Only the ring-full slow path reaches this scan, so the traverse is
+      // off the hot path.
+      if (s.ordinal != 0 &&
+          (s.slot->flags.load(std::memory_order_relaxed) &
+           kMessageIsActivation) == 0) {
+        bool pending_for_reliable = false;
+        ccb_->reliable_subscribers.Traverse(
+            [this, &s, &pending_for_reliable](int sub_id) {
+              if (GetAvailableSlots(sub_id).IsSet(s.slot->id)) {
+                pending_for_reliable = true;
+              }
+            });
+        if (pending_for_reliable) {
+          break;
+        }
+      }
       // If the refs have no references we can claim it.
       if ((refs & kRefsMask) == 0) {
         slot = s.slot;

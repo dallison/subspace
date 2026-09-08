@@ -383,8 +383,12 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
     }
   } else {
     // Subscriber.
-    // Remove the subscriber from the subscriber bitset.
+    // Remove the subscriber from the subscriber bitsets. Clearing the
+    // reliable bit matters: a dead reliable subscriber must stop gating
+    // FindFreeSlotReliable, or its permanently-pending slots would block
+    // every reliable publisher on the channel forever.
     ccb_->subscribers.Clear(owner);
+    ccb_->reliable_subscribers.Clear(owner);
     ccb_->num_subs.RemoveSubscriber(vchan_id);
 
     InPlaceAtomicBitset &available = GetAvailableSlots(owner);

@@ -19,6 +19,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <thread>
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
@@ -3587,6 +3588,148 @@ TEST_F(ClientTest, ReliablePublisherDoesNotBlockOnUnreliableSubscriber) {
     absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
     ASSERT_OK(pub_status);
   }
+}
+
+TEST_F(ClientTest, ReliableChannelIsLosslessForEveryReliableSubscriber) {
+  subspace::Client client;
+  InitClient(client);
+
+  constexpr int kNumSlots = 5;
+  absl::StatusOr<Publisher> pub = client.CreatePublisher(
+      "rel_multi_sub", 32, kNumSlots,
+      subspace::PublisherOptions().SetReliable(true));
+  ASSERT_OK(pub);
+  absl::StatusOr<Subscriber> fast_sub = client.CreateSubscriber(
+      "rel_multi_sub", subspace::SubscriberOptions().SetReliable(true));
+  ASSERT_OK(fast_sub);
+  absl::StatusOr<Subscriber> slow_sub = client.CreateSubscriber(
+      "rel_multi_sub", subspace::SubscriberOptions().SetReliable(true));
+  ASSERT_OK(slow_sub);
+
+  // Publish sequenced messages as fast as the channel allows while fast_sub
+  // consumes each one immediately (setting kMessageSeenByReliable) and
+  // slow_sub reads nothing. slow_sub holds no slot references — a reliable
+  // subscriber only holds a reference while it is reading — so its entire
+  // unread backlog is protected only by the per-subscriber available-slot
+  // bookkeeping. Without that protection the publisher reclaims the oldest
+  // seen slot and slow_sub silently loses messages.
+  int published = 0;
+  for (int i = 0; i < kNumSlots * 3; i++) {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_OK(buffer);
+    if (*buffer == nullptr) {
+      break; // Backpressure from slow_sub's unread backlog.
+    }
+    uint64_t seq = static_cast<uint64_t>(published);
+    memcpy(*buffer, &seq, sizeof(seq));
+    ASSERT_OK(pub->PublishMessage(sizeof(seq)));
+    published++;
+
+    // fast_sub drains everything so every published slot is seen by a
+    // reliable subscriber and carries no references from fast_sub (reading
+    // the next message releases the previous slot).
+    for (;;) {
+      absl::StatusOr<Message> msg = fast_sub->ReadMessage();
+      ASSERT_OK(msg);
+      if (msg->length == 0) {
+        break;
+      }
+    }
+  }
+
+  // The ring must fill: slow_sub has consumed nothing, so the publisher may
+  // not make unbounded progress by cannibalizing its backlog.
+  ASSERT_LE(published, kNumSlots)
+      << "publisher reclaimed slots still unread by a reliable subscriber";
+  ASSERT_GT(published, 0);
+
+  // slow_sub must now receive every message, in order — nothing reclaimed.
+  for (int i = 0; i < published; i++) {
+    absl::StatusOr<Message> msg = slow_sub->ReadMessage();
+    ASSERT_OK(msg);
+    ASSERT_EQ(sizeof(uint64_t), msg->length) << "message " << i;
+    uint64_t seq;
+    memcpy(&seq, msg->buffer, sizeof(seq));
+    ASSERT_EQ(static_cast<uint64_t>(i), seq)
+        << "reliable subscriber lost message(s)";
+  }
+
+  // With slow_sub caught up (its final ReadMessage released the previous
+  // slot; one more read returns nothing and releases the last), the
+  // publisher can make progress again.
+  {
+    absl::StatusOr<Message> msg = slow_sub->ReadMessage();
+    ASSERT_OK(msg);
+    ASSERT_EQ(0, msg->length);
+  }
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  ASSERT_NE(nullptr, *buffer) << "publisher still blocked after both "
+                                 "reliable subscribers consumed everything";
+  memcpy(*buffer, "done", 4);
+  ASSERT_OK(pub->PublishMessage(4));
+}
+
+TEST_F(ClientTest, ReliablePublisherUnblocksWhenLaggingSubscriberUnsubscribes) {
+  subspace::Client client;
+  InitClient(client);
+
+  constexpr int kNumSlots = 5;
+  absl::StatusOr<Publisher> pub = client.CreatePublisher(
+      "rel_multi_sub_unsub", 32, kNumSlots,
+      subspace::PublisherOptions().SetReliable(true));
+  ASSERT_OK(pub);
+  absl::StatusOr<Subscriber> fast_sub = client.CreateSubscriber(
+      "rel_multi_sub_unsub", subspace::SubscriberOptions().SetReliable(true));
+  ASSERT_OK(fast_sub);
+
+  int published = 0;
+  {
+    // A reliable subscriber that never reads gates the publisher once the
+    // ring fills...
+    absl::StatusOr<Subscriber> slow_sub = client.CreateSubscriber(
+        "rel_multi_sub_unsub", subspace::SubscriberOptions().SetReliable(true));
+    ASSERT_OK(slow_sub);
+
+    for (int i = 0; i < kNumSlots * 3; i++) {
+      absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+      ASSERT_OK(buffer);
+      if (*buffer == nullptr) {
+        break;
+      }
+      memcpy(*buffer, "foobar", 6);
+      ASSERT_OK(pub->PublishMessage(6));
+      published++;
+      for (;;) {
+        absl::StatusOr<Message> msg = fast_sub->ReadMessage();
+        ASSERT_OK(msg);
+        if (msg->length == 0) {
+          break;
+        }
+      }
+    }
+    ASSERT_LE(published, kNumSlots);
+
+    // ... and its departure must release that gate (otherwise a dead
+    // subscriber blocks the channel forever).
+  }
+
+  // The unsubscribe is processed by the server; poll briefly for the
+  // publisher to unblock.
+  bool unblocked = false;
+  for (int i = 0; i < 500; i++) {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_OK(buffer);
+    if (*buffer != nullptr) {
+      memcpy(*buffer, "foobar", 6);
+      ASSERT_OK(pub->PublishMessage(6));
+      unblocked = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_TRUE(unblocked)
+      << "publisher still gated by an unsubscribed reliable subscriber";
 }
 
 TEST_F(ClientTest, ReliablePublisher2) {

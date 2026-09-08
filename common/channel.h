@@ -134,7 +134,8 @@ constexpr int kDefaultSubscriberQueueSize = 16;
 constexpr uint64_t kDefaultSubscriberQueueArenaSize = 64'000;
 constexpr size_t kDefaultMaxAvailableSlotQueueCapacity = 1024;
 constexpr size_t kMaxSlotQueueCasAttempts = 64;
-constexpr uint32_t kChannelControlBlockVersion = 5;
+// Version 6: added the reliable_subscribers bitset to ChannelControlBlock.
+constexpr uint32_t kChannelControlBlockVersion = 6;
 constexpr size_t kMaxChannelControlBlockSize = 1ULL << 30;
 
 // This limits the number of virtual channels.  Each virtual channel
@@ -733,6 +734,19 @@ struct ChannelControlBlock {          // a.k.a CCB
   std::atomic<int> num_buffers; // Size of buffers array in shared memory.
   AtomicBitSet<kMaxSlotOwners> subscribers; // One bit per subscriber.
 
+  // One bit per RELIABLE subscriber (a subset of `subscribers`). A reliable
+  // subscriber only holds a slot reference while it is reading a message; its
+  // unread backlog is recorded solely in its per-subscriber available-slots
+  // bitset. FindFreeSlotReliable consults this set so that backlog cannot be
+  // reclaimed: kMessageSeenByReliable is set by the FIRST reliable subscriber
+  // to read a slot, so with two or more reliable subscribers a slower one's
+  // unread backlog (seen by a faster one, zero refs while the slow one is
+  // between messages) would otherwise be reclaimed and its messages silently
+  // lost. Placement-initialized at channel creation next to `subscribers`
+  // (AtomicBitSet carries a runtime num_bits_; an unconstructed raw-shm
+  // member traverses zero words).
+  AtomicBitSet<kMaxSlotOwners> reliable_subscribers;
+
   // Given a subscriber ID, what is the vchan ID associated with it.
   std::array<int16_t, kMaxSlotOwners> sub_vchan_ids;
 
@@ -935,8 +949,18 @@ public:
   std::string BufferSharedMemoryName(uint64_t session_id,
                                      int buffer_index) const;
 
-  void RegisterSubscriber(int sub_id, int vchan_id, bool is_new) {
+  void RegisterSubscriber(int sub_id, int vchan_id, bool is_new,
+                          bool reliable) {
     ccb_->sub_vchan_ids[sub_id] = vchan_id;
+    // Record reliability before the subscriber becomes visible below, so a
+    // publisher can never observe a registered reliable subscriber without
+    // its reliable bit. Subscriber ids are recycled: clear stale reliability
+    // rather than inheriting a previous owner's.
+    if (reliable) {
+      ccb_->reliable_subscribers.SetSeqCst(sub_id);
+    } else {
+      ccb_->reliable_subscribers.ClearSeqCst(sub_id);
+    }
     const bool was_registered = ccb_->subscribers.IsSet(sub_id);
     const bool register_membership = is_new || !was_registered;
     SubscriberCounter num_subs;
