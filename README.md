@@ -45,6 +45,7 @@ See the file docs/subspace.pdf for full documentation.  Additional documentation
 - [Channel Telemetry](docs/channel-telemetry.md)
 - [Split Buffers](docs/split-buffers.md)
 - [Publisher Buffer Leases](docs/publisher-buffer-leases.md)
+- [Reliable Messages](docs/reliable-messages.md)
 - [C Client API](docs/c-client.md)
 - [Client Architecture](docs/client-architecture.md)
 - [Server Architecture](docs/server-architecture.md)

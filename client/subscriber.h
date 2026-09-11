@@ -152,8 +152,14 @@ public:
 
   std::shared_ptr<ActiveMessage> GetActiveMessage() { return active_message_; }
 
+  // A reliable subscriber must pin its current message so that the publisher
+  // cannot recycle the slot while the subscriber is still using it.
+  bool RetainsActiveMessage() const {
+    return options_.keep_active_message || options_.reliable;
+  }
+
   void ClearActiveMessage() {
-    if (!options_.keep_active_message) {
+    if (!RetainsActiveMessage()) {
       return;
     }
     if (active_message_ != nullptr) {
@@ -169,7 +175,7 @@ public:
                                                   bool checksum_error) {
     std::shared_ptr<ActiveMessage> &m = active_messages_[slot->id];
     m->Set(len, buf, ord, ts, vchan_id, is_activation, checksum_error);
-    if (options_.keep_active_message) {
+    if (RetainsActiveMessage()) {
       active_message_ = m;
       m->IncRef();
     }
@@ -195,8 +201,10 @@ public:
     if (slot->ordinal.load(std::memory_order_relaxed) != ordinal) {
       return nullptr;
     }
-    // If we are still holding on to the same active message, return it.
-    if (options_.keep_active_message && active_message_ != nullptr &&
+    // If we are still holding on to the same active message, return it.  Going
+    // through Set() again would count the slot a second time against
+    // max_active_messages without a matching release.
+    if (RetainsActiveMessage() && active_message_ != nullptr &&
         active_message_->slot == slot && active_message_->ordinal == ordinal) {
       return active_message_;
     }
