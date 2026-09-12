@@ -3560,6 +3560,94 @@ TEST_F(ClientTest, ReliablePublisher1) {
   machine.Run();
 }
 
+TEST_F(ClientTest, TwoReliableSubscribersReceiveEveryMessage) {
+  subspace::Client client;
+  InitClient(client);
+
+  auto pub = client.CreatePublisher("two_reliable_subscribers",
+                                    subspace::PublisherOptions()
+                                        .SetSlotSize(sizeof(uint64_t))
+                                        .SetNumSlots(2)
+                                        .SetReliable(true));
+  ASSERT_OK(pub);
+  auto sub1 =
+      client.CreateSubscriber("two_reliable_subscribers",
+                              subspace::SubscriberOptions().SetReliable(true));
+  ASSERT_OK(sub1);
+  auto sub2 =
+      client.CreateSubscriber("two_reliable_subscribers",
+                              subspace::SubscriberOptions().SetReliable(true));
+  ASSERT_OK(sub2);
+
+  auto publish_sequence = [&pub](uint64_t sequence) -> absl::Status {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer(sizeof(sequence));
+    if (!buffer.ok()) {
+      return buffer.status();
+    }
+    if (*buffer == nullptr) {
+      return absl::UnavailableError("No reliable publisher slot available");
+    }
+    std::memcpy(*buffer, &sequence, sizeof(sequence));
+    return pub->PublishMessage(sizeof(sequence)).status();
+  };
+  auto read_sequence = [](Subscriber &sub) -> absl::StatusOr<uint64_t> {
+    absl::StatusOr<Message> message = sub.ReadMessage();
+    if (!message.ok()) {
+      return message.status();
+    }
+    if (message->length != sizeof(uint64_t)) {
+      return absl::DataLossError("Unexpected reliable message size");
+    }
+    uint64_t sequence = 0;
+    std::memcpy(&sequence, message->buffer, sizeof(sequence));
+    return sequence;
+  };
+  auto expect_publisher_blocked = [&pub]() {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_OK(buffer);
+    if (*buffer != nullptr) {
+      pub->CancelPublish();
+    }
+    ASSERT_EQ(nullptr, *buffer);
+  };
+
+  constexpr uint64_t kNumMessages = 32;
+  std::array<uint64_t, 2> received = {0, 0};
+
+  ASSERT_OK(publish_sequence(0));
+  auto sequence1 = read_sequence(*sub1);
+  ASSERT_OK(sequence1);
+  EXPECT_EQ(0, *sequence1);
+  ++received[0];
+  auto sequence2 = read_sequence(*sub2);
+  ASSERT_OK(sequence2);
+  EXPECT_EQ(0, *sequence2);
+  ++received[1];
+
+  for (uint64_t expected = 1; expected < kNumMessages; ++expected) {
+    ASSERT_OK(publish_sequence(expected));
+
+    // The previous active message occupies one slot and the unread message
+    // occupies the other, so the publisher must wait for both subscribers.
+    expect_publisher_blocked();
+
+    sequence1 = read_sequence(*sub1);
+    ASSERT_OK(sequence1);
+    EXPECT_EQ(expected, *sequence1);
+    ++received[0];
+
+    expect_publisher_blocked();
+
+    sequence2 = read_sequence(*sub2);
+    ASSERT_OK(sequence2);
+    EXPECT_EQ(expected, *sequence2);
+    ++received[1];
+  }
+
+  EXPECT_EQ(kNumMessages, received[0]);
+  EXPECT_EQ(kNumMessages, received[1]);
+}
+
 TEST_F(ClientTest, ReliablePublisherDoesNotBlockOnUnreliableSubscriber) {
   subspace::Client client;
   InitClient(client);
