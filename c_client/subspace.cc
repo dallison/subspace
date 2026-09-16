@@ -557,8 +557,8 @@ SubspaceSubscriberOptions subspace_subscriber_options_default(void) {
   return options;
 }
 
-SubspacePublisherOptions subspace_publisher_options_default(int64_t slot_size,
-                                                            int num_slots) {
+SubspacePublisherOptions
+subspace_publisher_options_default(SubspaceSlotSize slot_size, int num_slots) {
   SubspacePublisherOptions options = {
       .slot_size = slot_size,
       .num_slots = num_slots,
@@ -1660,7 +1660,7 @@ bool subspace_publisher_uses_split_buffers(SubspacePublisher publisher) {
          (*PublisherPtr(publisher))->UsesSplitBuffers();
 }
 
-int64_t subspace_get_publisher_slot_size(SubspacePublisher publisher) {
+SubspaceSlotSize subspace_get_publisher_slot_size(SubspacePublisher publisher) {
   if (publisher.publisher == nullptr) {
     return 0;
   }
@@ -1821,7 +1821,8 @@ int subspace_get_subscriber_fd(SubspaceSubscriber subscriber) {
   return (*sub_ptr)->GetFileDescriptor().Fd();
 }
 
-int64_t subspace_get_subscriber_slot_size(SubspaceSubscriber subscriber) {
+SubspaceSlotSize
+subspace_get_subscriber_slot_size(SubspaceSubscriber subscriber) {
   if (subscriber.subscriber == nullptr) {
     return 0;
   }

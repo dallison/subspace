@@ -28,6 +28,8 @@
 #include <mutex>
 #include <optional>
 #include <sys/resource.h>
+#include <type_traits>
+#include <utility>
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
 #include <sys/syscall.h>
 #ifndef MFD_CLOEXEC
@@ -92,7 +94,21 @@ uint64_t ExpectedSplitBufferVirtualMemoryUsage(int num_slots,
          AlignPage(slot_size) * static_cast<uint64_t>(num_slots);
 }
 
-subspace::PublisherOptions PubOpts(int64_t slot_size = 0,
+// The client API slot size width is selected by SUBSPACE_64BIT_SLOT_SIZE, so
+// check that the macro actually reaches the API types.
+#if defined(SUBSPACE_64BIT_SLOT_SIZE)
+static_assert(std::is_same_v<subspace::SlotSizeType, int64_t>);
+#else
+static_assert(std::is_same_v<subspace::SlotSizeType, int32_t>);
+#endif
+static_assert(std::is_same_v<decltype(std::declval<subspace::PublisherOptions>()
+                                          .SlotSize()),
+                             subspace::SlotSizeType>);
+static_assert(
+    std::is_same_v<decltype(std::declval<subspace::Publisher>().SlotSize()),
+                   subspace::SlotSizeType>);
+
+subspace::PublisherOptions PubOpts(subspace::SlotSizeType slot_size = 0,
                                    int32_t num_slots = 0) {
   return subspace::PublisherOptions().SetSlotSize(slot_size).SetNumSlots(
       num_slots);
@@ -257,7 +273,8 @@ TEST_F(ClientTest, Resize1) {
   ASSERT_EQ(512, pub->SlotSize());
 }
 
-// Slot sizes are 64 bit, so a channel can have slots that do not fit in an
+#if defined(SUBSPACE_64BIT_SLOT_SIZE)
+// With the 64 bit slot size API a channel can have slots that do not fit in an
 // int32_t.  The shared memory is sparse, so only the pages this test actually
 // touches are committed.
 TEST_F(ClientTest, SlotSizeLargerThanInt32) {
@@ -311,6 +328,7 @@ TEST_F(ClientTest, SlotSizeLargerThanInt32) {
                         total_drops);
   EXPECT_EQ(static_cast<uint64_t>(kSlotSize), max_message_size);
 }
+#endif // SUBSPACE_64BIT_SLOT_SIZE
 
 TEST_F(ClientTest, AttachingPublisherPreservesResizedSlotSize) {
   subspace::Client client1;

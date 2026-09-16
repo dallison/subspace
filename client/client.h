@@ -924,7 +924,7 @@ public:
   // In thread-safe mode, this will hold a lock on the client until you publish
   // the message.  If you don't want to publish the message, you must cancel the
   // publish using CancelPublish.  This will release the lock.
-  absl::StatusOr<void *> GetMessageBuffer(int64_t max_size = -1,
+  absl::StatusOr<void *> GetMessageBuffer(SlotSizeType max_size = -1,
                                           bool lock = true) {
     return client_->GetMessageBuffer(impl_.get(), max_size, lock);
   }
@@ -932,7 +932,7 @@ public:
   // Get the messsage buffer as a span.  Returns an empty span if there is no
   // buffer available.  See GetMessageBuffer for details of
   absl::StatusOr<absl::Span<std::byte>>
-  GetMessageBufferSpan(int64_t max_size = -1, bool lock = true) {
+  GetMessageBufferSpan(SlotSizeType max_size = -1, bool lock = true) {
     return client_->GetMessageBufferSpan(impl_.get(), max_size, lock);
   }
 
@@ -1113,7 +1113,9 @@ public:
   // code needs to identify/map/free that slot.
   bool UsesSplitBuffers() const { return impl_->UsesSplitBuffers(); }
 
-  int64_t SlotSize() const { return impl_->SlotSize(); }
+  SlotSizeType SlotSize() const {
+    return static_cast<SlotSizeType>(impl_->SlotSize());
+  }
   int32_t NumSlots() const { return impl_->NumSlots(); }
   int32_t SubscriberQueueSize() const { return impl_->SubscriberQueueSize(); }
   uint64_t SubscriberQueueArenaSize() const {
@@ -1191,12 +1193,14 @@ public:
   // Register a function to be called when the publisher resizes
   // the channel.
   absl::Status RegisterResizeCallback(
-      std::function<absl::Status(Publisher *, int64_t, int64_t)> callback) {
+      std::function<absl::Status(Publisher *, SlotSizeType, SlotSizeType)>
+          callback) {
     auto status = client_->RegisterResizeCallback(
         impl_.get(),
         [this](details::PublisherImpl *, int64_t old_size,
                int64_t new_size) -> absl::Status {
-          return resize_callback_(this, old_size, new_size);
+          return resize_callback_(this, static_cast<SlotSizeType>(old_size),
+                                  static_cast<SlotSizeType>(new_size));
         });
     if (!status.ok()) {
       return status;
@@ -1285,8 +1289,8 @@ private:
 
   std::shared_ptr<ClientImpl> client_;
   std::shared_ptr<details::PublisherImpl> impl_;
-  std::function<absl::Status(Publisher *, int64_t, int64_t)> resize_callback_ =
-      nullptr;
+  std::function<absl::Status(Publisher *, SlotSizeType, SlotSizeType)>
+      resize_callback_ = nullptr;
   std::vector<void *> address_cache_;
 };
 
@@ -1619,7 +1623,9 @@ public:
   // the payload into the subscriber process.
   bool UsesSplitBuffers() const { return impl_->UsesSplitBuffers(); }
 
-  int64_t SlotSize() const { return impl_->SlotSize(); }
+  SlotSizeType SlotSize() const {
+    return static_cast<SlotSizeType>(impl_->SlotSize());
+  }
   int32_t NumSlots() const { return impl_->NumSlots(); }
   int32_t SubscriberQueueSize() const { return impl_->SubscriberQueueSize(); }
 
@@ -1811,7 +1817,7 @@ public:
   // it will be created with num_slots slots, each of which is slot_size
   // bytes long.
   absl::StatusOr<Publisher>
-  CreatePublisher(const std::string &channel_name, int64_t slot_size,
+  CreatePublisher(const std::string &channel_name, SlotSizeType slot_size,
                   int num_slots,
                   const PublisherOptions &opts = PublisherOptions()) {
     return impl_->CreatePublisher(channel_name, slot_size, num_slots, opts);

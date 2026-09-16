@@ -59,6 +59,23 @@ namespace subspace {
 #endif
 #endif
 
+// Slot sizes are 64 bit internally: the wire protocol, the shared memory
+// layout and all of the buffer arithmetic use 64 bit values regardless of how
+// the client is built.  The C and C++ client APIs, however, expose a 32 bit
+// slot size by default so that code written against the older API keeps
+// compiling.  Define SUBSPACE_64BIT_SLOT_SIZE to widen the API types and allow
+// slots larger than 2GB to be requested and reported.  See //:slot_size_64
+// (Bazel) and the SUBSPACE_64BIT_SLOT_SIZE CMake option.
+//
+// The two builds interoperate: a client built without the macro can attach to
+// a channel whose slots are larger than 2GB, but its API will report a
+// truncated slot size, so use the macro on both sides if you need large slots.
+#if defined(SUBSPACE_64BIT_SLOT_SIZE)
+using SlotSizeType = int64_t;
+#else
+using SlotSizeType = int32_t;
+#endif
+
 // Flag for flags field in MessagePrefix.
 constexpr int kMessageActivate = 1;      // This is a reliable activation message.
 constexpr int kMessageBridged = 2;       // This message came from the bridge.

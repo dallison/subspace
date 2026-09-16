@@ -92,6 +92,15 @@ Then run each in a separate terminal:
  * `./bazel-bin/manual_tests/sub`
  * `./bazel-bin/manual_tests/pub`
 
+### Bazel Build Configs
+
+The `.bazelrc` file defines configs that select build-time options:
+
+| Config | Effect |
+|---|---|
+| `--config=linux_memfd` | On Linux, back shared memory with anonymous `memfd_create` objects instead of named `/dev/shm` ones. |
+| `--config=slot_size_64` | Expose 64 bit slot sizes in the C and C++ client APIs, allowing slots larger than 2GB. |
+
 ### Running Tests with Bazel
 
 You can run tests directly using `bazel run` or `bazel test`. The `bazel run` command will build and execute the test in one step, while `bazel test` runs tests in test mode (useful for CI/CD).
@@ -212,6 +221,14 @@ You can customize the build with CMake options:
 cmake -DCMAKE_BUILD_TYPE=Release ..
 make -j$(nproc)
 ```
+
+| Option | Default | Effect |
+|---|---|---|
+| `SUBSPACE_LINUX_USE_MEMFD` | `OFF` | On Linux, back shared memory with anonymous `memfd_create` objects instead of named `/dev/shm` ones. |
+| `SUBSPACE_64BIT_SLOT_SIZE` | `OFF` | Expose 64 bit slot sizes in the C and C++ client APIs, allowing slots larger than 2GB. |
+
+Both options change struct layouts or function signatures, so they must be set
+consistently for the library and everything that includes its headers.
 
 ### Running Tests
 
@@ -361,7 +378,7 @@ public:
     // Create a publisher for a channel
     absl::StatusOr<Publisher>
     CreatePublisher(const std::string &channel_name, 
-                    int64_t slot_size,
+                    SlotSizeType slot_size,
                     int num_slots,
                     const PublisherOptions &opts = PublisherOptions());
 
@@ -581,8 +598,8 @@ for lifecycle, retirement, capacity, and C API details.
 class Publisher {
 public:
     // Get a message buffer for writing
-    absl::StatusOr<void*> GetMessageBuffer(int64_t max_size = -1, bool lock = true);
-    absl::StatusOr<absl::Span<std::byte>> GetMessageBufferSpan(int64_t max_size = -1, bool lock = true);
+    absl::StatusOr<void*> GetMessageBuffer(SlotSizeType max_size = -1, bool lock = true);
+    absl::StatusOr<absl::Span<std::byte>> GetMessageBufferSpan(SlotSizeType max_size = -1, bool lock = true);
     
     // Publish a message
     absl::StatusOr<const Message> PublishMessage(int64_t message_size);
@@ -617,7 +634,7 @@ public:
     bool IsReliable() const;
     bool IsLocal() const;
     bool IsFixedSize() const;
-    int64_t SlotSize() const;
+    SlotSizeType SlotSize() const;
     int32_t NumSlots() const;
     
     // Statistics
@@ -817,7 +834,7 @@ public:
     std::string Name() const;
     std::string Type() const;
     bool IsReliable() const;
-    int64_t SlotSize() const;
+    SlotSizeType SlotSize() const;
     int32_t NumSlots() const;
     int64_t GetCurrentOrdinal() const;
     
@@ -998,9 +1015,16 @@ auto pub = client->CreatePublisher("channel",
 
 ### PublisherOptions Fields and Methods
 
+`subspace::SlotSizeType` is `int32_t` by default and `int64_t` when the library
+and its callers are built with `SUBSPACE_64BIT_SLOT_SIZE` (Bazel
+`--config=slot_size_64`, CMake `-DSUBSPACE_64BIT_SLOT_SIZE=ON`). Slot sizes are
+64 bit internally in every build; the macro only widens the C and C++ API so
+that slots larger than 2GB can be requested and reported. The C API has the
+equivalent `SubspaceSlotSize` typedef.
+
 | Field/Method | Type | Default | Description |
 |--------------|------|---------|-------------|
-| `slot_size` / `SetSlotSize()` | `int64_t` | `0` | Size of each message slot in bytes. Must be set if using options-only CreatePublisher. |
+| `slot_size` / `SetSlotSize()` | `SlotSizeType` | `0` | Size of each message slot in bytes. Must be set if using options-only CreatePublisher. |
 | `num_slots` / `SetNumSlots()` | `int32_t` | `0` | Number of slots in the channel. Must be set if using options-only CreatePublisher. |
 | `reliable` / `SetReliable()` | `bool` | `false` | If true, reliable delivery (see Reliable Channels section). |
 | `local` / `SetLocal()` | `bool` | `false` | If true, messages are only visible on the local machine (not bridged). |
@@ -1018,7 +1042,7 @@ auto pub = client->CreatePublisher("channel",
 | `metadata_size` / `SetMetadataSize()` | `int32_t` | `0` | Number of bytes of user metadata stored immediately after the checksum area. Accessible via `Publisher::GetMetadata()` / `Subscriber::GetMetadata()`. |
 
 **Getter Methods:**
-- `int64_t SlotSize() const`
+- `SlotSizeType SlotSize() const`
 - `int32_t NumSlots() const`
 - `bool IsReliable() const`
 - `bool IsLocal() const`
@@ -1703,7 +1727,7 @@ This is a quick reference for the most common calls. See
 - `bool subspace_remove_client(SubspaceClient *client)`
 
 **Publisher Functions:**
-- `SubspacePublisherOptions subspace_publisher_options_default(int64_t slot_size, int num_slots)`
+- `SubspacePublisherOptions subspace_publisher_options_default(SubspaceSlotSize slot_size, int num_slots)`
 - `SubspacePublisher subspace_create_publisher(SubspaceClient client, const char *channel_name, SubspacePublisherOptions options)`
 - `SubspaceMessageBuffer subspace_get_message_buffer(SubspacePublisher publisher, size_t max_size)`
 - `const SubspaceMessage subspace_publish_message(SubspacePublisher publisher, size_t messageSize)`
@@ -1741,7 +1765,7 @@ This is a quick reference for the most common calls. See
 - `int subspace_wait_for_subscriber_with_fd(SubspaceSubscriber subscriber, int fd)`
 - `struct pollfd subspace_get_subscriber_poll_fd(SubspaceSubscriber subscriber)`
 - `int subspace_get_subscriber_fd(SubspaceSubscriber subscriber)`
-- `int64_t subspace_get_subscriber_slot_size(SubspaceSubscriber subscriber)`
+- `SubspaceSlotSize subspace_get_subscriber_slot_size(SubspaceSubscriber subscriber)`
 - `int subspace_get_subscriber_num_slots(SubspaceSubscriber subscriber)`
 - `SubspaceTypeInfo subspace_get_subscriber_type(SubspaceSubscriber subscriber)`
 - `bool subspace_subscriber_uses_split_buffers(SubspaceSubscriber subscriber)`

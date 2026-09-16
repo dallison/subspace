@@ -23,6 +23,12 @@ build:tsan --linkopt -fsanitize=thread
 # unaffected; macOS/QNX (POSIX) are unaffected.
 build:linux_memfd --copt=-DSUBSPACE_LINUX_USE_MEMFD
 
+# Widen the slot size in the C and C++ client APIs from 32 to 64 bits, allowing
+# slots larger than 2GB.  Build with --config=slot_size_64.  Slot sizes are
+# always 64 bit internally; this only changes the API types, so it is a global
+# copt to keep every translation unit agreeing on the signatures.
+build:slot_size_64 --copt=-DSUBSPACE_64BIT_SLOT_SIZE
+
 # Enable the built-in platform-specific configuration feature
 common --enable_platform_specific_config
 

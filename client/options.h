@@ -36,12 +36,12 @@ class Subscriber;
 
 // Options when creating a publisher.
 struct PublisherOptions {
-  int64_t SlotSize() const { return slot_size; }
+  SlotSizeType SlotSize() const { return slot_size; }
   int32_t NumSlots() const { return num_slots; }
   uint64_t SubscriberQueueArenaSize() const {
     return subscriber_queue_arena_size;
   }
-  PublisherOptions &SetSlotSize(int64_t size) {
+  PublisherOptions &SetSlotSize(SlotSizeType size) {
     slot_size = size;
     return *this;
   }
@@ -250,7 +250,7 @@ struct PublisherOptions {
 
   // If you use the new CreatePublisher API, set the slot size and num slots in
   // here.
-  int64_t slot_size = 0;
+  SlotSizeType slot_size = 0;
   int32_t num_slots = 0;
   uint64_t subscriber_queue_arena_size = 0;
 
