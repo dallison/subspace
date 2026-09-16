@@ -248,6 +248,18 @@ jobs:
             --test_output=errors \
             -- //...
 
+      # The test above is the only coverage of a slot larger than 2GB, and it
+      # skips itself when the machine cannot allocate one.  Run it again with
+      # its output shown so the log records whether it really ran.
+      - name: Report the large slot test result (64 bit slot size API)
+        run: |
+          bazel test \
+            --config=slot_size_64 \
+            --test_output=all \
+            --nocache_test_results \
+            --test_filter=ClientTest.SlotSizeLargerThanInt32 \
+            -- //client:client_test
+
       - name: Upload slot-size-64 Bazel test logs
         uses: actions/upload-artifact@v7
         if: failure() # Upload artifacts only if a step failed
