@@ -89,11 +89,12 @@ Important publisher options:
 
 | Field | Purpose |
 | --- | --- |
-| `slot_size`, `num_slots` | Initial payload slot size and fixed slot count. `slot_size` is a `SubspaceSlotSize`, which is `int32_t` unless the library and your code are both built with `SUBSPACE_64BIT_SLOT_SIZE`; see [64-bit Slot Sizes](slot-sizes.md). |
+| `slot_size`, `num_slots` | Initial payload slot size and fixed slot count. `slot_size` is a `SubspaceSlotSize`, which is `int32_t` unless the library and your code are both built with `SUBSPACE_64BIT_SLOT_SIZE`; see [Slot Sizes](slot-sizes.md#64-bit-slot-sizes). |
 | `local` | Keep the channel local to this server. |
 | `reliable` | Wait for free slots instead of overwriting unread messages. |
 | `bridge`, `for_tunnel` | Mark bridge/tunnel publishers. |
 | `fixed_size` | Reject oversized messages instead of resizing. |
+| `max_slot_size` | Upper bound on how large the slots may grow, or 0 for no limit. See [Limiting the Slot Size](slot-sizes.md#limiting-the-slot-size). |
 | `type` | Opaque type string used to match publishers and subscribers. |
 | `activate` | Publish an activation message when the publisher is created. |
 | `mux`, `vchan_id` | Use a mux channel and optional virtual channel id. |

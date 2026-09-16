@@ -458,6 +458,10 @@ public:
                                            bool set_if_missing,
                                            const char *user_type);
   int32_t MaxSubscribers() const { return max_subscribers_; }
+  absl::Status ValidateOrSetMaxSlotSize(int64_t max_slot_size,
+                                        bool set_if_missing,
+                                        const char *user_type);
+  int64_t MaxSlotSize() const { return max_slot_size_; }
 
   virtual void SetSharedMemoryFds(SharedMemoryFds fds) {
     shared_memory_fds_ = std::move(fds);
@@ -530,6 +534,8 @@ protected:
   int32_t max_publishers_ = 0;
   bool max_subscribers_set_ = false;
   int32_t max_subscribers_ = 0;
+  bool max_slot_size_set_ = false;
+  int64_t max_slot_size_ = 0;
   toolbelt::Logger &logger_;
 };
 

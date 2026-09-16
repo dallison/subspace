@@ -4002,6 +4002,50 @@ fn integration_resize_multiple_expansions() {
 }
 
 #[test]
+fn integration_max_slot_size_caps_growth() {
+    let client = new_client("test_max_slot_size");
+
+    // The initial slot size may not exceed the cap.
+    let too_big = PublisherOptions::new()
+        .set_slot_size(512)
+        .set_num_slots(4)
+        .set_max_slot_size(256);
+    match client.create_publisher("rust_max_slot_initial", &too_big) {
+        Ok(_) => panic!("expected the initial slot size to be rejected"),
+        Err(e) => assert!(
+            e.to_string().contains("maximum slot size"),
+            "unexpected error: {}",
+            e
+        ),
+    }
+
+    let opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(4)
+        .set_max_slot_size(384);
+    let publisher = client.create_publisher("rust_max_slot", &opts).unwrap();
+
+    // Without the cap expand_slot_size() would double 256 to 512.
+    let (buf, cap) = publisher.get_message_buffer(300).unwrap().unwrap();
+    assert_eq!(cap, 384);
+    unsafe {
+        std::ptr::write_bytes(buf, b'x', 300);
+    }
+    // Releases the publish lock that get_message_buffer holds.
+    publisher.publish_message(300).unwrap();
+
+    // Asking for more than the cap is an error, not a resize.
+    match publisher.get_message_buffer(385) {
+        Ok(_) => panic!("expected the oversized request to be rejected"),
+        Err(e) => assert!(
+            e.to_string().contains("maximum slot size"),
+            "unexpected error: {}",
+            e
+        ),
+    }
+}
+
+#[test]
 fn integration_resize_subscriber_created_before_expansion() {
     let pub_client = new_client("test_resize_before_p");
     let sub_client = new_client("test_resize_before_s");

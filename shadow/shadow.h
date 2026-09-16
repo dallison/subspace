@@ -68,6 +68,8 @@ struct ShadowChannel {
   int max_publishers = 0;
   bool has_max_subscribers = false;
   int max_subscribers = 0;
+  bool has_max_slot_size = false;
+  int64_t max_slot_size = 0;
   bool hidden = false;
   std::string telemetry_target;
   toolbelt::FileDescriptor ccb_fd;

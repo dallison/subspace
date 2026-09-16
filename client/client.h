@@ -1105,6 +1105,11 @@ public:
   bool IsReliable() const { return impl_->IsReliable(); }
   bool IsLocal() const { return impl_->IsLocal(); }
   bool IsFixedSize() const { return impl_->IsFixedSize(); }
+  // Effective upper bound on the slot size, rounded up to the channel's
+  // alignment, or 0 if the channel is uncapped.
+  SlotSizeType MaxSlotSize() const {
+    return static_cast<SlotSizeType>(impl_->MaxSlotSize());
+  }
   bool ForTunnel() const { return impl_->ForTunnel(); }
   // True when the channel stores prefixes separately from payload slots.
   // In this mode each payload slot has an allocator-defined handle that can be

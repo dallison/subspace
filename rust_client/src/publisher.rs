@@ -23,7 +23,7 @@ use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 pub type OnSendCallback = Box<dyn Fn(*mut u8, i64) -> Result<i64> + Send + Sync>;
-pub type ResizeCallback = Box<dyn Fn(i32, i32) -> Result<()> + Send + Sync>;
+pub type ResizeCallback = Box<dyn Fn(i64, i64) -> Result<()> + Send + Sync>;
 
 pub struct PublishedMessage {
     pub new_slot: Option<usize>,

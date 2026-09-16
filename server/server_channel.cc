@@ -216,6 +216,30 @@ absl::Status ServerChannel::ValidateOrSetMaxSubscribers(
   return absl::OkStatus();
 }
 
+absl::Status ServerChannel::ValidateOrSetMaxSlotSize(int64_t max_slot_size,
+                                                     bool set_if_missing,
+                                                     const char *user_type) {
+  if (max_slot_size < 0) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Invalid max_slot_size %d for %s on channel %s: value must be "
+        "non-negative",
+        max_slot_size, user_type, Name()));
+  }
+  if (!max_slot_size_set_) {
+    if (set_if_missing || max_slot_size > 0) {
+      max_slot_size_ = max_slot_size;
+      max_slot_size_set_ = true;
+    }
+    return absl::OkStatus();
+  }
+  if (max_slot_size_ != max_slot_size) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Inconsistent max_slot_size for %s on channel %s: already %d, not %d",
+        user_type, Name(), max_slot_size_, max_slot_size));
+  }
+  return absl::OkStatus();
+}
+
 void ServerChannel::RemoveBuffer(uint64_t session_id, Server *server) {
   if (ccb_ == nullptr) {
     return;

@@ -7733,6 +7733,98 @@ TEST_F(ClientTest, ResizeFixedSizePublisherFails) {
   EXPECT_THAT(bigger.status().message(), ::testing::HasSubstr("fixed size"));
 }
 
+// A publisher whose initial slot size is already over its own cap is rejected
+// before it reaches the server.
+TEST_F(ClientTest, MaxSlotSizeRejectsInitialSlotSize) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub = client.CreatePublisher("capped_initial",
+                                    subspace::PublisherOptions()
+                                        .SetSlotSize(512)
+                                        .SetNumSlots(4)
+                                        .SetMaxSlotSize(256));
+  ASSERT_FALSE(pub.ok());
+  EXPECT_THAT(pub.status().message(),
+              ::testing::HasSubstr("maximum slot size"));
+}
+
+// Asking GetMessageBuffer() for more than the cap is an error rather than a
+// resize.
+TEST_F(ClientTest, MaxSlotSizeRejectsOversizedBuffer) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "capped_resize", subspace::PublisherOptions()
+                           .SetSlotSize(128)
+                           .SetNumSlots(4)
+                           .SetMaxSlotSize(256)));
+
+  // Growth up to the cap is still allowed.
+  [[maybe_unused]] auto ok_buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer(256));
+  EXPECT_EQ(256, pub.SlotSize());
+
+  auto too_big = pub.GetMessageBuffer(257);
+  ASSERT_FALSE(too_big.ok());
+  EXPECT_EQ(absl::StatusCode::kInvalidArgument, too_big.status().code());
+  EXPECT_THAT(too_big.status().message(),
+              ::testing::HasSubstr("maximum slot size"));
+  // The failed request must not have resized the channel.
+  EXPECT_EQ(256, pub.SlotSize());
+}
+
+// The growth multiplier would jump past the cap, so the resize is clamped to
+// the cap instead of being refused.
+TEST_F(ClientTest, MaxSlotSizeClampsGrowthToLimit) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "clamped_resize", subspace::PublisherOptions()
+                            .SetSlotSize(256)
+                            .SetNumSlots(4)
+                            .SetMaxSlotSize(384)));
+  auto sub = EVAL_AND_ASSERT_OK(client.CreateSubscriber("clamped_resize"));
+
+  // Without the cap ExpandSlotSize() would double 256 to 512.
+  auto buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer(300));
+  ASSERT_NE(nullptr, buffer);
+  EXPECT_EQ(384, pub.SlotSize());
+
+  memset(buffer, 'x', 300);
+  ASSERT_OK(pub.PublishMessage(300));
+
+  auto msg = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_EQ(300U, msg.length);
+  EXPECT_EQ(0, memcmp(msg.buffer, std::string(300, 'x').data(), 300));
+}
+
+// The cap is channel-wide policy, so publishers that disagree are rejected by
+// the server.
+TEST_F(ClientTest, MaxSlotSizeMustMatchAcrossPublishers) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  [[maybe_unused]] auto pub1 = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "shared_cap", subspace::PublisherOptions()
+                        .SetSlotSize(128)
+                        .SetNumSlots(4)
+                        .SetMaxSlotSize(256)));
+
+  auto pub2 = client.CreatePublisher("shared_cap",
+                                     subspace::PublisherOptions()
+                                         .SetSlotSize(128)
+                                         .SetNumSlots(4)
+                                         .SetMaxSlotSize(512));
+  ASSERT_FALSE(pub2.ok());
+  EXPECT_THAT(pub2.status().message(),
+              ::testing::HasSubstr("Inconsistent max_slot_size"));
+
+  // A publisher that agrees is fine.
+  [[maybe_unused]] auto pub3 = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "shared_cap", subspace::PublisherOptions()
+                        .SetSlotSize(128)
+                        .SetNumSlots(4)
+                        .SetMaxSlotSize(256)));
+}
+
 // ---------------------------------------------------------------------------
 // Coverage: Resize callback returning error
 // ---------------------------------------------------------------------------

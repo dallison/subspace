@@ -87,6 +87,18 @@ struct PublisherOptions {
     return *this;
   }
 
+  // Upper bound on how large the channel's slots may become.  A value of 0
+  // (the default) means there is no limit other than what the machine can
+  // allocate.  When set, the initial slot size must not exceed it, asking
+  // GetMessageBuffer() for a larger buffer fails instead of resizing, and
+  // automatic growth stops at the limit rather than overshooting it.  All
+  // publishers on a channel must agree on this value.
+  PublisherOptions &SetMaxSlotSize(SlotSizeType size) {
+    max_slot_size = size;
+    return *this;
+  }
+  SlotSizeType MaxSlotSize() const { return max_slot_size; }
+
   bool IsLocal() const { return local; }
   bool IsReliable() const { return reliable; }
   bool IsFixedSize() const { return fixed_size; }
@@ -253,6 +265,9 @@ struct PublisherOptions {
   SlotSizeType slot_size = 0;
   int32_t num_slots = 0;
   uint64_t subscriber_queue_arena_size = 0;
+
+  // See SetMaxSlotSize() for description.  0 means unlimited.
+  SlotSizeType max_slot_size = 0;
 
   bool local = false;
   bool reliable = false;

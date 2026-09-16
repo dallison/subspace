@@ -49,6 +49,9 @@ message CreatePublisherRequest {
   // proves that a stale shared-memory hazard counter can be cleared.
   uint32 active_queue_publish_depth = 21;
   int32 max_outstanding_slot_leases = 22; // Unpublished slots reserved by this publisher.
+  // Upper bound on the channel's slot size, already aligned.  0 means
+  // unlimited.
+  int64 max_slot_size = 23;
 }
 
 message CreatePublisherResponse {
@@ -519,6 +522,8 @@ message ShadowCreateChannel {
   bool hidden = 21;
   // Non-empty only for a hidden channel monitoring this public channel.
   string telemetry_target = 22;
+  bool has_max_slot_size = 23;
+  int64 max_slot_size = 24;
   // FDs sent via SCM_RIGHTS: [ccb_fd, bcb_fd]
 }
 
@@ -597,6 +602,8 @@ message ShadowUpdateChannelOptions {
   bool split_buffers_over_bridge = 6;
   bool has_max_subscribers = 7;
   int32 max_subscribers = 8;
+  bool has_max_slot_size = 9;
+  int64 max_slot_size = 10;
 }
 
 message Telemetry {

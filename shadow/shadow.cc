@@ -267,6 +267,8 @@ Shadow::HandleCreateChannel(const ShadowCreateChannel &msg,
     ch.max_publishers = msg.max_publishers();
     ch.has_max_subscribers = msg.has_max_subscribers();
     ch.max_subscribers = msg.max_subscribers();
+    ch.has_max_slot_size = msg.has_max_slot_size();
+    ch.max_slot_size = msg.max_slot_size();
     ch.hidden = msg.hidden();
     ch.telemetry_target = msg.telemetry_target();
     ch.ccb_fd = std::move(fds[0]);
@@ -486,6 +488,8 @@ Shadow::HandleUpdateChannelOptions(const ShadowUpdateChannelOptions &msg) {
   channel.max_publishers = msg.max_publishers();
   channel.has_max_subscribers = msg.has_max_subscribers();
   channel.max_subscribers = msg.max_subscribers();
+  channel.has_max_slot_size = msg.has_max_slot_size();
+  channel.max_slot_size = msg.max_slot_size();
   return absl::OkStatus();
 }
 
@@ -559,6 +563,8 @@ absl::Status Shadow::SendStateDump(toolbelt::UnixSocket &socket) {
       msg->set_max_publishers(ch.max_publishers);
       msg->set_has_max_subscribers(ch.has_max_subscribers);
       msg->set_max_subscribers(ch.max_subscribers);
+      msg->set_has_max_slot_size(ch.has_max_slot_size);
+      msg->set_max_slot_size(ch.max_slot_size);
       msg->set_hidden(ch.hidden);
       msg->set_telemetry_target(ch.telemetry_target);
 

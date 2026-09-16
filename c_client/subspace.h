@@ -270,6 +270,11 @@ typedef struct {
   bool bridge;             // This publisher is for the bridge.
   bool for_tunnel;         // Mark messages for external tunnel processes.
   bool fixed_size; // Don't resize the slot size if a larger message is sent.
+  // Upper bound on how large the slots may grow, or 0 for no limit.  Asking
+  // subspace_get_message_buffer() for more than this fails instead of
+  // resizing, and automatic growth stops here.  All publishers on a channel
+  // must agree on this value.
+  SubspaceSlotSize max_slot_size;
   SubspaceTypeInfo type; // Type of the message.  This is an opaque string.
   bool activate;         // Send an activation message when created.
   const char *mux;       // Optional mux channel name for virtual channels.
@@ -641,6 +646,10 @@ bool subspace_is_publisher_fixed_size(SubspacePublisher publisher);
 bool subspace_is_publisher_for_tunnel(SubspacePublisher publisher);
 bool subspace_publisher_uses_split_buffers(SubspacePublisher publisher);
 SubspaceSlotSize subspace_get_publisher_slot_size(SubspacePublisher publisher);
+// Effective slot size cap, rounded up to the channel's alignment, or 0 if the
+// channel is uncapped.
+SubspaceSlotSize
+subspace_get_publisher_max_slot_size(SubspacePublisher publisher);
 int32_t subspace_get_publisher_num_slots(SubspacePublisher publisher);
 int32_t subspace_get_publisher_queue_size(SubspacePublisher publisher);
 uint64_t

@@ -117,6 +117,11 @@ PYBIND11_MODULE(subspace, m) {
            "Set whether the publisher is reliable.")
       .def("set_fixed_size", &PublisherOptions::SetFixedSize,
            "Set whether the publisher has fixed size messages.")
+      .def("set_max_slot_size", &PublisherOptions::SetMaxSlotSize,
+           "Set the upper bound on the channel's slot size, or 0 for no "
+           "limit.")
+      .def("max_slot_size", &PublisherOptions::MaxSlotSize,
+           "Get the upper bound on the channel's slot size.")
       .def("set_type", &PublisherOptions::SetType,
            "Set the type of the message carried.")
       .def("is_local", &PublisherOptions::IsLocal,
@@ -432,6 +437,7 @@ PYBIND11_MODULE(subspace, m) {
   publisher_class.def("is_local", &Publisher::IsLocal);
   publisher_class.def("is_fixed_size", &Publisher::IsFixedSize);
   publisher_class.def("slot_size", &Publisher::SlotSize);
+  publisher_class.def("max_slot_size", &Publisher::MaxSlotSize);
 
   // New accessors.
   publisher_class.def("name", &Publisher::Name,

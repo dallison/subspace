@@ -624,6 +624,7 @@ SubspacePublisher subspace_create_publisher(SubspaceClient client,
       .SetBridge(options.bridge)
       .SetForTunnel(options.for_tunnel)
       .SetFixedSize(options.fixed_size)
+      .SetMaxSlotSize(options.max_slot_size)
       .SetType(StringFromPointer(options.type.type, options.type.type_length))
       .SetActivate(options.activate)
       .SetMux(StringFromPointer(options.mux, options.mux_length))
@@ -1648,6 +1649,14 @@ bool subspace_is_publisher_local(SubspacePublisher publisher) {
 bool subspace_is_publisher_fixed_size(SubspacePublisher publisher) {
   return publisher.publisher != nullptr &&
          (*PublisherPtr(publisher))->IsFixedSize();
+}
+
+SubspaceSlotSize
+subspace_get_publisher_max_slot_size(SubspacePublisher publisher) {
+  if (publisher.publisher == nullptr) {
+    return 0;
+  }
+  return (*PublisherPtr(publisher))->MaxSlotSize();
 }
 
 bool subspace_is_publisher_for_tunnel(SubspacePublisher publisher) {

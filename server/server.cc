@@ -1830,6 +1830,13 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
         return s;
       }
     }
+    if (rch.has_max_slot_size) {
+      if (absl::Status s = channel->ValidateOrSetMaxSlotSize(
+              rch.max_slot_size, /*set_if_missing=*/true, "shadow recovery");
+          !s.ok()) {
+        return s;
+      }
+    }
 
     if (map_storage) {
       if (absl::Status s = channel->MapExisting(

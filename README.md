@@ -46,7 +46,7 @@ See the file docs/subspace.pdf for full documentation.  Additional documentation
 - [Split Buffers](docs/split-buffers.md)
 - [Publisher Buffer Leases](docs/publisher-buffer-leases.md)
 - [Reliable Messages](docs/reliable-messages.md)
-- [64-bit Slot Sizes](docs/slot-sizes.md)
+- [Slot Sizes](docs/slot-sizes.md)
 - [C Client API](docs/c-client.md)
 - [Client Architecture](docs/client-architecture.md)
 - [Server Architecture](docs/server-architecture.md)
@@ -100,7 +100,7 @@ The `.bazelrc` file defines configs that select build-time options:
 | Config | Effect |
 |---|---|
 | `--config=linux_memfd` | On Linux, back shared memory with anonymous `memfd_create` objects instead of named `/dev/shm` ones. |
-| `--config=slot_size_64` | Expose 64 bit slot sizes in the C and C++ client APIs, allowing slots larger than 2GB. See [64-bit Slot Sizes](docs/slot-sizes.md). |
+| `--config=slot_size_64` | Expose 64 bit slot sizes in the C and C++ client APIs, allowing slots larger than 2GB. See [Slot Sizes](docs/slot-sizes.md#64-bit-slot-sizes). |
 
 ### Running Tests with Bazel
 
@@ -226,7 +226,7 @@ make -j$(nproc)
 | Option | Default | Effect |
 |---|---|---|
 | `SUBSPACE_LINUX_USE_MEMFD` | `OFF` | On Linux, back shared memory with anonymous `memfd_create` objects instead of named `/dev/shm` ones. |
-| `SUBSPACE_64BIT_SLOT_SIZE` | `OFF` | Expose 64 bit slot sizes in the C and C++ client APIs, allowing slots larger than 2GB. See [64-bit Slot Sizes](docs/slot-sizes.md). |
+| `SUBSPACE_64BIT_SLOT_SIZE` | `OFF` | Expose 64 bit slot sizes in the C and C++ client APIs, allowing slots larger than 2GB. See [Slot Sizes](docs/slot-sizes.md#64-bit-slot-sizes). |
 
 Both options change struct layouts or function signatures, so they must be set
 consistently for the library and everything that includes its headers.
@@ -1022,7 +1022,7 @@ and its callers are built with `SUBSPACE_64BIT_SLOT_SIZE` (Bazel
 64 bit internally in every build; the macro only widens the C and C++ API so
 that slots larger than 2GB can be requested and reported. The C API has the
 equivalent `SubspaceSlotSize` typedef. See
-[64-bit Slot Sizes](docs/slot-sizes.md) for the full list of affected
+[Slot Sizes](docs/slot-sizes.md#64-bit-slot-sizes) for the full list of affected
 declarations and the rules for mixing builds.
 
 | Field/Method | Type | Default | Description |
@@ -1033,6 +1033,7 @@ declarations and the rules for mixing builds.
 | `local` / `SetLocal()` | `bool` | `false` | If true, messages are only visible on the local machine (not bridged). |
 | `type` / `SetType()` | `std::string` | `""` | User-defined message type identifier. All publishers/subscribers must use the same type. |
 | `fixed_size` / `SetFixedSize()` | `bool` | `false` | If true, prevents automatic resizing of slots. |
+| `max_slot_size` / `SetMaxSlotSize()` | `SlotSizeType` | `0` | Upper bound on how large the slots may grow, or 0 for no limit. See [Limiting the Slot Size](docs/slot-sizes.md#limiting-the-slot-size). |
 | `bridge` / `SetBridge()` | `bool` | `false` | Internal: marks this as a bridge publisher. |
 | `mux` / `SetMux()` | `std::string` | `""` | Multiplexer name for virtual channels. |
 | `vchan_id` / `SetVchanId()` | `int` | `-1` | Virtual channel ID (-1 for server-assigned). |

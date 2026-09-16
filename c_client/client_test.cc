@@ -1220,6 +1220,42 @@ TEST_F(ClientTest, PublisherCancelAndWaitErrors) {
   ASSERT_TRUE(subspace_remove_client(&client));
 }
 
+TEST_F(ClientTest, MaxSlotSizeCapsGrowth) {
+  auto client = subspace_create_client_with_socket(Socket().c_str());
+  ASSERT_NE(nullptr, client.client);
+
+  // The initial slot size may not exceed the cap.
+  SubspacePublisherOptions too_big = CPublisherOptionsDefault(512, 4);
+  too_big.max_slot_size = 256;
+  SubspacePublisher bad =
+      subspace_create_publisher(client, "c_max_slot_initial", too_big);
+  ASSERT_EQ(nullptr, bad.publisher);
+  ASSERT_TRUE(subspace_has_error());
+  ASSERT_NE(nullptr, strstr(subspace_get_last_error(), "maximum slot size"));
+
+  SubspacePublisherOptions options = CPublisherOptionsDefault(256, 4);
+  options.max_slot_size = 384;
+  SubspacePublisher pub =
+      subspace_create_publisher(client, "c_max_slot", options);
+  ASSERT_NE(nullptr, pub.publisher) << subspace_get_last_error();
+  ASSERT_EQ(384, subspace_get_publisher_max_slot_size(pub));
+
+  // Without the cap the growth multiplier would double 256 to 512.
+  SubspaceMessageBuffer buffer = subspace_get_message_buffer(pub, 300);
+  ASSERT_NE(nullptr, buffer.buffer) << subspace_get_last_error();
+  ASSERT_EQ(384, subspace_get_publisher_slot_size(pub));
+
+  // Asking for more than the cap is an error, not a resize.
+  buffer = subspace_get_message_buffer(pub, 385);
+  ASSERT_EQ(nullptr, buffer.buffer);
+  ASSERT_TRUE(subspace_has_error());
+  ASSERT_NE(nullptr, strstr(subspace_get_last_error(), "maximum slot size"));
+  ASSERT_EQ(384, subspace_get_publisher_slot_size(pub));
+
+  ASSERT_TRUE(subspace_remove_publisher(&pub));
+  ASSERT_TRUE(subspace_remove_client(&client));
+}
+
 TEST_F(ClientTest, SplitBufferCallbacksPublishAndRead) {
   TestCSplitBufferState state;
 
