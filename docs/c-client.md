@@ -89,7 +89,7 @@ Important publisher options:
 
 | Field | Purpose |
 | --- | --- |
-| `slot_size`, `num_slots` | Initial payload slot size and fixed slot count. |
+| `slot_size`, `num_slots` | Initial payload slot size and fixed slot count. `slot_size` is a `SubspaceSlotSize`, which is `int32_t` unless the library and your code are both built with `SUBSPACE_64BIT_SLOT_SIZE`; see [64-bit Slot Sizes](slot-sizes.md). |
 | `local` | Keep the channel local to this server. |
 | `reliable` | Wait for free slots instead of overwriting unread messages. |
 | `bridge`, `for_tunnel` | Mark bridge/tunnel publishers. |
