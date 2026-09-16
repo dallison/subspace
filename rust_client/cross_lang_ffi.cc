@@ -29,7 +29,7 @@ void cpp_test_destroy_client(CppClientHandle handle) {
 
 CppPublisherHandle cpp_test_create_publisher(CppClientHandle client_handle,
                                              const char *channel,
-                                             int32_t slot_size, int num_slots,
+                                             int64_t slot_size, int num_slots,
                                              int32_t checksum_size,
                                              int32_t metadata_size) {
   return cpp_test_create_publisher_with_split(client_handle, channel, slot_size,
@@ -39,7 +39,7 @@ CppPublisherHandle cpp_test_create_publisher(CppClientHandle client_handle,
 }
 
 CppPublisherHandle cpp_test_create_publisher_with_split(
-    CppClientHandle client_handle, const char *channel, int32_t slot_size,
+    CppClientHandle client_handle, const char *channel, int64_t slot_size,
     int num_slots, int32_t checksum_size, int32_t metadata_size,
     bool use_split_buffers) {
   auto *client = static_cast<subspace::Client *>(client_handle);

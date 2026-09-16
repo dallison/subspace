@@ -33,8 +33,8 @@ absl::StatusOr<SystemControlBlock *>
 CreateSystemControlBlock(toolbelt::FileDescriptor &fd, uint64_t session_id);
 
 struct ResizeInfo {
-  int old_slot_size;
-  int new_slot_size;
+  int64_t old_slot_size;
+  int64_t new_slot_size;
 };
 
 struct SplitBufferOptions {
@@ -269,7 +269,7 @@ public:
   }
   toolbelt::Logger &GetLogger() { return logger_; }
 
-  void SetLastKnownSlotSize(int32_t slot_size) {
+  void SetLastKnownSlotSize(int64_t slot_size) {
     last_known_slot_size_ = slot_size;
   }
 
@@ -327,7 +327,7 @@ public:
 
   std::vector<ResizeInfo> GetResizeInfo() const;
 
-  virtual int SlotSize() const {
+  virtual int64_t SlotSize() const {
     if (ccb_->num_buffers == 0) {
       return last_known_slot_size_;
     }
@@ -474,8 +474,9 @@ public:
   // SCB has already been allocated and will be mapped in for
   // this channel.  This is only used in the server.
   virtual absl::StatusOr<SharedMemoryFds>
-  Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size, int num_slots,
-           uint64_t subscriber_queue_arena_size, int initial_ordinal);
+  Allocate(const toolbelt::FileDescriptor &scb_fd, int64_t slot_size,
+           int num_slots, uint64_t subscriber_queue_arena_size,
+           int initial_ordinal);
 
   // Map existing shared memory from recovered FDs (after a server crash).
   // Does not initialize CCB/BCB -- they already contain valid data.
@@ -498,7 +499,7 @@ public:
   absl::Status CapacityError(const CapacityInfo &info) const;
 
   virtual void GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
-                                uint32_t &max_message_size,
+                                uint64_t &max_message_size,
                                 uint32_t &total_drops) {
     Channel::GetStatsCounters(total_bytes, total_messages, max_message_size,
                               total_drops);
@@ -522,7 +523,7 @@ protected:
   bool hidden_ = false;
   std::string telemetry_target_;
   int session_id_;
-  mutable int32_t last_known_slot_size_ = 0;
+  mutable int64_t last_known_slot_size_ = 0;
   bool split_buffer_options_set_ = false;
   SplitBufferOptions split_buffer_options_;
   bool max_publishers_set_ = false;
@@ -634,7 +635,7 @@ public:
 
   const SharedMemoryFds &GetFds() override { return mux_->GetFds(); }
 
-  int SlotSize() const override { return mux_->SlotSize(); }
+  int64_t SlotSize() const override { return mux_->SlotSize(); }
   int NumSlots() const override { return mux_->NumSlots(); }
   int GetChannelId() const override { return mux_->GetChannelId(); }
 
@@ -687,7 +688,7 @@ public:
   }
 
   void GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
-                        uint32_t &max_message_size,
+                        uint64_t &max_message_size,
                         uint32_t &total_drops) override {
     mux_->GetStatsCounters(total_bytes, total_messages, max_message_size,
                            total_drops);

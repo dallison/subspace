@@ -680,7 +680,7 @@ impl Publisher {
         }
     }
 
-    pub fn get_stats_counters(&self) -> (u64, u64, u32, u32) {
+    pub fn get_stats_counters(&self) -> (u64, u64, u64, u32) {
         let imp = self.imp.lock().unwrap();
         let ccb = imp.channel.ccb();
         (
@@ -1080,7 +1080,7 @@ impl Subscriber {
         self.imp.lock().unwrap().options.vchan_id
     }
 
-    pub fn get_stats_counters(&self) -> (u64, u64, u32, u32) {
+    pub fn get_stats_counters(&self) -> (u64, u64, u64, u32) {
         let sub = self.imp.lock().unwrap();
         let ccb = sub.channel.ccb();
         (
@@ -1184,7 +1184,7 @@ impl Client {
             request: Some(proto::request::Request::CreatePublisher(
                 proto::CreatePublisherRequest {
                     channel_name: channel_name.to_string(),
-                    slot_size: slot_size as i32,
+                    slot_size,
                     num_slots: opts.num_slots,
                     is_local: opts.local,
                     is_reliable: opts.reliable,

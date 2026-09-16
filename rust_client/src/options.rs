@@ -16,7 +16,7 @@ pub const DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE: u64 = 64_000;
 
 #[derive(Debug, Clone)]
 pub struct PublisherOptions {
-    pub slot_size: i32,
+    pub slot_size: i64,
     pub num_slots: i32,
     pub subscriber_queue_arena_size: u64,
     pub local: bool,
@@ -72,7 +72,7 @@ impl PublisherOptions {
         Self::default()
     }
 
-    pub fn set_slot_size(mut self, size: i32) -> Self {
+    pub fn set_slot_size(mut self, size: i64) -> Self {
         self.slot_size = size;
         self
     }

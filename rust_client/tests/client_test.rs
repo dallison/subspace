@@ -1245,7 +1245,7 @@ fn integration_large_message() {
 
     let msg_size = 64 * 1024;
     let pub_opts = PublisherOptions::new()
-        .set_slot_size(msg_size as i32)
+        .set_slot_size(msg_size as i64)
         .set_num_slots(4);
     let publisher = pub_client
         .create_publisher("rust_large1", &pub_opts)

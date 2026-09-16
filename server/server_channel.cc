@@ -292,7 +292,7 @@ uint64_t ServerChannel::GetVirtualMemoryUsage() const {
 
 absl::StatusOr<SharedMemoryFds>
 ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
-                        [[maybe_unused]] int slot_size, int num_slots,
+                        [[maybe_unused]] int64_t slot_size, int num_slots,
                         uint64_t subscriber_queue_arena_size,
                         int initial_ordinal) {
   // Unmap existing memory.
@@ -1443,7 +1443,8 @@ std::vector<ResizeInfo> ServerChannel::GetResizeInfo() const {
 void ServerChannel::GetChannelStats(subspace::ChannelStatsProto *stats) {
   stats->set_channel_name(Name());
   uint64_t total_bytes, total_messages;
-  uint32_t max_message_size, total_drops;
+  uint64_t max_message_size;
+  uint32_t total_drops;
   GetStatsCounters(total_bytes, total_messages, max_message_size, total_drops);
   stats->set_total_bytes(total_bytes);
   stats->set_total_messages(total_messages);

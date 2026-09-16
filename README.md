@@ -361,7 +361,7 @@ public:
     // Create a publisher for a channel
     absl::StatusOr<Publisher>
     CreatePublisher(const std::string &channel_name, 
-                    int slot_size, 
+                    int64_t slot_size,
                     int num_slots,
                     const PublisherOptions &opts = PublisherOptions());
 
@@ -581,8 +581,8 @@ for lifecycle, retirement, capacity, and C API details.
 class Publisher {
 public:
     // Get a message buffer for writing
-    absl::StatusOr<void*> GetMessageBuffer(int32_t max_size = -1, bool lock = true);
-    absl::StatusOr<absl::Span<std::byte>> GetMessageBufferSpan(int32_t max_size = -1, bool lock = true);
+    absl::StatusOr<void*> GetMessageBuffer(int64_t max_size = -1, bool lock = true);
+    absl::StatusOr<absl::Span<std::byte>> GetMessageBufferSpan(int64_t max_size = -1, bool lock = true);
     
     // Publish a message
     absl::StatusOr<const Message> PublishMessage(int64_t message_size);
@@ -617,7 +617,7 @@ public:
     bool IsReliable() const;
     bool IsLocal() const;
     bool IsFixedSize() const;
-    int32_t SlotSize() const;
+    int64_t SlotSize() const;
     int32_t NumSlots() const;
     
     // Statistics
@@ -817,7 +817,7 @@ public:
     std::string Name() const;
     std::string Type() const;
     bool IsReliable() const;
-    int32_t SlotSize() const;
+    int64_t SlotSize() const;
     int32_t NumSlots() const;
     int64_t GetCurrentOrdinal() const;
     
@@ -1000,7 +1000,7 @@ auto pub = client->CreatePublisher("channel",
 
 | Field/Method | Type | Default | Description |
 |--------------|------|---------|-------------|
-| `slot_size` / `SetSlotSize()` | `int32_t` | `0` | Size of each message slot in bytes. Must be set if using options-only CreatePublisher. |
+| `slot_size` / `SetSlotSize()` | `int64_t` | `0` | Size of each message slot in bytes. Must be set if using options-only CreatePublisher. |
 | `num_slots` / `SetNumSlots()` | `int32_t` | `0` | Number of slots in the channel. Must be set if using options-only CreatePublisher. |
 | `reliable` / `SetReliable()` | `bool` | `false` | If true, reliable delivery (see Reliable Channels section). |
 | `local` / `SetLocal()` | `bool` | `false` | If true, messages are only visible on the local machine (not bridged). |
@@ -1018,7 +1018,7 @@ auto pub = client->CreatePublisher("channel",
 | `metadata_size` / `SetMetadataSize()` | `int32_t` | `0` | Number of bytes of user metadata stored immediately after the checksum area. Accessible via `Publisher::GetMetadata()` / `Subscriber::GetMetadata()`. |
 
 **Getter Methods:**
-- `int32_t SlotSize() const`
+- `int64_t SlotSize() const`
 - `int32_t NumSlots() const`
 - `bool IsReliable() const`
 - `bool IsLocal() const`
@@ -1703,7 +1703,7 @@ This is a quick reference for the most common calls. See
 - `bool subspace_remove_client(SubspaceClient *client)`
 
 **Publisher Functions:**
-- `SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size, int num_slots)`
+- `SubspacePublisherOptions subspace_publisher_options_default(int64_t slot_size, int num_slots)`
 - `SubspacePublisher subspace_create_publisher(SubspaceClient client, const char *channel_name, SubspacePublisherOptions options)`
 - `SubspaceMessageBuffer subspace_get_message_buffer(SubspacePublisher publisher, size_t max_size)`
 - `const SubspaceMessage subspace_publish_message(SubspacePublisher publisher, size_t messageSize)`
@@ -1741,7 +1741,7 @@ This is a quick reference for the most common calls. See
 - `int subspace_wait_for_subscriber_with_fd(SubspaceSubscriber subscriber, int fd)`
 - `struct pollfd subspace_get_subscriber_poll_fd(SubspaceSubscriber subscriber)`
 - `int subspace_get_subscriber_fd(SubspaceSubscriber subscriber)`
-- `int32_t subspace_get_subscriber_slot_size(SubspaceSubscriber subscriber)`
+- `int64_t subspace_get_subscriber_slot_size(SubspaceSubscriber subscriber)`
 - `int subspace_get_subscriber_num_slots(SubspaceSubscriber subscriber)`
 - `SubspaceTypeInfo subspace_get_subscriber_type(SubspaceSubscriber subscriber)`
 - `bool subspace_subscriber_uses_split_buffers(SubspaceSubscriber subscriber)`

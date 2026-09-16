@@ -318,7 +318,7 @@ absl::Status ClientImpl::UnregisterMessageCallback(SubscriberImpl *subscriber) {
 
 absl::Status ClientImpl::RegisterResizeCallback(
     PublisherImpl *publisher,
-    std::function<absl::Status(PublisherImpl *, int32_t, int32_t)> callback) {
+    std::function<absl::Status(PublisherImpl *, int64_t, int64_t)> callback) {
   ClientLockGuard guard(this);
   if (resize_callbacks_.find(publisher) != resize_callbacks_.end()) {
     return absl::InternalError(absl::StrFormat(
@@ -529,7 +529,7 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
 }
 
 absl::StatusOr<Publisher>
-ClientImpl::CreatePublisher(const std::string &channel_name, int slot_size,
+ClientImpl::CreatePublisher(const std::string &channel_name, int64_t slot_size,
                             int num_slots, const PublisherOptions &opts) {
   PublisherOptions options = opts;
   options.slot_size = slot_size;
@@ -657,7 +657,7 @@ static uint64_t ExpandSlotSize(uint64_t slotSize) {
 }
 
 absl::StatusOr<void *> ClientImpl::GetMessageBuffer(PublisherImpl *publisher,
-                                                    int32_t max_size,
+                                                    int64_t max_size,
                                                     bool lock) {
   auto span_or_status = GetMessageBufferSpan(publisher, max_size, lock);
   if (!span_or_status.ok()) {
@@ -670,7 +670,7 @@ absl::StatusOr<void *> ClientImpl::GetMessageBuffer(PublisherImpl *publisher,
 }
 
 absl::StatusOr<absl::Span<std::byte>>
-ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int32_t max_size,
+ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int64_t max_size,
                                  bool lock) {
   // If the current thread is calling this while it already owns the mutex we
   // allow it to continue without locking.  If another t thread is trying to
@@ -681,10 +681,10 @@ ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int32_t max_size,
     publisher->ClearPollFd();
   }
 
-  int32_t slot_size = publisher->SlotSize();
+  int64_t slot_size = publisher->SlotSize();
   size_t span_size = size_t(slot_size);
   if (max_size != -1 && max_size > slot_size) {
-    int32_t new_slot_size = slot_size;
+    int64_t new_slot_size = slot_size;
     assert(new_slot_size > 0);
     while (new_slot_size <= slot_size || new_slot_size < max_size) {
       new_slot_size = ExpandSlotSize(new_slot_size);
@@ -2080,7 +2080,7 @@ absl::StatusOr<const std::vector<ChannelStats>> ClientImpl::GetChannelStats() {
 }
 
 absl::Status ClientImpl::ResizeChannel(PublisherImpl *publisher,
-                                       int32_t new_slot_size) {
+                                       int64_t new_slot_size) {
   if (publisher->IsFixedSize()) {
     return absl::InternalError(absl::StrFormat(
         "Channel %s is fixed size at %d bytes; can't increase it to %d bytes",

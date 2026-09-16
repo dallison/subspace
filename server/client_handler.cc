@@ -385,9 +385,10 @@ void ClientHandler::HandleCreatePublisher(
   if (channel == nullptr) {
     server_->logger_.Log(toolbelt::LogLevel::kDebug,
                          "Publisher %s is creating new channel %s with size "
-                         "%d/%d and type length %zu (total of %zu channels)",
+                         "%lld/%d and type length %zu (total of %zu channels)",
                          client_name_.c_str(), req.channel_name().c_str(),
-                         req.slot_size(), req.num_slots(), req.type().size(),
+                         static_cast<long long>(req.slot_size()),
+                         req.num_slots(), req.type().size(),
                          server_->GetNumChannels());
     absl::StatusOr<ServerChannel *> ch = server_->CreateChannel(
         req.channel_name(), req.slot_size(), req.num_slots(),
@@ -401,10 +402,11 @@ void ClientHandler::HandleCreatePublisher(
   } else if (channel->IsPlaceholder()) {
     server_->logger_.Log(
         toolbelt::LogLevel::kDebug,
-        "Publisher %s is remapping placeholder channel %s with size %d/%d and "
-        "type length %zu (total of %zu channels)",
-        client_name_.c_str(), req.channel_name().c_str(), req.slot_size(),
-        req.num_slots(), req.type().size(), server_->GetNumChannels());
+        "Publisher %s is remapping placeholder channel %s with size %lld/%d "
+        "and type length %zu (total of %zu channels)",
+        client_name_.c_str(), req.channel_name().c_str(),
+        static_cast<long long>(req.slot_size()), req.num_slots(),
+        req.type().size(), server_->GetNumChannels());
     // Channel exists, but it's just a placeholder.  Remap the memory now
     // that we know the slots.
     absl::Status status = server_->RemapChannel(
@@ -532,9 +534,10 @@ void ClientHandler::HandleCreatePublisher(
       }
       server_->logger_.Log(
           toolbelt::LogLevel::kDebug,
-          "Publisher %s is resizing channel %s buffers from %d bytes to %d",
-          client_name_.c_str(), channel->Name().c_str(), channel->SlotSize(),
-          req.slot_size());
+          "Publisher %s is resizing channel %s buffers from %lld bytes to %lld",
+          client_name_.c_str(), channel->Name().c_str(),
+          static_cast<long long>(channel->SlotSize()),
+          static_cast<long long>(req.slot_size()));
     }
 
     if (channel->IsLocal() != req.is_local()) {

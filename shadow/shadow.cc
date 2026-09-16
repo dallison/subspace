@@ -279,9 +279,9 @@ Shadow::HandleCreateChannel(const ShadowCreateChannel &msg,
   apply_channel_metadata(channel);
 
   logger_.Log(toolbelt::LogLevel::kDebug,
-              "Shadow: create channel '%s' id=%d slots=%d/%d",
+              "Shadow: create channel '%s' id=%d slots=%d/%lld",
               channel.name.c_str(), channel.channel_id, channel.num_slots,
-              channel.slot_size);
+              static_cast<long long>(channel.slot_size));
 
   if (it == channels_.end()) {
     channels_.emplace(channel.name, std::move(ch));

@@ -179,7 +179,7 @@ public:
   }
 
   // Get the size associated with the given slot id.
-  int SlotSize(int slot_id) const {
+  int64_t SlotSize(int slot_id) const {
     const int buffer_index =
         ccb_->slots[slot_id].buffer_index.load(std::memory_order_relaxed);
     if (buffer_index < 0 ||
@@ -189,7 +189,7 @@ public:
     return buffers_.empty() ? 0 : buffers_[buffer_index]->slot_size;
   }
 
-  int SlotSize(MessageSlot *slot) const {
+  int64_t SlotSize(MessageSlot *slot) const {
     if (slot == nullptr) {
       return 0;
     }
@@ -205,7 +205,7 @@ public:
     return buffers_[buffer_index]->slot_size;
   }
   // Get the biggest slot size for the channel.
-  int SlotSize() const {
+  int64_t SlotSize() const {
     return buffers_.empty() ? 0 : buffers_.back()->slot_size;
   }
 

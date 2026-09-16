@@ -747,7 +747,7 @@ struct ChannelControlBlock {          // a.k.a CCB
   // Number of completed publications, including activation messages. This is
   // also the version stamp for subscriber delivery snapshots.
   std::atomic<uint64_t> total_messages;
-  std::atomic<uint32_t> max_message_size;
+  std::atomic<uint64_t> max_message_size;
   std::atomic<uint32_t> total_drops;
 
   // If true there are no more free slots and there's no need to check
@@ -769,6 +769,14 @@ struct ChannelControlBlock {          // a.k.a CCB
   //
 };
 static_assert(offsetof(ChannelControlBlock, version) == 72);
+// The Rust client mirrors this struct, so pin the stats block too.  Both
+// languages must agree or they will read different shared memory.
+static_assert(offsetof(ChannelControlBlock, total_messages) ==
+              offsetof(ChannelControlBlock, total_bytes) + 8);
+static_assert(offsetof(ChannelControlBlock, max_message_size) ==
+              offsetof(ChannelControlBlock, total_messages) + 8);
+static_assert(offsetof(ChannelControlBlock, total_drops) ==
+              offsetof(ChannelControlBlock, max_message_size) + 8);
 
 // Locates each subscriber's variable-capacity queue in the packed queue arena.
 // Offsets are relative to the start of the arena.
@@ -853,10 +861,10 @@ CheckedCcbSize(int num_slots, uint64_t subscriber_queue_arena_size) {
 }
 
 struct SlotBuffer {
-  SlotBuffer(int32_t slot_sz) : slot_size(slot_sz) {}
-  SlotBuffer(int32_t slot_sz, toolbelt::FileDescriptor f)
+  SlotBuffer(int64_t slot_sz) : slot_size(slot_sz) {}
+  SlotBuffer(int64_t slot_sz, toolbelt::FileDescriptor f)
       : slot_size(slot_sz), fd(std::move(f)) {}
-  int32_t slot_size;
+  int64_t slot_size;
   toolbelt::FileDescriptor fd;
 };
 
@@ -1093,7 +1101,7 @@ public:
 
   // Gets the statistics counters.
   void GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
-                        uint32_t &max_message_size, uint32_t &total_drops);
+                        uint64_t &max_message_size, uint32_t &total_drops);
 
   void SetDebug(bool v) { debug_ = v; }
 

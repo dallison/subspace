@@ -25,7 +25,7 @@ message InitResponse {
 message CreatePublisherRequest {
   string channel_name = 1;
   int32 num_slots = 2;
-  int32 slot_size = 3;
+  int64 slot_size = 3;
   bool is_local = 4;
   bool is_reliable = 5;
   bool is_bridge = 6; // This publisher is for the bridge.
@@ -97,7 +97,7 @@ message CreateSubscriberResponse {
   int32 bcb_fd_index = 5;
   int32 trigger_fd_index = 6;
   int32 poll_fd_index = 7;
-  int32 slot_size = 8; // Might be zero if no publisher.
+  int64 slot_size = 8; // Might be zero if no publisher.
   int32 num_slots = 9; // Might be zero if no publisher.
   repeated int32 reliable_pub_trigger_fd_indexes = 10;
   int32 num_pub_updates = 11;
@@ -259,7 +259,7 @@ message ChannelParticipantInfoProto {
 
 message ChannelInfoProto {
   string name = 1;
-  int32 slot_size = 2;
+  int64 slot_size = 2;
   int32 num_slots = 3;
   bytes type = 4;
   int32 num_pubs = 5;        // Total number of publishers for this channel.
@@ -290,11 +290,11 @@ message ChannelStatsProto {
   string channel_name = 1;
   int64 total_bytes = 2;
   int64 total_messages = 3;
-  int32 slot_size = 4;
+  int64 slot_size = 4;
   int32 num_slots = 5;
   int32 num_pubs = 6;
   int32 num_subs = 7;
-  uint32 max_message_size = 8;
+  uint64 max_message_size = 8;
   uint32 total_drops = 9;
   int32 num_bridge_pubs = 10; // Number of publishers that are bridges.
   int32 num_bridge_subs = 11; // Number of subscribers that are bridges.
@@ -325,7 +325,7 @@ message ChannelAddress {
 // bridged subscription is successful.
 message Subscribed {
   string channel_name = 1;
-  int32 slot_size = 2;
+  int64 slot_size = 2;
   int32 num_slots = 3;
   bool reliable = 4;
 
@@ -387,7 +387,7 @@ message RpcOpenRequest {}
 message RpcOpenResponse {
   message RequestChannel {
     string name = 1;     // Name of the channel.
-    int32 slot_size = 2; // Size of each slot in bytes.
+    int64 slot_size = 2; // Size of each slot in bytes.
     int32 num_slots = 3; // Number of slots in the channel.
     string type = 4;     // Type of data carried on this channel.
   }
@@ -497,7 +497,7 @@ message ShadowInit {
 message ShadowCreateChannel {
   string channel_name = 1;
   int32 channel_id = 2;
-  int32 slot_size = 3;
+  int64 slot_size = 3;
   int32 num_slots = 4;
   bytes type = 5;
   bool is_local = 6;

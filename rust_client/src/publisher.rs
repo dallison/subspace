@@ -731,7 +731,7 @@ impl PublisherImpl {
             if !is_activation {
                 let message_size = slot.message_size();
                 ccb.total_bytes.fetch_add(message_size, Ordering::Relaxed);
-                let msg_size = message_size as u32;
+                let msg_size = message_size;
                 let mut old_max = ccb.max_message_size.load(Ordering::Relaxed);
                 while msg_size > old_max {
                     match ccb.max_message_size.compare_exchange_weak(

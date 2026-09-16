@@ -340,7 +340,7 @@ void Channel::IncrementBufferRefs(int buffer_index) {
 }
 
 void Channel::GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
-                               uint32_t &max_message_size,
+                               uint64_t &max_message_size,
                                uint32_t &total_drops) {
   total_bytes = ccb_->total_bytes;
   total_messages = ccb_->total_messages;

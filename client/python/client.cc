@@ -740,7 +740,8 @@ exceed metadata_size() bytes.)doc",
       "get_stats_counters",
       [](Publisher *self) -> py::dict {
         uint64_t total_bytes = 0, total_messages = 0;
-        uint32_t max_message_size = 0, total_drops = 0;
+        uint64_t max_message_size = 0;
+        uint32_t total_drops = 0;
         self->GetStatsCounters(total_bytes, total_messages, max_message_size,
                                total_drops);
         py::dict d;
@@ -1096,7 +1097,7 @@ is listening on the same Unix Domain Socket.)doc");
   // Existing: create_publisher overload 1 (slot_size, num_slots, flags).
   client_class.def(
       "create_publisher",
-      [](Client *self, const std::string &channel_name, int slot_size,
+      [](Client *self, const std::string &channel_name, int64_t slot_size,
          int num_slots, bool local, bool reliable, bool fixed_size,
          const std::string &type) -> Publisher {
         absl::StatusOr<Publisher> result =
@@ -1138,7 +1139,7 @@ bytes long.)doc",
   // Existing: create_publisher overload 3 (slot_size, num_slots, options).
   client_class.def(
       "create_publisher",
-      [](Client *self, const std::string &channel_name, int slot_size,
+      [](Client *self, const std::string &channel_name, int64_t slot_size,
          int num_slots, const PublisherOptions &options) -> Publisher {
         absl::StatusOr<Publisher> result =
             self->CreatePublisher(channel_name, slot_size, num_slots, options);

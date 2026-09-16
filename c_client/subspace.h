@@ -250,7 +250,7 @@ typedef struct {
 
 // There are the options avaialble for publishers.
 typedef struct {
-  const int32_t slot_size; // Initial size of slots (might be resized).
+  const int64_t slot_size; // Initial size of slots (might be resized).
   const int num_slots;     // Number of slots (never changes)
   // Total bytes reserved for packed per-subscriber queues in the CCB. The
   // options factory selects zero, disabling queues in favor of the bitset path.
@@ -407,7 +407,7 @@ bool subspace_get_all_channel_stats(SubspaceClient client,
 // Publisher and subscriber options struct creators.  Use these to create
 // the options struct and then override with the values you want.
 SubspaceSubscriberOptions subspace_subscriber_options_default(void);
-SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size,
+SubspacePublisherOptions subspace_publisher_options_default(int64_t slot_size,
                                                             int num_slots);
 
 // Create a subscriber or publisher.  If the subscriber or publisher is created
@@ -477,7 +477,7 @@ int subspace_get_subscriber_fd(SubspaceSubscriber subscriber);
 
 // The slot size and number of slots will not be valid until the first message
 // is received.
-int32_t subspace_get_subscriber_slot_size(SubspaceSubscriber subscriber);
+int64_t subspace_get_subscriber_slot_size(SubspaceSubscriber subscriber);
 int subspace_get_subscriber_num_slots(SubspaceSubscriber subscriber);
 int32_t
 subspace_get_subscriber_queue_size(SubspaceSubscriber subscriber);
@@ -629,7 +629,7 @@ bool subspace_is_publisher_local(SubspacePublisher publisher);
 bool subspace_is_publisher_fixed_size(SubspacePublisher publisher);
 bool subspace_is_publisher_for_tunnel(SubspacePublisher publisher);
 bool subspace_publisher_uses_split_buffers(SubspacePublisher publisher);
-int32_t subspace_get_publisher_slot_size(SubspacePublisher publisher);
+int64_t subspace_get_publisher_slot_size(SubspacePublisher publisher);
 int32_t subspace_get_publisher_num_slots(SubspacePublisher publisher);
 int32_t subspace_get_publisher_queue_size(SubspacePublisher publisher);
 uint64_t
@@ -646,7 +646,7 @@ subspace_get_publisher_virtual_memory_usage(SubspacePublisher publisher);
 bool subspace_get_publisher_stats_counters(SubspacePublisher publisher,
                                            uint64_t *total_bytes,
                                            uint64_t *total_messages,
-                                           uint32_t *max_message_size,
+                                           uint64_t *max_message_size,
                                            uint32_t *total_drops);
 bool subspace_get_publisher_counters(SubspacePublisher publisher,
                                      SubspaceChannelCounters *counters);

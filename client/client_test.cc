@@ -92,7 +92,7 @@ uint64_t ExpectedSplitBufferVirtualMemoryUsage(int num_slots,
          AlignPage(slot_size) * static_cast<uint64_t>(num_slots);
 }
 
-subspace::PublisherOptions PubOpts(int32_t slot_size = 0,
+subspace::PublisherOptions PubOpts(int64_t slot_size = 0,
                                    int32_t num_slots = 0) {
   return subspace::PublisherOptions().SetSlotSize(slot_size).SetNumSlots(
       num_slots);
@@ -255,6 +255,61 @@ TEST_F(ClientTest, Resize1) {
   absl::StatusOr<void *> buffer3 = pub->GetMessageBuffer(512, false);
   ASSERT_OK(buffer3);
   ASSERT_EQ(512, pub->SlotSize());
+}
+
+// Slot sizes are 64 bit, so a channel can have slots that do not fit in an
+// int32_t.  The shared memory is sparse, so only the pages this test actually
+// touches are committed.
+TEST_F(ClientTest, SlotSizeLargerThanInt32) {
+  constexpr int64_t kSlotSize = 2058LL * 1024 * 1024; // 2.01GB.
+  constexpr int64_t kPastInt32 =
+      static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
+  static_assert(kSlotSize > kPastInt32, "slot must exceed the int32_t range");
+
+  subspace::Client client;
+  InitClient(client);
+
+  // Three slots: one for the publisher's lease, one for the subscriber's
+  // active message and one for the publisher to move on to.
+  absl::StatusOr<Publisher> pub = client.CreatePublisher(
+      "big_slots",
+      subspace::PublisherOptions().SetSlotSize(kSlotSize).SetNumSlots(3));
+  if (!pub.ok()) {
+    GTEST_SKIP() << "Cannot allocate a " << kSlotSize
+                 << " byte channel here: " << pub.status();
+  }
+  EXPECT_EQ(kSlotSize, pub->SlotSize());
+
+  absl::StatusOr<Subscriber> sub = client.CreateSubscriber("big_slots");
+  ASSERT_OK(sub);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer(kSlotSize);
+  ASSERT_OK(buffer);
+  ASSERT_NE(nullptr, *buffer);
+
+  // Write either side of the old int32_t boundary to prove the whole slot is
+  // addressable.
+  char *data = static_cast<char *>(*buffer);
+  data[0] = 'f';
+  data[kPastInt32] = 'm';
+  data[kSlotSize - 1] = 'l';
+  ASSERT_OK(pub->PublishMessage(kSlotSize));
+
+  absl::StatusOr<Message> message = sub->ReadMessage();
+  ASSERT_OK(message);
+  ASSERT_EQ(static_cast<size_t>(kSlotSize), message->length);
+  const char *received = static_cast<const char *>(message->buffer);
+  EXPECT_EQ('f', received[0]);
+  EXPECT_EQ('m', received[kPastInt32]);
+  EXPECT_EQ('l', received[kSlotSize - 1]);
+
+  uint64_t total_bytes = 0;
+  uint64_t total_messages = 0;
+  uint64_t max_message_size = 0;
+  uint32_t total_drops = 0;
+  pub->GetStatsCounters(total_bytes, total_messages, max_message_size,
+                        total_drops);
+  EXPECT_EQ(static_cast<uint64_t>(kSlotSize), max_message_size);
 }
 
 TEST_F(ClientTest, AttachingPublisherPreservesResizedSlotSize) {
@@ -4162,7 +4217,7 @@ TEST_F(ClientTest, DroppedMessageDetectionCanBeDisabled) {
 
   uint64_t total_bytes = 0;
   uint64_t total_messages = 0;
-  uint32_t max_message_size = 0;
+  uint64_t max_message_size = 0;
   uint32_t total_drops = 0;
   pub->GetStatsCounters(total_bytes, total_messages, max_message_size,
                         total_drops);
