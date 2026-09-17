@@ -16,7 +16,7 @@ pub const DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE: u64 = 64_000;
 
 #[derive(Debug, Clone)]
 pub struct PublisherOptions {
-    pub slot_size: i32,
+    pub slot_size: i64,
     pub num_slots: i32,
     pub subscriber_queue_arena_size: u64,
     pub local: bool,
@@ -24,6 +24,8 @@ pub struct PublisherOptions {
     pub bridge: bool,
     pub for_tunnel: bool,
     pub fixed_size: bool,
+    /// See `set_max_slot_size`.  0 means unlimited.
+    pub max_slot_size: i64,
     pub channel_type: String,
     pub activate: bool,
     pub mux: String,
@@ -50,6 +52,7 @@ impl Default for PublisherOptions {
             bridge: false,
             for_tunnel: false,
             fixed_size: false,
+            max_slot_size: 0,
             channel_type: String::new(),
             activate: false,
             mux: String::new(),
@@ -72,7 +75,7 @@ impl PublisherOptions {
         Self::default()
     }
 
-    pub fn set_slot_size(mut self, size: i32) -> Self {
+    pub fn set_slot_size(mut self, size: i64) -> Self {
         self.slot_size = size;
         self
     }
@@ -106,6 +109,16 @@ impl PublisherOptions {
 
     pub fn set_fixed_size(mut self, v: bool) -> Self {
         self.fixed_size = v;
+        self
+    }
+
+    /// Upper bound on how large the channel's slots may become.  0 (the
+    /// default) means no limit.  When set, the initial slot size must not
+    /// exceed it, asking `get_message_buffer` for a larger buffer fails
+    /// instead of resizing, and automatic growth stops at the limit.  All
+    /// publishers on a channel must agree on this value.
+    pub fn set_max_slot_size(mut self, v: i64) -> Self {
+        self.max_slot_size = v;
         self
     }
 

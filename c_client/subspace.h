@@ -23,6 +23,16 @@
 extern "C" {
 #endif
 
+// Slot sizes are 64 bit inside the library, but this API exposes a 32 bit slot
+// size by default so that existing code keeps compiling.  Define
+// SUBSPACE_64BIT_SLOT_SIZE to widen it and allow slots larger than 2GB.  This
+// must match the definition used to build the library.
+#if defined(SUBSPACE_64BIT_SLOT_SIZE)
+typedef int64_t SubspaceSlotSize;
+#else
+typedef int32_t SubspaceSlotSize;
+#endif
+
 // Error Handling.  Most functions return a boolean indicating success or
 // failure. If a function fails, you can call subspace_get_last_error() to get
 // the error message.  The error message is a static string that is owned by the
@@ -250,7 +260,7 @@ typedef struct {
 
 // There are the options avaialble for publishers.
 typedef struct {
-  const int32_t slot_size; // Initial size of slots (might be resized).
+  const SubspaceSlotSize slot_size; // Initial size of slots (might be resized).
   const int num_slots;     // Number of slots (never changes)
   // Total bytes reserved for packed per-subscriber queues in the CCB. The
   // options factory selects zero, disabling queues in favor of the bitset path.
@@ -260,6 +270,11 @@ typedef struct {
   bool bridge;             // This publisher is for the bridge.
   bool for_tunnel;         // Mark messages for external tunnel processes.
   bool fixed_size; // Don't resize the slot size if a larger message is sent.
+  // Upper bound on how large the slots may grow, or 0 for no limit.  Asking
+  // subspace_get_message_buffer() for more than this fails instead of
+  // resizing, and automatic growth stops here.  All publishers on a channel
+  // must agree on this value.
+  SubspaceSlotSize max_slot_size;
   SubspaceTypeInfo type; // Type of the message.  This is an opaque string.
   bool activate;         // Send an activation message when created.
   const char *mux;       // Optional mux channel name for virtual channels.
@@ -407,8 +422,8 @@ bool subspace_get_all_channel_stats(SubspaceClient client,
 // Publisher and subscriber options struct creators.  Use these to create
 // the options struct and then override with the values you want.
 SubspaceSubscriberOptions subspace_subscriber_options_default(void);
-SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size,
-                                                            int num_slots);
+SubspacePublisherOptions
+subspace_publisher_options_default(SubspaceSlotSize slot_size, int num_slots);
 
 // Create a subscriber or publisher.  If the subscriber or publisher is created
 // OK, the 'subscriber' or 'publisher' pointer will be non-null.  If there is
@@ -477,7 +492,8 @@ int subspace_get_subscriber_fd(SubspaceSubscriber subscriber);
 
 // The slot size and number of slots will not be valid until the first message
 // is received.
-int32_t subspace_get_subscriber_slot_size(SubspaceSubscriber subscriber);
+SubspaceSlotSize
+subspace_get_subscriber_slot_size(SubspaceSubscriber subscriber);
 int subspace_get_subscriber_num_slots(SubspaceSubscriber subscriber);
 int32_t
 subspace_get_subscriber_queue_size(SubspaceSubscriber subscriber);
@@ -629,7 +645,11 @@ bool subspace_is_publisher_local(SubspacePublisher publisher);
 bool subspace_is_publisher_fixed_size(SubspacePublisher publisher);
 bool subspace_is_publisher_for_tunnel(SubspacePublisher publisher);
 bool subspace_publisher_uses_split_buffers(SubspacePublisher publisher);
-int32_t subspace_get_publisher_slot_size(SubspacePublisher publisher);
+SubspaceSlotSize subspace_get_publisher_slot_size(SubspacePublisher publisher);
+// Effective slot size cap, rounded up to the channel's alignment, or 0 if the
+// channel is uncapped.
+SubspaceSlotSize
+subspace_get_publisher_max_slot_size(SubspacePublisher publisher);
 int32_t subspace_get_publisher_num_slots(SubspacePublisher publisher);
 int32_t subspace_get_publisher_queue_size(SubspacePublisher publisher);
 uint64_t
@@ -646,7 +666,7 @@ subspace_get_publisher_virtual_memory_usage(SubspacePublisher publisher);
 bool subspace_get_publisher_stats_counters(SubspacePublisher publisher,
                                            uint64_t *total_bytes,
                                            uint64_t *total_messages,
-                                           uint32_t *max_message_size,
+                                           uint64_t *max_message_size,
                                            uint32_t *total_drops);
 bool subspace_get_publisher_counters(SubspacePublisher publisher,
                                      SubspaceChannelCounters *counters);

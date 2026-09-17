@@ -117,6 +117,11 @@ PYBIND11_MODULE(subspace, m) {
            "Set whether the publisher is reliable.")
       .def("set_fixed_size", &PublisherOptions::SetFixedSize,
            "Set whether the publisher has fixed size messages.")
+      .def("set_max_slot_size", &PublisherOptions::SetMaxSlotSize,
+           "Set the upper bound on the channel's slot size, or 0 for no "
+           "limit.")
+      .def("max_slot_size", &PublisherOptions::MaxSlotSize,
+           "Get the upper bound on the channel's slot size.")
       .def("set_type", &PublisherOptions::SetType,
            "Set the type of the message carried.")
       .def("is_local", &PublisherOptions::IsLocal,
@@ -432,6 +437,7 @@ PYBIND11_MODULE(subspace, m) {
   publisher_class.def("is_local", &Publisher::IsLocal);
   publisher_class.def("is_fixed_size", &Publisher::IsFixedSize);
   publisher_class.def("slot_size", &Publisher::SlotSize);
+  publisher_class.def("max_slot_size", &Publisher::MaxSlotSize);
 
   // New accessors.
   publisher_class.def("name", &Publisher::Name,
@@ -740,7 +746,8 @@ exceed metadata_size() bytes.)doc",
       "get_stats_counters",
       [](Publisher *self) -> py::dict {
         uint64_t total_bytes = 0, total_messages = 0;
-        uint32_t max_message_size = 0, total_drops = 0;
+        uint64_t max_message_size = 0;
+        uint32_t total_drops = 0;
         self->GetStatsCounters(total_bytes, total_messages, max_message_size,
                                total_drops);
         py::dict d;
@@ -1096,7 +1103,7 @@ is listening on the same Unix Domain Socket.)doc");
   // Existing: create_publisher overload 1 (slot_size, num_slots, flags).
   client_class.def(
       "create_publisher",
-      [](Client *self, const std::string &channel_name, int slot_size,
+      [](Client *self, const std::string &channel_name, int64_t slot_size,
          int num_slots, bool local, bool reliable, bool fixed_size,
          const std::string &type) -> Publisher {
         absl::StatusOr<Publisher> result =
@@ -1138,7 +1145,7 @@ bytes long.)doc",
   // Existing: create_publisher overload 3 (slot_size, num_slots, options).
   client_class.def(
       "create_publisher",
-      [](Client *self, const std::string &channel_name, int slot_size,
+      [](Client *self, const std::string &channel_name, int64_t slot_size,
          int num_slots, const PublisherOptions &options) -> Publisher {
         absl::StatusOr<Publisher> result =
             self->CreatePublisher(channel_name, slot_size, num_slots, options);

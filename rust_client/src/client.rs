@@ -234,13 +234,30 @@ impl Publisher {
                 clear_trigger(pub_impl.poll_fd);
             }
 
-            let slot_size = pub_impl.channel.current_slot_size() as i32;
+            let slot_size = pub_impl.channel.current_slot_size() as i64;
             let mut span_size = slot_size as usize;
+            let requested_size = max_size as i64;
 
-            if max_size != -1 && max_size > slot_size {
+            if requested_size != -1 && requested_size > slot_size {
+                let max_slot_size = if pub_impl.options.max_slot_size > 0 {
+                    aligned64(pub_impl.options.max_slot_size)
+                } else {
+                    0
+                };
+                if max_slot_size != 0 && requested_size > max_slot_size {
+                    return Err(SubspaceError::InvalidArgument(format!(
+                        "Requested buffer of {} bytes on channel {} exceeds its maximum slot size of {} bytes",
+                        requested_size, pub_impl.channel.name, max_slot_size
+                    )));
+                }
                 let mut new_slot_size = slot_size;
-                while new_slot_size <= slot_size || new_slot_size < max_size {
-                    new_slot_size = expand_slot_size(new_slot_size as u64) as i32;
+                while new_slot_size <= slot_size || new_slot_size < requested_size {
+                    new_slot_size = expand_slot_size(new_slot_size as u64) as i64;
+                }
+                // The growth multiplier can overshoot the cap.  Clamping is safe
+                // because requested_size <= max_slot_size was checked above.
+                if max_slot_size != 0 && new_slot_size > max_slot_size {
+                    new_slot_size = max_slot_size;
                 }
                 span_size = new_slot_size as usize;
 
@@ -255,7 +272,7 @@ impl Publisher {
                     cb(slot_size, new_slot_size)?;
                 }
 
-                pub_impl.create_or_attach_buffers(aligned64(new_slot_size as i64) as u64)?;
+                pub_impl.create_or_attach_buffers(aligned64(new_slot_size) as u64)?;
                 register_pending_client_buffers(&mut client, &mut pub_impl.channel)?;
                 if let Some(si) = pub_impl.channel.slot {
                     pub_impl.channel.set_slot_to_biggest_buffer(si);
@@ -613,7 +630,7 @@ impl Publisher {
     /// Receives (old_size, new_size).  Return an error to prevent the resize.
     pub fn register_resize_callback<F>(&self, callback: F)
     where
-        F: Fn(i32, i32) -> Result<()> + Send + Sync + 'static,
+        F: Fn(i64, i64) -> Result<()> + Send + Sync + 'static,
     {
         self.imp.lock().unwrap().resize_callback = Some(Box::new(callback));
     }
@@ -680,7 +697,7 @@ impl Publisher {
         }
     }
 
-    pub fn get_stats_counters(&self) -> (u64, u64, u32, u32) {
+    pub fn get_stats_counters(&self) -> (u64, u64, u64, u32) {
         let imp = self.imp.lock().unwrap();
         let ccb = imp.channel.ccb();
         (
@@ -1080,7 +1097,7 @@ impl Subscriber {
         self.imp.lock().unwrap().options.vchan_id
     }
 
-    pub fn get_stats_counters(&self) -> (u64, u64, u32, u32) {
+    pub fn get_stats_counters(&self) -> (u64, u64, u64, u32) {
         let sub = self.imp.lock().unwrap();
         let ccb = sub.channel.ccb();
         (
@@ -1177,6 +1194,18 @@ impl Client {
                 "MaxOutstandingSlotLeases must be between 1 and NumSlots".into(),
             ));
         }
+        if opts.max_slot_size < 0 {
+            return Err(SubspaceError::InvalidArgument(format!(
+                "MaxSlotSize must be non-negative, not {}",
+                opts.max_slot_size
+            )));
+        }
+        if opts.max_slot_size > 0 && opts.slot_size > opts.max_slot_size {
+            return Err(SubspaceError::InvalidArgument(format!(
+                "Slot size {} for channel {} exceeds its maximum slot size of {} bytes",
+                opts.slot_size, channel_name, opts.max_slot_size
+            )));
+        }
 
         let slot_size = aligned64(opts.slot_size as i64);
 
@@ -1184,7 +1213,7 @@ impl Client {
             request: Some(proto::request::Request::CreatePublisher(
                 proto::CreatePublisherRequest {
                     channel_name: channel_name.to_string(),
-                    slot_size: slot_size as i32,
+                    slot_size,
                     num_slots: opts.num_slots,
                     is_local: opts.local,
                     is_reliable: opts.reliable,
@@ -1205,6 +1234,14 @@ impl Client {
                     process_id: std::process::id() as u64,
                     max_outstanding_slot_leases: opts.max_outstanding_slot_leases,
                     active_queue_publish_depth: 0,
+                    // Align the cap the same way as the slot size so that a
+                    // publisher asking for slot_size == max_slot_size isn't
+                    // rejected by its own limit.
+                    max_slot_size: if opts.max_slot_size > 0 {
+                        aligned64(opts.max_slot_size)
+                    } else {
+                        0
+                    },
                 },
             )),
         };

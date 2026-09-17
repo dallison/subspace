@@ -59,6 +59,23 @@ namespace subspace {
 #endif
 #endif
 
+// Slot sizes are 64 bit internally: the wire protocol, the shared memory
+// layout and all of the buffer arithmetic use 64 bit values regardless of how
+// the client is built.  The C and C++ client APIs, however, expose a 32 bit
+// slot size by default so that code written against the older API keeps
+// compiling.  Define SUBSPACE_64BIT_SLOT_SIZE to widen the API types and allow
+// slots larger than 2GB to be requested and reported.  See //:slot_size_64
+// (Bazel) and the SUBSPACE_64BIT_SLOT_SIZE CMake option.
+//
+// The two builds interoperate: a client built without the macro can attach to
+// a channel whose slots are larger than 2GB, but its API will report a
+// truncated slot size, so use the macro on both sides if you need large slots.
+#if defined(SUBSPACE_64BIT_SLOT_SIZE)
+using SlotSizeType = int64_t;
+#else
+using SlotSizeType = int32_t;
+#endif
+
 // Flag for flags field in MessagePrefix.
 constexpr int kMessageActivate = 1;      // This is a reliable activation message.
 constexpr int kMessageBridged = 2;       // This message came from the bridge.
@@ -747,7 +764,7 @@ struct ChannelControlBlock {          // a.k.a CCB
   // Number of completed publications, including activation messages. This is
   // also the version stamp for subscriber delivery snapshots.
   std::atomic<uint64_t> total_messages;
-  std::atomic<uint32_t> max_message_size;
+  std::atomic<uint64_t> max_message_size;
   std::atomic<uint32_t> total_drops;
 
   // If true there are no more free slots and there's no need to check
@@ -769,6 +786,14 @@ struct ChannelControlBlock {          // a.k.a CCB
   //
 };
 static_assert(offsetof(ChannelControlBlock, version) == 72);
+// The Rust client mirrors this struct, so pin the stats block too.  Both
+// languages must agree or they will read different shared memory.
+static_assert(offsetof(ChannelControlBlock, total_messages) ==
+              offsetof(ChannelControlBlock, total_bytes) + 8);
+static_assert(offsetof(ChannelControlBlock, max_message_size) ==
+              offsetof(ChannelControlBlock, total_messages) + 8);
+static_assert(offsetof(ChannelControlBlock, total_drops) ==
+              offsetof(ChannelControlBlock, max_message_size) + 8);
 
 // Locates each subscriber's variable-capacity queue in the packed queue arena.
 // Offsets are relative to the start of the arena.
@@ -853,10 +878,10 @@ CheckedCcbSize(int num_slots, uint64_t subscriber_queue_arena_size) {
 }
 
 struct SlotBuffer {
-  SlotBuffer(int32_t slot_sz) : slot_size(slot_sz) {}
-  SlotBuffer(int32_t slot_sz, toolbelt::FileDescriptor f)
+  SlotBuffer(int64_t slot_sz) : slot_size(slot_sz) {}
+  SlotBuffer(int64_t slot_sz, toolbelt::FileDescriptor f)
       : slot_size(slot_sz), fd(std::move(f)) {}
-  int32_t slot_size;
+  int64_t slot_size;
   toolbelt::FileDescriptor fd;
 };
 
@@ -1093,7 +1118,7 @@ public:
 
   // Gets the statistics counters.
   void GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
-                        uint32_t &max_message_size, uint32_t &total_drops);
+                        uint64_t &max_message_size, uint32_t &total_drops);
 
   void SetDebug(bool v) { debug_ = v; }
 

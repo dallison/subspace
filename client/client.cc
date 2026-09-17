@@ -318,7 +318,7 @@ absl::Status ClientImpl::UnregisterMessageCallback(SubscriberImpl *subscriber) {
 
 absl::Status ClientImpl::RegisterResizeCallback(
     PublisherImpl *publisher,
-    std::function<absl::Status(PublisherImpl *, int32_t, int32_t)> callback) {
+    std::function<absl::Status(PublisherImpl *, int64_t, int64_t)> callback) {
   ClientLockGuard guard(this);
   if (resize_callbacks_.find(publisher) != resize_callbacks_.end()) {
     return absl::InternalError(absl::StrFormat(
@@ -407,6 +407,15 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
       opts.MaxOutstandingSlotLeases() > opts.NumSlots()) {
     return absl::InvalidArgumentError(
         "MaxOutstandingSlotLeases must be between 1 and NumSlots");
+  }
+  if (opts.max_slot_size < 0) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "MaxSlotSize must be non-negative, not %d", opts.max_slot_size));
+  }
+  if (opts.max_slot_size > 0 && opts.slot_size > opts.max_slot_size) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Slot size %d for channel %s exceeds its maximum slot size of %d bytes",
+        opts.slot_size, channel_name, opts.max_slot_size));
   }
   Request req;
   FillCreatePublisherRequest(req.mutable_create_publisher(), channel_name, opts,
@@ -529,7 +538,7 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
 }
 
 absl::StatusOr<Publisher>
-ClientImpl::CreatePublisher(const std::string &channel_name, int slot_size,
+ClientImpl::CreatePublisher(const std::string &channel_name, int64_t slot_size,
                             int num_slots, const PublisherOptions &opts) {
   PublisherOptions options = opts;
   options.slot_size = slot_size;
@@ -657,7 +666,7 @@ static uint64_t ExpandSlotSize(uint64_t slotSize) {
 }
 
 absl::StatusOr<void *> ClientImpl::GetMessageBuffer(PublisherImpl *publisher,
-                                                    int32_t max_size,
+                                                    int64_t max_size,
                                                     bool lock) {
   auto span_or_status = GetMessageBufferSpan(publisher, max_size, lock);
   if (!span_or_status.ok()) {
@@ -670,7 +679,7 @@ absl::StatusOr<void *> ClientImpl::GetMessageBuffer(PublisherImpl *publisher,
 }
 
 absl::StatusOr<absl::Span<std::byte>>
-ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int32_t max_size,
+ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int64_t max_size,
                                  bool lock) {
   // If the current thread is calling this while it already owns the mutex we
   // allow it to continue without locking.  If another t thread is trying to
@@ -681,15 +690,28 @@ ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int32_t max_size,
     publisher->ClearPollFd();
   }
 
-  int32_t slot_size = publisher->SlotSize();
+  int64_t slot_size = publisher->SlotSize();
   size_t span_size = size_t(slot_size);
   if (max_size != -1 && max_size > slot_size) {
-    int32_t new_slot_size = slot_size;
+    const int64_t max_slot_size = publisher->MaxSlotSize();
+    if (max_slot_size != 0 && max_size > max_slot_size) {
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "Requested buffer of %d bytes on channel %s exceeds its maximum slot "
+          "size of %d bytes",
+          max_size, publisher->Name(), max_slot_size));
+    }
+    int64_t new_slot_size = slot_size;
     assert(new_slot_size > 0);
     while (new_slot_size <= slot_size || new_slot_size < max_size) {
       new_slot_size = ExpandSlotSize(new_slot_size);
-      span_size = size_t(new_slot_size);
     }
+    // The growth multiplier can overshoot the cap.  Clamping is safe because
+    // max_size <= max_slot_size was checked above, so the clamped size still
+    // satisfies the request and is still larger than the current slot size.
+    if (max_slot_size != 0 && new_slot_size > max_slot_size) {
+      new_slot_size = max_slot_size;
+    }
+    span_size = size_t(new_slot_size);
 
     if (absl::Status status = ResizeChannel(publisher, new_slot_size);
         !status.ok()) {
@@ -2080,11 +2102,18 @@ absl::StatusOr<const std::vector<ChannelStats>> ClientImpl::GetChannelStats() {
 }
 
 absl::Status ClientImpl::ResizeChannel(PublisherImpl *publisher,
-                                       int32_t new_slot_size) {
+                                       int64_t new_slot_size) {
   if (publisher->IsFixedSize()) {
     return absl::InternalError(absl::StrFormat(
         "Channel %s is fixed size at %d bytes; can't increase it to %d bytes",
         publisher->Name(), publisher->SlotSize(), new_slot_size));
+  }
+  if (int64_t max_slot_size = publisher->MaxSlotSize();
+      max_slot_size != 0 && new_slot_size > max_slot_size) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Channel %s has a maximum slot size of %d bytes; can't increase it to "
+        "%d bytes",
+        publisher->Name(), max_slot_size, new_slot_size));
   }
 
   // Call the resize callback if one has been registered.  If this returns
@@ -2126,6 +2155,10 @@ void ClientImpl::FillCreatePublisherRequest(CreatePublisherRequest *cmd,
   cmd->set_subscriber_queue_arena_size(opts.SubscriberQueueArenaSize());
   cmd->set_process_id(static_cast<uint64_t>(getpid()));
   cmd->set_max_outstanding_slot_leases(opts.MaxOutstandingSlotLeases());
+  // Align the cap the same way as the slot size so that a publisher asking for
+  // slot_size == max_slot_size isn't rejected by its own limit.
+  cmd->set_max_slot_size(opts.max_slot_size > 0 ? Aligned(opts.max_slot_size)
+                                                : 0);
 }
 
 void ClientImpl::ApplyPublisherResponseFds(

@@ -215,17 +215,17 @@ public:
   // subscriber, the channel parameters are not known, so slot_size and
   // num_slots will be zero.
   absl::StatusOr<ServerChannel *> CreateChannel(const std::string &channel_name,
-                                                int slot_size, int num_slots,
+                                                int64_t slot_size, int num_slots,
                                                 uint64_t subscriber_queue_arena_size,
                                                 const std::string &mux,
                                                 int vchan_id, std::string type,
                                                 bool hidden = false,
                                                 std::string telemetry_target = {});
   absl::StatusOr<ServerChannel *>
-  CreateMultiplexer(const std::string &channel_name, int slot_size,
+  CreateMultiplexer(const std::string &channel_name, int64_t slot_size,
                     int num_slots, uint64_t subscriber_queue_arena_size,
                     std::string type);
-  absl::Status RemapChannel(ServerChannel *channel, int slot_size,
+  absl::Status RemapChannel(ServerChannel *channel, int64_t slot_size,
                             int num_slots,
                             uint64_t subscriber_queue_arena_size);
   ServerChannel *FindChannel(const std::string &channel_name);
@@ -355,7 +355,7 @@ private:
   // touch the strand-confined ServerChannel for this metadata.
   struct BridgeChannelInfo {
     std::string channel_name;
-    int slot_size = 0;
+    int64_t slot_size = 0;
     int num_slots = 0;
     uint64_t subscriber_queue_arena_size = 0;
     int32_t checksum_size = 0;

@@ -706,6 +706,37 @@ class TestSubspaceClient(unittest.TestCase):
         pub = None
 
     # ------------------------------------------------------------------
+    # Maximum slot size
+    # ------------------------------------------------------------------
+    def test_max_slot_size(self):
+        client = self._make_client("max_slot")
+
+        # The initial slot size may not exceed the cap.
+        options = subspace.PublisherOptions()
+        options.set_slot_size(512).set_num_slots(4).set_max_slot_size(256)
+        with self.assertRaisesRegex(RuntimeError, "maximum slot size"):
+            client.create_publisher(channel_name="ch_max_slot_initial",
+                                    options=options)
+
+        options = subspace.PublisherOptions()
+        options.set_slot_size(256).set_num_slots(4).set_max_slot_size(384)
+        self.assertEqual(options.max_slot_size(), 384)
+        pub = client.create_publisher(channel_name="ch_max_slot",
+                                      options=options)
+        self.assertEqual(pub.max_slot_size(), 384)
+
+        # Without the cap the growth multiplier would double 256 to 512.
+        pub.publish_message(b"x" * 300)
+        self.assertEqual(pub.slot_size(), 384)
+
+        # Publishing more than the cap is an error, not a resize.
+        with self.assertRaisesRegex(RuntimeError, "maximum slot size"):
+            pub.publish_message(b"x" * 385)
+        self.assertEqual(pub.slot_size(), 384)
+
+        pub = None
+
+    # ------------------------------------------------------------------
     # Message callback / process_all_messages
     # ------------------------------------------------------------------
     def test_message_callback_and_process_all(self):

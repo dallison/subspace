@@ -28,6 +28,8 @@
 #include <mutex>
 #include <optional>
 #include <sys/resource.h>
+#include <type_traits>
+#include <utility>
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
 #include <sys/syscall.h>
 #ifndef MFD_CLOEXEC
@@ -92,7 +94,21 @@ uint64_t ExpectedSplitBufferVirtualMemoryUsage(int num_slots,
          AlignPage(slot_size) * static_cast<uint64_t>(num_slots);
 }
 
-subspace::PublisherOptions PubOpts(int32_t slot_size = 0,
+// The client API slot size width is selected by SUBSPACE_64BIT_SLOT_SIZE, so
+// check that the macro actually reaches the API types.
+#if defined(SUBSPACE_64BIT_SLOT_SIZE)
+static_assert(std::is_same_v<subspace::SlotSizeType, int64_t>);
+#else
+static_assert(std::is_same_v<subspace::SlotSizeType, int32_t>);
+#endif
+static_assert(std::is_same_v<decltype(std::declval<subspace::PublisherOptions>()
+                                          .SlotSize()),
+                             subspace::SlotSizeType>);
+static_assert(
+    std::is_same_v<decltype(std::declval<subspace::Publisher>().SlotSize()),
+                   subspace::SlotSizeType>);
+
+subspace::PublisherOptions PubOpts(subspace::SlotSizeType slot_size = 0,
                                    int32_t num_slots = 0) {
   return subspace::PublisherOptions().SetSlotSize(slot_size).SetNumSlots(
       num_slots);
@@ -256,6 +272,63 @@ TEST_F(ClientTest, Resize1) {
   ASSERT_OK(buffer3);
   ASSERT_EQ(512, pub->SlotSize());
 }
+
+#if defined(SUBSPACE_64BIT_SLOT_SIZE)
+// With the 64 bit slot size API a channel can have slots that do not fit in an
+// int32_t.  The shared memory is sparse, so only the pages this test actually
+// touches are committed.
+TEST_F(ClientTest, SlotSizeLargerThanInt32) {
+  constexpr int64_t kSlotSize = 2058LL * 1024 * 1024; // 2.01GB.
+  constexpr int64_t kPastInt32 =
+      static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
+  static_assert(kSlotSize > kPastInt32, "slot must exceed the int32_t range");
+
+  subspace::Client client;
+  InitClient(client);
+
+  // Three slots: one for the publisher's lease, one for the subscriber's
+  // active message and one for the publisher to move on to.
+  absl::StatusOr<Publisher> pub = client.CreatePublisher(
+      "big_slots",
+      subspace::PublisherOptions().SetSlotSize(kSlotSize).SetNumSlots(3));
+  if (!pub.ok()) {
+    GTEST_SKIP() << "Cannot allocate a " << kSlotSize
+                 << " byte channel here: " << pub.status();
+  }
+  EXPECT_EQ(kSlotSize, pub->SlotSize());
+
+  absl::StatusOr<Subscriber> sub = client.CreateSubscriber("big_slots");
+  ASSERT_OK(sub);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer(kSlotSize);
+  ASSERT_OK(buffer);
+  ASSERT_NE(nullptr, *buffer);
+
+  // Write either side of the old int32_t boundary to prove the whole slot is
+  // addressable.
+  char *data = static_cast<char *>(*buffer);
+  data[0] = 'f';
+  data[kPastInt32] = 'm';
+  data[kSlotSize - 1] = 'l';
+  ASSERT_OK(pub->PublishMessage(kSlotSize));
+
+  absl::StatusOr<Message> message = sub->ReadMessage();
+  ASSERT_OK(message);
+  ASSERT_EQ(static_cast<size_t>(kSlotSize), message->length);
+  const char *received = static_cast<const char *>(message->buffer);
+  EXPECT_EQ('f', received[0]);
+  EXPECT_EQ('m', received[kPastInt32]);
+  EXPECT_EQ('l', received[kSlotSize - 1]);
+
+  uint64_t total_bytes = 0;
+  uint64_t total_messages = 0;
+  uint64_t max_message_size = 0;
+  uint32_t total_drops = 0;
+  pub->GetStatsCounters(total_bytes, total_messages, max_message_size,
+                        total_drops);
+  EXPECT_EQ(static_cast<uint64_t>(kSlotSize), max_message_size);
+}
+#endif // SUBSPACE_64BIT_SLOT_SIZE
 
 TEST_F(ClientTest, AttachingPublisherPreservesResizedSlotSize) {
   subspace::Client client1;
@@ -4162,7 +4235,7 @@ TEST_F(ClientTest, DroppedMessageDetectionCanBeDisabled) {
 
   uint64_t total_bytes = 0;
   uint64_t total_messages = 0;
-  uint32_t max_message_size = 0;
+  uint64_t max_message_size = 0;
   uint32_t total_drops = 0;
   pub->GetStatsCounters(total_bytes, total_messages, max_message_size,
                         total_drops);
@@ -7658,6 +7731,98 @@ TEST_F(ClientTest, ResizeFixedSizePublisherFails) {
   auto bigger = pub.GetMessageBuffer(256);
   ASSERT_FALSE(bigger.ok());
   EXPECT_THAT(bigger.status().message(), ::testing::HasSubstr("fixed size"));
+}
+
+// A publisher whose initial slot size is already over its own cap is rejected
+// before it reaches the server.
+TEST_F(ClientTest, MaxSlotSizeRejectsInitialSlotSize) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub = client.CreatePublisher("capped_initial",
+                                    subspace::PublisherOptions()
+                                        .SetSlotSize(512)
+                                        .SetNumSlots(4)
+                                        .SetMaxSlotSize(256));
+  ASSERT_FALSE(pub.ok());
+  EXPECT_THAT(pub.status().message(),
+              ::testing::HasSubstr("maximum slot size"));
+}
+
+// Asking GetMessageBuffer() for more than the cap is an error rather than a
+// resize.
+TEST_F(ClientTest, MaxSlotSizeRejectsOversizedBuffer) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "capped_resize", subspace::PublisherOptions()
+                           .SetSlotSize(128)
+                           .SetNumSlots(4)
+                           .SetMaxSlotSize(256)));
+
+  // Growth up to the cap is still allowed.
+  [[maybe_unused]] auto ok_buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer(256));
+  EXPECT_EQ(256, pub.SlotSize());
+
+  auto too_big = pub.GetMessageBuffer(257);
+  ASSERT_FALSE(too_big.ok());
+  EXPECT_EQ(absl::StatusCode::kInvalidArgument, too_big.status().code());
+  EXPECT_THAT(too_big.status().message(),
+              ::testing::HasSubstr("maximum slot size"));
+  // The failed request must not have resized the channel.
+  EXPECT_EQ(256, pub.SlotSize());
+}
+
+// The growth multiplier would jump past the cap, so the resize is clamped to
+// the cap instead of being refused.
+TEST_F(ClientTest, MaxSlotSizeClampsGrowthToLimit) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "clamped_resize", subspace::PublisherOptions()
+                            .SetSlotSize(256)
+                            .SetNumSlots(4)
+                            .SetMaxSlotSize(384)));
+  auto sub = EVAL_AND_ASSERT_OK(client.CreateSubscriber("clamped_resize"));
+
+  // Without the cap ExpandSlotSize() would double 256 to 512.
+  auto buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer(300));
+  ASSERT_NE(nullptr, buffer);
+  EXPECT_EQ(384, pub.SlotSize());
+
+  memset(buffer, 'x', 300);
+  ASSERT_OK(pub.PublishMessage(300));
+
+  auto msg = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_EQ(300U, msg.length);
+  EXPECT_EQ(0, memcmp(msg.buffer, std::string(300, 'x').data(), 300));
+}
+
+// The cap is channel-wide policy, so publishers that disagree are rejected by
+// the server.
+TEST_F(ClientTest, MaxSlotSizeMustMatchAcrossPublishers) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  [[maybe_unused]] auto pub1 = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "shared_cap", subspace::PublisherOptions()
+                        .SetSlotSize(128)
+                        .SetNumSlots(4)
+                        .SetMaxSlotSize(256)));
+
+  auto pub2 = client.CreatePublisher("shared_cap",
+                                     subspace::PublisherOptions()
+                                         .SetSlotSize(128)
+                                         .SetNumSlots(4)
+                                         .SetMaxSlotSize(512));
+  ASSERT_FALSE(pub2.ok());
+  EXPECT_THAT(pub2.status().message(),
+              ::testing::HasSubstr("Inconsistent max_slot_size"));
+
+  // A publisher that agrees is fine.
+  [[maybe_unused]] auto pub3 = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "shared_cap", subspace::PublisherOptions()
+                        .SetSlotSize(128)
+                        .SetNumSlots(4)
+                        .SetMaxSlotSize(256)));
 }
 
 // ---------------------------------------------------------------------------

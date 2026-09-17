@@ -557,8 +557,8 @@ SubspaceSubscriberOptions subspace_subscriber_options_default(void) {
   return options;
 }
 
-SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size,
-                                                            int num_slots) {
+SubspacePublisherOptions
+subspace_publisher_options_default(SubspaceSlotSize slot_size, int num_slots) {
   SubspacePublisherOptions options = {
       .slot_size = slot_size,
       .num_slots = num_slots,
@@ -624,6 +624,7 @@ SubspacePublisher subspace_create_publisher(SubspaceClient client,
       .SetBridge(options.bridge)
       .SetForTunnel(options.for_tunnel)
       .SetFixedSize(options.fixed_size)
+      .SetMaxSlotSize(options.max_slot_size)
       .SetType(StringFromPointer(options.type.type, options.type.type_length))
       .SetActivate(options.activate)
       .SetMux(StringFromPointer(options.mux, options.mux_length))
@@ -1650,6 +1651,14 @@ bool subspace_is_publisher_fixed_size(SubspacePublisher publisher) {
          (*PublisherPtr(publisher))->IsFixedSize();
 }
 
+SubspaceSlotSize
+subspace_get_publisher_max_slot_size(SubspacePublisher publisher) {
+  if (publisher.publisher == nullptr) {
+    return 0;
+  }
+  return (*PublisherPtr(publisher))->MaxSlotSize();
+}
+
 bool subspace_is_publisher_for_tunnel(SubspacePublisher publisher) {
   return publisher.publisher != nullptr &&
          (*PublisherPtr(publisher))->ForTunnel();
@@ -1660,7 +1669,7 @@ bool subspace_publisher_uses_split_buffers(SubspacePublisher publisher) {
          (*PublisherPtr(publisher))->UsesSplitBuffers();
 }
 
-int32_t subspace_get_publisher_slot_size(SubspacePublisher publisher) {
+SubspaceSlotSize subspace_get_publisher_slot_size(SubspacePublisher publisher) {
   if (publisher.publisher == nullptr) {
     return 0;
   }
@@ -1749,7 +1758,7 @@ subspace_get_publisher_virtual_memory_usage(SubspacePublisher publisher) {
 bool subspace_get_publisher_stats_counters(SubspacePublisher publisher,
                                            uint64_t *total_bytes,
                                            uint64_t *total_messages,
-                                           uint32_t *max_message_size,
+                                           uint64_t *max_message_size,
                                            uint32_t *total_drops) {
   if (total_bytes != nullptr) {
     *total_bytes = 0;
@@ -1821,7 +1830,8 @@ int subspace_get_subscriber_fd(SubspaceSubscriber subscriber) {
   return (*sub_ptr)->GetFileDescriptor().Fd();
 }
 
-int32_t subspace_get_subscriber_slot_size(SubspaceSubscriber subscriber) {
+SubspaceSlotSize
+subspace_get_subscriber_slot_size(SubspaceSubscriber subscriber) {
   if (subscriber.subscriber == nullptr) {
     return 0;
   }

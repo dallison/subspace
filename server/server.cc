@@ -1196,7 +1196,7 @@ Server::HandleIncomingConnection(async::Context ctx,
 }
 
 absl::StatusOr<ServerChannel *>
-Server::CreateMultiplexer(const std::string &channel_name, int slot_size,
+Server::CreateMultiplexer(const std::string &channel_name, int64_t slot_size,
                           int num_slots,
                           uint64_t subscriber_queue_arena_size,
                           std::string type) {
@@ -1230,7 +1230,7 @@ Server::CreateMultiplexer(const std::string &channel_name, int slot_size,
 }
 
 absl::StatusOr<ServerChannel *>
-Server::CreateChannel(const std::string &channel_name, int slot_size,
+Server::CreateChannel(const std::string &channel_name, int64_t slot_size,
                       int num_slots, uint64_t subscriber_queue_arena_size,
                       const std::string &mux, int vchan_id, std::string type,
                       bool hidden, std::string telemetry_target) {
@@ -1331,7 +1331,7 @@ uint64_t Server::GetVirtualMemoryUsage() const {
   return size;
 }
 
-absl::Status Server::RemapChannel(ServerChannel *channel, int slot_size,
+absl::Status Server::RemapChannel(ServerChannel *channel, int64_t slot_size,
                                   int num_slots,
                                   uint64_t subscriber_queue_arena_size) {
   if (channel->IsVirtual()) {
@@ -1424,7 +1424,7 @@ Server::FindOrCreateTelemetryChannel(const std::string &target_name) {
   }
   uint64_t total_bytes = 0;
   uint64_t total_messages = 0;
-  uint32_t max_message_size = 0;
+  uint64_t max_message_size = 0;
   // Subsequent reports contain deltas from these initial counters.
   target->GetStatsCounters(total_bytes, total_messages, max_message_size,
                            state->last_total_drops);
@@ -1716,7 +1716,7 @@ void Server::PublishTelemetryBatch(const std::string &target_name,
   if (IsPublicChannel(target)) {
     uint64_t total_bytes = 0;
     uint64_t total_messages = 0;
-    uint32_t max_message_size = 0;
+    uint64_t max_message_size = 0;
     target->GetStatsCounters(total_bytes, total_messages, max_message_size,
                              current_drops);
     std::vector<ResizeInfo> resize_info = target->GetResizeInfo();
@@ -1826,6 +1826,13 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
       if (absl::Status s = channel->ValidateOrSetMaxSubscribers(
               rch.max_subscribers, /*set_if_missing=*/true,
               "shadow recovery");
+          !s.ok()) {
+        return s;
+      }
+    }
+    if (rch.has_max_slot_size) {
+      if (absl::Status s = channel->ValidateOrSetMaxSlotSize(
+              rch.max_slot_size, /*set_if_missing=*/true, "shadow recovery");
           !s.ok()) {
         return s;
       }
@@ -2041,7 +2048,7 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
       state->target_channel_id = target->GetChannelId();
       uint64_t total_bytes = 0;
       uint64_t total_messages = 0;
-      uint32_t max_message_size = 0;
+      uint64_t max_message_size = 0;
       target->GetStatsCounters(total_bytes, total_messages, max_message_size,
                                state->last_total_drops);
       state->resize_count = target->GetResizeInfo().size();

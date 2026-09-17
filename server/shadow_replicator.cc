@@ -180,6 +180,10 @@ void ShadowReplicator::SendCreateChannel(ServerChannel *channel) {
     msg->set_has_max_subscribers(true);
     msg->set_max_subscribers(channel->MaxSubscribers());
   }
+  if (channel->MaxSlotSize() > 0) {
+    msg->set_has_max_slot_size(true);
+    msg->set_max_slot_size(channel->MaxSlotSize());
+  }
   msg->set_hidden(channel->IsHidden());
   if (channel->IsTelemetryChannel()) {
     msg->set_telemetry_target(channel->TelemetryTarget());
@@ -313,6 +317,10 @@ void ShadowReplicator::SendUpdateChannelOptions(const ServerChannel *channel) {
     msg->set_has_max_subscribers(true);
     msg->set_max_subscribers(channel->MaxSubscribers());
   }
+  if (channel->MaxSlotSize() > 0) {
+    msg->set_has_max_slot_size(true);
+    msg->set_max_slot_size(channel->MaxSlotSize());
+  }
   SendEvent(event);
 }
 
@@ -435,6 +443,8 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
           .max_publishers = msg.max_publishers(),
           .has_max_subscribers = msg.has_max_subscribers(),
           .max_subscribers = msg.max_subscribers(),
+          .has_max_slot_size = msg.has_max_slot_size(),
+          .max_slot_size = msg.max_slot_size(),
           .hidden = msg.hidden(),
           .telemetry_target = msg.telemetry_target(),
           .ccb_fd = std::move(fds[0]),

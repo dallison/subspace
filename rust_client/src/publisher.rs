@@ -23,7 +23,7 @@ use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 pub type OnSendCallback = Box<dyn Fn(*mut u8, i64) -> Result<i64> + Send + Sync>;
-pub type ResizeCallback = Box<dyn Fn(i32, i32) -> Result<()> + Send + Sync>;
+pub type ResizeCallback = Box<dyn Fn(i64, i64) -> Result<()> + Send + Sync>;
 
 pub struct PublishedMessage {
     pub new_slot: Option<usize>,
@@ -731,7 +731,7 @@ impl PublisherImpl {
             if !is_activation {
                 let message_size = slot.message_size();
                 ccb.total_bytes.fetch_add(message_size, Ordering::Relaxed);
-                let msg_size = message_size as u32;
+                let msg_size = message_size;
                 let mut old_max = ccb.max_message_size.load(Ordering::Relaxed);
                 while msg_size > old_max {
                     match ccb.max_message_size.compare_exchange_weak(

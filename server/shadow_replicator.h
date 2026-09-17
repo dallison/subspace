@@ -53,7 +53,7 @@ struct RecoveredSubscriber {
 struct RecoveredChannel {
   std::string name;
   int channel_id = 0;
-  int slot_size = 0;
+  int64_t slot_size = 0;
   int num_slots = 0;
   uint64_t subscriber_queue_arena_size = 0;
   std::string type;
@@ -71,6 +71,8 @@ struct RecoveredChannel {
   int max_publishers = 0;
   bool has_max_subscribers = false;
   int max_subscribers = 0;
+  bool has_max_slot_size = false;
+  int64_t max_slot_size = 0;
   bool hidden = false;
   std::string telemetry_target;
   toolbelt::FileDescriptor ccb_fd;

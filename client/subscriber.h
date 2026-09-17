@@ -99,7 +99,7 @@ public:
     subscriber_queue_size_ = ResolveSubscriberQueueSize(NumSlots(), size);
   }
 
-  int32_t SlotSize() const { return ClientChannel::SlotSize(CurrentSlot()); }
+  int64_t SlotSize() const { return ClientChannel::SlotSize(CurrentSlot()); }
 
   bool IsPlaceholder() const { return ClientChannel::NumSlots() == 0; }
 

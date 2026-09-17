@@ -354,6 +354,18 @@ void ClientHandler::HandleCreatePublisher(
     response->set_error("num_slots and slot_size must be greater than 0");
     return;
   }
+  if (req.max_slot_size() < 0) {
+    response->set_error(
+        absl::StrFormat("max_slot_size must be non-negative, not %d",
+                        req.max_slot_size()));
+    return;
+  }
+  if (req.max_slot_size() > 0 && req.slot_size() > req.max_slot_size()) {
+    response->set_error(absl::StrFormat(
+        "Slot size %d for channel %s exceeds its maximum slot size of %d bytes",
+        req.slot_size(), req.channel_name(), req.max_slot_size()));
+    return;
+  }
   absl::StatusOr<size_t> checked_ccb_size =
       CheckedCcbSize(req.num_slots(), req.subscriber_queue_arena_size());
   if (!checked_ccb_size.ok()) {
@@ -385,9 +397,10 @@ void ClientHandler::HandleCreatePublisher(
   if (channel == nullptr) {
     server_->logger_.Log(toolbelt::LogLevel::kDebug,
                          "Publisher %s is creating new channel %s with size "
-                         "%d/%d and type length %zu (total of %zu channels)",
+                         "%lld/%d and type length %zu (total of %zu channels)",
                          client_name_.c_str(), req.channel_name().c_str(),
-                         req.slot_size(), req.num_slots(), req.type().size(),
+                         static_cast<long long>(req.slot_size()),
+                         req.num_slots(), req.type().size(),
                          server_->GetNumChannels());
     absl::StatusOr<ServerChannel *> ch = server_->CreateChannel(
         req.channel_name(), req.slot_size(), req.num_slots(),
@@ -401,10 +414,11 @@ void ClientHandler::HandleCreatePublisher(
   } else if (channel->IsPlaceholder()) {
     server_->logger_.Log(
         toolbelt::LogLevel::kDebug,
-        "Publisher %s is remapping placeholder channel %s with size %d/%d and "
-        "type length %zu (total of %zu channels)",
-        client_name_.c_str(), req.channel_name().c_str(), req.slot_size(),
-        req.num_slots(), req.type().size(), server_->GetNumChannels());
+        "Publisher %s is remapping placeholder channel %s with size %lld/%d "
+        "and type length %zu (total of %zu channels)",
+        client_name_.c_str(), req.channel_name().c_str(),
+        static_cast<long long>(req.slot_size()), req.num_slots(),
+        req.type().size(), server_->GetNumChannels());
     // Channel exists, but it's just a placeholder.  Remap the memory now
     // that we know the slots.
     absl::Status status = server_->RemapChannel(
@@ -532,9 +546,10 @@ void ClientHandler::HandleCreatePublisher(
       }
       server_->logger_.Log(
           toolbelt::LogLevel::kDebug,
-          "Publisher %s is resizing channel %s buffers from %d bytes to %d",
-          client_name_.c_str(), channel->Name().c_str(), channel->SlotSize(),
-          req.slot_size());
+          "Publisher %s is resizing channel %s buffers from %lld bytes to %lld",
+          client_name_.c_str(), channel->Name().c_str(),
+          static_cast<long long>(channel->SlotSize()),
+          static_cast<long long>(req.slot_size()));
     }
 
     if (channel->IsLocal() != req.is_local()) {
@@ -551,6 +566,12 @@ void ClientHandler::HandleCreatePublisher(
                            : channel;
   if (absl::Status status = split_channel->ValidateOrSetMaxPublishers(
           req.max_publishers(), /*set_if_missing=*/true, "publisher");
+      !status.ok()) {
+    response->set_error(status.ToString());
+    return;
+  }
+  if (absl::Status status = split_channel->ValidateOrSetMaxSlotSize(
+          req.max_slot_size(), /*set_if_missing=*/true, "publisher");
       !status.ok()) {
     response->set_error(status.ToString());
     return;

@@ -50,7 +50,7 @@ public class SubspaceClient implements AutoCloseable {
      * @return a new publisher
      * @throws SubspaceException on failure
      */
-    public SubspacePublisher createPublisher(String channelName, int slotSize,
+    public SubspacePublisher createPublisher(String channelName, long slotSize,
                                              int numSlots, boolean reliable) {
         checkOpen();
         long pubHandle = nativeCreatePublisher(nativeHandle, channelName,
@@ -59,7 +59,7 @@ public class SubspaceClient implements AutoCloseable {
     }
 
     /** Create a non-reliable publisher with default options. */
-    public SubspacePublisher createPublisher(String channelName, int slotSize,
+    public SubspacePublisher createPublisher(String channelName, long slotSize,
                                              int numSlots) {
         return createPublisher(channelName, slotSize, numSlots, false);
     }
@@ -97,7 +97,7 @@ public class SubspaceClient implements AutoCloseable {
     private static native void nativeDestroy(long handle);
     private static native long nativeCreatePublisher(long handle,
                                                      String channelName,
-                                                     int slotSize,
+                                                     long slotSize,
                                                      int numSlots,
                                                      boolean reliable);
     private static native long nativeCreateSubscriber(long handle,
