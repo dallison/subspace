@@ -34,6 +34,10 @@ public:
   bool IsReliable() const { return options_.IsReliable(); }
   bool IsLocal() const { return options_.IsLocal(); }
   bool IsFixedSize() const { return options_.IsFixedSize(); }
+  // Aligned upper bound on the slot size, or 0 if the channel is uncapped.
+  int64_t MaxSlotSize() const {
+    return options_.max_slot_size > 0 ? Aligned(options_.max_slot_size) : 0;
+  }
   bool UsesSplitBuffers() const { return UseSplitBuffers(); }
   void BeginSubscriberQueuePublish() {
     active_queue_publish_depth_.fetch_add(1, std::memory_order_seq_cst);

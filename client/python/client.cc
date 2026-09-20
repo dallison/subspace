@@ -52,6 +52,15 @@ PYBIND11_MODULE(subspace, m) {
       .value("READ_NEWEST", ReadMode::kReadNewest,
              "Read the newest available message.");
 
+  // ClearTrigger enum.
+  py::enum_<ClearTrigger>(m, "ClearTrigger",
+                          "Whether ReadMessage consumes the subscriber "
+                          "trigger fd.")
+      .value("CLEAR_TRIGGER", ClearTrigger::kClearTrigger,
+             "Read (clear) the subscriber trigger fd.")
+      .value("NO_CLEAR_TRIGGER", ClearTrigger::kNoClearTrigger,
+             "Leave the subscriber trigger fd unread.");
+
   // ChannelCounters struct.
   py::class_<ChannelCounters>(m, "ChannelCounters",
                               "Live counters for a channel stored in shared "
@@ -108,6 +117,11 @@ PYBIND11_MODULE(subspace, m) {
            "Set whether the publisher is reliable.")
       .def("set_fixed_size", &PublisherOptions::SetFixedSize,
            "Set whether the publisher has fixed size messages.")
+      .def("set_max_slot_size", &PublisherOptions::SetMaxSlotSize,
+           "Set the upper bound on the channel's slot size, or 0 for no "
+           "limit.")
+      .def("max_slot_size", &PublisherOptions::MaxSlotSize,
+           "Get the upper bound on the channel's slot size.")
       .def("set_type", &PublisherOptions::SetType,
            "Set the type of the message carried.")
       .def("is_local", &PublisherOptions::IsLocal,
@@ -266,7 +280,45 @@ PYBIND11_MODULE(subspace, m) {
            "Tunnel subscribers need to know whether messages are locally or "
            "remotely generated via the cross-machine flag.")
       .def("for_tunnel", &SubscriberOptions::ForTunnel,
-           "Get whether this subscriber is for an external tunnel process.");
+           "Get whether this subscriber is for an external tunnel process.")
+      .def("set_telemetry", &SubscriberOptions::SetTelemetry,
+           "Set whether the subscriber receives server-generated telemetry "
+           "for the channel instead of payload messages.")
+      .def("telemetry", &SubscriberOptions::Telemetry,
+           "Get whether the subscriber receives server-generated telemetry.");
+
+  py::enum_<Telemetry::Change>(m, "TelemetryChange")
+      .value("NONE", Telemetry::NONE)
+      .value("ADDED", Telemetry::ADDED)
+      .value("REMOVED", Telemetry::REMOVED);
+
+  py::class_<Telemetry::Publisher>(m, "TelemetryPublisher")
+      .def_property_readonly("name", &Telemetry::Publisher::name)
+      .def_property_readonly("change", &Telemetry::Publisher::change);
+  py::class_<Telemetry::Subscriber>(m, "TelemetrySubscriber")
+      .def_property_readonly("name", &Telemetry::Subscriber::name)
+      .def_property_readonly("change", &Telemetry::Subscriber::change);
+  py::class_<Telemetry::Drop>(m, "TelemetryDrop")
+      .def_property_readonly("num_drops", &Telemetry::Drop::num_drops);
+  py::class_<Telemetry::Resize>(m, "TelemetryResize")
+      .def_property_readonly("new_size", &Telemetry::Resize::new_size);
+  py::class_<Telemetry, std::shared_ptr<Telemetry>>(m, "Telemetry")
+      .def_property_readonly("publishers", [](const Telemetry &self) {
+        return std::vector<Telemetry::Publisher>(self.publishers().begin(),
+                                                 self.publishers().end());
+      })
+      .def_property_readonly("subscribers", [](const Telemetry &self) {
+        return std::vector<Telemetry::Subscriber>(self.subscribers().begin(),
+                                                  self.subscribers().end());
+      })
+      .def_property_readonly("drops", [](const Telemetry &self) {
+        return std::vector<Telemetry::Drop>(self.drops().begin(),
+                                            self.drops().end());
+      })
+      .def_property_readonly("resizes", [](const Telemetry &self) {
+        return std::vector<Telemetry::Resize>(self.resizes().begin(),
+                                              self.resizes().end());
+      });
 
   // Message class returned from read_message.
   py::class_<Message>(m, "Message",
@@ -385,6 +437,7 @@ PYBIND11_MODULE(subspace, m) {
   publisher_class.def("is_local", &Publisher::IsLocal);
   publisher_class.def("is_fixed_size", &Publisher::IsFixedSize);
   publisher_class.def("slot_size", &Publisher::SlotSize);
+  publisher_class.def("max_slot_size", &Publisher::MaxSlotSize);
 
   // New accessors.
   publisher_class.def("name", &Publisher::Name,
@@ -693,7 +746,8 @@ exceed metadata_size() bytes.)doc",
       "get_stats_counters",
       [](Publisher *self) -> py::dict {
         uint64_t total_bytes = 0, total_messages = 0;
-        uint32_t max_message_size = 0, total_drops = 0;
+        uint64_t max_message_size = 0;
+        uint32_t total_drops = 0;
         self->GetStatsCounters(total_bytes, total_messages, max_message_size,
                                total_drops);
         py::dict d;
@@ -717,9 +771,10 @@ total_drops.)doc");
   // Existing: read_message(skip_to_newest) - returns bytes.
   subscriber_class.def(
       "read_message",
-      [](Subscriber *self, bool skip_to_newest) {
+      [](Subscriber *self, bool skip_to_newest, ClearTrigger clear_trigger) {
         absl::StatusOr<Message> read_result = self->ReadMessage(
-            skip_to_newest ? ReadMode::kReadNewest : ReadMode::kReadNext);
+            skip_to_newest ? ReadMode::kReadNewest : ReadMode::kReadNext,
+            clear_trigger);
         if (!read_result.ok()) {
           throw std::runtime_error(read_result.status().ToString());
         }
@@ -731,8 +786,27 @@ total_drops.)doc");
       R"doc("Read a message from a subscriber. If there are no available messages,
 the returned bytes will have zero length. Setting the 'skip_to_newest' argument
 to True, causes the read to skip ahead to the newest available message, otherwise,
-it reads the next available message (oldest message not read yet).)doc",
-      py::arg("skip_to_newest") = false, py::return_value_policy::copy);
+it reads the next available message (oldest message not read yet). Pass
+clear_trigger=ClearTrigger.NO_CLEAR_TRIGGER to leave the subscriber trigger fd
+unread.)doc",
+      py::arg("skip_to_newest") = false,
+      py::arg("clear_trigger") = ClearTrigger::kClearTrigger,
+      py::return_value_policy::copy);
+
+  subscriber_class.def(
+      "read_telemetry_message",
+      [](Subscriber *self, bool skip_to_newest) {
+        absl::StatusOr<std::shared_ptr<Telemetry>> result =
+            self->ReadTelemetryMessage(skip_to_newest ? ReadMode::kReadNewest
+                                                      : ReadMode::kReadNext);
+        if (!result.ok()) {
+          throw std::runtime_error(result.status().ToString());
+        }
+        return *result;
+      },
+      R"doc(Read and deserialize a server-generated telemetry message.
+Returns None when no message is currently available.)doc",
+      py::arg("skip_to_newest") = false);
 
   // Existing: wait().
   subscriber_class.def(
@@ -753,9 +827,11 @@ it reads the next available message (oldest message not read yet).)doc",
   // New: read_message_object - returns a full Message with metadata.
   subscriber_class.def(
       "read_message_object",
-      [](Subscriber *self, bool skip_to_newest) -> Message {
+      [](Subscriber *self, bool skip_to_newest,
+         ClearTrigger clear_trigger) -> Message {
         absl::StatusOr<Message> read_result = self->ReadMessage(
-            skip_to_newest ? ReadMode::kReadNewest : ReadMode::kReadNext);
+            skip_to_newest ? ReadMode::kReadNewest : ReadMode::kReadNext,
+            clear_trigger);
         if (!read_result.ok()) {
           throw std::runtime_error(read_result.status().ToString());
         }
@@ -765,8 +841,12 @@ it reads the next available message (oldest message not read yet).)doc",
 (length, buffer, timestamp, ordinal, vchan_id, is_activation, slot_id,
 checksum_error).  Use as a context manager to auto-release the slot:
     with sub.read_message_object() as msg:
-        process(msg.buffer))doc",
-      py::arg("skip_to_newest") = false, py::return_value_policy::move);
+        process(msg.buffer)
+Pass clear_trigger=ClearTrigger.NO_CLEAR_TRIGGER to leave the subscriber
+trigger fd unread.)doc",
+      py::arg("skip_to_newest") = false,
+      py::arg("clear_trigger") = ClearTrigger::kClearTrigger,
+      py::return_value_policy::move);
 
   // New accessors.
   subscriber_class.def("name", &Subscriber::Name,
@@ -1023,7 +1103,7 @@ is listening on the same Unix Domain Socket.)doc");
   // Existing: create_publisher overload 1 (slot_size, num_slots, flags).
   client_class.def(
       "create_publisher",
-      [](Client *self, const std::string &channel_name, int slot_size,
+      [](Client *self, const std::string &channel_name, int64_t slot_size,
          int num_slots, bool local, bool reliable, bool fixed_size,
          const std::string &type) -> Publisher {
         absl::StatusOr<Publisher> result =
@@ -1065,7 +1145,7 @@ bytes long.)doc",
   // Existing: create_publisher overload 3 (slot_size, num_slots, options).
   client_class.def(
       "create_publisher",
-      [](Client *self, const std::string &channel_name, int slot_size,
+      [](Client *self, const std::string &channel_name, int64_t slot_size,
          int num_slots, const PublisherOptions &options) -> Publisher {
         absl::StatusOr<Publisher> result =
             self->CreatePublisher(channel_name, slot_size, num_slots, options);

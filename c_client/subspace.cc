@@ -30,6 +30,14 @@ struct HandleCache {
   std::vector<SubspaceMessage> messages;
 };
 
+struct TelemetryStorage {
+  std::shared_ptr<subspace::Telemetry> message;
+  std::vector<SubspaceTelemetryParticipant> publishers;
+  std::vector<SubspaceTelemetryParticipant> subscribers;
+  std::vector<SubspaceTelemetryDrop> drops;
+  std::vector<SubspaceTelemetryResize> resizes;
+};
+
 std::unordered_map<void *, ClientCache> client_caches;
 std::unordered_map<void *, HandleCache> publisher_caches;
 std::unordered_map<void *, HandleCache> subscriber_caches;
@@ -59,6 +67,48 @@ SubscriberPtr(SubspaceSubscriber subscriber) {
 
 SubspaceString ToCString(const std::string &s) {
   return {.data = s.data(), .length = s.size()};
+}
+
+SubspaceTelemetry TakeCTelemetry(
+    std::shared_ptr<subspace::Telemetry> message) {
+  if (message == nullptr) {
+    return {};
+  }
+
+  auto *storage = new TelemetryStorage;
+  storage->message = std::move(message);
+  storage->publishers.reserve(storage->message->publishers_size());
+  for (const auto &publisher : storage->message->publishers()) {
+    storage->publishers.push_back(
+        {.name = ToCString(publisher.name()),
+         .change =
+             static_cast<SubspaceTelemetryChange>(publisher.change())});
+  }
+  storage->subscribers.reserve(storage->message->subscribers_size());
+  for (const auto &subscriber : storage->message->subscribers()) {
+    storage->subscribers.push_back(
+        {.name = ToCString(subscriber.name()),
+         .change =
+             static_cast<SubspaceTelemetryChange>(subscriber.change())});
+  }
+  storage->drops.reserve(storage->message->drops_size());
+  for (const auto &drop : storage->message->drops()) {
+    storage->drops.push_back({.num_drops = drop.num_drops()});
+  }
+  storage->resizes.reserve(storage->message->resizes_size());
+  for (const auto &resize : storage->message->resizes()) {
+    storage->resizes.push_back({.new_size = resize.new_size()});
+  }
+
+  return {.telemetry = storage,
+          .publishers = storage->publishers.data(),
+          .num_publishers = storage->publishers.size(),
+          .subscribers = storage->subscribers.data(),
+          .num_subscribers = storage->subscribers.size(),
+          .drops = storage->drops.data(),
+          .num_drops = storage->drops.size(),
+          .resizes = storage->resizes.data(),
+          .num_resizes = storage->resizes.size()};
 }
 
 SubspaceChannelCounters ToCCounters(const subspace::ChannelCounters &counters) {
@@ -144,6 +194,12 @@ SubspaceChannelStats ToCChannelStats(const subspace::ChannelStats &stats,
 subspace::ReadMode ToCppReadMode(SubspaceReadMode mode) {
   return mode == kSubspaceReadNewest ? subspace::ReadMode::kReadNewest
                                      : subspace::ReadMode::kReadNext;
+}
+
+subspace::ClearTrigger ToCppClearTrigger(SubspaceClearTrigger clear_trigger) {
+  return clear_trigger == kSubspaceNoClearTrigger
+             ? subspace::ClearTrigger::kNoClearTrigger
+             : subspace::ClearTrigger::kClearTrigger;
 }
 
 subspace::ChecksumCallback
@@ -501,8 +557,8 @@ SubspaceSubscriberOptions subspace_subscriber_options_default(void) {
   return options;
 }
 
-SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size,
-                                                            int num_slots) {
+SubspacePublisherOptions
+subspace_publisher_options_default(SubspaceSlotSize slot_size, int num_slots) {
   SubspacePublisherOptions options = {
       .slot_size = slot_size,
       .num_slots = num_slots,
@@ -524,6 +580,7 @@ subspace_create_subscriber(SubspaceClient client, const char *channel_name,
       .SetSubscriberQueueSize(options.subscriber_queue_size)
       .SetBridge(options.bridge)
       .SetForTunnel(options.for_tunnel)
+      .SetTelemetry(options.telemetry)
       .SetType(StringFromPointer(options.type.type, options.type.type_length))
       .SetMaxActiveMessages(options.max_active_messages)
       .SetMaxSubscribers(options.max_subscribers)
@@ -567,6 +624,7 @@ SubspacePublisher subspace_create_publisher(SubspaceClient client,
       .SetBridge(options.bridge)
       .SetForTunnel(options.for_tunnel)
       .SetFixedSize(options.fixed_size)
+      .SetMaxSlotSize(options.max_slot_size)
       .SetType(StringFromPointer(options.type.type, options.type.type_length))
       .SetActivate(options.activate)
       .SetMux(StringFromPointer(options.mux, options.mux_length))
@@ -602,8 +660,9 @@ SubspacePublisher subspace_create_publisher(SubspaceClient client,
   return publisher;
 }
 
-SubspaceMessage subspace_read_message_with_mode(SubspaceSubscriber subscriber,
-                                                SubspaceReadMode mode) {
+SubspaceMessage subspace_read_message_with_mode_and_trigger(
+    SubspaceSubscriber subscriber, SubspaceReadMode mode,
+    SubspaceClearTrigger clear_trigger) {
   SubspaceMessage message = EmptyMessage();
   if (subscriber.subscriber == nullptr) {
     return message;
@@ -613,8 +672,8 @@ SubspaceMessage subspace_read_message_with_mode(SubspaceSubscriber subscriber,
   // subspace::Subscriber.
   auto sub_ptr = reinterpret_cast<std::shared_ptr<subspace::Subscriber> *>(
       subscriber.subscriber);
-  absl::StatusOr<subspace::Message> status_or_msg =
-      (*sub_ptr)->ReadMessage(ToCppReadMode(mode));
+  absl::StatusOr<subspace::Message> status_or_msg = (*sub_ptr)->ReadMessage(
+      ToCppReadMode(mode), ToCppClearTrigger(clear_trigger));
   if (!status_or_msg.ok()) {
     subspace_set_error(status_or_msg.status().ToString().c_str());
     return message;
@@ -629,8 +688,49 @@ SubspaceMessage subspace_read_message_with_mode(SubspaceSubscriber subscriber,
   return TakeCMessage(std::move(*status_or_msg));
 }
 
+SubspaceMessage subspace_read_message_with_mode(SubspaceSubscriber subscriber,
+                                                SubspaceReadMode mode) {
+  return subspace_read_message_with_mode_and_trigger(subscriber, mode,
+                                                     kSubspaceClearTrigger);
+}
+
 SubspaceMessage subspace_read_message(SubspaceSubscriber subscriber) {
   return subspace_read_message_with_mode(subscriber, kSubspaceReadNext);
+}
+
+SubspaceTelemetry subspace_read_telemetry_message_with_mode(
+    SubspaceSubscriber subscriber, SubspaceReadMode mode) {
+  subspace_clear_error();
+  if (subscriber.subscriber == nullptr) {
+    subspace_set_error("Invalid subscriber");
+    return {};
+  }
+
+  auto sub_ptr = SubscriberPtr(subscriber);
+  absl::StatusOr<std::shared_ptr<subspace::Telemetry>> telemetry =
+      (*sub_ptr)->ReadTelemetryMessage(ToCppReadMode(mode));
+  if (!telemetry.ok()) {
+    subspace_set_error(telemetry.status().ToString().c_str());
+    return {};
+  }
+  return TakeCTelemetry(std::move(*telemetry));
+}
+
+SubspaceTelemetry
+subspace_read_telemetry_message(SubspaceSubscriber subscriber) {
+  return subspace_read_telemetry_message_with_mode(subscriber,
+                                                   kSubspaceReadNext);
+}
+
+bool subspace_free_telemetry(SubspaceTelemetry *telemetry) {
+  subspace_clear_error();
+  if (telemetry == nullptr || telemetry->telemetry == nullptr) {
+    subspace_set_error("Invalid telemetry parameter");
+    return false;
+  }
+  delete reinterpret_cast<TelemetryStorage *>(telemetry->telemetry);
+  *telemetry = {};
+  return true;
 }
 
 SubspaceMessage subspace_find_message(SubspaceSubscriber subscriber,
@@ -1551,6 +1651,14 @@ bool subspace_is_publisher_fixed_size(SubspacePublisher publisher) {
          (*PublisherPtr(publisher))->IsFixedSize();
 }
 
+SubspaceSlotSize
+subspace_get_publisher_max_slot_size(SubspacePublisher publisher) {
+  if (publisher.publisher == nullptr) {
+    return 0;
+  }
+  return (*PublisherPtr(publisher))->MaxSlotSize();
+}
+
 bool subspace_is_publisher_for_tunnel(SubspacePublisher publisher) {
   return publisher.publisher != nullptr &&
          (*PublisherPtr(publisher))->ForTunnel();
@@ -1561,7 +1669,7 @@ bool subspace_publisher_uses_split_buffers(SubspacePublisher publisher) {
          (*PublisherPtr(publisher))->UsesSplitBuffers();
 }
 
-int32_t subspace_get_publisher_slot_size(SubspacePublisher publisher) {
+SubspaceSlotSize subspace_get_publisher_slot_size(SubspacePublisher publisher) {
   if (publisher.publisher == nullptr) {
     return 0;
   }
@@ -1650,7 +1758,7 @@ subspace_get_publisher_virtual_memory_usage(SubspacePublisher publisher) {
 bool subspace_get_publisher_stats_counters(SubspacePublisher publisher,
                                            uint64_t *total_bytes,
                                            uint64_t *total_messages,
-                                           uint32_t *max_message_size,
+                                           uint64_t *max_message_size,
                                            uint32_t *total_drops) {
   if (total_bytes != nullptr) {
     *total_bytes = 0;
@@ -1722,7 +1830,8 @@ int subspace_get_subscriber_fd(SubspaceSubscriber subscriber) {
   return (*sub_ptr)->GetFileDescriptor().Fd();
 }
 
-int32_t subspace_get_subscriber_slot_size(SubspaceSubscriber subscriber) {
+SubspaceSlotSize
+subspace_get_subscriber_slot_size(SubspaceSubscriber subscriber) {
   if (subscriber.subscriber == nullptr) {
     return 0;
   }

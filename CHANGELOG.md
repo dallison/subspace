@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### ReadMessage trigger control
+- Added `ClearTrigger` (`kClearTrigger` / `kNoClearTrigger`) so `ReadMessage`
+  can leave the subscriber trigger fd unread. Exposed in C++, C, Python, and
+  Rust.
+
 ### Publisher Buffer Leases
 - Added explicit C++, C, Python, and Rust APIs to acquire multiple unpublished
   publisher slots, publish or release individual leases, and reject stale lease

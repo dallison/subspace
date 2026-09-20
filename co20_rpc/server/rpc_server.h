@@ -84,7 +84,7 @@ struct Method {
   // (co20::ValueTask) so it may co_await work before calling exactly one of
   // reply/error_reply.
   Method(RpcServer *server, std::string name, std::string request_type,
-         std::string response_type, int32_t slot_size, int32_t num_slots,
+         std::string response_type, int64_t slot_size, int32_t num_slots,
          std::function<co20::ValueTask<void>(
              const google::protobuf::Any &,
              std::function<void(std::unique_ptr<google::protobuf::Any>)>,
@@ -98,7 +98,7 @@ struct Method {
   }
 
   Method(RpcServer *server, std::string name, std::string request_type,
-         std::string response_type, int32_t slot_size, int32_t num_slots,
+         std::string response_type, int64_t slot_size, int32_t num_slots,
          std::function<co20::ValueTask<absl::Status>(
              const google::protobuf::Any &, internal::AnyStreamWriter &)>
              callback,
@@ -116,7 +116,7 @@ struct Method {
   std::string name;
   std::string request_type;
   std::string response_type;
-  int32_t slot_size;
+  int64_t slot_size;
   int32_t num_slots;
   // Async handler for a normal, non-streaming method.  See the constructor
   // above for the calling convention.

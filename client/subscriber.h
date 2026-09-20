@@ -61,7 +61,8 @@ public:
                       std::move(session_id), std::move(type), std::move(reload),
                       user_id, group_id),
         subscriber_id_(subscriber_id),
-        subscriber_queue_size_(subscriber_queue_size), options_(options) {
+        subscriber_queue_size_(subscriber_queue_size), options_(options),
+        request_name_(name) {
     // Preallocate to avoid malloc later.
     (void)GetOrdinalTracker(vchan_id_);
   }
@@ -70,6 +71,9 @@ public:
   void InitActiveMessages();
   void ResetDeliveryState();
   bool UsesSplitBuffers() const { return UseSplitBuffers(); }
+  // The public requested name may differ from the mapped telemetry channel.
+  const std::string &RequestName() const { return request_name_; }
+  void SetRequestName(std::string name) { request_name_ = std::move(name); }
 
   std::shared_ptr<SubscriberImpl> shared_from_this() {
     return std::static_pointer_cast<SubscriberImpl>(
@@ -95,7 +99,7 @@ public:
     subscriber_queue_size_ = ResolveSubscriberQueueSize(NumSlots(), size);
   }
 
-  int32_t SlotSize() const { return ClientChannel::SlotSize(CurrentSlot()); }
+  int64_t SlotSize() const { return ClientChannel::SlotSize(CurrentSlot()); }
 
   bool IsPlaceholder() const { return ClientChannel::NumSlots() == 0; }
 
@@ -148,8 +152,14 @@ public:
 
   std::shared_ptr<ActiveMessage> GetActiveMessage() { return active_message_; }
 
+  // A reliable subscriber must pin its current message so that the publisher
+  // cannot recycle the slot while the subscriber is still using it.
+  bool RetainsActiveMessage() const {
+    return options_.keep_active_message || options_.reliable;
+  }
+
   void ClearActiveMessage() {
-    if (!options_.keep_active_message) {
+    if (!RetainsActiveMessage()) {
       return;
     }
     if (active_message_ != nullptr) {
@@ -165,7 +175,7 @@ public:
                                                   bool checksum_error) {
     std::shared_ptr<ActiveMessage> &m = active_messages_[slot->id];
     m->Set(len, buf, ord, ts, vchan_id, is_activation, checksum_error);
-    if (options_.keep_active_message) {
+    if (RetainsActiveMessage()) {
       active_message_ = m;
       m->IncRef();
     }
@@ -191,8 +201,10 @@ public:
     if (slot->ordinal.load(std::memory_order_relaxed) != ordinal) {
       return nullptr;
     }
-    // If we are still holding on to the same active message, return it.
-    if (options_.keep_active_message && active_message_ != nullptr &&
+    // If we are still holding on to the same active message, return it.  Going
+    // through Set() again would count the slot a second time against
+    // max_active_messages without a matching release.
+    if (RetainsActiveMessage() && active_message_ != nullptr &&
         active_message_->slot == slot && active_message_->ordinal == ordinal) {
       return active_message_;
     }
@@ -371,6 +383,7 @@ private:
   toolbelt::TriggerFd trigger_;
   std::vector<toolbelt::TriggerFd> reliable_publishers_;
   SubscriberOptions options_;
+  std::string request_name_;
   std::atomic<int> num_active_messages_{0};
   std::mutex reliable_publishers_mutex_;
 

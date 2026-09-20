@@ -21,6 +21,9 @@ pub type MessageCallback = Box<dyn Fn(Message) + Send + Sync>;
 pub type OnReceiveCallback = Box<dyn Fn(*mut u8, i64) -> Result<i64> + Send + Sync>;
 
 pub struct SubscriberImpl {
+    // Public target name used in telemetry reload and removal requests.
+    pub request_name: String,
+    // May map the server's hidden telemetry channel.
     pub channel: Channel,
     pub subscriber_id: i32,
     pub subscriber_queue_size: i32,
@@ -114,7 +117,8 @@ fn virtual_channel_id_match(slot_vchan_id: i16, subscriber_vchan_id: i32) -> boo
 
 impl SubscriberImpl {
     pub fn new(
-        name: String,
+        request_name: String,
+        channel_name: String,
         num_slots: i32,
         default_subscriber_queue_size: i32,
         subscriber_queue_arena_size: u64,
@@ -127,8 +131,9 @@ impl SubscriberImpl {
         options: SubscriberOptions,
     ) -> Self {
         let mut s = Self {
+            request_name,
             channel: Channel::new(
-                name,
+                channel_name,
                 num_slots,
                 default_subscriber_queue_size,
                 subscriber_queue_arena_size,

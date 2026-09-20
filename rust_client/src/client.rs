@@ -12,7 +12,7 @@ use crate::proto;
 use crate::publisher::{clear_trigger, PublisherImpl};
 use crate::socket::SocketConnection;
 use crate::subscriber::SubscriberImpl;
-use crate::ReadMode;
+use crate::{ClearTrigger, ReadMode};
 use nix::sys::mman::ProtFlags;
 use std::cell::UnsafeCell;
 use std::os::unix::io::RawFd;
@@ -234,13 +234,30 @@ impl Publisher {
                 clear_trigger(pub_impl.poll_fd);
             }
 
-            let slot_size = pub_impl.channel.current_slot_size() as i32;
+            let slot_size = pub_impl.channel.current_slot_size() as i64;
             let mut span_size = slot_size as usize;
+            let requested_size = max_size as i64;
 
-            if max_size != -1 && max_size > slot_size {
+            if requested_size != -1 && requested_size > slot_size {
+                let max_slot_size = if pub_impl.options.max_slot_size > 0 {
+                    aligned64(pub_impl.options.max_slot_size)
+                } else {
+                    0
+                };
+                if max_slot_size != 0 && requested_size > max_slot_size {
+                    return Err(SubspaceError::InvalidArgument(format!(
+                        "Requested buffer of {} bytes on channel {} exceeds its maximum slot size of {} bytes",
+                        requested_size, pub_impl.channel.name, max_slot_size
+                    )));
+                }
                 let mut new_slot_size = slot_size;
-                while new_slot_size <= slot_size || new_slot_size < max_size {
-                    new_slot_size = expand_slot_size(new_slot_size as u64) as i32;
+                while new_slot_size <= slot_size || new_slot_size < requested_size {
+                    new_slot_size = expand_slot_size(new_slot_size as u64) as i64;
+                }
+                // The growth multiplier can overshoot the cap.  Clamping is safe
+                // because requested_size <= max_slot_size was checked above.
+                if max_slot_size != 0 && new_slot_size > max_slot_size {
+                    new_slot_size = max_slot_size;
                 }
                 span_size = new_slot_size as usize;
 
@@ -255,7 +272,7 @@ impl Publisher {
                     cb(slot_size, new_slot_size)?;
                 }
 
-                pub_impl.create_or_attach_buffers(aligned64(new_slot_size as i64) as u64)?;
+                pub_impl.create_or_attach_buffers(aligned64(new_slot_size) as u64)?;
                 register_pending_client_buffers(&mut client, &mut pub_impl.channel)?;
                 if let Some(si) = pub_impl.channel.slot {
                     pub_impl.channel.set_slot_to_biggest_buffer(si);
@@ -613,7 +630,7 @@ impl Publisher {
     /// Receives (old_size, new_size).  Return an error to prevent the resize.
     pub fn register_resize_callback<F>(&self, callback: F)
     where
-        F: Fn(i32, i32) -> Result<()> + Send + Sync + 'static,
+        F: Fn(i64, i64) -> Result<()> + Send + Sync + 'static,
     {
         self.imp.lock().unwrap().resize_callback = Some(Box::new(callback));
     }
@@ -680,7 +697,7 @@ impl Publisher {
         }
     }
 
-    pub fn get_stats_counters(&self) -> (u64, u64, u32, u32) {
+    pub fn get_stats_counters(&self) -> (u64, u64, u64, u32) {
         let imp = self.imp.lock().unwrap();
         let ccb = imp.channel.ccb();
         (
@@ -750,7 +767,7 @@ pub struct Subscriber {
 
 impl Subscriber {
     pub fn name(&self) -> String {
-        self.imp.lock().unwrap().channel.name.clone()
+        self.imp.lock().unwrap().request_name.clone()
     }
 
     pub fn is_reliable(&self) -> bool {
@@ -789,15 +806,30 @@ impl Subscriber {
         }
     }
 
-    /// Read the next (or newest) message.
+    /// Read the next (or newest) message. The subscriber trigger fd is
+    /// consumed (cleared).
     pub fn read_message(&self, mode: ReadMode) -> Result<Message> {
+        self.read_message_with_trigger(mode, ClearTrigger::ClearTrigger)
+    }
+
+    /// Read the next (or newest) message, optionally leaving the subscriber
+    /// trigger fd unread. Pass `ClearTrigger::NoClearTrigger` when the caller
+    /// is managing the fd from an external event loop.
+    pub fn read_message_with_trigger(
+        &self,
+        mode: ReadMode,
+        clear_trigger: ClearTrigger,
+    ) -> Result<Message> {
         let mut client = self.inner.lock().unwrap();
         let mut sub_impl = self.imp.lock().unwrap();
+        let should_clear_trigger = clear_trigger == ClearTrigger::ClearTrigger;
 
         if sub_impl.channel.is_placeholder() {
             reload_subscriber(&mut *client, &mut sub_impl)?;
             if sub_impl.channel.is_placeholder() {
-                sub_impl.clear_poll_fd();
+                if should_clear_trigger {
+                    sub_impl.clear_poll_fd();
+                }
                 return Ok(Message::default());
             }
             sub_impl.trigger_reliable_publishers();
@@ -806,7 +838,24 @@ impl Subscriber {
         reload_reliable_publishers_if_necessary(&mut *client, &mut sub_impl)?;
 
         let pass_activation = sub_impl.options.pass_activation;
-        read_message_internal(&mut *client, &mut sub_impl, mode, pass_activation, true)
+        read_message_internal(
+            &mut *client,
+            &mut sub_impl,
+            mode,
+            pass_activation,
+            should_clear_trigger,
+        )
+    }
+
+    /// Read and deserialize a server-generated telemetry message.
+    pub fn read_telemetry_message(&self, mode: ReadMode) -> Result<Option<proto::Telemetry>> {
+        let message = self.read_message(mode)?;
+        if message.is_empty() {
+            return Ok(None);
+        }
+        let telemetry =
+            <proto::Telemetry as prost::Message>::decode(unsafe { message.as_slice() })?;
+        Ok(Some(telemetry))
     }
 
     /// Wait until there's a message available.
@@ -934,7 +983,7 @@ impl Subscriber {
             if sub.message_callback.is_none() {
                 return Err(SubspaceError::Internal(format!(
                     "No message callback registered for channel {}",
-                    sub.channel.name
+                    sub.request_name
                 )));
             }
         }
@@ -1048,7 +1097,7 @@ impl Subscriber {
         self.imp.lock().unwrap().options.vchan_id
     }
 
-    pub fn get_stats_counters(&self) -> (u64, u64, u32, u32) {
+    pub fn get_stats_counters(&self) -> (u64, u64, u64, u32) {
         let sub = self.imp.lock().unwrap();
         let ccb = sub.channel.ccb();
         (
@@ -1076,11 +1125,12 @@ impl Drop for Subscriber {
         let client = self.inner.lock().unwrap();
         let sub_impl = self.imp.lock().unwrap();
 
-        let channel_name = sub_impl.channel.name.clone();
+        let channel_name = sub_impl.request_name.clone();
         let subscriber_id = sub_impl.subscriber_id;
+        let opts = sub_impl.options.clone();
         drop(sub_impl);
 
-        let _ = remove_subscriber_request(&client, &channel_name, subscriber_id);
+        let _ = remove_subscriber_request(&client, &channel_name, subscriber_id, &opts);
     }
 }
 
@@ -1144,6 +1194,18 @@ impl Client {
                 "MaxOutstandingSlotLeases must be between 1 and NumSlots".into(),
             ));
         }
+        if opts.max_slot_size < 0 {
+            return Err(SubspaceError::InvalidArgument(format!(
+                "MaxSlotSize must be non-negative, not {}",
+                opts.max_slot_size
+            )));
+        }
+        if opts.max_slot_size > 0 && opts.slot_size > opts.max_slot_size {
+            return Err(SubspaceError::InvalidArgument(format!(
+                "Slot size {} for channel {} exceeds its maximum slot size of {} bytes",
+                opts.slot_size, channel_name, opts.max_slot_size
+            )));
+        }
 
         let slot_size = aligned64(opts.slot_size as i64);
 
@@ -1151,7 +1213,7 @@ impl Client {
             request: Some(proto::request::Request::CreatePublisher(
                 proto::CreatePublisherRequest {
                     channel_name: channel_name.to_string(),
-                    slot_size: slot_size as i32,
+                    slot_size,
                     num_slots: opts.num_slots,
                     is_local: opts.local,
                     is_reliable: opts.reliable,
@@ -1172,6 +1234,14 @@ impl Client {
                     process_id: std::process::id() as u64,
                     max_outstanding_slot_leases: opts.max_outstanding_slot_leases,
                     active_queue_publish_depth: 0,
+                    // Align the cap the same way as the slot size so that a
+                    // publisher asking for slot_size == max_slot_size isn't
+                    // rejected by its own limit.
+                    max_slot_size: if opts.max_slot_size > 0 {
+                        aligned64(opts.max_slot_size)
+                    } else {
+                        0
+                    },
                 },
             )),
         };
@@ -1304,6 +1374,7 @@ impl Client {
                     is_reliable: opts.reliable,
                     is_bridge: opts.bridge,
                     for_tunnel: opts.for_tunnel,
+                    telemetry: opts.telemetry,
                     r#type: opts.channel_type.as_bytes().to_vec(),
                     max_active_messages: opts.max_active_messages,
                     mux: opts.mux.clone(),
@@ -1330,8 +1401,13 @@ impl Client {
             return Err(SubspaceError::ServerError(sub_resp.error));
         }
 
+        let request_name = channel_name.to_string();
+        let channel_name =
+            resolved_subscriber_channel_name(&request_name, &sub_resp.resolved_channel_name);
+
         let mut sub_impl = SubscriberImpl::new(
-            channel_name.to_string(),
+            request_name,
+            channel_name,
             sub_resp.num_slots,
             sub_resp.default_subscriber_queue_size,
             sub_resp.subscriber_queue_arena_size,
@@ -1766,7 +1842,7 @@ fn read_message_internal(
                     "Dropped {} message{} on channel {}",
                     drops,
                     if drops == 1 { "" } else { "s" },
-                    sub.channel.name
+                    sub.request_name
                 );
             }
             sub.channel
@@ -1803,6 +1879,18 @@ fn read_message_internal(
     })
 }
 
+// Telemetry subscribers map a hidden channel while keeping request_name public.
+fn resolved_subscriber_channel_name(
+    request_name: &str,
+    resolved_channel_name: &str,
+) -> String {
+    if resolved_channel_name.is_empty() {
+        request_name.to_string()
+    } else {
+        resolved_channel_name.to_string()
+    }
+}
+
 fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Result<()> {
     let scb = sub.channel.scb();
     let channel_id = sub.channel.channel_id as usize;
@@ -1813,10 +1901,11 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
     let req = proto::Request {
         request: Some(proto::request::Request::CreateSubscriber(
             proto::CreateSubscriberRequest {
-                channel_name: sub.channel.name.clone(),
+                channel_name: sub.request_name.clone(),
                 subscriber_id: sub.subscriber_id,
                 mux: sub.options.mux.clone(),
                 subscriber_queue_size: sub.options.subscriber_queue_size,
+                telemetry: sub.options.telemetry,
                 process_id: std::process::id() as u64,
                 ..Default::default()
             },
@@ -1830,6 +1919,10 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
     };
     if !sub_resp.error.is_empty() {
         return Err(SubspaceError::ServerError(sub_resp.error));
+    }
+
+    if !sub_resp.resolved_channel_name.is_empty() {
+        sub.channel.name = sub_resp.resolved_channel_name.clone();
     }
 
     // A subscriber-created placeholder is the only case where the server
@@ -2066,12 +2159,14 @@ fn remove_subscriber_request(
     client: &ClientInner,
     channel_name: &str,
     subscriber_id: i32,
+    opts: &SubscriberOptions,
 ) -> Result<()> {
     let req = proto::Request {
         request: Some(proto::request::Request::RemoveSubscriber(
             proto::RemoveSubscriberRequest {
                 channel_name: channel_name.to_string(),
                 subscriber_id,
+                telemetry: opts.telemetry,
             },
         )),
     };

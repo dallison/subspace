@@ -18,6 +18,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
@@ -27,6 +28,8 @@
 #include <mutex>
 #include <optional>
 #include <sys/resource.h>
+#include <type_traits>
+#include <utility>
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
 #include <sys/syscall.h>
 #ifndef MFD_CLOEXEC
@@ -91,13 +94,46 @@ uint64_t ExpectedSplitBufferVirtualMemoryUsage(int num_slots,
          AlignPage(slot_size) * static_cast<uint64_t>(num_slots);
 }
 
-subspace::PublisherOptions PubOpts(int32_t slot_size = 0,
+// The client API slot size width is selected by SUBSPACE_64BIT_SLOT_SIZE, so
+// check that the macro actually reaches the API types.
+#if defined(SUBSPACE_64BIT_SLOT_SIZE)
+static_assert(std::is_same_v<subspace::SlotSizeType, int64_t>);
+#else
+static_assert(std::is_same_v<subspace::SlotSizeType, int32_t>);
+#endif
+static_assert(std::is_same_v<decltype(std::declval<subspace::PublisherOptions>()
+                                          .SlotSize()),
+                             subspace::SlotSizeType>);
+static_assert(
+    std::is_same_v<decltype(std::declval<subspace::Publisher>().SlotSize()),
+                   subspace::SlotSizeType>);
+
+subspace::PublisherOptions PubOpts(subspace::SlotSizeType slot_size = 0,
                                    int32_t num_slots = 0) {
   return subspace::PublisherOptions().SetSlotSize(slot_size).SetNumSlots(
       num_slots);
 }
 
 subspace::SubscriberOptions SubOpts() { return subspace::SubscriberOptions(); }
+
+absl::StatusOr<subspace::Telemetry>
+WaitForTelemetry(Subscriber &subscriber,
+                 std::chrono::milliseconds timeout = std::chrono::seconds(3)) {
+  auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    absl::StatusOr<std::shared_ptr<subspace::Telemetry>> telemetry =
+        subscriber.ReadTelemetryMessage(subspace::ReadMode::kReadNext);
+    if (!telemetry.ok()) {
+      return telemetry.status();
+    }
+    if (*telemetry != nullptr) {
+      return **telemetry;
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  return absl::DeadlineExceededError("Timed out waiting for telemetry");
+}
 
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
 absl::StatusOr<toolbelt::FileDescriptor> CreateTestMemfd(const char *name,
@@ -236,6 +272,63 @@ TEST_F(ClientTest, Resize1) {
   ASSERT_OK(buffer3);
   ASSERT_EQ(512, pub->SlotSize());
 }
+
+#if defined(SUBSPACE_64BIT_SLOT_SIZE)
+// With the 64 bit slot size API a channel can have slots that do not fit in an
+// int32_t.  The shared memory is sparse, so only the pages this test actually
+// touches are committed.
+TEST_F(ClientTest, SlotSizeLargerThanInt32) {
+  constexpr int64_t kSlotSize = 2058LL * 1024 * 1024; // 2.01GB.
+  constexpr int64_t kPastInt32 =
+      static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
+  static_assert(kSlotSize > kPastInt32, "slot must exceed the int32_t range");
+
+  subspace::Client client;
+  InitClient(client);
+
+  // Three slots: one for the publisher's lease, one for the subscriber's
+  // active message and one for the publisher to move on to.
+  absl::StatusOr<Publisher> pub = client.CreatePublisher(
+      "big_slots",
+      subspace::PublisherOptions().SetSlotSize(kSlotSize).SetNumSlots(3));
+  if (!pub.ok()) {
+    GTEST_SKIP() << "Cannot allocate a " << kSlotSize
+                 << " byte channel here: " << pub.status();
+  }
+  EXPECT_EQ(kSlotSize, pub->SlotSize());
+
+  absl::StatusOr<Subscriber> sub = client.CreateSubscriber("big_slots");
+  ASSERT_OK(sub);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer(kSlotSize);
+  ASSERT_OK(buffer);
+  ASSERT_NE(nullptr, *buffer);
+
+  // Write either side of the old int32_t boundary to prove the whole slot is
+  // addressable.
+  char *data = static_cast<char *>(*buffer);
+  data[0] = 'f';
+  data[kPastInt32] = 'm';
+  data[kSlotSize - 1] = 'l';
+  ASSERT_OK(pub->PublishMessage(kSlotSize));
+
+  absl::StatusOr<Message> message = sub->ReadMessage();
+  ASSERT_OK(message);
+  ASSERT_EQ(static_cast<size_t>(kSlotSize), message->length);
+  const char *received = static_cast<const char *>(message->buffer);
+  EXPECT_EQ('f', received[0]);
+  EXPECT_EQ('m', received[kPastInt32]);
+  EXPECT_EQ('l', received[kSlotSize - 1]);
+
+  uint64_t total_bytes = 0;
+  uint64_t total_messages = 0;
+  uint64_t max_message_size = 0;
+  uint32_t total_drops = 0;
+  pub->GetStatsCounters(total_bytes, total_messages, max_message_size,
+                        total_drops);
+  EXPECT_EQ(static_cast<uint64_t>(kSlotSize), max_message_size);
+}
+#endif // SUBSPACE_64BIT_SLOT_SIZE
 
 TEST_F(ClientTest, AttachingPublisherPreservesResizedSlotSize) {
   subspace::Client client1;
@@ -3159,6 +3252,38 @@ TEST_F(ClientTest, PublishSingleMessagePollAndReadSubscriberFirst) {
   ASSERT_EQ(0, msg->length);
 }
 
+TEST_F(ClientTest, ReadMessageNoClearTriggerLeavesEventFdReadable) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber("no_clear_trigger");
+  ASSERT_OK(sub);
+  absl::StatusOr<Publisher> pub =
+      pub_client.CreatePublisher("no_clear_trigger", 256, 10);
+  ASSERT_OK(pub);
+
+  struct pollfd fd = sub->GetPollFd();
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "foobar", 6);
+  ASSERT_OK(pub->PublishMessage(6));
+
+  ASSERT_EQ(1, ::poll(&fd, 1, 1000));
+
+  absl::StatusOr<Message> msg = sub->ReadMessage(
+      subspace::ReadMode::kReadNext, subspace::ClearTrigger::kNoClearTrigger);
+  ASSERT_OK(msg);
+  ASSERT_EQ(6, msg->length);
+
+  // The trigger fd was not consumed, so poll still reports ready.
+  fd.revents = 0;
+  ASSERT_EQ(1, ::poll(&fd, 1, 0));
+}
+
 TEST_F(ClientTest, PublishSingleMessagePollAndReadAfterPlaceholderRead) {
   subspace::Client pub_client;
   subspace::Client sub_client;
@@ -3506,6 +3631,94 @@ TEST_F(ClientTest, ReliablePublisher1) {
   });
 
   machine.Run();
+}
+
+TEST_F(ClientTest, TwoReliableSubscribersReceiveEveryMessage) {
+  subspace::Client client;
+  InitClient(client);
+
+  auto pub = client.CreatePublisher("two_reliable_subscribers",
+                                    subspace::PublisherOptions()
+                                        .SetSlotSize(sizeof(uint64_t))
+                                        .SetNumSlots(2)
+                                        .SetReliable(true));
+  ASSERT_OK(pub);
+  auto sub1 =
+      client.CreateSubscriber("two_reliable_subscribers",
+                              subspace::SubscriberOptions().SetReliable(true));
+  ASSERT_OK(sub1);
+  auto sub2 =
+      client.CreateSubscriber("two_reliable_subscribers",
+                              subspace::SubscriberOptions().SetReliable(true));
+  ASSERT_OK(sub2);
+
+  auto publish_sequence = [&pub](uint64_t sequence) -> absl::Status {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer(sizeof(sequence));
+    if (!buffer.ok()) {
+      return buffer.status();
+    }
+    if (*buffer == nullptr) {
+      return absl::UnavailableError("No reliable publisher slot available");
+    }
+    std::memcpy(*buffer, &sequence, sizeof(sequence));
+    return pub->PublishMessage(sizeof(sequence)).status();
+  };
+  auto read_sequence = [](Subscriber &sub) -> absl::StatusOr<uint64_t> {
+    absl::StatusOr<Message> message = sub.ReadMessage();
+    if (!message.ok()) {
+      return message.status();
+    }
+    if (message->length != sizeof(uint64_t)) {
+      return absl::DataLossError("Unexpected reliable message size");
+    }
+    uint64_t sequence = 0;
+    std::memcpy(&sequence, message->buffer, sizeof(sequence));
+    return sequence;
+  };
+  auto expect_publisher_blocked = [&pub]() {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_OK(buffer);
+    if (*buffer != nullptr) {
+      pub->CancelPublish();
+    }
+    ASSERT_EQ(nullptr, *buffer);
+  };
+
+  constexpr uint64_t kNumMessages = 32;
+  std::array<uint64_t, 2> received = {0, 0};
+
+  ASSERT_OK(publish_sequence(0));
+  auto sequence1 = read_sequence(*sub1);
+  ASSERT_OK(sequence1);
+  EXPECT_EQ(0, *sequence1);
+  ++received[0];
+  auto sequence2 = read_sequence(*sub2);
+  ASSERT_OK(sequence2);
+  EXPECT_EQ(0, *sequence2);
+  ++received[1];
+
+  for (uint64_t expected = 1; expected < kNumMessages; ++expected) {
+    ASSERT_OK(publish_sequence(expected));
+
+    // The previous active message occupies one slot and the unread message
+    // occupies the other, so the publisher must wait for both subscribers.
+    expect_publisher_blocked();
+
+    sequence1 = read_sequence(*sub1);
+    ASSERT_OK(sequence1);
+    EXPECT_EQ(expected, *sequence1);
+    ++received[0];
+
+    expect_publisher_blocked();
+
+    sequence2 = read_sequence(*sub2);
+    ASSERT_OK(sequence2);
+    EXPECT_EQ(expected, *sequence2);
+    ++received[1];
+  }
+
+  EXPECT_EQ(kNumMessages, received[0]);
+  EXPECT_EQ(kNumMessages, received[1]);
 }
 
 TEST_F(ClientTest, ReliablePublisherDoesNotBlockOnUnreliableSubscriber) {
@@ -4022,7 +4235,7 @@ TEST_F(ClientTest, DroppedMessageDetectionCanBeDisabled) {
 
   uint64_t total_bytes = 0;
   uint64_t total_messages = 0;
-  uint32_t max_message_size = 0;
+  uint64_t max_message_size = 0;
   uint32_t total_drops = 0;
   pub->GetStatsCounters(total_bytes, total_messages, max_message_size,
                         total_drops);
@@ -5013,6 +5226,210 @@ TEST_F(ClientTest, ChannelDirectory) {
   }
   ASSERT_TRUE(found_chan1);
   ASSERT_TRUE(found_chan2);
+}
+
+TEST_F(ClientTest, TelemetryRequiresExistingChannel) {
+  auto client =
+      EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket(), "telemetry-watch"));
+  absl::StatusOr<Subscriber> telemetry = client->CreateSubscriber(
+      "telemetry_missing", SubOpts().SetTelemetry(true));
+  EXPECT_FALSE(telemetry.ok());
+}
+
+TEST_F(ClientTest, TelemetryDoesNotEnforceRequestedType) {
+  auto client =
+      EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket(), "telemetry-type"));
+  Publisher publisher = EVAL_AND_ASSERT_OK(
+      client->CreatePublisher("telemetry_type", PubOpts(128, 4)));
+  Subscriber telemetry = EVAL_AND_ASSERT_OK(client->CreateSubscriber(
+      "telemetry_type",
+      SubOpts().SetType("application-data").SetTelemetry(true)));
+  EXPECT_EQ("subspace.Telemetry", telemetry.Type());
+}
+
+TEST_F(ClientTest, FailedTelemetrySubscriberRemovesHiddenChannel) {
+  constexpr char kChannel[] = "telemetry_failed_subscriber";
+  auto client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "telemetry-failure"));
+  Publisher publisher =
+      EVAL_AND_ASSERT_OK(client->CreatePublisher(kChannel, PubOpts(128, 4)));
+
+  absl::StatusOr<Subscriber> telemetry = client->CreateSubscriber(
+      kChannel, SubOpts().SetTelemetry(true).SetMaxActiveMessages(1000));
+  EXPECT_FALSE(telemetry.ok());
+  for (const auto &[name, channel] : Server()->GetChannels()) {
+    (void)name;
+    EXPECT_FALSE(channel->IsTelemetryChannel() &&
+                 channel->TelemetryTarget() == kChannel);
+  }
+}
+
+TEST_F(ClientTest, TelemetrySnapshotsAndBatchesParticipantChanges) {
+  constexpr char kChannel[] = "telemetry_participants";
+  auto publisher_client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "telemetry-publisher"));
+  auto subscriber_client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "telemetry-subscriber"));
+  auto watcher_client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "telemetry-watcher"));
+
+  Publisher publisher = EVAL_AND_ASSERT_OK(
+      publisher_client->CreatePublisher(kChannel, PubOpts(128, 8)));
+  Subscriber subscriber =
+      EVAL_AND_ASSERT_OK(subscriber_client->CreateSubscriber(kChannel));
+  {
+    Subscriber telemetry = EVAL_AND_ASSERT_OK(watcher_client->CreateSubscriber(
+        kChannel, SubOpts().SetTelemetry(true)));
+    EXPECT_EQ(kChannel, telemetry.Name());
+    EXPECT_EQ("subspace.Telemetry", telemetry.Type());
+
+    subspace::Telemetry snapshot =
+        EVAL_AND_ASSERT_OK(WaitForTelemetry(telemetry));
+    bool found_publisher = false;
+    bool found_subscriber = false;
+    for (const auto &entry : snapshot.publishers()) {
+      if (entry.name() == "telemetry-publisher" &&
+          entry.change() == subspace::Telemetry::NONE) {
+        found_publisher = true;
+      }
+    }
+    for (const auto &entry : snapshot.subscribers()) {
+      if (entry.name() == "telemetry-subscriber" &&
+          entry.change() == subspace::Telemetry::NONE) {
+        found_subscriber = true;
+      }
+    }
+    EXPECT_TRUE(found_publisher);
+    EXPECT_TRUE(found_subscriber);
+
+    auto added_client = EVAL_AND_ASSERT_OK(
+        subspace::Client::Create(Socket(), "telemetry-added"));
+    {
+      Publisher added = EVAL_AND_ASSERT_OK(
+          added_client->CreatePublisher(kChannel, PubOpts(128, 8)));
+      subspace::Telemetry update =
+          EVAL_AND_ASSERT_OK(WaitForTelemetry(telemetry));
+      bool found_added = false;
+      for (const auto &entry : update.publishers()) {
+        if (entry.name() == "telemetry-added" &&
+            entry.change() == subspace::Telemetry::ADDED) {
+          found_added = true;
+        }
+      }
+      EXPECT_TRUE(found_added);
+    }
+
+    subspace::Telemetry removal =
+        EVAL_AND_ASSERT_OK(WaitForTelemetry(telemetry));
+    bool found_removed = false;
+    for (const auto &entry : removal.publishers()) {
+      if (entry.name() == "telemetry-added" &&
+          entry.change() == subspace::Telemetry::REMOVED) {
+        found_removed = true;
+      }
+    }
+    EXPECT_TRUE(found_removed);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    std::shared_ptr<subspace::Telemetry> no_message = EVAL_AND_ASSERT_OK(
+        telemetry.ReadTelemetryMessage(subspace::ReadMode::kReadNewest));
+    EXPECT_EQ(nullptr, no_message);
+
+    Subscriber second = EVAL_AND_ASSERT_OK(watcher_client->CreateSubscriber(
+        kChannel, SubOpts().SetTelemetry(true)));
+    subspace::Telemetry refreshed =
+        EVAL_AND_ASSERT_OK(WaitForTelemetry(second));
+    EXPECT_GT(refreshed.publishers_size(), 0);
+
+    auto infos = EVAL_AND_ASSERT_OK(watcher_client->GetChannelInfo());
+    for (const subspace::ChannelInfo &info : infos) {
+      EXPECT_EQ(std::string::npos,
+                info.channel_name.find("/subspace/telemetry/"));
+    }
+    auto stats = EVAL_AND_ASSERT_OK(watcher_client->GetChannelStats());
+    for (const subspace::ChannelStats &stat : stats) {
+      EXPECT_EQ(std::string::npos,
+                stat.channel_name.find("/subspace/telemetry/"));
+    }
+  }
+
+  bool telemetry_channel_exists = true;
+  for (int attempt = 0; attempt < 40 && telemetry_channel_exists; ++attempt) {
+    telemetry_channel_exists = false;
+    for (const auto &[name, channel] : Server()->GetChannels()) {
+      (void)name;
+      if (channel->IsTelemetryChannel() &&
+          channel->TelemetryTarget() == kChannel) {
+        telemetry_channel_exists = true;
+        break;
+      }
+    }
+    if (telemetry_channel_exists) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+  }
+  EXPECT_FALSE(telemetry_channel_exists);
+}
+
+TEST_F(ClientTest, TelemetryReportsDropDeltasAndResizes) {
+  constexpr char kChannel[] = "telemetry_drop_resize";
+  auto target_client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "telemetry-target"));
+  auto watcher_client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "telemetry-metrics-watcher"));
+
+  Subscriber target_sub = EVAL_AND_ASSERT_OK(target_client->CreateSubscriber(
+      kChannel, SubOpts().SetKeepActiveMessage(true)));
+  Publisher target_pub = EVAL_AND_ASSERT_OK(
+      target_client->CreatePublisher(kChannel, PubOpts(32, 5)));
+  Subscriber telemetry = EVAL_AND_ASSERT_OK(
+      watcher_client->CreateSubscriber(kChannel, SubOpts().SetTelemetry(true)));
+  ASSERT_OK(WaitForTelemetry(telemetry).status());
+
+  absl::StatusOr<void *> resized = target_pub.GetMessageBuffer(4000);
+  ASSERT_OK(resized);
+  ASSERT_NE(nullptr, *resized);
+  *static_cast<char *>(*resized) = 'r';
+  ASSERT_OK(target_pub.PublishMessage(1));
+
+  for (int i = 0; i < 4; ++i) {
+    absl::StatusOr<void *> buffer = target_pub.GetMessageBuffer();
+    ASSERT_OK(buffer);
+    ASSERT_NE(nullptr, *buffer);
+    memset(*buffer, i, 1);
+    ASSERT_OK(target_pub.PublishMessage(1));
+  }
+  ASSERT_OK(target_sub.ReadMessage());
+  for (int i = 0; i < 4; ++i) {
+    absl::StatusOr<void *> buffer = target_pub.GetMessageBuffer();
+    ASSERT_OK(buffer);
+    ASSERT_NE(nullptr, *buffer);
+    memset(*buffer, i, 1);
+    ASSERT_OK(target_pub.PublishMessage(1));
+  }
+  for (;;) {
+    absl::StatusOr<Message> message = target_sub.ReadMessage();
+    ASSERT_OK(message);
+    if (message->length == 0) {
+      break;
+    }
+  }
+
+  bool found_drop = false;
+  bool found_resize = false;
+  for (int attempt = 0; attempt < 3 && (!found_drop || !found_resize);
+       ++attempt) {
+    subspace::Telemetry update =
+        EVAL_AND_ASSERT_OK(WaitForTelemetry(telemetry));
+    for (const auto &drop : update.drops()) {
+      found_drop = found_drop || drop.num_drops() > 0;
+    }
+    for (const auto &resize : update.resizes()) {
+      found_resize = found_resize || resize.new_size() >= 4000;
+    }
+  }
+  EXPECT_TRUE(found_drop);
+  EXPECT_TRUE(found_resize);
 }
 
 TEST_F(ClientTest, MessageGetters) {
@@ -7262,6 +7679,7 @@ TEST_F(ClientTest, SubscriberOptionsChain) {
       .SetMaxActiveMessages(20)
       .SetBridge(true)
       .SetForTunnel(true)
+      .SetTelemetry(true)
       .SetMux("/submux")
       .SetVchanId(3)
       .SetPassActivation(true)
@@ -7281,6 +7699,7 @@ TEST_F(ClientTest, SubscriberOptionsChain) {
   ASSERT_FALSE(opts.DetectDroppedMessages());
   ASSERT_TRUE(opts.IsBridge());
   ASSERT_TRUE(opts.ForTunnel());
+  ASSERT_TRUE(opts.Telemetry());
   ASSERT_EQ("/submux", opts.Mux());
   ASSERT_EQ(3, opts.VchanId());
   ASSERT_TRUE(opts.PassActivation());
@@ -7312,6 +7731,98 @@ TEST_F(ClientTest, ResizeFixedSizePublisherFails) {
   auto bigger = pub.GetMessageBuffer(256);
   ASSERT_FALSE(bigger.ok());
   EXPECT_THAT(bigger.status().message(), ::testing::HasSubstr("fixed size"));
+}
+
+// A publisher whose initial slot size is already over its own cap is rejected
+// before it reaches the server.
+TEST_F(ClientTest, MaxSlotSizeRejectsInitialSlotSize) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub = client.CreatePublisher("capped_initial",
+                                    subspace::PublisherOptions()
+                                        .SetSlotSize(512)
+                                        .SetNumSlots(4)
+                                        .SetMaxSlotSize(256));
+  ASSERT_FALSE(pub.ok());
+  EXPECT_THAT(pub.status().message(),
+              ::testing::HasSubstr("maximum slot size"));
+}
+
+// Asking GetMessageBuffer() for more than the cap is an error rather than a
+// resize.
+TEST_F(ClientTest, MaxSlotSizeRejectsOversizedBuffer) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "capped_resize", subspace::PublisherOptions()
+                           .SetSlotSize(128)
+                           .SetNumSlots(4)
+                           .SetMaxSlotSize(256)));
+
+  // Growth up to the cap is still allowed.
+  [[maybe_unused]] auto ok_buf = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer(256));
+  EXPECT_EQ(256, pub.SlotSize());
+
+  auto too_big = pub.GetMessageBuffer(257);
+  ASSERT_FALSE(too_big.ok());
+  EXPECT_EQ(absl::StatusCode::kInvalidArgument, too_big.status().code());
+  EXPECT_THAT(too_big.status().message(),
+              ::testing::HasSubstr("maximum slot size"));
+  // The failed request must not have resized the channel.
+  EXPECT_EQ(256, pub.SlotSize());
+}
+
+// The growth multiplier would jump past the cap, so the resize is clamped to
+// the cap instead of being refused.
+TEST_F(ClientTest, MaxSlotSizeClampsGrowthToLimit) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "clamped_resize", subspace::PublisherOptions()
+                            .SetSlotSize(256)
+                            .SetNumSlots(4)
+                            .SetMaxSlotSize(384)));
+  auto sub = EVAL_AND_ASSERT_OK(client.CreateSubscriber("clamped_resize"));
+
+  // Without the cap ExpandSlotSize() would double 256 to 512.
+  auto buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer(300));
+  ASSERT_NE(nullptr, buffer);
+  EXPECT_EQ(384, pub.SlotSize());
+
+  memset(buffer, 'x', 300);
+  ASSERT_OK(pub.PublishMessage(300));
+
+  auto msg = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_EQ(300U, msg.length);
+  EXPECT_EQ(0, memcmp(msg.buffer, std::string(300, 'x').data(), 300));
+}
+
+// The cap is channel-wide policy, so publishers that disagree are rejected by
+// the server.
+TEST_F(ClientTest, MaxSlotSizeMustMatchAcrossPublishers) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  [[maybe_unused]] auto pub1 = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "shared_cap", subspace::PublisherOptions()
+                        .SetSlotSize(128)
+                        .SetNumSlots(4)
+                        .SetMaxSlotSize(256)));
+
+  auto pub2 = client.CreatePublisher("shared_cap",
+                                     subspace::PublisherOptions()
+                                         .SetSlotSize(128)
+                                         .SetNumSlots(4)
+                                         .SetMaxSlotSize(512));
+  ASSERT_FALSE(pub2.ok());
+  EXPECT_THAT(pub2.status().message(),
+              ::testing::HasSubstr("Inconsistent max_slot_size"));
+
+  // A publisher that agrees is fine.
+  [[maybe_unused]] auto pub3 = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "shared_cap", subspace::PublisherOptions()
+                        .SetSlotSize(128)
+                        .SetNumSlots(4)
+                        .SetMaxSlotSize(256)));
 }
 
 // ---------------------------------------------------------------------------

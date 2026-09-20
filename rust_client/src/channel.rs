@@ -606,7 +606,7 @@ pub struct ChannelControlBlock {
 
     pub total_bytes: AtomicU64,
     pub total_messages: AtomicU64,
-    pub max_message_size: AtomicU32,
+    pub max_message_size: AtomicU64,
     pub total_drops: AtomicU32,
 
     pub free_slots_exhausted: AtomicBool,
@@ -614,6 +614,19 @@ pub struct ChannelControlBlock {
     // Accessed via unsafe pointer arithmetic.
 }
 const _: () = assert!(std::mem::offset_of!(ChannelControlBlock, version) == 72);
+// The stats block must stay in step with the C++ ChannelControlBlock.
+const _: () = assert!(
+    std::mem::offset_of!(ChannelControlBlock, total_messages)
+        == std::mem::offset_of!(ChannelControlBlock, total_bytes) + 8
+);
+const _: () = assert!(
+    std::mem::offset_of!(ChannelControlBlock, max_message_size)
+        == std::mem::offset_of!(ChannelControlBlock, total_messages) + 8
+);
+const _: () = assert!(
+    std::mem::offset_of!(ChannelControlBlock, total_drops)
+        == std::mem::offset_of!(ChannelControlBlock, max_message_size) + 8
+);
 
 #[repr(C)]
 pub struct AvailableSlotQueueIndex {

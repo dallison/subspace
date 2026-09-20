@@ -17,7 +17,7 @@ pub const CANCEL_CHANNEL_NUM_SLOTS: i32 = 8;
 
 #[derive(Debug, Clone)]
 pub struct MethodOptions {
-    pub slot_size: i32,
+    pub slot_size: i64,
     pub num_slots: i32,
     pub id: i32,
 }
@@ -38,7 +38,7 @@ pub(crate) struct MethodInfo {
     pub id: i32,
     pub request_type: String,
     pub response_type: String,
-    pub slot_size: i32,
+    pub slot_size: i64,
     pub num_slots: i32,
     pub request_publisher: Publisher,
     pub response_subscriber: Subscriber,

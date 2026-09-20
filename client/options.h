@@ -36,12 +36,12 @@ class Subscriber;
 
 // Options when creating a publisher.
 struct PublisherOptions {
-  int32_t SlotSize() const { return slot_size; }
+  SlotSizeType SlotSize() const { return slot_size; }
   int32_t NumSlots() const { return num_slots; }
   uint64_t SubscriberQueueArenaSize() const {
     return subscriber_queue_arena_size;
   }
-  PublisherOptions &SetSlotSize(int32_t size) {
+  PublisherOptions &SetSlotSize(SlotSizeType size) {
     slot_size = size;
     return *this;
   }
@@ -86,6 +86,18 @@ struct PublisherOptions {
     fixed_size = v;
     return *this;
   }
+
+  // Upper bound on how large the channel's slots may become.  A value of 0
+  // (the default) means there is no limit other than what the machine can
+  // allocate.  When set, the initial slot size must not exceed it, asking
+  // GetMessageBuffer() for a larger buffer fails instead of resizing, and
+  // automatic growth stops at the limit rather than overshooting it.  All
+  // publishers on a channel must agree on this value.
+  PublisherOptions &SetMaxSlotSize(SlotSizeType size) {
+    max_slot_size = size;
+    return *this;
+  }
+  SlotSizeType MaxSlotSize() const { return max_slot_size; }
 
   bool IsLocal() const { return local; }
   bool IsReliable() const { return reliable; }
@@ -250,9 +262,12 @@ struct PublisherOptions {
 
   // If you use the new CreatePublisher API, set the slot size and num slots in
   // here.
-  int32_t slot_size = 0;
+  SlotSizeType slot_size = 0;
   int32_t num_slots = 0;
   uint64_t subscriber_queue_arena_size = 0;
+
+  // See SetMaxSlotSize() for description.  0 means unlimited.
+  SlotSizeType max_slot_size = 0;
 
   bool local = false;
   bool reliable = false;
@@ -346,6 +361,14 @@ struct SubscriberOptions {
   }
   bool ForTunnel() const { return for_tunnel; }
 
+  // Subscribe to server-generated telemetry for the named channel instead of
+  // subscribing to the channel's payloads.
+  SubscriberOptions &SetTelemetry(bool v) {
+    telemetry = v;
+    return *this;
+  }
+  bool Telemetry() const { return telemetry; }
+
   SubscriberOptions &SetMux(std::string m) {
     mux = std::move(m);
     return *this;
@@ -414,6 +437,7 @@ struct SubscriberOptions {
   int32_t subscriber_queue_size = 0;
   bool bridge = false;
   bool for_tunnel = false;
+  bool telemetry = false;
   std::string type;
   int max_active_messages = 1;
   int32_t max_subscribers = 0;

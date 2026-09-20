@@ -82,6 +82,10 @@ for (;;) {
   auto bytes = static_cast<const char *>(msg_or->buffer);
   // Process bytes[0..msg_or->length).
 }
+
+// Leave the subscriber trigger fd unread:
+// sub.ReadMessage(subspace::ReadMode::kReadNext,
+//                 subspace::ClearTrigger::kNoClearTrigger);
 ```
 
 ## Python Client
@@ -108,6 +112,9 @@ while True:
     if len(data) == 0:
         break
     # Process data as bytes.
+
+# Leave the subscriber trigger fd unread:
+# subscriber.read_message(clear_trigger=subspace.ClearTrigger.NO_CLEAR_TRIGGER)
 ```
 
 For message metadata and ordinals, use `read_message_object()`:
@@ -142,7 +149,7 @@ channel subscriber limit.
 The Rust crate name is `subspace_client`.
 
 ```rust
-use subspace_client::{Client, PublisherOptions, ReadMode, SubscriberOptions};
+use subspace_client::{ClearTrigger, Client, PublisherOptions, ReadMode, SubscriberOptions};
 
 let client = Client::new("/tmp/subspace", "rust-client").unwrap();
 
@@ -173,6 +180,9 @@ loop {
     let data = unsafe { msg.as_slice() };
     // Process data.
 }
+
+// Leave the subscriber trigger fd unread:
+// subscriber.read_message_with_trigger(ReadMode::ReadNext, ClearTrigger::NoClearTrigger);
 ```
 
 For multiple in-flight unpublished slots:

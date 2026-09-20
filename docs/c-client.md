@@ -19,6 +19,7 @@ The main handle types are opaque wrappers:
 | `SubspacePublisher` | Publisher attached to a channel. |
 | `SubspaceSubscriber` | Subscriber attached to a channel. |
 | `SubspaceMessage` | A received message reference. |
+| `SubspaceTelemetry` | An owned, decoded channel telemetry message. |
 | `SubspaceMessageBuffer` | A writable publish buffer returned by a publisher. |
 | `SubspacePublisherBufferLease` | A specific unpublished publisher slot plus a stale-token guard. |
 
@@ -88,11 +89,12 @@ Important publisher options:
 
 | Field | Purpose |
 | --- | --- |
-| `slot_size`, `num_slots` | Initial payload slot size and fixed slot count. |
+| `slot_size`, `num_slots` | Initial payload slot size and fixed slot count. `slot_size` is a `SubspaceSlotSize`, which is `int32_t` unless the library and your code are both built with `SUBSPACE_64BIT_SLOT_SIZE`; see [Slot Sizes](slot-sizes.md#64-bit-slot-sizes). |
 | `local` | Keep the channel local to this server. |
 | `reliable` | Wait for free slots instead of overwriting unread messages. |
 | `bridge`, `for_tunnel` | Mark bridge/tunnel publishers. |
 | `fixed_size` | Reject oversized messages instead of resizing. |
+| `max_slot_size` | Upper bound on how large the slots may grow, or 0 for no limit. See [Limiting the Slot Size](slot-sizes.md#limiting-the-slot-size). |
 | `type` | Opaque type string used to match publishers and subscribers. |
 | `activate` | Publish an activation message when the publisher is created. |
 | `mux`, `vchan_id` | Use a mux channel and optional virtual channel id. |
@@ -214,6 +216,7 @@ Important subscriber options:
 | Field | Purpose |
 | --- | --- |
 | `reliable` | Participate in reliable slot lifetime tracking. |
+| `telemetry` | Subscribe to server-generated telemetry for the named existing channel instead of its payloads. |
 | `bridge`, `for_tunnel` | Mark bridge/tunnel subscribers. |
 | `type` | Required type string when type matching is used. |
 | `max_active_messages` | Maximum simultaneously held `SubspaceMessage` values. |
@@ -231,6 +234,11 @@ Subscribers do not request split-buffer mode. They learn the channel mode from
 the server and use `split_callbacks` only if the publisher used a custom split
 payload allocator.
 
+For channel monitoring, set `telemetry = true` and use
+`subspace_read_telemetry_message` to receive a decoded `SubspaceTelemetry`.
+See [Channel Telemetry](channel-telemetry.md) for message semantics, ownership,
+and lifecycle.
+
 ## Reading Messages
 
 Read messages with the default "next" mode, an explicit read mode, or by
@@ -247,6 +255,10 @@ if (msg.length > 0) {
 SubspaceMessage newest =
     subspace_read_message_with_mode(sub, kSubspaceReadNewest);
 subspace_free_message(&newest);
+
+SubspaceMessage kept = subspace_read_message_with_mode_and_trigger(
+    sub, kSubspaceReadNext, kSubspaceNoClearTrigger);
+subspace_free_message(&kept);
 ```
 
 Every non-empty `SubspaceMessage` must be released with
@@ -267,6 +279,10 @@ Related subscriber APIs:
 
 | Function | Purpose |
 | --- | --- |
+| `subspace_read_telemetry_message` | Read and decode the next telemetry message; a null `telemetry` field means no message is available. |
+| `subspace_read_telemetry_message_with_mode` | Read and decode telemetry using next or newest mode. |
+| `subspace_free_telemetry` | Release a non-empty decoded telemetry result. |
+| `subspace_read_message_with_mode_and_trigger` | Same as `subspace_read_message_with_mode`, with control over whether the subscriber trigger fd is consumed. |
 | `subspace_find_message` | Find a message by timestamp. |
 | `subspace_wait_for_subscriber` | Wait indefinitely for a message. |
 | `subspace_wait_for_subscriber_with_timeout` | Wait with a timeout. |

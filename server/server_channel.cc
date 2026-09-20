@@ -8,8 +8,8 @@
 #include "server/server.h"
 #include <cerrno>
 #include <csignal>
-#include <utility>
 #include <sys/mman.h>
+#include <utility>
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
 #include <sys/syscall.h>
 #ifndef MFD_CLOEXEC
@@ -216,6 +216,30 @@ absl::Status ServerChannel::ValidateOrSetMaxSubscribers(
   return absl::OkStatus();
 }
 
+absl::Status ServerChannel::ValidateOrSetMaxSlotSize(int64_t max_slot_size,
+                                                     bool set_if_missing,
+                                                     const char *user_type) {
+  if (max_slot_size < 0) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Invalid max_slot_size %d for %s on channel %s: value must be "
+        "non-negative",
+        max_slot_size, user_type, Name()));
+  }
+  if (!max_slot_size_set_) {
+    if (set_if_missing || max_slot_size > 0) {
+      max_slot_size_ = max_slot_size;
+      max_slot_size_set_ = true;
+    }
+    return absl::OkStatus();
+  }
+  if (max_slot_size_ != max_slot_size) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Inconsistent max_slot_size for %s on channel %s: already %d, not %d",
+        user_type, Name(), max_slot_size_, max_slot_size));
+  }
+  return absl::OkStatus();
+}
+
 void ServerChannel::RemoveBuffer(uint64_t session_id, Server *server) {
   if (ccb_ == nullptr) {
     return;
@@ -292,7 +316,7 @@ uint64_t ServerChannel::GetVirtualMemoryUsage() const {
 
 absl::StatusOr<SharedMemoryFds>
 ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
-                        [[maybe_unused]] int slot_size, int num_slots,
+                        [[maybe_unused]] int64_t slot_size, int num_slots,
                         uint64_t subscriber_queue_arena_size,
                         int initial_ordinal) {
   // Unmap existing memory.
@@ -1009,7 +1033,8 @@ std::vector<std::string> ServerChannel::RegisterExistingSubscribers() {
       RetireSubscriberQueue(id);
       warnings.push_back(absl::StrFormat(
           "Subscriber %d on channel %s requested queue capacity %d but the "
-          "publisher-provisioned arena cannot fit it; using the bitset path: %s",
+          "publisher-provisioned arena cannot fit it; using the bitset path: "
+          "%s",
           id, Name(), sub->SubscriberQueueSize(), status.ToString()));
     }
     RegisterSubscriber(id, GetVirtualChannelId(),
@@ -1065,16 +1090,22 @@ void ServerChannel::RemoveUser(Server *server, int user_id) {
   }
   if (user->IsPublisher()) {
     server->OnRemovePublisher(Name(), user->GetId());
-    server->ForEachShadow(
-        [this, &user](const std::unique_ptr<ShadowReplicator> &shadow) {
-          shadow->SendRemovePublisher(Name(), user->GetId());
-        });
+    if (!IsTelemetryChannel()) {
+      // Telemetry publishers are ephemeral and are never shadowed.
+      server->ForEachShadow(
+          [this, &user](const std::unique_ptr<ShadowReplicator> &shadow) {
+            shadow->SendRemovePublisher(Name(), user->GetId());
+          });
+    }
   } else {
     server->OnRemoveSubscriber(Name(), user->GetId());
     server->ForEachShadow(
         [this, &user](const std::unique_ptr<ShadowReplicator> &shadow) {
           shadow->SendRemoveSubscriber(Name(), user->GetId());
         });
+    if (IsTelemetryChannel()) {
+      server->TelemetrySubscriberRemoved(this);
+    }
   }
   CleanupSlots(user->GetId(), user->IsReliable(), user->IsPublisher(),
                GetVirtualChannelId());
@@ -1096,18 +1127,34 @@ void ServerChannel::RemoveUser(Server *server, int user_id) {
     TriggerAllSubscribers();
   }
   users_.erase(it);
-  if (IsEmpty()) {
+  // The telemetry coroutine removes its hidden channel after its publisher is
+  // fully destroyed.
+  if (IsEmpty() && !IsTelemetryChannel()) {
     server->RemoveChannel(this);
   }
   server->SendChannelDirectory();
 }
 
-void ServerChannel::RemoveAllUsersFor(ClientHandler *handler) {
+void ServerChannel::RemoveAllUsersFor(Server *server, ClientHandler *handler) {
   for (auto &[id, user] : users_) {
     if (user == nullptr) {
       continue;
     }
     if (user->GetHandler() == handler) {
+      if (IsHidden()) {
+        // Hidden channels bypass public plugin callbacks, so mirror the
+        // subscriber cleanup explicitly on disconnect.
+        if (user->IsSubscriber() && IsTelemetryChannel()) {
+          server->ForEachShadow(
+              [this, &user](const std::unique_ptr<ShadowReplicator> &shadow) {
+                shadow->SendRemoveSubscriber(Name(), user->GetId());
+              });
+          server->TelemetrySubscriberRemoved(this);
+        }
+      } else {
+        server->RecordTelemetryParticipantChange(this, user.get(),
+                                                 /*added=*/false);
+      }
       CleanupSlots(user->GetId(), user->IsReliable(), user->IsPublisher(),
                    GetVirtualChannelId());
       if (user->IsPublisher() && !IsPlaceholder() &&
@@ -1420,7 +1467,8 @@ std::vector<ResizeInfo> ServerChannel::GetResizeInfo() const {
 void ServerChannel::GetChannelStats(subspace::ChannelStatsProto *stats) {
   stats->set_channel_name(Name());
   uint64_t total_bytes, total_messages;
-  uint32_t max_message_size, total_drops;
+  uint64_t max_message_size;
+  uint32_t total_drops;
   GetStatsCounters(total_bytes, total_messages, max_message_size, total_drops);
   stats->set_total_bytes(total_bytes);
   stats->set_total_messages(total_messages);

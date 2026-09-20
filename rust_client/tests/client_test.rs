@@ -26,7 +26,7 @@ use subspace_client::options::{
     PublisherOptions, SubscriberOptions, DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE,
     DEFAULT_SUBSCRIBER_QUEUE_SIZE,
 };
-use subspace_client::{Client, ReadMode, SubspaceError};
+use subspace_client::{ClearTrigger, Client, ReadMode, SubspaceError};
 
 fn unique_socket_path() -> String {
     let mut template = b"/tmp/ss_rt_XXXXXX\0".to_vec();
@@ -115,6 +115,8 @@ fn subscriber_options_defaults() {
     assert!(!opts.reliable);
     assert_eq!(opts.subscriber_queue_size, 0);
     assert!(!opts.bridge);
+    assert!(!opts.for_tunnel);
+    assert!(!opts.telemetry);
     assert_eq!(opts.max_active_messages, 1);
     assert!(opts.log_dropped_messages);
     assert!(opts.detect_dropped_messages);
@@ -141,6 +143,8 @@ fn subscriber_options_builder_chain() {
         .set_pass_checksum_errors(true)
         .set_keep_active_message(true)
         .set_vchan_id(7)
+        .set_for_tunnel(true)
+        .set_telemetry(true)
         .set_type("image".into());
 
     assert!(opts.reliable);
@@ -154,6 +158,8 @@ fn subscriber_options_builder_chain() {
     assert!(opts.pass_checksum_errors);
     assert!(opts.keep_active_message);
     assert_eq!(opts.vchan_id, 7);
+    assert!(opts.for_tunnel);
+    assert!(opts.telemetry);
     assert_eq!(opts.channel_type, "image");
 }
 
@@ -358,6 +364,14 @@ fn read_mode_clone() {
     let mode = ReadMode::ReadNext;
     let cloned = mode;
     assert_eq!(mode, cloned);
+}
+
+#[test]
+fn clear_trigger_equality() {
+    assert_eq!(ClearTrigger::ClearTrigger, ClearTrigger::ClearTrigger);
+    assert_eq!(ClearTrigger::NoClearTrigger, ClearTrigger::NoClearTrigger);
+    assert_ne!(ClearTrigger::ClearTrigger, ClearTrigger::NoClearTrigger);
+    assert_eq!(ClearTrigger::default(), ClearTrigger::ClearTrigger);
 }
 
 // ── Error type tests ─────────────────────────────────────────────────────────
@@ -689,6 +703,48 @@ fn integration_publish_single_message_and_read() {
     // A second read should return an empty message (length 0).
     let msg2 = subscriber.read_message(ReadMode::ReadNext).unwrap();
     assert_eq!(msg2.length, 0);
+}
+
+fn poll_fd_readable(fd: i32, timeout_ms: i32) -> bool {
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+    ret > 0 && (pfd.revents & libc::POLLIN) != 0
+}
+
+#[test]
+fn integration_read_message_no_clear_trigger() {
+    let pub_client = new_client("test_no_clear_p");
+    let sub_client = new_client("test_no_clear_s");
+
+    let publisher = pub_client
+        .create_publisher(
+            "rust_no_clear",
+            &PublisherOptions::new().set_slot_size(256).set_num_slots(10),
+        )
+        .unwrap();
+    let subscriber = sub_client
+        .create_subscriber("rust_no_clear", &SubscriberOptions::new())
+        .unwrap();
+
+    let fd = subscriber.get_poll_fd();
+    let payload = b"keep trigger";
+    let (buf_ptr, _cap) = publisher.get_message_buffer(256).unwrap().unwrap();
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), buf_ptr, payload.len());
+    }
+    publisher.publish_message(payload.len() as i64).unwrap();
+
+    assert!(poll_fd_readable(fd, 1000));
+
+    let msg = subscriber
+        .read_message_with_trigger(ReadMode::ReadNext, ClearTrigger::NoClearTrigger)
+        .unwrap();
+    assert_eq!(msg.length as usize, payload.len());
+    assert!(poll_fd_readable(fd, 0));
 }
 
 #[test]
@@ -1189,7 +1245,7 @@ fn integration_large_message() {
 
     let msg_size = 64 * 1024;
     let pub_opts = PublisherOptions::new()
-        .set_slot_size(msg_size as i32)
+        .set_slot_size(msg_size as i64)
         .set_num_slots(4);
     let publisher = pub_client
         .create_publisher("rust_large1", &pub_opts)
@@ -3946,6 +4002,50 @@ fn integration_resize_multiple_expansions() {
 }
 
 #[test]
+fn integration_max_slot_size_caps_growth() {
+    let client = new_client("test_max_slot_size");
+
+    // The initial slot size may not exceed the cap.
+    let too_big = PublisherOptions::new()
+        .set_slot_size(512)
+        .set_num_slots(4)
+        .set_max_slot_size(256);
+    match client.create_publisher("rust_max_slot_initial", &too_big) {
+        Ok(_) => panic!("expected the initial slot size to be rejected"),
+        Err(e) => assert!(
+            e.to_string().contains("maximum slot size"),
+            "unexpected error: {}",
+            e
+        ),
+    }
+
+    let opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(4)
+        .set_max_slot_size(384);
+    let publisher = client.create_publisher("rust_max_slot", &opts).unwrap();
+
+    // Without the cap expand_slot_size() would double 256 to 512.
+    let (buf, cap) = publisher.get_message_buffer(300).unwrap().unwrap();
+    assert_eq!(cap, 384);
+    unsafe {
+        std::ptr::write_bytes(buf, b'x', 300);
+    }
+    // Releases the publish lock that get_message_buffer holds.
+    publisher.publish_message(300).unwrap();
+
+    // Asking for more than the cap is an error, not a resize.
+    match publisher.get_message_buffer(385) {
+        Ok(_) => panic!("expected the oversized request to be rejected"),
+        Err(e) => assert!(
+            e.to_string().contains("maximum slot size"),
+            "unexpected error: {}",
+            e
+        ),
+    }
+}
+
+#[test]
 fn integration_resize_subscriber_created_before_expansion() {
     let pub_client = new_client("test_resize_before_p");
     let sub_client = new_client("test_resize_before_s");
@@ -4458,6 +4558,47 @@ fn integration_publisher_new_accessors() {
     // current_slot_id should be valid after creation (publisher gets a slot).
     let slot_id = publisher.current_slot_id();
     assert!(slot_id >= 0);
+}
+
+#[test]
+fn integration_telemetry_subscriber_smoke() {
+    let pub_client = new_client("rust_telemetry_pub");
+    let watcher_client = new_client("rust_telemetry_watch");
+    let _pub = pub_client
+        .create_publisher(
+            "rust_telemetry_smoke",
+            &PublisherOptions::new().set_slot_size(128).set_num_slots(4),
+        )
+        .unwrap();
+
+    let telemetry = watcher_client
+        .create_subscriber(
+            "rust_telemetry_smoke",
+            &SubscriberOptions::new().set_telemetry(true),
+        )
+        .unwrap();
+
+    assert_eq!(telemetry.channel_type(), "subspace.Telemetry");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut snapshot = None;
+    while snapshot.is_none() && std::time::Instant::now() < deadline {
+        snapshot = telemetry
+            .read_telemetry_message(ReadMode::ReadNext)
+            .unwrap();
+        if snapshot.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let snapshot = snapshot.expect("timed out waiting for telemetry payload");
+    assert!(snapshot
+        .publishers
+        .iter()
+        .any(|publisher| publisher.name == "rust_telemetry_pub"));
+    assert!(telemetry
+        .read_telemetry_message(ReadMode::ReadNext)
+        .unwrap()
+        .is_none());
 }
 
 #[test]

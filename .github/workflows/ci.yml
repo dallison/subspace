@@ -208,6 +208,65 @@ jobs:
           name: bazel-memfd-test-logs-${{ matrix.os }}
           path: bazel-testlogs
 
+  # Exercises the 64 bit slot size client API (--config=slot_size_64, i.e.
+  # SUBSPACE_64BIT_SLOT_SIZE).  Slot sizes are 64 bit internally in every
+  # build, so the default CI jobs already cover the internals; this job covers
+  # the widened C and C++ API signatures and the tests that need slots larger
+  # than 2GB, which are compiled out of the default build.
+  slot-size-64:
+    name: slot-size-64 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60 # liberal upper bound to protect against tests stalling
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Bazel
+        uses: bazel-contrib/setup-bazel@0.18.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-${{ matrix.os }}-slot-size-64
+          repository-cache: true
+
+      - name: Build all targets (64 bit slot size API)
+        run: |
+          bazel build \
+            --config=slot_size_64 \
+            --verbose_failures \
+            -- //...
+
+      - name: Run tests (64 bit slot size API)
+        run: |
+          bazel test \
+            --config=slot_size_64 \
+            --verbose_failures \
+            --test_output=errors \
+            -- //...
+
+      # The test above is the only coverage of a slot larger than 2GB, and it
+      # skips itself when the machine cannot allocate one.  Run it again with
+      # its output shown so the log records whether it really ran.
+      - name: Report the large slot test result (64 bit slot size API)
+        run: |
+          bazel test \
+            --config=slot_size_64 \
+            --test_output=all \
+            --nocache_test_results \
+            --test_filter=ClientTest.SlotSizeLargerThanInt32 \
+            -- //client:client_test
+
+      - name: Upload slot-size-64 Bazel test logs
+        uses: actions/upload-artifact@v7
+        if: failure() # Upload artifacts only if a step failed
+        with:
+          name: bazel-slot-size-64-test-logs-${{ matrix.os }}
+          path: bazel-testlogs
+
   diagnostics:
     name: diagnostics (${{ matrix.os }}, ${{ matrix.mode }})
     runs-on: ${{ matrix.os }}

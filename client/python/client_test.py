@@ -5,6 +5,7 @@ import os
 import select
 import struct
 import tempfile
+import time
 import unittest
 
 
@@ -388,6 +389,7 @@ class TestSubspaceClient(unittest.TestCase):
 
     def test_subscriber_options(self):
         opts = subspace.SubscriberOptions()
+        self.assertFalse(opts.telemetry())
         opts.set_reliable(True)
         opts.set_subscriber_queue_size(3)
         opts.set_type("sub_opts_type")
@@ -396,6 +398,7 @@ class TestSubspaceClient(unittest.TestCase):
         opts.set_pass_checksum_errors(True)
         opts.set_keep_active_message(True)
         opts.set_max_subscribers(2)
+        opts.set_telemetry(True)
 
         self.assertTrue(opts.is_reliable())
         self.assertEqual(opts.subscriber_queue_size(), 3)
@@ -405,6 +408,33 @@ class TestSubspaceClient(unittest.TestCase):
         self.assertTrue(opts.pass_checksum_errors())
         self.assertTrue(opts.keep_active_message())
         self.assertEqual(opts.max_subscribers(), 2)
+        self.assertTrue(opts.telemetry())
+
+    def test_read_telemetry_message(self):
+        publisher_client = self._make_client("python-telemetry-publisher")
+        watcher_client = self._make_client("python-telemetry-watcher")
+        publisher = publisher_client.create_publisher(
+            channel_name="ch_python_telemetry", slot_size=128, num_slots=4)
+        options = subspace.SubscriberOptions().set_telemetry(True)
+        telemetry_subscriber = watcher_client.create_subscriber(
+            channel_name="ch_python_telemetry", options=options)
+
+        deadline = time.monotonic() + 5
+        telemetry = None
+        while telemetry is None and time.monotonic() < deadline:
+            telemetry = telemetry_subscriber.read_telemetry_message()
+            if telemetry is None:
+                time.sleep(0.05)
+
+        self.assertIsInstance(telemetry, subspace.Telemetry)
+        self.assertTrue(any(
+            entry.name == "python-telemetry-publisher"
+            and entry.change == subspace.TelemetryChange.NONE
+            for entry in telemetry.publishers))
+        self.assertIsNone(telemetry_subscriber.read_telemetry_message())
+
+        telemetry_subscriber = None
+        publisher = None
 
     def test_max_subscribers_option(self):
         client = self._make_client("max_subscribers")
@@ -673,6 +703,37 @@ class TestSubspaceClient(unittest.TestCase):
         self.assertEqual(resize_log[0][1], 1024)
 
         pub.unregister_resize_callback()
+        pub = None
+
+    # ------------------------------------------------------------------
+    # Maximum slot size
+    # ------------------------------------------------------------------
+    def test_max_slot_size(self):
+        client = self._make_client("max_slot")
+
+        # The initial slot size may not exceed the cap.
+        options = subspace.PublisherOptions()
+        options.set_slot_size(512).set_num_slots(4).set_max_slot_size(256)
+        with self.assertRaisesRegex(RuntimeError, "maximum slot size"):
+            client.create_publisher(channel_name="ch_max_slot_initial",
+                                    options=options)
+
+        options = subspace.PublisherOptions()
+        options.set_slot_size(256).set_num_slots(4).set_max_slot_size(384)
+        self.assertEqual(options.max_slot_size(), 384)
+        pub = client.create_publisher(channel_name="ch_max_slot",
+                                      options=options)
+        self.assertEqual(pub.max_slot_size(), 384)
+
+        # Without the cap the growth multiplier would double 256 to 512.
+        pub.publish_message(b"x" * 300)
+        self.assertEqual(pub.slot_size(), 384)
+
+        # Publishing more than the cap is an error, not a resize.
+        with self.assertRaisesRegex(RuntimeError, "maximum slot size"):
+            pub.publish_message(b"x" * 385)
+        self.assertEqual(pub.slot_size(), 384)
+
         pub = None
 
     # ------------------------------------------------------------------
@@ -950,6 +1011,33 @@ class TestSubspaceClient(unittest.TestCase):
         self.assertNotEqual(subspace.ReadMode.READ_NEXT,
                             subspace.ReadMode.READ_NEWEST)
 
+    def test_clear_trigger_enum(self):
+        self.assertIsNotNone(subspace.ClearTrigger.CLEAR_TRIGGER)
+        self.assertIsNotNone(subspace.ClearTrigger.NO_CLEAR_TRIGGER)
+        self.assertNotEqual(subspace.ClearTrigger.CLEAR_TRIGGER,
+                            subspace.ClearTrigger.NO_CLEAR_TRIGGER)
+
+    def test_read_message_no_clear_trigger(self):
+        client = self._make_client("no_clear")
+        pub = client.create_publisher(channel_name="ch_no_clear",
+                                      slot_size=256, num_slots=10)
+        sub = client.create_subscriber(channel_name="ch_no_clear")
+
+        fd = sub.get_file_descriptor()
+        poller = select.poll()
+        poller.register(fd, select.POLLIN)
+
+        pub.publish_message(b"hello")
+        self.assertTrue(poller.poll(1000))
+
+        data = sub.read_message(
+            clear_trigger=subspace.ClearTrigger.NO_CLEAR_TRIGGER)
+        self.assertEqual(data, b"hello")
+        self.assertTrue(poller.poll(0))
+
+        pub = None
+        sub = None
+
     # ------------------------------------------------------------------
     # Large message
     # ------------------------------------------------------------------
@@ -1017,6 +1105,29 @@ class TestSubspaceClient(unittest.TestCase):
         self.assertFalse(opts.for_tunnel())
         opts.set_for_tunnel(True)
         self.assertTrue(opts.for_tunnel())
+
+    def test_telemetry_subscriber_smoke(self):
+        pub_client = self._make_client("telemetry_pub")
+        watcher_client = self._make_client("telemetry_watch")
+        pub = pub_client.create_publisher(channel_name="ch_telemetry_smoke",
+                                          slot_size=128, num_slots=4)
+        opts = subspace.SubscriberOptions()
+        opts.set_telemetry(True)
+        telemetry = watcher_client.create_subscriber(
+            channel_name="ch_telemetry_smoke", options=opts)
+
+        self.assertEqual(telemetry.type(), "subspace.Telemetry")
+        deadline = time.monotonic() + 5.0
+        data = b""
+        while time.monotonic() < deadline:
+            data = telemetry.read_message()
+            if len(data) > 0:
+                break
+            time.sleep(0.05)
+        self.assertGreater(len(data), 0)
+
+        pub = None
+        telemetry = None
 
     def test_for_tunnel_publisher_accessor(self):
         client = self._make_client("tunnel_pub")

@@ -3,6 +3,7 @@
 // See LICENSE file for licensing information.
 
 #include <jni.h>
+#include <limits>
 #include <string>
 #include <memory>
 #include <mutex>
@@ -75,7 +76,7 @@ JNI_METHOD(void, SubspaceClient, nativeDestroy)(JNIEnv *, jobject,
 }
 
 JNI_METHOD(jlong, SubspaceClient, nativeCreatePublisher)(
-    JNIEnv *env, jobject, jlong handle, jstring channel_name, jint slot_size,
+    JNIEnv *env, jobject, jlong handle, jstring channel_name, jlong slot_size,
     jint num_slots, jboolean reliable) {
   auto *nc = reinterpret_cast<NativeClient *>(handle);
   const char *name_cstr = env->GetStringUTFChars(channel_name, nullptr);
@@ -122,7 +123,7 @@ JNI_METHOD(jlong, SubspaceClient, nativeCreateSubscriber)(
 // ---------------------------------------------------------------------------
 
 JNI_METHOD(jobject, SubspacePublisher, nativeGetMessageBuffer)(
-    JNIEnv *env, jobject, jlong handle, jint max_size) {
+    JNIEnv *env, jobject, jlong handle, jlong max_size) {
   auto *np = reinterpret_cast<NativePublisher *>(handle);
   auto result = np->publisher->GetMessageBuffer(max_size);
   if (!result.ok()) {
@@ -133,8 +134,16 @@ JNI_METHOD(jobject, SubspacePublisher, nativeGetMessageBuffer)(
   if (buf == nullptr) {
     return nullptr;
   }
-  int32_t slot_size = np->publisher->SlotSize();
-  return env->NewDirectByteBuffer(buf, max_size > 0 ? max_size : slot_size);
+  int64_t slot_size = np->publisher->SlotSize();
+  int64_t capacity = max_size > 0 ? max_size : slot_size;
+  // ByteBuffer.capacity() is an int, so the JVM cannot represent a slot larger
+  // than 2GB.  Report that rather than handing back an undefined buffer.
+  if (capacity > std::numeric_limits<jint>::max()) {
+    ThrowSubspaceException(env, "Slot size " + std::to_string(capacity) +
+                                    " is too large for a Java ByteBuffer");
+    return nullptr;
+  }
+  return env->NewDirectByteBuffer(buf, capacity);
 }
 
 JNI_METHOD(jlong, SubspacePublisher, nativePublishMessage)(JNIEnv *env,
@@ -163,8 +172,8 @@ JNI_METHOD(jint, SubspacePublisher, nativeGetPollFd)(JNIEnv *, jobject,
   return pfd.fd;
 }
 
-JNI_METHOD(jint, SubspacePublisher, nativeGetSlotSize)(JNIEnv *, jobject,
-                                                       jlong handle) {
+JNI_METHOD(jlong, SubspacePublisher, nativeGetSlotSize)(JNIEnv *, jobject,
+                                                        jlong handle) {
   auto *np = reinterpret_cast<NativePublisher *>(handle);
   return np->publisher->SlotSize();
 }

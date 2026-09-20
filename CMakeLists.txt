@@ -48,6 +48,20 @@ if(SUBSPACE_LINUX_USE_MEMFD AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDRO
     message(STATUS "Linux shared-memory backend: anonymous memfd_create")
 endif()
 
+# --- Slot size width in the client APIs ---
+# Slot sizes are always 64 bit internally.  By default the C and C++ client
+# APIs expose them as 32 bit values so that existing code keeps compiling.
+# Enable this option to widen the API types and allow slots larger than 2GB.
+# This is a global definition because it changes function signatures and must
+# be consistent across every translation unit, including callers.
+option(SUBSPACE_64BIT_SLOT_SIZE
+       "Expose 64 bit slot sizes in the C and C++ client APIs"
+       OFF)
+if(SUBSPACE_64BIT_SLOT_SIZE)
+    add_compile_definitions(SUBSPACE_64BIT_SLOT_SIZE)
+    message(STATUS "Client API slot size: 64 bit")
+endif()
+
 # --- Apple Silicon (ARM64) specific settings ---
 # Ensure that CMake targets the correct architecture when building on Apple platforms.
 # This value will be propagated to sub-dependencies.
