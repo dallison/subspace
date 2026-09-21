@@ -439,6 +439,43 @@ fn channel_counters_size() {
 // Otherwise (plain cargo test), a subprocess is spawned as a fallback.
 // ══════════════════════════════════════════════════════════════════════════════
 
+// ── Teardown for the shared server ──────────────────────────────────────────
+//
+// The server below lives in a `static`, and Rust does not run destructors for
+// statics, so neither `ServerGuard::drop` ever fires.  Registering the teardown
+// with atexit is what actually cleans up: without it every run leaves its
+// socket behind in /tmp, and the subprocess build also leaves a live
+// subspace_server holding the shared memory it mapped.
+
+static CLEANUP_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+static CLEANUP_SOCKET_PATH: std::sync::OnceLock<std::ffi::CString> = std::sync::OnceLock::new();
+
+extern "C" fn cleanup_server_at_exit() {
+    // Take the pid rather than read it, so this is still correct if a
+    // `ServerGuard` did run its `Drop` and reap the child: a reaped pid can be
+    // reused, and signalling it afterwards would hit an unrelated process.
+    let pid = CLEANUP_PID.swap(0, std::sync::atomic::Ordering::SeqCst);
+    if pid > 0 {
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    if let Some(path) = CLEANUP_SOCKET_PATH.get() {
+        unsafe { libc::unlink(path.as_ptr()) };
+    }
+}
+
+fn register_server_cleanup(socket_path: &str, server_pid: Option<u32>) {
+    if let Some(pid) = server_pid {
+        CLEANUP_PID.store(pid as i32, std::sync::atomic::Ordering::SeqCst);
+    }
+    let _ = CLEANUP_SOCKET_PATH
+        .set(std::ffi::CString::new(socket_path).expect("socket path contains a NUL"));
+    assert_eq!(
+        unsafe { libc::atexit(cleanup_server_at_exit) },
+        0,
+        "failed to register server cleanup"
+    );
+}
+
 // ── FFI-based in-process server (used when linked with C++ server library) ──
 
 #[cfg(server_ffi)]
@@ -486,6 +523,8 @@ impl ServerGuard {
         let c_socket = std::ffi::CString::new(socket_path.clone()).unwrap();
         let handle = unsafe { subspace_server_create(c_socket.as_ptr(), write_fd) };
         assert!(!handle.is_null(), "subspace_server_create returned null");
+
+        register_server_cleanup(&socket_path, None);
 
         let raw = RawServerHandle(handle);
         let thread = std::thread::spawn(move || {
@@ -598,6 +637,10 @@ impl ServerGuard {
             .spawn()
             .unwrap_or_else(|e| panic!("Failed to start server binary '{}': {}", binary, e));
 
+        // Registered before the readiness wait below, so a server that never
+        // comes up is killed rather than left running when that panic unwinds.
+        register_server_cleanup(&socket_path, Some(child.id()));
+
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             if std::time::Instant::now() > deadline {
@@ -620,6 +663,9 @@ impl ServerGuard {
 #[cfg(not(server_ffi))]
 impl Drop for ServerGuard {
     fn drop(&mut self) {
+        // Claim the child back from the atexit handler before reaping it, so
+        // the two teardown paths cannot both signal the pid.
+        CLEANUP_PID.store(0, std::sync::atomic::Ordering::SeqCst);
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_file(&self.socket_path);
