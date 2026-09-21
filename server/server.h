@@ -27,6 +27,7 @@
 #include "toolbelt/logging.h"
 #include "toolbelt/sockets.h"
 #include "toolbelt/triggerfd.h"
+#include <cstdio>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -90,6 +91,9 @@ public:
   virtual ~Server();
   void SetLogLevel(const std::string &level) { logger_.SetLogLevel(level); }
   toolbelt::LogLevel GetLogLevel() const { return logger_.GetLogLevel(); }
+  // In-process hosts (Replay, single-binary runners) send INFO to stdout so
+  // those lines are not treated as node errors.
+  void SetLogOutputStream(FILE *stream) { logger_.SetOutputStream(stream); }
 
   // Run the server.  On the Asio backend `num_asio_threads` controls how many
   // threads run the io_context (default 1, i.e. inline on the calling thread).
