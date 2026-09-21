@@ -712,6 +712,13 @@ void Server::ListenerCoroutine(async::Context ctx,
                   status.ToString().c_str());
     }
   }
+  // Nothing accepts once this loop has exited.  Drop the socket now rather
+  // than leaving it to the end of Run(), so a replacement server can bind
+  // without waiting for the runtime to wind down.  On Linux the name lives
+  // in the abstract namespace and is released as soon as the fd closes.
+  listen_socket.Close();
+  logger_.Log(toolbelt::LogLevel::kInfo, "Released listen socket %s",
+              socket_name_.c_str());
 }
 
 void Server::NotifyViaFd(int64_t val) {
