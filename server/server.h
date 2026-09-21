@@ -213,18 +213,25 @@ public:
 
   // Create a channel in both process and shared memory.  For a placeholder
   // subscriber, the channel parameters are not known, so slot_size and
-  // num_slots will be zero.
+  // num_slots will be zero.  checksum_size and metadata_size carry the
+  // requesting publisher's prefix layout, which is applied before the
+  // channel's shared memory is allocated and replicated to the shadows.  The
+  // defaults are the sentinels a channel is constructed with, so a
+  // placeholder subscriber leaves the layout unset for a later publisher.
   absl::StatusOr<ServerChannel *> CreateChannel(const std::string &channel_name,
                                                 int64_t slot_size, int num_slots,
                                                 uint64_t subscriber_queue_arena_size,
                                                 const std::string &mux,
                                                 int vchan_id, std::string type,
                                                 bool hidden = false,
-                                                std::string telemetry_target = {});
+                                                std::string telemetry_target = {},
+                                                int32_t checksum_size = 4,
+                                                int32_t metadata_size = 0);
   absl::StatusOr<ServerChannel *>
   CreateMultiplexer(const std::string &channel_name, int64_t slot_size,
                     int num_slots, uint64_t subscriber_queue_arena_size,
-                    std::string type);
+                    std::string type, int32_t checksum_size = 4,
+                    int32_t metadata_size = 0);
   absl::Status RemapChannel(ServerChannel *channel, int64_t slot_size,
                             int num_slots,
                             uint64_t subscriber_queue_arena_size);

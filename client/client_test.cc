@@ -5967,6 +5967,92 @@ TEST_F(ClientTest, VirtualChannelMuxPrefixSubscriberFirst) {
   ASSERT_EQ(50, sub_b->MetadataSize());
 }
 
+// Same as above, but the first publisher lands on a *different* virtual
+// channel than the one the subscriber created.  That drives the mux out of
+// placeholder state from Server::CreateChannel rather than from the
+// placeholder-remap path in HandleCreatePublisher, so the publisher's prefix
+// layout must be applied to the mux before the remap.
+TEST_F(ClientTest, VirtualChannelMuxPrefixSubscriberFirstOnDifferentVchan) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Subscriber> sub_a = client->CreateSubscriber(
+      "vchan_a", SubOpts().SetMux("sub_first_different_mux"));
+  ASSERT_OK(sub_a);
+
+  absl::StatusOr<Publisher> pub_b =
+      client->CreatePublisher("vchan_b", PubOpts(256, 10)
+                                             .SetMux("sub_first_different_mux")
+                                             .SetChecksumSize(20)
+                                             .SetMetadataSize(50));
+  ASSERT_OK(pub_b);
+  ASSERT_EQ(128, pub_b->PrefixSize());
+  ASSERT_EQ(20, pub_b->ChecksumSize());
+  ASSERT_EQ(50, pub_b->MetadataSize());
+
+  // The pre-existing virtual channel must have inherited the shared layout.
+  absl::StatusOr<Publisher> pub_a =
+      client->CreatePublisher("vchan_a", PubOpts(256, 10)
+                                             .SetMux("sub_first_different_mux")
+                                             .SetChecksumSize(20)
+                                             .SetMetadataSize(50));
+  ASSERT_OK(pub_a);
+  ASSERT_EQ(128, pub_a->PrefixSize());
+
+  // A later publisher with an incompatible layout is still rejected.
+  absl::StatusOr<Publisher> pub_c =
+      client->CreatePublisher("vchan_c", PubOpts(256, 10)
+                                             .SetMux("sub_first_different_mux")
+                                             .SetChecksumSize(32)
+                                             .SetMetadataSize(50));
+  ASSERT_FALSE(pub_c.ok());
+
+  // The subscriber that created the placeholder must pick up the shared
+  // layout and be able to read from its own virtual channel.
+  absl::StatusOr<void *> buffer = pub_a->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "hello", 6);
+  ASSERT_OK(pub_a->PublishMessage(6));
+
+  absl::StatusOr<Message> msg = sub_a->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(6, msg->length);
+  ASSERT_EQ(128, sub_a->PrefixSize());
+  ASSERT_EQ(20, sub_a->ChecksumSize());
+  ASSERT_EQ(50, sub_a->MetadataSize());
+}
+
+// A second subscriber attaching to an existing placeholder mux must not
+// disturb the first subscriber: the mux stays a placeholder and its shared
+// memory must not be torn down and recreated underneath already-attached
+// subscribers.
+TEST_F(ClientTest, VirtualChannelMuxSecondSubscriberOnPlaceholder) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Subscriber> sub_a =
+      client->CreateSubscriber("vchan_a", SubOpts().SetMux("two_sub_mux"));
+  ASSERT_OK(sub_a);
+  absl::StatusOr<Subscriber> sub_b =
+      client->CreateSubscriber("vchan_b", SubOpts().SetMux("two_sub_mux"));
+  ASSERT_OK(sub_b);
+
+  absl::StatusOr<Publisher> pub_a =
+      client->CreatePublisher("vchan_a", PubOpts(256, 10)
+                                             .SetMux("two_sub_mux")
+                                             .SetChecksumSize(20)
+                                             .SetMetadataSize(50));
+  ASSERT_OK(pub_a);
+
+  absl::StatusOr<void *> buffer = pub_a->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "hello", 6);
+  ASSERT_OK(pub_a->PublishMessage(6));
+
+  absl::StatusOr<Message> msg = sub_a->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(6, msg->length);
+  ASSERT_EQ(128, sub_a->PrefixSize());
+}
+
 TEST_F(ClientTest, SubscriberGetsSizes) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 

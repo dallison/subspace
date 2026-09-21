@@ -327,6 +327,9 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
   // set it here now that we know it.  If num_slots_ was already
   // set we need to make sure that the value passed here is
   // the same as the current value.
+  const int previous_num_slots = num_slots_;
+  const uint64_t previous_queue_arena_size = subscriber_queue_arena_size_;
+  const int previous_queue_size = subscriber_queue_size_;
   if (num_slots_ != 0) {
     assert(num_slots_ == num_slots);
   } else {
@@ -337,10 +340,26 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
                              ? 0
                              : kDefaultSubscriberQueueSize);
 
+  // Every failure below leaves the channel with no mapped memory (Unmap()
+  // has already run).  Restore the geometry we were called with so the
+  // channel reverts to exactly that state instead of claiming to have
+  // num_slots_ slots with a null CCB, which would make IsPlaceholder() lie
+  // and let the next publisher skip the remap and map nothing.  Callers
+  // that pass num_slots_ to UnmapMemory must do so before restoring.
+  auto restore_geometry = [&]() {
+    scb_ = nullptr;
+    ccb_ = nullptr;
+    bcb_ = nullptr;
+    num_slots_ = previous_num_slots;
+    subscriber_queue_arena_size_ = previous_queue_arena_size;
+    subscriber_queue_size_ = previous_queue_size;
+  };
+
   // Map SCB into process memory.
   scb_ = reinterpret_cast<SystemControlBlock *>(MapMemory(
       scb_fd.Fd(), sizeof(SystemControlBlock), PROT_READ | PROT_WRITE, "SCB"));
   if (scb_ == MAP_FAILED) {
+    restore_geometry();
     return absl::InternalError(absl::StrFormat(
         "Failed to map SystemControlBlock: %s", strerror(errno)));
   }
@@ -352,6 +371,7 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
       CheckedCcbSize(num_slots_, subscriber_queue_arena_size_);
   if (!checked_ccb_size.ok()) {
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+    restore_geometry();
     return checked_ccb_size.status();
   }
   absl::StatusOr<void *> p = CreateSharedMemory(
@@ -359,6 +379,7 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
       /*map=*/true, fds.ccb, session_id_);
   if (!p.ok()) {
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+    restore_geometry();
     return p.status();
   }
   ccb_ = reinterpret_cast<ChannelControlBlock *>(*p);
@@ -371,6 +392,7 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
   if (!p.ok()) {
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
     UnmapMemory(ccb_, CcbSize(num_slots_, subscriber_queue_arena_size_), "CCB");
+    restore_geometry();
     return p.status();
   }
   bcb_ = reinterpret_cast<BufferControlBlock *>(*p);
