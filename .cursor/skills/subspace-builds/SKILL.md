@@ -24,7 +24,7 @@ bazel test //...
 
 cmake -S . -B build/cmake-Debug -DCMAKE_BUILD_TYPE=Debug
 cmake --build build/cmake-Debug --parallel
-ctest --test-dir build/cmake-Debug --output-on-failure
+ctest --test-dir build/cmake-Debug --output-on-failure --timeout 300
 ```
 
 macOS Apple Silicon:

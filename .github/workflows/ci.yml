@@ -449,8 +449,14 @@ jobs:
       - name: Build CMake targets
         run: cmake --build build/cmake-${{ matrix.variant }} --parallel $(nproc)
 
+      # CTest applies no timeout of its own here, because a bare
+      # enable_testing() generates no DartConfiguration.tcl to carry a default.
+      # Without --timeout a hung test runs until the job's hour cap and is
+      # killed without CTest ever flushing its output, so the log never says
+      # which test stalled.  The suite normally takes ~80s in total and the
+      # slowest single test ~40s.
       - name: Run CMake tests
-        run: ctest --test-dir build/cmake-${{ matrix.variant }} --output-on-failure
+        run: ctest --test-dir build/cmake-${{ matrix.variant }} --output-on-failure --timeout 300
 
   cmake-android:
     name: cmake-android (x86_64)
