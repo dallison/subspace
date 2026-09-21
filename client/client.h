@@ -83,6 +83,7 @@ struct ChannelInfo {
   int subscriber_queue_size;
   uint64_t subscriber_queue_arena_size;
   bool reliable;
+  bool is_local = false;
 };
 
 struct ChannelStats {
@@ -90,6 +91,7 @@ struct ChannelStats {
   uint64_t total_bytes;
   uint64_t total_messages;
   uint64_t max_message_size;
+  bool is_local = false;
 };
 
 struct DefaultAliaser {

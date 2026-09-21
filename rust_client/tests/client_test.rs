@@ -3532,6 +3532,48 @@ fn coverage_get_channel_info() {
     assert_eq!(info.slot_size, 128);
     assert_eq!(info.num_slots, 8);
     assert_eq!(info.channel_type, "info_type");
+    assert!(!info.is_local);
+}
+
+#[test]
+fn coverage_get_channel_info_is_local() {
+    let client = new_client("cov_info_local");
+    let local_opts = PublisherOptions::new()
+        .set_slot_size(64)
+        .set_num_slots(4)
+        .set_local(true);
+    let _local_pub = client
+        .create_publisher("cov_info_local_ch", &local_opts)
+        .unwrap();
+    assert!(
+        client
+            .get_channel_info("cov_info_local_ch")
+            .unwrap()
+            .is_local
+    );
+    assert!(
+        client
+            .get_channel_stats("cov_info_local_ch")
+            .unwrap()
+            .is_local
+    );
+
+    let public_opts = PublisherOptions::new().set_slot_size(64).set_num_slots(4);
+    let _public_pub = client
+        .create_publisher("cov_info_public_ch", &public_opts)
+        .unwrap();
+    assert!(
+        !client
+            .get_channel_info("cov_info_public_ch")
+            .unwrap()
+            .is_local
+    );
+    assert!(
+        !client
+            .get_channel_stats("cov_info_public_ch")
+            .unwrap()
+            .is_local
+    );
 }
 
 #[test]

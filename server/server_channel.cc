@@ -1438,6 +1438,7 @@ void ServerChannel::GetChannelInfo(subspace::ChannelInfoProto *info) {
   info->set_num_tunnel_subs(num_tunnel_subs);
 
   info->set_is_reliable(IsReliable());
+  info->set_is_local(IsLocal());
   if (IsVirtual()) {
     info->set_is_virtual(true);
     VirtualChannel *vchan = static_cast<VirtualChannel *>(this);
@@ -1507,6 +1508,7 @@ void ServerChannel::GetChannelStats(subspace::ChannelStatsProto *stats) {
   stats->set_num_subs(num_subs);
   stats->set_num_bridge_pubs(num_bridge_pubs);
   stats->set_num_bridge_subs(num_bridge_subs);
+  stats->set_is_local(IsLocal());
 }
 
 ChannelCounters &ServerChannel::RecordUpdate(bool is_pub, bool add,

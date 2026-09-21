@@ -1004,6 +1004,43 @@ TEST_F(ClientTest, ChecksumPassErrorsMessageField) {
   ASSERT_TRUE(subspace_remove_client(&sub_client));
 }
 
+TEST_F(ClientTest, ChannelInfoReportsIsLocal) {
+  auto client = subspace_create_client_with_socket(Socket().c_str());
+  ASSERT_NE(nullptr, client.client);
+
+  SubspacePublisherOptions local_opts = CPublisherOptionsDefault(64, 4);
+  local_opts.local = true;
+  SubspacePublisher local_pub =
+      subspace_create_publisher(client, "c_info_local", local_opts);
+  ASSERT_NE(nullptr, local_pub.publisher);
+
+  SubspaceChannelInfo info = {};
+  ASSERT_TRUE(subspace_get_channel_info(client, "c_info_local", &info));
+  ASSERT_TRUE(info.is_local);
+
+  SubspacePublisher public_pub = subspace_create_publisher(
+      client, "c_info_public", CPublisherOptionsDefault(64, 4));
+  ASSERT_NE(nullptr, public_pub.publisher);
+
+  SubspaceChannelInfo public_info = {};
+  ASSERT_TRUE(subspace_get_channel_info(client, "c_info_public", &public_info));
+  ASSERT_FALSE(public_info.is_local);
+
+  SubspaceChannelStats local_stats = {};
+  ASSERT_TRUE(
+      subspace_get_channel_stats(client, "c_info_local", &local_stats));
+  ASSERT_TRUE(local_stats.is_local);
+
+  SubspaceChannelStats public_stats = {};
+  ASSERT_TRUE(
+      subspace_get_channel_stats(client, "c_info_public", &public_stats));
+  ASSERT_FALSE(public_stats.is_local);
+
+  ASSERT_TRUE(subspace_remove_publisher(&local_pub));
+  ASSERT_TRUE(subspace_remove_publisher(&public_pub));
+  ASSERT_TRUE(subspace_remove_client(&client));
+}
+
 TEST_F(ClientTest, ClientPublisherSubscriberIntrospection) {
   auto client = subspace_create_client_with_socket(Socket().c_str());
   ASSERT_NE(nullptr, client.client);
@@ -1043,6 +1080,8 @@ TEST_F(ClientTest, ClientPublisherSubscriberIntrospection) {
   ASSERT_TRUE(SubspaceStringEquals(info.type, type));
   ASSERT_EQ(1, info.num_publishers);
   ASSERT_EQ(1, info.num_subscribers);
+  // The publisher above is not local, so neither is the channel.
+  ASSERT_FALSE(info.is_local);
 
   SubspaceChannelInfo *infos = nullptr;
   size_t info_count = 0;

@@ -97,7 +97,9 @@ PYBIND11_MODULE(subspace, m) {
                     &ChannelInfo::subscriber_queue_size)
       .def_readonly("subscriber_queue_arena_size",
                     &ChannelInfo::subscriber_queue_arena_size)
-      .def_readonly("reliable", &ChannelInfo::reliable);
+      .def_readonly("reliable", &ChannelInfo::reliable)
+      .def_readonly("is_local", &ChannelInfo::is_local,
+                    "True if any publisher is local (not sent off-machine).");
 
   // ChannelStats struct.
   py::class_<ChannelStats>(m, "ChannelStats",
@@ -105,7 +107,9 @@ PYBIND11_MODULE(subspace, m) {
       .def_readonly("channel_name", &ChannelStats::channel_name)
       .def_readonly("total_bytes", &ChannelStats::total_bytes)
       .def_readonly("total_messages", &ChannelStats::total_messages)
-      .def_readonly("max_message_size", &ChannelStats::max_message_size);
+      .def_readonly("max_message_size", &ChannelStats::max_message_size)
+      .def_readonly("is_local", &ChannelStats::is_local,
+                    "True if any publisher is local (not sent off-machine).");
 
   // PublisherOptions class.
   py::class_<PublisherOptions>(m, "PublisherOptions",

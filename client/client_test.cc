@@ -7128,6 +7128,64 @@ TEST_F(ClientTest, GetChannelInfoAll) {
   ASSERT_TRUE(found);
 }
 
+TEST_F(ClientTest, GetChannelInfoReportsIsLocal) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  auto local_pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "info_is_local", PubOpts(64, 4).SetLocal(true)));
+  auto local_info =
+      EVAL_AND_ASSERT_OK(client.GetChannelInfo("info_is_local"));
+  EXPECT_TRUE(local_info.is_local);
+
+  auto public_pub = EVAL_AND_ASSERT_OK(
+      client.CreatePublisher("info_is_not_local", PubOpts(64, 4)));
+  auto public_info =
+      EVAL_AND_ASSERT_OK(client.GetChannelInfo("info_is_not_local"));
+  EXPECT_FALSE(public_info.is_local);
+
+  auto all_info = EVAL_AND_ASSERT_OK(client.GetChannelInfo());
+  bool seen_local = false;
+  for (const subspace::ChannelInfo &info : all_info) {
+    if (info.channel_name == "info_is_local") {
+      seen_local = true;
+      EXPECT_TRUE(info.is_local);
+    } else if (info.channel_name == "info_is_not_local") {
+      EXPECT_FALSE(info.is_local);
+    }
+  }
+  EXPECT_TRUE(seen_local);
+}
+
+TEST_F(ClientTest, GetChannelStatsReportsIsLocal) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  auto local_pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "stats_is_local", PubOpts(64, 4).SetLocal(true)));
+  auto local_stats =
+      EVAL_AND_ASSERT_OK(client.GetChannelStats("stats_is_local"));
+  EXPECT_TRUE(local_stats.is_local);
+
+  auto public_pub = EVAL_AND_ASSERT_OK(
+      client.CreatePublisher("stats_is_not_local", PubOpts(64, 4)));
+  auto public_stats =
+      EVAL_AND_ASSERT_OK(client.GetChannelStats("stats_is_not_local"));
+  EXPECT_FALSE(public_stats.is_local);
+
+  auto all_stats = EVAL_AND_ASSERT_OK(client.GetChannelStats());
+  bool seen_local = false;
+  for (const subspace::ChannelStats &stats : all_stats) {
+    if (stats.channel_name == "stats_is_local") {
+      seen_local = true;
+      EXPECT_TRUE(stats.is_local);
+    } else if (stats.channel_name == "stats_is_not_local") {
+      EXPECT_FALSE(stats.is_local);
+    }
+  }
+  EXPECT_TRUE(seen_local);
+}
+
 TEST_F(ClientTest, GetCurrentOrdinal) {
   subspace::Client pub_client;
   subspace::Client sub_client;

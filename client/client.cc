@@ -1982,6 +1982,7 @@ ClientImpl::GetChannelInfo(const std::string &channel) {
   result.subscriber_queue_size = info.subscriber_queue_size();
   result.subscriber_queue_arena_size =
       info.subscriber_queue_arena_size();
+  result.is_local = info.is_local();
   return result;
 }
 
@@ -2021,6 +2022,7 @@ absl::StatusOr<const std::vector<ChannelInfo>> ClientImpl::GetChannelInfo() {
     result.subscriber_queue_size = info.subscriber_queue_size();
     result.subscriber_queue_arena_size =
         info.subscriber_queue_arena_size();
+    result.is_local = info.is_local();
     r.push_back(result);
   }
   return r;
@@ -2066,6 +2068,7 @@ ClientImpl::GetChannelStats(const std::string &channel) {
   result.total_bytes = stats.total_bytes();
   result.total_messages = stats.total_messages();
   result.max_message_size = stats.max_message_size();
+  result.is_local = stats.is_local();
   return result;
 }
 
@@ -2096,6 +2099,7 @@ absl::StatusOr<const std::vector<ChannelStats>> ClientImpl::GetChannelStats() {
     result.total_bytes = stats.total_bytes();
     result.total_messages = stats.total_messages();
     result.max_message_size = stats.max_message_size();
+    result.is_local = stats.is_local();
     r.push_back(result);
   }
   return r;
