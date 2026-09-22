@@ -5967,6 +5967,92 @@ TEST_F(ClientTest, VirtualChannelMuxPrefixSubscriberFirst) {
   ASSERT_EQ(50, sub_b->MetadataSize());
 }
 
+// Same as above, but the first publisher lands on a *different* virtual
+// channel than the one the subscriber created.  That drives the mux out of
+// placeholder state from Server::CreateChannel rather than from the
+// placeholder-remap path in HandleCreatePublisher, so the publisher's prefix
+// layout must be applied to the mux before the remap.
+TEST_F(ClientTest, VirtualChannelMuxPrefixSubscriberFirstOnDifferentVchan) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Subscriber> sub_a = client->CreateSubscriber(
+      "vchan_a", SubOpts().SetMux("sub_first_different_mux"));
+  ASSERT_OK(sub_a);
+
+  absl::StatusOr<Publisher> pub_b =
+      client->CreatePublisher("vchan_b", PubOpts(256, 10)
+                                             .SetMux("sub_first_different_mux")
+                                             .SetChecksumSize(20)
+                                             .SetMetadataSize(50));
+  ASSERT_OK(pub_b);
+  ASSERT_EQ(128, pub_b->PrefixSize());
+  ASSERT_EQ(20, pub_b->ChecksumSize());
+  ASSERT_EQ(50, pub_b->MetadataSize());
+
+  // The pre-existing virtual channel must have inherited the shared layout.
+  absl::StatusOr<Publisher> pub_a =
+      client->CreatePublisher("vchan_a", PubOpts(256, 10)
+                                             .SetMux("sub_first_different_mux")
+                                             .SetChecksumSize(20)
+                                             .SetMetadataSize(50));
+  ASSERT_OK(pub_a);
+  ASSERT_EQ(128, pub_a->PrefixSize());
+
+  // A later publisher with an incompatible layout is still rejected.
+  absl::StatusOr<Publisher> pub_c =
+      client->CreatePublisher("vchan_c", PubOpts(256, 10)
+                                             .SetMux("sub_first_different_mux")
+                                             .SetChecksumSize(32)
+                                             .SetMetadataSize(50));
+  ASSERT_FALSE(pub_c.ok());
+
+  // The subscriber that created the placeholder must pick up the shared
+  // layout and be able to read from its own virtual channel.
+  absl::StatusOr<void *> buffer = pub_a->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "hello", 6);
+  ASSERT_OK(pub_a->PublishMessage(6));
+
+  absl::StatusOr<Message> msg = sub_a->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(6, msg->length);
+  ASSERT_EQ(128, sub_a->PrefixSize());
+  ASSERT_EQ(20, sub_a->ChecksumSize());
+  ASSERT_EQ(50, sub_a->MetadataSize());
+}
+
+// A second subscriber attaching to an existing placeholder mux must not
+// disturb the first subscriber: the mux stays a placeholder and its shared
+// memory must not be torn down and recreated underneath already-attached
+// subscribers.
+TEST_F(ClientTest, VirtualChannelMuxSecondSubscriberOnPlaceholder) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Subscriber> sub_a =
+      client->CreateSubscriber("vchan_a", SubOpts().SetMux("two_sub_mux"));
+  ASSERT_OK(sub_a);
+  absl::StatusOr<Subscriber> sub_b =
+      client->CreateSubscriber("vchan_b", SubOpts().SetMux("two_sub_mux"));
+  ASSERT_OK(sub_b);
+
+  absl::StatusOr<Publisher> pub_a =
+      client->CreatePublisher("vchan_a", PubOpts(256, 10)
+                                             .SetMux("two_sub_mux")
+                                             .SetChecksumSize(20)
+                                             .SetMetadataSize(50));
+  ASSERT_OK(pub_a);
+
+  absl::StatusOr<void *> buffer = pub_a->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "hello", 6);
+  ASSERT_OK(pub_a->PublishMessage(6));
+
+  absl::StatusOr<Message> msg = sub_a->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(6, msg->length);
+  ASSERT_EQ(128, sub_a->PrefixSize());
+}
+
 TEST_F(ClientTest, SubscriberGetsSizes) {
   auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
 
@@ -7040,6 +7126,64 @@ TEST_F(ClientTest, GetChannelInfoAll) {
     }
   }
   ASSERT_TRUE(found);
+}
+
+TEST_F(ClientTest, GetChannelInfoReportsIsLocal) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  auto local_pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "info_is_local", PubOpts(64, 4).SetLocal(true)));
+  auto local_info =
+      EVAL_AND_ASSERT_OK(client.GetChannelInfo("info_is_local"));
+  EXPECT_TRUE(local_info.is_local);
+
+  auto public_pub = EVAL_AND_ASSERT_OK(
+      client.CreatePublisher("info_is_not_local", PubOpts(64, 4)));
+  auto public_info =
+      EVAL_AND_ASSERT_OK(client.GetChannelInfo("info_is_not_local"));
+  EXPECT_FALSE(public_info.is_local);
+
+  auto all_info = EVAL_AND_ASSERT_OK(client.GetChannelInfo());
+  bool seen_local = false;
+  for (const subspace::ChannelInfo &info : all_info) {
+    if (info.channel_name == "info_is_local") {
+      seen_local = true;
+      EXPECT_TRUE(info.is_local);
+    } else if (info.channel_name == "info_is_not_local") {
+      EXPECT_FALSE(info.is_local);
+    }
+  }
+  EXPECT_TRUE(seen_local);
+}
+
+TEST_F(ClientTest, GetChannelStatsReportsIsLocal) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  auto local_pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      "stats_is_local", PubOpts(64, 4).SetLocal(true)));
+  auto local_stats =
+      EVAL_AND_ASSERT_OK(client.GetChannelStats("stats_is_local"));
+  EXPECT_TRUE(local_stats.is_local);
+
+  auto public_pub = EVAL_AND_ASSERT_OK(
+      client.CreatePublisher("stats_is_not_local", PubOpts(64, 4)));
+  auto public_stats =
+      EVAL_AND_ASSERT_OK(client.GetChannelStats("stats_is_not_local"));
+  EXPECT_FALSE(public_stats.is_local);
+
+  auto all_stats = EVAL_AND_ASSERT_OK(client.GetChannelStats());
+  bool seen_local = false;
+  for (const subspace::ChannelStats &stats : all_stats) {
+    if (stats.channel_name == "stats_is_local") {
+      seen_local = true;
+      EXPECT_TRUE(stats.is_local);
+    } else if (stats.channel_name == "stats_is_not_local") {
+      EXPECT_FALSE(stats.is_local);
+    }
+  }
+  EXPECT_TRUE(seen_local);
 }
 
 TEST_F(ClientTest, GetCurrentOrdinal) {

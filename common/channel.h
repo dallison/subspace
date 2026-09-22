@@ -1067,6 +1067,17 @@ public:
   virtual int32_t MetadataSize() const { return metadata_size_; }
   virtual void SetMetadataSize(int32_t size) { metadata_size_ = size; }
 
+  // The prefix size is derived from the checksum and metadata sizes rather
+  // than chosen independently, so set all three together; updating them
+  // separately lets a channel report a prefix that disagrees with the layout
+  // it describes.  Goes through the virtual setters, so a server-side
+  // VirtualChannel still forwards the layout to its multiplexer.
+  void SetPrefixLayout(int32_t checksum_size, int32_t metadata_size) {
+    SetChecksumSize(checksum_size);
+    SetMetadataSize(metadata_size);
+    SetPrefixSize(ComputePrefixSize(checksum_size, metadata_size));
+  }
+
   uint64_t BufferSizeToSlotSize(uint64_t size) const {
     if (size < NumSlots() * static_cast<uint64_t>(PrefixSize())) {
       return 0;

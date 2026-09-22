@@ -712,6 +712,13 @@ void Server::ListenerCoroutine(async::Context ctx,
                   status.ToString().c_str());
     }
   }
+  // Nothing accepts once this loop has exited.  Drop the socket now rather
+  // than leaving it to the end of Run(), so a replacement server can bind
+  // without waiting for the runtime to wind down.  On Linux the name lives
+  // in the abstract namespace and is released as soon as the fd closes.
+  listen_socket.Close();
+  logger_.Log(toolbelt::LogLevel::kInfo, "Released listen socket %s",
+              socket_name_.c_str());
 }
 
 void Server::NotifyViaFd(int64_t val) {
@@ -1199,7 +1206,8 @@ absl::StatusOr<ServerChannel *>
 Server::CreateMultiplexer(const std::string &channel_name, int64_t slot_size,
                           int num_slots,
                           uint64_t subscriber_queue_arena_size,
-                          std::string type) {
+                          std::string type, int32_t checksum_size,
+                          int32_t metadata_size) {
   const int subscriber_queue_size =
       subscriber_queue_arena_size == 0 ? 0 : kDefaultSubscriberQueueSize;
   absl::StatusOr<int> channel_id = channel_ids_.Allocate("mux");
@@ -1213,6 +1221,11 @@ Server::CreateMultiplexer(const std::string &channel_name, int64_t slot_size,
       *channel_id, channel_name, num_slots, subscriber_queue_size,
       subscriber_queue_arena_size, std::move(type), session_id_, logger_);
   channel->SetDebug(logger_.GetLogLevel() <= toolbelt::LogLevel::kVerboseDebug);
+  // Establish the prefix layout before allocating.  Allocation is what makes
+  // the channel visible: it is immediately followed by replication to the
+  // shadows, which copy the checksum and metadata sizes off the channel and
+  // are never sent them again.
+  channel->SetPrefixLayout(checksum_size, metadata_size);
 
   absl::StatusOr<SharedMemoryFds> fds =
       channel->Allocate(scb_fd_, slot_size, num_slots,
@@ -1233,16 +1246,20 @@ absl::StatusOr<ServerChannel *>
 Server::CreateChannel(const std::string &channel_name, int64_t slot_size,
                       int num_slots, uint64_t subscriber_queue_arena_size,
                       const std::string &mux, int vchan_id, std::string type,
-                      bool hidden, std::string telemetry_target) {
+                      bool hidden, std::string telemetry_target,
+                      int32_t checksum_size, int32_t metadata_size) {
   const int subscriber_queue_size =
       subscriber_queue_arena_size == 0 ? 0 : kDefaultSubscriberQueueSize;
   if (!mux.empty()) {
     ServerChannel *mux_channel = FindChannel(mux);
     if (mux_channel == nullptr) {
-      // No mux found, create one.
+      // No mux found, create one.  A subscriber-first request creates it as
+      // a placeholder and passes the default layout, which is what a
+      // placeholder should carry until a publisher establishes the real one.
       absl::StatusOr<ServerChannel *> m =
           CreateMultiplexer(mux, slot_size, num_slots,
-                            subscriber_queue_arena_size, type);
+                            subscriber_queue_arena_size, type, checksum_size,
+                            metadata_size);
       if (!m.ok()) {
         return m.status();
       }
@@ -1263,12 +1280,47 @@ Server::CreateChannel(const std::string &channel_name, int64_t slot_size,
               mux_channel->SubscriberQueueArenaSize()),
           static_cast<unsigned long long>(subscriber_queue_arena_size)));
     }
-    if (mux_channel->IsPlaceholder()) {
+    // A request with no slots and no slot size is a subscriber attaching
+    // before any publisher exists.  It carries no layout of its own and
+    // inherits whatever the mux eventually settles on, so it must leave the
+    // mux as a placeholder: re-running Allocate() here would tear down and
+    // recreate the CCB/BCB underneath the subscribers already attached to
+    // this mux, for no gain.
+    const bool inherit_layout = (slot_size == 0 && num_slots == 0);
+    if (mux_channel->IsPlaceholder() && !inherit_layout) {
+      // Install the publisher's prefix layout *before* allocating, so the
+      // mux is never observable as allocated-but-stale.  Allocation makes
+      // the mux non-placeholder and notifies shadow replicas, and both
+      // shadows and concurrently connecting subscribers read the checksum
+      // and metadata sizes straight off the mux; if they run first they
+      // would latch the placeholder's 4/0 defaults instead of the layout
+      // this publisher is about to establish.  Virtual channels forward
+      // their layout accessors to the mux, so this covers the siblings a
+      // subscriber may already have created.
+      const int32_t previous_checksum_size = mux_channel->ChecksumSize();
+      const int32_t previous_metadata_size = mux_channel->MetadataSize();
+      const int32_t previous_prefix_size = mux_channel->PrefixSize();
+      // 4/0 are the sizes a channel is constructed with and mean "no layout
+      // established yet".  A placeholder mux that already carries a real
+      // layout (one rebuilt by shadow recovery, for instance) keeps it; a
+      // publisher that disagrees is rejected by the consistency check in
+      // ClientHandler::HandleCreatePublisher rather than silently
+      // overwriting it here.
+      if (previous_checksum_size == 4 && previous_metadata_size == 0) {
+        mux_channel->SetPrefixLayout(checksum_size, metadata_size);
+      }
       // Remap the memory now that we know the slots.
       absl::Status status =
           RemapChannel(mux_channel, slot_size, num_slots,
                        subscriber_queue_arena_size);
       if (!status.ok()) {
+        // Allocation failed and left the mux a placeholder again; roll the
+        // layout back too so the next publisher can retry the promotion
+        // from a clean state rather than being rejected for disagreeing
+        // with a layout that was never actually established.
+        mux_channel->SetChecksumSize(previous_checksum_size);
+        mux_channel->SetMetadataSize(previous_metadata_size);
+        mux_channel->SetPrefixSize(previous_prefix_size);
         return status;
       }
     }
@@ -1306,6 +1358,9 @@ Server::CreateChannel(const std::string &channel_name, int64_t slot_size,
   }
   channel->SetDebug(logger_.GetLogLevel() <= toolbelt::LogLevel::kVerboseDebug);
   channel->SetLastKnownSlotSize(slot_size);
+  // As in CreateMultiplexer: the layout has to be on the channel before the
+  // allocation that publishes it to the shadows.
+  channel->SetPrefixLayout(checksum_size, metadata_size);
 
   absl::StatusOr<SharedMemoryFds> fds =
       channel->Allocate(scb_fd_, slot_size, num_slots,
@@ -1797,8 +1852,10 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
     channel->SetDebug(logger_.GetLogLevel() <=
                       toolbelt::LogLevel::kVerboseDebug);
     channel->SetLastKnownSlotSize(rch.slot_size);
-    channel->SetChecksumSize(rch.checksum_size);
-    channel->SetMetadataSize(rch.metadata_size);
+    // The prefix size is derived, not replicated, so it has to be recomputed
+    // here or the recovered channel keeps the default 64 and reports a
+    // prefix that disagrees with its own checksum/metadata sizes.
+    channel->SetPrefixLayout(rch.checksum_size, rch.metadata_size);
     if (rch.hidden) {
       if (rch.telemetry_target.empty()) {
         return absl::InvalidArgumentError(

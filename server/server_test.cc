@@ -835,6 +835,32 @@ TEST_F(ServerTest, GetChannelInfoAll) {
   EXPECT_GE(resp.channels_size(), 2);
 }
 
+// A channel is local if any of its publishers is, mirroring is_reliable.
+TEST_F(ServerTest, GetChannelInfoReportsIsLocal) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  conn.CreatePublisher("local_info_ch", 64, 4, "", /*reliable=*/false,
+                       /*is_local=*/true);
+  conn.CreatePublisher("public_info_ch", 64, 4, "", /*reliable=*/false,
+                       /*is_local=*/false);
+
+  subspace::Request local_req;
+  local_req.mutable_get_channel_info()->set_channel_name("local_info_ch");
+  auto local = conn.Send(local_req);
+  ASSERT_OK(local);
+  ASSERT_EQ(1, local->first.get_channel_info().channels_size());
+  EXPECT_TRUE(local->first.get_channel_info().channels(0).is_local());
+
+  subspace::Request public_req;
+  public_req.mutable_get_channel_info()->set_channel_name("public_info_ch");
+  auto pub = conn.Send(public_req);
+  ASSERT_OK(pub);
+  ASSERT_EQ(1, pub->first.get_channel_info().channels_size());
+  EXPECT_FALSE(pub->first.get_channel_info().channels(0).is_local());
+}
+
 // ---------------------------------------------------------------------------
 // GetChannelStats
 // ---------------------------------------------------------------------------
@@ -884,6 +910,31 @@ TEST_F(ServerTest, GetChannelStatsAll) {
   auto &resp = result->first.get_channel_stats();
   EXPECT_TRUE(resp.error().empty());
   EXPECT_GE(resp.channels_size(), 2);
+}
+
+TEST_F(ServerTest, GetChannelStatsReportsIsLocal) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  conn.CreatePublisher("local_stats_ch", 64, 4, "", /*reliable=*/false,
+                       /*is_local=*/true);
+  conn.CreatePublisher("public_stats_ch", 64, 4, "", /*reliable=*/false,
+                       /*is_local=*/false);
+
+  subspace::Request local_req;
+  local_req.mutable_get_channel_stats()->set_channel_name("local_stats_ch");
+  auto local = conn.Send(local_req);
+  ASSERT_OK(local);
+  ASSERT_EQ(1, local->first.get_channel_stats().channels_size());
+  EXPECT_TRUE(local->first.get_channel_stats().channels(0).is_local());
+
+  subspace::Request public_req;
+  public_req.mutable_get_channel_stats()->set_channel_name("public_stats_ch");
+  auto pub = conn.Send(public_req);
+  ASSERT_OK(pub);
+  ASSERT_EQ(1, pub->first.get_channel_stats().channels_size());
+  EXPECT_FALSE(pub->first.get_channel_stats().channels(0).is_local());
 }
 
 // ---------------------------------------------------------------------------
