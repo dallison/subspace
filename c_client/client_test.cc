@@ -759,6 +759,55 @@ TEST_F(ClientTest, ExplicitLeaseWithNoSubscribersRetiresImmediately) {
   ASSERT_TRUE(subspace_remove_client(&client));
 }
 
+// An idle publisher has to leave a rolling window behind for a subscriber
+// that attaches later.  Worth covering here as well as in the C++ tests
+// because the C defaults set prefer_retired_slots, which is the order that
+// used to leave the ring holding a single message however deep it was.
+TEST_F(ClientTest, CIdlePublisherKeepsRollingWindow) {
+  SubspaceClient client = subspace_create_client_with_socket(Socket().c_str());
+  ASSERT_NE(nullptr, client.client);
+
+  SubspacePublisherOptions pub_opts = CPublisherOptionsDefault(64, 8);
+  ASSERT_TRUE(pub_opts.prefer_retired_slots);
+  SubspacePublisher pub =
+      subspace_create_publisher(client, "c_rolling_window", pub_opts);
+  ASSERT_NE(nullptr, pub.publisher) << subspace_get_last_error();
+
+  for (int i = 0; i < 40; i++) {
+    SubspacePublisherBufferLease lease = subspace_acquire_publisher_buffer(pub);
+    ASSERT_NE(nullptr, lease.buffer) << subspace_get_last_error();
+    int len = snprintf(reinterpret_cast<char *>(lease.buffer), 64, "%d", i);
+    ASSERT_EQ(len + 1,
+              subspace_publish_publisher_buffer(pub, lease, len + 1).length);
+  }
+
+  SubspaceSubscriber sub =
+      subspace_create_subscriber(client, "c_rolling_window",
+                                 CSubscriberOptionsDefault());
+  ASSERT_NE(nullptr, sub.subscriber) << subspace_get_last_error();
+  std::vector<int> retained;
+  for (;;) {
+    SubspaceMessage msg = subspace_read_message(sub);
+    if (msg.length == 0) {
+      break;
+    }
+    retained.push_back(atoi(reinterpret_cast<const char *>(msg.buffer)));
+    subspace_free_message(&msg);
+  }
+
+  ASSERT_GT(retained.size(), 1u);
+  ASSERT_EQ(39, retained.back());
+  for (size_t i = 0; i < retained.size(); i++) {
+    ASSERT_EQ(retained.back() - static_cast<int>(retained.size() - 1 - i),
+              retained[i])
+        << "index " << i;
+  }
+
+  ASSERT_TRUE(subspace_remove_subscriber(&sub));
+  ASSERT_TRUE(subspace_remove_publisher(&pub));
+  ASSERT_TRUE(subspace_remove_client(&client));
+}
+
 TEST_F(ClientTest, ChecksumCallbacks) {
   auto pub_client = subspace_create_client_with_socket(Socket().c_str());
   ASSERT_NE(nullptr, pub_client.client);

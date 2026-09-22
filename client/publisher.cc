@@ -300,6 +300,38 @@ void PublisherImpl::RetirePublishedSlotImmediately(MessageSlot *slot) {
   }
 }
 
+int PublisherImpl::FindRetiredSlotToReuse(bool oldest_first) {
+  // Normally a slot is only retired once every subscriber has seen and
+  // dropped it, so the retired pool stays small and taking the lowest-index
+  // slot keeps the publisher on the cache-hot working set that
+  // SetPreferRetiredSlots() exists to produce.
+  if (!oldest_first) {
+    return RetiredSlots().FindFirstSet();
+  }
+  // With nothing subscribed every slot is retired the instant it is
+  // published, so the retired pool is the whole ring and the lowest-index
+  // slot is the one holding the oldest message.  Reusing that slot puts it
+  // straight back at the front of the pool, so the publisher would overwrite
+  // it forever while the rest of the ring stayed frozen on the messages that
+  // happened to be published first, and a subscriber attaching later would
+  // read those rather than recent history.  Recycling the oldest message
+  // rotates through the ring instead.
+  int oldest = -1;
+  uint64_t oldest_timestamp = -1ULL;
+  for (int i = 0; i < num_slots_; i++) {
+    if (!RetiredSlots().IsSet(i) || embargoed_slots_.IsSet(i)) {
+      continue;
+    }
+    const uint64_t timestamp =
+        ccb_->slots[i].timestamp.load(std::memory_order_relaxed);
+    if (timestamp < oldest_timestamp) {
+      oldest_timestamp = timestamp;
+      oldest = i;
+    }
+  }
+  return oldest;
+}
+
 MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
   int retries = num_slots_ * 1000;
   MessageSlot *slot = nullptr;
@@ -309,7 +341,7 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
   int retired_slot = -1;
   int free_slot = -1;
   // See PublisherOptions::SetPreferRetiredSlots() for the rationale.
-  // When true (the default) we prefer recycling a retired slot over
+  // When it is set we prefer recycling a retired slot over
   // pulling a fresh slot from the never-used pool.  Both are equally
   // valid for an unreliable publisher (a retired slot has been seen
   // by every current subscriber and dropped), but a retired slot's
@@ -320,15 +352,29 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
   // cycles through a tiny working set of retired slots without ever
   // consuming from FreeSlots, while still being able to burst into
   // FreeSlots if the subscriber falls behind.
-  const bool retired_first = options_.PreferRetiredSlots();
+  //
+  // None of that holds with nothing subscribed: a slot is then retired the
+  // moment it is published, so the publisher would take the slot it just
+  // wrote back out of the retired pool on the very next publish and never
+  // touch FreeSlots at all.  The ring would hold one message no matter how
+  // deep it is configured, and there is no publish/consume cycle keeping
+  // those pages hot to pay for it either.  Fill the ring from FreeSlots
+  // first while idle so that, together with the oldest-first recycling in
+  // FindRetiredSlotToReuse, it becomes a rolling window of recent messages
+  // for whoever attaches next.
   for (;;) {
     slot = nullptr;
     retired_slot = -1;
     free_slot = -1;
     CheckReload();
+    // Read the subscriber count off the reloaded CCB rather than caching it
+    // across the loop, so a subscriber attaching while we retry here is seen.
+    const bool no_subscribers = NumSubscribers(vchan_id_) == 0;
+    const bool retired_first =
+        options_.PreferRetiredSlots() && !no_subscribers;
     bool tried_first = false;
     if (retired_first) {
-      retired_slot = RetiredSlots().FindFirstSet();
+      retired_slot = FindRetiredSlotToReuse(/*oldest_first=*/no_subscribers);
       tried_first = (retired_slot != -1);
     } else if (!ccb_->free_slots_exhausted.load(std::memory_order_relaxed)) {
       free_slot = FreeSlots().FindFirstSet();
@@ -368,7 +414,8 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
         ccb_->free_slots_exhausted.store(true, std::memory_order_relaxed);
       }
     } else if (!retired_first &&
-               (retired_slot = RetiredSlots().FindFirstSet()) != -1) {
+               (retired_slot = FindRetiredSlotToReuse(
+                    /*oldest_first=*/no_subscribers)) != -1) {
       // FreeSlots exhausted (legacy order), fall back to RetiredSlots.
       if (embargoed_slots_.IsSet(retired_slot)) {
         continue;
