@@ -576,9 +576,29 @@ class TestSubspaceClient(unittest.TestCase):
         self.assertEqual(info.slot_size, 512)
         self.assertEqual(info.num_slots, 8)
         self.assertFalse(info.reliable)
+        self.assertFalse(info.is_local)
 
         pub = None
         sub = None
+
+    def test_channel_info_is_local(self):
+        client = self._make_client("info_local")
+        opts = subspace.PublisherOptions()
+        opts.set_slot_size(256)
+        opts.set_num_slots(4)
+        opts.set_local(True)
+        local_pub = client.create_publisher(channel_name="ch_info_local",
+                                            options=opts)
+        self.assertTrue(client.get_channel_info("ch_info_local").is_local)
+        self.assertTrue(client.get_channel_stats("ch_info_local").is_local)
+
+        public_pub = client.create_publisher(channel_name="ch_info_public",
+                                             slot_size=256, num_slots=4)
+        self.assertFalse(client.get_channel_info("ch_info_public").is_local)
+        self.assertFalse(client.get_channel_stats("ch_info_public").is_local)
+
+        local_pub = None
+        public_pub = None
 
     def test_get_all_channel_info(self):
         client = self._make_client("all_info")

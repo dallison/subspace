@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Prefix Layout Fixes
+- A channel's checksum/metadata/prefix layout is now established before its
+  shared memory is allocated, so shadow replicas receive the publisher's real
+  layout instead of the `4`/`0` defaults. Previously a shadow permanently
+  recorded the defaults, since the sizes are only replicated at channel
+  creation.
+- A publisher on a multiplexer now promotes a subscriber-created placeholder
+  with its own prefix layout, including when the publisher uses a different
+  virtual channel than the subscriber.
+- Subscribers attaching to an existing placeholder multiplexer no longer tear
+  down and recreate its shared memory underneath already-attached subscribers.
+- A failed channel allocation now restores the channel to its placeholder
+  state instead of leaving it claiming slots it never mapped.
+- Shadow recovery now recomputes the prefix size from the recovered checksum
+  and metadata sizes rather than leaving it at the default.
+
 ### ReadMessage trigger control
 - Added `ClearTrigger` (`kClearTrigger` / `kNoClearTrigger`) so `ReadMessage`
   can leave the subscriber trigger fd unread. Exposed in C++, C, Python, and

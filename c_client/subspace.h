@@ -105,6 +105,7 @@ typedef struct {
   int subscriber_queue_size;
   uint64_t subscriber_queue_arena_size;
   bool reliable;
+  bool is_local;
 } SubspaceChannelInfo;
 
 typedef struct {
@@ -112,6 +113,7 @@ typedef struct {
   uint64_t total_bytes;
   uint64_t total_messages;
   uint64_t max_message_size;
+  bool is_local;
 } SubspaceChannelStats;
 
 typedef struct {

@@ -116,6 +116,7 @@ pub struct ChannelInfo {
     pub subscriber_queue_size: i32,
     pub subscriber_queue_arena_size: u64,
     pub reliable: bool,
+    pub is_local: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +125,7 @@ pub struct ChannelStats {
     pub total_bytes: u64,
     pub total_messages: u64,
     pub max_message_size: u64,
+    pub is_local: bool,
 }
 
 // ── ClientInner ─────────────────────────────────────────────────────────────
@@ -1536,6 +1538,7 @@ impl Client {
             subscriber_queue_size: info.subscriber_queue_size,
             subscriber_queue_arena_size: info.subscriber_queue_arena_size,
             reliable: info.is_reliable,
+            is_local: info.is_local,
         })
     }
 
@@ -1576,6 +1579,7 @@ impl Client {
                 subscriber_queue_size: info.subscriber_queue_size,
                 subscriber_queue_arena_size: info.subscriber_queue_arena_size,
                 reliable: info.is_reliable,
+                is_local: info.is_local,
             })
             .collect())
     }
@@ -1613,6 +1617,7 @@ impl Client {
             total_bytes: s.total_bytes as u64,
             total_messages: s.total_messages as u64,
             max_message_size: s.max_message_size as u64,
+            is_local: s.is_local,
         })
     }
 
@@ -1654,6 +1659,7 @@ impl Client {
                 total_bytes: s.total_bytes as u64,
                 total_messages: s.total_messages as u64,
                 max_message_size: s.max_message_size as u64,
+                is_local: s.is_local,
             })
             .collect())
     }

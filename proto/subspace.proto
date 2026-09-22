@@ -281,6 +281,7 @@ message ChannelInfoProto {
   repeated ChannelParticipantInfoProto participants = 16;
   int32 subscriber_queue_size = 17;
   uint64 subscriber_queue_arena_size = 18;
+  bool is_local = 19; // True if any publisher is local (not sent off-machine).
 }
 
 // This is published to the /subspace/ChannelDirectory channel.
@@ -301,6 +302,7 @@ message ChannelStatsProto {
   uint32 total_drops = 9;
   int32 num_bridge_pubs = 10; // Number of publishers that are bridges.
   int32 num_bridge_subs = 11; // Number of subscribers that are bridges.
+  bool is_local = 12; // True if any publisher is local (not sent off-machine).
 }
 
 // This is published to the /subspace/Statistics channel.

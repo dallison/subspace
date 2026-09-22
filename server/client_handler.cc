@@ -373,6 +373,33 @@ void ClientHandler::HandleCreatePublisher(
     return;
   }
 
+  // Resolve the prefix layout up front.  Creating a channel (or promoting a
+  // placeholder multiplexer) allocates shared memory and publishes the
+  // channel to shadow replicas, and those steps read the layout off the
+  // channel, so it has to be known before any of them run.  Validating here
+  // also means an out-of-range size is rejected before we have created a
+  // channel or a publisher to unwind.
+  int32_t cs = req.checksum_size();
+  int32_t ms = req.metadata_size();
+  if (cs <= 0) {
+    cs = 4;
+  }
+  if (ms < 0) {
+    ms = 0;
+  }
+  if (cs > kMaxChecksumSize) {
+    response->set_error(
+        absl::StrFormat("checksum_size %d exceeds maximum %d for channel %s",
+                        cs, kMaxChecksumSize, req.channel_name()));
+    return;
+  }
+  if (ms > kMaxMetadataSize) {
+    response->set_error(
+        absl::StrFormat("metadata_size %d exceeds maximum %d for channel %s",
+                        ms, kMaxMetadataSize, req.channel_name()));
+    return;
+  }
+
   int max_outstanding_slot_leases = req.max_outstanding_slot_leases();
   // Zero is the protobuf default used by clients predating explicit leases.
   if (max_outstanding_slot_leases == 0) {
@@ -386,6 +413,26 @@ void ClientHandler::HandleCreatePublisher(
         max_outstanding_slot_leases, req.channel_name(), req.num_slots()));
     return;
   }
+
+  // A channel keeps the sizes it was constructed with (checksum 4,
+  // metadata 0) until the first publisher fixes the layout, so those values
+  // mean "not yet established" rather than "must match".  Virtual channels
+  // forward these accessors to their multiplexer, which is what holds every
+  // virtual channel on a mux to a single layout.  Returns an empty string
+  // when the requested layout is acceptable.
+  auto layout_conflict = [&](const ServerChannel *ch) -> std::string {
+    if (ch->ChecksumSize() != 4 && ch->ChecksumSize() != cs) {
+      return absl::StrFormat("Inconsistent checksum_size for channel %s: "
+                             "already %d, not %d",
+                             req.channel_name(), ch->ChecksumSize(), cs);
+    }
+    if (ch->MetadataSize() != 0 && ch->MetadataSize() != ms) {
+      return absl::StrFormat("Inconsistent metadata_size for channel %s: "
+                             "already %d, not %d",
+                             req.channel_name(), ch->MetadataSize(), ms);
+    }
+    return {};
+  };
 
   ServerChannel *channel = server_->FindChannel(req.channel_name());
   if (channel != nullptr && channel->IsHidden() &&
@@ -405,13 +452,17 @@ void ClientHandler::HandleCreatePublisher(
     absl::StatusOr<ServerChannel *> ch = server_->CreateChannel(
         req.channel_name(), req.slot_size(), req.num_slots(),
         req.subscriber_queue_arena_size(), req.mux(), req.vchan_id(),
-        req.type());
+        req.type(), /*hidden=*/false, /*telemetry_target=*/{}, cs, ms);
     if (!ch.ok()) {
       response->set_error(ch.status().ToString());
       return;
     }
     channel = *ch;
   } else if (channel->IsPlaceholder()) {
+    if (std::string conflict = layout_conflict(channel); !conflict.empty()) {
+      response->set_error(conflict);
+      return;
+    }
     server_->logger_.Log(
         toolbelt::LogLevel::kDebug,
         "Publisher %s is remapping placeholder channel %s with size %lld/%d "
@@ -419,12 +470,27 @@ void ClientHandler::HandleCreatePublisher(
         client_name_.c_str(), req.channel_name().c_str(),
         static_cast<long long>(req.slot_size()), req.num_slots(),
         req.type().size(), server_->GetNumChannels());
+    // Establish the layout before allocating.  Allocation is what makes the
+    // channel non-placeholder and republishes it to shadow replicas, and
+    // both shadows and concurrently connecting subscribers read the sizes
+    // straight off the channel, so they would otherwise latch the
+    // placeholder's defaults instead of this publisher's real layout.
+    const int32_t previous_checksum_size = channel->ChecksumSize();
+    const int32_t previous_metadata_size = channel->MetadataSize();
+    const int32_t previous_prefix_size = channel->PrefixSize();
+    channel->SetPrefixLayout(cs, ms);
     // Channel exists, but it's just a placeholder.  Remap the memory now
     // that we know the slots.
     absl::Status status = server_->RemapChannel(
         channel, req.slot_size(), req.num_slots(),
         req.subscriber_queue_arena_size());
     if (!status.ok()) {
+      // The failed allocation leaves the channel a placeholder again, so
+      // put the layout back as well and let a later publisher retry the
+      // promotion from a clean state.
+      channel->SetChecksumSize(previous_checksum_size);
+      channel->SetMetadataSize(previous_metadata_size);
+      channel->SetPrefixSize(previous_prefix_size);
       response->set_error(status.ToString());
       return;
     }
@@ -652,45 +718,15 @@ void ClientHandler::HandleCreatePublisher(
       return;
     }
     pub = *publisher;
-    {
-      int32_t cs = req.checksum_size();
-      int32_t ms = req.metadata_size();
-      if (cs <= 0) {
-        cs = 4;
-      }
-      if (ms < 0) {
-        ms = 0;
-      }
-      if (cs > kMaxChecksumSize) {
-        response->set_error(absl::StrFormat(
-            "checksum_size %d exceeds maximum %d for channel %s", cs,
-            kMaxChecksumSize, req.channel_name()));
-        return;
-      }
-      if (ms > kMaxMetadataSize) {
-        response->set_error(absl::StrFormat(
-            "metadata_size %d exceeds maximum %d for channel %s", ms,
-            kMaxMetadataSize, req.channel_name()));
-        return;
-      }
-      if (channel->ChecksumSize() != 4 && channel->ChecksumSize() != cs) {
-        response->set_error(
-            absl::StrFormat("Inconsistent checksum_size for channel %s: "
-                            "already %d, not %d",
-                            req.channel_name(), channel->ChecksumSize(), cs));
-        return;
-      }
-      if (channel->MetadataSize() != 0 && channel->MetadataSize() != ms) {
-        response->set_error(
-            absl::StrFormat("Inconsistent metadata_size for channel %s: "
-                            "already %d, not %d",
-                            req.channel_name(), channel->MetadataSize(), ms));
-        return;
-      }
-      channel->SetChecksumSize(cs);
-      channel->SetMetadataSize(ms);
-      channel->SetPrefixSize(Channel::ComputePrefixSize(cs, ms));
+    // Catches a publisher joining a channel (or a sibling virtual channel on
+    // a mux) whose layout was already established.  Where this request
+    // promoted a placeholder the layout is already installed and this is a
+    // no-op.
+    if (std::string conflict = layout_conflict(channel); !conflict.empty()) {
+      response->set_error(conflict);
+      return;
     }
+    channel->SetPrefixLayout(cs, ms);
 
     server_->OnNewPublisher(channel->Name(), pub->GetId());
     server_->SendChannelDirectory();

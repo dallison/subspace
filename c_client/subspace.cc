@@ -180,7 +180,8 @@ SubspaceChannelInfo ToCChannelInfo(const subspace::ChannelInfo &info,
           .subscriber_queue_size = info.subscriber_queue_size,
           .subscriber_queue_arena_size =
               info.subscriber_queue_arena_size,
-          .reliable = info.reliable};
+          .reliable = info.reliable,
+          .is_local = info.is_local};
 }
 
 SubspaceChannelStats ToCChannelStats(const subspace::ChannelStats &stats,
@@ -188,7 +189,8 @@ SubspaceChannelStats ToCChannelStats(const subspace::ChannelStats &stats,
   return {.channel_name = ToCString(channel_name),
           .total_bytes = stats.total_bytes,
           .total_messages = stats.total_messages,
-          .max_message_size = stats.max_message_size};
+          .max_message_size = stats.max_message_size,
+          .is_local = stats.is_local};
 }
 
 subspace::ReadMode ToCppReadMode(SubspaceReadMode mode) {

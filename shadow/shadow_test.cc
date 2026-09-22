@@ -270,6 +270,79 @@ TEST_F(ShadowTest, ShadowReceivesCreateChannel) {
   });
 }
 
+// The shadow copies the checksum and metadata sizes out of the create-channel
+// event and is never sent them again, so the prefix layout has to be on the
+// channel before the allocation that replicates it.
+TEST_F(ShadowTest, ShadowReceivesPrefixLayoutForNewChannel) {
+  subspace::Client client;
+  InitClient(client);
+
+  auto pub = client.CreatePublisher("shadow_prefix_new",
+                                    subspace::PublisherOptions()
+                                        .SetSlotSize(256)
+                                        .SetNumSlots(4)
+                                        .SetChecksumSize(20)
+                                        .SetMetadataSize(50));
+  ASSERT_THAT(pub, IsOk());
+
+  ASSERT_TRUE(WaitForShadowState([]() {
+    return GetShadow()->WithChannels([](auto &channels) {
+      auto it = channels.find("shadow_prefix_new");
+      return it != channels.end() && it->second.ccb_fd.Valid();
+    });
+  }));
+
+  GetShadow()->WithChannels([](auto &channels) {
+    auto it = channels.find("shadow_prefix_new");
+    ASSERT_NE(it, channels.end());
+    EXPECT_EQ(it->second.checksum_size, 20);
+    EXPECT_EQ(it->second.metadata_size, 50);
+  });
+}
+
+// Same requirement for a multiplexer a subscriber created as a placeholder:
+// the publisher that promotes it must install the layout before the remap
+// re-replicates the channel.
+TEST_F(ShadowTest, ShadowReceivesPrefixLayoutAfterPlaceholderPromotion) {
+  subspace::Client client;
+  InitClient(client);
+
+  auto sub = client.CreateSubscriber(
+      "shadow_prefix_vchan_a",
+      subspace::SubscriberOptions().SetMux("shadow_prefix_mux"));
+  ASSERT_THAT(sub, IsOk());
+
+  ASSERT_TRUE(WaitForShadowState([]() {
+    return GetShadow()->WithChannels([](auto &channels) {
+      auto it = channels.find("shadow_prefix_mux");
+      return it != channels.end() && it->second.num_slots == 0;
+    });
+  }));
+
+  auto pub = client.CreatePublisher("shadow_prefix_vchan_b",
+                                    subspace::PublisherOptions()
+                                        .SetSlotSize(256)
+                                        .SetNumSlots(4)
+                                        .SetMux("shadow_prefix_mux")
+                                        .SetChecksumSize(20)
+                                        .SetMetadataSize(50));
+  ASSERT_THAT(pub, IsOk());
+
+  ASSERT_TRUE(WaitForShadowState([]() {
+    return GetShadow()->WithChannels([](auto &channels) {
+      auto it = channels.find("shadow_prefix_mux");
+      return it != channels.end() && it->second.num_slots == 4;
+    });
+  }));
+
+  GetShadow()->WithChannels([](auto &channels) {
+    auto it = channels.find("shadow_prefix_mux");
+    ASSERT_NE(it, channels.end());
+    EXPECT_EQ(it->second.checksum_size, 20);
+    EXPECT_EQ(it->second.metadata_size, 50);
+  });
+}
+
 TEST_F(ShadowTest, ShadowReceivesAddPublisher) {
   subspace::Client client;
   InitClient(client);
