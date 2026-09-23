@@ -530,7 +530,7 @@ ServerChannel::MapExisting(const toolbelt::FileDescriptor &scb_fd,
     if (block->state.load(std::memory_order_acquire) !=
             static_cast<uint32_t>(SlotQueueBlockState::kAllocated) ||
         queue->Capacity() > kDefaultMaxAvailableSlotQueueCapacity ||
-        Aligned(SizeofSlotQueue(queue->Capacity())) >
+        static_cast<uint64_t>(Aligned(SizeofSlotQueue(queue->Capacity()))) >
             block->block_size - SlotQueueBlockHeaderSize()) {
       UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
       UnmapMemory(ccb_, *checked_ccb_size, "CCB");
