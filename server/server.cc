@@ -1856,6 +1856,9 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
     // here or the recovered channel keeps the default 64 and reports a
     // prefix that disagrees with its own checksum/metadata sizes.
     channel->SetPrefixLayout(rch.checksum_size, rch.metadata_size);
+    if (rch.is_local) {
+      channel->LatchLocal();
+    }
     if (rch.hidden) {
       if (rch.telemetry_target.empty()) {
         return absl::InvalidArgumentError(
@@ -1938,7 +1941,7 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
     for (auto &rsub : rch.subscribers) {
       auto sub = std::make_unique<SubscriberUser>(
           nullptr, rsub.id, rsub.is_reliable, rsub.is_bridge, rsub.for_tunnel,
-          rsub.max_active_messages, rsub.subscriber_queue_size);
+          rsub.max_active_messages, rsub.subscriber_queue_size, rsub.is_local);
       sub->SetProcessId(rsub.process_id);
 
       toolbelt::TriggerFd tfd(rsub.trigger_fd, rsub.poll_fd);

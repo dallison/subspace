@@ -1028,7 +1028,7 @@ declarations and the rules for mixing builds.
 | Field/Method | Type | Default | Description |
 |--------------|------|---------|-------------|
 | `slot_size` / `SetSlotSize()` | `SlotSizeType` | `0` | Size of each message slot in bytes. Must be set if using options-only CreatePublisher. |
-| `num_slots` / `SetNumSlots()` | `int32_t` | `0` | Number of slots in the channel. Must be set if using options-only CreatePublisher. |
+| `num_slots` / `SetNumSlots()` | `int32_t` | `0` | Number of slots in the channel. Must be set if using options-only CreatePublisher. A publisher joining an existing channel may ask for fewer slots than it has; it then uses the channel's slot count. |
 | `reliable` / `SetReliable()` | `bool` | `false` | If true, reliable delivery (see Reliable Channels section). |
 | `local` / `SetLocal()` | `bool` | `false` | If true, messages are only visible on the local machine (not bridged). |
 | `type` / `SetType()` | `std::string` | `""` | User-defined message type identifier. All publishers/subscribers must use the same type. |
@@ -1208,6 +1208,7 @@ auto sub = client->CreateSubscriber("channel",
 | Field/Method | Type | Default | Description |
 |--------------|------|---------|-------------|
 | `reliable` / `SetReliable()` | `bool` | `false` | If true, reliable delivery (see Reliable Channels section). |
+| `local` / `SetLocal()` | `bool` | `false` | If true, the channel is local, as with a local publisher: the server won't advertise it to or bridge it to other servers. Unlike publishers, subscribers don't have to agree on this. The channel stays local after the subscriber leaves, until the channel is removed. |
 | `telemetry` / `SetTelemetry()` | `bool` | `false` | Subscribe to server-generated telemetry for the named existing channel instead of its payloads. |
 | `type` / `SetType()` | `std::string` | `""` | User-defined message type identifier. Must match publisher type. |
 | `max_active_messages` / `SetMaxActiveMessages()` | `int` | `1` | Maximum number of active messages (shared_ptrs) that can be held simultaneously. |
@@ -1908,6 +1909,8 @@ on another server. Servers find each other through *discovery*, then move
 message data over a TCP *bridge*. Discovery is only active when the server is
 **not** started with `--local`, and a channel is only bridged when its
 publisher is created with `local = false` (`PublisherOptions::SetLocal(false)`).
+Once a local publisher or subscriber has joined a channel, the channel stays
+local until it is removed, even after that user leaves.
 
 ### Discovery modes
 

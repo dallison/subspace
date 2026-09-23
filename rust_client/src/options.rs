@@ -241,6 +241,7 @@ pub struct SubscriberOptions {
     pub pass_checksum_errors: bool,
     pub keep_active_message: bool,
     pub split_buffer_callbacks: SplitBufferCallbacks,
+    pub local: bool,
 }
 
 impl Default for SubscriberOptions {
@@ -264,6 +265,7 @@ impl Default for SubscriberOptions {
             pass_checksum_errors: false,
             keep_active_message: false,
             split_buffer_callbacks: SplitBufferCallbacks::default(),
+            local: false,
         }
     }
 }
@@ -275,6 +277,13 @@ impl SubscriberOptions {
 
     pub fn set_reliable(mut self, v: bool) -> Self {
         self.reliable = v;
+        self
+    }
+
+    /// A local subscriber makes the channel local, just as a local publisher
+    /// does: the server won't advertise it to or bridge it to other servers.
+    pub fn set_local(mut self, v: bool) -> Self {
+        self.local = v;
         self
     }
 
