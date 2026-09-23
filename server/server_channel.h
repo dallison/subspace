@@ -443,6 +443,8 @@ public:
   }
 
   bool IsLocal() const;
+  // Makes the channel local until it is removed.
+  void LatchLocal() { local_latched_ = true; }
   bool HasLocalPublisher() const;
   bool IsReliable() const;
   bool IsFixedSize() const;
@@ -527,6 +529,9 @@ protected:
       client_buffers_;
   SharedMemoryFds shared_memory_fds_;
   bool is_virtual_ = false;
+  // Set when a local publisher or subscriber joins.  It stays set after they
+  // leave so that the channel is not advertised while other users remain.
+  bool local_latched_ = false;
   bool skip_cleanup_ = false;
   bool hidden_ = false;
   std::string telemetry_target_;

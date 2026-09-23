@@ -7204,7 +7204,43 @@ TEST_F(ClientTest, LocalSubscriberMakesChannelLocal) {
   auto public_sub = EVAL_AND_ASSERT_OK(client.CreateSubscriber(kChannel));
   EXPECT_TRUE(EVAL_AND_ASSERT_OK(client.GetChannelInfo(kChannel)).is_local);
 
+  // Locality is latched until the channel is removed.
   local_sub.reset();
+  EXPECT_TRUE(EVAL_AND_ASSERT_OK(client.GetChannelInfo(kChannel)).is_local);
+}
+
+TEST_F(ClientTest, ChannelStaysLocalAfterLocalPublisherLeaves) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  constexpr char kChannel[] = "latched_local_publisher";
+  auto public_sub = EVAL_AND_ASSERT_OK(client.CreateSubscriber(kChannel));
+  {
+    auto local_pub = EVAL_AND_ASSERT_OK(
+        client.CreatePublisher(kChannel, PubOpts(64, 4).SetLocal(true)));
+    EXPECT_TRUE(EVAL_AND_ASSERT_OK(client.GetChannelInfo(kChannel)).is_local);
+  }
+  EXPECT_TRUE(EVAL_AND_ASSERT_OK(client.GetChannelInfo(kChannel)).is_local);
+  EXPECT_TRUE(EVAL_AND_ASSERT_OK(client.GetChannelStats(kChannel)).is_local);
+
+  // A public publisher can rejoin, but the channel stays local.
+  auto public_pub =
+      EVAL_AND_ASSERT_OK(client.CreatePublisher(kChannel, PubOpts(64, 4)));
+  EXPECT_TRUE(EVAL_AND_ASSERT_OK(client.GetChannelInfo(kChannel)).is_local);
+}
+
+TEST_F(ClientTest, LocalityDoesNotSurviveChannelRecreation) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  constexpr char kChannel[] = "latched_local_recreated";
+  {
+    auto local_pub = EVAL_AND_ASSERT_OK(
+        client.CreatePublisher(kChannel, PubOpts(64, 4).SetLocal(true)));
+    EXPECT_TRUE(EVAL_AND_ASSERT_OK(client.GetChannelInfo(kChannel)).is_local);
+  }
+  auto public_pub =
+      EVAL_AND_ASSERT_OK(client.CreatePublisher(kChannel, PubOpts(64, 4)));
   EXPECT_FALSE(EVAL_AND_ASSERT_OK(client.GetChannelInfo(kChannel)).is_local);
 }
 

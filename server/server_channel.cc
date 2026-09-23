@@ -650,7 +650,9 @@ ServerChannel::AddPublisher(ClientHandler *handler, bool is_reliable,
   }
   PublisherUser *result = pub.get();
   AddUser(*user_id, std::move(pub));
-
+  if (is_local) {
+    LatchLocal();
+  }
   return result;
 }
 
@@ -681,6 +683,9 @@ ServerChannel::AddSubscriber(ClientHandler *handler, bool is_reliable,
   }
   SubscriberUser *result = sub.get();
   AddUser(*user_id, std::move(sub));
+  if (is_local) {
+    LatchLocal();
+  }
   return result;
 }
 
@@ -1249,9 +1254,13 @@ void ServerChannel::CountCapacityUsage(
   }
 }
 
-// A channel is local if any publisher or subscriber is local.  A local
-// channel is neither advertised to nor bridged to other servers.
+// A channel is local once a local publisher or subscriber has joined it, and
+// stays local until it is removed.  A local channel is neither advertised to
+// nor bridged to other servers.
 bool ServerChannel::IsLocal() const {
+  if (local_latched_) {
+    return true;
+  }
   for (auto &[id, user] : users_) {
     if (user == nullptr) {
       continue;

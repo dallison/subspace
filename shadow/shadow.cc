@@ -343,6 +343,10 @@ Shadow::HandleAddPublisher(const ShadowAddPublisher &msg,
               "Shadow: add publisher '%s' pub_id=%d reliable=%d",
               msg.channel_name().c_str(), pub.id, pub.is_reliable);
 
+  // The server latches channel locality, so keep it after the user leaves.
+  if (pub.is_local) {
+    it->second.is_local = true;
+  }
   it->second.publishers.emplace(pub.id, std::move(pub));
   return absl::OkStatus();
 }
@@ -393,6 +397,10 @@ Shadow::HandleAddSubscriber(const ShadowAddSubscriber &msg,
               "Shadow: add subscriber '%s' sub_id=%d reliable=%d",
               msg.channel_name().c_str(), sub.id, sub.is_reliable);
 
+  // The server latches channel locality, so keep it after the user leaves.
+  if (sub.is_local) {
+    it->second.is_local = true;
+  }
   it->second.subscribers.emplace(sub.id, std::move(sub));
   return absl::OkStatus();
 }

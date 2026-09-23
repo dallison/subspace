@@ -1856,6 +1856,9 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
     // here or the recovered channel keeps the default 64 and reports a
     // prefix that disagrees with its own checksum/metadata sizes.
     channel->SetPrefixLayout(rch.checksum_size, rch.metadata_size);
+    if (rch.is_local) {
+      channel->LatchLocal();
+    }
     if (rch.hidden) {
       if (rch.telemetry_target.empty()) {
         return absl::InvalidArgumentError(

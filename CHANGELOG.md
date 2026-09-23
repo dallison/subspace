@@ -9,6 +9,11 @@
   `ChannelStats::is_local` now report true when any publisher or subscriber
   is local. Publishers must still agree with each other on locality; local
   subscribers don't constrain them.
+- Channel locality is now latched: once a local publisher or subscriber has
+  joined a channel, it stays local after they leave, until the channel is
+  removed. Previously a remaining non-local user could get the channel
+  advertised, e.g. while a local publisher restarted. The latch is replicated
+  to the shadow and restored on recovery.
 
 ### Publishers With Fewer Slots
 - A publisher that joins an existing channel with fewer slots than the

@@ -285,7 +285,8 @@ message ChannelInfoProto {
   repeated ChannelParticipantInfoProto participants = 16;
   int32 subscriber_queue_size = 17;
   uint64 subscriber_queue_arena_size = 18;
-  // True if any publisher or subscriber is local (not sent off-machine).
+  // True once a local publisher or subscriber has joined the channel (not sent
+  // off-machine).  Stays true after they leave, until the channel is removed.
   bool is_local = 19;
 }
 
@@ -307,7 +308,8 @@ message ChannelStatsProto {
   uint32 total_drops = 9;
   int32 num_bridge_pubs = 10; // Number of publishers that are bridges.
   int32 num_bridge_subs = 11; // Number of subscribers that are bridges.
-  // True if any publisher or subscriber is local (not sent off-machine).
+  // True once a local publisher or subscriber has joined the channel (not sent
+  // off-machine).  Stays true after they leave, until the channel is removed.
   bool is_local = 12;
 }
 
