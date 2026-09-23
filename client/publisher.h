@@ -60,6 +60,11 @@ public:
   MessageSlot *FindFreeSlotUnreliable(int owner);
   MessageSlot *FindFreeSlotReliable(int owner);
 
+  // Picks the retired slot to recycle next, or -1 if the retired pool holds
+  // no usable slot.  Takes the lowest-index slot unless oldest_first, which
+  // is what an idle publisher wants; see the definition.
+  int FindRetiredSlotToReuse(bool oldest_first);
+
   void SetSlotToBiggestBuffer(MessageSlot *slot);
 
   absl::Status CreateOrAttachBuffers(uint64_t slot_size);

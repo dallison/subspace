@@ -217,6 +217,12 @@ struct PublisherOptions {
   // preserves behaviour for subscribers that attach after earlier messages
   // were published and consumed by another subscriber on the same channel.
   // Set true for the cache-friendly LIFO-style recycling behaviour.
+  //
+  // Ignored while no subscriber is attached, because a publisher with no
+  // subscribers retires each slot as it publishes it and would recycle that
+  // same slot on the next publish, leaving the channel holding one message
+  // however deep it is configured.  An idle publisher fills the ring instead
+  // so that it holds recent history for a subscriber that attaches later.
   PublisherOptions &SetPreferRetiredSlots(bool v) {
     prefer_retired_slots = v;
     return *this;

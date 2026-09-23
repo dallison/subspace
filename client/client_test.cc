@@ -4740,6 +4740,73 @@ TEST_F(ClientTest, RetirementTrigger1) {
   ASSERT_FALSE(fd.revents & POLLIN);
 }
 
+// Ring depth and message count shared by the idle-publisher slot reuse tests.
+// The count is several times the depth so the ring has to wrap repeatedly.
+static constexpr int kIdleRingSlots = 8;
+static constexpr int kIdleRingMessages = 40;
+
+// Publishes a numbered message per lease into an empty channel, then attaches
+// a subscriber and collects the serials the ring still held.  Publishing a
+// lease with nothing subscribed retires the slot there and then, which is
+// what puts the whole ring back in play for the next publish.
+static void CollectSerialsRetainedWhileIdle(const std::string &socket,
+                                            const char *channel,
+                                            bool prefer_retired_slots,
+                                            std::vector<int> *retained) {
+  auto pub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(socket));
+  auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(socket));
+
+  auto pub = EVAL_AND_ASSERT_OK(pub_client->CreatePublisher(
+      channel, PubOpts(64, kIdleRingSlots)
+                   .SetPreferRetiredSlots(prefer_retired_slots)));
+
+  for (int i = 0; i < kIdleRingMessages; i++) {
+    auto lease = EVAL_AND_ASSERT_OK(pub.AcquireBufferLease());
+    ASSERT_NE(nullptr, lease.buffer) << "message " << i;
+    const int len =
+        snprintf(reinterpret_cast<char *>(lease.buffer), 64, "%d", i);
+    ASSERT_OK(pub.PublishBufferLease(lease, len + 1));
+  }
+
+  auto sub = EVAL_AND_ASSERT_OK(sub_client->CreateSubscriber(channel));
+  for (;;) {
+    auto msg = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+    if (msg.length == 0) {
+      break;
+    }
+    retained->push_back(atoi(reinterpret_cast<const char *>(msg.buffer)));
+  }
+}
+
+// The ring has to hold the most recent messages, so a subscriber attaching
+// later reads recent history rather than whatever happened to be published
+// first.  Both slot-allocator orders have to end up there: prefer_retired_slots
+// only decides which pool is tried first, and neither order is allowed to
+// leave the publisher fixated on a single slot.
+TEST_F(ClientTest, IdlePublisherKeepsRollingWindow) {
+  for (bool prefer_retired_slots : {false, true}) {
+    const char *channel = prefer_retired_slots ? "rolling_window_retired_first"
+                                               : "rolling_window_free_first";
+    std::vector<int> retained;
+    CollectSerialsRetainedWhileIdle(Socket(), channel, prefer_retired_slots,
+                                    &retained);
+    ASSERT_FALSE(HasFatalFailure()) << "channel " << channel;
+
+    // Whatever the ring held has to be a contiguous run ending at the newest
+    // message.  Recycling the lowest-index retired slot left the publisher
+    // overwriting one slot forever instead: the ring either froze on the
+    // start-up messages with only the newest one moving, or never filled at
+    // all and retained a single message.
+    ASSERT_GT(retained.size(), 1u) << "channel " << channel;
+    ASSERT_EQ(kIdleRingMessages - 1, retained.back()) << "channel " << channel;
+    for (size_t i = 0; i < retained.size(); i++) {
+      ASSERT_EQ(retained.back() - static_cast<int>(retained.size() - 1 - i),
+                retained[i])
+          << "channel " << channel << " index " << i;
+    }
+  }
+}
+
 TEST_F(ClientTest, SubscriberRemovalTriggersServerRetirement) {
   auto pub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
   auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
