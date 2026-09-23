@@ -343,6 +343,10 @@ Shadow::HandleAddPublisher(const ShadowAddPublisher &msg,
               "Shadow: add publisher '%s' pub_id=%d reliable=%d",
               msg.channel_name().c_str(), pub.id, pub.is_reliable);
 
+  // The server latches channel locality, so keep it after the user leaves.
+  if (pub.is_local) {
+    it->second.is_local = true;
+  }
   it->second.publishers.emplace(pub.id, std::move(pub));
   return absl::OkStatus();
 }
@@ -379,6 +383,7 @@ Shadow::HandleAddSubscriber(const ShadowAddSubscriber &msg,
   ShadowSubscriber sub{
       .id = msg.subscriber_id(),
       .is_reliable = msg.is_reliable(),
+      .is_local = msg.is_local(),
       .is_bridge = msg.is_bridge(),
       .for_tunnel = msg.for_tunnel(),
       .max_active_messages = msg.max_active_messages(),
@@ -392,6 +397,10 @@ Shadow::HandleAddSubscriber(const ShadowAddSubscriber &msg,
               "Shadow: add subscriber '%s' sub_id=%d reliable=%d",
               msg.channel_name().c_str(), sub.id, sub.is_reliable);
 
+  // The server latches channel locality, so keep it after the user leaves.
+  if (sub.is_local) {
+    it->second.is_local = true;
+  }
   it->second.subscribers.emplace(sub.id, std::move(sub));
   return absl::OkStatus();
 }
@@ -627,6 +636,7 @@ absl::Status Shadow::SendStateDump(toolbelt::UnixSocket &socket) {
       msg->set_channel_name(ch.name);
       msg->set_subscriber_id(sub.id);
       msg->set_is_reliable(sub.is_reliable);
+      msg->set_is_local(sub.is_local);
       msg->set_is_bridge(sub.is_bridge);
       msg->set_for_tunnel(sub.for_tunnel);
       msg->set_max_active_messages(sub.max_active_messages);

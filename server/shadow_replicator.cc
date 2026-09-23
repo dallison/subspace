@@ -251,6 +251,7 @@ void ShadowReplicator::SendAddSubscriber(const std::string &channel_name,
   msg->set_channel_name(channel_name);
   msg->set_subscriber_id(sub->GetId());
   msg->set_is_reliable(sub->IsReliable());
+  msg->set_is_local(sub->IsLocal());
   msg->set_is_bridge(sub->IsBridge());
   msg->set_for_tunnel(sub->ForTunnel());
   msg->set_max_active_messages(sub->MaxActiveMessages());
@@ -517,6 +518,7 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
       (*ch)->subscribers.push_back(RecoveredSubscriber{
           .id = msg.subscriber_id(),
           .is_reliable = msg.is_reliable(),
+          .is_local = msg.is_local(),
           .is_bridge = msg.is_bridge(),
           .for_tunnel = msg.for_tunnel(),
           .max_active_messages = msg.max_active_messages(),

@@ -618,7 +618,9 @@ void ClientHandler::HandleCreatePublisher(
           static_cast<long long>(req.slot_size()));
     }
 
-    if (channel->IsLocal() != req.is_local()) {
+    // Local subscribers don't count here: they make the channel local
+    // without constraining publishers.
+    if (channel->HasLocalPublisher() != req.is_local()) {
       response->set_error(
           absl::StrFormat("Inconsistent publisher parameters for channel %s: "
                           "all publishers must be either local or not",
@@ -763,6 +765,7 @@ void ClientHandler::HandleCreatePublisher(
   response->set_subscriber_queue_size(channel->SubscriberQueueSize());
   response->set_subscriber_queue_arena_size(
       channel->SubscriberQueueArenaSize());
+  response->set_num_slots(channel->NumSlots());
 
   const SharedMemoryFds &channel_fds = channel->GetFds();
   response->set_ccb_fd_index(0);
@@ -1003,10 +1006,10 @@ void ClientHandler::HandleCreateSubscriber(
                          "Client %s creating subscriber on channel %s: VM: %s",
                          client_name_.c_str(), req.channel_name().c_str(),
                          GetTotalVM().c_str());
-    absl::StatusOr<SubscriberUser *> subscriber =
-        channel->AddSubscriber(this, req.is_reliable(), req.is_bridge(),
-                               req.for_tunnel(), req.max_active_messages(),
-                               req.subscriber_queue_size(), req.process_id());
+    absl::StatusOr<SubscriberUser *> subscriber = channel->AddSubscriber(
+        this, req.is_reliable(), req.is_bridge(), req.for_tunnel(),
+        req.max_active_messages(), req.subscriber_queue_size(),
+        req.process_id(), req.is_local());
     if (!subscriber.ok()) {
       response->set_error(subscriber.status().ToString());
       remove_unused_telemetry_channel();

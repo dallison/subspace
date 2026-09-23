@@ -217,6 +217,12 @@ struct PublisherOptions {
   // preserves behaviour for subscribers that attach after earlier messages
   // were published and consumed by another subscriber on the same channel.
   // Set true for the cache-friendly LIFO-style recycling behaviour.
+  //
+  // Ignored while no subscriber is attached, because a publisher with no
+  // subscribers retires each slot as it publishes it and would recycle that
+  // same slot on the next publish, leaving the channel holding one message
+  // however deep it is configured.  An idle publisher fills the ring instead
+  // so that it holds recent history for a subscriber that attaches later.
   PublisherOptions &SetPreferRetiredSlots(bool v) {
     prefer_retired_slots = v;
     return *this;
@@ -310,6 +316,13 @@ struct SubscriberOptions {
     reliable = v;
     return *this;
   }
+  // A local subscriber makes the channel local, just as a local publisher
+  // does: the server won't advertise it to or bridge it to other servers.
+  SubscriberOptions &SetLocal(bool v) {
+    local = v;
+    return *this;
+  }
+  bool IsLocal() const { return local; }
   // Set the type of the message on the channel.  The type is
   // not meaningful to the subspace system.  It's up to the
   // user to figure out what it means.  The same type must
@@ -459,6 +472,7 @@ struct SubscriberOptions {
   bool keep_active_message = false;
   bool use_split_buffers = false;
   subspace::SplitBufferCallbacks split_buffer_callbacks;
+  bool local = false;
 };
 
 } // namespace subspace

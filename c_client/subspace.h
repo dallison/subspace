@@ -301,6 +301,12 @@ typedef struct {
   // bursting into FreeSlots when the subscriber falls behind.  Set to
   // false to force the legacy FreeSlots-first allocator (useful when
   // reproducing pre-fix benchmarks).
+  //
+  // Ignored while no subscriber is attached, because a publisher with no
+  // subscribers retires each slot as it publishes it and would recycle that
+  // same slot on the next publish, leaving the channel holding one message
+  // however deep num_slots is.  An idle publisher fills the ring instead so
+  // that it holds recent history for a subscriber that attaches later.
   bool prefer_retired_slots;
 
   // Split-buffer options.  When use_split_buffers is true, Subspace keeps
@@ -340,6 +346,7 @@ typedef struct {
   // Optional callbacks used when the server reports that the publisher
   // created split payload buffers.
   SubspaceSplitBufferCallbacks split_callbacks;
+  bool local; // If true, the channel stays local to this machine.
 } SubspaceSubscriberOptions;
 
 typedef enum {

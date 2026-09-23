@@ -804,6 +804,49 @@ TEST_F(ShadowRecoveryTest, ServerRecoversStateFromShadow) {
   StopShadow();
 }
 
+TEST_F(ShadowRecoveryTest, RecoveryKeepsLatchedLocality) {
+  signal(SIGPIPE, SIG_IGN);
+
+  StartShadow();
+  StartServer();
+
+  subspace::Client client;
+  client.SetThreadSafe(true);
+  ASSERT_THAT(client.Init(RecoveryServerSocket()), IsOk());
+
+  auto sub = client.CreateSubscriber("latched_local_chan");
+  ASSERT_THAT(sub, IsOk());
+  {
+    auto pub = client.CreatePublisher(
+        "latched_local_chan",
+        subspace::PublisherOptions().SetSlotSize(256).SetNumSlots(4).SetLocal(
+            true));
+    ASSERT_THAT(pub, IsOk());
+  }
+
+  // The local publisher has gone, but the channel stays local.
+  ASSERT_TRUE(WaitForShadowState([this]() {
+    return shadow_->WithChannels([](auto &channels) {
+      auto it = channels.find("latched_local_chan");
+      return it != channels.end() && it->second.publishers.empty() &&
+             it->second.subscribers.size() == 1 && it->second.is_local;
+    });
+  }));
+
+  server_->ForEachShadow(
+      [](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
+  StopServer();
+
+  StartServer();
+
+  auto &recovered_channels = server_->GetChannels();
+  ASSERT_EQ(recovered_channels.count("latched_local_chan"), 1u);
+  EXPECT_TRUE(recovered_channels.at("latched_local_chan")->IsLocal());
+
+  StopServer();
+  StopShadow();
+}
+
 TEST_F(ShadowRecoveryTest, RecoveryRebuildsCcbSubscriberRegistrations) {
   signal(SIGPIPE, SIG_IGN);
 

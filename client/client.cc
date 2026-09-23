@@ -444,11 +444,19 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
     (void)SendRequestReceiveResponse(remove_req, remove_resp, remove_fds);
   };
 
+  // A publisher may join an existing channel with fewer slots than it has.
+  // The CCB layout is sized by the channel's slot count, so map with that and
+  // keep it in the options so that reregistration asks for the same count.
+  // Servers that predate num_slots in the response send zero.
+  PublisherOptions channel_opts = opts;
+  if (pub_resp.num_slots() > 0) {
+    channel_opts.num_slots = pub_resp.num_slots();
+  }
   std::shared_ptr<PublisherImpl> channel = std::make_shared<PublisherImpl>(
-      channel_name, opts.num_slots, pub_resp.subscriber_queue_size(),
+      channel_name, channel_opts.num_slots, pub_resp.subscriber_queue_size(),
       pub_resp.subscriber_queue_arena_size(), pub_resp.channel_id(),
       pub_resp.publisher_id(), pub_resp.vchan_id(), session_id_,
-      pub_resp.type(), opts,
+      pub_resp.type(), channel_opts,
       [this](Channel *c) {
         return CheckReload(static_cast<ClientChannel *>(c));
       },
@@ -2206,6 +2214,7 @@ void ClientImpl::FillCreateSubscriberRequest(CreateSubscriberRequest *cmd,
   cmd->set_vchan_id(opts.VchanId());
   cmd->set_subscriber_queue_size(opts.SubscriberQueueSize());
   cmd->set_process_id(static_cast<uint64_t>(getpid()));
+  cmd->set_is_local(opts.IsLocal());
 }
 
 void ClientImpl::ApplySubscriberResponseFds(

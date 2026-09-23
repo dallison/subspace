@@ -530,7 +530,7 @@ ServerChannel::MapExisting(const toolbelt::FileDescriptor &scb_fd,
     if (block->state.load(std::memory_order_acquire) !=
             static_cast<uint32_t>(SlotQueueBlockState::kAllocated) ||
         queue->Capacity() > kDefaultMaxAvailableSlotQueueCapacity ||
-        Aligned(SizeofSlotQueue(queue->Capacity())) >
+        static_cast<uint64_t>(Aligned(SizeofSlotQueue(queue->Capacity()))) >
             block->block_size - SlotQueueBlockHeaderSize()) {
       UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
       UnmapMemory(ccb_, *checked_ccb_size, "CCB");
@@ -650,15 +650,17 @@ ServerChannel::AddPublisher(ClientHandler *handler, bool is_reliable,
   }
   PublisherUser *result = pub.get();
   AddUser(*user_id, std::move(pub));
-
+  if (is_local) {
+    LatchLocal();
+  }
   return result;
 }
 
 absl::StatusOr<SubscriberUser *>
 ServerChannel::AddSubscriber(ClientHandler *handler, bool is_reliable,
                              bool is_bridge, bool for_tunnel,
-                             int max_active_messages,
-                             int subscriber_queue_size, uint64_t process_id) {
+                             int max_active_messages, int subscriber_queue_size,
+                             uint64_t process_id, bool is_local) {
   absl::StatusOr<int> user_id = AllocateUserId("subscriber");
   if (!user_id.ok()) {
     return user_id.status();
@@ -671,7 +673,7 @@ ServerChannel::AddSubscriber(ClientHandler *handler, bool is_reliable,
   }
   std::unique_ptr<SubscriberUser> sub = std::make_unique<SubscriberUser>(
       handler, *user_id, is_reliable, is_bridge, for_tunnel,
-      max_active_messages, subscriber_queue_size);
+      max_active_messages, subscriber_queue_size, is_local);
   sub->SetProcessId(process_id);
   absl::Status status = sub->Init();
   if (!status.ok()) {
@@ -681,6 +683,9 @@ ServerChannel::AddSubscriber(ClientHandler *handler, bool is_reliable,
   }
   SubscriberUser *result = sub.get();
   AddUser(*user_id, std::move(sub));
+  if (is_local) {
+    LatchLocal();
+  }
   return result;
 }
 
@@ -1249,17 +1254,33 @@ void ServerChannel::CountCapacityUsage(
   }
 }
 
-// Channel is public if there are any public publishers.
+// A channel is local once a local publisher or subscriber has joined it, and
+// stays local until it is removed.  A local channel is neither advertised to
+// nor bridged to other servers.
 bool ServerChannel::IsLocal() const {
+  if (local_latched_) {
+    return true;
+  }
   for (auto &[id, user] : users_) {
     if (user == nullptr) {
       continue;
     }
-    if (user->IsPublisher()) {
-      PublisherUser *pub = static_cast<PublisherUser *>(user.get());
-      if (pub->IsLocal()) {
-        return true;
-      }
+    if (user->IsSubscriber() &&
+        static_cast<SubscriberUser *>(user.get())->IsLocal()) {
+      return true;
+    }
+  }
+  return HasLocalPublisher();
+}
+
+bool ServerChannel::HasLocalPublisher() const {
+  for (auto &[id, user] : users_) {
+    if (user == nullptr) {
+      continue;
+    }
+    if (user->IsPublisher() &&
+        static_cast<PublisherUser *>(user.get())->IsLocal()) {
+      return true;
     }
   }
   return false;

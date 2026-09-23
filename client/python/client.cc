@@ -209,6 +209,10 @@ PYBIND11_MODULE(subspace, m) {
       .def(py::init<>())
       .def("set_reliable", &SubscriberOptions::SetReliable,
            "Set whether the subscriber is reliable.")
+      .def("set_local", &SubscriberOptions::SetLocal,
+           "Set whether the subscriber keeps the channel local.")
+      .def("is_local", &SubscriberOptions::IsLocal,
+           "Get whether the subscriber keeps the channel local.")
       .def("set_subscriber_queue_size",
            &SubscriberOptions::SetSubscriberQueueSize,
            "Set this subscriber's queue capacity; zero uses the publisher "
