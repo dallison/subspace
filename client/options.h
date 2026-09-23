@@ -310,6 +310,13 @@ struct SubscriberOptions {
     reliable = v;
     return *this;
   }
+  // A local subscriber makes the channel local, just as a local publisher
+  // does: the server won't advertise it to or bridge it to other servers.
+  SubscriberOptions &SetLocal(bool v) {
+    local = v;
+    return *this;
+  }
+  bool IsLocal() const { return local; }
   // Set the type of the message on the channel.  The type is
   // not meaningful to the subspace system.  It's up to the
   // user to figure out what it means.  The same type must
@@ -459,6 +466,7 @@ struct SubscriberOptions {
   bool keep_active_message = false;
   bool use_split_buffers = false;
   subspace::SplitBufferCallbacks split_buffer_callbacks;
+  bool local = false;
 };
 
 } // namespace subspace

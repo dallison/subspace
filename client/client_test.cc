@@ -7186,6 +7186,80 @@ TEST_F(ClientTest, GetChannelStatsReportsIsLocal) {
   EXPECT_TRUE(seen_local);
 }
 
+TEST_F(ClientTest, LocalSubscriberMakesChannelLocal) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  constexpr char kChannel[] = "local_subscriber_channel";
+  std::optional<Subscriber> local_sub(EVAL_AND_ASSERT_OK(
+      client.CreateSubscriber(kChannel, SubOpts().SetLocal(true))));
+  EXPECT_TRUE(EVAL_AND_ASSERT_OK(client.GetChannelInfo(kChannel)).is_local);
+
+  // A public publisher may still join.
+  auto pub =
+      EVAL_AND_ASSERT_OK(client.CreatePublisher(kChannel, PubOpts(64, 4)));
+  EXPECT_TRUE(EVAL_AND_ASSERT_OK(client.GetChannelInfo(kChannel)).is_local);
+  EXPECT_TRUE(EVAL_AND_ASSERT_OK(client.GetChannelStats(kChannel)).is_local);
+
+  auto public_sub = EVAL_AND_ASSERT_OK(client.CreateSubscriber(kChannel));
+  EXPECT_TRUE(EVAL_AND_ASSERT_OK(client.GetChannelInfo(kChannel)).is_local);
+
+  local_sub.reset();
+  EXPECT_FALSE(EVAL_AND_ASSERT_OK(client.GetChannelInfo(kChannel)).is_local);
+}
+
+TEST_F(ClientTest, LocalSubscriberDoesNotConstrainPublisherLocality) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  constexpr char kChannel[] = "local_subscriber_local_publisher";
+  auto local_sub = EVAL_AND_ASSERT_OK(
+      client.CreateSubscriber(kChannel, SubOpts().SetLocal(true)));
+  auto local_pub = EVAL_AND_ASSERT_OK(
+      client.CreatePublisher(kChannel, PubOpts(64, 4).SetLocal(true)));
+
+  // Publishers must still agree with each other.
+  auto public_pub = client.CreatePublisher(kChannel, PubOpts(64, 4));
+  ASSERT_FALSE(public_pub.ok());
+  EXPECT_THAT(public_pub.status().message(),
+              ::testing::HasSubstr("must be either local or not"));
+}
+
+TEST_F(ClientTest, PublisherWithFewerSlotsUsesChannelSlotCount) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  constexpr char kChannel[] = "publisher_fewer_slots";
+  auto big_pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      kChannel, subspace::PublisherOptions()
+                    .SetSlotSize(64)
+                    .SetNumSlots(200)
+                    .SetSubscriberQueueArenaSize(64'000)));
+  auto sub = EVAL_AND_ASSERT_OK(client.CreateSubscriber(kChannel));
+
+  // The CCB layout depends on the slot count, so a publisher that asks for
+  // fewer slots must lay the channel out with the channel's count or it
+  // reads the subscriber queue index from the wrong place.
+  auto small_pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      kChannel, subspace::PublisherOptions()
+                    .SetSlotSize(64)
+                    .SetNumSlots(24)
+                    .SetSubscriberQueueArenaSize(64'000)));
+  EXPECT_EQ(200, small_pub.NumSlots());
+
+  for (int i = 0; i < 10; i++) {
+    void *buffer = EVAL_AND_ASSERT_OK(small_pub.GetMessageBuffer());
+    std::snprintf(static_cast<char *>(buffer), 64, "message %d", i);
+    ASSERT_OK(small_pub.PublishMessage(16));
+  }
+  for (int i = 0; i < 10; i++) {
+    Message msg = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+    ASSERT_EQ(16, msg.length);
+    EXPECT_STREQ(absl::StrFormat("message %d", i).c_str(),
+                 static_cast<const char *>(msg.buffer));
+  }
+}
+
 TEST_F(ClientTest, GetCurrentOrdinal) {
   subspace::Client pub_client;
   subspace::Client sub_client;

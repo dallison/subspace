@@ -38,6 +38,7 @@ struct ShadowPublisher {
 struct ShadowSubscriber {
   int id = 0;
   bool is_reliable = false;
+  bool is_local = false;
   bool is_bridge = false;
   bool for_tunnel = false;
   int max_active_messages = 0;

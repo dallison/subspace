@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Subscriber Locality
+- Added a `local` subscriber option (C++, C, Python, and Rust). A local
+  subscriber makes its channel local, just as a local publisher does, so the
+  server neither advertises nor bridges it. `ChannelInfo::is_local` and
+  `ChannelStats::is_local` now report true when any publisher or subscriber
+  is local. Publishers must still agree with each other on locality; local
+  subscribers don't constrain them.
+
+### Publishers With Fewer Slots
+- A publisher that joins an existing channel with fewer slots than the
+  channel has now lays out the CCB with the channel's slot count, reported in
+  the new `CreatePublisherResponse.num_slots`. Previously it used its own
+  requested count, read subscriber queue offsets from the wrong place, and
+  could lose messages or crash on its first publish.
+
 ### Prefix Layout Fixes
 - A channel's checksum/metadata/prefix layout is now established before its
   shared memory is allocated, so shadow replicas receive the publisher's real

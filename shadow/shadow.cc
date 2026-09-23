@@ -379,6 +379,7 @@ Shadow::HandleAddSubscriber(const ShadowAddSubscriber &msg,
   ShadowSubscriber sub{
       .id = msg.subscriber_id(),
       .is_reliable = msg.is_reliable(),
+      .is_local = msg.is_local(),
       .is_bridge = msg.is_bridge(),
       .for_tunnel = msg.for_tunnel(),
       .max_active_messages = msg.max_active_messages(),
@@ -627,6 +628,7 @@ absl::Status Shadow::SendStateDump(toolbelt::UnixSocket &socket) {
       msg->set_channel_name(ch.name);
       msg->set_subscriber_id(sub.id);
       msg->set_is_reliable(sub.is_reliable);
+      msg->set_is_local(sub.is_local);
       msg->set_is_bridge(sub.is_bridge);
       msg->set_for_tunnel(sub.for_tunnel);
       msg->set_max_active_messages(sub.max_active_messages);

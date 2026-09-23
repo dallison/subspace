@@ -70,6 +70,9 @@ message CreatePublisherResponse {
   repeated int32 retirement_fd_indexes = 13; // Write end of all retirement fds.
   int32 subscriber_queue_size = 14; // Resolved capacity; 0 means disabled.
   uint64 subscriber_queue_arena_size = 15;
+  // Slots in the channel, which can exceed the requested num_slots when the
+  // channel already exists.  The CCB layout depends on it.
+  int32 num_slots = 16;
 }
 
 // This is used both to create a new subscriber and to reload
@@ -90,6 +93,7 @@ message CreateSubscriberRequest {
   int32 subscriber_queue_size = 11;
   int32 max_subscribers = 12; // 0 means no explicit subscriber limit.
   bool telemetry = 13; // Subscribe to telemetry for channel_name.
+  bool is_local = 14;  // Keeps the channel on this machine.
 }
 
 message CreateSubscriberResponse {
@@ -281,7 +285,8 @@ message ChannelInfoProto {
   repeated ChannelParticipantInfoProto participants = 16;
   int32 subscriber_queue_size = 17;
   uint64 subscriber_queue_arena_size = 18;
-  bool is_local = 19; // True if any publisher is local (not sent off-machine).
+  // True if any publisher or subscriber is local (not sent off-machine).
+  bool is_local = 19;
 }
 
 // This is published to the /subspace/ChannelDirectory channel.
@@ -302,7 +307,8 @@ message ChannelStatsProto {
   uint32 total_drops = 9;
   int32 num_bridge_pubs = 10; // Number of publishers that are bridges.
   int32 num_bridge_subs = 11; // Number of subscribers that are bridges.
-  bool is_local = 12; // True if any publisher is local (not sent off-machine).
+  // True if any publisher or subscriber is local (not sent off-machine).
+  bool is_local = 12;
 }
 
 // This is published to the /subspace/Statistics channel.
@@ -564,6 +570,7 @@ message ShadowAddSubscriber {
   // Requested capacity. 0 uses the publisher's channel default.
   int32 subscriber_queue_size = 7;
   uint64 process_id = 8;
+  bool is_local = 9;
   // FDs sent via SCM_RIGHTS: [trigger_fd, poll_fd]
 }
 

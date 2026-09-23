@@ -340,6 +340,7 @@ typedef struct {
   // Optional callbacks used when the server reports that the publisher
   // created split payload buffers.
   SubspaceSplitBufferCallbacks split_callbacks;
+  bool local; // If true, the channel stays local to this machine.
 } SubspaceSubscriberOptions;
 
 typedef enum {

@@ -88,18 +88,20 @@ class SubscriberUser : public User {
 public:
   SubscriberUser(ClientHandler *handler, int id, bool is_reliable,
                  bool is_bridge, bool for_tunnel, int max_active_messages,
-                 int subscriber_queue_size)
+                 int subscriber_queue_size, bool is_local = false)
       : User(handler, id, is_reliable, is_bridge, for_tunnel),
         max_active_messages_(max_active_messages),
-        subscriber_queue_size_(subscriber_queue_size) {}
+        subscriber_queue_size_(subscriber_queue_size), is_local_(is_local) {}
   bool IsSubscriber() const override { return true; }
   int MaxActiveMessages() const { return max_active_messages_; }
   int SubscriberQueueSize() const { return subscriber_queue_size_; }
+  bool IsLocal() const { return is_local_; }
 
 private:
   int max_active_messages_;
   // Requested capacity. Zero means use the publisher's channel default.
   int subscriber_queue_size_;
+  bool is_local_;
 };
 
 class PublisherUser : public User {
@@ -246,7 +248,8 @@ public:
   absl::StatusOr<SubscriberUser *>
   AddSubscriber(ClientHandler *handler, bool is_reliable, bool is_bridge,
                 bool for_tunnel, int max_active_messages,
-                int subscriber_queue_size, uint64_t process_id);
+                int subscriber_queue_size, uint64_t process_id,
+                bool is_local = false);
   virtual std::vector<std::string> RegisterExistingSubscribers();
   absl::Status ReconcileSubscriberQueueArena();
   void ClearPublisherQueueHazardIfDead(int publisher_id,
@@ -440,6 +443,7 @@ public:
   }
 
   bool IsLocal() const;
+  bool HasLocalPublisher() const;
   bool IsReliable() const;
   bool IsFixedSize() const;
 

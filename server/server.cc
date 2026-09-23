@@ -1938,7 +1938,7 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
     for (auto &rsub : rch.subscribers) {
       auto sub = std::make_unique<SubscriberUser>(
           nullptr, rsub.id, rsub.is_reliable, rsub.is_bridge, rsub.for_tunnel,
-          rsub.max_active_messages, rsub.subscriber_queue_size);
+          rsub.max_active_messages, rsub.subscriber_queue_size, rsub.is_local);
       sub->SetProcessId(rsub.process_id);
 
       toolbelt::TriggerFd tfd(rsub.trigger_fd, rsub.poll_fd);

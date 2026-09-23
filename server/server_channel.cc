@@ -657,8 +657,8 @@ ServerChannel::AddPublisher(ClientHandler *handler, bool is_reliable,
 absl::StatusOr<SubscriberUser *>
 ServerChannel::AddSubscriber(ClientHandler *handler, bool is_reliable,
                              bool is_bridge, bool for_tunnel,
-                             int max_active_messages,
-                             int subscriber_queue_size, uint64_t process_id) {
+                             int max_active_messages, int subscriber_queue_size,
+                             uint64_t process_id, bool is_local) {
   absl::StatusOr<int> user_id = AllocateUserId("subscriber");
   if (!user_id.ok()) {
     return user_id.status();
@@ -671,7 +671,7 @@ ServerChannel::AddSubscriber(ClientHandler *handler, bool is_reliable,
   }
   std::unique_ptr<SubscriberUser> sub = std::make_unique<SubscriberUser>(
       handler, *user_id, is_reliable, is_bridge, for_tunnel,
-      max_active_messages, subscriber_queue_size);
+      max_active_messages, subscriber_queue_size, is_local);
   sub->SetProcessId(process_id);
   absl::Status status = sub->Init();
   if (!status.ok()) {
@@ -1249,17 +1249,29 @@ void ServerChannel::CountCapacityUsage(
   }
 }
 
-// Channel is public if there are any public publishers.
+// A channel is local if any publisher or subscriber is local.  A local
+// channel is neither advertised to nor bridged to other servers.
 bool ServerChannel::IsLocal() const {
   for (auto &[id, user] : users_) {
     if (user == nullptr) {
       continue;
     }
-    if (user->IsPublisher()) {
-      PublisherUser *pub = static_cast<PublisherUser *>(user.get());
-      if (pub->IsLocal()) {
-        return true;
-      }
+    if (user->IsSubscriber() &&
+        static_cast<SubscriberUser *>(user.get())->IsLocal()) {
+      return true;
+    }
+  }
+  return HasLocalPublisher();
+}
+
+bool ServerChannel::HasLocalPublisher() const {
+  for (auto &[id, user] : users_) {
+    if (user == nullptr) {
+      continue;
+    }
+    if (user->IsPublisher() &&
+        static_cast<PublisherUser *>(user.get())->IsLocal()) {
+      return true;
     }
   }
   return false;

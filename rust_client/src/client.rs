@@ -1263,9 +1263,16 @@ impl Client {
             return Err(SubspaceError::ServerError(pub_resp.error));
         }
 
+        // A publisher may join an existing channel with fewer slots than it
+        // has.  The CCB layout is sized by the channel's slot count, so map
+        // with that.  Servers that predate num_slots in the response send zero.
+        let mut channel_opts = opts.clone();
+        if pub_resp.num_slots > 0 {
+            channel_opts.num_slots = pub_resp.num_slots;
+        }
         let mut pub_impl = PublisherImpl::new(
             channel_name.to_string(),
-            opts.num_slots,
+            channel_opts.num_slots,
             pub_resp.subscriber_queue_size,
             pub_resp.subscriber_queue_arena_size,
             pub_resp.channel_id,
@@ -1273,7 +1280,7 @@ impl Client {
             pub_resp.vchan_id,
             client.session_id,
             String::from_utf8_lossy(&pub_resp.r#type).to_string(),
-            opts.clone(),
+            channel_opts,
         );
         pub_impl.channel.use_split_buffers = opts.use_split_buffers;
         pub_impl.channel.split_buffer_callbacks = opts.split_buffer_callbacks.clone();
@@ -1384,6 +1391,7 @@ impl Client {
                     subscriber_queue_size: opts.subscriber_queue_size,
                     process_id: std::process::id() as u64,
                     max_subscribers: opts.max_subscribers,
+                    is_local: opts.local,
                 },
             )),
         };
