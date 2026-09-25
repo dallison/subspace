@@ -10,13 +10,33 @@
 
 #include "client/test_fixture.h"
 
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/fd.h"
 #include "toolbelt/sockets.h"
+#include <cerrno>
+#include <chrono>
+#include <cstddef>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <fcntl.h>
 #include <limits>
+#include <set>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
+#if defined(__linux__)
+#include <dirent.h>
+#include <limits.h>
+#elif defined(__APPLE__)
+#include <libproc.h>
+#elif defined(__QNX__) || defined(__QNXNTO__)
+#include <devctl.h>
+#include <sys/procfs.h>
+#endif
 
 // Helper to send raw Request protos and receive Response protos + FDs,
 // using the same wire format as the real client (4-byte length prefix,
@@ -1109,6 +1129,340 @@ TEST_F(ServerTest, RegisterClientBufferInvalidFdIndexRejected) {
   ASSERT_OK(buffers);
   EXPECT_EQ(0, buffers->metadata_size());
 }
+
+#if !defined(__linux__) && !defined(__APPLE__) && !defined(__QNX__) &&         \
+    !defined(__QNXNTO__)
+TEST_F(ServerTest, ClientConnectionsDoNotLeakFileDescriptors) {
+  GTEST_SKIP() << "open file descriptor counting is not implemented on this "
+                  "platform";
+}
+#else
+
+namespace {
+
+struct OpenFileDescriptor {
+  int fd = -1;
+  std::string description;
+};
+
+#if defined(__linux__)
+absl::StatusOr<std::vector<OpenFileDescriptor>> ListOpenFileDescriptors() {
+  DIR *dir = ::opendir("/proc/self/fd");
+  if (dir == nullptr) {
+    return absl::InternalError(std::string("opendir /proc/self/fd: ") +
+                               std::strerror(errno));
+  }
+  const int dir_fd = ::dirfd(dir);
+  std::vector<OpenFileDescriptor> open_fds;
+  while (const dirent *entry = ::readdir(dir)) {
+    if (entry->d_name[0] == '.') {
+      continue;
+    }
+    char *end = nullptr;
+    const long fd = std::strtol(entry->d_name, &end, 10);
+    if (end == entry->d_name || *end != '\0' || fd == dir_fd) {
+      continue;
+    }
+    char link_path[64];
+    std::snprintf(link_path, sizeof(link_path), "/proc/self/fd/%ld", fd);
+    char target[PATH_MAX];
+    const ssize_t n = ::readlink(link_path, target, sizeof(target) - 1);
+    OpenFileDescriptor info;
+    info.fd = static_cast<int>(fd);
+    if (n >= 0) {
+      target[n] = '\0';
+      info.description = target;
+    } else {
+      info.description = "unknown";
+    }
+    open_fds.push_back(std::move(info));
+  }
+  ::closedir(dir);
+  return open_fds;
+}
+#elif defined(__APPLE__)
+const char *FileDescriptorTypeName(uint32_t type) {
+  switch (type) {
+  case PROX_FDTYPE_VNODE:
+    return "vnode";
+  case PROX_FDTYPE_SOCKET:
+    return "socket";
+  case PROX_FDTYPE_PSHM:
+    return "posix_shm";
+  case PROX_FDTYPE_PSEM:
+    return "posix_sem";
+  case PROX_FDTYPE_KQUEUE:
+    return "kqueue";
+  case PROX_FDTYPE_PIPE:
+    return "pipe";
+  case PROX_FDTYPE_FSEVENTS:
+    return "fsevents";
+  case PROX_FDTYPE_CHANNEL:
+    return "channel";
+  default:
+    return "other";
+  }
+}
+
+std::string DescribeFileDescriptor(pid_t pid, const proc_fdinfo &info) {
+  const char *type = FileDescriptorTypeName(info.proc_fdtype);
+  if (info.proc_fdtype == PROX_FDTYPE_VNODE) {
+    vnode_fdinfowithpath vnode;
+    const int n = ::proc_pidfdinfo(pid, info.proc_fd, PROC_PIDFDVNODEPATHINFO,
+                                   &vnode, sizeof(vnode));
+    if (n == static_cast<int>(sizeof(vnode)) &&
+        vnode.pvip.vip_path[0] != '\0') {
+      return std::string(type) + " " + vnode.pvip.vip_path;
+    }
+  }
+  return type;
+}
+
+// macOS has no /proc. proc_pidinfo(PROC_PIDLISTFDS) lists this process's open
+// descriptors. Grow the buffer until the kernel reports a short read, which
+// means the list fit.
+absl::StatusOr<std::vector<OpenFileDescriptor>> ListOpenFileDescriptors() {
+  const pid_t pid = ::getpid();
+  std::vector<char> buffer(32 * sizeof(proc_fdinfo));
+  int result = 0;
+  for (;;) {
+    result = ::proc_pidinfo(pid, PROC_PIDLISTFDS, 0, buffer.data(),
+                            static_cast<int>(buffer.size()));
+    if (result <= 0) {
+      return absl::InternalError(std::string("proc_pidinfo: ") +
+                                 std::strerror(errno));
+    }
+    if (static_cast<size_t>(result) < buffer.size()) {
+      break;
+    }
+    if (buffer.size() > (1u << 20)) {
+      return absl::ResourceExhaustedError("too many open file descriptors");
+    }
+    buffer.resize(buffer.size() * 2);
+  }
+
+  const auto *info = reinterpret_cast<const proc_fdinfo *>(buffer.data());
+  const int count = result / static_cast<int>(sizeof(proc_fdinfo));
+  std::vector<OpenFileDescriptor> open_fds;
+  open_fds.reserve(static_cast<size_t>(count));
+  for (int i = 0; i < count; ++i) {
+    OpenFileDescriptor fd;
+    fd.fd = info[i].proc_fd;
+    fd.description = DescribeFileDescriptor(pid, info[i]);
+    open_fds.push_back(std::move(fd));
+  }
+  return open_fds;
+}
+#elif defined(__QNX__) || defined(__QNXNTO__)
+// QNX has no /proc/self/fd. DCMD_PROC_INFO reports the process's open file
+// descriptor count in procfs_info::num_fdcons. The descriptor opened to issue
+// the devctl is included in that count and is subtracted here.
+// https://www.qnx.com/developers/docs/7.1/com.qnx.doc.neutrino.prog/topic/process_DCMD_PROC_INFO.html
+absl::StatusOr<std::vector<OpenFileDescriptor>> ListOpenFileDescriptors() {
+  char path[64];
+  std::snprintf(path, sizeof(path), "/proc/%d/as", ::getpid());
+  const int ctl = ::open(path, O_RDONLY);
+  if (ctl < 0) {
+    return absl::InternalError(std::string("open ") + path + ": " +
+                               std::strerror(errno));
+  }
+  procfs_info info;
+  const int rc = ::devctl(ctl, DCMD_PROC_INFO, &info, sizeof(info), nullptr);
+  ::close(ctl);
+  if (rc != EOK) {
+    return absl::InternalError(std::string("DCMD_PROC_INFO: ") +
+                               std::strerror(rc));
+  }
+  if (info.num_fdcons == 0) {
+    return absl::InternalError("DCMD_PROC_INFO reported no file descriptors");
+  }
+  const uint32_t open_count = info.num_fdcons - 1;
+  std::vector<OpenFileDescriptor> open_fds;
+  open_fds.reserve(open_count);
+  for (uint32_t i = 0; i < open_count; ++i) {
+    OpenFileDescriptor fd;
+    // num_fdcons is a count, not a list of descriptor numbers. These entries
+    // exist so the leak check can compare sizes; the numbers are not the
+    // process's real fds.
+    fd.fd = static_cast<int>(i);
+    fd.description = "fd connection";
+    open_fds.push_back(std::move(fd));
+  }
+  return open_fds;
+}
+#endif
+
+absl::StatusOr<std::vector<OpenFileDescriptor>>
+WaitForStableOpenFileDescriptors() {
+  constexpr int kStableSamples = 5;
+  constexpr auto kInterval = std::chrono::milliseconds(20);
+  constexpr auto kTimeout = std::chrono::seconds(2);
+
+  auto previous = ListOpenFileDescriptors();
+  if (!previous.ok()) {
+    return previous.status();
+  }
+  int stable_samples = 0;
+  const auto deadline = std::chrono::steady_clock::now() + kTimeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(kInterval);
+    auto current = ListOpenFileDescriptors();
+    if (!current.ok()) {
+      return current.status();
+    }
+    if (current->size() == previous->size()) {
+      if (++stable_samples >= kStableSamples) {
+        return current;
+      }
+    } else {
+      previous = std::move(current);
+      stable_samples = 0;
+    }
+  }
+  return previous;
+}
+
+// The server closes its side of a connection after it observes the client
+// hangup, which happens on the server thread. Poll until the process fd count
+// returns to `expected` or the timeout expires.
+absl::StatusOr<std::vector<OpenFileDescriptor>>
+WaitForOpenFileDescriptorCount(size_t expected) {
+  constexpr auto kInterval = std::chrono::milliseconds(20);
+  constexpr auto kTimeout = std::chrono::seconds(5);
+  const auto deadline = std::chrono::steady_clock::now() + kTimeout;
+  auto current = ListOpenFileDescriptors();
+  while (current.ok() && current->size() != expected &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(kInterval);
+    current = ListOpenFileDescriptors();
+  }
+  return current;
+}
+
+std::string FormatFileDescriptorsNotInBaseline(
+    const std::vector<OpenFileDescriptor> &baseline,
+    const std::vector<OpenFileDescriptor> &current) {
+  std::set<int> baseline_fds;
+  for (const OpenFileDescriptor &fd : baseline) {
+    baseline_fds.insert(fd.fd);
+  }
+  std::string out;
+  for (const OpenFileDescriptor &fd : current) {
+    if (baseline_fds.count(fd.fd) != 0) {
+      continue;
+    }
+    out += "  ";
+    out += std::to_string(fd.fd);
+    out += " ";
+    out += fd.description;
+    out += "\n";
+  }
+  if (out.empty()) {
+    out = "  (every current fd number was also open at the baseline; "
+          "descriptors may have been closed and their numbers reused)\n";
+  }
+  return out;
+}
+
+} // namespace
+
+// The server runs in this process, so a descriptor it fails to close shows up
+// in the process table once the client has closed its own. Linux reads
+// /proc/self/fd. macOS has no /proc and uses proc_pidinfo(PROC_PIDLISTFDS).
+// QNX reports the count through DCMD_PROC_INFO (num_fdcons). Trigger fds also
+// differ by platform (one eventfd on Linux, a pipe on macOS); the test
+// compares against a baseline taken on the same platform rather than a fixed
+// count.
+TEST_F(ServerTest, ClientConnectionsDoNotLeakFileDescriptors) {
+  auto baseline_or = WaitForStableOpenFileDescriptors();
+  ASSERT_OK(baseline_or);
+  const std::vector<OpenFileDescriptor> baseline = std::move(*baseline_or);
+
+  {
+    constexpr int kConnections = 8;
+    std::vector<RawConnection> connections;
+    connections.reserve(kConnections);
+    for (int i = 0; i < kConnections; ++i) {
+      connections.emplace_back();
+      ASSERT_OK(connections.back().Connect(Socket()));
+      ASSERT_OK(connections.back().Init("fd_leak_idle"));
+    }
+    auto while_open = ListOpenFileDescriptors();
+    ASSERT_OK(while_open);
+    EXPECT_GT(while_open->size(), baseline.size())
+        << "fd counter did not observe open client connections";
+  }
+  auto after_idle = WaitForOpenFileDescriptorCount(baseline.size());
+  ASSERT_OK(after_idle);
+  EXPECT_EQ(baseline.size(), after_idle->size())
+      << "idle client connect/close leaked "
+      << (static_cast<std::ptrdiff_t>(after_idle->size()) -
+          static_cast<std::ptrdiff_t>(baseline.size()))
+      << " file descriptors:\n"
+      << FormatFileDescriptorsNotInBaseline(baseline, *after_idle);
+
+  constexpr int kRounds = 8;
+  for (int round = 0; round < kRounds; ++round) {
+    constexpr int kConnections = 4;
+    std::vector<RawConnection> connections;
+    connections.reserve(kConnections);
+    for (int i = 0; i < kConnections; ++i) {
+      connections.emplace_back();
+      ASSERT_OK(connections.back().Connect(Socket()));
+      ASSERT_OK(connections.back().Init("fd_leak_raw"));
+      const std::string channel =
+          "fd_leak_raw_" + std::to_string(round) + "_" + std::to_string(i);
+      // Drop the connection without an explicit remove so the server has to
+      // reclaim the publisher, subscriber, trigger fds, and channel memory.
+      auto [pub_resp, pub_fds] = connections.back().CreatePublisher(
+          channel, 64, 4, "", /*reliable=*/true, /*is_local=*/true,
+          /*fixed_size=*/false, /*mux=*/"", /*vchan_id=*/0,
+          /*for_tunnel=*/false, /*notify_retirement=*/true);
+      ASSERT_TRUE(pub_resp.has_create_publisher());
+      ASSERT_TRUE(pub_resp.create_publisher().error().empty())
+          << pub_resp.create_publisher().error();
+      EXPECT_FALSE(pub_fds.empty());
+      auto [sub_resp, sub_fds] =
+          connections.back().CreateSubscriber(channel, "", /*reliable=*/true);
+      ASSERT_TRUE(sub_resp.has_create_subscriber());
+      ASSERT_TRUE(sub_resp.create_subscriber().error().empty())
+          << sub_resp.create_subscriber().error();
+      EXPECT_FALSE(sub_fds.empty());
+    }
+  }
+  auto after_raw = WaitForOpenFileDescriptorCount(baseline.size());
+  ASSERT_OK(after_raw);
+  EXPECT_EQ(baseline.size(), after_raw->size())
+      << "abrupt client disconnect leaked "
+      << (static_cast<std::ptrdiff_t>(after_raw->size()) -
+          static_cast<std::ptrdiff_t>(baseline.size()))
+      << " file descriptors:\n"
+      << FormatFileDescriptorsNotInBaseline(baseline, *after_raw);
+
+  for (int round = 0; round < kRounds; ++round) {
+    subspace::Client client;
+    InitClient(client);
+    const std::string channel = "fd_leak_client_" + std::to_string(round);
+    absl::StatusOr<Publisher> pub = client.CreatePublisher(
+        channel, 64, 4,
+        subspace::PublisherOptions().SetReliable(true).SetNotifyRetirement(
+            true));
+    ASSERT_OK(pub);
+    absl::StatusOr<Subscriber> sub = client.CreateSubscriber(
+        channel, subspace::SubscriberOptions().SetReliable(true));
+    ASSERT_OK(sub);
+  }
+  auto after_client = WaitForOpenFileDescriptorCount(baseline.size());
+  ASSERT_OK(after_client);
+  EXPECT_EQ(baseline.size(), after_client->size())
+      << "client session shutdown leaked "
+      << (static_cast<std::ptrdiff_t>(after_client->size()) -
+          static_cast<std::ptrdiff_t>(baseline.size()))
+      << " file descriptors:\n"
+      << FormatFileDescriptorsNotInBaseline(baseline, *after_client);
+}
+
+#endif
 
 int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);
