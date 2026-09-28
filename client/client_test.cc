@@ -5404,11 +5404,7 @@ TEST_F(ClientTest, FailedTelemetrySubscriberRemovesHiddenChannel) {
   absl::StatusOr<Subscriber> telemetry = client->CreateSubscriber(
       kChannel, SubOpts().SetTelemetry(true).SetMaxActiveMessages(1000));
   EXPECT_FALSE(telemetry.ok());
-  for (const auto &[name, channel] : Server()->GetChannels()) {
-    (void)name;
-    EXPECT_FALSE(channel->IsTelemetryChannel() &&
-                 channel->TelemetryTarget() == kChannel);
-  }
+  EXPECT_FALSE(Server()->HasTelemetryChannel(kChannel));
 }
 
 TEST_F(ClientTest, TelemetrySnapshotsAndBatchesParticipantChanges) {
@@ -5502,15 +5498,7 @@ TEST_F(ClientTest, TelemetrySnapshotsAndBatchesParticipantChanges) {
 
   bool telemetry_channel_exists = true;
   for (int attempt = 0; attempt < 40 && telemetry_channel_exists; ++attempt) {
-    telemetry_channel_exists = false;
-    for (const auto &[name, channel] : Server()->GetChannels()) {
-      (void)name;
-      if (channel->IsTelemetryChannel() &&
-          channel->TelemetryTarget() == kChannel) {
-        telemetry_channel_exists = true;
-        break;
-      }
-    }
+    telemetry_channel_exists = Server()->HasTelemetryChannel(kChannel);
     if (telemetry_channel_exists) {
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
