@@ -3318,6 +3318,86 @@ TEST_F(ClientTest, PublishSingleMessagePollAndReadAfterPlaceholderRead) {
   ASSERT_EQ(6, msg->length);
 }
 
+// Creates a publisher on `channel` and publishes "foobar" the first time the
+// placeholder hook runs.  The publisher is kept alive in `pub` because
+// destroying it triggers all subscribers and would hide a lost trigger.
+static void PublishOnFirstPlaceholderCheck(subspace::Client &sub_client,
+                                           subspace::Client &pub_client,
+                                           const std::string &channel,
+                                           std::optional<Publisher> &pub) {
+  auto fired = std::make_shared<bool>(false);
+  sub_client.SetPlaceholderCheckHookForTesting(
+      [&pub_client, channel, &pub, fired]() {
+        if (*fired) {
+          return;
+        }
+        *fired = true;
+        absl::StatusOr<Publisher> p =
+            pub_client.CreatePublisher(channel, 256, 10);
+        ASSERT_OK(p);
+        absl::StatusOr<void *> buffer = p->GetMessageBuffer();
+        ASSERT_OK(buffer);
+        memcpy(*buffer, "foobar", 6);
+        ASSERT_OK(p->PublishMessage(6));
+        pub = std::move(*p);
+      });
+}
+
+TEST_F(ClientTest, PublisherArrivingDuringPlaceholderReadTriggersSubscriber) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber("placeholder_read_race");
+  ASSERT_OK(sub);
+
+  // The publisher appears after ReadMessage has checked for one, so this read
+  // still sees a placeholder.
+  std::optional<Publisher> pub;
+  PublishOnFirstPlaceholderCheck(sub_client, pub_client,
+                                 "placeholder_read_race", pub);
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(0, msg->length);
+  ASSERT_TRUE(pub.has_value());
+
+  // The publish must have left the poll fd triggered.
+  struct pollfd fd = sub->GetPollFd();
+  ASSERT_EQ(1, ::poll(&fd, 1, 1000));
+
+  msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(6, msg->length);
+}
+
+TEST_F(ClientTest, PublisherArrivingDuringPlaceholderFindTriggersSubscriber) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber("placeholder_find_race");
+  ASSERT_OK(sub);
+
+  std::optional<Publisher> pub;
+  PublishOnFirstPlaceholderCheck(sub_client, pub_client,
+                                 "placeholder_find_race", pub);
+  absl::StatusOr<Message> msg = sub->FindMessage(0);
+  ASSERT_OK(msg);
+  ASSERT_EQ(0, msg->length);
+  ASSERT_TRUE(pub.has_value());
+
+  struct pollfd fd = sub->GetPollFd();
+  ASSERT_EQ(1, ::poll(&fd, 1, 1000));
+
+  msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(6, msg->length);
+}
+
 TEST_F(ClientTest, SlowReliableSubscriberDrainReachesEmptyRead) {
   subspace::Client pub_client;
   subspace::Client sub_client;

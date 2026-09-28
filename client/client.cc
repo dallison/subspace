@@ -1501,12 +1501,19 @@ absl::StatusOr<Message> ClientImpl::ReadMessage(SubscriberImpl *subscriber,
   // talk to the server to get the information to reload the shared
   // memory.  If there still isn't a publisher, we will still be a
   // placeholder.
+  //
+  // Clear the trigger before checking for a publisher.  A publisher that
+  // arrives after the check triggers the poll fd, and clearing after the
+  // check would discard that trigger and leave the subscriber waiting.
   if (subscriber->IsPlaceholder()) {
+    if (should_clear_trigger) {
+      subscriber->ClearPollFd();
+    }
     absl::Status status = ReloadSubscriber(subscriber);
+    if (placeholder_check_hook_ != nullptr) {
+      placeholder_check_hook_();
+    }
     if (!status.ok() || subscriber->IsPlaceholder()) {
-      if (should_clear_trigger) {
-        subscriber->ClearPollFd();
-      }
       return Message();
     }
     subscriber->TriggerReliablePublishers();
@@ -1566,9 +1573,14 @@ absl::StatusOr<Message> ClientImpl::FindMessage(SubscriberImpl *subscriber,
   // memory.  If there still isn't a publisher, we will still be a
   // placeholder.
   if (subscriber->IsPlaceholder()) {
+    // As in ReadMessage, clear before the check so a publisher arriving after
+    // it leaves the poll fd triggered.
+    subscriber->ClearPollFd();
     absl::Status status = ReloadSubscriber(subscriber);
+    if (placeholder_check_hook_ != nullptr) {
+      placeholder_check_hook_();
+    }
     if (!status.ok() || subscriber->IsPlaceholder()) {
-      subscriber->ClearPollFd();
       return Message();
     }
   }
