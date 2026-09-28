@@ -1052,6 +1052,15 @@ absl::Status Server::Run(int num_asio_threads) {
     }
 
     if (!tcp_discovery_) {
+      // Bind the receiver before the transmitter.  The transmitter asks for
+      // an ephemeral port, and the kernel can assign this server's discovery
+      // port.  Binding 0.0.0.0 on that port afterwards fails with EADDRINUSE.
+      if (absl::Status s = discovery_receiver_.Bind(
+              toolbelt::InetAddress::AnyAddress(discovery_port_));
+          !s.ok()) {
+        return s;
+      }
+
       // Bind the discovery transmitter to the network and any free
       // port on the requested interface.
       if (absl::Status s = discovery_transmitter_.Bind(ip_addr); !s.ok()) {
@@ -1068,13 +1077,6 @@ absl::Status Server::Run(int num_asio_threads) {
         if (absl::Status s = discovery_transmitter_.SetBroadcast(); !s.ok()) {
           return s;
         }
-      }
-
-      // Open the discovery receiver socket.
-      if (absl::Status s = discovery_receiver_.Bind(
-              toolbelt::InetAddress::AnyAddress(discovery_port_));
-          !s.ok()) {
-        return s;
       }
     }
   }

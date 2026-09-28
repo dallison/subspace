@@ -100,6 +100,9 @@ public:
       (void)pipe(server_pipe_[i]);
 
       int peer_port = disc_ports[(i + 1) % 2];
+      // Release only this server's port.  The peer reservation stays open
+      // until that server is running, so this server's ephemeral discovery
+      // transmitter cannot bind the peer's port.
       reserved_ports[i].Close();
       server_[i] = std::make_unique<subspace::Server>(
           scheduler_[i], socket_[i], "", disc_ports[i], peer_port,
@@ -329,11 +332,11 @@ public:
       bridge_notification_pipe_[i] = *bridge_pipe;
     }
 
-    for (auto &port : reserved_ports) {
-      port.Close();
-    }
-
     for (int i = 0; i < 2; i++) {
+      // Release only this server's port.  The peer reservation stays open
+      // until that server is running, so this server's ephemeral discovery
+      // transmitter cannot bind the peer's port.
+      reserved_ports[i].Close();
       server_thread_[i] = std::thread([this, i, num_asio_threads]() {
         absl::Status s = server_[i]->Run(num_asio_threads);
         if (!s.ok()) {
