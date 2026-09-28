@@ -1501,11 +1501,31 @@ absl::StatusOr<Message> ClientImpl::ReadMessage(SubscriberImpl *subscriber,
   // talk to the server to get the information to reload the shared
   // memory.  If there still isn't a publisher, we will still be a
   // placeholder.
-  if (subscriber->IsPlaceholder()) {
+  // A failed placeholder remap unmaps the subscriber and used to leave
+  // num_slots non-zero, so this stopped looking like a placeholder and the
+  // next read skipped the reload. Treat a missing control block the same way.
+  if (subscriber->IsPlaceholder() || subscriber->GetScb() == nullptr) {
     absl::Status status = ReloadSubscriber(subscriber);
     if (!status.ok() || subscriber->IsPlaceholder()) {
+      // Only a failed remap leaves the control block unmapped. A publisher
+      // can also arrive and trigger during a reload that still observed the
+      // placeholder; clearing that notification drops the message on the floor
+      // because nothing else will trigger the subscriber.
+      const bool retry_remap = subscriber->GetScb() == nullptr;
       if (should_clear_trigger) {
         subscriber->ClearPollFd();
+      }
+      // Sample after the clear. A publisher that arrived before the clear
+      // would otherwise lose its notification; one that arrives after it
+      // leaves the eventfd readable for the caller's wait.
+      bool publisher_arrived = false;
+      if (SystemControlBlock *scb = subscriber->GetScb(); scb != nullptr) {
+        const int updates =
+            scb->counters[subscriber->GetChannelId()].num_pub_updates;
+        publisher_arrived = updates != subscriber->NumUpdates();
+      }
+      if (retry_remap || publisher_arrived) {
+        subscriber->Trigger();
       }
       return Message();
     }
@@ -1643,12 +1663,15 @@ ClientImpl::ReloadBuffersIfNecessary(ClientChannel *channel) {
 
 absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
   // Check if there are any updates to the publishers
-  // since that last time we checked.
+  // since that last time we checked. A failed remap leaves no control block;
+  // retry the server request instead of dereferencing it.
   SystemControlBlock *scb = subscriber->GetScb();
-  int updates = scb->counters[subscriber->GetChannelId()].num_pub_updates;
-
-  if (subscriber->NumUpdates() == updates) {
-    return absl::OkStatus();
+  int updates = 0;
+  if (scb != nullptr) {
+    updates = scb->counters[subscriber->GetChannelId()].num_pub_updates;
+    if (subscriber->NumUpdates() == updates) {
+      return absl::OkStatus();
+    }
   }
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
@@ -1706,6 +1729,10 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
                                 std::move(fds[sub_resp.bcb_fd_index()]));
     if (absl::Status status = subscriber->Map(std::move(channel_fds), scb_fd_);
         !status.ok()) {
+      // Unmap already dropped the old control block and SetNumSlots has
+      // claimed the new geometry. Put the placeholder back so the next read
+      // retries this remap instead of using the unmapped channel.
+      subscriber->SetNumSlots(0);
       return status;
     }
     subscriber->InitActiveMessages();
@@ -1729,7 +1756,8 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
     subscriber->AddRetirementTrigger(fds[size_t(index)]);
   }
 
-  subscriber->SetNumUpdates(updates);
+  subscriber->SetNumUpdates(scb != nullptr ? updates
+                                           : sub_resp.num_pub_updates());
   // subscriber->Dump();
   return absl::OkStatus();
 }
