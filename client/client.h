@@ -819,6 +819,9 @@ private:
       details::PublisherImpl *,
       std::function<absl::Status(details::PublisherImpl *, int64_t, int64_t)>>
       resize_callbacks_;
+  // Test-only.  Called by ReadMessage and FindMessage on a placeholder
+  // subscriber just after it has checked the server for a new publisher.
+  std::function<void()> placeholder_check_hook_;
   bool debug_ = false;
   toolbelt::Logger logger_;
   mutable std::mutex mutex_;
@@ -1851,6 +1854,13 @@ public:
   void SetDebug(bool v) { impl_->SetDebug(v); }
 
   void SetThreadSafe(bool v) { impl_->SetThreadSafe(v); }
+
+  // Test-only.  The hook runs inside ReadMessage and FindMessage when a
+  // placeholder subscriber has just checked the server for a new publisher,
+  // so a test can make a publisher appear at exactly that point.
+  void SetPlaceholderCheckHookForTesting(std::function<void()> hook) {
+    impl_->placeholder_check_hook_ = std::move(hook);
+  }
 
   absl::StatusOr<const ChannelCounters>
   GetChannelCounters(const std::string &channel_name) const {
