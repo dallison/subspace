@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Placeholder Subscriber Wakeups
+- A placeholder subscriber now clears its trigger before checking for a new
+  publisher in `ReadMessage` and `FindMessage`. Previously it cleared after
+  the check, so a publisher that was created and published in between had its
+  trigger discarded. The subscriber stayed a placeholder and never woke for
+  that message.
+
 ### Subscriber Locality
 - Added a `local` subscriber option (C++, C, Python, and Rust). A local
   subscriber makes its channel local, just as a local publisher does, so the
