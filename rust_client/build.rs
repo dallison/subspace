@@ -23,7 +23,25 @@ fn find_well_known_types(start: &std::path::Path, depth: u32) -> Option<String> 
     None
 }
 
+fn max_channels() -> String {
+    println!("cargo:rerun-if-env-changed=SUBSPACE_MAX_CHANNELS");
+    println!("cargo:rerun-if-env-changed=SUBSPACE_MAX_CHANNELS_FILE");
+    if let Ok(path) = std::env::var("SUBSPACE_MAX_CHANNELS_FILE") {
+        if !path.is_empty() {
+            println!("cargo:rerun-if-changed={path}");
+            return std::fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("reading {path}: {err}"))
+                .trim()
+                .to_string();
+        }
+    }
+    std::env::var("SUBSPACE_MAX_CHANNELS").unwrap_or_else(|_| "1024".to_string())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let channels = max_channels();
+    println!("cargo:rustc-env=SUBSPACE_MAX_CHANNELS={channels}");
+
     let proto_file = std::env::var("SUBSPACE_PROTO_FILE")
         .unwrap_or_else(|_| "../proto/subspace.proto".into());
 

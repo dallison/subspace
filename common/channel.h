@@ -134,9 +134,19 @@ constexpr int kMessageIsActivation = 2; // This is an activation message.
 constexpr int kMessageSeenByReliable =
     4; // Message has been seen by a reliable subscriber.
 
-// We need a max channels number because the size of things in
-// shared memory needs to be fixed.
-constexpr int kMaxChannels = 1024;
+// Maximum channels in one server session.  The system control block in
+// shared memory is sized from this, so the server and every client must be
+// built with the same value.  A downstream Bazel module sets
+// subspace.max_channels(count = N) in its root MODULE.bazel.  Building this
+// repo uses --//:max_channels=N, and CMake uses -DSUBSPACE_MAX_CHANNELS=N.
+// N must be a positive multiple of 64 because channel ids are stored in a
+// bitset of 64-bit words.
+#ifndef SUBSPACE_MAX_CHANNELS
+#define SUBSPACE_MAX_CHANNELS 1024
+#endif
+constexpr int kMaxChannels = SUBSPACE_MAX_CHANNELS;
+static_assert(kMaxChannels > 0 && kMaxChannels % 64 == 0,
+              "SUBSPACE_MAX_CHANNELS must be a positive multiple of 64");
 
 // Maximum number of owners for a lot.  One per subscriber reference
 // and publisher reference.  Best if it's a multiple of 64 because

@@ -8409,6 +8409,13 @@ TEST_F(PluginTest, HeartbeatPublishes) {
 class SplitBufferPluginTest : public ::testing::Test {
 public:
   static void SetUpTestSuite() {
+    // The plugin is a shared library. macOS tests link the server into the
+    // test binary and cannot dlopen it, so the only test in this suite skips.
+    // Starting a server here and tearing it down immediately races coroutine
+    // shutdown under AddressSanitizer.
+#ifdef __APPLE__
+    return;
+#else
     printf("Starting Subspace server with split-buffer test plugin\n");
 #if defined(__ANDROID__)
     char socket_name_template[] = "/data/local/tmp/subspaceXXXXXX"; // NOLINT
@@ -8425,7 +8432,6 @@ public:
         /*local=*/true, server_pipe_[1], /*initial_ordinal=*/1,
         /*wait_for_clients=*/true);
 
-#ifndef __APPLE__
     auto status = server_->LoadPlugin(
         "SPLIT_BUFFER_FREE_TEST", "plugins/split_buffer_free_test_plugin.so");
     if (!status.ok()) {
@@ -8433,7 +8439,6 @@ public:
               status.ToString().c_str());
       exit(1);
     }
-#endif
 
     server_thread_ = std::thread([]() {
       absl::Status s = server_->Run();
@@ -8446,9 +8451,13 @@ public:
 
     char buf[8];
     (void)::read(server_pipe_[0], buf, 8);
+#endif
   }
 
   static void TearDownTestSuite() {
+#ifdef __APPLE__
+    return;
+#else
     printf("Stopping Subspace server with split-buffer test plugin\n");
     server_->Stop();
 
@@ -8457,6 +8466,7 @@ public:
     server_thread_.join();
     server_->CleanupAfterSession();
     (void)remove(socket_.c_str());
+#endif
   }
 
   void SetUp() override { signal(SIGPIPE, SIG_IGN); }

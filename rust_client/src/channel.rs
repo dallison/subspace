@@ -28,7 +28,41 @@ pub const MESSAGE_SEEN: u32 = 1;
 pub const MESSAGE_IS_ACTIVATION: u32 = 2;
 pub const MESSAGE_SEEN_BY_RELIABLE: u32 = 4;
 
-pub const MAX_CHANNELS: usize = 1024;
+/// Maximum channels in one server session.  This sizes the shared-memory
+/// system control block and must match the C++ `kMaxChannels` the server was
+/// built with.  `build.rs` supplies it from `subspace.max_channels` in a
+/// downstream `MODULE.bazel`, from `--//:max_channels`, from
+/// `-DSUBSPACE_MAX_CHANNELS`, or from the `SUBSPACE_MAX_CHANNELS` environment
+/// variable.  The default is 1024, and the value must be a positive multiple
+/// of 64.
+pub const MAX_CHANNELS: usize = parse_max_channels(env!("SUBSPACE_MAX_CHANNELS").as_bytes());
+
+const fn parse_max_channels(raw: &[u8]) -> usize {
+    if raw.is_empty() || raw[0] == b'0' {
+        panic!("SUBSPACE_MAX_CHANNELS must be a positive multiple of 64");
+    }
+    let mut count: usize = 0;
+    let mut i = 0;
+    while i < raw.len() {
+        let digit = raw[i];
+        if !digit.is_ascii_digit() {
+            panic!("SUBSPACE_MAX_CHANNELS must be a positive multiple of 64");
+        }
+        let Some(scaled) = count.checked_mul(10) else {
+            panic!("SUBSPACE_MAX_CHANNELS is too large");
+        };
+        let Some(next) = scaled.checked_add((digit - b'0') as usize) else {
+            panic!("SUBSPACE_MAX_CHANNELS is too large");
+        };
+        count = next;
+        i += 1;
+    }
+    if count % 64 != 0 {
+        panic!("SUBSPACE_MAX_CHANNELS must be a positive multiple of 64");
+    }
+    count
+}
+
 pub const MAX_SLOT_OWNERS: usize = 1024;
 pub const MAX_AVAILABLE_SLOT_QUEUE_CAPACITY: usize = 1024;
 const MAX_SLOT_QUEUE_CAS_ATTEMPTS: usize = 64;

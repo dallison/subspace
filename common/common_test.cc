@@ -8,6 +8,14 @@
 
 #include <gtest/gtest.h>
 
+TEST(CommonTest, MaxChannelsMatchesSharedMemory) {
+  EXPECT_GT(subspace::kMaxChannels, 0);
+  EXPECT_EQ(0, subspace::kMaxChannels % 64);
+  EXPECT_EQ(SUBSPACE_MAX_CHANNELS, subspace::kMaxChannels);
+  EXPECT_EQ(sizeof(subspace::SystemControlBlock),
+            sizeof(subspace::ChannelCounters) * subspace::kMaxChannels);
+}
+
 TEST(CommonTest, SubscriberQueueArenaSizeIsExplicitBytes) {
   constexpr int kNumSlots = 8;
   constexpr uint64_t kArenaSize = 12'345;

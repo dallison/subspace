@@ -827,5 +827,7 @@ monitoring tools to distinguish between local, bridged, and tunneled users.
 | `max_active_messages` | num_slots | Subscriber |
 | `vchan_id` | 1023 | 10-bit field |
 | Subscribers per channel | 1024 (kMaxSlotOwners) | CCB bitset |
-| Channels per session | 1024 (kMaxChannels) | SCB |
+| Channels per session | 1024 by default (`kMaxChannels`); raise with `subspace.max_channels` | SCB |
 | Channel name length | 64 (kMaxChannelName) | CCB |
+
+The session channel limit is a build setting because it sizes the system control block in shared memory. A downstream Bazel module raises it by calling `subspace.max_channels(count = N)` next to its `bazel_dep`. `N` must be a positive multiple of 64. See [Setting the channel limit from another Bazel build](max-channels.md).

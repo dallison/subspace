@@ -7,6 +7,9 @@ soong_namespace {}
 // Common defaults for all subspace native modules.
 cc_defaults {
     name: "subspace_defaults",
+    # Add "-DSUBSPACE_MAX_CHANNELS=N" to cflags to raise the session channel
+    # limit above the default of 1024.  N must be a positive multiple of 64,
+    # and every client built against this library must use the same value.
     cflags: [
         "-std=c++17",
         "-Wall",
