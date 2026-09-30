@@ -30,8 +30,9 @@ pub const MESSAGE_SEEN_BY_RELIABLE: u32 = 4;
 
 /// Maximum channels in one server session.  This sizes the shared-memory
 /// system control block and must match the C++ `kMaxChannels` the server was
-/// built with.  `build.rs` supplies it from `--//:max_channels`,
-/// `-DSUBSPACE_MAX_CHANNELS`, or the `SUBSPACE_MAX_CHANNELS` environment
+/// built with.  `build.rs` supplies it from `subspace.max_channels` in a
+/// downstream `MODULE.bazel`, from `--//:max_channels`, from
+/// `-DSUBSPACE_MAX_CHANNELS`, or from the `SUBSPACE_MAX_CHANNELS` environment
 /// variable.  The default is 1024, and the value must be a positive multiple
 /// of 64.
 pub const MAX_CHANNELS: usize = parse_max_channels(env!("SUBSPACE_MAX_CHANNELS").as_bytes());

@@ -136,10 +136,11 @@ constexpr int kMessageSeenByReliable =
 
 // Maximum channels in one server session.  The system control block in
 // shared memory is sized from this, so the server and every client must be
-// built with the same value.  Override the default of 1024 with
-// -DSUBSPACE_MAX_CHANNELS=N (CMake -DSUBSPACE_MAX_CHANNELS=N, Bazel
-// --//:max_channels=N).  N must be a positive multiple of 64 because channel
-// ids are stored in a bitset of 64-bit words.
+// built with the same value.  A downstream Bazel module sets
+// subspace.max_channels(count = N) in its root MODULE.bazel.  Building this
+// repo uses --//:max_channels=N, and CMake uses -DSUBSPACE_MAX_CHANNELS=N.
+// N must be a positive multiple of 64 because channel ids are stored in a
+// bitset of 64-bit words.
 #ifndef SUBSPACE_MAX_CHANNELS
 #define SUBSPACE_MAX_CHANNELS 1024
 #endif

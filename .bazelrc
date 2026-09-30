@@ -32,6 +32,8 @@ build:slot_size_64 --copt=-DSUBSPACE_64BIT_SLOT_SIZE
 # Maximum channels per server session (default 1024).  Must be a positive
 # multiple of 64.  This sizes the shared-memory system control block, so the
 # server and every client, including Rust, must be built with the same value.
+# A downstream module sets subspace.max_channels(count = N) instead.  See
+# docs/max-channels.md.
 #   bazel build --//:max_channels=2048 //server
 
 # Enable the built-in platform-specific configuration feature
