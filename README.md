@@ -108,7 +108,7 @@ The maximum number of channels in one server session defaults to 1024. Raise it 
 bazel build --//:max_channels=2048 //server //client:subspace_client //rust_client:subspace_client_rust
 ```
 
-This sizes the shared-memory system control block, so the server and every client, including the Rust client, must be built with the same value. A repo that imports Subspace with `bazel_dep` sets `@subspace//:max_channels` instead; see [Setting the channel limit from another Bazel build](docs/max-channels.md).
+This sizes the shared-memory system control block, so the server and every client, including the Rust client, must be built with the same value. A repo that imports Subspace with `bazel_dep` sets the limit in its `MODULE.bazel`; see [Setting the channel limit from another Bazel build](docs/max-channels.md).
 
 ### Running Tests with Bazel
 

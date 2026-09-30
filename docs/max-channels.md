@@ -1,120 +1,48 @@
 # Setting the channel limit from another Bazel build
 
 Use this when Subspace is a `bazel_dep` and the downstream build needs more
-than the default 1024 channels. The limit is `--@subspace//:max_channels`. It
-is compiled into the shared-memory system control block, so the server and
-every client in that build must get the same value.
+than the default 1024 channels. The setting applies to every Subspace target
+in that build: the server binary, the server library, and the C++, C, and
+Rust clients. It sizes the shared-memory system control block, so those
+targets must share one value.
 
-The value is a string of digits. It must be a positive multiple of 64.
-`1024` is the default. `1000` fails at analysis time.
+The value must be a positive multiple of 64. `1024` is the default. `1000`
+fails when the module is resolved.
 
-`--//:max_channels` is the flag for a build whose root is the Subspace repo
-itself. A downstream repo that writes `--//:max_channels` is setting a
-different flag, in its own root package.
+## Set it in MODULE.bazel
 
-## Set it for every target
-
-Put this in the downstream repo's `.bazelrc`:
-
-```
-build --@subspace//:max_channels=4096
-```
-
-That one line compiles every Subspace target the build uses:
-
-| Target | What it is |
-|---|---|
-| `@subspace//server:subspace_server` | Server binary |
-| `@subspace//server:server` | Server library |
-| `@subspace//client:subspace_client` | C++ client |
-| `@subspace//c_client:subspace_c_client` | C client |
-| `@subspace//rust_client:subspace_client_rust` | Rust client |
-| `@subspace//plugins:nop_plugin.so` | Plugin shared libraries |
-
-Users of that repo then build normally. They do not pass the flag themselves.
-
-The label uses the `bazel_dep` repo name. This `MODULE.bazel` entry:
+Add this next to the `bazel_dep` in the root `MODULE.bazel`:
 
 ```python
 bazel_dep(name = "subspace", version = "3.2.5")
+
+subspace = use_extension("@subspace//:extensions.bzl", "subspace")
+subspace.max_channels(count = 8192)
 ```
 
-makes the flag `@subspace//:max_channels`. A `repo_name = "something_else"`
-argument changes the label to `@something_else//:max_channels`.
+No extra `.bzl` file, no wrapper per target, and no build-line flag. Call
+`subspace.max_channels` once. Only the root module can set it.
 
-## Set it from a BUILD file
-
-A `BUILD` file can pin the flag onto one dependency. Do this only when the
-downstream repo cannot put the flag in `.bazelrc`. Every Subspace target that
-the build links or runs needs its own wrapper, and every wrapper must pass
-the same `max_channels` string. A target left as a direct `@subspace//...`
-dependency stays at 1024.
-
-`subspace_channels.bzl`:
-
-```python
-def _set_max_channels_impl(settings, attr):
-    return {"@subspace//:max_channels": attr.max_channels}
-
-_set_max_channels = transition(
-    implementation = _set_max_channels_impl,
-    inputs = [],
-    outputs = ["@subspace//:max_channels"],
-)
-
-def _apply_impl(ctx):
-    dep = ctx.attr.dep[0]
-    providers = [dep[DefaultInfo]]
-    if CcInfo in dep:
-        providers.append(dep[CcInfo])
-    return providers
-
-apply_max_channels = rule(
-    implementation = _apply_impl,
-    attrs = {
-        "dep": attr.label(cfg = _set_max_channels, mandatory = True),
-        "max_channels": attr.string(mandatory = True),
-        "_allowlist_function_transition": attr.label(
-            default = "@bazel_tools//tools/allowlists/function_transition_allowlist",
-        ),
-    },
-)
-```
-
-`BUILD`:
-
-```python
-load(":subspace_channels.bzl", "apply_max_channels")
-
-apply_max_channels(
-    name = "subspace_server",
-    dep = "@subspace//server:subspace_server",
-    max_channels = "4096",
-)
-
-apply_max_channels(
-    name = "subspace_client",
-    dep = "@subspace//client:subspace_client",
-    max_channels = "4096",
-)
-```
-
-Depend on those wrappers. Use `@subspace//server:server` instead of
-`@subspace//server:subspace_server` when the server is linked as a library.
-Add the same wrapper for `@subspace//c_client:subspace_c_client` and
-`@subspace//rust_client:subspace_client_rust` when the build uses them. The
-Rust client also needs its Rust providers forwarded; the `.bazelrc` setting
-above is the one that covers it without another wrapper.
+If `bazel_dep` uses `repo_name`, the extension label follows that name. With
+`repo_name = "subspace_ipc"` the load is
+`use_extension("@subspace_ipc//:extensions.bzl", "subspace")`.
 
 ## Check the result
 
 Build any downstream target that links Subspace, then confirm the compiled
-define. For a C++ target `//your:target` with the limit set to 4096:
+define. For a C++ target `//your:target` with the limit set to 8192:
 
 ```bash
 bazel aquery 'mnemonic(CppCompile, //your:target)' | grep SUBSPACE_MAX_CHANNELS
 ```
 
-The compile lines contain `-DSUBSPACE_MAX_CHANNELS=4096`. The server binary
+The compile lines contain `-DSUBSPACE_MAX_CHANNELS=8192`. The server binary
 and the clients must show the same number. A mismatch is a different
 shared-memory layout, and those processes cannot attach to each other.
+
+## Override for one build
+
+`--@subspace//:max_channels=N` overrides the `MODULE.bazel` value when `N` is
+not `1024`. Leaving the flag unset, or leaving it at `1024`, uses the
+`subspace.max_channels` count. `--//:max_channels` is the flag for a build
+whose root is the Subspace repo itself.

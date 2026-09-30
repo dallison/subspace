@@ -3,6 +3,12 @@ module(
     version = "3.2.5",
 )
 
+# Downstream modules raise the channel limit next to their bazel_dep.  See
+# docs/max-channels.md.  This use_extension keeps the default of 1024 when
+# nobody sets the tag.
+subspace = use_extension("//:extensions.bzl", "subspace")
+use_repo(subspace, "subspace_max_channels")
+
 bazel_dep(name = "bazel_skylib", version = "1.9.0")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "abseil-cpp", version = "20250512.1")
