@@ -827,5 +827,5 @@ monitoring tools to distinguish between local, bridged, and tunneled users.
 | `max_active_messages` | num_slots | Subscriber |
 | `vchan_id` | 1023 | 10-bit field |
 | Subscribers per channel | 1024 (kMaxSlotOwners) | CCB bitset |
-| Channels per session | 1024 (kMaxChannels) | SCB |
+| Channels per session | 1024 by default (`kMaxChannels` / `SUBSPACE_MAX_CHANNELS`) | SCB |
 | Channel name length | 64 (kMaxChannelName) | CCB |

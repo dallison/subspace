@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Configurable Channel Limit
+- The maximum number of channels in one server session defaults to 1024 and
+  can be raised at build time. Bazel: `--//:max_channels=N`. CMake:
+  `-DSUBSPACE_MAX_CHANNELS=N`. A Cargo build of the Rust client reads the
+  same number from `SUBSPACE_MAX_CHANNELS`. `N` must be a positive multiple
+  of 64. The server and every client must be built with the same value,
+  because it sizes the shared-memory system control block.
+
 ### Placeholder Subscriber Wakeups
 - A placeholder subscriber now clears its trigger before checking for a new
   publisher in `ReadMessage` and `FindMessage`. Previously it cleared after
