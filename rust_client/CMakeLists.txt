@@ -26,7 +26,9 @@ else()
 endif()
 
 add_custom_target(subspace_client_rust ALL
-    COMMAND ${CARGO_EXECUTABLE} build ${CARGO_BUILD_FLAG}
+    COMMAND ${CMAKE_COMMAND} -E env
+            SUBSPACE_MAX_CHANNELS=${SUBSPACE_MAX_CHANNELS}
+            ${CARGO_EXECUTABLE} build ${CARGO_BUILD_FLAG}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     COMMENT "Building Rust client library via Cargo"
 )
@@ -46,6 +48,6 @@ else()
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     )
     set_tests_properties(rust_client_test PROPERTIES
-        ENVIRONMENT "PATH=$<TARGET_FILE_DIR:subspace_server>:$ENV{PATH}"
+        ENVIRONMENT "PATH=$<TARGET_FILE_DIR:subspace_server>:$ENV{PATH};SUBSPACE_MAX_CHANNELS=${SUBSPACE_MAX_CHANNELS}"
     )
 endif()

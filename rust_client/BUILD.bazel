@@ -11,8 +11,10 @@ cargo_build_script(
     build_script_env = {
         "PROTOC": "$(execpath @protobuf//:protoc)",
         "SUBSPACE_PROTO_FILE": "$(execpath //proto:subspace.proto)",
+        "SUBSPACE_MAX_CHANNELS_FILE": "$(execpath //common:max_channels_setting)",
     },
     data = [
+        "//common:max_channels_setting",
         "//proto:subspace.proto",
         "@protobuf//:protoc",
         "@protobuf//:well_known_type_protos",

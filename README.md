@@ -47,6 +47,7 @@ See the file docs/subspace.pdf for full documentation.  Additional documentation
 - [Publisher Buffer Leases](docs/publisher-buffer-leases.md)
 - [Reliable Messages](docs/reliable-messages.md)
 - [Slot Sizes](docs/slot-sizes.md)
+- [Channel Limit](docs/max-channels.md)
 - [C Client API](docs/c-client.md)
 - [Client Architecture](docs/client-architecture.md)
 - [Server Architecture](docs/server-architecture.md)
@@ -101,6 +102,25 @@ The `.bazelrc` file defines configs that select build-time options:
 |---|---|
 | `--config=linux_memfd` | On Linux, back shared memory with anonymous `memfd_create` objects instead of named `/dev/shm` ones. |
 | `--config=slot_size_64` | Expose 64 bit slot sizes in the C and C++ client APIs, allowing slots larger than 2GB. See [Slot Sizes](docs/slot-sizes.md#64-bit-slot-sizes). |
+
+The maximum number of channels in one server session defaults to 1024. `N` must be a positive multiple of 64. This sizes the shared-memory system control block, so the server and every client, including the Rust client, must be built with the same value.
+
+A repo that imports Subspace with `bazel_dep` sets the limit in its root `MODULE.bazel`:
+
+```python
+bazel_dep(name = "subspace", version = "3.2.5")
+
+subspace = use_extension("@subspace//:extensions.bzl", "subspace")
+subspace.max_channels(count = 8192)
+```
+
+That applies to the server and every client. See [Setting the channel limit from another Bazel build](docs/max-channels.md).
+
+To raise the limit while building this repository:
+
+```bash
+bazel build --//:max_channels=2048 //server //client:subspace_client //rust_client:subspace_client_rust
+```
 
 ### Running Tests with Bazel
 
@@ -227,9 +247,12 @@ make -j$(nproc)
 |---|---|---|
 | `SUBSPACE_LINUX_USE_MEMFD` | `OFF` | On Linux, back shared memory with anonymous `memfd_create` objects instead of named `/dev/shm` ones. |
 | `SUBSPACE_64BIT_SLOT_SIZE` | `OFF` | Expose 64 bit slot sizes in the C and C++ client APIs, allowing slots larger than 2GB. See [Slot Sizes](docs/slot-sizes.md#64-bit-slot-sizes). |
+| `SUBSPACE_MAX_CHANNELS` | `1024` | Maximum channels per server session. Must be a positive multiple of 64. The same value is passed to the Rust client. |
 
-Both options change struct layouts or function signatures, so they must be set
-consistently for the library and everything that includes its headers.
+These options change struct layouts or function signatures, so they must be set
+consistently for the library and everything that includes its headers. The
+channel limit in particular sizes shared memory, so the server and every
+client have to agree.
 
 ### Running Tests
 
