@@ -41,6 +41,7 @@ It has the following features:
 1.	Uses my C++ coroutine library (https://github.com/dallison/co)
 
 See the file docs/subspace.pdf for full documentation.  Additional documentation:
+- [How Subspace Works Internally](docs/internals.md)
 - [Checksums and User Metadata](docs/checksums-and-metadata.md)
 - [Channel Telemetry](docs/channel-telemetry.md)
 - [Split Buffers](docs/split-buffers.md)
