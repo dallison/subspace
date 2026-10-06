@@ -866,6 +866,8 @@ public:
     // Callbacks
     absl::Status RegisterDroppedMessageCallback(
         std::function<void(Subscriber*, int64_t)> callback);
+    absl::Status RegisterStuckSubscriberCallback(
+        std::function<void(Subscriber*, double)> callback);
     absl::Status RegisterMessageCallback(
         std::function<void(Subscriber*, Message)> callback);
     absl::Status ProcessAllMessages(ReadMode mode = ReadMode::kReadNext);
@@ -900,6 +902,13 @@ auto sub = sub_or.value();
 // Register callback for dropped messages
 sub.RegisterDroppedMessageCallback([](subspace::Subscriber* sub, int64_t count) {
     std::cerr << "Dropped " << count << " messages on " << sub->Name() << std::endl;
+});
+
+// Called instead of the logged error when max_active_messages has kept the
+// subscriber from reading for the stuck warning grace period.  It is called
+// once until the subscriber reads a message again.
+sub.RegisterStuckSubscriberCallback([](subspace::Subscriber* sub, double seconds) {
+    std::cerr << sub->Name() << " has been stuck for " << seconds << " seconds" << std::endl;
 });
 
 // Register callback for received messages
@@ -1239,6 +1248,8 @@ auto sub = client->CreateSubscriber("channel",
 | `max_active_messages` / `SetMaxSharedPtrs()` | `int` | `0` | Alias: sets max_active_messages to n+1. |
 | `max_subscribers` / `SetMaxSubscribers()` | `int32_t` | `0` | Server-enforced channel subscriber limit; 0 means unlimited. The first subscriber establishes the value and later subscribers must use the same value. |
 | `log_dropped_messages` / `SetLogDroppedMessages()` | `bool` | `true` | If true, log when messages are dropped. |
+| `warn_when_stuck` / `SetWarnWhenStuck()` | `bool` | `true` | If true, log an error when a message has been waiting for `stuck_warning_grace_period` seconds that the subscriber can't read because it holds `max_active_messages` messages. The error is logged again after another grace period and then silenced until the subscriber reads a message. A callback registered with `RegisterStuckSubscriberCallback()` is called once instead of logging. The check runs when the subscriber tries to read. |
+| `stuck_warning_grace_period` / `SetStuckWarningGracePeriod()` | `double` | `5.0` | Seconds a subscriber may be stuck before the error is logged or the stuck subscriber callback is called. Must be finite and at least 0. |
 | `bridge` / `SetBridge()` | `bool` | `false` | Internal: marks this as a bridge subscriber. |
 | `mux` / `SetMux()` | `std::string` | `""` | Multiplexer name for virtual channels. |
 | `vchan_id` / `SetVchanId()` | `int` | `-1` | Virtual channel ID (-1 for server-assigned). |
@@ -1255,6 +1266,8 @@ auto sub = client->CreateSubscriber("channel",
 - `int MaxSharedPtrs() const`
 - `int MaxSubscribers() const`
 - `bool LogDroppedMessages() const`
+- `bool WarnWhenStuck() const`
+- `double StuckWarningGracePeriod() const`
 - `bool IsBridge() const`
 - `const std::string& Mux() const`
 - `int VchanId() const`
@@ -1804,6 +1817,8 @@ This is a quick reference for the most common calls. See
 - `bool subspace_remove_subscriber_callback(SubspaceSubscriber subscriber)`
 - `bool subspace_register_dropped_message_callback(SubspaceSubscriber subscriber, void (*callback)(SubspaceSubscriber, int64_t))`
 - `bool subspace_remove_dropped_message_callback(SubspaceSubscriber subscriber)`
+- `bool subspace_register_stuck_subscriber_callback(SubspaceSubscriber subscriber, void (*callback)(SubspaceSubscriber, double))`
+- `bool subspace_remove_stuck_subscriber_callback(SubspaceSubscriber subscriber)`
 - `bool subspace_process_all_messages(SubspaceSubscriber subscriber)`
 - `bool subspace_remove_subscriber(SubspaceSubscriber *subscriber)`
 

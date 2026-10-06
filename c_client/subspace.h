@@ -347,6 +347,10 @@ typedef struct {
   // created split payload buffers.
   SubspaceSplitBufferCallbacks split_callbacks;
   bool local; // If true, the channel stays local to this machine.
+  // Log an error when max_active_messages has kept the subscriber from
+  // reading a waiting message for stuck_warning_grace_period seconds.
+  bool warn_when_stuck;
+  double stuck_warning_grace_period;
 } SubspaceSubscriberOptions;
 
 typedef enum {
@@ -536,6 +540,16 @@ bool subspace_register_dropped_message_callback(
 
 // Unregister the callback and return true is successful.
 bool subspace_remove_dropped_message_callback(SubspaceSubscriber subscriber);
+
+// Register a callback called when max_active_messages has kept the subscriber
+// from reading a waiting message for stuck_warning_grace_period seconds.  It
+// receives the number of seconds the subscriber has been stuck, replaces the
+// logged error, and is called once until the subscriber reads again.
+bool subspace_register_stuck_subscriber_callback(
+    SubspaceSubscriber subscriber, void (*callback)(SubspaceSubscriber, double));
+
+// Unregister the callback and return true is successful.
+bool subspace_remove_stuck_subscriber_callback(SubspaceSubscriber subscriber);
 
 // Get all available messages from the subscriber and call the callback that has
 // been previously registered using subspace_register_subscriber_callback.

@@ -120,6 +120,8 @@ fn subscriber_options_defaults() {
     assert_eq!(opts.max_active_messages, 1);
     assert!(opts.log_dropped_messages);
     assert!(opts.detect_dropped_messages);
+    assert!(opts.warn_when_stuck);
+    assert_eq!(opts.stuck_warning_grace_period, 5.0);
     assert!(!opts.pass_activation);
     assert!(!opts.read_write);
     assert!(!opts.checksum);
@@ -138,6 +140,8 @@ fn subscriber_options_builder_chain() {
         .set_max_subscribers(3)
         .set_log_dropped_messages(false)
         .set_detect_dropped_messages(false)
+        .set_warn_when_stuck(false)
+        .set_stuck_warning_grace_period(1.5)
         .set_pass_activation(true)
         .set_checksum(true)
         .set_pass_checksum_errors(true)
@@ -153,6 +157,8 @@ fn subscriber_options_builder_chain() {
     assert_eq!(opts.max_subscribers, 3);
     assert!(!opts.log_dropped_messages);
     assert!(!opts.detect_dropped_messages);
+    assert!(!opts.warn_when_stuck);
+    assert_eq!(opts.stuck_warning_grace_period, 1.5);
     assert!(opts.pass_activation);
     assert!(opts.checksum);
     assert!(opts.pass_checksum_errors);
@@ -1654,6 +1660,245 @@ fn integration_dropped_message_callback() {
         num_dropped.load(std::sync::atomic::Ordering::Relaxed) >= 4,
         "subscriber should report at least the four forced overwritten messages"
     );
+}
+
+// ── Stuck subscriber warning ─────────────────────────────────────────────────
+
+struct ErrorLogCapture {
+    messages: std::sync::Mutex<Vec<String>>,
+}
+
+impl log::Log for ErrorLogCapture {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Error
+    }
+
+    fn log(&self, record: &log::Record) {
+        if record.level() <= log::Level::Error {
+            self.messages
+                .lock()
+                .unwrap()
+                .push(record.args().to_string());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static ERROR_LOG: ErrorLogCapture = ErrorLogCapture {
+    messages: std::sync::Mutex::new(Vec::new()),
+};
+
+fn capture_error_logs() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        log::set_logger(&ERROR_LOG).unwrap();
+        log::set_max_level(log::LevelFilter::Error);
+    });
+}
+
+fn count_stuck_warnings(channel: &str) -> usize {
+    let needle = format!("on channel {channel} has been unable to read messages");
+    ERROR_LOG
+        .messages
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|message| message.contains(&needle))
+        .count()
+}
+
+fn publish_stuck_test_message(publisher: &subspace_client::Publisher) {
+    let (buf, _) = publisher.get_message_buffer(64).unwrap().unwrap();
+    unsafe {
+        std::ptr::copy_nonoverlapping(b"stuck".as_ptr(), buf, 5);
+    }
+    publisher.publish_message(5).unwrap();
+}
+
+#[test]
+fn integration_stuck_subscriber_warning_is_throttled() {
+    capture_error_logs();
+    let channel = "rust_stuck_warning";
+    let client = new_client("test_stuck_warning");
+    let publisher = client
+        .create_publisher(
+            channel,
+            &PublisherOptions::new().set_slot_size(64).set_num_slots(8),
+        )
+        .unwrap();
+    let subscriber = client
+        .create_subscriber(
+            channel,
+            &SubscriberOptions::new()
+                .set_max_active_messages(1)
+                .set_stuck_warning_grace_period(0.2),
+        )
+        .unwrap();
+
+    publish_stuck_test_message(&publisher);
+    publish_stuck_test_message(&publisher);
+    let held = subscriber.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(held.length, 5);
+
+    // The second message is waiting but the held one uses up
+    // max_active_messages, so each read comes back empty.
+    let read_while_stuck = || {
+        let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
+        assert_eq!(msg.length, 0);
+    };
+    read_while_stuck();
+    assert_eq!(count_stuck_warnings(channel), 0);
+
+    // One warning per grace period, twice, then silence.
+    for expected in [1, 2, 2] {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        read_while_stuck();
+        assert_eq!(count_stuck_warnings(channel), expected);
+    }
+
+    // Reading a message again resets the throttle, and the grace period
+    // applies to the next time the subscriber is stuck.
+    drop(held);
+    let held = subscriber.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(held.length, 5);
+    publish_stuck_test_message(&publisher);
+    read_while_stuck();
+    assert_eq!(count_stuck_warnings(channel), 2);
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    read_while_stuck();
+    assert_eq!(count_stuck_warnings(channel), 3);
+    drop(held);
+}
+
+#[test]
+fn integration_stuck_subscriber_callback_replaces_warning() {
+    capture_error_logs();
+    let channel = "rust_stuck_callback";
+    let grace_period = 0.2;
+    let client = new_client("test_stuck_callback");
+    let publisher = client
+        .create_publisher(
+            channel,
+            &PublisherOptions::new().set_slot_size(64).set_num_slots(8),
+        )
+        .unwrap();
+    let subscriber = client
+        .create_subscriber(
+            channel,
+            &SubscriberOptions::new()
+                .set_max_active_messages(1)
+                .set_stuck_warning_grace_period(grace_period),
+        )
+        .unwrap();
+
+    let stuck_seconds = std::sync::Arc::new(std::sync::Mutex::new(Vec::<f64>::new()));
+    let recorded = stuck_seconds.clone();
+    subscriber.register_stuck_subscriber_callback(move |seconds| {
+        recorded.lock().unwrap().push(seconds);
+    });
+    let callbacks = || stuck_seconds.lock().unwrap().len();
+
+    publish_stuck_test_message(&publisher);
+    publish_stuck_test_message(&publisher);
+    let held = subscriber.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(held.length, 5);
+
+    let read_while_stuck = || {
+        let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
+        assert_eq!(msg.length, 0);
+    };
+    read_while_stuck();
+    assert_eq!(callbacks(), 0);
+
+    // The callback runs once per stuck period, after the grace period, and the
+    // error is never logged while it is registered.
+    for _ in 0..3 {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        read_while_stuck();
+        assert_eq!(callbacks(), 1);
+    }
+    assert!(stuck_seconds.lock().unwrap()[0] >= grace_period);
+    assert_eq!(count_stuck_warnings(channel), 0);
+
+    // After the subscriber reads again, the next stuck period gets its own
+    // callback once the grace period passes.
+    drop(held);
+    let held = subscriber.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(held.length, 5);
+    publish_stuck_test_message(&publisher);
+    read_while_stuck();
+    assert_eq!(callbacks(), 1);
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    read_while_stuck();
+    assert_eq!(callbacks(), 2);
+    assert_eq!(count_stuck_warnings(channel), 0);
+
+    // Removing the callback brings back the logged error.
+    subscriber.unregister_stuck_subscriber_callback();
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    read_while_stuck();
+    assert_eq!(count_stuck_warnings(channel), 1);
+    assert_eq!(callbacks(), 2);
+    drop(held);
+}
+
+#[test]
+fn integration_stuck_subscriber_warning_can_be_disabled() {
+    capture_error_logs();
+    let channel = "rust_stuck_warning_disabled";
+    let client = new_client("test_stuck_warning_disabled");
+    let publisher = client
+        .create_publisher(
+            channel,
+            &PublisherOptions::new().set_slot_size(64).set_num_slots(8),
+        )
+        .unwrap();
+    let subscriber = client
+        .create_subscriber(
+            channel,
+            &SubscriberOptions::new()
+                .set_max_active_messages(1)
+                .set_warn_when_stuck(false)
+                .set_stuck_warning_grace_period(0.0),
+        )
+        .unwrap();
+
+    publish_stuck_test_message(&publisher);
+    publish_stuck_test_message(&publisher);
+    let held = subscriber.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(held.length, 5);
+    for _ in 0..3 {
+        let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
+        assert_eq!(msg.length, 0);
+    }
+    assert_eq!(count_stuck_warnings(channel), 0);
+
+    // warn_when_stuck also turns off the callback.
+    let callbacks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = callbacks.clone();
+    subscriber.register_stuck_subscriber_callback(move |_| {
+        counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    });
+    for _ in 0..3 {
+        let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
+        assert_eq!(msg.length, 0);
+    }
+    assert_eq!(callbacks.load(std::sync::atomic::Ordering::Relaxed), 0);
+    drop(held);
+}
+
+#[test]
+fn integration_negative_stuck_warning_grace_period_is_rejected() {
+    let client = new_client("test_stuck_grace");
+    let error = match client.create_subscriber(
+        "rust_stuck_grace",
+        &SubscriberOptions::new().set_stuck_warning_grace_period(-1.0),
+    ) {
+        Ok(_) => panic!("negative grace period unexpectedly accepted"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("StuckWarningGracePeriod"));
 }
 
 // ── Checksum tests ───────────────────────────────────────────────────────────

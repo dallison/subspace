@@ -659,6 +659,16 @@ private:
   absl::Status
   UnregisterDroppedMessageCallback(details::SubscriberImpl *subscriber);
 
+  // Register a function to be called when max_active_messages has kept a
+  // subscriber from reading a waiting message for the stuck warning grace
+  // period.  The function is called with the number of seconds the subscriber
+  // has been stuck as its second argument.
+  absl::Status RegisterStuckSubscriberCallback(
+      details::SubscriberImpl *subscriber,
+      std::function<void(details::SubscriberImpl *, double)> callback);
+  absl::Status
+  UnregisterStuckSubscriberCallback(details::SubscriberImpl *subscriber);
+
   absl::Status RegisterMessageCallback(
       details::SubscriberImpl *subscriber,
       std::function<void(details::SubscriberImpl *, Message)> callback);
@@ -749,6 +759,7 @@ private:
   absl::StatusOr<Message>
   ReadMessageInternal(details::SubscriberImpl *subscriber, ReadMode mode,
                       bool pass_activation, bool clear_trigger);
+  void ReportIfSubscriberStuck(details::SubscriberImpl *subscriber);
   absl::StatusOr<Message>
   FindMessageInternal(details::SubscriberImpl *subscriber, uint64_t timestamp);
   absl::StatusOr<const Message>
@@ -806,6 +817,12 @@ private:
   absl::flat_hash_map<details::SubscriberImpl *,
                       std::function<void(details::SubscriberImpl *, int64_t)>>
       dropped_message_callbacks_;
+
+  // Called instead of logging an error when a subscriber is stuck at its
+  // max_active_messages limit.
+  absl::flat_hash_map<details::SubscriberImpl *,
+                      std::function<void(details::SubscriberImpl *, double)>>
+      stuck_subscriber_callbacks_;
 
   // Callback per subscriber to call when a message is received.  Use the
   // `ProcessAllMessages` function on the Subscriber to call this function for
@@ -1364,6 +1381,7 @@ public:
   ~Subscriber() {
     if (client_ != nullptr && impl_ != nullptr) {
       UnregisterDroppedMessageCallback().IgnoreError();
+      UnregisterStuckSubscriberCallback().IgnoreError();
       UnregisterMessageCallback().IgnoreError();
       (void)client_->RemoveSubscriber(impl_.get());
     }
@@ -1375,11 +1393,19 @@ public:
   Subscriber(Subscriber &&other)
       : client_(std::move(other.client_)), impl_(std::move(other.impl_)),
         dropped_message_callback_(std::move(other.dropped_message_callback_)),
+        stuck_subscriber_callback_(
+            std::move(other.stuck_subscriber_callback_)),
         message_callback_(std::move(other.message_callback_)) {
     if (impl_ != nullptr && client_ != nullptr &&
         dropped_message_callback_ != nullptr) {
       client_->UnregisterDroppedMessageCallback(impl_.get()).IgnoreError();
       RegisterDroppedMessageCallback(dropped_message_callback_).IgnoreError();
+    }
+    if (impl_ != nullptr && client_ != nullptr &&
+        stuck_subscriber_callback_ != nullptr) {
+      client_->UnregisterStuckSubscriberCallback(impl_.get()).IgnoreError();
+      RegisterStuckSubscriberCallback(stuck_subscriber_callback_)
+          .IgnoreError();
     }
     if (impl_ != nullptr && client_ != nullptr &&
         message_callback_ != nullptr) {
@@ -1394,11 +1420,18 @@ public:
     client_ = std::move(other.client_);
     impl_ = std::move(other.impl_);
     dropped_message_callback_ = std::move(other.dropped_message_callback_);
+    stuck_subscriber_callback_ = std::move(other.stuck_subscriber_callback_);
     message_callback_ = std::move(other.message_callback_);
     if (impl_ != nullptr && client_ != nullptr &&
         dropped_message_callback_ != nullptr) {
       client_->UnregisterDroppedMessageCallback(impl_.get()).IgnoreError();
       RegisterDroppedMessageCallback(dropped_message_callback_).IgnoreError();
+    }
+    if (impl_ != nullptr && client_ != nullptr &&
+        stuck_subscriber_callback_ != nullptr) {
+      client_->UnregisterStuckSubscriberCallback(impl_.get()).IgnoreError();
+      RegisterStuckSubscriberCallback(stuck_subscriber_callback_)
+          .IgnoreError();
     }
     if (impl_ != nullptr && client_ != nullptr &&
         message_callback_ != nullptr) {
@@ -1569,6 +1602,34 @@ public:
       return status;
     }
     dropped_message_callback_ = nullptr;
+    return absl::OkStatus();
+  }
+
+  // Register a function to be called when max_active_messages has kept the
+  // subscriber from reading a waiting message for the stuck warning grace
+  // period.  The function is called with the number of seconds the subscriber
+  // has been stuck as its second argument.  It replaces the logged error and
+  // is called once until the subscriber reads a message again.  The
+  // warn_when_stuck option enables it.
+  absl::Status RegisterStuckSubscriberCallback(
+      std::function<void(Subscriber *, double)> callback) {
+    auto status = client_->RegisterStuckSubscriberCallback(
+        impl_.get(), [this](details::SubscriberImpl *, double seconds) {
+          stuck_subscriber_callback_(this, seconds);
+        });
+    if (!status.ok()) {
+      return status;
+    }
+    stuck_subscriber_callback_ = std::move(callback);
+    return absl::OkStatus();
+  }
+
+  absl::Status UnregisterStuckSubscriberCallback() {
+    auto status = client_->UnregisterStuckSubscriberCallback(impl_.get());
+    if (!status.ok()) {
+      return status;
+    }
+    stuck_subscriber_callback_ = nullptr;
     return absl::OkStatus();
   }
 
@@ -1766,6 +1827,8 @@ private:
   std::shared_ptr<details::SubscriberImpl> impl_;
   std::vector<void *> address_cache_;
   std::function<void(Subscriber *, int64_t)> dropped_message_callback_ =
+      nullptr;
+  std::function<void(Subscriber *, double)> stuck_subscriber_callback_ =
       nullptr;
   std::function<void(Subscriber *, Message)> message_callback_ = nullptr;
 };
