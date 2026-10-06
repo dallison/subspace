@@ -12,11 +12,13 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::os::unix::io::RawFd;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, Weak};
+use std::time::Instant;
 
 use crate::error::Result;
 use crate::message::Message;
 
 pub type DroppedMessageCallback = Box<dyn Fn(i64) + Send + Sync>;
+pub type StuckSubscriberCallback = Box<dyn Fn(f64) + Send + Sync>;
 pub type MessageCallback = Box<dyn Fn(Message) + Send + Sync>;
 pub type OnReceiveCallback = Box<dyn Fn(*mut u8, i64) -> Result<i64> + Send + Sync>;
 
@@ -42,6 +44,7 @@ pub struct SubscriberImpl {
     pub(crate) active_messages: Vec<Arc<ActiveMessage>>,
     pub(crate) kept_active_message: Option<(usize, Arc<ActiveMessage>)>,
     pub(crate) dropped_message_callback: Option<DroppedMessageCallback>,
+    pub(crate) stuck_subscriber_callback: Option<StuckSubscriberCallback>,
     pub(crate) message_callback: Option<MessageCallback>,
     pub(crate) on_receive_callback: Option<OnReceiveCallback>,
     pub(crate) checksum_callback: Option<checksum::ChecksumCallback>,
@@ -55,7 +58,17 @@ pub struct SubscriberImpl {
     poll_snapshot: Vec<ActiveSlot>,
     newest_snapshot: Option<Vec<ActiveSlot>>,
     pub(crate) pending_queue_drops: i32,
+    // Time of the first read that max_active_messages blocked since the
+    // subscriber last read a message.
+    stuck_since: Option<Instant>,
+    stuck_reports: i32,
 }
+
+/// Number of stuck-subscriber errors logged before they are silenced until the
+/// subscriber reads a message again.  A stuck subscriber callback is called
+/// once instead.
+pub const MAX_STUCK_SUBSCRIBER_WARNINGS: i32 = 2;
+pub const MAX_STUCK_SUBSCRIBER_CALLBACKS: i32 = 1;
 
 struct OrdinalTracker {
     ring: FastRingBuffer,
@@ -155,6 +168,7 @@ impl SubscriberImpl {
             active_messages: Vec::new(),
             kept_active_message: None,
             dropped_message_callback: None,
+            stuck_subscriber_callback: None,
             message_callback: None,
             on_receive_callback: None,
             checksum_callback: None,
@@ -168,6 +182,8 @@ impl SubscriberImpl {
             poll_snapshot: Vec::new(),
             newest_snapshot: None,
             pending_queue_drops: 0,
+            stuck_since: None,
+            stuck_reports: 0,
         };
         s.get_or_create_tracker(vchan_id);
         s
@@ -272,6 +288,44 @@ impl SubscriberImpl {
             ordinal,
             vchan_id,
         });
+    }
+
+    /// Called when a read found a message that `max_active_messages` kept the
+    /// subscriber from taking.  Returns the number of seconds the subscriber
+    /// has been stuck when a report is due, allowing at most `max_reports`
+    /// reports, one grace period apart, until the subscriber reads again.
+    pub fn note_stuck_read(&mut self, now: Instant, max_reports: i32) -> Option<f64> {
+        if !self.options.warn_when_stuck {
+            return None;
+        }
+        let since = match self.stuck_since {
+            Some(since) => since,
+            None => {
+                self.stuck_since = Some(now);
+                self.stuck_reports = 0;
+                now
+            }
+        };
+        if self.stuck_reports >= max_reports {
+            return None;
+        }
+        let stuck_seconds = now.saturating_duration_since(since).as_secs_f64();
+        if stuck_seconds
+            < self.options.stuck_warning_grace_period * f64::from(self.stuck_reports + 1)
+        {
+            return None;
+        }
+        self.stuck_reports += 1;
+        Some(stuck_seconds)
+    }
+
+    /// Called when a read delivers a message or finds nothing waiting.
+    pub fn note_unstuck(&mut self) {
+        self.stuck_since = None;
+    }
+
+    pub fn stuck_reports(&self) -> i32 {
+        self.stuck_reports
     }
 
     pub fn add_active_message(&self) -> bool {

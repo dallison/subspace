@@ -555,6 +555,8 @@ SubspaceSubscriberOptions subspace_subscriber_options_default(void) {
   SubspaceSubscriberOptions options = {};
   options.max_active_messages = 1;
   options.detect_dropped_messages = true;
+  options.warn_when_stuck = true;
+  options.stuck_warning_grace_period = 5.0;
   options.vchan_id = -1;
   return options;
 }
@@ -595,6 +597,8 @@ subspace_create_subscriber(SubspaceClient client, const char *channel_name,
       .SetPassChecksumErrors(options.pass_checksum_errors)
       .SetKeepActiveMessage(options.keep_active_message)
       .SetDetectDroppedMessages(options.detect_dropped_messages)
+      .SetWarnWhenStuck(options.warn_when_stuck)
+      .SetStuckWarningGracePeriod(options.stuck_warning_grace_period)
       .SetSplitBufferCallbacks(ToCppSplitCallbacks(options.split_callbacks));
   subspace_options.SetLogDroppedMessages(options.log_dropped_messages);
   subspace_clear_error();
@@ -904,6 +908,47 @@ bool subspace_remove_dropped_message_callback(SubspaceSubscriber subscriber) {
   auto sub_ptr = reinterpret_cast<std::shared_ptr<subspace::Subscriber> *>(
       subscriber.subscriber);
   absl::Status status = (*sub_ptr)->UnregisterDroppedMessageCallback();
+  if (!status.ok()) {
+    subspace_set_error(status.ToString().c_str());
+    return false;
+  }
+  return true;
+}
+
+bool subspace_register_stuck_subscriber_callback(
+    SubspaceSubscriber subscriber,
+    void (*callback)(SubspaceSubscriber, double)) {
+  subspace_clear_error();
+  if (subscriber.subscriber == nullptr) {
+    subspace_set_error("Invalid subscriber parameter");
+    return false;
+  }
+  if (callback == nullptr) {
+    subspace_set_error("Invalid callback parameter");
+    return false;
+  }
+  auto sub_ptr = reinterpret_cast<std::shared_ptr<subspace::Subscriber> *>(
+      subscriber.subscriber);
+  absl::Status status = (*sub_ptr)->RegisterStuckSubscriberCallback(
+      [subscriber, callback](const subspace::Subscriber *, double seconds) {
+        callback(subscriber, seconds);
+      });
+  if (!status.ok()) {
+    subspace_set_error(status.ToString().c_str());
+    return false;
+  }
+  return true;
+}
+
+bool subspace_remove_stuck_subscriber_callback(SubspaceSubscriber subscriber) {
+  subspace_clear_error();
+  if (subscriber.subscriber == nullptr) {
+    subspace_set_error("Invalid subscriber parameter");
+    return false;
+  }
+  auto sub_ptr = reinterpret_cast<std::shared_ptr<subspace::Subscriber> *>(
+      subscriber.subscriber);
+  absl::Status status = (*sub_ptr)->UnregisterStuckSubscriberCallback();
   if (!status.ok()) {
     subspace_set_error(status.ToString().c_str());
     return false;

@@ -248,6 +248,18 @@ PYBIND11_MODULE(subspace, m) {
       .def("detect_dropped_messages",
            &SubscriberOptions::DetectDroppedMessages,
            "Get whether the subscriber detects dropped messages internally.")
+      .def("set_warn_when_stuck", &SubscriberOptions::SetWarnWhenStuck,
+           "Sets whether the subscriber logs an error when max_active_messages "
+           "keeps it from reading for the stuck warning grace period.")
+      .def("warn_when_stuck", &SubscriberOptions::WarnWhenStuck,
+           "Get whether the subscriber logs an error when it is stuck.")
+      .def("set_stuck_warning_grace_period",
+           &SubscriberOptions::SetStuckWarningGracePeriod,
+           "Sets how many seconds the subscriber may be stuck before the "
+           "error is logged.")
+      .def("stuck_warning_grace_period",
+           &SubscriberOptions::StuckWarningGracePeriod,
+           "Get the stuck warning grace period in seconds.")
       .def("set_bridge", &SubscriberOptions::SetBridge,
            "Set whether the subscriber is a bridge.")
       .def("is_bridge", &SubscriberOptions::IsBridge,
@@ -1053,6 +1065,35 @@ The callback receives an integer count of messages that were missed.)doc",
         }
       },
       "Unregister the dropped-message callback.");
+
+  subscriber_class.def(
+      "register_stuck_subscriber_callback",
+      [](Subscriber *self, py::function callback) {
+        absl::Status result = self->RegisterStuckSubscriberCallback(
+            [callback](Subscriber *, double seconds) {
+              py::gil_scoped_acquire acquire;
+              callback(seconds);
+            });
+        if (!result.ok()) {
+          throw std::runtime_error(result.ToString());
+        }
+      },
+      R"doc(Register a callback invoked when max_active_messages has kept the
+subscriber from reading a waiting message for the stuck warning grace period.
+The callback receives the number of seconds the subscriber has been stuck. It
+replaces the logged error and is called once until the subscriber reads
+again.)doc",
+      py::arg("callback"));
+
+  subscriber_class.def(
+      "unregister_stuck_subscriber_callback",
+      [](Subscriber *self) {
+        absl::Status result = self->UnregisterStuckSubscriberCallback();
+        if (!result.ok()) {
+          throw std::runtime_error(result.ToString());
+        }
+      },
+      "Unregister the stuck subscriber callback.");
 
   subscriber_class.def("for_tunnel", &Subscriber::ForTunnel,
                        "Get whether this subscriber is for a tunnel process.");

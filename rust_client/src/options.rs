@@ -233,6 +233,9 @@ pub struct SubscriberOptions {
     pub max_subscribers: i32,
     pub log_dropped_messages: bool,
     pub detect_dropped_messages: bool,
+    pub warn_when_stuck: bool,
+    /// Seconds.
+    pub stuck_warning_grace_period: f64,
     pub pass_activation: bool,
     pub read_write: bool,
     pub mux: String,
@@ -257,6 +260,8 @@ impl Default for SubscriberOptions {
             max_subscribers: 0,
             log_dropped_messages: true,
             detect_dropped_messages: true,
+            warn_when_stuck: true,
+            stuck_warning_grace_period: 5.0,
             pass_activation: false,
             read_write: false,
             mux: String::new(),
@@ -319,6 +324,22 @@ impl SubscriberOptions {
 
     pub fn set_detect_dropped_messages(mut self, v: bool) -> Self {
         self.detect_dropped_messages = v;
+        self
+    }
+
+    /// If true, log an error when a message has been waiting for
+    /// `stuck_warning_grace_period` seconds that the subscriber can't read
+    /// because it already holds `max_active_messages` messages.  The error is
+    /// logged a second time after another grace period and then silenced until
+    /// the subscriber reads a message again.  The check runs when the
+    /// subscriber tries to read.
+    pub fn set_warn_when_stuck(mut self, v: bool) -> Self {
+        self.warn_when_stuck = v;
+        self
+    }
+
+    pub fn set_stuck_warning_grace_period(mut self, seconds: f64) -> Self {
+        self.stuck_warning_grace_period = seconds;
         self
     }
 

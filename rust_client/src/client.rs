@@ -11,7 +11,9 @@ use crate::options::{PublisherOptions, SubscriberOptions};
 use crate::proto;
 use crate::publisher::{clear_trigger, PublisherImpl};
 use crate::socket::SocketConnection;
-use crate::subscriber::SubscriberImpl;
+use crate::subscriber::{
+    SubscriberImpl, MAX_STUCK_SUBSCRIBER_CALLBACKS, MAX_STUCK_SUBSCRIBER_WARNINGS,
+};
 use crate::{ClearTrigger, ReadMode};
 use nix::sys::mman::ProtFlags;
 use std::cell::UnsafeCell;
@@ -915,6 +917,23 @@ impl Subscriber {
         self.imp.lock().unwrap().dropped_message_callback = None;
     }
 
+    /// Register a callback invoked when `max_active_messages` has kept the
+    /// subscriber from reading a waiting message for the stuck warning grace
+    /// period.  The callback receives the number of seconds the subscriber
+    /// has been stuck.  It replaces the logged error and is called once until
+    /// the subscriber reads again.  The `warn_when_stuck` option enables it.
+    pub fn register_stuck_subscriber_callback<F>(&self, callback: F)
+    where
+        F: Fn(f64) + Send + Sync + 'static,
+    {
+        self.imp.lock().unwrap().stuck_subscriber_callback = Some(Box::new(callback));
+    }
+
+    /// Remove any previously registered stuck subscriber callback.
+    pub fn unregister_stuck_subscriber_callback(&self) {
+        self.imp.lock().unwrap().stuck_subscriber_callback = None;
+    }
+
     /// Register a callback invoked by `process_all_messages` for each
     /// message read from the channel.
     pub fn register_message_callback<F>(&self, callback: F)
@@ -1374,6 +1393,13 @@ impl Client {
                 "MaxActiveMessages must be at least 1".into(),
             ));
         }
+        if !opts.stuck_warning_grace_period.is_finite() || opts.stuck_warning_grace_period < 0.0 {
+            return Err(SubspaceError::InvalidArgument(format!(
+                "StuckWarningGracePeriod must be a finite number of seconds that is at least 0, \
+                 not {}",
+                opts.stuck_warning_grace_period
+            )));
+        }
 
         let req = proto::Request {
             request: Some(proto::request::Request::CreateSubscriber(
@@ -1727,6 +1753,34 @@ fn unregister_client_buffer_request(
     client.socket.send_request(&req)
 }
 
+fn report_if_subscriber_stuck(sub: &mut SubscriberImpl) {
+    let max_reports = if sub.stuck_subscriber_callback.is_some() {
+        MAX_STUCK_SUBSCRIBER_CALLBACKS
+    } else {
+        MAX_STUCK_SUBSCRIBER_WARNINGS
+    };
+    let Some(stuck_seconds) = sub.note_stuck_read(std::time::Instant::now(), max_reports) else {
+        return;
+    };
+    if let Some(ref cb) = sub.stuck_subscriber_callback {
+        cb(stuck_seconds);
+        return;
+    }
+    let silencing = sub.stuck_reports() >= MAX_STUCK_SUBSCRIBER_WARNINGS;
+    log::error!(
+        "Subscriber on channel {} has been unable to read messages for {:.1} seconds because it \
+         holds its maximum of {} active messages{}",
+        sub.request_name,
+        stuck_seconds,
+        sub.options.max_active_messages,
+        if silencing {
+            "; this warning is silenced until it reads again"
+        } else {
+            ""
+        }
+    );
+}
+
 fn read_message_internal(
     client: &mut ClientInner,
     sub: &mut SubscriberImpl,
@@ -1751,6 +1805,7 @@ fn read_message_internal(
     let new_idx = match new_slot_idx {
         Some(idx) => idx,
         None => {
+            sub.note_unstuck();
             sub.trigger_reliable_publishers();
             return Ok(Message::default());
         }
@@ -1835,8 +1890,10 @@ fn read_message_internal(
     if !sub.add_active_message() {
         sub.unread_slot(new_idx, frozen_ordinal, frozen_vchan_id);
         sub.channel.slot = old_slot;
+        report_if_subscriber_stuck(sub);
         return Ok(Message::default());
     }
+    sub.note_unstuck();
 
     if mode == ReadMode::ReadNext && sub.options.detect_dropped_messages {
         let mut drops = std::mem::take(&mut sub.pending_queue_drops);

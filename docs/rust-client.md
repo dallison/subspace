@@ -208,6 +208,8 @@ let opts = PublisherOptions::new()
 | `max_active_messages` | 1 | Max messages a subscriber can hold simultaneously. |
 | `max_subscribers` | 0 | Server-enforced channel subscriber limit; 0 means unlimited. |
 | `log_dropped_messages` | true | Log warnings when messages are dropped. |
+| `warn_when_stuck` | true | Log an error when `max_active_messages` has kept the subscriber from reading a waiting message for `stuck_warning_grace_period` seconds. Logged twice, then silenced until the subscriber reads again. A stuck subscriber callback is called once instead. |
+| `stuck_warning_grace_period` | 5.0 | Seconds before the stuck error is logged. |
 | `pass_activation` | false | Deliver channel activation messages to the subscriber. |
 | `read_write` | false | Map shared memory as read-write (default is read-only). |
 | `mux` | "" | Multiplexer name for virtual channels. |
@@ -341,6 +343,19 @@ channels only):
 ```rust
 subscriber.register_dropped_message_callback(|num_dropped| {
     eprintln!("dropped {} messages", num_dropped);
+});
+```
+
+### Stuck Subscriber Callback
+
+Called instead of the logged error when `max_active_messages` has kept the
+subscriber from reading a waiting message for `stuck_warning_grace_period`
+seconds. It is called once until the subscriber reads a message again.
+`warn_when_stuck` enables it:
+
+```rust
+subscriber.register_stuck_subscriber_callback(|seconds| {
+    eprintln!("stuck for {:.1} seconds", seconds);
 });
 ```
 

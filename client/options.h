@@ -360,6 +360,25 @@ struct SubscriberOptions {
     return *this;
   }
 
+  // If true, log an error when a message has been waiting for
+  // StuckWarningGracePeriod() seconds that the subscriber can't read because
+  // it already holds max_active_messages messages.  The error is logged a
+  // second time after another grace period and then silenced until the
+  // subscriber reads a message again.  If a stuck subscriber callback is
+  // registered, it is called once instead of logging.  The check runs when
+  // the subscriber tries to read.
+  SubscriberOptions &SetWarnWhenStuck(bool v) {
+    warn_when_stuck = v;
+    return *this;
+  }
+  bool WarnWhenStuck() const { return warn_when_stuck; }
+
+  SubscriberOptions &SetStuckWarningGracePeriod(double seconds) {
+    stuck_warning_grace_period = seconds;
+    return *this;
+  }
+  double StuckWarningGracePeriod() const { return stuck_warning_grace_period; }
+
   SubscriberOptions &SetBridge(bool v) {
     bridge = v;
     return *this;
@@ -456,6 +475,8 @@ struct SubscriberOptions {
   int32_t max_subscribers = 0;
   bool log_dropped_messages = true;
   bool detect_dropped_messages = true;
+  bool warn_when_stuck = true;
+  double stuck_warning_grace_period = 5.0; // Seconds.
   bool pass_activation = false; // If true, the subscriber will pass activation
                                 // messages to the user.
   bool read_write = false;

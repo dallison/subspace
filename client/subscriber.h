@@ -44,6 +44,12 @@ template <typename H> inline H AbslHashValue(H h, const OrdinalAndVchanId &x) {
   return H::combine(std::move(h), x.ordinal, x.vchan_id);
 }
 
+// Number of stuck-subscriber errors logged before they are silenced until the
+// subscriber reads a message again.  A stuck subscriber callback is called
+// once instead.
+constexpr int kMaxStuckSubscriberWarnings = 2;
+constexpr int kMaxStuckSubscriberCallbacks = 1;
+
 // A subscriber reads messages from a channel.  It maps the channel
 // shared memory.
 class SubscriberImpl : public ClientChannel {
@@ -111,6 +117,15 @@ public:
   bool CheckActiveMessageCount() const {
     return num_active_messages_ < options_.MaxActiveMessages();
   }
+
+  // Called when a read found a message that max_active_messages kept the
+  // subscriber from taking.  Returns the number of seconds the subscriber has
+  // been stuck when a report is due, allowing at most max_reports reports,
+  // one grace period apart, until the subscriber reads again.
+  std::optional<double> NoteStuckRead(uint64_t now_ns, int max_reports);
+  // Called when a read delivers a message or finds nothing waiting.
+  void NoteUnstuck() { stuck_since_ns_.reset(); }
+  int StuckReports() const { return stuck_reports_; }
 
   // This is the configured virtual channel ID, not the value assigned when the
   // subscriber is created by the server.  The difference is that the configured
@@ -439,6 +454,11 @@ private:
   int pending_queue_drops_ = 0;
   uint64_t queue_drain_tail_ = 0;
   bool queue_drain_tail_valid_ = false;
+
+  // Monotonic time of the first read that max_active_messages blocked since
+  // the subscriber last read a message.
+  std::optional<uint64_t> stuck_since_ns_;
+  int stuck_reports_ = 0;
 };
 } // namespace details
 } // namespace subspace

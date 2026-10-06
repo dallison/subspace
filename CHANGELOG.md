@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Stuck Subscriber Warning
+- A subscriber now logs an error when a message has been waiting for 5
+  seconds that it can't read because it already holds `max_active_messages`
+  messages. The error is logged a second time after another grace period and
+  then silenced until the subscriber reads a message, after which the next
+  stuck period is reported again. The check runs when the subscriber tries
+  to read. Two new subscriber options control it in C++, C, Python, and Rust:
+  `warn_when_stuck` (default true) and `stuck_warning_grace_period` in
+  seconds (default 5).
+- A stuck subscriber callback (`RegisterStuckSubscriberCallback` in C++,
+  `subspace_register_stuck_subscriber_callback` in C,
+  `register_stuck_subscriber_callback` in Python and Rust) replaces the
+  logged error. It receives the number of seconds the subscriber has been
+  stuck and is called once per stuck period. The same two options control
+  it.
+
 ### Configurable Channel Limit
 - The maximum number of channels in one server session defaults to 1024 and
   can be raised at build time. A downstream Bazel module sets it next to

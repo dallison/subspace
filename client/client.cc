@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <cmath>
 #include <cstring>
 #include <inttypes.h>
 #include <unistd.h>
@@ -287,6 +288,34 @@ ClientImpl::UnregisterDroppedMessageCallback(SubscriberImpl *subscriber) {
         subscriber->Name()));
   }
   dropped_message_callbacks_.erase(it);
+  return absl::OkStatus();
+}
+
+absl::Status ClientImpl::RegisterStuckSubscriberCallback(
+    SubscriberImpl *subscriber,
+    std::function<void(SubscriberImpl *, double)> callback) {
+  ClientLockGuard guard(this);
+  if (stuck_subscriber_callbacks_.find(subscriber) !=
+      stuck_subscriber_callbacks_.end()) {
+    return absl::InternalError(
+        absl::StrFormat("A stuck subscriber callback has already been "
+                        "registered for channel %s\n",
+                        subscriber->Name()));
+  }
+  stuck_subscriber_callbacks_[subscriber] = std::move(callback);
+  return absl::OkStatus();
+}
+
+absl::Status
+ClientImpl::UnregisterStuckSubscriberCallback(SubscriberImpl *subscriber) {
+  ClientLockGuard guard(this);
+  auto it = stuck_subscriber_callbacks_.find(subscriber);
+  if (it == stuck_subscriber_callbacks_.end()) {
+    return absl::InternalError(absl::StrFormat(
+        "No stuck subscriber callback has been registered for channel %s\n",
+        subscriber->Name()));
+  }
+  stuck_subscriber_callbacks_.erase(it);
   return absl::OkStatus();
 }
 
@@ -564,6 +593,13 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
   if (opts.MaxActiveMessages() < 1) {
     return absl::InvalidArgumentError(
         "MaxActiveMessages must be at least 1 for a subscriber");
+  }
+  if (!std::isfinite(opts.StuckWarningGracePeriod()) ||
+      opts.StuckWarningGracePeriod() < 0) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "StuckWarningGracePeriod must be a finite number of seconds that is "
+        "at least 0, not %g",
+        opts.StuckWarningGracePeriod()));
   }
   Request req;
   FillCreateSubscriberRequest(req.mutable_create_subscriber(), channel_name,
@@ -1358,6 +1394,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
   old_slot = nullptr; // Prevent any accidental use.
 
   if (new_slot == nullptr) {
+    subscriber->NoteUnstuck();
     // I'm out of messages to read, trigger the publishers to give me
     // some more.  This is only for reliable publishers.
     subscriber->TriggerReliablePublishers();
@@ -1439,8 +1476,10 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     // retain that empty handle while this slot is retried, which would keep an
     // extra reference after the ActiveMessage becomes valid and prevent its
     // active-message count from being released.
+    ReportIfSubscriberStuck(subscriber);
     return Message();
   } else {
+    subscriber->NoteUnstuck();
     if (mode == ReadMode::kReadNext &&
         subscriber->options_.DetectDroppedMessages()) {
       int drops = subscriber->ConsumeQueueDrops();
@@ -1547,6 +1586,34 @@ Subscriber::ReadTelemetryMessage(ReadMode mode) {
     return absl::DataLossError("Failed to parse telemetry message");
   }
   return telemetry;
+}
+
+void ClientImpl::ReportIfSubscriberStuck(SubscriberImpl *subscriber) {
+  auto callback = stuck_subscriber_callbacks_.find(subscriber);
+  const bool has_callback = callback != stuck_subscriber_callbacks_.end();
+  std::optional<double> stuck_seconds = subscriber->NoteStuckRead(
+      toolbelt::Now(), has_callback ? details::kMaxStuckSubscriberCallbacks
+                                    : details::kMaxStuckSubscriberWarnings);
+  if (!stuck_seconds.has_value()) {
+    return;
+  }
+  if (has_callback) {
+    // Call a copy so that, on a client that isn't thread safe, the callback can
+    // unregister itself.
+    auto report = callback->second;
+    report(subscriber, *stuck_seconds);
+    return;
+  }
+  const bool silencing =
+      subscriber->StuckReports() >= details::kMaxStuckSubscriberWarnings;
+  logger_.Log(toolbelt::LogLevel::kError,
+              "Subscriber on channel %s has been unable to read messages for "
+              "%.1f seconds because it holds its maximum of %d active "
+              "messages%s",
+              subscriber->Name().c_str(), *stuck_seconds,
+              subscriber->MaxActiveMessages(),
+              silencing ? "; this warning is silenced until it reads again"
+                        : "");
 }
 
 absl::StatusOr<Message>

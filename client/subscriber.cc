@@ -70,6 +70,28 @@ bool SubscriberImpl::AddActiveMessage([[maybe_unused]] MessageSlot *slot) {
   return true;
 }
 
+std::optional<double> SubscriberImpl::NoteStuckRead(uint64_t now_ns,
+                                                    int max_reports) {
+  if (!options_.WarnWhenStuck()) {
+    return std::nullopt;
+  }
+  if (!stuck_since_ns_.has_value()) {
+    stuck_since_ns_ = now_ns;
+    stuck_reports_ = 0;
+  }
+  if (stuck_reports_ >= max_reports) {
+    return std::nullopt;
+  }
+  const double stuck_seconds =
+      static_cast<double>(now_ns - *stuck_since_ns_) / 1e9;
+  if (stuck_seconds <
+      options_.StuckWarningGracePeriod() * (stuck_reports_ + 1)) {
+    return std::nullopt;
+  }
+  stuck_reports_++;
+  return stuck_seconds;
+}
+
 void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
     // std::cerr << this << " remove active message " << slot->id << " "
     //           << slot->ordinal << " refs " << std::hex << slot->refs.load() <<

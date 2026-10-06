@@ -1997,6 +1997,86 @@ TEST_F(ClientTest, SubscriberOptionsTelemetry) {
   ASSERT_TRUE(options.telemetry);
 }
 
+TEST_F(ClientTest, SubscriberOptionsStuckWarningDefaults) {
+  SubspaceSubscriberOptions options = subspace_subscriber_options_default();
+  ASSERT_TRUE(options.warn_when_stuck);
+  ASSERT_EQ(5.0, options.stuck_warning_grace_period);
+}
+
+int stuck_callbacks = 0;
+void StuckSubscriberCallback(SubspaceSubscriber /*subscriber*/,
+                             double /*seconds*/) {
+  stuck_callbacks++;
+}
+
+TEST_F(ClientTest, StuckSubscriberCallback) {
+  SubspaceClient pub_client =
+      subspace_create_client_with_socket(Socket().c_str());
+  ASSERT_NE(nullptr, pub_client.client);
+  SubspaceClient sub_client =
+      subspace_create_client_with_socket(Socket().c_str());
+  ASSERT_NE(nullptr, sub_client.client);
+
+  SubspacePublisher pub = subspace_create_publisher(
+      pub_client, "c_stuck_callback", CPublisherOptionsDefault(64, 8));
+  ASSERT_NE(nullptr, pub.publisher) << subspace_get_last_error();
+
+  SubspaceSubscriberOptions sub_opts = CSubscriberOptionsDefault();
+  sub_opts.max_active_messages = 1;
+  sub_opts.stuck_warning_grace_period = 0;
+  SubspaceSubscriber sub =
+      subspace_create_subscriber(sub_client, "c_stuck_callback", sub_opts);
+  ASSERT_NE(nullptr, sub.subscriber) << subspace_get_last_error();
+
+  stuck_callbacks = 0;
+  ASSERT_TRUE(
+      subspace_register_stuck_subscriber_callback(sub, StuckSubscriberCallback));
+  ASSERT_FALSE(
+      subspace_register_stuck_subscriber_callback(sub, StuckSubscriberCallback));
+
+  for (int i = 0; i < 2; i++) {
+    SubspaceMessageBuffer buffer = subspace_get_message_buffer(pub, 64);
+    ASSERT_NE(nullptr, buffer.buffer) << subspace_get_last_error();
+    memcpy(buffer.buffer, "stuck", 5);
+    ASSERT_NE(0, subspace_publish_message(pub, 5).length);
+  }
+
+  // Holding the first message leaves the second one unreadable.  With a zero
+  // grace period the first blocked read calls the callback, and later blocked
+  // reads don't call it again.
+  SubspaceMessage held = subspace_read_message(sub);
+  ASSERT_EQ(5, held.length);
+  for (int i = 0; i < 3; i++) {
+    SubspaceMessage msg = subspace_read_message(sub);
+    ASSERT_EQ(0, msg.length);
+  }
+  EXPECT_EQ(1, stuck_callbacks);
+
+  ASSERT_TRUE(subspace_remove_stuck_subscriber_callback(sub));
+  ASSERT_FALSE(subspace_remove_stuck_subscriber_callback(sub));
+
+  subspace_free_message(&held);
+  ASSERT_TRUE(subspace_remove_subscriber(&sub));
+  ASSERT_TRUE(subspace_remove_publisher(&pub));
+  ASSERT_TRUE(subspace_remove_client(&sub_client));
+  ASSERT_TRUE(subspace_remove_client(&pub_client));
+}
+
+TEST_F(ClientTest, NegativeStuckWarningGracePeriodIsRejected) {
+  SubspaceClient client = subspace_create_client_with_socket(Socket().c_str());
+  ASSERT_NE(nullptr, client.client);
+
+  SubspaceSubscriberOptions options = CSubscriberOptionsDefault();
+  options.stuck_warning_grace_period = -1;
+  SubspaceSubscriber sub =
+      subspace_create_subscriber(client, "c_stuck_grace", options);
+  ASSERT_EQ(nullptr, sub.subscriber);
+  ASSERT_TRUE(subspace_has_error());
+  ASSERT_NE(nullptr, strstr(subspace_get_last_error(), "StuckWarningGracePeriod"));
+
+  ASSERT_TRUE(subspace_remove_client(&client));
+}
+
 TEST_F(ClientTest, TelemetrySubscriberSmoke) {
   auto pub_client = subspace_create_client_with_socket(Socket().c_str());
   ASSERT_NE(nullptr, pub_client.client);
