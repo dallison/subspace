@@ -27,6 +27,7 @@ cc_library(
     deps = [
         "//common:subspace_common",
         "//common/async:async",
+        "//proto:subspace_cc_proto",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/status",

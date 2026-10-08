@@ -26,6 +26,18 @@ config_setting(
     flag_values = {":coro_backend": "asio"},
 )
 
+# Maximum channels in one server session.  This sizes the shared-memory
+# system control block, so the server and every client must be built with
+# the same value.  Must be a positive multiple of 64.  Default is 1024.
+# Downstream modules set this with subspace.max_channels in MODULE.bazel.
+# See docs/max-channels.md.
+#
+#   bazel build --//:max_channels=2048 //server
+string_flag(
+    name = "max_channels",
+    build_setting_default = "1024",
+)
+
 config_setting(
   name = "macos_arm64",
   constraint_values = [

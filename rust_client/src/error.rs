@@ -13,6 +13,9 @@ pub enum SubspaceError {
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 
+    #[error("failed precondition: {0}")]
+    FailedPrecondition(String),
+
     #[error("not connected: {0}")]
     NotConnected(String),
 

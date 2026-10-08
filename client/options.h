@@ -36,14 +36,25 @@ class Subscriber;
 
 // Options when creating a publisher.
 struct PublisherOptions {
-  int32_t SlotSize() const { return slot_size; }
+  SlotSizeType SlotSize() const { return slot_size; }
   int32_t NumSlots() const { return num_slots; }
-  PublisherOptions &SetSlotSize(int32_t size) {
+  uint64_t SubscriberQueueArenaSize() const {
+    return subscriber_queue_arena_size;
+  }
+  PublisherOptions &SetSlotSize(SlotSizeType size) {
     slot_size = size;
     return *this;
   }
   PublisherOptions &SetNumSlots(int32_t num) {
     num_slots = num;
+    return *this;
+  }
+  // Total bytes reserved for packed per-subscriber queues in the CCB. Queues
+  // are disabled by default. A non-empty arena gives subscribers that do not
+  // request an override the fixed kDefaultSubscriberQueueSize capacity. All
+  // publishers on a channel must agree on this value.
+  PublisherOptions &SetSubscriberQueueArenaSize(uint64_t size) {
+    subscriber_queue_arena_size = size;
     return *this;
   }
 
@@ -75,6 +86,18 @@ struct PublisherOptions {
     fixed_size = v;
     return *this;
   }
+
+  // Upper bound on how large the channel's slots may become.  A value of 0
+  // (the default) means there is no limit other than what the machine can
+  // allocate.  When set, the initial slot size must not exceed it, asking
+  // GetMessageBuffer() for a larger buffer fails instead of resizing, and
+  // automatic growth stops at the limit rather than overshooting it.  All
+  // publishers on a channel must agree on this value.
+  PublisherOptions &SetMaxSlotSize(SlotSizeType size) {
+    max_slot_size = size;
+    return *this;
+  }
+  SlotSizeType MaxSlotSize() const { return max_slot_size; }
 
   bool IsLocal() const { return local; }
   bool IsReliable() const { return reliable; }
@@ -125,6 +148,28 @@ struct PublisherOptions {
     return *this;
   }
 
+  // Maximum number of explicitly leased unpublished slots. Existing
+  // GetMessageBuffer()/PublishMessage() users retain their single-slot
+  // behavior; this limit applies to AcquireBufferLease().
+  PublisherOptions &SetMaxOutstandingSlotLeases(int32_t n) {
+    max_outstanding_slot_leases = n;
+    return *this;
+  }
+  int32_t MaxOutstandingSlotLeases() const {
+    return max_outstanding_slot_leases;
+  }
+
+  // When false, retirement notifications are emitted only after subscriber
+  // release (or immediately for a publication with no subscribers), never
+  // merely because an unreliable publisher forcibly reuses an old slot.
+  PublisherOptions &SetNotifyRetirementOnForcedReuse(bool v) {
+    notify_retirement_on_forced_reuse = v;
+    return *this;
+  }
+  bool NotifyRetirementOnForcedReuse() const {
+    return notify_retirement_on_forced_reuse;
+  }
+
   // If this is set to true all messages published will have a checksum
   // calculated and placed in the MessagePrefix metadata.  If subscribers want
   // to verify the checksum the must set the SubscriberOptions.Checksum to true.
@@ -172,6 +217,12 @@ struct PublisherOptions {
   // preserves behaviour for subscribers that attach after earlier messages
   // were published and consumed by another subscriber on the same channel.
   // Set true for the cache-friendly LIFO-style recycling behaviour.
+  //
+  // Ignored while no subscriber is attached, because a publisher with no
+  // subscribers retires each slot as it publishes it and would recycle that
+  // same slot on the next publish, leaving the channel holding one message
+  // however deep it is configured.  An idle publisher fills the ring instead
+  // so that it holds recent history for a subscriber that attaches later.
   PublisherOptions &SetPreferRetiredSlots(bool v) {
     prefer_retired_slots = v;
     return *this;
@@ -217,8 +268,12 @@ struct PublisherOptions {
 
   // If you use the new CreatePublisher API, set the slot size and num slots in
   // here.
-  int32_t slot_size = 0;
+  SlotSizeType slot_size = 0;
   int32_t num_slots = 0;
+  uint64_t subscriber_queue_arena_size = 0;
+
+  // See SetMaxSlotSize() for description.  0 means unlimited.
+  SlotSizeType max_slot_size = 0;
 
   bool local = false;
   bool reliable = false;
@@ -232,6 +287,8 @@ struct PublisherOptions {
   std::string mux;
   int vchan_id = -1; // If -1, server will assign.
   bool notify_retirement = false;
+  int32_t max_outstanding_slot_leases = 1;
+  bool notify_retirement_on_forced_reuse = true;
   bool checksum = false;
   int32_t checksum_size = 4;
   int32_t metadata_size = 0;
@@ -245,12 +302,27 @@ struct PublisherOptions {
 };
 
 struct SubscriberOptions {
+  // Capacity of this subscriber's CCB slot queue. Zero uses the publisher's
+  // channel default.
+  SubscriberOptions &SetSubscriberQueueSize(int32_t size) {
+    subscriber_queue_size = size;
+    return *this;
+  }
+  int32_t SubscriberQueueSize() const { return subscriber_queue_size; }
+
   // A reliable subscriber will never miss a message from a reliable
   // publisher.
   SubscriberOptions &SetReliable(bool v) {
     reliable = v;
     return *this;
   }
+  // A local subscriber makes the channel local, just as a local publisher
+  // does: the server won't advertise it to or bridge it to other servers.
+  SubscriberOptions &SetLocal(bool v) {
+    local = v;
+    return *this;
+  }
+  bool IsLocal() const { return local; }
   // Set the type of the message on the channel.  The type is
   // not meaningful to the subspace system.  It's up to the
   // user to figure out what it means.  The same type must
@@ -275,8 +347,18 @@ struct SubscriberOptions {
   const std::string &Type() const { return type; }
   int MaxSharedPtrs() const { return max_active_messages - 1; }
   int MaxActiveMessages() const { return max_active_messages; }
+  SubscriberOptions &SetMaxSubscribers(int n) {
+    max_subscribers = n;
+    return *this;
+  }
+  int MaxSubscribers() const { return max_subscribers; }
   bool LogDroppedMessages() const { return log_dropped_messages; }
   void SetLogDroppedMessages(bool v) { log_dropped_messages = v; }
+  bool DetectDroppedMessages() const { return detect_dropped_messages; }
+  SubscriberOptions &SetDetectDroppedMessages(bool v) {
+    detect_dropped_messages = v;
+    return *this;
+  }
 
   SubscriberOptions &SetBridge(bool v) {
     bridge = v;
@@ -291,6 +373,14 @@ struct SubscriberOptions {
     return *this;
   }
   bool ForTunnel() const { return for_tunnel; }
+
+  // Subscribe to server-generated telemetry for the named channel instead of
+  // subscribing to the channel's payloads.
+  SubscriberOptions &SetTelemetry(bool v) {
+    telemetry = v;
+    return *this;
+  }
+  bool Telemetry() const { return telemetry; }
 
   SubscriberOptions &SetMux(std::string m) {
     mux = std::move(m);
@@ -357,11 +447,15 @@ struct SubscriberOptions {
   }
 
   bool reliable = false;
+  int32_t subscriber_queue_size = 0;
   bool bridge = false;
   bool for_tunnel = false;
+  bool telemetry = false;
   std::string type;
   int max_active_messages = 1;
+  int32_t max_subscribers = 0;
   bool log_dropped_messages = true;
+  bool detect_dropped_messages = true;
   bool pass_activation = false; // If true, the subscriber will pass activation
                                 // messages to the user.
   bool read_write = false;
@@ -378,6 +472,7 @@ struct SubscriberOptions {
   bool keep_active_message = false;
   bool use_split_buffers = false;
   subspace::SplitBufferCallbacks split_buffer_callbacks;
+  bool local = false;
 };
 
 } // namespace subspace

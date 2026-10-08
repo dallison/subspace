@@ -7,17 +7,20 @@
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_format.h"
 #include "client/client.h"
-#include "common/split_buffer.h"
 #include "client_handler.h"
+#include "common/split_buffer.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
 #include "toolbelt/sockets.h"
 #include <cerrno>
+#include <chrono>
 #include <fcntl.h>
 #include <filesystem>
 #include <ifaddrs.h>
+#include <limits>
 #include <net/if.h>
+#include <optional>
 #include <setjmp.h>
 #include <stdio.h>
 #include <sys/mman.h>
@@ -34,6 +37,9 @@ static std::atomic<bool> close_plugins_on_shutdown = false;
 void ClosePluginsOnShutdown() { close_plugins_on_shutdown = true; }
 
 bool ShouldClosePluginsOnShutdown() { return close_plugins_on_shutdown; }
+
+static constexpr int kTelemetrySlotSize = 1024;
+static constexpr int kTelemetryNumSlots = 32;
 
 static const ServerChannel *SplitBufferOptionsChannel(
     const ServerChannel *channel) {
@@ -600,8 +606,8 @@ void Server::CreateShutdownTrigger() {
 toolbelt::SocketAddress Server::BridgeBindBase() const {
   // vsock bridging: bind the listener to (VMADDR_CID_ANY, 0) so it accepts
   // connections addressed to any of this host's local CIDs and the kernel
-  // assigns an ephemeral vsock port.  The CID we advertise to peers (vsock_cid_)
-  // is handled separately at advertise time.
+  // assigns an ephemeral vsock port.  The CID we advertise to peers
+  // (vsock_cid_) is handled separately at advertise time.
   if (use_vsock_) {
     return toolbelt::SocketAddress(kVsockCidAny, /*port=*/0);
   }
@@ -706,6 +712,13 @@ void Server::ListenerCoroutine(async::Context ctx,
                   status.ToString().c_str());
     }
   }
+  // Nothing accepts once this loop has exited.  Drop the socket now rather
+  // than leaving it to the end of Run(), so a replacement server can bind
+  // without waiting for the runtime to wind down.  On Linux the name lives
+  // in the abstract namespace and is released as soon as the fd closes.
+  listen_socket.Close();
+  logger_.Log(toolbelt::LogLevel::kInfo, "Released listen socket %s",
+              socket_name_.c_str());
 }
 
 void Server::NotifyViaFd(int64_t val) {
@@ -726,7 +739,9 @@ void Server::NotifyViaFd(int64_t val) {
 
 void Server::ForeachChannel(std::function<void(ServerChannel *)> func) {
   for (auto &channel : channels_) {
-    func(channel.second.get());
+    if (IsPublicChannel(channel.second.get())) {
+      func(channel.second.get());
+    }
   }
 }
 
@@ -961,7 +976,7 @@ absl::Status Server::Run(int num_asio_threads) {
               if (user == nullptr) {
                 continue;
               }
-              if (user->IsPublisher()) {
+              if (user->IsPublisher() && !ch->IsTelemetryChannel()) {
                 shadow->SendAddPublisher(
                     name, static_cast<PublisherUser *>(user.get()));
               } else if (user->IsSubscriber()) {
@@ -1037,6 +1052,15 @@ absl::Status Server::Run(int num_asio_threads) {
     }
 
     if (!tcp_discovery_) {
+      // Bind the receiver before the transmitter.  The transmitter asks for
+      // an ephemeral port, and the kernel can assign this server's discovery
+      // port.  Binding 0.0.0.0 on that port afterwards fails with EADDRINUSE.
+      if (absl::Status s = discovery_receiver_.Bind(
+              toolbelt::InetAddress::AnyAddress(discovery_port_));
+          !s.ok()) {
+        return s;
+      }
+
       // Bind the discovery transmitter to the network and any free
       // port on the requested interface.
       if (absl::Status s = discovery_transmitter_.Bind(ip_addr); !s.ok()) {
@@ -1053,13 +1077,6 @@ absl::Status Server::Run(int num_asio_threads) {
         if (absl::Status s = discovery_transmitter_.SetBroadcast(); !s.ok()) {
           return s;
         }
-      }
-
-      // Open the discovery receiver socket.
-      if (absl::Status s = discovery_receiver_.Bind(
-              toolbelt::InetAddress::AnyAddress(discovery_port_));
-          !s.ok()) {
-        return s;
       }
     }
   }
@@ -1079,6 +1096,8 @@ absl::Status Server::Run(int num_asio_threads) {
       },
       {.name = "Listener UDS",
        .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+
+  StartRecoveredTelemetryCoroutines();
 
   // All of the coroutines below run on the client strand because they read or
   // mutate server-wide state (the channels_ map, channel_ids_, per-channel
@@ -1137,7 +1156,7 @@ absl::Status Server::Run(int num_asio_threads) {
     // gratuitous advertise cycle.
     if (recovered) {
       for (auto &[name, ch] : channels_) {
-        if (!ch->IsLocal() && !ch->IsBridgePublisher()) {
+        if (IsPublicChannel(ch.get()) && !ch->IsLocal() && !ch->IsBridgePublisher()) {
           SendAdvertise(name, ch->IsReliable());
         }
       }
@@ -1186,8 +1205,13 @@ Server::HandleIncomingConnection(async::Context ctx,
 }
 
 absl::StatusOr<ServerChannel *>
-Server::CreateMultiplexer(const std::string &channel_name, int slot_size,
-                          int num_slots, std::string type) {
+Server::CreateMultiplexer(const std::string &channel_name, int64_t slot_size,
+                          int num_slots,
+                          uint64_t subscriber_queue_arena_size,
+                          std::string type, int32_t checksum_size,
+                          int32_t metadata_size) {
+  const int subscriber_queue_size =
+      subscriber_queue_arena_size == 0 ? 0 : kDefaultSubscriberQueueSize;
   absl::StatusOr<int> channel_id = channel_ids_.Allocate("mux");
   if (!channel_id.ok()) {
     return channel_id.status();
@@ -1196,29 +1220,48 @@ Server::CreateMultiplexer(const std::string &channel_name, int slot_size,
               "Creating multiplexer %s with %d slots", channel_name.c_str(),
               num_slots);
   ServerChannel *channel = new ChannelMultiplexer(
-      *channel_id, channel_name, num_slots, std::move(type), session_id_);
+      *channel_id, channel_name, num_slots, subscriber_queue_size,
+      subscriber_queue_arena_size, std::move(type), session_id_, logger_);
   channel->SetDebug(logger_.GetLogLevel() <= toolbelt::LogLevel::kVerboseDebug);
+  // Establish the prefix layout before allocating.  Allocation is what makes
+  // the channel visible: it is immediately followed by replication to the
+  // shadows, which copy the checksum and metadata sizes off the channel and
+  // are never sent them again.
+  channel->SetPrefixLayout(checksum_size, metadata_size);
 
   absl::StatusOr<SharedMemoryFds> fds =
-      channel->Allocate(scb_fd_, slot_size, num_slots, initial_ordinal_);
+      channel->Allocate(scb_fd_, slot_size, num_slots,
+                        subscriber_queue_arena_size, initial_ordinal_);
   if (!fds.ok()) {
     return fds.status();
   }
   channel->SetSharedMemoryFds(std::move(*fds));
   channels_.emplace(std::make_pair(channel_name, channel));
+  OnNewChannel(channel_name);
+  ForEachShadow([channel](const std::unique_ptr<ShadowReplicator> &s) {
+    s->SendCreateChannel(channel);
+  });
   return channel;
 }
 
 absl::StatusOr<ServerChannel *>
-Server::CreateChannel(const std::string &channel_name, int slot_size,
-                      int num_slots, const std::string &mux, int vchan_id,
-                      std::string type) {
+Server::CreateChannel(const std::string &channel_name, int64_t slot_size,
+                      int num_slots, uint64_t subscriber_queue_arena_size,
+                      const std::string &mux, int vchan_id, std::string type,
+                      bool hidden, std::string telemetry_target,
+                      int32_t checksum_size, int32_t metadata_size) {
+  const int subscriber_queue_size =
+      subscriber_queue_arena_size == 0 ? 0 : kDefaultSubscriberQueueSize;
   if (!mux.empty()) {
     ServerChannel *mux_channel = FindChannel(mux);
     if (mux_channel == nullptr) {
-      // No mux found, create one.
+      // No mux found, create one.  A subscriber-first request creates it as
+      // a placeholder and passes the default layout, which is what a
+      // placeholder should carry until a publisher establishes the real one.
       absl::StatusOr<ServerChannel *> m =
-          CreateMultiplexer(mux, slot_size, num_slots, type);
+          CreateMultiplexer(mux, slot_size, num_slots,
+                            subscriber_queue_arena_size, type, checksum_size,
+                            metadata_size);
       if (!m.ok()) {
         return m.status();
       }
@@ -1228,10 +1271,58 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
       return absl::InternalError(
           absl::StrFormat("Channel %s is not a multiplexer", mux));
     }
-    if (mux_channel->IsPlaceholder()) {
+    if (!mux_channel->IsPlaceholder() && num_slots > 0 &&
+        subscriber_queue_arena_size !=
+            mux_channel->SubscriberQueueArenaSize()) {
+      return absl::InternalError(absl::StrFormat(
+          "Inconsistent publisher parameters for mux %s: subscriber queue "
+          "arena size is %llu, not %llu",
+          mux,
+          static_cast<unsigned long long>(
+              mux_channel->SubscriberQueueArenaSize()),
+          static_cast<unsigned long long>(subscriber_queue_arena_size)));
+    }
+    // A request with no slots and no slot size is a subscriber attaching
+    // before any publisher exists.  It carries no layout of its own and
+    // inherits whatever the mux eventually settles on, so it must leave the
+    // mux as a placeholder: re-running Allocate() here would tear down and
+    // recreate the CCB/BCB underneath the subscribers already attached to
+    // this mux, for no gain.
+    const bool inherit_layout = (slot_size == 0 && num_slots == 0);
+    if (mux_channel->IsPlaceholder() && !inherit_layout) {
+      // Install the publisher's prefix layout *before* allocating, so the
+      // mux is never observable as allocated-but-stale.  Allocation makes
+      // the mux non-placeholder and notifies shadow replicas, and both
+      // shadows and concurrently connecting subscribers read the checksum
+      // and metadata sizes straight off the mux; if they run first they
+      // would latch the placeholder's 4/0 defaults instead of the layout
+      // this publisher is about to establish.  Virtual channels forward
+      // their layout accessors to the mux, so this covers the siblings a
+      // subscriber may already have created.
+      const int32_t previous_checksum_size = mux_channel->ChecksumSize();
+      const int32_t previous_metadata_size = mux_channel->MetadataSize();
+      const int32_t previous_prefix_size = mux_channel->PrefixSize();
+      // 4/0 are the sizes a channel is constructed with and mean "no layout
+      // established yet".  A placeholder mux that already carries a real
+      // layout (one rebuilt by shadow recovery, for instance) keeps it; a
+      // publisher that disagrees is rejected by the consistency check in
+      // ClientHandler::HandleCreatePublisher rather than silently
+      // overwriting it here.
+      if (previous_checksum_size == 4 && previous_metadata_size == 0) {
+        mux_channel->SetPrefixLayout(checksum_size, metadata_size);
+      }
       // Remap the memory now that we know the slots.
-      absl::Status status = RemapChannel(mux_channel, slot_size, num_slots);
+      absl::Status status =
+          RemapChannel(mux_channel, slot_size, num_slots,
+                       subscriber_queue_arena_size);
       if (!status.ok()) {
+        // Allocation failed and left the mux a placeholder again; roll the
+        // layout back too so the next publisher can retry the promotion
+        // from a clean state rather than being rejected for disagreeing
+        // with a layout that was never actually established.
+        mux_channel->SetChecksumSize(previous_checksum_size);
+        mux_channel->SetMetadataSize(previous_metadata_size);
+        mux_channel->SetPrefixSize(previous_prefix_size);
         return status;
       }
     }
@@ -1261,18 +1352,29 @@ Server::CreateChannel(const std::string &channel_name, int slot_size,
     return channel_id.status();
   }
   ServerChannel *channel =
-      new ServerChannel(*channel_id, channel_name, num_slots, std::move(type),
-                        false, session_id_);
+      new ServerChannel(*channel_id, channel_name, num_slots,
+                        subscriber_queue_size, subscriber_queue_arena_size,
+                        std::move(type), false, session_id_, logger_);
+  if (hidden) {
+    channel->SetTelemetryTarget(std::move(telemetry_target));
+  }
   channel->SetDebug(logger_.GetLogLevel() <= toolbelt::LogLevel::kVerboseDebug);
   channel->SetLastKnownSlotSize(slot_size);
+  // As in CreateMultiplexer: the layout has to be on the channel before the
+  // allocation that publishes it to the shadows.
+  channel->SetPrefixLayout(checksum_size, metadata_size);
 
   absl::StatusOr<SharedMemoryFds> fds =
-      channel->Allocate(scb_fd_, slot_size, num_slots, initial_ordinal_);
+      channel->Allocate(scb_fd_, slot_size, num_slots,
+                        subscriber_queue_arena_size, initial_ordinal_);
   if (!fds.ok()) {
     return fds.status();
   }
   channel->SetSharedMemoryFds(std::move(*fds));
   channels_.emplace(std::make_pair(channel_name, channel));
+  if (channel->IsTelemetryChannel()) {
+    NoteTelemetryChannel(channel->TelemetryTarget(), true);
+  }
   OnNewChannel(channel_name);
   ForEachShadow([channel](const std::unique_ptr<ShadowReplicator> &s) {
     s->SendCreateChannel(channel);
@@ -1289,23 +1391,28 @@ uint64_t Server::GetVirtualMemoryUsage() const {
   return size;
 }
 
-absl::Status Server::RemapChannel(ServerChannel *channel, int slot_size,
-                                  int num_slots) {
+absl::Status Server::RemapChannel(ServerChannel *channel, int64_t slot_size,
+                                  int num_slots,
+                                  uint64_t subscriber_queue_arena_size) {
   if (channel->IsVirtual()) {
     ChannelMultiplexer *mux = static_cast<VirtualChannel *>(channel)->GetMux();
     logger_.Log(toolbelt::LogLevel::kDebug,
                 "Remapping multiplexer %s with %d slots",
                 channel->Name().c_str(), num_slots);
-    return RemapChannel(mux, slot_size, num_slots);
+    return RemapChannel(mux, slot_size, num_slots,
+                        subscriber_queue_arena_size);
   }
   absl::StatusOr<SharedMemoryFds> fds =
-      channel->Allocate(scb_fd_, slot_size, num_slots, initial_ordinal_);
+      channel->Allocate(scb_fd_, slot_size, num_slots,
+                        subscriber_queue_arena_size, initial_ordinal_);
   if (!fds.ok()) {
     return fds.status();
   }
   channel->SetLastKnownSlotSize(slot_size);
   channel->SetSharedMemoryFds(std::move(*fds));
-  channel->RegisterExistingSubscribers();
+  for (const std::string &warning : channel->RegisterExistingSubscribers()) {
+    logger_.Log(toolbelt::LogLevel::kWarning, "%s", warning.c_str());
+  }
   // Remapping replaces the CCB/BCB FDs; shadow recovery must receive the
   // refreshed descriptors instead of retaining the placeholder mappings.
   ForEachShadow([channel](const std::unique_ptr<ShadowReplicator> &s) {
@@ -1322,17 +1429,448 @@ ServerChannel *Server::FindChannel(const std::string &channel_name) {
   return it->second.get();
 }
 
-absl::Status Server::RecoverFromShadow(RecoveredState &state) {
-  for (auto &rch : state.channels) {
-    channel_ids_.Set(rch.channel_id);
+uint64_t Server::TelemetryParticipantKey(const User *user) {
+  // Publisher and subscriber ids are allocated independently.
+  return (uint64_t(user->IsPublisher()) << 32) | uint32_t(user->GetId());
+}
 
-    auto *channel = new ServerChannel(rch.channel_id, rch.name, rch.num_slots,
-                                      rch.type, false, session_id_);
+ServerChannel *Server::FindTelemetryChannel(const std::string &target_name) {
+  auto it = telemetry_states_.find(target_name);
+  if (it == telemetry_states_.end()) {
+    return nullptr;
+  }
+  ServerChannel *channel = FindChannel(it->second->hidden_channel_name);
+  if (channel == nullptr || !channel->IsTelemetryChannel() ||
+      channel->TelemetryTarget() != target_name) {
+    return nullptr;
+  }
+  return channel;
+}
+
+absl::StatusOr<ServerChannel *>
+Server::FindOrCreateTelemetryChannel(const std::string &target_name) {
+  if (ServerChannel *channel = FindTelemetryChannel(target_name);
+      channel != nullptr) {
+    return channel;
+  }
+
+  ServerChannel *target = FindChannel(target_name);
+  if (!IsPublicChannel(target)) {
+    return absl::NotFoundError(
+        absl::StrFormat("No such channel %s", target_name));
+  }
+
+  // The name is internal; add a suffix if a real channel already uses it.
+  std::string hidden_name = "/subspace/telemetry/" + target_name;
+  for (int suffix = 1; FindChannel(hidden_name) != nullptr; ++suffix) {
+    hidden_name =
+        absl::StrFormat("/subspace/telemetry/%s#%d", target_name, suffix);
+  }
+
+  absl::StatusOr<ServerChannel *> hidden =
+      CreateChannel(hidden_name, kTelemetrySlotSize, kTelemetryNumSlots, 0, "",
+                    -1, "subspace.Telemetry", /*hidden=*/true, target_name);
+  if (!hidden.ok()) {
+    return hidden.status();
+  }
+
+  auto state = std::make_shared<TelemetryState>();
+  state->hidden_channel_name = hidden_name;
+  state->snapshot_requested = true;
+  state->target_channel_id = target->GetChannelId();
+  if (absl::Status status = state->trigger.Open(); !status.ok()) {
+    RemoveChannel(*hidden);
+    return status;
+  }
+  uint64_t total_bytes = 0;
+  uint64_t total_messages = 0;
+  uint64_t max_message_size = 0;
+  // Subsequent reports contain deltas from these initial counters.
+  target->GetStatsCounters(total_bytes, total_messages, max_message_size,
+                           state->last_total_drops);
+  state->resize_count = target->GetResizeInfo().size();
+  telemetry_states_.emplace(target_name, std::move(state));
+  return *hidden;
+}
+
+void Server::TelemetrySubscriberAdded(ServerChannel *channel) {
+  if (channel == nullptr || !channel->IsTelemetryChannel()) {
+    return;
+  }
+  auto it = telemetry_states_.find(channel->TelemetryTarget());
+  if (it == telemetry_states_.end()) {
+    return;
+  }
+  std::shared_ptr<TelemetryState> state = it->second;
+  ++state->subscriber_count;
+  state->snapshot_requested = true;
+  // The first subscriber starts the per-target coroutine and publisher.
+  if (!state->coroutine_running) {
+    StartTelemetryCoroutine(channel->TelemetryTarget(), state);
+  }
+  state->trigger.Trigger();
+}
+
+void Server::TelemetrySubscriberRemoved(ServerChannel *channel) {
+  if (channel == nullptr || !channel->IsTelemetryChannel()) {
+    return;
+  }
+  auto it = telemetry_states_.find(channel->TelemetryTarget());
+  if (it == telemetry_states_.end()) {
+    return;
+  }
+  std::shared_ptr<TelemetryState> state = it->second;
+  if (state->subscriber_count > 0) {
+    --state->subscriber_count;
+  }
+  if (state->subscriber_count == 0) {
+    // Wake the coroutine immediately so it can tear down its publisher.
+    state->trigger.Trigger();
+  }
+}
+
+void Server::RecordTelemetryParticipantChange(ServerChannel *channel,
+                                              User *user, bool added) {
+  if (!IsPublicChannel(channel) || user == nullptr) {
+    return;
+  }
+  auto state_it = telemetry_states_.find(channel->Name());
+  if (state_it == telemetry_states_.end()) {
+    return;
+  }
+
+  TelemetryState &state = *state_it->second;
+  uint64_t key = TelemetryParticipantKey(user);
+  std::string name;
+  if (user->GetHandler() != nullptr) {
+    name = user->GetHandler()->ClientName();
+  } else if (auto it = state.participants.find(key);
+             it != state.participants.end()) {
+    // Disconnect cleanup clears the handler before all removal paths run.
+    name = it->second;
+  }
+
+  if (added) {
+    state.participants[key] = name;
+  } else {
+    auto it = state.participants.find(key);
+    if (it != state.participants.end()) {
+      name = it->second;
+      state.participants.erase(it);
+    }
+  }
+  state.pending_participants.push_back(
+      {.name = std::move(name),
+       .publisher = user->IsPublisher(),
+       .change = added ? Telemetry::ADDED : Telemetry::REMOVED});
+}
+
+void Server::QueueTelemetrySnapshot(const std::string &target_name,
+                                    TelemetryState &state) {
+  ServerChannel *target = FindChannel(target_name);
+  if (!IsPublicChannel(target)) {
+    return;
+  }
+  for (const auto &[id, user] : target->GetUsers()) {
+    (void)id;
+    if (user == nullptr || user->GetHandler() == nullptr) {
+      continue;
+    }
+    uint64_t key = TelemetryParticipantKey(user.get());
+    std::string name = user->GetHandler()->ClientName();
+    state.participants[key] = name;
+    state.pending_participants.push_back({.name = std::move(name),
+                                          .publisher = user->IsPublisher(),
+                                          .change = Telemetry::NONE});
+  }
+}
+
+void Server::ReconcileTelemetryParticipants(const std::string &target_name,
+                                            TelemetryState &state) {
+  // Reconciliation catches disconnect and recovery paths that do not emit the
+  // normal add/remove callbacks.
+  absl::flat_hash_map<uint64_t, std::pair<std::string, bool>> current;
+  ServerChannel *target = FindChannel(target_name);
+  if (IsPublicChannel(target)) {
+    for (const auto &[id, user] : target->GetUsers()) {
+      (void)id;
+      if (user == nullptr || user->GetHandler() == nullptr) {
+        continue;
+      }
+      current.emplace(TelemetryParticipantKey(user.get()),
+                      std::make_pair(user->GetHandler()->ClientName(),
+                                     user->IsPublisher()));
+    }
+  }
+
+  for (const auto &[key, participant] : current) {
+    auto known = state.participants.find(key);
+    if (known == state.participants.end()) {
+      state.participants.emplace(key, participant.first);
+      state.pending_participants.push_back({.name = participant.first,
+                                            .publisher = participant.second,
+                                            .change = Telemetry::ADDED});
+    } else if (known->second != participant.first) {
+      state.pending_participants.push_back({.name = known->second,
+                                            .publisher = participant.second,
+                                            .change = Telemetry::REMOVED});
+      known->second = participant.first;
+      state.pending_participants.push_back({.name = participant.first,
+                                            .publisher = participant.second,
+                                            .change = Telemetry::ADDED});
+    }
+  }
+
+  for (auto it = state.participants.begin(); it != state.participants.end();) {
+    if (current.contains(it->first)) {
+      ++it;
+      continue;
+    }
+    bool publisher = (it->first >> 32) != 0;
+    state.pending_participants.push_back({.name = it->second,
+                                          .publisher = publisher,
+                                          .change = Telemetry::REMOVED});
+    auto erase_it = it++;
+    state.participants.erase(erase_it);
+  }
+}
+
+void Server::StartTelemetryCoroutine(
+    const std::string &target_name,
+    const std::shared_ptr<TelemetryState> &state) {
+  if (state->coroutine_running) {
+    return;
+  }
+  state->coroutine_running = true;
+  runtime_.SpawnOnStrand(
+      [this, target_name, state](async::Context ctx) {
+        TelemetryCoroutine(ctx, target_name, state);
+      },
+      {.name = absl::StrFormat("Channel telemetry for %s", target_name),
+       .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
+}
+
+void Server::StartRecoveredTelemetryCoroutines() {
+  for (const auto &[target_name, state] : telemetry_states_) {
+    if (state->subscriber_count > 0) {
+      StartTelemetryCoroutine(target_name, state);
+      state->trigger.Trigger();
+    }
+  }
+}
+
+void Server::TelemetryCoroutine(async::Context ctx, std::string target_name,
+                                std::shared_ptr<TelemetryState> state) {
+  Client client(ctx);
+  absl::Status status =
+      client.Init(socket_name_, "subspace-telemetry-internal");
+  if (!status.ok()) {
+    logger_.Log(toolbelt::LogLevel::kError,
+                "Failed to initialize telemetry client for %s: %s",
+                target_name.c_str(), status.ToString().c_str());
+    state->coroutine_running = false;
+    return;
+  }
+
+  // Keeping the publisher local ties its lifetime to this target's coroutine.
+  std::optional<Publisher> publisher;
+  while (!shutting_down_) {
+    // Triggers handle lifecycle changes; timeout is the batching period.
+    absl::Status wait_status = async::WaitReadable(
+        ctx, state->trigger.GetPollFd().Fd(), std::chrono::seconds(1));
+    const bool publish_batch = absl::IsDeadlineExceeded(wait_status);
+    if (wait_status.ok()) {
+      state->trigger.Clear();
+    }
+    if (shutting_down_) {
+      break;
+    }
+
+    auto current = telemetry_states_.find(target_name);
+    if (current == telemetry_states_.end() || current->second != state) {
+      break;
+    }
+
+    if (state->subscriber_count == 0) {
+      // Publisher destruction can yield, so recheck the shared state afterward
+      // in case another subscriber arrived while it was being removed.
+      publisher.reset();
+      current = telemetry_states_.find(target_name);
+      if (current == telemetry_states_.end() || current->second != state) {
+        break;
+      }
+      if (state->subscriber_count == 0) {
+        ServerChannel *hidden = FindChannel(state->hidden_channel_name);
+        if (hidden != nullptr && hidden->IsEmpty()) {
+          RemoveChannel(hidden);
+        }
+        break;
+      }
+      continue;
+    }
+
+    if (!publisher.has_value()) {
+      absl::StatusOr<Publisher> created = client.CreatePublisher(
+          state->hidden_channel_name, kTelemetrySlotSize, kTelemetryNumSlots,
+          PublisherOptions()
+              .SetType("subspace.Telemetry")
+              .SetUseSplitBuffers(false));
+      if (!created.ok()) {
+        logger_.Log(toolbelt::LogLevel::kError,
+                    "Failed to create telemetry publisher for %s: %s",
+                    target_name.c_str(), created.status().ToString().c_str());
+        continue;
+      }
+      publisher.emplace(std::move(*created));
+
+      current = telemetry_states_.find(target_name);
+      if (current == telemetry_states_.end() || current->second != state) {
+        break;
+      }
+      if (state->subscriber_count == 0) {
+        continue;
+      }
+    }
+
+    if (!publish_batch) {
+      continue;
+    }
+
+    PublishTelemetryBatch(target_name, state, *publisher);
+  }
+
+  publisher.reset();
+  auto current = telemetry_states_.find(target_name);
+  if (current != telemetry_states_.end() && current->second == state) {
+    state->coroutine_running = false;
+  }
+}
+
+void Server::PublishTelemetryBatch(const std::string &target_name,
+                                   const std::shared_ptr<TelemetryState> &state,
+                                   Publisher &publisher) {
+  if (state->snapshot_requested) {
+    // A new watcher receives the current participants before later deltas.
+    QueueTelemetrySnapshot(target_name, *state);
+    state->snapshot_requested = false;
+  }
+  ReconcileTelemetryParticipants(target_name, *state);
+
+  Telemetry telemetry;
+  for (const PendingTelemetryParticipant &participant :
+       state->pending_participants) {
+    if (participant.publisher) {
+      auto *entry = telemetry.add_publishers();
+      entry->set_name(participant.name);
+      entry->set_change(participant.change);
+    } else {
+      auto *entry = telemetry.add_subscribers();
+      entry->set_name(participant.name);
+      entry->set_change(participant.change);
+    }
+  }
+
+  uint32_t current_drops = state->last_total_drops;
+  size_t current_resize_count = state->resize_count;
+  ServerChannel *target = FindChannel(target_name);
+  if (IsPublicChannel(target)) {
+    uint64_t total_bytes = 0;
+    uint64_t total_messages = 0;
+    uint64_t max_message_size = 0;
+    target->GetStatsCounters(total_bytes, total_messages, max_message_size,
+                             current_drops);
+    std::vector<ResizeInfo> resize_info = target->GetResizeInfo();
+    current_resize_count = resize_info.size();
+    if (target->GetChannelId() != state->target_channel_id) {
+      // A recreated target starts new counter baselines.
+      state->target_channel_id = target->GetChannelId();
+    } else {
+      uint32_t drop_delta = current_drops - state->last_total_drops;
+      while (drop_delta > 0) {
+        uint32_t chunk =
+            std::min(drop_delta, uint32_t(std::numeric_limits<int32_t>::max()));
+        telemetry.add_drops()->set_num_drops(int32_t(chunk));
+        drop_delta -= chunk;
+      }
+      for (size_t i = state->resize_count; i < resize_info.size(); ++i) {
+        telemetry.add_resizes()->set_new_size(resize_info[i].new_slot_size);
+      }
+    }
+  } else {
+    // Force fresh baselines if the target is recreated before the next tick.
+    state->target_channel_id = -1;
+    current_drops = 0;
+    current_resize_count = 0;
+  }
+
+  if (telemetry.publishers().empty() && telemetry.subscribers().empty() &&
+      telemetry.drops().empty() && telemetry.resizes().empty()) {
+    state->last_total_drops = current_drops;
+    state->resize_count = current_resize_count;
+    return;
+  }
+
+  // Publishing yields. Commit only the entries present before that yield;
+  // callbacks may append newer changes while the message is sent.
+  const std::string hidden_channel_name = state->hidden_channel_name;
+  const size_t pending_participant_count = state->pending_participants.size();
+  int64_t length = telemetry.ByteSizeLong();
+  absl::StatusOr<void *> buffer = publisher.GetMessageBuffer(int32_t(length));
+  if (!buffer.ok()) {
+    logger_.Log(toolbelt::LogLevel::kError,
+                "Failed to get telemetry buffer for %s: %s",
+                target_name.c_str(), buffer.status().ToString().c_str());
+    return;
+  }
+  if (!telemetry.SerializeToArray(*buffer, int(length))) {
+    logger_.Log(toolbelt::LogLevel::kError,
+                "Failed to serialize telemetry for %s", target_name.c_str());
+    publisher.CancelPublish();
+    return;
+  }
+  absl::StatusOr<const Message> published =
+      publisher.PublishMessage(int32_t(length));
+  if (!published.ok()) {
+    logger_.Log(toolbelt::LogLevel::kError,
+                "Failed to publish telemetry for %s: %s", target_name.c_str(),
+                published.status().ToString().c_str());
+    return;
+  }
+
+  auto current = telemetry_states_.find(target_name);
+  if (current != telemetry_states_.end() && current->second == state &&
+      state->hidden_channel_name == hidden_channel_name) {
+    size_t erase_count =
+        std::min(pending_participant_count, state->pending_participants.size());
+    state->pending_participants.erase(
+        state->pending_participants.begin(),
+        state->pending_participants.begin() + erase_count);
+    state->last_total_drops = current_drops;
+    state->resize_count = current_resize_count;
+  }
+}
+
+absl::Status Server::RecoverFromShadow(RecoveredState &state) {
+  auto configure_channel = [this](ServerChannel *channel,
+                                  RecoveredChannel &rch,
+                                  bool map_storage) -> absl::Status {
     channel->SetDebug(logger_.GetLogLevel() <=
                       toolbelt::LogLevel::kVerboseDebug);
     channel->SetLastKnownSlotSize(rch.slot_size);
-    channel->SetChecksumSize(rch.checksum_size);
-    channel->SetMetadataSize(rch.metadata_size);
+    // The prefix size is derived, not replicated, so it has to be recomputed
+    // here or the recovered channel keeps the default 64 and reports a
+    // prefix that disagrees with its own checksum/metadata sizes.
+    channel->SetPrefixLayout(rch.checksum_size, rch.metadata_size);
+    if (rch.is_local) {
+      channel->LatchLocal();
+    }
+    if (rch.hidden) {
+      if (rch.telemetry_target.empty()) {
+        return absl::InvalidArgumentError(
+            "Recovered hidden telemetry channel has no target");
+      }
+      channel->SetTelemetryTarget(rch.telemetry_target);
+    }
     if (rch.has_split_buffer_options) {
       if (absl::Status s = channel->ValidateOrSetSplitBufferOptions(
               {.use_split_buffers = rch.use_split_buffers,
@@ -1349,21 +1887,47 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
         return s;
       }
     }
-
-    if (absl::Status s = channel->MapExisting(scb_fd_, std::move(rch.ccb_fd),
-                                              std::move(rch.bcb_fd));
-        !s.ok()) {
-      return s;
+    if (rch.has_max_subscribers) {
+      if (absl::Status s = channel->ValidateOrSetMaxSubscribers(
+              rch.max_subscribers, /*set_if_missing=*/true,
+              "shadow recovery");
+          !s.ok()) {
+        return s;
+      }
     }
-    for (RegisteredClientBuffer &buffer : rch.client_buffers) {
-      channel->RegisterClientBuffer(std::move(buffer.metadata),
-                                    std::move(buffer.fd));
+    if (rch.has_max_slot_size) {
+      if (absl::Status s = channel->ValidateOrSetMaxSlotSize(
+              rch.max_slot_size, /*set_if_missing=*/true, "shadow recovery");
+          !s.ok()) {
+        return s;
+      }
     }
 
+    if (map_storage) {
+      if (absl::Status s = channel->MapExisting(
+              scb_fd_, std::move(rch.ccb_fd), std::move(rch.bcb_fd));
+          !s.ok()) {
+        return s;
+      }
+      for (RegisteredClientBuffer &buffer : rch.client_buffers) {
+        channel->RegisterClientBuffer(std::move(buffer.metadata),
+                                      std::move(buffer.fd));
+      }
+    }
+    return absl::OkStatus();
+  };
+
+  auto restore_users = [this](ServerChannel *channel, RecoveredChannel &rch) {
     for (auto &rpub : rch.publishers) {
+      if (channel->IsTelemetryChannel()) {
+        // Telemetry publishers are ephemeral and recreated by their coroutine.
+        continue;
+      }
       auto pub = std::make_unique<PublisherUser>(
           nullptr, rpub.id, rpub.is_reliable, rpub.is_local, rpub.is_bridge,
-          rpub.for_tunnel, rpub.is_fixed_size);
+          rpub.for_tunnel, rpub.is_fixed_size,
+          rpub.max_outstanding_slot_leases);
+      pub->SetProcessId(rpub.process_id);
 
       toolbelt::TriggerFd tfd(rpub.poll_fd, rpub.trigger_fd);
       pub->SetTriggerFd(std::move(tfd));
@@ -1376,31 +1940,203 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
       }
 
       channel->AddUser(rpub.id, std::move(pub));
+      channel->ClearPublisherQueueHazardIfDead(rpub.id, rpub.process_id);
     }
 
     for (auto &rsub : rch.subscribers) {
       auto sub = std::make_unique<SubscriberUser>(
           nullptr, rsub.id, rsub.is_reliable, rsub.is_bridge, rsub.for_tunnel,
-          rsub.max_active_messages);
+          rsub.max_active_messages, rsub.subscriber_queue_size, rsub.is_local);
+      sub->SetProcessId(rsub.process_id);
 
       toolbelt::TriggerFd tfd(rsub.trigger_fd, rsub.poll_fd);
       sub->SetTriggerFd(std::move(tfd));
 
       channel->AddUser(rsub.id, std::move(sub));
     }
-    channel->RegisterExistingSubscribers();
+    for (const std::string &warning :
+         channel->RegisterExistingSubscribers()) {
+      logger_.Log(toolbelt::LogLevel::kWarning, "%s", warning.c_str());
+    }
+  };
 
+  absl::flat_hash_set<std::string> mux_names;
+  for (const RecoveredChannel &rch : state.channels) {
+    if (!rch.mux.empty()) {
+      mux_names.insert(rch.mux);
+    }
+  }
+
+  absl::flat_hash_map<std::string, ChannelMultiplexer *> recovered_muxes;
+  absl::flat_hash_map<int, std::string> physical_channel_ids;
+
+  // Recover physical channels first so virtual channels can attach to their
+  // single shared CCB/BCB mapping.
+  for (RecoveredChannel &rch : state.channels) {
+    if (!rch.mux.empty()) {
+      continue;
+    }
+    if (channels_.contains(rch.name) ||
+        physical_channel_ids.contains(rch.channel_id)) {
+      return absl::FailedPreconditionError(absl::StrFormat(
+          "duplicate recovered physical channel mapping for %s (id=%d)",
+          rch.name, rch.channel_id));
+    }
+    physical_channel_ids.emplace(rch.channel_id, rch.name);
+    channel_ids_.Set(rch.channel_id);
+    ServerChannel *channel = nullptr;
+    if (mux_names.contains(rch.name)) {
+      auto *mux = new ChannelMultiplexer(
+          rch.channel_id, rch.name, rch.num_slots,
+          rch.subscriber_queue_arena_size == 0 ? 0
+                                               : kDefaultSubscriberQueueSize,
+          rch.subscriber_queue_arena_size, rch.type, session_id_, logger_);
+      channel = mux;
+      recovered_muxes.emplace(rch.name, mux);
+    } else {
+      channel = new ServerChannel(
+          rch.channel_id, rch.name, rch.num_slots,
+          rch.subscriber_queue_arena_size == 0 ? 0
+                                               : kDefaultSubscriberQueueSize,
+          rch.subscriber_queue_arena_size, rch.type, false, session_id_,
+          logger_);
+    }
+    if (absl::Status status = configure_channel(channel, rch, true);
+        !status.ok()) {
+      delete channel;
+      return status;
+    }
+    restore_users(channel, rch);
     channels_.emplace(rch.name, channel);
+    if (channel->IsTelemetryChannel()) {
+      NoteTelemetryChannel(channel->TelemetryTarget(), true);
+    }
     logger_.Log(toolbelt::LogLevel::kInfo,
                 "Recovered channel '%s' (id=%d, %d pubs, %d subs)",
                 rch.name.c_str(), rch.channel_id,
                 static_cast<int>(rch.publishers.size()),
                 static_cast<int>(rch.subscribers.size()));
   }
+
+  // Older shadow state may contain only virtual-channel records. In that case
+  // infer and create the physical mux from the first virtual record.
+  for (RecoveredChannel &rch : state.channels) {
+    if (rch.mux.empty()) {
+      continue;
+    }
+    ChannelMultiplexer *mux = nullptr;
+    auto mux_it = recovered_muxes.find(rch.mux);
+    if (mux_it == recovered_muxes.end()) {
+      if (channels_.contains(rch.mux) ||
+          physical_channel_ids.contains(rch.channel_id)) {
+        return absl::FailedPreconditionError(absl::StrFormat(
+            "duplicate recovered mux mapping for %s (id=%d)", rch.mux,
+            rch.channel_id));
+      }
+      physical_channel_ids.emplace(rch.channel_id, rch.mux);
+      channel_ids_.Set(rch.channel_id);
+      mux = new ChannelMultiplexer(
+          rch.channel_id, rch.mux, rch.num_slots,
+          rch.subscriber_queue_arena_size == 0 ? 0
+                                               : kDefaultSubscriberQueueSize,
+          rch.subscriber_queue_arena_size, rch.type, session_id_, logger_);
+      if (absl::Status status = configure_channel(mux, rch, true);
+          !status.ok()) {
+        delete mux;
+        return status;
+      }
+      channels_.emplace(rch.mux, mux);
+      recovered_muxes.emplace(rch.mux, mux);
+    } else {
+      mux = mux_it->second;
+      if (rch.channel_id != mux->GetChannelId() ||
+          rch.num_slots != mux->NumSlots() ||
+          rch.subscriber_queue_arena_size !=
+              mux->SubscriberQueueArenaSize()) {
+        return absl::FailedPreconditionError(absl::StrFormat(
+            "inconsistent recovered virtual channel %s for mux %s", rch.name,
+            rch.mux));
+      }
+    }
+
+    if (channels_.contains(rch.name)) {
+      return absl::FailedPreconditionError(
+          absl::StrFormat("duplicate recovered virtual channel %s", rch.name));
+    }
+    absl::StatusOr<std::unique_ptr<VirtualChannel>> recovered_vchan =
+        mux->CreateVirtualChannel(*this, rch.name, rch.vchan_id);
+    if (!recovered_vchan.ok()) {
+      return recovered_vchan.status();
+    }
+    VirtualChannel *vchan = recovered_vchan->get();
+    if (absl::Status status = configure_channel(vchan, rch, false);
+        !status.ok()) {
+      return status;
+    }
+    restore_users(vchan, rch);
+    for (const auto &entry : vchan->GetUsers()) {
+      mux->AddUserId(entry.first);
+    }
+    channels_.emplace(rch.name, std::move(*recovered_vchan));
+    logger_.Log(toolbelt::LogLevel::kInfo,
+                "Recovered virtual channel '%s' on mux '%s' "
+                "(%d pubs, %d subs)",
+                rch.name.c_str(), rch.mux.c_str(),
+                static_cast<int>(rch.publishers.size()),
+                static_cast<int>(rch.subscribers.size()));
+  }
+  for (auto &[name, channel] : channels_) {
+    (void)name;
+    if (!channel->IsVirtual()) {
+      if (absl::Status status = channel->ReconcileSubscriberQueueArena();
+          !status.ok()) {
+        return status;
+      }
+    }
+  }
+  for (auto &[name, channel] : channels_) {
+    if (!channel->IsTelemetryChannel()) {
+      continue;
+    }
+    // Rebuild runtime-only state from the recovered hidden channel and users.
+    auto state = std::make_shared<TelemetryState>();
+    state->hidden_channel_name = name;
+    state->snapshot_requested = true;
+    if (absl::Status status = state->trigger.Open(); !status.ok()) {
+      return status;
+    }
+    for (const auto &[id, user] : channel->GetUsers()) {
+      (void)id;
+      if (user != nullptr && user->IsSubscriber()) {
+        ++state->subscriber_count;
+      }
+    }
+    if (ServerChannel *target = FindChannel(channel->TelemetryTarget());
+        IsPublicChannel(target)) {
+      state->target_channel_id = target->GetChannelId();
+      uint64_t total_bytes = 0;
+      uint64_t total_messages = 0;
+      uint64_t max_message_size = 0;
+      target->GetStatsCounters(total_bytes, total_messages, max_message_size,
+                               state->last_total_drops);
+      state->resize_count = target->GetResizeInfo().size();
+    }
+    telemetry_states_[channel->TelemetryTarget()] = std::move(state);
+  }
   return absl::OkStatus();
 }
 
 void Server::RemoveChannel(ServerChannel *channel) {
+  const bool telemetry = channel->IsTelemetryChannel();
+  const std::string telemetry_target =
+      telemetry ? channel->TelemetryTarget() : std::string();
+  if (telemetry) {
+    auto it = telemetry_states_.find(telemetry_target);
+    if (it != telemetry_states_.end() &&
+        it->second->hidden_channel_name == channel->Name()) {
+      telemetry_states_.erase(it);
+    }
+  }
   OnRemoveChannel(channel->Name());
   ForEachShadow([channel](const std::unique_ptr<ShadowReplicator> &s) {
     s->SendRemoveChannel(channel->Name(), channel->GetChannelId());
@@ -1422,14 +2158,31 @@ void Server::RemoveChannel(ServerChannel *channel) {
     }
   }
   channels_.erase(it);
+  if (telemetry) {
+    NoteTelemetryChannel(telemetry_target, false);
+  }
   SendChannelDirectory();
+}
+
+bool Server::HasTelemetryChannel(const std::string &target) const {
+  std::lock_guard<std::mutex> lock(telemetry_presence_mu_);
+  return telemetry_targets_.contains(target);
+}
+
+void Server::NoteTelemetryChannel(const std::string &target, bool present) {
+  std::lock_guard<std::mutex> lock(telemetry_presence_mu_);
+  if (present) {
+    telemetry_targets_.insert(target);
+  } else {
+    telemetry_targets_.erase(target);
+  }
 }
 
 void Server::RemoveAllUsersFor(ClientHandler *handler) {
   std::vector<ServerChannel *> empty_channels;
   for (auto &channel : channels_) {
-    channel.second->RemoveAllUsersFor(handler);
-    if (channel.second->IsEmpty()) {
+    channel.second->RemoveAllUsersFor(this, handler);
+    if (channel.second->IsEmpty() && !channel.second->IsTelemetryChannel()) {
       empty_channels.push_back(channel.second.get());
     }
   }
@@ -1472,6 +2225,9 @@ void Server::ChannelDirectoryCoroutine(async::Context ctx) {
     ChannelDirectory directory;
     directory.set_server_id(server_id_);
     for (auto &channel : channels_) {
+      if (!IsPublicChannel(channel.second.get())) {
+        continue;
+      }
       auto info = directory.add_channels();
       channel.second->GetChannelInfo(info);
     }
@@ -1532,6 +2288,9 @@ void Server::StatisticsCoroutine(async::Context ctx) {
     stats.set_timestamp(toolbelt::Now());
     stats.set_server_id(server_id_);
     for (auto &channel : channels_) {
+      if (!IsPublicChannel(channel.second.get())) {
+        continue;
+      }
       auto s = stats.add_channels();
       channel.second->GetChannelStats(s);
     }
@@ -1592,7 +2351,7 @@ void Server::SendQuery(const std::string &channel_name) {
 
 // Send an advertise discovery message over UDP.
 void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
-  if (local_) {
+  if (local_ || !IsPublicChannel(FindChannel(channel_name))) {
     return;
   }
   // Spawn a coroutine to send the Publish message.  Runs on the client strand
@@ -1680,7 +2439,7 @@ void Server::RemoveDiscoveryConnection(
 
 void Server::AdvertiseAllChannels() {
   for (auto &[name, ch] : channels_) {
-    if (!ch->IsLocal() && !ch->IsBridgePublisher()) {
+    if (IsPublicChannel(ch.get()) && !ch->IsLocal() && !ch->IsBridgePublisher()) {
       SendAdvertise(name, ch->IsReliable());
     }
   }
@@ -1779,8 +2538,8 @@ void Server::DiscoveryListenerCoroutine(async::Context ctx) {
     // Advertise our channels right away so the peer can bridge without waiting
     // for the next gratuitous advertise cycle.
     AdvertiseAllChannels();
-    // Runs on the client strand: the reader handles incoming Advertise/Subscribe
-    // messages which mutate channels_ and channel_ids_.
+    // Runs on the client strand: the reader handles incoming
+    // Advertise/Subscribe messages which mutate channels_ and channel_ids_.
     runtime_.SpawnOnStrand(
         [this, conn](async::Context reader_ctx) {
           DiscoveryConnectionReaderLoop(reader_ctx, conn);
@@ -1932,6 +2691,8 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
   subscribed.set_channel_name(channel_name);
   subscribed.set_slot_size(info.slot_size);
   subscribed.set_num_slots(info.num_slots);
+  subscribed.set_subscriber_queue_arena_size(
+      info.subscriber_queue_arena_size);
   subscribed.set_reliable(pub_reliable);
   subscribed.set_checksum_size(info.checksum_size);
   subscribed.set_metadata_size(info.metadata_size);
@@ -2162,7 +2923,8 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
 
   logger_.Log(toolbelt::LogLevel::kDebug,
               "Bridge transmitter for %s terminating", channel_name.c_str());
-  // bridge_guard removes the bridged-publisher entry (by `sender`) as we unwind.
+  // bridge_guard removes the bridged-publisher entry (by `sender`) as we
+  // unwind.
 }
 
 // This coroutine reads retirement messages from the bridge and removes
@@ -2419,6 +3181,8 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
   absl::StatusOr<Publisher> pub = client.CreatePublisher(
       channel_name, subscribed.slot_size(), subscribed.num_slots(),
       PublisherOptions()
+          .SetSubscriberQueueArenaSize(
+              subscribed.subscriber_queue_arena_size())
           .SetReliable(subscribed.reliable())
           .SetBridge(true)
           .SetNotifyRetirement(subscribed.notify_retirement())
@@ -2662,7 +3426,7 @@ void Server::IncomingQuery(const Discovery::Query &query,
   // Someone is asking who publishes a channel.  Do I publish it?  If so,
   // send an Advertise out.
   auto channel = channels_.find(query.channel_name());
-  if (channel != channels_.end()) {
+  if (channel != channels_.end() && IsPublicChannel(channel->second.get())) {
     if (channel->second->IsLocal() || channel->second->IsBridgePublisher()) {
       return;
     }
@@ -2675,7 +3439,7 @@ void Server::IncomingAdvertise(const Discovery::Advertise &advertise,
                                const std::string &server_id) {
   // Do I want to subscribe to this channel?
   auto channel = channels_.find(advertise.channel_name());
-  if (channel != channels_.end()) {
+  if (channel != channels_.end() && IsPublicChannel(channel->second.get())) {
     if (channel->second->IsBridged(sender, advertise.reliable(), server_id)) {
       // Already bridged to this sender with the same server instance.
       logger_.Log(toolbelt::LogLevel::kDebug,
@@ -2709,7 +3473,7 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
   bool sub_reliable = subscribe.reliable();
 
   auto channel = channels_.find(subscribe.channel_name());
-  if (channel != channels_.end()) {
+  if (channel != channels_.end() && IsPublicChannel(channel->second.get())) {
     if (channel->second->IsLocal()) {
       return;
     }
@@ -2750,6 +3514,7 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
         .channel_name = ch->Name(),
         .slot_size = ch->SlotSize(),
         .num_slots = ch->NumSlots(),
+        .subscriber_queue_arena_size = ch->SubscriberQueueArenaSize(),
         .checksum_size = ch->ChecksumSize(),
         .metadata_size = ch->MetadataSize(),
         .wire_split_buffers = ChannelUsesSplitBuffers(ch),
@@ -2781,7 +3546,7 @@ void Server::GratuitousAdvertiseCoroutine(async::Context ctx) {
       break;
     }
     for (auto &channel : channels_) {
-      if (!channel.second->IsLocal() && !channel.second->IsBridgePublisher()) {
+      if (IsPublicChannel(channel.second.get()) && !channel.second->IsLocal() && !channel.second->IsBridgePublisher()) {
         SendAdvertise(channel.first, channel.second->IsReliable());
       }
     }
@@ -2861,6 +3626,9 @@ void Server::OnReady() {
 }
 
 void Server::OnNewChannel(const std::string &channel_name) {
+  if (!IsPublicChannel(FindChannel(channel_name))) {
+    return;
+  }
   std::lock_guard<std::mutex> lock(plugin_lock_);
   for (const auto &plugin : plugins_) {
     plugin->interface->OnNewChannel(*this, channel_name);
@@ -2868,6 +3636,9 @@ void Server::OnNewChannel(const std::string &channel_name) {
 }
 
 void Server::OnRemoveChannel(const std::string &channel_name) {
+  if (!IsPublicChannel(FindChannel(channel_name))) {
+    return;
+  }
   std::lock_guard<std::mutex> lock(plugin_lock_);
   for (const auto &plugin : plugins_) {
     plugin->interface->OnRemoveChannel(*this, channel_name);
@@ -2875,6 +3646,16 @@ void Server::OnRemoveChannel(const std::string &channel_name) {
 }
 
 void Server::OnNewPublisher(const std::string &channel_name, int publisher_id) {
+  ServerChannel *channel = FindChannel(channel_name);
+  if (channel != nullptr) {
+    absl::StatusOr<User *> user = channel->GetUser(publisher_id);
+    if (user.ok()) {
+      RecordTelemetryParticipantChange(channel, *user, /*added=*/true);
+    }
+  }
+  if (!IsPublicChannel(channel)) {
+    return;
+  }
   std::lock_guard<std::mutex> lock(plugin_lock_);
   for (const auto &plugin : plugins_) {
     plugin->interface->OnNewPublisher(*this, channel_name, publisher_id);
@@ -2883,6 +3664,16 @@ void Server::OnNewPublisher(const std::string &channel_name, int publisher_id) {
 
 void Server::OnRemovePublisher(const std::string &channel_name,
                                int publisher_id) {
+  ServerChannel *channel = FindChannel(channel_name);
+  if (channel != nullptr) {
+    absl::StatusOr<User *> user = channel->GetUser(publisher_id);
+    if (user.ok()) {
+      RecordTelemetryParticipantChange(channel, *user, /*added=*/false);
+    }
+  }
+  if (!IsPublicChannel(channel)) {
+    return;
+  }
   std::lock_guard<std::mutex> lock(plugin_lock_);
   for (const auto &plugin : plugins_) {
     plugin->interface->OnRemovePublisher(*this, channel_name, publisher_id);
@@ -2891,6 +3682,16 @@ void Server::OnRemovePublisher(const std::string &channel_name,
 
 void Server::OnNewSubscriber(const std::string &channel_name,
                              int subscriber_id) {
+  ServerChannel *channel = FindChannel(channel_name);
+  if (channel != nullptr) {
+    absl::StatusOr<User *> user = channel->GetUser(subscriber_id);
+    if (user.ok()) {
+      RecordTelemetryParticipantChange(channel, *user, /*added=*/true);
+    }
+  }
+  if (!IsPublicChannel(channel)) {
+    return;
+  }
   std::lock_guard<std::mutex> lock(plugin_lock_);
   for (const auto &plugin : plugins_) {
     plugin->interface->OnNewSubscriber(*this, channel_name, subscriber_id);
@@ -2899,6 +3700,16 @@ void Server::OnNewSubscriber(const std::string &channel_name,
 
 void Server::OnRemoveSubscriber(const std::string &channel_name,
                                 int subscriber_id) {
+  ServerChannel *channel = FindChannel(channel_name);
+  if (channel != nullptr) {
+    absl::StatusOr<User *> user = channel->GetUser(subscriber_id);
+    if (user.ok()) {
+      RecordTelemetryParticipantChange(channel, *user, /*added=*/false);
+    }
+  }
+  if (!IsPublicChannel(channel)) {
+    return;
+  }
   std::lock_guard<std::mutex> lock(plugin_lock_);
   for (const auto &plugin : plugins_) {
     plugin->interface->OnRemoveSubscriber(*this, channel_name, subscriber_id);

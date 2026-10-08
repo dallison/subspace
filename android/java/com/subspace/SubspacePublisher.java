@@ -39,7 +39,7 @@ public class SubspacePublisher implements AutoCloseable {
      *         (reliable publisher with all slots in use)
      * @throws SubspaceException on failure
      */
-    public ByteBuffer getMessageBuffer(int maxSize) {
+    public ByteBuffer getMessageBuffer(long maxSize) {
         checkOpen();
         return nativeGetMessageBuffer(nativeHandle, maxSize);
     }
@@ -80,7 +80,7 @@ public class SubspacePublisher implements AutoCloseable {
     }
 
     /** Current slot size in bytes. */
-    public int getSlotSize() {
+    public long getSlotSize() {
         checkOpen();
         return nativeGetSlotSize(nativeHandle);
     }
@@ -107,12 +107,12 @@ public class SubspacePublisher implements AutoCloseable {
 
     // Native methods
     private static native ByteBuffer nativeGetMessageBuffer(long handle,
-                                                            int maxSize);
+                                                            long maxSize);
     private static native long nativePublishMessage(long handle,
                                                     long messageSize);
     private static native void nativeCancelPublish(long handle);
     private static native int nativeGetPollFd(long handle);
-    private static native int nativeGetSlotSize(long handle);
+    private static native long nativeGetSlotSize(long handle);
     private static native String nativeGetName(long handle);
     private static native void nativeDestroy(long handle);
 }

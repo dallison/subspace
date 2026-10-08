@@ -204,6 +204,19 @@ pub.PublishMessage(payload_size);
 `GetMetadata()` returns an `absl::Span<std::byte>` of `MetadataSize()` bytes.
 It returns an empty span if `MetadataSize()` is 0 or no slot is currently held.
 
+For an explicit publisher buffer lease, pass the valid lease token:
+
+```cpp
+auto lease = pub.AcquireBufferLease().value();
+auto meta = pub.GetMetadata(lease);
+// Fill metadata and lease.buffer, then publish the same lease.
+pub.PublishBufferLease(lease, payload_size);
+```
+
+The C equivalent is
+`subspace_get_publisher_buffer_metadata(pub, lease, &metadata_size)`. See
+[Publisher Buffer Leases](publisher-buffer-leases.md).
+
 ### Reading Metadata (Subscriber)
 
 Call `GetMetadata()` after `ReadMessage()`:

@@ -27,11 +27,14 @@
 #include "toolbelt/logging.h"
 #include "toolbelt/sockets.h"
 #include "toolbelt/triggerfd.h"
+#include <cstdio>
 #include <memory>
 #include <mutex>
 #include <vector>
 
 namespace subspace {
+
+class Publisher;
 
 // Values written to the notify_fd when the server is ready and
 // is stopped.
@@ -39,8 +42,8 @@ constexpr int64_t kServerReady = 1;
 constexpr int64_t kServerStopped = 2;
 constexpr int64_t kServerWaiting = 3;
 
-// In multithreaded tests we can't dlclose the plugins because the dynamic linker doesn't
-// play well with threads.
+// In multithreaded tests we can't dlclose the plugins because the dynamic
+// linker doesn't play well with threads.
 void ClosePluginsOnShutdown();
 bool ShouldClosePluginsOnShutdown();
 
@@ -88,6 +91,9 @@ public:
   virtual ~Server();
   void SetLogLevel(const std::string &level) { logger_.SetLogLevel(level); }
   toolbelt::LogLevel GetLogLevel() const { return logger_.GetLogLevel(); }
+  // In-process hosts (Replay, single-binary runners) send INFO to stdout so
+  // those lines are not treated as node errors.
+  void SetLogOutputStream(FILE *stream) { logger_.SetOutputStream(stream); }
 
   // Run the server.  On the Asio backend `num_asio_threads` controls how many
   // threads run the io_context (default 1, i.e. inline on the calling thread).
@@ -198,6 +204,10 @@ public:
     return channels_;
   }
 
+  // Whether a hidden telemetry channel for `target` is currently in
+  // channels_. Safe to call from another thread; channels_ itself is not.
+  bool HasTelemetryChannel(const std::string &target) const;
+
   int GetShutdownTriggerFd() {
     return shutdown_trigger_fd_.GetPollFd().Fd();
   }
@@ -211,16 +221,28 @@ public:
 
   // Create a channel in both process and shared memory.  For a placeholder
   // subscriber, the channel parameters are not known, so slot_size and
-  // num_slots will be zero.
+  // num_slots will be zero.  checksum_size and metadata_size carry the
+  // requesting publisher's prefix layout, which is applied before the
+  // channel's shared memory is allocated and replicated to the shadows.  The
+  // defaults are the sentinels a channel is constructed with, so a
+  // placeholder subscriber leaves the layout unset for a later publisher.
   absl::StatusOr<ServerChannel *> CreateChannel(const std::string &channel_name,
-                                                int slot_size, int num_slots,
+                                                int64_t slot_size, int num_slots,
+                                                uint64_t subscriber_queue_arena_size,
                                                 const std::string &mux,
-                                                int vchan_id, std::string type);
+                                                int vchan_id, std::string type,
+                                                bool hidden = false,
+                                                std::string telemetry_target = {},
+                                                int32_t checksum_size = 4,
+                                                int32_t metadata_size = 0);
   absl::StatusOr<ServerChannel *>
-  CreateMultiplexer(const std::string &channel_name, int slot_size,
-                    int num_slots, std::string type);
-  absl::Status RemapChannel(ServerChannel *channel, int slot_size,
-                            int num_slots);
+  CreateMultiplexer(const std::string &channel_name, int64_t slot_size,
+                    int num_slots, uint64_t subscriber_queue_arena_size,
+                    std::string type, int32_t checksum_size = 4,
+                    int32_t metadata_size = 0);
+  absl::Status RemapChannel(ServerChannel *channel, int64_t slot_size,
+                            int num_slots,
+                            uint64_t subscriber_queue_arena_size);
   ServerChannel *FindChannel(const std::string &channel_name);
   void RemoveChannel(ServerChannel *channel);
 
@@ -254,9 +276,61 @@ private:
     std::unique_ptr<PluginInterface> interface;
   };
 
+  struct PendingTelemetryParticipant {
+    std::string name;
+    bool publisher = false;
+    Telemetry::Change change = Telemetry::NONE;
+  };
+
+  // Per-target state shared with that target's telemetry coroutine. The
+  // shared_ptr in telemetry_states_ keeps it stable across coroutine yields.
+  struct TelemetryState {
+    std::string hidden_channel_name;
+    int subscriber_count = 0;
+    bool snapshot_requested = false;
+    bool coroutine_running = false;
+    int target_channel_id = -1;
+    uint32_t last_total_drops = 0;
+    size_t resize_count = 0;
+    toolbelt::TriggerFd trigger;
+    absl::flat_hash_map<uint64_t, std::string> participants;
+    std::vector<PendingTelemetryParticipant> pending_participants;
+  };
+
   absl::Status RecoverFromShadow(RecoveredState &state);
 
-  void ForeachChannel(std::function<void(ServerChannel*)> func);
+  // Public iteration excludes internal telemetry transport channels.
+  void ForeachChannel(std::function<void(ServerChannel *)> func);
+  bool IsPublicChannel(const ServerChannel *channel) const {
+    return channel != nullptr && !channel->IsHidden();
+  }
+
+  // Finds the hidden telemetry channel monitoring target_name.
+  ServerChannel *FindTelemetryChannel(const std::string &target_name);
+  // Creates the hidden channel and its state, but not its lazy publisher.
+  absl::StatusOr<ServerChannel *>
+  FindOrCreateTelemetryChannel(const std::string &target_name);
+  // Maintain the lazy coroutine on telemetry subscriber count transitions.
+  void TelemetrySubscriberAdded(ServerChannel *channel);
+  void TelemetrySubscriberRemoved(ServerChannel *channel);
+  // Queue a target-channel participant change for the next batch.
+  void RecordTelemetryParticipantChange(ServerChannel *channel, User *user,
+                                        bool added);
+  void StartTelemetryCoroutine(const std::string &target_name,
+                               const std::shared_ptr<TelemetryState> &state);
+  // Restarts coroutines whose subscribers were recovered from the shadow.
+  void StartRecoveredTelemetryCoroutines();
+  // Owns the internal publisher and emits at most one batch per second.
+  void TelemetryCoroutine(async::Context ctx, std::string target_name,
+                          std::shared_ptr<TelemetryState> state);
+  void PublishTelemetryBatch(const std::string &target_name,
+                             const std::shared_ptr<TelemetryState> &state,
+                             Publisher &publisher);
+  void ReconcileTelemetryParticipants(const std::string &target_name,
+                                      TelemetryState &state);
+  void QueueTelemetrySnapshot(const std::string &target_name,
+                              TelemetryState &state);
+  static uint64_t TelemetryParticipantKey(const User *user);
 
   void RemoveAllUsersFor(ClientHandler *handler);
   void CloseHandler(ClientHandler *handler);
@@ -296,8 +370,9 @@ private:
   // touch the strand-confined ServerChannel for this metadata.
   struct BridgeChannelInfo {
     std::string channel_name;
-    int slot_size = 0;
+    int64_t slot_size = 0;
     int num_slots = 0;
+    uint64_t subscriber_queue_arena_size = 0;
     int32_t checksum_size = 0;
     int32_t metadata_size = 0;
     bool wire_split_buffers = false;
@@ -387,6 +462,11 @@ private:
   std::atomic<bool> shutting_down_ = false;
 
   absl::flat_hash_map<std::string, std::unique_ptr<ServerChannel>> channels_;
+  // Tracks telemetry targets present in channels_ so tests can observe them
+  // without reading that map from another thread.
+  void NoteTelemetryChannel(const std::string &target, bool present);
+  mutable std::mutex telemetry_presence_mu_;
+  absl::flat_hash_set<std::string> telemetry_targets_;
 
   SystemControlBlock *scb_;
   toolbelt::FileDescriptor scb_fd_;
@@ -394,6 +474,9 @@ private:
   async::AsyncRuntime runtime_;
 
   toolbelt::TriggerFd channel_directory_trigger_fd_;
+  // Stable state is required because coroutines suspend while the map changes.
+  absl::flat_hash_map<std::string, std::shared_ptr<TelemetryState>>
+      telemetry_states_;
   toolbelt::InetAddress discovery_addr_;
   async::UDPSocket discovery_transmitter_;
   async::UDPSocket discovery_receiver_;

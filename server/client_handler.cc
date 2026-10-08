@@ -350,34 +350,147 @@ void ClientHandler::HandleCreatePublisher(
     const subspace::CreatePublisherRequest &req,
     subspace::CreatePublisherResponse *response,
     std::vector<toolbelt::FileDescriptor> &fds) {
+  if (req.num_slots() <= 0 || req.slot_size() <= 0) {
+    response->set_error("num_slots and slot_size must be greater than 0");
+    return;
+  }
+  if (req.max_slot_size() < 0) {
+    response->set_error(
+        absl::StrFormat("max_slot_size must be non-negative, not %d",
+                        req.max_slot_size()));
+    return;
+  }
+  if (req.max_slot_size() > 0 && req.slot_size() > req.max_slot_size()) {
+    response->set_error(absl::StrFormat(
+        "Slot size %d for channel %s exceeds its maximum slot size of %d bytes",
+        req.slot_size(), req.channel_name(), req.max_slot_size()));
+    return;
+  }
+  absl::StatusOr<size_t> checked_ccb_size =
+      CheckedCcbSize(req.num_slots(), req.subscriber_queue_arena_size());
+  if (!checked_ccb_size.ok()) {
+    response->set_error(checked_ccb_size.status().ToString());
+    return;
+  }
+
+  // Resolve the prefix layout up front.  Creating a channel (or promoting a
+  // placeholder multiplexer) allocates shared memory and publishes the
+  // channel to shadow replicas, and those steps read the layout off the
+  // channel, so it has to be known before any of them run.  Validating here
+  // also means an out-of-range size is rejected before we have created a
+  // channel or a publisher to unwind.
+  int32_t cs = req.checksum_size();
+  int32_t ms = req.metadata_size();
+  if (cs <= 0) {
+    cs = 4;
+  }
+  if (ms < 0) {
+    ms = 0;
+  }
+  if (cs > kMaxChecksumSize) {
+    response->set_error(
+        absl::StrFormat("checksum_size %d exceeds maximum %d for channel %s",
+                        cs, kMaxChecksumSize, req.channel_name()));
+    return;
+  }
+  if (ms > kMaxMetadataSize) {
+    response->set_error(
+        absl::StrFormat("metadata_size %d exceeds maximum %d for channel %s",
+                        ms, kMaxMetadataSize, req.channel_name()));
+    return;
+  }
+
+  int max_outstanding_slot_leases = req.max_outstanding_slot_leases();
+  // Zero is the protobuf default used by clients predating explicit leases.
+  if (max_outstanding_slot_leases == 0) {
+    max_outstanding_slot_leases = 1;
+  }
+  if (max_outstanding_slot_leases < 1 ||
+      max_outstanding_slot_leases > req.num_slots()) {
+    response->set_error(absl::StrFormat(
+        "Invalid max_outstanding_slot_leases %d for channel %s: value must be "
+        "between 1 and num_slots (%d)",
+        max_outstanding_slot_leases, req.channel_name(), req.num_slots()));
+    return;
+  }
+
+  // A channel keeps the sizes it was constructed with (checksum 4,
+  // metadata 0) until the first publisher fixes the layout, so those values
+  // mean "not yet established" rather than "must match".  Virtual channels
+  // forward these accessors to their multiplexer, which is what holds every
+  // virtual channel on a mux to a single layout.  Returns an empty string
+  // when the requested layout is acceptable.
+  auto layout_conflict = [&](const ServerChannel *ch) -> std::string {
+    if (ch->ChecksumSize() != 4 && ch->ChecksumSize() != cs) {
+      return absl::StrFormat("Inconsistent checksum_size for channel %s: "
+                             "already %d, not %d",
+                             req.channel_name(), ch->ChecksumSize(), cs);
+    }
+    if (ch->MetadataSize() != 0 && ch->MetadataSize() != ms) {
+      return absl::StrFormat("Inconsistent metadata_size for channel %s: "
+                             "already %d, not %d",
+                             req.channel_name(), ch->MetadataSize(), ms);
+    }
+    return {};
+  };
+
   ServerChannel *channel = server_->FindChannel(req.channel_name());
+  if (channel != nullptr && channel->IsHidden() &&
+      client_name_ != "subspace-telemetry-internal") {
+    response->set_error(
+        absl::StrFormat("No such channel %s", req.channel_name()));
+    return;
+  }
   if (channel == nullptr) {
     server_->logger_.Log(toolbelt::LogLevel::kDebug,
                          "Publisher %s is creating new channel %s with size "
-                         "%d/%d and type length %zu (total of %zu channels)",
+                         "%lld/%d and type length %zu (total of %zu channels)",
                          client_name_.c_str(), req.channel_name().c_str(),
-                         req.slot_size(), req.num_slots(), req.type().size(),
+                         static_cast<long long>(req.slot_size()),
+                         req.num_slots(), req.type().size(),
                          server_->GetNumChannels());
     absl::StatusOr<ServerChannel *> ch = server_->CreateChannel(
-        req.channel_name(), req.slot_size(), req.num_slots(), req.mux(),
-        req.vchan_id(), req.type());
+        req.channel_name(), req.slot_size(), req.num_slots(),
+        req.subscriber_queue_arena_size(), req.mux(), req.vchan_id(),
+        req.type(), /*hidden=*/false, /*telemetry_target=*/{}, cs, ms);
     if (!ch.ok()) {
       response->set_error(ch.status().ToString());
       return;
     }
     channel = *ch;
   } else if (channel->IsPlaceholder()) {
+    if (std::string conflict = layout_conflict(channel); !conflict.empty()) {
+      response->set_error(conflict);
+      return;
+    }
     server_->logger_.Log(
         toolbelt::LogLevel::kDebug,
-        "Publisher %s is remapping placeholder channel %s with size %d/%d and "
-        "type length %zu (total of %zu channels)",
-        client_name_.c_str(), req.channel_name().c_str(), req.slot_size(),
-        req.num_slots(), req.type().size(), server_->GetNumChannels());
+        "Publisher %s is remapping placeholder channel %s with size %lld/%d "
+        "and type length %zu (total of %zu channels)",
+        client_name_.c_str(), req.channel_name().c_str(),
+        static_cast<long long>(req.slot_size()), req.num_slots(),
+        req.type().size(), server_->GetNumChannels());
+    // Establish the layout before allocating.  Allocation is what makes the
+    // channel non-placeholder and republishes it to shadow replicas, and
+    // both shadows and concurrently connecting subscribers read the sizes
+    // straight off the channel, so they would otherwise latch the
+    // placeholder's defaults instead of this publisher's real layout.
+    const int32_t previous_checksum_size = channel->ChecksumSize();
+    const int32_t previous_metadata_size = channel->MetadataSize();
+    const int32_t previous_prefix_size = channel->PrefixSize();
+    channel->SetPrefixLayout(cs, ms);
     // Channel exists, but it's just a placeholder.  Remap the memory now
     // that we know the slots.
-    absl::Status status =
-        server_->RemapChannel(channel, req.slot_size(), req.num_slots());
+    absl::Status status = server_->RemapChannel(
+        channel, req.slot_size(), req.num_slots(),
+        req.subscriber_queue_arena_size());
     if (!status.ok()) {
+      // The failed allocation leaves the channel a placeholder again, so
+      // put the layout back as well and let a later publisher retry the
+      // promotion from a clean state.
+      channel->SetChecksumSize(previous_checksum_size);
+      channel->SetMetadataSize(previous_metadata_size);
+      channel->SetPrefixSize(previous_prefix_size);
       response->set_error(status.ToString());
       return;
     }
@@ -445,21 +558,25 @@ void ClientHandler::HandleCreatePublisher(
     channel->SetType(req.type());
   }
 
-  // Check capacity of channel for unreliable channels.
-  if (!req.is_reliable()) {
-    absl::Status cap_ok = channel->HasSufficientCapacity(0);
-    if (!cap_ok.ok()) {
-      response->set_error(absl::StrFormat(
-          "Insufficient capacity to add a new publisher to channel %s: %s",
-          req.channel_name(), cap_ok.ToString()));
-      return;
-    }
-  }
-
   int num_pubs, num_subs, num_bridge_pubs, num_bridge_subs;
   int num_tunnel_pubs, num_tunnel_subs;
   channel->CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs,
                       num_tunnel_pubs, num_tunnel_subs);
+  // The subscriber queue arena size defines the physical CCB layout and must
+  // remain fixed even when this channel currently has no publishers. Virtual
+  // channels delegate SubscriberQueueArenaSize() to their shared multiplexer,
+  // so
+  // this also enforces consistency across all vchans on a mux.
+  if (req.subscriber_queue_arena_size() !=
+      channel->SubscriberQueueArenaSize()) {
+    response->set_error(absl::StrFormat(
+        "Inconsistent publisher parameters for channel %s: subscriber queue "
+        "arena size is %llu, not %llu",
+        req.channel_name(),
+        static_cast<unsigned long long>(channel->SubscriberQueueArenaSize()),
+        static_cast<unsigned long long>(req.subscriber_queue_arena_size())));
+    return;
+  }
   // Check consistency of publisher parameters.
   if (num_pubs > 0) {
     if (req.is_fixed_size() != channel->IsFixedSize()) {
@@ -482,7 +599,6 @@ void ClientHandler::HandleCreatePublisher(
           req.channel_name(), req.num_slots(), current_num_slots));
       return;
     }
-
     if (slot_size_changed) {
       if (slot_size_changed) {
         if (channel->IsFixedSize()) {
@@ -496,12 +612,15 @@ void ClientHandler::HandleCreatePublisher(
       }
       server_->logger_.Log(
           toolbelt::LogLevel::kDebug,
-          "Publisher %s is resizing channel %s buffers from %d bytes to %d",
-          client_name_.c_str(), channel->Name().c_str(), channel->SlotSize(),
-          req.slot_size());
+          "Publisher %s is resizing channel %s buffers from %lld bytes to %lld",
+          client_name_.c_str(), channel->Name().c_str(),
+          static_cast<long long>(channel->SlotSize()),
+          static_cast<long long>(req.slot_size()));
     }
 
-    if (channel->IsLocal() != req.is_local()) {
+    // Local subscribers don't count here: they make the channel local
+    // without constraining publishers.
+    if (channel->HasLocalPublisher() != req.is_local()) {
       response->set_error(
           absl::StrFormat("Inconsistent publisher parameters for channel %s: "
                           "all publishers must be either local or not",
@@ -515,6 +634,12 @@ void ClientHandler::HandleCreatePublisher(
                            : channel;
   if (absl::Status status = split_channel->ValidateOrSetMaxPublishers(
           req.max_publishers(), /*set_if_missing=*/true, "publisher");
+      !status.ok()) {
+    response->set_error(status.ToString());
+    return;
+  }
+  if (absl::Status status = split_channel->ValidateOrSetMaxSlotSize(
+          req.max_slot_size(), /*set_if_missing=*/true, "publisher");
       !status.ok()) {
     response->set_error(status.ToString());
     return;
@@ -556,6 +681,9 @@ void ClientHandler::HandleCreatePublisher(
       pub = static_cast<PublisherUser *>(*user);
       pub->SetHandler(this);
       pub->SetProcessId(req.process_id());
+      split_channel->GetAvailableSlotQueueIndexAddress()
+          ->active_publishers[req.publisher_id()]
+          .store(req.active_queue_publish_depth(), std::memory_order_seq_cst);
       reclaimed = true;
       server_->logger_.Log(toolbelt::LogLevel::kDebug,
                            "Client %s reclaiming publisher %d on channel %s",
@@ -565,6 +693,19 @@ void ClientHandler::HandleCreatePublisher(
   }
 
   if (!reclaimed) {
+    // Reclaimed publishers are already included in capacity usage. Any request
+    // that creates a new publisher, including a failed reclaim, must reserve
+    // its configured lease budget.
+    if (!req.is_reliable()) {
+      absl::Status cap_ok =
+          channel->HasSufficientCapacity(0, max_outstanding_slot_leases);
+      if (!cap_ok.ok()) {
+        response->set_error(absl::StrFormat(
+            "Insufficient capacity to add a new publisher to channel %s: %s",
+            req.channel_name(), cap_ok.ToString()));
+        return;
+      }
+    }
     server_->logger_.Log(toolbelt::LogLevel::kDebug,
                          "Client %s creating publisher on channel %s: VM: %s",
                          client_name_.c_str(), req.channel_name().c_str(),
@@ -572,51 +713,22 @@ void ClientHandler::HandleCreatePublisher(
     // Create the publisher.
     absl::StatusOr<PublisherUser *> publisher = channel->AddPublisher(
         this, req.is_reliable(), req.is_local(), req.is_bridge(),
-        req.for_tunnel(), req.is_fixed_size(), req.process_id());
+        req.for_tunnel(), req.is_fixed_size(), max_outstanding_slot_leases,
+        req.process_id());
     if (!publisher.ok()) {
       response->set_error(publisher.status().ToString());
       return;
     }
     pub = *publisher;
-    {
-      int32_t cs = req.checksum_size();
-      int32_t ms = req.metadata_size();
-      if (cs <= 0) {
-        cs = 4;
-      }
-      if (ms < 0) {
-        ms = 0;
-      }
-      if (cs > kMaxChecksumSize) {
-        response->set_error(absl::StrFormat(
-            "checksum_size %d exceeds maximum %d for channel %s", cs,
-            kMaxChecksumSize, req.channel_name()));
-        return;
-      }
-      if (ms > kMaxMetadataSize) {
-        response->set_error(absl::StrFormat(
-            "metadata_size %d exceeds maximum %d for channel %s", ms,
-            kMaxMetadataSize, req.channel_name()));
-        return;
-      }
-      if (channel->ChecksumSize() != 4 && channel->ChecksumSize() != cs) {
-        response->set_error(
-            absl::StrFormat("Inconsistent checksum_size for channel %s: "
-                            "already %d, not %d",
-                            req.channel_name(), channel->ChecksumSize(), cs));
-        return;
-      }
-      if (channel->MetadataSize() != 0 && channel->MetadataSize() != ms) {
-        response->set_error(
-            absl::StrFormat("Inconsistent metadata_size for channel %s: "
-                            "already %d, not %d",
-                            req.channel_name(), channel->MetadataSize(), ms));
-        return;
-      }
-      channel->SetChecksumSize(cs);
-      channel->SetMetadataSize(ms);
-      channel->SetPrefixSize(Channel::ComputePrefixSize(cs, ms));
+    // Catches a publisher joining a channel (or a sibling virtual channel on
+    // a mux) whose layout was already established.  Where this request
+    // promoted a placeholder the layout is already installed and this is a
+    // no-op.
+    if (std::string conflict = layout_conflict(channel); !conflict.empty()) {
+      response->set_error(conflict);
+      return;
     }
+    channel->SetPrefixLayout(cs, ms);
 
     server_->OnNewPublisher(channel->Name(), pub->GetId());
     server_->SendChannelDirectory();
@@ -635,10 +747,13 @@ void ClientHandler::HandleCreatePublisher(
       }
     }
 
-    server_->ForEachShadow(
-        [&](const std::unique_ptr<ShadowReplicator> &shadow) {
-          shadow->SendAddPublisher(channel->Name(), pub);
-        });
+    if (!channel->IsTelemetryChannel()) {
+      // The per-channel coroutine recreates its ephemeral publisher.
+      server_->ForEachShadow(
+          [&](const std::unique_ptr<ShadowReplicator> &shadow) {
+            shadow->SendAddPublisher(channel->Name(), pub);
+          });
+    }
 
     channel->RecordUpdate(/*is_pub=*/true, /*add=*/true, req.is_reliable());
   }
@@ -647,6 +762,10 @@ void ClientHandler::HandleCreatePublisher(
   response->set_type(channel->Type());
   response->set_vchan_id(channel->GetVirtualChannelId());
   response->set_publisher_id(pub->GetId());
+  response->set_subscriber_queue_size(channel->SubscriberQueueSize());
+  response->set_subscriber_queue_arena_size(
+      channel->SubscriberQueueArenaSize());
+  response->set_num_slots(channel->NumSlots());
 
   const SharedMemoryFds &channel_fds = channel->GetFds();
   response->set_ccb_fd_index(0);
@@ -706,53 +825,104 @@ void ClientHandler::HandleCreateSubscriber(
     const subspace::CreateSubscriberRequest &req,
     subspace::CreateSubscriberResponse *response,
     std::vector<toolbelt::FileDescriptor> &fds) {
-  ServerChannel *channel = server_->FindChannel(req.channel_name());
-  if (channel == nullptr) {
-    // No channel exists, map an empty channel.
-    server_->logger_.Log(toolbelt::LogLevel::kDebug,
-                         "Subscriber %s is creating new placeholder channel %s "
-                         "with type length %zu (total of %zu channels)",
-                         client_name_.c_str(), req.channel_name().c_str(),
-                         req.type().size(), server_->GetNumChannels());
-    absl::StatusOr<ServerChannel *> ch = server_->CreateChannel(
-        req.channel_name(), 0, 0, req.mux(), req.vchan_id(), req.type());
-    if (!ch.ok()) {
-      response->set_error(ch.status().ToString());
-      return;
-    }
-    channel = *ch;
-  } else {
-    // Check that the channel types match, if they are provided and
-    // already set in the channel.
-    if (!req.type().empty() && !channel->Type().empty() &&
-        channel->Type() != req.type()) {
+  if (req.subscriber_queue_size() < 0) {
+    response->set_error("subscriber_queue_size must be >= 0");
+    return;
+  }
+  if (static_cast<size_t>(req.subscriber_queue_size()) >
+      kDefaultMaxAvailableSlotQueueCapacity) {
+    response->set_error(absl::StrFormat(
+        "subscriber_queue_size must be <= %zu",
+        kDefaultMaxAvailableSlotQueueCapacity));
+    return;
+  }
+  ServerChannel *channel = nullptr;
+  if (req.telemetry()) {
+    // The server owns the hidden channel's type; the requested target type is
+    // intentionally ignored for telemetry subscriptions.
+    if (req.is_bridge() || req.for_tunnel() || !req.mux().empty()) {
       response->set_error(
-          absl::StrFormat("Inconsistent channel types for channel %s: "
-                          "type has been set as %s, not %s\n",
-                          req.channel_name(), channel->Type(), req.type()));
+          "Telemetry subscribers cannot be bridges, tunnels, or virtual "
+          "channel subscribers");
       return;
     }
-    if (channel->Type().empty()) {
-      channel->SetType(req.type());
+    if (req.subscriber_id() == -1) {
+      ServerChannel *target = server_->FindChannel(req.channel_name());
+      if (!server_->IsPublicChannel(target)) {
+        response->set_error(
+            absl::StrFormat("No such channel %s", req.channel_name()));
+        return;
+      }
+      absl::StatusOr<ServerChannel *> telemetry_channel =
+          server_->FindOrCreateTelemetryChannel(req.channel_name());
+      if (!telemetry_channel.ok()) {
+        response->set_error(telemetry_channel.status().ToString());
+        return;
+      }
+      channel = *telemetry_channel;
+    } else {
+      channel = server_->FindTelemetryChannel(req.channel_name());
+      if (channel == nullptr) {
+        response->set_error(
+            absl::StrFormat("No telemetry channel for %s", req.channel_name()));
+        return;
+      }
+    }
+  } else {
+    channel = server_->FindChannel(req.channel_name());
+    if (channel != nullptr && channel->IsHidden()) {
+      response->set_error(
+          absl::StrFormat("No such channel %s", req.channel_name()));
+      return;
+    }
+    if (channel == nullptr) {
+      // No channel exists, map an empty channel.
+      server_->logger_.Log(
+          toolbelt::LogLevel::kDebug,
+          "Subscriber %s is creating new placeholder channel %s "
+          "with type length %zu (total of %zu channels)",
+          client_name_.c_str(), req.channel_name().c_str(), req.type().size(),
+          server_->GetNumChannels());
+      absl::StatusOr<ServerChannel *> ch = server_->CreateChannel(
+          req.channel_name(), 0, 0, 0, req.mux(), req.vchan_id(), req.type());
+      if (!ch.ok()) {
+        response->set_error(ch.status().ToString());
+        return;
+      }
+      channel = *ch;
+    } else {
+      // Check that the channel types match, if they are provided and
+      // already set in the channel.
+      if (!req.type().empty() && !channel->Type().empty() &&
+          channel->Type() != req.type()) {
+        response->set_error(
+            absl::StrFormat("Inconsistent channel types for channel %s: "
+                            "type has been set as %s, not %s\n",
+                            req.channel_name(), channel->Type(), req.type()));
+        return;
+      }
+      if (channel->Type().empty()) {
+        channel->SetType(req.type());
+      }
     }
   }
   // Check the virtuality settings.  We can't mix virtual and non-virtual
   // channels with the same name or on different multiplexer channels.
-  if (req.mux().empty() && channel->IsVirtual()) {
+  if (!req.telemetry() && req.mux().empty() && channel->IsVirtual()) {
     response->set_error(
         absl::StrFormat("Channel %s is virtual, but no multiplexer was "
                         "specified for the subscriber",
                         req.channel_name()));
     return;
   }
-  if (!req.mux().empty() && !channel->IsVirtual()) {
+  if (!req.telemetry() && !req.mux().empty() && !channel->IsVirtual()) {
     response->set_error(
         absl::StrFormat("Channel %s is not virtual, but a multiplexer was "
                         "specified for the subscriber",
                         req.channel_name()));
     return;
   }
-  if (channel->IsVirtual()) {
+  if (!req.telemetry() && channel->IsVirtual()) {
     VirtualChannel *vchan = static_cast<VirtualChannel *>(channel);
     if (vchan->GetMux()->Name() != req.mux()) {
       response->set_error(absl::StrFormat(
@@ -763,6 +933,42 @@ void ClientHandler::HandleCreateSubscriber(
       return;
     }
   }
+  ServerChannel *limit_channel =
+      channel->IsVirtual() ? static_cast<VirtualChannel *>(channel)->GetMux()
+                           : channel;
+  auto remove_unused_telemetry_channel = [&]() {
+    if (req.telemetry() && channel->IsEmpty()) {
+      server_->RemoveChannel(channel);
+    }
+  };
+  if (absl::Status status = limit_channel->ValidateOrSetMaxSubscribers(
+          req.max_subscribers(), /*set_if_missing=*/true, "subscriber");
+      !status.ok()) {
+    response->set_error(status.ToString());
+    remove_unused_telemetry_channel();
+    return;
+  }
+  server_->ForEachShadow([&](const std::unique_ptr<ShadowReplicator> &shadow) {
+    shadow->SendUpdateChannelOptions(limit_channel);
+  });
+  if (req.subscriber_id() < 0 && limit_channel->MaxSubscribers() > 0) {
+    int limit_num_pubs = 0;
+    int limit_num_subs = 0;
+    int limit_num_bridge_pubs = 0;
+    int limit_num_bridge_subs = 0;
+    int limit_num_tunnel_pubs = 0;
+    int limit_num_tunnel_subs = 0;
+    limit_channel->CountUsers(limit_num_pubs, limit_num_subs,
+                              limit_num_bridge_pubs, limit_num_bridge_subs,
+                              limit_num_tunnel_pubs, limit_num_tunnel_subs);
+    if (limit_num_subs >= limit_channel->MaxSubscribers()) {
+      response->set_error(absl::StrFormat(
+          "Channel %s already has the maximum number of subscribers (%d)",
+          req.channel_name(), limit_channel->MaxSubscribers()));
+      remove_unused_telemetry_channel();
+      return;
+    }
+  }
   SubscriberUser *sub;
   bool reclaimed = false;
   if (req.subscriber_id() != -1) {
@@ -770,6 +976,7 @@ void ClientHandler::HandleCreateSubscriber(
     absl::StatusOr<User *> user = channel->GetUser(req.subscriber_id());
     if (!user.ok()) {
       response->set_error(user.status().ToString());
+      remove_unused_telemetry_channel();
       return;
     }
     sub = static_cast<SubscriberUser *>(*user);
@@ -785,11 +992,12 @@ void ClientHandler::HandleCreateSubscriber(
   } else {
     if (!req.is_reliable()) {
       absl::Status cap_ok =
-          channel->HasSufficientCapacity(req.max_active_messages() - 1);
+          channel->HasSufficientCapacity(req.max_active_messages(), 0);
       if (!cap_ok.ok()) {
         response->set_error(absl::StrFormat(
             "Insufficient capacity to add a new subscriber to channel %s: %s",
             req.channel_name(), cap_ok.ToString()));
+        remove_unused_telemetry_channel();
         return;
       }
     }
@@ -798,12 +1006,13 @@ void ClientHandler::HandleCreateSubscriber(
                          "Client %s creating subscriber on channel %s: VM: %s",
                          client_name_.c_str(), req.channel_name().c_str(),
                          GetTotalVM().c_str());
-    absl::StatusOr<SubscriberUser *> subscriber =
-        channel->AddSubscriber(this, req.is_reliable(), req.is_bridge(),
-                               req.for_tunnel(), req.max_active_messages(),
-                               req.process_id());
+    absl::StatusOr<SubscriberUser *> subscriber = channel->AddSubscriber(
+        this, req.is_reliable(), req.is_bridge(), req.for_tunnel(),
+        req.max_active_messages(), req.subscriber_queue_size(),
+        req.process_id(), req.is_local());
     if (!subscriber.ok()) {
       response->set_error(subscriber.status().ToString());
+      remove_unused_telemetry_channel();
       return;
     }
     channel->RecordUpdate(/*is_pub=*/false, /*add=*/true, req.is_reliable());
@@ -821,6 +1030,9 @@ void ClientHandler::HandleCreateSubscriber(
 
   channel->RegisterSubscriber(sub->GetId(), channel->GetVirtualChannelId(),
                               req.subscriber_id() == -1);
+  if (req.telemetry() && req.subscriber_id() == -1) {
+    server_->TelemetrySubscriberAdded(channel);
+  }
 
   ServerChannel *resolved =
       channel->IsVirtual() ? static_cast<VirtualChannel *>(channel)->GetMux()
@@ -832,6 +1044,7 @@ void ClientHandler::HandleCreateSubscriber(
   response->set_channel_id(channel->GetChannelId());
   response->set_subscriber_id(sub->GetId());
   response->set_type(channel->Type());
+  response->set_resolved_channel_name(channel->Name());
   response->set_vchan_id(channel->GetVirtualChannelId());
 
   const SharedMemoryFds &channel_fds = channel->GetFds();
@@ -851,6 +1064,11 @@ void ClientHandler::HandleCreateSubscriber(
 
   response->set_slot_size(channel->SlotSize());
   response->set_num_slots(channel->NumSlots());
+  response->set_subscriber_queue_size(
+      channel->SubscriberQueueSize(sub->GetId()));
+  response->set_default_subscriber_queue_size(channel->SubscriberQueueSize());
+  response->set_subscriber_queue_arena_size(
+      channel->SubscriberQueueArenaSize());
   response->set_checksum_size(channel->ChecksumSize());
   response->set_metadata_size(channel->MetadataSize());
   ServerChannel *split_response_channel =
@@ -888,7 +1106,7 @@ void ClientHandler::HandleCreateSubscriber(
     }
   }
 
-  if (!req.is_bridge()) {
+  if (!req.is_bridge() && !req.telemetry()) {
     // Send Query to subscribe to public channels on other servers.
     server_->SendQuery(req.channel_name());
   }
@@ -960,7 +1178,9 @@ void ClientHandler::HandleRemoveSubscriber(
     const subspace::RemoveSubscriberRequest &req,
     subspace::RemoveSubscriberResponse *response,
     [[maybe_unused]] std::vector<toolbelt::FileDescriptor> &fds) {
-  ServerChannel *channel = server_->FindChannel(req.channel_name());
+  ServerChannel *channel =
+      req.telemetry() ? server_->FindTelemetryChannel(req.channel_name())
+                      : server_->FindChannel(req.channel_name());
   if (channel == nullptr) {
     response->set_error(
         absl::StrFormat("No such channel %s", req.channel_name()));
@@ -983,7 +1203,7 @@ void ClientHandler::HandleGetChannelInfo(
     return;
   }
   ServerChannel *channel = server_->FindChannel(req.channel_name());
-  if (channel == nullptr) {
+  if (!server_->IsPublicChannel(channel)) {
     response->set_error(
         absl::StrFormat("No such channel %s", req.channel_name()));
     return;
@@ -1006,7 +1226,7 @@ void ClientHandler::HandleGetChannelStats(
     return;
   }
   ServerChannel *channel = server_->FindChannel(req.channel_name());
-  if (channel == nullptr) {
+  if (!server_->IsPublicChannel(channel)) {
     response->set_error(
         absl::StrFormat("No such channel %s", req.channel_name()));
     return;

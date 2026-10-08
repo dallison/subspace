@@ -74,8 +74,36 @@ Each channel requires three shared memory regions, created via `shm_open()` (POS
 
 - One per channel.
 - Contains: channel name, num_slots, ordinals, activation tracker.
-- Variable-length: `MessageSlot` array + bitsets for retired/free/available slots.
-- Size: `CcbSize(num_slots)` = base + slots + bitsets.
+- CCB version 5 uses atomic slot metadata and subscriber counters.
+  `total_messages` advances for every
+  completed publication, including activation messages, and also versions
+  subscriber delivery snapshots.
+- Variable-length: `MessageSlot` array, retired/free/available bitsets, a
+  subscriber queue index, and a packed subscriber queue arena.
+- Size: `CcbSize(num_slots, subscriber_queue_arena_size)`. Publisher client
+  APIs explicitly configure the packed arena in bytes and default to zero,
+  omitting subscriber queues and using the available-slot bitset path. Opting
+  into the standard 64,000-byte arena supports 100 default-sized queues. A
+  subscriber that does not request an override then gets the fixed 16-entry
+  default. Subscriber IDs still support the full 1024 owner limit, but queue
+  allocation fails once the packed arena is full.
+- Per-subscriber queues are acceleration hints. The available-slot bitset is
+  authoritative, and consumers fall back to an ordinal-ordered bitset snapshot
+  if queue overflow or insertion failure races a claim.
+- Queue blocks are retired before reuse while publisher traversal hazards are
+  active. Shadow recovery reconciles subscriber offsets with allocated blocks,
+  conservatively retires orphan blocks, and only reclaims them after their
+  recorded publisher hazards have quiesced.
+- A slot remains publisher-owned while its available-slot bits and queue hints
+  are prepared. Subscribers preserve those records but cannot claim the slot
+  until the publisher commits it with a release store and advances
+  `total_messages`. Subscriber registration also seeds non-zero
+  publisher-owned generations so a join racing publication cannot miss the
+  message.
+- Subscriber removal does not wait for in-progress publishers. It releases the
+  dead subscriber's references and re-evaluates every slot. Publication commit
+  performs the same retirement check when a cleanup generation changed, so the
+  operation that finishes second safely completes retirement.
 
 ### Buffer Control Block (BCB)
 
@@ -98,19 +126,47 @@ Each channel requires three shared memory regions, created via `shm_open()` (POS
 
 ### Adding a Publisher
 
-1. Allocate a user ID from the channel's `user_ids_` bitset.
-2. Create a `PublisherUser` with reliability/local/bridge/tunnel flags.
-3. Initialize a trigger FD for reliable publishers.
-4. Update SCB counters.
-5. Return the publisher ID and file descriptors (CCB, BCB, trigger, poll, retirement FDs).
+1. Normalize `max_outstanding_slot_leases` (`0` from an older client means
+   `1`) and validate it against the channel slot count.
+2. For a new unreliable publisher, check capacity using its entire lease
+   budget. A reclaimed publisher is already included in the channel's usage.
+3. Allocate a user ID from the channel's `user_ids_` bitset.
+4. Create a `PublisherUser` with reliability/local/bridge/tunnel flags and its
+   maximum lease count.
+5. Initialize trigger and optional retirement FDs.
+6. Update SCB counters and replicate the publisher metadata to each shadow.
+7. Return the publisher ID and file descriptors (CCB, BCB, trigger, poll,
+   retirement FDs).
 
 ### Adding a Subscriber
 
-1. Allocate a user ID similarly.
-2. Check capacity for unreliable channels: `slots_needed = num_pubs + num_subs + max_active_messages + 1`.
-3. Create a `SubscriberUser` with a trigger FD.
+1. Validate or establish the channel's `max_subscribers` setting. The first
+   subscriber fixes the value; `0` means no explicit limit. Reject a new
+   subscriber when the nonzero limit is already reached.
+2. Check capacity for unreliable subscribers using their complete
+   `max_active_messages` budget.
+3. Allocate a user ID and create a `SubscriberUser` with a trigger FD.
 4. Register the subscriber in the CCB.
-5. Return file descriptors (CCB, BCB, trigger, all subscriber trigger FDs, retirement FDs).
+5. Return file descriptors (CCB, BCB, trigger, all subscriber trigger FDs,
+   retirement FDs).
+
+### Capacity Accounting
+
+The server admits an unreliable publisher or subscriber only when:
+
+```text
+slots_needed =
+    sum(publisher.max_outstanding_slot_leases)
+  + sum(subscriber.max_active_messages)
+
+slots_needed <= num_slots - 1
+```
+
+The calculation uses configured maxima so a publisher below its lease limit can
+always acquire another slot even when every subscriber holds its maximum active
+messages. `ChannelMultiplexer` includes users from every virtual channel that
+shares its storage. The default one lease per publisher reproduces the previous
+single-current-slot accounting.
 
 ## Bridge and Discovery System
 
@@ -206,8 +262,9 @@ Server
 - **Single-threaded with coroutines** — avoids locking and race conditions; cooperative multitasking via the `co` library. All blocking operations (accept, receive, send) yield to the scheduler.
 - **File descriptor passing** — shared memory FDs are sent to clients via Unix socket SCM_RIGHTS messages, so clients map the same memory regions.
 - **Discovery-based bridging** — UDP for lightweight discovery, TCP for reliable data transfer. Supports IPv4 and virtual addresses (VSOCK).
-- **Capacity management** — unreliable channels check capacity before adding subscribers to prevent buffer exhaustion.
+- **Capacity management** — unreliable channels reserve publisher lease budgets and subscriber active-message budgets before admitting users.
 - **Retirement tracking** — for reliable channels, tracks message lifetimes across bridges to prevent premature slot reuse.
+- **Subscriber limits** — the server enforces a consistent channel-level `max_subscribers` value, including across virtual channels sharing a mux.
 - **Tunnel tracking** — publishers and subscribers can be flagged as tunnel endpoints (`for_tunnel`). The server tracks tunnel user counts separately and reports them via `GetChannelInfo` (`num_tunnel_pubs`, `num_tunnel_subs`), allowing monitoring tools to distinguish between local, bridged, and tunneled users.
 - **Plugin system** — loadable modules with callbacks (OnReady, OnNewChannel, OnNewPublisher, etc.) for extensibility.
 

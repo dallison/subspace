@@ -19,7 +19,9 @@ The main handle types are opaque wrappers:
 | `SubspacePublisher` | Publisher attached to a channel. |
 | `SubspaceSubscriber` | Subscriber attached to a channel. |
 | `SubspaceMessage` | A received message reference. |
+| `SubspaceTelemetry` | An owned, decoded channel telemetry message. |
 | `SubspaceMessageBuffer` | A writable publish buffer returned by a publisher. |
+| `SubspacePublisherBufferLease` | A specific unpublished publisher slot plus a stale-token guard. |
 
 Most functions return `bool`, an integer status, or a handle whose inner pointer
 is `NULL` on failure. When a call fails, use:
@@ -87,15 +89,18 @@ Important publisher options:
 
 | Field | Purpose |
 | --- | --- |
-| `slot_size`, `num_slots` | Initial payload slot size and fixed slot count. |
+| `slot_size`, `num_slots` | Initial payload slot size and fixed slot count. `slot_size` is a `SubspaceSlotSize`, which is `int32_t` unless the library and your code are both built with `SUBSPACE_64BIT_SLOT_SIZE`; see [Slot Sizes](slot-sizes.md#64-bit-slot-sizes). |
 | `local` | Keep the channel local to this server. |
 | `reliable` | Wait for free slots instead of overwriting unread messages. |
 | `bridge`, `for_tunnel` | Mark bridge/tunnel publishers. |
 | `fixed_size` | Reject oversized messages instead of resizing. |
+| `max_slot_size` | Upper bound on how large the slots may grow, or 0 for no limit. See [Limiting the Slot Size](slot-sizes.md#limiting-the-slot-size). |
 | `type` | Opaque type string used to match publishers and subscribers. |
 | `activate` | Publish an activation message when the publisher is created. |
 | `mux`, `vchan_id` | Use a mux channel and optional virtual channel id. |
-| `notify_retirement` | Expose a retirement fd for reliable-slot retirement notifications. |
+| `notify_retirement` | Expose a retirement fd that reports retired slot IDs. |
+| `max_outstanding_slot_leases` | Maximum unpublished slots owned through the explicit lease API; default 1. |
+| `notify_retirement_on_forced_reuse` | Include unreliable forced-reuse notifications; default true. Set false for exact-slot reclamation. |
 | `checksum`, `checksum_size` | Enable checksums and reserve checksum bytes in the prefix. |
 | `metadata_size` | Reserve per-message user metadata bytes in the prefix. |
 | `prefer_retired_slots` | Prefer recently retired slots for unreliable publishers. |
@@ -139,6 +144,58 @@ Related publisher APIs:
 | `subspace_get_publisher_fd` | Return the publisher trigger fd. |
 | `subspace_get_publisher_retirement_fd` | Return the retirement notification fd. |
 
+## Explicit Publisher Buffer Leases
+
+The explicit lease API allows one publisher to own several unpublished slots
+without holding the thread-safe client's mutex across their lifetime:
+
+```c
+SubspacePublisherOptions opts =
+    subspace_publisher_options_default(4096, 16);
+opts.max_outstanding_slot_leases = 3;
+opts.notify_retirement = true;
+opts.notify_retirement_on_forced_reuse = false;
+
+SubspacePublisher pub =
+    subspace_create_publisher(client, "camera", opts);
+
+SubspacePublisherBufferLease lease =
+    subspace_acquire_publisher_buffer(pub);
+if (lease.buffer == NULL) {
+  if (subspace_has_error()) {
+    fprintf(stderr, "%s\n", subspace_get_last_error());
+  }
+  /* No error means no slot is currently available. */
+  return;
+}
+
+memcpy(lease.buffer, payload, payload_size);
+SubspaceMessage status =
+    subspace_publish_publisher_buffer(pub, lease, payload_size);
+```
+
+A lease contains the writable address, buffer capacity, slot ID, and a
+`lease_id` generation token. Publishing or releasing invalidates it; stale
+tokens are rejected. Discard an unpublished lease with
+`subspace_release_publisher_buffer`.
+
+With `notify_retirement` enabled, read `int32_t` slot IDs from
+`subspace_get_publisher_retirement_fd`. Reclaim an exact retired slot with:
+
+```c
+SubspacePublisherBufferLease reclaimed =
+    subspace_reclaim_publisher_buffer(pub, retired_slot_id);
+```
+
+The reclaimed lease has the same slot and payload address but a new lease ID.
+When forced-reuse notifications are enabled, a notified unreliable slot may
+already have been reused and therefore may not be reclaimable.
+
+Use either the explicit lease API or the implicit
+`subspace_get_message_buffer`/`subspace_publish_message` workflow for a given
+publisher, not both. See [Publisher Buffer Leases](publisher-buffer-leases.md)
+for the full lifecycle and capacity rules.
+
 ## Subscriber Options
 
 Start with `subspace_subscriber_options_default()`:
@@ -159,9 +216,11 @@ Important subscriber options:
 | Field | Purpose |
 | --- | --- |
 | `reliable` | Participate in reliable slot lifetime tracking. |
+| `telemetry` | Subscribe to server-generated telemetry for the named existing channel instead of its payloads. |
 | `bridge`, `for_tunnel` | Mark bridge/tunnel subscribers. |
 | `type` | Required type string when type matching is used. |
 | `max_active_messages` | Maximum simultaneously held `SubspaceMessage` values. |
+| `max_subscribers` | Server-enforced subscriber limit; 0 means unlimited. The first subscriber establishes the value. |
 | `pass_activation` | Deliver activation messages to the caller. |
 | `log_dropped_messages` | Log detected drops to stderr. |
 | `read_write` | Map payload buffers writable for this subscriber. |
@@ -174,6 +233,11 @@ Important subscriber options:
 Subscribers do not request split-buffer mode. They learn the channel mode from
 the server and use `split_callbacks` only if the publisher used a custom split
 payload allocator.
+
+For channel monitoring, set `telemetry = true` and use
+`subspace_read_telemetry_message` to receive a decoded `SubspaceTelemetry`.
+See [Channel Telemetry](channel-telemetry.md) for message semantics, ownership,
+and lifecycle.
 
 ## Reading Messages
 
@@ -191,6 +255,10 @@ if (msg.length > 0) {
 SubspaceMessage newest =
     subspace_read_message_with_mode(sub, kSubspaceReadNewest);
 subspace_free_message(&newest);
+
+SubspaceMessage kept = subspace_read_message_with_mode_and_trigger(
+    sub, kSubspaceReadNext, kSubspaceNoClearTrigger);
+subspace_free_message(&kept);
 ```
 
 Every non-empty `SubspaceMessage` must be released with
@@ -211,6 +279,10 @@ Related subscriber APIs:
 
 | Function | Purpose |
 | --- | --- |
+| `subspace_read_telemetry_message` | Read and decode the next telemetry message; a null `telemetry` field means no message is available. |
+| `subspace_read_telemetry_message_with_mode` | Read and decode telemetry using next or newest mode. |
+| `subspace_free_telemetry` | Release a non-empty decoded telemetry result. |
+| `subspace_read_message_with_mode_and_trigger` | Same as `subspace_read_message_with_mode`, with control over whether the subscriber trigger fd is consumed. |
 | `subspace_find_message` | Find a message by timestamp. |
 | `subspace_wait_for_subscriber` | Wait indefinitely for a message. |
 | `subspace_wait_for_subscriber_with_timeout` | Wait with a timeout. |
@@ -240,6 +312,10 @@ const void *received_metadata =
     subspace_get_subscriber_metadata(sub, &metadata_size);
 ```
 
+For an explicit publisher lease, use
+`subspace_get_publisher_buffer_metadata(pub, lease, &metadata_size)` before
+publishing the lease.
+
 Useful prefix accessors:
 
 | Function | Purpose |
@@ -265,6 +341,20 @@ subspace_register_subscriber_checksum_callback(sub, checksum_callback, NULL);
 The callback receives the same spans as the C++ API: prefix fields before the
 checksum, user metadata, and payload bytes. Publisher and subscriber callbacks
 must produce matching bytes.
+
+## Capacity and Admission
+
+For unreliable channels, the server reserves the configured maximums:
+
+```text
+sum(max_outstanding_slot_leases) + sum(max_active_messages)
+    <= num_slots - 1
+```
+
+This ensures that a publisher below its lease limit can acquire another slot
+even while subscribers hold their maximum active messages. The server rejects
+a publisher or subscriber whose configured budget would exceed capacity.
+Virtual channels sharing a mux are accounted together.
 
 ## Callbacks
 

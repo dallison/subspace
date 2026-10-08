@@ -43,10 +43,31 @@ public:
     bits_[word].fetch_or(1ULL << offset, std::memory_order_relaxed);
   }
 
+  void SetSeqCst(size_t bit) {
+    size_t word = bit / 64;
+    size_t offset = bit % 64;
+    bits_[word].fetch_or(1ULL << offset, std::memory_order_seq_cst);
+  }
+
+  // Atomically set a bit and return whether it was previously clear.
+  bool SetWasClear(size_t bit) {
+    size_t word = bit / 64;
+    size_t offset = bit % 64;
+    uint64_t mask = 1ULL << offset;
+    uint64_t old = bits_[word].fetch_or(mask, std::memory_order_release);
+    return (old & mask) == 0;
+  }
+
   void Clear(size_t bit) {
     size_t word = bit / 64;
     size_t offset = bit % 64;
     bits_[word].fetch_and(~(1ULL << offset), std::memory_order_relaxed);
+  }
+
+  void ClearSeqCst(size_t bit) {
+    size_t word = bit / 64;
+    size_t offset = bit % 64;
+    bits_[word].fetch_and(~(1ULL << offset), std::memory_order_seq_cst);
   }
 
   // Atomically clear bit and return whether it was previously set.
@@ -69,6 +90,12 @@ public:
     size_t word = bit / 64;
     size_t offset = bit % 64;
     return bits_[word].load(std::memory_order_relaxed) & (1ULL << offset);
+  }
+
+  bool IsSetSeqCst(size_t bit) const {
+    size_t word = bit / 64;
+    size_t offset = bit % 64;
+    return bits_[word].load(std::memory_order_seq_cst) & (1ULL << offset);
   }
 
   void ClearAll() {
@@ -129,6 +156,23 @@ public:
         size_t n = ffsll(word);
         // std::cerr << "i: " << i << " word " << std::hex << word << " n " << n
         // << std::dec << "\n";
+        if (n == 0) {
+          break;
+        }
+        bit += n;
+        func(bit - 1);
+        shift += n;
+      }
+    }
+  }
+
+  void TraverseSeqCst(std::function<void(size_t)> func) const {
+    for (size_t i = 0; i < BitsToWords(num_bits_); i++) {
+      size_t shift = 0;
+      size_t bit = i * 64;
+      while (bit < num_bits_ && shift < 64) {
+        uint64_t word = bits_[i].load(std::memory_order_seq_cst) >> shift;
+        size_t n = ffsll(word);
         if (n == 0) {
           break;
         }

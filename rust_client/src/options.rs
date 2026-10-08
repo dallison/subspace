@@ -9,20 +9,30 @@ use crate::split_buffer::{
 };
 use std::sync::Arc;
 
+/// Fixed queue depth inherited by subscribers when an arena is provisioned.
+pub const DEFAULT_SUBSCRIBER_QUEUE_SIZE: i32 = 16;
+/// Standard packed subscriber queue arena size for callers that opt in.
+pub const DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE: u64 = 64_000;
+
 #[derive(Debug, Clone)]
 pub struct PublisherOptions {
-    pub slot_size: i32,
+    pub slot_size: i64,
     pub num_slots: i32,
+    pub subscriber_queue_arena_size: u64,
     pub local: bool,
     pub reliable: bool,
     pub bridge: bool,
     pub for_tunnel: bool,
     pub fixed_size: bool,
+    /// See `set_max_slot_size`.  0 means unlimited.
+    pub max_slot_size: i64,
     pub channel_type: String,
     pub activate: bool,
     pub mux: String,
     pub vchan_id: i32,
     pub notify_retirement: bool,
+    pub max_outstanding_slot_leases: i32,
+    pub notify_retirement_on_forced_reuse: bool,
     pub checksum: bool,
     pub checksum_size: i32,
     pub metadata_size: i32,
@@ -36,16 +46,20 @@ impl Default for PublisherOptions {
         Self {
             slot_size: 0,
             num_slots: 0,
+            subscriber_queue_arena_size: 0,
             local: false,
             reliable: false,
             bridge: false,
             for_tunnel: false,
             fixed_size: false,
+            max_slot_size: 0,
             channel_type: String::new(),
             activate: false,
             mux: String::new(),
             vchan_id: -1,
             notify_retirement: false,
+            max_outstanding_slot_leases: 1,
+            notify_retirement_on_forced_reuse: true,
             checksum: false,
             checksum_size: 4,
             metadata_size: 0,
@@ -61,13 +75,20 @@ impl PublisherOptions {
         Self::default()
     }
 
-    pub fn set_slot_size(mut self, size: i32) -> Self {
+    pub fn set_slot_size(mut self, size: i64) -> Self {
         self.slot_size = size;
         self
     }
 
     pub fn set_num_slots(mut self, num: i32) -> Self {
         self.num_slots = num;
+        self
+    }
+
+    /// Set the bytes reserved for packed per-subscriber queues in the CCB.
+    /// Subscriber queues are disabled by default; a non-zero size opts in.
+    pub fn set_subscriber_queue_arena_size(mut self, size: u64) -> Self {
+        self.subscriber_queue_arena_size = size;
         self
     }
 
@@ -88,6 +109,16 @@ impl PublisherOptions {
 
     pub fn set_fixed_size(mut self, v: bool) -> Self {
         self.fixed_size = v;
+        self
+    }
+
+    /// Upper bound on how large the channel's slots may become.  0 (the
+    /// default) means no limit.  When set, the initial slot size must not
+    /// exceed it, asking `get_message_buffer` for a larger buffer fails
+    /// instead of resizing, and automatic growth stops at the limit.  All
+    /// publishers on a channel must agree on this value.
+    pub fn set_max_slot_size(mut self, v: i64) -> Self {
+        self.max_slot_size = v;
         self
     }
 
@@ -118,6 +149,16 @@ impl PublisherOptions {
 
     pub fn set_notify_retirement(mut self, v: bool) -> Self {
         self.notify_retirement = v;
+        self
+    }
+
+    pub fn set_max_outstanding_slot_leases(mut self, n: i32) -> Self {
+        self.max_outstanding_slot_leases = n;
+        self
+    }
+
+    pub fn set_notify_retirement_on_forced_reuse(mut self, v: bool) -> Self {
+        self.notify_retirement_on_forced_reuse = v;
         self
     }
 
@@ -183,11 +224,15 @@ impl PublisherOptions {
 #[derive(Debug, Clone)]
 pub struct SubscriberOptions {
     pub reliable: bool,
+    pub subscriber_queue_size: i32,
     pub bridge: bool,
     pub for_tunnel: bool,
+    pub telemetry: bool,
     pub channel_type: String,
     pub max_active_messages: i32,
+    pub max_subscribers: i32,
     pub log_dropped_messages: bool,
+    pub detect_dropped_messages: bool,
     pub pass_activation: bool,
     pub read_write: bool,
     pub mux: String,
@@ -196,17 +241,22 @@ pub struct SubscriberOptions {
     pub pass_checksum_errors: bool,
     pub keep_active_message: bool,
     pub split_buffer_callbacks: SplitBufferCallbacks,
+    pub local: bool,
 }
 
 impl Default for SubscriberOptions {
     fn default() -> Self {
         Self {
             reliable: false,
+            subscriber_queue_size: 0,
             bridge: false,
             for_tunnel: false,
+            telemetry: false,
             channel_type: String::new(),
             max_active_messages: 1,
+            max_subscribers: 0,
             log_dropped_messages: true,
+            detect_dropped_messages: true,
             pass_activation: false,
             read_write: false,
             mux: String::new(),
@@ -215,6 +265,7 @@ impl Default for SubscriberOptions {
             pass_checksum_errors: false,
             keep_active_message: false,
             split_buffer_callbacks: SplitBufferCallbacks::default(),
+            local: false,
         }
     }
 }
@@ -226,6 +277,18 @@ impl SubscriberOptions {
 
     pub fn set_reliable(mut self, v: bool) -> Self {
         self.reliable = v;
+        self
+    }
+
+    /// A local subscriber makes the channel local, just as a local publisher
+    /// does: the server won't advertise it to or bridge it to other servers.
+    pub fn set_local(mut self, v: bool) -> Self {
+        self.local = v;
+        self
+    }
+
+    pub fn set_subscriber_queue_size(mut self, size: i32) -> Self {
+        self.subscriber_queue_size = size;
         self
     }
 
@@ -244,8 +307,18 @@ impl SubscriberOptions {
         self
     }
 
+    pub fn set_max_subscribers(mut self, n: i32) -> Self {
+        self.max_subscribers = n;
+        self
+    }
+
     pub fn set_log_dropped_messages(mut self, v: bool) -> Self {
         self.log_dropped_messages = v;
+        self
+    }
+
+    pub fn set_detect_dropped_messages(mut self, v: bool) -> Self {
+        self.detect_dropped_messages = v;
         self
     }
 
@@ -256,6 +329,11 @@ impl SubscriberOptions {
 
     pub fn set_for_tunnel(mut self, v: bool) -> Self {
         self.for_tunnel = v;
+        self
+    }
+
+    pub fn set_telemetry(mut self, v: bool) -> Self {
+        self.telemetry = v;
         self
     }
 

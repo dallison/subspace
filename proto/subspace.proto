@@ -25,7 +25,7 @@ message InitResponse {
 message CreatePublisherRequest {
   string channel_name = 1;
   int32 num_slots = 2;
-  int32 slot_size = 3;
+  int64 slot_size = 3;
   bool is_local = 4;
   bool is_reliable = 5;
   bool is_bridge = 6; // This publisher is for the bridge.
@@ -42,6 +42,16 @@ message CreatePublisherRequest {
   int32 max_publishers = 17;   // 0 means no explicit publisher limit.
   bool split_buffers_over_bridge = 18; // Remote bridge publisher uses split buffers.
   uint64 process_id = 19;      // Client process id for introspection.
+  // Bytes reserved for packed per-subscriber queues in the CCB.
+  uint64 subscriber_queue_arena_size = 20;
+  // Local number of subscriber-queue traversals in progress when reclaiming
+  // after server failover. Reclaim runs under the client lock, so a zero value
+  // proves that a stale shared-memory hazard counter can be cleared.
+  uint32 active_queue_publish_depth = 21;
+  int32 max_outstanding_slot_leases = 22; // Unpublished slots reserved by this publisher.
+  // Upper bound on the channel's slot size, already aligned.  0 means
+  // unlimited.
+  int64 max_slot_size = 23;
 }
 
 message CreatePublisherResponse {
@@ -58,6 +68,11 @@ message CreatePublisherResponse {
   int32 vchan_id = 11;
   int32 retirement_fd_index = 12; // My retirement fd index (read end)
   repeated int32 retirement_fd_indexes = 13; // Write end of all retirement fds.
+  int32 subscriber_queue_size = 14; // Resolved capacity; 0 means disabled.
+  uint64 subscriber_queue_arena_size = 15;
+  // Slots in the channel, which can exceed the requested num_slots when the
+  // channel already exists.  The CCB layout depends on it.
+  int32 num_slots = 16;
 }
 
 // This is used both to create a new subscriber and to reload
@@ -73,7 +88,12 @@ message CreateSubscriberRequest {
   bool for_tunnel = 7;
   string mux = 8;
   int32 vchan_id = 9;
+  // Requested queue capacity. 0 uses the publisher's channel default.
   uint64 process_id = 10; // Client process id for introspection.
+  int32 subscriber_queue_size = 11;
+  int32 max_subscribers = 12; // 0 means no explicit subscriber limit.
+  bool telemetry = 13; // Subscribe to telemetry for channel_name.
+  bool is_local = 14;  // Keeps the channel on this machine.
 }
 
 message CreateSubscriberResponse {
@@ -84,7 +104,7 @@ message CreateSubscriberResponse {
   int32 bcb_fd_index = 5;
   int32 trigger_fd_index = 6;
   int32 poll_fd_index = 7;
-  int32 slot_size = 8; // Might be zero if no publisher.
+  int64 slot_size = 8; // Might be zero if no publisher.
   int32 num_slots = 9; // Might be zero if no publisher.
   repeated int32 reliable_pub_trigger_fd_indexes = 10;
   int32 num_pub_updates = 11;
@@ -94,6 +114,13 @@ message CreateSubscriberResponse {
   int32 checksum_size = 15; // Bytes reserved for checksum (from publisher).
   int32 metadata_size = 16; // Bytes reserved for user metadata (from publisher).
   bool use_split_buffers = 17;
+  int32 subscriber_queue_size = 18; // This subscriber's resolved capacity.
+  // Fixed publisher default used when subscriber_queue_size is zero.
+  int32 default_subscriber_queue_size = 19;
+  uint64 subscriber_queue_arena_size = 20;
+  // Actual server channel backing this subscription. This differs from the
+  // requested name for telemetry subscriptions.
+  string resolved_channel_name = 21;
 }
 
 message GetTriggersRequest { string channel_name = 1; }
@@ -115,6 +142,7 @@ message RemovePublisherResponse { string error = 1; }
 message RemoveSubscriberRequest {
   string channel_name = 1;
   int32 subscriber_id = 2;
+  bool telemetry = 3;
 }
 
 message RemoveSubscriberResponse { string error = 1; }
@@ -238,7 +266,7 @@ message ChannelParticipantInfoProto {
 
 message ChannelInfoProto {
   string name = 1;
-  int32 slot_size = 2;
+  int64 slot_size = 2;
   int32 num_slots = 3;
   bytes type = 4;
   int32 num_pubs = 5;        // Total number of publishers for this channel.
@@ -255,6 +283,11 @@ message ChannelInfoProto {
   string mux = 14;
   int32 channel_id = 15;
   repeated ChannelParticipantInfoProto participants = 16;
+  int32 subscriber_queue_size = 17;
+  uint64 subscriber_queue_arena_size = 18;
+  // True once a local publisher or subscriber has joined the channel (not sent
+  // off-machine).  Stays true after they leave, until the channel is removed.
+  bool is_local = 19;
 }
 
 // This is published to the /subspace/ChannelDirectory channel.
@@ -267,14 +300,17 @@ message ChannelStatsProto {
   string channel_name = 1;
   int64 total_bytes = 2;
   int64 total_messages = 3;
-  int32 slot_size = 4;
+  int64 slot_size = 4;
   int32 num_slots = 5;
   int32 num_pubs = 6;
   int32 num_subs = 7;
-  uint32 max_message_size = 8;
+  uint64 max_message_size = 8;
   uint32 total_drops = 9;
   int32 num_bridge_pubs = 10; // Number of publishers that are bridges.
   int32 num_bridge_subs = 11; // Number of subscribers that are bridges.
+  // True once a local publisher or subscriber has joined the channel (not sent
+  // off-machine).  Stays true after they leave, until the channel is removed.
+  bool is_local = 12;
 }
 
 // This is published to the /subspace/Statistics channel.
@@ -302,7 +338,7 @@ message ChannelAddress {
 // bridged subscription is successful.
 message Subscribed {
   string channel_name = 1;
-  int32 slot_size = 2;
+  int64 slot_size = 2;
   int32 num_slots = 3;
   bool reliable = 4;
 
@@ -315,6 +351,7 @@ message Subscribed {
   int32 metadata_size = 8;  // Bytes reserved for user metadata.
   bool split_buffers = 9; // Bridge messages are sent as prefix and payload chunks.
   bool split_buffers_over_bridge = 10; // Receiving bridge publisher uses split buffers.
+  uint64 subscriber_queue_arena_size = 11;
 }
 
 // This is sent over a TCP connection from the peer server when the
@@ -363,7 +400,7 @@ message RpcOpenRequest {}
 message RpcOpenResponse {
   message RequestChannel {
     string name = 1;     // Name of the channel.
-    int32 slot_size = 2; // Size of each slot in bytes.
+    int64 slot_size = 2; // Size of each slot in bytes.
     int32 num_slots = 3; // Number of slots in the channel.
     string type = 4;     // Type of data carried on this channel.
   }
@@ -473,7 +510,7 @@ message ShadowInit {
 message ShadowCreateChannel {
   string channel_name = 1;
   int32 channel_id = 2;
-  int32 slot_size = 3;
+  int64 slot_size = 3;
   int32 num_slots = 4;
   bytes type = 5;
   bool is_local = 6;
@@ -488,6 +525,15 @@ message ShadowCreateChannel {
   bool has_max_publishers = 15;
   int32 max_publishers = 16;
   bool split_buffers_over_bridge = 17;
+  uint64 subscriber_queue_arena_size = 18;
+  bool has_max_subscribers = 19;
+  int32 max_subscribers = 20;
+  // Hidden channels are omitted from public directory and statistics data.
+  bool hidden = 21;
+  // Non-empty only for a hidden channel monitoring this public channel.
+  string telemetry_target = 22;
+  bool has_max_slot_size = 23;
+  int64 max_slot_size = 24;
   // FDs sent via SCM_RIGHTS: [ccb_fd, bcb_fd]
 }
 
@@ -505,6 +551,8 @@ message ShadowAddPublisher {
   bool is_fixed_size = 6;
   bool notify_retirement = 7;
   bool for_tunnel = 8;
+  uint64 process_id = 9;
+  int32 max_outstanding_slot_leases = 10;
   // FDs sent via SCM_RIGHTS: [poll_fd, trigger_fd]
   // If notify_retirement: also [retirement_read_fd, retirement_write_fd]
 }
@@ -521,6 +569,10 @@ message ShadowAddSubscriber {
   bool is_bridge = 4;
   int32 max_active_messages = 5;
   bool for_tunnel = 6;
+  // Requested capacity. 0 uses the publisher's channel default.
+  int32 subscriber_queue_size = 7;
+  uint64 process_id = 8;
+  bool is_local = 9;
   // FDs sent via SCM_RIGHTS: [trigger_fd, poll_fd]
 }
 
@@ -559,4 +611,39 @@ message ShadowUpdateChannelOptions {
   bool has_max_publishers = 4;
   int32 max_publishers = 5;
   bool split_buffers_over_bridge = 6;
+  bool has_max_subscribers = 7;
+  int32 max_subscribers = 8;
+  bool has_max_slot_size = 9;
+  int64 max_slot_size = 10;
+}
+
+message Telemetry {
+  enum Change {
+    NONE = 0;
+    ADDED = 1;
+    REMOVED = 2;
+  }
+
+  message Publisher {
+    string name = 1;
+    Change change = 2;
+  }
+
+  message Subscriber {
+    string name = 1;
+    Change change = 2;
+  }
+
+  message Drop {
+    int32 num_drops = 1;
+  }
+
+  message Resize {
+    int64 new_size = 1;
+  }
+
+  repeated Publisher publishers = 1;
+  repeated Subscriber subscribers = 2;
+  repeated Drop drops = 3;
+  repeated Resize resizes = 4;
 }

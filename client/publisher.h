@@ -7,18 +7,25 @@
 #include "client/client_channel.h"
 #include "client/message.h"
 
+#include <unordered_map>
+
 namespace subspace {
+class Publisher;
 namespace details {
 
 // This is a publisher.  It maps in the channel's memory and allows
 // messages to be published.
 class PublisherImpl : public ClientChannel {
 public:
-  PublisherImpl(const std::string &name, int num_slots, int channel_id,
+  PublisherImpl(const std::string &name, int num_slots,
+                int subscriber_queue_size,
+                uint64_t subscriber_queue_arena_size, int channel_id,
                 int publisher_id, int vchan_id, uint64_t session_id,
-                std::string type, const PublisherOptions &options,
+                std::string type,
+                const PublisherOptions &options,
                 std::function<bool(Channel *)> reload, int user_id, int group_id)
-      : ClientChannel(name, num_slots, channel_id, vchan_id,
+      : ClientChannel(name, num_slots, subscriber_queue_size,
+                      subscriber_queue_arena_size, channel_id, vchan_id,
                       std::move(session_id), std::move(type),
                       std::move(reload), user_id, group_id),
         publisher_id_(publisher_id), options_(options) {}
@@ -27,7 +34,22 @@ public:
   bool IsReliable() const { return options_.IsReliable(); }
   bool IsLocal() const { return options_.IsLocal(); }
   bool IsFixedSize() const { return options_.IsFixedSize(); }
+  // Aligned upper bound on the slot size, or 0 if the channel is uncapped.
+  int64_t MaxSlotSize() const {
+    return options_.max_slot_size > 0 ? Aligned(options_.max_slot_size) : 0;
+  }
   bool UsesSplitBuffers() const { return UseSplitBuffers(); }
+  void BeginSubscriberQueuePublish() {
+    active_queue_publish_depth_.fetch_add(1, std::memory_order_seq_cst);
+    Channel::BeginSubscriberQueuePublish(publisher_id_);
+  }
+  void EndSubscriberQueuePublish() {
+    Channel::EndSubscriberQueuePublish(publisher_id_);
+    active_queue_publish_depth_.fetch_sub(1, std::memory_order_seq_cst);
+  }
+  uint32_t ActiveQueuePublishDepth() const {
+    return active_queue_publish_depth_.load(std::memory_order_seq_cst);
+  }
 
   // Trigger the publisher's reliable trigger fd, waking anything that is
   // waiting on the publisher's reliable event fd (e.g. a reliable publisher
@@ -37,6 +59,11 @@ public:
 
   MessageSlot *FindFreeSlotUnreliable(int owner);
   MessageSlot *FindFreeSlotReliable(int owner);
+
+  // Picks the retired slot to recycle next, or -1 if the retired pool holds
+  // no usable slot.  Takes the lowest-index slot unless oldest_first, which
+  // is what an idle publisher wants; see the definition.
+  int FindRetiredSlotToReuse(bool oldest_first);
 
   void SetSlotToBiggestBuffer(MessageSlot *slot);
 
@@ -72,11 +99,19 @@ public:
     return GetMetadataSpan(prefix, ChecksumSize(), MetadataSize());
   }
 
+  absl::Span<std::byte> GetMetadata(MessageSlot *slot) {
+    if (MetadataSize() == 0 || slot == nullptr) {
+      return {};
+    }
+    return GetMetadataSpan(Prefix(slot), ChecksumSize(), MetadataSize());
+  }
+
   std::string Mux() const { return options_.Mux(); }
   bool ForTunnel() const { return options_.ForTunnel(); }
 
 private:
   friend class ::subspace::ClientImpl;
+  friend class ::subspace::Publisher;
 
   bool IsPublisher() const override { return true; }
   bool IsBridge() const override { return options_.IsBridge(); }
@@ -91,6 +126,21 @@ private:
   std::string ResolvedName() const override {
     return IsVirtual() ? options_.mux : Name();
   }
+
+  MessageSlot *ClaimRetiredSlot(int32_t slot_id);
+  MessageSlot *ClaimAnyRetiredSlot();
+  bool ReleaseLeasedSlot(MessageSlot *slot);
+  uint64_t RegisterLease(MessageSlot *slot);
+  MessageSlot *FindLease(int32_t slot_id, uint64_t lease_id) const;
+  void RemoveLease(int32_t slot_id);
+  size_t NumLeases() const { return leased_slots_.size(); }
+  int32_t MaxOutstandingSlotLeases() const {
+    return options_.MaxOutstandingSlotLeases();
+  }
+  bool NotifyRetirementOnForcedReuse() const {
+    return options_.NotifyRetirementOnForcedReuse();
+  }
+  void RetirePublishedSlotImmediately(MessageSlot *slot);
 
   // A publisher is done with its busy slot (it now contains a message).  The
   // slot is moved from the busy list to the end of the active list and other
@@ -111,7 +161,8 @@ private:
   Channel::PublishedMessage
   ActivateSlotAndGetAnother(MessageSlot *slot, bool reliable,
                             bool is_activation, int owner, bool omit_prefix,
-                            bool use_prefix_slot_id, bool for_tunnel = false);
+                            bool use_prefix_slot_id, bool for_tunnel = false,
+                            bool acquire_next = true);
 
   Channel::PublishedMessage ActivateSlotAndGetAnother(bool reliable,
                                                       bool is_activation,
@@ -148,12 +199,15 @@ private:
 
   toolbelt::TriggerFd trigger_;
   int publisher_id_;
+  std::atomic<uint32_t> active_queue_publish_depth_{0};
   std::vector<toolbelt::TriggerFd> subscribers_;
   PublisherOptions options_;
   toolbelt::FileDescriptor retirement_fd_ = {};
   std::function<absl::StatusOr<int64_t>(void *buffer, int64_t size)>
       on_send_callback_ = nullptr;
   ChecksumCallback checksum_callback_ = nullptr;
+  std::unordered_map<int32_t, uint64_t> leased_slots_;
+  uint64_t next_lease_id_ = 1;
 
 };
 

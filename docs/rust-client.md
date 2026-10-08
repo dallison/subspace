@@ -49,6 +49,42 @@ let msg = publisher.publish_message(payload.len() as i64).unwrap();
 slots. In that case, call `publisher.wait(timeout_ms)` to block until a slot
 becomes available.
 
+### Explicit Publisher Buffer Leases
+
+Explicit leases allow one publisher to own several unpublished slots without
+holding its publish lock across the buffers' lifetime:
+
+```rust
+let opts = PublisherOptions::new()
+    .set_slot_size(4096)
+    .set_num_slots(16)
+    .set_metadata_size(8)
+    .set_max_outstanding_slot_leases(3)
+    .set_notify_retirement(true)
+    .set_notify_retirement_on_forced_reuse(false);
+let publisher = client.create_publisher("camera", &opts).unwrap();
+
+let mut lease = publisher.acquire_buffer_lease().unwrap().unwrap();
+let payload = b"frame data";
+unsafe {
+    lease.as_mut_slice()[..payload.len()].copy_from_slice(payload);
+}
+publisher.set_lease_metadata(&lease, b"frame001").unwrap();
+publisher
+    .publish_buffer_lease(&lease, payload.len() as i64)
+    .unwrap();
+```
+
+`acquire_buffer_lease()` and `reclaim_buffer_lease(slot_id)` return `Ok(None)`
+when no suitable slot is currently available. Publishing or releasing a lease
+makes its token stale; later operations with the same `lease_id` fail.
+`release_buffer_lease()` discards an unpublished lease.
+
+Retirement notifications are native-endian `i32` slot IDs read from
+`get_retirement_fd()`. Reclaiming a retired ID returns the same slot with a new
+lease token. Do not mix the implicit `get_message_buffer()` workflow with
+explicit leases on the same publisher.
+
 ### Subscribing to Messages
 
 ```rust
@@ -79,10 +115,51 @@ loop {
 }
 ```
 
+### Channel Telemetry
+
+Set `telemetry` to monitor an existing channel instead of receiving its payload
+messages:
+
+```rust
+let options = SubscriberOptions::new().set_telemetry(true);
+let telemetry = client
+    .create_subscriber("my_channel", &options)
+    .unwrap();
+
+if let Some(message) = telemetry
+    .read_telemetry_message(ReadMode::ReadNext)
+    .unwrap()
+{
+    for publisher in message.publishers {
+        println!("{} {}", publisher.name, publisher.change);
+    }
+}
+```
+
+`read_telemetry_message` returns `Result<Option<proto::Telemetry>>`; `None`
+means no message is currently available. The server sends an initial
+participant snapshot and batches later participant, drop, and resize changes
+once per second. See [Channel Telemetry](channel-telemetry.md) for the complete
+behavior.
+
 ### Read Modes
 
 - **`ReadMode::ReadNext`** — returns the next unread message in order.
 - **`ReadMode::ReadNewest`** — skips to the latest message, discarding older ones.
+
+### Trigger clearing
+
+By default `read_message` consumes the subscriber trigger fd (eventfd or pipe)
+so a later `wait`/`poll` blocks until a new message is published. Pass
+`ClearTrigger::NoClearTrigger` to leave the fd unread:
+
+```rust
+use subspace_client::{ClearTrigger, ReadMode};
+
+let msg = subscriber
+    .read_message_with_trigger(ReadMode::ReadNext, ClearTrigger::NoClearTrigger)
+    .unwrap();
+```
 
 ## Publisher Options
 
@@ -100,6 +177,8 @@ loop {
 | `mux` | "" | Multiplexer name for virtual channels. |
 | `vchan_id` | -1 | Virtual channel ID within a multiplexer. |
 | `notify_retirement` | false | Enable retirement notifications via a pipe FD. |
+| `max_outstanding_slot_leases` | 1 | Maximum unpublished slots owned through explicit leases. |
+| `notify_retirement_on_forced_reuse` | true | Emit retirement notifications when an unreliable publisher forcibly reuses an unread slot. |
 | `checksum` | false | Compute CRC32 checksums on published messages. |
 | `checksum_size` | 4 | Bytes reserved for checksums (default: 4 for CRC32). |
 | `metadata_size` | 0 | Bytes reserved in each message prefix for user metadata. |
@@ -122,10 +201,12 @@ let opts = PublisherOptions::new()
 | Option | Default | Description |
 |--------|---------|-------------|
 | `reliable` | false | Reliable mode — slots are held until the subscriber releases them. |
+| `telemetry` | false | Subscribe to server-generated telemetry for the named existing channel instead of its payloads. |
 | `bridge` | false | Subscriber is used for server-to-server bridging. |
 | `for_tunnel` | false | Subscriber is used by an external tunnel process. |
 | `channel_type` | "" | Must match the publisher's type string. |
 | `max_active_messages` | 1 | Max messages a subscriber can hold simultaneously. |
+| `max_subscribers` | 0 | Server-enforced channel subscriber limit; 0 means unlimited. |
 | `log_dropped_messages` | true | Log warnings when messages are dropped. |
 | `pass_activation` | false | Deliver channel activation messages to the subscriber. |
 | `read_write` | false | Map shared memory as read-write (default is read-only). |
@@ -155,6 +236,10 @@ and can register a dropped-message callback.
 **Reliable channels** (`reliable = true`): the publisher waits for a free slot,
 guaranteeing no message loss. `get_message_buffer` returns `Ok(None)` when all
 slots are in use; call `publisher.wait()` to block until one is freed.
+
+The implicit workflow keeps its normal preallocated slot. Explicit lease
+acquisition can instead return `Ok(None)` while all reusable slots are
+subscriber-held or already leased.
 
 ## Waiting and Polling
 

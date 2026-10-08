@@ -1,6 +1,11 @@
 package(default_visibility = ["//visibility:public"])
 
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("//:max_channels.bzl", "max_channels_setting")
+
+max_channels_setting(
+    name = "max_channels_setting",
+)
 
 cc_library(
     name = "subspace_common",
@@ -29,6 +34,7 @@ cc_library(
         "//conditions:default": ["-lrt"],
     }),
     deps = [
+        ":max_channels_setting",
         "//proto:subspace_cc_proto",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/status",
@@ -50,6 +56,7 @@ cc_test(
         "fast_ring_buffer.h",
     ],
     deps = [
+        ":subspace_common",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@googletest//:gtest_main",
     ],

@@ -1,5 +1,88 @@
 # CHANGELOG.md
 
+## Unreleased
+
+### Configurable Channel Limit
+- The maximum number of channels in one server session defaults to 1024 and
+  can be raised at build time. A downstream Bazel module sets it next to
+  `bazel_dep` with `subspace.max_channels(count = N)`. Inside this repo,
+  Bazel uses `--//:max_channels=N`. CMake uses `-DSUBSPACE_MAX_CHANNELS=N`.
+  A Cargo build of the Rust client reads `SUBSPACE_MAX_CHANNELS`. `N` must
+  be a positive multiple of 64. The server and every client must be built
+  with the same value, because it sizes the shared-memory system control
+  block.
+
+### Placeholder Subscriber Wakeups
+- A placeholder subscriber now clears its trigger before checking for a new
+  publisher in `ReadMessage` and `FindMessage`. Previously it cleared after
+  the check, so a publisher that was created and published in between had its
+  trigger discarded. The subscriber stayed a placeholder and never woke for
+  that message.
+
+### Subscriber Locality
+- Added a `local` subscriber option (C++, C, Python, and Rust). A local
+  subscriber makes its channel local, just as a local publisher does, so the
+  server neither advertises nor bridges it. `ChannelInfo::is_local` and
+  `ChannelStats::is_local` now report true when any publisher or subscriber
+  is local. Publishers must still agree with each other on locality; local
+  subscribers don't constrain them.
+- Channel locality is now latched: once a local publisher or subscriber has
+  joined a channel, it stays local after they leave, until the channel is
+  removed. Previously a remaining non-local user could get the channel
+  advertised, e.g. while a local publisher restarted. The latch is replicated
+  to the shadow and restored on recovery.
+
+### Publishers With Fewer Slots
+- A publisher that joins an existing channel with fewer slots than the
+  channel has now lays out the CCB with the channel's slot count, reported in
+  the new `CreatePublisherResponse.num_slots`. Previously it used its own
+  requested count, read subscriber queue offsets from the wrong place, and
+  could lose messages or crash on its first publish.
+
+### Prefix Layout Fixes
+- A channel's checksum/metadata/prefix layout is now established before its
+  shared memory is allocated, so shadow replicas receive the publisher's real
+  layout instead of the `4`/`0` defaults. Previously a shadow permanently
+  recorded the defaults, since the sizes are only replicated at channel
+  creation.
+- A publisher on a multiplexer now promotes a subscriber-created placeholder
+  with its own prefix layout, including when the publisher uses a different
+  virtual channel than the subscriber.
+- Subscribers attaching to an existing placeholder multiplexer no longer tear
+  down and recreate its shared memory underneath already-attached subscribers.
+- A failed channel allocation now restores the channel to its placeholder
+  state instead of leaving it claiming slots it never mapped.
+- Shadow recovery now recomputes the prefix size from the recovered checksum
+  and metadata sizes rather than leaving it at the default.
+
+### ReadMessage trigger control
+- Added `ClearTrigger` (`kClearTrigger` / `kNoClearTrigger`) so `ReadMessage`
+  can leave the subscriber trigger fd unread. Exposed in C++, C, Python, and
+  Rust.
+
+### Publisher Buffer Leases
+- Added explicit C++, C, Python, and Rust APIs to acquire multiple unpublished
+  publisher slots, publish or release individual leases, and reject stale lease
+  tokens.
+- Added exact-slot reclamation from retirement notifications and per-lease
+  metadata access.
+- Added `max_outstanding_slot_leases` and
+  `notify_retirement_on_forced_reuse` publisher options.
+- Hardened lease concurrency and lifetime handling: C++ metadata lookup is
+  synchronized, Python exported views cannot mutate reused slots, and Rust
+  clone teardown and publisher locking are ownership- and unwind-safe.
+
+### Channel Admission
+- Added server-enforced `max_subscribers` limits, including virtual channels
+  sharing a multiplexer.
+- Channel capacity now reserves every publisher's maximum lease budget and
+  every subscriber's maximum active-message budget.
+- Lease budgets and subscriber limits survive shadow-server recovery.
+
+### Split Buffers
+- QNX and macOS split-buffer shared-memory object names now use the portable
+  leading-slash form required by `shm_open`.
+
 ## Subspace Version 2.2.0
 
 ### Client API Improvements

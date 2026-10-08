@@ -14,6 +14,7 @@
 #include "proto/subspace.pb.h"
 #include "toolbelt/bitset.h"
 #include "toolbelt/fd.h"
+#include "toolbelt/logging.h"
 #include "toolbelt/pipe.h"
 #include "toolbelt/sockets.h"
 #include "toolbelt/triggerfd.h"
@@ -32,8 +33,8 @@ absl::StatusOr<SystemControlBlock *>
 CreateSystemControlBlock(toolbelt::FileDescriptor &fd, uint64_t session_id);
 
 struct ResizeInfo {
-  int old_slot_size;
-  int new_slot_size;
+  int64_t old_slot_size;
+  int64_t new_slot_size;
 };
 
 struct SplitBufferOptions {
@@ -86,26 +87,39 @@ private:
 class SubscriberUser : public User {
 public:
   SubscriberUser(ClientHandler *handler, int id, bool is_reliable,
-                 bool is_bridge, bool for_tunnel, int max_active_messages)
+                 bool is_bridge, bool for_tunnel, int max_active_messages,
+                 int subscriber_queue_size, bool is_local = false)
       : User(handler, id, is_reliable, is_bridge, for_tunnel),
-        max_active_messages_(max_active_messages) {}
+        max_active_messages_(max_active_messages),
+        subscriber_queue_size_(subscriber_queue_size), is_local_(is_local) {}
   bool IsSubscriber() const override { return true; }
   int MaxActiveMessages() const { return max_active_messages_; }
+  int SubscriberQueueSize() const { return subscriber_queue_size_; }
+  bool IsLocal() const { return is_local_; }
 
 private:
   int max_active_messages_;
+  // Requested capacity. Zero means use the publisher's channel default.
+  int subscriber_queue_size_;
+  bool is_local_;
 };
 
 class PublisherUser : public User {
 public:
   PublisherUser(ClientHandler *handler, int id, bool is_reliable, bool is_local,
-                bool is_bridge, bool for_tunnel, bool is_fixed_size)
+                bool is_bridge, bool for_tunnel, bool is_fixed_size,
+                int max_outstanding_slot_leases)
       : User(handler, id, is_reliable, is_bridge, for_tunnel),
-        is_local_(is_local), is_fixed_size_(is_fixed_size) {}
+        is_local_(is_local), is_fixed_size_(is_fixed_size),
+        max_outstanding_slot_leases_(
+            max_outstanding_slot_leases > 0 ? max_outstanding_slot_leases : 1) {}
 
   bool IsPublisher() const override { return true; }
   bool IsLocal() const { return is_local_; }
   bool IsFixedSize() const { return is_fixed_size_; }
+  int MaxOutstandingSlotLeases() const {
+    return max_outstanding_slot_leases_;
+  }
 
   toolbelt::FileDescriptor &GetRetirementFdWriter() {
     return retirement_pipe_.WriteFd();
@@ -135,6 +149,7 @@ public:
 private:
   bool is_local_;
   bool is_fixed_size_;
+  int max_outstanding_slot_leases_;
   toolbelt::Pipe retirement_pipe_;
 };
 
@@ -205,23 +220,40 @@ struct ClientBufferSlotKey {
 class ServerChannel : public Channel {
 public:
   ServerChannel(int id, const std::string &name, int num_slots,
-                std::string type, bool is_virtual, int session_id)
-      : Channel(name, num_slots, id, std::move(type)), is_virtual_(is_virtual),
-        session_id_(session_id) {}
+                int subscriber_queue_size,
+                uint64_t subscriber_queue_arena_size, std::string type,
+                bool is_virtual, int session_id, toolbelt::Logger &logger)
+      : Channel(name, num_slots, id, subscriber_queue_size,
+                subscriber_queue_arena_size, std::move(type)),
+        is_virtual_(is_virtual), session_id_(session_id), logger_(logger) {}
 
   virtual ~ServerChannel();
 
   void SetSkipCleanup(bool v) { skip_cleanup_ = v; }
+  // Marks this as an internal channel carrying telemetry for target.
+  void SetTelemetryTarget(std::string target) {
+    hidden_ = true;
+    telemetry_target_ = std::move(target);
+  }
+  bool IsHidden() const { return hidden_; }
+  bool IsTelemetryChannel() const { return !telemetry_target_.empty(); }
+  const std::string &TelemetryTarget() const { return telemetry_target_; }
 
   absl::StatusOr<PublisherUser *> AddPublisher(ClientHandler *handler,
                                                bool is_reliable, bool is_local,
                                                bool is_bridge, bool for_tunnel,
                                                bool is_fixed_size,
+                                               int max_outstanding_slot_leases,
                                                uint64_t process_id);
   absl::StatusOr<SubscriberUser *>
   AddSubscriber(ClientHandler *handler, bool is_reliable, bool is_bridge,
-                bool for_tunnel, int max_active_messages, uint64_t process_id);
-  virtual void RegisterExistingSubscribers();
+                bool for_tunnel, int max_active_messages,
+                int subscriber_queue_size, uint64_t process_id,
+                bool is_local = false);
+  virtual std::vector<std::string> RegisterExistingSubscribers();
+  absl::Status ReconcileSubscriberQueueArena();
+  void ClearPublisherQueueHazardIfDead(int publisher_id,
+                                       uint64_t process_id);
 
   virtual std::string Type() const { return Channel::Type(); }
   virtual void SetType(const std::string &type) { Channel::SetType(type); }
@@ -238,8 +270,9 @@ public:
   const absl::flat_hash_map<int, std::unique_ptr<User>> &GetUsers() const {
     return users_;
   }
+  toolbelt::Logger &GetLogger() { return logger_; }
 
-  void SetLastKnownSlotSize(int32_t slot_size) {
+  void SetLastKnownSlotSize(int64_t slot_size) {
     last_known_slot_size_ = slot_size;
   }
 
@@ -261,6 +294,7 @@ public:
   std::vector<toolbelt::FileDescriptor> GetReliablePublisherTriggerFds() const;
 
   std::vector<toolbelt::FileDescriptor> GetRetirementFds() const;
+  virtual void NotifyPublisherRetirement(int32_t slot_id);
 
   // Translate a user id into a User pointer.  The pointer ownership
   // is kept by the ServerChannel.
@@ -279,19 +313,24 @@ public:
   virtual ChannelCounters &RecordUpdate(bool is_pub, bool add, bool reliable);
 
   void RemoveUser(Server *server, int user_id);
-  void RemoveAllUsersFor(ClientHandler *handler);
+  void RemoveAllUsersFor(Server *server,ClientHandler *handler);
   virtual bool IsEmpty() const { return user_ids_.IsEmpty(); }
-  virtual absl::Status HasSufficientCapacity(int new_max_active_messages) const;
+  virtual absl::Status
+  HasSufficientCapacity(int new_max_active_messages,
+                        int new_max_outstanding_slot_leases) const;
   virtual void CountUsers(int &num_pubs, int &num_subs, int &num_bridge_pubs,
                           int &num_bridge_subs, int &num_tunnel_pubs,
                           int &num_tunnel_subs) const;
+  virtual void
+  CountCapacityUsage(int &max_active_messages,
+                     int &max_outstanding_slot_leases) const;
   virtual void GetChannelInfo(subspace::ChannelInfoProto *info);
   virtual void GetChannelStats(subspace::ChannelStatsProto *stats);
   void TriggerAllSubscribers();
 
   std::vector<ResizeInfo> GetResizeInfo() const;
 
-  virtual int SlotSize() const {
+  virtual int64_t SlotSize() const {
     if (ccb_->num_buffers == 0) {
       return last_known_slot_size_;
     }
@@ -305,9 +344,7 @@ public:
 
   virtual int NumSlots() const { return Channel::NumSlots(); }
   virtual void CleanupSlots(int owner, bool reliable, bool is_pub,
-                            int vchan_id) {
-    Channel::CleanupSlots(owner, reliable, is_pub, vchan_id);
-  }
+                            int vchan_id);
 
   virtual void RemoveBuffer(uint64_t session_id, Server *server = nullptr);
 
@@ -406,6 +443,9 @@ public:
   }
 
   bool IsLocal() const;
+  // Makes the channel local until it is removed.
+  void LatchLocal() { local_latched_ = true; }
+  bool HasLocalPublisher() const;
   bool IsReliable() const;
   bool IsFixedSize() const;
 
@@ -420,6 +460,14 @@ public:
                                           bool set_if_missing,
                                           const char *user_type);
   int32_t MaxPublishers() const { return max_publishers_; }
+  absl::Status ValidateOrSetMaxSubscribers(int32_t max_subscribers,
+                                           bool set_if_missing,
+                                           const char *user_type);
+  int32_t MaxSubscribers() const { return max_subscribers_; }
+  absl::Status ValidateOrSetMaxSlotSize(int64_t max_slot_size,
+                                        bool set_if_missing,
+                                        const char *user_type);
+  int64_t MaxSlotSize() const { return max_slot_size_; }
 
   virtual void SetSharedMemoryFds(SharedMemoryFds fds) {
     shared_memory_fds_ = std::move(fds);
@@ -436,7 +484,8 @@ public:
   // SCB has already been allocated and will be mapped in for
   // this channel.  This is only used in the server.
   virtual absl::StatusOr<SharedMemoryFds>
-  Allocate(const toolbelt::FileDescriptor &scb_fd, int slot_size, int num_slots,
+  Allocate(const toolbelt::FileDescriptor &scb_fd, int64_t slot_size,
+           int num_slots, uint64_t subscriber_queue_arena_size,
            int initial_ordinal);
 
   // Map existing shared memory from recovered FDs (after a server crash).
@@ -450,20 +499,27 @@ public:
     int num_pubs;
     int num_subs;
     int max_active_messages;
+    int max_outstanding_slot_leases;
     int slots_needed;
   };
 
-  CapacityInfo HasSufficientCapacityInternal(int new_max_active_messages) const;
+  CapacityInfo
+  HasSufficientCapacityInternal(int new_max_active_messages,
+                                int new_max_outstanding_slot_leases) const;
   absl::Status CapacityError(const CapacityInfo &info) const;
 
   virtual void GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
-                                uint32_t &max_message_size,
+                                uint64_t &max_message_size,
                                 uint32_t &total_drops) {
     Channel::GetStatsCounters(total_bytes, total_messages, max_message_size,
                               total_drops);
   }
 
 protected:
+  absl::Status AllocateSubscriberQueue(int sub_id,
+                                       int subscriber_queue_size);
+  void RetireSubscriberQueue(int sub_id);
+
   absl::flat_hash_map<int, std::unique_ptr<User>> users_;
   toolbelt::BitSet<kMaxUsers> user_ids_;
   absl::flat_hash_map<ChannelTransmitter, std::string> bridged_publishers_;
@@ -473,13 +529,23 @@ protected:
       client_buffers_;
   SharedMemoryFds shared_memory_fds_;
   bool is_virtual_ = false;
+  // Set when a local publisher or subscriber joins.  It stays set after they
+  // leave so that the channel is not advertised while other users remain.
+  bool local_latched_ = false;
   bool skip_cleanup_ = false;
+  bool hidden_ = false;
+  std::string telemetry_target_;
   int session_id_;
-  mutable int32_t last_known_slot_size_ = 0;
+  mutable int64_t last_known_slot_size_ = 0;
   bool split_buffer_options_set_ = false;
   SplitBufferOptions split_buffer_options_;
   bool max_publishers_set_ = false;
   int32_t max_publishers_ = 0;
+  bool max_subscribers_set_ = false;
+  int32_t max_subscribers_ = 0;
+  bool max_slot_size_set_ = false;
+  int64_t max_slot_size_ = 0;
+  toolbelt::Logger &logger_;
 };
 
 class VirtualChannel;
@@ -487,8 +553,12 @@ class VirtualChannel;
 class ChannelMultiplexer : public ServerChannel {
 public:
   ChannelMultiplexer(int id, const std::string &name, int num_slots,
-                     std::string type, int session_id)
-      : ServerChannel(id, name, num_slots, type, false, session_id) {}
+                     int subscriber_queue_size,
+                     uint64_t subscriber_queue_arena_size, std::string type,
+                     int session_id, toolbelt::Logger &logger)
+      : ServerChannel(id, name, num_slots, subscriber_queue_size,
+                      subscriber_queue_arena_size, type, false, session_id,
+                      logger) {}
 
   absl::StatusOr<std::unique_ptr<VirtualChannel>>
   CreateVirtualChannel(Server &server, const std::string &name, int vchan_id);
@@ -497,7 +567,8 @@ public:
 
   bool IsMux() const override { return true; }
   bool HasPublisherOwnedBy(const ClientHandler *handler) const override;
-  void RegisterExistingSubscribers() override;
+  std::vector<std::string> RegisterExistingSubscribers() override;
+  void NotifyPublisherRetirement(int32_t slot_id) override;
   bool IsEmpty() const override {
     return virtual_channels_.empty() && ServerChannel::IsEmpty();
   }
@@ -512,6 +583,8 @@ public:
   void CountUsers(int &num_pubs, int &num_subs, int &num_bridge_pubs,
                   int &num_bridge_subs, int &num_tunnel_pubs,
                   int &num_tunnel_subs) const override;
+  void CountCapacityUsage(int &max_active_messages,
+                          int &max_outstanding_slot_leases) const override;
 
 private:
   int next_vchan_id_ = 0;
@@ -529,8 +602,10 @@ class VirtualChannel : public ServerChannel {
 public:
   VirtualChannel(ChannelMultiplexer *mux, int vchan_id, const std::string &name,
                  int num_slots, std::string type, int session_id)
-      : ServerChannel(mux->GetChannelId(), name, num_slots, type, true,
-                      session_id),
+      : ServerChannel(mux->GetChannelId(), name, num_slots,
+                      mux->SubscriberQueueSize(),
+                      mux->SubscriberQueueArenaSize(), type, true, session_id,
+                      mux->GetLogger()),
         mux_(mux), vchan_id_(vchan_id) {}
 
   std::string Type() const override { return mux_->Type(); }
@@ -559,10 +634,23 @@ public:
   int GetVirtualChannelId() const override { return vchan_id_; }
 
   bool IsPlaceholder() const override { return mux_->IsPlaceholder(); }
+  int SubscriberQueueSize() const override { return mux_->SubscriberQueueSize(); }
+  int SubscriberQueueSize(int sub_id) const override {
+    return mux_->SubscriberQueueSize(sub_id);
+  }
+  void SetSubscriberQueueSize(int n) override {
+    mux_->SetSubscriberQueueSize(n);
+  }
+  uint64_t SubscriberQueueArenaSize() const override {
+    return mux_->SubscriberQueueArenaSize();
+  }
+  void SetSubscriberQueueArenaSize(uint64_t size) override {
+    mux_->SetSubscriberQueueArenaSize(size);
+  }
 
   const SharedMemoryFds &GetFds() override { return mux_->GetFds(); }
 
-  int SlotSize() const override { return mux_->SlotSize(); }
+  int64_t SlotSize() const override { return mux_->SlotSize(); }
   int NumSlots() const override { return mux_->NumSlots(); }
   int GetChannelId() const override { return mux_->GetChannelId(); }
 
@@ -585,8 +673,10 @@ public:
   }
 
   absl::Status
-  HasSufficientCapacity(int new_max_active_messages) const override {
-    return mux_->HasSufficientCapacity(new_max_active_messages);
+  HasSufficientCapacity(int new_max_active_messages,
+                        int new_max_outstanding_slot_leases) const override {
+    return mux_->HasSufficientCapacity(new_max_active_messages,
+                                       new_max_outstanding_slot_leases);
   };
 
   ChannelCounters &RecordUpdate(bool is_pub, bool add, bool reliable) override {
@@ -613,7 +703,7 @@ public:
   }
 
   void GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
-                        uint32_t &max_message_size,
+                        uint64_t &max_message_size,
                         uint32_t &total_drops) override {
     mux_->GetStatsCounters(total_bytes, total_messages, max_message_size,
                            total_drops);

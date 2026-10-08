@@ -30,6 +30,8 @@ struct RecoveredPublisher {
   bool for_tunnel = false;
   bool is_fixed_size = false;
   bool notify_retirement = false;
+  int max_outstanding_slot_leases = 1;
+  uint64_t process_id = 0;
   toolbelt::FileDescriptor poll_fd;
   toolbelt::FileDescriptor trigger_fd;
   toolbelt::FileDescriptor retirement_read_fd;
@@ -39,9 +41,12 @@ struct RecoveredPublisher {
 struct RecoveredSubscriber {
   int id = 0;
   bool is_reliable = false;
+  bool is_local = false;
   bool is_bridge = false;
   bool for_tunnel = false;
   int max_active_messages = 0;
+  int subscriber_queue_size = 0;
+  uint64_t process_id = 0;
   toolbelt::FileDescriptor trigger_fd;
   toolbelt::FileDescriptor poll_fd;
 };
@@ -49,8 +54,9 @@ struct RecoveredSubscriber {
 struct RecoveredChannel {
   std::string name;
   int channel_id = 0;
-  int slot_size = 0;
+  int64_t slot_size = 0;
   int num_slots = 0;
+  uint64_t subscriber_queue_arena_size = 0;
   std::string type;
   bool is_local = false;
   bool is_reliable = false;
@@ -64,6 +70,12 @@ struct RecoveredChannel {
   bool split_buffers_over_bridge = false;
   bool has_max_publishers = false;
   int max_publishers = 0;
+  bool has_max_subscribers = false;
+  int max_subscribers = 0;
+  bool has_max_slot_size = false;
+  int64_t max_slot_size = 0;
+  bool hidden = false;
+  std::string telemetry_target;
   toolbelt::FileDescriptor ccb_fd;
   toolbelt::FileDescriptor bcb_fd;
   std::vector<RegisteredClientBuffer> client_buffers;

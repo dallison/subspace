@@ -6,6 +6,7 @@
 #include "absl/status/status_matchers.h"
 #include "client/client.h"
 #include "common/channel.h"
+#include "proto/subspace.pb.h"
 #include "server/server.h"
 #include "shadow/shadow.h"
 #include "gtest/gtest.h"
@@ -96,6 +97,30 @@ static const std::string &BridgeServer1Socket() {
 static const std::string &BridgeShadowSocket() {
   static const std::string s = MakeUniqueSocketPath("bridge_shd");
   return s;
+}
+
+static const subspace::ShadowChannel *FindShadowTelemetryChannel(
+    const absl::flat_hash_map<std::string, subspace::ShadowChannel> &channels,
+    const std::string &target) {
+  for (const auto &[name, ch] : channels) {
+    (void)name;
+    if (ch.hidden && ch.telemetry_target == target) {
+      return &ch;
+    }
+  }
+  return nullptr;
+}
+
+static subspace::ServerChannel *
+FindServerTelemetryChannel(subspace::Server &server,
+                           const std::string &target) {
+  for (auto &[name, ch] : server.GetChannels()) {
+    (void)name;
+    if (ch->IsTelemetryChannel() && ch->TelemetryTarget() == target) {
+      return ch.get();
+    }
+  }
+  return nullptr;
 }
 
 class ShadowTest : public ::testing::Test {
@@ -245,11 +270,89 @@ TEST_F(ShadowTest, ShadowReceivesCreateChannel) {
   });
 }
 
+// The shadow copies the checksum and metadata sizes out of the create-channel
+// event and is never sent them again, so the prefix layout has to be on the
+// channel before the allocation that replicates it.
+TEST_F(ShadowTest, ShadowReceivesPrefixLayoutForNewChannel) {
+  subspace::Client client;
+  InitClient(client);
+
+  auto pub = client.CreatePublisher("shadow_prefix_new",
+                                    subspace::PublisherOptions()
+                                        .SetSlotSize(256)
+                                        .SetNumSlots(4)
+                                        .SetChecksumSize(20)
+                                        .SetMetadataSize(50));
+  ASSERT_THAT(pub, IsOk());
+
+  ASSERT_TRUE(WaitForShadowState([]() {
+    return GetShadow()->WithChannels([](auto &channels) {
+      auto it = channels.find("shadow_prefix_new");
+      return it != channels.end() && it->second.ccb_fd.Valid();
+    });
+  }));
+
+  GetShadow()->WithChannels([](auto &channels) {
+    auto it = channels.find("shadow_prefix_new");
+    ASSERT_NE(it, channels.end());
+    EXPECT_EQ(it->second.checksum_size, 20);
+    EXPECT_EQ(it->second.metadata_size, 50);
+  });
+}
+
+// Same requirement for a multiplexer a subscriber created as a placeholder:
+// the publisher that promotes it must install the layout before the remap
+// re-replicates the channel.
+TEST_F(ShadowTest, ShadowReceivesPrefixLayoutAfterPlaceholderPromotion) {
+  subspace::Client client;
+  InitClient(client);
+
+  auto sub = client.CreateSubscriber(
+      "shadow_prefix_vchan_a",
+      subspace::SubscriberOptions().SetMux("shadow_prefix_mux"));
+  ASSERT_THAT(sub, IsOk());
+
+  ASSERT_TRUE(WaitForShadowState([]() {
+    return GetShadow()->WithChannels([](auto &channels) {
+      auto it = channels.find("shadow_prefix_mux");
+      return it != channels.end() && it->second.num_slots == 0;
+    });
+  }));
+
+  auto pub = client.CreatePublisher("shadow_prefix_vchan_b",
+                                    subspace::PublisherOptions()
+                                        .SetSlotSize(256)
+                                        .SetNumSlots(4)
+                                        .SetMux("shadow_prefix_mux")
+                                        .SetChecksumSize(20)
+                                        .SetMetadataSize(50));
+  ASSERT_THAT(pub, IsOk());
+
+  ASSERT_TRUE(WaitForShadowState([]() {
+    return GetShadow()->WithChannels([](auto &channels) {
+      auto it = channels.find("shadow_prefix_mux");
+      return it != channels.end() && it->second.num_slots == 4;
+    });
+  }));
+
+  GetShadow()->WithChannels([](auto &channels) {
+    auto it = channels.find("shadow_prefix_mux");
+    ASSERT_NE(it, channels.end());
+    EXPECT_EQ(it->second.checksum_size, 20);
+    EXPECT_EQ(it->second.metadata_size, 50);
+  });
+}
+
 TEST_F(ShadowTest, ShadowReceivesAddPublisher) {
   subspace::Client client;
   InitClient(client);
 
-  auto pub = client.CreatePublisher("shadow_test_chan2", 128, 2);
+  auto pub = client.CreatePublisher(
+      "shadow_test_chan2",
+      subspace::PublisherOptions()
+          .SetSlotSize(128)
+          .SetNumSlots(5)
+          .SetMaxOutstandingSlotLeases(3));
   ASSERT_THAT(pub, IsOk());
 
   ASSERT_TRUE(WaitForShadowState([]() {
@@ -265,6 +368,7 @@ TEST_F(ShadowTest, ShadowReceivesAddPublisher) {
     EXPECT_EQ(it->second.publishers.size(), 1u);
 
     auto &pub_entry = it->second.publishers.begin()->second;
+    EXPECT_EQ(pub_entry.max_outstanding_slot_leases, 3);
     EXPECT_TRUE(pub_entry.poll_fd.Valid());
     EXPECT_TRUE(pub_entry.trigger_fd.Valid());
   });
@@ -319,6 +423,43 @@ TEST_F(ShadowTest, ShadowReceivesRemovePublisher) {
       return channels.count("shadow_test_chan4") == 0;
     });
   }));
+}
+
+TEST_F(ShadowTest, ShadowReplicatesHiddenTelemetryMetadata) {
+  constexpr char kTarget[] = "shadow_telemetry_metadata";
+
+  subspace::Client target_client;
+  InitClient(target_client);
+  auto pub = target_client.CreatePublisher(kTarget, 128, 4);
+  ASSERT_THAT(pub, IsOk());
+
+  subspace::Client watcher_client;
+  InitClient(watcher_client);
+  auto telemetry = watcher_client.CreateSubscriber(
+      kTarget, subspace::SubscriberOptions().SetTelemetry(true));
+  ASSERT_THAT(telemetry, IsOk());
+  EXPECT_EQ(kTarget, telemetry->Name());
+  EXPECT_EQ("subspace.Telemetry", telemetry->Type());
+
+  ASSERT_TRUE(WaitForShadowState([kTarget]() {
+    return GetShadow()->WithChannels([&](auto &channels) {
+      const auto *hidden = FindShadowTelemetryChannel(channels, kTarget);
+      return hidden != nullptr && hidden->hidden &&
+             hidden->telemetry_target == kTarget &&
+             hidden->subscribers.size() == 1 && hidden->publishers.empty();
+    });
+  }));
+
+  GetShadow()->WithChannels([&](auto &channels) {
+    EXPECT_NE(channels.find(kTarget), channels.end());
+    const auto *hidden = FindShadowTelemetryChannel(channels, kTarget);
+    ASSERT_NE(nullptr, hidden);
+    EXPECT_TRUE(hidden->hidden);
+    EXPECT_EQ(kTarget, hidden->telemetry_target);
+    EXPECT_EQ("subspace.Telemetry", hidden->type);
+    EXPECT_EQ(1u, hidden->subscribers.size());
+    EXPECT_TRUE(hidden->publishers.empty());
+  });
 }
 
 TEST_F(ShadowTest, ShadowReceivesRemoveSubscriber) {
@@ -487,6 +628,108 @@ protected:
   std::thread shadow_thread_;
 };
 
+TEST_F(ShadowRecoveryTest, RecoversHiddenTelemetryChannelAndSubscribers) {
+  signal(SIGPIPE, SIG_IGN);
+
+  StartShadow();
+  StartServer();
+
+  constexpr char kTarget[] = "shadow_telemetry_recovery";
+
+  subspace::Client target_client;
+  target_client.SetThreadSafe(true);
+  ASSERT_THAT(target_client.Init(RecoveryServerSocket()), IsOk());
+  auto pub = target_client.CreatePublisher(kTarget, 128, 8);
+  ASSERT_THAT(pub, IsOk());
+
+  subspace::Client watcher_client;
+  watcher_client.SetThreadSafe(true);
+  ASSERT_THAT(watcher_client.Init(RecoveryServerSocket()), IsOk());
+  auto telemetry = watcher_client.CreateSubscriber(
+      kTarget, subspace::SubscriberOptions().SetTelemetry(true));
+  ASSERT_THAT(telemetry, IsOk());
+
+  ASSERT_TRUE(WaitForShadowState([this, kTarget]() {
+    return shadow_->WithChannels([&](auto &channels) {
+      const auto *hidden = FindShadowTelemetryChannel(channels, kTarget);
+      return hidden != nullptr && hidden->hidden &&
+             hidden->telemetry_target == kTarget &&
+             hidden->subscribers.size() == 1 && hidden->publishers.empty();
+    });
+  }));
+
+  std::string hidden_channel_name = shadow_->WithChannels([&](auto &channels) {
+    const auto *hidden = FindShadowTelemetryChannel(channels, kTarget);
+    EXPECT_NE(nullptr, hidden);
+    return hidden->name;
+  });
+
+  subspace::ServerChannel *pre_hidden =
+      FindServerTelemetryChannel(*server_, kTarget);
+  ASSERT_NE(nullptr, pre_hidden);
+  EXPECT_TRUE(pre_hidden->IsHidden());
+  EXPECT_EQ(kTarget, pre_hidden->TelemetryTarget());
+
+  server_->ForEachShadow(
+      [](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
+  StopServer();
+
+  StartServer();
+
+  subspace::ServerChannel *recovered_hidden =
+      FindServerTelemetryChannel(*server_, kTarget);
+  ASSERT_NE(nullptr, recovered_hidden);
+  EXPECT_TRUE(recovered_hidden->IsHidden());
+  EXPECT_EQ(kTarget, recovered_hidden->TelemetryTarget());
+  EXPECT_EQ(hidden_channel_name, recovered_hidden->Name());
+
+  int num_pubs = 0, num_subs = 0, num_bridge_pubs = 0, num_bridge_subs = 0;
+  int num_tunnel_pubs = 0, num_tunnel_subs = 0;
+  recovered_hidden->CountUsers(num_pubs, num_subs, num_bridge_pubs,
+                               num_bridge_subs, num_tunnel_pubs,
+                               num_tunnel_subs);
+  // The coroutine may already have recreated its ephemeral publisher.
+  EXPECT_LE(num_pubs, 1);
+  EXPECT_EQ(1, num_subs);
+
+  ASSERT_TRUE(WaitForShadowState([this, kTarget]() {
+    return shadow_->WithChannels([&](auto &channels) {
+      const auto *hidden = FindShadowTelemetryChannel(channels, kTarget);
+      return hidden != nullptr && hidden->hidden &&
+             hidden->telemetry_target == kTarget &&
+             hidden->subscribers.size() == 1 && hidden->publishers.empty();
+    });
+  }));
+
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  bool ephemeral_publisher_created = false;
+  while (std::chrono::steady_clock::now() < deadline) {
+    recovered_hidden = FindServerTelemetryChannel(*server_, kTarget);
+    ASSERT_NE(nullptr, recovered_hidden);
+    num_pubs = num_subs = num_bridge_pubs = num_bridge_subs = 0;
+    num_tunnel_pubs = num_tunnel_subs = 0;
+    recovered_hidden->CountUsers(num_pubs, num_subs, num_bridge_pubs,
+                                 num_bridge_subs, num_tunnel_pubs,
+                                 num_tunnel_subs);
+    if (num_pubs == 1 && num_subs >= 1) {
+      ephemeral_publisher_created = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  EXPECT_TRUE(ephemeral_publisher_created);
+
+  ASSERT_TRUE(WaitForShadowState([this, kTarget]() {
+    return shadow_->WithChannels([&](auto &channels) {
+      const auto *hidden = FindShadowTelemetryChannel(channels, kTarget);
+      return hidden != nullptr && hidden->publishers.empty();
+    });
+  }));
+
+  StopServer();
+  StopShadow();
+}
+
 TEST_F(ShadowRecoveryTest, ServerRecoversStateFromShadow) {
   signal(SIGPIPE, SIG_IGN);
 
@@ -557,6 +800,49 @@ TEST_F(ShadowRecoveryTest, ServerRecoversStateFromShadow) {
       [this]() { return shadow_->GetSessionId() == server_->GetSessionId(); }));
 
   // Clean up.
+  StopServer();
+  StopShadow();
+}
+
+TEST_F(ShadowRecoveryTest, RecoveryKeepsLatchedLocality) {
+  signal(SIGPIPE, SIG_IGN);
+
+  StartShadow();
+  StartServer();
+
+  subspace::Client client;
+  client.SetThreadSafe(true);
+  ASSERT_THAT(client.Init(RecoveryServerSocket()), IsOk());
+
+  auto sub = client.CreateSubscriber("latched_local_chan");
+  ASSERT_THAT(sub, IsOk());
+  {
+    auto pub = client.CreatePublisher(
+        "latched_local_chan",
+        subspace::PublisherOptions().SetSlotSize(256).SetNumSlots(4).SetLocal(
+            true));
+    ASSERT_THAT(pub, IsOk());
+  }
+
+  // The local publisher has gone, but the channel stays local.
+  ASSERT_TRUE(WaitForShadowState([this]() {
+    return shadow_->WithChannels([](auto &channels) {
+      auto it = channels.find("latched_local_chan");
+      return it != channels.end() && it->second.publishers.empty() &&
+             it->second.subscribers.size() == 1 && it->second.is_local;
+    });
+  }));
+
+  server_->ForEachShadow(
+      [](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
+  StopServer();
+
+  StartServer();
+
+  auto &recovered_channels = server_->GetChannels();
+  ASSERT_EQ(recovered_channels.count("latched_local_chan"), 1u);
+  EXPECT_TRUE(recovered_channels.at("latched_local_chan")->IsLocal());
+
   StopServer();
   StopShadow();
 }
@@ -906,6 +1192,130 @@ TEST_F(ShadowRecoveryTest, ServerFunctionalAfterRecovery) {
   }
 
   // Clean up.
+  StopServer();
+  StopShadow();
+}
+
+TEST_F(ShadowRecoveryTest, RecoversMuxSubscriberQueueTopology) {
+  signal(SIGPIPE, SIG_IGN);
+
+  StartShadow();
+  StartServer();
+
+  constexpr char kMux[] = "/queue_recovery/*";
+  constexpr char kVchan[] = "/queue_recovery/0";
+  subspace::Client pre_client;
+  pre_client.SetThreadSafe(true);
+  ASSERT_THAT(pre_client.Init(RecoveryServerSocket()), IsOk());
+
+  subspace::PublisherOptions pub_options;
+  pub_options.SetSlotSize(64)
+      .SetNumSlots(32)
+      .SetSubscriberQueueArenaSize(
+          subspace::kDefaultSubscriberQueueArenaSize)
+      .SetMaxOutstandingSlotLeases(3)
+      .SetMux(kMux);
+  auto pre_pub = pre_client.CreatePublisher(kVchan, pub_options);
+  ASSERT_THAT(pre_pub, IsOk());
+  subspace::SubscriberOptions sub_options;
+  sub_options.SetSubscriberQueueSize(4).SetMaxSubscribers(2);
+  auto pre_sub = pre_client.CreateSubscriber(kMux, sub_options);
+  ASSERT_THAT(pre_sub, IsOk());
+  subspace::ServerChannel *pre_mux = server_->FindChannel(kMux);
+  ASSERT_NE(nullptr, pre_mux);
+  int pre_subscriber_id = -1;
+  pre_mux->GetCcb()->subscribers.Traverse(
+      [&pre_subscriber_id](int id) { pre_subscriber_id = id; });
+  ASSERT_GE(pre_subscriber_id, 0);
+  const uint64_t pre_queue_offset =
+      pre_mux->GetAvailableSlotQueueIndexAddress()
+          ->offsets[pre_subscriber_id]
+          .load(std::memory_order_acquire);
+  ASSERT_NE(subspace::kInvalidSlotQueueOffset, pre_queue_offset);
+  auto pre_buffer = pre_pub->GetMessageBuffer();
+  ASSERT_THAT(pre_buffer, IsOk());
+  memcpy(*pre_buffer, "queued_before_restart", 21);
+  ASSERT_THAT(pre_pub->PublishMessage(21), IsOk());
+
+  ASSERT_TRUE(WaitForShadowState([this]() {
+    return shadow_->WithChannels([](auto &channels) {
+      auto mux = channels.find("/queue_recovery/*");
+      auto vchan = channels.find("/queue_recovery/0");
+      if (mux == channels.end() || vchan == channels.end() ||
+          !mux->second.has_max_subscribers ||
+          mux->second.max_subscribers != 2 ||
+          mux->second.subscribers.size() != 1 ||
+          vchan->second.publishers.size() != 1) {
+        return false;
+      }
+      return mux->second.subscribers.begin()->second.subscriber_queue_size == 4 &&
+             vchan->second.publishers.begin()
+                     ->second.max_outstanding_slot_leases == 3;
+    });
+  }));
+
+  server_->ForEachShadow(
+      [](const std::unique_ptr<subspace::ShadowReplicator> &shadow) {
+        shadow->Close();
+      });
+  StopServer();
+  StartServer();
+
+  subspace::ServerChannel *mux = server_->FindChannel(kMux);
+  subspace::ServerChannel *vchan = server_->FindChannel(kVchan);
+  ASSERT_NE(nullptr, mux);
+  ASSERT_NE(nullptr, vchan);
+  EXPECT_TRUE(mux->IsMux());
+  EXPECT_TRUE(vchan->IsVirtual());
+  EXPECT_EQ(subspace::kDefaultSubscriberQueueArenaSize,
+            mux->SubscriberQueueArenaSize());
+  EXPECT_EQ(2, mux->MaxSubscribers());
+  EXPECT_EQ(pre_queue_offset,
+            mux->GetAvailableSlotQueueIndexAddress()
+                ->offsets[pre_subscriber_id]
+                .load(std::memory_order_acquire));
+
+  int max_active_messages = 0;
+  int max_outstanding_slot_leases = 0;
+  mux->CountCapacityUsage(max_active_messages, max_outstanding_slot_leases);
+  EXPECT_EQ(1, max_active_messages);
+  EXPECT_EQ(3, max_outstanding_slot_leases);
+
+  ASSERT_EQ(1u, mux->GetUsers().size());
+  const auto *recovered_subscriber = static_cast<const subspace::SubscriberUser *>(
+      mux->GetUsers().begin()->second.get());
+  EXPECT_EQ(4, recovered_subscriber->SubscriberQueueSize());
+  EXPECT_NE(0u, recovered_subscriber->ProcessId());
+  ASSERT_EQ(1u, vchan->GetUsers().size());
+  const auto *recovered_publisher = static_cast<const subspace::PublisherUser *>(
+      vchan->GetUsers().begin()->second.get());
+  EXPECT_EQ(3, recovered_publisher->MaxOutstandingSlotLeases());
+  EXPECT_NE(0u, recovered_publisher->ProcessId());
+
+  auto recovered_pre_message = pre_sub->ReadMessage();
+  ASSERT_THAT(recovered_pre_message, IsOk());
+  ASSERT_EQ(21, recovered_pre_message->length);
+  EXPECT_EQ(
+      0, memcmp(recovered_pre_message->buffer, "queued_before_restart", 21));
+
+  subspace::Client post_client;
+  post_client.SetThreadSafe(true);
+  ASSERT_THAT(post_client.Init(RecoveryServerSocket()), IsOk());
+  auto post_pub = post_client.CreatePublisher(kVchan, pub_options);
+  ASSERT_THAT(post_pub, IsOk());
+  auto post_sub = post_client.CreateSubscriber(kMux, sub_options);
+  ASSERT_THAT(post_sub, IsOk());
+  EXPECT_EQ(4, post_sub->SubscriberQueueSize());
+
+  auto buffer = post_pub->GetMessageBuffer();
+  ASSERT_THAT(buffer, IsOk());
+  memcpy(*buffer, "recovered_queue", 15);
+  ASSERT_THAT(post_pub->PublishMessage(15), IsOk());
+  auto message = post_sub->ReadMessage(subspace::ReadMode::kReadNewest);
+  ASSERT_THAT(message, IsOk());
+  ASSERT_EQ(15, message->length);
+  EXPECT_EQ(0, memcmp(message->buffer, "recovered_queue", 15));
+
   StopServer();
   StopShadow();
 }

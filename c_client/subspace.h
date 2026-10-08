@@ -23,6 +23,16 @@
 extern "C" {
 #endif
 
+// Slot sizes are 64 bit inside the library, but this API exposes a 32 bit slot
+// size by default so that existing code keeps compiling.  Define
+// SUBSPACE_64BIT_SLOT_SIZE to widen it and allow slots larger than 2GB.  This
+// must match the definition used to build the library.
+#if defined(SUBSPACE_64BIT_SLOT_SIZE)
+typedef int64_t SubspaceSlotSize;
+#else
+typedef int32_t SubspaceSlotSize;
+#endif
+
 // Error Handling.  Most functions return a boolean indicating success or
 // failure. If a function fails, you can call subspace_get_last_error() to get
 // the error message.  The error message is a static string that is owned by the
@@ -92,7 +102,10 @@ typedef struct {
   SubspaceString type;
   uint64_t slot_size;
   int num_slots;
+  int subscriber_queue_size;
+  uint64_t subscriber_queue_arena_size;
   bool reliable;
+  bool is_local;
 } SubspaceChannelInfo;
 
 typedef struct {
@@ -100,6 +113,7 @@ typedef struct {
   uint64_t total_bytes;
   uint64_t total_messages;
   uint64_t max_message_size;
+  bool is_local;
 } SubspaceChannelStats;
 
 typedef struct {
@@ -180,6 +194,41 @@ typedef struct {
   bool checksum_error;
 } SubspaceMessage;
 
+typedef enum {
+  kSubspaceTelemetryNoChange = 0,
+  kSubspaceTelemetryAdded = 1,
+  kSubspaceTelemetryRemoved = 2,
+} SubspaceTelemetryChange;
+
+typedef struct {
+  SubspaceString name;
+  SubspaceTelemetryChange change;
+} SubspaceTelemetryParticipant;
+
+typedef struct {
+  int32_t num_drops;
+} SubspaceTelemetryDrop;
+
+typedef struct {
+  int64_t new_size;
+} SubspaceTelemetryResize;
+
+// A decoded server-generated telemetry message. The telemetry pointer owns the
+// arrays and strings exposed by this struct. Release a non-empty result with
+// subspace_free_telemetry. A null telemetry pointer means no message is
+// currently available.
+typedef struct {
+  void *telemetry;
+  const SubspaceTelemetryParticipant *publishers;
+  size_t num_publishers;
+  const SubspaceTelemetryParticipant *subscribers;
+  size_t num_subscribers;
+  const SubspaceTelemetryDrop *drops;
+  size_t num_drops;
+  const SubspaceTelemetryResize *resizes;
+  size_t num_resizes;
+} SubspaceTelemetry;
+
 typedef struct {
   void *slot;
 } SubspaceMessageSlot;
@@ -213,19 +262,29 @@ typedef struct {
 
 // There are the options avaialble for publishers.
 typedef struct {
-  const int32_t slot_size; // Initial size of slots (might be resized).
+  const SubspaceSlotSize slot_size; // Initial size of slots (might be resized).
   const int num_slots;     // Number of slots (never changes)
+  // Total bytes reserved for packed per-subscriber queues in the CCB. The
+  // options factory selects zero, disabling queues in favor of the bitset path.
+  uint64_t subscriber_queue_arena_size;
   bool local;              // If true, messages stay local to this machine.
   bool reliable;           // Reliable publisher.
   bool bridge;             // This publisher is for the bridge.
   bool for_tunnel;         // Mark messages for external tunnel processes.
   bool fixed_size; // Don't resize the slot size if a larger message is sent.
+  // Upper bound on how large the slots may grow, or 0 for no limit.  Asking
+  // subspace_get_message_buffer() for more than this fails instead of
+  // resizing, and automatic growth stops here.  All publishers on a channel
+  // must agree on this value.
+  SubspaceSlotSize max_slot_size;
   SubspaceTypeInfo type; // Type of the message.  This is an opaque string.
   bool activate;         // Send an activation message when created.
   const char *mux;       // Optional mux channel name for virtual channels.
   size_t mux_length;
   int vchan_id;           // Virtual channel id, or -1 for server-assigned.
   bool notify_retirement; // Notify publisher when slots retire.
+  int32_t max_outstanding_slot_leases; // Explicit unpublished lease limit.
+  bool notify_retirement_on_forced_reuse; // Include publisher-forced reuse.
   bool checksum;          // Calculate and attach message checksums.
   int32_t checksum_size;  // Bytes reserved for checksum (default 4).
   int32_t metadata_size;  // Bytes reserved for user metadata (default 0).
@@ -242,6 +301,12 @@ typedef struct {
   // bursting into FreeSlots when the subscriber falls behind.  Set to
   // false to force the legacy FreeSlots-first allocator (useful when
   // reproducing pre-fix benchmarks).
+  //
+  // Ignored while no subscriber is attached, because a publisher with no
+  // subscribers retires each slot as it publishes it and would recycle that
+  // same slot on the next publish, leaving the channel holding one message
+  // however deep num_slots is.  An idle publisher fills the ring instead so
+  // that it holds recent history for a subscriber that attaches later.
   bool prefer_retired_slots;
 
   // Split-buffer options.  When use_split_buffers is true, Subspace keeps
@@ -257,12 +322,18 @@ typedef struct {
 
 typedef struct {
   bool reliable;           // Reliable subscriber.
+  // Capacity of this subscriber's CCB slot queue. 0 uses the publisher
+  // default.
+  int32_t subscriber_queue_size;
   bool bridge;             // This subscriber is for the bridge.
   bool for_tunnel;         // Mark subscriptions for external tunnels.
+  bool telemetry;          // Subscribe to server-generated telemetry.
   SubspaceTypeInfo type;   // Type of the message.  This is an opaque string.
   int max_active_messages; // Max number of message that can be active at once.
+  int32_t max_subscribers; // 0 means no explicit subscriber limit.
   bool pass_activation;    // Pass activation message in read.
   bool log_dropped_messages; // Log dropped messages to stderr.
+  bool detect_dropped_messages; // Detect and count ordinal gaps internally.
   bool read_write;           // Map buffers writable for this subscriber.
   const char *mux;           // Optional mux channel name for virtual channels.
   size_t mux_length;
@@ -275,12 +346,21 @@ typedef struct {
   // Optional callbacks used when the server reports that the publisher
   // created split payload buffers.
   SubspaceSplitBufferCallbacks split_callbacks;
+  bool local; // If true, the channel stays local to this machine.
 } SubspaceSubscriberOptions;
 
 typedef enum {
   kSubspaceReadNext = 0,   // Read the next message.
   kSubspaceReadNewest = 1, // Read the newest message.
 } SubspaceReadMode;
+
+// Controls whether a read consumes the subscriber trigger fd (eventfd or
+// pipe). kSubspaceClearTrigger is the default and matches existing
+// subspace_read_message / subspace_read_message_with_mode behavior.
+typedef enum {
+  kSubspaceClearTrigger = 0,   // Read (clear) the subscriber trigger fd.
+  kSubspaceNoClearTrigger = 1, // Leave the subscriber trigger fd unread.
+} SubspaceClearTrigger;
 
 // This is a message buffer that is used to publish a message.  The 'buffer'
 // member is a pointer to the message buffer that can be used to publish a
@@ -295,6 +375,15 @@ typedef struct {
   void *buffer;
   size_t buffer_size;
 } SubspaceMessageBuffer;
+
+// A specific publisher-owned slot. The token becomes invalid after publish or
+// release; lease_id prevents stale tokens from operating on a reused slot.
+typedef struct {
+  void *buffer;
+  size_t buffer_size;
+  int32_t slot_id;
+  uint64_t lease_id;
+} SubspacePublisherBufferLease;
 
 // Get the last error message from the subspace library.  This will return
 // a pointer to a string that is owned by the library.  The string will be
@@ -342,8 +431,8 @@ bool subspace_get_all_channel_stats(SubspaceClient client,
 // Publisher and subscriber options struct creators.  Use these to create
 // the options struct and then override with the values you want.
 SubspaceSubscriberOptions subspace_subscriber_options_default(void);
-SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size,
-                                                            int num_slots);
+SubspacePublisherOptions
+subspace_publisher_options_default(SubspaceSlotSize slot_size, int num_slots);
 
 // Create a subscriber or publisher.  If the subscriber or publisher is created
 // OK, the 'subscriber' or 'publisher' pointer will be non-null.  If there is
@@ -377,6 +466,18 @@ bool subspace_remove_client(SubspaceClient *client);
 SubspaceMessage subspace_read_message(SubspaceSubscriber subscriber);
 SubspaceMessage subspace_read_message_with_mode(SubspaceSubscriber subscriber,
                                                 SubspaceReadMode mode);
+// Same as subspace_read_message_with_mode, with control over whether the
+// subscriber trigger fd is consumed. Pass kSubspaceNoClearTrigger to leave
+// the fd unread, for example when the caller is managing it from an
+// external event loop.
+SubspaceMessage subspace_read_message_with_mode_and_trigger(
+    SubspaceSubscriber subscriber, SubspaceReadMode mode,
+    SubspaceClearTrigger clear_trigger);
+SubspaceTelemetry
+subspace_read_telemetry_message(SubspaceSubscriber subscriber);
+SubspaceTelemetry subspace_read_telemetry_message_with_mode(
+    SubspaceSubscriber subscriber, SubspaceReadMode mode);
+bool subspace_free_telemetry(SubspaceTelemetry *telemetry);
 SubspaceMessage subspace_find_message(SubspaceSubscriber subscriber,
                                       uint64_t timestamp);
 bool subspace_get_all_messages(SubspaceSubscriber subscriber,
@@ -400,8 +501,11 @@ int subspace_get_subscriber_fd(SubspaceSubscriber subscriber);
 
 // The slot size and number of slots will not be valid until the first message
 // is received.
-int32_t subspace_get_subscriber_slot_size(SubspaceSubscriber subscriber);
+SubspaceSlotSize
+subspace_get_subscriber_slot_size(SubspaceSubscriber subscriber);
 int subspace_get_subscriber_num_slots(SubspaceSubscriber subscriber);
+int32_t
+subspace_get_subscriber_queue_size(SubspaceSubscriber subscriber);
 
 // This is a shortcut to wait for a message to be available.  It will block
 // until a message is available.
@@ -511,6 +615,22 @@ subspace_publish_message_with_prefix(SubspacePublisher publisher,
                                      bool use_slot_id_from_prefix);
 bool subspace_cancel_publish(SubspacePublisher publisher);
 
+SubspacePublisherBufferLease
+subspace_acquire_publisher_buffer(SubspacePublisher publisher);
+SubspacePublisherBufferLease
+subspace_reclaim_publisher_buffer(SubspacePublisher publisher, int32_t slot_id);
+SubspacePublisherBufferLease
+subspace_reclaim_any_publisher_buffer(SubspacePublisher publisher);
+const SubspaceMessage
+subspace_publish_publisher_buffer(SubspacePublisher publisher,
+                                  SubspacePublisherBufferLease lease,
+                                  size_t message_size);
+bool subspace_release_publisher_buffer(SubspacePublisher publisher,
+                                       SubspacePublisherBufferLease lease);
+void *subspace_get_publisher_buffer_metadata(
+    SubspacePublisher publisher, SubspacePublisherBufferLease lease,
+    size_t *metadata_size);
+
 // Reliable publishers that cannot send a message at the present time can be
 // waited for using this function.  It will block until the publisher is able to
 // send a message.  Returns -1 on error.
@@ -534,8 +654,15 @@ bool subspace_is_publisher_local(SubspacePublisher publisher);
 bool subspace_is_publisher_fixed_size(SubspacePublisher publisher);
 bool subspace_is_publisher_for_tunnel(SubspacePublisher publisher);
 bool subspace_publisher_uses_split_buffers(SubspacePublisher publisher);
-int32_t subspace_get_publisher_slot_size(SubspacePublisher publisher);
+SubspaceSlotSize subspace_get_publisher_slot_size(SubspacePublisher publisher);
+// Effective slot size cap, rounded up to the channel's alignment, or 0 if the
+// channel is uncapped.
+SubspaceSlotSize
+subspace_get_publisher_max_slot_size(SubspacePublisher publisher);
 int32_t subspace_get_publisher_num_slots(SubspacePublisher publisher);
+int32_t subspace_get_publisher_queue_size(SubspacePublisher publisher);
+uint64_t
+subspace_get_publisher_queue_arena_size(SubspacePublisher publisher);
 SubspaceString subspace_get_publisher_name(SubspacePublisher publisher);
 SubspaceString subspace_get_publisher_type(SubspacePublisher publisher);
 SubspaceString subspace_get_publisher_mux(SubspacePublisher publisher);
@@ -548,7 +675,7 @@ subspace_get_publisher_virtual_memory_usage(SubspacePublisher publisher);
 bool subspace_get_publisher_stats_counters(SubspacePublisher publisher,
                                            uint64_t *total_bytes,
                                            uint64_t *total_messages,
-                                           uint32_t *max_message_size,
+                                           uint64_t *max_message_size,
                                            uint32_t *total_drops);
 bool subspace_get_publisher_counters(SubspacePublisher publisher,
                                      SubspaceChannelCounters *counters);

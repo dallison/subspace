@@ -151,6 +151,8 @@ void ShadowReplicator::SendCreateChannel(ServerChannel *channel) {
   msg->set_channel_id(channel->GetChannelId());
   msg->set_slot_size(channel->SlotSize());
   msg->set_num_slots(channel->NumSlots());
+  msg->set_subscriber_queue_arena_size(
+      channel->SubscriberQueueArenaSize());
   msg->set_type(channel->Type());
   msg->set_is_local(channel->IsLocal());
   msg->set_is_reliable(channel->IsReliable());
@@ -173,6 +175,18 @@ void ShadowReplicator::SendCreateChannel(ServerChannel *channel) {
   if (channel->MaxPublishers() > 0) {
     msg->set_has_max_publishers(true);
     msg->set_max_publishers(channel->MaxPublishers());
+  }
+  if (channel->MaxSubscribers() > 0) {
+    msg->set_has_max_subscribers(true);
+    msg->set_max_subscribers(channel->MaxSubscribers());
+  }
+  if (channel->MaxSlotSize() > 0) {
+    msg->set_has_max_slot_size(true);
+    msg->set_max_slot_size(channel->MaxSlotSize());
+  }
+  msg->set_hidden(channel->IsHidden());
+  if (channel->IsTelemetryChannel()) {
+    msg->set_telemetry_target(channel->TelemetryTarget());
   }
 
   const SharedMemoryFds &channel_fds = channel->GetFds();
@@ -202,6 +216,9 @@ void ShadowReplicator::SendAddPublisher(const std::string &channel_name,
   msg->set_is_bridge(pub->IsBridge());
   msg->set_for_tunnel(pub->ForTunnel());
   msg->set_is_fixed_size(pub->IsFixedSize());
+  msg->set_max_outstanding_slot_leases(
+      pub->MaxOutstandingSlotLeases());
+  msg->set_process_id(pub->ProcessId());
 
   std::vector<toolbelt::FileDescriptor> fds;
   fds.push_back(const_cast<PublisherUser *>(pub)->GetPollFd());
@@ -234,9 +251,12 @@ void ShadowReplicator::SendAddSubscriber(const std::string &channel_name,
   msg->set_channel_name(channel_name);
   msg->set_subscriber_id(sub->GetId());
   msg->set_is_reliable(sub->IsReliable());
+  msg->set_is_local(sub->IsLocal());
   msg->set_is_bridge(sub->IsBridge());
   msg->set_for_tunnel(sub->ForTunnel());
   msg->set_max_active_messages(sub->MaxActiveMessages());
+  msg->set_subscriber_queue_size(sub->SubscriberQueueSize());
+  msg->set_process_id(sub->ProcessId());
 
   std::vector<toolbelt::FileDescriptor> fds;
   fds.push_back(const_cast<SubscriberUser *>(sub)->GetTriggerFd());
@@ -293,6 +313,14 @@ void ShadowReplicator::SendUpdateChannelOptions(const ServerChannel *channel) {
   if (channel->MaxPublishers() > 0) {
     msg->set_has_max_publishers(true);
     msg->set_max_publishers(channel->MaxPublishers());
+  }
+  if (channel->MaxSubscribers() > 0) {
+    msg->set_has_max_subscribers(true);
+    msg->set_max_subscribers(channel->MaxSubscribers());
+  }
+  if (channel->MaxSlotSize() > 0) {
+    msg->set_has_max_slot_size(true);
+    msg->set_max_slot_size(channel->MaxSlotSize());
   }
   SendEvent(event);
 }
@@ -399,6 +427,8 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
           .channel_id = msg.channel_id(),
           .slot_size = msg.slot_size(),
           .num_slots = msg.num_slots(),
+          .subscriber_queue_arena_size =
+              msg.subscriber_queue_arena_size(),
           .type = msg.type(),
           .is_local = msg.is_local(),
           .is_reliable = msg.is_reliable(),
@@ -412,6 +442,12 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
           .split_buffers_over_bridge = msg.split_buffers_over_bridge(),
           .has_max_publishers = msg.has_max_publishers(),
           .max_publishers = msg.max_publishers(),
+          .has_max_subscribers = msg.has_max_subscribers(),
+          .max_subscribers = msg.max_subscribers(),
+          .has_max_slot_size = msg.has_max_slot_size(),
+          .max_slot_size = msg.max_slot_size(),
+          .hidden = msg.hidden(),
+          .telemetry_target = msg.telemetry_target(),
           .ccb_fd = std::move(fds[0]),
           .bcb_fd = std::move(fds[1]),
       });
@@ -430,9 +466,8 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
       if (msg.has_fd() && static_cast<size_t>(msg.fd_index()) < fds.size()) {
         fd = std::move(fds[size_t(msg.fd_index())]);
       }
-      (*ch)->client_buffers.push_back(
-          RegisteredClientBuffer{.metadata = std::move(metadata),
-                                 .fd = std::move(fd)});
+      (*ch)->client_buffers.push_back(RegisteredClientBuffer{
+          .metadata = std::move(metadata), .fd = std::move(fd)});
       continue;
     }
 
@@ -454,6 +489,11 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
           .for_tunnel = msg.for_tunnel(),
           .is_fixed_size = msg.is_fixed_size(),
           .notify_retirement = msg.notify_retirement(),
+          .max_outstanding_slot_leases =
+              msg.max_outstanding_slot_leases() > 0
+                  ? msg.max_outstanding_slot_leases()
+                  : 1,
+          .process_id = msg.process_id(),
           .poll_fd = std::move(fds[0]),
           .trigger_fd = std::move(fds[1]),
           .retirement_read_fd = msg.notify_retirement()
@@ -478,9 +518,12 @@ absl::StatusOr<RecoveredState> ShadowReplicator::ReceiveStateDump() {
       (*ch)->subscribers.push_back(RecoveredSubscriber{
           .id = msg.subscriber_id(),
           .is_reliable = msg.is_reliable(),
+          .is_local = msg.is_local(),
           .is_bridge = msg.is_bridge(),
           .for_tunnel = msg.for_tunnel(),
           .max_active_messages = msg.max_active_messages(),
+          .subscriber_queue_size = msg.subscriber_queue_size(),
+          .process_id = msg.process_id(),
           .trigger_fd = std::move(fds[0]),
           .poll_fd = std::move(fds[1]),
       });

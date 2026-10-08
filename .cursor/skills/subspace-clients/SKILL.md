@@ -82,6 +82,10 @@ for (;;) {
   auto bytes = static_cast<const char *>(msg_or->buffer);
   // Process bytes[0..msg_or->length).
 }
+
+// Leave the subscriber trigger fd unread:
+// sub.ReadMessage(subspace::ReadMode::kReadNext,
+//                 subspace::ClearTrigger::kNoClearTrigger);
 ```
 
 ## Python Client
@@ -108,6 +112,9 @@ while True:
     if len(data) == 0:
         break
     # Process data as bytes.
+
+# Leave the subscriber trigger fd unread:
+# subscriber.read_message(clear_trigger=subspace.ClearTrigger.NO_CLEAR_TRIGGER)
 ```
 
 For message metadata and ordinals, use `read_message_object()`:
@@ -117,12 +124,32 @@ with subscriber.read_message_object() as msg:
     print(msg.ordinal, msg.timestamp, msg.buffer)
 ```
 
+For multiple in-flight unpublished slots, configure and use explicit leases:
+
+```python
+options = subspace.PublisherOptions()
+options.set_slot_size(4096)
+options.set_num_slots(16)
+options.set_max_outstanding_slot_leases(3)
+publisher = client.create_publisher("camera", options=options)
+
+lease = publisher.acquire_buffer_lease()
+if lease is not None:
+    lease.buffer[:len(payload)] = payload
+    publisher.publish_buffer_lease(lease, len(payload))
+```
+
+`release_buffer_lease(lease)` discards an unpublished lease, while
+`reclaim_buffer_lease(slot_id)` reacquires a retired slot. Use
+`SubscriberOptions.set_max_subscribers(n)` to establish a server-enforced
+channel subscriber limit.
+
 ## Rust Client
 
 The Rust crate name is `subspace_client`.
 
 ```rust
-use subspace_client::{Client, PublisherOptions, ReadMode, SubscriberOptions};
+use subspace_client::{ClearTrigger, Client, PublisherOptions, ReadMode, SubscriberOptions};
 
 let client = Client::new("/tmp/subspace", "rust-client").unwrap();
 
@@ -153,7 +180,33 @@ loop {
     let data = unsafe { msg.as_slice() };
     // Process data.
 }
+
+// Leave the subscriber trigger fd unread:
+// subscriber.read_message_with_trigger(ReadMode::ReadNext, ClearTrigger::NoClearTrigger);
 ```
+
+For multiple in-flight unpublished slots:
+
+```rust
+let options = PublisherOptions::new()
+    .set_slot_size(4096)
+    .set_num_slots(16)
+    .set_max_outstanding_slot_leases(3);
+let publisher = client.create_publisher("camera", &options).unwrap();
+
+if let Some(mut lease) = publisher.acquire_buffer_lease().unwrap() {
+    unsafe {
+        lease.as_mut_slice()[..payload.len()].copy_from_slice(payload);
+    }
+    publisher
+        .publish_buffer_lease(&lease, payload.len() as i64)
+        .unwrap();
+}
+```
+
+Rust also exposes `release_buffer_lease`, `reclaim_buffer_lease`,
+lease-scoped metadata, `set_notify_retirement_on_forced_reuse`, and
+`SubscriberOptions::set_max_subscribers`.
 
 ## Java Client
 

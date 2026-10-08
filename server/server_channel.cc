@@ -6,8 +6,10 @@
 #include "absl/strings/str_format.h"
 #include "server/client_handler.h"
 #include "server/server.h"
-#include <utility>
+#include <cerrno>
+#include <csignal>
 #include <sys/mman.h>
+#include <utility>
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
 #include <sys/syscall.h>
 #ifndef MFD_CLOEXEC
@@ -19,6 +21,18 @@
 #endif
 
 namespace subspace {
+namespace {
+
+bool ProcessDefinitelyDead(uint64_t process_id) {
+  if (process_id == 0) {
+    return false;
+  }
+  errno = 0;
+  return kill(static_cast<pid_t>(process_id), 0) == -1 && errno == ESRCH;
+}
+
+} // namespace
+
 ServerChannel::~ServerChannel() {
   if (is_virtual_ || skip_cleanup_) {
     return;
@@ -178,6 +192,54 @@ absl::Status ServerChannel::ValidateOrSetMaxPublishers(
   return absl::OkStatus();
 }
 
+absl::Status ServerChannel::ValidateOrSetMaxSubscribers(
+    int32_t max_subscribers, bool set_if_missing, const char *user_type) {
+  if (max_subscribers < 0) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Invalid max_subscribers %d for %s on channel %s: value must be "
+        "non-negative",
+        max_subscribers, user_type, Name()));
+  }
+  if (!max_subscribers_set_) {
+    if (set_if_missing || max_subscribers > 0) {
+      max_subscribers_ = max_subscribers;
+      max_subscribers_set_ = true;
+    }
+    return absl::OkStatus();
+  }
+  if (max_subscribers_ != max_subscribers) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Inconsistent max_subscribers for %s on channel %s: already %d, not "
+        "%d",
+        user_type, Name(), max_subscribers_, max_subscribers));
+  }
+  return absl::OkStatus();
+}
+
+absl::Status ServerChannel::ValidateOrSetMaxSlotSize(int64_t max_slot_size,
+                                                     bool set_if_missing,
+                                                     const char *user_type) {
+  if (max_slot_size < 0) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Invalid max_slot_size %d for %s on channel %s: value must be "
+        "non-negative",
+        max_slot_size, user_type, Name()));
+  }
+  if (!max_slot_size_set_) {
+    if (set_if_missing || max_slot_size > 0) {
+      max_slot_size_ = max_slot_size;
+      max_slot_size_set_ = true;
+    }
+    return absl::OkStatus();
+  }
+  if (max_slot_size_ != max_slot_size) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "Inconsistent max_slot_size for %s on channel %s: already %d, not %d",
+        user_type, Name(), max_slot_size_, max_slot_size));
+  }
+  return absl::OkStatus();
+}
+
 void ServerChannel::RemoveBuffer(uint64_t session_id, Server *server) {
   if (ccb_ == nullptr) {
     return;
@@ -247,13 +309,15 @@ uint64_t ServerChannel::GetVirtualMemoryUsage() const {
   if (split_buffer_size == 0) {
     return Channel::GetVirtualMemoryUsage();
   }
-  return sizeof(SystemControlBlock) + CcbSize(num_slots_) +
+  return sizeof(SystemControlBlock) +
+         CcbSize(num_slots_, subscriber_queue_arena_size_) +
          sizeof(BufferControlBlock) + split_buffer_size;
 }
 
 absl::StatusOr<SharedMemoryFds>
 ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
-                        [[maybe_unused]] int slot_size, int num_slots,
+                        [[maybe_unused]] int64_t slot_size, int num_slots,
+                        uint64_t subscriber_queue_arena_size,
                         int initial_ordinal) {
   // Unmap existing memory.
   Unmap();
@@ -263,16 +327,39 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
   // set it here now that we know it.  If num_slots_ was already
   // set we need to make sure that the value passed here is
   // the same as the current value.
+  const int previous_num_slots = num_slots_;
+  const uint64_t previous_queue_arena_size = subscriber_queue_arena_size_;
+  const int previous_queue_size = subscriber_queue_size_;
   if (num_slots_ != 0) {
     assert(num_slots_ == num_slots);
   } else {
     num_slots_ = num_slots;
   }
+  SetSubscriberQueueArenaSize(subscriber_queue_arena_size);
+  SetSubscriberQueueSize(subscriber_queue_arena_size == 0
+                             ? 0
+                             : kDefaultSubscriberQueueSize);
+
+  // Every failure below leaves the channel with no mapped memory (Unmap()
+  // has already run).  Restore the geometry we were called with so the
+  // channel reverts to exactly that state instead of claiming to have
+  // num_slots_ slots with a null CCB, which would make IsPlaceholder() lie
+  // and let the next publisher skip the remap and map nothing.  Callers
+  // that pass num_slots_ to UnmapMemory must do so before restoring.
+  auto restore_geometry = [&]() {
+    scb_ = nullptr;
+    ccb_ = nullptr;
+    bcb_ = nullptr;
+    num_slots_ = previous_num_slots;
+    subscriber_queue_arena_size_ = previous_queue_arena_size;
+    subscriber_queue_size_ = previous_queue_size;
+  };
 
   // Map SCB into process memory.
   scb_ = reinterpret_cast<SystemControlBlock *>(MapMemory(
       scb_fd.Fd(), sizeof(SystemControlBlock), PROT_READ | PROT_WRITE, "SCB"));
   if (scb_ == MAP_FAILED) {
+    restore_geometry();
     return absl::InternalError(absl::StrFormat(
         "Failed to map SystemControlBlock: %s", strerror(errno)));
   }
@@ -280,22 +367,32 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
   SharedMemoryFds fds;
 
   // Create CCB in shared memory and map into process memory.
-  absl::StatusOr<void *> p =
-      CreateSharedMemory(channel_id_, "ccb", CcbSize(num_slots_), /*map=*/true,
-                         fds.ccb, session_id_);
+  absl::StatusOr<size_t> checked_ccb_size =
+      CheckedCcbSize(num_slots_, subscriber_queue_arena_size_);
+  if (!checked_ccb_size.ok()) {
+    UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+    restore_geometry();
+    return checked_ccb_size.status();
+  }
+  absl::StatusOr<void *> p = CreateSharedMemory(
+      channel_id_, "ccb", *checked_ccb_size,
+      /*map=*/true, fds.ccb, session_id_);
   if (!p.ok()) {
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+    restore_geometry();
     return p.status();
   }
   ccb_ = reinterpret_cast<ChannelControlBlock *>(*p);
-  ccb_->num_subs = SubscriberCounter();
+  new (&ccb_->num_subs) SubscriberCounter();
+  new (&ccb_->subscriber_cleanup_generation) SubscriberCleanupGeneration();
 
   // Create buffer control block.
   p = CreateSharedMemory(channel_id_, "bcb", sizeof(BufferControlBlock),
                          /*map=*/true, fds.bcb, session_id_);
   if (!p.ok()) {
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
-    UnmapMemory(ccb_, CcbSize(num_slots_), "CCB");
+    UnmapMemory(ccb_, CcbSize(num_slots_, subscriber_queue_arena_size_), "CCB");
+    restore_geometry();
     return p.status();
   }
   bcb_ = reinterpret_cast<BufferControlBlock *>(*p);
@@ -306,19 +403,36 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
   // of debugging (you can see it in all processes).
   strncpy(ccb_->channel_name, name_.c_str(), kMaxChannelName - 1);
   ccb_->num_slots = num_slots_;
+  ccb_->subscriber_queue_size = subscriber_queue_size_;
+  ccb_->version = kChannelControlBlockVersion;
 
   // Initialize all ordinals.
   ccb_->ordinals.Init(initial_ordinal);
 
   new (&ccb_->subscribers) AtomicBitSet<kMaxSlotOwners>();
+  auto *queue_index =
+      new (GetAvailableSlotQueueIndexAddress()) AvailableSlotQueueIndex;
+  queue_index->next_offset.store(0, std::memory_order_relaxed);
+  for (auto &offset : queue_index->offsets) {
+    offset.store(kInvalidSlotQueueOffset, std::memory_order_relaxed);
+  }
+  for (auto &active : queue_index->active_publishers) {
+    active.store(0, std::memory_order_relaxed);
+  }
 
   // Initialize all slots
   for (int32_t i = 0; i < num_slots_; i++) {
     MessageSlot *slot = &ccb_->slots[i];
     slot->id = i;
-    slot->refs = 0;
-    slot->vchan_id = -1;
-    slot->buffer_index = -1; // No buffer in the free list.
+    slot->refs.store(0, std::memory_order_relaxed);
+    slot->ordinal.store(0, std::memory_order_relaxed);
+    slot->message_size.store(0, std::memory_order_relaxed);
+    slot->vchan_id.store(-1, std::memory_order_relaxed);
+    slot->buffer_index.store(-1,
+                             std::memory_order_relaxed); // No buffer in the free list.
+    slot->timestamp.store(0, std::memory_order_relaxed);
+    slot->flags.store(0, std::memory_order_relaxed);
+    slot->bridged_slot_id.store(-1, std::memory_order_relaxed);
     new (&slot->sub_owners) AtomicBitSet<kMaxSlotOwners>();
   }
 
@@ -354,19 +468,82 @@ ServerChannel::MapExisting(const toolbelt::FileDescriptor &scb_fd,
         "Failed to map recovered SCB: %s", strerror(errno)));
   }
 
+  absl::StatusOr<size_t> checked_ccb_size =
+      CheckedCcbSize(num_slots_, subscriber_queue_arena_size_);
+  if (!checked_ccb_size.ok()) {
+    UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+    return checked_ccb_size.status();
+  }
   ccb_ = reinterpret_cast<ChannelControlBlock *>(MapMemory(
-      ccb_fd.Fd(), CcbSize(num_slots_), PROT_READ | PROT_WRITE, "CCB"));
+      ccb_fd.Fd(), *checked_ccb_size, PROT_READ | PROT_WRITE, "CCB"));
   if (ccb_ == MAP_FAILED) {
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
     return absl::InternalError(absl::StrFormat(
         "Failed to map recovered CCB: %s", strerror(errno)));
+  }
+  if (ccb_->version != kChannelControlBlockVersion) {
+    UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+    UnmapMemory(ccb_, *checked_ccb_size, "CCB");
+    return absl::FailedPreconditionError(absl::StrFormat(
+        "unsupported channel control block version %u (expected %u)",
+        ccb_->version, kChannelControlBlockVersion));
+  }
+  AvailableSlotQueueIndex *queue_index = GetAvailableSlotQueueIndexAddress();
+  const uint64_t arena_size = SubscriberQueueArenaSize();
+  const uint64_t next_offset =
+      queue_index->next_offset.load(std::memory_order_acquire);
+  if (next_offset > arena_size) {
+    UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+    UnmapMemory(ccb_, *checked_ccb_size, "CCB");
+    return absl::FailedPreconditionError(
+        "recovered subscriber queue arena high-water mark is out of range");
+  }
+  char *arena = EndOfAvailableSlotQueueIndex();
+  for (uint64_t offset = 0; offset < next_offset;) {
+    auto *block = reinterpret_cast<SlotQueueBlockHeader *>(arena + offset);
+    const uint32_t state = block->state.load(std::memory_order_acquire);
+    if (block->block_size < SlotQueueBlockSize(0) ||
+        block->block_size > next_offset - offset ||
+        state > static_cast<uint32_t>(SlotQueueBlockState::kFree)) {
+      UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+      UnmapMemory(ccb_, *checked_ccb_size, "CCB");
+      return absl::FailedPreconditionError(
+          "recovered subscriber queue arena contains a corrupt block");
+    }
+    offset += block->block_size;
+  }
+  for (int sub_id = 0; sub_id < kMaxSlotOwners; ++sub_id) {
+    const uint64_t offset =
+        queue_index->offsets[sub_id].load(std::memory_order_acquire);
+    if (offset == kInvalidSlotQueueOffset) {
+      continue;
+    }
+    if (offset < SlotQueueBlockHeaderSize() || offset >= next_offset) {
+      UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+      UnmapMemory(ccb_, *checked_ccb_size, "CCB");
+      return absl::FailedPreconditionError(
+          "recovered subscriber queue offset is out of range");
+    }
+    auto *block = reinterpret_cast<SlotQueueBlockHeader *>(
+        arena + offset - SlotQueueBlockHeaderSize());
+    auto *queue = reinterpret_cast<InPlaceSlotQueue *>(arena + offset);
+    if (block->state.load(std::memory_order_acquire) !=
+            static_cast<uint32_t>(SlotQueueBlockState::kAllocated) ||
+        queue->Capacity() > kDefaultMaxAvailableSlotQueueCapacity ||
+        static_cast<uint64_t>(Aligned(SizeofSlotQueue(queue->Capacity()))) >
+            block->block_size - SlotQueueBlockHeaderSize()) {
+      UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+      UnmapMemory(ccb_, *checked_ccb_size, "CCB");
+      return absl::FailedPreconditionError(
+          "recovered subscriber queue metadata is inconsistent");
+    }
   }
 
   bcb_ = reinterpret_cast<BufferControlBlock *>(MapMemory(
       bcb_fd.Fd(), sizeof(BufferControlBlock), PROT_READ | PROT_WRITE, "BCB"));
   if (bcb_ == MAP_FAILED) {
     UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
-    UnmapMemory(ccb_, CcbSize(num_slots_), "CCB");
+    UnmapMemory(ccb_, *checked_ccb_size, "CCB");
     return absl::InternalError(absl::StrFormat(
         "Failed to map recovered BCB: %s", strerror(errno)));
   }
@@ -422,6 +599,31 @@ std::vector<toolbelt::FileDescriptor> ServerChannel::GetRetirementFds() const {
   }
   return r;
 }
+
+void ServerChannel::NotifyPublisherRetirement(int32_t slot_id) {
+  for (auto &[id, user] : users_) {
+    if (user == nullptr || !user->IsPublisher()) {
+      continue;
+    }
+    auto &fd =
+        static_cast<PublisherUser *>(user.get())->GetRetirementFdWriter();
+    if (!fd.Valid()) {
+      continue;
+    }
+    absl::StatusOr<ssize_t> written = fd.Write(&slot_id, sizeof(slot_id));
+    if (!written.ok()) {
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to trigger retirement for slot %d: %s", slot_id,
+                  written.status().ToString().c_str());
+    } else if (*written != sizeof(slot_id)) {
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Failed to trigger retirement for slot %d: wrote %zd "
+                  "bytes, expected %zu bytes",
+                  slot_id, *written, sizeof(slot_id));
+    }
+  }
+}
+
 // User ids are allocated from the multiplexer as all virtual channels
 // on the mux share the same CCB.
 absl::StatusOr<int> ServerChannel::AllocateUserId(const char *type) {
@@ -431,14 +633,16 @@ absl::StatusOr<int> ServerChannel::AllocateUserId(const char *type) {
 absl::StatusOr<PublisherUser *>
 ServerChannel::AddPublisher(ClientHandler *handler, bool is_reliable,
                             bool is_local, bool is_bridge, bool for_tunnel,
-                            bool is_fixed_size, uint64_t process_id) {
+                            bool is_fixed_size,
+                            int max_outstanding_slot_leases,
+                            uint64_t process_id) {
   absl::StatusOr<int> user_id = AllocateUserId("publisher");
   if (!user_id.ok()) {
     return user_id.status();
   }
   std::unique_ptr<PublisherUser> pub = std::make_unique<PublisherUser>(
       handler, *user_id, is_reliable, is_local, is_bridge, for_tunnel,
-      is_fixed_size);
+      is_fixed_size, max_outstanding_slot_leases);
   pub->SetProcessId(process_id);
   absl::Status status = pub->Init();
   if (!status.ok()) {
@@ -446,44 +650,442 @@ ServerChannel::AddPublisher(ClientHandler *handler, bool is_reliable,
   }
   PublisherUser *result = pub.get();
   AddUser(*user_id, std::move(pub));
-
+  if (is_local) {
+    LatchLocal();
+  }
   return result;
 }
 
 absl::StatusOr<SubscriberUser *>
 ServerChannel::AddSubscriber(ClientHandler *handler, bool is_reliable,
                              bool is_bridge, bool for_tunnel,
-                             int max_active_messages, uint64_t process_id) {
+                             int max_active_messages, int subscriber_queue_size,
+                             uint64_t process_id, bool is_local) {
   absl::StatusOr<int> user_id = AllocateUserId("subscriber");
   if (!user_id.ok()) {
     return user_id.status();
   }
+  if (absl::Status status =
+          AllocateSubscriberQueue(*user_id, subscriber_queue_size);
+      !status.ok()) {
+    RemoveUserId(*user_id);
+    return status;
+  }
   std::unique_ptr<SubscriberUser> sub = std::make_unique<SubscriberUser>(
       handler, *user_id, is_reliable, is_bridge, for_tunnel,
-      max_active_messages);
+      max_active_messages, subscriber_queue_size, is_local);
   sub->SetProcessId(process_id);
   absl::Status status = sub->Init();
   if (!status.ok()) {
+    RetireSubscriberQueue(*user_id);
+    RemoveUserId(*user_id);
     return status;
   }
   SubscriberUser *result = sub.get();
   AddUser(*user_id, std::move(sub));
+  if (is_local) {
+    LatchLocal();
+  }
   return result;
 }
 
-void ServerChannel::RegisterExistingSubscribers() {
+absl::Status
+ServerChannel::AllocateSubscriberQueue(int sub_id,
+                                       int subscriber_queue_size) {
+  if (IsVirtual()) {
+    return static_cast<VirtualChannel *>(this)
+        ->GetMux()
+        ->AllocateSubscriberQueue(sub_id, subscriber_queue_size);
+  }
+  if (IsPlaceholder()) {
+    return absl::OkStatus();
+  }
+  const int capacity =
+      ResolveSubscriberQueueSize(NumSlots(), subscriber_queue_size == 0
+                                                 ? SubscriberQueueSize()
+                                                 : subscriber_queue_size);
+  AvailableSlotQueueIndex *index = GetAvailableSlotQueueIndexAddress();
+  const uint64_t existing_queue_offset =
+      index->offsets[sub_id].load(std::memory_order_acquire);
+  uint64_t next_offset =
+      index->next_offset.load(std::memory_order_relaxed);
+  char *arena = EndOfAvailableSlotQueueIndex();
+  if (existing_queue_offset != kInvalidSlotQueueOffset) {
+    if (capacity == 0 ||
+        existing_queue_offset < SlotQueueBlockHeaderSize()) {
+      return absl::FailedPreconditionError(absl::StrFormat(
+          "invalid existing subscriber queue for subscriber %d on channel %s",
+          sub_id, Name()));
+    }
+    const uint64_t block_offset =
+        existing_queue_offset - SlotQueueBlockHeaderSize();
+    if (block_offset >= next_offset) {
+      return absl::FailedPreconditionError(absl::StrFormat(
+          "existing subscriber queue for subscriber %d on channel %s is "
+          "outside the queue arena",
+          sub_id, Name()));
+    }
+    auto *block =
+        reinterpret_cast<SlotQueueBlockHeader *>(arena + block_offset);
+    auto *queue =
+        reinterpret_cast<InPlaceSlotQueue *>(arena + existing_queue_offset);
+    if (static_cast<SlotQueueBlockState>(
+            block->state.load(std::memory_order_acquire)) !=
+            SlotQueueBlockState::kAllocated ||
+        queue->Capacity() != static_cast<size_t>(capacity)) {
+      return absl::FailedPreconditionError(absl::StrFormat(
+          "existing subscriber queue for subscriber %d on channel %s has "
+          "inconsistent allocation metadata",
+          sub_id, Name()));
+    }
+    return absl::OkStatus();
+  }
+  if (capacity == 0) {
+    index->offsets[sub_id].store(kInvalidSlotQueueOffset,
+                                 std::memory_order_release);
+    return absl::OkStatus();
+  }
+
+  const size_t allocation_size =
+      SlotQueueBlockSize(static_cast<size_t>(capacity));
+  const size_t arena_size = SubscriberQueueArenaSize();
+  auto block_at = [arena](uint64_t offset) {
+    return reinterpret_cast<SlotQueueBlockHeader *>(arena + offset);
+  };
+  auto state_of = [](SlotQueueBlockHeader *block) {
+    return static_cast<SlotQueueBlockState>(
+        block->state.load(std::memory_order_acquire));
+  };
+
+  // Publishers that started after subscriber retirement cannot observe the
+  // retired subscriber bit. Once every publisher that was active at retirement
+  // has left its traversal, the block is safe to reuse.
+  for (uint64_t offset = 0; offset < next_offset;) {
+    SlotQueueBlockHeader *block = block_at(offset);
+    if (block->block_size < SlotQueueBlockSize(0) ||
+        block->block_size > next_offset - offset) {
+      return absl::InternalError(
+          absl::StrFormat("corrupt subscriber queue arena for channel %s",
+                          Name()));
+    }
+    if (state_of(block) == SlotQueueBlockState::kRetired) {
+      block->waiting_publishers.Traverse([block, index](int pub_id) {
+        if (index->active_publishers[pub_id].load(
+                std::memory_order_seq_cst) == 0) {
+          block->waiting_publishers.Clear(pub_id);
+        }
+      });
+      if (block->waiting_publishers.IsEmpty()) {
+        block->state.store(static_cast<uint32_t>(SlotQueueBlockState::kFree),
+                           std::memory_order_release);
+      }
+    }
+    offset += block->block_size;
+  }
+
+  // Coalesce adjacent safe free blocks to avoid permanent fragmentation when
+  // subscribers churn between different queue capacities.
+  for (uint64_t offset = 0; offset < next_offset;) {
+    SlotQueueBlockHeader *block = block_at(offset);
+    if (state_of(block) == SlotQueueBlockState::kFree) {
+      while (offset + block->block_size < next_offset) {
+        SlotQueueBlockHeader *next = block_at(offset + block->block_size);
+        if (state_of(next) != SlotQueueBlockState::kFree) {
+          break;
+        }
+        block->block_size += next->block_size;
+      }
+    }
+    offset += block->block_size;
+  }
+
+  uint64_t block_offset = kInvalidSlotQueueOffset;
+  uint64_t best_size = std::numeric_limits<uint64_t>::max();
+  for (uint64_t offset = 0; offset < next_offset;) {
+    SlotQueueBlockHeader *block = block_at(offset);
+    if (state_of(block) == SlotQueueBlockState::kFree &&
+        block->block_size >= allocation_size && block->block_size < best_size) {
+      block_offset = offset;
+      best_size = block->block_size;
+    }
+    offset += block->block_size;
+  }
+
+  if (block_offset == kInvalidSlotQueueOffset) {
+    if (allocation_size > arena_size ||
+        next_offset > arena_size - allocation_size) {
+      return absl::ResourceExhaustedError(absl::StrFormat(
+          "subscriber queue capacity %d does not fit in channel %s queue arena "
+          "(%zu of %zu bytes remain)",
+          capacity, Name(),
+          arena_size - std::min<size_t>(next_offset, arena_size), arena_size));
+    }
+    block_offset = next_offset;
+    SlotQueueBlockHeader *block =
+        new (arena + block_offset) SlotQueueBlockHeader;
+    block->block_size = allocation_size;
+    next_offset += allocation_size;
+    index->next_offset.store(next_offset, std::memory_order_relaxed);
+  } else {
+    SlotQueueBlockHeader *block = block_at(block_offset);
+    const uint64_t remainder = block->block_size - allocation_size;
+    if (remainder >= SlotQueueBlockSize(0)) {
+      block->block_size = allocation_size;
+      SlotQueueBlockHeader *split =
+          new (arena + block_offset + allocation_size) SlotQueueBlockHeader;
+      split->block_size = remainder;
+      split->state.store(
+          static_cast<uint32_t>(SlotQueueBlockState::kFree),
+          std::memory_order_relaxed);
+    }
+  }
+
+  SlotQueueBlockHeader *block = block_at(block_offset);
+  block->waiting_publishers.ClearAll();
+  block->state.store(
+      static_cast<uint32_t>(SlotQueueBlockState::kAllocated),
+      std::memory_order_relaxed);
+  const uint64_t queue_offset = block_offset + SlotQueueBlockHeaderSize();
+  new (arena + queue_offset)
+      InPlaceSlotQueue(static_cast<size_t>(capacity),
+                       /*drop_oldest=*/subscriber_queue_size != 0);
+  index->offsets[sub_id].store(queue_offset, std::memory_order_release);
+  return absl::OkStatus();
+}
+
+void ServerChannel::RetireSubscriberQueue(int sub_id) {
+  if (IsVirtual()) {
+    static_cast<VirtualChannel *>(this)->GetMux()->RetireSubscriberQueue(sub_id);
+    return;
+  }
+  if (IsPlaceholder()) {
+    return;
+  }
+  AvailableSlotQueueIndex *index = GetAvailableSlotQueueIndexAddress();
+  const uint64_t queue_offset =
+      index->offsets[sub_id].exchange(kInvalidSlotQueueOffset,
+                                      std::memory_order_seq_cst);
+  if (queue_offset == kInvalidSlotQueueOffset ||
+      queue_offset < SlotQueueBlockHeaderSize()) {
+    return;
+  }
+  const uint64_t block_offset = queue_offset - SlotQueueBlockHeaderSize();
+  if (block_offset >=
+      index->next_offset.load(std::memory_order_acquire)) {
+    return;
+  }
+  auto *block = reinterpret_cast<SlotQueueBlockHeader *>(
+      EndOfAvailableSlotQueueIndex() + block_offset);
+  block->waiting_publishers.ClearAll();
+  for (int pub_id = 0; pub_id < kMaxSlotOwners; ++pub_id) {
+    if (index->active_publishers[pub_id].load(std::memory_order_seq_cst) != 0) {
+      block->waiting_publishers.Set(pub_id);
+    }
+  }
+  block->state.store(
+      static_cast<uint32_t>(block->waiting_publishers.IsEmpty()
+                                ? SlotQueueBlockState::kFree
+                                : SlotQueueBlockState::kRetired),
+      std::memory_order_release);
+}
+
+absl::Status ServerChannel::ReconcileSubscriberQueueArena() {
+  if (IsVirtual()) {
+    return static_cast<VirtualChannel *>(this)
+        ->GetMux()
+        ->ReconcileSubscriberQueueArena();
+  }
+  if (IsPlaceholder()) {
+    return absl::OkStatus();
+  }
+
+  AvailableSlotQueueIndex *index = GetAvailableSlotQueueIndexAddress();
+  const uint64_t next_offset =
+      index->next_offset.load(std::memory_order_acquire);
+  char *arena = EndOfAvailableSlotQueueIndex();
+  auto block_at = [arena](uint64_t offset) {
+    return reinterpret_cast<SlotQueueBlockHeader *>(arena + offset);
+  };
+
+  absl::flat_hash_map<uint64_t, int> owners;
+  for (int sub_id = 0; sub_id < kMaxSlotOwners; ++sub_id) {
+    const uint64_t queue_offset =
+        index->offsets[sub_id].load(std::memory_order_acquire);
+    if (queue_offset == kInvalidSlotQueueOffset) {
+      continue;
+    }
+    if (!ccb_->subscribers.IsSet(sub_id)) {
+      RetireSubscriberQueue(sub_id);
+      continue;
+    }
+    const uint64_t block_offset = queue_offset - SlotQueueBlockHeaderSize();
+    if (!owners.emplace(block_offset, sub_id).second) {
+      return absl::FailedPreconditionError(absl::StrFormat(
+          "subscriber queue arena for channel %s has duplicate ownership of "
+          "block offset %llu",
+          Name(), static_cast<unsigned long long>(block_offset)));
+    }
+  }
+
+  for (uint64_t offset = 0; offset < next_offset;) {
+    SlotQueueBlockHeader *block = block_at(offset);
+    SlotQueueBlockState state = static_cast<SlotQueueBlockState>(
+        block->state.load(std::memory_order_acquire));
+    if (state == SlotQueueBlockState::kAllocated &&
+        !owners.contains(offset)) {
+      // A crash may occur after constructing a block but before publishing its
+      // subscriber offset, or after clearing the offset but before retirement.
+      // Retire conservatively against every publisher that may still hold an
+      // arena pointer.
+      block->waiting_publishers.ClearAll();
+      for (int pub_id = 0; pub_id < kMaxSlotOwners; ++pub_id) {
+        if (index->active_publishers[pub_id].load(
+                std::memory_order_seq_cst) != 0) {
+          block->waiting_publishers.Set(pub_id);
+        }
+      }
+      state = block->waiting_publishers.IsEmpty()
+                  ? SlotQueueBlockState::kFree
+                  : SlotQueueBlockState::kRetired;
+      block->state.store(static_cast<uint32_t>(state),
+                         std::memory_order_release);
+    }
+    if (state == SlotQueueBlockState::kRetired) {
+      block->waiting_publishers.Traverse([block, index](int pub_id) {
+        if (index->active_publishers[pub_id].load(
+                std::memory_order_seq_cst) == 0) {
+          block->waiting_publishers.Clear(pub_id);
+        }
+      });
+      if (block->waiting_publishers.IsEmpty()) {
+        block->state.store(static_cast<uint32_t>(SlotQueueBlockState::kFree),
+                           std::memory_order_release);
+      }
+    }
+    offset += block->block_size;
+  }
+
+  for (uint64_t offset = 0; offset < next_offset;) {
+    SlotQueueBlockHeader *block = block_at(offset);
+    if (static_cast<SlotQueueBlockState>(
+            block->state.load(std::memory_order_acquire)) ==
+        SlotQueueBlockState::kFree) {
+      while (offset + block->block_size < next_offset) {
+        SlotQueueBlockHeader *next = block_at(offset + block->block_size);
+        if (static_cast<SlotQueueBlockState>(
+                next->state.load(std::memory_order_acquire)) !=
+            SlotQueueBlockState::kFree) {
+          break;
+        }
+        block->block_size += next->block_size;
+      }
+    }
+    offset += block->block_size;
+  }
+  return absl::OkStatus();
+}
+
+void ServerChannel::ClearPublisherQueueHazardIfDead(int publisher_id,
+                                                    uint64_t process_id) {
+  if (!ProcessDefinitelyDead(process_id) || IsPlaceholder()) {
+    return;
+  }
+  ServerChannel *storage_channel =
+      IsVirtual()
+          ? static_cast<ServerChannel *>(
+                static_cast<VirtualChannel *>(this)->GetMux())
+          : this;
+  storage_channel->GetAvailableSlotQueueIndexAddress()
+      ->active_publishers[publisher_id]
+      .store(0, std::memory_order_seq_cst);
+}
+
+void ServerChannel::CleanupSlots(int owner, bool reliable, bool is_pub,
+                                 int vchan_id) {
+  if (is_pub) {
+    Channel::CleanupSlots(owner, reliable, is_pub, vchan_id);
+    return;
+  }
+
+  ccb_->subscribers.ClearSeqCst(owner);
+  RetireSubscriberQueue(owner);
+
+  Channel::CleanupSlots(owner, reliable, is_pub, vchan_id);
+  ccb_->subscriber_cleanup_generation.Increment(vchan_id);
+
+  // Re-evaluate every published slot after lowering the subscriber count.
+  // Publication commit performs the same check. If this scan encounters a
+  // publisher-owned slot it leaves it alone; the publisher's later commit
+  // observes the new count and completes retirement. If commit happened first,
+  // this scan completes retirement.
+  for (int i = 0; i < NumSlots(); ++i) {
+    MessageSlot *slot = &ccb_->slots[i];
+    if ((slot->flags.load(std::memory_order_relaxed) &
+         kMessageIsActivation) != 0) {
+      continue;
+    }
+    if (vchan_id != -1 &&
+        slot->vchan_id.load(std::memory_order_relaxed) != vchan_id) {
+      continue;
+    }
+
+    if (TryRetireSlot(slot)) {
+      NotifyPublisherRetirement(
+          slot->bridged_slot_id.load(std::memory_order_relaxed));
+    }
+  }
+}
+
+std::vector<std::string> ServerChannel::RegisterExistingSubscribers() {
+  std::vector<std::string> warnings;
   for (auto &[id, user] : users_) {
     if (user == nullptr || !user->IsSubscriber()) {
       continue;
     }
-    RegisterSubscriber(id, GetVirtualChannelId(), /*is_new=*/true);
+    auto *sub = static_cast<SubscriberUser *>(user.get());
+    ServerChannel *storage_channel =
+        IsVirtual()
+            ? static_cast<ServerChannel *>(
+                  static_cast<VirtualChannel *>(this)->GetMux())
+            : this;
+    const bool was_registered =
+        !IsPlaceholder() &&
+        storage_channel->GetCcb()->subscribers.IsSet(id);
+    if (absl::Status status =
+            AllocateSubscriberQueue(id, sub->SubscriberQueueSize());
+        !status.ok()) {
+      // The arena was provisioned from the publisher default and should fit
+      // every default-sized subscriber. A pre-publisher override can still
+      // exceed that budget, so leave that subscriber on the bitset path.
+      RetireSubscriberQueue(id);
+      warnings.push_back(absl::StrFormat(
+          "Subscriber %d on channel %s requested queue capacity %d but the "
+          "publisher-provisioned arena cannot fit it; using the bitset path: "
+          "%s",
+          id, Name(), sub->SubscriberQueueSize(), status.ToString()));
+    }
+    RegisterSubscriber(id, GetVirtualChannelId(),
+                       /*is_new=*/!was_registered);
   }
+  return warnings;
 }
 
-void ChannelMultiplexer::RegisterExistingSubscribers() {
-  ServerChannel::RegisterExistingSubscribers();
+std::vector<std::string> ChannelMultiplexer::RegisterExistingSubscribers() {
+  std::vector<std::string> warnings =
+      ServerChannel::RegisterExistingSubscribers();
   for (VirtualChannel *vchan : virtual_channels_) {
-    vchan->RegisterExistingSubscribers();
+    std::vector<std::string> vchan_warnings =
+        vchan->RegisterExistingSubscribers();
+    warnings.insert(warnings.end(), vchan_warnings.begin(),
+                    vchan_warnings.end());
+  }
+  return warnings;
+}
+
+void ChannelMultiplexer::NotifyPublisherRetirement(int32_t slot_id) {
+  ServerChannel::NotifyPublisherRetirement(slot_id);
+  for (VirtualChannel *vchan : virtual_channels_) {
+    vchan->NotifyPublisherRetirement(slot_id);
   }
 }
 
@@ -515,39 +1117,84 @@ void ServerChannel::RemoveUser(Server *server, int user_id) {
   }
   if (user->IsPublisher()) {
     server->OnRemovePublisher(Name(), user->GetId());
-    server->ForEachShadow(
-        [this, &user](const std::unique_ptr<ShadowReplicator> &shadow) {
-          shadow->SendRemovePublisher(Name(), user->GetId());
-        });
+    if (!IsTelemetryChannel()) {
+      // Telemetry publishers are ephemeral and are never shadowed.
+      server->ForEachShadow(
+          [this, &user](const std::unique_ptr<ShadowReplicator> &shadow) {
+            shadow->SendRemovePublisher(Name(), user->GetId());
+          });
+    }
   } else {
     server->OnRemoveSubscriber(Name(), user->GetId());
     server->ForEachShadow(
         [this, &user](const std::unique_ptr<ShadowReplicator> &shadow) {
           shadow->SendRemoveSubscriber(Name(), user->GetId());
         });
+    if (IsTelemetryChannel()) {
+      server->TelemetrySubscriberRemoved(this);
+    }
   }
   CleanupSlots(user->GetId(), user->IsReliable(), user->IsPublisher(),
                GetVirtualChannelId());
+  if (user->IsPublisher() && !IsPlaceholder()) {
+    ServerChannel *storage_channel =
+        IsVirtual()
+            ? static_cast<ServerChannel *>(
+                  static_cast<VirtualChannel *>(this)->GetMux())
+            : this;
+    // RemoveUser is an explicit client request serialized with publication, so
+    // no local SubscriberQueuePublishGuard can still be live.
+    storage_channel->GetAvailableSlotQueueIndexAddress()
+        ->active_publishers[user->GetId()]
+        .store(0, std::memory_order_seq_cst);
+  }
   RemoveUserId(user->GetId());
   RecordUpdate(user->IsPublisher(), /*add=*/false, user->IsReliable());
   if (user->IsPublisher()) {
     TriggerAllSubscribers();
   }
   users_.erase(it);
-  if (IsEmpty()) {
+  // The telemetry coroutine removes its hidden channel after its publisher is
+  // fully destroyed.
+  if (IsEmpty() && !IsTelemetryChannel()) {
     server->RemoveChannel(this);
   }
   server->SendChannelDirectory();
 }
 
-void ServerChannel::RemoveAllUsersFor(ClientHandler *handler) {
+void ServerChannel::RemoveAllUsersFor(Server *server, ClientHandler *handler) {
   for (auto &[id, user] : users_) {
     if (user == nullptr) {
       continue;
     }
     if (user->GetHandler() == handler) {
+      if (IsHidden()) {
+        // Hidden channels bypass public plugin callbacks, so mirror the
+        // subscriber cleanup explicitly on disconnect.
+        if (user->IsSubscriber() && IsTelemetryChannel()) {
+          server->ForEachShadow(
+              [this, &user](const std::unique_ptr<ShadowReplicator> &shadow) {
+                shadow->SendRemoveSubscriber(Name(), user->GetId());
+              });
+          server->TelemetrySubscriberRemoved(this);
+        }
+      } else {
+        server->RecordTelemetryParticipantChange(this, user.get(),
+                                                 /*added=*/false);
+      }
       CleanupSlots(user->GetId(), user->IsReliable(), user->IsPublisher(),
                    GetVirtualChannelId());
+      if (user->IsPublisher() && !IsPlaceholder() &&
+          ProcessDefinitelyDead(user->ProcessId())) {
+        ServerChannel *storage_channel =
+            IsVirtual()
+                ? static_cast<ServerChannel *>(
+                      static_cast<VirtualChannel *>(this)->GetMux())
+                : this;
+        storage_channel->GetAvailableSlotQueueIndexAddress()
+            ->active_publishers[user->GetId()]
+            .store(0, std::memory_order_seq_cst);
+      }
       RemoveUserId(user->GetId());
       RecordUpdate(user->IsPublisher(), /*add=*/false, user->IsReliable());
       if (user->IsPublisher()) {
@@ -588,17 +1235,52 @@ void ServerChannel::CountUsers(int &num_pubs, int &num_subs,
   }
 }
 
-// Channel is public if there are any public publishers.
-bool ServerChannel::IsLocal() const {
-  for (auto &[id, user] : users_) {
+void ServerChannel::CountCapacityUsage(
+    int &max_active_messages, int &max_outstanding_slot_leases) const {
+  max_active_messages = 0;
+  max_outstanding_slot_leases = 0;
+  for (const auto &[id, user] : users_) {
     if (user == nullptr) {
       continue;
     }
     if (user->IsPublisher()) {
-      PublisherUser *pub = static_cast<PublisherUser *>(user.get());
-      if (pub->IsLocal()) {
-        return true;
-      }
+      max_outstanding_slot_leases +=
+          static_cast<const PublisherUser *>(user.get())
+              ->MaxOutstandingSlotLeases();
+    } else {
+      max_active_messages +=
+          static_cast<const SubscriberUser *>(user.get())->MaxActiveMessages();
+    }
+  }
+}
+
+// A channel is local once a local publisher or subscriber has joined it, and
+// stays local until it is removed.  A local channel is neither advertised to
+// nor bridged to other servers.
+bool ServerChannel::IsLocal() const {
+  if (local_latched_) {
+    return true;
+  }
+  for (auto &[id, user] : users_) {
+    if (user == nullptr) {
+      continue;
+    }
+    if (user->IsSubscriber() &&
+        static_cast<SubscriberUser *>(user.get())->IsLocal()) {
+      return true;
+    }
+  }
+  return HasLocalPublisher();
+}
+
+bool ServerChannel::HasLocalPublisher() const {
+  for (auto &[id, user] : users_) {
+    if (user == nullptr) {
+      continue;
+    }
+    if (user->IsPublisher() &&
+        static_cast<PublisherUser *>(user.get())->IsLocal()) {
+      return true;
     }
   }
   return false;
@@ -674,9 +1356,10 @@ bool ServerChannel::IsBridgeSubscriber() const {
 }
 
 ServerChannel::CapacityInfo ServerChannel::HasSufficientCapacityInternal(
-    int new_max_active_messages) const {
+    int new_max_active_messages,
+    int new_max_outstanding_slot_leases) const {
   if (NumSlots() == 0) {
-    return CapacityInfo{true, 0, 0, 0, 0};
+    return CapacityInfo{true, 0, 0, 0, 0, 0};
   }
   // Count number of publishers and subscribers.
   int num_pubs, num_subs, num_bridge_pubs, num_bridge_subs;
@@ -684,25 +1367,23 @@ ServerChannel::CapacityInfo ServerChannel::HasSufficientCapacityInternal(
   CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs,
              num_tunnel_pubs, num_tunnel_subs);
 
-  // Add in the total active message maximums.
-  int max_active_messages = new_max_active_messages;
-  for (auto &[id, user] : users_) {
-    if (user == nullptr) {
-      continue;
-    }
-    if (user->IsSubscriber()) {
-      SubscriberUser *sub = static_cast<SubscriberUser *>(user.get());
-      max_active_messages += sub->MaxActiveMessages() - 1;
-    }
-  }
-  int slots_needed = num_pubs + num_subs + max_active_messages + 1;
+  int max_active_messages;
+  int max_outstanding_slot_leases;
+  CountCapacityUsage(max_active_messages, max_outstanding_slot_leases);
+  max_active_messages += new_max_active_messages;
+  max_outstanding_slot_leases += new_max_outstanding_slot_leases;
+  int slots_needed = max_active_messages + max_outstanding_slot_leases;
   return CapacityInfo{slots_needed <= NumSlots() - 1, num_pubs, num_subs,
-                      max_active_messages, slots_needed};
+                      max_active_messages, max_outstanding_slot_leases,
+                      slots_needed};
 }
 
 absl::Status
-ServerChannel::HasSufficientCapacity(int new_max_active_messages) const {
-  auto info = HasSufficientCapacityInternal(new_max_active_messages);
+ServerChannel::HasSufficientCapacity(
+    int new_max_active_messages,
+    int new_max_outstanding_slot_leases) const {
+  auto info = HasSufficientCapacityInternal(
+      new_max_active_messages, new_max_outstanding_slot_leases);
   if (info.capacity_ok) {
     return absl::OkStatus();
   }
@@ -710,19 +1391,59 @@ ServerChannel::HasSufficientCapacity(int new_max_active_messages) const {
 }
 
 absl::Status ServerChannel::CapacityError(const CapacityInfo &info) const {
-  return absl::InternalError(absl::StrFormat(
-      "there are %d slots with %d publisher%s and %d "
-      "subscriber%s with %d additional active message%s; you "
+  std::string message = absl::StrFormat(
+      "there are %d slots with %d publisher%s reserving %d slot lease%s and "
+      "%d subscriber%s reserving %d active message%s; you "
       "need at least %d slots",
-      NumSlots(), info.num_pubs, (info.num_pubs == 1 ? "" : "s"), info.num_subs,
+      NumSlots(), info.num_pubs, (info.num_pubs == 1 ? "" : "s"),
+      info.max_outstanding_slot_leases,
+      (info.max_outstanding_slot_leases == 1 ? "" : "s"), info.num_subs,
       (info.num_subs == 1 ? "" : "s"), info.max_active_messages,
-      (info.max_active_messages == 1 ? "" : "s"), info.slots_needed + 1));
+      (info.max_active_messages == 1 ? "" : "s"), info.slots_needed + 1);
+
+  auto append_users = [this, &message](bool publishers) {
+    message += publishers ? "; publishers=[" : "; subscribers=[";
+    bool first = true;
+    for (int id = 0; id < kMaxUsers; ++id) {
+      auto it = users_.find(id);
+      if (it == users_.end() || it->second == nullptr ||
+          it->second->IsPublisher() != publishers) {
+        continue;
+      }
+      const User &user = *it->second;
+      const ClientHandler *handler = user.GetHandler();
+      const std::string client_name =
+          handler == nullptr ? std::string("<disconnected>")
+                             : handler->ClientName();
+      message += absl::StrFormat(
+          "%s{pid=%llu, client=\"%s\"", first ? "" : ", ",
+          static_cast<unsigned long long>(user.ProcessId()), client_name);
+      if (user.IsPublisher()) {
+        const auto &publisher = static_cast<const PublisherUser &>(user);
+        message += absl::StrFormat(
+            ", max_outstanding_slot_leases=%d",
+            publisher.MaxOutstandingSlotLeases());
+      } else {
+        const auto &subscriber = static_cast<const SubscriberUser &>(user);
+        message += absl::StrFormat(
+            ", max_active_messages=%d", subscriber.MaxActiveMessages());
+      }
+      message += "}";
+      first = false;
+    }
+    message += "]";
+  };
+  append_users(/*publishers=*/true);
+  append_users(/*publishers=*/false);
+  return absl::InternalError(message);
 }
 
 void ServerChannel::GetChannelInfo(subspace::ChannelInfoProto *info) {
   info->set_name(Name());
   info->set_slot_size(SlotSize());
   info->set_num_slots(NumSlots());
+  info->set_subscriber_queue_size(SubscriberQueueSize());
+  info->set_subscriber_queue_arena_size(SubscriberQueueArenaSize());
   info->set_type(Type());
   info->set_channel_id(GetChannelId());
 
@@ -738,6 +1459,7 @@ void ServerChannel::GetChannelInfo(subspace::ChannelInfoProto *info) {
   info->set_num_tunnel_subs(num_tunnel_subs);
 
   info->set_is_reliable(IsReliable());
+  info->set_is_local(IsLocal());
   if (IsVirtual()) {
     info->set_is_virtual(true);
     VirtualChannel *vchan = static_cast<VirtualChannel *>(this);
@@ -789,7 +1511,8 @@ std::vector<ResizeInfo> ServerChannel::GetResizeInfo() const {
 void ServerChannel::GetChannelStats(subspace::ChannelStatsProto *stats) {
   stats->set_channel_name(Name());
   uint64_t total_bytes, total_messages;
-  uint32_t max_message_size, total_drops;
+  uint64_t max_message_size;
+  uint32_t total_drops;
   GetStatsCounters(total_bytes, total_messages, max_message_size, total_drops);
   stats->set_total_bytes(total_bytes);
   stats->set_total_messages(total_messages);
@@ -806,6 +1529,7 @@ void ServerChannel::GetChannelStats(subspace::ChannelStatsProto *stats) {
   stats->set_num_subs(num_subs);
   stats->set_num_bridge_pubs(num_bridge_pubs);
   stats->set_num_bridge_subs(num_bridge_subs);
+  stats->set_is_local(IsLocal());
 }
 
 ChannelCounters &ServerChannel::RecordUpdate(bool is_pub, bool add,
@@ -912,5 +1636,19 @@ void ChannelMultiplexer::CountUsers(int &num_pubs, int &num_subs,
   num_bridge_subs += total_bridge_subs;
   num_tunnel_pubs += total_tunnel_pubs;
   num_tunnel_subs += total_tunnel_subs;
+}
+
+void ChannelMultiplexer::CountCapacityUsage(
+    int &max_active_messages, int &max_outstanding_slot_leases) const {
+  ServerChannel::CountCapacityUsage(max_active_messages,
+                                    max_outstanding_slot_leases);
+  for (const VirtualChannel *vchan : virtual_channels_) {
+    int vchan_active_messages;
+    int vchan_outstanding_slot_leases;
+    vchan->CountCapacityUsage(vchan_active_messages,
+                              vchan_outstanding_slot_leases);
+    max_active_messages += vchan_active_messages;
+    max_outstanding_slot_leases += vchan_outstanding_slot_leases;
+  }
 }
 } // namespace subspace

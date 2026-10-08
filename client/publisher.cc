@@ -13,6 +13,18 @@
 namespace subspace {
 namespace details {
 
+class SubscriberQueuePublishGuard {
+public:
+  explicit SubscriberQueuePublishGuard(PublisherImpl &publisher)
+      : publisher_(publisher) {
+    publisher_.BeginSubscriberQueuePublish();
+  }
+  ~SubscriberQueuePublishGuard() { publisher_.EndSubscriberQueuePublish(); }
+
+private:
+  PublisherImpl &publisher_;
+};
+
 absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
   if (final_slot_size == 0) {
     // If we are being asked for a slot size of 0, we will just use 64 bytes.
@@ -174,15 +186,150 @@ void PublisherImpl::SetSlotToBiggestBuffer(MessageSlot *slot) {
   if (slot == nullptr) {
     return;
   }
-  if (slot->buffer_index != -1) {
+  const int old_buffer_index =
+      slot->buffer_index.load(std::memory_order_relaxed);
+  if (old_buffer_index != -1) {
     // If the slot has a buffer (it's not in the free list), decrement the
     // refs for the buffer.
-    if (bcb_->refs[slot->buffer_index].load(std::memory_order_relaxed) > 0) {
-      DecrementBufferRefs(slot->buffer_index);
+    if (bcb_->refs[old_buffer_index].load(std::memory_order_relaxed) > 0) {
+      DecrementBufferRefs(old_buffer_index);
     }
   }
-  slot->buffer_index = buffers_.size() - 1; // Use biggest buffer.
-  IncrementBufferRefs(slot->buffer_index);
+  const int new_buffer_index = buffers_.size() - 1;
+  slot->buffer_index.store(new_buffer_index, std::memory_order_relaxed);
+  IncrementBufferRefs(new_buffer_index);
+}
+
+uint64_t PublisherImpl::RegisterLease(MessageSlot *slot) {
+  if (slot == nullptr) {
+    return 0;
+  }
+  uint64_t lease_id = next_lease_id_++;
+  if (lease_id == 0) {
+    lease_id = next_lease_id_++;
+  }
+  leased_slots_[slot->id] = lease_id;
+  return lease_id;
+}
+
+MessageSlot *PublisherImpl::FindLease(int32_t slot_id,
+                                      uint64_t lease_id) const {
+  auto it = leased_slots_.find(slot_id);
+  if (it == leased_slots_.end() || it->second != lease_id) {
+    return nullptr;
+  }
+  MessageSlot *slot = GetSlot(slot_id);
+  if (slot == nullptr ||
+      slot->refs.load(std::memory_order_acquire) !=
+          (kPubOwned | uint64_t(publisher_id_))) {
+    return nullptr;
+  }
+  return slot;
+}
+
+void PublisherImpl::RemoveLease(int32_t slot_id) {
+  leased_slots_.erase(slot_id);
+}
+
+MessageSlot *PublisherImpl::ClaimRetiredSlot(int32_t slot_id) {
+  MessageSlot *slot = GetSlot(slot_id);
+  if (slot == nullptr || !RetiredSlots().IsSet(slot_id)) {
+    return nullptr;
+  }
+
+  uint64_t old_refs = slot->refs.load(std::memory_order_acquire);
+  if ((old_refs & (kPubOwned | kRefsMask)) != 0) {
+    return nullptr;
+  }
+  uint64_t expected = BuildRefsBitField(
+      slot->ordinal, (old_refs >> kVchanIdShift) & kVchanIdMask,
+      (old_refs >> kRetiredRefsShift) & kRetiredRefsMask);
+  if (!slot->refs.compare_exchange_strong(
+          expected, kPubOwned | uint64_t(publisher_id_),
+          std::memory_order_acquire, std::memory_order_relaxed)) {
+    return nullptr;
+  }
+  RetiredSlots().Clear(slot_id);
+  slot->ordinal = 0;
+  slot->timestamp = 0;
+  slot->vchan_id = vchan_id_;
+  SetSlotToBiggestBuffer(slot);
+  MessagePrefix *prefix = Prefix(slot);
+  prefix->flags = 0;
+  prefix->vchan_id = vchan_id_;
+  ccb_->subscribers.Traverse([this, slot](int sub_id) {
+    GetAvailableSlots(sub_id).Clear(slot->id);
+  });
+  return slot;
+}
+
+MessageSlot *PublisherImpl::ClaimAnyRetiredSlot() {
+  MessageSlot *claimed = nullptr;
+  RetiredSlots().Traverse([this, &claimed](size_t slot_id) {
+    if (claimed == nullptr) {
+      claimed = ClaimRetiredSlot(static_cast<int32_t>(slot_id));
+    }
+  });
+  return claimed;
+}
+
+bool PublisherImpl::ReleaseLeasedSlot(MessageSlot *slot) {
+  if (slot == nullptr ||
+      slot->refs.load(std::memory_order_acquire) !=
+          (kPubOwned | uint64_t(publisher_id_))) {
+    return false;
+  }
+  slot->ordinal = 0;
+  slot->timestamp = 0;
+  slot->refs.store(0, std::memory_order_release);
+  ccb_->subscribers.Traverse([this, slot](int sub_id) {
+    GetAvailableSlots(sub_id).Clear(slot->id);
+  });
+  RetiredSlots().Set(slot->id);
+  return true;
+}
+
+void PublisherImpl::RetirePublishedSlotImmediately(MessageSlot *slot) {
+  if (slot == nullptr) {
+    return;
+  }
+  const int32_t retirement_slot_id =
+      slot->bridged_slot_id.load(std::memory_order_relaxed);
+  if (TryRetireSlot(slot)) {
+    TriggerRetirement(retirement_slot_id);
+  }
+}
+
+int PublisherImpl::FindRetiredSlotToReuse(bool oldest_first) {
+  // Normally a slot is only retired once every subscriber has seen and
+  // dropped it, so the retired pool stays small and taking the lowest-index
+  // slot keeps the publisher on the cache-hot working set that
+  // SetPreferRetiredSlots() exists to produce.
+  if (!oldest_first) {
+    return RetiredSlots().FindFirstSet();
+  }
+  // With nothing subscribed every slot is retired the instant it is
+  // published, so the retired pool is the whole ring and the lowest-index
+  // slot is the one holding the oldest message.  Reusing that slot puts it
+  // straight back at the front of the pool, so the publisher would overwrite
+  // it forever while the rest of the ring stayed frozen on the messages that
+  // happened to be published first, and a subscriber attaching later would
+  // read those rather than recent history.  Recycling the oldest message
+  // rotates through the ring instead.
+  int oldest = -1;
+  uint64_t oldest_timestamp = -1ULL;
+  for (int i = 0; i < num_slots_; i++) {
+    if (!RetiredSlots().IsSet(i) || embargoed_slots_.IsSet(i)) {
+      continue;
+    }
+    const uint64_t timestamp =
+        ccb_->slots[i].timestamp.load(std::memory_order_relaxed);
+    if (timestamp < oldest_timestamp) {
+      oldest_timestamp = timestamp;
+      oldest = i;
+    }
+  }
+  return oldest;
 }
 
 MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
@@ -194,7 +341,7 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
   int retired_slot = -1;
   int free_slot = -1;
   // See PublisherOptions::SetPreferRetiredSlots() for the rationale.
-  // When true (the default) we prefer recycling a retired slot over
+  // When it is set we prefer recycling a retired slot over
   // pulling a fresh slot from the never-used pool.  Both are equally
   // valid for an unreliable publisher (a retired slot has been seen
   // by every current subscriber and dropped), but a retired slot's
@@ -205,15 +352,29 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
   // cycles through a tiny working set of retired slots without ever
   // consuming from FreeSlots, while still being able to burst into
   // FreeSlots if the subscriber falls behind.
-  const bool retired_first = options_.PreferRetiredSlots();
+  //
+  // None of that holds with nothing subscribed: a slot is then retired the
+  // moment it is published, so the publisher would take the slot it just
+  // wrote back out of the retired pool on the very next publish and never
+  // touch FreeSlots at all.  The ring would hold one message no matter how
+  // deep it is configured, and there is no publish/consume cycle keeping
+  // those pages hot to pay for it either.  Fill the ring from FreeSlots
+  // first while idle so that, together with the oldest-first recycling in
+  // FindRetiredSlotToReuse, it becomes a rolling window of recent messages
+  // for whoever attaches next.
   for (;;) {
     slot = nullptr;
     retired_slot = -1;
     free_slot = -1;
     CheckReload();
+    // Read the subscriber count off the reloaded CCB rather than caching it
+    // across the loop, so a subscriber attaching while we retry here is seen.
+    const bool no_subscribers = NumSubscribers(vchan_id_) == 0;
+    const bool retired_first =
+        options_.PreferRetiredSlots() && !no_subscribers;
     bool tried_first = false;
     if (retired_first) {
-      retired_slot = RetiredSlots().FindFirstSet();
+      retired_slot = FindRetiredSlotToReuse(/*oldest_first=*/no_subscribers);
       tried_first = (retired_slot != -1);
     } else if (!ccb_->free_slots_exhausted.load(std::memory_order_relaxed)) {
       free_slot = FreeSlots().FindFirstSet();
@@ -253,7 +414,8 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
         ccb_->free_slots_exhausted.store(true, std::memory_order_relaxed);
       }
     } else if (!retired_first &&
-               (retired_slot = RetiredSlots().FindFirstSet()) != -1) {
+               (retired_slot = FindRetiredSlotToReuse(
+                    /*oldest_first=*/no_subscribers)) != -1) {
       // FreeSlots exhausted (legacy order), fall back to RetiredSlots.
       if (embargoed_slots_.IsSet(retired_slot)) {
         continue;
@@ -275,9 +437,11 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
         if ((refs & kPubOwned) != 0) {
           continue;
         }
-        if ((refs & kRefsMask) == 0 && s->timestamp < earliest_timestamp) {
+        const uint64_t timestamp =
+            s->timestamp.load(std::memory_order_relaxed);
+        if ((refs & kRefsMask) == 0 && timestamp < earliest_timestamp) {
           slot = s;
-          earliest_timestamp = s->timestamp;
+          earliest_timestamp = timestamp;
         }
       }
     }
@@ -294,7 +458,8 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
     uint64_t old_refs = slot->refs.load(std::memory_order_relaxed);
     uint64_t ref = kPubOwned | owner;
     uint64_t expected = BuildRefsBitField(
-        slot->ordinal, (old_refs >> kVchanIdShift) & kVchanIdMask,
+        slot->ordinal.load(std::memory_order_relaxed),
+        (old_refs >> kVchanIdShift) & kVchanIdMask,
         (old_refs >> kRetiredRefsShift) & kRetiredRefsMask);
     if (slot->refs.compare_exchange_weak(expected, ref,
                                          std::memory_order_acquire,
@@ -316,9 +481,9 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
       std::this_thread::yield();
     }
   }
-  slot->ordinal = 0;
-  slot->timestamp = 0;
-  slot->vchan_id = vchan_id_;
+  slot->ordinal.store(0, std::memory_order_relaxed);
+  slot->timestamp.store(0, std::memory_order_relaxed);
+  slot->vchan_id.store(vchan_id_, std::memory_order_relaxed);
   SetSlotToBiggestBuffer(slot);
 
   MessagePrefix *p = Prefix(slot);
@@ -328,7 +493,9 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
   // We have a slot.  Clear it in all the subscriber bitsets.
   ccb_->subscribers.Traverse([this, slot](int sub_id) {
     int vid = GetSubVchanId(sub_id);
-    if (vid != -1 && slot->vchan_id != -1 && vid != slot->vchan_id) {
+    const int slot_vchan_id =
+        slot->vchan_id.load(std::memory_order_relaxed);
+    if (vid != -1 && slot_vchan_id != -1 && vid != slot_vchan_id) {
       return;
     }
 
@@ -338,7 +505,8 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
   // If we took a slot that wasn't retired we must trigger the retirement fd.
   // This happens when we recycle a slot that has not yet been seen by all
   // subscribers.
-  if (free_slot == -1 && retired_slot == -1) {
+  if (free_slot == -1 && retired_slot == -1 &&
+      NotifyRetirementOnForcedReuse()) {
     TriggerRetirement(slot->id);
   }
   return slot;
@@ -374,7 +542,9 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
       }
       MessageSlot *s = &ccb_->slots[free_slot];
 
-      ActiveSlot active_slot = {s, s->ordinal, s->timestamp};
+      ActiveSlot active_slot = {
+          s, s->ordinal.load(std::memory_order_relaxed),
+          s->timestamp.load(std::memory_order_relaxed)};
       active_slots_.push_back(active_slot);
     } else if (!ForTunnel() && (retired_slot = RetiredSlots().FindFirstSet()) != -1) {
       if (embargoed_slots_.IsSet(retired_slot)) {
@@ -386,7 +556,9 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
       }
       MessageSlot *s = &ccb_->slots[retired_slot];
 
-      ActiveSlot active_slot = {s, s->ordinal, s->timestamp};
+      ActiveSlot active_slot = {
+          s, s->ordinal.load(std::memory_order_relaxed),
+          s->timestamp.load(std::memory_order_relaxed)};
       active_slots_.push_back(active_slot);
     } else {
       for (int i = 0; i < NumSlots(); i++) {
@@ -396,7 +568,9 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
         MessageSlot *s = &ccb_->slots[i];
         uint64_t refs = s->refs.load(std::memory_order_relaxed);
         if ((refs & kPubOwned) == 0) {
-          ActiveSlot active_slot = {s, s->ordinal, s->timestamp};
+          ActiveSlot active_slot = {
+              s, s->ordinal.load(std::memory_order_relaxed),
+              s->timestamp.load(std::memory_order_relaxed)};
           active_slots_.push_back(active_slot);
         }
       }
@@ -412,13 +586,17 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
 
     // Look for a slot with zero refs but don't go past one with non-zero
     // reliable ref count.
+    const bool require_reliable_seen = GetCounters().num_reliable_subs != 0;
     for (auto &s : active_slots_) {
       uint64_t refs = s.slot->refs.load(std::memory_order_relaxed);
       if (((refs >> kReliableRefCountShift) & kRefCountMask) != 0) {
         break;
       }
-      // Don't go past one without the kMessageSeen flag set.
-      if (s.ordinal != 0 && (s.slot->flags & kMessageSeen) == 0) {
+      // Don't let unreliable subscribers create reliable-publisher
+      // backpressure. Only reliable subscribers require ordered visibility.
+      if (require_reliable_seen && s.ordinal != 0 &&
+          (s.slot->flags.load(std::memory_order_relaxed) &
+           kMessageSeenByReliable) == 0) {
         break;
       }
       // If the refs have no references we can claim it.
@@ -434,7 +612,8 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
     uint64_t old_refs = slot->refs.load(std::memory_order_relaxed);
     uint64_t ref = kPubOwned | owner;
     uint64_t expected = BuildRefsBitField(
-        slot->ordinal, (old_refs >> kVchanIdShift) & kVchanIdMask,
+        slot->ordinal.load(std::memory_order_relaxed),
+        (old_refs >> kVchanIdShift) & kVchanIdMask,
         (old_refs >> kRetiredRefsShift) & kRetiredRefsMask);
     if (slot->refs.compare_exchange_weak(expected, ref,
                                          std::memory_order_acquire,
@@ -457,9 +636,9 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
       std::this_thread::yield();
     }
   }
-  slot->ordinal = 0;
-  slot->timestamp = 0;
-  slot->vchan_id = vchan_id_;
+  slot->ordinal.store(0, std::memory_order_relaxed);
+  slot->timestamp.store(0, std::memory_order_relaxed);
+  slot->vchan_id.store(vchan_id_, std::memory_order_relaxed);
   SetSlotToBiggestBuffer(slot);
 
   MessagePrefix *p = Prefix(slot);
@@ -469,7 +648,9 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
   // We have a slot.  Clear it in all the subscriber bitsets.
   ccb_->subscribers.Traverse([this, slot](int sub_id) {
     int vid = GetSubVchanId(sub_id);
-    if (vid != -1 && slot->vchan_id != -1 && vid != slot->vchan_id) {
+    const int slot_vchan_id =
+        slot->vchan_id.load(std::memory_order_relaxed);
+    if (vid != -1 && slot_vchan_id != -1 && vid != slot_vchan_id) {
       return;
     }
     GetAvailableSlots(sub_id).Clear(slot->id);
@@ -478,7 +659,8 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
   // If we took a slot that wasn't retired we must trigger the retirement fd.
   // This happens when we recycle a slot that has not yet been seen by all
   // subscribers.
-  if (free_slot == -1 && retired_slot == -1) {
+  if (free_slot == -1 && retired_slot == -1 &&
+      NotifyRetirementOnForcedReuse()) {
     TriggerRetirement(slot->id);
   }
   return slot;
@@ -486,45 +668,54 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
 
 Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     MessageSlot *slot, bool reliable, bool is_activation, int owner,
-    bool omit_prefix, bool use_prefix_slot_id, bool for_tunnel) {
+    bool omit_prefix, bool use_prefix_slot_id, bool for_tunnel,
+    bool acquire_next) {
   void *buffer = GetBufferAddress(slot);
   MessagePrefix *prefix = Prefix(slot);
 
-  slot->ordinal = ccb_->ordinals.Next(slot->vchan_id);
-  slot->timestamp = toolbelt::Now();
-  slot->flags = 0;
+  const int initial_vchan_id =
+      slot->vchan_id.load(std::memory_order_relaxed);
+  slot->ordinal.store(ccb_->ordinals.Next(initial_vchan_id),
+                      std::memory_order_relaxed);
+  slot->timestamp.store(toolbelt::Now(), std::memory_order_relaxed);
+  slot->flags.store(0, std::memory_order_relaxed);
 
   // Copy message parameters into message prefix in buffer.
   if (omit_prefix) {
     if (for_tunnel) {
       prefix->SetIsCrossMachine();
     }
-    slot->timestamp = prefix->timestamp;
-    slot->vchan_id = prefix->vchan_id;
+    slot->timestamp.store(prefix->timestamp, std::memory_order_relaxed);
+    slot->vchan_id.store(prefix->vchan_id, std::memory_order_relaxed);
     // The bridged_slot_id is the slot is used for the retirement notification.
-    slot->bridged_slot_id = use_prefix_slot_id ? prefix->slot_id : slot->id;
+    slot->bridged_slot_id.store(
+        use_prefix_slot_id ? prefix->slot_id : slot->id,
+        std::memory_order_relaxed);
   } else {
-    prefix->message_size = slot->message_size;
-    prefix->ordinal = slot->ordinal;
-    prefix->timestamp = slot->timestamp;
-    prefix->vchan_id = slot->vchan_id;
+    prefix->message_size =
+        slot->message_size.load(std::memory_order_relaxed);
+    prefix->ordinal = slot->ordinal.load(std::memory_order_relaxed);
+    prefix->timestamp = slot->timestamp.load(std::memory_order_relaxed);
+    prefix->vchan_id = slot->vchan_id.load(std::memory_order_relaxed);
     prefix->checksum_size = static_cast<uint16_t>(ChecksumSize());
     prefix->metadata_size = static_cast<uint16_t>(MetadataSize());
     prefix->flags = 0;
     prefix->slot_id = slot->id;
-    slot->bridged_slot_id = slot->id;
+    slot->bridged_slot_id.store(slot->id, std::memory_order_relaxed);
     if (is_activation) {
       prefix->SetIsActivation();
-      slot->flags |= kMessageIsActivation;
-      ccb_->activation_tracker.Activate(slot->vchan_id);
+      slot->flags.fetch_or(kMessageIsActivation, std::memory_order_relaxed);
+      ccb_->activation_tracker.Activate(
+          slot->vchan_id.load(std::memory_order_relaxed));
     }
     if (for_tunnel) {
       prefix->SetIsCrossMachine();
     }
     if (options_.Checksum()) {
       prefix->SetHasChecksum();
-      auto data = GetMessageChecksumData(prefix, buffer, slot->message_size,
-                                         ChecksumSize(), MetadataSize());
+      auto data = GetMessageChecksumData(
+          prefix, buffer, slot->message_size.load(std::memory_order_relaxed),
+          ChecksumSize(), MetadataSize());
       absl::Span<std::byte> cksum = GetChecksumSpan(prefix, ChecksumSize());
       if (checksum_callback_ != nullptr) {
         checksum_callback_(data, cksum);
@@ -534,39 +725,92 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     }
   }
 
-  // Set the refs to the ordinal with no refs.
-  slot->refs.store(BuildRefsBitField(slot->ordinal, vchan_id_, 0),
-                   std::memory_order_release);
+  const uint64_t published_ordinal =
+      slot->ordinal.load(std::memory_order_relaxed);
+  const uint64_t published_timestamp =
+      slot->timestamp.load(std::memory_order_relaxed);
+  const int32_t retirement_slot_id =
+      slot->bridged_slot_id.load(std::memory_order_relaxed);
+  const uint64_t cleanup_generation =
+      SubscriberCleanupGenerationFor(vchan_id_);
 
-  // Tell all subscribers that the slot is available, BEFORE bumping
-  // total_messages.  SubscriberImpl::NextSlot() uses total_messages as
-  // a version stamp for its cached active_slots_ snapshot: a subscriber
-  // that observes a bumped total_messages must also observe every
-  // preceding bits.Set() so its CollectVisibleSlots() snapshot can't
-  // miss the just-published slot.  bits.Set() is relaxed, but the
-  // following total_messages++ is seq_cst, so the relaxed bit writes
-  // are sequenced-before the seq_cst increment and therefore
-  // happens-before any subscriber's seq_cst load of total_messages
-  // that observes the new value.  If we incremented total_messages
-  // first, a subscriber could read the new total, run
-  // CollectVisibleSlots() before the bit was visible, cache that
-  // snapshot under next_slot_cached_total_, and then reuse the stale
-  // cache forever (no further total bump arrives to invalidate it).
-  ccb_->subscribers.Traverse([this, slot](int sub_id) {
+  // Tell all subscribers that the slot is available while it remains
+  // publisher-owned. The kPubOwned bit is the publication commit barrier:
+  // subscribers preserve the delivery record but cannot claim the slot, and
+  // server cleanup cannot retire it until all delivery records and accounting
+  // below are complete.
+  //
+  // The available-slot bitset remains authoritative when queue insertion
+  // fails or entries are evicted. A subscriber can disappear after
+  // TraverseSeqCst observes its bit, so recheck membership after setting the
+  // delivery bit. Either this recheck clears a stale write, or the server's
+  // later ClearWasSet observes it.
+  SubscriberQueuePublishGuard publish_guard(*this);
+  std::vector<InPlaceSlotQueue *> failed_queues;
+  ccb_->subscribers.TraverseSeqCst([this, slot, &failed_queues](int sub_id) {
     if (vchan_id_ != -1 && GetSubVchanId(sub_id) != -1 &&
         vchan_id_ != GetSubVchanId(sub_id)) {
       return;
     }
-    GetAvailableSlots(sub_id).Set(slot->id);
+    InPlaceAtomicBitset &available = GetAvailableSlots(sub_id);
+    available.Set(slot->id);
+    if (!ccb_->subscribers.IsSetSeqCst(sub_id)) {
+      available.Clear(slot->id);
+      // The subscriber ID may have been reused after the first membership
+      // check. Registration publishes membership before seeding this bit. If
+      // the new subscriber is already visible, restore the bit that the stale
+      // cleanup above may have cleared; otherwise its later seed handles the
+      // in-progress generation.
+      if (!ccb_->subscribers.IsSetSeqCst(sub_id)) {
+        return;
+      }
+      available.Set(slot->id);
+    }
+
+    InPlaceSlotQueue *queue = GetAvailableSlotQueueAddress(sub_id);
+    if (queue != nullptr &&
+        !queue->Push(slot->id,
+                     slot->ordinal.load(std::memory_order_relaxed),
+                     /*report_insertion_failure=*/false)) {
+      failed_queues.push_back(queue);
+    }
   });
 
-  // Update counters AFTER setting the available-slot bits (see above).
+  // Finish all slot and queue bookkeeping before making the slot claimable.
   if (!is_activation) {
-    ccb_->total_bytes += slot->message_size;
-    if (slot->message_size > ccb_->max_message_size) {
-      ccb_->max_message_size = slot->message_size;
+    const uint64_t message_size =
+        slot->message_size.load(std::memory_order_relaxed);
+    ccb_->total_bytes += message_size;
+    if (message_size > ccb_->max_message_size) {
+      ccb_->max_message_size = message_size;
     }
-    ccb_->total_messages++;
+  }
+  for (InPlaceSlotQueue *queue : failed_queues) {
+    queue->MarkInsertionFailure();
+  }
+
+  // Commit the publication. A subscriber that observes the subsequent
+  // total_messages increment must also observe this release and all preceding
+  // delivery-record writes. PopulateActiveSlots preserves bits for
+  // publisher-owned slots, and queue consumers leave current-generation
+  // entries at the head until this store completes.
+  slot->refs.store(BuildRefsBitField(published_ordinal, vchan_id_, 0),
+                   std::memory_order_release);
+
+  // SubscriberImpl::NextSlot() uses total_messages as a version stamp for its
+  // cached active_slots_ snapshot.
+  ccb_->total_messages.fetch_add(1, std::memory_order_seq_cst);
+
+  // Subscriber removal and publication commit race safely: the operation that
+  // happens second re-evaluates retirement using the current subscriber count.
+  if (!is_activation &&
+      SubscriberCleanupGenerationFor(vchan_id_) != cleanup_generation &&
+      TryRetireSlot(slot)) {
+    TriggerRetirement(retirement_slot_id);
+  }
+
+  if (!acquire_next) {
+    return {nullptr, published_ordinal, published_timestamp};
   }
 
   // A reliable publisher doesn't allocate a slot until it is asked for.
@@ -577,7 +821,7 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
   // Find a new slot.x
   MessageSlot *new_slot = FindFreeSlotUnreliable(owner);
 
-  return {new_slot, prefix->ordinal, prefix->timestamp};
+  return {new_slot, published_ordinal, published_timestamp};
 }
 
 } // namespace details

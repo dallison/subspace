@@ -1,7 +1,13 @@
 module(
     name = "subspace",
-    version = "2.9.1",
+    version = "3.2.5",
 )
+
+# Downstream modules raise the channel limit next to their bazel_dep.  See
+# docs/max-channels.md.  This use_extension keeps the default of 1024 when
+# nobody sets the tag.
+subspace = use_extension("//:extensions.bzl", "subspace")
+use_repo(subspace, "subspace_max_channels")
 
 bazel_dep(name = "bazel_skylib", version = "1.9.0")
 bazel_dep(name = "platforms", version = "1.0.0")
@@ -14,7 +20,7 @@ bazel_dep(name = "rules_java", version = "9.1.0")
 bazel_dep(name = "rules_pkg", version = "1.0.1")
 bazel_dep(name = "rules_android_ndk", version = "0.1.5")
 bazel_dep(name = "zlib", version = "1.3.1.bcr.5")
-bazel_dep(name = "coroutines", version = "3.3.2")
+bazel_dep(name = "coroutines", version = "3.3.5")
 bazel_dep(name = "cpp_toolbelt", version = "2.1.3")
 bazel_dep(name = "retro", version = "0.0.0")
 bazel_dep(name = "rules_python", version = "1.7.0")

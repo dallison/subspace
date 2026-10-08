@@ -142,8 +142,14 @@ void UnmapMemory(void *p, size_t size,
 }
 
 Channel::Channel(const std::string &name, int num_slots, int channel_id,
-                 std::string type, std::function<bool(Channel *)> reload)
-    : name_(name), num_slots_(num_slots), channel_id_(channel_id),
+                 int subscriber_queue_size,
+                 uint64_t subscriber_queue_arena_size, std::string type,
+                 std::function<bool(Channel *)> reload)
+    : name_(name), num_slots_(num_slots),
+      subscriber_queue_size_(
+          ResolveSubscriberQueueSize(num_slots, subscriber_queue_size)),
+      subscriber_queue_arena_size_(subscriber_queue_arena_size),
+      channel_id_(channel_id),
       type_(std::move(type)), reload_callback_(std::move(reload)) {}
 
 void Channel::Unmap() {
@@ -158,7 +164,7 @@ void Channel::Unmap() {
   ccb_ = nullptr;
   bcb_ = nullptr;
   UnmapMemory(scb, sizeof(SystemControlBlock), "SCB");
-  UnmapMemory(ccb, CcbSize(num_slots_), "CCB");
+  UnmapMemory(ccb, CcbSize(num_slots_, subscriber_queue_arena_size_), "CCB");
   UnmapMemory(bcb, sizeof(BufferControlBlock), "BCB");
 }
 
@@ -255,9 +261,9 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
       //   "%d: AtomicIncRefCount: %s slot %d ordinal %d retired_refs: %d NumSubscribers: %d retire: %d\n", getpid(), Name(), slot->id, ordinal, retired_refs, NumSubscribers(ref_vchan_id), retire);
       // std::cerr << details;
       if (retire && new_refs == 0 && new_reliable_refs == 0 &&
-          retired_refs >= NumSubscribers(ref_vchan_id)) {
+          retired_refs >= NumSubscribers(ref_vchan_id) &&
+          RetiredSlots().SetWasClear(slot->id)) {
         // All subscribers have seen the slot, retire it.
-        RetiredSlots().Set(slot->id);
         if (retire_callback) {
           // std::cerr << "Calling retire callback for slot " << slot->id
           //           << std::endl;
@@ -285,10 +291,13 @@ void MessageSlot::Dump(std::ostream &os) const {
     os << " refs: " << just_refs << " reliable refs: " << reliable_refs
        << " ord: " << ref_ord;
   }
-  os << " ordinal: " << ordinal << " buffer_index: " << buffer_index
-     << " vchan_id: " << vchan_id << " timestamp: " << timestamp
-     << " message size: " << message_size << " raw refs: " << std::hex << refs
-     << " flags: " << flags << std::dec << "\n";
+  os << " ordinal: " << ordinal.load(std::memory_order_relaxed)
+     << " buffer_index: " << buffer_index.load(std::memory_order_relaxed)
+     << " vchan_id: " << vchan_id.load(std::memory_order_relaxed)
+     << " timestamp: " << timestamp.load(std::memory_order_relaxed)
+     << " message size: " << message_size.load(std::memory_order_relaxed)
+     << " raw refs: " << std::hex << l_refs
+     << " flags: " << flags.load(std::memory_order_relaxed) << std::dec << "\n";
 }
 
 void Channel::DumpSlots(std::ostream &os) const {
@@ -307,7 +316,7 @@ void Channel::Dump(std::ostream &os) const {
   toolbelt::Hexdump(scb_, 64);
 
   os << "CCB:\n";
-  toolbelt::Hexdump(ccb_, CcbSize(num_slots_));
+  toolbelt::Hexdump(ccb_, CcbSize(num_slots_, subscriber_queue_arena_size_));
 
   os << "Slots:\n";
   DumpSlots(os);
@@ -331,7 +340,7 @@ void Channel::IncrementBufferRefs(int buffer_index) {
 }
 
 void Channel::GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
-                               uint32_t &max_message_size,
+                               uint64_t &max_message_size,
                                uint32_t &total_drops) {
   total_bytes = ccb_->total_bytes;
   total_messages = ccb_->total_messages;
@@ -340,8 +349,10 @@ void Channel::GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
 }
 
 uint64_t Channel::GetVirtualMemoryUsage() const {
-  uint64_t size = sizeof(SystemControlBlock) + CcbSize(num_slots_) +
-                  sizeof(BufferControlBlock);
+  uint64_t size =
+      sizeof(SystemControlBlock) +
+      CcbSize(num_slots_, subscriber_queue_arena_size_) +
+      sizeof(BufferControlBlock);
   for (int i = 0; i < ccb_->num_buffers; i++) {
     if (bcb_->refs[i] > 0) {
       size += bcb_->sizes[i];
@@ -353,22 +364,21 @@ uint64_t Channel::GetVirtualMemoryUsage() const {
 void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
                            int vchan_id) {
   if (is_pub) {
-    // Look for a slot with kPubOwned set and clear it.
+    // Clear every slot owned by this publisher. Explicit multi-slot leases can
+    // leave more than one slot publisher-owned when a process exits.
     for (int i = 0; i < NumSlots(); i++) {
       MessageSlot *slot = &ccb_->slots[i];
       uint64_t refs = slot->refs.load(std::memory_order_relaxed);
       // Is the slot owned by this publisher?
       if (refs == (kPubOwned | uint64_t(owner))) {
         // Owned by this publisher, clear slot.
-        slot->ordinal = 0;
-        slot->refs =
-            0; // Sequentially consistent because we've changed the ordinal too.
+        slot->ordinal.store(0, std::memory_order_relaxed);
+        slot->refs.store(0, std::memory_order_release);
 
         // Clear the slot in all the subscriber bitsets.
         ccb_->subscribers.Traverse([this, slot](int sub_id) {
           GetAvailableSlots(sub_id).Clear(slot->id);
         });
-        return;
       }
     }
   } else {
@@ -377,15 +387,50 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
     ccb_->subscribers.Clear(owner);
     ccb_->num_subs.RemoveSubscriber(vchan_id);
 
-    // Go through all the slots and remove the owner from the owners bitset.
+    InPlaceAtomicBitset &available = GetAvailableSlots(owner);
     for (int i = 0; i < NumSlots(); i++) {
       MessageSlot *slot = &ccb_->slots[i];
-      if (slot->sub_owners.IsSet(owner)) {
-        slot->sub_owners.Clear(owner);
-        AtomicIncRefCount(slot, reliable, -1, 0, 0, true);
+
+      // The available-slot bitset is the authoritative delivery record. A
+      // process may die before reading a published slot, in which case there
+      // is no sub_owners entry to clean up. Removing the subscriber changes
+      // the retirement threshold, so every unread slot must be re-evaluated.
+      available.ClearWasSet(i);
+
+      if (slot->sub_owners.ClearWasSet(owner)) {
+        // The subscriber has already been removed from NumSubscribers above,
+        // so lowering the retirement threshold accounts for this owner.
+        AtomicIncRefCount(slot, reliable, -1, 0, 0, false);
       }
     }
   }
+}
+
+bool Channel::TryRetireSlot(MessageSlot *slot) {
+  if (slot->ordinal.load(std::memory_order_relaxed) == 0) {
+    return false;
+  }
+
+  const uint64_t refs = slot->refs.load(std::memory_order_acquire);
+  if ((refs & kPubOwned) != 0) {
+    return false;
+  }
+
+  const uint64_t ref_count = refs & kRefCountMask;
+  const uint64_t reliable_ref_count =
+      (refs >> kReliableRefCountShift) & kRefCountMask;
+  const uint64_t retired_refs =
+      (refs >> kRetiredRefsShift) & kRetiredRefsMask;
+  int ref_vchan_id = (refs >> kVchanIdShift) & kVchanIdMask;
+  if (ref_vchan_id == kVchanIdMask) {
+    ref_vchan_id = -1;
+  }
+
+  if (ref_count != 0 || reliable_ref_count != 0 ||
+      retired_refs < static_cast<uint64_t>(NumSubscribers(ref_vchan_id))) {
+    return false;
+  }
+  return RetiredSlots().SetWasClear(slot->id);
 }
 
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX

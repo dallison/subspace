@@ -12,7 +12,7 @@ use crate::proto;
 use crate::publisher::{clear_trigger, PublisherImpl};
 use crate::socket::SocketConnection;
 use crate::subscriber::SubscriberImpl;
-use crate::ReadMode;
+use crate::{ClearTrigger, ReadMode};
 use nix::sys::mman::ProtFlags;
 use std::cell::UnsafeCell;
 use std::os::unix::io::RawFd;
@@ -59,6 +59,48 @@ impl Drop for PublishLock {
     }
 }
 
+struct PublishUnlockGuard<'a> {
+    lock: &'a PublishLock,
+    armed: bool,
+}
+
+impl<'a> PublishUnlockGuard<'a> {
+    fn new(lock: &'a PublishLock) -> Self {
+        Self { lock, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PublishUnlockGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.lock.unlock();
+        }
+    }
+}
+
+#[cfg(test)]
+mod publish_lock_tests {
+    use super::{PublishLock, PublishUnlockGuard};
+
+    #[test]
+    fn unlock_guard_releases_lock_during_unwind() {
+        let lock = PublishLock::new();
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            lock.lock();
+            let _guard = PublishUnlockGuard::new(&lock);
+            panic!("exercise unwind-safe publisher unlocking");
+        }));
+        assert!(panic.is_err());
+
+        lock.lock();
+        lock.unlock();
+    }
+}
+
 // ── Info / Stats types ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -71,7 +113,10 @@ pub struct ChannelInfo {
     pub channel_type: String,
     pub slot_size: u64,
     pub num_slots: i32,
+    pub subscriber_queue_size: i32,
+    pub subscriber_queue_arena_size: u64,
     pub reliable: bool,
+    pub is_local: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +125,7 @@ pub struct ChannelStats {
     pub total_bytes: u64,
     pub total_messages: u64,
     pub max_message_size: u64,
+    pub is_local: bool,
 }
 
 // ── ClientInner ─────────────────────────────────────────────────────────────
@@ -97,11 +143,42 @@ struct ClientInner {
 
 // ── Publisher wrapper ───────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy)]
+pub struct PublisherBufferLease {
+    pub buffer: *mut u8,
+    pub buffer_size: usize,
+    pub slot_id: i32,
+    pub lease_id: u64,
+}
+
+impl PublisherBufferLease {
+    pub fn is_valid(&self) -> bool {
+        !self.buffer.is_null() && self.slot_id >= 0 && self.lease_id != 0
+    }
+
+    /// Returns the writable payload area for this lease.
+    ///
+    /// # Safety
+    ///
+    /// The publisher must remain alive, the lease must still be active, and
+    /// no other reference may access this payload buffer for the returned
+    /// slice's lifetime.
+    pub unsafe fn as_mut_slice(&mut self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.buffer, self.buffer_size) }
+    }
+}
+
 #[derive(Clone)]
 pub struct Publisher {
     inner: Arc<Mutex<ClientInner>>,
     pub(crate) imp: Arc<Mutex<PublisherImpl>>,
     publish_lock: Arc<PublishLock>,
+    _lifetime: Arc<PublisherLifetime>,
+}
+
+struct PublisherLifetime {
+    inner: Arc<Mutex<ClientInner>>,
+    imp: Arc<Mutex<PublisherImpl>>,
 }
 
 impl Publisher {
@@ -129,6 +206,18 @@ impl Publisher {
         self.imp.lock().unwrap().channel.num_slots
     }
 
+    pub fn subscriber_queue_size(&self) -> i32 {
+        self.imp.lock().unwrap().channel.subscriber_queue_size
+    }
+
+    pub fn subscriber_queue_arena_size(&self) -> u64 {
+        self.imp
+            .lock()
+            .unwrap()
+            .channel
+            .subscriber_queue_arena_size
+    }
+
     /// Get a mutable pointer to the message buffer for writing.
     /// Returns None if no slot is available (reliable publisher).
     ///
@@ -137,6 +226,7 @@ impl Publisher {
     /// obtaining the same buffer concurrently.
     pub fn get_message_buffer(&self, max_size: i32) -> Result<Option<(*mut u8, usize)>> {
         self.publish_lock.lock();
+        let mut unlock_guard = PublishUnlockGuard::new(&self.publish_lock);
 
         let result = (|| -> Result<Option<(*mut u8, usize)>> {
             let mut client = self.inner.lock().unwrap();
@@ -146,13 +236,30 @@ impl Publisher {
                 clear_trigger(pub_impl.poll_fd);
             }
 
-            let slot_size = pub_impl.channel.current_slot_size() as i32;
+            let slot_size = pub_impl.channel.current_slot_size() as i64;
             let mut span_size = slot_size as usize;
+            let requested_size = max_size as i64;
 
-            if max_size != -1 && max_size > slot_size {
+            if requested_size != -1 && requested_size > slot_size {
+                let max_slot_size = if pub_impl.options.max_slot_size > 0 {
+                    aligned64(pub_impl.options.max_slot_size)
+                } else {
+                    0
+                };
+                if max_slot_size != 0 && requested_size > max_slot_size {
+                    return Err(SubspaceError::InvalidArgument(format!(
+                        "Requested buffer of {} bytes on channel {} exceeds its maximum slot size of {} bytes",
+                        requested_size, pub_impl.channel.name, max_slot_size
+                    )));
+                }
                 let mut new_slot_size = slot_size;
-                while new_slot_size <= slot_size || new_slot_size < max_size {
-                    new_slot_size = expand_slot_size(new_slot_size as u64) as i32;
+                while new_slot_size <= slot_size || new_slot_size < requested_size {
+                    new_slot_size = expand_slot_size(new_slot_size as u64) as i64;
+                }
+                // The growth multiplier can overshoot the cap.  Clamping is safe
+                // because requested_size <= max_slot_size was checked above.
+                if max_slot_size != 0 && new_slot_size > max_slot_size {
+                    new_slot_size = max_slot_size;
                 }
                 span_size = new_slot_size as usize;
 
@@ -167,7 +274,7 @@ impl Publisher {
                     cb(slot_size, new_slot_size)?;
                 }
 
-                pub_impl.create_or_attach_buffers(aligned64(new_slot_size as i64) as u64)?;
+                pub_impl.create_or_attach_buffers(aligned64(new_slot_size) as u64)?;
                 register_pending_client_buffers(&mut client, &mut pub_impl.channel)?;
                 if let Some(si) = pub_impl.channel.slot {
                     pub_impl.channel.set_slot_to_biggest_buffer(si);
@@ -181,7 +288,7 @@ impl Publisher {
                     return Ok(None);
                 }
                 let owner = pub_impl.publisher_id;
-                let slot = pub_impl.find_free_slot_reliable(owner);
+                let slot = pub_impl.find_free_slot_reliable(owner, true);
                 if slot.is_none() {
                     return Ok(None);
                 }
@@ -198,9 +305,8 @@ impl Publisher {
             Ok(Some((buffer, span_size)))
         })();
 
-        match &result {
-            Ok(Some(_)) => {}
-            _ => self.publish_lock.unlock(),
+        if matches!(&result, Ok(Some(_))) {
+            unlock_guard.disarm();
         }
 
         result
@@ -209,6 +315,7 @@ impl Publisher {
     /// Publish the message that was written into the buffer.
     /// Releases the publish lock acquired by `get_message_buffer`.
     pub fn publish_message(&self, message_size: i64) -> Result<Message> {
+        let _unlock_guard = PublishUnlockGuard::new(&self.publish_lock);
         let result = (|| -> Result<Message> {
             let mut client = self.inner.lock().unwrap();
             let mut pub_impl = self.imp.lock().unwrap();
@@ -234,14 +341,17 @@ impl Publisher {
             }
 
             let slot_idx = pub_impl.channel.slot.unwrap();
-            pub_impl.channel.slot_mut(slot_idx).message_size = message_size as u64;
+            pub_impl.channel
+                .slot_ref(slot_idx)
+                .set_message_size(message_size as u64);
 
             let owner = pub_impl.publisher_id;
             let reliable = pub_impl.options.reliable;
             let vchan_id = pub_impl.channel.vchan_id;
 
-            let published = pub_impl
-                .activate_slot_and_get_another(slot_idx, reliable, false, owner, false, false);
+            let published = pub_impl.activate_slot_and_get_another(
+                slot_idx, reliable, false, owner, false, false, true,
+            );
 
             pub_impl.channel.slot = published.new_slot;
             pub_impl.trigger_subscribers();
@@ -266,7 +376,6 @@ impl Publisher {
             })
         })();
 
-        self.publish_lock.unlock();
         result
     }
 
@@ -274,6 +383,198 @@ impl Publisher {
     /// Call this after `get_message_buffer` if you decide not to publish.
     pub fn cancel_publish(&self) {
         self.publish_lock.unlock();
+    }
+
+    /// Acquire an unpublished slot without holding the publish lock for the
+    /// lifetime of the returned lease.
+    pub fn acquire_buffer_lease(&self) -> Result<Option<PublisherBufferLease>> {
+        self.publish_lock.lock();
+        let _unlock_guard = PublishUnlockGuard::new(&self.publish_lock);
+        let result = (|| -> Result<Option<PublisherBufferLease>> {
+            let mut client = self.inner.lock().unwrap();
+            let mut pub_impl = self.imp.lock().unwrap();
+
+            if pub_impl.num_leases() >= pub_impl.options.max_outstanding_slot_leases as usize {
+                return Ok(None);
+            }
+            reload_subscribers_if_necessary(&mut client, &mut pub_impl)?;
+
+            let slot_idx = if let Some(slot_idx) = pub_impl.channel.slot.take() {
+                slot_idx
+            } else {
+                if pub_impl.options.reliable
+                    && pub_impl.channel.num_subscribers(pub_impl.channel.vchan_id) == 0
+                {
+                    return Ok(None);
+                }
+                let owner = pub_impl.publisher_id;
+                let slot = if pub_impl.options.reliable {
+                    pub_impl.find_free_slot_reliable(owner, false)
+                } else {
+                    pub_impl.find_free_slot_unreliable(owner, false)
+                };
+                match slot {
+                    Some(slot_idx) => slot_idx,
+                    None => return Ok(None),
+                }
+            };
+
+            let lease_id = pub_impl.register_lease(slot_idx);
+            Ok(Some(PublisherBufferLease {
+                buffer: pub_impl.channel.get_buffer_address(slot_idx),
+                buffer_size: pub_impl.channel.slot_size_for_slot(slot_idx) as usize,
+                slot_id: pub_impl.channel.slot_ref(slot_idx).id,
+                lease_id,
+            }))
+        })();
+        result
+    }
+
+    /// Reclaim a specific retired slot. Returns `None` while the slot is not
+    /// reclaimable or the publisher is already at its lease limit.
+    pub fn reclaim_buffer_lease(&self, slot_id: i32) -> Result<Option<PublisherBufferLease>> {
+        self.publish_lock.lock();
+        let _unlock_guard = PublishUnlockGuard::new(&self.publish_lock);
+        let result = (|| -> Result<Option<PublisherBufferLease>> {
+            let mut client = self.inner.lock().unwrap();
+            let mut pub_impl = self.imp.lock().unwrap();
+
+            if pub_impl.num_leases() >= pub_impl.options.max_outstanding_slot_leases as usize {
+                return Ok(None);
+            }
+            reload_subscribers_if_necessary(&mut client, &mut pub_impl)?;
+            let slot_idx = match pub_impl.claim_retired_slot(slot_id) {
+                Some(slot_idx) => slot_idx,
+                None => return Ok(None),
+            };
+            let lease_id = pub_impl.register_lease(slot_idx);
+            Ok(Some(PublisherBufferLease {
+                buffer: pub_impl.channel.get_buffer_address(slot_idx),
+                buffer_size: pub_impl.channel.slot_size_for_slot(slot_idx) as usize,
+                slot_id: pub_impl.channel.slot_ref(slot_idx).id,
+                lease_id,
+            }))
+        })();
+        result
+    }
+
+    /// Publish data written into an explicit lease. The token becomes stale
+    /// after a successful publish.
+    pub fn publish_buffer_lease(
+        &self,
+        lease: &PublisherBufferLease,
+        message_size: i64,
+    ) -> Result<Message> {
+        self.publish_lock.lock();
+        let _unlock_guard = PublishUnlockGuard::new(&self.publish_lock);
+        let result = (|| -> Result<Message> {
+            if message_size <= 0 {
+                return Err(SubspaceError::InvalidArgument(
+                    "Message size must be greater than 0".into(),
+                ));
+            }
+
+            let mut client = self.inner.lock().unwrap();
+            let mut pub_impl = self.imp.lock().unwrap();
+            let slot_idx = pub_impl
+                .find_lease(lease.slot_id, lease.lease_id)
+                .ok_or_else(|| {
+                    SubspaceError::FailedPrecondition("Invalid or stale publisher lease".into())
+                })?;
+            if message_size > pub_impl.channel.slot_size_for_slot(slot_idx) as i64 {
+                return Err(SubspaceError::InvalidArgument(
+                    "Message size exceeds leased slot size".into(),
+                ));
+            }
+            reload_subscribers_if_necessary(&mut client, &mut pub_impl)?;
+
+            let mut message_size = message_size;
+            if let Some(ref cb) = pub_impl.on_send_callback {
+                let buffer = pub_impl.channel.get_buffer_address(slot_idx);
+                message_size = cb(buffer, message_size)?;
+            }
+            pub_impl
+                .channel
+                .slot_ref(slot_idx)
+                .set_message_size(message_size as u64);
+
+            let owner = pub_impl.publisher_id;
+            let reliable = pub_impl.options.reliable;
+            let vchan_id = pub_impl.channel.vchan_id;
+            let published = pub_impl.activate_slot_and_get_another(
+                slot_idx, reliable, false, owner, false, false, false,
+            );
+            pub_impl.remove_lease(lease.slot_id);
+            pub_impl.trigger_subscribers();
+            if pub_impl.channel.num_subscribers(vchan_id) == 0 {
+                pub_impl.retire_published_slot_immediately(slot_idx);
+            }
+
+            Ok(Message {
+                length: message_size as usize,
+                buffer: std::ptr::null(),
+                ordinal: published.ordinal,
+                timestamp: published.timestamp,
+                vchan_id,
+                is_activation: false,
+                slot_id: lease.slot_id,
+                checksum_error: false,
+                active_message: None,
+            })
+        })();
+        result
+    }
+
+    /// Discard an unpublished explicit lease. The token becomes stale after a
+    /// successful release.
+    pub fn release_buffer_lease(&self, lease: &PublisherBufferLease) -> Result<()> {
+        self.publish_lock.lock();
+        let _unlock_guard = PublishUnlockGuard::new(&self.publish_lock);
+        let result = (|| -> Result<()> {
+            let mut pub_impl = self.imp.lock().unwrap();
+            let slot_idx = pub_impl
+                .find_lease(lease.slot_id, lease.lease_id)
+                .ok_or_else(|| {
+                    SubspaceError::FailedPrecondition("Invalid or stale publisher lease".into())
+                })?;
+            if !pub_impl.release_leased_slot(slot_idx) {
+                return Err(SubspaceError::Internal(
+                    "Failed to release publisher lease".into(),
+                ));
+            }
+            pub_impl.remove_lease(lease.slot_id);
+            Ok(())
+        })();
+        result
+    }
+
+    pub fn get_lease_metadata(&self, lease: &PublisherBufferLease) -> Result<Vec<u8>> {
+        let mut pub_impl = self.imp.lock().unwrap();
+        let slot_idx = pub_impl
+            .find_lease(lease.slot_id, lease.lease_id)
+            .ok_or_else(|| {
+                SubspaceError::FailedPrecondition("Invalid or stale publisher lease".into())
+            })?;
+        Ok(pub_impl.get_metadata_for_slot(slot_idx).to_vec())
+    }
+
+    pub fn set_lease_metadata(&self, lease: &PublisherBufferLease, data: &[u8]) -> Result<()> {
+        let mut pub_impl = self.imp.lock().unwrap();
+        let slot_idx = pub_impl
+            .find_lease(lease.slot_id, lease.lease_id)
+            .ok_or_else(|| {
+                SubspaceError::FailedPrecondition("Invalid or stale publisher lease".into())
+            })?;
+        let metadata = pub_impl.get_metadata_for_slot(slot_idx);
+        if data.len() > metadata.len() {
+            return Err(SubspaceError::InvalidArgument(format!(
+                "Metadata too large: {} bytes vs {} available",
+                data.len(),
+                metadata.len()
+            )));
+        }
+        metadata[..data.len()].copy_from_slice(data);
+        Ok(())
     }
 
     /// Wait until a reliable publisher can try sending again.
@@ -331,7 +632,7 @@ impl Publisher {
     /// Receives (old_size, new_size).  Return an error to prevent the resize.
     pub fn register_resize_callback<F>(&self, callback: F)
     where
-        F: Fn(i32, i32) -> Result<()> + Send + Sync + 'static,
+        F: Fn(i64, i64) -> Result<()> + Send + Sync + 'static,
     {
         self.imp.lock().unwrap().resize_callback = Some(Box::new(callback));
     }
@@ -398,7 +699,7 @@ impl Publisher {
         }
     }
 
-    pub fn get_stats_counters(&self) -> (u64, u64, u32, u32) {
+    pub fn get_stats_counters(&self) -> (u64, u64, u64, u32) {
         let imp = self.imp.lock().unwrap();
         let ccb = imp.channel.ccb();
         (
@@ -421,7 +722,7 @@ impl Publisher {
     }
 }
 
-impl Drop for Publisher {
+impl Drop for PublisherLifetime {
     fn drop(&mut self) {
         let client = self.inner.lock().unwrap();
         let mut pub_impl = self.imp.lock().unwrap();
@@ -468,7 +769,7 @@ pub struct Subscriber {
 
 impl Subscriber {
     pub fn name(&self) -> String {
-        self.imp.lock().unwrap().channel.name.clone()
+        self.imp.lock().unwrap().request_name.clone()
     }
 
     pub fn is_reliable(&self) -> bool {
@@ -487,10 +788,14 @@ impl Subscriber {
         self.imp.lock().unwrap().channel.num_slots
     }
 
+    pub fn subscriber_queue_size(&self) -> i32 {
+        self.imp.lock().unwrap().subscriber_queue_size
+    }
+
     pub fn current_ordinal(&self) -> i64 {
         let sub = self.imp.lock().unwrap();
         match sub.channel.slot {
-            Some(si) => sub.channel.slot_ref(si).ordinal as i64,
+            Some(si) => sub.channel.slot_ref(si).ordinal() as i64,
             None => -1,
         }
     }
@@ -498,20 +803,35 @@ impl Subscriber {
     pub fn timestamp(&self) -> u64 {
         let sub = self.imp.lock().unwrap();
         match sub.channel.slot {
-            Some(si) => sub.channel.slot_ref(si).timestamp,
+            Some(si) => sub.channel.slot_ref(si).timestamp(),
             None => 0,
         }
     }
 
-    /// Read the next (or newest) message.
+    /// Read the next (or newest) message. The subscriber trigger fd is
+    /// consumed (cleared).
     pub fn read_message(&self, mode: ReadMode) -> Result<Message> {
+        self.read_message_with_trigger(mode, ClearTrigger::ClearTrigger)
+    }
+
+    /// Read the next (or newest) message, optionally leaving the subscriber
+    /// trigger fd unread. Pass `ClearTrigger::NoClearTrigger` when the caller
+    /// is managing the fd from an external event loop.
+    pub fn read_message_with_trigger(
+        &self,
+        mode: ReadMode,
+        clear_trigger: ClearTrigger,
+    ) -> Result<Message> {
         let mut client = self.inner.lock().unwrap();
         let mut sub_impl = self.imp.lock().unwrap();
+        let should_clear_trigger = clear_trigger == ClearTrigger::ClearTrigger;
 
         if sub_impl.channel.is_placeholder() {
             reload_subscriber(&mut *client, &mut sub_impl)?;
             if sub_impl.channel.is_placeholder() {
-                sub_impl.clear_poll_fd();
+                if should_clear_trigger {
+                    sub_impl.clear_poll_fd();
+                }
                 return Ok(Message::default());
             }
             sub_impl.trigger_reliable_publishers();
@@ -520,7 +840,24 @@ impl Subscriber {
         reload_reliable_publishers_if_necessary(&mut *client, &mut sub_impl)?;
 
         let pass_activation = sub_impl.options.pass_activation;
-        read_message_internal(&mut *client, &mut sub_impl, mode, pass_activation, true)
+        read_message_internal(
+            &mut *client,
+            &mut sub_impl,
+            mode,
+            pass_activation,
+            should_clear_trigger,
+        )
+    }
+
+    /// Read and deserialize a server-generated telemetry message.
+    pub fn read_telemetry_message(&self, mode: ReadMode) -> Result<Option<proto::Telemetry>> {
+        let message = self.read_message(mode)?;
+        if message.is_empty() {
+            return Ok(None);
+        }
+        let telemetry =
+            <proto::Telemetry as prost::Message>::decode(unsafe { message.as_slice() })?;
+        Ok(Some(telemetry))
     }
 
     /// Wait until there's a message available.
@@ -540,7 +877,12 @@ impl Subscriber {
     }
 
     pub fn get_poll_fd(&self) -> RawFd {
-        self.imp.lock().unwrap().poll_fd
+        let mut imp = self.imp.lock().unwrap();
+        imp.poll_drain_pending = true;
+        imp.poll_drain_exhausted = false;
+        imp.queue_drain_tail = None;
+        imp.poll_snapshot_valid = false;
+        imp.poll_fd
     }
 
     pub fn trigger(&self) {
@@ -643,7 +985,7 @@ impl Subscriber {
             if sub.message_callback.is_none() {
                 return Err(SubspaceError::Internal(format!(
                     "No message callback registered for channel {}",
-                    sub.channel.name
+                    sub.request_name
                 )));
             }
         }
@@ -702,15 +1044,15 @@ impl Subscriber {
         sub_impl.channel.slot = Some(slot_idx);
 
         let slot = sub_impl.channel.slot_ref(slot_idx);
-        if slot.message_size == 0 {
+        if slot.message_size() == 0 {
             return Ok(Message::default());
         }
 
         let buffer = sub_impl.channel.get_buffer_address(slot_idx);
-        let msg_size = slot.message_size as usize;
-        let ordinal = slot.ordinal;
-        let timestamp = slot.timestamp;
-        let vchan_id = slot.vchan_id as i32;
+        let msg_size = slot.message_size() as usize;
+        let ordinal = slot.ordinal();
+        let timestamp = slot.timestamp();
+        let vchan_id = slot.vchan_id() as i32;
         let slot_id = slot.id;
 
         Ok(Message {
@@ -757,7 +1099,7 @@ impl Subscriber {
         self.imp.lock().unwrap().options.vchan_id
     }
 
-    pub fn get_stats_counters(&self) -> (u64, u64, u32, u32) {
+    pub fn get_stats_counters(&self) -> (u64, u64, u64, u32) {
         let sub = self.imp.lock().unwrap();
         let ccb = sub.channel.ccb();
         (
@@ -785,11 +1127,12 @@ impl Drop for Subscriber {
         let client = self.inner.lock().unwrap();
         let sub_impl = self.imp.lock().unwrap();
 
-        let channel_name = sub_impl.channel.name.clone();
+        let channel_name = sub_impl.request_name.clone();
         let subscriber_id = sub_impl.subscriber_id;
+        let opts = sub_impl.options.clone();
         drop(sub_impl);
 
-        let _ = remove_subscriber_request(&client, &channel_name, subscriber_id);
+        let _ = remove_subscriber_request(&client, &channel_name, subscriber_id, &opts);
     }
 }
 
@@ -847,13 +1190,32 @@ impl Client {
     ) -> Result<Publisher> {
         let mut client = self.inner.lock().unwrap();
 
+        if opts.max_outstanding_slot_leases < 1 || opts.max_outstanding_slot_leases > opts.num_slots
+        {
+            return Err(SubspaceError::InvalidArgument(
+                "MaxOutstandingSlotLeases must be between 1 and NumSlots".into(),
+            ));
+        }
+        if opts.max_slot_size < 0 {
+            return Err(SubspaceError::InvalidArgument(format!(
+                "MaxSlotSize must be non-negative, not {}",
+                opts.max_slot_size
+            )));
+        }
+        if opts.max_slot_size > 0 && opts.slot_size > opts.max_slot_size {
+            return Err(SubspaceError::InvalidArgument(format!(
+                "Slot size {} for channel {} exceeds its maximum slot size of {} bytes",
+                opts.slot_size, channel_name, opts.max_slot_size
+            )));
+        }
+
         let slot_size = aligned64(opts.slot_size as i64);
 
         let req = proto::Request {
             request: Some(proto::request::Request::CreatePublisher(
                 proto::CreatePublisherRequest {
                     channel_name: channel_name.to_string(),
-                    slot_size: slot_size as i32,
+                    slot_size,
                     num_slots: opts.num_slots,
                     is_local: opts.local,
                     is_reliable: opts.reliable,
@@ -868,9 +1230,20 @@ impl Client {
                     metadata_size: opts.metadata_size,
                     use_split_buffers: opts.use_split_buffers,
                     split_buffers_over_bridge: opts.split_buffers_over_bridge,
+                    subscriber_queue_arena_size: opts.subscriber_queue_arena_size,
                     max_publishers: 0,
                     publisher_id: -1,
                     process_id: std::process::id() as u64,
+                    max_outstanding_slot_leases: opts.max_outstanding_slot_leases,
+                    active_queue_publish_depth: 0,
+                    // Align the cap the same way as the slot size so that a
+                    // publisher asking for slot_size == max_slot_size isn't
+                    // rejected by its own limit.
+                    max_slot_size: if opts.max_slot_size > 0 {
+                        aligned64(opts.max_slot_size)
+                    } else {
+                        0
+                    },
                 },
             )),
         };
@@ -890,15 +1263,24 @@ impl Client {
             return Err(SubspaceError::ServerError(pub_resp.error));
         }
 
+        // A publisher may join an existing channel with fewer slots than it
+        // has.  The CCB layout is sized by the channel's slot count, so map
+        // with that.  Servers that predate num_slots in the response send zero.
+        let mut channel_opts = opts.clone();
+        if pub_resp.num_slots > 0 {
+            channel_opts.num_slots = pub_resp.num_slots;
+        }
         let mut pub_impl = PublisherImpl::new(
             channel_name.to_string(),
-            opts.num_slots,
+            channel_opts.num_slots,
+            pub_resp.subscriber_queue_size,
+            pub_resp.subscriber_queue_arena_size,
             pub_resp.channel_id,
             pub_resp.publisher_id,
             pub_resp.vchan_id,
             client.session_id,
             String::from_utf8_lossy(&pub_resp.r#type).to_string(),
-            opts.clone(),
+            channel_opts,
         );
         pub_impl.channel.use_split_buffers = opts.use_split_buffers;
         pub_impl.channel.split_buffer_callbacks = opts.split_buffer_callbacks.clone();
@@ -943,7 +1325,7 @@ impl Client {
         if !opts.reliable {
             let owner = pub_impl.publisher_id;
 
-            let slot = pub_impl.find_free_slot_unreliable(owner);
+            let slot = pub_impl.find_free_slot_unreliable(owner, true);
             if slot.is_none() {
                 return Err(SubspaceError::Internal(
                     "No slot available for publisher".into(),
@@ -968,10 +1350,15 @@ impl Client {
         pub_impl.trigger_subscribers();
 
         let pub_arc = Arc::new(Mutex::new(pub_impl));
+        let publisher_lifetime = Arc::new(PublisherLifetime {
+            inner: self.inner.clone(),
+            imp: pub_arc.clone(),
+        });
         Ok(Publisher {
             inner: self.inner.clone(),
             imp: pub_arc,
             publish_lock: Arc::new(PublishLock::new()),
+            _lifetime: publisher_lifetime,
         })
     }
 
@@ -996,11 +1383,15 @@ impl Client {
                     is_reliable: opts.reliable,
                     is_bridge: opts.bridge,
                     for_tunnel: opts.for_tunnel,
+                    telemetry: opts.telemetry,
                     r#type: opts.channel_type.as_bytes().to_vec(),
                     max_active_messages: opts.max_active_messages,
                     mux: opts.mux.clone(),
                     vchan_id: opts.vchan_id,
+                    subscriber_queue_size: opts.subscriber_queue_size,
                     process_id: std::process::id() as u64,
+                    max_subscribers: opts.max_subscribers,
+                    is_local: opts.local,
                 },
             )),
         };
@@ -1020,9 +1411,17 @@ impl Client {
             return Err(SubspaceError::ServerError(sub_resp.error));
         }
 
+        let request_name = channel_name.to_string();
+        let channel_name =
+            resolved_subscriber_channel_name(&request_name, &sub_resp.resolved_channel_name);
+
         let mut sub_impl = SubscriberImpl::new(
-            channel_name.to_string(),
+            request_name,
+            channel_name,
             sub_resp.num_slots,
+            sub_resp.default_subscriber_queue_size,
+            sub_resp.subscriber_queue_arena_size,
+            sub_resp.subscriber_queue_size,
             sub_resp.channel_id,
             sub_resp.subscriber_id,
             sub_resp.vchan_id,
@@ -1040,6 +1439,10 @@ impl Client {
         };
 
         sub_impl.channel.num_slots = sub_resp.num_slots;
+        sub_impl.channel.subscriber_queue_size = sub_resp.default_subscriber_queue_size;
+        sub_impl.channel.subscriber_queue_arena_size =
+            sub_resp.subscriber_queue_arena_size;
+        sub_impl.subscriber_queue_size = sub_resp.subscriber_queue_size;
         sub_impl
             .channel
             .embargoed_slots
@@ -1140,7 +1543,10 @@ impl Client {
             channel_type: String::from_utf8_lossy(&info.r#type).to_string(),
             slot_size: info.slot_size as u64,
             num_slots: info.num_slots,
+            subscriber_queue_size: info.subscriber_queue_size,
+            subscriber_queue_arena_size: info.subscriber_queue_arena_size,
             reliable: info.is_reliable,
+            is_local: info.is_local,
         })
     }
 
@@ -1178,7 +1584,10 @@ impl Client {
                 channel_type: String::from_utf8_lossy(&info.r#type).to_string(),
                 slot_size: info.slot_size as u64,
                 num_slots: info.num_slots,
+                subscriber_queue_size: info.subscriber_queue_size,
+                subscriber_queue_arena_size: info.subscriber_queue_arena_size,
                 reliable: info.is_reliable,
+                is_local: info.is_local,
             })
             .collect())
     }
@@ -1216,6 +1625,7 @@ impl Client {
             total_bytes: s.total_bytes as u64,
             total_messages: s.total_messages as u64,
             max_message_size: s.max_message_size as u64,
+            is_local: s.is_local,
         })
     }
 
@@ -1257,6 +1667,7 @@ impl Client {
                 total_bytes: s.total_bytes as u64,
                 total_messages: s.total_messages as u64,
                 max_message_size: s.max_message_size as u64,
+                is_local: s.is_local,
             })
             .collect())
     }
@@ -1329,10 +1740,9 @@ fn read_message_internal(
 
     let old_slot = sub.channel.slot;
     let last_ordinal: i64 = match old_slot {
-        Some(si) => sub.channel.slot_ref(si).ordinal as i64,
+        Some(si) => sub.channel.slot_ref(si).ordinal() as i64,
         None => -1,
     };
-
     let new_slot_idx = match mode {
         ReadMode::ReadNext => sub.next_slot(),
         ReadMode::ReadNewest => sub.last_slot(),
@@ -1348,29 +1758,11 @@ fn read_message_internal(
 
     sub.channel.slot = Some(new_idx);
 
-    if mode == ReadMode::ReadNext && last_ordinal != -1 {
-        let new_vchan_id = sub.channel.slot_ref(new_idx).vchan_id as i32;
-        let drops = sub.detect_drops(new_vchan_id);
-        if drops > 0 {
-            if let Some(ref cb) = sub.dropped_message_callback {
-                cb(drops as i64);
-            }
-            if sub.options.log_dropped_messages {
-                log::warn!(
-                    "Dropped {} message{} on channel {}",
-                    drops,
-                    if drops == 1 { "" } else { "s" },
-                    sub.channel.name
-                );
-            }
-            sub.channel
-                .ccb()
-                .total_drops
-                .fetch_add(drops as u32, Ordering::Relaxed);
-        }
-    }
-
     let prefix = sub.channel.get_prefix(new_idx);
+    let slot = sub.channel.slot_ref(new_idx);
+    let frozen_ordinal = slot.ordinal();
+    let frozen_vchan_id = slot.vchan_id() as i32;
+    let mut delivered_message_size = slot.message_size() as i64;
     let mut is_activation = false;
     let mut checksum_error = false;
 
@@ -1379,13 +1771,12 @@ fn read_message_internal(
             let p = &*prefix;
             if p.has_checksum() && sub.options.checksum {
                 let buffer = sub.channel.get_buffer_address(new_idx);
-                let slot = sub.channel.slot_ref(new_idx);
                 let cs = sub.channel.checksum_size;
                 let ms = sub.channel.metadata_size;
                 let data = checksum::get_message_checksum_data(
                     prefix,
                     buffer,
-                    slot.message_size as usize,
+                    delivered_message_size as usize,
                     cs,
                     ms,
                 );
@@ -1403,6 +1794,7 @@ fn read_message_internal(
                 is_activation = true;
                 if !pass_activation {
                     sub.ignore_activation(new_idx);
+                    sub.channel.slot = old_slot;
                     if sub.options.reliable {
                         sub.trigger_reliable_publishers();
                     }
@@ -1414,31 +1806,67 @@ fn read_message_internal(
 
     if let Some(ref cb) = sub.on_receive_callback {
         let buffer = sub.channel.get_buffer_address(new_idx);
-        let slot = sub.channel.slot_ref(new_idx);
-        let new_size = cb(buffer as *mut u8, slot.message_size as i64)?;
-        sub.channel.slot_mut(new_idx).message_size = new_size as u64;
+        delivered_message_size = match cb(buffer as *mut u8, delivered_message_size) {
+            Ok(size) => size,
+            Err(e) => {
+                sub.release_unclaimed_slot(new_idx, frozen_ordinal, frozen_vchan_id);
+                sub.channel.slot = old_slot;
+                return Err(e);
+            }
+        };
     }
 
-    let slot = sub.channel.slot_ref(new_idx);
-    if slot.message_size == 0 {
+    if delivered_message_size <= 0 {
+        sub.release_unclaimed_slot(new_idx, frozen_ordinal, frozen_vchan_id);
+        sub.channel.slot = old_slot;
         return Ok(Message::default());
     }
 
     let buffer = sub.channel.get_buffer_address(new_idx);
-    let msg_size = slot.message_size as usize;
-    let ordinal = slot.ordinal;
-    let timestamp = slot.timestamp;
-    let vchan_id = slot.vchan_id as i32;
+    let slot = sub.channel.slot_ref(new_idx);
+    let msg_size = delivered_message_size as usize;
+    let ordinal = frozen_ordinal;
+    let timestamp = slot.timestamp();
+    let vchan_id = frozen_vchan_id;
     let slot_id = slot.id;
 
     sub.clear_active_message();
 
     if !sub.add_active_message() {
-        sub.unread_slot(new_idx);
+        sub.unread_slot(new_idx, frozen_ordinal, frozen_vchan_id);
+        sub.channel.slot = old_slot;
         return Ok(Message::default());
     }
 
-    sub.claim_slot(new_idx, sub.channel.vchan_id, mode == ReadMode::ReadNewest);
+    if mode == ReadMode::ReadNext && sub.options.detect_dropped_messages {
+        let mut drops = std::mem::take(&mut sub.pending_queue_drops);
+        // Explicit bounded queues report their own evictions and may deliver
+        // concurrent publisher reservations out of ordinal order without
+        // losing a message. Only the ordered bitset/inherited-queue path can
+        // treat an ordinal gap as a drop.
+        if last_ordinal != -1 && sub.options.subscriber_queue_size == 0 {
+            drops = drops.max(sub.detect_drops(vchan_id));
+        }
+        if drops > 0 {
+            if let Some(ref cb) = sub.dropped_message_callback {
+                cb(drops as i64);
+            }
+            if sub.options.log_dropped_messages {
+                log::warn!(
+                    "Dropped {} message{} on channel {}",
+                    drops,
+                    if drops == 1 { "" } else { "s" },
+                    sub.request_name
+                );
+            }
+            sub.channel
+                .ccb()
+                .total_drops
+                .fetch_add(drops as u32, Ordering::Relaxed);
+        }
+    }
+
+    sub.claim_slot(new_idx, vchan_id, mode == ReadMode::ReadNewest);
 
     if checksum_error && !sub.options.pass_checksum_errors {
         return Err(SubspaceError::ChecksumError);
@@ -1465,6 +1893,18 @@ fn read_message_internal(
     })
 }
 
+// Telemetry subscribers map a hidden channel while keeping request_name public.
+fn resolved_subscriber_channel_name(
+    request_name: &str,
+    resolved_channel_name: &str,
+) -> String {
+    if resolved_channel_name.is_empty() {
+        request_name.to_string()
+    } else {
+        resolved_channel_name.to_string()
+    }
+}
+
 fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Result<()> {
     let scb = sub.channel.scb();
     let channel_id = sub.channel.channel_id as usize;
@@ -1472,14 +1912,14 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
     if sub.channel.num_updates == updates {
         return Ok(());
     }
-    sub.channel.num_updates = updates;
-
     let req = proto::Request {
         request: Some(proto::request::Request::CreateSubscriber(
             proto::CreateSubscriberRequest {
-                channel_name: sub.channel.name.clone(),
+                channel_name: sub.request_name.clone(),
                 subscriber_id: sub.subscriber_id,
                 mux: sub.options.mux.clone(),
+                subscriber_queue_size: sub.options.subscriber_queue_size,
+                telemetry: sub.options.telemetry,
                 process_id: std::process::id() as u64,
                 ..Default::default()
             },
@@ -1495,11 +1935,26 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
         return Err(SubspaceError::ServerError(sub_resp.error));
     }
 
-    sub.channel.unmap();
+    if !sub_resp.resolved_channel_name.is_empty() {
+        sub.channel.name = sub_resp.resolved_channel_name.clone();
+    }
+
+    // A subscriber-created placeholder is the only case where the server
+    // replaces the CCB. Established channels retain their CCB across
+    // publisher updates.
+    let remap_ccb = sub.channel.num_slots == 0;
+    if remap_ccb {
+        sub.reset_delivery_state();
+        sub.channel.unmap();
+    }
     if !sub_resp.r#type.is_empty() {
         sub.channel.channel_type = String::from_utf8_lossy(&sub_resp.r#type).to_string();
     }
     sub.channel.num_slots = sub_resp.num_slots;
+    sub.channel.subscriber_queue_size = sub_resp.default_subscriber_queue_size;
+    sub.channel.subscriber_queue_arena_size =
+        sub_resp.subscriber_queue_arena_size;
+    sub.subscriber_queue_size = sub_resp.subscriber_queue_size;
     sub.channel
         .embargoed_slots
         .resize(sub_resp.num_slots as usize);
@@ -1522,13 +1977,15 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
         sub.checksum_tmp = vec![0u8; cs as usize];
     }
 
-    let prot = ProtFlags::PROT_READ | ProtFlags::PROT_WRITE;
-    sub.channel.map(
-        client.scb_fd,
-        fds[sub_resp.ccb_fd_index as usize],
-        fds[sub_resp.bcb_fd_index as usize],
-        prot,
-    )?;
+    if remap_ccb {
+        let prot = ProtFlags::PROT_READ | ProtFlags::PROT_WRITE;
+        sub.channel.map(
+            client.scb_fd,
+            fds[sub_resp.ccb_fd_index as usize],
+            fds[sub_resp.bcb_fd_index as usize],
+            prot,
+        )?;
+    }
 
     sub.attach_buffers()?;
 
@@ -1548,7 +2005,10 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
         sub.retirement_trigger_fds.push(fds[idx as usize]);
     }
 
-    sub.init_active_messages();
+    if remap_ccb {
+        sub.init_active_messages();
+    }
+    sub.channel.num_updates = updates;
 
     Ok(())
 }
@@ -1636,7 +2096,7 @@ fn reload_reliable_publishers_if_necessary(
 
 fn activate_reliable_channel(publisher: &mut PublisherImpl) -> Result<()> {
     let owner = publisher.publisher_id;
-    let slot = publisher.find_free_slot_reliable(owner);
+    let slot = publisher.find_free_slot_reliable(owner, true);
     if slot.is_none() {
         return Err(SubspaceError::Internal(format!(
             "Channel {} has no free slots",
@@ -1652,10 +2112,10 @@ fn activate_reliable_channel(publisher: &mut PublisherImpl) -> Result<()> {
             publisher.channel.name
         )));
     }
-    publisher.channel.slot_mut(si).message_size = 1;
+    publisher.channel.slot_ref(si).set_message_size(1);
 
     let owner = publisher.publisher_id;
-    publisher.activate_slot_and_get_another(si, true, true, owner, false, false);
+    publisher.activate_slot_and_get_another(si, true, true, owner, false, false, true);
     publisher.channel.slot = None;
     publisher.trigger_subscribers();
 
@@ -1675,10 +2135,11 @@ fn activate_channel(publisher: &mut PublisherImpl) -> Result<()> {
             publisher.channel.name
         )));
     }
-    publisher.channel.slot_mut(si).message_size = 1;
+    publisher.channel.slot_ref(si).set_message_size(1);
 
     let owner = publisher.publisher_id;
-    let published = publisher.activate_slot_and_get_another(si, false, true, owner, false, false);
+    let published =
+        publisher.activate_slot_and_get_another(si, false, true, owner, false, false, true);
     publisher.channel.slot = published.new_slot;
     publisher.trigger_subscribers();
 
@@ -1712,12 +2173,14 @@ fn remove_subscriber_request(
     client: &ClientInner,
     channel_name: &str,
     subscriber_id: i32,
+    opts: &SubscriberOptions,
 ) -> Result<()> {
     let req = proto::Request {
         request: Some(proto::request::Request::RemoveSubscriber(
             proto::RemoveSubscriberRequest {
                 channel_name: channel_name.to_string(),
                 subscriber_id,
+                telemetry: opts.telemetry,
             },
         )),
     };
@@ -1757,7 +2220,7 @@ fn expand_slot_size(slot_size: u64) -> u64 {
 
 fn get_virtual_memory_usage(channel: &Channel) -> u64 {
     let mut size = std::mem::size_of::<SystemControlBlock>() as u64
-        + ccb_size(channel.num_slots) as u64
+        + ccb_size(channel.num_slots, channel.subscriber_queue_arena_size) as u64
         + std::mem::size_of::<BufferControlBlock>() as u64;
     if !channel.bcb.is_null() {
         let bcb = unsafe { &*channel.bcb };

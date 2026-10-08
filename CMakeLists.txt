@@ -48,6 +48,38 @@ if(SUBSPACE_LINUX_USE_MEMFD AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDRO
     message(STATUS "Linux shared-memory backend: anonymous memfd_create")
 endif()
 
+# --- Slot size width in the client APIs ---
+# Slot sizes are always 64 bit internally.  By default the C and C++ client
+# APIs expose them as 32 bit values so that existing code keeps compiling.
+# Enable this option to widen the API types and allow slots larger than 2GB.
+# This is a global definition because it changes function signatures and must
+# be consistent across every translation unit, including callers.
+option(SUBSPACE_64BIT_SLOT_SIZE
+       "Expose 64 bit slot sizes in the C and C++ client APIs"
+       OFF)
+if(SUBSPACE_64BIT_SLOT_SIZE)
+    add_compile_definitions(SUBSPACE_64BIT_SLOT_SIZE)
+    message(STATUS "Client API slot size: 64 bit")
+endif()
+
+# --- Maximum channels per server session ---
+# This sizes the shared-memory system control block, so the server and every
+# client, including the Rust client, must be built with the same value.  The
+# value is also exported as SUBSPACE_MAX_CHANNELS for the Rust build.
+set(SUBSPACE_MAX_CHANNELS "1024" CACHE STRING
+    "Maximum channels per server session. Must be a positive multiple of 64.")
+if(NOT SUBSPACE_MAX_CHANNELS MATCHES "^[1-9][0-9]*$")
+    message(FATAL_ERROR
+        "SUBSPACE_MAX_CHANNELS must be a positive multiple of 64, got '${SUBSPACE_MAX_CHANNELS}'")
+endif()
+math(EXPR SUBSPACE_MAX_CHANNELS_MOD "${SUBSPACE_MAX_CHANNELS} % 64")
+if(NOT SUBSPACE_MAX_CHANNELS_MOD EQUAL 0)
+    message(FATAL_ERROR
+        "SUBSPACE_MAX_CHANNELS must be a positive multiple of 64, got '${SUBSPACE_MAX_CHANNELS}'")
+endif()
+add_compile_definitions(SUBSPACE_MAX_CHANNELS=${SUBSPACE_MAX_CHANNELS})
+message(STATUS "Maximum channels: ${SUBSPACE_MAX_CHANNELS}")
+
 # --- Apple Silicon (ARM64) specific settings ---
 # Ensure that CMake targets the correct architecture when building on Apple platforms.
 # This value will be propagated to sub-dependencies.

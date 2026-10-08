@@ -158,7 +158,7 @@ The CCB contains:
 - **OrdinalAccumulator** — per-virtual-channel atomic ordinal counters.
 - **ActivationTracker** — bitset of activated virtual channels.
 - **Subscriber tracking** — bitset of active subscribers, per-subscriber vchan_id array, subscriber counter per vchan.
-- **Statistics** — `total_bytes`, `total_messages`, `max_message_size`, `total_drops` (atomics).
+- **Statistics** — `total_bytes`, `total_messages`, `max_message_size`, `total_drops` (atomics). `total_messages` includes activations and also versions subscriber snapshots.
 - **free_slots_exhausted** — atomic bool, optimization to skip scanning the free-slots bitset.
 
 Following the slot array (with 64-byte alignment):
@@ -176,7 +176,7 @@ Following the slot array (with 64-byte alignment):
 `Client::CreatePublisher(channel_name, slot_size, num_slots, options)`:
 
 1. Sends a `CreatePublisher` RPC to the server.
-2. The server creates the channel (if new) with the specified slot size and slot count, validates options (type matching, checksum/metadata size limits), and returns file descriptors for CCB, BCB, and buffer shared memory.
+2. The server creates the channel (if new) with the specified slot size and slot count, validates options (type matching, checksum/metadata size limits, and `max_outstanding_slot_leases`), and returns file descriptors for CCB, BCB, and buffer shared memory.
 3. The client maps all shared memory regions.
 4. For **unreliable** publishers: a free slot is immediately claimed via `FindFreeSlotUnreliable`. If `options.activate` is set, an activation message is published.
 5. For **reliable** publishers: an activation message is published via `ActivateReliableChannel`, **unless** the publisher is a bridge or tunnel publisher (they skip activation because the original local publisher has already activated the channel).
@@ -196,7 +196,7 @@ void* buf = publisher.GetMessageBuffer(max_size);
 
 - If `max_size` exceeds the current slot size, the channel is resized (see Section 8).
 - For reliable publishers, returns `nullptr` when no slot is available.
-- For unreliable publishers, always returns a buffer (may recycle a slot with unread messages).
+- For unreliable publishers using this implicit path, always returns a buffer (may recycle a slot with unread messages).
 
 **Phase 2: Publish**
 
@@ -228,9 +228,56 @@ Internally, `ActivateSlotAndGetAnother`:
 
 ### 4.5 Retirement Notifications
 
-If `notify_retirement` is set, the publisher receives a pipe file descriptor. When a slot is fully retired (all subscribers have released it), the slot ID is written to this pipe. The publisher can poll `GetRetirementFd()` to learn which slots have been retired.
+If `notify_retirement` is set, the publisher receives a pipe file descriptor.
+When a slot is fully retired (all subscribers have released it), the slot ID is
+written to this pipe. A leased publication with no subscribers retires
+immediately. The publisher can poll `GetRetirementFd()` to learn which slots
+have been retired.
 
-### 4.6 On-Send Callback
+For an unreliable publisher, `notify_retirement_on_forced_reuse` controls
+whether overwriting an unread slot also emits a notification. The default is
+true for compatibility. Set it false when notifications drive external-resource
+lifetime or `ReclaimBufferLease()`, because a forced-reuse notification may
+refer to a slot that the publisher has already reused.
+
+### 4.6 Explicit Buffer Leases
+
+`AcquireBufferLease()` moves the publisher's current slot into an explicit
+`PublisherBufferLease`, or claims another slot when there is no current slot.
+The returned token contains the payload address, buffer size, slot ID, and a
+monotonic lease ID. The lease ID prevents a stale token from operating on the
+same slot after reuse.
+
+A publisher can own up to `max_outstanding_slot_leases` unpublished slots. The
+lease remains publisher-owned until one of these terminal operations:
+
+- `PublishBufferLease(lease, size)` activates the slot without implicitly
+  acquiring a replacement.
+- `ReleaseBufferLease(lease)` returns the unpublished slot to the retired pool.
+
+`ReclaimBufferLease(slot_id)` claims a specific retired slot reported through
+the retirement fd and assigns a new lease ID. `GetMetadata(lease)` returns the
+writable metadata span for a valid leased slot.
+
+Unlike `GetMessageBuffer()`, leases do not hold the thread-safe client's mutex
+across the producer's write interval. An empty successful lease means no slot
+is currently available. The application should wait for retirement and retry.
+The implicit and explicit workflows should not be mixed on one publisher.
+
+For unreliable channel admission, the server requires:
+
+```text
+sum(publisher.max_outstanding_slot_leases)
+  + sum(subscriber.max_active_messages)
+  <= num_slots - 1
+```
+
+This reserves enough capacity for every configured lease and active-message
+maximum, including users on virtual channels sharing a mux.
+
+See [Publisher Buffer Leases](publisher-buffer-leases.md) for examples.
+
+### 4.7 On-Send Callback
 
 `Publisher::SetOnSendCallback(callback)` registers a callback invoked just before publish. The callback receives the buffer pointer and message size, and returns the (possibly modified) message size. Returning an error aborts the publish.
 
@@ -243,9 +290,12 @@ If `notify_retirement` is set, the publisher receives a pipe file descriptor. Wh
 `Client::CreateSubscriber(channel_name, options)`:
 
 1. Sends a `CreateSubscriber` RPC to the server.
-2. If no publisher exists for the channel, a **placeholder** subscriber is created with `num_slots = 0`. The placeholder is automatically reloaded when a publisher appears (detected via SCB counter changes).
-3. Otherwise, the client maps CCB, BCB, and buffer shared memory. The subscriber registers itself in the CCB's subscriber bitset and initializes its `AvailableSlots` bitset.
-4. Trigger file descriptors are set up for poll-based notification.
+2. The server validates `max_subscribers`. The first subscriber establishes the
+   channel-level value; `0` means unlimited. Later subscribers must request the
+   same value and are rejected once a nonzero limit is reached.
+3. If no publisher exists for the channel, a **placeholder** subscriber is created with `num_slots = 0`. The placeholder is automatically reloaded when a publisher appears (detected via SCB counter changes).
+4. Otherwise, the client maps CCB, BCB, and buffer shared memory. The subscriber registers itself in the CCB's subscriber bitset and initializes its `AvailableSlots` bitset.
+5. Trigger file descriptors are set up for poll-based notification.
 
 ### 5.2 Reading Messages
 
@@ -257,11 +307,17 @@ Message msg = subscriber.ReadMessage(ReadMode::kReadNext);
 
 1. If the subscriber is a placeholder, attempt to reload it by contacting the server.
 2. If reliable publisher triggers need refreshing (detected via SCB counters), reload them.
-3. Clear the subscriber's poll trigger.
+3. Clear the subscriber's poll trigger unless `ClearTrigger::kNoClearTrigger` was passed.
 4. **Slot selection:**
-   - `kReadNext`: Scans `AvailableSlots` for this subscriber, collects all slots with non-zero ordinal that are not publisher-owned and match the vchan_id filter. Sorts by timestamp. Returns the first slot whose ordinal has not been seen.
-   - `kReadNewest`: Same scan, but returns only the most recent slot.
-5. **Claim the slot:** `AtomicIncRefCount(slot, +1)` increments the ref count via CAS. If the CAS fails (slot was recycled), retries from scratch.
+   - `kReadNext`: Unreliable subscribers normally pop their per-subscriber
+     queue, carrying the queued `(slot_id, ordinal, vchan_id)` generation
+     through the ref-count CAS. The `AvailableSlots` bitset remains
+     authoritative and is scanned in ordinal order after queue overflow or
+     insertion failure.
+   - `kReadNewest`: Selects the most recent slot from an authoritative bitset
+     snapshot. Snapshot entries are temporarily pinned before their bits are
+     cleared, so a concurrently recycled generation is not erased.
+5. **Claim the slot:** `AtomicIncRefCount(slot, +1)` increments the ref count via CAS using the frozen ordinal and vchan. If the CAS fails (slot was recycled), retries from scratch.
 6. **Dropped message detection:** Compares the new message's ordinal against the ordinal tracker. Gaps indicate dropped messages; the dropped-message callback is invoked with the count.
 7. **Checksum verification:** If the prefix has the `kMessageHasChecksum` flag:
    - Computes the checksum over the same three data regions used by the publisher.
@@ -485,7 +541,7 @@ Publishers and subscribers can specify a `type` string. The server enforces:
 
 ### 13.1 Subscriber Polling
 
-Each subscriber has a trigger file descriptor (pipe or eventfd). Publishers write to this fd when a new message is published. Subscribers use `GetPollFd()` to get a `struct pollfd` for use with `poll()` or `epoll()`, or call `Wait()` to block until a message is available.
+Each subscriber has a trigger file descriptor (pipe or eventfd). Publishers write to this fd when a new message is published. Subscribers use `GetPollFd()` to get a `struct pollfd` for use with `poll()` or `epoll()`, or call `Wait()` to block until a message is available. A poll-driven drain uses a bounded queue-tail/bitset snapshot; `total_messages`, which includes activations, re-arms the next poll burst when a publication arrives after that snapshot.
 
 **Important:** After `Wait()` returns, the subscriber should read **all** available messages before waiting again. The trigger fd may not be re-armed until all messages are consumed.
 
@@ -751,7 +807,7 @@ monitoring tools to distinguish between local, bridged, and tunneled users.
 ### Channel Statistics (from CCB)
 
 - `total_bytes`: Total bytes published.
-- `total_messages`: Total messages published.
+- `total_messages`: Total publications, including activations.
 - `max_message_size`: Largest message seen.
 - `total_drops`: Total messages dropped by unreliable publishers.
 
@@ -771,5 +827,7 @@ monitoring tools to distinguish between local, bridged, and tunneled users.
 | `max_active_messages` | num_slots | Subscriber |
 | `vchan_id` | 1023 | 10-bit field |
 | Subscribers per channel | 1024 (kMaxSlotOwners) | CCB bitset |
-| Channels per session | 1024 (kMaxChannels) | SCB |
+| Channels per session | 1024 by default (`kMaxChannels`); raise with `subspace.max_channels` | SCB |
 | Channel name length | 64 (kMaxChannelName) | CCB |
+
+The session channel limit is a build setting because it sizes the system control block in shared memory. A downstream Bazel module raises it by calling `subspace.max_channels(count = N)` next to its `bazel_dep`. `N` must be a positive multiple of 64. See [Setting the channel limit from another Bazel build](max-channels.md).

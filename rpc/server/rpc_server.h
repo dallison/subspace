@@ -86,7 +86,7 @@ struct Method {
   // failure.  Exactly one of reply/error_reply should be called.  They may be
   // called immediately, or kept and invoked later from any thread.
   Method(RpcServer *server, std::string name, std::string request_type,
-         std::string response_type, int32_t slot_size, int32_t num_slots,
+         std::string response_type, int64_t slot_size, int32_t num_slots,
          std::function<void(
              const google::protobuf::Any &, co::Coroutine *,
              std::function<void(std::unique_ptr<google::protobuf::Any>)>,
@@ -101,7 +101,7 @@ struct Method {
   // Streaming method constructor.
   Method(
       RpcServer *server, std::string name, std::string request_type,
-      std::string response_type, int32_t slot_size, int32_t num_slots,
+      std::string response_type, int64_t slot_size, int32_t num_slots,
       std::function<absl::Status(const google::protobuf::Any &,
                                  internal::AnyStreamWriter &, co::Coroutine *)>
           callback,
@@ -119,7 +119,7 @@ struct Method {
   std::string name;
   std::string request_type;
   std::string response_type;
-  int32_t slot_size;
+  int64_t slot_size;
   int32_t num_slots;
   // Async handler for a normal, non-streaming method.  See the constructor
   // above for the calling convention.

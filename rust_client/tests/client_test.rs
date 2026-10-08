@@ -22,8 +22,11 @@ fn calculate_checksum(spans: &[&[u8]]) -> u32 {
 fn verify_checksum(spans: &[&[u8]], checksum: u32) -> bool {
     verify_crc32_checksum(spans, &checksum.to_ne_bytes())
 }
-use subspace_client::options::{PublisherOptions, SubscriberOptions};
-use subspace_client::{Client, ReadMode, SubspaceError};
+use subspace_client::options::{
+    PublisherOptions, SubscriberOptions, DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE,
+    DEFAULT_SUBSCRIBER_QUEUE_SIZE,
+};
+use subspace_client::{ClearTrigger, Client, ReadMode, SubspaceError};
 
 fn unique_socket_path() -> String {
     let mut template = b"/tmp/ss_rt_XXXXXX\0".to_vec();
@@ -54,6 +57,7 @@ fn publisher_options_defaults() {
     let opts = PublisherOptions::new();
     assert_eq!(opts.slot_size, 0);
     assert_eq!(opts.num_slots, 0);
+    assert_eq!(opts.subscriber_queue_arena_size, 0);
     assert!(!opts.local);
     assert!(!opts.reliable);
     assert!(!opts.bridge);
@@ -65,6 +69,8 @@ fn publisher_options_defaults() {
     assert!(opts.mux.is_empty());
     assert!(!opts.use_split_buffers);
     assert!(!opts.split_buffers_over_bridge);
+    assert_eq!(opts.max_outstanding_slot_leases, 1);
+    assert!(opts.notify_retirement_on_forced_reuse);
 }
 
 #[test]
@@ -72,10 +78,13 @@ fn publisher_options_builder_chain() {
     let opts = PublisherOptions::new()
         .set_slot_size(4096)
         .set_num_slots(16)
+        .set_subscriber_queue_arena_size(32_000)
         .set_reliable(true)
         .set_local(true)
         .set_fixed_size(true)
         .set_checksum(true)
+        .set_max_outstanding_slot_leases(3)
+        .set_notify_retirement_on_forced_reuse(false)
         .set_use_split_buffers(true)
         .set_split_buffers_over_bridge(true)
         .set_type("sensor".into())
@@ -85,10 +94,13 @@ fn publisher_options_builder_chain() {
 
     assert_eq!(opts.slot_size, 4096);
     assert_eq!(opts.num_slots, 16);
+    assert_eq!(opts.subscriber_queue_arena_size, 32_000);
     assert!(opts.reliable);
     assert!(opts.local);
     assert!(opts.fixed_size);
     assert!(opts.checksum);
+    assert_eq!(opts.max_outstanding_slot_leases, 3);
+    assert!(!opts.notify_retirement_on_forced_reuse);
     assert!(opts.use_split_buffers);
     assert!(opts.split_buffers_over_bridge);
     assert!(opts.activate);
@@ -101,38 +113,53 @@ fn publisher_options_builder_chain() {
 fn subscriber_options_defaults() {
     let opts = SubscriberOptions::new();
     assert!(!opts.reliable);
+    assert_eq!(opts.subscriber_queue_size, 0);
     assert!(!opts.bridge);
+    assert!(!opts.for_tunnel);
+    assert!(!opts.telemetry);
     assert_eq!(opts.max_active_messages, 1);
     assert!(opts.log_dropped_messages);
+    assert!(opts.detect_dropped_messages);
     assert!(!opts.pass_activation);
     assert!(!opts.read_write);
     assert!(!opts.checksum);
     assert!(!opts.pass_checksum_errors);
     assert!(!opts.keep_active_message);
     assert_eq!(opts.vchan_id, -1);
+    assert_eq!(opts.max_subscribers, 0);
 }
 
 #[test]
 fn subscriber_options_builder_chain() {
     let opts = SubscriberOptions::new()
         .set_reliable(true)
+        .set_subscriber_queue_size(3)
         .set_max_active_messages(8)
+        .set_max_subscribers(3)
         .set_log_dropped_messages(false)
+        .set_detect_dropped_messages(false)
         .set_pass_activation(true)
         .set_checksum(true)
         .set_pass_checksum_errors(true)
         .set_keep_active_message(true)
         .set_vchan_id(7)
+        .set_for_tunnel(true)
+        .set_telemetry(true)
         .set_type("image".into());
 
     assert!(opts.reliable);
+    assert_eq!(opts.subscriber_queue_size, 3);
     assert_eq!(opts.max_active_messages, 8);
+    assert_eq!(opts.max_subscribers, 3);
     assert!(!opts.log_dropped_messages);
+    assert!(!opts.detect_dropped_messages);
     assert!(opts.pass_activation);
     assert!(opts.checksum);
     assert!(opts.pass_checksum_errors);
     assert!(opts.keep_active_message);
     assert_eq!(opts.vchan_id, 7);
+    assert!(opts.for_tunnel);
+    assert!(opts.telemetry);
     assert_eq!(opts.channel_type, "image");
 }
 
@@ -339,6 +366,14 @@ fn read_mode_clone() {
     assert_eq!(mode, cloned);
 }
 
+#[test]
+fn clear_trigger_equality() {
+    assert_eq!(ClearTrigger::ClearTrigger, ClearTrigger::ClearTrigger);
+    assert_eq!(ClearTrigger::NoClearTrigger, ClearTrigger::NoClearTrigger);
+    assert_ne!(ClearTrigger::ClearTrigger, ClearTrigger::NoClearTrigger);
+    assert_eq!(ClearTrigger::default(), ClearTrigger::ClearTrigger);
+}
+
 // ── Error type tests ─────────────────────────────────────────────────────────
 
 #[test]
@@ -404,6 +439,43 @@ fn channel_counters_size() {
 // Otherwise (plain cargo test), a subprocess is spawned as a fallback.
 // ══════════════════════════════════════════════════════════════════════════════
 
+// ── Teardown for the shared server ──────────────────────────────────────────
+//
+// The server below lives in a `static`, and Rust does not run destructors for
+// statics, so neither `ServerGuard::drop` ever fires.  Registering the teardown
+// with atexit is what actually cleans up: without it every run leaves its
+// socket behind in /tmp, and the subprocess build also leaves a live
+// subspace_server holding the shared memory it mapped.
+
+static CLEANUP_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+static CLEANUP_SOCKET_PATH: std::sync::OnceLock<std::ffi::CString> = std::sync::OnceLock::new();
+
+extern "C" fn cleanup_server_at_exit() {
+    // Take the pid rather than read it, so this is still correct if a
+    // `ServerGuard` did run its `Drop` and reap the child: a reaped pid can be
+    // reused, and signalling it afterwards would hit an unrelated process.
+    let pid = CLEANUP_PID.swap(0, std::sync::atomic::Ordering::SeqCst);
+    if pid > 0 {
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    if let Some(path) = CLEANUP_SOCKET_PATH.get() {
+        unsafe { libc::unlink(path.as_ptr()) };
+    }
+}
+
+fn register_server_cleanup(socket_path: &str, server_pid: Option<u32>) {
+    if let Some(pid) = server_pid {
+        CLEANUP_PID.store(pid as i32, std::sync::atomic::Ordering::SeqCst);
+    }
+    let _ = CLEANUP_SOCKET_PATH
+        .set(std::ffi::CString::new(socket_path).expect("socket path contains a NUL"));
+    assert_eq!(
+        unsafe { libc::atexit(cleanup_server_at_exit) },
+        0,
+        "failed to register server cleanup"
+    );
+}
+
 // ── FFI-based in-process server (used when linked with C++ server library) ──
 
 #[cfg(server_ffi)]
@@ -451,6 +523,8 @@ impl ServerGuard {
         let c_socket = std::ffi::CString::new(socket_path.clone()).unwrap();
         let handle = unsafe { subspace_server_create(c_socket.as_ptr(), write_fd) };
         assert!(!handle.is_null(), "subspace_server_create returned null");
+
+        register_server_cleanup(&socket_path, None);
 
         let raw = RawServerHandle(handle);
         let thread = std::thread::spawn(move || {
@@ -563,6 +637,10 @@ impl ServerGuard {
             .spawn()
             .unwrap_or_else(|e| panic!("Failed to start server binary '{}': {}", binary, e));
 
+        // Registered before the readiness wait below, so a server that never
+        // comes up is killed rather than left running when that panic unwinds.
+        register_server_cleanup(&socket_path, Some(child.id()));
+
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             if std::time::Instant::now() > deadline {
@@ -585,6 +663,9 @@ impl ServerGuard {
 #[cfg(not(server_ffi))]
 impl Drop for ServerGuard {
     fn drop(&mut self) {
+        // Claim the child back from the atexit handler before reaping it, so
+        // the two teardown paths cannot both signal the pid.
+        CLEANUP_PID.store(0, std::sync::atomic::Ordering::SeqCst);
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_file(&self.socket_path);
@@ -668,6 +749,48 @@ fn integration_publish_single_message_and_read() {
     // A second read should return an empty message (length 0).
     let msg2 = subscriber.read_message(ReadMode::ReadNext).unwrap();
     assert_eq!(msg2.length, 0);
+}
+
+fn poll_fd_readable(fd: i32, timeout_ms: i32) -> bool {
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+    ret > 0 && (pfd.revents & libc::POLLIN) != 0
+}
+
+#[test]
+fn integration_read_message_no_clear_trigger() {
+    let pub_client = new_client("test_no_clear_p");
+    let sub_client = new_client("test_no_clear_s");
+
+    let publisher = pub_client
+        .create_publisher(
+            "rust_no_clear",
+            &PublisherOptions::new().set_slot_size(256).set_num_slots(10),
+        )
+        .unwrap();
+    let subscriber = sub_client
+        .create_subscriber("rust_no_clear", &SubscriberOptions::new())
+        .unwrap();
+
+    let fd = subscriber.get_poll_fd();
+    let payload = b"keep trigger";
+    let (buf_ptr, _cap) = publisher.get_message_buffer(256).unwrap().unwrap();
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), buf_ptr, payload.len());
+    }
+    publisher.publish_message(payload.len() as i64).unwrap();
+
+    assert!(poll_fd_readable(fd, 1000));
+
+    let msg = subscriber
+        .read_message_with_trigger(ReadMode::ReadNext, ClearTrigger::NoClearTrigger)
+        .unwrap();
+    assert_eq!(msg.length as usize, payload.len());
+    assert!(poll_fd_readable(fd, 0));
 }
 
 #[test]
@@ -865,6 +988,119 @@ fn integration_publish_multiple_messages() {
     }
 }
 
+#[test]
+fn integration_subscriber_queue_overflow_preserves_newest() {
+    let client = new_client("rust_queue_overflow");
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(64)
+        .set_num_slots(8)
+        .set_subscriber_queue_arena_size(DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE);
+    let publisher = client
+        .create_publisher("rust_queue_overflow_ch", &pub_opts)
+        .unwrap();
+    let sub_opts = SubscriberOptions::new().set_subscriber_queue_size(2);
+    let subscriber = client
+        .create_subscriber("rust_queue_overflow_ch", &sub_opts)
+        .unwrap();
+    let reported_drops =
+        std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
+    let callback_drops = reported_drops.clone();
+    subscriber.register_dropped_message_callback(move |drops| {
+        callback_drops.fetch_add(drops, std::sync::atomic::Ordering::Relaxed);
+    });
+
+    for value in 1u8..=4 {
+        let (buffer, _) = publisher.get_message_buffer(1).unwrap().unwrap();
+        unsafe {
+            *buffer = value;
+        }
+        publisher.publish_message(1).unwrap();
+    }
+
+    let first = subscriber.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(unsafe { *first.buffer }, 3);
+    assert_eq!(
+        reported_drops.load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
+    drop(first);
+    let second = subscriber.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(unsafe { *second.buffer }, 4);
+    drop(second);
+    assert!(subscriber
+        .read_message(ReadMode::ReadNext)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn integration_default_subscriber_queue_overflow_recovers_from_bitset() {
+    let client = new_client("rust_default_queue_overflow");
+    let publisher = client
+        .create_publisher(
+            "rust_default_queue_overflow_ch",
+            &PublisherOptions::new()
+                .set_slot_size(64)
+                .set_num_slots(64),
+        )
+        .unwrap();
+    let subscriber = client
+        .create_subscriber(
+            "rust_default_queue_overflow_ch",
+            &SubscriberOptions::new(),
+        )
+        .unwrap();
+
+    for value in 1u8..=32 {
+        let (buffer, _) = publisher.get_message_buffer(1).unwrap().unwrap();
+        unsafe {
+            *buffer = value;
+        }
+        publisher.publish_message(1).unwrap();
+    }
+
+    for expected in 1u8..=32 {
+        let message = subscriber.read_message(ReadMode::ReadNext).unwrap();
+        assert_eq!(unsafe { *message.buffer }, expected);
+    }
+    assert!(subscriber
+        .read_message(ReadMode::ReadNext)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn integration_subscriber_queue_read_newest_does_not_redeliver_old_entries() {
+    let client = new_client("rust_queue_newest");
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(64)
+        .set_num_slots(8)
+        .set_subscriber_queue_arena_size(DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE);
+    let publisher = client
+        .create_publisher("rust_queue_newest_ch", &pub_opts)
+        .unwrap();
+    let sub_opts = SubscriberOptions::new().set_subscriber_queue_size(4);
+    let subscriber = client
+        .create_subscriber("rust_queue_newest_ch", &sub_opts)
+        .unwrap();
+
+    for value in 1u8..=3 {
+        let (buffer, _) = publisher.get_message_buffer(1).unwrap().unwrap();
+        unsafe {
+            *buffer = value;
+        }
+        publisher.publish_message(1).unwrap();
+    }
+
+    let newest = subscriber.read_message(ReadMode::ReadNewest).unwrap();
+    assert_eq!(unsafe { *newest.buffer }, 3);
+    drop(newest);
+    assert!(subscriber
+        .read_message(ReadMode::ReadNext)
+        .unwrap()
+        .is_empty());
+}
+
 // ── Read newest skips intermediate messages ──────────────────────────────────
 
 #[test]
@@ -1055,7 +1291,7 @@ fn integration_large_message() {
 
     let msg_size = 64 * 1024;
     let pub_opts = PublisherOptions::new()
-        .set_slot_size(msg_size as i32)
+        .set_slot_size(msg_size as i64)
         .set_num_slots(4);
     let publisher = pub_client
         .create_publisher("rust_large1", &pub_opts)
@@ -1593,6 +1829,75 @@ fn integration_custom_checksum_callback() {
     assert!(msg2.checksum_error);
 }
 
+#[test]
+fn integration_subscriber_joining_during_publish_receives_message() {
+    use std::sync::{Arc, Condvar, Mutex};
+
+    let pub_client = new_client("test_join_publish_p");
+    let sub_client = new_client("test_join_publish_s");
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(10)
+        .set_checksum(true)
+        .set_subscriber_queue_arena_size(DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE);
+    let publisher = pub_client
+        .create_publisher("rust_join_during_publish", &pub_opts)
+        .unwrap();
+
+    let state = Arc::new((Mutex::new((false, false)), Condvar::new()));
+    let callback_state = Arc::clone(&state);
+    publisher.set_checksum_callback(move |spans: &[&[u8]], checksum: &mut [u8]| {
+        let (lock, cv) = &*callback_state;
+        let mut state = lock.lock().unwrap();
+        state.0 = true;
+        cv.notify_all();
+        while !state.1 {
+            state = cv.wait(state).unwrap();
+        }
+        drop(state);
+        calculate_crc32_checksum(spans, checksum);
+    });
+
+    let publisher_thread = publisher.clone();
+    let publish_thread = std::thread::spawn(move || {
+        let payload = b"joined";
+        let (buffer, _) = publisher_thread
+            .get_message_buffer(payload.len() as i32)
+            .unwrap()
+            .unwrap();
+        unsafe {
+            std::ptr::copy_nonoverlapping(payload.as_ptr(), buffer, payload.len());
+        }
+        publisher_thread
+            .publish_message(payload.len() as i64)
+            .unwrap();
+    });
+
+    let (lock, cv) = &*state;
+    let mut state_guard = lock.lock().unwrap();
+    while !state_guard.0 {
+        state_guard = cv.wait(state_guard).unwrap();
+    }
+    drop(state_guard);
+
+    let sub_opts = SubscriberOptions::new()
+        .set_subscriber_queue_size(16)
+        .set_checksum(true);
+    let subscriber = sub_client
+        .create_subscriber("rust_join_during_publish", &sub_opts)
+        .unwrap();
+
+    let mut state_guard = lock.lock().unwrap();
+    state_guard.1 = true;
+    cv.notify_all();
+    drop(state_guard);
+    publish_thread.join().unwrap();
+
+    let message = subscriber.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(message.length, 6);
+    assert_eq!(unsafe { message.as_slice() }, b"joined");
+}
+
 // ── Checksum + metadata tests ────────────────────────────────────────────────
 
 #[test]
@@ -2027,6 +2332,245 @@ fn read_retired_slot(fd: i32) -> i32 {
     slot_id
 }
 
+// ── Explicit publisher buffer lease tests ───────────────────────────────────
+
+#[test]
+fn integration_explicit_publisher_buffer_leases() {
+    let pub_client = new_client("test_lease_p");
+    let sub_client = new_client("test_lease_s");
+
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(128)
+        .set_num_slots(6)
+        .set_subscriber_queue_arena_size(DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE)
+        .set_metadata_size(8)
+        .set_max_outstanding_slot_leases(3)
+        .set_notify_retirement(true)
+        .set_notify_retirement_on_forced_reuse(false);
+    let publisher = pub_client
+        .create_publisher("rust_explicit_leases", &pub_opts)
+        .unwrap();
+    let subscriber = sub_client
+        .create_subscriber(
+            "rust_explicit_leases",
+            &SubscriberOptions::new()
+                .set_subscriber_queue_size(4)
+                .set_max_active_messages(2),
+        )
+        .unwrap();
+    assert_eq!(subscriber.subscriber_queue_size(), 4);
+
+    let publisher_clone = publisher.clone();
+    drop(publisher_clone);
+    assert_eq!(publisher.get_counters().num_pubs, 1);
+
+    let mut leases = Vec::new();
+    for _ in 0..3 {
+        leases.push(publisher.acquire_buffer_lease().unwrap().unwrap());
+    }
+    assert_eq!(
+        leases
+            .iter()
+            .map(|lease| lease.slot_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3
+    );
+    assert!(leases.iter().all(|lease| lease.buffer_size == 128));
+    assert!(publisher.acquire_buffer_lease().unwrap().is_none());
+
+    let lease = leases[1];
+    let payload = b"lease-two";
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), lease.buffer, payload.len());
+    }
+    publisher.set_lease_metadata(&lease, b"lease-md").unwrap();
+    assert_eq!(publisher.get_lease_metadata(&lease).unwrap(), b"lease-md");
+
+    let published = publisher
+        .publish_buffer_lease(&lease, payload.len() as i64)
+        .unwrap();
+    assert_eq!(published.slot_id, lease.slot_id);
+    assert!(matches!(
+        publisher.publish_buffer_lease(&lease, payload.len() as i64),
+        Err(SubspaceError::FailedPrecondition(_))
+    ));
+
+    let received = subscriber.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(unsafe { received.as_slice() }, payload);
+    assert_eq!(subscriber.get_metadata(), b"lease-md");
+    drop(received);
+
+    let retirement_fd = publisher.get_retirement_fd();
+    assert!(retirement_fd_readable(retirement_fd, 1000));
+    let retired_slot = read_retired_slot(retirement_fd);
+    assert_eq!(retired_slot, lease.slot_id);
+
+    let reclaimed = publisher
+        .reclaim_buffer_lease(retired_slot)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reclaimed.slot_id, lease.slot_id);
+    assert_ne!(reclaimed.lease_id, lease.lease_id);
+
+    publisher.release_buffer_lease(&leases[0]).unwrap();
+    publisher.release_buffer_lease(&leases[2]).unwrap();
+    publisher.release_buffer_lease(&reclaimed).unwrap();
+    assert!(matches!(
+        publisher.release_buffer_lease(&reclaimed),
+        Err(SubspaceError::FailedPrecondition(_))
+    ));
+}
+
+#[test]
+fn integration_leased_publish_uses_subscriber_queue_overflow_policy() {
+    let client = new_client("test_lease_queue_overflow");
+    let publisher = client
+        .create_publisher(
+            "rust_lease_queue_overflow",
+            &PublisherOptions::new()
+                .set_slot_size(64)
+                .set_num_slots(8)
+                .set_subscriber_queue_arena_size(DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE)
+                .set_max_outstanding_slot_leases(4),
+        )
+        .unwrap();
+    let subscriber = client
+        .create_subscriber(
+            "rust_lease_queue_overflow",
+            &SubscriberOptions::new().set_subscriber_queue_size(2),
+        )
+        .unwrap();
+    assert_eq!(subscriber.subscriber_queue_size(), 2);
+
+    let mut leases = Vec::new();
+    for _ in 0..4 {
+        leases.push(publisher.acquire_buffer_lease().unwrap().unwrap());
+    }
+
+    // Releasing an unpublished lease must not create a queue entry.
+    publisher.release_buffer_lease(&leases[0]).unwrap();
+    assert!(subscriber
+        .read_message(ReadMode::ReadNext)
+        .unwrap()
+        .is_empty());
+
+    for (lease, payload) in leases[1..]
+        .iter()
+        .zip([&b"two"[..], &b"three"[..], &b"four"[..]])
+    {
+        unsafe {
+            std::ptr::copy_nonoverlapping(payload.as_ptr(), lease.buffer, payload.len());
+        }
+        publisher
+            .publish_buffer_lease(lease, payload.len() as i64)
+            .unwrap();
+    }
+
+    let first = subscriber.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(unsafe { first.as_slice() }, b"three");
+    drop(first);
+    let second = subscriber.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(unsafe { second.as_slice() }, b"four");
+    drop(second);
+    assert!(subscriber
+        .read_message(ReadMode::ReadNext)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn integration_lease_without_subscribers_retires_immediately() {
+    let client = new_client("test_lease_no_sub");
+    let publisher = client
+        .create_publisher(
+            "rust_lease_no_sub",
+            &PublisherOptions::new()
+                .set_slot_size(128)
+                .set_num_slots(4)
+                .set_max_outstanding_slot_leases(2)
+                .set_notify_retirement(true)
+                .set_notify_retirement_on_forced_reuse(false),
+        )
+        .unwrap();
+
+    let lease = publisher.acquire_buffer_lease().unwrap().unwrap();
+    let original_buffer = lease.buffer;
+    unsafe {
+        std::ptr::copy_nonoverlapping(b"solo".as_ptr(), lease.buffer, 4);
+    }
+    publisher.publish_buffer_lease(&lease, 4).unwrap();
+
+    let retirement_fd = publisher.get_retirement_fd();
+    assert!(retirement_fd_readable(retirement_fd, 1000));
+    let retired_slot = read_retired_slot(retirement_fd);
+    assert_eq!(retired_slot, lease.slot_id);
+
+    let reclaimed = publisher
+        .reclaim_buffer_lease(retired_slot)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reclaimed.buffer, original_buffer);
+    assert_ne!(reclaimed.lease_id, lease.lease_id);
+    publisher.release_buffer_lease(&reclaimed).unwrap();
+}
+
+#[test]
+fn integration_lease_budget_is_in_channel_capacity() {
+    let client = new_client("test_lease_capacity");
+    let publisher = client
+        .create_publisher(
+            "rust_lease_capacity",
+            &PublisherOptions::new()
+                .set_slot_size(64)
+                .set_num_slots(5)
+                .set_max_outstanding_slot_leases(3),
+        )
+        .unwrap();
+
+    let error = match client.create_subscriber(
+        "rust_lease_capacity",
+        &SubscriberOptions::new().set_max_active_messages(2),
+    ) {
+        Ok(_) => panic!("subscriber creation unexpectedly fit channel capacity"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("3 slot leases"));
+    drop(publisher);
+}
+
+#[test]
+fn integration_max_subscribers_limits_count_and_still_delivers() {
+    let client = new_client("test_max_subscribers");
+    let publisher = client
+        .create_publisher(
+            "rust_max_subscribers",
+            &PublisherOptions::new().set_slot_size(64).set_num_slots(6),
+        )
+        .unwrap();
+    let sub_opts = SubscriberOptions::new().set_max_subscribers(1);
+    let subscriber = client
+        .create_subscriber("rust_max_subscribers", &sub_opts)
+        .unwrap();
+    let error = match client.create_subscriber("rust_max_subscribers", &sub_opts) {
+        Ok(_) => panic!("subscriber creation unexpectedly exceeded channel limit"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("maximum number of subscribers"));
+
+    let payload = b"limit-ok";
+    let (buffer, _) = publisher
+        .get_message_buffer(payload.len() as i32)
+        .unwrap()
+        .unwrap();
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), buffer, payload.len());
+    }
+    publisher.publish_message(payload.len() as i64).unwrap();
+    let received = subscriber.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(unsafe { received.as_slice() }, payload);
+}
+
 // ── Retirement trigger tests ─────────────────────────────────────────────────
 
 /// One publisher with retirement notification and two subscribers.
@@ -2168,6 +2712,57 @@ fn integration_retirement_trigger_publisher_side() {
     let r1 = read_retired_slot(retirement_fd);
     assert_eq!(r0, 1);
     assert_eq!(r1, 2);
+
+    assert!(!retirement_fd_readable(retirement_fd, 0));
+}
+
+#[test]
+fn integration_forced_reuse_retirement_can_be_suppressed() {
+    let pub_client = new_client("test_ret_no_forced_p");
+    let sub_client = new_client("test_ret_no_forced_s");
+
+    let publisher = pub_client
+        .create_publisher(
+            "rust_ret_no_forced",
+            &PublisherOptions::new()
+                .set_slot_size(256)
+                .set_num_slots(10)
+                .set_notify_retirement(true)
+                .set_notify_retirement_on_forced_reuse(false),
+        )
+        .unwrap();
+    let retirement_fd = publisher.get_retirement_fd();
+    let subscriber = sub_client
+        .create_subscriber(
+            "rust_ret_no_forced",
+            &SubscriberOptions::new().set_log_dropped_messages(false),
+        )
+        .unwrap();
+    let _slow_subscriber = sub_client
+        .create_subscriber(
+            "rust_ret_no_forced",
+            &SubscriberOptions::new().set_log_dropped_messages(false),
+        )
+        .unwrap();
+
+    for _ in 0..7 {
+        let (buffer, _) = publisher.get_message_buffer(256).unwrap().unwrap();
+        unsafe {
+            std::ptr::copy_nonoverlapping(b"foobar".as_ptr(), buffer, 6);
+        }
+        publisher.publish_message(6).unwrap();
+    }
+    for _ in 0..2 {
+        let message = subscriber.read_message(ReadMode::ReadNext).unwrap();
+        assert_eq!(message.length, 6);
+    }
+    for _ in 0..3 {
+        let (buffer, _) = publisher.get_message_buffer(256).unwrap().unwrap();
+        unsafe {
+            std::ptr::copy_nonoverlapping(b"foobar".as_ptr(), buffer, 6);
+        }
+        publisher.publish_message(6).unwrap();
+    }
 
     assert!(!retirement_fd_readable(retirement_fd, 0));
 }
@@ -2983,6 +3578,48 @@ fn coverage_get_channel_info() {
     assert_eq!(info.slot_size, 128);
     assert_eq!(info.num_slots, 8);
     assert_eq!(info.channel_type, "info_type");
+    assert!(!info.is_local);
+}
+
+#[test]
+fn coverage_get_channel_info_is_local() {
+    let client = new_client("cov_info_local");
+    let local_opts = PublisherOptions::new()
+        .set_slot_size(64)
+        .set_num_slots(4)
+        .set_local(true);
+    let _local_pub = client
+        .create_publisher("cov_info_local_ch", &local_opts)
+        .unwrap();
+    assert!(
+        client
+            .get_channel_info("cov_info_local_ch")
+            .unwrap()
+            .is_local
+    );
+    assert!(
+        client
+            .get_channel_stats("cov_info_local_ch")
+            .unwrap()
+            .is_local
+    );
+
+    let public_opts = PublisherOptions::new().set_slot_size(64).set_num_slots(4);
+    let _public_pub = client
+        .create_publisher("cov_info_public_ch", &public_opts)
+        .unwrap();
+    assert!(
+        !client
+            .get_channel_info("cov_info_public_ch")
+            .unwrap()
+            .is_local
+    );
+    assert!(
+        !client
+            .get_channel_stats("cov_info_public_ch")
+            .unwrap()
+            .is_local
+    );
 }
 
 #[test]
@@ -3201,6 +3838,7 @@ fn coverage_publisher_accessors() {
     let opts = PublisherOptions::new()
         .set_slot_size(128)
         .set_num_slots(8)
+        .set_subscriber_queue_arena_size(5_000)
         .set_type("pub_type".to_string())
         .set_fixed_size(true);
     let pub_handle = client.create_publisher("cov_pub_acc_ch", &opts).unwrap();
@@ -3209,6 +3847,11 @@ fn coverage_publisher_accessors() {
     assert!(!pub_handle.is_reliable());
     assert!(pub_handle.is_fixed_size());
     assert_eq!(pub_handle.num_slots(), 8);
+    assert_eq!(
+        pub_handle.subscriber_queue_size(),
+        DEFAULT_SUBSCRIBER_QUEUE_SIZE
+    );
+    assert_eq!(pub_handle.subscriber_queue_arena_size(), 5_000);
     assert!(pub_handle.slot_size() > 0);
     assert!(pub_handle.get_poll_fd() >= 0);
     assert!(pub_handle.prefix_size() > 0);
@@ -3218,9 +3861,12 @@ fn coverage_publisher_accessors() {
 #[test]
 fn coverage_subscriber_accessors() {
     let client = new_client("cov_sub_acc");
-    let opts = PublisherOptions::new().set_slot_size(128).set_num_slots(16);
+    let opts = PublisherOptions::new()
+        .set_slot_size(128)
+        .set_num_slots(16)
+        .set_subscriber_queue_arena_size(DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE);
     let _pub = client.create_publisher("cov_sub_acc_ch", &opts).unwrap();
-    let sub_opts = SubscriberOptions::new();
+    let sub_opts = SubscriberOptions::new().set_subscriber_queue_size(3);
     let sub = client
         .create_subscriber("cov_sub_acc_ch", &sub_opts)
         .unwrap();
@@ -3229,6 +3875,7 @@ fn coverage_subscriber_accessors() {
     assert!(!sub.is_reliable());
     assert!(!sub.is_placeholder());
     assert!(sub.num_slots() > 0);
+    assert_eq!(sub.subscriber_queue_size(), 3);
     assert!(sub.get_poll_fd() >= 0);
     assert!(sub.prefix_size() > 0);
     assert!(sub.checksum_size() > 0);
@@ -3439,6 +4086,50 @@ fn integration_resize_multiple_expansions() {
         let data = unsafe { std::slice::from_raw_parts(msg.buffer, msg.length as usize) };
         assert_eq!(data, expected.as_slice(), "message #{} content mismatch", i);
         drop(msg);
+    }
+}
+
+#[test]
+fn integration_max_slot_size_caps_growth() {
+    let client = new_client("test_max_slot_size");
+
+    // The initial slot size may not exceed the cap.
+    let too_big = PublisherOptions::new()
+        .set_slot_size(512)
+        .set_num_slots(4)
+        .set_max_slot_size(256);
+    match client.create_publisher("rust_max_slot_initial", &too_big) {
+        Ok(_) => panic!("expected the initial slot size to be rejected"),
+        Err(e) => assert!(
+            e.to_string().contains("maximum slot size"),
+            "unexpected error: {}",
+            e
+        ),
+    }
+
+    let opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(4)
+        .set_max_slot_size(384);
+    let publisher = client.create_publisher("rust_max_slot", &opts).unwrap();
+
+    // Without the cap expand_slot_size() would double 256 to 512.
+    let (buf, cap) = publisher.get_message_buffer(300).unwrap().unwrap();
+    assert_eq!(cap, 384);
+    unsafe {
+        std::ptr::write_bytes(buf, b'x', 300);
+    }
+    // Releases the publish lock that get_message_buffer holds.
+    publisher.publish_message(300).unwrap();
+
+    // Asking for more than the cap is an error, not a resize.
+    match publisher.get_message_buffer(385) {
+        Ok(_) => panic!("expected the oversized request to be rejected"),
+        Err(e) => assert!(
+            e.to_string().contains("maximum slot size"),
+            "unexpected error: {}",
+            e
+        ),
     }
 }
 
@@ -3955,6 +4646,47 @@ fn integration_publisher_new_accessors() {
     // current_slot_id should be valid after creation (publisher gets a slot).
     let slot_id = publisher.current_slot_id();
     assert!(slot_id >= 0);
+}
+
+#[test]
+fn integration_telemetry_subscriber_smoke() {
+    let pub_client = new_client("rust_telemetry_pub");
+    let watcher_client = new_client("rust_telemetry_watch");
+    let _pub = pub_client
+        .create_publisher(
+            "rust_telemetry_smoke",
+            &PublisherOptions::new().set_slot_size(128).set_num_slots(4),
+        )
+        .unwrap();
+
+    let telemetry = watcher_client
+        .create_subscriber(
+            "rust_telemetry_smoke",
+            &SubscriberOptions::new().set_telemetry(true),
+        )
+        .unwrap();
+
+    assert_eq!(telemetry.channel_type(), "subspace.Telemetry");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut snapshot = None;
+    while snapshot.is_none() && std::time::Instant::now() < deadline {
+        snapshot = telemetry
+            .read_telemetry_message(ReadMode::ReadNext)
+            .unwrap();
+        if snapshot.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let snapshot = snapshot.expect("timed out waiting for telemetry payload");
+    assert!(snapshot
+        .publishers
+        .iter()
+        .any(|publisher| publisher.name == "rust_telemetry_pub"));
+    assert!(telemetry
+        .read_telemetry_message(ReadMode::ReadNext)
+        .unwrap()
+        .is_none());
 }
 
 #[test]

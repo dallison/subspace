@@ -86,7 +86,7 @@ struct Method {
   // async work), a reply function for success and an error function for
   // failure.  Exactly one of reply/error_reply should be called.
   Method(RpcServer *server, std::string name, std::string request_type,
-         std::string response_type, int32_t slot_size, int32_t num_slots,
+         std::string response_type, int64_t slot_size, int32_t num_slots,
          std::function<void(
              const google::protobuf::Any &, boost::asio::yield_context,
              std::function<void(std::unique_ptr<google::protobuf::Any>)>,
@@ -101,7 +101,7 @@ struct Method {
 
   Method(
       RpcServer *server, std::string name, std::string request_type,
-      std::string response_type, int32_t slot_size, int32_t num_slots,
+      std::string response_type, int64_t slot_size, int32_t num_slots,
       std::function<absl::Status(const google::protobuf::Any &,
                                  internal::AnyStreamWriter &,
                                  boost::asio::yield_context)>
@@ -120,7 +120,7 @@ struct Method {
   std::string name;
   std::string request_type;
   std::string response_type;
-  int32_t slot_size;
+  int64_t slot_size;
   int32_t num_slots;
   // Async handler for a normal, non-streaming method.  See the constructor
   // above for the calling convention.

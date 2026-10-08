@@ -25,11 +25,14 @@ It has the following features:
 1.	No communication with server for message transfer.
 1.	Message type agnostic transmission – bring your own serialization.
 2.  Channel types, meaningful to user, not system.
-1.	Single lock POSIX shared memory channels
+1.	Lock-free shared memory data
 1.	Both unreliable and reliable communications between publishers and subscribers.
 1.	Ability to read the next or newest message in a channel.
 1.	File-descriptor-based event triggers.
 1.	Optional split payload buffers for external allocators and memory pools.
+1.	Explicit multi-slot publisher buffer leases with exact-slot reclamation.
+1.	Server-enforced publisher and subscriber limits with lease-aware channel capacity.
+1.	Server-generated channel telemetry for participant, drop, and resize changes.
 1.	Automatic UDP discovery and TCP bridging of channels between servers, plus optional TCP unicast discovery for bridging across NAT/VMs/emulators.
 1.	Shadow process for crash recovery -- the server can restart and resume without losing shared memory state.
 1.	Shared and weak pointers for message references.
@@ -38,8 +41,14 @@ It has the following features:
 1.	Uses my C++ coroutine library (https://github.com/dallison/co)
 
 See the file docs/subspace.pdf for full documentation.  Additional documentation:
+- [How Subspace Works Internally](docs/internals.md)
 - [Checksums and User Metadata](docs/checksums-and-metadata.md)
+- [Channel Telemetry](docs/channel-telemetry.md)
 - [Split Buffers](docs/split-buffers.md)
+- [Publisher Buffer Leases](docs/publisher-buffer-leases.md)
+- [Reliable Messages](docs/reliable-messages.md)
+- [Slot Sizes](docs/slot-sizes.md)
+- [Channel Limit](docs/max-channels.md)
 - [C Client API](docs/c-client.md)
 - [Client Architecture](docs/client-architecture.md)
 - [Server Architecture](docs/server-architecture.md)
@@ -85,6 +94,34 @@ Then run each in a separate terminal:
  * `./bazel-bin/server/subspace_server`
  * `./bazel-bin/manual_tests/sub`
  * `./bazel-bin/manual_tests/pub`
+
+### Bazel Build Configs
+
+The `.bazelrc` file defines configs that select build-time options:
+
+| Config | Effect |
+|---|---|
+| `--config=linux_memfd` | On Linux, back shared memory with anonymous `memfd_create` objects instead of named `/dev/shm` ones. |
+| `--config=slot_size_64` | Expose 64 bit slot sizes in the C and C++ client APIs, allowing slots larger than 2GB. See [Slot Sizes](docs/slot-sizes.md#64-bit-slot-sizes). |
+
+The maximum number of channels in one server session defaults to 1024. `N` must be a positive multiple of 64. This sizes the shared-memory system control block, so the server and every client, including the Rust client, must be built with the same value.
+
+A repo that imports Subspace with `bazel_dep` sets the limit in its root `MODULE.bazel`:
+
+```python
+bazel_dep(name = "subspace", version = "3.2.5")
+
+subspace = use_extension("@subspace//:extensions.bzl", "subspace")
+subspace.max_channels(count = 8192)
+```
+
+That applies to the server and every client. See [Setting the channel limit from another Bazel build](docs/max-channels.md).
+
+To raise the limit while building this repository:
+
+```bash
+bazel build --//:max_channels=2048 //server //client:subspace_client //rust_client:subspace_client_rust
+```
 
 ### Running Tests with Bazel
 
@@ -206,6 +243,17 @@ You can customize the build with CMake options:
 cmake -DCMAKE_BUILD_TYPE=Release ..
 make -j$(nproc)
 ```
+
+| Option | Default | Effect |
+|---|---|---|
+| `SUBSPACE_LINUX_USE_MEMFD` | `OFF` | On Linux, back shared memory with anonymous `memfd_create` objects instead of named `/dev/shm` ones. |
+| `SUBSPACE_64BIT_SLOT_SIZE` | `OFF` | Expose 64 bit slot sizes in the C and C++ client APIs, allowing slots larger than 2GB. See [Slot Sizes](docs/slot-sizes.md#64-bit-slot-sizes). |
+| `SUBSPACE_MAX_CHANNELS` | `1024` | Maximum channels per server session. Must be a positive multiple of 64. The same value is passed to the Rust client. |
+
+These options change struct layouts or function signatures, so they must be set
+consistently for the library and everything that includes its headers. The
+channel limit in particular sizes shared memory, so the server and every
+client have to agree.
 
 ### Running Tests
 
@@ -355,7 +403,7 @@ public:
     // Create a publisher for a channel
     absl::StatusOr<Publisher>
     CreatePublisher(const std::string &channel_name, 
-                    int slot_size, 
+                    SlotSizeType slot_size,
                     int num_slots,
                     const PublisherOptions &opts = PublisherOptions());
 
@@ -485,17 +533,112 @@ MyMessageType* msg = reinterpret_cast<MyMessageType*>(span.data());
 pub.PublishMessage(sizeof(MyMessageType));
 ```
 
+### Explicit Publisher Buffer Leases
+
+The C++, C, Python, and Rust clients can explicitly lease several unpublished
+slots instead of using the implicit single-buffer workflow. This is useful for
+asynchronous producers and external memory pipelines. Configure the maximum
+before creating the publisher:
+
+```cpp
+auto pub_or = client->CreatePublisher(
+    "camera",
+    subspace::PublisherOptions()
+        .SetSlotSize(4096)
+        .SetNumSlots(16)
+        .SetMetadataSize(16)
+        .SetMaxOutstandingSlotLeases(3)
+        .SetNotifyRetirement(true)
+        .SetNotifyRetirementOnForcedReuse(false));
+auto pub = *std::move(pub_or);
+
+auto lease_or = pub.AcquireScopedBufferLease();
+if (!lease_or.ok() || !*lease_or) {
+    // Error, or no slot is currently available.
+    return;
+}
+subspace::ScopedPublisherBufferLease lease = *std::move(lease_or);
+std::memcpy(lease.buffer(), payload, payload_size);
+auto metadata = lease.GetMetadata();
+
+auto status = lease.Publish(payload_size);
+// Or call lease.Release(). If neither is called, destruction releases it.
+```
+
+`ScopedPublisherBufferLease` is the recommended C++ interface. It releases an
+active unpublished lease when it leaves scope, and successful `Publish()`,
+`PublishCopy()`, or `Release()` invalidates it. The originating `Publisher`
+must not be moved or destroyed while its scoped leases are alive. The raw
+`PublisherBufferLease` API remains available for integrations that manage the
+lifecycle themselves.
+
+The Python API exposes the same lifecycle with a writable staging
+`memoryview`. The requested bytes are copied into the leased shared-memory
+slot by `publish_buffer_lease()`:
+
+```python
+options = subspace.PublisherOptions()
+options.set_slot_size(4096)
+options.set_num_slots(16)
+options.set_max_outstanding_slot_leases(3)
+
+pub = client.create_publisher("camera", options=options)
+lease = pub.acquire_buffer_lease()
+if lease is not None:
+    lease.buffer[:len(payload)] = payload
+    pub.publish_buffer_lease(lease, len(payload))
+```
+
+Rust returns the same temporary-unavailability result as `Ok(None)`:
+
+```rust
+let options = PublisherOptions::new()
+    .set_slot_size(4096)
+    .set_num_slots(16)
+    .set_max_outstanding_slot_leases(3);
+let publisher = client.create_publisher("camera", &options)?;
+
+if let Some(mut lease) = publisher.acquire_buffer_lease()? {
+    unsafe {
+        lease.as_mut_slice()[..payload.len()].copy_from_slice(payload);
+    }
+    publisher.publish_buffer_lease(&lease, payload.len() as i64)?;
+}
+```
+
+Publishing or releasing invalidates the lease. Its `lease_id` prevents a stale
+token from operating on a reused slot. When retirement notifications are
+enabled, read an `int32_t` slot ID from `GetRetirementFd()` and pass it to
+`ReclaimBufferLease(slot_id)` to reacquire that exact retired slot with a new
+lease ID.
+
+An empty lease is a temporary availability result, not an error. Do not mix the
+explicit lease workflow with the implicit `GetMessageBuffer()` workflow on the
+same publisher. See [Publisher Buffer Leases](docs/publisher-buffer-leases.md)
+for lifecycle, retirement, capacity, and C API details.
+
 ### Publisher Methods
 
 ```cpp
 class Publisher {
 public:
     // Get a message buffer for writing
-    absl::StatusOr<void*> GetMessageBuffer(int32_t max_size = -1, bool lock = true);
-    absl::StatusOr<absl::Span<std::byte>> GetMessageBufferSpan(int32_t max_size = -1, bool lock = true);
+    absl::StatusOr<void*> GetMessageBuffer(SlotSizeType max_size = -1, bool lock = true);
+    absl::StatusOr<absl::Span<std::byte>> GetMessageBufferSpan(SlotSizeType max_size = -1, bool lock = true);
     
     // Publish a message
     absl::StatusOr<const Message> PublishMessage(int64_t message_size);
+
+    // Explicit unpublished-slot leases
+    absl::StatusOr<ScopedPublisherBufferLease> AcquireScopedBufferLease();
+    absl::StatusOr<ScopedPublisherBufferLease> ReclaimScopedBufferLease(
+        int32_t slot_id);
+    absl::StatusOr<PublisherBufferLease> AcquireBufferLease();
+    absl::StatusOr<PublisherBufferLease> ReclaimBufferLease(int32_t slot_id);
+    absl::StatusOr<const Message> PublishBufferLease(
+        const PublisherBufferLease &lease, int64_t message_size);
+    absl::Status ReleaseBufferLease(const PublisherBufferLease &lease);
+    absl::Span<std::byte> GetMetadata(const PublisherBufferLease &lease);
     
     // Cancel a publish (releases lock in thread-safe mode)
     void CancelPublish();
@@ -516,7 +659,7 @@ public:
     bool IsReliable() const;
     bool IsLocal() const;
     bool IsFixedSize() const;
-    int32_t SlotSize() const;
+    SlotSizeType SlotSize() const;
     int32_t NumSlots() const;
     
     // Statistics
@@ -612,6 +755,16 @@ auto msg_or = sub.ReadMessage(subspace::ReadMode::kReadNewest);
 // This skips to the most recent message, discarding older ones
 ```
 
+**Leave the subscriber trigger fd unread**
+```cpp
+auto msg_or = sub.ReadMessage(subspace::ReadMode::kReadNext,
+                              subspace::ClearTrigger::kNoClearTrigger);
+```
+By default `ReadMessage` consumes the subscriber trigger fd (eventfd or pipe)
+so a later `poll`/`Wait` blocks until a new message is published. Pass
+`ClearTrigger::kNoClearTrigger` when the caller is managing that fd from an
+external event loop.
+
 **Method 3: Typed read (returns shared_ptr)**
 ```cpp
 auto msg_ptr_or = sub.ReadMessage<MyMessageType>();
@@ -624,6 +777,28 @@ auto msg_ptr = msg_ptr_or.value();
 // Access data: msg_ptr->field1, (*msg_ptr).field2
 // Message is automatically released when msg_ptr goes out of scope
 ```
+
+**Method 4: Read server-generated channel telemetry**
+```cpp
+auto telemetry_sub = client->CreateSubscriber(
+    "my_channel",
+    subspace::SubscriberOptions().SetTelemetry(true)).value();
+
+auto telemetry_or = telemetry_sub.ReadTelemetryMessage();
+if (!telemetry_or.ok()) {
+    // Handle a read or protobuf decoding error
+    return;
+}
+std::shared_ptr<subspace::Telemetry> telemetry = *telemetry_or;
+if (telemetry == nullptr) {
+    // No telemetry message is currently available
+    return;
+}
+```
+
+The monitored channel must already exist. The server sends an initial
+participant snapshot and then batches participant, drop, and resize changes at
+one-second intervals. See [Channel Telemetry](docs/channel-telemetry.md).
 
 ### Waiting for Messages
 
@@ -656,9 +831,15 @@ if (fd_or.ok()) {
 class Subscriber {
 public:
     // Read messages
-    absl::StatusOr<Message> ReadMessage(ReadMode mode = ReadMode::kReadNext);
+    absl::StatusOr<Message> ReadMessage(
+        ReadMode mode = ReadMode::kReadNext,
+        ClearTrigger clear_trigger = ClearTrigger::kClearTrigger);
     template <typename T>
-    absl::StatusOr<shared_ptr<T>> ReadMessage(ReadMode mode = ReadMode::kReadNext);
+    absl::StatusOr<shared_ptr<T>> ReadMessage(
+        ReadMode mode = ReadMode::kReadNext,
+        ClearTrigger clear_trigger = ClearTrigger::kClearTrigger);
+    absl::StatusOr<std::shared_ptr<Telemetry>>
+        ReadTelemetryMessage(ReadMode mode = ReadMode::kReadNext);
     
     // Find message by timestamp
     absl::StatusOr<Message> FindMessage(uint64_t timestamp);
@@ -678,7 +859,7 @@ public:
     std::string Name() const;
     std::string Type() const;
     bool IsReliable() const;
-    int32_t SlotSize() const;
+    SlotSizeType SlotSize() const;
     int32_t NumSlots() const;
     int64_t GetCurrentOrdinal() const;
     
@@ -777,7 +958,8 @@ Unreliable channels provide best-effort delivery with no guarantees. If a subscr
 
 **Characteristics:**
 - Messages may be dropped if subscriber is slow
-- Publishers never block (always get a slot immediately)
+- The implicit publish path keeps a slot reserved, so publishers normally get a buffer immediately
+- Explicit lease acquisition can temporarily return an empty lease when every reusable slot is subscriber-held or already leased
 - Lower memory usage
 - Highest performance
 
@@ -803,6 +985,22 @@ You can mix reliable and unreliable publishers/subscribers on the same channel:
 - **Reliable subscriber + Unreliable publisher**: Best effort (may drop)
 - **Unreliable subscriber + Reliable publisher**: May drop if slow
 - **Unreliable subscriber + Unreliable publisher**: Best effort, may drop
+
+### Channel Capacity
+
+For unreliable channels, the server reserves each publisher's configured lease
+budget and each subscriber's active-message budget:
+
+```text
+sum(max_outstanding_slot_leases) + sum(max_active_messages)
+    <= num_slots - 1
+```
+
+Admission fails if adding a publisher or subscriber would exceed that limit.
+This guarantees that a publisher below its lease limit can acquire another
+lease even when subscribers hold their maximum active messages. Capacity is
+aggregated across virtual channels sharing a multiplexer. With the default
+single lease per publisher, this preserves the previous capacity behavior.
 
 ## PublisherOptions
 
@@ -842,25 +1040,37 @@ auto pub = client->CreatePublisher("channel",
 
 ### PublisherOptions Fields and Methods
 
+`subspace::SlotSizeType` is `int32_t` by default and `int64_t` when the library
+and its callers are built with `SUBSPACE_64BIT_SLOT_SIZE` (Bazel
+`--config=slot_size_64`, CMake `-DSUBSPACE_64BIT_SLOT_SIZE=ON`). Slot sizes are
+64 bit internally in every build; the macro only widens the C and C++ API so
+that slots larger than 2GB can be requested and reported. The C API has the
+equivalent `SubspaceSlotSize` typedef. See
+[Slot Sizes](docs/slot-sizes.md#64-bit-slot-sizes) for the full list of affected
+declarations and the rules for mixing builds.
+
 | Field/Method | Type | Default | Description |
 |--------------|------|---------|-------------|
-| `slot_size` / `SetSlotSize()` | `int32_t` | `0` | Size of each message slot in bytes. Must be set if using options-only CreatePublisher. |
-| `num_slots` / `SetNumSlots()` | `int32_t` | `0` | Number of slots in the channel. Must be set if using options-only CreatePublisher. |
+| `slot_size` / `SetSlotSize()` | `SlotSizeType` | `0` | Size of each message slot in bytes. Must be set if using options-only CreatePublisher. |
+| `num_slots` / `SetNumSlots()` | `int32_t` | `0` | Number of slots in the channel. Must be set if using options-only CreatePublisher. A publisher joining an existing channel may ask for fewer slots than it has; it then uses the channel's slot count. |
 | `reliable` / `SetReliable()` | `bool` | `false` | If true, reliable delivery (see Reliable Channels section). |
 | `local` / `SetLocal()` | `bool` | `false` | If true, messages are only visible on the local machine (not bridged). |
 | `type` / `SetType()` | `std::string` | `""` | User-defined message type identifier. All publishers/subscribers must use the same type. |
 | `fixed_size` / `SetFixedSize()` | `bool` | `false` | If true, prevents automatic resizing of slots. |
+| `max_slot_size` / `SetMaxSlotSize()` | `SlotSizeType` | `0` | Upper bound on how large the slots may grow, or 0 for no limit. See [Limiting the Slot Size](docs/slot-sizes.md#limiting-the-slot-size). |
 | `bridge` / `SetBridge()` | `bool` | `false` | Internal: marks this as a bridge publisher. |
 | `mux` / `SetMux()` | `std::string` | `""` | Multiplexer name for virtual channels. |
 | `vchan_id` / `SetVchanId()` | `int` | `-1` | Virtual channel ID (-1 for server-assigned). |
 | `activate` / `SetActivate()` | `bool` | `false` | If true, channel is activated even if unreliable. |
 | `notify_retirement` / `SetNotifyRetirement()` | `bool` | `false` | If true, notify when slots are retired. |
+| `max_outstanding_slot_leases` / `SetMaxOutstandingSlotLeases()` | `int32_t` | `1` | Maximum unpublished slots owned through `AcquireBufferLease()`. This does not change the implicit `GetMessageBuffer()` workflow. |
+| `notify_retirement_on_forced_reuse` / `SetNotifyRetirementOnForcedReuse()` | `bool` | `true` | Include notifications caused by an unreliable publisher forcibly reusing an unread slot. Set false when retirement notifications drive exact-slot reclamation. |
 | `checksum` / `SetChecksum()` | `bool` | `false` | If true, calculate checksums for all messages. |
 | `checksum_size` / `SetChecksumSize()` | `int32_t` | `4` | Number of bytes reserved for the checksum (starting at the `checksum` field of `MessagePrefix`). Default 4 for CRC32. Increase for larger checksums (e.g. 20 for SHA-1). |
 | `metadata_size` / `SetMetadataSize()` | `int32_t` | `0` | Number of bytes of user metadata stored immediately after the checksum area. Accessible via `Publisher::GetMetadata()` / `Subscriber::GetMetadata()`. |
 
 **Getter Methods:**
-- `int32_t SlotSize() const`
+- `SlotSizeType SlotSize() const`
 - `int32_t NumSlots() const`
 - `bool IsReliable() const`
 - `bool IsLocal() const`
@@ -871,6 +1081,8 @@ auto pub = client->CreatePublisher("channel",
 - `int VchanId() const`
 - `bool Activate() const`
 - `bool NotifyRetirement() const`
+- `int32_t MaxOutstandingSlotLeases() const`
+- `bool NotifyRetirementOnForcedReuse() const`
 - `bool Checksum() const`
 - `int32_t ChecksumSize() const`
 - `int32_t MetadataSize() const`
@@ -1020,9 +1232,12 @@ auto sub = client->CreateSubscriber("channel",
 | Field/Method | Type | Default | Description |
 |--------------|------|---------|-------------|
 | `reliable` / `SetReliable()` | `bool` | `false` | If true, reliable delivery (see Reliable Channels section). |
+| `local` / `SetLocal()` | `bool` | `false` | If true, the channel is local, as with a local publisher: the server won't advertise it to or bridge it to other servers. Unlike publishers, subscribers don't have to agree on this. The channel stays local after the subscriber leaves, until the channel is removed. |
+| `telemetry` / `SetTelemetry()` | `bool` | `false` | Subscribe to server-generated telemetry for the named existing channel instead of its payloads. |
 | `type` / `SetType()` | `std::string` | `""` | User-defined message type identifier. Must match publisher type. |
 | `max_active_messages` / `SetMaxActiveMessages()` | `int` | `1` | Maximum number of active messages (shared_ptrs) that can be held simultaneously. |
 | `max_active_messages` / `SetMaxSharedPtrs()` | `int` | `0` | Alias: sets max_active_messages to n+1. |
+| `max_subscribers` / `SetMaxSubscribers()` | `int32_t` | `0` | Server-enforced channel subscriber limit; 0 means unlimited. The first subscriber establishes the value and later subscribers must use the same value. |
 | `log_dropped_messages` / `SetLogDroppedMessages()` | `bool` | `true` | If true, log when messages are dropped. |
 | `bridge` / `SetBridge()` | `bool` | `false` | Internal: marks this as a bridge subscriber. |
 | `mux` / `SetMux()` | `std::string` | `""` | Multiplexer name for virtual channels. |
@@ -1034,9 +1249,11 @@ auto sub = client->CreateSubscriber("channel",
 
 **Getter Methods:**
 - `bool IsReliable() const`
+- `bool Telemetry() const`
 - `const std::string& Type() const`
 - `int MaxActiveMessages() const`
 - `int MaxSharedPtrs() const`
+- `int MaxSubscribers() const`
 - `bool LogDroppedMessages() const`
 - `bool IsBridge() const`
 - `const std::string& Mux() const`
@@ -1205,12 +1422,17 @@ SubspacePublisherOptions pub_opts = subspace_publisher_options_default(1024, 10)
 // pub_opts.reliable = false
 // pub_opts.fixed_size = false
 // pub_opts.activate = false
+// pub_opts.max_outstanding_slot_leases = 1
+// pub_opts.notify_retirement_on_forced_reuse = true
 // pub_opts.checksum_size = 4   (CRC32)
 // pub_opts.metadata_size = 0   (no user metadata)
 
 // Customize options
 pub_opts.reliable = true;
 pub_opts.fixed_size = false;
+pub_opts.max_outstanding_slot_leases = 3;
+pub_opts.notify_retirement = true;
+pub_opts.notify_retirement_on_forced_reuse = false;
 pub_opts.type.type = "MyMessageType";
 pub_opts.type.type_length = strlen(pub_opts.type.type);
 pub_opts.checksum_size = 20;   // e.g. 20-byte digest
@@ -1231,12 +1453,14 @@ if (pub.publisher == NULL) {
 SubspaceSubscriberOptions sub_opts = subspace_subscriber_options_default();
 // sub_opts.reliable = false
 // sub_opts.max_active_messages = 1
+// sub_opts.max_subscribers = 0  (no explicit limit)
 // sub_opts.pass_activation = false
 // sub_opts.log_dropped_messages = false
 
 // Customize options
 sub_opts.reliable = true;
 sub_opts.max_active_messages = 10;
+sub_opts.max_subscribers = 4;
 sub_opts.type.type = "MyMessageType";
 sub_opts.type.type_length = strlen(sub_opts.type.type);
 
@@ -1279,6 +1503,34 @@ if (pub_status.length == 0) {
 // pub_status.timestamp contains the publish timestamp
 ```
 
+### Publishing with Explicit Leases
+
+```c
+SubspacePublisherBufferLease lease =
+    subspace_acquire_publisher_buffer(pub);
+if (lease.buffer == NULL) {
+    if (subspace_has_error()) {
+        fprintf(stderr, "Lease failed: %s\n", subspace_get_last_error());
+    }
+    // Otherwise no slot is currently available; wait for retirement and retry.
+    return;
+}
+
+memcpy(lease.buffer, payload, payload_size);
+size_t metadata_size = 0;
+void *metadata =
+    subspace_get_publisher_buffer_metadata(pub, lease, &metadata_size);
+
+SubspaceMessage status =
+    subspace_publish_publisher_buffer(pub, lease, payload_size);
+// Or discard it with subspace_release_publisher_buffer(pub, lease).
+```
+
+If retirement notifications are enabled,
+`subspace_get_publisher_retirement_fd()` emits `int32_t` slot IDs.
+`subspace_reclaim_publisher_buffer(pub, slot_id)` reacquires the exact retired
+slot with a new lease token.
+
 ### Reading Messages
 
 ```c
@@ -1309,6 +1561,12 @@ if (newest.length > 0) {
     // Process message
     subspace_free_message(&newest);
 }
+
+// Leave the subscriber trigger fd unread (for example when poll/epoll
+// already consumed it, or another waiter should still observe it).
+SubspaceMessage kept = subspace_read_message_with_mode_and_trigger(
+    sub, kSubspaceReadNext, kSubspaceNoClearTrigger);
+subspace_free_message(&kept);
 ```
 
 **Important:** You must call `subspace_free_message()` when done with a message. The `max_active_messages` option determines how many messages you can hold simultaneously. If you don't free messages, the subscriber will run out of slots and be unable to read more messages.
@@ -1498,11 +1756,17 @@ This is a quick reference for the most common calls. See
 - `bool subspace_remove_client(SubspaceClient *client)`
 
 **Publisher Functions:**
-- `SubspacePublisherOptions subspace_publisher_options_default(int32_t slot_size, int num_slots)`
+- `SubspacePublisherOptions subspace_publisher_options_default(SubspaceSlotSize slot_size, int num_slots)`
 - `SubspacePublisher subspace_create_publisher(SubspaceClient client, const char *channel_name, SubspacePublisherOptions options)`
 - `SubspaceMessageBuffer subspace_get_message_buffer(SubspacePublisher publisher, size_t max_size)`
 - `const SubspaceMessage subspace_publish_message(SubspacePublisher publisher, size_t messageSize)`
 - `bool subspace_cancel_publish(SubspacePublisher publisher)`
+- `SubspacePublisherBufferLease subspace_acquire_publisher_buffer(SubspacePublisher publisher)`
+- `SubspacePublisherBufferLease subspace_reclaim_publisher_buffer(SubspacePublisher publisher, int32_t slot_id)`
+- `const SubspaceMessage subspace_publish_publisher_buffer(SubspacePublisher publisher, SubspacePublisherBufferLease lease, size_t message_size)`
+- `bool subspace_release_publisher_buffer(SubspacePublisher publisher, SubspacePublisherBufferLease lease)`
+- `void *subspace_get_publisher_buffer_metadata(SubspacePublisher publisher, SubspacePublisherBufferLease lease, size_t *metadata_size)`
+- `int subspace_get_publisher_retirement_fd(SubspacePublisher publisher)`
 - `bool subspace_wait_for_publisher(SubspacePublisher publisher)`
 - `bool subspace_wait_for_publisher_with_timeout(SubspacePublisher publisher, uint64_t timeout_ms)`
 - `int subspace_wait_for_publisher_with_fd(SubspacePublisher publisher, int fd)`
@@ -1520,6 +1784,7 @@ This is a quick reference for the most common calls. See
 - `SubspaceSubscriber subspace_create_subscriber(SubspaceClient client, const char *channel_name, SubspaceSubscriberOptions options)`
 - `SubspaceMessage subspace_read_message(SubspaceSubscriber subscriber)`
 - `SubspaceMessage subspace_read_message_with_mode(SubspaceSubscriber subscriber, SubspaceReadMode mode)`
+- `SubspaceMessage subspace_read_message_with_mode_and_trigger(SubspaceSubscriber subscriber, SubspaceReadMode mode, SubspaceClearTrigger clear_trigger)`
 - `SubspaceMessage subspace_find_message(SubspaceSubscriber subscriber, uint64_t timestamp)`
 - `bool subspace_get_all_messages(SubspaceSubscriber subscriber, SubspaceReadMode mode, SubspaceMessage **messages, size_t *count)`
 - `bool subspace_free_message(SubspaceMessage *message)`
@@ -1529,7 +1794,7 @@ This is a quick reference for the most common calls. See
 - `int subspace_wait_for_subscriber_with_fd(SubspaceSubscriber subscriber, int fd)`
 - `struct pollfd subspace_get_subscriber_poll_fd(SubspaceSubscriber subscriber)`
 - `int subspace_get_subscriber_fd(SubspaceSubscriber subscriber)`
-- `int32_t subspace_get_subscriber_slot_size(SubspaceSubscriber subscriber)`
+- `SubspaceSlotSize subspace_get_subscriber_slot_size(SubspaceSubscriber subscriber)`
 - `int subspace_get_subscriber_num_slots(SubspaceSubscriber subscriber)`
 - `SubspaceTypeInfo subspace_get_subscriber_type(SubspaceSubscriber subscriber)`
 - `bool subspace_subscriber_uses_split_buffers(SubspaceSubscriber subscriber)`
@@ -1581,6 +1846,9 @@ let subscriber = client.create_subscriber("sensor_data", &sub_opts)?;
 // Read a message.
 let msg = subscriber.read_message(ReadMode::ReadNext)?;
 assert_eq!(msg.length, 5);
+
+// Leave the subscriber trigger fd unread:
+// subscriber.read_message_with_trigger(ReadMode::ReadNext, ClearTrigger::NoClearTrigger)?;
 ```
 
 ### Features
@@ -1588,6 +1856,8 @@ assert_eq!(msg.length, 5);
 - Full pub/sub support: unreliable and reliable channels, read-next and
   read-newest modes, activation messages, virtual channels.
 - Checksums (built-in CRC32 or custom callbacks) and per-message user metadata.
+- Explicit multi-slot publisher leases with exact-slot reclamation.
+- Server-enforced subscriber limits and lease-aware capacity admission.
 - File-descriptor-based `wait()` for integration with event loops and `poll()`.
 - Slot retirement notification for reliable publishers.
 - Runs on Linux and macOS (ARM64 and x86_64).
@@ -1663,6 +1933,8 @@ on another server. Servers find each other through *discovery*, then move
 message data over a TCP *bridge*. Discovery is only active when the server is
 **not** started with `--local`, and a channel is only bridged when its
 publisher is created with `local = false` (`PublisherOptions::SetLocal(false)`).
+Once a local publisher or subscriber has joined a channel, the channel stays
+local until it is removed, even after that user leaves.
 
 ### Discovery modes
 
@@ -1779,7 +2051,7 @@ its full state from whichever shadow is available.
 - Shared memory mappings -- buffers remain intact in `/dev/shm` (Linux) or
   POSIX shared memory (macOS).
 - Publisher and subscriber metadata (IDs, trigger FDs, reliability settings,
-  tunnel flags).
+  tunnel flags, publisher lease budgets, and subscriber limits).
 - The session ID, so clients can detect a server restart and reclaim their
   connections.
 

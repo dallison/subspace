@@ -21,7 +21,7 @@ pub mod proto {
 }
 
 pub use channel::ChannelCounters;
-pub use client::{ChannelInfo, ChannelStats, Client, Publisher, Subscriber};
+pub use client::{ChannelInfo, ChannelStats, Client, Publisher, PublisherBufferLease, Subscriber};
 pub use error::SubspaceError;
 pub use message::Message;
 pub use options::{PublisherOptions, SubscriberOptions};
@@ -31,4 +31,14 @@ pub use split_buffer::{SplitBufferCallbacks, SplitBufferMapping, SplitBufferMeta
 pub enum ReadMode {
     ReadNext,
     ReadNewest,
+}
+
+/// Controls whether `read_message` consumes the subscriber trigger fd
+/// (eventfd or pipe). `ClearTrigger` is the default and matches existing
+/// `read_message` behavior. `NoClearTrigger` leaves the fd unread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClearTrigger {
+    #[default]
+    ClearTrigger,
+    NoClearTrigger,
 }

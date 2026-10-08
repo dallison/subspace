@@ -188,7 +188,15 @@ ReadSplitBufferMetadataFile(const std::string &shadow_file) {
 }
 
 std::string SplitBufferObjectName(const std::string &shadow_file) {
+#if defined(__QNXNTO__) || defined(__APPLE__)
+  // POSIX requires a leading slash for a portable global shm_open name.
+  // QNX otherwise resolves this relative to the process working directory,
+  // preventing subscribers launched from a different EM application
+  // directory from opening a publisher's split-buffer prefix.
+  return absl::StrFormat("/subspace_sb_%016x", StableHash64(shadow_file));
+#else
   return absl::StrFormat("subspace_sb_%016x", StableHash64(shadow_file));
+#endif
 }
 
 absl::StatusOr<toolbelt::FileDescriptor>

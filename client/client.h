@@ -20,6 +20,7 @@
 #include "common/async/wait.h"
 #include "common/channel.h"
 #include "common/client_buffer.h"
+#include "proto/subspace.pb.h"
 
 #include "toolbelt/fd.h"
 #include "toolbelt/logging.h"
@@ -58,6 +59,16 @@ enum class ReadMode {
   kReadNewest,
 };
 
+// Controls whether ReadMessage consumes the subscriber trigger fd (eventfd
+// or pipe). The default, kClearTrigger, reads the fd so a later poll/Wait
+// blocks until a new message is published. kNoClearTrigger leaves the fd
+// unread, which is useful when the caller is managing it from an external
+// event loop.
+enum class ClearTrigger {
+  kClearTrigger,
+  kNoClearTrigger,
+};
+
 struct ChannelInfo {
   std::string channel_name;
   int num_publishers;
@@ -69,7 +80,10 @@ struct ChannelInfo {
   std::string type;
   uint64_t slot_size;
   int num_slots;
+  int subscriber_queue_size;
+  uint64_t subscriber_queue_arena_size;
   bool reliable;
+  bool is_local = false;
 };
 
 struct ChannelStats {
@@ -77,6 +91,7 @@ struct ChannelStats {
   uint64_t total_bytes;
   uint64_t total_messages;
   uint64_t max_message_size;
+  bool is_local = false;
 };
 
 struct DefaultAliaser {
@@ -250,6 +265,60 @@ inline shared_ptr<T, Aliaser>::shared_ptr(const weak_ptr<T, Aliaser> &p)
 class Publisher;
 class Subscriber;
 
+// An explicitly leased publisher slot. The lease remains publisher-owned until
+// it is published or released. lease_id prevents stale slot-id reuse.
+struct PublisherBufferLease {
+  void *buffer = nullptr;
+  size_t buffer_size = 0;
+  int32_t slot_id = -1;
+  uint64_t lease_id = 0;
+
+  explicit operator bool() const {
+    return buffer != nullptr && slot_id >= 0 && lease_id != 0;
+  }
+};
+
+// RAII owner for an explicitly leased publisher slot. Unless the lease is
+// published or explicitly released first, destruction releases it back to the
+// publisher. The Publisher must not be moved or destroyed while one of its
+// scoped leases is alive.
+class ScopedPublisherBufferLease {
+public:
+  ScopedPublisherBufferLease() = default;
+  ~ScopedPublisherBufferLease();
+
+  ScopedPublisherBufferLease(const ScopedPublisherBufferLease &) = delete;
+  ScopedPublisherBufferLease &
+  operator=(const ScopedPublisherBufferLease &) = delete;
+  ScopedPublisherBufferLease(ScopedPublisherBufferLease &&other) noexcept;
+  ScopedPublisherBufferLease &
+  operator=(ScopedPublisherBufferLease &&other) = delete;
+
+  explicit operator bool() const {
+    return publisher_ != nullptr && static_cast<bool>(lease_);
+  }
+  void *buffer() const { return lease_.buffer; }
+  size_t buffer_size() const { return lease_.buffer_size; }
+  int32_t slot_id() const { return lease_.slot_id; }
+  uint64_t lease_id() const { return lease_.lease_id; }
+  absl::Span<std::byte> GetMetadata();
+  absl::StatusOr<const Message> Publish(int64_t message_size);
+  absl::StatusOr<const Message> PublishCopy(absl::Span<const std::byte> payload);
+  absl::Status Release();
+
+private:
+  friend class Publisher;
+  ScopedPublisherBufferLease(Publisher *publisher, PublisherBufferLease lease)
+      : publisher_(publisher), lease_(lease) {}
+  void Invalidate() {
+    publisher_ = nullptr;
+    lease_ = {};
+  }
+
+  Publisher *publisher_ = nullptr;
+  PublisherBufferLease lease_;
+};
+
 // This is an Subspace client.  It must be initialized by calling Init()
 // before it can be used.  The Init() function connects it to an Subspace
 // server that is listening on the same Unix Domain Socket.
@@ -338,7 +407,8 @@ private:
   // it will be created with num_slots slots, each of which is slot_size
   // bytes long.
   absl::StatusOr<Publisher>
-  CreatePublisher(const std::string &channel_name, int slot_size, int num_slots,
+  CreatePublisher(const std::string &channel_name, int64_t slot_size,
+                  int num_slots,
                   const PublisherOptions &opts = PublisherOptions());
 
   // Create a publisher with the slot size and number of slots set in the
@@ -391,11 +461,11 @@ private:
   // If max_size is greater than the current buffer size, the buffers
   // will be resized.
   absl::StatusOr<void *> GetMessageBuffer(details::PublisherImpl *publisher,
-                                          int32_t max_size, bool lock);
+                                          int64_t max_size, bool lock);
   // Get the messsage buffer as a span.  Returns an empty span if there is no
   // buffer available
   absl::StatusOr<absl::Span<std::byte>>
-  GetMessageBufferSpan(details::PublisherImpl *publisher, int32_t max_size,
+  GetMessageBufferSpan(details::PublisherImpl *publisher, int64_t max_size,
                        bool lock);
 
   // Publish the message in the publisher's buffer.  The message_size
@@ -406,6 +476,29 @@ private:
   PublishMessage(details::PublisherImpl *publisher, int64_t message_size,
                  bool notify_subscribers);
   void NotifySubscribers(details::PublisherImpl *publisher);
+
+  absl::StatusOr<PublisherBufferLease>
+  AcquirePublisherBuffer(details::PublisherImpl *publisher);
+  absl::StatusOr<PublisherBufferLease>
+  ReclaimPublisherBuffer(details::PublisherImpl *publisher, int32_t slot_id);
+  absl::StatusOr<PublisherBufferLease>
+  ReclaimAnyPublisherBuffer(details::PublisherImpl *publisher);
+  absl::StatusOr<const Message>
+  PublishPublisherBuffer(details::PublisherImpl *publisher,
+                         const PublisherBufferLease &lease,
+                         int64_t message_size);
+  absl::StatusOr<const Message>
+  PublishPublisherBufferCopy(details::PublisherImpl *publisher,
+                             const PublisherBufferLease &lease,
+                             absl::Span<const std::byte> payload);
+  absl::StatusOr<const Message> PublishPublisherBufferInternal(
+      details::PublisherImpl *publisher, const PublisherBufferLease &lease,
+      int64_t message_size, const std::byte *payload);
+  absl::Status ReleasePublisherBuffer(details::PublisherImpl *publisher,
+                                      const PublisherBufferLease &lease);
+  absl::Span<std::byte>
+  GetPublisherBufferMetadata(details::PublisherImpl *publisher,
+                             const PublisherBufferLease &lease);
 
   // In thread-safe mode, if you don't want to publish the message, you must
   // cancel the publish.  This will release the lock.
@@ -525,8 +618,11 @@ private:
   // memory which is read-only.  If the read is triggered by the PollFd,
   // you must read all the avaiable messages from the subscriber as the
   // PollFd is only triggered when a new message is published.
-  absl::StatusOr<Message> ReadMessage(details::SubscriberImpl *subscriber,
-                                      ReadMode mode = ReadMode::kReadNext);
+  // Pass ClearTrigger::kNoClearTrigger to leave the subscriber trigger fd
+  // unread.
+  absl::StatusOr<Message> ReadMessage(
+      details::SubscriberImpl *subscriber, ReadMode mode = ReadMode::kReadNext,
+      ClearTrigger clear_trigger = ClearTrigger::kClearTrigger);
   // Continue draining a batch after ReadMessage has cleared the poll fd and
   // refreshed publisher state. This avoids repeating that work per message.
   absl::StatusOr<Message>
@@ -538,7 +634,8 @@ private:
   template <typename T, typename Aliaser = DefaultAliaser>
   absl::StatusOr<shared_ptr<T, Aliaser>>
   ReadMessage(details::SubscriberImpl *subscriber,
-              ReadMode mode = ReadMode::kReadNext);
+              ReadMode mode = ReadMode::kReadNext,
+              ClearTrigger clear_trigger = ClearTrigger::kClearTrigger);
 
   // Find a message given a timestamp.
   absl::StatusOr<Message> FindMessage(details::SubscriberImpl *subscriber,
@@ -593,7 +690,7 @@ private:
   // to prevent the resize from happening, return an error.
   absl::Status RegisterResizeCallback(
       details::PublisherImpl *publisher,
-      std::function<absl::Status(details::PublisherImpl *, int32_t, int32_t)>
+      std::function<absl::Status(details::PublisherImpl *, int64_t, int64_t)>
           cb);
   absl::Status UnregisterResizeCallback(details::PublisherImpl *publisher);
 
@@ -611,17 +708,16 @@ private:
   int64_t GetCurrentOrdinal(details::SubscriberImpl *sub);
 
   absl::Status CheckConnected() const;
-  absl::Status
-  SendRequestReceiveResponse(const Request &req, Response &response,
-                             std::vector<toolbelt::FileDescriptor> &fds,
-                             const std::vector<toolbelt::FileDescriptor>
-                                 &send_fds = {});
+  absl::Status SendRequestReceiveResponse(
+      const Request &req, Response &response,
+      std::vector<toolbelt::FileDescriptor> &fds,
+      const std::vector<toolbelt::FileDescriptor> &send_fds = {});
   absl::Status
   SendOneWayRequest(const Request &req,
                     const std::vector<toolbelt::FileDescriptor> &fds = {});
-  absl::Status RegisterClientBuffer(
-      const ClientBufferHandleMetadata &metadata,
-      const toolbelt::FileDescriptor *fd = nullptr);
+  absl::Status
+  RegisterClientBuffer(const ClientBufferHandleMetadata &metadata,
+                       const toolbelt::FileDescriptor *fd = nullptr);
   absl::StatusOr<std::vector<RegisteredClientBuffer>>
   GetClientBuffers(const std::string &channel_name, uint64_t session_id,
                    uint32_t buffer_index);
@@ -667,7 +763,7 @@ private:
                          int64_t message_size, bool omit_prefix,
                          bool use_prefix_slot_id, bool notify_subscribers);
   absl::Status ResizeChannel(details::PublisherImpl *publisher,
-                             int32_t new_slot_size);
+                             int64_t new_slot_size);
   absl::StatusOr<bool>
   ReloadBuffersIfNecessary(details::ClientChannel *channel);
 
@@ -728,8 +824,11 @@ private:
   // Call the function when a publisher causes a channel to be resized.
   absl::flat_hash_map<
       details::PublisherImpl *,
-      std::function<absl::Status(details::PublisherImpl *, int32_t, int32_t)>>
+      std::function<absl::Status(details::PublisherImpl *, int64_t, int64_t)>>
       resize_callbacks_;
+  // Test-only.  Called by ReadMessage and FindMessage on a placeholder
+  // subscriber just after it has checked the server for a new publisher.
+  std::function<void()> placeholder_check_hook_;
   bool debug_ = false;
   toolbelt::Logger logger_;
   mutable std::mutex mutex_;
@@ -758,8 +857,9 @@ private:
 // you need to as it may prevent a publisher getting a slot.
 template <typename T, typename Aliaser>
 inline absl::StatusOr<::subspace::shared_ptr<T, Aliaser>>
-ClientImpl::ReadMessage(details::SubscriberImpl *subscriber, ReadMode mode) {
-  absl::StatusOr<Message> msg = ReadMessage(subscriber, mode);
+ClientImpl::ReadMessage(details::SubscriberImpl *subscriber, ReadMode mode,
+                        ClearTrigger clear_trigger) {
+  absl::StatusOr<Message> msg = ReadMessage(subscriber, mode, clear_trigger);
   if (!msg.ok()) {
     return msg.status();
   }
@@ -836,7 +936,7 @@ public:
   // In thread-safe mode, this will hold a lock on the client until you publish
   // the message.  If you don't want to publish the message, you must cancel the
   // publish using CancelPublish.  This will release the lock.
-  absl::StatusOr<void *> GetMessageBuffer(int32_t max_size = -1,
+  absl::StatusOr<void *> GetMessageBuffer(SlotSizeType max_size = -1,
                                           bool lock = true) {
     return client_->GetMessageBuffer(impl_.get(), max_size, lock);
   }
@@ -844,7 +944,7 @@ public:
   // Get the messsage buffer as a span.  Returns an empty span if there is no
   // buffer available.  See GetMessageBuffer for details of
   absl::StatusOr<absl::Span<std::byte>>
-  GetMessageBufferSpan(int32_t max_size = -1, bool lock = true) {
+  GetMessageBufferSpan(SlotSizeType max_size = -1, bool lock = true) {
     return client_->GetMessageBufferSpan(impl_.get(), max_size, lock);
   }
 
@@ -866,6 +966,59 @@ public:
   // Flush a batch whose messages were published without subscriber
   // notification.
   void NotifySubscribers() { client_->NotifySubscribers(impl_.get()); }
+
+  // Lease multiple unpublished slots without holding the client's thread-safe
+  // mutex across the lease lifetime. The maximum is configured by
+  // PublisherOptions::SetMaxOutstandingSlotLeases().
+  absl::StatusOr<PublisherBufferLease> AcquireBufferLease() {
+    return client_->AcquirePublisherBuffer(impl_.get());
+  }
+
+  absl::StatusOr<ScopedPublisherBufferLease> AcquireScopedBufferLease() & {
+    auto lease = AcquireBufferLease();
+    if (!lease.ok()) {
+      return lease.status();
+    }
+    return ScopedPublisherBufferLease(this, *lease);
+  }
+
+  // Reclaim a specific slot reported by the retirement fd.
+  absl::StatusOr<PublisherBufferLease> ReclaimBufferLease(int32_t slot_id) {
+    return client_->ReclaimPublisherBuffer(impl_.get(), slot_id);
+  }
+
+  // Reclaim any slot currently marked retired when fd notifications are stale.
+  absl::StatusOr<PublisherBufferLease> ReclaimAnyBufferLease() {
+    return client_->ReclaimAnyPublisherBuffer(impl_.get());
+  }
+
+  absl::StatusOr<ScopedPublisherBufferLease>
+  ReclaimScopedBufferLease(int32_t slot_id) & {
+    auto lease = ReclaimBufferLease(slot_id);
+    if (!lease.ok()) {
+      return lease.status();
+    }
+    return ScopedPublisherBufferLease(this, *lease);
+  }
+
+  absl::StatusOr<const Message>
+  PublishBufferLease(const PublisherBufferLease &lease, int64_t message_size) {
+    return client_->PublishPublisherBuffer(impl_.get(), lease, message_size);
+  }
+
+  absl::StatusOr<const Message>
+  PublishBufferLeaseCopy(const PublisherBufferLease &lease,
+                         absl::Span<const std::byte> payload) {
+    return client_->PublishPublisherBufferCopy(impl_.get(), lease, payload);
+  }
+
+  absl::Status ReleaseBufferLease(const PublisherBufferLease &lease) {
+    return client_->ReleasePublisherBuffer(impl_.get(), lease);
+  }
+
+  absl::Span<std::byte> GetMetadata(const PublisherBufferLease &lease) {
+    return client_->GetPublisherBufferMetadata(impl_.get(), lease);
+  }
 
   // Publish a message that already includes a prefix.  You have the option to
   // use the slot id passed in the prefix for message retirement or use the
@@ -971,6 +1124,11 @@ public:
   bool IsReliable() const { return impl_->IsReliable(); }
   bool IsLocal() const { return impl_->IsLocal(); }
   bool IsFixedSize() const { return impl_->IsFixedSize(); }
+  // Effective upper bound on the slot size, rounded up to the channel's
+  // alignment, or 0 if the channel is uncapped.
+  SlotSizeType MaxSlotSize() const {
+    return static_cast<SlotSizeType>(impl_->MaxSlotSize());
+  }
   bool ForTunnel() const { return impl_->ForTunnel(); }
   // True when the channel stores prefixes separately from payload slots.
   // In this mode each payload slot has an allocator-defined handle that can be
@@ -979,8 +1137,14 @@ public:
   // code needs to identify/map/free that slot.
   bool UsesSplitBuffers() const { return impl_->UsesSplitBuffers(); }
 
-  int32_t SlotSize() const { return impl_->SlotSize(); }
+  SlotSizeType SlotSize() const {
+    return static_cast<SlotSizeType>(impl_->SlotSize());
+  }
   int32_t NumSlots() const { return impl_->NumSlots(); }
+  int32_t SubscriberQueueSize() const { return impl_->SubscriberQueueSize(); }
+  uint64_t SubscriberQueueArenaSize() const {
+    return impl_->SubscriberQueueArenaSize();
+  }
 
   const std::vector<std::unique_ptr<details::BufferSet>> &GetBuffers() const {
     return client_->GetBuffers(impl_.get());
@@ -1024,7 +1188,7 @@ public:
   }
 
   void GetStatsCounters(uint64_t &total_bytes, uint64_t &total_messages,
-                        uint32_t &max_message_size, uint32_t &total_drops) {
+                        uint64_t &max_message_size, uint32_t &total_drops) {
     impl_->GetStatsCounters(total_bytes, total_messages, max_message_size,
                             total_drops);
   }
@@ -1053,12 +1217,14 @@ public:
   // Register a function to be called when the publisher resizes
   // the channel.
   absl::Status RegisterResizeCallback(
-      std::function<absl::Status(Publisher *, int, int)> callback) {
+      std::function<absl::Status(Publisher *, SlotSizeType, SlotSizeType)>
+          callback) {
     auto status = client_->RegisterResizeCallback(
         impl_.get(),
-        [this](details::PublisherImpl *, int32_t old_size,
-               int32_t new_size) -> absl::Status {
-          return resize_callback_(this, old_size, new_size);
+        [this](details::PublisherImpl *, int64_t old_size,
+               int64_t new_size) -> absl::Status {
+          return resize_callback_(this, static_cast<SlotSizeType>(old_size),
+                                  static_cast<SlotSizeType>(new_size));
         });
     if (!status.ok()) {
       return status;
@@ -1148,9 +1314,65 @@ private:
 
   std::shared_ptr<ClientImpl> client_;
   std::shared_ptr<details::PublisherImpl> impl_;
-  std::function<absl::Status(Publisher *, int, int)> resize_callback_ = nullptr;
+  std::function<absl::Status(Publisher *, SlotSizeType, SlotSizeType)>
+      resize_callback_ = nullptr;
   std::vector<void *> address_cache_;
 };
+
+inline ScopedPublisherBufferLease::~ScopedPublisherBufferLease() {
+  Release().IgnoreError();
+}
+
+inline ScopedPublisherBufferLease::ScopedPublisherBufferLease(
+    ScopedPublisherBufferLease &&other) noexcept
+    : publisher_(other.publisher_), lease_(other.lease_) {
+  other.Invalidate();
+}
+
+inline absl::Span<std::byte> ScopedPublisherBufferLease::GetMetadata() {
+  if (!*this) {
+    return {};
+  }
+  return publisher_->GetMetadata(lease_);
+}
+
+inline absl::StatusOr<const Message>
+ScopedPublisherBufferLease::Publish(int64_t message_size) {
+  if (!*this) {
+    return absl::FailedPreconditionError(
+        "publisher buffer lease is not active");
+  }
+  auto result = publisher_->PublishBufferLease(lease_, message_size);
+  if (result.ok()) {
+    Invalidate();
+  }
+  return result;
+}
+
+inline absl::StatusOr<const Message>
+ScopedPublisherBufferLease::PublishCopy(
+    absl::Span<const std::byte> payload) {
+  if (!*this) {
+    return absl::FailedPreconditionError(
+        "publisher buffer lease is not active");
+  }
+  auto result = publisher_->PublishBufferLeaseCopy(lease_, payload);
+  if (result.ok()) {
+    Invalidate();
+  }
+  return result;
+}
+
+inline absl::Status ScopedPublisherBufferLease::Release() {
+  if (!*this) {
+    return absl::OkStatus();
+  }
+  absl::Status status = publisher_->ReleaseBufferLease(lease_);
+  if (status.ok()) {
+    Invalidate();
+  }
+  return status;
+}
 
 class Subscriber {
 public:
@@ -1267,19 +1489,29 @@ public:
   // memory which is read-only.  If the read is triggered by the PollFd,
   // you must read all the avaiable messages from the subscriber as the
   // PollFd is only triggered when a new message is published.
-  absl::StatusOr<Message> ReadMessage(ReadMode mode = ReadMode::kReadNext) {
-    return client_->ReadMessage(impl_.get(), mode);
+  // Pass ClearTrigger::kNoClearTrigger to leave the subscriber trigger fd
+  // unread.
+  absl::StatusOr<Message>
+  ReadMessage(ReadMode mode = ReadMode::kReadNext,
+              ClearTrigger clear_trigger = ClearTrigger::kClearTrigger) {
+    return client_->ReadMessage(impl_.get(), mode, clear_trigger);
   }
   absl::StatusOr<Message>
   ReadMessageFromBatch(ReadMode mode = ReadMode::kReadNext) {
     return client_->ReadMessageFromBatch(impl_.get(), mode);
   }
 
+  // Read and deserialize a telemetry message. Returns nullptr when no message
+  // is currently available.
+  absl::StatusOr<std::shared_ptr<Telemetry>>
+  ReadTelemetryMessage(ReadMode mode = ReadMode::kReadNext);
+
   // As ReadMessage above but returns a shared_ptr to the typed message.
   // NOTE: this is subspace::shared_ptr, not std::shared_ptr.
   template <typename T, typename Aliaser = DefaultAliaser>
   absl::StatusOr<shared_ptr<T, Aliaser>>
-  ReadMessage(ReadMode mode = ReadMode::kReadNext);
+  ReadMessage(ReadMode mode = ReadMode::kReadNext,
+              ClearTrigger clear_trigger = ClearTrigger::kClearTrigger);
 
   bool AddActiveMessage(int32_t slot_id) {
     return impl_->AddActiveMessage(impl_->GetSlot(slot_id));
@@ -1318,7 +1550,7 @@ public:
     return impl_->GetVirtualMemoryUsage();
   }
 
-  std::string Name() const { return impl_->Name(); }
+  std::string Name() const { return impl_->RequestName(); }
   std::string Type() const { return impl_->Type(); }
   std::string_view TypeView() const { return impl_->TypeView(); }
 
@@ -1420,8 +1652,11 @@ public:
   // the payload into the subscriber process.
   bool UsesSplitBuffers() const { return impl_->UsesSplitBuffers(); }
 
-  int32_t SlotSize() const { return impl_->SlotSize(); }
+  SlotSizeType SlotSize() const {
+    return static_cast<SlotSizeType>(impl_->SlotSize());
+  }
   int32_t NumSlots() const { return impl_->NumSlots(); }
+  int32_t SubscriberQueueSize() const { return impl_->SubscriberQueueSize(); }
 
   const std::vector<std::unique_ptr<details::BufferSet>> &GetBuffers() const {
     return client_->GetBuffers(impl_.get());
@@ -1524,8 +1759,10 @@ public:
   bool AtomicIncRefCount(int slot_id, int inc) {
     MessageSlot *slot = impl_->GetSlot(slot_id);
     if (slot != nullptr) {
-      return impl_->AtomicIncRefCount(slot, IsReliable(), inc, slot->ordinal,
-                                      slot->vchan_id, false);
+      return impl_->AtomicIncRefCount(
+          slot, IsReliable(), inc,
+          slot->ordinal.load(std::memory_order_relaxed),
+          slot->vchan_id.load(std::memory_order_relaxed), false);
     }
     return false;
   }
@@ -1554,8 +1791,8 @@ private:
 
 template <typename T, typename Aliaser>
 inline absl::StatusOr<::subspace::shared_ptr<T, Aliaser>>
-Subscriber::ReadMessage(ReadMode mode) {
-  return client_->ReadMessage<T, Aliaser>(impl_.get(), mode);
+Subscriber::ReadMessage(ReadMode mode, ClearTrigger clear_trigger) {
+  return client_->ReadMessage<T, Aliaser>(impl_.get(), mode, clear_trigger);
 }
 
 template <typename T, typename Aliaser>
@@ -1609,7 +1846,8 @@ public:
   // it will be created with num_slots slots, each of which is slot_size
   // bytes long.
   absl::StatusOr<Publisher>
-  CreatePublisher(const std::string &channel_name, int slot_size, int num_slots,
+  CreatePublisher(const std::string &channel_name, SlotSizeType slot_size,
+                  int num_slots,
                   const PublisherOptions &opts = PublisherOptions()) {
     return impl_->CreatePublisher(channel_name, slot_size, num_slots, opts);
   }
@@ -1635,6 +1873,13 @@ public:
   void SetDebug(bool v) { impl_->SetDebug(v); }
 
   void SetThreadSafe(bool v) { impl_->SetThreadSafe(v); }
+
+  // Test-only.  The hook runs inside ReadMessage and FindMessage when a
+  // placeholder subscriber has just checked the server for a new publisher,
+  // so a test can make a publisher appear at exactly that point.
+  void SetPlaceholderCheckHookForTesting(std::function<void()> hook) {
+    impl_->placeholder_check_hook_ = std::move(hook);
+  }
 
   absl::StatusOr<const ChannelCounters>
   GetChannelCounters(const std::string &channel_name) const {

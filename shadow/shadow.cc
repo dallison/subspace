@@ -251,6 +251,7 @@ Shadow::HandleCreateChannel(const ShadowCreateChannel &msg,
     ch.channel_id = msg.channel_id();
     ch.slot_size = msg.slot_size();
     ch.num_slots = msg.num_slots();
+    ch.subscriber_queue_arena_size = msg.subscriber_queue_arena_size();
     ch.type = msg.type();
     ch.is_local = msg.is_local();
     ch.is_reliable = msg.is_reliable();
@@ -264,6 +265,12 @@ Shadow::HandleCreateChannel(const ShadowCreateChannel &msg,
     ch.split_buffers_over_bridge = msg.split_buffers_over_bridge();
     ch.has_max_publishers = msg.has_max_publishers();
     ch.max_publishers = msg.max_publishers();
+    ch.has_max_subscribers = msg.has_max_subscribers();
+    ch.max_subscribers = msg.max_subscribers();
+    ch.has_max_slot_size = msg.has_max_slot_size();
+    ch.max_slot_size = msg.max_slot_size();
+    ch.hidden = msg.hidden();
+    ch.telemetry_target = msg.telemetry_target();
     ch.ccb_fd = std::move(fds[0]);
     ch.bcb_fd = std::move(fds[1]);
   };
@@ -274,9 +281,9 @@ Shadow::HandleCreateChannel(const ShadowCreateChannel &msg,
   apply_channel_metadata(channel);
 
   logger_.Log(toolbelt::LogLevel::kDebug,
-              "Shadow: create channel '%s' id=%d slots=%d/%d",
+              "Shadow: create channel '%s' id=%d slots=%d/%lld",
               channel.name.c_str(), channel.channel_id, channel.num_slots,
-              channel.slot_size);
+              static_cast<long long>(channel.slot_size));
 
   if (it == channels_.end()) {
     channels_.emplace(channel.name, std::move(ch));
@@ -317,6 +324,11 @@ Shadow::HandleAddPublisher(const ShadowAddPublisher &msg,
       .for_tunnel = msg.for_tunnel(),
       .is_fixed_size = msg.is_fixed_size(),
       .notify_retirement = msg.notify_retirement(),
+      .max_outstanding_slot_leases =
+          msg.max_outstanding_slot_leases() > 0
+              ? msg.max_outstanding_slot_leases()
+              : 1,
+      .process_id = msg.process_id(),
       .poll_fd = std::move(fds[0]),
       .trigger_fd = std::move(fds[1]),
       .retirement_read_fd = msg.notify_retirement()
@@ -331,6 +343,10 @@ Shadow::HandleAddPublisher(const ShadowAddPublisher &msg,
               "Shadow: add publisher '%s' pub_id=%d reliable=%d",
               msg.channel_name().c_str(), pub.id, pub.is_reliable);
 
+  // The server latches channel locality, so keep it after the user leaves.
+  if (pub.is_local) {
+    it->second.is_local = true;
+  }
   it->second.publishers.emplace(pub.id, std::move(pub));
   return absl::OkStatus();
 }
@@ -367,9 +383,12 @@ Shadow::HandleAddSubscriber(const ShadowAddSubscriber &msg,
   ShadowSubscriber sub{
       .id = msg.subscriber_id(),
       .is_reliable = msg.is_reliable(),
+      .is_local = msg.is_local(),
       .is_bridge = msg.is_bridge(),
       .for_tunnel = msg.for_tunnel(),
       .max_active_messages = msg.max_active_messages(),
+      .subscriber_queue_size = msg.subscriber_queue_size(),
+      .process_id = msg.process_id(),
       .trigger_fd = std::move(fds[0]),
       .poll_fd = std::move(fds[1]),
   };
@@ -378,6 +397,10 @@ Shadow::HandleAddSubscriber(const ShadowAddSubscriber &msg,
               "Shadow: add subscriber '%s' sub_id=%d reliable=%d",
               msg.channel_name().c_str(), sub.id, sub.is_reliable);
 
+  // The server latches channel locality, so keep it after the user leaves.
+  if (sub.is_local) {
+    it->second.is_local = true;
+  }
   it->second.subscribers.emplace(sub.id, std::move(sub));
   return absl::OkStatus();
 }
@@ -472,6 +495,10 @@ Shadow::HandleUpdateChannelOptions(const ShadowUpdateChannelOptions &msg) {
   channel.split_buffers_over_bridge = msg.split_buffers_over_bridge();
   channel.has_max_publishers = msg.has_max_publishers();
   channel.max_publishers = msg.max_publishers();
+  channel.has_max_subscribers = msg.has_max_subscribers();
+  channel.max_subscribers = msg.max_subscribers();
+  channel.has_max_slot_size = msg.has_max_slot_size();
+  channel.max_slot_size = msg.max_slot_size();
   return absl::OkStatus();
 }
 
@@ -528,6 +555,8 @@ absl::Status Shadow::SendStateDump(toolbelt::UnixSocket &socket) {
       msg->set_channel_id(ch.channel_id);
       msg->set_slot_size(ch.slot_size);
       msg->set_num_slots(ch.num_slots);
+      msg->set_subscriber_queue_arena_size(
+          ch.subscriber_queue_arena_size);
       msg->set_type(ch.type);
       msg->set_is_local(ch.is_local);
       msg->set_is_reliable(ch.is_reliable);
@@ -541,6 +570,12 @@ absl::Status Shadow::SendStateDump(toolbelt::UnixSocket &socket) {
       msg->set_split_buffers_over_bridge(ch.split_buffers_over_bridge);
       msg->set_has_max_publishers(ch.has_max_publishers);
       msg->set_max_publishers(ch.max_publishers);
+      msg->set_has_max_subscribers(ch.has_max_subscribers);
+      msg->set_max_subscribers(ch.max_subscribers);
+      msg->set_has_max_slot_size(ch.has_max_slot_size);
+      msg->set_max_slot_size(ch.max_slot_size);
+      msg->set_hidden(ch.hidden);
+      msg->set_telemetry_target(ch.telemetry_target);
 
       std::vector<toolbelt::FileDescriptor> fds;
       fds.push_back(ch.ccb_fd);
@@ -578,6 +613,9 @@ absl::Status Shadow::SendStateDump(toolbelt::UnixSocket &socket) {
       msg->set_for_tunnel(pub.for_tunnel);
       msg->set_is_fixed_size(pub.is_fixed_size);
       msg->set_notify_retirement(pub.notify_retirement);
+      msg->set_max_outstanding_slot_leases(
+          pub.max_outstanding_slot_leases);
+      msg->set_process_id(pub.process_id);
 
       std::vector<toolbelt::FileDescriptor> fds;
       fds.push_back(pub.poll_fd);
@@ -598,9 +636,12 @@ absl::Status Shadow::SendStateDump(toolbelt::UnixSocket &socket) {
       msg->set_channel_name(ch.name);
       msg->set_subscriber_id(sub.id);
       msg->set_is_reliable(sub.is_reliable);
+      msg->set_is_local(sub.is_local);
       msg->set_is_bridge(sub.is_bridge);
       msg->set_for_tunnel(sub.for_tunnel);
       msg->set_max_active_messages(sub.max_active_messages);
+      msg->set_subscriber_queue_size(sub.subscriber_queue_size);
+      msg->set_process_id(sub.process_id);
 
       std::vector<toolbelt::FileDescriptor> fds;
       fds.push_back(sub.trigger_fd);
