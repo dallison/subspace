@@ -223,6 +223,8 @@ Important subscriber options:
 | `max_subscribers` | Server-enforced subscriber limit; 0 means unlimited. The first subscriber establishes the value. |
 | `pass_activation` | Deliver activation messages to the caller. |
 | `log_dropped_messages` | Log detected drops to stderr. |
+| `warn_when_stuck` | Log an error when `max_active_messages` has kept the subscriber from reading a waiting message for `stuck_warning_grace_period` seconds. Logged twice, then silenced until the subscriber reads again. A stuck subscriber callback is called once instead. `subspace_subscriber_options_default()` sets it to true. |
+| `stuck_warning_grace_period` | Seconds before the stuck error is logged. `subspace_subscriber_options_default()` sets it to 5. |
 | `read_write` | Map payload buffers writable for this subscriber. |
 | `mux`, `vchan_id` | Attach through a mux channel and optional virtual channel id. |
 | `checksum` | Verify message checksums. |
@@ -380,6 +382,7 @@ Callback-related APIs:
 | `subspace_process_all_messages_with_mode` | Same, with explicit read mode. |
 | `subspace_invoke_subscriber_callback` | Invoke the registered callback with a caller-supplied message. |
 | `subspace_register_dropped_message_callback` | Register dropped-message notification callback. |
+| `subspace_register_stuck_subscriber_callback` | Register a callback for a subscriber stuck at `max_active_messages`. It receives the seconds stuck, replaces the logged error, and is called once until the subscriber reads again. |
 | `subspace_register_publisher_on_send_callback` | Transform outgoing payloads before publish. |
 | `subspace_register_subscriber_on_receive_callback` | Transform incoming payloads after read. |
 | `subspace_register_resize_callback` | Register publisher resize callback. |

@@ -7673,6 +7673,202 @@ TEST_F(ClientTest, MaxActiveMessagesTooSmall) {
               ::testing::HasSubstr("MaxActiveMessages"));
 }
 
+TEST_F(ClientTest, NegativeStuckWarningGracePeriod) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+  auto sub = client.CreateSubscriber(
+      "stuck_grace_test",
+      subspace::SubscriberOptions().SetStuckWarningGracePeriod(-1));
+  ASSERT_FALSE(sub.ok());
+  EXPECT_THAT(sub.status().message(),
+              ::testing::HasSubstr("StuckWarningGracePeriod"));
+}
+
+namespace {
+int CountStuckWarnings(const std::string &output, const std::string &channel) {
+  const std::string needle = absl::StrFormat(
+      "on channel %s has been unable to read messages", channel);
+  int count = 0;
+  for (size_t pos = output.find(needle); pos != std::string::npos;
+       pos = output.find(needle, pos + needle.size())) {
+    count++;
+  }
+  return count;
+}
+
+void PublishStuckTestMessage(subspace::Publisher &pub) {
+  absl::StatusOr<void *> buffer = pub.GetMessageBuffer(64);
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "stuck", 5);
+  ASSERT_OK(pub.PublishMessage(5));
+}
+} // namespace
+
+TEST_F(ClientTest, StuckSubscriberWarningIsThrottled) {
+  constexpr char kChannel[] = "stuck_warning";
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+  auto pub =
+      EVAL_AND_ASSERT_OK(pub_client.CreatePublisher(kChannel, PubOpts(64, 8)));
+  auto sub = EVAL_AND_ASSERT_OK(sub_client.CreateSubscriber(
+      kChannel,
+      SubOpts().SetMaxActiveMessages(1).SetStuckWarningGracePeriod(0.2)));
+
+  PublishStuckTestMessage(pub);
+  PublishStuckTestMessage(pub);
+  std::optional<subspace::Message> held =
+      EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_EQ(5, held->length);
+
+  // The second message is waiting but the held one uses up
+  // max_active_messages, so each read comes back empty.
+  int warnings = 0;
+  auto read_while_stuck = [&]() {
+    ::testing::internal::CaptureStderr();
+    absl::StatusOr<subspace::Message> msg = sub.ReadMessage();
+    warnings += CountStuckWarnings(::testing::internal::GetCapturedStderr(),
+                                   kChannel);
+    ASSERT_OK(msg);
+    ASSERT_EQ(0, msg->length);
+  };
+  read_while_stuck();
+  EXPECT_EQ(0, warnings);
+
+  // One warning per grace period, twice, then silence.
+  for (int expected : {1, 2, 2}) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    read_while_stuck();
+    EXPECT_EQ(expected, warnings);
+  }
+
+  // Reading a message again resets the throttle, and the grace period applies
+  // to the next time the subscriber is stuck.
+  held.reset();
+  held = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_EQ(5, held->length);
+  PublishStuckTestMessage(pub);
+  read_while_stuck();
+  EXPECT_EQ(2, warnings);
+  std::this_thread::sleep_for(std::chrono::milliseconds(250));
+  read_while_stuck();
+  EXPECT_EQ(3, warnings);
+}
+
+TEST_F(ClientTest, StuckSubscriberCallbackReplacesWarning) {
+  constexpr char kChannel[] = "stuck_callback";
+  constexpr double kGracePeriod = 0.2;
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+  auto pub =
+      EVAL_AND_ASSERT_OK(pub_client.CreatePublisher(kChannel, PubOpts(64, 8)));
+  auto sub = EVAL_AND_ASSERT_OK(sub_client.CreateSubscriber(
+      kChannel, SubOpts().SetMaxActiveMessages(1).SetStuckWarningGracePeriod(
+                    kGracePeriod)));
+
+  std::vector<double> stuck_seconds;
+  ASSERT_OK(sub.RegisterStuckSubscriberCallback(
+      [&stuck_seconds, &sub](Subscriber *s, double seconds) {
+        EXPECT_EQ(sub, *s);
+        stuck_seconds.push_back(seconds);
+      }));
+  // Only one callback per subscriber.
+  EXPECT_FALSE(
+      sub.RegisterStuckSubscriberCallback([](Subscriber *, double) {}).ok());
+
+  PublishStuckTestMessage(pub);
+  PublishStuckTestMessage(pub);
+  std::optional<subspace::Message> held =
+      EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_EQ(5, held->length);
+
+  int warnings = 0;
+  auto read_while_stuck = [&]() {
+    ::testing::internal::CaptureStderr();
+    absl::StatusOr<subspace::Message> msg = sub.ReadMessage();
+    warnings += CountStuckWarnings(::testing::internal::GetCapturedStderr(),
+                                   kChannel);
+    ASSERT_OK(msg);
+    ASSERT_EQ(0, msg->length);
+  };
+  read_while_stuck();
+  EXPECT_TRUE(stuck_seconds.empty());
+
+  // The callback runs once per stuck period, after the grace period, and the
+  // error is never logged while it is registered.
+  for (int i = 0; i < 3; i++) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    read_while_stuck();
+    ASSERT_EQ(1u, stuck_seconds.size());
+  }
+  EXPECT_GE(stuck_seconds[0], kGracePeriod);
+  EXPECT_EQ(0, warnings);
+
+  // After the subscriber reads again, the next stuck period gets its own
+  // callback once the grace period passes.
+  held.reset();
+  held = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_EQ(5, held->length);
+  PublishStuckTestMessage(pub);
+  read_while_stuck();
+  EXPECT_EQ(1u, stuck_seconds.size());
+  std::this_thread::sleep_for(std::chrono::milliseconds(250));
+  read_while_stuck();
+  EXPECT_EQ(2u, stuck_seconds.size());
+  EXPECT_EQ(0, warnings);
+
+  // Removing the callback brings back the logged error.
+  ASSERT_OK(sub.UnregisterStuckSubscriberCallback());
+  EXPECT_FALSE(sub.UnregisterStuckSubscriberCallback().ok());
+  std::this_thread::sleep_for(std::chrono::milliseconds(250));
+  read_while_stuck();
+  EXPECT_EQ(1, warnings);
+  EXPECT_EQ(2u, stuck_seconds.size());
+}
+
+TEST_F(ClientTest, StuckSubscriberWarningCanBeDisabled) {
+  constexpr char kChannel[] = "stuck_warning_disabled";
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+  auto pub =
+      EVAL_AND_ASSERT_OK(pub_client.CreatePublisher(kChannel, PubOpts(64, 8)));
+  auto sub = EVAL_AND_ASSERT_OK(sub_client.CreateSubscriber(
+      kChannel, SubOpts()
+                    .SetMaxActiveMessages(1)
+                    .SetWarnWhenStuck(false)
+                    .SetStuckWarningGracePeriod(0)));
+
+  PublishStuckTestMessage(pub);
+  PublishStuckTestMessage(pub);
+  subspace::Message held = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_EQ(5, held.length);
+
+  ::testing::internal::CaptureStderr();
+  for (int i = 0; i < 3; i++) {
+    absl::StatusOr<subspace::Message> msg = sub.ReadMessage();
+    ASSERT_OK(msg);
+    EXPECT_EQ(0, msg->length);
+  }
+  EXPECT_EQ(0, CountStuckWarnings(::testing::internal::GetCapturedStderr(),
+                                  kChannel));
+
+  // warn_when_stuck also turns off the callback.
+  int callbacks = 0;
+  ASSERT_OK(sub.RegisterStuckSubscriberCallback(
+      [&callbacks](Subscriber *, double) { callbacks++; }));
+  for (int i = 0; i < 3; i++) {
+    absl::StatusOr<subspace::Message> msg = sub.ReadMessage();
+    ASSERT_OK(msg);
+    EXPECT_EQ(0, msg->length);
+  }
+  EXPECT_EQ(0, callbacks);
+}
+
 TEST_F(ClientTest, CapacityErrorIdentifiesExistingClients) {
   auto publisher_client_a = EVAL_AND_ASSERT_OK(
       subspace::Client::Create(Socket(), "capacity-publisher-a"));
@@ -8118,9 +8314,15 @@ TEST_F(ClientTest, SubscriberOptionsChain) {
       .SetChecksum(true)
       .SetPassChecksumErrors(true)
       .SetKeepActiveMessage(true)
-      .SetDetectDroppedMessages(false);
+      .SetDetectDroppedMessages(false)
+      .SetWarnWhenStuck(false)
+      .SetStuckWarningGracePeriod(1.5);
   opts.SetLogDroppedMessages(true);
 
+  ASSERT_FALSE(opts.WarnWhenStuck());
+  ASSERT_EQ(1.5, opts.StuckWarningGracePeriod());
+  ASSERT_TRUE(subspace::SubscriberOptions().WarnWhenStuck());
+  ASSERT_EQ(5.0, subspace::SubscriberOptions().StuckWarningGracePeriod());
   ASSERT_TRUE(opts.IsReliable());
   ASSERT_EQ(12, opts.SubscriberQueueSize());
   ASSERT_EQ("sub_type", opts.Type());
