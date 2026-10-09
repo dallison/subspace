@@ -238,6 +238,10 @@ public:
   bool IsHidden() const { return hidden_; }
   bool IsTelemetryChannel() const { return !telemetry_target_.empty(); }
   const std::string &TelemetryTarget() const { return telemetry_target_; }
+  // A static channel comes from the server's static channel config.  It
+  // keeps its layout and stays when it has no publishers or subscribers.
+  void SetStatic(bool v) { static_ = v; }
+  bool IsStatic() const { return static_; }
 
   absl::StatusOr<PublisherUser *> AddPublisher(ClientHandler *handler,
                                                bool is_reliable, bool is_local,
@@ -534,6 +538,7 @@ protected:
   bool local_latched_ = false;
   bool skip_cleanup_ = false;
   bool hidden_ = false;
+  bool static_ = false;
   std::string telemetry_target_;
   int session_id_;
   mutable int64_t last_known_slot_size_ = 0;

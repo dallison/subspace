@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Static Channel Config
+- `subspace_server --channel_config=FILE` reads a `StaticChannelConfig` in
+  protobuf text format and creates its channels and multiplexers before the
+  server accepts clients. Clients can then use only those channels and the
+  server's own, the channels stay when they have no users, and their layout
+  is fixed: publishers must be fixed size and match the configured slot
+  size, number of slots, checksum size and metadata size.
+- A multiplexer with no publishers now reports its slot size.
+
 ### Stuck Subscriber Warning
 - A subscriber now logs an error when a message has been waiting for 5
   seconds that it can't read because it already holds `max_active_messages`

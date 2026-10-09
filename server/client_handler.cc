@@ -11,6 +11,22 @@
 namespace subspace {
 namespace {
 
+// With a static channel config, clients can't create channels other than the
+// server's own.  Sets the response error and returns false for one they
+// can't create.
+template <typename Response>
+bool StaticConfigAllowsNewChannel(const Server &server,
+                                  const std::string &channel_name,
+                                  Response *response) {
+  if (!server.HasStaticChannelConfig() ||
+      Server::IsServerChannelName(channel_name)) {
+    return true;
+  }
+  response->set_error(absl::StrFormat(
+      "Channel %s isn't in the static channel config", channel_name));
+  return false;
+}
+
 ClientBufferAllocatorKind FromProtoAllocator(ClientBufferAllocator allocator) {
   switch (allocator) {
   case CLIENT_BUFFER_ALLOCATOR_ANDROID_MEMFD:
@@ -440,6 +456,37 @@ void ClientHandler::HandleCreatePublisher(
     response->set_error(
         absl::StrFormat("No such channel %s", req.channel_name()));
     return;
+  }
+  if (channel == nullptr &&
+      !StaticConfigAllowsNewChannel(*server_, req.channel_name(), response)) {
+    return;
+  }
+  if (channel != nullptr && channel->IsStatic()) {
+    // Resizing happens in the publisher, so only a fixed size publisher keeps
+    // the configured layout.
+    if (!req.is_fixed_size()) {
+      response->set_error(absl::StrFormat(
+          "Publishers on static channel %s must be fixed size",
+          req.channel_name()));
+      return;
+    }
+    if (req.slot_size() != channel->SlotSize() ||
+        req.num_slots() != channel->NumSlots()) {
+      response->set_error(absl::StrFormat(
+          "Static channel %s has %d slots of %d bytes, not %d slots of %d "
+          "bytes",
+          req.channel_name(), channel->NumSlots(), channel->SlotSize(),
+          req.num_slots(), req.slot_size()));
+      return;
+    }
+    if (cs != channel->ChecksumSize() || ms != channel->MetadataSize()) {
+      response->set_error(absl::StrFormat(
+          "Static channel %s has checksum_size %d and metadata_size %d, not "
+          "%d and %d",
+          req.channel_name(), channel->ChecksumSize(), channel->MetadataSize(),
+          cs, ms));
+      return;
+    }
   }
   if (channel == nullptr) {
     server_->logger_.Log(toolbelt::LogLevel::kDebug,
@@ -876,6 +923,10 @@ void ClientHandler::HandleCreateSubscriber(
       return;
     }
     if (channel == nullptr) {
+      if (!StaticConfigAllowsNewChannel(*server_, req.channel_name(),
+                                        response)) {
+        return;
+      }
       // No channel exists, map an empty channel.
       server_->logger_.Log(
           toolbelt::LogLevel::kDebug,

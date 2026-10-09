@@ -1156,7 +1156,7 @@ void ServerChannel::RemoveUser(Server *server, int user_id) {
   users_.erase(it);
   // The telemetry coroutine removes its hidden channel after its publisher is
   // fully destroyed.
-  if (IsEmpty() && !IsTelemetryChannel()) {
+  if (IsEmpty() && !IsTelemetryChannel() && !IsStatic()) {
     server->RemoveChannel(this);
   }
   server->SendChannelDirectory();

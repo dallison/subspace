@@ -30,6 +30,7 @@
 #include <cstdio>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 namespace subspace {
@@ -111,6 +112,15 @@ public:
 
   void SetShadowSocket(const std::string &socket_name);
   void SetShadowSockets(const std::string &primary, const std::string &secondary);
+
+  // Call before Run().  Run() creates the configured channels before it
+  // accepts any clients, and from then on clients can use only those channels
+  // and the server's own.  Fails if the config isn't valid.
+  absl::Status SetStaticChannelConfig(StaticChannelConfig config);
+  bool HasStaticChannelConfig() const { return static_config_.has_value(); }
+  // The channels the server publishes itself, which a static channel config
+  // doesn't list.
+  static bool IsServerChannelName(const std::string &channel_name);
   void SimulateCrash() {
     simulate_crash_ = true;
     for (auto &[name, ch] : channels_) {
@@ -298,6 +308,10 @@ private:
   };
 
   absl::Status RecoverFromShadow(RecoveredState &state);
+
+  // Creates the static config's channels, or checks that channels recovered
+  // from a shadow match it, and marks them static.
+  absl::Status CreateStaticChannels();
 
   // Public iteration excludes internal telemetry transport channels.
   void ForeachChannel(std::function<void(ServerChannel *)> func);
@@ -500,6 +514,7 @@ private:
   std::vector<std::unique_ptr<Plugin>> plugins_;
   toolbelt::TriggerFd shutdown_trigger_fd_;
   std::string machine_name_;
+  std::optional<StaticChannelConfig> static_config_;
   bool publish_server_channels_ = true;
   BridgePortRange bridge_port_range_;
   bool bridge_ports_fallback_to_ephemeral_ = false;

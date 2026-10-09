@@ -647,3 +647,40 @@ message Telemetry {
   repeated Drop drops = 3;
   repeated Resize resizes = 4;
 }
+
+// A server given a StaticChannelConfig (subspace_server --channel_config, in
+// protobuf text format) creates its channels before it accepts any clients.
+// Clients can then use only these channels and the server's own
+// /subspace/ChannelDirectory and /subspace/Statistics.  The channels stay for
+// the life of the server and their layout is fixed: publishers must be fixed
+// size and match the configured slot size, number of slots, checksum size and
+// metadata size.
+message StaticMultiplexer {
+  string name = 1;
+  int32 slot_size = 2;
+  int32 num_slots = 3;
+  string type = 4;
+  int32 checksum_size = 5; // 0 means the default of 4 bytes.
+  int32 metadata_size = 6;
+}
+
+message StaticChannel {
+  string name = 1;
+  // A channel on a multiplexer leaves slot_size, num_slots, type,
+  // checksum_size and metadata_size unset and takes them from the
+  // multiplexer.
+  int32 slot_size = 2;
+  int32 num_slots = 3;
+  string type = 4;
+  int32 checksum_size = 5; // 0 means the default of 4 bytes.
+  int32 metadata_size = 6;
+  // Name of an entry in StaticChannelConfig.multiplexers.
+  string mux = 7;
+  // Virtual channel id on the multiplexer.  Only used when mux is set.
+  int32 vchan_id = 8;
+}
+
+message StaticChannelConfig {
+  repeated StaticMultiplexer multiplexers = 1;
+  repeated StaticChannel channels = 2;
+}

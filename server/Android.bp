@@ -10,6 +10,7 @@ cc_library_static {
         "client_handler.cc",
         "server_channel.cc",
         "shadow_replicator.cc",
+        "static_config.cc",
     ],
     export_include_dirs: ["."],
     include_dirs: ["external/subspace"],
