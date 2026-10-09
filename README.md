@@ -50,6 +50,7 @@ See the file docs/subspace.pdf for full documentation.  Additional documentation
 - [Slot Sizes](docs/slot-sizes.md)
 - [Channel Limit](docs/max-channels.md)
 - [C Client API](docs/c-client.md)
+- [ASIL Client](docs/asil-client.md)
 - [Client Architecture](docs/client-architecture.md)
 - [Server Architecture](docs/server-architecture.md)
 - [Asio Backend and vsock Bridging](docs/asio-backend.md)
@@ -2008,6 +2009,47 @@ The `manual_tests/pub` tool takes `--local=false` and `--channel=NAME`, and
 `manual_tests/sub` takes `--channel=NAME`, so you can also drive bridging by
 hand against servers on two different computers.
 
+## Static Channel Config
+
+By default the server creates channels on demand as publishers and subscribers
+arrive.  For systems that need a fixed, known set of channels, start the server
+with `--channel_config=FILE`.  The file is a `StaticChannelConfig`
+(`proto/subspace.proto`) in protobuf text format:
+
+```
+multiplexers { name: "/sensors" slot_size: 1024 num_slots: 16 type: "Sensor" }
+channels { name: "/vehicle/state" slot_size: 256 num_slots: 8 type: "State" }
+channels { name: "/sensors/lidar" mux: "/sensors" vchan_id: 0 }
+channels { name: "/sensors/radar" mux: "/sensors" vchan_id: 1 }
+```
+
+The server creates every configured channel and its message buffers before it
+accepts clients, so a subscriber that starts first gets the full channel
+layout and maps the buffers instead of waiting for a publisher.  With a config
+loaded:
+
+- Clients can use only the configured channels and the server's own
+  `/subspace/ChannelDirectory` and `/subspace/Statistics`.  Creating a
+  publisher or subscriber for any other channel fails.
+- Configured channels stay for the life of the server, including when they
+  have no publishers or subscribers.
+- The layout is fixed.  Publishers must be fixed size (`SetFixedSize(true)`)
+  and match the configured slot size, number of slots, checksum size and
+  metadata size.
+- `use_split_buffers: true` gives a channel or multiplexer
+  [split buffers](docs/split-buffers.md), which the server creates.
+  Publishers must set `SetUseSplitBuffers(true)` on these channels and leave
+  it unset on the others.
+- A channel on a multiplexer takes its slot size, number of slots, type,
+  prefix layout and split buffer setting from the multiplexer and needs an
+  explicit `vchan_id`.
+- Names starting with `/subspace/` are reserved for the server.
+- After a restart from a shadow, the recovered channels must match the config
+  or the server doesn't start.
+
+The [ASIL client](docs/asil-client.md) is a C++17 client for safety-related
+software that shares these channels with the standard clients.
+
 ## Shadow Server (Crash Recovery)
 
 Subspace supports a **shadow process** that mirrors the server's channel,
@@ -2083,6 +2125,7 @@ its full state from whichever shadow is available.
 |------|---------|-------------|
 | `--shadow_socket` | `""` (disabled) | Unix socket path for the primary shadow process |
 | `--secondary_shadow_socket` | `""` (disabled) | Unix socket path for the secondary shadow process |
+| `--channel_config` | `""` (disabled) | `StaticChannelConfig` text format file. See [Static Channel Config](#static-channel-config). |
 
 ### Shadow Flags
 

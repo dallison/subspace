@@ -9,6 +9,7 @@ cc_library(
         "client_handler.cc",
         "server_channel.cc",
         "shadow_replicator.cc",
+        "static_config.cc",
     ],
     hdrs = [
         "server.h",
@@ -16,16 +17,20 @@ cc_library(
         "server_channel.h",
         "plugin.h",
         "shadow_replicator.h",
+        "static_config.h",
     ],
     deps = [
         "//common:subspace_common",
         "//common/async:async",
         "//client:subspace_client",
+        "//proto:subspace_cc_proto",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
+        "@protobuf//:protobuf",
         "@abseil-cpp//absl/flags:flag",
         "@abseil-cpp//absl/flags:parse",
         "@coroutines//co:co",
@@ -59,6 +64,22 @@ cc_binary(
         "//:qnx": [],
         "//conditions:default": ["-lrt", "-ldl"],
     }),
+)
+
+cc_test(
+    name = "static_config_test",
+    size = "small",
+    srcs = ["static_config_test.cc"],
+    deps = [
+        ":server",
+        "//client:subspace_client",
+        "//client:test_fixture",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@abseil-cpp//absl/status:statusor",
+        "@googletest//:gtest",
+        "@coroutines//:co",
+    ],
 )
 
 cc_test(

@@ -2,6 +2,57 @@
 
 ## Unreleased
 
+### Static Channel Config
+- `subspace_server --channel_config=FILE` reads a `StaticChannelConfig` in
+  protobuf text format and creates its channels and multiplexers before the
+  server accepts clients. Clients can then use only those channels and the
+  server's own, the channels stay when they have no users, and their layout
+  is fixed: publishers must be fixed size and match the configured slot
+  size, number of slots, checksum size and metadata size.
+- A multiplexer with no publishers now reports its slot size.
+- Publishers on different virtual channels of a multiplexer are checked
+  against each other for fixed size and locality, as they share the
+  multiplexer's buffers. Before, a second fixed-size publisher on another
+  virtual channel was rejected, so a static multiplexer could only have
+  publishers on one virtual channel.
+- The server creates the message buffers of every static channel and
+  multiplexer when it starts, so subscribers can map them before any
+  publisher exists.
+- `use_split_buffers` in a static channel or multiplexer config gives it
+  split buffers, which the server creates. Publishers whose split buffer
+  setting differs from the config are rejected.
+- `GetClientBuffersRequest` can ask for one prefix or slot of a split buffer
+  set with `filter_slot`, `is_prefix` and `slot_id`.
+
+### ASIL Client
+- `asil_client/` is a new C++17 client for safety-related software. It
+  shares channels with the standard clients through the same shared memory
+  protocol, using only the standard library and
+  POSIX. It is built without exceptions or RTTI, returns an error code from
+  every operation, and allocates no memory while publishing or reading.
+  Checksums, metadata, `ReadNewest`, dropped message counts and activation
+  messages work with the standard clients. The server handshake is behind a
+  replaceable `ServerConnection` interface. `PhaserServerConnection`
+  implements the standard protocol with phaser messages in fixed buffers,
+  sent and received in protobuf wire format, so the handshake makes no heap
+  allocations either. See `docs/asil-client.md`.
+- The ASIL client also supports reliable publishers and subscribers, virtual
+  channels and multiplexer subscribers, subscribers holding up to 64
+  messages, subscriber queues, split buffers (with C callbacks for slots from
+  a custom allocator), and the memfd backend. Reading the newest message on
+  a reliable subscriber marks the skipped messages as read.
+- ASIL publishers and subscribers map all of a channel's shared memory when
+  they open, and publishing and reading make no shared memory calls. A
+  subscriber needs the channel to have buffers when it opens: always true of
+  static channels, otherwise a publisher must have opened. Messages in a
+  buffer that a standard publisher created by resizing after the subscriber
+  opened return `kBufferNotMapped`.
+- Bazel, CMake and Soong build phaser and generate `subspace_phaser` from
+  `subspace.proto`. Android CMake cross-compiles take a host
+  `protoc-gen-phaser` in `PHASER_PLUGIN_EXECUTABLE`.
+- Abseil 20250814.1, protobuf 33.4, cpp_toolbelt 2.1.6 and phaser 2.1.3 in
+  the Bazel build. CMake uses cpp_toolbelt 2.1.6.
+
 ### Stuck Subscriber Warning
 - A subscriber now logs an error when a message has been waiting for 5
   seconds that it can't read because it already holds `max_active_messages`

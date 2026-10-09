@@ -68,7 +68,7 @@ Android cross-compile so protobuf versions match:
 
 ```bash
 cmake -S . -B build/host-protoc -DCMAKE_BUILD_TYPE=Release
-cmake --build build/host-protoc --target protoc --parallel
+cmake --build build/host-protoc --target protoc protoc-gen-phaser --parallel
 
 cmake -S . -B build/android \
   -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
@@ -76,7 +76,8 @@ cmake -S . -B build/android \
   -DANDROID_PLATFORM=android-28 \
   -DANDROID_STL=c++_shared \
   -DCMAKE_BUILD_TYPE=Release \
-  -DPROTOC_EXECUTABLE="$PWD/build/host-protoc/_deps/protobuf-build/protoc"
+  -DPROTOC_EXECUTABLE="$PWD/build/host-protoc/_deps/protobuf-build/protoc" \
+  -DPHASER_PLUGIN_EXECUTABLE="$PWD/build/host-protoc/_deps/phaser-build/protoc-gen-phaser"
 
 cmake --build build/android --parallel
 ```

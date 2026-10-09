@@ -10,6 +10,7 @@
 #include "client_handler.h"
 #include "common/split_buffer.h"
 #include "proto/subspace.pb.h"
+#include "server/static_config.h"
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
 #include "toolbelt/sockets.h"
@@ -40,6 +41,9 @@ bool ShouldClosePluginsOnShutdown() { return close_plugins_on_shutdown; }
 
 static constexpr int kTelemetrySlotSize = 1024;
 static constexpr int kTelemetryNumSlots = 32;
+
+static constexpr char kChannelDirectoryChannel[] = "/subspace/ChannelDirectory";
+static constexpr char kStatisticsChannel[] = "/subspace/Statistics";
 
 static const ServerChannel *SplitBufferOptionsChannel(
     const ServerChannel *channel) {
@@ -1006,6 +1010,12 @@ absl::Status Server::Run(int num_asio_threads) {
                         s.ToString().c_str()));
   }
 
+  // Before any client is handled, so no client sees a static channel missing
+  // or as a placeholder.
+  if (absl::Status s = CreateStaticChannels(); !s.ok()) {
+    return s;
+  }
+
   char hostname[256] = "local";
   if (!local_) {
     if (gethostname(hostname, sizeof(hostname)) == -1) {
@@ -1223,6 +1233,7 @@ Server::CreateMultiplexer(const std::string &channel_name, int64_t slot_size,
       *channel_id, channel_name, num_slots, subscriber_queue_size,
       subscriber_queue_arena_size, std::move(type), session_id_, logger_);
   channel->SetDebug(logger_.GetLogLevel() <= toolbelt::LogLevel::kVerboseDebug);
+  channel->SetLastKnownSlotSize(slot_size);
   // Establish the prefix layout before allocating.  Allocation is what makes
   // the channel visible: it is immediately followed by replication to the
   // shadows, which copy the checksum and metadata sizes off the channel and
@@ -1381,6 +1392,213 @@ Server::CreateChannel(const std::string &channel_name, int64_t slot_size,
   });
 
   return channel;
+}
+
+absl::Status Server::SetStaticChannelConfig(StaticChannelConfig config) {
+  if (absl::Status s = ValidateStaticChannelConfig(config); !s.ok()) {
+    return s;
+  }
+  static_config_ = std::move(config);
+  return absl::OkStatus();
+}
+
+bool Server::IsServerChannelName(const std::string &channel_name) {
+  return channel_name == kChannelDirectoryChannel ||
+         channel_name == kStatisticsChannel;
+}
+
+void Server::RegisterClientBuffer(ServerChannel *channel,
+                                  ClientBufferHandleMetadata metadata,
+                                  toolbelt::FileDescriptor fd) {
+  channel->RegisterClientBuffer(metadata, std::move(fd));
+  ForEachShadow([&](const std::unique_ptr<ShadowReplicator> &shadow) {
+    const auto matches =
+        channel->FindClientBuffers(metadata.session_id, metadata.buffer_index);
+    for (const RegisteredClientBuffer *buffer : matches) {
+      if (buffer->metadata.slot_id == metadata.slot_id &&
+          buffer->metadata.is_prefix == metadata.is_prefix) {
+        shadow->SendRegisterClientBuffer(buffer->metadata, buffer->fd);
+        return;
+      }
+    }
+    shadow->SendRegisterClientBuffer(metadata);
+  });
+}
+
+absl::Status Server::CreateStaticBuffers(ServerChannel *channel,
+                                         int64_t slot_size,
+                                         bool use_split_buffers) {
+  if (absl::Status s = channel->ValidateOrSetSplitBufferOptions(
+          {.use_split_buffers = use_split_buffers},
+          /*set_if_missing=*/use_split_buffers, "static channel config");
+      !s.ok()) {
+    return s;
+  }
+  if (channel->GetCcb()->num_buffers.load(std::memory_order_acquire) > 0) {
+    // Recovered from a shadow with its buffers.
+    return absl::OkStatus();
+  }
+  // A publisher that is never registered with the channel creates the
+  // buffers through the same code as a client's first publisher.  The
+  // buffers outlive it: named shared memory stays until the session is
+  // cleaned up, and the channel keeps the registered file descriptors.
+  details::PublisherImpl creator(
+      channel->Name(), channel->NumSlots(), channel->SubscriberQueueSize(),
+      channel->SubscriberQueueArenaSize(), channel->GetChannelId(),
+      /*publisher_id=*/-1, /*vchan_id=*/-1, session_id_, channel->Type(),
+      PublisherOptions()
+          .SetSlotSize(slot_size)
+          .SetNumSlots(channel->NumSlots())
+          .SetFixedSize(true)
+          .SetUseSplitBuffers(use_split_buffers),
+      /*reload=*/nullptr, static_cast<int>(getuid()),
+      static_cast<int>(getgid()));
+  creator.SetChecksumSize(channel->ChecksumSize());
+  creator.SetMetadataSize(channel->MetadataSize());
+  creator.SetPrefixSize(channel->PrefixSize());
+  creator.SetClientBufferRegistrationCallback(
+      [this, channel](const ClientBufferHandleMetadata &metadata,
+                      const toolbelt::FileDescriptor *fd) {
+        RegisterClientBuffer(channel, metadata,
+                             fd != nullptr ? *fd : toolbelt::FileDescriptor());
+        return absl::OkStatus();
+      });
+  creator.SetClientBufferLookupCallback(
+      [channel](const std::string &, uint64_t session_id,
+                uint32_t buffer_index)
+          -> absl::StatusOr<std::vector<RegisteredClientBuffer>> {
+        std::vector<RegisteredClientBuffer> buffers;
+        for (const RegisteredClientBuffer *buffer :
+             channel->FindClientBuffers(session_id, buffer_index)) {
+          buffers.push_back(*buffer);
+        }
+        return buffers;
+      });
+  const SharedMemoryFds &fds = channel->GetFds();
+  if (absl::Status s = creator.Map(SharedMemoryFds(fds.ccb, fds.bcb), scb_fd_);
+      !s.ok()) {
+    return s;
+  }
+  return creator.CreateOrAttachBuffers(slot_size);
+}
+
+absl::Status Server::CreateStaticChannels() {
+  if (!static_config_.has_value()) {
+    return absl::OkStatus();
+  }
+  // A server restarted from a shadow already has the channels; they must
+  // still be the ones configured.
+  auto check_recovered = [](const ServerChannel *channel, bool is_mux,
+                            const std::string &mux, int vchan_id,
+                            int64_t slot_size, int num_slots,
+                            int32_t checksum_size,
+                            int32_t metadata_size) -> absl::Status {
+    const bool matches =
+        !channel->IsPlaceholder() && channel->IsMux() == is_mux &&
+        channel->IsVirtual() == !mux.empty() &&
+        (mux.empty() ||
+         (static_cast<const VirtualChannel *>(channel)->GetMux()->Name() ==
+              mux &&
+          channel->GetVirtualChannelId() == vchan_id)) &&
+        channel->SlotSize() == slot_size && channel->NumSlots() == num_slots &&
+        channel->ChecksumSize() == checksum_size &&
+        channel->MetadataSize() == metadata_size;
+    if (!matches) {
+      return absl::FailedPreconditionError(absl::StrFormat(
+          "Channel %s recovered from the shadow doesn't match the static "
+          "channel config",
+          channel->Name()));
+    }
+    return absl::OkStatus();
+  };
+  auto checksum_or_default = [](int32_t checksum_size) {
+    return checksum_size == 0 ? 4 : checksum_size;
+  };
+
+  absl::flat_hash_map<std::string, const StaticMultiplexer *> muxes;
+  for (const StaticMultiplexer &m : static_config_->multiplexers()) {
+    muxes[m.name()] = &m;
+    const int64_t slot_size = Aligned(m.slot_size());
+    const int32_t checksum_size = checksum_or_default(m.checksum_size());
+    ServerChannel *mux = FindChannel(m.name());
+    if (mux == nullptr) {
+      absl::StatusOr<ServerChannel *> created =
+          CreateMultiplexer(m.name(), slot_size, m.num_slots(), 0, m.type(),
+                            checksum_size, m.metadata_size());
+      if (!created.ok()) {
+        return absl::InternalError(
+            absl::StrFormat("Failed to create static multiplexer %s: %s",
+                            m.name(), created.status().ToString()));
+      }
+      mux = *created;
+    } else if (absl::Status s = check_recovered(
+                   mux, /*is_mux=*/true, "", -1, slot_size, m.num_slots(),
+                   checksum_size, m.metadata_size());
+               !s.ok()) {
+      return s;
+    }
+    mux->SetStatic(true);
+    if (absl::Status s =
+            CreateStaticBuffers(mux, slot_size, m.use_split_buffers());
+        !s.ok()) {
+      return absl::InternalError(
+          absl::StrFormat("Failed to create buffers for static multiplexer "
+                          "%s: %s",
+                          m.name(), s.ToString()));
+    }
+  }
+
+  for (const StaticChannel &c : static_config_->channels()) {
+    const StaticMultiplexer *mux =
+        c.mux().empty() ? nullptr : muxes.at(c.mux());
+    const int64_t slot_size =
+        Aligned(mux != nullptr ? mux->slot_size() : c.slot_size());
+    const int num_slots = mux != nullptr ? mux->num_slots() : c.num_slots();
+    const int32_t checksum_size = checksum_or_default(
+        mux != nullptr ? mux->checksum_size() : c.checksum_size());
+    const int32_t metadata_size =
+        mux != nullptr ? mux->metadata_size() : c.metadata_size();
+    const int vchan_id = mux != nullptr ? c.vchan_id() : -1;
+    ServerChannel *channel = FindChannel(c.name());
+    if (channel == nullptr) {
+      // A virtual channel takes its layout from the multiplexer, which
+      // already has it.
+      absl::StatusOr<ServerChannel *> created =
+          mux != nullptr
+              ? CreateChannel(c.name(), 0, 0, 0, c.mux(), vchan_id, "")
+              : CreateChannel(c.name(), slot_size, num_slots, 0, "", -1,
+                              c.type(), /*hidden=*/false,
+                              /*telemetry_target=*/{}, checksum_size,
+                              metadata_size);
+      if (!created.ok()) {
+        return absl::InternalError(
+            absl::StrFormat("Failed to create static channel %s: %s",
+                            c.name(), created.status().ToString()));
+      }
+      channel = *created;
+    } else if (absl::Status s = check_recovered(
+                   channel, /*is_mux=*/false, c.mux(), vchan_id, slot_size,
+                   num_slots, checksum_size, metadata_size);
+               !s.ok()) {
+      return s;
+    }
+    channel->SetStatic(true);
+    if (mux == nullptr) {
+      if (absl::Status s =
+              CreateStaticBuffers(channel, slot_size, c.use_split_buffers());
+          !s.ok()) {
+        return absl::InternalError(absl::StrFormat(
+            "Failed to create buffers for static channel %s: %s", c.name(),
+            s.ToString()));
+      }
+    }
+  }
+  logger_.Log(toolbelt::LogLevel::kInfo,
+              "Static channel config: %d channels and %d multiplexers",
+              static_config_->channels_size(),
+              static_config_->multiplexers_size());
+  SendChannelDirectory();
+  return absl::OkStatus();
 }
 
 uint64_t Server::GetVirtualMemoryUsage() const {
@@ -2153,7 +2371,7 @@ void Server::RemoveChannel(ServerChannel *channel) {
     auto vchan = static_cast<VirtualChannel *>(it->second.get());
     ChannelMultiplexer *mux = vchan->GetMux();
     mux->RemoveVirtualChannel(vchan);
-    if (mux->IsEmpty()) {
+    if (mux->IsEmpty() && !mux->IsStatic()) {
       RemoveChannel(mux);
     }
   }
@@ -2182,7 +2400,8 @@ void Server::RemoveAllUsersFor(ClientHandler *handler) {
   std::vector<ServerChannel *> empty_channels;
   for (auto &channel : channels_) {
     channel.second->RemoveAllUsersFor(this, handler);
-    if (channel.second->IsEmpty() && !channel.second->IsTelemetryChannel()) {
+    if (channel.second->IsEmpty() && !channel.second->IsTelemetryChannel() &&
+        !channel.second->IsStatic()) {
       empty_channels.push_back(channel.second.get());
     }
   }
@@ -2207,7 +2426,7 @@ void Server::ChannelDirectoryCoroutine(async::Context ctx) {
   constexpr int kDirectoryNumSlots = 32;
 
   absl::StatusOr<Publisher> channel_directory = client.CreatePublisher(
-      "/subspace/ChannelDirectory", kDirectorySlotSize, kDirectoryNumSlots,
+      kChannelDirectoryChannel, kDirectorySlotSize, kDirectoryNumSlots,
       PublisherOptions()
           .SetType("subspace.ChannelDirectory")
           .SetUseSplitBuffers(false));
@@ -2270,7 +2489,7 @@ void Server::StatisticsCoroutine(async::Context ctx) {
   constexpr int kStatsNumSlots = 32;
 
   absl::StatusOr<Publisher> pub = client.CreatePublisher(
-      "/subspace/Statistics", kStatsSlotSize, kStatsNumSlots,
+      kStatisticsChannel, kStatsSlotSize, kStatsNumSlots,
       PublisherOptions()
           .SetType("subspace.Statistics")
           .SetUseSplitBuffers(false));

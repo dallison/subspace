@@ -5,6 +5,7 @@
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
 #include "server.h"
+#include "server/static_config.h"
 #include <cerrno>
 #include <csignal>
 #include <cstdint>
@@ -92,6 +93,10 @@ ABSL_FLAG(std::string, shadow_socket, "",
           "Primary shadow process Unix socket (empty = disabled)");
 ABSL_FLAG(std::string, secondary_shadow_socket, "",
           "Secondary shadow process Unix socket (empty = disabled)");
+ABSL_FLAG(std::string, channel_config, "",
+          "StaticChannelConfig file in protobuf text format.  The server "
+          "creates its channels at startup, fixes their layout and allows no "
+          "others (empty = channels are created on demand)");
 
 // Look up this host's local vsock context id (CID) so we can advertise it to
 // bridge peers.  Only meaningful on Linux with vsock support.
@@ -270,6 +275,21 @@ int main(int argc, char **argv) {
   server->SetMachineName(absl::GetFlag(FLAGS_machine));
   server->SetShadowSockets(absl::GetFlag(FLAGS_shadow_socket),
                             absl::GetFlag(FLAGS_secondary_shadow_socket));
+
+  if (const std::string &channel_config = absl::GetFlag(FLAGS_channel_config);
+      !channel_config.empty()) {
+    absl::StatusOr<subspace::StaticChannelConfig> config =
+        subspace::ReadStaticChannelConfig(channel_config);
+    if (!config.ok()) {
+      fprintf(stderr, "%s\n", config.status().ToString().c_str());
+      exit(1);
+    }
+    if (absl::Status status = server->SetStaticChannelConfig(*std::move(config));
+        !status.ok()) {
+      fprintf(stderr, "%s\n", status.ToString().c_str());
+      exit(1);
+    }
+  }
 
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
   int num_asio_threads = absl::GetFlag(FLAGS_num_asio_threads);

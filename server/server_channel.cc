@@ -1156,7 +1156,7 @@ void ServerChannel::RemoveUser(Server *server, int user_id) {
   users_.erase(it);
   // The telemetry coroutine removes its hidden channel after its publisher is
   // fully destroyed.
-  if (IsEmpty() && !IsTelemetryChannel()) {
+  if (IsEmpty() && !IsTelemetryChannel() && !IsStatic()) {
     server->RemoveChannel(this);
   }
   server->SendChannelDirectory();
@@ -1636,6 +1636,18 @@ void ChannelMultiplexer::CountUsers(int &num_pubs, int &num_subs,
   num_bridge_subs += total_bridge_subs;
   num_tunnel_pubs += total_tunnel_pubs;
   num_tunnel_subs += total_tunnel_subs;
+}
+
+ServerChannel::SharedPublisherTraits
+ChannelMultiplexer::GetSharedPublisherTraits() const {
+  SharedPublisherTraits traits = ServerChannel::GetSharedPublisherTraits();
+  for (const VirtualChannel *vchan : virtual_channels_) {
+    const SharedPublisherTraits v =
+        vchan->ServerChannel::GetSharedPublisherTraits();
+    traits.fixed_size |= v.fixed_size;
+    traits.local |= v.local;
+  }
+  return traits;
 }
 
 void ChannelMultiplexer::CountCapacityUsage(

@@ -184,15 +184,17 @@ executable. The `android_libs/` approach works for `/data/local/tmp/` binaries.
 
 Subspace can also be cross-compiled for Android using CMake with the NDK
 toolchain. CMake fetches the same third-party dependencies with
-`FetchContent`, but protobuf code generation requires a host-native `protoc`
-that matches the protobuf version used by the Android build.
+`FetchContent`, but code generation runs on the host.  It needs a host-native
+`protoc` that matches the protobuf version used by the Android build, and a
+host-native phaser plugin (`protoc-gen-phaser`) for the ASIL client's messages.
 
 ```bash
 export ANDROID_NDK_HOME=/path/to/ndk
 
-# Build a host protoc matching Subspace's protobuf dependency.
+# Build a host protoc matching Subspace's protobuf dependency, and the phaser
+# plugin.
 cmake -S . -B build/host-protoc -DCMAKE_BUILD_TYPE=Release
-cmake --build build/host-protoc --target protoc --parallel
+cmake --build build/host-protoc --target protoc protoc-gen-phaser --parallel
 
 cmake -S . -B build/android \
   -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
@@ -200,7 +202,8 @@ cmake -S . -B build/android \
   -DANDROID_PLATFORM=android-28 \
   -DANDROID_STL=c++_shared \
   -DCMAKE_BUILD_TYPE=Release \
-  -DPROTOC_EXECUTABLE="$PWD/build/host-protoc/_deps/protobuf-build/protoc"
+  -DPROTOC_EXECUTABLE="$PWD/build/host-protoc/_deps/protobuf-build/protoc" \
+  -DPHASER_PLUGIN_EXECUTABLE="$PWD/build/host-protoc/_deps/phaser-build/protoc-gen-phaser"
 
 cmake --build build/android --parallel
 ```
@@ -240,6 +243,9 @@ Place the subspace source tree in your AOSP checkout (e.g.,
 | `libsubspace_server` | static lib | Server implementation |
 | `subspace_server` | binary | Standalone server daemon |
 | `libsubspace_proto` | static lib | Protobuf message definitions |
+| `libsubspace_phaser` | static lib | Phaser message definitions for the ASIL client |
+| `libsubspace_asil_client` | static lib | ASIL client core (no exceptions, no RTTI) |
+| `libsubspace_asil_phaser_connection` | static lib | ASIL client's server connection |
 | `libsubspace_jni` | shared lib | JNI bindings for Java clients |
 | `subspace-java` | java lib | Java client wrapper |
 | `subspace_java_client_test` | java binary | Device-side Java integration test |
@@ -256,16 +262,20 @@ files with the `subspace_rpc` plugin via a `genrule` (see
 
 ### External Dependencies
 
-Subspace requires two external libraries that must also be present in the AOSP
-tree:
+Subspace requires three external libraries that must also be present in the
+AOSP tree:
 
 1. **coroutines** (`external/coroutines/`) — https://github.com/dallison/coroutines
 2. **cpp_toolbelt** (`external/cpp_toolbelt/`) — https://github.com/dallison/cpp_toolbelt
+3. **phaser** (`external/phaser/`) — https://github.com/dallison/phaser
 
-Example Blueprint files for both are provided in
-`external/coroutines/Android.bp.example` and
-`external/cpp_toolbelt/Android.bp.example` within this repository. Copy these to
-`Android.bp` in the respective source trees in your AOSP checkout.
+Example Blueprint files for all three are provided in
+`external/coroutines/Android.bp.example`,
+`external/cpp_toolbelt/Android.bp.example` and
+`external/phaser/Android.bp.example` within this repository. Copy these to
+`Android.bp` in the respective source trees in your AOSP checkout.  The phaser
+file defines the `libphaser_runtime` library and the `protoc-gen-phaser` host
+plugin.
 
 ### AOSP Dependencies
 

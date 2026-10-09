@@ -1,5 +1,6 @@
 load("@protobuf//bazel:proto_library.bzl", "proto_library")
 load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@phaser//phaser:phaser_library.bzl", "phaser_library")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -16,3 +17,15 @@ cc_proto_library(
     deps = [":subspace_proto"],
 )
 
+# Phaser messages for subspace.proto in namespace subspace::phaser.  They are
+# built in caller-provided buffers without heap allocation and converted to and
+# from protobuf wire format.
+phaser_library(
+    name = "subspace_phaser",
+    add_namespace = "phaser",
+    copts = [
+        "-fno-exceptions",
+        "-fno-rtti",
+    ],
+    deps = [":subspace_proto"],
+)
