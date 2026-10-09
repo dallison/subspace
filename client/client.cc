@@ -1166,7 +1166,7 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
         {.fd = fd.Fd(), .events = POLLIN}};
     int e = GetSyscallShim().poll_fn(
         fds, 2, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
-    if (timeout_ns == 0 && e == 0) {
+    if (timeout_ns != 0 && e == 0) {
       return absl::InternalError("Timeout waiting for reliable publisher");
     }
     if (e < 0) {
@@ -1270,7 +1270,7 @@ absl::StatusOr<int> ClientImpl::WaitForSubscriber(
         {.fd = fd.Fd(), .events = POLLIN}};
     int e = GetSyscallShim().poll_fn(
         fds, 2, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
-    if (timeout_ns == 0 && e == 0) {
+    if (timeout_ns != 0 && e == 0) {
       return absl::InternalError("Timeout waiting for subscriber");
     }
     if (e < 0) {
