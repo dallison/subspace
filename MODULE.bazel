@@ -1,6 +1,6 @@
 module(
     name = "subspace",
-    version = "3.2.6",
+    version = "3.2.7",
 )
 
 # Downstream modules raise the channel limit next to their bazel_dep.  See
