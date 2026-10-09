@@ -144,7 +144,8 @@ endif()
 FetchContent_Declare(
     cpp_toolbelt
     GIT_REPOSITORY https://github.com/dallison/cpp_toolbelt.git
-    GIT_TAG 2.1.2
+    # cpp_toolbelt 2.1.6, as in the git_override in MODULE.bazel.
+    GIT_TAG 86b45cdd3da46a97a4476be2f2a61909677284a2
     CMAKE_ARGS
         -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
 )
@@ -164,6 +165,18 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(protobuf)
 # Protobuf provides targets like protobuf::libprotobuf and protobuf::protoc
 # These targets can be used directly without find_package
+
+# --- External Dependency: phaser (using FetchContent for native CMake) ---
+# The ASIL client talks to the server with phaser messages held in fixed
+# buffers.  Phaser uses the Abseil, cpp_toolbelt and protobuf fetched above.
+# Cross-compiles take a host protoc-gen-phaser in PHASER_PLUGIN_EXECUTABLE.
+FetchContent_Declare(
+    phaser
+    GIT_REPOSITORY https://github.com/dallison/phaser.git
+    # phaser 2.1.3, as in the git_override in MODULE.bazel.
+    GIT_TAG 3d5eca68b74da5ad982a2768b9b54da728fd17f7
+)
+FetchContent_MakeAvailable(phaser)
 
 # --- Option: coroutine/networking backend for the server ---
 # Mirrors the Bazel //:coro_backend flag.  "co" (default) builds against the co
@@ -256,6 +269,7 @@ add_subdirectory(server)
 add_subdirectory(plugins)
 add_subdirectory(shadow)
 add_subdirectory(c_client)
+add_subdirectory(asil_client)
 add_subdirectory(android)
 add_subdirectory(rust_client)
 add_subdirectory(rpc)

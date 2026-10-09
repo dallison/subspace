@@ -50,6 +50,7 @@ See the file docs/subspace.pdf for full documentation.  Additional documentation
 - [Slot Sizes](docs/slot-sizes.md)
 - [Channel Limit](docs/max-channels.md)
 - [C Client API](docs/c-client.md)
+- [ASIL Client](docs/asil-client.md)
 - [Client Architecture](docs/client-architecture.md)
 - [Server Architecture](docs/server-architecture.md)
 - [Asio Backend and vsock Bridging](docs/asio-backend.md)
@@ -2039,6 +2040,9 @@ placeholder.  With a config loaded:
 - Names starting with `/subspace/` are reserved for the server.
 - After a restart from a shadow, the recovered channels must match the config
   or the server doesn't start.
+
+The [ASIL client](docs/asil-client.md) is a C++17 client for safety-related
+software that shares these channels with the standard clients.
 
 ## Shadow Server (Crash Recovery)
 

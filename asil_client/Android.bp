@@ -1,0 +1,36 @@
+// Copyright 2026 David Allison
+// All Rights Reserved
+// See LICENSE file for licensing information.
+
+// The ASIL client core: C++17, the standard library and POSIX only.  It is
+// built without exceptions or RTTI.
+cc_library_static {
+    name: "libsubspace_asil_client",
+    defaults: ["subspace_defaults"],
+    srcs: [
+        "channel_memory.cc",
+        "checksum.cc",
+        "client.cc",
+        "error.cc",
+        "publisher.cc",
+        "subscriber.cc",
+    ],
+    include_dirs: ["external/subspace"],
+    cppflags: ["-fno-exceptions"],
+    rtti: false,
+}
+
+// The handshake with the server, using phaser messages in fixed buffers.
+cc_library_static {
+    name: "libsubspace_asil_phaser_connection",
+    defaults: ["subspace_defaults"],
+    srcs: ["phaser_connection.cc"],
+    include_dirs: ["external/subspace"],
+    cppflags: ["-fno-exceptions"],
+    rtti: false,
+    static_libs: [
+        "libsubspace_asil_client",
+        "libsubspace_phaser",
+    ],
+    export_static_lib_headers: ["libsubspace_phaser"],
+}

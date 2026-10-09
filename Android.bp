@@ -47,3 +47,61 @@ cc_library_static {
     export_shared_lib_headers: ["libprotobuf-cpp-full"],
     rtti: false,
 }
+
+// Phaser messages generated from subspace.proto for the ASIL client's server
+// connection.  They are sent and received in protobuf wire format.  As in the
+// Bazel phaser_library rule, the plugin writes
+// proto/subspace_phaser/<proto path>.phaser.{cc,h}, generating any.proto too,
+// and a short proto/subspace.phaser.h header includes the generated one.  The
+// .cc and .h outputs come from separate genrules so the headers never end up
+// in `generated_sources`.
+subspace_phaser_cmd = "$(location aprotoc) " +
+    "--plugin=protoc-gen-phaser=$(location protoc-gen-phaser) " +
+    "--phaser_out=add_namespace=phaser,package_name=proto," +
+    "target_name=subspace_phaser,frontend=protobuf:$(genDir) " +
+    "-Iexternal/subspace -Iexternal/protobuf/src " +
+    "$(in) external/protobuf/src/google/protobuf/any.proto"
+
+genrule {
+    name: "libsubspace_phaser_cc",
+    tools: [
+        "aprotoc",
+        "protoc-gen-phaser",
+    ],
+    cmd: subspace_phaser_cmd,
+    srcs: ["proto/subspace.proto"],
+    out: [
+        "proto/subspace_phaser/proto/subspace.phaser.cc",
+        "proto/subspace_phaser/google/protobuf/any.phaser.cc",
+    ],
+}
+
+genrule {
+    name: "libsubspace_phaser_h",
+    tools: [
+        "aprotoc",
+        "protoc-gen-phaser",
+    ],
+    cmd: subspace_phaser_cmd + " && " +
+        "echo '#pragma once' > $(genDir)/proto/subspace.phaser.h && " +
+        "echo '#include \"proto/subspace_phaser/proto/subspace.phaser.h\"' " +
+        ">> $(genDir)/proto/subspace.phaser.h",
+    srcs: ["proto/subspace.proto"],
+    out: [
+        "proto/subspace.phaser.h",
+        "proto/subspace_phaser/proto/subspace.phaser.h",
+        "proto/subspace_phaser/google/protobuf/any.phaser.h",
+    ],
+}
+
+cc_library_static {
+    name: "libsubspace_phaser",
+    defaults: ["subspace_defaults"],
+    generated_sources: ["libsubspace_phaser_cc"],
+    generated_headers: ["libsubspace_phaser_h"],
+    export_generated_headers: ["libsubspace_phaser_h"],
+    cppflags: ["-fno-exceptions"],
+    rtti: false,
+    static_libs: ["libphaser_runtime"],
+    export_static_lib_headers: ["libphaser_runtime"],
+}

@@ -11,6 +11,24 @@
   size, number of slots, checksum size and metadata size.
 - A multiplexer with no publishers now reports its slot size.
 
+### ASIL Client
+- `asil_client/` is a new C++17 client for safety-related software. It
+  shares unreliable, fixed-size channels with the standard clients through
+  the same shared memory protocol, using only the standard library and
+  POSIX. It is built without exceptions or RTTI, returns an error code from
+  every operation, and allocates no memory while publishing or reading.
+  Checksums, metadata, `ReadNewest`, dropped message counts and activation
+  messages work with the standard clients. The server handshake is behind a
+  replaceable `ServerConnection` interface. `PhaserServerConnection`
+  implements the standard protocol with phaser messages in fixed buffers,
+  sent and received in protobuf wire format, so the handshake makes no heap
+  allocations either. See `docs/asil-client.md`.
+- Bazel, CMake and Soong build phaser and generate `subspace_phaser` from
+  `subspace.proto`. Android CMake cross-compiles take a host
+  `protoc-gen-phaser` in `PHASER_PLUGIN_EXECUTABLE`.
+- Abseil 20250814.1, protobuf 33.4, cpp_toolbelt 2.1.6 and phaser 2.1.3 in
+  the Bazel build. CMake uses cpp_toolbelt 2.1.6.
+
 ### Stuck Subscriber Warning
 - A subscriber now logs an error when a message has been waiting for 5
   seconds that it can't read because it already holds `max_active_messages`

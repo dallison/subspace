@@ -1,0 +1,88 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+# The ASIL client core: C++17, the standard library and POSIX only.  It is
+# built without exceptions or RTTI.
+cc_library(
+    name = "asil_client",
+    srcs = [
+        "channel_memory.cc",
+        "checksum.cc",
+        "client.cc",
+        "error.cc",
+        "publisher.cc",
+        "subscriber.cc",
+    ],
+    hdrs = [
+        "bitset.h",
+        "channel_memory.h",
+        "checksum.h",
+        "client.h",
+        "error.h",
+        "publisher.h",
+        "server_connection.h",
+        "shm_layout.h",
+        "subscriber.h",
+        "unique_fd.h",
+    ],
+    copts = [
+        "-fno-exceptions",
+        "-fno-rtti",
+    ],
+    linkopts = select({
+        "//:macos_x86_64": [],
+        "//:macos_arm64": [],
+        "//:macos_default": [],
+        "//:android": [],
+        "//:qnx": ["-lsocket"],
+        "//conditions:default": ["-lrt"],
+    }),
+    deps = ["//common:max_channels_setting"],
+)
+
+# The standard server handshake, using Phaser messages in fixed buffers and
+# protobuf wire format.
+cc_library(
+    name = "phaser_connection",
+    srcs = ["phaser_connection.cc"],
+    hdrs = ["phaser_connection.h"],
+    copts = [
+        "-fno-exceptions",
+        "-fno-rtti",
+    ],
+    deps = [
+        ":asil_client",
+        "//proto:subspace_phaser",
+    ],
+)
+
+cc_test(
+    name = "layout_test",
+    size = "small",
+    srcs = ["layout_test.cc"],
+    deps = [
+        ":asil_client",
+        "//client:subspace_client",
+        "//common:subspace_common",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "asil_client_test",
+    size = "small",
+    srcs = ["asil_client_test.cc"],
+    deps = [
+        ":asil_client",
+        ":phaser_connection",
+        "//client:subspace_client",
+        "//client:test_fixture",
+        "//server",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@abseil-cpp//absl/status:statusor",
+        "@coroutines//:co",
+        "@googletest//:gtest",
+    ],
+)
