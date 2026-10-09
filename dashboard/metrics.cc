@@ -300,7 +300,7 @@ ScaledValue ScaleLatency(double nanoseconds) {
     return {.value = nanoseconds / 1'000'000.0, .unit = "ms"};
   }
   if (nanoseconds >= 1'000.0) {
-    return {.value = nanoseconds / 1'000.0, .unit = "µs"};
+    return {.value = nanoseconds / 1'000.0, .unit = "us"};
   }
   return {.value = nanoseconds, .unit = "ns"};
 }

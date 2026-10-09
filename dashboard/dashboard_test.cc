@@ -54,7 +54,7 @@ TEST(DisplayScalingTest, UsesExpectedBoundaries) {
   EXPECT_EQ(ScaleThroughputToUnit(50'000.0, "MHz").unit, "MHz");
   EXPECT_DOUBLE_EQ(ScaleThroughputToUnit(50'000.0, "MHz").value, 0.05);
   EXPECT_EQ(ScaleLatency(999.0).unit, "ns");
-  EXPECT_EQ(ScaleLatency(1'000.0).unit, "µs");
+  EXPECT_EQ(ScaleLatency(1'000.0).unit, "us");
   EXPECT_EQ(ScaleLatency(1'000'000.0).unit, "ms");
 }
 

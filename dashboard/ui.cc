@@ -157,7 +157,7 @@ ThroughputSummaryRow(const StatisticalSummary &summary) {
 std::vector<std::string> LatencySummaryRow(const StatisticalSummary &summary) {
   const ScaledValue scaled = ScaleLatency(SummaryMagnitude(summary));
   double divisor = 1.0;
-  if (scaled.unit == "µs") {
+  if (scaled.unit == "us") {
     divisor = 1'000.0;
   } else if (scaled.unit == "ms") {
     divisor = 1'000'000.0;
