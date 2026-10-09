@@ -146,6 +146,12 @@ public:
 
   uint64_t GetSessionId() const { return session_id_; }
 
+  // Records a buffer that a publisher, or the server for a static channel,
+  // has created, and replicates it to the shadows.
+  void RegisterClientBuffer(ServerChannel *channel,
+                            ClientBufferHandleMetadata metadata,
+                            toolbelt::FileDescriptor fd);
+
   absl::StatusOr<toolbelt::FileDescriptor> CreateBridgeNotificationPipe();
 
   struct BridgePortRange {
@@ -312,6 +318,12 @@ private:
   // Creates the static config's channels, or checks that channels recovered
   // from a shadow match it, and marks them static.
   absl::Status CreateStaticChannels();
+
+  // Creates the buffers of a static channel or multiplexer, as its first
+  // publisher would, so that subscribers can map them before any publisher
+  // exists.
+  absl::Status CreateStaticBuffers(ServerChannel *channel, int64_t slot_size,
+                                   bool use_split_buffers);
 
   // Public iteration excludes internal telemetry transport channels.
   void ForeachChannel(std::function<void(ServerChannel *)> func);

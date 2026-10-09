@@ -58,6 +58,7 @@ constexpr int64_t kMessageHasChecksum = 4;
 // MessageSlot flags.
 constexpr uint32_t kMessageSeen = 1;
 constexpr uint32_t kMessageIsActivation = 2;
+constexpr uint32_t kMessageSeenByReliable = 4;
 
 // Fields of MessageSlot::refs.
 constexpr uint64_t kRefCountMask = 0x3ff;
@@ -74,9 +75,9 @@ constexpr uint64_t kOrdinalShift = 40;
 inline uint64_t BuildRefsBitField(uint64_t ordinal, int vchan_id,
                                   uint64_t retired_refs) {
   const uint64_t vchan_bits =
-      ordinal == 0 ? 0
-                   : ((static_cast<uint64_t>(vchan_id) & kVchanIdMask)
-                      << kVchanIdShift);
+      ordinal == 0
+          ? 0
+          : ((static_cast<uint64_t>(vchan_id) & kVchanIdMask) << kVchanIdShift);
   return ((ordinal & kOrdinalMask) << kOrdinalShift) | vchan_bits |
          ((retired_refs & kRetiredRefsMask) << kRetiredRefsShift);
 }
@@ -192,25 +193,51 @@ struct BufferControlBlock {
   std::atomic<uint64_t> sizes[kMaxBuffers];
 };
 
+// InPlaceSlotQueue: a bounded MPSC ring of published slots for one
+// subscriber, in the CCB's queue arena.  The entries follow the header.
+constexpr size_t kMaxSlotQueueCasAttempts = 64;
+
+struct SlotQueueEntry {
+  std::atomic<uint64_t> sequence;
+  std::atomic<uint64_t> ordinal;
+  std::atomic<int32_t> slot_id;
+};
+static_assert(sizeof(SlotQueueEntry) == 24);
+
+struct SlotQueue {
+  size_t capacity;
+  std::atomic<uint64_t> head;
+  std::atomic<uint64_t> tail;
+  std::atomic<uint32_t> overflow_count;
+  std::atomic<bool> insertion_failed;
+  bool drop_oldest;
+
+  SlotQueueEntry *Entries() {
+    return reinterpret_cast<SlotQueueEntry *>(this + 1);
+  }
+};
+static_assert(sizeof(SlotQueue) == 32);
+static_assert(offsetof(SlotQueue, overflow_count) == 24);
+static_assert(offsetof(SlotQueue, insertion_failed) == 28);
+
 // Offsets of the regions that follow the slots in the CCB.  A CCB holds the
 // header and slots, the retired and free slot bitsets, one available-slot
 // bitset per subscriber, the subscriber queue index and the queue arena.
 inline size_t RetiredSlotsOffset(int num_slots) {
-  return static_cast<size_t>(
-      Aligned64(static_cast<int64_t>(sizeof(ChannelControlBlock) +
-                                     num_slots * sizeof(MessageSlot))));
+  return static_cast<size_t>(Aligned64(static_cast<int64_t>(
+      sizeof(ChannelControlBlock) + num_slots * sizeof(MessageSlot))));
 }
 
 inline size_t FreeSlotsOffset(int num_slots) {
   return RetiredSlotsOffset(num_slots) +
-         static_cast<size_t>(Aligned64(
-             static_cast<int64_t>(SizeofBitset(num_slots))));
+         static_cast<size_t>(
+             Aligned64(static_cast<int64_t>(SizeofBitset(num_slots))));
 }
 
 inline size_t AvailableSlotsOffset(int num_slots, int sub_id) {
   return FreeSlotsOffset(num_slots) +
-         static_cast<size_t>(Aligned64(
-             static_cast<int64_t>(SizeofBitset(num_slots)))) +
+         static_cast<size_t>(
+             Aligned64(static_cast<int64_t>(SizeofBitset(num_slots)))) +
          SizeofBitset(num_slots) * static_cast<size_t>(sub_id);
 }
 
@@ -218,17 +245,22 @@ inline size_t SlotQueueIndexOffset(int num_slots) {
   return AvailableSlotsOffset(num_slots, kMaxSlotOwners);
 }
 
-inline size_t CcbSize(int num_slots, uint64_t subscriber_queue_arena_size) {
+// Queue offsets in AvailableSlotQueueIndex are relative to this.
+inline size_t SlotQueueArenaOffset(int num_slots) {
   return SlotQueueIndexOffset(num_slots) +
          static_cast<size_t>(
-             Aligned64(static_cast<int64_t>(sizeof(AvailableSlotQueueIndex)))) +
+             Aligned64(static_cast<int64_t>(sizeof(AvailableSlotQueueIndex))));
+}
+
+inline size_t CcbSize(int num_slots, uint64_t subscriber_queue_arena_size) {
+  return SlotQueueArenaOffset(num_slots) +
          static_cast<size_t>(subscriber_queue_arena_size);
 }
 
 inline int32_t PrefixSize(int32_t checksum_size, int32_t metadata_size) {
-  return static_cast<int32_t>(Aligned64(
-      static_cast<int64_t>(offsetof(MessagePrefix, checksum)) + checksum_size +
-      metadata_size));
+  return static_cast<int32_t>(
+      Aligned64(static_cast<int64_t>(offsetof(MessagePrefix, checksum)) +
+                checksum_size + metadata_size));
 }
 
 } // namespace shm

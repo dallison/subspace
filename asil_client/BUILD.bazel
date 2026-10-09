@@ -23,6 +23,7 @@ cc_library(
         "publisher.h",
         "server_connection.h",
         "shm_layout.h",
+        "split_buffer.h",
         "subscriber.h",
         "unique_fd.h",
     ],

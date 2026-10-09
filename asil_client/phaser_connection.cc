@@ -160,6 +160,38 @@ Error PhaserServerConnection::Send(size_t length) {
   return Error::kOk;
 }
 
+// Sends one descriptor the way the server reads them: the descriptor count as
+// an int32 with the descriptor as SCM_RIGHTS.
+Error PhaserServerConnection::SendFd(int fd) {
+  alignas(struct cmsghdr) char control[CMSG_SPACE(sizeof(int))];
+  std::memset(control, 0, sizeof(control));
+  int32_t count = 1;
+  struct iovec iov;
+  iov.iov_base = &count;
+  iov.iov_len = sizeof(count);
+  struct msghdr msg;
+  std::memset(&msg, 0, sizeof(msg));
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
+  msg.msg_control = control;
+  msg.msg_controllen = static_cast<socklen_t>(sizeof(control));
+  struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+  cmsg->cmsg_level = SOL_SOCKET;
+  cmsg->cmsg_type = SCM_RIGHTS;
+  cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+  std::memcpy(CMSG_DATA(cmsg), &fd, sizeof(int));
+  for (;;) {
+    const ssize_t n = ::sendmsg(socket_.Get(), &msg, kSendFlags);
+    if (n == static_cast<ssize_t>(sizeof(count))) {
+      return Error::kOk;
+    }
+    if (n < 0 && errno == EINTR) {
+      continue;
+    }
+    return Error::kConnectionFailed;
+  }
+}
+
 // Receives a length-prefixed response into wire_.  A response that does not
 // fit is read and discarded so that the stream stays in step.
 Error PhaserServerConnection::Receive(size_t &length) {
@@ -190,8 +222,8 @@ Error PhaserServerConnection::Receive(size_t &length) {
 // beyond kMaxReceivedFds are closed and reported as kCapacityExceeded once
 // all of them have been read.
 Error PhaserServerConnection::ReceiveFds() {
-  alignas(struct cmsghdr) char control[CMSG_SPACE(kMaxFdsPerMessage *
-                                                  sizeof(int))];
+  alignas(
+      struct cmsghdr) char control[CMSG_SPACE(kMaxFdsPerMessage * sizeof(int))];
   int32_t received = 0;
   bool overflow = false;
   for (;;) {
@@ -259,8 +291,9 @@ Error PhaserServerConnection::ReceiveFds() {
 }
 
 // build(request) fills in the request and read(response) handles the reply.
+// A send_fd of 0 or more goes to the server after the request.
 template <typename Build, typename Read>
-Error PhaserServerConnection::Transact(Build build, Read read) {
+Error PhaserServerConnection::Transact(Build build, Read read, int send_fd) {
   if (!socket_.Valid()) {
     return Error::kNotInitialized;
   }
@@ -284,6 +317,9 @@ Error PhaserServerConnection::Transact(Build build, Read read) {
   }
 
   Error e = Send(length);
+  if (e == Error::kOk && send_fd >= 0) {
+    e = SendFd(send_fd);
+  }
   if (e == Error::kOk) {
     e = Receive(length);
   }
@@ -353,12 +389,19 @@ Error PhaserServerConnection::CreatePublisher(const PublisherRequest &request,
         cmd->set_slot_size(request.slot_size);
         cmd->set_num_slots(request.num_slots);
         cmd->set_is_fixed_size(true);
+        cmd->set_is_reliable(request.reliable);
         if (request.type != nullptr) {
           cmd->set_type(View(request.type));
         }
-        cmd->set_vchan_id(-1);
+        if (request.mux != nullptr) {
+          cmd->set_mux(View(request.mux));
+        }
+        cmd->set_vchan_id(request.vchan_id);
+        cmd->set_subscriber_queue_arena_size(
+            request.subscriber_queue_arena_size);
         cmd->set_checksum_size(request.checksum_size);
         cmd->set_metadata_size(request.metadata_size);
+        cmd->set_use_split_buffers(request.use_split_buffers);
         cmd->set_publisher_id(-1);
         cmd->set_process_id(static_cast<uint64_t>(::getpid()));
         cmd->set_max_outstanding_slot_leases(1);
@@ -385,6 +428,10 @@ Error PhaserServerConnection::CreatePublisher(const PublisherRequest &request,
             e != Error::kOk) {
           return e;
         }
+        if (Error e = DupFd(fds_, pub.pub_poll_fd_index(), reply.poll);
+            e != Error::kOk) {
+          return e;
+        }
         if (Error e = FillFdList(
                 fds_, pub.sub_trigger_fd_indexes_size(),
                 [&](size_t i) { return pub.sub_trigger_fd_indexes(i); },
@@ -406,11 +453,15 @@ Error PhaserServerConnection::CreateSubscriber(const SubscriberRequest &request,
         wire::CreateSubscriberRequest *cmd = req.mutable_create_subscriber();
         cmd->set_channel_name(View(request.channel_name));
         cmd->set_subscriber_id(-1);
+        cmd->set_is_reliable(request.reliable);
         if (request.type != nullptr) {
           cmd->set_type(View(request.type));
         }
         cmd->set_max_active_messages(request.max_active_messages);
-        cmd->set_vchan_id(-1);
+        if (request.mux != nullptr) {
+          cmd->set_mux(View(request.mux));
+        }
+        cmd->set_vchan_id(request.vchan_id);
         cmd->set_process_id(static_cast<uint64_t>(::getpid()));
       },
       [&](const wire::Response &response) {
@@ -450,7 +501,9 @@ Error PhaserServerConnection::CreateSubscriber(const SubscriberRequest &request,
         }
         if (Error e = FillFdList(
                 fds_, sub.reliable_pub_trigger_fd_indexes_size(),
-                [&](size_t i) { return sub.reliable_pub_trigger_fd_indexes(i); },
+                [&](size_t i) {
+                  return sub.reliable_pub_trigger_fd_indexes(i);
+                },
                 reply.reliable_publisher_triggers);
             e != Error::kOk) {
           return e;
@@ -528,6 +581,90 @@ Error PhaserServerConnection::RemoveSubscriber(const char *channel_name,
         const std::string_view error = response.remove_subscriber().error();
         if (!error.empty()) {
           return Rejected(error.data(), error.size());
+        }
+        return Error::kOk;
+      });
+}
+
+Error PhaserServerConnection::RegisterBuffer(const ClientBuffer &buffer,
+                                             int fd) {
+  if (fd < 0) {
+    return Error::kInvalidArgument;
+  }
+  return Transact(
+      [&](wire::Request &req) {
+        wire::RegisterClientBufferRequest *cmd =
+            req.mutable_register_client_buffer();
+        wire::ClientBufferHandleMetadataProto *metadata =
+            cmd->mutable_metadata();
+        metadata->set_channel_name(View(buffer.channel_name));
+        metadata->set_session_id(buffer.session_id);
+        metadata->set_buffer_index(buffer.buffer_index);
+        metadata->set_slot_id(0);
+        metadata->set_is_prefix(false);
+        metadata->set_full_size(buffer.full_size);
+        metadata->set_allocation_size(buffer.full_size);
+        metadata->set_handle(static_cast<uint64_t>(fd));
+        metadata->set_allocator(wire::CLIENT_BUFFER_ALLOCATOR_ANDROID_MEMFD);
+        cmd->set_has_fd(true);
+        cmd->set_fd_index(0);
+      },
+      [&](const wire::Response &response) {
+        const std::string_view error =
+            response.register_client_buffer().error();
+        if (!error.empty()) {
+          return Rejected(error.data(), error.size());
+        }
+        return Error::kOk;
+      },
+      fd);
+}
+
+Error PhaserServerConnection::GetBuffer(const BufferRequest &request,
+                                        BufferReply &reply) {
+  reply = BufferReply();
+  return Transact(
+      [&](wire::Request &req) {
+        wire::GetClientBuffersRequest *cmd = req.mutable_get_client_buffers();
+        cmd->set_channel_name(View(request.channel_name));
+        cmd->set_session_id(request.session_id);
+        cmd->set_buffer_index(request.buffer_index);
+        cmd->set_filter_slot(true);
+        cmd->set_is_prefix(request.is_prefix);
+        cmd->set_slot_id(request.slot_id);
+      },
+      [&](const wire::Response &response) {
+        if (!response.has_get_client_buffers()) {
+          return Error::kProtocolError;
+        }
+        const wire::GetClientBuffersResponse &buffers =
+            response.get_client_buffers();
+        if (!buffers.error().empty()) {
+          return Rejected(buffers.error().data(), buffers.error().size());
+        }
+        if (buffers.metadata_size() != buffers.fd_indexes_size()) {
+          return Error::kProtocolError;
+        }
+        for (size_t i = 0; i < buffers.metadata_size(); i++) {
+          const wire::ClientBufferHandleMetadataProto metadata =
+              buffers.metadata(i);
+          if (metadata.is_prefix() != request.is_prefix ||
+              metadata.slot_id() != request.slot_id) {
+            continue;
+          }
+          if (buffers.fd_indexes(i) >= 0) {
+            if (Error e = DupFd(fds_, buffers.fd_indexes(i), reply.fd);
+                e != Error::kOk) {
+              return e;
+            }
+          }
+          reply.found = true;
+          reply.full_size = metadata.full_size();
+          reply.allocation_size = metadata.allocation_size();
+          reply.handle = metadata.handle();
+          reply.map_offset = metadata.map_offset();
+          reply.allocator = static_cast<BufferAllocator>(metadata.allocator());
+          return Error::kOk;
         }
         return Error::kOk;
       });

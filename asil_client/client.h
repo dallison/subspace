@@ -4,12 +4,13 @@
 
 // A Subspace client for safety-related software.
 //
-// The client publishes and reads messages on unreliable, fixed-size channels,
-// sharing them with the standard clients.  It is written in C++17 using only
-// the standard library and POSIX.  It throws no exceptions and returns an
-// Error from every operation that can fail.  Memory is allocated only by the
-// ServerConnection while it talks to the server; publishing and reading
-// messages allocate nothing.
+// The client publishes and reads messages on fixed-size channels, reliable or
+// unreliable, plain or virtual, sharing them with the standard clients.  It
+// is written in C++17 using only the standard library and POSIX.  It throws no
+// exceptions and returns an Error from every operation that can fail.  It
+// makes no heap allocations: buffers and tables have fixed capacities, and
+// publishing and reading messages talks to the server only when publishers,
+// subscribers or memfd buffers change.
 //
 //   subspace::asil::PhaserServerConnection connection;
 //   connection.Connect("/tmp/subspace");

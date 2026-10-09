@@ -5,6 +5,7 @@
 // Checks that the ASIL client's view of shared memory matches
 // common/channel.h, and that its checksum matches the standard client's.
 
+#include "asil_client/channel_memory.h"
 #include "asil_client/checksum.h"
 #include "asil_client/shm_layout.h"
 #include "client/checksum.h"
@@ -22,7 +23,7 @@ namespace {
 namespace shm = ::subspace::asil::shm;
 
 #define EXPECT_SAME_OFFSET(type, field)                                        \
-  EXPECT_EQ(offsetof(::subspace::type, field), offsetof(shm::type, field))      \
+  EXPECT_EQ(offsetof(::subspace::type, field), offsetof(shm::type, field))     \
       << #type "::" #field
 
 TEST(LayoutTest, Constants) {
@@ -35,10 +36,13 @@ TEST(LayoutTest, Constants) {
   EXPECT_EQ(::subspace::kInvalidSlotQueueOffset, shm::kInvalidSlotQueueOffset);
   EXPECT_EQ(::subspace::kMessageActivate, shm::kMessageActivate);
   EXPECT_EQ(::subspace::kMessageHasChecksum, shm::kMessageHasChecksum);
-  EXPECT_EQ(static_cast<uint32_t>(::subspace::kMessageSeen),
-            shm::kMessageSeen);
+  EXPECT_EQ(static_cast<uint32_t>(::subspace::kMessageSeen), shm::kMessageSeen);
   EXPECT_EQ(static_cast<uint32_t>(::subspace::kMessageIsActivation),
             shm::kMessageIsActivation);
+  EXPECT_EQ(static_cast<uint32_t>(::subspace::kMessageSeenByReliable),
+            shm::kMessageSeenByReliable);
+  EXPECT_EQ(::subspace::kMaxSlotQueueCasAttempts,
+            shm::kMaxSlotQueueCasAttempts);
   EXPECT_EQ(::subspace::kPubOwned, shm::kPubOwned);
   EXPECT_EQ(::subspace::kRefsMask, shm::kRefsMask);
   EXPECT_EQ(::subspace::kRefCountMask, shm::kRefCountMask);
@@ -142,6 +146,9 @@ TEST(LayoutTest, CcbRegions) {
     EXPECT_EQ(shm::AvailableSlotsOffset(num_slots, 5), available + 5 * bitset);
     EXPECT_EQ(shm::SlotQueueIndexOffset(num_slots),
               available + ::subspace::AvailableSlotsSize(num_slots));
+    EXPECT_EQ(shm::SlotQueueArenaOffset(num_slots),
+              shm::SlotQueueIndexOffset(num_slots) +
+                  ::subspace::AvailableSlotQueueIndexSize());
     EXPECT_EQ(shm::CcbSize(num_slots, 0), ::subspace::CcbSize(num_slots, 0));
     EXPECT_EQ(shm::CcbSize(num_slots, 64000),
               ::subspace::CcbSize(num_slots, 64000));
@@ -151,9 +158,9 @@ TEST(LayoutTest, CcbRegions) {
 TEST(LayoutTest, PrefixSize) {
   for (int32_t checksum_size : {0, 4, 16, 17}) {
     for (int32_t metadata_size : {0, 1, 16, 100}) {
-      EXPECT_EQ(shm::PrefixSize(checksum_size, metadata_size),
-                ::subspace::Channel::ComputePrefixSize(checksum_size,
-                                                       metadata_size));
+      EXPECT_EQ(
+          shm::PrefixSize(checksum_size, metadata_size),
+          ::subspace::Channel::ComputePrefixSize(checksum_size, metadata_size));
     }
   }
 }
@@ -167,6 +174,70 @@ TEST(LayoutTest, RefsBitField) {
       }
     }
   }
+}
+
+TEST(LayoutTest, SlotQueue) {
+  EXPECT_EQ(sizeof(::subspace::InPlaceSlotQueue), sizeof(shm::SlotQueue));
+  EXPECT_EQ(sizeof(::subspace::SlotQueueEntry), sizeof(shm::SlotQueueEntry));
+  EXPECT_SAME_OFFSET(SlotQueueEntry, sequence);
+  EXPECT_SAME_OFFSET(SlotQueueEntry, ordinal);
+  EXPECT_SAME_OFFSET(SlotQueueEntry, slot_id);
+}
+
+// A queue in a buffer, initialized by the standard client and used through
+// both views.
+struct QueueMemory {
+  explicit QueueMemory(size_t capacity, bool drop_oldest)
+      : memory(::subspace::SizeofSlotQueue(capacity) / sizeof(uint64_t) + 1),
+        standard(new (memory.data())::subspace::InPlaceSlotQueue(capacity,
+                                                                 drop_oldest)),
+        asil(reinterpret_cast<shm::SlotQueue *>(memory.data())) {}
+
+  std::vector<uint64_t> memory;
+  ::subspace::InPlaceSlotQueue *standard;
+  shm::SlotQueue *asil;
+};
+
+TEST(SlotQueueTest, AsilPushesStandardPops) {
+  QueueMemory queue(4, /*drop_oldest=*/true);
+  EXPECT_EQ(4u, queue.asil->capacity);
+  for (int32_t i = 0; i < 6; i++) {
+    EXPECT_TRUE(
+        ::subspace::asil::internal::PushSlotQueue(queue.asil, i, 100 + i));
+  }
+  // The two oldest entries made room for the newest.
+  EXPECT_EQ(2u, queue.standard->OverflowCount());
+  for (int32_t i = 2; i < 6; i++) {
+    ::subspace::QueuedSlot slot;
+    ASSERT_TRUE(queue.standard->TryPop(slot));
+    EXPECT_EQ(i, slot.slot_id);
+    EXPECT_EQ(static_cast<uint64_t>(100 + i), slot.ordinal);
+  }
+  ::subspace::QueuedSlot slot;
+  EXPECT_FALSE(queue.standard->TryPop(slot));
+
+  // Entries wrap around the ring.
+  EXPECT_TRUE(::subspace::asil::internal::PushSlotQueue(queue.asil, 9, 109));
+  ASSERT_TRUE(queue.standard->TryPop(slot));
+  EXPECT_EQ(9, slot.slot_id);
+}
+
+TEST(SlotQueueTest, InheritedQueueRejectsWhenFull) {
+  QueueMemory queue(2, /*drop_oldest=*/false);
+  EXPECT_TRUE(::subspace::asil::internal::PushSlotQueue(queue.asil, 0, 1));
+  EXPECT_TRUE(::subspace::asil::internal::PushSlotQueue(queue.asil, 1, 2));
+  EXPECT_FALSE(::subspace::asil::internal::PushSlotQueue(queue.asil, 2, 3));
+  EXPECT_FALSE(queue.standard->InsertionFailed());
+  ::subspace::asil::internal::MarkSlotQueueInsertionFailure(queue.asil);
+  EXPECT_TRUE(queue.standard->InsertionFailed());
+  EXPECT_EQ(0u, queue.standard->OverflowCount());
+
+  // A standard push is visible to the ASIL view.
+  QueueMemory other(2, /*drop_oldest=*/true);
+  ASSERT_TRUE(other.standard->Push(7, 70));
+  EXPECT_EQ(1u, other.asil->tail.load());
+  EXPECT_EQ(7, other.asil->Entries()[0].slot_id.load());
+  EXPECT_EQ(70u, other.asil->Entries()[0].ordinal.load());
 }
 
 TEST(ChecksumTest, MatchesStandardClient) {

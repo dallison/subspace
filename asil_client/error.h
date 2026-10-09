@@ -41,6 +41,14 @@ enum class Error : int32_t {
   kTimeout,
   // A fixed capacity, such as the channel name length, was exceeded.
   kCapacityExceeded,
+  // The subscriber already holds max_active_messages messages.
+  kActiveMessageLimit,
+  // The channel has no message buffers to map.  The server creates them for
+  // a static channel; otherwise a publisher must open first.
+  kNoBuffers,
+  // The message is in a buffer that a standard publisher created after this
+  // subscriber opened, by resizing the channel.  The message is skipped.
+  kBufferNotMapped,
 };
 
 // Returns a static description of the error.

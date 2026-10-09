@@ -2023,9 +2023,10 @@ channels { name: "/sensors/lidar" mux: "/sensors" vchan_id: 0 }
 channels { name: "/sensors/radar" mux: "/sensors" vchan_id: 1 }
 ```
 
-The server creates every configured channel before it accepts clients, so a
-subscriber that starts first gets the full channel layout instead of a
-placeholder.  With a config loaded:
+The server creates every configured channel and its message buffers before it
+accepts clients, so a subscriber that starts first gets the full channel
+layout and maps the buffers instead of waiting for a publisher.  With a config
+loaded:
 
 - Clients can use only the configured channels and the server's own
   `/subspace/ChannelDirectory` and `/subspace/Statistics`.  Creating a
@@ -2035,8 +2036,13 @@ placeholder.  With a config loaded:
 - The layout is fixed.  Publishers must be fixed size (`SetFixedSize(true)`)
   and match the configured slot size, number of slots, checksum size and
   metadata size.
-- A channel on a multiplexer takes its slot size, number of slots, type and
-  prefix layout from the multiplexer and needs an explicit `vchan_id`.
+- `use_split_buffers: true` gives a channel or multiplexer
+  [split buffers](docs/split-buffers.md), which the server creates.
+  Publishers must set `SetUseSplitBuffers(true)` on these channels and leave
+  it unset on the others.
+- A channel on a multiplexer takes its slot size, number of slots, type,
+  prefix layout and split buffer setting from the multiplexer and needs an
+  explicit `vchan_id`.
 - Names starting with `/subspace/` are reserved for the server.
 - After a restart from a shadow, the recovered channels must match the config
   or the server doesn't start.

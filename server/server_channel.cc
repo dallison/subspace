@@ -1638,6 +1638,18 @@ void ChannelMultiplexer::CountUsers(int &num_pubs, int &num_subs,
   num_tunnel_subs += total_tunnel_subs;
 }
 
+ServerChannel::SharedPublisherTraits
+ChannelMultiplexer::GetSharedPublisherTraits() const {
+  SharedPublisherTraits traits = ServerChannel::GetSharedPublisherTraits();
+  for (const VirtualChannel *vchan : virtual_channels_) {
+    const SharedPublisherTraits v =
+        vchan->ServerChannel::GetSharedPublisherTraits();
+    traits.fixed_size |= v.fixed_size;
+    traits.local |= v.local;
+  }
+  return traits;
+}
+
 void ChannelMultiplexer::CountCapacityUsage(
     int &max_active_messages, int &max_outstanding_slot_leases) const {
   ServerChannel::CountCapacityUsage(max_active_messages,

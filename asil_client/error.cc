@@ -39,6 +39,12 @@ const char *ErrorString(Error error) {
     return "timeout";
   case Error::kCapacityExceeded:
     return "capacity exceeded";
+  case Error::kActiveMessageLimit:
+    return "too many active messages";
+  case Error::kNoBuffers:
+    return "channel has no buffers";
+  case Error::kBufferNotMapped:
+    return "message buffer not mapped";
   }
   return "unknown error";
 }

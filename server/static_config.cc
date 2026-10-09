@@ -103,10 +103,11 @@ absl::Status ValidateStaticChannelConfig(const StaticChannelConfig &config) {
     }
     if (channel.slot_size() != 0 || channel.num_slots() != 0 ||
         !channel.type().empty() || channel.checksum_size() != 0 ||
-        channel.metadata_size() != 0) {
+        channel.metadata_size() != 0 || channel.use_split_buffers()) {
       return ConfigError(absl::StrFormat(
           "%s is on mux %s and takes its slot_size, num_slots, type, "
-          "checksum_size and metadata_size from it; leave them unset",
+          "checksum_size, metadata_size and use_split_buffers from it; leave "
+          "them unset",
           channel.name(), channel.mux()));
     }
     if (channel.vchan_id() < 0 || channel.vchan_id() >= kMaxVchanId) {

@@ -10,6 +10,7 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_format.h"
 #include "server/static_config.h"
 #include <chrono>
 #include <cstring>
@@ -28,6 +29,19 @@ constexpr char kConfig[] = R"pb(
   channels { name: "/static/meta" slot_size: 64 num_slots: 4 metadata_size: 16 }
   channels { name: "/static/v1" mux: "/static/mux" vchan_id: 3 }
   channels { name: "/static/v2" mux: "/static/mux" vchan_id: 7 }
+  channels {
+    name: "/static/split"
+    slot_size: 256
+    num_slots: 4
+    use_split_buffers: true
+  }
+  multiplexers {
+    name: "/static/split_mux"
+    slot_size: 128
+    num_slots: 4
+    use_split_buffers: true
+  }
+  channels { name: "/static/sv" mux: "/static/split_mux" vchan_id: 1 }
 )pb";
 
 subspace::PublisherOptions FixedSize() {
@@ -107,8 +121,8 @@ TEST(StaticConfigParseTest, ParsesValidConfig) {
   absl::StatusOr<subspace::StaticChannelConfig> config =
       subspace::ParseStaticChannelConfig(kConfig);
   ASSERT_OK(config);
-  EXPECT_EQ(1, config->multiplexers_size());
-  EXPECT_EQ(4, config->channels_size());
+  EXPECT_EQ(2, config->multiplexers_size());
+  EXPECT_EQ(6, config->channels_size());
 }
 
 TEST(StaticConfigParseTest, RejectsInvalidConfigs) {
@@ -138,6 +152,9 @@ TEST(StaticConfigParseTest, RejectsInvalidConfigs) {
        "isn't a configured multiplexer"},
       {R"pb(multiplexers { name: "/m" slot_size: 64 num_slots: 4 }
             channels { name: "/v" mux: "/m" slot_size: 64 })pb",
+       "leave them unset"},
+      {R"pb(multiplexers { name: "/m" slot_size: 64 num_slots: 4 }
+            channels { name: "/v" mux: "/m" use_split_buffers: true })pb",
        "leave them unset"},
       {R"pb(multiplexers { name: "/m" slot_size: 64 num_slots: 4 }
             channels { name: "/v" mux: "/m" vchan_id: 1023 })pb",
@@ -196,6 +213,56 @@ TEST_F(StaticConfigTest, SubscriberBeforePublisher) {
   ASSERT_EQ(5, msg->length);
   EXPECT_EQ("hello",
             std::string(static_cast<const char *>(msg->buffer), msg->length));
+}
+
+TEST_F(StaticConfigTest, SplitBuffersCreatedByServer) {
+  absl::StatusOr<subspace::Subscriber> sub =
+      Client().CreateSubscriber("/static/split");
+  ASSERT_OK(sub);
+  EXPECT_TRUE(sub->UsesSplitBuffers());
+
+  absl::StatusOr<subspace::Publisher> pub = Client().CreatePublisher(
+      "/static/split", 256, 4, FixedSize().SetUseSplitBuffers(true));
+  ASSERT_OK(pub);
+  EXPECT_TRUE(pub->UsesSplitBuffers());
+  for (int i = 0; i < 6; i++) {
+    std::string text = absl::StrFormat("split %d", i);
+    Publish(*pub, text);
+    absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+    ASSERT_OK(msg);
+    EXPECT_EQ(text,
+              std::string(static_cast<const char *>(msg->buffer), msg->length));
+  }
+}
+
+TEST_F(StaticConfigTest, SplitBufferVirtualChannel) {
+  absl::StatusOr<subspace::Subscriber> sub = Client().CreateSubscriber(
+      "/static/sv", subspace::SubscriberOptions().SetMux("/static/split_mux"));
+  ASSERT_OK(sub);
+  EXPECT_TRUE(sub->UsesSplitBuffers());
+
+  absl::StatusOr<subspace::Publisher> pub = Client().CreatePublisher(
+      "/static/sv", 128, 4,
+      FixedSize().SetMux("/static/split_mux").SetUseSplitBuffers(true));
+  ASSERT_OK(pub);
+  Publish(*pub, "vchan");
+  absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  EXPECT_EQ("vchan",
+            std::string(static_cast<const char *>(msg->buffer), msg->length));
+}
+
+TEST_F(StaticConfigTest, RejectsMismatchedSplitBuffers) {
+  absl::StatusOr<subspace::Publisher> unsplit =
+      Client().CreatePublisher("/static/split", 256, 4, FixedSize());
+  ASSERT_FALSE(unsplit.ok());
+  EXPECT_THAT(unsplit.status().message(), HasSubstr("uses split buffers"));
+
+  absl::StatusOr<subspace::Publisher> split = Client().CreatePublisher(
+      "/static/a", 256, 8, FixedSize().SetUseSplitBuffers(true));
+  ASSERT_FALSE(split.ok());
+  EXPECT_THAT(split.status().message(),
+              HasSubstr("doesn't use split buffers"));
 }
 
 TEST_F(StaticConfigTest, UnconfiguredChannelsAreRejected) {
@@ -307,6 +374,13 @@ TEST_F(StaticConfigTest, VirtualChannels) {
   ASSERT_OK(msg);
   EXPECT_EQ("virtual",
             std::string(static_cast<const char *>(msg->buffer), msg->length));
+
+  // Publishers on other virtual channels of the multiplexer share its
+  // buffers, so they are also fixed size.
+  absl::StatusOr<subspace::Publisher> other = Client().CreatePublisher(
+      "/static/v2", 128, 8, FixedSize().SetMux("/static/mux"));
+  ASSERT_OK(other);
+  EXPECT_EQ(7, other->VirtualChannelId());
 }
 
 TEST_F(StaticConfigTest, ServerChannelsArePublished) {

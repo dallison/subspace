@@ -1407,6 +1407,81 @@ bool Server::IsServerChannelName(const std::string &channel_name) {
          channel_name == kStatisticsChannel;
 }
 
+void Server::RegisterClientBuffer(ServerChannel *channel,
+                                  ClientBufferHandleMetadata metadata,
+                                  toolbelt::FileDescriptor fd) {
+  channel->RegisterClientBuffer(metadata, std::move(fd));
+  ForEachShadow([&](const std::unique_ptr<ShadowReplicator> &shadow) {
+    const auto matches =
+        channel->FindClientBuffers(metadata.session_id, metadata.buffer_index);
+    for (const RegisteredClientBuffer *buffer : matches) {
+      if (buffer->metadata.slot_id == metadata.slot_id &&
+          buffer->metadata.is_prefix == metadata.is_prefix) {
+        shadow->SendRegisterClientBuffer(buffer->metadata, buffer->fd);
+        return;
+      }
+    }
+    shadow->SendRegisterClientBuffer(metadata);
+  });
+}
+
+absl::Status Server::CreateStaticBuffers(ServerChannel *channel,
+                                         int64_t slot_size,
+                                         bool use_split_buffers) {
+  if (absl::Status s = channel->ValidateOrSetSplitBufferOptions(
+          {.use_split_buffers = use_split_buffers},
+          /*set_if_missing=*/use_split_buffers, "static channel config");
+      !s.ok()) {
+    return s;
+  }
+  if (channel->GetCcb()->num_buffers.load(std::memory_order_acquire) > 0) {
+    // Recovered from a shadow with its buffers.
+    return absl::OkStatus();
+  }
+  // A publisher that is never registered with the channel creates the
+  // buffers through the same code as a client's first publisher.  The
+  // buffers outlive it: named shared memory stays until the session is
+  // cleaned up, and the channel keeps the registered file descriptors.
+  details::PublisherImpl creator(
+      channel->Name(), channel->NumSlots(), channel->SubscriberQueueSize(),
+      channel->SubscriberQueueArenaSize(), channel->GetChannelId(),
+      /*publisher_id=*/-1, /*vchan_id=*/-1, session_id_, channel->Type(),
+      PublisherOptions()
+          .SetSlotSize(slot_size)
+          .SetNumSlots(channel->NumSlots())
+          .SetFixedSize(true)
+          .SetUseSplitBuffers(use_split_buffers),
+      /*reload=*/nullptr, static_cast<int>(getuid()),
+      static_cast<int>(getgid()));
+  creator.SetChecksumSize(channel->ChecksumSize());
+  creator.SetMetadataSize(channel->MetadataSize());
+  creator.SetPrefixSize(channel->PrefixSize());
+  creator.SetClientBufferRegistrationCallback(
+      [this, channel](const ClientBufferHandleMetadata &metadata,
+                      const toolbelt::FileDescriptor *fd) {
+        RegisterClientBuffer(channel, metadata,
+                             fd != nullptr ? *fd : toolbelt::FileDescriptor());
+        return absl::OkStatus();
+      });
+  creator.SetClientBufferLookupCallback(
+      [channel](const std::string &, uint64_t session_id,
+                uint32_t buffer_index)
+          -> absl::StatusOr<std::vector<RegisteredClientBuffer>> {
+        std::vector<RegisteredClientBuffer> buffers;
+        for (const RegisteredClientBuffer *buffer :
+             channel->FindClientBuffers(session_id, buffer_index)) {
+          buffers.push_back(*buffer);
+        }
+        return buffers;
+      });
+  const SharedMemoryFds &fds = channel->GetFds();
+  if (absl::Status s = creator.Map(SharedMemoryFds(fds.ccb, fds.bcb), scb_fd_);
+      !s.ok()) {
+    return s;
+  }
+  return creator.CreateOrAttachBuffers(slot_size);
+}
+
 absl::Status Server::CreateStaticChannels() {
   if (!static_config_.has_value()) {
     return absl::OkStatus();
@@ -1463,6 +1538,14 @@ absl::Status Server::CreateStaticChannels() {
       return s;
     }
     mux->SetStatic(true);
+    if (absl::Status s =
+            CreateStaticBuffers(mux, slot_size, m.use_split_buffers());
+        !s.ok()) {
+      return absl::InternalError(
+          absl::StrFormat("Failed to create buffers for static multiplexer "
+                          "%s: %s",
+                          m.name(), s.ToString()));
+    }
   }
 
   for (const StaticChannel &c : static_config_->channels()) {
@@ -1500,6 +1583,15 @@ absl::Status Server::CreateStaticChannels() {
       return s;
     }
     channel->SetStatic(true);
+    if (mux == nullptr) {
+      if (absl::Status s =
+              CreateStaticBuffers(channel, slot_size, c.use_split_buffers());
+          !s.ok()) {
+        return absl::InternalError(absl::StrFormat(
+            "Failed to create buffers for static channel %s: %s", c.name(),
+            s.ToString()));
+      }
+    }
   }
   logger_.Log(toolbelt::LogLevel::kInfo,
               "Static channel config: %d channels and %d multiplexers",

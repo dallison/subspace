@@ -453,6 +453,16 @@ public:
   bool IsReliable() const;
   bool IsFixedSize() const;
 
+  // Properties that every publisher sharing this channel's buffers must agree
+  // on.  The virtual channels of a multiplexer all share its buffers.
+  struct SharedPublisherTraits {
+    bool fixed_size = false;
+    bool local = false;
+  };
+  virtual SharedPublisherTraits GetSharedPublisherTraits() const {
+    return {IsFixedSize(), HasLocalPublisher()};
+  }
+
   bool HasSplitBufferOptions() const { return split_buffer_options_set_; }
   const SplitBufferOptions &GetSplitBufferOptions() const {
     return split_buffer_options_;
@@ -590,6 +600,7 @@ public:
                   int &num_tunnel_subs) const override;
   void CountCapacityUsage(int &max_active_messages,
                           int &max_outstanding_slot_leases) const override;
+  SharedPublisherTraits GetSharedPublisherTraits() const override;
 
 private:
   int next_vchan_id_ = 0;
@@ -634,6 +645,9 @@ public:
                   int &num_tunnel_subs) const override {
     mux_->CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs,
                      num_tunnel_pubs, num_tunnel_subs);
+  }
+  SharedPublisherTraits GetSharedPublisherTraits() const override {
+    return mux_->GetSharedPublisherTraits();
   }
   ChannelMultiplexer *GetMux() const { return mux_; }
   int GetVirtualChannelId() const override { return vchan_id_; }

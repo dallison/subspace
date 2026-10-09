@@ -52,6 +52,8 @@ public:
                         int32_t publisher_id) override;
   Error RemoveSubscriber(const char *channel_name,
                          int32_t subscriber_id) override;
+  Error RegisterBuffer(const ClientBuffer &buffer, int fd) override;
+  Error GetBuffer(const BufferRequest &request, BufferReply &reply) override;
 
   const char *LastServerError() const override { return last_error_; }
 
@@ -59,8 +61,9 @@ public:
 
 private:
   template <typename Build, typename Read>
-  Error Transact(Build build, Read read);
+  Error Transact(Build build, Read read, int send_fd = -1);
   Error Send(size_t length);
+  Error SendFd(int fd);
   Error Receive(size_t &length);
   Error ReceiveFds();
   Error Rejected(const char *message, size_t length);

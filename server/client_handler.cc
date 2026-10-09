@@ -284,19 +284,7 @@ absl::Status ClientHandler::HandleRegisterClientBuffer(
     }
     fd = std::move(fds[size_t(req.fd_index())]);
   }
-  channel->RegisterClientBuffer(metadata, std::move(fd));
-  server_->ForEachShadow([&](const std::unique_ptr<ShadowReplicator> &shadow) {
-    const auto matches =
-        channel->FindClientBuffers(metadata.session_id, metadata.buffer_index);
-    for (const RegisteredClientBuffer *buffer : matches) {
-      if (buffer->metadata.slot_id == metadata.slot_id &&
-          buffer->metadata.is_prefix == metadata.is_prefix) {
-        shadow->SendRegisterClientBuffer(buffer->metadata, buffer->fd);
-        return;
-      }
-    }
-    shadow->SendRegisterClientBuffer(metadata);
-  });
+  server_->RegisterClientBuffer(channel, std::move(metadata), std::move(fd));
   return absl::OkStatus();
 }
 
@@ -341,6 +329,10 @@ void ClientHandler::HandleGetClientBuffers(
   }
   for (const RegisteredClientBuffer *buffer :
        channel->FindClientBuffers(req.session_id(), req.buffer_index())) {
+    if (req.filter_slot() && (buffer->metadata.is_prefix != req.is_prefix() ||
+                              buffer->metadata.slot_id != req.slot_id())) {
+      continue;
+    }
     ToProto(buffer->metadata, response->add_metadata());
     if (buffer->fd.Valid()) {
       response->add_fd_indexes(static_cast<int32_t>(fds.size()));
@@ -487,6 +479,18 @@ void ClientHandler::HandleCreatePublisher(
           cs, ms));
       return;
     }
+    const ServerChannel *layout_channel =
+        channel->IsVirtual()
+            ? static_cast<const VirtualChannel *>(channel)->GetMux()
+            : channel;
+    const bool split = layout_channel->HasSplitBufferOptions() &&
+                       layout_channel->GetSplitBufferOptions().use_split_buffers;
+    if (req.use_split_buffers() != split) {
+      response->set_error(absl::StrFormat(
+          "Static channel %s %s split buffers", req.channel_name(),
+          split ? "uses" : "doesn't use"));
+      return;
+    }
   }
   if (channel == nullptr) {
     server_->logger_.Log(toolbelt::LogLevel::kDebug,
@@ -626,7 +630,9 @@ void ClientHandler::HandleCreatePublisher(
   }
   // Check consistency of publisher parameters.
   if (num_pubs > 0) {
-    if (req.is_fixed_size() != channel->IsFixedSize()) {
+    const ServerChannel::SharedPublisherTraits traits =
+        channel->GetSharedPublisherTraits();
+    if (req.is_fixed_size() != traits.fixed_size) {
       response->set_error(
           absl::StrFormat("Inconsistent publisher parameters for channel %s: "
                           "all publishers must be either fixed size or not",
@@ -648,7 +654,7 @@ void ClientHandler::HandleCreatePublisher(
     }
     if (slot_size_changed) {
       if (slot_size_changed) {
-        if (channel->IsFixedSize()) {
+        if (traits.fixed_size) {
           // Fixed size channels cannot change size.
           response->set_error(absl::StrFormat(
               "Failed to add publisher to fixed size channel %s with different "
@@ -667,7 +673,7 @@ void ClientHandler::HandleCreatePublisher(
 
     // Local subscribers don't count here: they make the channel local
     // without constraining publishers.
-    if (channel->HasLocalPublisher() != req.is_local()) {
+    if (traits.local != req.is_local()) {
       response->set_error(
           absl::StrFormat("Inconsistent publisher parameters for channel %s: "
                           "all publishers must be either local or not",
