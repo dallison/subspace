@@ -14,7 +14,7 @@ fails when the module is resolved.
 Add this next to the `bazel_dep` in the root `MODULE.bazel`:
 
 ```python
-bazel_dep(name = "subspace", version = "3.2.5")
+bazel_dep(name = "subspace", version = "3.2.7")
 
 subspace = use_extension("@subspace//:extensions.bzl", "subspace")
 subspace.max_channels(count = 8192)
