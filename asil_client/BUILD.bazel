@@ -54,7 +54,7 @@ cc_library(
     ],
     deps = [
         ":asil_client",
-        "//proto:subspace_phaser",
+        "//common:server_wire",
     ],
 )
 

@@ -127,7 +127,8 @@ bazelisk test //asil_client:all
 | Target | Contents | Dependencies |
 |---|---|---|
 | `//asil_client:asil_client` | Client, publisher, subscriber, shared memory | C++17, POSIX |
-| `//asil_client:phaser_connection` | The standard server handshake | `asil_client`, `//proto:subspace_phaser` |
+| `//asil_client:phaser_connection` | The standard server handshake | `asil_client`, `//common:server_wire` |
+| `//common:server_wire` | Server request and response encoding, shared with the standard client | `//proto:subspace_phaser` |
 | `//proto:subspace_phaser` | Phaser messages generated from `subspace.proto` | phaser runtime, Abseil, cpp_toolbelt |
 
 CMake builds the same libraries as `subspace_asil_client`,
@@ -135,8 +136,7 @@ CMake builds the same libraries as `subspace_asil_client`,
 `asil_layout_test` and `asil_client_test`.  Phaser is fetched with
 `FetchContent`, and its `protoc-gen-phaser` plugin is built for the host.  A
 cross-compile needs a host plugin passed as `-DPHASER_PLUGIN_EXECUTABLE`; see
-[the Android CMake build](android.md#building-with-cmake).  Without one, the
-cross-compile builds only the core library.
+[the Android CMake build](android.md#building-with-cmake).
 
 Soong builds `libsubspace_asil_client`, `libsubspace_asil_phaser_connection`
 and `libsubspace_phaser`, using the phaser modules from
@@ -159,13 +159,16 @@ each response stays small.
 `PhaserServerConnection` implements it with the server's standard protocol:
 length-prefixed messages in protobuf wire format on the server's Unix socket,
 with file descriptors passed by `SCM_RIGHTS`.  The server receives the same
-bytes it receives from the standard clients.  The connection builds each
-request as a phaser message in a fixed buffer inside the object, serializes
-it to protobuf wire format, and decodes the response into the same buffer,
-so it needs neither the protobuf library nor the heap.  The buffers take
-about 60 KB, so keep the connection in static storage or inside a long-lived
-object.  A system with its own qualified transport can replace it with
-another implementation of `ServerConnection`.
+bytes it receives from the standard clients.  Requests and responses are
+encoded by `ServerWire` in `common/server_wire.h`, which the standard C++
+client uses too.  The standard client gives it growable buffers.  The ASIL
+connection gives it fixed buffers inside the object: it builds each request
+as a phaser message in a fixed buffer, serializes it to protobuf wire format,
+and decodes the response into the same buffer, so it needs neither the
+protobuf library nor the heap.  The buffers take about 60 KB, so keep the
+connection in static storage or inside a long-lived object.  A system with
+its own qualified transport can replace it with another implementation of
+`ServerConnection`.
 
 ## Example
 

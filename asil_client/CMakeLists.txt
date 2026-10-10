@@ -25,13 +25,6 @@ target_link_libraries(asil_layout_test PUBLIC
     gtest_main
 )
 
-# The server connection needs the phaser messages, which proto/ skips when
-# cross-compiling without a host phaser plugin.
-if(NOT TARGET subspace_phaser)
-    message(STATUS "Skipping the ASIL server connection: subspace_phaser is not available.")
-    return()
-endif()
-
 # The handshake with the server, using phaser messages in fixed buffers.
 add_library(subspace_asil_phaser_connection STATIC
     phaser_connection.cc

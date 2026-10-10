@@ -47,8 +47,12 @@
   static channels, otherwise a publisher must have opened. Messages in a
   buffer that a standard publisher created by resizing after the subscriber
   opened return `kBufferNotMapped`.
+- The standard C++ client builds its server requests and responses as
+  phaser messages too, in growable buffers. `ServerWire` in
+  `common/server_wire.h` encodes them for both C++ clients, with fixed or
+  growable buffers. The bytes on the socket are unchanged.
 - Bazel, CMake and Soong build phaser and generate `subspace_phaser` from
-  `subspace.proto`. Android CMake cross-compiles take a host
+  `subspace.proto`. Android CMake cross-compiles need a host
   `protoc-gen-phaser` in `PHASER_PLUGIN_EXECUTABLE`.
 - Abseil 20250814.1, protobuf 33.4, cpp_toolbelt 2.1.6 and phaser 2.1.3 in
   the Bazel build. CMake uses cpp_toolbelt 2.1.6.

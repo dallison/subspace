@@ -186,7 +186,8 @@ Subspace can also be cross-compiled for Android using CMake with the NDK
 toolchain. CMake fetches the same third-party dependencies with
 `FetchContent`, but code generation runs on the host.  It needs a host-native
 `protoc` that matches the protobuf version used by the Android build, and a
-host-native phaser plugin (`protoc-gen-phaser`) for the ASIL client's messages.
+host-native phaser plugin (`protoc-gen-phaser`) for the C++ clients' server
+messages.
 
 ```bash
 export ANDROID_NDK_HOME=/path/to/ndk
@@ -243,7 +244,7 @@ Place the subspace source tree in your AOSP checkout (e.g.,
 | `libsubspace_server` | static lib | Server implementation |
 | `subspace_server` | binary | Standalone server daemon |
 | `libsubspace_proto` | static lib | Protobuf message definitions |
-| `libsubspace_phaser` | static lib | Phaser message definitions for the ASIL client |
+| `libsubspace_phaser` | static lib | Phaser message definitions for the C++ clients |
 | `libsubspace_asil_client` | static lib | ASIL client core (no exceptions, no RTTI) |
 | `libsubspace_asil_phaser_connection` | static lib | ASIL client's server connection |
 | `libsubspace_jni` | shared lib | JNI bindings for Java clients |

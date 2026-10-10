@@ -93,15 +93,14 @@ target_link_libraries(subspace_proto PUBLIC
     protobuf::libprotobuf
 )
 
-# Phaser messages for the ASIL client's server connection.  They are sent and
-# received in protobuf wire format, so the server sees the same bytes as from
-# any other client.  Cross-compiles need a host plugin in
-# PHASER_PLUGIN_EXECUTABLE; without one the ASIL server connection is skipped.
+# Phaser messages for the clients' server requests and responses.  They are
+# sent and received in protobuf wire format, so the server sees the same bytes
+# as from any other client.  Cross-compiles need a host plugin in
+# PHASER_PLUGIN_EXECUTABLE.
 if(CMAKE_CROSSCOMPILING AND NOT PHASER_PLUGIN_EXECUTABLE)
-    message(STATUS
-        "Skipping subspace_phaser: cross-compiling without "
+    message(FATAL_ERROR
+        "Cross-compiling needs a host protoc-gen-phaser in "
         "-DPHASER_PLUGIN_EXECUTABLE.")
-    return()
 endif()
 set(SUBSPACE_PHASER_PROTOC)
 if(CMAKE_CROSSCOMPILING)

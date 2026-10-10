@@ -19,10 +19,12 @@ cc_library_shared {
     static_libs: [
         "libsubspace_common",
         "libsubspace_proto",
+        "libsubspace_phaser",
         "libcoroutines",
         "libcpp_toolbelt",
         "libabsl",
     ],
+    export_static_lib_headers: ["libsubspace_phaser"],
     shared_libs: [
         "libprotobuf-cpp-full",
         "liblog",

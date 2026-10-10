@@ -47,6 +47,18 @@ cc_library(
     ],
 )
 
+# Server requests and responses as Phaser messages in protobuf wire format,
+# shared by the standard and ASIL clients.
+cc_library(
+    name = "server_wire",
+    hdrs = ["server_wire.h"],
+    deps = [
+        "//proto:subspace_phaser",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+    ],
+)
+
 cc_test(
     name = "common_test",
     size = "small",

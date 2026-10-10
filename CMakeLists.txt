@@ -167,8 +167,10 @@ FetchContent_MakeAvailable(protobuf)
 # These targets can be used directly without find_package
 
 # --- External Dependency: phaser (using FetchContent for native CMake) ---
-# The ASIL client talks to the server with phaser messages held in fixed
-# buffers.  Phaser uses the Abseil, cpp_toolbelt and protobuf fetched above.
+# The C++ clients build their server requests and responses as phaser
+# messages: in growable buffers for the standard client and fixed buffers for
+# the ASIL client.  Phaser uses the Abseil, cpp_toolbelt and protobuf fetched
+# above.
 # Cross-compiles take a host protoc-gen-phaser in PHASER_PLUGIN_EXECUTABLE.
 FetchContent_Declare(
     phaser

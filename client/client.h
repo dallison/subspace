@@ -20,7 +20,7 @@
 #include "common/async/wait.h"
 #include "common/channel.h"
 #include "common/client_buffer.h"
-#include "proto/subspace.pb.h"
+#include "proto/subspace.phaser.h"
 
 #include "toolbelt/fd.h"
 #include "toolbelt/logging.h"
@@ -712,11 +712,11 @@ private:
 
   absl::Status CheckConnected() const;
   absl::Status SendRequestReceiveResponse(
-      const Request &req, Response &response,
+      const phaser::Request &req, phaser::Response &response,
       std::vector<toolbelt::FileDescriptor> &fds,
       const std::vector<toolbelt::FileDescriptor> &send_fds = {});
   absl::Status
-  SendOneWayRequest(const Request &req,
+  SendOneWayRequest(const phaser::Request &req,
                     const std::vector<toolbelt::FileDescriptor> &fds = {});
   absl::Status
   RegisterClientBuffer(const ClientBufferHandleMetadata &metadata,
@@ -732,19 +732,19 @@ private:
   absl::Status ReregisterPublisher(details::PublisherImpl *publisher);
   absl::Status ReregisterSubscriber(details::SubscriberImpl *subscriber);
 
-  static void FillCreatePublisherRequest(CreatePublisherRequest *cmd,
+  static void FillCreatePublisherRequest(phaser::CreatePublisherRequest *cmd,
                                          const std::string &channel_name,
                                          const PublisherOptions &opts,
                                          int publisher_id);
   void ApplyPublisherResponseFds(details::PublisherImpl *publisher,
-                                 const CreatePublisherResponse &resp,
+                                 const phaser::CreatePublisherResponse &resp,
                                  std::vector<toolbelt::FileDescriptor> &fds);
-  static void FillCreateSubscriberRequest(CreateSubscriberRequest *cmd,
+  static void FillCreateSubscriberRequest(phaser::CreateSubscriberRequest *cmd,
                                           const std::string &channel_name,
                                           const SubscriberOptions &opts,
                                           int subscriber_id);
   void ApplySubscriberResponseFds(details::SubscriberImpl *subscriber,
-                                  const CreateSubscriberResponse &resp,
+                                  const phaser::CreateSubscriberResponse &resp,
                                   std::vector<toolbelt::FileDescriptor> &fds);
 
   bool CheckReload(details::ClientChannel *channel);

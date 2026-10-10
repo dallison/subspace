@@ -150,11 +150,12 @@ Error PhaserServerConnection::Rejected(const char *message, size_t length) {
   return Error::kServerRejected;
 }
 
-// Sends the length-prefixed request in wire_.
+// Sends the serialized request in wire_ after its length.
 Error PhaserServerConnection::Send(size_t length) {
+  char *const header = wire_.Payload() - kServerWireHeaderSize;
   const uint32_t network_length = htonl(static_cast<uint32_t>(length));
-  std::memcpy(wire_, &network_length, sizeof(network_length));
-  if (!SendFully(socket_.Get(), wire_, sizeof(network_length) + length)) {
+  std::memcpy(header, &network_length, sizeof(network_length));
+  if (!SendFully(socket_.Get(), header, kServerWireHeaderSize + length)) {
     return Error::kConnectionFailed;
   }
   return Error::kOk;
@@ -194,22 +195,24 @@ Error PhaserServerConnection::SendFd(int fd) {
 
 // Receives a length-prefixed response into wire_.  A response that does not
 // fit is read and discarded so that the stream stays in step.
-Error PhaserServerConnection::Receive(size_t &length) {
+Error PhaserServerConnection::Receive(const char *&data, size_t &length) {
   uint32_t network_length = 0;
   if (!ReceiveFully(socket_.Get(), reinterpret_cast<char *>(&network_length),
                     sizeof(network_length))) {
     return Error::kConnectionFailed;
   }
   length = ntohl(network_length);
-  char *const data = wire_ + sizeof(uint32_t);
-  if (length <= kWireBufferSize) {
-    return ReceiveFully(socket_.Get(), data, length) ? Error::kOk
-                                                     : Error::kConnectionFailed;
+  if (char *buffer = wire_.ResponseBuffer(length); buffer != nullptr) {
+    data = buffer;
+    return ReceiveFully(socket_.Get(), buffer, length)
+               ? Error::kOk
+               : Error::kConnectionFailed;
   }
+  char *const scratch = wire_.ResponseBuffer(kWireBufferSize);
   for (size_t remaining = length; remaining > 0;) {
     const size_t chunk =
         remaining < kWireBufferSize ? remaining : kWireBufferSize;
-    if (!ReceiveFully(socket_.Get(), data, chunk)) {
+    if (!ReceiveFully(socket_.Get(), scratch, chunk)) {
       return Error::kConnectionFailed;
     }
     remaining -= chunk;
@@ -300,28 +303,27 @@ Error PhaserServerConnection::Transact(Build build, Read read, int send_fd) {
   fds_.Clear();
   size_t length = 0;
   {
-    absl::StatusOr<wire::Request> request =
-        wire::Request::TryCreateMutable(message_, sizeof(message_));
+    // The response is built in the request's storage, so the request goes
+    // out of scope first.
+    absl::StatusOr<wire::Request> request = wire_.NewRequest();
     if (!request.ok()) {
       return Error::kCapacityExceeded;
     }
     build(*request);
-    if (request->AllocationFailed()) {
+    absl::StatusOr<size_t> serialized = wire_.Serialize(*request);
+    if (!serialized.ok()) {
       return Error::kCapacityExceeded;
     }
-    ::phaser::ProtoBuffer out(wire_ + sizeof(uint32_t), kWireBufferSize);
-    if (!request->Serialize(out).ok()) {
-      return Error::kCapacityExceeded;
-    }
-    length = out.Size();
+    length = *serialized;
   }
 
   Error e = Send(length);
   if (e == Error::kOk && send_fd >= 0) {
     e = SendFd(send_fd);
   }
+  const char *data = nullptr;
   if (e == Error::kOk) {
-    e = Receive(length);
+    e = Receive(data, length);
   }
   if (e == Error::kOk || e == Error::kCapacityExceeded) {
     // The descriptors follow even a response that did not fit.
@@ -340,15 +342,13 @@ Error PhaserServerConnection::Transact(Build build, Read read, int send_fd) {
     return e;
   }
 
-  absl::StatusOr<wire::Response> response =
-      wire::Response::TryCreateMutable(message_, sizeof(message_));
+  absl::StatusOr<wire::Response> response = wire_.NewResponse();
   if (!response.ok()) {
     fds_.Clear();
     return Error::kCapacityExceeded;
   }
-  ::phaser::ProtoBuffer in(static_cast<const char *>(wire_ + sizeof(uint32_t)),
-                           length);
-  if (absl::Status status = response->Deserialize(in); !status.ok()) {
+  if (absl::Status status = wire_.Decode(data, length, *response);
+      !status.ok()) {
     fds_.Clear();
     return status.code() == absl::StatusCode::kResourceExhausted
                ? Error::kCapacityExceeded

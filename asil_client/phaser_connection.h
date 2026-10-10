@@ -5,6 +5,7 @@
 #pragma once
 
 #include "asil_client/server_connection.h"
+#include "common/server_wire.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -14,10 +15,10 @@ namespace asil {
 
 // The standard Subspace protocol: protobuf requests and responses over the
 // server's Unix socket, with file descriptors passed as SCM_RIGHTS.  Requests
-// and responses are Phaser messages held in buffers inside this object and
-// converted to and from protobuf wire format, so the handshake makes no heap
-// allocations.  A request or response that does not fit fails with
-// kCapacityExceeded.
+// and responses are Phaser messages held in a ServerWire with fixed buffers
+// inside this object, the same encoding as the standard client uses, so the
+// handshake makes no heap allocations.  A request or response that does not
+// fit fails with kCapacityExceeded.
 //
 // The object holds about 60 KB of buffers, so keep it in static storage or
 // inside a long-lived object rather than on a small stack.
@@ -64,15 +65,14 @@ private:
   Error Transact(Build build, Read read, int send_fd = -1);
   Error Send(size_t length);
   Error SendFd(int fd);
-  Error Receive(size_t &length);
+  Error Receive(const char *&data, size_t &length);
   Error ReceiveFds();
   Error Rejected(const char *message, size_t length);
 
   UniqueFd socket_;
   ReceivedFds fds_;
   char last_error_[256] = {};
-  alignas(8) char wire_[sizeof(uint32_t) + kWireBufferSize];
-  alignas(8) char message_[kMessageBufferSize];
+  ServerWire<FixedServerWireBuffers<kMessageBufferSize, kWireBufferSize>> wire_;
 };
 
 } // namespace asil

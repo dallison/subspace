@@ -32,6 +32,7 @@ target_link_libraries(subspace_client PUBLIC
     subspace_common
     subspace_async
     subspace_proto
+    subspace_phaser
     absl::flags
     absl::flat_hash_map
     absl::flat_hash_set
