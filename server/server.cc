@@ -2138,6 +2138,7 @@ void Server::RemoveChannel(ServerChannel *channel) {
     }
   }
   OnRemoveChannel(channel->Name());
+  statistics_totals_.erase(channel->Name());
   ForEachShadow([channel](const std::unique_ptr<ShadowReplicator> &s) {
     s->SendRemoveChannel(channel->Name(), channel->GetChannelId());
   });
@@ -2281,16 +2282,6 @@ void Server::StatisticsCoroutine(async::Context ctx) {
     return;
   }
 
-  // The shared memory counters only grow, so a counter that went backwards
-  // means the channel was removed and created again.  Such a channel counts
-  // from zero.
-  struct ChannelTotals {
-    uint64_t bytes = 0;
-    uint64_t messages = 0;
-    uint64_t drops = 0;
-  };
-  absl::flat_hash_map<std::string, ChannelTotals> previous_totals;
-
   constexpr int kPeriodSecs = 2;
   while (!shutting_down_) {
     async::Sleep(ctx, kPeriodSecs);
@@ -2298,31 +2289,39 @@ void Server::StatisticsCoroutine(async::Context ctx) {
     stats.set_timestamp(toolbelt::Now());
     stats.set_server_id(server_id_);
     stats.set_machine_name(machine_name_);
-    absl::flat_hash_map<std::string, ChannelTotals> totals;
+    absl::flat_hash_map<std::string, StatisticsTotals> totals;
     for (auto &channel : channels_) {
       if (!IsPublicChannel(channel.second.get())) {
         continue;
       }
       auto s = stats.add_channels();
       channel.second->GetChannelStats(s);
-      ChannelTotals current = {.bytes = uint64_t(s->total_bytes()),
-                               .messages = uint64_t(s->total_messages()),
-                               .drops = s->total_drops()};
-      ChannelTotals interval = current;
-      auto it = previous_totals.find(s->channel_name());
-      if (it != previous_totals.end() && current.bytes >= it->second.bytes &&
-          current.messages >= it->second.messages &&
-          current.drops >= it->second.drops) {
+      StatisticsTotals current = {.bytes = uint64_t(s->total_bytes()),
+                                  .messages = uint64_t(s->total_messages()),
+                                  .drops = s->total_drops()};
+      StatisticsTotals interval = current;
+      // RemoveChannel forgets a removed channel, so a channel created again
+      // under the same name counts from its creation.  The 64-bit counters
+      // never wrap, so one that went backwards belongs to a channel that was
+      // replaced some other way and also counts from its creation.  The
+      // 32-bit drop counter wraps, so its count is taken modulo 2^32.
+      auto it = statistics_totals_.find(s->channel_name());
+      if (it != statistics_totals_.end() &&
+          current.bytes >= it->second.bytes &&
+          current.messages >= it->second.messages) {
         interval = {.bytes = current.bytes - it->second.bytes,
                     .messages = current.messages - it->second.messages,
-                    .drops = current.drops - it->second.drops};
+                    .drops = uint32_t(current.drops - it->second.drops)};
       }
       totals[s->channel_name()] = current;
       s->set_total_bytes(int64_t(interval.bytes));
       s->set_total_messages(int64_t(interval.messages));
-      s->set_total_drops(uint32_t(interval.drops));
+      s->set_total_drops(interval.drops);
     }
-    previous_totals = std::move(totals);
+    // The sample ends before it is published.  If publishing fails below, the
+    // counts of this interval are lost and the next message only counts its
+    // own interval.  This is expected.
+    statistics_totals_ = std::move(totals);
     int64_t length = stats.ByteSizeLong();
 
     absl::StatusOr<void *> buffer = pub->GetMessageBuffer(int32_t(length));

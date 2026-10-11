@@ -328,7 +328,8 @@ message Statistics {
   // total_bytes, total_messages and total_drops of each channel count the
   // interval since the previous Statistics message, not the channel's
   // lifetime.  A channel created during the interval only counts from its
-  // creation.
+  // creation.  If the server fails to publish a message, the counts of its
+  // interval are lost.  This is expected.
   repeated ChannelStatsProto channels = 3;
   // Set by Server::SetMachineName.
   string machine_name = 4;

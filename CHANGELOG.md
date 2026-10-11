@@ -7,6 +7,9 @@
   and `total_drops` now count the interval since the previous message
   instead of the channel's lifetime. `GetChannelStats` still returns
   lifetime totals.
+- A channel removed and created again under the same name counts from its
+  creation. If a `Statistics` message fails to publish, the counts of its
+  interval are lost.
 - `Statistics` carries the server's `machine_name`, set with
   `Server::SetMachineName`.
 
