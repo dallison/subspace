@@ -24,8 +24,38 @@ double Percentile(std::vector<T> values, double percentile) {
 
 } // namespace
 
-const std::array<RateController::Setting, 9> &RateController::Settings() {
-  static constexpr std::array<Setting, 9> settings = {{
+const std::array<ModeController::Setting, 2> &ModeController::Settings() {
+  static constexpr std::array<Setting, 2> settings = {{
+      {PerformanceMode::kThroughput, "THROUGHPUT"},
+      {PerformanceMode::kLatency, "LATENCY"},
+  }};
+  return settings;
+}
+
+bool ModeController::Increase() {
+  if (index_ + 1 >= Settings().size()) {
+    return false;
+  }
+  ++index_;
+  ++generation_;
+  return true;
+}
+
+bool ModeController::Decrease() {
+  if (index_ == 0) {
+    return false;
+  }
+  --index_;
+  ++generation_;
+  return true;
+}
+
+const ModeController::Setting &ModeController::Current() const {
+  return Settings()[index_];
+}
+
+const std::array<RateController::Setting, 11> &RateController::Settings() {
+  static constexpr std::array<Setting, 11> settings = {{
       {0.0, "STOPPED"},
       {1.0, "1 Hz"},
       {10.0, "10 Hz"},
@@ -34,6 +64,8 @@ const std::array<RateController::Setting, 9> &RateController::Settings() {
       {10'000.0, "10 kHz"},
       {100'000.0, "100 kHz"},
       {1'000'000.0, "1 MHz"},
+      {2'000'000.0, "2 MHz"},
+      {5'000'000.0, "5 MHz"},
       {10'000'000.0, "10 MHz"},
   }};
   return settings;

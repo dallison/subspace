@@ -128,7 +128,7 @@ constexpr Glyph kDot = {
 
 std::string CountString(uint64_t value) { return std::to_string(value); }
 
-constexpr size_t kAcceleratorControlCount = 4;
+constexpr size_t kAcceleratorControlCount = 5;
 
 constexpr std::array<std::string_view, 3> kGaugeStatisticLabels = {
     "CURRENT", "MEAN", "P50"};
@@ -271,9 +271,11 @@ StatsWindow::StatsWindow(retro::Screen *screen, retro::WindowOptions options)
              -1) {}
 
 void StatsWindow::DrawSnapshot(const DashboardSnapshot &snapshot,
-                               const DashboardEngine::Config &config) {
+                               const DashboardEngine::Config &config,
+                               const ModeController::Setting &mode) {
   Window::Draw(false);
   table_.Clear();
+  table_.AddRow({"Mode", mode.label, "", "", "", "", "", ""});
   table_.AddRow(
       {"Channel", snapshot.active_channel, "", "", "", "", "", ""});
   table_.AddRow({"Socket", config.socket, "", "", "", "", "", ""});
@@ -303,7 +305,9 @@ AcceleratorWindow::AcceleratorWindow(retro::Screen *screen,
                                      retro::WindowOptions options)
     : Window(screen, std::move(options)) {}
 
-void AcceleratorWindow::DrawSetting(const RateController::Setting &setting,
+void AcceleratorWindow::DrawSetting(const ModeController::Setting &mode,
+                                    size_t mode_index, size_t mode_count,
+                                    const RateController::Setting &setting,
                                     size_t rate_index, size_t rate_count,
                                     int32_t slots, size_t slot_index,
                                     size_t slot_count, int32_t queue_size,
@@ -336,11 +340,19 @@ void AcceleratorWindow::DrawSetting(const RateController::Setting &setting,
       8, std::string(kGaugeStatisticLabels[GaugeStatisticIndex(
              gauge_statistic)]),
       retro::kColorPairGreen);
+  PrintInMiddle(9, "MODE",
+                selected == AcceleratorControl::kMode
+                    ? retro::kColorPairCyan
+                    : retro::kColorPairNormal);
+  PrintInMiddle(10, mode.label, retro::kColorPairGreen);
 
   const int bar_width = std::max(4, Width() - 6);
-  size_t selected_index = rate_index;
-  size_t selected_count = rate_count;
-  if (selected == AcceleratorControl::kSlots) {
+  size_t selected_index = mode_index;
+  size_t selected_count = mode_count;
+  if (selected == AcceleratorControl::kRate) {
+    selected_index = rate_index;
+    selected_count = rate_count;
+  } else if (selected == AcceleratorControl::kSlots) {
     selected_index = slot_index;
     selected_count = slot_count;
   } else if (selected == AcceleratorControl::kSubscriberQueue) {
@@ -359,10 +371,10 @@ void AcceleratorWindow::DrawSetting(const RateController::Setting &setting,
   bar.append(filled, '*');
   bar.append(bar_width - 2 - filled, ' ');
   bar += "]";
-  PrintInMiddle(9, bar, retro::kColorPairYellow);
-  PrintInMiddle(10, "LEFT / RIGHT  select");
-  PrintInMiddle(11, "UP / DOWN     adjust");
-  PrintInMiddle(12, "q             quit");
+  PrintInMiddle(11, bar, retro::kColorPairYellow);
+  PrintInMiddle(12, "LEFT / RIGHT  select");
+  PrintInMiddle(13, "UP / DOWN     adjust");
+  PrintInMiddle(14, "q             quit");
   if (!error.empty()) {
     std::string banner = "ERROR: " + error;
     const size_t max_width = static_cast<size_t>(std::max(1, Width() - 4));
@@ -583,14 +595,17 @@ co20::Task DashboardApplication::InputTask(co20::Coroutine &c) {
   while (!engine_.IsStopping()) {
     const int ready = co_await c.Wait(STDIN_FILENO, POLLIN, 100'000'000ULL);
     if (ready == STDIN_FILENO) {
-      InstallSigwinchHandler();
-      BlockSigwinch block_sigwinch;
-      for (;;) {
-        const int character = getch();
-        if (character == ERR) {
-          break;
-        }
-        switch (character) {
+      bool handled_key = false;
+      {
+        InstallSigwinchHandler();
+        BlockSigwinch block_sigwinch;
+        for (;;) {
+          const int character = getch();
+          if (character == ERR) {
+            break;
+          }
+          handled_key = true;
+          switch (character) {
         case KEY_LEFT: {
           const size_t index = static_cast<size_t>(selected_control_);
           selected_control_ = static_cast<AcceleratorControl>(
@@ -605,7 +620,9 @@ co20::Task DashboardApplication::InputTask(co20::Coroutine &c) {
         }
         case KEY_UP: {
           bool changed = false;
-          if (selected_control_ == AcceleratorControl::kRate) {
+          if (selected_control_ == AcceleratorControl::kMode) {
+            changed = engine_.IncreaseMode();
+          } else if (selected_control_ == AcceleratorControl::kRate) {
             changed = engine_.IncreaseRate();
           } else if (selected_control_ == AcceleratorControl::kSlots) {
             changed = engine_.IncreaseSlots();
@@ -625,7 +642,9 @@ co20::Task DashboardApplication::InputTask(co20::Coroutine &c) {
         }
         case KEY_DOWN: {
           bool changed = false;
-          if (selected_control_ == AcceleratorControl::kRate) {
+          if (selected_control_ == AcceleratorControl::kMode) {
+            changed = engine_.DecreaseMode();
+          } else if (selected_control_ == AcceleratorControl::kRate) {
             changed = engine_.DecreaseRate();
           } else if (selected_control_ == AcceleratorControl::kSlots) {
             changed = engine_.DecreaseSlots();
@@ -650,6 +669,12 @@ co20::Task DashboardApplication::InputTask(co20::Coroutine &c) {
         default:
           break;
         }
+        }
+      }
+      // macOS reports this curses tty as readable when no key is waiting.
+      // Polling it again immediately pins the main thread and slows publishing.
+      if (!handled_key) {
+        co_await c.Sleep(std::chrono::milliseconds(100));
       }
     }
   }
@@ -666,6 +691,8 @@ co20::Task DashboardApplication::RefreshTask(co20::Coroutine &c) {
 
 void DashboardApplication::DrawAll() {
   const auto snapshot = engine_.Snapshot();
+  const auto &mode_settings = ModeController::Settings();
+  const auto mode = engine_.Mode();
   const auto &settings = RateController::Settings();
   const auto rate = engine_.Rate();
   const auto &slot_settings = SlotController::Settings();
@@ -686,11 +713,12 @@ void DashboardApplication::DrawAll() {
           ? GaugeValue(snapshot.latency_ns, gauge_statistic_)
           : 0.0,
       statistic);
-  stats_window_->DrawSnapshot(snapshot, engine_.GetConfig());
+  stats_window_->DrawSnapshot(snapshot, engine_.GetConfig(), mode.setting);
   accelerator_window_->DrawSetting(
-      setting, rate.index, settings.size(), slots.count, slots.index,
-      slot_settings.size(), queue.size, queue.index, queue_settings.size(),
-      gauge_statistic_, selected_control_, snapshot.error);
+      mode.setting, mode.index, mode_settings.size(), setting, rate.index,
+      settings.size(), slots.count, slots.index, slot_settings.size(),
+      queue.size, queue.index, queue_settings.size(), gauge_statistic_,
+      selected_control_, snapshot.error);
   warning_window_->DrawWarnings(snapshot.warnings);
 }
 

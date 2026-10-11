@@ -34,12 +34,15 @@ bazelisk run -c opt //dashboard:dashboard -- \
 
 ## Controls
 
-- Left/right arrows: select the publish-rate, channel-slot, subscriber-queue,
-  or gauge-statistic control.
-- Up/down arrows: adjust the selected control. Rates range from STOPPED through
-  10 MHz; slot presets are 8, 16, 32, 64, 128, 256, 512, and 1024; subscriber
-  queue presets are off, 8, 16, 32, 64, 128, 256, 512, and 1024; gauge
-  statistics are current, mean, and p50 and apply to both gauges.
+- Left/right arrows: select the operating-mode, publish-rate, channel-slot,
+  subscriber-queue, or gauge-statistic control.
+- Up/down arrows: adjust the selected control. Throughput mode batches
+  notifications and drains every available message. Latency mode wakes the
+  subscriber for every publication and reads the newest available message.
+  Rates range from STOPPED through 10 MHz; slot presets are 8, 16, 32, 64, 128,
+  256, 512, and 1024; subscriber queue presets are off, 8, 16, 32, 64, 128,
+  256, 512, and 1024; gauge statistics are current, mean, and p50 and apply to
+  both gauges.
 - `q`: stop all tasks and quit.
 
 The publisher and subscriber run on separate OS threads with independent

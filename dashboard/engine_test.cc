@@ -63,6 +63,37 @@ TEST_F(DashboardEngineTest, PublishesAndReceivesAtSelectedRate) {
   EXPECT_TRUE(snapshot.error.empty());
 }
 
+TEST_F(DashboardEngineTest, SwitchesPerformanceModeWhileRunning) {
+  DashboardEngine engine(
+      {.socket = Socket(), .channel = "/dashboard-engine-mode-test"});
+  ASSERT_TRUE(engine.Init().ok());
+  EXPECT_EQ(engine.Mode().setting.mode, PerformanceMode::kThroughput);
+
+  TestApplication app;
+  engine.StartTasks(app);
+  app.Spawn(
+      [&engine](co20::Coroutine &c) -> co20::Task {
+        EXPECT_TRUE(engine.IncreaseRate()); // 10 Hz.
+        EXPECT_TRUE(engine.IncreaseMode()); // Latency.
+        EXPECT_FALSE(engine.IncreaseMode());
+        co_await c.Sleep(std::chrono::milliseconds(300));
+        EXPECT_EQ(engine.Mode().setting.mode, PerformanceMode::kLatency);
+        EXPECT_TRUE(engine.DecreaseMode()); // Throughput.
+        EXPECT_FALSE(engine.DecreaseMode());
+        co_await c.Sleep(std::chrono::milliseconds(300));
+        engine.RequestStop();
+        co_return;
+      },
+      "test-controller");
+  app.Cpp20Scheduler().Run();
+
+  EXPECT_EQ(engine.Mode().setting.mode, PerformanceMode::kThroughput);
+  const auto snapshot = engine.Snapshot();
+  EXPECT_GT(snapshot.published_messages, 0);
+  EXPECT_GT(snapshot.received_messages, 0);
+  EXPECT_TRUE(snapshot.error.empty());
+}
+
 TEST_F(DashboardEngineTest, HighestRateDoesNotStarveShutdown) {
   DashboardEngine engine(
       {.socket = Socket(), .channel = "/dashboard-engine-max-rate-test"});

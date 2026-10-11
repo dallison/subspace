@@ -121,7 +121,12 @@ void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
                             std::memory_order_relaxed));
                       });
   }
-  if (--num_active_messages_ < options_.MaxActiveMessages()) {
+  // Re-arm only when this release drops the subscriber below its active-message
+  // cap. That is the case that unblocked a reader waiting in GetAllMessages.
+  // Writing the trigger pipe on every release caps macOS throughput, because
+  // each release is a syscall even when this thread is the one about to read.
+  const int remaining = --num_active_messages_;
+  if (remaining == options_.MaxActiveMessages() - 1) {
     Trigger();
     if (IsReliable()) {
       TriggerReliablePublishers();

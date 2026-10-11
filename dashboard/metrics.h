@@ -43,6 +43,32 @@ struct ScaledValue {
   std::string unit;
 };
 
+enum class PerformanceMode {
+  kThroughput,
+  kLatency,
+};
+
+class ModeController {
+public:
+  struct Setting {
+    PerformanceMode mode;
+    const char *label;
+  };
+
+  bool Increase();
+  bool Decrease();
+  const Setting &Current() const;
+  size_t Index() const { return index_; }
+  uint64_t Generation() const { return generation_; }
+
+  static constexpr size_t kInitialIndex = 0;
+  static const std::array<Setting, 2> &Settings();
+
+private:
+  size_t index_ = kInitialIndex;
+  uint64_t generation_ = 0;
+};
+
 class RateController {
 public:
   struct Setting {
@@ -59,7 +85,7 @@ public:
   size_t Index() const { return index_; }
 
   static constexpr size_t kInitialIndex = 1;
-  static const std::array<Setting, 9> &Settings();
+  static const std::array<Setting, 11> &Settings();
 
 private:
   size_t index_ = kInitialIndex;

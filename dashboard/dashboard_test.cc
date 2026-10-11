@@ -9,6 +9,23 @@
 namespace subspace::dashboard {
 namespace {
 
+TEST(ModeControllerTest, SwitchesBetweenThroughputAndLatency) {
+  ModeController mode;
+  EXPECT_EQ(mode.Current().mode, PerformanceMode::kThroughput);
+  EXPECT_EQ(std::string(mode.Current().label), "THROUGHPUT");
+  EXPECT_EQ(mode.Generation(), 0);
+
+  EXPECT_TRUE(mode.Increase());
+  EXPECT_EQ(mode.Current().mode, PerformanceMode::kLatency);
+  EXPECT_EQ(std::string(mode.Current().label), "LATENCY");
+  EXPECT_EQ(mode.Generation(), 1);
+  EXPECT_FALSE(mode.Increase());
+
+  EXPECT_TRUE(mode.Decrease());
+  EXPECT_EQ(mode.Current().mode, PerformanceMode::kThroughput);
+  EXPECT_FALSE(mode.Decrease());
+}
+
 TEST(RateControllerTest, ClampsAtBothEnds) {
   RateController rate;
   EXPECT_EQ(rate.Current().hz, 1.0);
@@ -23,6 +40,10 @@ TEST(RateControllerTest, ClampsAtBothEnds) {
   EXPECT_EQ(rate.Current().hz, 10'000'000.0);
   EXPECT_EQ(std::string(rate.Current().label), "10 MHz");
   EXPECT_FALSE(rate.Increase());
+  EXPECT_EQ(RateController::Settings()[8].hz, 2'000'000.0);
+  EXPECT_EQ(std::string(RateController::Settings()[8].label), "2 MHz");
+  EXPECT_EQ(RateController::Settings()[9].hz, 5'000'000.0);
+  EXPECT_EQ(std::string(RateController::Settings()[9].label), "5 MHz");
 }
 
 TEST(SlotControllerTest, UsesPresetsAndClampsAtBothEnds) {
