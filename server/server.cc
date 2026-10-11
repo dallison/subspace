@@ -2281,19 +2281,48 @@ void Server::StatisticsCoroutine(async::Context ctx) {
     return;
   }
 
+  // The shared memory counters only grow, so a counter that went backwards
+  // means the channel was removed and created again.  Such a channel counts
+  // from zero.
+  struct ChannelTotals {
+    uint64_t bytes = 0;
+    uint64_t messages = 0;
+    uint64_t drops = 0;
+  };
+  absl::flat_hash_map<std::string, ChannelTotals> previous_totals;
+
   constexpr int kPeriodSecs = 2;
   while (!shutting_down_) {
     async::Sleep(ctx, kPeriodSecs);
     Statistics stats;
     stats.set_timestamp(toolbelt::Now());
     stats.set_server_id(server_id_);
+    stats.set_machine_name(machine_name_);
+    absl::flat_hash_map<std::string, ChannelTotals> totals;
     for (auto &channel : channels_) {
       if (!IsPublicChannel(channel.second.get())) {
         continue;
       }
       auto s = stats.add_channels();
       channel.second->GetChannelStats(s);
+      ChannelTotals current = {.bytes = uint64_t(s->total_bytes()),
+                               .messages = uint64_t(s->total_messages()),
+                               .drops = s->total_drops()};
+      ChannelTotals interval = current;
+      auto it = previous_totals.find(s->channel_name());
+      if (it != previous_totals.end() && current.bytes >= it->second.bytes &&
+          current.messages >= it->second.messages &&
+          current.drops >= it->second.drops) {
+        interval = {.bytes = current.bytes - it->second.bytes,
+                    .messages = current.messages - it->second.messages,
+                    .drops = current.drops - it->second.drops};
+      }
+      totals[s->channel_name()] = current;
+      s->set_total_bytes(int64_t(interval.bytes));
+      s->set_total_messages(int64_t(interval.messages));
+      s->set_total_drops(uint32_t(interval.drops));
     }
+    previous_totals = std::move(totals);
     int64_t length = stats.ByteSizeLong();
 
     absl::StatusOr<void *> buffer = pub->GetMessageBuffer(int32_t(length));

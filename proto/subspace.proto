@@ -325,7 +325,13 @@ message ChannelStatsProto {
 message Statistics {
   string server_id = 1;
   int64 timestamp = 2;
+  // total_bytes, total_messages and total_drops of each channel count the
+  // interval since the previous Statistics message, not the channel's
+  // lifetime.  A channel created during the interval only counts from its
+  // creation.
   repeated ChannelStatsProto channels = 3;
+  // Set by Server::SetMachineName.
+  string machine_name = 4;
 }
 
 message ChannelAddress {
