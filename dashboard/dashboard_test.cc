@@ -42,9 +42,25 @@ TEST(SlotControllerTest, UsesPresetsAndClampsAtBothEnds) {
   EXPECT_EQ(SlotController::Settings().size(), 8);
 }
 
-TEST(ChannelNameTest, AppendsSlotCountToBaseName) {
-  EXPECT_EQ(ChannelNameForSlots("/dashboard", 32), "/dashboard-32-slots");
-  EXPECT_EQ(ChannelNameForSlots("/custom", 1024), "/custom-1024-slots");
+TEST(SubscriberQueueControllerTest, UsesPresetsAndClampsAtBothEnds) {
+  SubscriberQueueController queues;
+  EXPECT_EQ(queues.Current(), 0);
+  EXPECT_EQ(queues.Generation(), 0);
+
+  EXPECT_FALSE(queues.Decrease());
+  EXPECT_TRUE(queues.Increase());
+  EXPECT_EQ(queues.Current(), 8);
+
+  while (queues.Increase()) {
+  }
+  EXPECT_EQ(queues.Current(), 1024);
+  EXPECT_FALSE(queues.Increase());
+  EXPECT_EQ(SubscriberQueueController::Settings().size(), 9);
+}
+
+TEST(ChannelNameTest, AppendsSlotCountAndQueueSizeToBaseName) {
+  EXPECT_EQ(ChannelName("/dashboard", 32, 0), "/dashboard-32-slots-0-queue");
+  EXPECT_EQ(ChannelName("/custom", 1024, 16), "/custom-1024-slots-16-queue");
 }
 
 TEST(DisplayScalingTest, UsesExpectedBoundaries) {
@@ -190,7 +206,7 @@ TEST(RollingMetricsTest, KeepsMostRecentWarnings) {
 
 TEST(RollingMetricsTest, StatisticsResetKeepsConfigurationAndWarnings) {
   RollingMetrics metrics;
-  metrics.ResetForChannel("/dashboard-32-slots", 32);
+  metrics.ResetForChannel("/dashboard-32-slots-0-queue", 32, 0);
   metrics.SetTargetRate("1 MHz");
   metrics.RecordWarning("retained warning");
   metrics.Sample(1'000'000'000ULL);
@@ -208,8 +224,9 @@ TEST(RollingMetricsTest, StatisticsResetKeepsConfigurationAndWarnings) {
   EXPECT_DOUBLE_EQ(snapshot.drop_rate_percent, 0.0);
   EXPECT_FALSE(snapshot.throughput_hz.valid);
   EXPECT_FALSE(snapshot.latency_ns.valid);
-  EXPECT_EQ(snapshot.active_channel, "/dashboard-32-slots");
+  EXPECT_EQ(snapshot.active_channel, "/dashboard-32-slots-0-queue");
   EXPECT_EQ(snapshot.active_slots, 32);
+  EXPECT_EQ(snapshot.active_queue_size, 0);
   EXPECT_EQ(snapshot.target_rate, "1 MHz");
   ASSERT_EQ(snapshot.warnings.size(), 1);
   EXPECT_EQ(snapshot.warnings.front(), "retained warning");
@@ -224,7 +241,7 @@ TEST(RollingMetricsTest, ChannelResetClearsMeasurementsButKeepsControls) {
   metrics.RecordWarning("retained warning");
   metrics.Sample(1'000'000'000ULL);
 
-  metrics.ResetForChannel("/dashboard-64-slots", 64);
+  metrics.ResetForChannel("/dashboard-64-slots-16-queue", 64, 16);
 
   const auto &snapshot = metrics.Snapshot();
   EXPECT_EQ(snapshot.published_messages, 0);
@@ -236,7 +253,9 @@ TEST(RollingMetricsTest, ChannelResetClearsMeasurementsButKeepsControls) {
   EXPECT_EQ(snapshot.target_rate, "100 kHz");
   EXPECT_EQ(snapshot.requested_slots, 64);
   EXPECT_EQ(snapshot.active_slots, 64);
-  EXPECT_EQ(snapshot.active_channel, "/dashboard-64-slots");
+  EXPECT_EQ(snapshot.requested_queue_size, 16);
+  EXPECT_EQ(snapshot.active_queue_size, 16);
+  EXPECT_EQ(snapshot.active_channel, "/dashboard-64-slots-16-queue");
   ASSERT_EQ(snapshot.warnings.size(), 1);
   EXPECT_EQ(snapshot.warnings.front(), "retained warning");
 }

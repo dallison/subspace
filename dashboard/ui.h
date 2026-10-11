@@ -17,7 +17,12 @@ namespace subspace::dashboard {
 
 using Glyph = std::array<std::string_view, 8>;
 
-enum class AcceleratorControl { kRate, kSlots, kGaugeStatistic };
+enum class AcceleratorControl {
+  kRate,
+  kSlots,
+  kSubscriberQueue,
+  kGaugeStatistic
+};
 enum class GaugeStatistic { kCurrent, kMean, kP50 };
 
 const Glyph &GlyphFor(char character);
@@ -49,9 +54,9 @@ public:
   AcceleratorWindow(retro::Screen *screen, retro::WindowOptions options);
   void DrawSetting(const RateController::Setting &setting, size_t rate_index,
                    size_t rate_count, int32_t slots, size_t slot_index,
-                   size_t slot_count, GaugeStatistic gauge_statistic,
-                   AcceleratorControl selected,
-                   const std::string &error);
+                   size_t slot_count, int32_t queue_size, size_t queue_index,
+                   size_t queue_count, GaugeStatistic gauge_statistic,
+                   AcceleratorControl selected, const std::string &error);
 };
 
 class WarningWindow : public retro::Window {

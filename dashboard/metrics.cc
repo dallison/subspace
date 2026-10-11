@@ -89,6 +89,34 @@ bool SlotController::Decrease() {
 
 int32_t SlotController::Current() const { return Settings()[index_]; }
 
+const std::array<int32_t, 9> &SubscriberQueueController::Settings() {
+  static constexpr std::array<int32_t, 9> settings = {
+      0, 8, 16, 32, 64, 128, 256, 512, 1024};
+  return settings;
+}
+
+bool SubscriberQueueController::Increase() {
+  if (index_ + 1 >= Settings().size()) {
+    return false;
+  }
+  ++index_;
+  ++generation_;
+  return true;
+}
+
+bool SubscriberQueueController::Decrease() {
+  if (index_ == 0) {
+    return false;
+  }
+  --index_;
+  ++generation_;
+  return true;
+}
+
+int32_t SubscriberQueueController::Current() const {
+  return Settings()[index_];
+}
+
 void RollingMetrics::RecordPublished(uint64_t count) {
   snapshot_.published_messages += count;
 }
@@ -134,6 +162,8 @@ void RollingMetrics::RecordWarning(std::string warning) {
 void RollingMetrics::ResetStatistics() {
   const int32_t requested_slots = snapshot_.requested_slots;
   const int32_t active_slots = snapshot_.active_slots;
+  const int32_t requested_queue_size = snapshot_.requested_queue_size;
+  const int32_t active_queue_size = snapshot_.active_queue_size;
   std::string active_channel = std::move(snapshot_.active_channel);
   std::string target_rate = std::move(snapshot_.target_rate);
   std::string error = std::move(snapshot_.error);
@@ -142,6 +172,8 @@ void RollingMetrics::ResetStatistics() {
   snapshot_ = {};
   snapshot_.requested_slots = requested_slots;
   snapshot_.active_slots = active_slots;
+  snapshot_.requested_queue_size = requested_queue_size;
+  snapshot_.active_queue_size = active_queue_size;
   snapshot_.active_channel = std::move(active_channel);
   snapshot_.target_rate = std::move(target_rate);
   snapshot_.error = std::move(error);
@@ -154,10 +186,13 @@ void RollingMetrics::ResetStatistics() {
   history_.clear();
 }
 
-void RollingMetrics::ResetForChannel(std::string channel, int32_t slots) {
+void RollingMetrics::ResetForChannel(std::string channel, int32_t slots,
+                                     int32_t queue_size) {
   ResetStatistics();
   snapshot_.requested_slots = slots;
   snapshot_.active_slots = slots;
+  snapshot_.requested_queue_size = queue_size;
+  snapshot_.active_queue_size = queue_size;
   snapshot_.active_channel = std::move(channel);
 }
 
@@ -339,8 +374,10 @@ double DropRatePercent(uint64_t received, uint64_t dropped) {
   return static_cast<double>(100.0L * dropped / total);
 }
 
-std::string ChannelNameForSlots(std::string_view base, int32_t slots) {
-  return std::string(base) + "-" + std::to_string(slots) + "-slots";
+std::string ChannelName(std::string_view base, int32_t slots,
+                        int32_t queue_size) {
+  return std::string(base) + "-" + std::to_string(slots) + "-slots-" +
+         std::to_string(queue_size) + "-queue";
 }
 
 } // namespace subspace::dashboard

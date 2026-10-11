@@ -22,20 +22,38 @@ size_t PublishBatchSize(int32_t slots) {
   return static_cast<size_t>(std::max(1, slots - 1));
 }
 
+uint64_t ChannelGeneration(uint64_t slots_generation,
+                           uint64_t queue_generation) {
+  return (slots_generation << 32) | queue_generation;
+}
+
+uint64_t SubscriberQueueArenaBytes(int32_t queue_size) {
+  if (queue_size <= 0) {
+    return 0;
+  }
+  return subspace::SlotQueueBlockSize(static_cast<size_t>(queue_size));
+}
+
 } // namespace
 
-DashboardEngine::DashboardEngine(Config config) : config_(std::move(config)) {
-  const int32_t initial_slots = slots_.Current();
-  const std::string initial_channel =
-      ChannelNameForSlots(config_.channel, initial_slots);
-  published_channel_ = {
-      .name = initial_channel,
-      .slots = initial_slots,
-      .generation = slots_.Generation(),
+DashboardEngine::ChannelProfile DashboardEngine::CurrentChannel() const {
+  const int32_t slots = slots_.Current();
+  const int32_t queue_size = queues_.Current();
+  return {
+      .name = ChannelName(config_.channel, slots, queue_size),
+      .slots = slots,
+      .queue_size = queue_size,
+      .generation =
+          ChannelGeneration(slots_.Generation(), queues_.Generation()),
   };
+}
+
+DashboardEngine::DashboardEngine(Config config) : config_(std::move(config)) {
+  published_channel_ = CurrentChannel();
   active_channel_ = published_channel_;
   metrics_.SetTargetRate(rate_.Current().label);
-  metrics_.ResetForChannel(initial_channel, initial_slots);
+  metrics_.ResetForChannel(published_channel_.name, published_channel_.slots,
+                            published_channel_.queue_size);
 }
 
 DashboardEngine::~DashboardEngine() {
@@ -140,6 +158,12 @@ bool DashboardEngine::DecreaseRate() {
   return true;
 }
 
+void DashboardEngine::ResetMeasurementsForChannelChange() {
+  std::lock_guard lock(metrics_mutex_);
+  metrics_.ResetStatistics();
+  dropped_since_warning_ = 0;
+}
+
 bool DashboardEngine::IncreaseSlots() {
   {
     std::lock_guard lock(rate_mutex_);
@@ -147,11 +171,7 @@ bool DashboardEngine::IncreaseSlots() {
       return false;
     }
   }
-  {
-    std::lock_guard lock(metrics_mutex_);
-    metrics_.ResetStatistics();
-    dropped_since_warning_ = 0;
-  }
+  ResetMeasurementsForChannelChange();
   NotifyChannelChanged();
   return true;
 }
@@ -163,11 +183,31 @@ bool DashboardEngine::DecreaseSlots() {
       return false;
     }
   }
+  ResetMeasurementsForChannelChange();
+  NotifyChannelChanged();
+  return true;
+}
+
+bool DashboardEngine::IncreaseSubscriberQueue() {
   {
-    std::lock_guard lock(metrics_mutex_);
-    metrics_.ResetStatistics();
-    dropped_since_warning_ = 0;
+    std::lock_guard lock(rate_mutex_);
+    if (!queues_.Increase()) {
+      return false;
+    }
   }
+  ResetMeasurementsForChannelChange();
+  NotifyChannelChanged();
+  return true;
+}
+
+bool DashboardEngine::DecreaseSubscriberQueue() {
+  {
+    std::lock_guard lock(rate_mutex_);
+    if (!queues_.Decrease()) {
+      return false;
+    }
+  }
+  ResetMeasurementsForChannelChange();
   NotifyChannelChanged();
   return true;
 }
@@ -181,8 +221,11 @@ absl::StatusOr<subspace::Publisher>
 DashboardEngine::CreatePublisher(const ChannelProfile &profile) {
   return publisher_client_->CreatePublisher(
       profile.name, kPayloadSize, profile.slots,
-      subspace::PublisherOptions().SetFixedSize(true).SetType(
-          "subspace.dashboard.Timestamp"));
+      subspace::PublisherOptions()
+          .SetFixedSize(true)
+          .SetType("subspace.dashboard.Timestamp")
+          .SetSubscriberQueueArenaSize(
+              SubscriberQueueArenaBytes(profile.queue_size)));
 }
 
 absl::StatusOr<subspace::Subscriber>
@@ -190,6 +233,7 @@ DashboardEngine::CreateSubscriber(const ChannelProfile &profile) {
   subspace::SubscriberOptions options;
   options.SetType("subspace.dashboard.Timestamp");
   options.SetLogDroppedMessages(false);
+  options.SetSubscriberQueueSize(profile.queue_size);
   auto subscriber =
       subscriber_client_->CreateSubscriber(profile.name, options);
   if (!subscriber.ok()) {
@@ -237,18 +281,14 @@ void DashboardEngine::PublisherLoop() {
       std::lock_guard lock(rate_mutex_);
       setting = rate_.Current();
       current_generation = rate_.Generation();
-      requested_channel = {
-          .name = ChannelNameForSlots(config_.channel, slots_.Current()),
-          .slots = slots_.Current(),
-          .generation = slots_.Generation(),
-      };
+      requested_channel = CurrentChannel();
     }
     if (channel_generation != requested_channel.generation) {
       record_published();
       auto publisher = CreatePublisher(requested_channel);
       if (!publisher.ok()) {
         std::lock_guard lock(rate_mutex_);
-        if (slots_.Generation() != requested_channel.generation) {
+        if (CurrentChannel().generation != requested_channel.generation) {
           continue;
         }
         ReportError(publisher.status());
@@ -261,9 +301,10 @@ void DashboardEngine::PublisherLoop() {
         std::lock_guard lock(rate_mutex_);
         published_channel_ = requested_channel;
       }
-      RecordWarning(absl::StrFormat("Publisher switched to %s (%d slots)",
-                                    requested_channel.name,
-                                    requested_channel.slots));
+      RecordWarning(absl::StrFormat(
+          "Publisher switched to %s (%d slots, queue %d)",
+          requested_channel.name, requested_channel.slots,
+          requested_channel.queue_size));
       Wake(subscriber_stop_[1]);
       continue;
     }
@@ -283,7 +324,7 @@ void DashboardEngine::PublisherLoop() {
       std::unique_lock lock(rate_mutex_);
       rate_changed_.wait(lock, [&] {
         return IsStopping() || rate_.Generation() != generation ||
-               slots_.Generation() != channel_generation;
+               CurrentChannel().generation != channel_generation;
       });
       continue;
     }
@@ -297,7 +338,7 @@ void DashboardEngine::PublisherLoop() {
         rate_changed_.wait_for(
             lock, std::chrono::nanoseconds(remaining_ns), [&] {
               return IsStopping() || rate_.Generation() != generation ||
-                     slots_.Generation() != channel_generation;
+                     CurrentChannel().generation != channel_generation;
             });
       } else {
         std::this_thread::yield();
@@ -431,11 +472,13 @@ void DashboardEngine::SubscriberLoop() {
           std::lock_guard lock(metrics_mutex_);
           dropped_since_warning_ = 0;
           metrics_.ResetForChannel(published_channel.name,
-                                   published_channel.slots);
+                                   published_channel.slots,
+                                   published_channel.queue_size);
         }
-        RecordWarning(absl::StrFormat("Subscriber switched to %s (%d slots)",
-                                      published_channel.name,
-                                      published_channel.slots));
+        RecordWarning(absl::StrFormat(
+            "Subscriber switched to %s (%d slots, queue %d)",
+            published_channel.name, published_channel.slots,
+            published_channel.queue_size));
         continue;
       }
     }
@@ -501,18 +544,27 @@ DashboardEngine::SlotSnapshot DashboardEngine::Slots() const {
   return {.count = slots_.Current(), .index = slots_.Index()};
 }
 
+DashboardEngine::QueueSnapshot DashboardEngine::SubscriberQueue() const {
+  std::lock_guard lock(rate_mutex_);
+  return {.size = queues_.Current(), .index = queues_.Index()};
+}
+
 DashboardSnapshot DashboardEngine::Snapshot() const {
   int32_t requested_slots;
+  int32_t requested_queue_size;
   ChannelProfile active_channel;
   {
     std::lock_guard lock(rate_mutex_);
     requested_slots = slots_.Current();
+    requested_queue_size = queues_.Current();
     active_channel = active_channel_;
   }
   std::lock_guard lock(metrics_mutex_);
   DashboardSnapshot snapshot = metrics_.Snapshot();
   snapshot.requested_slots = requested_slots;
   snapshot.active_slots = active_channel.slots;
+  snapshot.requested_queue_size = requested_queue_size;
+  snapshot.active_queue_size = active_channel.queue_size;
   snapshot.active_channel = active_channel.name;
   return snapshot;
 }

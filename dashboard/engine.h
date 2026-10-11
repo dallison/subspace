@@ -36,6 +36,11 @@ public:
     size_t index;
   };
 
+  struct QueueSnapshot {
+    int32_t size;
+    size_t index;
+  };
+
   explicit DashboardEngine(Config config);
   ~DashboardEngine();
 
@@ -50,6 +55,8 @@ public:
   bool DecreaseRate();
   bool IncreaseSlots();
   bool DecreaseSlots();
+  bool IncreaseSubscriberQueue();
+  bool DecreaseSubscriberQueue();
   void RecordWarning(std::string warning);
   bool IsStopping() const {
     return stopping_.load(std::memory_order_acquire);
@@ -58,12 +65,14 @@ public:
   const Config &GetConfig() const { return config_; }
   RateSnapshot Rate() const;
   SlotSnapshot Slots() const;
+  QueueSnapshot SubscriberQueue() const;
   DashboardSnapshot Snapshot() const;
 
 private:
   struct ChannelProfile {
     std::string name;
     int32_t slots;
+    int32_t queue_size;
     uint64_t generation;
   };
 
@@ -73,6 +82,8 @@ private:
 
   void NotifyRateChanged();
   void NotifyChannelChanged();
+  ChannelProfile CurrentChannel() const;
+  void ResetMeasurementsForChannelChange();
   absl::StatusOr<subspace::Publisher>
   CreatePublisher(const ChannelProfile &profile);
   absl::StatusOr<subspace::Subscriber>
@@ -93,6 +104,7 @@ private:
   std::condition_variable rate_changed_;
   RateController rate_;
   SlotController slots_;
+  SubscriberQueueController queues_;
   ChannelProfile published_channel_;
   ChannelProfile active_channel_;
   RollingMetrics metrics_;
