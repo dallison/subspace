@@ -1126,15 +1126,80 @@ fn posix_shm_name(shadow_path: &str) -> crate::error::Result<String> {
     Ok(format!("/subspace_{}", stat.st_ino))
 }
 
+// Contents of a POSIX buffer shadow file; must match PosixShadowRecord in the
+// C++ client (client/client_channel.cc).  The size is stored as data rather
+// than as the file length because /tmp may be RAM-backed (on QNX it is
+// /dev/shmem), where an ftruncated file commits as much memory as the buffer.
 #[cfg(not(target_os = "linux"))]
-fn create_shm(name: &str, size: usize) -> crate::error::Result<RawFd> {
-    let shadow_fd = shim_open(
-        name,
+const POSIX_SHADOW_MAGIC: [u8; 8] = *b"\0SSBSIZE";
+#[cfg(not(target_os = "linux"))]
+const POSIX_SHADOW_RECORD_LEN: usize = 16;
+
+#[cfg(not(target_os = "linux"))]
+fn write_posix_shadow_size(shadow_path: &str, size: usize) -> crate::error::Result<()> {
+    let fd = shim_open(
+        shadow_path,
         OFlag::O_RDWR | OFlag::O_CREAT,
         Mode::from_bits_truncate(0o666),
     )?;
-    shim_ftruncate(shadow_fd, size as libc::off_t);
-    shim_close(shadow_fd);
+    // Only the creator records the size; a publisher attaching later must not
+    // overwrite a size another publisher already recorded.
+    let stat = match crate::syscall_shim::shim_fstat(fd) {
+        Ok(stat) => stat,
+        Err(e) => {
+            shim_close(fd);
+            return Err(e.into());
+        }
+    };
+    if stat.st_size == 0 && size > 0 {
+        let mut record = [0u8; POSIX_SHADOW_RECORD_LEN];
+        record[..8].copy_from_slice(&POSIX_SHADOW_MAGIC);
+        record[8..].copy_from_slice(&(size as u64).to_ne_bytes());
+        // A single write so a concurrent reader sees either nothing or the
+        // whole record.
+        let n = shim_write(fd, record.as_ptr() as *const libc::c_void, record.len());
+        if n != record.len() as libc::ssize_t {
+            let err = std::io::Error::last_os_error();
+            shim_close(fd);
+            return Err(SubspaceError::Internal(format!(
+                "Failed to write size to shadow file {shadow_path}: {err}"
+            )));
+        }
+    }
+    shim_close(fd);
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_posix_shadow_size(shadow_path: &str) -> crate::error::Result<usize> {
+    let fd = shim_open(shadow_path, OFlag::O_RDONLY, Mode::empty())?;
+    let stat = match crate::syscall_shim::shim_fstat(fd) {
+        Ok(stat) => stat,
+        Err(e) => {
+            shim_close(fd);
+            return Err(e.into());
+        }
+    };
+    let mut record = [0u8; POSIX_SHADOW_RECORD_LEN];
+    let n = shim_read(fd, record.as_mut_ptr() as *mut libc::c_void, record.len());
+    let err = std::io::Error::last_os_error();
+    shim_close(fd);
+    if n < 0 {
+        return Err(SubspaceError::Io(err));
+    }
+    if n as usize == POSIX_SHADOW_RECORD_LEN && record[..8] == POSIX_SHADOW_MAGIC {
+        let mut size = [0u8; 8];
+        size.copy_from_slice(&record[8..]);
+        return Ok(u64::from_ne_bytes(size) as usize);
+    }
+    // Either the creator has not written the record yet (size 0, so callers
+    // retry) or the file was sized with ftruncate by an older client.
+    Ok(stat.st_size as usize)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn create_shm(name: &str, size: usize) -> crate::error::Result<RawFd> {
+    write_posix_shadow_size(name, size)?;
 
     // Use the shadow file's inode to build a short name that fits within
     // macOS's PSHMNAMELEN (31-char) limit.
@@ -1177,8 +1242,7 @@ fn get_shm_size(fd: RawFd, _shadow_path: &str) -> crate::error::Result<usize> {
 fn get_shm_size(_fd: RawFd, shadow_path: &str) -> crate::error::Result<usize> {
     // macOS fstat on shm fds returns page-aligned sizes; read the shadow file
     // to get the real size (matches C++ GetBufferSize).
-    let stat = crate::syscall_shim::shim_stat(shadow_path)?;
-    Ok(stat.st_size as usize)
+    read_posix_shadow_size(shadow_path)
 }
 
 pub fn trigger_fd(fd: RawFd) {
