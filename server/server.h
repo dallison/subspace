@@ -501,8 +501,9 @@ private:
   toolbelt::TriggerFd shutdown_trigger_fd_;
   std::string machine_name_;
 
-  // Lifetime counters of each channel at the previous Statistics message.
-  // Used on the client strand only, like channels_.
+  // Lifetime counters of each channel at the previous published Statistics
+  // message, or at the creation of a virtual channel.  Used on the client
+  // strand only, like channels_.
   struct StatisticsTotals {
     uint64_t bytes = 0;
     uint64_t messages = 0;

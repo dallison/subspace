@@ -1340,6 +1340,14 @@ Server::CreateChannel(const std::string &channel_name, int64_t slot_size,
                 channel_name.c_str(), num_slots, mux.c_str());
     // The channels_ map owns all the server channels.
     channels_.emplace(std::make_pair(channel_name, std::move(*vchan)));
+    // A virtual channel shares its multiplexer's counters, which already hold
+    // traffic from before the virtual channel existed.
+    ChannelStatsProto mux_stats;
+    channel->GetChannelStats(&mux_stats);
+    statistics_totals_[channel_name] = {
+        .bytes = uint64_t(mux_stats.total_bytes()),
+        .messages = uint64_t(mux_stats.total_messages()),
+        .drops = mux_stats.total_drops()};
     OnNewChannel(channel_name);
     ForEachShadow([channel](const std::unique_ptr<ShadowReplicator> &s) {
       s->SendCreateChannel(channel);
@@ -2283,12 +2291,14 @@ void Server::StatisticsCoroutine(async::Context ctx) {
   }
 
   constexpr int kPeriodSecs = 2;
+  uint64_t sequence = 0;
   while (!shutting_down_) {
     async::Sleep(ctx, kPeriodSecs);
     Statistics stats;
     stats.set_timestamp(toolbelt::Now());
     stats.set_server_id(server_id_);
     stats.set_machine_name(machine_name_);
+    stats.set_sequence(sequence);
     absl::flat_hash_map<std::string, StatisticsTotals> totals;
     for (auto &channel : channels_) {
       if (!IsPublicChannel(channel.second.get())) {
@@ -2318,10 +2328,6 @@ void Server::StatisticsCoroutine(async::Context ctx) {
       s->set_total_messages(int64_t(interval.messages));
       s->set_total_drops(interval.drops);
     }
-    // The sample ends before it is published.  If publishing fails below, the
-    // counts of this interval are lost and the next message only counts its
-    // own interval.  This is expected.
-    statistics_totals_ = std::move(totals);
     int64_t length = stats.ByteSizeLong();
 
     absl::StatusOr<void *> buffer = pub->GetMessageBuffer(int32_t(length));
@@ -2342,7 +2348,12 @@ void Server::StatisticsCoroutine(async::Context ctx) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to publish statistics: %s",
                   s.status().ToString().c_str());
+      continue;
     }
+    // Only a published message ends its interval.  After a failure the
+    // previous totals stay, so the next message also counts this interval.
+    statistics_totals_ = std::move(totals);
+    ++sequence;
   }
 }
 

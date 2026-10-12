@@ -5642,6 +5642,66 @@ TEST_F(ClientTest, StatisticsCountRecreatedChannelFromCreation) {
   EXPECT_EQ(kSecondMessages * 6, bytes);
 }
 
+TEST_F(ClientTest, StatisticsCountNewVirtualChannelFromCreation) {
+  auto client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "statistics-virtual-test"));
+
+  absl::StatusOr<Subscriber> stats_sub =
+      client->CreateSubscriber("/subspace/Statistics");
+  ASSERT_OK(stats_sub);
+
+  constexpr char kMux[] = "/statistics/mux";
+  constexpr char kFirstChannel[] = "/statistics/virtual_a";
+  constexpr char kNewChannel[] = "/statistics/virtual_b";
+  constexpr int kNumMessages = 3;
+  absl::StatusOr<Publisher> first_pub =
+      client->CreatePublisher(kFirstChannel, 256, 10, PubOpts().SetMux(kMux));
+  ASSERT_OK(first_pub);
+  ASSERT_OK(PublishFoobar(*first_pub, kNumMessages));
+  int64_t messages = 0;
+  for (int i = 0; i < kMaxStatisticsIntervals && messages < kNumMessages;
+       i++) {
+    absl::StatusOr<subspace::ChannelStatsProto> channel =
+        NextChannelStatistics(*stats_sub, kFirstChannel);
+    ASSERT_OK(channel);
+    messages += channel->total_messages();
+  }
+  ASSERT_EQ(kNumMessages, messages);
+
+  absl::StatusOr<Publisher> new_pub =
+      client->CreatePublisher(kNewChannel, 256, 10, PubOpts().SetMux(kMux));
+  ASSERT_OK(new_pub);
+  absl::StatusOr<subspace::ChannelStatsProto> new_channel =
+      NextChannelStatistics(*stats_sub, kNewChannel);
+  ASSERT_OK(new_channel);
+  EXPECT_EQ(0, new_channel->total_messages());
+  EXPECT_EQ(0, new_channel->total_bytes());
+  EXPECT_EQ(0u, new_channel->total_drops());
+}
+
+TEST_F(ClientTest, StatisticsSequenceCountsPublishedMessages) {
+  auto client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "statistics-sequence-test"));
+
+  absl::StatusOr<Subscriber> stats_sub =
+      client->CreateSubscriber("/subspace/Statistics");
+  ASSERT_OK(stats_sub);
+
+  std::vector<uint64_t> sequences;
+  while (sequences.size() < 2) {
+    ASSERT_OK(stats_sub->Wait());
+    absl::StatusOr<subspace::Message> msg = stats_sub->ReadMessage();
+    ASSERT_OK(msg);
+    if (msg->length == 0) {
+      continue;
+    }
+    subspace::Statistics stats;
+    ASSERT_TRUE(stats.ParseFromArray(msg->buffer, msg->length));
+    sequences.push_back(stats.sequence());
+  }
+  EXPECT_EQ(sequences[0] + 1, sequences[1]);
+}
+
 TEST_F(ClientTest, TelemetryRequiresExistingChannel) {
   auto client =
       EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket(), "telemetry-watch"));

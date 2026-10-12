@@ -8,10 +8,12 @@
   instead of the channel's lifetime. `GetChannelStats` still returns
   lifetime totals.
 - A channel removed and created again under the same name counts from its
-  creation. If a `Statistics` message fails to publish, the counts of its
-  interval are lost.
+  creation. A new virtual channel counts from its creation, not from the
+  creation of its multiplexer. If a `Statistics` message fails to publish,
+  the next message also counts its interval.
 - `Statistics` carries the server's `machine_name`, set with
-  `Server::SetMachineName`.
+  `Server::SetMachineName`, and a `sequence` that goes up by one per
+  published message. A gap in `sequence` means lost intervals.
 
 ### Checksum Covers Only Publisher Flags
 - The message checksum now covers only the `kMessageActivate` and
