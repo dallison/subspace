@@ -2290,6 +2290,16 @@ void Server::StatisticsCoroutine(async::Context ctx) {
     return;
   }
 
+  auto delivered_statistics_messages = [this]() -> uint64_t {
+    auto it = channels_.find("/subspace/Statistics");
+    if (it == channels_.end()) {
+      return 0;
+    }
+    ChannelStatsProto stats;
+    it->second->GetChannelStats(&stats);
+    return uint64_t(stats.total_messages());
+  };
+
   constexpr int kPeriodSecs = 2;
   uint64_t sequence = 0;
   while (!shutting_down_) {
@@ -2343,15 +2353,27 @@ void Server::StatisticsCoroutine(async::Context ctx) {
                   "Failed to serialize channel stats");
       continue;
     }
+    const uint64_t delivered_before = delivered_statistics_messages();
     absl::StatusOr<const Message> s = pub->PublishMessage(length);
     if (!s.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to publish statistics: %s",
                   s.status().ToString().c_str());
+    }
+    // PublishMessage can fail after it delivered the message, so the
+    // channel's message count decides whether this interval was delivered.
+    // Until then the previous totals stay, so the next message also counts
+    // this interval.
+    if (delivered_statistics_messages() <= delivered_before) {
       continue;
     }
-    // Only a published message ends its interval.  After a failure the
-    // previous totals stay, so the next message also counts this interval.
+    // A virtual channel created while this message was being published
+    // keeps the start totals CreateChannel gave it.
+    for (auto &[name, previous] : statistics_totals_) {
+      if (!totals.contains(name) && channels_.contains(name)) {
+        totals.emplace(name, previous);
+      }
+    }
     statistics_totals_ = std::move(totals);
     ++sequence;
   }
