@@ -3397,17 +3397,25 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
   if (bridge_ms < 0) {
     bridge_ms = 0;
   }
-  absl::StatusOr<Publisher> pub = client.CreatePublisher(
-      channel_name, subscribed.slot_size(), subscribed.num_slots(),
-      PublisherOptions()
-          .SetSubscriberQueueArenaSize(
-              subscribed.subscriber_queue_arena_size())
-          .SetReliable(subscribed.reliable())
-          .SetBridge(true)
-          .SetNotifyRetirement(subscribed.notify_retirement())
-          .SetChecksumSize(bridge_cs)
-          .SetMetadataSize(bridge_ms)
-          .SetUseSplitBuffers(bridge_publisher_split_buffers));
+  PublisherOptions bridge_options = PublisherOptions()
+                                        .SetReliable(subscribed.reliable())
+                                        .SetBridge(true)
+                                        .SetNotifyRetirement(
+                                            subscribed.notify_retirement());
+  // A static channel keeps the layout from this server's config.
+  if (const ServerChannel *local = FindChannel(channel_name);
+      local != nullptr && local->IsStatic()) {
+    bridge_options.SetServerDefined(true).SetUseSplitBuffers(false);
+  } else {
+    bridge_options.SetSlotSize(subscribed.slot_size())
+        .SetNumSlots(subscribed.num_slots())
+        .SetSubscriberQueueArenaSize(subscribed.subscriber_queue_arena_size())
+        .SetChecksumSize(bridge_cs)
+        .SetMetadataSize(bridge_ms)
+        .SetUseSplitBuffers(bridge_publisher_split_buffers);
+  }
+  absl::StatusOr<Publisher> pub =
+      client.CreatePublisher(channel_name, bridge_options);
   if (!pub.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to create bridge publisher for %s: %s",

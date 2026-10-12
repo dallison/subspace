@@ -434,8 +434,19 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
-  if (opts.MaxOutstandingSlotLeases() < 1 ||
-      opts.MaxOutstandingSlotLeases() > opts.NumSlots()) {
+  if (opts.ServerDefined()) {
+    if (opts.slot_size != 0 || opts.num_slots != 0 || opts.fixed_size ||
+        opts.checksum_size != 0 || opts.metadata_size != 0 ||
+        opts.subscriber_queue_arena_size != 0 || opts.use_split_buffers) {
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "Publisher on %s is server defined, so it can't set the slot size, "
+          "number of slots, fixed size, checksum size, metadata size, "
+          "subscriber queue arena size or split buffers",
+          channel_name));
+    }
+    // The server checks the leases against the channel's slots.
+  } else if (opts.MaxOutstandingSlotLeases() < 1 ||
+             opts.MaxOutstandingSlotLeases() > opts.NumSlots()) {
     return absl::InvalidArgumentError(
         "MaxOutstandingSlotLeases must be between 1 and NumSlots");
   }
@@ -483,6 +494,15 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
   if (pub_resp.num_slots() > 0) {
     channel_opts.num_slots = pub_resp.num_slots();
   }
+  if (opts.ServerDefined()) {
+    channel_opts.slot_size = pub_resp.slot_size();
+    channel_opts.fixed_size = pub_resp.is_fixed_size();
+    channel_opts.checksum_size = pub_resp.checksum_size();
+    channel_opts.metadata_size = pub_resp.metadata_size();
+    channel_opts.subscriber_queue_arena_size =
+        pub_resp.subscriber_queue_arena_size();
+    channel_opts.use_split_buffers = pub_resp.use_split_buffers();
+  }
   std::shared_ptr<PublisherImpl> channel = std::make_shared<PublisherImpl>(
       channel_name, channel_opts.num_slots, pub_resp.subscriber_queue_size(),
       pub_resp.subscriber_queue_arena_size(), pub_resp.channel_id(),
@@ -507,8 +527,10 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
              uint32_t buffer_index) {
         return UnregisterClientBuffer(channel_name, session_id, buffer_index);
       });
-  int32_t cs = opts.ChecksumSize() > 0 ? opts.ChecksumSize() : 4;
-  int32_t ms = opts.MetadataSize() > 0 ? opts.MetadataSize() : 0;
+  int32_t cs =
+      channel_opts.ChecksumSize() > 0 ? channel_opts.ChecksumSize() : 4;
+  int32_t ms =
+      channel_opts.MetadataSize() > 0 ? channel_opts.MetadataSize() : 0;
   channel->SetChecksumSize(cs);
   channel->SetMetadataSize(ms);
   channel->SetPrefixSize(Channel::ComputePrefixSize(cs, ms));
@@ -534,7 +556,7 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
   }
 
   if (absl::Status status =
-          channel->CreateOrAttachBuffers(Aligned(opts.slot_size));
+          channel->CreateOrAttachBuffers(Aligned(channel_opts.slot_size));
       !status.ok()) {
     remove_server_publisher();
     return status;
@@ -2228,24 +2250,30 @@ void ClientImpl::FillCreatePublisherRequest(
     phaser::CreatePublisherRequest *cmd, const std::string &channel_name,
     const PublisherOptions &opts, int publisher_id) {
   cmd->set_channel_name(channel_name);
-  cmd->set_slot_size(Aligned(opts.slot_size));
-  cmd->set_num_slots(opts.num_slots);
+  // A server defined publisher's options hold the layout from the server,
+  // which it must not send back.
+  if (opts.ServerDefined()) {
+    cmd->set_server_defined(true);
+  } else {
+    cmd->set_slot_size(Aligned(opts.slot_size));
+    cmd->set_num_slots(opts.num_slots);
+    cmd->set_is_fixed_size(opts.IsFixedSize());
+    cmd->set_checksum_size(opts.ChecksumSize());
+    cmd->set_metadata_size(opts.MetadataSize());
+    cmd->set_use_split_buffers(opts.UseSplitBuffers());
+    cmd->set_subscriber_queue_arena_size(opts.SubscriberQueueArenaSize());
+  }
   cmd->set_is_local(opts.IsLocal());
   cmd->set_is_reliable(opts.IsReliable());
   cmd->set_is_bridge(opts.IsBridge());
   cmd->set_for_tunnel(opts.ForTunnel());
-  cmd->set_is_fixed_size(opts.IsFixedSize());
   cmd->set_type(opts.Type());
   cmd->set_mux(opts.Mux());
   cmd->set_vchan_id(opts.VchanId());
   cmd->set_notify_retirement(opts.notify_retirement);
-  cmd->set_checksum_size(opts.ChecksumSize());
-  cmd->set_metadata_size(opts.MetadataSize());
   cmd->set_publisher_id(publisher_id);
   cmd->set_max_publishers(opts.MaxPublishers());
-  cmd->set_use_split_buffers(opts.UseSplitBuffers());
   cmd->set_split_buffers_over_bridge(opts.SplitBuffersOverBridge());
-  cmd->set_subscriber_queue_arena_size(opts.SubscriberQueueArenaSize());
   cmd->set_process_id(static_cast<uint64_t>(getpid()));
   cmd->set_max_outstanding_slot_leases(opts.MaxOutstandingSlotLeases());
   // Align the cap the same way as the slot size so that a publisher asking for

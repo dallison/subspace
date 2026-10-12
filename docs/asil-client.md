@@ -88,9 +88,10 @@ An ASIL publisher sets `use_split_buffers` and maps the channel's existing
 buffers; it never creates split buffers.
 
 A static channel or multiplexer has split buffers when its config sets
-`use_split_buffers`, and the server creates them.  Publishers must then use
-split buffers, and on any other static channel they must not.  On a server
-that creates channels on demand, the first standard publisher creates them.
+`use_split_buffers`, and the server creates them.  A `server_defined`
+publisher learns from the server whether the channel has split buffers, and
+needs `split_slots` when it does.  On a server that creates channels on
+demand, the first standard publisher creates them.
 
 A standard publisher can create its slots with a custom allocator.  To map
 those slots, set `split_allocator` to C functions that map and unmap a slot,
@@ -245,8 +246,24 @@ asil::Error Run() {
 ## Publishers
 
 `PublisherOptions` gives the slot size, number of slots, checksum size,
-metadata size and type.  On a static channel these must match the config.
+metadata size, subscriber queue arena size, split buffer setting and type.
 `subscriber_queue_arena_size` must match the channel's other publishers.
+
+On a static channel the server defines the layout.  The publisher sets
+`server_defined` and leaves `slot_size`, `num_slots`, `checksum_size`,
+`metadata_size`, `subscriber_queue_arena_size` and `use_split_buffers` at
+zero.  `Open()` returns `Error::kInvalidArgument` if any of them is set, and
+`Error::kServerRejected` if the channel is static and `server_defined` isn't
+set, or if `server_defined` is set and the channel isn't static.  The
+publisher then takes its layout from the server:
+
+```c++
+asil::PublisherOptions options;
+options.server_defined = true;
+options.type = "State";
+asil::Publisher pub;
+asil::Error error = client.CreatePublisher("/vehicle/state", options, pub);
+```
 
 `Buffer()` returns the payload of the slot the publisher holds, and
 `Metadata()` returns its metadata area.  `Publish(size)` sends the message and

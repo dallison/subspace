@@ -11,7 +11,9 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
+#include "proto/subspace.pb.h"
 #include "server/static_config.h"
+#include "toolbelt/sockets.h"
 #include <chrono>
 #include <cstring>
 #include <string>
@@ -44,8 +46,39 @@ constexpr char kConfig[] = R"pb(
   channels { name: "/static/sv" mux: "/static/split_mux" vchan_id: 1 }
 )pb";
 
-subspace::PublisherOptions FixedSize() {
-  return subspace::PublisherOptions().SetFixedSize(true);
+subspace::PublisherOptions ServerDefined() {
+  return subspace::PublisherOptions().SetServerDefined(true);
+}
+
+// Sends a request the way the clients do, bypassing the client library's own
+// checks, and returns the server's response.
+absl::StatusOr<subspace::Response> Transact(toolbelt::UnixSocket &socket,
+                                            const subspace::Request &req) {
+  std::vector<char> buffer(sizeof(int32_t) + req.ByteSizeLong());
+  char *payload = buffer.data() + sizeof(int32_t);
+  if (!req.SerializeToArray(payload, static_cast<int>(req.ByteSizeLong()))) {
+    return absl::InternalError("Failed to serialize request");
+  }
+  if (absl::StatusOr<ssize_t> n =
+          socket.SendMessage(payload, req.ByteSizeLong());
+      !n.ok()) {
+    return n.status();
+  }
+  absl::StatusOr<std::vector<char>> received =
+      socket.ReceiveVariableLengthMessage();
+  if (!received.ok()) {
+    return received.status();
+  }
+  subspace::Response response;
+  if (!response.ParseFromArray(received->data(),
+                               static_cast<int>(received->size()))) {
+    return absl::InternalError("Failed to parse response");
+  }
+  std::vector<toolbelt::FileDescriptor> fds;
+  if (absl::Status status = socket.ReceiveFds(fds); !status.ok()) {
+    return status;
+  }
+  return response;
 }
 
 void Publish(subspace::Publisher &pub, const std::string &text) {
@@ -106,6 +139,7 @@ public:
   }
 
   subspace::Client &Client() { return client_; }
+  static const std::string &Socket() { return socket_; }
 
 private:
   inline static subspace::async::RuntimeEngine engine_;
@@ -204,7 +238,7 @@ TEST_F(StaticConfigTest, SubscriberBeforePublisher) {
   EXPECT_EQ(8, sub->NumSlots());
 
   absl::StatusOr<subspace::Publisher> pub =
-      Client().CreatePublisher("/static/a", 256, 8, FixedSize());
+      Client().CreatePublisher("/static/a", ServerDefined());
   ASSERT_OK(pub);
   Publish(*pub, "hello");
 
@@ -221,10 +255,12 @@ TEST_F(StaticConfigTest, SplitBuffersCreatedByServer) {
   ASSERT_OK(sub);
   EXPECT_TRUE(sub->UsesSplitBuffers());
 
-  absl::StatusOr<subspace::Publisher> pub = Client().CreatePublisher(
-      "/static/split", 256, 4, FixedSize().SetUseSplitBuffers(true));
+  absl::StatusOr<subspace::Publisher> pub =
+      Client().CreatePublisher("/static/split", ServerDefined());
   ASSERT_OK(pub);
   EXPECT_TRUE(pub->UsesSplitBuffers());
+  EXPECT_EQ(256, pub->SlotSize());
+  EXPECT_EQ(4, pub->NumSlots());
   for (int i = 0; i < 6; i++) {
     std::string text = absl::StrFormat("split %d", i);
     Publish(*pub, text);
@@ -242,9 +278,9 @@ TEST_F(StaticConfigTest, SplitBufferVirtualChannel) {
   EXPECT_TRUE(sub->UsesSplitBuffers());
 
   absl::StatusOr<subspace::Publisher> pub = Client().CreatePublisher(
-      "/static/sv", 128, 4,
-      FixedSize().SetMux("/static/split_mux").SetUseSplitBuffers(true));
+      "/static/sv", ServerDefined().SetMux("/static/split_mux"));
   ASSERT_OK(pub);
+  EXPECT_TRUE(pub->UsesSplitBuffers());
   Publish(*pub, "vchan");
   absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
   ASSERT_OK(msg);
@@ -252,22 +288,103 @@ TEST_F(StaticConfigTest, SplitBufferVirtualChannel) {
             std::string(static_cast<const char *>(msg->buffer), msg->length));
 }
 
-TEST_F(StaticConfigTest, RejectsMismatchedSplitBuffers) {
-  absl::StatusOr<subspace::Publisher> unsplit =
-      Client().CreatePublisher("/static/split", 256, 4, FixedSize());
-  ASSERT_FALSE(unsplit.ok());
-  EXPECT_THAT(unsplit.status().message(), HasSubstr("uses split buffers"));
+TEST_F(StaticConfigTest, PublishersMustBeServerDefined) {
+  // A publisher that gives the configured layout itself is still rejected.
+  absl::StatusOr<subspace::Publisher> pub = Client().CreatePublisher(
+      "/static/a", 256, 8, subspace::PublisherOptions().SetFixedSize(true));
+  ASSERT_FALSE(pub.ok());
+  EXPECT_THAT(pub.status().message(), HasSubstr("must set server_defined"));
 
-  absl::StatusOr<subspace::Publisher> split = Client().CreatePublisher(
-      "/static/a", 256, 8, FixedSize().SetUseSplitBuffers(true));
-  ASSERT_FALSE(split.ok());
-  EXPECT_THAT(split.status().message(),
-              HasSubstr("doesn't use split buffers"));
+  // The client rejects layout options alongside server_defined.
+  for (const subspace::PublisherOptions &options :
+       {ServerDefined().SetSlotSize(256), ServerDefined().SetNumSlots(8),
+        ServerDefined().SetFixedSize(true), ServerDefined().SetChecksumSize(4),
+        ServerDefined().SetMetadataSize(16),
+        ServerDefined().SetSubscriberQueueArenaSize(4096),
+        ServerDefined().SetUseSplitBuffers(true)}) {
+    pub = Client().CreatePublisher("/static/a", options);
+    ASSERT_FALSE(pub.ok());
+    EXPECT_EQ(absl::StatusCode::kInvalidArgument, pub.status().code());
+    EXPECT_THAT(pub.status().message(), HasSubstr("is server defined"));
+  }
+}
+
+TEST_F(StaticConfigTest, ServerRejectsLayoutFromServerDefinedPublishers) {
+  toolbelt::UnixSocket socket;
+  ASSERT_OK(socket.Connect(Socket()));
+  subspace::Request init;
+  init.mutable_init()->set_client_name("raw");
+  ASSERT_OK(Transact(socket, init));
+
+  const std::vector<
+      std::pair<std::string, void (*)(subspace::CreatePublisherRequest *)>>
+      cases = {
+          {"num_slots",
+           [](subspace::CreatePublisherRequest *r) { r->set_num_slots(8); }},
+          {"slot_size",
+           [](subspace::CreatePublisherRequest *r) { r->set_slot_size(256); }},
+          {"fixed_size",
+           [](subspace::CreatePublisherRequest *r) {
+             r->set_is_fixed_size(true);
+           }},
+          {"checksum_size",
+           [](subspace::CreatePublisherRequest *r) {
+             r->set_checksum_size(4);
+           }},
+          {"metadata_size",
+           [](subspace::CreatePublisherRequest *r) {
+             r->set_metadata_size(16);
+           }},
+          {"subscriber_queue_arena_size",
+           [](subspace::CreatePublisherRequest *r) {
+             r->set_subscriber_queue_arena_size(4096);
+           }},
+          {"use_split_buffers",
+           [](subspace::CreatePublisherRequest *r) {
+             r->set_use_split_buffers(true);
+           }},
+      };
+  for (const auto &[field, set] : cases) {
+    subspace::Request req;
+    subspace::CreatePublisherRequest *cmd = req.mutable_create_publisher();
+    cmd->set_channel_name("/static/a");
+    cmd->set_server_defined(true);
+    cmd->set_publisher_id(-1);
+    set(cmd);
+    absl::StatusOr<subspace::Response> response = Transact(socket, req);
+    ASSERT_OK(response);
+    EXPECT_THAT(response->create_publisher().error(),
+                HasSubstr("can't set " + field))
+        << field;
+  }
+}
+
+TEST_F(StaticConfigTest, PublisherTakesLayoutFromServer) {
+  absl::StatusOr<subspace::Publisher> pub =
+      Client().CreatePublisher("/static/meta", ServerDefined());
+  ASSERT_OK(pub);
+  EXPECT_EQ(64, pub->SlotSize());
+  EXPECT_EQ(4, pub->NumSlots());
+  EXPECT_EQ(4, pub->ChecksumSize());
+  EXPECT_EQ(16, pub->MetadataSize());
+  EXPECT_FALSE(pub->UsesSplitBuffers());
+  // The layout is fixed, so the publisher can't grow its slots.
+  EXPECT_FALSE(pub->GetMessageBuffer(128).ok());
+
+  // A second publisher is accepted after the first has created the
+  // channel's buffers.
+  absl::StatusOr<subspace::Publisher> first =
+      Client().CreatePublisher("/static/a", ServerDefined());
+  ASSERT_OK(first);
+  Publish(*first, "x");
+  absl::StatusOr<subspace::Publisher> second =
+      Client().CreatePublisher("/static/a", ServerDefined());
+  ASSERT_OK(second);
 }
 
 TEST_F(StaticConfigTest, UnconfiguredChannelsAreRejected) {
   absl::StatusOr<subspace::Publisher> pub =
-      Client().CreatePublisher("/not/configured", 64, 4, FixedSize());
+      Client().CreatePublisher("/not/configured", ServerDefined());
   ASSERT_FALSE(pub.ok());
   EXPECT_THAT(pub.status().message(),
               HasSubstr("isn't in the static channel config"));
@@ -279,52 +396,17 @@ TEST_F(StaticConfigTest, UnconfiguredChannelsAreRejected) {
               HasSubstr("isn't in the static channel config"));
 
   // A virtual channel on a configured multiplexer must be configured too.
-  pub = Client().CreatePublisher("/static/v9", 128, 8,
-                                 FixedSize().SetMux("/static/mux"));
+  pub = Client().CreatePublisher("/static/v9",
+                                 ServerDefined().SetMux("/static/mux"));
   ASSERT_FALSE(pub.ok());
   EXPECT_THAT(pub.status().message(),
               HasSubstr("isn't in the static channel config"));
 }
 
-TEST_F(StaticConfigTest, PublisherLayoutMustMatch) {
-  absl::StatusOr<subspace::Publisher> pub = Client().CreatePublisher(
-      "/static/a", 256, 8, subspace::PublisherOptions());
-  ASSERT_FALSE(pub.ok());
-  EXPECT_THAT(pub.status().message(), HasSubstr("must be fixed size"));
-
-  for (auto [slot_size, num_slots] :
-       std::vector<std::pair<int, int>>{{512, 8}, {128, 8}, {256, 16},
-                                        {256, 4}}) {
-    pub = Client().CreatePublisher("/static/a", slot_size, num_slots,
-                                   FixedSize());
-    ASSERT_FALSE(pub.ok()) << slot_size << "/" << num_slots;
-    EXPECT_THAT(pub.status().message(),
-                HasSubstr("has 8 slots of 256 bytes"));
-  }
-
-  pub = Client().CreatePublisher("/static/meta", 64, 4, FixedSize());
-  ASSERT_FALSE(pub.ok());
-  EXPECT_THAT(pub.status().message(),
-              HasSubstr("checksum_size 4 and metadata_size 16, not 4 and 0"));
-  pub = Client().CreatePublisher("/static/meta", 64, 4,
-                                 FixedSize().SetMetadataSize(16));
-  ASSERT_OK(pub);
-
-  // A matching second publisher is accepted after the first has created the
-  // channel's buffers.
-  absl::StatusOr<subspace::Publisher> first =
-      Client().CreatePublisher("/static/a", 256, 8, FixedSize());
-  ASSERT_OK(first);
-  Publish(*first, "x");
-  absl::StatusOr<subspace::Publisher> second =
-      Client().CreatePublisher("/static/a", 256, 8, FixedSize());
-  ASSERT_OK(second);
-}
-
 TEST_F(StaticConfigTest, ChannelsOutliveTheirUsers) {
   {
     absl::StatusOr<subspace::Publisher> pub =
-        Client().CreatePublisher("/static/a", 256, 8, FixedSize());
+        Client().CreatePublisher("/static/a", ServerDefined());
     ASSERT_OK(pub);
     absl::StatusOr<subspace::Subscriber> sub =
         Client().CreateSubscriber("/static/a");
@@ -340,7 +422,7 @@ TEST_F(StaticConfigTest, ChannelsOutliveTheirUsers) {
   EXPECT_EQ(8, info->num_slots);
 
   absl::StatusOr<subspace::Publisher> pub =
-      Client().CreatePublisher("/static/a", 256, 8, FixedSize());
+      Client().CreatePublisher("/static/a", ServerDefined());
   ASSERT_OK(pub);
   absl::StatusOr<subspace::Subscriber> sub =
       Client().CreateSubscriber("/static/a");
@@ -360,13 +442,10 @@ TEST_F(StaticConfigTest, VirtualChannels) {
   EXPECT_EQ(3, sub->VirtualChannelId());
 
   absl::StatusOr<subspace::Publisher> pub = Client().CreatePublisher(
-      "/static/v1", 256, 8, FixedSize().SetMux("/static/mux"));
-  ASSERT_FALSE(pub.ok());
-  EXPECT_THAT(pub.status().message(), HasSubstr("has 8 slots of 128 bytes"));
-
-  pub = Client().CreatePublisher("/static/v1", 128, 8,
-                                 FixedSize().SetMux("/static/mux"));
+      "/static/v1", ServerDefined().SetMux("/static/mux"));
   ASSERT_OK(pub);
+  EXPECT_EQ(128, pub->SlotSize());
+  EXPECT_EQ(8, pub->NumSlots());
   EXPECT_EQ(3, pub->VirtualChannelId());
   Publish(*pub, "virtual");
 
@@ -378,7 +457,7 @@ TEST_F(StaticConfigTest, VirtualChannels) {
   // Publishers on other virtual channels of the multiplexer share its
   // buffers, so they are also fixed size.
   absl::StatusOr<subspace::Publisher> other = Client().CreatePublisher(
-      "/static/v2", 128, 8, FixedSize().SetMux("/static/mux"));
+      "/static/v2", ServerDefined().SetMux("/static/mux"));
   ASSERT_OK(other);
   EXPECT_EQ(7, other->VirtualChannelId());
 }

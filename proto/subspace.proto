@@ -52,6 +52,11 @@ message CreatePublisherRequest {
   // Upper bound on the channel's slot size, already aligned.  0 means
   // unlimited.
   int64 max_slot_size = 23;
+  // The channel is in the server's static channel config, which defines its
+  // layout.  Publishers on static channels must set this and leave
+  // num_slots, slot_size, is_fixed_size, checksum_size, metadata_size,
+  // subscriber_queue_arena_size and use_split_buffers unset.
+  bool server_defined = 24;
 }
 
 message CreatePublisherResponse {
@@ -73,6 +78,13 @@ message CreatePublisherResponse {
   // Slots in the channel, which can exceed the requested num_slots when the
   // channel already exists.  The CCB layout depends on it.
   int32 num_slots = 16;
+  // The rest of the channel's layout, which a server_defined publisher takes
+  // from here.
+  int64 slot_size = 17;
+  int32 checksum_size = 18;
+  int32 metadata_size = 19;
+  bool use_split_buffers = 20;
+  bool is_fixed_size = 21;
 }
 
 // This is used both to create a new subscriber and to reload

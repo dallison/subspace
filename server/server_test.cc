@@ -316,6 +316,28 @@ TEST_F(ServerTest, CreateSubscriberSuccess) {
 // CreatePublisher error paths
 // ---------------------------------------------------------------------------
 
+TEST_F(ServerTest, ServerDefinedNeedsStaticChannel) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  // Neither a new channel nor an existing one on a server without a static
+  // channel config has a layout that the server defines.
+  conn.CreatePublisher("server_defined_ch");
+  for (const char *channel : {"server_defined_new", "server_defined_ch"}) {
+    subspace::Request req;
+    subspace::CreatePublisherRequest *cmd = req.mutable_create_publisher();
+    cmd->set_channel_name(channel);
+    cmd->set_server_defined(true);
+    cmd->set_publisher_id(-1);
+    auto result = conn.Send(req);
+    ASSERT_OK(result);
+    EXPECT_THAT(result->first.create_publisher().error(),
+                ::testing::HasSubstr("can't set server_defined"))
+        << channel;
+  }
+}
+
 TEST_F(ServerTest, PubTypeMismatch) {
   RawConnection conn;
   ASSERT_OK(conn.Connect(Socket()));

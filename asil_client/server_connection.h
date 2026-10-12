@@ -47,6 +47,9 @@ struct PublisherRequest {
   int32_t vchan_id = -1;
   uint64_t subscriber_queue_arena_size = 0;
   bool use_split_buffers = false;
+  // The server defines the layout of this static channel, and the layout
+  // fields above are zero.
+  bool server_defined = false;
 };
 
 struct PublisherReply {
@@ -56,6 +59,11 @@ struct PublisherReply {
   int32_t vchan_id = -1;
   int32_t num_sub_updates = 0;
   uint64_t subscriber_queue_arena_size = 0;
+  // The rest of the channel's layout.
+  int64_t slot_size = 0;
+  int32_t checksum_size = 0;
+  int32_t metadata_size = 0;
+  bool use_split_buffers = false;
   UniqueFd ccb;
   UniqueFd bcb;
   // Readable when a reliable subscriber has released a message.

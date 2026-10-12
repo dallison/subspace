@@ -46,7 +46,7 @@ private:
   void HandleInit(const subspace::InitRequest &req,
                   subspace::InitResponse *response,
                   std::vector<toolbelt::FileDescriptor> &fds);
-  void HandleCreatePublisher(const subspace::CreatePublisherRequest &req,
+  void HandleCreatePublisher(const subspace::CreatePublisherRequest &request,
                              subspace::CreatePublisherResponse *response,
                              std::vector<toolbelt::FileDescriptor> &fds);
   void HandleCreateSubscriber(const subspace::CreateSubscriberRequest &req,

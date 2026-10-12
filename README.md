@@ -2033,13 +2033,27 @@ loaded:
   publisher or subscriber for any other channel fails.
 - Configured channels stay for the life of the server, including when they
   have no publishers or subscribers.
-- The layout is fixed.  Publishers must be fixed size (`SetFixedSize(true)`)
-  and match the configured slot size, number of slots, checksum size and
-  metadata size.
+- The server defines the layout.  Publishers on a configured channel must set
+  `SetServerDefined(true)` and leave every option that shapes the shared
+  memory unset: `SetSlotSize`, `SetNumSlots`, `SetFixedSize`,
+  `SetChecksumSize`, `SetMetadataSize`, `SetSubscriberQueueArenaSize` and
+  `SetUseSplitBuffers`.  The server rejects a publisher that sets any of them
+  or leaves out `server_defined`, and also a `server_defined` publisher on a
+  channel that isn't configured.  The publisher takes its slot size, number of
+  slots, checksum size, metadata size and split buffer setting from the
+  server, and is always fixed size:
+
+  ```c++
+  absl::StatusOr<subspace::Publisher> pub = client.CreatePublisher(
+      "/vehicle/state", subspace::PublisherOptions().SetServerDefined(true));
+  ```
+
+  The C client has `subspace_publisher_options_server_defined()`, Python has
+  `set_server_defined(True)`, Rust has `set_server_defined(true)` and the ASIL
+  client has `PublisherOptions::server_defined`.  Options that don't change
+  the layout, such as reliable, checksum, type and mux, work as usual.
 - `use_split_buffers: true` gives a channel or multiplexer
   [split buffers](docs/split-buffers.md), which the server creates.
-  Publishers must set `SetUseSplitBuffers(true)` on these channels and leave
-  it unset on the others.
 - A channel on a multiplexer takes its slot size, number of slots, type,
   prefix layout and split buffer setting from the multiplexer and needs an
   explicit `vchan_id`.

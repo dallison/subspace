@@ -110,6 +110,11 @@ subspace::PublisherOptions FixedSize() {
   return subspace::PublisherOptions().SetFixedSize(true);
 }
 
+// A standard publisher on a static channel.
+subspace::PublisherOptions ServerDefined() {
+  return subspace::PublisherOptions().SetServerDefined(true);
+}
+
 void StdPublish(subspace::Publisher &pub, const std::string &text) {
   absl::StatusOr<void *> buffer = pub.GetMessageBuffer();
   ASSERT_OK(buffer);
@@ -171,6 +176,13 @@ asil::PublisherOptions AsilPubOptions(int64_t slot_size, int32_t num_slots) {
   asil::PublisherOptions options;
   options.slot_size = slot_size;
   options.num_slots = num_slots;
+  return options;
+}
+
+// An ASIL publisher on a static channel.
+asil::PublisherOptions StaticPubOptions() {
+  asil::PublisherOptions options;
+  options.server_defined = true;
   return options;
 }
 
@@ -286,7 +298,7 @@ TEST_F(AsilClientTest, AsilPublisherStandardSubscriber) {
   ASSERT_OK(sub);
 
   asil::Publisher pub;
-  asil::PublisherOptions options = AsilPubOptions(256, 8);
+  asil::PublisherOptions options = StaticPubOptions();
   options.type = "T";
   ASSERT_EQ(asil::Error::kOk,
             Asil().CreatePublisher("/asil/to_std", options, pub));
@@ -324,7 +336,7 @@ TEST_F(AsilClientTest, StandardPublisherAsilSubscriber) {
   EXPECT_EQ(0u, msg.length);
 
   absl::StatusOr<subspace::Publisher> pub =
-      Std().CreatePublisher("/asil/from_std", 256, 8, FixedSize());
+      Std().CreatePublisher("/asil/from_std", ServerDefined());
   ASSERT_OK(pub);
   StdPublish(*pub, "alpha");
   StdPublish(*pub, "beta");
@@ -345,7 +357,7 @@ TEST_F(AsilClientTest, AsilToAsilWithWait) {
   ASSERT_EQ(asil::Error::kOk, Asil().CreateSubscriber("/asil/wait", {}, sub));
   asil::Publisher pub;
   ASSERT_EQ(asil::Error::kOk,
-            Asil().CreatePublisher("/asil/wait", AsilPubOptions(64, 4), pub));
+            Asil().CreatePublisher("/asil/wait", StaticPubOptions(), pub));
 
   // Drain the trigger set when the subscriber opened.
   asil::Message msg;
@@ -361,9 +373,8 @@ TEST_F(AsilClientTest, AsilToAsilWithWait) {
 
 TEST_F(AsilClientTest, SubscriberJoinsAfterPublisher) {
   asil::Publisher pub;
-  ASSERT_EQ(
-      asil::Error::kOk,
-      Asil().CreatePublisher("/asil/late_sub", AsilPubOptions(64, 4), pub));
+  ASSERT_EQ(asil::Error::kOk,
+            Asil().CreatePublisher("/asil/late_sub", StaticPubOptions(), pub));
 
   absl::StatusOr<subspace::Subscriber> sub =
       Std().CreateSubscriber("/asil/late_sub");
@@ -382,7 +393,7 @@ TEST_F(AsilClientTest, ChecksumToStandard) {
       "/asil/sum_to_std", subspace::SubscriberOptions().SetChecksum(true));
   ASSERT_OK(sub);
   asil::Publisher pub;
-  asil::PublisherOptions options = AsilPubOptions(128, 4);
+  asil::PublisherOptions options = StaticPubOptions();
   options.checksum = true;
   ASSERT_EQ(asil::Error::kOk,
             Asil().CreatePublisher("/asil/sum_to_std", options, pub));
@@ -406,7 +417,7 @@ TEST_F(AsilClientTest, ChecksumFromStandard) {
                                                       lenient, lenient_sub));
 
   absl::StatusOr<subspace::Publisher> pub = Std().CreatePublisher(
-      "/asil/sum_from_std", 128, 4, FixedSize().SetChecksum(true));
+      "/asil/sum_from_std", ServerDefined().SetChecksum(true));
   ASSERT_OK(pub);
   StdPublish(*pub, "good");
 
@@ -440,10 +451,8 @@ TEST_F(AsilClientTest, Metadata) {
   ASSERT_OK(std_sub);
 
   asil::Publisher asil_pub;
-  asil::PublisherOptions options = AsilPubOptions(64, 8);
-  options.metadata_size = 16;
   ASSERT_EQ(asil::Error::kOk,
-            Asil().CreatePublisher("/asil/meta", options, asil_pub));
+            Asil().CreatePublisher("/asil/meta", StaticPubOptions(), asil_pub));
   ASSERT_EQ(16u, asil_pub.MetadataSize());
   memcpy(asil_pub.Metadata(), "asil-metadata!!", 16);
   AsilPublish(asil_pub, "from asil");
@@ -452,8 +461,8 @@ TEST_F(AsilClientTest, Metadata) {
   EXPECT_EQ("from asil", std_msg.text);
   EXPECT_EQ(std::string("asil-metadata!!", 16), std_msg.metadata);
 
-  absl::StatusOr<subspace::Publisher> std_pub = Std().CreatePublisher(
-      "/asil/meta", 64, 8, FixedSize().SetMetadataSize(16));
+  absl::StatusOr<subspace::Publisher> std_pub =
+      Std().CreatePublisher("/asil/meta", ServerDefined());
   ASSERT_OK(std_pub);
   absl::StatusOr<void *> buffer = std_pub->GetMessageBuffer();
   ASSERT_OK(buffer);
@@ -478,7 +487,7 @@ TEST_F(AsilClientTest, ReadNewest) {
   asil::Subscriber sub;
   ASSERT_EQ(asil::Error::kOk, Asil().CreateSubscriber("/asil/newest", {}, sub));
   absl::StatusOr<subspace::Publisher> pub =
-      Std().CreatePublisher("/asil/newest", 64, 8, FixedSize());
+      Std().CreatePublisher("/asil/newest", ServerDefined());
   ASSERT_OK(pub);
   StdPublish(*pub, "old");
   StdPublish(*pub, "older");
@@ -501,7 +510,7 @@ TEST_F(AsilClientTest, AsilSubscriberCountsDrops) {
   ASSERT_EQ(asil::Error::kOk,
             Asil().CreateSubscriber("/asil/drops_in", {}, sub));
   absl::StatusOr<subspace::Publisher> pub =
-      Std().CreatePublisher("/asil/drops_in", 64, 4, FixedSize());
+      Std().CreatePublisher("/asil/drops_in", ServerDefined());
   ASSERT_OK(pub);
   StdPublish(*pub, "first");
   asil::Message msg;
@@ -544,9 +553,8 @@ TEST_F(AsilClientTest, StandardSubscriberSeesAsilDrops) {
       [&dropped](subspace::Subscriber *, int64_t n) { dropped += n; }));
 
   asil::Publisher pub;
-  ASSERT_EQ(
-      asil::Error::kOk,
-      Asil().CreatePublisher("/asil/drops_out", AsilPubOptions(64, 4), pub));
+  ASSERT_EQ(asil::Error::kOk,
+            Asil().CreatePublisher("/asil/drops_out", StaticPubOptions(), pub));
   AsilPublish(pub, "first");
   EXPECT_EQ("first", StdRead(*sub).text);
 
@@ -577,7 +585,7 @@ TEST_F(AsilClientTest, Activation) {
             Asil().CreateSubscriber("/asil/activate", {}, asil_sub));
 
   asil::Publisher pub;
-  asil::PublisherOptions options = AsilPubOptions(64, 4);
+  asil::PublisherOptions options = StaticPubOptions();
   options.activate = true;
   ASSERT_EQ(asil::Error::kOk,
             Asil().CreatePublisher("/asil/activate", options, pub));
@@ -604,7 +612,7 @@ TEST_F(AsilClientTest, ManyMessagesThroughFewSlots) {
   ASSERT_OK(std_sub);
   asil::Publisher pub;
   ASSERT_EQ(asil::Error::kOk,
-            Asil().CreatePublisher("/asil/cycle", AsilPubOptions(64, 4), pub));
+            Asil().CreatePublisher("/asil/cycle", StaticPubOptions(), pub));
 
   for (int i = 0; i < 200; i++) {
     const std::string text = "message " + std::to_string(i);
@@ -621,7 +629,7 @@ TEST_F(AsilClientTest, HeldMessageIsNotOverwritten) {
   asil::Subscriber sub;
   ASSERT_EQ(asil::Error::kOk, Asil().CreateSubscriber("/asil/hold", {}, sub));
   absl::StatusOr<subspace::Publisher> pub =
-      Std().CreatePublisher("/asil/hold", 64, 4, FixedSize());
+      Std().CreatePublisher("/asil/hold", ServerDefined());
   ASSERT_OK(pub);
   StdPublish(*pub, "held");
   asil::Message held;
@@ -641,16 +649,15 @@ TEST_F(AsilClientTest, HeldMessageIsNotOverwritten) {
 }
 
 TEST_F(AsilClientTest, Rejections) {
+  // A static channel's publishers let the server define its layout.
   asil::Publisher pub;
-  EXPECT_EQ(
-      asil::Error::kServerRejected,
-      Asil().CreatePublisher("/asil/reject", AsilPubOptions(128, 4), pub));
-  EXPECT_THAT(Asil().LastServerError(), HasSubstr("has 4 slots of 64 bytes"));
+  EXPECT_EQ(asil::Error::kServerRejected,
+            Asil().CreatePublisher("/asil/reject", AsilPubOptions(64, 4), pub));
+  EXPECT_THAT(Asil().LastServerError(), HasSubstr("must set server_defined"));
   EXPECT_FALSE(pub.IsOpen());
 
-  EXPECT_EQ(
-      asil::Error::kServerRejected,
-      Asil().CreatePublisher("/asil/unknown", AsilPubOptions(64, 4), pub));
+  EXPECT_EQ(asil::Error::kServerRejected,
+            Asil().CreatePublisher("/asil/unknown", StaticPubOptions(), pub));
   EXPECT_THAT(Asil().LastServerError(),
               HasSubstr("isn't in the static channel config"));
 
@@ -658,30 +665,57 @@ TEST_F(AsilClientTest, Rejections) {
   EXPECT_EQ(asil::Error::kServerRejected,
             Asil().CreateSubscriber("/asil/unknown", {}, sub));
 
-  EXPECT_EQ(asil::Error::kInvalidArgument,
-            Asil().CreatePublisher("/asil/reject", AsilPubOptions(0, 4), pub));
+  // Layout options alongside server_defined.
+  for (int field = 0; field < 6; field++) {
+    asil::PublisherOptions options = StaticPubOptions();
+    switch (field) {
+    case 0:
+      options.slot_size = 64;
+      break;
+    case 1:
+      options.num_slots = 4;
+      break;
+    case 2:
+      options.checksum_size = 4;
+      break;
+    case 3:
+      options.metadata_size = 16;
+      break;
+    case 4:
+      options.subscriber_queue_arena_size = 4096;
+      break;
+    default:
+      options.use_split_buffers = true;
+      break;
+    }
+    EXPECT_EQ(asil::Error::kInvalidArgument,
+              Asil().CreatePublisher("/asil/reject", options, pub))
+        << field;
+  }
   EXPECT_EQ(asil::Error::kCapacityExceeded,
             Asil().CreatePublisher(std::string(300, 'x').c_str(),
-                                   AsilPubOptions(64, 4), pub));
+                                   StaticPubOptions(), pub));
 
   ASSERT_EQ(asil::Error::kOk,
-            Asil().CreatePublisher("/asil/reject", AsilPubOptions(64, 4), pub));
+            Asil().CreatePublisher("/asil/reject", StaticPubOptions(), pub));
+  EXPECT_EQ(64, pub.SlotSize());
+  EXPECT_EQ(4, pub.NumSlots());
   EXPECT_EQ(asil::Error::kAlreadyInitialized,
-            Asil().CreatePublisher("/asil/reject", AsilPubOptions(64, 4), pub));
+            Asil().CreatePublisher("/asil/reject", StaticPubOptions(), pub));
   EXPECT_EQ(asil::Error::kMessageTooLarge, pub.Publish(65));
 
   asil::Client uninitialized;
   asil::Publisher other;
-  EXPECT_EQ(asil::Error::kNotInitialized,
-            uninitialized.CreatePublisher("/asil/reject", AsilPubOptions(64, 4),
-                                          other));
+  EXPECT_EQ(
+      asil::Error::kNotInitialized,
+      uninitialized.CreatePublisher("/asil/reject", StaticPubOptions(), other));
 }
 
 TEST_F(AsilClientTest, CloseRemovesFromServer) {
   asil::Publisher pub;
   asil::Subscriber sub;
   ASSERT_EQ(asil::Error::kOk,
-            Asil().CreatePublisher("/asil/close", AsilPubOptions(64, 4), pub));
+            Asil().CreatePublisher("/asil/close", StaticPubOptions(), pub));
   ASSERT_EQ(asil::Error::kOk, Asil().CreateSubscriber("/asil/close", {}, sub));
   absl::StatusOr<const subspace::ChannelInfo> info =
       Std().GetChannelInfo("/asil/close");
@@ -701,7 +735,7 @@ TEST_F(AsilClientTest, CloseRemovesFromServer) {
 
   // The channel can be used again.
   ASSERT_EQ(asil::Error::kOk,
-            Asil().CreatePublisher("/asil/close", AsilPubOptions(64, 4), pub));
+            Asil().CreatePublisher("/asil/close", StaticPubOptions(), pub));
   ASSERT_EQ(asil::Error::kOk, Asil().CreateSubscriber("/asil/close", {}, sub));
   AsilPublish(pub, "again");
   asil::Message msg;
@@ -722,7 +756,7 @@ TEST_F(AsilClientTest, HandshakeMakesNoHeapAllocations) {
   allocations = 0;
   counting_allocations = true;
   const asil::Error pub_error =
-      Asil().CreatePublisher("/asil/no_alloc", AsilPubOptions(64, 4), pub);
+      Asil().CreatePublisher("/asil/no_alloc", StaticPubOptions(), pub);
   const asil::Error sub_error =
       Asil().CreateSubscriber("/asil/no_alloc", {}, sub);
   const asil::Error pub_close = pub.Close();
@@ -765,9 +799,8 @@ int FillReliable(asil::Publisher &pub, const std::string &prefix, int first) {
   return n - first;
 }
 
-asil::PublisherOptions ReliablePubOptions(int64_t slot_size,
-                                          int32_t num_slots) {
-  asil::PublisherOptions options = AsilPubOptions(slot_size, num_slots);
+asil::PublisherOptions ReliablePubOptions() {
+  asil::PublisherOptions options = StaticPubOptions();
   options.reliable = true;
   return options;
 }
@@ -777,9 +810,9 @@ TEST_F(AsilClientTest, ReliableAsilPublisherStandardSubscriber) {
       "/asil/rel_to_std", subspace::SubscriberOptions().SetReliable(true));
   ASSERT_OK(sub);
   asil::Publisher pub;
-  ASSERT_EQ(asil::Error::kOk,
-            Asil().CreatePublisher("/asil/rel_to_std",
-                                   ReliablePubOptions(64, 4), pub));
+  ASSERT_EQ(
+      asil::Error::kOk,
+      Asil().CreatePublisher("/asil/rel_to_std", ReliablePubOptions(), pub));
   EXPECT_TRUE(pub.IsReliable());
 
   // The activation message and the unread messages fill the channel.
@@ -806,7 +839,7 @@ TEST_F(AsilClientTest, StandardReliablePublisherAsilSubscriber) {
             Asil().CreateSubscriber("/asil/rel_from_std", options, sub));
   EXPECT_TRUE(sub.IsReliable());
   absl::StatusOr<subspace::Publisher> pub = Std().CreatePublisher(
-      "/asil/rel_from_std", 64, 4, FixedSize().SetReliable(true));
+      "/asil/rel_from_std", ServerDefined().SetReliable(true));
   ASSERT_OK(pub);
 
   int published = 0;
@@ -849,9 +882,9 @@ TEST_F(AsilClientTest, ReliableReadNewestFreesSkippedSlots) {
   ASSERT_EQ(asil::Error::kOk,
             Asil().CreateSubscriber("/asil/rel_newest", options, sub));
   asil::Publisher pub;
-  ASSERT_EQ(asil::Error::kOk,
-            Asil().CreatePublisher("/asil/rel_newest",
-                                   ReliablePubOptions(64, 4), pub));
+  ASSERT_EQ(
+      asil::Error::kOk,
+      Asil().CreatePublisher("/asil/rel_newest", ReliablePubOptions(), pub));
   ASSERT_EQ(3, FillReliable(pub, "n", 0));
 
   asil::Message msg;
@@ -871,9 +904,8 @@ TEST_F(AsilClientTest, ReliableReadNewestFreesSkippedSlots) {
 
 TEST_F(AsilClientTest, ReliablePublisherWaitsForSubscriber) {
   asil::Publisher pub;
-  ASSERT_EQ(
-      asil::Error::kOk,
-      Asil().CreatePublisher("/asil/rel_late", ReliablePubOptions(64, 4), pub));
+  ASSERT_EQ(asil::Error::kOk, Asil().CreatePublisher(
+                                  "/asil/rel_late", ReliablePubOptions(), pub));
   EXPECT_EQ(nullptr, pub.Buffer());
 
   absl::StatusOr<subspace::Subscriber> sub = Std().CreateSubscriber(
@@ -885,9 +917,8 @@ TEST_F(AsilClientTest, ReliablePublisherWaitsForSubscriber) {
 
 TEST_F(AsilClientTest, VirtualChannels) {
   asil::Publisher rejected;
-  EXPECT_EQ(
-      asil::Error::kServerRejected,
-      Asil().CreatePublisher("/asil/v1", AsilPubOptions(128, 8), rejected));
+  EXPECT_EQ(asil::Error::kServerRejected,
+            Asil().CreatePublisher("/asil/v1", StaticPubOptions(), rejected));
 
   asil::Subscriber mux_sub;
   ASSERT_EQ(asil::Error::kOk,
@@ -902,14 +933,14 @@ TEST_F(AsilClientTest, VirtualChannels) {
       "/asil/v1", subspace::SubscriberOptions().SetMux("/asil/mux"));
   ASSERT_OK(v1_sub);
 
-  asil::PublisherOptions v1_options = AsilPubOptions(128, 8);
+  asil::PublisherOptions v1_options = StaticPubOptions();
   v1_options.mux = "/asil/mux";
   asil::Publisher v1_pub;
   ASSERT_EQ(asil::Error::kOk,
             Asil().CreatePublisher("/asil/v1", v1_options, v1_pub));
   EXPECT_EQ(1, v1_pub.VirtualChannelId());
-  absl::StatusOr<subspace::Publisher> v2_pub = Std().CreatePublisher(
-      "/asil/v2", 128, 8, FixedSize().SetMux("/asil/mux"));
+  absl::StatusOr<subspace::Publisher> v2_pub =
+      Std().CreatePublisher("/asil/v2", ServerDefined().SetMux("/asil/mux"));
   ASSERT_OK(v2_pub);
 
   AsilPublish(v1_pub, "a1");
@@ -949,7 +980,7 @@ TEST_F(AsilClientTest, MultipleActiveMessages) {
   ASSERT_EQ(asil::Error::kOk,
             Asil().CreateSubscriber("/asil/multi", options, sub));
   absl::StatusOr<subspace::Publisher> pub =
-      Std().CreatePublisher("/asil/multi", 64, 8, FixedSize());
+      Std().CreatePublisher("/asil/multi", ServerDefined());
   ASSERT_OK(pub);
   for (const char *text : {"a", "b", "c", "d"}) {
     StdPublish(*pub, text);
@@ -992,19 +1023,19 @@ TEST_F(AsilClientTest, SubscriberOpensBeforeAnyPublisher) {
   EXPECT_EQ(0u, msg.length);
 
   absl::StatusOr<subspace::Publisher> pub =
-      Std().CreatePublisher("/asil/early_sub", 64, 4, FixedSize());
+      Std().CreatePublisher("/asil/early_sub", ServerDefined());
   ASSERT_OK(pub);
   StdPublish(*pub, "early");
   ASSERT_EQ(asil::Error::kOk, sub.ReadMessage(msg));
   EXPECT_EQ("early", Text(msg));
 }
 
-asil::PublisherOptions SplitPubOptions(int64_t slot_size, int32_t num_slots,
-                                       asil::SplitSlot *slots) {
-  asil::PublisherOptions options = AsilPubOptions(slot_size, num_slots);
-  options.use_split_buffers = true;
+// An ASIL publisher on a static channel with split buffers.
+asil::PublisherOptions SplitPubOptions(asil::SplitSlot *slots,
+                                       int32_t capacity) {
+  asil::PublisherOptions options = StaticPubOptions();
   options.split_slots = slots;
-  options.split_slot_capacity = num_slots;
+  options.split_slot_capacity = capacity;
   return options;
 }
 
@@ -1031,7 +1062,7 @@ TEST_F(AsilClientTest, SplitAsilPublisherStandardSubscriber) {
   asil::Publisher pub;
   ASSERT_EQ(asil::Error::kOk,
             Asil().CreatePublisher("/asil/split_to_std",
-                                   SplitPubOptions(256, 4, pub_slots), pub))
+                                   SplitPubOptions(pub_slots, 4), pub))
       << Asil().LastServerError();
   EXPECT_GE(pub.SlotSize(), 256);
   for (const asil::SplitSlot &slot : pub_slots) {
@@ -1063,8 +1094,7 @@ TEST_F(AsilClientTest, SplitStandardPublisherAsilSubscriber) {
   ASSERT_EQ(asil::Error::kOk,
             Asil().CreateSubscriber("/asil/split_from_std", options, sub));
   absl::StatusOr<subspace::Publisher> pub = Std().CreatePublisher(
-      "/asil/split_from_std", 256, 4,
-      FixedSize().SetUseSplitBuffers(true).SetChecksum(true));
+      "/asil/split_from_std", ServerDefined().SetChecksum(true));
   ASSERT_OK(pub);
 
   asil::Message msg;
@@ -1087,7 +1117,7 @@ TEST_F(AsilClientTest, SplitVirtualChannel) {
   EXPECT_EQ(4, sub.VirtualChannelId());
 
   asil::SplitSlot pub_slots[8];
-  asil::PublisherOptions pub_options = SplitPubOptions(128, 8, pub_slots);
+  asil::PublisherOptions pub_options = SplitPubOptions(pub_slots, 8);
   pub_options.mux = "/asil/split_mux";
   asil::Publisher pub;
   ASSERT_EQ(asil::Error::kOk,
@@ -1110,15 +1140,16 @@ TEST_F(AsilClientTest, SplitRejections) {
                                     SplitSubOptions(slots, 3), sub));
   EXPECT_FALSE(sub.IsOpen());
 
+  // The server says the channel has split buffers, and a publisher needs
+  // somewhere to map them too.
   asil::Publisher pub;
   EXPECT_EQ(
-      asil::Error::kServerRejected,
-      Asil().CreatePublisher("/asil/split_reject", AsilPubOptions(64, 4), pub));
-  EXPECT_THAT(Asil().LastServerError(), HasSubstr("uses split buffers"));
-  EXPECT_EQ(asil::Error::kServerRejected,
-            Asil().CreatePublisher("/asil/reject",
-                                   SplitPubOptions(64, 4, slots), pub));
-  EXPECT_THAT(Asil().LastServerError(), HasSubstr("doesn't use split buffers"));
+      asil::Error::kInvalidArgument,
+      Asil().CreatePublisher("/asil/split_reject", StaticPubOptions(), pub));
+  EXPECT_EQ(asil::Error::kCapacityExceeded,
+            Asil().CreatePublisher("/asil/split_reject",
+                                   SplitPubOptions(slots, 3), pub));
+  EXPECT_FALSE(pub.IsOpen());
 }
 
 TEST_F(AsilDynamicTest, AsilPublisherCreatesChannel) {

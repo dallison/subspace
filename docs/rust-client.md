@@ -180,10 +180,11 @@ let msg = subscriber
 | `max_outstanding_slot_leases` | 1 | Maximum unpublished slots owned through explicit leases. |
 | `notify_retirement_on_forced_reuse` | true | Emit retirement notifications when an unreliable publisher forcibly reuses an unread slot. |
 | `checksum` | false | Compute CRC32 checksums on published messages. |
-| `checksum_size` | 4 | Bytes reserved for checksums (default: 4 for CRC32). |
+| `checksum_size` | 0 | Bytes reserved for checksums; 0 means 4, for CRC32. |
 | `metadata_size` | 0 | Bytes reserved in each message prefix for user metadata. |
 | `use_split_buffers` | false | Store message prefixes separately from payload buffers using the built-in split shared-memory allocator. |
 | `split_buffers_over_bridge` | false | Ask receiving bridge servers to create their mirror publisher with split payload buffers. |
+| `server_defined` | false | Take the layout from the server's [static channel config](../README.md#static-channel-config). Required on static channels, which reject `slot_size`, `num_slots`, `fixed_size`, `checksum_size`, `metadata_size`, `subscriber_queue_arena_size` and `use_split_buffers`. |
 | `split_buffer_callbacks` | none | Optional external allocator callbacks for split payload buffers. Publishers use `allocate`/`free`; subscribers use `map`/`unmap`. |
 
 All options use a builder pattern:

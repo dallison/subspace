@@ -576,6 +576,13 @@ subspace_publisher_options_default(SubspaceSlotSize slot_size, int num_slots) {
   return options;
 }
 
+SubspacePublisherOptions subspace_publisher_options_server_defined(void) {
+  SubspacePublisherOptions options = subspace_publisher_options_default(0, 0);
+  options.checksum_size = 0;
+  options.server_defined = true;
+  return options;
+}
+
 SubspaceSubscriber
 subspace_create_subscriber(SubspaceClient client, const char *channel_name,
                            SubspaceSubscriberOptions options) {
@@ -648,7 +655,8 @@ SubspacePublisher subspace_create_publisher(SubspaceClient client,
       .SetMaxPublishers(options.max_publishers)
       .SetUseSplitBuffers(options.use_split_buffers)
       .SetSplitBuffersOverBridge(options.split_buffers_over_bridge)
-      .SetSplitBufferCallbacks(ToCppSplitCallbacks(options.split_callbacks));
+      .SetSplitBufferCallbacks(ToCppSplitCallbacks(options.split_callbacks))
+      .SetServerDefined(options.server_defined);
   subspace_clear_error();
   SubspacePublisher publisher;
   memset(&publisher, 0, sizeof(publisher));

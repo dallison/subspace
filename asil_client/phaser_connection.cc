@@ -388,7 +388,8 @@ Error PhaserServerConnection::CreatePublisher(const PublisherRequest &request,
         cmd->set_channel_name(View(request.channel_name));
         cmd->set_slot_size(request.slot_size);
         cmd->set_num_slots(request.num_slots);
-        cmd->set_is_fixed_size(true);
+        cmd->set_is_fixed_size(!request.server_defined);
+        cmd->set_server_defined(request.server_defined);
         cmd->set_is_reliable(request.reliable);
         if (request.type != nullptr) {
           cmd->set_type(View(request.type));
@@ -420,6 +421,10 @@ Error PhaserServerConnection::CreatePublisher(const PublisherRequest &request,
         reply.vchan_id = pub.vchan_id();
         reply.num_sub_updates = pub.num_sub_updates();
         reply.subscriber_queue_arena_size = pub.subscriber_queue_arena_size();
+        reply.slot_size = pub.slot_size();
+        reply.checksum_size = pub.checksum_size();
+        reply.metadata_size = pub.metadata_size();
+        reply.use_split_buffers = pub.use_split_buffers();
         if (Error e = DupFd(fds_, pub.ccb_fd_index(), reply.ccb);
             e != Error::kOk) {
           return e;

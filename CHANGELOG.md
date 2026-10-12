@@ -6,9 +6,21 @@
 - `subspace_server --channel_config=FILE` reads a `StaticChannelConfig` in
   protobuf text format and creates its channels and multiplexers before the
   server accepts clients. Clients can then use only those channels and the
-  server's own, the channels stay when they have no users, and their layout
-  is fixed: publishers must be fixed size and match the configured slot
-  size, number of slots, checksum size and metadata size.
+  server's own, the channels stay when they have no users, and the server
+  defines their layout.
+- Publishers on a static channel must set the new `server_defined` option
+  (`PublisherOptions::SetServerDefined`, `server_defined` in the C, Python,
+  Rust and ASIL clients) and can't set the slot size, number of slots, fixed
+  size, checksum size, metadata size, subscriber queue arena size or split
+  buffer setting. The server rejects `server_defined` on any other channel.
+  `CreatePublisherResponse` now reports the channel's slot size, checksum
+  size, metadata size, split buffer setting and fixed size, and a
+  `server_defined` publisher uses them.
+- `subspace_publisher_options_server_defined()` in the C client gives
+  options for a static channel.
+- The default `checksum_size` in the C++ and Rust `PublisherOptions` is now 0,
+  which means 4 bytes as before, so a `server_defined` publisher can use the
+  default options.
 - A multiplexer with no publishers now reports its slot size.
 - Publishers on different virtual channels of a multiplexer are checked
   against each other for fixed size and locality, as they share the
@@ -19,8 +31,7 @@
   multiplexer when it starts, so subscribers can map them before any
   publisher exists.
 - `use_split_buffers` in a static channel or multiplexer config gives it
-  split buffers, which the server creates. Publishers whose split buffer
-  setting differs from the config are rejected.
+  split buffers, which the server creates.
 - `GetClientBuffersRequest` can ask for one prefix or slot of a split buffer
   set with `filter_slot`, `is_prefix` and `slot_id`.
 

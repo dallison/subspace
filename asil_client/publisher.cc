@@ -41,10 +41,18 @@ Error Publisher::Open(Client &client, const char *channel_name,
   if (!client.Initialized()) {
     return Error::kNotInitialized;
   }
-  if (options.slot_size <= 0 || options.num_slots <= 0 ||
-      !ValidLayoutSize(options.checksum_size) ||
-      !ValidLayoutSize(options.metadata_size) || options.vchan_id < -1 ||
-      options.vchan_id >= shm::kMaxVchanId) {
+  if (options.server_defined) {
+    if (options.slot_size != 0 || options.num_slots != 0 ||
+        options.checksum_size != 0 || options.metadata_size != 0 ||
+        options.subscriber_queue_arena_size != 0 || options.use_split_buffers) {
+      return Error::kInvalidArgument;
+    }
+  } else if (options.slot_size <= 0 || options.num_slots <= 0 ||
+             !ValidLayoutSize(options.checksum_size) ||
+             !ValidLayoutSize(options.metadata_size)) {
+    return Error::kInvalidArgument;
+  }
+  if (options.vchan_id < -1 || options.vchan_id >= shm::kMaxVchanId) {
     return Error::kInvalidArgument;
   }
   if (Error e = internal::CopyName(channel_name, name_); e != Error::kOk) {
@@ -55,11 +63,11 @@ Error Publisher::Open(Client &client, const char *channel_name,
       e != Error::kOk) {
     return e;
   }
-  const int64_t slot_size = shm::Aligned64(options.slot_size);
-
   PublisherRequest request;
   request.channel_name = name_;
-  request.slot_size = slot_size;
+  request.server_defined = options.server_defined;
+  request.slot_size =
+      options.server_defined ? 0 : shm::Aligned64(options.slot_size);
   request.num_slots = options.num_slots;
   request.type = options.type;
   request.checksum_size = options.checksum_size;
@@ -91,22 +99,35 @@ Error Publisher::Open(Client &client, const char *channel_name,
   buffer_context_.group_id = client.group_id_;
   buffer_context_.connection = client.connection_;
 
+  int64_t slot_size = request.slot_size;
+  int32_t checksum_size = options.checksum_size;
+  int32_t metadata_size = options.metadata_size;
+  bool use_split_buffers = options.use_split_buffers;
+  if (options.server_defined) {
+    slot_size = reply.slot_size;
+    checksum_size = reply.checksum_size;
+    metadata_size = reply.metadata_size;
+    use_split_buffers = reply.use_split_buffers;
+  }
+
   Error e = Error::kOk;
   if (channel_id_ < 0 || channel_id_ >= shm::kMaxChannels ||
       publisher_id_ < 0 || publisher_id_ >= shm::kMaxSlotOwners ||
       vchan_id_ < -1 || vchan_id_ >= shm::kMaxVchanId ||
-      (vchan_id_ != -1) != (options.mux != nullptr)) {
+      (vchan_id_ != -1) != (options.mux != nullptr) || slot_size <= 0 ||
+      (options.server_defined && reply.num_slots <= 0) ||
+      !ValidLayoutSize(checksum_size) || !ValidLayoutSize(metadata_size)) {
     e = Error::kProtocolError;
   }
   if (e == Error::kOk) {
     const int num_slots =
         reply.num_slots > 0 ? reply.num_slots : options.num_slots;
     e = memory_.Map(client.scb_, reply.ccb.Get(), reply.bcb.Get(), num_slots,
-                    options.checksum_size, options.metadata_size,
+                    checksum_size, metadata_size,
                     reply.subscriber_queue_arena_size, &buffer_context_);
   }
   if (e == Error::kOk) {
-    e = options.use_split_buffers
+    e = use_split_buffers
             ? memory_.AttachSplitBuffers(
                   /*writable=*/true, options.split_slots,
                   options.split_slot_capacity, options.split_allocator)

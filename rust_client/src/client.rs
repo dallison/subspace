@@ -1209,7 +1209,25 @@ impl Client {
     ) -> Result<Publisher> {
         let mut client = self.inner.lock().unwrap();
 
-        if opts.max_outstanding_slot_leases < 1 || opts.max_outstanding_slot_leases > opts.num_slots
+        if opts.server_defined {
+            if opts.slot_size != 0
+                || opts.num_slots != 0
+                || opts.fixed_size
+                || opts.checksum_size != 0
+                || opts.metadata_size != 0
+                || opts.subscriber_queue_arena_size != 0
+                || opts.use_split_buffers
+            {
+                return Err(SubspaceError::InvalidArgument(format!(
+                    "Publisher on {} is server defined, so it can't set the slot size, \
+                     number of slots, fixed size, checksum size, metadata size, \
+                     subscriber queue arena size or split buffers",
+                    channel_name
+                )));
+            }
+            // The server checks the leases against the channel's slots.
+        } else if opts.max_outstanding_slot_leases < 1
+            || opts.max_outstanding_slot_leases > opts.num_slots
         {
             return Err(SubspaceError::InvalidArgument(
                 "MaxOutstandingSlotLeases must be between 1 and NumSlots".into(),
@@ -1263,6 +1281,7 @@ impl Client {
                     } else {
                         0
                     },
+                    server_defined: opts.server_defined,
                 },
             )),
         };
@@ -1289,6 +1308,26 @@ impl Client {
         if pub_resp.num_slots > 0 {
             channel_opts.num_slots = pub_resp.num_slots;
         }
+        if opts.server_defined {
+            channel_opts.slot_size = pub_resp.slot_size;
+            channel_opts.fixed_size = pub_resp.is_fixed_size;
+            channel_opts.checksum_size = pub_resp.checksum_size;
+            channel_opts.metadata_size = pub_resp.metadata_size;
+            channel_opts.subscriber_queue_arena_size = pub_resp.subscriber_queue_arena_size;
+            channel_opts.use_split_buffers = pub_resp.use_split_buffers;
+        }
+        let slot_size = aligned64(channel_opts.slot_size);
+        let use_split_buffers = channel_opts.use_split_buffers;
+        let cs = if channel_opts.checksum_size > 0 {
+            channel_opts.checksum_size
+        } else {
+            4
+        };
+        let ms = if channel_opts.metadata_size > 0 {
+            channel_opts.metadata_size
+        } else {
+            0
+        };
         let mut pub_impl = PublisherImpl::new(
             channel_name.to_string(),
             channel_opts.num_slots,
@@ -1301,24 +1340,11 @@ impl Client {
             String::from_utf8_lossy(&pub_resp.r#type).to_string(),
             channel_opts,
         );
-        pub_impl.channel.use_split_buffers = opts.use_split_buffers;
+        pub_impl.channel.use_split_buffers = use_split_buffers;
         pub_impl.channel.split_buffer_callbacks = opts.split_buffer_callbacks.clone();
-
-        {
-            let cs = if opts.checksum_size > 0 {
-                opts.checksum_size
-            } else {
-                4
-            };
-            let ms = if opts.metadata_size > 0 {
-                opts.metadata_size
-            } else {
-                0
-            };
-            pub_impl.channel.checksum_size = cs;
-            pub_impl.channel.metadata_size = ms;
-            pub_impl.channel.prefix_size = compute_prefix_size(cs, ms);
-        }
+        pub_impl.channel.checksum_size = cs;
+        pub_impl.channel.metadata_size = ms;
+        pub_impl.channel.prefix_size = compute_prefix_size(cs, ms);
 
         let prot = ProtFlags::PROT_READ | ProtFlags::PROT_WRITE;
         pub_impl.channel.map(

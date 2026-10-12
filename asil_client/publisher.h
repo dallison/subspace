@@ -18,8 +18,14 @@ namespace asil {
 class Client;
 
 struct PublisherOptions {
-  // The channel layout.  On a server with a static channel config these must
-  // match the configured channel.
+  // The channel is in the server's static channel config, which defines its
+  // layout.  Publishers on static channels must set this and leave
+  // slot_size, num_slots, checksum_size, metadata_size,
+  // subscriber_queue_arena_size and use_split_buffers zero; the publisher
+  // takes them from the server.  split_slots and split_allocator still apply
+  // to a static channel with split buffers.
+  bool server_defined = false;
+  // The channel layout, for a channel that isn't static.
   int64_t slot_size = 0;
   int32_t num_slots = 0;
   int32_t checksum_size = 0; // 0 means 4 bytes.
@@ -40,10 +46,11 @@ struct PublisherOptions {
   // Bytes in the channel's control block for subscriber queues.  This must
   // match the channel; 0 for a channel without queues.
   uint64_t subscriber_queue_arena_size = 0;
-  // The channel has split buffers.  They must exist already: the server
-  // creates them for a static channel, otherwise a standard publisher does.
-  // split_slots has room for the channel's num_slots slot mappings, and the
-  // allocator maps slots that a custom allocator created.
+  // The channel has split buffers, which a standard publisher must have
+  // created.  On a static channel the server says whether there are split
+  // buffers, and creates them.  split_slots has room for the channel's
+  // num_slots slot mappings, and the allocator maps slots that a custom
+  // allocator created.
   bool use_split_buffers = false;
   SplitSlot *split_slots = nullptr;
   int32_t split_slot_capacity = 0;

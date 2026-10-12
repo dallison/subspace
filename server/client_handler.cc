@@ -4,6 +4,7 @@
 
 #include "server/client_handler.h"
 #include "absl/strings/str_format.h"
+#include "absl/strings/str_join.h"
 #include "client_handler.h"
 #include "server/server.h"
 #include <unistd.h>
@@ -355,9 +356,76 @@ void ClientHandler::HandleInit(const subspace::InitRequest &req,
 }
 
 void ClientHandler::HandleCreatePublisher(
-    const subspace::CreatePublisherRequest &req,
+    const subspace::CreatePublisherRequest &request,
     subspace::CreatePublisherResponse *response,
     std::vector<toolbelt::FileDescriptor> &fds) {
+  // A static channel's layout comes from the config, so its publishers set
+  // server_defined instead and the request is completed from the channel.
+  const ServerChannel *existing = server_->FindChannel(request.channel_name());
+  const bool is_static = existing != nullptr && existing->IsStatic();
+  if (is_static && !request.server_defined()) {
+    response->set_error(absl::StrFormat(
+        "Publishers on static channel %s must set server_defined",
+        request.channel_name()));
+    return;
+  }
+  if (!is_static && request.server_defined()) {
+    response->set_error(absl::StrFormat(
+        "Channel %s isn't in the static channel config, so its publishers "
+        "can't set server_defined",
+        request.channel_name()));
+    return;
+  }
+  subspace::CreatePublisherRequest server_defined_req;
+  if (is_static) {
+    std::vector<std::string> layout_fields;
+    if (request.num_slots() != 0) {
+      layout_fields.push_back("num_slots");
+    }
+    if (request.slot_size() != 0) {
+      layout_fields.push_back("slot_size");
+    }
+    if (request.is_fixed_size()) {
+      layout_fields.push_back("fixed_size");
+    }
+    if (request.checksum_size() != 0) {
+      layout_fields.push_back("checksum_size");
+    }
+    if (request.metadata_size() != 0) {
+      layout_fields.push_back("metadata_size");
+    }
+    if (request.subscriber_queue_arena_size() != 0) {
+      layout_fields.push_back("subscriber_queue_arena_size");
+    }
+    if (request.use_split_buffers()) {
+      layout_fields.push_back("use_split_buffers");
+    }
+    if (!layout_fields.empty()) {
+      response->set_error(absl::StrFormat(
+          "Static channel %s has a layout defined by the server; its "
+          "publishers can't set %s",
+          request.channel_name(), absl::StrJoin(layout_fields, ", ")));
+      return;
+    }
+    const ServerChannel *layout_channel =
+        existing->IsVirtual()
+            ? static_cast<const VirtualChannel *>(existing)->GetMux()
+            : existing;
+    server_defined_req = request;
+    server_defined_req.set_num_slots(existing->NumSlots());
+    server_defined_req.set_slot_size(existing->SlotSize());
+    server_defined_req.set_is_fixed_size(true);
+    server_defined_req.set_checksum_size(existing->ChecksumSize());
+    server_defined_req.set_metadata_size(existing->MetadataSize());
+    server_defined_req.set_subscriber_queue_arena_size(
+        existing->SubscriberQueueArenaSize());
+    server_defined_req.set_use_split_buffers(
+        layout_channel->HasSplitBufferOptions() &&
+        layout_channel->GetSplitBufferOptions().use_split_buffers);
+  }
+  const subspace::CreatePublisherRequest &req =
+      is_static ? server_defined_req : request;
+
   if (req.num_slots() <= 0 || req.slot_size() <= 0) {
     response->set_error("num_slots and slot_size must be greater than 0");
     return;
@@ -452,45 +520,6 @@ void ClientHandler::HandleCreatePublisher(
   if (channel == nullptr &&
       !StaticConfigAllowsNewChannel(*server_, req.channel_name(), response)) {
     return;
-  }
-  if (channel != nullptr && channel->IsStatic()) {
-    // Resizing happens in the publisher, so only a fixed size publisher keeps
-    // the configured layout.
-    if (!req.is_fixed_size()) {
-      response->set_error(absl::StrFormat(
-          "Publishers on static channel %s must be fixed size",
-          req.channel_name()));
-      return;
-    }
-    if (req.slot_size() != channel->SlotSize() ||
-        req.num_slots() != channel->NumSlots()) {
-      response->set_error(absl::StrFormat(
-          "Static channel %s has %d slots of %d bytes, not %d slots of %d "
-          "bytes",
-          req.channel_name(), channel->NumSlots(), channel->SlotSize(),
-          req.num_slots(), req.slot_size()));
-      return;
-    }
-    if (cs != channel->ChecksumSize() || ms != channel->MetadataSize()) {
-      response->set_error(absl::StrFormat(
-          "Static channel %s has checksum_size %d and metadata_size %d, not "
-          "%d and %d",
-          req.channel_name(), channel->ChecksumSize(), channel->MetadataSize(),
-          cs, ms));
-      return;
-    }
-    const ServerChannel *layout_channel =
-        channel->IsVirtual()
-            ? static_cast<const VirtualChannel *>(channel)->GetMux()
-            : channel;
-    const bool split = layout_channel->HasSplitBufferOptions() &&
-                       layout_channel->GetSplitBufferOptions().use_split_buffers;
-    if (req.use_split_buffers() != split) {
-      response->set_error(absl::StrFormat(
-          "Static channel %s %s split buffers", req.channel_name(),
-          split ? "uses" : "doesn't use"));
-      return;
-    }
   }
   if (channel == nullptr) {
     server_->logger_.Log(toolbelt::LogLevel::kDebug,
@@ -819,6 +848,13 @@ void ClientHandler::HandleCreatePublisher(
   response->set_subscriber_queue_arena_size(
       channel->SubscriberQueueArenaSize());
   response->set_num_slots(channel->NumSlots());
+  response->set_slot_size(channel->SlotSize());
+  response->set_checksum_size(channel->ChecksumSize());
+  response->set_metadata_size(channel->MetadataSize());
+  response->set_use_split_buffers(
+      split_channel->HasSplitBufferOptions() &&
+      split_channel->GetSplitBufferOptions().use_split_buffers);
+  response->set_is_fixed_size(req.is_fixed_size());
 
   const SharedMemoryFds &channel_fds = channel->GetFds();
   response->set_ccb_fd_index(0);
