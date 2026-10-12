@@ -270,10 +270,11 @@ DashboardEngine::CreateSubscriber(const ChannelProfile &profile) {
   options.SetType("subspace.dashboard.Timestamp");
   options.SetLogDroppedMessages(false);
   options.SetSubscriberQueueSize(profile.queue_size);
-  // The read loop holds one message. A cap of 1 re-arms the trigger pipe on
-  // every release. Stay above that so a same-thread read does not write()
-  // once per message. See SubscriberImpl::RemoveActiveMessage.
+  // The dashboard's subscriber_busy_ handoff guarantees that the publisher
+  // wakes an idle subscriber. Avoid an additional trigger write when this
+  // thread releases each message.
   options.SetMaxActiveMessages(8);
+  options.SetTriggerOnRelease(false);
   auto subscriber =
       subscriber_client_->CreateSubscriber(profile.name, options);
   if (!subscriber.ok()) {
