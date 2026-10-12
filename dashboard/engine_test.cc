@@ -63,6 +63,37 @@ TEST_F(DashboardEngineTest, PublishesAndReceivesAtSelectedRate) {
   EXPECT_TRUE(snapshot.error.empty());
 }
 
+TEST_F(DashboardEngineTest, SwitchesPerformanceModeWhileRunning) {
+  DashboardEngine engine(
+      {.socket = Socket(), .channel = "/dashboard-engine-mode-test"});
+  ASSERT_TRUE(engine.Init().ok());
+  EXPECT_EQ(engine.Mode().setting.mode, PerformanceMode::kThroughput);
+
+  TestApplication app;
+  engine.StartTasks(app);
+  app.Spawn(
+      [&engine](co20::Coroutine &c) -> co20::Task {
+        EXPECT_TRUE(engine.IncreaseRate()); // 10 Hz.
+        EXPECT_TRUE(engine.IncreaseMode()); // Latency.
+        EXPECT_FALSE(engine.IncreaseMode());
+        co_await c.Sleep(std::chrono::milliseconds(300));
+        EXPECT_EQ(engine.Mode().setting.mode, PerformanceMode::kLatency);
+        EXPECT_TRUE(engine.DecreaseMode()); // Throughput.
+        EXPECT_FALSE(engine.DecreaseMode());
+        co_await c.Sleep(std::chrono::milliseconds(300));
+        engine.RequestStop();
+        co_return;
+      },
+      "test-controller");
+  app.Cpp20Scheduler().Run();
+
+  EXPECT_EQ(engine.Mode().setting.mode, PerformanceMode::kThroughput);
+  const auto snapshot = engine.Snapshot();
+  EXPECT_GT(snapshot.published_messages, 0);
+  EXPECT_GT(snapshot.received_messages, 0);
+  EXPECT_TRUE(snapshot.error.empty());
+}
+
 TEST_F(DashboardEngineTest, HighestRateDoesNotStarveShutdown) {
   DashboardEngine engine(
       {.socket = Socket(), .channel = "/dashboard-engine-max-rate-test"});
@@ -135,18 +166,19 @@ TEST_F(DashboardEngineTest, SwitchesSlotsAndUnregistersOldSubscriber) {
   const auto snapshot = engine.Snapshot();
   EXPECT_EQ(snapshot.requested_slots, 64);
   EXPECT_EQ(snapshot.active_slots, 64);
+  EXPECT_EQ(snapshot.active_queue_size, 0);
   EXPECT_EQ(snapshot.active_channel,
-            ChannelNameForSlots(kBase, snapshot.active_slots));
+            ChannelName(kBase, snapshot.active_slots, snapshot.active_queue_size));
   EXPECT_GT(snapshot.received_messages, 0);
   EXPECT_TRUE(snapshot.error.empty());
 
   subspace::Client observer;
   ASSERT_TRUE(observer.Init(Socket()).ok());
-  auto old_info = observer.GetChannelInfo(ChannelNameForSlots(kBase, 32));
+  auto old_info = observer.GetChannelInfo(ChannelName(kBase, 32, 0));
   if (old_info.ok()) {
     EXPECT_EQ(old_info->num_subscribers, 0);
   }
-  auto active_info = observer.GetChannelInfo(ChannelNameForSlots(kBase, 64));
+  auto active_info = observer.GetChannelInfo(ChannelName(kBase, 64, 0));
   ASSERT_TRUE(active_info.ok());
   EXPECT_EQ(active_info->num_subscribers, 1);
 }
@@ -175,9 +207,89 @@ TEST_F(DashboardEngineTest, CoalescesRapidSlotChanges) {
   const auto snapshot = engine.Snapshot();
   EXPECT_EQ(snapshot.requested_slots, 128);
   EXPECT_EQ(snapshot.active_slots, 128);
-  EXPECT_EQ(snapshot.active_channel, ChannelNameForSlots(kBase, 128));
+  EXPECT_EQ(snapshot.active_queue_size, 0);
+  EXPECT_EQ(snapshot.active_channel, ChannelName(kBase, 128, 0));
   EXPECT_GT(snapshot.received_messages, 0);
   EXPECT_TRUE(snapshot.error.empty());
+}
+
+TEST_F(DashboardEngineTest, SwitchesSubscriberQueueAndUnregistersOldSubscriber) {
+  constexpr std::string_view kBase = "/dashboard-engine-queue-switch-test";
+  DashboardEngine engine({.socket = Socket(), .channel = std::string(kBase)});
+  ASSERT_TRUE(engine.Init().ok());
+
+  TestApplication app;
+  engine.StartTasks(app);
+  app.Spawn(
+      [&engine](co20::Coroutine &c) -> co20::Task {
+        EXPECT_TRUE(engine.IncreaseRate()); // 10 Hz.
+        EXPECT_TRUE(engine.IncreaseRate()); // 100 Hz.
+        co_await c.Sleep(std::chrono::milliseconds(200));
+        EXPECT_TRUE(engine.IncreaseSubscriberQueue()); // 8.
+        co_await c.Sleep(std::chrono::milliseconds(600));
+        engine.RequestStop();
+        co_return;
+      },
+      "test-controller");
+  app.Cpp20Scheduler().Run();
+
+  const auto snapshot = engine.Snapshot();
+  EXPECT_EQ(snapshot.requested_slots, 32);
+  EXPECT_EQ(snapshot.active_slots, 32);
+  EXPECT_EQ(snapshot.requested_queue_size, 8);
+  EXPECT_EQ(snapshot.active_queue_size, 8);
+  EXPECT_EQ(snapshot.active_channel, ChannelName(kBase, 32, 8));
+  EXPECT_GT(snapshot.received_messages, 0);
+  EXPECT_TRUE(snapshot.error.empty());
+
+  subspace::Client observer;
+  ASSERT_TRUE(observer.Init(Socket()).ok());
+  auto old_info = observer.GetChannelInfo(ChannelName(kBase, 32, 0));
+  if (old_info.ok()) {
+    EXPECT_EQ(old_info->num_subscribers, 0);
+    EXPECT_EQ(old_info->subscriber_queue_arena_size, 0);
+  }
+  auto active_info = observer.GetChannelInfo(ChannelName(kBase, 32, 8));
+  ASSERT_TRUE(active_info.ok());
+  EXPECT_EQ(active_info->num_subscribers, 1);
+  EXPECT_EQ(active_info->subscriber_queue_arena_size,
+            subspace::SlotQueueBlockSize(8));
+}
+
+TEST_F(DashboardEngineTest, CoalescesRapidSubscriberQueueChanges) {
+  constexpr std::string_view kBase = "/dashboard-engine-rapid-queue-test";
+  DashboardEngine engine({.socket = Socket(), .channel = std::string(kBase)});
+  ASSERT_TRUE(engine.Init().ok());
+
+  TestApplication app;
+  engine.StartTasks(app);
+  app.Spawn(
+      [&engine](co20::Coroutine &c) -> co20::Task {
+        EXPECT_TRUE(engine.IncreaseRate());
+        EXPECT_TRUE(engine.IncreaseSubscriberQueue()); // 8
+        EXPECT_TRUE(engine.IncreaseSubscriberQueue()); // 16
+        EXPECT_TRUE(engine.IncreaseSubscriberQueue()); // 32
+        EXPECT_TRUE(engine.DecreaseSubscriberQueue()); // 16
+        co_await c.Sleep(std::chrono::milliseconds(500));
+        engine.RequestStop();
+        co_return;
+      },
+      "test-controller");
+  app.Cpp20Scheduler().Run();
+
+  const auto snapshot = engine.Snapshot();
+  EXPECT_EQ(snapshot.requested_queue_size, 16);
+  EXPECT_EQ(snapshot.active_queue_size, 16);
+  EXPECT_EQ(snapshot.active_channel, ChannelName(kBase, 32, 16));
+  EXPECT_GT(snapshot.received_messages, 0);
+  EXPECT_TRUE(snapshot.error.empty());
+
+  subspace::Client observer;
+  ASSERT_TRUE(observer.Init(Socket()).ok());
+  auto active_info = observer.GetChannelInfo(ChannelName(kBase, 32, 16));
+  ASSERT_TRUE(active_info.ok());
+  EXPECT_EQ(active_info->subscriber_queue_arena_size,
+            subspace::SlotQueueBlockSize(16));
 }
 
 TEST_F(DashboardEngineTest, StopsWhileChannelSwitchIsPending) {

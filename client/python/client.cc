@@ -233,6 +233,10 @@ PYBIND11_MODULE(subspace, m) {
            "Set the maximum number of active messages for the subscriber.")
       .def("max_active_messages", &SubscriberOptions::MaxActiveMessages,
            "Get the maximum number of active messages for the subscriber.")
+      .def("set_trigger_on_release", &SubscriberOptions::SetTriggerOnRelease,
+           "Set whether releasing an active message re-arms the subscriber.")
+      .def("trigger_on_release", &SubscriberOptions::TriggerOnRelease,
+           "Get whether active-message release re-arms the subscriber.")
       .def("set_max_subscribers", &SubscriberOptions::SetMaxSubscribers,
            "Set the server-enforced subscriber limit for the channel.")
       .def("max_subscribers", &SubscriberOptions::MaxSubscribers,

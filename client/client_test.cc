@@ -8315,6 +8315,7 @@ TEST_F(ClientTest, SubscriberOptionsChain) {
       .SetPassChecksumErrors(true)
       .SetKeepActiveMessage(true)
       .SetDetectDroppedMessages(false)
+      .SetTriggerOnRelease(false)
       .SetWarnWhenStuck(false)
       .SetStuckWarningGracePeriod(1.5);
   opts.SetLogDroppedMessages(true);
@@ -8330,6 +8331,8 @@ TEST_F(ClientTest, SubscriberOptionsChain) {
   ASSERT_EQ(20, opts.MaxActiveMessages());
   ASSERT_TRUE(opts.LogDroppedMessages());
   ASSERT_FALSE(opts.DetectDroppedMessages());
+  ASSERT_FALSE(opts.TriggerOnRelease());
+  ASSERT_TRUE(subspace::SubscriberOptions().TriggerOnRelease());
   ASSERT_TRUE(opts.IsBridge());
   ASSERT_TRUE(opts.ForTunnel());
   ASSERT_TRUE(opts.Telemetry());

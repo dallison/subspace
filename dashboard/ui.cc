@@ -6,17 +6,48 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <cstdio>
 #include <errno.h>
 #include <fcntl.h>
 #include <iostream>
 #include <poll.h>
+#include <pthread.h>
 #include <string>
 #include <unistd.h>
 #include <vector>
 
 namespace subspace::dashboard {
 namespace {
+
+// Apple's ncurses installs a SIGWINCH handler that calls tcsetattr. On macOS
+// 26 that ioctl deadlocks when it interrupts wgetch's own tcsetattr, after
+// initscr has already cleared the screen. The dashboard then sits on a black
+// alternate screen. Own the signal and keep it blocked while reading a key.
+void OnSigwinch(int) {}
+
+void InstallSigwinchHandler() {
+  struct sigaction action {};
+  action.sa_handler = OnSigwinch;
+  sigemptyset(&action.sa_mask);
+  action.sa_flags = SA_RESTART;
+  sigaction(SIGWINCH, &action, nullptr);
+}
+
+class BlockSigwinch {
+public:
+  BlockSigwinch() {
+    sigemptyset(&blocked_);
+    sigaddset(&blocked_, SIGWINCH);
+    pthread_sigmask(SIG_BLOCK, &blocked_, &previous_);
+  }
+
+  ~BlockSigwinch() { pthread_sigmask(SIG_SETMASK, &previous_, nullptr); }
+
+private:
+  sigset_t blocked_{};
+  sigset_t previous_{};
+};
 
 std::string SanitizeWarning(std::string_view text) {
   std::string sanitized;
@@ -96,6 +127,8 @@ constexpr Glyph kDot = {
 };
 
 std::string CountString(uint64_t value) { return std::to_string(value); }
+
+constexpr size_t kAcceleratorControlCount = 5;
 
 constexpr std::array<std::string_view, 3> kGaugeStatisticLabels = {
     "CURRENT", "MEAN", "P50"};
@@ -238,14 +271,21 @@ StatsWindow::StatsWindow(retro::Screen *screen, retro::WindowOptions options)
              -1) {}
 
 void StatsWindow::DrawSnapshot(const DashboardSnapshot &snapshot,
-                               const DashboardEngine::Config &config) {
+                               const DashboardEngine::Config &config,
+                               const ModeController::Setting &mode) {
   Window::Draw(false);
   table_.Clear();
+  table_.AddRow({"Mode", mode.label, "", "", "", "", "", ""});
   table_.AddRow(
       {"Channel", snapshot.active_channel, "", "", "", "", "", ""});
   table_.AddRow({"Socket", config.socket, "", "", "", "", "", ""});
   table_.AddRow({"Slots", CountString(snapshot.active_slots), "", "", "", "",
                  "", "slots"});
+  table_.AddRow({"Queue",
+                 snapshot.active_queue_size == 0
+                     ? "off"
+                     : CountString(snapshot.active_queue_size),
+                 "", "", "", "", "", "messages"});
   table_.AddRow({"Slot size", "8", "", "", "", "", "", "bytes"});
   table_.AddRow({"Target", snapshot.target_rate, "", "", "", "", "", ""});
   table_.AddRow({"Published", CountString(snapshot.published_messages), "", "",
@@ -265,10 +305,13 @@ AcceleratorWindow::AcceleratorWindow(retro::Screen *screen,
                                      retro::WindowOptions options)
     : Window(screen, std::move(options)) {}
 
-void AcceleratorWindow::DrawSetting(const RateController::Setting &setting,
+void AcceleratorWindow::DrawSetting(const ModeController::Setting &mode,
+                                    size_t mode_index, size_t mode_count,
+                                    const RateController::Setting &setting,
                                     size_t rate_index, size_t rate_count,
                                     int32_t slots, size_t slot_index,
-                                    size_t slot_count,
+                                    size_t slot_count, int32_t queue_size,
+                                    size_t queue_index, size_t queue_count,
                                     GaugeStatistic gauge_statistic,
                                     AcceleratorControl selected,
                                     const std::string &error) {
@@ -283,21 +326,38 @@ void AcceleratorWindow::DrawSetting(const RateController::Setting &setting,
                     ? retro::kColorPairCyan
                     : retro::kColorPairNormal);
   PrintInMiddle(4, CountString(slots), retro::kColorPairGreen);
-  PrintInMiddle(5, "GAUGE STATISTIC",
+  PrintInMiddle(5, "SUBSCRIBER QUEUE",
+                selected == AcceleratorControl::kSubscriberQueue
+                    ? retro::kColorPairCyan
+                    : retro::kColorPairNormal);
+  PrintInMiddle(6, queue_size == 0 ? "off" : CountString(queue_size),
+                retro::kColorPairGreen);
+  PrintInMiddle(7, "GAUGE STATISTIC",
                 selected == AcceleratorControl::kGaugeStatistic
                     ? retro::kColorPairCyan
                     : retro::kColorPairNormal);
   PrintInMiddle(
-      6, std::string(kGaugeStatisticLabels[GaugeStatisticIndex(
+      8, std::string(kGaugeStatisticLabels[GaugeStatisticIndex(
              gauge_statistic)]),
       retro::kColorPairGreen);
+  PrintInMiddle(9, "MODE",
+                selected == AcceleratorControl::kMode
+                    ? retro::kColorPairCyan
+                    : retro::kColorPairNormal);
+  PrintInMiddle(10, mode.label, retro::kColorPairGreen);
 
   const int bar_width = std::max(4, Width() - 6);
-  size_t selected_index = rate_index;
-  size_t selected_count = rate_count;
-  if (selected == AcceleratorControl::kSlots) {
+  size_t selected_index = mode_index;
+  size_t selected_count = mode_count;
+  if (selected == AcceleratorControl::kRate) {
+    selected_index = rate_index;
+    selected_count = rate_count;
+  } else if (selected == AcceleratorControl::kSlots) {
     selected_index = slot_index;
     selected_count = slot_count;
+  } else if (selected == AcceleratorControl::kSubscriberQueue) {
+    selected_index = queue_index;
+    selected_count = queue_count;
   } else if (selected == AcceleratorControl::kGaugeStatistic) {
     selected_index = GaugeStatisticIndex(gauge_statistic);
     selected_count = kGaugeStatisticLabels.size();
@@ -311,10 +371,10 @@ void AcceleratorWindow::DrawSetting(const RateController::Setting &setting,
   bar.append(filled, '*');
   bar.append(bar_width - 2 - filled, ' ');
   bar += "]";
-  PrintInMiddle(7, bar, retro::kColorPairYellow);
-  PrintInMiddle(8, "LEFT / RIGHT  select");
-  PrintInMiddle(9, "UP / DOWN     adjust");
-  PrintInMiddle(10, "q             quit");
+  PrintInMiddle(11, bar, retro::kColorPairYellow);
+  PrintInMiddle(12, "LEFT / RIGHT  select");
+  PrintInMiddle(13, "UP / DOWN     adjust");
+  PrintInMiddle(14, "q             quit");
   if (!error.empty()) {
     std::string banner = "ERROR: " + error;
     const size_t max_width = static_cast<size_t>(std::max(1, Width() - 4));
@@ -356,7 +416,7 @@ void WarningWindow::DrawWarnings(
 }
 
 DashboardApplication::DashboardApplication(DashboardEngine &engine)
-    : Cpp20Application(32, 112), engine_(engine) {}
+    : Cpp20Application(36, 112), engine_(engine) {}
 
 DashboardApplication::~DashboardApplication() { RestoreStandardError(); }
 
@@ -409,6 +469,13 @@ absl::Status DashboardApplication::Init() {
                                      .y = top_height + body_height,
                                      .x = 0});
 
+  InstallSigwinchHandler();
+  // getch() must not block the scheduler. A spurious POLLIN on the tty, which
+  // macOS 26 reports for a just-initialized curses terminal, would otherwise
+  // enter wgetch before the first refresh and leave the cleared screen black.
+  nodelay(stdscr, TRUE);
+  DrawAll();
+
   if (auto status = CaptureStandardError(); !status.ok()) {
     return status;
   }
@@ -418,10 +485,10 @@ absl::Status DashboardApplication::Init() {
       },
       "dashboard-warning-capture");
   engine_.StartTasks(*this);
-  Spawn([this](co20::Coroutine &c) -> co20::Task { return InputTask(c); },
-        "dashboard-input");
   Spawn([this](co20::Coroutine &c) -> co20::Task { return RefreshTask(c); },
         "dashboard-refresh");
+  Spawn([this](co20::Coroutine &c) -> co20::Task { return InputTask(c); },
+        "dashboard-input");
   return absl::OkStatus();
 }
 
@@ -528,62 +595,86 @@ co20::Task DashboardApplication::InputTask(co20::Coroutine &c) {
   while (!engine_.IsStopping()) {
     const int ready = co_await c.Wait(STDIN_FILENO, POLLIN, 100'000'000ULL);
     if (ready == STDIN_FILENO) {
-      const int character = getch();
-      switch (character) {
-      case KEY_LEFT: {
-        const size_t index = static_cast<size_t>(selected_control_);
-        selected_control_ =
-            static_cast<AcceleratorControl>((index + 2) % 3);
-        break;
-      }
-      case KEY_RIGHT: {
-        const size_t index = static_cast<size_t>(selected_control_);
-        selected_control_ =
-            static_cast<AcceleratorControl>((index + 1) % 3);
-        break;
-      }
-      case KEY_UP: {
-        bool changed = false;
-        if (selected_control_ == AcceleratorControl::kRate) {
-          changed = engine_.IncreaseRate();
-        } else if (selected_control_ == AcceleratorControl::kSlots) {
-          changed = engine_.IncreaseSlots();
-        } else {
-          const size_t index = GaugeStatisticIndex(gauge_statistic_);
-          if (index + 1 < kGaugeStatisticLabels.size()) {
-            gauge_statistic_ = static_cast<GaugeStatistic>(index + 1);
-            changed = true;
+      bool handled_key = false;
+      {
+        InstallSigwinchHandler();
+        BlockSigwinch block_sigwinch;
+        for (;;) {
+          const int character = getch();
+          if (character == ERR) {
+            break;
           }
+          handled_key = true;
+          switch (character) {
+        case KEY_LEFT: {
+          const size_t index = static_cast<size_t>(selected_control_);
+          selected_control_ = static_cast<AcceleratorControl>(
+              (index + kAcceleratorControlCount - 1) % kAcceleratorControlCount);
+          break;
         }
-        if (!changed) {
-          beep();
+        case KEY_RIGHT: {
+          const size_t index = static_cast<size_t>(selected_control_);
+          selected_control_ = static_cast<AcceleratorControl>(
+              (index + 1) % kAcceleratorControlCount);
+          break;
         }
-        break;
-      }
-      case KEY_DOWN: {
-        bool changed = false;
-        if (selected_control_ == AcceleratorControl::kRate) {
-          changed = engine_.DecreaseRate();
-        } else if (selected_control_ == AcceleratorControl::kSlots) {
-          changed = engine_.DecreaseSlots();
-        } else {
-          const size_t index = GaugeStatisticIndex(gauge_statistic_);
-          if (index != 0) {
-            gauge_statistic_ = static_cast<GaugeStatistic>(index - 1);
-            changed = true;
+        case KEY_UP: {
+          bool changed = false;
+          if (selected_control_ == AcceleratorControl::kMode) {
+            changed = engine_.IncreaseMode();
+          } else if (selected_control_ == AcceleratorControl::kRate) {
+            changed = engine_.IncreaseRate();
+          } else if (selected_control_ == AcceleratorControl::kSlots) {
+            changed = engine_.IncreaseSlots();
+          } else if (selected_control_ == AcceleratorControl::kSubscriberQueue) {
+            changed = engine_.IncreaseSubscriberQueue();
+          } else {
+            const size_t index = GaugeStatisticIndex(gauge_statistic_);
+            if (index + 1 < kGaugeStatisticLabels.size()) {
+              gauge_statistic_ = static_cast<GaugeStatistic>(index + 1);
+              changed = true;
+            }
           }
+          if (!changed) {
+            beep();
+          }
+          break;
         }
-        if (!changed) {
-          beep();
+        case KEY_DOWN: {
+          bool changed = false;
+          if (selected_control_ == AcceleratorControl::kMode) {
+            changed = engine_.DecreaseMode();
+          } else if (selected_control_ == AcceleratorControl::kRate) {
+            changed = engine_.DecreaseRate();
+          } else if (selected_control_ == AcceleratorControl::kSlots) {
+            changed = engine_.DecreaseSlots();
+          } else if (selected_control_ == AcceleratorControl::kSubscriberQueue) {
+            changed = engine_.DecreaseSubscriberQueue();
+          } else {
+            const size_t index = GaugeStatisticIndex(gauge_statistic_);
+            if (index != 0) {
+              gauge_statistic_ = static_cast<GaugeStatistic>(index - 1);
+              changed = true;
+            }
+          }
+          if (!changed) {
+            beep();
+          }
+          break;
         }
-        break;
+        case 'q':
+        case 'Q':
+          engine_.RequestStop();
+          break;
+        default:
+          break;
+        }
+        }
       }
-      case 'q':
-      case 'Q':
-        engine_.RequestStop();
-        break;
-      default:
-        break;
+      // macOS reports this curses tty as readable when no key is waiting.
+      // Polling it again immediately pins the main thread and slows publishing.
+      if (!handled_key) {
+        co_await c.Sleep(std::chrono::milliseconds(100));
       }
     }
   }
@@ -600,10 +691,14 @@ co20::Task DashboardApplication::RefreshTask(co20::Coroutine &c) {
 
 void DashboardApplication::DrawAll() {
   const auto snapshot = engine_.Snapshot();
+  const auto &mode_settings = ModeController::Settings();
+  const auto mode = engine_.Mode();
   const auto &settings = RateController::Settings();
   const auto rate = engine_.Rate();
   const auto &slot_settings = SlotController::Settings();
   const auto slots = engine_.Slots();
+  const auto &queue_settings = SubscriberQueueController::Settings();
+  const auto queue = engine_.SubscriberQueue();
   const auto &setting = rate.setting;
   const std::string throughput_unit = ScaleThroughput(setting.hz).unit;
   const std::string_view statistic =
@@ -618,11 +713,12 @@ void DashboardApplication::DrawAll() {
           ? GaugeValue(snapshot.latency_ns, gauge_statistic_)
           : 0.0,
       statistic);
-  stats_window_->DrawSnapshot(snapshot, engine_.GetConfig());
+  stats_window_->DrawSnapshot(snapshot, engine_.GetConfig(), mode.setting);
   accelerator_window_->DrawSetting(
-      setting, rate.index, settings.size(), slots.count, slots.index,
-      slot_settings.size(), gauge_statistic_, selected_control_,
-      snapshot.error);
+      mode.setting, mode.index, mode_settings.size(), setting, rate.index,
+      settings.size(), slots.count, slots.index, slot_settings.size(),
+      queue.size, queue.index, queue_settings.size(), gauge_statistic_,
+      selected_control_, snapshot.error);
   warning_window_->DrawWarnings(snapshot.warnings);
 }
 

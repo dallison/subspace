@@ -26,6 +26,11 @@ public:
     std::string channel = "/dashboard";
   };
 
+  struct ModeSnapshot {
+    ModeController::Setting setting;
+    size_t index;
+  };
+
   struct RateSnapshot {
     RateController::Setting setting;
     size_t index;
@@ -33,6 +38,11 @@ public:
 
   struct SlotSnapshot {
     int32_t count;
+    size_t index;
+  };
+
+  struct QueueSnapshot {
+    int32_t size;
     size_t index;
   };
 
@@ -46,24 +56,31 @@ public:
   void StartTasks(retro::Cpp20Application &app);
   void RequestStop();
 
+  bool IncreaseMode();
+  bool DecreaseMode();
   bool IncreaseRate();
   bool DecreaseRate();
   bool IncreaseSlots();
   bool DecreaseSlots();
+  bool IncreaseSubscriberQueue();
+  bool DecreaseSubscriberQueue();
   void RecordWarning(std::string warning);
   bool IsStopping() const {
     return stopping_.load(std::memory_order_acquire);
   }
 
   const Config &GetConfig() const { return config_; }
+  ModeSnapshot Mode() const;
   RateSnapshot Rate() const;
   SlotSnapshot Slots() const;
+  QueueSnapshot SubscriberQueue() const;
   DashboardSnapshot Snapshot() const;
 
 private:
   struct ChannelProfile {
     std::string name;
     int32_t slots;
+    int32_t queue_size;
     uint64_t generation;
   };
 
@@ -72,7 +89,10 @@ private:
   co20::Task SamplerTask(co20::Coroutine &c);
 
   void NotifyRateChanged();
+  void NotifyModeChanged();
   void NotifyChannelChanged();
+  ChannelProfile CurrentChannel() const;
+  void ResetMeasurements();
   absl::StatusOr<subspace::Publisher>
   CreatePublisher(const ChannelProfile &profile);
   absl::StatusOr<subspace::Subscriber>
@@ -80,6 +100,8 @@ private:
   void ReportError(const absl::Status &status);
   void JoinWorkers();
   void RecordPublished(uint64_t count);
+  void RecordDropped(uint64_t count);
+  void RecordReceived(uint64_t latency_ns, uint64_t dropped);
   void RecordReceivedBatch(const std::vector<uint64_t> &latencies);
   void SampleMetrics();
   static absl::Status CreateNonBlockingPipe(int pipe_fds[2]);
@@ -91,8 +113,10 @@ private:
   mutable std::mutex rate_mutex_;
   mutable std::mutex metrics_mutex_;
   std::condition_variable rate_changed_;
+  ModeController mode_;
   RateController rate_;
   SlotController slots_;
+  SubscriberQueueController queues_;
   ChannelProfile published_channel_;
   ChannelProfile active_channel_;
   RollingMetrics metrics_;
@@ -102,6 +126,11 @@ private:
   std::optional<subspace::Publisher> publisher_;
   std::optional<subspace::Subscriber> subscriber_;
   std::atomic<bool> stopping_ = false;
+  std::atomic<PerformanceMode> performance_mode_ =
+      PerformanceMode::kThroughput;
+  // True while the subscriber thread is draining messages it has already been
+  // woken for. The publisher skips per-message trigger writes in that window.
+  std::atomic<bool> subscriber_busy_ = false;
   bool tasks_started_ = false;
   std::thread publisher_thread_;
   std::thread subscriber_thread_;

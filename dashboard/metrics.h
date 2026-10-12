@@ -30,6 +30,8 @@ struct DashboardSnapshot {
   double drop_rate_percent = 0.0;
   int32_t requested_slots = 32;
   int32_t active_slots = 32;
+  int32_t requested_queue_size = 0;
+  int32_t active_queue_size = 0;
   std::string active_channel;
   std::string target_rate;
   std::string error;
@@ -39,6 +41,32 @@ struct DashboardSnapshot {
 struct ScaledValue {
   double value = 0.0;
   std::string unit;
+};
+
+enum class PerformanceMode {
+  kThroughput,
+  kLatency,
+};
+
+class ModeController {
+public:
+  struct Setting {
+    PerformanceMode mode;
+    const char *label;
+  };
+
+  bool Increase();
+  bool Decrease();
+  const Setting &Current() const;
+  size_t Index() const { return index_; }
+  uint64_t Generation() const { return generation_; }
+
+  static constexpr size_t kInitialIndex = 0;
+  static const std::array<Setting, 2> &Settings();
+
+private:
+  size_t index_ = kInitialIndex;
+  uint64_t generation_ = 0;
 };
 
 class RateController {
@@ -57,7 +85,7 @@ public:
   size_t Index() const { return index_; }
 
   static constexpr size_t kInitialIndex = 1;
-  static const std::array<Setting, 9> &Settings();
+  static const std::array<Setting, 11> &Settings();
 
 private:
   size_t index_ = kInitialIndex;
@@ -82,6 +110,25 @@ private:
   uint64_t generation_ = 0;
 };
 
+class SubscriberQueueController {
+public:
+  SubscriberQueueController() = default;
+
+  bool Increase();
+  bool Decrease();
+  int32_t Current() const;
+  size_t Index() const { return index_; }
+  uint64_t Generation() const { return generation_; }
+
+  // Zero disables subscriber queues. The remaining presets are queue capacities.
+  static constexpr size_t kInitialIndex = 0;
+  static const std::array<int32_t, 9> &Settings();
+
+private:
+  size_t index_ = kInitialIndex;
+  uint64_t generation_ = 0;
+};
+
 class RollingMetrics {
 public:
   static constexpr size_t kHistoryBuckets = 10;
@@ -95,7 +142,7 @@ public:
   void SetError(std::string error);
   void RecordWarning(std::string warning);
   void ResetStatistics();
-  void ResetForChannel(std::string channel, int32_t slots);
+  void ResetForChannel(std::string channel, int32_t slots, int32_t queue_size);
   void Sample(uint64_t now_ns);
 
   const DashboardSnapshot &Snapshot() const { return snapshot_; }
@@ -136,6 +183,7 @@ ScaledValue ScaleLatency(double nanoseconds);
 std::string FormatGaugeNumber(double value);
 std::string FormatCompact(double value);
 double DropRatePercent(uint64_t received, uint64_t dropped);
-std::string ChannelNameForSlots(std::string_view base, int32_t slots);
+std::string ChannelName(std::string_view base, int32_t slots,
+                        int32_t queue_size);
 
 } // namespace subspace::dashboard
