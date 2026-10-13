@@ -39,6 +39,8 @@ bazelisk run -c opt //dashboard:dashboard -- \
 - Up/down arrows: adjust the selected control. Throughput mode batches
   notifications and drains every available message. Latency mode wakes the
   subscriber for every publication and reads the newest available message.
+  Reliable mode uses a reliable publisher and subscriber, notifies on every
+  publication, and drains messages sequentially like throughput mode.
   Rates range from STOPPED through 10 MHz; slot presets are 8, 16, 32, 64, 128,
   256, 512, and 1024; subscriber queue presets are off, 8, 16, 32, 64, 128,
   256, 512, and 1024; gauge statistics are current, mean, and p50 and apply to

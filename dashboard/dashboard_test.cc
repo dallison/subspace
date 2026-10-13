@@ -9,7 +9,7 @@
 namespace subspace::dashboard {
 namespace {
 
-TEST(ModeControllerTest, SwitchesBetweenThroughputAndLatency) {
+TEST(ModeControllerTest, SwitchesBetweenPerformanceModes) {
   ModeController mode;
   EXPECT_EQ(mode.Current().mode, PerformanceMode::kThroughput);
   EXPECT_EQ(std::string(mode.Current().label), "THROUGHPUT");
@@ -19,11 +19,24 @@ TEST(ModeControllerTest, SwitchesBetweenThroughputAndLatency) {
   EXPECT_EQ(mode.Current().mode, PerformanceMode::kLatency);
   EXPECT_EQ(std::string(mode.Current().label), "LATENCY");
   EXPECT_EQ(mode.Generation(), 1);
+
+  EXPECT_TRUE(mode.Increase());
+  EXPECT_EQ(mode.Current().mode, PerformanceMode::kReliable);
+  EXPECT_EQ(std::string(mode.Current().label), "RELIABLE");
+  EXPECT_EQ(mode.Generation(), 2);
   EXPECT_FALSE(mode.Increase());
 
   EXPECT_TRUE(mode.Decrease());
+  EXPECT_EQ(mode.Current().mode, PerformanceMode::kLatency);
+  EXPECT_TRUE(mode.Decrease());
   EXPECT_EQ(mode.Current().mode, PerformanceMode::kThroughput);
   EXPECT_FALSE(mode.Decrease());
+}
+
+TEST(DashboardMetricsTest, ChannelNameIncludesReliableSuffix) {
+  EXPECT_EQ(ChannelName("/dashboard", 32, 0, false), "/dashboard-32-slots-0-queue");
+  EXPECT_EQ(ChannelName("/dashboard", 32, 0, true),
+            "/dashboard-32-slots-0-queue-reliable");
 }
 
 TEST(RateControllerTest, ClampsAtBothEnds) {

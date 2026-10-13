@@ -24,10 +24,11 @@ double Percentile(std::vector<T> values, double percentile) {
 
 } // namespace
 
-const std::array<ModeController::Setting, 2> &ModeController::Settings() {
-  static constexpr std::array<Setting, 2> settings = {{
+const std::array<ModeController::Setting, 3> &ModeController::Settings() {
+  static constexpr std::array<Setting, 3> settings = {{
       {PerformanceMode::kThroughput, "THROUGHPUT"},
       {PerformanceMode::kLatency, "LATENCY"},
+      {PerformanceMode::kReliable, "RELIABLE"},
   }};
   return settings;
 }
@@ -407,9 +408,13 @@ double DropRatePercent(uint64_t received, uint64_t dropped) {
 }
 
 std::string ChannelName(std::string_view base, int32_t slots,
-                        int32_t queue_size) {
-  return std::string(base) + "-" + std::to_string(slots) + "-slots-" +
-         std::to_string(queue_size) + "-queue";
+                        int32_t queue_size, bool reliable) {
+  std::string name = std::string(base) + "-" + std::to_string(slots) +
+                     "-slots-" + std::to_string(queue_size) + "-queue";
+  if (reliable) {
+    name += "-reliable";
+  }
+  return name;
 }
 
 } // namespace subspace::dashboard
