@@ -75,9 +75,11 @@ TEST_F(DashboardEngineTest, SwitchesPerformanceModeWhileRunning) {
       [&engine](co20::Coroutine &c) -> co20::Task {
         EXPECT_TRUE(engine.IncreaseRate()); // 10 Hz.
         EXPECT_TRUE(engine.IncreaseMode()); // Latency.
+        EXPECT_TRUE(engine.IncreaseMode()); // Reliable.
         EXPECT_FALSE(engine.IncreaseMode());
         co_await c.Sleep(std::chrono::milliseconds(300));
-        EXPECT_EQ(engine.Mode().setting.mode, PerformanceMode::kLatency);
+        EXPECT_EQ(engine.Mode().setting.mode, PerformanceMode::kReliable);
+        EXPECT_TRUE(engine.DecreaseMode()); // Latency.
         EXPECT_TRUE(engine.DecreaseMode()); // Throughput.
         EXPECT_FALSE(engine.DecreaseMode());
         co_await c.Sleep(std::chrono::milliseconds(300));
@@ -290,6 +292,33 @@ TEST_F(DashboardEngineTest, CoalescesRapidSubscriberQueueChanges) {
   ASSERT_TRUE(active_info.ok());
   EXPECT_EQ(active_info->subscriber_queue_arena_size,
             subspace::SlotQueueBlockSize(16));
+}
+
+TEST_F(DashboardEngineTest, ReliableModePublishesOnReliableChannel) {
+  constexpr std::string_view kBase = "/dashboard-engine-reliable-mode-test";
+  DashboardEngine engine({.socket = Socket(), .channel = std::string(kBase)});
+  ASSERT_TRUE(engine.Init().ok());
+
+  TestApplication app;
+  engine.StartTasks(app);
+  app.Spawn(
+      [&engine](co20::Coroutine &c) -> co20::Task {
+        EXPECT_TRUE(engine.IncreaseRate()); // 10 Hz.
+        EXPECT_TRUE(engine.IncreaseMode()); // Latency.
+        EXPECT_TRUE(engine.IncreaseMode()); // Reliable.
+        co_await c.Sleep(std::chrono::milliseconds(500));
+        engine.RequestStop();
+        co_return;
+      },
+      "test-controller");
+  app.Cpp20Scheduler().Run();
+
+  EXPECT_EQ(engine.Mode().setting.mode, PerformanceMode::kReliable);
+  const auto snapshot = engine.Snapshot();
+  EXPECT_EQ(snapshot.active_channel, ChannelName(kBase, 32, 0, true));
+  EXPECT_GT(snapshot.published_messages, 0);
+  EXPECT_GT(snapshot.received_messages, 0);
+  EXPECT_TRUE(snapshot.error.empty());
 }
 
 TEST_F(DashboardEngineTest, StopsWhileChannelSwitchIsPending) {
