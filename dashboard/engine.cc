@@ -23,8 +23,18 @@ size_t PublishBatchSize(int32_t slots) {
 }
 
 uint64_t ChannelGeneration(uint64_t slots_generation,
-                           uint64_t queue_generation) {
-  return (slots_generation << 32) | queue_generation;
+                           uint64_t queue_generation,
+                           uint64_t mode_generation) {
+  return (mode_generation << 48) | (slots_generation << 32) | queue_generation;
+}
+
+bool UsesReliableTransport(PerformanceMode mode) {
+  return mode == PerformanceMode::kReliable;
+}
+
+bool UsesBatchSubscriberDrain(PerformanceMode mode) {
+  return mode == PerformanceMode::kThroughput ||
+         mode == PerformanceMode::kReliable;
 }
 
 uint64_t SubscriberQueueArenaBytes(int32_t queue_size) {
@@ -39,12 +49,14 @@ uint64_t SubscriberQueueArenaBytes(int32_t queue_size) {
 DashboardEngine::ChannelProfile DashboardEngine::CurrentChannel() const {
   const int32_t slots = slots_.Current();
   const int32_t queue_size = queues_.Current();
+  const PerformanceMode mode = mode_.Current().mode;
   return {
-      .name = ChannelName(config_.channel, slots, queue_size),
+      .name = ChannelName(config_.channel, slots, queue_size,
+                          UsesReliableTransport(mode)),
       .slots = slots,
       .queue_size = queue_size,
-      .generation =
-          ChannelGeneration(slots_.Generation(), queues_.Generation()),
+      .generation = ChannelGeneration(slots_.Generation(), queues_.Generation(),
+                                      mode_.Generation()),
   };
 }
 
@@ -255,21 +267,38 @@ void DashboardEngine::RecordWarning(std::string warning) {
 
 absl::StatusOr<subspace::Publisher>
 DashboardEngine::CreatePublisher(const ChannelProfile &profile) {
-  return publisher_client_->CreatePublisher(
-      profile.name, kPayloadSize, profile.slots,
+  PerformanceMode mode;
+  {
+    std::lock_guard lock(rate_mutex_);
+    mode = mode_.Current().mode;
+  }
+  subspace::PublisherOptions options =
       subspace::PublisherOptions()
           .SetFixedSize(true)
           .SetType("subspace.dashboard.Timestamp")
           .SetSubscriberQueueArenaSize(
-              SubscriberQueueArenaBytes(profile.queue_size)));
+              SubscriberQueueArenaBytes(profile.queue_size));
+  if (UsesReliableTransport(mode)) {
+    options.SetReliable(true);
+  }
+  return publisher_client_->CreatePublisher(profile.name, kPayloadSize,
+                                           profile.slots, options);
 }
 
 absl::StatusOr<subspace::Subscriber>
 DashboardEngine::CreateSubscriber(const ChannelProfile &profile) {
+  PerformanceMode mode;
+  {
+    std::lock_guard lock(rate_mutex_);
+    mode = mode_.Current().mode;
+  }
   subspace::SubscriberOptions options;
   options.SetType("subspace.dashboard.Timestamp");
   options.SetLogDroppedMessages(false);
   options.SetSubscriberQueueSize(profile.queue_size);
+  if (UsesReliableTransport(mode)) {
+    options.SetReliable(true);
+  }
   // The dashboard's subscriber_busy_ handoff guarantees that the publisher
   // wakes an idle subscriber. Avoid an additional trigger write when this
   // thread releases each message.
@@ -326,8 +355,8 @@ void DashboardEngine::PublisherLoop() {
       current_generation = rate_.Generation();
       current_mode_generation = mode_.Generation();
       mode = mode_.Current().mode;
-      requested_generation =
-          ChannelGeneration(slots_.Generation(), queues_.Generation());
+      requested_generation = ChannelGeneration(
+          slots_.Generation(), queues_.Generation(), mode_.Generation());
     }
     mode_generation = current_mode_generation;
     if (channel_generation != requested_generation) {
@@ -377,8 +406,8 @@ void DashboardEngine::PublisherLoop() {
       rate_changed_.wait(lock, [&] {
         return IsStopping() || rate_.Generation() != generation ||
                mode_.Generation() != mode_generation ||
-               ChannelGeneration(slots_.Generation(), queues_.Generation()) !=
-                   channel_generation;
+               ChannelGeneration(slots_.Generation(), queues_.Generation(),
+                                 mode_.Generation()) != channel_generation;
       });
       continue;
     }
@@ -394,7 +423,8 @@ void DashboardEngine::PublisherLoop() {
               return IsStopping() || rate_.Generation() != generation ||
                      mode_.Generation() != mode_generation ||
                      ChannelGeneration(slots_.Generation(),
-                                       queues_.Generation()) !=
+                                       queues_.Generation(),
+                                       mode_.Generation()) !=
                          channel_generation;
             });
       } else {
@@ -441,6 +471,7 @@ void DashboardEngine::PublisherLoop() {
     // is still woken.
     const bool notify =
         mode == PerformanceMode::kLatency ||
+        mode == PerformanceMode::kReliable ||
         !subscriber_busy_.load(std::memory_order_acquire);
     auto published = publisher_->PublishMessage(kPayloadSize, notify);
     if (published.ok() && mode == PerformanceMode::kThroughput && !notify &&
@@ -640,8 +671,8 @@ void DashboardEngine::SubscriberLoop() {
       if (!saw_message) {
         break;
       }
-      if (performance_mode_.load(std::memory_order_acquire) !=
-          PerformanceMode::kThroughput) {
+      if (!UsesBatchSubscriberDrain(
+              performance_mode_.load(std::memory_order_acquire))) {
         break;
       }
       auto missed = subscriber_->ReadMessage();

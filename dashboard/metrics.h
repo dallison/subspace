@@ -46,6 +46,7 @@ struct ScaledValue {
 enum class PerformanceMode {
   kThroughput,
   kLatency,
+  kReliable,
 };
 
 class ModeController {
@@ -62,7 +63,7 @@ public:
   uint64_t Generation() const { return generation_; }
 
   static constexpr size_t kInitialIndex = 0;
-  static const std::array<Setting, 2> &Settings();
+  static const std::array<Setting, 3> &Settings();
 
 private:
   size_t index_ = kInitialIndex;
@@ -184,6 +185,6 @@ std::string FormatGaugeNumber(double value);
 std::string FormatCompact(double value);
 double DropRatePercent(uint64_t received, uint64_t dropped);
 std::string ChannelName(std::string_view base, int32_t slots,
-                        int32_t queue_size);
+                        int32_t queue_size, bool reliable = false);
 
 } // namespace subspace::dashboard
