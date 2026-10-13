@@ -121,12 +121,10 @@ TEST_F(SyscallFailureTest, FtruncateFailAfterShmOpen) {
   auto pub = client->CreatePublisher("/ftrunc_test",
                                      subspace::PublisherOptions().SetSlotSize(64).SetNumSlots(4));
   ASSERT_FALSE(pub.ok());
-  // On Linux ftruncate is on the shm fd; on POSIX/macOS it's on the shadow file.
   EXPECT_THAT(
       pub.status().message(),
       ::testing::AnyOf(
           ::testing::HasSubstr("Failed to set length of shared memory"),
-          ::testing::HasSubstr("Failed to truncate shadow file"),
           ::testing::HasSubstr("Failed to size anonymous shared memory")));
 }
 

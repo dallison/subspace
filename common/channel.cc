@@ -178,7 +178,7 @@ std::string Channel::BufferSharedMemoryName(uint64_t session_id,
                          buffer_index);
 #elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   // In POSIX mode (macOS and QNX) the shared memory object name is derived
-  // from a "shadow" file on disk: its length records the buffer's true size
+  // from a "shadow" file on disk: its contents record the buffer's true size
   // (fstat on the shm object itself is page-aligned) and its inode is used to
   // name the shm object (see PosixSharedMemoryName).  This is an actual
   // filesystem path, so anchor it in /tmp; a bare relative name would create
