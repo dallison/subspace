@@ -121,7 +121,8 @@ void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
                             std::memory_order_relaxed));
                       });
   }
-  if (--num_active_messages_ < options_.MaxActiveMessages()) {
+  if (--num_active_messages_ < options_.MaxActiveMessages() &&
+      options_.TriggerOnRelease()) {
     Trigger();
     if (IsReliable()) {
       TriggerReliablePublishers();

@@ -347,6 +347,16 @@ struct SubscriberOptions {
   const std::string &Type() const { return type; }
   int MaxSharedPtrs() const { return max_active_messages - 1; }
   int MaxActiveMessages() const { return max_active_messages; }
+
+  // By default, releasing an active message re-arms the subscriber trigger.
+  // Event loops that provide their own race-free publisher/subscriber handoff
+  // may disable this to avoid a trigger write for every released message.
+  SubscriberOptions &SetTriggerOnRelease(bool v) {
+    trigger_on_release = v;
+    return *this;
+  }
+  bool TriggerOnRelease() const { return trigger_on_release; }
+
   SubscriberOptions &SetMaxSubscribers(int n) {
     max_subscribers = n;
     return *this;
@@ -472,6 +482,7 @@ struct SubscriberOptions {
   bool telemetry = false;
   std::string type;
   int max_active_messages = 1;
+  bool trigger_on_release = true;
   int32_t max_subscribers = 0;
   bool log_dropped_messages = true;
   bool detect_dropped_messages = true;

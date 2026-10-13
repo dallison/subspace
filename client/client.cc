@@ -976,15 +976,22 @@ ClientImpl::GetPublisherBufferMetadata(PublisherImpl *publisher,
 }
 
 absl::StatusOr<const Message>
-ClientImpl::PublishMessage(PublisherImpl *publisher, int64_t message_size) {
+ClientImpl::PublishMessage(PublisherImpl *publisher, int64_t message_size,
+                           bool notify_subscribers) {
   return PublishMessageInternal(publisher, message_size, /*omit_prefix=*/false,
-                                /*use_prefix_slot_id=*/false);
+                                /*use_prefix_slot_id=*/false,
+                                notify_subscribers);
+}
+
+void ClientImpl::NotifySubscribers(PublisherImpl *publisher) {
+  publisher->TriggerSubscribers();
 }
 
 absl::StatusOr<const Message>
 ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
                                    int64_t message_size, bool omit_prefix,
-                                   bool use_prefix_slot_id) {
+                                   bool use_prefix_slot_id,
+                                   bool notify_subscribers) {
   // Lock is already held by the call to GetMessageBufferSpan.  This RAII
   // instance wil relesas the lock when we return from this function.
   ClientLockGuard guard(this, LockMode::kMaybeLocked);
@@ -1027,7 +1034,9 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
 
   publisher->SetSlot(msg.new_slot);
 
-  publisher->TriggerSubscribers();
+  if (notify_subscribers) {
+    publisher->TriggerSubscribers();
+  }
   if (absl::Status status = publisher->UnmapUnusedBuffers(); !status.ok()) {
     return status;
   }
@@ -1157,7 +1166,7 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
         {.fd = fd.Fd(), .events = POLLIN}};
     int e = GetSyscallShim().poll_fn(
         fds, 2, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
-    if (timeout_ns == 0 && e == 0) {
+    if (timeout_ns != 0 && e == 0) {
       return absl::InternalError("Timeout waiting for reliable publisher");
     }
     if (e < 0) {
@@ -1261,7 +1270,7 @@ absl::StatusOr<int> ClientImpl::WaitForSubscriber(
         {.fd = fd.Fd(), .events = POLLIN}};
     int e = GetSyscallShim().poll_fn(
         fds, 2, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
-    if (timeout_ns == 0 && e == 0) {
+    if (timeout_ns != 0 && e == 0) {
       return absl::InternalError("Timeout waiting for subscriber");
     }
     if (e < 0) {
@@ -1614,6 +1623,14 @@ void ClientImpl::ReportIfSubscriberStuck(SubscriberImpl *subscriber) {
               subscriber->MaxActiveMessages(),
               silencing ? "; this warning is silenced until it reads again"
                         : "");
+}
+
+absl::StatusOr<Message>
+ClientImpl::ReadMessageFromBatch(SubscriberImpl *subscriber, ReadMode mode) {
+  ClientLockGuard guard(this);
+  return ReadMessageInternal(subscriber, mode,
+                             subscriber->options_.pass_activation,
+                             /*clear_trigger=*/false);
 }
 
 absl::StatusOr<Message>

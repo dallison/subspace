@@ -28,6 +28,7 @@
 #include <mutex>
 #include <optional>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <type_traits>
 #include <utility>
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
@@ -360,6 +361,84 @@ TEST_F(ClientTest, AttachingPublisherPreservesResizedSlotSize) {
   ASSERT_OK(updated_info);
   EXPECT_EQ(512u, updated_info->slot_size);
 }
+
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
+// The /tmp shadow file records the buffer size; it must not be sized to the
+// buffer itself because /tmp is RAM-backed on QNX.
+TEST_F(ClientTest, PosixShadowFileDoesNotReserveBufferSize) {
+  constexpr int kSlotSize = 1 << 20;
+  constexpr int kNumSlots = 8;
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  InitClient(pub_client);
+  InitClient(sub_client);
+  subspace::PublisherOptions options = PubOpts(kSlotSize, kNumSlots);
+  options.SetUseSplitBuffers(false);
+  absl::StatusOr<Publisher> pub =
+      pub_client.CreatePublisher("posix_shadow_size", options);
+  ASSERT_OK(pub);
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "foobar", 6);
+  ASSERT_OK(pub->PublishMessage(6));
+
+  std::string shadow_file =
+      absl::StrFormat("/tmp/subspace_%d_posix_shadow_size_0",
+                      Server()->GetSessionId());
+  struct stat sb;
+  ASSERT_EQ(0, stat(shadow_file.c_str(), &sb)) << strerror(errno);
+  EXPECT_LT(sb.st_size, 4096);
+
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber("posix_shadow_size");
+  ASSERT_OK(sub);
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(6, msg->length);
+  EXPECT_EQ(kSlotSize, sub->SlotSize());
+}
+
+// The publisher that creates a buffer's shm object owns its size, so a stale
+// size left in the shadow file (e.g. by a creator that crashed before sizing
+// its object) must be replaced rather than trusted.
+TEST_F(ClientTest, PosixShadowFileStaleSizeIsReplacedByCreator) {
+  constexpr int kSlotSize = 4096;
+  constexpr int kNumSlots = 4;
+  std::string shadow_file =
+      absl::StrFormat("/tmp/subspace_%d_posix_shadow_stale_0",
+                      Server()->GetSessionId());
+  {
+    char record[16] = {'\0', 'S', 'S', 'B', 'S', 'I', 'Z', 'E'};
+    uint64_t stale_size = 64;
+    memcpy(record + 8, &stale_size, sizeof(stale_size));
+    std::ofstream out(shadow_file, std::ios::binary | std::ios::trunc);
+    out.write(record, sizeof(record));
+    ASSERT_TRUE(out.good());
+  }
+
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  InitClient(pub_client);
+  InitClient(sub_client);
+  subspace::PublisherOptions options = PubOpts(kSlotSize, kNumSlots);
+  options.SetUseSplitBuffers(false);
+  absl::StatusOr<Publisher> pub =
+      pub_client.CreatePublisher("posix_shadow_stale", options);
+  ASSERT_OK(pub);
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "foobar", 6);
+  ASSERT_OK(pub->PublishMessage(6));
+
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber("posix_shadow_stale");
+  ASSERT_OK(sub);
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(6, msg->length);
+  EXPECT_EQ(kSlotSize, sub->SlotSize());
+}
+#endif
 
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
 TEST(AndroidBufferRegistrationTest, FailedRegistrationRollsBackNumBuffers) {
@@ -3250,6 +3329,48 @@ TEST_F(ClientTest, PublishSingleMessagePollAndReadSubscriberFirst) {
   msg = sub->ReadMessage();
   ASSERT_OK(msg);
   ASSERT_EQ(0, msg->length);
+}
+
+TEST_F(ClientTest, PublishBatchNotifiesOnceAndDrainsWithoutRepolling) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+  auto sub = EVAL_AND_ASSERT_OK(
+      sub_client.CreateSubscriber("publish_batch_notification"));
+  auto pub = EVAL_AND_ASSERT_OK(
+      pub_client.CreatePublisher("publish_batch_notification", 64, 8));
+
+  ASSERT_EQ(0, EVAL_AND_ASSERT_OK(sub.ReadMessage()).length);
+  auto buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  std::memcpy(buffer, "a", 1);
+  ASSERT_OK(pub.PublishMessage(1, /*notify_subscribers=*/false));
+
+  struct pollfd fd = sub.GetPollFd();
+  EXPECT_EQ(0, ::poll(&fd, 1, 0));
+
+  buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+  std::memcpy(buffer, "b", 1);
+  ASSERT_OK(pub.PublishMessage(1, /*notify_subscribers=*/false));
+  fd = sub.GetPollFd();
+  EXPECT_EQ(0, ::poll(&fd, 1, 0));
+
+  pub.NotifySubscribers();
+  fd = sub.GetPollFd();
+  ASSERT_EQ(1, ::poll(&fd, 1, 1000));
+
+  {
+    auto first = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+    ASSERT_EQ(1, first.length);
+    EXPECT_EQ('a', *static_cast<const char *>(first.buffer));
+  }
+  {
+    auto second = EVAL_AND_ASSERT_OK(sub.ReadMessageFromBatch());
+    ASSERT_EQ(1, second.length);
+    EXPECT_EQ('b', *static_cast<const char *>(second.buffer));
+  }
+  auto empty = EVAL_AND_ASSERT_OK(sub.ReadMessageFromBatch());
+  EXPECT_EQ(0, empty.length);
 }
 
 TEST_F(ClientTest, ReadMessageNoClearTriggerLeavesEventFdReadable) {
@@ -8273,6 +8394,7 @@ TEST_F(ClientTest, SubscriberOptionsChain) {
       .SetPassChecksumErrors(true)
       .SetKeepActiveMessage(true)
       .SetDetectDroppedMessages(false)
+      .SetTriggerOnRelease(false)
       .SetWarnWhenStuck(false)
       .SetStuckWarningGracePeriod(1.5);
   opts.SetLogDroppedMessages(true);
@@ -8288,6 +8410,8 @@ TEST_F(ClientTest, SubscriberOptionsChain) {
   ASSERT_EQ(20, opts.MaxActiveMessages());
   ASSERT_TRUE(opts.LogDroppedMessages());
   ASSERT_FALSE(opts.DetectDroppedMessages());
+  ASSERT_FALSE(opts.TriggerOnRelease());
+  ASSERT_TRUE(subspace::SubscriberOptions().TriggerOnRelease());
   ASSERT_TRUE(opts.IsBridge());
   ASSERT_TRUE(opts.ForTunnel());
   ASSERT_TRUE(opts.Telemetry());

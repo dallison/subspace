@@ -473,7 +473,9 @@ private:
   // information about the message sent with buffer set to nullptr since
   // the publisher cannot access the message once it's been published.
   absl::StatusOr<const Message>
-  PublishMessage(details::PublisherImpl *publisher, int64_t message_size);
+  PublishMessage(details::PublisherImpl *publisher, int64_t message_size,
+                 bool notify_subscribers);
+  void NotifySubscribers(details::PublisherImpl *publisher);
 
   absl::StatusOr<PublisherBufferLease>
   AcquirePublisherBuffer(details::PublisherImpl *publisher);
@@ -621,6 +623,11 @@ private:
   absl::StatusOr<Message> ReadMessage(
       details::SubscriberImpl *subscriber, ReadMode mode = ReadMode::kReadNext,
       ClearTrigger clear_trigger = ClearTrigger::kClearTrigger);
+  // Continue draining a batch after ReadMessage has cleared the poll fd and
+  // refreshed publisher state. This avoids repeating that work per message.
+  absl::StatusOr<Message>
+  ReadMessageFromBatch(details::SubscriberImpl *subscriber,
+                       ReadMode mode = ReadMode::kReadNext);
 
   // As ReadMessage above but returns a shared_ptr to the typed message.
   // NOTE: this is subspace::shared_ptr, not std::shared_ptr.
@@ -765,7 +772,7 @@ private:
   absl::StatusOr<const Message>
   PublishMessageInternal(details::PublisherImpl *publisher,
                          int64_t message_size, bool omit_prefix,
-                         bool use_prefix_slot_id);
+                         bool use_prefix_slot_id, bool notify_subscribers);
   absl::Status ResizeChannel(details::PublisherImpl *publisher,
                              int64_t new_slot_size);
   absl::StatusOr<bool>
@@ -966,9 +973,16 @@ public:
   // In thread-safe mode, this will release the lock on the client.  If you
   // don't want to publish the message, you must cancel the publish using
   // CancelPublish.
-  absl::StatusOr<const Message> PublishMessage(int64_t message_size) {
-    return client_->PublishMessage(impl_.get(), message_size);
+  // notify_subscribers may be false while building a batch, provided a later
+  // message in that batch is published with notification enabled.
+  absl::StatusOr<const Message>
+  PublishMessage(int64_t message_size, bool notify_subscribers = true) {
+    return client_->PublishMessage(impl_.get(), message_size,
+                                   notify_subscribers);
   }
+  // Flush a batch whose messages were published without subscriber
+  // notification.
+  void NotifySubscribers() { client_->NotifySubscribers(impl_.get()); }
 
   // Lease multiple unpublished slots without holding the client's thread-safe
   // mutex across the lease lifetime. The maximum is configured by
@@ -1311,7 +1325,8 @@ private:
   PublishMessageInternal(int64_t message_size, bool omit_prefix,
                          bool use_prefix_slot_id) {
     return client_->PublishMessageInternal(impl_.get(), message_size,
-                                           omit_prefix, use_prefix_slot_id);
+                                           omit_prefix, use_prefix_slot_id,
+                                           /*notify_subscribers=*/true);
   }
 
   std::shared_ptr<ClientImpl> client_;
@@ -1513,6 +1528,10 @@ public:
   ReadMessage(ReadMode mode = ReadMode::kReadNext,
               ClearTrigger clear_trigger = ClearTrigger::kClearTrigger) {
     return client_->ReadMessage(impl_.get(), mode, clear_trigger);
+  }
+  absl::StatusOr<Message>
+  ReadMessageFromBatch(ReadMode mode = ReadMode::kReadNext) {
+    return client_->ReadMessageFromBatch(impl_.get(), mode);
   }
 
   // Read and deserialize a telemetry message. Returns nullptr when no message
