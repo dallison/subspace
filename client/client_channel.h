@@ -397,7 +397,7 @@ protected:
 
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   absl::StatusOr<std::string>
-  CreatePosixSharedMemoryFile(const std::string &filename, off_t size);
+  CreatePosixSharedMemoryFile(const std::string &filename);
 #endif
 
   MessageSlot *slot_ = nullptr; // Current slot.

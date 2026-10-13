@@ -397,6 +397,47 @@ TEST_F(ClientTest, PosixShadowFileDoesNotReserveBufferSize) {
   ASSERT_EQ(6, msg->length);
   EXPECT_EQ(kSlotSize, sub->SlotSize());
 }
+
+// The publisher that creates a buffer's shm object owns its size, so a stale
+// size left in the shadow file (e.g. by a creator that crashed before sizing
+// its object) must be replaced rather than trusted.
+TEST_F(ClientTest, PosixShadowFileStaleSizeIsReplacedByCreator) {
+  constexpr int kSlotSize = 4096;
+  constexpr int kNumSlots = 4;
+  std::string shadow_file =
+      absl::StrFormat("/tmp/subspace_%d_posix_shadow_stale_0",
+                      Server()->GetSessionId());
+  {
+    char record[16] = {'\0', 'S', 'S', 'B', 'S', 'I', 'Z', 'E'};
+    uint64_t stale_size = 64;
+    memcpy(record + 8, &stale_size, sizeof(stale_size));
+    std::ofstream out(shadow_file, std::ios::binary | std::ios::trunc);
+    out.write(record, sizeof(record));
+    ASSERT_TRUE(out.good());
+  }
+
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  InitClient(pub_client);
+  InitClient(sub_client);
+  subspace::PublisherOptions options = PubOpts(kSlotSize, kNumSlots);
+  options.SetUseSplitBuffers(false);
+  absl::StatusOr<Publisher> pub =
+      pub_client.CreatePublisher("posix_shadow_stale", options);
+  ASSERT_OK(pub);
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "foobar", 6);
+  ASSERT_OK(pub->PublishMessage(6));
+
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber("posix_shadow_stale");
+  ASSERT_OK(sub);
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(6, msg->length);
+  EXPECT_EQ(kSlotSize, sub->SlotSize());
+}
 #endif
 
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD

@@ -93,6 +93,36 @@ struct PosixShadowRecord {
   uint64_t size;
 };
 
+// How long a publisher attaching to a buffer waits for a concurrent creator to
+// record the size and size the shm object.
+constexpr int kPosixShadowWaitAttempts = 1000;
+constexpr auto kPosixShadowWaitInterval = std::chrono::milliseconds(1);
+
+absl::Status WritePosixShadowBufferSize(const std::string &filename,
+                                        size_t size) {
+  auto &shim = GetSyscallShim();
+  int fd = shim.open_fn(filename.c_str(), O_WRONLY | O_TRUNC, 0);
+  if (fd < 0) {
+    return absl::InternalError(
+        absl::StrFormat("Failed to open shadow file %s: %s", filename,
+                        strerror(errno)));
+  }
+  PosixShadowRecord record;
+  memcpy(record.magic, kPosixShadowMagic, sizeof(kPosixShadowMagic));
+  record.size = static_cast<uint64_t>(size);
+  // A single write so that a reader sees either nothing or the whole record.
+  ssize_t n = shim.write_fn(fd, &record, sizeof(record));
+  int saved_errno = n < 0 ? errno : EIO;
+  shim.close_fn(fd);
+  if (n != static_cast<ssize_t>(sizeof(record))) {
+    return absl::InternalError(
+        absl::StrFormat("Failed to write size to shadow file %s: %s", filename,
+                        strerror(saved_errno)));
+  }
+  return absl::OkStatus();
+}
+
+// Returns 0 if the shadow file does not hold a size yet.
 absl::StatusOr<size_t> ReadPosixShadowBufferSize(const std::string &filename) {
   auto &shim = GetSyscallShim();
   int fd = shim.open_fn(filename.c_str(), O_RDONLY, 0);
@@ -122,55 +152,30 @@ absl::StatusOr<size_t> ReadPosixShadowBufferSize(const std::string &filename) {
       memcmp(record.magic, kPosixShadowMagic, sizeof(kPosixShadowMagic)) == 0) {
     return static_cast<size_t>(record.size);
   }
-  // Either the creator has not written the record yet (size 0, so callers
-  // retry) or the file was sized with ftruncate by an older client.
-  return static_cast<size_t>(sb.st_size);
+  // A shadow file sized with ftruncate by an older client is always larger
+  // than a record; anything smaller is a record that is not written yet.
+  if (static_cast<size_t>(sb.st_size) > sizeof(record)) {
+    return static_cast<size_t>(sb.st_size);
+  }
+  return 0;
 }
 
 } // namespace
 
 absl::StatusOr<std::string>
-ClientChannel::CreatePosixSharedMemoryFile(const std::string &filename,
-                                           off_t size) {
-  // Create a file in /tmp that records the real size of the shared memory
-  // segment (fstat on the shm object returns a page-aligned size, so the shadow
-  // file is the authoritative record; see GetBufferSize).
-  //
-  // Only set the size if it has not been set yet.  Several publishers may open
-  // the same buffer's shadow file: the one that creates the buffer sizes it,
-  // and a publisher attaching later must not resize it.  In particular a
-  // publisher joining with a smaller requested slot size must not shrink a
-  // buffer that an earlier publisher already created larger (e.g. after a
-  // resize), which would corrupt the recorded buffer size.
-  //
-  // The record is written with a single write() so that a concurrent reader
-  // sees either an empty file or the whole record.
+ClientChannel::CreatePosixSharedMemoryFile(const std::string &filename) {
+  // Create (or open) the shadow file in /tmp.  Its inode names the shm object
+  // and, once the buffer is created, it records the real size of the shared
+  // memory segment (fstat on the shm object returns a page-aligned size, so
+  // the shadow file is the authoritative record; see GetBufferSize).  Only the
+  // publisher that creates the shm object writes the size; see
+  // CreatePosixBuffer.
   auto &shim = GetSyscallShim();
   int fd = shim.open_fn(filename.c_str(), O_RDWR | O_CREAT, 0666);
   if (fd < 0) {
     return absl::InternalError(
         absl::StrFormat("Failed to open shadow file %s: %s", filename.c_str(),
                         strerror(errno)));
-  }
-  struct stat sb;
-  if (shim.fstat_fn(fd, &sb) < 0) {
-    shim.close_fn(fd);
-    return absl::InternalError(
-        absl::StrFormat("Failed to stat shadow file %s: %s", filename.c_str(),
-                        strerror(errno)));
-  }
-  if (sb.st_size == 0 && size > 0) {
-    PosixShadowRecord record;
-    memcpy(record.magic, kPosixShadowMagic, sizeof(kPosixShadowMagic));
-    record.size = static_cast<uint64_t>(size);
-    ssize_t n = shim.write_fn(fd, &record, sizeof(record));
-    if (n != static_cast<ssize_t>(sizeof(record))) {
-      int saved_errno = n < 0 ? errno : EIO;
-      shim.close_fn(fd);
-      return absl::InternalError(
-          absl::StrFormat("Failed to write size to shadow file %s: %s",
-                          filename.c_str(), strerror(saved_errno)));
-    }
   }
   shim.close_fn(fd);
 
@@ -640,13 +645,13 @@ ClientChannel::CreatePosixBuffer(const std::string &filename, size_t size) {
   // file.  This is because the fstat of the shm "file" returns a page aligned
   // size, which is not what we want.  The shadow file is used to determine the
   // size of the shared memory segment.
-  absl::StatusOr<std::string> shm_name =
-      CreatePosixSharedMemoryFile(filename, off_t(size));
+  absl::StatusOr<std::string> shm_name = CreatePosixSharedMemoryFile(filename);
   if (!shm_name.ok()) {
     return shm_name.status();
   }
 
-  // shm_name is the name of the shared memory.
+  // shm_name is the name of the shared memory.  Creating it exclusively makes
+  // this publisher the one that owns the buffer's size.
   auto shm_fd = OpenSharedMemoryFile(*shm_name, O_RDWR | O_CREAT | O_EXCL);
   if (!shm_fd.ok()) {
     return shm_fd.status();
@@ -654,6 +659,16 @@ ClientChannel::CreatePosixBuffer(const std::string &filename, size_t size) {
   if (!shm_fd->Valid()) {
     // Can only happen if the file already exists.
     return *shm_fd;
+  }
+
+  // The size must be recorded before the shm object is sized: publishers
+  // attaching concurrently wait for a nonzero shm size and then trust the
+  // shadow record (see GetBufferSize).  This overwrites any record left by a
+  // creator that crashed before sizing its object.
+  if (absl::Status status = WritePosixShadowBufferSize(filename, size);
+      !status.ok()) {
+    (void)shim.shm_unlink_fn(shm_name->c_str());
+    return status;
   }
 
   // Make it the appropriate size.
@@ -1089,15 +1104,35 @@ ClientChannel::OpenBuffer(int buffer_index) {
 absl::StatusOr<size_t>
 ClientChannel::GetBufferSize(toolbelt::FileDescriptor &shm_fd,
                              int buffer_index) const {
+  auto &shim = GetSyscallShim();
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   // On Posix we need to read the size from the shadow file because the fstat
   // of the shm "file" returns a page aligned size.
-  (void)shm_fd;
-  return ReadPosixShadowBufferSize(BufferSharedMemoryName(buffer_index));
+  //
+  // A concurrent creator may have won shm_open(O_CREAT | O_EXCL) without having
+  // recorded the size yet.  It writes the shadow record before sizing the shm
+  // object, so once the object has a nonzero size the record is the creator's.
+  std::string filename = BufferSharedMemoryName(buffer_index);
+  for (int attempt = 0; attempt < kPosixShadowWaitAttempts; attempt++) {
+    struct stat sb;
+    if (shim.fstat_fn(shm_fd.Fd(), &sb) == -1) {
+      return absl::InternalError(
+          absl::StrFormat("Failed to get size of shared memory %s: %s",
+                          filename, strerror(errno)));
+    }
+    if (sb.st_size > 0) {
+      absl::StatusOr<size_t> size = ReadPosixShadowBufferSize(filename);
+      if (!size.ok() || *size > 0) {
+        return size;
+      }
+    }
+    std::this_thread::sleep_for(kPosixShadowWaitInterval);
+  }
+  return absl::InternalError(absl::StrFormat(
+      "Timed out waiting for the size of shared memory %s", filename));
 #else
   // On Linux and Android, fstat on the fd gives the correct size.
   (void)buffer_index;
-  auto &shim = GetSyscallShim();
   struct stat sb;
   if (shim.fstat_fn(shm_fd.Fd(), &sb) == -1) {
     return absl::InternalError(

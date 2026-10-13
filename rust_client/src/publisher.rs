@@ -822,8 +822,8 @@ impl PublisherImpl {
                     .buffer_shared_memory_name(self.resolved_name(), buffer_index);
 
                 // Try to create the shared memory file.
-                match create_shm(&shm_name, final_buffer_size as usize) {
-                    Ok(fd) => {
+                match create_shm(&shm_name, final_buffer_size as usize)? {
+                    Some(fd) => {
                         unsafe {
                             (*self.channel.bcb).sizes[buffer_index]
                                 .store(final_buffer_size, Ordering::Relaxed);
@@ -841,20 +841,29 @@ impl PublisherImpl {
                         ));
                         current_slot_size = final_slot_size;
                     }
-                    Err(_) => {
-                        // File already exists, attach to it.
+                    None => {
+                        // Another publisher created it, so attach to it.  Its
+                        // real size may differ from the size we asked for (for
+                        // example after a resize), so record the real size.
                         let fd = open_shm(&shm_name)?;
-                        let size = get_shm_size(fd, &shm_name)?;
+                        let size = match get_shm_size(fd, &shm_name) {
+                            Ok(size) => size,
+                            Err(e) => {
+                                shim_close(fd);
+                                return Err(e);
+                            }
+                        };
                         let cs = self.channel.buffer_size_to_slot_size(size as u64);
                         let addr = if cs > 0 {
-                            map_memory(fd, size, ProtFlags::PROT_READ | ProtFlags::PROT_WRITE)?
+                            map_memory(fd, size, ProtFlags::PROT_READ | ProtFlags::PROT_WRITE)
                         } else {
-                            std::ptr::null_mut()
+                            Ok(std::ptr::null_mut())
                         };
                         shim_close(fd);
+                        let addr = addr?;
                         unsafe {
                             (*self.channel.bcb).sizes[buffer_index]
-                                .store(final_buffer_size, Ordering::Relaxed);
+                                .store(size as u64, Ordering::Relaxed);
                         }
                         self.channel
                             .buffers
@@ -1106,16 +1115,22 @@ impl PublisherImpl {
 
 // ── Shared memory helpers ───────────────────────────────────────────────────
 
+/// Creates the buffer's shared memory.  Returns None if another publisher has
+/// already created it.
 #[cfg(target_os = "linux")]
-fn create_shm(name: &str, size: usize) -> crate::error::Result<RawFd> {
+fn create_shm(name: &str, size: usize) -> crate::error::Result<Option<RawFd>> {
     let path = format!("/dev/shm/{}", name);
-    let fd = shim_open(
+    let fd = match shim_open(
         path.as_str(),
         OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_EXCL,
         Mode::from_bits_truncate(0o666),
-    )?;
+    ) {
+        Ok(fd) => fd,
+        Err(nix::Error::EEXIST) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
     shim_ftruncate(fd, size as libc::off_t);
-    Ok(fd)
+    Ok(Some(fd))
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1135,41 +1150,32 @@ const POSIX_SHADOW_MAGIC: [u8; 8] = *b"\0SSBSIZE";
 #[cfg(not(target_os = "linux"))]
 const POSIX_SHADOW_RECORD_LEN: usize = 16;
 
+// How long a publisher attaching to a buffer waits for a concurrent creator to
+// record the size and size the shm object.
+#[cfg(not(target_os = "linux"))]
+const POSIX_SHADOW_WAIT_ATTEMPTS: usize = 1000;
+#[cfg(not(target_os = "linux"))]
+const POSIX_SHADOW_WAIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1);
+
 #[cfg(not(target_os = "linux"))]
 fn write_posix_shadow_size(shadow_path: &str, size: usize) -> crate::error::Result<()> {
-    let fd = shim_open(
-        shadow_path,
-        OFlag::O_RDWR | OFlag::O_CREAT,
-        Mode::from_bits_truncate(0o666),
-    )?;
-    // Only the creator records the size; a publisher attaching later must not
-    // overwrite a size another publisher already recorded.
-    let stat = match crate::syscall_shim::shim_fstat(fd) {
-        Ok(stat) => stat,
-        Err(e) => {
-            shim_close(fd);
-            return Err(e.into());
-        }
-    };
-    if stat.st_size == 0 && size > 0 {
-        let mut record = [0u8; POSIX_SHADOW_RECORD_LEN];
-        record[..8].copy_from_slice(&POSIX_SHADOW_MAGIC);
-        record[8..].copy_from_slice(&(size as u64).to_ne_bytes());
-        // A single write so a concurrent reader sees either nothing or the
-        // whole record.
-        let n = shim_write(fd, record.as_ptr() as *const libc::c_void, record.len());
-        if n != record.len() as libc::ssize_t {
-            let err = std::io::Error::last_os_error();
-            shim_close(fd);
-            return Err(SubspaceError::Internal(format!(
-                "Failed to write size to shadow file {shadow_path}: {err}"
-            )));
-        }
-    }
+    let fd = shim_open(shadow_path, OFlag::O_WRONLY | OFlag::O_TRUNC, Mode::empty())?;
+    let mut record = [0u8; POSIX_SHADOW_RECORD_LEN];
+    record[..8].copy_from_slice(&POSIX_SHADOW_MAGIC);
+    record[8..].copy_from_slice(&(size as u64).to_ne_bytes());
+    // A single write so that a reader sees either nothing or the whole record.
+    let n = shim_write(fd, record.as_ptr() as *const libc::c_void, record.len());
+    let err = std::io::Error::last_os_error();
     shim_close(fd);
+    if n != record.len() as libc::ssize_t {
+        return Err(SubspaceError::Internal(format!(
+            "Failed to write size to shadow file {shadow_path}: {err}"
+        )));
+    }
     Ok(())
 }
 
+/// Returns 0 if the shadow file does not hold a size yet.
 #[cfg(not(target_os = "linux"))]
 fn read_posix_shadow_size(shadow_path: &str) -> crate::error::Result<usize> {
     let fd = shim_open(shadow_path, OFlag::O_RDONLY, Mode::empty())?;
@@ -1192,26 +1198,68 @@ fn read_posix_shadow_size(shadow_path: &str) -> crate::error::Result<usize> {
         size.copy_from_slice(&record[8..]);
         return Ok(u64::from_ne_bytes(size) as usize);
     }
-    // Either the creator has not written the record yet (size 0, so callers
-    // retry) or the file was sized with ftruncate by an older client.
-    Ok(stat.st_size as usize)
+    // A shadow file sized with ftruncate by an older client is always larger
+    // than a record; anything smaller is a record that is not written yet.
+    if stat.st_size as usize > POSIX_SHADOW_RECORD_LEN {
+        return Ok(stat.st_size as usize);
+    }
+    Ok(0)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn create_shm(name: &str, size: usize) -> crate::error::Result<RawFd> {
-    write_posix_shadow_size(name, size)?;
+fn unlink_posix_shm(shm_name: &str) {
+    if let Ok(c_name) = std::ffi::CString::new(shm_name) {
+        unsafe {
+            libc::shm_unlink(c_name.as_ptr());
+        }
+    }
+}
+
+/// Creates the buffer's shared memory.  Returns None if another publisher has
+/// already created it.
+#[cfg(not(target_os = "linux"))]
+fn create_shm(name: &str, size: usize) -> crate::error::Result<Option<RawFd>> {
+    // The shadow file's inode names the shm object; the publisher that creates
+    // the shm object records the size in it.
+    let shadow_fd = shim_open(
+        name,
+        OFlag::O_RDWR | OFlag::O_CREAT,
+        Mode::from_bits_truncate(0o666),
+    )?;
+    shim_close(shadow_fd);
 
     // Use the shadow file's inode to build a short name that fits within
     // macOS's PSHMNAMELEN (31-char) limit.
     let shm_name = posix_shm_name(name)?;
 
-    let raw_fd = crate::syscall_shim::shim_shm_open(
+    let raw_fd = match crate::syscall_shim::shim_shm_open(
         shm_name.as_str(),
         OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_EXCL,
         Mode::from_bits_truncate(0o666),
-    )?;
-    shim_ftruncate(raw_fd, size as libc::off_t);
-    Ok(raw_fd)
+    ) {
+        Ok(fd) => fd,
+        Err(nix::Error::EEXIST) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+
+    // The size must be recorded before the shm object is sized: publishers
+    // attaching concurrently wait for a nonzero shm size and then trust the
+    // shadow record (see get_shm_size).  This overwrites any record left by a
+    // creator that crashed before sizing its object.
+    if let Err(e) = write_posix_shadow_size(name, size) {
+        shim_close(raw_fd);
+        unlink_posix_shm(&shm_name);
+        return Err(e);
+    }
+    if shim_ftruncate(raw_fd, size as libc::off_t) == -1 {
+        let err = std::io::Error::last_os_error();
+        shim_close(raw_fd);
+        unlink_posix_shm(&shm_name);
+        return Err(SubspaceError::Internal(format!(
+            "Failed to set length of shared memory {name}: {err}"
+        )));
+    }
+    Ok(Some(raw_fd))
 }
 
 #[cfg(target_os = "linux")]
@@ -1239,10 +1287,27 @@ fn get_shm_size(fd: RawFd, _shadow_path: &str) -> crate::error::Result<usize> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn get_shm_size(_fd: RawFd, shadow_path: &str) -> crate::error::Result<usize> {
+fn get_shm_size(fd: RawFd, shadow_path: &str) -> crate::error::Result<usize> {
     // macOS fstat on shm fds returns page-aligned sizes; read the shadow file
     // to get the real size (matches C++ GetBufferSize).
-    read_posix_shadow_size(shadow_path)
+    //
+    // A concurrent creator may have won shm_open(O_CREAT | O_EXCL) without
+    // having recorded the size yet.  It writes the shadow record before sizing
+    // the shm object, so once the object has a nonzero size the record is the
+    // creator's.
+    for _ in 0..POSIX_SHADOW_WAIT_ATTEMPTS {
+        let stat = crate::syscall_shim::shim_fstat(fd)?;
+        if stat.st_size > 0 {
+            let size = read_posix_shadow_size(shadow_path)?;
+            if size > 0 {
+                return Ok(size);
+            }
+        }
+        std::thread::sleep(POSIX_SHADOW_WAIT_INTERVAL);
+    }
+    Err(SubspaceError::Internal(format!(
+        "Timed out waiting for the size of shared memory {shadow_path}"
+    )))
 }
 
 pub fn trigger_fd(fd: RawFd) {
