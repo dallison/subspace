@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/subspace_logo.jpg" alt="Subspace logo" width="640">
+</p>
+
 # Subspace IPC
 Next Generation, sub-microsecond latency shared memory IPC.
 
