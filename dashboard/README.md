@@ -61,21 +61,23 @@ The Retro application divides the screen into:
   statistic (current, mean, or p50) applies to both gauges.
 - **Stats table** — cumulative publish/receive/drop counts, active channel,
   requested vs active slot and queue sizes, and target rate.
-- **Accelerator bar** — the five tunable controls (mode, rate, slots, subscriber
-  queue, gauge statistic). The highlighted control responds to up/down arrows.
+- **Accelerator bar** — five controls top to bottom: publish rate, channel slots,
+  subscriber queue, gauge statistic, then mode at the bottom. The highlighted
+  control responds to up/down arrows.
 - **Warning pane** — scrolling log of non-fatal events (channel switches,
   aggregated drop notices). Client library warnings captured from stderr are
   sanitized and appended here instead of corrupting the curses display.
 
 ## Controls
 
-**Left/right arrows** cycle which accelerator control is selected:
+**Left/right arrows** cycle which accelerator control is selected (same order as
+the bar, top to bottom):
 
-1. **MODE** — performance mode (throughput, latency, reliable)
-2. **RATE** — publish rate preset
-3. **SLOTS** — publisher slot count
-4. **QUEUE** — subscriber queue capacity
-5. **GAUGE** — which statistic the gauges show (current, mean, p50)
+1. **RATE** — publish rate preset
+2. **SLOTS** — publisher slot count
+3. **QUEUE** — subscriber queue capacity
+4. **GAUGE** — which statistic the gauges show (current, mean, p50)
+5. **MODE** — performance mode (throughput, latency, reliable)
 
 **Up/down arrows** adjust the selected control.
 
