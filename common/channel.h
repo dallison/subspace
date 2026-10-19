@@ -16,8 +16,11 @@
 #include "toolbelt/fd.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -81,6 +84,13 @@ constexpr int kMessageActivate = 1;      // This is a reliable activation messag
 constexpr int kMessageBridged = 2;       // This message came from the bridge.
 constexpr int kMessageHasChecksum = 4;   // This message has a checksum.
 constexpr int kMessageCrossMachine = 8;  // This is a cross-machine (tunnel) message.
+
+// The only flags covered by the message checksum.  The publisher sets these
+// and they never change once the message is published.  Every other bit,
+// including kMessageBridged, kMessageCrossMachine and any bit a program sets
+// itself, can be changed in transit without invalidating the checksum.
+constexpr int64_t kChecksummedMessageFlags =
+    kMessageActivate | kMessageHasChecksum;
 
 // Maximum values for checksum_size and metadata_size (must fit in uint16_t).
 constexpr int32_t kMaxChecksumSize = 0xFFFF;
@@ -546,26 +556,57 @@ struct BufferControlBlock {
       sizes[kMaxBuffers]; // Number of references to this buffer.
 };
 
-// Given a message prefix and a buffer containing the message data return three
-// spans covering the data to be checksummed:
-//   [0] prefix fields before the checksum (slot_id through padding2)
+// The data covered by a message checksum, as three spans:
+//   [0] prefix fields before the checksum (slot_id through metadata_size),
+//       with flags masked to kChecksummedMessageFlags
 //   [1] user metadata area (immediately after the checksum storage)
 //   [2] message payload
-inline std::array<absl::Span<const uint8_t>, 3>
-GetMessageChecksumData(MessagePrefix *prefix, void *buffer,
+//
+// Span 0 points at a masked copy held in this object, not at the prefix, so
+// the object must outlive any use of Spans().  It cannot be copied or moved
+// because that would leave span 0 pointing at the old copy.
+class MessageChecksumData {
+public:
+  MessageChecksumData(const MessagePrefix *prefix, const void *buffer,
+                      size_t message_size, int32_t checksum_size,
+                      int32_t metadata_size) {
+    const auto *base = reinterpret_cast<const uint8_t *>(prefix);
+    memcpy(prefix_fields_, base + offsetof(MessagePrefix, slot_id),
+           sizeof(prefix_fields_));
+    int64_t flags;
+    memcpy(&flags, prefix_fields_ + kFlagsOffset, sizeof(flags));
+    flags &= kChecksummedMessageFlags;
+    memcpy(prefix_fields_ + kFlagsOffset, &flags, sizeof(flags));
+    spans_ = {absl::Span<const uint8_t>(prefix_fields_, sizeof(prefix_fields_)),
+              absl::Span<const uint8_t>(base + offsetof(MessagePrefix, checksum) +
+                                            checksum_size,
+                                        metadata_size),
+              absl::Span<const uint8_t>(
+                  reinterpret_cast<const uint8_t *>(buffer), message_size)};
+  }
+
+  MessageChecksumData(const MessageChecksumData &) = delete;
+  MessageChecksumData &operator=(const MessageChecksumData &) = delete;
+
+  const std::array<absl::Span<const uint8_t>, 3> &Spans() const {
+    return spans_;
+  }
+
+private:
+  static constexpr size_t kFlagsOffset =
+      offsetof(MessagePrefix, flags) - offsetof(MessagePrefix, slot_id);
+
+  uint8_t prefix_fields_[offsetof(MessagePrefix, checksum) -
+                         offsetof(MessagePrefix, slot_id)];
+  std::array<absl::Span<const uint8_t>, 3> spans_;
+};
+
+inline MessageChecksumData
+GetMessageChecksumData(const MessagePrefix *prefix, const void *buffer,
                        size_t message_size, int32_t checksum_size,
                        int32_t metadata_size) {
-  const auto *base = reinterpret_cast<const uint8_t *>(prefix);
-  std::array<absl::Span<const uint8_t>, 3> data = {
-      absl::Span<const uint8_t>(base + offsetof(MessagePrefix, slot_id),
-                                offsetof(MessagePrefix, checksum) -
-                                    offsetof(MessagePrefix, slot_id)),
-      absl::Span<const uint8_t>(
-          base + offsetof(MessagePrefix, checksum) + checksum_size,
-          metadata_size),
-      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t *>(buffer),
-                                message_size)};
-  return data;
+  return MessageChecksumData(prefix, buffer, message_size, checksum_size,
+                             metadata_size);
 }
 
 // Get a span over the checksum storage area within the prefix.

@@ -6736,6 +6736,39 @@ TEST_F(ClientTest, ChecksumIgnoresPrefixPadding) {
   ASSERT_STREQ("padtest", reinterpret_cast<const char *>(msg->buffer));
 }
 
+// Flags outside kChecksummedMessageFlags can be set after publishing, as a
+// bridge or tunnel does when forwarding, without invalidating the checksum.
+TEST_F(ClientTest, ChecksumIgnoresUncoveredFlags) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  absl::StatusOr<Publisher> pub = client->CreatePublisher(
+      "chan_cs_flags", PubOpts(256, 10).SetChecksum(true));
+  ASSERT_OK(pub);
+
+  absl::StatusOr<Subscriber> sub =
+      client->CreateSubscriber("chan_cs_flags", SubOpts().SetChecksum(true));
+  ASSERT_OK(sub);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "flagged", 7);
+
+  subspace::MessagePrefix *prefix = pub->Prefix();
+  ASSERT_NE(nullptr, prefix);
+
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(7);
+  ASSERT_OK(pub_status);
+
+  prefix->SetIsBridged();
+  prefix->SetIsCrossMachine();
+  prefix->flags |= int64_t{1} << 32;
+
+  absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(7, msg->length);
+  ASSERT_FALSE(msg->checksum_error);
+}
+
 // Same test with a larger checksum (20 bytes) to ensure the padding boundary
 // is computed correctly for non-default checksum sizes.
 TEST_F(ClientTest, ChecksumIgnoresPrefixPaddingLargeChecksum) {

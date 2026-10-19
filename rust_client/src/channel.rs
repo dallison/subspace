@@ -23,6 +23,11 @@ use std::sync::atomic::{
 pub const MESSAGE_ACTIVATE: i64 = 1;
 pub const MESSAGE_BRIDGED: i64 = 2;
 pub const MESSAGE_HAS_CHECKSUM: i64 = 4;
+pub const MESSAGE_CROSS_MACHINE: i64 = 8;
+
+/// The only flags covered by the message checksum.  Must match
+/// kChecksummedMessageFlags in common/channel.h.
+pub const CHECKSUMMED_MESSAGE_FLAGS: i64 = MESSAGE_ACTIVATE | MESSAGE_HAS_CHECKSUM;
 
 pub const MESSAGE_SEEN: u32 = 1;
 pub const MESSAGE_IS_ACTIVATION: u32 = 2;

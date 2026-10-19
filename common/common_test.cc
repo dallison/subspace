@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <memory>
 #include <new>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -197,4 +198,67 @@ TEST(CommonTest, BitsetTraverse2) {
     count++;
   });
   EXPECT_EQ(count, 7);
+}
+
+namespace {
+
+std::vector<uint8_t> ChecksumPrefixFields(const subspace::MessagePrefix &prefix) {
+  const char payload[] = "payload";
+  subspace::MessageChecksumData data = subspace::GetMessageChecksumData(
+      &prefix, payload, sizeof(payload), /*checksum_size=*/4,
+      /*metadata_size=*/0);
+  absl::Span<const uint8_t> fields = data.Spans()[0];
+  return std::vector<uint8_t>(fields.begin(), fields.end());
+}
+
+subspace::MessagePrefix TestPrefix() {
+  subspace::MessagePrefix prefix = {};
+  prefix.slot_id = 3;
+  prefix.message_size = 8;
+  prefix.ordinal = 42;
+  prefix.timestamp = 1234;
+  prefix.vchan_id = -1;
+  prefix.checksum_size = 4;
+  prefix.SetHasChecksum();
+  return prefix;
+}
+
+} // namespace
+
+TEST(CommonTest, ChecksumIgnoresUncoveredFlags) {
+  subspace::MessagePrefix prefix = TestPrefix();
+  const std::vector<uint8_t> before = ChecksumPrefixFields(prefix);
+
+  prefix.SetIsBridged();
+  prefix.SetIsCrossMachine();
+  prefix.flags |= int64_t{1} << 32;
+  const int64_t flags = prefix.flags;
+  EXPECT_EQ(before, ChecksumPrefixFields(prefix));
+
+  // The prefix in shared memory must not be modified by the masking.
+  EXPECT_EQ(flags, prefix.flags);
+}
+
+TEST(CommonTest, ChecksumCoversPublisherFlags) {
+  subspace::MessagePrefix prefix = TestPrefix();
+  const std::vector<uint8_t> before = ChecksumPrefixFields(prefix);
+
+  prefix.SetIsActivation();
+  EXPECT_NE(before, ChecksumPrefixFields(prefix));
+
+  prefix = TestPrefix();
+  prefix.flags &= ~int64_t{subspace::kMessageHasChecksum};
+  EXPECT_NE(before, ChecksumPrefixFields(prefix));
+}
+
+TEST(CommonTest, ChecksumCoversPrefixFields) {
+  const std::vector<uint8_t> before = ChecksumPrefixFields(TestPrefix());
+
+  subspace::MessagePrefix prefix = TestPrefix();
+  prefix.ordinal++;
+  EXPECT_NE(before, ChecksumPrefixFields(prefix));
+
+  prefix = TestPrefix();
+  prefix.message_size++;
+  EXPECT_NE(before, ChecksumPrefixFields(prefix));
 }

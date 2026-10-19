@@ -718,9 +718,9 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
           ChecksumSize(), MetadataSize());
       absl::Span<std::byte> cksum = GetChecksumSpan(prefix, ChecksumSize());
       if (checksum_callback_ != nullptr) {
-        checksum_callback_(data, cksum);
+        checksum_callback_(data.Spans(), cksum);
       } else {
-        CalculateCRC32Checksum(data, cksum);
+        CalculateCRC32Checksum(data.Spans(), cksum);
       }
     }
   }

@@ -1435,7 +1435,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
                                  subscriber->MetadataSize());
       absl::Span<const std::byte> cksum =
           GetChecksumSpan(prefix, subscriber->ChecksumSize());
-      checksum_error = !subscriber->ValidateChecksum(data, cksum);
+      checksum_error = !subscriber->ValidateChecksum(data.Spans(), cksum);
     }
     if ((prefix->flags & kMessageActivate) != 0) {
       is_activation = true;

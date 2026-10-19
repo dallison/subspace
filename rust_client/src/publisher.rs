@@ -653,12 +653,14 @@ impl PublisherImpl {
                         let buffer = self.channel.get_buffer_address(slot_idx);
                         let cs = self.channel.checksum_size;
                         let ms = self.channel.metadata_size;
+                        let mut prefix_fields = [0u8; checksum::PREFIX_FIELDS_LEN];
                         let data = checksum::get_message_checksum_data(
                             prefix,
                             buffer,
                             message_size as usize,
                             cs,
                             ms,
+                            &mut prefix_fields,
                         );
                         let cksum = checksum::get_checksum_slice(prefix, cs);
                         cksum.fill(0);
