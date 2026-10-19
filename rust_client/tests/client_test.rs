@@ -8,10 +8,14 @@ use std::process::{Child, Command, Stdio};
 
 use subspace_client::bitset::DynamicBitSet;
 use subspace_client::channel::{
-    aligned, aligned64, build_refs_bit_field, CHECKSUM_OFFSET, ORDINAL_MASK, ORDINAL_SHIFT,
+    aligned, aligned64, build_refs_bit_field, MessagePrefix, CHECKSUM_OFFSET, MESSAGE_ACTIVATE,
+    MESSAGE_BRIDGED, MESSAGE_CROSS_MACHINE, MESSAGE_HAS_CHECKSUM, ORDINAL_MASK, ORDINAL_SHIFT,
     PUB_OWNED, RETIRED_REFS_MASK, RETIRED_REFS_SHIFT, VCHAN_ID_MASK, VCHAN_ID_SHIFT,
 };
-use subspace_client::checksum::{calculate_crc32_checksum, subspace_crc32, verify_crc32_checksum};
+use subspace_client::checksum::{
+    calculate_crc32_checksum, get_message_checksum_data, subspace_crc32, verify_crc32_checksum,
+    PREFIX_FIELDS_LEN,
+};
 
 fn calculate_checksum(spans: &[&[u8]]) -> u32 {
     let mut buf = [0u8; 4];
@@ -226,6 +230,67 @@ fn checksum_single_span_matches_multi_span() {
     let whole = calculate_checksum(&[b"foobar"]);
     let split = calculate_checksum(&[b"foo", b"bar"]);
     assert_eq!(whole, split);
+}
+
+fn test_prefix() -> MessagePrefix {
+    MessagePrefix {
+        padding: 0,
+        slot_id: 3,
+        message_size: 8,
+        ordinal: 42,
+        timestamp: 1234,
+        flags: MESSAGE_HAS_CHECKSUM,
+        vchan_id: -1,
+        checksum_size: 4,
+        metadata_size: 0,
+        checksum: 0,
+        padding3: [0; 12],
+    }
+}
+
+fn prefix_checksum(prefix: &MessagePrefix) -> u32 {
+    let payload = b"payload";
+    let mut prefix_fields = [0u8; PREFIX_FIELDS_LEN];
+    let data = unsafe {
+        get_message_checksum_data(
+            prefix,
+            payload.as_ptr(),
+            payload.len(),
+            4,
+            0,
+            &mut prefix_fields,
+        )
+    };
+    calculate_checksum(&data)
+}
+
+#[test]
+fn checksum_ignores_uncovered_flags() {
+    let mut prefix = test_prefix();
+    let before = prefix_checksum(&prefix);
+
+    prefix.flags |= MESSAGE_BRIDGED | MESSAGE_CROSS_MACHINE | (1 << 32);
+    let flags = prefix.flags;
+    assert_eq!(before, prefix_checksum(&prefix));
+    // The masking works on a copy and leaves the prefix unchanged.
+    assert_eq!(flags, prefix.flags);
+}
+
+#[test]
+fn checksum_covers_publisher_flags() {
+    let before = prefix_checksum(&test_prefix());
+
+    let mut prefix = test_prefix();
+    prefix.flags |= MESSAGE_ACTIVATE;
+    assert_ne!(before, prefix_checksum(&prefix));
+
+    let mut prefix = test_prefix();
+    prefix.flags &= !MESSAGE_HAS_CHECKSUM;
+    assert_ne!(before, prefix_checksum(&prefix));
+
+    let mut prefix = test_prefix();
+    prefix.ordinal += 1;
+    assert_ne!(before, prefix_checksum(&prefix));
 }
 
 // ── Bit field helpers ────────────────────────────────────────────────────────

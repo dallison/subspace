@@ -438,8 +438,8 @@ Both `checksum_size` and `metadata_size` are stored as `uint16_t` in the prefix.
 
 ### 7.4 What Is and Is Not Checksummed
 
-- **Checksummed:** `slot_id`, `message_size`, `ordinal`, `timestamp`, `flags`, `vchan_id`, `checksum_size`, `metadata_size`, user metadata, and the message payload.
-- **Not checksummed:** The `padding` field (offset 0–3), the checksum storage itself, and any alignment padding between the end of metadata and the end of the prefix.
+- **Checksummed:** `slot_id`, `message_size`, `ordinal`, `timestamp`, the `kMessageActivate` and `kMessageHasChecksum` bits of `flags` (`kChecksummedMessageFlags`), `vchan_id`, `checksum_size`, `metadata_size`, user metadata, and the message payload.
+- **Not checksummed:** The `padding` field (offset 0–3), every other bit of `flags` (including `kMessageBridged` and `kMessageCrossMachine`, which are set in transit), the checksum storage itself, and any alignment padding between the end of metadata and the end of the prefix.
 
 ---
 

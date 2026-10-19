@@ -1828,12 +1828,14 @@ fn read_message_internal(
                 let buffer = sub.channel.get_buffer_address(new_idx);
                 let cs = sub.channel.checksum_size;
                 let ms = sub.channel.metadata_size;
+                let mut prefix_fields = [0u8; checksum::PREFIX_FIELDS_LEN];
                 let data = checksum::get_message_checksum_data(
                     prefix,
                     buffer,
                     delivered_message_size as usize,
                     cs,
                     ms,
+                    &mut prefix_fields,
                 );
                 let stored_cksum = checksum::get_checksum_slice_const(prefix, cs);
                 if let Some(ref cb) = sub.checksum_callback {
