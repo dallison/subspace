@@ -10,6 +10,7 @@
 
 #include "client/test_fixture.h"
 
+#include "common/channel.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "proto/subspace.pb.h"
@@ -38,6 +39,14 @@
 #include <sys/procfs.h>
 #endif
 
+namespace {
+void FillMatchingInitBuildConfig(subspace::InitRequest *init) {
+  init->set_max_channels(subspace::kMaxChannels);
+  init->set_max_slot_owners(subspace::kMaxSlotOwners);
+  init->set_max_buffers(static_cast<int32_t>(subspace::kMaxBuffers));
+}
+} // namespace
+
 // Helper to send raw Request protos and receive Response protos + FDs,
 // using the same wire format as the real client (4-byte length prefix,
 // then protobuf body, then SCM_RIGHTS FDs).
@@ -50,6 +59,7 @@ public:
   absl::Status Init(const std::string &client_name = "raw_test") {
     subspace::Request req;
     req.mutable_init()->set_client_name(client_name);
+    FillMatchingInitBuildConfig(req.mutable_init());
     auto result = Send(req);
     if (!result.ok()) {
       return result.status();
@@ -239,12 +249,31 @@ TEST_F(ServerTest, InitSuccess) {
 
   subspace::Request req;
   req.mutable_init()->set_client_name("test_init");
+  FillMatchingInitBuildConfig(req.mutable_init());
   auto result = conn.Send(req);
   ASSERT_OK(result);
   auto &[resp, fds] = *result;
   ASSERT_TRUE(resp.has_init());
+  ASSERT_TRUE(resp.init().error().empty());
   ASSERT_GT(resp.init().session_id(), 0);
   ASSERT_FALSE(fds.empty());
+}
+
+TEST_F(ServerTest, InitRejectsBuildConfigMismatch) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+
+  subspace::Request req;
+  req.mutable_init()->set_client_name("mismatch");
+  FillMatchingInitBuildConfig(req.mutable_init());
+  req.mutable_init()->set_max_channels(subspace::kMaxChannels + 64);
+  auto result = conn.Send(req);
+  ASSERT_OK(result);
+  auto &[resp, fds] = *result;
+  ASSERT_TRUE(resp.has_init());
+  EXPECT_THAT(resp.init().error(), ::testing::HasSubstr("max_channels"));
+  EXPECT_THAT(resp.init().error(), ::testing::HasSubstr("Build configuration mismatch"));
+  EXPECT_TRUE(fds.empty());
 }
 
 TEST(ChannelAddressParsingTest, ParsesValidInetAddress) {

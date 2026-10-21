@@ -4,6 +4,7 @@
 
 #include "server/client_handler.h"
 #include "absl/strings/str_format.h"
+#include "absl/strings/str_join.h"
 #include "client_handler.h"
 #include "server/server.h"
 #include <unistd.h>
@@ -338,6 +339,29 @@ void ClientHandler::HandleGetClientBuffers(
 void ClientHandler::HandleInit(const subspace::InitRequest &req,
                                subspace::InitResponse *response,
                                std::vector<toolbelt::FileDescriptor> &fds) {
+  std::vector<std::string> mismatches;
+  if (req.max_channels() != kMaxChannels) {
+    mismatches.push_back(absl::StrFormat("max_channels client=%d server=%d",
+                                         req.max_channels(), kMaxChannels));
+  }
+  if (req.max_slot_owners() != kMaxSlotOwners) {
+    mismatches.push_back(absl::StrFormat("max_slot_owners client=%d server=%d",
+                                         req.max_slot_owners(), kMaxSlotOwners));
+  }
+  if (req.max_buffers() != static_cast<int32_t>(kMaxBuffers)) {
+    mismatches.push_back(absl::StrFormat("max_buffers client=%d server=%d",
+                                         req.max_buffers(),
+                                         static_cast<int32_t>(kMaxBuffers)));
+  }
+  if (!mismatches.empty()) {
+    response->set_error(absl::StrFormat(
+        "Build configuration mismatch (%s). Rebuild the client and server with "
+        "the same SUBSPACE_MAX_CHANNELS, SUBSPACE_MAX_SLOT_OWNERS, and "
+        "SUBSPACE_MAX_BUFFERS (or matching subspace.max_* MODULE.bazel tags).",
+        absl::StrJoin(mismatches, ", ")));
+    return;
+  }
+
   response->set_scb_fd_index(0);
   fds.push_back(server_->scb_fd_);
   client_name_ = req.client_name();

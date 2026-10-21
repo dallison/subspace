@@ -17,6 +17,19 @@ TEST(CommonTest, MaxChannelsMatchesSharedMemory) {
             sizeof(subspace::ChannelCounters) * subspace::kMaxChannels);
 }
 
+TEST(CommonTest, MaxSlotOwnersMatchesCompileDefine) {
+  EXPECT_GT(subspace::kMaxSlotOwners, 0);
+  EXPECT_EQ(SUBSPACE_MAX_SLOT_OWNERS, subspace::kMaxSlotOwners);
+}
+
+TEST(CommonTest, MaxBuffersMatchesCompileDefine) {
+  EXPECT_GT(subspace::kMaxBuffers, 0);
+  EXPECT_EQ(SUBSPACE_MAX_BUFFERS, subspace::kMaxBuffers);
+  if (subspace::kMaxBuffers == 341) {
+    EXPECT_LE(sizeof(subspace::BufferControlBlock), 4096u);
+  }
+}
+
 TEST(CommonTest, SubscriberQueueArenaSizeIsExplicitBytes) {
   constexpr int kNumSlots = 8;
   constexpr uint64_t kArenaSize = 12'345;

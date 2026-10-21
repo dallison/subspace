@@ -12,9 +12,13 @@ cargo_build_script(
         "PROTOC": "$(execpath @protobuf//:protoc)",
         "SUBSPACE_PROTO_FILE": "$(execpath //proto:subspace.proto)",
         "SUBSPACE_MAX_CHANNELS_FILE": "$(execpath //common:max_channels_setting)",
+        "SUBSPACE_MAX_SLOT_OWNERS_FILE": "$(execpath //common:max_slot_owners_setting)",
+        "SUBSPACE_MAX_BUFFERS_FILE": "$(execpath //common:max_buffers_setting)",
     },
     data = [
+        "//common:max_buffers_setting",
         "//common:max_channels_setting",
+        "//common:max_slot_owners_setting",
         "//proto:subspace.proto",
         "@protobuf//:protoc",
         "@protobuf//:well_known_type_protos",

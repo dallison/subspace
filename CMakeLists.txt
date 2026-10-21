@@ -80,6 +80,30 @@ endif()
 add_compile_definitions(SUBSPACE_MAX_CHANNELS=${SUBSPACE_MAX_CHANNELS})
 message(STATUS "Maximum channels: ${SUBSPACE_MAX_CHANNELS}")
 
+# --- Maximum slot owners per channel ---
+# This sizes CCB fields in shared memory, so the server and every client,
+# including the Rust client, must be built with the same value.
+set(SUBSPACE_MAX_SLOT_OWNERS "1024" CACHE STRING
+    "Maximum publishers plus subscribers per channel. Must be a positive integer.")
+if(NOT SUBSPACE_MAX_SLOT_OWNERS MATCHES "^[1-9][0-9]*$")
+    message(FATAL_ERROR
+        "SUBSPACE_MAX_SLOT_OWNERS must be a positive integer, got '${SUBSPACE_MAX_SLOT_OWNERS}'")
+endif()
+add_compile_definitions(SUBSPACE_MAX_SLOT_OWNERS=${SUBSPACE_MAX_SLOT_OWNERS})
+message(STATUS "Maximum slot owners per channel: ${SUBSPACE_MAX_SLOT_OWNERS}")
+
+# --- Maximum payload buffer segments per channel (BCB table) ---
+# This sizes the Buffer Control Block in shared memory, so the server and
+# every client, including the Rust client, must be built with the same value.
+set(SUBSPACE_MAX_BUFFERS "341" CACHE STRING
+    "Maximum distinct payload buffer segments per channel. Must be a positive integer. Default fits the BCB in one 4 KiB page.")
+if(NOT SUBSPACE_MAX_BUFFERS MATCHES "^[1-9][0-9]*$")
+    message(FATAL_ERROR
+        "SUBSPACE_MAX_BUFFERS must be a positive integer, got '${SUBSPACE_MAX_BUFFERS}'")
+endif()
+add_compile_definitions(SUBSPACE_MAX_BUFFERS=${SUBSPACE_MAX_BUFFERS})
+message(STATUS "Maximum payload buffer segments per channel: ${SUBSPACE_MAX_BUFFERS}")
+
 # --- Apple Silicon (ARM64) specific settings ---
 # Ensure that CMake targets the correct architecture when building on Apple platforms.
 # This value will be propagated to sub-dependencies.

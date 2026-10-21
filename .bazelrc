@@ -35,6 +35,14 @@ build:slot_size_64 --copt=-DSUBSPACE_64BIT_SLOT_SIZE
 # A downstream module sets subspace.max_channels(count = N) instead.  See
 # docs/max-channels.md.
 #   bazel build --//:max_channels=2048 //server
+#
+# Maximum slot owners per channel (default 1024).  Must be a positive integer.
+# See docs/max-slot-owners.md.
+#   bazel build --//:max_slot_owners=2048 //server
+#
+# Maximum payload buffer segments per channel (default 341, 4 KiB BCB).  Must be
+# a positive integer.  See docs/max-buffers.md.
+#   bazel build --//:max_buffers=512 //server
 
 # Enable the built-in platform-specific configuration feature
 common --enable_platform_specific_config

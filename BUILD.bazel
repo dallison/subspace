@@ -38,6 +38,31 @@ string_flag(
     build_setting_default = "1024",
 )
 
+# Maximum publishers plus subscribers per channel.  This sizes CCB fields in
+# shared memory, so the server and every client must be built with the same
+# value.  Must be a positive integer.  Default is 1024.
+# Downstream modules set this with subspace.max_slot_owners in MODULE.bazel.
+# See docs/max-slot-owners.md.
+#
+#   bazel build --//:max_slot_owners=2048 //server
+string_flag(
+    name = "max_slot_owners",
+    build_setting_default = "1024",
+)
+
+# Maximum distinct payload buffer segments per channel (BCB table).  This sizes
+# the Buffer Control Block in shared memory, so the server and every client
+# must be built with the same value.  Must be a positive integer.  Default is
+# 341 so sizeof(BufferControlBlock) is 4096 bytes on typical platforms.
+# Downstream modules set this with subspace.max_buffers in MODULE.bazel.
+# See docs/max-buffers.md.
+#
+#   bazel build --//:max_buffers=512 //server
+string_flag(
+    name = "max_buffers",
+    build_setting_default = "341",
+)
+
 config_setting(
   name = "macos_arm64",
   constraint_values = [
