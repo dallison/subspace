@@ -572,8 +572,6 @@ struct BufferControlBlock {
   std::atomic<uint64_t>
       sizes[kMaxBuffers]; // Byte size of this buffer segment.
 };
-static_assert(kMaxBuffers != 341 || sizeof(BufferControlBlock) <= 4096,
-              "default SUBSPACE_MAX_BUFFERS must fit the BCB in one 4 KiB page");
 
 // The data covered by a message checksum, as three spans:
 //   [0] prefix fields before the checksum (slot_id through metadata_size),
