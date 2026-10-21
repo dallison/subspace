@@ -2,9 +2,19 @@ package(default_visibility = ["//visibility:public"])
 
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 load("//:max_channels.bzl", "max_channels_setting")
+load("//:max_buffers.bzl", "max_buffers_setting")
+load("//:max_slot_owners.bzl", "max_slot_owners_setting")
 
 max_channels_setting(
     name = "max_channels_setting",
+)
+
+max_slot_owners_setting(
+    name = "max_slot_owners_setting",
+)
+
+max_buffers_setting(
+    name = "max_buffers_setting",
 )
 
 cc_library(
@@ -35,6 +45,8 @@ cc_library(
     }),
     deps = [
         ":max_channels_setting",
+        ":max_buffers_setting",
+        ":max_slot_owners_setting",
         "//proto:subspace_cc_proto",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/status",

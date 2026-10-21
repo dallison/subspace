@@ -158,10 +158,16 @@ constexpr int kMaxChannels = SUBSPACE_MAX_CHANNELS;
 static_assert(kMaxChannels > 0 && kMaxChannels % 64 == 0,
               "SUBSPACE_MAX_CHANNELS must be a positive multiple of 64");
 
-// Maximum number of owners for a lot.  One per subscriber reference
-// and publisher reference.  Best if it's a multiple of 64 because
-// it's used as the size in a toolbelt::BitSet.
-constexpr int kMaxSlotOwners = 1024;
+// Maximum publishers plus subscribers per channel.  This sizes CCB fields in
+// shared memory, so the server and every client must be built with the same
+// value.  A downstream Bazel module sets subspace.max_slot_owners(count = N)
+// in its root MODULE.bazel.  Building this repo uses --//:max_slot_owners=N,
+// and CMake uses -DSUBSPACE_MAX_SLOT_OWNERS=N.  N must be a positive integer.
+#ifndef SUBSPACE_MAX_SLOT_OWNERS
+#define SUBSPACE_MAX_SLOT_OWNERS 1024
+#endif
+constexpr int kMaxSlotOwners = SUBSPACE_MAX_SLOT_OWNERS;
+static_assert(kMaxSlotOwners > 0, "SUBSPACE_MAX_SLOT_OWNERS must be positive");
 // Default per-subscriber queue depth used whenever the publisher provisions a
 // non-empty arena and the subscriber does not request an override.
 constexpr int kDefaultSubscriberQueueSize = 16;
@@ -185,7 +191,18 @@ constexpr int kMaxVchanId = 1023;
 // in process memory.
 constexpr size_t kMaxChannelName = 64;
 
-constexpr size_t kMaxBuffers = 1024;
+// Maximum distinct shared-memory payload segments tracked in the BCB (refs and
+// sizes tables).  Each slot-size resize can add another segment until
+// ccb_->num_buffers reaches this limit.  A downstream Bazel module sets
+// subspace.max_buffers(count = N) in its root MODULE.bazel.  Building this
+// repo uses --//:max_buffers=N, and CMake uses -DSUBSPACE_MAX_BUFFERS=N.  N
+// must be a positive integer.  The default (341) yields a 4096-byte BCB on
+// typical platforms (4-byte atomic int32 refs plus 8-byte atomic uint64 sizes).
+#ifndef SUBSPACE_MAX_BUFFERS
+#define SUBSPACE_MAX_BUFFERS 341
+#endif
+constexpr size_t kMaxBuffers = SUBSPACE_MAX_BUFFERS;
+static_assert(kMaxBuffers > 0, "SUBSPACE_MAX_BUFFERS must be positive");
 
 // Ref count bits.
 constexpr uint64_t kRefCountMask = 0x3ff;
@@ -553,7 +570,7 @@ struct BufferControlBlock {
   std::atomic<int32_t>
       refs[kMaxBuffers]; // Number of references to this buffer.
   std::atomic<uint64_t>
-      sizes[kMaxBuffers]; // Number of references to this buffer.
+      sizes[kMaxBuffers]; // Byte size of this buffer segment.
 };
 
 // The data covered by a message checksum, as three spans:
