@@ -61,8 +61,12 @@ directly through shared memory using lock-free atomic operations.
 ### 2.2 Connection Protocol
 
 1. The client connects to the server via a Unix domain socket (default `/tmp/subspace`).
-2. The client sends an `Init` protobuf request containing the client name.
-3. The server responds with a session ID and transmits the SCB file descriptor via `SCM_RIGHTS`.
+2. The client sends an `Init` protobuf request with its program name and the
+   build-time limits it was compiled with (`max_channels`, `max_slot_owners`,
+   `max_buffers`). These must match the server’s compiled limits or the server
+   returns `InitResponse.error` and does not pass an SCB fd.
+3. On success, the server responds with a session ID and transmits the SCB file
+   descriptor via `SCM_RIGHTS`.
 4. The client maps the SCB into its address space.
 5. All subsequent requests (CreatePublisher, CreateSubscriber, etc.) use the same socket with a 4-byte length prefix + serialized protobuf, followed by file descriptor transfer for shared memory regions.
 
@@ -438,8 +442,8 @@ Both `checksum_size` and `metadata_size` are stored as `uint16_t` in the prefix.
 
 ### 7.4 What Is and Is Not Checksummed
 
-- **Checksummed:** `slot_id`, `message_size`, `ordinal`, `timestamp`, `flags`, `vchan_id`, `checksum_size`, `metadata_size`, user metadata, and the message payload.
-- **Not checksummed:** The `padding` field (offset 0–3), the checksum storage itself, and any alignment padding between the end of metadata and the end of the prefix.
+- **Checksummed:** `slot_id`, `message_size`, `ordinal`, `timestamp`, the `kMessageActivate` and `kMessageHasChecksum` bits of `flags` (`kChecksummedMessageFlags`), `vchan_id`, `checksum_size`, `metadata_size`, user metadata, and the message payload.
+- **Not checksummed:** The `padding` field (offset 0–3), every other bit of `flags` (including `kMessageBridged` and `kMessageCrossMachine`, which are set in transit), the checksum storage itself, and any alignment padding between the end of metadata and the end of the prefix.
 
 ---
 
@@ -823,11 +827,16 @@ monitoring tools to distinguish between local, bridged, and tunneled users.
 |-----------|---------|-------------|
 | `checksum_size` | 65535 (0xFFFF) | Server |
 | `metadata_size` | 65535 (0xFFFF) | Server |
-| `num_slots` | 1024 (kMaxBuffers) | Server |
+| `num_slots` | Server policy (often 1024) | Server |
+| Distinct payload buffers per channel | 341 by default (`kMaxBuffers`); raise with `subspace.max_buffers` | BCB |
 | `max_active_messages` | num_slots | Subscriber |
 | `vchan_id` | 1023 | 10-bit field |
-| Subscribers per channel | 1024 (kMaxSlotOwners) | CCB bitset |
+| Subscribers per channel | 1024 by default (`kMaxSlotOwners`); raise with `subspace.max_slot_owners` | CCB bitset |
 | Channels per session | 1024 by default (`kMaxChannels`); raise with `subspace.max_channels` | SCB |
 | Channel name length | 64 (kMaxChannelName) | CCB |
 
 The session channel limit is a build setting because it sizes the system control block in shared memory. A downstream Bazel module raises it by calling `subspace.max_channels(count = N)` next to its `bazel_dep`. `N` must be a positive multiple of 64. See [Setting the channel limit from another Bazel build](max-channels.md).
+
+The per-channel publisher/subscriber limit sizes CCB fields in shared memory. Raise it with `subspace.max_slot_owners(count = N)` (`N` is any positive integer). See [Setting the slot-owner limit from another Bazel build](max-slot-owners.md).
+
+The BCB buffer-table limit sizes `BufferControlBlock` in shared memory (ref counts and sizes for each payload segment). The default `341` yields a 4096-byte BCB. Raise it with `subspace.max_buffers(count = N)`. See [Setting the BCB buffer-table limit](max-buffers.md).

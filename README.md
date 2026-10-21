@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/subspace_logo.jpg" alt="Subspace logo" width="640">
+</p>
+
 # Subspace IPC
 Next Generation, sub-microsecond latency shared memory IPC.
 
@@ -116,6 +120,10 @@ subspace.max_channels(count = 8192)
 ```
 
 That applies to the server and every client. See [Setting the channel limit from another Bazel build](docs/max-channels.md).
+
+The per-channel publisher/subscriber limit defaults to 1024 (`kMaxSlotOwners`). Downstream modules call `subspace.max_slot_owners(count = N)` on the same extension. See [Setting the slot-owner limit from another Bazel build](docs/max-slot-owners.md).
+
+The BCB buffer-table limit defaults to 341 (`kMaxBuffers`), so the Buffer Control Block is 4096 bytes on typical platforms. Call `subspace.max_buffers(count = N)` when a channel needs more distinct payload segments (for example many resizes). See [Setting the BCB buffer-table limit](docs/max-buffers.md).
 
 To raise the limit while building this repository:
 
@@ -249,6 +257,8 @@ make -j$(nproc)
 | `SUBSPACE_LINUX_USE_MEMFD` | `OFF` | On Linux, back shared memory with anonymous `memfd_create` objects instead of named `/dev/shm` ones. |
 | `SUBSPACE_64BIT_SLOT_SIZE` | `OFF` | Expose 64 bit slot sizes in the C and C++ client APIs, allowing slots larger than 2GB. See [Slot Sizes](docs/slot-sizes.md#64-bit-slot-sizes). |
 | `SUBSPACE_MAX_CHANNELS` | `1024` | Maximum channels per server session. Must be a positive multiple of 64. The same value is passed to the Rust client. |
+| `SUBSPACE_MAX_SLOT_OWNERS` | `1024` | Maximum publishers plus subscribers per channel. Must be a positive integer. The same value is passed to the Rust client. |
+| `SUBSPACE_MAX_BUFFERS` | `341` | Maximum distinct payload buffer segments per channel (BCB size). Must be a positive integer. Default fits the BCB in one 4 KiB page. Passed to the Rust client. |
 
 These options change struct layouts or function signatures, so they must be set
 consistently for the library and everything that includes its headers. The

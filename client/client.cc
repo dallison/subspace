@@ -24,6 +24,13 @@
 namespace subspace {
 
 namespace {
+void FillInitRequest(InitRequest *init, const std::string &client_name) {
+  init->set_client_name(client_name);
+  init->set_max_channels(kMaxChannels);
+  init->set_max_slot_owners(kMaxSlotOwners);
+  init->set_max_buffers(static_cast<int32_t>(kMaxBuffers));
+}
+
 std::atomic<bool> default_use_split_buffers{false};
 
 #if defined(__QNX__) || defined(__QNXNTO__)
@@ -242,13 +249,16 @@ absl::Status ClientImpl::Init(const std::string &server_socket,
   name_ = client_name;
   socket_name_ = server_socket;
   Request req;
-  req.mutable_init()->set_client_name(client_name);
+  FillInitRequest(req.mutable_init(), client_name);
   Response resp;
   std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
   status = SendRequestReceiveResponse(req, resp, fds);
   if (!status.ok()) {
     return status;
+  }
+  if (!resp.init().error().empty()) {
+    return absl::InternalError(resp.init().error());
   }
   if (absl::Status fd_status = CheckFdIndex(fds, resp.init().scb_fd_index(),
                                             "scb_fd", "InitResponse");
@@ -1435,7 +1445,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
                                  subscriber->MetadataSize());
       absl::Span<const std::byte> cksum =
           GetChecksumSpan(prefix, subscriber->ChecksumSize());
-      checksum_error = !subscriber->ValidateChecksum(data, cksum);
+      checksum_error = !subscriber->ValidateChecksum(data.Spans(), cksum);
     }
     if ((prefix->flags & kMessageActivate) != 0) {
       is_activation = true;
@@ -2349,7 +2359,7 @@ absl::Status ClientImpl::Reconnect() {
   }
 
   Request init_req;
-  init_req.mutable_init()->set_client_name(name_);
+  FillInitRequest(init_req.mutable_init(), name_);
   Response init_resp;
   std::vector<toolbelt::FileDescriptor> init_fds;
   init_fds.reserve(100);
@@ -2357,6 +2367,10 @@ absl::Status ClientImpl::Reconnect() {
   if (!status.ok()) {
     cleanup();
     return status;
+  }
+  if (!init_resp.init().error().empty()) {
+    cleanup();
+    return absl::InternalError(init_resp.init().error());
   }
   scb_fd_ = std::move(init_fds[init_resp.init().scb_fd_index()]);
   session_id_ = init_resp.init().session_id();

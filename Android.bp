@@ -7,9 +7,11 @@ soong_namespace {}
 // Common defaults for all subspace native modules.
 cc_defaults {
     name: "subspace_defaults",
-    # Add "-DSUBSPACE_MAX_CHANNELS=N" to cflags to raise the session channel
-    # limit above the default of 1024.  N must be a positive multiple of 64,
-    # and every client built against this library must use the same value.
+    # Add "-DSUBSPACE_MAX_CHANNELS=N", "-DSUBSPACE_MAX_SLOT_OWNERS=N", and/or
+    # "-DSUBSPACE_MAX_BUFFERS=N" to cflags to raise build limits.  max_channels
+    # N must be a positive multiple of 64; max_slot_owners and max_buffers must
+    # be positive integers (max_buffers defaults to 341 for a 4 KiB BCB).
+    # Every client built against this library must use the same values.
     cflags: [
         "-std=c++17",
         "-Wall",

@@ -23,6 +23,11 @@ use std::sync::atomic::{
 pub const MESSAGE_ACTIVATE: i64 = 1;
 pub const MESSAGE_BRIDGED: i64 = 2;
 pub const MESSAGE_HAS_CHECKSUM: i64 = 4;
+pub const MESSAGE_CROSS_MACHINE: i64 = 8;
+
+/// The only flags covered by the message checksum.  Must match
+/// kChecksummedMessageFlags in common/channel.h.
+pub const CHECKSUMMED_MESSAGE_FLAGS: i64 = MESSAGE_ACTIVATE | MESSAGE_HAS_CHECKSUM;
 
 pub const MESSAGE_SEEN: u32 = 1;
 pub const MESSAGE_IS_ACTIVATION: u32 = 2;
@@ -36,6 +41,17 @@ pub const MESSAGE_SEEN_BY_RELIABLE: u32 = 4;
 /// variable.  The default is 1024, and the value must be a positive multiple
 /// of 64.
 pub const MAX_CHANNELS: usize = parse_max_channels(env!("SUBSPACE_MAX_CHANNELS").as_bytes());
+
+/// Maximum publishers plus subscribers per channel.  Must match C++
+/// `kMaxSlotOwners`.  See `build.rs` for configuration sources.
+pub const MAX_SLOT_OWNERS: usize =
+    parse_max_slot_owners(env!("SUBSPACE_MAX_SLOT_OWNERS").as_bytes());
+
+/// Maximum distinct payload buffer segments per channel.  Must match C++
+/// `kMaxBuffers`.  See `build.rs` for configuration sources.  The default is
+/// 341 so the BCB is 4096 bytes on typical platforms.
+pub const MAX_BUFFERS: usize =
+    parse_max_buffers(env!("SUBSPACE_MAX_BUFFERS").as_bytes());
 
 const fn parse_max_channels(raw: &[u8]) -> usize {
     if raw.is_empty() || raw[0] == b'0' {
@@ -63,13 +79,57 @@ const fn parse_max_channels(raw: &[u8]) -> usize {
     count
 }
 
-pub const MAX_SLOT_OWNERS: usize = 1024;
+const fn parse_max_slot_owners(raw: &[u8]) -> usize {
+    if raw.is_empty() || raw[0] == b'0' {
+        panic!("SUBSPACE_MAX_SLOT_OWNERS must be a positive integer");
+    }
+    let mut count: usize = 0;
+    let mut i = 0;
+    while i < raw.len() {
+        let digit = raw[i];
+        if !digit.is_ascii_digit() {
+            panic!("SUBSPACE_MAX_SLOT_OWNERS must be a positive integer");
+        }
+        let Some(scaled) = count.checked_mul(10) else {
+            panic!("SUBSPACE_MAX_SLOT_OWNERS is too large");
+        };
+        let Some(next) = scaled.checked_add((digit - b'0') as usize) else {
+            panic!("SUBSPACE_MAX_SLOT_OWNERS is too large");
+        };
+        count = next;
+        i += 1;
+    }
+    count
+}
+
+const fn parse_max_buffers(raw: &[u8]) -> usize {
+    if raw.is_empty() || raw[0] == b'0' {
+        panic!("SUBSPACE_MAX_BUFFERS must be a positive integer");
+    }
+    let mut count: usize = 0;
+    let mut i = 0;
+    while i < raw.len() {
+        let digit = raw[i];
+        if !digit.is_ascii_digit() {
+            panic!("SUBSPACE_MAX_BUFFERS must be a positive integer");
+        }
+        let Some(scaled) = count.checked_mul(10) else {
+            panic!("SUBSPACE_MAX_BUFFERS is too large");
+        };
+        let Some(next) = scaled.checked_add((digit - b'0') as usize) else {
+            panic!("SUBSPACE_MAX_BUFFERS is too large");
+        };
+        count = next;
+        i += 1;
+    }
+    count
+}
+
 pub const MAX_AVAILABLE_SLOT_QUEUE_CAPACITY: usize = 1024;
 const MAX_SLOT_QUEUE_CAS_ATTEMPTS: usize = 64;
 pub const CHANNEL_CONTROL_BLOCK_VERSION: u32 = 5;
 pub const MAX_VCHAN_ID: usize = 1023;
 pub const MAX_CHANNEL_NAME: usize = 64;
-pub const MAX_BUFFERS: usize = 1024;
 
 // ── Ref count bit field constants ───────────────────────────────────────────
 
@@ -153,7 +213,7 @@ impl MessagePrefix {
 
 // ── MessageSlot ─────────────────────────────────────────────────────────────
 
-/// Number of 64-bit words needed for MAX_SLOT_OWNERS (1024) bits.
+/// Number of 64-bit words needed for MAX_SLOT_OWNERS bits.
 const SLOT_OWNER_WORDS: usize = bits_to_words(MAX_SLOT_OWNERS);
 
 #[repr(C)]

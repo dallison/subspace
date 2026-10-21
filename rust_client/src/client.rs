@@ -1169,6 +1169,9 @@ impl Client {
         let req = proto::Request {
             request: Some(proto::request::Request::Init(proto::InitRequest {
                 client_name: client_name.to_string(),
+                max_channels: MAX_CHANNELS as i32,
+                max_slot_owners: MAX_SLOT_OWNERS as i32,
+                max_buffers: MAX_BUFFERS as i32,
             })),
         };
         socket.send_request(&req)?;
@@ -1182,6 +1185,10 @@ impl Client {
                 ))
             }
         };
+
+        if !init.error.is_empty() {
+            return Err(SubspaceError::Internal(init.error));
+        }
 
         let scb_fd = fds[init.scb_fd_index as usize];
 
@@ -1828,12 +1835,14 @@ fn read_message_internal(
                 let buffer = sub.channel.get_buffer_address(new_idx);
                 let cs = sub.channel.checksum_size;
                 let ms = sub.channel.metadata_size;
+                let mut prefix_fields = [0u8; checksum::PREFIX_FIELDS_LEN];
                 let data = checksum::get_message_checksum_data(
                     prefix,
                     buffer,
                     delivered_message_size as usize,
                     cs,
                     ms,
+                    &mut prefix_fields,
                 );
                 let stored_cksum = checksum::get_checksum_slice_const(prefix, cs);
                 if let Some(ref cb) = sub.checksum_callback {

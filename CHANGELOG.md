@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Checksum Covers Only Publisher Flags
+- The message checksum now covers only the `kMessageActivate` and
+  `kMessageHasChecksum` bits of the prefix `flags`
+  (`kChecksummedMessageFlags`). Other flags, such as `kMessageBridged`,
+  `kMessageCrossMachine` or a bit a program sets itself, can be set after
+  publishing, for example while forwarding a message over a bridge or tunnel,
+  without invalidating the checksum. C++ and Rust compute the same value.
+  Messages with only those two flags set have the same checksum as before.
+- `GetMessageChecksumData` returns a `MessageChecksumData` holding a masked
+  copy of the prefix fields. Pass `Spans()` to the checksum calculation. The
+  Rust `get_message_checksum_data` takes a `PREFIX_FIELDS_LEN` scratch buffer.
+
 ### Stuck Subscriber Warning
 - A subscriber now logs an error when a message has been waiting for 5
   seconds that it can't read because it already holds `max_active_messages`

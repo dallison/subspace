@@ -292,12 +292,13 @@ void ClientChannel::UnmapSplitBufferSet(size_t buffer_index,
         metadata = buffer.split_metadata[slot];
       }
       SplitBufferMapping mapping = {
-          .handle = slot < buffer.split_handles.size() ? buffer.split_handles[slot]
-                                                       : metadata.handle,
+          .handle = slot < buffer.split_handles.size()
+                        ? buffer.split_handles[slot]
+                        : metadata.handle,
           .address = buffer.split_slot_buffers[slot],
-          .size = slot < buffer.split_slot_sizes.size()
-                      ? buffer.split_slot_sizes[slot]
-                      : metadata.allocation_size,
+          .size = static_cast<size_t>(slot < buffer.split_slot_sizes.size()
+                                          ? buffer.split_slot_sizes[slot]
+                                          : metadata.allocation_size),
           .private_data = slot < buffer.split_private_data.size()
                               ? buffer.split_private_data[slot]
                               : nullptr,
