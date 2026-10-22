@@ -259,6 +259,8 @@ ToCppMapping(const SubspaceSplitBufferMapping &mapping) {
 subspace::SplitBufferCallbacks
 ToCppSplitCallbacks(SubspaceSplitBufferCallbacks callbacks) {
   subspace::SplitBufferCallbacks cpp_callbacks;
+  cpp_callbacks.map_keeps_registration_fd =
+      callbacks.map_keeps_registration_fd;
   if (callbacks.allocate != nullptr) {
     cpp_callbacks.allocate =
         [callbacks](const subspace::SplitBufferMetadata &metadata)
@@ -551,6 +553,12 @@ bool subspace_get_all_channel_stats(SubspaceClient client,
   return true;
 }
 
+SubspaceSplitBufferCallbacks subspace_split_buffer_callbacks(void) {
+  SubspaceSplitBufferCallbacks callbacks = {};
+  callbacks.map_keeps_registration_fd = true;
+  return callbacks;
+}
+
 SubspaceSubscriberOptions subspace_subscriber_options_default(void) {
   SubspaceSubscriberOptions options = {};
   options.max_active_messages = 1;
@@ -558,6 +566,7 @@ SubspaceSubscriberOptions subspace_subscriber_options_default(void) {
   options.warn_when_stuck = true;
   options.stuck_warning_grace_period = 5.0;
   options.vchan_id = -1;
+  options.split_callbacks = subspace_split_buffer_callbacks();
   return options;
 }
 
@@ -573,6 +582,7 @@ subspace_publisher_options_default(SubspaceSlotSize slot_size, int num_slots) {
   options.notify_retirement_on_forced_reuse = true;
   options.checksum_size = 4;
   options.prefer_retired_slots = true;
+  options.split_callbacks = subspace_split_buffer_callbacks();
   return options;
 }
 

@@ -1067,7 +1067,8 @@ ClientChannel::OpenSplitBufferSet(size_t buffer_index, size_t full_size,
       slot_handle = static_cast<uintptr_t>(slot_fd.Fd());
       buffer->split_fds.push_back(std::move(slot_fd));
     }
-    if (registered_fd.has_value()) {
+    if (registered_fd.has_value() &&
+        !SplitBuffersCallbacks().map_keeps_registration_fd) {
       buffer->split_fds.push_back(std::move(*registered_fd));
     }
     buffer->split_handles[slot] = slot_handle;

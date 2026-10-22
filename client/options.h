@@ -262,6 +262,10 @@ struct PublisherOptions {
     split_buffer_callbacks = std::move(callbacks);
     return *this;
   }
+  PublisherOptions &SetMapKeepsRegistrationFd(bool v) {
+    split_buffer_callbacks.map_keeps_registration_fd = v;
+    return *this;
+  }
   const subspace::SplitBufferCallbacks &SplitBufferCallbackSet() const {
     return split_buffer_callbacks;
   }
@@ -469,6 +473,10 @@ struct SubscriberOptions {
   SubscriberOptions &SetSplitBufferCallbacks(
       subspace::SplitBufferCallbacks callbacks) {
     split_buffer_callbacks = std::move(callbacks);
+    return *this;
+  }
+  SubscriberOptions &SetMapKeepsRegistrationFd(bool v) {
+    split_buffer_callbacks.map_keeps_registration_fd = v;
     return *this;
   }
   const subspace::SplitBufferCallbacks &SplitBufferCallbackSet() const {

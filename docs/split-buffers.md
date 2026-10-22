@@ -186,6 +186,15 @@ Callbacks exchange `SplitBufferMetadata` and `SplitBufferMapping` values. The
 mapping contains an allocator-defined `handle`, mapped `address`, mapped `size`,
 and opaque `private_data` value.
 
+On POSIX/QNX attach, the client may pass `registration_fd` in metadata for
+`map`. By default `map_keeps_registration_fd` is **true** in C++, Rust, and C:
+the client assumes `map` dup's or otherwise retains that fd and does **not**
+keep a duplicate open (avoids extra fd references on QNX). Set it to **false**
+only if `map` mmap's `registration_fd` without taking ownership and needs the
+client to hold the fd until unmap. In C, start from
+`subspace_split_buffer_callbacks()` so the default is applied before assigning
+callback function pointers.
+
 ## C API
 
 The C API exposes the same feature through `SubspacePublisherOptions` and
