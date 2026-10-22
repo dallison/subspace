@@ -167,7 +167,16 @@ typedef struct {
   SubspaceSplitReleaseCallback unmap;
   SubspaceSplitReleaseCallback free;
   void *user_data;
+  // When true, map() retains registration_fd and the client does not keep a
+  // duplicate fd after attach. Same meaning as C++ / Rust
+  // SplitBufferCallbacks::map_keeps_registration_fd. Use
+  // subspace_split_buffer_callbacks() to default this to true.
+  bool map_keeps_registration_fd;
 } SubspaceSplitBufferCallbacks;
+
+// Zero-initialized callbacks with map_keeps_registration_fd true (recommended
+// starting point before assigning allocate/map/unmap/free).
+SubspaceSplitBufferCallbacks subspace_split_buffer_callbacks(void);
 
 // This is a received message.  The 'message' member is a pointer to a smart
 // message object that is used to manage the message.  The 'length' member is

@@ -426,10 +426,16 @@ static bool release_payload(const SubspaceSplitBufferInfo *info,
 }
 
 opts.use_split_buffers = true;
+opts.split_callbacks = subspace_split_buffer_callbacks();
 opts.split_callbacks.allocate = allocate_payload;
 opts.split_callbacks.free = release_payload;
 opts.split_callbacks.user_data = allocator_context;
 ```
+
+`subspace_publisher_options_default()` and `subspace_subscriber_options_default()`
+already initialize `split_callbacks` this way. Set
+`split_callbacks.map_keeps_registration_fd` to `false` only if your `map`
+callback mmap's `registration_fd` without taking ownership.
 
 Subscribers use `split_callbacks.map` and `split_callbacks.unmap` to map custom
 handles. If callbacks are not supplied, subscribers use the built-in shared

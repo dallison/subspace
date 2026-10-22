@@ -192,6 +192,11 @@ impl PublisherOptions {
         self
     }
 
+    pub fn set_map_keeps_registration_fd(mut self, v: bool) -> Self {
+        self.split_buffer_callbacks.map_keeps_registration_fd = v;
+        self
+    }
+
     pub fn set_split_buffer_allocate_callback<F>(mut self, callback: F) -> Self
     where
         F: Fn(
@@ -395,6 +400,11 @@ impl SubscriberOptions {
 
     pub fn set_split_buffer_callbacks(mut self, callbacks: SplitBufferCallbacks) -> Self {
         self.split_buffer_callbacks = callbacks;
+        self
+    }
+
+    pub fn set_map_keeps_registration_fd(mut self, v: bool) -> Self {
+        self.split_buffer_callbacks.map_keeps_registration_fd = v;
         self
     }
 

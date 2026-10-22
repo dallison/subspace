@@ -254,13 +254,12 @@ SubspacePublisherOptions CPublisherOptionsDefault(int32_t slot_size,
       subspace_publisher_options_default(slot_size, num_slots);
   if (absl::GetFlag(FLAGS_use_split_buffers)) {
     options.use_split_buffers = true;
-    options.split_callbacks = {
-        .allocate = TestCSplitAllocate,
-        .map = TestCSplitMap,
-        .unmap = TestCSplitUnmap,
-        .free = TestCSplitFree,
-        .user_data = &default_split_buffer_state,
-    };
+    options.split_callbacks = subspace_split_buffer_callbacks();
+    options.split_callbacks.allocate = TestCSplitAllocate;
+    options.split_callbacks.map = TestCSplitMap;
+    options.split_callbacks.unmap = TestCSplitUnmap;
+    options.split_callbacks.free = TestCSplitFree;
+    options.split_callbacks.user_data = &default_split_buffer_state;
   }
   return options;
 }
@@ -268,13 +267,12 @@ SubspacePublisherOptions CPublisherOptionsDefault(int32_t slot_size,
 SubspaceSubscriberOptions CSubscriberOptionsDefault() {
   SubspaceSubscriberOptions options = subspace_subscriber_options_default();
   if (absl::GetFlag(FLAGS_use_split_buffers)) {
-    options.split_callbacks = {
-        .allocate = TestCSplitAllocate,
-        .map = TestCSplitMap,
-        .unmap = TestCSplitUnmap,
-        .free = TestCSplitFree,
-        .user_data = &default_split_buffer_state,
-    };
+    options.split_callbacks = subspace_split_buffer_callbacks();
+    options.split_callbacks.allocate = TestCSplitAllocate;
+    options.split_callbacks.map = TestCSplitMap;
+    options.split_callbacks.unmap = TestCSplitUnmap;
+    options.split_callbacks.free = TestCSplitFree;
+    options.split_callbacks.user_data = &default_split_buffer_state;
   }
   return options;
 }
@@ -640,13 +638,12 @@ TEST_F(ClientTest, ExplicitSplitBufferLeasesRetireAndReclaimExactSlot) {
   pub_opts.max_outstanding_slot_leases = 3;
   pub_opts.subscriber_queue_arena_size = 64'000;
   pub_opts.metadata_size = 8;
-  pub_opts.split_callbacks = {
-      .allocate = TestCSplitAllocate,
-      .map = TestCSplitMap,
-      .unmap = TestCSplitUnmap,
-      .free = TestCSplitFree,
-      .user_data = &split_state,
-  };
+  pub_opts.split_callbacks = subspace_split_buffer_callbacks();
+  pub_opts.split_callbacks.allocate = TestCSplitAllocate;
+  pub_opts.split_callbacks.map = TestCSplitMap;
+  pub_opts.split_callbacks.unmap = TestCSplitUnmap;
+  pub_opts.split_callbacks.free = TestCSplitFree;
+  pub_opts.split_callbacks.user_data = &split_state;
   SubspacePublisher pub =
       subspace_create_publisher(pub_client, "c_explicit_leases", pub_opts);
   ASSERT_NE(nullptr, pub.publisher) << subspace_get_last_error();
@@ -1354,13 +1351,12 @@ TEST_F(ClientTest, SplitBufferCallbacksPublishAndRead) {
   ASSERT_NE(nullptr, sub_client.client);
   ASSERT_FALSE(subspace_has_error());
 
-  SubspaceSplitBufferCallbacks callbacks = {
-      .allocate = TestCSplitAllocate,
-      .map = TestCSplitMap,
-      .unmap = TestCSplitUnmap,
-      .free = TestCSplitFree,
-      .user_data = &state,
-  };
+  SubspaceSplitBufferCallbacks callbacks = subspace_split_buffer_callbacks();
+  callbacks.allocate = TestCSplitAllocate;
+  callbacks.map = TestCSplitMap;
+  callbacks.unmap = TestCSplitUnmap;
+  callbacks.free = TestCSplitFree;
+  callbacks.user_data = &state;
 
   SubspacePublisherOptions pub_opts = subspace_publisher_options_default(96, 3);
   pub_opts.use_split_buffers = true;
