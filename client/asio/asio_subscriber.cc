@@ -15,7 +15,7 @@ namespace subspace {
 AsioSubscriber::AsioSubscriber(std::shared_ptr<AsioClient> client,
                                Subscriber subscriber)
     : client_(std::move(client)), subscriber_(std::move(subscriber)),
-      event_fd_(client_->IoContext(), ::dup(subscriber_->GetPollFd().fd)),
+      event_fd_(client_->GetExecutor(), ::dup(subscriber_->GetPollFd().fd)),
       type_(subscriber_->Type()) {}
 
 AsioSubscriber::~AsioSubscriber() {

@@ -18,15 +18,15 @@
 namespace subspace {
 
 template <typename CompletionToken>
-auto AsioClient::AsyncCreate(boost::asio::io_context &io,
-                             std::string server_socket, std::string client_name,
-                             CompletionToken &&token) {
+auto AsioClient::AsyncCreate(Executor executor, std::string server_socket,
+                             std::string client_name, CompletionToken &&token) {
   using Signature = void(absl::StatusOr<std::shared_ptr<AsioClient>>);
   return boost::asio::async_initiate<CompletionToken, Signature>(
-      [&io, server_socket = std::move(server_socket),
+      [executor = std::move(executor), server_socket = std::move(server_socket),
        client_name = std::move(client_name)](auto handler) mutable {
-        auto client = std::shared_ptr<AsioClient>(new AsioClient(io));
-        auto work = asio_client_internal::MakeWorkGuard(io);
+        auto client =
+            std::shared_ptr<AsioClient>(new AsioClient(std::move(executor)));
+        auto work = asio_client_internal::MakeWorkGuard(client->GetExecutor());
         boost::asio::post(
             client->control_pool_,
             [client, server_socket = std::move(server_socket),
@@ -35,7 +35,7 @@ auto AsioClient::AsyncCreate(boost::asio::io_context &io,
               auto result = Client::Create(server_socket, client_name);
               if (!result.ok()) {
                 asio_client_internal::Complete(
-                    client->IoContext(), std::move(handler),
+                    client->GetExecutor(), std::move(handler),
                     absl::StatusOr<std::shared_ptr<AsioClient>>(
                         result.status()));
                 return;
@@ -43,7 +43,7 @@ auto AsioClient::AsyncCreate(boost::asio::io_context &io,
               client->client_ = std::move(result).value();
               client->client_->SetThreadSafe(true);
               asio_client_internal::Complete(
-                  client->IoContext(), std::move(handler),
+                  client->GetExecutor(), std::move(handler),
                   absl::StatusOr<std::shared_ptr<AsioClient>>(client));
             });
       },
@@ -58,7 +58,7 @@ auto AsioClient::AsyncCreatePublisher(std::string channel_name,
   return boost::asio::async_initiate<CompletionToken, Signature>(
       [self = shared_from_this(), channel_name = std::move(channel_name),
        options = std::move(options)](auto handler) mutable {
-        auto work = asio_client_internal::MakeWorkGuard(self->IoContext());
+        auto work = asio_client_internal::MakeWorkGuard(self->GetExecutor());
         boost::asio::post(
             self->control_pool_,
             [self, channel_name = std::move(channel_name),
@@ -68,12 +68,12 @@ auto AsioClient::AsyncCreatePublisher(std::string channel_name,
                   self->client_->CreatePublisher(channel_name, options);
               if (!result.ok()) {
                 asio_client_internal::Complete(
-                    self->IoContext(), std::move(handler),
+                    self->GetExecutor(), std::move(handler),
                     absl::StatusOr<AsioPublisher>(result.status()));
                 return;
               }
               asio_client_internal::Complete(
-                  self->IoContext(), std::move(handler),
+                  self->GetExecutor(), std::move(handler),
                   absl::StatusOr<AsioPublisher>(
                       AsioPublisher(self, std::move(result).value())));
             });
@@ -89,7 +89,7 @@ auto AsioClient::AsyncCreateSubscriber(std::string channel_name,
   return boost::asio::async_initiate<CompletionToken, Signature>(
       [self = shared_from_this(), channel_name = std::move(channel_name),
        options = std::move(options)](auto handler) mutable {
-        auto work = asio_client_internal::MakeWorkGuard(self->IoContext());
+        auto work = asio_client_internal::MakeWorkGuard(self->GetExecutor());
         boost::asio::post(
             self->control_pool_,
             [self, channel_name = std::move(channel_name),
@@ -99,7 +99,7 @@ auto AsioClient::AsyncCreateSubscriber(std::string channel_name,
                   self->client_->CreateSubscriber(channel_name, options);
               if (!result.ok()) {
                 asio_client_internal::Complete(
-                    self->IoContext(), std::move(handler),
+                    self->GetExecutor(), std::move(handler),
                     absl::StatusOr<std::shared_ptr<AsioSubscriber>>(
                         result.status()));
                 return;
@@ -107,7 +107,7 @@ auto AsioClient::AsyncCreateSubscriber(std::string channel_name,
               auto subscriber = std::shared_ptr<AsioSubscriber>(
                   new AsioSubscriber(self, std::move(result).value()));
               asio_client_internal::Complete(
-                  self->IoContext(), std::move(handler),
+                  self->GetExecutor(), std::move(handler),
                   absl::StatusOr<std::shared_ptr<AsioSubscriber>>(subscriber));
             });
       },
@@ -121,14 +121,14 @@ auto AsioClient::AsyncGetChannelInfo(std::string channel_name,
   return boost::asio::async_initiate<CompletionToken, Signature>(
       [self = shared_from_this(),
        channel_name = std::move(channel_name)](auto handler) mutable {
-        auto work = asio_client_internal::MakeWorkGuard(self->IoContext());
+        auto work = asio_client_internal::MakeWorkGuard(self->GetExecutor());
         boost::asio::post(
             self->control_pool_,
             [self, channel_name = std::move(channel_name),
              work = std::move(work), handler = std::move(handler)]() mutable {
               auto result = self->client_->GetChannelInfo(channel_name);
               asio_client_internal::Complete(
-                  self->IoContext(), std::move(handler),
+                  self->GetExecutor(), std::move(handler),
                   result.ok() ? absl::StatusOr<ChannelInfo>(*result)
                               : absl::StatusOr<ChannelInfo>(result.status()));
             });
@@ -142,13 +142,13 @@ auto AsioClient::AsyncGetChannelInfo(CompletionToken &&token) {
   using Signature = void(absl::StatusOr<Result>);
   return boost::asio::async_initiate<CompletionToken, Signature>(
       [self = shared_from_this()](auto handler) mutable {
-        auto work = asio_client_internal::MakeWorkGuard(self->IoContext());
+        auto work = asio_client_internal::MakeWorkGuard(self->GetExecutor());
         boost::asio::post(
             self->control_pool_, [self, work = std::move(work),
                                   handler = std::move(handler)]() mutable {
               auto result = self->client_->GetChannelInfo();
               asio_client_internal::Complete(
-                  self->IoContext(), std::move(handler),
+                  self->GetExecutor(), std::move(handler),
                   result.ok() ? absl::StatusOr<Result>(*result)
                               : absl::StatusOr<Result>(result.status()));
             });
@@ -163,14 +163,14 @@ auto AsioClient::AsyncGetChannelStats(std::string channel_name,
   return boost::asio::async_initiate<CompletionToken, Signature>(
       [self = shared_from_this(),
        channel_name = std::move(channel_name)](auto handler) mutable {
-        auto work = asio_client_internal::MakeWorkGuard(self->IoContext());
+        auto work = asio_client_internal::MakeWorkGuard(self->GetExecutor());
         boost::asio::post(
             self->control_pool_,
             [self, channel_name = std::move(channel_name),
              work = std::move(work), handler = std::move(handler)]() mutable {
               auto result = self->client_->GetChannelStats(channel_name);
               asio_client_internal::Complete(
-                  self->IoContext(), std::move(handler),
+                  self->GetExecutor(), std::move(handler),
                   result.ok() ? absl::StatusOr<ChannelStats>(*result)
                               : absl::StatusOr<ChannelStats>(result.status()));
             });
@@ -184,13 +184,13 @@ auto AsioClient::AsyncGetChannelStats(CompletionToken &&token) {
   using Signature = void(absl::StatusOr<Result>);
   return boost::asio::async_initiate<CompletionToken, Signature>(
       [self = shared_from_this()](auto handler) mutable {
-        auto work = asio_client_internal::MakeWorkGuard(self->IoContext());
+        auto work = asio_client_internal::MakeWorkGuard(self->GetExecutor());
         boost::asio::post(
             self->control_pool_, [self, work = std::move(work),
                                   handler = std::move(handler)]() mutable {
               auto result = self->client_->GetChannelStats();
               asio_client_internal::Complete(
-                  self->IoContext(), std::move(handler),
+                  self->GetExecutor(), std::move(handler),
                   result.ok() ? absl::StatusOr<Result>(*result)
                               : absl::StatusOr<Result>(result.status()));
             });
@@ -205,14 +205,14 @@ auto AsioClient::AsyncChannelExists(std::string channel_name,
   return boost::asio::async_initiate<CompletionToken, Signature>(
       [self = shared_from_this(),
        channel_name = std::move(channel_name)](auto handler) mutable {
-        auto work = asio_client_internal::MakeWorkGuard(self->IoContext());
+        auto work = asio_client_internal::MakeWorkGuard(self->GetExecutor());
         boost::asio::post(
             self->control_pool_,
             [self, channel_name = std::move(channel_name),
              work = std::move(work), handler = std::move(handler)]() mutable {
               auto result = self->client_->ChannelExists(channel_name);
               asio_client_internal::Complete(
-                  self->IoContext(), std::move(handler),
+                  self->GetExecutor(), std::move(handler),
                   result.ok() ? absl::StatusOr<bool>(*result)
                               : absl::StatusOr<bool>(result.status()));
             });

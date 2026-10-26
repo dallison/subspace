@@ -8,7 +8,7 @@
 #include "client/client.h"
 
 #include "absl/status/statusor.h"
-#include <boost/asio/io_context.hpp>
+#include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/thread_pool.hpp>
 
 #include <memory>
@@ -21,17 +21,18 @@ class AsioSubscriber;
 
 class AsioClient : public std::enable_shared_from_this<AsioClient> {
 public:
+  using Executor = boost::asio::any_io_executor;
+
   ~AsioClient();
 
   AsioClient(const AsioClient &) = delete;
   AsioClient &operator=(const AsioClient &) = delete;
 
   template <typename CompletionToken>
-  static auto AsyncCreate(boost::asio::io_context &io,
-                          std::string server_socket, std::string client_name,
-                          CompletionToken &&token);
+  static auto AsyncCreate(Executor executor, std::string server_socket,
+                          std::string client_name, CompletionToken &&token);
 
-  boost::asio::io_context &IoContext() const { return *io_; }
+  const Executor &GetExecutor() const { return executor_; }
 
   void SetDebug(bool enabled);
 
@@ -63,12 +64,12 @@ private:
   friend class AsioPublisher;
   friend class AsioSubscriber;
 
-  explicit AsioClient(boost::asio::io_context &io);
+  explicit AsioClient(Executor executor);
 
   void ReleasePublisher(Publisher publisher);
   void ReleaseSubscriber(Subscriber subscriber);
 
-  boost::asio::io_context *io_;
+  Executor executor_;
   boost::asio::thread_pool control_pool_{1};
   std::shared_ptr<Client> client_;
 };

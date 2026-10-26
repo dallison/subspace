@@ -20,12 +20,12 @@ auto AsioPublisher::AsyncGetMessageBuffer(SlotSizeType max_size,
   return boost::asio::async_initiate<CompletionToken, Signature>(
       [this, max_size](auto handler) mutable {
         auto client = client_;
-        auto work = asio_client_internal::MakeWorkGuard(client->IoContext());
+        auto work = asio_client_internal::MakeWorkGuard(client->GetExecutor());
         boost::asio::post(client->control_pool_,
                           [this, client, max_size, work = std::move(work),
                            handler = std::move(handler)]() mutable {
                             asio_client_internal::Complete(
-                                client->IoContext(), std::move(handler),
+                                client->GetExecutor(), std::move(handler),
                                 GetMessageBuffer(max_size));
                           });
       },
@@ -40,12 +40,12 @@ auto AsioPublisher::AsyncPublishMessage(int64_t message_size,
   return boost::asio::async_initiate<CompletionToken, Signature>(
       [this, message_size](auto handler) mutable {
         auto client = client_;
-        auto work = asio_client_internal::MakeWorkGuard(client->IoContext());
+        auto work = asio_client_internal::MakeWorkGuard(client->GetExecutor());
         boost::asio::post(client->control_pool_,
                           [this, client, message_size, work = std::move(work),
                            handler = std::move(handler)]() mutable {
                             asio_client_internal::Complete(
-                                client->IoContext(), std::move(handler),
+                                client->GetExecutor(), std::move(handler),
                                 PublishMessage(message_size));
                           });
       },

@@ -34,13 +34,13 @@ auto AsioSubscriber::AsyncReadMessageImpl(ReadMode mode,
   return boost::asio::async_initiate<CompletionToken, Signature>(
       [self = shared_from_this(), mode, clear_trigger](auto handler) mutable {
         auto work =
-            asio_client_internal::MakeWorkGuard(self->client_->IoContext());
+            asio_client_internal::MakeWorkGuard(self->client_->GetExecutor());
         boost::asio::post(
             self->client_->control_pool_,
             [self, mode, clear_trigger, work = std::move(work),
              handler = std::move(handler)]() mutable {
               asio_client_internal::Complete(
-                  self->client_->IoContext(), std::move(handler),
+                  self->client_->GetExecutor(), std::move(handler),
                   self->subscriber_->ReadMessage(mode, clear_trigger));
             });
       },

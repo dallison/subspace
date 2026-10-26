@@ -10,7 +10,7 @@
 
 namespace subspace {
 
-AsioClient::AsioClient(boost::asio::io_context &io) : io_(&io) {}
+AsioClient::AsioClient(Executor executor) : executor_(std::move(executor)) {}
 
 AsioClient::~AsioClient() { control_pool_.join(); }
 

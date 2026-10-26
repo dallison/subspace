@@ -33,7 +33,7 @@ TEST_F(AsioClientTest, PublishesAndReceives) {
   bool channel_stats_read = false;
 
   AsioClient::AsyncCreate(
-      io, Socket(), "asio-client-test",
+      io.get_executor(), Socket(), "asio-client-test",
       [&](absl::StatusOr<std::shared_ptr<AsioClient>> client_result) {
         if (!client_result.ok()) {
           failure = "create client";
