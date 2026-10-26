@@ -14,6 +14,7 @@
 #include "client/options.h"
 #include "client/publisher.h"
 #include "client/subscriber.h"
+#include "client/types.h"
 #include "co/coroutine.h"
 #include "common/async/context.h"
 #include "common/async/socket.h"
@@ -53,46 +54,6 @@ constexpr const char *kDefaultServerSocket = "/tmp/subspace";
 #else
 #define SUBSPACE_NO_UNIQUE_ADDRESS
 #endif
-
-enum class ReadMode {
-  kReadNext,
-  kReadNewest,
-};
-
-// Controls whether ReadMessage consumes the subscriber trigger fd (eventfd
-// or pipe). The default, kClearTrigger, reads the fd so a later poll/Wait
-// blocks until a new message is published. kNoClearTrigger leaves the fd
-// unread, which is useful when the caller is managing it from an external
-// event loop.
-enum class ClearTrigger {
-  kClearTrigger,
-  kNoClearTrigger,
-};
-
-struct ChannelInfo {
-  std::string channel_name;
-  int num_publishers;
-  int num_subscribers;
-  int num_bridge_pubs;
-  int num_bridge_subs;
-  int num_tunnel_pubs;
-  int num_tunnel_subs;
-  std::string type;
-  uint64_t slot_size;
-  int num_slots;
-  int subscriber_queue_size;
-  uint64_t subscriber_queue_arena_size;
-  bool reliable;
-  bool is_local = false;
-};
-
-struct ChannelStats {
-  std::string channel_name;
-  uint64_t total_bytes;
-  uint64_t total_messages;
-  uint64_t max_message_size;
-  bool is_local = false;
-};
 
 struct DefaultAliaser {
   void Set(const void * /*buffer*/, size_t /*length*/) {}
@@ -303,7 +264,8 @@ public:
   uint64_t lease_id() const { return lease_.lease_id; }
   absl::Span<std::byte> GetMetadata();
   absl::StatusOr<const Message> Publish(int64_t message_size);
-  absl::StatusOr<const Message> PublishCopy(absl::Span<const std::byte> payload);
+  absl::StatusOr<const Message>
+  PublishCopy(absl::Span<const std::byte> payload);
   absl::Status Release();
 
 private:
@@ -620,9 +582,10 @@ private:
   // PollFd is only triggered when a new message is published.
   // Pass ClearTrigger::kNoClearTrigger to leave the subscriber trigger fd
   // unread.
-  absl::StatusOr<Message> ReadMessage(
-      details::SubscriberImpl *subscriber, ReadMode mode = ReadMode::kReadNext,
-      ClearTrigger clear_trigger = ClearTrigger::kClearTrigger);
+  absl::StatusOr<Message>
+  ReadMessage(details::SubscriberImpl *subscriber,
+              ReadMode mode = ReadMode::kReadNext,
+              ClearTrigger clear_trigger = ClearTrigger::kClearTrigger);
   // Continue draining a batch after ReadMessage has cleared the poll fd and
   // refreshed publisher state. This avoids repeating that work per message.
   absl::StatusOr<Message>
@@ -975,8 +938,8 @@ public:
   // CancelPublish.
   // notify_subscribers may be false while building a batch, provided a later
   // message in that batch is published with notification enabled.
-  absl::StatusOr<const Message>
-  PublishMessage(int64_t message_size, bool notify_subscribers = true) {
+  absl::StatusOr<const Message> PublishMessage(int64_t message_size,
+                                               bool notify_subscribers = true) {
     return client_->PublishMessage(impl_.get(), message_size,
                                    notify_subscribers);
   }
@@ -1114,9 +1077,7 @@ public:
   // explicitly wake a waiter.
   void TriggerReliableWait() { impl_->TriggerReliable(); }
 
-  struct pollfd GetPollFd() const {
-    return client_->GetPollFd(impl_.get());
-  }
+  struct pollfd GetPollFd() const { return client_->GetPollFd(impl_.get()); }
 
   // This is a file descriptor that you can poll on to wait for
   // message slots to be retired.  It is triggered
@@ -1367,8 +1328,7 @@ ScopedPublisherBufferLease::Publish(int64_t message_size) {
 }
 
 inline absl::StatusOr<const Message>
-ScopedPublisherBufferLease::PublishCopy(
-    absl::Span<const std::byte> payload) {
+ScopedPublisherBufferLease::PublishCopy(absl::Span<const std::byte> payload) {
   if (!*this) {
     return absl::FailedPreconditionError(
         "publisher buffer lease is not active");
@@ -1408,8 +1368,7 @@ public:
   Subscriber(Subscriber &&other)
       : client_(std::move(other.client_)), impl_(std::move(other.impl_)),
         dropped_message_callback_(std::move(other.dropped_message_callback_)),
-        stuck_subscriber_callback_(
-            std::move(other.stuck_subscriber_callback_)),
+        stuck_subscriber_callback_(std::move(other.stuck_subscriber_callback_)),
         message_callback_(std::move(other.message_callback_)) {
     if (impl_ != nullptr && client_ != nullptr &&
         dropped_message_callback_ != nullptr) {
@@ -1419,8 +1378,7 @@ public:
     if (impl_ != nullptr && client_ != nullptr &&
         stuck_subscriber_callback_ != nullptr) {
       client_->UnregisterStuckSubscriberCallback(impl_.get()).IgnoreError();
-      RegisterStuckSubscriberCallback(stuck_subscriber_callback_)
-          .IgnoreError();
+      RegisterStuckSubscriberCallback(stuck_subscriber_callback_).IgnoreError();
     }
     if (impl_ != nullptr && client_ != nullptr &&
         message_callback_ != nullptr) {
@@ -1445,8 +1403,7 @@ public:
     if (impl_ != nullptr && client_ != nullptr &&
         stuck_subscriber_callback_ != nullptr) {
       client_->UnregisterStuckSubscriberCallback(impl_.get()).IgnoreError();
-      RegisterStuckSubscriberCallback(stuck_subscriber_callback_)
-          .IgnoreError();
+      RegisterStuckSubscriberCallback(stuck_subscriber_callback_).IgnoreError();
     }
     if (impl_ != nullptr && client_ != nullptr &&
         message_callback_ != nullptr) {
@@ -1563,9 +1520,7 @@ public:
   template <typename T, typename Aliaser = DefaultAliaser>
   absl::StatusOr<shared_ptr<T, Aliaser>> FindMessage(uint64_t timestamp);
 
-  struct pollfd GetPollFd() const {
-    return client_->GetPollFd(impl_.get());
-  }
+  struct pollfd GetPollFd() const { return client_->GetPollFd(impl_.get()); }
 
   toolbelt::FileDescriptor GetFileDescriptor() const {
     return client_->GetFileDescriptor(impl_.get());
