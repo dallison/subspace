@@ -116,34 +116,49 @@ absl::Status CheckDistinctFds(std::initializer_list<int> scalar_indices,
 
 } // namespace
 
-AsioClient::AsioClient(Executor executor)
+AsioClient::AsioClient(Executor executor, std::string server_socket,
+                       std::string client_name)
+    : state_(std::shared_ptr<AsioClientState>(
+          new AsioClientState(std::move(executor)))) {
+  state_->Init(std::move(server_socket), std::move(client_name));
+}
+
+bool AsioClient::IsConnected() const { return state_->IsConnected(); }
+
+const AsioClient::Executor &AsioClient::GetExecutor() const {
+  return state_->GetExecutor();
+}
+
+void AsioClient::SetDebug(bool enabled) { state_->SetDebug(enabled); }
+
+AsioClientState::AsioClientState(Executor executor)
     : executor_(std::move(executor)), strand_(executor_), socket_(executor_),
       control_buffer_(CMSG_SPACE(4096 * sizeof(int)), '\0') {}
 
-AsioClient::~AsioClient() {
+AsioClientState::~AsioClientState() {
+  is_connected_.store(false, std::memory_order_release);
   boost::system::error_code ignored;
   socket_.close(ignored);
   Fail(absl::CancelledError("AsioClient destroyed"));
 }
 
-void AsioClient::Init(std::string socket, std::string name,
-                      std::function<void(absl::Status)> completion) {
+void AsioClientState::Init(std::string socket, std::string name) {
   name_ = std::move(name);
   auto endpoint = MakeEndpoint(socket);
   if (!endpoint.ok()) {
-    completion(endpoint.status());
+    Fail(endpoint.status());
     return;
   }
   auto self = shared_from_this();
   socket_.async_connect(
       std::move(*endpoint),
       boost::asio::bind_executor(
-          strand_, [self, completion = std::move(completion)](
-                       const boost::system::error_code &error) mutable {
+          strand_, [self](const boost::system::error_code &error) {
             if (error) {
-              completion(IoError("connect", error));
+              self->FailTransport(IoError("connect", error));
               return;
             }
+            self->transport_connected_ = true;
             Request request;
             auto *init = request.mutable_init();
             init->set_client_name(self->name_);
@@ -152,21 +167,19 @@ void AsioClient::Init(std::string socket, std::string name,
             init->set_max_buffers(static_cast<int32_t>(kMaxBuffers));
             self->Enqueue(
                 std::move(request),
-                [self, completion = std::move(completion)](
-                    absl::StatusOr<RpcResult> result) mutable {
+                [self](absl::StatusOr<RpcResult> result) {
                   if (!result.ok()) {
-                    completion(result.status());
                     return;
                   }
                   const auto &response = result->response.init();
                   if (!response.error().empty()) {
-                    completion(absl::InternalError(response.error()));
+                    self->Fail(absl::InternalError(response.error()));
                     return;
                   }
                   if (absl::Status status =
                           CheckFd(result->fds, response.scb_fd_index(), "scb");
                       !status.ok()) {
-                    completion(status);
+                    self->Fail(status);
                     return;
                   }
                   self->scb_fd_ =
@@ -174,14 +187,16 @@ void AsioClient::Init(std::string socket, std::string name,
                   self->session_id_ = response.session_id();
                   self->server_user_id_ = response.user_id();
                   self->server_group_id_ = response.group_id();
-                  completion(absl::OkStatus());
-                });
+                  self->is_connected_.store(true, std::memory_order_release);
+                },
+                {}, true, true);
           }));
 }
 
-void AsioClient::Enqueue(Request request, ControlCompletion completion,
-                         std::vector<toolbelt::FileDescriptor> outbound_fds,
-                         bool expects_response) {
+void AsioClientState::Enqueue(
+    Request request, ControlCompletion completion,
+    std::vector<toolbelt::FileDescriptor> outbound_fds, bool expects_response,
+    bool prioritize) {
   const size_t size = request.ByteSizeLong();
   ControlCommand command;
   command.outbound.resize(sizeof(uint32_t) + size);
@@ -196,14 +211,27 @@ void AsioClient::Enqueue(Request request, ControlCompletion completion,
   command.expects_response = expects_response;
   command.completion = std::move(completion);
   auto self = shared_from_this();
-  boost::asio::post(strand_, [self, command = std::move(command)]() mutable {
-    self->commands_.push_back(std::move(command));
+  auto enqueue = [self, command = std::move(command), prioritize]() mutable {
+    if (!self->terminal_status_.ok()) {
+      command.completion(self->terminal_status_);
+      return;
+    }
+    if (prioritize) {
+      self->commands_.push_front(std::move(command));
+    } else {
+      self->commands_.push_back(std::move(command));
+    }
     self->StartNext();
-  });
+  };
+  if (strand_.running_in_this_thread()) {
+    enqueue();
+  } else {
+    boost::asio::post(strand_, std::move(enqueue));
+  }
 }
 
-void AsioClient::StartNext() {
-  if (active_ || commands_.empty()) {
+void AsioClientState::StartNext() {
+  if (!transport_connected_ || active_ || commands_.empty()) {
     return;
   }
   active_ = true;
@@ -226,7 +254,7 @@ void AsioClient::StartNext() {
           }));
 }
 
-void AsioClient::SendRequestFds() {
+void AsioClientState::SendRequestFds() {
   const auto &fds = commands_.front().outbound_fds;
   int32_t count = static_cast<int32_t>(fds.size());
   std::vector<char> control(CMSG_SPACE(fds.size() * sizeof(int)), '\0');
@@ -280,7 +308,7 @@ void AsioClient::SendRequestFds() {
   }
 }
 
-void AsioClient::ReadResponseLength() {
+void AsioClientState::ReadResponseLength() {
   auto self = shared_from_this();
   boost::asio::async_read(
       socket_, boost::asio::buffer(length_),
@@ -303,7 +331,7 @@ void AsioClient::ReadResponseLength() {
           }));
 }
 
-void AsioClient::ReadResponseBody() {
+void AsioClientState::ReadResponseBody() {
   response_body_.assign(response_size_, '\0');
   auto self = shared_from_this();
   boost::asio::async_read(
@@ -328,7 +356,7 @@ void AsioClient::ReadResponseBody() {
           }));
 }
 
-void AsioClient::ReceiveFds() {
+void AsioClientState::ReceiveFds() {
   auto self = shared_from_this();
   socket_.async_wait(
       boost::asio::socket_base::wait_read,
@@ -415,7 +443,7 @@ void AsioClient::ReceiveFds() {
       }));
 }
 
-void AsioClient::Finish(absl::StatusOr<RpcResult> result) {
+void AsioClientState::Finish(absl::StatusOr<RpcResult> result) {
   if (commands_.empty()) {
     return;
   }
@@ -426,7 +454,9 @@ void AsioClient::Finish(absl::StatusOr<RpcResult> result) {
   StartNext();
 }
 
-void AsioClient::FailTransport(absl::Status status) {
+void AsioClientState::FailTransport(absl::Status status) {
+  is_connected_.store(false, std::memory_order_release);
+  transport_connected_ = false;
   boost::system::error_code ignored;
   socket_.close(ignored);
   result_ = RpcResult();
@@ -434,7 +464,9 @@ void AsioClient::FailTransport(absl::Status status) {
   Fail(std::move(status));
 }
 
-void AsioClient::Fail(absl::Status status) {
+void AsioClientState::Fail(absl::Status status) {
+  is_connected_.store(false, std::memory_order_release);
+  terminal_status_ = status;
   while (!commands_.empty()) {
     auto completion = std::move(commands_.front().completion);
     commands_.pop_front();
@@ -443,22 +475,22 @@ void AsioClient::Fail(absl::Status status) {
   active_ = false;
 }
 
-void AsioClient::FillPublisherRequest(CreatePublisherRequest *request,
-                                      const std::string &name,
-                                      const PublisherOptions &options) {
+void AsioClientState::FillPublisherRequest(CreatePublisherRequest *request,
+                                           const std::string &name,
+                                           const PublisherOptions &options) {
   details::FillCreatePublisherRequest(request, name, options, -1);
 }
 
-void AsioClient::FillSubscriberRequest(CreateSubscriberRequest *request,
-                                       const std::string &name,
-                                       const SubscriberOptions &options) {
+void AsioClientState::FillSubscriberRequest(CreateSubscriberRequest *request,
+                                            const std::string &name,
+                                            const SubscriberOptions &options) {
   details::FillCreateSubscriberRequest(request, name, options, -1);
 }
 
 absl::StatusOr<AsioPublisher>
-AsioClient::BuildPublisher(const std::string &name,
-                           const PublisherOptions &requested_options,
-                           RpcResult result) {
+AsioClientState::BuildPublisher(const std::string &name,
+                                const PublisherOptions &requested_options,
+                                RpcResult result) {
   const auto &response = result.response.create_publisher();
   if (!response.error().empty()) {
     return absl::InternalError(response.error());
@@ -486,7 +518,7 @@ AsioClient::BuildPublisher(const std::string &name,
                client_channel->AttachBuffers().ok();
       },
       server_user_id_, server_group_id_);
-  std::weak_ptr<AsioClient> weak = shared_from_this();
+  std::weak_ptr<AsioClientState> weak = shared_from_this();
   impl->SetClientBufferRegistrationCallback(
       [weak](const ClientBufferHandleMetadata &metadata,
              const toolbelt::FileDescriptor *fd) {
@@ -638,9 +670,9 @@ AsioClient::BuildPublisher(const std::string &name,
 }
 
 absl::StatusOr<std::shared_ptr<AsioSubscriber>>
-AsioClient::BuildSubscriber(const std::string &name,
-                            const SubscriberOptions &requested_options,
-                            RpcResult result) {
+AsioClientState::BuildSubscriber(const std::string &name,
+                                 const SubscriberOptions &requested_options,
+                                 RpcResult result) {
   const auto &response = result.response.create_subscriber();
   if (!response.error().empty()) {
     return absl::InternalError(response.error());
@@ -662,7 +694,7 @@ AsioClient::BuildSubscriber(const std::string &name,
                client_channel->AttachBuffers().ok();
       },
       server_user_id_, server_group_id_);
-  std::weak_ptr<AsioClient> weak = shared_from_this();
+  std::weak_ptr<AsioClientState> weak = shared_from_this();
   impl->SetClientBufferLookupCallback([weak](const std::string &channel_name,
                                              uint64_t session_id,
                                              uint32_t buffer_index) {
@@ -750,8 +782,8 @@ AsioClient::BuildSubscriber(const std::string &name,
 }
 
 absl::StatusOr<absl::Span<std::byte>>
-AsioClient::GetMessageBuffer(details::PublisherImpl *publisher,
-                             SlotSizeType max_size) {
+AsioClientState::GetMessageBuffer(details::PublisherImpl *publisher,
+                                  SlotSizeType max_size) {
   if (publisher->IsReliable()) {
     publisher->ClearPollFd();
   }
@@ -797,7 +829,7 @@ AsioClient::GetMessageBuffer(details::PublisherImpl *publisher,
                                publisher->SlotSize());
 }
 
-void AsioClient::AcquireMessageBuffer(
+void AsioClientState::AcquireMessageBuffer(
     std::shared_ptr<details::PublisherImpl> publisher, SlotSizeType max_size,
     std::shared_ptr<boost::asio::posix::stream_descriptor> poll_descriptor,
     std::shared_ptr<std::atomic_bool> cancelled,
@@ -872,8 +904,8 @@ void AsioClient::AcquireMessageBuffer(
 }
 
 absl::StatusOr<Message>
-AsioClient::PublishMessage(details::PublisherImpl *publisher,
-                           int64_t message_size) {
+AsioClientState::PublishMessage(details::PublisherImpl *publisher,
+                                int64_t message_size) {
   if (publisher->CurrentSlot() == nullptr) {
     return absl::FailedPreconditionError(
         "GetMessageBuffer must complete before PublishMessage");
@@ -915,7 +947,7 @@ AsioClient::PublishMessage(details::PublisherImpl *publisher,
                  publisher->VirtualChannelId(), false, old_slot_id, false);
 }
 
-void AsioClient::RefreshPublisher(
+void AsioClientState::RefreshPublisher(
     std::shared_ptr<details::PublisherImpl> publisher,
     std::function<void(absl::Status)> completion) {
   auto self = shared_from_this();
@@ -978,7 +1010,7 @@ void AsioClient::RefreshPublisher(
   });
 }
 
-void AsioClient::RefreshSubscriber(
+void AsioClientState::RefreshSubscriber(
     std::shared_ptr<details::SubscriberImpl> subscriber,
     ClearTrigger clear_trigger,
     std::function<void(absl::Status, bool)> completion) {
@@ -1072,7 +1104,7 @@ void AsioClient::RefreshSubscriber(
   });
 }
 
-void AsioClient::ApplySubscriberRefresh(
+void AsioClientState::ApplySubscriberRefresh(
     std::shared_ptr<details::SubscriberImpl> subscriber, int updates,
     RpcResult result, std::function<void(absl::Status, bool)> completion) {
   const auto &response = result.response.create_subscriber();
@@ -1177,8 +1209,8 @@ void AsioClient::ApplySubscriberRefresh(
 }
 
 absl::StatusOr<Message>
-AsioClient::ReadMessage(details::SubscriberImpl *subscriber, ReadMode mode,
-                        ClearTrigger clear_trigger) {
+AsioClientState::ReadMessage(details::SubscriberImpl *subscriber, ReadMode mode,
+                             ClearTrigger clear_trigger) {
   if (clear_trigger == ClearTrigger::kClearTrigger) {
     subscriber->ClearPollFd();
   }
@@ -1271,7 +1303,7 @@ AsioClient::ReadMessage(details::SubscriberImpl *subscriber, ReadMode mode,
   return message;
 }
 
-void AsioClient::RemovePublisher(
+void AsioClientState::RemovePublisher(
     std::shared_ptr<details::PublisherImpl> publisher) {
   Request request;
   auto *remove = request.mutable_remove_publisher();
@@ -1282,7 +1314,7 @@ void AsioClient::RemovePublisher(
   });
 }
 
-void AsioClient::RemoveSubscriber(
+void AsioClientState::RemoveSubscriber(
     std::shared_ptr<details::SubscriberImpl> subscriber) {
   Request request;
   auto *remove = request.mutable_remove_subscriber();
@@ -1293,10 +1325,9 @@ void AsioClient::RemoveSubscriber(
                                   auto) mutable { subscriber.reset(); });
 }
 
-absl::StatusOr<AsioClient::RpcResult>
-AsioClient::WaitForControl(Request request,
-                           std::vector<toolbelt::FileDescriptor> outbound_fds,
-                           bool expects_response) {
+absl::StatusOr<AsioClientState::RpcResult> AsioClientState::WaitForControl(
+    Request request, std::vector<toolbelt::FileDescriptor> outbound_fds,
+    bool expects_response) {
   auto promise = std::make_shared<std::promise<absl::StatusOr<RpcResult>>>();
   std::future<absl::StatusOr<RpcResult>> future = promise->get_future();
   Enqueue(
@@ -1309,8 +1340,9 @@ AsioClient::WaitForControl(Request request,
 }
 
 absl::Status
-AsioClient::RegisterClientBuffer(const ClientBufferHandleMetadata &metadata,
-                                 const toolbelt::FileDescriptor *fd) {
+AsioClientState::RegisterClientBuffer(
+    const ClientBufferHandleMetadata &metadata,
+    const toolbelt::FileDescriptor *fd) {
   Request request;
   auto *register_buffer = request.mutable_register_client_buffer();
   details::ToProto(metadata, register_buffer->mutable_metadata());
@@ -1331,8 +1363,8 @@ AsioClient::RegisterClientBuffer(const ClientBufferHandleMetadata &metadata,
 }
 
 absl::StatusOr<std::vector<RegisteredClientBuffer>>
-AsioClient::GetClientBuffers(const std::string &channel_name,
-                             uint64_t session_id, uint32_t buffer_index) {
+AsioClientState::GetClientBuffers(const std::string &channel_name,
+                                  uint64_t session_id, uint32_t buffer_index) {
   Request request;
   auto *get = request.mutable_get_client_buffers();
   get->set_channel_name(channel_name);
@@ -1376,9 +1408,9 @@ AsioClient::GetClientBuffers(const std::string &channel_name,
   return buffers;
 }
 
-absl::Status AsioClient::UnregisterClientBuffer(const std::string &channel_name,
-                                                uint64_t session_id,
-                                                uint32_t buffer_index) {
+absl::Status AsioClientState::UnregisterClientBuffer(
+    const std::string &channel_name, uint64_t session_id,
+    uint32_t buffer_index) {
   Request request;
   auto *unregister = request.mutable_unregister_client_buffer();
   unregister->set_channel_name(channel_name);
@@ -1390,7 +1422,7 @@ absl::Status AsioClient::UnregisterClientBuffer(const std::string &channel_name,
 }
 
 AsioPublisher::AsioPublisher(
-    std::shared_ptr<AsioClient> client,
+    std::shared_ptr<AsioClientState> client,
     std::shared_ptr<details::PublisherImpl> impl,
     std::shared_ptr<boost::asio::posix::stream_descriptor> poll_descriptor)
     : client_(std::move(client)), impl_(std::move(impl)),
@@ -1426,7 +1458,7 @@ struct pollfd AsioPublisher::GetPollFd() const {
 }
 
 AsioSubscriber::AsioSubscriber(
-    std::shared_ptr<AsioClient> client,
+    std::shared_ptr<AsioClientState> client,
     std::shared_ptr<details::SubscriberImpl> impl,
     std::shared_ptr<boost::asio::posix::stream_descriptor> event_fd)
     : client_(std::move(client)), impl_(std::move(impl)),

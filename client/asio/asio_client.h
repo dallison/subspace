@@ -44,6 +44,7 @@
 namespace subspace {
 
 class AsioClient;
+class AsioClientState;
 
 class AsioPublisher {
 public:
@@ -65,13 +66,13 @@ public:
   struct pollfd GetPollFd() const;
 
 private:
-  friend class AsioClient;
+  friend class AsioClientState;
   AsioPublisher(
-      std::shared_ptr<AsioClient> client,
+      std::shared_ptr<AsioClientState> client,
       std::shared_ptr<details::PublisherImpl> impl,
       std::shared_ptr<boost::asio::posix::stream_descriptor> poll_descriptor);
 
-  std::shared_ptr<AsioClient> client_;
+  std::shared_ptr<AsioClientState> client_;
   std::shared_ptr<details::PublisherImpl> impl_;
   std::shared_ptr<boost::asio::posix::stream_descriptor> poll_descriptor_;
 };
@@ -102,9 +103,9 @@ public:
   struct pollfd GetPollFd() const;
 
 private:
-  friend class AsioClient;
+  friend class AsioClientState;
   AsioSubscriber(
-      std::shared_ptr<AsioClient> client,
+      std::shared_ptr<AsioClientState> client,
       std::shared_ptr<details::SubscriberImpl> impl,
       std::shared_ptr<boost::asio::posix::stream_descriptor> event_fd);
 
@@ -115,7 +116,7 @@ private:
   void WaitForNotification();
   void Drain();
 
-  std::shared_ptr<AsioClient> client_;
+  std::shared_ptr<AsioClientState> client_;
   std::shared_ptr<details::SubscriberImpl> impl_;
   boost::asio::strand<boost::asio::any_io_executor> strand_;
   std::shared_ptr<boost::asio::posix::stream_descriptor> event_fd_;
@@ -123,18 +124,55 @@ private:
   std::atomic_bool running_{false};
 };
 
-class AsioClient : public std::enable_shared_from_this<AsioClient> {
+class AsioClient {
 public:
   using Executor = boost::asio::any_io_executor;
 
-  ~AsioClient();
+  AsioClient(Executor executor, std::string server_socket,
+             std::string client_name);
   AsioClient(const AsioClient &) = delete;
   AsioClient &operator=(const AsioClient &) = delete;
+  AsioClient(AsioClient &&) noexcept = default;
+  AsioClient &operator=(AsioClient &&) noexcept = default;
+
+  bool IsConnected() const;
+  const Executor &GetExecutor() const;
+  void SetDebug(bool enabled);
 
   template <typename CompletionToken>
-  static auto AsyncCreate(Executor executor, std::string server_socket,
-                          std::string client_name, CompletionToken &&token);
+  auto AsyncCreatePublisher(std::string channel_name, PublisherOptions options,
+                            CompletionToken &&token);
 
+  template <typename CompletionToken>
+  auto AsyncCreateSubscriber(std::string channel_name,
+                             SubscriberOptions options,
+                             CompletionToken &&token);
+
+  template <typename CompletionToken>
+  auto AsyncGetChannelInfo(std::string channel_name, CompletionToken &&token);
+
+  template <typename CompletionToken>
+  auto AsyncGetChannelStats(std::string channel_name, CompletionToken &&token);
+
+  template <typename CompletionToken>
+  auto AsyncChannelExists(std::string channel_name, CompletionToken &&token);
+
+private:
+  std::shared_ptr<AsioClientState> state_;
+};
+
+class AsioClientState
+    : public std::enable_shared_from_this<AsioClientState> {
+public:
+  using Executor = AsioClient::Executor;
+
+  ~AsioClientState();
+  AsioClientState(const AsioClientState &) = delete;
+  AsioClientState &operator=(const AsioClientState &) = delete;
+
+  bool IsConnected() const {
+    return is_connected_.load(std::memory_order_acquire);
+  }
   const Executor &GetExecutor() const { return executor_; }
   void SetDebug(bool enabled) { debug_ = enabled; }
 
@@ -157,6 +195,7 @@ public:
   auto AsyncChannelExists(std::string channel_name, CompletionToken &&token);
 
 private:
+  friend class AsioClient;
   friend class AsioPublisher;
   friend class AsioSubscriber;
 
@@ -172,12 +211,11 @@ private:
     ControlCompletion completion;
   };
 
-  explicit AsioClient(Executor executor);
-  void Init(std::string socket, std::string name,
-            std::function<void(absl::Status)> completion);
+  explicit AsioClientState(Executor executor);
+  void Init(std::string socket, std::string name);
   void Enqueue(Request request, ControlCompletion completion,
                std::vector<toolbelt::FileDescriptor> outbound_fds = {},
-               bool expects_response = true);
+               bool expects_response = true, bool prioritize = false);
   void StartNext();
   void SendRequestFds();
   void ReadResponseLength();
@@ -254,6 +292,9 @@ private:
   int server_user_id_ = 0;
   int server_group_id_ = 0;
   toolbelt::FileDescriptor scb_fd_;
+  std::atomic_bool is_connected_{false};
+  bool transport_connected_ = false;
+  absl::Status terminal_status_;
   bool debug_ = false;
 };
 
@@ -293,36 +334,48 @@ void Complete(std::shared_ptr<CompletionState<Handler>> completion,
 } // namespace asio_detail
 
 template <typename CompletionToken>
-auto AsioClient::AsyncCreate(Executor executor, std::string server_socket,
-                             std::string client_name, CompletionToken &&token) {
-  using Signature = void(absl::StatusOr<std::shared_ptr<AsioClient>>);
-  return boost::asio::async_initiate<CompletionToken, Signature>(
-      [executor = std::move(executor), server_socket = std::move(server_socket),
-       client_name = std::move(client_name)](auto handler) mutable {
-        auto fallback = executor;
-        auto completion =
-            asio_detail::MakeCompletion(std::move(handler), fallback);
-        auto work = boost::asio::make_work_guard(executor);
-        auto client =
-            std::shared_ptr<AsioClient>(new AsioClient(std::move(executor)));
-        client->Init(
-            std::move(server_socket), std::move(client_name),
-            [client, fallback, work = std::move(work),
-             completion = std::move(completion)](absl::Status status) mutable {
-              asio_detail::Complete(
-                  std::move(completion),
-                  status.ok()
-                      ? absl::StatusOr<std::shared_ptr<AsioClient>>(client)
-                      : absl::StatusOr<std::shared_ptr<AsioClient>>(status));
-            });
-      },
-      token);
-}
-
-template <typename CompletionToken>
 auto AsioClient::AsyncCreatePublisher(std::string channel_name,
                                       PublisherOptions options,
                                       CompletionToken &&token) {
+  return state_->AsyncCreatePublisher(
+      std::move(channel_name), std::move(options),
+      std::forward<CompletionToken>(token));
+}
+
+template <typename CompletionToken>
+auto AsioClient::AsyncCreateSubscriber(std::string channel_name,
+                                       SubscriberOptions options,
+                                       CompletionToken &&token) {
+  return state_->AsyncCreateSubscriber(
+      std::move(channel_name), std::move(options),
+      std::forward<CompletionToken>(token));
+}
+
+template <typename CompletionToken>
+auto AsioClient::AsyncGetChannelInfo(std::string channel_name,
+                                     CompletionToken &&token) {
+  return state_->AsyncGetChannelInfo(std::move(channel_name),
+                                     std::forward<CompletionToken>(token));
+}
+
+template <typename CompletionToken>
+auto AsioClient::AsyncGetChannelStats(std::string channel_name,
+                                      CompletionToken &&token) {
+  return state_->AsyncGetChannelStats(std::move(channel_name),
+                                      std::forward<CompletionToken>(token));
+}
+
+template <typename CompletionToken>
+auto AsioClient::AsyncChannelExists(std::string channel_name,
+                                    CompletionToken &&token) {
+  return state_->AsyncChannelExists(std::move(channel_name),
+                                    std::forward<CompletionToken>(token));
+}
+
+template <typename CompletionToken>
+auto AsioClientState::AsyncCreatePublisher(std::string channel_name,
+                                           PublisherOptions options,
+                                           CompletionToken &&token) {
   using Signature = void(absl::StatusOr<AsioPublisher>);
   return boost::asio::async_initiate<CompletionToken, Signature>(
       [self = shared_from_this(), channel_name = std::move(channel_name),
@@ -382,9 +435,9 @@ auto AsioClient::AsyncCreatePublisher(std::string channel_name,
 }
 
 template <typename CompletionToken>
-auto AsioClient::AsyncCreateSubscriber(std::string channel_name,
-                                       SubscriberOptions options,
-                                       CompletionToken &&token) {
+auto AsioClientState::AsyncCreateSubscriber(std::string channel_name,
+                                            SubscriberOptions options,
+                                            CompletionToken &&token) {
   using Signature = void(absl::StatusOr<std::shared_ptr<AsioSubscriber>>);
   return boost::asio::async_initiate<CompletionToken, Signature>(
       [self = shared_from_this(), channel_name = std::move(channel_name),
@@ -422,8 +475,8 @@ auto AsioClient::AsyncCreateSubscriber(std::string channel_name,
 }
 
 template <typename CompletionToken>
-auto AsioClient::AsyncGetChannelInfo(std::string channel_name,
-                                     CompletionToken &&token) {
+auto AsioClientState::AsyncGetChannelInfo(std::string channel_name,
+                                          CompletionToken &&token) {
   using Signature = void(absl::StatusOr<ChannelInfo>);
   return boost::asio::async_initiate<CompletionToken, Signature>(
       [self = shared_from_this(),
@@ -478,8 +531,8 @@ auto AsioClient::AsyncGetChannelInfo(std::string channel_name,
 }
 
 template <typename CompletionToken>
-auto AsioClient::AsyncGetChannelStats(std::string channel_name,
-                                      CompletionToken &&token) {
+auto AsioClientState::AsyncGetChannelStats(std::string channel_name,
+                                           CompletionToken &&token) {
   using Signature = void(absl::StatusOr<ChannelStats>);
   return boost::asio::async_initiate<CompletionToken, Signature>(
       [self = shared_from_this(),
@@ -516,8 +569,8 @@ auto AsioClient::AsyncGetChannelStats(std::string channel_name,
 }
 
 template <typename CompletionToken>
-auto AsioClient::AsyncChannelExists(std::string channel_name,
-                                    CompletionToken &&token) {
+auto AsioClientState::AsyncChannelExists(std::string channel_name,
+                                         CompletionToken &&token) {
   using Signature = void(absl::StatusOr<bool>);
   return boost::asio::async_initiate<CompletionToken, Signature>(
       [self = shared_from_this(),

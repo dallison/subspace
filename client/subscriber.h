@@ -13,6 +13,7 @@
 
 namespace subspace {
 class AsioClient;
+class AsioClientState;
 class AsioSubscriber;
 namespace details {
 
@@ -310,6 +311,7 @@ public:
 private:
   friend class ::subspace::ClientImpl;
   friend class ::subspace::AsioClient;
+  friend class ::subspace::AsioClientState;
   friend class ::subspace::AsioSubscriber;
 
   struct OrdinalTracker {
