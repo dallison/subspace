@@ -214,6 +214,7 @@ endif()
 # not cross-compile cleanly, so this is fetched only for native builds and only
 # when explicitly enabled.
 option(SUBSPACE_ASIO_RPC "Build the asio_rpc backend (fetches Boost via FetchContent)" ON)
+option(SUBSPACE_ASIO_CLIENT "Build the asynchronous Subspace client" ON)
 
 if(SUBSPACE_ASIO_RPC AND CMAKE_CROSSCOMPILING)
     message(STATUS "Disabling SUBSPACE_ASIO_RPC: Boost.Context does not cross-compile cleanly.")
@@ -221,7 +222,7 @@ if(SUBSPACE_ASIO_RPC AND CMAKE_CROSSCOMPILING)
 endif()
 
 set(SUBSPACE_NEEDS_BOOST OFF)
-if(SUBSPACE_CORO_BACKEND STREQUAL "asio" OR SUBSPACE_ASIO_RPC)
+if(SUBSPACE_CORO_BACKEND STREQUAL "asio" OR SUBSPACE_ASIO_RPC OR SUBSPACE_ASIO_CLIENT)
     set(SUBSPACE_NEEDS_BOOST ON)
 endif()
 
@@ -229,7 +230,12 @@ if(SUBSPACE_NEEDS_BOOST)
     # Build only the Boost libraries needed by the asio server/RPC backends; the
     # Boost CMake superproject pulls in their transitive dependencies
     # automatically.
-    set(BOOST_INCLUDE_LIBRARIES asio coroutine context system CACHE INTERNAL "Boost libs for asio_rpc")
+    set(SUBSPACE_BOOST_LIBRARIES asio system)
+    if(SUBSPACE_ASIO_RPC OR SUBSPACE_CORO_BACKEND STREQUAL "asio")
+        list(APPEND SUBSPACE_BOOST_LIBRARIES coroutine context)
+    endif()
+    set(BOOST_INCLUDE_LIBRARIES ${SUBSPACE_BOOST_LIBRARIES}
+        CACHE INTERNAL "Boost libraries used by Subspace")
     FetchContent_Declare(
         Boost
         URL https://github.com/boostorg/boost/releases/download/boost-1.87.0/boost-1.87.0-cmake.tar.xz

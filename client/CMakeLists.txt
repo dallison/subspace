@@ -2,13 +2,14 @@
 
 # Define targets (e.g., libraries, executables) and add source files here.
 # Example for a client library:
-add_library(subspace_client STATIC
-    client.cc
-    client.h
+add_library(subspace_client_core STATIC
     client_channel.cc
     client_channel.h
     message.cc
     message.h
+    options.cc
+    options.h
+    protocol.h
     publisher.cc
     publisher.h
     subscriber.cc
@@ -18,7 +19,7 @@ add_library(subspace_client STATIC
     arm_crc32.S
 )
 
-target_include_directories(subspace_client PUBLIC
+target_include_directories(subspace_client_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
@@ -28,7 +29,7 @@ set_source_files_properties(arm_crc32.S PROPERTIES
 )
 
 # Link against other internal libraries (e.g., common) or external dependencies if needed:
-target_link_libraries(subspace_client PUBLIC
+target_link_libraries(subspace_client_core PUBLIC
     subspace_common
     subspace_async
     subspace_proto
@@ -42,6 +43,38 @@ target_link_libraries(subspace_client PUBLIC
     co
     protobuf::libprotobuf
 )
+
+add_library(subspace_client STATIC
+    client.cc
+    client.h
+)
+
+target_include_directories(subspace_client PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(subspace_client PUBLIC
+    subspace_client_core
+)
+
+if(SUBSPACE_ASIO_CLIENT)
+    add_library(subspace_asio_client STATIC
+        asio/asio_client.cc
+        asio/asio_client.h
+        asio/asio_publisher.h
+        asio/asio_subscriber.h
+    )
+    target_include_directories(subspace_asio_client PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+    )
+    target_link_libraries(subspace_asio_client PUBLIC
+        subspace_client_core
+        Boost::asio
+        Boost::system
+        absl::cleanup
+        absl::strings
+    )
+endif()
 
 
 add_executable(client_test client_test.cc)

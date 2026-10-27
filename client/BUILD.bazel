@@ -7,6 +7,7 @@ cc_library(
     srcs = [
         "client_channel.cc",
         "message.cc",
+        "options.cc",
         "publisher.cc",
         "subscriber.cc",
         "checksum.cc",
@@ -16,6 +17,7 @@ cc_library(
         "client_channel.h",
         "message.h",
         "options.h",
+        "protocol.h",
         "publisher.h",
         "subscriber.h",
         "checksum.h",

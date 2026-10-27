@@ -14,11 +14,14 @@ cc_library(
         "//client:subspace_client_core",
         "//common:subspace_common",
         "//proto:subspace_cc_proto",
+        "@abseil-cpp//absl/cleanup",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/types:span",
         "@boost.asio//:boost.asio",
+        "@cpp_toolbelt//toolbelt",
     ],
 )
 

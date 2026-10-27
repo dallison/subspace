@@ -15,6 +15,10 @@ enum class ReadMode {
   kReadNewest,
 };
 
+// Controls whether ReadMessage consumes the subscriber trigger fd (eventfd
+// or pipe). The default, kClearTrigger, reads the fd so a later poll or wait
+// blocks until a new message is published. kNoClearTrigger leaves the fd
+// unread for callers that manage it from an external event loop.
 enum class ClearTrigger {
   kClearTrigger,
   kNoClearTrigger,

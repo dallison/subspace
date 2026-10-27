@@ -8,6 +8,8 @@
 
 #include <gtest/gtest.h>
 
+#include <boost/asio/bind_cancellation_slot.hpp>
+#include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/use_future.hpp>
 
@@ -22,6 +24,179 @@ namespace subspace {
 namespace {
 
 class AsioClientTest : public SubspaceTestBase {};
+
+TEST_F(AsioClientTest, RejectsOverlongSocketName) {
+  boost::asio::io_context io;
+  absl::Status status;
+  AsioClient::AsyncCreate(
+      io.get_executor(), std::string(256, 'x'), "overlong-socket-test",
+      [&](absl::StatusOr<std::shared_ptr<AsioClient>> result) {
+        status = result.status();
+      });
+  io.run();
+  EXPECT_TRUE(absl::IsInvalidArgument(status));
+}
+
+TEST_F(AsioClientTest, RejectsInvalidPublisherOptionsBeforeRegistration) {
+  boost::asio::io_context io;
+  absl::Status status;
+  AsioClient::AsyncCreate(
+      io.get_executor(), Socket(), "asio-invalid-options-test",
+      [&](absl::StatusOr<std::shared_ptr<AsioClient>> client_result) {
+        ASSERT_TRUE(client_result.ok());
+        (*client_result)
+            ->AsyncCreatePublisher(
+                "asio_invalid_options",
+                PublisherOptions().SetNumSlots(2).SetMaxOutstandingSlotLeases(
+                    3),
+                [&](absl::StatusOr<AsioPublisher> publisher_result) {
+                  status = publisher_result.status();
+                });
+      });
+  io.run();
+  EXPECT_TRUE(absl::IsInvalidArgument(status));
+}
+
+TEST_F(AsioClientTest, PublishRequiresAcquiredBuffer) {
+  boost::asio::io_context io;
+  absl::Status status;
+  std::optional<AsioPublisher> publisher;
+  AsioClient::AsyncCreate(
+      io.get_executor(), Socket(), "asio-publish-without-buffer-test",
+      [&](absl::StatusOr<std::shared_ptr<AsioClient>> client_result) {
+        ASSERT_TRUE(client_result.ok());
+        (*client_result)
+            ->AsyncCreatePublisher(
+                "asio_publish_without_buffer",
+                PublisherOptions().SetSlotSize(64).SetNumSlots(4).SetReliable(
+                    true),
+                [&](absl::StatusOr<AsioPublisher> publisher_result) {
+                  ASSERT_TRUE(publisher_result.ok());
+                  publisher.emplace(std::move(*publisher_result));
+                  publisher->AsyncPublishMessage(
+                      1, [&](absl::StatusOr<Message> result) {
+                        status = result.status();
+                      });
+                });
+      });
+  io.run();
+  EXPECT_TRUE(absl::IsFailedPrecondition(status));
+}
+
+TEST_F(AsioClientTest, CancelsReliableBufferWait) {
+  boost::asio::io_context io;
+  boost::asio::cancellation_signal cancellation;
+  std::shared_ptr<AsioClient> client;
+  std::shared_ptr<AsioSubscriber> subscriber;
+  std::optional<AsioPublisher> publisher;
+  absl::Status wait_status;
+
+  AsioClient::AsyncCreate(
+      io.get_executor(), Socket(), "asio-cancel-buffer-test",
+      [&](absl::StatusOr<std::shared_ptr<AsioClient>> client_result) {
+        ASSERT_TRUE(client_result.ok());
+        client = std::move(*client_result);
+        client->AsyncCreatePublisher(
+            "asio_cancel_buffer",
+            PublisherOptions().SetSlotSize(64).SetNumSlots(2).SetReliable(true),
+            [&](absl::StatusOr<AsioPublisher> publisher_result) {
+              ASSERT_TRUE(publisher_result.ok());
+              publisher.emplace(std::move(*publisher_result));
+              client->AsyncCreateSubscriber(
+                  "asio_cancel_buffer", SubscriberOptions().SetReliable(true),
+                  [&](absl::StatusOr<std::shared_ptr<AsioSubscriber>>
+                          subscriber_result) {
+                    ASSERT_TRUE(subscriber_result.ok());
+                    subscriber = std::move(*subscriber_result);
+                    publisher->AsyncGetMessageBuffer(
+                        -1, [&](absl::StatusOr<absl::Span<std::byte>> buffer) {
+                          ASSERT_TRUE(buffer.ok());
+                          (*buffer)[0] = std::byte{1};
+                          publisher->AsyncPublishMessage(
+                              1, [&](absl::StatusOr<Message> result) {
+                                ASSERT_TRUE(result.ok());
+                                publisher->AsyncGetMessageBuffer(
+                                    -1, boost::asio::bind_cancellation_slot(
+                                            cancellation.slot(),
+                                            [&](absl::StatusOr<
+                                                absl::Span<std::byte>>
+                                                    waited) {
+                                              wait_status = waited.status();
+                                            }));
+                                boost::asio::post(io, [&] {
+                                  cancellation.emit(
+                                      boost::asio::cancellation_type::all);
+                                });
+                              });
+                        });
+                  });
+            });
+      });
+
+  io.run();
+  EXPECT_TRUE(absl::IsCancelled(wait_status));
+}
+
+TEST_F(AsioClientTest, StartedSubscriberDoesNotSelfOwnWhileIdle) {
+  boost::asio::io_context io;
+  std::shared_ptr<AsioClient> client;
+  std::weak_ptr<AsioSubscriber> weak_subscriber;
+
+  AsioClient::AsyncCreate(
+      io.get_executor(), Socket(), "asio-subscriber-lifetime-test",
+      [&](absl::StatusOr<std::shared_ptr<AsioClient>> client_result) {
+        ASSERT_TRUE(client_result.ok());
+        client = std::move(*client_result);
+        client->AsyncCreateSubscriber(
+            "asio_idle_subscriber", SubscriberOptions(),
+            [&](absl::StatusOr<std::shared_ptr<AsioSubscriber>> result) {
+              ASSERT_TRUE(result.ok());
+              auto subscriber = std::move(*result);
+              weak_subscriber = subscriber;
+              subscriber->Start([](Message &&) {});
+              subscriber.reset();
+            });
+      });
+
+  io.run();
+  EXPECT_TRUE(weak_subscriber.expired());
+}
+
+TEST_F(AsioClientTest, PublisherMoveAssignmentRemovesReplacedPublisher) {
+  boost::asio::io_context io;
+  std::shared_ptr<AsioClient> client;
+  std::optional<AsioPublisher> publisher;
+  absl::Status removed_status;
+
+  AsioClient::AsyncCreate(
+      io.get_executor(), Socket(), "asio-publisher-move-test",
+      [&](absl::StatusOr<std::shared_ptr<AsioClient>> client_result) {
+        ASSERT_TRUE(client_result.ok());
+        client = std::move(*client_result);
+        client->AsyncCreatePublisher(
+            "asio_replaced_publisher",
+            PublisherOptions().SetSlotSize(64).SetNumSlots(4),
+            [&](absl::StatusOr<AsioPublisher> first) {
+              ASSERT_TRUE(first.ok());
+              publisher.emplace(std::move(*first));
+              client->AsyncCreatePublisher(
+                  "asio_retained_publisher",
+                  PublisherOptions().SetSlotSize(64).SetNumSlots(4),
+                  [&](absl::StatusOr<AsioPublisher> second) {
+                    ASSERT_TRUE(second.ok());
+                    *publisher = std::move(*second);
+                    client->AsyncGetChannelInfo(
+                        "asio_replaced_publisher",
+                        [&](absl::StatusOr<ChannelInfo> info) {
+                          removed_status = info.status();
+                        });
+                  });
+            });
+      });
+
+  io.run();
+  EXPECT_TRUE(absl::IsNotFound(removed_status));
+}
 
 TEST_F(AsioClientTest, PublishesAndReceives) {
   boost::asio::io_context io;
@@ -47,7 +222,10 @@ TEST_F(AsioClientTest, PublishesAndReceives) {
             "asio_client_test", boost::asio::use_future));
         client->AsyncCreatePublisher(
             "asio_client_test",
-            PublisherOptions().SetSlotSize(64).SetNumSlots(4),
+            PublisherOptions()
+                .SetSlotSize(64)
+                .SetNumSlots(4)
+                .SetUseSplitBuffers(true),
             [&](absl::StatusOr<AsioPublisher> publisher_result) {
               if (!publisher_result.ok()) {
                 failure = "create publisher";
@@ -77,41 +255,48 @@ TEST_F(AsioClientTest, PublishesAndReceives) {
                       return;
                     }
                     subscriber = std::move(subscriber_result).value();
-                    auto buffer = publisher->GetMessageBuffer();
-                    if (!buffer.ok()) {
-                      failure = "get buffer";
-                      return;
-                    }
-                    constexpr char message[] = "open-source-wire";
-                    std::memcpy(buffer->data(), message, sizeof(message) - 1);
-                    publisher->AsyncPublishMessage(
-                        sizeof(message) - 1,
-                        [&](absl::StatusOr<Message> publish_result) {
-                          if (!publish_result.ok()) {
-                            failure = "publish";
+                    publisher->AsyncGetMessageBuffer(
+                        1024,
+                        [&](absl::StatusOr<absl::Span<std::byte>> buffer) {
+                          if (!buffer.ok()) {
+                            failure = "get buffer";
                             return;
                           }
-                          auto read_next =
-                              std::make_shared<std::function<void()>>();
-                          *read_next = [&, read_next] {
-                            subscriber->AsyncReadMessage(
-                                ReadMode::kReadNext,
-                                [&, read_next](absl::StatusOr<Message> result) {
-                                  if (!result.ok()) {
-                                    failure = "read";
-                                    return;
-                                  }
-                                  auto received = std::move(result).value();
-                                  if (received.buffer == nullptr) {
-                                    (*read_next)();
-                                    return;
-                                  }
-                                  payload.assign(static_cast<const char *>(
-                                                     received.buffer),
-                                                 received.length);
-                                });
-                          };
-                          (*read_next)();
+                          constexpr char message[] = "open-source-wire";
+                          std::memcpy(buffer->data(), message,
+                                      sizeof(message) - 1);
+                          publisher->AsyncPublishMessage(
+                              sizeof(message) - 1,
+                              [&](absl::StatusOr<Message> publish_result) {
+                                if (!publish_result.ok()) {
+                                  failure = "publish";
+                                  return;
+                                }
+                                auto read_next =
+                                    std::make_shared<std::function<void()>>();
+                                *read_next = [&, read_next] {
+                                  subscriber->AsyncReadMessage(
+                                      ReadMode::kReadNext,
+                                      [&, read_next](
+                                          absl::StatusOr<Message> result) {
+                                        if (!result.ok()) {
+                                          failure = "read";
+                                          return;
+                                        }
+                                        auto received =
+                                            std::move(result).value();
+                                        if (received.buffer == nullptr) {
+                                          (*read_next)();
+                                          return;
+                                        }
+                                        payload.assign(
+                                            static_cast<const char *>(
+                                                received.buffer),
+                                            received.length);
+                                      });
+                                };
+                                (*read_next)();
+                              });
                         });
                   });
             });

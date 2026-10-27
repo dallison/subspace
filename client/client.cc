@@ -5,6 +5,7 @@
 #include "client/client.h"
 #include "absl/strings/str_format.h"
 #include "client.h"
+#include "client/protocol.h"
 #include "common/syscall_shim.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/clock.h"
@@ -31,8 +32,6 @@ void FillInitRequest(InitRequest *init, const std::string &client_name) {
   init->set_max_buffers(static_cast<int32_t>(kMaxBuffers));
 }
 
-std::atomic<bool> default_use_split_buffers{false};
-
 #if defined(__QNX__) || defined(__QNXNTO__)
 void ConfigureQnxClockPeriod() {
   static std::atomic<bool> attempted{false};
@@ -49,50 +48,11 @@ void ConfigureQnxClockPeriod() {
 }
 #endif
 
-ClientBufferAllocatorKind FromProtoAllocator(ClientBufferAllocator allocator) {
-  switch (allocator) {
-  case CLIENT_BUFFER_ALLOCATOR_ANDROID_MEMFD:
-    return ClientBufferAllocatorKind::kAndroidMemfd;
-  case CLIENT_BUFFER_ALLOCATOR_SPLIT_SHM:
-    return ClientBufferAllocatorKind::kSplitShm;
-  case CLIENT_BUFFER_ALLOCATOR_SPLIT_CALLBACK:
-    return ClientBufferAllocatorKind::kSplitCallback;
-  case CLIENT_BUFFER_ALLOCATOR_SPLIT_BUFFER_FREE_TEST:
-    return ClientBufferAllocatorKind::kSplitBufferFreeTest;
-  case CLIENT_BUFFER_ALLOCATOR_UNSPECIFIED:
-  default:
-    return ClientBufferAllocatorKind::kUnspecified;
-  }
-}
-
-ClientBufferAllocator ToProtoAllocator(ClientBufferAllocatorKind allocator) {
-  switch (allocator) {
-  case ClientBufferAllocatorKind::kAndroidMemfd:
-    return CLIENT_BUFFER_ALLOCATOR_ANDROID_MEMFD;
-  case ClientBufferAllocatorKind::kSplitShm:
-    return CLIENT_BUFFER_ALLOCATOR_SPLIT_SHM;
-  case ClientBufferAllocatorKind::kSplitCallback:
-    return CLIENT_BUFFER_ALLOCATOR_SPLIT_CALLBACK;
-  case ClientBufferAllocatorKind::kSplitBufferFreeTest:
-    return CLIENT_BUFFER_ALLOCATOR_SPLIT_BUFFER_FREE_TEST;
-  case ClientBufferAllocatorKind::kUnspecified:
-  default:
-    return CLIENT_BUFFER_ALLOCATOR_UNSPECIFIED;
-  }
-}
 } // namespace
 
 using ClientChannel = details::ClientChannel;
 using SubscriberImpl = details::SubscriberImpl;
 using PublisherImpl = details::PublisherImpl;
-
-void SetDefaultUseSplitBuffers(bool use_split_buffers) {
-  default_use_split_buffers.store(use_split_buffers, std::memory_order_relaxed);
-}
-
-bool DefaultUseSplitBuffers() {
-  return default_use_split_buffers.load(std::memory_order_relaxed);
-}
 
 // Get the current thread as a 64 bit number.  pthread_t is integral on some
 // platforms (Linux glibc, QNX) and a pointer on others (macOS); on QNX it is
@@ -103,40 +63,6 @@ static uint64_t GetThreadId() {
   uint64_t id = 0;
   std::memcpy(&id, &tid, sizeof(tid) < sizeof(id) ? sizeof(tid) : sizeof(id));
   return id;
-}
-
-static void ToProto(const ClientBufferHandleMetadata &metadata,
-                    ClientBufferHandleMetadataProto *proto) {
-  proto->set_channel_name(metadata.channel_name);
-  proto->set_session_id(metadata.session_id);
-  proto->set_buffer_index(metadata.buffer_index);
-  proto->set_slot_id(metadata.slot_id);
-  proto->set_is_prefix(metadata.is_prefix);
-  proto->set_full_size(metadata.full_size);
-  proto->set_allocation_size(metadata.allocation_size);
-  proto->set_handle(static_cast<uint64_t>(metadata.handle));
-  proto->set_shadow_file(metadata.shadow_file);
-  proto->set_object_name(metadata.object_name);
-  proto->set_allocator(ToProtoAllocator(metadata.allocator));
-  proto->set_map_offset(metadata.map_offset);
-}
-
-static ClientBufferHandleMetadata
-FromProto(const ClientBufferHandleMetadataProto &proto) {
-  ClientBufferHandleMetadata metadata;
-  metadata.channel_name = proto.channel_name();
-  metadata.session_id = proto.session_id();
-  metadata.buffer_index = proto.buffer_index();
-  metadata.slot_id = proto.slot_id();
-  metadata.is_prefix = proto.is_prefix();
-  metadata.full_size = proto.full_size();
-  metadata.allocation_size = proto.allocation_size();
-  metadata.handle = static_cast<uintptr_t>(proto.handle());
-  metadata.shadow_file = proto.shadow_file();
-  metadata.object_name = proto.object_name();
-  metadata.allocator = FromProtoAllocator(proto.allocator());
-  metadata.map_offset = proto.map_offset();
-  return metadata;
 }
 
 static absl::Status
@@ -641,10 +567,9 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
   std::shared_ptr<SubscriberImpl> channel = std::make_shared<SubscriberImpl>(
       mapped_channel_name, sub_resp.num_slots(),
       sub_resp.default_subscriber_queue_size(),
-      sub_resp.subscriber_queue_arena_size(),
-      sub_resp.subscriber_queue_size(), sub_resp.channel_id(),
-      sub_resp.subscriber_id(), sub_resp.vchan_id(), session_id_, sub_resp.type(),
-      subscriber_options,
+      sub_resp.subscriber_queue_arena_size(), sub_resp.subscriber_queue_size(),
+      sub_resp.channel_id(), sub_resp.subscriber_id(), sub_resp.vchan_id(),
+      session_id_, sub_resp.type(), subscriber_options,
       [this](Channel *c) {
         return CheckReload(static_cast<ClientChannel *>(c));
       },
@@ -698,27 +623,6 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
   return Subscriber(shared_from_this(), channel);
 }
 
-static uint64_t ExpandSlotSize(uint64_t slotSize) {
-  // smaller than 4K, double the size
-  // 4K..16K, times 1.5
-  // 16K..64K, times 1.25
-  // 64K..256K, times 1.125
-  // 256K..1M, times 1.0625
-  // 1M..., times 1.03125
-  static constexpr double multipliers[] = {2.0,   1.5,    1.25,
-                                           1.125, 1.0625, 1.03125};
-  static constexpr size_t sizeRanges[] = {4096, 16384, 65536, 262144, 1048576};
-  size_t i = 0;
-  for (; i < std::size(sizeRanges); i++) {
-    if (slotSize <= sizeRanges[i]) {
-      break;
-    }
-  }
-  // i will be the index of the multiplier to use.  It might be one past the
-  // end of the sizeRanges array.
-  return Aligned(uint64_t(double(slotSize) * multipliers[i]));
-}
-
 absl::StatusOr<void *> ClientImpl::GetMessageBuffer(PublisherImpl *publisher,
                                                     int64_t max_size,
                                                     bool lock) {
@@ -757,7 +661,7 @@ ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int64_t max_size,
     int64_t new_slot_size = slot_size;
     assert(new_slot_size > 0);
     while (new_slot_size <= slot_size || new_slot_size < max_size) {
-      new_slot_size = ExpandSlotSize(new_slot_size);
+      new_slot_size = details::ExpandSlotSize(new_slot_size);
     }
     // The growth multiplier can overshoot the cap.  Clamping is safe because
     // max_size <= max_slot_size was checked above, so the clamped size still
@@ -876,8 +780,7 @@ ClientImpl::ReclaimPublisherBuffer(PublisherImpl *publisher, int32_t slot_id) {
 absl::StatusOr<PublisherBufferLease>
 ClientImpl::ReclaimAnyPublisherBuffer(PublisherImpl *publisher) {
   ClientLockGuard guard(this);
-  if (publisher->NumLeases() >=
-      size_t(publisher->MaxOutstandingSlotLeases())) {
+  if (publisher->NumLeases() >= size_t(publisher->MaxOutstandingSlotLeases())) {
     return PublisherBufferLease{};
   }
   if (absl::Status status = ReloadSubscribersIfNecessary(publisher);
@@ -997,11 +900,9 @@ void ClientImpl::NotifySubscribers(PublisherImpl *publisher) {
   publisher->TriggerSubscribers();
 }
 
-absl::StatusOr<const Message>
-ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
-                                   int64_t message_size, bool omit_prefix,
-                                   bool use_prefix_slot_id,
-                                   bool notify_subscribers) {
+absl::StatusOr<const Message> ClientImpl::PublishMessageInternal(
+    PublisherImpl *publisher, int64_t message_size, bool omit_prefix,
+    bool use_prefix_slot_id, bool notify_subscribers) {
   // Lock is already held by the call to GetMessageBufferSpan.  This RAII
   // instance wil relesas the lock when we return from this function.
   ClientLockGuard guard(this, LockMode::kMaybeLocked);
@@ -1423,9 +1324,8 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     return Message();
   }
   subscriber->SetSlot(new_slot);
-  int64_t delivered_message_size =
-      static_cast<int64_t>(
-          new_slot->message_size.load(std::memory_order_relaxed));
+  int64_t delivered_message_size = static_cast<int64_t>(
+      new_slot->message_size.load(std::memory_order_relaxed));
 
   if (debug_) {
     printf("read new_slot: %d: %" PRId64 "\n", new_slot->id,
@@ -1438,11 +1338,9 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
   bool checksum_error = false;
   if (prefix != nullptr) {
     if (prefix->HasChecksum()) {
-      auto data =
-          GetMessageChecksumData(prefix, subscriber->GetCurrentBufferAddress(),
-                                 delivered_message_size,
-                                 subscriber->ChecksumSize(),
-                                 subscriber->MetadataSize());
+      auto data = GetMessageChecksumData(
+          prefix, subscriber->GetCurrentBufferAddress(), delivered_message_size,
+          subscriber->ChecksumSize(), subscriber->MetadataSize());
       absl::Span<const std::byte> cksum =
           GetChecksumSpan(prefix, subscriber->ChecksumSize());
       checksum_error = !subscriber->ValidateChecksum(data.Spans(), cksum);
@@ -1509,9 +1407,8 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
       // detection because they deliver through the ordered bitset path.
       if (last_ordinal != -1 &&
           subscriber->options_.SubscriberQueueSize() == 0) {
-        drops = std::max(
-            drops, subscriber->DetectDrops(
-                       new_slot->vchan_id.load(std::memory_order_relaxed)));
+        drops = std::max(drops, subscriber->DetectDrops(new_slot->vchan_id.load(
+                                    std::memory_order_relaxed)));
       }
       if (drops > 0) {
         auto it = dropped_message_callbacks_.find(subscriber);
@@ -1527,9 +1424,9 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
       }
     }
     // We have a slot, claim it.
-    subscriber->ClaimSlot(
-        new_slot, new_slot->vchan_id.load(std::memory_order_relaxed),
-        mode == ReadMode::kReadNewest);
+    subscriber->ClaimSlot(new_slot,
+                          new_slot->vchan_id.load(std::memory_order_relaxed),
+                          mode == ReadMode::kReadNewest);
   }
   auto ret_msg = Message(msg);
   if (subscriber->IsBridge()) {
@@ -1695,7 +1592,7 @@ struct pollfd ClientImpl::GetPollFd(SubscriberImpl *subscriber) const {
 }
 
 struct pollfd ClientImpl::GetPollFd(PublisherImpl *publisher) const {
-  static struct pollfd fd { .fd = -1, .events = POLLIN };
+  static struct pollfd fd{.fd = -1, .events = POLLIN};
   if (!publisher->IsReliable()) {
     return fd;
   }
@@ -1792,12 +1689,10 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
   }
   subscriber->options_.use_split_buffers = sub_resp.use_split_buffers();
   subscriber->SetNumSlots(sub_resp.num_slots());
-  subscriber->SetSubscriberQueueSize(
-      sub_resp.default_subscriber_queue_size());
+  subscriber->SetSubscriberQueueSize(sub_resp.default_subscriber_queue_size());
   subscriber->SetSubscriberQueueArenaSize(
       sub_resp.subscriber_queue_arena_size());
-  subscriber->SetEffectiveSubscriberQueueSize(
-      sub_resp.subscriber_queue_size());
+  subscriber->SetEffectiveSubscriberQueueSize(sub_resp.subscriber_queue_size());
   {
     int32_t cs = sub_resp.checksum_size() > 0 ? sub_resp.checksum_size() : 4;
     int32_t ms = sub_resp.metadata_size() > 0 ? sub_resp.metadata_size() : 0;
@@ -2094,8 +1989,7 @@ ClientImpl::GetChannelInfo(const std::string &channel) {
   result.slot_size = info.slot_size();
   result.num_slots = info.num_slots();
   result.subscriber_queue_size = info.subscriber_queue_size();
-  result.subscriber_queue_arena_size =
-      info.subscriber_queue_arena_size();
+  result.subscriber_queue_arena_size = info.subscriber_queue_arena_size();
   result.is_local = info.is_local();
   return result;
 }
@@ -2134,8 +2028,7 @@ absl::StatusOr<const std::vector<ChannelInfo>> ClientImpl::GetChannelInfo() {
     result.slot_size = info.slot_size();
     result.num_slots = info.num_slots();
     result.subscriber_queue_size = info.subscriber_queue_size();
-    result.subscriber_queue_arena_size =
-        info.subscriber_queue_arena_size();
+    result.subscriber_queue_arena_size = info.subscriber_queue_arena_size();
     result.is_local = info.is_local();
     r.push_back(result);
   }
@@ -2252,31 +2145,7 @@ void ClientImpl::FillCreatePublisherRequest(CreatePublisherRequest *cmd,
                                             const std::string &channel_name,
                                             const PublisherOptions &opts,
                                             int publisher_id) {
-  cmd->set_channel_name(channel_name);
-  cmd->set_slot_size(Aligned(opts.slot_size));
-  cmd->set_num_slots(opts.num_slots);
-  cmd->set_is_local(opts.IsLocal());
-  cmd->set_is_reliable(opts.IsReliable());
-  cmd->set_is_bridge(opts.IsBridge());
-  cmd->set_for_tunnel(opts.ForTunnel());
-  cmd->set_is_fixed_size(opts.IsFixedSize());
-  cmd->set_type(opts.Type());
-  cmd->set_mux(opts.Mux());
-  cmd->set_vchan_id(opts.VchanId());
-  cmd->set_notify_retirement(opts.notify_retirement);
-  cmd->set_checksum_size(opts.ChecksumSize());
-  cmd->set_metadata_size(opts.MetadataSize());
-  cmd->set_publisher_id(publisher_id);
-  cmd->set_max_publishers(opts.MaxPublishers());
-  cmd->set_use_split_buffers(opts.UseSplitBuffers());
-  cmd->set_split_buffers_over_bridge(opts.SplitBuffersOverBridge());
-  cmd->set_subscriber_queue_arena_size(opts.SubscriberQueueArenaSize());
-  cmd->set_process_id(static_cast<uint64_t>(getpid()));
-  cmd->set_max_outstanding_slot_leases(opts.MaxOutstandingSlotLeases());
-  // Align the cap the same way as the slot size so that a publisher asking for
-  // slot_size == max_slot_size isn't rejected by its own limit.
-  cmd->set_max_slot_size(opts.max_slot_size > 0 ? Aligned(opts.max_slot_size)
-                                                : 0);
+  details::FillCreatePublisherRequest(cmd, channel_name, opts, publisher_id);
 }
 
 void ClientImpl::ApplyPublisherResponseFds(
@@ -2307,20 +2176,7 @@ void ClientImpl::FillCreateSubscriberRequest(CreateSubscriberRequest *cmd,
                                              const std::string &channel_name,
                                              const SubscriberOptions &opts,
                                              int subscriber_id) {
-  cmd->set_channel_name(channel_name);
-  cmd->set_subscriber_id(subscriber_id);
-  cmd->set_is_reliable(opts.IsReliable());
-  cmd->set_is_bridge(opts.IsBridge());
-  cmd->set_for_tunnel(opts.ForTunnel());
-  cmd->set_telemetry(opts.Telemetry());
-  cmd->set_type(opts.Type());
-  cmd->set_max_active_messages(opts.MaxActiveMessages());
-  cmd->set_max_subscribers(opts.MaxSubscribers());
-  cmd->set_mux(opts.Mux());
-  cmd->set_vchan_id(opts.VchanId());
-  cmd->set_subscriber_queue_size(opts.SubscriberQueueSize());
-  cmd->set_process_id(static_cast<uint64_t>(getpid()));
-  cmd->set_is_local(opts.IsLocal());
+  details::FillCreateSubscriberRequest(cmd, channel_name, opts, subscriber_id);
 }
 
 void ClientImpl::ApplySubscriberResponseFds(
@@ -2400,8 +2256,7 @@ absl::Status ClientImpl::Reconnect() {
 absl::Status ClientImpl::ReregisterPublisher(PublisherImpl *publisher) {
   Request req;
   FillCreatePublisherRequest(req.mutable_create_publisher(), publisher->Name(),
-                             publisher->options_,
-                             publisher->GetPublisherId());
+                             publisher->options_, publisher->GetPublisherId());
   req.mutable_create_publisher()->set_active_queue_publish_depth(
       publisher->ActiveQueuePublishDepth());
 
@@ -2544,7 +2399,7 @@ ClientImpl::RegisterClientBuffer(const ClientBufferHandleMetadata &metadata,
                                  const toolbelt::FileDescriptor *fd) {
   Request req;
   auto *register_buffer = req.mutable_register_client_buffer();
-  ToProto(metadata, register_buffer->mutable_metadata());
+  details::ToProto(metadata, register_buffer->mutable_metadata());
   std::vector<toolbelt::FileDescriptor> fds;
   if (fd != nullptr && fd->Valid()) {
     register_buffer->set_has_fd(true);
@@ -2590,7 +2445,7 @@ ClientImpl::GetClientBuffers(const std::string &channel_name,
   result.reserve(get_resp.metadata_size());
   for (int i = 0; i < get_resp.metadata_size(); ++i) {
     RegisteredClientBuffer buffer{
-        .metadata = FromProto(get_resp.metadata(i)),
+        .metadata = details::FromProto(get_resp.metadata(i)),
     };
     int fd_index = get_resp.fd_indexes(i);
     if (fd_index >= 0 && static_cast<size_t>(fd_index) < fds.size()) {

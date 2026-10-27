@@ -2,13 +2,13 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-cc_library_shared {
-    name: "libsubspace_client",
+cc_library_static {
+    name: "libsubspace_client_core",
     defaults: ["subspace_defaults"],
     srcs: [
-        "client.cc",
         "client_channel.cc",
         "message.cc",
+        "options.cc",
         "publisher.cc",
         "subscriber.cc",
         "checksum.cc",
@@ -23,6 +23,19 @@ cc_library_shared {
         "libcpp_toolbelt",
         "libabsl",
     ],
+    shared_libs: [
+        "libprotobuf-cpp-full",
+        "liblog",
+    ],
+}
+
+cc_library_shared {
+    name: "libsubspace_client",
+    defaults: ["subspace_defaults"],
+    srcs: ["client.cc"],
+    export_include_dirs: ["."],
+    include_dirs: ["external/subspace"],
+    whole_static_libs: ["libsubspace_client_core"],
     shared_libs: [
         "libprotobuf-cpp-full",
         "liblog",

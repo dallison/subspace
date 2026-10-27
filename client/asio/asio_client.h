@@ -7,6 +7,7 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/match.h"
 #include "client/message.h"
 #include "client/options.h"
 #include "client/publisher.h"
@@ -16,6 +17,7 @@
 #include "toolbelt/fd.h"
 
 #include <boost/asio/any_io_executor.hpp>
+#include <boost/asio/associated_cancellation_slot.hpp>
 #include <boost/asio/associated_executor.hpp>
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/executor_work_guard.hpp>
@@ -23,6 +25,7 @@
 #include <boost/asio/posix/stream_descriptor.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/strand.hpp>
+#include <boost/asio/system_executor.hpp>
 
 #include <array>
 #include <atomic>
@@ -30,6 +33,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <future>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -47,11 +51,7 @@ public:
   AsioPublisher(const AsioPublisher &) = delete;
   AsioPublisher &operator=(const AsioPublisher &) = delete;
   AsioPublisher(AsioPublisher &&) noexcept = default;
-  AsioPublisher &operator=(AsioPublisher &&) noexcept = default;
-
-  absl::StatusOr<absl::Span<std::byte>>
-  GetMessageBuffer(SlotSizeType max_size = -1);
-  absl::StatusOr<Message> PublishMessage(int64_t message_size);
+  AsioPublisher &operator=(AsioPublisher &&other) noexcept;
 
   template <typename CompletionToken>
   auto AsyncGetMessageBuffer(SlotSizeType max_size, CompletionToken &&token);
@@ -66,11 +66,14 @@ public:
 
 private:
   friend class AsioClient;
-  AsioPublisher(std::shared_ptr<AsioClient> client,
-                std::shared_ptr<details::PublisherImpl> impl);
+  AsioPublisher(
+      std::shared_ptr<AsioClient> client,
+      std::shared_ptr<details::PublisherImpl> impl,
+      std::shared_ptr<boost::asio::posix::stream_descriptor> poll_descriptor);
 
   std::shared_ptr<AsioClient> client_;
   std::shared_ptr<details::PublisherImpl> impl_;
+  std::shared_ptr<boost::asio::posix::stream_descriptor> poll_descriptor_;
 };
 
 class AsioSubscriber : public std::enable_shared_from_this<AsioSubscriber> {
@@ -100,19 +103,22 @@ public:
 
 private:
   friend class AsioClient;
-  AsioSubscriber(std::shared_ptr<AsioClient> client,
-                 std::shared_ptr<details::SubscriberImpl> impl);
+  AsioSubscriber(
+      std::shared_ptr<AsioClient> client,
+      std::shared_ptr<details::SubscriberImpl> impl,
+      std::shared_ptr<boost::asio::posix::stream_descriptor> event_fd);
 
   template <typename CompletionToken>
   auto AsyncReadMessageImpl(ReadMode mode, ClearTrigger clear_trigger,
                             CompletionToken &&token);
-  void ResetEventFd();
+  absl::Status ResetEventFd();
   void WaitForNotification();
   void Drain();
 
   std::shared_ptr<AsioClient> client_;
   std::shared_ptr<details::SubscriberImpl> impl_;
-  boost::asio::posix::stream_descriptor event_fd_;
+  boost::asio::strand<boost::asio::any_io_executor> strand_;
+  std::shared_ptr<boost::asio::posix::stream_descriptor> event_fd_;
   std::function<void(Message &&)> on_message_;
   std::atomic_bool running_{false};
 };
@@ -161,18 +167,24 @@ private:
   using ControlCompletion = std::function<void(absl::StatusOr<RpcResult>)>;
   struct ControlCommand {
     std::vector<char> outbound;
+    std::vector<toolbelt::FileDescriptor> outbound_fds;
+    bool expects_response = true;
     ControlCompletion completion;
   };
 
   explicit AsioClient(Executor executor);
   void Init(std::string socket, std::string name,
             std::function<void(absl::Status)> completion);
-  void Enqueue(Request request, ControlCompletion completion);
+  void Enqueue(Request request, ControlCompletion completion,
+               std::vector<toolbelt::FileDescriptor> outbound_fds = {},
+               bool expects_response = true);
   void StartNext();
+  void SendRequestFds();
   void ReadResponseLength();
   void ReadResponseBody();
   void ReceiveFds();
   void Finish(absl::StatusOr<RpcResult> result);
+  void FailTransport(absl::Status status);
   void Fail(absl::Status status);
 
   absl::StatusOr<AsioPublisher> BuildPublisher(const std::string &name,
@@ -185,18 +197,37 @@ private:
   GetMessageBuffer(details::PublisherImpl *publisher, SlotSizeType max_size);
   void AcquireMessageBuffer(
       std::shared_ptr<details::PublisherImpl> publisher, SlotSizeType max_size,
+      std::shared_ptr<boost::asio::posix::stream_descriptor> poll_descriptor,
+      std::shared_ptr<std::atomic_bool> cancelled,
       std::function<void(absl::StatusOr<absl::Span<std::byte>>)> completion);
   absl::StatusOr<Message> PublishMessage(details::PublisherImpl *publisher,
                                          int64_t message_size);
   void RefreshPublisher(std::shared_ptr<details::PublisherImpl> publisher,
                         std::function<void(absl::Status)> completion);
   void RefreshSubscriber(std::shared_ptr<details::SubscriberImpl> subscriber,
+                         ClearTrigger clear_trigger,
+                         std::function<void(absl::Status, bool)> completion);
+  void
+  ApplySubscriberRefresh(std::shared_ptr<details::SubscriberImpl> subscriber,
+                         int updates, RpcResult result,
                          std::function<void(absl::Status, bool)> completion);
   absl::StatusOr<Message> ReadMessage(details::SubscriberImpl *subscriber,
                                       ReadMode mode,
                                       ClearTrigger clear_trigger);
   void RemovePublisher(std::shared_ptr<details::PublisherImpl> publisher);
   void RemoveSubscriber(std::shared_ptr<details::SubscriberImpl> subscriber);
+  absl::Status RegisterClientBuffer(const ClientBufferHandleMetadata &metadata,
+                                    const toolbelt::FileDescriptor *fd);
+  absl::StatusOr<std::vector<RegisteredClientBuffer>>
+  GetClientBuffers(const std::string &channel_name, uint64_t session_id,
+                   uint32_t buffer_index);
+  absl::Status UnregisterClientBuffer(const std::string &channel_name,
+                                      uint64_t session_id,
+                                      uint32_t buffer_index);
+  absl::StatusOr<RpcResult>
+  WaitForControl(Request request,
+                 std::vector<toolbelt::FileDescriptor> outbound_fds = {},
+                 bool expects_response = true);
 
   static void FillPublisherRequest(CreatePublisherRequest *request,
                                    const std::string &name,
@@ -216,6 +247,8 @@ private:
   RpcResult result_;
   std::vector<char> control_buffer_;
   int expected_fds_ = 0;
+  std::array<char, sizeof(int32_t)> fd_count_{};
+  size_t fd_count_received_ = 0;
   std::string name_;
   uint64_t session_id_ = 0;
   int server_user_id_ = 0;
@@ -226,13 +259,34 @@ private:
 
 namespace asio_detail {
 
-template <typename Handler, typename Result>
-void Complete(const AsioClient::Executor &fallback, Handler handler,
-              Result result) {
-  auto executor = boost::asio::get_associated_executor(handler, fallback);
-  boost::asio::post(executor, [handler = std::move(handler),
-                               result = std::move(result)]() mutable {
-    std::move(handler)(std::move(result));
+template <typename Handler> struct CompletionState {
+  CompletionState(Handler value, const AsioClient::Executor &fallback)
+      : handler(std::move(value)),
+        executor(boost::asio::get_associated_executor(handler, fallback)),
+        work(boost::asio::make_work_guard(executor)) {}
+
+  Handler handler;
+  AsioClient::Executor executor;
+  boost::asio::executor_work_guard<AsioClient::Executor> work;
+};
+
+template <typename Handler>
+auto MakeCompletion(Handler handler, const AsioClient::Executor &fallback) {
+  return std::make_shared<CompletionState<Handler>>(std::move(handler),
+                                                    fallback);
+}
+
+template <typename Handler, typename Result,
+          typename KeepAlive = std::nullptr_t>
+void Complete(std::shared_ptr<CompletionState<Handler>> completion,
+              Result result, KeepAlive keep_alive = nullptr) {
+  auto executor = completion->executor;
+  boost::asio::post(executor, [completion = std::move(completion),
+                               result = std::move(result),
+                               keep_alive = std::move(keep_alive)]() mutable {
+    static_cast<void>(keep_alive);
+    completion->work.reset();
+    std::move(completion->handler)(std::move(result));
   });
 }
 
@@ -245,9 +299,9 @@ auto AsioClient::AsyncCreate(Executor executor, std::string server_socket,
   return boost::asio::async_initiate<CompletionToken, Signature>(
       [executor = std::move(executor), server_socket = std::move(server_socket),
        client_name = std::move(client_name)](auto handler) mutable {
-        auto completion = std::make_shared<std::decay_t<decltype(handler)>>(
-            std::move(handler));
         auto fallback = executor;
+        auto completion =
+            asio_detail::MakeCompletion(std::move(handler), fallback);
         auto work = boost::asio::make_work_guard(executor);
         auto client =
             std::shared_ptr<AsioClient>(new AsioClient(std::move(executor)));
@@ -256,7 +310,7 @@ auto AsioClient::AsyncCreate(Executor executor, std::string server_socket,
             [client, fallback, work = std::move(work),
              completion = std::move(completion)](absl::Status status) mutable {
               asio_detail::Complete(
-                  fallback, std::move(*completion),
+                  std::move(completion),
                   status.ok()
                       ? absl::StatusOr<std::shared_ptr<AsioClient>>(client)
                       : absl::StatusOr<std::shared_ptr<AsioClient>>(status));
@@ -273,8 +327,31 @@ auto AsioClient::AsyncCreatePublisher(std::string channel_name,
   return boost::asio::async_initiate<CompletionToken, Signature>(
       [self = shared_from_this(), channel_name = std::move(channel_name),
        options = std::move(options)](auto handler) mutable {
-        auto completion = std::make_shared<std::decay_t<decltype(handler)>>(
-            std::move(handler));
+        auto completion =
+            asio_detail::MakeCompletion(std::move(handler), self->executor_);
+        if (options.MaxOutstandingSlotLeases() < 1 ||
+            options.MaxOutstandingSlotLeases() > options.NumSlots()) {
+          asio_detail::Complete(
+              std::move(completion),
+              absl::StatusOr<AsioPublisher>(absl::InvalidArgumentError(
+                  "MaxOutstandingSlotLeases must be between 1 and NumSlots")));
+          return;
+        }
+        if (options.MaxSlotSize() < 0) {
+          asio_detail::Complete(
+              std::move(completion),
+              absl::StatusOr<AsioPublisher>(absl::InvalidArgumentError(
+                  "MaxSlotSize must be non-negative")));
+          return;
+        }
+        if (options.MaxSlotSize() > 0 &&
+            options.SlotSize() > options.MaxSlotSize()) {
+          asio_detail::Complete(
+              std::move(completion),
+              absl::StatusOr<AsioPublisher>(
+                  absl::InvalidArgumentError("SlotSize exceeds MaxSlotSize")));
+          return;
+        }
         Request request;
         FillPublisherRequest(request.mutable_create_publisher(), channel_name,
                              options);
@@ -283,11 +360,22 @@ auto AsioClient::AsyncCreatePublisher(std::string channel_name,
             [self, channel_name = std::move(channel_name),
              options = std::move(options), completion = std::move(completion)](
                 absl::StatusOr<RpcResult> result) mutable {
-              asio_detail::Complete(
-                  self->executor_, std::move(*completion),
-                  result.ok() ? self->BuildPublisher(channel_name, options,
-                                                     std::move(result).value())
-                              : absl::StatusOr<AsioPublisher>(result.status()));
+              if (!result.ok()) {
+                asio_detail::Complete(
+                    std::move(completion),
+                    absl::StatusOr<AsioPublisher>(result.status()));
+                return;
+              }
+              boost::asio::post(
+                  boost::asio::system_executor(),
+                  [self, channel_name = std::move(channel_name),
+                   options = std::move(options), result = std::move(*result),
+                   completion = std::move(completion)]() mutable {
+                    asio_detail::Complete(
+                        std::move(completion),
+                        self->BuildPublisher(channel_name, options,
+                                             std::move(result)));
+                  });
             });
       },
       token);
@@ -301,8 +389,8 @@ auto AsioClient::AsyncCreateSubscriber(std::string channel_name,
   return boost::asio::async_initiate<CompletionToken, Signature>(
       [self = shared_from_this(), channel_name = std::move(channel_name),
        options = std::move(options)](auto handler) mutable {
-        auto completion = std::make_shared<std::decay_t<decltype(handler)>>(
-            std::move(handler));
+        auto completion =
+            asio_detail::MakeCompletion(std::move(handler), self->executor_);
         Request request;
         FillSubscriberRequest(request.mutable_create_subscriber(), channel_name,
                               options);
@@ -311,12 +399,23 @@ auto AsioClient::AsyncCreateSubscriber(std::string channel_name,
             [self, channel_name = std::move(channel_name),
              options = std::move(options), completion = std::move(completion)](
                 absl::StatusOr<RpcResult> result) mutable {
-              asio_detail::Complete(
-                  self->executor_, std::move(*completion),
-                  result.ok() ? self->BuildSubscriber(channel_name, options,
-                                                      std::move(result).value())
-                              : absl::StatusOr<std::shared_ptr<AsioSubscriber>>(
-                                    result.status()));
+              if (!result.ok()) {
+                asio_detail::Complete(
+                    std::move(completion),
+                    absl::StatusOr<std::shared_ptr<AsioSubscriber>>(
+                        result.status()));
+                return;
+              }
+              boost::asio::post(
+                  boost::asio::system_executor(),
+                  [self, channel_name = std::move(channel_name),
+                   options = std::move(options), result = std::move(*result),
+                   completion = std::move(completion)]() mutable {
+                    asio_detail::Complete(
+                        std::move(completion),
+                        self->BuildSubscriber(channel_name, options,
+                                              std::move(result)));
+                  });
             });
       },
       token);
@@ -329,8 +428,8 @@ auto AsioClient::AsyncGetChannelInfo(std::string channel_name,
   return boost::asio::async_initiate<CompletionToken, Signature>(
       [self = shared_from_this(),
        channel_name = std::move(channel_name)](auto handler) mutable {
-        auto completion = std::make_shared<std::decay_t<decltype(handler)>>(
-            std::move(handler));
+        auto completion =
+            asio_detail::MakeCompletion(std::move(handler), self->executor_);
         Request request;
         request.mutable_get_channel_info()->set_channel_name(channel_name);
         self->Enqueue(
@@ -343,7 +442,14 @@ auto AsioClient::AsyncGetChannelInfo(std::string channel_name,
               } else {
                 const auto &response = result->response.get_channel_info();
                 if (!response.error().empty()) {
-                  output = absl::InternalError(response.error());
+                  output =
+                      absl::StartsWith(response.error(), "No such channel ")
+                          ? absl::StatusOr<ChannelInfo>(
+                                absl::NotFoundError(response.error()))
+                          : absl::StatusOr<ChannelInfo>(
+                                absl::InternalError(response.error()));
+                } else if (response.channels_size() == 0) {
+                  output = absl::NotFoundError("channel does not exist");
                 } else if (response.channels_size() == 1) {
                   const auto &info = response.channels(0);
                   ChannelInfo value{};
@@ -365,8 +471,7 @@ auto AsioClient::AsyncGetChannelInfo(std::string channel_name,
                   output = std::move(value);
                 }
               }
-              asio_detail::Complete(self->executor_, std::move(*completion),
-                                    std::move(output));
+              asio_detail::Complete(std::move(completion), std::move(output));
             });
       },
       token);
@@ -379,8 +484,8 @@ auto AsioClient::AsyncGetChannelStats(std::string channel_name,
   return boost::asio::async_initiate<CompletionToken, Signature>(
       [self = shared_from_this(),
        channel_name = std::move(channel_name)](auto handler) mutable {
-        auto completion = std::make_shared<std::decay_t<decltype(handler)>>(
-            std::move(handler));
+        auto completion =
+            asio_detail::MakeCompletion(std::move(handler), self->executor_);
         Request request;
         request.mutable_get_channel_stats()->set_channel_name(channel_name);
         self->Enqueue(
@@ -404,8 +509,7 @@ auto AsioClient::AsyncGetChannelStats(std::string channel_name,
                       stats.is_local()};
                 }
               }
-              asio_detail::Complete(self->executor_, std::move(*completion),
-                                    std::move(output));
+              asio_detail::Complete(std::move(completion), std::move(output));
             });
       },
       token);
@@ -418,14 +522,22 @@ auto AsioClient::AsyncChannelExists(std::string channel_name,
   return boost::asio::async_initiate<CompletionToken, Signature>(
       [self = shared_from_this(),
        channel_name = std::move(channel_name)](auto handler) mutable {
-        auto completion = std::make_shared<std::decay_t<decltype(handler)>>(
-            std::move(handler));
+        auto completion =
+            asio_detail::MakeCompletion(std::move(handler), self->executor_);
         self->AsyncGetChannelInfo(
             std::move(channel_name),
             [self, completion = std::move(completion)](
                 absl::StatusOr<ChannelInfo> result) mutable {
-              asio_detail::Complete(self->executor_, std::move(*completion),
-                                    absl::StatusOr<bool>(result.ok()));
+              if (result.ok()) {
+                asio_detail::Complete(std::move(completion),
+                                      absl::StatusOr<bool>(true));
+              } else if (absl::IsNotFound(result.status())) {
+                asio_detail::Complete(std::move(completion),
+                                      absl::StatusOr<bool>(false));
+              } else {
+                asio_detail::Complete(std::move(completion),
+                                      absl::StatusOr<bool>(result.status()));
+              }
             });
       },
       token);
@@ -435,18 +547,43 @@ template <typename CompletionToken>
 auto AsioPublisher::AsyncGetMessageBuffer(SlotSizeType max_size,
                                           CompletionToken &&token) {
   using Signature = void(absl::StatusOr<absl::Span<std::byte>>);
+  auto client = client_;
+  auto impl = impl_;
+  auto poll_descriptor = poll_descriptor_;
   return boost::asio::async_initiate<CompletionToken, Signature>(
-      [this, max_size](auto handler) mutable {
-        auto completion = std::make_shared<std::decay_t<decltype(handler)>>(
-            std::move(handler));
-        auto client = client_;
-        auto impl = impl_;
+      [client = std::move(client), impl = std::move(impl),
+       poll_descriptor = std::move(poll_descriptor),
+       max_size](auto handler) mutable {
+        auto cancellation_slot =
+            boost::asio::get_associated_cancellation_slot(handler);
+        auto completion = asio_detail::MakeCompletion(std::move(handler),
+                                                      client->GetExecutor());
+        auto cancelled = std::make_shared<std::atomic_bool>(false);
+        if (cancellation_slot.is_connected()) {
+          cancellation_slot.assign([client, cancelled, poll_descriptor](
+                                       boost::asio::cancellation_type type) {
+            if (type == boost::asio::cancellation_type::none) {
+              return;
+            }
+            cancelled->store(true, std::memory_order_release);
+            if (poll_descriptor != nullptr) {
+              boost::asio::post(client->GetExecutor(), [poll_descriptor] {
+                boost::system::error_code ignored;
+                poll_descriptor->cancel(ignored);
+              });
+            }
+          });
+        }
         client->AcquireMessageBuffer(
-            impl, max_size,
-            [client, completion = std::move(completion)](
+            impl, max_size, poll_descriptor, cancelled,
+            [client, impl, cancellation_slot,
+             completion = std::move(completion)](
                 absl::StatusOr<absl::Span<std::byte>> result) mutable {
-              asio_detail::Complete(client->GetExecutor(),
-                                    std::move(*completion), std::move(result));
+              if (cancellation_slot.is_connected()) {
+                cancellation_slot.clear();
+              }
+              asio_detail::Complete(std::move(completion), std::move(result),
+                                    std::move(impl));
             });
       },
       token);
@@ -456,19 +593,30 @@ template <typename CompletionToken>
 auto AsioPublisher::AsyncPublishMessage(int64_t message_size,
                                         CompletionToken &&token) {
   using Signature = void(absl::StatusOr<Message>);
+  auto client = client_;
+  auto impl = impl_;
   return boost::asio::async_initiate<CompletionToken, Signature>(
-      [this, message_size](auto handler) mutable {
-        auto completion = std::make_shared<std::decay_t<decltype(handler)>>(
-            std::move(handler));
-        auto client = client_;
-        auto impl = impl_;
+      [client = std::move(client), impl = std::move(impl),
+       message_size](auto handler) mutable {
+        auto completion = asio_detail::MakeCompletion(std::move(handler),
+                                                      client->GetExecutor());
         client->RefreshPublisher(impl, [client, impl, message_size,
                                         completion = std::move(completion)](
                                            absl::Status status) mutable {
-          asio_detail::Complete(
-              client->GetExecutor(), std::move(*completion),
-              status.ok() ? client->PublishMessage(impl.get(), message_size)
-                          : absl::StatusOr<Message>(status));
+          if (!status.ok()) {
+            asio_detail::Complete(std::move(completion),
+                                  absl::StatusOr<Message>(status),
+                                  std::move(impl));
+            return;
+          }
+          boost::asio::post(
+              boost::asio::system_executor(),
+              [client, impl = std::move(impl), message_size,
+               completion = std::move(completion)]() mutable {
+                auto result = client->PublishMessage(impl.get(), message_size);
+                asio_detail::Complete(std::move(completion), std::move(result),
+                                      std::move(impl));
+              });
         });
       },
       token);
@@ -494,22 +642,39 @@ auto AsioSubscriber::AsyncReadMessageImpl(ReadMode mode,
   using Signature = void(absl::StatusOr<Message>);
   return boost::asio::async_initiate<CompletionToken, Signature>(
       [self = shared_from_this(), mode, clear_trigger](auto handler) mutable {
-        auto completion = std::make_shared<std::decay_t<decltype(handler)>>(
-            std::move(handler));
         auto client = self->client_;
         auto impl = self->impl_;
+        auto completion = asio_detail::MakeCompletion(std::move(handler),
+                                                      client->GetExecutor());
         client->RefreshSubscriber(
-            impl, [self, client, impl, mode, clear_trigger,
-                   completion = std::move(completion)](absl::Status status,
-                                                       bool reloaded) mutable {
-              if (reloaded) {
-                self->ResetEventFd();
-              }
-              asio_detail::Complete(
-                  client->GetExecutor(), std::move(*completion),
-                  status.ok()
-                      ? client->ReadMessage(impl.get(), mode, clear_trigger)
-                      : absl::StatusOr<Message>(status));
+            impl, clear_trigger,
+            [self, client, impl, mode, completion = std::move(completion)](
+                absl::Status status, bool reloaded) mutable {
+              boost::asio::post(
+                  self->strand_,
+                  [self, client, impl = std::move(impl), mode, status, reloaded,
+                   completion = std::move(completion)]() mutable {
+                    if (reloaded && status.ok()) {
+                      status = self->ResetEventFd();
+                    }
+                    if (!status.ok()) {
+                      asio_detail::Complete(
+                          std::move(completion),
+                          absl::StatusOr<Message>(std::move(status)),
+                          std::move(impl));
+                      return;
+                    }
+                    boost::asio::post(
+                        boost::asio::system_executor(),
+                        [client, impl = std::move(impl), mode,
+                         completion = std::move(completion)]() mutable {
+                          auto result = client->ReadMessage(
+                              impl.get(), mode, ClearTrigger::kNoClearTrigger);
+                          asio_detail::Complete(std::move(completion),
+                                                std::move(result),
+                                                std::move(impl));
+                        });
+                  });
             });
       },
       token);

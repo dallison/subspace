@@ -4,9 +4,12 @@
 
 #include "client/asio/asio_client.h"
 
+#include "absl/cleanup/cleanup.h"
 #include "absl/strings/str_format.h"
 #include "client/checksum.h"
+#include "client/protocol.h"
 #include "common/channel.h"
+#include "toolbelt/clock.h"
 
 #include <boost/asio/bind_executor.hpp>
 #include <boost/asio/connect.hpp>
@@ -21,16 +24,29 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <unordered_set>
 
 namespace subspace {
 namespace {
 
-boost::asio::local::stream_protocol::endpoint
+constexpr uint32_t kMaxControlResponseSize = 64 * 1024 * 1024;
+
+absl::StatusOr<boost::asio::local::stream_protocol::endpoint>
 MakeEndpoint(const std::string &pathname) {
   sockaddr_un address{};
   address.sun_family = AF_UNIX;
+#ifdef __linux__
+  if (pathname.size() > sizeof(address.sun_path) - 2) {
+    return absl::InvalidArgumentError("abstract Unix socket name is too long");
+  }
   address.sun_path[0] = '\0';
   std::memcpy(address.sun_path + 1, pathname.data(), pathname.size());
+#else
+  if (pathname.size() > sizeof(address.sun_path) - 1) {
+    return absl::InvalidArgumentError("Unix socket path is too long");
+  }
+  std::memcpy(address.sun_path, pathname.data(), pathname.size());
+#endif
   boost::asio::local::stream_protocol::endpoint endpoint;
   address.sun_path[sizeof(address.sun_path) - 1] = '\1';
   std::memcpy(endpoint.data(), &address, sizeof(address));
@@ -56,15 +72,46 @@ absl::Status CheckFd(const std::vector<toolbelt::FileDescriptor> &fds,
   return absl::OkStatus();
 }
 
-uint64_t ExpandSlotSize(uint64_t slot_size) {
-  static constexpr double multipliers[] = {2.0,   1.5,    1.25,
-                                           1.125, 1.0625, 1.03125};
-  static constexpr size_t ranges[] = {4096, 16384, 65536, 262144, 1048576};
-  size_t index = 0;
-  while (index < std::size(ranges) && slot_size > ranges[index]) {
-    ++index;
+template <typename Indices>
+absl::Status CheckFds(const std::vector<toolbelt::FileDescriptor> &fds,
+                      const Indices &indices, std::string_view name) {
+  for (int index : indices) {
+    if (absl::Status status = CheckFd(fds, index, name); !status.ok()) {
+      return status;
+    }
   }
-  return Aligned(static_cast<uint64_t>(slot_size * multipliers[index]));
+  return absl::OkStatus();
+}
+
+template <typename... IndexGroups>
+absl::Status CheckDistinctFds(std::initializer_list<int> scalar_indices,
+                              const IndexGroups &...index_groups) {
+  std::unordered_set<int> seen;
+  auto add = [&seen](int index) -> absl::Status {
+    if (index >= 0 && !seen.insert(index).second) {
+      return absl::InternalError(
+          absl::StrFormat("descriptor index %d is used more than once", index));
+    }
+    return absl::OkStatus();
+  };
+  for (int index : scalar_indices) {
+    if (absl::Status status = add(index); !status.ok()) {
+      return status;
+    }
+  }
+  absl::Status status = absl::OkStatus();
+  auto add_group = [&](const auto &indices) {
+    if (!status.ok()) {
+      return;
+    }
+    for (int index : indices) {
+      if (status = add(index); !status.ok()) {
+        return;
+      }
+    }
+  };
+  (add_group(index_groups), ...);
+  return status;
 }
 
 } // namespace
@@ -82,9 +129,14 @@ AsioClient::~AsioClient() {
 void AsioClient::Init(std::string socket, std::string name,
                       std::function<void(absl::Status)> completion) {
   name_ = std::move(name);
+  auto endpoint = MakeEndpoint(socket);
+  if (!endpoint.ok()) {
+    completion(endpoint.status());
+    return;
+  }
   auto self = shared_from_this();
   socket_.async_connect(
-      MakeEndpoint(socket),
+      std::move(*endpoint),
       boost::asio::bind_executor(
           strand_, [self, completion = std::move(completion)](
                        const boost::system::error_code &error) mutable {
@@ -127,7 +179,9 @@ void AsioClient::Init(std::string socket, std::string name,
           }));
 }
 
-void AsioClient::Enqueue(Request request, ControlCompletion completion) {
+void AsioClient::Enqueue(Request request, ControlCompletion completion,
+                         std::vector<toolbelt::FileDescriptor> outbound_fds,
+                         bool expects_response) {
   const size_t size = request.ByteSizeLong();
   ControlCommand command;
   command.outbound.resize(sizeof(uint32_t) + size);
@@ -138,6 +192,8 @@ void AsioClient::Enqueue(Request request, ControlCompletion completion) {
     completion(absl::InternalError("failed to serialize request"));
     return;
   }
+  command.outbound_fds = std::move(outbound_fds);
+  command.expects_response = expects_response;
   command.completion = std::move(completion);
   auto self = shared_from_this();
   boost::asio::post(strand_, [self, command = std::move(command)]() mutable {
@@ -157,11 +213,71 @@ void AsioClient::StartNext() {
       boost::asio::bind_executor(
           strand_, [self](const boost::system::error_code &error, size_t) {
             if (error) {
-              self->Finish(IoError("control write", error));
+              self->FailTransport(IoError("control write", error));
               return;
             }
-            self->ReadResponseLength();
+            if (!self->commands_.front().outbound_fds.empty()) {
+              self->SendRequestFds();
+            } else if (self->commands_.front().expects_response) {
+              self->ReadResponseLength();
+            } else {
+              self->Finish(RpcResult());
+            }
           }));
+}
+
+void AsioClient::SendRequestFds() {
+  const auto &fds = commands_.front().outbound_fds;
+  int32_t count = static_cast<int32_t>(fds.size());
+  std::vector<char> control(CMSG_SPACE(fds.size() * sizeof(int)), '\0');
+  iovec iov{&count, sizeof(count)};
+  msghdr message{};
+  message.msg_iov = &iov;
+  message.msg_iovlen = 1;
+  message.msg_control = control.data();
+  message.msg_controllen = control.size();
+  cmsghdr *cmsg = CMSG_FIRSTHDR(&message);
+  cmsg->cmsg_level = SOL_SOCKET;
+  cmsg->cmsg_type = SCM_RIGHTS;
+  cmsg->cmsg_len = CMSG_LEN(fds.size() * sizeof(int));
+  int *raw_fds = reinterpret_cast<int *>(CMSG_DATA(cmsg));
+  for (size_t index = 0; index < fds.size(); ++index) {
+    raw_fds[index] = fds[index].Fd();
+  }
+  message.msg_controllen = cmsg->cmsg_len;
+  int flags = MSG_DONTWAIT;
+#ifdef MSG_NOSIGNAL
+  flags |= MSG_NOSIGNAL;
+#endif
+  const ssize_t sent = ::sendmsg(socket_.native_handle(), &message, flags);
+  if (sent < 0) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+      auto self = shared_from_this();
+      socket_.async_wait(
+          boost::asio::socket_base::wait_write,
+          boost::asio::bind_executor(
+              strand_, [self](const boost::system::error_code &error) {
+                if (error) {
+                  self->FailTransport(IoError("fd write wait", error));
+                  return;
+                }
+                self->SendRequestFds();
+              }));
+      return;
+    }
+    FailTransport(absl::InternalError(
+        absl::StrFormat("failed to send fds: %s", std::strerror(errno))));
+    return;
+  }
+  if (sent != sizeof(count)) {
+    FailTransport(absl::DataLossError("short descriptor-count write"));
+    return;
+  }
+  if (commands_.front().expects_response) {
+    ReadResponseLength();
+  } else {
+    Finish(RpcResult());
+  }
 }
 
 void AsioClient::ReadResponseLength() {
@@ -171,13 +287,18 @@ void AsioClient::ReadResponseLength() {
       boost::asio::bind_executor(
           strand_, [self](const boost::system::error_code &error, size_t) {
             if (error) {
-              self->Finish(IoError("response length read", error));
+              self->FailTransport(IoError("response length read", error));
               return;
             }
             uint32_t network_size = 0;
             std::memcpy(&network_size, self->length_.data(),
                         sizeof(network_size));
             self->response_size_ = ntohl(network_size);
+            if (self->response_size_ > kMaxControlResponseSize) {
+              self->FailTransport(absl::ResourceExhaustedError(
+                  "control response exceeds maximum size"));
+              return;
+            }
             self->ReadResponseBody();
           }));
 }
@@ -190,17 +311,19 @@ void AsioClient::ReadResponseBody() {
       boost::asio::bind_executor(
           strand_, [self](const boost::system::error_code &error, size_t) {
             if (error) {
-              self->Finish(IoError("response body read", error));
+              self->FailTransport(IoError("response body read", error));
               return;
             }
             self->result_ = RpcResult();
             if (!self->result_.response.ParseFromArray(
                     self->response_body_.data(),
                     static_cast<int>(self->response_body_.size()))) {
-              self->Finish(absl::DataLossError("failed to parse response"));
+              self->FailTransport(
+                  absl::DataLossError("failed to parse response"));
               return;
             }
             self->expected_fds_ = -1;
+            self->fd_count_received_ = 0;
             self->ReceiveFds();
           }));
 }
@@ -209,56 +332,87 @@ void AsioClient::ReceiveFds() {
   auto self = shared_from_this();
   socket_.async_wait(
       boost::asio::socket_base::wait_read,
-      boost::asio::bind_executor(
-          strand_, [self](const boost::system::error_code &error) {
-            if (error) {
-              self->Finish(IoError("fd wait", error));
-              return;
-            }
-            int32_t total = 0;
-            iovec iov{&total, sizeof(total)};
-            msghdr message{};
-            message.msg_iov = &iov;
-            message.msg_iovlen = 1;
-            message.msg_control = self->control_buffer_.data();
-            message.msg_controllen = self->control_buffer_.size();
-            const ssize_t received = ::recvmsg(self->socket_.native_handle(),
-                                               &message, MSG_DONTWAIT);
-            if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-              self->ReceiveFds();
-              return;
-            }
-            if (received <= 0) {
-              self->Finish(absl::InternalError("failed to receive fds"));
-              return;
-            }
-            if ((message.msg_flags & MSG_CTRUNC) != 0) {
-              self->Finish(absl::ResourceExhaustedError(
-                  "ancillary fd message was truncated"));
-              return;
-            }
-            if (self->expected_fds_ < 0) {
-              self->expected_fds_ = total;
-            }
-            for (cmsghdr *cmsg = CMSG_FIRSTHDR(&message); cmsg != nullptr;
-                 cmsg = CMSG_NXTHDR(&message, cmsg)) {
-              if (cmsg->cmsg_level != SOL_SOCKET ||
-                  cmsg->cmsg_type != SCM_RIGHTS) {
-                continue;
-              }
-              const size_t count = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
-              const int *fds = reinterpret_cast<int *>(CMSG_DATA(cmsg));
-              for (size_t i = 0; i < count; ++i) {
-                self->result_.fds.emplace_back(fds[i]);
-              }
-            }
-            if (static_cast<int>(self->result_.fds.size()) >=
-                self->expected_fds_) {
-              self->Finish(std::move(self->result_));
-            } else {
-              self->ReceiveFds();
-            }
-          }));
+      boost::asio::bind_executor(strand_, [self](const boost::system::error_code
+                                                     &error) {
+        if (error) {
+          self->FailTransport(IoError("fd wait", error));
+          return;
+        }
+        std::fill(self->control_buffer_.begin(), self->control_buffer_.end(),
+                  '\0');
+        iovec iov{self->fd_count_.data() + self->fd_count_received_,
+                  self->fd_count_.size() - self->fd_count_received_};
+        msghdr message{};
+        message.msg_iov = &iov;
+        message.msg_iovlen = 1;
+        message.msg_control = self->control_buffer_.data();
+        message.msg_controllen = self->control_buffer_.size();
+        const ssize_t received =
+            ::recvmsg(self->socket_.native_handle(), &message, MSG_DONTWAIT);
+        if (received < 0) {
+          if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+            self->ReceiveFds();
+            return;
+          }
+          self->FailTransport(absl::InternalError(absl::StrFormat(
+              "failed to receive fds: %s", std::strerror(errno))));
+          return;
+        }
+        if (received == 0) {
+          self->FailTransport(absl::DataLossError("EOF while receiving fds"));
+          return;
+        }
+        self->fd_count_received_ += static_cast<size_t>(received);
+        for (cmsghdr *cmsg = CMSG_FIRSTHDR(&message); cmsg != nullptr;
+             cmsg = CMSG_NXTHDR(&message, cmsg)) {
+          if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) {
+            continue;
+          }
+          if (cmsg->cmsg_len < CMSG_LEN(0) ||
+              (cmsg->cmsg_len - CMSG_LEN(0)) % sizeof(int) != 0) {
+            self->FailTransport(
+                absl::DataLossError("invalid SCM_RIGHTS control length"));
+            return;
+          }
+          const size_t count = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+          const int *fds = reinterpret_cast<int *>(CMSG_DATA(cmsg));
+          for (size_t i = 0; i < count; ++i) {
+            self->result_.fds.emplace_back(fds[i]);
+          }
+        }
+        if ((message.msg_flags & MSG_CTRUNC) != 0) {
+          self->FailTransport(absl::ResourceExhaustedError(
+              "ancillary fd message was truncated"));
+          return;
+        }
+        if (self->fd_count_received_ < self->fd_count_.size()) {
+          self->ReceiveFds();
+          return;
+        }
+        int32_t total = 0;
+        std::memcpy(&total, self->fd_count_.data(), sizeof(total));
+        self->fd_count_received_ = 0;
+        if (total < 0 || total > 4096) {
+          self->FailTransport(absl::DataLossError("invalid descriptor count"));
+          return;
+        }
+        if (self->expected_fds_ < 0) {
+          self->expected_fds_ = total;
+        } else if (self->expected_fds_ != total) {
+          self->FailTransport(
+              absl::DataLossError("descriptor count changed between batches"));
+          return;
+        }
+        if (static_cast<int>(self->result_.fds.size()) == self->expected_fds_) {
+          self->Finish(std::move(self->result_));
+        } else if (static_cast<int>(self->result_.fds.size()) >
+                   self->expected_fds_) {
+          self->FailTransport(
+              absl::DataLossError("received too many descriptors"));
+        } else {
+          self->ReceiveFds();
+        }
+      }));
 }
 
 void AsioClient::Finish(absl::StatusOr<RpcResult> result) {
@@ -270,6 +424,14 @@ void AsioClient::Finish(absl::StatusOr<RpcResult> result) {
   active_ = false;
   completion(std::move(result));
   StartNext();
+}
+
+void AsioClient::FailTransport(absl::Status status) {
+  boost::system::error_code ignored;
+  socket_.close(ignored);
+  result_ = RpcResult();
+  response_body_.clear();
+  Fail(std::move(status));
 }
 
 void AsioClient::Fail(absl::Status status) {
@@ -284,48 +446,13 @@ void AsioClient::Fail(absl::Status status) {
 void AsioClient::FillPublisherRequest(CreatePublisherRequest *request,
                                       const std::string &name,
                                       const PublisherOptions &options) {
-  request->set_channel_name(name);
-  request->set_slot_size(Aligned(options.slot_size));
-  request->set_num_slots(options.num_slots);
-  request->set_is_local(options.IsLocal());
-  request->set_is_reliable(options.IsReliable());
-  request->set_is_bridge(options.IsBridge());
-  request->set_for_tunnel(options.ForTunnel());
-  request->set_is_fixed_size(options.IsFixedSize());
-  request->set_type(options.Type());
-  request->set_mux(options.Mux());
-  request->set_vchan_id(options.VchanId());
-  request->set_notify_retirement(options.notify_retirement);
-  request->set_checksum_size(options.ChecksumSize());
-  request->set_metadata_size(options.MetadataSize());
-  request->set_publisher_id(-1);
-  request->set_max_publishers(options.MaxPublishers());
-  request->set_use_split_buffers(options.UseSplitBuffers());
-  request->set_split_buffers_over_bridge(options.SplitBuffersOverBridge());
-  request->set_subscriber_queue_arena_size(options.SubscriberQueueArenaSize());
-  request->set_process_id(static_cast<uint64_t>(getpid()));
-  request->set_max_outstanding_slot_leases(options.MaxOutstandingSlotLeases());
-  request->set_max_slot_size(
-      options.max_slot_size > 0 ? Aligned(options.max_slot_size) : 0);
+  details::FillCreatePublisherRequest(request, name, options, -1);
 }
 
 void AsioClient::FillSubscriberRequest(CreateSubscriberRequest *request,
                                        const std::string &name,
                                        const SubscriberOptions &options) {
-  request->set_channel_name(name);
-  request->set_subscriber_id(-1);
-  request->set_is_reliable(options.IsReliable());
-  request->set_is_bridge(options.IsBridge());
-  request->set_for_tunnel(options.ForTunnel());
-  request->set_telemetry(options.Telemetry());
-  request->set_type(options.Type());
-  request->set_max_active_messages(options.MaxActiveMessages());
-  request->set_max_subscribers(options.MaxSubscribers());
-  request->set_mux(options.Mux());
-  request->set_vchan_id(options.VchanId());
-  request->set_subscriber_queue_size(options.SubscriberQueueSize());
-  request->set_process_id(static_cast<uint64_t>(getpid()));
-  request->set_is_local(options.IsLocal());
+  details::FillCreateSubscriberRequest(request, name, options, -1);
 }
 
 absl::StatusOr<AsioPublisher>
@@ -336,6 +463,14 @@ AsioClient::BuildPublisher(const std::string &name,
   if (!response.error().empty()) {
     return absl::InternalError(response.error());
   }
+  auto rollback =
+      absl::MakeCleanup([this, name, publisher_id = response.publisher_id()] {
+        Request request;
+        auto *remove = request.mutable_remove_publisher();
+        remove->set_channel_name(name);
+        remove->set_publisher_id(publisher_id);
+        Enqueue(std::move(request), [](absl::StatusOr<RpcResult>) {});
+      });
   PublisherOptions options = requested_options;
   if (response.num_slots() > 0) {
     options.num_slots = response.num_slots();
@@ -344,8 +479,39 @@ AsioClient::BuildPublisher(const std::string &name,
       name, options.num_slots, response.subscriber_queue_size(),
       response.subscriber_queue_arena_size(), response.channel_id(),
       response.publisher_id(), response.vchan_id(), session_id_,
-      response.type(), options, [](Channel *) { return false; },
+      response.type(), options,
+      [](Channel *channel) {
+        auto *client_channel = static_cast<details::ClientChannel *>(channel);
+        return client_channel->BuffersChanged() &&
+               client_channel->AttachBuffers().ok();
+      },
       server_user_id_, server_group_id_);
+  std::weak_ptr<AsioClient> weak = shared_from_this();
+  impl->SetClientBufferRegistrationCallback(
+      [weak](const ClientBufferHandleMetadata &metadata,
+             const toolbelt::FileDescriptor *fd) {
+        auto client = weak.lock();
+        return client != nullptr ? client->RegisterClientBuffer(metadata, fd)
+                                 : absl::CancelledError("AsioClient destroyed");
+      });
+  impl->SetClientBufferLookupCallback([weak](const std::string &channel_name,
+                                             uint64_t session_id,
+                                             uint32_t buffer_index) {
+    auto client = weak.lock();
+    return client != nullptr
+               ? client->GetClientBuffers(channel_name, session_id,
+                                          buffer_index)
+               : absl::StatusOr<std::vector<RegisteredClientBuffer>>(
+                     absl::CancelledError("AsioClient destroyed"));
+  });
+  impl->SetClientBufferUnregistrationCallback(
+      [weak](const std::string &channel_name, uint64_t session_id,
+             uint32_t buffer_index) {
+        auto client = weak.lock();
+        return client != nullptr ? client->UnregisterClientBuffer(
+                                       channel_name, session_id, buffer_index)
+                                 : absl::CancelledError("AsioClient destroyed");
+      });
   impl->SetChecksumSize(options.ChecksumSize() > 0 ? options.ChecksumSize()
                                                    : 4);
   impl->SetMetadataSize(options.MetadataSize());
@@ -356,6 +522,42 @@ AsioClient::BuildPublisher(const std::string &name,
     return status;
   }
   if (absl::Status status = CheckFd(result.fds, response.bcb_fd_index(), "bcb");
+      !status.ok()) {
+    return status;
+  }
+  if (absl::Status status = CheckFd(result.fds, response.pub_trigger_fd_index(),
+                                    "publisher trigger");
+      !status.ok()) {
+    return status;
+  }
+  if (absl::Status status =
+          CheckFd(result.fds, response.pub_poll_fd_index(), "publisher poll");
+      !status.ok()) {
+    return status;
+  }
+  if (absl::Status status = CheckFds(
+          result.fds, response.sub_trigger_fd_indexes(), "subscriber trigger");
+      !status.ok()) {
+    return status;
+  }
+  if (response.retirement_fd_index() >= 0) {
+    if (absl::Status status =
+            CheckFd(result.fds, response.retirement_fd_index(),
+                    "retirement notification");
+        !status.ok()) {
+      return status;
+    }
+  }
+  if (absl::Status status = CheckFds(
+          result.fds, response.retirement_fd_indexes(), "retirement trigger");
+      !status.ok()) {
+    return status;
+  }
+  if (absl::Status status = CheckDistinctFds(
+          {response.ccb_fd_index(), response.bcb_fd_index(),
+           response.pub_trigger_fd_index(), response.pub_poll_fd_index(),
+           response.retirement_fd_index()},
+          response.sub_trigger_fd_indexes(), response.retirement_fd_indexes());
       !status.ok()) {
     return status;
   }
@@ -401,9 +603,38 @@ AsioClient::BuildPublisher(const std::string &name,
       return absl::ResourceExhaustedError("publisher has no free slot");
     }
     impl->SetSlot(slot);
+    if (!options.IsBridge() && options.Activate() &&
+        !impl->IsActivated(impl->VirtualChannelId())) {
+      if (impl->GetCurrentBufferAddress() == nullptr) {
+        return absl::InternalError("publisher has no activation buffer");
+      }
+      slot->message_size.store(1, std::memory_order_relaxed);
+      auto activation = impl->ActivateSlotAndGetAnother(
+          false, true, false, false, impl->ForTunnel());
+      impl->SetSlot(activation.new_slot);
+      if (impl->CurrentSlot() == nullptr) {
+        return absl::ResourceExhaustedError(
+            "publisher has no slot after activation");
+      }
+    }
   }
   impl->TriggerSubscribers();
-  return AsioPublisher(shared_from_this(), std::move(impl));
+  if (absl::Status status = impl->UnmapUnusedBuffers(); !status.ok()) {
+    return status;
+  }
+  std::shared_ptr<boost::asio::posix::stream_descriptor> poll_descriptor;
+  if (impl->IsReliable()) {
+    const int fd = ::dup(impl->GetPollFd().Fd());
+    if (fd < 0) {
+      return absl::InternalError(
+          absl::StrFormat("dup publisher poll fd: %s", std::strerror(errno)));
+    }
+    poll_descriptor =
+        std::make_shared<boost::asio::posix::stream_descriptor>(executor_, fd);
+  }
+  std::move(rollback).Cancel();
+  return AsioPublisher(shared_from_this(), std::move(impl),
+                       std::move(poll_descriptor));
 }
 
 absl::StatusOr<std::shared_ptr<AsioSubscriber>>
@@ -424,8 +655,24 @@ AsioClient::BuildSubscriber(const std::string &name,
       response.default_subscriber_queue_size(),
       response.subscriber_queue_arena_size(), response.subscriber_queue_size(),
       response.channel_id(), response.subscriber_id(), response.vchan_id(),
-      session_id_, response.type(), options, [](Channel *) { return false; },
+      session_id_, response.type(), options,
+      [](Channel *channel) {
+        auto *client_channel = static_cast<details::ClientChannel *>(channel);
+        return client_channel->BuffersChanged() &&
+               client_channel->AttachBuffers().ok();
+      },
       server_user_id_, server_group_id_);
+  std::weak_ptr<AsioClient> weak = shared_from_this();
+  impl->SetClientBufferLookupCallback([weak](const std::string &channel_name,
+                                             uint64_t session_id,
+                                             uint32_t buffer_index) {
+    auto client = weak.lock();
+    return client != nullptr
+               ? client->GetClientBuffers(channel_name, session_id,
+                                          buffer_index)
+               : absl::StatusOr<std::vector<RegisteredClientBuffer>>(
+                     absl::CancelledError("AsioClient destroyed"));
+  });
   impl->SetRequestName(name);
   impl->SetNumSlots(response.num_slots());
   impl->SetEffectiveSubscriberQueueSize(response.subscriber_queue_size());
@@ -440,6 +687,35 @@ AsioClient::BuildSubscriber(const std::string &name,
     return status;
   }
   if (absl::Status status = CheckFd(result.fds, response.bcb_fd_index(), "bcb");
+      !status.ok()) {
+    return status;
+  }
+  if (absl::Status status = CheckFd(result.fds, response.trigger_fd_index(),
+                                    "subscriber trigger");
+      !status.ok()) {
+    return status;
+  }
+  if (absl::Status status =
+          CheckFd(result.fds, response.poll_fd_index(), "subscriber poll");
+      !status.ok()) {
+    return status;
+  }
+  if (absl::Status status =
+          CheckFds(result.fds, response.reliable_pub_trigger_fd_indexes(),
+                   "reliable publisher trigger");
+      !status.ok()) {
+    return status;
+  }
+  if (absl::Status status = CheckFds(
+          result.fds, response.retirement_fd_indexes(), "retirement trigger");
+      !status.ok()) {
+    return status;
+  }
+  if (absl::Status status = CheckDistinctFds(
+          {response.ccb_fd_index(), response.bcb_fd_index(),
+           response.trigger_fd_index(), response.poll_fd_index()},
+          response.reliable_pub_trigger_fd_indexes(),
+          response.retirement_fd_indexes());
       !status.ok()) {
     return status;
   }
@@ -462,8 +738,15 @@ AsioClient::BuildSubscriber(const std::string &name,
   }
   impl->SetNumUpdates(response.num_pub_updates());
   impl->Trigger();
-  return std::shared_ptr<AsioSubscriber>(
-      new AsioSubscriber(shared_from_this(), std::move(impl)));
+  const int event_fd = ::dup(impl->GetPollFd().Fd());
+  if (event_fd < 0) {
+    return absl::InternalError(
+        absl::StrFormat("dup subscriber poll fd: %s", std::strerror(errno)));
+  }
+  auto descriptor = std::make_shared<boost::asio::posix::stream_descriptor>(
+      executor_, event_fd);
+  return std::shared_ptr<AsioSubscriber>(new AsioSubscriber(
+      shared_from_this(), std::move(impl), std::move(descriptor)));
 }
 
 absl::StatusOr<absl::Span<std::byte>>
@@ -484,7 +767,7 @@ AsioClient::GetMessageBuffer(details::PublisherImpl *publisher,
     }
     int64_t new_size = publisher->SlotSize();
     while (new_size < max_size) {
-      new_size = ExpandSlotSize(new_size);
+      new_size = details::ExpandSlotSize(new_size);
     }
     if (const int64_t maximum = publisher->MaxSlotSize();
         maximum != 0 && new_size > maximum) {
@@ -516,49 +799,99 @@ AsioClient::GetMessageBuffer(details::PublisherImpl *publisher,
 
 void AsioClient::AcquireMessageBuffer(
     std::shared_ptr<details::PublisherImpl> publisher, SlotSizeType max_size,
+    std::shared_ptr<boost::asio::posix::stream_descriptor> poll_descriptor,
+    std::shared_ptr<std::atomic_bool> cancelled,
     std::function<void(absl::StatusOr<absl::Span<std::byte>>)> completion) {
   RefreshPublisher(publisher, [self = shared_from_this(), publisher, max_size,
+                               poll_descriptor, cancelled,
                                completion = std::move(completion)](
                                   absl::Status status) mutable {
+    if (cancelled->load(std::memory_order_acquire)) {
+      completion(
+          absl::CancelledError("publisher buffer acquisition cancelled"));
+      return;
+    }
     if (!status.ok()) {
       completion(status);
       return;
     }
-    auto result = self->GetMessageBuffer(publisher.get(), max_size);
-    if (!result.ok() || !result->empty() || !publisher->IsReliable() ||
-        publisher->NumSubscribers(publisher->VirtualChannelId()) == 0) {
-      completion(std::move(result));
-      return;
-    }
-    const int fd = ::dup(publisher->GetPollFd().Fd());
-    if (fd < 0) {
-      completion(absl::InternalError(
-          absl::StrFormat("dup publisher poll fd: %s", std::strerror(errno))));
-      return;
-    }
-    auto descriptor = std::make_shared<boost::asio::posix::stream_descriptor>(
-        self->executor_, fd);
-    descriptor->async_wait(
-        boost::asio::posix::stream_descriptor::wait_read,
-        boost::asio::bind_executor(
-            self->strand_, [self, publisher = std::move(publisher), max_size,
-                            descriptor, completion = std::move(completion)](
-                               const boost::system::error_code &error) mutable {
-              if (error) {
-                completion(IoError("publisher wait", error));
-                return;
-              }
-              self->AcquireMessageBuffer(std::move(publisher), max_size,
-                                         std::move(completion));
-            }));
+    boost::asio::post(
+        boost::asio::system_executor(),
+        [self, publisher = std::move(publisher), max_size, poll_descriptor,
+         cancelled, completion = std::move(completion)]() mutable {
+          auto result = self->GetMessageBuffer(publisher.get(), max_size);
+          if (cancelled->load(std::memory_order_acquire)) {
+            completion(
+                absl::CancelledError("publisher buffer acquisition cancelled"));
+            return;
+          }
+          if (!result.ok() || !result->empty() || !publisher->IsReliable() ||
+              publisher->NumSubscribers(publisher->VirtualChannelId()) == 0) {
+            completion(std::move(result));
+            return;
+          }
+          if (poll_descriptor == nullptr) {
+            completion(
+                absl::InternalError("reliable publisher has no poll fd"));
+            return;
+          }
+          boost::asio::post(
+              self->strand_, [self, publisher = std::move(publisher), max_size,
+                              poll_descriptor, cancelled,
+                              completion = std::move(completion)]() mutable {
+                if (cancelled->load(std::memory_order_acquire)) {
+                  completion(absl::CancelledError(
+                      "publisher buffer acquisition cancelled"));
+                  return;
+                }
+                poll_descriptor->async_wait(
+                    boost::asio::posix::stream_descriptor::wait_read,
+                    boost::asio::bind_executor(
+                        self->strand_,
+                        [self, publisher = std::move(publisher), max_size,
+                         poll_descriptor, cancelled,
+                         completion = std::move(completion)](
+                            const boost::system::error_code &error) mutable {
+                          if (error) {
+                            completion(
+                                error == boost::asio::error::operation_aborted
+                                    ? absl::Status(absl::CancelledError(
+                                          "publisher buffer acquisition "
+                                          "cancelled"))
+                                    : IoError("publisher wait", error));
+                            return;
+                          }
+                          self->AcquireMessageBuffer(
+                              std::move(publisher), max_size,
+                              std::move(poll_descriptor), std::move(cancelled),
+                              std::move(completion));
+                        }));
+              });
+        });
   });
 }
 
 absl::StatusOr<Message>
 AsioClient::PublishMessage(details::PublisherImpl *publisher,
                            int64_t message_size) {
+  if (publisher->CurrentSlot() == nullptr) {
+    return absl::FailedPreconditionError(
+        "GetMessageBuffer must complete before PublishMessage");
+  }
   if (message_size <= 0 || message_size > publisher->SlotSize()) {
     return absl::InvalidArgumentError("invalid message size");
+  }
+  if (publisher->on_send_callback_ != nullptr) {
+    absl::StatusOr<int64_t> delivered = publisher->on_send_callback_(
+        publisher->GetCurrentBufferAddress(), message_size);
+    if (!delivered.ok()) {
+      return delivered.status();
+    }
+    message_size = *delivered;
+    if (message_size <= 0 || message_size > publisher->SlotSize()) {
+      return absl::InvalidArgumentError(
+          "send callback returned an invalid message size");
+    }
   }
   const int old_slot_id = publisher->CurrentSlotId();
   publisher->SetMessageSize(message_size);
@@ -566,6 +899,18 @@ AsioClient::PublishMessage(details::PublisherImpl *publisher,
       publisher->IsReliable(), false, false, false, publisher->ForTunnel());
   publisher->SetSlot(published.new_slot);
   publisher->TriggerSubscribers();
+  if (absl::Status status = publisher->UnmapUnusedBuffers(); !status.ok()) {
+    return status;
+  }
+  if (published.new_slot == nullptr) {
+    if (publisher->IsReliable()) {
+      return Message(message_size, nullptr, published.ordinal,
+                     published.timestamp, publisher->VirtualChannelId(), false,
+                     -1, false);
+    }
+    return absl::ResourceExhaustedError(
+        absl::StrFormat("out of slots for channel %s", publisher->Name()));
+  }
   return Message(message_size, nullptr, published.ordinal, published.timestamp,
                  publisher->VirtualChannelId(), false, old_slot_id, false);
 }
@@ -573,42 +918,82 @@ AsioClient::PublishMessage(details::PublisherImpl *publisher,
 void AsioClient::RefreshPublisher(
     std::shared_ptr<details::PublisherImpl> publisher,
     std::function<void(absl::Status)> completion) {
-  SystemControlBlock *scb = publisher->GetScb();
-  const int updates = scb->counters[publisher->GetChannelId()].num_sub_updates;
-  if (publisher->NumUpdates() == updates) {
-    completion(absl::OkStatus());
-    return;
-  }
-  Request request;
-  request.mutable_get_triggers()->set_channel_name(publisher->Name());
-  Enqueue(std::move(request), [publisher = std::move(publisher), updates,
-                               completion = std::move(completion)](
-                                  absl::StatusOr<RpcResult> result) mutable {
-    if (!result.ok()) {
-      completion(result.status());
+  auto self = shared_from_this();
+  boost::asio::post(strand_, [self, publisher = std::move(publisher),
+                              completion = std::move(completion)]() mutable {
+    SystemControlBlock *scb = publisher->GetScb();
+    const int updates =
+        scb->counters[publisher->GetChannelId()].num_sub_updates;
+    if (publisher->NumUpdates() == updates) {
+      completion(absl::OkStatus());
       return;
     }
-    const auto &response = result->response.get_triggers();
-    if (!response.error().empty()) {
-      completion(absl::InternalError(response.error()));
-      return;
-    }
-    publisher->ClearSubscribers();
-    for (int index : response.sub_trigger_fd_indexes()) {
-      publisher->AddSubscriber(std::move(result->fds[index]));
-    }
-    publisher->ClearRetirementTriggers();
-    for (int index : response.retirement_fd_indexes()) {
-      publisher->AddRetirementTrigger(result->fds[index]);
-    }
-    publisher->SetNumUpdates(updates);
-    completion(absl::OkStatus());
+    Request request;
+    request.mutable_get_triggers()->set_channel_name(publisher->Name());
+    self->Enqueue(
+        std::move(request), [publisher = std::move(publisher), updates,
+                             completion = std::move(completion)](
+                                absl::StatusOr<RpcResult> result) mutable {
+          if (!result.ok()) {
+            completion(result.status());
+            return;
+          }
+          const auto &response = result->response.get_triggers();
+          if (!response.error().empty()) {
+            completion(absl::InternalError(response.error()));
+            return;
+          }
+          if (absl::Status status =
+                  CheckFds(result->fds, response.sub_trigger_fd_indexes(),
+                           "subscriber trigger");
+              !status.ok()) {
+            completion(status);
+            return;
+          }
+          if (absl::Status status =
+                  CheckFds(result->fds, response.retirement_fd_indexes(),
+                           "retirement trigger");
+              !status.ok()) {
+            completion(status);
+            return;
+          }
+          if (absl::Status status =
+                  CheckDistinctFds({}, response.sub_trigger_fd_indexes(),
+                                   response.retirement_fd_indexes());
+              !status.ok()) {
+            completion(status);
+            return;
+          }
+          publisher->ClearSubscribers();
+          for (int index : response.sub_trigger_fd_indexes()) {
+            publisher->AddSubscriber(std::move(result->fds[index]));
+          }
+          publisher->ClearRetirementTriggers();
+          for (int index : response.retirement_fd_indexes()) {
+            publisher->AddRetirementTrigger(result->fds[index]);
+          }
+          publisher->SetNumUpdates(updates);
+          completion(absl::OkStatus());
+        });
   });
 }
 
 void AsioClient::RefreshSubscriber(
     std::shared_ptr<details::SubscriberImpl> subscriber,
+    ClearTrigger clear_trigger,
     std::function<void(absl::Status, bool)> completion) {
+  if (!strand_.running_in_this_thread()) {
+    boost::asio::post(
+        strand_, [self = shared_from_this(), subscriber = std::move(subscriber),
+                  clear_trigger, completion = std::move(completion)]() mutable {
+          self->RefreshSubscriber(std::move(subscriber), clear_trigger,
+                                  std::move(completion));
+        });
+    return;
+  }
+  if (clear_trigger == ClearTrigger::kClearTrigger) {
+    subscriber->ClearPollFd();
+  }
   SystemControlBlock *scb = subscriber->GetScb();
   const int updates = scb->counters[subscriber->GetChannelId()].num_pub_updates;
   if (subscriber->NumUpdates() == updates) {
@@ -616,96 +1001,179 @@ void AsioClient::RefreshSubscriber(
     return;
   }
   Request request;
+  if (!subscriber->IsPlaceholder()) {
+    request.mutable_get_triggers()->set_channel_name(subscriber->Name());
+    Enqueue(std::move(request), [subscriber = std::move(subscriber), updates,
+                                 completion = std::move(completion)](
+                                    absl::StatusOr<RpcResult> result) mutable {
+      if (!result.ok()) {
+        completion(result.status(), false);
+        return;
+      }
+      const auto &response = result->response.get_triggers();
+      if (!response.error().empty()) {
+        completion(absl::InternalError(response.error()), false);
+        return;
+      }
+      if (absl::Status status =
+              CheckFds(result->fds, response.reliable_pub_trigger_fd_indexes(),
+                       "reliable publisher trigger");
+          !status.ok()) {
+        completion(status, false);
+        return;
+      }
+      if (absl::Status status =
+              CheckFds(result->fds, response.retirement_fd_indexes(),
+                       "retirement trigger");
+          !status.ok()) {
+        completion(status, false);
+        return;
+      }
+      if (absl::Status status =
+              CheckDistinctFds({}, response.reliable_pub_trigger_fd_indexes(),
+                               response.retirement_fd_indexes());
+          !status.ok()) {
+        completion(status, false);
+        return;
+      }
+      subscriber->ClearPublishers();
+      for (int index : response.reliable_pub_trigger_fd_indexes()) {
+        subscriber->AddPublisher(std::move(result->fds[index]));
+      }
+      subscriber->ClearRetirementTriggers();
+      for (int index : response.retirement_fd_indexes()) {
+        subscriber->AddRetirementTrigger(result->fds[index]);
+      }
+      subscriber->SetNumUpdates(updates);
+      completion(absl::OkStatus(), false);
+    });
+    return;
+  }
   FillSubscriberRequest(request.mutable_create_subscriber(),
                         subscriber->RequestName(), subscriber->options_);
   request.mutable_create_subscriber()->set_subscriber_id(
       subscriber->GetSubscriberId());
-  Enqueue(std::move(request), [this, subscriber = std::move(subscriber),
-                               updates, completion = std::move(completion)](
+  Enqueue(std::move(request), [self = shared_from_this(),
+                               subscriber = std::move(subscriber), updates,
+                               completion = std::move(completion)](
                                   absl::StatusOr<RpcResult> result) mutable {
     if (!result.ok()) {
       completion(result.status(), false);
       return;
     }
-    const auto &response = result->response.create_subscriber();
-    if (!response.error().empty()) {
-      completion(absl::InternalError(response.error()), false);
-      return;
-    }
-    const bool remap = subscriber->IsPlaceholder();
-    if (remap) {
-      if (absl::Status status =
-              CheckFd(result->fds, response.ccb_fd_index(), "ccb");
-          !status.ok()) {
-        completion(status, false);
-        return;
-      }
-      if (absl::Status status =
-              CheckFd(result->fds, response.bcb_fd_index(), "bcb");
-          !status.ok()) {
-        completion(status, false);
-        return;
-      }
-      subscriber->ResetDeliveryState();
-      subscriber->Unmap();
-    }
-    if (!response.type().empty()) {
-      subscriber->SetType(response.type());
-    }
-    subscriber->options_.use_split_buffers = response.use_split_buffers();
-    subscriber->SetNumSlots(response.num_slots());
-    subscriber->SetSubscriberQueueSize(
-        response.default_subscriber_queue_size());
-    subscriber->SetSubscriberQueueArenaSize(
-        response.subscriber_queue_arena_size());
-    subscriber->SetEffectiveSubscriberQueueSize(
-        response.subscriber_queue_size());
-    subscriber->SetChecksumSize(
-        response.checksum_size() > 0 ? response.checksum_size() : 4);
-    subscriber->SetMetadataSize(std::max(0, response.metadata_size()));
-    subscriber->SetPrefixSize(Channel::ComputePrefixSize(
-        subscriber->ChecksumSize(), subscriber->MetadataSize()));
-    subscriber->AllocateChecksumBuffer();
-    if (remap) {
-      SharedMemoryFds fds(std::move(result->fds[response.ccb_fd_index()]),
-                          std::move(result->fds[response.bcb_fd_index()]));
-      if (absl::Status status = subscriber->Map(std::move(fds), scb_fd_);
-          !status.ok()) {
-        completion(status, false);
-        return;
-      }
-      subscriber->InitActiveMessages();
-    }
-    if (absl::Status status = subscriber->AttachBuffers(); !status.ok()) {
-      completion(status, false);
-      return;
-    }
-    if (absl::Status status =
-            CheckFd(result->fds, response.trigger_fd_index(), "trigger");
-        !status.ok()) {
-      completion(status, false);
-      return;
-    }
-    if (absl::Status status =
-            CheckFd(result->fds, response.poll_fd_index(), "poll");
-        !status.ok()) {
-      completion(status, false);
-      return;
-    }
-    subscriber->SetTriggerFd(
-        std::move(result->fds[response.trigger_fd_index()]));
-    subscriber->SetPollFd(std::move(result->fds[response.poll_fd_index()]));
-    subscriber->ClearPublishers();
-    for (int index : response.reliable_pub_trigger_fd_indexes()) {
-      subscriber->AddPublisher(std::move(result->fds[index]));
-    }
-    subscriber->ClearRetirementTriggers();
-    for (int index : response.retirement_fd_indexes()) {
-      subscriber->AddRetirementTrigger(result->fds[index]);
-    }
-    subscriber->SetNumUpdates(updates);
-    completion(absl::OkStatus(), true);
+    boost::asio::post(boost::asio::system_executor(),
+                      [self, subscriber = std::move(subscriber), updates,
+                       result = std::move(*result),
+                       completion = std::move(completion)]() mutable {
+                        self->ApplySubscriberRefresh(std::move(subscriber),
+                                                     updates, std::move(result),
+                                                     std::move(completion));
+                      });
   });
+}
+
+void AsioClient::ApplySubscriberRefresh(
+    std::shared_ptr<details::SubscriberImpl> subscriber, int updates,
+    RpcResult result, std::function<void(absl::Status, bool)> completion) {
+  const auto &response = result.response.create_subscriber();
+  if (!response.error().empty()) {
+    completion(absl::InternalError(response.error()), false);
+    return;
+  }
+  const bool remap = subscriber->IsPlaceholder();
+  if (remap) {
+    if (absl::Status status =
+            CheckFd(result.fds, response.ccb_fd_index(), "ccb");
+        !status.ok()) {
+      completion(status, false);
+      return;
+    }
+    if (absl::Status status =
+            CheckFd(result.fds, response.bcb_fd_index(), "bcb");
+        !status.ok()) {
+      completion(status, false);
+      return;
+    }
+  }
+  if (absl::Status status =
+          CheckFd(result.fds, response.trigger_fd_index(), "trigger");
+      !status.ok()) {
+    completion(status, false);
+    return;
+  }
+  if (absl::Status status =
+          CheckFd(result.fds, response.poll_fd_index(), "poll");
+      !status.ok()) {
+    completion(status, false);
+    return;
+  }
+  if (absl::Status status =
+          CheckFds(result.fds, response.reliable_pub_trigger_fd_indexes(),
+                   "reliable publisher trigger");
+      !status.ok()) {
+    completion(status, false);
+    return;
+  }
+  if (absl::Status status = CheckFds(
+          result.fds, response.retirement_fd_indexes(), "retirement trigger");
+      !status.ok()) {
+    completion(status, false);
+    return;
+  }
+  if (absl::Status status = CheckDistinctFds(
+          {response.ccb_fd_index(), response.bcb_fd_index(),
+           response.trigger_fd_index(), response.poll_fd_index()},
+          response.reliable_pub_trigger_fd_indexes(),
+          response.retirement_fd_indexes());
+      !status.ok()) {
+    completion(status, false);
+    return;
+  }
+  if (remap) {
+    subscriber->ResetDeliveryState();
+    subscriber->Unmap();
+  }
+  if (!response.type().empty()) {
+    subscriber->SetType(response.type());
+  }
+  subscriber->options_.use_split_buffers = response.use_split_buffers();
+  subscriber->SetNumSlots(response.num_slots());
+  subscriber->SetSubscriberQueueSize(response.default_subscriber_queue_size());
+  subscriber->SetSubscriberQueueArenaSize(
+      response.subscriber_queue_arena_size());
+  subscriber->SetEffectiveSubscriberQueueSize(response.subscriber_queue_size());
+  subscriber->SetChecksumSize(
+      response.checksum_size() > 0 ? response.checksum_size() : 4);
+  subscriber->SetMetadataSize(std::max(0, response.metadata_size()));
+  subscriber->SetPrefixSize(Channel::ComputePrefixSize(
+      subscriber->ChecksumSize(), subscriber->MetadataSize()));
+  subscriber->AllocateChecksumBuffer();
+  if (remap) {
+    SharedMemoryFds fds(std::move(result.fds[response.ccb_fd_index()]),
+                        std::move(result.fds[response.bcb_fd_index()]));
+    if (absl::Status status = subscriber->Map(std::move(fds), scb_fd_);
+        !status.ok()) {
+      completion(status, false);
+      return;
+    }
+    subscriber->InitActiveMessages();
+  }
+  if (absl::Status status = subscriber->AttachBuffers(); !status.ok()) {
+    completion(status, false);
+    return;
+  }
+  subscriber->SetTriggerFd(std::move(result.fds[response.trigger_fd_index()]));
+  subscriber->SetPollFd(std::move(result.fds[response.poll_fd_index()]));
+  subscriber->ClearPublishers();
+  for (int index : response.reliable_pub_trigger_fd_indexes()) {
+    subscriber->AddPublisher(std::move(result.fds[index]));
+  }
+  subscriber->ClearRetirementTriggers();
+  for (int index : response.retirement_fd_indexes()) {
+    subscriber->AddRetirementTrigger(result.fds[index]);
+  }
+  subscriber->SetNumUpdates(updates);
+  completion(absl::OkStatus(), true);
 }
 
 absl::StatusOr<Message>
@@ -717,9 +1185,14 @@ AsioClient::ReadMessage(details::SubscriberImpl *subscriber, ReadMode mode,
   if (subscriber->IsPlaceholder()) {
     return Message();
   }
+  int64_t last_ordinal = -1;
+  if (MessageSlot *current = subscriber->CurrentSlot(); current != nullptr) {
+    last_ordinal = current->ordinal.load(std::memory_order_relaxed);
+  }
   MessageSlot *slot = mode == ReadMode::kReadNext ? subscriber->NextSlot()
                                                   : subscriber->LastSlot();
   if (slot == nullptr) {
+    subscriber->NoteUnstuck();
     subscriber->TriggerReliablePublishers();
     if (absl::Status status = subscriber->UnmapUnusedBuffers(); !status.ok()) {
       return status;
@@ -770,7 +1243,21 @@ AsioClient::ReadMessage(details::SubscriberImpl *subscriber, ReadMode mode,
       checksum_error);
   if (active->length == 0) {
     subscriber->UnreadSlot(slot);
+    subscriber->NoteStuckRead(toolbelt::Now(),
+                              details::kMaxStuckSubscriberWarnings);
     return Message();
+  }
+  subscriber->NoteUnstuck();
+  if (mode == ReadMode::kReadNext &&
+      subscriber->options_.DetectDroppedMessages()) {
+    int drops = subscriber->ConsumeQueueDrops();
+    if (last_ordinal != -1 && subscriber->options_.SubscriberQueueSize() == 0) {
+      drops = std::max(drops, subscriber->DetectDrops(slot->vchan_id.load(
+                                  std::memory_order_relaxed)));
+    }
+    if (drops > 0) {
+      subscriber->RecordDroppedMessages(drops);
+    }
   }
   subscriber->ClaimSlot(slot, slot->vchan_id.load(std::memory_order_relaxed),
                         mode == ReadMode::kReadNewest);
@@ -806,23 +1293,126 @@ void AsioClient::RemoveSubscriber(
                                   auto) mutable { subscriber.reset(); });
 }
 
-AsioPublisher::AsioPublisher(std::shared_ptr<AsioClient> client,
-                             std::shared_ptr<details::PublisherImpl> impl)
-    : client_(std::move(client)), impl_(std::move(impl)) {}
+absl::StatusOr<AsioClient::RpcResult>
+AsioClient::WaitForControl(Request request,
+                           std::vector<toolbelt::FileDescriptor> outbound_fds,
+                           bool expects_response) {
+  auto promise = std::make_shared<std::promise<absl::StatusOr<RpcResult>>>();
+  std::future<absl::StatusOr<RpcResult>> future = promise->get_future();
+  Enqueue(
+      std::move(request),
+      [promise](absl::StatusOr<RpcResult> result) mutable {
+        promise->set_value(std::move(result));
+      },
+      std::move(outbound_fds), expects_response);
+  return future.get();
+}
+
+absl::Status
+AsioClient::RegisterClientBuffer(const ClientBufferHandleMetadata &metadata,
+                                 const toolbelt::FileDescriptor *fd) {
+  Request request;
+  auto *register_buffer = request.mutable_register_client_buffer();
+  details::ToProto(metadata, register_buffer->mutable_metadata());
+  std::vector<toolbelt::FileDescriptor> fds;
+  if (fd != nullptr && fd->Valid()) {
+    register_buffer->set_has_fd(true);
+    register_buffer->set_fd_index(0);
+    fds.push_back(*fd);
+  }
+  absl::StatusOr<RpcResult> result =
+      WaitForControl(std::move(request), std::move(fds));
+  if (!result.ok()) {
+    return result.status();
+  }
+  const auto &response = result->response.register_client_buffer();
+  return response.error().empty() ? absl::OkStatus()
+                                  : absl::InternalError(response.error());
+}
+
+absl::StatusOr<std::vector<RegisteredClientBuffer>>
+AsioClient::GetClientBuffers(const std::string &channel_name,
+                             uint64_t session_id, uint32_t buffer_index) {
+  Request request;
+  auto *get = request.mutable_get_client_buffers();
+  get->set_channel_name(channel_name);
+  get->set_session_id(session_id);
+  get->set_buffer_index(buffer_index);
+  absl::StatusOr<RpcResult> result = WaitForControl(std::move(request));
+  if (!result.ok()) {
+    return result.status();
+  }
+  const auto &response = result->response.get_client_buffers();
+  if (!response.error().empty()) {
+    return absl::InternalError(response.error());
+  }
+  if (response.metadata_size() != response.fd_indexes_size()) {
+    return absl::DataLossError("malformed client-buffer response");
+  }
+  for (int fd_index : response.fd_indexes()) {
+    if (fd_index >= 0) {
+      if (absl::Status status = CheckFd(result->fds, fd_index, "client buffer");
+          !status.ok()) {
+        return status;
+      }
+    }
+  }
+  if (absl::Status status = CheckDistinctFds({}, response.fd_indexes());
+      !status.ok()) {
+    return status;
+  }
+  std::vector<RegisteredClientBuffer> buffers;
+  buffers.reserve(response.metadata_size());
+  for (int index = 0; index < response.metadata_size(); ++index) {
+    RegisteredClientBuffer buffer{
+        .metadata = details::FromProto(response.metadata(index)),
+    };
+    const int fd_index = response.fd_indexes(index);
+    if (fd_index >= 0) {
+      buffer.fd = std::move(result->fds[fd_index]);
+    }
+    buffers.push_back(std::move(buffer));
+  }
+  return buffers;
+}
+
+absl::Status AsioClient::UnregisterClientBuffer(const std::string &channel_name,
+                                                uint64_t session_id,
+                                                uint32_t buffer_index) {
+  Request request;
+  auto *unregister = request.mutable_unregister_client_buffer();
+  unregister->set_channel_name(channel_name);
+  unregister->set_session_id(session_id);
+  unregister->set_buffer_index(buffer_index);
+  absl::StatusOr<RpcResult> result =
+      WaitForControl(std::move(request), {}, false);
+  return result.status();
+}
+
+AsioPublisher::AsioPublisher(
+    std::shared_ptr<AsioClient> client,
+    std::shared_ptr<details::PublisherImpl> impl,
+    std::shared_ptr<boost::asio::posix::stream_descriptor> poll_descriptor)
+    : client_(std::move(client)), impl_(std::move(impl)),
+      poll_descriptor_(std::move(poll_descriptor)) {}
+
+AsioPublisher &AsioPublisher::operator=(AsioPublisher &&other) noexcept {
+  if (this == &other) {
+    return *this;
+  }
+  if (impl_ != nullptr) {
+    client_->RemovePublisher(std::move(impl_));
+  }
+  client_ = std::move(other.client_);
+  impl_ = std::move(other.impl_);
+  poll_descriptor_ = std::move(other.poll_descriptor_);
+  return *this;
+}
 
 AsioPublisher::~AsioPublisher() {
   if (impl_ != nullptr) {
     client_->RemovePublisher(std::move(impl_));
   }
-}
-
-absl::StatusOr<absl::Span<std::byte>>
-AsioPublisher::GetMessageBuffer(SlotSizeType max_size) {
-  return client_->GetMessageBuffer(impl_.get(), max_size);
-}
-
-absl::StatusOr<Message> AsioPublisher::PublishMessage(int64_t message_size) {
-  return client_->PublishMessage(impl_.get(), message_size);
 }
 
 bool AsioPublisher::IsReliable() const { return impl_->IsReliable(); }
@@ -835,14 +1425,15 @@ struct pollfd AsioPublisher::GetPollFd() const {
   return fd;
 }
 
-AsioSubscriber::AsioSubscriber(std::shared_ptr<AsioClient> client,
-                               std::shared_ptr<details::SubscriberImpl> impl)
+AsioSubscriber::AsioSubscriber(
+    std::shared_ptr<AsioClient> client,
+    std::shared_ptr<details::SubscriberImpl> impl,
+    std::shared_ptr<boost::asio::posix::stream_descriptor> event_fd)
     : client_(std::move(client)), impl_(std::move(impl)),
-      event_fd_(client_->GetExecutor(), ::dup(impl_->GetPollFd().Fd())) {}
+      strand_(client_->GetExecutor()), event_fd_(std::move(event_fd)) {}
 
 AsioSubscriber::~AsioSubscriber() {
-  boost::system::error_code ignored;
-  event_fd_.cancel(ignored);
+  Shutdown();
   if (impl_ != nullptr) {
     client_->RemoveSubscriber(std::move(impl_));
   }
@@ -852,50 +1443,75 @@ void AsioSubscriber::Start(std::function<void(Message &&)> on_message) {
   if (running_.exchange(true)) {
     return;
   }
-  on_message_ = std::move(on_message);
-  Drain();
+  auto self = shared_from_this();
+  boost::asio::post(strand_,
+                    [self, on_message = std::move(on_message)]() mutable {
+                      if (!self->running_) {
+                        return;
+                      }
+                      self->on_message_ = std::move(on_message);
+                      self->Drain();
+                    });
 }
 
 void AsioSubscriber::Shutdown() {
   running_ = false;
-  boost::system::error_code ignored;
-  event_fd_.cancel(ignored);
+  auto event_fd = event_fd_;
+  boost::asio::post(strand_, [event_fd = std::move(event_fd)] {
+    boost::system::error_code ignored;
+    event_fd->cancel(ignored);
+  });
 }
 
-void AsioSubscriber::ResetEventFd() {
+absl::Status AsioSubscriber::ResetEventFd() {
+  const int fd = ::dup(impl_->GetPollFd().Fd());
+  if (fd < 0) {
+    return absl::InternalError(
+        absl::StrFormat("dup subscriber poll fd: %s", std::strerror(errno)));
+  }
   boost::system::error_code ignored;
-  event_fd_.cancel(ignored);
-  event_fd_.close(ignored);
-  event_fd_.assign(::dup(impl_->GetPollFd().Fd()), ignored);
+  event_fd_->cancel(ignored);
+  event_fd_->close(ignored);
+  event_fd_->assign(fd, ignored);
+  if (ignored) {
+    ::close(fd);
+    return IoError("assign subscriber poll fd", ignored);
+  }
+  return absl::OkStatus();
 }
 
 void AsioSubscriber::WaitForNotification() {
-  auto self = shared_from_this();
-  event_fd_.async_wait(boost::asio::posix::stream_descriptor::wait_read,
-                       [self](const boost::system::error_code &error) {
-                         if (!error && self->running_) {
-                           self->Drain();
-                         }
-                       });
+  std::weak_ptr<AsioSubscriber> weak = weak_from_this();
+  event_fd_->async_wait(
+      boost::asio::posix::stream_descriptor::wait_read,
+      boost::asio::bind_executor(
+          strand_, [weak](const boost::system::error_code &error) {
+            if (auto self = weak.lock();
+                self != nullptr && !error && self->running_) {
+              self->Drain();
+            }
+          }));
 }
 
 void AsioSubscriber::Drain() {
   if (!running_) {
     return;
   }
-  AsyncReadMessage(ReadMode::kReadNext,
-                   [self = shared_from_this()](absl::StatusOr<Message> result) {
-                     if (!result.ok()) {
-                       self->Shutdown();
-                       return;
-                     }
-                     if (result->buffer == nullptr) {
-                       self->WaitForNotification();
-                       return;
-                     }
-                     self->on_message_(std::move(result).value());
-                     self->Drain();
-                   });
+  AsyncReadMessage(
+      ReadMode::kReadNext,
+      boost::asio::bind_executor(
+          strand_, [self = shared_from_this()](absl::StatusOr<Message> result) {
+            if (!result.ok()) {
+              self->Shutdown();
+              return;
+            }
+            if (result->buffer == nullptr) {
+              self->WaitForNotification();
+              return;
+            }
+            self->on_message_(std::move(result).value());
+            self->Drain();
+          }));
 }
 
 std::string AsioSubscriber::Name() const { return impl_->RequestName(); }
