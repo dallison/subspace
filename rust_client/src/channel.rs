@@ -163,11 +163,11 @@ pub fn build_refs_bit_field(ordinal: u64, vchan_id: i32, retired_refs: i32) -> u
         | ((retired_refs as u64 & RETIRED_REFS_MASK) << RETIRED_REFS_SHIFT)
 }
 
-pub fn aligned<const ALIGNMENT: i64>(v: i64) -> i64 {
+pub const fn aligned<const ALIGNMENT: i64>(v: i64) -> i64 {
     (v + (ALIGNMENT - 1)) & !(ALIGNMENT - 1)
 }
 
-pub fn aligned64(v: i64) -> i64 {
+pub const fn aligned64(v: i64) -> i64 {
     aligned::<64>(v)
 }
 
@@ -229,7 +229,6 @@ pub struct MessageSlot {
     pub flags: AtomicU32,
     pub bridged_slot_id: AtomicI32,
 }
-const _: () = assert!(std::mem::size_of::<MessageSlot>() == 184);
 const _: () = assert!(std::mem::offset_of!(MessageSlot, refs) == 0);
 const _: () = assert!(std::mem::offset_of!(MessageSlot, ordinal) == 8);
 const _: () = assert!(std::mem::offset_of!(MessageSlot, message_size) == 16);
@@ -242,8 +241,20 @@ const _: () = assert!(
         == std::mem::offset_of!(MessageSlot, sub_owners)
             + std::mem::size_of::<AtomicBitSet<SLOT_OWNER_WORDS>>()
 );
-const _: () = assert!(std::mem::offset_of!(MessageSlot, flags) == 176);
-const _: () = assert!(std::mem::offset_of!(MessageSlot, bridged_slot_id) == 180);
+const _: () = assert!(
+    std::mem::offset_of!(MessageSlot, flags)
+        == std::mem::offset_of!(MessageSlot, timestamp) + std::mem::size_of::<AtomicU64>()
+);
+const _: () = assert!(
+    std::mem::offset_of!(MessageSlot, bridged_slot_id)
+        == std::mem::offset_of!(MessageSlot, flags) + std::mem::size_of::<AtomicU32>()
+);
+const _: () = assert!(
+    std::mem::size_of::<MessageSlot>()
+        == std::mem::offset_of!(MessageSlot, bridged_slot_id) + std::mem::size_of::<AtomicI32>()
+);
+// The default owner count keeps the historical shared-memory layout.
+const _: () = assert!(MAX_SLOT_OWNERS != 1024 || std::mem::size_of::<MessageSlot>() == 184);
 
 impl MessageSlot {
     pub fn ordinal(&self) -> u64 {
@@ -728,10 +739,24 @@ pub struct AvailableSlotQueueIndex {
     pub offsets: [AtomicU64; MAX_SLOT_OWNERS],
     pub active_publishers: [AtomicU32; MAX_SLOT_OWNERS],
 }
-const _: () = assert!(std::mem::size_of::<AvailableSlotQueueIndex>() == 12296);
 const _: () = assert!(std::mem::offset_of!(AvailableSlotQueueIndex, offsets) == 8);
-const _: () =
-    assert!(std::mem::offset_of!(AvailableSlotQueueIndex, active_publishers) == 8200);
+const _: () = assert!(
+    std::mem::offset_of!(AvailableSlotQueueIndex, active_publishers)
+        == std::mem::offset_of!(AvailableSlotQueueIndex, offsets)
+            + std::mem::size_of::<AtomicU64>() * MAX_SLOT_OWNERS
+);
+const _: () = assert!(
+    std::mem::size_of::<AvailableSlotQueueIndex>()
+        == aligned::<8>(
+            (std::mem::offset_of!(AvailableSlotQueueIndex, active_publishers)
+                + std::mem::size_of::<AtomicU32>() * MAX_SLOT_OWNERS) as i64,
+        ) as usize
+);
+const _: () = assert!(
+    MAX_SLOT_OWNERS != 1024
+        || (std::mem::offset_of!(AvailableSlotQueueIndex, active_publishers) == 8200
+            && std::mem::size_of::<AvailableSlotQueueIndex>() == 12296)
+);
 
 fn available_slot_queue_index_size() -> usize {
     aligned64(std::mem::size_of::<AvailableSlotQueueIndex>() as i64) as usize
@@ -744,8 +769,16 @@ pub struct SlotQueueBlockHeader {
     pub reserved: u32,
     pub waiting_publishers: AtomicBitSet<SLOT_OWNER_WORDS>,
 }
-const _: () = assert!(std::mem::size_of::<SlotQueueBlockHeader>() == 192);
 const _: () = assert!(std::mem::offset_of!(SlotQueueBlockHeader, waiting_publishers) == 16);
+const _: () = assert!(
+    std::mem::size_of::<SlotQueueBlockHeader>()
+        == aligned64(
+            (std::mem::offset_of!(SlotQueueBlockHeader, waiting_publishers)
+                + std::mem::size_of::<AtomicBitSet<SLOT_OWNER_WORDS>>()) as i64,
+        ) as usize
+);
+const _: () =
+    assert!(MAX_SLOT_OWNERS != 1024 || std::mem::size_of::<SlotQueueBlockHeader>() == 192);
 
 pub fn resolve_subscriber_queue_size(num_slots: i32, subscriber_queue_size: i32) -> i32 {
     if num_slots <= 0 || subscriber_queue_size <= 0 {

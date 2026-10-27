@@ -1,6 +1,6 @@
 module(
     name = "subspace",
-    version = "3.2.9",
+    version = "3.2.10",
 )
 
 # Downstream modules raise build limits next to their bazel_dep.  See
