@@ -240,7 +240,7 @@ inline uint64_t BuildRefsBitField(uint64_t ordinal, int vchan_id,
 std::string DecodedRefsBitField(uint64_t refs);
 
 // Aligned to given power of 2.
-template <int64_t alignment = 64> int64_t Aligned(int64_t v) {
+template <int64_t alignment = 64> constexpr int64_t Aligned(int64_t v) {
   return (v + (alignment - 1)) & ~(alignment - 1);
 }
 
@@ -287,7 +287,6 @@ struct MessageSlot {
 
   void Dump(std::ostream &os) const;
 };
-static_assert(sizeof(MessageSlot) == 184);
 static_assert(offsetof(MessageSlot, refs) == 0);
 static_assert(offsetof(MessageSlot, ordinal) == 8);
 static_assert(offsetof(MessageSlot, message_size) == 16);
@@ -295,9 +294,17 @@ static_assert(offsetof(MessageSlot, id) == 24);
 static_assert(offsetof(MessageSlot, buffer_index) == 28);
 static_assert(offsetof(MessageSlot, vchan_id) == 30);
 static_assert(offsetof(MessageSlot, sub_owners) == 32);
-static_assert(offsetof(MessageSlot, timestamp) == 168);
-static_assert(offsetof(MessageSlot, flags) == 176);
-static_assert(offsetof(MessageSlot, bridged_slot_id) == 180);
+static_assert(offsetof(MessageSlot, timestamp) ==
+              offsetof(MessageSlot, sub_owners) +
+                  sizeof(AtomicBitSet<kMaxSlotOwners>));
+static_assert(offsetof(MessageSlot, flags) ==
+              offsetof(MessageSlot, timestamp) + sizeof(std::atomic<uint64_t>));
+static_assert(offsetof(MessageSlot, bridged_slot_id) ==
+              offsetof(MessageSlot, flags) + sizeof(std::atomic<uint32_t>));
+static_assert(sizeof(MessageSlot) == offsetof(MessageSlot, bridged_slot_id) +
+                                         sizeof(std::atomic<int32_t>));
+// The default owner count keeps the historical shared-memory layout.
+static_assert(kMaxSlotOwners != 1024 || sizeof(MessageSlot) == 184);
 
 struct ActiveSlot {
   MessageSlot *slot;
@@ -871,9 +878,19 @@ struct AvailableSlotQueueIndex {
   std::array<std::atomic<uint32_t>, kMaxSlotOwners> active_publishers;
 };
 static_assert(offsetof(AvailableSlotQueueIndex, next_offset) == 0);
-static_assert(offsetof(AvailableSlotQueueIndex, offsets) == 8);
-static_assert(offsetof(AvailableSlotQueueIndex, active_publishers) == 8200);
-static_assert(sizeof(AvailableSlotQueueIndex) == 12296);
+static_assert(offsetof(AvailableSlotQueueIndex, offsets) ==
+              sizeof(std::atomic<uint64_t>));
+static_assert(offsetof(AvailableSlotQueueIndex, active_publishers) ==
+              offsetof(AvailableSlotQueueIndex, offsets) +
+                  sizeof(std::atomic<uint64_t>) * kMaxSlotOwners);
+static_assert(sizeof(AvailableSlotQueueIndex) ==
+              static_cast<size_t>(Aligned<alignof(AvailableSlotQueueIndex)>(
+                  static_cast<int64_t>(
+                      offsetof(AvailableSlotQueueIndex, active_publishers) +
+                      sizeof(std::atomic<uint32_t>) * kMaxSlotOwners))));
+static_assert(kMaxSlotOwners != 1024 ||
+              (offsetof(AvailableSlotQueueIndex, active_publishers) == 8200 &&
+               sizeof(AvailableSlotQueueIndex) == 12296));
 
 inline size_t AvailableSlotsSize(int num_slots) {
   return SizeofAtomicBitSet(num_slots) * kMaxSlotOwners;
@@ -896,8 +913,12 @@ struct alignas(64) SlotQueueBlockHeader {
   uint32_t reserved = 0;
   AtomicBitSet<kMaxSlotOwners> waiting_publishers;
 };
-static_assert(sizeof(SlotQueueBlockHeader) == 192);
 static_assert(offsetof(SlotQueueBlockHeader, waiting_publishers) == 16);
+static_assert(sizeof(SlotQueueBlockHeader) ==
+              static_cast<size_t>(Aligned<64>(static_cast<int64_t>(
+                  offsetof(SlotQueueBlockHeader, waiting_publishers) +
+                  sizeof(AtomicBitSet<kMaxSlotOwners>)))));
+static_assert(kMaxSlotOwners != 1024 || sizeof(SlotQueueBlockHeader) == 192);
 
 inline size_t SlotQueueBlockHeaderSize() {
   return Aligned(sizeof(SlotQueueBlockHeader));

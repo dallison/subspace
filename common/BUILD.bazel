@@ -4,6 +4,7 @@ load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 load("//:max_channels.bzl", "max_channels_setting")
 load("//:max_buffers.bzl", "max_buffers_setting")
 load("//:max_slot_owners.bzl", "max_slot_owners_setting")
+load(":slot_owner_layout.bzl", "slot_owner_limit_test")
 
 max_channels_setting(
     name = "max_channels_setting",
@@ -82,4 +83,28 @@ cc_test(
         ":subspace_common",
         "@googletest//:gtest_main",
     ],
+)
+
+# Compiled only through :slot_owner_layout_256_test, which sets
+# --//:max_slot_owners=256. manual keeps //... from building this source at
+# the default count, where its 256-owner checks would not apply.
+cc_test(
+    name = "slot_owner_layout_256_test_impl",
+    size = "small",
+    srcs = ["slot_owner_layout_test.cc"],
+    tags = ["manual"],
+    deps = [
+        ":subspace_common",
+        "@googletest//:gtest_main",
+    ],
+    data = [
+        "//rust_client:subspace_client_rust",
+    ],
+)
+
+slot_owner_limit_test(
+    name = "slot_owner_layout_256_test",
+    size = "small",
+    slot_owners = "256",
+    target = ":slot_owner_layout_256_test_impl",
 )
