@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Late Subscribers Do Not Count Channel History As Drops
+- A subscriber created on a channel with history no longer reports that
+  history as dropped messages. A slot held by another subscriber is never
+  reused, so a new subscriber's first message could be far older than the
+  rest of the history, and the jump to the next message counted as drops.
+- At creation, a subscriber remembers the newest ordinal already published on
+  each virtual channel it reads. Ordinal gaps up to that point are history,
+  not drops. A virtual channel subscriber remembers only the multiplexer and
+  its own virtual channel. C++ and Rust behave the same.
+- Drop detection now also runs on a subscriber's first read, so messages lost
+  between creation and the first read are counted. A subscriber on a channel
+  with nothing published still starts counting at its first message.
+- `OrdinalAccumulator` has a read-only `PeekNext` (`peek_next` in Rust). The
+  shared-memory layout is unchanged.
+
 ### Per-Interval Statistics
 - On `/subspace/Statistics`, each channel's `total_messages`, `total_bytes`
   and `total_drops` now count the interval since the previous message

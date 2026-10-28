@@ -595,6 +595,11 @@ impl OrdinalAccumulator {
         let idx = (vchan_id + 1) as usize;
         self.ordinals[idx].fetch_add(1, Ordering::Relaxed)
     }
+
+    pub fn peek_next(&self, vchan_id: i32) -> u64 {
+        let idx = (vchan_id + 1) as usize;
+        self.ordinals[idx].load(Ordering::Relaxed)
+    }
 }
 
 // ── ActivationTracker ───────────────────────────────────────────────────────
