@@ -1506,6 +1506,7 @@ impl Client {
         )?;
 
         sub_impl.attach_buffers()?;
+        sub_impl.remember_published_ordinals();
 
         sub_impl.trigger_fd = fds[sub_resp.trigger_fd_index as usize];
         sub_impl.poll_fd = fds[sub_resp.poll_fd_index as usize];
@@ -1800,10 +1801,6 @@ fn read_message_internal(
     }
 
     let old_slot = sub.channel.slot;
-    let last_ordinal: i64 = match old_slot {
-        Some(si) => sub.channel.slot_ref(si).ordinal() as i64,
-        None => -1,
-    };
     let new_slot_idx = match mode {
         ReadMode::ReadNext => sub.next_slot(),
         ReadMode::ReadNewest => sub.last_slot(),
@@ -1910,7 +1907,7 @@ fn read_message_internal(
         // concurrent publisher reservations out of ordinal order without
         // losing a message. Only the ordered bitset/inherited-queue path can
         // treat an ordinal gap as a drop.
-        if last_ordinal != -1 && sub.options.subscriber_queue_size == 0 {
+        if sub.options.subscriber_queue_size == 0 {
             drops = drops.max(sub.detect_drops(vchan_id));
         }
         if drops > 0 {

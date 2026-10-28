@@ -1727,6 +1727,71 @@ fn integration_dropped_message_callback() {
     );
 }
 
+// A slot held by another subscriber is never reused, so a late subscriber's
+// first read can be far older than the rest of the history it reads next.
+// Only messages it misses after attaching are drops.
+#[test]
+fn integration_late_subscriber_counts_only_drops_after_attaching() {
+    const NUM_SLOTS: usize = 10;
+    let client = new_client("test_late_sub_drops");
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(NUM_SLOTS as i32);
+    let publisher = client.create_publisher("rust_late_sub", &pub_opts).unwrap();
+    let publish = |count: usize| {
+        for _ in 0..count {
+            let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
+            unsafe {
+                std::ptr::copy_nonoverlapping(b"foobar".as_ptr(), buf, 6);
+            }
+            publisher.publish_message(6).unwrap();
+        }
+    };
+    let sub_opts = SubscriberOptions::new().set_log_dropped_messages(false);
+
+    let holder = client.create_subscriber("rust_late_sub", &sub_opts).unwrap();
+    publish(1);
+    let held = holder.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(held.ordinal, 1);
+    publish(100);
+
+    let subscriber = client.create_subscriber("rust_late_sub", &sub_opts).unwrap();
+    let num_dropped = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
+    let dropped_clone = num_dropped.clone();
+    subscriber.register_dropped_message_callback(move |n| {
+        dropped_clone.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+    });
+    let read_ordinals = || {
+        let mut ordinals = Vec::new();
+        loop {
+            let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
+            if msg.length == 0 {
+                return ordinals;
+            }
+            ordinals.push(msg.ordinal);
+        }
+    };
+
+    let history = read_ordinals();
+    assert!(history.len() >= 2);
+    assert_eq!(history[0], 1);
+    assert!(history[1] > NUM_SLOTS as u64);
+    assert_eq!(num_dropped.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+    publish(3 * NUM_SLOTS);
+    let mut last_seen = *history.last().unwrap();
+    let mut expected_drops = 0i64;
+    for ordinal in read_ordinals() {
+        expected_drops += (ordinal - last_seen - 1) as i64;
+        last_seen = ordinal;
+    }
+    assert!(expected_drops > 0);
+    assert_eq!(
+        num_dropped.load(std::sync::atomic::Ordering::Relaxed),
+        expected_drops
+    );
+}
+
 // ── Stuck subscriber warning ─────────────────────────────────────────────────
 
 struct ErrorLogCapture {

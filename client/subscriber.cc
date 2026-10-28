@@ -4,6 +4,7 @@
 
 #include "client/subscriber.h"
 
+#include <algorithm>
 #include <limits>
 
 namespace subspace {
@@ -33,6 +34,7 @@ void SubscriberImpl::ResetDeliveryState() {
   newest_snapshot_.clear();
   embargoed_slots_.ClearAll();
   ordinal_trackers_.clear();
+  published_before_attach_.clear();
   (void)GetOrdinalTracker(vchan_id_);
   next_slot_cached_total_ = 0;
   next_slot_cursor_ = 0;
@@ -170,10 +172,14 @@ SubscriberImpl::GetOrdinalTracker(int vchan_id) {
 int SubscriberImpl::DetectDrops(int vchan_id) {
   auto &tracker = GetOrdinalTracker(vchan_id);
   const uint64_t ordinal = CurrentOrdinal();
-  if (ordinal == 0 || ordinal <= tracker.last_ordinal_seen) {
+  uint64_t last_seen = tracker.last_ordinal_seen;
+  if (auto it = published_before_attach_.find(vchan_id);
+      it != published_before_attach_.end()) {
+    last_seen = std::max(last_seen, it->second);
+  }
+  if (ordinal == 0 || ordinal <= last_seen) {
     return 0;
   }
-  const uint64_t last_seen = tracker.last_ordinal_seen;
   tracker.last_ordinal_seen = ordinal;
   if (last_seen == 0 || ordinal == last_seen + 1) {
     return 0;
@@ -187,6 +193,28 @@ void SubscriberImpl::RememberOrdinal(uint64_t ordinal, int vchan_id) {
     tracker.last_ordinal_seen = ordinal;
   }
   tracker.ordinals.Insert(OrdinalAndVchanId{ordinal, vchan_id});
+}
+
+// A slot held by another subscriber is never reused, so the first message a
+// new subscriber reads can be far older than the rest of the history.
+void SubscriberImpl::RememberPublishedOrdinals() {
+  if (ccb_ == nullptr) {
+    return;
+  }
+  auto remember_published = [this](int vchan_id) {
+    const uint64_t next_ordinal = ccb_->ordinals.PeekNext(vchan_id);
+    if (next_ordinal > 1) {
+      published_before_attach_[vchan_id] = next_ordinal - 1;
+    }
+  };
+  if (vchan_id_ != -1) {
+    remember_published(-1);
+    remember_published(vchan_id_);
+    return;
+  }
+  for (int vchan_id = -1; vchan_id < kMaxVchanId; vchan_id++) {
+    remember_published(vchan_id);
+  }
 }
 
 const ActiveSlot *SubscriberImpl::FindUnseenOrdinal() {
