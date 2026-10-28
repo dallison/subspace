@@ -325,7 +325,18 @@ message ChannelStatsProto {
 message Statistics {
   string server_id = 1;
   int64 timestamp = 2;
+  // total_bytes, total_messages and total_drops of each channel count the
+  // interval since the previous Statistics message, not the channel's
+  // lifetime.  A channel created during the interval only counts from its
+  // creation.  If the server fails to publish a message, the next message also
+  // counts that message's interval.
   repeated ChannelStatsProto channels = 3;
+  // Set by Server::SetMachineName.
+  string machine_name = 4;
+  // Goes up by one for each message a server publishes, starting from 0 when
+  // the server starts.  A gap means messages were lost after they were
+  // published, and with them the counts of their intervals.
+  uint64 sequence = 5;
 }
 
 message ChannelAddress {

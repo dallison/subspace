@@ -5496,6 +5496,212 @@ TEST_F(ClientTest, ChannelDirectory) {
   ASSERT_TRUE(found_chan2);
 }
 
+// Messages published before a test reads statistics show up within a couple of
+// intervals.  Reading more than this many means the counts are wrong, so the
+// test fails instead of waiting for counts that never arrive.
+constexpr int kMaxStatisticsIntervals = 5;
+
+// Reads /subspace/Statistics messages until one lists the channel and returns
+// that channel's entry.
+static absl::StatusOr<subspace::ChannelStatsProto>
+NextChannelStatistics(Subscriber &stats_sub, const std::string &channel_name) {
+  for (;;) {
+    if (absl::Status status = stats_sub.Wait(); !status.ok()) {
+      return status;
+    }
+    absl::StatusOr<subspace::Message> msg = stats_sub.ReadMessage();
+    if (!msg.ok()) {
+      return msg.status();
+    }
+    if (msg->length == 0) {
+      continue;
+    }
+    subspace::Statistics stats;
+    if (!stats.ParseFromArray(msg->buffer, msg->length)) {
+      return absl::InternalError("Failed to parse Statistics");
+    }
+    EXPECT_EQ(SubspaceTestBase::kMachineName, stats.machine_name());
+    for (const subspace::ChannelStatsProto &channel : stats.channels()) {
+      if (channel.channel_name() == channel_name) {
+        return channel;
+      }
+    }
+  }
+}
+
+static absl::Status PublishFoobar(Publisher &pub, int num_messages) {
+  for (int i = 0; i < num_messages; i++) {
+    absl::StatusOr<void *> buffer = pub.GetMessageBuffer();
+    if (!buffer.ok()) {
+      return buffer.status();
+    }
+    memcpy(*buffer, "foobar", 6);
+    if (absl::StatusOr<const Message> m = pub.PublishMessage(6); !m.ok()) {
+      return m.status();
+    }
+  }
+  return absl::OkStatus();
+}
+
+TEST_F(ClientTest, StatisticsCountPerInterval) {
+  auto client =
+      EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket(), "statistics-test"));
+
+  absl::StatusOr<Subscriber> stats_sub =
+      client->CreateSubscriber("/subspace/Statistics");
+  ASSERT_OK(stats_sub);
+
+  constexpr char kChannel[] = "/statistics/interval";
+  constexpr int kNumMessages = 5;
+  absl::StatusOr<Publisher> pub =
+      client->CreatePublisher(kChannel, PubOpts(256, 10));
+  ASSERT_OK(pub);
+  absl::StatusOr<Subscriber> sub = client->CreateSubscriber(kChannel);
+  ASSERT_OK(sub);
+  ASSERT_OK(PublishFoobar(*pub, kNumMessages));
+
+  // Each statistics message only counts its own interval, so add them up
+  // until every published message has been seen.
+  int64_t messages = 0;
+  int64_t bytes = 0;
+  uint64_t drops = 0;
+  for (int i = 0; i < kMaxStatisticsIntervals && messages < kNumMessages;
+       i++) {
+    absl::StatusOr<subspace::ChannelStatsProto> channel =
+        NextChannelStatistics(*stats_sub, kChannel);
+    ASSERT_OK(channel);
+    messages += channel->total_messages();
+    bytes += channel->total_bytes();
+    drops += channel->total_drops();
+  }
+  EXPECT_EQ(kNumMessages, messages);
+  EXPECT_EQ(kNumMessages * 6, bytes);
+  EXPECT_EQ(0u, drops);
+
+  absl::StatusOr<subspace::ChannelStatsProto> idle =
+      NextChannelStatistics(*stats_sub, kChannel);
+  ASSERT_OK(idle);
+  EXPECT_EQ(0, idle->total_messages());
+  EXPECT_EQ(0, idle->total_bytes());
+
+  absl::StatusOr<const subspace::ChannelStats> lifetime =
+      client->GetChannelStats(kChannel);
+  ASSERT_OK(lifetime);
+  EXPECT_EQ(uint64_t(kNumMessages), lifetime->total_messages);
+  EXPECT_EQ(uint64_t(kNumMessages * 6), lifetime->total_bytes);
+}
+
+TEST_F(ClientTest, StatisticsCountRecreatedChannelFromCreation) {
+  auto client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "statistics-recreate-test"));
+
+  absl::StatusOr<Subscriber> stats_sub =
+      client->CreateSubscriber("/subspace/Statistics");
+  ASSERT_OK(stats_sub);
+
+  // The second channel publishes more than the first, so its lifetime totals
+  // grow past the first channel's and only a removal can reset the count.
+  constexpr char kChannel[] = "/statistics/recreated";
+  constexpr int kFirstMessages = 3;
+  constexpr int kSecondMessages = 7;
+  {
+    absl::StatusOr<Publisher> pub =
+        client->CreatePublisher(kChannel, PubOpts(256, 10));
+    ASSERT_OK(pub);
+    absl::StatusOr<Subscriber> sub = client->CreateSubscriber(kChannel);
+    ASSERT_OK(sub);
+    ASSERT_OK(PublishFoobar(*pub, kFirstMessages));
+    int64_t messages = 0;
+    for (int i = 0; i < kMaxStatisticsIntervals && messages < kFirstMessages;
+         i++) {
+      absl::StatusOr<subspace::ChannelStatsProto> channel =
+          NextChannelStatistics(*stats_sub, kChannel);
+      ASSERT_OK(channel);
+      messages += channel->total_messages();
+    }
+    ASSERT_EQ(kFirstMessages, messages);
+  }
+
+  absl::StatusOr<Publisher> pub =
+      client->CreatePublisher(kChannel, PubOpts(256, 10));
+  ASSERT_OK(pub);
+  absl::StatusOr<Subscriber> sub = client->CreateSubscriber(kChannel);
+  ASSERT_OK(sub);
+  ASSERT_OK(PublishFoobar(*pub, kSecondMessages));
+  int64_t messages = 0;
+  int64_t bytes = 0;
+  for (int i = 0; i < kMaxStatisticsIntervals && messages < kSecondMessages;
+       i++) {
+    absl::StatusOr<subspace::ChannelStatsProto> channel =
+        NextChannelStatistics(*stats_sub, kChannel);
+    ASSERT_OK(channel);
+    messages += channel->total_messages();
+    bytes += channel->total_bytes();
+  }
+  EXPECT_EQ(kSecondMessages, messages);
+  EXPECT_EQ(kSecondMessages * 6, bytes);
+}
+
+TEST_F(ClientTest, StatisticsCountNewVirtualChannelFromCreation) {
+  auto client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "statistics-virtual-test"));
+
+  absl::StatusOr<Subscriber> stats_sub =
+      client->CreateSubscriber("/subspace/Statistics");
+  ASSERT_OK(stats_sub);
+
+  constexpr char kMux[] = "/statistics/mux";
+  constexpr char kFirstChannel[] = "/statistics/virtual_a";
+  constexpr char kNewChannel[] = "/statistics/virtual_b";
+  constexpr int kNumMessages = 3;
+  absl::StatusOr<Publisher> first_pub =
+      client->CreatePublisher(kFirstChannel, 256, 10, PubOpts().SetMux(kMux));
+  ASSERT_OK(first_pub);
+  ASSERT_OK(PublishFoobar(*first_pub, kNumMessages));
+  int64_t messages = 0;
+  for (int i = 0; i < kMaxStatisticsIntervals && messages < kNumMessages;
+       i++) {
+    absl::StatusOr<subspace::ChannelStatsProto> channel =
+        NextChannelStatistics(*stats_sub, kFirstChannel);
+    ASSERT_OK(channel);
+    messages += channel->total_messages();
+  }
+  ASSERT_EQ(kNumMessages, messages);
+
+  absl::StatusOr<Publisher> new_pub =
+      client->CreatePublisher(kNewChannel, 256, 10, PubOpts().SetMux(kMux));
+  ASSERT_OK(new_pub);
+  absl::StatusOr<subspace::ChannelStatsProto> new_channel =
+      NextChannelStatistics(*stats_sub, kNewChannel);
+  ASSERT_OK(new_channel);
+  EXPECT_EQ(0, new_channel->total_messages());
+  EXPECT_EQ(0, new_channel->total_bytes());
+  EXPECT_EQ(0u, new_channel->total_drops());
+}
+
+TEST_F(ClientTest, StatisticsSequenceCountsPublishedMessages) {
+  auto client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "statistics-sequence-test"));
+
+  absl::StatusOr<Subscriber> stats_sub =
+      client->CreateSubscriber("/subspace/Statistics");
+  ASSERT_OK(stats_sub);
+
+  std::vector<uint64_t> sequences;
+  while (sequences.size() < 2) {
+    ASSERT_OK(stats_sub->Wait());
+    absl::StatusOr<subspace::Message> msg = stats_sub->ReadMessage();
+    ASSERT_OK(msg);
+    if (msg->length == 0) {
+      continue;
+    }
+    subspace::Statistics stats;
+    ASSERT_TRUE(stats.ParseFromArray(msg->buffer, msg->length));
+    sequences.push_back(stats.sequence());
+  }
+  EXPECT_EQ(sequences[0] + 1, sequences[1]);
+}
+
 TEST_F(ClientTest, TelemetryRequiresExistingChannel) {
   auto client =
       EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket(), "telemetry-watch"));

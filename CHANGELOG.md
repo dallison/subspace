@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Per-Interval Statistics
+- On `/subspace/Statistics`, each channel's `total_messages`, `total_bytes`
+  and `total_drops` now count the interval since the previous message
+  instead of the channel's lifetime. `GetChannelStats` still returns
+  lifetime totals.
+- A channel removed and created again under the same name counts from its
+  creation. A new virtual channel counts from its creation, not from the
+  creation of its multiplexer. If a `Statistics` message fails to publish,
+  the next message also counts its interval.
+- `Statistics` carries the server's `machine_name`, set with
+  `Server::SetMachineName`, and a `sequence` that goes up by one per
+  published message. A gap in `sequence` means lost intervals.
+
 ### Checksum Covers Only Publisher Flags
 - The message checksum now covers only the `kMessageActivate` and
   `kMessageHasChecksum` bits of the prefix `flags`

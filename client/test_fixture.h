@@ -151,6 +151,8 @@ std::string StatusToString(const absl::Status &status) {
 // automatically get server lifecycle management.
 class SubspaceTestBase : public ::testing::Test {
 public:
+  static constexpr char kMachineName[] = "subspace-test-machine";
+
   static void SetUpTestSuite() {
     printf("Starting Subspace server\n");
 #if defined(__ANDROID__)
@@ -167,6 +169,7 @@ public:
         engine_, socket_, "", 0, 0,
         /*local=*/true, server_pipe_[1], /*initial_ordinal=*/1,
         /*wait_for_clients=*/true);
+    server_->SetMachineName(kMachineName);
 
     server_thread_ = std::thread([]() {
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
