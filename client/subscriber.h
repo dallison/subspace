@@ -12,6 +12,9 @@
 #include <utility>
 
 namespace subspace {
+class AsioClient;
+class AsioClientState;
+class AsioSubscriber;
 namespace details {
 
 struct OrdinalAndVchanId {
@@ -94,10 +97,9 @@ public:
   }
   int64_t Timestamp() const { return Timestamp(CurrentSlot()); }
   int64_t Timestamp(MessageSlot *slot) const {
-    return slot == nullptr
-               ? 0
-               : static_cast<int64_t>(
-                     slot->timestamp.load(std::memory_order_relaxed));
+    return slot == nullptr ? 0
+                           : static_cast<int64_t>(slot->timestamp.load(
+                                 std::memory_order_relaxed));
   }
   bool IsReliable() const { return options_.IsReliable(); }
   int SubscriberQueueSize() const override { return subscriber_queue_size_; }
@@ -236,9 +238,7 @@ public:
   }
 
   int DetectDrops(int vchan_id);
-  int ConsumeQueueDrops() {
-    return std::exchange(pending_queue_drops_, 0);
-  }
+  int ConsumeQueueDrops() { return std::exchange(pending_queue_drops_, 0); }
 
   // Search the active list for a message with the given timestamp.  If found,
   // take ownership of the slot found.  Return nullptr if nothing found in which
@@ -296,7 +296,8 @@ public:
     if (checksum_callback_ != nullptr) {
       absl::Span<std::byte> tmp_span(checksum_tmp_.data(), checksum.size());
       checksum_callback_(data, tmp_span);
-      return memcmp(checksum_tmp_.data(), checksum.data(), checksum.size()) == 0;
+      return memcmp(checksum_tmp_.data(), checksum.data(), checksum.size()) ==
+             0;
     }
     return VerifyCRC32Checksum(data, checksum);
   }
@@ -309,6 +310,9 @@ public:
 
 private:
   friend class ::subspace::ClientImpl;
+  friend class ::subspace::AsioClient;
+  friend class ::subspace::AsioClientState;
+  friend class ::subspace::AsioSubscriber;
 
   struct OrdinalTracker {
     FastRingBuffer<OrdinalAndVchanId, kMaxSlotOwners> ordinals;
@@ -323,9 +327,7 @@ private:
 
   bool IsSubscriber() const override { return true; }
   bool IsBridge() const override { return options_.IsBridge(); }
-  bool UseSplitBuffers() const override {
-    return options_.UseSplitBuffers();
-  }
+  bool UseSplitBuffers() const override { return options_.UseSplitBuffers(); }
   const SplitBufferCallbacks &SplitBuffersCallbacks() const override {
     return options_.SplitBufferCallbackSet();
   }

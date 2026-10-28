@@ -10,6 +10,9 @@
 #include <unordered_map>
 
 namespace subspace {
+class AsioClient;
+class AsioClientState;
+class AsioPublisher;
 class Publisher;
 namespace details {
 
@@ -18,16 +21,16 @@ namespace details {
 class PublisherImpl : public ClientChannel {
 public:
   PublisherImpl(const std::string &name, int num_slots,
-                int subscriber_queue_size,
-                uint64_t subscriber_queue_arena_size, int channel_id,
-                int publisher_id, int vchan_id, uint64_t session_id,
-                std::string type,
+                int subscriber_queue_size, uint64_t subscriber_queue_arena_size,
+                int channel_id, int publisher_id, int vchan_id,
+                uint64_t session_id, std::string type,
                 const PublisherOptions &options,
-                std::function<bool(Channel *)> reload, int user_id, int group_id)
+                std::function<bool(Channel *)> reload, int user_id,
+                int group_id)
       : ClientChannel(name, num_slots, subscriber_queue_size,
                       subscriber_queue_arena_size, channel_id, vchan_id,
-                      std::move(session_id), std::move(type),
-                      std::move(reload), user_id, group_id),
+                      std::move(session_id), std::move(type), std::move(reload),
+                      user_id, group_id),
         publisher_id_(publisher_id), options_(options) {}
   ~PublisherImpl() override { Unmap(); }
 
@@ -111,14 +114,15 @@ public:
 
 private:
   friend class ::subspace::ClientImpl;
+  friend class ::subspace::AsioClient;
+  friend class ::subspace::AsioClientState;
+  friend class ::subspace::AsioPublisher;
   friend class ::subspace::Publisher;
 
   bool IsPublisher() const override { return true; }
   bool IsBridge() const override { return options_.IsBridge(); }
   BufferMapMode MapMode() const override { return BufferMapMode::kReadWrite; }
-  bool UseSplitBuffers() const override {
-    return options_.UseSplitBuffers();
-  }
+  bool UseSplitBuffers() const override { return options_.UseSplitBuffers(); }
   const SplitBufferCallbacks &SplitBuffersCallbacks() const override {
     return options_.SplitBufferCallbackSet();
   }
@@ -164,11 +168,9 @@ private:
                             bool use_prefix_slot_id, bool for_tunnel = false,
                             bool acquire_next = true);
 
-  Channel::PublishedMessage ActivateSlotAndGetAnother(bool reliable,
-                                                      bool is_activation,
-                                                      bool omit_prefix,
-                                                      bool use_prefix_slot_id,
-                                                      bool for_tunnel = false) {
+  Channel::PublishedMessage
+  ActivateSlotAndGetAnother(bool reliable, bool is_activation, bool omit_prefix,
+                            bool use_prefix_slot_id, bool for_tunnel = false) {
     return ActivateSlotAndGetAnother(slot_, reliable, is_activation,
                                      publisher_id_, omit_prefix,
                                      use_prefix_slot_id, for_tunnel);
@@ -208,7 +210,6 @@ private:
   ChecksumCallback checksum_callback_ = nullptr;
   std::unordered_map<int32_t, uint64_t> leased_slots_;
   uint64_t next_lease_id_ = 1;
-
 };
 
 } // namespace details

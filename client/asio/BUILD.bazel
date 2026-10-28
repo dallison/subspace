@@ -1,0 +1,38 @@
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "asio_client",
+    srcs = ["asio_client.cc"],
+    hdrs = [
+        "asio_client.h",
+        "asio_publisher.h",
+        "asio_subscriber.h",
+    ],
+    deps = [
+        "//client:subspace_client_core",
+        "//common:subspace_common",
+        "//proto:subspace_cc_proto",
+        "@abseil-cpp//absl/cleanup",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+        "@boost.asio//:boost.asio",
+        "@cpp_toolbelt//toolbelt",
+    ],
+)
+
+cc_test(
+    name = "asio_client_test",
+    srcs = ["asio_client_test.cc"],
+    deps = [
+        ":asio_client",
+        "//client:test_fixture",
+        "@abseil-cpp//absl/status:statusor",
+        "@boost.asio//:boost.asio",
+        "@googletest//:gtest_main",
+    ],
+)

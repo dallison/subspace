@@ -49,3 +49,25 @@ cc_library_static {
     export_shared_lib_headers: ["libprotobuf-cpp-full"],
     rtti: false,
 }
+
+cc_library_static {
+    name: "libsubspace_asio_client",
+    defaults: ["subspace_defaults"],
+    srcs: ["client/asio/asio_client.cc"],
+    export_include_dirs: ["."],
+    include_dirs: [
+        "external/boost",
+        "external/subspace",
+    ],
+    static_libs: [
+        "libsubspace_client_core",
+        "libsubspace_common",
+        "libsubspace_proto",
+        "libcpp_toolbelt",
+        "libabsl",
+    ],
+    shared_libs: [
+        "libprotobuf-cpp-full",
+        "liblog",
+    ],
+}
