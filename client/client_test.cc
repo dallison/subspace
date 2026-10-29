@@ -4443,6 +4443,290 @@ TEST_F(ClientTest, DroppedMessageDetectionCanBeDisabled) {
   ASSERT_EQ(0u, total_drops);
 }
 
+struct ReadOrdinal {
+  uint64_t ordinal;
+  int vchan_id;
+};
+
+subspace::SubscriberOptions QuietSubOpts() {
+  subspace::SubscriberOptions options;
+  options.SetLogDroppedMessages(false);
+  return options;
+}
+
+void PublishMessages(Publisher &pub, int count) {
+  for (int i = 0; i < count; i++) {
+    absl::StatusOr<void *> buffer = pub.GetMessageBuffer();
+    ASSERT_OK(buffer);
+    ASSERT_NE(nullptr, *buffer);
+    memcpy(*buffer, "foobar", 6);
+    ASSERT_OK(pub.PublishMessage(6));
+  }
+}
+
+std::vector<ReadOrdinal> ReadUntilEmpty(Subscriber &sub) {
+  std::vector<ReadOrdinal> read;
+  for (;;) {
+    absl::StatusOr<Message> msg = sub.ReadMessage();
+    EXPECT_TRUE(msg.ok()) << msg.status();
+    if (!msg.ok() || msg->length == 0) {
+      return read;
+    }
+    read.push_back({msg->ordinal, msg->vchan_id});
+  }
+}
+
+std::vector<uint64_t> OrdinalsOf(const std::vector<ReadOrdinal> &read,
+                                 int vchan_id) {
+  std::vector<uint64_t> ordinals;
+  for (const ReadOrdinal &r : read) {
+    if (r.vchan_id == vchan_id) {
+      ordinals.push_back(r.ordinal);
+    }
+  }
+  return ordinals;
+}
+
+// Messages skipped after last_seen when the given ordinals are read in order.
+int64_t CountGaps(uint64_t last_seen, const std::vector<uint64_t> &ordinals) {
+  int64_t gaps = 0;
+  for (uint64_t ordinal : ordinals) {
+    gaps += static_cast<int64_t>(ordinal - last_seen - 1);
+    last_seen = ordinal;
+  }
+  return gaps;
+}
+
+void CountDroppedMessages(Subscriber &sub, int64_t &num_dropped_messages) {
+  ASSERT_OK(sub.RegisterDroppedMessageCallback(
+      [&num_dropped_messages](Subscriber *, int64_t num_dropped) {
+        num_dropped_messages += num_dropped;
+      }));
+}
+
+// A slot held by another subscriber is never reused, so a late subscriber's
+// first read can be far older than the rest of the history it reads next.
+// Only messages it misses after attaching are drops.
+TEST_F(ClientTest, LateSubscriberCountsOnlyDropsAfterAttaching) {
+  constexpr int kNumSlots = 10;
+
+  subspace::Client client;
+  InitClient(client);
+  absl::StatusOr<Publisher> pub =
+      client.CreatePublisher("late_sub", 32, kNumSlots);
+  ASSERT_OK(pub);
+  absl::StatusOr<Subscriber> holder =
+      client.CreateSubscriber("late_sub", QuietSubOpts());
+  ASSERT_OK(holder);
+  PublishMessages(*pub, 1);
+  absl::StatusOr<Message> held = holder->ReadMessage();
+  ASSERT_OK(held);
+  ASSERT_EQ(1u, held->ordinal);
+  PublishMessages(*pub, 100);
+
+  absl::StatusOr<Subscriber> sub =
+      client.CreateSubscriber("late_sub", QuietSubOpts());
+  ASSERT_OK(sub);
+  int64_t num_dropped_messages = 0;
+  CountDroppedMessages(*sub, num_dropped_messages);
+
+  std::vector<uint64_t> history = OrdinalsOf(ReadUntilEmpty(*sub), -1);
+  ASSERT_GE(history.size(), 2u);
+  ASSERT_EQ(1u, history.front());
+  ASSERT_GT(history[1], uint64_t{kNumSlots});
+  EXPECT_EQ(0, num_dropped_messages);
+
+  PublishMessages(*pub, 3 * kNumSlots);
+  const int64_t expected_drops =
+      CountGaps(history.back(), OrdinalsOf(ReadUntilEmpty(*sub), -1));
+  ASSERT_GT(expected_drops, 0);
+  EXPECT_EQ(expected_drops, num_dropped_messages);
+}
+
+// Messages published after a subscriber attaches are its to read, even before
+// its first read, so losing them is a drop.
+TEST_F(ClientTest, SubscriberCountsDropsBeforeItsFirstRead) {
+  constexpr int kNumSlots = 10;
+  constexpr uint64_t kHistory = 20;
+
+  subspace::Client client;
+  InitClient(client);
+  absl::StatusOr<Publisher> pub =
+      client.CreatePublisher("drop_before_first_read", 32, kNumSlots);
+  ASSERT_OK(pub);
+  PublishMessages(*pub, kHistory);
+  absl::StatusOr<Subscriber> sub =
+      client.CreateSubscriber("drop_before_first_read", QuietSubOpts());
+  ASSERT_OK(sub);
+  int64_t num_dropped_messages = 0;
+  CountDroppedMessages(*sub, num_dropped_messages);
+
+  PublishMessages(*pub, 3 * kNumSlots);
+  std::vector<uint64_t> ordinals = OrdinalsOf(ReadUntilEmpty(*sub), -1);
+  ASSERT_FALSE(ordinals.empty());
+  ASSERT_GT(ordinals.front(), kHistory + 1);
+  EXPECT_EQ(CountGaps(kHistory, ordinals), num_dropped_messages);
+}
+
+// A subscriber on a channel with nothing published has no starting point, so
+// the first message it reads becomes one.  Only gaps after it are drops.
+TEST_F(ClientTest, SubscriberOnEmptyChannelStartsCountingAtItsFirstRead) {
+  constexpr int kNumSlots = 10;
+
+  subspace::Client client;
+  InitClient(client);
+  absl::StatusOr<Publisher> pub =
+      client.CreatePublisher("drop_on_empty_channel", 32, kNumSlots);
+  ASSERT_OK(pub);
+  absl::StatusOr<Subscriber> sub =
+      client.CreateSubscriber("drop_on_empty_channel", QuietSubOpts());
+  ASSERT_OK(sub);
+  int64_t num_dropped_messages = 0;
+  CountDroppedMessages(*sub, num_dropped_messages);
+
+  PublishMessages(*pub, 3 * kNumSlots);
+  std::vector<uint64_t> history = OrdinalsOf(ReadUntilEmpty(*sub), -1);
+  ASSERT_FALSE(history.empty());
+  ASSERT_GT(history.front(), 1u);
+  EXPECT_EQ(0, num_dropped_messages);
+
+  PublishMessages(*pub, 3 * kNumSlots);
+  const int64_t expected_drops =
+      CountGaps(history.back(), OrdinalsOf(ReadUntilEmpty(*sub), -1));
+  ASSERT_GT(expected_drops, 0);
+  EXPECT_EQ(expected_drops, num_dropped_messages);
+}
+
+// A placeholder subscriber attaches before the channel's first publisher, so
+// its first message is not a gap.
+TEST_F(ClientTest, PlaceholderSubscriberStartsAtFirstMessage) {
+  subspace::Client client;
+  InitClient(client);
+  absl::StatusOr<Subscriber> sub =
+      client.CreateSubscriber("placeholder_sub", QuietSubOpts());
+  ASSERT_OK(sub);
+  ASSERT_TRUE(sub->IsPlaceholder());
+  int64_t num_dropped_messages = 0;
+  CountDroppedMessages(*sub, num_dropped_messages);
+  absl::StatusOr<Publisher> pub =
+      client.CreatePublisher("placeholder_sub", 32, 10);
+  ASSERT_OK(pub);
+
+  PublishMessages(*pub, 5);
+  std::vector<uint64_t> ordinals = OrdinalsOf(ReadUntilEmpty(*sub), -1);
+  EXPECT_FALSE(sub->IsPlaceholder());
+  EXPECT_EQ((std::vector<uint64_t>{1, 2, 3, 4, 5}), ordinals);
+  EXPECT_EQ(0, num_dropped_messages);
+}
+
+// A virtual channel subscriber reads only its own virtual channel, so history
+// held back on it is not a gap, and its siblings' traffic is never counted.
+TEST_F(ClientTest, LateVirtualSubscriberCountsOnlyDropsAfterAttaching) {
+  constexpr int kNumSlots = 10;
+  constexpr char kMux[] = "late_vchan_mux";
+
+  subspace::Client client;
+  InitClient(client);
+  absl::StatusOr<Publisher> pub_a = client.CreatePublisher(
+      "late_vchan_a", 32, kNumSlots, PubOpts().SetMux(kMux));
+  ASSERT_OK(pub_a);
+  absl::StatusOr<Publisher> pub_b = client.CreatePublisher(
+      "late_vchan_b", 32, kNumSlots, PubOpts().SetMux(kMux));
+  ASSERT_OK(pub_b);
+  absl::StatusOr<Subscriber> holder =
+      client.CreateSubscriber("late_vchan_a", QuietSubOpts().SetMux(kMux));
+  ASSERT_OK(holder);
+  PublishMessages(*pub_a, 1);
+  absl::StatusOr<Message> held = holder->ReadMessage();
+  ASSERT_OK(held);
+  ASSERT_EQ(1u, held->ordinal);
+  const int vchan_a = held->vchan_id;
+  PublishMessages(*pub_b, 50);
+  PublishMessages(*pub_a, 50);
+
+  absl::StatusOr<Subscriber> sub =
+      client.CreateSubscriber("late_vchan_a", QuietSubOpts().SetMux(kMux));
+  ASSERT_OK(sub);
+  int64_t num_dropped_messages = 0;
+  CountDroppedMessages(*sub, num_dropped_messages);
+
+  std::vector<ReadOrdinal> history_read = ReadUntilEmpty(*sub);
+  std::vector<uint64_t> history = OrdinalsOf(history_read, vchan_a);
+  ASSERT_EQ(history_read.size(), history.size());
+  ASSERT_GE(history.size(), 2u);
+  ASSERT_EQ(1u, history.front());
+  ASSERT_GT(history[1], uint64_t{kNumSlots});
+  EXPECT_EQ(0, num_dropped_messages);
+
+  PublishMessages(*pub_b, 3 * kNumSlots);
+  PublishMessages(*pub_a, 3 * kNumSlots);
+  const int64_t expected_drops =
+      CountGaps(history.back(), OrdinalsOf(ReadUntilEmpty(*sub), vchan_a));
+  ASSERT_GT(expected_drops, 0);
+  EXPECT_EQ(expected_drops, num_dropped_messages);
+}
+
+// A multiplexer subscriber reads every virtual channel and counts each
+// channel's gaps from what was published on it before attaching.
+TEST_F(ClientTest, LateMultiplexerSubscriberCountsOnlyDropsAfterAttaching) {
+  constexpr int kNumSlots = 10;
+  constexpr uint64_t kHistoryA = 51;
+  constexpr uint64_t kHistoryB = 50;
+  constexpr char kMux[] = "late_mux";
+
+  subspace::Client client;
+  InitClient(client);
+  absl::StatusOr<Publisher> pub_a = client.CreatePublisher(
+      "late_mux_a", 32, kNumSlots, PubOpts().SetMux(kMux));
+  ASSERT_OK(pub_a);
+  absl::StatusOr<Publisher> pub_b = client.CreatePublisher(
+      "late_mux_b", 32, kNumSlots, PubOpts().SetMux(kMux));
+  ASSERT_OK(pub_b);
+  absl::StatusOr<Subscriber> holder =
+      client.CreateSubscriber("late_mux_a", QuietSubOpts().SetMux(kMux));
+  ASSERT_OK(holder);
+  PublishMessages(*pub_a, 1);
+  absl::StatusOr<Message> held = holder->ReadMessage();
+  ASSERT_OK(held);
+  ASSERT_EQ(1u, held->ordinal);
+  const int vchan_a = held->vchan_id;
+  PublishMessages(*pub_a, kHistoryA - 1);
+  PublishMessages(*pub_b, kHistoryB);
+
+  absl::StatusOr<Subscriber> sub =
+      client.CreateSubscriber(kMux, QuietSubOpts());
+  ASSERT_OK(sub);
+  int64_t num_dropped_messages = 0;
+  CountDroppedMessages(*sub, num_dropped_messages);
+
+  std::vector<ReadOrdinal> history = ReadUntilEmpty(*sub);
+  ASSERT_GE(history.size(), 2u);
+  ASSERT_EQ(1u, history.front().ordinal);
+  EXPECT_EQ(0, num_dropped_messages);
+  std::optional<int> vchan_b;
+  for (const ReadOrdinal &r : history) {
+    if (r.vchan_id != vchan_a) {
+      vchan_b = r.vchan_id;
+    }
+  }
+  ASSERT_TRUE(vchan_b.has_value());
+
+  PublishMessages(*pub_a, 2 * kNumSlots);
+  PublishMessages(*pub_b, 2 * kNumSlots);
+  for (int i = 0; i < kNumSlots / 2; i++) {
+    PublishMessages(*pub_a, 1);
+    PublishMessages(*pub_b, 1);
+  }
+  std::vector<ReadOrdinal> after_attach = ReadUntilEmpty(*sub);
+  const int64_t drops_a =
+      CountGaps(kHistoryA, OrdinalsOf(after_attach, vchan_a));
+  const int64_t drops_b =
+      CountGaps(kHistoryB, OrdinalsOf(after_attach, *vchan_b));
+  ASSERT_GT(drops_a, 0);
+  ASSERT_GT(drops_b, 0);
+  EXPECT_EQ(drops_a + drops_b, num_dropped_messages);
+}
+
 TEST_F(ClientTest, PublishSingleMessageAndReadSharedPtr) {
   subspace::Client pub_client;
   subspace::Client sub_client;
@@ -5494,6 +5778,212 @@ TEST_F(ClientTest, ChannelDirectory) {
   }
   ASSERT_TRUE(found_chan1);
   ASSERT_TRUE(found_chan2);
+}
+
+// Messages published before a test reads statistics show up within a couple of
+// intervals.  Reading more than this many means the counts are wrong, so the
+// test fails instead of waiting for counts that never arrive.
+constexpr int kMaxStatisticsIntervals = 5;
+
+// Reads /subspace/Statistics messages until one lists the channel and returns
+// that channel's entry.
+static absl::StatusOr<subspace::ChannelStatsProto>
+NextChannelStatistics(Subscriber &stats_sub, const std::string &channel_name) {
+  for (;;) {
+    if (absl::Status status = stats_sub.Wait(); !status.ok()) {
+      return status;
+    }
+    absl::StatusOr<subspace::Message> msg = stats_sub.ReadMessage();
+    if (!msg.ok()) {
+      return msg.status();
+    }
+    if (msg->length == 0) {
+      continue;
+    }
+    subspace::Statistics stats;
+    if (!stats.ParseFromArray(msg->buffer, msg->length)) {
+      return absl::InternalError("Failed to parse Statistics");
+    }
+    EXPECT_EQ(SubspaceTestBase::kMachineName, stats.machine_name());
+    for (const subspace::ChannelStatsProto &channel : stats.channels()) {
+      if (channel.channel_name() == channel_name) {
+        return channel;
+      }
+    }
+  }
+}
+
+static absl::Status PublishFoobar(Publisher &pub, int num_messages) {
+  for (int i = 0; i < num_messages; i++) {
+    absl::StatusOr<void *> buffer = pub.GetMessageBuffer();
+    if (!buffer.ok()) {
+      return buffer.status();
+    }
+    memcpy(*buffer, "foobar", 6);
+    if (absl::StatusOr<const Message> m = pub.PublishMessage(6); !m.ok()) {
+      return m.status();
+    }
+  }
+  return absl::OkStatus();
+}
+
+TEST_F(ClientTest, StatisticsCountPerInterval) {
+  auto client =
+      EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket(), "statistics-test"));
+
+  absl::StatusOr<Subscriber> stats_sub =
+      client->CreateSubscriber("/subspace/Statistics");
+  ASSERT_OK(stats_sub);
+
+  constexpr char kChannel[] = "/statistics/interval";
+  constexpr int kNumMessages = 5;
+  absl::StatusOr<Publisher> pub =
+      client->CreatePublisher(kChannel, PubOpts(256, 10));
+  ASSERT_OK(pub);
+  absl::StatusOr<Subscriber> sub = client->CreateSubscriber(kChannel);
+  ASSERT_OK(sub);
+  ASSERT_OK(PublishFoobar(*pub, kNumMessages));
+
+  // Each statistics message only counts its own interval, so add them up
+  // until every published message has been seen.
+  int64_t messages = 0;
+  int64_t bytes = 0;
+  uint64_t drops = 0;
+  for (int i = 0; i < kMaxStatisticsIntervals && messages < kNumMessages;
+       i++) {
+    absl::StatusOr<subspace::ChannelStatsProto> channel =
+        NextChannelStatistics(*stats_sub, kChannel);
+    ASSERT_OK(channel);
+    messages += channel->total_messages();
+    bytes += channel->total_bytes();
+    drops += channel->total_drops();
+  }
+  EXPECT_EQ(kNumMessages, messages);
+  EXPECT_EQ(kNumMessages * 6, bytes);
+  EXPECT_EQ(0u, drops);
+
+  absl::StatusOr<subspace::ChannelStatsProto> idle =
+      NextChannelStatistics(*stats_sub, kChannel);
+  ASSERT_OK(idle);
+  EXPECT_EQ(0, idle->total_messages());
+  EXPECT_EQ(0, idle->total_bytes());
+
+  absl::StatusOr<const subspace::ChannelStats> lifetime =
+      client->GetChannelStats(kChannel);
+  ASSERT_OK(lifetime);
+  EXPECT_EQ(uint64_t(kNumMessages), lifetime->total_messages);
+  EXPECT_EQ(uint64_t(kNumMessages * 6), lifetime->total_bytes);
+}
+
+TEST_F(ClientTest, StatisticsCountRecreatedChannelFromCreation) {
+  auto client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "statistics-recreate-test"));
+
+  absl::StatusOr<Subscriber> stats_sub =
+      client->CreateSubscriber("/subspace/Statistics");
+  ASSERT_OK(stats_sub);
+
+  // The second channel publishes more than the first, so its lifetime totals
+  // grow past the first channel's and only a removal can reset the count.
+  constexpr char kChannel[] = "/statistics/recreated";
+  constexpr int kFirstMessages = 3;
+  constexpr int kSecondMessages = 7;
+  {
+    absl::StatusOr<Publisher> pub =
+        client->CreatePublisher(kChannel, PubOpts(256, 10));
+    ASSERT_OK(pub);
+    absl::StatusOr<Subscriber> sub = client->CreateSubscriber(kChannel);
+    ASSERT_OK(sub);
+    ASSERT_OK(PublishFoobar(*pub, kFirstMessages));
+    int64_t messages = 0;
+    for (int i = 0; i < kMaxStatisticsIntervals && messages < kFirstMessages;
+         i++) {
+      absl::StatusOr<subspace::ChannelStatsProto> channel =
+          NextChannelStatistics(*stats_sub, kChannel);
+      ASSERT_OK(channel);
+      messages += channel->total_messages();
+    }
+    ASSERT_EQ(kFirstMessages, messages);
+  }
+
+  absl::StatusOr<Publisher> pub =
+      client->CreatePublisher(kChannel, PubOpts(256, 10));
+  ASSERT_OK(pub);
+  absl::StatusOr<Subscriber> sub = client->CreateSubscriber(kChannel);
+  ASSERT_OK(sub);
+  ASSERT_OK(PublishFoobar(*pub, kSecondMessages));
+  int64_t messages = 0;
+  int64_t bytes = 0;
+  for (int i = 0; i < kMaxStatisticsIntervals && messages < kSecondMessages;
+       i++) {
+    absl::StatusOr<subspace::ChannelStatsProto> channel =
+        NextChannelStatistics(*stats_sub, kChannel);
+    ASSERT_OK(channel);
+    messages += channel->total_messages();
+    bytes += channel->total_bytes();
+  }
+  EXPECT_EQ(kSecondMessages, messages);
+  EXPECT_EQ(kSecondMessages * 6, bytes);
+}
+
+TEST_F(ClientTest, StatisticsCountNewVirtualChannelFromCreation) {
+  auto client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "statistics-virtual-test"));
+
+  absl::StatusOr<Subscriber> stats_sub =
+      client->CreateSubscriber("/subspace/Statistics");
+  ASSERT_OK(stats_sub);
+
+  constexpr char kMux[] = "/statistics/mux";
+  constexpr char kFirstChannel[] = "/statistics/virtual_a";
+  constexpr char kNewChannel[] = "/statistics/virtual_b";
+  constexpr int kNumMessages = 3;
+  absl::StatusOr<Publisher> first_pub =
+      client->CreatePublisher(kFirstChannel, 256, 10, PubOpts().SetMux(kMux));
+  ASSERT_OK(first_pub);
+  ASSERT_OK(PublishFoobar(*first_pub, kNumMessages));
+  int64_t messages = 0;
+  for (int i = 0; i < kMaxStatisticsIntervals && messages < kNumMessages;
+       i++) {
+    absl::StatusOr<subspace::ChannelStatsProto> channel =
+        NextChannelStatistics(*stats_sub, kFirstChannel);
+    ASSERT_OK(channel);
+    messages += channel->total_messages();
+  }
+  ASSERT_EQ(kNumMessages, messages);
+
+  absl::StatusOr<Publisher> new_pub =
+      client->CreatePublisher(kNewChannel, 256, 10, PubOpts().SetMux(kMux));
+  ASSERT_OK(new_pub);
+  absl::StatusOr<subspace::ChannelStatsProto> new_channel =
+      NextChannelStatistics(*stats_sub, kNewChannel);
+  ASSERT_OK(new_channel);
+  EXPECT_EQ(0, new_channel->total_messages());
+  EXPECT_EQ(0, new_channel->total_bytes());
+  EXPECT_EQ(0u, new_channel->total_drops());
+}
+
+TEST_F(ClientTest, StatisticsSequenceCountsPublishedMessages) {
+  auto client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "statistics-sequence-test"));
+
+  absl::StatusOr<Subscriber> stats_sub =
+      client->CreateSubscriber("/subspace/Statistics");
+  ASSERT_OK(stats_sub);
+
+  std::vector<uint64_t> sequences;
+  while (sequences.size() < 2) {
+    ASSERT_OK(stats_sub->Wait());
+    absl::StatusOr<subspace::Message> msg = stats_sub->ReadMessage();
+    ASSERT_OK(msg);
+    if (msg->length == 0) {
+      continue;
+    }
+    subspace::Statistics stats;
+    ASSERT_TRUE(stats.ParseFromArray(msg->buffer, msg->length));
+    sequences.push_back(stats.sequence());
+  }
+  EXPECT_EQ(sequences[0] + 1, sequences[1]);
 }
 
 TEST_F(ClientTest, TelemetryRequiresExistingChannel) {

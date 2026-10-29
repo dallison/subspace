@@ -1340,6 +1340,14 @@ Server::CreateChannel(const std::string &channel_name, int64_t slot_size,
                 channel_name.c_str(), num_slots, mux.c_str());
     // The channels_ map owns all the server channels.
     channels_.emplace(std::make_pair(channel_name, std::move(*vchan)));
+    // A virtual channel shares its multiplexer's counters, which already hold
+    // traffic from before the virtual channel existed.
+    ChannelStatsProto mux_stats;
+    channel->GetChannelStats(&mux_stats);
+    statistics_totals_[channel_name] = {
+        .bytes = uint64_t(mux_stats.total_bytes()),
+        .messages = uint64_t(mux_stats.total_messages()),
+        .drops = mux_stats.total_drops()};
     OnNewChannel(channel_name);
     ForEachShadow([channel](const std::unique_ptr<ShadowReplicator> &s) {
       s->SendCreateChannel(channel);
@@ -2138,6 +2146,7 @@ void Server::RemoveChannel(ServerChannel *channel) {
     }
   }
   OnRemoveChannel(channel->Name());
+  statistics_totals_.erase(channel->Name());
   ForEachShadow([channel](const std::unique_ptr<ShadowReplicator> &s) {
     s->SendRemoveChannel(channel->Name(), channel->GetChannelId());
   });
@@ -2281,18 +2290,53 @@ void Server::StatisticsCoroutine(async::Context ctx) {
     return;
   }
 
+  auto delivered_statistics_messages = [this]() -> uint64_t {
+    auto it = channels_.find("/subspace/Statistics");
+    if (it == channels_.end()) {
+      return 0;
+    }
+    ChannelStatsProto stats;
+    it->second->GetChannelStats(&stats);
+    return uint64_t(stats.total_messages());
+  };
+
   constexpr int kPeriodSecs = 2;
+  uint64_t sequence = 0;
   while (!shutting_down_) {
     async::Sleep(ctx, kPeriodSecs);
     Statistics stats;
     stats.set_timestamp(toolbelt::Now());
     stats.set_server_id(server_id_);
+    stats.set_machine_name(machine_name_);
+    stats.set_sequence(sequence);
+    absl::flat_hash_map<std::string, StatisticsTotals> totals;
     for (auto &channel : channels_) {
       if (!IsPublicChannel(channel.second.get())) {
         continue;
       }
       auto s = stats.add_channels();
       channel.second->GetChannelStats(s);
+      StatisticsTotals current = {.bytes = uint64_t(s->total_bytes()),
+                                  .messages = uint64_t(s->total_messages()),
+                                  .drops = s->total_drops()};
+      StatisticsTotals interval = current;
+      // RemoveChannel forgets a removed channel, so a channel created again
+      // under the same name counts from its creation.  The 64-bit counters
+      // never wrap, so one that went backwards belongs to a channel that was
+      // replaced some other way and also counts from its creation.  The
+      // 32-bit drop counter wraps, so its count is taken modulo 2^32.
+      auto it = statistics_totals_.find(s->channel_name());
+      if (it != statistics_totals_.end() &&
+          current.bytes >= it->second.bytes &&
+          current.messages >= it->second.messages) {
+        interval = {.bytes = current.bytes - it->second.bytes,
+                    .messages = current.messages - it->second.messages,
+                    .drops = uint32_t(current.drops - it->second.drops)};
+      }
+      totals[s->channel_name()] = current;
+      s->set_total_bytes(int64_t(interval.bytes));
+      s->set_total_messages(int64_t(interval.messages));
+      s->set_total_drops(interval.drops);
     }
     int64_t length = stats.ByteSizeLong();
 
@@ -2309,12 +2353,29 @@ void Server::StatisticsCoroutine(async::Context ctx) {
                   "Failed to serialize channel stats");
       continue;
     }
+    const uint64_t delivered_before = delivered_statistics_messages();
     absl::StatusOr<const Message> s = pub->PublishMessage(length);
     if (!s.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to publish statistics: %s",
                   s.status().ToString().c_str());
     }
+    // PublishMessage can fail after it delivered the message, so the
+    // channel's message count decides whether this interval was delivered.
+    // Until then the previous totals stay, so the next message also counts
+    // this interval.
+    if (delivered_statistics_messages() <= delivered_before) {
+      continue;
+    }
+    // A virtual channel created while this message was being published
+    // keeps the start totals CreateChannel gave it.
+    for (auto &[name, previous] : statistics_totals_) {
+      if (!totals.contains(name) && channels_.contains(name)) {
+        totals.emplace(name, previous);
+      }
+    }
+    statistics_totals_ = std::move(totals);
+    ++sequence;
   }
 }
 
