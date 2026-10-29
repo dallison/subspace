@@ -95,6 +95,25 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "tunnel_fake_peer_test",
+    size = "medium",
+    srcs = ["tunnel_fake_peer_test.cc"],
+    deps = [
+        ":server",
+        ":tunnel_wire",
+        "//client:subspace_client",
+        "//common:subspace_common",
+        "//common/async:async",
+        "//proto:tunnel_cc_proto",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@googletest//:gtest_main",
+    ],
+)
+
 cc_library(
     name = "server_ffi",
     srcs = ["server_ffi.cc"],

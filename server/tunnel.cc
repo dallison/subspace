@@ -427,30 +427,44 @@ TunnelManager::PlanIngress(const Handshake &handshake,
       .SetType(handshake.channel_type())
       .SetChecksumSize(plan.checksum_size)
       .SetMetadataSize(plan.metadata_size);
-  if (!transport.mux().empty()) {
-    options.SetMux(transport.mux()).SetVchanId(transport.vchan_id());
+
+  // The publisher must agree with the channel as it exists here or the server
+  // refuses it.  Message sizes don't depend on the handshake: the publisher
+  // resizes to fit each message.
+  ServerChannel *channel = server_->FindChannel(plan.topic);
+  if (!server_->IsPublicChannel(channel)) {
+    channel = nullptr;
+  }
+  if (channel == nullptr) {
+    if (!transport.mux().empty()) {
+      options.SetMux(transport.mux()).SetVchanId(transport.vchan_id());
+    }
+    options.SetSlotSize(static_cast<SlotSizeType>(slot_size))
+        .SetNumSlots(num_slots);
+    return plan;
   }
 
-  // The publisher must agree with the channel's existing publishers or the
-  // server refuses it.  Message sizes don't depend on the handshake: the
-  // publisher resizes to fit each message.
-  ServerChannel *channel = server_->FindChannel(plan.topic);
-  if (channel != nullptr && server_->IsPublicChannel(channel) &&
-      !channel->IsPlaceholder()) {
-    if (!channel->Type().empty() &&
-        channel->Type() != handshake.channel_type()) {
-      // Peers and local programs may name types differently.
-      options.SetType("");
-    }
+  // The peer's multiplexer only matters when this publisher creates the
+  // channel.  A virtual channel's size cap is its multiplexer's.
+  ServerChannel *capped = channel;
+  if (channel->IsVirtual()) {
+    VirtualChannel *vchan = static_cast<VirtualChannel *>(channel);
+    options.SetMux(vchan->GetMux()->Name())
+        .SetVchanId(vchan->GetVirtualChannelId());
+    capped = vchan->GetMux();
+  }
+  if (!channel->Type().empty() &&
+      channel->Type() != handshake.channel_type()) {
+    // Peers and local programs may name types differently.
+    options.SetType("");
+  }
+  if (capped->MaxSlotSize() > 0) {
+    options.SetMaxSlotSize(capped->MaxSlotSize());
+    slot_size = std::min<uint64_t>(
+        slot_size, static_cast<uint64_t>(capped->MaxSlotSize()));
+  }
+  if (!channel->IsPlaceholder()) {
     options.SetSubscriberQueueArenaSize(channel->SubscriberQueueArenaSize());
-    ServerChannel *split =
-        channel->IsVirtual() ? static_cast<VirtualChannel *>(channel)->GetMux()
-                             : channel;
-    if (split->MaxSlotSize() > 0) {
-      options.SetMaxSlotSize(split->MaxSlotSize());
-      slot_size =
-          std::min<uint64_t>(slot_size, static_cast<uint64_t>(split->MaxSlotSize()));
-    }
     int num_pubs, num_subs, num_bridge_pubs, num_bridge_subs, num_tunnel_pubs,
         num_tunnel_subs;
     channel->CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs,
@@ -708,8 +722,10 @@ absl::Status TunnelManager::ForwardChannel(async::Context ctx, Client &client,
   handshake.set_topic_name(route.topic);
   handshake.set_channel_type(sub->Type());
   tunnel::SubspaceTransport *transport = handshake.mutable_subspace();
-  transport->set_slot_size(
-      static_cast<uint64_t>(std::max<SlotSizeType>(sub->SlotSize(), 0)));
+  // Subscriber::SlotSize() is the current message's slot size; buffers grow,
+  // so the last is the channel's.
+  const auto &buffers = sub->GetBuffers();
+  transport->set_slot_size(buffers.empty() ? 0 : buffers.back()->slot_size);
   transport->set_num_slots(static_cast<uint32_t>(sub->NumSlots()));
   transport->set_is_reliable(publication.reliable);
   transport->set_mux(publication.mux);

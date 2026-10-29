@@ -9,13 +9,17 @@
 #include "proto/tunnel_config.pb.h"
 #include "server/server.h"
 #include "server/tunnel.h"
+#include "toolbelt/sockets.h"
 #include <arpa/inet.h>
+#include <array>
 #include <chrono>
+#include <fcntl.h>
 #include <gtest/gtest.h>
 #include <memory>
 #include <netinet/in.h>
 #include <signal.h>
 #include <string>
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
@@ -130,13 +134,31 @@ std::string Pattern(size_t size, int seed) {
   return data;
 }
 
-absl::Status Publish(Publisher &pub, const std::string &data) {
-  absl::StatusOr<void *> buffer =
-      pub.GetMessageBuffer(static_cast<SlotSizeType>(data.size()));
+absl::Status Publish(Publisher &pub, const std::string &data,
+                     const std::string &metadata = "") {
+  absl::StatusOr<void *> buffer;
+  for (;;) {
+    buffer = pub.GetMessageBuffer(static_cast<SlotSizeType>(data.size()));
+    if (!buffer.ok() || *buffer != nullptr) {
+      break;
+    }
+    // A reliable publisher waits for a free slot.
+    if (absl::Status s = pub.Wait(5s); !s.ok()) {
+      return s;
+    }
+  }
   if (!buffer.ok()) {
     return buffer.status();
   }
   memcpy(*buffer, data.data(), data.size());
+  if (!metadata.empty()) {
+    absl::Span<std::byte> area = pub.GetMetadata();
+    if (area.size() < metadata.size()) {
+      pub.CancelPublish();
+      return absl::InvalidArgumentError("metadata doesn't fit");
+    }
+    memcpy(area.data(), metadata.data(), metadata.size());
+  }
   return pub.PublishMessage(static_cast<int64_t>(data.size())).status();
 }
 
@@ -272,6 +294,283 @@ INSTANTIATE_TEST_SUITE_P(Directions, TunnelResizeTest, ::testing::Values(0, 1),
                            return info.param == 0 ? "AlphaToBeta"
                                                   : "BetaToAlpha";
                          });
+
+// The receiving publisher runs out of slots while the subscriber holds them,
+// so it waits; the messages after the wait need bigger slots.
+TEST_F(TunnelTest, ReliableChannelResizesWhileAMessageWaits) {
+  absl::StatusOr<Publisher> pub = clients_[0].CreatePublisher(
+      "/tunnel_test/reliable",
+      PublisherOptions().SetSlotSize(256).SetNumSlots(4).SetReliable(true));
+  ASSERT_THAT(pub, IsOk());
+  absl::StatusOr<Subscriber> sub = clients_[1].CreateSubscriber(
+      "/tunnel_test/reliable", SubscriberOptions().SetReliable(true));
+  ASSERT_THAT(sub, IsOk());
+  ASSERT_THAT(WaitForRoute(*pub, *sub), IsOk());
+
+  std::vector<std::string> sent;
+  for (int i = 0; i < 10; i++) {
+    sent.push_back(Pattern(size_t{100} << i, i));
+    ASSERT_THAT(Publish(*pub, sent.back()), IsOk()) << i;
+  }
+  // Give the tunnel time to fill the receiving channel and start waiting.
+  std::this_thread::sleep_for(300ms);
+  for (size_t i = 0; i < sent.size(); i++) {
+    absl::StatusOr<std::string> received = Read(*sub);
+    ASSERT_THAT(received, IsOk()) << i;
+    ASSERT_EQ(received->size(), sent[i].size()) << i;
+    EXPECT_TRUE(*received == sent[i]) << i;
+  }
+}
+
+TEST_F(TunnelTest, ChecksumsAndMetadataSurvive) {
+  absl::StatusOr<Publisher> pub = clients_[0].CreatePublisher(
+      "/tunnel_test/checksum", PublisherOptions()
+                                   .SetSlotSize(256)
+                                   .SetNumSlots(8)
+                                   .SetChecksum(true)
+                                   .SetMetadataSize(24));
+  ASSERT_THAT(pub, IsOk());
+  absl::StatusOr<Subscriber> sub = clients_[1].CreateSubscriber(
+      "/tunnel_test/checksum", SubscriberOptions().SetChecksum(true));
+  ASSERT_THAT(sub, IsOk());
+  ASSERT_THAT(WaitForRoute(*pub, *sub), IsOk());
+
+  for (int i = 0; i < 3; i++) {
+    std::string data = Pattern(300 * (i + 1), i);
+    std::string metadata = absl::StrFormat("metadata %d", i);
+    ASSERT_THAT(Publish(*pub, data, metadata), IsOk());
+    // ReadMessage fails if the checksum doesn't verify.
+    absl::StatusOr<std::string> received = Read(*sub);
+    ASSERT_THAT(received, IsOk()) << i;
+    EXPECT_TRUE(*received == data) << i;
+    absl::Span<const std::byte> area = sub->GetMetadata();
+    ASSERT_EQ(area.size(), 24u);
+    EXPECT_EQ(std::string(reinterpret_cast<const char *>(area.data()),
+                          metadata.size()),
+              metadata);
+  }
+}
+
+// The receiving server numbers its virtual channels independently.
+TEST_F(TunnelTest, VirtualChannelsCross) {
+  absl::StatusOr<Publisher> other = clients_[1].CreatePublisher(
+      "/tunnel_test/vother", PublisherOptions()
+                                 .SetSlotSize(256)
+                                 .SetNumSlots(8)
+                                 .SetMux("/tunnel_test/mux"));
+  ASSERT_THAT(other, IsOk());
+  absl::StatusOr<Publisher> pub = clients_[0].CreatePublisher(
+      "/tunnel_test/virtual", PublisherOptions()
+                                  .SetSlotSize(256)
+                                  .SetNumSlots(8)
+                                  .SetMux("/tunnel_test/mux")
+                                  .SetVchanId(7));
+  ASSERT_THAT(pub, IsOk());
+  absl::StatusOr<Subscriber> sub = clients_[1].CreateSubscriber(
+      "/tunnel_test/virtual", SubscriberOptions().SetMux("/tunnel_test/mux"));
+  ASSERT_THAT(sub, IsOk());
+  ASSERT_NE(sub->VirtualChannelId(), 7);
+  ASSERT_THAT(WaitForRoute(*pub, *sub), IsOk());
+
+  ASSERT_THAT(Publish(*pub, "virtual"), IsOk());
+  absl::StatusOr<Message> msg;
+  for (int i = 0; i < 1000; i++) {
+    msg = sub->ReadMessage();
+    if (!msg.ok() || msg->length > 0) {
+      break;
+    }
+    std::this_thread::sleep_for(5ms);
+  }
+  ASSERT_THAT(msg, IsOk());
+  ASSERT_EQ(msg->length, 7u);
+  EXPECT_EQ(std::string(static_cast<const char *>(msg->buffer), msg->length),
+            "virtual");
+  EXPECT_EQ(msg->vchan_id, sub->VirtualChannelId());
+}
+
+// Messages that arrived over the tunnel aren't sent back.
+TEST_F(TunnelTest, MessagesAreNotEchoed) {
+  const char *kChannel = "/tunnel_test/echo";
+  absl::StatusOr<Publisher> pubs[2] = {
+      clients_[0].CreatePublisher(kChannel, 256, 16),
+      clients_[1].CreatePublisher(kChannel, 256, 16)};
+  ASSERT_THAT(pubs[0], IsOk());
+  ASSERT_THAT(pubs[1], IsOk());
+  absl::StatusOr<Subscriber> subs[2] = {clients_[0].CreateSubscriber(kChannel),
+                                        clients_[1].CreateSubscriber(kChannel)};
+  ASSERT_THAT(subs[0], IsOk());
+  ASSERT_THAT(subs[1], IsOk());
+  ASSERT_THAT(WaitForRoute(*pubs[0], *subs[1]), IsOk());
+  // Discard alpha's probes, which its own subscriber also saw.
+  while (Read(*subs[0], 200ms).ok()) {
+  }
+  ASSERT_THAT(WaitForRoute(*pubs[1], *subs[0]), IsOk());
+  while (Read(*subs[1], 200ms).ok()) {
+  }
+
+  for (int from = 0; from < 2; from++) {
+    std::string data = absl::StrFormat("from %s", kDeviceNames[from]);
+    ASSERT_THAT(Publish(*pubs[from], data), IsOk());
+    for (int i = 0; i < 2; i++) {
+      absl::StatusOr<std::string> received = Read(*subs[i]);
+      ASSERT_THAT(received, IsOk()) << from << " to " << i;
+      EXPECT_EQ(*received, data);
+    }
+    for (int i = 0; i < 2; i++) {
+      EXPECT_FALSE(Read(*subs[i], 500ms).ok()) << from << " echoed to " << i;
+    }
+  }
+}
+
+// Native discovery and bridging connect alpha and beta while the tunnel
+// connects beta and gamma.  Neither carries the other's traffic.
+TEST(TunnelCoexistenceTest, NativeAndTunnelBridgingStaySeparate) {
+  signal(SIGPIPE, SIG_IGN);
+  // Native discovery broadcasts, so share the bridge tests' port lock.
+  int lock_fd =
+      ::open("/tmp/subspace_bridge_test_port.lock", O_CREAT | O_RDWR, 0666);
+  ASSERT_NE(-1, lock_fd);
+  ASSERT_EQ(0, ::flock(lock_fd, LOCK_EX));
+  std::array<toolbelt::UDPSocket, 2> reserved;
+  int disc_ports[2];
+  for (int i = 0; i < 2; i++) {
+    ASSERT_THAT(reserved[i].Bind(toolbelt::InetAddress::AnyAddress(0)), IsOk());
+    disc_ports[i] = reserved[i].BoundAddress().Port();
+  }
+  int tunnel_ports[2] = {FreePort(), FreePort()};
+
+  struct Instance {
+    async::RuntimeEngine engine;
+    std::string socket;
+    int pipe[2];
+    std::unique_ptr<Server> server;
+    std::thread thread;
+  };
+  Instance instances[3];
+  const char *kNames[3] = {"alpha", "beta", "gamma"};
+  for (int i = 0; i < 3; i++) {
+    Instance &instance = instances[i];
+    char socket_template[] = "/tmp/subspace_tunnelXXXXXX"; // NOLINT
+    ::close(mkstemp(&socket_template[0]));
+    instance.socket = &socket_template[0];
+    ASSERT_EQ(0, pipe(instance.pipe));
+    if (i < 2) {
+      reserved[i].Close();
+      instance.server = std::make_unique<Server>(
+          instance.engine, instance.socket, "", disc_ports[i],
+          disc_ports[1 - i], /*local=*/false, instance.pipe[1]);
+    } else {
+      instance.server = std::make_unique<Server>(
+          instance.engine, instance.socket, "", 0, 0, /*local=*/true,
+          instance.pipe[1]);
+    }
+    if (i > 0) {
+      int self = i - 1;
+      TunnelConfig config;
+      config.set_device_name(kNames[i]);
+      config.set_listen_address("127.0.0.1");
+      config.set_listen_port(tunnel_ports[self]);
+      TunnelPeer *peer = config.add_peers();
+      peer->set_name(kNames[3 - i]);
+      peer->set_tcp_addr("127.0.0.1");
+      peer->set_tcp_port(tunnel_ports[1 - self]);
+      instance.server->SetTunnelConfig(config);
+    }
+    instance.thread = std::thread([&instance]() {
+      absl::Status s = instance.server->Run(/*num_asio_threads=*/4);
+      if (!s.ok()) {
+        fprintf(stderr, "Error running Subspace server: %s\n",
+                s.ToString().c_str());
+        exit(1);
+      }
+    });
+    char buf[8];
+    (void)::read(instance.pipe[0], buf, sizeof(buf));
+  }
+  ASSERT_EQ(0, ::flock(lock_fd, LOCK_UN));
+  ::close(lock_fd);
+
+  {
+    Client clients[3];
+    for (int i = 0; i < 3; i++) {
+      ASSERT_THAT(clients[i].Init(instances[i].socket), IsOk());
+    }
+    // Published natively on alpha, wanted on beta and gamma.
+    absl::StatusOr<Publisher> native =
+        clients[0].CreatePublisher("/coexist/native", 256, 16);
+    ASSERT_THAT(native, IsOk());
+    absl::StatusOr<Subscriber> native_subs[2] = {
+        clients[1].CreateSubscriber("/coexist/native"),
+        clients[2].CreateSubscriber("/coexist/native")};
+    ASSERT_THAT(native_subs[0], IsOk());
+    ASSERT_THAT(native_subs[1], IsOk());
+
+    // Published on gamma, wanted on beta and alpha.
+    absl::StatusOr<Publisher> tunneled =
+        clients[2].CreatePublisher("/coexist/tunnel", 256, 16);
+    ASSERT_THAT(tunneled, IsOk());
+    absl::StatusOr<Subscriber> tunnel_subs[2] = {
+        clients[1].CreateSubscriber("/coexist/tunnel"),
+        clients[0].CreateSubscriber("/coexist/tunnel")};
+    ASSERT_THAT(tunnel_subs[0], IsOk());
+    ASSERT_THAT(tunnel_subs[1], IsOk());
+
+    // Published on beta, wanted on both sides.
+    absl::StatusOr<Publisher> both =
+        clients[1].CreatePublisher("/coexist/both", 256, 16);
+    ASSERT_THAT(both, IsOk());
+    absl::StatusOr<Subscriber> both_subs[2] = {
+        clients[0].CreateSubscriber("/coexist/both"),
+        clients[2].CreateSubscriber("/coexist/both")};
+    ASSERT_THAT(both_subs[0], IsOk());
+    ASSERT_THAT(both_subs[1], IsOk());
+
+    ASSERT_THAT(WaitForRoute(*native, *native_subs[0]), IsOk());
+    ASSERT_THAT(WaitForRoute(*tunneled, *tunnel_subs[0]), IsOk());
+    ASSERT_THAT(WaitForRoute(*both, *both_subs[0]), IsOk());
+    ASSERT_THAT(WaitForRoute(*both, *both_subs[1]), IsOk());
+    // Probes may have crossed where they shouldn't; those are checked below.
+    for (auto *subs : {native_subs, tunnel_subs, both_subs}) {
+      for (int i = 0; i < 2; i++) {
+        while (Read(*subs[i], 200ms).ok()) {
+        }
+      }
+    }
+
+    ASSERT_THAT(Publish(*native, "native"), IsOk());
+    ASSERT_THAT(Publish(*tunneled, "tunnel"), IsOk());
+    ASSERT_THAT(Publish(*both, "both"), IsOk());
+    absl::StatusOr<std::string> received = Read(*native_subs[0]);
+    ASSERT_THAT(received, IsOk());
+    EXPECT_EQ(*received, "native");
+    received = Read(*tunnel_subs[0]);
+    ASSERT_THAT(received, IsOk());
+    EXPECT_EQ(*received, "tunnel");
+    for (int i = 0; i < 2; i++) {
+      received = Read(*both_subs[i]);
+      ASSERT_THAT(received, IsOk()) << i;
+      EXPECT_EQ(*received, "both");
+    }
+    EXPECT_FALSE(Read(*native_subs[1], 1s).ok())
+        << "the tunnel carried a natively bridged channel";
+    EXPECT_FALSE(Read(*tunnel_subs[1], 1s).ok())
+        << "native bridging carried a tunneled channel";
+    for (int i = 0; i < 2; i++) {
+      EXPECT_FALSE(Read(*both_subs[i], 200ms).ok()) << "duplicate on " << i;
+    }
+  }
+
+  for (Instance &instance : instances) {
+    instance.server->Stop();
+    char buf[8];
+    (void)::read(instance.pipe[0], buf, sizeof(buf));
+    instance.thread.join();
+    instance.server->CleanupAfterSession();
+    (void)remove(instance.socket.c_str());
+    ::close(instance.pipe[0]);
+    ::close(instance.pipe[1]);
+  }
+}
 
 } // namespace
 } // namespace subspace
