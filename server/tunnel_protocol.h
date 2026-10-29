@@ -103,12 +103,4 @@ int32_t WirePrefixSize(const SubspaceTransport &transport);
 // channels and the tunnel's discovery and IPC information channels.
 bool IsInternalChannel(std::string_view name);
 
-// Clears the flag bits outside kChecksummedMessageFlags in a message prefix
-// and returns the ones that were set.  Peers number the other bits
-// differently, so they mean nothing on the far side.  Subspace's checksum
-// doesn't cover them, so this never invalidates it; a peer whose checksum
-// covers every flag bit can't verify a message that had any of them set.  The
-// prefix need not be aligned.
-int64_t ClearUncheckedFlags(std::byte *prefix);
-
 } // namespace subspace::tunnel

@@ -19,11 +19,13 @@
   are dropped on arrival, and messages whose packet would exceed 2 GiB are
   not sent. Both cases are logged.
 - The tunnel never changes or recomputes a message's checksum, so custom
-  checksum callbacks work across it. A message whose virtual channel has a
-  different ID on the receiving server keeps the sender's ID in its prefix.
+  checksum callbacks work across it. Flags cross unchanged, and a message
+  whose virtual channel has a different ID on the receiving server keeps the
+  sender's ID in its prefix.
 - `Publisher::PublishMessageWithPrefix` takes an optional
   `use_vchan_id_from_prefix`. When it's false, the message goes to the
-  publisher's own virtual channel and the prefix is left as it is.
+  publisher's own virtual channel and the prefix keeps the sender's
+  `vchan_id`.
 - CMake and Android builds now generate the tunnel protos alongside
   `subspace.proto`.
 

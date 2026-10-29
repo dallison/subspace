@@ -5,13 +5,11 @@
 #include "server/tunnel_protocol.h"
 
 #include "absl/status/status_matchers.h"
-#include "client/checksum.h"
 #include "common/channel.h"
 #include "proto/tunnel_discovery.pb.h"
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <array>
-#include <cstring>
 #include <string>
 #include <vector>
 
@@ -213,85 +211,6 @@ TEST(TunnelDiscoveryTest, EncodesPeerLayout) {
                 reinterpret_cast<const std::byte *>(wire.data()),
                 reinterpret_cast<const std::byte *>(wire.data()) + wire.size()),
             expected);
-}
-
-// A prefix area followed by a payload, laid out like a slot.
-class PrefixTest : public ::testing::Test {
-protected:
-  static constexpr int32_t kMetadataSize = 16;
-
-  void SetUp() override {
-    memset(area_, 0, sizeof(area_));
-    for (size_t i = 0; i < sizeof(payload_); i++) {
-      payload_[i] = static_cast<char>(i * 7);
-    }
-    prefix()->slot_id = 3;
-    prefix()->message_size = sizeof(payload_);
-    prefix()->ordinal = 42;
-    prefix()->timestamp = 1234;
-    prefix()->vchan_id = -1;
-    prefix()->checksum_size = 4;
-    prefix()->metadata_size = kMetadataSize;
-    char *metadata = reinterpret_cast<char *>(prefix()) +
-                     offsetof(MessagePrefix, checksum) + 4;
-    memcpy(metadata, "metadata-bytes!!", kMetadataSize);
-  }
-
-  MessagePrefix *prefix() { return reinterpret_cast<MessagePrefix *>(area_); }
-
-  // Checksums the way a Subspace publisher does, with flags masked.
-  void SubspaceChecksum() {
-    prefix()->SetHasChecksum();
-    auto data = GetMessageChecksumData(prefix(), payload_, sizeof(payload_), 4,
-                                       kMetadataSize);
-    CalculateCRC32Checksum(data.Spans(), GetChecksumSpan(prefix(), 4));
-  }
-
-  bool SubspaceVerifies() {
-    auto data = GetMessageChecksumData(prefix(), payload_, sizeof(payload_), 4,
-                                       kMetadataSize);
-    return VerifyCRC32Checksum(data.Spans(), GetChecksumSpan(prefix(), 4));
-  }
-
-  alignas(64) char area_[128];
-  char payload_[100];
-};
-
-TEST_F(PrefixTest, ClearsOnlyUncheckedFlags) {
-  prefix()->vchan_id = 7;
-  SubspaceChecksum();
-  const int64_t extra = kMessageBridged | kMessageCrossMachine | 0x100;
-  prefix()->flags |= extra;
-  char before[sizeof(area_)];
-  memcpy(before, area_, sizeof(area_));
-
-  EXPECT_EQ(ClearUncheckedFlags(reinterpret_cast<std::byte *>(prefix())),
-            extra);
-  EXPECT_EQ(prefix()->flags, kMessageHasChecksum);
-  EXPECT_EQ(prefix()->vchan_id, 7);
-  EXPECT_TRUE(SubspaceVerifies());
-  prefix()->flags |= extra;
-  EXPECT_EQ(memcmp(before, area_, sizeof(area_)), 0);
-}
-
-TEST_F(PrefixTest, LeavesCheckedFlagsAlone) {
-  SubspaceChecksum();
-  prefix()->flags |= kMessageActivate;
-  char before[sizeof(area_)];
-  memcpy(before, area_, sizeof(area_));
-  EXPECT_EQ(ClearUncheckedFlags(reinterpret_cast<std::byte *>(prefix())), 0);
-  EXPECT_EQ(memcmp(before, area_, sizeof(area_)), 0);
-}
-
-TEST_F(PrefixTest, ClearsUnalignedPrefix) {
-  SubspaceChecksum();
-  prefix()->flags |= kMessageBridged;
-  std::byte packet[1 + sizeof(MessagePrefix)];
-  memcpy(packet + 1, prefix(), sizeof(MessagePrefix));
-  EXPECT_EQ(ClearUncheckedFlags(packet + 1), kMessageBridged);
-  memcpy(prefix(), packet + 1, sizeof(MessagePrefix));
-  EXPECT_EQ(prefix()->flags, kMessageHasChecksum);
-  EXPECT_TRUE(SubspaceVerifies());
 }
 
 } // namespace

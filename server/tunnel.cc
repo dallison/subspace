@@ -16,7 +16,6 @@
 #include "toolbelt/clock.h"
 #include <algorithm>
 #include <arpa/inet.h>
-#include <cinttypes>
 #include <cstring>
 #include <limits>
 #include <netdb.h>
@@ -523,7 +522,6 @@ void TunnelManager::IngressCoroutine(
                        plan.peer.c_str());
 
   const size_t prefix_size = static_cast<size_t>(plan.wire_prefix_size);
-  bool logged_flags = false;
   absl::Status status;
   while (!server_->shutting_down_) {
     absl::StatusOr<PacketHeader> header = ReadHeader(*socket, ctx);
@@ -610,21 +608,10 @@ void TunnelManager::IngressCoroutine(
       pub->CancelPublish();
       continue;
     }
-    // The tunnel never changes what the checksum covers, so it never has to
-    // recompute it, whatever algorithm the sender used.
-    const int64_t cleared = tunnel::ClearUncheckedFlags(prefix_bytes);
-    if (cleared != 0 && prefix->HasChecksum() && !logged_flags) {
-      logged_flags = true;
-      server_->logger_.Log(toolbelt::LogLevel::kWarning,
-                           "Tunnel %s from %s: messages have flags 0x%" PRIx64
-                           " set, so their checksums won't verify here if "
-                           "the peer's checksum covers every flag bit",
-                           topic.c_str(), plan.peer.c_str(),
-                           static_cast<uint64_t>(cleared));
-    }
+    // The checksum doesn't cover the bridged flag.  The sender's virtual
+    // channel ID stays in the prefix, where the checksum does cover it, and
+    // the message goes to this publisher's virtual channel.
     prefix->SetIsBridged();
-    // The sender's virtual channel ID stays in the prefix, where its checksum
-    // covers it, and the message goes to this publisher's virtual channel.
     absl::StatusOr<const Message> published =
         pub->PublishMessageWithPrefix(static_cast<int64_t>(payload_size),
                                       /*use_slot_id_from_prefix=*/false,
@@ -806,7 +793,6 @@ absl::Status TunnelManager::ForwardChannel(async::Context ctx, Client &client,
       tunnel::EncodePacketHeader(*header, packet.data());
       std::byte *wire_prefix = packet.data() + tunnel::kPacketHeaderSize;
       memcpy(wire_prefix, prefix, prefix_size);
-      tunnel::ClearUncheckedFlags(wire_prefix);
       if (coalesce) {
         memcpy(wire_prefix + prefix_size, msg->buffer, msg->length);
       }

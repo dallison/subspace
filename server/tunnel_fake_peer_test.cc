@@ -364,17 +364,10 @@ absl::StatusOr<Discovery> ParseDiscovery(const Packet &packet) {
   return msg;
 }
 
-// The checksum a peer computes, covering every flag bit.
-void FullFlagsChecksum(MessagePrefix *prefix, std::string_view payload) {
-  const auto *base = reinterpret_cast<const uint8_t *>(prefix);
-  std::array<absl::Span<const uint8_t>, 3> spans = {
-      absl::Span<const uint8_t>(base + offsetof(MessagePrefix, slot_id),
-                                offsetof(MessagePrefix, checksum) -
-                                    offsetof(MessagePrefix, slot_id)),
-      absl::Span<const uint8_t>(),
-      absl::Span<const uint8_t>(
-          reinterpret_cast<const uint8_t *>(payload.data()), payload.size())};
-  CalculateCRC32Checksum(spans, GetChecksumSpan(prefix, 4));
+void Checksum(MessagePrefix *prefix, std::string_view payload) {
+  auto data =
+      GetMessageChecksumData(prefix, payload.data(), payload.size(), 4, 0);
+  CalculateCRC32Checksum(data.Spans(), GetChecksumSpan(prefix, 4));
 }
 
 // A checksum the tunnel can't compute: CRC32 with a different seed.
@@ -400,7 +393,7 @@ std::string CruiseDataBody(std::string_view payload, uint64_t ordinal,
   prefix.checksum_size = 4;
   if (checksum) {
     prefix.flags |= kMessageHasChecksum;
-    FullFlagsChecksum(&prefix, payload);
+    Checksum(&prefix, payload);
   }
   std::string body(reinterpret_cast<const char *>(&prefix), sizeof(prefix));
   body.append(payload);
@@ -749,9 +742,8 @@ TEST_F(TunnelFakePeerTest, SendsChannelsThePeerSubscribesTo) {
     EXPECT_EQ(prefix.flags, kMessageHasChecksum);
     EXPECT_EQ(prefix.message_size, messages[i].size());
     EXPECT_TRUE(payload == messages[i]) << i;
-    // A peer checksums every flag bit and still agrees.
     MessagePrefix expected = prefix;
-    FullFlagsChecksum(&expected, payload);
+    Checksum(&expected, payload);
     EXPECT_EQ(expected.checksum, prefix.checksum) << i;
   }
 }
@@ -780,16 +772,22 @@ TEST_F(TunnelFakePeerTest, ReceivesCruiseMessages) {
   ASSERT_THAT(data->Send(PacketType::kData, 4,
                          CruiseDataBody(huge, 4, /*checksum=*/true)),
               IsOk());
+  // With multihop on, the peer forwards what it received from another machine.
+  ASSERT_THAT(data->Send(PacketType::kData, 5,
+                         CruiseDataBody("forwarded", 5, /*checksum=*/true,
+                                        kMessageCrossMachine)),
+              IsOk());
 
   // ReadMessage fails if a checksum doesn't verify.
-  for (const std::string &expected : {std::string("hello"), large, huge}) {
+  for (const std::string &expected :
+       {std::string("hello"), large, huge, std::string("forwarded")}) {
     absl::StatusOr<std::string> received = Read(*sub);
     ASSERT_THAT(received, IsOk()) << expected.size();
     ASSERT_EQ(received->size(), expected.size());
     EXPECT_TRUE(*received == expected) << expected.size();
   }
   EXPECT_FALSE(Read(*sub, 300ms).ok());
-  EXPECT_EQ(Stats().messages_received, 3u);
+  EXPECT_EQ(Stats().messages_received, 4u);
 }
 
 // The peer numbers the virtual channel 9, and here it's 3.  The prefix keeps

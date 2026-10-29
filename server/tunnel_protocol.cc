@@ -7,7 +7,6 @@
 #include "absl/strings/match.h"
 #include "absl/strings/str_format.h"
 #include <cstddef>
-#include <cstring>
 #include <ctime>
 #include <limits>
 
@@ -150,16 +149,6 @@ bool IsInternalChannel(std::string_view name) {
          absl::StrContains(name, "/subspace/channel_directory") ||
          absl::StrContains(name, "/framework/ipc_information") ||
          absl::StrContains(name, "/ipc/discovery/");
-}
-
-int64_t ClearUncheckedFlags(std::byte *prefix) {
-  int64_t flags;
-  std::byte *field = prefix + offsetof(MessagePrefix, flags);
-  memcpy(&flags, field, sizeof(flags));
-  const int64_t cleared = flags & ~kChecksummedMessageFlags;
-  flags &= kChecksummedMessageFlags;
-  memcpy(field, &flags, sizeof(flags));
-  return cleared;
 }
 
 } // namespace subspace::tunnel

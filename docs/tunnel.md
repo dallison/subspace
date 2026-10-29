@@ -142,15 +142,18 @@ publishes the incoming messages on the local channel of that name.
   type.
 - Reliability, checksum size and metadata size come from the sender.
 
-The tunnel never changes or recomputes a checksum, so a channel can use a custom
-checksum callback as long as the publisher and subscribers agree on it. The
-receiving server leaves every field the checksum covers as the sender wrote it:
+The tunnel never changes or recomputes a checksum. A checksum verifies across
+it whenever both ends compute it the same way, including with a custom checksum
+callback, and cruise peers do once they're built with this version of
+Subspace. The receiving server leaves every field the checksum covers as the
+sender wrote it:
 
 - A virtual channel's ID can differ between machines. The message is delivered
   on the receiving server's virtual channel, and its prefix keeps the sender's
   ID, the same way it keeps the sender's slot ID, ordinal and timestamp.
-- Only the activate and has-checksum flags cross the tunnel. Peers number the
-  other flags differently, and Subspace's checksum doesn't cover them.
+- Flags cross the tunnel as they are. The receiving server also marks the
+  message bridged and cross-machine, and the checksum doesn't cover those
+  flags.
 
 User metadata in the message prefix crosses the tunnel unchanged.
 
@@ -220,9 +223,5 @@ and at debug level after that, until it changes.
 - Only TCP is supported.
 - Only protobuf discovery is supported; peers that send only ROS-encoded
   discovery can't exchange channels with the server.
-- A cruise peer's checksum covers every flag bit. With multihop on, the peer
-  forwards messages that it received from other machines with its
-  cross-machine flag set, and their checksums don't verify here. The server
-  logs a warning the first time this happens on each connection.
 - Routes come from discovery; there are no static routes.
 - All peers share the same options; there are no per-peer settings.
