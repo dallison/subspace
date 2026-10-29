@@ -669,7 +669,7 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
 Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     MessageSlot *slot, bool reliable, bool is_activation, int owner,
     bool omit_prefix, bool use_prefix_slot_id, bool for_tunnel,
-    bool acquire_next) {
+    bool acquire_next, bool use_prefix_vchan_id) {
   void *buffer = GetBufferAddress(slot);
   MessagePrefix *prefix = Prefix(slot);
 
@@ -686,7 +686,8 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
       prefix->SetIsCrossMachine();
     }
     slot->timestamp.store(prefix->timestamp, std::memory_order_relaxed);
-    slot->vchan_id.store(prefix->vchan_id, std::memory_order_relaxed);
+    slot->vchan_id.store(use_prefix_vchan_id ? prefix->vchan_id : vchan_id_,
+                         std::memory_order_relaxed);
     // The bridged_slot_id is the slot is used for the retirement notification.
     slot->bridged_slot_id.store(
         use_prefix_slot_id ? prefix->slot_id : slot->id,

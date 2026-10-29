@@ -990,6 +990,7 @@ ClientImpl::PublishMessage(PublisherImpl *publisher, int64_t message_size,
                            bool notify_subscribers) {
   return PublishMessageInternal(publisher, message_size, /*omit_prefix=*/false,
                                 /*use_prefix_slot_id=*/false,
+                                /*use_prefix_vchan_id=*/false,
                                 notify_subscribers);
 }
 
@@ -1001,6 +1002,7 @@ absl::StatusOr<const Message>
 ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
                                    int64_t message_size, bool omit_prefix,
                                    bool use_prefix_slot_id,
+                                   bool use_prefix_vchan_id,
                                    bool notify_subscribers) {
   // Lock is already held by the call to GetMessageBufferSpan.  This RAII
   // instance wil relesas the lock when we return from this function.
@@ -1037,7 +1039,7 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
 
   Channel::PublishedMessage msg = publisher->ActivateSlotAndGetAnother(
       publisher->IsReliable(), /*is_activation=*/false, omit_prefix,
-      use_prefix_slot_id, publisher->ForTunnel());
+      use_prefix_slot_id, publisher->ForTunnel(), use_prefix_vchan_id);
 
   // Prevent use of old_slot.
   old_slot = nullptr;

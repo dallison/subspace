@@ -55,9 +55,6 @@ using tunnel::PacketHeader;
 using tunnel::PacketType;
 using Clock = std::chrono::steady_clock;
 
-// Cruise marks messages that crossed machines with the bit Subspace uses for
-// bridged messages.
-constexpr int64_t kCruiseCrossMachine = 2;
 constexpr const char *kPeerName = "cruise";
 
 sockaddr_in Loopback(int port) {
@@ -380,6 +377,16 @@ void FullFlagsChecksum(MessagePrefix *prefix, std::string_view payload) {
   CalculateCRC32Checksum(spans, GetChecksumSpan(prefix, 4));
 }
 
+// A checksum the tunnel can't compute: CRC32 with a different seed.
+void CustomChecksum(const std::array<absl::Span<const uint8_t>, 3> &data,
+                    absl::Span<std::byte> checksum) {
+  uint32_t crc = 0x5eed;
+  for (const absl::Span<const uint8_t> &span : data) {
+    crc = SubspaceCRC32(crc, span.data(), span.size());
+  }
+  memcpy(checksum.data(), &crc, sizeof(crc));
+}
+
 // A data packet body the way a cruise publisher sends it.
 std::string CruiseDataBody(std::string_view payload, uint64_t ordinal,
                            bool checksum, int64_t flags = 0) {
@@ -388,7 +395,7 @@ std::string CruiseDataBody(std::string_view payload, uint64_t ordinal,
   prefix.message_size = payload.size();
   prefix.ordinal = ordinal;
   prefix.timestamp = 1;
-  prefix.flags = kCruiseCrossMachine | flags;
+  prefix.flags = flags;
   prefix.vchan_id = -1;
   prefix.checksum_size = 4;
   if (checksum) {
@@ -783,6 +790,59 @@ TEST_F(TunnelFakePeerTest, ReceivesCruiseMessages) {
   }
   EXPECT_FALSE(Read(*sub, 300ms).ok());
   EXPECT_EQ(Stats().messages_received, 3u);
+}
+
+// The peer numbers the virtual channel 9, and here it's 3.  The prefix keeps
+// the peer's number, so a checksum the tunnel can't compute still verifies.
+TEST_F(TunnelFakePeerTest, KeepsThePeersPrefix) {
+  StartServer();
+  absl::StatusOr<Subscriber> sub = client_->CreateSubscriber(
+      "/cruise/virtual", SubscriberOptions()
+                             .SetMux("/cruise/mux")
+                             .SetVchanId(3)
+                             .SetChecksum(true));
+  ASSERT_THAT(sub, IsOk());
+  sub->SetChecksumCallback(CustomChecksum);
+  absl::StatusOr<Subscriber> nine = client_->CreateSubscriber(
+      "/cruise/nine", SubscriberOptions().SetMux("/cruise/mux").SetVchanId(9));
+  ASSERT_THAT(nine, IsOk());
+  std::unique_ptr<WireConnection> data = OpenData("/cruise/virtual", 64, 8);
+  ASSERT_NE(data, nullptr);
+
+  const std::string payload = "virtual";
+  MessagePrefix prefix = {};
+  prefix.slot_id = 5;
+  prefix.message_size = payload.size();
+  prefix.ordinal = 1;
+  prefix.timestamp = 1;
+  prefix.vchan_id = 9;
+  prefix.checksum_size = 4;
+  prefix.SetHasChecksum();
+  auto spans = GetMessageChecksumData(&prefix, payload.data(), payload.size(),
+                                      4, 0);
+  CustomChecksum(spans.Spans(), GetChecksumSpan(&prefix, 4));
+  std::string body(reinterpret_cast<const char *>(&prefix), sizeof(prefix));
+  body.append(payload);
+  ASSERT_THAT(data->Send(PacketType::kData, 1, body), IsOk());
+
+  absl::StatusOr<Message> msg;
+  for (int i = 0; i < 1000; i++) {
+    msg = sub->ReadMessage();
+    if (!msg.ok() || msg->length > 0) {
+      break;
+    }
+    std::this_thread::sleep_for(5ms);
+  }
+  // ReadMessage fails if the checksum doesn't verify.
+  ASSERT_THAT(msg, IsOk());
+  ASSERT_EQ(std::string(static_cast<const char *>(msg->buffer), msg->length),
+            payload);
+  EXPECT_EQ(msg->vchan_id, 3);
+  const auto *received = reinterpret_cast<const MessagePrefix *>(
+      static_cast<const char *>(msg->buffer) - sub->PrefixSize());
+  EXPECT_EQ(received->vchan_id, 9);
+  EXPECT_EQ(received->checksum, prefix.checksum);
+  EXPECT_FALSE(Read(*nine, 300ms).ok());
 }
 
 TEST_F(TunnelFakePeerTest, DropsMessagesTooLargeForACappedChannel) {

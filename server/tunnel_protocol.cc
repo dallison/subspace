@@ -6,8 +6,6 @@
 
 #include "absl/strings/match.h"
 #include "absl/strings/str_format.h"
-#include "client/checksum.h"
-#include <array>
 #include <cstddef>
 #include <cstring>
 #include <ctime>
@@ -29,22 +27,6 @@ uint64_t GetLE(const std::byte *in, size_t size) {
     value |= static_cast<uint64_t>(in[i]) << (8 * i);
   }
   return value;
-}
-
-// The checksum input with every flag bit included.
-std::array<absl::Span<const uint8_t>, 3>
-UnmaskedChecksumSpans(const MessagePrefix *prefix, const void *payload,
-                      size_t payload_size, int32_t checksum_size,
-                      int32_t metadata_size) {
-  const auto *base = reinterpret_cast<const uint8_t *>(prefix);
-  return {absl::Span<const uint8_t>(base + offsetof(MessagePrefix, slot_id),
-                                    offsetof(MessagePrefix, checksum) -
-                                        offsetof(MessagePrefix, slot_id)),
-          absl::Span<const uint8_t>(base + offsetof(MessagePrefix, checksum) +
-                                        checksum_size,
-                                    metadata_size),
-          absl::Span<const uint8_t>(
-              reinterpret_cast<const uint8_t *>(payload), payload_size)};
 }
 
 } // namespace
@@ -170,55 +152,14 @@ bool IsInternalChannel(std::string_view name) {
          absl::StrContains(name, "/ipc/discovery/");
 }
 
-void PrepareEgressPrefix(std::byte *prefix) {
+int64_t ClearUncheckedFlags(std::byte *prefix) {
   int64_t flags;
   std::byte *field = prefix + offsetof(MessagePrefix, flags);
   memcpy(&flags, field, sizeof(flags));
+  const int64_t cleared = flags & ~kChecksummedMessageFlags;
   flags &= kChecksummedMessageFlags;
   memcpy(field, &flags, sizeof(flags));
-}
-
-IngressPrefixResult TranslateIngressPrefix(MessagePrefix *prefix,
-                                           const void *payload,
-                                           size_t payload_size,
-                                           int32_t checksum_size,
-                                           int32_t metadata_size,
-                                           int32_t local_vchan_id) {
-  const int64_t extra_flags = prefix->flags & ~kChecksummedMessageFlags;
-  if (extra_flags == 0 && prefix->vchan_id == local_vchan_id) {
-    return IngressPrefixResult::kUnchanged;
-  }
-  auto normalize = [&]() {
-    prefix->flags &= kChecksummedMessageFlags;
-    prefix->vchan_id = local_vchan_id;
-  };
-  if (!prefix->HasChecksum()) {
-    normalize();
-    return IngressPrefixResult::kRewritten;
-  }
-  if (checksum_size != 4) {
-    normalize();
-    return IngressPrefixResult::kChecksumNotRecomputed;
-  }
-
-  absl::Span<const std::byte> checksum = GetChecksumSpan(prefix, 4);
-  bool valid = VerifyCRC32Checksum(
-      UnmaskedChecksumSpans(prefix, payload, payload_size, checksum_size,
-                            metadata_size),
-      checksum);
-  if (!valid && extra_flags != 0) {
-    auto data = GetMessageChecksumData(prefix, payload, payload_size,
-                                       checksum_size, metadata_size);
-    valid = VerifyCRC32Checksum(data.Spans(), checksum);
-  }
-  normalize();
-  if (!valid) {
-    return IngressPrefixResult::kBadChecksum;
-  }
-  auto data = GetMessageChecksumData(prefix, payload, payload_size,
-                                     checksum_size, metadata_size);
-  CalculateCRC32Checksum(data.Spans(), GetChecksumSpan(prefix, 4));
-  return IngressPrefixResult::kRewritten;
+  return cleared;
 }
 
 } // namespace subspace::tunnel

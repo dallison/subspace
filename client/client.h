@@ -772,7 +772,8 @@ private:
   absl::StatusOr<const Message>
   PublishMessageInternal(details::PublisherImpl *publisher,
                          int64_t message_size, bool omit_prefix,
-                         bool use_prefix_slot_id, bool notify_subscribers);
+                         bool use_prefix_slot_id, bool use_prefix_vchan_id,
+                         bool notify_subscribers);
   absl::Status ResizeChannel(details::PublisherImpl *publisher,
                              int64_t new_slot_size);
   absl::StatusOr<bool>
@@ -1043,13 +1044,20 @@ public:
   // back over the bridge, use the slot id from the prefix.  If the retirement
   // notification is locally handled, use the slot id from the message.
   //
+  // The message is delivered on the virtual channel in the prefix's vchan_id.
+  // If use_vchan_id_from_prefix is false, it's delivered on this publisher's
+  // virtual channel instead, and the prefix keeps the sender's vchan_id, so a
+  // checksum the sender computed over it still verifies.
+  //
   // In thread-safe mode, this will release the lock on the client.  If you
   // don't want to publish the message, you must cancel the publish using
   // CancelPublish.
   absl::StatusOr<const Message>
   PublishMessageWithPrefix(int64_t message_size,
-                           bool use_slot_id_from_prefix = true) {
-    return PublishMessageInternal(message_size, true, use_slot_id_from_prefix);
+                           bool use_slot_id_from_prefix = true,
+                           bool use_vchan_id_from_prefix = true) {
+    return PublishMessageInternal(message_size, true, use_slot_id_from_prefix,
+                                  use_vchan_id_from_prefix);
   }
 
   // If you don't want to publish the message, you must cancel the publish. This
@@ -1323,10 +1331,11 @@ private:
 
   absl::StatusOr<const Message>
   PublishMessageInternal(int64_t message_size, bool omit_prefix,
-                         bool use_prefix_slot_id) {
-    return client_->PublishMessageInternal(impl_.get(), message_size,
-                                           omit_prefix, use_prefix_slot_id,
-                                           /*notify_subscribers=*/true);
+                         bool use_prefix_slot_id,
+                         bool use_prefix_vchan_id = true) {
+    return client_->PublishMessageInternal(
+        impl_.get(), message_size, omit_prefix, use_prefix_slot_id,
+        use_prefix_vchan_id, /*notify_subscribers=*/true);
   }
 
   std::shared_ptr<ClientImpl> client_;

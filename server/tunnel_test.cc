@@ -4,6 +4,7 @@
 
 #include "absl/status/status_matchers.h"
 #include "absl/strings/str_format.h"
+#include "client/checksum.h"
 #include "client/client.h"
 #include "common/async/runtime.h"
 #include "proto/tunnel_config.pb.h"
@@ -357,8 +358,17 @@ TEST_F(TunnelTest, ChecksumsAndMetadataSurvive) {
   }
 }
 
-// The receiving server numbers its virtual channels independently.
+// The receiving server numbers its virtual channels independently.  The
+// checksum is one the tunnel can't compute, so it must arrive as it was sent.
 TEST_F(TunnelTest, VirtualChannelsCross) {
+  auto custom_checksum = [](const std::array<absl::Span<const uint8_t>, 3> &data,
+                            absl::Span<std::byte> checksum) {
+    uint32_t crc = 0x5eed;
+    for (const absl::Span<const uint8_t> &span : data) {
+      crc = SubspaceCRC32(crc, span.data(), span.size());
+    }
+    memcpy(checksum.data(), &crc, sizeof(crc));
+  };
   absl::StatusOr<Publisher> other = clients_[1].CreatePublisher(
       "/tunnel_test/vother", PublisherOptions()
                                  .SetSlotSize(256)
@@ -370,11 +380,15 @@ TEST_F(TunnelTest, VirtualChannelsCross) {
                                   .SetSlotSize(256)
                                   .SetNumSlots(8)
                                   .SetMux("/tunnel_test/mux")
-                                  .SetVchanId(7));
+                                  .SetVchanId(7)
+                                  .SetChecksum(true));
   ASSERT_THAT(pub, IsOk());
+  pub->SetChecksumCallback(custom_checksum);
   absl::StatusOr<Subscriber> sub = clients_[1].CreateSubscriber(
-      "/tunnel_test/virtual", SubscriberOptions().SetMux("/tunnel_test/mux"));
+      "/tunnel_test/virtual",
+      SubscriberOptions().SetMux("/tunnel_test/mux").SetChecksum(true));
   ASSERT_THAT(sub, IsOk());
+  sub->SetChecksumCallback(custom_checksum);
   ASSERT_NE(sub->VirtualChannelId(), 7);
   ASSERT_THAT(WaitForRoute(*pub, *sub), IsOk());
 

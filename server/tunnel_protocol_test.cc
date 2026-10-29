@@ -247,105 +247,51 @@ protected:
     CalculateCRC32Checksum(data.Spans(), GetChecksumSpan(prefix(), 4));
   }
 
-  // Checksums with every flag bit included.
-  void FullFlagsChecksum() {
-    prefix()->SetHasChecksum();
-    const auto *base = reinterpret_cast<const uint8_t *>(prefix());
-    std::array<absl::Span<const uint8_t>, 3> spans = {
-        absl::Span<const uint8_t>(base + offsetof(MessagePrefix, slot_id),
-                                  offsetof(MessagePrefix, checksum) -
-                                      offsetof(MessagePrefix, slot_id)),
-        absl::Span<const uint8_t>(base + offsetof(MessagePrefix, checksum) + 4,
-                                  kMetadataSize),
-        absl::Span<const uint8_t>(reinterpret_cast<const uint8_t *>(payload_),
-                                  sizeof(payload_))};
-    CalculateCRC32Checksum(spans, GetChecksumSpan(prefix(), 4));
-  }
-
   bool SubspaceVerifies() {
     auto data = GetMessageChecksumData(prefix(), payload_, sizeof(payload_), 4,
                                        kMetadataSize);
     return VerifyCRC32Checksum(data.Spans(), GetChecksumSpan(prefix(), 4));
   }
 
-  IngressPrefixResult Translate(int32_t local_vchan_id,
-                                int32_t checksum_size = 4) {
-    return TranslateIngressPrefix(prefix(), payload_, sizeof(payload_),
-                                  checksum_size, kMetadataSize,
-                                  local_vchan_id);
-  }
-
   alignas(64) char area_[128];
   char payload_[100];
 };
 
-TEST_F(PrefixTest, EgressKeepsOnlyChecksummedFlags) {
+TEST_F(PrefixTest, ClearsOnlyUncheckedFlags) {
+  prefix()->vchan_id = 7;
   SubspaceChecksum();
-  prefix()->flags |= kMessageBridged | kMessageCrossMachine | 0x100;
-  PrepareEgressPrefix(reinterpret_cast<std::byte *>(prefix()));
+  const int64_t extra = kMessageBridged | kMessageCrossMachine | 0x100;
+  prefix()->flags |= extra;
+  char before[sizeof(area_)];
+  memcpy(before, area_, sizeof(area_));
+
+  EXPECT_EQ(ClearUncheckedFlags(reinterpret_cast<std::byte *>(prefix())),
+            extra);
+  EXPECT_EQ(prefix()->flags, kMessageHasChecksum);
+  EXPECT_EQ(prefix()->vchan_id, 7);
+  EXPECT_TRUE(SubspaceVerifies());
+  prefix()->flags |= extra;
+  EXPECT_EQ(memcmp(before, area_, sizeof(area_)), 0);
+}
+
+TEST_F(PrefixTest, LeavesCheckedFlagsAlone) {
+  SubspaceChecksum();
+  prefix()->flags |= kMessageActivate;
+  char before[sizeof(area_)];
+  memcpy(before, area_, sizeof(area_));
+  EXPECT_EQ(ClearUncheckedFlags(reinterpret_cast<std::byte *>(prefix())), 0);
+  EXPECT_EQ(memcmp(before, area_, sizeof(area_)), 0);
+}
+
+TEST_F(PrefixTest, ClearsUnalignedPrefix) {
+  SubspaceChecksum();
+  prefix()->flags |= kMessageBridged;
+  std::byte packet[1 + sizeof(MessagePrefix)];
+  memcpy(packet + 1, prefix(), sizeof(MessagePrefix));
+  EXPECT_EQ(ClearUncheckedFlags(packet + 1), kMessageBridged);
+  memcpy(prefix(), packet + 1, sizeof(MessagePrefix));
   EXPECT_EQ(prefix()->flags, kMessageHasChecksum);
   EXPECT_TRUE(SubspaceVerifies());
-}
-
-TEST_F(PrefixTest, IngressLeavesMatchingPrefixAlone) {
-  SubspaceChecksum();
-  MessagePrefix before = *prefix();
-  EXPECT_EQ(Translate(-1), IngressPrefixResult::kUnchanged);
-  EXPECT_EQ(memcmp(&before, prefix(), sizeof(before)), 0);
-  EXPECT_TRUE(SubspaceVerifies());
-}
-
-TEST_F(PrefixTest, IngressRecomputesFullFlagsChecksum) {
-  // A peer that checksums every flag bit, with its cross-machine bit set.
-  prefix()->flags = 2;
-  FullFlagsChecksum();
-  EXPECT_FALSE(SubspaceVerifies());
-  EXPECT_EQ(Translate(-1), IngressPrefixResult::kRewritten);
-  EXPECT_EQ(prefix()->flags, kMessageHasChecksum);
-  EXPECT_TRUE(SubspaceVerifies());
-}
-
-TEST_F(PrefixTest, IngressAcceptsMaskedChecksumWithExtraFlags) {
-  SubspaceChecksum();
-  prefix()->flags |= 0x40;
-  EXPECT_EQ(Translate(-1), IngressPrefixResult::kRewritten);
-  EXPECT_EQ(prefix()->flags, kMessageHasChecksum);
-  EXPECT_TRUE(SubspaceVerifies());
-}
-
-TEST_F(PrefixTest, IngressNormalizesVirtualChannelId) {
-  prefix()->vchan_id = 7;
-  SubspaceChecksum();
-  EXPECT_EQ(Translate(2), IngressPrefixResult::kRewritten);
-  EXPECT_EQ(prefix()->vchan_id, 2);
-  EXPECT_TRUE(SubspaceVerifies());
-}
-
-TEST_F(PrefixTest, IngressKeepsBadChecksumBad) {
-  prefix()->vchan_id = 7;
-  SubspaceChecksum();
-  payload_[10] ^= 1;
-  EXPECT_EQ(Translate(2), IngressPrefixResult::kBadChecksum);
-  EXPECT_EQ(prefix()->vchan_id, 2);
-  EXPECT_FALSE(SubspaceVerifies());
-}
-
-TEST_F(PrefixTest, IngressWithoutChecksum) {
-  prefix()->flags = 2;
-  prefix()->vchan_id = 7;
-  EXPECT_EQ(Translate(-1), IngressPrefixResult::kRewritten);
-  EXPECT_EQ(prefix()->flags, 0);
-  EXPECT_EQ(prefix()->vchan_id, -1);
-}
-
-TEST_F(PrefixTest, IngressCustomChecksumIsNotRecomputed) {
-  prefix()->vchan_id = 7;
-  prefix()->SetHasChecksum();
-  uint32_t checksum = prefix()->checksum;
-  EXPECT_EQ(Translate(2, /*checksum_size=*/8),
-            IngressPrefixResult::kChecksumNotRecomputed);
-  EXPECT_EQ(prefix()->vchan_id, 2);
-  EXPECT_EQ(prefix()->checksum, checksum);
 }
 
 } // namespace

@@ -103,37 +103,12 @@ int32_t WirePrefixSize(const SubspaceTransport &transport);
 // channels and the tunnel's discovery and IPC information channels.
 bool IsInternalChannel(std::string_view name);
 
-// Prepares a copy of a local message prefix for sending.  Only the flags
-// covered by Subspace's checksum are kept.  A peer that checksums every flag
-// bit then computes the same value as a Subspace subscriber.  The copy need not
-// be aligned.
-void PrepareEgressPrefix(std::byte *prefix);
-
-enum class IngressPrefixResult {
-  kUnchanged,
-  // The prefix was normalized and its checksum recomputed.
-  kRewritten,
-  // The checksum didn't verify as received.  The prefix was normalized but
-  // the checksum was left alone, so local subscribers see a checksum error.
-  kBadChecksum,
-  // The prefix had to be normalized but uses a custom checksum, which we
-  // can't recompute.  The checksum is stale.
-  kChecksumNotRecomputed,
-};
-
-// Rewrites a prefix received from a peer so that local subscribers deliver
-// and verify it.  `prefix` points at the local slot's prefix area, already
-// holding the received prefix and metadata, and `payload` at the received
-// payload.  The prefix's vchan_id is set to `local_vchan_id`, and flag bits
-// outside kChecksummedMessageFlags are cleared.  A peer may have covered
-// those bits with its checksum, so whenever either change is needed the
-// checksum is verified against the received prefix first and recomputed
-// afterwards.
-IngressPrefixResult TranslateIngressPrefix(MessagePrefix *prefix,
-                                           const void *payload,
-                                           size_t payload_size,
-                                           int32_t checksum_size,
-                                           int32_t metadata_size,
-                                           int32_t local_vchan_id);
+// Clears the flag bits outside kChecksummedMessageFlags in a message prefix
+// and returns the ones that were set.  Peers number the other bits
+// differently, so they mean nothing on the far side.  Subspace's checksum
+// doesn't cover them, so this never invalidates it; a peer whose checksum
+// covers every flag bit can't verify a message that had any of them set.  The
+// prefix need not be aligned.
+int64_t ClearUncheckedFlags(std::byte *prefix);
 
 } // namespace subspace::tunnel
