@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Tunnel-Compatible Discovery and Bridging
+- The server can exchange channels over TCP with peers that use the cruise
+  IPC tunnel and discovery protocols. `--tunnel` turns it on, and
+  `--tunnel_config` names a configuration file in protobuf text format
+  (`proto/tunnel_config.proto`) that lists the device name, listen port,
+  peers, discovery denylist and refresh interval. Programs that embed the
+  server call `Server::SetTunnelConfig`. See `docs/tunnel.md`.
+- The tunnel runs alongside native discovery and bridging, and the two never
+  forward each other's messages. With `--local --tunnel` only the tunnel runs.
+- Tunnel channels resize with their messages and have no maximum message
+  size of their own. Messages too large for a fixed-size or capped channel
+  are dropped on arrival, and messages whose packet would exceed 2 GiB are
+  not sent. Both cases are logged.
+- CMake and Android builds now generate the tunnel protos alongside
+  `subspace.proto`.
+
 ### Checksum Covers Only Publisher Flags
 - The message checksum now covers only the `kMessageActivate` and
   `kMessageHasChecksum` bits of the prefix `flags`

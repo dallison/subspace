@@ -131,6 +131,8 @@ cc_binary(
     ],
     deps = [
       ":server",
+      ":tunnel_wire",
+      "//proto:tunnel_cc_proto",
       "@coroutines//co:co",
     ],
     linkopts = select({

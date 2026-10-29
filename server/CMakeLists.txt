@@ -10,6 +10,14 @@ add_library(libserver STATIC
     server.cc
     server.h
     plugin.h
+    tunnel.cc
+    tunnel.h
+    tunnel_config.cc
+    tunnel_config.h
+    tunnel_discovery_message.cc
+    tunnel_discovery_message.h
+    tunnel_protocol.cc
+    tunnel_protocol.h
 )
 
 target_include_directories(libserver PUBLIC
@@ -22,6 +30,19 @@ target_link_libraries(libserver PUBLIC
     subspace_async
     protobuf::libprotobuf
 )
+
+add_executable(tunnel_wire_test tunnel_config_test.cc tunnel_protocol_test.cc)
+add_executable(tunnel_test tunnel_test.cc)
+add_executable(tunnel_fake_peer_test tunnel_fake_peer_test.cc)
+foreach(TUNNEL_TEST tunnel_wire_test tunnel_test tunnel_fake_peer_test)
+    add_test(NAME ${TUNNEL_TEST} COMMAND ${TUNNEL_TEST})
+    target_link_libraries(${TUNNEL_TEST} PUBLIC
+        libserver
+        absl::status_matchers
+        gmock
+        gtest_main
+    )
+endforeach()
 
 add_executable(subspace_server
     main.cc

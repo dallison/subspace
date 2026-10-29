@@ -34,11 +34,15 @@ cc_defaults {
     compile_multilib: "64",
 }
 
-// Generate C++ protobuf sources from subspace.proto.
+// Generate C++ protobuf sources from the protos in proto/.
 cc_library_static {
     name: "libsubspace_proto",
     defaults: ["subspace_defaults"],
-    srcs: ["proto/subspace.proto"],
+    srcs: [
+        "proto/subspace.proto",
+        "proto/tunnel_config.proto",
+        "proto/tunnel_handshake.proto",
+    ],
     proto: {
         type: "full",
         canonical_path_from_root: false,
