@@ -1,5 +1,6 @@
 // Copyright 2023-2026 David Allison
 // Asio backend support is Copyright 2026 Cruise LLC
+// Tunnel support is Copyright 2026 General Motors LLC
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
