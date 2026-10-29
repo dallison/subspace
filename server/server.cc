@@ -10,6 +10,8 @@
 #include "client_handler.h"
 #include "common/split_buffer.h"
 #include "proto/subspace.pb.h"
+#include "proto/tunnel_config.pb.h"
+#include "server/tunnel.h"
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
 #include "toolbelt/sockets.h"
@@ -846,6 +848,14 @@ absl::Status Server::Run(int num_asio_threads) {
     return status;
   }
 
+  if (tunnel_config_ != nullptr) {
+    auto tunnel = std::make_unique<TunnelManager>(this, *tunnel_config_);
+    if (absl::Status s = tunnel->Init(); !s.ok()) {
+      return s;
+    }
+    tunnel_ = std::move(tunnel);
+  }
+
   // Notify listener that the server is ready.  Do this in a coroutine so that
   // it executes when we start running.
   if (notify_fd_.Valid()) {
@@ -1161,6 +1171,11 @@ absl::Status Server::Run(int num_asio_threads) {
         }
       }
     }
+  }
+
+  // The tunnel has its own peers, so it runs even for a --local server.
+  if (tunnel_ != nullptr) {
+    tunnel_->Spawn();
   }
 
   // Run the coroutine main loop.
@@ -2255,7 +2270,16 @@ void Server::ChannelDirectoryCoroutine(async::Context ctx) {
   }
 }
 
-void Server::SendChannelDirectory() { channel_directory_trigger_fd_.Trigger(); }
+void Server::SendChannelDirectory() {
+  channel_directory_trigger_fd_.Trigger();
+  if (tunnel_ != nullptr) {
+    tunnel_->ChannelsChanged();
+  }
+}
+
+void Server::SetTunnelConfig(const TunnelConfig &config) {
+  tunnel_config_ = std::make_unique<TunnelConfig>(config);
+}
 
 void Server::StatisticsCoroutine(async::Context ctx) {
   Client client(ctx);

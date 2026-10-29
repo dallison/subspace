@@ -102,8 +102,9 @@ bool IsInternalChannel(std::string_view name);
 
 // Prepares a copy of a local message prefix for sending.  Only the flags
 // covered by Subspace's checksum are kept.  A peer that checksums every flag
-// bit then computes the same value as a Subspace subscriber.
-void PrepareEgressPrefix(MessagePrefix *prefix);
+// bit then computes the same value as a Subspace subscriber.  The copy need not
+// be aligned.
+void PrepareEgressPrefix(std::byte *prefix);
 
 enum class IngressPrefixResult {
   kUnchanged,

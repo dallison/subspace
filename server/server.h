@@ -35,6 +35,8 @@
 namespace subspace {
 
 class Publisher;
+class TunnelConfig;
+class TunnelManager;
 
 // Values written to the notify_fd when the server is ready and
 // is stopped.
@@ -108,6 +110,12 @@ public:
   // running on the same computer.
   void SetMachineName(std::string name) { machine_name_ = std::move(name); }
   const std::string& MachineName() const { return machine_name_; }
+
+  // Enables tunnel-compatible discovery and bridging alongside the native
+  // kind.  Call before Run, which fails if the configuration is invalid.
+  void SetTunnelConfig(const TunnelConfig &config);
+  // Null unless Run has started the tunnel.
+  TunnelManager *GetTunnelManager() const { return tunnel_.get(); }
 
   void SetShadowSocket(const std::string &socket_name);
   void SetShadowSockets(const std::string &primary, const std::string &secondary);
@@ -249,6 +257,7 @@ public:
 private:
   friend class ClientHandler;
   friend class ServerChannel;
+  friend class TunnelManager;
   friend class VirtualChannel;
   static constexpr size_t kDiscoveryBufferSize = 1024;
 
@@ -506,6 +515,9 @@ private:
 
   std::unique_ptr<ShadowReplicator> primary_shadow_replicator_;
   std::unique_ptr<ShadowReplicator> secondary_shadow_replicator_;
+
+  std::unique_ptr<TunnelConfig> tunnel_config_;
+  std::unique_ptr<TunnelManager> tunnel_;
 };
 
 } // namespace subspace

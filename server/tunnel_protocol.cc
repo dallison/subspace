@@ -8,6 +8,8 @@
 #include "absl/strings/str_format.h"
 #include "client/checksum.h"
 #include <array>
+#include <cstddef>
+#include <cstring>
 #include <ctime>
 #include <limits>
 
@@ -168,8 +170,12 @@ bool IsInternalChannel(std::string_view name) {
          absl::StrContains(name, "/ipc/discovery/");
 }
 
-void PrepareEgressPrefix(MessagePrefix *prefix) {
-  prefix->flags &= kChecksummedMessageFlags;
+void PrepareEgressPrefix(std::byte *prefix) {
+  int64_t flags;
+  std::byte *field = prefix + offsetof(MessagePrefix, flags);
+  memcpy(&flags, field, sizeof(flags));
+  flags &= kChecksummedMessageFlags;
+  memcpy(field, &flags, sizeof(flags));
 }
 
 IngressPrefixResult TranslateIngressPrefix(MessagePrefix *prefix,

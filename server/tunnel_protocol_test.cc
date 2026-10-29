@@ -319,7 +319,7 @@ protected:
 TEST_F(PrefixTest, EgressKeepsOnlyChecksummedFlags) {
   SubspaceChecksum();
   prefix()->flags |= kMessageBridged | kMessageCrossMachine | 0x100;
-  PrepareEgressPrefix(prefix());
+  PrepareEgressPrefix(reinterpret_cast<std::byte *>(prefix()));
   EXPECT_EQ(prefix()->flags, kMessageHasChecksum);
   EXPECT_TRUE(SubspaceVerifies());
 }
