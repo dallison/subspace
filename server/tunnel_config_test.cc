@@ -13,6 +13,12 @@
 #include <string>
 #include <unistd.h>
 
+#if defined(__ANDROID__)
+#define TUNNEL_TEST_TMP "/data/local/tmp"
+#else
+#define TUNNEL_TEST_TMP "/tmp"
+#endif
+
 namespace subspace {
 namespace {
 
@@ -125,7 +131,7 @@ TEST(TunnelConfigTest, DeviceNamePrecedence) {
 }
 
 TEST(TunnelConfigTest, LoadsFile) {
-  char path[] = "/tmp/tunnel_config_test_XXXXXX";
+  char path[] = TUNNEL_TEST_TMP "/tunnel_config_test_XXXXXX";
   int fd = mkstemp(path);
   ASSERT_GE(fd, 0);
   close(fd);

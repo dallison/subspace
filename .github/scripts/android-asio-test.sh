@@ -34,6 +34,9 @@ adb push bazel-bin/server/subspace_server /data/local/tmp/subspace_server
 adb push bazel-bin/client/client_test /data/local/tmp/client_test
 adb push bazel-bin/client/bridge_test /data/local/tmp/bridge_test
 adb push bazel-bin/common/split_buffer_test /data/local/tmp/split_buffer_test
+adb push bazel-bin/common/async/async_test /data/local/tmp/async_test
+adb push bazel-bin/server/tunnel_test /data/local/tmp/tunnel_test
+adb push bazel-bin/server/tunnel_fake_peer_test /data/local/tmp/tunnel_fake_peer_test
 adb push bazel-bin/asio_rpc/test/rpc_test /data/local/tmp/asio_rpc_test
 adb push bazel-bin/asio_rpc/server/server_test /data/local/tmp/asio_rpc_server_test
 adb push bazel-bin/asio_rpc/client/client_test /data/local/tmp/asio_rpc_client_test
@@ -83,6 +86,10 @@ run_with_retry "client_test (asio)" "./client_test"
 # here.  Its multi-core thread-safety coverage runs on the real Linux/macOS
 # asio runners (the asio-backend jobs), which exercise the full bridge_test.
 run_with_retry "bridge_test (asio)" "./bridge_test --gtest_filter=-BridgeStressTest.*"
+
+run_with_retry "async_test (asio)" "./async_test"
+run_with_retry "tunnel_test (asio)" "./tunnel_test"
+run_with_retry "tunnel_fake_peer_test (asio)" "./tunnel_fake_peer_test"
 
 run_with_retry "asio_rpc_test" "./asio_rpc_test"
 run_with_retry "asio_rpc_server_test" "./asio_rpc_server_test"

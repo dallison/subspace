@@ -151,6 +151,42 @@ Messages that came in over the tunnel are marked as bridged and cross-machine.
 The server doesn't send these messages back out over the tunnel or over a
 native bridge, which prevents echoes between peers.
 
+## Platforms
+
+The tunnel builds with Bazel, CMake and Soong on Linux, macOS, Android and
+QNX. CI runs the tunnel tests on Linux and macOS with both coroutine
+backends, and on the Android x86_64 emulator with Bazel (both backends) and
+CMake. For QNX, `.github/scripts/qnx-deploy-client-test.sh` stages the tunnel
+tests with `client_test` for a QNX VM.
+
+### Between the Android Emulator and the Host
+
+The emulator's network only lets the guest open connections, so the host
+reaches the guest through `adb forward` and the guest reaches the host through
+`adb reverse`. Both sides open connections to each other, so each needs its own
+listen port:
+
+```bash
+adb reverse tcp:7400 tcp:7400   # guest -> host
+adb forward tcp:7401 tcp:7401   # host -> guest
+```
+
+Host configuration:
+
+```textproto
+device_name: "host"
+listen_port: 7400
+peers { name: "emulator" tcp_addr: "127.0.0.1" tcp_port: 7401 }
+```
+
+Guest configuration:
+
+```textproto
+device_name: "emulator"
+listen_port: 7401
+peers { name: "host" tcp_addr: "127.0.0.1" tcp_port: 7400 }
+```
+
 ## Logging
 
 The server logs when the tunnel starts listening, when connections open and

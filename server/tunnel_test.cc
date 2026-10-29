@@ -25,6 +25,12 @@
 #include <unistd.h>
 #include <vector>
 
+#if defined(__ANDROID__)
+#define TUNNEL_TEST_TMP "/data/local/tmp"
+#else
+#define TUNNEL_TEST_TMP "/tmp"
+#endif
+
 namespace subspace {
 namespace {
 
@@ -59,7 +65,7 @@ public:
     ASSERT_GT(ports[0], 0);
     ASSERT_GT(ports[1], 0);
     for (int i = 0; i < 2; i++) {
-      char socket_template[] = "/tmp/subspace_tunnelXXXXXX"; // NOLINT
+      char socket_template[] = TUNNEL_TEST_TMP "/subspace_tunnelXXXXXX"; // NOLINT
       ::close(mkstemp(&socket_template[0]));
       socket_[i] = &socket_template[0];
       ASSERT_EQ(0, pipe(server_pipe_[i]));
@@ -427,8 +433,8 @@ TEST_F(TunnelTest, MessagesAreNotEchoed) {
 TEST(TunnelCoexistenceTest, NativeAndTunnelBridgingStaySeparate) {
   signal(SIGPIPE, SIG_IGN);
   // Native discovery broadcasts, so share the bridge tests' port lock.
-  int lock_fd =
-      ::open("/tmp/subspace_bridge_test_port.lock", O_CREAT | O_RDWR, 0666);
+  int lock_fd = ::open(TUNNEL_TEST_TMP "/subspace_bridge_test_port.lock",
+                       O_CREAT | O_RDWR, 0666);
   ASSERT_NE(-1, lock_fd);
   ASSERT_EQ(0, ::flock(lock_fd, LOCK_EX));
   std::array<toolbelt::UDPSocket, 2> reserved;
@@ -450,7 +456,7 @@ TEST(TunnelCoexistenceTest, NativeAndTunnelBridgingStaySeparate) {
   const char *kNames[3] = {"alpha", "beta", "gamma"};
   for (int i = 0; i < 3; i++) {
     Instance &instance = instances[i];
-    char socket_template[] = "/tmp/subspace_tunnelXXXXXX"; // NOLINT
+    char socket_template[] = TUNNEL_TEST_TMP "/subspace_tunnelXXXXXX"; // NOLINT
     ::close(mkstemp(&socket_template[0]));
     instance.socket = &socket_template[0];
     ASSERT_EQ(0, pipe(instance.pipe));

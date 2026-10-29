@@ -121,7 +121,8 @@ jobs:
       # selected.  async_test exercises the asio WaitReadable/WaitEither/Sleep
       # and the StreamSocket/UDPSocket facade; client_test and bridge_test run
       # the real asio client/server port (including discovery, bridging and the
-      # multi-threaded data plane) end to end.
+      # multi-threaded data plane) end to end.  The tunnel tests run the
+      # tunnel's discovery and data plane on asio.
       - name: Build and test asio backend
         run: |
           bazel test \
@@ -130,6 +131,8 @@ jobs:
             //client:client_test \
             //client:bridge_test \
             //server:server_test \
+            //server:tunnel_test \
+            //server:tunnel_fake_peer_test \
             --//:coro_backend=asio \
             --verbose_failures \
             --test_output=errors \
@@ -534,6 +537,10 @@ jobs:
             //client:client_test \
             //client:bridge_test \
             //common:split_buffer_test \
+            //common/async:async_test \
+            //server:tunnel_wire_test \
+            //server:tunnel_test \
+            //server:tunnel_fake_peer_test \
             //plugins:nop_plugin.so \
             //plugins:split_buffer_free_test_plugin.so \
             //android/jni:libsubspace_jni.so \
@@ -606,6 +613,9 @@ jobs:
             //client:client_test \
             //client:bridge_test \
             //common:split_buffer_test \
+            //common/async:async_test \
+            //server:tunnel_test \
+            //server:tunnel_fake_peer_test \
             //plugins:nop_plugin.so \
             //plugins:split_buffer_free_test_plugin.so \
             //asio_rpc/test:rpc_test \

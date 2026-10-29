@@ -36,6 +36,12 @@
 #include <utility>
 #include <vector>
 
+#if defined(__ANDROID__)
+#define TUNNEL_TEST_TMP "/data/local/tmp"
+#else
+#define TUNNEL_TEST_TMP "/tmp"
+#endif
+
 namespace subspace {
 namespace {
 
@@ -440,7 +446,7 @@ protected:
   }
 
   void StartServer(int refresh_secs = 0) {
-    char socket_template[] = "/tmp/subspace_tunnelXXXXXX"; // NOLINT
+    char socket_template[] = TUNNEL_TEST_TMP "/subspace_tunnelXXXXXX"; // NOLINT
     ::close(mkstemp(&socket_template[0]));
     socket_ = &socket_template[0];
     ASSERT_EQ(0, pipe(server_pipe_));
