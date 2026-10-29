@@ -500,6 +500,10 @@ doesn't parse, or breaks these limits. It also closes one with a slot size
 this build can't hold, or a slot count above `INT32_MAX`. A second handshake
 on the same connection closes it too.
 
+The whole handshake must arrive within 5 seconds of the server accepting the
+connection. If it doesn't, the server logs a warning and closes the
+connection, even if the peer sent other packets in the meantime.
+
 ### Data Packets
 
 A data packet's body is the message's prefix area followed by its payload.

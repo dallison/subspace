@@ -21,6 +21,8 @@
   `peers` entry, for that peer. Data connections and static routes still run.
 - `docs/tunnel.md` describes the tunnel's wire format, discovery protocol and
   channels.
+- An incoming tunnel connection is closed if its handshake doesn't arrive
+  within 5 seconds.
 - The tunnel runs alongside native discovery and bridging, and the two never
   forward each other's messages. With `--local --tunnel` only the tunnel runs.
 - Tunnel channels resize with their messages and have no maximum message

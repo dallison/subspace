@@ -71,6 +71,10 @@ inline constexpr uint32_t kDefaultNumSlots = 24;
 // Peers retry failed and dropped connections at this interval.
 inline constexpr int kReconnectIntervalSecs = 3;
 
+// An accepted connection is closed if its handshake hasn't arrived within
+// this time.
+inline constexpr int kHandshakeTimeoutSecs = 5;
+
 // Builds a header for a body of `body_size` bytes.  Fails if the body is
 // larger than kMaxSendBodySize.
 absl::StatusOr<PacketHeader> MakePacketHeader(PacketType type,

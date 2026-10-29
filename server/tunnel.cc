@@ -16,11 +16,13 @@
 #include "toolbelt/clock.h"
 #include <algorithm>
 #include <arpa/inet.h>
+#include <cerrno>
 #include <cstring>
 #include <limits>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <optional>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -35,6 +37,8 @@ namespace {
 constexpr std::chrono::seconds
     kReconnectInterval(tunnel::kReconnectIntervalSecs);
 constexpr std::chrono::seconds kConnectTimeout(tunnel::kReconnectIntervalSecs);
+constexpr std::chrono::seconds
+    kHandshakeTimeout(tunnel::kHandshakeTimeoutSecs);
 // Payloads up to this size are copied in behind the prefix so the packet goes
 // out in one send.
 constexpr size_t kCoalesceLimit = 16 * 1024;
@@ -87,9 +91,52 @@ void SetNoDelay(const async::StreamSocket &socket) {
                    &one, sizeof(one));
 }
 
-// Reads exactly `length` bytes.
+using Deadline = std::chrono::steady_clock::time_point;
+
+// Reads exactly `length` bytes, or fails with DeadlineExceeded once
+// `deadline` passes.  The co backend's Receive waits until it fills its whole
+// buffer, so this reads the non-blocking descriptor itself.
+absl::Status ReadFullyBy(async::StreamSocket &socket, void *buffer,
+                         size_t length, Deadline deadline,
+                         async::Context ctx) {
+  const int fd = async::StreamSocketFd(socket);
+  char *p = static_cast<char *>(buffer);
+  while (length > 0) {
+    ssize_t n = ::recv(fd, p, length, 0);
+    if (n > 0) {
+      p += n;
+      length -= static_cast<size_t>(n);
+      continue;
+    }
+    if (n == 0) {
+      return PeerClosed();
+    }
+    if (errno == EINTR) {
+      continue;
+    }
+    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+      return absl::InternalError(
+          absl::StrFormat("recv failed: %s", strerror(errno)));
+    }
+    std::chrono::nanoseconds remaining =
+        deadline - std::chrono::steady_clock::now();
+    if (remaining <= std::chrono::nanoseconds(0)) {
+      return absl::DeadlineExceededError("timed out");
+    }
+    if (absl::Status s = async::WaitReadable(ctx, fd, remaining); !s.ok()) {
+      return s;
+    }
+  }
+  return absl::OkStatus();
+}
+
+// Reads exactly `length` bytes, by `deadline` if there is one.
 absl::Status ReadFully(async::StreamSocket &socket, void *buffer,
-                       size_t length, async::Context ctx) {
+                       size_t length, async::Context ctx,
+                       std::optional<Deadline> deadline = std::nullopt) {
+  if (deadline.has_value()) {
+    return ReadFullyBy(socket, buffer, length, *deadline, ctx);
+  }
   char *p = static_cast<char *>(buffer);
   while (length > 0) {
     size_t chunk = std::min(length, kMaxReceiveChunk);
@@ -107,11 +154,13 @@ absl::Status ReadFully(async::StreamSocket &socket, void *buffer,
 }
 
 absl::Status Skip(async::StreamSocket &socket, size_t length,
-                  async::Context ctx) {
+                  async::Context ctx,
+                  std::optional<Deadline> deadline = std::nullopt) {
   std::vector<char> scratch(std::min<size_t>(length, 64 * 1024));
   while (length > 0) {
     size_t chunk = std::min(length, scratch.size());
-    if (absl::Status s = ReadFully(socket, scratch.data(), chunk, ctx);
+    if (absl::Status s =
+            ReadFully(socket, scratch.data(), chunk, ctx, deadline);
         !s.ok()) {
       return s;
     }
@@ -120,10 +169,12 @@ absl::Status Skip(async::StreamSocket &socket, size_t length,
   return absl::OkStatus();
 }
 
-absl::StatusOr<PacketHeader> ReadHeader(async::StreamSocket &socket,
-                                        async::Context ctx) {
+absl::StatusOr<PacketHeader>
+ReadHeader(async::StreamSocket &socket, async::Context ctx,
+           std::optional<Deadline> deadline = std::nullopt) {
   std::array<std::byte, tunnel::kPacketHeaderSize> buffer{};
-  if (absl::Status s = ReadFully(socket, buffer.data(), buffer.size(), ctx);
+  if (absl::Status s =
+          ReadFully(socket, buffer.data(), buffer.size(), ctx, deadline);
       !s.ok()) {
     return s;
   }
@@ -366,16 +417,18 @@ void TunnelManager::HandshakeCoroutine(
   if (server_->shutting_down_) {
     return;
   }
+  const Deadline deadline =
+      std::chrono::steady_clock::now() + kHandshakeTimeout;
   absl::Status status;
   for (;;) {
-    absl::StatusOr<PacketHeader> header = ReadHeader(*socket, ctx);
+    absl::StatusOr<PacketHeader> header = ReadHeader(*socket, ctx, deadline);
     if (!header.ok()) {
       status = header.status();
       break;
     }
     if (header->type != PacketType::kHandshake) {
       // Nothing can be published before the handshake says where.
-      status = Skip(*socket, header->BodySize(), ctx);
+      status = Skip(*socket, header->BodySize(), ctx, deadline);
       if (!status.ok()) {
         break;
       }
@@ -388,7 +441,7 @@ void TunnelManager::HandshakeCoroutine(
       break;
     }
     std::string body(header->BodySize(), '\0');
-    status = ReadFully(*socket, body.data(), body.size(), ctx);
+    status = ReadFully(*socket, body.data(), body.size(), ctx, deadline);
     if (!status.ok()) {
       break;
     }
@@ -421,6 +474,11 @@ void TunnelManager::HandshakeCoroutine(
         },
         std::move(name));
     return;
+  }
+  socket->Close();
+  if (absl::IsDeadlineExceeded(status)) {
+    status = absl::DeadlineExceededError(absl::StrFormat(
+        "no handshake within %d seconds", tunnel::kHandshakeTimeoutSecs));
   }
   if (!server_->shutting_down_ && !IsPeerClosed(status)) {
     server_->logger_.Log(toolbelt::LogLevel::kWarning,

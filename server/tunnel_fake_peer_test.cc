@@ -27,6 +27,7 @@
 #include <map>
 #include <memory>
 #include <netinet/in.h>
+#include <optional>
 #include <poll.h>
 #include <signal.h>
 #include <string>
@@ -1033,6 +1034,52 @@ TEST_F(TunnelFakePeerTest, ClosesConnectionsWithBadHandshakes) {
   ASSERT_THAT((*bad_magic)->SendRaw(std::string(tunnel::kPacketHeaderSize, 'x')),
               IsOk());
   EXPECT_TRUE((*bad_magic)->ClosedWithin(2s));
+}
+
+// One connection sends nothing, one stops partway through its handshake, and
+// one keeps sending packets that aren't a handshake.  The server closes each
+// when the handshake timeout passes, and not before.
+TEST_F(TunnelFakePeerTest, ClosesConnectionsWithoutAHandshake) {
+  StartServer();
+  std::array<std::unique_ptr<WireConnection>, 3> connections;
+  for (std::unique_ptr<WireConnection> &connection : connections) {
+    absl::StatusOr<std::unique_ptr<WireConnection>> c =
+        WireConnection::Connect(ServerPort());
+    ASSERT_THAT(c, IsOk());
+    connection = std::move(*c);
+  }
+  const Clock::time_point start = Clock::now();
+  WireConnection &partial = *connections[1];
+  WireConnection &chatty = *connections[2];
+
+  absl::StatusOr<PacketHeader> header = tunnel::MakePacketHeader(
+      PacketType::kHandshake, 100, 0, tunnel::RealtimeNowNs());
+  ASSERT_THAT(header, IsOk());
+  std::string packet(tunnel::kPacketHeaderSize, '\0');
+  tunnel::EncodePacketHeader(*header,
+                             reinterpret_cast<std::byte *>(packet.data()));
+  packet.append(10, 'h');
+  ASSERT_THAT(partial.SendRaw(packet), IsOk());
+
+  const std::chrono::seconds timeout(tunnel::kHandshakeTimeoutSecs);
+  std::array<std::optional<Clock::duration>, 3> closed_after;
+  uint64_t seq = 0;
+  while (Clock::now() - start < timeout + 5s &&
+         !(closed_after[0] && closed_after[1] && closed_after[2])) {
+    if (!closed_after[2]) {
+      // Fails once the server has closed the connection.
+      (void)chatty.Send(PacketType::kData, ++seq, "not a handshake");
+    }
+    for (size_t i = 0; i < connections.size(); i++) {
+      if (!closed_after[i] && connections[i]->ClosedWithin(50ms)) {
+        closed_after[i] = Clock::now() - start;
+      }
+    }
+  }
+  for (size_t i = 0; i < connections.size(); i++) {
+    ASSERT_TRUE(closed_after[i].has_value()) << i;
+    EXPECT_GE(*closed_after[i], timeout - 1s) << i;
+  }
 }
 
 // The peer never asks for the channel, and the denylist keeps it out of
