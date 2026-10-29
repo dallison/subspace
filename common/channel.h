@@ -790,6 +790,9 @@ public:
     }
   }
   uint64_t Next(int vchan_id) { return ordinals_[vchan_id + 1]++; }
+  uint64_t PeekNext(int vchan_id) const {
+    return ordinals_[vchan_id + 1].load(std::memory_order_relaxed);
+  }
 
 private:
   std::array<std::atomic<uint64_t>, kMaxVchanId + 1> ordinals_ = {};

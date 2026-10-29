@@ -18,7 +18,7 @@ The server is only involved in **setup and teardown** — once channels are esta
    - Spawns coroutines:
      - **ListenerCoroutine** — accepts client connections.
      - **ChannelDirectoryCoroutine** — publishes channel directory updates.
-     - **StatisticsCoroutine** — publishes channel statistics every 2 seconds.
+     - **StatisticsCoroutine** — publishes per-interval channel statistics every 2 seconds.
      - **DiscoveryReceiverCoroutine** — receives UDP discovery messages.
      - **GratuitousAdvertiseCoroutine** — broadcasts channel advertisements every 5 seconds.
    - Runs the coroutine scheduler (blocks until shutdown).

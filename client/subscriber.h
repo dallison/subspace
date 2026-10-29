@@ -140,6 +140,7 @@ public:
   void ClaimSlot(MessageSlot *slot, int vchan_id, bool was_newest);
   void UnreadSlot(MessageSlot *slot);
   void RememberOrdinal(uint64_t ordinal, int vchan_id);
+  void RememberPublishedOrdinals();
   uint64_t CollectVisibleSlots(InPlaceAtomicBitset &bits);
   std::optional<ClaimedQueuedSlot>
   FindNextQueuedSlot(uint64_t max_queue_position);
@@ -424,6 +425,11 @@ private:
   // One of these per virtual channel.  If there are no virtual channels
   // we will use vchan_id -1.
   absl::flat_hash_map<int, std::unique_ptr<OrdinalTracker>> ordinal_trackers_;
+
+  // The newest ordinal published on each virtual channel before the subscriber
+  // attached.  Messages up to it are channel history, not drops.  This is kept
+  // apart from last_ordinal_seen because delivery order depends on that.
+  absl::flat_hash_map<int, uint64_t> published_before_attach_;
 
   // The callback to call when a message is received.
   std::function<void(SubscriberImpl *, Message)> message_callback_;

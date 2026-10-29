@@ -689,6 +689,7 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
   if (absl::Status status = channel->AttachBuffers(); !status.ok()) {
     return status;
   }
+  channel->RememberPublishedOrdinals();
 
   ApplySubscriberResponseFds(channel.get(), sub_resp, fds);
 
@@ -1393,12 +1394,10 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
 
   MessageSlot *new_slot = nullptr;
   MessageSlot *old_slot = subscriber->CurrentSlot();
-  int64_t last_ordinal = -1;
-  if (old_slot != nullptr) {
-    last_ordinal = old_slot->ordinal.load(std::memory_order_relaxed);
-    if (debug_) {
-      printf("read old slot: %d: %" PRId64 "\n", old_slot->id, last_ordinal);
-    }
+  if (debug_ && old_slot != nullptr) {
+    printf("read old slot: %d: %" PRId64 "\n", old_slot->id,
+           static_cast<int64_t>(
+               old_slot->ordinal.load(std::memory_order_relaxed)));
   }
 
   switch (mode) {
@@ -1509,8 +1508,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
       // publishers, so an ordinal gap is not evidence of a dropped message.
       // Queue-disabled and inherited-default subscribers retain ordinal-based
       // detection because they deliver through the ordered bitset path.
-      if (last_ordinal != -1 &&
-          subscriber->options_.SubscriberQueueSize() == 0) {
+      if (subscriber->options_.SubscriberQueueSize() == 0) {
         drops = std::max(
             drops, subscriber->DetectDrops(
                        new_slot->vchan_id.load(std::memory_order_relaxed)));
