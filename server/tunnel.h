@@ -12,8 +12,8 @@
 #include "common/async/context.h"
 #include "common/async/socket.h"
 #include "proto/tunnel_config.pb.h"
+#include "proto/tunnel_discovery.pb.h"
 #include "proto/tunnel_handshake.pb.h"
-#include "server/tunnel_discovery_message.h"
 #include "toolbelt/sockets.h"
 #include "toolbelt/triggerfd.h"
 #include <atomic>
@@ -51,7 +51,8 @@ public:
     // Messages too large for the local channel, or for the peer.
     std::atomic<uint64_t> oversized_received{0};
     std::atomic<uint64_t> oversized_not_sent{0};
-    // Messages dropped for a malformed prefix.
+    // Messages dropped for a malformed prefix, and discovery messages that
+    // didn't decode.
     std::atomic<uint64_t> malformed_received{0};
     std::atomic<uint64_t> discovery_received{0};
     std::atomic<uint64_t> discovery_sent{0};
@@ -139,15 +140,19 @@ private:
   void DiscoveryReceiverLoop(async::Context ctx, async::StreamSocket &socket,
                              const tunnel::Handshake &handshake,
                              const std::string &peer);
+  // Reads and discards a connection for an internal channel until the peer
+  // closes it.  Closing it instead would make the peer reconnect forever.
+  void DiscardConnection(async::Context ctx, async::StreamSocket &socket,
+                         const std::string &topic, const std::string &peer);
 
   IngressPlan PlanIngress(const tunnel::Handshake &handshake,
                           const std::string &peer);
   void Rescan();
-  void HandleDiscovery(const tunnel::DiscoveryMessage &msg);
+  void HandleDiscovery(const tunnel::Discovery &msg);
   void EnsureRoute(const std::string &topic, Peer &peer);
   // Makes every peer's discovery sender send a fresh message.
   void RequestDiscoverySend();
-  tunnel::DiscoveryMessage BuildDiscoveryMessage() const;
+  tunnel::Discovery BuildDiscoveryMessage() const;
   bool Excluded(const std::string &topic) const;
   // Logs a connection failure at info level, or at debug level when it
   // repeats the previous one.

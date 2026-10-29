@@ -53,9 +53,12 @@ inline constexpr uint64_t kMaxSendBodySize = INT32_MAX;
 inline constexpr size_t kMaxControlBodySize = 16 * 1024 * 1024;
 
 // The channel a peer's discovery sender feeds.  Discovery messages arrive
-// over an ordinary tunnel connection whose handshake names this channel.
+// over an ordinary tunnel connection whose handshake names this channel, and
+// each one is a serialized subspace.tunnel.Discovery.  Peers may also send
+// an older encoding on /ipc/discovery/receive, which is an internal channel
+// and so is ignored.
 inline constexpr std::string_view kDiscoveryChannelName =
-    "/ipc/discovery/receive";
+    "/ipc/discovery/proto/receive";
 
 // Handshake values a peer's discovery receiver expects.
 inline constexpr uint64_t kDiscoverySlotSize = 256;

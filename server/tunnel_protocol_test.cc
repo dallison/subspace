@@ -2,12 +2,12 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#include "server/tunnel_discovery_message.h"
 #include "server/tunnel_protocol.h"
 
 #include "absl/status/status_matchers.h"
 #include "client/checksum.h"
 #include "common/channel.h"
+#include "proto/tunnel_discovery.pb.h"
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <array>
@@ -171,85 +171,48 @@ TEST(TunnelChannelTest, InternalChannels) {
   EXPECT_TRUE(IsInternalChannel("/subspace/Statistics"));
   EXPECT_TRUE(IsInternalChannel("/ipc/discovery/receive"));
   EXPECT_TRUE(IsInternalChannel("/ipc/discovery/send"));
+  EXPECT_TRUE(IsInternalChannel(kDiscoveryChannelName));
+  EXPECT_TRUE(IsInternalChannel("/ipc/discovery/proto/send"));
   EXPECT_TRUE(IsInternalChannel("/framework/ipc_information/host"));
   EXPECT_FALSE(IsInternalChannel("/camera/front"));
   EXPECT_FALSE(IsInternalChannel("/my/subspace"));
 }
 
-TEST(TunnelDiscoveryMessageTest, EncodesRosLayout) {
-  DiscoveryMessage msg;
-  msg.device_name = "dev";
-  msg.published_topics.push_back({.topic = "/t",
-                                  .datatype = "D",
-                                  .mux = "",
-                                  .vchan_id = -1,
-                                  .is_reliable = true});
-  msg.subscribed_topics.push_back({.topic = "/s", .datatype = ""});
+// Pins the field numbers and types that peers decode.
+TEST(TunnelDiscoveryTest, EncodesPeerLayout) {
+  Discovery msg;
+  msg.set_device_name("dev");
+  DiscoveryTopic *plain = msg.add_published_topics();
+  plain->set_topic("/t");
+  plain->set_datatype("D");
+  plain->set_vchan_id(-1);
+  plain->set_is_reliable(true);
+  DiscoveryTopic *virtual_topic = msg.add_published_topics();
+  virtual_topic->set_topic("/v");
+  virtual_topic->set_mux("m");
+  virtual_topic->set_vchan_id(3);
+  msg.add_subscribed_topics()->set_topic("/s");
 
-  std::vector<std::byte> expected = Bytes({0x03, 0, 0, 0});
-  Append(expected, "dev");
-  for (std::byte b : Bytes({0x01, 0, 0, 0, 0x02, 0, 0, 0})) {
-    expected.push_back(b);
-  }
-  Append(expected, "/t");
-  for (std::byte b : Bytes({0x01, 0, 0, 0})) {
-    expected.push_back(b);
-  }
-  Append(expected, "D");
-  for (std::byte b : Bytes({0x00, 0, 0, 0,          // mux
-                            0xFF, 0xFF, 0xFF, 0xFF, // vchan_id -1
-                            0x01,                   // is_reliable
-                            0x01, 0, 0, 0,          // one subscribed topic
-                            0x02, 0, 0, 0})) {
-    expected.push_back(b);
-  }
-  Append(expected, "/s");
-  for (std::byte b : Bytes({0x00, 0, 0, 0,  // datatype
-                            0x00, 0, 0, 0,  // mux
-                            0x00, 0, 0, 0,  // vchan_id
-                            0x00})) {       // is_reliable
-    expected.push_back(b);
-  }
-  EXPECT_EQ(EncodeDiscoveryMessage(msg), expected);
-
-  absl::StatusOr<DiscoveryMessage> decoded = DecodeDiscoveryMessage(expected);
-  ASSERT_THAT(decoded, IsOk());
-  EXPECT_EQ(decoded->device_name, "dev");
-  EXPECT_EQ(decoded->published_topics, msg.published_topics);
-  EXPECT_EQ(decoded->subscribed_topics, msg.subscribed_topics);
-}
-
-TEST(TunnelDiscoveryMessageTest, IgnoresTrailingBytes) {
-  DiscoveryMessage msg;
-  msg.device_name = "peer";
-  std::vector<std::byte> wire = EncodeDiscoveryMessage(msg);
-  wire.push_back(std::byte{0x55});
-  absl::StatusOr<DiscoveryMessage> decoded = DecodeDiscoveryMessage(wire);
-  ASSERT_THAT(decoded, IsOk());
-  EXPECT_EQ(decoded->device_name, "peer");
-  EXPECT_TRUE(decoded->published_topics.empty());
-}
-
-TEST(TunnelDiscoveryMessageTest, RejectsTruncatedMessages) {
-  DiscoveryMessage msg;
-  msg.device_name = "dev";
-  msg.published_topics.push_back({.topic = "/t", .datatype = "D"});
-  std::vector<std::byte> wire = EncodeDiscoveryMessage(msg);
-  for (size_t length = 0; length < wire.size(); length++) {
-    EXPECT_FALSE(
-        DecodeDiscoveryMessage(absl::MakeConstSpan(wire).first(length)).ok())
-        << "length " << length;
-  }
-}
-
-TEST(TunnelDiscoveryMessageTest, RejectsHugeCounts) {
-  // An empty device name followed by a topic count of 0xFFFFFFFF.
-  std::vector<std::byte> wire =
-      Bytes({0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0});
-  EXPECT_FALSE(DecodeDiscoveryMessage(wire).ok());
-  // A string length larger than the message.
-  wire = Bytes({0xFF, 0xFF, 0xFF, 0x7F, 'a'});
-  EXPECT_FALSE(DecodeDiscoveryMessage(wire).ok());
+  std::vector<std::byte> expected = Bytes({
+      0x0A, 3, 'd', 'e', 'v',           // device_name
+      0x12, 20,                         // published topic
+      0x0A, 2, '/', 't',                // topic
+      0x12, 1, 'D',                     // datatype
+      0x20, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+      0xFF, 0xFF, 0xFF, 0xFF, 0x01,     // vchan_id -1
+      0x28, 1,                          // is_reliable
+      0x12, 9,                          // published topic
+      0x0A, 2, '/', 'v',                // topic
+      0x1A, 1, 'm',                     // mux
+      0x20, 3,                          // vchan_id
+      0x1A, 4,                          // subscribed topic
+      0x0A, 2, '/', 's',                // topic
+  });
+  std::string wire = msg.SerializeAsString();
+  EXPECT_EQ(std::vector<std::byte>(
+                reinterpret_cast<const std::byte *>(wire.data()),
+                reinterpret_cast<const std::byte *>(wire.data()) + wire.size()),
+            expected);
 }
 
 // A prefix area followed by a payload, laid out like a slot.

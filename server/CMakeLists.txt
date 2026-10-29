@@ -14,8 +14,6 @@ add_library(libserver STATIC
     tunnel.h
     tunnel_config.cc
     tunnel_config.h
-    tunnel_discovery_message.cc
-    tunnel_discovery_message.h
     tunnel_protocol.cc
     tunnel_protocol.h
 )

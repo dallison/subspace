@@ -387,6 +387,10 @@ void TunnelManager::HandshakeCoroutine(
       DiscoveryReceiverLoop(ctx, *socket, handshake, peer);
       return;
     }
+    if (tunnel::IsInternalChannel(handshake.topic_name())) {
+      DiscardConnection(ctx, *socket, handshake.topic_name(), peer);
+      return;
+    }
     IngressPlan plan = PlanIngress(handshake, peer);
     std::string name = "Tunnel ingress " + plan.topic + " from " + peer;
     SpawnOnNewStrand(
@@ -924,18 +928,21 @@ void TunnelManager::EnsureRoute(const std::string &topic, Peer &peer) {
       std::move(name));
 }
 
-tunnel::DiscoveryMessage TunnelManager::BuildDiscoveryMessage() const {
-  tunnel::DiscoveryMessage msg;
-  msg.device_name = device_name_;
+tunnel::Discovery TunnelManager::BuildDiscoveryMessage() const {
+  tunnel::Discovery msg;
+  msg.set_device_name(device_name_);
   for (const auto &[topic, publication] : local_publications_) {
-    msg.published_topics.push_back({.topic = topic,
-                                    .datatype = publication.datatype,
-                                    .mux = publication.mux,
-                                    .vchan_id = publication.vchan_id,
-                                    .is_reliable = publication.reliable});
+    tunnel::DiscoveryTopic *info = msg.add_published_topics();
+    info->set_topic(topic);
+    info->set_datatype(publication.datatype);
+    info->set_mux(publication.mux);
+    info->set_vchan_id(publication.vchan_id);
+    info->set_is_reliable(publication.reliable);
   }
   for (const auto &[topic, datatype] : local_subscriptions_) {
-    msg.subscribed_topics.push_back({.topic = topic, .datatype = datatype});
+    tunnel::DiscoveryTopic *info = msg.add_subscribed_topics();
+    info->set_topic(topic);
+    info->set_datatype(datatype);
   }
   return msg;
 }
@@ -1056,8 +1063,8 @@ absl::Status TunnelManager::RunDiscoveryConnection(async::Context ctx,
 absl::Status TunnelManager::SendDiscovery(async::Context ctx,
                                           async::StreamSocket &socket,
                                           uint64_t seq) {
-  std::vector<std::byte> payload =
-      tunnel::EncodeDiscoveryMessage(BuildDiscoveryMessage());
+  // Never empty, because the device name is required.
+  std::string payload = BuildDiscoveryMessage().SerializeAsString();
   const size_t prefix_size =
       static_cast<size_t>(Channel::ComputePrefixSize(4, 0));
   MessagePrefix prefix = {};
@@ -1111,16 +1118,19 @@ void TunnelManager::DiscoveryReceiverLoop(async::Context ctx,
     if (server_->shutting_down_) {
       break;
     }
-    absl::StatusOr<tunnel::DiscoveryMessage> msg =
-        tunnel::DecodeDiscoveryMessage(
-            absl::MakeConstSpan(body).subspan(prefix_size));
-    if (!msg.ok()) {
+    tunnel::Discovery msg;
+    // Protobuf accepts many byte strings that aren't discovery messages, but
+    // a real one always names its device.
+    if (!msg.ParseFromArray(body.data() + prefix_size,
+                            static_cast<int>(body.size() - prefix_size)) ||
+        msg.device_name().empty()) {
+      stats_.malformed_received++;
       server_->logger_.Log(toolbelt::LogLevel::kWarning,
-                           "Tunnel discovery from %s: %s", peer.c_str(),
-                           msg.status().ToString().c_str());
+                           "Tunnel discovery from %s doesn't decode",
+                           peer.c_str());
       continue;
     }
-    HandleDiscovery(*msg);
+    HandleDiscovery(msg);
   }
   if (!server_->shutting_down_ && !IsPeerClosed(status)) {
     server_->logger_.Log(toolbelt::LogLevel::kWarning,
@@ -1129,32 +1139,49 @@ void TunnelManager::DiscoveryReceiverLoop(async::Context ctx,
   }
 }
 
-void TunnelManager::HandleDiscovery(const tunnel::DiscoveryMessage &msg) {
+void TunnelManager::DiscardConnection(async::Context ctx,
+                                      async::StreamSocket &socket,
+                                      const std::string &topic,
+                                      const std::string &peer) {
+  server_->logger_.Log(toolbelt::LogLevel::kDebug,
+                       "Tunnel ignoring internal channel %s from %s",
+                       topic.c_str(), peer.c_str());
+  std::vector<char> scratch(64 * 1024);
+  while (!server_->shutting_down_) {
+    absl::StatusOr<ssize_t> n =
+        socket.Receive(scratch.data(), scratch.size(), ctx);
+    if (!n.ok() || *n <= 0) {
+      return;
+    }
+  }
+}
+
+void TunnelManager::HandleDiscovery(const tunnel::Discovery &msg) {
   stats_.discovery_received++;
-  auto it = peers_by_name_.find(msg.device_name);
+  auto it = peers_by_name_.find(msg.device_name());
   if (it == peers_by_name_.end()) {
-    if (unknown_peers_logged_.insert(msg.device_name).second) {
+    if (unknown_peers_logged_.insert(msg.device_name()).second) {
       server_->logger_.Log(toolbelt::LogLevel::kWarning,
                            "Tunnel discovery from unknown device \"%s\"; add "
                            "it to the tunnel configuration's peers",
-                           msg.device_name.c_str());
+                           msg.device_name().c_str());
     }
     return;
   }
   Peer &peer = *it->second;
   bool reply = false;
-  for (const tunnel::DiscoveryTopicInfo &info : msg.published_topics) {
-    if (!Excluded(info.topic) &&
-        peer.remote_publications.insert(info.topic).second &&
-        local_subscriptions_.count(info.topic) > 0) {
+  for (const tunnel::DiscoveryTopic &info : msg.published_topics()) {
+    if (!Excluded(info.topic()) &&
+        peer.remote_publications.insert(info.topic()).second &&
+        local_subscriptions_.count(info.topic()) > 0) {
       reply = true;
     }
   }
-  for (const tunnel::DiscoveryTopicInfo &info : msg.subscribed_topics) {
-    if (!Excluded(info.topic) &&
-        peer.remote_subscriptions.insert(info.topic).second &&
-        local_publications_.count(info.topic) > 0) {
-      EnsureRoute(info.topic, peer);
+  for (const tunnel::DiscoveryTopic &info : msg.subscribed_topics()) {
+    if (!Excluded(info.topic()) &&
+        peer.remote_subscriptions.insert(info.topic()).second &&
+        local_publications_.count(info.topic()) > 0) {
+      EnsureRoute(info.topic(), peer);
     }
   }
   if (reply) {

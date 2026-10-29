@@ -40,12 +40,10 @@ cc_library(
     name = "tunnel_wire",
     srcs = [
         "tunnel_config.cc",
-        "tunnel_discovery_message.cc",
         "tunnel_protocol.cc",
     ],
     hdrs = [
         "tunnel_config.h",
-        "tunnel_discovery_message.h",
         "tunnel_protocol.h",
     ],
     deps = [
@@ -73,6 +71,7 @@ cc_test(
         ":tunnel_wire",
         "//client:subspace_client",
         "//common:subspace_common",
+        "//proto:tunnel_cc_proto",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:status_matchers",
         "@googletest//:gtest_main",

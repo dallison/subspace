@@ -21,6 +21,7 @@ endif()
 set(PROTO_FILES
     subspace.proto
     tunnel_config.proto
+    tunnel_discovery.proto
     tunnel_handshake.proto
 )
 

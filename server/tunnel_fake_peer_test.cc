@@ -13,10 +13,10 @@
 #include "common/async/runtime.h"
 #include "common/channel.h"
 #include "proto/tunnel_config.pb.h"
+#include "proto/tunnel_discovery.pb.h"
 #include "proto/tunnel_handshake.pb.h"
 #include "server/server.h"
 #include "server/tunnel.h"
-#include "server/tunnel_discovery_message.h"
 #include "server/tunnel_protocol.h"
 #include <arpa/inet.h>
 #include <array>
@@ -48,8 +48,8 @@ namespace {
 using ::absl_testing::IsOk;
 using ::absl_testing::StatusIs;
 using namespace std::chrono_literals;
-using tunnel::DiscoveryMessage;
-using tunnel::DiscoveryTopicInfo;
+using tunnel::Discovery;
+using tunnel::DiscoveryTopic;
 using tunnel::Handshake;
 using tunnel::PacketHeader;
 using tunnel::PacketType;
@@ -315,19 +315,39 @@ Handshake DiscoveryHandshake() {
   return handshake;
 }
 
-std::string DiscoveryBody(const DiscoveryMessage &msg, uint64_t ordinal) {
-  std::vector<std::byte> payload = tunnel::EncodeDiscoveryMessage(msg);
+// A discovery message listing (topic, datatype) pairs.
+Discovery MakeDiscovery(
+    const std::string &device_name,
+    const std::vector<std::pair<std::string, std::string>> &published,
+    const std::vector<std::pair<std::string, std::string>> &subscribed) {
+  Discovery msg;
+  msg.set_device_name(device_name);
+  for (const auto &[topic, datatype] : published) {
+    DiscoveryTopic *info = msg.add_published_topics();
+    info->set_topic(topic);
+    info->set_datatype(datatype);
+    info->set_vchan_id(-1);
+  }
+  for (const auto &[topic, datatype] : subscribed) {
+    DiscoveryTopic *info = msg.add_subscribed_topics();
+    info->set_topic(topic);
+    info->set_datatype(datatype);
+  }
+  return msg;
+}
+
+std::string DiscoveryBody(const std::string &payload, uint64_t ordinal) {
   MessagePrefix prefix = {};
   prefix.message_size = payload.size();
   prefix.ordinal = ordinal;
   prefix.vchan_id = -1;
   prefix.checksum_size = 4;
   std::string body(reinterpret_cast<const char *>(&prefix), sizeof(prefix));
-  body.append(reinterpret_cast<const char *>(payload.data()), payload.size());
+  body.append(payload);
   return body;
 }
 
-absl::StatusOr<DiscoveryMessage> ParseDiscovery(const Packet &packet) {
+absl::StatusOr<Discovery> ParseDiscovery(const Packet &packet) {
   if (packet.header.type != PacketType::kData) {
     return absl::InvalidArgumentError("not a data packet");
   }
@@ -339,9 +359,12 @@ absl::StatusOr<DiscoveryMessage> ParseDiscovery(const Packet &packet) {
   if (prefix.message_size != packet.body.size() - sizeof(prefix)) {
     return absl::InvalidArgumentError("message size doesn't match the packet");
   }
-  return tunnel::DecodeDiscoveryMessage(absl::MakeConstSpan(
-      reinterpret_cast<const std::byte *>(packet.body.data()) + sizeof(prefix),
-      packet.body.size() - sizeof(prefix)));
+  Discovery msg;
+  if (!msg.ParseFromArray(packet.body.data() + sizeof(prefix),
+                          static_cast<int>(packet.body.size() - sizeof(prefix)))) {
+    return absl::InvalidArgumentError("discovery message doesn't decode");
+  }
+  return msg;
 }
 
 // The checksum a peer computes, covering every flag bit.
@@ -413,10 +436,11 @@ absl::Status Publish(Publisher &pub, const std::string &data) {
   return pub.PublishMessage(static_cast<int64_t>(data.size())).status();
 }
 
-const DiscoveryTopicInfo *FindTopic(const std::vector<DiscoveryTopicInfo> &list,
-                                    const std::string &topic) {
-  for (const DiscoveryTopicInfo &info : list) {
-    if (info.topic == topic) {
+const DiscoveryTopic *
+FindTopic(const google::protobuf::RepeatedPtrField<DiscoveryTopic> &list,
+          const std::string &topic) {
+  for (const DiscoveryTopic &info : list) {
+    if (info.topic() == topic) {
       return &info;
     }
   }
@@ -486,19 +510,31 @@ protected:
     return server_->GetTunnelManager()->GetStats();
   }
 
-  // Opens a discovery connection to the server and sends it one message.
-  std::unique_ptr<WireConnection> Announce(const DiscoveryMessage &msg) {
+  // Opens a connection to the server whose handshake names `topic`, shaped
+  // like a discovery channel.
+  std::unique_ptr<WireConnection> OpenDiscovery(std::string_view topic) {
     absl::StatusOr<std::unique_ptr<WireConnection>> connection =
         WireConnection::Connect(ServerPort());
     EXPECT_THAT(connection, IsOk());
     if (!connection.ok()) {
       return nullptr;
     }
-    EXPECT_THAT((*connection)->SendHandshake(DiscoveryHandshake()), IsOk());
-    EXPECT_THAT(
-        (*connection)->Send(PacketType::kData, 1, DiscoveryBody(msg, 1)),
-        IsOk());
+    Handshake handshake = DiscoveryHandshake();
+    handshake.set_topic_name(std::string(topic));
+    EXPECT_THAT((*connection)->SendHandshake(handshake), IsOk());
     return std::move(*connection);
+  }
+
+  // Opens a discovery connection to the server and sends it one message.
+  std::unique_ptr<WireConnection> Announce(const Discovery &msg) {
+    std::unique_ptr<WireConnection> connection =
+        OpenDiscovery(tunnel::kDiscoveryChannelName);
+    if (connection != nullptr) {
+      EXPECT_THAT(connection->Send(PacketType::kData, 1,
+                                   DiscoveryBody(msg.SerializeAsString(), 1)),
+                  IsOk());
+    }
+    return connection;
   }
 
   // Opens a data connection to the server for `topic`.
@@ -523,9 +559,9 @@ protected:
 
   // Reads the server's discovery messages until one satisfies `done`,
   // checking that their sequence numbers count up from `*seq`.
-  absl::StatusOr<DiscoveryMessage>
+  absl::StatusOr<Discovery>
   ReadDiscoveryUntil(WireConnection &connection, uint64_t *seq,
-                     const std::function<bool(const DiscoveryMessage &)> &done) {
+                     const std::function<bool(const Discovery &)> &done) {
     Clock::time_point deadline = Clock::now() + 10s;
     while (Clock::now() < deadline) {
       absl::StatusOr<Packet> packet = connection.Read();
@@ -537,7 +573,7 @@ protected:
             absl::StrFormat("sequence %d follows %d", packet->header.seq, *seq));
       }
       *seq = packet->header.seq;
-      absl::StatusOr<DiscoveryMessage> msg = ParseDiscovery(*packet);
+      absl::StatusOr<Discovery> msg = ParseDiscovery(*packet);
       if (!msg.ok() || done(*msg)) {
         return msg;
       }
@@ -598,35 +634,38 @@ TEST_F(TunnelFakePeerTest, AnnouncesChannelsInCruiseFormat) {
   EXPECT_EQ(handshake.subspace().metadata_size(), 0);
 
   uint64_t seq = 0;
-  absl::StatusOr<DiscoveryMessage> msg = ReadDiscoveryUntil(
-      *discovery->connection, &seq, [](const DiscoveryMessage &m) {
-        return FindTopic(m.published_topics, "/alpha/out") != nullptr &&
-               FindTopic(m.published_topics, "/alpha/reliable") != nullptr &&
-               FindTopic(m.published_topics, "/alpha/virtual") != nullptr &&
-               FindTopic(m.subscribed_topics, "/alpha/in") != nullptr;
+  absl::StatusOr<Discovery> msg = ReadDiscoveryUntil(
+      *discovery->connection, &seq, [](const Discovery &m) {
+        return FindTopic(m.published_topics(), "/alpha/out") != nullptr &&
+               FindTopic(m.published_topics(), "/alpha/reliable") != nullptr &&
+               FindTopic(m.published_topics(), "/alpha/virtual") != nullptr &&
+               FindTopic(m.subscribed_topics(), "/alpha/in") != nullptr;
       });
   ASSERT_THAT(msg, IsOk());
-  EXPECT_EQ(msg->device_name, "alpha");
+  EXPECT_EQ(msg->device_name(), "alpha");
 
-  const DiscoveryTopicInfo *info = FindTopic(msg->published_topics, "/alpha/out");
-  EXPECT_EQ(info->datatype, "alpha.Out");
-  EXPECT_EQ(info->mux, "");
-  EXPECT_EQ(info->vchan_id, -1);
-  EXPECT_FALSE(info->is_reliable);
-  EXPECT_TRUE(FindTopic(msg->published_topics, "/alpha/reliable")->is_reliable);
-  info = FindTopic(msg->published_topics, "/alpha/virtual");
-  EXPECT_EQ(info->mux, "/alpha/mux");
-  EXPECT_EQ(info->vchan_id, 5);
-  info = FindTopic(msg->subscribed_topics, "/alpha/in");
-  EXPECT_EQ(info->datatype, "alpha.In");
-  EXPECT_EQ(info->vchan_id, 0);
+  const DiscoveryTopic *info =
+      FindTopic(msg->published_topics(), "/alpha/out");
+  EXPECT_EQ(info->datatype(), "alpha.Out");
+  EXPECT_EQ(info->mux(), "");
+  EXPECT_EQ(info->vchan_id(), -1);
+  EXPECT_FALSE(info->is_reliable());
+  EXPECT_TRUE(
+      FindTopic(msg->published_topics(), "/alpha/reliable")->is_reliable());
+  info = FindTopic(msg->published_topics(), "/alpha/virtual");
+  EXPECT_EQ(info->mux(), "/alpha/mux");
+  EXPECT_EQ(info->vchan_id(), 5);
+  info = FindTopic(msg->subscribed_topics(), "/alpha/in");
+  EXPECT_EQ(info->datatype(), "alpha.In");
+  EXPECT_EQ(info->vchan_id(), 0);
 
-  for (const auto *list : {&msg->published_topics, &msg->subscribed_topics}) {
-    for (const DiscoveryTopicInfo &topic : *list) {
-      EXPECT_NE(topic.topic, "/alpha/secret");
-      EXPECT_NE(topic.topic, "/alpha/local");
-      EXPECT_NE(topic.topic, "/alpha/mux");
-      EXPECT_FALSE(absl::StartsWith(topic.topic, "/subspace/")) << topic.topic;
+  for (const auto *list : {&msg->published_topics(), &msg->subscribed_topics()}) {
+    for (const DiscoveryTopic &topic : *list) {
+      EXPECT_NE(topic.topic(), "/alpha/secret");
+      EXPECT_NE(topic.topic(), "/alpha/local");
+      EXPECT_NE(topic.topic(), "/alpha/mux");
+      EXPECT_FALSE(absl::StartsWith(topic.topic(), "/subspace/"))
+          << topic.topic();
     }
   }
 }
@@ -640,8 +679,8 @@ TEST_F(TunnelFakePeerTest, RepliesWhenThePeerPublishesWhatItWants) {
   ASSERT_THAT(discovery, IsOk());
   uint64_t seq = 0;
   ASSERT_THAT(ReadDiscoveryUntil(*discovery->connection, &seq,
-                                 [](const DiscoveryMessage &m) {
-                                   return FindTopic(m.subscribed_topics,
+                                 [](const Discovery &m) {
+                                   return FindTopic(m.subscribed_topics(),
                                                     "/cruise/reply") != nullptr;
                                  }),
               IsOk());
@@ -650,18 +689,15 @@ TEST_F(TunnelFakePeerTest, RepliesWhenThePeerPublishesWhatItWants) {
     seq++;
   }
 
-  std::unique_ptr<WireConnection> announcement =
-      Announce({.device_name = kPeerName,
-                .published_topics = {{.topic = "/cruise/reply",
-                                      .datatype = "cruise.Reply",
-                                      .vchan_id = -1}}});
+  std::unique_ptr<WireConnection> announcement = Announce(
+      MakeDiscovery(kPeerName, {{"/cruise/reply", "cruise.Reply"}}, {}));
   // Well before the 5 second refresh.
   absl::StatusOr<Packet> reply = discovery->connection->Read(2s);
   ASSERT_THAT(reply, IsOk());
   EXPECT_EQ(reply->header.seq, seq + 1);
-  absl::StatusOr<DiscoveryMessage> msg = ParseDiscovery(*reply);
+  absl::StatusOr<Discovery> msg = ParseDiscovery(*reply);
   ASSERT_THAT(msg, IsOk());
-  EXPECT_NE(FindTopic(msg->subscribed_topics, "/cruise/reply"), nullptr);
+  EXPECT_NE(FindTopic(msg->subscribed_topics(), "/cruise/reply"), nullptr);
 }
 
 TEST_F(TunnelFakePeerTest, SendsChannelsThePeerSubscribesTo) {
@@ -674,9 +710,7 @@ TEST_F(TunnelFakePeerTest, SendsChannelsThePeerSubscribesTo) {
                            .SetType("alpha.Stream"));
   ASSERT_THAT(pub, IsOk());
   std::unique_ptr<WireConnection> announcement = Announce(
-      {.device_name = kPeerName,
-       .subscribed_topics = {{.topic = "/alpha/stream",
-                              .datatype = "alpha.Stream"}}});
+      MakeDiscovery(kPeerName, {}, {{"/alpha/stream", "alpha.Stream"}}));
 
   absl::StatusOr<Accepted> stream = peer_.Accept("/alpha/stream");
   ASSERT_THAT(stream, IsOk());
@@ -790,16 +824,82 @@ TEST_F(TunnelFakePeerTest, IgnoresUnknownDevices) {
   absl::StatusOr<Publisher> pub =
       client_->CreatePublisher("/alpha/private", 256, 8);
   ASSERT_THAT(pub, IsOk());
-  DiscoveryMessage msg = {
-      .device_name = "stranger",
-      .subscribed_topics = {{.topic = "/alpha/private"}}};
+  Discovery msg = MakeDiscovery("stranger", {}, {{"/alpha/private", ""}});
   std::unique_ptr<WireConnection> stranger = Announce(msg);
   EXPECT_THAT(peer_.Accept("/alpha/private", 1s),
               StatusIs(absl::StatusCode::kDeadlineExceeded));
 
-  msg.device_name = kPeerName;
+  msg.set_device_name(kPeerName);
   std::unique_ptr<WireConnection> known = Announce(msg);
   EXPECT_THAT(peer_.Accept("/alpha/private"), IsOk());
+}
+
+TEST_F(TunnelFakePeerTest, SkipsDiscoveryThatDoesNotDecode) {
+  StartServer();
+  absl::StatusOr<Publisher> pub =
+      client_->CreatePublisher("/alpha/wanted", 256, 8);
+  ASSERT_THAT(pub, IsOk());
+  std::unique_ptr<WireConnection> discovery =
+      OpenDiscovery(tunnel::kDiscoveryChannelName);
+  ASSERT_NE(discovery, nullptr);
+  // An invalid wire type, then a valid message with no device name.
+  ASSERT_THAT(discovery->Send(PacketType::kData, 1,
+                              DiscoveryBody(std::string(3, '\xff'), 1)),
+              IsOk());
+  ASSERT_THAT(discovery->Send(
+                  PacketType::kData, 2,
+                  DiscoveryBody(MakeDiscovery("", {}, {{"/alpha/wanted", ""}})
+                                    .SerializeAsString(),
+                                2)),
+              IsOk());
+  ASSERT_THAT(discovery->Send(
+                  PacketType::kData, 3,
+                  DiscoveryBody(MakeDiscovery(kPeerName, {},
+                                              {{"/alpha/wanted", ""}})
+                                    .SerializeAsString(),
+                                3)),
+              IsOk());
+
+  EXPECT_THAT(peer_.Accept("/alpha/wanted"), IsOk());
+  EXPECT_EQ(Stats().malformed_received, 2u);
+  EXPECT_EQ(Stats().discovery_received, 1u);
+}
+
+// Peers also announce themselves in an older encoding on
+// /ipc/discovery/receive, which the tunnel doesn't read.
+TEST_F(TunnelFakePeerTest, DiscardsInternalChannels) {
+  StartServer();
+  absl::StatusOr<Publisher> pub =
+      client_->CreatePublisher("/alpha/wanted", 256, 8);
+  ASSERT_THAT(pub, IsOk());
+  absl::StatusOr<Subscriber> legacy =
+      client_->CreateSubscriber("/ipc/discovery/receive");
+  ASSERT_THAT(legacy, IsOk());
+
+  std::unique_ptr<WireConnection> ros = OpenDiscovery("/ipc/discovery/receive");
+  ASSERT_NE(ros, nullptr);
+  std::unique_ptr<WireConnection> directory =
+      OpenDiscovery("/subspace/ChannelDirectory");
+  ASSERT_NE(directory, nullptr);
+  // Would ask for /alpha/wanted if the tunnel decoded it.
+  std::string announcement =
+      MakeDiscovery(kPeerName, {}, {{"/alpha/wanted", ""}})
+          .SerializeAsString();
+  for (WireConnection *connection : {ros.get(), directory.get()}) {
+    for (uint64_t seq = 1; seq <= 3; seq++) {
+      ASSERT_THAT(connection->Send(PacketType::kData, seq,
+                                   DiscoveryBody(announcement, seq)),
+                  IsOk());
+    }
+  }
+
+  EXPECT_THAT(peer_.Accept("/alpha/wanted", 1s),
+              StatusIs(absl::StatusCode::kDeadlineExceeded));
+  EXPECT_FALSE(Read(*legacy, 100ms).ok());
+  EXPECT_FALSE(ros->ClosedWithin(100ms));
+  EXPECT_FALSE(directory->ClosedWithin(100ms));
+  EXPECT_EQ(Stats().messages_received, 0u);
+  EXPECT_EQ(Stats().discovery_received, 0u);
 }
 
 TEST_F(TunnelFakePeerTest, RepeatsDiscoveryOnRefresh) {
@@ -829,9 +929,9 @@ TEST_F(TunnelFakePeerTest, ResendsDiscoveryAfterReconnecting) {
   absl::StatusOr<Packet> packet = again->connection->Read();
   ASSERT_THAT(packet, IsOk());
   EXPECT_EQ(packet->header.seq, 1u);
-  absl::StatusOr<DiscoveryMessage> msg = ParseDiscovery(*packet);
+  absl::StatusOr<Discovery> msg = ParseDiscovery(*packet);
   ASSERT_THAT(msg, IsOk());
-  EXPECT_EQ(msg->device_name, "alpha");
+  EXPECT_EQ(msg->device_name(), "alpha");
 }
 
 TEST_F(TunnelFakePeerTest, ClosesConnectionsWithBadHandshakes) {

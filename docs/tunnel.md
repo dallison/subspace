@@ -79,9 +79,11 @@ A peer whose address doesn't resolve at startup is logged and retried every
 ## Discovery
 
 Each server keeps one discovery connection open to every configured peer,
-using the cruise discovery topic `/ipc/discovery/receive`. Over it, the server
-sends its device name and the channels it publishes and subscribes to. The
-server sends the message:
+using the cruise protobuf discovery topic `/ipc/discovery/proto/receive`. Over
+it, the server sends its device name and the channels it publishes and
+subscribes to, as a serialized `subspace.tunnel.Discovery`
+(`proto/tunnel_discovery.proto`). This matches the cruise `DiscoveryProto`
+message field for field. The server sends the message:
 
 - when the connection is made, or remade after a failure,
 - when its set of channels changes,
@@ -108,7 +110,16 @@ subscribes to it. The denylist applies only to discovery and sending; a peer
 that connects to send a denylisted channel is accepted.
 
 Discovery messages from a device that isn't listed in `peers` are ignored, with
-a warning the first time each unknown device name appears.
+a warning the first time each unknown device name appears. Messages that don't
+decode, or that have no device name, are skipped with a warning, and the
+connection stays open.
+
+Only the protobuf format is supported. Cruise peers need a build that sends it,
+with `discovery_protocol` set to `protobuf` or `both` (the default). The older
+ROS-encoded discovery that such peers may also send on `/ipc/discovery/receive`
+is read and discarded, as is anything a peer sends on another internal
+channel. Those connections are kept open so the peer doesn't keep
+reconnecting.
 
 ## Data
 
@@ -197,5 +208,7 @@ and at debug level after that, until it changes.
 ## Limitations
 
 - Only TCP is supported.
+- Only protobuf discovery is supported; peers that send only ROS-encoded
+  discovery can't exchange channels with the server.
 - Routes come from discovery; there are no static routes.
 - All peers share the same options; there are no per-peer settings.

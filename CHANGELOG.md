@@ -9,6 +9,9 @@
   (`proto/tunnel_config.proto`) that lists the device name, listen port,
   peers, discovery denylist and refresh interval. Programs that embed the
   server call `Server::SetTunnelConfig`. See `docs/tunnel.md`.
+- Tunnel discovery uses the cruise protobuf format on
+  `/ipc/discovery/proto/receive` (`proto/tunnel_discovery.proto`). ROS-encoded
+  discovery is not supported; connections that carry it are ignored.
 - The tunnel runs alongside native discovery and bridging, and the two never
   forward each other's messages. With `--local --tunnel` only the tunnel runs.
 - Tunnel channels resize with their messages and have no maximum message

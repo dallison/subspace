@@ -12,7 +12,6 @@ cc_library_static {
         "shadow_replicator.cc",
         "tunnel.cc",
         "tunnel_config.cc",
-        "tunnel_discovery_message.cc",
         "tunnel_protocol.cc",
     ],
     export_include_dirs: ["."],

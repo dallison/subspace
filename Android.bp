@@ -41,6 +41,7 @@ cc_library_static {
     srcs: [
         "proto/subspace.proto",
         "proto/tunnel_config.proto",
+        "proto/tunnel_discovery.proto",
         "proto/tunnel_handshake.proto",
     ],
     proto: {
