@@ -1,0 +1,24 @@
+// Copyright 2026 David Allison
+// All Rights Reserved
+// See LICENSE file for licensing information.
+
+// Configuration for the tunnel-compatible discovery and bridging mode, read
+// in protobuf text format from the file named by --tunnel_config.
+syntax = "proto3";
+
+package subspace;
+
+message TunnelPeer {
+  string name = 1;      // Must equal the peer's device_name.
+  string tcp_addr = 2;  // Host name or IP address.
+  int32 tcp_port = 3;   // The peer's listen port.
+}
+
+message TunnelConfig {
+  string device_name = 1;     // Default: --machine, else the host name.
+  string listen_address = 2;  // Default: all interfaces.
+  int32 listen_port = 3;      // Required.
+  repeated TunnelPeer peers = 4;
+  repeated string discovery_denylist = 5;  // Exact channel names.
+  optional int32 discovery_refresh_secs = 6;  // Absent = 5; 0 = no refresh.
+}

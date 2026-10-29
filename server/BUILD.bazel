@@ -33,6 +33,49 @@ cc_library(
 )
 
 cc_library(
+    name = "tunnel_wire",
+    srcs = [
+        "tunnel_config.cc",
+        "tunnel_discovery_message.cc",
+        "tunnel_protocol.cc",
+    ],
+    hdrs = [
+        "tunnel_config.h",
+        "tunnel_discovery_message.h",
+        "tunnel_protocol.h",
+    ],
+    deps = [
+        "//client:subspace_client",
+        "//common:subspace_common",
+        "//proto:tunnel_cc_proto",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+        "@protobuf//:protobuf",
+    ],
+)
+
+cc_test(
+    name = "tunnel_wire_test",
+    size = "small",
+    srcs = [
+        "tunnel_config_test.cc",
+        "tunnel_protocol_test.cc",
+    ],
+    deps = [
+        ":tunnel_wire",
+        "//client:subspace_client",
+        "//common:subspace_common",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "server_ffi",
     srcs = ["server_ffi.cc"],
     hdrs = ["server_ffi.h"],
