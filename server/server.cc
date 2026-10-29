@@ -1397,7 +1397,7 @@ Server::CreateChannel(const std::string &channel_name, int64_t slot_size,
   channel->SetSharedMemoryFds(std::move(*fds));
   channels_.emplace(std::make_pair(channel_name, channel));
   if (channel->IsTelemetryChannel()) {
-    NoteTelemetryChannel(channel->TelemetryTarget(), true);
+    num_telemetry_channels_.fetch_add(1, std::memory_order_relaxed);
   }
   OnNewChannel(channel_name);
   ForEachShadow([channel](const std::unique_ptr<ShadowReplicator> &s) {
@@ -2033,7 +2033,7 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
     restore_users(channel, rch);
     channels_.emplace(rch.name, channel);
     if (channel->IsTelemetryChannel()) {
-      NoteTelemetryChannel(channel->TelemetryTarget(), true);
+      num_telemetry_channels_.fetch_add(1, std::memory_order_relaxed);
     }
     logger_.Log(toolbelt::LogLevel::kInfo,
                 "Recovered channel '%s' (id=%d, %d pubs, %d subs)",
@@ -2184,23 +2184,9 @@ void Server::RemoveChannel(ServerChannel *channel) {
   }
   channels_.erase(it);
   if (telemetry) {
-    NoteTelemetryChannel(telemetry_target, false);
+    num_telemetry_channels_.fetch_sub(1, std::memory_order_relaxed);
   }
   SendChannelDirectory();
-}
-
-bool Server::HasTelemetryChannel(const std::string &target) const {
-  std::lock_guard<std::mutex> lock(telemetry_presence_mu_);
-  return telemetry_targets_.contains(target);
-}
-
-void Server::NoteTelemetryChannel(const std::string &target, bool present) {
-  std::lock_guard<std::mutex> lock(telemetry_presence_mu_);
-  if (present) {
-    telemetry_targets_.insert(target);
-  } else {
-    telemetry_targets_.erase(target);
-  }
 }
 
 void Server::RemoveAllUsersFor(ClientHandler *handler) {
@@ -3641,8 +3627,6 @@ void Server::GratuitousAdvertiseCoroutine(async::Context ctx) {
 
 absl::Status Server::LoadPlugin(const std::string &name,
                                 const std::string &path) {
-  std::lock_guard<std::mutex> lock(plugin_lock_);
-
   void *handle = nullptr;
   bool builtin = (path == "BUILTIN");
   if (!builtin) {
@@ -3671,7 +3655,6 @@ absl::Status Server::LoadPlugin(const std::string &name,
 absl::Status
 Server::LoadBuiltinPlugin(const std::string &name,
                           std::unique_ptr<PluginInterface> interface) {
-  std::lock_guard<std::mutex> lock(plugin_lock_);
   return RegisterPlugin(name, nullptr, std::move(interface));
 }
 
@@ -3692,7 +3675,6 @@ Server::RegisterPlugin(const std::string &name, void *handle,
 }
 
 absl::Status Server::UnloadPlugin(const std::string &name) {
-  std::lock_guard<std::mutex> lock(plugin_lock_);
   auto it = std::find_if(
       plugins_.begin(), plugins_.end(),
       [&name](const std::unique_ptr<Plugin> &p) { return p->name == name; });
@@ -3705,7 +3687,6 @@ absl::Status Server::UnloadPlugin(const std::string &name) {
 }
 
 void Server::OnReady() {
-  std::lock_guard<std::mutex> lock(plugin_lock_);
   for (const auto &plugin : plugins_) {
     plugin->interface->OnReady(*this);
   }
@@ -3715,7 +3696,6 @@ void Server::OnNewChannel(const std::string &channel_name) {
   if (!IsPublicChannel(FindChannel(channel_name))) {
     return;
   }
-  std::lock_guard<std::mutex> lock(plugin_lock_);
   for (const auto &plugin : plugins_) {
     plugin->interface->OnNewChannel(*this, channel_name);
   }
@@ -3725,7 +3705,6 @@ void Server::OnRemoveChannel(const std::string &channel_name) {
   if (!IsPublicChannel(FindChannel(channel_name))) {
     return;
   }
-  std::lock_guard<std::mutex> lock(plugin_lock_);
   for (const auto &plugin : plugins_) {
     plugin->interface->OnRemoveChannel(*this, channel_name);
   }
@@ -3742,7 +3721,6 @@ void Server::OnNewPublisher(const std::string &channel_name, int publisher_id) {
   if (!IsPublicChannel(channel)) {
     return;
   }
-  std::lock_guard<std::mutex> lock(plugin_lock_);
   for (const auto &plugin : plugins_) {
     plugin->interface->OnNewPublisher(*this, channel_name, publisher_id);
   }
@@ -3760,7 +3738,6 @@ void Server::OnRemovePublisher(const std::string &channel_name,
   if (!IsPublicChannel(channel)) {
     return;
   }
-  std::lock_guard<std::mutex> lock(plugin_lock_);
   for (const auto &plugin : plugins_) {
     plugin->interface->OnRemovePublisher(*this, channel_name, publisher_id);
   }
@@ -3778,7 +3755,6 @@ void Server::OnNewSubscriber(const std::string &channel_name,
   if (!IsPublicChannel(channel)) {
     return;
   }
-  std::lock_guard<std::mutex> lock(plugin_lock_);
   for (const auto &plugin : plugins_) {
     plugin->interface->OnNewSubscriber(*this, channel_name, subscriber_id);
   }
@@ -3796,7 +3772,6 @@ void Server::OnRemoveSubscriber(const std::string &channel_name,
   if (!IsPublicChannel(channel)) {
     return;
   }
-  std::lock_guard<std::mutex> lock(plugin_lock_);
   for (const auto &plugin : plugins_) {
     plugin->interface->OnRemoveSubscriber(*this, channel_name, subscriber_id);
   }
@@ -3804,7 +3779,6 @@ void Server::OnRemoveSubscriber(const std::string &channel_name,
 
 absl::StatusOr<bool> Server::FreeClientBufferWithPlugins(
     const ClientBufferHandleMetadata &metadata) {
-  std::lock_guard<std::mutex> lock(plugin_lock_);
   for (const auto &plugin : plugins_) {
     absl::StatusOr<bool> freed =
         plugin->interface->OnFreeClientBuffer(*this, metadata);

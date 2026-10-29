@@ -136,6 +136,17 @@ WaitForTelemetry(Subscriber &subscriber,
   return absl::DeadlineExceededError("Timed out waiting for telemetry");
 }
 
+// A telemetry channel goes away soon after its last telemetry subscriber.
+bool WaitForNoTelemetryChannels(subspace::Server *server) {
+  for (int attempt = 0; attempt < 40; ++attempt) {
+    if (server->NumTelemetryChannels() == 0) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  return server->NumTelemetryChannels() == 0;
+}
+
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
 absl::StatusOr<toolbelt::FileDescriptor> CreateTestMemfd(const char *name,
                                                          size_t size) {
@@ -2537,45 +2548,6 @@ TEST_F(ClientTest, PublishSingleMessageAndReadWithCallback) {
 
   status = sub->UnregisterMessageCallback();
   ASSERT_OK(status);
-}
-
-TEST_F(ClientTest, PublishSingleMessageAndReadWithPlugin) {
-#ifdef __APPLE__
-  ASSERT_OK(Server()->LoadBuiltinPlugin(
-      "NOP", std::unique_ptr<subspace::PluginInterface>(NOP_Create())));
-#else
-  ASSERT_OK(Server()->LoadPlugin("NOP", "plugins/nop_plugin.so"));
-#endif
-  subspace::Client pub_client;
-  subspace::Client sub_client;
-  ASSERT_OK(pub_client.Init(Socket()));
-  ASSERT_OK(sub_client.Init(Socket()));
-  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher("dave6", 256, 10);
-  ASSERT_OK(pub);
-  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-  ASSERT_OK(buffer);
-  memcpy(*buffer, "foobar", 6);
-  absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
-  ASSERT_OK(pub_status);
-
-  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("dave6");
-  ASSERT_OK(sub);
-
-  absl::StatusOr<Message> msg = sub->ReadMessage();
-  ASSERT_OK(msg);
-  ASSERT_EQ(6, msg->length);
-
-  // Another read will get 0.
-  msg = sub->ReadMessage();
-  ASSERT_OK(msg);
-  ASSERT_EQ(0, msg->length);
-
-  // Read again to make sure we get another 0.
-  // Regression test.
-  msg = sub->ReadMessage();
-  ASSERT_OK(msg);
-  ASSERT_EQ(0, msg->length);
-  ASSERT_OK(Server()->UnloadPlugin("NOP"));
 }
 
 TEST_F(ClientTest, VirtualPublishSingleMessageAndRead) {
@@ -6007,6 +5979,7 @@ TEST_F(ClientTest, TelemetryDoesNotEnforceRequestedType) {
 
 TEST_F(ClientTest, FailedTelemetrySubscriberRemovesHiddenChannel) {
   constexpr char kChannel[] = "telemetry_failed_subscriber";
+  ASSERT_TRUE(WaitForNoTelemetryChannels(Server()));
   auto client = EVAL_AND_ASSERT_OK(
       subspace::Client::Create(Socket(), "telemetry-failure"));
   Publisher publisher =
@@ -6015,11 +5988,12 @@ TEST_F(ClientTest, FailedTelemetrySubscriberRemovesHiddenChannel) {
   absl::StatusOr<Subscriber> telemetry = client->CreateSubscriber(
       kChannel, SubOpts().SetTelemetry(true).SetMaxActiveMessages(1000));
   EXPECT_FALSE(telemetry.ok());
-  EXPECT_FALSE(Server()->HasTelemetryChannel(kChannel));
+  EXPECT_EQ(0, Server()->NumTelemetryChannels());
 }
 
 TEST_F(ClientTest, TelemetrySnapshotsAndBatchesParticipantChanges) {
   constexpr char kChannel[] = "telemetry_participants";
+  ASSERT_TRUE(WaitForNoTelemetryChannels(Server()));
   auto publisher_client = EVAL_AND_ASSERT_OK(
       subspace::Client::Create(Socket(), "telemetry-publisher"));
   auto subscriber_client = EVAL_AND_ASSERT_OK(
@@ -6107,14 +6081,7 @@ TEST_F(ClientTest, TelemetrySnapshotsAndBatchesParticipantChanges) {
     }
   }
 
-  bool telemetry_channel_exists = true;
-  for (int attempt = 0; attempt < 40 && telemetry_channel_exists; ++attempt) {
-    telemetry_channel_exists = Server()->HasTelemetryChannel(kChannel);
-    if (telemetry_channel_exists) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-  }
-  EXPECT_FALSE(telemetry_channel_exists);
+  EXPECT_TRUE(WaitForNoTelemetryChannels(Server()));
 }
 
 TEST_F(ClientTest, TelemetryReportsDropDeltasAndResizes) {
@@ -9205,6 +9172,9 @@ public:
     char buf[8];
     (void)::read(server_pipe_[0], buf, 8);
     server_thread_.join();
+    absl::Status unloaded = server_->UnloadPlugin("NOP");
+    EXPECT_TRUE(unloaded.ok()) << unloaded;
+    EXPECT_TRUE(absl::IsNotFound(server_->UnloadPlugin("NOP")));
     server_->CleanupAfterSession();
     (void)remove(socket_.c_str());
   }
@@ -9221,6 +9191,38 @@ private:
   inline static std::unique_ptr<subspace::Server> server_;
   inline static std::thread server_thread_;
 };
+
+TEST_F(PluginTest, PublishSingleMessageAndRead) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher("dave6", 256, 10);
+  ASSERT_OK(pub);
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "foobar", 6);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+  ASSERT_OK(pub_status);
+
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("dave6");
+  ASSERT_OK(sub);
+
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(6, msg->length);
+
+  // Another read will get 0.
+  msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(0, msg->length);
+
+  // Read again to make sure we get another 0.
+  // Regression test.
+  msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(0, msg->length);
+}
 
 TEST_F(PluginTest, HeartbeatPublishes) {
   subspace::Client sub_client;
