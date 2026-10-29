@@ -303,6 +303,15 @@ private:
   std::unique_ptr<boost::asio::steady_timer> reemit_timer_;
 
 #else  // SUBSPACE_CORO_BACKEND_CO
+  // On macOS, ASan's strerror interceptor alone takes about 56KB of stack, so
+  // an error path that formats errno overruns the default 64KB coroutine
+  // stack and silently corrupts the heap below it.
+#if defined(CO_ADDRESS_SANITIZER)
+  static constexpr size_t kStackSize = 256 * 1024;
+#else
+  static constexpr size_t kStackSize = co::kCoDefaultStackSize;
+#endif
+
   explicit AsyncRuntime(co::CoroutineScheduler &scheduler)
       : scheduler_(scheduler) {}
 
@@ -311,7 +320,8 @@ private:
   void Spawn(std::function<void(Context)> fn, SpawnOptions opts = {}) {
     scheduler_.Spawn([fn = std::move(fn)](co::Coroutine *c) { fn(c); },
                      {.name = std::move(opts.name),
-                      .interrupt_fd = opts.interrupt_fd});
+                      .interrupt_fd = opts.interrupt_fd,
+                      .stack_size = kStackSize});
   }
 
   // The co backend is single-threaded, so there is no strand: spawning "on the

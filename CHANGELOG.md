@@ -30,6 +30,12 @@
   `Server::SetMachineName`, and a `sequence` that goes up by one per
   published message. A gap in `sequence` means lost intervals.
 
+### Larger Server Coroutine Stacks Under ASan
+- With AddressSanitizer, coroutines spawned through `AsyncRuntime` on the co
+  backend get 256KB stacks instead of 64KB. On macOS, ASan's `strerror`
+  interceptor alone uses about 56KB of stack, so an error path that formatted
+  `errno` could run off the end of a 64KB stack and corrupt the heap.
+
 ### Checksum Covers Only Publisher Flags
 - The message checksum now covers only the `kMessageActivate` and
   `kMessageHasChecksum` bits of the prefix `flags`
