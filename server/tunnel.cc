@@ -213,6 +213,8 @@ absl::Status TunnelManager::Init() {
   for (const TunnelPeer &peer_config : config_.peers()) {
     auto peer = std::make_unique<Peer>();
     peer->config = peer_config;
+    peer->discovery =
+        !config_.disable_discovery() && !peer_config.disable_discovery();
     absl::StatusOr<toolbelt::TriggerFd> trigger =
         toolbelt::TriggerFd::Create();
     if (!trigger.ok()) {
@@ -231,6 +233,18 @@ absl::Status TunnelManager::Init() {
     }
     peers_by_name_[peer_config.name()] = peer.get();
     peers_.push_back(std::move(peer));
+  }
+  for (const TunnelSendRoute &route : config_.send_routes()) {
+    std::vector<Peer *> &peers = send_routes_[route.topic()];
+    for (const std::string &name : route.peers()) {
+      peers.push_back(peers_by_name_.at(name));
+    }
+  }
+  for (const TunnelReceiveRoute &route : config_.receive_routes()) {
+    receive_routes_[route.topic()] = ReceiveRoute{
+        .peers = {route.peers().begin(), route.peers().end()},
+        .mux = route.mux(),
+        .vchan_id = route.has_vchan_id() ? route.vchan_id() : -1};
   }
 
   toolbelt::InetAddress listen_address =
@@ -254,10 +268,14 @@ absl::Status TunnelManager::Init() {
                                         listener.status().message()));
   }
   listener_ = std::move(*listener);
-  server_->logger_.Log(toolbelt::LogLevel::kInfo,
-                       "Tunnel device %s listening on %s with %d peers",
-                       device_name_.c_str(), listen_address.ToString().c_str(),
-                       static_cast<int>(peers_.size()));
+  server_->logger_.Log(
+      toolbelt::LogLevel::kInfo,
+      "Tunnel device %s listening on %s with %d peers, %d send routes and %d "
+      "receive routes%s",
+      device_name_.c_str(), listen_address.ToString().c_str(),
+      static_cast<int>(peers_.size()), config_.send_routes_size(),
+      config_.receive_routes_size(),
+      config_.disable_discovery() ? "; discovery is off" : "");
   return absl::OkStatus();
 }
 
@@ -277,6 +295,9 @@ void TunnelManager::Spawn() {
   SpawnOnStrand([this](async::Context ctx) { ScannerCoroutine(ctx); },
                 "Tunnel scanner");
   for (const std::unique_ptr<Peer> &peer : peers_) {
+    if (!peer->discovery) {
+      continue;
+    }
     Peer *p = peer.get();
     SpawnOnStrand(
         [this, p](async::Context ctx) { DiscoverySenderCoroutine(ctx, p); },
@@ -383,7 +404,8 @@ void TunnelManager::HandshakeCoroutine(
     if (server_->shutting_down_) {
       return;
     }
-    if (handshake.topic_name() == tunnel::kDiscoveryChannelName) {
+    if (handshake.topic_name() == tunnel::kDiscoveryChannelName &&
+        !config_.disable_discovery()) {
       DiscoveryReceiverLoop(ctx, *socket, handshake, peer);
       return;
     }
@@ -440,7 +462,10 @@ TunnelManager::PlanIngress(const Handshake &handshake,
     channel = nullptr;
   }
   if (channel == nullptr) {
-    if (!transport.mux().empty()) {
+    auto route = receive_routes_.find(plan.topic);
+    if (route != receive_routes_.end() && !route->second.mux.empty()) {
+      options.SetMux(route->second.mux).SetVchanId(route->second.vchan_id);
+    } else if (!transport.mux().empty()) {
       options.SetMux(transport.mux()).SetVchanId(transport.vchan_id());
     }
     options.SetSlotSize(static_cast<SlotSizeType>(slot_size))
@@ -448,8 +473,8 @@ TunnelManager::PlanIngress(const Handshake &handshake,
     return plan;
   }
 
-  // The peer's multiplexer only matters when this publisher creates the
-  // channel.  A virtual channel's size cap is its multiplexer's.
+  // The route's or peer's multiplexer only matters when this publisher
+  // creates the channel.  A virtual channel's size cap is its multiplexer's.
   ServerChannel *capped = channel;
   if (channel->IsVirtual()) {
     VirtualChannel *vchan = static_cast<VirtualChannel *>(channel);
@@ -837,11 +862,18 @@ bool TunnelManager::Excluded(const std::string &topic) const {
 }
 
 void TunnelManager::Rescan() {
-  bool changed = false;
+  bool publications_added = false;
+  bool discovery_changed = false;
   for (const auto &[name, channel_ptr] : server_->channels_) {
     ServerChannel *channel = channel_ptr.get();
     if (!server_->IsPublicChannel(channel) || channel->IsMux() ||
-        channel->IsLocal() || Excluded(name)) {
+        channel->IsLocal() || tunnel::IsInternalChannel(name)) {
+      continue;
+    }
+    // The denylist is for discovery; a send route names its channel
+    // explicitly.
+    const bool excluded = Excluded(name);
+    if (excluded && !send_routes_.contains(name)) {
       continue;
     }
     bool has_publisher = false;
@@ -867,22 +899,28 @@ void TunnelManager::Rescan() {
       }
       auto [it, inserted] = local_publications_.try_emplace(name, publication);
       if (inserted) {
-        changed = true;
+        publications_added = true;
+        discovery_changed |= !excluded;
       } else if (reliable && !it->second.reliable) {
-        // Routes already running keep their mode until they reconnect.
+        // Routes already running keep their mode, even when they reconnect.
         it->second.reliable = true;
-        changed = true;
+        discovery_changed |= !excluded;
       }
     }
-    if (has_subscriber &&
+    if (has_subscriber && !excluded &&
         local_subscriptions_.try_emplace(name, channel->Type()).second) {
-      changed = true;
+      discovery_changed = true;
     }
   }
-  if (!changed) {
-    return;
+  if (discovery_changed) {
+    RequestDiscoverySend();
   }
-  RequestDiscoverySend();
+  if (publications_added) {
+    StartRoutes();
+  }
+}
+
+void TunnelManager::StartRoutes() {
   for (const std::unique_ptr<Peer> &peer : peers_) {
     for (const std::string &topic : peer->remote_subscriptions) {
       if (local_publications_.count(topic) > 0) {
@@ -890,12 +928,22 @@ void TunnelManager::Rescan() {
       }
     }
   }
+  for (const auto &[topic, peers] : send_routes_) {
+    if (local_publications_.count(topic) == 0) {
+      continue;
+    }
+    for (Peer *peer : peers) {
+      EnsureRoute(topic, *peer);
+    }
+  }
 }
 
 void TunnelManager::RequestDiscoverySend() {
   discovery_generation_++;
   for (const std::unique_ptr<Peer> &peer : peers_) {
-    peer->discovery_trigger.Trigger();
+    if (peer->discovery) {
+      peer->discovery_trigger.Trigger();
+    }
   }
 }
 
@@ -915,10 +963,14 @@ void TunnelManager::EnsureRoute(const std::string &topic, Peer &peer) {
       std::move(name));
 }
 
-tunnel::Discovery TunnelManager::BuildDiscoveryMessage() const {
+tunnel::Discovery
+TunnelManager::BuildDiscoveryMessage(const Peer &peer) const {
   tunnel::Discovery msg;
   msg.set_device_name(device_name_);
   for (const auto &[topic, publication] : local_publications_) {
+    if (Excluded(topic)) {
+      continue;
+    }
     tunnel::DiscoveryTopic *info = msg.add_published_topics();
     info->set_topic(topic);
     info->set_datatype(publication.datatype);
@@ -927,6 +979,11 @@ tunnel::Discovery TunnelManager::BuildDiscoveryMessage() const {
     info->set_is_reliable(publication.reliable);
   }
   for (const auto &[topic, datatype] : local_subscriptions_) {
+    auto route = receive_routes_.find(topic);
+    if (route != receive_routes_.end() &&
+        !route->second.peers.contains(peer.config.name())) {
+      continue;
+    }
     tunnel::DiscoveryTopic *info = msg.add_subscribed_topics();
     info->set_topic(topic);
     info->set_datatype(datatype);
@@ -1006,7 +1063,7 @@ absl::Status TunnelManager::RunDiscoveryConnection(async::Context ctx,
       // Clear first: a change made while sending triggers another send.
       peer.discovery_trigger.Clear();
       peer.sent_generation = discovery_generation_;
-      if (absl::Status s = SendDiscovery(ctx, socket, ++seq); !s.ok()) {
+      if (absl::Status s = SendDiscovery(ctx, socket, peer, ++seq); !s.ok()) {
         return s;
       }
       next_refresh = std::chrono::steady_clock::now() + refresh_interval_;
@@ -1049,9 +1106,9 @@ absl::Status TunnelManager::RunDiscoveryConnection(async::Context ctx,
 
 absl::Status TunnelManager::SendDiscovery(async::Context ctx,
                                           async::StreamSocket &socket,
-                                          uint64_t seq) {
+                                          const Peer &peer, uint64_t seq) {
   // Never empty, because the device name is required.
-  std::string payload = BuildDiscoveryMessage().SerializeAsString();
+  std::string payload = BuildDiscoveryMessage(peer).SerializeAsString();
   const size_t prefix_size =
       static_cast<size_t>(Channel::ComputePrefixSize(4, 0));
   MessagePrefix prefix = {};
@@ -1156,6 +1213,16 @@ void TunnelManager::HandleDiscovery(const tunnel::Discovery &msg) {
     return;
   }
   Peer &peer = *it->second;
+  if (!peer.discovery) {
+    if (!peer.ignored_discovery_logged) {
+      peer.ignored_discovery_logged = true;
+      server_->logger_.Log(toolbelt::LogLevel::kInfo,
+                           "Tunnel ignoring discovery from %s, for which "
+                           "discovery is off",
+                           msg.device_name().c_str());
+    }
+    return;
+  }
   bool reply = false;
   for (const tunnel::DiscoveryTopic &info : msg.published_topics()) {
     if (!Excluded(info.topic()) &&

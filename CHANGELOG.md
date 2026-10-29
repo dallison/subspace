@@ -12,6 +12,15 @@
 - Tunnel discovery uses the cruise protobuf format on
   `/ipc/discovery/proto/receive` (`proto/tunnel_discovery.proto`). ROS-encoded
   discovery is not supported; connections that carry it are ignored.
+- Static routes carry channels without discovery. A `send_routes` entry sends
+  a channel published on this server to the peers it names, whether or not
+  they ask for it. A `receive_routes` entry announces a subscription only to
+  the peers it names, and sets the multiplexer and virtual channel ID used if
+  the tunnel creates the channel.
+- `disable_discovery` turns tunnel discovery off for every peer, or, on a
+  `peers` entry, for that peer. Data connections and static routes still run.
+- `docs/tunnel.md` describes the tunnel's wire format, discovery protocol and
+  channels.
 - The tunnel runs alongside native discovery and bridging, and the two never
   forward each other's messages. With `--local --tunnel` only the tunnel runs.
 - Tunnel channels resize with their messages and have no maximum message

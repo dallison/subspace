@@ -35,6 +35,8 @@ class Server;
 // discovery message listing the channels this server publishes and
 // subscribes to.  For every channel a peer subscribes to that this server
 // publishes, a TCP connection to the peer carries the channel's messages.
+// Static send routes add connections that discovery didn't ask for, and
+// discovery can be turned off for some peers or all of them.
 //
 // The tunnel runs alongside native discovery and bridging but never carries
 // their traffic or offers its own to them: its publishers and subscribers are
@@ -88,6 +90,9 @@ private:
 
   struct Peer {
     TunnelPeer config;
+    // False when the configuration turns discovery off for this peer.
+    bool discovery = true;
+    bool ignored_discovery_logged = false;
     // Invalid until the peer's address resolves.
     toolbelt::InetAddress address;
     // Topics the peer has told us it publishes and subscribes to.  Peers only
@@ -97,6 +102,12 @@ private:
     // Wakes the peer's discovery sender.
     toolbelt::TriggerFd discovery_trigger;
     uint64_t sent_generation = 0;
+  };
+
+  struct ReceiveRoute {
+    absl::flat_hash_set<std::string> peers;
+    std::string mux;
+    int32_t vchan_id = -1;
   };
 
   // What an egress connection needs, copied so it can run off the strand.
@@ -136,7 +147,7 @@ private:
   absl::Status RunDiscoveryConnection(async::Context ctx,
                                       async::StreamSocket &socket, Peer &peer);
   absl::Status SendDiscovery(async::Context ctx, async::StreamSocket &socket,
-                             uint64_t seq);
+                             const Peer &peer, uint64_t seq);
   void DiscoveryReceiverLoop(async::Context ctx, async::StreamSocket &socket,
                              const tunnel::Handshake &handshake,
                              const std::string &peer);
@@ -149,10 +160,14 @@ private:
                           const std::string &peer);
   void Rescan();
   void HandleDiscovery(const tunnel::Discovery &msg);
+  // Starts every route whose channel is now published here.
+  void StartRoutes();
   void EnsureRoute(const std::string &topic, Peer &peer);
   // Makes every peer's discovery sender send a fresh message.
   void RequestDiscoverySend();
-  tunnel::Discovery BuildDiscoveryMessage() const;
+  // A receive route's channel is announced only to the route's peers.
+  tunnel::Discovery BuildDiscoveryMessage(const Peer &peer) const;
+  // True for channels discovery never announces or sends.
   bool Excluded(const std::string &topic) const;
   // Logs a connection failure at info level, or at debug level when it
   // repeats the previous one.
@@ -175,8 +190,11 @@ private:
   // Strand-confined.
   std::vector<std::unique_ptr<Peer>> peers_;
   absl::flat_hash_map<std::string, Peer *> peers_by_name_;
+  absl::flat_hash_map<std::string, std::vector<Peer *>> send_routes_;
+  absl::flat_hash_map<std::string, ReceiveRoute> receive_routes_;
   // Ordered so discovery messages list topics in a stable order.  Topics are
-  // never removed, matching the peers' additive discovery.
+  // never removed, matching the peers' additive discovery.  Denylisted
+  // channels appear only if a send route names them.
   std::map<std::string, LocalPublication> local_publications_;
   std::map<std::string, std::string> local_subscriptions_;
   absl::flat_hash_set<std::pair<std::string, std::string>> routes_;

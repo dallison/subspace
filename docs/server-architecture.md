@@ -244,6 +244,14 @@ listeners to the any‑address so the forwarded loopback port reaches them.
 See `manual_tests/cross_host_bridge.sh` for a worked example that bridges a
 channel in both directions between a host and an Android emulator.
 
+### Tunnel-Compatible Discovery and Bridging
+
+With `--tunnel`, a `TunnelManager` also exchanges channels with peers that use
+the cruise IPC tunnel and discovery protocols, over a TCP port of its own. It
+runs alongside native discovery and bridging and never carries their traffic.
+[Tunnel-Compatible Discovery and Bridging](tunnel.md) describes its protocols,
+channels and configuration.
+
 ## Key Classes
 
 ```
@@ -254,6 +262,7 @@ Server
   │     └── shared memory: SCB, CCB, BCB, buffers
   ├── ChannelMultiplexer (container for virtual channels)
   │     └── VirtualChannel (shares mux storage, own users)
+  ├── TunnelManager (tunnel discovery and bridging, with --tunnel)
   └── Plugin (loadable modules via dlopen)
 ```
 

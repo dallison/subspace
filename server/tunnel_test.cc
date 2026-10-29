@@ -15,6 +15,7 @@
 #include <array>
 #include <chrono>
 #include <fcntl.h>
+#include <functional>
 #include <gtest/gtest.h>
 #include <memory>
 #include <netinet/in.h>
@@ -61,7 +62,9 @@ class TunnelServers {
 public:
   ~TunnelServers() { Stop(); }
 
-  void Start() {
+  // `configure` can change server `i`'s configuration before it starts.
+  void Start(const std::function<void(int i, TunnelConfig &)> &configure =
+                 nullptr) {
     int ports[2] = {FreePort(), FreePort()};
     ASSERT_GT(ports[0], 0);
     ASSERT_GT(ports[1], 0);
@@ -79,6 +82,9 @@ public:
       peer->set_name(kDeviceNames[1 - i]);
       peer->set_tcp_addr("127.0.0.1");
       peer->set_tcp_port(ports[1 - i]);
+      if (configure) {
+        configure(i, config);
+      }
 
       // Local servers run no native discovery, so only the tunnel connects
       // them.
@@ -439,6 +445,65 @@ TEST_F(TunnelTest, MessagesAreNotEchoed) {
     for (int i = 0; i < 2; i++) {
       EXPECT_FALSE(Read(*subs[i], 500ms).ok()) << from << " echoed to " << i;
     }
+  }
+}
+
+// With discovery off, only the static routes carry channels.
+TEST(TunnelStaticRouteTest, RoutesWorkWithoutDiscovery) {
+  signal(SIGPIPE, SIG_IGN);
+  TunnelServers servers;
+  servers.Start([](int i, TunnelConfig &config) {
+    config.set_disable_discovery(true);
+    if (i == 0) {
+      TunnelSendRoute *route = config.add_send_routes();
+      route->set_topic("/static/out");
+      route->add_peers(kDeviceNames[1]);
+    } else {
+      TunnelReceiveRoute *route = config.add_receive_routes();
+      route->set_topic("/static/out");
+      route->add_peers(kDeviceNames[0]);
+      route->set_mux("/static/mux");
+      route->set_vchan_id(6);
+    }
+  });
+  Client clients[2];
+  ASSERT_THAT(clients[0].Init(servers.Socket(0)), IsOk());
+  ASSERT_THAT(clients[1].Init(servers.Socket(1)), IsOk());
+
+  absl::StatusOr<Publisher> pub =
+      clients[0].CreatePublisher("/static/out", 256, 16);
+  ASSERT_THAT(pub, IsOk());
+  absl::StatusOr<Publisher> unrouted =
+      clients[0].CreatePublisher("/static/unrouted", 256, 16);
+  ASSERT_THAT(unrouted, IsOk());
+  absl::StatusOr<Subscriber> unrouted_sub =
+      clients[1].CreateSubscriber("/static/unrouted");
+  ASSERT_THAT(unrouted_sub, IsOk());
+
+  // Subscribing before the tunnel creates the channel on beta would choose
+  // the virtual channel there.
+  auto deadline = std::chrono::steady_clock::now() + 15s;
+  while (servers.Stats(1).messages_received == 0 &&
+         std::chrono::steady_clock::now() < deadline) {
+    ASSERT_THAT(Publish(*pub, "probe"), IsOk());
+    std::this_thread::sleep_for(50ms);
+  }
+  ASSERT_GT(servers.Stats(1).messages_received, 0u);
+  absl::StatusOr<Subscriber> sub = clients[1].CreateSubscriber(
+      "/static/out", SubscriberOptions().SetMux("/static/mux"));
+  ASSERT_THAT(sub, IsOk());
+  EXPECT_EQ(sub->VirtualChannelId(), 6);
+  ASSERT_THAT(WaitForRoute(*pub, *sub), IsOk());
+
+  ASSERT_THAT(Publish(*pub, "routed"), IsOk());
+  absl::StatusOr<std::string> received = Read(*sub);
+  ASSERT_THAT(received, IsOk());
+  EXPECT_EQ(*received, "routed");
+  ASSERT_THAT(Publish(*unrouted, "unrouted"), IsOk());
+  EXPECT_FALSE(Read(*unrouted_sub, 1s).ok());
+  for (int i = 0; i < 2; i++) {
+    EXPECT_EQ(servers.Stats(i).discovery_sent, 0u) << i;
+    EXPECT_EQ(servers.Stats(i).discovery_received, 0u) << i;
   }
 }
 

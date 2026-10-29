@@ -12,6 +12,24 @@ message TunnelPeer {
   string name = 1;      // Must equal the peer's device_name.
   string tcp_addr = 2;  // Host name or IP address.
   int32 tcp_port = 3;   // The peer's listen port.
+  bool disable_discovery = 4;  // Exchange no discovery with this peer.
+}
+
+// Sends a channel published on this server to peers, whether or not they
+// announce that they subscribe to it.
+message TunnelSendRoute {
+  string topic = 1;
+  repeated string peers = 2;  // Names from TunnelConfig.peers.
+}
+
+// Receives a channel from peers.  Discovery asks only these peers for it.
+message TunnelReceiveRoute {
+  string topic = 1;
+  repeated string peers = 2;  // Names from TunnelConfig.peers.
+  // Used when the tunnel creates the channel.  Absent vchan_id lets the
+  // server pick one.
+  string mux = 3;
+  optional int32 vchan_id = 4;
 }
 
 message TunnelConfig {
@@ -21,4 +39,7 @@ message TunnelConfig {
   repeated TunnelPeer peers = 4;
   repeated string discovery_denylist = 5;  // Exact channel names.
   optional int32 discovery_refresh_secs = 6;  // Absent = 5; 0 = no refresh.
+  bool disable_discovery = 7;  // Exchange no discovery with any peer.
+  repeated TunnelSendRoute send_routes = 8;
+  repeated TunnelReceiveRoute receive_routes = 9;
 }

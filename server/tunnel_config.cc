@@ -7,8 +7,10 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
+#include "common/channel.h"
 #include "google/protobuf/io/tokenizer.h"
 #include "google/protobuf/text_format.h"
+#include "server/tunnel_protocol.h"
 #include <cerrno>
 #include <cstring>
 #include <fstream>
@@ -37,6 +39,41 @@ private:
 };
 
 bool ValidPort(int32_t port) { return port > 0 && port <= 65535; }
+
+// Checks what send and receive routes have in common and returns the route's
+// name for further errors.
+std::string
+ValidateRoute(std::string_view field, std::string_view kind, int index,
+              const std::string &topic,
+              const google::protobuf::RepeatedPtrField<std::string> &peers,
+              const absl::flat_hash_set<std::string> &peer_names,
+              absl::flat_hash_set<std::string> &topics,
+              std::vector<std::string> &errors) {
+  std::string label = topic.empty()
+                          ? absl::StrFormat("%s[%d]", field, index)
+                          : absl::StrFormat("%s %s", kind, topic);
+  if (topic.empty()) {
+    errors.push_back(absl::StrFormat("%s has no topic", label));
+  } else if (tunnel::IsInternalChannel(topic)) {
+    errors.push_back(absl::StrFormat("%s is an internal channel", label));
+  } else if (!topics.insert(topic).second) {
+    errors.push_back(absl::StrFormat("%s is listed more than once", label));
+  }
+  if (peers.empty()) {
+    errors.push_back(absl::StrFormat("%s names no peers", label));
+  }
+  absl::flat_hash_set<std::string> seen;
+  for (const std::string &peer : peers) {
+    if (!peer_names.contains(peer)) {
+      errors.push_back(
+          absl::StrFormat("%s names unknown peer \"%s\"", label, peer));
+    } else if (!seen.insert(peer).second) {
+      errors.push_back(
+          absl::StrFormat("%s names peer %s more than once", label, peer));
+    }
+  }
+  return label;
+}
 
 } // namespace
 
@@ -124,6 +161,30 @@ absl::Status ValidateTunnelConfig(const TunnelConfig &config,
       errors.push_back(absl::StrFormat("%s has tcp_port %d, which is not a "
                                        "valid TCP port",
                                        label, peer.tcp_port()));
+    }
+  }
+
+  absl::flat_hash_set<std::string> send_topics;
+  for (int i = 0; i < config.send_routes_size(); i++) {
+    const TunnelSendRoute &route = config.send_routes(i);
+    ValidateRoute("send_routes", "send route", i, route.topic(), route.peers(),
+                  names, send_topics, errors);
+  }
+  absl::flat_hash_set<std::string> receive_topics;
+  for (int i = 0; i < config.receive_routes_size(); i++) {
+    const TunnelReceiveRoute &route = config.receive_routes(i);
+    std::string label =
+        ValidateRoute("receive_routes", "receive route", i, route.topic(),
+                      route.peers(), names, receive_topics, errors);
+    if (!route.has_vchan_id()) {
+      continue;
+    }
+    if (route.mux().empty()) {
+      errors.push_back(absl::StrFormat("%s has a vchan_id but no mux", label));
+    } else if (route.vchan_id() < 0 || route.vchan_id() >= kMaxVchanId) {
+      errors.push_back(absl::StrFormat(
+          "%s has vchan_id %d, which is not between 0 and %d", label,
+          route.vchan_id(), kMaxVchanId - 1));
     }
   }
 

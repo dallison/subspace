@@ -56,6 +56,7 @@ using tunnel::PacketType;
 using Clock = std::chrono::steady_clock;
 
 constexpr const char *kPeerName = "cruise";
+constexpr const char *kOtherPeerName = "other";
 
 sockaddr_in Loopback(int port) {
   sockaddr_in addr = {};
@@ -447,11 +448,32 @@ FindTopic(const google::protobuf::RepeatedPtrField<DiscoveryTopic> &list,
   return nullptr;
 }
 
+bool WaitFor(const std::function<bool()> &done,
+             std::chrono::milliseconds timeout = 5s) {
+  Clock::time_point deadline = Clock::now() + timeout;
+  while (!done()) {
+    if (Clock::now() >= deadline) {
+      return false;
+    }
+    std::this_thread::sleep_for(5ms);
+  }
+  return true;
+}
+
+TunnelPeer *AddPeer(TunnelConfig &config, const char *name, int port) {
+  TunnelPeer *peer = config.add_peers();
+  peer->set_name(name);
+  peer->set_tcp_addr("127.0.0.1");
+  peer->set_tcp_port(port);
+  return peer;
+}
+
 class TunnelFakePeerTest : public ::testing::Test {
 protected:
   void SetUp() override {
     signal(SIGPIPE, SIG_IGN);
     ASSERT_THAT(peer_.Listen(), IsOk());
+    ASSERT_THAT(other_.Listen(), IsOk());
   }
 
   void TearDown() override {
@@ -469,7 +491,10 @@ protected:
     ::close(server_pipe_[1]);
   }
 
-  void StartServer(int refresh_secs = 0) {
+  // The configuration names one peer, `peer_`, and denylists /alpha/secret.
+  // `configure` can change it before the server starts.
+  void
+  StartServer(const std::function<void(TunnelConfig &)> &configure = nullptr) {
     char socket_template[] = TUNNEL_TEST_TMP "/subspace_tunnelXXXXXX"; // NOLINT
     ::close(mkstemp(&socket_template[0]));
     socket_ = &socket_template[0];
@@ -479,13 +504,10 @@ protected:
     config.set_device_name("alpha");
     config.set_listen_address("127.0.0.1");
     config.set_listen_port(FreePort());
-    TunnelPeer *peer = config.add_peers();
-    peer->set_name(kPeerName);
-    peer->set_tcp_addr("127.0.0.1");
-    peer->set_tcp_port(peer_.Port());
+    AddPeer(config, kPeerName, peer_.Port());
     config.add_discovery_denylist("/alpha/secret");
-    if (refresh_secs > 0) {
-      config.set_discovery_refresh_secs(refresh_secs);
+    if (configure) {
+      configure(config);
     }
 
     server_ = std::make_unique<Server>(engine_, socket_, "", 0, 0,
@@ -582,6 +604,8 @@ protected:
   }
 
   FakePeer peer_;
+  // Not a peer unless a test adds it.
+  FakePeer other_;
   async::RuntimeEngine engine_;
   std::string socket_;
   int server_pipe_[2];
@@ -961,7 +985,8 @@ TEST_F(TunnelFakePeerTest, DiscardsInternalChannels) {
 }
 
 TEST_F(TunnelFakePeerTest, RepeatsDiscoveryOnRefresh) {
-  StartServer(/*refresh_secs=*/1);
+  StartServer(
+      [](TunnelConfig &config) { config.set_discovery_refresh_secs(1); });
   absl::StatusOr<Accepted> discovery =
       peer_.Accept(tunnel::kDiscoveryChannelName);
   ASSERT_THAT(discovery, IsOk());
@@ -1008,6 +1033,161 @@ TEST_F(TunnelFakePeerTest, ClosesConnectionsWithBadHandshakes) {
   ASSERT_THAT((*bad_magic)->SendRaw(std::string(tunnel::kPacketHeaderSize, 'x')),
               IsOk());
   EXPECT_TRUE((*bad_magic)->ClosedWithin(2s));
+}
+
+// The peer never asks for the channel, and the denylist keeps it out of
+// discovery, but the route sends it anyway.
+TEST_F(TunnelFakePeerTest, SendRouteSendsWhatDiscoveryWouldNot) {
+  StartServer([](TunnelConfig &config) {
+    TunnelSendRoute *route = config.add_send_routes();
+    route->set_topic("/alpha/secret");
+    route->add_peers(kPeerName);
+  });
+  absl::StatusOr<Publisher> secret =
+      client_->CreatePublisher("/alpha/secret", 256, 8);
+  ASSERT_THAT(secret, IsOk());
+  absl::StatusOr<Publisher> open =
+      client_->CreatePublisher("/alpha/open", 256, 8);
+  ASSERT_THAT(open, IsOk());
+
+  absl::StatusOr<Accepted> stream = peer_.Accept("/alpha/secret");
+  ASSERT_THAT(stream, IsOk());
+  ASSERT_THAT(Publish(*secret, "routed"), IsOk());
+  absl::StatusOr<Packet> packet = stream->connection->Read();
+  ASSERT_THAT(packet, IsOk());
+  EXPECT_EQ(packet->body.substr(sizeof(MessagePrefix)), "routed");
+
+  absl::StatusOr<Accepted> discovery =
+      peer_.Accept(tunnel::kDiscoveryChannelName);
+  ASSERT_THAT(discovery, IsOk());
+  uint64_t seq = 0;
+  absl::StatusOr<Discovery> msg = ReadDiscoveryUntil(
+      *discovery->connection, &seq, [](const Discovery &m) {
+        return FindTopic(m.published_topics(), "/alpha/open") != nullptr;
+      });
+  ASSERT_THAT(msg, IsOk());
+  EXPECT_EQ(FindTopic(msg->published_topics(), "/alpha/secret"), nullptr);
+}
+
+TEST_F(TunnelFakePeerTest, DiscoveryOffLeavesOnlyRoutes) {
+  StartServer([](TunnelConfig &config) {
+    config.set_disable_discovery(true);
+    TunnelSendRoute *route = config.add_send_routes();
+    route->set_topic("/alpha/routed");
+    route->add_peers(kPeerName);
+  });
+  absl::StatusOr<Publisher> routed =
+      client_->CreatePublisher("/alpha/routed", 256, 8);
+  ASSERT_THAT(routed, IsOk());
+  absl::StatusOr<Publisher> asked =
+      client_->CreatePublisher("/alpha/asked", 256, 8);
+  ASSERT_THAT(asked, IsOk());
+  std::unique_ptr<WireConnection> announcement =
+      Announce(MakeDiscovery(kPeerName, {}, {{"/alpha/asked", ""}}));
+  ASSERT_NE(announcement, nullptr);
+
+  absl::StatusOr<Accepted> stream = peer_.Accept("/alpha/routed");
+  ASSERT_THAT(stream, IsOk());
+  ASSERT_THAT(Publish(*routed, "routed"), IsOk());
+  absl::StatusOr<Packet> packet = stream->connection->Read();
+  ASSERT_THAT(packet, IsOk());
+  EXPECT_EQ(packet->body.substr(sizeof(MessagePrefix)), "routed");
+
+  EXPECT_THAT(peer_.Accept("/alpha/asked", 1s),
+              StatusIs(absl::StatusCode::kDeadlineExceeded));
+  // Accept kept any discovery connection made while it waited.
+  EXPECT_THAT(peer_.Accept(tunnel::kDiscoveryChannelName, 100ms),
+              StatusIs(absl::StatusCode::kDeadlineExceeded));
+  EXPECT_FALSE(announcement->ClosedWithin(100ms));
+  EXPECT_EQ(Stats().discovery_received, 0u);
+  EXPECT_EQ(Stats().discovery_sent, 0u);
+}
+
+TEST_F(TunnelFakePeerTest, DiscoveryOffForOnePeer) {
+  StartServer([this](TunnelConfig &config) {
+    config.mutable_peers(0)->set_disable_discovery(true);
+    AddPeer(config, kOtherPeerName, other_.Port());
+  });
+  absl::StatusOr<Publisher> pub =
+      client_->CreatePublisher("/alpha/wanted", 256, 8);
+  ASSERT_THAT(pub, IsOk());
+
+  EXPECT_THAT(other_.Accept(tunnel::kDiscoveryChannelName), IsOk());
+  EXPECT_THAT(peer_.Accept(tunnel::kDiscoveryChannelName, 500ms),
+              StatusIs(absl::StatusCode::kDeadlineExceeded));
+
+  std::unique_ptr<WireConnection> ignored =
+      Announce(MakeDiscovery(kPeerName, {}, {{"/alpha/wanted", ""}}));
+  ASSERT_TRUE(WaitFor([this]() { return Stats().discovery_received == 1; }));
+  EXPECT_THAT(peer_.Accept("/alpha/wanted", 500ms),
+              StatusIs(absl::StatusCode::kDeadlineExceeded));
+
+  std::unique_ptr<WireConnection> heard =
+      Announce(MakeDiscovery(kOtherPeerName, {}, {{"/alpha/wanted", ""}}));
+  EXPECT_THAT(other_.Accept("/alpha/wanted"), IsOk());
+}
+
+// Only the route's peer is told that this server subscribes to the channel.
+TEST_F(TunnelFakePeerTest, ReceiveRouteAsksOnlyItsPeers) {
+  StartServer([this](TunnelConfig &config) {
+    AddPeer(config, kOtherPeerName, other_.Port());
+    TunnelReceiveRoute *route = config.add_receive_routes();
+    route->set_topic("/alpha/pinned");
+    route->add_peers(kOtherPeerName);
+  });
+  // Discovery that lists the second subscription also lists the first.
+  absl::StatusOr<Subscriber> pinned =
+      client_->CreateSubscriber("/alpha/pinned");
+  ASSERT_THAT(pinned, IsOk());
+  absl::StatusOr<Subscriber> dynamic =
+      client_->CreateSubscriber("/alpha/dynamic");
+  ASSERT_THAT(dynamic, IsOk());
+
+  for (FakePeer *fake : {&peer_, &other_}) {
+    const bool asked = fake == &other_;
+    absl::StatusOr<Accepted> discovery =
+        fake->Accept(tunnel::kDiscoveryChannelName);
+    ASSERT_THAT(discovery, IsOk());
+    uint64_t seq = 0;
+    absl::StatusOr<Discovery> msg = ReadDiscoveryUntil(
+        *discovery->connection, &seq, [](const Discovery &m) {
+          return FindTopic(m.subscribed_topics(), "/alpha/dynamic") != nullptr;
+        });
+    ASSERT_THAT(msg, IsOk());
+    EXPECT_EQ(FindTopic(msg->subscribed_topics(), "/alpha/pinned") != nullptr,
+              asked);
+  }
+}
+
+TEST_F(TunnelFakePeerTest, ReceiveRouteChoosesTheVirtualChannel) {
+  StartServer([](TunnelConfig &config) {
+    TunnelReceiveRoute *route = config.add_receive_routes();
+    route->set_topic("/cruise/routed");
+    route->add_peers(kPeerName);
+    route->set_mux("/alpha/mux");
+    route->set_vchan_id(4);
+  });
+  std::unique_ptr<WireConnection> data = OpenData("/cruise/routed", 64, 8);
+  ASSERT_NE(data, nullptr);
+  ASSERT_THAT(
+      data->Send(PacketType::kData, 1, CruiseDataBody("first", 1, false)),
+      IsOk());
+  // Subscribing before the tunnel creates the channel would choose the
+  // virtual channel here.
+  ASSERT_TRUE(WaitFor([this]() { return Stats().messages_received == 1; }));
+
+  absl::StatusOr<Subscriber> sub = client_->CreateSubscriber(
+      "/cruise/routed", SubscriberOptions().SetMux("/alpha/mux"));
+  ASSERT_THAT(sub, IsOk());
+  EXPECT_EQ(sub->VirtualChannelId(), 4);
+  ASSERT_THAT(
+      data->Send(PacketType::kData, 2, CruiseDataBody("second", 2, false)),
+      IsOk());
+  absl::StatusOr<std::string> received;
+  do {
+    received = Read(*sub);
+  } while (received.ok() && *received != "second");
+  EXPECT_THAT(received, IsOk());
 }
 
 } // namespace
