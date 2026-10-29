@@ -281,9 +281,22 @@ Server
 
 ```
 server/
-├── main.cc              # Entry point, command-line parsing
-├── server.h/cc          # Main Server class
-├── client_handler.h/cc  # Client connection handler
-├── server_channel.h/cc  # Channel management
-└── plugin.h             # Plugin interface
+├── main.cc                       # Entry point, command-line parsing
+├── server.h                      # Server class
+├── server.cc                     # Construction, Run, shutdown, client listener, cleanup
+├── server_channels.cc            # Creating, finding and removing channels; directory and statistics
+├── server_telemetry.cc           # Channel telemetry
+├── server_discovery.cc           # Native discovery: Query, Advertise, Subscribe
+├── server_bridge.cc              # Bridge listener ports and addresses
+├── server_bridge_transmitter.cc  # Bridge transmitter and retirement receiver
+├── server_bridge_receiver.cc     # Bridge receiver and retirement sender
+├── server_shadow.cc              # Shadow sockets and recovery from a shadow
+├── server_plugins.cc             # Plugin loading and callbacks
+├── client_handler.h/cc           # Client connection handler
+├── server_channel.h/cc           # ServerChannel and its users
+├── shadow_replicator.h/cc        # Replication to the shadow process
+├── tunnel.h/cc                   # Tunnel discovery and bridging
+├── tunnel_config.h/cc            # Tunnel configuration parsing and validation
+├── tunnel_protocol.h/cc          # Tunnel wire format
+└── plugin.h                      # Plugin interface
 ```

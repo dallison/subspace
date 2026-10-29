@@ -9,6 +9,14 @@ add_library(libserver STATIC
     shadow_replicator.h
     server.cc
     server.h
+    server_bridge.cc
+    server_bridge_receiver.cc
+    server_bridge_transmitter.cc
+    server_channels.cc
+    server_discovery.cc
+    server_plugins.cc
+    server_shadow.cc
+    server_telemetry.cc
     plugin.h
     tunnel.cc
     tunnel.h
