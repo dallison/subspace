@@ -27,18 +27,23 @@ boost::asio::io_context &IocFromYield(boost::asio::yield_context yield) {
   return static_cast<boost::asio::io_context &>(
       yield.get_executor().context());
 }
-}  // namespace
 
-absl::Status WaitReadable(Context ctx, int fd, std::chrono::nanoseconds timeout) {
+// Wait for `fd` to become ready for `cond`.  `poll_events` is the poll event
+// for the same condition and `ready_mask` the revents bits that count as ready
+// on the fast path.
+absl::Status WaitFd(Context ctx, int fd,
+                    boost::asio::posix::descriptor_base::wait_type cond,
+                    short poll_events, short ready_mask,
+                    std::chrono::nanoseconds timeout, const char *what) {
   boost::asio::io_context &ioc = IocFromYield(ctx);
-  // Fast path: if the fd is already readable, return immediately without
+  // Fast path: if the fd is already ready, return immediately without
   // suspending.  This keeps a persistently-readable fd (e.g. a triggered
   // shutdown fd) from racing a graceful-shutdown cancellation that could
   // otherwise repeatedly wake us before the reactor reports the readable fd,
   // livelocking the coroutine so it never observes the fd and never exits.
   {
-    struct pollfd pfd = {.fd = fd, .events = POLLIN, .revents = 0};
-    if (::poll(&pfd, 1, 0) > 0 && (pfd.revents & (POLLIN | POLLHUP)) != 0) {
+    struct pollfd pfd = {.fd = fd, .events = poll_events, .revents = 0};
+    if (::poll(&pfd, 1, 0) > 0 && (pfd.revents & ready_mask) != 0) {
       return absl::OkStatus();
     }
   }
@@ -93,7 +98,7 @@ absl::Status WaitReadable(Context ctx, int fd, std::chrono::nanoseconds timeout)
   // the never-expiring notifier (a missed wakeup).  Serializing them with the
   // async_wait registration on the strand makes the wake safe.
   sd->async_wait(
-      boost::asio::posix::stream_descriptor::wait_read,
+      cond,
       boost::asio::bind_executor(
           ctx.get_executor(),
           [sd, timer, fd_ready, timed_out, cancelled,
@@ -157,9 +162,22 @@ absl::Status WaitReadable(Context ctx, int fd, std::chrono::nanoseconds timeout)
   if (*timed_out) {
     return absl::DeadlineExceededError("Timeout waiting for fd");
   }
-  // Resumed without the fd becoming readable and without timing out: the wait
+  // Resumed without the fd becoming ready and without timing out: the wait
   // was cancelled (e.g. graceful shutdown).
-  return absl::InternalError("WaitReadable: operation canceled");
+  return absl::InternalError(absl::StrFormat("%s: operation canceled", what));
+}
+
+}  // namespace
+
+absl::Status WaitReadable(Context ctx, int fd, std::chrono::nanoseconds timeout) {
+  return WaitFd(ctx, fd, boost::asio::posix::stream_descriptor::wait_read,
+                POLLIN, POLLIN | POLLHUP, timeout, "WaitReadable");
+}
+
+absl::Status WaitWritable(Context ctx, int fd,
+                          std::chrono::nanoseconds timeout) {
+  return WaitFd(ctx, fd, boost::asio::posix::stream_descriptor::wait_write,
+                POLLOUT, POLLOUT | POLLERR | POLLHUP, timeout, "WaitWritable");
 }
 
 absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2,
@@ -347,6 +365,19 @@ absl::Status WaitReadable(Context ctx, int fd, std::chrono::nanoseconds timeout)
     return absl::DeadlineExceededError("Timeout waiting for fd");
   }
   return absl::OkStatus();
+}
+
+absl::Status WaitWritable(Context ctx, int fd,
+                          std::chrono::nanoseconds timeout) {
+  int r = ctx->Wait(fd, POLLOUT, static_cast<uint64_t>(timeout.count()));
+  if (r == fd) {
+    return absl::OkStatus();
+  }
+  if (r == -1 && timeout.count() != 0) {
+    return absl::DeadlineExceededError("Timeout waiting for fd");
+  }
+  // Woken by the coroutine's interrupt fd.
+  return absl::CancelledError("WaitWritable: interrupted");
 }
 
 absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2,

@@ -8,8 +8,12 @@
 #include "common/async/wait.h"
 
 #include <cstring>
+#include <fcntl.h>
 #include <gtest/gtest.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <unistd.h>
+#include <vector>
 
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
 #include <boost/asio/detached.hpp>
@@ -276,6 +280,126 @@ TEST(AsyncTest, UnixSocketMessageAndFdPassing) {
   EXPECT_EQ(received_msg, "hello-uds");
   EXPECT_EQ(received_via_fd, "FD!");
 }
+
+TEST(AsyncTest, WaitWritableOnPipe) {
+  int fds[2];
+  ASSERT_EQ(0, ::pipe(fds));
+  int flags = ::fcntl(fds[1], F_GETFL, 0);
+  ASSERT_EQ(0, ::fcntl(fds[1], F_SETFL, flags | O_NONBLOCK));
+
+  RuntimeFixture fx;
+  absl::Status empty_status = absl::UnknownError("not run");
+  absl::Status full_status = absl::UnknownError("not run");
+  fx.runtime.Spawn([&](Context ctx) {
+    empty_status = WaitWritable(ctx, fds[1], std::chrono::milliseconds(100));
+    char buf[4096] = {};
+    while (::write(fds[1], buf, sizeof(buf)) > 0) {
+    }
+    full_status = WaitWritable(ctx, fds[1], std::chrono::milliseconds(20));
+  });
+  fx.Run();
+  EXPECT_TRUE(empty_status.ok()) << empty_status;
+  EXPECT_TRUE(absl::IsDeadlineExceeded(full_status)) << full_status;
+  ::close(fds[0]);
+  ::close(fds[1]);
+}
+
+TEST(AsyncTest, ConnectStreamLoopback) {
+  absl::StatusOr<StreamSocket> listener =
+      ListenStream(InetAddress("127.0.0.1", 0));
+  ASSERT_TRUE(listener.ok()) << listener.status();
+  int port = listener->BoundAddress().Port();
+  ASSERT_GT(port, 0);
+  EXPECT_GE(StreamSocketFd(*listener), 0);
+
+  RuntimeFixture fx;
+  std::string received;
+  absl::Status connect_status = absl::UnknownError("not run");
+  fx.runtime.Spawn([&](Context ctx) {
+    absl::StatusOr<StreamSocket> conn = listener->Accept(ctx);
+    if (!conn.ok()) {
+      return;
+    }
+    char buf[4];
+    absl::StatusOr<ssize_t> n = conn->Receive(buf, sizeof(buf), ctx);
+    if (n.ok() && *n > 0) {
+      received.assign(buf, static_cast<size_t>(*n));
+    }
+  });
+  fx.runtime.Spawn([&, port](Context ctx) {
+    absl::StatusOr<StreamSocket> client = ConnectStream(
+        InetAddress("127.0.0.1", port), std::chrono::seconds(5), ctx);
+    connect_status = client.status();
+    if (!client.ok()) {
+      return;
+    }
+    EXPECT_GE(StreamSocketFd(*client), 0);
+    (void)client->Send("ping", 4, ctx);
+  });
+  fx.Run();
+  EXPECT_TRUE(connect_status.ok()) << connect_status;
+  EXPECT_EQ(received, "ping");
+}
+
+TEST(AsyncTest, ConnectStreamRefused) {
+  int port = 0;
+  {
+    absl::StatusOr<StreamSocket> listener =
+        ListenStream(InetAddress("127.0.0.1", 0));
+    ASSERT_TRUE(listener.ok()) << listener.status();
+    port = listener->BoundAddress().Port();
+  }
+
+  RuntimeFixture fx;
+  absl::Status status = absl::UnknownError("not run");
+  fx.runtime.Spawn([&, port](Context ctx) {
+    status = ConnectStream(InetAddress("127.0.0.1", port),
+                           std::chrono::seconds(5), ctx)
+                 .status();
+  });
+  fx.Run();
+  EXPECT_TRUE(absl::IsUnavailable(status)) << status;
+}
+
+#if defined(__linux__)
+// Linux drops a SYN when the listener's accept queue is full, so a connect
+// to a listener with a zero backlog and a queued connection stays pending.
+TEST(AsyncTest, ConnectStreamTimeout) {
+  int listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(listen_fd, 0);
+  InetAddress loopback("127.0.0.1", 0);
+  ASSERT_EQ(0, ::bind(listen_fd,
+                      reinterpret_cast<const sockaddr *>(&loopback.GetAddress()),
+                      sizeof(sockaddr_in)));
+  ASSERT_EQ(0, ::listen(listen_fd, 0));
+  sockaddr_in bound;
+  socklen_t len = sizeof(bound);
+  ASSERT_EQ(0, ::getsockname(listen_fd, reinterpret_cast<sockaddr *>(&bound),
+                             &len));
+  std::vector<int> fillers;
+  for (int i = 0; i < 3; i++) {
+    int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    ASSERT_GE(fd, 0);
+    (void)::connect(fd, reinterpret_cast<const sockaddr *>(&bound),
+                    sizeof(bound));
+    fillers.push_back(fd);
+  }
+
+  RuntimeFixture fx;
+  absl::Status status = absl::UnknownError("not run");
+  fx.runtime.Spawn([&](Context ctx) {
+    status = ConnectStream(InetAddress(bound), std::chrono::milliseconds(200),
+                           ctx)
+                 .status();
+  });
+  fx.Run();
+  EXPECT_TRUE(absl::IsDeadlineExceeded(status)) << status;
+  for (int fd : fillers) {
+    ::close(fd);
+  }
+  ::close(listen_fd);
+}
+#endif
 
 }  // namespace
 }  // namespace subspace::async

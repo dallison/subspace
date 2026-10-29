@@ -24,6 +24,13 @@ absl::Status WaitReadable(Context ctx, int fd,
                           std::chrono::nanoseconds timeout =
                               std::chrono::nanoseconds(0));
 
+// Wait until `fd` is writable or has an error pending.  A non-zero timeout
+// returns DeadlineExceededError if the fd is not ready in time; a zero timeout
+// waits forever.  Returns an error if the wait is interrupted or cancelled.
+absl::Status WaitWritable(Context ctx, int fd,
+                          std::chrono::nanoseconds timeout =
+                              std::chrono::nanoseconds(0));
+
 // Wait until either `fd1` or `fd2` becomes readable.  Returns the raw fd that
 // became ready.  A non-zero timeout returns DeadlineExceededError if neither fd
 // is ready in time; a zero timeout waits forever.
