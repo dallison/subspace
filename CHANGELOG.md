@@ -56,6 +56,29 @@
   bridge connection, could hang at shutdown, with clients blocked connecting
   to a server that had stopped accepting connections.
 
+### Unreliable Subscribers That Fall Behind
+- An unreliable publisher no longer loses the message it has just published.
+  A subscriber sets a slot's retired bit just after releasing the slot, so
+  a publisher can reuse the slot in between and the bit then marks the new
+  message. A publisher that took the slot for that bit overwrote a message
+  nobody had read, often the newest, and a subscriber waiting on its poll fd
+  then waited for the next message. Publishers now take a slot for its
+  retired bit only if the slot's refs show every subscriber has seen and
+  released it.
+- A subscriber that falls behind an unreliable publisher no longer reads
+  messages out of order. Its snapshot of the slots could catch one that a
+  publisher was reusing, with ordinal and timestamp zeroed. That entry sorted
+  first, and since a claim with ordinal 0 matches any message, the
+  subscriber took the message published there next ahead of older ones.
+  Snapshots now keep a slot only while it holds the message its refs were
+  committed with.
+- `ReclaimBufferLease` makes the same check, so it returns an empty lease for
+  a slot whose retired bit is stale. It also does so for a slot that retired
+  before a subscriber joined, until the new subscriber has released it too.
+- The Rust client has both fixes. Its subscriber already skipped older
+  messages rather than reading them late, but its publisher had the same
+  stale retired bits.
+
 ### Late Subscribers Do Not Count Channel History As Drops
 - A subscriber created on a channel with history no longer reports that
   history as dropped messages. A slot held by another subscriber is never

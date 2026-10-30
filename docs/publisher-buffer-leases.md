@@ -186,6 +186,10 @@ if (count == sizeof(slot_id)) {
 }
 ```
 
+Reclaiming returns an empty lease if a subscriber has joined since the slot
+retired and hasn't released the slot itself, because it hasn't seen the
+message yet. The slot isn't lost: the publisher reuses it later.
+
 For unreliable publishers,
 `notify_retirement_on_forced_reuse` controls notifications generated when the
 publisher overwrites an unread message:

@@ -3653,6 +3653,112 @@ TEST_F(ClientTest, ExternalPollLoopGetPollFdOnceDrainUntilEmpty) {
          "messages";
 }
 
+// An unreliable subscriber that falls behind a publisher, draining whenever its
+// poll fd fires as the tunnel and bridges do, can miss messages but must read
+// the rest in order and must always get the newest.  Its snapshot of the slots
+// could catch one being reused and deliver the message published there next
+// ahead of older ones.  A publisher could take a slot back for a retired bit
+// set after the slot had already been reused, losing the message just
+// published in it.
+static void CheckLaggingUnreliableSubscriber(const std::string &channel,
+                                             bool bridge) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(SubspaceTestBase::Socket()));
+  ASSERT_OK(sub_client.Init(SubspaceTestBase::Socket()));
+  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
+      channel, subspace::PublisherOptions().SetSlotSize(1024).SetNumSlots(16));
+  ASSERT_OK(pub);
+  subspace::SubscriberOptions options;
+  options.SetBridge(bridge);
+  options.SetLogDroppedMessages(false);
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(channel, options);
+  ASSERT_OK(sub);
+
+  std::atomic<uint64_t> newest_read{0};
+  std::atomic<int> out_of_order{0};
+  std::atomic<bool> stop{false};
+  std::thread reader([&]() {
+    uint64_t last = 0;
+    while (!stop.load()) {
+      struct pollfd fd = sub->GetPollFd();
+      if (::poll(&fd, 1, 10) <= 0) {
+        continue;
+      }
+      for (;;) {
+        absl::StatusOr<Message> msg = sub->ReadMessage();
+        if (!msg.ok()) {
+          ADD_FAILURE() << msg.status();
+          return;
+        }
+        if (msg->length == 0) {
+          break;
+        }
+        uint64_t number;
+        memcpy(&number, msg->buffer, sizeof(number));
+        if (number <= last) {
+          out_of_order++;
+        } else {
+          last = number;
+          newest_read.store(number);
+        }
+      }
+    }
+  });
+
+  // Publish in bursts and wait after each for its last message, having already
+  // taken the buffer for the next one.
+  constexpr int kBursts = 400;
+  constexpr int kBurstSize = 50;
+  auto size_of = [](uint64_t number) -> int32_t {
+    return 16 + (number * 37) % 900;
+  };
+  auto publish = [&]() -> absl::Status {
+    uint64_t number = 0;
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer(size_of(1));
+    for (int burst = 0; burst < kBursts; burst++) {
+      for (int i = 0; i < kBurstSize; i++) {
+        if (!buffer.ok()) {
+          return buffer.status();
+        }
+        number++;
+        memcpy(*buffer, &number, sizeof(number));
+        if (absl::StatusOr<const Message> m =
+                pub->PublishMessage(size_of(number));
+            !m.ok()) {
+          return m.status();
+        }
+        buffer = pub->GetMessageBuffer(size_of(number + 1));
+      }
+      const auto deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      while (newest_read.load() < number) {
+        if (std::chrono::steady_clock::now() > deadline) {
+          return absl::InternalError(absl::StrFormat(
+              "message %d, the newest, was never read; the last read was %d",
+              number, newest_read.load()));
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+      }
+    }
+    return absl::OkStatus();
+  };
+  const absl::Status status = publish();
+  stop = true;
+  reader.join();
+  ASSERT_OK(status);
+  EXPECT_EQ(0, out_of_order.load()) << "messages read out of order";
+}
+
+TEST_F(ClientTest, LaggingUnreliableSubscriberReadsInOrderAndGetsNewest) {
+  CheckLaggingUnreliableSubscriber("lagging_unreliable", /*bridge=*/false);
+}
+
+TEST_F(ClientTest, LaggingUnreliableBridgeSubscriberReadsInOrderAndGetsNewest) {
+  CheckLaggingUnreliableSubscriber("lagging_unreliable_bridge",
+                                   /*bridge=*/true);
+}
+
 TEST_F(ClientTest, PublishSingleMessagePollAndReadPublisherFirst) {
   subspace::Client pub_client;
   subspace::Client sub_client;
