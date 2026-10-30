@@ -57,6 +57,7 @@ See the file docs/subspace.pdf for full documentation.  Additional documentation
 - [Client Architecture](docs/client-architecture.md)
 - [Server Architecture](docs/server-architecture.md)
 - [Asio Backend and vsock Bridging](docs/asio-backend.md)
+- [Tunnel-Compatible Discovery and Bridging](docs/tunnel.md)
 - [Rust Client](docs/rust-client.md)
 - [Shadow Process (Crash Recovery)](docs/shadow-process.md)
 - [Running Subspace on Android](docs/android.md)

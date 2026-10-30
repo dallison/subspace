@@ -2,6 +2,92 @@
 
 ## Unreleased
 
+### Tunnel-Compatible Discovery and Bridging
+- The server can exchange channels over TCP with peers that use the cruise
+  IPC tunnel and discovery protocols. `--tunnel` turns it on, and
+  `--tunnel_config` names a configuration file in protobuf text format
+  (`proto/tunnel_config.proto`) that lists the device name, listen port,
+  peers, discovery denylist and refresh interval. Programs that embed the
+  server call `Server::SetTunnelConfig`. See `docs/tunnel.md`.
+- Tunnel discovery uses the cruise protobuf format on
+  `/ipc/discovery/proto/receive` (`proto/tunnel_discovery.proto`). ROS-encoded
+  discovery is not supported; connections that carry it are ignored.
+- Static routes carry channels without discovery. A `send_routes` entry sends
+  a channel published on this server to the peers it names, whether or not
+  they ask for it. A `receive_routes` entry announces a subscription only to
+  the peers it names, and sets the multiplexer and virtual channel ID used if
+  the tunnel creates the channel.
+- `disable_discovery` turns tunnel discovery off for every peer, or, on a
+  `peers` entry, for that peer. Data connections and static routes still run.
+- `docs/tunnel.md` describes the tunnel's wire format, discovery protocol and
+  channels.
+- An incoming tunnel connection is closed if its handshake doesn't arrive
+  within 5 seconds.
+- The tunnel runs alongside native discovery and bridging, and the two never
+  forward each other's messages. With `--local --tunnel` only the tunnel runs.
+- Tunnel channels resize with their messages and have no maximum message
+  size of their own. Messages too large for a fixed-size or capped channel
+  are dropped on arrival, and messages whose packet would exceed 2 GiB are
+  not sent. Both cases are logged.
+- The tunnel never changes or recomputes a message's checksum, so custom
+  checksum callbacks work across it. Flags cross unchanged, and a message
+  whose virtual channel has a different ID on the receiving server keeps the
+  sender's ID in its prefix.
+- `Publisher::PublishMessageWithPrefix` takes an optional
+  `use_vchan_id_from_prefix`. When it's false, the message goes to the
+  publisher's own virtual channel and the prefix keeps the sender's
+  `vchan_id`.
+- CMake and Android builds now generate the tunnel protos alongside
+  `subspace.proto`.
+- `tunnel_stress_test` covers high message rates on reliable and unreliable
+  channels, many channels flowing both ways at once, and a stream that carries
+  on while each server in turn is killed and restarted. On an unreliable
+  channel messages can be dropped, but what arrives is in order and ends with
+  the last message sent. `tunnel_test` checks that two servers connected both
+  natively and through the tunnel receive each message twice and that nothing
+  loops.
+
+### Asio Waits and Shutdown
+- With the Boost.Asio backend, `async::WaitReadable`, `WaitWritable` and
+  `WaitEither` no longer return before the fd is ready. Asio's reactor can
+  deliver a readiness event left over from an earlier wait, so the waits now
+  check with `poll()` and wait again if the fd isn't ready. Tunnel connections
+  stalled on this, because a readable connection looks like the peer closing
+  it.
+- On Linux, a coroutine that waits on an fd another coroutine is already
+  waiting on now gets an `InternalError` at once. It used to throw, which
+  ended the coroutine without a trace. On macOS, asio's kqueue reactor
+  accepts the second wait and never wakes the first, so two coroutines must
+  never wait on the same fd at once.
+- A cancelled wait, as at graceful shutdown, returns `CancelledError` instead
+  of `InternalError`, and a client whose request is cancelled no longer
+  reconnects. A server with many in-process clients, such as one per tunnel or
+  bridge connection, could hang at shutdown, with clients blocked connecting
+  to a server that had stopped accepting connections.
+
+### Unreliable Subscribers That Fall Behind
+- An unreliable publisher no longer loses the message it has just published.
+  A subscriber sets a slot's retired bit just after releasing the slot, so
+  a publisher can reuse the slot in between and the bit then marks the new
+  message. A publisher that took the slot for that bit overwrote a message
+  nobody had read, often the newest, and a subscriber waiting on its poll fd
+  then waited for the next message. Publishers now take a slot for its
+  retired bit only if the slot's refs show every subscriber has seen and
+  released it.
+- A subscriber that falls behind an unreliable publisher no longer reads
+  messages out of order. Its snapshot of the slots could catch one that a
+  publisher was reusing, with ordinal and timestamp zeroed. That entry sorted
+  first, and since a claim with ordinal 0 matches any message, the
+  subscriber took the message published there next ahead of older ones.
+  Snapshots now keep a slot only while it holds the message its refs were
+  committed with.
+- `ReclaimBufferLease` makes the same check, so it returns an empty lease for
+  a slot whose retired bit is stale. It also does so for a slot that retired
+  before a subscriber joined, until the new subscriber has released it too.
+- The Rust client has both fixes. Its subscriber already skipped older
+  messages rather than reading them late, but its publisher had the same
+  stale retired bits.
+
 ### Late Subscribers Do Not Count Channel History As Drops
 - A subscriber created on a channel with history no longer reports that
   history as dropped messages. A slot held by another subscriber is never

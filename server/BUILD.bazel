@@ -6,9 +6,18 @@ cc_library(
     name = "server",
     srcs = [
         "server.cc",
+        "server_bridge.cc",
+        "server_bridge_receiver.cc",
+        "server_bridge_transmitter.cc",
+        "server_channels.cc",
+        "server_discovery.cc",
+        "server_plugins.cc",
+        "server_shadow.cc",
+        "server_telemetry.cc",
         "client_handler.cc",
         "server_channel.cc",
         "shadow_replicator.cc",
+        "tunnel.cc",
     ],
     hdrs = [
         "server.h",
@@ -16,11 +25,14 @@ cc_library(
         "server_channel.h",
         "plugin.h",
         "shadow_replicator.h",
+        "tunnel.h",
     ],
     deps = [
+        ":tunnel_wire",
         "//common:subspace_common",
         "//common/async:async",
         "//client:subspace_client",
+        "//proto:tunnel_cc_proto",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/status",
@@ -29,6 +41,119 @@ cc_library(
         "@abseil-cpp//absl/flags:flag",
         "@abseil-cpp//absl/flags:parse",
         "@coroutines//co:co",
+    ],
+)
+
+cc_library(
+    name = "tunnel_wire",
+    srcs = [
+        "tunnel_config.cc",
+        "tunnel_protocol.cc",
+    ],
+    hdrs = [
+        "tunnel_config.h",
+        "tunnel_protocol.h",
+    ],
+    deps = [
+        "//client:subspace_client",
+        "//common:subspace_common",
+        "//proto:tunnel_cc_proto",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+        "@protobuf//:protobuf",
+    ],
+)
+
+cc_test(
+    name = "tunnel_wire_test",
+    size = "small",
+    srcs = [
+        "tunnel_config_test.cc",
+        "tunnel_protocol_test.cc",
+    ],
+    deps = [
+        ":tunnel_wire",
+        "//client:subspace_client",
+        "//common:subspace_common",
+        "//proto:tunnel_cc_proto",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "tunnel_test_util",
+    testonly = True,
+    hdrs = ["tunnel_test_util.h"],
+    deps = [
+        ":server",
+        "//client:subspace_client",
+        "//common/async:async",
+        "//proto:tunnel_cc_proto",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@googletest//:gtest",
+    ],
+)
+
+cc_test(
+    name = "tunnel_test",
+    size = "medium",
+    srcs = ["tunnel_test.cc"],
+    deps = [
+        ":server",
+        ":tunnel_test_util",
+        "//client:subspace_client",
+        "//common/async:async",
+        "//proto:tunnel_cc_proto",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@abseil-cpp//absl/strings:str_format",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "tunnel_stress_test",
+    size = "medium",
+    srcs = ["tunnel_stress_test.cc"],
+    data = [":subspace_server"],
+    env = {"SUBSPACE_SERVER": "$(rootpath :subspace_server)"},
+    deps = [
+        ":server",
+        ":tunnel_test_util",
+        "//client:subspace_client",
+        "//proto:tunnel_cc_proto",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@googletest//:gtest_main",
+        "@protobuf//:protobuf",
+    ],
+)
+
+cc_test(
+    name = "tunnel_fake_peer_test",
+    size = "medium",
+    srcs = ["tunnel_fake_peer_test.cc"],
+    deps = [
+        ":server",
+        ":tunnel_wire",
+        "//client:subspace_client",
+        "//common:subspace_common",
+        "//common/async:async",
+        "//proto:tunnel_cc_proto",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@googletest//:gtest_main",
     ],
 )
 
@@ -49,6 +174,8 @@ cc_binary(
     ],
     deps = [
       ":server",
+      ":tunnel_wire",
+      "//proto:tunnel_cc_proto",
       "@coroutines//co:co",
     ],
     linkopts = select({

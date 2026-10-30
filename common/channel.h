@@ -1201,6 +1201,13 @@ public:
 
   bool TryRetireSlot(MessageSlot *slot);
 
+  // Whether `refs`, read from `slot`, show a slot that holds no message or one
+  // that every subscriber has seen and released.  A slot's retired bit is set
+  // after the subscriber retiring it releases it, so a publisher can reuse the
+  // slot in between and the bit then stands for a message nobody has seen.
+  // Check the refs before taking a slot for its retired bit.
+  bool RefsShowRetired(const MessageSlot *slot, uint64_t refs) const;
+
   int NumSubscribers(int vchan_id) const {
     return ccb_->num_subs.NumSubscribers(vchan_id);
   }

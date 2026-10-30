@@ -1316,6 +1316,28 @@ impl Channel {
         }
     }
 
+    /// Whether `refs`, read from the slot, show a slot that holds no message or
+    /// one that every subscriber has seen and released.  A slot's retired bit
+    /// is set after the subscriber retiring it releases it, so a publisher can
+    /// reuse the slot in between and the bit then stands for a message nobody
+    /// has seen.  Check the refs before taking a slot for its retired bit.
+    pub fn refs_show_retired(&self, slot_idx: usize, refs: u64) -> bool {
+        if (refs & (PUB_OWNED | REFS_MASK)) != 0 {
+            return false;
+        }
+        if self.slot_ref(slot_idx).ordinal() == 0 {
+            return true;
+        }
+        let encoded_vchan_id = (refs >> VCHAN_ID_SHIFT) & VCHAN_ID_MASK;
+        let vchan_id = if encoded_vchan_id == VCHAN_ID_MASK {
+            -1
+        } else {
+            encoded_vchan_id as i32
+        };
+        let retired_refs = (refs >> RETIRED_REFS_SHIFT) & RETIRED_REFS_MASK;
+        retired_refs >= self.num_subscribers(vchan_id).max(0) as u64
+    }
+
     pub fn try_retire_slot(&self, slot_idx: usize) -> bool {
         let slot = self.slot_ref(slot_idx);
         if slot.ordinal() == 0 {

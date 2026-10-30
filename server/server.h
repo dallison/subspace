@@ -1,4 +1,5 @@
 // Copyright 2023-2026 David Allison
+// Tunnel support is Copyright 2026 General Motors LLC
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -27,14 +28,16 @@
 #include "toolbelt/logging.h"
 #include "toolbelt/sockets.h"
 #include "toolbelt/triggerfd.h"
+#include <atomic>
 #include <cstdio>
 #include <memory>
-#include <mutex>
 #include <vector>
 
 namespace subspace {
 
 class Publisher;
+class TunnelConfig;
+class TunnelManager;
 
 // Values written to the notify_fd when the server is ready and
 // is stopped.
@@ -109,6 +112,12 @@ public:
   void SetMachineName(std::string name) { machine_name_ = std::move(name); }
   const std::string& MachineName() const { return machine_name_; }
 
+  // Enables tunnel-compatible discovery and bridging alongside the native
+  // kind.  Call before Run, which fails if the configuration is invalid.
+  void SetTunnelConfig(const TunnelConfig &config);
+  // Null unless Run has started the tunnel.
+  TunnelManager *GetTunnelManager() const { return tunnel_.get(); }
+
   void SetShadowSocket(const std::string &socket_name);
   void SetShadowSockets(const std::string &primary, const std::string &secondary);
   void SimulateCrash() {
@@ -181,6 +190,7 @@ public:
   void CleanupFilesystem();
   void CleanupAfterSession();
 
+  // Call these before Run or after it returns, never while the server runs.
   absl::Status LoadPlugin(const std::string &name, const std::string &path);
   absl::Status LoadBuiltinPlugin(const std::string &name,
                                  std::unique_ptr<PluginInterface> interface);
@@ -204,9 +214,11 @@ public:
     return channels_;
   }
 
-  // Whether a hidden telemetry channel for `target` is currently in
-  // channels_. Safe to call from another thread; channels_ itself is not.
-  bool HasTelemetryChannel(const std::string &target) const;
+  // The number of hidden telemetry channels in channels_.  Safe to call from
+  // another thread; channels_ itself is not.
+  int NumTelemetryChannels() const {
+    return num_telemetry_channels_.load(std::memory_order_relaxed);
+  }
 
   int GetShutdownTriggerFd() {
     return shutdown_trigger_fd_.GetPollFd().Fd();
@@ -249,6 +261,7 @@ public:
 private:
   friend class ClientHandler;
   friend class ServerChannel;
+  friend class TunnelManager;
   friend class VirtualChannel;
   static constexpr size_t kDiscoveryBufferSize = 1024;
 
@@ -462,11 +475,7 @@ private:
   std::atomic<bool> shutting_down_ = false;
 
   absl::flat_hash_map<std::string, std::unique_ptr<ServerChannel>> channels_;
-  // Tracks telemetry targets present in channels_ so tests can observe them
-  // without reading that map from another thread.
-  void NoteTelemetryChannel(const std::string &target, bool present);
-  mutable std::mutex telemetry_presence_mu_;
-  absl::flat_hash_set<std::string> telemetry_targets_;
+  std::atomic<int> num_telemetry_channels_ = 0;
 
   SystemControlBlock *scb_;
   toolbelt::FileDescriptor scb_fd_;
@@ -493,10 +502,6 @@ private:
   bool simulate_crash_ = false;
   bool cleanup_filesystem_ = false;
 
-  // In tests we will load a plugin while the server is running.  This needs a
-  // lock.
-  std::mutex plugin_lock_;
-
   std::vector<std::unique_ptr<Plugin>> plugins_;
   toolbelt::TriggerFd shutdown_trigger_fd_;
   std::string machine_name_;
@@ -517,6 +522,9 @@ private:
 
   std::unique_ptr<ShadowReplicator> primary_shadow_replicator_;
   std::unique_ptr<ShadowReplicator> secondary_shadow_replicator_;
+
+  std::unique_ptr<TunnelConfig> tunnel_config_;
+  std::unique_ptr<TunnelManager> tunnel_;
 };
 
 } // namespace subspace

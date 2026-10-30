@@ -187,7 +187,7 @@ The FDs are transferred using `SCM_RIGHTS` ancillary messages on the Unix domain
 | `shadow/shadow.h`, `shadow/shadow.cc` | Shadow process: event handling, state storage, state dump |
 | `shadow/main.cc` | Shadow binary entry point |
 | `server/shadow_replicator.h`, `server/shadow_replicator.cc` | Server side: sends events, receives state dumps |
-| `server/server.cc` (`RecoverFromShadow`, `Run`) | Recovery logic in the server |
+| `server/server_shadow.cc` (`RecoverFromShadow`), `server/server.cc` (`Run`) | Recovery logic in the server |
 | `server/server_channel.h` (`MapExisting`) | Maps recovered shared memory FDs |
 | `proto/subspace.proto` | Protobuf message definitions |
 | `shadow/shadow_test.cc` | Integration tests including crash recovery |

@@ -1,0 +1,27 @@
+// Copyright 2026 General Motors LLC
+// All Rights Reserved
+// See LICENSE file for licensing information.
+
+// Tunnel peers announce the channels they publish and subscribe to in a
+// Discovery message, carried as the payload of data packets on the discovery
+// channel.  The field numbers are part of the tunnel wire format and must not
+// change; the names are local.
+syntax = "proto3";
+
+package subspace.tunnel;
+
+message DiscoveryTopic {
+  string topic = 1;
+  string datatype = 2;
+  // Only set for published topics.  A channel that isn't virtual has an
+  // empty mux and a vchan_id of -1.
+  string mux = 3;
+  int32 vchan_id = 4;
+  bool is_reliable = 5;
+}
+
+message Discovery {
+  string device_name = 1;
+  repeated DiscoveryTopic published_topics = 2;
+  repeated DiscoveryTopic subscribed_topics = 3;
+}

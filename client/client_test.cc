@@ -136,6 +136,17 @@ WaitForTelemetry(Subscriber &subscriber,
   return absl::DeadlineExceededError("Timed out waiting for telemetry");
 }
 
+// A telemetry channel goes away soon after its last telemetry subscriber.
+bool WaitForNoTelemetryChannels(subspace::Server *server) {
+  for (int attempt = 0; attempt < 40; ++attempt) {
+    if (server->NumTelemetryChannels() == 0) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  return server->NumTelemetryChannels() == 0;
+}
+
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
 absl::StatusOr<toolbelt::FileDescriptor> CreateTestMemfd(const char *name,
                                                          size_t size) {
@@ -2539,45 +2550,6 @@ TEST_F(ClientTest, PublishSingleMessageAndReadWithCallback) {
   ASSERT_OK(status);
 }
 
-TEST_F(ClientTest, PublishSingleMessageAndReadWithPlugin) {
-#ifdef __APPLE__
-  ASSERT_OK(Server()->LoadBuiltinPlugin(
-      "NOP", std::unique_ptr<subspace::PluginInterface>(NOP_Create())));
-#else
-  ASSERT_OK(Server()->LoadPlugin("NOP", "plugins/nop_plugin.so"));
-#endif
-  subspace::Client pub_client;
-  subspace::Client sub_client;
-  ASSERT_OK(pub_client.Init(Socket()));
-  ASSERT_OK(sub_client.Init(Socket()));
-  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher("dave6", 256, 10);
-  ASSERT_OK(pub);
-  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
-  ASSERT_OK(buffer);
-  memcpy(*buffer, "foobar", 6);
-  absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
-  ASSERT_OK(pub_status);
-
-  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("dave6");
-  ASSERT_OK(sub);
-
-  absl::StatusOr<Message> msg = sub->ReadMessage();
-  ASSERT_OK(msg);
-  ASSERT_EQ(6, msg->length);
-
-  // Another read will get 0.
-  msg = sub->ReadMessage();
-  ASSERT_OK(msg);
-  ASSERT_EQ(0, msg->length);
-
-  // Read again to make sure we get another 0.
-  // Regression test.
-  msg = sub->ReadMessage();
-  ASSERT_OK(msg);
-  ASSERT_EQ(0, msg->length);
-  ASSERT_OK(Server()->UnloadPlugin("NOP"));
-}
-
 TEST_F(ClientTest, VirtualPublishSingleMessageAndRead) {
   subspace::Client pub_client;
   subspace::Client sub_client;
@@ -3679,6 +3651,112 @@ TEST_F(ClientTest, ExternalPollLoopGetPollFdOnceDrainUntilEmpty) {
   EXPECT_EQ(static_cast<int>(received.size()), kNum)
       << "external-poll drain reader that never re-fetches the fd missed "
          "messages";
+}
+
+// An unreliable subscriber that falls behind a publisher, draining whenever its
+// poll fd fires as the tunnel and bridges do, can miss messages but must read
+// the rest in order and must always get the newest.  Its snapshot of the slots
+// could catch one being reused and deliver the message published there next
+// ahead of older ones.  A publisher could take a slot back for a retired bit
+// set after the slot had already been reused, losing the message just
+// published in it.
+static void CheckLaggingUnreliableSubscriber(const std::string &channel,
+                                             bool bridge) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(SubspaceTestBase::Socket()));
+  ASSERT_OK(sub_client.Init(SubspaceTestBase::Socket()));
+  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher(
+      channel, subspace::PublisherOptions().SetSlotSize(1024).SetNumSlots(16));
+  ASSERT_OK(pub);
+  subspace::SubscriberOptions options;
+  options.SetBridge(bridge);
+  options.SetLogDroppedMessages(false);
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(channel, options);
+  ASSERT_OK(sub);
+
+  std::atomic<uint64_t> newest_read{0};
+  std::atomic<int> out_of_order{0};
+  std::atomic<bool> stop{false};
+  std::thread reader([&]() {
+    uint64_t last = 0;
+    while (!stop.load()) {
+      struct pollfd fd = sub->GetPollFd();
+      if (::poll(&fd, 1, 10) <= 0) {
+        continue;
+      }
+      for (;;) {
+        absl::StatusOr<Message> msg = sub->ReadMessage();
+        if (!msg.ok()) {
+          ADD_FAILURE() << msg.status();
+          return;
+        }
+        if (msg->length == 0) {
+          break;
+        }
+        uint64_t number;
+        memcpy(&number, msg->buffer, sizeof(number));
+        if (number <= last) {
+          out_of_order++;
+        } else {
+          last = number;
+          newest_read.store(number);
+        }
+      }
+    }
+  });
+
+  // Publish in bursts and wait after each for its last message, having already
+  // taken the buffer for the next one.
+  constexpr int kBursts = 400;
+  constexpr int kBurstSize = 50;
+  auto size_of = [](uint64_t number) -> int32_t {
+    return 16 + (number * 37) % 900;
+  };
+  auto publish = [&]() -> absl::Status {
+    uint64_t number = 0;
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer(size_of(1));
+    for (int burst = 0; burst < kBursts; burst++) {
+      for (int i = 0; i < kBurstSize; i++) {
+        if (!buffer.ok()) {
+          return buffer.status();
+        }
+        number++;
+        memcpy(*buffer, &number, sizeof(number));
+        if (absl::StatusOr<const Message> m =
+                pub->PublishMessage(size_of(number));
+            !m.ok()) {
+          return m.status();
+        }
+        buffer = pub->GetMessageBuffer(size_of(number + 1));
+      }
+      const auto deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      while (newest_read.load() < number) {
+        if (std::chrono::steady_clock::now() > deadline) {
+          return absl::InternalError(absl::StrFormat(
+              "message %d, the newest, was never read; the last read was %d",
+              number, newest_read.load()));
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+      }
+    }
+    return absl::OkStatus();
+  };
+  const absl::Status status = publish();
+  stop = true;
+  reader.join();
+  ASSERT_OK(status);
+  EXPECT_EQ(0, out_of_order.load()) << "messages read out of order";
+}
+
+TEST_F(ClientTest, LaggingUnreliableSubscriberReadsInOrderAndGetsNewest) {
+  CheckLaggingUnreliableSubscriber("lagging_unreliable", /*bridge=*/false);
+}
+
+TEST_F(ClientTest, LaggingUnreliableBridgeSubscriberReadsInOrderAndGetsNewest) {
+  CheckLaggingUnreliableSubscriber("lagging_unreliable_bridge",
+                                   /*bridge=*/true);
 }
 
 TEST_F(ClientTest, PublishSingleMessagePollAndReadPublisherFirst) {
@@ -6007,6 +6085,7 @@ TEST_F(ClientTest, TelemetryDoesNotEnforceRequestedType) {
 
 TEST_F(ClientTest, FailedTelemetrySubscriberRemovesHiddenChannel) {
   constexpr char kChannel[] = "telemetry_failed_subscriber";
+  ASSERT_TRUE(WaitForNoTelemetryChannels(Server()));
   auto client = EVAL_AND_ASSERT_OK(
       subspace::Client::Create(Socket(), "telemetry-failure"));
   Publisher publisher =
@@ -6015,11 +6094,12 @@ TEST_F(ClientTest, FailedTelemetrySubscriberRemovesHiddenChannel) {
   absl::StatusOr<Subscriber> telemetry = client->CreateSubscriber(
       kChannel, SubOpts().SetTelemetry(true).SetMaxActiveMessages(1000));
   EXPECT_FALSE(telemetry.ok());
-  EXPECT_FALSE(Server()->HasTelemetryChannel(kChannel));
+  EXPECT_EQ(0, Server()->NumTelemetryChannels());
 }
 
 TEST_F(ClientTest, TelemetrySnapshotsAndBatchesParticipantChanges) {
   constexpr char kChannel[] = "telemetry_participants";
+  ASSERT_TRUE(WaitForNoTelemetryChannels(Server()));
   auto publisher_client = EVAL_AND_ASSERT_OK(
       subspace::Client::Create(Socket(), "telemetry-publisher"));
   auto subscriber_client = EVAL_AND_ASSERT_OK(
@@ -6107,14 +6187,7 @@ TEST_F(ClientTest, TelemetrySnapshotsAndBatchesParticipantChanges) {
     }
   }
 
-  bool telemetry_channel_exists = true;
-  for (int attempt = 0; attempt < 40 && telemetry_channel_exists; ++attempt) {
-    telemetry_channel_exists = Server()->HasTelemetryChannel(kChannel);
-    if (telemetry_channel_exists) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-  }
-  EXPECT_FALSE(telemetry_channel_exists);
+  EXPECT_TRUE(WaitForNoTelemetryChannels(Server()));
 }
 
 TEST_F(ClientTest, TelemetryReportsDropDeltasAndResizes) {
@@ -9205,6 +9278,9 @@ public:
     char buf[8];
     (void)::read(server_pipe_[0], buf, 8);
     server_thread_.join();
+    absl::Status unloaded = server_->UnloadPlugin("NOP");
+    EXPECT_TRUE(unloaded.ok()) << unloaded;
+    EXPECT_TRUE(absl::IsNotFound(server_->UnloadPlugin("NOP")));
     server_->CleanupAfterSession();
     (void)remove(socket_.c_str());
   }
@@ -9221,6 +9297,38 @@ private:
   inline static std::unique_ptr<subspace::Server> server_;
   inline static std::thread server_thread_;
 };
+
+TEST_F(PluginTest, PublishSingleMessageAndRead) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+  absl::StatusOr<Publisher> pub = pub_client.CreatePublisher("dave6", 256, 10);
+  ASSERT_OK(pub);
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  memcpy(*buffer, "foobar", 6);
+  absl::StatusOr<const Message> pub_status = pub->PublishMessage(6);
+  ASSERT_OK(pub_status);
+
+  absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber("dave6");
+  ASSERT_OK(sub);
+
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(6, msg->length);
+
+  // Another read will get 0.
+  msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(0, msg->length);
+
+  // Read again to make sure we get another 0.
+  // Regression test.
+  msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(0, msg->length);
+}
 
 TEST_F(PluginTest, HeartbeatPublishes) {
   subspace::Client sub_client;

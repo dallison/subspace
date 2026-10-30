@@ -155,6 +155,8 @@ private:
   // owner: the ID of the publisher
   // omit_prefix: don't fill in the MessagePrefix (used when a message
   //              is read from the bridge)
+  // use_prefix_vchan_id: with omit_prefix, deliver on the prefix's virtual
+  //              channel rather than this publisher's
   // notify: set to true if we should notify the subscribers.
   //
   // Locks the CCB.
@@ -162,16 +164,18 @@ private:
   ActivateSlotAndGetAnother(MessageSlot *slot, bool reliable,
                             bool is_activation, int owner, bool omit_prefix,
                             bool use_prefix_slot_id, bool for_tunnel = false,
-                            bool acquire_next = true);
+                            bool acquire_next = true,
+                            bool use_prefix_vchan_id = true);
 
-  Channel::PublishedMessage ActivateSlotAndGetAnother(bool reliable,
-                                                      bool is_activation,
-                                                      bool omit_prefix,
-                                                      bool use_prefix_slot_id,
-                                                      bool for_tunnel = false) {
-    return ActivateSlotAndGetAnother(slot_, reliable, is_activation,
-                                     publisher_id_, omit_prefix,
-                                     use_prefix_slot_id, for_tunnel);
+  Channel::PublishedMessage
+  ActivateSlotAndGetAnother(bool reliable, bool is_activation,
+                            bool omit_prefix, bool use_prefix_slot_id,
+                            bool for_tunnel = false,
+                            bool use_prefix_vchan_id = true) {
+    return ActivateSlotAndGetAnother(
+        slot_, reliable, is_activation, publisher_id_, omit_prefix,
+        use_prefix_slot_id, for_tunnel, /*acquire_next=*/true,
+        use_prefix_vchan_id);
   }
 
   void ClearSubscribers() { subscribers_.clear(); }

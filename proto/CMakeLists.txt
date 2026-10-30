@@ -20,14 +20,13 @@ endif()
 # Define the .proto file(s) in this subdirectory
 set(PROTO_FILES
     subspace.proto
+    tunnel_config.proto
+    tunnel_discovery.proto
+    tunnel_handshake.proto
 )
 
 # Variables to store the generated source and header files
 set(SUBSPACE_PROTO_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}")
-
-# Generated file paths
-set(PROTO_SRC "${CMAKE_CURRENT_BINARY_DIR}/subspace.pb.cc")
-set(PROTO_HDR "${CMAKE_CURRENT_BINARY_DIR}/subspace.pb.h")
 
 if(CMAKE_CROSSCOMPILING)
     find_program(PROTOC_EXECUTABLE protoc REQUIRED)
@@ -52,34 +51,37 @@ if(CMAKE_CROSSCOMPILING)
         )
     endif()
     message(STATUS "Cross-compiling: using host protoc ${PROTOC_VERSION} at ${PROTOC_EXECUTABLE}")
-    add_custom_command(
-        OUTPUT ${PROTO_SRC} ${PROTO_HDR}
-        COMMAND ${PROTOC_EXECUTABLE}
-        ARGS --cpp_out=${CMAKE_CURRENT_BINARY_DIR}
-             --proto_path=${CMAKE_CURRENT_SOURCE_DIR}
-             --proto_path=${protobuf_SOURCE_DIR}/src
-             ${CMAKE_CURRENT_SOURCE_DIR}/subspace.proto
-        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/subspace.proto
-        COMMENT "Generating C++ code from subspace.proto (cross-compile)"
-    )
+    set(SUBSPACE_PROTOC ${PROTOC_EXECUTABLE})
+    set(SUBSPACE_PROTOC_DEPENDS)
+    set(SUBSPACE_PROTOC_COMMENT " (cross-compile)")
 else()
+    set(SUBSPACE_PROTOC $<TARGET_FILE:protobuf::protoc>)
+    set(SUBSPACE_PROTOC_DEPENDS protobuf::protoc)
+    set(SUBSPACE_PROTOC_COMMENT "")
+endif()
+
+set(PROTO_GENERATED)
+foreach(PROTO_FILE ${PROTO_FILES})
+    get_filename_component(PROTO_NAME ${PROTO_FILE} NAME_WE)
+    set(PROTO_SRC "${CMAKE_CURRENT_BINARY_DIR}/${PROTO_NAME}.pb.cc")
+    set(PROTO_HDR "${CMAKE_CURRENT_BINARY_DIR}/${PROTO_NAME}.pb.h")
     add_custom_command(
         OUTPUT ${PROTO_SRC} ${PROTO_HDR}
-        COMMAND $<TARGET_FILE:protobuf::protoc>
+        COMMAND ${SUBSPACE_PROTOC}
         ARGS --cpp_out=${CMAKE_CURRENT_BINARY_DIR}
              --proto_path=${CMAKE_CURRENT_SOURCE_DIR}
              --proto_path=${protobuf_SOURCE_DIR}/src
-             ${CMAKE_CURRENT_SOURCE_DIR}/subspace.proto
-        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/subspace.proto
-                protobuf::protoc
-        COMMENT "Generating C++ code from subspace.proto"
+             ${CMAKE_CURRENT_SOURCE_DIR}/${PROTO_FILE}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${PROTO_FILE}
+                ${SUBSPACE_PROTOC_DEPENDS}
+        COMMENT "Generating C++ code from ${PROTO_FILE}${SUBSPACE_PROTOC_COMMENT}"
     )
-endif()
+    list(APPEND PROTO_GENERATED ${PROTO_SRC} ${PROTO_HDR})
+endforeach()
 
 # Define the subspace_proto library target with the generated sources
 add_library(subspace_proto STATIC
-    ${PROTO_SRC}
-    ${PROTO_HDR}
+    ${PROTO_GENERATED}
 )
 
 

@@ -1,5 +1,6 @@
 // Copyright 2023-2026 David Allison
 // Asio backend support is Copyright 2026 Cruise LLC
+// Tunnel support is Copyright 2026 General Motors LLC
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -144,7 +145,7 @@ absl::Status WaitFdReady(Context yield, int fd,
   if (!*fd_ready) {
     // Resumed without the fd becoming ready: the wait was cancelled (e.g.
     // graceful shutdown).
-    return absl::InternalError(
+    return absl::CancelledError(
         absl::StrFormat("%s error: Operation canceled", what));
   }
   return absl::OkStatus();
@@ -469,6 +470,19 @@ void StreamSocket::Close() {
   if (impl_ != nullptr) {
     impl_.reset();
   }
+}
+
+StreamSocket StreamSocket::Adopt(int fd, SocketAddress bound_address) {
+  StreamSocket s;
+  s.impl_ = std::make_shared<Impl>();
+  s.impl_->fd = fd;
+  s.impl_->nonblocking = true;
+  s.bound_address_ = std::move(bound_address);
+  return s;
+}
+
+int StreamSocket::Fd() const {
+  return impl_ == nullptr ? -1 : impl_->fd;
 }
 
 // -------------------------------------------------------------------------
@@ -1033,3 +1047,183 @@ void UnixSocket::Close() {
 }  // namespace subspace::async
 
 #endif  // SUBSPACE_CORO_BACKEND_ASIO
+
+#include "absl/strings/str_format.h"
+#include "common/async/wait.h"
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+namespace subspace::async {
+
+namespace {
+
+// Closes the fd unless it is released.
+struct FdCloser {
+  int fd;
+  ~FdCloser() {
+    if (fd >= 0) {
+      ::close(fd);
+    }
+  }
+  int Release() {
+    int r = fd;
+    fd = -1;
+    return r;
+  }
+};
+
+absl::Status SetFdFlags(int fd, bool nonblocking) {
+  int fd_flags = ::fcntl(fd, F_GETFD, 0);
+  if (fd_flags < 0 || ::fcntl(fd, F_SETFD, fd_flags | FD_CLOEXEC) < 0) {
+    return absl::InternalError(
+        absl::StrFormat("fcntl FD_CLOEXEC failed: %s", strerror(errno)));
+  }
+  if (nonblocking) {
+    int fl_flags = ::fcntl(fd, F_GETFL, 0);
+    if (fl_flags < 0 || ::fcntl(fd, F_SETFL, fl_flags | O_NONBLOCK) < 0) {
+      return absl::InternalError(
+          absl::StrFormat("fcntl O_NONBLOCK failed: %s", strerror(errno)));
+    }
+  }
+  return absl::OkStatus();
+}
+
+absl::StatusOr<int> ConnectTcpFd(const InetAddress &addr,
+                                 std::chrono::nanoseconds timeout,
+                                 Context ctx) {
+  FdCloser fd{::socket(AF_INET, SOCK_STREAM, 0)};
+  if (fd.fd < 0) {
+    return absl::InternalError(
+        absl::StrFormat("socket() failed: %s", strerror(errno)));
+  }
+  if (absl::Status s = SetFdFlags(fd.fd, /*nonblocking=*/true); !s.ok()) {
+    return s;
+  }
+  const sockaddr_in &sa = addr.GetAddress();
+  if (::connect(fd.fd, reinterpret_cast<const sockaddr *>(&sa), sizeof(sa)) ==
+      0) {
+    return fd.Release();
+  }
+  if (errno != EINPROGRESS && errno != EINTR) {
+    return absl::UnavailableError(absl::StrFormat(
+        "connect to %s failed: %s", addr.ToString(), strerror(errno)));
+  }
+  if (absl::Status s = WaitWritable(ctx, fd.fd, timeout); !s.ok()) {
+    if (absl::IsDeadlineExceeded(s)) {
+      return absl::DeadlineExceededError(
+          absl::StrFormat("timed out connecting to %s", addr.ToString()));
+    }
+    return s;
+  }
+  int err = 0;
+  socklen_t len = sizeof(err);
+  if (::getsockopt(fd.fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0) {
+    err = errno;
+  }
+  if (err != 0) {
+    return absl::UnavailableError(absl::StrFormat(
+        "connect to %s failed: %s", addr.ToString(), strerror(err)));
+  }
+  return fd.Release();
+}
+
+}  // namespace
+
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+
+absl::StatusOr<StreamSocket> ConnectStream(const InetAddress &addr,
+                                           std::chrono::nanoseconds timeout,
+                                           Context ctx) {
+  absl::StatusOr<int> fd = ConnectTcpFd(addr, timeout, ctx);
+  if (!fd.ok()) {
+    return fd.status();
+  }
+  return StreamSocket::Adopt(*fd);
+}
+
+absl::StatusOr<StreamSocket> ListenStream(const InetAddress &addr) {
+  FdCloser fd{::socket(AF_INET, SOCK_STREAM, 0)};
+  if (fd.fd < 0) {
+    return absl::InternalError(
+        absl::StrFormat("socket() failed: %s", strerror(errno)));
+  }
+  if (absl::Status s = SetFdFlags(fd.fd, /*nonblocking=*/true); !s.ok()) {
+    return s;
+  }
+  int one = 1;
+  if (::setsockopt(fd.fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) < 0) {
+    return absl::InternalError(
+        absl::StrFormat("SO_REUSEADDR failed: %s", strerror(errno)));
+  }
+  const sockaddr_in &sa = addr.GetAddress();
+  if (::bind(fd.fd, reinterpret_cast<const sockaddr *>(&sa), sizeof(sa)) < 0) {
+    return absl::InternalError(absl::StrFormat(
+        "Failed to bind TCP socket to %s: %s", addr.ToString(),
+        strerror(errno)));
+  }
+  if (::listen(fd.fd, SOMAXCONN) < 0) {
+    return absl::InternalError(
+        absl::StrFormat("listen() failed: %s", strerror(errno)));
+  }
+  sockaddr_in bound;
+  socklen_t blen = sizeof(bound);
+  if (::getsockname(fd.fd, reinterpret_cast<sockaddr *>(&bound), &blen) < 0) {
+    return absl::InternalError(
+        absl::StrFormat("getsockname() failed: %s", strerror(errno)));
+  }
+  return StreamSocket::Adopt(fd.Release(), SocketAddress(InetAddress(bound)));
+}
+
+int StreamSocketFd(const StreamSocket &socket) { return socket.Fd(); }
+
+#else  // SUBSPACE_CORO_BACKEND_CO
+
+absl::StatusOr<StreamSocket> ConnectStream(const InetAddress &addr,
+                                           std::chrono::nanoseconds timeout,
+                                           Context ctx) {
+  absl::StatusOr<int> fd = ConnectTcpFd(addr, timeout, ctx);
+  if (!fd.ok()) {
+    return fd.status();
+  }
+  StreamSocket socket;
+  socket.GetTCPSocket() = toolbelt::TCPSocket(*fd, /*connected=*/true);
+  // Toolbelt only yields on EAGAIN when it knows the socket is non-blocking.
+  if (absl::Status s = socket.SetNonBlocking(); !s.ok()) {
+    return s;
+  }
+  return socket;
+}
+
+absl::StatusOr<StreamSocket> ListenStream(const InetAddress &addr) {
+  StreamSocket socket;
+  toolbelt::TCPSocket &tcp = socket.GetTCPSocket();
+  if (absl::Status s = tcp.SetReuseAddr(); !s.ok()) {
+    return s;
+  }
+  if (absl::Status s = tcp.Bind(addr, /*listen=*/true); !s.ok()) {
+    return s;
+  }
+  // Toolbelt listens with a small backlog.  A tunnel peer opens one
+  // connection per channel, so raise it.
+  if (::listen(tcp.GetFileDescriptor().Fd(), SOMAXCONN) < 0) {
+    return absl::InternalError(
+        absl::StrFormat("listen() failed: %s", strerror(errno)));
+  }
+  if (absl::Status s = tcp.SetCloseOnExec(); !s.ok()) {
+    return s;
+  }
+  return socket;
+}
+
+int StreamSocketFd(const StreamSocket &socket) {
+  toolbelt::FileDescriptor fd = socket.GetFileDescriptor();
+  return fd.Valid() ? fd.Fd() : -1;
+}
+
+#endif
+
+}  // namespace subspace::async

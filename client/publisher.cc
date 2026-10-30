@@ -238,7 +238,7 @@ MessageSlot *PublisherImpl::ClaimRetiredSlot(int32_t slot_id) {
   }
 
   uint64_t old_refs = slot->refs.load(std::memory_order_acquire);
-  if ((old_refs & (kPubOwned | kRefsMask)) != 0) {
+  if (!RefsShowRetired(slot, old_refs)) {
     return nullptr;
   }
   uint64_t expected = BuildRefsBitField(
@@ -456,6 +456,11 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
     }
     // Claim the slot by setting the kPubOwned bit and our owner.
     uint64_t old_refs = slot->refs.load(std::memory_order_relaxed);
+    if (retired_slot != -1 && !RefsShowRetired(slot, old_refs)) {
+      // A stale retired bit, now cleared.  The slot may hold the newest
+      // message.
+      continue;
+    }
     uint64_t ref = kPubOwned | owner;
     uint64_t expected = BuildRefsBitField(
         slot->ordinal.load(std::memory_order_relaxed),
@@ -555,6 +560,11 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
         continue;
       }
       MessageSlot *s = &ccb_->slots[retired_slot];
+      if (!RefsShowRetired(s, s->refs.load(std::memory_order_relaxed))) {
+        // A stale retired bit, now cleared.
+        retired_slot = -1;
+        continue;
+      }
 
       ActiveSlot active_slot = {
           s, s->ordinal.load(std::memory_order_relaxed),
@@ -669,7 +679,7 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
 Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     MessageSlot *slot, bool reliable, bool is_activation, int owner,
     bool omit_prefix, bool use_prefix_slot_id, bool for_tunnel,
-    bool acquire_next) {
+    bool acquire_next, bool use_prefix_vchan_id) {
   void *buffer = GetBufferAddress(slot);
   MessagePrefix *prefix = Prefix(slot);
 
@@ -686,7 +696,8 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
       prefix->SetIsCrossMachine();
     }
     slot->timestamp.store(prefix->timestamp, std::memory_order_relaxed);
-    slot->vchan_id.store(prefix->vchan_id, std::memory_order_relaxed);
+    slot->vchan_id.store(use_prefix_vchan_id ? prefix->vchan_id : vchan_id_,
+                         std::memory_order_relaxed);
     // The bridged_slot_id is the slot is used for the retirement notification.
     slot->bridged_slot_id.store(
         use_prefix_slot_id ? prefix->slot_id : slot->id,

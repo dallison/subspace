@@ -991,6 +991,7 @@ ClientImpl::PublishMessage(PublisherImpl *publisher, int64_t message_size,
                            bool notify_subscribers) {
   return PublishMessageInternal(publisher, message_size, /*omit_prefix=*/false,
                                 /*use_prefix_slot_id=*/false,
+                                /*use_prefix_vchan_id=*/false,
                                 notify_subscribers);
 }
 
@@ -1002,6 +1003,7 @@ absl::StatusOr<const Message>
 ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
                                    int64_t message_size, bool omit_prefix,
                                    bool use_prefix_slot_id,
+                                   bool use_prefix_vchan_id,
                                    bool notify_subscribers) {
   // Lock is already held by the call to GetMessageBufferSpan.  This RAII
   // instance wil relesas the lock when we return from this function.
@@ -1038,7 +1040,7 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
 
   Channel::PublishedMessage msg = publisher->ActivateSlotAndGetAnother(
       publisher->IsReliable(), /*is_activation=*/false, omit_prefix,
-      use_prefix_slot_id, publisher->ForTunnel());
+      use_prefix_slot_id, publisher->ForTunnel(), use_prefix_vchan_id);
 
   // Prevent use of old_slot.
   old_slot = nullptr;
@@ -2395,6 +2397,14 @@ absl::Status ClientImpl::Reconnect() {
   return absl::OkStatus();
 }
 
+bool ClientImpl::ShouldReconnect(const absl::Status &failure) const {
+  // A cancelled wait means the coroutine running this client is being
+  // stopped, not that the server has gone.  Reconnecting then can block in
+  // connect() for good if the server has stopped accepting connections, as it
+  // does while it shuts down.
+  return was_connected_ && !reconnecting_ && !absl::IsCancelled(failure);
+}
+
 absl::Status ClientImpl::ReregisterPublisher(PublisherImpl *publisher) {
   Request req;
   FillCreatePublisherRequest(req.mutable_create_publisher(), publisher->Name(),
@@ -2459,7 +2469,7 @@ absl::Status ClientImpl::SendRequestReceiveResponse(
         socket_.SendMessage(sendbuf, msg_len, SocketContext());
     if (!n.ok()) {
       socket_.Close();
-      if (was_connected_ && !reconnecting_) {
+      if (ShouldReconnect(n.status())) {
         if (absl::Status rs = Reconnect(); rs.ok()) {
           return SendRequestReceiveResponse(req, response, fds, send_fds);
         } else {
@@ -2481,7 +2491,7 @@ absl::Status ClientImpl::SendRequestReceiveResponse(
       socket_.ReceiveVariableLengthMessage(SocketContext());
   if (!recv_msg.ok()) {
     socket_.Close();
-    if (was_connected_ && !reconnecting_) {
+    if (ShouldReconnect(recv_msg.status())) {
       if (absl::Status rs = Reconnect(); rs.ok()) {
         return SendRequestReceiveResponse(req, response, fds, send_fds);
       } else {
@@ -2518,7 +2528,7 @@ absl::Status ClientImpl::SendOneWayRequest(
       socket_.SendMessage(sendbuf, msg_len, SocketContext());
   if (!n.ok()) {
     socket_.Close();
-    if (was_connected_ && !reconnecting_) {
+    if (ShouldReconnect(n.status())) {
       if (absl::Status rs = Reconnect(); rs.ok()) {
         return SendOneWayRequest(req, fds);
       } else {
