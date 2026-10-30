@@ -133,6 +133,7 @@ jobs:
             //server:server_test \
             //server:tunnel_test \
             //server:tunnel_fake_peer_test \
+            //server:tunnel_stress_test \
             --//:coro_backend=asio \
             --verbose_failures \
             --test_output=errors \

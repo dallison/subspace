@@ -10,208 +10,28 @@
 #include "proto/tunnel_config.pb.h"
 #include "server/server.h"
 #include "server/tunnel.h"
+#include "server/tunnel_test_util.h"
 #include "toolbelt/sockets.h"
-#include <arpa/inet.h>
 #include <array>
 #include <chrono>
 #include <fcntl.h>
-#include <functional>
 #include <gtest/gtest.h>
+#include <map>
 #include <memory>
-#include <netinet/in.h>
+#include <optional>
 #include <signal.h>
 #include <string>
 #include <sys/file.h>
-#include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
-
-#if defined(__ANDROID__)
-#define TUNNEL_TEST_TMP "/data/local/tmp"
-#else
-#define TUNNEL_TEST_TMP "/tmp"
-#endif
 
 namespace subspace {
 namespace {
 
 using ::absl_testing::IsOk;
 using namespace std::chrono_literals;
-
-constexpr const char *kDeviceNames[2] = {"alpha", "beta"};
-
-// Finds a free loopback TCP port.
-int FreePort() {
-  int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-  sockaddr_in addr = {};
-  addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  socklen_t len = sizeof(addr);
-  int port = -1;
-  if (::bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == 0 &&
-      ::getsockname(fd, reinterpret_cast<sockaddr *>(&addr), &len) == 0) {
-    port = ntohs(addr.sin_port);
-  }
-  ::close(fd);
-  return port;
-}
-
-// Two servers that know each other only through their tunnels.
-class TunnelServers {
-public:
-  ~TunnelServers() { Stop(); }
-
-  // `configure` can change server `i`'s configuration before it starts.
-  void Start(const std::function<void(int i, TunnelConfig &)> &configure =
-                 nullptr) {
-    int ports[2] = {FreePort(), FreePort()};
-    ASSERT_GT(ports[0], 0);
-    ASSERT_GT(ports[1], 0);
-    for (int i = 0; i < 2; i++) {
-      char socket_template[] = TUNNEL_TEST_TMP "/subspace_tunnelXXXXXX"; // NOLINT
-      ::close(mkstemp(&socket_template[0]));
-      socket_[i] = &socket_template[0];
-      ASSERT_EQ(0, pipe(server_pipe_[i]));
-
-      TunnelConfig config;
-      config.set_device_name(kDeviceNames[i]);
-      config.set_listen_address("127.0.0.1");
-      config.set_listen_port(ports[i]);
-      TunnelPeer *peer = config.add_peers();
-      peer->set_name(kDeviceNames[1 - i]);
-      peer->set_tcp_addr("127.0.0.1");
-      peer->set_tcp_port(ports[1 - i]);
-      if (configure) {
-        configure(i, config);
-      }
-
-      // Local servers run no native discovery, so only the tunnel connects
-      // them.
-      server_[i] = std::make_unique<Server>(engine_[i], socket_[i], "", 0, 0,
-                                            /*local=*/true, server_pipe_[i][1]);
-      server_[i]->SetTunnelConfig(config);
-      server_thread_[i] = std::thread([this, i]() {
-        // The ingress and egress connections run on their own strands, so
-        // several Asio threads exercise them concurrently.  The co backend
-        // ignores the thread count.
-        absl::Status s = server_[i]->Run(/*num_asio_threads=*/4);
-        if (!s.ok()) {
-          fprintf(stderr, "Error running Subspace server: %s\n",
-                  s.ToString().c_str());
-          exit(1);
-        }
-      });
-      char buf[8];
-      (void)::read(server_pipe_[i][0], buf, sizeof(buf));
-    }
-    running_ = true;
-  }
-
-  void Stop() {
-    if (!running_) {
-      return;
-    }
-    char buf[8];
-    for (int i = 0; i < 2; i++) {
-      server_[i]->Stop();
-      (void)::read(server_pipe_[i][0], buf, sizeof(buf));
-      server_thread_[i].join();
-      server_[i]->CleanupAfterSession();
-      (void)remove(socket_[i].c_str());
-      ::close(server_pipe_[i][0]);
-      ::close(server_pipe_[i][1]);
-    }
-    running_ = false;
-  }
-
-  const std::string &Socket(int i) const { return socket_[i]; }
-  const TunnelManager::Stats &Stats(int i) const {
-    return server_[i]->GetTunnelManager()->GetStats();
-  }
-
-private:
-  async::RuntimeEngine engine_[2];
-  std::string socket_[2];
-  int server_pipe_[2][2];
-  std::unique_ptr<Server> server_[2];
-  std::thread server_thread_[2];
-  bool running_ = false;
-};
-
-std::string Pattern(size_t size, int seed) {
-  std::string data(size, '\0');
-  for (size_t i = 0; i < size; i++) {
-    data[i] = static_cast<char>((i * 31 + seed) % 251);
-  }
-  return data;
-}
-
-absl::Status Publish(Publisher &pub, const std::string &data,
-                     const std::string &metadata = "") {
-  absl::StatusOr<void *> buffer;
-  for (;;) {
-    buffer = pub.GetMessageBuffer(static_cast<SlotSizeType>(data.size()));
-    if (!buffer.ok() || *buffer != nullptr) {
-      break;
-    }
-    // A reliable publisher waits for a free slot.
-    if (absl::Status s = pub.Wait(5s); !s.ok()) {
-      return s;
-    }
-  }
-  if (!buffer.ok()) {
-    return buffer.status();
-  }
-  memcpy(*buffer, data.data(), data.size());
-  if (!metadata.empty()) {
-    absl::Span<std::byte> area = pub.GetMetadata();
-    if (area.size() < metadata.size()) {
-      pub.CancelPublish();
-      return absl::InvalidArgumentError("metadata doesn't fit");
-    }
-    memcpy(area.data(), metadata.data(), metadata.size());
-  }
-  return pub.PublishMessage(static_cast<int64_t>(data.size())).status();
-}
-
-// Reads the next message's payload, waiting up to `timeout` for it.
-absl::StatusOr<std::string> Read(Subscriber &sub,
-                                 std::chrono::milliseconds timeout = 5s) {
-  auto deadline = std::chrono::steady_clock::now() + timeout;
-  for (;;) {
-    absl::StatusOr<Message> msg = sub.ReadMessage();
-    if (!msg.ok()) {
-      return msg.status();
-    }
-    if (msg->length > 0) {
-      return std::string(static_cast<const char *>(msg->buffer), msg->length);
-    }
-    if (std::chrono::steady_clock::now() >= deadline) {
-      return absl::DeadlineExceededError("no message arrived");
-    }
-    std::this_thread::sleep_for(2ms);
-  }
-}
-
-// Publishes probes until one arrives, which shows the tunnel has a route for
-// the channel, then discards any probes still on their way.
-absl::Status WaitForRoute(Publisher &pub, Subscriber &sub) {
-  auto deadline = std::chrono::steady_clock::now() + 15s;
-  bool routed = false;
-  while (!routed && std::chrono::steady_clock::now() < deadline) {
-    if (absl::Status s = Publish(pub, "probe"); !s.ok()) {
-      return s;
-    }
-    routed = Read(sub, 50ms).ok();
-  }
-  if (!routed) {
-    return absl::DeadlineExceededError("the tunnel never carried a message");
-  }
-  while (Read(sub, 200ms).ok()) {
-  }
-  return absl::OkStatus();
-}
+using namespace tunnel_test;
 
 class TunnelTest : public ::testing::Test {
 protected:
@@ -507,153 +327,292 @@ TEST(TunnelStaticRouteTest, RoutesWorkWithoutDiscovery) {
   }
 }
 
+// A server that can run native discovery and bridging, the tunnel, or both.
+class MixedServer {
+public:
+  ~MixedServer() { Stop(); }
+
+  // Native discovery and bridging run unless `discovery_port` is zero, and
+  // talk to the server on `peer_discovery_port`.
+  void Start(int discovery_port, int peer_discovery_port,
+             const std::optional<TunnelConfig> &tunnel) {
+    char socket_template[] = TUNNEL_TEST_TMP "/subspace_tunnelXXXXXX"; // NOLINT
+    ::close(mkstemp(&socket_template[0]));
+    socket_ = &socket_template[0];
+    ASSERT_EQ(0, pipe(pipe_));
+    server_ = std::make_unique<Server>(
+        engine_, socket_, "", discovery_port, peer_discovery_port,
+        /*local=*/discovery_port == 0, pipe_[1]);
+    if (tunnel.has_value()) {
+      server_->SetTunnelConfig(*tunnel);
+    }
+    Server *server = server_.get();
+    thread_ = std::thread([server]() {
+      absl::Status s = server->Run(/*num_asio_threads=*/4);
+      if (!s.ok()) {
+        // exit() can hang while other threads are running.
+        fprintf(stderr, "Error running Subspace server: %s\n",
+                s.ToString().c_str());
+        _exit(1);
+      }
+    });
+    char buf[8];
+    (void)::read(pipe_[0], buf, sizeof(buf));
+  }
+
+  void Stop() {
+    if (server_ == nullptr) {
+      return;
+    }
+    server_->Stop();
+    char buf[8];
+    (void)::read(pipe_[0], buf, sizeof(buf));
+    thread_.join();
+    server_->CleanupAfterSession();
+    server_.reset();
+    (void)remove(socket_.c_str());
+    ::close(pipe_[0]);
+    ::close(pipe_[1]);
+  }
+
+  const std::string &Socket() const { return socket_; }
+  const TunnelManager::Stats &Stats() const {
+    return server_->GetTunnelManager()->GetStats();
+  }
+
+private:
+  async::RuntimeEngine engine_;
+  std::string socket_;
+  int pipe_[2] = {-1, -1};
+  std::unique_ptr<Server> server_;
+  std::thread thread_;
+};
+
+// Native discovery broadcasts, so servers that run it start while holding
+// the bridge tests' port lock.
+class NativeDiscoveryPorts {
+public:
+  ~NativeDiscoveryPorts() { Unlock(); }
+
+  // Takes the lock and reserves two free UDP ports.
+  void Lock() {
+    lock_fd_ = ::open(TUNNEL_TEST_TMP "/subspace_bridge_test_port.lock",
+                      O_CREAT | O_RDWR, 0666);
+    ASSERT_NE(-1, lock_fd_);
+    ASSERT_EQ(0, ::flock(lock_fd_, LOCK_EX));
+    for (int i = 0; i < 2; i++) {
+      ASSERT_THAT(reserved_[i].Bind(toolbelt::InetAddress::AnyAddress(0)),
+                  IsOk());
+      ports_[i] = reserved_[i].BoundAddress().Port();
+    }
+  }
+
+  // Frees port `i` for the server about to bind it.
+  int Take(int i) {
+    reserved_[i].Close();
+    return ports_[i];
+  }
+  int Port(int i) const { return ports_[i]; }
+
+  void Unlock() {
+    if (lock_fd_ < 0) {
+      return;
+    }
+    (void)::flock(lock_fd_, LOCK_UN);
+    ::close(lock_fd_);
+    lock_fd_ = -1;
+  }
+
+private:
+  int lock_fd_ = -1;
+  std::array<toolbelt::UDPSocket, 2> reserved_;
+  int ports_[2] = {0, 0};
+};
+
+TunnelConfig TunnelTo(const char *name, int port, const char *peer_name,
+                      int peer_port) {
+  TunnelConfig config;
+  config.set_device_name(name);
+  config.set_listen_address("127.0.0.1");
+  config.set_listen_port(port);
+  TunnelPeer *peer = config.add_peers();
+  peer->set_name(peer_name);
+  peer->set_tcp_addr("127.0.0.1");
+  peer->set_tcp_port(peer_port);
+  return config;
+}
+
 // Native discovery and bridging connect alpha and beta while the tunnel
 // connects beta and gamma.  Neither carries the other's traffic.
 TEST(TunnelCoexistenceTest, NativeAndTunnelBridgingStaySeparate) {
   signal(SIGPIPE, SIG_IGN);
-  // Native discovery broadcasts, so share the bridge tests' port lock.
-  int lock_fd = ::open(TUNNEL_TEST_TMP "/subspace_bridge_test_port.lock",
-                       O_CREAT | O_RDWR, 0666);
-  ASSERT_NE(-1, lock_fd);
-  ASSERT_EQ(0, ::flock(lock_fd, LOCK_EX));
-  std::array<toolbelt::UDPSocket, 2> reserved;
-  int disc_ports[2];
-  for (int i = 0; i < 2; i++) {
-    ASSERT_THAT(reserved[i].Bind(toolbelt::InetAddress::AnyAddress(0)), IsOk());
-    disc_ports[i] = reserved[i].BoundAddress().Port();
-  }
-  int tunnel_ports[2] = {FreePort(), FreePort()};
-
-  struct Instance {
-    async::RuntimeEngine engine;
-    std::string socket;
-    int pipe[2];
-    std::unique_ptr<Server> server;
-    std::thread thread;
-  };
-  Instance instances[3];
-  const char *kNames[3] = {"alpha", "beta", "gamma"};
-  for (int i = 0; i < 3; i++) {
-    Instance &instance = instances[i];
-    char socket_template[] = TUNNEL_TEST_TMP "/subspace_tunnelXXXXXX"; // NOLINT
-    ::close(mkstemp(&socket_template[0]));
-    instance.socket = &socket_template[0];
-    ASSERT_EQ(0, pipe(instance.pipe));
-    if (i < 2) {
-      reserved[i].Close();
-      instance.server = std::make_unique<Server>(
-          instance.engine, instance.socket, "", disc_ports[i],
-          disc_ports[1 - i], /*local=*/false, instance.pipe[1]);
-    } else {
-      instance.server = std::make_unique<Server>(
-          instance.engine, instance.socket, "", 0, 0, /*local=*/true,
-          instance.pipe[1]);
-    }
-    if (i > 0) {
-      int self = i - 1;
-      TunnelConfig config;
-      config.set_device_name(kNames[i]);
-      config.set_listen_address("127.0.0.1");
-      config.set_listen_port(tunnel_ports[self]);
-      TunnelPeer *peer = config.add_peers();
-      peer->set_name(kNames[3 - i]);
-      peer->set_tcp_addr("127.0.0.1");
-      peer->set_tcp_port(tunnel_ports[1 - self]);
-      instance.server->SetTunnelConfig(config);
-    }
-    instance.thread = std::thread([&instance]() {
-      absl::Status s = instance.server->Run(/*num_asio_threads=*/4);
-      if (!s.ok()) {
-        fprintf(stderr, "Error running Subspace server: %s\n",
-                s.ToString().c_str());
-        exit(1);
-      }
-    });
-    char buf[8];
-    (void)::read(instance.pipe[0], buf, sizeof(buf));
-  }
-  ASSERT_EQ(0, ::flock(lock_fd, LOCK_UN));
-  ::close(lock_fd);
-
+  const std::array<int, 2> tunnel_ports = FreePorts<2>();
+  MixedServer servers[3];
   {
-    Client clients[3];
-    for (int i = 0; i < 3; i++) {
-      ASSERT_THAT(clients[i].Init(instances[i].socket), IsOk());
-    }
-    // Published natively on alpha, wanted on beta and gamma.
-    absl::StatusOr<Publisher> native =
-        clients[0].CreatePublisher("/coexist/native", 256, 16);
-    ASSERT_THAT(native, IsOk());
-    absl::StatusOr<Subscriber> native_subs[2] = {
-        clients[1].CreateSubscriber("/coexist/native"),
-        clients[2].CreateSubscriber("/coexist/native")};
-    ASSERT_THAT(native_subs[0], IsOk());
-    ASSERT_THAT(native_subs[1], IsOk());
+    NativeDiscoveryPorts native;
+    ASSERT_NO_FATAL_FAILURE(native.Lock());
+    ASSERT_NO_FATAL_FAILURE(
+        servers[0].Start(native.Take(0), native.Port(1), std::nullopt));
+    ASSERT_NO_FATAL_FAILURE(servers[1].Start(
+        native.Take(1), native.Port(0),
+        TunnelTo("beta", tunnel_ports[0], "gamma", tunnel_ports[1])));
+  }
+  ASSERT_NO_FATAL_FAILURE(servers[2].Start(
+      0, 0, TunnelTo("gamma", tunnel_ports[1], "beta", tunnel_ports[0])));
 
-    // Published on gamma, wanted on beta and alpha.
-    absl::StatusOr<Publisher> tunneled =
-        clients[2].CreatePublisher("/coexist/tunnel", 256, 16);
-    ASSERT_THAT(tunneled, IsOk());
-    absl::StatusOr<Subscriber> tunnel_subs[2] = {
-        clients[1].CreateSubscriber("/coexist/tunnel"),
-        clients[0].CreateSubscriber("/coexist/tunnel")};
-    ASSERT_THAT(tunnel_subs[0], IsOk());
-    ASSERT_THAT(tunnel_subs[1], IsOk());
+  Client clients[3];
+  for (int i = 0; i < 3; i++) {
+    ASSERT_THAT(clients[i].Init(servers[i].Socket()), IsOk());
+  }
+  // Published natively on alpha, wanted on beta and gamma.
+  absl::StatusOr<Publisher> native =
+      clients[0].CreatePublisher("/coexist/native", 256, 16);
+  ASSERT_THAT(native, IsOk());
+  absl::StatusOr<Subscriber> native_subs[2] = {
+      clients[1].CreateSubscriber("/coexist/native"),
+      clients[2].CreateSubscriber("/coexist/native")};
+  ASSERT_THAT(native_subs[0], IsOk());
+  ASSERT_THAT(native_subs[1], IsOk());
 
-    // Published on beta, wanted on both sides.
-    absl::StatusOr<Publisher> both =
-        clients[1].CreatePublisher("/coexist/both", 256, 16);
-    ASSERT_THAT(both, IsOk());
-    absl::StatusOr<Subscriber> both_subs[2] = {
-        clients[0].CreateSubscriber("/coexist/both"),
-        clients[2].CreateSubscriber("/coexist/both")};
-    ASSERT_THAT(both_subs[0], IsOk());
-    ASSERT_THAT(both_subs[1], IsOk());
+  // Published on gamma, wanted on beta and alpha.
+  absl::StatusOr<Publisher> tunneled =
+      clients[2].CreatePublisher("/coexist/tunnel", 256, 16);
+  ASSERT_THAT(tunneled, IsOk());
+  absl::StatusOr<Subscriber> tunnel_subs[2] = {
+      clients[1].CreateSubscriber("/coexist/tunnel"),
+      clients[0].CreateSubscriber("/coexist/tunnel")};
+  ASSERT_THAT(tunnel_subs[0], IsOk());
+  ASSERT_THAT(tunnel_subs[1], IsOk());
 
-    ASSERT_THAT(WaitForRoute(*native, *native_subs[0]), IsOk());
-    ASSERT_THAT(WaitForRoute(*tunneled, *tunnel_subs[0]), IsOk());
-    ASSERT_THAT(WaitForRoute(*both, *both_subs[0]), IsOk());
-    ASSERT_THAT(WaitForRoute(*both, *both_subs[1]), IsOk());
-    // Probes may have crossed where they shouldn't; those are checked below.
-    for (auto *subs : {native_subs, tunnel_subs, both_subs}) {
-      for (int i = 0; i < 2; i++) {
-        while (Read(*subs[i], 200ms).ok()) {
-        }
+  // Published on beta, wanted on both sides.
+  absl::StatusOr<Publisher> both =
+      clients[1].CreatePublisher("/coexist/both", 256, 16);
+  ASSERT_THAT(both, IsOk());
+  absl::StatusOr<Subscriber> both_subs[2] = {
+      clients[0].CreateSubscriber("/coexist/both"),
+      clients[2].CreateSubscriber("/coexist/both")};
+  ASSERT_THAT(both_subs[0], IsOk());
+  ASSERT_THAT(both_subs[1], IsOk());
+
+  ASSERT_THAT(WaitForRoute(*native, *native_subs[0]), IsOk());
+  ASSERT_THAT(WaitForRoute(*tunneled, *tunnel_subs[0]), IsOk());
+  ASSERT_THAT(WaitForRoute(*both, *both_subs[0]), IsOk());
+  ASSERT_THAT(WaitForRoute(*both, *both_subs[1]), IsOk());
+  // Probes may have crossed where they shouldn't; those are checked below.
+  for (auto *subs : {native_subs, tunnel_subs, both_subs}) {
+    for (int i = 0; i < 2; i++) {
+      while (Read(*subs[i], 200ms).ok()) {
       }
-    }
-
-    ASSERT_THAT(Publish(*native, "native"), IsOk());
-    ASSERT_THAT(Publish(*tunneled, "tunnel"), IsOk());
-    ASSERT_THAT(Publish(*both, "both"), IsOk());
-    absl::StatusOr<std::string> received = Read(*native_subs[0]);
-    ASSERT_THAT(received, IsOk());
-    EXPECT_EQ(*received, "native");
-    received = Read(*tunnel_subs[0]);
-    ASSERT_THAT(received, IsOk());
-    EXPECT_EQ(*received, "tunnel");
-    for (int i = 0; i < 2; i++) {
-      received = Read(*both_subs[i]);
-      ASSERT_THAT(received, IsOk()) << i;
-      EXPECT_EQ(*received, "both");
-    }
-    EXPECT_FALSE(Read(*native_subs[1], 1s).ok())
-        << "the tunnel carried a natively bridged channel";
-    EXPECT_FALSE(Read(*tunnel_subs[1], 1s).ok())
-        << "native bridging carried a tunneled channel";
-    for (int i = 0; i < 2; i++) {
-      EXPECT_FALSE(Read(*both_subs[i], 200ms).ok()) << "duplicate on " << i;
     }
   }
 
-  for (Instance &instance : instances) {
-    instance.server->Stop();
-    char buf[8];
-    (void)::read(instance.pipe[0], buf, sizeof(buf));
-    instance.thread.join();
-    instance.server->CleanupAfterSession();
-    (void)remove(instance.socket.c_str());
-    ::close(instance.pipe[0]);
-    ::close(instance.pipe[1]);
+  ASSERT_THAT(Publish(*native, "native"), IsOk());
+  ASSERT_THAT(Publish(*tunneled, "tunnel"), IsOk());
+  ASSERT_THAT(Publish(*both, "both"), IsOk());
+  absl::StatusOr<std::string> received = Read(*native_subs[0]);
+  ASSERT_THAT(received, IsOk());
+  EXPECT_EQ(*received, "native");
+  received = Read(*tunnel_subs[0]);
+  ASSERT_THAT(received, IsOk());
+  EXPECT_EQ(*received, "tunnel");
+  for (int i = 0; i < 2; i++) {
+    received = Read(*both_subs[i]);
+    ASSERT_THAT(received, IsOk()) << i;
+    EXPECT_EQ(*received, "both");
+  }
+  EXPECT_FALSE(Read(*native_subs[1], 1s).ok())
+      << "the tunnel carried a natively bridged channel";
+  EXPECT_FALSE(Read(*tunnel_subs[1], 1s).ok())
+      << "native bridging carried a tunneled channel";
+  for (int i = 0; i < 2; i++) {
+    EXPECT_FALSE(Read(*both_subs[i], 200ms).ok()) << "duplicate on " << i;
+  }
+}
+
+// Publishes probes until one arrives twice, which shows that both native
+// bridging and the tunnel carry the channel.
+absl::Status WaitForBothPaths(Publisher &pub, Subscriber &sub) {
+  auto deadline = std::chrono::steady_clock::now() + 20s;
+  std::map<std::string, int> copies;
+  for (int n = 0; std::chrono::steady_clock::now() < deadline; n++) {
+    if (absl::Status s = Publish(pub, absl::StrFormat("probe %d", n));
+        !s.ok()) {
+      return s;
+    }
+    for (;;) {
+      absl::StatusOr<std::string> probe = Read(sub, 50ms);
+      if (!probe.ok()) {
+        break;
+      }
+      if (++copies[*probe] == 2) {
+        return absl::OkStatus();
+      }
+    }
+  }
+  return absl::DeadlineExceededError("no probe arrived over both paths");
+}
+
+// Native bridging and the tunnel both connect alpha and beta.  Each carries
+// every channel, so subscribers get every message twice; docs/tunnel.md says
+// not to connect servers this way.  Neither forwards what the other
+// delivered, so nothing loops.
+TEST(TunnelCoexistenceTest, BothPathsBetweenTwoServersDeliverTwiceButDontLoop) {
+  signal(SIGPIPE, SIG_IGN);
+  const std::array<int, 2> tunnel_ports = FreePorts<2>();
+  MixedServer servers[2];
+  {
+    NativeDiscoveryPorts native;
+    ASSERT_NO_FATAL_FAILURE(native.Lock());
+    for (int i = 0; i < 2; i++) {
+      ASSERT_NO_FATAL_FAILURE(servers[i].Start(
+          native.Take(i), native.Port(1 - i),
+          TunnelTo(kDeviceNames[i], tunnel_ports[i], kDeviceNames[1 - i],
+                   tunnel_ports[1 - i])));
+    }
+  }
+
+  Client clients[2];
+  for (int i = 0; i < 2; i++) {
+    ASSERT_THAT(clients[i].Init(servers[i].Socket()), IsOk());
+  }
+  const char *kChannel = "/coexist/twice";
+  absl::StatusOr<Publisher> pubs[2] = {
+      clients[0].CreatePublisher(kChannel, 256, 16),
+      clients[1].CreatePublisher(kChannel, 256, 16)};
+  ASSERT_THAT(pubs[0], IsOk());
+  ASSERT_THAT(pubs[1], IsOk());
+  absl::StatusOr<Subscriber> subs[2] = {clients[0].CreateSubscriber(kChannel),
+                                        clients[1].CreateSubscriber(kChannel)};
+  ASSERT_THAT(subs[0], IsOk());
+  ASSERT_THAT(subs[1], IsOk());
+  ASSERT_THAT(WaitForBothPaths(*pubs[0], *subs[1]), IsOk());
+  ASSERT_THAT(WaitForBothPaths(*pubs[1], *subs[0]), IsOk());
+  // Each subscriber also saw its own server's probes.
+  for (int i = 0; i < 2; i++) {
+    while (Read(*subs[i], 200ms).ok()) {
+    }
+  }
+
+  for (int from = 0; from < 2; from++) {
+    const int to = 1 - from;
+    const uint64_t sent_before[2] = {servers[0].Stats().messages_sent,
+                                     servers[1].Stats().messages_sent};
+    std::string data = absl::StrFormat("from %s", kDeviceNames[from]);
+    ASSERT_THAT(Publish(*pubs[from], data), IsOk());
+    for (int copy = 0; copy < 2; copy++) {
+      absl::StatusOr<std::string> received = Read(*subs[to]);
+      ASSERT_THAT(received, IsOk()) << "copy " << copy << " on " << to;
+      EXPECT_EQ(*received, data);
+    }
+    absl::StatusOr<std::string> local = Read(*subs[from]);
+    ASSERT_THAT(local, IsOk());
+    EXPECT_EQ(*local, data);
+    for (int i = 0; i < 2; i++) {
+      EXPECT_FALSE(Read(*subs[i], 1s).ok())
+          << data << " arrived again on " << kDeviceNames[i];
+    }
+    EXPECT_EQ(servers[from].Stats().messages_sent - sent_before[from], 1u);
+    EXPECT_EQ(servers[to].Stats().messages_sent - sent_before[to], 0u);
   }
 }
 

@@ -86,12 +86,28 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "tunnel_test_util",
+    testonly = True,
+    hdrs = ["tunnel_test_util.h"],
+    deps = [
+        ":server",
+        "//client:subspace_client",
+        "//common/async:async",
+        "//proto:tunnel_cc_proto",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@googletest//:gtest",
+    ],
+)
+
 cc_test(
     name = "tunnel_test",
     size = "medium",
     srcs = ["tunnel_test.cc"],
     deps = [
         ":server",
+        ":tunnel_test_util",
         "//client:subspace_client",
         "//common/async:async",
         "//proto:tunnel_cc_proto",
@@ -99,6 +115,26 @@ cc_test(
         "@abseil-cpp//absl/status:status_matchers",
         "@abseil-cpp//absl/strings:str_format",
         "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "tunnel_stress_test",
+    size = "medium",
+    srcs = ["tunnel_stress_test.cc"],
+    data = [":subspace_server"],
+    env = {"SUBSPACE_SERVER": "$(rootpath :subspace_server)"},
+    deps = [
+        ":server",
+        ":tunnel_test_util",
+        "//client:subspace_client",
+        "//proto:tunnel_cc_proto",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@googletest//:gtest_main",
+        "@protobuf//:protobuf",
     ],
 )
 

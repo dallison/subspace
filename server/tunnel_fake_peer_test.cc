@@ -517,9 +517,10 @@ protected:
     server_thread_ = std::thread([this]() {
       absl::Status s = server_->Run(/*num_asio_threads=*/4);
       if (!s.ok()) {
+        // exit() can hang while other threads are running.
         fprintf(stderr, "Error running Subspace server: %s\n",
                 s.ToString().c_str());
-        exit(1);
+        _exit(1);
       }
     });
     char buf[8];

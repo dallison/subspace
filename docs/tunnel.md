@@ -72,6 +72,13 @@ subspace_server --tunnel --tunnel_config=/etc/subspace/tunnel.textproto
 `--local --tunnel` turns off native discovery and bridging and runs only the
 tunnel.
 
+Without `--local`, native bridging runs alongside the tunnel. Don't connect
+the same two servers both ways. If they find each other through native
+discovery and also list each other as tunnel peers, each message reaches the
+other server twice, once over each bridge. Neither bridge forwards what
+arrived over the other, so messages don't loop. Use `--local --tunnel`, or
+leave servers that bridge natively out of each other's `peers`.
+
 The server exits at startup if it can't read or parse the configuration file,
 if the configuration is invalid, or if it can't listen on the tunnel port.
 
@@ -421,6 +428,19 @@ reliability from the channel when it starts. If a reliable publisher appears
 later, discovery announces the channel as reliable, but connections already
 running stay as they are.
 
+### Reconnecting
+
+When a peer stops, the connections to it close, and the server tries again
+every 3 seconds until the peer is back. Messages on their way to the peer
+when it stopped are lost with it. Once messages flow again, a reliable channel
+has no gaps or duplicates in what's published after the reconnection.
+
+Each new send connection subscribes to the channel again, and a new
+subscriber first reads the messages still in the channel's slots. So after a
+reconnection, the peer can receive some older messages again before the new
+ones. A server that has just started has nothing in its slots, so a peer
+doesn't receive old messages again from a server that restarted.
+
 ### Checksums and Virtual Channels
 
 The tunnel never changes or recomputes a checksum. A checksum verifies across
@@ -553,6 +573,20 @@ backends, and on the Android x86_64 emulator with Bazel (both backends) and
 CMake. For QNX, `.github/scripts/qnx-deploy-client-test.sh` stages the tunnel
 tests with `client_test` for a QNX VM.
 
+The tunnel's tests are in `server/`:
+
+| Test | What it covers |
+|------|----------------|
+| `tunnel_wire_test` | The wire format. |
+| `tunnel_config_test` | Parsing and validating the configuration. |
+| `tunnel_test` | Two servers connected by the tunnel, with static routes, and alongside native bridging. |
+| `tunnel_fake_peer_test` | One server against a scripted peer: discovery, routes, bad handshakes and handshake timeouts. |
+| `tunnel_stress_test` | High message rates, many channels in both directions, and a server restarting mid-stream. |
+
+The restart test runs `subspace_server` in its own process, which it finds
+through the `SUBSPACE_SERVER` environment variable. Bazel and CMake set it.
+Android and QNX don't run `tunnel_config_test` or `tunnel_stress_test` yet.
+
 ### Between the Android Emulator and the Host
 
 The emulator's network only lets the guest open connections, so the host
@@ -599,6 +633,8 @@ each logged once.
   static routes don't depend on it.
 - Discovery is additive. Channels are never withdrawn, and data connections
   stay open until the server stops.
+- Two servers that bridge natively and also through the tunnel receive each
+  other's messages twice (see [Enabling the Tunnel](#enabling-the-tunnel)).
 - Connections are neither authenticated nor encrypted. Any host that can
   reach `listen_port` can publish on any channel that isn't internal, so
   restrict access to the port with a firewall.

@@ -39,6 +39,13 @@
   `vchan_id`.
 - CMake and Android builds now generate the tunnel protos alongside
   `subspace.proto`.
+- `tunnel_stress_test` covers high message rates on reliable and unreliable
+  channels, many channels flowing both ways at once, and a stream that carries
+  on while each server in turn is killed and restarted. On an unreliable
+  channel messages can be dropped, but what arrives is in order and ends with
+  the last message sent. `tunnel_test` checks that two servers connected both
+  natively and through the tunnel receive each message twice and that nothing
+  loops.
 
 ### Asio Waits and Shutdown
 - With the Boost.Asio backend, `async::WaitReadable`, `WaitWritable` and
