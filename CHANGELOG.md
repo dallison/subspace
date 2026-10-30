@@ -54,9 +54,11 @@
   check with `poll()` and wait again if the fd isn't ready. Tunnel connections
   stalled on this, because a readable connection looks like the peer closing
   it.
-- A coroutine that waits on an fd another coroutine is already waiting on now
-  gets an `InternalError` at once. It used to throw, which ended the
-  coroutine without a trace.
+- On Linux, a coroutine that waits on an fd another coroutine is already
+  waiting on now gets an `InternalError` at once. It used to throw, which
+  ended the coroutine without a trace. On macOS, asio's kqueue reactor
+  accepts the second wait and never wakes the first, so two coroutines must
+  never wait on the same fd at once.
 - A cancelled wait, as at graceful shutdown, returns `CancelledError` instead
   of `InternalError`, and a client whose request is cancelled no longer
   reconnects. A server with many in-process clients, such as one per tunnel or

@@ -119,7 +119,15 @@ TEST(AsyncTest, WaitReadableWorksWithoutCancellationSlot) {
 }
 #endif
 
+// Under Asio the reactor decides what a second waiter on an fd gets.  epoll
+// won't register the fd again, so the second wait fails at once.  kqueue
+// moves the fd's events to the second registration, so the first wait is
+// never woken.
 TEST(AsyncTest, SecondWaiterOnAnFdReturns) {
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO &&                     \
+    !defined(BOOST_ASIO_HAS_EPOLL)
+  GTEST_SKIP() << "only epoll refuses a second waiter on an fd";
+#endif
   int fds[2];
   ASSERT_EQ(0, ::pipe(fds));
 

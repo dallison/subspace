@@ -18,9 +18,10 @@ namespace subspace::async {
 // Context.  These replace the implicit co::self / co::Wait / co::Sleep calls so
 // that the same source compiles under either backend.
 //
-// Under Asio only one coroutine at a time can wait on a given fd; another
-// coroutine's wait on it fails at once with an InternalError.  The co backend
-// has no such limit.  Under Asio a wait that is cancelled, as a graceful
+// Under Asio only one coroutine at a time can wait on a given fd.  With epoll
+// (Linux and Android), another coroutine's wait on it fails at once with an
+// InternalError.  With kqueue (macOS), the other wait takes over the fd and
+// the first may never return.  The co backend has no such limit.  Under Asio a wait that is cancelled, as a graceful
 // shutdown does, returns CancelledError.
 
 // Wait until `fd` is readable.  A non-zero timeout returns

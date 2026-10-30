@@ -86,10 +86,12 @@ int ReadableOf(int fd1, int fd2) {
   return -1;
 }
 
-// Registers `fd` with the reactor.  An fd can be registered only once in an
+// Registers `fd` with the reactor.  epoll registers an fd only once in an
 // io_context, so this fails while another coroutine is waiting on `fd`.
 // Failing here, rather than letting the descriptor's constructor throw, keeps
-// the waiting coroutine from ending without a trace.
+// the waiting coroutine from ending without a trace.  kqueue accepts the
+// second registration and moves the fd's events to it, so there this
+// succeeds and the other coroutine's wait is never woken.
 absl::StatusOr<std::shared_ptr<boost::asio::posix::stream_descriptor>>
 RegisterFd(boost::asio::io_context &ioc, int fd, const char *what) {
   auto sd = std::make_shared<boost::asio::posix::stream_descriptor>(ioc);
