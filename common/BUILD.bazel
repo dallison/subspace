@@ -4,6 +4,7 @@ load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 load("//:max_channels.bzl", "max_channels_setting")
 load("//:max_buffers.bzl", "max_buffers_setting")
 load("//:max_slot_owners.bzl", "max_slot_owners_setting")
+load("//:coroutine_stack_size.bzl", "coroutine_stack_size_setting")
 load(":slot_owner_layout.bzl", "slot_owner_limit_test")
 
 max_channels_setting(
@@ -16,6 +17,16 @@ max_slot_owners_setting(
 
 max_buffers_setting(
     name = "max_buffers_setting",
+)
+
+coroutine_stack_size_setting(
+    name = "coroutine_stack_setting",
+)
+
+cc_library(
+    name = "coroutine_stack",
+    hdrs = ["coroutine_stack.h"],
+    deps = [":coroutine_stack_setting"],
 )
 
 cc_library(

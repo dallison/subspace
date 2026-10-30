@@ -6,6 +6,7 @@
 #include "common/async/runtime.h"
 #include "common/async/socket.h"
 #include "common/async/wait.h"
+#include "common/coroutine_stack.h"
 
 #include <cstring>
 #include <gtest/gtest.h>
@@ -35,6 +36,18 @@ struct RuntimeFixture {
   void Run() { scheduler.Run(); }
 };
 #endif
+
+TEST(AsyncTest, CoroutineStackSizeFollowsBuildSetting) {
+  EXPECT_EQ(kConfiguredCoroutineStackSize % 4096, 0u);
+#ifdef SUBSPACE_COROUTINE_STACK_ASAN
+  EXPECT_GE(CoroutineStackSize(), kAsanCoroutineStackFloor);
+  if (kConfiguredCoroutineStackSize > kAsanCoroutineStackFloor) {
+    EXPECT_EQ(CoroutineStackSize(), kConfiguredCoroutineStackSize);
+  }
+#else
+  EXPECT_EQ(CoroutineStackSize(), kConfiguredCoroutineStackSize);
+#endif
+}
 
 TEST(AsyncTest, WaitReadableWakesOnData) {
   int fds[2];

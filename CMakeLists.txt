@@ -104,6 +104,23 @@ endif()
 add_compile_definitions(SUBSPACE_MAX_BUFFERS=${SUBSPACE_MAX_BUFFERS})
 message(STATUS "Maximum payload buffer segments per channel: ${SUBSPACE_MAX_BUFFERS}")
 
+# --- Server and shadow coroutine stack size ---
+# Ordinary process memory for each coroutine those processes spawn.  Clients
+# do not need the same value.  AddressSanitizer builds use at least 256 KiB.
+set(SUBSPACE_COROUTINE_STACK_SIZE "65536" CACHE STRING
+    "Stack size in bytes for each server and shadow coroutine. Must be a positive multiple of 4096.")
+if(NOT SUBSPACE_COROUTINE_STACK_SIZE MATCHES "^[1-9][0-9]*$")
+    message(FATAL_ERROR
+        "SUBSPACE_COROUTINE_STACK_SIZE must be a positive multiple of 4096, got '${SUBSPACE_COROUTINE_STACK_SIZE}'")
+endif()
+math(EXPR SUBSPACE_COROUTINE_STACK_SIZE_MOD "${SUBSPACE_COROUTINE_STACK_SIZE} % 4096")
+if(NOT SUBSPACE_COROUTINE_STACK_SIZE_MOD EQUAL 0)
+    message(FATAL_ERROR
+        "SUBSPACE_COROUTINE_STACK_SIZE must be a positive multiple of 4096, got '${SUBSPACE_COROUTINE_STACK_SIZE}'")
+endif()
+add_compile_definitions(SUBSPACE_COROUTINE_STACK_SIZE=${SUBSPACE_COROUTINE_STACK_SIZE})
+message(STATUS "Server coroutine stack size: ${SUBSPACE_COROUTINE_STACK_SIZE}")
+
 # --- Apple Silicon (ARM64) specific settings ---
 # Ensure that CMake targets the correct architecture when building on Apple platforms.
 # This value will be propagated to sub-dependencies.

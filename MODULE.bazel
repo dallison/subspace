@@ -4,8 +4,10 @@ module(
 )
 
 # Downstream modules raise build limits next to their bazel_dep.  See
-# docs/max-channels.md, docs/max-slot-owners.md, and docs/max-buffers.md.
-# Defaults: 1024 channels, 1024 slot owners, 341 buffer segments (4 KiB BCB).
+# docs/max-channels.md, docs/max-slot-owners.md, docs/max-buffers.md, and
+# docs/coroutine-stack-size.md.
+# Defaults: 1024 channels, 1024 slot owners, 341 buffer segments (4 KiB BCB),
+# 64 KiB server coroutine stacks.
 subspace = use_extension("//:extensions.bzl", "subspace")
 use_repo(subspace, "subspace_max_channels")
 
@@ -35,6 +37,7 @@ git_override(
 
 # Boost (for asio_rpc)
 bazel_dep(name = "boost.asio", version = "1.87.0.bcr.1")
+bazel_dep(name = "boost.context", version = "1.87.0")
 bazel_dep(name = "boost.coroutine", version = "1.87.0")
 bazel_dep(name = "rules_shell", version = "0.6.1") 
 bazel_dep(name = "rules_proto", version = "6.0.2")

@@ -12,6 +12,9 @@ cc_defaults {
     # N must be a positive multiple of 64; max_slot_owners and max_buffers must
     # be positive integers (max_buffers defaults to 341 for a 4 KiB BCB).
     # Every client built against this library must use the same values.
+    # "-DSUBSPACE_COROUTINE_STACK_SIZE=N" sets the server and shadow coroutine
+    # stack in bytes (default 65536, a positive multiple of 4096).  Clients do
+    # not need to match it.
     cflags: [
         "-std=c++17",
         "-Wall",
