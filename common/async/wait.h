@@ -17,6 +17,11 @@ namespace subspace::async {
 // FD-readiness and sleep primitives, expressed against the active backend's
 // Context.  These replace the implicit co::self / co::Wait / co::Sleep calls so
 // that the same source compiles under either backend.
+//
+// Under Asio only one coroutine at a time can wait on a given fd; another
+// coroutine's wait on it fails at once with an InternalError.  The co backend
+// has no such limit.  Under Asio a wait that is cancelled, as a graceful
+// shutdown does, returns CancelledError.
 
 // Wait until `fd` is readable.  A non-zero timeout returns
 // DeadlineExceededError if the fd is not ready in time; a zero timeout waits

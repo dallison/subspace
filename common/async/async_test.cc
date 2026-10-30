@@ -119,6 +119,38 @@ TEST(AsyncTest, WaitReadableWorksWithoutCancellationSlot) {
 }
 #endif
 
+TEST(AsyncTest, SecondWaiterOnAnFdReturns) {
+  int fds[2];
+  ASSERT_EQ(0, ::pipe(fds));
+
+  RuntimeFixture fx;
+  absl::Status first;
+  absl::Status second;
+  bool second_returned = false;
+  fx.runtime.Spawn([&](Context ctx) {
+    first = WaitReadable(ctx, fds[0], std::chrono::seconds(5));
+  });
+  fx.runtime.Spawn([&](Context ctx) {
+    second = WaitReadable(ctx, fds[0], std::chrono::seconds(5));
+    second_returned = true;
+  });
+  fx.runtime.Spawn([&](Context ctx) {
+    Sleep(ctx, std::chrono::milliseconds(10));
+    ASSERT_EQ(1, ::write(fds[1], "x", 1));
+  });
+
+  fx.Run();
+  EXPECT_TRUE(first.ok()) << first;
+  EXPECT_TRUE(second_returned);
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+  EXPECT_TRUE(absl::IsInternal(second)) << second;
+#else
+  EXPECT_TRUE(second.ok()) << second;
+#endif
+  ::close(fds[0]);
+  ::close(fds[1]);
+}
+
 TEST(AsyncTest, WaitEitherReturnsReadyFd) {
   int a[2], b[2];
   ASSERT_EQ(0, ::pipe(a));

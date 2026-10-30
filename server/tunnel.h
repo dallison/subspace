@@ -172,9 +172,6 @@ private:
   // Logs a connection failure at info level, or at debug level when it
   // repeats the previous one.
   void LogFailure(std::string &last_failure, std::string failure);
-  // Waits on the shutdown trigger so a retry delay ends early at shutdown.
-  void SleepUnlessShutdown(async::Context ctx,
-                           std::chrono::nanoseconds duration);
   void SpawnOnStrand(std::function<void(async::Context)> fn, std::string name);
   void SpawnOnNewStrand(std::function<void(async::Context)> fn,
                         std::string name);

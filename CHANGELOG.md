@@ -40,6 +40,22 @@
 - CMake and Android builds now generate the tunnel protos alongside
   `subspace.proto`.
 
+### Asio Waits and Shutdown
+- With the Boost.Asio backend, `async::WaitReadable`, `WaitWritable` and
+  `WaitEither` no longer return before the fd is ready. Asio's reactor can
+  deliver a readiness event left over from an earlier wait, so the waits now
+  check with `poll()` and wait again if the fd isn't ready. Tunnel connections
+  stalled on this, because a readable connection looks like the peer closing
+  it.
+- A coroutine that waits on an fd another coroutine is already waiting on now
+  gets an `InternalError` at once. It used to throw, which ended the
+  coroutine without a trace.
+- A cancelled wait, as at graceful shutdown, returns `CancelledError` instead
+  of `InternalError`, and a client whose request is cancelled no longer
+  reconnects. A server with many in-process clients, such as one per tunnel or
+  bridge connection, could hang at shutdown, with clients blocked connecting
+  to a server that had stopped accepting connections.
+
 ### Late Subscribers Do Not Count Channel History As Drops
 - A subscriber created on a channel with history no longer reports that
   history as dropped messages. A slot held by another subscriber is never

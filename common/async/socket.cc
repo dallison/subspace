@@ -145,7 +145,7 @@ absl::Status WaitFdReady(Context yield, int fd,
   if (!*fd_ready) {
     // Resumed without the fd becoming ready: the wait was cancelled (e.g.
     // graceful shutdown).
-    return absl::InternalError(
+    return absl::CancelledError(
         absl::StrFormat("%s error: Operation canceled", what));
   }
   return absl::OkStatus();

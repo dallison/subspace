@@ -374,12 +374,6 @@ void TunnelManager::SpawnOnNewStrand(std::function<void(async::Context)> fn,
        .interrupt_fd = server_->shutdown_trigger_fd_.GetPollFd().Fd()});
 }
 
-void TunnelManager::SleepUnlessShutdown(async::Context ctx,
-                                        std::chrono::nanoseconds duration) {
-  (void)async::WaitReadable(
-      ctx, server_->shutdown_trigger_fd_.GetPollFd().Fd(), duration);
-}
-
 void TunnelManager::ListenerCoroutine(async::Context ctx) {
   while (!server_->shutting_down_) {
     absl::StatusOr<async::StreamSocket> socket = listener_.Accept(ctx);
@@ -390,7 +384,7 @@ void TunnelManager::ListenerCoroutine(async::Context ctx) {
       server_->logger_.Log(toolbelt::LogLevel::kError,
                            "Tunnel can't accept a connection: %s",
                            socket.status().ToString().c_str());
-      SleepUnlessShutdown(ctx, std::chrono::seconds(1));
+      async::Sleep(ctx, std::chrono::seconds(1));
       continue;
     }
     auto connection = std::make_shared<async::StreamSocket>(std::move(*socket));
@@ -741,7 +735,7 @@ void TunnelManager::EgressCoroutine(async::Context ctx, EgressRoute route) {
         LogFailure(last_failure,
                    absl::StrFormat("Tunnel can't send %s to %s: %s", topic,
                                    peer_name, address.status().ToString()));
-        SleepUnlessShutdown(ctx, kReconnectInterval);
+        async::Sleep(ctx, kReconnectInterval);
         continue;
       }
       route.address = *address;
@@ -755,7 +749,7 @@ void TunnelManager::EgressCoroutine(async::Context ctx, EgressRoute route) {
       LogFailure(last_failure,
                  absl::StrFormat("Tunnel can't connect to %s for %s: %s",
                                  peer_name, topic, socket.status().ToString()));
-      SleepUnlessShutdown(ctx, kReconnectInterval);
+      async::Sleep(ctx, kReconnectInterval);
       continue;
     }
     SetNoDelay(*socket);
@@ -767,7 +761,7 @@ void TunnelManager::EgressCoroutine(async::Context ctx, EgressRoute route) {
     LogFailure(last_failure,
                absl::StrFormat("Tunnel stopped sending %s to %s: %s", topic,
                                peer_name, status.ToString()));
-    SleepUnlessShutdown(ctx, kReconnectInterval);
+    async::Sleep(ctx, kReconnectInterval);
   }
 }
 
@@ -907,7 +901,7 @@ void TunnelManager::ScannerCoroutine(async::Context ctx) {
       server_->logger_.Log(toolbelt::LogLevel::kError,
                            "Tunnel channel scanner: %s",
                            status.ToString().c_str());
-      SleepUnlessShutdown(ctx, std::chrono::seconds(1));
+      async::Sleep(ctx, std::chrono::seconds(1));
       continue;
     }
     rescan_trigger_.Clear();
@@ -1050,12 +1044,9 @@ TunnelManager::BuildDiscoveryMessage(const Peer &peer) const {
 }
 
 void TunnelManager::WaitToReconnect(async::Context ctx, Peer &peer) {
-  const int trigger_fd = peer.discovery_trigger.GetPollFd().Fd();
-  absl::StatusOr<int> fd =
-      async::WaitEither(ctx, trigger_fd,
-                        server_->shutdown_trigger_fd_.GetPollFd().Fd(),
-                        kReconnectInterval);
-  if (fd.ok() && *fd == trigger_fd) {
+  if (async::WaitReadable(ctx, peer.discovery_trigger.GetPollFd().Fd(),
+                          kReconnectInterval)
+          .ok()) {
     peer.discovery_trigger.Clear();
   }
 }

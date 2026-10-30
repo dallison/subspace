@@ -2397,6 +2397,14 @@ absl::Status ClientImpl::Reconnect() {
   return absl::OkStatus();
 }
 
+bool ClientImpl::ShouldReconnect(const absl::Status &failure) const {
+  // A cancelled wait means the coroutine running this client is being
+  // stopped, not that the server has gone.  Reconnecting then can block in
+  // connect() for good if the server has stopped accepting connections, as it
+  // does while it shuts down.
+  return was_connected_ && !reconnecting_ && !absl::IsCancelled(failure);
+}
+
 absl::Status ClientImpl::ReregisterPublisher(PublisherImpl *publisher) {
   Request req;
   FillCreatePublisherRequest(req.mutable_create_publisher(), publisher->Name(),
@@ -2461,7 +2469,7 @@ absl::Status ClientImpl::SendRequestReceiveResponse(
         socket_.SendMessage(sendbuf, msg_len, SocketContext());
     if (!n.ok()) {
       socket_.Close();
-      if (was_connected_ && !reconnecting_) {
+      if (ShouldReconnect(n.status())) {
         if (absl::Status rs = Reconnect(); rs.ok()) {
           return SendRequestReceiveResponse(req, response, fds, send_fds);
         } else {
@@ -2483,7 +2491,7 @@ absl::Status ClientImpl::SendRequestReceiveResponse(
       socket_.ReceiveVariableLengthMessage(SocketContext());
   if (!recv_msg.ok()) {
     socket_.Close();
-    if (was_connected_ && !reconnecting_) {
+    if (ShouldReconnect(recv_msg.status())) {
       if (absl::Status rs = Reconnect(); rs.ok()) {
         return SendRequestReceiveResponse(req, response, fds, send_fds);
       } else {
@@ -2520,7 +2528,7 @@ absl::Status ClientImpl::SendOneWayRequest(
       socket_.SendMessage(sendbuf, msg_len, SocketContext());
   if (!n.ok()) {
     socket_.Close();
-    if (was_connected_ && !reconnecting_) {
+    if (ShouldReconnect(n.status())) {
       if (absl::Status rs = Reconnect(); rs.ok()) {
         return SendOneWayRequest(req, fds);
       } else {

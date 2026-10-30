@@ -24,30 +24,90 @@
 namespace subspace::async {
 
 namespace {
+using Clock = std::chrono::steady_clock;
+
 boost::asio::io_context &IocFromYield(boost::asio::yield_context yield) {
   return static_cast<boost::asio::io_context &>(
       yield.get_executor().context());
 }
 
-// Wait for `fd` to become ready for `cond`.  `poll_events` is the poll event
-// for the same condition and `ready_mask` the revents bits that count as ready
-// on the fast path.
-absl::Status WaitFd(Context ctx, int fd,
-                    boost::asio::posix::descriptor_base::wait_type cond,
-                    short poll_events, short ready_mask,
-                    std::chrono::nanoseconds timeout, const char *what) {
-  boost::asio::io_context &ioc = IocFromYield(ctx);
-  // Fast path: if the fd is already ready, return immediately without
-  // suspending.  This keeps a persistently-readable fd (e.g. a triggered
-  // shutdown fd) from racing a graceful-shutdown cancellation that could
-  // otherwise repeatedly wake us before the reactor reports the readable fd,
-  // livelocking the coroutine so it never observes the fd and never exits.
-  {
-    struct pollfd pfd = {.fd = fd, .events = poll_events, .revents = 0};
-    if (::poll(&pfd, 1, 0) > 0 && (pfd.revents & ready_mask) != 0) {
-      return absl::OkStatus();
+// When a wait of `timeout` that starts now ends, or max if it has no timeout.
+Clock::time_point DeadlineAfter(std::chrono::nanoseconds timeout) {
+  const Clock::time_point now = Clock::now();
+  if (timeout.count() == 0 || timeout >= Clock::time_point::max() - now) {
+    return Clock::time_point::max();
+  }
+  return now + timeout;
+}
+
+// The timeout for the rest of a wait that ends at `deadline`: zero if it has
+// none, and DeadlineExceededError once it has passed.
+absl::StatusOr<std::chrono::nanoseconds> TimeLeft(Clock::time_point deadline) {
+  if (deadline == Clock::time_point::max()) {
+    return std::chrono::nanoseconds(0);
+  }
+  auto left = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      deadline - Clock::now());
+  if (left.count() <= 0) {
+    return absl::DeadlineExceededError("Timeout waiting for fd");
+  }
+  return left;
+}
+
+// Asio can report an fd ready when it isn't.  Its epoll reactor returns the
+// state it keeps for a descriptor to a pool as soon as the descriptor is
+// released, so a readiness event still queued for a descriptor that a wait
+// has released can complete the next wait that gets the same state.  The
+// waits here register and release a descriptor every time, so they check with
+// poll() that an fd is ready before returning, and wait again if it isn't.
+// An error or hangup counts as ready, so the caller's next read or write
+// reports it.
+constexpr short kAlwaysReady = POLLERR | POLLHUP;
+
+// Whether `fd` is ready for `events` now.
+bool IsReady(int fd, short events) {
+  struct pollfd pfd = {.fd = fd, .events = events, .revents = 0};
+  return ::poll(&pfd, 1, 0) > 0 &&
+         (pfd.revents & (events | kAlwaysReady)) != 0;
+}
+
+// Which of `fd1` and `fd2` is readable now, or -1 if neither is.
+int ReadableOf(int fd1, int fd2) {
+  struct pollfd fds[2] = {{.fd = fd1, .events = POLLIN, .revents = 0},
+                          {.fd = fd2, .events = POLLIN, .revents = 0}};
+  if (::poll(fds, 2, 0) > 0) {
+    if ((fds[0].revents & (POLLIN | kAlwaysReady)) != 0) {
+      return fd1;
+    }
+    if ((fds[1].revents & (POLLIN | kAlwaysReady)) != 0) {
+      return fd2;
     }
   }
+  return -1;
+}
+
+// Registers `fd` with the reactor.  An fd can be registered only once in an
+// io_context, so this fails while another coroutine is waiting on `fd`.
+// Failing here, rather than letting the descriptor's constructor throw, keeps
+// the waiting coroutine from ending without a trace.
+absl::StatusOr<std::shared_ptr<boost::asio::posix::stream_descriptor>>
+RegisterFd(boost::asio::io_context &ioc, int fd, const char *what) {
+  auto sd = std::make_shared<boost::asio::posix::stream_descriptor>(ioc);
+  boost::system::error_code ec;
+  sd->assign(fd, ec);
+  if (ec) {
+    return absl::InternalError(absl::StrFormat("%s: can't wait on fd %d: %s",
+                                               what, fd, ec.message()));
+  }
+  return sd;
+}
+
+// Wait for the reactor to report `fd` ready for `cond`, which it can do when
+// it isn't (see IsReady).
+absl::Status ReactorWaitFd(Context ctx, int fd,
+                           boost::asio::posix::descriptor_base::wait_type cond,
+                           std::chrono::nanoseconds timeout, const char *what) {
+  boost::asio::io_context &ioc = IocFromYield(ctx);
   // We register the caller's real fd with the reactor and release() it before
   // the descriptor is destroyed so we never close it.  We intentionally do NOT
   // ::dup(): dup'ing churns ephemeral fd numbers through the shared process fd
@@ -64,7 +124,13 @@ absl::Status WaitFd(Context ctx, int fd,
   // posts its completion, so the coroutine only ever resumes on a clean stack.
   // The descriptor (and the optional timeout timer) use plain handlers that
   // merely wake the notifier, so a cancellation never reaches them directly.
-  auto sd = std::make_shared<boost::asio::posix::stream_descriptor>(ioc, fd);
+  absl::StatusOr<std::shared_ptr<boost::asio::posix::stream_descriptor>>
+      registered = RegisterFd(ioc, fd, what);
+  if (!registered.ok()) {
+    return registered.status();
+  }
+  std::shared_ptr<boost::asio::posix::stream_descriptor> sd =
+      std::move(*registered);
   auto fd_ready = std::make_shared<bool>(false);
   auto timed_out = std::make_shared<bool>(false);
   auto cancelled = std::make_shared<bool>(false);
@@ -165,43 +231,58 @@ absl::Status WaitFd(Context ctx, int fd,
   }
   // Resumed without the fd becoming ready and without timing out: the wait
   // was cancelled (e.g. graceful shutdown).
-  return absl::InternalError(absl::StrFormat("%s: operation canceled", what));
+  return absl::CancelledError(absl::StrFormat("%s: operation canceled", what));
 }
 
-}  // namespace
-
-absl::Status WaitReadable(Context ctx, int fd, std::chrono::nanoseconds timeout) {
-  return WaitFd(ctx, fd, boost::asio::posix::stream_descriptor::wait_read,
-                POLLIN, POLLIN | POLLHUP, timeout, "WaitReadable");
-}
-
-absl::Status WaitWritable(Context ctx, int fd,
-                          std::chrono::nanoseconds timeout) {
-  return WaitFd(ctx, fd, boost::asio::posix::stream_descriptor::wait_write,
-                POLLOUT, POLLOUT | POLLERR | POLLHUP, timeout, "WaitWritable");
-}
-
-absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2,
-                               std::chrono::nanoseconds timeout) {
-  boost::asio::io_context &ioc = IocFromYield(ctx);
-  // Fast path: if either fd is already readable, return immediately without
-  // suspending (see WaitReadable for why real-fd waits need this).
-  {
-    struct pollfd fds[2] = {{.fd = fd1, .events = POLLIN, .revents = 0},
-                            {.fd = fd2, .events = POLLIN, .revents = 0}};
-    if (::poll(fds, 2, 0) > 0) {
-      if ((fds[0].revents & (POLLIN | POLLHUP)) != 0) {
-        return fd1;
-      }
-      if ((fds[1].revents & (POLLIN | POLLHUP)) != 0) {
-        return fd2;
-      }
+// Wait for `fd` to become ready for `cond`, which `poll_events` names for
+// poll().
+absl::Status WaitFd(Context ctx, int fd,
+                    boost::asio::posix::descriptor_base::wait_type cond,
+                    short poll_events, std::chrono::nanoseconds timeout,
+                    const char *what) {
+  const Clock::time_point deadline = DeadlineAfter(timeout);
+  for (;;) {
+    // Checking before suspending also keeps a persistently-readable fd (e.g. a
+    // triggered shutdown fd) from racing a graceful-shutdown cancellation that
+    // could otherwise repeatedly wake us before the reactor reports the
+    // readable fd, livelocking the coroutine so it never observes the fd and
+    // never exits.
+    if (IsReady(fd, poll_events)) {
+      return absl::OkStatus();
+    }
+    absl::StatusOr<std::chrono::nanoseconds> left = TimeLeft(deadline);
+    if (!left.ok()) {
+      return left.status();
+    }
+    if (absl::Status s = ReactorWaitFd(ctx, fd, cond, *left, what); !s.ok()) {
+      return s;
     }
   }
-  // Register the caller's real fds (no ::dup(); see WaitReadable) and release()
-  // them before the descriptors are destroyed so we never close them.
-  auto sd1 = std::make_shared<boost::asio::posix::stream_descriptor>(ioc, fd1);
-  auto sd2 = std::make_shared<boost::asio::posix::stream_descriptor>(ioc, fd2);
+}
+
+// Wait for the reactor to report `fd1` or `fd2` readable, which it can do
+// when neither is (see IsReady).
+absl::Status ReactorWaitEither(Context ctx, int fd1, int fd2,
+                               std::chrono::nanoseconds timeout) {
+  boost::asio::io_context &ioc = IocFromYield(ctx);
+  // Register the caller's real fds (no ::dup(); see ReactorWaitFd) and
+  // release() them before the descriptors are destroyed so we never close
+  // them.
+  absl::StatusOr<std::shared_ptr<boost::asio::posix::stream_descriptor>>
+      registered1 = RegisterFd(ioc, fd1, "WaitEither");
+  if (!registered1.ok()) {
+    return registered1.status();
+  }
+  std::shared_ptr<boost::asio::posix::stream_descriptor> sd1 =
+      std::move(*registered1);
+  absl::StatusOr<std::shared_ptr<boost::asio::posix::stream_descriptor>>
+      registered2 = RegisterFd(ioc, fd2, "WaitEither");
+  if (!registered2.ok()) {
+    sd1->release();
+    return registered2.status();
+  }
+  std::shared_ptr<boost::asio::posix::stream_descriptor> sd2 =
+      std::move(*registered2);
 
   auto result_fd = std::make_shared<int>(-1);
   auto done = std::make_shared<bool>(false);
@@ -212,7 +293,7 @@ absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2,
   auto notifier = std::make_shared<boost::asio::steady_timer>(ioc);
   notifier->expires_at(boost::asio::steady_timer::time_point::max());
 
-  // Single idempotent wake (see WaitReadable): fd-ready and graceful-shutdown
+  // Single idempotent wake (see ReactorWaitFd): fd-ready and graceful-shutdown
   // cancellation both resume the coroutine through here, so notifier->cancel()
   // is called exactly once and never races asio's per-operation cancellation.
   auto wake = [notifier, notified]() {
@@ -283,7 +364,7 @@ absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2,
   }
 
   // Graceful shutdown routes through the same idempotent wake() rather than
-  // cancelling the notifier op directly (see WaitReadable).
+  // cancelling the notifier op directly (see ReactorWaitFd).
   auto exec = ctx.get_executor();
   auto cancel_slot = ctx.get_cancellation_slot();
   if (cancel_slot.is_connected()) {
@@ -318,9 +399,40 @@ absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2,
     if (*timed_out) {
       return absl::DeadlineExceededError("Timeout waiting for fd");
     }
-    return absl::InternalError("WaitEither: no fd became ready");
+    return absl::CancelledError("WaitEither: operation canceled");
   }
-  return *result_fd;
+  return absl::OkStatus();
+}
+
+}  // namespace
+
+absl::Status WaitReadable(Context ctx, int fd, std::chrono::nanoseconds timeout) {
+  return WaitFd(ctx, fd, boost::asio::posix::stream_descriptor::wait_read,
+                POLLIN, timeout, "WaitReadable");
+}
+
+absl::Status WaitWritable(Context ctx, int fd,
+                          std::chrono::nanoseconds timeout) {
+  return WaitFd(ctx, fd, boost::asio::posix::stream_descriptor::wait_write,
+                POLLOUT, timeout, "WaitWritable");
+}
+
+absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2,
+                               std::chrono::nanoseconds timeout) {
+  const Clock::time_point deadline = DeadlineAfter(timeout);
+  for (;;) {
+    // As in WaitFd, checking first also avoids a livelock at shutdown.
+    if (int fd = ReadableOf(fd1, fd2); fd >= 0) {
+      return fd;
+    }
+    absl::StatusOr<std::chrono::nanoseconds> left = TimeLeft(deadline);
+    if (!left.ok()) {
+      return left.status();
+    }
+    if (absl::Status s = ReactorWaitEither(ctx, fd1, fd2, *left); !s.ok()) {
+      return s;
+    }
+  }
 }
 
 void Sleep(Context ctx, std::chrono::nanoseconds duration) {

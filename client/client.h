@@ -736,6 +736,8 @@ private:
                                       uint32_t buffer_index);
 
   absl::Status Reconnect();
+  // Whether a request that failed with `failure` should reconnect and retry.
+  bool ShouldReconnect(const absl::Status &failure) const;
   absl::Status ReregisterPublisher(details::PublisherImpl *publisher);
   absl::Status ReregisterSubscriber(details::SubscriberImpl *subscriber);
 
