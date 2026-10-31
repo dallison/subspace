@@ -5973,9 +5973,11 @@ TEST_F(ClientTest, StatisticsSequenceCountsPublishedMessages) {
 
   // The shared server has been publishing for the whole process. A slot can
   // be retired before this subscriber reads it, so the backlog can skip a
-  // sequence. Drain that backlog, then check the messages published while
-  // this subscriber is keeping up. ReadMessage clears the trigger, so every
-  // message queued for one wakeup has to be read before waiting again.
+  // sequence, and that backlog may arrive after the first read. A wakeup
+  // that does not block is still catch-up. A message that arrives only
+  // after this subscriber blocks was published while it was keeping up.
+  // ReadMessage clears the trigger, so every message queued for one wakeup
+  // has to be read before waiting again.
   auto read_available = [&](std::vector<uint64_t> *sequences) -> bool {
     absl::StatusOr<subspace::Message> msg = stats_sub->ReadMessage();
     if (!msg.ok()) {
@@ -5986,9 +5988,7 @@ TEST_F(ClientTest, StatisticsSequenceCountsPublishedMessages) {
       if (!stats.ParseFromArray(msg->buffer, msg->length)) {
         return false;
       }
-      if (sequences != nullptr) {
-        sequences->push_back(stats.sequence());
-      }
+      sequences->push_back(stats.sequence());
       msg = stats_sub->ReadMessage(subspace::ReadMode::kReadNext,
                                    subspace::ClearTrigger::kNoClearTrigger);
       if (!msg.ok()) {
@@ -5997,18 +5997,33 @@ TEST_F(ClientTest, StatisticsSequenceCountsPublishedMessages) {
     }
     return true;
   };
-  ASSERT_TRUE(read_available(nullptr));
 
-  std::vector<uint64_t> sequences;
+  std::optional<uint64_t> caught_up;
+  bool saw_live = false;
   const auto deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(8);
-  while (sequences.size() < 2 &&
-         std::chrono::steady_clock::now() < deadline) {
+  while (!saw_live && std::chrono::steady_clock::now() < deadline) {
+    const auto wait_start = std::chrono::steady_clock::now();
     ASSERT_OK(stats_sub->Wait(std::chrono::seconds(3)));
-    ASSERT_TRUE(read_available(&sequences));
+    const bool blocked = std::chrono::steady_clock::now() - wait_start >=
+                         std::chrono::milliseconds(500);
+    std::vector<uint64_t> batch;
+    ASSERT_TRUE(read_available(&batch));
+    if (batch.empty()) {
+      continue;
+    }
+    if (!blocked || !caught_up.has_value()) {
+      caught_up = batch.back();
+      continue;
+    }
+    uint64_t expected = *caught_up;
+    for (uint64_t sequence : batch) {
+      EXPECT_EQ(expected + 1, sequence);
+      expected = sequence;
+    }
+    saw_live = true;
   }
-  ASSERT_GE(sequences.size(), 2u);
-  EXPECT_EQ(sequences[0] + 1, sequences[1]);
+  EXPECT_TRUE(saw_live);
 }
 
 TEST_F(ClientTest, TelemetryRequiresExistingChannel) {
