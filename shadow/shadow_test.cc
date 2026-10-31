@@ -652,10 +652,6 @@ TEST_F(ShadowRecoveryTest, RecoversHiddenTelemetryChannelAndSubscribers) {
     return hidden == nullptr ? std::string() : hidden->name;
   });
   ASSERT_FALSE(hidden_channel_name.empty());
-  // channels_ is confined to the server thread. Observe the hidden channel
-  // through the shadow, which locks its own copy, and the publisher through
-  // the server's cross-thread flag.
-  EXPECT_TRUE(server_->HasTelemetryChannel(kTarget));
 
   server_->ForEachShadow(
       [](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
@@ -671,18 +667,18 @@ TEST_F(ShadowRecoveryTest, RecoversHiddenTelemetryChannelAndSubscribers) {
              hidden->subscribers.size() == 1 && hidden->publishers.empty();
     });
   }));
-  EXPECT_TRUE(server_->HasTelemetryChannel(kTarget));
 
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-  bool ephemeral_publisher_created = false;
-  while (std::chrono::steady_clock::now() < deadline) {
-    if (server_->HasTelemetryPublisher(kTarget)) {
-      ephemeral_publisher_created = true;
-      break;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-  }
-  EXPECT_TRUE(ephemeral_publisher_created);
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
+  // The ephemeral publisher is not a shadowed user. Its memfd survives only
+  // as a registered buffer, which is how the recovered coroutine shows that
+  // it created the publisher again.
+  ASSERT_TRUE(WaitForShadowState([this, kTarget]() {
+    return shadow_->WithChannels([&](auto &channels) {
+      const auto *hidden = FindShadowTelemetryChannel(channels, kTarget);
+      return hidden != nullptr && !hidden->client_buffers.empty();
+    });
+  }));
+#endif
 
   ASSERT_TRUE(WaitForShadowState([this, kTarget]() {
     return shadow_->WithChannels([&](auto &channels) {

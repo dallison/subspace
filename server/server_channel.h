@@ -348,6 +348,13 @@ public:
 
   virtual void RemoveBuffer(uint64_t session_id, Server *server = nullptr);
 
+  // A memfd payload lives only as a registered fd. The CCB's buffer count can
+  // be published before that fd reaches the shadow, and the memfd dies with
+  // the crashed server. Telemetry publishers are not restored, so rewind any
+  // buffer generation the shadow does not hold and let the recovered
+  // coroutine allocate a new one.
+  void DiscardUnreplicatedMemfdBuffers();
+
   // Returns true if the given client connection owns a publisher that is
   // backed by this channel's storage.  Only such a connection is permitted to
   // register or unregister client buffers for the channel; this prevents an

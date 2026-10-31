@@ -6040,7 +6040,11 @@ TEST_F(ClientTest, FailedTelemetrySubscriberRemovesHiddenChannel) {
   absl::StatusOr<Subscriber> telemetry = client->CreateSubscriber(
       kChannel, SubOpts().SetTelemetry(true).SetMaxActiveMessages(1000));
   EXPECT_FALSE(telemetry.ok());
-  EXPECT_FALSE(Server()->HasTelemetryChannel(kChannel));
+  // Subscribing to the hidden name is rejected while that channel exists, and
+  // creates an ordinary placeholder once the server has removed it.
+  absl::StatusOr<Subscriber> probe = client->CreateSubscriber(
+      std::string("/subspace/telemetry/") + kChannel);
+  EXPECT_TRUE(probe.ok());
 }
 
 TEST_F(ClientTest, TelemetrySnapshotsAndBatchesParticipantChanges) {
@@ -6132,14 +6136,19 @@ TEST_F(ClientTest, TelemetrySnapshotsAndBatchesParticipantChanges) {
     }
   }
 
-  bool telemetry_channel_exists = true;
-  for (int attempt = 0; attempt < 40 && telemetry_channel_exists; ++attempt) {
-    telemetry_channel_exists = Server()->HasTelemetryChannel(kChannel);
-    if (telemetry_channel_exists) {
+  bool telemetry_channel_removed = false;
+  const std::string hidden_name =
+      std::string("/subspace/telemetry/") + kChannel;
+  for (int attempt = 0; attempt < 40 && !telemetry_channel_removed; ++attempt) {
+    absl::StatusOr<Subscriber> probe =
+        watcher_client->CreateSubscriber(hidden_name);
+    if (probe.ok()) {
+      telemetry_channel_removed = true;
+    } else {
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
   }
-  EXPECT_FALSE(telemetry_channel_exists);
+  EXPECT_TRUE(telemetry_channel_removed);
 }
 
 TEST_F(ClientTest, TelemetryReportsDropDeltasAndResizes) {

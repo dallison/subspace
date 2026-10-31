@@ -1380,9 +1380,6 @@ Server::CreateChannel(const std::string &channel_name, int64_t slot_size,
   }
   channel->SetSharedMemoryFds(std::move(*fds));
   channels_.emplace(std::make_pair(channel_name, channel));
-  if (channel->IsTelemetryChannel()) {
-    NoteTelemetryChannel(channel->TelemetryTarget(), true);
-  }
   OnNewChannel(channel_name);
   ForEachShadow([channel](const std::unique_ptr<ShadowReplicator> &s) {
     s->SendCreateChannel(channel);
@@ -1702,11 +1699,6 @@ void Server::TelemetryCoroutine(async::Context ctx, std::string target_name,
     if (state->subscriber_count == 0) {
       // Publisher destruction can yield, so recheck the shared state afterward
       // in case another subscriber arrived while it was being removed.
-      // Clear the cross-thread flag first; reset can yield, and the mutex
-      // inside the note must not be held across that suspension.
-      if (publisher.has_value()) {
-        NoteTelemetryPublisher(target_name, false);
-      }
       publisher.reset();
       current = telemetry_states_.find(target_name);
       if (current == telemetry_states_.end() || current->second != state) {
@@ -1735,7 +1727,6 @@ void Server::TelemetryCoroutine(async::Context ctx, std::string target_name,
         continue;
       }
       publisher.emplace(std::move(*created));
-      NoteTelemetryPublisher(target_name, true);
 
       current = telemetry_states_.find(target_name);
       if (current == telemetry_states_.end() || current->second != state) {
@@ -1753,9 +1744,6 @@ void Server::TelemetryCoroutine(async::Context ctx, std::string target_name,
     PublishTelemetryBatch(target_name, state, *publisher);
   }
 
-  if (publisher.has_value()) {
-    NoteTelemetryPublisher(target_name, false);
-  }
   publisher.reset();
   auto current = telemetry_states_.find(target_name);
   if (current != telemetry_states_.end() && current->second == state) {
@@ -1930,6 +1918,7 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
         channel->RegisterClientBuffer(std::move(buffer.metadata),
                                       std::move(buffer.fd));
       }
+      channel->DiscardUnreplicatedMemfdBuffers();
     }
     return absl::OkStatus();
   };
@@ -2025,9 +2014,6 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
     }
     restore_users(channel, rch);
     channels_.emplace(rch.name, channel);
-    if (channel->IsTelemetryChannel()) {
-      NoteTelemetryChannel(channel->TelemetryTarget(), true);
-    }
     logger_.Log(toolbelt::LogLevel::kInfo,
                 "Recovered channel '%s' (id=%d, %d pubs, %d subs)",
                 rch.name.c_str(), rch.channel_id,
@@ -2176,39 +2162,7 @@ void Server::RemoveChannel(ServerChannel *channel) {
     }
   }
   channels_.erase(it);
-  if (telemetry) {
-    NoteTelemetryChannel(telemetry_target, false);
-  }
   SendChannelDirectory();
-}
-
-bool Server::HasTelemetryChannel(const std::string &target) const {
-  std::lock_guard<std::mutex> lock(telemetry_presence_mu_);
-  return telemetry_targets_.contains(target);
-}
-
-bool Server::HasTelemetryPublisher(const std::string &target) const {
-  std::lock_guard<std::mutex> lock(telemetry_presence_mu_);
-  return telemetry_publishers_.contains(target);
-}
-
-void Server::NoteTelemetryChannel(const std::string &target, bool present) {
-  std::lock_guard<std::mutex> lock(telemetry_presence_mu_);
-  if (present) {
-    telemetry_targets_.insert(target);
-  } else {
-    telemetry_targets_.erase(target);
-    telemetry_publishers_.erase(target);
-  }
-}
-
-void Server::NoteTelemetryPublisher(const std::string &target, bool present) {
-  std::lock_guard<std::mutex> lock(telemetry_presence_mu_);
-  if (present) {
-    telemetry_publishers_.insert(target);
-  } else {
-    telemetry_publishers_.erase(target);
-  }
 }
 
 void Server::RemoveAllUsersFor(ClientHandler *handler) {
