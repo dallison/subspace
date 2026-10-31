@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Configurable Server Coroutine Stack
+- Coroutines spawned by the server (`AsyncRuntime`) and by the shadow process
+  use a build-time stack size. The default remains 64 KiB.
+- A downstream Bazel module sets `subspace.coroutine_stack_size(bytes = N)`
+  next to `bazel_dep`. Inside this repo, Bazel uses
+  `--//:coroutine_stack_size=N`. CMake uses
+  `-DSUBSPACE_COROUTINE_STACK_SIZE=N`. `N` must be a positive multiple of
+  4096. This is process memory, not shared memory, so clients do not need the
+  same value.
+- AddressSanitizer builds still use at least 256 KiB. A configured size
+  larger than that is kept.
+
 ### Late Subscribers Do Not Count Channel History As Drops
 - A subscriber created on a channel with history no longer reports that
   history as dropped messages. A slot held by another subscriber is never
@@ -31,10 +43,11 @@
   published message. A gap in `sequence` means lost intervals.
 
 ### Larger Server Coroutine Stacks Under ASan
-- With AddressSanitizer, coroutines spawned through `AsyncRuntime` on the co
-  backend get 256KB stacks instead of 64KB. On macOS, ASan's `strerror`
-  interceptor alone uses about 56KB of stack, so an error path that formatted
-  `errno` could run off the end of a 64KB stack and corrupt the heap.
+- With AddressSanitizer, server and shadow coroutines get at least 256 KiB
+  of stack. On macOS, ASan's `strerror` interceptor alone uses about 56 KiB
+  of stack, so an error path that formatted `errno` could run off the end of
+  a 64 KiB stack and corrupt the heap. A build that sets a larger coroutine
+  stack keeps that size. See `subspace.coroutine_stack_size`.
 
 ### Checksum Covers Only Publisher Flags
 - The message checksum now covers only the `kMessageActivate` and

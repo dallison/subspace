@@ -26,6 +26,7 @@ cc_library(
         "//conditions:default": [],
     }),
     deps = [
+        "//common:coroutine_stack",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings:str_format",
@@ -34,6 +35,7 @@ cc_library(
     ] + select({
         "//:coro_backend_asio": [
             "@boost.asio//:boost.asio",
+            "@boost.context//:boost.context",
             "@boost.coroutine//:boost.coroutine",
         ],
         "//conditions:default": [],

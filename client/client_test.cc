@@ -5971,19 +5971,59 @@ TEST_F(ClientTest, StatisticsSequenceCountsPublishedMessages) {
       client->CreateSubscriber("/subspace/Statistics");
   ASSERT_OK(stats_sub);
 
-  std::vector<uint64_t> sequences;
-  while (sequences.size() < 2) {
-    ASSERT_OK(stats_sub->Wait());
+  // The shared server has been publishing for the whole process. A slot can
+  // be retired before this subscriber reads it, so the backlog can skip a
+  // sequence, and that backlog may arrive after the first read. A wakeup
+  // that does not block is still catch-up. A message that arrives only
+  // after this subscriber blocks was published while it was keeping up.
+  // ReadMessage clears the trigger, so every message queued for one wakeup
+  // has to be read before waiting again.
+  auto read_available = [&](std::vector<uint64_t> *sequences) -> bool {
     absl::StatusOr<subspace::Message> msg = stats_sub->ReadMessage();
-    ASSERT_OK(msg);
-    if (msg->length == 0) {
+    if (!msg.ok()) {
+      return false;
+    }
+    while (msg->length != 0) {
+      subspace::Statistics stats;
+      if (!stats.ParseFromArray(msg->buffer, msg->length)) {
+        return false;
+      }
+      sequences->push_back(stats.sequence());
+      msg = stats_sub->ReadMessage(subspace::ReadMode::kReadNext,
+                                   subspace::ClearTrigger::kNoClearTrigger);
+      if (!msg.ok()) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  std::optional<uint64_t> caught_up;
+  bool saw_live = false;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(8);
+  while (!saw_live && std::chrono::steady_clock::now() < deadline) {
+    const auto wait_start = std::chrono::steady_clock::now();
+    ASSERT_OK(stats_sub->Wait(std::chrono::seconds(3)));
+    const bool blocked = std::chrono::steady_clock::now() - wait_start >=
+                         std::chrono::milliseconds(500);
+    std::vector<uint64_t> batch;
+    ASSERT_TRUE(read_available(&batch));
+    if (batch.empty()) {
       continue;
     }
-    subspace::Statistics stats;
-    ASSERT_TRUE(stats.ParseFromArray(msg->buffer, msg->length));
-    sequences.push_back(stats.sequence());
+    if (!blocked || !caught_up.has_value()) {
+      caught_up = batch.back();
+      continue;
+    }
+    uint64_t expected = *caught_up;
+    for (uint64_t sequence : batch) {
+      EXPECT_EQ(expected + 1, sequence);
+      expected = sequence;
+    }
+    saw_live = true;
   }
-  EXPECT_EQ(sequences[0] + 1, sequences[1]);
+  EXPECT_TRUE(saw_live);
 }
 
 TEST_F(ClientTest, TelemetryRequiresExistingChannel) {
@@ -6015,7 +6055,11 @@ TEST_F(ClientTest, FailedTelemetrySubscriberRemovesHiddenChannel) {
   absl::StatusOr<Subscriber> telemetry = client->CreateSubscriber(
       kChannel, SubOpts().SetTelemetry(true).SetMaxActiveMessages(1000));
   EXPECT_FALSE(telemetry.ok());
-  EXPECT_FALSE(Server()->HasTelemetryChannel(kChannel));
+  // Subscribing to the hidden name is rejected while that channel exists, and
+  // creates an ordinary placeholder once the server has removed it.
+  absl::StatusOr<Subscriber> probe = client->CreateSubscriber(
+      std::string("/subspace/telemetry/") + kChannel);
+  EXPECT_TRUE(probe.ok());
 }
 
 TEST_F(ClientTest, TelemetrySnapshotsAndBatchesParticipantChanges) {
@@ -6107,14 +6151,19 @@ TEST_F(ClientTest, TelemetrySnapshotsAndBatchesParticipantChanges) {
     }
   }
 
-  bool telemetry_channel_exists = true;
-  for (int attempt = 0; attempt < 40 && telemetry_channel_exists; ++attempt) {
-    telemetry_channel_exists = Server()->HasTelemetryChannel(kChannel);
-    if (telemetry_channel_exists) {
+  bool telemetry_channel_removed = false;
+  const std::string hidden_name =
+      std::string("/subspace/telemetry/") + kChannel;
+  for (int attempt = 0; attempt < 40 && !telemetry_channel_removed; ++attempt) {
+    absl::StatusOr<Subscriber> probe =
+        watcher_client->CreateSubscriber(hidden_name);
+    if (probe.ok()) {
+      telemetry_channel_removed = true;
+    } else {
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
   }
-  EXPECT_FALSE(telemetry_channel_exists);
+  EXPECT_TRUE(telemetry_channel_removed);
 }
 
 TEST_F(ClientTest, TelemetryReportsDropDeltasAndResizes) {

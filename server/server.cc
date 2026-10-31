@@ -1380,9 +1380,6 @@ Server::CreateChannel(const std::string &channel_name, int64_t slot_size,
   }
   channel->SetSharedMemoryFds(std::move(*fds));
   channels_.emplace(std::make_pair(channel_name, channel));
-  if (channel->IsTelemetryChannel()) {
-    NoteTelemetryChannel(channel->TelemetryTarget(), true);
-  }
   OnNewChannel(channel_name);
   ForEachShadow([channel](const std::unique_ptr<ShadowReplicator> &s) {
     s->SendCreateChannel(channel);
@@ -1921,6 +1918,7 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
         channel->RegisterClientBuffer(std::move(buffer.metadata),
                                       std::move(buffer.fd));
       }
+      channel->DiscardUnreplicatedMemfdBuffers();
     }
     return absl::OkStatus();
   };
@@ -2016,9 +2014,6 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
     }
     restore_users(channel, rch);
     channels_.emplace(rch.name, channel);
-    if (channel->IsTelemetryChannel()) {
-      NoteTelemetryChannel(channel->TelemetryTarget(), true);
-    }
     logger_.Log(toolbelt::LogLevel::kInfo,
                 "Recovered channel '%s' (id=%d, %d pubs, %d subs)",
                 rch.name.c_str(), rch.channel_id,
@@ -2167,24 +2162,7 @@ void Server::RemoveChannel(ServerChannel *channel) {
     }
   }
   channels_.erase(it);
-  if (telemetry) {
-    NoteTelemetryChannel(telemetry_target, false);
-  }
   SendChannelDirectory();
-}
-
-bool Server::HasTelemetryChannel(const std::string &target) const {
-  std::lock_guard<std::mutex> lock(telemetry_presence_mu_);
-  return telemetry_targets_.contains(target);
-}
-
-void Server::NoteTelemetryChannel(const std::string &target, bool present) {
-  std::lock_guard<std::mutex> lock(telemetry_presence_mu_);
-  if (present) {
-    telemetry_targets_.insert(target);
-  } else {
-    telemetry_targets_.erase(target);
-  }
 }
 
 void Server::RemoveAllUsersFor(ClientHandler *handler) {

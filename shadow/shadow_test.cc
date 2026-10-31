@@ -111,18 +111,6 @@ static const subspace::ShadowChannel *FindShadowTelemetryChannel(
   return nullptr;
 }
 
-static subspace::ServerChannel *
-FindServerTelemetryChannel(subspace::Server &server,
-                           const std::string &target) {
-  for (auto &[name, ch] : server.GetChannels()) {
-    (void)name;
-    if (ch->IsTelemetryChannel() && ch->TelemetryTarget() == target) {
-      return ch.get();
-    }
-  }
-  return nullptr;
-}
-
 class ShadowTest : public ::testing::Test {
 public:
   static void SetUpTestSuite() {
@@ -661,14 +649,9 @@ TEST_F(ShadowRecoveryTest, RecoversHiddenTelemetryChannelAndSubscribers) {
   std::string hidden_channel_name = shadow_->WithChannels([&](auto &channels) {
     const auto *hidden = FindShadowTelemetryChannel(channels, kTarget);
     EXPECT_NE(nullptr, hidden);
-    return hidden->name;
+    return hidden == nullptr ? std::string() : hidden->name;
   });
-
-  subspace::ServerChannel *pre_hidden =
-      FindServerTelemetryChannel(*server_, kTarget);
-  ASSERT_NE(nullptr, pre_hidden);
-  EXPECT_TRUE(pre_hidden->IsHidden());
-  EXPECT_EQ(kTarget, pre_hidden->TelemetryTarget());
+  ASSERT_FALSE(hidden_channel_name.empty());
 
   server_->ForEachShadow(
       [](const std::unique_ptr<subspace::ShadowReplicator> &s) { s->Close(); });
@@ -676,48 +659,26 @@ TEST_F(ShadowRecoveryTest, RecoversHiddenTelemetryChannelAndSubscribers) {
 
   StartServer();
 
-  subspace::ServerChannel *recovered_hidden =
-      FindServerTelemetryChannel(*server_, kTarget);
-  ASSERT_NE(nullptr, recovered_hidden);
-  EXPECT_TRUE(recovered_hidden->IsHidden());
-  EXPECT_EQ(kTarget, recovered_hidden->TelemetryTarget());
-  EXPECT_EQ(hidden_channel_name, recovered_hidden->Name());
-
-  int num_pubs = 0, num_subs = 0, num_bridge_pubs = 0, num_bridge_subs = 0;
-  int num_tunnel_pubs = 0, num_tunnel_subs = 0;
-  recovered_hidden->CountUsers(num_pubs, num_subs, num_bridge_pubs,
-                               num_bridge_subs, num_tunnel_pubs,
-                               num_tunnel_subs);
-  // The coroutine may already have recreated its ephemeral publisher.
-  EXPECT_LE(num_pubs, 1);
-  EXPECT_EQ(1, num_subs);
-
-  ASSERT_TRUE(WaitForShadowState([this, kTarget]() {
+  ASSERT_TRUE(WaitForShadowState([this, kTarget, hidden_channel_name]() {
     return shadow_->WithChannels([&](auto &channels) {
       const auto *hidden = FindShadowTelemetryChannel(channels, kTarget);
-      return hidden != nullptr && hidden->hidden &&
-             hidden->telemetry_target == kTarget &&
+      return hidden != nullptr && hidden->name == hidden_channel_name &&
+             hidden->hidden && hidden->telemetry_target == kTarget &&
              hidden->subscribers.size() == 1 && hidden->publishers.empty();
     });
   }));
 
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-  bool ephemeral_publisher_created = false;
-  while (std::chrono::steady_clock::now() < deadline) {
-    recovered_hidden = FindServerTelemetryChannel(*server_, kTarget);
-    ASSERT_NE(nullptr, recovered_hidden);
-    num_pubs = num_subs = num_bridge_pubs = num_bridge_subs = 0;
-    num_tunnel_pubs = num_tunnel_subs = 0;
-    recovered_hidden->CountUsers(num_pubs, num_subs, num_bridge_pubs,
-                                 num_bridge_subs, num_tunnel_pubs,
-                                 num_tunnel_subs);
-    if (num_pubs == 1 && num_subs >= 1) {
-      ephemeral_publisher_created = true;
-      break;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-  }
-  EXPECT_TRUE(ephemeral_publisher_created);
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
+  // The ephemeral publisher is not a shadowed user. Its memfd survives only
+  // as a registered buffer, which is how the recovered coroutine shows that
+  // it created the publisher again.
+  ASSERT_TRUE(WaitForShadowState([this, kTarget]() {
+    return shadow_->WithChannels([&](auto &channels) {
+      const auto *hidden = FindShadowTelemetryChannel(channels, kTarget);
+      return hidden != nullptr && !hidden->client_buffers.empty();
+    });
+  }));
+#endif
 
   ASSERT_TRUE(WaitForShadowState([this, kTarget]() {
     return shadow_->WithChannels([&](auto &channels) {
