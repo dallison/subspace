@@ -1702,6 +1702,11 @@ void Server::TelemetryCoroutine(async::Context ctx, std::string target_name,
     if (state->subscriber_count == 0) {
       // Publisher destruction can yield, so recheck the shared state afterward
       // in case another subscriber arrived while it was being removed.
+      // Clear the cross-thread flag first; reset can yield, and the mutex
+      // inside the note must not be held across that suspension.
+      if (publisher.has_value()) {
+        NoteTelemetryPublisher(target_name, false);
+      }
       publisher.reset();
       current = telemetry_states_.find(target_name);
       if (current == telemetry_states_.end() || current->second != state) {
@@ -1730,6 +1735,7 @@ void Server::TelemetryCoroutine(async::Context ctx, std::string target_name,
         continue;
       }
       publisher.emplace(std::move(*created));
+      NoteTelemetryPublisher(target_name, true);
 
       current = telemetry_states_.find(target_name);
       if (current == telemetry_states_.end() || current->second != state) {
@@ -1747,6 +1753,9 @@ void Server::TelemetryCoroutine(async::Context ctx, std::string target_name,
     PublishTelemetryBatch(target_name, state, *publisher);
   }
 
+  if (publisher.has_value()) {
+    NoteTelemetryPublisher(target_name, false);
+  }
   publisher.reset();
   auto current = telemetry_states_.find(target_name);
   if (current != telemetry_states_.end() && current->second == state) {
@@ -2178,12 +2187,27 @@ bool Server::HasTelemetryChannel(const std::string &target) const {
   return telemetry_targets_.contains(target);
 }
 
+bool Server::HasTelemetryPublisher(const std::string &target) const {
+  std::lock_guard<std::mutex> lock(telemetry_presence_mu_);
+  return telemetry_publishers_.contains(target);
+}
+
 void Server::NoteTelemetryChannel(const std::string &target, bool present) {
   std::lock_guard<std::mutex> lock(telemetry_presence_mu_);
   if (present) {
     telemetry_targets_.insert(target);
   } else {
     telemetry_targets_.erase(target);
+    telemetry_publishers_.erase(target);
+  }
+}
+
+void Server::NoteTelemetryPublisher(const std::string &target, bool present) {
+  std::lock_guard<std::mutex> lock(telemetry_presence_mu_);
+  if (present) {
+    telemetry_publishers_.insert(target);
+  } else {
+    telemetry_publishers_.erase(target);
   }
 }
 

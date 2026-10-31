@@ -5971,18 +5971,43 @@ TEST_F(ClientTest, StatisticsSequenceCountsPublishedMessages) {
       client->CreateSubscriber("/subspace/Statistics");
   ASSERT_OK(stats_sub);
 
-  std::vector<uint64_t> sequences;
-  while (sequences.size() < 2) {
-    ASSERT_OK(stats_sub->Wait());
+  // The shared server has been publishing for the whole process. A slot can
+  // be retired before this subscriber reads it, so the backlog can skip a
+  // sequence. Drain that backlog, then check the messages published while
+  // this subscriber is keeping up. ReadMessage clears the trigger, so every
+  // message queued for one wakeup has to be read before waiting again.
+  auto read_available = [&](std::vector<uint64_t> *sequences) -> bool {
     absl::StatusOr<subspace::Message> msg = stats_sub->ReadMessage();
-    ASSERT_OK(msg);
-    if (msg->length == 0) {
-      continue;
+    if (!msg.ok()) {
+      return false;
     }
-    subspace::Statistics stats;
-    ASSERT_TRUE(stats.ParseFromArray(msg->buffer, msg->length));
-    sequences.push_back(stats.sequence());
+    while (msg->length != 0) {
+      subspace::Statistics stats;
+      if (!stats.ParseFromArray(msg->buffer, msg->length)) {
+        return false;
+      }
+      if (sequences != nullptr) {
+        sequences->push_back(stats.sequence());
+      }
+      msg = stats_sub->ReadMessage(subspace::ReadMode::kReadNext,
+                                   subspace::ClearTrigger::kNoClearTrigger);
+      if (!msg.ok()) {
+        return false;
+      }
+    }
+    return true;
+  };
+  ASSERT_TRUE(read_available(nullptr));
+
+  std::vector<uint64_t> sequences;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(8);
+  while (sequences.size() < 2 &&
+         std::chrono::steady_clock::now() < deadline) {
+    ASSERT_OK(stats_sub->Wait(std::chrono::seconds(3)));
+    ASSERT_TRUE(read_available(&sequences));
   }
+  ASSERT_GE(sequences.size(), 2u);
   EXPECT_EQ(sequences[0] + 1, sequences[1]);
 }
 

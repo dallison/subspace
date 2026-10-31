@@ -208,6 +208,10 @@ public:
   // channels_. Safe to call from another thread; channels_ itself is not.
   bool HasTelemetryChannel(const std::string &target) const;
 
+  // Whether the target's telemetry coroutine currently holds its ephemeral
+  // publisher. Safe to call from another thread.
+  bool HasTelemetryPublisher(const std::string &target) const;
+
   int GetShutdownTriggerFd() {
     return shutdown_trigger_fd_.GetPollFd().Fd();
   }
@@ -463,10 +467,13 @@ private:
 
   absl::flat_hash_map<std::string, std::unique_ptr<ServerChannel>> channels_;
   // Tracks telemetry targets present in channels_ so tests can observe them
-  // without reading that map from another thread.
+  // without reading that map from another thread. The publisher set tracks
+  // which of those coroutines currently hold an ephemeral publisher.
   void NoteTelemetryChannel(const std::string &target, bool present);
+  void NoteTelemetryPublisher(const std::string &target, bool present);
   mutable std::mutex telemetry_presence_mu_;
   absl::flat_hash_set<std::string> telemetry_targets_;
+  absl::flat_hash_set<std::string> telemetry_publishers_;
 
   SystemControlBlock *scb_;
   toolbelt::FileDescriptor scb_fd_;
