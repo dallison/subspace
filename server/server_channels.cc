@@ -199,9 +199,6 @@ Server::CreateChannel(const std::string &channel_name, int64_t slot_size,
   }
   channel->SetSharedMemoryFds(std::move(*fds));
   channels_.emplace(std::make_pair(channel_name, channel));
-  if (channel->IsTelemetryChannel()) {
-    num_telemetry_channels_.fetch_add(1, std::memory_order_relaxed);
-  }
   OnNewChannel(channel_name);
   ForEachShadow([channel](const std::unique_ptr<ShadowReplicator> &s) {
     s->SendCreateChannel(channel);
@@ -289,9 +286,6 @@ void Server::RemoveChannel(ServerChannel *channel) {
     }
   }
   channels_.erase(it);
-  if (telemetry) {
-    num_telemetry_channels_.fetch_sub(1, std::memory_order_relaxed);
-  }
   SendChannelDirectory();
 }
 

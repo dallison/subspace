@@ -73,6 +73,7 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
         channel->RegisterClientBuffer(std::move(buffer.metadata),
                                       std::move(buffer.fd));
       }
+      channel->DiscardUnreplicatedMemfdBuffers();
     }
     return absl::OkStatus();
   };
@@ -168,9 +169,6 @@ absl::Status Server::RecoverFromShadow(RecoveredState &state) {
     }
     restore_users(channel, rch);
     channels_.emplace(rch.name, channel);
-    if (channel->IsTelemetryChannel()) {
-      num_telemetry_channels_.fetch_add(1, std::memory_order_relaxed);
-    }
     logger_.Log(toolbelt::LogLevel::kInfo,
                 "Recovered channel '%s' (id=%d, %d pubs, %d subs)",
                 rch.name.c_str(), rch.channel_id,

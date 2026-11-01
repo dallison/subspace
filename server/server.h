@@ -214,12 +214,6 @@ public:
     return channels_;
   }
 
-  // The number of hidden telemetry channels in channels_.  Safe to call from
-  // another thread; channels_ itself is not.
-  int NumTelemetryChannels() const {
-    return num_telemetry_channels_.load(std::memory_order_relaxed);
-  }
-
   int GetShutdownTriggerFd() {
     return shutdown_trigger_fd_.GetPollFd().Fd();
   }
@@ -475,7 +469,6 @@ private:
   std::atomic<bool> shutting_down_ = false;
 
   absl::flat_hash_map<std::string, std::unique_ptr<ServerChannel>> channels_;
-  std::atomic<int> num_telemetry_channels_ = 0;
 
   SystemControlBlock *scb_;
   toolbelt::FileDescriptor scb_fd_;

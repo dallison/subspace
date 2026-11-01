@@ -840,3 +840,5 @@ The session channel limit is a build setting because it sizes the system control
 The per-channel publisher/subscriber limit sizes CCB fields in shared memory. Raise it with `subspace.max_slot_owners(count = N)` (`N` is any positive integer). See [Setting the slot-owner limit from another Bazel build](max-slot-owners.md).
 
 The BCB buffer-table limit sizes `BufferControlBlock` in shared memory (ref counts and sizes for each payload segment). The default `341` yields a 4096-byte BCB. Raise it with `subspace.max_buffers(count = N)`. See [Setting the BCB buffer-table limit](max-buffers.md).
+
+Server and shadow coroutines use a 64 KiB stack by default. Change it with `subspace.coroutine_stack_size(bytes = N)` (`N` is a positive multiple of 4096). That size is process memory, not a shared-memory layout, so clients do not have to match it. See [Setting the server coroutine stack size](coroutine-stack-size.md).

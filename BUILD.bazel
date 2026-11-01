@@ -63,6 +63,18 @@ string_flag(
     build_setting_default = "341",
 )
 
+# Stack size, in bytes, of each coroutine the server and shadow process spawn.
+# Ordinary process memory, not shared memory.  Must be a positive multiple of
+# 4096.  Default is 65536 (64 KiB).  AddressSanitizer builds use at least
+# 256 KiB.  Downstream modules set this with subspace.coroutine_stack_size
+# in MODULE.bazel.  See docs/coroutine-stack-size.md.
+#
+#   bazel build --//:coroutine_stack_size=16384 //server
+string_flag(
+    name = "coroutine_stack_size",
+    build_setting_default = "65536",
+)
+
 config_setting(
   name = "macos_arm64",
   constraint_values = [

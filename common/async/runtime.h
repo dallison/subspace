@@ -7,6 +7,7 @@
 #define _COMMON_ASYNC_RUNTIME_H
 
 #include "common/async/context.h"
+#include "common/coroutine_stack.h"
 #include <functional>
 #include <string>
 #include <vector>
@@ -21,6 +22,7 @@
 #include <boost/asio/post.hpp>
 #include <boost/asio/spawn.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/context/fixedsize_stack.hpp>
 #include <boost/asio/strand.hpp>
 #include <chrono>
 #include <list>
@@ -257,7 +259,9 @@ private:
       it->cancellable = cancellable;
       it->name = std::move(name);
       boost::asio::spawn(
-          ex, [fn = std::move(fn)](Context yield) { fn(yield); },
+          ex, std::allocator_arg,
+          boost::context::fixedsize_stack(CoroutineStackSize()),
+          [fn = std::move(fn)](Context yield) { fn(yield); },
           boost::asio::bind_cancellation_slot(
               it->signal->slot(),
               // Run the completion handler on the strand and erase the entry
@@ -303,15 +307,6 @@ private:
   std::unique_ptr<boost::asio::steady_timer> reemit_timer_;
 
 #else  // SUBSPACE_CORO_BACKEND_CO
-  // On macOS, ASan's strerror interceptor alone takes about 56KB of stack, so
-  // an error path that formats errno overruns the default 64KB coroutine
-  // stack and silently corrupts the heap below it.
-#if defined(CO_ADDRESS_SANITIZER)
-  static constexpr size_t kStackSize = 256 * 1024;
-#else
-  static constexpr size_t kStackSize = co::kCoDefaultStackSize;
-#endif
-
   explicit AsyncRuntime(co::CoroutineScheduler &scheduler)
       : scheduler_(scheduler) {}
 
@@ -321,7 +316,7 @@ private:
     scheduler_.Spawn([fn = std::move(fn)](co::Coroutine *c) { fn(c); },
                      {.name = std::move(opts.name),
                       .interrupt_fd = opts.interrupt_fd,
-                      .stack_size = kStackSize});
+                      .stack_size = CoroutineStackSize()});
   }
 
   // The co backend is single-threaded, so there is no strand: spawning "on the
