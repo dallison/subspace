@@ -394,6 +394,17 @@ void Server::CleanupFilesystem() {
 }
 
 absl::Status Server::Run(int num_asio_threads) {
+  if (!mtls_cert_.empty() || !mtls_key_.empty() || !mtls_ca_.empty()) {
+    absl::StatusOr<std::shared_ptr<async::MtlsContext>> mtls =
+        async::MtlsContext::Load(mtls_cert_, mtls_key_, mtls_ca_);
+    if (!mtls.ok()) {
+      return mtls.status();
+    }
+    mtls_ = std::move(*mtls);
+    logger_.Log(toolbelt::LogLevel::kInfo,
+                "mTLS is on for bridge and tunnel connections");
+  }
+
   std::vector<struct pollfd> poll_fds;
 
 #ifndef __linux__
@@ -784,6 +795,28 @@ Server::HandleIncomingConnection(async::Context ctx,
 
 void Server::SetTunnelConfig(const TunnelConfig &config) {
   tunnel_config_ = std::make_unique<TunnelConfig>(config);
+}
+
+void Server::SetMtlsCredentials(std::string cert_file, std::string key_file,
+                                std::string ca_file) {
+  mtls_cert_ = std::move(cert_file);
+  mtls_key_ = std::move(key_file);
+  mtls_ca_ = std::move(ca_file);
+}
+
+absl::Status Server::SecureConnection(async::Context ctx,
+                                      async::ByteStream &stream,
+                                      bool server_role) {
+  if (mtls_ == nullptr) {
+    return absl::OkStatus();
+  }
+  absl::Status status = stream.HandshakeTls(mtls_, server_role, ctx,
+                                             std::chrono::seconds(5));
+  if (!status.ok()) {
+    logger_.Log(toolbelt::LogLevel::kWarning, "mTLS handshake failed: %s",
+                status.ToString().c_str());
+  }
+  return status;
 }
 
 } // namespace subspace

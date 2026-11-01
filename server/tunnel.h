@@ -10,6 +10,7 @@
 #include "absl/status/statusor.h"
 #include "client/options.h"
 #include "common/async/context.h"
+#include "common/async/byte_stream.h"
 #include "common/async/socket.h"
 #include "proto/tunnel_config.pb.h"
 #include "proto/tunnel_discovery.pb.h"
@@ -130,14 +131,14 @@ private:
 
   void ListenerCoroutine(async::Context ctx);
   void HandshakeCoroutine(async::Context ctx,
-                          std::shared_ptr<async::StreamSocket> socket,
+                          std::shared_ptr<async::ByteStream> socket,
                           std::string peer);
   void IngressCoroutine(async::Context ctx,
-                        std::shared_ptr<async::StreamSocket> socket,
+                        std::shared_ptr<async::ByteStream> socket,
                         IngressPlan plan);
   void EgressCoroutine(async::Context ctx, EgressRoute route);
   absl::Status ForwardChannel(async::Context ctx, Client &client,
-                              async::StreamSocket &socket,
+                              async::ByteStream &socket,
                               const EgressRoute &route);
   void ScannerCoroutine(async::Context ctx);
   void DiscoverySenderCoroutine(async::Context ctx, Peer *peer);
@@ -145,15 +146,15 @@ private:
   // new to tell the peer.
   void WaitToReconnect(async::Context ctx, Peer &peer);
   absl::Status RunDiscoveryConnection(async::Context ctx,
-                                      async::StreamSocket &socket, Peer &peer);
-  absl::Status SendDiscovery(async::Context ctx, async::StreamSocket &socket,
+                                      async::ByteStream &socket, Peer &peer);
+  absl::Status SendDiscovery(async::Context ctx, async::ByteStream &socket,
                              const Peer &peer, uint64_t seq);
-  void DiscoveryReceiverLoop(async::Context ctx, async::StreamSocket &socket,
+  void DiscoveryReceiverLoop(async::Context ctx, async::ByteStream &socket,
                              const tunnel::Handshake &handshake,
                              const std::string &peer);
   // Reads and discards a connection for an internal channel until the peer
   // closes it.  Closing it instead would make the peer reconnect forever.
-  void DiscardConnection(async::Context ctx, async::StreamSocket &socket,
+  void DiscardConnection(async::Context ctx, async::ByteStream &socket,
                          const std::string &topic, const std::string &peer);
 
   IngressPlan PlanIngress(const tunnel::Handshake &handshake,

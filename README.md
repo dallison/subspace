@@ -108,6 +108,7 @@ The `.bazelrc` file defines configs that select build-time options:
 |---|---|
 | `--config=linux_memfd` | On Linux, back shared memory with anonymous `memfd_create` objects instead of named `/dev/shm` ones. |
 | `--config=slot_size_64` | Expose 64 bit slot sizes in the C and C++ client APIs, allowing slots larger than 2GB. See [Slot Sizes](docs/slot-sizes.md#64-bit-slot-sizes). |
+| `--config=mtls` | Protect bridge and tunnel connections with mutual TLS (BoringSSL). See [Mutual TLS](docs/mtls.md). |
 
 The maximum number of channels in one server session defaults to 1024. `N` must be a positive multiple of 64. This sizes the shared-memory system control block, so the server and every client, including the Rust client, must be built with the same value.
 
@@ -263,6 +264,7 @@ make -j$(nproc)
 | `SUBSPACE_MAX_SLOT_OWNERS` | `1024` | Maximum publishers plus subscribers per channel. Must be a positive integer. The same value is passed to the Rust client. |
 | `SUBSPACE_MAX_BUFFERS` | `341` | Maximum distinct payload buffer segments per channel (BCB size). Must be a positive integer. Default fits the BCB in one 4 KiB page. Passed to the Rust client. |
 | `SUBSPACE_COROUTINE_STACK_SIZE` | `65536` | Stack size in bytes for each server and shadow coroutine. Must be a positive multiple of 4096. Clients do not need the same value. |
+| `SUBSPACE_ENABLE_MTLS` | `OFF` | Protect bridge and tunnel connections with mutual TLS, using the system OpenSSL. See [Mutual TLS](docs/mtls.md). |
 
 `SUBSPACE_64BIT_SLOT_SIZE` and the three shared-memory limits change struct
 layouts or function signatures, so they must be set consistently for the

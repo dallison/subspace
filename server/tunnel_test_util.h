@@ -70,8 +70,11 @@ public:
   ~TunnelServers() { Stop(); }
 
   // `configure` can change server `i`'s configuration before it starts.
+  // `prepare` runs after that and before Run, so a test can set mTLS
+  // credentials on the server.
   void Start(const std::function<void(int i, TunnelConfig &)> &configure =
-                 nullptr) {
+                 nullptr,
+             const std::function<void(int i, Server &)> &prepare = nullptr) {
     const std::array<int, 2> ports = FreePorts<2>();
     ASSERT_GT(ports[0], 0);
     ASSERT_GT(ports[1], 0);
@@ -98,6 +101,9 @@ public:
       server_[i] = std::make_unique<Server>(engine_[i], socket_[i], "", 0, 0,
                                             /*local=*/true, server_pipe_[i][1]);
       server_[i]->SetTunnelConfig(config);
+      if (prepare) {
+        prepare(i, *server_[i]);
+      }
       server_thread_[i] = std::thread([this, i]() {
         // The ingress and egress connections run on their own strands, so
         // several Asio threads exercise them concurrently.  The co backend

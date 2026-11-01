@@ -29,6 +29,9 @@ build:linux_memfd --copt=-DSUBSPACE_LINUX_USE_MEMFD
 # copt to keep every translation unit agreeing on the signatures.
 build:slot_size_64 --copt=-DSUBSPACE_64BIT_SLOT_SIZE
 
+# Mutual TLS for bridge and tunnel connections.  See docs/mtls.md.
+build:mtls --//:mtls=true
+
 # Maximum channels per server session (default 1024).  Must be a positive
 # multiple of 64.  This sizes the shared-memory system control block, so the
 # server and every client, including Rust, must be built with the same value.

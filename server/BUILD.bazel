@@ -189,6 +189,28 @@ cc_binary(
 )
 
 cc_test(
+    name = "mtls_test",
+    size = "medium",
+    srcs = ["mtls_test.cc"],
+    deps = [
+        ":server",
+        ":tunnel_test_util",
+        "//client:subspace_client",
+        "//common/async:async",
+        "//common/async:mtls_test_certs",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@googletest//:gtest_main",
+    ] + select({
+        "//:mtls_enabled": [
+            "@boringssl//:crypto",
+            "@boringssl//:ssl",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+cc_test(
     name = "server_test",
     size = "small",
     srcs = ["server_test.cc"],

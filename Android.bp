@@ -15,6 +15,8 @@ cc_defaults {
     # "-DSUBSPACE_COROUTINE_STACK_SIZE=N" sets the server and shadow coroutine
     # stack in bytes (default 65536, a positive multiple of 4096).  Clients do
     # not need to match it.
+    # mTLS is off.  To turn it on, add "-DSUBSPACE_ENABLE_MTLS=1" and link
+    # libcrypto and libssl (BoringSSL).  See docs/mtls.md.
     cflags: [
         "-std=c++17",
         "-Wall",

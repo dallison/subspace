@@ -15,6 +15,7 @@
 #include "co/coroutine.h"
 #include "common/async/context.h"
 #include "common/async/runtime.h"
+#include "common/async/byte_stream.h"
 #include "common/async/socket.h"
 #include "common/async/wait.h"
 #include "plugin.h"
@@ -115,6 +116,12 @@ public:
   // Enables tunnel-compatible discovery and bridging alongside the native
   // kind.  Call before Run, which fails if the configuration is invalid.
   void SetTunnelConfig(const TunnelConfig &config);
+
+  // PEM files for mutual TLS on native bridge connections (including
+  // retirement sockets) and tunnel connections.  All three are required.
+  // Call before Run.  A server built without mTLS rejects them.
+  void SetMtlsCredentials(std::string cert_file, std::string key_file,
+                          std::string ca_file);
   // Null unless Run has started the tunnel.
   TunnelManager *GetTunnelManager() const { return tunnel_.get(); }
 
@@ -400,7 +407,12 @@ private:
   void RetirementCoroutine(
       async::Context ctx, const std::string &channel_name,
       toolbelt::FileDescriptor &&retirement_fd,
-      std::shared_ptr<async::StreamSocket> retirement_transmitter);
+      std::shared_ptr<async::ByteStream> retirement_transmitter);
+
+  // No-op unless SetMtlsCredentials was loaded.  `server_role` is true on
+  // the side that accepted the connection.
+  absl::Status SecureConnection(async::Context ctx, async::ByteStream &stream,
+                                bool server_role);
 
   void RetirementReceiverCoroutine(
       async::Context ctx,
@@ -518,6 +530,11 @@ private:
 
   std::unique_ptr<TunnelConfig> tunnel_config_;
   std::unique_ptr<TunnelManager> tunnel_;
+
+  std::string mtls_cert_;
+  std::string mtls_key_;
+  std::string mtls_ca_;
+  std::shared_ptr<async::MtlsContext> mtls_;
 };
 
 } // namespace subspace
