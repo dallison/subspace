@@ -1,4 +1,5 @@
 // Copyright 2023-2026 David Allison
+// Tunnel support is Copyright 2026 General Motors LLC
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -27,14 +28,16 @@
 #include "toolbelt/logging.h"
 #include "toolbelt/sockets.h"
 #include "toolbelt/triggerfd.h"
+#include <atomic>
 #include <cstdio>
 #include <memory>
-#include <mutex>
 #include <vector>
 
 namespace subspace {
 
 class Publisher;
+class TunnelConfig;
+class TunnelManager;
 
 // Values written to the notify_fd when the server is ready and
 // is stopped.
@@ -109,6 +112,12 @@ public:
   void SetMachineName(std::string name) { machine_name_ = std::move(name); }
   const std::string& MachineName() const { return machine_name_; }
 
+  // Enables tunnel-compatible discovery and bridging alongside the native
+  // kind.  Call before Run, which fails if the configuration is invalid.
+  void SetTunnelConfig(const TunnelConfig &config);
+  // Null unless Run has started the tunnel.
+  TunnelManager *GetTunnelManager() const { return tunnel_.get(); }
+
   void SetShadowSocket(const std::string &socket_name);
   void SetShadowSockets(const std::string &primary, const std::string &secondary);
   void SimulateCrash() {
@@ -181,6 +190,7 @@ public:
   void CleanupFilesystem();
   void CleanupAfterSession();
 
+  // Call these before Run or after it returns, never while the server runs.
   absl::Status LoadPlugin(const std::string &name, const std::string &path);
   absl::Status LoadBuiltinPlugin(const std::string &name,
                                  std::unique_ptr<PluginInterface> interface);
@@ -245,6 +255,7 @@ public:
 private:
   friend class ClientHandler;
   friend class ServerChannel;
+  friend class TunnelManager;
   friend class VirtualChannel;
   static constexpr size_t kDiscoveryBufferSize = 1024;
 
@@ -484,10 +495,6 @@ private:
   bool simulate_crash_ = false;
   bool cleanup_filesystem_ = false;
 
-  // In tests we will load a plugin while the server is running.  This needs a
-  // lock.
-  std::mutex plugin_lock_;
-
   std::vector<std::unique_ptr<Plugin>> plugins_;
   toolbelt::TriggerFd shutdown_trigger_fd_;
   std::string machine_name_;
@@ -508,6 +515,9 @@ private:
 
   std::unique_ptr<ShadowReplicator> primary_shadow_replicator_;
   std::unique_ptr<ShadowReplicator> secondary_shadow_replicator_;
+
+  std::unique_ptr<TunnelConfig> tunnel_config_;
+  std::unique_ptr<TunnelManager> tunnel_;
 };
 
 } // namespace subspace

@@ -9,7 +9,21 @@ add_library(libserver STATIC
     shadow_replicator.h
     server.cc
     server.h
+    server_bridge.cc
+    server_bridge_receiver.cc
+    server_bridge_transmitter.cc
+    server_channels.cc
+    server_discovery.cc
+    server_plugins.cc
+    server_shadow.cc
+    server_telemetry.cc
     plugin.h
+    tunnel.cc
+    tunnel.h
+    tunnel_config.cc
+    tunnel_config.h
+    tunnel_protocol.cc
+    tunnel_protocol.h
 )
 
 target_include_directories(libserver PUBLIC
@@ -22,6 +36,21 @@ target_link_libraries(libserver PUBLIC
     subspace_async
     protobuf::libprotobuf
 )
+
+add_executable(tunnel_wire_test tunnel_config_test.cc tunnel_protocol_test.cc)
+add_executable(tunnel_test tunnel_test.cc)
+add_executable(tunnel_fake_peer_test tunnel_fake_peer_test.cc)
+add_executable(tunnel_stress_test tunnel_stress_test.cc)
+foreach(TUNNEL_TEST tunnel_wire_test tunnel_test tunnel_fake_peer_test
+        tunnel_stress_test)
+    add_test(NAME ${TUNNEL_TEST} COMMAND ${TUNNEL_TEST})
+    target_link_libraries(${TUNNEL_TEST} PUBLIC
+        libserver
+        absl::status_matchers
+        gmock
+        gtest_main
+    )
+endforeach()
 
 add_executable(subspace_server
     main.cc
@@ -38,4 +67,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
 elseif(ANDROID)
     target_link_libraries(subspace_server PRIVATE dl log)
 endif()
+
+# The restart test runs the server binary.
+add_dependencies(tunnel_stress_test subspace_server)
+set_tests_properties(tunnel_stress_test PROPERTIES
+    ENVIRONMENT "SUBSPACE_SERVER=$<TARGET_FILE:subspace_server>")
 

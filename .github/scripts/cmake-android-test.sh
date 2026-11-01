@@ -27,6 +27,10 @@ adb push "$BUILD_DIR/common/split_buffer_test" /data/local/tmp/split_buffer_test
 adb push "$BUILD_DIR/common/common_test" /data/local/tmp/common_test
 adb push "$BUILD_DIR/c_client/c_client_test" /data/local/tmp/c_client_test
 adb push "$BUILD_DIR/shadow/shadow_test" /data/local/tmp/shadow_test
+adb push "$BUILD_DIR/common/async_test" /data/local/tmp/async_test
+adb push "$BUILD_DIR/server/tunnel_wire_test" /data/local/tmp/tunnel_wire_test
+adb push "$BUILD_DIR/server/tunnel_test" /data/local/tmp/tunnel_test
+adb push "$BUILD_DIR/server/tunnel_fake_peer_test" /data/local/tmp/tunnel_fake_peer_test
 adb push "$BUILD_DIR/android/libsubspace_jni.so" /data/local/tmp/libsubspace_jni.so
 
 SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
@@ -64,6 +68,14 @@ adb shell "cd /data/local/tmp && $LIB ./c_client_test"
 
 echo "=== shadow_test ==="
 adb shell "cd /data/local/tmp && $LIB ./shadow_test"
+
+echo "=== async_test ==="
+adb shell "cd /data/local/tmp && $LIB ./async_test"
+
+echo "=== tunnel tests ==="
+adb shell "cd /data/local/tmp && $LIB ./tunnel_wire_test"
+adb shell "cd /data/local/tmp && $LIB ./tunnel_test"
+adb shell "cd /data/local/tmp && $LIB ./tunnel_fake_peer_test"
 
 echo "=== subspace-java integration test ==="
 adb shell "cd /data/local/tmp && $LIB dalvikvm -cp /data/local/tmp/subspace-java-test.jar com.subspace.test.SubspaceJavaClientTest"

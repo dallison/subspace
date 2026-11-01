@@ -1,10 +1,13 @@
 // Copyright 2023-2026 David Allison
+// Tunnel support is Copyright 2026 General Motors LLC
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
+#include "proto/tunnel_config.pb.h"
 #include "server.h"
+#include "server/tunnel_config.h"
 #include <cerrno>
 #include <csignal>
 #include <cstdint>
@@ -92,6 +95,12 @@ ABSL_FLAG(std::string, shadow_socket, "",
           "Primary shadow process Unix socket (empty = disabled)");
 ABSL_FLAG(std::string, secondary_shadow_socket, "",
           "Secondary shadow process Unix socket (empty = disabled)");
+ABSL_FLAG(bool, tunnel, false,
+          "Run discovery and bridging compatible with the cruise tunnel "
+          "alongside the native kind.  Requires --tunnel_config.");
+ABSL_FLAG(std::string, tunnel_config, "",
+          "Tunnel configuration file in protobuf text format.  See "
+          "docs/tunnel.md.");
 
 // Look up this host's local vsock context id (CID) so we can advertise it to
 // bridge peers.  Only meaningful on Linux with vsock support.
@@ -270,6 +279,24 @@ int main(int argc, char **argv) {
   server->SetMachineName(absl::GetFlag(FLAGS_machine));
   server->SetShadowSockets(absl::GetFlag(FLAGS_shadow_socket),
                             absl::GetFlag(FLAGS_secondary_shadow_socket));
+
+  const std::string tunnel_config_path = absl::GetFlag(FLAGS_tunnel_config);
+  if (absl::GetFlag(FLAGS_tunnel)) {
+    if (tunnel_config_path.empty()) {
+      fprintf(stderr, "--tunnel requires --tunnel_config\n");
+      exit(1);
+    }
+    absl::StatusOr<subspace::TunnelConfig> config =
+        subspace::LoadTunnelConfig(tunnel_config_path);
+    if (!config.ok()) {
+      fprintf(stderr, "%s\n", config.status().ToString().c_str());
+      exit(1);
+    }
+    // Run checks the configuration once it knows the device name.
+    server->SetTunnelConfig(*config);
+  } else if (!tunnel_config_path.empty()) {
+    fprintf(stderr, "Ignoring --tunnel_config because --tunnel isn't set\n");
+  }
 
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
   int num_asio_threads = absl::GetFlag(FLAGS_num_asio_threads);

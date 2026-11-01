@@ -220,7 +220,7 @@ impl PublisherImpl {
         let slot_ptr = self.channel.slot_ptr(slot_idx);
         unsafe {
             let old_refs = (*slot_ptr).refs.load(Ordering::Acquire);
-            if (old_refs & (PUB_OWNED | REFS_MASK)) != 0 {
+            if !self.channel.refs_show_retired(slot_idx, old_refs) {
                 return None;
             }
             let expected = build_refs_bit_field(
@@ -368,6 +368,12 @@ impl PublisherImpl {
             let slot_ptr = self.channel.slot_ptr(si);
             unsafe {
                 let old_refs = (*slot_ptr).refs.load(Ordering::Relaxed);
+                if retired_slot != -1 && !self.channel.refs_show_retired(si, old_refs) {
+                    // A stale retired bit, now cleared.  The slot may hold the
+                    // newest message.
+                    slot_idx = None;
+                    continue;
+                }
                 let ref_val = PUB_OWNED | owner as u64;
                 let expected = build_refs_bit_field(
                     (*slot_ptr).ordinal(),
@@ -475,6 +481,13 @@ impl PublisherImpl {
                         retired_slot = rs as i32;
                         self.channel.retired_slots().clear(rs);
                         let s = self.channel.slot_ref(rs);
+                        if !self
+                            .channel
+                            .refs_show_retired(rs, s.refs.load(Ordering::Relaxed))
+                        {
+                            // A stale retired bit, now cleared.
+                            continue;
+                        }
                         self.channel.active_slots.push(ActiveSlot {
                             slot_index: rs,
                             ordinal: s.ordinal(),

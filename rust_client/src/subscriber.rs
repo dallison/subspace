@@ -437,6 +437,18 @@ impl SubscriberImpl {
                     return;
                 }
                 let s = self.channel.slot_ref(i);
+                // A publisher reusing the slot zeroes its ordinal and timestamp
+                // before its bit is cleared, and a claim with ordinal 0 matches
+                // whatever is published there next, so keep the slot only while
+                // it holds the message its refs were committed with.
+                let refs = s.refs.load(Ordering::Acquire);
+                let ordinal = s.ordinal();
+                if (refs & PUB_OWNED) != 0
+                    || ordinal == 0
+                    || (ordinal & ORDINAL_MASK) != ((refs >> ORDINAL_SHIFT) & ORDINAL_MASK)
+                {
+                    return;
+                }
                 if !virtual_channel_id_match(s.vchan_id(), self.channel.vchan_id) {
                     return;
                 }
@@ -445,7 +457,7 @@ impl SubscriberImpl {
                 }
                 self.channel.active_slots.push(ActiveSlot {
                     slot_index: i,
-                    ordinal: s.ordinal(),
+                    ordinal,
                     timestamp: s.timestamp(),
                     vchan_id: s.vchan_id() as i32,
                 });

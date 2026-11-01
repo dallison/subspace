@@ -308,6 +308,17 @@ uint64_t SubscriberImpl::CollectVisibleSlots(InPlaceAtomicBitset &bits) {
         return;
       }
       MessageSlot *s = &ccb_->slots[i];
+      // A publisher reusing the slot zeroes its ordinal and timestamp before
+      // its bit is cleared, and a claim with ordinal 0 matches whatever is
+      // published there next, so keep the slot only while it holds the
+      // message its refs were committed with.
+      const uint64_t refs = s->refs.load(std::memory_order_acquire);
+      const uint64_t ordinal = s->ordinal.load(std::memory_order_relaxed);
+      if ((refs & kPubOwned) != 0 || ordinal == 0 ||
+          (ordinal & kOrdinalMask) !=
+              ((refs >> kOrdinalShift) & kOrdinalMask)) {
+        return;
+      }
       if (!VirtualChannelIdMatch(s, vchan_id_)) {
         return;
       }
@@ -315,8 +326,7 @@ uint64_t SubscriberImpl::CollectVisibleSlots(InPlaceAtomicBitset &bits) {
         return;
       }
       ActiveSlot active_slot = {
-          s, s->ordinal.load(std::memory_order_relaxed),
-          s->timestamp.load(std::memory_order_relaxed),
+          s, ordinal, s->timestamp.load(std::memory_order_relaxed),
           s->vchan_id.load(std::memory_order_relaxed)};
       active_slots_.push_back(active_slot);
     });

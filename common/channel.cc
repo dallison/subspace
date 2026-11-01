@@ -406,6 +406,21 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
   }
 }
 
+bool Channel::RefsShowRetired(const MessageSlot *slot, uint64_t refs) const {
+  if ((refs & (kPubOwned | kRefsMask)) != 0) {
+    return false;
+  }
+  if (slot->ordinal.load(std::memory_order_relaxed) == 0) {
+    return true;
+  }
+  int vchan_id = (refs >> kVchanIdShift) & kVchanIdMask;
+  if (vchan_id == kVchanIdMask) {
+    vchan_id = -1;
+  }
+  const uint64_t retired_refs = (refs >> kRetiredRefsShift) & kRetiredRefsMask;
+  return retired_refs >= static_cast<uint64_t>(NumSubscribers(vchan_id));
+}
+
 bool Channel::TryRetireSlot(MessageSlot *slot) {
   if (slot->ordinal.load(std::memory_order_relaxed) == 0) {
     return false;

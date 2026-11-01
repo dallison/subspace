@@ -1353,6 +1353,122 @@ fn integration_threaded_pub_sub() {
     sub_handle.join().unwrap();
 }
 
+// An unreliable subscriber that falls behind a publisher, draining whenever its
+// poll fd fires as the tunnel and bridges do, can miss messages but must read
+// the rest in order and must always get the newest.  Its snapshot of the slots
+// could catch one being reused and deliver the message published there next
+// ahead of older ones.  A publisher could take a slot back for a retired bit
+// set after the slot had already been reused, losing the message just
+// published in it.
+fn check_lagging_unreliable_subscriber(channel: &str, bridge: bool) {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let pub_client = new_client("lagging_pub");
+    let publisher = pub_client
+        .create_publisher(
+            channel,
+            &PublisherOptions::new().set_slot_size(1024).set_num_slots(16),
+        )
+        .unwrap();
+    let sub_client = new_client("lagging_sub");
+    let subscriber = sub_client
+        .create_subscriber(
+            channel,
+            &SubscriberOptions::new()
+                .set_bridge(bridge)
+                .set_log_dropped_messages(false),
+        )
+        .unwrap();
+
+    let newest_read = Arc::new(AtomicU64::new(0));
+    let out_of_order = Arc::new(AtomicU64::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let reader = {
+        let (newest_read, out_of_order, stop) =
+            (newest_read.clone(), out_of_order.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut last = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                if !poll_fd_readable(subscriber.get_poll_fd(), 10) {
+                    continue;
+                }
+                loop {
+                    let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
+                    if msg.length == 0 {
+                        break;
+                    }
+                    let number = unsafe { std::ptr::read_unaligned(msg.buffer as *const u64) };
+                    if number <= last {
+                        out_of_order.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        last = number;
+                        newest_read.store(number, Ordering::Relaxed);
+                    }
+                }
+            }
+        })
+    };
+
+    // Publish in bursts and wait after each for its last message, having already
+    // taken the buffer for the next one.
+    const BURSTS: u64 = 400;
+    const BURST_SIZE: u64 = 50;
+    let size_of = |number: u64| 16 + (number * 37) % 900;
+    let mut failure = None;
+    let mut number = 0u64;
+    let mut buffer = publisher.get_message_buffer(size_of(1) as i32);
+    'bursts: for _ in 0..BURSTS {
+        for _ in 0..BURST_SIZE {
+            number += 1;
+            match buffer {
+                Ok(Some((buf, _))) => unsafe { std::ptr::write_unaligned(buf as *mut u64, number) },
+                other => {
+                    failure = Some(format!("no buffer for message {number}: {other:?}"));
+                    break 'bursts;
+                }
+            }
+            if let Err(e) = publisher.publish_message(size_of(number) as i64) {
+                failure = Some(format!("publishing message {number}: {e:?}"));
+                break 'bursts;
+            }
+            buffer = publisher.get_message_buffer(size_of(number + 1) as i32);
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while newest_read.load(Ordering::Relaxed) < number {
+            if Instant::now() > deadline {
+                failure = Some(format!(
+                    "message {number}, the newest, was never read; the last read was {}",
+                    newest_read.load(Ordering::Relaxed)
+                ));
+                break 'bursts;
+            }
+            std::thread::sleep(Duration::from_micros(100));
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    reader.join().unwrap();
+    if let Some(failure) = failure {
+        panic!("{failure}");
+    }
+    assert_eq!(
+        out_of_order.load(Ordering::Relaxed),
+        0,
+        "messages read out of order"
+    );
+}
+
+#[test]
+fn integration_lagging_unreliable_subscriber_reads_in_order_and_gets_newest() {
+    check_lagging_unreliable_subscriber("rust_lagging_unreliable", false);
+}
+
+#[test]
+fn integration_lagging_unreliable_bridge_subscriber_reads_in_order_and_gets_newest() {
+    check_lagging_unreliable_subscriber("rust_lagging_unreliable_bridge", true);
+}
+
 // ── Large messages ───────────────────────────────────────────────────────────
 
 #[test]

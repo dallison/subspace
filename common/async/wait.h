@@ -1,5 +1,6 @@
 // Copyright 2023-2026 David Allison
 // Asio backend support is Copyright 2026 Cruise LLC
+// Tunnel support is Copyright 2026 General Motors LLC
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -16,11 +17,24 @@ namespace subspace::async {
 // FD-readiness and sleep primitives, expressed against the active backend's
 // Context.  These replace the implicit co::self / co::Wait / co::Sleep calls so
 // that the same source compiles under either backend.
+//
+// Under Asio only one coroutine at a time can wait on a given fd.  With epoll
+// (Linux and Android), another coroutine's wait on it fails at once with an
+// InternalError.  With kqueue (macOS), the other wait takes over the fd and
+// the first may never return.  The co backend has no such limit.  Under Asio a wait that is cancelled, as a graceful
+// shutdown does, returns CancelledError.
 
 // Wait until `fd` is readable.  A non-zero timeout returns
 // DeadlineExceededError if the fd is not ready in time; a zero timeout waits
 // forever.
 absl::Status WaitReadable(Context ctx, int fd,
+                          std::chrono::nanoseconds timeout =
+                              std::chrono::nanoseconds(0));
+
+// Wait until `fd` is writable or has an error pending.  A non-zero timeout
+// returns DeadlineExceededError if the fd is not ready in time; a zero timeout
+// waits forever.  Returns an error if the wait is interrupted or cancelled.
+absl::Status WaitWritable(Context ctx, int fd,
                           std::chrono::nanoseconds timeout =
                               std::chrono::nanoseconds(0));
 
