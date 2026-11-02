@@ -42,8 +42,6 @@ constexpr std::chrono::seconds
 // Payloads up to this size are copied in behind the prefix so the packet goes
 // out in one send.
 constexpr size_t kCoalesceLimit = 16 * 1024;
-// toolbelt tracks receive progress in an int, so large reads are split.
-constexpr size_t kMaxReceiveChunk = 16 * 1024 * 1024;
 
 absl::Status PeerClosed() {
   return absl::AbortedError("the peer closed the connection");
@@ -93,67 +91,14 @@ void SetNoDelay(const async::StreamSocket &socket) {
 
 using Deadline = std::chrono::steady_clock::time_point;
 
-// Reads exactly `length` bytes, or fails with DeadlineExceeded once
-// `deadline` passes.  The co backend's Receive waits until it fills its whole
-// buffer, so this reads the non-blocking descriptor itself.
-absl::Status ReadFullyBy(async::StreamSocket &socket, void *buffer,
-                         size_t length, Deadline deadline,
-                         async::Context ctx) {
-  const int fd = async::StreamSocketFd(socket);
-  char *p = static_cast<char *>(buffer);
-  while (length > 0) {
-    ssize_t n = ::recv(fd, p, length, 0);
-    if (n > 0) {
-      p += n;
-      length -= static_cast<size_t>(n);
-      continue;
-    }
-    if (n == 0) {
-      return PeerClosed();
-    }
-    if (errno == EINTR) {
-      continue;
-    }
-    if (errno != EAGAIN && errno != EWOULDBLOCK) {
-      return absl::InternalError(
-          absl::StrFormat("recv failed: %s", strerror(errno)));
-    }
-    std::chrono::nanoseconds remaining =
-        deadline - std::chrono::steady_clock::now();
-    if (remaining <= std::chrono::nanoseconds(0)) {
-      return absl::DeadlineExceededError("timed out");
-    }
-    if (absl::Status s = async::WaitReadable(ctx, fd, remaining); !s.ok()) {
-      return s;
-    }
-  }
-  return absl::OkStatus();
-}
-
 // Reads exactly `length` bytes, by `deadline` if there is one.
-absl::Status ReadFully(async::StreamSocket &socket, void *buffer,
-                       size_t length, async::Context ctx,
+absl::Status ReadFully(async::ByteStream &socket, void *buffer, size_t length,
+                       async::Context ctx,
                        std::optional<Deadline> deadline = std::nullopt) {
-  if (deadline.has_value()) {
-    return ReadFullyBy(socket, buffer, length, *deadline, ctx);
-  }
-  char *p = static_cast<char *>(buffer);
-  while (length > 0) {
-    size_t chunk = std::min(length, kMaxReceiveChunk);
-    absl::StatusOr<ssize_t> n = socket.Receive(p, chunk, ctx);
-    if (!n.ok()) {
-      return n.status();
-    }
-    if (*n <= 0) {
-      return PeerClosed();
-    }
-    p += *n;
-    length -= static_cast<size_t>(*n);
-  }
-  return absl::OkStatus();
+  return socket.ReadFully(buffer, length, ctx, deadline);
 }
 
-absl::Status Skip(async::StreamSocket &socket, size_t length,
+absl::Status Skip(async::ByteStream &socket, size_t length,
                   async::Context ctx,
                   std::optional<Deadline> deadline = std::nullopt) {
   std::vector<char> scratch(std::min<size_t>(length, 64 * 1024));
@@ -170,7 +115,7 @@ absl::Status Skip(async::StreamSocket &socket, size_t length,
 }
 
 absl::StatusOr<PacketHeader>
-ReadHeader(async::StreamSocket &socket, async::Context ctx,
+ReadHeader(async::ByteStream &socket, async::Context ctx,
            std::optional<Deadline> deadline = std::nullopt) {
   std::array<std::byte, tunnel::kPacketHeaderSize> buffer{};
   if (absl::Status s =
@@ -181,24 +126,12 @@ ReadHeader(async::StreamSocket &socket, async::Context ctx,
   return tunnel::DecodePacketHeader(buffer);
 }
 
-absl::Status SendAll(async::StreamSocket &socket, const void *data,
-                     size_t length, async::Context ctx) {
-  const char *p = static_cast<const char *>(data);
-  while (length > 0) {
-    absl::StatusOr<ssize_t> n = socket.Send(p, length, ctx);
-    if (!n.ok()) {
-      return n.status();
-    }
-    if (*n <= 0) {
-      return absl::UnavailableError("connection closed while sending");
-    }
-    p += *n;
-    length -= static_cast<size_t>(*n);
-  }
-  return absl::OkStatus();
+absl::Status SendAll(async::ByteStream &socket, const void *data, size_t length,
+                     async::Context ctx) {
+  return socket.SendAll(data, length, ctx);
 }
 
-absl::Status SendPacket(async::StreamSocket &socket, PacketType type,
+absl::Status SendPacket(async::ByteStream &socket, PacketType type,
                         uint64_t seq, const void *body, size_t body_size,
                         async::Context ctx) {
   absl::StatusOr<PacketHeader> header =
@@ -214,7 +147,7 @@ absl::Status SendPacket(async::StreamSocket &socket, PacketType type,
   return SendAll(socket, packet.data(), packet.size(), ctx);
 }
 
-absl::Status SendHandshake(async::StreamSocket &socket,
+absl::Status SendHandshake(async::ByteStream &socket,
                            const Handshake &handshake, async::Context ctx) {
   std::string body = handshake.SerializeAsString();
   return SendPacket(socket, PacketType::kHandshake, 0, body.data(),
@@ -387,15 +320,15 @@ void TunnelManager::ListenerCoroutine(async::Context ctx) {
       async::Sleep(ctx, std::chrono::seconds(1));
       continue;
     }
-    auto connection = std::make_shared<async::StreamSocket>(std::move(*socket));
+    auto connection = std::make_shared<async::ByteStream>(std::move(*socket));
     if (absl::Status s = connection->SetNonBlocking(); !s.ok()) {
       server_->logger_.Log(toolbelt::LogLevel::kError,
                            "Tunnel can't configure a connection: %s",
                            s.ToString().c_str());
       continue;
     }
-    SetNoDelay(*connection);
-    std::string peer = PeerAddress(*connection);
+    SetNoDelay(connection->Socket());
+    std::string peer = PeerAddress(connection->Socket());
     SpawnOnStrand(
         [this, connection, peer](async::Context handshake_ctx) {
           HandshakeCoroutine(handshake_ctx, connection, peer);
@@ -406,9 +339,17 @@ void TunnelManager::ListenerCoroutine(async::Context ctx) {
 }
 
 void TunnelManager::HandshakeCoroutine(
-    async::Context ctx, std::shared_ptr<async::StreamSocket> socket,
+    async::Context ctx, std::shared_ptr<async::ByteStream> socket,
     std::string peer) {
   if (server_->shutting_down_) {
+    return;
+  }
+  if (absl::Status s =
+          server_->SecureConnection(ctx, *socket, /*server_role=*/true);
+      !s.ok()) {
+    server_->logger_.Log(toolbelt::LogLevel::kWarning,
+                         "Tunnel mTLS handshake from %s failed: %s",
+                         peer.c_str(), s.ToString().c_str());
     return;
   }
   const Deadline deadline =
@@ -564,7 +505,7 @@ TunnelManager::PlanIngress(const Handshake &handshake,
 }
 
 void TunnelManager::IngressCoroutine(
-    async::Context ctx, std::shared_ptr<async::StreamSocket> socket,
+    async::Context ctx, std::shared_ptr<async::ByteStream> socket,
     IngressPlan plan) {
   if (server_->shutting_down_) {
     return;
@@ -752,9 +693,19 @@ void TunnelManager::EgressCoroutine(async::Context ctx, EgressRoute route) {
       async::Sleep(ctx, kReconnectInterval);
       continue;
     }
-    SetNoDelay(*socket);
-    absl::Status status = ForwardChannel(ctx, client, *socket, route);
-    socket->Close();
+    async::ByteStream stream(std::move(*socket));
+    SetNoDelay(stream.Socket());
+    if (absl::Status secure =
+            server_->SecureConnection(ctx, stream, /*server_role=*/false);
+        !secure.ok()) {
+      LogFailure(last_failure,
+                 absl::StrFormat("Tunnel mTLS handshake to %s for %s failed: %s",
+                                 peer_name, topic, secure.ToString()));
+      async::Sleep(ctx, kReconnectInterval);
+      continue;
+    }
+    absl::Status status = ForwardChannel(ctx, client, stream, route);
+    stream.Close();
     if (server_->shutting_down_) {
       break;
     }
@@ -774,7 +725,7 @@ void TunnelManager::LogFailure(std::string &last_failure,
 }
 
 absl::Status TunnelManager::ForwardChannel(async::Context ctx, Client &client,
-                                           async::StreamSocket &socket,
+                                           async::ByteStream &socket,
                                            const EgressRoute &route) {
   const LocalPublication &publication = route.publication;
   SubscriberOptions options;
@@ -808,8 +759,7 @@ absl::Status TunnelManager::ForwardChannel(async::Context ctx, Client &client,
                        route.topic.c_str(), route.peer.name().c_str());
 
   const int32_t prefix_size = sub->PrefixSize();
-  const toolbelt::FileDescriptor socket_fd(async::StreamSocketFd(socket),
-                                           /*owned=*/false);
+  const toolbelt::FileDescriptor socket_fd(socket.Fd(), /*owned=*/false);
   uint64_t seq = 0;
   std::vector<std::byte> packet;
   for (;;) {
@@ -1079,9 +1029,19 @@ void TunnelManager::DiscoverySenderCoroutine(async::Context ctx, Peer *peer) {
       WaitToReconnect(ctx, *peer);
       continue;
     }
-    SetNoDelay(*socket);
-    absl::Status status = RunDiscoveryConnection(ctx, *socket, *peer);
-    socket->Close();
+    async::ByteStream stream(std::move(*socket));
+    SetNoDelay(stream.Socket());
+    if (absl::Status secure =
+            server_->SecureConnection(ctx, stream, /*server_role=*/false);
+        !secure.ok()) {
+      LogFailure(last_failure,
+                 absl::StrFormat("Tunnel mTLS handshake to %s failed: %s", name,
+                                 secure.ToString()));
+      WaitToReconnect(ctx, *peer);
+      continue;
+    }
+    absl::Status status = RunDiscoveryConnection(ctx, stream, *peer);
+    stream.Close();
     if (server_->shutting_down_) {
       break;
     }
@@ -1093,7 +1053,7 @@ void TunnelManager::DiscoverySenderCoroutine(async::Context ctx, Peer *peer) {
 }
 
 absl::Status TunnelManager::RunDiscoveryConnection(async::Context ctx,
-                                                   async::StreamSocket &socket,
+                                                   async::ByteStream &socket,
                                                    Peer &peer) {
   if (absl::Status s = SendHandshake(socket, DiscoveryHandshake(), ctx);
       !s.ok()) {
@@ -1103,7 +1063,7 @@ absl::Status TunnelManager::RunDiscoveryConnection(async::Context ctx,
                        "Tunnel discovery connected to %s",
                        peer.config.name().c_str());
   const int trigger_fd = peer.discovery_trigger.GetPollFd().Fd();
-  const int socket_fd = async::StreamSocketFd(socket);
+  const int socket_fd = socket.Fd();
   uint64_t seq = 0;
   bool send = true;
   auto next_refresh = std::chrono::steady_clock::now();
@@ -1154,7 +1114,7 @@ absl::Status TunnelManager::RunDiscoveryConnection(async::Context ctx,
 }
 
 absl::Status TunnelManager::SendDiscovery(async::Context ctx,
-                                          async::StreamSocket &socket,
+                                          async::ByteStream &socket,
                                           const Peer &peer, uint64_t seq) {
   // Never empty, because the device name is required.
   std::string payload = BuildDiscoveryMessage(peer).SerializeAsString();
@@ -1179,7 +1139,7 @@ absl::Status TunnelManager::SendDiscovery(async::Context ctx,
 }
 
 void TunnelManager::DiscoveryReceiverLoop(async::Context ctx,
-                                          async::StreamSocket &socket,
+                                          async::ByteStream &socket,
                                           const Handshake &handshake,
                                           const std::string &peer) {
   const size_t prefix_size =
@@ -1233,7 +1193,7 @@ void TunnelManager::DiscoveryReceiverLoop(async::Context ctx,
 }
 
 void TunnelManager::DiscardConnection(async::Context ctx,
-                                      async::StreamSocket &socket,
+                                      async::ByteStream &socket,
                                       const std::string &topic,
                                       const std::string &peer) {
   server_->logger_.Log(toolbelt::LogLevel::kDebug,

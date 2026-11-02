@@ -232,6 +232,10 @@ endif()
 # when explicitly enabled.
 option(SUBSPACE_ASIO_RPC "Build the asio_rpc backend (fetches Boost via FetchContent)" ON)
 
+# Mutual TLS for native bridge connections and the tunnel.  Off by default.
+# See docs/mtls.md.  Uses the system OpenSSL.
+option(SUBSPACE_ENABLE_MTLS "Protect bridge and tunnel connections with mTLS" OFF)
+
 if(SUBSPACE_ASIO_RPC AND CMAKE_CROSSCOMPILING)
     message(STATUS "Disabling SUBSPACE_ASIO_RPC: Boost.Context does not cross-compile cleanly.")
     set(SUBSPACE_ASIO_RPC OFF)

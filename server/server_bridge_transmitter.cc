@@ -66,7 +66,7 @@ struct Server::BridgeRetirementState {
 };
 
 static absl::Status SendSplitBridgeMessage(async::Context ctx,
-                                           async::StreamSocket &bridge,
+                                           async::ByteStream &bridge,
                                            const Message &msg,
                                            const MessagePrefix *prefix,
                                            size_t prefix_area) {
@@ -103,7 +103,7 @@ static absl::Status SendSplitBridgeMessage(async::Context ctx,
 }
 
 static absl::Status SendCombinedBridgeMessage(async::Context ctx,
-                                              async::StreamSocket &bridge,
+                                              async::ByteStream &bridge,
                                               const Message &msg,
                                               const MessagePrefix *prefix,
                                               size_t prefix_area) {
@@ -124,7 +124,7 @@ static absl::Status SendCombinedBridgeMessage(async::Context ctx,
 }
 
 static absl::Status SendBridgeMessage(async::Context ctx,
-                                      async::StreamSocket &bridge,
+                                      async::ByteStream &bridge,
                                       const Message &msg,
                                       const MessagePrefix *prefix,
                                       size_t prefix_area,
@@ -171,15 +171,23 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
     }
   } bridge_guard{this, info.channel_name, sender, sub_reliable};
 
-  async::StreamSocket bridge;
-  if (absl::Status status = bridge.Connect(subscriber); !status.ok()) {
+  async::StreamSocket connected;
+  if (absl::Status status = connected.Connect(subscriber); !status.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to connect to bridge subscriber: %s",
                 status.ToString().c_str());
     return;
   }
-  if (absl::Status status = bridge.SetNonBlocking(); !status.ok()) {
+  if (absl::Status status = connected.SetNonBlocking(); !status.ok()) {
     logger_.Log(toolbelt::LogLevel::kError, "%s", status.ToString().c_str());
+    return;
+  }
+  async::ByteStream bridge(std::move(connected));
+  if (absl::Status status = SecureConnection(ctx, bridge, /*server_role=*/false);
+      !status.ok()) {
+    logger_.Log(toolbelt::LogLevel::kError,
+                "mTLS handshake to bridge subscriber failed: %s",
+                status.ToString().c_str());
     return;
   }
 
@@ -444,12 +452,21 @@ void Server::RetirementReceiverCoroutine(
     std::shared_ptr<async::StreamSocket> retirement_listener,
     std::shared_ptr<BridgeRetirementState> retirement_state) {
   // Accept connection on the retirement listener socket.
-  absl::StatusOr<async::StreamSocket> retirement_socket =
+  absl::StatusOr<async::StreamSocket> accepted =
       retirement_listener->Accept(ctx);
-  if (!retirement_socket.ok()) {
+  if (!accepted.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to accept retirement connection: %s",
-                retirement_socket.status().ToString().c_str());
+                accepted.status().ToString().c_str());
+    return;
+  }
+  async::ByteStream retirement_socket(std::move(*accepted));
+  if (absl::Status status =
+          SecureConnection(ctx, retirement_socket, /*server_role=*/true);
+      !status.ok()) {
+    logger_.Log(toolbelt::LogLevel::kError,
+                "mTLS handshake on a retirement connection failed: %s",
+                status.ToString().c_str());
     return;
   }
 
@@ -457,7 +474,7 @@ void Server::RetirementReceiverCoroutine(
   char buffer[kDiscoveryBufferSize];
   for (;;) {
     absl::StatusOr<ssize_t> n_recv =
-        retirement_socket->ReceiveMessage(buffer, sizeof(buffer), ctx);
+        retirement_socket.ReceiveMessage(buffer, sizeof(buffer), ctx);
     if (!n_recv.ok()) {
       return;
     }

@@ -1,6 +1,6 @@
 package(default_visibility = ["//visibility:public"])
 
-load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "string_flag")
 
 # Build-time selection of the coroutine/networking backend for the server (and
 # the client paths it relies on).  See common/async/context.h.  `co` is the
@@ -24,6 +24,20 @@ config_setting(
 config_setting(
     name = "coro_backend_asio",
     flag_values = {":coro_backend": "asio"},
+)
+
+# Mutual TLS for native bridge connections and the tunnel.  Off by default,
+# so a normal build does not depend on BoringSSL.  See docs/mtls.md.
+#
+#   bazelisk build --//:mtls //server:subspace_server
+bool_flag(
+    name = "mtls",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "mtls_enabled",
+    flag_values = {":mtls": "True"},
 )
 
 # Maximum channels in one server session.  This sizes the shared-memory

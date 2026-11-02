@@ -14,6 +14,8 @@ use_repo(subspace, "subspace_max_channels")
 bazel_dep(name = "bazel_skylib", version = "1.9.0")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "abseil-cpp", version = "20250512.1")
+# Only linked when the server is built with --//:mtls.  See docs/mtls.md.
+bazel_dep(name = "boringssl", version = "0.20261020.0")
 bazel_dep(name = "googletest", version = "1.17.0")
 bazel_dep(name = "protobuf", version = "33.2")
 

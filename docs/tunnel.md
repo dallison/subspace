@@ -6,7 +6,10 @@ Subspace discovery and bridging. The two never carry each other's traffic: a
 message that arrives through the tunnel is not forwarded over a native bridge,
 and a message that arrives over a native bridge is not sent into the tunnel.
 
-The tunnel uses TCP over IPv4 only.
+The tunnel uses TCP over IPv4 only. A server built with mutual TLS, and given
+a certificate, wraps every tunnel connection, including discovery. See
+[Mutual TLS](mtls.md). Without those credentials the bytes on the wire are
+unchanged.
 
 ## How It Works
 

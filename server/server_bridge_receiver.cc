@@ -29,7 +29,7 @@ struct BridgeReceivedMessage {
 };
 
 static absl::StatusOr<size_t>
-ReceiveSplitBridgeMessage(async::Context ctx, async::StreamSocket &bridge,
+ReceiveSplitBridgeMessage(async::Context ctx, async::ByteStream &bridge,
                           const Subscribed &subscribed,
                           const BridgeReceiveTarget &target) {
   absl::StatusOr<ssize_t> prefix = bridge.ReceiveMessage(
@@ -70,7 +70,7 @@ ReceiveSplitBridgeMessage(async::Context ctx, async::StreamSocket &bridge,
 
 static absl::StatusOr<size_t>
 ReceiveCombinedBridgeMessageForSplitPublisher(async::Context ctx,
-                                              async::StreamSocket &bridge,
+                                              async::ByteStream &bridge,
                                               const Subscribed &subscribed,
                                               const BridgeReceiveTarget &target) {
   std::vector<char> combined(subscribed.slot_size() + target.prefix_length);
@@ -93,7 +93,7 @@ ReceiveCombinedBridgeMessageForSplitPublisher(async::Context ctx,
 }
 
 static absl::StatusOr<size_t>
-ReceiveCombinedBridgeMessage(async::Context ctx, async::StreamSocket &bridge,
+ReceiveCombinedBridgeMessage(async::Context ctx, async::ByteStream &bridge,
                              const Subscribed &subscribed,
                              const BridgeReceiveTarget &target) {
   absl::StatusOr<ssize_t> n = bridge.ReceiveMessage(
@@ -111,7 +111,7 @@ ReceiveCombinedBridgeMessage(async::Context ctx, async::StreamSocket &bridge,
 }
 
 static absl::StatusOr<BridgeReceivedMessage>
-ReceiveBridgeMessage(async::Context ctx, async::StreamSocket &bridge,
+ReceiveBridgeMessage(async::Context ctx, async::ByteStream &bridge,
                      Publisher &pub, const Subscribed &subscribed,
                      void *payload_buffer) {
   // The MessagePrefix struct contains 4 bytes of padding at offset 0. This is
@@ -275,12 +275,20 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
   }
 
   // Accept connection on listen socket.
-  absl::StatusOr<async::StreamSocket> bridge =
-      receiver_listener.Accept(ctx);
-  if (!bridge.ok()) {
+  absl::StatusOr<async::StreamSocket> accepted = receiver_listener.Accept(ctx);
+  if (!accepted.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to accept incoming bridge connection: %s",
-                bridge.status().ToString().c_str());
+                accepted.status().ToString().c_str());
+    return;
+  }
+  async::ByteStream bridge(std::move(*accepted));
+  if (absl::Status handshake =
+          SecureConnection(ctx, bridge, /*server_role=*/true);
+      !handshake.ok()) {
+    logger_.Log(toolbelt::LogLevel::kError,
+                "mTLS handshake on bridge connection failed: %s",
+                handshake.ToString().c_str());
     return;
   }
 
@@ -288,7 +296,7 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
   Subscribed subscribed;
   // Recieve it into offset 3 in buffer so that we can write the length for
   // sending it out again to the bridge notification pipe.
-  absl::StatusOr<ssize_t> n_recv = bridge->ReceiveMessage(
+  absl::StatusOr<ssize_t> n_recv = bridge.ReceiveMessage(
       buffer + sizeof(int32_t), sizeof(buffer) - sizeof(int32_t), ctx);
   if (!n_recv.ok()) {
     logger_.Log(toolbelt::LogLevel::kError, "Failed to receive Subscribed: %s",
@@ -321,9 +329,9 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
     return;
   }
 
-  std::shared_ptr<async::StreamSocket> retirement_transmitter;
+  std::shared_ptr<async::ByteStream> retirement_transmitter;
   struct CloseRetirementTransmitterOnExit {
-    std::shared_ptr<async::StreamSocket> &socket;
+    std::shared_ptr<async::ByteStream> &socket;
     ~CloseRetirementTransmitterOnExit() {
       if (socket != nullptr) {
         socket->Close();
@@ -332,7 +340,7 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
   } close_retirement_transmitter_on_exit{retirement_transmitter};
 
   if (subscribed.notify_retirement()) {
-    retirement_transmitter = std::make_shared<async::StreamSocket>();
+    retirement_transmitter = std::make_shared<async::ByteStream>();
     // The address family travels in the message (see SendSubscribeMessage);
     // unset defaults to FAMILY_INET for compatibility with older peers.
     absl::StatusOr<toolbelt::SocketAddress> retirement_addr =
@@ -344,11 +352,19 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
       return;
     }
 
-    s = retirement_transmitter->Connect(*retirement_addr);
+    s = retirement_transmitter->Socket().Connect(*retirement_addr);
     if (!s.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to connect to retirement socket for %s: %s",
                   channel_name.c_str(), s.ToString().c_str());
+      return;
+    }
+    if (absl::Status handshake = SecureConnection(
+            ctx, *retirement_transmitter, /*server_role=*/false);
+        !handshake.ok()) {
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "mTLS handshake to retirement socket for %s failed: %s",
+                  channel_name.c_str(), handshake.ToString().c_str());
       return;
     }
   }
@@ -461,7 +477,7 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
     }
 
     absl::StatusOr<BridgeReceivedMessage> bridge_msg =
-        ReceiveBridgeMessage(ctx, *bridge, *pub, subscribed, *buf);
+        ReceiveBridgeMessage(ctx, bridge, *pub, subscribed, *buf);
     if (!bridge_msg.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to read bridge message for %s: %s",
@@ -501,7 +517,7 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
 void Server::RetirementCoroutine(
     async::Context ctx, const std::string &channel_name,
     toolbelt::FileDescriptor &&retirement_fd,
-    std::shared_ptr<async::StreamSocket> retirement_transmitter) {
+    std::shared_ptr<async::ByteStream> retirement_transmitter) {
   logger_.Log(toolbelt::LogLevel::kDebug, "Retirement coroutine for %s running",
               channel_name.c_str());
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO

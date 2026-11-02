@@ -101,6 +101,13 @@ ABSL_FLAG(bool, tunnel, false,
 ABSL_FLAG(std::string, tunnel_config, "",
           "Tunnel configuration file in protobuf text format.  See "
           "docs/tunnel.md.");
+ABSL_FLAG(std::string, mtls_cert, "",
+          "PEM certificate for mutual TLS on bridge and tunnel connections. "
+          "Requires --mtls_key, --mtls_ca, and a server built with mTLS.");
+ABSL_FLAG(std::string, mtls_key, "",
+          "PEM private key for --mtls_cert.  The key must be unencrypted.");
+ABSL_FLAG(std::string, mtls_ca, "",
+          "PEM CA certificate.  Peers must present a certificate this CA signed.");
 
 // Look up this host's local vsock context id (CID) so we can advertise it to
 // bridge peers.  Only meaningful on Linux with vsock support.
@@ -296,6 +303,13 @@ int main(int argc, char **argv) {
     server->SetTunnelConfig(*config);
   } else if (!tunnel_config_path.empty()) {
     fprintf(stderr, "Ignoring --tunnel_config because --tunnel isn't set\n");
+  }
+
+  const std::string mtls_cert = absl::GetFlag(FLAGS_mtls_cert);
+  const std::string mtls_key = absl::GetFlag(FLAGS_mtls_key);
+  const std::string mtls_ca = absl::GetFlag(FLAGS_mtls_ca);
+  if (!mtls_cert.empty() || !mtls_key.empty() || !mtls_ca.empty()) {
+    server->SetMtlsCredentials(mtls_cert, mtls_key, mtls_ca);
   }
 
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO

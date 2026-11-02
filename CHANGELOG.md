@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Mutual TLS
+- Bridge connections, including retirement sockets, and tunnel connections
+  can require a certificate from both sides. The server uses BoringSSL
+  (Bazel) or OpenSSL (CMake). Build it in with `--config=mtls` or
+  `-DSUBSPACE_ENABLE_MTLS=ON`; a server built without it keeps the cleartext
+  protocols. `--mtls_cert`, `--mtls_key`, and `--mtls_ca` turn it on at run
+  time, and `Server::SetMtlsCredentials` does the same for an embedded
+  server. See `docs/mtls.md`.
+
 ### Tunnel-Compatible Discovery and Bridging
 - The server can exchange channels over TCP with peers that use the cruise
   IPC tunnel and discovery protocols. `--tunnel` turns it on, and
