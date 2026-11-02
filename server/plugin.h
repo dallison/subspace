@@ -4,11 +4,14 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/types/span.h"
 #include "common/client_buffer.h"
 #include "toolbelt/logging.h"
+#include <cstddef>
 #include <dlfcn.h>
 #include <memory>
 #include <string>
+#include <sys/types.h>
 
 namespace co {
 class CoroutineScheduler;
@@ -24,11 +27,28 @@ struct PluginContext  {
   co::CoroutineScheduler *scheduler = nullptr;
 };
 
+// Payload passed to an egress plugin. `bytes` does not include the prefix.
+// The memory belongs to the published slot and may be read-only, so a plugin
+// that changes the message returns a new span kept alive by `keepalive`.
+struct PluginPayload {
+  absl::Span<const std::byte> bytes;
+  std::shared_ptr<void> keepalive;
+  bool modified = false;
+};
+
+// Result of an ingress plugin. See PluginInterfaceFunctions::onReceive.
+struct PluginReceiveResult {
+  ssize_t length = -1;
+  bool modified = false;
+};
+
 // Plugins allow an externally loaded module to handle occurences in the
 // server.  It is envisioned that they can be used for adding additional
 // channels, etc.  The server runs in a single thread so plugins must
 // behave themselves and not block for long periods of time.  Access to
-// the current coroutine is in `co::self`.
+// the current coroutine is in `co::self`.  onSend and onReceive can run
+// at the same time as each other when the server is using more than one
+// thread.
 struct PluginInterfaceFunctions {
   absl::Status (*onStartup)(Server &s, const std::string& name, PluginContext *ctx);
   void (*onReady)(Server &s, PluginContext *ctx);
@@ -46,6 +66,30 @@ struct PluginInterfaceFunctions {
   absl::StatusOr<bool> (*onFreeClientBuffer)(
       Server &s, const ClientBufferHandleMetadata &metadata,
       PluginContext *ctx);
+
+  // Called for a message about to leave over a native bridge or the tunnel.
+  // `payload` is the message bytes without the prefix. Return that payload
+  // to leave it unchanged. To replace it, return a new span and keep it
+  // alive with `keepalive`, and set `modified`. A returned error skips this
+  // plugin and the previous payload is kept. A null function means the
+  // plugin does not see egress traffic.
+  absl::StatusOr<PluginPayload> (*onSend)(Server &s,
+                                          const std::string &channel_name,
+                                          PluginPayload payload,
+                                          PluginContext *ctx);
+
+  // Called for a message that has arrived over a native bridge or the tunnel
+  // and is about to be published. `data` is the payload without the prefix
+  // and can be changed in place, up to `max_length` bytes. `length` follows
+  // the cruise tunnel plugin: a positive value is the payload length to
+  // publish, 0 drops the message and skips later plugins, and -1 leaves the
+  // payload unchanged by this plugin. Set `modified` when the bytes changed
+  // even if the length did not, so the checksum can be recomputed. A null
+  // function means the plugin does not see ingress traffic.
+  PluginReceiveResult (*onReceive)(Server &s, const std::string &channel_name,
+                                   std::byte *data, size_t length,
+                                   size_t max_length, int32_t slot_id,
+                                   PluginContext *ctx);
 };
 
 class PluginInterface {
@@ -95,6 +139,23 @@ public:
       return false;
     }
     return functions_.onFreeClientBuffer(s, metadata, ctx_.get());
+  }
+
+  bool HasOnSend() const { return functions_.onSend != nullptr; }
+
+  absl::StatusOr<PluginPayload> OnSend(Server &s,
+                                       const std::string &channel_name,
+                                       PluginPayload payload) {
+    return functions_.onSend(s, channel_name, std::move(payload), ctx_.get());
+  }
+
+  bool HasOnReceive() const { return functions_.onReceive != nullptr; }
+
+  PluginReceiveResult OnReceive(Server &s, const std::string &channel_name,
+                                std::byte *data, size_t length,
+                                size_t max_length, int32_t slot_id) {
+    return functions_.onReceive(s, channel_name, data, length, max_length,
+                                slot_id, ctx_.get());
   }
 
   void SetScheduler(co::CoroutineScheduler &scheduler) {

@@ -9,6 +9,7 @@
 #include "client/client.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/sockets.h"
+#include <cstring>
 #include <sys/socket.h>
 #include <vector>
 
@@ -67,7 +68,8 @@ struct Server::BridgeRetirementState {
 
 static absl::Status SendSplitBridgeMessage(async::Context ctx,
                                            async::ByteStream &bridge,
-                                           const Message &msg,
+                                           const void *payload,
+                                           size_t payload_length,
                                            const MessagePrefix *prefix,
                                            size_t prefix_area) {
   const char *prefix_addr = reinterpret_cast<const char *>(prefix);
@@ -82,18 +84,17 @@ static absl::Status SendSplitBridgeMessage(async::Context ctx,
                         n.status().ToString()));
   }
 
-  int32_t payload_length = htonl(static_cast<int32_t>(msg.length));
+  int32_t wire_length = htonl(static_cast<int32_t>(payload_length));
   if (absl::StatusOr<ssize_t> n =
-          bridge.Send(reinterpret_cast<const char *>(&payload_length),
-                      sizeof(payload_length), ctx);
+          bridge.Send(reinterpret_cast<const char *>(&wire_length),
+                      sizeof(wire_length), ctx);
       !n.ok()) {
     return absl::InternalError(
         absl::StrFormat("failed to send bridge payload length: %s",
                         n.status().ToString()));
   }
   if (absl::StatusOr<ssize_t> n =
-          bridge.Send(static_cast<const char *>(msg.buffer), msg.length,
-                      ctx);
+          bridge.Send(static_cast<const char *>(payload), payload_length, ctx);
       !n.ok()) {
     return absl::InternalError(
         absl::StrFormat("failed to send bridge payload: %s",
@@ -104,7 +105,8 @@ static absl::Status SendSplitBridgeMessage(async::Context ctx,
 
 static absl::Status SendCombinedBridgeMessage(async::Context ctx,
                                               async::ByteStream &bridge,
-                                              const Message &msg,
+                                              const void *payload,
+                                              size_t payload_length,
                                               const MessagePrefix *prefix,
                                               size_t prefix_area) {
   const char *prefix_addr = reinterpret_cast<const char *>(prefix);
@@ -112,7 +114,17 @@ static absl::Status SendCombinedBridgeMessage(async::Context ctx,
   // length. The MessagePrefix padding exists for this purpose, so the legacy
   // bridge path can write prefix and payload in one chunk.
   char *data_addr = const_cast<char *>(prefix_addr) + sizeof(int32_t);
-  size_t message_length = msg.length + prefix_area - sizeof(int32_t);
+  size_t message_length = payload_length + prefix_area - sizeof(int32_t);
+  // The combined frame is one buffer. A plugin replacement is not contiguous
+  // with the prefix, so copy both into a frame that still has the padding
+  // SendMessage uses for the length.
+  std::vector<char> copied;
+  if (payload != prefix_addr + prefix_area) {
+    copied.resize(prefix_area + payload_length);
+    memcpy(copied.data(), prefix, prefix_area);
+    memcpy(copied.data() + prefix_area, payload, payload_length);
+    data_addr = copied.data() + sizeof(int32_t);
+  }
   if (absl::StatusOr<ssize_t> n =
           bridge.SendMessage(data_addr, message_length, ctx);
       !n.ok()) {
@@ -125,14 +137,17 @@ static absl::Status SendCombinedBridgeMessage(async::Context ctx,
 
 static absl::Status SendBridgeMessage(async::Context ctx,
                                       async::ByteStream &bridge,
-                                      const Message &msg,
+                                      const void *payload,
+                                      size_t payload_length,
                                       const MessagePrefix *prefix,
                                       size_t prefix_area,
                                       bool split_buffers_on_wire) {
   if (split_buffers_on_wire) {
-    return SendSplitBridgeMessage(ctx, bridge, msg, prefix, prefix_area);
+    return SendSplitBridgeMessage(ctx, bridge, payload, payload_length, prefix,
+                                  prefix_area);
   }
-  return SendCombinedBridgeMessage(ctx, bridge, msg, prefix, prefix_area);
+  return SendCombinedBridgeMessage(ctx, bridge, payload, payload_length,
+                                   prefix, prefix_area);
 }
 
 // This coroutine creates a subscriber to the given channel and sends
@@ -395,6 +410,28 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
         // This message came from bridge.  We don't forward them again.
         continue;
       }
+      EgressPluginResult egress = ApplyEgressPlugins(
+          channel_name, msg->buffer, static_cast<size_t>(msg->length));
+      const void *payload = msg->buffer;
+      size_t payload_length = static_cast<size_t>(msg->length);
+      const MessagePrefix *wire_prefix = prefix;
+      std::vector<std::byte> prefix_copy;
+      if (egress.modified) {
+        prefix_copy.resize(prefix_area);
+        memcpy(prefix_copy.data(), prefix, prefix_area);
+        auto *rewritten = reinterpret_cast<MessagePrefix *>(prefix_copy.data());
+        if (absl::Status status = UpdateModifiedChecksum(
+                rewritten, egress.bytes.data(), egress.bytes.size());
+            !status.ok()) {
+          logger_.Log(toolbelt::LogLevel::kError,
+                      "Failed to checksum modified bridge message on %s: %s",
+                      channel_name.c_str(), status.ToString().c_str());
+          continue;
+        }
+        wire_prefix = rewritten;
+        payload = egress.bytes.data();
+        payload_length = egress.bytes.size();
+      }
       // Note that for a reliable publisher where the subscriber is slower
       // we will get backpressure from the receiver because it won't
       // read from the socket.  We will keep transmitting until the TCP
@@ -414,9 +451,9 @@ void Server::BridgeTransmitterCoroutine(async::Context ctx,
         // returns.
         retirement_state->Track(slot_id, std::move(msg->active_message));
       }
-      if (absl::Status status =
-              SendBridgeMessage(ctx, bridge, *msg, prefix, prefix_area,
-                                wire_split_buffers);
+      if (absl::Status status = SendBridgeMessage(
+              ctx, bridge, payload, payload_length, wire_prefix, prefix_area,
+              wire_split_buffers);
           !status.ok()) {
         if (notifying_of_retirement) {
           retirement_state->Release(slot_id);

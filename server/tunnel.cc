@@ -25,6 +25,7 @@
 #include <optional>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <vector>
 
 namespace subspace {
 
@@ -617,7 +618,28 @@ void TunnelManager::IngressCoroutine(
       break;
     }
     MessagePrefix *prefix = pub->Prefix();
-    if (prefix->message_size != payload_size) {
+    Server::IngressPluginResult ingress = server_->ApplyIngressPlugins(
+        topic, *buffer, payload_size, static_cast<size_t>(pub->SlotSize()),
+        pub->CurrentSlotId());
+    if (ingress.drop) {
+      pub->CancelPublish();
+      continue;
+    }
+    if (ingress.modified) {
+      if (absl::Status s = server_->UpdateModifiedChecksum(
+              prefix, *buffer, ingress.length);
+          !s.ok()) {
+        server_->logger_.Log(toolbelt::LogLevel::kError,
+                             "Tunnel can't checksum a modified message on %s "
+                             "from %s: %s",
+                             topic.c_str(), plan.peer.c_str(),
+                             s.ToString().c_str());
+        pub->CancelPublish();
+        continue;
+      }
+    }
+    const size_t published_size = ingress.length;
+    if (prefix->message_size != published_size) {
       stats_.malformed_received++;
       pub->CancelPublish();
       continue;
@@ -631,7 +653,7 @@ void TunnelManager::IngressCoroutine(
     // the message goes to this publisher's virtual channel.
     prefix->SetIsBridged();
     absl::StatusOr<const Message> published =
-        pub->PublishMessageWithPrefix(static_cast<int64_t>(payload_size),
+        pub->PublishMessageWithPrefix(static_cast<int64_t>(published_size),
                                       /*use_slot_id_from_prefix=*/false,
                                       /*use_vchan_id_from_prefix=*/false);
     if (!published.ok()) {
@@ -800,7 +822,33 @@ absl::Status TunnelManager::ForwardChannel(async::Context ctx, Client &client,
       if (sub->PrefixSize() != prefix_size) {
         return absl::FailedPreconditionError("the channel's prefix changed");
       }
-      const size_t body_size = static_cast<size_t>(prefix_size) + msg->length;
+      Server::EgressPluginResult egress = server_->ApplyEgressPlugins(
+          route.topic, msg->buffer, static_cast<size_t>(msg->length));
+      const void *payload = msg->buffer;
+      size_t payload_length = static_cast<size_t>(msg->length);
+      const std::byte *wire_prefix =
+          reinterpret_cast<const std::byte *>(prefix);
+      std::vector<std::byte> prefix_copy;
+      if (egress.modified) {
+        prefix_copy.resize(static_cast<size_t>(prefix_size));
+        memcpy(prefix_copy.data(), prefix, static_cast<size_t>(prefix_size));
+        if (absl::Status s = server_->UpdateModifiedChecksum(
+                reinterpret_cast<MessagePrefix *>(prefix_copy.data()),
+                egress.bytes.data(), egress.bytes.size());
+            !s.ok()) {
+          server_->logger_.Log(
+              toolbelt::LogLevel::kError,
+              "Tunnel can't checksum a modified message on %s to %s: %s",
+              route.topic.c_str(), route.peer.name().c_str(),
+              s.ToString().c_str());
+          continue;
+        }
+        wire_prefix = prefix_copy.data();
+        payload = egress.bytes.data();
+        payload_length = egress.bytes.size();
+      }
+      const size_t body_size =
+          static_cast<size_t>(prefix_size) + payload_length;
       absl::StatusOr<PacketHeader> header = tunnel::MakePacketHeader(
           PacketType::kData, body_size, seq + 1, tunnel::RealtimeNowNs());
       if (!header.ok()) {
@@ -808,27 +856,26 @@ absl::Status TunnelManager::ForwardChannel(async::Context ctx, Client &client,
         server_->logger_.Log(toolbelt::LogLevel::kWarning,
                              "Tunnel can't send a %zu byte message on %s to "
                              "%s: %s",
-                             static_cast<size_t>(msg->length),
-                             route.topic.c_str(),
+                             payload_length, route.topic.c_str(),
                              route.peer.name().c_str(),
                              header.status().ToString().c_str());
         continue;
       }
-      const bool coalesce = msg->length <= kCoalesceLimit;
+      const bool coalesce = payload_length <= kCoalesceLimit;
       packet.resize(tunnel::kPacketHeaderSize + prefix_size +
-                    (coalesce ? msg->length : 0));
+                    (coalesce ? payload_length : 0));
       tunnel::EncodePacketHeader(*header, packet.data());
-      std::byte *wire_prefix = packet.data() + tunnel::kPacketHeaderSize;
-      memcpy(wire_prefix, prefix, prefix_size);
+      std::byte *packet_prefix = packet.data() + tunnel::kPacketHeaderSize;
+      memcpy(packet_prefix, wire_prefix, static_cast<size_t>(prefix_size));
       if (coalesce) {
-        memcpy(wire_prefix + prefix_size, msg->buffer, msg->length);
+        memcpy(packet_prefix + prefix_size, payload, payload_length);
       }
       if (absl::Status s = SendAll(socket, packet.data(), packet.size(), ctx);
           !s.ok()) {
         return s;
       }
       if (!coalesce) {
-        if (absl::Status s = SendAll(socket, msg->buffer, msg->length, ctx);
+        if (absl::Status s = SendAll(socket, payload, payload_length, ctx);
             !s.ok()) {
           return s;
         }

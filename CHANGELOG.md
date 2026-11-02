@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Bridge and Tunnel Plugins
+- Server plugins can change messages as they cross a native bridge or the
+  tunnel. `onSend` runs on the way out and `onReceive` on the way in, with
+  the same drop and replace behavior as the cruise tunnel plugin. If a plugin
+  changes the payload, the server writes a new checksum. `SetChecksumSize`
+  and `SetChecksumCallback` tell it the checksum length and function, the
+  same way a client does. The default is a 4-byte CRC32. An unchanged message
+  keeps the checksum its publisher wrote. Rebuild existing plugins against
+  this server; the plugin interface gained these two functions.
+
 ### Mutual TLS
 - Bridge connections, including retirement sockets, and tunnel connections
   can require a certificate from both sides. The server uses BoringSSL

@@ -485,9 +485,28 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
       break;
     }
 
+    MessagePrefix *prefix = bridge_msg->prefix;
+    IngressPluginResult ingress = ApplyIngressPlugins(
+        channel_name, *buf, static_cast<size_t>(bridge_msg->payload_length),
+        static_cast<size_t>(pub->SlotSize()), pub->CurrentSlotId());
+    if (ingress.drop) {
+      pub->CancelPublish();
+      continue;
+    }
+    int64_t payload_length = static_cast<int64_t>(ingress.length);
+    if (ingress.modified) {
+      if (absl::Status status = UpdateModifiedChecksum(
+              prefix, *buf, static_cast<size_t>(payload_length));
+          !status.ok()) {
+        logger_.Log(toolbelt::LogLevel::kError,
+                    "Failed to checksum modified bridge message on %s: %s",
+                    channel_name.c_str(), status.ToString().c_str());
+        pub->CancelPublish();
+        continue;
+      }
+    }
     // Set the kMessageBridged flag in the prefix so that this message isn't
     // forwarded again over a bridge.
-    MessagePrefix *prefix = bridge_msg->prefix;
     if ((prefix->flags & kMessageActivate) != 0) {
       // Since we have created a reliable publisher and it has sent an
       // activation message through, we don't send another one.
@@ -496,7 +515,7 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
     prefix->flags |= kMessageBridged;
 
     absl::StatusOr<const Message> pub_msg = pub->PublishMessageInternal(
-        bridge_msg->payload_length, /*omit_prefix=*/true,
+        payload_length, /*omit_prefix=*/true,
         /*omit_prefix_slot_id=*/true);
     if (!pub_msg.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,

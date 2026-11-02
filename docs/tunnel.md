@@ -446,11 +446,18 @@ doesn't receive old messages again from a server that restarted.
 
 ### Checksums and Virtual Channels
 
-The tunnel never changes or recomputes a checksum. A checksum verifies across
-it whenever both ends compute it the same way, including with a custom checksum
-callback, and cruise peers do once they're built with this version of
-Subspace. The receiving server leaves every field the checksum covers as the
-sender wrote it:
+A checksum verifies across the tunnel whenever both ends compute it the same
+way, including with a custom checksum callback, and cruise peers do once
+they're built with this version of Subspace. The tunnel leaves the checksum
+alone unless a server plugin changes the payload. `onSend` runs on the way
+out and `onReceive` on the way in. If either one changes the bytes, the
+server writes a new checksum with `SetChecksumSize` and `SetChecksumCallback`
+before the message is sent or published. Those match the client's checksum
+length and function; the default is a 4-byte CRC32. A message whose checksum
+length doesn't match, or that needs a function the server was not given, is
+not forwarded. Every other message keeps the checksum the publisher wrote.
+The receiving server leaves every field the checksum covers as the sender
+wrote it:
 
 - A virtual channel's ID can differ between machines. The message is delivered
   on the receiving server's virtual channel, and its prefix keeps the sender's
