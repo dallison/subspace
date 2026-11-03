@@ -164,7 +164,7 @@ FetchContent_MakeAvailable(abseil)
 FetchContent_Declare(
     co
     GIT_REPOSITORY https://github.com/dallison/co.git
-    GIT_TAG 3.3.2
+    GIT_TAG 3.4.1
     CMAKE_ARGS
         -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
 )
@@ -185,7 +185,7 @@ endif()
 FetchContent_Declare(
     cpp_toolbelt
     GIT_REPOSITORY https://github.com/dallison/cpp_toolbelt.git
-    GIT_TAG 2.1.2
+    GIT_TAG 2.1.6
     CMAKE_ARGS
         -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
 )
