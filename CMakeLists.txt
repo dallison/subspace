@@ -159,8 +159,20 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(abseil)
 
+# --- External Dependency: cpp_toolbelt (using FetchContent for native CMake) ---
+# MUST be available before co: from 3.4.1, co includes toolbelt/async_waiter.h
+# and links the toolbelt target.  Declaring our pin first also overrides the
+# fork URL in co's own CMakeLists.txt when it FetchContents cpp_toolbelt.
+FetchContent_Declare(
+    cpp_toolbelt
+    GIT_REPOSITORY https://github.com/dallison/cpp_toolbelt.git
+    GIT_TAG 2.1.6
+    CMAKE_ARGS
+        -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
+)
+FetchContent_MakeAvailable(cpp_toolbelt)
+
 # --- External Dependency: co (using FetchContent for native CMake) ---
-# MUST be declared before cpp_toolbelt since cpp_toolbelt depends on it
 FetchContent_Declare(
     co
     GIT_REPOSITORY https://github.com/dallison/co.git
@@ -178,18 +190,6 @@ endif()
 if(TARGET coroutines_test)
     target_link_libraries(coroutines_test PRIVATE absl::status_matchers gmock)
 endif()
-
-# --- External Dependency: cpp_toolbelt (using FetchContent for native CMake) ---
-# cpp_toolbelt's CMakeLists.txt will try to fetch co, but since we've already
-# declared it above, FetchContent will use our version instead
-FetchContent_Declare(
-    cpp_toolbelt
-    GIT_REPOSITORY https://github.com/dallison/cpp_toolbelt.git
-    GIT_TAG 2.1.6
-    CMAKE_ARGS
-        -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
-)
-FetchContent_MakeAvailable(cpp_toolbelt)
 
 # --- External Dependency: Protobuf (using FetchContent for native CMake) ---
 FetchContent_Declare(
