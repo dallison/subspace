@@ -24,23 +24,8 @@ bazel_dep(name = "rules_java", version = "9.1.0")
 bazel_dep(name = "rules_pkg", version = "1.0.1")
 bazel_dep(name = "rules_android_ndk", version = "0.1.5")
 bazel_dep(name = "zlib", version = "1.3.1.bcr.5")
-
-# coroutines 3.4.1 and cpp_toolbelt 2.1.6 are not in the BCR yet; pin with
-# git_override until the registry PRs land, then drop the overrides.
 bazel_dep(name = "coroutines", version = "3.4.1")
 bazel_dep(name = "cpp_toolbelt", version = "2.1.6")
-
-git_override(
-    module_name = "coroutines",
-    commit = "4bb845ca60d9ee4fc140b26774e10e57870b16d3",
-    remote = "https://github.com/dallison/co.git",
-)
-
-git_override(
-    module_name = "cpp_toolbelt",
-    commit = "28b3e84ebba8d4bba23525b32b9357ca03eb5223",
-    remote = "https://github.com/dallison/cpp_toolbelt.git",
-)
 
 # retro 1.1.0 is not in the BCR yet; pin it with git_override below.
 bazel_dep(name = "retro", version = "1.1.0")
