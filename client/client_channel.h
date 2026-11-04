@@ -102,6 +102,12 @@ public:
 
   void Unmap() override;
 
+  // Unmaps the channel control block, buffer control block, and message
+  // buffers before they are mapped again. The system control block stays
+  // mapped because every channel in the client shares it, and other threads
+  // read publisher and subscriber counts from it while a subscriber reloads.
+  void UnmapForReload();
+
   void Dump(std::ostream &os) const override;
 
   uint64_t GetVirtualMemoryUsage() const override;
@@ -342,6 +348,12 @@ public:
   }
 
 protected:
+  // The file the system control block is mapped from. A reconnect to a new
+  // server session gives a different one, so Map() must not keep the old
+  // mapping.
+  dev_t scb_dev_ = 0;
+  ino_t scb_ino_ = 0;
+
   void TriggerRetirement(int slot_id);
 
   virtual bool IsSubscriber() const { return false; }

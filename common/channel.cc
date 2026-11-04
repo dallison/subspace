@@ -152,20 +152,28 @@ Channel::Channel(const std::string &name, int num_slots, int channel_id,
       channel_id_(channel_id),
       type_(std::move(type)), reload_callback_(std::move(reload)) {}
 
+void Channel::UnmapChannelMemory() {
+  if (bcb_ != nullptr) {
+    auto *bcb = bcb_;
+    bcb_ = nullptr;
+    UnmapMemory(bcb, sizeof(BufferControlBlock), "BCB");
+  }
+  if (ccb_ != nullptr) {
+    auto *ccb = ccb_;
+    ccb_ = nullptr;
+    UnmapMemory(ccb, CcbSize(num_slots_, subscriber_queue_arena_size_), "CCB");
+  }
+}
+
 void Channel::Unmap() {
   if (scb_ == nullptr) {
     // Not yet mapped.
     return;
   }
   auto *scb = scb_;
-  auto *ccb = ccb_;
-  auto *bcb = bcb_;
   scb_ = nullptr;
-  ccb_ = nullptr;
-  bcb_ = nullptr;
   UnmapMemory(scb, sizeof(SystemControlBlock), "SCB");
-  UnmapMemory(ccb, CcbSize(num_slots_, subscriber_queue_arena_size_), "CCB");
-  UnmapMemory(bcb, sizeof(BufferControlBlock), "BCB");
+  UnmapChannelMemory();
 }
 
 std::string Channel::BufferSharedMemoryName(uint64_t session_id,

@@ -1356,6 +1356,11 @@ public:
   virtual uint64_t GetVirtualMemoryUsage() const;
 
 protected:
+  // Unmaps the channel and buffer control blocks and leaves the system
+  // control block mapped. A reload uses this so other threads can keep
+  // reading channel counters from the system control block.
+  void UnmapChannelMemory();
+
   int32_t ToCCBOffset(void *addr) const {
     return (int32_t)(reinterpret_cast<char *>(addr) -
                      reinterpret_cast<char *>(ccb_));
