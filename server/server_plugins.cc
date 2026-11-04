@@ -5,7 +5,9 @@
 // See LICENSE file for licensing information.
 
 #include "server/server.h"
+
 #include "absl/strings/str_format.h"
+#include "client/checksum.h"
 #include <atomic>
 
 namespace subspace {
@@ -189,6 +191,99 @@ absl::StatusOr<bool> Server::FreeClientBufferWithPlugins(
     }
   }
   return false;
+}
+
+Server::EgressPluginResult
+Server::ApplyEgressPlugins(const std::string &channel_name, const void *data,
+                           size_t length) {
+  PluginPayload current;
+  current.bytes = absl::Span<const std::byte>(
+      reinterpret_cast<const std::byte *>(data), length);
+  bool modified = false;
+  for (const auto &plugin : plugins_) {
+    if (!plugin->interface->HasOnSend()) {
+      continue;
+    }
+    absl::StatusOr<PluginPayload> next =
+        plugin->interface->OnSend(*this, channel_name, current);
+    if (!next.ok()) {
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Plugin %s onSend failed for %s: %s", plugin->name.c_str(),
+                  channel_name.c_str(), next.status().ToString().c_str());
+      continue;
+    }
+    if (next->modified || next->bytes.data() != current.bytes.data() ||
+        next->bytes.size() != current.bytes.size()) {
+      modified = true;
+    }
+    current = std::move(*next);
+  }
+  return EgressPluginResult{current.bytes, std::move(current.keepalive),
+                            modified};
+}
+
+Server::IngressPluginResult Server::ApplyIngressPlugins(
+    const std::string &channel_name, void *data, size_t length,
+    size_t max_length, int32_t slot_id) {
+  IngressPluginResult result;
+  result.length = length;
+  auto *bytes = reinterpret_cast<std::byte *>(data);
+  for (const auto &plugin : plugins_) {
+    if (!plugin->interface->HasOnReceive()) {
+      continue;
+    }
+    PluginReceiveResult received = plugin->interface->OnReceive(
+        *this, channel_name, bytes, result.length, max_length, slot_id);
+    if (received.length == 0) {
+      result.drop = true;
+      return result;
+    }
+    if (received.length < 0) {
+      continue;
+    }
+    if (static_cast<size_t>(received.length) > max_length) {
+      logger_.Log(toolbelt::LogLevel::kError,
+                  "Plugin %s onReceive for %s returned %zd bytes, above the "
+                  "%zu byte slot",
+                  plugin->name.c_str(), channel_name.c_str(), received.length,
+                  max_length);
+      continue;
+    }
+    if (static_cast<size_t>(received.length) != result.length ||
+        received.modified) {
+      result.modified = true;
+    }
+    result.length = static_cast<size_t>(received.length);
+  }
+  return result;
+}
+
+absl::Status Server::UpdateModifiedChecksum(MessagePrefix *prefix,
+                                            const void *payload,
+                                            size_t length) {
+  prefix->message_size = length;
+  if (!prefix->HasChecksum()) {
+    return absl::OkStatus();
+  }
+  const int32_t checksum_size = prefix->checksum_size;
+  if (checksum_size != checksum_size_) {
+    return absl::FailedPreconditionError(absl::StrFormat(
+        "message checksum is %d bytes but the server is configured for %d",
+        checksum_size, checksum_size_));
+  }
+  if (checksum_callback_ == nullptr && checksum_size != 4) {
+    return absl::FailedPreconditionError(
+        "the server has no checksum function for a modified message");
+  }
+  MessageChecksumData data = GetMessageChecksumData(
+      prefix, payload, length, checksum_size, prefix->metadata_size);
+  absl::Span<std::byte> checksum = GetChecksumSpan(prefix, checksum_size);
+  if (checksum_callback_ != nullptr) {
+    checksum_callback_(data.Spans(), checksum);
+  } else {
+    CalculateCRC32Checksum(data.Spans(), checksum);
+  }
+  return absl::OkStatus();
 }
 
 } // namespace subspace
