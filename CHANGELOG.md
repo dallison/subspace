@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Bridge and Tunnel Plugins
+- Server plugins can change messages as they cross a native bridge or the
+  tunnel. `onSend` runs on the way out and `onReceive` on the way in. If a plugin
+  changes the payload, the server writes a new checksum. `SetChecksumSize`
+  and `SetChecksumCallback` tell it the checksum length and function, the
+  same way a client does. The default is a 4-byte CRC32. An unchanged message
+  keeps the checksum its publisher wrote. Rebuild existing plugins against
+  this server; the plugin interface gained these two functions.
+
 ### Mutual TLS
 - Bridge connections, including retirement sockets, and tunnel connections
   can require a certificate from both sides. The server uses BoringSSL
@@ -12,13 +21,13 @@
   server. See `docs/mtls.md`.
 
 ### Tunnel-Compatible Discovery and Bridging
-- The server can exchange channels over TCP with peers that use the cruise
+- The server can exchange channels over TCP with peers that use the Cruise
   IPC tunnel and discovery protocols. `--tunnel` turns it on, and
   `--tunnel_config` names a configuration file in protobuf text format
   (`proto/tunnel_config.proto`) that lists the device name, listen port,
   peers, discovery denylist and refresh interval. Programs that embed the
   server call `Server::SetTunnelConfig`. See `docs/tunnel.md`.
-- Tunnel discovery uses the cruise protobuf format on
+- Tunnel discovery uses the Cruise protobuf format on
   `/ipc/discovery/proto/receive` (`proto/tunnel_discovery.proto`). ROS-encoded
   discovery is not supported; connections that carry it are ignored.
 - Static routes carry channels without discovery. A `send_routes` entry sends

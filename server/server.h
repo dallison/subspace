@@ -10,6 +10,7 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "client/checksum.h"
 #include "client/message.h"
 #include "client_handler.h"
 #include "co/coroutine.h"
@@ -202,6 +203,19 @@ public:
   absl::Status LoadBuiltinPlugin(const std::string &name,
                                  std::unique_ptr<PluginInterface> interface);
   absl::Status UnloadPlugin(const std::string &name);
+
+  // Checksum written when an egress or ingress plugin changes a message that
+  // carries one. The length is the number of bytes the function writes, and
+  // it has to match the message's checksum length. A null function with the
+  // default length of 4 uses CRC32, the same as a client that has not set
+  // its own function. Call these before Run.
+  void SetChecksumSize(int32_t checksum_size) {
+    checksum_size_ = checksum_size;
+  }
+  int32_t ChecksumSize() const { return checksum_size_; }
+  void SetChecksumCallback(ChecksumCallback callback) {
+    checksum_callback_ = std::move(callback);
+  }
 
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO
   virtual co::CoroutineScheduler &GetScheduler() { return runtime_.scheduler(); }
@@ -454,6 +468,27 @@ private:
   absl::StatusOr<bool> FreeClientBufferWithPlugins(
       const ClientBufferHandleMetadata &metadata);
 
+  struct EgressPluginResult {
+    absl::Span<const std::byte> bytes;
+    std::shared_ptr<void> keepalive;
+    bool modified = false;
+  };
+  EgressPluginResult ApplyEgressPlugins(const std::string &channel_name,
+                                        const void *data, size_t length);
+  struct IngressPluginResult {
+    size_t length = 0;
+    bool drop = false;
+    bool modified = false;
+  };
+  IngressPluginResult ApplyIngressPlugins(const std::string &channel_name,
+                                          void *data, size_t length,
+                                          size_t max_length, int32_t slot_id);
+  // Writes a new checksum over `payload` into `prefix` and sets its message
+  // size. The prefix is the one that will be sent or published, not a live
+  // slot a local subscriber can still see.
+  absl::Status UpdateModifiedChecksum(MessagePrefix *prefix,
+                                      const void *payload, size_t length);
+
   std::string socket_name_;
   uint64_t session_id_;
   std::vector<std::unique_ptr<ClientHandler>> client_handlers_;
@@ -508,6 +543,8 @@ private:
   bool cleanup_filesystem_ = false;
 
   std::vector<std::unique_ptr<Plugin>> plugins_;
+  int32_t checksum_size_ = 4;
+  ChecksumCallback checksum_callback_;
   toolbelt::TriggerFd shutdown_trigger_fd_;
   std::string machine_name_;
 

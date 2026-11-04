@@ -211,6 +211,21 @@ cc_test(
 )
 
 cc_test(
+    name = "plugin_bridge_test",
+    size = "medium",
+    srcs = ["plugin_bridge_test.cc"],
+    deps = [
+        ":server",
+        ":tunnel_test_util",
+        "//client:subspace_client",
+        "//common/async:async",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "server_test",
     size = "small",
     srcs = ["server_test.cc"],

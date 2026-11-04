@@ -134,6 +134,27 @@ absl::StatusOr<bool> OnFreeClientBuffer(
   return false;
 }
 
+absl::StatusOr<subspace::PluginPayload>
+OnSend(subspace::Server & /*s*/, const std::string &channel_name,
+       subspace::PluginPayload payload, subspace::PluginContext *ctx) {
+  ctx->logger.Log(toolbelt::LogLevel::kInfo,
+                  "NOP plugin: onSend channel %s length %zu\n",
+                  channel_name.c_str(), payload.bytes.size());
+  return payload;
+}
+
+subspace::PluginReceiveResult
+OnReceive(subspace::Server & /*s*/, const std::string &channel_name,
+          std::byte * /*data*/, size_t length, size_t /*max_length*/,
+          int32_t slot_id, subspace::PluginContext *ctx) {
+  ctx->logger.Log(toolbelt::LogLevel::kInfo,
+                  "NOP plugin: onReceive channel %s length %zu slot %d\n",
+                  channel_name.c_str(), length, slot_id);
+  subspace::PluginReceiveResult result;
+  result.length = static_cast<ssize_t>(length);
+  return result;
+}
+
 } // namespace nop_plugin
 
 extern "C" {
@@ -149,6 +170,8 @@ subspace::PluginInterface *NOP_Create() {
       .onNewSubscriber = nop_plugin::OnNewSubscriber,
       .onRemoveSubscriber = nop_plugin::OnRemoveSubscriber,
       .onFreeClientBuffer = nop_plugin::OnFreeClientBuffer,
+      .onSend = nop_plugin::OnSend,
+      .onReceive = nop_plugin::OnReceive,
   };
   auto iface = new subspace::PluginInterface(
       functions, std::make_unique<subspace::PluginContext>("nop_plugin"));

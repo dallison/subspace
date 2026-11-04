@@ -42,8 +42,9 @@ add_executable(tunnel_wire_test tunnel_config_test.cc tunnel_protocol_test.cc)
 add_executable(tunnel_test tunnel_test.cc)
 add_executable(tunnel_fake_peer_test tunnel_fake_peer_test.cc)
 add_executable(tunnel_stress_test tunnel_stress_test.cc)
+add_executable(plugin_bridge_test plugin_bridge_test.cc)
 foreach(TUNNEL_TEST server_mtls_test tunnel_wire_test tunnel_test tunnel_fake_peer_test
-        tunnel_stress_test)
+        tunnel_stress_test plugin_bridge_test)
     add_test(NAME ${TUNNEL_TEST} COMMAND ${TUNNEL_TEST})
     target_link_libraries(${TUNNEL_TEST} PUBLIC
         libserver
