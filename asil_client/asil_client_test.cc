@@ -18,21 +18,80 @@
 #include "asil_client/split_buffer.h"
 #include "asil_client/subscriber.h"
 #include "server/static_config.h"
+#include <arpa/inet.h>
+#include <atomic>
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
 #include <new>
 #include <poll.h>
+#include <pthread.h>
 #include <string>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <thread>
+#include <unistd.h>
 #include <utility>
 
 namespace {
-// Counts heap allocations made by this thread while counting is set.
+// Counts heap allocations made by the thread that called StartCounting.  The
+// server runs in this process, so other threads must not be counted.
+#if defined(__APPLE__)
+// The malloc logger sees every allocation in the process, including malloc,
+// calloc and realloc calls that don't go through operator new.  It can run
+// while a thread's local storage is being set up, so it can't use any.
+extern "C" {
+extern void (*malloc_logger)(uint32_t type, uintptr_t arg1, uintptr_t arg2,
+                             uintptr_t arg3, uintptr_t result,
+                             uint32_t num_hot_frames_to_skip);
+}
+
+constexpr uint32_t kMallocLoggerAlloc = 2;
+std::atomic<uintptr_t> counted_thread{0};
+std::atomic<int> allocations{0};
+
+uintptr_t CurrentThread() { return reinterpret_cast<uintptr_t>(pthread_self()); }
+
+void CountMalloc(uint32_t type, uintptr_t, uintptr_t, uintptr_t, uintptr_t,
+                 uint32_t) {
+  if ((type & kMallocLoggerAlloc) != 0 &&
+      counted_thread.load(std::memory_order_relaxed) == CurrentThread()) {
+    allocations++;
+  }
+}
+
+struct MallocLoggerInstaller {
+  MallocLoggerInstaller() { malloc_logger = CountMalloc; }
+} malloc_logger_installer;
+
+void StartCounting() {
+  allocations = 0;
+  counted_thread = CurrentThread();
+}
+
+int StopCounting() {
+  counted_thread = 0;
+  return allocations;
+}
+#else
 thread_local bool counting_allocations = false;
 thread_local int allocations = 0;
+
+void StartCounting() {
+  allocations = 0;
+  counting_allocations = true;
+}
+
+int StopCounting() {
+  counting_allocations = false;
+  return allocations;
+}
+#endif
 } // namespace
 
+#if !defined(__APPLE__)
 void *operator new(std::size_t size) {
   if (counting_allocations) {
     allocations++;
@@ -46,10 +105,12 @@ void *operator new(std::size_t size) {
 
 void operator delete(void *p) noexcept { std::free(p); }
 void operator delete(void *p, std::size_t) noexcept { std::free(p); }
+#endif
 
 namespace {
 
 namespace asil = ::subspace::asil;
+using ::testing::AnyOf;
 using ::testing::HasSubstr;
 
 constexpr char kConfig[] = R"pb(
@@ -77,6 +138,9 @@ constexpr char kConfig[] = R"pb(
   channels { name: "/asil/rel_late" slot_size: 64 num_slots: 4 }
   channels { name: "/asil/multi" slot_size: 64 num_slots: 8 }
   channels { name: "/asil/no_alloc" slot_size: 64 num_slots: 4 }
+  channels { name: "/asil/steady" slot_size: 64 num_slots: 16 }
+  channels { name: "/asil/steady_rel" slot_size: 64 num_slots: 8 }
+  channels { name: "/asil/steady_meta" slot_size: 64 num_slots: 8 metadata_size: 16 }
   channels { name: "/asil/oversize" slot_size: 64 num_slots: 4 }
   channels { name: "/asil/early_sub" slot_size: 64 num_slots: 4 }
   channels {
@@ -275,6 +339,8 @@ public:
   static void SetUpTestSuite() { server_.Start(kConfig); }
   static void TearDownTestSuite() { server_.Stop(); }
   void SetUp() override { Connect(server_.Socket()); }
+
+  static const std::string &Socket() { return server_.Socket(); }
 
 private:
   inline static TestServer server_;
@@ -746,28 +812,206 @@ TEST_F(AsilClientTest, CloseRemovesFromServer) {
 TEST_F(AsilClientTest, HandshakeMakesNoHeapAllocations) {
   asil::Publisher pub;
   asil::Subscriber sub;
-  allocations = 0;
-  counting_allocations = true;
+  StartCounting();
   int *volatile counted = new int(1);
-  counting_allocations = false;
+  const int sanity_allocations = StopCounting();
   delete counted;
-  ASSERT_EQ(1, allocations);
+  ASSERT_EQ(1, sanity_allocations);
 
-  allocations = 0;
-  counting_allocations = true;
+  StartCounting();
   const asil::Error pub_error =
       Asil().CreatePublisher("/asil/no_alloc", StaticPubOptions(), pub);
   const asil::Error sub_error =
       Asil().CreateSubscriber("/asil/no_alloc", {}, sub);
   const asil::Error pub_close = pub.Close();
   const asil::Error sub_close = sub.Close();
-  counting_allocations = false;
+  const int handshake_allocations = StopCounting();
 
   EXPECT_EQ(asil::Error::kOk, pub_error);
   EXPECT_EQ(asil::Error::kOk, sub_error);
   EXPECT_EQ(asil::Error::kOk, pub_close);
   EXPECT_EQ(asil::Error::kOk, sub_close);
-  EXPECT_EQ(0, allocations);
+  EXPECT_EQ(0, handshake_allocations);
+}
+
+// Not even initialization allocates, so a client can be set up with the heap
+// already closed.  The fixture's own clients have initialized, so this uses
+// new ones, whose first messages are the first of their kind on the thread.
+TEST_F(AsilClientTest, InitializationMakesNoHeapAllocations) {
+  auto connection = std::make_unique<asil::PhaserServerConnection>();
+  auto client = std::make_unique<asil::Client>();
+  StartCounting();
+  const asil::Error connected = connection->Connect(Socket().c_str());
+  const asil::Error initialized = client->Init(*connection, "no_alloc_init");
+  const int init_allocations = StopCounting();
+  EXPECT_EQ(asil::Error::kOk, connected);
+  EXPECT_EQ(asil::Error::kOk, initialized);
+  EXPECT_EQ(0, init_allocations);
+}
+
+// Everything after the handshakes: publishing, reading, waiting, and fetching
+// new trigger fds when the other side of a channel changes.
+TEST_F(AsilClientTest, SteadyStateMakesNoHeapAllocations) {
+  asil::Publisher pub;
+  asil::Subscriber sub;
+  asil::PublisherOptions pub_options = StaticPubOptions();
+  pub_options.checksum = true;
+  asil::SubscriberOptions sub_options;
+  sub_options.checksum = true;
+  sub_options.max_active_messages = 4;
+  ASSERT_EQ(asil::Error::kOk,
+            Asil().CreatePublisher("/asil/steady", pub_options, pub));
+  ASSERT_EQ(asil::Error::kOk,
+            Asil().CreateSubscriber("/asil/steady", sub_options, sub));
+
+  asil::Publisher rel_pub;
+  asil::Subscriber rel_sub;
+  asil::PublisherOptions rel_pub_options = StaticPubOptions();
+  rel_pub_options.reliable = true;
+  ASSERT_EQ(asil::Error::kOk,
+            Asil().CreatePublisher("/asil/steady_rel", rel_pub_options,
+                                   rel_pub));
+  asil::SubscriberOptions rel_options;
+  rel_options.reliable = true;
+  ASSERT_EQ(asil::Error::kOk,
+            Asil().CreateSubscriber("/asil/steady_rel", rel_options, rel_sub));
+
+  // These grow the channels, and so need the server, but not the ASIL client.
+  absl::StatusOr<subspace::Subscriber> std_sub =
+      Std().CreateSubscriber("/asil/steady");
+  ASSERT_OK(std_sub);
+
+  StartCounting();
+  asil::Message msg;
+  asil::Error last = asil::Error::kOk;
+  for (int i = 0; i < 20; i++) {
+    void *buffer = pub.Buffer();
+    if (buffer == nullptr) {
+      last = asil::Error::kNoSlot;
+      break;
+    }
+    memcpy(buffer, "steady", 6);
+    last = pub.Publish(6);
+    if (last != asil::Error::kOk) {
+      break;
+    }
+    last = sub.Wait(0);
+    if (last != asil::Error::kOk) {
+      break;
+    }
+    last = sub.ReadMessage(msg);
+    if (last != asil::Error::kOk) {
+      break;
+    }
+    sub.ReleaseMessage(msg);
+    last = sub.ReadMessage(msg, asil::ReadMode::kReadNewest);
+    if (last != asil::Error::kOk) {
+      break;
+    }
+    sub.ReleaseMessage();
+
+    void *rel_buffer = rel_pub.Buffer();
+    if (rel_buffer != nullptr) {
+      memcpy(rel_buffer, "rel", 3);
+      last = rel_pub.Publish(3);
+      if (last != asil::Error::kOk) {
+        break;
+      }
+    }
+    last = rel_sub.ReadMessage(msg);
+    if (last != asil::Error::kOk) {
+      break;
+    }
+    rel_sub.ReleaseMessage();
+  }
+  (void)rel_pub.Wait(0);
+  const int steady_allocations = StopCounting();
+  EXPECT_EQ(asil::Error::kOk, last);
+  EXPECT_EQ(0, steady_allocations) << "publish and read";
+
+  // A subscriber joining makes the publisher fetch the subscriber triggers.
+  absl::StatusOr<subspace::Subscriber> joined =
+      Std().CreateSubscriber("/asil/steady");
+  ASSERT_OK(joined);
+  StartCounting();
+  void *buffer = pub.Buffer();
+  ASSERT_NE(nullptr, buffer);
+  memcpy(buffer, "joined", 6);
+  last = pub.Publish(6);
+  const int publisher_refresh_allocations = StopCounting();
+  EXPECT_EQ(asil::Error::kOk, last);
+  EXPECT_EQ(0, publisher_refresh_allocations) << "publisher refresh";
+
+  // A publisher joining makes the subscriber fetch the publisher triggers.
+  absl::StatusOr<subspace::Publisher> std_pub =
+      Std().CreatePublisher("/asil/steady", ServerDefined());
+  ASSERT_OK(std_pub);
+  StartCounting();
+  last = sub.ReadMessage(msg);
+  const int subscriber_refresh_allocations = StopCounting();
+  EXPECT_EQ(asil::Error::kOk, last);
+  EXPECT_EQ(0, subscriber_refresh_allocations) << "subscriber refresh";
+
+  StartCounting();
+  sub.ReleaseMessage();
+  const asil::Error pub_close = pub.Close();
+  const asil::Error sub_close = sub.Close();
+  const asil::Error rel_pub_close = rel_pub.Close();
+  const asil::Error rel_sub_close = rel_sub.Close();
+  const int close_allocations = StopCounting();
+  EXPECT_EQ(asil::Error::kOk, pub_close);
+  EXPECT_EQ(asil::Error::kOk, sub_close);
+  EXPECT_EQ(asil::Error::kOk, rel_pub_close);
+  EXPECT_EQ(asil::Error::kOk, rel_sub_close);
+  EXPECT_EQ(0, close_allocations) << "close";
+}
+
+// Failures must not allocate either.
+TEST_F(AsilClientTest, ErrorsMakeNoHeapAllocations) {
+  asil::Publisher pub;
+  asil::Subscriber sub;
+  const std::string huge(asil::PhaserServerConnection::kWireBufferSize, 'x');
+  const std::string long_name(300, 'x');
+  asil::TriggersReply reply;
+  asil::TriggerFdList triggers;
+  reply.subscriber_triggers = &triggers;
+
+  // Each failure is counted on its own so that a failure names its cause.
+  StartCounting();
+  const asil::Error rejected_pub =
+      Asil().CreatePublisher("/asil/reject", AsilPubOptions(64, 4), pub);
+  EXPECT_EQ(0, StopCounting()) << "layout rejected by server";
+  StartCounting();
+  const asil::Error unknown_pub =
+      Asil().CreatePublisher("/asil/unknown", StaticPubOptions(), pub);
+  EXPECT_EQ(0, StopCounting()) << "unknown publisher channel";
+  StartCounting();
+  const asil::Error unknown_sub =
+      Asil().CreateSubscriber("/asil/unknown", {}, sub);
+  EXPECT_EQ(0, StopCounting()) << "unknown subscriber channel";
+  StartCounting();
+  const asil::Error long_pub =
+      Asil().CreatePublisher(long_name.c_str(), StaticPubOptions(), pub);
+  EXPECT_EQ(0, StopCounting()) << "channel name too long";
+  StartCounting();
+  const asil::Error oversized = Connection().GetTriggers(huge.c_str(), reply);
+  EXPECT_EQ(0, StopCounting()) << "request too large for the wire buffer";
+
+  EXPECT_EQ(asil::Error::kServerRejected, rejected_pub);
+  EXPECT_EQ(asil::Error::kServerRejected, unknown_pub);
+  EXPECT_EQ(asil::Error::kServerRejected, unknown_sub);
+  EXPECT_EQ(asil::Error::kCapacityExceeded, long_pub);
+  EXPECT_EQ(asil::Error::kCapacityExceeded, oversized);
+
+  ASSERT_EQ(asil::Error::kOk,
+            Asil().CreatePublisher("/asil/steady_meta", StaticPubOptions(), pub));
+  StartCounting();
+  const asil::Error too_large = pub.Publish(1000);
+  const asil::Error empty = pub.Publish(0);
+  const int publish_allocations = StopCounting();
+  EXPECT_EQ(asil::Error::kMessageTooLarge, too_large);
+  EXPECT_EQ(asil::Error::kInvalidArgument, empty);
+  EXPECT_EQ(0, publish_allocations);
 }
 
 TEST_F(AsilClientTest, OversizedRequestKeepsTheConnection) {
@@ -775,12 +1019,188 @@ TEST_F(AsilClientTest, OversizedRequestKeepsTheConnection) {
   asil::TriggersReply reply;
   EXPECT_EQ(asil::Error::kCapacityExceeded,
             Connection().GetTriggers(huge.c_str(), reply));
+  EXPECT_THAT(Connection().LastServerError(), HasSubstr("too large"));
   EXPECT_TRUE(Connection().Connected());
 
   asil::TriggerFdList subscribers;
   reply.subscriber_triggers = &subscribers;
   EXPECT_EQ(asil::Error::kOk,
             Connection().GetTriggers("/asil/oversize", reply));
+}
+
+// Reads exactly length bytes, or returns false.
+bool ReadFull(int fd, char *data, size_t length) {
+  while (length > 0) {
+    const ssize_t n = ::recv(fd, data, length, 0);
+    if (n < 0 && errno == EINTR) {
+      continue;
+    }
+    if (n <= 0) {
+      return false;
+    }
+    data += n;
+    length -= static_cast<size_t>(n);
+  }
+  return true;
+}
+
+bool WriteFull(int fd, const char *data, size_t length) {
+  while (length > 0) {
+    const ssize_t n = ::send(fd, data, length, 0);
+    if (n < 0 && errno == EINTR) {
+      continue;
+    }
+    if (n <= 0) {
+      return false;
+    }
+    data += n;
+    length -= static_cast<size_t>(n);
+  }
+  return true;
+}
+
+// A response that fits the wire buffer but not the message it is cloned
+// into, and a response the wire buffer itself cannot hold. Both name the
+// cause, and neither allocates.
+TEST_F(AsilClientTest, OversizedResponseMakesNoHeapAllocations) {
+  StartCounting();
+  const absl::Status full = ::phaser::internal::AllocationFailedError();
+  const absl::Status too_small = ::phaser::internal::BufferTooSmallError();
+  const int status_allocations = StopCounting();
+  EXPECT_EQ(0, status_allocations);
+  EXPECT_EQ("phaser: payload buffer is full", std::string(full.message()));
+  EXPECT_EQ("phaser: buffer is too small", std::string(too_small.message()));
+
+  ::subspace::phaser::Response source =
+      ::subspace::phaser::Response::CreateDynamicMutable(
+          8192, ::phaser::Tuning::kSize);
+  source.mutable_get_triggers()->set_error(std::string(4000, 'e'));
+  ASSERT_FALSE(source.AllocationFailed());
+
+  ::subspace::ServerWire<::subspace::FixedServerWireBuffers<1024, 64 * 1024>>
+      small;
+  absl::StatusOr<::subspace::phaser::Response> decoded = small.NewResponse();
+  ASSERT_TRUE(decoded.ok()) << decoded.status();
+  StartCounting();
+  const absl::Status decoded_status = decltype(small)::Decode(
+      static_cast<const char *>(source.Data()), source.ByteSizeLong(),
+      *decoded);
+  const int decode_allocations = StopCounting();
+  EXPECT_FALSE(decoded_status.ok());
+  EXPECT_EQ(absl::StatusCode::kResourceExhausted, decoded_status.code());
+  EXPECT_THAT(std::string(decoded_status.message()),
+              AnyOf(HasSubstr("too large"), HasSubstr("buffer is full")));
+  EXPECT_EQ(0, decode_allocations) << decoded_status;
+
+  ::subspace::phaser::Response ok_response =
+      ::subspace::phaser::Response::CreateDynamicMutable(
+          1024, ::phaser::Tuning::kSize);
+  ok_response.mutable_get_triggers()->set_error("");
+  ASSERT_FALSE(ok_response.AllocationFailed());
+  const std::string ok_bytes(static_cast<const char *>(ok_response.Data()),
+                             ok_response.ByteSizeLong());
+
+#if defined(__ANDROID__)
+  char socket_name[] = "/data/local/tmp/asilrespXXXXXX";
+#else
+  char socket_name[] = "/tmp/asilrespXXXXXX";
+#endif
+  ::close(::mkstemp(socket_name));
+  (void)::unlink(socket_name);
+
+  const int listen_fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+  ASSERT_GE(listen_fd, 0);
+  struct sockaddr_un addr;
+  std::memset(&addr, 0, sizeof(addr));
+  addr.sun_family = AF_UNIX;
+  std::memcpy(addr.sun_path, socket_name, sizeof(socket_name));
+  ASSERT_EQ(0, ::bind(listen_fd, reinterpret_cast<struct sockaddr *>(&addr),
+                      sizeof(addr)));
+  ASSERT_EQ(0, ::listen(listen_fd, 1));
+
+  std::thread server([listen_fd, ok_bytes] {
+    const int client = ::accept(listen_fd, nullptr, nullptr);
+    if (client < 0) {
+      return;
+    }
+#if defined(SO_NOSIGPIPE)
+    const int on = 1;
+    (void)::setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+#endif
+    for (int n = 0; n < 2; n++) {
+      uint32_t network_length = 0;
+      if (!ReadFull(client, reinterpret_cast<char *>(&network_length),
+                    sizeof(network_length))) {
+        break;
+      }
+      std::string request(ntohl(network_length), '\0');
+      if (!request.empty() &&
+          !ReadFull(client, request.data(), request.size())) {
+        break;
+      }
+      if (n == 0) {
+        const uint32_t length =
+            asil::PhaserServerConnection::kWireBufferSize + 8;
+        const uint32_t network = htonl(length);
+        char zeros[4096] = {};
+        if (!WriteFull(client, reinterpret_cast<const char *>(&network),
+                       sizeof(network))) {
+          break;
+        }
+        for (uint32_t left = length; left > 0;) {
+          const uint32_t chunk = left < sizeof(zeros) ? left : sizeof(zeros);
+          if (!WriteFull(client, zeros, chunk)) {
+            ::close(client);
+            return;
+          }
+          left -= chunk;
+        }
+      } else {
+        const uint32_t network = htonl(static_cast<uint32_t>(ok_bytes.size()));
+        if (!WriteFull(client, reinterpret_cast<const char *>(&network),
+                       sizeof(network)) ||
+            !WriteFull(client, ok_bytes.data(), ok_bytes.size())) {
+          ::close(client);
+          return;
+        }
+      }
+      const int32_t no_fds = 0;
+      if (!WriteFull(client, reinterpret_cast<const char *>(&no_fds),
+                     sizeof(no_fds))) {
+        break;
+      }
+    }
+    ::close(client);
+  });
+
+  asil::PhaserServerConnection connection;
+  const asil::Error connected = connection.Connect(socket_name);
+  if (connected != asil::Error::kOk) {
+    ::close(listen_fd);
+    server.join();
+    (void)::unlink(socket_name);
+    FAIL() << "connect";
+    return;
+  }
+
+  asil::TriggersReply reply;
+  StartCounting();
+  const asil::Error oversized = connection.GetTriggers("/asil/resp", reply);
+  const int response_allocations = StopCounting();
+  EXPECT_EQ(asil::Error::kCapacityExceeded, oversized);
+  EXPECT_THAT(connection.LastServerError(),
+              HasSubstr("response does not fit the wire buffer"));
+  EXPECT_EQ(0, response_allocations);
+  EXPECT_TRUE(connection.Connected());
+
+  EXPECT_EQ(asil::Error::kOk, connection.GetTriggers("/asil/resp", reply));
+  EXPECT_TRUE(connection.Connected());
+  EXPECT_THAT(connection.LastServerError(),
+              HasSubstr("response does not fit the wire buffer"));
+
+  server.join();
+  ::close(listen_fd);
+  (void)::unlink(socket_name);
 }
 
 // Publishes "<prefix><n>" for n from first until the reliable publisher has

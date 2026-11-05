@@ -38,8 +38,8 @@ cc_library(
         "syscall_shim.cc",
     ],
     hdrs = [
-        "atomic_bitset.h",
         "channel.h",
+        "dynamic_bitset.h",
         "client_buffer.h",
         "fast_ring_buffer.h",
         "split_buffer.h",
@@ -59,6 +59,8 @@ cc_library(
         ":max_channels_setting",
         ":max_buffers_setting",
         ":max_slot_owners_setting",
+        ":shm_layout",
+        ":shm_protocol",
         "//proto:subspace_cc_proto",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/status",
@@ -71,8 +73,52 @@ cc_library(
     ],
 )
 
-# Server requests and responses as Phaser messages in protobuf wire format,
-# shared by the standard and ASIL clients.
+# Shared-memory protocol types. Header only, and free of Abseil, so the ASIL
+# client can include it.
+cc_library(
+    name = "shm_layout",
+    hdrs = [
+        "atomic_bitset.h",
+        "shm_layout.h",
+    ],
+    deps = [
+        ":max_buffers_setting",
+        ":max_channels_setting",
+        ":max_slot_owners_setting",
+    ],
+)
+
+# The slot, checksum and publish operations on a mapped channel, shared by the
+# standard and ASIL clients.  Header only and free of Abseil.
+cc_library(
+    name = "shm_protocol",
+    hdrs = [
+        "bitset_view.h",
+        "channel_view.h",
+        "message_checksum.h",
+        "publish.h",
+        "slot_search.h",
+        "subscribe.h",
+    ],
+    deps = [
+        ":crc32",
+        ":shm_layout",
+    ],
+)
+
+# Message checksum. No Abseil, so the ASIL client links the same function as
+# the regular client.
+cc_library(
+    name = "crc32",
+    srcs = [
+        "arm_crc32.S",
+        "crc32.cc",
+    ],
+    hdrs = ["crc32.h"],
+)
+
+# Server requests and responses as native Phaser payloads, shared by the
+# standard and ASIL clients.
 cc_library(
     name = "server_wire",
     hdrs = ["server_wire.h"],

@@ -13,18 +13,19 @@
 namespace subspace {
 namespace asil {
 
-// The standard Subspace protocol: protobuf requests and responses over the
-// server's Unix socket, with file descriptors passed as SCM_RIGHTS.  Requests
-// and responses are Phaser messages held in a ServerWire with fixed buffers
-// inside this object, the same encoding as the standard client uses, so the
-// handshake makes no heap allocations.  A request or response that does not
-// fit fails with kCapacityExceeded.
+// The standard Subspace protocol: native Phaser requests and responses over
+// the server's Unix socket, with file descriptors passed as SCM_RIGHTS.
+// Requests and responses are Phaser messages held in a ServerWire with fixed
+// buffers inside this object, the same encoding as the standard client uses,
+// so a handshake makes no heap allocations, even when it fails.  A request or
+// response that does not fit fails with kCapacityExceeded, and
+// LastServerError() says which buffer it did not fit.
 //
 // The object holds about 60 KB of buffers, so keep it in static storage or
 // inside a long-lived object rather than on a small stack.
 class PhaserServerConnection : public ServerConnection {
 public:
-  // Protobuf wire bytes for one request or response.
+  // Native Phaser payload bytes for one request or response.
   static constexpr size_t kWireBufferSize = 16 * 1024;
   // The decoded request or response.
   static constexpr size_t kMessageBufferSize = 32 * 1024;
@@ -67,6 +68,12 @@ private:
   Error SendFd(int fd);
   Error Receive(const char *&data, size_t &length);
   Error ReceiveFds();
+  void SetLastError(const char *message, size_t length);
+  void Remember(const char *message, size_t length) {
+    if (message != nullptr && length != 0) {
+      SetLastError(message, length);
+    }
+  }
   Error Rejected(const char *message, size_t length);
 
   UniqueFd socket_;

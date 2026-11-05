@@ -165,7 +165,8 @@ public:
   // reply.found false when it hasn't been registered yet.
   virtual Error GetBuffer(const BufferRequest &request, BufferReply &reply) = 0;
 
-  // The server's message for the last request that returned kServerRejected.
+  // Detail for the last handshake failure that had one: the server's reason
+  // for kServerRejected, or which buffer was too small for kCapacityExceeded.
   virtual const char *LastServerError() const = 0;
 };
 

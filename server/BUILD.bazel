@@ -31,6 +31,7 @@ cc_library(
     ],
     deps = [
         ":tunnel_wire",
+        "//common:server_wire",
         "//common:subspace_common",
         "//common/async:async",
         "//client:subspace_client",
@@ -201,6 +202,7 @@ cc_test(
         ":server",
         "//client:subspace_client",
         "//client:test_fixture",
+        "//common:server_wire",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:status_matchers",
         "@abseil-cpp//absl/status:statusor",
@@ -254,6 +256,7 @@ cc_test(
         ":server",
         "//client:subspace_client",
         "//client:test_fixture",
+        "//common:server_wire",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:status_matchers",
         "@googletest//:gtest",

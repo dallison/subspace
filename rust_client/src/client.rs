@@ -1166,40 +1166,38 @@ impl Client {
         let socket = SocketConnection::connect(server_socket)?;
 
         // Send Init request.
-        let req = proto::Request {
-            request: Some(proto::request::Request::Init(proto::InitRequest {
-                client_name: client_name.to_string(),
-                max_channels: MAX_CHANNELS as i32,
-                max_slot_owners: MAX_SLOT_OWNERS as i32,
-                max_buffers: MAX_BUFFERS as i32,
-            })),
-        };
+        let mut req = phaser_request();
+        {
+            let mut init = req.mutable_init();
+            init.set_client_name(client_name);
+            init.set_max_channels(MAX_CHANNELS as i32);
+            init.set_max_slot_owners(MAX_SLOT_OWNERS as i32);
+            init.set_max_buffers(MAX_BUFFERS as i32);
+        }
         socket.send_request(&req)?;
         let (resp, fds) = socket.receive_response()?;
 
-        let init = match resp.response {
-            Some(proto::response::Response::Init(init)) => init,
-            _ => {
-                return Err(SubspaceError::Internal(
-                    "Unexpected response to Init".into(),
-                ))
-            }
-        };
+        if resp.response_case() != RESP_INIT {
+            return Err(SubspaceError::Internal(
+                "Unexpected response to Init".into(),
+            ));
+        }
+        let init = resp.init();
 
-        if !init.error.is_empty() {
-            return Err(SubspaceError::Internal(init.error));
+        if !init.error().is_empty() {
+            return Err(SubspaceError::Internal(init.error()));
         }
 
-        let scb_fd = fds[init.scb_fd_index as usize];
+        let scb_fd = fds[init.scb_fd_index() as usize];
 
         Ok(Self {
             inner: Arc::new(Mutex::new(ClientInner {
                 socket,
                 name: client_name.to_string(),
-                session_id: init.session_id as u64,
+                session_id: init.session_id() as u64,
                 scb_fd,
-                server_user_id: init.user_id,
-                server_group_id: init.group_id,
+                server_user_id: init.user_id(),
+                server_group_id: init.group_id(),
                 debug: false,
             })),
         })
@@ -1255,73 +1253,69 @@ impl Client {
 
         let slot_size = aligned64(opts.slot_size as i64);
 
-        let req = proto::Request {
-            request: Some(proto::request::Request::CreatePublisher(
-                proto::CreatePublisherRequest {
-                    channel_name: channel_name.to_string(),
-                    slot_size,
-                    num_slots: opts.num_slots,
-                    is_local: opts.local,
-                    is_reliable: opts.reliable,
-                    is_bridge: opts.bridge,
-                    is_fixed_size: opts.fixed_size,
-                    for_tunnel: opts.for_tunnel,
-                    r#type: opts.channel_type.as_bytes().to_vec(),
-                    mux: opts.mux.clone(),
-                    vchan_id: opts.vchan_id,
-                    notify_retirement: opts.notify_retirement,
-                    checksum_size: opts.checksum_size,
-                    metadata_size: opts.metadata_size,
-                    use_split_buffers: opts.use_split_buffers,
-                    split_buffers_over_bridge: opts.split_buffers_over_bridge,
-                    subscriber_queue_arena_size: opts.subscriber_queue_arena_size,
-                    max_publishers: 0,
-                    publisher_id: -1,
-                    process_id: std::process::id() as u64,
-                    max_outstanding_slot_leases: opts.max_outstanding_slot_leases,
-                    active_queue_publish_depth: 0,
-                    // Align the cap the same way as the slot size so that a
-                    // publisher asking for slot_size == max_slot_size isn't
-                    // rejected by its own limit.
-                    max_slot_size: if opts.max_slot_size > 0 {
-                        aligned64(opts.max_slot_size)
-                    } else {
-                        0
-                    },
-                    server_defined: opts.server_defined,
-                },
-            )),
-        };
+        let mut req = phaser_request();
+        {
+            let mut create = req.mutable_create_publisher();
+            create.set_channel_name(channel_name);
+            create.set_slot_size(slot_size);
+            create.set_num_slots(opts.num_slots);
+            create.set_is_local(opts.local);
+            create.set_is_reliable(opts.reliable);
+            create.set_is_bridge(opts.bridge);
+            create.set_is_fixed_size(opts.fixed_size);
+            create.set_for_tunnel(opts.for_tunnel);
+            create.set_type(opts.channel_type.as_bytes());
+            create.set_mux(&opts.mux);
+            create.set_vchan_id(opts.vchan_id);
+            create.set_notify_retirement(opts.notify_retirement);
+            create.set_checksum_size(opts.checksum_size);
+            create.set_metadata_size(opts.metadata_size);
+            create.set_use_split_buffers(opts.use_split_buffers);
+            create.set_split_buffers_over_bridge(opts.split_buffers_over_bridge);
+            create.set_subscriber_queue_arena_size(opts.subscriber_queue_arena_size);
+            create.set_max_publishers(0);
+            create.set_publisher_id(-1);
+            create.set_process_id(std::process::id() as u64);
+            create.set_max_outstanding_slot_leases(opts.max_outstanding_slot_leases);
+            create.set_active_queue_publish_depth(0);
+            // Align the cap the same way as the slot size so that a
+            // publisher asking for slot_size == max_slot_size isn't
+            // rejected by its own limit.
+            create.set_max_slot_size(if opts.max_slot_size > 0 {
+                aligned64(opts.max_slot_size)
+            } else {
+                0
+            });
+            create.set_server_defined(opts.server_defined);
+        }
 
         let (resp, fds) = send_request_receive_response(&mut client, &req)?;
 
-        let pub_resp = match resp.response {
-            Some(proto::response::Response::CreatePublisher(r)) => r,
-            _ => {
-                return Err(SubspaceError::Internal(
-                    "Unexpected response to CreatePublisher".into(),
-                ))
-            }
-        };
+        if resp.response_case() != RESP_CREATE_PUBLISHER {
+            return Err(SubspaceError::Internal(
+                "Unexpected response to CreatePublisher".into(),
+            ));
+        }
+        let pub_resp = resp.create_publisher();
 
-        if !pub_resp.error.is_empty() {
-            return Err(SubspaceError::ServerError(pub_resp.error));
+        if !pub_resp.error().is_empty() {
+            return Err(SubspaceError::ServerError(pub_resp.error()));
         }
 
         // A publisher may join an existing channel with fewer slots than it
         // has.  The CCB layout is sized by the channel's slot count, so map
         // with that.  Servers that predate num_slots in the response send zero.
         let mut channel_opts = opts.clone();
-        if pub_resp.num_slots > 0 {
-            channel_opts.num_slots = pub_resp.num_slots;
+        if pub_resp.num_slots() > 0 {
+            channel_opts.num_slots = pub_resp.num_slots();
         }
         if opts.server_defined {
-            channel_opts.slot_size = pub_resp.slot_size;
-            channel_opts.fixed_size = pub_resp.is_fixed_size;
-            channel_opts.checksum_size = pub_resp.checksum_size;
-            channel_opts.metadata_size = pub_resp.metadata_size;
-            channel_opts.subscriber_queue_arena_size = pub_resp.subscriber_queue_arena_size;
-            channel_opts.use_split_buffers = pub_resp.use_split_buffers;
+            channel_opts.slot_size = pub_resp.slot_size();
+            channel_opts.fixed_size = pub_resp.is_fixed_size();
+            channel_opts.checksum_size = pub_resp.checksum_size();
+            channel_opts.metadata_size = pub_resp.metadata_size();
+            channel_opts.subscriber_queue_arena_size = pub_resp.subscriber_queue_arena_size();
+            channel_opts.use_split_buffers = pub_resp.use_split_buffers();
         }
         let slot_size = aligned64(channel_opts.slot_size);
         let use_split_buffers = channel_opts.use_split_buffers;
@@ -1338,13 +1332,13 @@ impl Client {
         let mut pub_impl = PublisherImpl::new(
             channel_name.to_string(),
             channel_opts.num_slots,
-            pub_resp.subscriber_queue_size,
-            pub_resp.subscriber_queue_arena_size,
-            pub_resp.channel_id,
-            pub_resp.publisher_id,
-            pub_resp.vchan_id,
+            pub_resp.subscriber_queue_size(),
+            pub_resp.subscriber_queue_arena_size(),
+            pub_resp.channel_id(),
+            pub_resp.publisher_id(),
+            pub_resp.vchan_id(),
             client.session_id,
-            String::from_utf8_lossy(&pub_resp.r#type).to_string(),
+            String::from_utf8_lossy(&pub_resp.type_()).into_owned(),
             channel_opts,
         );
         pub_impl.channel.use_split_buffers = use_split_buffers;
@@ -1356,23 +1350,25 @@ impl Client {
         let prot = ProtFlags::PROT_READ | ProtFlags::PROT_WRITE;
         pub_impl.channel.map(
             client.scb_fd,
-            fds[pub_resp.ccb_fd_index as usize],
-            fds[pub_resp.bcb_fd_index as usize],
+            fds[pub_resp.ccb_fd_index() as usize],
+            fds[pub_resp.bcb_fd_index() as usize],
             prot,
         )?;
 
         pub_impl.create_or_attach_buffers(slot_size as u64)?;
         register_pending_client_buffers(&mut client, &mut pub_impl.channel)?;
 
-        pub_impl.trigger_fd = fds[pub_resp.pub_trigger_fd_index as usize];
-        pub_impl.poll_fd = fds[pub_resp.pub_poll_fd_index as usize];
+        pub_impl.trigger_fd = fds[pub_resp.pub_trigger_fd_index() as usize];
+        pub_impl.poll_fd = fds[pub_resp.pub_poll_fd_index() as usize];
 
         pub_impl.subscriber_trigger_fds.clear();
-        for &idx in &pub_resp.sub_trigger_fd_indexes {
-            pub_impl.subscriber_trigger_fds.push(fds[idx as usize]);
+        for i in 0..pub_resp.sub_trigger_fd_indexes_size() {
+            pub_impl
+                .subscriber_trigger_fds
+                .push(fds[pub_resp.sub_trigger_fd_indexes(i) as usize]);
         }
 
-        pub_impl.channel.num_updates = pub_resp.num_sub_updates as u16;
+        pub_impl.channel.num_updates = pub_resp.num_sub_updates() as u16;
 
         if !opts.reliable {
             let owner = pub_impl.publisher_id;
@@ -1391,12 +1387,14 @@ impl Client {
             activate_reliable_channel(&mut pub_impl)?;
         }
 
-        if pub_resp.retirement_fd_index != -1 {
-            pub_impl.retirement_fd = fds[pub_resp.retirement_fd_index as usize];
+        if pub_resp.retirement_fd_index() != -1 {
+            pub_impl.retirement_fd = fds[pub_resp.retirement_fd_index() as usize];
         }
         pub_impl.retirement_trigger_fds.clear();
-        for &idx in &pub_resp.retirement_fd_indexes {
-            pub_impl.retirement_trigger_fds.push(fds[idx as usize]);
+        for i in 0..pub_resp.retirement_fd_indexes_size() {
+            pub_impl
+                .retirement_trigger_fds
+                .push(fds[pub_resp.retirement_fd_indexes(i) as usize]);
         }
 
         pub_impl.trigger_subscribers();
@@ -1434,61 +1432,57 @@ impl Client {
             )));
         }
 
-        let req = proto::Request {
-            request: Some(proto::request::Request::CreateSubscriber(
-                proto::CreateSubscriberRequest {
-                    channel_name: channel_name.to_string(),
-                    subscriber_id: -1,
-                    is_reliable: opts.reliable,
-                    is_bridge: opts.bridge,
-                    for_tunnel: opts.for_tunnel,
-                    telemetry: opts.telemetry,
-                    r#type: opts.channel_type.as_bytes().to_vec(),
-                    max_active_messages: opts.max_active_messages,
-                    mux: opts.mux.clone(),
-                    vchan_id: opts.vchan_id,
-                    subscriber_queue_size: opts.subscriber_queue_size,
-                    process_id: std::process::id() as u64,
-                    max_subscribers: opts.max_subscribers,
-                    is_local: opts.local,
-                },
-            )),
-        };
+        let mut req = phaser_request();
+        {
+            let mut create = req.mutable_create_subscriber();
+            create.set_channel_name(channel_name);
+            create.set_subscriber_id(-1);
+            create.set_is_reliable(opts.reliable);
+            create.set_is_bridge(opts.bridge);
+            create.set_for_tunnel(opts.for_tunnel);
+            create.set_telemetry(opts.telemetry);
+            create.set_type(opts.channel_type.as_bytes());
+            create.set_max_active_messages(opts.max_active_messages);
+            create.set_mux(&opts.mux);
+            create.set_vchan_id(opts.vchan_id);
+            create.set_subscriber_queue_size(opts.subscriber_queue_size);
+            create.set_process_id(std::process::id() as u64);
+            create.set_max_subscribers(opts.max_subscribers);
+            create.set_is_local(opts.local);
+        }
 
         let (resp, fds) = send_request_receive_response(&mut client, &req)?;
 
-        let sub_resp = match resp.response {
-            Some(proto::response::Response::CreateSubscriber(r)) => r,
-            _ => {
-                return Err(SubspaceError::Internal(
-                    "Unexpected response to CreateSubscriber".into(),
-                ))
-            }
-        };
+        if resp.response_case() != RESP_CREATE_SUBSCRIBER {
+            return Err(SubspaceError::Internal(
+                "Unexpected response to CreateSubscriber".into(),
+            ));
+        }
+        let sub_resp = resp.create_subscriber();
 
-        if !sub_resp.error.is_empty() {
-            return Err(SubspaceError::ServerError(sub_resp.error));
+        if !sub_resp.error().is_empty() {
+            return Err(SubspaceError::ServerError(sub_resp.error()));
         }
 
         let request_name = channel_name.to_string();
         let channel_name =
-            resolved_subscriber_channel_name(&request_name, &sub_resp.resolved_channel_name);
+            resolved_subscriber_channel_name(&request_name, &sub_resp.resolved_channel_name());
 
         let mut sub_impl = SubscriberImpl::new(
             request_name,
             channel_name,
-            sub_resp.num_slots,
-            sub_resp.default_subscriber_queue_size,
-            sub_resp.subscriber_queue_arena_size,
-            sub_resp.subscriber_queue_size,
-            sub_resp.channel_id,
-            sub_resp.subscriber_id,
-            sub_resp.vchan_id,
+            sub_resp.num_slots(),
+            sub_resp.default_subscriber_queue_size(),
+            sub_resp.subscriber_queue_arena_size(),
+            sub_resp.subscriber_queue_size(),
+            sub_resp.channel_id(),
+            sub_resp.subscriber_id(),
+            sub_resp.vchan_id(),
             client.session_id,
-            String::from_utf8_lossy(&sub_resp.r#type).to_string(),
+            String::from_utf8_lossy(&sub_resp.type_()).to_string(),
             opts.clone(),
         );
-        sub_impl.channel.use_split_buffers = sub_resp.use_split_buffers;
+        sub_impl.channel.use_split_buffers = sub_resp.use_split_buffers();
         sub_impl.channel.split_buffer_callbacks = opts.split_buffer_callbacks.clone();
 
         let prot = if opts.bridge || opts.read_write {
@@ -1497,24 +1491,24 @@ impl Client {
             ProtFlags::PROT_READ | ProtFlags::PROT_WRITE // CCB needs write for atomic ops
         };
 
-        sub_impl.channel.num_slots = sub_resp.num_slots;
-        sub_impl.channel.subscriber_queue_size = sub_resp.default_subscriber_queue_size;
+        sub_impl.channel.num_slots = sub_resp.num_slots();
+        sub_impl.channel.subscriber_queue_size = sub_resp.default_subscriber_queue_size();
         sub_impl.channel.subscriber_queue_arena_size =
-            sub_resp.subscriber_queue_arena_size;
-        sub_impl.subscriber_queue_size = sub_resp.subscriber_queue_size;
+            sub_resp.subscriber_queue_arena_size();
+        sub_impl.subscriber_queue_size = sub_resp.subscriber_queue_size();
         sub_impl
             .channel
             .embargoed_slots
-            .resize(sub_resp.num_slots as usize);
+            .resize(sub_resp.num_slots() as usize);
 
         {
-            let cs = if sub_resp.checksum_size > 0 {
-                sub_resp.checksum_size
+            let cs = if sub_resp.checksum_size() > 0 {
+                sub_resp.checksum_size()
             } else {
                 4
             };
-            let ms = if sub_resp.metadata_size > 0 {
-                sub_resp.metadata_size
+            let ms = if sub_resp.metadata_size() > 0 {
+                sub_resp.metadata_size()
             } else {
                 0
             };
@@ -1526,31 +1520,33 @@ impl Client {
 
         sub_impl.channel.map(
             client.scb_fd,
-            fds[sub_resp.ccb_fd_index as usize],
-            fds[sub_resp.bcb_fd_index as usize],
+            fds[sub_resp.ccb_fd_index() as usize],
+            fds[sub_resp.bcb_fd_index() as usize],
             prot,
         )?;
 
         sub_impl.attach_buffers()?;
         sub_impl.remember_published_ordinals();
 
-        sub_impl.trigger_fd = fds[sub_resp.trigger_fd_index as usize];
-        sub_impl.poll_fd = fds[sub_resp.poll_fd_index as usize];
+        sub_impl.trigger_fd = fds[sub_resp.trigger_fd_index() as usize];
+        sub_impl.poll_fd = fds[sub_resp.poll_fd_index() as usize];
 
         {
             let mut pub_fds = sub_impl.reliable_publisher_fds.lock().unwrap();
             pub_fds.clear();
-            for &idx in &sub_resp.reliable_pub_trigger_fd_indexes {
-                pub_fds.push(fds[idx as usize]);
+            for i in 0..sub_resp.reliable_pub_trigger_fd_indexes_size() {
+                pub_fds.push(fds[sub_resp.reliable_pub_trigger_fd_indexes(i) as usize]);
             }
         }
 
         sub_impl.retirement_trigger_fds.clear();
-        for &idx in &sub_resp.retirement_fd_indexes {
-            sub_impl.retirement_trigger_fds.push(fds[idx as usize]);
+        for i in 0..sub_resp.retirement_fd_indexes_size() {
+            sub_impl
+                .retirement_trigger_fds
+                .push(fds[sub_resp.retirement_fd_indexes(i) as usize]);
         }
 
-        sub_impl.channel.num_updates = sub_resp.num_pub_updates as u16;
+        sub_impl.channel.num_updates = sub_resp.num_pub_updates() as u16;
         sub_impl.trigger();
 
         let sub_arc = Arc::new(Mutex::new(sub_impl));
@@ -1568,125 +1564,48 @@ impl Client {
 
     pub fn get_channel_info(&self, channel_name: &str) -> Result<ChannelInfo> {
         let mut client = self.inner.lock().unwrap();
-        let req = proto::Request {
-            request: Some(proto::request::Request::GetChannelInfo(
-                proto::GetChannelInfoRequest {
-                    channel_name: channel_name.to_string(),
-                },
-            )),
-        };
+        let mut req = phaser_request();
+        req.mutable_get_channel_info()
+            .set_channel_name(channel_name);
 
         let (resp, _fds) = send_request_receive_response(&mut client, &req)?;
-        let info_resp = match resp.response {
-            Some(proto::response::Response::GetChannelInfo(r)) => r,
-            _ => {
-                return Err(SubspaceError::Internal(
-                    "Unexpected response to GetChannelInfo".into(),
-                ))
-            }
-        };
-        if !info_resp.error.is_empty() {
-            return Err(SubspaceError::ServerError(info_resp.error));
-        }
-        if info_resp.channels.len() != 1 {
+        let info_resp = expect_channel_info(&resp)?;
+        if info_resp.channels_size() != 1 {
             return Err(SubspaceError::Internal(
                 "Invalid response for GetChannelInfo".into(),
             ));
         }
-        let info = &info_resp.channels[0];
-        Ok(ChannelInfo {
-            channel_name: info.name.clone(),
-            num_publishers: info.num_pubs,
-            num_subscribers: info.num_subs,
-            num_bridge_pubs: info.num_bridge_pubs,
-            num_bridge_subs: info.num_bridge_subs,
-            channel_type: String::from_utf8_lossy(&info.r#type).to_string(),
-            slot_size: info.slot_size as u64,
-            num_slots: info.num_slots,
-            subscriber_queue_size: info.subscriber_queue_size,
-            subscriber_queue_arena_size: info.subscriber_queue_arena_size,
-            reliable: info.is_reliable,
-            is_local: info.is_local,
-        })
+        let info = channel_info_from(&info_resp.channels(0));
+        Ok(info)
     }
 
     pub fn get_all_channel_info(&self) -> Result<Vec<ChannelInfo>> {
         let mut client = self.inner.lock().unwrap();
-        let req = proto::Request {
-            request: Some(proto::request::Request::GetChannelInfo(
-                proto::GetChannelInfoRequest {
-                    channel_name: String::new(),
-                },
-            )),
-        };
+        let mut req = phaser_request();
+        req.mutable_get_channel_info().set_channel_name("");
 
         let (resp, _fds) = send_request_receive_response(&mut client, &req)?;
-        let info_resp = match resp.response {
-            Some(proto::response::Response::GetChannelInfo(r)) => r,
-            _ => {
-                return Err(SubspaceError::Internal(
-                    "Unexpected response to GetChannelInfo".into(),
-                ))
-            }
-        };
-        if !info_resp.error.is_empty() {
-            return Err(SubspaceError::ServerError(info_resp.error));
-        }
-        Ok(info_resp
-            .channels
-            .iter()
-            .map(|info| ChannelInfo {
-                channel_name: info.name.clone(),
-                num_publishers: info.num_pubs,
-                num_subscribers: info.num_subs,
-                num_bridge_pubs: info.num_bridge_pubs,
-                num_bridge_subs: info.num_bridge_subs,
-                channel_type: String::from_utf8_lossy(&info.r#type).to_string(),
-                slot_size: info.slot_size as u64,
-                num_slots: info.num_slots,
-                subscriber_queue_size: info.subscriber_queue_size,
-                subscriber_queue_arena_size: info.subscriber_queue_arena_size,
-                reliable: info.is_reliable,
-                is_local: info.is_local,
-            })
+        let info_resp = expect_channel_info(&resp)?;
+        Ok((0..info_resp.channels_size())
+            .map(|i| channel_info_from(&info_resp.channels(i)))
             .collect())
     }
 
     pub fn get_channel_stats(&self, channel_name: &str) -> Result<ChannelStats> {
         let mut client = self.inner.lock().unwrap();
-        let req = proto::Request {
-            request: Some(proto::request::Request::GetChannelStats(
-                proto::GetChannelStatsRequest {
-                    channel_name: channel_name.to_string(),
-                },
-            )),
-        };
+        let mut req = phaser_request();
+        req.mutable_get_channel_stats()
+            .set_channel_name(channel_name);
 
         let (resp, _fds) = send_request_receive_response(&mut client, &req)?;
-        let stats_resp = match resp.response {
-            Some(proto::response::Response::GetChannelStats(r)) => r,
-            _ => {
-                return Err(SubspaceError::Internal(
-                    "Unexpected response to GetChannelStats".into(),
-                ))
-            }
-        };
-        if !stats_resp.error.is_empty() {
-            return Err(SubspaceError::ServerError(stats_resp.error));
-        }
-        if stats_resp.channels.len() != 1 {
+        let stats_resp = expect_channel_stats(&resp)?;
+        if stats_resp.channels_size() != 1 {
             return Err(SubspaceError::Internal(
                 "Invalid response for GetChannelStats".into(),
             ));
         }
-        let s = &stats_resp.channels[0];
-        Ok(ChannelStats {
-            channel_name: s.channel_name.clone(),
-            total_bytes: s.total_bytes as u64,
-            total_messages: s.total_messages as u64,
-            max_message_size: s.max_message_size as u64,
-            is_local: s.is_local,
-        })
+        let stats = channel_stats_from(&stats_resp.channels(0));
+        Ok(stats)
     }
 
     pub fn channel_exists(&self, channel_name: &str) -> Result<bool> {
@@ -1699,71 +1618,137 @@ impl Client {
 
     pub fn get_all_channel_stats(&self) -> Result<Vec<ChannelStats>> {
         let mut client = self.inner.lock().unwrap();
-        let req = proto::Request {
-            request: Some(proto::request::Request::GetChannelStats(
-                proto::GetChannelStatsRequest {
-                    channel_name: String::new(),
-                },
-            )),
-        };
+        let mut req = phaser_request();
+        req.mutable_get_channel_stats().set_channel_name("");
 
         let (resp, _fds) = send_request_receive_response(&mut client, &req)?;
-        let stats_resp = match resp.response {
-            Some(proto::response::Response::GetChannelStats(r)) => r,
-            _ => {
-                return Err(SubspaceError::Internal(
-                    "Unexpected response to GetChannelStats".into(),
-                ))
-            }
-        };
-        if !stats_resp.error.is_empty() {
-            return Err(SubspaceError::ServerError(stats_resp.error));
-        }
-        Ok(stats_resp
-            .channels
-            .iter()
-            .map(|s| ChannelStats {
-                channel_name: s.channel_name.clone(),
-                total_bytes: s.total_bytes as u64,
-                total_messages: s.total_messages as u64,
-                max_message_size: s.max_message_size as u64,
-                is_local: s.is_local,
-            })
+        let stats_resp = expect_channel_stats(&resp)?;
+        Ok((0..stats_resp.channels_size())
+            .map(|i| channel_stats_from(&stats_resp.channels(i)))
             .collect())
     }
 }
 
 // ── Internal helper functions ───────────────────────────────────────────────
 
+const RESP_INIT: i32 = 1;
+const RESP_CREATE_PUBLISHER: i32 = 2;
+const RESP_CREATE_SUBSCRIBER: i32 = 3;
+const RESP_GET_TRIGGERS: i32 = 4;
+const RESP_REMOVE_PUBLISHER: i32 = 5;
+const RESP_REMOVE_SUBSCRIBER: i32 = 6;
+const RESP_GET_CHANNEL_INFO: i32 = 7;
+const RESP_GET_CHANNEL_STATS: i32 = 8;
+const RESP_REGISTER_CLIENT_BUFFER: i32 = 10;
+
+fn phaser_request() -> subspace_phaser_c::Request<'static> {
+    subspace_phaser_c::Request::new(8192)
+}
+
+fn channel_info_from(info: &subspace_phaser_c::ChannelInfoProto<'_>) -> ChannelInfo {
+    ChannelInfo {
+        channel_name: info.name(),
+        num_publishers: info.num_pubs(),
+        num_subscribers: info.num_subs(),
+        num_bridge_pubs: info.num_bridge_pubs(),
+        num_bridge_subs: info.num_bridge_subs(),
+        channel_type: String::from_utf8_lossy(&info.type_()).into_owned(),
+        slot_size: info.slot_size() as u64,
+        num_slots: info.num_slots(),
+        subscriber_queue_size: info.subscriber_queue_size(),
+        subscriber_queue_arena_size: info.subscriber_queue_arena_size(),
+        reliable: info.is_reliable(),
+        is_local: info.is_local(),
+    }
+}
+
+fn channel_stats_from(stats: &subspace_phaser_c::ChannelStatsProto<'_>) -> ChannelStats {
+    ChannelStats {
+        channel_name: stats.channel_name(),
+        total_bytes: stats.total_bytes() as u64,
+        total_messages: stats.total_messages() as u64,
+        max_message_size: stats.max_message_size() as u64,
+        is_local: stats.is_local(),
+    }
+}
+
+fn expect_channel_info<'a>(
+    resp: &'a subspace_phaser_c::Response<'static>,
+) -> Result<subspace_phaser_c::GetChannelInfoResponse<'a>> {
+    if resp.response_case() != RESP_GET_CHANNEL_INFO {
+        return Err(SubspaceError::Internal(
+            "Unexpected response to GetChannelInfo".into(),
+        ));
+    }
+    let info = resp.get_channel_info();
+    if !info.error().is_empty() {
+        return Err(SubspaceError::ServerError(info.error()));
+    }
+    Ok(info)
+}
+
+fn expect_channel_stats<'a>(
+    resp: &'a subspace_phaser_c::Response<'static>,
+) -> Result<subspace_phaser_c::GetChannelStatsResponse<'a>> {
+    if resp.response_case() != RESP_GET_CHANNEL_STATS {
+        return Err(SubspaceError::Internal(
+            "Unexpected response to GetChannelStats".into(),
+        ));
+    }
+    let stats = resp.get_channel_stats();
+    if !stats.error().is_empty() {
+        return Err(SubspaceError::ServerError(stats.error()));
+    }
+    Ok(stats)
+}
+
 fn send_request_receive_response(
     client: &mut ClientInner,
-    req: &proto::Request,
-) -> Result<(proto::Response, Vec<RawFd>)> {
+    req: &subspace_phaser_c::Request,
+) -> Result<(subspace_phaser_c::Response<'static>, Vec<RawFd>)> {
     client.socket.send_request(req)?;
     client.socket.receive_response()
+}
+
+fn fill_buffer_metadata(
+    dst: &mut subspace_phaser_c::ClientBufferHandleMetadataProto,
+    src: &proto::ClientBufferHandleMetadataProto,
+) {
+    dst.set_channel_name(&src.channel_name);
+    dst.set_session_id(src.session_id);
+    dst.set_buffer_index(src.buffer_index);
+    dst.set_slot_id(src.slot_id);
+    dst.set_is_prefix(src.is_prefix);
+    dst.set_full_size(src.full_size);
+    dst.set_allocation_size(src.allocation_size);
+    dst.set_handle(src.handle);
+    dst.set_shadow_file(&src.shadow_file);
+    dst.set_object_name(&src.object_name);
+    dst.set_allocator(subspace_phaser_c::ClientBufferAllocator(src.allocator));
+    dst.set_map_offset(src.map_offset);
 }
 
 fn register_pending_client_buffers(client: &mut ClientInner, channel: &mut Channel) -> Result<()> {
     let registrations = std::mem::take(&mut channel.pending_client_buffer_registrations);
     for metadata in registrations {
-        let req = proto::Request {
-            request: Some(proto::request::Request::RegisterClientBuffer(
-                proto::RegisterClientBufferRequest {
-                    metadata: Some(metadata),
-                    has_fd: false,
-                    fd_index: 0,
-                },
-            )),
-        };
+        let mut req = phaser_request();
+        {
+            let mut register = req.mutable_register_client_buffer();
+            {
+                let mut dst = register.mutable_metadata();
+                fill_buffer_metadata(&mut dst, &metadata);
+            }
+            register.set_has_fd(false);
+            register.set_fd_index(0);
+        }
         client.socket.send_request(&req)?;
         let (resp, _fds) = client.socket.receive_response()?;
-        match resp.response {
-            Some(proto::response::Response::RegisterClientBuffer(r)) => {
-                if !r.error.is_empty() {
-                    return Err(SubspaceError::ServerError(r.error));
-                }
-            }
-            _ => return Err(SubspaceError::Internal("Unexpected response".into())),
+        if resp.response_case() != RESP_REGISTER_CLIENT_BUFFER {
+            return Err(SubspaceError::Internal("Unexpected response".into()));
+        }
+        let registered = resp.register_client_buffer();
+        if !registered.error().is_empty() {
+            return Err(SubspaceError::ServerError(registered.error()));
         }
     }
     Ok(())
@@ -1775,15 +1760,13 @@ fn unregister_client_buffer_request(
     session_id: u64,
     buffer_index: u32,
 ) -> Result<()> {
-    let req = proto::Request {
-        request: Some(proto::request::Request::UnregisterClientBuffer(
-            proto::UnregisterClientBufferRequest {
-                channel_name: channel_name.to_string(),
-                session_id,
-                buffer_index,
-            },
-        )),
-    };
+    let mut req = phaser_request();
+    {
+        let mut unregister = req.mutable_unregister_client_buffer();
+        unregister.set_channel_name(channel_name);
+        unregister.set_session_id(session_id);
+        unregister.set_buffer_index(buffer_index);
+    }
     client.socket.send_request(&req)
 }
 
@@ -2001,31 +1984,28 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
     if sub.channel.num_updates == updates {
         return Ok(());
     }
-    let req = proto::Request {
-        request: Some(proto::request::Request::CreateSubscriber(
-            proto::CreateSubscriberRequest {
-                channel_name: sub.request_name.clone(),
-                subscriber_id: sub.subscriber_id,
-                mux: sub.options.mux.clone(),
-                subscriber_queue_size: sub.options.subscriber_queue_size,
-                telemetry: sub.options.telemetry,
-                process_id: std::process::id() as u64,
-                ..Default::default()
-            },
-        )),
-    };
-
-    let (resp, fds) = send_request_receive_response(client, &req)?;
-    let sub_resp = match resp.response {
-        Some(proto::response::Response::CreateSubscriber(r)) => r,
-        _ => return Err(SubspaceError::Internal("Unexpected response".into())),
-    };
-    if !sub_resp.error.is_empty() {
-        return Err(SubspaceError::ServerError(sub_resp.error));
+    let mut req = phaser_request();
+    {
+        let mut create = req.mutable_create_subscriber();
+        create.set_channel_name(&sub.request_name);
+        create.set_subscriber_id(sub.subscriber_id);
+        create.set_mux(&sub.options.mux);
+        create.set_subscriber_queue_size(sub.options.subscriber_queue_size);
+        create.set_telemetry(sub.options.telemetry);
+        create.set_process_id(std::process::id() as u64);
     }
 
-    if !sub_resp.resolved_channel_name.is_empty() {
-        sub.channel.name = sub_resp.resolved_channel_name.clone();
+    let (resp, fds) = send_request_receive_response(client, &req)?;
+    if resp.response_case() != RESP_CREATE_SUBSCRIBER {
+        return Err(SubspaceError::Internal("Unexpected response".into()));
+    }
+    let sub_resp = resp.create_subscriber();
+    if !sub_resp.error().is_empty() {
+        return Err(SubspaceError::ServerError(sub_resp.error()));
+    }
+
+    if !sub_resp.resolved_channel_name().is_empty() {
+        sub.channel.name = sub_resp.resolved_channel_name().clone();
     }
 
     // A subscriber-created placeholder is the only case where the server
@@ -2036,27 +2016,27 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
         sub.reset_delivery_state();
         sub.channel.unmap();
     }
-    if !sub_resp.r#type.is_empty() {
-        sub.channel.channel_type = String::from_utf8_lossy(&sub_resp.r#type).to_string();
+    if !sub_resp.type_().is_empty() {
+        sub.channel.channel_type = String::from_utf8_lossy(&sub_resp.type_()).to_string();
     }
-    sub.channel.num_slots = sub_resp.num_slots;
-    sub.channel.subscriber_queue_size = sub_resp.default_subscriber_queue_size;
+    sub.channel.num_slots = sub_resp.num_slots();
+    sub.channel.subscriber_queue_size = sub_resp.default_subscriber_queue_size();
     sub.channel.subscriber_queue_arena_size =
-        sub_resp.subscriber_queue_arena_size;
-    sub.subscriber_queue_size = sub_resp.subscriber_queue_size;
+        sub_resp.subscriber_queue_arena_size();
+    sub.subscriber_queue_size = sub_resp.subscriber_queue_size();
     sub.channel
         .embargoed_slots
-        .resize(sub_resp.num_slots as usize);
-    sub.channel.use_split_buffers = sub_resp.use_split_buffers;
+        .resize(sub_resp.num_slots() as usize);
+    sub.channel.use_split_buffers = sub_resp.use_split_buffers();
 
     {
-        let cs = if sub_resp.checksum_size > 0 {
-            sub_resp.checksum_size
+        let cs = if sub_resp.checksum_size() > 0 {
+            sub_resp.checksum_size()
         } else {
             4
         };
-        let ms = if sub_resp.metadata_size > 0 {
-            sub_resp.metadata_size
+        let ms = if sub_resp.metadata_size() > 0 {
+            sub_resp.metadata_size()
         } else {
             0
         };
@@ -2070,28 +2050,29 @@ fn reload_subscriber(client: &mut ClientInner, sub: &mut SubscriberImpl) -> Resu
         let prot = ProtFlags::PROT_READ | ProtFlags::PROT_WRITE;
         sub.channel.map(
             client.scb_fd,
-            fds[sub_resp.ccb_fd_index as usize],
-            fds[sub_resp.bcb_fd_index as usize],
+            fds[sub_resp.ccb_fd_index() as usize],
+            fds[sub_resp.bcb_fd_index() as usize],
             prot,
         )?;
     }
 
     sub.attach_buffers()?;
 
-    sub.trigger_fd = fds[sub_resp.trigger_fd_index as usize];
-    sub.poll_fd = fds[sub_resp.poll_fd_index as usize];
+    sub.trigger_fd = fds[sub_resp.trigger_fd_index() as usize];
+    sub.poll_fd = fds[sub_resp.poll_fd_index() as usize];
 
     {
         let mut pub_fds = sub.reliable_publisher_fds.lock().unwrap();
         pub_fds.clear();
-        for &idx in &sub_resp.reliable_pub_trigger_fd_indexes {
-            pub_fds.push(fds[idx as usize]);
+        for i in 0..sub_resp.reliable_pub_trigger_fd_indexes_size() {
+            pub_fds.push(fds[sub_resp.reliable_pub_trigger_fd_indexes(i) as usize]);
         }
     }
 
     sub.retirement_trigger_fds.clear();
-    for &idx in &sub_resp.retirement_fd_indexes {
-        sub.retirement_trigger_fds.push(fds[idx as usize]);
+    for i in 0..sub_resp.retirement_fd_indexes_size() {
+        sub.retirement_trigger_fds
+            .push(fds[sub_resp.retirement_fd_indexes(i) as usize]);
     }
 
     if remap_ccb {
@@ -2114,28 +2095,28 @@ fn reload_subscribers_if_necessary(
     }
     publisher.channel.num_updates = updates;
 
-    let req = proto::Request {
-        request: Some(proto::request::Request::GetTriggers(
-            proto::GetTriggersRequest {
-                channel_name: publisher.channel.name.clone(),
-            },
-        )),
-    };
+    let mut req = phaser_request();
+    req.mutable_get_triggers()
+        .set_channel_name(&publisher.channel.name);
 
     let (resp, fds) = send_request_receive_response(client, &req)?;
-    let trig_resp = match resp.response {
-        Some(proto::response::Response::GetTriggers(r)) => r,
-        _ => return Err(SubspaceError::Internal("Unexpected response".into())),
-    };
+    if resp.response_case() != RESP_GET_TRIGGERS {
+        return Err(SubspaceError::Internal("Unexpected response".into()));
+    }
+    let trig_resp = resp.get_triggers();
 
     publisher.subscriber_trigger_fds.clear();
-    for &idx in &trig_resp.sub_trigger_fd_indexes {
-        publisher.subscriber_trigger_fds.push(fds[idx as usize]);
+    for i in 0..trig_resp.sub_trigger_fd_indexes_size() {
+        publisher
+            .subscriber_trigger_fds
+            .push(fds[trig_resp.sub_trigger_fd_indexes(i) as usize]);
     }
 
     publisher.retirement_trigger_fds.clear();
-    for &idx in &trig_resp.retirement_fd_indexes {
-        publisher.retirement_trigger_fds.push(fds[idx as usize]);
+    for i in 0..trig_resp.retirement_fd_indexes_size() {
+        publisher
+            .retirement_trigger_fds
+            .push(fds[trig_resp.retirement_fd_indexes(i) as usize]);
     }
 
     Ok(())
@@ -2153,31 +2134,29 @@ fn reload_reliable_publishers_if_necessary(
     }
     subscriber.channel.num_updates = updates;
 
-    let req = proto::Request {
-        request: Some(proto::request::Request::GetTriggers(
-            proto::GetTriggersRequest {
-                channel_name: subscriber.channel.name.clone(),
-            },
-        )),
-    };
+    let mut req = phaser_request();
+    req.mutable_get_triggers()
+        .set_channel_name(&subscriber.channel.name);
 
     let (resp, fds) = send_request_receive_response(client, &req)?;
-    let trig_resp = match resp.response {
-        Some(proto::response::Response::GetTriggers(r)) => r,
-        _ => return Err(SubspaceError::Internal("Unexpected response".into())),
-    };
+    if resp.response_case() != RESP_GET_TRIGGERS {
+        return Err(SubspaceError::Internal("Unexpected response".into()));
+    }
+    let trig_resp = resp.get_triggers();
 
     {
         let mut pub_fds = subscriber.reliable_publisher_fds.lock().unwrap();
         pub_fds.clear();
-        for &idx in &trig_resp.reliable_pub_trigger_fd_indexes {
-            pub_fds.push(fds[idx as usize]);
+        for i in 0..trig_resp.reliable_pub_trigger_fd_indexes_size() {
+            pub_fds.push(fds[trig_resp.reliable_pub_trigger_fd_indexes(i) as usize]);
         }
     }
 
     subscriber.retirement_trigger_fds.clear();
-    for &idx in &trig_resp.retirement_fd_indexes {
-        subscriber.retirement_trigger_fds.push(fds[idx as usize]);
+    for i in 0..trig_resp.retirement_fd_indexes_size() {
+        subscriber
+            .retirement_trigger_fds
+            .push(fds[trig_resp.retirement_fd_indexes(i) as usize]);
     }
 
     Ok(())
@@ -2240,19 +2219,18 @@ fn remove_publisher_request(
     channel_name: &str,
     publisher_id: i32,
 ) -> Result<()> {
-    let req = proto::Request {
-        request: Some(proto::request::Request::RemovePublisher(
-            proto::RemovePublisherRequest {
-                channel_name: channel_name.to_string(),
-                publisher_id,
-            },
-        )),
-    };
+    let mut req = phaser_request();
+    {
+        let mut remove = req.mutable_remove_publisher();
+        remove.set_channel_name(channel_name);
+        remove.set_publisher_id(publisher_id);
+    }
     client.socket.send_request(&req)?;
     let (resp, _fds) = client.socket.receive_response()?;
-    if let Some(proto::response::Response::RemovePublisher(r)) = resp.response {
-        if !r.error.is_empty() {
-            return Err(SubspaceError::ServerError(r.error));
+    if resp.response_case() == RESP_REMOVE_PUBLISHER {
+        let removed = resp.remove_publisher();
+        if !removed.error().is_empty() {
+            return Err(SubspaceError::ServerError(removed.error()));
         }
     }
     Ok(())
@@ -2264,20 +2242,19 @@ fn remove_subscriber_request(
     subscriber_id: i32,
     opts: &SubscriberOptions,
 ) -> Result<()> {
-    let req = proto::Request {
-        request: Some(proto::request::Request::RemoveSubscriber(
-            proto::RemoveSubscriberRequest {
-                channel_name: channel_name.to_string(),
-                subscriber_id,
-                telemetry: opts.telemetry,
-            },
-        )),
-    };
+    let mut req = phaser_request();
+    {
+        let mut remove = req.mutable_remove_subscriber();
+        remove.set_channel_name(channel_name);
+        remove.set_subscriber_id(subscriber_id);
+        remove.set_telemetry(opts.telemetry);
+    }
     client.socket.send_request(&req)?;
     let (resp, _fds) = client.socket.receive_response()?;
-    if let Some(proto::response::Response::RemoveSubscriber(r)) = resp.response {
-        if !r.error.is_empty() {
-            return Err(SubspaceError::ServerError(r.error));
+    if resp.response_case() == RESP_REMOVE_SUBSCRIBER {
+        let removed = resp.remove_subscriber();
+        if !removed.error().is_empty() {
+            return Err(SubspaceError::ServerError(removed.error()));
         }
     }
     Ok(())

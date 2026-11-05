@@ -13,14 +13,21 @@ safety case the most predictable setup.
 
 ## Design Rules
 
-- **C++17, the standard library and POSIX.**  The core library has no other
-  dependencies and is compiled with `-fno-exceptions -fno-rtti`.  The server
-  connection adds [phaser](https://github.com/dallison/phaser) and is built
-  the same way.
+- **C++17, the standard library and POSIX.**  The core library shares the
+  shared-memory protocol in `common/` with the regular client: the memory
+  layout (`shm_layout.h`), the slot, retirement and reference count
+  operations (`channel_view.h`), finding a slot to publish in
+  (`slot_search.h`), publishing it (`publish.h`), taking, releasing and
+  skipping messages (`subscribe.h`) and the message checksum
+  (`message_checksum.h`).  Those are themselves only the
+  standard library and POSIX, and the core is compiled with
+  `-fno-exceptions -fno-rtti`.  The server connection adds
+  [phaser](https://github.com/dallison/phaser) and is built the same way.
 - **Errors are values.**  Every operation that can fail returns
   `subspace::asil::Error`.  `ErrorString()` describes a code, and
-  `Client::LastServerError()` gives the server's reason for
-  `Error::kServerRejected`.
+  `Client::LastServerError()` gives the detail: the server's reason for
+  `Error::kServerRejected`, or which buffer a request or response did not
+  fit for `Error::kCapacityExceeded`.
 - **No heap allocation.**  The client, publishers and subscribers allocate no
   memory, and neither does `PhaserServerConnection` while it talks to the
   server.
@@ -158,15 +165,15 @@ memfd backend, or the prefixes or one slot of a split buffer set, so that
 each response stays small.
 
 `PhaserServerConnection` implements it with the server's standard protocol:
-length-prefixed messages in protobuf wire format on the server's Unix socket,
-with file descriptors passed by `SCM_RIGHTS`.  The server receives the same
-bytes it receives from the standard clients.  Requests and responses are
-encoded by `ServerWire` in `common/server_wire.h`, which the standard C++
-client uses too.  The standard client gives it growable buffers.  The ASIL
-connection gives it fixed buffers inside the object: it builds each request
-as a phaser message in a fixed buffer, serializes it to protobuf wire format,
-and decodes the response into the same buffer, so it needs neither the
-protobuf library nor the heap.  The buffers take about 60 KB, so keep the
+length-prefixed native Phaser payloads on the server's Unix socket, with file
+descriptors passed by `SCM_RIGHTS`.  The server receives the same bytes it
+receives from the standard clients.  Requests and responses are encoded by
+`ServerWire` in `common/server_wire.h`, which the standard C++ client uses
+too.  The standard client gives it growable buffers.  The ASIL connection
+gives it fixed buffers inside the object: it builds each request as a phaser
+message in a fixed buffer, copies that payload onto the socket, and loads the
+response into the same buffer, so it needs neither the protobuf library nor
+the heap.  The buffers take about 60 KB, so keep the
 connection in static storage or inside a long-lived object.  A system with
 its own qualified transport can replace it with another implementation of
 `ServerConnection`.
@@ -350,10 +357,18 @@ have them.
 
 ## Testing
 
-`layout_test` compares every size, offset and constant in
-`asil_client/shm_layout.h` with `common/channel.h`, checks that the checksum
-matches the standard client's, and passes subscriber queue entries between
-the ASIL client and the standard `InPlaceSlotQueue`.
+`layout_test` checks the shared-memory code that both clients use, on a
+channel control block in process memory.  It checks the delivery of a
+published message to each subscriber's bitset and queue, the byte counts and
+the commit, and that a queue that does not fit in the queue arena is ignored.
+For the slot search it checks that a stale retired bit on an unread message
+doesn't give that slot away, the order in which free, retired and in-use slots
+are taken, that a slot the client can't use is given back, and that a reliable
+publisher neither takes a held slot nor overtakes a message no reliable
+subscriber has seen.  It checks releasing, retiring and skipping messages.
+It also checks that the shared checksum matches the standard client's, and
+that the flags the bridge and the tunnel set after publishing do not
+invalidate it.
 
 `asil_client_test` exchanges messages between the ASIL client and the
 standard client in both directions.  One server runs a static channel config,
@@ -363,5 +378,6 @@ on demand, for channels created by ASIL publishers, resized channels,
 subscriber queues, custom split buffer allocators and subscribers that open
 before a channel has buffers.  The
 test also checks that setting up and closing a publisher and a subscriber
-makes no heap allocations, and that a request too large for the wire buffer
-returns `Error::kCapacityExceeded` and leaves the connection usable.
+makes no heap allocations, and that a request or response too large for its
+buffer returns `Error::kCapacityExceeded`, with the reason in
+`LastServerError()`, and leaves the connection usable.

@@ -4,13 +4,13 @@
 # built without exceptions or RTTI.
 add_library(subspace_asil_client STATIC
     channel_memory.cc
-    checksum.cc
     client.cc
     error.cc
     publisher.cc
     subscriber.cc
 )
 target_compile_options(subspace_asil_client PRIVATE -fno-exceptions -fno-rtti)
+target_link_libraries(subspace_asil_client PUBLIC subspace_crc32)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
     target_link_libraries(subspace_asil_client PUBLIC rt)
 endif()

@@ -30,6 +30,20 @@ phaser_library(
     deps = [":subspace_proto"],
 )
 
+# C frontend for the Rust client. The socket carries the native Phaser payload
+# from this crate. The extra namespace keeps these C++ symbols distinct from
+# //proto:subspace_phaser, which the C++ clients also link into the Rust tests.
+# Exceptions stay enabled because the C handle allocates with try/catch.
+# direct_header_symlinks is off so this target can share the proto with the
+# protobuf-frontend library above.
+phaser_library(
+    name = "subspace_phaser_c",
+    add_namespace = "phaser_c",
+    direct_header_symlinks = False,
+    rust = True,
+    deps = [":subspace_proto"],
+)
+
 proto_library(
     name = "tunnel_proto",
     srcs = [

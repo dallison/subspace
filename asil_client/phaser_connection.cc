@@ -22,6 +22,18 @@ namespace asil {
 namespace wire = ::subspace::phaser;
 
 namespace {
+// Builds the permanent failure statuses before main. Connect names this so
+// the initializer cannot be dropped. Copying one later does not allocate.
+const bool kPermanentErrorsReady = [] {
+  (void)::phaser::internal::AllocationFailedError();
+  (void)::phaser::internal::BufferTooSmallError();
+  (void)::subspace::server_wire_internal::PermanentError(
+      absl::StatusCode::kResourceExhausted, "Message is too large to build");
+  return true;
+}();
+} // namespace
+
+namespace {
 
 #if defined(MSG_NOSIGNAL)
 constexpr int kSendFlags = MSG_NOSIGNAL;
@@ -104,6 +116,7 @@ Error FillFdList(const PhaserServerConnection::ReceivedFds &fds, size_t count,
 } // namespace
 
 Error PhaserServerConnection::Connect(const char *socket_name) {
+  (void)kPermanentErrorsReady;
   if (socket_name == nullptr) {
     return Error::kInvalidArgument;
   }
@@ -142,12 +155,20 @@ Error PhaserServerConnection::Connect(const char *socket_name) {
   return Error::kOk;
 }
 
-Error PhaserServerConnection::Rejected(const char *message, size_t length) {
-  if (length > sizeof(last_error_) - 1) {
+void PhaserServerConnection::SetLastError(const char *message, size_t length) {
+  if (message == nullptr) {
+    length = 0;
+  } else if (length > sizeof(last_error_) - 1) {
     length = sizeof(last_error_) - 1;
   }
-  std::memcpy(last_error_, message, length);
+  if (length != 0) {
+    std::memcpy(last_error_, message, length);
+  }
   last_error_[length] = '\0';
+}
+
+Error PhaserServerConnection::Rejected(const char *message, size_t length) {
+  SetLastError(message, length);
   return Error::kServerRejected;
 }
 
@@ -218,6 +239,8 @@ Error PhaserServerConnection::Receive(const char *&data, size_t &length) {
     }
     remaining -= chunk;
   }
+  SetLastError("response does not fit the wire buffer",
+               sizeof("response does not fit the wire buffer") - 1);
   return Error::kCapacityExceeded;
 }
 
@@ -308,11 +331,15 @@ Error PhaserServerConnection::Transact(Build build, Read read, int send_fd) {
     // out of scope first.
     absl::StatusOr<wire::Request> request = wire_.NewRequest();
     if (!request.ok()) {
+      Remember(request.status().message().data(),
+              request.status().message().size());
       return Error::kCapacityExceeded;
     }
     build(*request);
     absl::StatusOr<size_t> serialized = wire_.Serialize(*request);
     if (!serialized.ok()) {
+      Remember(serialized.status().message().data(),
+              serialized.status().message().size());
       return Error::kCapacityExceeded;
     }
     length = *serialized;
@@ -346,11 +373,14 @@ Error PhaserServerConnection::Transact(Build build, Read read, int send_fd) {
   absl::StatusOr<wire::Response> response = wire_.NewResponse();
   if (!response.ok()) {
     fds_.Clear();
+    Remember(response.status().message().data(),
+            response.status().message().size());
     return Error::kCapacityExceeded;
   }
   if (absl::Status status = wire_.Decode(data, length, *response);
       !status.ok()) {
     fds_.Clear();
+    Remember(status.message().data(), status.message().size());
     return status.code() == absl::StatusCode::kResourceExhausted
                ? Error::kCapacityExceeded
                : Error::kProtocolError;
@@ -367,7 +397,7 @@ Error PhaserServerConnection::Init(const char *client_name, InitReply &reply) {
         init->set_client_name(View(client_name));
         init->set_max_channels(shm::kMaxChannels);
         init->set_max_slot_owners(shm::kMaxSlotOwners);
-        init->set_max_buffers(shm::kMaxBuffers);
+        init->set_max_buffers(static_cast<int32_t>(shm::kMaxBuffers));
       },
       [&](const wire::Response &response) {
         if (!response.has_init()) {

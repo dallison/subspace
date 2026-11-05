@@ -2,17 +2,16 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-// The publishing side of the shared memory protocol.  This follows
-// PublisherImpl::FindFreeSlotUnreliable, PublisherImpl::FindFreeSlotReliable
-// and PublisherImpl::ActivateSlotAndGetAnother in client/publisher.cc.
+// The publishing side of the shared memory protocol.  Finding a slot uses
+// common/slot_search.h and publishing one uses common/publish.h, as the
+// standard client does.
 
 #include "asil_client/publisher.h"
 
-#include "asil_client/checksum.h"
 #include "asil_client/client.h"
-
-#include <cstring>
-#include <sched.h>
+#include "common/message_checksum.h"
+#include "common/publish.h"
+#include "common/slot_search.h"
 
 namespace subspace {
 namespace asil {
@@ -20,16 +19,6 @@ namespace asil {
 namespace {
 
 bool ValidLayoutSize(int32_t size) { return size >= 0 && size <= 0xFFFF; }
-
-// Slots are ordered by timestamp, then by id, as a stable sort by timestamp
-// orders them.
-bool Earlier(uint64_t timestamp, int id, uint64_t other_timestamp,
-             int other_id) {
-  if (timestamp != other_timestamp) {
-    return timestamp < other_timestamp;
-  }
-  return id < other_id;
-}
 
 } // namespace
 
@@ -146,9 +135,9 @@ Error Publisher::Open(Client &client, const char *channel_name,
     (void)Close();
     return e;
   }
-  BitsetView activations(&memory_.Ccb()->activation_tracker,
-                         shm::kMaxVchanId + 1);
-  if (reliable_ || (options.activate && !activations.IsSet(vchan_id_ + 1))) {
+  const bool activated =
+      memory_.Ccb()->activation_tracker.IsActivated(vchan_id_);
+  if (reliable_ || (options.activate && !activated)) {
     // Reliable subscribers hold the activation message, which stops a
     // reliable publisher overtaking them.
     slot_->message_size.store(1, std::memory_order_relaxed);
@@ -267,256 +256,41 @@ void Publisher::TriggerSubscribers() const {
   }
 }
 
+// The publisher maps the channel's buffer when it opens the channel, so every
+// claimed slot is usable.
+class Publisher::SearchHooks : public SlotSearchHooks {
+public:
+  explicit SearchHooks(Publisher &publisher) : publisher_(publisher) {}
+
+  void AssignBuffer(shm::MessageSlot *slot) { publisher_.SetSlotBuffer(slot); }
+  shm::MessagePrefix *Prefix(shm::MessageSlot *slot) {
+    return publisher_.memory_.Prefix(slot);
+  }
+  void ForcedReuse(shm::MessageSlot *slot) {
+    publisher_.memory_.TriggerRetirement(publisher_.retirement_triggers_,
+                                         slot->id);
+  }
+
+private:
+  Publisher &publisher_;
+};
+
 shm::MessageSlot *Publisher::FindFreeSlot() {
-  return reliable_ ? FindFreeSlotReliable() : FindFreeSlotUnreliable();
-}
-
-int Publisher::FindRetiredSlotToReuse(bool oldest_first) const {
-  BitsetView retired = memory_.RetiredSlots();
-  if (!oldest_first) {
-    return retired.FindFirstSet();
+  SlotSearch search;
+  search.owner = publisher_id_;
+  search.vchan_id = vchan_id_;
+  SearchHooks hooks(*this);
+  if (reliable_) {
+    return ClaimSlotReliable(memory_, search, memory_.Counters(channel_id_),
+                             hooks);
   }
-  // With no subscribers every slot retires as soon as it is published, so
-  // reuse the oldest to keep a window of recent messages for late joiners.
-  int oldest = -1;
-  uint64_t oldest_timestamp = ~uint64_t{0};
-  for (int i = 0; i < memory_.NumSlots(); i++) {
-    if (!retired.IsSet(i)) {
-      continue;
-    }
-    const uint64_t timestamp =
-        memory_.Slot(i)->timestamp.load(std::memory_order_relaxed);
-    if (timestamp < oldest_timestamp) {
-      oldest_timestamp = timestamp;
-      oldest = i;
-    }
-  }
-  return oldest;
-}
-
-// Takes ownership of slot if no other publisher or subscriber has it.
-bool Publisher::ClaimSlot(shm::MessageSlot *slot) {
-  const uint64_t owner = shm::kPubOwned | static_cast<uint64_t>(publisher_id_);
-  const uint64_t old_refs = slot->refs.load(std::memory_order_relaxed);
-  uint64_t expected = shm::BuildRefsBitField(
-      slot->ordinal.load(std::memory_order_relaxed),
-      static_cast<int>((old_refs >> shm::kVchanIdShift) & shm::kVchanIdMask),
-      (old_refs >> shm::kRetiredRefsShift) & shm::kRetiredRefsMask);
-  return slot->refs.compare_exchange_weak(
-      expected, owner, std::memory_order_acquire, std::memory_order_relaxed);
-}
-
-shm::MessageSlot *Publisher::FindFreeSlotUnreliable() {
-  shm::ChannelControlBlock *ccb = memory_.Ccb();
-  BitsetView free_slots = memory_.FreeSlots();
-  BitsetView retired_slots = memory_.RetiredSlots();
-  constexpr int kMaxCasRetries = 1000;
-  int retries = memory_.NumSlots() * 1000;
-  int cas_retries = 0;
-  shm::MessageSlot *slot = nullptr;
-  int free_slot = -1;
-  int retired_slot = -1;
-  for (;;) {
-    slot = nullptr;
-    free_slot = -1;
-    retired_slot = -1;
-    const bool no_subscribers = memory_.NumSubscribers(vchan_id_) == 0;
-    if (!ccb->free_slots_exhausted.load(std::memory_order_relaxed) &&
-        (free_slot = free_slots.FindFirstSet()) != -1) {
-      if (!free_slots.ClearWasSet(free_slot)) {
-        continue;
-      }
-      slot = memory_.Slot(free_slot);
-      if (free_slots.IsEmpty()) {
-        ccb->free_slots_exhausted.store(true, std::memory_order_relaxed);
-      }
-    } else if ((retired_slot = FindRetiredSlotToReuse(no_subscribers)) != -1) {
-      if (!retired_slots.ClearWasSet(retired_slot)) {
-        continue;
-      }
-      slot = memory_.Slot(retired_slot);
-    } else {
-      // Recycle the oldest message that no subscriber holds.
-      uint64_t earliest = ~uint64_t{0};
-      for (int i = 0; i < memory_.NumSlots(); i++) {
-        shm::MessageSlot *s = memory_.Slot(i);
-        const uint64_t refs = s->refs.load(std::memory_order_relaxed);
-        if ((refs & shm::kPubOwned) != 0) {
-          continue;
-        }
-        const uint64_t timestamp = s->timestamp.load(std::memory_order_relaxed);
-        if ((refs & shm::kRefsMask) == 0 && timestamp < earliest) {
-          slot = s;
-          earliest = timestamp;
-        }
-      }
-    }
-    if (slot == nullptr) {
-      if (retries-- == 0) {
-        return nullptr;
-      }
-      continue;
-    }
-    if (ClaimSlot(slot)) {
-      break;
-    }
-    if (++cas_retries >= kMaxCasRetries) {
-      if (retries-- == 0) {
-        return nullptr;
-      }
-      cas_retries = 0;
-      (void)::sched_yield();
-    }
-  }
-  PrepareClaimedSlot(slot, free_slot == -1 && retired_slot == -1);
-  return slot;
-}
-
-// A reliable subscriber still needs a slot that it holds, and, when reliable
-// subscribers exist, a message that none of them has seen.
-bool Publisher::ReliableClaimable(shm::MessageSlot *slot,
-                                  bool require_reliable_seen) const {
-  const uint64_t refs = slot->refs.load(std::memory_order_relaxed);
-  if (((refs >> shm::kReliableRefCountShift) & shm::kRefCountMask) != 0) {
-    return false;
-  }
-  if (require_reliable_seen &&
-      slot->ordinal.load(std::memory_order_relaxed) != 0 &&
-      (slot->flags.load(std::memory_order_relaxed) &
-       shm::kMessageSeenByReliable) == 0) {
-    return false;
-  }
-  return (refs & shm::kRefsMask) == 0;
-}
-
-// The oldest slot that no subscriber holds and that is older than every slot
-// a reliable subscriber still needs.
-shm::MessageSlot *
-Publisher::OldestReliableCandidate(bool require_reliable_seen) const {
-  int stop = -1;
-  uint64_t stop_timestamp = 0;
-  for (int i = 0; i < memory_.NumSlots(); i++) {
-    shm::MessageSlot *s = memory_.Slot(i);
-    const uint64_t refs = s->refs.load(std::memory_order_relaxed);
-    if ((refs & shm::kPubOwned) != 0) {
-      continue;
-    }
-    const bool needed =
-        ((refs >> shm::kReliableRefCountShift) & shm::kRefCountMask) != 0 ||
-        (require_reliable_seen &&
-         s->ordinal.load(std::memory_order_relaxed) != 0 &&
-         (s->flags.load(std::memory_order_relaxed) &
-          shm::kMessageSeenByReliable) == 0);
-    const uint64_t timestamp = s->timestamp.load(std::memory_order_relaxed);
-    if (needed && (stop == -1 || Earlier(timestamp, i, stop_timestamp, stop))) {
-      stop = i;
-      stop_timestamp = timestamp;
-    }
-  }
-  shm::MessageSlot *best = nullptr;
-  uint64_t best_timestamp = 0;
-  for (int i = 0; i < memory_.NumSlots(); i++) {
-    shm::MessageSlot *s = memory_.Slot(i);
-    const uint64_t refs = s->refs.load(std::memory_order_relaxed);
-    if ((refs & (shm::kPubOwned | shm::kRefsMask)) != 0) {
-      continue;
-    }
-    const uint64_t timestamp = s->timestamp.load(std::memory_order_relaxed);
-    if (stop != -1 && !Earlier(timestamp, i, stop_timestamp, stop)) {
-      continue;
-    }
-    if (best == nullptr || Earlier(timestamp, i, best_timestamp, best->id)) {
-      best = s;
-      best_timestamp = timestamp;
-    }
-  }
-  return best;
-}
-
-shm::MessageSlot *Publisher::FindFreeSlotReliable() {
-  shm::ChannelControlBlock *ccb = memory_.Ccb();
-  BitsetView free_slots = memory_.FreeSlots();
-  BitsetView retired_slots = memory_.RetiredSlots();
-  constexpr int kMaxCasRetries = 1000;
-  int retries = memory_.NumSlots() * 1000;
-  int cas_retries = 0;
-  shm::MessageSlot *slot = nullptr;
-  int free_slot = -1;
-  int retired_slot = -1;
-  for (;;) {
-    slot = nullptr;
-    free_slot = -1;
-    retired_slot = -1;
-    const bool require_reliable_seen =
-        memory_.Counters(channel_id_).num_reliable_subs != 0;
-    if (!ccb->free_slots_exhausted.load(std::memory_order_relaxed) &&
-        (free_slot = free_slots.FindFirstSet()) != -1) {
-      if (!free_slots.ClearWasSet(free_slot)) {
-        continue;
-      }
-      if (free_slots.IsEmpty()) {
-        ccb->free_slots_exhausted.store(true, std::memory_order_relaxed);
-      }
-      // A free slot has never held a message.
-      slot = memory_.Slot(free_slot);
-    } else if ((retired_slot = retired_slots.FindFirstSet()) != -1) {
-      if (!retired_slots.ClearWasSet(retired_slot)) {
-        continue;
-      }
-      slot = memory_.Slot(retired_slot);
-      if (!ReliableClaimable(slot, require_reliable_seen)) {
-        // The slot is still retired; it just can't be reused yet.
-        retired_slots.Set(retired_slot);
-        return nullptr;
-      }
-    } else {
-      slot = OldestReliableCandidate(require_reliable_seen);
-      if (slot == nullptr) {
-        return nullptr;
-      }
-    }
-    if (ClaimSlot(slot)) {
-      retired_slots.Clear(slot->id);
-      break;
-    }
-    if (++cas_retries >= kMaxCasRetries) {
-      if (retries-- == 0) {
-        return nullptr;
-      }
-      cas_retries = 0;
-      (void)::sched_yield();
-    }
-  }
-  PrepareClaimedSlot(slot, free_slot == -1 && retired_slot == -1);
-  return slot;
-}
-
-// Resets a slot this publisher has just claimed.  forced_reuse is true when
-// the slot held a message that a subscriber might not have seen.
-void Publisher::PrepareClaimedSlot(shm::MessageSlot *slot, bool forced_reuse) {
-  slot->ordinal.store(0, std::memory_order_relaxed);
-  slot->timestamp.store(0, std::memory_order_relaxed);
-  slot->vchan_id.store(static_cast<int16_t>(vchan_id_),
-                       std::memory_order_relaxed);
-  SetSlotBuffer(slot);
-  shm::MessagePrefix *prefix = memory_.Prefix(slot);
-  prefix->flags = 0;
-  prefix->vchan_id = vchan_id_;
-
-  // The old message is gone, so no subscriber should look for it.
-  memory_.Subscribers().Traverse([this, slot](int sub_id) {
-    memory_.AvailableSlots(sub_id).Clear(slot->id);
-  });
-
-  if (forced_reuse) {
-    memory_.TriggerRetirement(retirement_triggers_, slot->id);
-  }
+  return ClaimSlotUnreliable(memory_, search, hooks);
 }
 
 void Publisher::SetSlotBuffer(shm::MessageSlot *slot) {
   shm::BufferControlBlock *bcb = memory_.Bcb();
   const int old_index = slot->buffer_index.load(std::memory_order_relaxed);
-  if (old_index >= 0 && old_index < shm::kMaxBuffers &&
+  if (old_index >= 0 && old_index < static_cast<int>(shm::kMaxBuffers) &&
       bcb->refs[old_index].load(std::memory_order_relaxed) > 0) {
     bcb->refs[old_index]--;
   }
@@ -528,112 +302,30 @@ void Publisher::SetSlotBuffer(shm::MessageSlot *slot) {
 
 void Publisher::PublishSlot(shm::MessageSlot *slot, bool is_activation,
                             PublishedMessage *published) {
-  shm::ChannelControlBlock *ccb = memory_.Ccb();
   shm::MessagePrefix *prefix = memory_.Prefix(slot);
-  const uint64_t ordinal = ccb->ordinals[vchan_id_ + 1].fetch_add(1);
-  const uint64_t timestamp = internal::Now();
-  const uint64_t message_size =
-      slot->message_size.load(std::memory_order_relaxed);
-  slot->ordinal.store(ordinal, std::memory_order_relaxed);
-  slot->timestamp.store(timestamp, std::memory_order_relaxed);
-  slot->flags.store(0, std::memory_order_relaxed);
-
-  prefix->message_size = message_size;
-  prefix->ordinal = ordinal;
-  prefix->timestamp = timestamp;
-  prefix->vchan_id = vchan_id_;
-  prefix->checksum_size = static_cast<uint16_t>(memory_.ChecksumSize());
-  prefix->metadata_size = static_cast<uint16_t>(memory_.MetadataSize());
-  prefix->flags = 0;
-  prefix->slot_id = slot->id;
-  slot->bridged_slot_id.store(slot->id, std::memory_order_relaxed);
-  if (is_activation) {
-    prefix->flags |= shm::kMessageActivate;
-    slot->flags.fetch_or(shm::kMessageIsActivation, std::memory_order_relaxed);
-    BitsetView(&ccb->activation_tracker, shm::kMaxVchanId + 1)
-        .Set(vchan_id_ + 1);
-  }
+  StampSlot(memory_.Ccb(), slot, internal::Now());
+  FillPrefix(memory_.Ccb(), slot, prefix, memory_.ChecksumSize(),
+             memory_.MetadataSize(), is_activation);
   if (checksum_) {
-    prefix->flags |= shm::kMessageHasChecksum;
-    const auto *base = reinterpret_cast<const uint8_t *>(prefix);
-    uint32_t crc = 0xFFFFFFFF;
-    crc = Crc32(crc, base + offsetof(shm::MessagePrefix, slot_id),
-                offsetof(shm::MessagePrefix, checksum) -
-                    offsetof(shm::MessagePrefix, slot_id));
-    crc = Crc32(crc,
-                base + offsetof(shm::MessagePrefix, checksum) +
-                    memory_.ChecksumSize(),
-                static_cast<size_t>(memory_.MetadataSize()));
-    crc = Crc32(crc, reinterpret_cast<const uint8_t *>(memory_.Payload(slot)),
-                message_size);
-    crc = ~crc;
-    std::memcpy(&prefix->checksum, &crc, sizeof(crc));
+    prefix->SetHasChecksum();
+    SetMessageChecksum(prefix, memory_.Payload(slot),
+                       slot->message_size.load(std::memory_order_relaxed),
+                       memory_.ChecksumSize(), memory_.MetadataSize());
   }
 
-  const uint64_t cleanup_generation = memory_.CleanupGeneration(vchan_id_);
-
-  // The server uses this count to tell when no publisher can be writing to a
-  // subscriber queue.
-  std::atomic<uint32_t> &active_publishers =
-      memory_.QueueIndex()->active_publishers[publisher_id_];
-  active_publishers.fetch_add(1, std::memory_order_seq_cst);
-
-  // Mark the message available to every subscriber on the publisher's
-  // virtual channel while the slot is still publisher owned.  A subscriber
-  // can leave between the traversal and the set, so check membership again
-  // afterwards.  The bitset is the authoritative record, so a queue that is
-  // full only loses a hint.
-  memory_.Subscribers().Traverse(
-      [this, slot, ordinal](int sub_id) {
-        const int sub_vchan_id = memory_.Ccb()->sub_vchan_ids[sub_id];
-        if (vchan_id_ != -1 && sub_vchan_id != -1 &&
-            sub_vchan_id != vchan_id_) {
-          return;
-        }
-        BitsetView available = memory_.AvailableSlots(sub_id);
-        BitsetView subscribers = memory_.Subscribers();
-        available.Set(slot->id);
-        if (!subscribers.IsSetSeqCst(sub_id)) {
-          available.Clear(slot->id);
-          if (!subscribers.IsSetSeqCst(sub_id)) {
-            return;
-          }
-          available.Set(slot->id);
-        }
-        shm::SlotQueue *queue = memory_.Queue(sub_id);
-        if (queue != nullptr &&
-            !internal::PushSlotQueue(queue, slot->id, ordinal)) {
-          internal::MarkSlotQueueInsertionFailure(queue);
-        }
-      },
-      std::memory_order_seq_cst);
-
-  if (!is_activation) {
-    ccb->total_bytes += message_size;
-    if (message_size > ccb->max_message_size) {
-      ccb->max_message_size = message_size;
-    }
+  PublishedSlot result;
+  {
+    SubscriberQueuePublishScope publishing(memory_.QueueIndex(),
+                                           publisher_id_);
+    result = CommitPublishedSlot(memory_, slot, vchan_id_, is_activation,
+                                 publishing);
   }
-
-  // Releasing publisher ownership makes the message readable.
-  slot->refs.store(shm::BuildRefsBitField(ordinal, vchan_id_, 0),
-                   std::memory_order_release);
-  ccb->total_messages.fetch_add(1, std::memory_order_seq_cst);
-
-  // A subscriber removed while publishing lowers the retirement threshold.
-  if (!is_activation &&
-      memory_.CleanupGeneration(vchan_id_) != cleanup_generation &&
-      memory_.TryRetireSlot(slot)) {
-    memory_.TriggerRetirement(retirement_triggers_, slot->id);
-  }
-
-  uint32_t active = active_publishers.load(std::memory_order_seq_cst);
-  while (active != 0 && !active_publishers.compare_exchange_strong(
-                            active, active - 1, std::memory_order_seq_cst)) {
+  if (result.retired) {
+    memory_.TriggerRetirement(retirement_triggers_, result.retirement_slot_id);
   }
   if (published != nullptr) {
-    published->ordinal = ordinal;
-    published->timestamp = timestamp;
+    published->ordinal = result.ordinal;
+    published->timestamp = result.timestamp;
   }
 }
 

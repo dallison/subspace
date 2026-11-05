@@ -4145,6 +4145,54 @@ TEST_F(ClientTest, ReliablePublisher2) {
   machine.Run();
 }
 
+TEST_F(ClientTest, ReliableReadNewestLetsPublisherReuseSkippedSlots) {
+  subspace::Client client;
+  InitClient(client);
+
+  constexpr int kNumSlots = 5;
+  absl::StatusOr<Subscriber> sub = client.CreateSubscriber(
+      "rel_newest", subspace::SubscriberOptions().SetReliable(true));
+  ASSERT_OK(sub);
+  absl::StatusOr<Publisher> pub = client.CreatePublisher(
+      "rel_newest", 32, kNumSlots,
+      subspace::PublisherOptions().SetReliable(true));
+  ASSERT_OK(pub);
+
+  auto publish = [&pub]() -> bool {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    EXPECT_TRUE(buffer.ok()) << buffer.status();
+    if (!buffer.ok() || *buffer == nullptr) {
+      return false;
+    }
+    memcpy(*buffer, "foobar", 6);
+    absl::StatusOr<const Message> published = pub->PublishMessage(6);
+    EXPECT_TRUE(published.ok()) << published.status();
+    return true;
+  };
+
+  // The activation message and these fill the channel.
+  for (int i = 0; i < kNumSlots - 1; i++) {
+    ASSERT_TRUE(publish()) << "publish " << i;
+  }
+  ASSERT_FALSE(publish());
+
+  // Reading the newest message skips the others, so the subscriber has
+  // finished with every slot but the one it keeps until it reads the next
+  // message.
+  {
+    absl::StatusOr<Message> msg =
+        sub->ReadMessage(subspace::ReadMode::kReadNewest);
+    ASSERT_OK(msg);
+    ASSERT_EQ(6, msg->length);
+  }
+
+  for (int i = 0; i < kNumSlots - 1; i++) {
+    ASSERT_TRUE(publish()) << "publish " << i;
+  }
+  // Now every slot holds a message the subscriber hasn't read.
+  ASSERT_FALSE(publish());
+}
+
 TEST_F(ClientTest, ReliablePublisherActivation) {
   subspace::Client client;
   InitClient(client);

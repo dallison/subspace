@@ -2,18 +2,17 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-// The reading side of the shared memory protocol.  This follows
-// SubscriberImpl::NextSlot, LastSlot, ClaimSlot and RemoveActiveMessage in
-// client/subscriber.cc, using the subscriber's available-slot bitset as the
-// record of unread messages.  A subscriber queue, when the channel has one,
-// only holds hints, so the subscriber leaves it to the publishers.
+// The reading side of the shared memory protocol.  Taking, releasing and
+// skipping messages uses common/subscribe.h, as the standard client does.
+// The subscriber's available-slot bitset is the record of unread messages.
+// A subscriber queue, when the channel has one, only holds hints, so the
+// subscriber leaves it to the publishers.
 
 #include "asil_client/subscriber.h"
 
-#include "asil_client/checksum.h"
 #include "asil_client/client.h"
-
-#include <cstring>
+#include "common/message_checksum.h"
+#include "common/subscribe.h"
 
 namespace subspace {
 namespace asil {
@@ -21,19 +20,6 @@ namespace asil {
 namespace {
 
 constexpr int kMaxClaimAttempts = 1000;
-
-// Messages are ordered by timestamp, then ordinal.
-bool Before(uint64_t timestamp, uint64_t ordinal, uint64_t other_timestamp,
-            uint64_t other_ordinal) {
-  if (timestamp != other_timestamp) {
-    return timestamp < other_timestamp;
-  }
-  return ordinal < other_ordinal;
-}
-
-BitsetView Owners(shm::MessageSlot *slot) {
-  return BitsetView(&slot->sub_owners, shm::kMaxSlotOwners);
-}
 
 bool ValidVchanId(int vchan_id) {
   return vchan_id >= -1 && vchan_id < shm::kMaxVchanId;
@@ -187,19 +173,13 @@ Error Subscriber::ReleaseMessage(const Message &message) {
 }
 
 void Subscriber::ReleaseSlot(shm::MessageSlot *slot) {
-  if (!Owners(slot).ClearWasSet(subscriber_id_)) {
+  const ReleasedMessage result = ReleaseMessageReference(
+      memory_, slot, subscriber_id_, options_.reliable);
+  if (!result.released) {
     return;
   }
-  bool retired = false;
-  (void)memory_.AtomicIncRefCount(
-      slot, options_.reliable, -1,
-      slot->ordinal.load(std::memory_order_relaxed),
-      slot->vchan_id.load(std::memory_order_relaxed), /*retire=*/true,
-      &retired);
-  if (retired) {
-    memory_.TriggerRetirement(
-        retirement_triggers_,
-        slot->bridged_slot_id.load(std::memory_order_relaxed));
+  if (result.retired) {
+    memory_.TriggerRetirement(retirement_triggers_, result.retirement_slot_id);
   }
   if (options_.reliable) {
     // A reliable publisher may be waiting for this slot.
@@ -229,27 +209,22 @@ void Subscriber::TriggerReliablePublishers() const {
   }
 }
 
-// Whether slot holds a published message for this subscriber's virtual
-// channel.  A subscriber to a multiplexer sees every virtual channel.
-bool Subscriber::Visible(const shm::MessageSlot *slot) const {
-  if ((slot->refs.load(std::memory_order_acquire) & shm::kPubOwned) != 0 ||
-      slot->ordinal.load(std::memory_order_relaxed) == 0) {
-    return false;
+// The ordinal of the published message in slot if this subscriber receives
+// it, otherwise 0.
+uint64_t Subscriber::VisibleOrdinal(const shm::MessageSlot *slot) const {
+  const uint64_t ordinal = CommittedOrdinal(slot);
+  if (ordinal == 0 ||
+      !VirtualChannelsMatch(vchan_id_,
+                            slot->vchan_id.load(std::memory_order_relaxed))) {
+    return 0;
   }
-  const int slot_vchan_id = slot->vchan_id.load(std::memory_order_relaxed);
-  return vchan_id_ == -1 || slot_vchan_id == -1 || slot_vchan_id == vchan_id_;
+  return ordinal;
 }
 
-// Takes a reference to slot and records it so that the server can release
-// the reference if this process dies.
 bool Subscriber::Claim(shm::MessageSlot *slot, uint64_t ordinal) {
-  if (!memory_.AtomicIncRefCount(slot, options_.reliable, 1, ordinal,
-                                 slot->vchan_id.load(std::memory_order_relaxed),
-                                 false, nullptr)) {
-    return false;
-  }
-  Owners(slot).Set(subscriber_id_);
-  return true;
+  return ClaimMessageReference(memory_, slot, subscriber_id_,
+                               options_.reliable, ordinal,
+                               slot->vchan_id.load(std::memory_order_relaxed));
 }
 
 // Finds the oldest unread message and takes a reference to it.
@@ -261,13 +236,13 @@ Subscriber::Find Subscriber::FindNext(shm::MessageSlot *&slot) {
     uint64_t best_timestamp = 0;
     available.Traverse([&](int i) {
       shm::MessageSlot *s = memory_.Slot(i);
-      if (!Visible(s)) {
+      const uint64_t ordinal = VisibleOrdinal(s);
+      if (ordinal == 0) {
         return;
       }
-      const uint64_t ordinal = s->ordinal.load(std::memory_order_relaxed);
       const uint64_t timestamp = s->timestamp.load(std::memory_order_relaxed);
       if (best == nullptr ||
-          Before(timestamp, ordinal, best_timestamp, best_ordinal)) {
+          DeliveredBefore(timestamp, ordinal, best_timestamp, best_ordinal)) {
         best = s;
         best_ordinal = ordinal;
         best_timestamp = timestamp;
@@ -294,13 +269,13 @@ Subscriber::Find Subscriber::FindNewest(shm::MessageSlot *&slot) {
     uint64_t best_timestamp = 0;
     available.Traverse([&](int i) {
       shm::MessageSlot *s = memory_.Slot(i);
-      if (!Visible(s)) {
+      const uint64_t ordinal = VisibleOrdinal(s);
+      if (ordinal == 0) {
         return;
       }
-      const uint64_t ordinal = s->ordinal.load(std::memory_order_relaxed);
       const uint64_t timestamp = s->timestamp.load(std::memory_order_relaxed);
       if (best == nullptr ||
-          Before(best_timestamp, best_ordinal, timestamp, ordinal)) {
+          DeliveredBefore(best_timestamp, best_ordinal, timestamp, ordinal)) {
         best = s;
         best_ordinal = ordinal;
         best_timestamp = timestamp;
@@ -317,10 +292,7 @@ Subscriber::Find Subscriber::FindNewest(shm::MessageSlot *&slot) {
   return Find::kNone;
 }
 
-// Marks every unread message older than newest as read.  Each slot is pinned
-// while its bit is cleared so that a publisher recycling it can't lose the
-// bit for the new message.  A reliable subscriber also marks the messages
-// seen so that a reliable publisher doesn't wait for it to read them.
+// Marks every unread message older than newest as read.
 void Subscriber::ClearOlder(const shm::MessageSlot *newest) {
   BitsetView available = memory_.AvailableSlots(subscriber_id_);
   const uint64_t newest_ordinal =
@@ -333,25 +305,19 @@ void Subscriber::ClearOlder(const shm::MessageSlot *newest) {
       return;
     }
     shm::MessageSlot *s = memory_.Slot(i);
-    if (!Visible(s)) {
+    const uint64_t ordinal = VisibleOrdinal(s);
+    if (ordinal == 0) {
       return;
     }
-    const uint64_t ordinal = s->ordinal.load(std::memory_order_relaxed);
     const uint64_t timestamp = s->timestamp.load(std::memory_order_relaxed);
-    if (!Before(timestamp, ordinal, newest_timestamp, newest_ordinal)) {
+    if (!DeliveredBefore(timestamp, ordinal, newest_timestamp,
+                         newest_ordinal)) {
       return;
     }
-    const int vchan_id = s->vchan_id.load(std::memory_order_relaxed);
-    if (memory_.AtomicIncRefCount(s, options_.reliable, 1, ordinal, vchan_id,
-                                  false, nullptr)) {
-      available.Clear(i);
-      if (options_.reliable) {
-        s->flags.fetch_or(shm::kMessageSeen | shm::kMessageSeenByReliable,
-                          std::memory_order_relaxed);
-        marked_seen = true;
-      }
-      (void)memory_.AtomicIncRefCount(s, options_.reliable, -1, ordinal,
-                                      vchan_id, false, nullptr);
+    if (SkipUnreadMessage(memory_, s, subscriber_id_, options_.reliable,
+                          ordinal,
+                          s->vchan_id.load(std::memory_order_relaxed))) {
+      marked_seen |= options_.reliable;
     }
   });
   if (marked_seen) {
@@ -361,21 +327,9 @@ void Subscriber::ClearOlder(const shm::MessageSlot *newest) {
 
 bool Subscriber::ChecksumValid(const shm::MessageSlot *slot,
                                size_t length) const {
-  const shm::MessagePrefix *prefix = memory_.Prefix(slot);
-  const auto *base = reinterpret_cast<const uint8_t *>(prefix);
-  uint32_t crc = 0xFFFFFFFF;
-  crc = Crc32(crc, base + offsetof(shm::MessagePrefix, slot_id),
-              offsetof(shm::MessagePrefix, checksum) -
-                  offsetof(shm::MessagePrefix, slot_id));
-  crc = Crc32(crc,
-              base + offsetof(shm::MessagePrefix, checksum) +
-                  memory_.ChecksumSize(),
-              static_cast<size_t>(memory_.MetadataSize()));
-  crc = Crc32(crc, reinterpret_cast<const uint8_t *>(memory_.Payload(slot)),
-              length);
-  uint32_t stored;
-  std::memcpy(&stored, &prefix->checksum, sizeof(stored));
-  return stored == ~crc;
+  return MessageChecksumMatches(memory_.Prefix(slot), memory_.Payload(slot),
+                                length, memory_.ChecksumSize(),
+                                memory_.MetadataSize());
 }
 
 Error Subscriber::ReadMessage(Message &message, ReadMode mode) {
@@ -416,10 +370,7 @@ Error Subscriber::ReadMessage(Message &message, ReadMode mode) {
       ClearOlder(slot);
     }
     available.Clear(slot->id);
-    slot->flags.fetch_or(options_.reliable
-                             ? shm::kMessageSeen | shm::kMessageSeenByReliable
-                             : shm::kMessageSeen,
-                         std::memory_order_relaxed);
+    MarkMessageSeen(slot, options_.reliable);
 
     uint64_t unused_last_ordinal = 0;
     uint64_t &last_ordinal = ValidVchanId(vchan_id)

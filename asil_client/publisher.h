@@ -113,15 +113,11 @@ public:
 private:
   bool HoldSlot();
   Error RefreshTriggers();
+  class SearchHooks;
+
+  // Claims and resets a slot using common/slot_search.h, which the standard
+  // client shares.
   shm::MessageSlot *FindFreeSlot();
-  shm::MessageSlot *FindFreeSlotUnreliable();
-  shm::MessageSlot *FindFreeSlotReliable();
-  shm::MessageSlot *OldestReliableCandidate(bool require_reliable_seen) const;
-  bool ReliableClaimable(shm::MessageSlot *slot,
-                         bool require_reliable_seen) const;
-  bool ClaimSlot(shm::MessageSlot *slot);
-  void PrepareClaimedSlot(shm::MessageSlot *slot, bool forced_reuse);
-  int FindRetiredSlotToReuse(bool oldest_first) const;
   void SetSlotBuffer(shm::MessageSlot *slot);
   void PublishSlot(shm::MessageSlot *slot, bool is_activation,
                    PublishedMessage *published);

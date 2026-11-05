@@ -95,9 +95,8 @@ target_link_libraries(subspace_proto PUBLIC
     protobuf::libprotobuf
 )
 
-# Phaser messages for the clients' server requests and responses.  They are
-# sent and received in protobuf wire format, so the server sees the same bytes
-# as from any other client.  Cross-compiles need a host plugin in
+# Phaser messages for the clients' server requests and responses.  The socket
+# carries the native Phaser payload.  Cross-compiles need a host plugin in
 # PHASER_PLUGIN_EXECUTABLE.
 if(CMAKE_CROSSCOMPILING AND NOT PHASER_PLUGIN_EXECUTABLE)
     message(FATAL_ERROR

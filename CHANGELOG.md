@@ -45,8 +45,8 @@
   messages work with the standard clients. The server handshake is behind a
   replaceable `ServerConnection` interface. `PhaserServerConnection`
   implements the standard protocol with phaser messages in fixed buffers,
-  sent and received in protobuf wire format, so the handshake makes no heap
-  allocations either. See `docs/asil-client.md`.
+  sent and received as the native Phaser payload, so the handshake makes no
+  heap allocations either. See `docs/asil-client.md`.
 - The ASIL client also supports reliable publishers and subscribers, virtual
   channels and multiplexer subscribers, subscribers holding up to 64
   messages, subscriber queues, split buffers (with C callbacks for slots from
@@ -61,11 +61,26 @@
 - The standard C++ client builds its server requests and responses as
   phaser messages too, in growable buffers. `ServerWire` in
   `common/server_wire.h` encodes them for both C++ clients, with fixed or
-  growable buffers. The bytes on the socket are unchanged.
+  growable buffers. The socket carries the native Phaser payload. The Rust
+  client sends and parses that same payload. Bridge, tunnel, discovery, the
+  channel directory and statistics stay on protobuf.
+- The ASIL client and the standard C++ client share the shared memory
+  protocol code in `common/`: finding a slot, publishing, the checksum, and
+  taking, releasing and skipping messages. Sharing it fixed these bugs in the
+  standard client:
+  - A reliable subscriber reading the newest message didn't mark the
+    messages it skipped as seen, so a reliable publisher could no longer get
+    a slot once the free slots ran out.
+  - A subscriber ignoring an activation message kept its owner bit on the
+    slot. If the process then died, the server dropped a reference from
+    whatever message was in that slot later.
+  - With retirement notification on, releasing a bridged message crashed if
+    its slot on the other side of the bridge had a higher id than any slot
+    in this channel.
 - Bazel, CMake and Soong build phaser and generate `subspace_phaser` from
   `subspace.proto`. Android CMake cross-compiles need a host
   `protoc-gen-phaser` in `PHASER_PLUGIN_EXECUTABLE`.
-- Abseil 20250814.1, protobuf 33.4, cpp_toolbelt 2.1.6 and phaser 2.1.3 in
+- Abseil 20250814.1, protobuf 33.4, cpp_toolbelt 2.1.6 and phaser 3.1.1 in
   the Bazel build. CMake uses cpp_toolbelt 2.1.6.
 
 ### Bridge and Tunnel Plugins

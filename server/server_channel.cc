@@ -8,6 +8,7 @@
 #include "server/server.h"
 #include <cerrno>
 #include <csignal>
+#include <type_traits>
 #include <sys/mman.h>
 #include <utility>
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
@@ -1499,7 +1500,8 @@ absl::Status ServerChannel::CapacityError(const CapacityInfo &info) const {
   return absl::InternalError(message);
 }
 
-void ServerChannel::GetChannelInfo(subspace::ChannelInfoProto *info) {
+template <typename Info>
+void ServerChannel::FillChannelInfo(Info *info) {
   info->set_name(Name());
   info->set_slot_size(SlotSize());
   info->set_num_slots(NumSlots());
@@ -1523,25 +1525,45 @@ void ServerChannel::GetChannelInfo(subspace::ChannelInfoProto *info) {
   info->set_is_local(IsLocal());
   if (IsVirtual()) {
     info->set_is_virtual(true);
-    VirtualChannel *vchan = static_cast<VirtualChannel *>(this);
     info->set_vchan_id(GetVirtualChannelId());
-    info->set_mux(vchan->GetMux()->Name());
+    info->set_mux(static_cast<VirtualChannel *>(this)->GetMux()->Name());
   }
 
   for (const auto &[id, user] : users_) {
     if (user == nullptr || user->GetHandler() == nullptr) {
       continue;
     }
-    ChannelParticipantInfoProto *participant = info->add_participants();
-    participant->set_id(id);
-    participant->set_pid(user->ProcessId());
-    participant->set_program_name(user->GetHandler()->ClientName());
-    participant->set_is_publisher(user->IsPublisher());
-    participant->set_is_subscriber(user->IsSubscriber());
-    participant->set_is_reliable(user->IsReliable());
-    participant->set_is_bridge(user->IsBridge());
-    participant->set_for_tunnel(user->ForTunnel());
+    auto participant = info->add_participants();
+    const int participant_id = id;
+    const User *participant_user = user.get();
+    auto fill = [&](auto *out) {
+      out->set_id(participant_id);
+      out->set_pid(participant_user->ProcessId());
+      out->set_program_name(participant_user->GetHandler()->ClientName());
+      out->set_is_publisher(participant_user->IsPublisher());
+      out->set_is_subscriber(participant_user->IsSubscriber());
+      out->set_is_reliable(participant_user->IsReliable());
+      out->set_is_bridge(participant_user->IsBridge());
+      out->set_for_tunnel(participant_user->ForTunnel());
+    };
+    if constexpr (std::is_pointer_v<decltype(participant)>) {
+      fill(participant);
+    } else {
+      fill(&participant);
+    }
   }
+}
+
+template void ServerChannel::FillChannelInfo(subspace::ChannelInfoProto *);
+template void
+ServerChannel::FillChannelInfo(subspace::phaser::ChannelInfoProto *);
+
+void ServerChannel::GetChannelInfo(subspace::ChannelInfoProto *info) {
+  FillChannelInfo(info);
+}
+
+void ServerChannel::GetChannelInfo(subspace::phaser::ChannelInfoProto *info) {
+  FillChannelInfo(info);
 }
 
 std::vector<ResizeInfo> ServerChannel::GetResizeInfo() const {
@@ -1569,7 +1591,8 @@ std::vector<ResizeInfo> ServerChannel::GetResizeInfo() const {
   return info;
 }
 
-void ServerChannel::GetChannelStats(subspace::ChannelStatsProto *stats) {
+template <typename Stats>
+void ServerChannel::FillChannelStats(Stats *stats) {
   stats->set_channel_name(Name());
   uint64_t total_bytes, total_messages;
   uint64_t max_message_size;
@@ -1591,6 +1614,18 @@ void ServerChannel::GetChannelStats(subspace::ChannelStatsProto *stats) {
   stats->set_num_bridge_pubs(num_bridge_pubs);
   stats->set_num_bridge_subs(num_bridge_subs);
   stats->set_is_local(IsLocal());
+}
+
+template void ServerChannel::FillChannelStats(subspace::ChannelStatsProto *);
+template void
+ServerChannel::FillChannelStats(subspace::phaser::ChannelStatsProto *);
+
+void ServerChannel::GetChannelStats(subspace::ChannelStatsProto *stats) {
+  FillChannelStats(stats);
+}
+
+void ServerChannel::GetChannelStats(subspace::phaser::ChannelStatsProto *stats) {
+  FillChannelStats(stats);
 }
 
 ChannelCounters &ServerChannel::RecordUpdate(bool is_pub, bool add,

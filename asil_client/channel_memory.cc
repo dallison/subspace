@@ -13,7 +13,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#if ASIL_SHM_MODE == ASIL_SHM_MEMFD
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
 #include <sys/syscall.h>
 #endif
 
@@ -41,7 +41,7 @@ uint64_t PageAligned(uint64_t size) {
   return (size + page - 1) & ~(page - 1);
 }
 
-#if ASIL_SHM_MODE != ASIL_SHM_MEMFD
+#if SUBSPACE_SHMEM_MODE != SUBSPACE_SHMEM_MODE_MEMFD
 // Android's libc has no shm_open, and memfd mode never opens a buffer by name.
 constexpr mode_t kShmMode = S_IRUSR | S_IWUSR | S_IROTH | S_IWOTH;
 
@@ -55,7 +55,7 @@ int OpenShm(const char *name, int flags) {
 }
 #endif
 
-#if ASIL_SHM_MODE == ASIL_SHM_POSIX
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
 // The shm object for a buffer is named after the inode of its shadow file.
 Error PosixShmName(const char *shadow_file, char (&out)[64]) {
   struct stat st;
@@ -131,7 +131,7 @@ Error ReadShadowSize(const char *shadow_file, uint64_t &size) {
 }
 #endif
 
-#if ASIL_SHM_MODE == ASIL_SHM_MEMFD
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
 int CreateMemfd(const char *name, uint64_t size) {
   constexpr unsigned int kMemfdCloexec = 1;
   const int fd =
@@ -212,58 +212,6 @@ Error CopyName(const char *name, char (&out)[kMaxChannelNameLength + 1]) {
   return Error::kOk;
 }
 
-bool PushSlotQueue(shm::SlotQueue *queue, int32_t slot_id, uint64_t ordinal) {
-  const size_t capacity = queue->capacity;
-  if (capacity == 0) {
-    return false;
-  }
-  shm::SlotQueueEntry *entries = queue->Entries();
-  shm::SlotQueueEntry *entry = nullptr;
-  uint64_t tail = queue->tail.load(std::memory_order_relaxed);
-  for (size_t attempt = 0; attempt < shm::kMaxSlotQueueCasAttempts; ++attempt) {
-    const uint64_t head = queue->head.load(std::memory_order_acquire);
-    if (tail - head >= capacity) {
-      if (!queue->drop_oldest) {
-        return false;
-      }
-      // Evict the oldest entry, as InPlaceSlotQueue::DropFront does.
-      shm::SlotQueueEntry &front = entries[head % capacity];
-      uint64_t expected = head;
-      if (front.sequence.load(std::memory_order_acquire) != head + 1 ||
-          !queue->head.compare_exchange_weak(expected, head + 1,
-                                             std::memory_order_acq_rel,
-                                             std::memory_order_relaxed)) {
-        return false;
-      }
-      front.sequence.store(head + capacity, std::memory_order_release);
-      queue->overflow_count.fetch_add(1, std::memory_order_release);
-      tail = queue->tail.load(std::memory_order_relaxed);
-      continue;
-    }
-    shm::SlotQueueEntry &candidate = entries[tail % capacity];
-    if (candidate.sequence.load(std::memory_order_acquire) != tail) {
-      return false;
-    }
-    if (queue->tail.compare_exchange_strong(tail, tail + 1,
-                                            std::memory_order_acq_rel,
-                                            std::memory_order_relaxed)) {
-      entry = &candidate;
-      break;
-    }
-  }
-  if (entry == nullptr) {
-    return false;
-  }
-  entry->slot_id.store(slot_id, std::memory_order_relaxed);
-  entry->ordinal.store(ordinal, std::memory_order_relaxed);
-  entry->sequence.store(tail + 1, std::memory_order_release);
-  return true;
-}
-
-void MarkSlotQueueInsertionFailure(shm::SlotQueue *queue) {
-  queue->insertion_failed.store(true, std::memory_order_release);
-}
-
 Error ChannelMemory::Map(shm::SystemControlBlock *scb, int ccb_fd, int bcb_fd,
                          int num_slots, int32_t checksum_size,
                          int32_t metadata_size,
@@ -303,7 +251,7 @@ Error ChannelMemory::Map(shm::SystemControlBlock *scb, int ccb_fd, int bcb_fd,
   bcb_ = static_cast<shm::BufferControlBlock *>(bcb);
   context_ = context;
   ccb_size_ = ccb_size;
-  queue_arena_size_ = static_cast<size_t>(subscriber_queue_arena_size);
+  queue_arena_size_ = subscriber_queue_arena_size;
   num_slots_ = num_slots;
   checksum_size_ = checksum_size > 0 ? checksum_size : 4;
   metadata_size_ = metadata_size > 0 ? metadata_size : 0;
@@ -365,7 +313,7 @@ Error ChannelMemory::BufferName(int index,
       *p = '.';
     }
   }
-#if ASIL_SHM_MODE == ASIL_SHM_POSIX
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   const char *format = "/tmp/subspace_%llu_%s_%d";
 #else
   const char *format = "subspace_%llu_%s_%d";
@@ -384,7 +332,7 @@ Error ChannelMemory::NewestIndex(int &index) const {
   if (num_buffers <= 0) {
     return Error::kNoBuffers;
   }
-  if (num_buffers > shm::kMaxBuffers) {
+  if (num_buffers > static_cast<int>(shm::kMaxBuffers)) {
     return Error::kLayoutMismatch;
   }
   index = num_buffers - 1;
@@ -444,7 +392,7 @@ Error ChannelMemory::MapBuffer(int index, int fd, uint64_t size, int prot) {
 // Opens buffer index, which has already been created.
 Error ChannelMemory::OpenBuffer(int index, bool writable, UniqueFd &fd,
                                 uint64_t &size) const {
-#if ASIL_SHM_MODE == ASIL_SHM_MEMFD
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
   (void)writable;
   BufferReply reply;
   if (Error e = GetRegisteredBuffer(index, /*is_prefix=*/false, 0, reply);
@@ -470,7 +418,7 @@ Error ChannelMemory::OpenBuffer(int index, bool writable, UniqueFd &fd,
     return e;
   }
   const int flags = writable ? O_RDWR : O_RDONLY;
-#if ASIL_SHM_MODE == ASIL_SHM_POSIX
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   char shm_name[64];
   if (Error e = PosixShmName(name, shm_name); e != Error::kOk) {
     return e;
@@ -551,14 +499,14 @@ Error ChannelMemory::CreateBuffer(uint64_t full_size) {
   if (Error e = BufferName(0, name); e != Error::kOk) {
     return e;
   }
-#if ASIL_SHM_MODE == ASIL_SHM_MEMFD
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
   UniqueFd fd(CreateMemfd(name, full_size));
   if (!fd.Valid()) {
     return Error::kSharedMemoryError;
   }
 #else
   const bool root = ::getuid() == 0;
-#if ASIL_SHM_MODE == ASIL_SHM_POSIX
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   if (Error e = CreateShadowFile(name); e != Error::kOk) {
     return e;
   }
@@ -577,7 +525,7 @@ Error ChannelMemory::CreateBuffer(uint64_t full_size) {
     // EEXIST: another publisher created the buffer.
     return errno == EEXIST ? Error::kOk : Error::kSharedMemoryError;
   }
-#if ASIL_SHM_MODE == ASIL_SHM_POSIX
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
   // Record the size before sizing the shm object, matching the standard
   // client: an attacher that sees a nonzero shm size can trust the record.
   if (Error e = WriteShadowSize(name, full_size); e != Error::kOk) {
@@ -589,7 +537,7 @@ Error ChannelMemory::CreateBuffer(uint64_t full_size) {
       ::chmod(path, 0777) != 0 ||
       (root && ::chown(path, static_cast<uid_t>(context_->user_id),
                        static_cast<gid_t>(context_->group_id)) != 0)) {
-#if ASIL_SHM_MODE == ASIL_SHM_POSIX
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
     (void)::shm_unlink(shm_name);
 #endif
     return Error::kSharedMemoryError;
@@ -601,7 +549,7 @@ Error ChannelMemory::CreateBuffer(uint64_t full_size) {
           expected, 1, std::memory_order_release, std::memory_order_relaxed)) {
     return Error::kOk;
   }
-#if ASIL_SHM_MODE == ASIL_SHM_MEMFD
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
   ClientBuffer registration;
   registration.channel_name = context_->channel_name;
   registration.session_id = context_->session_id;
@@ -766,12 +714,6 @@ Error ChannelMemory::MapSplitSlot(int slot_id, uint64_t payload_size,
   return Error::kOk;
 }
 
-shm::MessageSlot *ChannelMemory::Slot(int id) const {
-  auto *slots = reinterpret_cast<shm::MessageSlot *>(
-      reinterpret_cast<char *>(ccb_) + sizeof(shm::ChannelControlBlock));
-  return &slots[id];
-}
-
 shm::MessagePrefix *ChannelMemory::Prefix(const shm::MessageSlot *slot) const {
   if (!InMappedBuffer(slot)) {
     return nullptr;
@@ -792,160 +734,9 @@ char *ChannelMemory::Payload(const shm::MessageSlot *slot) const {
   return reinterpret_cast<char *>(Prefix(slot)) + prefix_size_;
 }
 
-BitsetView ChannelMemory::RetiredSlots() const {
-  return BitsetView(reinterpret_cast<char *>(ccb_) +
-                        shm::RetiredSlotsOffset(num_slots_),
-                    num_slots_);
-}
-
-BitsetView ChannelMemory::FreeSlots() const {
-  return BitsetView(reinterpret_cast<char *>(ccb_) +
-                        shm::FreeSlotsOffset(num_slots_),
-                    num_slots_);
-}
-
-BitsetView ChannelMemory::AvailableSlots(int sub_id) const {
-  return BitsetView(reinterpret_cast<char *>(ccb_) +
-                        shm::AvailableSlotsOffset(num_slots_, sub_id),
-                    num_slots_);
-}
-
-BitsetView ChannelMemory::Subscribers() const {
-  return BitsetView(&ccb_->subscribers, shm::kMaxSlotOwners);
-}
-
-shm::AvailableSlotQueueIndex *ChannelMemory::QueueIndex() const {
-  return reinterpret_cast<shm::AvailableSlotQueueIndex *>(
-      reinterpret_cast<char *>(ccb_) + shm::SlotQueueIndexOffset(num_slots_));
-}
-
-shm::SlotQueue *ChannelMemory::Queue(int sub_id) const {
-  const uint64_t offset =
-      QueueIndex()->offsets[sub_id].load(std::memory_order_acquire);
-  if (offset == shm::kInvalidSlotQueueOffset || offset > queue_arena_size_ ||
-      queue_arena_size_ - offset < sizeof(shm::SlotQueue)) {
-    return nullptr;
-  }
-  auto *queue = reinterpret_cast<shm::SlotQueue *>(
-      reinterpret_cast<char *>(ccb_) + shm::SlotQueueArenaOffset(num_slots_) +
-      offset);
-  const size_t room = queue_arena_size_ - offset - sizeof(shm::SlotQueue);
-  if (queue->capacity > room / sizeof(shm::SlotQueueEntry)) {
-    return nullptr;
-  }
-  return queue;
-}
-
-int ChannelMemory::NumSubscribers(int vchan_id) const {
-  const shm::SubscriberCounter &counter = ccb_->num_subs;
-  for (;;) {
-    const uint64_t before = counter.sequence.load(std::memory_order_acquire);
-    if ((before & 1) != 0) {
-      // A server died while updating the count.
-      return shm::kMaxSlotOwners;
-    }
-    const int mux_count = counter.counts[0].load(std::memory_order_relaxed);
-    const int count = vchan_id == -1
-                          ? mux_count
-                          : mux_count + counter.counts[vchan_id + 1].load(
-                                            std::memory_order_relaxed);
-    if (counter.sequence.load(std::memory_order_acquire) == before) {
-      return count;
-    }
-  }
-}
-
-uint64_t ChannelMemory::CleanupGeneration(int vchan_id) const {
-  const uint64_t mux_generation =
-      ccb_->subscriber_cleanup_generation[0].load(std::memory_order_acquire);
-  if (vchan_id == -1) {
-    return mux_generation;
-  }
-  return mux_generation +
-         ccb_->subscriber_cleanup_generation[vchan_id + 1].load(
-             std::memory_order_acquire);
-}
-
-bool ChannelMemory::AtomicIncRefCount(shm::MessageSlot *slot, bool reliable,
-                                      int inc, uint64_t ordinal, int vchan_id,
-                                      bool retire, bool *retired) {
-  if (retired != nullptr) {
-    *retired = false;
-  }
-  ordinal &= shm::kOrdinalMask;
-  for (;;) {
-    uint64_t ref = slot->refs.load(std::memory_order_relaxed);
-    if ((ref & shm::kPubOwned) != 0) {
-      return false;
-    }
-    const uint64_t ref_ordinal =
-        (ref >> shm::kOrdinalShift) & shm::kOrdinalMask;
-    const int ref_vchan_id = shm::RefsVchanId(ref);
-    if (ref_ordinal != 0 && ordinal != 0 &&
-        (ref_ordinal != ordinal || ref_vchan_id != vchan_id)) {
-      return false;
-    }
-    uint64_t refs = ref & shm::kRefCountMask;
-    uint64_t reliable_refs =
-        (ref >> shm::kReliableRefCountShift) & shm::kRefCountMask;
-    if (inc < 0 && refs == 0) {
-      return true;
-    }
-    refs = static_cast<uint64_t>(static_cast<int64_t>(refs) + inc);
-    if (reliable) {
-      reliable_refs =
-          static_cast<uint64_t>(static_cast<int64_t>(reliable_refs) + inc);
-    }
-    uint64_t retired_refs =
-        (ref >> shm::kRetiredRefsShift) & shm::kRetiredRefsMask;
-    if (retire) {
-      retired_refs++;
-    }
-    const uint64_t new_ref =
-        shm::BuildRefsBitField(ref_ordinal, ref_vchan_id, retired_refs) |
-        (reliable_refs << shm::kReliableRefCountShift) | refs;
-    if (slot->refs.compare_exchange_weak(ref, new_ref,
-                                         std::memory_order_acq_rel,
-                                         std::memory_order_relaxed)) {
-      if (retire && refs == 0 && reliable_refs == 0 &&
-          retired_refs >= static_cast<uint64_t>(NumSubscribers(ref_vchan_id)) &&
-          RetiredSlots().SetWasClear(slot->id) && retired != nullptr) {
-        *retired = true;
-      }
-      return true;
-    }
-  }
-}
-
-bool ChannelMemory::TryRetireSlot(shm::MessageSlot *slot) {
-  if (slot->ordinal.load(std::memory_order_relaxed) == 0) {
-    return false;
-  }
-  const uint64_t refs = slot->refs.load(std::memory_order_acquire);
-  if ((refs & shm::kPubOwned) != 0) {
-    return false;
-  }
-  const uint64_t ref_count = refs & shm::kRefCountMask;
-  const uint64_t reliable_ref_count =
-      (refs >> shm::kReliableRefCountShift) & shm::kRefCountMask;
-  const uint64_t retired_refs =
-      (refs >> shm::kRetiredRefsShift) & shm::kRetiredRefsMask;
-  if (ref_count != 0 || reliable_ref_count != 0 ||
-      retired_refs <
-          static_cast<uint64_t>(NumSubscribers(shm::RefsVchanId(refs)))) {
-    return false;
-  }
-  return RetiredSlots().SetWasClear(slot->id);
-}
-
 void ChannelMemory::TriggerRetirement(const TriggerFdList &triggers,
                                       int32_t slot_id) const {
-  if (triggers.Size() == 0) {
-    return;
-  }
-  if (slot_id >= 0 && slot_id < num_slots_ &&
-      (Slot(slot_id)->flags.load(std::memory_order_relaxed) &
-       shm::kMessageIsActivation) != 0) {
+  if (triggers.Size() == 0 || !ReportsRetirement(slot_id)) {
     return;
   }
   for (int i = 0; i < triggers.Size(); i++) {

@@ -2,10 +2,10 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#include "client/checksum.h"
+#include "common/crc32.h"
+
 #include <cstddef>
 #include <cstdint>
-#include <iostream>
 
 namespace subspace {
 

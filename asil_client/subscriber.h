@@ -123,7 +123,7 @@ private:
   SubscriberRequest BuildRequest() const;
   Error MapChannel(SubscriberReply &reply);
   Error RefreshTriggers();
-  bool Visible(const shm::MessageSlot *slot) const;
+  uint64_t VisibleOrdinal(const shm::MessageSlot *slot) const;
   Find FindNext(shm::MessageSlot *&slot);
   Find FindNewest(shm::MessageSlot *&slot);
   bool Claim(shm::MessageSlot *slot, uint64_t ordinal);

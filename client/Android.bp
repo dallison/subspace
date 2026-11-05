@@ -11,12 +11,11 @@ cc_library_shared {
         "message.cc",
         "publisher.cc",
         "subscriber.cc",
-        "checksum.cc",
-        "arm_crc32.S",
     ],
     export_include_dirs: ["."],
     include_dirs: ["external/subspace"],
     static_libs: [
+        "libsubspace_crc32",
         "libsubspace_common",
         "libsubspace_proto",
         "libsubspace_phaser",

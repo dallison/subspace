@@ -12,6 +12,7 @@
 #include "common/channel.h"
 #include "common/client_buffer.h"
 #include "proto/subspace.pb.h"
+#include "proto/subspace.phaser.h"
 #include "toolbelt/bitset.h"
 #include "toolbelt/fd.h"
 #include "toolbelt/logging.h"
@@ -330,6 +331,16 @@ public:
                      int &max_outstanding_slot_leases) const;
   virtual void GetChannelInfo(subspace::ChannelInfoProto *info);
   virtual void GetChannelStats(subspace::ChannelStatsProto *stats);
+  void GetChannelInfo(subspace::phaser::ChannelInfoProto *info);
+  void GetChannelStats(subspace::phaser::ChannelStatsProto *stats);
+
+ private:
+  template <typename Info>
+  void FillChannelInfo(Info *info);
+  template <typename Stats>
+  void FillChannelStats(Stats *stats);
+
+ public:
   void TriggerAllSubscribers();
 
   std::vector<ResizeInfo> GetResizeInfo() const;

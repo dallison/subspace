@@ -255,8 +255,8 @@ absl::Status Server::RemapChannel(ServerChannel *channel, int64_t slot_size,
   return absl::OkStatus();
 }
 
-ServerChannel *Server::FindChannel(const std::string &channel_name) {
-  auto it = channels_.find(channel_name);
+ServerChannel *Server::FindChannel(std::string_view channel_name) {
+  auto it = channels_.find(std::string(channel_name));
   if (it == channels_.end()) {
     return nullptr;
   }

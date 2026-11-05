@@ -8,6 +8,7 @@
 #include "client/options.h"
 #include "co/coroutine.h"
 #include "common/channel.h"
+#include "common/dynamic_bitset.h"
 #include "common/client_buffer.h"
 #include "proto/subspace.pb.h"
 #include "toolbelt/clock.h"

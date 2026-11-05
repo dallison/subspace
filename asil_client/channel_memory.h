@@ -7,11 +7,12 @@
 
 #pragma once
 
-#include "asil_client/bitset.h"
 #include "asil_client/error.h"
 #include "asil_client/server_connection.h"
 #include "asil_client/shm_layout.h"
 #include "asil_client/split_buffer.h"
+#include "common/bitset_view.h"
+#include "common/channel_view.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -48,12 +49,9 @@ struct BufferContext {
   ServerConnection *connection = nullptr;
 };
 
-// InPlaceSlotQueue::Push with report_insertion_failure false.
-bool PushSlotQueue(shm::SlotQueue *queue, int32_t slot_id, uint64_t ordinal);
-// InPlaceSlotQueue::MarkInsertionFailure.
-void MarkSlotQueueInsertionFailure(shm::SlotQueue *queue);
-
-class ChannelMemory {
+// The slot, bitset and queue operations come from ChannelView, shared with the
+// standard client.
+class ChannelMemory : public ChannelView {
 public:
   ChannelMemory() = default;
   ~ChannelMemory() { Unmap(); }
@@ -90,42 +88,20 @@ public:
            slot->buffer_index.load(std::memory_order_relaxed) == index_;
   }
 
-  int NumSlots() const { return num_slots_; }
   // The slot size of the mapped buffer.
   int64_t SlotSize() const { return slot_size_; }
   int32_t ChecksumSize() const { return checksum_size_; }
   int32_t MetadataSize() const { return metadata_size_; }
 
-  shm::ChannelControlBlock *Ccb() const { return ccb_; }
   shm::BufferControlBlock *Bcb() const { return bcb_; }
   const shm::ChannelCounters &Counters(int channel_id) const {
     return scb_->counters[channel_id];
   }
 
-  shm::MessageSlot *Slot(int id) const;
   // The prefix and payload of slot, or null when it isn't in the mapped
   // buffer.
   shm::MessagePrefix *Prefix(const shm::MessageSlot *slot) const;
   char *Payload(const shm::MessageSlot *slot) const;
-
-  BitsetView RetiredSlots() const;
-  BitsetView FreeSlots() const;
-  BitsetView AvailableSlots(int sub_id) const;
-  BitsetView Subscribers() const;
-  shm::AvailableSlotQueueIndex *QueueIndex() const;
-  // The subscriber's queue, or null if it has none.
-  shm::SlotQueue *Queue(int sub_id) const;
-
-  int NumSubscribers(int vchan_id) const;
-  uint64_t CleanupGeneration(int vchan_id) const;
-
-  // Channel::AtomicIncRefCount.  Sets *retired when this call retired the
-  // slot.
-  bool AtomicIncRefCount(shm::MessageSlot *slot, bool reliable, int inc,
-                         uint64_t ordinal, int vchan_id, bool retire,
-                         bool *retired);
-  // Channel::TryRetireSlot.
-  bool TryRetireSlot(shm::MessageSlot *slot);
 
   // Tells publishers that asked for retirement notification that slot_id is
   // free.
@@ -144,12 +120,9 @@ private:
   void UnmapBuffers();
 
   shm::SystemControlBlock *scb_ = nullptr;
-  shm::ChannelControlBlock *ccb_ = nullptr;
   shm::BufferControlBlock *bcb_ = nullptr;
   const BufferContext *context_ = nullptr;
   size_t ccb_size_ = 0;
-  size_t queue_arena_size_ = 0;
-  int num_slots_ = 0;
   int32_t checksum_size_ = 4;
   int32_t metadata_size_ = 0;
   int32_t prefix_size_ = 64;

@@ -11,7 +11,9 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
+#include "common/server_wire.h"
 #include "proto/subspace.pb.h"
+#include "proto/subspace.phaser.h"
 #include "server/static_config.h"
 #include "toolbelt/sockets.h"
 #include <chrono>
@@ -52,15 +54,14 @@ subspace::PublisherOptions ServerDefined() {
 
 // Sends a request the way the clients do, bypassing the client library's own
 // checks, and returns the server's response.
-absl::StatusOr<subspace::Response> Transact(toolbelt::UnixSocket &socket,
-                                            const subspace::Request &req) {
-  std::vector<char> buffer(sizeof(int32_t) + req.ByteSizeLong());
-  char *payload = buffer.data() + sizeof(int32_t);
-  if (!req.SerializeToArray(payload, static_cast<int>(req.ByteSizeLong()))) {
-    return absl::InternalError("Failed to serialize request");
+absl::StatusOr<subspace::phaser::Response> Transact(toolbelt::UnixSocket &socket,
+                                            const subspace::phaser::Request &req) {
+  subspace::ServerWire<subspace::DynamicServerWireBuffers> wire;
+  absl::StatusOr<size_t> length = wire.Serialize(req);
+  if (!length.ok()) {
+    return length.status();
   }
-  if (absl::StatusOr<ssize_t> n =
-          socket.SendMessage(payload, req.ByteSizeLong());
+  if (absl::StatusOr<ssize_t> n = socket.SendMessage(wire.Payload(), *length);
       !n.ok()) {
     return n.status();
   }
@@ -69,10 +70,13 @@ absl::StatusOr<subspace::Response> Transact(toolbelt::UnixSocket &socket,
   if (!received.ok()) {
     return received.status();
   }
-  subspace::Response response;
-  if (!response.ParseFromArray(received->data(),
-                               static_cast<int>(received->size()))) {
-    return absl::InternalError("Failed to parse response");
+  subspace::phaser::Response response;
+  if (absl::Status status = subspace::ServerWire<
+          subspace::DynamicServerWireBuffers>::Decode(received->data(),
+                                                      received->size(),
+                                                      response);
+      !status.ok()) {
+    return status;
   }
   std::vector<toolbelt::FileDescriptor> fds;
   if (absl::Status status = socket.ReceiveFds(fds); !status.ok()) {
@@ -312,46 +316,46 @@ TEST_F(StaticConfigTest, PublishersMustBeServerDefined) {
 TEST_F(StaticConfigTest, ServerRejectsLayoutFromServerDefinedPublishers) {
   toolbelt::UnixSocket socket;
   ASSERT_OK(socket.Connect(Socket()));
-  subspace::Request init;
+  subspace::phaser::Request init;
   init.mutable_init()->set_client_name("raw");
   ASSERT_OK(Transact(socket, init));
 
   const std::vector<
-      std::pair<std::string, void (*)(subspace::CreatePublisherRequest *)>>
+      std::pair<std::string, void (*)(subspace::phaser::CreatePublisherRequest *)>>
       cases = {
           {"num_slots",
-           [](subspace::CreatePublisherRequest *r) { r->set_num_slots(8); }},
+           [](subspace::phaser::CreatePublisherRequest *r) { r->set_num_slots(8); }},
           {"slot_size",
-           [](subspace::CreatePublisherRequest *r) { r->set_slot_size(256); }},
+           [](subspace::phaser::CreatePublisherRequest *r) { r->set_slot_size(256); }},
           {"fixed_size",
-           [](subspace::CreatePublisherRequest *r) {
+           [](subspace::phaser::CreatePublisherRequest *r) {
              r->set_is_fixed_size(true);
            }},
           {"checksum_size",
-           [](subspace::CreatePublisherRequest *r) {
+           [](subspace::phaser::CreatePublisherRequest *r) {
              r->set_checksum_size(4);
            }},
           {"metadata_size",
-           [](subspace::CreatePublisherRequest *r) {
+           [](subspace::phaser::CreatePublisherRequest *r) {
              r->set_metadata_size(16);
            }},
           {"subscriber_queue_arena_size",
-           [](subspace::CreatePublisherRequest *r) {
+           [](subspace::phaser::CreatePublisherRequest *r) {
              r->set_subscriber_queue_arena_size(4096);
            }},
           {"use_split_buffers",
-           [](subspace::CreatePublisherRequest *r) {
+           [](subspace::phaser::CreatePublisherRequest *r) {
              r->set_use_split_buffers(true);
            }},
       };
   for (const auto &[field, set] : cases) {
-    subspace::Request req;
-    subspace::CreatePublisherRequest *cmd = req.mutable_create_publisher();
+    subspace::phaser::Request req;
+    subspace::phaser::CreatePublisherRequest *cmd = req.mutable_create_publisher();
     cmd->set_channel_name("/static/a");
     cmd->set_server_defined(true);
     cmd->set_publisher_id(-1);
     set(cmd);
-    absl::StatusOr<subspace::Response> response = Transact(socket, req);
+    absl::StatusOr<subspace::phaser::Response> response = Transact(socket, req);
     ASSERT_OK(response);
     EXPECT_THAT(response->create_publisher().error(),
                 HasSubstr("can't set " + field))

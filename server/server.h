@@ -7,6 +7,7 @@
 #define _xSERVERSERVER_H
 
 #include "absl/container/flat_hash_map.h"
+#include <string_view>
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -286,7 +287,7 @@ public:
   absl::Status RemapChannel(ServerChannel *channel, int64_t slot_size,
                             int num_slots,
                             uint64_t subscriber_queue_arena_size);
-  ServerChannel *FindChannel(const std::string &channel_name);
+  ServerChannel *FindChannel(std::string_view channel_name);
   void RemoveChannel(ServerChannel *channel);
 
 private:

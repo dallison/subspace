@@ -4,18 +4,17 @@
 
 #pragma once
 
-#include "asil_client/shm_layout.h"
+#include "common/atomic_bitset.h"
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 
 namespace subspace {
-namespace asil {
 
 // A view of an AtomicBitSet in shared memory.  The memory orders match
-// common/atomic_bitset.h.  The bit count stored in shared memory is ignored;
-// the view uses the count the server reported for the channel.
+// AtomicBitSet.  The bit count stored in shared memory is ignored; the view
+// uses the count it is given, which comes from the server.
 class BitsetView {
 public:
   BitsetView() = default;
@@ -91,11 +90,10 @@ public:
 
 private:
   static uint64_t Mask(int bit) { return uint64_t{1} << (bit % 64); }
-  int NumWords() const { return static_cast<int>(shm::BitsToWords(num_bits_)); }
+  int NumWords() const { return static_cast<int>(BitsToWords(num_bits_)); }
 
   std::atomic<uint64_t> *words_ = nullptr;
   int num_bits_ = 0;
 };
 
-} // namespace asil
 } // namespace subspace

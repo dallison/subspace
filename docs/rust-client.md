@@ -433,9 +433,9 @@ bazelisk test //rust_client:client_test
 bazelisk test //rust_client:latency_test
 ```
 
-The build uses `prost` for protobuf code generation (via a `build.rs` script)
-and communicates with the server using the same protobuf wire format as the C++
-client.
+The build uses `prost` for protobuf messages that travel on channels, such as
+telemetry and split-buffer metadata files. The client-server socket uses the
+native Phaser payload, the same bytes the C++ clients send.
 
 ## Architecture
 

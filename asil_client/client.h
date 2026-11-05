@@ -58,7 +58,10 @@ public:
     return subscriber.Open(*this, channel_name, options);
   }
 
-  // Why the server rejected the last request that returned kServerRejected.
+  // The detail for the last handshake that failed with one. For
+  // kServerRejected this is the server's reason. For kCapacityExceeded it
+  // says which buffer the request or response did not fit. Empty when the
+  // last such failure had no detail.
   const char *LastServerError() const;
 
 private:
