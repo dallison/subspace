@@ -28,6 +28,7 @@
 #include <mutex>
 #include <optional>
 #include <sys/resource.h>
+#include <thread>
 #include <sys/stat.h>
 #include <type_traits>
 #include <utility>
@@ -2177,6 +2178,49 @@ TEST_F(ClientTest, PlaceholderSubscriberLearnsSplitBuffersOnReload) {
       sub->Prefix(sub->GetSlot(pub_status->slot_id));
   ASSERT_NE(nullptr, sub_prefix);
   EXPECT_NE(reinterpret_cast<const void *>(sub_prefix), msg->buffer);
+}
+
+// Publisher and subscriber counts live in the system control block, which
+// other threads can read while a placeholder subscriber reloads. The reload
+// replaces the channel's other shared memory but must keep that block mapped
+// at the same address.
+TEST_F(ClientTest, ChannelCountersStayReadableDuringPlaceholderReload) {
+  // Each pass creates a channel and a reader thread. A few passes cover the
+  // reload; hundreds of them run past the valgrind test limit.
+  constexpr int kReloads = 8;
+  subspace::Client sub_client;
+  subspace::Client pub_client;
+  ASSERT_OK(sub_client.Init(Socket()));
+  ASSERT_OK(pub_client.Init(Socket()));
+  for (int i = 0; i < kReloads; ++i) {
+    const std::string channel =
+        absl::StrFormat("counters_during_reload_%d", i);
+    absl::StatusOr<Subscriber> sub = sub_client.CreateSubscriber(channel);
+    ASSERT_OK(sub);
+    const subspace::ChannelCounters *counters = &sub->GetChannelCounters();
+    absl::StatusOr<Publisher> pub =
+        pub_client.CreatePublisher(channel, 32, 4);
+    ASSERT_OK(pub);
+
+    std::atomic<bool> reloaded{false};
+    uint16_t max_pubs_seen = 0;
+    std::thread reader([&sub, &reloaded, &max_pubs_seen]() {
+      while (!reloaded.load(std::memory_order_relaxed)) {
+        max_pubs_seen = std::max(
+            max_pubs_seen, sub->GetChannelCounters().num_pubs);
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+      }
+    });
+    absl::StatusOr<Message> msg = sub->ReadMessage();
+    ASSERT_OK(msg);
+    reloaded.store(true, std::memory_order_relaxed);
+    reader.join();
+
+    EXPECT_FALSE(sub->IsPlaceholder());
+    EXPECT_EQ(&sub->GetChannelCounters(), counters);
+    EXPECT_LE(max_pubs_seen, 1);
+    EXPECT_EQ(1, sub->GetChannelCounters().num_pubs);
+  }
 }
 
 TEST_F(ClientTest, PlaceholderSubscriberReloadRebuildsCcbSubscriberCount) {

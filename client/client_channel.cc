@@ -190,24 +190,47 @@ absl::Status ClientChannel::Map(SharedMemoryFds fds,
   if (!checked_ccb_size.ok()) {
     return checked_ccb_size.status();
   }
-  scb_ = reinterpret_cast<SystemControlBlock *>(MapMemory(
-      scb_fd.Fd(), sizeof(SystemControlBlock), PROT_READ | PROT_WRITE, "SCB"));
-  if (scb_ == MAP_FAILED) {
-    scb_ = nullptr;
+  // A reload keeps the system control block it already mapped, as long as
+  // it is the same one. Every channel in this client maps that block from
+  // the same file descriptor, and a reconnect to a new server session gives
+  // a different file, which must be mapped again.
+  struct stat scb_stat;
+  if (fstat(scb_fd.Fd(), &scb_stat) != 0) {
     return absl::InternalError(absl::StrFormat(
-        "Failed to map SystemControlBlock: %s (scb_fd=%d, ccb_fd=%d, "
-        "bcb_fd=%d, scb_size=%zu, ccb_size=%zu, bcb_size=%zu)",
-        strerror(errno), scb_fd.Fd(), fds.ccb.Fd(), fds.bcb.Fd(),
-        sizeof(SystemControlBlock), *checked_ccb_size,
-        sizeof(BufferControlBlock)));
+        "Failed to stat SystemControlBlock fd %d: %s", scb_fd.Fd(),
+        strerror(errno)));
+  }
+  if (scb_ != nullptr &&
+      (scb_stat.st_dev != scb_dev_ || scb_stat.st_ino != scb_ino_)) {
+    UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+    scb_ = nullptr;
+  }
+  const bool maps_scb = scb_ == nullptr;
+  if (maps_scb) {
+    scb_ = reinterpret_cast<SystemControlBlock *>(
+        MapMemory(scb_fd.Fd(), sizeof(SystemControlBlock),
+                  PROT_READ | PROT_WRITE, "SCB"));
+    if (scb_ == MAP_FAILED) {
+      scb_ = nullptr;
+      return absl::InternalError(absl::StrFormat(
+          "Failed to map SystemControlBlock: %s (scb_fd=%d, ccb_fd=%d, "
+          "bcb_fd=%d, scb_size=%zu, ccb_size=%zu, bcb_size=%zu)",
+          strerror(errno), scb_fd.Fd(), fds.ccb.Fd(), fds.bcb.Fd(),
+          sizeof(SystemControlBlock), *checked_ccb_size,
+          sizeof(BufferControlBlock)));
+    }
+    scb_dev_ = scb_stat.st_dev;
+    scb_ino_ = scb_stat.st_ino;
   }
 
   ccb_ = reinterpret_cast<ChannelControlBlock *>(
       MapMemory(fds.ccb.Fd(), *checked_ccb_size, PROT_READ | PROT_WRITE, "CCB"));
   if (ccb_ == MAP_FAILED) {
     int mmap_errno = errno;
-    UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
-    scb_ = nullptr;
+    if (maps_scb) {
+      UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+      scb_ = nullptr;
+    }
     ccb_ = nullptr;
     return absl::InternalError(absl::StrFormat(
         "Failed to map ChannelControlBlock: %s (scb_fd=%d, ccb_fd=%d, "
@@ -217,9 +240,11 @@ absl::Status ClientChannel::Map(SharedMemoryFds fds,
   }
   if (ccb_->version != kChannelControlBlockVersion) {
     const uint32_t version = ccb_->version;
-    UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+    if (maps_scb) {
+      UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+      scb_ = nullptr;
+    }
     UnmapMemory(ccb_, *checked_ccb_size, "CCB");
-    scb_ = nullptr;
     ccb_ = nullptr;
     return absl::FailedPreconditionError(absl::StrFormat(
         "unsupported channel control block version %u (expected %u)",
@@ -230,9 +255,11 @@ absl::Status ClientChannel::Map(SharedMemoryFds fds,
       fds.bcb.Fd(), sizeof(BufferControlBlock), PROT_READ | PROT_WRITE, "BCB"));
   if (bcb_ == MAP_FAILED) {
     int mmap_errno = errno;
-    UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+    if (maps_scb) {
+      UnmapMemory(scb_, sizeof(SystemControlBlock), "SCB");
+      scb_ = nullptr;
+    }
     UnmapMemory(ccb_, *checked_ccb_size, "CCB");
-    scb_ = nullptr;
     ccb_ = nullptr;
     bcb_ = nullptr;
     return absl::InternalError(absl::StrFormat(
@@ -437,17 +464,23 @@ absl::Status ClientChannel::AttachSplitBuffers(int num_buffers) {
   return absl::OkStatus();
 }
 
+void ClientChannel::UnmapForReload() {
+  UnmapChannelMemory();
+  for (size_t i = 0; i < buffers_.size(); i++) {
+    UnmapBufferSet(i, *buffers_[i], /*destroy_owned_buffers=*/true);
+  }
+  buffers_.clear();
+}
+
 void ClientChannel::Unmap() {
   if (scb_ == nullptr) {
     // Not yet mapped.
     return;
   }
-  Channel::Unmap();
-
-  for (size_t i = 0; i < buffers_.size(); i++) {
-    UnmapBufferSet(i, *buffers_[i], /*destroy_owned_buffers=*/true);
-  }
-  buffers_.clear();
+  UnmapForReload();
+  auto *scb = scb_;
+  scb_ = nullptr;
+  UnmapMemory(scb, sizeof(SystemControlBlock), "SCB");
 }
 
 void ClientChannel::Dump(std::ostream &os) const {

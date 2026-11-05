@@ -1784,7 +1784,9 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
   const bool remap_ccb = subscriber->NumSlots() == 0;
   if (remap_ccb) {
     subscriber->ResetDeliveryState();
-    subscriber->Unmap();
+    // Leave the system control block mapped. Its counters are read from
+    // other threads, and every channel in this client shares the mapping.
+    subscriber->UnmapForReload();
   }
 
   if (!sub_resp.type().empty()) {
