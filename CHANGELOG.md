@@ -68,6 +68,169 @@
 - Abseil 20250814.1, protobuf 33.4, cpp_toolbelt 2.1.6 and phaser 2.1.3 in
   the Bazel build. CMake uses cpp_toolbelt 2.1.6.
 
+### Bridge and Tunnel Plugins
+- Server plugins can change messages as they cross a native bridge or the
+  tunnel. `onSend` runs on the way out and `onReceive` on the way in. If a plugin
+  changes the payload, the server writes a new checksum. `SetChecksumSize`
+  and `SetChecksumCallback` tell it the checksum length and function, the
+  same way a client does. The default is a 4-byte CRC32. An unchanged message
+  keeps the checksum its publisher wrote. Rebuild existing plugins against
+  this server; the plugin interface gained these two functions.
+
+### Mutual TLS
+- Bridge connections, including retirement sockets, and tunnel connections
+  can require a certificate from both sides. The server uses BoringSSL
+  (Bazel) or OpenSSL (CMake). Build it in with `--config=mtls` or
+  `-DSUBSPACE_ENABLE_MTLS=ON`; a server built without it keeps the cleartext
+  protocols. `--mtls_cert`, `--mtls_key`, and `--mtls_ca` turn it on at run
+  time, and `Server::SetMtlsCredentials` does the same for an embedded
+  server. See `docs/mtls.md`.
+
+### Tunnel-Compatible Discovery and Bridging
+- The server can exchange channels over TCP with peers that use the Cruise
+  IPC tunnel and discovery protocols. `--tunnel` turns it on, and
+  `--tunnel_config` names a configuration file in protobuf text format
+  (`proto/tunnel_config.proto`) that lists the device name, listen port,
+  peers, discovery denylist and refresh interval. Programs that embed the
+  server call `Server::SetTunnelConfig`. See `docs/tunnel.md`.
+- Tunnel discovery uses the Cruise protobuf format on
+  `/ipc/discovery/proto/receive` (`proto/tunnel_discovery.proto`). ROS-encoded
+  discovery is not supported; connections that carry it are ignored.
+- Static routes carry channels without discovery. A `send_routes` entry sends
+  a channel published on this server to the peers it names, whether or not
+  they ask for it. A `receive_routes` entry announces a subscription only to
+  the peers it names, and sets the multiplexer and virtual channel ID used if
+  the tunnel creates the channel.
+- `disable_discovery` turns tunnel discovery off for every peer, or, on a
+  `peers` entry, for that peer. Data connections and static routes still run.
+- `docs/tunnel.md` describes the tunnel's wire format, discovery protocol and
+  channels.
+- An incoming tunnel connection is closed if its handshake doesn't arrive
+  within 5 seconds.
+- The tunnel runs alongside native discovery and bridging, and the two never
+  forward each other's messages. With `--local --tunnel` only the tunnel runs.
+- Tunnel channels resize with their messages and have no maximum message
+  size of their own. Messages too large for a fixed-size or capped channel
+  are dropped on arrival, and messages whose packet would exceed 2 GiB are
+  not sent. Both cases are logged.
+- The tunnel never changes or recomputes a message's checksum, so custom
+  checksum callbacks work across it. Flags cross unchanged, and a message
+  whose virtual channel has a different ID on the receiving server keeps the
+  sender's ID in its prefix.
+- `Publisher::PublishMessageWithPrefix` takes an optional
+  `use_vchan_id_from_prefix`. When it's false, the message goes to the
+  publisher's own virtual channel and the prefix keeps the sender's
+  `vchan_id`.
+- CMake and Android builds now generate the tunnel protos alongside
+  `subspace.proto`.
+- `tunnel_stress_test` covers high message rates on reliable and unreliable
+  channels, many channels flowing both ways at once, and a stream that carries
+  on while each server in turn is killed and restarted. On an unreliable
+  channel messages can be dropped, but what arrives is in order and ends with
+  the last message sent. `tunnel_test` checks that two servers connected both
+  natively and through the tunnel receive each message twice and that nothing
+  loops.
+
+### Asio Waits and Shutdown
+- With the Boost.Asio backend, `async::WaitReadable`, `WaitWritable` and
+  `WaitEither` no longer return before the fd is ready. Asio's reactor can
+  deliver a readiness event left over from an earlier wait, so the waits now
+  check with `poll()` and wait again if the fd isn't ready. Tunnel connections
+  stalled on this, because a readable connection looks like the peer closing
+  it.
+- On Linux, a coroutine that waits on an fd another coroutine is already
+  waiting on now gets an `InternalError` at once. It used to throw, which
+  ended the coroutine without a trace. On macOS, asio's kqueue reactor
+  accepts the second wait and never wakes the first, so two coroutines must
+  never wait on the same fd at once.
+- A cancelled wait, as at graceful shutdown, returns `CancelledError` instead
+  of `InternalError`, and a client whose request is cancelled no longer
+  reconnects. A server with many in-process clients, such as one per tunnel or
+  bridge connection, could hang at shutdown, with clients blocked connecting
+  to a server that had stopped accepting connections.
+
+### Unreliable Subscribers That Fall Behind
+- An unreliable publisher no longer loses the message it has just published.
+  A subscriber sets a slot's retired bit just after releasing the slot, so
+  a publisher can reuse the slot in between and the bit then marks the new
+  message. A publisher that took the slot for that bit overwrote a message
+  nobody had read, often the newest, and a subscriber waiting on its poll fd
+  then waited for the next message. Publishers now take a slot for its
+  retired bit only if the slot's refs show every subscriber has seen and
+  released it.
+- A subscriber that falls behind an unreliable publisher no longer reads
+  messages out of order. Its snapshot of the slots could catch one that a
+  publisher was reusing, with ordinal and timestamp zeroed. That entry sorted
+  first, and since a claim with ordinal 0 matches any message, the
+  subscriber took the message published there next ahead of older ones.
+  Snapshots now keep a slot only while it holds the message its refs were
+  committed with.
+- `ReclaimBufferLease` makes the same check, so it returns an empty lease for
+  a slot whose retired bit is stale. It also does so for a slot that retired
+  before a subscriber joined, until the new subscriber has released it too.
+- The Rust client has both fixes. Its subscriber already skipped older
+  messages rather than reading them late, but its publisher had the same
+  stale retired bits.
+
+### Configurable Server Coroutine Stack
+- Coroutines spawned by the server (`AsyncRuntime`) and by the shadow process
+  use a build-time stack size. The default remains 64 KiB.
+- A downstream Bazel module sets `subspace.coroutine_stack_size(bytes = N)`
+  next to `bazel_dep`. Inside this repo, Bazel uses
+  `--//:coroutine_stack_size=N`. CMake uses
+  `-DSUBSPACE_COROUTINE_STACK_SIZE=N`. `N` must be a positive multiple of
+  4096. This is process memory, not shared memory, so clients do not need the
+  same value.
+- AddressSanitizer builds still use at least 256 KiB. A configured size
+  larger than that is kept.
+
+### Late Subscribers Do Not Count Channel History As Drops
+- A subscriber created on a channel with history no longer reports that
+  history as dropped messages. A slot held by another subscriber is never
+  reused, so a new subscriber's first message could be far older than the
+  rest of the history, and the jump to the next message counted as drops.
+- At creation, a subscriber remembers the newest ordinal already published on
+  each virtual channel it reads. Ordinal gaps up to that point are history,
+  not drops. A virtual channel subscriber remembers only the multiplexer and
+  its own virtual channel. C++ and Rust behave the same.
+- Drop detection now also runs on a subscriber's first read, so messages lost
+  between creation and the first read are counted. A subscriber on a channel
+  with nothing published still starts counting at its first message.
+- `OrdinalAccumulator` has a read-only `PeekNext` (`peek_next` in Rust). The
+  shared-memory layout is unchanged.
+
+### Per-Interval Statistics
+- On `/subspace/Statistics`, each channel's `total_messages`, `total_bytes`
+  and `total_drops` now count the interval since the previous message
+  instead of the channel's lifetime. `GetChannelStats` still returns
+  lifetime totals.
+- A channel removed and created again under the same name counts from its
+  creation. A new virtual channel counts from its creation, not from the
+  creation of its multiplexer. If a `Statistics` message fails to publish,
+  the next message also counts its interval.
+- `Statistics` carries the server's `machine_name`, set with
+  `Server::SetMachineName`, and a `sequence` that goes up by one per
+  published message. A gap in `sequence` means lost intervals.
+
+### Larger Server Coroutine Stacks Under ASan
+- With AddressSanitizer, server and shadow coroutines get at least 256 KiB
+  of stack. On macOS, ASan's `strerror` interceptor alone uses about 56 KiB
+  of stack, so an error path that formatted `errno` could run off the end of
+  a 64 KiB stack and corrupt the heap. A build that sets a larger coroutine
+  stack keeps that size. See `subspace.coroutine_stack_size`.
+
+### Checksum Covers Only Publisher Flags
+- The message checksum now covers only the `kMessageActivate` and
+  `kMessageHasChecksum` bits of the prefix `flags`
+  (`kChecksummedMessageFlags`). Other flags, such as `kMessageBridged`,
+  `kMessageCrossMachine` or a bit a program sets itself, can be set after
+  publishing, for example while forwarding a message over a bridge or tunnel,
+  without invalidating the checksum. C++ and Rust compute the same value.
+  Messages with only those two flags set have the same checksum as before.
+- `GetMessageChecksumData` returns a `MessageChecksumData` holding a masked
+  copy of the prefix fields. Pass `Spans()` to the checksum calculation. The
+  Rust `get_message_checksum_data` takes a `PREFIX_FIELDS_LEN` scratch buffer.
+
 ### Stuck Subscriber Warning
 - A subscriber now logs an error when a message has been waiting for 5
   seconds that it can't read because it already holds `max_active_messages`

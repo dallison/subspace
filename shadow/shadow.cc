@@ -4,6 +4,7 @@
 // See LICENSE file for licensing information.
 
 #include "shadow/shadow.h"
+#include "common/coroutine_stack.h"
 #include "absl/strings/str_format.h"
 #include <algorithm>
 #include <unistd.h>
@@ -109,7 +110,8 @@ absl::Status Shadow::Run() {
   NotifyEvent();
 
   scheduler_.Spawn([this]() { ListenerCoroutine(); },
-                   {.name = "Shadow listener"});
+                   {.name = "Shadow listener",
+                    .stack_size = CoroutineStackSize()});
 
   scheduler_.Run();
   return absl::OkStatus();
@@ -129,7 +131,8 @@ void Shadow::ListenerCoroutine() {
     auto client = std::make_shared<toolbelt::UnixSocket>(std::move(*accepted));
 
     scheduler_.Spawn([this, client]() { ClientCoroutine(client); },
-                     {.name = "Shadow client"});
+                     {.name = "Shadow client",
+                      .stack_size = CoroutineStackSize()});
   }
 }
 

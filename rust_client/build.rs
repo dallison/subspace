@@ -23,10 +23,10 @@ fn find_well_known_types(start: &std::path::Path, depth: u32) -> Option<String> 
     None
 }
 
-fn max_channels() -> String {
-    println!("cargo:rerun-if-env-changed=SUBSPACE_MAX_CHANNELS");
-    println!("cargo:rerun-if-env-changed=SUBSPACE_MAX_CHANNELS_FILE");
-    if let Ok(path) = std::env::var("SUBSPACE_MAX_CHANNELS_FILE") {
+fn read_config_value(env_var: &str, file_env_var: &str, default: &str) -> String {
+    println!("cargo:rerun-if-env-changed={env_var}");
+    println!("cargo:rerun-if-env-changed={file_env_var}");
+    if let Ok(path) = std::env::var(file_env_var) {
         if !path.is_empty() {
             println!("cargo:rerun-if-changed={path}");
             return std::fs::read_to_string(&path)
@@ -35,12 +35,28 @@ fn max_channels() -> String {
                 .to_string();
         }
     }
-    std::env::var("SUBSPACE_MAX_CHANNELS").unwrap_or_else(|_| "1024".to_string())
+    std::env::var(env_var).unwrap_or_else(|_| default.to_string())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let channels = max_channels();
+    let channels = read_config_value(
+        "SUBSPACE_MAX_CHANNELS",
+        "SUBSPACE_MAX_CHANNELS_FILE",
+        "1024",
+    );
     println!("cargo:rustc-env=SUBSPACE_MAX_CHANNELS={channels}");
+    let slot_owners = read_config_value(
+        "SUBSPACE_MAX_SLOT_OWNERS",
+        "SUBSPACE_MAX_SLOT_OWNERS_FILE",
+        "1024",
+    );
+    println!("cargo:rustc-env=SUBSPACE_MAX_SLOT_OWNERS={slot_owners}");
+    let max_buffers = read_config_value(
+        "SUBSPACE_MAX_BUFFERS",
+        "SUBSPACE_MAX_BUFFERS_FILE",
+        "341",
+    );
+    println!("cargo:rustc-env=SUBSPACE_MAX_BUFFERS={max_buffers}");
 
     let proto_file = std::env::var("SUBSPACE_PROTO_FILE")
         .unwrap_or_else(|_| "../proto/subspace.proto".into());

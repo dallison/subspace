@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/subspace_logo.jpg" alt="Subspace logo" width="640">
+</p>
+
 # Subspace IPC
 Next Generation, sub-microsecond latency shared memory IPC.
 
@@ -54,6 +58,7 @@ See the file docs/subspace.pdf for full documentation.  Additional documentation
 - [Client Architecture](docs/client-architecture.md)
 - [Server Architecture](docs/server-architecture.md)
 - [Asio Backend and vsock Bridging](docs/asio-backend.md)
+- [Tunnel-Compatible Discovery and Bridging](docs/tunnel.md)
 - [Rust Client](docs/rust-client.md)
 - [Shadow Process (Crash Recovery)](docs/shadow-process.md)
 - [Running Subspace on Android](docs/android.md)
@@ -104,19 +109,26 @@ The `.bazelrc` file defines configs that select build-time options:
 |---|---|
 | `--config=linux_memfd` | On Linux, back shared memory with anonymous `memfd_create` objects instead of named `/dev/shm` ones. |
 | `--config=slot_size_64` | Expose 64 bit slot sizes in the C and C++ client APIs, allowing slots larger than 2GB. See [Slot Sizes](docs/slot-sizes.md#64-bit-slot-sizes). |
+| `--config=mtls` | Protect bridge and tunnel connections with mutual TLS (BoringSSL). See [Mutual TLS](docs/mtls.md). |
 
 The maximum number of channels in one server session defaults to 1024. `N` must be a positive multiple of 64. This sizes the shared-memory system control block, so the server and every client, including the Rust client, must be built with the same value.
 
 A repo that imports Subspace with `bazel_dep` sets the limit in its root `MODULE.bazel`:
 
 ```python
-bazel_dep(name = "subspace", version = "3.2.5")
+bazel_dep(name = "subspace", version = "3.2.7")
 
 subspace = use_extension("@subspace//:extensions.bzl", "subspace")
 subspace.max_channels(count = 8192)
 ```
 
 That applies to the server and every client. See [Setting the channel limit from another Bazel build](docs/max-channels.md).
+
+The per-channel publisher/subscriber limit defaults to 1024 (`kMaxSlotOwners`). Downstream modules call `subspace.max_slot_owners(count = N)` on the same extension. See [Setting the slot-owner limit from another Bazel build](docs/max-slot-owners.md).
+
+The BCB buffer-table limit defaults to 341 (`kMaxBuffers`), so the Buffer Control Block is 4096 bytes on typical platforms. Call `subspace.max_buffers(count = N)` when a channel needs more distinct payload segments (for example many resizes). See [Setting the BCB buffer-table limit](docs/max-buffers.md).
+
+Each coroutine the server and the shadow process spawn has a 64 KiB stack by default. Call `subspace.coroutine_stack_size(bytes = N)` to change it. `N` must be a positive multiple of 4096. This is process memory, not shared memory, so clients do not need the same value. See [Setting the server coroutine stack size](docs/coroutine-stack-size.md).
 
 To raise the limit while building this repository:
 
@@ -250,11 +262,17 @@ make -j$(nproc)
 | `SUBSPACE_LINUX_USE_MEMFD` | `OFF` | On Linux, back shared memory with anonymous `memfd_create` objects instead of named `/dev/shm` ones. |
 | `SUBSPACE_64BIT_SLOT_SIZE` | `OFF` | Expose 64 bit slot sizes in the C and C++ client APIs, allowing slots larger than 2GB. See [Slot Sizes](docs/slot-sizes.md#64-bit-slot-sizes). |
 | `SUBSPACE_MAX_CHANNELS` | `1024` | Maximum channels per server session. Must be a positive multiple of 64. The same value is passed to the Rust client. |
+| `SUBSPACE_MAX_SLOT_OWNERS` | `1024` | Maximum publishers plus subscribers per channel. Must be a positive integer. The same value is passed to the Rust client. |
+| `SUBSPACE_MAX_BUFFERS` | `341` | Maximum distinct payload buffer segments per channel (BCB size). Must be a positive integer. Default fits the BCB in one 4 KiB page. Passed to the Rust client. |
+| `SUBSPACE_COROUTINE_STACK_SIZE` | `65536` | Stack size in bytes for each server and shadow coroutine. Must be a positive multiple of 4096. Clients do not need the same value. |
+| `SUBSPACE_ENABLE_MTLS` | `OFF` | Protect bridge and tunnel connections with mutual TLS, using the system OpenSSL. See [Mutual TLS](docs/mtls.md). |
 
-These options change struct layouts or function signatures, so they must be set
-consistently for the library and everything that includes its headers. The
-channel limit in particular sizes shared memory, so the server and every
-client have to agree.
+`SUBSPACE_64BIT_SLOT_SIZE` and the three shared-memory limits change struct
+layouts or function signatures, so they must be set consistently for the
+library and everything that includes its headers. The channel, slot-owner, and
+buffer limits size shared memory, so the server and every client have to
+agree. `SUBSPACE_COROUTINE_STACK_SIZE` is only the server and shadow coroutine
+stack.
 
 ### Running Tests
 

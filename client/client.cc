@@ -24,6 +24,13 @@
 namespace subspace {
 
 namespace {
+void FillInitRequest(phaser::InitRequest *init, const std::string &client_name) {
+  init->set_client_name(client_name);
+  init->set_max_channels(kMaxChannels);
+  init->set_max_slot_owners(kMaxSlotOwners);
+  init->set_max_buffers(static_cast<int32_t>(kMaxBuffers));
+}
+
 std::atomic<bool> default_use_split_buffers{false};
 
 #if defined(__QNX__) || defined(__QNXNTO__)
@@ -244,13 +251,16 @@ absl::Status ClientImpl::Init(const std::string &server_socket,
   name_ = client_name;
   socket_name_ = server_socket;
   phaser::Request req;
-  req.mutable_init()->set_client_name(client_name);
+  FillInitRequest(req.mutable_init(), client_name);
   phaser::Response resp;
   std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
   status = SendRequestReceiveResponse(req, resp, fds);
   if (!status.ok()) {
     return status;
+  }
+  if (!resp.init().error().empty()) {
+    return absl::InternalError(resp.init().error());
   }
   if (absl::Status fd_status = CheckFdIndex(fds, resp.init().scb_fd_index(),
                                             "scb_fd", "InitResponse");
@@ -704,6 +714,7 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
   if (absl::Status status = channel->AttachBuffers(); !status.ok()) {
     return status;
   }
+  channel->RememberPublishedOrdinals();
 
   ApplySubscriberResponseFds(channel.get(), sub_resp, fds);
 
@@ -1001,15 +1012,24 @@ ClientImpl::GetPublisherBufferMetadata(PublisherImpl *publisher,
 }
 
 absl::StatusOr<const Message>
-ClientImpl::PublishMessage(PublisherImpl *publisher, int64_t message_size) {
+ClientImpl::PublishMessage(PublisherImpl *publisher, int64_t message_size,
+                           bool notify_subscribers) {
   return PublishMessageInternal(publisher, message_size, /*omit_prefix=*/false,
-                                /*use_prefix_slot_id=*/false);
+                                /*use_prefix_slot_id=*/false,
+                                /*use_prefix_vchan_id=*/false,
+                                notify_subscribers);
+}
+
+void ClientImpl::NotifySubscribers(PublisherImpl *publisher) {
+  publisher->TriggerSubscribers();
 }
 
 absl::StatusOr<const Message>
 ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
                                    int64_t message_size, bool omit_prefix,
-                                   bool use_prefix_slot_id) {
+                                   bool use_prefix_slot_id,
+                                   bool use_prefix_vchan_id,
+                                   bool notify_subscribers) {
   // Lock is already held by the call to GetMessageBufferSpan.  This RAII
   // instance wil relesas the lock when we return from this function.
   ClientLockGuard guard(this, LockMode::kMaybeLocked);
@@ -1045,14 +1065,16 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
 
   Channel::PublishedMessage msg = publisher->ActivateSlotAndGetAnother(
       publisher->IsReliable(), /*is_activation=*/false, omit_prefix,
-      use_prefix_slot_id, publisher->ForTunnel());
+      use_prefix_slot_id, publisher->ForTunnel(), use_prefix_vchan_id);
 
   // Prevent use of old_slot.
   old_slot = nullptr;
 
   publisher->SetSlot(msg.new_slot);
 
-  publisher->TriggerSubscribers();
+  if (notify_subscribers) {
+    publisher->TriggerSubscribers();
+  }
   if (absl::Status status = publisher->UnmapUnusedBuffers(); !status.ok()) {
     return status;
   }
@@ -1182,7 +1204,7 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
         {.fd = fd.Fd(), .events = POLLIN}};
     int e = GetSyscallShim().poll_fn(
         fds, 2, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
-    if (timeout_ns == 0 && e == 0) {
+    if (timeout_ns != 0 && e == 0) {
       return absl::InternalError("Timeout waiting for reliable publisher");
     }
     if (e < 0) {
@@ -1286,7 +1308,7 @@ absl::StatusOr<int> ClientImpl::WaitForSubscriber(
         {.fd = fd.Fd(), .events = POLLIN}};
     int e = GetSyscallShim().poll_fn(
         fds, 2, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
-    if (timeout_ns == 0 && e == 0) {
+    if (timeout_ns != 0 && e == 0) {
       return absl::InternalError("Timeout waiting for subscriber");
     }
     if (e < 0) {
@@ -1397,12 +1419,10 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
 
   MessageSlot *new_slot = nullptr;
   MessageSlot *old_slot = subscriber->CurrentSlot();
-  int64_t last_ordinal = -1;
-  if (old_slot != nullptr) {
-    last_ordinal = old_slot->ordinal.load(std::memory_order_relaxed);
-    if (debug_) {
-      printf("read old slot: %d: %" PRId64 "\n", old_slot->id, last_ordinal);
-    }
+  if (debug_ && old_slot != nullptr) {
+    printf("read old slot: %d: %" PRId64 "\n", old_slot->id,
+           static_cast<int64_t>(
+               old_slot->ordinal.load(std::memory_order_relaxed)));
   }
 
   switch (mode) {
@@ -1451,7 +1471,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
                                  subscriber->MetadataSize());
       absl::Span<const std::byte> cksum =
           GetChecksumSpan(prefix, subscriber->ChecksumSize());
-      checksum_error = !subscriber->ValidateChecksum(data, cksum);
+      checksum_error = !subscriber->ValidateChecksum(data.Spans(), cksum);
     }
     if ((prefix->flags & kMessageActivate) != 0) {
       is_activation = true;
@@ -1513,8 +1533,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
       // publishers, so an ordinal gap is not evidence of a dropped message.
       // Queue-disabled and inherited-default subscribers retain ordinal-based
       // detection because they deliver through the ordered bitset path.
-      if (last_ordinal != -1 &&
-          subscriber->options_.SubscriberQueueSize() == 0) {
+      if (subscriber->options_.SubscriberQueueSize() == 0) {
         drops = std::max(
             drops, subscriber->DetectDrops(
                        new_slot->vchan_id.load(std::memory_order_relaxed)));
@@ -1639,6 +1658,14 @@ void ClientImpl::ReportIfSubscriberStuck(SubscriberImpl *subscriber) {
               subscriber->MaxActiveMessages(),
               silencing ? "; this warning is silenced until it reads again"
                         : "");
+}
+
+absl::StatusOr<Message>
+ClientImpl::ReadMessageFromBatch(SubscriberImpl *subscriber, ReadMode mode) {
+  ClientLockGuard guard(this);
+  return ReadMessageInternal(subscriber, mode,
+                             subscriber->options_.pass_activation,
+                             /*clear_trigger=*/false);
 }
 
 absl::StatusOr<Message>
@@ -1782,7 +1809,9 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
   const bool remap_ccb = subscriber->NumSlots() == 0;
   if (remap_ccb) {
     subscriber->ResetDeliveryState();
-    subscriber->Unmap();
+    // Leave the system control block mapped. Its counters are read from
+    // other threads, and every channel in this client shares the mapping.
+    subscriber->UnmapForReload();
   }
 
   if (!sub_resp.type().empty()) {
@@ -2361,7 +2390,7 @@ absl::Status ClientImpl::Reconnect() {
   }
 
   phaser::Request init_req;
-  init_req.mutable_init()->set_client_name(name_);
+  FillInitRequest(init_req.mutable_init(), name_);
   phaser::Response init_resp;
   std::vector<toolbelt::FileDescriptor> init_fds;
   init_fds.reserve(100);
@@ -2369,6 +2398,10 @@ absl::Status ClientImpl::Reconnect() {
   if (!status.ok()) {
     cleanup();
     return status;
+  }
+  if (!init_resp.init().error().empty()) {
+    cleanup();
+    return absl::InternalError(init_resp.init().error());
   }
   scb_fd_ = std::move(init_fds[init_resp.init().scb_fd_index()]);
   session_id_ = init_resp.init().session_id();
@@ -2393,6 +2426,14 @@ absl::Status ClientImpl::Reconnect() {
 
   cleanup();
   return absl::OkStatus();
+}
+
+bool ClientImpl::ShouldReconnect(const absl::Status &failure) const {
+  // A cancelled wait means the coroutine running this client is being
+  // stopped, not that the server has gone.  Reconnecting then can block in
+  // connect() for good if the server has stopped accepting connections, as it
+  // does while it shuts down.
+  return was_connected_ && !reconnecting_ && !absl::IsCancelled(failure);
 }
 
 absl::Status ClientImpl::ReregisterPublisher(PublisherImpl *publisher) {
@@ -2458,7 +2499,7 @@ absl::Status ClientImpl::SendRequestReceiveResponse(
         socket_.SendMessage(wire.Payload(), *msg_len, SocketContext());
     if (!n.ok()) {
       socket_.Close();
-      if (was_connected_ && !reconnecting_) {
+      if (ShouldReconnect(n.status())) {
         if (absl::Status rs = Reconnect(); rs.ok()) {
           return SendRequestReceiveResponse(req, response, fds, send_fds);
         } else {
@@ -2480,7 +2521,7 @@ absl::Status ClientImpl::SendRequestReceiveResponse(
       socket_.ReceiveVariableLengthMessage(SocketContext());
   if (!recv_msg.ok()) {
     socket_.Close();
-    if (was_connected_ && !reconnecting_) {
+    if (ShouldReconnect(recv_msg.status())) {
       if (absl::Status rs = Reconnect(); rs.ok()) {
         return SendRequestReceiveResponse(req, response, fds, send_fds);
       } else {
@@ -2520,7 +2561,7 @@ absl::Status ClientImpl::SendOneWayRequest(
       socket_.SendMessage(wire.Payload(), *msg_len, SocketContext());
   if (!n.ok()) {
     socket_.Close();
-    if (was_connected_ && !reconnecting_) {
+    if (ShouldReconnect(n.status())) {
       if (absl::Status rs = Reconnect(); rs.ok()) {
         return SendOneWayRequest(req, fds);
       } else {

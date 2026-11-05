@@ -29,6 +29,10 @@ adb push bazel-bin/server/subspace_server /data/local/tmp/subspace_server
 adb push bazel-bin/client/client_test /data/local/tmp/client_test
 adb push bazel-bin/client/bridge_test /data/local/tmp/bridge_test
 adb push bazel-bin/common/split_buffer_test /data/local/tmp/split_buffer_test
+adb push bazel-bin/common/async/async_test /data/local/tmp/async_test
+adb push bazel-bin/server/tunnel_wire_test /data/local/tmp/tunnel_wire_test
+adb push bazel-bin/server/tunnel_test /data/local/tmp/tunnel_test
+adb push bazel-bin/server/tunnel_fake_peer_test /data/local/tmp/tunnel_fake_peer_test
 adb push bazel-bin/coro_rpc/test/rpc_test /data/local/tmp/coro_rpc_test
 adb push bazel-bin/coro_rpc/server/server_test /data/local/tmp/coro_rpc_server_test
 adb push bazel-bin/coro_rpc/client/client_test /data/local/tmp/coro_rpc_client_test
@@ -72,6 +76,14 @@ adb shell "cd /data/local/tmp && $LIB ./client_test"
 
 echo "=== bridge_test ==="
 adb shell "cd /data/local/tmp && $LIB ./bridge_test"
+
+echo "=== async_test ==="
+adb shell "cd /data/local/tmp && $LIB ./async_test"
+
+echo "=== tunnel tests ==="
+adb shell "cd /data/local/tmp && $LIB ./tunnel_wire_test"
+adb shell "cd /data/local/tmp && $LIB ./tunnel_test"
+adb shell "cd /data/local/tmp && $LIB ./tunnel_fake_peer_test"
 
 echo "=== coro_rpc tests ==="
 adb shell "cd /data/local/tmp && $LIB ./coro_rpc_test"

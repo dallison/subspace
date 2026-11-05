@@ -121,7 +121,8 @@ jobs:
       # selected.  async_test exercises the asio WaitReadable/WaitEither/Sleep
       # and the StreamSocket/UDPSocket facade; client_test and bridge_test run
       # the real asio client/server port (including discovery, bridging and the
-      # multi-threaded data plane) end to end.
+      # multi-threaded data plane) end to end.  The tunnel tests run the
+      # tunnel's discovery and data plane on asio.
       - name: Build and test asio backend
         run: |
           bazel test \
@@ -130,6 +131,9 @@ jobs:
             //client:client_test \
             //client:bridge_test \
             //server:server_test \
+            //server:tunnel_test \
+            //server:tunnel_fake_peer_test \
+            //server:tunnel_stress_test \
             --//:coro_backend=asio \
             --verbose_failures \
             --test_output=errors \
@@ -453,10 +457,10 @@ jobs:
       # enable_testing() generates no DartConfiguration.tcl to carry a default.
       # Without --timeout a hung test runs until the job's hour cap and is
       # killed without CTest ever flushing its output, so the log never says
-      # which test stalled.  The suite normally takes ~80s in total and the
-      # slowest single test ~40s.
+      # which test stalled.  Debug rust_client_test compiles its tests and
+      # then runs the stress cases, which can take several minutes.
       - name: Run CMake tests
-        run: ctest --test-dir build/cmake-${{ matrix.variant }} --output-on-failure --timeout 300
+        run: ctest --test-dir build/cmake-${{ matrix.variant }} --output-on-failure --timeout 600
 
   cmake-android:
     name: cmake-android (x86_64)
@@ -535,6 +539,10 @@ jobs:
             //client:client_test \
             //client:bridge_test \
             //common:split_buffer_test \
+            //common/async:async_test \
+            //server:tunnel_wire_test \
+            //server:tunnel_test \
+            //server:tunnel_fake_peer_test \
             //plugins:nop_plugin.so \
             //plugins:split_buffer_free_test_plugin.so \
             //android/jni:libsubspace_jni.so \
@@ -607,6 +615,9 @@ jobs:
             //client:client_test \
             //client:bridge_test \
             //common:split_buffer_test \
+            //common/async:async_test \
+            //server:tunnel_test \
+            //server:tunnel_fake_peer_test \
             //plugins:nop_plugin.so \
             //plugins:split_buffer_free_test_plugin.so \
             //asio_rpc/test:rpc_test \

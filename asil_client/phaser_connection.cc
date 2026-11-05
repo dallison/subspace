@@ -4,6 +4,7 @@
 
 #include "asil_client/phaser_connection.h"
 
+#include "asil_client/shm_layout.h"
 #include "proto/subspace.phaser.h"
 
 #include <arpa/inet.h>
@@ -362,13 +363,20 @@ Error PhaserServerConnection::Transact(Build build, Read read, int send_fd) {
 Error PhaserServerConnection::Init(const char *client_name, InitReply &reply) {
   return Transact(
       [&](wire::Request &request) {
-        request.mutable_init()->set_client_name(View(client_name));
+        wire::InitRequest *init = request.mutable_init();
+        init->set_client_name(View(client_name));
+        init->set_max_channels(shm::kMaxChannels);
+        init->set_max_slot_owners(shm::kMaxSlotOwners);
+        init->set_max_buffers(shm::kMaxBuffers);
       },
       [&](const wire::Response &response) {
         if (!response.has_init()) {
           return Error::kProtocolError;
         }
         const wire::InitResponse &init = response.init();
+        if (!init.error().empty()) {
+          return Rejected(init.error().data(), init.error().size());
+        }
         if (Error e = DupFd(fds_, init.scb_fd_index(), reply.scb);
             e != Error::kOk) {
           return e;

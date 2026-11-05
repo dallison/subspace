@@ -42,6 +42,9 @@ endif()
 add_library(subspace_async STATIC
     async/context.h
     async/runtime.h
+    async/mtls.h
+    async/byte_stream.h
+    async/byte_stream.cc
     async/socket.h
     async/socket.cc
     async/wait.h
@@ -54,6 +57,13 @@ target_link_libraries(subspace_async PUBLIC
     toolbelt
     co
 )
+if(SUBSPACE_ENABLE_MTLS)
+    find_package(OpenSSL REQUIRED)
+    target_compile_definitions(subspace_async PUBLIC SUBSPACE_ENABLE_MTLS=1)
+    target_link_libraries(subspace_async PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+else()
+    target_compile_definitions(subspace_async PUBLIC SUBSPACE_ENABLE_MTLS=0)
+endif()
 if(SUBSPACE_CORO_BACKEND STREQUAL "asio")
     target_link_libraries(subspace_async PUBLIC Boost::asio Boost::coroutine)
 endif()
@@ -61,6 +71,10 @@ endif()
 add_executable(async_test async/async_test.cc)
 add_test(NAME async_test COMMAND async_test)
 target_link_libraries(async_test PUBLIC subspace_async gtest gtest_main)
+
+add_executable(mtls_test async/mtls_test.cc)
+add_test(NAME mtls_test COMMAND mtls_test)
+target_link_libraries(mtls_test PUBLIC subspace_async absl::status_matchers gtest gtest_main)
 
 add_executable(common_test common_test.cc)
 add_test(NAME common_test COMMAND common_test)

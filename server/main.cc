@@ -1,11 +1,14 @@
 // Copyright 2023-2026 David Allison
+// Tunnel support is Copyright 2026 General Motors LLC
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
+#include "proto/tunnel_config.pb.h"
 #include "server.h"
 #include "server/static_config.h"
+#include "server/tunnel_config.h"
 #include <cerrno>
 #include <csignal>
 #include <cstdint>
@@ -97,6 +100,19 @@ ABSL_FLAG(std::string, channel_config, "",
           "StaticChannelConfig file in protobuf text format.  The server "
           "creates its channels at startup, fixes their layout and allows no "
           "others (empty = channels are created on demand)");
+ABSL_FLAG(bool, tunnel, false,
+          "Run discovery and bridging compatible with the cruise tunnel "
+          "alongside the native kind.  Requires --tunnel_config.");
+ABSL_FLAG(std::string, tunnel_config, "",
+          "Tunnel configuration file in protobuf text format.  See "
+          "docs/tunnel.md.");
+ABSL_FLAG(std::string, mtls_cert, "",
+          "PEM certificate for mutual TLS on bridge and tunnel connections. "
+          "Requires --mtls_key, --mtls_ca, and a server built with mTLS.");
+ABSL_FLAG(std::string, mtls_key, "",
+          "PEM private key for --mtls_cert.  The key must be unencrypted.");
+ABSL_FLAG(std::string, mtls_ca, "",
+          "PEM CA certificate.  Peers must present a certificate this CA signed.");
 
 // Look up this host's local vsock context id (CID) so we can advertise it to
 // bridge peers.  Only meaningful on Linux with vsock support.
@@ -289,6 +305,31 @@ int main(int argc, char **argv) {
       fprintf(stderr, "%s\n", status.ToString().c_str());
       exit(1);
     }
+  }
+
+  const std::string tunnel_config_path = absl::GetFlag(FLAGS_tunnel_config);
+  if (absl::GetFlag(FLAGS_tunnel)) {
+    if (tunnel_config_path.empty()) {
+      fprintf(stderr, "--tunnel requires --tunnel_config\n");
+      exit(1);
+    }
+    absl::StatusOr<subspace::TunnelConfig> config =
+        subspace::LoadTunnelConfig(tunnel_config_path);
+    if (!config.ok()) {
+      fprintf(stderr, "%s\n", config.status().ToString().c_str());
+      exit(1);
+    }
+    // Run checks the configuration once it knows the device name.
+    server->SetTunnelConfig(*config);
+  } else if (!tunnel_config_path.empty()) {
+    fprintf(stderr, "Ignoring --tunnel_config because --tunnel isn't set\n");
+  }
+
+  const std::string mtls_cert = absl::GetFlag(FLAGS_mtls_cert);
+  const std::string mtls_key = absl::GetFlag(FLAGS_mtls_key);
+  const std::string mtls_ca = absl::GetFlag(FLAGS_mtls_ca);
+  if (!mtls_cert.empty() || !mtls_key.empty() || !mtls_ca.empty()) {
+    server->SetMtlsCredentials(mtls_cert, mtls_key, mtls_ca);
   }
 
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO

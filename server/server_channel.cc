@@ -287,6 +287,67 @@ void ServerChannel::RemoveBuffer(uint64_t session_id, Server *server) {
   client_buffers_.clear();
 }
 
+void ServerChannel::DiscardUnreplicatedMemfdBuffers() {
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
+  if (!IsTelemetryChannel() || ccb_ == nullptr || bcb_ == nullptr) {
+    return;
+  }
+  if (HasSplitBufferOptions() &&
+      GetSplitBufferOptions().use_split_buffers) {
+    return;
+  }
+
+  int num_buffers = ccb_->num_buffers.load(std::memory_order_acquire);
+  if (num_buffers <= 0) {
+    return;
+  }
+  if (num_buffers > static_cast<int>(kMaxBuffers)) {
+    num_buffers = static_cast<int>(kMaxBuffers);
+  }
+
+  int kept = 0;
+  for (; kept < num_buffers; ++kept) {
+    bool registered = false;
+    ForEachClientBuffer([&](const RegisteredClientBuffer &buffer) {
+      const ClientBufferHandleMetadata &metadata = buffer.metadata;
+      if (metadata.buffer_index == static_cast<uint32_t>(kept) &&
+          !metadata.is_prefix && metadata.slot_id == 0 && buffer.fd.Valid()) {
+        registered = true;
+      }
+    });
+    if (!registered) {
+      break;
+    }
+  }
+  if (kept == num_buffers) {
+    return;
+  }
+
+  for (int i = kept; i < num_buffers; ++i) {
+    bcb_->sizes[i].store(0, std::memory_order_relaxed);
+    bcb_->refs[i].store(0, std::memory_order_relaxed);
+  }
+  const int slot_count = NumSlots();
+  for (int32_t slot_id = 0; slot_id < slot_count; ++slot_id) {
+    MessageSlot &slot = ccb_->slots[slot_id];
+    const int buffer_index =
+        slot.buffer_index.load(std::memory_order_relaxed);
+    if (buffer_index >= kept) {
+      slot.buffer_index.store(-1, std::memory_order_relaxed);
+      slot.message_size.store(0, std::memory_order_relaxed);
+      slot.refs.store(0, std::memory_order_relaxed);
+    }
+  }
+  ccb_->num_buffers.store(kept, std::memory_order_release);
+  logger_.Log(toolbelt::LogLevel::kInfo,
+              "Discarded %d unreplicated memfd buffer(s) on recovered "
+              "telemetry channel %s",
+              num_buffers - kept, Name().c_str());
+#else
+  (void)this;
+#endif
+}
+
 uint64_t ServerChannel::GetVirtualMemoryUsage() const {
   if (!split_buffer_options_set_ || !split_buffer_options_.use_split_buffers ||
       ccb_ == nullptr || bcb_ == nullptr) {

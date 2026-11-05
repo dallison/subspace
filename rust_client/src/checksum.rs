@@ -3,7 +3,13 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-use crate::channel::{MessagePrefix, CHECKSUM_OFFSET};
+use crate::channel::{MessagePrefix, CHECKSUMMED_MESSAGE_FLAGS, CHECKSUM_OFFSET};
+
+const SLOT_ID_OFFSET: usize = std::mem::offset_of!(MessagePrefix, slot_id);
+const FLAGS_OFFSET: usize = std::mem::offset_of!(MessagePrefix, flags) - SLOT_ID_OFFSET;
+
+/// Bytes in the checksummed prefix fields (slot_id through metadata_size).
+pub const PREFIX_FIELDS_LEN: usize = CHECKSUM_OFFSET - SLOT_ID_OFFSET;
 
 #[rustfmt::skip]
 static CRC32_TABLE: [u32; 256] = [
@@ -83,7 +89,9 @@ pub fn verify_crc32_checksum(spans: &[&[u8]], checksum: &[u8]) -> bool {
 }
 
 /// Build three spans for checksum computation:
-///   [0] prefix fields before the checksum (slot_id through metadata_size)
+///   [0] prefix fields before the checksum (slot_id through metadata_size),
+///       copied into `prefix_fields` with flags masked to
+///       CHECKSUMMED_MESSAGE_FLAGS
 ///   [1] user metadata area (immediately after checksum storage)
 ///   [2] message payload
 ///
@@ -96,13 +104,19 @@ pub unsafe fn get_message_checksum_data<'a>(
     message_size: usize,
     checksum_size: i32,
     metadata_size: i32,
+    prefix_fields: &'a mut [u8; PREFIX_FIELDS_LEN],
 ) -> [&'a [u8]; 3] {
     let base = prefix as *const u8;
-    let slot_id_offset = std::mem::offset_of!(MessagePrefix, slot_id);
-    let prefix_fields_len = CHECKSUM_OFFSET - slot_id_offset;
+    prefix_fields.copy_from_slice(std::slice::from_raw_parts(
+        base.add(SLOT_ID_OFFSET),
+        PREFIX_FIELDS_LEN,
+    ));
+    let flags_bytes = &mut prefix_fields[FLAGS_OFFSET..FLAGS_OFFSET + 8];
+    let flags = i64::from_ne_bytes(flags_bytes.try_into().unwrap()) & CHECKSUMMED_MESSAGE_FLAGS;
+    flags_bytes.copy_from_slice(&flags.to_ne_bytes());
     let metadata_start = base.add(CHECKSUM_OFFSET + checksum_size as usize);
     [
-        std::slice::from_raw_parts(base.add(slot_id_offset), prefix_fields_len),
+        &prefix_fields[..],
         std::slice::from_raw_parts(metadata_start, metadata_size as usize),
         std::slice::from_raw_parts(buffer, message_size),
     ]

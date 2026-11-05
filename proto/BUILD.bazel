@@ -29,3 +29,17 @@ phaser_library(
     ],
     deps = [":subspace_proto"],
 )
+
+proto_library(
+    name = "tunnel_proto",
+    srcs = [
+        "tunnel_config.proto",
+        "tunnel_discovery.proto",
+        "tunnel_handshake.proto",
+    ],
+)
+
+cc_proto_library(
+    name = "tunnel_cc_proto",
+    deps = [":tunnel_proto"],
+)

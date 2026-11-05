@@ -67,23 +67,67 @@ Error PosixShmName(const char *shadow_file, char (&out)[64]) {
   return Error::kOk;
 }
 
-// The shadow file's length is the buffer's true size.  Only the first
-// publisher sets it.
-Error CreateShadowFile(const char *shadow_file, uint64_t size) {
+// The shadow file records the buffer size.  Its length is not the buffer
+// size: fstat of the shm object is page-aligned, and ftruncating the shadow
+// file would commit that much memory where /tmp is RAM-backed.  A leading
+// NUL keeps the server from reading the record as split-buffer metadata.
+constexpr char kPosixShadowMagic[8] = {'\0', 'S', 'S', 'B', 'S', 'I', 'Z', 'E'};
+
+struct PosixShadowRecord {
+  char magic[sizeof(kPosixShadowMagic)];
+  uint64_t size;
+};
+
+Error CreateShadowFile(const char *shadow_file) {
   const int fd = ::open(shadow_file, O_RDWR | O_CREAT | O_CLOEXEC, 0666);
   if (fd < 0) {
     return Error::kSharedMemoryError;
   }
-  struct stat st;
-  Error e = Error::kOk;
-  if (::fstat(fd, &st) != 0) {
-    e = Error::kSharedMemoryError;
-  } else if (st.st_size == 0 &&
-             ::ftruncate(fd, static_cast<off_t>(size)) != 0) {
-    e = Error::kSharedMemoryError;
-  }
   (void)::close(fd);
-  return e;
+  return Error::kOk;
+}
+
+Error WriteShadowSize(const char *shadow_file, uint64_t size) {
+  const int fd = ::open(shadow_file, O_WRONLY | O_TRUNC | O_CLOEXEC);
+  if (fd < 0) {
+    return Error::kSharedMemoryError;
+  }
+  PosixShadowRecord record = {};
+  std::memcpy(record.magic, kPosixShadowMagic, sizeof(kPosixShadowMagic));
+  record.size = size;
+  const ssize_t n = ::write(fd, &record, sizeof(record));
+  (void)::close(fd);
+  return n == static_cast<ssize_t>(sizeof(record)) ? Error::kOk
+                                                   : Error::kSharedMemoryError;
+}
+
+// Sets size to 0 when the creator has not recorded it yet.  A shadow file
+// longer than the record was sized with ftruncate by an older client.
+Error ReadShadowSize(const char *shadow_file, uint64_t &size) {
+  const int fd = ::open(shadow_file, O_RDONLY | O_CLOEXEC);
+  if (fd < 0) {
+    return Error::kSharedMemoryError;
+  }
+  struct stat st;
+  if (::fstat(fd, &st) != 0) {
+    (void)::close(fd);
+    return Error::kSharedMemoryError;
+  }
+  PosixShadowRecord record;
+  const ssize_t n = ::read(fd, &record, sizeof(record));
+  (void)::close(fd);
+  if (n == static_cast<ssize_t>(sizeof(record)) &&
+      std::memcmp(record.magic, kPosixShadowMagic, sizeof(kPosixShadowMagic)) ==
+          0) {
+    size = record.size;
+    return Error::kOk;
+  }
+  if (static_cast<uint64_t>(st.st_size) > sizeof(record)) {
+    size = static_cast<uint64_t>(st.st_size);
+    return Error::kOk;
+  }
+  size = 0;
+  return Error::kOk;
 }
 #endif
 
@@ -432,11 +476,30 @@ Error ChannelMemory::OpenBuffer(int index, bool writable, UniqueFd &fd,
     return e;
   }
   fd.Reset(OpenShm(shm_name, flags));
-  struct stat st;
-  if (!fd.Valid() || ::stat(name, &st) != 0) {
+  if (!fd.Valid()) {
     return Error::kSharedMemoryError;
   }
-  size = static_cast<uint64_t>(st.st_size);
+  // The creator writes the shadow record before sizing the shm object, so a
+  // nonzero shm size means the record is the buffer's real size.
+  size = 0;
+  for (int attempt = 0; attempt < kBufferWaitMilliseconds && size == 0;
+       attempt++) {
+    struct stat shm_st;
+    if (::fstat(fd.Get(), &shm_st) != 0) {
+      return Error::kSharedMemoryError;
+    }
+    if (shm_st.st_size > 0) {
+      if (Error e = ReadShadowSize(name, size); e != Error::kOk) {
+        return e;
+      }
+    }
+    if (size == 0) {
+      SleepMillisecond();
+    }
+  }
+  if (size == 0) {
+    return Error::kSharedMemoryError;
+  }
 #else
   fd.Reset(OpenShm(name, flags));
   if (!fd.Valid()) {
@@ -496,7 +559,7 @@ Error ChannelMemory::CreateBuffer(uint64_t full_size) {
 #else
   const bool root = ::getuid() == 0;
 #if ASIL_SHM_MODE == ASIL_SHM_POSIX
-  if (Error e = CreateShadowFile(name, full_size); e != Error::kOk) {
+  if (Error e = CreateShadowFile(name); e != Error::kOk) {
     return e;
   }
   char shm_name[64];
@@ -514,10 +577,21 @@ Error ChannelMemory::CreateBuffer(uint64_t full_size) {
     // EEXIST: another publisher created the buffer.
     return errno == EEXIST ? Error::kOk : Error::kSharedMemoryError;
   }
+#if ASIL_SHM_MODE == ASIL_SHM_POSIX
+  // Record the size before sizing the shm object, matching the standard
+  // client: an attacher that sees a nonzero shm size can trust the record.
+  if (Error e = WriteShadowSize(name, full_size); e != Error::kOk) {
+    (void)::shm_unlink(shm_name);
+    return e;
+  }
+#endif
   if (::ftruncate(fd.Get(), static_cast<off_t>(full_size)) != 0 ||
       ::chmod(path, 0777) != 0 ||
       (root && ::chown(path, static_cast<uid_t>(context_->user_id),
                        static_cast<gid_t>(context_->group_id)) != 0)) {
+#if ASIL_SHM_MODE == ASIL_SHM_POSIX
+    (void)::shm_unlink(shm_name);
+#endif
     return Error::kSharedMemoryError;
   }
 #endif

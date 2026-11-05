@@ -7,6 +7,7 @@
 #define _COMMON_ASYNC_RUNTIME_H
 
 #include "common/async/context.h"
+#include "common/coroutine_stack.h"
 #include <functional>
 #include <string>
 #include <vector>
@@ -21,6 +22,7 @@
 #include <boost/asio/post.hpp>
 #include <boost/asio/spawn.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/context/fixedsize_stack.hpp>
 #include <boost/asio/strand.hpp>
 #include <chrono>
 #include <list>
@@ -257,7 +259,9 @@ private:
       it->cancellable = cancellable;
       it->name = std::move(name);
       boost::asio::spawn(
-          ex, [fn = std::move(fn)](Context yield) { fn(yield); },
+          ex, std::allocator_arg,
+          boost::context::fixedsize_stack(CoroutineStackSize()),
+          [fn = std::move(fn)](Context yield) { fn(yield); },
           boost::asio::bind_cancellation_slot(
               it->signal->slot(),
               // Run the completion handler on the strand and erase the entry
@@ -311,7 +315,8 @@ private:
   void Spawn(std::function<void(Context)> fn, SpawnOptions opts = {}) {
     scheduler_.Spawn([fn = std::move(fn)](co::Coroutine *c) { fn(c); },
                      {.name = std::move(opts.name),
-                      .interrupt_fd = opts.interrupt_fd});
+                      .interrupt_fd = opts.interrupt_fd,
+                      .stack_size = CoroutineStackSize()});
   }
 
   // The co backend is single-threaded, so there is no strand: spawning "on the

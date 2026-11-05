@@ -80,6 +80,47 @@ endif()
 add_compile_definitions(SUBSPACE_MAX_CHANNELS=${SUBSPACE_MAX_CHANNELS})
 message(STATUS "Maximum channels: ${SUBSPACE_MAX_CHANNELS}")
 
+# --- Maximum slot owners per channel ---
+# This sizes CCB fields in shared memory, so the server and every client,
+# including the Rust client, must be built with the same value.
+set(SUBSPACE_MAX_SLOT_OWNERS "1024" CACHE STRING
+    "Maximum publishers plus subscribers per channel. Must be a positive integer.")
+if(NOT SUBSPACE_MAX_SLOT_OWNERS MATCHES "^[1-9][0-9]*$")
+    message(FATAL_ERROR
+        "SUBSPACE_MAX_SLOT_OWNERS must be a positive integer, got '${SUBSPACE_MAX_SLOT_OWNERS}'")
+endif()
+add_compile_definitions(SUBSPACE_MAX_SLOT_OWNERS=${SUBSPACE_MAX_SLOT_OWNERS})
+message(STATUS "Maximum slot owners per channel: ${SUBSPACE_MAX_SLOT_OWNERS}")
+
+# --- Maximum payload buffer segments per channel (BCB table) ---
+# This sizes the Buffer Control Block in shared memory, so the server and
+# every client, including the Rust client, must be built with the same value.
+set(SUBSPACE_MAX_BUFFERS "341" CACHE STRING
+    "Maximum distinct payload buffer segments per channel. Must be a positive integer. Default fits the BCB in one 4 KiB page.")
+if(NOT SUBSPACE_MAX_BUFFERS MATCHES "^[1-9][0-9]*$")
+    message(FATAL_ERROR
+        "SUBSPACE_MAX_BUFFERS must be a positive integer, got '${SUBSPACE_MAX_BUFFERS}'")
+endif()
+add_compile_definitions(SUBSPACE_MAX_BUFFERS=${SUBSPACE_MAX_BUFFERS})
+message(STATUS "Maximum payload buffer segments per channel: ${SUBSPACE_MAX_BUFFERS}")
+
+# --- Server and shadow coroutine stack size ---
+# Ordinary process memory for each coroutine those processes spawn.  Clients
+# do not need the same value.  AddressSanitizer builds use at least 256 KiB.
+set(SUBSPACE_COROUTINE_STACK_SIZE "65536" CACHE STRING
+    "Stack size in bytes for each server and shadow coroutine. Must be a positive multiple of 4096.")
+if(NOT SUBSPACE_COROUTINE_STACK_SIZE MATCHES "^[1-9][0-9]*$")
+    message(FATAL_ERROR
+        "SUBSPACE_COROUTINE_STACK_SIZE must be a positive multiple of 4096, got '${SUBSPACE_COROUTINE_STACK_SIZE}'")
+endif()
+math(EXPR SUBSPACE_COROUTINE_STACK_SIZE_MOD "${SUBSPACE_COROUTINE_STACK_SIZE} % 4096")
+if(NOT SUBSPACE_COROUTINE_STACK_SIZE_MOD EQUAL 0)
+    message(FATAL_ERROR
+        "SUBSPACE_COROUTINE_STACK_SIZE must be a positive multiple of 4096, got '${SUBSPACE_COROUTINE_STACK_SIZE}'")
+endif()
+add_compile_definitions(SUBSPACE_COROUTINE_STACK_SIZE=${SUBSPACE_COROUTINE_STACK_SIZE})
+message(STATUS "Server coroutine stack size: ${SUBSPACE_COROUTINE_STACK_SIZE}")
+
 # --- Apple Silicon (ARM64) specific settings ---
 # Ensure that CMake targets the correct architecture when building on Apple platforms.
 # This value will be propagated to sub-dependencies.
@@ -118,12 +159,24 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(abseil)
 
+# --- External Dependency: cpp_toolbelt (using FetchContent for native CMake) ---
+# MUST be available before co: from 3.4.1, co includes toolbelt/async_waiter.h
+# and links the toolbelt target.  Declaring our pin first also overrides the
+# fork URL in co's own CMakeLists.txt when it FetchContents cpp_toolbelt.
+FetchContent_Declare(
+    cpp_toolbelt
+    GIT_REPOSITORY https://github.com/dallison/cpp_toolbelt.git
+    GIT_TAG 2.1.6
+    CMAKE_ARGS
+        -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
+)
+FetchContent_MakeAvailable(cpp_toolbelt)
+
 # --- External Dependency: co (using FetchContent for native CMake) ---
-# MUST be declared before cpp_toolbelt since cpp_toolbelt depends on it
 FetchContent_Declare(
     co
     GIT_REPOSITORY https://github.com/dallison/co.git
-    GIT_TAG 3.3.2
+    GIT_TAG 3.4.1
     CMAKE_ARGS
         -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
 )
@@ -137,19 +190,6 @@ endif()
 if(TARGET coroutines_test)
     target_link_libraries(coroutines_test PRIVATE absl::status_matchers gmock)
 endif()
-
-# --- External Dependency: cpp_toolbelt (using FetchContent for native CMake) ---
-# cpp_toolbelt's CMakeLists.txt will try to fetch co, but since we've already
-# declared it above, FetchContent will use our version instead
-FetchContent_Declare(
-    cpp_toolbelt
-    GIT_REPOSITORY https://github.com/dallison/cpp_toolbelt.git
-    # cpp_toolbelt 2.1.6, as in the git_override in MODULE.bazel.
-    GIT_TAG 86b45cdd3da46a97a4476be2f2a61909677284a2
-    CMAKE_ARGS
-        -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
-)
-FetchContent_MakeAvailable(cpp_toolbelt)
 
 # --- External Dependency: Protobuf (using FetchContent for native CMake) ---
 FetchContent_Declare(
@@ -205,6 +245,10 @@ endif()
 # not cross-compile cleanly, so this is fetched only for native builds and only
 # when explicitly enabled.
 option(SUBSPACE_ASIO_RPC "Build the asio_rpc backend (fetches Boost via FetchContent)" ON)
+
+# Mutual TLS for native bridge connections and the tunnel.  Off by default.
+# See docs/mtls.md.  Uses the system OpenSSL.
+option(SUBSPACE_ENABLE_MTLS "Protect bridge and tunnel connections with mTLS" OFF)
 
 if(SUBSPACE_ASIO_RPC AND CMAKE_CROSSCOMPILING)
     message(STATUS "Disabling SUBSPACE_ASIO_RPC: Boost.Context does not cross-compile cleanly.")

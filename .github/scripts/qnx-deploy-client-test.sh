@@ -3,7 +3,8 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Stage and copy Subspace's QNX x86_64 client_test bundle to a QNX VM.
+Stage and copy Subspace's QNX x86_64 client_test bundle to a QNX VM.  The
+bundle also holds the async and tunnel tests.
 
 Usage:
   .github/scripts/qnx-deploy-client-test.sh [options]
@@ -26,12 +27,17 @@ Options:
 
 The bundle layout is:
   client/client_test
+  common/async/async_test
+  server/tunnel_wire_test
+  server/tunnel_test
+  server/tunnel_fake_peer_test
   _solib_x86_64/*.so
   plugins/*.so
 
-Run it on QNX from the bundle root:
+Run them on QNX from the bundle root:
   cd /tmp/subspace-client-test
   ./client/client_test
+  ./server/tunnel_test
 EOF
 }
 
@@ -129,20 +135,35 @@ if [[ "$BUILD" -eq 1 ]]; then
   [[ -n "${QNX_SDP_PATH:-}" ]] ||
     die "set QNX_SDP_PATH first, e.g. export QNX_SDP_PATH=\$HOME/qnx800"
 
-  echo "Building QNX client_test and plugin shared libraries..."
+  echo "Building QNX tests and plugin shared libraries..."
   "$BAZEL" build \
     //client:client_test \
+    //common/async:async_test \
+    //server:tunnel_wire_test \
+    //server:tunnel_test \
+    //server:tunnel_fake_peer_test \
     //plugins:nop_plugin.so \
     //plugins:split_buffer_free_test_plugin.so \
     "--config=${CONFIG}"
 fi
 
 CLIENT_TEST="bazel-bin/client/client_test"
+# Staged at the same paths relative to _solib_x86_64 as in bazel-bin, so the
+# binaries' relative library search paths still resolve.
+EXTRA_TESTS=(
+  common/async/async_test
+  server/tunnel_wire_test
+  server/tunnel_test
+  server/tunnel_fake_peer_test
+)
 SOLIB_DIR="bazel-bin/_solib_x86_64"
 NOP_PLUGIN="bazel-bin/plugins/nop_plugin.so"
 SPLIT_PLUGIN="bazel-bin/plugins/split_buffer_free_test_plugin.so"
 
 [[ -x "$CLIENT_TEST" ]] || die "missing executable: $CLIENT_TEST"
+for test in "${EXTRA_TESTS[@]}"; do
+  [[ -x "bazel-bin/$test" ]] || die "missing executable: bazel-bin/$test"
+done
 [[ -d "$SOLIB_DIR" ]] || die "missing shared library directory: $SOLIB_DIR"
 [[ -f "$NOP_PLUGIN" ]] || die "missing plugin: $NOP_PLUGIN"
 [[ -f "$SPLIT_PLUGIN" ]] || die "missing plugin: $SPLIT_PLUGIN"
@@ -156,6 +177,10 @@ rm -rf "$DEPLOY_DIR"
 mkdir -p "$DEPLOY_DIR/client" "$DEPLOY_DIR/_solib_x86_64" "$DEPLOY_DIR/plugins"
 
 install -m 0755 "$CLIENT_TEST" "$DEPLOY_DIR/client/client_test"
+for test in "${EXTRA_TESTS[@]}"; do
+  mkdir -p "$DEPLOY_DIR/$(dirname "$test")"
+  install -m 0755 "bazel-bin/$test" "$DEPLOY_DIR/$test"
+done
 
 shopt -s nullglob
 solibs=("$SOLIB_DIR"/*.so)
@@ -177,12 +202,16 @@ if [[ "$STRIP" -eq 1 ]]; then
   . "$QNX_SDP_PATH/qnxsdp-env.sh" >/dev/null
   "${QNX_HOST}/usr/bin/ntox86_64-strip" \
     "$DEPLOY_DIR/client/client_test" \
+    "${EXTRA_TESTS[@]/#/$DEPLOY_DIR/}" \
     "$DEPLOY_DIR/plugins/"*.so \
     "$DEPLOY_DIR/_solib_x86_64/"*.so
 fi
 
 echo "Bundle contents:"
 echo "  $DEPLOY_DIR/client/client_test"
+for test in "${EXTRA_TESTS[@]}"; do
+  echo "  $DEPLOY_DIR/$test"
+done
 echo "  $DEPLOY_DIR/_solib_x86_64/ (${#solibs[@]} libraries)"
 echo "  $DEPLOY_DIR/plugins/"
 
@@ -228,7 +257,8 @@ if ! tar -C "$DEPLOY_DIR" -cf - . | ssh "${ssh_opts[@]}" "$remote" "\
   rm -rf $quoted_remote_dir && \
   mkdir -p $quoted_remote_dir && \
   tar -xf - -C $quoted_remote_dir && \
-  chmod +x $quoted_remote_dir/client/client_test && \
+  chmod +x $quoted_remote_dir/client/client_test \
+    ${EXTRA_TESTS[*]/#/$quoted_remote_dir/} && \
   df -k $quoted_remote_parent || true"; then
   die "copy failed. Check free space on QNX with: ssh ${ssh_opts[*]} $remote 'df -k $quoted_remote_parent'. Try a larger filesystem or a different --remote-dir."
 fi
@@ -239,3 +269,6 @@ echo "Run on QNX:"
 echo "  ssh ${ssh_opts[*]} $remote"
 echo "  cd $REMOTE_DIR"
 echo "  ./client/client_test"
+for test in "${EXTRA_TESTS[@]}"; do
+  echo "  ./$test"
+done

@@ -121,12 +121,10 @@ TEST_F(SyscallFailureTest, FtruncateFailAfterShmOpen) {
   auto pub = client->CreatePublisher("/ftrunc_test",
                                      subspace::PublisherOptions().SetSlotSize(64).SetNumSlots(4));
   ASSERT_FALSE(pub.ok());
-  // On Linux ftruncate is on the shm fd; on POSIX/macOS it's on the shadow file.
   EXPECT_THAT(
       pub.status().message(),
       ::testing::AnyOf(
           ::testing::HasSubstr("Failed to set length of shared memory"),
-          ::testing::HasSubstr("Failed to truncate shadow file"),
           ::testing::HasSubstr("Failed to size anonymous shared memory")));
 }
 
@@ -193,6 +191,62 @@ TEST_F(SyscallFailureTest, PollFailWaitForReliablePublisher) {
   ASSERT_FALSE(status.ok());
   EXPECT_THAT(status.message(),
               ::testing::HasSubstr("Error from poll waiting for reliable publisher"));
+}
+
+// poll returns 0 when a caller-supplied fd is also waited on. That is a
+// timeout, which only happens when a finite timeout was requested.
+int PollTimesOutForTwoFds(struct pollfd *fds, nfds_t nfds, int timeout) {
+  if (nfds == 2) {
+    return 0;
+  }
+  return ::poll(fds, nfds, timeout);
+}
+
+TEST_F(SyscallFailureTest, PollTimeoutWaitForSubscriberWithFd) {
+  auto client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "poll_sub_timeout_test"));
+  auto sub = EVAL_AND_ASSERT_OK(client->CreateSubscriber(
+      "/poll_sub_timeout_test",
+      subspace::SubscriberOptions().SetMaxActiveMessages(2)));
+
+  int pipe_fds[2];
+  ASSERT_EQ(0, ::pipe(pipe_fds));
+  toolbelt::FileDescriptor interrupt(pipe_fds[0]);
+  toolbelt::FileDescriptor write_end(pipe_fds[1]);
+
+  subspace::SyscallShim shim;
+  shim.poll_fn = PollTimesOutForTwoFds;
+  ScopedSyscallShim guard(&shim);
+
+  auto status = sub.Wait(interrupt, std::chrono::milliseconds(1));
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.status().message(),
+              ::testing::HasSubstr("Timeout waiting for subscriber"));
+}
+
+TEST_F(SyscallFailureTest, PollTimeoutWaitForReliablePublisherWithFd) {
+  auto client = EVAL_AND_ASSERT_OK(
+      subspace::Client::Create(Socket(), "poll_pub_timeout_test"));
+  auto pub = EVAL_AND_ASSERT_OK(client->CreatePublisher(
+      "/poll_pub_timeout_test",
+      subspace::PublisherOptions()
+          .SetSlotSize(64)
+          .SetNumSlots(4)
+          .SetReliable(true)));
+
+  int pipe_fds[2];
+  ASSERT_EQ(0, ::pipe(pipe_fds));
+  toolbelt::FileDescriptor interrupt(pipe_fds[0]);
+  toolbelt::FileDescriptor write_end(pipe_fds[1]);
+
+  subspace::SyscallShim shim;
+  shim.poll_fn = PollTimesOutForTwoFds;
+  ScopedSyscallShim guard(&shim);
+
+  auto status = pub.Wait(interrupt, std::chrono::milliseconds(1));
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.status().message(),
+              ::testing::HasSubstr("Timeout waiting for reliable publisher"));
 }
 
 // ---------------------------------------------------------------------------

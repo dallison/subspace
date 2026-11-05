@@ -1169,6 +1169,9 @@ impl Client {
         let req = proto::Request {
             request: Some(proto::request::Request::Init(proto::InitRequest {
                 client_name: client_name.to_string(),
+                max_channels: MAX_CHANNELS as i32,
+                max_slot_owners: MAX_SLOT_OWNERS as i32,
+                max_buffers: MAX_BUFFERS as i32,
             })),
         };
         socket.send_request(&req)?;
@@ -1182,6 +1185,10 @@ impl Client {
                 ))
             }
         };
+
+        if !init.error.is_empty() {
+            return Err(SubspaceError::Internal(init.error));
+        }
 
         let scb_fd = fds[init.scb_fd_index as usize];
 
@@ -1525,6 +1532,7 @@ impl Client {
         )?;
 
         sub_impl.attach_buffers()?;
+        sub_impl.remember_published_ordinals();
 
         sub_impl.trigger_fd = fds[sub_resp.trigger_fd_index as usize];
         sub_impl.poll_fd = fds[sub_resp.poll_fd_index as usize];
@@ -1819,10 +1827,6 @@ fn read_message_internal(
     }
 
     let old_slot = sub.channel.slot;
-    let last_ordinal: i64 = match old_slot {
-        Some(si) => sub.channel.slot_ref(si).ordinal() as i64,
-        None => -1,
-    };
     let new_slot_idx = match mode {
         ReadMode::ReadNext => sub.next_slot(),
         ReadMode::ReadNewest => sub.last_slot(),
@@ -1854,12 +1858,14 @@ fn read_message_internal(
                 let buffer = sub.channel.get_buffer_address(new_idx);
                 let cs = sub.channel.checksum_size;
                 let ms = sub.channel.metadata_size;
+                let mut prefix_fields = [0u8; checksum::PREFIX_FIELDS_LEN];
                 let data = checksum::get_message_checksum_data(
                     prefix,
                     buffer,
                     delivered_message_size as usize,
                     cs,
                     ms,
+                    &mut prefix_fields,
                 );
                 let stored_cksum = checksum::get_checksum_slice_const(prefix, cs);
                 if let Some(ref cb) = sub.checksum_callback {
@@ -1927,7 +1933,7 @@ fn read_message_internal(
         // concurrent publisher reservations out of ordinal order without
         // losing a message. Only the ordered bitset/inherited-queue path can
         // treat an ordinal gap as a drop.
-        if last_ordinal != -1 && sub.options.subscriber_queue_size == 0 {
+        if sub.options.subscriber_queue_size == 0 {
             drops = drops.max(sub.detect_drops(vchan_id));
         }
         if drops > 0 {

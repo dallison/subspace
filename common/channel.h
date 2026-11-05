@@ -16,8 +16,11 @@
 #include "toolbelt/fd.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -81,6 +84,13 @@ constexpr int kMessageActivate = 1;      // This is a reliable activation messag
 constexpr int kMessageBridged = 2;       // This message came from the bridge.
 constexpr int kMessageHasChecksum = 4;   // This message has a checksum.
 constexpr int kMessageCrossMachine = 8;  // This is a cross-machine (tunnel) message.
+
+// The only flags covered by the message checksum.  The publisher sets these
+// and they never change once the message is published.  Every other bit,
+// including kMessageBridged, kMessageCrossMachine and any bit a program sets
+// itself, can be changed in transit without invalidating the checksum.
+constexpr int64_t kChecksummedMessageFlags =
+    kMessageActivate | kMessageHasChecksum;
 
 // Maximum values for checksum_size and metadata_size (must fit in uint16_t).
 constexpr int32_t kMaxChecksumSize = 0xFFFF;
@@ -148,10 +158,16 @@ constexpr int kMaxChannels = SUBSPACE_MAX_CHANNELS;
 static_assert(kMaxChannels > 0 && kMaxChannels % 64 == 0,
               "SUBSPACE_MAX_CHANNELS must be a positive multiple of 64");
 
-// Maximum number of owners for a lot.  One per subscriber reference
-// and publisher reference.  Best if it's a multiple of 64 because
-// it's used as the size in a toolbelt::BitSet.
-constexpr int kMaxSlotOwners = 1024;
+// Maximum publishers plus subscribers per channel.  This sizes CCB fields in
+// shared memory, so the server and every client must be built with the same
+// value.  A downstream Bazel module sets subspace.max_slot_owners(count = N)
+// in its root MODULE.bazel.  Building this repo uses --//:max_slot_owners=N,
+// and CMake uses -DSUBSPACE_MAX_SLOT_OWNERS=N.  N must be a positive integer.
+#ifndef SUBSPACE_MAX_SLOT_OWNERS
+#define SUBSPACE_MAX_SLOT_OWNERS 1024
+#endif
+constexpr int kMaxSlotOwners = SUBSPACE_MAX_SLOT_OWNERS;
+static_assert(kMaxSlotOwners > 0, "SUBSPACE_MAX_SLOT_OWNERS must be positive");
 // Default per-subscriber queue depth used whenever the publisher provisions a
 // non-empty arena and the subscriber does not request an override.
 constexpr int kDefaultSubscriberQueueSize = 16;
@@ -175,7 +191,18 @@ constexpr int kMaxVchanId = 1023;
 // in process memory.
 constexpr size_t kMaxChannelName = 64;
 
-constexpr size_t kMaxBuffers = 1024;
+// Maximum distinct shared-memory payload segments tracked in the BCB (refs and
+// sizes tables).  Each slot-size resize can add another segment until
+// ccb_->num_buffers reaches this limit.  A downstream Bazel module sets
+// subspace.max_buffers(count = N) in its root MODULE.bazel.  Building this
+// repo uses --//:max_buffers=N, and CMake uses -DSUBSPACE_MAX_BUFFERS=N.  N
+// must be a positive integer.  The default (341) yields a 4096-byte BCB on
+// typical platforms (4-byte atomic int32 refs plus 8-byte atomic uint64 sizes).
+#ifndef SUBSPACE_MAX_BUFFERS
+#define SUBSPACE_MAX_BUFFERS 341
+#endif
+constexpr size_t kMaxBuffers = SUBSPACE_MAX_BUFFERS;
+static_assert(kMaxBuffers > 0, "SUBSPACE_MAX_BUFFERS must be positive");
 
 // Ref count bits.
 constexpr uint64_t kRefCountMask = 0x3ff;
@@ -213,7 +240,7 @@ inline uint64_t BuildRefsBitField(uint64_t ordinal, int vchan_id,
 std::string DecodedRefsBitField(uint64_t refs);
 
 // Aligned to given power of 2.
-template <int64_t alignment = 64> int64_t Aligned(int64_t v) {
+template <int64_t alignment = 64> constexpr int64_t Aligned(int64_t v) {
   return (v + (alignment - 1)) & ~(alignment - 1);
 }
 
@@ -260,7 +287,6 @@ struct MessageSlot {
 
   void Dump(std::ostream &os) const;
 };
-static_assert(sizeof(MessageSlot) == 184);
 static_assert(offsetof(MessageSlot, refs) == 0);
 static_assert(offsetof(MessageSlot, ordinal) == 8);
 static_assert(offsetof(MessageSlot, message_size) == 16);
@@ -268,9 +294,17 @@ static_assert(offsetof(MessageSlot, id) == 24);
 static_assert(offsetof(MessageSlot, buffer_index) == 28);
 static_assert(offsetof(MessageSlot, vchan_id) == 30);
 static_assert(offsetof(MessageSlot, sub_owners) == 32);
-static_assert(offsetof(MessageSlot, timestamp) == 168);
-static_assert(offsetof(MessageSlot, flags) == 176);
-static_assert(offsetof(MessageSlot, bridged_slot_id) == 180);
+static_assert(offsetof(MessageSlot, timestamp) ==
+              offsetof(MessageSlot, sub_owners) +
+                  sizeof(AtomicBitSet<kMaxSlotOwners>));
+static_assert(offsetof(MessageSlot, flags) ==
+              offsetof(MessageSlot, timestamp) + sizeof(std::atomic<uint64_t>));
+static_assert(offsetof(MessageSlot, bridged_slot_id) ==
+              offsetof(MessageSlot, flags) + sizeof(std::atomic<uint32_t>));
+static_assert(sizeof(MessageSlot) == offsetof(MessageSlot, bridged_slot_id) +
+                                         sizeof(std::atomic<int32_t>));
+// The default owner count keeps the historical shared-memory layout.
+static_assert(kMaxSlotOwners != 1024 || sizeof(MessageSlot) == 184);
 
 struct ActiveSlot {
   MessageSlot *slot;
@@ -543,29 +577,60 @@ struct BufferControlBlock {
   std::atomic<int32_t>
       refs[kMaxBuffers]; // Number of references to this buffer.
   std::atomic<uint64_t>
-      sizes[kMaxBuffers]; // Number of references to this buffer.
+      sizes[kMaxBuffers]; // Byte size of this buffer segment.
 };
 
-// Given a message prefix and a buffer containing the message data return three
-// spans covering the data to be checksummed:
-//   [0] prefix fields before the checksum (slot_id through padding2)
+// The data covered by a message checksum, as three spans:
+//   [0] prefix fields before the checksum (slot_id through metadata_size),
+//       with flags masked to kChecksummedMessageFlags
 //   [1] user metadata area (immediately after the checksum storage)
 //   [2] message payload
-inline std::array<absl::Span<const uint8_t>, 3>
-GetMessageChecksumData(MessagePrefix *prefix, void *buffer,
+//
+// Span 0 points at a masked copy held in this object, not at the prefix, so
+// the object must outlive any use of Spans().  It cannot be copied or moved
+// because that would leave span 0 pointing at the old copy.
+class MessageChecksumData {
+public:
+  MessageChecksumData(const MessagePrefix *prefix, const void *buffer,
+                      size_t message_size, int32_t checksum_size,
+                      int32_t metadata_size) {
+    const auto *base = reinterpret_cast<const uint8_t *>(prefix);
+    memcpy(prefix_fields_, base + offsetof(MessagePrefix, slot_id),
+           sizeof(prefix_fields_));
+    int64_t flags;
+    memcpy(&flags, prefix_fields_ + kFlagsOffset, sizeof(flags));
+    flags &= kChecksummedMessageFlags;
+    memcpy(prefix_fields_ + kFlagsOffset, &flags, sizeof(flags));
+    spans_ = {absl::Span<const uint8_t>(prefix_fields_, sizeof(prefix_fields_)),
+              absl::Span<const uint8_t>(base + offsetof(MessagePrefix, checksum) +
+                                            checksum_size,
+                                        metadata_size),
+              absl::Span<const uint8_t>(
+                  reinterpret_cast<const uint8_t *>(buffer), message_size)};
+  }
+
+  MessageChecksumData(const MessageChecksumData &) = delete;
+  MessageChecksumData &operator=(const MessageChecksumData &) = delete;
+
+  const std::array<absl::Span<const uint8_t>, 3> &Spans() const {
+    return spans_;
+  }
+
+private:
+  static constexpr size_t kFlagsOffset =
+      offsetof(MessagePrefix, flags) - offsetof(MessagePrefix, slot_id);
+
+  uint8_t prefix_fields_[offsetof(MessagePrefix, checksum) -
+                         offsetof(MessagePrefix, slot_id)];
+  std::array<absl::Span<const uint8_t>, 3> spans_;
+};
+
+inline MessageChecksumData
+GetMessageChecksumData(const MessagePrefix *prefix, const void *buffer,
                        size_t message_size, int32_t checksum_size,
                        int32_t metadata_size) {
-  const auto *base = reinterpret_cast<const uint8_t *>(prefix);
-  std::array<absl::Span<const uint8_t>, 3> data = {
-      absl::Span<const uint8_t>(base + offsetof(MessagePrefix, slot_id),
-                                offsetof(MessagePrefix, checksum) -
-                                    offsetof(MessagePrefix, slot_id)),
-      absl::Span<const uint8_t>(
-          base + offsetof(MessagePrefix, checksum) + checksum_size,
-          metadata_size),
-      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t *>(buffer),
-                                message_size)};
-  return data;
+  return MessageChecksumData(prefix, buffer, message_size, checksum_size,
+                             metadata_size);
 }
 
 // Get a span over the checksum storage area within the prefix.
@@ -725,6 +790,9 @@ public:
     }
   }
   uint64_t Next(int vchan_id) { return ordinals_[vchan_id + 1]++; }
+  uint64_t PeekNext(int vchan_id) const {
+    return ordinals_[vchan_id + 1].load(std::memory_order_relaxed);
+  }
 
 private:
   std::array<std::atomic<uint64_t>, kMaxVchanId + 1> ordinals_ = {};
@@ -813,9 +881,19 @@ struct AvailableSlotQueueIndex {
   std::array<std::atomic<uint32_t>, kMaxSlotOwners> active_publishers;
 };
 static_assert(offsetof(AvailableSlotQueueIndex, next_offset) == 0);
-static_assert(offsetof(AvailableSlotQueueIndex, offsets) == 8);
-static_assert(offsetof(AvailableSlotQueueIndex, active_publishers) == 8200);
-static_assert(sizeof(AvailableSlotQueueIndex) == 12296);
+static_assert(offsetof(AvailableSlotQueueIndex, offsets) ==
+              sizeof(std::atomic<uint64_t>));
+static_assert(offsetof(AvailableSlotQueueIndex, active_publishers) ==
+              offsetof(AvailableSlotQueueIndex, offsets) +
+                  sizeof(std::atomic<uint64_t>) * kMaxSlotOwners);
+static_assert(sizeof(AvailableSlotQueueIndex) ==
+              static_cast<size_t>(Aligned<alignof(AvailableSlotQueueIndex)>(
+                  static_cast<int64_t>(
+                      offsetof(AvailableSlotQueueIndex, active_publishers) +
+                      sizeof(std::atomic<uint32_t>) * kMaxSlotOwners))));
+static_assert(kMaxSlotOwners != 1024 ||
+              (offsetof(AvailableSlotQueueIndex, active_publishers) == 8200 &&
+               sizeof(AvailableSlotQueueIndex) == 12296));
 
 inline size_t AvailableSlotsSize(int num_slots) {
   return SizeofAtomicBitSet(num_slots) * kMaxSlotOwners;
@@ -838,8 +916,12 @@ struct alignas(64) SlotQueueBlockHeader {
   uint32_t reserved = 0;
   AtomicBitSet<kMaxSlotOwners> waiting_publishers;
 };
-static_assert(sizeof(SlotQueueBlockHeader) == 192);
 static_assert(offsetof(SlotQueueBlockHeader, waiting_publishers) == 16);
+static_assert(sizeof(SlotQueueBlockHeader) ==
+              static_cast<size_t>(Aligned<64>(static_cast<int64_t>(
+                  offsetof(SlotQueueBlockHeader, waiting_publishers) +
+                  sizeof(AtomicBitSet<kMaxSlotOwners>)))));
+static_assert(kMaxSlotOwners != 1024 || sizeof(SlotQueueBlockHeader) == 192);
 
 inline size_t SlotQueueBlockHeaderSize() {
   return Aligned(sizeof(SlotQueueBlockHeader));
@@ -1119,6 +1201,13 @@ public:
 
   bool TryRetireSlot(MessageSlot *slot);
 
+  // Whether `refs`, read from `slot`, show a slot that holds no message or one
+  // that every subscriber has seen and released.  A slot's retired bit is set
+  // after the subscriber retiring it releases it, so a publisher can reuse the
+  // slot in between and the bit then stands for a message nobody has seen.
+  // Check the refs before taking a slot for its retired bit.
+  bool RefsShowRetired(const MessageSlot *slot, uint64_t refs) const;
+
   int NumSubscribers(int vchan_id) const {
     return ccb_->num_subs.NumSubscribers(vchan_id);
   }
@@ -1267,6 +1356,11 @@ public:
   virtual uint64_t GetVirtualMemoryUsage() const;
 
 protected:
+  // Unmaps the channel and buffer control blocks and leaves the system
+  // control block mapped. A reload uses this so other threads can keep
+  // reading channel counters from the system control block.
+  void UnmapChannelMemory();
+
   int32_t ToCCBOffset(void *addr) const {
     return (int32_t)(reinterpret_cast<char *>(addr) -
                      reinterpret_cast<char *>(ccb_));

@@ -23,6 +23,11 @@ use std::sync::atomic::{
 pub const MESSAGE_ACTIVATE: i64 = 1;
 pub const MESSAGE_BRIDGED: i64 = 2;
 pub const MESSAGE_HAS_CHECKSUM: i64 = 4;
+pub const MESSAGE_CROSS_MACHINE: i64 = 8;
+
+/// The only flags covered by the message checksum.  Must match
+/// kChecksummedMessageFlags in common/channel.h.
+pub const CHECKSUMMED_MESSAGE_FLAGS: i64 = MESSAGE_ACTIVATE | MESSAGE_HAS_CHECKSUM;
 
 pub const MESSAGE_SEEN: u32 = 1;
 pub const MESSAGE_IS_ACTIVATION: u32 = 2;
@@ -36,6 +41,17 @@ pub const MESSAGE_SEEN_BY_RELIABLE: u32 = 4;
 /// variable.  The default is 1024, and the value must be a positive multiple
 /// of 64.
 pub const MAX_CHANNELS: usize = parse_max_channels(env!("SUBSPACE_MAX_CHANNELS").as_bytes());
+
+/// Maximum publishers plus subscribers per channel.  Must match C++
+/// `kMaxSlotOwners`.  See `build.rs` for configuration sources.
+pub const MAX_SLOT_OWNERS: usize =
+    parse_max_slot_owners(env!("SUBSPACE_MAX_SLOT_OWNERS").as_bytes());
+
+/// Maximum distinct payload buffer segments per channel.  Must match C++
+/// `kMaxBuffers`.  See `build.rs` for configuration sources.  The default is
+/// 341 so the BCB is 4096 bytes on typical platforms.
+pub const MAX_BUFFERS: usize =
+    parse_max_buffers(env!("SUBSPACE_MAX_BUFFERS").as_bytes());
 
 const fn parse_max_channels(raw: &[u8]) -> usize {
     if raw.is_empty() || raw[0] == b'0' {
@@ -63,13 +79,57 @@ const fn parse_max_channels(raw: &[u8]) -> usize {
     count
 }
 
-pub const MAX_SLOT_OWNERS: usize = 1024;
+const fn parse_max_slot_owners(raw: &[u8]) -> usize {
+    if raw.is_empty() || raw[0] == b'0' {
+        panic!("SUBSPACE_MAX_SLOT_OWNERS must be a positive integer");
+    }
+    let mut count: usize = 0;
+    let mut i = 0;
+    while i < raw.len() {
+        let digit = raw[i];
+        if !digit.is_ascii_digit() {
+            panic!("SUBSPACE_MAX_SLOT_OWNERS must be a positive integer");
+        }
+        let Some(scaled) = count.checked_mul(10) else {
+            panic!("SUBSPACE_MAX_SLOT_OWNERS is too large");
+        };
+        let Some(next) = scaled.checked_add((digit - b'0') as usize) else {
+            panic!("SUBSPACE_MAX_SLOT_OWNERS is too large");
+        };
+        count = next;
+        i += 1;
+    }
+    count
+}
+
+const fn parse_max_buffers(raw: &[u8]) -> usize {
+    if raw.is_empty() || raw[0] == b'0' {
+        panic!("SUBSPACE_MAX_BUFFERS must be a positive integer");
+    }
+    let mut count: usize = 0;
+    let mut i = 0;
+    while i < raw.len() {
+        let digit = raw[i];
+        if !digit.is_ascii_digit() {
+            panic!("SUBSPACE_MAX_BUFFERS must be a positive integer");
+        }
+        let Some(scaled) = count.checked_mul(10) else {
+            panic!("SUBSPACE_MAX_BUFFERS is too large");
+        };
+        let Some(next) = scaled.checked_add((digit - b'0') as usize) else {
+            panic!("SUBSPACE_MAX_BUFFERS is too large");
+        };
+        count = next;
+        i += 1;
+    }
+    count
+}
+
 pub const MAX_AVAILABLE_SLOT_QUEUE_CAPACITY: usize = 1024;
 const MAX_SLOT_QUEUE_CAS_ATTEMPTS: usize = 64;
 pub const CHANNEL_CONTROL_BLOCK_VERSION: u32 = 5;
 pub const MAX_VCHAN_ID: usize = 1023;
 pub const MAX_CHANNEL_NAME: usize = 64;
-pub const MAX_BUFFERS: usize = 1024;
 
 // ── Ref count bit field constants ───────────────────────────────────────────
 
@@ -103,11 +163,11 @@ pub fn build_refs_bit_field(ordinal: u64, vchan_id: i32, retired_refs: i32) -> u
         | ((retired_refs as u64 & RETIRED_REFS_MASK) << RETIRED_REFS_SHIFT)
 }
 
-pub fn aligned<const ALIGNMENT: i64>(v: i64) -> i64 {
+pub const fn aligned<const ALIGNMENT: i64>(v: i64) -> i64 {
     (v + (ALIGNMENT - 1)) & !(ALIGNMENT - 1)
 }
 
-pub fn aligned64(v: i64) -> i64 {
+pub const fn aligned64(v: i64) -> i64 {
     aligned::<64>(v)
 }
 
@@ -153,7 +213,7 @@ impl MessagePrefix {
 
 // ── MessageSlot ─────────────────────────────────────────────────────────────
 
-/// Number of 64-bit words needed for MAX_SLOT_OWNERS (1024) bits.
+/// Number of 64-bit words needed for MAX_SLOT_OWNERS bits.
 const SLOT_OWNER_WORDS: usize = bits_to_words(MAX_SLOT_OWNERS);
 
 #[repr(C)]
@@ -169,7 +229,6 @@ pub struct MessageSlot {
     pub flags: AtomicU32,
     pub bridged_slot_id: AtomicI32,
 }
-const _: () = assert!(std::mem::size_of::<MessageSlot>() == 184);
 const _: () = assert!(std::mem::offset_of!(MessageSlot, refs) == 0);
 const _: () = assert!(std::mem::offset_of!(MessageSlot, ordinal) == 8);
 const _: () = assert!(std::mem::offset_of!(MessageSlot, message_size) == 16);
@@ -182,8 +241,20 @@ const _: () = assert!(
         == std::mem::offset_of!(MessageSlot, sub_owners)
             + std::mem::size_of::<AtomicBitSet<SLOT_OWNER_WORDS>>()
 );
-const _: () = assert!(std::mem::offset_of!(MessageSlot, flags) == 176);
-const _: () = assert!(std::mem::offset_of!(MessageSlot, bridged_slot_id) == 180);
+const _: () = assert!(
+    std::mem::offset_of!(MessageSlot, flags)
+        == std::mem::offset_of!(MessageSlot, timestamp) + std::mem::size_of::<AtomicU64>()
+);
+const _: () = assert!(
+    std::mem::offset_of!(MessageSlot, bridged_slot_id)
+        == std::mem::offset_of!(MessageSlot, flags) + std::mem::size_of::<AtomicU32>()
+);
+const _: () = assert!(
+    std::mem::size_of::<MessageSlot>()
+        == std::mem::offset_of!(MessageSlot, bridged_slot_id) + std::mem::size_of::<AtomicI32>()
+);
+// The default owner count keeps the historical shared-memory layout.
+const _: () = assert!(MAX_SLOT_OWNERS != 1024 || std::mem::size_of::<MessageSlot>() == 184);
 
 impl MessageSlot {
     pub fn ordinal(&self) -> u64 {
@@ -524,6 +595,11 @@ impl OrdinalAccumulator {
         let idx = (vchan_id + 1) as usize;
         self.ordinals[idx].fetch_add(1, Ordering::Relaxed)
     }
+
+    pub fn peek_next(&self, vchan_id: i32) -> u64 {
+        let idx = (vchan_id + 1) as usize;
+        self.ordinals[idx].load(Ordering::Relaxed)
+    }
 }
 
 // ── ActivationTracker ───────────────────────────────────────────────────────
@@ -668,10 +744,24 @@ pub struct AvailableSlotQueueIndex {
     pub offsets: [AtomicU64; MAX_SLOT_OWNERS],
     pub active_publishers: [AtomicU32; MAX_SLOT_OWNERS],
 }
-const _: () = assert!(std::mem::size_of::<AvailableSlotQueueIndex>() == 12296);
 const _: () = assert!(std::mem::offset_of!(AvailableSlotQueueIndex, offsets) == 8);
-const _: () =
-    assert!(std::mem::offset_of!(AvailableSlotQueueIndex, active_publishers) == 8200);
+const _: () = assert!(
+    std::mem::offset_of!(AvailableSlotQueueIndex, active_publishers)
+        == std::mem::offset_of!(AvailableSlotQueueIndex, offsets)
+            + std::mem::size_of::<AtomicU64>() * MAX_SLOT_OWNERS
+);
+const _: () = assert!(
+    std::mem::size_of::<AvailableSlotQueueIndex>()
+        == aligned::<8>(
+            (std::mem::offset_of!(AvailableSlotQueueIndex, active_publishers)
+                + std::mem::size_of::<AtomicU32>() * MAX_SLOT_OWNERS) as i64,
+        ) as usize
+);
+const _: () = assert!(
+    MAX_SLOT_OWNERS != 1024
+        || (std::mem::offset_of!(AvailableSlotQueueIndex, active_publishers) == 8200
+            && std::mem::size_of::<AvailableSlotQueueIndex>() == 12296)
+);
 
 fn available_slot_queue_index_size() -> usize {
     aligned64(std::mem::size_of::<AvailableSlotQueueIndex>() as i64) as usize
@@ -684,8 +774,16 @@ pub struct SlotQueueBlockHeader {
     pub reserved: u32,
     pub waiting_publishers: AtomicBitSet<SLOT_OWNER_WORDS>,
 }
-const _: () = assert!(std::mem::size_of::<SlotQueueBlockHeader>() == 192);
 const _: () = assert!(std::mem::offset_of!(SlotQueueBlockHeader, waiting_publishers) == 16);
+const _: () = assert!(
+    std::mem::size_of::<SlotQueueBlockHeader>()
+        == aligned64(
+            (std::mem::offset_of!(SlotQueueBlockHeader, waiting_publishers)
+                + std::mem::size_of::<AtomicBitSet<SLOT_OWNER_WORDS>>()) as i64,
+        ) as usize
+);
+const _: () =
+    assert!(MAX_SLOT_OWNERS != 1024 || std::mem::size_of::<SlotQueueBlockHeader>() == 192);
 
 pub fn resolve_subscriber_queue_size(num_slots: i32, subscriber_queue_size: i32) -> i32 {
     if num_slots <= 0 || subscriber_queue_size <= 0 {
@@ -1216,6 +1314,28 @@ impl Channel {
                 return true;
             }
         }
+    }
+
+    /// Whether `refs`, read from the slot, show a slot that holds no message or
+    /// one that every subscriber has seen and released.  A slot's retired bit
+    /// is set after the subscriber retiring it releases it, so a publisher can
+    /// reuse the slot in between and the bit then stands for a message nobody
+    /// has seen.  Check the refs before taking a slot for its retired bit.
+    pub fn refs_show_retired(&self, slot_idx: usize, refs: u64) -> bool {
+        if (refs & (PUB_OWNED | REFS_MASK)) != 0 {
+            return false;
+        }
+        if self.slot_ref(slot_idx).ordinal() == 0 {
+            return true;
+        }
+        let encoded_vchan_id = (refs >> VCHAN_ID_SHIFT) & VCHAN_ID_MASK;
+        let vchan_id = if encoded_vchan_id == VCHAN_ID_MASK {
+            -1
+        } else {
+            encoded_vchan_id as i32
+        };
+        let retired_refs = (refs >> RETIRED_REFS_SHIFT) & RETIRED_REFS_MASK;
+        retired_refs >= self.num_subscribers(vchan_id).max(0) as u64
     }
 
     pub fn try_retire_slot(&self, slot_idx: usize) -> bool {

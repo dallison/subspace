@@ -8,10 +8,14 @@ use std::process::{Child, Command, Stdio};
 
 use subspace_client::bitset::DynamicBitSet;
 use subspace_client::channel::{
-    aligned, aligned64, build_refs_bit_field, CHECKSUM_OFFSET, ORDINAL_MASK, ORDINAL_SHIFT,
+    aligned, aligned64, build_refs_bit_field, MessagePrefix, CHECKSUM_OFFSET, MESSAGE_ACTIVATE,
+    MESSAGE_BRIDGED, MESSAGE_CROSS_MACHINE, MESSAGE_HAS_CHECKSUM, ORDINAL_MASK, ORDINAL_SHIFT,
     PUB_OWNED, RETIRED_REFS_MASK, RETIRED_REFS_SHIFT, VCHAN_ID_MASK, VCHAN_ID_SHIFT,
 };
-use subspace_client::checksum::{calculate_crc32_checksum, subspace_crc32, verify_crc32_checksum};
+use subspace_client::checksum::{
+    calculate_crc32_checksum, get_message_checksum_data, subspace_crc32, verify_crc32_checksum,
+    PREFIX_FIELDS_LEN,
+};
 
 fn calculate_checksum(spans: &[&[u8]]) -> u32 {
     let mut buf = [0u8; 4];
@@ -226,6 +230,67 @@ fn checksum_single_span_matches_multi_span() {
     let whole = calculate_checksum(&[b"foobar"]);
     let split = calculate_checksum(&[b"foo", b"bar"]);
     assert_eq!(whole, split);
+}
+
+fn test_prefix() -> MessagePrefix {
+    MessagePrefix {
+        padding: 0,
+        slot_id: 3,
+        message_size: 8,
+        ordinal: 42,
+        timestamp: 1234,
+        flags: MESSAGE_HAS_CHECKSUM,
+        vchan_id: -1,
+        checksum_size: 4,
+        metadata_size: 0,
+        checksum: 0,
+        padding3: [0; 12],
+    }
+}
+
+fn prefix_checksum(prefix: &MessagePrefix) -> u32 {
+    let payload = b"payload";
+    let mut prefix_fields = [0u8; PREFIX_FIELDS_LEN];
+    let data = unsafe {
+        get_message_checksum_data(
+            prefix,
+            payload.as_ptr(),
+            payload.len(),
+            4,
+            0,
+            &mut prefix_fields,
+        )
+    };
+    calculate_checksum(&data)
+}
+
+#[test]
+fn checksum_ignores_uncovered_flags() {
+    let mut prefix = test_prefix();
+    let before = prefix_checksum(&prefix);
+
+    prefix.flags |= MESSAGE_BRIDGED | MESSAGE_CROSS_MACHINE | (1 << 32);
+    let flags = prefix.flags;
+    assert_eq!(before, prefix_checksum(&prefix));
+    // The masking works on a copy and leaves the prefix unchanged.
+    assert_eq!(flags, prefix.flags);
+}
+
+#[test]
+fn checksum_covers_publisher_flags() {
+    let before = prefix_checksum(&test_prefix());
+
+    let mut prefix = test_prefix();
+    prefix.flags |= MESSAGE_ACTIVATE;
+    assert_ne!(before, prefix_checksum(&prefix));
+
+    let mut prefix = test_prefix();
+    prefix.flags &= !MESSAGE_HAS_CHECKSUM;
+    assert_ne!(before, prefix_checksum(&prefix));
+
+    let mut prefix = test_prefix();
+    prefix.ordinal += 1;
+    assert_ne!(before, prefix_checksum(&prefix));
 }
 
 // ── Bit field helpers ────────────────────────────────────────────────────────
@@ -1288,6 +1353,122 @@ fn integration_threaded_pub_sub() {
     sub_handle.join().unwrap();
 }
 
+// An unreliable subscriber that falls behind a publisher, draining whenever its
+// poll fd fires as the tunnel and bridges do, can miss messages but must read
+// the rest in order and must always get the newest.  Its snapshot of the slots
+// could catch one being reused and deliver the message published there next
+// ahead of older ones.  A publisher could take a slot back for a retired bit
+// set after the slot had already been reused, losing the message just
+// published in it.
+fn check_lagging_unreliable_subscriber(channel: &str, bridge: bool) {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let pub_client = new_client("lagging_pub");
+    let publisher = pub_client
+        .create_publisher(
+            channel,
+            &PublisherOptions::new().set_slot_size(1024).set_num_slots(16),
+        )
+        .unwrap();
+    let sub_client = new_client("lagging_sub");
+    let subscriber = sub_client
+        .create_subscriber(
+            channel,
+            &SubscriberOptions::new()
+                .set_bridge(bridge)
+                .set_log_dropped_messages(false),
+        )
+        .unwrap();
+
+    let newest_read = Arc::new(AtomicU64::new(0));
+    let out_of_order = Arc::new(AtomicU64::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let reader = {
+        let (newest_read, out_of_order, stop) =
+            (newest_read.clone(), out_of_order.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut last = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                if !poll_fd_readable(subscriber.get_poll_fd(), 10) {
+                    continue;
+                }
+                loop {
+                    let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
+                    if msg.length == 0 {
+                        break;
+                    }
+                    let number = unsafe { std::ptr::read_unaligned(msg.buffer as *const u64) };
+                    if number <= last {
+                        out_of_order.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        last = number;
+                        newest_read.store(number, Ordering::Relaxed);
+                    }
+                }
+            }
+        })
+    };
+
+    // Publish in bursts and wait after each for its last message, having already
+    // taken the buffer for the next one.
+    const BURSTS: u64 = 400;
+    const BURST_SIZE: u64 = 50;
+    let size_of = |number: u64| 16 + (number * 37) % 900;
+    let mut failure = None;
+    let mut number = 0u64;
+    let mut buffer = publisher.get_message_buffer(size_of(1) as i32);
+    'bursts: for _ in 0..BURSTS {
+        for _ in 0..BURST_SIZE {
+            number += 1;
+            match buffer {
+                Ok(Some((buf, _))) => unsafe { std::ptr::write_unaligned(buf as *mut u64, number) },
+                other => {
+                    failure = Some(format!("no buffer for message {number}: {other:?}"));
+                    break 'bursts;
+                }
+            }
+            if let Err(e) = publisher.publish_message(size_of(number) as i64) {
+                failure = Some(format!("publishing message {number}: {e:?}"));
+                break 'bursts;
+            }
+            buffer = publisher.get_message_buffer(size_of(number + 1) as i32);
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while newest_read.load(Ordering::Relaxed) < number {
+            if Instant::now() > deadline {
+                failure = Some(format!(
+                    "message {number}, the newest, was never read; the last read was {}",
+                    newest_read.load(Ordering::Relaxed)
+                ));
+                break 'bursts;
+            }
+            std::thread::sleep(Duration::from_micros(100));
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    reader.join().unwrap();
+    if let Some(failure) = failure {
+        panic!("{failure}");
+    }
+    assert_eq!(
+        out_of_order.load(Ordering::Relaxed),
+        0,
+        "messages read out of order"
+    );
+}
+
+#[test]
+fn integration_lagging_unreliable_subscriber_reads_in_order_and_gets_newest() {
+    check_lagging_unreliable_subscriber("rust_lagging_unreliable", false);
+}
+
+#[test]
+fn integration_lagging_unreliable_bridge_subscriber_reads_in_order_and_gets_newest() {
+    check_lagging_unreliable_subscriber("rust_lagging_unreliable_bridge", true);
+}
+
 // ── Large messages ───────────────────────────────────────────────────────────
 
 #[test]
@@ -1659,6 +1840,71 @@ fn integration_dropped_message_callback() {
     assert!(
         num_dropped.load(std::sync::atomic::Ordering::Relaxed) >= 4,
         "subscriber should report at least the four forced overwritten messages"
+    );
+}
+
+// A slot held by another subscriber is never reused, so a late subscriber's
+// first read can be far older than the rest of the history it reads next.
+// Only messages it misses after attaching are drops.
+#[test]
+fn integration_late_subscriber_counts_only_drops_after_attaching() {
+    const NUM_SLOTS: usize = 10;
+    let client = new_client("test_late_sub_drops");
+    let pub_opts = PublisherOptions::new()
+        .set_slot_size(256)
+        .set_num_slots(NUM_SLOTS as i32);
+    let publisher = client.create_publisher("rust_late_sub", &pub_opts).unwrap();
+    let publish = |count: usize| {
+        for _ in 0..count {
+            let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
+            unsafe {
+                std::ptr::copy_nonoverlapping(b"foobar".as_ptr(), buf, 6);
+            }
+            publisher.publish_message(6).unwrap();
+        }
+    };
+    let sub_opts = SubscriberOptions::new().set_log_dropped_messages(false);
+
+    let holder = client.create_subscriber("rust_late_sub", &sub_opts).unwrap();
+    publish(1);
+    let held = holder.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(held.ordinal, 1);
+    publish(100);
+
+    let subscriber = client.create_subscriber("rust_late_sub", &sub_opts).unwrap();
+    let num_dropped = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
+    let dropped_clone = num_dropped.clone();
+    subscriber.register_dropped_message_callback(move |n| {
+        dropped_clone.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+    });
+    let read_ordinals = || {
+        let mut ordinals = Vec::new();
+        loop {
+            let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
+            if msg.length == 0 {
+                return ordinals;
+            }
+            ordinals.push(msg.ordinal);
+        }
+    };
+
+    let history = read_ordinals();
+    assert!(history.len() >= 2);
+    assert_eq!(history[0], 1);
+    assert!(history[1] > NUM_SLOTS as u64);
+    assert_eq!(num_dropped.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+    publish(3 * NUM_SLOTS);
+    let mut last_seen = *history.last().unwrap();
+    let mut expected_drops = 0i64;
+    for ordinal in read_ordinals() {
+        expected_drops += (ordinal - last_seen - 1) as i64;
+        last_seen = ordinal;
+    }
+    assert!(expected_drops > 0);
+    assert_eq!(
+        num_dropped.load(std::sync::atomic::Ordering::Relaxed),
+        expected_drops
     );
 }
 

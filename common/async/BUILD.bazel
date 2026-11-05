@@ -10,11 +10,14 @@ load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 cc_library(
     name = "async",
     srcs = [
+        "byte_stream.cc",
         "socket.cc",
         "wait.cc",
     ],
     hdrs = [
+        "byte_stream.h",
         "context.h",
+        "mtls.h",
         "runtime.h",
         "socket.h",
         "wait.h",
@@ -24,8 +27,12 @@ cc_library(
         "//:coro_backend_asio": ["SUBSPACE_CORO_BACKEND=2"],
         # co backend leaves the macro unset; context.h defaults to _CO.
         "//conditions:default": [],
+    }) + select({
+        "//:mtls_enabled": ["SUBSPACE_ENABLE_MTLS=1"],
+        "//conditions:default": ["SUBSPACE_ENABLE_MTLS=0"],
     }),
     deps = [
+        "//common:coroutine_stack",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings:str_format",
@@ -34,7 +41,44 @@ cc_library(
     ] + select({
         "//:coro_backend_asio": [
             "@boost.asio//:boost.asio",
+            "@boost.context//:boost.context",
             "@boost.coroutine//:boost.coroutine",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "//:mtls_enabled": [
+            "@boringssl//:crypto",
+            "@boringssl//:ssl",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+cc_library(
+    name = "mtls_test_certs",
+    testonly = True,
+    hdrs = ["mtls_test_certs.h"],
+)
+
+cc_test(
+    name = "mtls_test",
+    size = "small",
+    srcs = ["mtls_test.cc"],
+    deps = [
+        ":async",
+        ":mtls_test_certs",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@googletest//:gtest_main",
+    ] + select({
+        "//:mtls_enabled": [
+            "@boringssl//:crypto",
+            "@boringssl//:ssl",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "//:coro_backend_asio": [
+            "@boost.asio//:boost.asio",
         ],
         "//conditions:default": [],
     }),

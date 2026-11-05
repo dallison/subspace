@@ -39,6 +39,11 @@ pub struct SubscriberImpl {
     num_active_messages: std::sync::atomic::AtomicI32,
 
     ordinal_trackers: HashMap<i32, OrdinalTracker>,
+    // The newest ordinal published on each virtual channel before the
+    // subscriber attached.  Messages up to it are channel history, not drops.
+    // This is kept apart from last_ordinal_seen because delivery order depends
+    // on that.
+    published_before_attach: HashMap<i32, u64>,
 
     self_ref: Option<Weak<Mutex<SubscriberImpl>>>,
     pub(crate) active_messages: Vec<Arc<ActiveMessage>>,
@@ -164,6 +169,7 @@ impl SubscriberImpl {
             retirement_trigger_fds: Vec::new(),
             num_active_messages: std::sync::atomic::AtomicI32::new(0),
             ordinal_trackers: HashMap::new(),
+            published_before_attach: HashMap::new(),
             self_ref: None,
             active_messages: Vec::new(),
             kept_active_message: None,
@@ -223,6 +229,7 @@ impl SubscriberImpl {
         self.pending_queue_drops = 0;
         self.newest_snapshot = None;
         self.ordinal_trackers.clear();
+        self.published_before_attach.clear();
         self.get_or_create_tracker(self.channel.vchan_id);
     }
 
@@ -288,6 +295,22 @@ impl SubscriberImpl {
             ordinal,
             vchan_id,
         });
+    }
+
+    /// A slot held by another subscriber is never reused, so the first message
+    /// a new subscriber reads can be far older than the rest of the history.
+    pub fn remember_published_ordinals(&mut self) {
+        let vchan_ids: Vec<i32> = if self.channel.vchan_id != -1 {
+            vec![-1, self.channel.vchan_id]
+        } else {
+            (-1..MAX_VCHAN_ID as i32).collect()
+        };
+        for vchan_id in vchan_ids {
+            let next_ordinal = self.channel.ccb().ordinals.peek_next(vchan_id);
+            if next_ordinal > 1 {
+                self.published_before_attach.insert(vchan_id, next_ordinal - 1);
+            }
+        }
     }
 
     /// Called when a read found a message that `max_active_messages` kept the
@@ -414,6 +437,18 @@ impl SubscriberImpl {
                     return;
                 }
                 let s = self.channel.slot_ref(i);
+                // A publisher reusing the slot zeroes its ordinal and timestamp
+                // before its bit is cleared, and a claim with ordinal 0 matches
+                // whatever is published there next, so keep the slot only while
+                // it holds the message its refs were committed with.
+                let refs = s.refs.load(Ordering::Acquire);
+                let ordinal = s.ordinal();
+                if (refs & PUB_OWNED) != 0
+                    || ordinal == 0
+                    || (ordinal & ORDINAL_MASK) != ((refs >> ORDINAL_SHIFT) & ORDINAL_MASK)
+                {
+                    return;
+                }
                 if !virtual_channel_id_match(s.vchan_id(), self.channel.vchan_id) {
                     return;
                 }
@@ -422,7 +457,7 @@ impl SubscriberImpl {
                 }
                 self.channel.active_slots.push(ActiveSlot {
                     slot_index: i,
-                    ordinal: s.ordinal(),
+                    ordinal,
                     timestamp: s.timestamp(),
                     vchan_id: s.vchan_id() as i32,
                 });
@@ -1076,11 +1111,16 @@ impl SubscriberImpl {
             return 0;
         };
         let ordinal = self.channel.slot_ref(slot_idx).ordinal();
+        let published_before_attach = self
+            .published_before_attach
+            .get(&vchan_id)
+            .copied()
+            .unwrap_or(0);
         let tracker = self.get_or_create_tracker(vchan_id);
-        if ordinal == 0 || ordinal <= tracker.last_ordinal_seen {
+        let last_seen = tracker.last_ordinal_seen.max(published_before_attach);
+        if ordinal == 0 || ordinal <= last_seen {
             return 0;
         }
-        let last_seen = tracker.last_ordinal_seen;
         tracker.last_ordinal_seen = ordinal;
         if last_seen == 0 || ordinal == last_seen + 1 {
             0

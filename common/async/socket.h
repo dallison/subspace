@@ -1,5 +1,6 @@
 // Copyright 2023-2026 David Allison
 // Asio backend support is Copyright 2026 Cruise LLC
+// Tunnel support is Copyright 2026 General Motors LLC
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -10,6 +11,7 @@
 #include "absl/status/statusor.h"
 #include "common/async/context.h"
 #include "toolbelt/sockets.h"
+#include <chrono>
 
 // Networking facade used by the server's discovery and bridging paths.  The
 // address types (InetAddress / VirtualAddress / SocketAddress) are pure value
@@ -89,6 +91,12 @@ public:
 
   bool Connected() const;
   void Close();
+
+  // Takes ownership of `fd`, which must be a non-blocking stream socket.
+  static StreamSocket Adopt(int fd, SocketAddress bound_address = {});
+
+  // The socket's file descriptor, or -1 if it is closed.
+  int Fd() const;
 
 private:
   struct Impl;
@@ -193,5 +201,24 @@ using UnixSocket = toolbelt::UnixSocket;
 }  // namespace subspace::async
 
 #endif
+
+namespace subspace::async {
+
+// Connects a TCP socket to `addr` without blocking the runtime.  A non-zero
+// timeout returns DeadlineExceededError if the connection isn't made in time;
+// a zero timeout leaves it to the kernel.  The socket is non-blocking.
+absl::StatusOr<StreamSocket> ConnectStream(const InetAddress &addr,
+                                           std::chrono::nanoseconds timeout,
+                                           Context ctx);
+
+// Binds a listening TCP socket to `addr` with SO_REUSEADDR set, so a
+// restarted server can rebind a fixed port while connections from its
+// previous run are in TIME_WAIT.
+absl::StatusOr<StreamSocket> ListenStream(const InetAddress &addr);
+
+// The socket's file descriptor, or -1 if it is closed.
+int StreamSocketFd(const StreamSocket &socket);
+
+}  // namespace subspace::async
 
 #endif  // _COMMON_ASYNC_SOCKET_H

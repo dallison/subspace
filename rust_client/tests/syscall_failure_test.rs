@@ -517,12 +517,8 @@ fn fstat_or_stat_fail_on_subscriber_attach() {
 
     let _guard = ScopedShim::install();
     // get_shm_size is called during subscriber buffer attachment.
-    // On Linux it uses fstat; on macOS it uses stat on the shadow file.
-    if cfg!(target_os = "linux") {
-        FSTAT_COUNTDOWN.store(0, Ordering::SeqCst);
-    } else {
-        STAT_COUNTDOWN.store(0, Ordering::SeqCst);
-    }
+    // On Linux it fstats the shm fd; elsewhere it fstats the shadow file.
+    FSTAT_COUNTDOWN.store(0, Ordering::SeqCst);
     let sub_opts = SubscriberOptions::new();
     let result = client.create_subscriber("sf_get_shm_size_sub", &sub_opts);
     assert!(

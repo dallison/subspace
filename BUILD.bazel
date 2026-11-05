@@ -1,6 +1,6 @@
 package(default_visibility = ["//visibility:public"])
 
-load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "string_flag")
 
 # Build-time selection of the coroutine/networking backend for the server (and
 # the client paths it relies on).  See common/async/context.h.  `co` is the
@@ -26,6 +26,20 @@ config_setting(
     flag_values = {":coro_backend": "asio"},
 )
 
+# Mutual TLS for native bridge connections and the tunnel.  Off by default,
+# so a normal build does not depend on BoringSSL.  See docs/mtls.md.
+#
+#   bazelisk build --//:mtls //server:subspace_server
+bool_flag(
+    name = "mtls",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "mtls_enabled",
+    flag_values = {":mtls": "True"},
+)
+
 # Maximum channels in one server session.  This sizes the shared-memory
 # system control block, so the server and every client must be built with
 # the same value.  Must be a positive multiple of 64.  Default is 1024.
@@ -36,6 +50,43 @@ config_setting(
 string_flag(
     name = "max_channels",
     build_setting_default = "1024",
+)
+
+# Maximum publishers plus subscribers per channel.  This sizes CCB fields in
+# shared memory, so the server and every client must be built with the same
+# value.  Must be a positive integer.  Default is 1024.
+# Downstream modules set this with subspace.max_slot_owners in MODULE.bazel.
+# See docs/max-slot-owners.md.
+#
+#   bazel build --//:max_slot_owners=2048 //server
+string_flag(
+    name = "max_slot_owners",
+    build_setting_default = "1024",
+)
+
+# Maximum distinct payload buffer segments per channel (BCB table).  This sizes
+# the Buffer Control Block in shared memory, so the server and every client
+# must be built with the same value.  Must be a positive integer.  Default is
+# 341 so sizeof(BufferControlBlock) is 4096 bytes on typical platforms.
+# Downstream modules set this with subspace.max_buffers in MODULE.bazel.
+# See docs/max-buffers.md.
+#
+#   bazel build --//:max_buffers=512 //server
+string_flag(
+    name = "max_buffers",
+    build_setting_default = "341",
+)
+
+# Stack size, in bytes, of each coroutine the server and shadow process spawn.
+# Ordinary process memory, not shared memory.  Must be a positive multiple of
+# 4096.  Default is 65536 (64 KiB).  AddressSanitizer builds use at least
+# 256 KiB.  Downstream modules set this with subspace.coroutine_stack_size
+# in MODULE.bazel.  See docs/coroutine-stack-size.md.
+#
+#   bazel build --//:coroutine_stack_size=16384 //server
+string_flag(
+    name = "coroutine_stack_size",
+    build_setting_default = "65536",
 )
 
 config_setting(

@@ -1,4 +1,5 @@
 // Copyright 2023-2026 David Allison
+// Tunnel support is Copyright 2026 General Motors LLC
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -9,11 +10,13 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "client/checksum.h"
 #include "client/message.h"
 #include "client_handler.h"
 #include "co/coroutine.h"
 #include "common/async/context.h"
 #include "common/async/runtime.h"
+#include "common/async/byte_stream.h"
 #include "common/async/socket.h"
 #include "common/async/wait.h"
 #include "plugin.h"
@@ -27,15 +30,17 @@
 #include "toolbelt/logging.h"
 #include "toolbelt/sockets.h"
 #include "toolbelt/triggerfd.h"
+#include <atomic>
 #include <cstdio>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <vector>
 
 namespace subspace {
 
 class Publisher;
+class TunnelConfig;
+class TunnelManager;
 
 // Values written to the notify_fd when the server is ready and
 // is stopped.
@@ -109,6 +114,18 @@ public:
   // running on the same computer.
   void SetMachineName(std::string name) { machine_name_ = std::move(name); }
   const std::string& MachineName() const { return machine_name_; }
+
+  // Enables tunnel-compatible discovery and bridging alongside the native
+  // kind.  Call before Run, which fails if the configuration is invalid.
+  void SetTunnelConfig(const TunnelConfig &config);
+
+  // PEM files for mutual TLS on native bridge connections (including
+  // retirement sockets) and tunnel connections.  All three are required.
+  // Call before Run.  A server built without mTLS rejects them.
+  void SetMtlsCredentials(std::string cert_file, std::string key_file,
+                          std::string ca_file);
+  // Null unless Run has started the tunnel.
+  TunnelManager *GetTunnelManager() const { return tunnel_.get(); }
 
   void SetShadowSocket(const std::string &socket_name);
   void SetShadowSockets(const std::string &primary, const std::string &secondary);
@@ -197,10 +214,24 @@ public:
   void CleanupFilesystem();
   void CleanupAfterSession();
 
+  // Call these before Run or after it returns, never while the server runs.
   absl::Status LoadPlugin(const std::string &name, const std::string &path);
   absl::Status LoadBuiltinPlugin(const std::string &name,
                                  std::unique_ptr<PluginInterface> interface);
   absl::Status UnloadPlugin(const std::string &name);
+
+  // Checksum written when an egress or ingress plugin changes a message that
+  // carries one. The length is the number of bytes the function writes, and
+  // it has to match the message's checksum length. A null function with the
+  // default length of 4 uses CRC32, the same as a client that has not set
+  // its own function. Call these before Run.
+  void SetChecksumSize(int32_t checksum_size) {
+    checksum_size_ = checksum_size;
+  }
+  int32_t ChecksumSize() const { return checksum_size_; }
+  void SetChecksumCallback(ChecksumCallback callback) {
+    checksum_callback_ = std::move(callback);
+  }
 
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO
   virtual co::CoroutineScheduler &GetScheduler() { return runtime_.scheduler(); }
@@ -219,10 +250,6 @@ public:
   GetChannels() {
     return channels_;
   }
-
-  // Whether a hidden telemetry channel for `target` is currently in
-  // channels_. Safe to call from another thread; channels_ itself is not.
-  bool HasTelemetryChannel(const std::string &target) const;
 
   int GetShutdownTriggerFd() {
     return shutdown_trigger_fd_.GetPollFd().Fd();
@@ -265,6 +292,7 @@ public:
 private:
   friend class ClientHandler;
   friend class ServerChannel;
+  friend class TunnelManager;
   friend class VirtualChannel;
   static constexpr size_t kDiscoveryBufferSize = 1024;
 
@@ -415,11 +443,18 @@ private:
                                bool split_buffers_over_bridge,
                                toolbelt::InetAddress publisher,
                                bool local_has_split_options,
-                               bool local_use_split_buffers);
+                               bool local_use_split_buffers,
+                               bool local_is_static, std::string static_mux,
+                               int static_vchan_id);
   void RetirementCoroutine(
       async::Context ctx, const std::string &channel_name,
       toolbelt::FileDescriptor &&retirement_fd,
-      std::shared_ptr<async::StreamSocket> retirement_transmitter);
+      std::shared_ptr<async::ByteStream> retirement_transmitter);
+
+  // No-op unless SetMtlsCredentials was loaded.  `server_role` is true on
+  // the side that accepted the connection.
+  absl::Status SecureConnection(async::Context ctx, async::ByteStream &stream,
+                                bool server_role);
 
   void RetirementReceiverCoroutine(
       async::Context ctx,
@@ -461,6 +496,27 @@ private:
   absl::StatusOr<bool> FreeClientBufferWithPlugins(
       const ClientBufferHandleMetadata &metadata);
 
+  struct EgressPluginResult {
+    absl::Span<const std::byte> bytes;
+    std::shared_ptr<void> keepalive;
+    bool modified = false;
+  };
+  EgressPluginResult ApplyEgressPlugins(const std::string &channel_name,
+                                        const void *data, size_t length);
+  struct IngressPluginResult {
+    size_t length = 0;
+    bool drop = false;
+    bool modified = false;
+  };
+  IngressPluginResult ApplyIngressPlugins(const std::string &channel_name,
+                                          void *data, size_t length,
+                                          size_t max_length, int32_t slot_id);
+  // Writes a new checksum over `payload` into `prefix` and sets its message
+  // size. The prefix is the one that will be sent or published, not a live
+  // slot a local subscriber can still see.
+  absl::Status UpdateModifiedChecksum(MessagePrefix *prefix,
+                                      const void *payload, size_t length);
+
   std::string socket_name_;
   uint64_t session_id_;
   std::vector<std::unique_ptr<ClientHandler>> client_handlers_;
@@ -488,11 +544,6 @@ private:
   std::atomic<bool> shutting_down_ = false;
 
   absl::flat_hash_map<std::string, std::unique_ptr<ServerChannel>> channels_;
-  // Tracks telemetry targets present in channels_ so tests can observe them
-  // without reading that map from another thread.
-  void NoteTelemetryChannel(const std::string &target, bool present);
-  mutable std::mutex telemetry_presence_mu_;
-  absl::flat_hash_set<std::string> telemetry_targets_;
 
   SystemControlBlock *scb_;
   toolbelt::FileDescriptor scb_fd_;
@@ -519,20 +570,37 @@ private:
   bool simulate_crash_ = false;
   bool cleanup_filesystem_ = false;
 
-  // In tests we will load a plugin while the server is running.  This needs a
-  // lock.
-  std::mutex plugin_lock_;
-
   std::vector<std::unique_ptr<Plugin>> plugins_;
+  int32_t checksum_size_ = 4;
+  ChecksumCallback checksum_callback_;
   toolbelt::TriggerFd shutdown_trigger_fd_;
   std::string machine_name_;
   std::optional<StaticChannelConfig> static_config_;
+
+  // Lifetime counters of each channel at the previous published Statistics
+  // message, or at the creation of a virtual channel.  Used on the client
+  // strand only, like channels_.
+  struct StatisticsTotals {
+    uint64_t bytes = 0;
+    uint64_t messages = 0;
+    uint32_t drops = 0;
+  };
+  absl::flat_hash_map<std::string, StatisticsTotals> statistics_totals_;
+
   bool publish_server_channels_ = true;
   BridgePortRange bridge_port_range_;
   bool bridge_ports_fallback_to_ephemeral_ = false;
 
   std::unique_ptr<ShadowReplicator> primary_shadow_replicator_;
   std::unique_ptr<ShadowReplicator> secondary_shadow_replicator_;
+
+  std::unique_ptr<TunnelConfig> tunnel_config_;
+  std::unique_ptr<TunnelManager> tunnel_;
+
+  std::string mtls_cert_;
+  std::string mtls_key_;
+  std::string mtls_ca_;
+  std::shared_ptr<async::MtlsContext> mtls_;
 };
 
 } // namespace subspace

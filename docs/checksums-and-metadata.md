@@ -77,6 +77,13 @@ When enabled, the publisher computes a checksum over the message prefix fields
 checksum area.  The subscriber recomputes the checksum and compares it against
 the stored value.
 
+Only the flags in `kChecksummedMessageFlags` (`kMessageActivate` and
+`kMessageHasChecksum`) are part of the checksum.  The publisher sets them and
+they never change.  Other flags, such as `kMessageBridged`,
+`kMessageCrossMachine` or a bit a program sets itself, can be set after the
+message is published, for example by a bridge or tunnel forwarding it, without
+invalidating the checksum.
+
 ### Default CRC32
 
 By default, `checksum_size` is 4 and the built-in hardware-accelerated CRC32
@@ -121,7 +128,7 @@ The three spans in `data` cover:
 
 | Index | Contents |
 |-------|----------|
-| 0 | Prefix fields before the checksum (`slot_id` through `metadata_size`) |
+| 0 | Prefix fields before the checksum (`slot_id` through `metadata_size`), with `flags` masked to `kChecksummedMessageFlags` |
 | 1 | User metadata area (may be empty) |
 | 2 | Message payload |
 

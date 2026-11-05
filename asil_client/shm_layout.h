@@ -36,6 +36,12 @@
 #ifndef SUBSPACE_MAX_CHANNELS
 #define SUBSPACE_MAX_CHANNELS 1024
 #endif
+#ifndef SUBSPACE_MAX_SLOT_OWNERS
+#define SUBSPACE_MAX_SLOT_OWNERS 1024
+#endif
+#ifndef SUBSPACE_MAX_BUFFERS
+#define SUBSPACE_MAX_BUFFERS 341
+#endif
 
 namespace subspace {
 namespace asil {
@@ -44,9 +50,9 @@ namespace shm {
 static_assert(sizeof(void *) == 8, "Subspace shared memory needs 64 bits");
 
 constexpr int kMaxChannels = SUBSPACE_MAX_CHANNELS;
-constexpr int kMaxSlotOwners = 1024;
+constexpr int kMaxSlotOwners = SUBSPACE_MAX_SLOT_OWNERS;
 constexpr int kMaxVchanId = 1023;
-constexpr int kMaxBuffers = 1024;
+constexpr int kMaxBuffers = SUBSPACE_MAX_BUFFERS;
 constexpr size_t kMaxChannelName = 64;
 constexpr uint32_t kChannelControlBlockVersion = 5;
 constexpr uint64_t kInvalidSlotQueueOffset = ~uint64_t{0};
@@ -186,7 +192,8 @@ struct AvailableSlotQueueIndex {
   std::atomic<uint64_t> offsets[kMaxSlotOwners];
   std::atomic<uint32_t> active_publishers[kMaxSlotOwners];
 };
-static_assert(sizeof(AvailableSlotQueueIndex) == 12296);
+static_assert(kMaxSlotOwners != 1024 ||
+              sizeof(AvailableSlotQueueIndex) == 12296);
 
 struct BufferControlBlock {
   std::atomic<int32_t> refs[kMaxBuffers];
