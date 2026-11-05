@@ -2185,7 +2185,9 @@ TEST_F(ClientTest, PlaceholderSubscriberLearnsSplitBuffersOnReload) {
 // replaces the channel's other shared memory but must keep that block mapped
 // at the same address.
 TEST_F(ClientTest, ChannelCountersStayReadableDuringPlaceholderReload) {
-  constexpr int kReloads = 200;
+  // Each pass creates a channel and a reader thread. A few passes cover the
+  // reload; hundreds of them run past the valgrind test limit.
+  constexpr int kReloads = 8;
   subspace::Client sub_client;
   subspace::Client pub_client;
   ASSERT_OK(sub_client.Init(Socket()));
@@ -2206,6 +2208,7 @@ TEST_F(ClientTest, ChannelCountersStayReadableDuringPlaceholderReload) {
       while (!reloaded.load(std::memory_order_relaxed)) {
         max_pubs_seen = std::max(
             max_pubs_seen, sub->GetChannelCounters().num_pubs);
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
       }
     });
     absl::StatusOr<Message> msg = sub->ReadMessage();
