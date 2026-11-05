@@ -782,7 +782,14 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
     if (queue != nullptr &&
         !queue->Push(slot->id,
                      slot->ordinal.load(std::memory_order_relaxed),
-                     /*report_insertion_failure=*/false)) {
+                     /*report_insertion_failure=*/false,
+                     [this, &available](const QueuedSlot &evicted) {
+                       return ForgetEvictedSlot(
+                           available, evicted,
+                           [this](int32_t retirement_slot_id) {
+                             TriggerRetirement(retirement_slot_id);
+                           });
+                     })) {
       failed_queues.push_back(queue);
     }
   });
@@ -796,10 +803,6 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
       ccb_->max_message_size = message_size;
     }
   }
-  for (InPlaceSlotQueue *queue : failed_queues) {
-    queue->MarkInsertionFailure();
-  }
-
   // Commit the publication. A subscriber that observes the subsequent
   // total_messages increment must also observe this release and all preceding
   // delivery-record writes. PopulateActiveSlots preserves bits for
@@ -807,6 +810,13 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
   // entries at the head until this store completes.
   slot->refs.store(BuildRefsBitField(published_ordinal, vchan_id_, 0),
                    std::memory_order_release);
+
+  // A subscriber that sees the failure recovers from its bitset, and must find
+  // this message there. Before the commit its snapshot would skip the slot,
+  // and it could leave recovery and read this publisher's next message first.
+  for (InPlaceSlotQueue *queue : failed_queues) {
+    queue->MarkInsertionFailure();
+  }
 
   // SubscriberImpl::NextSlot() uses total_messages as a version stamp for its
   // cached active_slots_ snapshot.

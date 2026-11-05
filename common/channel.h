@@ -359,6 +359,7 @@ public:
   }
 
   size_t Capacity() const { return capacity_; }
+  bool DropsOldest() const { return drop_oldest_; }
   uint64_t Head() const { return head_.load(std::memory_order_acquire); }
   uint64_t Tail() const { return tail_.load(std::memory_order_acquire); }
 
@@ -368,6 +369,18 @@ public:
   // every unread ordinal from the authoritative bitset.
   bool Push(int32_t slot_id, uint64_t ordinal,
             bool report_insertion_failure = true) {
+    return Push(slot_id, ordinal, report_insertion_failure,
+                [](const QueuedSlot &) { return true; });
+  }
+
+  // An evicted message is dropped for the subscriber, but its bit in the
+  // subscriber's bitset would otherwise let it be read after newer messages.
+  // `forget` is called with the oldest hint before it leaves the queue so the
+  // caller can clear that bit. If it returns false the hint stays and the push
+  // fails.
+  template <typename Forget>
+  bool Push(int32_t slot_id, uint64_t ordinal, bool report_insertion_failure,
+            Forget &&forget) {
     if (capacity_ == 0) {
       if (report_insertion_failure) {
         MarkInsertionFailure();
@@ -389,7 +402,7 @@ public:
           }
           return false;
         }
-        if (!DropFront()) {
+        if (!EvictFront(forget)) {
           if (report_insertion_failure) {
             MarkInsertionFailure();
           }
@@ -436,8 +449,8 @@ public:
 
   // Read the oldest queued slot without consuming it. This lets poll-driven
   // subscribers stop at the end of a stable drain snapshot without losing the
-  // first newer message.
-  bool TryPeek(QueuedSlot &slot) {
+  // first newer message. `position` identifies the entry for PopAt().
+  bool TryPeek(QueuedSlot &slot, uint64_t &position) {
     if (capacity_ == 0) {
       return false;
     }
@@ -456,11 +469,29 @@ public:
       return false;
     }
     slot = candidate;
+    position = head;
     return true;
   }
 
-  // Drop the oldest queued slot. Producers use this on overflow, and the
-  // subscriber uses it to discard stale entries whose slot has been reused.
+  // Consume the entry that TryPeek() returned at `position`. This fails if a
+  // producer evicted it first, rather than consuming the entry behind it.
+  bool PopAt(uint64_t position) {
+    if (capacity_ == 0) {
+      return false;
+    }
+    uint64_t head = position;
+    if (!head_.compare_exchange_strong(head, position + 1,
+                                       std::memory_order_acq_rel,
+                                       std::memory_order_relaxed)) {
+      return false;
+    }
+    entries_[position % capacity_].sequence.store(position + capacity_,
+                                                  std::memory_order_release);
+    return true;
+  }
+
+  // Drop the oldest queued slot. The subscriber uses this to discard queued
+  // hints it no longer needs.
   bool DropFront() {
     if (capacity_ == 0) {
       return false;
@@ -541,6 +572,37 @@ public:
   }
 
 private:
+  // Drop the oldest queued slot for a producer that needs room. The subscriber
+  // can pop past the entry as soon as head_ moves, so `forget` must finish
+  // first.
+  template <typename Forget> bool EvictFront(Forget &forget) {
+    uint64_t head = head_.load(std::memory_order_relaxed);
+    for (size_t attempt = 0; attempt < kMaxSlotQueueCasAttempts; ++attempt) {
+      SlotQueueEntry &entry = entries_[head % capacity_];
+      if (entry.sequence.load(std::memory_order_acquire) != head + 1) {
+        return false;
+      }
+      const QueuedSlot evicted = {
+          entry.slot_id.load(std::memory_order_relaxed),
+          entry.ordinal.load(std::memory_order_relaxed),
+      };
+      if (entry.sequence.load(std::memory_order_acquire) != head + 1) {
+        head = head_.load(std::memory_order_relaxed);
+        continue;
+      }
+      if (!forget(evicted)) {
+        return false;
+      }
+      if (head_.compare_exchange_strong(head, head + 1,
+                                        std::memory_order_acq_rel,
+                                        std::memory_order_relaxed)) {
+        entry.sequence.store(head + capacity_, std::memory_order_release);
+        return true;
+      }
+    }
+    return false;
+  }
+
   // Fixed ring capacity for this queue, capped independently of the channel's
   // slot count to keep shared-memory usage bounded.
   size_t capacity_ = 0;
@@ -1124,8 +1186,11 @@ public:
       }
       bits.Set(best->id);
       if (queue != nullptr) {
-        queue->Push(best->id,
-                    best->ordinal.load(std::memory_order_relaxed));
+        queue->Push(best->id, best->ordinal.load(std::memory_order_relaxed),
+                    /*report_insertion_failure=*/true,
+                    [this, &bits](const QueuedSlot &evicted) {
+                      return ForgetEvictedSlot(bits, evicted);
+                    });
       }
       last_ordinal = best->ordinal.load(std::memory_order_relaxed);
     }
@@ -1237,6 +1302,14 @@ public:
   bool AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
                          uint64_t ordinal, int vchan_id, bool retire,
                          std::function<void()> retire_callback = {});
+
+  // Clear the bit in `bits` for a message evicted from that subscriber's
+  // queue, if the slot still holds it. Returns false while the message is
+  // still being published, because its slot cannot be pinned until then. If
+  // the slot retires when it is unpinned, `retire_callback` is called with
+  // the slot ID to report.
+  bool ForgetEvictedSlot(InPlaceAtomicBitset &bits, const QueuedSlot &evicted,
+                         std::function<void(int32_t)> retire_callback = {});
 
   void SetType(std::string type) { type_ = std::move(type); }
   const std::string Type() const { return type_; }

@@ -285,6 +285,52 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
   }
 }
 
+bool Channel::ForgetEvictedSlot(
+    InPlaceAtomicBitset &bits, const QueuedSlot &evicted,
+    std::function<void(int32_t)> retire_callback) {
+  if (evicted.slot_id < 0 || evicted.slot_id >= NumSlots() ||
+      evicted.ordinal == 0) {
+    return true;
+  }
+  MessageSlot *slot = &ccb_->slots[evicted.slot_id];
+  const uint64_t refs = slot->refs.load(std::memory_order_acquire);
+  if ((refs & kPubOwned) != 0) {
+    return slot->ordinal.load(std::memory_order_relaxed) != evicted.ordinal;
+  }
+  if (((refs >> kOrdinalShift) & kOrdinalMask) !=
+      (evicted.ordinal & kOrdinalMask)) {
+    return true;
+  }
+  int vchan_id = (refs >> kVchanIdShift) & kVchanIdMask;
+  if (vchan_id == kVchanIdMask) {
+    vchan_id = -1;
+  }
+  // While pinned the slot cannot be reused, so its bit cannot yet belong to a
+  // newer message.
+  if (!AtomicIncRefCount(slot, /*reliable=*/false, 1, evicted.ordinal,
+                         vchan_id, false)) {
+    return true;
+  }
+  if (slot->ordinal.load(std::memory_order_relaxed) == evicted.ordinal) {
+    bits.Clear(slot->id);
+  }
+  const int32_t retirement_slot_id =
+      slot->bridged_slot_id.load(std::memory_order_relaxed);
+  // A subscriber that retires the slot while it is pinned leaves the ref count
+  // above zero, so the unpin has to retire it.
+  const uint64_t unpinned =
+      slot->refs.fetch_sub(1, std::memory_order_acq_rel) - 1;
+  const uint64_t retired_refs =
+      (unpinned >> kRetiredRefsShift) & kRetiredRefsMask;
+  if ((unpinned & kRefCountMask) == 0 &&
+      ((unpinned >> kReliableRefCountShift) & kRefCountMask) == 0 &&
+      retired_refs >= static_cast<uint64_t>(NumSubscribers(vchan_id)) &&
+      RetiredSlots().SetWasClear(slot->id) && retire_callback) {
+    retire_callback(retirement_slot_id);
+  }
+  return true;
+}
+
 void MessageSlot::Dump(std::ostream &os) const {
   uint64_t l_refs = refs.load(std::memory_order_relaxed);
   int reliable_refs = (l_refs >> kReliableRefCountShift) & kRefCountMask;

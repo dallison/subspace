@@ -370,6 +370,51 @@ impl SlotQueueHeader {
         self.tail.load(Ordering::Acquire)
     }
 
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub fn drops_oldest(&self) -> bool {
+        self.drop_oldest
+    }
+
+    /// Drop the oldest entry for a producer that needs room. The subscriber
+    /// can pop past the entry as soon as head moves, so `forget` must finish
+    /// first.
+    fn evict_front<F: FnMut(i32, u64) -> bool>(&self, forget: &mut F) -> bool {
+        let mut head = self.head.load(Ordering::Relaxed);
+        for _ in 0..MAX_SLOT_QUEUE_CAS_ATTEMPTS {
+            let entry = unsafe { &*self.entries().add((head % self.capacity as u64) as usize) };
+            if entry.sequence.load(Ordering::Acquire) != head + 1 {
+                return false;
+            }
+            let slot_id = entry.slot_id.load(Ordering::Relaxed);
+            let ordinal = entry.ordinal.load(Ordering::Relaxed);
+            if entry.sequence.load(Ordering::Acquire) != head + 1 {
+                head = self.head.load(Ordering::Relaxed);
+                continue;
+            }
+            if !forget(slot_id, ordinal) {
+                return false;
+            }
+            match self.head.compare_exchange(
+                head,
+                head + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    entry
+                        .sequence
+                        .store(head + self.capacity as u64, Ordering::Release);
+                    return true;
+                }
+                Err(v) => head = v,
+            }
+        }
+        false
+    }
+
     fn drop_front(&self) -> bool {
         if self.capacity == 0 {
             return false;
@@ -412,6 +457,21 @@ impl SlotQueueHeader {
         ordinal: u64,
         report_insertion_failure: bool,
     ) -> bool {
+        self.push_with_forget(slot_id, ordinal, report_insertion_failure, |_, _| true)
+    }
+
+    /// An evicted message is dropped for the subscriber, but its bit in the
+    /// subscriber's bitset would otherwise let it be read after newer
+    /// messages. `forget` is called with the oldest entry's slot ID and
+    /// ordinal before it leaves the queue so the caller can clear that bit. If
+    /// it returns false the entry stays and the push fails.
+    pub fn push_with_forget<F: FnMut(i32, u64) -> bool>(
+        &self,
+        slot_id: i32,
+        ordinal: u64,
+        report_insertion_failure: bool,
+        mut forget: F,
+    ) -> bool {
         if self.capacity == 0 {
             if report_insertion_failure {
                 self.mark_insertion_failure();
@@ -430,7 +490,7 @@ impl SlotQueueHeader {
                     }
                     return false;
                 }
-                if !self.drop_front() {
+                if !self.evict_front(&mut forget) {
                     if report_insertion_failure {
                         self.mark_insertion_failure();
                     }
@@ -481,7 +541,9 @@ impl SlotQueueHeader {
         self.insertion_failed.store(true, Ordering::Release);
     }
 
-    pub fn try_peek(&self) -> Option<(i32, u64)> {
+    /// Returns the oldest entry's slot ID and ordinal without consuming it,
+    /// and its position for `pop_at`.
+    pub fn try_peek(&self) -> Option<(i32, u64, u64)> {
         if self.capacity == 0 {
             return None;
         }
@@ -492,10 +554,34 @@ impl SlotQueueHeader {
         if entry.sequence.load(Ordering::Acquire) != head + 1 {
             return None;
         }
-        Some((
-            entry.slot_id.load(Ordering::Relaxed),
-            entry.ordinal.load(Ordering::Relaxed),
-        ))
+        let slot_id = entry.slot_id.load(Ordering::Relaxed);
+        let ordinal = entry.ordinal.load(Ordering::Relaxed);
+        if entry.sequence.load(Ordering::Acquire) != head + 1 {
+            return None;
+        }
+        Some((slot_id, ordinal, head))
+    }
+
+    /// Consume the entry that `try_peek` returned at `position`. This fails
+    /// if a producer evicted it first, rather than consuming the entry behind
+    /// it.
+    pub fn pop_at(&self, position: u64) -> bool {
+        if self.capacity == 0 {
+            return false;
+        }
+        if self
+            .head
+            .compare_exchange(position, position + 1, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return false;
+        }
+        let entry =
+            unsafe { &*self.entries().add((position % self.capacity as u64) as usize) };
+        entry
+            .sequence
+            .store(position + self.capacity as u64, Ordering::Release);
+        true
     }
 
     pub fn try_pop(&self) -> Option<(i32, u64)> {
@@ -1366,6 +1452,60 @@ impl Channel {
             return false;
         }
         self.retired_slots().set_was_clear(slot_idx)
+    }
+
+    /// Clear the bit in `bits` for a message evicted from that subscriber's
+    /// queue, if the slot still holds it. Returns false while the message is
+    /// still being published, because its slot cannot be pinned until then.
+    /// If the slot retires when it is unpinned, `retire` is called with the
+    /// slot ID to report.
+    pub fn forget_evicted_slot<R: FnOnce(i32)>(
+        &self,
+        bits: &InPlaceAtomicBitSet,
+        slot_id: i32,
+        ordinal: u64,
+        retire: R,
+    ) -> bool {
+        if slot_id < 0 || slot_id >= self.num_slots || ordinal == 0 {
+            return true;
+        }
+        let slot_idx = slot_id as usize;
+        let slot = self.slot_ref(slot_idx);
+        let refs = slot.refs.load(Ordering::Acquire);
+        if (refs & PUB_OWNED) != 0 {
+            return slot.ordinal() != ordinal;
+        }
+        if ((refs >> ORDINAL_SHIFT) & ORDINAL_MASK) != (ordinal & ORDINAL_MASK) {
+            return true;
+        }
+        let encoded_vchan_id = (refs >> VCHAN_ID_SHIFT) & VCHAN_ID_MASK;
+        let vchan_id = if encoded_vchan_id == VCHAN_ID_MASK {
+            -1
+        } else {
+            encoded_vchan_id as i32
+        };
+        // While pinned the slot cannot be reused, so its bit cannot yet belong
+        // to a newer message.
+        if !self.atomic_inc_ref_count::<fn()>(slot_idx, false, 1, ordinal, vchan_id, false, None) {
+            return true;
+        }
+        if slot.ordinal() == ordinal {
+            bits.clear(slot_idx);
+        }
+        let retirement_slot_id = slot.bridged_slot_id();
+        // A subscriber that retires the slot while it is pinned leaves the ref
+        // count above zero, so the unpin has to retire it.
+        let pinned = slot.refs.fetch_sub(1, Ordering::AcqRel);
+        let unpinned = pinned - 1;
+        let retired_refs = (unpinned >> RETIRED_REFS_SHIFT) & RETIRED_REFS_MASK;
+        if (unpinned & REF_COUNT_MASK) == 0
+            && ((unpinned >> RELIABLE_REF_COUNT_SHIFT) & REF_COUNT_MASK) == 0
+            && retired_refs >= self.num_subscribers(vchan_id) as u64
+            && self.retired_slots().set_was_clear(slot_idx)
+        {
+            retire(retirement_slot_id);
+        }
+        true
     }
 
     /// Get the buffer address for a slot, accounting for prefix.

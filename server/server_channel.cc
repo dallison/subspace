@@ -726,8 +726,8 @@ ServerChannel::AddSubscriber(ClientHandler *handler, bool is_reliable,
   if (!user_id.ok()) {
     return user_id.status();
   }
-  if (absl::Status status =
-          AllocateSubscriberQueue(*user_id, subscriber_queue_size);
+  if (absl::Status status = AllocateSubscriberQueue(
+          *user_id, subscriber_queue_size, is_reliable);
       !status.ok()) {
     RemoveUserId(*user_id);
     return status;
@@ -751,12 +751,12 @@ ServerChannel::AddSubscriber(ClientHandler *handler, bool is_reliable,
 }
 
 absl::Status
-ServerChannel::AllocateSubscriberQueue(int sub_id,
-                                       int subscriber_queue_size) {
+ServerChannel::AllocateSubscriberQueue(int sub_id, int subscriber_queue_size,
+                                       bool is_reliable) {
   if (IsVirtual()) {
     return static_cast<VirtualChannel *>(this)
         ->GetMux()
-        ->AllocateSubscriberQueue(sub_id, subscriber_queue_size);
+        ->AllocateSubscriberQueue(sub_id, subscriber_queue_size, is_reliable);
   }
   if (IsPlaceholder()) {
     return absl::OkStatus();
@@ -907,9 +907,12 @@ ServerChannel::AllocateSubscriberQueue(int sub_id,
       static_cast<uint32_t>(SlotQueueBlockState::kAllocated),
       std::memory_order_relaxed);
   const uint64_t queue_offset = block_offset + SlotQueueBlockHeaderSize();
+  // Evicting a hint clears the subscriber's bit for that message. A reliable
+  // subscriber reads only from its bitset, so its queue must never evict.
   new (arena + queue_offset)
       InPlaceSlotQueue(static_cast<size_t>(capacity),
-                       /*drop_oldest=*/subscriber_queue_size != 0);
+                       /*drop_oldest=*/subscriber_queue_size != 0 &&
+                           !is_reliable);
   index->offsets[sub_id].store(queue_offset, std::memory_order_release);
   return absl::OkStatus();
 }
@@ -1112,8 +1115,8 @@ std::vector<std::string> ServerChannel::RegisterExistingSubscribers() {
     const bool was_registered =
         !IsPlaceholder() &&
         storage_channel->GetCcb()->subscribers.IsSet(id);
-    if (absl::Status status =
-            AllocateSubscriberQueue(id, sub->SubscriberQueueSize());
+    if (absl::Status status = AllocateSubscriberQueue(
+            id, sub->SubscriberQueueSize(), sub->IsReliable());
         !status.ok()) {
       // The arena was provisioned from the publisher default and should fit
       // every default-sized subscriber. A pre-publisher override can still

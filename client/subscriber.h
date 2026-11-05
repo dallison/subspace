@@ -146,6 +146,7 @@ public:
   FindNextQueuedSlot(uint64_t max_queue_position);
   MessageSlot *FindNextVisibleSlot(InPlaceAtomicBitset &bits,
                                    uint64_t max_ordinal);
+  bool DiscardRecoveredQueueEntries(InPlaceSlotQueue &queue);
 
   void IgnoreActivation(MessageSlot *slot) {
     RememberOrdinal(slot->ordinal.load(std::memory_order_relaxed),
