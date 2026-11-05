@@ -464,6 +464,16 @@ TEST_F(PluginBridgeTest, NativeBridgeRecomputesChecksumWhenEgressChangesPayload)
   ASSERT_THAT(got, IsOk());
   EXPECT_EQ(got->data, Flipped("Mhello"));
   EXPECT_FALSE(got->checksum_error);
+  // Each retry publishes another "Mhello". Once the bridge is up, the ones
+  // still in flight arrive too, so drop them before publishing "plain".
+  for (;;) {
+    absl::StatusOr<Received> extra = ReadChecked(*sub, 200ms);
+    if (!extra.ok()) {
+      break;
+    }
+    EXPECT_EQ(extra->data, Flipped("Mhello"));
+    EXPECT_FALSE(extra->checksum_error);
+  }
 
   ASSERT_THAT(Publish(*pub, "plain"), IsOk());
   got = ReadChecked(*sub);
