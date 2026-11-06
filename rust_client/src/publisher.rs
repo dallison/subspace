@@ -733,10 +733,20 @@ impl PublisherImpl {
 
                 let queue = self.channel.get_available_slot_queue(sub_id);
                 if let Some(queue) = queue {
-                    if !queue.push(
+                    if !queue.push_with_forget(
                         slot.id,
                         ordinal,
                         /* report_insertion_failure= */ false,
+                        |evicted_slot_id, evicted_ordinal| {
+                            self.channel.forget_evicted_slot(
+                                &available,
+                                evicted_slot_id,
+                                evicted_ordinal,
+                                |retirement_slot_id| {
+                                    self.trigger_retirement(retirement_slot_id as usize)
+                                },
+                            )
+                        },
                     ) {
                         failed_queues.push(queue as *const SlotQueueHeader);
                     }
@@ -761,15 +771,19 @@ impl PublisherImpl {
                 }
             }
 
-            for queue in failed_queues {
-                unsafe { (&*queue).mark_insertion_failure() };
-            }
-
             // Commit only after all delivery state is ready.
             slot.refs.store(
                 build_refs_bit_field(ordinal, vchan_id, 0),
                 Ordering::Release,
             );
+
+            // A subscriber that sees the failure recovers from its bitset, and
+            // must find this message there. Before the commit its snapshot
+            // would skip the slot, and it could leave recovery and read this
+            // publisher's next message first.
+            for queue in failed_queues {
+                unsafe { (&*queue).mark_insertion_failure() };
+            }
             ccb.total_messages.fetch_add(1, Ordering::SeqCst);
 
             // Whichever happens second, subscriber cleanup or this commit,

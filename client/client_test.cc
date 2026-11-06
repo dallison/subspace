@@ -1738,6 +1738,77 @@ TEST_F(ClientTest, SubscriberQueueOverflowReportsDroppedMessages) {
   ASSERT_EQ(1, message.length);
   EXPECT_EQ(3, *static_cast<const uint8_t *>(message.buffer));
   EXPECT_EQ(2, reported_drops);
+
+  // The evicted messages are still in their slots but must not be read after
+  // the newer ones.
+  message.Reset();
+  message = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_EQ(1, message.length);
+  EXPECT_EQ(4, *static_cast<const uint8_t *>(message.buffer));
+  message.Reset();
+  message = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  EXPECT_EQ(0, message.length);
+  EXPECT_EQ(2, reported_drops);
+}
+
+TEST_F(ClientTest, LateSubscriberQueueKeepsNewestHistory) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  constexpr char kChannel[] = "subscriber_queue_late_history";
+  auto pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      kChannel, subspace::PublisherOptions()
+                    .SetSlotSize(64)
+                    .SetNumSlots(8)
+                    .SetSubscriberQueueArenaSize(
+                        subspace::kDefaultSubscriberQueueArenaSize)));
+  for (uint8_t value = 1; value <= 4; ++value) {
+    void *buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+    *static_cast<uint8_t *>(buffer) = value;
+    ASSERT_OK(pub.PublishMessage(1));
+  }
+
+  // Registration seeds the queue with the history, which evicts the oldest.
+  auto sub = EVAL_AND_ASSERT_OK(client.CreateSubscriber(
+      kChannel, subspace::SubscriberOptions().SetSubscriberQueueSize(2)));
+  for (uint8_t expected = 3; expected <= 4; ++expected) {
+    Message message = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+    ASSERT_EQ(1, message.length);
+    EXPECT_EQ(expected, *static_cast<const uint8_t *>(message.buffer));
+  }
+  Message message = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  EXPECT_EQ(0, message.length);
+}
+
+TEST_F(ClientTest, ReliableSubscriberQueueOverflowKeepsMessages) {
+  subspace::Client client;
+  ASSERT_OK(client.Init(Socket()));
+
+  constexpr char kChannel[] = "reliable_subscriber_queue_overflow";
+  auto pub = EVAL_AND_ASSERT_OK(client.CreatePublisher(
+      kChannel, subspace::PublisherOptions()
+                    .SetSlotSize(64)
+                    .SetNumSlots(8)
+                    .SetReliable(true)
+                    .SetSubscriberQueueArenaSize(
+                        subspace::kDefaultSubscriberQueueArenaSize)));
+  // A reliable subscriber never reads its queue, so it is always full.
+  auto sub = EVAL_AND_ASSERT_OK(client.CreateSubscriber(
+      kChannel, subspace::SubscriberOptions()
+                    .SetReliable(true)
+                    .SetSubscriberQueueSize(1)));
+
+  for (uint8_t value = 1; value <= 4; ++value) {
+    void *buffer = EVAL_AND_ASSERT_OK(pub.GetMessageBuffer());
+    ASSERT_NE(nullptr, buffer);
+    *static_cast<uint8_t *>(buffer) = value;
+    ASSERT_OK(pub.PublishMessage(1));
+  }
+  for (uint8_t expected = 1; expected <= 4; ++expected) {
+    Message message = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+    ASSERT_EQ(1, message.length);
+    EXPECT_EQ(expected, *static_cast<const uint8_t *>(message.buffer));
+  }
 }
 
 TEST_F(ClientTest, QueueMessageSurvivesMaxActiveMessageRejection) {

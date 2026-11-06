@@ -1105,6 +1105,81 @@ fn integration_subscriber_queue_overflow_preserves_newest() {
 }
 
 #[test]
+fn integration_late_subscriber_queue_keeps_newest_history() {
+    let client = new_client("rust_late_queue");
+    let publisher = client
+        .create_publisher(
+            "rust_late_queue_ch",
+            &PublisherOptions::new()
+                .set_slot_size(64)
+                .set_num_slots(8)
+                .set_subscriber_queue_arena_size(DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE),
+        )
+        .unwrap();
+    for value in 1u8..=4 {
+        let (buffer, _) = publisher.get_message_buffer(1).unwrap().unwrap();
+        unsafe {
+            *buffer = value;
+        }
+        publisher.publish_message(1).unwrap();
+    }
+
+    let subscriber = client
+        .create_subscriber(
+            "rust_late_queue_ch",
+            &SubscriberOptions::new().set_subscriber_queue_size(2),
+        )
+        .unwrap();
+    for expected in 3u8..=4 {
+        let message = subscriber.read_message(ReadMode::ReadNext).unwrap();
+        assert_eq!(unsafe { *message.buffer }, expected);
+    }
+    assert!(subscriber
+        .read_message(ReadMode::ReadNext)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn integration_reliable_subscriber_queue_overflow_keeps_messages() {
+    let client = new_client("rust_reliable_queue");
+    let publisher = client
+        .create_publisher(
+            "rust_reliable_queue_ch",
+            &PublisherOptions::new()
+                .set_slot_size(64)
+                .set_num_slots(8)
+                .set_reliable(true)
+                .set_subscriber_queue_arena_size(DEFAULT_SUBSCRIBER_QUEUE_ARENA_SIZE),
+        )
+        .unwrap();
+    let subscriber = client
+        .create_subscriber(
+            "rust_reliable_queue_ch",
+            &SubscriberOptions::new()
+                .set_reliable(true)
+                .set_subscriber_queue_size(1),
+        )
+        .unwrap();
+    for value in 1u8..=4 {
+        let (buffer, _) = publisher.get_message_buffer(1).unwrap().unwrap();
+        unsafe {
+            *buffer = value;
+        }
+        publisher.publish_message(1).unwrap();
+    }
+
+    for expected in 1u8..=4 {
+        let message = subscriber.read_message(ReadMode::ReadNext).unwrap();
+        assert_eq!(unsafe { *message.buffer }, expected);
+    }
+    assert!(subscriber
+        .read_message(ReadMode::ReadNext)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn integration_default_subscriber_queue_overflow_recovers_from_bitset() {
     let client = new_client("rust_default_queue_overflow");
     let publisher = client

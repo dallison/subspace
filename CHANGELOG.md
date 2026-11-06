@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Subscriber Queues Keep Per-Publisher Order
+- A subscriber with an explicit queue size could read a message that had
+  overflowed its queue after newer messages from the same publisher. The
+  overflowed message stayed visible in the subscriber's slot bitset, where
+  bitset recovery and the first read found it. A publisher now clears that bit
+  when it drops a message from a subscriber's queue, and leaves the entry in
+  place while the dropped message is still being published. The C++ and Rust
+  clients both do this, so mixed-language channels keep the same order.
+- A reliable subscriber's queue no longer drops entries when it is full.
+  Reliable subscribers read from their bitset, and must never lose a message.
+  The server sets this when it creates the queue, so upgrade it with the
+  clients. With an older server, a reliable subscriber that sets a queue size
+  can lose messages.
+
 ### Bridge and Tunnel Plugins
 - Server plugins can change messages as they cross a native bridge or the
   tunnel. `onSend` runs on the way out and `onReceive` on the way in. If a plugin

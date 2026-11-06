@@ -273,6 +273,9 @@ void SubscriberImpl::ClaimSlot(MessageSlot *slot, int vchan_id,
 
 void SubscriberImpl::UnreadSlot(MessageSlot *slot) {
   if (slot->sub_owners.ClearWasSet(subscriber_id_)) {
+    // A publisher evicting a queued slot can clear its bit just before the
+    // pop. Restore it while the slot is still held so that it stays unread.
+    GetAvailableSlots(subscriber_id_).Set(slot->id);
     DecrementSlotRef(slot, false);
   }
   // A queued hint has already been consumed by NextSlot(). If delivery is
@@ -346,11 +349,12 @@ SubscriberImpl::FindNextQueuedSlot(uint64_t max_queue_position) {
   OrdinalTracker *cached_tracker = nullptr;
 
   QueuedSlot queued;
+  uint64_t position = 0;
   for (size_t i = 0; i < queue->Capacity(); i++) {
     if (queue->Head() >= max_queue_position) {
       return std::nullopt;
     }
-    if (!queue->TryPeek(queued)) {
+    if (!queue->TryPeek(queued, position)) {
       return std::nullopt;
     }
     if (queued.slot_id >= 0 && queued.slot_id < NumSlots()) {
@@ -366,11 +370,12 @@ SubscriberImpl::FindNextQueuedSlot(uint64_t max_queue_position) {
         return std::nullopt;
       }
     }
-    QueuedSlot popped;
-    if (!queue->TryPop(popped)) {
+    // If a producer evicted the checked entry, the one behind it may still be
+    // being published. Discarding it would leave that message in the bitset
+    // to be read after newer queued messages from the same publisher.
+    if (!queue->PopAt(position)) {
       continue;
     }
-    queued = popped;
     if (queued.slot_id < 0 || queued.slot_id >= NumSlots()) {
       continue;
     }
@@ -434,6 +439,48 @@ SubscriberImpl::FindNextQueuedSlot(uint64_t max_queue_position) {
   }
 
   return std::nullopt;
+}
+
+// Drop the queue entries for messages that bitset recovery has delivered, so
+// that the queue path can take over again. An entry for a message still being
+// published stays at the head. Returns false, leaving the entry at the head,
+// for a message that has not been read. Bitset recovery must deliver it, or
+// the publisher evicting it must finish, before any newer queue entry is read.
+// Popping it here instead would make a racing eviction drop the entry behind
+// it, losing this message without counting it.
+bool SubscriberImpl::DiscardRecoveredQueueEntries(InPlaceSlotQueue &queue) {
+  QueuedSlot queued;
+  uint64_t position = 0;
+  for (size_t i = 0; i < queue.Capacity(); i++) {
+    if (!queue.TryPeek(queued, position)) {
+      return true;
+    }
+    MessageSlot *s = queued.slot_id >= 0 && queued.slot_id < NumSlots()
+                         ? &ccb_->slots[queued.slot_id]
+                         : nullptr;
+    if (s == nullptr) {
+      queue.PopAt(position);
+      continue;
+    }
+    const uint64_t refs = s->refs.load(std::memory_order_acquire);
+    const bool same_generation =
+        s->ordinal.load(std::memory_order_relaxed) == queued.ordinal;
+    if ((refs & kPubOwned) != 0 && same_generation) {
+      return true;
+    }
+    const int slot_vchan_id = s->vchan_id.load(std::memory_order_relaxed);
+    if ((refs & kPubOwned) == 0 && same_generation && queued.ordinal != 0 &&
+        ((refs >> kOrdinalShift) & kOrdinalMask) ==
+            (queued.ordinal & kOrdinalMask) &&
+        VirtualChannelIdMatch(s, vchan_id_) &&
+        !GetOrdinalTracker(slot_vchan_id)
+             .ordinals.Contains(
+                 OrdinalAndVchanId{queued.ordinal, slot_vchan_id})) {
+      return false;
+    }
+    queue.PopAt(position);
+  }
+  return true;
 }
 
 MessageSlot *SubscriberImpl::FindNextVisibleSlot(InPlaceAtomicBitset &bits,
@@ -507,8 +554,13 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
       }
     }
     if (slot == nullptr) {
-      // Prepopulate the active slots.
-      PopulateActiveSlots(bits);
+      // Prepopulate the active slots. Registration already seeded a queue that
+      // drops its oldest entries, and the bits of the messages it dropped must
+      // stay clear.
+      InPlaceSlotQueue *queue = GetAvailableSlotQueueAddress(subscriber_id_);
+      if (queue == nullptr || !queue->DropsOldest()) {
+        PopulateActiveSlots(bits);
+      }
     }
 
     if (!reliable && SubscriberQueueSize() > 0) {
@@ -555,6 +607,9 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
         const uint64_t ordinal = claimed->ordinal;
         const int vchan_id = claimed->vchan_id;
         if (queue != nullptr && queue->InsertionFailed()) {
+          // A publisher evicting this entry can clear its bit just before the
+          // pop. Restore the bit so that bitset recovery still finds it.
+          bits.Set(new_slot->id);
           AtomicIncRefCount(new_slot, reliable, -1, ordinal, vchan_id, false);
           queue->ConsumeInsertionFailure();
           queue_bitset_fallback_ = true;
@@ -585,6 +640,7 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
             new_slot->Dump(std::cerr);
           }
           embargoed_slots_.Set(new_slot->id);
+          bits.Set(new_slot->id);
           AtomicIncRefCount(new_slot, reliable, -1, ordinal, vchan_id, false);
           continue;
         }
@@ -673,10 +729,10 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
     }
     if (new_slot == nullptr) {
       if (queue_bitset_fallback_) {
-        if (InPlaceSlotQueue *queue =
-                GetAvailableSlotQueueAddress(subscriber_id_);
-            queue != nullptr) {
-          queue->DiscardAll();
+        InPlaceSlotQueue *queue = GetAvailableSlotQueueAddress(subscriber_id_);
+        if (queue != nullptr && !DiscardRecoveredQueueEntries(*queue)) {
+          next_slot_cache_valid_ = false;
+          continue;
         }
         queue_bitset_fallback_ = false;
       }
@@ -709,6 +765,15 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
     // we just go back and try again.
     if (AtomicIncRefCount(new_slot->slot, reliable, 1, new_slot->ordinal,
                           new_slot->vchan_id, false)) {
+      if (!bits.IsSet(new_slot->slot->id)) {
+        // A publisher evicted the message from this subscriber's queue after
+        // the snapshot, dropping it. A newer message from the same publisher
+        // may already have been read from the queue.
+        AtomicIncRefCount(new_slot->slot, reliable, -1, new_slot->ordinal,
+                          new_slot->vchan_id, false);
+        ++next_slot_cursor_;
+        continue;
+      }
       const int buffer_index =
           new_slot->slot->buffer_index.load(std::memory_order_relaxed);
       if (!ValidateSlotBuffer(new_slot->slot) || buffer_index == -1) {
