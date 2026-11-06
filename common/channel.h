@@ -307,8 +307,13 @@ public:
       }
       bits.Set(best->id);
       if (queue != nullptr) {
-        queue->Push(best->id,
-                    best->ordinal.load(std::memory_order_relaxed));
+        queue->Push(best->id, best->ordinal.load(std::memory_order_relaxed),
+                    /*report_insertion_failure=*/true,
+                    [this, sub_id](const QueuedSlot &evicted) {
+                      return View().ForgetEvictedSlot(
+                          View().AvailableSlots(sub_id), evicted,
+                          [](int32_t) {});
+                    });
       }
       last_ordinal = best->ordinal.load(std::memory_order_relaxed);
     }

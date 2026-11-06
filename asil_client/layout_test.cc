@@ -129,8 +129,16 @@ public:
     ::subspace::SubscriberQueuePublishScope publishing(view_.QueueIndex(),
                                                        kPublisherId);
     EXPECT_EQ(1u, view_.QueueIndex()->active_publishers[kPublisherId].load());
-    return ::subspace::CommitPublishedSlot(view_, slot, vchan_id, is_activation,
-                                           publishing);
+    return ::subspace::CommitPublishedSlot(
+        view_, slot, vchan_id, is_activation, publishing,
+        [this](int32_t retirement_slot_id) {
+          evicted_retirements_.push_back(retirement_slot_id);
+        });
+  }
+
+  // The slots that retired as publishing dropped them from full queues.
+  const std::vector<int32_t> &EvictedRetirements() const {
+    return evicted_retirements_;
   }
 
 private:
@@ -139,6 +147,7 @@ private:
   };
   std::vector<Block> memory_;
   ChannelView view_;
+  std::vector<int32_t> evicted_retirements_;
 };
 
 TEST(PublishTest, DeliversToSubscribersOnTheVirtualChannel) {
@@ -198,6 +207,70 @@ TEST(PublishTest, FullQueueRecordsInsertionFailure) {
   // The bitset still records both messages.
   EXPECT_TRUE(channel.View().AvailableSlots(0).IsSet(0));
   EXPECT_TRUE(channel.View().AvailableSlots(0).IsSet(1));
+}
+
+TEST(PublishTest, EvictionForgetsTheDroppedMessage) {
+  TestChannel channel(/*num_slots=*/4, /*queue_arena_size=*/4096);
+  channel.AddSubscriber(0, /*vchan_id=*/-1);
+  channel.AddSubscriber(1, /*vchan_id=*/-1);
+  InPlaceSlotQueue *queue = channel.AddQueue(0, /*offset=*/0, /*capacity=*/1,
+                                             /*drop_oldest=*/true);
+  channel.Publish(0, /*vchan_id=*/-1, 10);
+  channel.Publish(1, /*vchan_id=*/-1, 10);
+
+  ChannelView &view = channel.View();
+  EXPECT_FALSE(view.AvailableSlots(0).IsSet(0));
+  EXPECT_TRUE(view.AvailableSlots(0).IsSet(1));
+  // Subscriber 1 has no queue, so it still has both messages.
+  EXPECT_TRUE(view.AvailableSlots(1).IsSet(0));
+  EXPECT_EQ(1u, queue->OverflowCount());
+  EXPECT_FALSE(queue->InsertionFailed());
+  // The pin taken to clear the bit is released.
+  EXPECT_EQ(::subspace::BuildRefsBitField(1, -1, 0), view.Slot(0)->refs.load());
+  EXPECT_TRUE(channel.EvictedRetirements().empty());
+
+  ::subspace::QueuedSlot queued;
+  ASSERT_TRUE(queue->TryPop(queued));
+  EXPECT_EQ(1, queued.slot_id);
+}
+
+TEST(PublishTest, EvictionKeepsAMessageStillBeingPublished) {
+  TestChannel channel(/*num_slots=*/4, /*queue_arena_size=*/4096);
+  channel.AddSubscriber(0, /*vchan_id=*/-1);
+  InPlaceSlotQueue *queue = channel.AddQueue(0, /*offset=*/0, /*capacity=*/1,
+                                             /*drop_oldest=*/true);
+  // Another publisher has queued slot 0 but not yet committed it.
+  MessageSlot *in_flight = channel.View().Slot(0);
+  in_flight->refs.store(::subspace::kPubOwned);
+  in_flight->ordinal.store(7);
+  ASSERT_TRUE(queue->Push(0, 7));
+
+  channel.Publish(1, /*vchan_id=*/-1, 10);
+  EXPECT_TRUE(queue->InsertionFailed());
+  EXPECT_EQ(0u, queue->OverflowCount());
+  EXPECT_TRUE(channel.View().AvailableSlots(0).IsSet(1));
+  ::subspace::QueuedSlot queued;
+  ASSERT_TRUE(queue->TryPop(queued));
+  EXPECT_EQ(0, queued.slot_id);
+}
+
+TEST(PublishTest, EvictionRetiresASlotReleasedDuringThePin) {
+  TestChannel channel(/*num_slots=*/4, /*queue_arena_size=*/4096);
+  channel.AddSubscriber(0, /*vchan_id=*/-1);
+  InPlaceSlotQueue *queue = channel.AddQueue(0, /*offset=*/0, /*capacity=*/1,
+                                             /*drop_oldest=*/true);
+  channel.Publish(0, /*vchan_id=*/-1, 10);
+  ChannelView &view = channel.View();
+  MessageSlot *slot = view.Slot(0);
+  slot->bridged_slot_id.store(6);
+  // The subscriber has read and released the message, but its release found
+  // the slot pinned by an earlier eviction and so did not retire it.
+  slot->refs.store(::subspace::BuildRefsBitField(1, -1, 1));
+
+  channel.Publish(1, /*vchan_id=*/-1, 10);
+  EXPECT_EQ(1u, queue->OverflowCount());
+  EXPECT_TRUE(view.RetiredSlots().IsSet(0));
+  EXPECT_EQ(std::vector<int32_t>{6}, channel.EvictedRetirements());
 }
 
 TEST(PublishTest, QueueOutsideTheArenaIsIgnored) {

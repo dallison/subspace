@@ -189,6 +189,54 @@ public:
     }
   }
 
+  // Clears the bit in `bits` for a message evicted from that subscriber's
+  // queue, if the slot still holds it.  Returns false while the message is
+  // still being published, because its slot cannot be pinned until then.  If
+  // the slot retires when it is unpinned, calls `retired` with the slot to
+  // name to retirement listeners.
+  template <typename Retired>
+  bool ForgetEvictedSlot(BitsetView bits, const QueuedSlot &evicted,
+                         Retired &&retired) const {
+    if (evicted.slot_id < 0 || evicted.slot_id >= num_slots_ ||
+        evicted.ordinal == 0) {
+      return true;
+    }
+    MessageSlot *slot = Slot(evicted.slot_id);
+    const uint64_t refs = slot->refs.load(std::memory_order_acquire);
+    if ((refs & kPubOwned) != 0) {
+      return slot->ordinal.load(std::memory_order_relaxed) != evicted.ordinal;
+    }
+    if (((refs >> kOrdinalShift) & kOrdinalMask) !=
+        (evicted.ordinal & kOrdinalMask)) {
+      return true;
+    }
+    const int vchan_id = RefsVchanId(refs);
+    // While pinned the slot cannot be reused, so its bit cannot yet belong to
+    // a newer message.
+    if (!AtomicIncRefCount(slot, /*reliable=*/false, 1, evicted.ordinal,
+                           vchan_id, /*retire=*/false, nullptr)) {
+      return true;
+    }
+    if (slot->ordinal.load(std::memory_order_relaxed) == evicted.ordinal) {
+      bits.Clear(slot->id);
+    }
+    const int32_t retirement_slot_id =
+        slot->bridged_slot_id.load(std::memory_order_relaxed);
+    // A subscriber that retires the slot while it is pinned leaves the ref
+    // count above zero, so the unpin has to retire it.
+    const uint64_t unpinned =
+        slot->refs.fetch_sub(1, std::memory_order_acq_rel) - 1;
+    const uint64_t retired_refs =
+        (unpinned >> kRetiredRefsShift) & kRetiredRefsMask;
+    if ((unpinned & kRefCountMask) == 0 &&
+        ((unpinned >> kReliableRefCountShift) & kRefCountMask) == 0 &&
+        retired_refs >= static_cast<uint64_t>(NumSubscribers(vchan_id)) &&
+        RetiredSlots().SetWasClear(slot->id)) {
+      retired(retirement_slot_id);
+    }
+    return true;
+  }
+
 protected:
   ChannelControlBlock *ccb_ = nullptr;
   int num_slots_ = 0;

@@ -63,6 +63,9 @@ inline void UnclaimMessageReference(const ChannelView &channel,
                                     MessageSlot *slot, int subscriber_id,
                                     bool reliable) {
   if (slot->sub_owners.ClearWasSet(subscriber_id)) {
+    // A publisher evicting a queued slot can clear its bit just before the
+    // subscriber pops it.  Restore the bit while the slot is still held.
+    channel.AvailableSlots(subscriber_id).Set(slot->id);
     (void)channel.AtomicIncRefCount(
         slot, reliable, -1, slot->ordinal.load(std::memory_order_relaxed),
         slot->vchan_id.load(std::memory_order_relaxed), /*retire=*/false,

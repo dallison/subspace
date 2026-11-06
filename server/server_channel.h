@@ -548,8 +548,8 @@ public:
   }
 
 protected:
-  absl::Status AllocateSubscriberQueue(int sub_id,
-                                       int subscriber_queue_size);
+  absl::Status AllocateSubscriberQueue(int sub_id, int subscriber_queue_size,
+                                       bool is_reliable);
   void RetireSubscriberQueue(int sub_id);
 
   absl::flat_hash_map<int, std::unique_ptr<User>> users_;

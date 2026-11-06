@@ -103,11 +103,16 @@ struct PublishedSlot {
 
 // Makes the stamped message in slot, which the publisher owns, available to
 // the subscribers on vchan_id and then readable.  `publishing` must count the
-// publisher, because the commit writes to subscriber queues.
-inline PublishedSlot
+// publisher, because the commit writes to subscriber queues.  An older message
+// dropped from a full subscriber queue can retire its slot as the commit
+// forgets it; `evicted_retired` is called with the slot to name to retirement
+// listeners.
+template <typename EvictedRetired>
+PublishedSlot
 CommitPublishedSlot(const ChannelView &channel, MessageSlot *slot,
                     int vchan_id, bool is_activation,
-                    const SubscriberQueuePublishScope & /*publishing*/) {
+                    const SubscriberQueuePublishScope & /*publishing*/,
+                    EvictedRetired &&evicted_retired) {
   ChannelControlBlock *ccb = channel.Ccb();
   PublishedSlot published;
   published.ordinal = slot->ordinal.load(std::memory_order_relaxed);
@@ -147,7 +152,11 @@ CommitPublishedSlot(const ChannelView &channel, MessageSlot *slot,
         InPlaceSlotQueue *queue = channel.Queue(sub_id);
         if (queue != nullptr &&
             !queue->Push(slot->id, published.ordinal,
-                         /*report_insertion_failure=*/false)) {
+                         /*report_insertion_failure=*/false,
+                         [&](const QueuedSlot &evicted) {
+                           return channel.ForgetEvictedSlot(available, evicted,
+                                                            evicted_retired);
+                         })) {
           failed_queues.Set(sub_id);
         }
       },
@@ -162,6 +171,16 @@ CommitPublishedSlot(const ChannelView &channel, MessageSlot *slot,
       ccb->max_message_size = message_size;
     }
   }
+
+  // Commit.  A subscriber that sees the total_messages increment also sees
+  // this release and every delivery record above.  Subscribers use
+  // total_messages as a version stamp for their delivery snapshots.
+  slot->refs.store(BuildRefsBitField(published.ordinal, vchan_id, 0),
+                   std::memory_order_release);
+
+  // A subscriber that sees the failure recovers from its bitset, and must find
+  // this message there.  Before the commit its snapshot would skip the slot,
+  // and it could leave recovery and read this publisher's next message first.
   // A subscriber that left since its push failed has no queue to mark.  A new
   // subscriber with the same ID that is marked only rescans its bitset.
   failed_queues.Traverse([&channel](size_t sub_id) {
@@ -170,12 +189,6 @@ CommitPublishedSlot(const ChannelView &channel, MessageSlot *slot,
       queue->MarkInsertionFailure();
     }
   });
-
-  // Commit.  A subscriber that sees the total_messages increment also sees
-  // this release and every delivery record above.  Subscribers use
-  // total_messages as a version stamp for their delivery snapshots.
-  slot->refs.store(BuildRefsBitField(published.ordinal, vchan_id, 0),
-                   std::memory_order_release);
   ccb->total_messages.fetch_add(1, std::memory_order_seq_cst);
 
   // Subscriber removal and the commit race safely: whichever happens second

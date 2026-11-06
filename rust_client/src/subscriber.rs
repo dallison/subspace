@@ -487,6 +487,57 @@ impl SubscriberImpl {
         None
     }
 
+    /// Drop the queue entries for messages that bitset recovery has delivered,
+    /// so that the queue path can take over again. An entry for a message
+    /// still being published stays at the head. Returns false, leaving the
+    /// entry at the head, for a message that has not been read. Bitset
+    /// recovery must deliver it, or the publisher evicting it must finish,
+    /// before any newer queue entry is read. Popping it here instead would
+    /// make a racing eviction drop the entry behind it, losing this message
+    /// without counting it.
+    fn discard_recovered_queue_entries(&self) -> bool {
+        let Some(queue) = self
+            .channel
+            .get_available_slot_queue(self.subscriber_id as usize)
+        else {
+            return true;
+        };
+        for _ in 0..queue.capacity() {
+            let Some((slot_id, ordinal, position)) = queue.try_peek() else {
+                return true;
+            };
+            if slot_id < 0 || slot_id >= self.channel.num_slots {
+                queue.pop_at(position);
+                continue;
+            }
+            let slot_idx = slot_id as usize;
+            let slot = self.channel.slot_ref(slot_idx);
+            let refs = slot.refs.load(Ordering::Acquire);
+            let same_generation = slot.ordinal() == ordinal;
+            if (refs & PUB_OWNED) != 0 && same_generation {
+                return true;
+            }
+            let vchan_id = slot.vchan_id() as i32;
+            let seen = self.ordinal_trackers.get(&vchan_id).is_some_and(|tracker| {
+                ordinal <= tracker.last_ordinal_seen
+                    || tracker
+                        .ring
+                        .contains(&OrdinalAndVchanId { ordinal, vchan_id })
+            });
+            if (refs & PUB_OWNED) == 0
+                && ordinal != 0
+                && same_generation
+                && ((refs >> ORDINAL_SHIFT) & ORDINAL_MASK) == (ordinal & ORDINAL_MASK)
+                && virtual_channel_id_match(slot.vchan_id(), self.channel.vchan_id)
+                && !seen
+            {
+                return false;
+            }
+            queue.pop_at(position);
+        }
+        true
+    }
+
     fn has_visible_ordinal_before(
         &self,
         vchan_id: i32,
@@ -542,25 +593,26 @@ impl SubscriberImpl {
             if queue.head() >= max_queue_position {
                 break;
             }
-            if let Some((slot_id, ordinal)) = queue.try_peek() {
-                if slot_id >= 0 && (slot_id as usize) < self.channel.num_slots as usize {
-                    let slot = self.channel.slot_ref(slot_id as usize);
-                    if (slot.refs.load(Ordering::Acquire) & PUB_OWNED) != 0
-                        && slot.ordinal() == ordinal
-                    {
-                        // Leave the current generation at the queue head until
-                        // the publisher commits it.
-                        break;
-                    }
-                }
-            }
-            let Some((slot_id, ordinal)) = self
-                .channel
-                .get_available_slot_queue(self.subscriber_id as usize)
-                .and_then(|queue| queue.try_pop())
-            else {
+            let Some((slot_id, ordinal, position)) = queue.try_peek() else {
                 break;
             };
+            if slot_id >= 0 && (slot_id as usize) < self.channel.num_slots as usize {
+                let slot = self.channel.slot_ref(slot_id as usize);
+                if (slot.refs.load(Ordering::Acquire) & PUB_OWNED) != 0
+                    && slot.ordinal() == ordinal
+                {
+                    // Leave the current generation at the queue head until
+                    // the publisher commits it.
+                    break;
+                }
+            }
+            // If a producer evicted the checked entry, the one behind it may
+            // still be being published. Discarding it would leave that message
+            // in the bitset to be read after newer queued messages from the
+            // same publisher.
+            if !queue.pop_at(position) {
+                continue;
+            }
             if slot_id < 0 || slot_id as usize >= self.channel.num_slots as usize {
                 continue;
             }
@@ -635,6 +687,12 @@ impl SubscriberImpl {
                     .get_available_slot_queue(self.subscriber_id as usize)
                 {
                     if queue.insertion_failed() {
+                        // A publisher evicting this entry can clear its bit
+                        // just before the pop. Restore the bit so that bitset
+                        // recovery still finds it.
+                        self.channel
+                            .get_available_slots(self.subscriber_id as usize)
+                            .set(slot_idx);
                         self.channel.atomic_inc_ref_count::<fn()>(
                             slot_idx,
                             false,
@@ -674,6 +732,9 @@ impl SubscriberImpl {
                 if !self.channel.validate_slot_buffer(slot_idx)
                     || self.channel.slot_ref(slot_idx).buffer_index() == -1
                 {
+                    self.channel
+                        .get_available_slots(self.subscriber_id as usize)
+                        .set(slot_idx);
                     if self.channel.buffers_changed() {
                         self.channel.atomic_inc_ref_count::<fn()>(
                             slot_idx,
@@ -797,7 +858,15 @@ impl SubscriberImpl {
                 }
             }
 
-            if self.channel.slot.is_none() {
+            if self.channel.slot.is_none()
+                && !self
+                    .channel
+                    .get_available_slot_queue(self.subscriber_id as usize)
+                    .is_some_and(|queue| queue.drops_oldest())
+            {
+                // Registration already seeded a queue that drops its oldest
+                // entries, and the bits of the messages it dropped must stay
+                // clear.
                 self.populate_active_slots(&bits);
             }
 
@@ -821,11 +890,9 @@ impl SubscriberImpl {
                 Some(idx) => idx,
                 None => {
                     if self.queue_bitset_fallback {
-                        if let Some(queue) = self
-                            .channel
-                            .get_available_slot_queue(self.subscriber_id as usize)
-                        {
-                            queue.discard_all();
+                        if !self.discard_recovered_queue_entries() {
+                            self.poll_snapshot_valid = false;
+                            continue;
                         }
                         self.queue_bitset_fallback = false;
                     }
@@ -1052,6 +1119,12 @@ impl SubscriberImpl {
             .sub_owners
             .clear_was_set(self.subscriber_id as usize)
         {
+            // A publisher evicting a queued slot can clear its bit just before
+            // the pop. Restore it while the slot is still held so that it stays
+            // unread.
+            self.channel
+                .get_available_slots(self.subscriber_id as usize)
+                .set(slot_idx);
             self.decrement_slot_ref(slot_idx, ordinal, vchan_id, false);
         }
         if self

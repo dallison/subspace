@@ -317,8 +317,11 @@ void Publisher::PublishSlot(shm::MessageSlot *slot, bool is_activation,
   {
     SubscriberQueuePublishScope publishing(memory_.QueueIndex(),
                                            publisher_id_);
-    result = CommitPublishedSlot(memory_, slot, vchan_id_, is_activation,
-                                 publishing);
+    result = CommitPublishedSlot(
+        memory_, slot, vchan_id_, is_activation, publishing,
+        [this](int32_t retirement_slot_id) {
+          memory_.TriggerRetirement(retirement_triggers_, retirement_slot_id);
+        });
   }
   if (result.retired) {
     memory_.TriggerRetirement(retirement_triggers_, result.retirement_slot_id);

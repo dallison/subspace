@@ -112,6 +112,78 @@ TEST(CommonTest, InPlaceSlotQueueEvictsOldestOnOverflow) {
   EXPECT_FALSE(queue->TryPop(slot));
 }
 
+TEST(CommonTest, InPlaceSlotQueueForgetsEvictedEntry) {
+  constexpr size_t kCapacity = 2;
+  std::unique_ptr<std::byte[]> storage(
+      new std::byte[subspace::SizeofSlotQueue(kCapacity)]);
+  auto *queue = new (storage.get()) subspace::InPlaceSlotQueue(kCapacity);
+
+  ASSERT_TRUE(queue->Push(1, 10));
+  ASSERT_TRUE(queue->Push(2, 20));
+  std::vector<subspace::QueuedSlot> forgotten;
+  auto forget = [&forgotten](const subspace::QueuedSlot &evicted) {
+    forgotten.push_back(evicted);
+    return true;
+  };
+  EXPECT_TRUE(queue->Push(3, 30, /*report_insertion_failure=*/true, forget));
+  ASSERT_EQ(1u, forgotten.size());
+  EXPECT_EQ(1, forgotten[0].slot_id);
+  EXPECT_EQ(10, forgotten[0].ordinal);
+  EXPECT_EQ(1, queue->ConsumeOverflow());
+
+  subspace::QueuedSlot slot;
+  ASSERT_TRUE(queue->TryPop(slot));
+  EXPECT_EQ(2, slot.slot_id);
+  ASSERT_TRUE(queue->TryPop(slot));
+  EXPECT_EQ(3, slot.slot_id);
+  EXPECT_FALSE(queue->TryPop(slot));
+}
+
+TEST(CommonTest, InPlaceSlotQueueKeepsEntryThatCannotBeForgotten) {
+  constexpr size_t kCapacity = 2;
+  std::unique_ptr<std::byte[]> storage(
+      new std::byte[subspace::SizeofSlotQueue(kCapacity)]);
+  auto *queue = new (storage.get()) subspace::InPlaceSlotQueue(kCapacity);
+
+  ASSERT_TRUE(queue->Push(1, 10));
+  ASSERT_TRUE(queue->Push(2, 20));
+  EXPECT_FALSE(queue->Push(3, 30, /*report_insertion_failure=*/true,
+                           [](const subspace::QueuedSlot &) { return false; }));
+  EXPECT_TRUE(queue->ConsumeInsertionFailure());
+  EXPECT_EQ(0, queue->ConsumeOverflow());
+
+  subspace::QueuedSlot slot;
+  ASSERT_TRUE(queue->TryPop(slot));
+  EXPECT_EQ(1, slot.slot_id);
+  ASSERT_TRUE(queue->TryPop(slot));
+  EXPECT_EQ(2, slot.slot_id);
+  EXPECT_FALSE(queue->TryPop(slot));
+}
+
+TEST(CommonTest, InPlaceSlotQueuePopAtRejectsEvictedEntry) {
+  constexpr size_t kCapacity = 2;
+  std::unique_ptr<std::byte[]> storage(
+      new std::byte[subspace::SizeofSlotQueue(kCapacity)]);
+  auto *queue = new (storage.get()) subspace::InPlaceSlotQueue(kCapacity);
+
+  ASSERT_TRUE(queue->Push(1, 10));
+  ASSERT_TRUE(queue->Push(2, 20));
+  subspace::QueuedSlot peeked;
+  uint64_t position = 0;
+  ASSERT_TRUE(queue->TryPeek(peeked, position));
+  EXPECT_EQ(1, peeked.slot_id);
+
+  // A producer evicts the peeked entry before the consumer pops it.
+  ASSERT_TRUE(queue->Push(3, 30));
+  EXPECT_FALSE(queue->PopAt(position));
+
+  ASSERT_TRUE(queue->TryPeek(peeked, position));
+  EXPECT_EQ(2, peeked.slot_id);
+  EXPECT_TRUE(queue->PopAt(position));
+  ASSERT_TRUE(queue->TryPeek(peeked, position));
+  EXPECT_EQ(3, peeked.slot_id);
+}
+
 TEST(CommonTest, InPlaceSlotQueueCanRejectOverflowWithoutEviction) {
   constexpr size_t kCapacity = 2;
   std::unique_ptr<std::byte[]> storage(

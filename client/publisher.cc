@@ -403,7 +403,10 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
   {
     SubscriberQueuePublishGuard publish_guard(*this);
     published = CommitPublishedSlot(View(), slot, vchan_id_, is_activation,
-                                    publish_guard.Scope());
+                                    publish_guard.Scope(),
+                                    [this](int32_t retirement_slot_id) {
+                                      TriggerRetirement(retirement_slot_id);
+                                    });
   }
   if (published.retired) {
     TriggerRetirement(published.retirement_slot_id);
