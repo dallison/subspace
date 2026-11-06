@@ -7,10 +7,6 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace subspace {
-
-extern "C" {
-
 #if defined(__x86_64__) && !defined(__SSE4_2__)
 // On Intel crc is only available when SSE4.2 is enabled
 #undef SUBSPACE_HARDWARE_CRC
@@ -21,15 +17,26 @@ extern "C" {
 #undef SUBSPACE_HARDWARE_CRC
 #endif
 
-
 #if defined(SUBSPACE_HARDWARE_CRC) && defined(__aarch64__)
-
 // Whether to use the hand-written assembly version of the CRC32 function
 // in arm_crc32.S
 #define ARM_ASM_CRC32 1
-
 #if !defined(ARM_ASM_CRC32)
 #include <arm_acle.h>
+#endif
+#elif defined(SUBSPACE_HARDWARE_CRC) && defined(__x86_64__)
+// The intrinsics headers include C library headers, which must not be inside
+// a namespace.
+#include <nmmintrin.h>
+#endif
+
+namespace subspace {
+
+extern "C" {
+
+#if defined(SUBSPACE_HARDWARE_CRC) && defined(__aarch64__)
+
+#if !defined(ARM_ASM_CRC32)
 uint32_t SubspaceCRC32(uint32_t crc, const uint8_t *data, size_t length) {
   size_t i = 0;
 
@@ -54,7 +61,6 @@ uint32_t SubspaceCRC32(uint32_t crc, const uint8_t *data, size_t length) {
 #endif  // !defined(ARM_ASM_CRC32)
 
 #elif defined(SUBSPACE_HARDWARE_CRC) && defined(__x86_64__)
-#include <nmmintrin.h>
 uint32_t SubspaceCRC32(uint32_t crc, const uint8_t *data, size_t length) {
   size_t i = 0;
   // Process 8 bytes at a time.

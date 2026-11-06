@@ -80,8 +80,13 @@
 - Bazel, CMake and Soong build phaser and generate `subspace_phaser` from
   `subspace.proto`. Android CMake cross-compiles need a host
   `protoc-gen-phaser` in `PHASER_PLUGIN_EXECUTABLE`.
+- CMake also generates the Rust client's Phaser bindings and links their C++
+  code into the shared library `subspace_phaser_c_rust`, which the Cargo
+  build links. A Cargo build run outside CMake sets `SUBSPACE_PHASER_C_RS`
+  and `SUBSPACE_PHASER_C_LIB_DIR` to the files from a CMake build.
 - Abseil 20250814.1, protobuf 33.4, cpp_toolbelt 2.1.6 and phaser 3.1.1 in
-  the Bazel build. CMake uses cpp_toolbelt 2.1.6.
+  the Bazel build. CMake uses cpp_toolbelt 2.1.6 and the same phaser. Both
+  pin phaser 3.1.1 with the CMake build fixes in dallison/phaser#22.
 
 ### Subscriber Queues Keep Per-Publisher Order
 - A subscriber with an explicit queue size could read a message that had

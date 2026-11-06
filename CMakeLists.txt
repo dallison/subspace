@@ -215,8 +215,9 @@ FetchContent_MakeAvailable(protobuf)
 FetchContent_Declare(
     phaser
     GIT_REPOSITORY https://github.com/dallison/phaser.git
-    # phaser 3.1.1, as in the git_override in MODULE.bazel.
-    GIT_TAG 4b3a80c0c90d51e04d4b27aa8cc32b884f2b6e38
+    # phaser 3.1.1 with the CMake build fixes in dallison/phaser#22, as in the
+    # git_override in MODULE.bazel.
+    GIT_TAG a0c1b24794eff9f872c727664841c4c900da074f
 )
 FetchContent_MakeAvailable(phaser)
 

@@ -58,6 +58,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("cargo:rustc-env=SUBSPACE_MAX_BUFFERS={max_buffers}");
 
+    // Under Cargo the phaser bindings link a shared library from the CMake
+    // build, which the tests find through this rpath.  Bazel links them
+    // statically.
+    if let Ok(dir) = std::env::var("DEP_SUBSPACE_PHASER_C_RUST_LIB_DIR") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
+    }
+
     let proto_file = std::env::var("SUBSPACE_PROTO_FILE")
         .unwrap_or_else(|_| "../proto/subspace.proto".into());
 

@@ -1113,7 +1113,12 @@ TEST_F(AsilClientTest, OversizedResponseMakesNoHeapAllocations) {
   struct sockaddr_un addr;
   std::memset(&addr, 0, sizeof(addr));
   addr.sun_family = AF_UNIX;
+#if defined(__linux__)
+  // Connect() uses the abstract namespace on Linux, as the server does.
+  std::memcpy(addr.sun_path + 1, socket_name, std::strlen(socket_name));
+#else
   std::memcpy(addr.sun_path, socket_name, sizeof(socket_name));
+#endif
   ASSERT_EQ(0, ::bind(listen_fd, reinterpret_cast<struct sockaddr *>(&addr),
                       sizeof(addr)));
   ASSERT_EQ(0, ::listen(listen_fd, 1));
@@ -1176,6 +1181,8 @@ TEST_F(AsilClientTest, OversizedResponseMakesNoHeapAllocations) {
   asil::PhaserServerConnection connection;
   const asil::Error connected = connection.Connect(socket_name);
   if (connected != asil::Error::kOk) {
+    // Closing alone does not wake the accept() on Linux.
+    ::shutdown(listen_fd, SHUT_RDWR);
     ::close(listen_fd);
     server.join();
     (void)::unlink(socket_name);

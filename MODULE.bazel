@@ -43,8 +43,8 @@ bazel_dep(name = "rules_python", version = "1.9.0")
 
 git_override(
     module_name = "phaser",
-    # Tag 3.1.1.
-    commit = "4b3a80c0c90d51e04d4b27aa8cc32b884f2b6e38",
+    # Tag 3.1.1 with the CMake build fixes in dallison/phaser#22.
+    commit = "a0c1b24794eff9f872c727664841c4c900da074f",
     remote = "https://github.com/dallison/phaser.git",
 )
 
