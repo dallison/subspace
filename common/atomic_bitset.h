@@ -6,10 +6,7 @@
 
 #include <atomic>
 #include <cstddef>
-#include <functional>
-#include <iostream>
 #include <strings.h>
-#include <vector>
 
 namespace subspace {
 
@@ -130,7 +127,8 @@ public:
     return -1;
   }
 
-  void Print(std::ostream &os, int start_bit = 0) const {
+  // Templates so this header needs neither iostream nor std::function.
+  template <typename Stream> void Print(Stream &os, int start_bit = 0) const {
     // Print the bits with - between each group of 4.
     size_t start_word = start_bit / 64;
     start_bit %= 64;
@@ -147,15 +145,15 @@ public:
     os << "\n";
   }
 
-  void Traverse(std::function<void(size_t)> func) const {
+  template <typename Fn>
+  void Traverse(Fn &&func,
+                std::memory_order order = std::memory_order_relaxed) const {
     for (size_t i = 0; i < BitsToWords(num_bits_); i++) {
       size_t shift = 0;
       size_t bit = i * 64;
       while (bit < num_bits_ && shift < 64) {
-        uint64_t word = bits_[i].load(std::memory_order_relaxed) >> shift;
+        uint64_t word = bits_[i].load(order) >> shift;
         size_t n = ffsll(word);
-        // std::cerr << "i: " << i << " word " << std::hex << word << " n " << n
-        // << std::dec << "\n";
         if (n == 0) {
           break;
         }
@@ -166,21 +164,8 @@ public:
     }
   }
 
-  void TraverseSeqCst(std::function<void(size_t)> func) const {
-    for (size_t i = 0; i < BitsToWords(num_bits_); i++) {
-      size_t shift = 0;
-      size_t bit = i * 64;
-      while (bit < num_bits_ && shift < 64) {
-        uint64_t word = bits_[i].load(std::memory_order_seq_cst) >> shift;
-        size_t n = ffsll(word);
-        if (n == 0) {
-          break;
-        }
-        bit += n;
-        func(bit - 1);
-        shift += n;
-      }
-    }
+  template <typename Fn> void TraverseSeqCst(Fn &&func) const {
+    Traverse(func, std::memory_order_seq_cst);
   }
 
 private:
@@ -197,54 +182,5 @@ inline size_t SizeofAtomicBitSet(size_t size_in_bits) {
 
 // An atomic bitset with its bits not stored in the object.
 using InPlaceAtomicBitset = AtomicBitSet<0>;
-
-class DynamicBitSet {
-public:
-  DynamicBitSet() : num_bits_(0), bits_(0) {}
-  DynamicBitSet(size_t num_bits)
-      : num_bits_(num_bits), bits_(BitsToWords(num_bits), 0) {}
-
-  void Resize(size_t num_bits) {
-    num_bits_ = num_bits;
-    bits_.resize(BitsToWords(num_bits), 0);
-  }
-
-  void Set(size_t bit) {
-    size_t word = bit / 64;
-    size_t offset = bit % 64;
-    bits_[word] |= 1ULL << offset;
-  }
-
-  void Clear(size_t bit) {
-    size_t word = bit / 64;
-    size_t offset = bit % 64;
-    bits_[word] &= ~(1ULL << offset);
-  }
-
-  bool IsSet(size_t bit) const {
-    size_t word = bit / 64;
-    size_t offset = bit % 64;
-    return bits_[word] & (1ULL << offset);
-  }
-
-  void ClearAll() {
-    for (size_t i = 0; i < BitsToWords(num_bits_); i++) {
-      bits_[i] = 0;
-    }
-  }
-
-  bool IsEmpty() const {
-    for (size_t i = 0; i < BitsToWords(num_bits_); i++) {
-      if (bits_[i] != 0) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-private:
-  size_t num_bits_;
-  std::vector<unsigned long long> bits_;
-};
 
 } // namespace subspace

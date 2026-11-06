@@ -12,7 +12,7 @@ target_include_directories(nop_plugin PRIVATE
     $<TARGET_PROPERTY:libserver,INTERFACE_INCLUDE_DIRECTORIES>
 )
 
-add_dependencies(nop_plugin subspace_proto)
+add_dependencies(nop_plugin subspace_proto subspace_phaser)
 
 if(ANDROID)
     # Android's lld requires all symbols resolved at link time for .so files
@@ -62,7 +62,7 @@ target_include_directories(split_buffer_free_test_plugin PRIVATE
     $<TARGET_PROPERTY:libserver,INTERFACE_INCLUDE_DIRECTORIES>
 )
 
-add_dependencies(split_buffer_free_test_plugin subspace_proto)
+add_dependencies(split_buffer_free_test_plugin subspace_proto subspace_phaser)
 
 if(ANDROID)
     target_link_libraries(split_buffer_free_test_plugin PRIVATE

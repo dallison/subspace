@@ -6,7 +6,7 @@
 #include "absl/strings/str_format.h"
 #include "client.h"
 #include "common/syscall_shim.h"
-#include "proto/subspace.pb.h"
+#include "common/server_wire.h"
 #include "toolbelt/clock.h"
 #include "toolbelt/hexdump.h"
 #include "toolbelt/mutex.h"
@@ -24,7 +24,7 @@
 namespace subspace {
 
 namespace {
-void FillInitRequest(InitRequest *init, const std::string &client_name) {
+void FillInitRequest(phaser::InitRequest *init, const std::string &client_name) {
   init->set_client_name(client_name);
   init->set_max_channels(kMaxChannels);
   init->set_max_slot_owners(kMaxSlotOwners);
@@ -49,35 +49,37 @@ void ConfigureQnxClockPeriod() {
 }
 #endif
 
-ClientBufferAllocatorKind FromProtoAllocator(ClientBufferAllocator allocator) {
+ClientBufferAllocatorKind
+FromProtoAllocator(phaser::ClientBufferAllocator allocator) {
   switch (allocator) {
-  case CLIENT_BUFFER_ALLOCATOR_ANDROID_MEMFD:
+  case phaser::CLIENT_BUFFER_ALLOCATOR_ANDROID_MEMFD:
     return ClientBufferAllocatorKind::kAndroidMemfd;
-  case CLIENT_BUFFER_ALLOCATOR_SPLIT_SHM:
+  case phaser::CLIENT_BUFFER_ALLOCATOR_SPLIT_SHM:
     return ClientBufferAllocatorKind::kSplitShm;
-  case CLIENT_BUFFER_ALLOCATOR_SPLIT_CALLBACK:
+  case phaser::CLIENT_BUFFER_ALLOCATOR_SPLIT_CALLBACK:
     return ClientBufferAllocatorKind::kSplitCallback;
-  case CLIENT_BUFFER_ALLOCATOR_SPLIT_BUFFER_FREE_TEST:
+  case phaser::CLIENT_BUFFER_ALLOCATOR_SPLIT_BUFFER_FREE_TEST:
     return ClientBufferAllocatorKind::kSplitBufferFreeTest;
-  case CLIENT_BUFFER_ALLOCATOR_UNSPECIFIED:
+  case phaser::CLIENT_BUFFER_ALLOCATOR_UNSPECIFIED:
   default:
     return ClientBufferAllocatorKind::kUnspecified;
   }
 }
 
-ClientBufferAllocator ToProtoAllocator(ClientBufferAllocatorKind allocator) {
+phaser::ClientBufferAllocator
+ToProtoAllocator(ClientBufferAllocatorKind allocator) {
   switch (allocator) {
   case ClientBufferAllocatorKind::kAndroidMemfd:
-    return CLIENT_BUFFER_ALLOCATOR_ANDROID_MEMFD;
+    return phaser::CLIENT_BUFFER_ALLOCATOR_ANDROID_MEMFD;
   case ClientBufferAllocatorKind::kSplitShm:
-    return CLIENT_BUFFER_ALLOCATOR_SPLIT_SHM;
+    return phaser::CLIENT_BUFFER_ALLOCATOR_SPLIT_SHM;
   case ClientBufferAllocatorKind::kSplitCallback:
-    return CLIENT_BUFFER_ALLOCATOR_SPLIT_CALLBACK;
+    return phaser::CLIENT_BUFFER_ALLOCATOR_SPLIT_CALLBACK;
   case ClientBufferAllocatorKind::kSplitBufferFreeTest:
-    return CLIENT_BUFFER_ALLOCATOR_SPLIT_BUFFER_FREE_TEST;
+    return phaser::CLIENT_BUFFER_ALLOCATOR_SPLIT_BUFFER_FREE_TEST;
   case ClientBufferAllocatorKind::kUnspecified:
   default:
-    return CLIENT_BUFFER_ALLOCATOR_UNSPECIFIED;
+    return phaser::CLIENT_BUFFER_ALLOCATOR_UNSPECIFIED;
   }
 }
 } // namespace
@@ -106,7 +108,7 @@ static uint64_t GetThreadId() {
 }
 
 static void ToProto(const ClientBufferHandleMetadata &metadata,
-                    ClientBufferHandleMetadataProto *proto) {
+                    phaser::ClientBufferHandleMetadataProto *proto) {
   proto->set_channel_name(metadata.channel_name);
   proto->set_session_id(metadata.session_id);
   proto->set_buffer_index(metadata.buffer_index);
@@ -122,7 +124,7 @@ static void ToProto(const ClientBufferHandleMetadata &metadata,
 }
 
 static ClientBufferHandleMetadata
-FromProto(const ClientBufferHandleMetadataProto &proto) {
+FromProto(const phaser::ClientBufferHandleMetadataProto &proto) {
   ClientBufferHandleMetadata metadata;
   metadata.channel_name = proto.channel_name();
   metadata.session_id = proto.session_id();
@@ -248,9 +250,9 @@ absl::Status ClientImpl::Init(const std::string &server_socket,
 
   name_ = client_name;
   socket_name_ = server_socket;
-  Request req;
+  phaser::Request req;
   FillInitRequest(req.mutable_init(), client_name);
-  Response resp;
+  phaser::Response resp;
   std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
   status = SendRequestReceiveResponse(req, resp, fds);
@@ -442,8 +444,19 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
-  if (opts.MaxOutstandingSlotLeases() < 1 ||
-      opts.MaxOutstandingSlotLeases() > opts.NumSlots()) {
+  if (opts.ServerDefined()) {
+    if (opts.slot_size != 0 || opts.num_slots != 0 || opts.fixed_size ||
+        opts.checksum_size != 0 || opts.metadata_size != 0 ||
+        opts.subscriber_queue_arena_size != 0 || opts.use_split_buffers) {
+      return absl::InvalidArgumentError(absl::StrFormat(
+          "Publisher on %s is server defined, so it can't set the slot size, "
+          "number of slots, fixed size, checksum size, metadata size, "
+          "subscriber queue arena size or split buffers",
+          channel_name));
+    }
+    // The server checks the leases against the channel's slots.
+  } else if (opts.MaxOutstandingSlotLeases() < 1 ||
+             opts.MaxOutstandingSlotLeases() > opts.NumSlots()) {
     return absl::InvalidArgumentError(
         "MaxOutstandingSlotLeases must be between 1 and NumSlots");
   }
@@ -456,29 +469,29 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
         "Slot size %d for channel %s exceeds its maximum slot size of %d bytes",
         opts.slot_size, channel_name, opts.max_slot_size));
   }
-  Request req;
+  phaser::Request req;
   FillCreatePublisherRequest(req.mutable_create_publisher(), channel_name, opts,
                              -1);
 
   // Send request to server and wait for response.
-  Response resp;
+  phaser::Response resp;
   std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
   if (absl::Status status = SendRequestReceiveResponse(req, resp, fds);
       !status.ok()) {
     return status;
   }
-  auto &pub_resp = resp.create_publisher();
+  const auto &pub_resp = resp.create_publisher();
   if (!pub_resp.error().empty()) {
     return absl::InternalError(pub_resp.error());
   }
   auto remove_server_publisher = [&]() {
-    Request remove_req;
+    phaser::Request remove_req;
     auto *cmd = remove_req.mutable_remove_publisher();
     cmd->set_channel_name(channel_name);
     cmd->set_publisher_id(pub_resp.publisher_id());
 
-    Response remove_resp;
+    phaser::Response remove_resp;
     std::vector<toolbelt::FileDescriptor> remove_fds;
     (void)SendRequestReceiveResponse(remove_req, remove_resp, remove_fds);
   };
@@ -491,11 +504,20 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
   if (pub_resp.num_slots() > 0) {
     channel_opts.num_slots = pub_resp.num_slots();
   }
+  if (opts.ServerDefined()) {
+    channel_opts.slot_size = pub_resp.slot_size();
+    channel_opts.fixed_size = pub_resp.is_fixed_size();
+    channel_opts.checksum_size = pub_resp.checksum_size();
+    channel_opts.metadata_size = pub_resp.metadata_size();
+    channel_opts.subscriber_queue_arena_size =
+        pub_resp.subscriber_queue_arena_size();
+    channel_opts.use_split_buffers = pub_resp.use_split_buffers();
+  }
   std::shared_ptr<PublisherImpl> channel = std::make_shared<PublisherImpl>(
       channel_name, channel_opts.num_slots, pub_resp.subscriber_queue_size(),
       pub_resp.subscriber_queue_arena_size(), pub_resp.channel_id(),
       pub_resp.publisher_id(), pub_resp.vchan_id(), session_id_,
-      pub_resp.type(), channel_opts,
+      std::string(pub_resp.type()), channel_opts,
       [this](Channel *c) {
         return CheckReload(static_cast<ClientChannel *>(c));
       },
@@ -515,8 +537,10 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
              uint32_t buffer_index) {
         return UnregisterClientBuffer(channel_name, session_id, buffer_index);
       });
-  int32_t cs = opts.ChecksumSize() > 0 ? opts.ChecksumSize() : 4;
-  int32_t ms = opts.MetadataSize() > 0 ? opts.MetadataSize() : 0;
+  int32_t cs =
+      channel_opts.ChecksumSize() > 0 ? channel_opts.ChecksumSize() : 4;
+  int32_t ms =
+      channel_opts.MetadataSize() > 0 ? channel_opts.MetadataSize() : 0;
   channel->SetChecksumSize(cs);
   channel->SetMetadataSize(ms);
   channel->SetPrefixSize(Channel::ComputePrefixSize(cs, ms));
@@ -542,7 +566,7 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
   }
 
   if (absl::Status status =
-          channel->CreateOrAttachBuffers(Aligned(opts.slot_size));
+          channel->CreateOrAttachBuffers(Aligned(channel_opts.slot_size));
       !status.ok()) {
     remove_server_publisher();
     return status;
@@ -611,12 +635,12 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
         "at least 0, not %g",
         opts.StuckWarningGracePeriod()));
   }
-  Request req;
+  phaser::Request req;
   FillCreateSubscriberRequest(req.mutable_create_subscriber(), channel_name,
                               opts, -1);
 
   // Send request to server and wait for response.
-  Response resp;
+  phaser::Response resp;
   std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
   if (absl::Status status = SendRequestReceiveResponse(req, resp, fds);
@@ -624,7 +648,7 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
     return status;
   }
 
-  auto &sub_resp = resp.create_subscriber();
+  const auto &sub_resp = resp.create_subscriber();
   if (!sub_resp.error().empty()) {
     return absl::InternalError(sub_resp.error());
   }
@@ -636,14 +660,15 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
   const std::string mapped_channel_name =
       sub_resp.resolved_channel_name().empty()
           ? channel_name
-          : sub_resp.resolved_channel_name();
+          : std::string(sub_resp.resolved_channel_name());
 
   std::shared_ptr<SubscriberImpl> channel = std::make_shared<SubscriberImpl>(
       mapped_channel_name, sub_resp.num_slots(),
       sub_resp.default_subscriber_queue_size(),
       sub_resp.subscriber_queue_arena_size(),
       sub_resp.subscriber_queue_size(), sub_resp.channel_id(),
-      sub_resp.subscriber_id(), sub_resp.vchan_id(), session_id_, sub_resp.type(),
+      sub_resp.subscriber_id(), sub_resp.vchan_id(), session_id_,
+      std::string(sub_resp.type()),
       subscriber_options,
       [this](Channel *c) {
         return CheckReload(static_cast<ClientChannel *>(c));
@@ -1759,13 +1784,13 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
-  Request req;
+  phaser::Request req;
   FillCreateSubscriberRequest(req.mutable_create_subscriber(),
                               subscriber->RequestName(), subscriber->options_,
                               subscriber->GetSubscriberId());
 
   // Send request to server and wait for response.
-  Response resp;
+  phaser::Response resp;
   std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
   if (absl::Status status = SendRequestReceiveResponse(req, resp, fds);
@@ -1773,7 +1798,7 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
     return status;
   }
 
-  auto &sub_resp = resp.create_subscriber();
+  const auto &sub_resp = resp.create_subscriber();
   if (!sub_resp.error().empty()) {
     return absl::InternalError(sub_resp.error());
   }
@@ -1790,7 +1815,7 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
   }
 
   if (!sub_resp.type().empty()) {
-    subscriber->SetType(sub_resp.type());
+    subscriber->SetType(std::string(sub_resp.type()));
   }
   subscriber->options_.use_split_buffers = sub_resp.use_split_buffers();
   subscriber->SetNumSlots(sub_resp.num_slots());
@@ -1856,12 +1881,12 @@ ClientImpl::ReloadSubscribersIfNecessary(PublisherImpl *publisher) {
 
   // We do have updates, get a new list of subscriber for
   // the channel.
-  Request req;
+  phaser::Request req;
   auto *cmd = req.mutable_get_triggers();
   cmd->set_channel_name(publisher->Name());
 
   // Send request to server and wait for response.
-  Response resp;
+  phaser::Response resp;
   std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
   if (absl::Status status = SendRequestReceiveResponse(req, resp, fds);
@@ -1869,7 +1894,7 @@ ClientImpl::ReloadSubscribersIfNecessary(PublisherImpl *publisher) {
     return status;
   }
 
-  auto &sub_resp = resp.get_triggers();
+  const auto &sub_resp = resp.get_triggers();
   // Add all subscriber triggers fds to the publisher channel.
   publisher->ClearSubscribers();
   for (auto index : sub_resp.sub_trigger_fd_indexes()) {
@@ -1899,12 +1924,12 @@ ClientImpl::ReloadReliablePublishersIfNecessary(SubscriberImpl *subscriber) {
   }
   // We do have updates, get a new list of subscriber for
   // the channel.
-  Request req;
+  phaser::Request req;
   auto *cmd = req.mutable_get_triggers();
   cmd->set_channel_name(subscriber->Name());
 
   // Send request to server and wait for response.
-  Response resp;
+  phaser::Response resp;
   std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
   if (absl::Status status = SendRequestReceiveResponse(req, resp, fds);
@@ -1912,7 +1937,7 @@ ClientImpl::ReloadReliablePublishersIfNecessary(SubscriberImpl *subscriber) {
     return status;
   }
 
-  auto &sub_resp = resp.get_triggers();
+  const auto &sub_resp = resp.get_triggers();
   // Add all subscriber triggers fds to the publisher channel.
   subscriber->ClearPublishers();
   for (auto index : sub_resp.reliable_pub_trigger_fd_indexes()) {
@@ -1993,13 +2018,13 @@ absl::Status ClientImpl::RemovePublisher(PublisherImpl *publisher) {
   if (!socket_.Connected()) {
     return RemoveChannel(publisher);
   }
-  Request req;
+  phaser::Request req;
   auto *cmd = req.mutable_remove_publisher();
   cmd->set_channel_name(publisher->Name());
   cmd->set_publisher_id(publisher->GetPublisherId());
 
   // Send request to server and wait for response.
-  Response response;
+  phaser::Response response;
   std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
   if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
@@ -2007,7 +2032,7 @@ absl::Status ClientImpl::RemovePublisher(PublisherImpl *publisher) {
     return RemoveChannel(publisher);
   }
 
-  auto &resp = response.remove_publisher();
+  const auto &resp = response.remove_publisher();
   if (!resp.error().empty()) {
     return absl::InternalError(resp.error());
   }
@@ -2019,14 +2044,14 @@ absl::Status ClientImpl::RemoveSubscriber(SubscriberImpl *subscriber) {
   if (!socket_.Connected()) {
     return RemoveChannel(subscriber);
   }
-  Request req;
+  phaser::Request req;
   auto *cmd = req.mutable_remove_subscriber();
   cmd->set_channel_name(subscriber->RequestName());
   cmd->set_subscriber_id(subscriber->GetSubscriberId());
   cmd->set_telemetry(subscriber->options_.Telemetry());
 
   // Send request to server and wait for response.
-  Response response;
+  phaser::Response response;
   std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
   if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
@@ -2034,7 +2059,7 @@ absl::Status ClientImpl::RemoveSubscriber(SubscriberImpl *subscriber) {
     return RemoveChannel(subscriber);
   }
 
-  auto &resp = response.remove_subscriber();
+  const auto &resp = response.remove_subscriber();
   if (!resp.error().empty()) {
     return absl::InternalError(resp.error());
   }
@@ -2062,19 +2087,19 @@ ClientImpl::GetChannelInfo(const std::string &channel) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
-  Request req;
+  phaser::Request req;
   auto *cmd = req.mutable_get_channel_info();
   cmd->set_channel_name(channel);
 
   // Send request to server and wait for response.
-  Response response;
+  phaser::Response response;
   std::vector<toolbelt::FileDescriptor> fds;
   if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
       !status.ok()) {
     return status;
   }
 
-  auto &resp = response.get_channel_info();
+  const auto &resp = response.get_channel_info();
   if (!resp.error().empty()) {
     return absl::InternalError(resp.error());
   }
@@ -2083,7 +2108,7 @@ ClientImpl::GetChannelInfo(const std::string &channel) {
     return absl::InternalError("Invalid response for getChannelInfo");
   }
   ChannelInfo result;
-  const ChannelInfoProto &info = resp.channels()[0];
+  const phaser::ChannelInfoProto info = resp.channels(0);
   result.channel_name = info.name();
   result.num_publishers = info.num_pubs();
   result.num_subscribers = info.num_subs();
@@ -2107,22 +2132,22 @@ absl::StatusOr<const std::vector<ChannelInfo>> ClientImpl::GetChannelInfo() {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
-  Request req;
+  phaser::Request req;
   [[maybe_unused]] auto cmd = req.mutable_get_channel_info();
 
   // Send request to server and wait for response.
-  Response response;
+  phaser::Response response;
   std::vector<toolbelt::FileDescriptor> fds;
   if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
       !status.ok()) {
     return status;
   }
-  auto &resp = response.get_channel_info();
+  const auto &resp = response.get_channel_info();
   if (!resp.error().empty()) {
     return absl::InternalError(resp.error());
   }
   std::vector<ChannelInfo> r;
-  for (auto &info : resp.channels()) {
+  for (const auto &info : resp.channels()) {
     ChannelInfo result;
     result.channel_name = info.name();
     result.num_publishers = info.num_pubs();
@@ -2159,18 +2184,18 @@ ClientImpl::GetChannelStats(const std::string &channel) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
-  Request req;
+  phaser::Request req;
   auto *cmd = req.mutable_get_channel_stats();
   cmd->set_channel_name(channel);
 
   // Send request to server and wait for response.
-  Response response;
+  phaser::Response response;
   std::vector<toolbelt::FileDescriptor> fds;
   if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
       !status.ok()) {
     return status;
   }
-  auto &resp = response.get_channel_stats();
+  const auto &resp = response.get_channel_stats();
   if (!resp.error().empty()) {
     return absl::InternalError(resp.error());
   }
@@ -2179,7 +2204,7 @@ ClientImpl::GetChannelStats(const std::string &channel) {
     return absl::InternalError("Invalid response for getChannelStats");
   }
   ChannelStats result;
-  const ChannelStatsProto &stats = resp.channels()[0];
+  const phaser::ChannelStatsProto stats = resp.channels(0);
   result.channel_name = stats.channel_name();
   result.total_bytes = stats.total_bytes();
   result.total_messages = stats.total_messages();
@@ -2194,22 +2219,22 @@ absl::StatusOr<const std::vector<ChannelStats>> ClientImpl::GetChannelStats() {
     return status;
   }
 
-  Request req;
+  phaser::Request req;
   [[maybe_unused]] auto cmd = req.mutable_get_channel_stats();
 
   // Send request to server and wait for response.
-  Response response;
+  phaser::Response response;
   std::vector<toolbelt::FileDescriptor> fds;
   if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
       !status.ok()) {
     return status;
   }
-  auto &resp = response.get_channel_stats();
+  const auto &resp = response.get_channel_stats();
   if (!resp.error().empty()) {
     return absl::InternalError(resp.error());
   }
   std::vector<ChannelStats> r;
-  for (auto &stats : resp.channels()) {
+  for (const auto &stats : resp.channels()) {
     ChannelStats result;
     result.channel_name = stats.channel_name();
     result.total_bytes = stats.total_bytes();
@@ -2250,29 +2275,34 @@ absl::Status ClientImpl::ResizeChannel(PublisherImpl *publisher,
   return publisher->CreateOrAttachBuffers(Aligned(new_slot_size));
 }
 
-void ClientImpl::FillCreatePublisherRequest(CreatePublisherRequest *cmd,
-                                            const std::string &channel_name,
-                                            const PublisherOptions &opts,
-                                            int publisher_id) {
+void ClientImpl::FillCreatePublisherRequest(
+    phaser::CreatePublisherRequest *cmd, const std::string &channel_name,
+    const PublisherOptions &opts, int publisher_id) {
   cmd->set_channel_name(channel_name);
-  cmd->set_slot_size(Aligned(opts.slot_size));
-  cmd->set_num_slots(opts.num_slots);
+  // A server defined publisher's options hold the layout from the server,
+  // which it must not send back.
+  if (opts.ServerDefined()) {
+    cmd->set_server_defined(true);
+  } else {
+    cmd->set_slot_size(Aligned(opts.slot_size));
+    cmd->set_num_slots(opts.num_slots);
+    cmd->set_is_fixed_size(opts.IsFixedSize());
+    cmd->set_checksum_size(opts.ChecksumSize());
+    cmd->set_metadata_size(opts.MetadataSize());
+    cmd->set_use_split_buffers(opts.UseSplitBuffers());
+    cmd->set_subscriber_queue_arena_size(opts.SubscriberQueueArenaSize());
+  }
   cmd->set_is_local(opts.IsLocal());
   cmd->set_is_reliable(opts.IsReliable());
   cmd->set_is_bridge(opts.IsBridge());
   cmd->set_for_tunnel(opts.ForTunnel());
-  cmd->set_is_fixed_size(opts.IsFixedSize());
   cmd->set_type(opts.Type());
   cmd->set_mux(opts.Mux());
   cmd->set_vchan_id(opts.VchanId());
   cmd->set_notify_retirement(opts.notify_retirement);
-  cmd->set_checksum_size(opts.ChecksumSize());
-  cmd->set_metadata_size(opts.MetadataSize());
   cmd->set_publisher_id(publisher_id);
   cmd->set_max_publishers(opts.MaxPublishers());
-  cmd->set_use_split_buffers(opts.UseSplitBuffers());
   cmd->set_split_buffers_over_bridge(opts.SplitBuffersOverBridge());
-  cmd->set_subscriber_queue_arena_size(opts.SubscriberQueueArenaSize());
   cmd->set_process_id(static_cast<uint64_t>(getpid()));
   cmd->set_max_outstanding_slot_leases(opts.MaxOutstandingSlotLeases());
   // Align the cap the same way as the slot size so that a publisher asking for
@@ -2282,7 +2312,7 @@ void ClientImpl::FillCreatePublisherRequest(CreatePublisherRequest *cmd,
 }
 
 void ClientImpl::ApplyPublisherResponseFds(
-    PublisherImpl *publisher, const CreatePublisherResponse &resp,
+    PublisherImpl *publisher, const phaser::CreatePublisherResponse &resp,
     std::vector<toolbelt::FileDescriptor> &fds) {
   publisher->SetTriggerFd(std::move(fds[resp.pub_trigger_fd_index()]));
   publisher->SetPollFd(std::move(fds[resp.pub_poll_fd_index()]));
@@ -2305,10 +2335,9 @@ void ClientImpl::ApplyPublisherResponseFds(
   publisher->SetNumUpdates(resp.num_sub_updates());
 }
 
-void ClientImpl::FillCreateSubscriberRequest(CreateSubscriberRequest *cmd,
-                                             const std::string &channel_name,
-                                             const SubscriberOptions &opts,
-                                             int subscriber_id) {
+void ClientImpl::FillCreateSubscriberRequest(
+    phaser::CreateSubscriberRequest *cmd, const std::string &channel_name,
+    const SubscriberOptions &opts, int subscriber_id) {
   cmd->set_channel_name(channel_name);
   cmd->set_subscriber_id(subscriber_id);
   cmd->set_is_reliable(opts.IsReliable());
@@ -2326,7 +2355,7 @@ void ClientImpl::FillCreateSubscriberRequest(CreateSubscriberRequest *cmd,
 }
 
 void ClientImpl::ApplySubscriberResponseFds(
-    SubscriberImpl *subscriber, const CreateSubscriberResponse &resp,
+    SubscriberImpl *subscriber, const phaser::CreateSubscriberResponse &resp,
     std::vector<toolbelt::FileDescriptor> &fds) {
   subscriber->SetTriggerFd(std::move(fds[resp.trigger_fd_index()]));
   subscriber->SetPollFd(std::move(fds[resp.poll_fd_index()]));
@@ -2360,9 +2389,9 @@ absl::Status ClientImpl::Reconnect() {
     return status;
   }
 
-  Request init_req;
+  phaser::Request init_req;
   FillInitRequest(init_req.mutable_init(), name_);
-  Response init_resp;
+  phaser::Response init_resp;
   std::vector<toolbelt::FileDescriptor> init_fds;
   init_fds.reserve(100);
   status = SendRequestReceiveResponse(init_req, init_resp, init_fds);
@@ -2408,21 +2437,21 @@ bool ClientImpl::ShouldReconnect(const absl::Status &failure) const {
 }
 
 absl::Status ClientImpl::ReregisterPublisher(PublisherImpl *publisher) {
-  Request req;
+  phaser::Request req;
   FillCreatePublisherRequest(req.mutable_create_publisher(), publisher->Name(),
                              publisher->options_,
                              publisher->GetPublisherId());
   req.mutable_create_publisher()->set_active_queue_publish_depth(
       publisher->ActiveQueuePublishDepth());
 
-  Response resp;
+  phaser::Response resp;
   std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
   if (absl::Status status = SendRequestReceiveResponse(req, resp, fds);
       !status.ok()) {
     return status;
   }
-  auto &pub_resp = resp.create_publisher();
+  const auto &pub_resp = resp.create_publisher();
   if (!pub_resp.error().empty()) {
     return absl::InternalError(pub_resp.error());
   }
@@ -2432,19 +2461,19 @@ absl::Status ClientImpl::ReregisterPublisher(PublisherImpl *publisher) {
 }
 
 absl::Status ClientImpl::ReregisterSubscriber(SubscriberImpl *subscriber) {
-  Request req;
+  phaser::Request req;
   FillCreateSubscriberRequest(req.mutable_create_subscriber(),
                               subscriber->Name(), subscriber->options_,
                               subscriber->GetSubscriberId());
 
-  Response resp;
+  phaser::Response resp;
   std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
   if (absl::Status status = SendRequestReceiveResponse(req, resp, fds);
       !status.ok()) {
     return status;
   }
-  auto &sub_resp = resp.create_subscriber();
+  const auto &sub_resp = resp.create_subscriber();
   if (!sub_resp.error().empty()) {
     return absl::InternalError(sub_resp.error());
   }
@@ -2454,21 +2483,20 @@ absl::Status ClientImpl::ReregisterSubscriber(SubscriberImpl *subscriber) {
 }
 
 absl::Status ClientImpl::SendRequestReceiveResponse(
-    const Request &req, Response &response,
+    const phaser::Request &req, phaser::Response &response,
     std::vector<toolbelt::FileDescriptor> &fds,
     const std::vector<toolbelt::FileDescriptor> &send_fds) {
 
   {
-    size_t msg_len = req.ByteSizeLong();
-    std::vector<char> send_msg(sizeof(int32_t) + msg_len);
-    char *sendbuf = send_msg.data() + sizeof(int32_t);
-
-    if (!req.SerializeToArray(sendbuf, msg_len)) {
-      return absl::InternalError("Failed to serialize request");
+    ServerWire<DynamicServerWireBuffers> wire;
+    absl::StatusOr<size_t> msg_len = wire.Serialize(req);
+    if (!msg_len.ok()) {
+      return absl::InternalError(absl::StrFormat(
+          "Failed to serialize request: %s", msg_len.status().message()));
     }
 
     absl::StatusOr<ssize_t> n =
-        socket_.SendMessage(sendbuf, msg_len, SocketContext());
+        socket_.SendMessage(wire.Payload(), *msg_len, SocketContext());
     if (!n.ok()) {
       socket_.Close();
       if (ShouldReconnect(n.status())) {
@@ -2502,10 +2530,12 @@ absl::Status ClientImpl::SendRequestReceiveResponse(
     }
     return recv_msg.status();
   }
-  if (!response.ParseFromArray(recv_msg->data(),
-                               static_cast<int>(recv_msg->size()))) {
+  if (absl::Status status = ServerWire<DynamicServerWireBuffers>::Decode(
+          recv_msg->data(), recv_msg->size(), response);
+      !status.ok()) {
     socket_.Close();
-    return absl::InternalError("Failed to parse response");
+    return absl::InternalError(
+        absl::StrFormat("Failed to parse response: %s", status.message()));
   }
 
   absl::Status s = socket_.ReceiveFds(fds, SocketContext());
@@ -2517,17 +2547,18 @@ absl::Status ClientImpl::SendRequestReceiveResponse(
 }
 
 absl::Status ClientImpl::SendOneWayRequest(
-    const Request &req, const std::vector<toolbelt::FileDescriptor> &fds) {
-  size_t msg_len = req.ByteSizeLong();
-  std::vector<char> send_msg(sizeof(int32_t) + msg_len);
-  char *sendbuf = send_msg.data() + sizeof(int32_t);
-
-  if (!req.SerializeToArray(sendbuf, msg_len)) {
-    return absl::InternalError("Failed to serialize one-way request");
+    const phaser::Request &req,
+    const std::vector<toolbelt::FileDescriptor> &fds) {
+  ServerWire<DynamicServerWireBuffers> wire;
+  absl::StatusOr<size_t> msg_len = wire.Serialize(req);
+  if (!msg_len.ok()) {
+    return absl::InternalError(absl::StrFormat(
+        "Failed to serialize one-way request: %s",
+        msg_len.status().message()));
   }
 
   absl::StatusOr<ssize_t> n =
-      socket_.SendMessage(sendbuf, msg_len, SocketContext());
+      socket_.SendMessage(wire.Payload(), *msg_len, SocketContext());
   if (!n.ok()) {
     socket_.Close();
     if (ShouldReconnect(n.status())) {
@@ -2552,7 +2583,7 @@ absl::Status ClientImpl::SendOneWayRequest(
 absl::Status
 ClientImpl::RegisterClientBuffer(const ClientBufferHandleMetadata &metadata,
                                  const toolbelt::FileDescriptor *fd) {
-  Request req;
+  phaser::Request req;
   auto *register_buffer = req.mutable_register_client_buffer();
   ToProto(metadata, register_buffer->mutable_metadata());
   std::vector<toolbelt::FileDescriptor> fds;
@@ -2561,7 +2592,7 @@ ClientImpl::RegisterClientBuffer(const ClientBufferHandleMetadata &metadata,
     register_buffer->set_fd_index(0);
     fds.push_back(*fd);
   }
-  Response response;
+  phaser::Response response;
   std::vector<toolbelt::FileDescriptor> response_fds;
   if (absl::Status status =
           SendRequestReceiveResponse(req, response, response_fds, fds);
@@ -2577,13 +2608,13 @@ ClientImpl::RegisterClientBuffer(const ClientBufferHandleMetadata &metadata,
 absl::StatusOr<std::vector<RegisteredClientBuffer>>
 ClientImpl::GetClientBuffers(const std::string &channel_name,
                              uint64_t session_id, uint32_t buffer_index) {
-  Request req;
+  phaser::Request req;
   auto *get = req.mutable_get_client_buffers();
   get->set_channel_name(channel_name);
   get->set_session_id(session_id);
   get->set_buffer_index(buffer_index);
 
-  Response response;
+  phaser::Response response;
   std::vector<toolbelt::FileDescriptor> fds;
   if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
       !status.ok()) {
@@ -2598,7 +2629,7 @@ ClientImpl::GetClientBuffers(const std::string &channel_name,
   }
   std::vector<RegisteredClientBuffer> result;
   result.reserve(get_resp.metadata_size());
-  for (int i = 0; i < get_resp.metadata_size(); ++i) {
+  for (size_t i = 0; i < get_resp.metadata_size(); ++i) {
     RegisteredClientBuffer buffer{
         .metadata = FromProto(get_resp.metadata(i)),
     };
@@ -2614,7 +2645,7 @@ ClientImpl::GetClientBuffers(const std::string &channel_name,
 absl::Status ClientImpl::UnregisterClientBuffer(const std::string &channel_name,
                                                 uint64_t session_id,
                                                 uint32_t buffer_index) {
-  Request req;
+  phaser::Request req;
   auto *unregister = req.mutable_unregister_client_buffer();
   unregister->set_channel_name(channel_name);
   unregister->set_session_id(session_id);

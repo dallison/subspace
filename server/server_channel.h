@@ -12,6 +12,7 @@
 #include "common/channel.h"
 #include "common/client_buffer.h"
 #include "proto/subspace.pb.h"
+#include "proto/subspace.phaser.h"
 #include "toolbelt/bitset.h"
 #include "toolbelt/fd.h"
 #include "toolbelt/logging.h"
@@ -238,6 +239,10 @@ public:
   bool IsHidden() const { return hidden_; }
   bool IsTelemetryChannel() const { return !telemetry_target_.empty(); }
   const std::string &TelemetryTarget() const { return telemetry_target_; }
+  // A static channel comes from the server's static channel config.  It
+  // keeps its layout and stays when it has no publishers or subscribers.
+  void SetStatic(bool v) { static_ = v; }
+  bool IsStatic() const { return static_; }
 
   absl::StatusOr<PublisherUser *> AddPublisher(ClientHandler *handler,
                                                bool is_reliable, bool is_local,
@@ -326,6 +331,16 @@ public:
                      int &max_outstanding_slot_leases) const;
   virtual void GetChannelInfo(subspace::ChannelInfoProto *info);
   virtual void GetChannelStats(subspace::ChannelStatsProto *stats);
+  void GetChannelInfo(subspace::phaser::ChannelInfoProto *info);
+  void GetChannelStats(subspace::phaser::ChannelStatsProto *stats);
+
+ private:
+  template <typename Info>
+  void FillChannelInfo(Info *info);
+  template <typename Stats>
+  void FillChannelStats(Stats *stats);
+
+ public:
   void TriggerAllSubscribers();
 
   std::vector<ResizeInfo> GetResizeInfo() const;
@@ -456,6 +471,16 @@ public:
   bool IsReliable() const;
   bool IsFixedSize() const;
 
+  // Properties that every publisher sharing this channel's buffers must agree
+  // on.  The virtual channels of a multiplexer all share its buffers.
+  struct SharedPublisherTraits {
+    bool fixed_size = false;
+    bool local = false;
+  };
+  virtual SharedPublisherTraits GetSharedPublisherTraits() const {
+    return {IsFixedSize(), HasLocalPublisher()};
+  }
+
   bool HasSplitBufferOptions() const { return split_buffer_options_set_; }
   const SplitBufferOptions &GetSplitBufferOptions() const {
     return split_buffer_options_;
@@ -541,6 +566,7 @@ protected:
   bool local_latched_ = false;
   bool skip_cleanup_ = false;
   bool hidden_ = false;
+  bool static_ = false;
   std::string telemetry_target_;
   int session_id_;
   mutable int64_t last_known_slot_size_ = 0;
@@ -592,6 +618,7 @@ public:
                   int &num_tunnel_subs) const override;
   void CountCapacityUsage(int &max_active_messages,
                           int &max_outstanding_slot_leases) const override;
+  SharedPublisherTraits GetSharedPublisherTraits() const override;
 
 private:
   int next_vchan_id_ = 0;
@@ -636,6 +663,9 @@ public:
                   int &num_tunnel_subs) const override {
     mux_->CountUsers(num_pubs, num_subs, num_bridge_pubs, num_bridge_subs,
                      num_tunnel_pubs, num_tunnel_subs);
+  }
+  SharedPublisherTraits GetSharedPublisherTraits() const override {
+    return mux_->GetSharedPublisherTraits();
   }
   ChannelMultiplexer *GetMux() const { return mux_; }
   int GetVirtualChannelId() const override { return vchan_id_; }

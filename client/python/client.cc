@@ -158,6 +158,13 @@ PYBIND11_MODULE(subspace, m) {
            "Set the number of slots for the publisher.")
       .def("num_slots", &PublisherOptions::NumSlots,
            "Get the number of slots for the publisher.")
+      .def("set_server_defined", &PublisherOptions::SetServerDefined,
+           "Set for a publisher on a static channel, whose layout the server "
+           "defines.  The slot size, number of slots, fixed size, checksum "
+           "size, metadata size, subscriber queue arena size and split "
+           "buffers must then be left unset.")
+      .def("server_defined", &PublisherOptions::ServerDefined,
+           "Get whether the server defines the channel's layout.")
       .def("set_subscriber_queue_arena_size",
            &PublisherOptions::SetSubscriberQueueArenaSize,
            "Set the bytes reserved for packed subscriber queues. Queues are "

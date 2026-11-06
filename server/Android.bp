@@ -18,6 +18,7 @@ cc_library_static {
         "client_handler.cc",
         "server_channel.cc",
         "shadow_replicator.cc",
+        "static_config.cc",
         "tunnel.cc",
         "tunnel_config.cc",
         "tunnel_protocol.cc",

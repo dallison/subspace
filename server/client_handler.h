@@ -11,6 +11,7 @@
 #include "common/channel.h"
 #include "co/coroutine.h"
 #include "proto/subspace.pb.h"
+#include "proto/subspace.phaser.h"
 #include "toolbelt/sockets.h"
 #include <cstdint>
 #include <sys/poll.h>
@@ -35,46 +36,46 @@ public:
 private:
   std::string GetTotalVM();
 
-  absl::Status HandleMessage(const subspace::Request &req,
-                             subspace::Response &resp,
+  absl::Status HandleMessage(const subspace::phaser::Request &req,
+                             subspace::phaser::Response &resp,
                              std::vector<toolbelt::FileDescriptor> &fds);
 
   // These individual handler functions set any errors in the response
   // message instead of returning them to the caller.  This allows the
   // connection to remain open to the client and the client will be
   // able to display or handle the error as appropriate.
-  void HandleInit(const subspace::InitRequest &req,
-                  subspace::InitResponse *response,
+  void HandleInit(const subspace::phaser::InitRequest &req,
+                  subspace::phaser::InitResponse *response,
                   std::vector<toolbelt::FileDescriptor> &fds);
-  void HandleCreatePublisher(const subspace::CreatePublisherRequest &req,
-                             subspace::CreatePublisherResponse *response,
+  void HandleCreatePublisher(const subspace::phaser::CreatePublisherRequest &request,
+                             subspace::phaser::CreatePublisherResponse *response,
                              std::vector<toolbelt::FileDescriptor> &fds);
-  void HandleCreateSubscriber(const subspace::CreateSubscriberRequest &req,
-                              subspace::CreateSubscriberResponse *response,
+  void HandleCreateSubscriber(const subspace::phaser::CreateSubscriberRequest &req,
+                              subspace::phaser::CreateSubscriberResponse *response,
                               std::vector<toolbelt::FileDescriptor> &fds);
-  void HandleGetTriggers(const subspace::GetTriggersRequest &req,
-                         subspace::GetTriggersResponse *response,
+  void HandleGetTriggers(const subspace::phaser::GetTriggersRequest &req,
+                         subspace::phaser::GetTriggersResponse *response,
                          std::vector<toolbelt::FileDescriptor> &fds);
 
-  void HandleRemovePublisher(const subspace::RemovePublisherRequest &req,
-                             subspace::RemovePublisherResponse *response,
+  void HandleRemovePublisher(const subspace::phaser::RemovePublisherRequest &req,
+                             subspace::phaser::RemovePublisherResponse *response,
                              std::vector<toolbelt::FileDescriptor> &fds);
-  void HandleRemoveSubscriber(const subspace::RemoveSubscriberRequest &req,
-                              subspace::RemoveSubscriberResponse *response,
+  void HandleRemoveSubscriber(const subspace::phaser::RemoveSubscriberRequest &req,
+                              subspace::phaser::RemoveSubscriberResponse *response,
                               std::vector<toolbelt::FileDescriptor> &fds);
-  void HandleGetChannelInfo(const subspace::GetChannelInfoRequest &req,
-                            subspace::GetChannelInfoResponse *response,
+  void HandleGetChannelInfo(const subspace::phaser::GetChannelInfoRequest &req,
+                            subspace::phaser::GetChannelInfoResponse *response,
                             std::vector<toolbelt::FileDescriptor> &fds);
-  void HandleGetChannelStats(const subspace::GetChannelStatsRequest &req,
-                             subspace::GetChannelStatsResponse *response,
+  void HandleGetChannelStats(const subspace::phaser::GetChannelStatsRequest &req,
+                             subspace::phaser::GetChannelStatsResponse *response,
                              std::vector<toolbelt::FileDescriptor> &fds);
   absl::Status
-  HandleRegisterClientBuffer(const subspace::RegisterClientBufferRequest &req,
+  HandleRegisterClientBuffer(const subspace::phaser::RegisterClientBufferRequest &req,
                              std::vector<toolbelt::FileDescriptor> &fds);
   absl::Status HandleUnregisterClientBuffer(
-      const subspace::UnregisterClientBufferRequest &req);
-  void HandleGetClientBuffers(const subspace::GetClientBuffersRequest &req,
-                              subspace::GetClientBuffersResponse *response,
+      const subspace::phaser::UnregisterClientBufferRequest &req);
+  void HandleGetClientBuffers(const subspace::phaser::GetClientBuffersRequest &req,
+                              subspace::phaser::GetClientBuffersResponse *response,
                               std::vector<toolbelt::FileDescriptor> &fds);
   Server *server_;
   async::UnixSocket socket_;

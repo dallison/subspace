@@ -7,6 +7,7 @@
 #include "absl/flags/parse.h"
 #include "proto/tunnel_config.pb.h"
 #include "server.h"
+#include "server/static_config.h"
 #include "server/tunnel_config.h"
 #include <cerrno>
 #include <csignal>
@@ -95,6 +96,10 @@ ABSL_FLAG(std::string, shadow_socket, "",
           "Primary shadow process Unix socket (empty = disabled)");
 ABSL_FLAG(std::string, secondary_shadow_socket, "",
           "Secondary shadow process Unix socket (empty = disabled)");
+ABSL_FLAG(std::string, channel_config, "",
+          "StaticChannelConfig file in protobuf text format.  The server "
+          "creates its channels at startup, fixes their layout and allows no "
+          "others (empty = channels are created on demand)");
 ABSL_FLAG(bool, tunnel, false,
           "Run discovery and bridging compatible with the cruise tunnel "
           "alongside the native kind.  Requires --tunnel_config.");
@@ -286,6 +291,21 @@ int main(int argc, char **argv) {
   server->SetMachineName(absl::GetFlag(FLAGS_machine));
   server->SetShadowSockets(absl::GetFlag(FLAGS_shadow_socket),
                             absl::GetFlag(FLAGS_secondary_shadow_socket));
+
+  if (const std::string &channel_config = absl::GetFlag(FLAGS_channel_config);
+      !channel_config.empty()) {
+    absl::StatusOr<subspace::StaticChannelConfig> config =
+        subspace::ReadStaticChannelConfig(channel_config);
+    if (!config.ok()) {
+      fprintf(stderr, "%s\n", config.status().ToString().c_str());
+      exit(1);
+    }
+    if (absl::Status status = server->SetStaticChannelConfig(*std::move(config));
+        !status.ok()) {
+      fprintf(stderr, "%s\n", status.ToString().c_str());
+      exit(1);
+    }
+  }
 
   const std::string tunnel_config_path = absl::GetFlag(FLAGS_tunnel_config);
   if (absl::GetFlag(FLAGS_tunnel)) {

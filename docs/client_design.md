@@ -68,7 +68,7 @@ directly through shared memory using lock-free atomic operations.
 3. On success, the server responds with a session ID and transmits the SCB file
    descriptor via `SCM_RIGHTS`.
 4. The client maps the SCB into its address space.
-5. All subsequent requests (CreatePublisher, CreateSubscriber, etc.) use the same socket with a 4-byte length prefix + serialized protobuf, followed by file descriptor transfer for shared memory regions.
+5. All subsequent requests (CreatePublisher, CreateSubscriber, etc.) use the same socket with a 4-byte length prefix plus the native Phaser payload, followed by file descriptor transfer for shared memory regions.
 
 ### 2.3 Thread Safety
 

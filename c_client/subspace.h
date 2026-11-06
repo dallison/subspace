@@ -318,6 +318,12 @@ typedef struct {
   bool split_buffers_over_bridge;
   int32_t max_publishers;
   SubspaceSplitBufferCallbacks split_callbacks;
+  // The channel is in the server's static channel config, which defines its
+  // layout.  Publishers on static channels must set this and leave
+  // slot_size, num_slots, fixed_size, checksum_size, metadata_size,
+  // subscriber_queue_arena_size and use_split_buffers zero.  Use
+  // subspace_publisher_options_server_defined() to get such options.
+  bool server_defined;
 } SubspacePublisherOptions;
 
 typedef struct {
@@ -437,6 +443,9 @@ bool subspace_get_all_channel_stats(SubspaceClient client,
 SubspaceSubscriberOptions subspace_subscriber_options_default(void);
 SubspacePublisherOptions
 subspace_publisher_options_default(SubspaceSlotSize slot_size, int num_slots);
+// Options for a publisher on a static channel, whose layout the server
+// defines.
+SubspacePublisherOptions subspace_publisher_options_server_defined(void);
 
 // Create a subscriber or publisher.  If the subscriber or publisher is created
 // OK, the 'subscriber' or 'publisher' pointer will be non-null.  If there is

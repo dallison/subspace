@@ -6,6 +6,7 @@
 
 #include "client/client_channel.h"
 #include "client/message.h"
+#include "common/slot_search.h"
 
 #include <unordered_map>
 
@@ -39,12 +40,12 @@ public:
     return options_.max_slot_size > 0 ? Aligned(options_.max_slot_size) : 0;
   }
   bool UsesSplitBuffers() const { return UseSplitBuffers(); }
-  void BeginSubscriberQueuePublish() {
+  // The number of publishes to subscriber queues in progress in this process.
+  // A re-registration reports it so the server can restore active_publishers.
+  void BeginQueuePublishDepth() {
     active_queue_publish_depth_.fetch_add(1, std::memory_order_seq_cst);
-    Channel::BeginSubscriberQueuePublish(publisher_id_);
   }
-  void EndSubscriberQueuePublish() {
-    Channel::EndSubscriberQueuePublish(publisher_id_);
+  void EndQueuePublishDepth() {
     active_queue_publish_depth_.fetch_sub(1, std::memory_order_seq_cst);
   }
   uint32_t ActiveQueuePublishDepth() const {
@@ -57,13 +58,10 @@ public:
   // triggerfd.
   void TriggerReliable() { trigger_.Trigger(); }
 
+  // Claim a slot for owner using the search in common/slot_search.h, which
+  // the ASIL client shares.
   MessageSlot *FindFreeSlotUnreliable(int owner);
   MessageSlot *FindFreeSlotReliable(int owner);
-
-  // Picks the retired slot to recycle next, or -1 if the retired pool holds
-  // no usable slot.  Takes the lowest-index slot unless oldest_first, which
-  // is what an idle publisher wants; see the definition.
-  int FindRetiredSlotToReuse(bool oldest_first);
 
   void SetSlotToBiggestBuffer(MessageSlot *slot);
 
@@ -112,6 +110,10 @@ public:
 private:
   friend class ::subspace::ClientImpl;
   friend class ::subspace::Publisher;
+  friend class SubscriberQueuePublishGuard;
+
+  class SearchHooks;
+  SlotSearch SearchFor(int owner) const;
 
   bool IsPublisher() const override { return true; }
   bool IsBridge() const override { return options_.IsBridge(); }

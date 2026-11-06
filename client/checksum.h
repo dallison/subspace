@@ -5,19 +5,14 @@
 #pragma once
 
 #include "absl/types/span.h"
+#include "common/crc32.h"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 
-// Undefine this if you don't want to use hardware CRC32 instructions
-#define SUBSPACE_HARDWARE_CRC 1
-
 namespace subspace {
-
-extern "C" {
-uint32_t SubspaceCRC32(uint32_t crc, const uint8_t *data, size_t length);
-}
 
 // The callback receives the data to be checksummed and a writable region
 // where the checksum should be stored.  The default CRC32 implementation

@@ -10,8 +10,6 @@ cc_library(
         "message.cc",
         "publisher.cc",
         "subscriber.cc",
-        "checksum.cc",
-        "arm_crc32.S",
     ],
     hdrs = [
         "client.h",
@@ -25,9 +23,12 @@ cc_library(
     strip_include_prefix = ".",
     include_prefix = "subspace/client",
     deps = [
+        "//common:crc32",
+        "//common:server_wire",
         "//common:subspace_common",
         "//common/async:async",
         "//proto:subspace_cc_proto",
+        "//proto:subspace_phaser",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/status",

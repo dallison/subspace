@@ -1,0 +1,59 @@
+// Android.bp for phaser (https://github.com/dallison/phaser).
+// Place this file alongside the phaser source tree at external/phaser/ in
+// your AOSP checkout.
+
+// Runtime library linked by phaser-generated code.
+cc_library_static {
+    name: "libphaser_runtime",
+    srcs: [
+        "phaser/runtime/md5.cc",
+        "phaser/runtime/message.cc",
+        "phaser/runtime/phaser_bank.cc",
+    ],
+    export_include_dirs: ["."],
+    cflags: [
+        "-std=c++17",
+        "-Wall",
+        "-Wno-unused-parameter",
+    ],
+    static_libs: [
+        "libcpp_toolbelt",
+        "libabsl",
+    ],
+    export_static_lib_headers: [
+        "libcpp_toolbelt",
+        "libabsl",
+    ],
+    stl: "c++_shared",
+    min_sdk_version: "28",
+    compile_multilib: "64",
+}
+
+// The protoc plugin.  It runs on the build host during code generation.
+cc_binary_host {
+    name: "protoc-gen-phaser",
+    srcs: [
+        "phaser/compiler/enum_gen.cc",
+        "phaser/compiler/gen.cc",
+        "phaser/compiler/main.cc",
+        "phaser/compiler/message_gen.cc",
+        "phaser/options.proto",
+    ],
+    proto: {
+        type: "full",
+        include_dirs: ["external/protobuf/src"],
+    },
+    local_include_dirs: ["."],
+    cflags: [
+        "-Wall",
+        "-Wno-unused-parameter",
+    ],
+    cpp_std: "c++17",
+    cppflags: ["-fexceptions"],
+    rtti: true,
+    static_libs: [
+        "libprotoc",
+        "libprotobuf-cpp-full",
+        "libabsl",
+    ],
+}

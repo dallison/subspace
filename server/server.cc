@@ -590,6 +590,12 @@ absl::Status Server::Run(int num_asio_threads) {
                         s.ToString().c_str()));
   }
 
+  // Before any client is handled, so no client sees a static channel missing
+  // or as a placeholder.
+  if (absl::Status s = CreateStaticChannels(); !s.ok()) {
+    return s;
+  }
+
   char hostname[256] = "local";
   if (!local_) {
     if (gethostname(hostname, sizeof(hostname)) == -1) {

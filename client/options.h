@@ -99,6 +99,17 @@ struct PublisherOptions {
   }
   SlotSizeType MaxSlotSize() const { return max_slot_size; }
 
+  // The channel is in the server's static channel config, which defines its
+  // layout.  Publishers on static channels must set this, and must leave the
+  // options that shape the channel's shared memory unset: slot size, number
+  // of slots, fixed size, checksum size, metadata size, subscriber queue
+  // arena size and split buffers.  The publisher takes them from the server.
+  PublisherOptions &SetServerDefined(bool v) {
+    server_defined = v;
+    return *this;
+  }
+  bool ServerDefined() const { return server_defined; }
+
   bool IsLocal() const { return local; }
   bool IsReliable() const { return reliable; }
   bool IsFixedSize() const { return fixed_size; }
@@ -186,7 +197,7 @@ struct PublisherOptions {
   bool Checksum() const { return checksum; }
 
   // Number of bytes reserved for the checksum starting at the checksum
-  // field of MessagePrefix.  Default is 4 (CRC32).
+  // field of MessagePrefix.  0, the default, means 4 (CRC32).
   PublisherOptions &SetChecksumSize(int32_t size) {
     checksum_size = size;
     return *this;
@@ -280,6 +291,7 @@ struct PublisherOptions {
   bool bridge = false;
   bool for_tunnel = false;
   bool fixed_size = false;
+  bool server_defined = false;
   std::string type;
   bool activate =
       false; // If true, the channel will be activated even if unreliable.
@@ -290,7 +302,7 @@ struct PublisherOptions {
   int32_t max_outstanding_slot_leases = 1;
   bool notify_retirement_on_forced_reuse = true;
   bool checksum = false;
-  int32_t checksum_size = 4;
+  int32_t checksum_size = 0;
   int32_t metadata_size = 0;
 
   // See SetPreferRetiredSlots() for description.

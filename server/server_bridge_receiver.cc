@@ -225,7 +225,10 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
                                      bool split_buffers_over_bridge,
                                      toolbelt::InetAddress publisher,
                                      bool local_has_split_options,
-                                     bool local_use_split_buffers) {
+                                     bool local_use_split_buffers,
+                                     bool local_is_static,
+                                     std::string static_mux,
+                                     int static_vchan_id) {
   // bridged_publishers_ and channels_ are owned by the client strand, but this
   // coroutine runs on the parallel io_context.  Post the teardown bookkeeping
   // onto the strand (capturing everything by value, since the guard's members
@@ -378,17 +381,29 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
   if (bridge_ms < 0) {
     bridge_ms = 0;
   }
-  absl::StatusOr<Publisher> pub = client.CreatePublisher(
-      channel_name, subscribed.slot_size(), subscribed.num_slots(),
+  PublisherOptions bridge_options =
       PublisherOptions()
-          .SetSubscriberQueueArenaSize(
-              subscribed.subscriber_queue_arena_size())
           .SetReliable(subscribed.reliable())
           .SetBridge(true)
-          .SetNotifyRetirement(subscribed.notify_retirement())
-          .SetChecksumSize(bridge_cs)
-          .SetMetadataSize(bridge_ms)
-          .SetUseSplitBuffers(bridge_publisher_split_buffers));
+          .SetNotifyRetirement(subscribed.notify_retirement());
+  // A static channel keeps the layout from this server's config.  Whether it
+  // is static was read on the client strand; this coroutine must not look the
+  // channel up.
+  if (local_is_static) {
+    bridge_options.SetServerDefined(true).SetUseSplitBuffers(false);
+    if (!static_mux.empty()) {
+      bridge_options.SetMux(static_mux).SetVchanId(static_vchan_id);
+    }
+  } else {
+    bridge_options.SetSlotSize(subscribed.slot_size())
+        .SetNumSlots(subscribed.num_slots())
+        .SetSubscriberQueueArenaSize(subscribed.subscriber_queue_arena_size())
+        .SetChecksumSize(bridge_cs)
+        .SetMetadataSize(bridge_ms)
+        .SetUseSplitBuffers(bridge_publisher_split_buffers);
+  }
+  absl::StatusOr<Publisher> pub =
+      client.CreatePublisher(channel_name, bridge_options);
   if (!pub.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to create bridge publisher for %s: %s",

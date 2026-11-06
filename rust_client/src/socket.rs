@@ -4,12 +4,10 @@
 // See LICENSE file for licensing information.
 
 use crate::error::{Result, SubspaceError};
-use crate::proto;
 use nix::sys::socket::{
     connect, recvmsg, sendmsg, socket, AddressFamily, ControlMessage, ControlMessageOwned,
     MsgFlags, SockFlag, SockType, UnixAddr,
 };
-use prost::Message;
 use std::io::{IoSlice, IoSliceMut};
 use std::os::fd::AsRawFd;
 use std::os::unix::io::RawFd;
@@ -55,21 +53,21 @@ impl SocketConnection {
         self.fd
     }
 
-    pub fn send_request(&self, req: &proto::Request) -> Result<()> {
-        let msg_len = req.encoded_len();
-        let mut buf = vec![0u8; 4 + msg_len];
+    pub fn send_request(&self, req: &subspace_phaser_c::Request) -> Result<()> {
+        let payload = req.native_payload();
+        let mut buf = vec![0u8; 4 + payload.len()];
 
         // Length prefix in network byte order (big-endian).
-        let len_be = (msg_len as u32).to_be_bytes();
+        let len_be = (payload.len() as u32).to_be_bytes();
         buf[..4].copy_from_slice(&len_be);
-        req.encode(&mut &mut buf[4..])?;
+        buf[4..].copy_from_slice(&payload);
 
         send_fully(self.fd, &buf)?;
         Ok(())
     }
 
-    pub fn receive_response(&self) -> Result<(proto::Response, Vec<RawFd>)> {
-        // 1. Read length-prefixed protobuf response.
+    pub fn receive_response(&self) -> Result<(subspace_phaser_c::Response<'static>, Vec<RawFd>)> {
+        // 1. Read the length-prefixed native Phaser response.
         let mut len_buf = [0u8; 4];
         recv_fully(self.fd, &mut len_buf)?;
         let length = u32::from_be_bytes(len_buf) as usize;
@@ -77,7 +75,12 @@ impl SocketConnection {
         let mut data = vec![0u8; length];
         recv_fully(self.fd, &mut data)?;
 
-        let response = proto::Response::decode(&data[..])?;
+        let mut response = subspace_phaser_c::Response::new(length.max(64));
+        if !response.parse_native_payload(&data) {
+            return Err(SubspaceError::Internal(
+                "Failed to parse native Phaser response".into(),
+            ));
+        }
 
         // 2. Receive file descriptors via SCM_RIGHTS.
         let fds = self.receive_fds()?;
