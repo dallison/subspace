@@ -698,7 +698,11 @@ message StaticMultiplexer {
   string name = 1;
   int32 slot_size = 2;
   int32 num_slots = 3;
-  string type = 4;
+  // Type of the data on this multiplexer.  Bytes, the same as the type on
+  // the wire: a short name, or an opaque blob such as ROS metadata or a
+  // protobuf descriptor.  In text format a quoted string is those bytes,
+  // and escapes such as \377 carry bytes that are not text.
+  bytes type = 4;
   int32 checksum_size = 5; // 0 means the default of 4 bytes.
   int32 metadata_size = 6;
   // Message payloads are in shared memory of their own, one for each slot.
@@ -709,10 +713,13 @@ message StaticChannel {
   string name = 1;
   // A channel on a multiplexer leaves slot_size, num_slots, type,
   // checksum_size, metadata_size and use_split_buffers unset and takes them
-  // from the multiplexer.
+  // from the multiplexer.  type is bytes, the same as the type on the wire:
+  // a short name, or an opaque blob such as ROS metadata or a protobuf
+  // descriptor.  In text format a quoted string is those bytes, and escapes
+  // such as \377 carry bytes that are not text.
   int32 slot_size = 2;
   int32 num_slots = 3;
-  string type = 4;
+  bytes type = 4;
   int32 checksum_size = 5; // 0 means the default of 4 bytes.
   int32 metadata_size = 6;
   // Name of an entry in StaticChannelConfig.multiplexers.

@@ -32,6 +32,11 @@
   publisher exists.
 - `use_split_buffers` in a static channel or multiplexer config gives it
   split buffers, which the server creates.
+- `type` in a static channel or multiplexer config is bytes, the same as the
+  channel type on the wire. A quoted string is that text's bytes, and
+  protobuf text escapes carry an opaque blob such as ROS metadata or a
+  protobuf descriptor. A virtual channel still takes its type from its
+  multiplexer.
 - `GetClientBuffersRequest` can ask for one prefix or slot of a split buffer
   set with `filter_slot`, `is_prefix` and `slot_id`.
 

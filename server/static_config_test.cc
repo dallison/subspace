@@ -46,7 +46,16 @@ constexpr char kConfig[] = R"pb(
     use_split_buffers: true
   }
   channels { name: "/static/sv" mux: "/static/split_mux" vchan_id: 1 }
+  channels {
+    name: "/static/blob"
+    slot_size: 64
+    num_slots: 4
+    type: "\377\000State\200"
+  }
 )pb";
+
+// The bytes in /static/blob's type: 0xFF, 0x00, "State", 0x80.
+const std::string kBlobType("\xff\x00State\x80", 8);
 
 subspace::PublisherOptions ServerDefined() {
   return subspace::PublisherOptions().SetServerDefined(true);
@@ -160,7 +169,30 @@ TEST(StaticConfigParseTest, ParsesValidConfig) {
       subspace::ParseStaticChannelConfig(kConfig);
   ASSERT_OK(config);
   EXPECT_EQ(2, config->multiplexers_size());
-  EXPECT_EQ(6, config->channels_size());
+  EXPECT_EQ(7, config->channels_size());
+  EXPECT_EQ(kBlobType, config->channels(6).type());
+}
+
+TEST(StaticConfigParseTest, TypeIsOpaqueBytes) {
+  // A quoted name and an opaque blob with non-text bytes are the same bytes
+  // field.
+  absl::StatusOr<subspace::StaticChannelConfig> named =
+      subspace::ParseStaticChannelConfig(
+          R"pb(channels { name: "/n" slot_size: 64 num_slots: 4 type: "State" })pb");
+  ASSERT_OK(named);
+  EXPECT_EQ("State", named->channels(0).type());
+
+  absl::StatusOr<subspace::StaticChannelConfig> blob =
+      subspace::ParseStaticChannelConfig(R"pb(
+        channels {
+          name: "/b"
+          slot_size: 64
+          num_slots: 4
+          type: "\377\000State\200"
+        }
+      )pb");
+  ASSERT_OK(blob);
+  EXPECT_EQ(kBlobType, blob->channels(0).type());
 }
 
 TEST(StaticConfigParseTest, RejectsInvalidConfigs) {
@@ -233,6 +265,25 @@ TEST_F(StaticConfigTest, ChannelsExistBeforeAnyClient) {
   EXPECT_EQ(128u, vchan_info->slot_size);
   EXPECT_EQ(8, vchan_info->num_slots);
   EXPECT_EQ("Mux", vchan_info->type);
+
+  absl::StatusOr<const subspace::ChannelInfo> blob_info =
+      Client().GetChannelInfo("/static/blob");
+  ASSERT_OK(blob_info);
+  EXPECT_EQ(kBlobType, blob_info->type);
+}
+
+TEST_F(StaticConfigTest, OpaqueTypeMustMatch) {
+  absl::StatusOr<subspace::Publisher> mismatch = Client().CreatePublisher(
+      "/static/blob",
+      ServerDefined().SetType(std::string("\xff\x00Other\x80", 8)));
+  ASSERT_FALSE(mismatch.ok());
+  EXPECT_THAT(mismatch.status().message(),
+              HasSubstr("Inconsistent channel types"));
+
+  absl::StatusOr<subspace::Publisher> pub = Client().CreatePublisher(
+      "/static/blob", ServerDefined().SetType(kBlobType));
+  ASSERT_OK(pub);
+  EXPECT_EQ(kBlobType, std::string(pub->TypeView()));
 }
 
 TEST_F(StaticConfigTest, SubscriberBeforePublisher) {

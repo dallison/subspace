@@ -2041,6 +2041,12 @@ channels { name: "/sensors/lidar" mux: "/sensors" vchan_id: 0 }
 channels { name: "/sensors/radar" mux: "/sensors" vchan_id: 1 }
 ```
 
+`type` is bytes, the same as the channel type on the wire.  A quoted string
+such as `type: "State"` is that text's bytes.  An opaque blob, such as ROS
+metadata or a protobuf descriptor, uses the same field; protobuf text escapes
+carry bytes that are not text (`type: "\000\377..."`).  A channel on a
+multiplexer leaves `type` unset and uses the multiplexer's type.
+
 The server creates every configured channel and its message buffers before it
 accepts clients, so a subscriber that starts first gets the full channel
 layout and maps the buffers instead of waiting for a publisher.  With a config
