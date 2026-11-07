@@ -45,6 +45,13 @@ add_test(NAME client_test COMMAND client_test)
 set_tests_properties(client_test PROPERTIES
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
+if(APPLE)
+    # Linked first so the static libraries below resolve their references.
+    target_link_libraries(client_test PUBLIC
+        nop_plugin_lib
+        split_buffer_free_test_plugin_lib
+    )
+endif()
 target_link_libraries(client_test PUBLIC
     subspace_client
     subspace_common

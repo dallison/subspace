@@ -66,6 +66,7 @@ using InetAddress = toolbelt::InetAddress;
 
 #ifdef __APPLE__
 extern "C" subspace::PluginInterface *NOP_Create();
+extern "C" subspace::PluginInterface *SPLIT_BUFFER_FREE_TEST_Create();
 #endif
 
 class ClientTest : public SubspaceTestBase {};
@@ -9572,13 +9573,6 @@ TEST_F(PluginTest, HeartbeatPublishes) {
 class SplitBufferPluginTest : public ::testing::Test {
 public:
   static void SetUpTestSuite() {
-    // The plugin is a shared library. macOS tests link the server into the
-    // test binary and cannot dlopen it, so the only test in this suite skips.
-    // Starting a server here and tearing it down immediately races coroutine
-    // shutdown under AddressSanitizer.
-#ifdef __APPLE__
-    return;
-#else
     printf("Starting Subspace server with split-buffer test plugin\n");
 #if defined(__ANDROID__)
     char socket_name_template[] = "/data/local/tmp/subspaceXXXXXX"; // NOLINT
@@ -9595,8 +9589,15 @@ public:
         /*local=*/true, server_pipe_[1], /*initial_ordinal=*/1,
         /*wait_for_clients=*/true);
 
+#ifdef __APPLE__
+    auto status = server_->LoadBuiltinPlugin(
+        "SPLIT_BUFFER_FREE_TEST",
+        std::unique_ptr<subspace::PluginInterface>(
+            SPLIT_BUFFER_FREE_TEST_Create()));
+#else
     auto status = server_->LoadPlugin(
         "SPLIT_BUFFER_FREE_TEST", "plugins/split_buffer_free_test_plugin.so");
+#endif
     if (!status.ok()) {
       fprintf(stderr, "Failed to load split-buffer test plugin: %s\n",
               status.ToString().c_str());
@@ -9614,13 +9615,9 @@ public:
 
     char buf[8];
     (void)::read(server_pipe_[0], buf, 8);
-#endif
   }
 
   static void TearDownTestSuite() {
-#ifdef __APPLE__
-    return;
-#else
     printf("Stopping Subspace server with split-buffer test plugin\n");
     server_->Stop();
 
@@ -9629,7 +9626,6 @@ public:
     server_thread_.join();
     server_->CleanupAfterSession();
     (void)remove(socket_.c_str());
-#endif
   }
 
   void SetUp() override { signal(SIGPIPE, SIG_IGN); }
@@ -9646,9 +9642,6 @@ private:
 };
 
 TEST_F(SplitBufferPluginTest, ServerCleanupUsesPluginEndToEnd) {
-#ifdef __APPLE__
-  GTEST_SKIP() << "split-buffer cleanup test plugin is dlopen-only";
-#else
   std::string log_path = Socket() + ".split_buffer_free.log";
   (void)remove(log_path.c_str());
   ASSERT_EQ(0, setenv("SUBSPACE_SPLIT_BUFFER_FREE_TEST_LOG", log_path.c_str(),
@@ -9716,7 +9709,6 @@ TEST_F(SplitBufferPluginTest, ServerCleanupUsesPluginEndToEnd) {
     }
   }
   EXPECT_EQ(3, freed_slots);
-#endif
 }
 
 int main(int argc, char **argv) {

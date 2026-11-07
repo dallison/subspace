@@ -95,9 +95,18 @@ cc_test(
         "@googletest//:gtest",
         "@coroutines//:co",
     ] + select({
-        "//:macos_arm64": ["//plugins:nop_plugin_lib"],
-        "//:macos_x86_64": ["//plugins:nop_plugin_lib"],
-        "//:macos_default": ["//plugins:nop_plugin_lib"],
+        "//:macos_arm64": [
+            "//plugins:nop_plugin_lib",
+            "//plugins:split_buffer_free_test_plugin_lib",
+        ],
+        "//:macos_x86_64": [
+            "//plugins:nop_plugin_lib",
+            "//plugins:split_buffer_free_test_plugin_lib",
+        ],
+        "//:macos_default": [
+            "//plugins:nop_plugin_lib",
+            "//plugins:split_buffer_free_test_plugin_lib",
+        ],
         "//conditions:default": [],
     }),
 )
