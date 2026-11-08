@@ -92,3 +92,24 @@ cc_test(
         "@googletest//:gtest",
     ],
 )
+
+# Not part of `bazel test //...`. Run it with `bazelisk test //asil_client:stress_test`.
+cc_test(
+    name = "stress_test",
+    size = "large",
+    srcs = ["stress_test.cc"],
+    tags = ["manual"],
+    deps = [
+        ":asil_client",
+        ":phaser_connection",
+        "//client:subspace_client",
+        "//client:test_fixture",
+        "//server",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:status_matchers",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings:str_format",
+        "@coroutines//:co",
+        "@googletest//:gtest",
+    ],
+)

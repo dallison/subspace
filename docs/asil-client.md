@@ -141,7 +141,10 @@ bazelisk test //asil_client:all
 
 CMake builds the same libraries as `subspace_asil_client`,
 `subspace_asil_phaser_connection` and `subspace_phaser`, with the tests
-`asil_layout_test` and `asil_client_test`.  Phaser is fetched with
+`asil_layout_test` and `asil_client_test`.  It also builds `asil_stress_test`,
+which is not registered with ctest.  The Bazel target
+`//asil_client:stress_test` is tagged manual, so `bazel test //...` skips it.
+Phaser is fetched with
 `FetchContent`, and its `protoc-gen-phaser` plugin is built for the host.  A
 cross-compile needs a host plugin passed as `-DPHASER_PLUGIN_EXECUTABLE`; see
 [the Android CMake build](android.md#building-with-cmake).

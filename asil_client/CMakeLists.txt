@@ -44,3 +44,13 @@ target_link_libraries(asil_client_test PUBLIC
     libserver
     gmock
 )
+
+# Manual, like client/stress_test. Build it, but don't register it with ctest.
+add_executable(asil_stress_test stress_test.cc)
+target_link_libraries(asil_stress_test PUBLIC
+    subspace_asil_client
+    subspace_asil_phaser_connection
+    subspace_client
+    libserver
+    gmock
+)
