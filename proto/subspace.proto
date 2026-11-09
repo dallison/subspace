@@ -14,6 +14,9 @@ message InitRequest {
   int32 max_channels = 2;
   int32 max_slot_owners = 3;
   int32 max_buffers = 4;
+  // Set by the ASIL client. With a static channel config loaded, an ASIL
+  // publisher can use only the configured channels.
+  bool asil = 5;
 }
 
 // All Request and Response messages are carried over a Unix Domain

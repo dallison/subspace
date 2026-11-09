@@ -12,9 +12,11 @@
 ### Static Channel Config
 - `subspace_server --channel_config=FILE` reads a `StaticChannelConfig` in
   protobuf text format and creates its channels and multiplexers before the
-  server accepts clients. Clients can then use only those channels and the
-  server's own, the channels stay when they have no users, and the server
-  defines their layout.
+  server accepts clients. Those channels stay when they have no users, and
+  the server defines their layout. A standard publisher can still create a
+  channel that isn't configured by specifying its layout, and any subscriber
+  can subscribe to one. An ASIL publisher cannot: the ASIL client marks its
+  connection, and the server rejects its publishers on any other channel.
 - Publishers on a static channel must set the new `server_defined` option
   (`PublisherOptions::SetServerDefined`, `server_defined` in the C, Python,
   Rust and ASIL clients) and can't set the slot size, number of slots, fixed

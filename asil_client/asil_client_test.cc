@@ -727,9 +727,20 @@ TEST_F(AsilClientTest, Rejections) {
   EXPECT_THAT(Asil().LastServerError(),
               HasSubstr("isn't in the static channel config"));
 
-  asil::Subscriber sub;
+  // An ASIL publisher can't create a channel the config doesn't list, even
+  // by giving the layout itself.
   EXPECT_EQ(asil::Error::kServerRejected,
+            Asil().CreatePublisher("/asil/unknown", AsilPubOptions(64, 4), pub));
+  EXPECT_THAT(Asil().LastServerError(),
+              HasSubstr("ASIL publishers can only use channels"));
+  EXPECT_FALSE(pub.IsOpen());
+
+  // A subscriber can ask for that channel. Until a publisher creates its
+  // buffers there is nothing to map.
+  asil::Subscriber sub;
+  EXPECT_EQ(asil::Error::kNoBuffers,
             Asil().CreateSubscriber("/asil/unknown", {}, sub));
+  EXPECT_FALSE(sub.IsOpen());
 
   // Layout options alongside server_defined.
   for (int field = 0; field < 6; field++) {
@@ -1004,7 +1015,7 @@ TEST_F(AsilClientTest, ErrorsMakeNoHeapAllocations) {
 
   EXPECT_EQ(asil::Error::kServerRejected, rejected_pub);
   EXPECT_EQ(asil::Error::kServerRejected, unknown_pub);
-  EXPECT_EQ(asil::Error::kServerRejected, unknown_sub);
+  EXPECT_EQ(asil::Error::kNoBuffers, unknown_sub);
   EXPECT_EQ(asil::Error::kCapacityExceeded, long_pub);
   EXPECT_EQ(asil::Error::kCapacityExceeded, oversized);
 
@@ -1582,6 +1593,38 @@ TEST_F(AsilClientTest, SplitRejections) {
             Asil().CreatePublisher("/asil/split_reject",
                                    SplitPubOptions(slots, 3), pub));
   EXPECT_FALSE(pub.IsOpen());
+}
+
+TEST_F(AsilClientTest, StandardPublisherCreatesChannelBesideStaticConfig) {
+  asil::Publisher rejected;
+  EXPECT_EQ(asil::Error::kServerRejected,
+            Asil().CreatePublisher("/dyn/beside", AsilPubOptions(64, 4),
+                                   rejected));
+  EXPECT_THAT(Asil().LastServerError(),
+              HasSubstr("ASIL publishers can only use channels"));
+
+  absl::StatusOr<subspace::Publisher> pub =
+      Std().CreatePublisher("/dyn/beside", 64, 4, FixedSize());
+  ASSERT_OK(pub);
+
+  // The channel exists now, but it isn't static, so an ASIL publisher still
+  // can't join it.
+  EXPECT_EQ(asil::Error::kServerRejected,
+            Asil().CreatePublisher("/dyn/beside", AsilPubOptions(64, 4),
+                                   rejected));
+  EXPECT_FALSE(rejected.IsOpen());
+
+  asil::Subscriber asil_sub;
+  ASSERT_EQ(asil::Error::kOk,
+            Asil().CreateSubscriber("/dyn/beside", {}, asil_sub));
+  absl::StatusOr<subspace::Subscriber> std_sub =
+      Std().CreateSubscriber("/dyn/beside");
+  ASSERT_OK(std_sub);
+  StdPublish(*pub, "beside");
+  asil::Message msg;
+  ASSERT_EQ(asil::Error::kOk, asil_sub.ReadMessage(msg));
+  EXPECT_EQ("beside", Text(msg));
+  EXPECT_EQ("beside", StdRead(*std_sub).text);
 }
 
 TEST_F(AsilDynamicTest, AsilPublisherCreatesChannel) {

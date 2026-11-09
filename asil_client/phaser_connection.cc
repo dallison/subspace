@@ -395,6 +395,7 @@ Error PhaserServerConnection::Init(const char *client_name, InitReply &reply) {
       [&](wire::Request &request) {
         wire::InitRequest *init = request.mutable_init();
         init->set_client_name(View(client_name));
+        init->set_asil(true);
         init->set_max_channels(shm::kMaxChannels);
         init->set_max_slot_owners(shm::kMaxSlotOwners);
         init->set_max_buffers(static_cast<int32_t>(shm::kMaxBuffers));

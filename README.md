@@ -2052,9 +2052,15 @@ accepts clients, so a subscriber that starts first gets the full channel
 layout and maps the buffers instead of waiting for a publisher.  With a config
 loaded:
 
-- Clients can use only the configured channels and the server's own
-  `/subspace/ChannelDirectory` and `/subspace/Statistics`.  Creating a
-  publisher or subscriber for any other channel fails.
+- A configured channel is shared by the standard clients and the ASIL client.
+  Its publishers, of either kind, must set `server_defined`.
+- A channel that isn't configured can be created by a standard publisher that
+  specifies the layout itself (`slot_size`, `num_slots` and the other layout
+  options) and does not set `server_defined`.  An ASIL publisher cannot create
+  or join that channel.  Any subscriber can, including an ASIL subscriber.
+  The channel is created when the first publisher or subscriber asks for it
+  and removed when it has no users.  An ASIL subscriber that opens before the
+  channel has buffers gets `Error::kNoBuffers`.
 - Configured channels stay for the life of the server, including when they
   have no publishers or subscribers.
 - The server defines the layout.  Publishers on a configured channel must set

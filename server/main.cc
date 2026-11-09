@@ -98,8 +98,10 @@ ABSL_FLAG(std::string, secondary_shadow_socket, "",
           "Secondary shadow process Unix socket (empty = disabled)");
 ABSL_FLAG(std::string, channel_config, "",
           "StaticChannelConfig file in protobuf text format.  The server "
-          "creates its channels at startup, fixes their layout and allows no "
-          "others (empty = channels are created on demand)");
+          "creates those channels at startup and fixes their layout.  Standard "
+          "publishers can still create other channels, and any subscriber can "
+          "use them; ASIL publishers cannot (empty = every channel is created "
+          "on demand)");
 ABSL_FLAG(bool, tunnel, false,
           "Run discovery and bridging compatible with the cruise tunnel "
           "alongside the native kind.  Requires --tunnel_config.");

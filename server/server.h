@@ -132,8 +132,11 @@ public:
   void SetShadowSockets(const std::string &primary, const std::string &secondary);
 
   // Call before Run().  Run() creates the configured channels before it
-  // accepts any clients, and from then on clients can use only those channels
-  // and the server's own.  Fails if the config isn't valid.
+  // accepts any clients.  Publishers on those channels must set
+  // server_defined.  A standard publisher can still create a channel that
+  // isn't configured by specifying its layout, and any subscriber can
+  // subscribe to one.  An ASIL publisher cannot.  Fails if the config isn't
+  // valid.
   absl::Status SetStaticChannelConfig(StaticChannelConfig config);
   bool HasStaticChannelConfig() const { return static_config_.has_value(); }
   // The channels the server publishes itself, which a static channel config

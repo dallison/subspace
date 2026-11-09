@@ -14,22 +14,6 @@
 namespace subspace {
 namespace {
 
-// With a static channel config, clients can't create channels other than the
-// server's own.  Sets the response error and returns false for one they
-// can't create.
-template <typename Response>
-bool StaticConfigAllowsNewChannel(const Server &server,
-                                  std::string_view channel_name,
-                                  Response *response) {
-  if (!server.HasStaticChannelConfig() ||
-      Server::IsServerChannelName(std::string(channel_name))) {
-    return true;
-  }
-  response->set_error(absl::StrFormat(
-      "Channel %s isn't in the static channel config", channel_name));
-  return false;
-}
-
 ClientBufferAllocatorKind FromProtoAllocator(int allocator) {
   switch (allocator) {
   case CLIENT_BUFFER_ALLOCATOR_ANDROID_MEMFD:
@@ -377,6 +361,7 @@ void ClientHandler::HandleInit(const subspace::phaser::InitRequest &req,
   response->set_scb_fd_index(0);
   fds.push_back(server_->scb_fd_);
   client_name_ = req.client_name();
+  asil_client_ = req.asil();
   response->set_session_id(server_->GetSessionId());
   response->set_user_id(getuid());
   response->set_group_id(getgid());
@@ -400,6 +385,17 @@ void ClientHandler::HandleCreatePublisher(
     response->set_error(absl::StrFormat(
         "Channel %s isn't in the static channel config, so its publishers "
         "can't set server_defined",
+        request.channel_name()));
+    return;
+  }
+  // Configured channels are shared by both client types, and both must set
+  // server_defined, which the checks above enforce. A channel that isn't
+  // configured can be created by a standard publisher that specifies its
+  // layout. An ASIL publisher cannot create or join one.
+  if (server_->HasStaticChannelConfig() && !is_static && asil_client_) {
+    response->set_error(absl::StrFormat(
+        "ASIL publishers can only use channels in the static channel config; "
+        "%s isn't configured",
         request.channel_name()));
     return;
   }
@@ -546,10 +542,6 @@ void ClientHandler::HandleCreatePublisher(
       client_name_ != "subspace-telemetry-internal") {
     response->set_error(
         absl::StrFormat("No such channel %s", req.channel_name()));
-    return;
-  }
-  if (channel == nullptr &&
-      !StaticConfigAllowsNewChannel(*server_, req.channel_name(), response)) {
     return;
   }
   if (channel == nullptr) {
@@ -997,11 +989,9 @@ void ClientHandler::HandleCreateSubscriber(
       return;
     }
     if (channel == nullptr) {
-      if (!StaticConfigAllowsNewChannel(*server_, req.channel_name(),
-                                        response)) {
-        return;
-      }
-      // No channel exists, map an empty channel.
+      // No channel exists, map an empty channel. Any subscriber may do this,
+      // including on a server with a static config and including an ASIL
+      // subscriber. A publisher still has to establish the layout.
       server_->logger_.Log(
           toolbelt::LogLevel::kDebug,
           "Subscriber %s is creating new placeholder channel %s "

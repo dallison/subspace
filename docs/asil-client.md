@@ -7,9 +7,14 @@ protocol, so an ASIL process and a standard process can share a channel in
 either direction.
 
 It works with any server.  A server running a
-[static channel config](../README.md#static-channel-config), where every
-channel exists before any client connects and keeps a fixed layout, gives a
-safety case the most predictable setup.
+[static channel config](../README.md#static-channel-config) creates the
+configured channels before any client connects and keeps their layout fixed.
+ASIL and standard publishers share those channels when both set
+`server_defined`.  A standard publisher can still create a channel that isn't
+configured, by specifying its layout, and an ASIL subscriber can subscribe to
+it.  An ASIL publisher cannot create or join a channel that isn't configured
+while a static config is loaded.  On a server with no static config, an ASIL
+publisher can create a channel by specifying its layout.
 
 ## Design Rules
 
@@ -70,11 +75,13 @@ The ASIL client shares channels with the standard clients for:
 
 A publisher or subscriber maps one of the channel's message buffers, the
 newest, when it opens.  A server with a static channel config creates every
-static channel's buffers when it starts, so ASIL publishers and subscribers
-can open in any order.  On a server that creates channels on demand, a
-channel has buffers once its first publisher opens.  Until then an ASIL
-subscriber's `Open()` returns `Error::kNoBuffers`.  An ASIL publisher that is
-first on such a channel creates its buffer.
+configured channel's buffers when it starts, so ASIL publishers and
+subscribers can open those in any order.  A channel that isn't configured, and
+any channel on a server that creates channels on demand, has buffers once its
+first publisher opens.  Until then an ASIL subscriber's `Open()` returns
+`Error::kNoBuffers`.  An ASIL publisher creates that buffer only on a server
+with no static config; with a config loaded it can publish only on the
+configured channels.
 
 ASIL publishers always use fixed-size slots, so a channel never resizes while
 one is open.  A standard publisher can resize a channel that only it
@@ -264,8 +271,9 @@ On a static channel the server defines the layout.  The publisher sets
 `metadata_size`, `subscriber_queue_arena_size` and `use_split_buffers` at
 zero.  `Open()` returns `Error::kInvalidArgument` if any of them is set, and
 `Error::kServerRejected` if the channel is static and `server_defined` isn't
-set, or if `server_defined` is set and the channel isn't static.  The
-publisher then takes its layout from the server:
+set, if `server_defined` is set and the channel isn't static, or if a static
+config is loaded and the publisher gives its own layout for a channel that
+isn't configured.  The publisher then takes its layout from the server:
 
 ```c++
 asil::PublisherOptions options;
@@ -375,8 +383,9 @@ invalidate it.
 
 `asil_client_test` exchanges messages between the ASIL client and the
 standard client in both directions.  One server runs a static channel config,
-for reliable channels, virtual channels, held messages, split buffers and
-subscribers that open before any publisher.  A second server creates channels
+for reliable channels, virtual channels, held messages, split buffers,
+subscribers that open before any publisher, and channels a standard publisher
+creates beside that config.  A second server creates channels
 on demand, for channels created by ASIL publishers, resized channels,
 subscriber queues, custom split buffer allocators and subscribers that open
 before a channel has buffers.  The

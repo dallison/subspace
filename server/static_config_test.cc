@@ -3,8 +3,9 @@
 // See LICENSE file for licensing information.
 
 // Tests for a server started with a static channel config: the configured
-// channels exist before any client connects, they are the only channels
-// clients can use, and their layout is fixed.
+// channels exist before any client connects and their layout is fixed.
+// A standard publisher can still create a channel that isn't configured,
+// and any subscriber can subscribe to one.
 
 #include "client/test_fixture.h"
 
@@ -437,25 +438,49 @@ TEST_F(StaticConfigTest, PublisherTakesLayoutFromServer) {
   ASSERT_OK(second);
 }
 
-TEST_F(StaticConfigTest, UnconfiguredChannelsAreRejected) {
-  absl::StatusOr<subspace::Publisher> pub =
+TEST_F(StaticConfigTest, UnconfiguredChannels) {
+  // server_defined is only for a channel the config created.
+  absl::StatusOr<subspace::Publisher> defined =
       Client().CreatePublisher("/not/configured", ServerDefined());
-  ASSERT_FALSE(pub.ok());
-  EXPECT_THAT(pub.status().message(),
+  ASSERT_FALSE(defined.ok());
+  EXPECT_THAT(defined.status().message(),
               HasSubstr("isn't in the static channel config"));
 
+  // A virtual channel on a configured multiplexer must be configured too
+  // when the publisher asks the server for the layout.
+  defined = Client().CreatePublisher("/static/v9",
+                                     ServerDefined().SetMux("/static/mux"));
+  ASSERT_FALSE(defined.ok());
+  EXPECT_THAT(defined.status().message(),
+              HasSubstr("isn't in the static channel config"));
+
+  // A subscriber can open a channel the config doesn't list, before any
+  // publisher has created it.
+  absl::StatusOr<subspace::Subscriber> early =
+      Client().CreateSubscriber("/dynamic/early");
+  ASSERT_OK(early);
+
+  // A standard publisher that specifies the layout creates the channel.
+  absl::StatusOr<subspace::Publisher> pub =
+      Client().CreatePublisher("/dynamic/a", 128, 4);
+  ASSERT_OK(pub);
   absl::StatusOr<subspace::Subscriber> sub =
-      Client().CreateSubscriber("/not/configured");
-  ASSERT_FALSE(sub.ok());
-  EXPECT_THAT(sub.status().message(),
-              HasSubstr("isn't in the static channel config"));
+      Client().CreateSubscriber("/dynamic/a");
+  ASSERT_OK(sub);
+  Publish(*pub, "dynamic");
+  absl::StatusOr<subspace::Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  EXPECT_EQ("dynamic",
+            std::string(static_cast<const char *>(msg->buffer), msg->length));
 
-  // A virtual channel on a configured multiplexer must be configured too.
-  pub = Client().CreatePublisher("/static/v9",
-                                 ServerDefined().SetMux("/static/mux"));
-  ASSERT_FALSE(pub.ok());
-  EXPECT_THAT(pub.status().message(),
-              HasSubstr("isn't in the static channel config"));
+  absl::StatusOr<subspace::Publisher> later =
+      Client().CreatePublisher("/dynamic/early", 64, 4);
+  ASSERT_OK(later);
+  Publish(*later, "after");
+  msg = early->ReadMessage();
+  ASSERT_OK(msg);
+  EXPECT_EQ("after",
+            std::string(static_cast<const char *>(msg->buffer), msg->length));
 }
 
 TEST_F(StaticConfigTest, ChannelsOutliveTheirUsers) {

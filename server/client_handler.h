@@ -80,6 +80,9 @@ private:
   Server *server_;
   async::UnixSocket socket_;
   std::string client_name_;
+  // Set from InitRequest.asil. With a static channel config, this connection's
+  // publishers can use only the configured channels.
+  bool asil_client_ = false;
 };
 
 } // namespace subspace
