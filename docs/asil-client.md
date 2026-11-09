@@ -37,10 +37,12 @@ publisher can create a channel by specifying its layout.
   memory, and neither does `PhaserServerConnection` while it talks to the
   server.
 - **Resources are acquired when an object opens.**  A publisher or
-  subscriber maps all of its channel's shared memory in `Open()`, and creates
-  shared memory only when an ASIL publisher is the first on a channel that
-  isn't static.  Publishing and reading make no `mmap`, `shm_open` or other
-  shared memory calls.  After `Open()` the server is involved only when a
+  subscriber maps all of its channel's shared memory in `Open()`.  Publishing
+  and reading make no `mmap`, `shm_open` or other shared memory calls.  An
+  ASIL publisher creates a channel's buffer only when it is the first
+  publisher and the server has no static config.  With a config loaded it
+  publishes only on the configured channels, whose buffers the server has
+  already created.  After `Open()` the server is involved only when a
   publisher or subscriber refreshes its trigger file descriptors because
   another process joined or left the channel, and on `Close()`.
 - **Fixed capacities.**  Channel names hold up to 255 characters and each
@@ -177,24 +179,27 @@ memfd backend, or the prefixes or one slot of a split buffer set, so that
 each response stays small.
 
 `PhaserServerConnection` implements it with the server's standard protocol:
-length-prefixed native Phaser payloads on the server's Unix socket, with file
-descriptors passed by `SCM_RIGHTS`.  The server receives the same bytes it
-receives from the standard clients.  Requests and responses are encoded by
-`ServerWire` in `common/server_wire.h`, which the standard C++ client uses
-too.  The standard client gives it growable buffers.  The ASIL connection
-gives it fixed buffers: it builds each request as a phaser message in a
-fixed buffer, copies that payload onto the socket, and loads the response
-into the same buffer, so it needs neither the protobuf library nor the heap
-while it talks to the server.  The message buffer and the wire buffer are
-both 16 KB and live inside the object.  Pass a larger size to the constructor
-when a channel opened through the client needs a bigger handshake.  That
-storage is allocated once, in the constructor, and both buffers use that
-size.  The default buffers take about 32 KB, so keep the connection in
-static storage or inside a long-lived object.  A system with its own
-qualified transport can replace it with another implementation of
-`ServerConnection`.
+a 4-byte length followed by the Phaser message buffer itself (`Data()` /
+`ByteSizeLong()`), with file descriptors passed by `SCM_RIGHTS`.  That is
+Phaser's zero-copy form.  The server receives the same bytes it receives
+from the standard C++ client and the Rust client, with no protobuf
+transcoding.  `ServerWire` in `common/server_wire.h` builds the message for
+both C++ clients.  The standard client gives it growable buffers.  The ASIL
+connection gives it fixed buffers: it builds each request in a fixed buffer,
+sends that buffer, and loads the response back into it, so a handshake does
+not allocate.  The message buffer and the wire buffer are both 16 KB and
+live inside the object.  Pass a larger size to the constructor when a
+channel opened through the client needs a bigger handshake.  That storage
+is allocated once, in the constructor, and both buffers use that size.  The
+default buffers take about 32 KB, so keep the connection in static storage
+or inside a long-lived object.  A system with its own qualified transport
+can replace it with another implementation of `ServerConnection`.
 
 ## Example
+
+This example gives each channel its layout, which an ASIL publisher can do
+on a server with no static config.  On a configured channel the publisher
+sets `server_defined` instead, as shown under Publishers.
 
 ```cpp
 #include "asil_client/client.h"
