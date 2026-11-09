@@ -165,12 +165,19 @@ Pick TakeRetiredSlot(const ChannelView &channel, const Hooks &hooks,
 }
 
 // Takes ownership of slot if its refs are still old_refs with no references.
+//
+// Strong, not weak: a weak exchange may fail spuriously (on ARM's
+// load/store-exclusive, a page fault between the two clears the reservation,
+// which the first write to a slot's page always takes), and the claim loops
+// do not retry the same slot. They go back to selecting one, having already
+// cleared this slot's free or retired bit, so a spurious failure leaks the
+// slot from that pool.
 inline bool TryClaimSlot(MessageSlot *slot, int owner, uint64_t old_refs) {
   uint64_t expected = BuildRefsBitField(
       slot->ordinal.load(std::memory_order_relaxed),
       static_cast<int>((old_refs >> kVchanIdShift) & kVchanIdMask),
       static_cast<int>((old_refs >> kRetiredRefsShift) & kRetiredRefsMask));
-  return slot->refs.compare_exchange_weak(
+  return slot->refs.compare_exchange_strong(
       expected, kPubOwned | static_cast<uint64_t>(owner),
       std::memory_order_acquire, std::memory_order_relaxed);
 }

@@ -11,8 +11,11 @@
 
 namespace {
 
+// The object's header is num_bits_ padded to the words' alignment: 8 bytes on
+// every target, including 32-bit ones where size_t is 4.
 constexpr size_t BitsetBytes(size_t bits) {
-  return sizeof(size_t) + sizeof(uint64_t) * ((bits + 63) / 64);
+  return sizeof(subspace::InPlaceAtomicBitset) +
+         sizeof(uint64_t) * ((bits + 63) / 64);
 }
 
 }  // namespace
