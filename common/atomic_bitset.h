@@ -190,13 +190,24 @@ private:
   std::atomic<uint64_t> bits_[SizeInBits == 0 ? 0 : BitsToWords(SizeInBits)];
 };
 
-inline size_t SizeofAtomicBitSet(size_t size_in_bits) {
-  return sizeof(size_t) +
-         sizeof(std::atomic<uint64_t>) * BitsToWords(size_in_bits);
-}
-
 // An atomic bitset with its bits not stored in the object.
 using InPlaceAtomicBitset = AtomicBitSet<0>;
+
+// The size of an in-place bitset with its bits: the object (num_bits_, padded
+// to the alignment of the 64-bit words that follow it) plus the words.
+//
+// The header is sizeof(InPlaceAtomicBitset), not sizeof(size_t). They are the
+// same on 64-bit targets, but on a 32-bit target size_t is 4 bytes and the
+// words still need 8-byte alignment, so the object is 8 bytes. Counting 4
+// there overlapped consecutive in-place bitsets by 4 bytes and put every
+// other one's words on a 4-byte boundary, which faults on 32-bit ARM
+// (ldrexd/strexd need 8).
+static_assert(sizeof(InPlaceAtomicBitset) % alignof(std::atomic<uint64_t>) == 0,
+              "InPlaceAtomicBitset must keep its words aligned");
+inline size_t SizeofAtomicBitSet(size_t size_in_bits) {
+  return sizeof(InPlaceAtomicBitset) +
+         sizeof(std::atomic<uint64_t>) * BitsToWords(size_in_bits);
+}
 
 class DynamicBitSet {
 public:

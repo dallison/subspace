@@ -73,6 +73,22 @@ TEST(CommonTest, AtomicBitsetTraverse) {
   EXPECT_EQ(count, 6);
 }
 
+// Consecutive in-place bitsets are laid out at a stride of
+// SizeofAtomicBitSet (the per-owner available-slots sets in the CCB), so the
+// size must include the object's padding and keep every set's words aligned.
+// On 64-bit targets the padding is 0; on 32-bit ones it is 4 bytes.
+TEST(CommonTest, InPlaceAtomicBitsetSizeKeepsWordsAligned) {
+  static_assert(sizeof(subspace::InPlaceAtomicBitset) % alignof(uint64_t) == 0);
+  for (size_t bits : {0, 1, 63, 64, 65, 1024, 6144}) {
+    EXPECT_EQ(subspace::SizeofAtomicBitSet(bits),
+              sizeof(subspace::InPlaceAtomicBitset) +
+                  sizeof(std::atomic<uint64_t>) * subspace::BitsToWords(bits))
+        << bits;
+    EXPECT_EQ(subspace::SizeofAtomicBitSet(bits) % alignof(uint64_t), 0u)
+        << bits;
+  }
+}
+
 TEST(CommonTest, FastRingBuffer) {
   subspace::FastRingBuffer<int, 3> buffer;
   buffer.Insert(1);
