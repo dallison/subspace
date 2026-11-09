@@ -9,32 +9,40 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 
 namespace subspace {
 namespace asil {
 
 // The standard Subspace protocol: native Phaser requests and responses over
 // the server's Unix socket, with file descriptors passed as SCM_RIGHTS.
-// Requests and responses are Phaser messages held in a ServerWire with fixed
-// buffers inside this object, the same encoding as the standard client uses,
-// so a handshake makes no heap allocations, even when it fails.  A request or
+// Requests and responses are Phaser messages held in a ServerWire. The
+// default buffers are inside this object, so a handshake makes no heap
+// allocations, even when it fails. A larger wire buffer is allocated once,
+// in the constructor, and handshakes still do not allocate. A request or
 // response that does not fit fails with kCapacityExceeded, and
 // LastServerError() says which buffer it did not fit.
 //
-// The object holds about 60 KB of buffers, so keep it in static storage or
-// inside a long-lived object rather than on a small stack.
+// The default object holds about 32 KB of buffers, so keep it in static
+// storage or inside a long-lived object rather than on a small stack.
 class PhaserServerConnection : public ServerConnection {
 public:
-  // Native Phaser payload bytes for one request or response.
+  // Capacity of the request or response, both as a Phaser message and as the
+  // payload copied onto the socket. A larger constructor argument uses this
+  // same size for both buffers.
   static constexpr size_t kWireBufferSize = 16 * 1024;
-  // The decoded request or response.
-  static constexpr size_t kMessageBufferSize = 32 * 1024;
+
+  // wire_buffer_size is the payload capacity of one request or response.
+  // Zero selects kWireBufferSize. A size up to kWireBufferSize uses the
+  // buffer inside this object. A larger size allocates its storage here.
+  explicit PhaserServerConnection(size_t wire_buffer_size = kWireBufferSize);
+
+  size_t WireBufferSize() const { return wire_buffer_size_; }
   // Descriptors in one response: the channel's control blocks, the
   // publisher or subscriber's own triggers, and a trigger and a retirement
   // descriptor for every other publisher or subscriber.
   static constexpr int kMaxReceivedFds = 2 * kMaxTriggerFds + 8;
 
-  PhaserServerConnection() = default;
   ~PhaserServerConnection() override = default;
 
   PhaserServerConnection(const PhaserServerConnection &) = delete;
@@ -79,7 +87,15 @@ private:
   UniqueFd socket_;
   ReceivedFds fds_;
   char last_error_[256] = {};
-  ServerWire<FixedServerWireBuffers<kMessageBufferSize, kWireBufferSize>> wire_;
+  size_t wire_buffer_size_ = kWireBufferSize;
+  size_t message_buffer_size_ = kWireBufferSize;
+  bool storage_ok_ = true;
+  // Holds the message buffer and the wire buffer when they do not fit in
+  // the embedded arrays. Empty for the default size.
+  std::unique_ptr<char[]> allocated_;
+  alignas(8) char embedded_message_[kWireBufferSize];
+  alignas(8) char embedded_wire_[kServerWireHeaderSize + kWireBufferSize];
+  ServerWire<ProvidedServerWireBuffers> wire_;
 };
 
 } // namespace asil

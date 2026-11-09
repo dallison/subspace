@@ -1030,6 +1030,31 @@ TEST_F(AsilClientTest, ErrorsMakeNoHeapAllocations) {
   EXPECT_EQ(0, publish_allocations);
 }
 
+TEST_F(AsilClientTest, LargerWireBufferSendsAnOversizedRequest) {
+  EXPECT_EQ(16 * 1024, asil::PhaserServerConnection().WireBufferSize());
+
+  asil::PhaserServerConnection connection(64 * 1024);
+  EXPECT_EQ(64 * 1024, connection.WireBufferSize());
+  ASSERT_EQ(asil::Error::kOk, connection.Connect(Socket().c_str()));
+
+  // This name fills the default wire buffer, so the default connection
+  // rejects it locally. A 64 KB buffer has room for the request and for the
+  // server's error, which repeats the name.
+  const std::string huge(asil::PhaserServerConnection::kWireBufferSize, 'x');
+  asil::TriggersReply reply;
+  EXPECT_EQ(asil::Error::kServerRejected,
+            connection.GetTriggers(huge.c_str(), reply));
+  EXPECT_THAT(connection.LastServerError(), HasSubstr("No such channel"));
+  EXPECT_TRUE(connection.Connected());
+
+  StartCounting();
+  const asil::Error ok = connection.GetTriggers("/asil/oversize", reply);
+  const int allocations = StopCounting();
+  EXPECT_EQ(asil::Error::kOk, ok);
+  EXPECT_EQ(0, allocations);
+  EXPECT_TRUE(connection.Connected());
+}
+
 TEST_F(AsilClientTest, OversizedRequestKeepsTheConnection) {
   const std::string huge(asil::PhaserServerConnection::kWireBufferSize, 'x');
   asil::TriggersReply reply;

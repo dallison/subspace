@@ -11,6 +11,8 @@
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
+#include <limits>
+#include <new>
 #include <string_view>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -113,7 +115,57 @@ Error FillFdList(const PhaserServerConnection::ReceivedFds &fds, size_t count,
   return Error::kOk;
 }
 
+constexpr size_t Align8(size_t n) { return (n + 7) & ~size_t{7}; }
+
+// The message buffer and the wire buffer are the same size. A request that
+// fits in the embedded arrays keeps the full embedded message buffer.
+size_t MessageCapacity(size_t wire_bytes) {
+  if (wire_bytes <= PhaserServerConnection::kWireBufferSize) {
+    return PhaserServerConnection::kWireBufferSize;
+  }
+  if (wire_bytes > std::numeric_limits<size_t>::max() - 7) {
+    return 0;
+  }
+  return Align8(wire_bytes);
+}
+
 } // namespace
+
+PhaserServerConnection::PhaserServerConnection(size_t wire_buffer_size)
+    : wire_buffer_size_(wire_buffer_size == 0 ? kWireBufferSize
+                                              : wire_buffer_size),
+      message_buffer_size_(MessageCapacity(wire_buffer_size_)) {
+  char *message = embedded_message_;
+  char *wire = embedded_wire_;
+  size_t message_capacity = kWireBufferSize;
+  size_t wire_capacity = wire_buffer_size_;
+  if (message_buffer_size_ == 0) {
+    storage_ok_ = false;
+    wire_capacity = 0;
+  } else if (message_buffer_size_ >
+                 std::numeric_limits<size_t>::max() - kServerWireHeaderSize -
+                     wire_buffer_size_) {
+    storage_ok_ = false;
+    wire_capacity = 0;
+  } else if (wire_buffer_size_ > kWireBufferSize ||
+             message_buffer_size_ > kWireBufferSize) {
+    const size_t bytes =
+        message_buffer_size_ + kServerWireHeaderSize + wire_buffer_size_;
+    allocated_.reset(new (std::nothrow) char[bytes]);
+    if (allocated_ == nullptr) {
+      storage_ok_ = false;
+      wire_capacity = 0;
+    } else {
+      message = allocated_.get();
+      wire = allocated_.get() + message_buffer_size_;
+      message_capacity = message_buffer_size_;
+    }
+  } else if (wire_buffer_size_ < kWireBufferSize) {
+    wire_capacity = wire_buffer_size_;
+  }
+  wire_ = ServerWire<ProvidedServerWireBuffers>(ProvidedServerWireBuffers(
+      message, message_capacity, wire, wire_capacity));
+}
 
 Error PhaserServerConnection::Connect(const char *socket_name) {
   (void)kPermanentErrorsReady;
@@ -230,10 +282,17 @@ Error PhaserServerConnection::Receive(const char *&data, size_t &length) {
                ? Error::kOk
                : Error::kConnectionFailed;
   }
-  char *const scratch = wire_.ResponseBuffer(kWireBufferSize);
+  // A response that does not fit is still consumed, so the descriptor
+  // message that follows stays aligned with this response.
+  char stack_scratch[256];
+  char *scratch = wire_.ResponseBuffer(wire_buffer_size_);
+  size_t scratch_size = wire_buffer_size_;
+  if (scratch == nullptr || scratch_size == 0) {
+    scratch = stack_scratch;
+    scratch_size = sizeof(stack_scratch);
+  }
   for (size_t remaining = length; remaining > 0;) {
-    const size_t chunk =
-        remaining < kWireBufferSize ? remaining : kWireBufferSize;
+    const size_t chunk = remaining < scratch_size ? remaining : scratch_size;
     if (!ReceiveFully(socket_.Get(), scratch, chunk)) {
       return Error::kConnectionFailed;
     }
@@ -321,6 +380,11 @@ Error PhaserServerConnection::ReceiveFds() {
 // A send_fd of 0 or more goes to the server after the request.
 template <typename Build, typename Read>
 Error PhaserServerConnection::Transact(Build build, Read read, int send_fd) {
+  if (!storage_ok_) {
+    SetLastError("wire buffer allocation failed",
+                 sizeof("wire buffer allocation failed") - 1);
+    return Error::kCapacityExceeded;
+  }
   if (!socket_.Valid()) {
     return Error::kNotInitialized;
   }

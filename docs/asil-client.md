@@ -45,8 +45,10 @@ publisher can create a channel by specifying its layout.
   another process joined or left the channel, and on `Close()`.
 - **Fixed capacities.**  Channel names hold up to 255 characters and each
   trigger list holds up to 1024 file descriptors.  A request or response to
-  the server holds up to 16 KB in wire format.  Exceeding any of these
-  returns `Error::kCapacityExceeded`.  `max_active_messages` is at most 64.
+  the server holds up to 16 KB in wire format unless
+  `PhaserServerConnection` is constructed with a larger size.  Exceeding
+  the size returns `Error::kCapacityExceeded`.  `max_active_messages` is at
+  most 64.
   A subscriber keeps the newest ordinal of every virtual channel, which makes
   it about 8 KB, so keep subscribers in static storage or inside long-lived
   objects.
@@ -180,12 +182,16 @@ descriptors passed by `SCM_RIGHTS`.  The server receives the same bytes it
 receives from the standard clients.  Requests and responses are encoded by
 `ServerWire` in `common/server_wire.h`, which the standard C++ client uses
 too.  The standard client gives it growable buffers.  The ASIL connection
-gives it fixed buffers inside the object: it builds each request as a phaser
-message in a fixed buffer, copies that payload onto the socket, and loads the
-response into the same buffer, so it needs neither the protobuf library nor
-the heap.  The buffers take about 60 KB, so keep the
-connection in static storage or inside a long-lived object.  A system with
-its own qualified transport can replace it with another implementation of
+gives it fixed buffers: it builds each request as a phaser message in a
+fixed buffer, copies that payload onto the socket, and loads the response
+into the same buffer, so it needs neither the protobuf library nor the heap
+while it talks to the server.  The message buffer and the wire buffer are
+both 16 KB and live inside the object.  Pass a larger size to the constructor
+when a channel opened through the client needs a bigger handshake.  That
+storage is allocated once, in the constructor, and both buffers use that
+size.  The default buffers take about 32 KB, so keep the connection in
+static storage or inside a long-lived object.  A system with its own
+qualified transport can replace it with another implementation of
 `ServerConnection`.
 
 ## Example

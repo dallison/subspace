@@ -12,6 +12,8 @@
 // publishing and reading messages talks to the server only when publishers,
 // subscribers or memfd buffers change.
 //
+//   // The wire buffer is 16 KB. Pass a larger size when a channel handshake
+//   // needs more room: PhaserServerConnection connection(64 * 1024);
 //   subspace::asil::PhaserServerConnection connection;
 //   connection.Connect("/tmp/subspace");
 //   subspace::asil::Client client;

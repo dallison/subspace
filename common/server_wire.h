@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 namespace subspace {
@@ -67,6 +68,39 @@ private:
   alignas(8) char wire_[kServerWireHeaderSize + kWireSize];
 };
 
+// Message and wire storage the caller owns. The wire pointer addresses the
+// length header, and wire_size is the payload capacity after that header.
+class ProvidedServerWireBuffers {
+public:
+  static constexpr bool kErrorMessages = false;
+
+  ProvidedServerWireBuffers() = default;
+  ProvidedServerWireBuffers(char *message, size_t message_size, char *wire,
+                            size_t wire_size)
+      : message_(message),
+        message_size_(message_size),
+        wire_(wire),
+        wire_size_(wire_size) {}
+
+  absl::StatusOr<phaser::Request> NewRequest() {
+    return phaser::Request::TryCreateMutable(message_, message_size_,
+                                             ::phaser::Tuning::kSize);
+  }
+
+  absl::StatusOr<phaser::Response> NewResponse() {
+    return phaser::Response::TryCreateMutable(message_, message_size_,
+                                              ::phaser::Tuning::kSize);
+  }
+
+  char *Wire(size_t length) { return length <= wire_size_ ? wire_ : nullptr; }
+
+private:
+  char *message_ = nullptr;
+  size_t message_size_ = 0;
+  char *wire_ = nullptr;
+  size_t wire_size_ = 0;
+};
+
 class DynamicServerWireBuffers {
 public:
   static constexpr bool kErrorMessages = true;
@@ -115,6 +149,9 @@ inline absl::Status PermanentError(absl::StatusCode code,
 
 template <typename Buffers> class ServerWire {
 public:
+  ServerWire() = default;
+  explicit ServerWire(Buffers buffers) : buffers_(std::move(buffers)) {}
+
   absl::StatusOr<phaser::Request> NewRequest() { return buffers_.NewRequest(); }
   absl::StatusOr<phaser::Response> NewResponse() {
     return buffers_.NewResponse();
