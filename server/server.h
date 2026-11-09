@@ -1,5 +1,5 @@
 // Copyright 2023-2026 David Allison
-// Tunnel support is Copyright 2026 General Motors LLC
+// Tunnel support is Copyright 2026 General Motors
 // All Rights Reserved
 // See LICENSE file for licensing information.
 

@@ -15,7 +15,7 @@ transported over the network at sub-light speed.
 ## Acknowledgments
 
 Some of the code in this project was contributed by Cruise LLC and by
-General Motors Inc.
+General Motors.
 
 ## Features
 
