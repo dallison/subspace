@@ -141,8 +141,9 @@
 - The server can exchange channels over TCP with peers that use the Cruise
   IPC tunnel and discovery protocols. `--tunnel` turns it on, and
   `--tunnel_config` names a configuration file, in protobuf text format
-  unless it ends in `.pb` or `.binpb` (`proto/tunnel_config.proto`) that lists the device name, listen port,
-  peers, discovery denylist and refresh interval. Programs that embed the
+  unless it ends in `.pb` or `.binpb` (`proto/tunnel_config.proto`) that
+  lists the device name, listen port, peers, discovery denylist and refresh
+  interval. Programs that embed the
   server call `Server::SetTunnelConfig`. See `docs/tunnel.md`.
 - Tunnel discovery uses the Cruise protobuf format on
   `/ipc/discovery/proto/receive` (`proto/tunnel_discovery.proto`). ROS-encoded

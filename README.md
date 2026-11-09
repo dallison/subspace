@@ -2043,6 +2043,17 @@ channels { name: "/sensors/lidar" mux: "/sensors" vchan_id: 0 }
 channels { name: "/sensors/radar" mux: "/sensors" vchan_id: 1 }
 ```
 
+To give the server a wire-format file instead, encode the text with `protoc`,
+which needs the protobuf well-known types on its include path:
+
+```bash
+protoc -I proto --encode=subspace.StaticChannelConfig proto/subspace.proto \
+    < channels.textproto > channels.pb
+```
+
+Either format is validated the same way.  A wire-format file that has a field
+this build doesn't know is rejected, as a text file with an unknown field is.
+
 `type` is bytes, the same as the channel type on the wire.  A quoted string
 such as `type: "State"` is that text's bytes.  An opaque blob, such as ROS
 metadata or a protobuf descriptor, uses the same field; protobuf text escapes
