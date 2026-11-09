@@ -466,9 +466,15 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
         slot->ordinal.load(std::memory_order_relaxed),
         (old_refs >> kVchanIdShift) & kVchanIdMask,
         (old_refs >> kRetiredRefsShift) & kRetiredRefsMask);
-    if (slot->refs.compare_exchange_weak(expected, ref,
-                                         std::memory_order_acquire,
-                                         std::memory_order_relaxed)) {
+    // Strong, not weak: a weak exchange may fail spuriously (on ARM's
+    // load/store-exclusive, a page fault between the two clears the
+    // reservation, which the first write to a slot's page always takes),
+    // and this loop does not retry the same slot. It goes back to selecting
+    // one, having already cleared this slot's free or retired bit, so a
+    // spurious failure leaks the slot from that pool.
+    if (slot->refs.compare_exchange_strong(expected, ref,
+                                           std::memory_order_acquire,
+                                           std::memory_order_relaxed)) {
       if (!ValidateSlotBuffer(slot)) {
         // No buffer for the slot.  Embargo the slot so we don't see it again
         // this loop and try again.
@@ -625,9 +631,15 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
         slot->ordinal.load(std::memory_order_relaxed),
         (old_refs >> kVchanIdShift) & kVchanIdMask,
         (old_refs >> kRetiredRefsShift) & kRetiredRefsMask);
-    if (slot->refs.compare_exchange_weak(expected, ref,
-                                         std::memory_order_acquire,
-                                         std::memory_order_relaxed)) {
+    // Strong, not weak: a weak exchange may fail spuriously (on ARM's
+    // load/store-exclusive, a page fault between the two clears the
+    // reservation, which the first write to a slot's page always takes),
+    // and this loop does not retry the same slot. It goes back to selecting
+    // one, having already cleared this slot's free or retired bit, so a
+    // spurious failure leaks the slot from that pool.
+    if (slot->refs.compare_exchange_strong(expected, ref,
+                                           std::memory_order_acquire,
+                                           std::memory_order_relaxed)) {
       if (!ValidateSlotBuffer(slot)) {
         // No buffer for the slot.  Embargo the slot so we don't see it again
         // this loop and try again.
