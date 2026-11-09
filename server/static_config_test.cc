@@ -19,13 +19,16 @@
 #include "toolbelt/sockets.h"
 #include <chrono>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <thread>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
 namespace {
 
+using ::absl_testing::StatusIs;
 using ::testing::HasSubstr;
 
 constexpr char kConfig[] = R"pb(
@@ -241,6 +244,103 @@ TEST(StaticConfigParseTest, RejectsInvalidConfigs) {
     ASSERT_FALSE(config.ok()) << text;
     EXPECT_THAT(config.status().message(), HasSubstr(error)) << text;
   }
+}
+
+// A file the test removes when it is destroyed.
+struct TempConfig {
+  std::string path;
+  ~TempConfig() {
+    if (!path.empty()) {
+      ::unlink(path.c_str());
+    }
+  }
+};
+
+TempConfig MakeTempConfig(const char *suffix) {
+#if defined(__ANDROID__)
+  std::string pattern = "/data/local/tmp/static_cfgXXXXXX";
+#else
+  std::string pattern = "/tmp/static_cfgXXXXXX";
+#endif
+  std::vector<char> name(pattern.begin(), pattern.end());
+  name.push_back('\0');
+  const int fd = ::mkstemp(name.data());
+  EXPECT_GE(fd, 0);
+  if (fd >= 0) {
+    ::close(fd);
+  }
+  std::string path(name.data());
+  std::string named = path + suffix;
+  EXPECT_EQ(0, ::rename(path.c_str(), named.c_str()));
+  return TempConfig{named};
+}
+
+bool WriteConfig(const std::string &path, const std::string &bytes) {
+  std::ofstream out(path, std::ios::binary);
+  out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  return out.good();
+}
+
+TEST(StaticConfigParseTest, ExtensionSelectsTextOrWire) {
+  absl::StatusOr<subspace::StaticChannelConfig> parsed =
+      subspace::ParseStaticChannelConfig(kConfig);
+  ASSERT_OK(parsed);
+  std::string wire;
+  ASSERT_TRUE(parsed->SerializeToString(&wire));
+
+  TempConfig text = MakeTempConfig(".textproto");
+  TempConfig wire_file = MakeTempConfig(".pb");
+  TempConfig binpb = MakeTempConfig(".BINPB");
+  TempConfig other = MakeTempConfig(".cfg");
+  ASSERT_FALSE(text.path.empty());
+  ASSERT_TRUE(WriteConfig(text.path, kConfig));
+  ASSERT_TRUE(WriteConfig(wire_file.path, wire));
+  ASSERT_TRUE(WriteConfig(binpb.path, wire));
+  ASSERT_TRUE(WriteConfig(other.path, kConfig));
+
+  absl::StatusOr<subspace::StaticChannelConfig> from_text =
+      subspace::ReadStaticChannelConfig(text.path);
+  ASSERT_OK(from_text);
+  EXPECT_EQ(kBlobType, from_text->channels(6).type());
+
+  absl::StatusOr<subspace::StaticChannelConfig> from_wire =
+      subspace::ReadStaticChannelConfig(wire_file.path);
+  ASSERT_OK(from_wire);
+  EXPECT_EQ(kBlobType, from_wire->channels(6).type());
+
+  absl::StatusOr<subspace::StaticChannelConfig> from_binpb =
+      subspace::ReadStaticChannelConfig(binpb.path);
+  ASSERT_OK(from_binpb);
+  EXPECT_EQ(parsed->channels_size(), from_binpb->channels_size());
+
+  absl::StatusOr<subspace::StaticChannelConfig> from_cfg =
+      subspace::ReadStaticChannelConfig(other.path);
+  ASSERT_OK(from_cfg);
+
+  ASSERT_TRUE(WriteConfig(text.path, wire));
+  EXPECT_THAT(subspace::ReadStaticChannelConfig(text.path),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("text format")));
+  ASSERT_TRUE(WriteConfig(wire_file.path, kConfig));
+  EXPECT_THAT(subspace::ReadStaticChannelConfig(wire_file.path),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("wire format")));
+}
+
+TEST(StaticConfigParseTest, WireFormatRejectsUnknownFields) {
+  absl::StatusOr<subspace::StaticChannelConfig> parsed =
+      subspace::ParseStaticChannelConfig(kConfig);
+  ASSERT_OK(parsed);
+  std::string wire;
+  ASSERT_TRUE(parsed->SerializeToString(&wire));
+  // Field 999, varint 1: a field this build doesn't have.
+  wire.append("\xb8\x3e\x01", 3);
+
+  TempConfig file = MakeTempConfig(".pb");
+  ASSERT_TRUE(WriteConfig(file.path, wire));
+  EXPECT_THAT(subspace::ReadStaticChannelConfig(file.path),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("unknown field")));
 }
 
 TEST(StaticConfigParseTest, ReadMissingFile) {

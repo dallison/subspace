@@ -65,7 +65,7 @@ Two command line flags control the tunnel:
 | Flag | Meaning |
 |------|---------|
 | `--tunnel` | Turn on tunnel discovery and bridging. |
-| `--tunnel_config=<path>` | The tunnel configuration file, in protobuf text format. Required with `--tunnel`. |
+| `--tunnel_config=<path>` | The tunnel configuration file. A name ending in `.pb` or `.binpb` is protobuf wire format; any other name is protobuf text format. Required with `--tunnel`. |
 
 ```bash
 subspace_server --tunnel --tunnel_config=/etc/subspace/tunnel.textproto

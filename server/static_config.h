@@ -20,7 +20,8 @@ inline constexpr char kServerChannelPrefix[] = "/subspace/";
 absl::StatusOr<StaticChannelConfig>
 ParseStaticChannelConfig(const std::string &text);
 
-// Reads, parses and validates a StaticChannelConfig text format file.
+// Reads, parses and validates a StaticChannelConfig file. A name ending in
+// .pb or .binpb is protobuf wire format. Any other name is text format.
 absl::StatusOr<StaticChannelConfig>
 ReadStaticChannelConfig(const std::string &filename);
 

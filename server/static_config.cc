@@ -4,6 +4,8 @@
 
 #include "server/static_config.h"
 
+#include "server/config_format.h"
+
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/strings/match.h"
@@ -12,6 +14,7 @@
 #include "google/protobuf/text_format.h"
 #include <fstream>
 #include <sstream>
+#include <utility>
 
 namespace subspace {
 
@@ -136,17 +139,46 @@ ParseStaticChannelConfig(const std::string &text) {
   return config;
 }
 
-absl::StatusOr<StaticChannelConfig>
-ReadStaticChannelConfig(const std::string &filename) {
-  std::ifstream in(filename);
+namespace {
+
+absl::StatusOr<std::string> ReadConfigFile(const std::string &filename) {
+  std::ifstream in(filename, std::ios::binary);
   if (!in) {
     return absl::NotFoundError(absl::StrFormat(
         "Static channel config: can't open %s", filename));
   }
-  std::stringstream text;
-  text << in.rdbuf();
-  absl::StatusOr<StaticChannelConfig> config =
-      ParseStaticChannelConfig(text.str());
+  std::stringstream contents;
+  contents << in.rdbuf();
+  if (in.bad()) {
+    return absl::InternalError(absl::StrFormat(
+        "Static channel config: can't read %s", filename));
+  }
+  return contents.str();
+}
+
+} // namespace
+
+absl::StatusOr<StaticChannelConfig>
+ReadStaticChannelConfig(const std::string &filename) {
+  absl::StatusOr<std::string> bytes = ReadConfigFile(filename);
+  if (!bytes.ok()) {
+    return bytes.status();
+  }
+  absl::StatusOr<StaticChannelConfig> config;
+  if (ConfigFileIsText(filename)) {
+    config = ParseStaticChannelConfig(*bytes);
+  } else {
+    StaticChannelConfig parsed;
+    if (!parsed.ParseFromString(*bytes)) {
+      config = ConfigError("invalid protobuf wire format");
+    } else if (HasUnknownFields(parsed)) {
+      config = ConfigError("unknown field in protobuf wire format");
+    } else if (absl::Status s = ValidateStaticChannelConfig(parsed); !s.ok()) {
+      config = s;
+    } else {
+      config = std::move(parsed);
+    }
+  }
   if (!config.ok()) {
     return absl::Status(config.status().code(),
                         absl::StrFormat("%s: %s", filename,

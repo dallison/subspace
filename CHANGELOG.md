@@ -10,11 +10,13 @@
   unchanged.
 
 ### Static Channel Config
-- `subspace_server --channel_config=FILE` reads a `StaticChannelConfig` in
-  protobuf text format and creates its channels and multiplexers before the
-  server accepts clients. Those channels stay when they have no users, and
-  the server defines their layout. A standard publisher can still create a
-  channel that isn't configured by specifying its layout, and any subscriber
+- `subspace_server --channel_config=FILE` reads a `StaticChannelConfig` and
+  creates its channels and multiplexers before the server accepts clients.
+  A file ending in `.pb` or `.binpb` is protobuf wire format; any other name
+  is protobuf text format. `--tunnel_config` uses the same rule. The
+  configured channels stay when they have no users, and the server defines
+  their layout. A standard publisher can still create a channel that isn't
+  configured by specifying its layout, and any subscriber
   can subscribe to one. An ASIL publisher cannot: the ASIL client marks its
   connection, and the server rejects its publishers on any other channel.
 - Publishers on a static channel must set the new `server_defined` option
@@ -138,8 +140,8 @@
 ### Tunnel-Compatible Discovery and Bridging
 - The server can exchange channels over TCP with peers that use the Cruise
   IPC tunnel and discovery protocols. `--tunnel` turns it on, and
-  `--tunnel_config` names a configuration file in protobuf text format
-  (`proto/tunnel_config.proto`) that lists the device name, listen port,
+  `--tunnel_config` names a configuration file, in protobuf text format
+  unless it ends in `.pb` or `.binpb` (`proto/tunnel_config.proto`) that lists the device name, listen port,
   peers, discovery denylist and refresh interval. Programs that embed the
   server call `Server::SetTunnelConfig`. See `docs/tunnel.md`.
 - Tunnel discovery uses the Cruise protobuf format on

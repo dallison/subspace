@@ -4,6 +4,8 @@
 
 #include "server/tunnel_config.h"
 
+#include "server/config_format.h"
+
 #include "absl/container/flat_hash_set.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
@@ -94,7 +96,7 @@ absl::StatusOr<TunnelConfig> ParseTunnelConfig(std::string_view text,
 }
 
 absl::StatusOr<TunnelConfig> LoadTunnelConfig(const std::string &path) {
-  std::ifstream in(path);
+  std::ifstream in(path, std::ios::binary);
   if (!in) {
     return absl::NotFoundError(absl::StrFormat(
         "can't open tunnel configuration %s: %s", path, strerror(errno)));
@@ -105,7 +107,19 @@ absl::StatusOr<TunnelConfig> LoadTunnelConfig(const std::string &path) {
     return absl::InternalError(
         absl::StrFormat("can't read tunnel configuration %s", path));
   }
-  return ParseTunnelConfig(text.str(), path);
+  if (ConfigFileIsText(path)) {
+    return ParseTunnelConfig(text.str(), path);
+  }
+  TunnelConfig config;
+  if (!config.ParseFromString(text.str())) {
+    return absl::InvalidArgumentError(
+        absl::StrFormat("%s: invalid protobuf wire format", path));
+  }
+  if (HasUnknownFields(config)) {
+    return absl::InvalidArgumentError(absl::StrFormat(
+        "%s: unknown field in protobuf wire format", path));
+  }
+  return config;
 }
 
 std::string TunnelDeviceName(const TunnelConfig &config,

@@ -7,6 +7,7 @@ add_library(libserver STATIC
     server_channel.h
     shadow_replicator.cc
     shadow_replicator.h
+    config_format.h
     static_config.cc
     static_config.h
     server.cc

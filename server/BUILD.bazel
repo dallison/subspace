@@ -26,6 +26,7 @@ cc_library(
         "server_channel.h",
         "plugin.h",
         "shadow_replicator.h",
+        "config_format.h",
         "static_config.h",
         "tunnel.h",
     ],
@@ -57,6 +58,7 @@ cc_library(
         "tunnel_protocol.cc",
     ],
     hdrs = [
+        "config_format.h",
         "tunnel_config.h",
         "tunnel_protocol.h",
     ],

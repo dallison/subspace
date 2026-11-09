@@ -2032,7 +2032,9 @@ hand against servers on two different computers.
 By default the server creates channels on demand as publishers and subscribers
 arrive.  For systems that need a fixed, known set of channels, start the server
 with `--channel_config=FILE`.  The file is a `StaticChannelConfig`
-(`proto/subspace.proto`) in protobuf text format:
+(`proto/subspace.proto`).  A name ending in `.pb` or `.binpb` is protobuf
+wire format, for a configuration a tool generated.  Any other name is
+protobuf text format:
 
 ```
 multiplexers { name: "/sensors" slot_size: 1024 num_slots: 16 type: "Sensor" }
@@ -2169,7 +2171,7 @@ its full state from whichever shadow is available.
 |------|---------|-------------|
 | `--shadow_socket` | `""` (disabled) | Unix socket path for the primary shadow process |
 | `--secondary_shadow_socket` | `""` (disabled) | Unix socket path for the secondary shadow process |
-| `--channel_config` | `""` (disabled) | `StaticChannelConfig` text format file. See [Static Channel Config](#static-channel-config). |
+| `--channel_config` | `""` (disabled) | `StaticChannelConfig` file. `.pb` and `.binpb` are protobuf wire format; any other name is text format. See [Static Channel Config](#static-channel-config). |
 
 ### Shadow Flags
 
