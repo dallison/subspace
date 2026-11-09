@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- x86 builds with SSE4.2 no longer use the SSE4.2 CRC32 instruction for
+  message checksums. That instruction computes CRC-32C, not the IEEE 802.3
+  CRC32 used everywhere else (including the Rust client), so checksums from
+  such a build did not verify against other builds. x86 now always uses the
+  IEEE table. ARM hardware CRC32 already used the IEEE polynomial and is
+  unchanged.
+
 ### Static Channel Config
 - `subspace_server --channel_config=FILE` reads a `StaticChannelConfig` in
   protobuf text format and creates its channels and multiplexers before the

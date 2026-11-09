@@ -812,10 +812,15 @@ TEST_F(AsilClientTest, CloseRemovesFromServer) {
 TEST_F(AsilClientTest, HandshakeMakesNoHeapAllocations) {
   asil::Publisher pub;
   asil::Subscriber sub;
+  // An indirect call keeps an optimized build from lowering this to malloc.
+  // operator new is assumed free of side effects, so a direct new expression
+  // never reaches the counter above.
+  using OpNew = void *(*)(std::size_t);
+  volatile OpNew allocate = &::operator new;
   StartCounting();
-  int *volatile counted = new int(1);
+  void *counted = allocate(sizeof(int));
   const int sanity_allocations = StopCounting();
-  delete counted;
+  ::operator delete(counted);
   ASSERT_EQ(1, sanity_allocations);
 
   StartCounting();

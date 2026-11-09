@@ -14,9 +14,10 @@
 
 namespace subspace {
 
-// CRC32 of a published message. x86-64 with SSE4.2 uses CRC32C; other builds
-// use the IEEE 802.3 polynomial. Pass 0xFFFFFFFF as the first crc and invert
-// the final result.
+// CRC32 of a published message, using the IEEE 802.3 polynomial on every
+// platform (the same as the Rust client). The ARM CRC32 instructions are IEEE;
+// x86 uses a lookup table because its SSE4.2 CRC32 instruction is CRC-32C.
+// Pass 0xFFFFFFFF as the first crc and invert the final result.
 extern "C" {
 uint32_t SubspaceCRC32(uint32_t crc, const uint8_t *data, size_t length);
 }
