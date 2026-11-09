@@ -6,6 +6,7 @@
 #include "client/client_channel.h"
 #include "client/message.h"
 #include "common/fast_ring_buffer.h"
+#include "common/subscribe.h"
 #include <cstring>
 #include <mutex>
 #include <optional>
@@ -151,12 +152,10 @@ public:
   void IgnoreActivation(MessageSlot *slot) {
     RememberOrdinal(slot->ordinal.load(std::memory_order_relaxed),
                     slot->vchan_id.load(std::memory_order_relaxed));
-    DecrementSlotRef(slot, true);
-    slot->flags.fetch_or(kMessageSeen, std::memory_order_relaxed);
-    if (IsReliable()) {
-      slot->flags.fetch_or(kMessageSeenByReliable, std::memory_order_relaxed);
-    }
+    MarkMessageSeen(slot, IsReliable());
+    ReleaseSlotReference(slot);
   }
+  void ReleaseSlotReference(MessageSlot *slot);
   // A subscriber wants to find a slot with a message in it.  There are
   // two ways to get this:
   // NextSlot: gets the next slot in the active list
@@ -197,13 +196,6 @@ public:
       m->IncRef();
     }
     return m;
-  }
-
-  void DecrementSlotRef(MessageSlot *slot, bool retire) {
-    AtomicIncRefCount(slot, IsReliable(), -1,
-                      slot->ordinal.load(std::memory_order_relaxed) &
-                          kOrdinalMask,
-                      slot->vchan_id.load(std::memory_order_relaxed), retire);
   }
 
   bool SlotExpired(MessageSlot *slot, uint32_t ordinal) {

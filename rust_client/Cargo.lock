@@ -414,8 +414,13 @@ dependencies = [
  "prost",
  "prost-build",
  "prost-types",
+ "subspace_phaser_c",
  "thiserror",
 ]
+
+[[package]]
+name = "subspace_phaser_c"
+version = "2.2.0"
 
 [[package]]
 name = "syn"

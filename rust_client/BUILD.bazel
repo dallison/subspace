@@ -33,6 +33,7 @@ rust_library(
     aliases = aliases(),
     deps = all_crate_deps(normal = True) + [
         ":build_script",
+        "//proto:subspace_phaser_c_rs",
     ],
 )
 

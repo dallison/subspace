@@ -1,5 +1,5 @@
 // Copyright 2023-2026 David Allison
-// Tunnel support is Copyright 2026 General Motors LLC
+// Tunnel support is Copyright 2026 General Motors
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -7,6 +7,7 @@
 #include "absl/flags/parse.h"
 #include "proto/tunnel_config.pb.h"
 #include "server.h"
+#include "server/static_config.h"
 #include "server/tunnel_config.h"
 #include <cerrno>
 #include <csignal>
@@ -95,12 +96,21 @@ ABSL_FLAG(std::string, shadow_socket, "",
           "Primary shadow process Unix socket (empty = disabled)");
 ABSL_FLAG(std::string, secondary_shadow_socket, "",
           "Secondary shadow process Unix socket (empty = disabled)");
+ABSL_FLAG(std::string, channel_config, "",
+          "StaticChannelConfig file.  A name ending in .pb or .binpb is "
+          "protobuf wire format; any other name is protobuf text format.  The "
+          "server creates those channels at startup and fixes their layout.  "
+          "Standard "
+          "publishers can still create other channels, and any subscriber can "
+          "use them; ASIL publishers cannot (empty = every channel is created "
+          "on demand)");
 ABSL_FLAG(bool, tunnel, false,
           "Run discovery and bridging compatible with the cruise tunnel "
           "alongside the native kind.  Requires --tunnel_config.");
 ABSL_FLAG(std::string, tunnel_config, "",
-          "Tunnel configuration file in protobuf text format.  See "
-          "docs/tunnel.md.");
+          "Tunnel configuration file.  A name ending in .pb or .binpb is "
+          "protobuf wire format; any other name is protobuf text format.  "
+          "See docs/tunnel.md.");
 ABSL_FLAG(std::string, mtls_cert, "",
           "PEM certificate for mutual TLS on bridge and tunnel connections. "
           "Requires --mtls_key, --mtls_ca, and a server built with mTLS.");
@@ -286,6 +296,21 @@ int main(int argc, char **argv) {
   server->SetMachineName(absl::GetFlag(FLAGS_machine));
   server->SetShadowSockets(absl::GetFlag(FLAGS_shadow_socket),
                             absl::GetFlag(FLAGS_secondary_shadow_socket));
+
+  if (const std::string &channel_config = absl::GetFlag(FLAGS_channel_config);
+      !channel_config.empty()) {
+    absl::StatusOr<subspace::StaticChannelConfig> config =
+        subspace::ReadStaticChannelConfig(channel_config);
+    if (!config.ok()) {
+      fprintf(stderr, "%s\n", config.status().ToString().c_str());
+      exit(1);
+    }
+    if (absl::Status status = server->SetStaticChannelConfig(*std::move(config));
+        !status.ok()) {
+      fprintf(stderr, "%s\n", status.ToString().c_str());
+      exit(1);
+    }
+  }
 
   const std::string tunnel_config_path = absl::GetFlag(FLAGS_tunnel_config);
   if (absl::GetFlag(FLAGS_tunnel)) {

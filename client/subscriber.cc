@@ -11,10 +11,7 @@ namespace subspace {
 namespace details {
 
 static bool ActiveSlotLess(const ActiveSlot &a, const ActiveSlot &b) {
-  if (a.timestamp != b.timestamp) {
-    return a.timestamp < b.timestamp;
-  }
-  return a.ordinal < b.ordinal;
+  return DeliveredBefore(a.timestamp, a.ordinal, b.timestamp, b.ordinal);
 }
 
 void SubscriberImpl::InitActiveMessages() {
@@ -46,19 +43,9 @@ void SubscriberImpl::ResetDeliveryState() {
   queue_drain_tail_valid_ = false;
 }
 
-// For non-virtual channels both the slots' vchan_id and the subsriber's
-// are -1.  This is the common case.
-// For virtual subscribers, if the slot's vchan_id is -1 it means that
-// the message was published direcly to the multiplexer and all subscribers
-// should see it.
-
-// If the subscriber's vchan_id is -1 it means that the subscriber is on the
-// multiplexer and should see all messages, regardless of the vchan_id
 static inline bool VirtualChannelIdMatch(MessageSlot *slot, int vchan_id) {
-  const int slot_vchan_id =
-      slot->vchan_id.load(std::memory_order_relaxed);
-  return vchan_id == -1 || slot_vchan_id == -1 ||
-         slot_vchan_id == vchan_id;
+  return VirtualChannelsMatch(vchan_id,
+                              slot->vchan_id.load(std::memory_order_relaxed));
 }
 
 bool SubscriberImpl::AddActiveMessage([[maybe_unused]] MessageSlot *slot) {
@@ -94,35 +81,22 @@ std::optional<double> SubscriberImpl::NoteStuckRead(uint64_t now_ns,
   return stuck_seconds;
 }
 
-void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
-    // std::cerr << this << " remove active message " << slot->id << " "
-    //           << slot->ordinal << " refs " << std::hex << slot->refs.load() <<
-    //           std::dec << "\n";
-  if (slot->sub_owners.ClearWasSet(subscriber_id_)) {
-    AtomicIncRefCount(slot, IsReliable(), -1,
-                      slot->ordinal.load(std::memory_order_relaxed),
-                      slot->vchan_id.load(std::memory_order_relaxed), true,
-                      [this, slot]() {
-                      // When a slot retires we want to use the slot id that was
-                      // originally used for the message.  If the message came
-                      // in from a bridge we want to notify the original sender
-                      // of the message, not the bridge publisher.
-                      //
-                      // The original slot id is in the message prefix and is
-                      // copied into the slot when the bridge publisher
-                      // publishes the message.
-
-                      // Enable this for debugging slot retirement.
-                      // std::string details = absl::StrFormat(
-                      //   "%d: RemoveActiveMessage: %s retiring slot %d ordinal "
-                      //   "%d vchan_id %d\n", getpid(), Name(),
-                      //   slot->bridged_slot_id, slot->ordinal,
-                      //   slot->vchan_id);
-                      // std::cerr << details;
-                        TriggerRetirement(slot->bridged_slot_id.load(
-                            std::memory_order_relaxed));
-                      });
+void SubscriberImpl::ReleaseSlotReference(MessageSlot *slot) {
+  const ReleasedMessage result =
+      ReleaseMessageReference(View(), slot, subscriber_id_, IsReliable());
+  if (result.retired) {
+    // When a slot retires we want to use the slot id that was originally used
+    // for the message.  If the message came in from a bridge we want to
+    // notify the original sender of the message, not the bridge publisher.
+    //
+    // The original slot id is in the message prefix and is copied into the
+    // slot when the bridge publisher publishes the message.
+    TriggerRetirement(result.retirement_slot_id);
   }
+}
+
+void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
+  ReleaseSlotReference(slot);
   if (--num_active_messages_ < options_.MaxActiveMessages() &&
       options_.TriggerOnRelease()) {
     Trigger();
@@ -240,44 +214,33 @@ void SubscriberImpl::ClaimSlot(MessageSlot *slot, int vchan_id,
                                bool was_newest) {
   slot->sub_owners.Set(subscriber_id_);
   if (was_newest) {
-    InPlaceAtomicBitset &bits = GetAvailableSlots(subscriber_id_);
+    bool marked_seen = false;
     for (const ActiveSlot &snapshot : newest_snapshot_) {
-      bool pinned = snapshot.slot == slot;
-      if (!pinned) {
-        pinned = AtomicIncRefCount(snapshot.slot, IsReliable(), 1,
-                                   snapshot.ordinal, snapshot.vchan_id, false);
+      if (snapshot.slot == slot) {
+        continue;
       }
-      if (!pinned) {
+      if (!SkipUnreadMessage(View(), snapshot.slot, subscriber_id_,
+                             IsReliable(), snapshot.ordinal,
+                             snapshot.vchan_id)) {
         // The slot was recycled after the ReadNewest snapshot. Its current bit
         // belongs to the new generation and must remain set.
         continue;
       }
-      bits.Clear(snapshot.slot->id);
       RememberOrdinal(snapshot.ordinal, snapshot.vchan_id);
-      if (snapshot.slot != slot) {
-        AtomicIncRefCount(snapshot.slot, IsReliable(), -1, snapshot.ordinal,
-                          snapshot.vchan_id, false);
-      }
+      marked_seen |= IsReliable();
     }
     newest_snapshot_.clear();
-  } else {
-    // Clear the bit in the subscriber bitset.
-    GetAvailableSlots(subscriber_id_).Clear(slot->id);
+    if (marked_seen) {
+      TriggerReliablePublishers();
+    }
   }
+  GetAvailableSlots(subscriber_id_).Clear(slot->id);
   RememberOrdinal(slot->ordinal.load(std::memory_order_relaxed), vchan_id);
-  slot->flags.fetch_or(kMessageSeen, std::memory_order_relaxed);
-  if (IsReliable()) {
-    slot->flags.fetch_or(kMessageSeenByReliable, std::memory_order_relaxed);
-  }
+  MarkMessageSeen(slot, IsReliable());
 }
 
 void SubscriberImpl::UnreadSlot(MessageSlot *slot) {
-  if (slot->sub_owners.ClearWasSet(subscriber_id_)) {
-    // A publisher evicting a queued slot can clear its bit just before the
-    // pop. Restore it while the slot is still held so that it stays unread.
-    GetAvailableSlots(subscriber_id_).Set(slot->id);
-    DecrementSlotRef(slot, false);
-  }
+  UnclaimMessageReference(View(), slot, subscriber_id_, IsReliable());
   // A queued hint has already been consumed by NextSlot(). If delivery is
   // rejected (for example at max_active_messages), the slot remains unread in
   // the authoritative bitset but is no longer present in the queue. Stay on
@@ -311,18 +274,8 @@ uint64_t SubscriberImpl::CollectVisibleSlots(InPlaceAtomicBitset &bits) {
         return;
       }
       MessageSlot *s = &ccb_->slots[i];
-      // A publisher reusing the slot zeroes its ordinal and timestamp before
-      // its bit is cleared, and a claim with ordinal 0 matches whatever is
-      // published there next, so keep the slot only while it holds the
-      // message its refs were committed with.
-      const uint64_t refs = s->refs.load(std::memory_order_acquire);
-      const uint64_t ordinal = s->ordinal.load(std::memory_order_relaxed);
-      if ((refs & kPubOwned) != 0 || ordinal == 0 ||
-          (ordinal & kOrdinalMask) !=
-              ((refs >> kOrdinalShift) & kOrdinalMask)) {
-        return;
-      }
-      if (!VirtualChannelIdMatch(s, vchan_id_)) {
+      const uint64_t ordinal = CommittedOrdinal(s);
+      if (ordinal == 0 || !VirtualChannelIdMatch(s, vchan_id_)) {
         return;
       }
       if (s->buffer_index.load(std::memory_order_relaxed) == -1) {
@@ -391,8 +344,7 @@ SubscriberImpl::FindNextQueuedSlot(uint64_t max_queue_position) {
     }
     if (queued.ordinal == 0 ||
         (queued.ordinal & kOrdinalMask) != ref_ordinal ||
-        (vchan_id_ != -1 && ref_vchan_id != -1 &&
-         vchan_id_ != ref_vchan_id)) {
+        !VirtualChannelsMatch(vchan_id_, ref_vchan_id)) {
       continue;
     }
     if (ref_vchan_id != cached_vchan_id) {
@@ -496,16 +448,11 @@ MessageSlot *SubscriberImpl::FindNextVisibleSlot(InPlaceAtomicBitset &bits,
       return;
     }
     MessageSlot *s = &ccb_->slots[i];
-    const uint64_t refs = s->refs.load(std::memory_order_acquire);
-    if ((refs & kPubOwned) != 0) {
-      return;
-    }
-    const uint64_t ordinal = s->ordinal.load(std::memory_order_relaxed);
+    const uint64_t ordinal = CommittedOrdinal(s);
     const int slot_vchan_id =
         s->vchan_id.load(std::memory_order_relaxed);
     if (ordinal == 0 || ordinal > max_ordinal ||
-        (vchan_id_ != -1 && slot_vchan_id != -1 &&
-         slot_vchan_id != vchan_id_) ||
+        !VirtualChannelsMatch(vchan_id_, slot_vchan_id) ||
         s->buffer_index.load(std::memory_order_relaxed) == -1) {
       return;
     }
@@ -900,9 +847,8 @@ MessageSlot *SubscriberImpl::FindActiveSlotByTimestamp(
         continue;
       }
       MessageSlot *s = &ccb_->slots[i];
-      uint64_t refs = s->refs.load(std::memory_order_acquire);
-      const uint64_t ordinal = s->ordinal.load(std::memory_order_relaxed);
-      if (ordinal != 0 && (refs & kPubOwned) == 0) {
+      const uint64_t ordinal = CommittedOrdinal(s);
+      if (ordinal != 0) {
         buffer.push_back(
             {s, ordinal, Prefix(s)->timestamp,
              s->vchan_id.load(std::memory_order_relaxed)});
@@ -941,11 +887,7 @@ MessageSlot *SubscriberImpl::FindActiveSlotByTimestamp(
                           false);
         continue;
       }
-      it->slot->flags.fetch_or(kMessageSeen, std::memory_order_relaxed);
-      if (reliable) {
-        it->slot->flags.fetch_or(kMessageSeenByReliable,
-                                 std::memory_order_relaxed);
-      }
+      MarkMessageSeen(it->slot, reliable);
       it->slot->sub_owners.Set(owner);
       return it->slot;
     }

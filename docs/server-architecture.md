@@ -295,6 +295,8 @@ server/
 ├── client_handler.h/cc           # Client connection handler
 ├── server_channel.h/cc           # ServerChannel and its users
 ├── shadow_replicator.h/cc        # Replication to the shadow process
+├── static_config.h/cc            # Static channel config parsing and validation
+├── config_format.h               # Config file format, chosen by extension
 ├── tunnel.h/cc                   # Tunnel discovery and bridging
 ├── tunnel_config.h/cc            # Tunnel configuration parsing and validation
 ├── tunnel_protocol.h/cc          # Tunnel wire format

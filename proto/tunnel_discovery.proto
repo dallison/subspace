@@ -1,4 +1,4 @@
-// Copyright 2026 General Motors LLC
+// Copyright 2026 General Motors
 // All Rights Reserved
 // See LICENSE file for licensing information.
 

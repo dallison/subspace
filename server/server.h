@@ -1,5 +1,5 @@
 // Copyright 2023-2026 David Allison
-// Tunnel support is Copyright 2026 General Motors LLC
+// Tunnel support is Copyright 2026 General Motors
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -7,6 +7,7 @@
 #define _xSERVERSERVER_H
 
 #include "absl/container/flat_hash_map.h"
+#include <string_view>
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -33,6 +34,7 @@
 #include <atomic>
 #include <cstdio>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace subspace {
@@ -128,6 +130,18 @@ public:
 
   void SetShadowSocket(const std::string &socket_name);
   void SetShadowSockets(const std::string &primary, const std::string &secondary);
+
+  // Call before Run().  Run() creates the configured channels before it
+  // accepts any clients.  Publishers on those channels must set
+  // server_defined.  A standard publisher can still create a channel that
+  // isn't configured by specifying its layout, and any subscriber can
+  // subscribe to one.  An ASIL publisher cannot.  Fails if the config isn't
+  // valid.
+  absl::Status SetStaticChannelConfig(StaticChannelConfig config);
+  bool HasStaticChannelConfig() const { return static_config_.has_value(); }
+  // The channels the server publishes itself, which a static channel config
+  // doesn't list.
+  static bool IsServerChannelName(const std::string &channel_name);
   void SimulateCrash() {
     simulate_crash_ = true;
     for (auto &[name, ch] : channels_) {
@@ -152,6 +166,12 @@ public:
   const std::string& GetSocketName() const { return socket_name_; }
 
   uint64_t GetSessionId() const { return session_id_; }
+
+  // Records a buffer that a publisher, or the server for a static channel,
+  // has created, and replicates it to the shadows.
+  void RegisterClientBuffer(ServerChannel *channel,
+                            ClientBufferHandleMetadata metadata,
+                            toolbelt::FileDescriptor fd);
 
   absl::StatusOr<toolbelt::FileDescriptor> CreateBridgeNotificationPipe();
 
@@ -270,7 +290,7 @@ public:
   absl::Status RemapChannel(ServerChannel *channel, int64_t slot_size,
                             int num_slots,
                             uint64_t subscriber_queue_arena_size);
-  ServerChannel *FindChannel(const std::string &channel_name);
+  ServerChannel *FindChannel(std::string_view channel_name);
   void RemoveChannel(ServerChannel *channel);
 
 private:
@@ -326,6 +346,16 @@ private:
   };
 
   absl::Status RecoverFromShadow(RecoveredState &state);
+
+  // Creates the static config's channels, or checks that channels recovered
+  // from a shadow match it, and marks them static.
+  absl::Status CreateStaticChannels();
+
+  // Creates the buffers of a static channel or multiplexer, as its first
+  // publisher would, so that subscribers can map them before any publisher
+  // exists.
+  absl::Status CreateStaticBuffers(ServerChannel *channel, int64_t slot_size,
+                                   bool use_split_buffers);
 
   // Public iteration excludes internal telemetry transport channels.
   void ForeachChannel(std::function<void(ServerChannel *)> func);
@@ -417,7 +447,9 @@ private:
                                bool split_buffers_over_bridge,
                                toolbelt::InetAddress publisher,
                                bool local_has_split_options,
-                               bool local_use_split_buffers);
+                               bool local_use_split_buffers,
+                               bool local_is_static, std::string static_mux,
+                               int static_vchan_id);
   void RetirementCoroutine(
       async::Context ctx, const std::string &channel_name,
       toolbelt::FileDescriptor &&retirement_fd,
@@ -547,6 +579,7 @@ private:
   ChecksumCallback checksum_callback_;
   toolbelt::TriggerFd shutdown_trigger_fd_;
   std::string machine_name_;
+  std::optional<StaticChannelConfig> static_config_;
 
   // Lifetime counters of each channel at the previous published Statistics
   // message, or at the creation of a virtual channel.  Used on the client

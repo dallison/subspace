@@ -28,6 +28,7 @@ target_link_libraries(subspace_common PUBLIC
     co
     subspace_proto
     protobuf::libprotobuf
+    subspace_crc32
 )
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
@@ -35,6 +36,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
 elseif(ANDROID)
     target_link_libraries(subspace_common PUBLIC log)
 endif()
+
+# The message checksum. Linked by the regular client and the ASIL client.
+add_library(subspace_crc32 STATIC
+    crc32.cc
+    arm_crc32.S
+)
+set_source_files_properties(arm_crc32.S PROPERTIES
+    LANGUAGE ASM
+)
 
 # --- Async abstraction layer ---
 # Build-time selectable coroutine/networking backend (see context.h).  The

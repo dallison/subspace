@@ -221,114 +221,13 @@ std::string DecodedRefsBitField(uint64_t refs) {
 bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
                                 uint64_t ordinal, int vchan_id, bool retire,
                                 std::function<void()> retire_callback) {
-  for (;;) {
-    uint64_t ref = slot->refs.load(std::memory_order_relaxed);
-    if ((ref & kPubOwned) != 0) {
-      return false;
-    }
-    ordinal &= kOrdinalMask;
-    // Not pub owned.  If the ordinal has changed we can't get the slot because
-    // another message has been published into it.  We need to try another slot.
-    // An ordinal of 0 in the refs field means that the slot was free and we can
-    // keep trying to use it.
-    uint64_t ref_ord = (ref >> kOrdinalShift) & kOrdinalMask;
-    if (ref_ord != 0 && ordinal != 0 && ref_ord != ordinal) {
-      return false;
-    }
-    int ref_vchan_id = (ref >> kVchanIdShift) & kVchanIdMask;
-    if (ref_vchan_id == (1 << kVchanIdSize) - 1) {
-      // This is a special case where the vchan_id is invalid.
-      ref_vchan_id = -1;
-    }
-    if (ref_ord != 0 && ordinal != 0 && ref_vchan_id != vchan_id) {
-      return false;
-    }
-    uint64_t new_refs = ref & kRefCountMask;
-    uint64_t new_reliable_refs =
-        (ref >> kReliableRefCountShift) & kRefCountMask;
-    if (inc < 0 && new_refs == 0) {
-      // Don't try to decrement the refs below zero.  How can this happen?
-      return true;
-    }
-
-    new_refs += inc;
-    if (reliable) {
-      new_reliable_refs += inc;
-    }
-    ref &= ~kPubOwned;
-    int retired_refs = (ref >> kRetiredRefsShift) & kRetiredRefsMask;
-    if (retire) {
-      retired_refs++;
-    }
-    uint64_t new_ref = BuildRefsBitField(ref_ord, ref_vchan_id, retired_refs) |
-                       (new_reliable_refs << kReliableRefCountShift) | new_refs;
-    if (slot->refs.compare_exchange_weak(ref, new_ref,
-                                         std::memory_order_acq_rel,
-                                         std::memory_order_relaxed)) {
-      // std::string details = absl::StrFormat(
-      //   "%d: AtomicIncRefCount: %s slot %d ordinal %d retired_refs: %d NumSubscribers: %d retire: %d\n", getpid(), Name(), slot->id, ordinal, retired_refs, NumSubscribers(ref_vchan_id), retire);
-      // std::cerr << details;
-      if (retire && new_refs == 0 && new_reliable_refs == 0 &&
-          retired_refs >= NumSubscribers(ref_vchan_id) &&
-          RetiredSlots().SetWasClear(slot->id)) {
-        // All subscribers have seen the slot, retire it.
-        if (retire_callback) {
-          // std::cerr << "Calling retire callback for slot " << slot->id
-          //           << std::endl;
-          retire_callback();
-        }
-      }
-      return true;
-    }
-    // Another subscriber got there before us.  Try again.
-    // Could also be a publisher, in which case the kPubOwned bit will be set.
+  bool retired = false;
+  const bool held = View().AtomicIncRefCount(slot, reliable, inc, ordinal,
+                                             vchan_id, retire, &retired);
+  if (retired && retire_callback) {
+    retire_callback();
   }
-}
-
-bool Channel::ForgetEvictedSlot(
-    InPlaceAtomicBitset &bits, const QueuedSlot &evicted,
-    std::function<void(int32_t)> retire_callback) {
-  if (evicted.slot_id < 0 || evicted.slot_id >= NumSlots() ||
-      evicted.ordinal == 0) {
-    return true;
-  }
-  MessageSlot *slot = &ccb_->slots[evicted.slot_id];
-  const uint64_t refs = slot->refs.load(std::memory_order_acquire);
-  if ((refs & kPubOwned) != 0) {
-    return slot->ordinal.load(std::memory_order_relaxed) != evicted.ordinal;
-  }
-  if (((refs >> kOrdinalShift) & kOrdinalMask) !=
-      (evicted.ordinal & kOrdinalMask)) {
-    return true;
-  }
-  int vchan_id = (refs >> kVchanIdShift) & kVchanIdMask;
-  if (vchan_id == kVchanIdMask) {
-    vchan_id = -1;
-  }
-  // While pinned the slot cannot be reused, so its bit cannot yet belong to a
-  // newer message.
-  if (!AtomicIncRefCount(slot, /*reliable=*/false, 1, evicted.ordinal,
-                         vchan_id, false)) {
-    return true;
-  }
-  if (slot->ordinal.load(std::memory_order_relaxed) == evicted.ordinal) {
-    bits.Clear(slot->id);
-  }
-  const int32_t retirement_slot_id =
-      slot->bridged_slot_id.load(std::memory_order_relaxed);
-  // A subscriber that retires the slot while it is pinned leaves the ref count
-  // above zero, so the unpin has to retire it.
-  const uint64_t unpinned =
-      slot->refs.fetch_sub(1, std::memory_order_acq_rel) - 1;
-  const uint64_t retired_refs =
-      (unpinned >> kRetiredRefsShift) & kRetiredRefsMask;
-  if ((unpinned & kRefCountMask) == 0 &&
-      ((unpinned >> kReliableRefCountShift) & kRefCountMask) == 0 &&
-      retired_refs >= static_cast<uint64_t>(NumSubscribers(vchan_id)) &&
-      RetiredSlots().SetWasClear(slot->id) && retire_callback) {
-    retire_callback(retirement_slot_id);
-  }
-  return true;
+  return held;
 }
 
 void MessageSlot::Dump(std::ostream &os) const {
@@ -458,48 +357,6 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
       }
     }
   }
-}
-
-bool Channel::RefsShowRetired(const MessageSlot *slot, uint64_t refs) const {
-  if ((refs & (kPubOwned | kRefsMask)) != 0) {
-    return false;
-  }
-  if (slot->ordinal.load(std::memory_order_relaxed) == 0) {
-    return true;
-  }
-  int vchan_id = (refs >> kVchanIdShift) & kVchanIdMask;
-  if (vchan_id == kVchanIdMask) {
-    vchan_id = -1;
-  }
-  const uint64_t retired_refs = (refs >> kRetiredRefsShift) & kRetiredRefsMask;
-  return retired_refs >= static_cast<uint64_t>(NumSubscribers(vchan_id));
-}
-
-bool Channel::TryRetireSlot(MessageSlot *slot) {
-  if (slot->ordinal.load(std::memory_order_relaxed) == 0) {
-    return false;
-  }
-
-  const uint64_t refs = slot->refs.load(std::memory_order_acquire);
-  if ((refs & kPubOwned) != 0) {
-    return false;
-  }
-
-  const uint64_t ref_count = refs & kRefCountMask;
-  const uint64_t reliable_ref_count =
-      (refs >> kReliableRefCountShift) & kRefCountMask;
-  const uint64_t retired_refs =
-      (refs >> kRetiredRefsShift) & kRetiredRefsMask;
-  int ref_vchan_id = (refs >> kVchanIdShift) & kVchanIdMask;
-  if (ref_vchan_id == kVchanIdMask) {
-    ref_vchan_id = -1;
-  }
-
-  if (ref_count != 0 || reliable_ref_count != 0 ||
-      retired_refs < static_cast<uint64_t>(NumSubscribers(ref_vchan_id))) {
-    return false;
-  }
-  return RetiredSlots().SetWasClear(slot->id);
 }
 
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX

@@ -15,7 +15,7 @@ transported over the network at sub-light speed.
 ## Acknowledgments
 
 Some of the code in this project was contributed by Cruise LLC and by
-General Motors Inc.
+General Motors.
 
 ## Features
 
@@ -54,6 +54,7 @@ See the file docs/subspace.pdf for full documentation.  Additional documentation
 - [Slot Sizes](docs/slot-sizes.md)
 - [Channel Limit](docs/max-channels.md)
 - [C Client API](docs/c-client.md)
+- [ASIL Client](docs/asil-client.md)
 - [Client Architecture](docs/client-architecture.md)
 - [Server Architecture](docs/server-architecture.md)
 - [Asio Backend and vsock Bridging](docs/asio-backend.md)
@@ -2026,6 +2027,86 @@ The `manual_tests/pub` tool takes `--local=false` and `--channel=NAME`, and
 `manual_tests/sub` takes `--channel=NAME`, so you can also drive bridging by
 hand against servers on two different computers.
 
+## Static Channel Config
+
+By default the server creates channels on demand as publishers and subscribers
+arrive.  For systems that need a fixed, known set of channels, start the server
+with `--channel_config=FILE`.  The file is a `StaticChannelConfig`
+(`proto/subspace.proto`).  A name ending in `.pb` or `.binpb` is protobuf
+wire format, for a configuration a tool generated.  Any other name is
+protobuf text format:
+
+```
+multiplexers { name: "/sensors" slot_size: 1024 num_slots: 16 type: "Sensor" }
+channels { name: "/vehicle/state" slot_size: 256 num_slots: 8 type: "State" }
+channels { name: "/sensors/lidar" mux: "/sensors" vchan_id: 0 }
+channels { name: "/sensors/radar" mux: "/sensors" vchan_id: 1 }
+```
+
+To give the server a wire-format file instead, encode the text with `protoc`,
+which needs the protobuf well-known types on its include path:
+
+```bash
+protoc -I proto --encode=subspace.StaticChannelConfig proto/subspace.proto \
+    < channels.textproto > channels.pb
+```
+
+Either format is validated the same way.  A wire-format file that has a field
+this build doesn't know is rejected, as a text file with an unknown field is.
+
+`type` is bytes, the same as the channel type on the wire.  A quoted string
+such as `type: "State"` is that text's bytes.  An opaque blob, such as ROS
+metadata or a protobuf descriptor, uses the same field; protobuf text escapes
+carry bytes that are not text (`type: "\000\377..."`).  A channel on a
+multiplexer leaves `type` unset and uses the multiplexer's type.
+
+The server creates every configured channel and its message buffers before it
+accepts clients, so a subscriber that starts first gets the full channel
+layout and maps the buffers instead of waiting for a publisher.  With a config
+loaded:
+
+- A configured channel is shared by the standard clients and the ASIL client.
+  Its publishers, of either kind, must set `server_defined`.
+- A channel that isn't configured can be created by a standard publisher that
+  specifies the layout itself (`slot_size`, `num_slots` and the other layout
+  options) and does not set `server_defined`.  An ASIL publisher cannot create
+  or join that channel.  Any subscriber can, including an ASIL subscriber.
+  The channel is created when the first publisher or subscriber asks for it
+  and removed when it has no users.  An ASIL subscriber that opens before the
+  channel has buffers gets `Error::kNoBuffers`.
+- Configured channels stay for the life of the server, including when they
+  have no publishers or subscribers.
+- The server defines the layout.  Publishers on a configured channel must set
+  `SetServerDefined(true)` and leave every option that shapes the shared
+  memory unset: `SetSlotSize`, `SetNumSlots`, `SetFixedSize`,
+  `SetChecksumSize`, `SetMetadataSize`, `SetSubscriberQueueArenaSize` and
+  `SetUseSplitBuffers`.  The server rejects a publisher that sets any of them
+  or leaves out `server_defined`, and also a `server_defined` publisher on a
+  channel that isn't configured.  The publisher takes its slot size, number of
+  slots, checksum size, metadata size and split buffer setting from the
+  server, and is always fixed size:
+
+  ```c++
+  absl::StatusOr<subspace::Publisher> pub = client.CreatePublisher(
+      "/vehicle/state", subspace::PublisherOptions().SetServerDefined(true));
+  ```
+
+  The C client has `subspace_publisher_options_server_defined()`, Python has
+  `set_server_defined(True)`, Rust has `set_server_defined(true)` and the ASIL
+  client has `PublisherOptions::server_defined`.  Options that don't change
+  the layout, such as reliable, checksum, type and mux, work as usual.
+- `use_split_buffers: true` gives a channel or multiplexer
+  [split buffers](docs/split-buffers.md), which the server creates.
+- A channel on a multiplexer takes its slot size, number of slots, type,
+  prefix layout and split buffer setting from the multiplexer and needs an
+  explicit `vchan_id`.
+- Names starting with `/subspace/` are reserved for the server.
+- After a restart from a shadow, the recovered channels must match the config
+  or the server doesn't start.
+
+The [ASIL client](docs/asil-client.md) is a C++17 client for safety-related
+software that shares these channels with the standard clients.
+
 ## Shadow Server (Crash Recovery)
 
 Subspace supports a **shadow process** that mirrors the server's channel,
@@ -2101,6 +2182,7 @@ its full state from whichever shadow is available.
 |------|---------|-------------|
 | `--shadow_socket` | `""` (disabled) | Unix socket path for the primary shadow process |
 | `--secondary_shadow_socket` | `""` (disabled) | Unix socket path for the secondary shadow process |
+| `--channel_config` | `""` (disabled) | `StaticChannelConfig` file. `.pb` and `.binpb` are protobuf wire format; any other name is text format. See [Static Channel Config](#static-channel-config). |
 
 ### Shadow Flags
 

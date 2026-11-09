@@ -13,7 +13,9 @@
 #include "common/channel.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "common/server_wire.h"
 #include "proto/subspace.pb.h"
+#include "proto/subspace.phaser.h"
 #include "toolbelt/fd.h"
 #include "toolbelt/sockets.h"
 #include <cerrno>
@@ -40,7 +42,7 @@
 #endif
 
 namespace {
-void FillMatchingInitBuildConfig(subspace::InitRequest *init) {
+void FillMatchingInitBuildConfig(subspace::phaser::InitRequest *init) {
   init->set_max_channels(subspace::kMaxChannels);
   init->set_max_slot_owners(subspace::kMaxSlotOwners);
   init->set_max_buffers(static_cast<int32_t>(subspace::kMaxBuffers));
@@ -57,7 +59,7 @@ public:
   }
 
   absl::Status Init(const std::string &client_name = "raw_test") {
-    subspace::Request req;
+    subspace::phaser::Request req;
     req.mutable_init()->set_client_name(client_name);
     FillMatchingInitBuildConfig(req.mutable_init());
     auto result = Send(req);
@@ -71,22 +73,21 @@ public:
   uint64_t SessionId() const { return session_id_; }
 
   absl::StatusOr<
-      std::pair<subspace::Response, std::vector<toolbelt::FileDescriptor>>>
-  Send(const subspace::Request &req) {
+      std::pair<subspace::phaser::Response, std::vector<toolbelt::FileDescriptor>>>
+  Send(const subspace::phaser::Request &req) {
     return SendWithFds(req, {});
   }
 
   absl::StatusOr<
-      std::pair<subspace::Response, std::vector<toolbelt::FileDescriptor>>>
-  SendWithFds(const subspace::Request &req,
+      std::pair<subspace::phaser::Response, std::vector<toolbelt::FileDescriptor>>>
+  SendWithFds(const subspace::phaser::Request &req,
               const std::vector<toolbelt::FileDescriptor> &send_fds) {
-    size_t msg_len = req.ByteSizeLong();
-    std::vector<char> buf(sizeof(int32_t) + msg_len);
-    char *payload = buf.data() + sizeof(int32_t);
-    if (!req.SerializeToArray(payload, msg_len)) {
-      return absl::InternalError("Failed to serialize request");
+    subspace::ServerWire<subspace::DynamicServerWireBuffers> wire;
+    absl::StatusOr<size_t> msg_len = wire.Serialize(req);
+    if (!msg_len.ok()) {
+      return msg_len.status();
     }
-    auto n = socket_.SendMessage(payload, msg_len);
+    auto n = socket_.SendMessage(wire.Payload(), *msg_len);
     if (!n.ok()) {
       return n.status();
     }
@@ -100,9 +101,12 @@ public:
     if (!recv.ok()) {
       return recv.status();
     }
-    subspace::Response resp;
-    if (!resp.ParseFromArray(recv->data(), static_cast<int>(recv->size()))) {
-      return absl::InternalError("Failed to parse response");
+    subspace::phaser::Response resp;
+    if (absl::Status status = subspace::ServerWire<
+            subspace::DynamicServerWireBuffers>::Decode(recv->data(),
+                                                        recv->size(), resp);
+        !status.ok()) {
+      return status;
     }
 
     std::vector<toolbelt::FileDescriptor> fds;
@@ -115,11 +119,11 @@ public:
   // Build a RegisterClientBuffer request for the given (channel, session,
   // buffer_index, slot_id).  When send_fd is true a backing fd is attached and
   // fd_index is used as-is (allowing tests to inject an out-of-range index).
-  subspace::Request
+  subspace::phaser::Request
   MakeRegisterRequest(const std::string &channel, uint64_t session_id,
                       uint32_t buffer_index, uint32_t slot_id, bool has_fd,
                       int fd_index) {
-    subspace::Request req;
+    subspace::phaser::Request req;
     auto *r = req.mutable_register_client_buffer();
     auto *m = r->mutable_metadata();
     m->set_channel_name(channel);
@@ -131,10 +135,10 @@ public:
     return req;
   }
 
-  subspace::Request MakeUnregisterRequest(const std::string &channel,
+  subspace::phaser::Request MakeUnregisterRequest(const std::string &channel,
                                           uint64_t session_id,
                                           uint32_t buffer_index) {
-    subspace::Request req;
+    subspace::phaser::Request req;
     auto *u = req.mutable_unregister_client_buffer();
     u->set_channel_name(channel);
     u->set_session_id(session_id);
@@ -147,26 +151,25 @@ public:
   // same connection so the caller can observe the resulting server state.  The
   // ordered processing on a single connection guarantees the one-way request
   // has been handled by the time the query returns.
-  absl::StatusOr<subspace::GetClientBuffersResponse>
-  SendOneWayThenGetBuffers(const subspace::Request &one_way,
+  absl::StatusOr<subspace::phaser::GetClientBuffersResponse>
+  SendOneWayThenGetBuffers(const subspace::phaser::Request &one_way,
                            const std::string &channel, uint64_t session_id,
                            uint32_t buffer_index) {
-    size_t msg_len = one_way.ByteSizeLong();
-    std::vector<char> buf(sizeof(int32_t) + msg_len);
-    char *payload = buf.data() + sizeof(int32_t);
-    if (!one_way.SerializeToArray(payload, msg_len)) {
-      return absl::InternalError("Failed to serialize request");
+    subspace::ServerWire<subspace::DynamicServerWireBuffers> wire;
+    absl::StatusOr<size_t> msg_len = wire.Serialize(one_way);
+    if (!msg_len.ok()) {
+      return msg_len.status();
     }
-    if (auto n = socket_.SendMessage(payload, msg_len); !n.ok()) {
+    if (auto n = socket_.SendMessage(wire.Payload(), *msg_len); !n.ok()) {
       return n.status();
     }
     return GetClientBuffers(channel, session_id, buffer_index);
   }
 
-  absl::StatusOr<subspace::GetClientBuffersResponse>
+  absl::StatusOr<subspace::phaser::GetClientBuffersResponse>
   GetClientBuffers(const std::string &channel, uint64_t session_id,
                    uint32_t buffer_index) {
-    subspace::Request req;
+    subspace::phaser::Request req;
     auto *g = req.mutable_get_client_buffers();
     g->set_channel_name(channel);
     g->set_session_id(session_id);
@@ -175,11 +178,19 @@ public:
     if (!result.ok()) {
       return result.status();
     }
-    return result->first.get_client_buffers();
+    // The getter is a view into the response. Copy it into an owned message
+    // before the response is destroyed.
+    subspace::phaser::GetClientBuffersResponse buffers;
+    if (absl::Status status = buffers.CloneFrom(result->first.get_client_buffers());
+        !status.ok() || buffers.AllocationFailed()) {
+      return status.ok() ? absl::InternalError("Failed to copy client buffers")
+                         : status;
+    }
+    return buffers;
   }
 
   // Convenience: create a publisher and return the response.
-  std::pair<subspace::Response, std::vector<toolbelt::FileDescriptor>>
+  std::pair<subspace::phaser::Response, std::vector<toolbelt::FileDescriptor>>
   CreatePublisher(const std::string &channel, int slot_size = 64,
                   int num_slots = 4, const std::string &type = "",
                   bool reliable = false, bool is_local = true,
@@ -188,7 +199,7 @@ public:
                   bool notify_retirement = false, int checksum_size = 0,
                   int metadata_size = 0, int max_publishers = 0,
                   uint64_t subscriber_queue_arena_size = 0) {
-    subspace::Request req;
+    subspace::phaser::Request req;
     auto *cmd = req.mutable_create_publisher();
     cmd->set_channel_name(channel);
     cmd->set_slot_size(slot_size);
@@ -211,13 +222,13 @@ public:
   }
 
   // Convenience: create a subscriber and return the response.
-  std::pair<subspace::Response, std::vector<toolbelt::FileDescriptor>>
+  std::pair<subspace::phaser::Response, std::vector<toolbelt::FileDescriptor>>
   CreateSubscriber(const std::string &channel,
                    const std::string &type = "", bool reliable = false,
                    int max_active_messages = 4, const std::string &mux = "",
                    int vchan_id = 0, bool for_tunnel = false,
                    int subscriber_queue_size = 0) {
-    subspace::Request req;
+    subspace::phaser::Request req;
     auto *cmd = req.mutable_create_subscriber();
     cmd->set_channel_name(channel);
     cmd->set_type(type);
@@ -247,7 +258,7 @@ TEST_F(ServerTest, InitSuccess) {
   RawConnection conn;
   ASSERT_OK(conn.Connect(Socket()));
 
-  subspace::Request req;
+  subspace::phaser::Request req;
   req.mutable_init()->set_client_name("test_init");
   FillMatchingInitBuildConfig(req.mutable_init());
   auto result = conn.Send(req);
@@ -263,7 +274,7 @@ TEST_F(ServerTest, InitRejectsBuildConfigMismatch) {
   RawConnection conn;
   ASSERT_OK(conn.Connect(Socket()));
 
-  subspace::Request req;
+  subspace::phaser::Request req;
   req.mutable_init()->set_client_name("mismatch");
   FillMatchingInitBuildConfig(req.mutable_init());
   req.mutable_init()->set_max_channels(subspace::kMaxChannels + 64);
@@ -344,6 +355,28 @@ TEST_F(ServerTest, CreateSubscriberSuccess) {
 // ---------------------------------------------------------------------------
 // CreatePublisher error paths
 // ---------------------------------------------------------------------------
+
+TEST_F(ServerTest, ServerDefinedNeedsStaticChannel) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  // Neither a new channel nor an existing one on a server without a static
+  // channel config has a layout that the server defines.
+  conn.CreatePublisher("server_defined_ch");
+  for (const char *channel : {"server_defined_new", "server_defined_ch"}) {
+    subspace::phaser::Request req;
+    subspace::phaser::CreatePublisherRequest *cmd = req.mutable_create_publisher();
+    cmd->set_channel_name(channel);
+    cmd->set_server_defined(true);
+    cmd->set_publisher_id(-1);
+    auto result = conn.Send(req);
+    ASSERT_OK(result);
+    EXPECT_THAT(result->first.create_publisher().error(),
+                ::testing::HasSubstr("can't set server_defined"))
+        << channel;
+  }
+}
 
 TEST_F(ServerTest, PubTypeMismatch) {
   RawConnection conn;
@@ -700,7 +733,7 @@ TEST_F(ServerTest, SubInvalidReclaim) {
   conn.CreatePublisher("sub_reclaim_ch", 64, 4);
 
   // Try to reclaim a subscriber with an invalid ID.
-  subspace::Request req;
+  subspace::phaser::Request req;
   auto *cmd = req.mutable_create_subscriber();
   cmd->set_channel_name("sub_reclaim_ch");
   cmd->set_subscriber_id(9999);
@@ -720,7 +753,7 @@ TEST_F(ServerTest, GetTriggersNoSuchChannel) {
   ASSERT_OK(conn.Connect(Socket()));
   ASSERT_OK(conn.Init());
 
-  subspace::Request req;
+  subspace::phaser::Request req;
   req.mutable_get_triggers()->set_channel_name("nonexistent_triggers");
   auto result = conn.Send(req);
   ASSERT_OK(result);
@@ -736,7 +769,7 @@ TEST_F(ServerTest, GetTriggersSuccess) {
   conn.CreatePublisher("triggers_ch", 64, 4, "", /*reliable=*/true);
   conn.CreateSubscriber("triggers_ch");
 
-  subspace::Request req;
+  subspace::phaser::Request req;
   req.mutable_get_triggers()->set_channel_name("triggers_ch");
   auto result = conn.Send(req);
   ASSERT_OK(result);
@@ -752,7 +785,7 @@ TEST_F(ServerTest, RemovePublisherNoSuchChannel) {
   ASSERT_OK(conn.Connect(Socket()));
   ASSERT_OK(conn.Init());
 
-  subspace::Request req;
+  subspace::phaser::Request req;
   auto *cmd = req.mutable_remove_publisher();
   cmd->set_channel_name("ghost_channel");
   cmd->set_publisher_id(0);
@@ -767,7 +800,7 @@ TEST_F(ServerTest, RemoveSubscriberNoSuchChannel) {
   ASSERT_OK(conn.Connect(Socket()));
   ASSERT_OK(conn.Init());
 
-  subspace::Request req;
+  subspace::phaser::Request req;
   auto *cmd = req.mutable_remove_subscriber();
   cmd->set_channel_name("ghost_channel_sub");
   cmd->set_subscriber_id(0);
@@ -786,7 +819,7 @@ TEST_F(ServerTest, RemovePublisherSuccess) {
   ASSERT_TRUE(create_resp.create_publisher().error().empty());
   int pub_id = create_resp.create_publisher().publisher_id();
 
-  subspace::Request req;
+  subspace::phaser::Request req;
   auto *cmd = req.mutable_remove_publisher();
   cmd->set_channel_name("rm_pub_ch");
   cmd->set_publisher_id(pub_id);
@@ -804,7 +837,7 @@ TEST_F(ServerTest, RemoveSubscriberSuccess) {
   ASSERT_TRUE(create_resp.create_subscriber().error().empty());
   int sub_id = create_resp.create_subscriber().subscriber_id();
 
-  subspace::Request req;
+  subspace::phaser::Request req;
   auto *cmd = req.mutable_remove_subscriber();
   cmd->set_channel_name("rm_sub_ch");
   cmd->set_subscriber_id(sub_id);
@@ -819,7 +852,7 @@ TEST_F(ServerTest, RemovePublisherInvalidId) {
   ASSERT_OK(conn.Init());
 
   conn.CreatePublisher("rm_inval_pub", 64, 4);
-  subspace::Request req;
+  subspace::phaser::Request req;
   auto *cmd = req.mutable_remove_publisher();
   cmd->set_channel_name("rm_inval_pub");
   cmd->set_publisher_id(9999);
@@ -840,7 +873,7 @@ TEST_F(ServerTest, GetChannelInfoByName) {
 
   conn.CreatePublisher("info_ch", 128, 8, "info_type");
 
-  subspace::Request req;
+  subspace::phaser::Request req;
   req.mutable_get_channel_info()->set_channel_name("info_ch");
   auto result = conn.Send(req);
   ASSERT_OK(result);
@@ -859,7 +892,7 @@ TEST_F(ServerTest, GetChannelInfoNoSuchChannel) {
   ASSERT_OK(conn.Connect(Socket()));
   ASSERT_OK(conn.Init());
 
-  subspace::Request req;
+  subspace::phaser::Request req;
   req.mutable_get_channel_info()->set_channel_name("no_such_info");
   auto result = conn.Send(req);
   ASSERT_OK(result);
@@ -875,7 +908,7 @@ TEST_F(ServerTest, GetChannelInfoAll) {
   conn.CreatePublisher("allinfo1", 64, 4);
   conn.CreatePublisher("allinfo2", 64, 4);
 
-  subspace::Request req;
+  subspace::phaser::Request req;
   req.mutable_get_channel_info();
   auto result = conn.Send(req);
   ASSERT_OK(result);
@@ -895,14 +928,14 @@ TEST_F(ServerTest, GetChannelInfoReportsIsLocal) {
   conn.CreatePublisher("public_info_ch", 64, 4, "", /*reliable=*/false,
                        /*is_local=*/false);
 
-  subspace::Request local_req;
+  subspace::phaser::Request local_req;
   local_req.mutable_get_channel_info()->set_channel_name("local_info_ch");
   auto local = conn.Send(local_req);
   ASSERT_OK(local);
   ASSERT_EQ(1, local->first.get_channel_info().channels_size());
   EXPECT_TRUE(local->first.get_channel_info().channels(0).is_local());
 
-  subspace::Request public_req;
+  subspace::phaser::Request public_req;
   public_req.mutable_get_channel_info()->set_channel_name("public_info_ch");
   auto pub = conn.Send(public_req);
   ASSERT_OK(pub);
@@ -921,7 +954,7 @@ TEST_F(ServerTest, GetChannelStatsByName) {
 
   conn.CreatePublisher("stats_ch", 256, 4);
 
-  subspace::Request req;
+  subspace::phaser::Request req;
   req.mutable_get_channel_stats()->set_channel_name("stats_ch");
   auto result = conn.Send(req);
   ASSERT_OK(result);
@@ -936,7 +969,7 @@ TEST_F(ServerTest, GetChannelStatsNoSuchChannel) {
   ASSERT_OK(conn.Connect(Socket()));
   ASSERT_OK(conn.Init());
 
-  subspace::Request req;
+  subspace::phaser::Request req;
   req.mutable_get_channel_stats()->set_channel_name("no_such_stats");
   auto result = conn.Send(req);
   ASSERT_OK(result);
@@ -952,7 +985,7 @@ TEST_F(ServerTest, GetChannelStatsAll) {
   conn.CreatePublisher("allstats_s1", 64, 4);
   conn.CreatePublisher("allstats_s2", 64, 4);
 
-  subspace::Request req;
+  subspace::phaser::Request req;
   req.mutable_get_channel_stats();
   auto result = conn.Send(req);
   ASSERT_OK(result);
@@ -971,14 +1004,14 @@ TEST_F(ServerTest, GetChannelStatsReportsIsLocal) {
   conn.CreatePublisher("public_stats_ch", 64, 4, "", /*reliable=*/false,
                        /*is_local=*/false);
 
-  subspace::Request local_req;
+  subspace::phaser::Request local_req;
   local_req.mutable_get_channel_stats()->set_channel_name("local_stats_ch");
   auto local = conn.Send(local_req);
   ASSERT_OK(local);
   ASSERT_EQ(1, local->first.get_channel_stats().channels_size());
   EXPECT_TRUE(local->first.get_channel_stats().channels(0).is_local());
 
-  subspace::Request public_req;
+  subspace::phaser::Request public_req;
   public_req.mutable_get_channel_stats()->set_channel_name("public_stats_ch");
   auto pub = conn.Send(public_req);
   ASSERT_OK(pub);

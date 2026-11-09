@@ -1,7 +1,7 @@
 // Copyright 2023-2026 David Allison
 // All Rights Reserved
 // Shadow support is Copyright 2026 Cruise LLC
-// Tunnel support is Copyright 2026 General Motors LLC
+// Tunnel support is Copyright 2026 General Motors
 // See LICENSE file for licensing information.
 
 #include "server/server.h"
@@ -588,6 +588,12 @@ absl::Status Server::Run(int num_asio_threads) {
     return absl::InternalError(
         absl::StrFormat("Failed to create channel directory trigger: %s",
                         s.ToString().c_str()));
+  }
+
+  // Before any client is handled, so no client sees a static channel missing
+  // or as a placeholder.
+  if (absl::Status s = CreateStaticChannels(); !s.ok()) {
+    return s;
   }
 
   char hostname[256] = "local";

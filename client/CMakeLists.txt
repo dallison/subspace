@@ -13,25 +13,20 @@ add_library(subspace_client STATIC
     publisher.h
     subscriber.cc
     subscriber.h
-    checksum.cc
     checksum.h
-    arm_crc32.S
 )
 
 target_include_directories(subspace_client PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-# Set the assembly file to use ASM language (CMake will handle C preprocessor automatically for .S files)
-set_source_files_properties(arm_crc32.S PROPERTIES
-    LANGUAGE ASM
-)
-
 # Link against other internal libraries (e.g., common) or external dependencies if needed:
 target_link_libraries(subspace_client PUBLIC
     subspace_common
+    subspace_crc32
     subspace_async
     subspace_proto
+    subspace_phaser
     absl::flags
     absl::flat_hash_map
     absl::flat_hash_set
@@ -50,6 +45,13 @@ add_test(NAME client_test COMMAND client_test)
 set_tests_properties(client_test PROPERTIES
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
+if(APPLE)
+    # Linked first so the static libraries below resolve their references.
+    target_link_libraries(client_test PUBLIC
+        nop_plugin_lib
+        split_buffer_free_test_plugin_lib
+    )
+endif()
 target_link_libraries(client_test PUBLIC
     subspace_client
     subspace_common

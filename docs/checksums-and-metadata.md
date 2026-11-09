@@ -93,8 +93,10 @@ is used:
 - **`VerifyCRC32Checksum()`** — recomputes CRC32 and compares against the
   stored 4 bytes.
 
-These functions use ARM or x86 hardware CRC instructions when available
-(`SUBSPACE_HARDWARE_CRC`), with a software fallback.
+These functions use ARM hardware CRC instructions when available
+(`SUBSPACE_HARDWARE_CRC`), with a software fallback. Both compute the IEEE
+802.3 polynomial. x86 always uses the software table, because its SSE4.2
+CRC32 instruction computes CRC-32C, a different checksum.
 
 ### Larger Checksums
 
