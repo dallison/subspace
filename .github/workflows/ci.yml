@@ -480,7 +480,7 @@ jobs:
           sudo apt-get install -y \
             gcc-arm-linux-gnueabihf \
             g++-arm-linux-gnueabihf \
-            qemu-user-static
+            qemu-user
 
       - name: Build a host protoc
         run: |
@@ -507,7 +507,7 @@ jobs:
           grep -q 'Class:.*ELF32' armhf-header.txt
           grep -q 'Machine:.*ARM' armhf-header.txt
 
-      # CTest launches each test with qemu-arm-static -L (the toolchain's
+      # CTest launches each test with qemu-user -L (the toolchain's
       # CMAKE_CROSSCOMPILING_EMULATOR), so the armhf sysroot is found for the
       # test binaries. QEMU_LD_PREFIX gives the same sysroot to any armhf
       # process that is started without that wrapper. client_test raises its

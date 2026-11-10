@@ -141,5 +141,5 @@ environment or user-local `user.bazelrc`.
 - Android details: `docs/android.md`
 - General Bazel/CMake docs: `README.md`
 - CI build matrix: `.github/workflows/ci.yml`
-- 32-bit ARM (armhf) is the `cmake (armhf)` job: CMake cross-compile with `cmake/toolchains/linux-armhf.cmake` and `qemu-user-static`, not Bazel. Local equivalent: `scripts/build-arm32-colima.sh`.
+- 32-bit ARM (armhf) is the `cmake (armhf)` job: CMake cross-compile with `cmake/toolchains/linux-armhf.cmake` and `qemu-user`, not Bazel. Local equivalent: `scripts/build-arm32-colima.sh`.
 - Test runner rule: `.cursor/rules/test-runner.mdc`
