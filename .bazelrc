@@ -146,6 +146,20 @@ build:android_x86_64 --copt=-DABSL_FLAGS_STRIP_NAMES=0
 
 build:android --config=android_arm64
 
+# Linux ARMv7 hard-float (armhf) cross-compile from an x86_64 host.
+# Requires g++-arm-linux-gnueabihf. Tests run under qemu-user-static when
+# QEMU_LD_PREFIX points at the cross sysroot.
+#   bazel build --config=linux_arm32 //server:subspace_server //client:subspace_client
+build:linux_arm32 --platforms=//platform/host:linux_arm32
+build:linux_arm32 --extra_toolchains=@linux_arm32_toolchain//:cc_toolchain
+build:linux_arm32 --cpu=armv7
+# The autoconfigured host toolchain provides this feature. The armhf
+# toolchain does not, and requesting it fails toolchain resolution.
+build:linux_arm32 --features=-external_include_paths
+test:linux_arm32 --test_env=QEMU_LD_PREFIX=/usr/arm-linux-gnueabihf
+run:linux_arm32 --run_under=//bazel/toolchains/linux_arm32:qemu
+run:linux_arm32 --run_env=QEMU_LD_PREFIX=/usr/arm-linux-gnueabihf
+
 # QNX 8 Toolchain Configurations
 # Set QNX_SDP_PATH in the environment and pass a matching
 # --define=QNX_SDP_PATH=... after --config=qnx_* if your SDP is elsewhere.
