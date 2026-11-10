@@ -11,13 +11,12 @@ namespace subspace {
 
 extern "C" {
 
-#if defined(__x86_64__) && !defined(__SSE4_2__)
-// On Intel crc is only available when SSE4.2 is enabled
-#undef SUBSPACE_HARDWARE_CRC
-#endif
-
+// The x86 SSE4.2 CRC32 instruction computes CRC-32C, not the IEEE 802.3 CRC32
+// used by the Rust client and by every other build. x86 always uses the table
+// below. The ARM CRC32 instructions compute the IEEE polynomial and are used
+// when available.
 #if defined(__aarch64__) && !defined(__ARM_FEATURE_CRC32)
-// Swite off hardware CRC32 if it is not available on aarch64.
+// Switch off hardware CRC32 if it is not available on aarch64.
 #undef SUBSPACE_HARDWARE_CRC
 #endif
 
@@ -53,27 +52,6 @@ uint32_t SubspaceCRC32(uint32_t crc, const uint8_t *data, size_t length) {
 }
 #endif  // !defined(ARM_ASM_CRC32)
 
-#elif defined(SUBSPACE_HARDWARE_CRC) && defined(__x86_64__)
-#include <nmmintrin.h>
-uint32_t SubspaceCRC32(uint32_t crc, const uint8_t *data, size_t length) {
-  size_t i = 0;
-  // Process 8 bytes at a time.
-  for (; i + 8 <= length; i += 8) {
-    crc = _mm_crc32_u64(crc, *reinterpret_cast<const uint64_t *>(data + i));
-  }
-  // Process remaining 4 bytes.
-  if (i + 4 <= length) {
-    crc = _mm_crc32_u32(crc, *reinterpret_cast<const uint32_t *>(data + i));
-    i += 4;
-  }
-
-  // Process remaining bytes one at a time.
-  for (; i < length; i++) {
-    crc = _mm_crc32_u8(crc, data[i]);
-  }
-
-  return crc;
-}
 #else
 // Vibe-coded Fast CRC32 lookup table (IEEE 802.3 polynomial: 0xEDB88320)
 static const uint32_t crc32_table[256] = {
