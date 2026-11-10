@@ -86,6 +86,18 @@ might need to tell bazel what compiler to use.
 CC=clang bazel build ...
 ```
 
+### 32-bit ARM (armhf) with Colima
+
+Colima hosts an aarch64 or x86_64 Linux VM, and Bazel does not publish a 32-bit ARM binary, so the armhf build is a CMake cross-compile from that VM. From the repo root:
+
+```
+scripts/build-arm32-colima.sh
+scripts/build-arm32-colima.sh --test
+```
+
+The script starts the aarch64 Colima profile if it is not already running, builds a host `protoc`, then cross-compiles into `build/armhf`. Binaries are ELF32 ARM, hard-float. The Rust client and the Asio RPC backends are skipped: the Rust build has no armhf Cargo target wired up here, and Boost.Context does not cross-compile cleanly. Tests run under `qemu-arm-static`. `client_test` raises its own file-descriptor soft limit at startup: the container's default is 1024, and past that the kernel drops `SCM_RIGHTS` payloads and the test reports truncated control data.
+
+GitHub Actions job `cmake (armhf)` runs this cross-compile and the CMake tests on `ubuntu-latest`.
 
 ### Example: Ubuntu 20.04
 Build a minimal set of binaries:
