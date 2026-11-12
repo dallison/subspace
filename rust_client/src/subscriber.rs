@@ -371,17 +371,17 @@ impl SubscriberImpl {
             let ordinal = slot.ordinal();
             let vchan_id = slot.vchan_id() as i32;
             let bridged_slot_id = slot.bridged_slot_id();
-            self.channel.atomic_inc_ref_count(
+            if self.channel.release_subscriber_obligation(
                 slot_idx,
+                self.subscriber_id as usize,
                 reliable,
-                -1,
+                true,
                 ordinal,
                 vchan_id,
-                true,
-                Some(|| {
-                    self.trigger_retirement(bridged_slot_id as usize);
-                }),
-            );
+            ) && self.channel.try_retire_slot(slot_idx)
+            {
+                self.trigger_retirement(bridged_slot_id as usize);
+            }
         }
         let new_count = self.num_active_messages.fetch_sub(1, Ordering::Relaxed) - 1;
         if new_count < self.options.max_active_messages {
@@ -1144,7 +1144,16 @@ impl SubscriberImpl {
         let ordinal = self.channel.slot_ref(slot_idx).ordinal();
         let vchan_id = self.channel.slot_ref(slot_idx).vchan_id() as i32;
         self.remember_ordinal(ordinal, vchan_id);
-        self.decrement_slot_ref(slot_idx, ordinal, vchan_id, true);
+        if self.channel.release_subscriber_obligation(
+            slot_idx,
+            self.subscriber_id as usize,
+            self.options.reliable,
+            true,
+            ordinal,
+            vchan_id,
+        ) {
+            self.channel.try_retire_slot(slot_idx);
+        }
         self.channel.slot_ref(slot_idx).set_flag(MESSAGE_SEEN);
         if self.options.reliable {
             self.channel.slot_ref(slot_idx).set_flag(MESSAGE_SEEN_BY_RELIABLE);

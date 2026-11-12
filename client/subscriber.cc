@@ -95,33 +95,18 @@ std::optional<double> SubscriberImpl::NoteStuckRead(uint64_t now_ns,
 }
 
 void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
-    // std::cerr << this << " remove active message " << slot->id << " "
-    //           << slot->ordinal << " refs " << std::hex << slot->refs.load() <<
-    //           std::dec << "\n";
   if (slot->sub_owners.ClearWasSet(subscriber_id_)) {
-    AtomicIncRefCount(slot, IsReliable(), -1,
-                      slot->ordinal.load(std::memory_order_relaxed),
-                      slot->vchan_id.load(std::memory_order_relaxed), true,
-                      [this, slot]() {
-                      // When a slot retires we want to use the slot id that was
-                      // originally used for the message.  If the message came
-                      // in from a bridge we want to notify the original sender
-                      // of the message, not the bridge publisher.
-                      //
-                      // The original slot id is in the message prefix and is
-                      // copied into the slot when the bridge publisher
-                      // publishes the message.
-
-                      // Enable this for debugging slot retirement.
-                      // std::string details = absl::StrFormat(
-                      //   "%d: RemoveActiveMessage: %s retiring slot %d ordinal "
-                      //   "%d vchan_id %d\n", getpid(), Name(),
-                      //   slot->bridged_slot_id, slot->ordinal,
-                      //   slot->vchan_id);
-                      // std::cerr << details;
-                        TriggerRetirement(slot->bridged_slot_id.load(
-                            std::memory_order_relaxed));
-                      });
+    const uint64_t ordinal = slot->ordinal.load(std::memory_order_relaxed);
+    const int vchan_id = slot->vchan_id.load(std::memory_order_relaxed);
+    // bridged_slot_id is the slot the original publisher should hear about.
+    // A bridge copies that id into the slot when it republishes.
+    const int32_t retirement_slot_id =
+        slot->bridged_slot_id.load(std::memory_order_relaxed);
+    if (ReleaseSubscriberObligation(slot, subscriber_id_, IsReliable(),
+                                    /*drop_ref=*/true, ordinal, vchan_id) &&
+        TryRetireSlot(slot)) {
+      TriggerRetirement(retirement_slot_id);
+    }
   }
   if (--num_active_messages_ < options_.MaxActiveMessages() &&
       options_.TriggerOnRelease()) {

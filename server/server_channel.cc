@@ -495,6 +495,7 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
     slot->flags.store(0, std::memory_order_relaxed);
     slot->bridged_slot_id.store(-1, std::memory_order_relaxed);
     new (&slot->sub_owners) AtomicBitSet<kMaxSlotOwners>();
+    new (&slot->pending_subs) AtomicBitSet<kMaxSlotOwners>();
   }
 
   // Initialize the available slots for each subscriber.

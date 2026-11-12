@@ -149,9 +149,16 @@ public:
   bool DiscardRecoveredQueueEntries(InPlaceSlotQueue &queue);
 
   void IgnoreActivation(MessageSlot *slot) {
-    RememberOrdinal(slot->ordinal.load(std::memory_order_relaxed),
-                    slot->vchan_id.load(std::memory_order_relaxed));
-    DecrementSlotRef(slot, true);
+    const uint64_t ordinal = slot->ordinal.load(std::memory_order_relaxed);
+    const int vchan_id = slot->vchan_id.load(std::memory_order_relaxed);
+    RememberOrdinal(ordinal, vchan_id);
+    // Activations are delivered to the same audience as other messages. Finish
+    // the obligation without a retirement notification; the retired bit is
+    // enough for the publisher to reuse the slot.
+    if (ReleaseSubscriberObligation(slot, subscriber_id_, IsReliable(),
+                                    /*drop_ref=*/true, ordinal, vchan_id)) {
+      TryRetireSlot(slot);
+    }
     slot->flags.fetch_or(kMessageSeen, std::memory_order_relaxed);
     if (IsReliable()) {
       slot->flags.fetch_or(kMessageSeenByReliable, std::memory_order_relaxed);
@@ -200,10 +207,15 @@ public:
   }
 
   void DecrementSlotRef(MessageSlot *slot, bool retire) {
+    const int32_t retirement_slot_id =
+        slot->bridged_slot_id.load(std::memory_order_relaxed);
     AtomicIncRefCount(slot, IsReliable(), -1,
                       slot->ordinal.load(std::memory_order_relaxed) &
                           kOrdinalMask,
-                      slot->vchan_id.load(std::memory_order_relaxed), retire);
+                      slot->vchan_id.load(std::memory_order_relaxed), retire,
+                      [this, retirement_slot_id]() {
+                        TriggerRetirement(retirement_slot_id);
+                      });
   }
 
   bool SlotExpired(MessageSlot *slot, uint32_t ordinal) {

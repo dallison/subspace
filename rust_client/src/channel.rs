@@ -127,7 +127,7 @@ const fn parse_max_buffers(raw: &[u8]) -> usize {
 
 pub const MAX_AVAILABLE_SLOT_QUEUE_CAPACITY: usize = 1024;
 const MAX_SLOT_QUEUE_CAS_ATTEMPTS: usize = 64;
-pub const CHANNEL_CONTROL_BLOCK_VERSION: u32 = 5;
+pub const CHANNEL_CONTROL_BLOCK_VERSION: u32 = 6;
 pub const MAX_VCHAN_ID: usize = 1023;
 pub const MAX_CHANNEL_NAME: usize = 64;
 
@@ -139,11 +139,11 @@ pub const RELIABLE_REF_COUNT_SHIFT: u64 = 10;
 pub const PUB_OWNED: u64 = 1u64 << 63;
 pub const REFS_MASK: u64 = (1u64 << 20) - 1;
 pub const RELIABLE_REFS_MASK: u64 = ((1u64 << 10) - 1) << RELIABLE_REF_COUNT_SHIFT;
-pub const RETIRED_REFS_SIZE: u64 = 10;
-pub const RETIRED_REFS_MASK: u64 = (1u64 << RETIRED_REFS_SIZE) - 1;
-pub const RETIRED_REFS_SHIFT: u64 = 20;
+pub const PENDING_SIZE: u64 = 10;
+pub const PENDING_MASK: u64 = (1u64 << PENDING_SIZE) - 1;
+pub const PENDING_SHIFT: u64 = 20;
 
-pub const VCHAN_ID_SHIFT: u64 = RETIRED_REFS_SHIFT + RETIRED_REFS_SIZE;
+pub const VCHAN_ID_SHIFT: u64 = PENDING_SHIFT + PENDING_SIZE;
 pub const VCHAN_ID_SIZE: u64 = 10;
 pub const VCHAN_ID_MASK: u64 = (1u64 << VCHAN_ID_SIZE) - 1;
 
@@ -153,14 +153,18 @@ pub const ORDINAL_SHIFT: u64 = 40;
 
 // ── Bit field helpers ───────────────────────────────────────────────────────
 
-pub fn build_refs_bit_field(ordinal: u64, vchan_id: i32, retired_refs: i32) -> u64 {
+pub fn pending_count(refs: u64) -> i32 {
+    ((refs >> PENDING_SHIFT) & PENDING_MASK) as i32
+}
+
+pub fn build_refs_bit_field(ordinal: u64, vchan_id: i32, pending: i32) -> u64 {
     ((ordinal & ORDINAL_MASK) << ORDINAL_SHIFT)
         | if ordinal == 0 {
             0
         } else {
             (vchan_id as u64 & VCHAN_ID_MASK) << VCHAN_ID_SHIFT
         }
-        | ((retired_refs as u64 & RETIRED_REFS_MASK) << RETIRED_REFS_SHIFT)
+        | ((pending as u64 & PENDING_MASK) << PENDING_SHIFT)
 }
 
 pub const fn aligned<const ALIGNMENT: i64>(v: i64) -> i64 {
@@ -228,6 +232,8 @@ pub struct MessageSlot {
     pub timestamp: AtomicU64,
     pub flags: AtomicU32,
     pub bridged_slot_id: AtomicI32,
+    /// Subscribers still obliged to decrement `pending` for the current message.
+    pub pending_subs: AtomicBitSet<SLOT_OWNER_WORDS>,
 }
 const _: () = assert!(std::mem::offset_of!(MessageSlot, refs) == 0);
 const _: () = assert!(std::mem::offset_of!(MessageSlot, ordinal) == 8);
@@ -250,11 +256,18 @@ const _: () = assert!(
         == std::mem::offset_of!(MessageSlot, flags) + std::mem::size_of::<AtomicU32>()
 );
 const _: () = assert!(
-    std::mem::size_of::<MessageSlot>()
-        == std::mem::offset_of!(MessageSlot, bridged_slot_id) + std::mem::size_of::<AtomicI32>()
+    std::mem::offset_of!(MessageSlot, pending_subs)
+        == ((std::mem::offset_of!(MessageSlot, bridged_slot_id) + std::mem::size_of::<AtomicI32>()
+            + 7)
+            & !7)
 );
-// The default owner count keeps the historical shared-memory layout.
-const _: () = assert!(MAX_SLOT_OWNERS != 1024 || std::mem::size_of::<MessageSlot>() == 184);
+const _: () = assert!(
+    std::mem::size_of::<MessageSlot>()
+        == std::mem::offset_of!(MessageSlot, pending_subs)
+            + std::mem::size_of::<AtomicBitSet<SLOT_OWNER_WORDS>>()
+);
+// 1024 owners: the original 184-byte slot plus one 136-byte obligation bitset.
+const _: () = assert!(MAX_SLOT_OWNERS != 1024 || std::mem::size_of::<MessageSlot>() == 320);
 
 impl MessageSlot {
     pub fn ordinal(&self) -> u64 {
@@ -1373,12 +1386,12 @@ impl Channel {
                 new_reliable_refs += inc as i64;
             }
 
-            let mut retired_refs = ((r >> RETIRED_REFS_SHIFT) & RETIRED_REFS_MASK) as i32;
-            if retire {
-                retired_refs += 1;
+            let mut pending = pending_count(r);
+            if retire && pending > 0 {
+                pending -= 1;
             }
 
-            let new_ref = build_refs_bit_field(ref_ord, ref_vchan_id, retired_refs)
+            let new_ref = build_refs_bit_field(ref_ord, ref_vchan_id, pending)
                 | ((new_reliable_refs as u64 & REF_COUNT_MASK) << RELIABLE_REF_COUNT_SHIFT)
                 | (new_refs as u64 & REF_COUNT_MASK);
 
@@ -1387,10 +1400,10 @@ impl Channel {
                 .compare_exchange_weak(r, new_ref, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
-                if retire
+                if (retire || inc < 0)
                     && new_refs == 0
                     && new_reliable_refs == 0
-                    && retired_refs >= self.num_subscribers(ref_vchan_id)
+                    && pending == 0
                     && self.retired_slots().set_was_clear(slot.id as usize)
                 {
                     if let Some(cb) = retire_callback {
@@ -1414,14 +1427,7 @@ impl Channel {
         if self.slot_ref(slot_idx).ordinal() == 0 {
             return true;
         }
-        let encoded_vchan_id = (refs >> VCHAN_ID_SHIFT) & VCHAN_ID_MASK;
-        let vchan_id = if encoded_vchan_id == VCHAN_ID_MASK {
-            -1
-        } else {
-            encoded_vchan_id as i32
-        };
-        let retired_refs = (refs >> RETIRED_REFS_SHIFT) & RETIRED_REFS_MASK;
-        retired_refs >= self.num_subscribers(vchan_id).max(0) as u64
+        pending_count(refs) == 0
     }
 
     pub fn try_retire_slot(&self, slot_idx: usize) -> bool {
@@ -1437,18 +1443,7 @@ impl Channel {
 
         let ref_count = refs & REF_COUNT_MASK;
         let reliable_ref_count = (refs >> RELIABLE_REF_COUNT_SHIFT) & REF_COUNT_MASK;
-        let retired_refs = (refs >> RETIRED_REFS_SHIFT) & RETIRED_REFS_MASK;
-        let encoded_vchan_id = (refs >> VCHAN_ID_SHIFT) & VCHAN_ID_MASK;
-        let ref_vchan_id = if encoded_vchan_id == VCHAN_ID_MASK {
-            -1
-        } else {
-            encoded_vchan_id as i32
-        };
-
-        if ref_count != 0
-            || reliable_ref_count != 0
-            || retired_refs < self.num_subscribers(ref_vchan_id) as u64
-        {
+        if ref_count != 0 || reliable_ref_count != 0 || pending_count(refs) != 0 {
             return false;
         }
         self.retired_slots().set_was_clear(slot_idx)
@@ -1497,10 +1492,9 @@ impl Channel {
         // count above zero, so the unpin has to retire it.
         let pinned = slot.refs.fetch_sub(1, Ordering::AcqRel);
         let unpinned = pinned - 1;
-        let retired_refs = (unpinned >> RETIRED_REFS_SHIFT) & RETIRED_REFS_MASK;
         if (unpinned & REF_COUNT_MASK) == 0
             && ((unpinned >> RELIABLE_REF_COUNT_SHIFT) & REF_COUNT_MASK) == 0
-            && retired_refs >= self.num_subscribers(vchan_id) as u64
+            && pending_count(unpinned) == 0
             && self.retired_slots().set_was_clear(slot_idx)
         {
             retire(retirement_slot_id);
@@ -1632,6 +1626,125 @@ impl Channel {
         }
     }
 
+    /// Drop subscriber `owner`'s obligation and, when `drop_ref` is set, one
+    /// reference. Returns false when the slot is publisher-owned or holds a
+    /// different message. Does not set the retired bit.
+    pub fn release_subscriber_obligation(
+        &self,
+        slot_idx: usize,
+        owner: usize,
+        reliable: bool,
+        drop_ref: bool,
+        ordinal: u64,
+        vchan_id: i32,
+    ) -> bool {
+        let slot = self.slot_ref(slot_idx);
+        let want_ord = ordinal & ORDINAL_MASK;
+        loop {
+            let r = slot.refs.load(Ordering::Acquire);
+            if (r & PUB_OWNED) != 0 {
+                if drop_ref {
+                    slot.sub_owners.clear(owner);
+                }
+                return false;
+            }
+            let ref_ord = (r >> ORDINAL_SHIFT) & ORDINAL_MASK;
+            let ref_vchan_id = {
+                let v = ((r >> VCHAN_ID_SHIFT) & VCHAN_ID_MASK) as i32;
+                if v == ((1 << VCHAN_ID_SIZE) - 1) as i32 {
+                    -1
+                } else {
+                    v
+                }
+            };
+            if want_ord != 0 && ref_ord != 0 && ref_ord != want_ord {
+                if drop_ref {
+                    slot.sub_owners.clear(owner);
+                }
+                return false;
+            }
+            if want_ord != 0 && ref_ord != 0 && ref_vchan_id != vchan_id {
+                if drop_ref {
+                    slot.sub_owners.clear(owner);
+                }
+                return false;
+            }
+
+            let owed = slot.pending_subs.clear_was_set(owner);
+            let again = slot.refs.load(Ordering::Acquire);
+            if again != r {
+                if owed {
+                    slot.pending_subs.set(owner);
+                }
+                if drop_ref
+                    && ((again & PUB_OWNED) != 0
+                        || ((again >> ORDINAL_SHIFT) & ORDINAL_MASK) != want_ord)
+                {
+                    slot.sub_owners.clear(owner);
+                    return false;
+                }
+                continue;
+            }
+
+            let mut new_refs = (r & REF_COUNT_MASK) as i64;
+            let mut new_reliable_refs =
+                ((r >> RELIABLE_REF_COUNT_SHIFT) & REF_COUNT_MASK) as i64;
+            let drop_a_ref = drop_ref && new_refs != 0;
+            if drop_a_ref {
+                new_refs -= 1;
+                if reliable && new_reliable_refs > 0 {
+                    new_reliable_refs -= 1;
+                }
+            }
+            let mut pending = pending_count(r);
+            if owed && pending > 0 {
+                pending -= 1;
+            }
+            if !owed && !drop_a_ref {
+                if drop_ref {
+                    slot.sub_owners.clear(owner);
+                }
+                return true;
+            }
+            let new_ref = build_refs_bit_field(ref_ord, ref_vchan_id, pending)
+                | ((new_reliable_refs as u64 & REF_COUNT_MASK) << RELIABLE_REF_COUNT_SHIFT)
+                | (new_refs as u64 & REF_COUNT_MASK);
+            if slot
+                .refs
+                .compare_exchange_weak(r, new_ref, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                if drop_ref {
+                    slot.sub_owners.clear(owner);
+                }
+                return true;
+            }
+            if owed {
+                slot.pending_subs.set(owner);
+            }
+        }
+    }
+
+    pub fn release_departed_obligations(&self, slot_idx: usize) {
+        let slot = self.slot_ref(slot_idx);
+        let mut departed = Vec::new();
+        slot.pending_subs.traverse(|sub_id| {
+            if !self.ccb().subscribers.is_set(sub_id) {
+                departed.push(sub_id);
+            }
+        });
+        let ordinal = slot.ordinal();
+        let vchan_id = slot.vchan_id() as i32;
+        if ordinal == 0 {
+            return;
+        }
+        for sub_id in departed {
+            self.release_subscriber_obligation(
+                slot_idx, sub_id, false, false, ordinal, vchan_id,
+            );
+        }
+    }
+
     pub fn cleanup_slots(&self, owner: i32, reliable: bool, is_pub: bool, vchan_id: i32) {
         if is_pub {
             for i in 0..self.num_slots as usize {
@@ -1640,6 +1753,7 @@ impl Channel {
                 if refs == (PUB_OWNED | owner as u64) {
                     self.slot_ref(i).set_ordinal(0);
                     slot.refs.store(0, Ordering::Release);
+                    slot.pending_subs.clear_all();
 
                     let ccb = self.ccb();
                     ccb.subscribers.traverse(|sub_id| {
@@ -1655,8 +1769,22 @@ impl Channel {
             for i in 0..self.num_slots as usize {
                 let slot = self.slot_ref(i);
                 self.get_available_slots(owner as usize).clear_was_set(i);
-                if slot.sub_owners.clear_was_set(owner as usize) {
-                    self.atomic_inc_ref_count::<fn()>(i, reliable, -1, 0, 0, false, None);
+                let drop_ref = slot.sub_owners.clear_was_set(owner as usize);
+                let ordinal = slot.ordinal();
+                let slot_vchan = slot.vchan_id() as i32;
+                if ordinal == 0 {
+                    slot.pending_subs.clear(owner as usize);
+                    continue;
+                }
+                if drop_ref || slot.pending_subs.is_set(owner as usize) {
+                    self.release_subscriber_obligation(
+                        i,
+                        owner as usize,
+                        reliable,
+                        drop_ref,
+                        ordinal,
+                        slot_vchan,
+                    );
                 }
             }
             ccb.subscriber_cleanup_generation.increment(vchan_id);

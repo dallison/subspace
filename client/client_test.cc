@@ -5513,6 +5513,43 @@ TEST_F(ClientTest, SubscriberRemovalTriggersServerRetirement) {
   message.Reset();
 }
 
+// A subscriber that attaches after a slot has retired was not delivered that
+// message, so it must not keep the publisher from reclaiming the slot.
+TEST_F(ClientTest, LateSubscriberDoesNotBlockRetiredSlotReclaim) {
+  auto pub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+  auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  auto pub = EVAL_AND_ASSERT_OK(pub_client->CreatePublisher(
+      "late_reclaim",
+      PubOpts(256, 16).SetNotifyRetirement(true).SetMaxOutstandingSlotLeases(2)));
+  auto sub = EVAL_AND_ASSERT_OK(sub_client->CreateSubscriber("late_reclaim"));
+
+  auto lease = EVAL_AND_ASSERT_OK(pub.AcquireBufferLease());
+  ASSERT_TRUE(lease);
+  memcpy(lease.buffer, "hello", 5);
+  ASSERT_OK(pub.PublishBufferLease(lease, 5));
+
+  auto message = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_EQ(5, message.length);
+  const int32_t slot_id = message.slot_id;
+  message.Reset();
+
+  const toolbelt::FileDescriptor &retirement_fd = pub.GetRetirementFd();
+  struct pollfd fd = {.fd = retirement_fd.Fd(), .events = POLLIN};
+  ASSERT_EQ(1, ::poll(&fd, 1, 1000));
+  int32_t retired = -1;
+  ASSERT_EQ(sizeof(retired),
+            ::read(fd.fd, &retired, sizeof(retired)));
+  EXPECT_EQ(slot_id, retired);
+
+  auto late_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+  auto late = EVAL_AND_ASSERT_OK(late_client->CreateSubscriber("late_reclaim"));
+  (void)late;
+
+  auto reclaimed = EVAL_AND_ASSERT_OK(pub.ReclaimBufferLease(slot_id));
+  EXPECT_TRUE(reclaimed);
+}
+
 TEST_F(ClientTest, SubscriberRemovalCanRacePublisherCommit) {
   auto pub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
   auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));

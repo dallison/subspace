@@ -10,7 +10,7 @@ use subspace_client::bitset::DynamicBitSet;
 use subspace_client::channel::{
     aligned, aligned64, build_refs_bit_field, MessagePrefix, CHECKSUM_OFFSET, MESSAGE_ACTIVATE,
     MESSAGE_BRIDGED, MESSAGE_CROSS_MACHINE, MESSAGE_HAS_CHECKSUM, ORDINAL_MASK, ORDINAL_SHIFT,
-    PUB_OWNED, RETIRED_REFS_MASK, RETIRED_REFS_SHIFT, VCHAN_ID_MASK, VCHAN_ID_SHIFT,
+    PENDING_MASK, PENDING_SHIFT, PUB_OWNED, VCHAN_ID_MASK, VCHAN_ID_SHIFT,
 };
 use subspace_client::checksum::{
     calculate_crc32_checksum, get_message_checksum_data, subspace_crc32, verify_crc32_checksum,
@@ -316,17 +316,17 @@ fn build_refs_nonzero_ordinal_includes_vchan() {
 fn build_refs_round_trips_all_fields() {
     let ordinal = 12345u64;
     let vchan_id = 99i32;
-    let retired_refs = 3i32;
+    let pending = 3i32;
 
-    let field = build_refs_bit_field(ordinal, vchan_id, retired_refs);
+    let field = build_refs_bit_field(ordinal, vchan_id, pending);
 
     let got_ordinal = (field >> ORDINAL_SHIFT) & ORDINAL_MASK;
     let got_vchan = (field >> VCHAN_ID_SHIFT) & VCHAN_ID_MASK;
-    let got_retired = (field >> RETIRED_REFS_SHIFT) & RETIRED_REFS_MASK;
+    let got_pending = (field >> PENDING_SHIFT) & PENDING_MASK;
 
     assert_eq!(got_ordinal, ordinal);
     assert_eq!(got_vchan, vchan_id as u64);
-    assert_eq!(got_retired, retired_refs as u64);
+    assert_eq!(got_pending, pending as u64);
 }
 
 #[test]

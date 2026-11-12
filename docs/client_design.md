@@ -148,7 +148,7 @@ pieces of state in a single word, enabling lock-free ownership transfer:
 |------|-------|-------------|
 | 0–9 | ref_count | Total subscriber reference count (max 1023). |
 | 10–19 | reliable_ref_count | Reliable subscriber reference count. |
-| 20–29 | retired_refs | Count of subscribers that have retired this slot. |
+| 20–29 | pending | Subscribers delivered this message who have not yet finished with it. Set at publish and decremented as each of them releases the slot or disconnects. The slot is retired at zero. A subscriber who joins later is not counted. |
 | 30–39 | vchan_id | Virtual channel ID (10 bits; 1023 encodes -1). |
 | 40–62 | ordinal | Low 23 bits of the message ordinal. |
 | 63 | pub_owned | Set when a publisher owns the slot for writing. |
@@ -652,11 +652,14 @@ If any check fails, the subscriber skips the slot.
 
 ### 15.4 Subscriber Release and Retirement
 
-When a subscriber decrements the ref count to zero and the `retired_refs`
-count equals `NumSubscribers(vchan_id)`, the slot is marked as retired. This
-check is performed inside the CAS loop. Race condition: if two subscribers
-release simultaneously, only one will see `refs == 0` and trigger retirement.
-This is correct because the CAS serializes the updates.
+When a subscriber finishes with a slot, it decrements `pending` if it was one
+of the subscribers the message was delivered to. The slot is marked retired
+when `pending` is zero and both reference counts are zero. `pending` is the
+audience at publish time, so a subscriber who joins later does not keep an
+older message from being reclaimed. A subscriber who disconnects without
+reading decrements `pending` for the messages it was delivered. Race
+condition: if two subscribers release simultaneously, the CAS serializes the
+updates and only one of them sets the retired bit.
 
 ### 15.5 Buffer Resize Race
 

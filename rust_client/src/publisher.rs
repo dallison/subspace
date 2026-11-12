@@ -226,7 +226,7 @@ impl PublisherImpl {
             let expected = build_refs_bit_field(
                 (*slot_ptr).ordinal(),
                 ((old_refs >> VCHAN_ID_SHIFT) & VCHAN_ID_MASK) as i32,
-                ((old_refs >> RETIRED_REFS_SHIFT) & RETIRED_REFS_MASK) as i32,
+                ((old_refs >> PENDING_SHIFT) & PENDING_MASK) as i32,
             );
             if (*slot_ptr)
                 .refs
@@ -248,6 +248,7 @@ impl PublisherImpl {
         slot.set_ordinal(0);
         slot.set_timestamp(0);
         slot.set_vchan_id(vchan_id as i16);
+        slot.pending_subs.clear_all();
         self.channel.set_slot_to_biggest_buffer(slot_idx);
 
         let prefix = self.channel.get_prefix(slot_idx);
@@ -273,6 +274,7 @@ impl PublisherImpl {
         slot.set_ordinal(0);
         slot.set_timestamp(0);
         slot.refs.store(0, Ordering::Release);
+        slot.pending_subs.clear_all();
         self.channel.ccb().subscribers.traverse(|sub_id| {
             self.channel.get_available_slots(sub_id).clear(slot_idx);
         });
@@ -378,7 +380,7 @@ impl PublisherImpl {
                 let expected = build_refs_bit_field(
                     (*slot_ptr).ordinal(),
                     ((old_refs >> VCHAN_ID_SHIFT) & VCHAN_ID_MASK) as i32,
-                    ((old_refs >> RETIRED_REFS_SHIFT) & RETIRED_REFS_MASK) as i32,
+                    ((old_refs >> PENDING_SHIFT) & PENDING_MASK) as i32,
                 );
 
                 if (*slot_ptr)
@@ -554,7 +556,7 @@ impl PublisherImpl {
                 let expected = build_refs_bit_field(
                     (*slot_ptr).ordinal(),
                     ((old_refs >> VCHAN_ID_SHIFT) & VCHAN_ID_MASK) as i32,
-                    ((old_refs >> RETIRED_REFS_SHIFT) & RETIRED_REFS_MASK) as i32,
+                    ((old_refs >> PENDING_SHIFT) & PENDING_MASK) as i32,
                 );
 
                 if (*slot_ptr)
@@ -689,17 +691,16 @@ impl PublisherImpl {
 
         let ordinal = slot.ordinal();
         let retirement_slot_id = slot.bridged_slot_id();
-        let (return_ordinal, return_timestamp) = if !prefix.is_null() {
-            unsafe { ((*prefix).ordinal, (*prefix).timestamp) }
-        } else {
-            (0, 0)
-        };
         let cleanup_generation = self
             .channel
             .ccb()
             .subscriber_cleanup_generation
             .get(vchan_id);
-
+        let (return_ordinal, return_timestamp) = if !prefix.is_null() {
+            unsafe { ((*prefix).ordinal, (*prefix).timestamp) }
+        } else {
+            (0, 0)
+        };
         // Prepare every delivery record and statistic while the slot remains
         // PUB_OWNED. Subscribers preserve the bit/queue entry but cannot claim
         // the slot, and server cleanup cannot retire it before commit.
@@ -711,6 +712,7 @@ impl PublisherImpl {
                 &self.active_queue_publish_depth,
             );
             let mut failed_queues: Vec<*const SlotQueueHeader> = Vec::new();
+            slot.pending_subs.clear_all();
             ccb.subscribers.traverse_seq_cst(|sub_id| {
                 if vchan_id != -1
                     && self.channel.get_sub_vchan_id(sub_id) != -1
@@ -730,6 +732,7 @@ impl PublisherImpl {
                     }
                     available.set(slot_idx);
                 }
+                slot.pending_subs.set(sub_id);
 
                 let queue = self.channel.get_available_slot_queue(sub_id);
                 if let Some(queue) = queue {
@@ -771,9 +774,12 @@ impl PublisherImpl {
                 }
             }
 
-            // Commit only after all delivery state is ready.
+            // Commit only after all delivery state is ready. pending is the
+            // number of obligation bits still set.
+            let mut pending = 0i32;
+            slot.pending_subs.traverse(|_| pending += 1);
             slot.refs.store(
-                build_refs_bit_field(ordinal, vchan_id, 0),
+                build_refs_bit_field(ordinal, vchan_id, pending),
                 Ordering::Release,
             );
 
@@ -786,10 +792,15 @@ impl PublisherImpl {
             }
             ccb.total_messages.fetch_add(1, Ordering::SeqCst);
 
-            // Whichever happens second, subscriber cleanup or this commit,
-            // completes retirement using the current subscriber count.
+            // Subscribers who left while the slot was publisher-owned could
+            // not decrement pending. Drop them, and retire if that emptied
+            // the audience. A publish that never had subscribers is left for
+            // the lease path so an idle ring still fills from the free list.
+            self.channel.release_departed_obligations(slot_idx);
             if !is_activation
-                && ccb
+                && self
+                    .channel
+                    .ccb()
                     .subscriber_cleanup_generation
                     .get(vchan_id)
                     != cleanup_generation
