@@ -186,9 +186,11 @@ if (count == sizeof(slot_id)) {
 }
 ```
 
-Reclaiming returns an empty lease if a subscriber has joined since the slot
-retired and hasn't released the slot itself, because it hasn't seen the
-message yet. The slot isn't lost: the publisher reuses it later.
+Reclaiming returns an empty lease when the slot is not actually retired:
+a subscriber who was delivered the message still holds it, or the retired bit
+is left over from an older message that has already been replaced. A
+subscriber who joins after the message was published does not keep that
+slot from being reclaimed.
 
 For unreliable publishers,
 `notify_retirement_on_forced_reuse` controls notifications generated when the

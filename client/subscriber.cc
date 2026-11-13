@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <optional>
 
 namespace subspace {
 namespace details {
@@ -24,6 +25,9 @@ void SubscriberImpl::InitActiveMessages() {
     m = std::make_shared<ActiveMessage>(shared_from_this(), &ccb_->slots[slot_id]);
     slot_id++;
   }
+  // Read newest and FindMessage hold at most one entry per slot.
+  search_buffer_.reserve(NumSlots());
+  newest_snapshot_.reserve(NumSlots());
 }
 
 void SubscriberImpl::ResetDeliveryState() {
@@ -95,34 +99,57 @@ std::optional<double> SubscriberImpl::NoteStuckRead(uint64_t now_ns,
 }
 
 void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
-    // std::cerr << this << " remove active message " << slot->id << " "
-    //           << slot->ordinal << " refs " << std::hex << slot->refs.load() <<
-    //           std::dec << "\n";
   if (slot->sub_owners.ClearWasSet(subscriber_id_)) {
-    AtomicIncRefCount(slot, IsReliable(), -1,
-                      slot->ordinal.load(std::memory_order_relaxed),
-                      slot->vchan_id.load(std::memory_order_relaxed), true,
-                      [this, slot]() {
-                      // When a slot retires we want to use the slot id that was
-                      // originally used for the message.  If the message came
-                      // in from a bridge we want to notify the original sender
-                      // of the message, not the bridge publisher.
-                      //
-                      // The original slot id is in the message prefix and is
-                      // copied into the slot when the bridge publisher
-                      // publishes the message.
-
-                      // Enable this for debugging slot retirement.
-                      // std::string details = absl::StrFormat(
-                      //   "%d: RemoveActiveMessage: %s retiring slot %d ordinal "
-                      //   "%d vchan_id %d\n", getpid(), Name(),
-                      //   slot->bridged_slot_id, slot->ordinal,
-                      //   slot->vchan_id);
-                      // std::cerr << details;
-                        TriggerRetirement(slot->bridged_slot_id.load(
-                            std::memory_order_relaxed));
-                      });
+    const uint64_t ordinal = slot->ordinal.load(std::memory_order_relaxed);
+    const int vchan_id = slot->vchan_id.load(std::memory_order_relaxed);
+    // bridged_slot_id is the slot the original publisher should hear about.
+    // A bridge copies that id into the slot when it republishes.
+    const int32_t retirement_slot_id =
+        slot->bridged_slot_id.load(std::memory_order_relaxed);
+    if (ReleaseSubscriberObligation(slot, subscriber_id_, IsReliable(),
+                                    /*drop_ref=*/true, ordinal, vchan_id) &&
+        TryRetireSlot(slot)) {
+      TriggerRetirement(retirement_slot_id);
+    }
   }
+  NoteActiveMessageReleased();
+}
+
+void SubscriberImpl::ReleaseLookupMessage(MessageSlot *slot) {
+  DropLookupPin(slot);
+  NoteActiveMessageReleased();
+}
+
+void SubscriberImpl::FinishActiveRelease(ActiveMessage *am) {
+  std::lock_guard<std::recursive_mutex> lock(active_mutex_);
+  // Only a sealed message has a release to do.  Holders cannot change a sealed
+  // count, and the mutex keeps two releases from overlapping, so the seal is
+  // still ours here.
+  if (am->refs.load(std::memory_order_acquire) != ActiveMessage::kReleasing) {
+    return;
+  }
+  if (am->length != 0) {
+    // The message must be reset before releasing the slot, since another
+    // message might take the slot as soon as the pin is dropped.
+    const bool lookup = am->lookup_only;
+    am->ResetInternal();
+    if (lookup) {
+      ReleaseLookupMessage(am->slot);
+    } else {
+      RemoveActiveMessage(am->slot);
+    }
+  }
+  // Lift the seal only after the release is complete.  A hold on this message
+  // must see it released, which the mutex also guarantees.
+  am->refs.store(0, std::memory_order_release);
+}
+
+void SubscriberImpl::DropLookupPin(MessageSlot *slot) {
+  slot->sub_owners.Clear(subscriber_id_);
+  DecrementSlotRef(slot, false);
+}
+
+void SubscriberImpl::NoteActiveMessageReleased() {
   if (--num_active_messages_ < options_.MaxActiveMessages() &&
       options_.TriggerOnRelease()) {
     Trigger();
@@ -130,6 +157,86 @@ void SubscriberImpl::RemoveActiveMessage(MessageSlot *slot) {
       TriggerReliablePublishers();
     }
   }
+}
+
+std::shared_ptr<ActiveMessage>
+SubscriberImpl::HoldExistingMessage(MessageSlot *slot, bool consume,
+                                    bool *rejected) {
+  if (rejected != nullptr) {
+    *rejected = false;
+  }
+  if (slot == nullptr || slot->id < 0 ||
+      static_cast<size_t>(slot->id) >= active_messages_.size()) {
+    return nullptr;
+  }
+  std::lock_guard<std::recursive_mutex> lock(active_mutex_);
+  // A release on another thread may have cleared the ownership bit since the
+  // search set it.  Our pin needs it, so set it again under the mutex.
+  slot->sub_owners.Set(subscriber_id_);
+  std::shared_ptr<ActiveMessage> &existing = active_messages_[slot->id];
+  for (;;) {
+    int held = existing->refs.load(std::memory_order_acquire);
+    if (held == ActiveMessage::kReleasing) {
+      // The last holder dropped its reference and is waiting for this mutex.
+      // Do its release now, then the slot is free.  The release clears the
+      // ownership bit, so set it again.
+      FinishActiveRelease(existing.get());
+      slot->sub_owners.Set(subscriber_id_);
+      continue;
+    }
+    if (held <= 0) {
+      return nullptr;
+    }
+    if (existing->refs.compare_exchange_weak(held, held + 1,
+                                             std::memory_order_acq_rel,
+                                             std::memory_order_acquire)) {
+      break;
+    }
+  }
+  const uint64_t ordinal = slot->ordinal.load(std::memory_order_relaxed);
+  if (existing->length == 0 || existing->ordinal != ordinal) {
+    // Our hold is never the last one, so this does not release anything.
+    existing->DecRef();
+    if (rejected != nullptr) {
+      *rejected = true;
+    }
+    return nullptr;
+  }
+  // Only the holder that drops the last reference reads this flag, and that
+  // cannot happen while this hold is still counted.
+  if (consume) {
+    existing->lookup_only = false;
+  }
+  DecrementSlotRef(slot, false);
+  return existing;
+}
+
+std::shared_ptr<ActiveMessage>
+SubscriberImpl::ActivateLookup(MessageSlot *slot) {
+  std::shared_ptr<ActiveMessage> &msg = active_messages_[slot->id];
+  msg->Set(slot->message_size.load(std::memory_order_relaxed),
+           GetBufferAddress(slot),
+           slot->ordinal.load(std::memory_order_relaxed), Timestamp(slot),
+           slot->vchan_id.load(std::memory_order_relaxed), false, false);
+  if (msg->length == 0) {
+    // max_active_messages is reached.  The lookup counted nothing, so only its
+    // slot pin needs dropping.  Unlike a read, a lookup did not clear the
+    // subscriber's unread bit, so it must not restore it.
+    DropLookupPin(slot);
+    return nullptr;
+  }
+  msg->lookup_only = true;
+  return msg;
+}
+
+void SubscriberImpl::RetainActiveMessage(
+    const std::shared_ptr<ActiveMessage> &msg) {
+  if (!RetainsActiveMessage() || msg == nullptr || active_message_ == msg) {
+    return;
+  }
+  ClearActiveMessage();
+  active_message_ = msg;
+  msg->IncRef();
 }
 
 void SubscriberImpl::PopulateActiveSlots(InPlaceAtomicBitset &bits) {

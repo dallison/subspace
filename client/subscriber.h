@@ -111,6 +111,20 @@ public:
 
   bool AddActiveMessage(MessageSlot *slot);
   void RemoveActiveMessage(MessageSlot *slot);
+  // Drops a FindMessage pin: the slot reference and the active-message count,
+  // but not the delivery obligation.
+  void ReleaseLookupMessage(MessageSlot *slot);
+  // Drops the slot reference of a lookup that did not end up holding a message,
+  // and clears this subscriber's ownership of the slot.  The delivery obligation
+  // is untouched.
+  void DropLookupPin(MessageSlot *slot);
+
+  // Performs the release of am after its last reference was dropped.  The
+  // caller may be any thread, and it holds no lock.  Takes active_mutex_, which
+  // HoldExistingMessage also takes, so the release cannot interleave with a read
+  // or find that is deciding whether to share the hold.  Does nothing unless am
+  // is sealed, so a second caller is harmless.
+  void FinishActiveRelease(ActiveMessage *am);
 
   int NumActiveMessages() const { return num_active_messages_; }
   int MaxActiveMessages() const { return options_.MaxActiveMessages(); }
@@ -149,9 +163,16 @@ public:
   bool DiscardRecoveredQueueEntries(InPlaceSlotQueue &queue);
 
   void IgnoreActivation(MessageSlot *slot) {
-    RememberOrdinal(slot->ordinal.load(std::memory_order_relaxed),
-                    slot->vchan_id.load(std::memory_order_relaxed));
-    DecrementSlotRef(slot, true);
+    const uint64_t ordinal = slot->ordinal.load(std::memory_order_relaxed);
+    const int vchan_id = slot->vchan_id.load(std::memory_order_relaxed);
+    RememberOrdinal(ordinal, vchan_id);
+    // Activations are delivered to the same audience as other messages. Finish
+    // the obligation without a retirement notification; the retired bit is
+    // enough for the publisher to reuse the slot.
+    if (ReleaseSubscriberObligation(slot, subscriber_id_, IsReliable(),
+                                    /*drop_ref=*/true, ordinal, vchan_id)) {
+      TryRetireSlot(slot);
+    }
     slot->flags.fetch_or(kMessageSeen, std::memory_order_relaxed);
     if (IsReliable()) {
       slot->flags.fetch_or(kMessageSeenByReliable, std::memory_order_relaxed);
@@ -185,6 +206,27 @@ public:
     active_message_.reset();
   }
 
+  // The slot has already been pinned by a read or a find.  If this subscriber
+  // already holds that message, share its ActiveMessage and drop the extra
+  // pin.  consume is true for a read, which makes the eventual release drop
+  // the delivery obligation.  On success the returned message has one extra
+  // reference that the caller drops after wrapping it in a Message.  Returns
+  // nullptr when nothing is held, and the caller then activates the object.
+  // When a different message is held, sets *rejected and returns nullptr; the
+  // caller still owns its pin.  This does not happen in practice: a hold keeps
+  // the slot pinned, so its ordinal cannot change under it.
+  std::shared_ptr<ActiveMessage> HoldExistingMessage(MessageSlot *slot,
+                                                     bool consume,
+                                                     bool *rejected);
+
+  // Wraps a slot just pinned by FindMessage.  Returns nullptr, and releases
+  // the pin, when max_active_messages is already reached.
+  std::shared_ptr<ActiveMessage> ActivateLookup(MessageSlot *slot);
+
+  // Makes msg the message retained between reads, when this subscriber keeps
+  // one.  A no-op when msg is already retained.
+  void RetainActiveMessage(const std::shared_ptr<ActiveMessage> &msg);
+
   std::shared_ptr<ActiveMessage> SetActiveMessage(size_t len, MessageSlot *slot,
                                                   const void *buf, uint64_t ord,
                                                   int64_t ts, int vchan_id,
@@ -200,10 +242,15 @@ public:
   }
 
   void DecrementSlotRef(MessageSlot *slot, bool retire) {
+    const int32_t retirement_slot_id =
+        slot->bridged_slot_id.load(std::memory_order_relaxed);
     AtomicIncRefCount(slot, IsReliable(), -1,
                       slot->ordinal.load(std::memory_order_relaxed) &
                           kOrdinalMask,
-                      slot->vchan_id.load(std::memory_order_relaxed), retire);
+                      slot->vchan_id.load(std::memory_order_relaxed), retire,
+                      [this, retirement_slot_id]() {
+                        TriggerRetirement(retirement_slot_id);
+                      });
   }
 
   bool SlotExpired(MessageSlot *slot, uint32_t ordinal) {
@@ -390,6 +437,7 @@ private:
   }
 
   OrdinalTracker &GetOrdinalTracker(int vchan_id);
+  void NoteActiveMessageReleased();
 
   std::string ResolvedName() const override {
     return IsVirtual() ? options_.mux : Name();
@@ -417,6 +465,11 @@ private:
   // subscriber is created to avoid memory allocation for every message we
   // receive.
   std::vector<std::shared_ptr<ActiveMessage>> active_messages_;
+  // Serializes the release of a message on any thread with the read and find
+  // paths that take a hold on one.  Recursive, because a hold can finish a
+  // pending release on its own thread.  Never held while waiting for the client
+  // lock, so a publisher waiting on a slot cannot block a release.
+  std::recursive_mutex active_mutex_;
 
   // The subscriber holds on to an active message for the slot it has just
   // read.

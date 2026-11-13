@@ -18,23 +18,43 @@ void ActiveMessage::ResetInternal() {
   vchan_id = -1;
   is_activation = false;
   checksum_error = false;
+  lookup_only = false;
 }
 
-void ActiveMessage::Release(int ref_count) {
-  if (sub.expired()) {
-    return;
-  }
-  std::shared_ptr<details::SubscriberImpl> subr = sub.lock();
-  if (length != 0 && ref_count == 0) {
-    // The message must be reset before releasing the slot since another message
-    // might take the slot once we release and before we reset it.
-    ResetInternal();
-    subr->RemoveActiveMessage(slot);
+void ActiveMessage::DecRef() {
+  int held = refs.load(std::memory_order_acquire);
+  for (;;) {
+    if (held > 1) {
+      if (refs.compare_exchange_weak(held, held - 1, std::memory_order_acq_rel,
+                                     std::memory_order_acquire)) {
+        return;
+      }
+    } else if (held == 1) {
+      if (refs.compare_exchange_weak(held, kReleasing,
+                                     std::memory_order_acq_rel,
+                                     std::memory_order_acquire)) {
+        // We dropped the last reference.  The subscriber performs the release
+        // under its active_mutex_.  If the subscriber is gone there is nothing to
+        // release against, so just unseal.
+        std::shared_ptr<details::SubscriberImpl> subr = sub.lock();
+        if (subr != nullptr) {
+          subr->FinishActiveRelease(this);
+        } else {
+          refs.store(0, std::memory_order_release);
+        }
+        return;
+      }
+    } else {
+      // Nothing is held (or the message is sealed and another thread owns the
+      // release).
+      return;
+    }
   }
 }
 
 void ActiveMessage::Set(size_t len, const void *buf, uint64_t ord, int64_t ts,
                           int vid, bool activation, bool cs_error) {
+  lookup_only = false;
   length = len;
   buffer = buf;
   ordinal = ord;

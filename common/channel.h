@@ -177,7 +177,10 @@ constexpr int kDefaultSubscriberQueueSize = 16;
 constexpr uint64_t kDefaultSubscriberQueueArenaSize = 64'000;
 constexpr size_t kDefaultMaxAvailableSlotQueueCapacity = 1024;
 constexpr size_t kMaxSlotQueueCasAttempts = 64;
-constexpr uint32_t kChannelControlBlockVersion = 5;
+// Bumped when the slot retirement field became a publish-time countdown and
+// MessageSlot gained the per-subscriber obligation bitset. Older clients must
+// not map a version 6 control block.
+constexpr uint32_t kChannelControlBlockVersion = 6;
 constexpr size_t kMaxChannelControlBlockSize = 1ULL << 30;
 
 // This limits the number of virtual channels.  Each virtual channel
@@ -212,12 +215,16 @@ constexpr uint64_t kPubOwned = 1ULL << 63;
 constexpr uint64_t kRefsMask = (1ULL << 20) - 1; // 20 bits
 constexpr uint64_t kReliableRefsMask = ((1ULL << 10) - 1)
                                        << kReliableRefCountShift;
-constexpr uint64_t kRetiredRefsSize = 10;
-constexpr uint64_t kRetiredRefsMask = (1ULL << kRetiredRefsSize) - 1;
-constexpr uint64_t kRetiredRefsShift = 20;
+// Subscribers who were delivered this message and have not yet finished with
+// it. Set to that count when the message is published and decremented as each
+// of them releases the slot or disconnects. The slot is retired at zero.
+// A subscriber who joins later is not counted, so they cannot hold the slot.
+constexpr uint64_t kPendingSize = 10;
+constexpr uint64_t kPendingMask = (1ULL << kPendingSize) - 1;
+constexpr uint64_t kPendingShift = 20;
 
-// Virtual channel ID is just above retired refs and is 10 bits long.
-constexpr uint64_t kVchanIdShift = kRetiredRefsShift + kRetiredRefsSize;
+// Virtual channel ID is just above the pending count and is 10 bits long.
+constexpr uint64_t kVchanIdShift = kPendingShift + kPendingSize;
 constexpr uint64_t kVchanIdSize = 10;
 constexpr uint64_t kVchanIdMask = (1ULL << kVchanIdSize) - 1;
 
@@ -231,11 +238,14 @@ constexpr uint64_t kOrdinalShift = 40;
 
 // Combine an ordinal and a vchan_id into a single 64 bit field, shifted
 // to the correct position for the refs field.
-inline uint64_t BuildRefsBitField(uint64_t ordinal, int vchan_id,
-                                  int retired_refs) {
+inline int PendingCount(uint64_t refs) {
+  return static_cast<int>((refs >> kPendingShift) & kPendingMask);
+}
+
+inline uint64_t BuildRefsBitField(uint64_t ordinal, int vchan_id, int pending) {
   return ((ordinal & kOrdinalMask) << kOrdinalShift) |
          (ordinal == 0 ? 0 : ((vchan_id & kVchanIdMask) << kVchanIdShift)) |
-         ((retired_refs & kRetiredRefsMask) << kRetiredRefsShift);
+         ((static_cast<uint64_t>(pending) & kPendingMask) << kPendingShift);
 }
 std::string DecodedRefsBitField(uint64_t refs);
 
@@ -284,6 +294,9 @@ struct MessageSlot {
   std::atomic<uint32_t> flags;
   std::atomic<int32_t>
       bridged_slot_id; // Slot ID of other side of bridge.
+  // Subscribers still obliged to decrement the pending count for the message
+  // currently in this slot. Empty while a publisher owns the slot.
+  AtomicBitSet<kMaxSlotOwners> pending_subs;
 
   void Dump(std::ostream &os) const;
 };
@@ -301,10 +314,16 @@ static_assert(offsetof(MessageSlot, flags) ==
               offsetof(MessageSlot, timestamp) + sizeof(std::atomic<uint64_t>));
 static_assert(offsetof(MessageSlot, bridged_slot_id) ==
               offsetof(MessageSlot, flags) + sizeof(std::atomic<uint32_t>));
-static_assert(sizeof(MessageSlot) == offsetof(MessageSlot, bridged_slot_id) +
-                                         sizeof(std::atomic<int32_t>));
-// The default owner count keeps the historical shared-memory layout.
-static_assert(kMaxSlotOwners != 1024 || sizeof(MessageSlot) == 184);
+static_assert(offsetof(MessageSlot, pending_subs) ==
+              ((offsetof(MessageSlot, bridged_slot_id) +
+                sizeof(std::atomic<int32_t>) + 7) &
+               ~size_t{7}));
+static_assert(sizeof(MessageSlot) ==
+              offsetof(MessageSlot, pending_subs) +
+                  sizeof(AtomicBitSet<kMaxSlotOwners>));
+// 1024 owners: the original 184-byte slot plus one 136-byte obligation bitset
+// placed on an 8-byte boundary (4 bytes of padding after bridged_slot_id).
+static_assert(kMaxSlotOwners != 1024 || sizeof(MessageSlot) == 320);
 
 struct ActiveSlot {
   MessageSlot *slot;
@@ -1266,11 +1285,25 @@ public:
 
   bool TryRetireSlot(MessageSlot *slot);
 
+  // Drop subscriber `owner`'s obligation to the message in `slot` and, when
+  // `drop_ref` is set, one reference. Returns false when the slot is
+  // publisher-owned or holds a different message. Does not set the retired
+  // bit; the caller uses TryRetireSlot.
+  bool ReleaseSubscriberObligation(MessageSlot *slot, int owner, bool reliable,
+                                   bool drop_ref, uint64_t ordinal,
+                                   int vchan_id);
+
+  // A subscriber removed while this slot was still publisher-owned could not
+  // decrement pending. Drop those obligations now that the message is
+  // committed, including an ID reused by a subscriber on a virtual channel
+  // that was not delivered this message.
+  void ReleaseDepartedObligations(MessageSlot *slot);
+
   // Whether `refs`, read from `slot`, show a slot that holds no message or one
-  // that every subscriber has seen and released.  A slot's retired bit is set
-  // after the subscriber retiring it releases it, so a publisher can reuse the
-  // slot in between and the bit then stands for a message nobody has seen.
-  // Check the refs before taking a slot for its retired bit.
+  // that every subscriber delivered at publish time has finished with. A
+  // slot's retired bit is set after that countdown reaches zero, so a publisher
+  // can reuse the slot in between and the bit then stands for a message nobody
+  // has seen. Check the refs before taking a slot for its retired bit.
   bool RefsShowRetired(const MessageSlot *slot, uint64_t refs) const;
 
   int NumSubscribers(int vchan_id) const {

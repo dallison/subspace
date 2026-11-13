@@ -206,14 +206,14 @@ std::string DecodedRefsBitField(uint64_t refs) {
   std::string result;
   int ref_count = refs & kRefCountMask;
   int reliable_ref_count = (refs >> kReliableRefCountShift) & kRefCountMask;
-  int retired_refs = (refs >> kRetiredRefsShift) & kRetiredRefsMask;
+  int pending = PendingCount(refs);
   int vchan_id = (refs >> kVchanIdShift) & kVchanIdMask;
   uint64_t ordinal = (refs >> kOrdinalShift) & kOrdinalMask;
 
   absl::StrAppendFormat(&result,
                         "ref_count: %d, reliable_ref_count: %d, "
-                        "retired_refs: %d, vchan_id: %d, ordinal: %d",
-                        ref_count, reliable_ref_count, retired_refs, vchan_id,
+                        "pending: %d, vchan_id: %d, ordinal: %d",
+                        ref_count, reliable_ref_count, pending, vchan_id,
                         ordinal);
   return result;
 }
@@ -256,25 +256,21 @@ bool Channel::AtomicIncRefCount(MessageSlot *slot, bool reliable, int inc,
       new_reliable_refs += inc;
     }
     ref &= ~kPubOwned;
-    int retired_refs = (ref >> kRetiredRefsShift) & kRetiredRefsMask;
-    if (retire) {
-      retired_refs++;
+    int pending = PendingCount(ref);
+    if (retire && pending > 0) {
+      pending--;
     }
-    uint64_t new_ref = BuildRefsBitField(ref_ord, ref_vchan_id, retired_refs) |
+    uint64_t new_ref = BuildRefsBitField(ref_ord, ref_vchan_id, pending) |
                        (new_reliable_refs << kReliableRefCountShift) | new_refs;
     if (slot->refs.compare_exchange_weak(ref, new_ref,
                                          std::memory_order_acq_rel,
                                          std::memory_order_relaxed)) {
-      // std::string details = absl::StrFormat(
-      //   "%d: AtomicIncRefCount: %s slot %d ordinal %d retired_refs: %d NumSubscribers: %d retire: %d\n", getpid(), Name(), slot->id, ordinal, retired_refs, NumSubscribers(ref_vchan_id), retire);
-      // std::cerr << details;
-      if (retire && new_refs == 0 && new_reliable_refs == 0 &&
-          retired_refs >= NumSubscribers(ref_vchan_id) &&
-          RetiredSlots().SetWasClear(slot->id)) {
-        // All subscribers have seen the slot, retire it.
+      // A reference dropping to zero retires the slot once every subscriber
+      // who was delivered the message has finished with it. `retire` covers a
+      // caller that decremented pending without also dropping a reference.
+      if ((retire || inc < 0) && new_refs == 0 && new_reliable_refs == 0 &&
+          pending == 0 && RetiredSlots().SetWasClear(slot->id)) {
         if (retire_callback) {
-          // std::cerr << "Calling retire callback for slot " << slot->id
-          //           << std::endl;
           retire_callback();
         }
       }
@@ -320,11 +316,9 @@ bool Channel::ForgetEvictedSlot(
   // above zero, so the unpin has to retire it.
   const uint64_t unpinned =
       slot->refs.fetch_sub(1, std::memory_order_acq_rel) - 1;
-  const uint64_t retired_refs =
-      (unpinned >> kRetiredRefsShift) & kRetiredRefsMask;
   if ((unpinned & kRefCountMask) == 0 &&
       ((unpinned >> kReliableRefCountShift) & kRefCountMask) == 0 &&
-      retired_refs >= static_cast<uint64_t>(NumSubscribers(vchan_id)) &&
+      PendingCount(unpinned) == 0 &&
       RetiredSlots().SetWasClear(slot->id) && retire_callback) {
     retire_callback(retirement_slot_id);
   }
@@ -428,6 +422,7 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
         // Owned by this publisher, clear slot.
         slot->ordinal.store(0, std::memory_order_relaxed);
         slot->refs.store(0, std::memory_order_release);
+        slot->pending_subs.ClearAll();
 
         // Clear the slot in all the subscriber bitsets.
         ccb_->subscribers.Traverse([this, slot](int sub_id) {
@@ -447,17 +442,137 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
 
       // The available-slot bitset is the authoritative delivery record. A
       // process may die before reading a published slot, in which case there
-      // is no sub_owners entry to clean up. Removing the subscriber changes
-      // the retirement threshold, so every unread slot must be re-evaluated.
+      // is no sub_owners entry to clean up. The obligation bitset is what
+      // still owes a pending decrement.
       available.ClearWasSet(i);
 
-      if (slot->sub_owners.ClearWasSet(owner)) {
-        // The subscriber has already been removed from NumSubscribers above,
-        // so lowering the retirement threshold accounts for this owner.
-        AtomicIncRefCount(slot, reliable, -1, 0, 0, false);
+      const bool drop_ref = slot->sub_owners.ClearWasSet(owner);
+      const uint64_t ordinal = slot->ordinal.load(std::memory_order_relaxed);
+      const int slot_vchan = slot->vchan_id.load(std::memory_order_relaxed);
+      if (ordinal == 0) {
+        slot->pending_subs.Clear(owner);
+        continue;
+      }
+      if (drop_ref || slot->pending_subs.IsSet(owner)) {
+        ReleaseSubscriberObligation(slot, owner, reliable, drop_ref, ordinal,
+                                    slot_vchan);
       }
     }
   }
+}
+
+bool Channel::ReleaseSubscriberObligation(MessageSlot *slot, int owner,
+                                          bool reliable, bool drop_ref,
+                                          uint64_t ordinal, int vchan_id) {
+  const uint64_t want_ord = ordinal & kOrdinalMask;
+  for (;;) {
+    uint64_t ref = slot->refs.load(std::memory_order_acquire);
+    if ((ref & kPubOwned) != 0) {
+      if (drop_ref) {
+        slot->sub_owners.Clear(owner);
+      }
+      return false;
+    }
+    const uint64_t ref_ord = (ref >> kOrdinalShift) & kOrdinalMask;
+    int ref_vchan_id = (ref >> kVchanIdShift) & kVchanIdMask;
+    if (ref_vchan_id == kVchanIdMask) {
+      ref_vchan_id = -1;
+    }
+    if (want_ord != 0 && ref_ord != 0 && ref_ord != want_ord) {
+      if (drop_ref) {
+        slot->sub_owners.Clear(owner);
+      }
+      return false;
+    }
+    if (want_ord != 0 && ref_ord != 0 && ref_vchan_id != vchan_id) {
+      if (drop_ref) {
+        slot->sub_owners.Clear(owner);
+      }
+      return false;
+    }
+
+    // Take the obligation before the CAS so two releasers cannot both
+    // decrement. If the slot changes before the CAS lands, put the bit back
+    // when it now belongs to a committed newer message.
+    const bool owed = slot->pending_subs.ClearWasSet(owner);
+    const uint64_t again = slot->refs.load(std::memory_order_acquire);
+    if (again != ref) {
+      if (owed) {
+        // The bit we cleared may belong to the message a publisher is
+        // installing. Put it back. ClearAll during that publish wipes a
+        // restore that still belongs to the previous message, and a restore
+        // of a bit the publisher just set matches the count it recorded.
+        slot->pending_subs.Set(owner);
+      }
+      if (drop_ref &&
+          ((again & kPubOwned) != 0 ||
+           ((again >> kOrdinalShift) & kOrdinalMask) != want_ord)) {
+        slot->sub_owners.Clear(owner);
+        return false;
+      }
+      continue;
+    }
+
+    uint64_t new_refs = ref & kRefCountMask;
+    uint64_t new_reliable_refs =
+        (ref >> kReliableRefCountShift) & kRefCountMask;
+    const bool drop_a_ref = drop_ref && new_refs != 0;
+    if (drop_a_ref) {
+      new_refs -= 1;
+      if (reliable && new_reliable_refs > 0) {
+        new_reliable_refs -= 1;
+      }
+    }
+    int pending = PendingCount(ref);
+    if (owed && pending > 0) {
+      pending--;
+    }
+    if (!owed && !drop_a_ref) {
+      if (drop_ref) {
+        slot->sub_owners.Clear(owner);
+      }
+      return true;
+    }
+    const uint64_t new_ref = BuildRefsBitField(ref_ord, ref_vchan_id, pending) |
+                             (new_reliable_refs << kReliableRefCountShift) |
+                             new_refs;
+    if (slot->refs.compare_exchange_weak(ref, new_ref,
+                                         std::memory_order_acq_rel,
+                                         std::memory_order_relaxed)) {
+      if (drop_ref) {
+        slot->sub_owners.Clear(owner);
+      }
+      return true;
+    }
+    if (owed) {
+      slot->pending_subs.Set(owner);
+    }
+  }
+}
+
+void Channel::ReleaseDepartedObligations(MessageSlot *slot) {
+  const uint64_t ordinal = slot->ordinal.load(std::memory_order_relaxed);
+  const int vchan_id = slot->vchan_id.load(std::memory_order_relaxed);
+  if (ordinal == 0) {
+    return;
+  }
+  // Release during the walk. Traverse shifts past the bit it just reported
+  // before loading again, and the release only clears that subscriber's bit.
+  slot->pending_subs.Traverse([this, slot, ordinal, vchan_id](size_t sub_id) {
+    if (ccb_->subscribers.IsSet(sub_id)) {
+      // User IDs are first-fit and shared by every virtual channel on a mux.
+      // A subscriber removed while this slot was publisher-owned can be
+      // reissued to a virtual channel that was not delivered the message
+      // before this commit. That subscriber must not keep the countdown.
+      const int sub_vchan = ccb_->sub_vchan_ids[sub_id];
+      if (sub_vchan == -1 || vchan_id == -1 || sub_vchan == vchan_id) {
+        return;
+      }
+    }
+    ReleaseSubscriberObligation(slot, static_cast<int>(sub_id),
+                                /*reliable=*/false, /*drop_ref=*/false, ordinal,
+                                vchan_id);
+  });
 }
 
 bool Channel::RefsShowRetired(const MessageSlot *slot, uint64_t refs) const {
@@ -467,12 +582,7 @@ bool Channel::RefsShowRetired(const MessageSlot *slot, uint64_t refs) const {
   if (slot->ordinal.load(std::memory_order_relaxed) == 0) {
     return true;
   }
-  int vchan_id = (refs >> kVchanIdShift) & kVchanIdMask;
-  if (vchan_id == kVchanIdMask) {
-    vchan_id = -1;
-  }
-  const uint64_t retired_refs = (refs >> kRetiredRefsShift) & kRetiredRefsMask;
-  return retired_refs >= static_cast<uint64_t>(NumSubscribers(vchan_id));
+  return PendingCount(refs) == 0;
 }
 
 bool Channel::TryRetireSlot(MessageSlot *slot) {
@@ -488,15 +598,7 @@ bool Channel::TryRetireSlot(MessageSlot *slot) {
   const uint64_t ref_count = refs & kRefCountMask;
   const uint64_t reliable_ref_count =
       (refs >> kReliableRefCountShift) & kRefCountMask;
-  const uint64_t retired_refs =
-      (refs >> kRetiredRefsShift) & kRetiredRefsMask;
-  int ref_vchan_id = (refs >> kVchanIdShift) & kVchanIdMask;
-  if (ref_vchan_id == kVchanIdMask) {
-    ref_vchan_id = -1;
-  }
-
-  if (ref_count != 0 || reliable_ref_count != 0 ||
-      retired_refs < static_cast<uint64_t>(NumSubscribers(ref_vchan_id))) {
+  if (ref_count != 0 || reliable_ref_count != 0 || PendingCount(refs) != 0) {
     return false;
   }
   return RetiredSlots().SetWasClear(slot->id);

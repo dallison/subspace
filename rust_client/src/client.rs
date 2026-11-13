@@ -1064,6 +1064,7 @@ impl Subscriber {
 
         let slot = sub_impl.channel.slot_ref(slot_idx);
         if slot.message_size() == 0 {
+            sub_impl.drop_lookup_pin(slot_idx);
             return Ok(Message::default());
         }
 
@@ -1073,6 +1074,23 @@ impl Subscriber {
         let timestamp = slot.timestamp();
         let vchan_id = slot.vchan_id() as i32;
         let slot_id = slot.id;
+        let am = Arc::clone(&sub_impl.active_messages[slot_idx]);
+
+        // The search pinned the slot. The returned message owns that pin and
+        // releases it on drop, without consuming the delivery obligation.
+        if sub_impl.acquire_active_message(slot_idx) {
+            sub_impl.decrement_slot_ref(slot_idx, ordinal, vchan_id, false);
+        } else if !sub_impl.add_active_message() {
+            // max_active_messages is reached.  A lookup does not clear the
+            // unread bit, so only the pin is dropped.  Restoring the bit would
+            // redeliver a message this subscriber already read.
+            sub_impl.drop_lookup_pin(slot_idx);
+            sub_impl.channel.slot = None;
+            return Ok(Message::default());
+        } else {
+            sub_impl.lookup_only[slot_idx].store(true, Ordering::Relaxed);
+            am.inc_ref();
+        }
 
         Ok(Message {
             length: msg_size,
@@ -1083,7 +1101,7 @@ impl Subscriber {
             is_activation: false,
             slot_id,
             checksum_error: false,
-            active_message: None,
+            active_message: Some(am),
         })
     }
 
@@ -1891,13 +1909,35 @@ fn read_message_internal(
     let vchan_id = frozen_vchan_id;
     let slot_id = slot.id;
 
-    sub.clear_active_message();
-
-    if !sub.add_active_message() {
-        sub.unread_slot(new_idx, frozen_ordinal, frozen_vchan_id);
-        sub.channel.slot = old_slot;
-        report_if_subscriber_stuck(sub);
-        return Ok(Message::default());
+    // A find may already hold this slot. Share that hold instead of counting
+    // the message twice; this read takes over releasing the delivery obligation.
+    // Finish a release still pending on this slot first, then take the slot
+    // again.  That release may clear this subscriber's ownership bit, which
+    // NextSlot just set for its pin, so set it again.
+    let shared = sub.acquire_active_message(new_idx);
+    if shared {
+        sub.lookup_only[new_idx].store(false, Ordering::Relaxed);
+        sub.decrement_slot_ref(new_idx, frozen_ordinal, frozen_vchan_id, false);
+        if sub.options.keep_active_message
+            && sub
+                .kept_active_message
+                .as_ref()
+                .map(|(idx, _)| *idx)
+                != Some(new_idx)
+        {
+            sub.clear_active_message();
+            sub.active_messages[new_idx].inc_ref();
+            let am = Arc::clone(&sub.active_messages[new_idx]);
+            sub.kept_active_message = Some((new_idx, am));
+        }
+    } else {
+        sub.clear_active_message();
+        if !sub.add_active_message() {
+            sub.unread_slot(new_idx, frozen_ordinal, frozen_vchan_id);
+            sub.channel.slot = old_slot;
+            report_if_subscriber_stuck(sub);
+            return Ok(Message::default());
+        }
     }
     sub.note_unstuck();
 
@@ -1932,15 +1972,23 @@ fn read_message_internal(
     sub.claim_slot(new_idx, vchan_id, mode == ReadMode::ReadNewest);
 
     if checksum_error && !sub.options.pass_checksum_errors {
+        if shared {
+            // Drop the reference try_hold took. An earlier find keeps its own.
+            sub.active_messages[new_idx].dec_ref();
+        } else {
+            // add_active_message counted this slot, but no Message owns it.
+            sub.remove_active_message(new_idx);
+        }
         return Err(SubspaceError::ChecksumError);
     }
 
     let am = &sub.active_messages[new_idx];
-    am.inc_ref();
-
-    if sub.options.keep_active_message {
+    if !shared {
         am.inc_ref();
-        sub.kept_active_message = Some((new_idx, Arc::clone(am)));
+        if sub.options.keep_active_message {
+            am.inc_ref();
+            sub.kept_active_message = Some((new_idx, Arc::clone(am)));
+        }
     }
 
     Ok(Message {

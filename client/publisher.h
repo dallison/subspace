@@ -7,7 +7,7 @@
 #include "client/client_channel.h"
 #include "client/message.h"
 
-#include <unordered_map>
+#include <vector>
 
 namespace subspace {
 class Publisher;
@@ -28,7 +28,8 @@ public:
                       subscriber_queue_arena_size, channel_id, vchan_id,
                       std::move(session_id), std::move(type),
                       std::move(reload), user_id, group_id),
-        publisher_id_(publisher_id), options_(options) {}
+        publisher_id_(publisher_id), options_(options),
+        lease_ids_(num_slots > 0 ? num_slots : 0, 0) {}
   ~PublisherImpl() override { Unmap(); }
 
   bool IsReliable() const { return options_.IsReliable(); }
@@ -133,7 +134,7 @@ private:
   uint64_t RegisterLease(MessageSlot *slot);
   MessageSlot *FindLease(int32_t slot_id, uint64_t lease_id) const;
   void RemoveLease(int32_t slot_id);
-  size_t NumLeases() const { return leased_slots_.size(); }
+  size_t NumLeases() const { return num_leases_; }
   int32_t MaxOutstandingSlotLeases() const {
     return options_.MaxOutstandingSlotLeases();
   }
@@ -210,7 +211,10 @@ private:
   std::function<absl::StatusOr<int64_t>(void *buffer, int64_t size)>
       on_send_callback_ = nullptr;
   ChecksumCallback checksum_callback_ = nullptr;
-  std::unordered_map<int32_t, uint64_t> leased_slots_;
+  // Lease id for each slot, or 0 if the slot is not leased.  Indexed by slot
+  // id so that taking a lease does not allocate.
+  std::vector<uint64_t> lease_ids_;
+  size_t num_leases_ = 0;
   uint64_t next_lease_id_ = 1;
 
 };

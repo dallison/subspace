@@ -1477,61 +1477,88 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     subscriber->SetSlot(nullptr);
     return Message();
   }
-  // We have a new slot, clear the subscriber's slot.
-  subscriber->ClearActiveMessage();
-
-  // Allocate a new active message for the slot.
-  auto msg = subscriber->SetActiveMessage(
-      delivered_message_size, new_slot, subscriber->GetCurrentBufferAddress(),
-      subscriber->CurrentOrdinal(), subscriber->Timestamp(new_slot),
-      new_slot->vchan_id.load(std::memory_order_relaxed), is_activation,
-      checksum_error);
-
-  // If we are unable to allocate a new message (due to message limits)
-  // restore the slot so that we pick it up next time.
-  if (msg->length == 0) {
+  // A FindMessage may already hold this slot.  Share that hold instead of
+  // counting the message twice; the read takes over releasing its delivery
+  // obligation.
+  bool rejected = false;
+  auto msg = subscriber->HoldExistingMessage(new_slot, /*consume=*/true,
+                                             &rejected);
+  const bool shared = msg != nullptr;
+  if (rejected) {
+    // The read still owns its pin and unread bit.  Restore them so the next
+    // read picks the message up.
     subscriber->UnreadSlot(new_slot);
-    // Subscriber does not have a slot now but the slot it had is still active.
-    // Do not wrap the reusable ActiveMessage in an empty Message. A caller may
-    // retain that empty handle while this slot is retried, which would keep an
-    // extra reference after the ActiveMessage becomes valid and prevent its
-    // active-message count from being released.
-    ReportIfSubscriberStuck(subscriber);
+    subscriber->SetSlot(nullptr);
     return Message();
+  }
+  if (shared) {
+    subscriber->RetainActiveMessage(msg);
   } else {
-    subscriber->NoteUnstuck();
-    if (mode == ReadMode::kReadNext &&
-        subscriber->options_.DetectDroppedMessages()) {
-      int drops = subscriber->ConsumeQueueDrops();
-      // Explicit bounded queues report their own evictions. Their MPSC
-      // reservation order can differ from ordinal assignment under concurrent
-      // publishers, so an ordinal gap is not evidence of a dropped message.
-      // Queue-disabled and inherited-default subscribers retain ordinal-based
-      // detection because they deliver through the ordered bitset path.
-      if (subscriber->options_.SubscriberQueueSize() == 0) {
-        drops = std::max(
-            drops, subscriber->DetectDrops(
-                       new_slot->vchan_id.load(std::memory_order_relaxed)));
+    // We have a new slot, clear the subscriber's slot.
+    subscriber->ClearActiveMessage();
+
+    // Allocate a new active message for the slot.
+    msg = subscriber->SetActiveMessage(
+        delivered_message_size, new_slot, subscriber->GetCurrentBufferAddress(),
+        subscriber->CurrentOrdinal(), subscriber->Timestamp(new_slot),
+        new_slot->vchan_id.load(std::memory_order_relaxed), is_activation,
+        checksum_error);
+
+    // If we are unable to allocate a new message (due to message limits)
+    // restore the slot so that we pick it up next time.
+    if (msg->length == 0) {
+      subscriber->UnreadSlot(new_slot);
+      // Subscriber does not have a slot now but the slot it had is still
+      // active. Do not wrap the reusable ActiveMessage in an empty Message. A
+      // caller may retain that empty handle while this slot is retried, which
+      // would keep an extra reference after the ActiveMessage becomes valid
+      // and prevent its active-message count from being released.
+      ReportIfSubscriberStuck(subscriber);
+      return Message();
+    }
+  }
+  subscriber->NoteUnstuck();
+  if (mode == ReadMode::kReadNext &&
+      subscriber->options_.DetectDroppedMessages()) {
+    int drops = subscriber->ConsumeQueueDrops();
+    // Explicit bounded queues report their own evictions. Their MPSC
+    // reservation order can differ from ordinal assignment under concurrent
+    // publishers, so an ordinal gap is not evidence of a dropped message.
+    // Queue-disabled and inherited-default subscribers retain ordinal-based
+    // detection because they deliver through the ordered bitset path.
+    if (subscriber->options_.SubscriberQueueSize() == 0) {
+      drops = std::max(
+          drops, subscriber->DetectDrops(
+                     new_slot->vchan_id.load(std::memory_order_relaxed)));
+    }
+    if (drops > 0) {
+      auto it = dropped_message_callbacks_.find(subscriber);
+      if (it != dropped_message_callbacks_.end()) {
+        it->second(subscriber, drops);
       }
-      if (drops > 0) {
-        auto it = dropped_message_callbacks_.find(subscriber);
-        if (it != dropped_message_callbacks_.end()) {
-          it->second(subscriber, drops);
-        }
-        subscriber->RecordDroppedMessages(drops);
-        if (subscriber->options_.log_dropped_messages) {
-          logger_.Log(toolbelt::LogLevel::kWarning,
-                      "Dropped %d message%s on channel %s", drops,
-                      drops == 1 ? "" : "s", subscriber->Name().c_str());
-        }
+      subscriber->RecordDroppedMessages(drops);
+      if (subscriber->options_.log_dropped_messages) {
+        logger_.Log(toolbelt::LogLevel::kWarning,
+                    "Dropped %d message%s on channel %s", drops,
+                    drops == 1 ? "" : "s", subscriber->Name().c_str());
       }
     }
-    // We have a slot, claim it.
-    subscriber->ClaimSlot(
-        new_slot, new_slot->vchan_id.load(std::memory_order_relaxed),
-        mode == ReadMode::kReadNewest);
+  }
+  // We have a slot, claim it.
+  subscriber->ClaimSlot(
+      new_slot, new_slot->vchan_id.load(std::memory_order_relaxed),
+      mode == ReadMode::kReadNewest);
+  if (shared) {
+    msg->length = static_cast<size_t>(delivered_message_size);
+    msg->is_activation = is_activation;
+    msg->checksum_error = checksum_error;
   }
   auto ret_msg = Message(msg);
+  if (shared) {
+    // Message took its own reference.  Drop the one HoldExistingMessage used
+    // to keep the slot alive across this function.
+    msg->DecRef();
+  }
   if (subscriber->IsBridge()) {
     // Bridge subscribers don't hold onto the message in the subscriber to allow
     // timely slot retirement.  If they hold onto it, the slot would not be
@@ -1651,10 +1678,28 @@ ClientImpl::FindMessageInternal(SubscriberImpl *subscriber,
     // Not found.
     return Message();
   }
-  return Message(new_slot->message_size.load(std::memory_order_relaxed),
-                 subscriber->GetCurrentBufferAddress(),
-                 subscriber->CurrentOrdinal(), subscriber->Timestamp(),
-                 subscriber->VirtualChannelId(), false, new_slot->id, false);
+  // FindMessage pinned the slot.  The returned Message owns that pin and
+  // releases it when dropped, without consuming the delivery obligation, so a
+  // later ReadMessage can still deliver it.
+  bool rejected = false;
+  if (auto held = subscriber->HoldExistingMessage(new_slot, /*consume=*/false,
+                                                  &rejected)) {
+    Message msg(held);
+    held->DecRef();
+    return msg;
+  }
+  if (rejected) {
+    subscriber->DropLookupPin(new_slot);
+    subscriber->SetSlot(nullptr);
+    return Message();
+  }
+  auto msg = subscriber->ActivateLookup(new_slot);
+  if (msg == nullptr) {
+    ReportIfSubscriberStuck(subscriber);
+    return Message();
+  }
+  subscriber->NoteUnstuck();
+  return Message(msg);
 }
 
 absl::StatusOr<Message> ClientImpl::FindMessage(SubscriberImpl *subscriber,

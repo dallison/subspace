@@ -5231,6 +5231,161 @@ TEST_F(ClientTest, FindMessage) {
   }
 }
 
+// FindMessage used to pin every slot it returned and never release the pin, so
+// after a few finds the publisher could not reuse the ring.
+TEST_F(ClientTest, FindMessageReleasesSlot) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  absl::StatusOr<Publisher> pub =
+      pub_client.CreatePublisher("find_release", 256, 4);
+  ASSERT_OK(pub);
+  subspace::SubscriberOptions sub_opts;
+  sub_opts.SetMaxActiveMessages(1);
+  sub_opts.SetLogDroppedMessages(false);
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber("find_release", sub_opts);
+  ASSERT_OK(sub);
+
+  std::vector<uint64_t> timestamps;
+  for (int i = 0; i < 3; i++) {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_OK(buffer);
+    ASSERT_NE(nullptr, *buffer);
+    int len = snprintf(static_cast<char *>(*buffer), 256, "found %d", i);
+    absl::StatusOr<const Message> published = pub->PublishMessage(len + 1);
+    ASSERT_OK(published);
+    timestamps.push_back(published->timestamp);
+  }
+
+  for (int round = 0; round < 10; round++) {
+    for (uint64_t timestamp : timestamps) {
+      absl::StatusOr<const Message> found = sub->FindMessage(timestamp);
+      ASSERT_OK(found);
+      ASSERT_EQ(timestamp, found->timestamp);
+      ASSERT_GT(found->length, 0u);
+    }
+  }
+
+  // Finding a message does not consume it.
+  for (uint64_t timestamp : timestamps) {
+    absl::StatusOr<Message> msg = sub->ReadMessage();
+    ASSERT_OK(msg);
+    ASSERT_EQ(timestamp, msg->timestamp);
+  }
+
+  // The pins are gone, so the publisher can keep using the ring.
+  for (int i = 0; i < 8; i++) {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_OK(buffer);
+    ASSERT_NE(nullptr, *buffer);
+    ASSERT_OK(pub->PublishMessage(1));
+  }
+}
+
+// Two threads find and drop the same messages at once.  A drop that takes the
+// last hold on a slot races the other thread's find on that slot.  Every
+// returned message must be complete, and once they are all dropped the
+// subscriber must hold no active messages and still deliver each message.
+TEST_F(ClientTest, FindMessageConcurrentDropKeepsCountsBalanced) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  InitClient(sub_client);
+
+  absl::StatusOr<Publisher> pub =
+      pub_client.CreatePublisher("find_race", 256, 4);
+  ASSERT_OK(pub);
+  subspace::SubscriberOptions sub_opts;
+  sub_opts.SetMaxActiveMessages(2);
+  sub_opts.SetLogDroppedMessages(false);
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber("find_race", sub_opts);
+  ASSERT_OK(sub);
+
+  std::vector<uint64_t> timestamps;
+  for (int i = 0; i < 2; i++) {
+    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    ASSERT_OK(buffer);
+    absl::StatusOr<const Message> published = pub->PublishMessage(8);
+    ASSERT_OK(published);
+    timestamps.push_back(published->timestamp);
+  }
+
+  std::atomic<int> failures = 0;
+  std::vector<std::thread> threads;
+  for (int t = 0; t < 2; t++) {
+    threads.emplace_back([&sub, &timestamps, &failures, t]() {
+      for (int round = 0; round < 500; round++) {
+        uint64_t timestamp = timestamps[(round + t) % timestamps.size()];
+        absl::StatusOr<const Message> found = sub->FindMessage(timestamp);
+        if (!found.ok()) {
+          failures++;
+          continue;
+        }
+        // An empty result is allowed when max_active_messages is reached.
+        if (found->length > 0 && found->timestamp != timestamp) {
+          failures++;
+        }
+      }
+    });
+  }
+  for (std::thread &th : threads) {
+    th.join();
+  }
+  EXPECT_EQ(0, failures.load());
+  EXPECT_EQ(0, sub->NumActiveMessages());
+
+  for (uint64_t timestamp : timestamps) {
+    absl::StatusOr<Message> msg = sub->ReadMessage();
+    ASSERT_OK(msg);
+    ASSERT_EQ(timestamp, msg->timestamp);
+    ASSERT_GT(msg->length, 0u);
+  }
+}
+
+// A second find of a message that is still held shares the slot pin, including
+// when the subscriber is already at max_active_messages.
+TEST_F(ClientTest, FindMessageTwiceSharesSlot) {
+  subspace::Client pub_client;
+  subspace::Client sub_client;
+  ASSERT_OK(pub_client.Init(Socket()));
+  ASSERT_OK(sub_client.Init(Socket()));
+
+  absl::StatusOr<Publisher> pub =
+      pub_client.CreatePublisher("find_share", 256, 4);
+  ASSERT_OK(pub);
+  subspace::SubscriberOptions sub_opts;
+  sub_opts.SetMaxActiveMessages(1);
+  sub_opts.SetLogDroppedMessages(false);
+  absl::StatusOr<Subscriber> sub =
+      sub_client.CreateSubscriber("find_share", sub_opts);
+  ASSERT_OK(sub);
+
+  absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+  ASSERT_OK(buffer);
+  ASSERT_NE(nullptr, *buffer);
+  memcpy(*buffer, "shared", 6);
+  absl::StatusOr<const Message> published = pub->PublishMessage(6);
+  ASSERT_OK(published);
+
+  absl::StatusOr<Message> first = sub->FindMessage(published->timestamp);
+  ASSERT_OK(first);
+  ASSERT_EQ(published->timestamp, first->timestamp);
+  absl::StatusOr<Message> second = sub->FindMessage(published->timestamp);
+  ASSERT_OK(second);
+  ASSERT_EQ(published->timestamp, second->timestamp);
+  ASSERT_EQ(first->ordinal, second->ordinal);
+
+  first->Reset();
+  second->Reset();
+  absl::StatusOr<Message> msg = sub->ReadMessage();
+  ASSERT_OK(msg);
+  ASSERT_EQ(published->timestamp, msg->timestamp);
+}
+
 TEST_F(ClientTest, Mikael) {
   subspace::Client pub_client;
   subspace::Client sub_client;
@@ -5513,6 +5668,43 @@ TEST_F(ClientTest, SubscriberRemovalTriggersServerRetirement) {
   message.Reset();
 }
 
+// A subscriber that attaches after a slot has retired was not delivered that
+// message, so it must not keep the publisher from reclaiming the slot.
+TEST_F(ClientTest, LateSubscriberDoesNotBlockRetiredSlotReclaim) {
+  auto pub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+  auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+
+  auto pub = EVAL_AND_ASSERT_OK(pub_client->CreatePublisher(
+      "late_reclaim",
+      PubOpts(256, 16).SetNotifyRetirement(true).SetMaxOutstandingSlotLeases(2)));
+  auto sub = EVAL_AND_ASSERT_OK(sub_client->CreateSubscriber("late_reclaim"));
+
+  auto lease = EVAL_AND_ASSERT_OK(pub.AcquireBufferLease());
+  ASSERT_TRUE(lease);
+  memcpy(lease.buffer, "hello", 5);
+  ASSERT_OK(pub.PublishBufferLease(lease, 5));
+
+  auto message = EVAL_AND_ASSERT_OK(sub.ReadMessage());
+  ASSERT_EQ(5, message.length);
+  const int32_t slot_id = message.slot_id;
+  message.Reset();
+
+  const toolbelt::FileDescriptor &retirement_fd = pub.GetRetirementFd();
+  struct pollfd fd = {.fd = retirement_fd.Fd(), .events = POLLIN};
+  ASSERT_EQ(1, ::poll(&fd, 1, 1000));
+  int32_t retired = -1;
+  ASSERT_EQ(sizeof(retired),
+            ::read(fd.fd, &retired, sizeof(retired)));
+  EXPECT_EQ(slot_id, retired);
+
+  auto late_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+  auto late = EVAL_AND_ASSERT_OK(late_client->CreateSubscriber("late_reclaim"));
+  (void)late;
+
+  auto reclaimed = EVAL_AND_ASSERT_OK(pub.ReclaimBufferLease(slot_id));
+  EXPECT_TRUE(reclaimed);
+}
+
 TEST_F(ClientTest, SubscriberRemovalCanRacePublisherCommit) {
   auto pub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
   auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
@@ -5588,6 +5780,94 @@ TEST_F(ClientTest, SubscriberRemovalCanRacePublisherCommit) {
             ::read(retirement_fd.Fd(), &retired_slot, sizeof(retired_slot)));
   EXPECT_EQ(slot->id, retired_slot);
   EXPECT_EQ(0, ::poll(&fd, 1, 0));
+}
+
+// Subscriber IDs are first-fit and shared by every virtual channel on a mux.
+// A subscriber removed while a publish is in flight can be reissued to a
+// virtual channel that was not delivered the message. That subscriber must
+// not keep the slot's countdown.
+TEST_F(ClientTest, RecycledVirtualSubscriberDoesNotKeepPending) {
+  auto client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+  constexpr char kMux[] = "recycled_vchan_mux";
+  auto pub_a = EVAL_AND_ASSERT_OK(client->CreatePublisher(
+      "reuse_a", 256, 32, PubOpts().SetMux(kMux)));
+  auto pub_b = EVAL_AND_ASSERT_OK(client->CreatePublisher(
+      "reuse_b", 256, 32, PubOpts().SetMux(kMux)));
+  const int vchan_a = pub_a.VirtualChannelId();
+  const int vchan_b = pub_b.VirtualChannelId();
+  ASSERT_NE(vchan_a, vchan_b);
+  ASSERT_NE(-1, vchan_a);
+  ASSERT_NE(-1, vchan_b);
+
+  std::optional<Subscriber> sub_a = EVAL_AND_ASSERT_OK(
+      client->CreateSubscriber("reuse_a", SubOpts().SetMux(kMux)));
+
+  subspace::ServerChannel *channel_a = Server()->FindChannel("reuse_a");
+  ASSERT_NE(nullptr, channel_a);
+  ASSERT_TRUE(channel_a->IsVirtual());
+  subspace::ChannelMultiplexer *mux =
+      static_cast<subspace::VirtualChannel *>(channel_a)->GetMux();
+
+  int publisher_id = -1;
+  int subscriber_id = -1;
+  for (const auto &[id, user] : channel_a->GetUsers()) {
+    if (user == nullptr) {
+      continue;
+    }
+    if (user->IsPublisher()) {
+      publisher_id = id;
+    } else {
+      subscriber_id = id;
+    }
+  }
+  ASSERT_GE(publisher_id, 0);
+  ASSERT_GE(subscriber_id, 0);
+
+  subspace::MessageSlot *slot = nullptr;
+  for (int i = 0; i < mux->NumSlots(); ++i) {
+    subspace::MessageSlot *candidate = &mux->GetCcb()->slots[i];
+    if (candidate->refs.load(std::memory_order_acquire) ==
+        (subspace::kPubOwned | static_cast<uint64_t>(publisher_id))) {
+      slot = candidate;
+      break;
+    }
+  }
+  ASSERT_NE(nullptr, slot);
+
+  slot->ordinal.store(1, std::memory_order_relaxed);
+  slot->vchan_id.store(static_cast<int16_t>(vchan_a),
+                       std::memory_order_relaxed);
+  slot->pending_subs.ClearAll();
+  slot->pending_subs.Set(subscriber_id);
+  mux->BeginSubscriberQueuePublish(publisher_id);
+
+  // Cleanup observes the publisher-owned slot and leaves the obligation bit.
+  sub_a.reset();
+  EXPECT_TRUE(slot->pending_subs.IsSet(subscriber_id));
+  EXPECT_FALSE(mux->GetCcb()->subscribers.IsSet(subscriber_id));
+
+  auto sub_b = EVAL_AND_ASSERT_OK(
+      client->CreateSubscriber("reuse_b", SubOpts().SetMux(kMux)));
+  (void)sub_b;
+  subspace::ServerChannel *channel_b = Server()->FindChannel("reuse_b");
+  ASSERT_NE(nullptr, channel_b);
+  int recycled_id = -1;
+  for (const auto &[id, user] : channel_b->GetUsers()) {
+    if (user != nullptr && user->IsSubscriber()) {
+      recycled_id = id;
+    }
+  }
+  ASSERT_EQ(subscriber_id, recycled_id);
+  EXPECT_EQ(vchan_b, mux->GetSubVchanId(recycled_id));
+
+  slot->refs.store(subspace::BuildRefsBitField(1, vchan_a, 1),
+                   std::memory_order_release);
+  mux->ReleaseDepartedObligations(slot);
+  mux->EndSubscriberQueuePublish(publisher_id);
+
+  EXPECT_FALSE(slot->pending_subs.IsSet(subscriber_id));
+  EXPECT_EQ(0, subspace::PendingCount(slot->refs.load(std::memory_order_acquire)));
+  EXPECT_TRUE(mux->TryRetireSlot(slot));
 }
 
 // This tests retirement from the the publisher side using dropped messages.  We

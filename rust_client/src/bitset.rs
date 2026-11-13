@@ -63,6 +63,14 @@ impl<const WORDS: usize> AtomicBitSet<WORDS> {
             != 0
     }
 
+    pub fn num_bits(&self) -> usize {
+        self.num_bits
+    }
+
+    pub fn load_word(&self, index: usize) -> u64 {
+        self.bits[index].load(Ordering::Relaxed)
+    }
+
     pub fn is_set(&self, bit: usize) -> bool {
         let word = bit / 64;
         let offset = bit % 64;
