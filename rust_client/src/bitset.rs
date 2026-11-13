@@ -13,8 +13,18 @@ pub const fn bits_to_words(bits: usize) -> usize {
     }
 }
 
+/// Bytes before the `atomic<uint64_t>` words of an in-place bitset.
+///
+/// C++ `AtomicBitSet<0>` stores a `size_t` and then 64-bit atomics. On a
+/// 32-bit target `size_t` is 4 bytes, but the words still need 8-byte
+/// alignment, so the header is 8 bytes. `ldrexd`/`strexd` fault otherwise.
+fn in_place_bitset_header_size() -> usize {
+    let align = std::mem::align_of::<AtomicU64>();
+    (std::mem::size_of::<usize>() + align - 1) & !(align - 1)
+}
+
 pub fn sizeof_atomic_bitset(num_bits: usize) -> usize {
-    std::mem::size_of::<usize>() + std::mem::size_of::<AtomicU64>() * bits_to_words(num_bits)
+    in_place_bitset_header_size() + std::mem::size_of::<AtomicU64>() * bits_to_words(num_bits)
 }
 
 /// Fixed-size atomic bitset. Binary-compatible with C++ `AtomicBitSet<N>`.
@@ -160,7 +170,7 @@ impl InPlaceAtomicBitSet {
 
     fn word_ptr(&self, index: usize) -> *const AtomicU64 {
         unsafe {
-            (self.ptr as *const u8).add(std::mem::size_of::<usize>()) as *const AtomicU64
+            (self.ptr as *const u8).add(in_place_bitset_header_size()) as *const AtomicU64
         }
         .wrapping_add(index)
     }

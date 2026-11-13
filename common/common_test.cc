@@ -259,8 +259,16 @@ TEST(CommonTest, InPlaceSlotQueueDoesNotWaitAfterProducerReservationDeath) {
 
   // Model a producer that advanced tail from 0 to 1 and died before publishing
   // entry 0's sequence. No operation may wait indefinitely behind the hole.
+  //
+  // tail_ is the atomic after capacity_ (size_t) and head_. On a 32-bit target
+  // size_t is 4 bytes and head_ still needs 8-byte alignment, so 4 padding
+  // bytes sit between them. Stepping by sizeof(size_t) alone lands inside that
+  // padding, and the 64-bit atomic store faults on 32-bit ARM.
+  constexpr size_t kHeadOffset =
+      (sizeof(size_t) + alignof(std::atomic<uint64_t>) - 1) &
+      ~(alignof(std::atomic<uint64_t>) - 1);
   auto *tail = reinterpret_cast<std::atomic<uint64_t> *>(
-      storage.get() + sizeof(size_t) + sizeof(std::atomic<uint64_t>));
+      storage.get() + kHeadOffset + sizeof(std::atomic<uint64_t>));
   tail->store(1, std::memory_order_release);
 
   EXPECT_TRUE(queue->Push(2, 20));

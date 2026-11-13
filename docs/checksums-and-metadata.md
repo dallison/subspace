@@ -86,15 +86,15 @@ invalidating the checksum.
 
 ### Default CRC32
 
-By default, `checksum_size` is 4 and the built-in hardware-accelerated CRC32
-is used:
+By default, `checksum_size` is 4 and the built-in IEEE 802.3 CRC32 is used:
 
 - **`CalculateCRC32Checksum()`** — computes CRC32 and writes 4 bytes.
 - **`VerifyCRC32Checksum()`** — recomputes CRC32 and compares against the
   stored 4 bytes.
 
-These functions use ARM or x86 hardware CRC instructions when available
-(`SUBSPACE_HARDWARE_CRC`), with a software fallback.
+ARM builds use the hardware CRC32 instructions when available
+(`SUBSPACE_HARDWARE_CRC`). x86 always uses the lookup table: the SSE4.2 CRC32
+instruction computes CRC-32C, which does not match this polynomial.
 
 ### Larger Checksums
 
