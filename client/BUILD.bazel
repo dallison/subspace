@@ -59,6 +59,28 @@ cc_library(
 )
 
 cc_test(
+    name = "alloc_test",
+    size = "small",
+    srcs = ["alloc_test.cc"],
+    copts = [
+        "-Wno-missing-field-initializers",
+        "-Wno-unused-parameter",
+    ],
+    linkopts = select({
+        "@platforms//os:linux": ["-rdynamic"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        ":subspace_client",
+        ":test_fixture",
+        "//server",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "client_test",
     size = "small",
     timeout = "moderate",

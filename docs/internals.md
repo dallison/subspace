@@ -167,7 +167,8 @@ Reuse order is what makes it a ring:
 - Unused slots start in the free set.
 - After every subscriber the message was delivered to has finished with it,
   its slot moves to the retired set and can be claimed again. A subscriber
-  who joins later does not add themselves to that audience.
+  who joins later does not add themselves to that audience, nor does a
+  recycled subscriber ID on a virtual channel the message was not delivered to.
 - With subscribers attached, an unreliable publisher prefers a recently retired
   slot so it keeps rewriting a small, cache-hot set.
 - With nobody subscribed, publishing fills the free slots first and then

@@ -656,7 +656,8 @@ When a subscriber finishes with a slot, it decrements `pending` if it was one
 of the subscribers the message was delivered to. The slot is marked retired
 when `pending` is zero and both reference counts are zero. `pending` is the
 audience at publish time, so a subscriber who joins later does not keep an
-older message from being reclaimed. A subscriber who disconnects without
+older message from being reclaimed. A subscriber ID recycled onto a virtual
+channel that was not delivered the message does not keep it either. A subscriber who disconnects without
 reading decrements `pending` for the messages it was delivered. Race
 condition: if two subscribers release simultaneously, the CAS serializes the
 updates and only one of them sets the retired bit.

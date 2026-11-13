@@ -21,7 +21,6 @@
 #include <inttypes.h>
 #include <mutex>
 #include <unistd.h>
-#include <vector>
 
 namespace subspace {
 
@@ -552,21 +551,28 @@ bool Channel::ReleaseSubscriberObligation(MessageSlot *slot, int owner,
 }
 
 void Channel::ReleaseDepartedObligations(MessageSlot *slot) {
-  std::vector<int> departed;
-  slot->pending_subs.Traverse([this, &departed](size_t sub_id) {
-    if (!ccb_->subscribers.IsSet(sub_id)) {
-      departed.push_back(static_cast<int>(sub_id));
-    }
-  });
   const uint64_t ordinal = slot->ordinal.load(std::memory_order_relaxed);
   const int vchan_id = slot->vchan_id.load(std::memory_order_relaxed);
   if (ordinal == 0) {
     return;
   }
-  for (int sub_id : departed) {
-    ReleaseSubscriberObligation(slot, sub_id, /*reliable=*/false,
-                                /*drop_ref=*/false, ordinal, vchan_id);
-  }
+  // Release during the walk. Traverse shifts past the bit it just reported
+  // before loading again, and the release only clears that subscriber's bit.
+  slot->pending_subs.Traverse([this, slot, ordinal, vchan_id](size_t sub_id) {
+    if (ccb_->subscribers.IsSet(sub_id)) {
+      // User IDs are first-fit and shared by every virtual channel on a mux.
+      // A subscriber removed while this slot was publisher-owned can be
+      // reissued to a virtual channel that was not delivered the message
+      // before this commit. That subscriber must not keep the countdown.
+      const int sub_vchan = ccb_->sub_vchan_ids[sub_id];
+      if (sub_vchan == -1 || vchan_id == -1 || sub_vchan == vchan_id) {
+        return;
+      }
+    }
+    ReleaseSubscriberObligation(slot, static_cast<int>(sub_id),
+                                /*reliable=*/false, /*drop_ref=*/false, ordinal,
+                                vchan_id);
+  });
 }
 
 bool Channel::RefsShowRetired(const MessageSlot *slot, uint64_t refs) const {

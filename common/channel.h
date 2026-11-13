@@ -1294,7 +1294,9 @@ public:
                                    int vchan_id);
 
   // A subscriber removed while this slot was still publisher-owned could not
-  // decrement pending. Drop those obligations now that the message is committed.
+  // decrement pending. Drop those obligations now that the message is
+  // committed, including an ID reused by a subscriber on a virtual channel
+  // that was not delivered this message.
   void ReleaseDepartedObligations(MessageSlot *slot);
 
   // Whether `refs`, read from `slot`, show a slot that holds no message or one

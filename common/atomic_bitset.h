@@ -6,7 +6,6 @@
 
 #include <atomic>
 #include <cstddef>
-#include <functional>
 #include <iostream>
 #include <strings.h>
 #include <vector>
@@ -147,15 +146,17 @@ public:
     os << "\n";
   }
 
-  void Traverse(std::function<void(size_t)> func) const {
+  // The callback is a template so a walk on the publish path does not allocate
+  // a std::function. The visited bit is shifted out before the next load, so
+  // the callback may clear that bit.
+  template <typename Func>
+  void Traverse(Func&& func) const {
     for (size_t i = 0; i < BitsToWords(num_bits_); i++) {
       size_t shift = 0;
       size_t bit = i * 64;
       while (bit < num_bits_ && shift < 64) {
         uint64_t word = bits_[i].load(std::memory_order_relaxed) >> shift;
         size_t n = ffsll(word);
-        // std::cerr << "i: " << i << " word " << std::hex << word << " n " << n
-        // << std::dec << "\n";
         if (n == 0) {
           break;
         }
@@ -166,7 +167,8 @@ public:
     }
   }
 
-  void TraverseSeqCst(std::function<void(size_t)> func) const {
+  template <typename Func>
+  void TraverseSeqCst(Func&& func) const {
     for (size_t i = 0; i < BitsToWords(num_bits_); i++) {
       size_t shift = 0;
       size_t bit = i * 64;

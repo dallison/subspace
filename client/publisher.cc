@@ -204,18 +204,28 @@ uint64_t PublisherImpl::RegisterLease(MessageSlot *slot) {
   if (slot == nullptr) {
     return 0;
   }
+  if (slot->id < 0) {
+    return 0;
+  }
+  const size_t index = static_cast<size_t>(slot->id);
+  if (index >= lease_ids_.size()) {
+    lease_ids_.resize(index + 1, 0);
+  }
   uint64_t lease_id = next_lease_id_++;
   if (lease_id == 0) {
     lease_id = next_lease_id_++;
   }
-  leased_slots_[slot->id] = lease_id;
+  if (lease_ids_[index] == 0) {
+    num_leases_++;
+  }
+  lease_ids_[index] = lease_id;
   return lease_id;
 }
 
 MessageSlot *PublisherImpl::FindLease(int32_t slot_id,
                                       uint64_t lease_id) const {
-  auto it = leased_slots_.find(slot_id);
-  if (it == leased_slots_.end() || it->second != lease_id) {
+  if (slot_id < 0 || static_cast<size_t>(slot_id) >= lease_ids_.size() ||
+      lease_id == 0 || lease_ids_[slot_id] != lease_id) {
     return nullptr;
   }
   MessageSlot *slot = GetSlot(slot_id);
@@ -228,7 +238,12 @@ MessageSlot *PublisherImpl::FindLease(int32_t slot_id,
 }
 
 void PublisherImpl::RemoveLease(int32_t slot_id) {
-  leased_slots_.erase(slot_id);
+  if (slot_id < 0 || static_cast<size_t>(slot_id) >= lease_ids_.size() ||
+      lease_ids_[slot_id] == 0) {
+    return;
+  }
+  lease_ids_[slot_id] = 0;
+  num_leases_--;
 }
 
 MessageSlot *PublisherImpl::ClaimRetiredSlot(int32_t slot_id) {
@@ -594,13 +609,16 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
       }
     }
 
-    // Sort the active slots by timestamp.
-    // std::stable_sort gives consistently better performance than std::sort and
-    // also is more deterministic in slot ordering.
-    std::stable_sort(active_slots_.begin(), active_slots_.end(),
-                     [](const ActiveSlot &a, const ActiveSlot &b) {
-                       return a.timestamp < b.timestamp;
-                     });
+    // Sort the active slots by timestamp, then slot id, which is the order a
+    // stable sort of the slot-ordered list gives.  std::stable_sort is not
+    // used because libstdc++ allocates a temporary buffer for it.
+    std::sort(active_slots_.begin(), active_slots_.end(),
+              [](const ActiveSlot &a, const ActiveSlot &b) {
+                if (a.timestamp != b.timestamp) {
+                  return a.timestamp < b.timestamp;
+                }
+                return a.slot->id < b.slot->id;
+              });
 
     // Look for a slot with zero refs but don't go past one with non-zero
     // reliable ref count.

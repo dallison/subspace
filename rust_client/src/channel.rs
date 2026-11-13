@@ -1727,21 +1727,46 @@ impl Channel {
 
     pub fn release_departed_obligations(&self, slot_idx: usize) {
         let slot = self.slot_ref(slot_idx);
-        let mut departed = Vec::new();
-        slot.pending_subs.traverse(|sub_id| {
-            if !self.ccb().subscribers.is_set(sub_id) {
-                departed.push(sub_id);
-            }
-        });
         let ordinal = slot.ordinal();
         let vchan_id = slot.vchan_id() as i32;
         if ordinal == 0 {
             return;
         }
-        for sub_id in departed {
-            self.release_subscriber_obligation(
-                slot_idx, sub_id, false, false, ordinal, vchan_id,
-            );
+        // Snapshot the obligation words, then release. A Vec would allocate
+        // on the publish path, and releasing inside the walk borrows the slot.
+        let mut words = [0u64; SLOT_OWNER_WORDS];
+        let num_bits = {
+            let pending = &self.slot_ref(slot_idx).pending_subs;
+            let num_bits = pending.num_bits();
+            let nwords = bits_to_words(num_bits).min(SLOT_OWNER_WORDS);
+            for i in 0..nwords {
+                words[i] = pending.load_word(i);
+            }
+            num_bits
+        };
+        for (i, word) in words.iter().enumerate() {
+            let mut word = *word;
+            let base = i * 64;
+            while word != 0 {
+                let sub_id = base + word.trailing_zeros() as usize;
+                word &= word - 1;
+                if sub_id >= num_bits {
+                    break;
+                }
+                if self.ccb().subscribers.is_set(sub_id) {
+                    // User IDs are first-fit and shared by every virtual channel
+                    // on a mux. An ID removed while this slot was publisher-owned
+                    // can be reissued to a virtual channel that was not delivered
+                    // the message.
+                    let sub_vchan = self.get_sub_vchan_id(sub_id);
+                    if sub_vchan == -1 || vchan_id == -1 || sub_vchan == vchan_id {
+                        continue;
+                    }
+                }
+                self.release_subscriber_obligation(
+                    slot_idx, sub_id, false, false, ordinal, vchan_id,
+                );
+            }
         }
     }
 
