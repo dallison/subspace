@@ -19,3 +19,13 @@ platform(
         "@platforms//os:osx",
     ],
 )
+
+# Cross-compilation target: 32-bit ARM Linux, hard float (armhf / ARMv7).
+# Select it with --config=linux_arm32. This is not the host platform.
+platform(
+    name = "linux_arm32",
+    constraint_values = [
+        "@platforms//cpu:armv7",
+        "@platforms//os:linux",
+    ],
+)

@@ -98,3 +98,10 @@ android_ndk_repository_extension = use_extension(
     "android_ndk_repository_extension",
 )
 use_repo(android_ndk_repository_extension, "androidndk")
+
+# Fetched only when --config=linux_arm32 selects @linux_arm32_toolchain.
+linux_arm32_toolchain = use_repo_rule(
+    "//bazel/toolchains/linux_arm32:repo.bzl",
+    "linux_arm32_toolchain",
+)
+linux_arm32_toolchain(name = "linux_arm32_toolchain")

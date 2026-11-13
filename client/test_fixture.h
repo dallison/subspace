@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 #include <memory>
 #include <signal.h>
+#include <sys/resource.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -154,6 +155,23 @@ public:
   static constexpr char kMachineName[] = "subspace-test-machine";
 
   static void SetUpTestSuite() {
+    // Docker and Colima default the soft NOFILE limit to 1024. The server and
+    // every client in this process hold sockets plus a descriptor for each
+    // shared-memory segment. When the limit is hit, sendmsg/recvmsg of
+    // SCM_RIGHTS fails with MSG_CTRUNC. Raise the soft limit up to the hard
+    // limit so the concurrent publisher tests fit.
+    struct rlimit nofile;
+    if (getrlimit(RLIMIT_NOFILE, &nofile) == 0) {
+      rlim_t target = 65536;
+      if (nofile.rlim_max != RLIM_INFINITY && nofile.rlim_max < target) {
+        target = nofile.rlim_max;
+      }
+      if (nofile.rlim_cur < target) {
+        nofile.rlim_cur = target;
+        (void)setrlimit(RLIMIT_NOFILE, &nofile);
+      }
+    }
+
     printf("Starting Subspace server\n");
 #if defined(__ANDROID__)
     char socket_name_template[] = "/data/local/tmp/subspaceXXXXXX"; // NOLINT

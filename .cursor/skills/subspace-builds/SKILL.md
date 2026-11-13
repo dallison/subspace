@@ -41,6 +41,36 @@ bazel build //... --config=macos_x86_64
 bazel test //... --config=macos_x86_64
 ```
 
+## Linux ARM32 (armhf)
+
+Cross-compile from an x86_64 Linux host. Requires `g++-arm-linux-gnueabihf`.
+`qemu-user-static` runs the resulting binaries on the host (`--config=linux_arm32`
+sets `QEMU_LD_PREFIX=/usr/arm-linux-gnueabihf`).
+
+```bash
+bazel build --config=linux_arm32 //server:subspace_server //client:subspace_client
+bazel test --config=linux_arm32 //common:common_test //client:client_test
+```
+
+CMake needs a host `protoc` first. The toolchain file is
+`cmake/toolchains/linux-armhf.cmake`. CI runs that cross-compile as the
+`cmake (armhf)` job; `scripts/build-arm32-colima.sh` is the local Colima
+equivalent.
+
+```bash
+cmake -S . -B build/host-protoc -DCMAKE_BUILD_TYPE=Release
+cmake --build build/host-protoc --target protoc --parallel
+
+cmake -S . -B build/armhf \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/linux-armhf.cmake \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DPROTOC_EXECUTABLE="$PWD/build/host-protoc/_deps/protobuf-build/protoc"
+cmake --build build/armhf --parallel
+```
+
+The Rust client is not part of this cross compile. Its standard library
+target is not registered for `armv7-unknown-linux-gnueabihf`.
+
 ## Android With Bazel
 
 Requires `ANDROID_NDK_HOME`.
@@ -141,4 +171,5 @@ environment or user-local `user.bazelrc`.
 - Android details: `docs/android.md`
 - General Bazel/CMake docs: `README.md`
 - CI build matrix: `.github/workflows/ci.yml`
+- 32-bit ARM (armhf): Bazel `--config=linux_arm32`, or the `cmake (armhf)` job with `cmake/toolchains/linux-armhf.cmake` and `qemu-user`. Local CMake equivalent: `scripts/build-arm32-colima.sh`.
 - Test runner rule: `.cursor/rules/test-runner.mdc`

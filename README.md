@@ -40,7 +40,7 @@ It has the following features:
 1.	Automatic UDP discovery and TCP bridging of channels between servers, plus optional TCP unicast discovery for bridging across NAT/VMs/emulators.
 1.	Shadow process for crash recovery -- the server can restart and resume without losing shared memory state.
 1.	Shared and weak pointers for message references.
-1.	Ports to MacOS, Linux, QNX and Android, for ARM64 and x86_64.
+1.	Ports to MacOS, Linux, QNX and Android, for ARM64, ARM32 (Linux armhf), and x86_64.
 1.	Builds using Bazel, cmake and Android Blueprints and uses Abseil and Protocol Buffers from Google.
 1.	Uses my C++ coroutine library (https://github.com/dallison/co)
 
@@ -86,6 +86,29 @@ might need to tell bazel what compiler to use.
 CC=clang bazel build ...
 ```
 
+### Linux ARM32 (armhf)
+
+Cross-compile 32-bit ARMv7 hard-float binaries from an x86_64 Linux host. Install `g++-arm-linux-gnueabihf`. To run tests on the host, also install `qemu-user-static` (Ubuntu 26.04 ships the emulator as `qemu-arm`).
+
+```
+bazel build --config=linux_arm32 //server:subspace_server //client:subspace_client
+bazel test --config=linux_arm32 //common:common_test //client:client_test
+```
+
+CMake uses `cmake/toolchains/linux-armhf.cmake` and a host `protoc`, the same way the Android cross compile does. The shared-memory layout matches a 64-bit build: `size_t` fields are padded so 64-bit atomics stay 8-byte aligned.
+
+### 32-bit ARM (armhf) with Colima
+
+Colima hosts an aarch64 or x86_64 Linux VM, and Bazel does not publish a 32-bit ARM binary, so the armhf build is a CMake cross-compile from that VM. From the repo root:
+
+```
+scripts/build-arm32-colima.sh
+scripts/build-arm32-colima.sh --test
+```
+
+The script starts the aarch64 Colima profile if it is not already running, builds a host `protoc`, then cross-compiles into `build/armhf`. Binaries are ELF32 ARM, hard-float. The Rust client and the Asio RPC backends are skipped: the Rust build has no armhf Cargo target wired up here, and Boost.Context does not cross-compile cleanly. Tests run under `qemu-arm-static`. `client_test` raises its own file-descriptor soft limit at startup: the container's default is 1024, and past that the kernel drops `SCM_RIGHTS` payloads and the test reports truncated control data.
+
+GitHub Actions job `cmake (armhf)` runs this cross-compile and the CMake tests on `ubuntu-latest`.
 
 ### Example: Ubuntu 20.04
 Build a minimal set of binaries:
