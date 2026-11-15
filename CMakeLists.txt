@@ -176,7 +176,8 @@ FetchContent_MakeAvailable(cpp_toolbelt)
 FetchContent_Declare(
     co
     GIT_REPOSITORY https://github.com/dallison/co.git
-    GIT_TAG 3.4.1
+    # fix/poll-event-mask (co#77): honor each waiter's event mask.
+    GIT_TAG 6f877a685ff748ba72bb2a08b6d4680723ba6280
     CMAKE_ARGS
         -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
 )
