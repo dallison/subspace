@@ -42,7 +42,7 @@ bazel_dep(name = "cpp_toolbelt", version = "2.1.6")
 # platform default with --//:trigger_mechanism.  See docs/trigger-mechanism.md.
 git_override(
     module_name = "cpp_toolbelt",
-    commit = "eaa23f0594f29e7a50bd35de9896ad55af8c89a1",
+    commit = "a5b1cb994ec301db6023e98cfda71a7262d66bf9",
     remote = "https://github.com/dallison/cpp_toolbelt.git",
 )
 

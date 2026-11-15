@@ -188,7 +188,7 @@ FetchContent_Declare(
     cpp_toolbelt
     GIT_REPOSITORY https://github.com/dallison/cpp_toolbelt.git
     # qnx_pipes: socketpair on QNX, pipe elsewhere, overridable at build time.
-    GIT_TAG eaa23f0594f29e7a50bd35de9896ad55af8c89a1
+    GIT_TAG a5b1cb994ec301db6023e98cfda71a7262d66bf9
     CMAKE_ARGS
         -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
 )
