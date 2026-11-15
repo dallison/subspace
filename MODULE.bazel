@@ -37,6 +37,14 @@ git_override(
 
 bazel_dep(name = "cpp_toolbelt", version = "2.1.6")
 
+# TriggerFd uses a Unix domain socketpair instead of a pipe on non-Linux POSIX
+# (cpp_toolbelt qnx_pipes branch).  Not released to the BCR yet.
+git_override(
+    module_name = "cpp_toolbelt",
+    commit = "6d060fffa35b667000b7ac2b92c6b28bd17cbd10",
+    remote = "https://github.com/dallison/cpp_toolbelt.git",
+)
+
 # retro 1.1.0 is not in the BCR yet; pin it with git_override below.
 bazel_dep(name = "retro", version = "1.1.0")
 bazel_dep(name = "rules_python", version = "1.7.0")

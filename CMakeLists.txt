@@ -166,7 +166,8 @@ FetchContent_MakeAvailable(abseil)
 FetchContent_Declare(
     cpp_toolbelt
     GIT_REPOSITORY https://github.com/dallison/cpp_toolbelt.git
-    GIT_TAG 2.1.6
+    # qnx_pipes branch: socketpair-based TriggerFd on non-Linux POSIX.
+    GIT_TAG 6d060fffa35b667000b7ac2b92c6b28bd17cbd10
     CMAKE_ARGS
         -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
 )
