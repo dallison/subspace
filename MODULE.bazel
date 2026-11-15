@@ -28,10 +28,12 @@ bazel_dep(name = "coroutines", version = "3.4.1")
 
 # The cpp20 poll fallback must resume a waiter only for events it asked for.
 # A socketpair is always writable, so waking every waiter on POLLOUT hangs
-# co20_rpc on macOS.  https://github.com/dallison/co/pull/77 — not released yet.
+# co20_rpc on macOS (dallison/co#77).  c2cbd0f also keeps TSan from corrupting
+# the shadow stack on a coroutine stack switch with GCC 15 (dallison/co c2cbd0f).
+# Not released yet.
 git_override(
     module_name = "coroutines",
-    commit = "6f877a685ff748ba72bb2a08b6d4680723ba6280",
+    commit = "c2cbd0f75b1e834090762d584b812a485b8b8ca8",
     remote = "https://github.com/dallison/co.git",
 )
 

@@ -202,8 +202,8 @@ message(STATUS "Trigger mechanism: ${SUBSPACE_TRIGGER_MECHANISM}")
 FetchContent_Declare(
     co
     GIT_REPOSITORY https://github.com/dallison/co.git
-    # fix/poll-event-mask (co#77): honor each waiter's event mask.
-    GIT_TAG 6f877a685ff748ba72bb2a08b6d4680723ba6280
+    # dallison/co#77 (poll event mask) plus TSan stack-switch fix (c2cbd0f).
+    GIT_TAG c2cbd0f75b1e834090762d584b812a485b8b8ca8
     CMAKE_ARGS
         -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
 )
