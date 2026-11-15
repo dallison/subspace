@@ -37,12 +37,12 @@ git_override(
 
 bazel_dep(name = "cpp_toolbelt", version = "2.1.6")
 
-# TriggerFd uses a Unix domain socketpair instead of a pipe on QNX
-# (cpp_toolbelt qnx_pipes branch).  macOS and other POSIX keep the pipe.
-# Not released to the BCR yet.
+# TriggerFd is a socketpair on QNX and a pipe on other non-Linux POSIX.
+# cpp_toolbelt qnx_pipes branch, not released to the BCR yet.  Override the
+# platform default with --//:trigger_mechanism.  See docs/trigger-mechanism.md.
 git_override(
     module_name = "cpp_toolbelt",
-    commit = "10e2b042cb0e4602b8362d50612abf3c8b681ecc",
+    commit = "eaa23f0594f29e7a50bd35de9896ad55af8c89a1",
     remote = "https://github.com/dallison/cpp_toolbelt.git",
 )
 

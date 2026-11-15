@@ -46,6 +46,10 @@ build:mtls --//:mtls=true
 # Maximum payload buffer segments per channel (default 341, 4 KiB BCB).  Must be
 # a positive integer.  See docs/max-buffers.md.
 #   bazel build --//:max_buffers=512 //server
+#
+# How a publisher wakes a waiting subscriber.  default is eventfd on Linux, a
+# socketpair on QNX, and a pipe elsewhere.  See docs/trigger-mechanism.md.
+#   bazel build --//:trigger_mechanism=socketpair //server
 
 # Enable the built-in platform-specific configuration feature
 common --enable_platform_specific_config
