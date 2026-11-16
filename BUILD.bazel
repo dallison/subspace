@@ -89,6 +89,17 @@ string_flag(
     build_setting_default = "65536",
 )
 
+# How a publisher wakes a waiting subscriber.  "default" keeps the platform
+# choice compiled into cpp_toolbelt: eventfd on Linux, a socketpair on QNX,
+# and a pipe elsewhere.  This does not change shared memory.  See
+# docs/trigger-mechanism.md.
+#
+#   bazel build --//:trigger_mechanism=socketpair //server
+alias(
+    name = "trigger_mechanism",
+    actual = "@cpp_toolbelt//toolbelt:trigger_mechanism",
+)
+
 config_setting(
   name = "macos_arm64",
   constraint_values = [

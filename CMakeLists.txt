@@ -121,6 +121,27 @@ endif()
 add_compile_definitions(SUBSPACE_COROUTINE_STACK_SIZE=${SUBSPACE_COROUTINE_STACK_SIZE})
 message(STATUS "Server coroutine stack size: ${SUBSPACE_COROUTINE_STACK_SIZE}")
 
+# --- How a publisher wakes a waiting subscriber ---
+# "default" keeps the platform choice: eventfd on Linux, a socketpair on QNX,
+# and a pipe elsewhere.  Applied to the toolbelt target after it is fetched.
+# This does not change shared memory.  See docs/trigger-mechanism.md.
+set(SUBSPACE_TRIGGER_MECHANISM "default" CACHE STRING
+    "Trigger mechanism: default, eventfd, pipe, or socketpair.")
+set_property(CACHE SUBSPACE_TRIGGER_MECHANISM PROPERTY STRINGS
+    default eventfd pipe socketpair)
+if(SUBSPACE_TRIGGER_MECHANISM STREQUAL "default")
+    set(SUBSPACE_TRIGGER_MECHANISM_DEFINE "")
+elseif(SUBSPACE_TRIGGER_MECHANISM STREQUAL "eventfd")
+    set(SUBSPACE_TRIGGER_MECHANISM_DEFINE "TOOLBELT_TRIGGERFD_SIGNAL_MECHANISM=TOOLBELT_TRIGGERFD_EVENTFD")
+elseif(SUBSPACE_TRIGGER_MECHANISM STREQUAL "pipe")
+    set(SUBSPACE_TRIGGER_MECHANISM_DEFINE "TOOLBELT_TRIGGERFD_SIGNAL_MECHANISM=TOOLBELT_TRIGGERFD_PIPE")
+elseif(SUBSPACE_TRIGGER_MECHANISM STREQUAL "socketpair")
+    set(SUBSPACE_TRIGGER_MECHANISM_DEFINE "TOOLBELT_TRIGGERFD_SIGNAL_MECHANISM=TOOLBELT_TRIGGERFD_SOCKETPAIR")
+else()
+    message(FATAL_ERROR
+        "SUBSPACE_TRIGGER_MECHANISM must be default, eventfd, pipe, or socketpair, got '${SUBSPACE_TRIGGER_MECHANISM}'")
+endif()
+
 # --- Apple Silicon (ARM64) specific settings ---
 # Ensure that CMake targets the correct architecture when building on Apple platforms.
 # This value will be propagated to sub-dependencies.
@@ -166,17 +187,23 @@ FetchContent_MakeAvailable(abseil)
 FetchContent_Declare(
     cpp_toolbelt
     GIT_REPOSITORY https://github.com/dallison/cpp_toolbelt.git
-    GIT_TAG 2.1.6
+    # qnx_pipes: socketpair on QNX, pipe elsewhere, overridable at build time.
+    GIT_TAG a5b1cb994ec301db6023e98cfda71a7262d66bf9
     CMAKE_ARGS
         -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
 )
 FetchContent_MakeAvailable(cpp_toolbelt)
+if(SUBSPACE_TRIGGER_MECHANISM_DEFINE)
+    target_compile_definitions(toolbelt PRIVATE ${SUBSPACE_TRIGGER_MECHANISM_DEFINE})
+endif()
+message(STATUS "Trigger mechanism: ${SUBSPACE_TRIGGER_MECHANISM}")
 
 # --- External Dependency: co (using FetchContent for native CMake) ---
 FetchContent_Declare(
     co
     GIT_REPOSITORY https://github.com/dallison/co.git
-    GIT_TAG 3.4.1
+    # dallison/co#77 (poll event mask) plus TSan stack-switch fix (c2cbd0f).
+    GIT_TAG c2cbd0f75b1e834090762d584b812a485b8b8ca8
     CMAKE_ARGS
         -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
 )
