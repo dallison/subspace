@@ -45,3 +45,18 @@ cmake --build build
 ```
 
 `SUBSPACE_TRIGGER_MECHANISM` is `default`, `eventfd`, `pipe`, or `socketpair`.
+
+## Regression tests
+
+`//socketpair` rebuilds these tests with `--//:trigger_mechanism=socketpair`:
+
+- `//client:client_test` (`//socketpair:client_test_socketpair`), on Linux and macOS
+- `//c_client:client_test`, Linux only
+- `//client:bridge_test`, Linux only
+- `//server:server_test`, Linux only
+- the three `//co20_rpc` tests, Linux only
+
+`bazel test //...` runs `client_test_socketpair` on the Linux and macOS CI
+jobs. Other platforms skip it, and the other wrappers are Linux only. A
+socketpair reports `POLLOUT` while it is open, so a test hangs if a `POLLIN`
+waiter is resumed for that event.
