@@ -28,14 +28,25 @@ bazel_dep(name = "coroutines", version = "3.4.1")
 
 # The cpp20 poll fallback must resume a waiter only for events it asked for.
 # A socketpair is always writable, so waking every waiter on POLLOUT hangs
-# co20_rpc on macOS.  https://github.com/dallison/co/pull/77 — not released yet.
+# co20_rpc on macOS (dallison/co#77).  c2cbd0f also keeps TSan from corrupting
+# the shadow stack on a coroutine stack switch with GCC 15 (dallison/co c2cbd0f).
+# Not released yet.
 git_override(
     module_name = "coroutines",
-    commit = "6f877a685ff748ba72bb2a08b6d4680723ba6280",
+    commit = "c2cbd0f75b1e834090762d584b812a485b8b8ca8",
     remote = "https://github.com/dallison/co.git",
 )
 
 bazel_dep(name = "cpp_toolbelt", version = "2.1.6")
+
+# TriggerFd is a socketpair on QNX and a pipe on other non-Linux POSIX.
+# cpp_toolbelt qnx_pipes branch, not released to the BCR yet.  Override the
+# platform default with --//:trigger_mechanism.  See docs/trigger-mechanism.md.
+git_override(
+    module_name = "cpp_toolbelt",
+    commit = "a5b1cb994ec301db6023e98cfda71a7262d66bf9",
+    remote = "https://github.com/dallison/cpp_toolbelt.git",
+)
 
 # retro 1.1.0 is not in the BCR yet; pin it with git_override below.
 bazel_dep(name = "retro", version = "1.1.0")

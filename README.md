@@ -53,6 +53,7 @@ See the file docs/subspace.pdf for full documentation.  Additional documentation
 - [Reliable Messages](docs/reliable-messages.md)
 - [Slot Sizes](docs/slot-sizes.md)
 - [Channel Limit](docs/max-channels.md)
+- [Trigger Mechanism](docs/trigger-mechanism.md)
 - [C Client API](docs/c-client.md)
 - [Client Architecture](docs/client-architecture.md)
 - [Server Architecture](docs/server-architecture.md)
@@ -157,6 +158,8 @@ To raise the limit while building this repository:
 ```bash
 bazel build --//:max_channels=2048 //server //client:subspace_client //rust_client:subspace_client_rust
 ```
+
+A publisher wakes a waiting subscriber with an eventfd on Linux, a socketpair on QNX, and a pipe elsewhere. Select another mechanism with `--//:trigger_mechanism=eventfd`, `pipe`, or `socketpair`. `default` keeps the platform choice. See [Trigger Mechanism](docs/trigger-mechanism.md).
 
 ### Running Tests with Bazel
 
@@ -287,6 +290,7 @@ make -j$(nproc)
 | `SUBSPACE_MAX_SLOT_OWNERS` | `1024` | Maximum publishers plus subscribers per channel. Must be a positive integer. The same value is passed to the Rust client. |
 | `SUBSPACE_MAX_BUFFERS` | `341` | Maximum distinct payload buffer segments per channel (BCB size). Must be a positive integer. Default fits the BCB in one 4 KiB page. Passed to the Rust client. |
 | `SUBSPACE_COROUTINE_STACK_SIZE` | `65536` | Stack size in bytes for each server and shadow coroutine. Must be a positive multiple of 4096. Clients do not need the same value. |
+| `SUBSPACE_TRIGGER_MECHANISM` | `default` | How a publisher wakes a waiting subscriber: `default`, `eventfd`, `pipe`, or `socketpair`. `default` is eventfd on Linux, a socketpair on QNX, and a pipe elsewhere. See [Trigger Mechanism](docs/trigger-mechanism.md). |
 | `SUBSPACE_ENABLE_MTLS` | `OFF` | Protect bridge and tunnel connections with mutual TLS, using the system OpenSSL. See [Mutual TLS](docs/mtls.md). |
 
 `SUBSPACE_64BIT_SLOT_SIZE` and the three shared-memory limits change struct
