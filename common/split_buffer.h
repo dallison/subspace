@@ -53,6 +53,10 @@ struct SplitBufferCallbacks {
   std::function<absl::Status(const SplitBufferMetadata &metadata,
                              const SplitBufferMapping &mapping)>
       free;
+  // When true (default), map() retains registration_fd (dup/mmap or handle
+  // lookup). OpenSplitBufferSet will not keep a duplicate client fd. Set false
+  // only if map() mmap's registration_fd without taking ownership.
+  bool map_keeps_registration_fd = true;
 };
 
 SplitBufferMetadata SplitBufferMetadataFromProto(

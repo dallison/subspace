@@ -56,12 +56,27 @@ pub type SplitBufferUnmapCallback =
 pub type SplitBufferFreeCallback =
     Arc<dyn Fn(&SplitBufferMetadata, &SplitBufferMapping) -> Result<()> + Send + Sync>;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SplitBufferCallbacks {
     pub allocate: Option<SplitBufferAllocateCallback>,
     pub map: Option<SplitBufferMapCallback>,
     pub unmap: Option<SplitBufferUnmapCallback>,
     pub free: Option<SplitBufferFreeCallback>,
+    /// When true (default), `map` retains `registration_fd`; attach will not
+    /// keep a duplicate client fd open.
+    pub map_keeps_registration_fd: bool,
+}
+
+impl Default for SplitBufferCallbacks {
+    fn default() -> Self {
+        Self {
+            allocate: None,
+            map: None,
+            unmap: None,
+            free: None,
+            map_keeps_registration_fd: true,
+        }
+    }
 }
 
 impl std::fmt::Debug for SplitBufferCallbacks {
@@ -71,6 +86,7 @@ impl std::fmt::Debug for SplitBufferCallbacks {
             .field("map", &self.map.is_some())
             .field("unmap", &self.unmap.is_some())
             .field("free", &self.free.is_some())
+            .field("map_keeps_registration_fd", &self.map_keeps_registration_fd)
             .finish()
     }
 }
