@@ -58,6 +58,33 @@ static void CleanupSplitBufferObjectFile(const std::filesystem::path &path) {
 }
 #endif
 
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
+// Older Linux servers minted a shm name with mkstemp and left the zero-length
+// file in /tmp (`<8 hex session>.<id>.<scb|ccb|bcb>.<suffix>`). The shm object
+// was unlinked on the success path; remove the shadow, and the name, in case
+// a crash left the object too.
+static bool IsControlBlockShadow(const std::string &filename) {
+  if (filename.size() < 10 || filename[8] != '.') {
+    return false;
+  }
+  for (size_t i = 0; i < 8; i++) {
+    char c = filename[i];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+      return false;
+    }
+  }
+  return filename.find(".scb.") != std::string::npos ||
+         filename.find(".ccb.") != std::string::npos ||
+         filename.find(".bcb.") != std::string::npos;
+}
+
+static void RemoveControlBlockShadow(const std::filesystem::path &path) {
+  std::string shm_name = "/" + path.filename().string();
+  (void)shm_unlink(shm_name.c_str());
+  (void)std::filesystem::remove(path);
+}
+#endif
+
 // Look for the IP address and calculate the broadcast address
 // for the given interface.  If the interface name is empty
 // choose the first interface that supports broadcast and
@@ -350,6 +377,16 @@ void Server::CleanupAfterSession() {
       (void)std::filesystem::remove(entry.path());
     }
   }
+  // Remove /tmp shadows left by servers that used mkstemp to name shm objects.
+  std::string session_shm_prefix =
+      absl::StrFormat("%08x.", static_cast<uint32_t>(session_id_));
+  for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
+    std::string filename = entry.path().filename().string();
+    if (filename.rfind(session_shm_prefix, 0) == 0 &&
+        IsControlBlockShadow(filename)) {
+      RemoveControlBlockShadow(entry.path());
+    }
+  }
 #endif
 }
 
@@ -388,6 +425,12 @@ void Server::CleanupFilesystem() {
     std::string filename = entry.path().filename().string();
     if (filename.rfind("subspace_", 0) == 0) {
       (void)std::filesystem::remove(entry.path());
+    }
+  }
+  // Remove /tmp shadows left by servers that used mkstemp to name shm objects.
+  for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
+    if (IsControlBlockShadow(entry.path().filename().string())) {
+      RemoveControlBlockShadow(entry.path());
     }
   }
 #endif
