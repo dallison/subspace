@@ -3652,6 +3652,66 @@ TEST_F(ClientTest, SlowReliableSubscriberDrainReachesEmptyRead) {
          "drain";
 }
 
+// A subscriber that retains its current message used to keep the ActiveMessage
+// when Set() failed at max_active_messages. That left refs == 1 and length == 0,
+// and every later read of the same slot was rejected before the reference could
+// be dropped. Releasing the held message must let the waiting one through.
+TEST_F(ClientTest, RetainedSubscriberRecoversAfterMaxActiveMessages) {
+  struct Case {
+    const char *channel;
+    subspace::SubscriberOptions options;
+  };
+  const Case cases[] = {
+      {"retain_reliable_max_active",
+       SubOpts().SetReliable(true).SetMaxActiveMessages(1)},
+      {"retain_keep_max_active",
+       SubOpts().SetKeepActiveMessage(true).SetMaxActiveMessages(1)},
+  };
+  for (const Case &test_case : cases) {
+    auto pub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+    auto sub_client = EVAL_AND_ASSERT_OK(subspace::Client::Create(Socket()));
+    auto pub = EVAL_AND_ASSERT_OK(
+        pub_client->CreatePublisher(test_case.channel, PubOpts(64, 4)));
+    auto sub = EVAL_AND_ASSERT_OK(
+        sub_client->CreateSubscriber(test_case.channel, test_case.options));
+
+    auto publish = [&](const char *text) -> absl::Status {
+      absl::StatusOr<void *> buffer = pub.GetMessageBuffer();
+      if (!buffer.ok()) {
+        return buffer.status();
+      }
+      if (*buffer == nullptr) {
+        return absl::FailedPreconditionError("publisher has no buffer");
+      }
+      size_t len = strlen(text) + 1;
+      memcpy(*buffer, text, len);
+      absl::StatusOr<const Message> published = pub.PublishMessage(len);
+      return published.status();
+    };
+    ASSERT_OK(publish("one"));
+    ASSERT_OK(publish("two"));
+
+    absl::StatusOr<Message> first = sub.ReadMessage();
+    ASSERT_OK(first);
+    ASSERT_STREQ("one", reinterpret_cast<const char *>(first->buffer));
+
+    absl::StatusOr<Message> blocked = sub.ReadMessage();
+    ASSERT_OK(blocked);
+    ASSERT_EQ(0, blocked->length);
+
+    absl::StatusOr<Message> still_blocked = sub.ReadMessage();
+    ASSERT_OK(still_blocked);
+    ASSERT_EQ(0, still_blocked->length);
+
+    first->Reset();
+
+    absl::StatusOr<Message> second = sub.ReadMessage();
+    ASSERT_OK(second);
+    ASSERT_GT(second->length, 0u);
+    ASSERT_STREQ("two", reinterpret_cast<const char *>(second->buffer));
+  }
+}
+
 // Reproduces the external-epoll pattern: fetch the poll fd ONCE before the
 // loop, then poll on that fd and read, WITHOUT ever calling GetPollFd() again.
 // Verifies that messages published across many separate poll cycles are all
