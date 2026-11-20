@@ -29,6 +29,9 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
+#include <filesystem>
+#endif
 #if defined(__linux__)
 #include <dirent.h>
 #include <limits.h>
@@ -328,6 +331,35 @@ TEST_F(ServerTest, CreatePublisherSuccess) {
   ASSERT_GE(resp.create_publisher().publisher_id(), 0);
   ASSERT_GE(static_cast<int>(fds.size()), 4);
 }
+
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
+// Linux names the control blocks only for the duration of shm_open, then
+// unlinks them. Creating a channel must not leave a zero-length
+// /tmp/<session>.<id>.{scb,ccb,bcb}.* file.
+TEST_F(ServerTest, LinuxSharedMemoryCreatesNoTmpShadow) {
+  RawConnection conn;
+  ASSERT_OK(conn.Connect(Socket()));
+  ASSERT_OK(conn.Init());
+
+  char prefix[16];
+  snprintf(prefix, sizeof(prefix), "%08x.",
+           static_cast<uint32_t>(conn.SessionId()));
+
+  auto [resp, fds] = conn.CreatePublisher("no_tmp_shadow");
+  ASSERT_TRUE(resp.has_create_publisher());
+  ASSERT_TRUE(resp.create_publisher().error().empty());
+
+  for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
+    std::string name = entry.path().filename().string();
+    if (name.rfind(prefix, 0) != 0) {
+      continue;
+    }
+    EXPECT_EQ(name.find(".scb."), std::string::npos) << entry.path();
+    EXPECT_EQ(name.find(".ccb."), std::string::npos) << entry.path();
+    EXPECT_EQ(name.find(".bcb."), std::string::npos) << entry.path();
+  }
+}
+#endif
 
 TEST_F(ServerTest, CreateSubscriberSuccess) {
   RawConnection conn;
