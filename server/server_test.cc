@@ -333,9 +333,9 @@ TEST_F(ServerTest, CreatePublisherSuccess) {
 }
 
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
-// Linux names the control blocks only for the duration of shm_open, then
-// unlinks them. Creating a channel must not leave a zero-length
-// /tmp/<session>.<id>.{scb,ccb,bcb}.* file.
+// Linux names the control blocks in /dev/shm only for the duration of
+// shm_open, then unlinks them. Creating a channel must not leave a
+// <session>.<id>.{scb,ccb,bcb}.* file in /dev/shm or /tmp.
 TEST_F(ServerTest, LinuxSharedMemoryCreatesNoTmpShadow) {
   RawConnection conn;
   ASSERT_OK(conn.Connect(Socket()));
@@ -349,14 +349,17 @@ TEST_F(ServerTest, LinuxSharedMemoryCreatesNoTmpShadow) {
   ASSERT_TRUE(resp.has_create_publisher());
   ASSERT_TRUE(resp.create_publisher().error().empty());
 
-  for (const auto &entry : std::filesystem::directory_iterator("/tmp")) {
-    std::string name = entry.path().filename().string();
-    if (name.rfind(prefix, 0) != 0) {
-      continue;
+  for (const char *dir : {"/dev/shm", "/tmp"}) {
+    std::error_code ec;
+    for (const auto &entry : std::filesystem::directory_iterator(dir, ec)) {
+      std::string name = entry.path().filename().string();
+      if (name.rfind(prefix, 0) != 0) {
+        continue;
+      }
+      EXPECT_EQ(name.find(".scb."), std::string::npos) << entry.path();
+      EXPECT_EQ(name.find(".ccb."), std::string::npos) << entry.path();
+      EXPECT_EQ(name.find(".bcb."), std::string::npos) << entry.path();
     }
-    EXPECT_EQ(name.find(".scb."), std::string::npos) << entry.path();
-    EXPECT_EQ(name.find(".ccb."), std::string::npos) << entry.path();
-    EXPECT_EQ(name.find(".bcb."), std::string::npos) << entry.path();
   }
 }
 #endif

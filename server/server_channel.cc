@@ -83,32 +83,25 @@ static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
   return p;
 
 #elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
-  // Same unique name as the POSIX backend. Linux does not keep the shadow:
-  // the shm object is unlinked and lives on the fd, and nothing scans the
-  // /tmp file afterwards.
+  // Mint a unique name in /dev/shm via mkstemp, replace it with the
+  // shm_open object, and unlink the name once the fd is ready.
   char shm_file[NAME_MAX];
-  snprintf(shm_file, sizeof(shm_file), "/tmp/%08x.%d.%s.XXXXXX",
+  snprintf(shm_file, sizeof(shm_file), "/dev/shm/%08x.%d.%s.XXXXXX",
            static_cast<uint32_t>(session_id), id, suffix);
   int tmpfd = mkstemp(shm_file);
   if (tmpfd == -1) {
     return absl::InternalError(absl::StrFormat(
         "Failed to create shared memory name %s: %s", shm_file, strerror(errno)));
   }
-  char *shm_name = shm_file + 4; // After /tmp
-  auto discard_shadow = [&]() {
-    (void)close(tmpfd);
-    (void)unlink(shm_file);
-    tmpfd = -1;
-  };
+  (void)close(tmpfd);
+  char *shm_name = shm_file + sizeof("/dev/shm") - 1;
 
   shm_unlink(shm_name);
 
   int shm_fd = shm_open(shm_name, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
   if (shm_fd == -1) {
-    int saved = errno;
-    discard_shadow();
     return absl::InternalError(absl::StrFormat(
-        "Failed to open shared memory %s: %s", shm_name, strerror(saved)));
+        "Failed to open shared memory %s: %s", shm_name, strerror(errno)));
   }
 
   int e = ftruncate(shm_fd, size);
@@ -116,7 +109,6 @@ static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
     int saved = errno;
     shm_unlink(shm_name);
     close(shm_fd);
-    discard_shadow();
     return absl::InternalError(absl::StrFormat(
         "Failed to set length of shared memory %s: %s", shm_name,
         strerror(saved)));
@@ -129,7 +121,6 @@ static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
       int saved = errno;
       shm_unlink(shm_name);
       close(shm_fd);
-      discard_shadow();
       return absl::InternalError(absl::StrFormat(
           "Failed to map shared memory %s: %s", shm_name, strerror(saved)));
     }
@@ -137,7 +128,6 @@ static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
 
   shm_unlink(shm_name);
   fd.SetFd(shm_fd);
-  discard_shadow();
   return p;
 
 #else

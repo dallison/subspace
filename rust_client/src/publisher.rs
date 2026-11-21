@@ -1018,7 +1018,7 @@ impl PublisherImpl {
         let metadata_base = if base.starts_with('/') {
             base
         } else {
-            format!("/tmp/{base}")
+            format!("/dev/shm/{base}")
         };
         let prefix_name = format!("{metadata_base}_prefix");
         let mut prefix_metadata = SplitBufferMetadata {
@@ -1449,7 +1449,7 @@ fn open_split_buffer_set(
     let metadata_base = if base.starts_with('/') {
         base
     } else {
-        format!("/tmp/{base}")
+        format!("/dev/shm/{base}")
     };
     let prefix_name = format!("{metadata_base}_prefix");
     let prefix_metadata = read_split_buffer_metadata_file(&prefix_name)?;
