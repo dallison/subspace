@@ -234,7 +234,11 @@ public:
                                                   bool checksum_error) {
     std::shared_ptr<ActiveMessage> &m = active_messages_[slot->id];
     m->Set(len, buf, ord, ts, vchan_id, is_activation, checksum_error);
-    if (RetainsActiveMessage()) {
+    // Set() clears the message when max_active_messages is already reached.
+    // Retaining that empty message leaves refs > 0 with length == 0. The next
+    // read then rejects the slot in HoldExistingMessage and returns before
+    // ClearActiveMessage can drop the reference, so the subscriber stays stuck.
+    if (m->length > 0 && RetainsActiveMessage()) {
       active_message_ = m;
       m->IncRef();
     }
