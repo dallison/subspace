@@ -742,7 +742,7 @@ ClientChannel::CreateSplitBufferSet(size_t buffer_index, size_t full_size,
 
   std::string base = BufferSharedMemoryName(buffer_index);
   std::string metadata_base = base.empty() || base[0] == '/' ? base
-                                                            : "/tmp/" + base;
+                                                            : "/dev/shm/" + base;
   std::string prefix_name = metadata_base + "_prefix";
   SplitBufferMetadata prefix_metadata = {
       .channel_name = ResolvedName(),
@@ -980,7 +980,7 @@ ClientChannel::OpenSplitBufferSet(size_t buffer_index, size_t full_size,
   uint64_t payload_size = PageAlignedSize(slot_size);
   std::string base = BufferSharedMemoryName(buffer_index);
   std::string metadata_base = base.empty() || base[0] == '/' ? base
-                                                            : "/tmp/" + base;
+                                                            : "/dev/shm/" + base;
   std::string prefix_name = metadata_base + "_prefix";
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
   absl::StatusOr<RegisteredClientBuffer> prefix_registered =
