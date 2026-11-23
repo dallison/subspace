@@ -64,8 +64,11 @@ bazel_dep(name = "rules_python", version = "1.9.0")
 
 git_override(
     module_name = "phaser",
-    # Tag 3.1.1 with the CMake build fixes in dallison/phaser#22.
+    # Tag 3.1.1 with the CMake build fixes in dallison/phaser#22, plus the
+    # 32-bit ARM PayloadBuffer header alignment fix from dallison/phaser#23.
     commit = "a0c1b24794eff9f872c727664841c4c900da074f",
+    patch_strip = 1,
+    patches = ["//patches:phaser_armhf_payload_buffer.patch"],
     remote = "https://github.com/dallison/phaser.git",
 )
 

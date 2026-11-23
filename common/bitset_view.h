@@ -21,7 +21,7 @@ public:
   BitsetView() = default;
   BitsetView(void *bitset, int num_bits)
       : words_(reinterpret_cast<std::atomic<uint64_t> *>(
-            static_cast<char *>(bitset) + sizeof(size_t))),
+            static_cast<char *>(bitset) + sizeof(InPlaceAtomicBitset))),
         num_bits_(num_bits) {}
 
   void Set(int bit) {

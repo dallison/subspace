@@ -40,6 +40,10 @@ namespace subspace {
 // the socket is the caller's to write, and Serialize leaves room for it just
 // before the payload.
 inline constexpr size_t kServerWireHeaderSize = sizeof(uint32_t);
+// Put before the 4-byte header in an 8-byte-aligned buffer so the payload
+// after the header is 8-byte aligned too.
+inline constexpr size_t kServerWireHeaderPad =
+    (8 - (kServerWireHeaderSize % 8)) % 8;
 
 template <size_t kMessageSize, size_t kWireSize> class FixedServerWireBuffers {
 public:
@@ -62,11 +66,13 @@ public:
   }
 
   // Room for the header and length bytes after it, or nullptr.
-  char *Wire(size_t length) { return length <= kWireSize ? wire_ : nullptr; }
+  char *Wire(size_t length) {
+    return length <= kWireSize ? wire_ + kServerWireHeaderPad : nullptr;
+  }
 
 private:
   alignas(8) char message_[kMessageSize];
-  alignas(8) char wire_[kServerWireHeaderSize + kWireSize];
+  alignas(8) char wire_[kServerWireHeaderPad + kServerWireHeaderSize + kWireSize];
 };
 
 // Message and wire storage the caller owns. The wire pointer addresses the

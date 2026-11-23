@@ -95,7 +95,8 @@ private:
   // the embedded arrays. Empty for the default size.
   std::unique_ptr<char[]> allocated_;
   alignas(8) char embedded_message_[kWireBufferSize];
-  alignas(8) char embedded_wire_[kServerWireHeaderSize + kWireBufferSize];
+  alignas(8) char
+      embedded_wire_[kServerWireHeaderPad + kServerWireHeaderSize + kWireBufferSize];
   ServerWire<ProvidedServerWireBuffers> wire_;
 };
 

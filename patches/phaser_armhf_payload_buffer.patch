@@ -1,0 +1,84 @@
+diff --git a/phaser/phaser_library.bzl b/phaser/phaser_library.bzl
+index 704d5d6..d4bbc3a 100644
+--- a/phaser/phaser_library.bzl
++++ b/phaser/phaser_library.bzl
+@@ -551,6 +551,9 @@ def phaser_library(
+     cc_library(
+         name = name,
+         alwayslink = True,
++        # Static archives keep bank static initializers linked on armhf (QEMU
++        # would not run registrars in un-loaded shared objects).
++        linkstatic = True,
+         copts = copts,
+         srcs = [srcs],
+         hdrs = [hdrs],
+diff --git a/phaser/runtime/payload_buffer.cc b/phaser/runtime/payload_buffer.cc
+index bedb83a..77ec883 100644
+--- a/phaser/runtime/payload_buffer.cc
++++ b/phaser/runtime/payload_buffer.cc
+@@ -320,14 +320,9 @@ void PayloadBuffer::CheckFreeList() {
+ }
+ 
+ void PayloadBuffer::InitFreeList() {
+-  char *end_of_header = reinterpret_cast<char *>(this + 1);
+-  size_t header_size = sizeof(PayloadBuffer);
+-  if (IsMoveable()) {
+-    end_of_header +=
+-        sizeof(Resizer *); // Room for resizer function for movable buffers.
+-    header_size += sizeof(Resizer *);
+-  }
+-  FreeBlockHeader *f = reinterpret_cast<FreeBlockHeader *>(end_of_header);
++  const uint32_t header_size = AlignedPayloadHeaderSize(IsMoveable());
++  char *start_of_free = reinterpret_cast<char *>(this) + header_size;
++  FreeBlockHeader *f = reinterpret_cast<FreeBlockHeader *>(start_of_free);
+   f->length = full_size - header_size;
+   f->next = 0;
+   free_list = ToOffset(f);
+diff --git a/phaser/runtime/payload_buffer.h b/phaser/runtime/payload_buffer.h
+index 8042312..082c5e3 100644
+--- a/phaser/runtime/payload_buffer.h
++++ b/phaser/runtime/payload_buffer.h
+@@ -141,6 +141,9 @@ struct PayloadBuffer {
+   BufferOffset metadata;  // Offset to message metadata.
+   BufferOffset
+       bitmaps[kNumBitmapRuns]; // Free list head for each small block class.
++  // Explicit tail padding so the header is 48 bytes on 32- and 64-bit hosts
++  // without changing field offsets.
++  uint32_t header_padding[2] = {0, 0};
+ 
+   // Initialize a new PayloadBuffer at this with a message of the
+   // given size.  This is a fixed size buffer.
+@@ -607,6 +610,19 @@ struct PayloadBuffer {
+   }
+ };
+ 
++static_assert(sizeof(PayloadBuffer) == 48,
++              "PayloadBuffer wire layout must match on all platforms");
++
++// Bytes reserved before the heap/free list: fixed 48-byte header plus an
++// optional movable resizer pointer, rounded up to 8-byte alignment.
++inline uint32_t AlignedPayloadHeaderSize(bool movable) {
++  uint32_t n = static_cast<uint32_t>(sizeof(PayloadBuffer));
++  if (movable) {
++    n += static_cast<uint32_t>(sizeof(Resizer *));
++  }
++  return (n + 7u) & ~7u;
++}
++
+ // A string to be copied into a buffer.  It can be in that buffer, which
+ // allocating can move, so it is found again there by its offset.
+ class StringSource {
+diff --git a/phaser/runtime/wireformat.h b/phaser/runtime/wireformat.h
+index f937071..27b6c79 100644
+--- a/phaser/runtime/wireformat.h
++++ b/phaser/runtime/wireformat.h
+@@ -79,8 +79,7 @@ inline bool IsStructurallyValidPhaser(absl::Span<const char> data) {
+   }
+ 
+   const size_t minimum_header =
+-      sizeof(::phaser::PayloadBuffer) +
+-      (movable ? sizeof(::phaser::Resizer*) : 0);
++      ::phaser::AlignedPayloadHeaderSize(movable);
+   const uint32_t message = LoadWireUint32(data, kMessageOffset);
+   const uint32_t hwm = LoadWireUint32(data, kHwmOffset);
+   const uint32_t full_size = LoadWireUint32(data, kFullSizeOffset);

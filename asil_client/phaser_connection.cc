@@ -137,28 +137,28 @@ PhaserServerConnection::PhaserServerConnection(size_t wire_buffer_size)
                                               : wire_buffer_size),
       message_buffer_size_(MessageCapacity(wire_buffer_size_)) {
   char *message = embedded_message_;
-  char *wire = embedded_wire_;
+  char *wire = embedded_wire_ + kServerWireHeaderPad;
   size_t message_capacity = kWireBufferSize;
   size_t wire_capacity = wire_buffer_size_;
   if (message_buffer_size_ == 0) {
     storage_ok_ = false;
     wire_capacity = 0;
   } else if (message_buffer_size_ >
-                 std::numeric_limits<size_t>::max() - kServerWireHeaderSize -
-                     wire_buffer_size_) {
+                 std::numeric_limits<size_t>::max() - kServerWireHeaderPad -
+                     kServerWireHeaderSize - wire_buffer_size_) {
     storage_ok_ = false;
     wire_capacity = 0;
   } else if (wire_buffer_size_ > kWireBufferSize ||
              message_buffer_size_ > kWireBufferSize) {
-    const size_t bytes =
-        message_buffer_size_ + kServerWireHeaderSize + wire_buffer_size_;
+    const size_t bytes = message_buffer_size_ + kServerWireHeaderPad +
+                         kServerWireHeaderSize + wire_buffer_size_;
     allocated_.reset(new (std::nothrow) char[bytes]);
     if (allocated_ == nullptr) {
       storage_ok_ = false;
       wire_capacity = 0;
     } else {
       message = allocated_.get();
-      wire = allocated_.get() + message_buffer_size_;
+      wire = allocated_.get() + message_buffer_size_ + kServerWireHeaderPad;
       message_capacity = message_buffer_size_;
     }
   } else if (wire_buffer_size_ < kWireBufferSize) {

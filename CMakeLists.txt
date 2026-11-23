@@ -242,9 +242,13 @@ FetchContent_MakeAvailable(protobuf)
 FetchContent_Declare(
     phaser
     GIT_REPOSITORY https://github.com/dallison/phaser.git
-    # phaser 3.1.1 with the CMake build fixes in dallison/phaser#22, as in the
-    # git_override in MODULE.bazel.
+    # phaser 3.1.1 with the CMake build fixes in dallison/phaser#22, plus the
+    # 32-bit ARM PayloadBuffer header alignment fix from dallison/phaser#23,
+    # as in the git_override in MODULE.bazel.
     GIT_TAG a0c1b24794eff9f872c727664841c4c900da074f
+    PATCH_COMMAND "${CMAKE_COMMAND}"
+        "-DPATCH_FILE=${CMAKE_CURRENT_SOURCE_DIR}/patches/phaser_armhf_payload_buffer.patch"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/apply_patch.cmake"
 )
 FetchContent_MakeAvailable(phaser)
 

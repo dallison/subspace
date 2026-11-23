@@ -30,6 +30,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <string>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <thread>
@@ -256,6 +257,18 @@ asil::PublisherOptions StaticPubOptions() {
 class TestServer {
 public:
   void Start(const char *config) {
+    struct rlimit nofile;
+    if (getrlimit(RLIMIT_NOFILE, &nofile) == 0) {
+      rlim_t target = 65536;
+      if (nofile.rlim_max != RLIM_INFINITY && nofile.rlim_max < target) {
+        target = nofile.rlim_max;
+      }
+      if (nofile.rlim_cur < target) {
+        nofile.rlim_cur = target;
+        (void)setrlimit(RLIMIT_NOFILE, &nofile);
+      }
+    }
+
 #if defined(__ANDROID__)
     char socket_name_template[] = "/data/local/tmp/subspaceXXXXXX"; // NOLINT
 #else
