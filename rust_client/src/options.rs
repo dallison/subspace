@@ -24,6 +24,8 @@ pub struct PublisherOptions {
     pub bridge: bool,
     pub for_tunnel: bool,
     pub fixed_size: bool,
+    /// See `set_server_defined`.
+    pub server_defined: bool,
     /// See `set_max_slot_size`.  0 means unlimited.
     pub max_slot_size: i64,
     pub channel_type: String,
@@ -52,6 +54,7 @@ impl Default for PublisherOptions {
             bridge: false,
             for_tunnel: false,
             fixed_size: false,
+            server_defined: false,
             max_slot_size: 0,
             channel_type: String::new(),
             activate: false,
@@ -61,7 +64,8 @@ impl Default for PublisherOptions {
             max_outstanding_slot_leases: 1,
             notify_retirement_on_forced_reuse: true,
             checksum: false,
-            checksum_size: 4,
+            // 0 means 4 bytes.
+            checksum_size: 0,
             metadata_size: 0,
             use_split_buffers: false,
             split_buffers_over_bridge: false,
@@ -109,6 +113,16 @@ impl PublisherOptions {
 
     pub fn set_fixed_size(mut self, v: bool) -> Self {
         self.fixed_size = v;
+        self
+    }
+
+    /// The channel is in the server's static channel config, which defines
+    /// its layout.  Publishers on static channels must set this and leave the
+    /// slot size, number of slots, fixed size, checksum size, metadata size,
+    /// subscriber queue arena size and split buffers unset.  The publisher
+    /// takes them from the server.
+    pub fn set_server_defined(mut self, v: bool) -> Self {
+        self.server_defined = v;
         self
     }
 

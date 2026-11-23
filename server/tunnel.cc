@@ -1,4 +1,4 @@
-// Copyright 2026 General Motors LLC
+// Copyright 2026 General Motors
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -444,9 +444,7 @@ TunnelManager::PlanIngress(const Handshake &handshake,
   options.SetBridge(true)
       .SetForTunnel(true)
       .SetReliable(transport.is_reliable())
-      .SetType(handshake.channel_type())
-      .SetChecksumSize(plan.checksum_size)
-      .SetMetadataSize(plan.metadata_size);
+      .SetType(handshake.channel_type());
 
   // The publisher must agree with the channel as it exists here or the server
   // refuses it.  Message sizes don't depend on the handshake: the publisher
@@ -455,6 +453,24 @@ TunnelManager::PlanIngress(const Handshake &handshake,
   if (!server_->IsPublicChannel(channel)) {
     channel = nullptr;
   }
+  if (channel != nullptr && channel->IsStatic()) {
+    // The config owns the layout, so this publisher must not send slot,
+    // checksum, metadata or split-buffer settings.
+    options.SetServerDefined(true).SetUseSplitBuffers(false);
+    if (!channel->Type().empty() &&
+        channel->Type() != handshake.channel_type()) {
+      options.SetType("");
+    }
+    if (channel->IsVirtual()) {
+      VirtualChannel *vchan = static_cast<VirtualChannel *>(channel);
+      options.SetMux(vchan->GetMux()->Name())
+          .SetVchanId(vchan->GetVirtualChannelId());
+    }
+    return plan;
+  }
+
+  options.SetChecksumSize(plan.checksum_size)
+      .SetMetadataSize(plan.metadata_size);
   if (channel == nullptr) {
     auto route = receive_routes_.find(plan.topic);
     if (route != receive_routes_.end() && !route->second.mux.empty()) {

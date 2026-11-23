@@ -1,4 +1,4 @@
-// Copyright 2026 General Motors LLC
+// Copyright 2026 General Motors
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -19,7 +19,8 @@ inline constexpr int kDefaultTunnelDiscoveryRefreshSecs = 5;
 absl::StatusOr<TunnelConfig> ParseTunnelConfig(std::string_view text,
                                                std::string_view source);
 
-// Reads and parses the tunnel configuration file at `path`.
+// Reads and parses the tunnel configuration file at `path`. A name ending
+// in .pb or .binpb is protobuf wire format. Any other name is text format.
 absl::StatusOr<TunnelConfig> LoadTunnelConfig(const std::string &path);
 
 // The device name this server announces to tunnel peers: the configured

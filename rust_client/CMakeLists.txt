@@ -25,15 +25,55 @@ else()
     set(CARGO_TARGET_DIR "debug")
 endif()
 
+# The client sends the server native Phaser payloads, built through phaser's C
+# frontend.  The phaser_c crate includes the generated Rust bindings.  Cargo
+# cannot follow CMake's static libraries, so their C++ code and everything it
+# uses are linked into one shared library.
+phaser_add_library(subspace_phaser_c
+    PROTOS proto/subspace.proto
+    IMPORTS google/protobuf/any.proto
+    IMPORT_DIRS ${CMAKE_SOURCE_DIR} ${protobuf_SOURCE_DIR}/src
+    ADD_NAMESPACE phaser_c
+    RUST
+)
+if(NOT EXISTS "${CMAKE_CURRENT_BINARY_DIR}/subspace_phaser_c_rust.cc")
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/subspace_phaser_c_rust.cc" "")
+endif()
+add_library(subspace_phaser_c_rust SHARED
+    "${CMAKE_CURRENT_BINARY_DIR}/subspace_phaser_c_rust.cc"
+)
+# Nothing in the shared library calls the C API, so the linker would drop it.
+if(APPLE)
+    set(SUBSPACE_PHASER_C_WHOLE
+        -Wl,-force_load,$<TARGET_FILE:subspace_phaser_c>
+        -Wl,-force_load,$<TARGET_FILE:phaser_c>)
+else()
+    set(SUBSPACE_PHASER_C_WHOLE
+        -Wl,--whole-archive
+        $<TARGET_FILE:subspace_phaser_c>
+        $<TARGET_FILE:phaser_c>
+        -Wl,--no-whole-archive)
+endif()
+target_link_libraries(subspace_phaser_c_rust PRIVATE
+    ${SUBSPACE_PHASER_C_WHOLE}
+    subspace_phaser_c
+)
+
+set(SUBSPACE_CARGO_ENV
+    SUBSPACE_MAX_CHANNELS=${SUBSPACE_MAX_CHANNELS}
+    SUBSPACE_MAX_SLOT_OWNERS=${SUBSPACE_MAX_SLOT_OWNERS}
+    SUBSPACE_MAX_BUFFERS=${SUBSPACE_MAX_BUFFERS}
+    SUBSPACE_PHASER_C_RS=$<TARGET_PROPERTY:subspace_phaser_c,PHASER_RUST_SOURCE>
+    SUBSPACE_PHASER_C_LIB_DIR=$<TARGET_FILE_DIR:subspace_phaser_c_rust>
+)
+
 add_custom_target(subspace_client_rust ALL
-    COMMAND ${CMAKE_COMMAND} -E env
-            SUBSPACE_MAX_CHANNELS=${SUBSPACE_MAX_CHANNELS}
-            SUBSPACE_MAX_SLOT_OWNERS=${SUBSPACE_MAX_SLOT_OWNERS}
-            SUBSPACE_MAX_BUFFERS=${SUBSPACE_MAX_BUFFERS}
+    COMMAND ${CMAKE_COMMAND} -E env ${SUBSPACE_CARGO_ENV}
             ${CARGO_EXECUTABLE} build ${CARGO_BUILD_FLAG}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     COMMENT "Building Rust client library via Cargo"
 )
+add_dependencies(subspace_client_rust subspace_phaser_c_rust)
 
 # The Rust client opens named /dev/shm buffers and cannot consume buffers
 # created by a server using the anonymous memfd backend. This mirrors the Bazel
@@ -50,6 +90,6 @@ else()
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     )
     set_tests_properties(rust_client_test PROPERTIES
-        ENVIRONMENT "PATH=$<TARGET_FILE_DIR:subspace_server>:$ENV{PATH};SUBSPACE_MAX_CHANNELS=${SUBSPACE_MAX_CHANNELS};SUBSPACE_MAX_SLOT_OWNERS=${SUBSPACE_MAX_SLOT_OWNERS};SUBSPACE_MAX_BUFFERS=${SUBSPACE_MAX_BUFFERS}"
+        ENVIRONMENT "PATH=$<TARGET_FILE_DIR:subspace_server>:$ENV{PATH};${SUBSPACE_CARGO_ENV}"
     )
 endif()

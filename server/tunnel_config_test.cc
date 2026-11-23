@@ -1,4 +1,4 @@
-// Copyright 2026 General Motors LLC
+// Copyright 2026 General Motors
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -223,6 +223,73 @@ TEST(TunnelConfigTest, LoadsFile) {
   unlink(path);
 
   EXPECT_THAT(LoadTunnelConfig(path), StatusIs(absl::StatusCode::kNotFound));
+}
+
+TEST(TunnelConfigTest, ExtensionSelectsTextOrWire) {
+  absl::StatusOr<TunnelConfig> parsed = ParseTunnelConfig(kGoodConfig, "text");
+  ASSERT_THAT(parsed, IsOk());
+  std::string wire;
+  ASSERT_TRUE(parsed->SerializeToString(&wire));
+
+  char text_template[] = TUNNEL_TEST_TMP "/tunnel_cfg_textXXXXXX";
+  char wire_template[] = TUNNEL_TEST_TMP "/tunnel_cfg_wireXXXXXX";
+  const int text_fd = mkstemp(text_template);
+  const int wire_fd = mkstemp(wire_template);
+  ASSERT_GE(text_fd, 0);
+  ASSERT_GE(wire_fd, 0);
+  close(text_fd);
+  close(wire_fd);
+  const std::string text_path = std::string(text_template) + ".textproto";
+  const std::string wire_path = std::string(wire_template) + ".pb";
+  ASSERT_EQ(0, rename(text_template, text_path.c_str()));
+  ASSERT_EQ(0, rename(wire_template, wire_path.c_str()));
+
+  {
+    std::ofstream out(text_path, std::ios::binary);
+    out << kGoodConfig;
+    std::ofstream wire_out(wire_path, std::ios::binary);
+    wire_out.write(wire.data(), static_cast<std::streamsize>(wire.size()));
+  }
+  absl::StatusOr<TunnelConfig> from_text = LoadTunnelConfig(text_path);
+  ASSERT_THAT(from_text, IsOk());
+  EXPECT_EQ(from_text->device_name(), "alpha");
+  absl::StatusOr<TunnelConfig> from_wire = LoadTunnelConfig(wire_path);
+  ASSERT_THAT(from_wire, IsOk());
+  EXPECT_EQ(from_wire->device_name(), "alpha");
+
+  {
+    std::ofstream out(wire_path, std::ios::binary);
+    out << kGoodConfig;
+  }
+  EXPECT_THAT(LoadTunnelConfig(wire_path),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("wire format")));
+  unlink(text_path.c_str());
+  unlink(wire_path.c_str());
+}
+
+TEST(TunnelConfigTest, WireFormatRejectsUnknownFields) {
+  absl::StatusOr<TunnelConfig> parsed = ParseTunnelConfig(kGoodConfig, "text");
+  ASSERT_THAT(parsed, IsOk());
+  std::string wire;
+  ASSERT_TRUE(parsed->SerializeToString(&wire));
+  // Field 999, varint 1: a field this build doesn't have.
+  wire.append("\xb8\x3e\x01", 3);
+
+  char path[] = TUNNEL_TEST_TMP "/tunnel_cfg_unknownXXXXXX";
+  const int fd = mkstemp(path);
+  ASSERT_GE(fd, 0);
+  close(fd);
+  const std::string named = std::string(path) + ".pb";
+  ASSERT_EQ(0, rename(path, named.c_str()));
+  {
+    std::ofstream out(named, std::ios::binary);
+    out.write(wire.data(), static_cast<std::streamsize>(wire.size()));
+  }
+  EXPECT_THAT(LoadTunnelConfig(named),
+              StatusIs(absl::StatusCode::kInvalidArgument,
+                       HasSubstr("unknown field")));
+  unlink(named.c_str());
 }
 
 } // namespace

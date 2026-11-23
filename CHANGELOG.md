@@ -2,14 +2,117 @@
 
 ## Unreleased
 
+- x86 builds with SSE4.2 no longer use the SSE4.2 CRC32 instruction for
+  message checksums. That instruction computes CRC-32C, not the IEEE 802.3
+  CRC32 used everywhere else (including the Rust client), so checksums from
+  such a build did not verify against other builds. x86 now always uses the
+  IEEE table. ARM hardware CRC32 already used the IEEE polynomial and is
+  unchanged.
+
+### Static Channel Config
+- `subspace_server --channel_config=FILE` reads a `StaticChannelConfig` and
+  creates its channels and multiplexers before the server accepts clients.
+  A file ending in `.pb` or `.binpb` is protobuf wire format; any other name
+  is protobuf text format. `--tunnel_config` uses the same rule. The
+  configured channels stay when they have no users, and the server defines
+  their layout. A standard publisher can still create a channel that isn't
+  configured by specifying its layout, and any subscriber
+  can subscribe to one. An ASIL publisher cannot: the ASIL client marks its
+  connection, and the server rejects its publishers on any other channel.
+- Publishers on a static channel must set the new `server_defined` option
+  (`PublisherOptions::SetServerDefined`, `server_defined` in the C, Python,
+  Rust and ASIL clients) and can't set the slot size, number of slots, fixed
+  size, checksum size, metadata size, subscriber queue arena size or split
+  buffer setting. The server rejects `server_defined` on any other channel.
+  `CreatePublisherResponse` now reports the channel's slot size, checksum
+  size, metadata size, split buffer setting and fixed size, and a
+  `server_defined` publisher uses them.
+- `subspace_publisher_options_server_defined()` in the C client gives
+  options for a static channel.
+- The default `checksum_size` in the C++ and Rust `PublisherOptions` is now 0,
+  which means 4 bytes as before, so a `server_defined` publisher can use the
+  default options.
+- A multiplexer with no publishers now reports its slot size.
+- Publishers on different virtual channels of a multiplexer are checked
+  against each other for fixed size and locality, as they share the
+  multiplexer's buffers. Before, a second fixed-size publisher on another
+  virtual channel was rejected, so a static multiplexer could only have
+  publishers on one virtual channel.
+- The server creates the message buffers of every static channel and
+  multiplexer when it starts, so subscribers can map them before any
+  publisher exists.
+- `use_split_buffers` in a static channel or multiplexer config gives it
+  split buffers, which the server creates.
+- `type` in a static channel or multiplexer config is bytes, the same as the
+  channel type on the wire. A quoted string is that text's bytes, and
+  protobuf text escapes carry an opaque blob such as ROS metadata or a
+  protobuf descriptor. A virtual channel still takes its type from its
+  multiplexer.
+- `GetClientBuffersRequest` can ask for one prefix or slot of a split buffer
+  set with `filter_slot`, `is_prefix` and `slot_id`.
+
+### ASIL Client
+- `asil_client/` is a new C++17 client for safety-related software. It
+  shares channels with the standard clients through the same shared memory
+  protocol, using only the standard library and
+  POSIX. It is built without exceptions or RTTI, returns an error code from
+  every operation, and allocates no memory while publishing or reading.
+  Checksums, metadata, `ReadNewest`, dropped message counts and activation
+  messages work with the standard clients. The server handshake is behind a
+  replaceable `ServerConnection` interface. `PhaserServerConnection`
+  implements the standard protocol with phaser messages in fixed buffers,
+  sent and received as the native Phaser payload, so the handshake makes no
+  heap allocations either. See `docs/asil-client.md`.
+- The ASIL client also supports reliable publishers and subscribers, virtual
+  channels and multiplexer subscribers, subscribers holding up to 64
+  messages, subscriber queues, split buffers (with C callbacks for slots from
+  a custom allocator), and the memfd backend. Reading the newest message on
+  a reliable subscriber marks the skipped messages as read.
+- ASIL publishers and subscribers map all of a channel's shared memory when
+  they open, and publishing and reading make no shared memory calls. A
+  subscriber needs the channel to have buffers when it opens: always true of
+  static channels, otherwise a publisher must have opened. Messages in a
+  buffer that a standard publisher created by resizing after the subscriber
+  opened return `kBufferNotMapped`.
+- The standard C++ client builds its server requests and responses as
+  phaser messages too, in growable buffers. `ServerWire` in
+  `common/server_wire.h` encodes them for both C++ clients, with fixed or
+  growable buffers. The socket carries the native Phaser payload. The Rust
+  client sends and parses that same payload. Bridge, tunnel, discovery, the
+  channel directory and statistics stay on protobuf.
+- The ASIL client and the standard C++ client share the shared memory
+  protocol code in `common/`: finding a slot, publishing, the checksum, and
+  taking, releasing and skipping messages. Sharing it fixed these bugs in the
+  standard client:
+  - A reliable subscriber reading the newest message didn't mark the
+    messages it skipped as seen, so a reliable publisher could no longer get
+    a slot once the free slots ran out.
+  - A subscriber ignoring an activation message kept its owner bit on the
+    slot. If the process then died, the server dropped a reference from
+    whatever message was in that slot later.
+  - With retirement notification on, releasing a bridged message crashed if
+    its slot on the other side of the bridge had a higher id than any slot
+    in this channel.
+- Bazel, CMake and Soong build phaser and generate `subspace_phaser` from
+  `subspace.proto`. Android CMake cross-compiles need a host
+  `protoc-gen-phaser` in `PHASER_PLUGIN_EXECUTABLE`.
+- CMake also generates the Rust client's Phaser bindings and links their C++
+  code into the shared library `subspace_phaser_c_rust`, which the Cargo
+  build links. A Cargo build run outside CMake sets `SUBSPACE_PHASER_C_RS`
+  and `SUBSPACE_PHASER_C_LIB_DIR` to the files from a CMake build.
+- Abseil 20250814.1, protobuf 33.4, cpp_toolbelt 2.1.6 and phaser 3.1.1 in
+  the Bazel build. CMake uses cpp_toolbelt 2.1.6 and the same phaser. Both
+  pin phaser 3.1.1 with the CMake build fixes in dallison/phaser#22.
+
 ### Subscriber Queues Keep Per-Publisher Order
 - A subscriber with an explicit queue size could read a message that had
   overflowed its queue after newer messages from the same publisher. The
   overflowed message stayed visible in the subscriber's slot bitset, where
   bitset recovery and the first read found it. A publisher now clears that bit
   when it drops a message from a subscriber's queue, and leaves the entry in
-  place while the dropped message is still being published. The C++ and Rust
-  clients both do this, so mixed-language channels keep the same order.
+  place while the dropped message is still being published. The standard
+  C++, ASIL and Rust publishers all do this, so mixed-language channels keep
+  the same order.
 - A reliable subscriber's queue no longer drops entries when it is full.
   Reliable subscribers read from their bitset, and must never lose a message.
   The server sets this when it creates the queue, so upgrade it with the
@@ -37,9 +140,10 @@
 ### Tunnel-Compatible Discovery and Bridging
 - The server can exchange channels over TCP with peers that use the Cruise
   IPC tunnel and discovery protocols. `--tunnel` turns it on, and
-  `--tunnel_config` names a configuration file in protobuf text format
-  (`proto/tunnel_config.proto`) that lists the device name, listen port,
-  peers, discovery denylist and refresh interval. Programs that embed the
+  `--tunnel_config` names a configuration file, in protobuf text format
+  unless it ends in `.pb` or `.binpb` (`proto/tunnel_config.proto`) that
+  lists the device name, listen port, peers, discovery denylist and refresh
+  interval. Programs that embed the
   server call `Server::SetTunnelConfig`. See `docs/tunnel.md`.
 - Tunnel discovery uses the Cruise protobuf format on
   `/ipc/discovery/proto/receive` (`proto/tunnel_discovery.proto`). ROS-encoded

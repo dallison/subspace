@@ -12,6 +12,7 @@ prost-types = "0.13"
 thiserror = "2"
 log = "0.4"
 libc = "0.2"
+subspace_phaser_c = { path = "phaser_c" }
 
 [build-dependencies]
 prost-build = "0.13"

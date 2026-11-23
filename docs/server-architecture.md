@@ -74,7 +74,8 @@ Each channel requires three shared memory regions, created via `shm_open()` (POS
 
 - One per channel.
 - Contains: channel name, num_slots, ordinals, activation tracker.
-- CCB version 5 uses atomic slot metadata and subscriber counters.
+- CCB version 6 uses atomic slot metadata, subscriber counters, and a
+  publish-time delivery countdown in each slot.
   `total_messages` advances for every
   completed publication, including activation messages, and also versions
   subscriber delivery snapshots.
@@ -295,6 +296,8 @@ server/
 ├── client_handler.h/cc           # Client connection handler
 ├── server_channel.h/cc           # ServerChannel and its users
 ├── shadow_replicator.h/cc        # Replication to the shadow process
+├── static_config.h/cc            # Static channel config parsing and validation
+├── config_format.h               # Config file format, chosen by extension
 ├── tunnel.h/cc                   # Tunnel discovery and bridging
 ├── tunnel_config.h/cc            # Tunnel configuration parsing and validation
 ├── tunnel_protocol.h/cc          # Tunnel wire format

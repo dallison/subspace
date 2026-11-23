@@ -6,6 +6,7 @@
 #include "client/client_channel.h"
 #include "client/message.h"
 #include "common/fast_ring_buffer.h"
+#include "common/subscribe.h"
 #include <cstring>
 #include <mutex>
 #include <optional>
@@ -173,11 +174,9 @@ public:
                                     /*drop_ref=*/true, ordinal, vchan_id)) {
       TryRetireSlot(slot);
     }
-    slot->flags.fetch_or(kMessageSeen, std::memory_order_relaxed);
-    if (IsReliable()) {
-      slot->flags.fetch_or(kMessageSeenByReliable, std::memory_order_relaxed);
-    }
+    MarkMessageSeen(slot, IsReliable());
   }
+  void ReleaseSlotReference(MessageSlot *slot);
   // A subscriber wants to find a slot with a message in it.  There are
   // two ways to get this:
   // NextSlot: gets the next slot in the active list

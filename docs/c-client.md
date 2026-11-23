@@ -85,10 +85,18 @@ opts.metadata_size = 32;
 SubspacePublisher pub = subspace_create_publisher(client, "my_channel", opts);
 ```
 
+On a server with a [static channel config](../README.md#static-channel-config),
+start with `subspace_publisher_options_server_defined()` instead.  It sets
+`server_defined` and leaves every layout option (`slot_size`, `num_slots`,
+`fixed_size`, `checksum_size`, `metadata_size`,
+`subscriber_queue_arena_size` and `use_split_buffers`) at zero, as the server
+requires on a static channel.
+
 Important publisher options:
 
 | Field | Purpose |
 | --- | --- |
+| `server_defined` | Take the channel layout from the server's static channel config. Required on static channels and rejected on others. |
 | `slot_size`, `num_slots` | Initial payload slot size and fixed slot count. `slot_size` is a `SubspaceSlotSize`, which is `int32_t` unless the library and your code are both built with `SUBSPACE_64BIT_SLOT_SIZE`; see [Slot Sizes](slot-sizes.md#64-bit-slot-sizes). |
 | `local` | Keep the channel local to this server. |
 | `reliable` | Wait for free slots instead of overwriting unread messages. |

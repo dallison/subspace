@@ -1,34 +1,38 @@
 // Copyright 2026 David Allison
+// Copyright 2026 General Motors
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#include "client/checksum.h"
+#include "common/crc32.h"
+
 #include <cstddef>
 #include <cstdint>
-#include <iostream>
-
-namespace subspace {
-
-extern "C" {
 
 // The x86 SSE4.2 CRC32 instruction computes CRC-32C, not the IEEE 802.3 CRC32
-// used by the Rust client and by every other build. x86 always uses the table
-// below. The ARM CRC32 instructions compute the IEEE polynomial and are used
-// when available.
+// used by the Rust client and by every other build, so x86 always uses the
+// table below. The ARM CRC32 instructions compute the IEEE polynomial and are
+// used when available.
 #if defined(__aarch64__) && !defined(__ARM_FEATURE_CRC32)
 // Switch off hardware CRC32 if it is not available on aarch64.
 #undef SUBSPACE_HARDWARE_CRC
 #endif
 
-
 #if defined(SUBSPACE_HARDWARE_CRC) && defined(__aarch64__)
-
 // Whether to use the hand-written assembly version of the CRC32 function
 // in arm_crc32.S
 #define ARM_ASM_CRC32 1
-
 #if !defined(ARM_ASM_CRC32)
 #include <arm_acle.h>
+#endif
+#endif
+
+namespace subspace {
+
+extern "C" {
+
+#if defined(SUBSPACE_HARDWARE_CRC) && defined(__aarch64__)
+
+#if !defined(ARM_ASM_CRC32)
 uint32_t SubspaceCRC32(uint32_t crc, const uint8_t *data, size_t length) {
   size_t i = 0;
 

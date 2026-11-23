@@ -27,10 +27,11 @@ cc_binary(
     linkshared = True,
 )
 
-# Static library version of the NOP plugin for linking directly into binaries.
-# On macOS, dlopen'd plugins get their own copy of thread-local variables
-# (like co::self), breaking the coroutine scheduler.  Linking the plugin
-# statically avoids that by keeping a single copy of the coroutines library.
+# Static library versions of the test plugins for linking directly into
+# binaries.  On macOS, dlopen'd plugins get their own copy of thread-local
+# variables (like co::self), breaking the coroutine scheduler.  Linking the
+# plugin statically avoids that by keeping a single copy of the coroutines
+# library.
 cc_library(
     name = "nop_plugin_lib",
     srcs = ["nop_plugin.cc"],
@@ -40,6 +41,16 @@ cc_library(
         "//server:server",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/strings:str_format",
+    ],
+    alwayslink = True,
+)
+
+cc_library(
+    name = "split_buffer_free_test_plugin_lib",
+    srcs = ["split_buffer_free_test_plugin.cc"],
+    deps = [
+        "//server:server",
+        "@abseil-cpp//absl/status",
     ],
     alwayslink = True,
 )

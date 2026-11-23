@@ -1,5 +1,6 @@
 load("@protobuf//bazel:proto_library.bzl", "proto_library")
 load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@phaser//phaser:phaser_library.bzl", "phaser_library")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -16,6 +17,33 @@ cc_proto_library(
     deps = [":subspace_proto"],
 )
 
+# Phaser messages for subspace.proto in namespace subspace::phaser.  They are
+# built in caller-provided buffers without heap allocation and converted to and
+# from protobuf wire format.
+phaser_library(
+    name = "subspace_phaser",
+    add_namespace = "phaser",
+    copts = [
+        "-fno-exceptions",
+        "-fno-rtti",
+    ],
+    deps = [":subspace_proto"],
+)
+
+# C frontend for the Rust client. The socket carries the native Phaser payload
+# from this crate. The extra namespace keeps these C++ symbols distinct from
+# //proto:subspace_phaser, which the C++ clients also link into the Rust tests.
+# Exceptions stay enabled because the C handle allocates with try/catch.
+# direct_header_symlinks is off so this target can share the proto with the
+# protobuf-frontend library above.
+phaser_library(
+    name = "subspace_phaser_c",
+    add_namespace = "phaser_c",
+    direct_header_symlinks = False,
+    rust = True,
+    deps = [":subspace_proto"],
+)
+
 proto_library(
     name = "tunnel_proto",
     srcs = [
@@ -29,4 +57,3 @@ cc_proto_library(
     name = "tunnel_cc_proto",
     deps = [":tunnel_proto"],
 )
-

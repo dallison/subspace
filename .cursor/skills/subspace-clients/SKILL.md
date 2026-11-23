@@ -273,10 +273,14 @@ bazel build //rust_client:subspace_client_rust
 bazel test //rust_client:client_test
 
 cmake -S . -B build/cmake-Debug -DCMAKE_BUILD_TYPE=Debug
-cmake --build build/cmake-Debug --target subspace_client_rust
-
-cd rust_client && cargo build && cargo test -- --test-threads=1
+cmake --build build/cmake-Debug --target subspace_client_rust subspace_server
+ctest --test-dir build/cmake-Debug -R rust_client_test --output-on-failure
 ```
+
+Cargo needs the Phaser bindings from a CMake build. To run it directly, set
+`SUBSPACE_PHASER_C_RS` to the generated
+`build/cmake-Debug/rust_client/subspace_phaser_c_phaser/subspace_phaser_c.rs` and
+`SUBSPACE_PHASER_C_LIB_DIR` to `build/cmake-Debug/rust_client`.
 
 Java/JNI for Android:
 

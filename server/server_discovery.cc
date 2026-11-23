@@ -1,7 +1,7 @@
 // Copyright 2023-2026 David Allison
 // All Rights Reserved
 // Shadow support is Copyright 2026 Cruise LLC
-// Tunnel support is Copyright 2026 General Motors LLC
+// Tunnel support is Copyright 2026 General Motors
 // See LICENSE file for licensing information.
 
 #include "server/server.h"
@@ -352,14 +352,23 @@ void Server::SubscribeOverBridge(ServerChannel *channel, bool reliable,
   const bool local_use_split_buffers =
       local_has_split_options &&
       split_channel->GetSplitBufferOptions().use_split_buffers;
+  const bool local_is_static = channel->IsStatic();
+  std::string static_mux;
+  int static_vchan_id = -1;
+  if (local_is_static && channel->IsVirtual()) {
+    const VirtualChannel *vchan = static_cast<const VirtualChannel *>(channel);
+    static_mux = vchan->GetMux()->Name();
+    static_vchan_id = vchan->GetVirtualChannelId();
+  }
   std::string channel_name = channel->Name();
   runtime_.SpawnOnNewStrand(
       [this, channel_name, reliable, split_buffers_over_bridge, publisher,
-       local_has_split_options, local_use_split_buffers](async::Context ctx) {
+       local_has_split_options, local_use_split_buffers, local_is_static,
+       static_mux, static_vchan_id](async::Context ctx) {
         BridgeReceiverCoroutine(ctx, channel_name, reliable,
                                 split_buffers_over_bridge, publisher,
-                                local_has_split_options,
-                                local_use_split_buffers);
+                                local_has_split_options, local_use_split_buffers,
+                                local_is_static, static_mux, static_vchan_id);
       },
       {.name = absl::StrFormat("Bridge receiver for %s", channel_name),
        .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
