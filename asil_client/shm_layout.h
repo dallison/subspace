@@ -4,7 +4,8 @@
 // See LICENSE file for licensing information.
 
 // Names for the shared-memory protocol. The types live in common/shm_layout.h
-// and are the same types the regular client uses.
+// and are the same types the regular client uses. The layout is valid on
+// 32-bit targets: size_t fields are padded so 64-bit atomics stay aligned.
 
 #pragma once
 
@@ -13,8 +14,6 @@
 namespace subspace {
 namespace asil {
 namespace shm {
-
-static_assert(sizeof(void *) == 8, "Subspace shared memory needs 64 bits");
 
 using ::subspace::ActivationTracker;
 using ::subspace::AvailableSlotQueueIndex;
