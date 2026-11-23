@@ -462,6 +462,62 @@ jobs:
       - name: Run CMake tests
         run: ctest --test-dir build/cmake-${{ matrix.variant }} --output-on-failure --timeout 600
 
+  # 32-bit ARM Linux. Bazel publishes no armhf binary, so this cross-compiles
+  # with the distro armhf toolchain and runs the CMake tests under qemu-user.
+  # The Rust client and Asio RPC backends are not part of the cross build.
+  cmake-armhf:
+    name: cmake (armhf)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install the armhf cross toolchain and QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-arm-linux-gnueabihf \
+            g++-arm-linux-gnueabihf \
+            qemu-user
+
+      - name: Build a host protoc
+        run: |
+          cmake -S . -B build/host-protoc \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSUBSPACE_ASIO_RPC=OFF \
+            -DSUBSPACE_CO20_RPC=OFF
+          cmake --build build/host-protoc --target protoc --parallel "$(nproc)"
+
+      - name: Configure the armhf build
+        run: |
+          cmake -S . -B build/armhf \
+            -DCMAKE_TOOLCHAIN_FILE="$PWD/cmake/toolchains/linux-armhf.cmake" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPROTOC_EXECUTABLE="$PWD/build/host-protoc/_deps/protobuf-build/protoc" \
+            -DSUBSPACE_ASIO_RPC=OFF
+
+      - name: Build armhf targets
+        run: cmake --build build/armhf --parallel "$(nproc)"
+
+      - name: Check the server is 32-bit ARM
+        run: |
+          readelf -h build/armhf/server/subspace_server > armhf-header.txt
+          grep -q 'Class:.*ELF32' armhf-header.txt
+          grep -q 'Machine:.*ARM' armhf-header.txt
+
+      # CTest launches each test with qemu-user -L (the toolchain's
+      # CMAKE_CROSSCOMPILING_EMULATOR), so the armhf sysroot is found for the
+      # test binaries. QEMU_LD_PREFIX gives the same sysroot to any armhf
+      # process that is started without that wrapper. client_test raises its
+      # own soft NOFILE limit in client/test_fixture.h; without it the kernel
+      # drops SCM_RIGHTS payloads once the default 1024 limit is reached.
+      - name: Run armhf tests under QEMU
+        run: |
+          export QEMU_LD_PREFIX=/usr/arm-linux-gnueabihf
+          ctest --test-dir build/armhf --output-on-failure --timeout 600
+
   cmake-android:
     name: cmake-android (x86_64)
     runs-on: ubuntu-latest

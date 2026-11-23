@@ -48,8 +48,10 @@ struct ActiveMessage {
     vchan_id = other.vchan_id;
     is_activation = other.is_activation;
     checksum_error = other.checksum_error;
+    lookup_only = other.lookup_only;
     refs = other.refs.load();
     other.refs.store(0);
+    other.lookup_only = false;
   };
 
   ActiveMessage &operator=(ActiveMessage &&other) {
@@ -62,16 +64,22 @@ struct ActiveMessage {
     vchan_id = other.vchan_id;
     is_activation = other.is_activation;
     checksum_error = other.checksum_error;
+    lookup_only = other.lookup_only;
     refs = other.refs.load();
     other.refs.store(0);
+    other.lookup_only = false;
     return *this;
   }
 
   void Set(size_t len, const void *buf, uint64_t ord, int64_t ts, int vid,
              bool activation, bool cs_error);
 
-  void IncRef() { refs++; }
-  void DecRef() { Release(--refs); }
+  void IncRef() { refs.fetch_add(1, std::memory_order_acq_rel); }
+  // Drops one reference.  The last one seals the message (refs becomes
+  // kReleasing) and hands the release to the subscriber, which performs it
+  // under its active_mutex_.  Until then no read or find can hold the message.
+  void DecRef();
+  static constexpr int kReleasing = -1;
 
   std::weak_ptr<details::SubscriberImpl>
       sub;                      // Subscriber that read the message.
@@ -83,13 +91,17 @@ struct ActiveMessage {
   int vchan_id = -1;            // Virtual channel ID (or -1 if not used).
   bool is_activation = false;   // Is this an activation message?
   bool checksum_error = false;  // Was there a checksum error?
+  // Set when this hold comes from FindMessage.  Dropping the last reference
+  // releases the slot pin without consuming the subscriber's delivery
+  // obligation, so the message stays readable.
+  bool lookup_only = false;
 
   // We keep track of the number of references to this active message.  Once it
   // goes to zero we can release the slot.
   std::atomic<int> refs = 0;
 
 private:
-  void Release(int ref_count);
+  friend class details::SubscriberImpl;
 
   void ResetInternal();
 };

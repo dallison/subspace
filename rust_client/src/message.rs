@@ -19,6 +19,13 @@ pub(crate) struct ActiveMessage {
     release: Box<dyn Fn() + Send + Sync>,
 }
 
+/// `refs` value once the last reference has been dropped and the release has
+/// not been claimed yet.  Nothing can take the message in this state, and the
+/// release is performed by whoever claims it with `claim_release`.  The
+/// subscriber claims it under its lock, so the release never runs while another
+/// read or find is partway through taking the same slot.
+const PENDING_RELEASE: i32 = 1 << 30;
+
 impl ActiveMessage {
     pub fn new(release: Box<dyn Fn() + Send + Sync>) -> Self {
         Self {
@@ -27,29 +34,81 @@ impl ActiveMessage {
         }
     }
 
+    /// Adds a reference.  The caller already holds one.
     pub fn inc_ref(&self) {
-        self.refs.fetch_add(1, Ordering::Relaxed);
+        self.refs.fetch_add(1, Ordering::AcqRel);
     }
 
+    /// Adds a reference if the message is held.  Returns false, without
+    /// changing anything, when nothing holds it or its release is pending.
+    pub fn try_hold(&self) -> bool {
+        let mut held = self.refs.load(Ordering::Acquire);
+        loop {
+            if held <= 0 || held >= PENDING_RELEASE {
+                return false;
+            }
+            match self.refs.compare_exchange_weak(
+                held,
+                held + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(current) => held = current,
+            }
+        }
+    }
+
+    /// True when nothing holds the message and no release is pending.
+    pub fn is_free(&self) -> bool {
+        self.refs.load(Ordering::Acquire) == 0
+    }
+
+    /// Drops one reference.  The last one invokes the release callback.
     pub fn dec_ref(&self) {
-        let old = self.refs.fetch_sub(1, Ordering::Release);
-        if old == 1 {
-            std::sync::atomic::fence(Ordering::Acquire);
+        if self.dec_ref_no_release() {
             (self.release)();
         }
     }
 
-    /// Decrement the reference count without invoking the release callback.
-    /// Returns true if the ref count reached zero (caller is responsible
-    /// for performing the release).
+    /// Drops one reference without invoking the release callback.  Returns
+    /// true if this dropped the last one, in which case the caller must
+    /// release the message with `claim_release` and the release routine.
     pub fn dec_ref_no_release(&self) -> bool {
-        let old = self.refs.fetch_sub(1, Ordering::Release);
-        if old == 1 {
-            std::sync::atomic::fence(Ordering::Acquire);
-            true
-        } else {
-            false
+        let mut held = self.refs.load(Ordering::Acquire);
+        loop {
+            // A pending release is not a count, so it is never decremented.
+            if held > 1 && held < PENDING_RELEASE {
+                match self.refs.compare_exchange_weak(
+                    held,
+                    held - 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return false,
+                    Err(current) => held = current,
+                }
+            } else if held == 1 {
+                match self.refs.compare_exchange_weak(
+                    held,
+                    PENDING_RELEASE,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return true,
+                    Err(current) => held = current,
+                }
+            } else {
+                return false;
+            }
         }
+    }
+
+    /// Claims a pending release.  Returns true for exactly one caller.
+    pub fn claim_release(&self) -> bool {
+        self.refs
+            .compare_exchange(PENDING_RELEASE, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 }
 

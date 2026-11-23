@@ -61,8 +61,9 @@ using ::subspace::kPubOwned;
 using ::subspace::kRefCountMask;
 using ::subspace::kRefsMask;
 using ::subspace::kReliableRefCountShift;
-using ::subspace::kRetiredRefsMask;
-using ::subspace::kRetiredRefsShift;
+using ::subspace::kPendingMask;
+using ::subspace::kPendingShift;
+using ::subspace::PendingCount;
 using ::subspace::kVchanIdMask;
 using ::subspace::kVchanIdShift;
 

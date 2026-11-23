@@ -139,8 +139,8 @@ yet been reused (`FindMessage` searches the slots that are still live). When
 the slot is claimed for a new message, the previous payload is gone.
 
 The 64-bit `refs` word is the lock-free ownership record. It packs the
-subscriber reference count, the reliable reference count, the retired-subscriber
-count, the virtual channel id, the low bits of the ordinal, and a bit that is
+subscriber reference count, the reliable reference count, the number of
+subscribers still due to finish with the message, the virtual channel id, the low bits of the ordinal, and a bit that is
 set while a publisher owns the slot for writing. Publishers and subscribers
 transfer ownership with a compare-and-swap on this word. The publisher writes
 the prefix and payload first, then stores `refs` with release ordering so a
@@ -165,8 +165,10 @@ payload over the old one.
 Reuse order is what makes it a ring:
 
 - Unused slots start in the free set.
-- After every current subscriber has released a message, its slot moves to the
-  retired set and can be claimed again.
+- After every subscriber the message was delivered to has finished with it,
+  its slot moves to the retired set and can be claimed again. A subscriber
+  who joins later does not add themselves to that audience, nor does a
+  recycled subscriber ID on a virtual channel the message was not delivered to.
 - With subscribers attached, an unreliable publisher prefers a recently retired
   slot so it keeps rewriting a small, cache-hot set.
 - With nobody subscribed, publishing fills the free slots first and then

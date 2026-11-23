@@ -122,6 +122,10 @@ CommitPublishedSlot(const ChannelView &channel, MessageSlot *slot,
       slot->bridged_slot_id.load(std::memory_order_relaxed);
   const uint64_t cleanup_generation = channel.CleanupGeneration(vchan_id);
 
+  // The slot is publisher-owned, so a departing subscriber cannot decrement
+  // pending yet. Record exactly the subscribers who receive this message.
+  slot->pending_subs.ClearAll();
+
   // Tell every subscriber that the slot is available while it is still
   // publisher owned.  The kPubOwned bit is the commit barrier: subscribers
   // keep the delivery record but cannot claim the slot, and server cleanup
@@ -150,6 +154,7 @@ CommitPublishedSlot(const ChannelView &channel, MessageSlot *slot,
           }
           available.Set(slot->id);
         }
+        slot->pending_subs.Set(sub_id);
         InPlaceSlotQueue *queue = channel.Queue(sub_id);
         if (queue != nullptr &&
             !queue->Push(slot->id, published.ordinal,
@@ -173,10 +178,15 @@ CommitPublishedSlot(const ChannelView &channel, MessageSlot *slot,
     }
   }
 
-  // Commit.  A subscriber that sees the total_messages increment also sees
-  // this release and every delivery record above.  Subscribers use
-  // total_messages as a version stamp for their delivery snapshots.
-  slot->refs.store(BuildRefsBitField(published.ordinal, vchan_id, 0),
+  // Commit. pending is the number of obligation bits still set: a subscriber
+  // who left during the traverse is not in the set, and a subscriber who joins
+  // afterwards is not either. A subscriber that sees the total_messages
+  // increment also sees this release and every delivery record above.
+  // Subscribers use total_messages as a version stamp for their delivery
+  // snapshots.
+  int pending = 0;
+  slot->pending_subs.Traverse([&pending](size_t) { pending++; });
+  slot->refs.store(BuildRefsBitField(published.ordinal, vchan_id, pending),
                    std::memory_order_release);
 
   // A subscriber that sees the failure recovers from its bitset, and must find
@@ -192,8 +202,12 @@ CommitPublishedSlot(const ChannelView &channel, MessageSlot *slot,
   });
   ccb->total_messages.fetch_add(1, std::memory_order_seq_cst);
 
-  // Subscriber removal and the commit race safely: whichever happens second
-  // re-evaluates retirement with the current subscriber count.
+  // A subscriber removed while the slot was publisher-owned could not
+  // decrement pending. Drop those obligations now that the message is
+  // committed. If that was the whole audience, retire the slot. A publish
+  // that never had subscribers is retired by the lease path instead, so the
+  // idle ring still fills from the free list.
+  channel.ReleaseDepartedObligations(slot);
   if (!is_activation &&
       channel.CleanupGeneration(vchan_id) != cleanup_generation) {
     published.retired = channel.TryRetireSlot(slot);

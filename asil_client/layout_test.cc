@@ -93,6 +93,10 @@ public:
       slot->id = i;
       slot->vchan_id.store(-1);
       slot->bridged_slot_id.store(-1);
+      new (&slot->sub_owners)
+          ::subspace::AtomicBitSet<::subspace::kMaxSlotOwners>();
+      new (&slot->pending_subs)
+          ::subspace::AtomicBitSet<::subspace::kMaxSlotOwners>();
     }
   }
 
@@ -176,7 +180,8 @@ TEST(PublishTest, DeliversToSubscribersOnTheVirtualChannel) {
   EXPECT_EQ(1u, queued.ordinal);
   EXPECT_FALSE(queue->InsertionFailed());
 
-  EXPECT_EQ(::subspace::BuildRefsBitField(1, 3, 0),
+  // Subscribers 0 (every virtual channel) and 1 (vchan 3) were delivered it.
+  EXPECT_EQ(::subspace::BuildRefsBitField(1, 3, 2),
             view.Slot(5)->refs.load());
   EXPECT_EQ(1u, channel.Ccb()->total_messages.load());
   EXPECT_EQ(100u, channel.Ccb()->total_bytes);
@@ -227,7 +232,9 @@ TEST(PublishTest, EvictionForgetsTheDroppedMessage) {
   EXPECT_EQ(1u, queue->OverflowCount());
   EXPECT_FALSE(queue->InsertionFailed());
   // The pin taken to clear the bit is released.
-  EXPECT_EQ(::subspace::BuildRefsBitField(1, -1, 0), view.Slot(0)->refs.load());
+  // Both subscribers were delivered the message, and eviction does not
+  // change the countdown.
+  EXPECT_EQ(::subspace::BuildRefsBitField(1, -1, 2), view.Slot(0)->refs.load());
   EXPECT_TRUE(channel.EvictedRetirements().empty());
 
   ::subspace::QueuedSlot queued;
@@ -264,9 +271,10 @@ TEST(PublishTest, EvictionRetiresASlotReleasedDuringThePin) {
   ChannelView &view = channel.View();
   MessageSlot *slot = view.Slot(0);
   slot->bridged_slot_id.store(6);
-  // The subscriber has read and released the message, but its release found
-  // the slot pinned by an earlier eviction and so did not retire it.
-  slot->refs.store(::subspace::BuildRefsBitField(1, -1, 1));
+  // The subscriber has finished with the message (pending is zero), but its
+  // release found the slot pinned by an earlier eviction and so did not retire
+  // it. Dropping that pin retires the slot.
+  slot->refs.store(::subspace::BuildRefsBitField(1, -1, 0));
 
   channel.Publish(1, /*vchan_id=*/-1, 10);
   EXPECT_EQ(1u, queue->OverflowCount());
@@ -607,7 +615,7 @@ TEST(SubscribeTest, SkippingARecycledSlotKeepsItsBit) {
   EXPECT_TRUE(::subspace::SkipUnreadMessage(view, slot, 0, true, 2, -1));
   EXPECT_FALSE(view.AvailableSlots(0).IsSet(0));
   EXPECT_NE(0, slot->flags.load() & ::subspace::kMessageSeenByReliable);
-  EXPECT_EQ(::subspace::BuildRefsBitField(2, -1, 0), slot->refs.load());
+  EXPECT_EQ(::subspace::BuildRefsBitField(2, -1, 1), slot->refs.load());
 }
 
 TEST(SubscribeTest, ActivationRetirementIsNotReported) {

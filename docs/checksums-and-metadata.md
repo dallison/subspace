@@ -86,8 +86,7 @@ invalidating the checksum.
 
 ### Default CRC32
 
-By default, `checksum_size` is 4 and the built-in hardware-accelerated CRC32
-is used:
+By default, `checksum_size` is 4 and the built-in IEEE 802.3 CRC32 is used:
 
 - **`CalculateCRC32Checksum()`** — computes CRC32 and writes 4 bytes.
 - **`VerifyCRC32Checksum()`** — recomputes CRC32 and compares against the

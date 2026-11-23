@@ -299,6 +299,14 @@
   stuck and is called once per stuck period. The same two options control
   it.
 
+### Trigger Mechanism
+- A publisher wakes a waiting subscriber with an eventfd on Linux, a socketpair
+  on QNX, and a pipe elsewhere. Override that with
+  `--//:trigger_mechanism=eventfd|pipe|socketpair` or
+  `-DSUBSPACE_TRIGGER_MECHANISM=eventfd|pipe|socketpair`. `default` keeps the
+  platform choice. This is process-local and does not change shared memory.
+  See `docs/trigger-mechanism.md`.
+
 ### Configurable Channel Limit
 - The maximum number of channels in one server session defaults to 1024 and
   can be raised at build time. A downstream Bazel module sets it next to

@@ -6,7 +6,7 @@
 
 // This file is compiled only with SUBSPACE_MAX_SLOT_OWNERS=256. The sizes
 // below are the shared-memory layout at that count. Hardcoding the 1024-owner
-// sizes (MessageSlot 184, AvailableSlotQueueIndex 12296, SlotQueueBlockHeader
+// sizes (MessageSlot 320, AvailableSlotQueueIndex 12296, SlotQueueBlockHeader
 // 192) fails this build.
 
 namespace {
@@ -27,7 +27,8 @@ TEST(SlotOwnerLayoutTest, TwoHundredFiftySixOwners) {
   static_assert(offsetof(subspace::MessageSlot, timestamp) == 72);
   static_assert(offsetof(subspace::MessageSlot, flags) == 80);
   static_assert(offsetof(subspace::MessageSlot, bridged_slot_id) == 84);
-  static_assert(sizeof(subspace::MessageSlot) == 88);
+  static_assert(offsetof(subspace::MessageSlot, pending_subs) == 88);
+  static_assert(sizeof(subspace::MessageSlot) == 128);
   static_assert(offsetof(subspace::AvailableSlotQueueIndex, offsets) == 8);
   static_assert(offsetof(subspace::AvailableSlotQueueIndex, active_publishers) ==
                 2056);

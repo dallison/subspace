@@ -74,7 +74,8 @@ Each channel requires three shared memory regions, created via `shm_open()` (POS
 
 - One per channel.
 - Contains: channel name, num_slots, ordinals, activation tracker.
-- CCB version 5 uses atomic slot metadata and subscriber counters.
+- CCB version 6 uses atomic slot metadata, subscriber counters, and a
+  publish-time delivery countdown in each slot.
   `total_messages` advances for every
   completed publication, including activation messages, and also versions
   subscriber delivery snapshots.

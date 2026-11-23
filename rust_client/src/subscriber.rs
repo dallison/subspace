@@ -47,6 +47,9 @@ pub struct SubscriberImpl {
 
     self_ref: Option<Weak<Mutex<SubscriberImpl>>>,
     pub(crate) active_messages: Vec<Arc<ActiveMessage>>,
+    // Parallel to active_messages. True when the hold came from find_message,
+    // so dropping it releases the slot pin without the delivery obligation.
+    pub(crate) lookup_only: Vec<std::sync::atomic::AtomicBool>,
     pub(crate) kept_active_message: Option<(usize, Arc<ActiveMessage>)>,
     pub(crate) dropped_message_callback: Option<DroppedMessageCallback>,
     pub(crate) stuck_subscriber_callback: Option<StuckSubscriberCallback>,
@@ -172,6 +175,7 @@ impl SubscriberImpl {
             published_before_attach: HashMap::new(),
             self_ref: None,
             active_messages: Vec::new(),
+            lookup_only: Vec::new(),
             kept_active_message: None,
             dropped_message_callback: None,
             stuck_subscriber_callback: None,
@@ -205,12 +209,15 @@ impl SubscriberImpl {
     pub fn init_active_messages(&mut self) {
         let weak = self.self_ref.as_ref().expect("self_ref not set").clone();
         self.active_messages.clear();
+        self.lookup_only.clear();
         for i in 0..self.channel.num_slots as usize {
             let w = weak.clone();
+            self.lookup_only
+                .push(std::sync::atomic::AtomicBool::new(false));
             self.active_messages.push(Arc::new(ActiveMessage::new(Box::new(move || {
                 if let Some(sub_arc) = w.upgrade() {
                     let sub = sub_arc.lock().unwrap();
-                    sub.remove_active_message(i);
+                    sub.finish_active_release(i);
                 }
             }))));
         }
@@ -360,6 +367,70 @@ impl SubscriberImpl {
         true
     }
 
+    /// Drops the slot reference of a lookup that holds no message, and this
+    /// subscriber's ownership of the slot.  The delivery obligation is
+    /// untouched.
+    pub fn drop_lookup_pin(&self, slot_idx: usize) {
+        let slot = self.channel.slot_ref(slot_idx);
+        slot.sub_owners.clear(self.subscriber_id as usize);
+        self.decrement_slot_ref(slot_idx, slot.ordinal(), slot.vchan_id() as i32, false);
+    }
+
+    pub fn release_lookup_message(&self, slot_idx: usize) {
+        self.drop_lookup_pin(slot_idx);
+        self.note_active_message_released();
+    }
+
+    /// Takes a hold on slot_idx's message for a read or find.  Returns true when
+    /// it shares a hold that already exists.  Returns false when the message is
+    /// free, and the caller activates it and takes the first reference.
+    ///
+    /// Each pass finishes any pending release first and then sets this
+    /// subscriber's ownership bit, since a release clears it.  A drop on another
+    /// thread can seal the message between that finish and the hold.  The next
+    /// pass finishes it, so a sealed count is never added to.
+    pub fn acquire_active_message(&self, slot_idx: usize) -> bool {
+        loop {
+            self.finish_active_release(slot_idx);
+            self.channel
+                .slot_ref(slot_idx)
+                .sub_owners
+                .set(self.subscriber_id as usize);
+            let am = &self.active_messages[slot_idx];
+            if am.try_hold() {
+                return true;
+            }
+            if am.is_free() {
+                return false;
+            }
+        }
+    }
+
+    /// Performs the release of slot_idx's message if its last reference was
+    /// dropped and nobody has released it yet.  Must be called with the
+    /// subscriber locked.  Read and find call this before taking the slot again,
+    /// so a new hold never races the release of the previous one.
+    pub fn finish_active_release(&self, slot_idx: usize) {
+        if !self.active_messages[slot_idx].claim_release() {
+            return;
+        }
+        if self.lookup_only[slot_idx].swap(false, Ordering::Relaxed) {
+            self.release_lookup_message(slot_idx);
+        } else {
+            self.remove_active_message(slot_idx);
+        }
+    }
+
+    fn note_active_message_released(&self) {
+        let new_count = self.num_active_messages.fetch_sub(1, Ordering::Relaxed) - 1;
+        if new_count < self.options.max_active_messages {
+            self.trigger();
+            if self.options.reliable {
+                self.trigger_reliable_publishers();
+            }
+        }
+    }
+
     pub fn remove_active_message(&self, slot_idx: usize) {
         let slot = self.channel.slot_ref(slot_idx);
         let reliable = self.options.reliable;
@@ -371,25 +442,19 @@ impl SubscriberImpl {
             let ordinal = slot.ordinal();
             let vchan_id = slot.vchan_id() as i32;
             let bridged_slot_id = slot.bridged_slot_id();
-            self.channel.atomic_inc_ref_count(
+            if self.channel.release_subscriber_obligation(
                 slot_idx,
+                self.subscriber_id as usize,
                 reliable,
-                -1,
+                true,
                 ordinal,
                 vchan_id,
-                true,
-                Some(|| {
-                    self.trigger_retirement(bridged_slot_id as usize);
-                }),
-            );
-        }
-        let new_count = self.num_active_messages.fetch_sub(1, Ordering::Relaxed) - 1;
-        if new_count < self.options.max_active_messages {
-            self.trigger();
-            if reliable {
-                self.trigger_reliable_publishers();
+            ) && self.channel.try_retire_slot(slot_idx)
+            {
+                self.trigger_retirement(bridged_slot_id as usize);
             }
         }
+        self.note_active_message_released();
     }
 
     pub fn num_active_messages(&self) -> i32 {
@@ -1144,7 +1209,16 @@ impl SubscriberImpl {
         let ordinal = self.channel.slot_ref(slot_idx).ordinal();
         let vchan_id = self.channel.slot_ref(slot_idx).vchan_id() as i32;
         self.remember_ordinal(ordinal, vchan_id);
-        self.decrement_slot_ref(slot_idx, ordinal, vchan_id, true);
+        if self.channel.release_subscriber_obligation(
+            slot_idx,
+            self.subscriber_id as usize,
+            self.options.reliable,
+            true,
+            ordinal,
+            vchan_id,
+        ) {
+            self.channel.try_retire_slot(slot_idx);
+        }
         self.channel.slot_ref(slot_idx).set_flag(MESSAGE_SEEN);
         if self.options.reliable {
             self.channel.slot_ref(slot_idx).set_flag(MESSAGE_SEEN_BY_RELIABLE);
@@ -1310,7 +1384,7 @@ impl SubscriberImpl {
         }
         if let Some((slot_idx, am)) = self.kept_active_message.take() {
             if am.dec_ref_no_release() {
-                self.remove_active_message(slot_idx);
+                self.finish_active_release(slot_idx);
             }
         }
     }

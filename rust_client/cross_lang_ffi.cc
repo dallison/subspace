@@ -46,6 +46,7 @@ CppPublisherHandle cpp_test_create_publisher_with_split(
   subspace::PublisherOptions opts;
   opts.SetSlotSize(slot_size)
       .SetNumSlots(num_slots)
+      .SetChecksum(checksum_size > 0)
       .SetChecksumSize(checksum_size)
       .SetMetadataSize(metadata_size)
       .SetUseSplitBuffers(use_split_buffers);

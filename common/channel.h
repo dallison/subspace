@@ -397,6 +397,17 @@ public:
     return View().RefsShowRetired(slot, refs);
   }
 
+  bool ReleaseSubscriberObligation(MessageSlot *slot, int owner, bool reliable,
+                                   bool drop_ref, uint64_t ordinal,
+                                   int vchan_id) {
+    return View().ReleaseSubscriberObligation(slot, owner, reliable, drop_ref,
+                                              ordinal, vchan_id);
+  }
+
+  void ReleaseDepartedObligations(MessageSlot *slot) {
+    View().ReleaseDepartedObligations(slot);
+  }
+
   int NumSubscribers(int vchan_id) const {
     return ccb_->num_subs.NumSubscribers(vchan_id);
   }

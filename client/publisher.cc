@@ -249,18 +249,28 @@ uint64_t PublisherImpl::RegisterLease(MessageSlot *slot) {
   if (slot == nullptr) {
     return 0;
   }
+  if (slot->id < 0) {
+    return 0;
+  }
+  const size_t index = static_cast<size_t>(slot->id);
+  if (index >= lease_ids_.size()) {
+    lease_ids_.resize(index + 1, 0);
+  }
   uint64_t lease_id = next_lease_id_++;
   if (lease_id == 0) {
     lease_id = next_lease_id_++;
   }
-  leased_slots_[slot->id] = lease_id;
+  if (lease_ids_[index] == 0) {
+    num_leases_++;
+  }
+  lease_ids_[index] = lease_id;
   return lease_id;
 }
 
 MessageSlot *PublisherImpl::FindLease(int32_t slot_id,
                                       uint64_t lease_id) const {
-  auto it = leased_slots_.find(slot_id);
-  if (it == leased_slots_.end() || it->second != lease_id) {
+  if (slot_id < 0 || static_cast<size_t>(slot_id) >= lease_ids_.size() ||
+      lease_id == 0 || lease_ids_[slot_id] != lease_id) {
     return nullptr;
   }
   MessageSlot *slot = GetSlot(slot_id);
@@ -273,7 +283,12 @@ MessageSlot *PublisherImpl::FindLease(int32_t slot_id,
 }
 
 void PublisherImpl::RemoveLease(int32_t slot_id) {
-  leased_slots_.erase(slot_id);
+  if (slot_id < 0 || static_cast<size_t>(slot_id) >= lease_ids_.size() ||
+      lease_ids_[slot_id] == 0) {
+    return;
+  }
+  lease_ids_[slot_id] = 0;
+  num_leases_--;
 }
 
 MessageSlot *PublisherImpl::ClaimRetiredSlot(int32_t slot_id) {
@@ -287,8 +302,9 @@ MessageSlot *PublisherImpl::ClaimRetiredSlot(int32_t slot_id) {
     return nullptr;
   }
   uint64_t expected = BuildRefsBitField(
-      slot->ordinal, (old_refs >> kVchanIdShift) & kVchanIdMask,
-      (old_refs >> kRetiredRefsShift) & kRetiredRefsMask);
+      slot->ordinal.load(std::memory_order_relaxed),
+      (old_refs >> kVchanIdShift) & kVchanIdMask,
+      (old_refs >> kPendingShift) & kPendingMask);
   if (!slot->refs.compare_exchange_strong(
           expected, kPubOwned | uint64_t(publisher_id_),
           std::memory_order_acquire, std::memory_order_relaxed)) {
@@ -319,6 +335,7 @@ bool PublisherImpl::ReleaseLeasedSlot(MessageSlot *slot) {
   slot->ordinal = 0;
   slot->timestamp = 0;
   slot->refs.store(0, std::memory_order_release);
+  slot->pending_subs.ClearAll();
   ForgetMessage(View(), slot);
   RetiredSlots().Set(slot->id);
   return true;

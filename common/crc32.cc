@@ -9,10 +9,11 @@
 #include <cstdint>
 
 // The x86 SSE4.2 CRC32 instruction computes CRC-32C, not the IEEE 802.3 CRC32
-// used everywhere else, so x86 always uses the table below. The ARM CRC32
-// instructions compute the IEEE polynomial and are used when available.
+// used by the Rust client and by every other build, so x86 always uses the
+// table below. The ARM CRC32 instructions compute the IEEE polynomial and are
+// used when available.
 #if defined(__aarch64__) && !defined(__ARM_FEATURE_CRC32)
-// Swite off hardware CRC32 if it is not available on aarch64.
+// Switch off hardware CRC32 if it is not available on aarch64.
 #undef SUBSPACE_HARDWARE_CRC
 #endif
 

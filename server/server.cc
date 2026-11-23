@@ -24,7 +24,7 @@
 
 namespace subspace {
 
-#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
+#if SUBSPACE_SHMEM_MODE != SUBSPACE_SHMEM_MODE_MEMFD
 static bool CleanupSplitBufferMetadataFile(const std::filesystem::path &path) {
   absl::StatusOr<SplitBufferMetadata> metadata =
       ReadSplitBufferMetadataFile(path.string());
@@ -35,7 +35,9 @@ static bool CleanupSplitBufferMetadataFile(const std::filesystem::path &path) {
   (void)DestroySplitSharedMemoryBuffer(*metadata);
   return true;
 }
+#endif
 
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
 static void CleanupPosixShadowFile(const std::filesystem::path &path) {
   auto status = Channel::PosixSharedMemoryName(path.string());
   if (status.ok()) {
@@ -55,6 +57,26 @@ static void CleanupSplitBufferObjectFile(const std::filesystem::path &path) {
   std::string object_name = path.filename().string();
   (void)shm_unlink(object_name.c_str());
   (void)std::filesystem::remove(path);
+}
+#endif
+
+#if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
+// Linux mints a temporary control-block name in /dev/shm
+// (`<8 hex session>.<id>.<scb|ccb|bcb>.<suffix>`) and unlinks it before
+// returning; if a crash left one behind, clean it up along with the session.
+static bool IsControlBlockShadow(const std::string &filename) {
+  if (filename.size() < 10 || filename[8] != '.') {
+    return false;
+  }
+  for (size_t i = 0; i < 8; i++) {
+    char c = filename[i];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+      return false;
+    }
+  }
+  return filename.find(".scb.") != std::string::npos ||
+         filename.find(".ccb.") != std::string::npos ||
+         filename.find(".bcb.") != std::string::npos;
 }
 #endif
 
@@ -343,11 +365,19 @@ void Server::CleanupAfterSession() {
   }
 
 #else
-  // Remove all files starting with "subspace_SESSION" in /dev/shm.
-  for (const auto &entry : std::filesystem::directory_iterator("/dev/shm")) {
+  // Remove all files for this session in /dev/shm.
+  std::string session_shm_prefix =
+      absl::StrFormat("%08x.", static_cast<uint32_t>(session_id_));
+  std::error_code ec;
+  for (const auto &entry : std::filesystem::directory_iterator("/dev/shm", ec)) {
     std::string filename = entry.path().filename().string();
     if (filename.rfind(session_shm_file_prefix, 0) == 0) {
-      (void)std::filesystem::remove(entry.path());
+      if (!CleanupSplitBufferMetadataFile(entry.path())) {
+        (void)std::filesystem::remove(entry.path(), ec);
+      }
+    } else if (filename.rfind(session_shm_prefix, 0) == 0 &&
+               IsControlBlockShadow(filename)) {
+      (void)std::filesystem::remove(entry.path(), ec);
     }
   }
 #endif
@@ -383,11 +413,14 @@ void Server::CleanupFilesystem() {
   }
 
 #else
-  // Remove all files starting with "subspace_" in /dev/shm.
-  for (const auto &entry : std::filesystem::directory_iterator("/dev/shm")) {
+  // Remove all files starting with "subspace_" (or any crashed control-block
+  // objects) in /dev/shm.
+  std::error_code ec;
+  for (const auto &entry : std::filesystem::directory_iterator("/dev/shm", ec)) {
     std::string filename = entry.path().filename().string();
-    if (filename.rfind("subspace_", 0) == 0) {
-      (void)std::filesystem::remove(entry.path());
+    if (filename.rfind("subspace_", 0) == 0 ||
+        IsControlBlockShadow(filename)) {
+      (void)std::filesystem::remove(entry.path(), ec);
     }
   }
 #endif

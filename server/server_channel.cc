@@ -46,11 +46,10 @@ static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
                                                  int64_t size, bool map,
                                                  toolbelt::FileDescriptor &fd,
                                                  [[maybe_unused]] uint64_t session_id = 0) {
-  char shm_file[NAME_MAX]; // Unique file in file system.
-  int tmpfd;
-
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
+  char shm_file[NAME_MAX];
   snprintf(shm_file, sizeof(shm_file), "subspace.%d.%s", id, suffix);
+  int tmpfd;
 #ifdef __NR_memfd_create
   tmpfd = static_cast<int>(syscall(
       __NR_memfd_create, shm_file, static_cast<unsigned int>(MFD_CLOEXEC)));
@@ -84,15 +83,63 @@ static absl::StatusOr<void *> CreateSharedMemory(int id, const char *suffix,
   fd.SetFd(tmpfd);
   return p;
 
+#elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
+  // Mint a unique name in /dev/shm via mkstemp, replace it with the
+  // shm_open object, and unlink the name once the fd is ready.
+  char shm_file[NAME_MAX];
+  snprintf(shm_file, sizeof(shm_file), "/dev/shm/%08x.%d.%s.XXXXXX",
+           static_cast<uint32_t>(session_id), id, suffix);
+  int tmpfd = mkstemp(shm_file);
+  if (tmpfd == -1) {
+    return absl::InternalError(absl::StrFormat(
+        "Failed to create shared memory name %s: %s", shm_file, strerror(errno)));
+  }
+  (void)close(tmpfd);
+  char *shm_name = shm_file + sizeof("/dev/shm") - 1;
+
+  shm_unlink(shm_name);
+
+  int shm_fd = shm_open(shm_name, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+  if (shm_fd == -1) {
+    return absl::InternalError(absl::StrFormat(
+        "Failed to open shared memory %s: %s", shm_name, strerror(errno)));
+  }
+
+  int e = ftruncate(shm_fd, size);
+  if (e == -1) {
+    int saved = errno;
+    shm_unlink(shm_name);
+    close(shm_fd);
+    return absl::InternalError(absl::StrFormat(
+        "Failed to set length of shared memory %s: %s", shm_name,
+        strerror(saved)));
+  }
+
+  void *p = nullptr;
+  if (map) {
+    p = MapMemory(shm_fd, size, PROT_READ | PROT_WRITE, suffix);
+    if (p == MAP_FAILED) {
+      int saved = errno;
+      shm_unlink(shm_name);
+      close(shm_fd);
+      return absl::InternalError(absl::StrFormat(
+          "Failed to map shared memory %s: %s", shm_name, strerror(saved)));
+    }
+  }
+
+  shm_unlink(shm_name);
+  fd.SetFd(shm_fd);
+  return p;
+
 #else
-  char *shm_name;          // Name passed to shm_* (starts with /)
+  char shm_file[NAME_MAX];
   // Create a shadow file in /tmp for uniqueness.  The shm object name is
   // derived from this path and unlinked while the shadow file stays around for
   // lifetime/cleanup bookkeeping.
   snprintf(shm_file, sizeof(shm_file), "/tmp/%08x.%d.%s.XXXXXX",
            static_cast<uint32_t>(session_id), id, suffix);
-  tmpfd = mkstemp(shm_file);
-  shm_name = shm_file + 4; // After /tmp
+  int tmpfd = mkstemp(shm_file);
+  char *shm_name = shm_file + 4; // After /tmp
   // Remove any existing shared memory.
   shm_unlink(shm_name);
 
@@ -496,6 +543,7 @@ ServerChannel::Allocate(const toolbelt::FileDescriptor &scb_fd,
     slot->flags.store(0, std::memory_order_relaxed);
     slot->bridged_slot_id.store(-1, std::memory_order_relaxed);
     new (&slot->sub_owners) AtomicBitSet<kMaxSlotOwners>();
+    new (&slot->pending_subs) AtomicBitSet<kMaxSlotOwners>();
   }
 
   // Initialize the available slots for each subscriber.

@@ -71,6 +71,7 @@ void ResetClaimedSlot(const ChannelView &channel, MessageSlot *slot,
   MessagePrefix *prefix = hooks.Prefix(slot);
   prefix->flags = 0;
   prefix->vchan_id = vchan_id;
+  slot->pending_subs.ClearAll();
   ForgetMessage(channel, slot);
 }
 
@@ -176,7 +177,7 @@ inline bool TryClaimSlot(MessageSlot *slot, int owner, uint64_t old_refs) {
   uint64_t expected = BuildRefsBitField(
       slot->ordinal.load(std::memory_order_relaxed),
       static_cast<int>((old_refs >> kVchanIdShift) & kVchanIdMask),
-      static_cast<int>((old_refs >> kRetiredRefsShift) & kRetiredRefsMask));
+      PendingCount(old_refs));
   return slot->refs.compare_exchange_strong(
       expected, kPubOwned | static_cast<uint64_t>(owner),
       std::memory_order_acquire, std::memory_order_relaxed);

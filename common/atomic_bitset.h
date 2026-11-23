@@ -145,6 +145,9 @@ public:
     os << "\n";
   }
 
+  // The callback is a template so a walk on the publish path does not allocate
+  // a std::function. The visited bit is shifted out before the next load, so
+  // the callback may clear that bit.
   template <typename Fn>
   void Traverse(Fn &&func,
                 std::memory_order order = std::memory_order_relaxed) const {

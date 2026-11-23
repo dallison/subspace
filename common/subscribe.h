@@ -95,13 +95,16 @@ inline ReleasedMessage ReleaseMessageReference(const ChannelView &channel,
     return result;
   }
   result.released = true;
-  (void)channel.AtomicIncRefCount(
-      slot, reliable, -1, slot->ordinal.load(std::memory_order_relaxed),
-      slot->vchan_id.load(std::memory_order_relaxed), /*retire=*/true,
-      &result.retired);
-  if (result.retired) {
-    result.retirement_slot_id =
-        slot->bridged_slot_id.load(std::memory_order_relaxed);
+  const uint64_t ordinal = slot->ordinal.load(std::memory_order_relaxed);
+  const int vchan_id = slot->vchan_id.load(std::memory_order_relaxed);
+  const int32_t retirement_slot_id =
+      slot->bridged_slot_id.load(std::memory_order_relaxed);
+  if (channel.ReleaseSubscriberObligation(slot, subscriber_id, reliable,
+                                          /*drop_ref=*/true, ordinal,
+                                          vchan_id) &&
+      channel.TryRetireSlot(slot)) {
+    result.retired = true;
+    result.retirement_slot_id = retirement_slot_id;
   }
   return result;
 }

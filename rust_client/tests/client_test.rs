@@ -10,7 +10,7 @@ use subspace_client::bitset::DynamicBitSet;
 use subspace_client::channel::{
     aligned, aligned64, build_refs_bit_field, MessagePrefix, CHECKSUM_OFFSET, MESSAGE_ACTIVATE,
     MESSAGE_BRIDGED, MESSAGE_CROSS_MACHINE, MESSAGE_HAS_CHECKSUM, ORDINAL_MASK, ORDINAL_SHIFT,
-    PUB_OWNED, RETIRED_REFS_MASK, RETIRED_REFS_SHIFT, VCHAN_ID_MASK, VCHAN_ID_SHIFT,
+    PENDING_MASK, PENDING_SHIFT, PUB_OWNED, VCHAN_ID_MASK, VCHAN_ID_SHIFT,
 };
 use subspace_client::checksum::{
     calculate_crc32_checksum, get_message_checksum_data, subspace_crc32, verify_crc32_checksum,
@@ -316,17 +316,17 @@ fn build_refs_nonzero_ordinal_includes_vchan() {
 fn build_refs_round_trips_all_fields() {
     let ordinal = 12345u64;
     let vchan_id = 99i32;
-    let retired_refs = 3i32;
+    let pending = 3i32;
 
-    let field = build_refs_bit_field(ordinal, vchan_id, retired_refs);
+    let field = build_refs_bit_field(ordinal, vchan_id, pending);
 
     let got_ordinal = (field >> ORDINAL_SHIFT) & ORDINAL_MASK;
     let got_vchan = (field >> VCHAN_ID_SHIFT) & VCHAN_ID_MASK;
-    let got_retired = (field >> RETIRED_REFS_SHIFT) & RETIRED_REFS_MASK;
+    let got_pending = (field >> PENDING_SHIFT) & PENDING_MASK;
 
     assert_eq!(got_ordinal, ordinal);
     assert_eq!(got_vchan, vchan_id as u64);
-    assert_eq!(got_retired, retired_refs as u64);
+    assert_eq!(got_pending, pending as u64);
 }
 
 #[test]
@@ -4985,6 +4985,162 @@ fn integration_find_message_not_found() {
     // Search for a timestamp far in the future; should return empty.
     let found = subscriber.find_message(u64::MAX).unwrap();
     assert!(found.is_empty());
+}
+
+#[test]
+fn integration_find_message_releases_slot() {
+    let pub_client = new_client("test_findrel_p");
+    let sub_client = new_client("test_findrel_s");
+    let publisher = pub_client
+        .create_publisher(
+            "rust_find_rel",
+            &PublisherOptions::new().set_slot_size(256).set_num_slots(4),
+        )
+        .unwrap();
+    let subscriber = sub_client
+        .create_subscriber(
+            "rust_find_rel",
+            &SubscriberOptions::new()
+                .set_max_active_messages(1)
+                .set_log_dropped_messages(false),
+        )
+        .unwrap();
+
+    let mut timestamps = Vec::new();
+    for i in 0..3 {
+        let text = format!("found {}", i);
+        let (buf, _) = publisher.get_message_buffer(256).unwrap().unwrap();
+        unsafe {
+            std::ptr::copy_nonoverlapping(text.as_ptr(), buf, text.len());
+        }
+        let msg = publisher.publish_message(text.len() as i64).unwrap();
+        timestamps.push(msg.timestamp);
+    }
+
+    for _ in 0..10 {
+        for timestamp in &timestamps {
+            let found = subscriber.find_message(*timestamp).unwrap();
+            assert!(!found.is_empty());
+            assert_eq!(found.timestamp, *timestamp);
+        }
+    }
+
+    // Finding a message does not consume it.
+    for timestamp in &timestamps {
+        let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
+        assert_eq!(msg.timestamp, *timestamp);
+    }
+
+    // The pins are gone, so the publisher can keep using the ring.
+    for _ in 0..8 {
+        let (buf, _) = publisher.get_message_buffer(64).unwrap().unwrap();
+        unsafe {
+            *buf = b'x';
+        }
+        publisher.publish_message(1).unwrap();
+    }
+}
+
+#[test]
+fn integration_find_message_twice_shares_slot() {
+    let pub_client = new_client("test_findshare_p");
+    let sub_client = new_client("test_findshare_s");
+    let publisher = pub_client
+        .create_publisher(
+            "rust_find_share",
+            &PublisherOptions::new().set_slot_size(256).set_num_slots(4),
+        )
+        .unwrap();
+    let subscriber = sub_client
+        .create_subscriber(
+            "rust_find_share",
+            &SubscriberOptions::new()
+                .set_max_active_messages(1)
+                .set_log_dropped_messages(false),
+        )
+        .unwrap();
+
+    let (buf, _) = publisher.get_message_buffer(64).unwrap().unwrap();
+    let payload = b"shared";
+    unsafe {
+        std::ptr::copy_nonoverlapping(payload.as_ptr(), buf, payload.len());
+    }
+    let published = publisher.publish_message(payload.len() as i64).unwrap();
+
+    let first = subscriber.find_message(published.timestamp).unwrap();
+    let second = subscriber.find_message(published.timestamp).unwrap();
+    assert!(!first.is_empty());
+    assert_eq!(first.timestamp, published.timestamp);
+    assert_eq!(second.timestamp, published.timestamp);
+    assert_eq!(first.ordinal, second.ordinal);
+    drop(first);
+    drop(second);
+
+    let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
+    assert_eq!(msg.timestamp, published.timestamp);
+}
+
+/// Two threads find and drop the same messages at once. A drop that takes the
+/// last hold on a slot races the other thread's find on that slot. Every
+/// returned message must be complete, and once they are all dropped the
+/// subscriber must hold no active messages and still deliver each message.
+#[test]
+fn integration_find_message_concurrent_drop_keeps_counts_balanced() {
+    let pub_client = new_client("test_findrace_p");
+    let sub_client = new_client("test_findrace_s");
+    let publisher = pub_client
+        .create_publisher(
+            "rust_find_race",
+            &PublisherOptions::new().set_slot_size(256).set_num_slots(4),
+        )
+        .unwrap();
+    let subscriber = sub_client
+        .create_subscriber(
+            "rust_find_race",
+            &SubscriberOptions::new()
+                .set_max_active_messages(2)
+                .set_log_dropped_messages(false),
+        )
+        .unwrap();
+
+    let mut timestamps = Vec::new();
+    for _ in 0..2 {
+        let published = publisher.publish_message(8).unwrap();
+        timestamps.push(published.timestamp);
+    }
+
+    let failures = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|s| {
+        for t in 0..2usize {
+            let subscriber = &subscriber;
+            let timestamps = &timestamps;
+            let failures = &failures;
+            s.spawn(move || {
+                for round in 0..500usize {
+                    let timestamp = timestamps[(round + t) % timestamps.len()];
+                    match subscriber.find_message(timestamp) {
+                        Ok(found) => {
+                            // An empty result is allowed when max_active_messages is reached.
+                            if !found.is_empty() && found.timestamp != timestamp {
+                                failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                        Err(_) => {
+                            failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                }
+            });
+        }
+    });
+    assert_eq!(failures.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(subscriber.num_active_messages(), 0);
+
+    for timestamp in &timestamps {
+        let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
+        assert_eq!(msg.timestamp, *timestamp);
+        assert!(!msg.is_empty());
+    }
 }
 
 // ── Stats / counters tests ──────────────────────────────────────────────────

@@ -1,0 +1,71 @@
+load("//:trigger_mechanism_test.bzl", "trigger_mechanism_test")
+
+# Linux defaults to an eventfd trigger and macOS to a pipe. These rebuild the
+# tests that wait on a trigger with a socketpair, which is what QNX uses and
+# what woke every POLLIN waiter on the poll fallback. client_test runs on
+# Linux and macOS. The rest run on Linux only. QNX already uses a socketpair,
+# so these add nothing there.
+_LINUX_ONLY = ["@platforms//os:linux"]
+
+_LINUX_AND_MACOS = select({
+    "@platforms//os:linux": [],
+    "@platforms//os:macos": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
+trigger_mechanism_test(
+    name = "client_test_socketpair",
+    size = "small",
+    timeout = "moderate",
+    mechanism = "socketpair",
+    target = "//client:client_test",
+    target_compatible_with = _LINUX_AND_MACOS,
+)
+
+trigger_mechanism_test(
+    name = "c_client_test_socketpair",
+    size = "small",
+    mechanism = "socketpair",
+    target = "//c_client:client_test",
+    target_compatible_with = _LINUX_ONLY,
+)
+
+trigger_mechanism_test(
+    name = "bridge_test_socketpair",
+    size = "medium",
+    mechanism = "socketpair",
+    target = "//client:bridge_test",
+    target_compatible_with = _LINUX_ONLY,
+)
+
+trigger_mechanism_test(
+    name = "server_test_socketpair",
+    size = "small",
+    mechanism = "socketpair",
+    target = "//server:server_test",
+    target_compatible_with = _LINUX_ONLY,
+)
+
+trigger_mechanism_test(
+    name = "co20_client_test_socketpair",
+    size = "medium",
+    mechanism = "socketpair",
+    target = "//co20_rpc/client:client_test",
+    target_compatible_with = _LINUX_ONLY,
+)
+
+trigger_mechanism_test(
+    name = "co20_server_test_socketpair",
+    size = "medium",
+    mechanism = "socketpair",
+    target = "//co20_rpc/server:server_test",
+    target_compatible_with = _LINUX_ONLY,
+)
+
+trigger_mechanism_test(
+    name = "co20_rpc_test_socketpair",
+    size = "medium",
+    mechanism = "socketpair",
+    target = "//co20_rpc/test:rpc_test",
+    target_compatible_with = _LINUX_ONLY,
+)

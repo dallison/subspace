@@ -525,7 +525,12 @@ fn latency_unreliable_round_trip() {
             let msg = subscriber.read_message(ReadMode::ReadNext).unwrap();
             if msg.length >= std::mem::size_of::<u64>() {
                 let recv_time = now_ns();
-                if last_ordinal > 0 && msg.ordinal > last_ordinal + 1 {
+                // Count messages missed before the first read too.  A
+                // subscriber thread that starts late sees a first ordinal well
+                // past 1, and leaving those uncounted keeps
+                // received + dropped below NUM_MESSAGES by more than the
+                // flush publisher below can make up, so the loop never ends.
+                if msg.ordinal > last_ordinal + 1 {
                     sub_dropped
                         .fetch_add((msg.ordinal - last_ordinal - 1) as i64, Ordering::Relaxed);
                 }

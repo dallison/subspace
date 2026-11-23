@@ -206,14 +206,14 @@ std::string DecodedRefsBitField(uint64_t refs) {
   std::string result;
   int ref_count = refs & kRefCountMask;
   int reliable_ref_count = (refs >> kReliableRefCountShift) & kRefCountMask;
-  int retired_refs = (refs >> kRetiredRefsShift) & kRetiredRefsMask;
+  int pending = PendingCount(refs);
   int vchan_id = (refs >> kVchanIdShift) & kVchanIdMask;
   uint64_t ordinal = (refs >> kOrdinalShift) & kOrdinalMask;
 
   absl::StrAppendFormat(&result,
                         "ref_count: %d, reliable_ref_count: %d, "
-                        "retired_refs: %d, vchan_id: %d, ordinal: %d",
-                        ref_count, reliable_ref_count, retired_refs, vchan_id,
+                        "pending: %d, vchan_id: %d, ordinal: %d",
+                        ref_count, reliable_ref_count, pending, vchan_id,
                         ordinal);
   return result;
 }
@@ -327,6 +327,7 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
         // Owned by this publisher, clear slot.
         slot->ordinal.store(0, std::memory_order_relaxed);
         slot->refs.store(0, std::memory_order_release);
+        slot->pending_subs.ClearAll();
 
         // Clear the slot in all the subscriber bitsets.
         ccb_->subscribers.Traverse([this, slot](int sub_id) {
@@ -346,14 +347,20 @@ void Channel::CleanupSlots(int owner, bool reliable, bool is_pub,
 
       // The available-slot bitset is the authoritative delivery record. A
       // process may die before reading a published slot, in which case there
-      // is no sub_owners entry to clean up. Removing the subscriber changes
-      // the retirement threshold, so every unread slot must be re-evaluated.
+      // is no sub_owners entry to clean up. The obligation bitset is what
+      // still owes a pending decrement.
       available.ClearWasSet(i);
 
-      if (slot->sub_owners.ClearWasSet(owner)) {
-        // The subscriber has already been removed from NumSubscribers above,
-        // so lowering the retirement threshold accounts for this owner.
-        AtomicIncRefCount(slot, reliable, -1, 0, 0, false);
+      const bool drop_ref = slot->sub_owners.ClearWasSet(owner);
+      const uint64_t ordinal = slot->ordinal.load(std::memory_order_relaxed);
+      const int slot_vchan = slot->vchan_id.load(std::memory_order_relaxed);
+      if (ordinal == 0) {
+        slot->pending_subs.Clear(owner);
+        continue;
+      }
+      if (drop_ref || slot->pending_subs.IsSet(owner)) {
+        ReleaseSubscriberObligation(slot, owner, reliable, drop_ref, ordinal,
+                                    slot_vchan);
       }
     }
   }
