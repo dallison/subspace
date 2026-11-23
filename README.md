@@ -97,7 +97,7 @@ bazel build --config=linux_arm32 //server:subspace_server //client:subspace_clie
 bazel test --config=linux_arm32 //common:common_test //client:client_test
 ```
 
-CMake uses `cmake/toolchains/linux-armhf.cmake` and a host `protoc`, the same way the Android cross compile does. The shared-memory layout matches a 64-bit build: `size_t` fields are padded so 64-bit atomics stay 8-byte aligned.
+CMake uses `cmake/toolchains/linux-armhf.cmake` and a host `protoc` plus `protoc-gen-phaser`, the same way the Android cross compile does. The shared-memory layout matches a 64-bit build: `size_t` fields are padded so 64-bit atomics stay 8-byte aligned.
 
 ### 32-bit ARM (armhf) with Colima
 
@@ -108,7 +108,7 @@ scripts/build-arm32-colima.sh
 scripts/build-arm32-colima.sh --test
 ```
 
-The script starts the aarch64 Colima profile if it is not already running, builds a host `protoc`, then cross-compiles into `build/armhf`. Binaries are ELF32 ARM, hard-float. The Rust client and the Asio RPC backends are skipped: the Rust build has no armhf Cargo target wired up here, and Boost.Context does not cross-compile cleanly. Tests run under `qemu-arm-static`. `client_test` raises its own file-descriptor soft limit at startup: the container's default is 1024, and past that the kernel drops `SCM_RIGHTS` payloads and the test reports truncated control data.
+The script starts the aarch64 Colima profile if it is not already running, builds a host `protoc` and `protoc-gen-phaser`, then cross-compiles into `build/armhf`. Binaries are ELF32 ARM, hard-float. The Rust client and the Asio RPC backends are skipped: the Rust build has no armhf Cargo target wired up here, and Boost.Context does not cross-compile cleanly. Tests run under `qemu-arm-static`. `client_test` raises its own file-descriptor soft limit at startup: the container's default is 1024, and past that the kernel drops `SCM_RIGHTS` payloads and the test reports truncated control data.
 
 GitHub Actions job `cmake (armhf)` runs this cross-compile and the CMake tests on `ubuntu-latest`.
 

@@ -3,8 +3,8 @@
 #
 # Colima only hosts aarch64 and x86_64 VMs, and Bazel does not ship a 32-bit
 # ARM binary, so this uses the aarch64 Colima VM to run an Ubuntu container
-# that cross-compiles with CMake. A host protoc is built first so it matches
-# the protobuf version fetched for the target.
+# that cross-compiles with CMake. A host protoc and protoc-gen-phaser are
+# built first so they match the protobuf and phaser fetched for the target.
 #
 # Usage, from the repo root:
 #   scripts/build-arm32-colima.sh
@@ -44,16 +44,17 @@ docker run --rm \
     # pointing at protoc-<version>. Follow that symlink rather than requiring
     # a regular file of exactly that name.
     protoc=build/host-protoc/_deps/protobuf-build/protoc
-    if [[ ! -e \"\$protoc\" ]]; then
+    phaser=build/host-protoc/_deps/phaser-build/protoc-gen-phaser
+    if [[ ! -e \"\$protoc\" || ! -e \"\$phaser\" ]]; then
       cmake -S . -B build/host-protoc \
         -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DSUBSPACE_ASIO_RPC=OFF \
         -DSUBSPACE_CO20_RPC=OFF
-      cmake --build build/host-protoc --target protoc --parallel
+      cmake --build build/host-protoc --target protoc protoc-gen-phaser --parallel
     fi
-    if [[ ! -e \"\$protoc\" ]]; then
-      echo 'host protoc was not produced' >&2
+    if [[ ! -e \"\$protoc\" || ! -e \"\$phaser\" ]]; then
+      echo 'host protoc or protoc-gen-phaser was not produced' >&2
       exit 1
     fi
     echo \"Using host protoc: \$protoc\"
@@ -63,6 +64,7 @@ docker run --rm \
       -DCMAKE_TOOLCHAIN_FILE=/src/cmake/toolchains/linux-armhf.cmake \
       -DCMAKE_BUILD_TYPE=Release \
       -DPROTOC_EXECUTABLE=/src/\$protoc \
+      -DPHASER_PLUGIN_EXECUTABLE=/src/\$phaser \
       -DSUBSPACE_ASIO_RPC=OFF
     cmake --build build/armhf --parallel
     readelf -h build/armhf/server/subspace_server

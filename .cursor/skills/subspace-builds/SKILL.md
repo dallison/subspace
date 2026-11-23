@@ -52,19 +52,20 @@ bazel build --config=linux_arm32 //server:subspace_server //client:subspace_clie
 bazel test --config=linux_arm32 //common:common_test //client:client_test
 ```
 
-CMake needs a host `protoc` first. The toolchain file is
-`cmake/toolchains/linux-armhf.cmake`. CI runs that cross-compile as the
+CMake needs a host `protoc` and `protoc-gen-phaser` first. The toolchain file
+is `cmake/toolchains/linux-armhf.cmake`. CI runs that cross-compile as the
 `cmake (armhf)` job; `scripts/build-arm32-colima.sh` is the local Colima
 equivalent.
 
 ```bash
 cmake -S . -B build/host-protoc -DCMAKE_BUILD_TYPE=Release
-cmake --build build/host-protoc --target protoc --parallel
+cmake --build build/host-protoc --target protoc protoc-gen-phaser --parallel
 
 cmake -S . -B build/armhf \
   -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/linux-armhf.cmake \
   -DCMAKE_BUILD_TYPE=Release \
-  -DPROTOC_EXECUTABLE="$PWD/build/host-protoc/_deps/protobuf-build/protoc"
+  -DPROTOC_EXECUTABLE="$PWD/build/host-protoc/_deps/protobuf-build/protoc" \
+  -DPHASER_PLUGIN_EXECUTABLE="$PWD/build/host-protoc/_deps/phaser-build/protoc-gen-phaser"
 cmake --build build/armhf --parallel
 ```
 
