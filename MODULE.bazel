@@ -24,23 +24,17 @@ bazel_dep(name = "rules_java", version = "9.1.0")
 bazel_dep(name = "rules_pkg", version = "1.0.1")
 bazel_dep(name = "rules_android_ndk", version = "0.1.5")
 bazel_dep(name = "zlib", version = "1.3.1.bcr.5")
-bazel_dep(name = "coroutines", version = "3.4.1")
+bazel_dep(name = "coroutines", version = "3.5.2")
 
-# The cpp20 poll fallback must resume a waiter only for events it asked for.
-# A socketpair is always writable, so waking every waiter on POLLOUT hangs
-# co20_rpc on macOS (dallison/co#77).  c2cbd0f also keeps TSan from corrupting
-# the shadow stack on a coroutine stack switch with GCC 15 (dallison/co c2cbd0f).
-# Not released yet.
-#
-# The patch adds a multi-fd Wait to the C++20 scheduler, frees coroutines when
-# they finish, and keeps the poll fallback from resuming a coroutine twice.
-# The co20 backend needs all three.  Drop it once it is upstream.
+# The co20 backend needs the C++20 scheduler fixes on dallison/co
+# co20-subspace-support (3.5.2): multi-fd Wait, the poll fallback event mask,
+# TSan across stack switches, and non-aggregate ValueTask promises for GCC.
+# The branch is local to ~/co and not pushed yet, so this pin only resolves on
+# this machine.  Point it at the GitHub remote once the branch is pushed.
 git_override(
     module_name = "coroutines",
-    commit = "c2cbd0f75b1e834090762d584b812a485b8b8ca8",
-    patch_strip = 1,
-    patches = ["//patches:co_cpp20_wait_any_and_reap.patch"],
-    remote = "https://github.com/dallison/co.git",
+    commit = "fe00d446d24fd4047414be4f946dd59320d48bb7",
+    remote = "file:///Users/FZDSZZ/co",
 )
 
 bazel_dep(name = "cpp_toolbelt", version = "2.1.6")

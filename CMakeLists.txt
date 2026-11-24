@@ -203,15 +203,12 @@ endif()
 message(STATUS "Trigger mechanism: ${SUBSPACE_TRIGGER_MECHANISM}")
 
 # --- External Dependency: co (using FetchContent for native CMake) ---
-set(SUBSPACE_CO_PATCH ${CMAKE_CURRENT_SOURCE_DIR}/patches/co_cpp20_wait_any_and_reap.patch)
+# Same commit as the Bazel git_override in MODULE.bazel (co 3.5.2 on the
+# co20-subspace-support branch in ~/co).  Local file remote until it is pushed.
 FetchContent_Declare(
     co
-    GIT_REPOSITORY https://github.com/dallison/co.git
-    # dallison/co#77 (poll event mask) plus TSan stack-switch fix (c2cbd0f).
-    GIT_TAG c2cbd0f75b1e834090762d584b812a485b8b8ca8
-    # Same patch as the Bazel git_override in MODULE.bazel.  Skipped when it
-    # is already applied, so reconfiguring works.
-    PATCH_COMMAND sh -c "git apply --reverse --check ${SUBSPACE_CO_PATCH} 2>/dev/null || git apply ${SUBSPACE_CO_PATCH}"
+    GIT_REPOSITORY file:///Users/FZDSZZ/co
+    GIT_TAG fe00d446d24fd4047414be4f946dd59320d48bb7
     CMAKE_ARGS
         -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
 )
