@@ -17,6 +17,7 @@
 #include "co/coroutine.h"
 #include "common/async/context.h"
 #include "common/async/socket.h"
+#include "common/async/task.h"
 #include "common/async/wait.h"
 #include "common/channel.h"
 #include "common/client_buffer.h"
@@ -402,26 +403,29 @@ private:
   const std::string &GetName() const { return name_; }
 
   // Initialize the client by connecting to the server.
-  absl::Status Init(const std::string &server_socket = kDefaultServerSocket,
+  async::Task<absl::Status>
+  Init(const std::string &server_socket = kDefaultServerSocket,
                     const std::string &client_name = "");
 
   // Create a publisher for the given channel.  If the channel doesn't exit
   // it will be created with num_slots slots, each of which is slot_size
   // bytes long.
-  absl::StatusOr<Publisher>
+  async::Task<absl::StatusOr<Publisher>>
   CreatePublisher(const std::string &channel_name, int64_t slot_size,
                   int num_slots,
                   const PublisherOptions &opts = PublisherOptions());
 
   // Create a publisher with the slot size and number of slots set in the
   // options.
-  absl::StatusOr<Publisher>
+  async::Task<absl::StatusOr<Publisher>>
   CreatePublisher(const std::string &channel_name,
                   const PublisherOptions &opts = PublisherOptions());
+  async::Task<void> RemoveServerPublisher(const std::string &channel_name,
+                                          int32_t publisher_id);
 
   // Create a subscriber for the given channel. This can be done before there
   // are any publishers on the channel.
-  absl::StatusOr<Subscriber>
+  async::Task<absl::StatusOr<Subscriber>>
   CreateSubscriber(const std::string &channel_name,
                    const SubscriberOptions &opts = SubscriberOptions());
 
@@ -438,19 +442,24 @@ private:
   absl::StatusOr<const ChannelCounters>
   GetChannelCounters(const std::string &channel_name) const;
 
-  absl::StatusOr<const ChannelInfo>
+  async::Task<absl::StatusOr<const ChannelInfo>>
   GetChannelInfo(const std::string &channelName);
-  absl::StatusOr<const std::vector<ChannelInfo>> GetChannelInfo();
+  async::Task<absl::StatusOr<const std::vector<ChannelInfo>>>
+  GetChannelInfo();
 
-  absl::StatusOr<const ChannelStats>
+  async::Task<absl::StatusOr<const ChannelStats>>
   GetChannelStats(const std::string &channelName);
-  absl::StatusOr<const std::vector<ChannelStats>> GetChannelStats();
+  async::Task<absl::StatusOr<const std::vector<ChannelStats>>>
+  GetChannelStats();
 
-  absl::StatusOr<bool> ChannelExists(const std::string &channelName);
+  async::Task<absl::StatusOr<bool>>
+  ChannelExists(const std::string &channelName);
 
   // Remove publisher and subscriber.
-  absl::Status RemovePublisher(details::PublisherImpl *publisher);
-  absl::Status RemoveSubscriber(details::SubscriberImpl *subscriber);
+  async::Task<absl::Status>
+  RemovePublisher(details::PublisherImpl *publisher);
+  async::Task<absl::Status>
+  RemoveSubscriber(details::SubscriberImpl *subscriber);
 
   // Get a pointer to the message buffer for the publisher.  The publisher
   // will own this buffer until you call PublishMessage.  The idea is that
@@ -462,11 +471,11 @@ private:
   // detect when another attempt can be made to get a buffer.
   // If max_size is greater than the current buffer size, the buffers
   // will be resized.
-  absl::StatusOr<void *> GetMessageBuffer(details::PublisherImpl *publisher,
-                                          int64_t max_size, bool lock);
+  // (Publisher::GetMessageBuffer is GetMessageBufferSpan plus a conversion, so
+  // it needs no coroutine frame of its own.)
   // Get the messsage buffer as a span.  Returns an empty span if there is no
   // buffer available
-  absl::StatusOr<absl::Span<std::byte>>
+  async::Task<absl::StatusOr<absl::Span<std::byte>>>
   GetMessageBufferSpan(details::PublisherImpl *publisher, int64_t max_size,
                        bool lock);
 
@@ -474,26 +483,27 @@ private:
   // argument specifies the actual size of the message to send.  Returns the
   // information about the message sent with buffer set to nullptr since
   // the publisher cannot access the message once it's been published.
-  absl::StatusOr<const Message>
+  async::Task<absl::StatusOr<const Message>>
   PublishMessage(details::PublisherImpl *publisher, int64_t message_size,
                  bool notify_subscribers);
   void NotifySubscribers(details::PublisherImpl *publisher);
 
-  absl::StatusOr<PublisherBufferLease>
+  async::Task<absl::StatusOr<PublisherBufferLease>>
   AcquirePublisherBuffer(details::PublisherImpl *publisher);
-  absl::StatusOr<PublisherBufferLease>
+  async::Task<absl::StatusOr<PublisherBufferLease>>
   ReclaimPublisherBuffer(details::PublisherImpl *publisher, int32_t slot_id);
-  absl::StatusOr<PublisherBufferLease>
+  async::Task<absl::StatusOr<PublisherBufferLease>>
   ReclaimAnyPublisherBuffer(details::PublisherImpl *publisher);
-  absl::StatusOr<const Message>
+  async::Task<absl::StatusOr<const Message>>
   PublishPublisherBuffer(details::PublisherImpl *publisher,
                          const PublisherBufferLease &lease,
                          int64_t message_size);
-  absl::StatusOr<const Message>
+  async::Task<absl::StatusOr<const Message>>
   PublishPublisherBufferCopy(details::PublisherImpl *publisher,
                              const PublisherBufferLease &lease,
                              absl::Span<const std::byte> payload);
-  absl::StatusOr<const Message> PublishPublisherBufferInternal(
+  async::Task<absl::StatusOr<const Message>>
+  PublishPublisherBufferInternal(
       details::PublisherImpl *publisher, const PublisherBufferLease &lease,
       int64_t message_size, const std::byte *payload);
   absl::Status ReleasePublisherBuffer(details::PublisherImpl *publisher,
@@ -509,19 +519,21 @@ private:
   // Wait until a reliable publisher can try again to send a message.  If the
   // client is coroutine-aware, the coroutine will wait.  If it's not,
   // the function will block on a poll until the publisher is triggered.
-  absl::Status WaitForReliablePublisher(details::PublisherImpl *publisher,
-                                        const toolbelt::AsyncWaiter *c = nullptr) {
+  async::Task<absl::Status>
+  WaitForReliablePublisher(details::PublisherImpl *publisher,
+                           const toolbelt::AsyncWaiter *c = nullptr) {
     return WaitForReliablePublisher(publisher, std::chrono::nanoseconds(0), c);
   }
 
-  absl::Status WaitForReliablePublisher(details::PublisherImpl *publisher,
+  async::Task<absl::Status>
+  WaitForReliablePublisher(details::PublisherImpl *publisher,
                                         std::chrono::nanoseconds timeout,
                                         const toolbelt::AsyncWaiter *c = nullptr);
 
   // Wait until a reliable publisher can try again to send a message.  If the
   // client is coroutine-aware, the coroutine will wait.  If it's not,
   // the function will block on a poll until the publisher is triggered.
-  absl::StatusOr<int>
+  async::Task<absl::StatusOr<int>>
   WaitForReliablePublisher(details::PublisherImpl *publisher,
                            const toolbelt::FileDescriptor &fd,
                            const toolbelt::AsyncWaiter *c = nullptr) {
@@ -529,7 +541,8 @@ private:
                                     c);
   }
 
-  absl::StatusOr<int> WaitForReliablePublisher(
+  async::Task<absl::StatusOr<int>>
+  WaitForReliablePublisher(
       details::PublisherImpl *publisher, const toolbelt::FileDescriptor &fd,
       std::chrono::nanoseconds timeout, const toolbelt::AsyncWaiter *c = nullptr);
 
@@ -566,12 +579,14 @@ private:
   // subscriber.  If the client is coroutine-aware, the coroutine
   // will wait.  If it's not, the function will block on a poll
   // until the subscriber is triggered.
-  absl::Status WaitForSubscriber(details::SubscriberImpl *subscriber,
-                                 const toolbelt::AsyncWaiter *c = nullptr) {
+  async::Task<absl::Status>
+  WaitForSubscriber(details::SubscriberImpl *subscriber,
+                    const toolbelt::AsyncWaiter *c = nullptr) {
     return WaitForSubscriber(subscriber, std::chrono::nanoseconds(0), c);
   }
 
-  absl::Status WaitForSubscriber(details::SubscriberImpl *subscriber,
+  async::Task<absl::Status>
+  WaitForSubscriber(details::SubscriberImpl *subscriber,
                                  std::chrono::nanoseconds timeout,
                                  const toolbelt::AsyncWaiter *c = nullptr);
 
@@ -579,13 +594,15 @@ private:
   // subscriber.  If the client is coroutine-aware, the coroutine
   // will wait.  If it's not, the function will block on a poll
   // until the subscriber is triggered.
-  absl::StatusOr<int> WaitForSubscriber(details::SubscriberImpl *subscriber,
-                                        const toolbelt::FileDescriptor &fd,
-                                        const toolbelt::AsyncWaiter *c = nullptr) {
+  async::Task<absl::StatusOr<int>>
+  WaitForSubscriber(details::SubscriberImpl *subscriber,
+                    const toolbelt::FileDescriptor &fd,
+                    const toolbelt::AsyncWaiter *c = nullptr) {
     return WaitForSubscriber(subscriber, fd, std::chrono::nanoseconds(0), c);
   }
 
-  absl::StatusOr<int> WaitForSubscriber(details::SubscriberImpl *subscriber,
+  async::Task<absl::StatusOr<int>>
+  WaitForSubscriber(details::SubscriberImpl *subscriber,
                                         const toolbelt::FileDescriptor &fd,
                                         std::chrono::nanoseconds timeout,
                                         const toolbelt::AsyncWaiter *c = nullptr);
@@ -622,30 +639,32 @@ private:
   // PollFd is only triggered when a new message is published.
   // Pass ClearTrigger::kNoClearTrigger to leave the subscriber trigger fd
   // unread.
-  absl::StatusOr<Message> ReadMessage(
+  async::Task<absl::StatusOr<Message>>
+  ReadMessage(
       details::SubscriberImpl *subscriber, ReadMode mode = ReadMode::kReadNext,
       ClearTrigger clear_trigger = ClearTrigger::kClearTrigger);
   // Continue draining a batch after ReadMessage has cleared the poll fd and
   // refreshed publisher state. This avoids repeating that work per message.
-  absl::StatusOr<Message>
+  async::Task<absl::StatusOr<Message>>
   ReadMessageFromBatch(details::SubscriberImpl *subscriber,
                        ReadMode mode = ReadMode::kReadNext);
 
   // As ReadMessage above but returns a shared_ptr to the typed message.
   // NOTE: this is subspace::shared_ptr, not std::shared_ptr.
   template <typename T, typename Aliaser = DefaultAliaser>
-  absl::StatusOr<shared_ptr<T, Aliaser>>
+  async::Task<absl::StatusOr<shared_ptr<T, Aliaser>>>
   ReadMessage(details::SubscriberImpl *subscriber,
               ReadMode mode = ReadMode::kReadNext,
               ClearTrigger clear_trigger = ClearTrigger::kClearTrigger);
 
   // Find a message given a timestamp.
-  absl::StatusOr<Message> FindMessage(details::SubscriberImpl *subscriber,
+  async::Task<absl::StatusOr<Message>>
+  FindMessage(details::SubscriberImpl *subscriber,
                                       uint64_t timestamp);
   // AsFindMessage above but returns a shared_ptr to the typed message.
   // NOTE: this is subspace::shared_ptr, not std::shared_ptr.
   template <typename T, typename Aliaser = DefaultAliaser>
-  absl::StatusOr<shared_ptr<T, Aliaser>>
+  async::Task<absl::StatusOr<shared_ptr<T, Aliaser>>>
   FindMessage(details::SubscriberImpl *subscriber, uint64_t timestamp);
 
   // Gets the PollFd for a publisher and subscriber.  PollFds are only
@@ -709,10 +728,11 @@ private:
   // Call the message callback function for all available messages.  You must
   // have registered a callback function with RegisterMessageCallback for this
   // to work.
-  absl::Status ProcessAllMessages(details::SubscriberImpl *subscriber,
+  async::Task<absl::Status>
+  ProcessAllMessages(details::SubscriberImpl *subscriber,
                                   ReadMode mode = ReadMode::kReadNext);
 
-  absl::StatusOr<std::vector<Message>>
+  async::Task<absl::StatusOr<std::vector<Message>>>
   GetAllMessages(details::SubscriberImpl *subscriber,
                  ReadMode mode = ReadMode::kReadNext);
 
@@ -720,28 +740,33 @@ private:
   int64_t GetCurrentOrdinal(details::SubscriberImpl *sub);
 
   absl::Status CheckConnected() const;
-  absl::Status SendRequestReceiveResponse(
+  async::Task<absl::Status>
+  SendRequestReceiveResponse(
       const Request &req, Response &response,
       std::vector<toolbelt::FileDescriptor> &fds,
       const std::vector<toolbelt::FileDescriptor> &send_fds = {});
-  absl::Status
+  async::Task<absl::Status>
   SendOneWayRequest(const Request &req,
                     const std::vector<toolbelt::FileDescriptor> &fds = {});
-  absl::Status
+  async::Task<absl::Status>
   RegisterClientBuffer(const ClientBufferHandleMetadata &metadata,
                        const toolbelt::FileDescriptor *fd = nullptr);
-  absl::StatusOr<std::vector<RegisteredClientBuffer>>
+  async::Task<absl::StatusOr<std::vector<RegisteredClientBuffer>>>
   GetClientBuffers(const std::string &channel_name, uint64_t session_id,
                    uint32_t buffer_index);
-  absl::Status UnregisterClientBuffer(const std::string &channel_name,
+  async::Task<absl::Status>
+  UnregisterClientBuffer(const std::string &channel_name,
                                       uint64_t session_id,
                                       uint32_t buffer_index);
 
-  absl::Status Reconnect();
+  async::Task<absl::Status>
+  Reconnect();
   // Whether a request that failed with `failure` should reconnect and retry.
   bool ShouldReconnect(const absl::Status &failure) const;
-  absl::Status ReregisterPublisher(details::PublisherImpl *publisher);
-  absl::Status ReregisterSubscriber(details::SubscriberImpl *subscriber);
+  async::Task<absl::Status>
+  ReregisterPublisher(details::PublisherImpl *publisher);
+  async::Task<absl::Status>
+  ReregisterSubscriber(details::SubscriberImpl *subscriber);
 
   static void FillCreatePublisherRequest(CreatePublisherRequest *cmd,
                                          const std::string &channel_name,
@@ -758,29 +783,60 @@ private:
                                   const CreateSubscriberResponse &resp,
                                   std::vector<toolbelt::FileDescriptor> &fds);
 
-  bool CheckReload(details::ClientChannel *channel);
+  async::Task<bool> CheckReload(details::ClientChannel *channel);
 
-  absl::Status ReloadSubscriber(details::SubscriberImpl *channel);
-  absl::Status ReloadSubscribersIfNecessary(details::PublisherImpl *publisher);
-  absl::Status
+  // The Async API holds nothing across a suspension, but a thread-safe client
+  // keeps a mutex locked while a coroutine is suspended, which would let
+  // another coroutine on the same thread deadlock on it.  So the Async API is
+  // only available on a client that isn't thread safe.
+  absl::Status CheckAsyncAllowed() const {
+    if (thread_safe_) {
+      return absl::FailedPreconditionError(
+          "The Async API can't be used on a thread-safe client");
+    }
+    return absl::OkStatus();
+  }
+
+  // Cheap checks matching the early-outs of ReloadSubscribersIfNecessary and
+  // ReloadReliablePublishersIfNecessary.  The hot paths test these first so
+  // they only create a coroutine frame when the server has to be consulted.
+  bool SubscribersChanged(details::PublisherImpl *publisher) const {
+    return publisher->NumUpdates() !=
+           publisher->GetScb()
+               ->counters[publisher->GetChannelId()]
+               .num_sub_updates;
+  }
+  bool PublishersChanged(details::SubscriberImpl *subscriber) const {
+    return subscriber->NumUpdates() !=
+           subscriber->GetScb()
+               ->counters[subscriber->GetChannelId()]
+               .num_pub_updates;
+  }
+
+  async::Task<absl::Status>
+  ReloadSubscriber(details::SubscriberImpl *channel);
+  async::Task<absl::Status>
+  ReloadSubscribersIfNecessary(details::PublisherImpl *publisher);
+  async::Task<absl::Status>
   ReloadReliablePublishersIfNecessary(details::SubscriberImpl *subscriber);
   absl::Status RemoveChannel(details::ClientChannel *channel);
-  absl::Status ActivateReliableChannel(details::PublisherImpl *channel);
-  absl::Status ActivateChannel(details::PublisherImpl *channel);
-  absl::StatusOr<Message>
+  async::Task<absl::Status> ActivateReliableChannel(details::PublisherImpl *channel);
+  async::Task<absl::Status> ActivateChannel(details::PublisherImpl *channel);
+  async::Task<absl::StatusOr<Message>>
   ReadMessageInternal(details::SubscriberImpl *subscriber, ReadMode mode,
                       bool pass_activation, bool clear_trigger);
   void ReportIfSubscriberStuck(details::SubscriberImpl *subscriber);
-  absl::StatusOr<Message>
+  async::Task<absl::StatusOr<Message>>
   FindMessageInternal(details::SubscriberImpl *subscriber, uint64_t timestamp);
-  absl::StatusOr<const Message>
+  async::Task<absl::StatusOr<const Message>>
   PublishMessageInternal(details::PublisherImpl *publisher,
                          int64_t message_size, bool omit_prefix,
                          bool use_prefix_slot_id, bool use_prefix_vchan_id,
                          bool notify_subscribers);
-  absl::Status ResizeChannel(details::PublisherImpl *publisher,
+  async::Task<absl::Status>
+  ResizeChannel(details::PublisherImpl *publisher,
                              int64_t new_slot_size);
-  absl::StatusOr<bool>
+  async::Task<absl::StatusOr<bool>>
   ReloadBuffersIfNecessary(details::ClientChannel *channel);
 
   const std::vector<std::unique_ptr<details::BufferSet>> &
@@ -818,6 +874,16 @@ private:
   // True when this client cooperates with a coroutine (has a yield_context);
   // false for a blocking client that uses synchronous socket I/O + poll().
   bool IsCooperative() const { return async_ctx_.has_value(); }
+#elif SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
+  // Inside an Async call co20::self is the running coroutine, so socket waits
+  // suspend it.  The blocking API runs the same code under SyncWait, which
+  // hides co20::self, so those waits go through co_ (if there is one) or poll.
+  async::Context SocketContext() const {
+    if (co20::Coroutine *running = co20::self; running != nullptr) {
+      return async::Context(running);
+    }
+    return async::Context(co_);
+  }
 #else
   const toolbelt::AsyncWaiter *SocketContext() const { return co_; }
 #endif
@@ -878,28 +944,29 @@ private:
 // by a publisher.  Don't hold onto shared_ptr instances long than
 // you need to as it may prevent a publisher getting a slot.
 template <typename T, typename Aliaser>
-inline absl::StatusOr<::subspace::shared_ptr<T, Aliaser>>
+inline async::Task<absl::StatusOr<::subspace::shared_ptr<T, Aliaser>>>
 ClientImpl::ReadMessage(details::SubscriberImpl *subscriber, ReadMode mode,
                         ClearTrigger clear_trigger) {
-  absl::StatusOr<Message> msg = ReadMessage(subscriber, mode, clear_trigger);
+  absl::StatusOr<Message> msg =
+      ASYNC_AWAIT(ReadMessage(subscriber, mode, clear_trigger));
   if (!msg.ok()) {
-    return msg.status();
+    ASYNC_RETURN msg.status();
   }
   if (msg->length == 0) {
-    return ::subspace::shared_ptr<T, Aliaser>();
+    ASYNC_RETURN ::subspace::shared_ptr<T, Aliaser>();
   }
-  return ::subspace::shared_ptr<T, Aliaser>(std::move(*msg));
+  ASYNC_RETURN ::subspace::shared_ptr<T, Aliaser>(std::move(*msg));
 }
 
 template <typename T, typename Aliaser>
-inline absl::StatusOr<::subspace::shared_ptr<T, Aliaser>>
+inline async::Task<absl::StatusOr<::subspace::shared_ptr<T, Aliaser>>>
 ClientImpl::FindMessage(details::SubscriberImpl *subscriber,
                         uint64_t timestamp) {
-  absl::StatusOr<Message> msg = FindMessage(subscriber, timestamp);
+  absl::StatusOr<Message> msg = ASYNC_AWAIT(FindMessage(subscriber, timestamp));
   if (!msg.ok()) {
-    return msg.status();
+    ASYNC_RETURN msg.status();
   }
-  return ::subspace::shared_ptr<T, Aliaser>(std::move(*msg));
+  ASYNC_RETURN ::subspace::shared_ptr<T, Aliaser>(std::move(*msg));
 }
 
 // The Publisher and Subscriber classes are the main interface for sending
@@ -907,9 +974,9 @@ ClientImpl::FindMessage(details::SubscriberImpl *subscriber,
 class Publisher {
 public:
   ~Publisher() {
-    if (client_ != nullptr && impl_ != nullptr) {
+    if (client_ != nullptr && impl_ != nullptr && !closed_) {
       UnregisterResizeCallback().IgnoreError();
-      (void)client_->RemovePublisher(impl_.get());
+      (void)ASYNC_BLOCK(client_->RemovePublisher(impl_.get()));
     }
   }
 
@@ -918,7 +985,8 @@ public:
 
   Publisher(Publisher &&other)
       : client_(std::move(other.client_)), impl_(std::move(other.impl_)),
-        resize_callback_(std::move(other.resize_callback_)) {
+        resize_callback_(std::move(other.resize_callback_)),
+        closed_(other.closed_) {
     if (impl_ != nullptr && client_ != nullptr && resize_callback_ != nullptr) {
       client_->UnregisterResizeCallback(impl_.get()).IgnoreError();
       RegisterResizeCallback(resize_callback_).IgnoreError();
@@ -931,6 +999,7 @@ public:
     client_ = std::move(other.client_);
     impl_ = std::move(other.impl_);
     resize_callback_ = std::move(other.resize_callback_);
+    closed_ = other.closed_;
     if (impl_ != nullptr && client_ != nullptr && resize_callback_ != nullptr) {
       client_->UnregisterResizeCallback(impl_.get()).IgnoreError();
       RegisterResizeCallback(resize_callback_).IgnoreError();
@@ -960,14 +1029,19 @@ public:
   // publish using CancelPublish.  This will release the lock.
   absl::StatusOr<void *> GetMessageBuffer(SlotSizeType max_size = -1,
                                           bool lock = true) {
-    return client_->GetMessageBuffer(impl_.get(), max_size, lock);
+    absl::StatusOr<absl::Span<std::byte>> span = ASYNC_BLOCK(
+        client_->GetMessageBufferSpan(impl_.get(), max_size, lock));
+    if (!span.ok()) {
+      return span.status();
+    }
+    return span->empty() ? nullptr : static_cast<void *>(span->data());
   }
 
   // Get the messsage buffer as a span.  Returns an empty span if there is no
   // buffer available.  See GetMessageBuffer for details of
   absl::StatusOr<absl::Span<std::byte>>
   GetMessageBufferSpan(SlotSizeType max_size = -1, bool lock = true) {
-    return client_->GetMessageBufferSpan(impl_.get(), max_size, lock);
+    return ASYNC_BLOCK(client_->GetMessageBufferSpan(impl_.get(), max_size, lock));
   }
 
   // Publish the message in the publisher's buffer.  The message_size
@@ -982,8 +1056,8 @@ public:
   // message in that batch is published with notification enabled.
   absl::StatusOr<const Message>
   PublishMessage(int64_t message_size, bool notify_subscribers = true) {
-    return client_->PublishMessage(impl_.get(), message_size,
-                                   notify_subscribers);
+    return ASYNC_BLOCK(client_->PublishMessage(impl_.get(), message_size,
+                                   notify_subscribers));
   }
   // Flush a batch whose messages were published without subscriber
   // notification.
@@ -993,7 +1067,7 @@ public:
   // mutex across the lease lifetime. The maximum is configured by
   // PublisherOptions::SetMaxOutstandingSlotLeases().
   absl::StatusOr<PublisherBufferLease> AcquireBufferLease() {
-    return client_->AcquirePublisherBuffer(impl_.get());
+    return ASYNC_BLOCK(client_->AcquirePublisherBuffer(impl_.get()));
   }
 
   absl::StatusOr<ScopedPublisherBufferLease> AcquireScopedBufferLease() & {
@@ -1006,12 +1080,12 @@ public:
 
   // Reclaim a specific slot reported by the retirement fd.
   absl::StatusOr<PublisherBufferLease> ReclaimBufferLease(int32_t slot_id) {
-    return client_->ReclaimPublisherBuffer(impl_.get(), slot_id);
+    return ASYNC_BLOCK(client_->ReclaimPublisherBuffer(impl_.get(), slot_id));
   }
 
   // Reclaim any slot currently marked retired when fd notifications are stale.
   absl::StatusOr<PublisherBufferLease> ReclaimAnyBufferLease() {
-    return client_->ReclaimAnyPublisherBuffer(impl_.get());
+    return ASYNC_BLOCK(client_->ReclaimAnyPublisherBuffer(impl_.get()));
   }
 
   absl::StatusOr<ScopedPublisherBufferLease>
@@ -1025,13 +1099,13 @@ public:
 
   absl::StatusOr<const Message>
   PublishBufferLease(const PublisherBufferLease &lease, int64_t message_size) {
-    return client_->PublishPublisherBuffer(impl_.get(), lease, message_size);
+    return ASYNC_BLOCK(client_->PublishPublisherBuffer(impl_.get(), lease, message_size));
   }
 
   absl::StatusOr<const Message>
   PublishBufferLeaseCopy(const PublisherBufferLease &lease,
                          absl::Span<const std::byte> payload) {
-    return client_->PublishPublisherBufferCopy(impl_.get(), lease, payload);
+    return ASYNC_BLOCK(client_->PublishPublisherBufferCopy(impl_.get(), lease, payload));
   }
 
   absl::Status ReleaseBufferLease(const PublisherBufferLease &lease) {
@@ -1072,12 +1146,12 @@ public:
   // client is coroutine-aware, the coroutine will wait.  If it's not,
   // the function will block on a poll until the publisher is triggered.
   absl::Status Wait(const toolbelt::AsyncWaiter *c = nullptr) {
-    return client_->WaitForReliablePublisher(impl_.get(), c);
+    return ASYNC_BLOCK(client_->WaitForReliablePublisher(impl_.get(), c));
   }
 
   absl::Status Wait(std::chrono::nanoseconds timeout,
                     const toolbelt::AsyncWaiter *c = nullptr) {
-    return client_->WaitForReliablePublisher(impl_.get(), timeout, c);
+    return ASYNC_BLOCK(client_->WaitForReliablePublisher(impl_.get(), timeout, c));
   }
 
   // Wait until a reliable publisher can try again to send a message.  If the
@@ -1088,13 +1162,13 @@ public:
   // triggered the wait.
   absl::StatusOr<int> Wait(const toolbelt::FileDescriptor &fd,
                            const toolbelt::AsyncWaiter *c = nullptr) {
-    return client_->WaitForReliablePublisher(impl_.get(), fd, c);
+    return ASYNC_BLOCK(client_->WaitForReliablePublisher(impl_.get(), fd, c));
   }
 
   absl::StatusOr<int> Wait(const toolbelt::FileDescriptor &fd,
                            std::chrono::nanoseconds timeout,
                            const toolbelt::AsyncWaiter *c = nullptr) {
-    return client_->WaitForReliablePublisher(impl_.get(), fd, timeout, c);
+    return ASYNC_BLOCK(client_->WaitForReliablePublisher(impl_.get(), fd, timeout, c));
   }
 
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
@@ -1325,6 +1399,166 @@ public:
   // empty span if MetadataSize() is 0.
   absl::Span<std::byte> GetMetadata() { return impl_->GetMetadata(); }
 
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
+  // ---- Async API (C++20 coroutines) ------------------------------------
+  //
+  // Each of these does what the function of the same name without "Async"
+  // does, but suspends the calling coroutine instead of blocking the thread
+  // while it waits for the server or for a reliable publisher.  co_await the
+  // result from a coroutine running on a co20::Scheduler.  Don't use the
+  // blocking functions from inside such a coroutine: they block the whole
+  // scheduler thread.
+  //
+  // The client must not be thread safe (FailedPrecondition otherwise), and
+  // only one Async call should be in progress on a client at a time because
+  // they share its socket to the server.  The Publisher must stay in place
+  // until the call completes.
+
+  async::Task<absl::StatusOr<void *>>
+  GetMessageBufferAsync(SlotSizeType max_size = -1) {
+    auto span = ASYNC_AWAIT(GetMessageBufferSpanAsync(max_size));
+    if (!span.ok()) {
+      co_return span.status();
+    }
+    co_return span->empty() ? nullptr : static_cast<void *>(span->data());
+  }
+
+  async::Task<absl::StatusOr<absl::Span<std::byte>>>
+  GetMessageBufferSpanAsync(SlotSizeType max_size = -1) {
+    auto client = client_;
+    auto impl = impl_;
+    if (absl::Status s = client->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(
+        client->GetMessageBufferSpan(impl.get(), max_size, /*lock=*/false));
+  }
+
+  async::Task<absl::StatusOr<const Message>>
+  PublishMessageAsync(int64_t message_size, bool notify_subscribers = true) {
+    auto client = client_;
+    auto impl = impl_;
+    if (absl::Status s = client->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(
+        client->PublishMessage(impl.get(), message_size, notify_subscribers));
+  }
+
+  // The same as PublishMessageWithPrefix, but suspends the calling coroutine.
+  async::Task<absl::StatusOr<const Message>>
+  PublishMessageWithPrefixAsync(int64_t message_size,
+                                bool use_slot_id_from_prefix = true,
+                                bool use_vchan_id_from_prefix = true) {
+    auto client = client_;
+    auto impl = impl_;
+    if (absl::Status s = client->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(client->PublishMessageInternal(
+        impl.get(), message_size, /*omit_prefix=*/true,
+        use_slot_id_from_prefix, use_vchan_id_from_prefix,
+        /*notify_subscribers=*/true));
+  }
+
+  async::Task<absl::StatusOr<PublisherBufferLease>> AcquireBufferLeaseAsync() {
+    auto client = client_;
+    auto impl = impl_;
+    if (absl::Status s = client->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(client->AcquirePublisherBuffer(impl.get()));
+  }
+
+  async::Task<absl::StatusOr<PublisherBufferLease>>
+  ReclaimBufferLeaseAsync(int32_t slot_id) {
+    auto client = client_;
+    auto impl = impl_;
+    if (absl::Status s = client->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(client->ReclaimPublisherBuffer(impl.get(), slot_id));
+  }
+
+  async::Task<absl::StatusOr<PublisherBufferLease>>
+  ReclaimAnyBufferLeaseAsync() {
+    auto client = client_;
+    auto impl = impl_;
+    if (absl::Status s = client->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(client->ReclaimAnyPublisherBuffer(impl.get()));
+  }
+
+  async::Task<absl::StatusOr<const Message>>
+  PublishBufferLeaseAsync(PublisherBufferLease lease, int64_t message_size) {
+    auto client = client_;
+    auto impl = impl_;
+    if (absl::Status s = client->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(
+        client->PublishPublisherBuffer(impl.get(), lease, message_size));
+  }
+
+  // The payload must stay valid until the call completes.
+  async::Task<absl::StatusOr<const Message>>
+  PublishBufferLeaseCopyAsync(PublisherBufferLease lease,
+                              absl::Span<const std::byte> payload) {
+    auto client = client_;
+    auto impl = impl_;
+    if (absl::Status s = client->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(
+        client->PublishPublisherBufferCopy(impl.get(), lease, payload));
+  }
+
+  // Wait until a reliable publisher can try again to send a message.  A
+  // timeout of zero waits forever.
+  async::Task<absl::Status>
+  WaitAsync(std::chrono::nanoseconds timeout = std::chrono::nanoseconds(0)) {
+    auto client = client_;
+    auto impl = impl_;
+    if (absl::Status s = client->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(
+        client->WaitForReliablePublisher(impl.get(), timeout, nullptr));
+  }
+
+  // As above, but also returns when fd becomes readable.  Returns the fd that
+  // triggered the wait.
+  async::Task<absl::StatusOr<int>>
+  WaitAsync(const toolbelt::FileDescriptor &fd,
+            std::chrono::nanoseconds timeout = std::chrono::nanoseconds(0)) {
+    auto client = client_;
+    auto impl = impl_;
+    if (absl::Status s = client->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(
+        client->WaitForReliablePublisher(impl.get(), fd, timeout, nullptr));
+  }
+
+  // Removes the publisher from the server without blocking.  The destructor
+  // does the same but blocks, so a publisher used from a coroutine should be
+  // closed with this first.  The publisher can't be used afterwards.
+  async::Task<absl::Status> CloseAsync() {
+    if (client_ == nullptr || impl_ == nullptr || closed_) {
+      co_return absl::OkStatus();
+    }
+    auto client = client_;
+    auto impl = impl_;
+    if (absl::Status s = client->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    closed_ = true;
+    UnregisterResizeCallback().IgnoreError();
+    co_return ASYNC_AWAIT(client->RemovePublisher(impl.get()));
+  }
+#endif
+
 private:
   friend class Server;
   friend class ClientImpl;
@@ -1337,9 +1571,9 @@ private:
   PublishMessageInternal(int64_t message_size, bool omit_prefix,
                          bool use_prefix_slot_id,
                          bool use_prefix_vchan_id = true) {
-    return client_->PublishMessageInternal(
+    return ASYNC_BLOCK(client_->PublishMessageInternal(
         impl_.get(), message_size, omit_prefix, use_prefix_slot_id,
-        use_prefix_vchan_id, /*notify_subscribers=*/true);
+        use_prefix_vchan_id, /*notify_subscribers=*/true));
   }
 
   std::shared_ptr<ClientImpl> client_;
@@ -1347,6 +1581,9 @@ private:
   std::function<absl::Status(Publisher *, SlotSizeType, SlotSizeType)>
       resize_callback_ = nullptr;
   std::vector<void *> address_cache_;
+  // Set by CloseAsync so that the destructor doesn't remove the publisher a
+  // second time (that removal would block).
+  bool closed_ = false;
 };
 
 inline ScopedPublisherBufferLease::~ScopedPublisherBufferLease() {
@@ -1407,11 +1644,11 @@ inline absl::Status ScopedPublisherBufferLease::Release() {
 class Subscriber {
 public:
   ~Subscriber() {
-    if (client_ != nullptr && impl_ != nullptr) {
+    if (client_ != nullptr && impl_ != nullptr && !closed_) {
       UnregisterDroppedMessageCallback().IgnoreError();
       UnregisterStuckSubscriberCallback().IgnoreError();
       UnregisterMessageCallback().IgnoreError();
-      (void)client_->RemoveSubscriber(impl_.get());
+      (void)ASYNC_BLOCK(client_->RemoveSubscriber(impl_.get()));
     }
   }
   Subscriber(const Subscriber &other) = delete;
@@ -1423,7 +1660,8 @@ public:
         dropped_message_callback_(std::move(other.dropped_message_callback_)),
         stuck_subscriber_callback_(
             std::move(other.stuck_subscriber_callback_)),
-        message_callback_(std::move(other.message_callback_)) {
+        message_callback_(std::move(other.message_callback_)),
+        closed_(other.closed_) {
     if (impl_ != nullptr && client_ != nullptr &&
         dropped_message_callback_ != nullptr) {
       client_->UnregisterDroppedMessageCallback(impl_.get()).IgnoreError();
@@ -1450,6 +1688,7 @@ public:
     dropped_message_callback_ = std::move(other.dropped_message_callback_);
     stuck_subscriber_callback_ = std::move(other.stuck_subscriber_callback_);
     message_callback_ = std::move(other.message_callback_);
+    closed_ = other.closed_;
     if (impl_ != nullptr && client_ != nullptr &&
         dropped_message_callback_ != nullptr) {
       client_->UnregisterDroppedMessageCallback(impl_.get()).IgnoreError();
@@ -1480,12 +1719,12 @@ public:
   // will wait.  If it's not, the function will block on a poll
   // until the subscriber is triggered.
   absl::Status Wait(const toolbelt::AsyncWaiter *c = nullptr) {
-    return client_->WaitForSubscriber(impl_.get(), c);
+    return ASYNC_BLOCK(client_->WaitForSubscriber(impl_.get(), c));
   }
 
   absl::Status Wait(std::chrono::nanoseconds timeout,
                     const toolbelt::AsyncWaiter *c = nullptr) {
-    return client_->WaitForSubscriber(impl_.get(), timeout, c);
+    return ASYNC_BLOCK(client_->WaitForSubscriber(impl_.get(), timeout, c));
   }
 
   // Wait until there's a message available to be read by the
@@ -1497,13 +1736,13 @@ public:
   // triggered the wait.
   absl::StatusOr<int> Wait(const toolbelt::FileDescriptor &fd,
                            const toolbelt::AsyncWaiter *c = nullptr) {
-    return client_->WaitForSubscriber(impl_.get(), fd, c);
+    return ASYNC_BLOCK(client_->WaitForSubscriber(impl_.get(), fd, c));
   }
 
   absl::StatusOr<int> Wait(const toolbelt::FileDescriptor &fd,
                            std::chrono::nanoseconds timeout,
                            const toolbelt::AsyncWaiter *c = nullptr) {
-    return client_->WaitForSubscriber(impl_.get(), fd, timeout, c);
+    return ASYNC_BLOCK(client_->WaitForSubscriber(impl_.get(), fd, timeout, c));
   }
 
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
@@ -1540,11 +1779,11 @@ public:
   absl::StatusOr<Message>
   ReadMessage(ReadMode mode = ReadMode::kReadNext,
               ClearTrigger clear_trigger = ClearTrigger::kClearTrigger) {
-    return client_->ReadMessage(impl_.get(), mode, clear_trigger);
+    return ASYNC_BLOCK(client_->ReadMessage(impl_.get(), mode, clear_trigger));
   }
   absl::StatusOr<Message>
   ReadMessageFromBatch(ReadMode mode = ReadMode::kReadNext) {
-    return client_->ReadMessageFromBatch(impl_.get(), mode);
+    return ASYNC_BLOCK(client_->ReadMessageFromBatch(impl_.get(), mode));
   }
 
   // Read and deserialize a telemetry message. Returns nullptr when no message
@@ -1568,7 +1807,7 @@ public:
 
   // Find a message given a timestamp.
   absl::StatusOr<Message> FindMessage(uint64_t timestamp) {
-    return client_->FindMessage(impl_.get(), timestamp);
+    return ASYNC_BLOCK(client_->FindMessage(impl_.get(), timestamp));
   }
 
   // AsFindMessage above but returns a shared_ptr to the typed message.
@@ -1700,12 +1939,12 @@ public:
   void ClearOnReceiveCallback() { impl_->SetOnReceiveCallback(nullptr); }
 
   absl::Status ProcessAllMessages(ReadMode mode = ReadMode::kReadNext) {
-    return client_->ProcessAllMessages(impl_.get(), mode);
+    return ASYNC_BLOCK(client_->ProcessAllMessages(impl_.get(), mode));
   }
 
   absl::StatusOr<std::vector<Message>>
   GetAllMessages(ReadMode mode = ReadMode::kReadNext) {
-    return client_->GetAllMessages(impl_.get(), mode);
+    return ASYNC_BLOCK(client_->GetAllMessages(impl_.get(), mode));
   }
 
   void Trigger() { impl_->Trigger(); }
@@ -1841,6 +2080,121 @@ public:
     return false;
   }
 
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
+  // ---- Async API (C++20 coroutines) ------------------------------------
+  //
+  // The same as the functions without "Async", but they suspend the calling
+  // coroutine instead of blocking the thread.  See the Publisher Async API
+  // for the rules on using them.
+
+  async::Task<absl::Status>
+  WaitAsync(std::chrono::nanoseconds timeout = std::chrono::nanoseconds(0)) {
+    auto client = client_;
+    auto impl = impl_;
+    if (absl::Status s = client->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(
+        client->WaitForSubscriber(impl.get(), timeout, nullptr));
+  }
+
+  async::Task<absl::StatusOr<int>>
+  WaitAsync(const toolbelt::FileDescriptor &fd,
+            std::chrono::nanoseconds timeout = std::chrono::nanoseconds(0)) {
+    auto client = client_;
+    auto impl = impl_;
+    if (absl::Status s = client->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(
+        client->WaitForSubscriber(impl.get(), fd, timeout, nullptr));
+  }
+
+  async::Task<absl::StatusOr<Message>>
+  ReadMessageAsync(ReadMode mode = ReadMode::kReadNext,
+                   ClearTrigger clear_trigger = ClearTrigger::kClearTrigger) {
+    auto client = client_;
+    auto impl = impl_;
+    if (absl::Status s = client->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(
+        client->ReadMessage(impl.get(), mode, clear_trigger));
+  }
+
+  template <typename T, typename Aliaser = DefaultAliaser>
+  async::Task<absl::StatusOr<shared_ptr<T, Aliaser>>>
+  ReadMessageAsync(ReadMode mode = ReadMode::kReadNext,
+                   ClearTrigger clear_trigger = ClearTrigger::kClearTrigger) {
+    auto client = client_;
+    auto impl = impl_;
+    if (absl::Status s = client->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(
+        (client->ReadMessage<T, Aliaser>(impl.get(), mode, clear_trigger)));
+  }
+
+  async::Task<absl::StatusOr<Message>> FindMessageAsync(uint64_t timestamp) {
+    auto client = client_;
+    auto impl = impl_;
+    if (absl::Status s = client->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(client->FindMessage(impl.get(), timestamp));
+  }
+
+  template <typename T, typename Aliaser = DefaultAliaser>
+  async::Task<absl::StatusOr<shared_ptr<T, Aliaser>>>
+  FindMessageAsync(uint64_t timestamp) {
+    auto client = client_;
+    auto impl = impl_;
+    if (absl::Status s = client->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(
+        (client->FindMessage<T, Aliaser>(impl.get(), timestamp)));
+  }
+
+  async::Task<absl::Status>
+  ProcessAllMessagesAsync(ReadMode mode = ReadMode::kReadNext) {
+    auto client = client_;
+    auto impl = impl_;
+    if (absl::Status s = client->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(client->ProcessAllMessages(impl.get(), mode));
+  }
+
+  async::Task<absl::StatusOr<std::vector<Message>>>
+  GetAllMessagesAsync(ReadMode mode = ReadMode::kReadNext) {
+    auto client = client_;
+    auto impl = impl_;
+    if (absl::Status s = client->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(client->GetAllMessages(impl.get(), mode));
+  }
+
+  // Removes the subscriber from the server without blocking.  The destructor
+  // does the same but blocks.  The subscriber can't be used afterwards.
+  async::Task<absl::Status> CloseAsync() {
+    if (client_ == nullptr || impl_ == nullptr || closed_) {
+      co_return absl::OkStatus();
+    }
+    auto client = client_;
+    auto impl = impl_;
+    if (absl::Status s = client->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    closed_ = true;
+    UnregisterDroppedMessageCallback().IgnoreError();
+    UnregisterStuckSubscriberCallback().IgnoreError();
+    UnregisterMessageCallback().IgnoreError();
+    co_return ASYNC_AWAIT(client->RemoveSubscriber(impl.get()));
+  }
+#endif
+
 private:
   friend class Server;
   friend class ClientImpl;
@@ -1851,8 +2205,21 @@ private:
 
   absl::StatusOr<Message>
   ReadMessageInternal(ReadMode mode, bool pass_activation, bool clear_trigger) {
-    return client_->ReadMessageInternal(impl_.get(), mode, pass_activation,
-                                        clear_trigger);
+    return ASYNC_BLOCK(client_->ReadMessageInternal(
+        impl_.get(), mode, pass_activation, clear_trigger));
+  }
+
+  // Awaitable form for code on the scheduler, such as the in-process bridge.
+  async::Task<absl::StatusOr<Message>>
+  ReadMessageInternalAsync(ReadMode mode, bool pass_activation,
+                           bool clear_trigger) {
+    auto client = client_;
+    auto impl = impl_;
+    if (absl::Status s = client->CheckAsyncAllowed(); !s.ok()) {
+      ASYNC_RETURN s;
+    }
+    ASYNC_RETURN ASYNC_AWAIT(client->ReadMessageInternal(
+        impl.get(), mode, pass_activation, clear_trigger));
   }
 
   std::shared_ptr<ClientImpl> client_;
@@ -1863,18 +2230,21 @@ private:
   std::function<void(Subscriber *, double)> stuck_subscriber_callback_ =
       nullptr;
   std::function<void(Subscriber *, Message)> message_callback_ = nullptr;
+  // Set by CloseAsync so the destructor doesn't remove the subscriber again.
+  bool closed_ = false;
 };
 
 template <typename T, typename Aliaser>
 inline absl::StatusOr<::subspace::shared_ptr<T, Aliaser>>
 Subscriber::ReadMessage(ReadMode mode, ClearTrigger clear_trigger) {
-  return client_->ReadMessage<T, Aliaser>(impl_.get(), mode, clear_trigger);
+  return ASYNC_BLOCK(
+      client_->ReadMessage<T, Aliaser>(impl_.get(), mode, clear_trigger));
 }
 
 template <typename T, typename Aliaser>
 inline absl::StatusOr<::subspace::shared_ptr<T, Aliaser>>
 Subscriber::FindMessage(uint64_t timestamp) {
-  return client_->FindMessage<T, Aliaser>(impl_.get(), timestamp);
+  return ASYNC_BLOCK(client_->FindMessage<T, Aliaser>(impl_.get(), timestamp));
 }
 
 // This is a wrapper around the ClientImpl that is created as a shared_ptr
@@ -1903,6 +2273,12 @@ public:
 
   Client(const toolbelt::AsyncWaiter *c = nullptr)
       : impl_(std::make_shared<ClientImpl>(c)) {}
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
+  // The Async API suspends whichever coroutine calls it (co20::self), so a
+  // co20 client doesn't need the coroutine it is created in.  The context is
+  // accepted so code written for the other backends compiles unchanged.
+  explicit Client(async::Context) : impl_(std::make_shared<ClientImpl>()) {}
+#endif
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
   // Asio-backed client: the yield_context drives cooperative socket I/O.
   explicit Client(async::Context ctx)
@@ -1915,7 +2291,7 @@ public:
   // Initialize the client by connecting to the server.
   absl::Status Init(const std::string &server_socket = kDefaultServerSocket,
                     const std::string &client_name = "") {
-    return impl_->Init(server_socket, client_name);
+    return ASYNC_BLOCK(impl_->Init(server_socket, client_name));
   }
 
   // Create a publisher for the given channel.  If the channel doesn't exit
@@ -1925,7 +2301,7 @@ public:
   CreatePublisher(const std::string &channel_name, SlotSizeType slot_size,
                   int num_slots,
                   const PublisherOptions &opts = PublisherOptions()) {
-    return impl_->CreatePublisher(channel_name, slot_size, num_slots, opts);
+    return ASYNC_BLOCK(impl_->CreatePublisher(channel_name, slot_size, num_slots, opts));
   }
 
   // If you prefer, you can create the publisher with the slot size and
@@ -1933,7 +2309,7 @@ public:
   absl::StatusOr<Publisher>
   CreatePublisher(const std::string &channel_name,
                   const PublisherOptions &opts = PublisherOptions()) {
-    return impl_->CreatePublisher(channel_name, opts);
+    return ASYNC_BLOCK(impl_->CreatePublisher(channel_name, opts));
   }
 
   // Create a subscriber for the given channel. This can be done before there
@@ -1941,7 +2317,7 @@ public:
   absl::StatusOr<Subscriber>
   CreateSubscriber(const std::string &channel_name,
                    const SubscriberOptions &opts = SubscriberOptions()) {
-    return impl_->CreateSubscriber(channel_name, opts);
+    return ASYNC_BLOCK(impl_->CreateSubscriber(channel_name, opts));
   }
 
   // Call with true to turn on some debug information.  Kind of meaningless
@@ -1964,23 +2340,117 @@ public:
 
   absl::StatusOr<const ChannelInfo>
   GetChannelInfo(const std::string &channelName) {
-    return impl_->GetChannelInfo(channelName);
+    return ASYNC_BLOCK(impl_->GetChannelInfo(channelName));
   }
   absl::StatusOr<const std::vector<ChannelInfo>> GetChannelInfo() {
-    return impl_->GetChannelInfo();
+    return ASYNC_BLOCK(impl_->GetChannelInfo());
   }
 
   absl::StatusOr<const ChannelStats>
   GetChannelStats(const std::string &channelName) {
-    return impl_->GetChannelStats(channelName);
+    return ASYNC_BLOCK(impl_->GetChannelStats(channelName));
   }
   absl::StatusOr<const std::vector<ChannelStats>> GetChannelStats() {
-    return impl_->GetChannelStats();
+    return ASYNC_BLOCK(impl_->GetChannelStats());
   }
 
   absl::StatusOr<bool> ChannelExists(const std::string &channelName) {
-    return impl_->ChannelExists(channelName);
+    return ASYNC_BLOCK(impl_->ChannelExists(channelName));
   }
+
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
+  // ---- Async API (C++20 coroutines) ------------------------------------
+  //
+  // The same as the functions without "Async", but they suspend the calling
+  // coroutine instead of blocking the thread.  See the Publisher Async API
+  // for the rules on using them.  The Client must not be thread safe.
+  async::Task<absl::Status>
+  InitAsync(const std::string &server_socket = kDefaultServerSocket,
+            const std::string &client_name = "") {
+    auto impl = impl_;
+    if (absl::Status s = impl->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(impl->Init(server_socket, client_name));
+  }
+
+  async::Task<absl::StatusOr<Publisher>>
+  CreatePublisherAsync(const std::string &channel_name, SlotSizeType slot_size,
+                       int num_slots,
+                       const PublisherOptions &opts = PublisherOptions()) {
+    auto impl = impl_;
+    if (absl::Status s = impl->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(
+        impl->CreatePublisher(channel_name, slot_size, num_slots, opts));
+  }
+
+  async::Task<absl::StatusOr<Publisher>>
+  CreatePublisherAsync(const std::string &channel_name,
+                       const PublisherOptions &opts = PublisherOptions()) {
+    auto impl = impl_;
+    if (absl::Status s = impl->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(impl->CreatePublisher(channel_name, opts));
+  }
+
+  async::Task<absl::StatusOr<Subscriber>>
+  CreateSubscriberAsync(const std::string &channel_name,
+                        const SubscriberOptions &opts = SubscriberOptions()) {
+    auto impl = impl_;
+    if (absl::Status s = impl->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(impl->CreateSubscriber(channel_name, opts));
+  }
+
+  async::Task<absl::StatusOr<const ChannelInfo>>
+  GetChannelInfoAsync(const std::string &channelName) {
+    auto impl = impl_;
+    if (absl::Status s = impl->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(impl->GetChannelInfo(channelName));
+  }
+
+  async::Task<absl::StatusOr<const std::vector<ChannelInfo>>>
+  GetChannelInfoAsync() {
+    auto impl = impl_;
+    if (absl::Status s = impl->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(impl->GetChannelInfo());
+  }
+
+  async::Task<absl::StatusOr<const ChannelStats>>
+  GetChannelStatsAsync(const std::string &channelName) {
+    auto impl = impl_;
+    if (absl::Status s = impl->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(impl->GetChannelStats(channelName));
+  }
+
+  async::Task<absl::StatusOr<const std::vector<ChannelStats>>>
+  GetChannelStatsAsync() {
+    auto impl = impl_;
+    if (absl::Status s = impl->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(impl->GetChannelStats());
+  }
+
+  async::Task<absl::StatusOr<bool>>
+  ChannelExistsAsync(const std::string &channelName) {
+    auto impl = impl_;
+    if (absl::Status s = impl->CheckAsyncAllowed(); !s.ok()) {
+      co_return s;
+    }
+    co_return ASYNC_AWAIT(impl->ChannelExists(channelName));
+  }
+#endif
 
 private:
   std::shared_ptr<ClientImpl> impl_;

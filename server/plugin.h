@@ -5,6 +5,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
+#include "common/async/runtime.h"
 #include "common/client_buffer.h"
 #include "toolbelt/logging.h"
 #include <cstddef>
@@ -13,10 +14,6 @@
 #include <string>
 #include <sys/types.h>
 
-namespace co {
-class CoroutineScheduler;
-}
-
 namespace subspace {
 class Server;
 
@@ -24,7 +21,7 @@ struct PluginContext  {
   PluginContext(const std::string &name) : logger(name) {}
   virtual ~PluginContext() = default;
   toolbelt::Logger logger;
-  co::CoroutineScheduler *scheduler = nullptr;
+  async::RuntimeEngine *scheduler = nullptr;
 };
 
 // Payload passed to an egress plugin. `bytes` does not include the prefix.
@@ -158,7 +155,7 @@ public:
                                 slot_id, ctx_.get());
   }
 
-  void SetScheduler(co::CoroutineScheduler &scheduler) {
+  void SetScheduler(async::RuntimeEngine &scheduler) {
     if (ctx_) {
       ctx_->scheduler = &scheduler;
     }

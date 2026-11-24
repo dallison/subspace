@@ -25,7 +25,7 @@ private:
   PublisherImpl &publisher_;
 };
 
-absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
+async::Task<absl::Status> PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
   if (final_slot_size == 0) {
     // If we are being asked for a slot size of 0, we will just use 64 bytes.
     // This is the minimum slot size we can use.
@@ -41,10 +41,10 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
       size_t buffer_index = buffers_.size();
       if (UseSplitBuffers()) {
         auto split_buffer =
-            CreateSplitBufferSet(buffer_index, final_buffer_size,
-                                 final_slot_size);
+            ASYNC_AWAIT(CreateSplitBufferSet(buffer_index, final_buffer_size,
+                                 final_slot_size));
         if (!split_buffer.ok()) {
-          return split_buffer.status();
+          ASYNC_RETURN split_buffer.status();
         }
         bcb_->sizes[buffers_.size()].store(final_buffer_size,
                                            std::memory_order_relaxed);
@@ -63,7 +63,7 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
       auto shm_fd = CreateBuffer(buffer_index, final_buffer_size);
 #endif
       if (!shm_fd.ok()) {
-        return shm_fd.status();
+        ASYNC_RETURN shm_fd.status();
       }
       if (!shm_fd->Valid()) {
         // The named shared memory already exists so we attach to it instead of
@@ -71,7 +71,7 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
         opened_existing_buffer = true;
         shm_fd = OpenBuffer(buffer_index);
         if (!shm_fd.ok()) {
-          return shm_fd.status();
+          ASYNC_RETURN shm_fd.status();
         }
       }
       if (opened_existing_buffer) {
@@ -82,14 +82,14 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
         // slot with our smaller requested size.
         auto size = GetBufferSize(*shm_fd, buffer_index);
         if (!size.ok()) {
-          return size.status();
+          ASYNC_RETURN size.status();
         }
         current_slot_size = BufferSizeToSlotSize(*size);
         absl::StatusOr<char *> addr;
         if (current_slot_size > 0) {
           addr = MapBuffer(*shm_fd, *size, BufferMapMode::kReadWrite);
           if (!addr.ok()) {
-            return addr.status();
+            ASYNC_RETURN addr.status();
           }
         } else {
           addr = nullptr;
@@ -106,7 +106,7 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
         auto addr =
             MapBuffer(*shm_fd, final_buffer_size, BufferMapMode::kReadWrite);
         if (!addr.ok()) {
-          return addr.status();
+          ASYNC_RETURN addr.status();
         }
         auto buffer_set = std::make_unique<BufferSet>(
             final_buffer_size, final_slot_size, *addr);
@@ -141,7 +141,7 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
               .allocator = ClientBufferAllocatorKind::kAndroidMemfd,
           };
           if (absl::Status status =
-                  client_buffer_registration_callback_(metadata, &buffer.fd);
+                  ASYNC_AWAIT(client_buffer_registration_callback_(metadata, &buffer.fd));
               !status.ok()) {
             int expected_num_buffers = new_num_buffers;
             if (ccb_->num_buffers.compare_exchange_strong(
@@ -155,11 +155,11 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
                 std::min(static_cast<size_t>(old_num_buffers),
                          buffers_.size());
             for (size_t j = rollback_to; j < buffers_.size(); j++) {
-              UnmapBufferSet(j, *buffers_[j],
-                             /*destroy_owned_buffers=*/false);
+              ASYNC_AWAIT(UnmapBufferSet(j, *buffers_[j],
+                             /*destroy_owned_buffers=*/false));
             }
             buffers_.resize(rollback_to);
-            return status;
+            ASYNC_RETURN status;
           }
         }
       }
@@ -170,7 +170,7 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
     if (!UseSplitBuffers()) {
       for (size_t i = 0; i < buffers_.size(); i++) {
-        UnmapBufferSet(i, *buffers_[i], /*destroy_owned_buffers=*/false);
+        ASYNC_AWAIT(UnmapBufferSet(i, *buffers_[i], /*destroy_owned_buffers=*/false));
       }
       buffers_.clear();
       current_slot_size = 0;
@@ -179,7 +179,7 @@ absl::Status PublisherImpl::CreateOrAttachBuffers(uint64_t final_slot_size) {
     // Another thread has updated the number of buffers in the CCB.  We need to
     // retry.
   }
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
 void PublisherImpl::SetSlotToBiggestBuffer(MessageSlot *slot) {
@@ -349,7 +349,8 @@ int PublisherImpl::FindRetiredSlotToReuse(bool oldest_first) {
   return oldest;
 }
 
-MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
+async::Task<MessageSlot *>
+PublisherImpl::FindFreeSlotUnreliable(int owner) {
   int retries = num_slots_ * 1000;
   MessageSlot *slot = nullptr;
   embargoed_slots_.ClearAll();
@@ -383,7 +384,9 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
     slot = nullptr;
     retired_slot = -1;
     free_slot = -1;
-    CheckReload();
+    if (BuffersChanged()) {
+      ASYNC_AWAIT(CheckReload());
+    }
     // Read the subscriber count off the reloaded CCB rather than caching it
     // across the loop, so a subscriber attaching while we retry here is seen.
     const bool no_subscribers = NumSubscribers(vchan_id_) == 0;
@@ -467,7 +470,7 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
       // We are guaranteed to find a slot, but let's not go into an infinite
       // loop if something goes wrong.
       if (retries-- == 0) {
-        return nullptr;
+        ASYNC_RETURN nullptr;
       }
       continue;
     }
@@ -492,7 +495,7 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
     if (slot->refs.compare_exchange_strong(expected, ref,
                                            std::memory_order_acquire,
                                            std::memory_order_relaxed)) {
-      if (!ValidateSlotBuffer(slot)) {
+      if (!ASYNC_AWAIT(ValidateSlotBuffer(slot))) {
         // No buffer for the slot.  Embargo the slot so we don't see it again
         // this loop and try again.
         embargoed_slots_.Set(slot->id);
@@ -503,7 +506,7 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
     }
     if (++cas_retries >= max_cas_retries) {
       if (retries-- == 0) {
-        return nullptr;
+        ASYNC_RETURN nullptr;
       }
       cas_retries = 0;
       std::this_thread::yield();
@@ -537,10 +540,11 @@ MessageSlot *PublisherImpl::FindFreeSlotUnreliable(int owner) {
       NotifyRetirementOnForcedReuse()) {
     TriggerRetirement(slot->id);
   }
-  return slot;
+  ASYNC_RETURN slot;
 }
 
-MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
+async::Task<MessageSlot *>
+PublisherImpl::FindFreeSlotReliable(int owner) {
   int retries = num_slots_ * 1000;
   MessageSlot *slot = nullptr;
   int retired_slot = -1;
@@ -552,7 +556,9 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
     slot = nullptr;
     retired_slot = -1;
     free_slot = -1;
-    CheckReload();
+    if (BuffersChanged()) {
+      ASYNC_AWAIT(CheckReload());
+    }
 
     // Put all free slots into the active_slots vector.
     active_slots_.clear();
@@ -642,7 +648,7 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
       }
     }
     if (slot == nullptr) {
-      return nullptr;
+      ASYNC_RETURN nullptr;
     }
     // Claim the slot by setting the kPubOwned bit.
     uint64_t old_refs = slot->refs.load(std::memory_order_relaxed);
@@ -660,7 +666,7 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
     if (slot->refs.compare_exchange_strong(expected, ref,
                                            std::memory_order_acquire,
                                            std::memory_order_relaxed)) {
-      if (!ValidateSlotBuffer(slot)) {
+      if (!ASYNC_AWAIT(ValidateSlotBuffer(slot))) {
         // No buffer for the slot.  Embargo the slot so we don't see it again
         // this loop and try again.
         embargoed_slots_.Set(slot->id);
@@ -672,7 +678,7 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
     }
     if (++cas_retries >= max_cas_retries) {
       if (retries-- == 0) {
-        return nullptr;
+        ASYNC_RETURN nullptr;
       }
       cas_retries = 0;
       std::this_thread::yield();
@@ -705,10 +711,11 @@ MessageSlot *PublisherImpl::FindFreeSlotReliable(int owner) {
       NotifyRetirementOnForcedReuse()) {
     TriggerRetirement(slot->id);
   }
-  return slot;
+  ASYNC_RETURN slot;
 }
 
-Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
+async::Task<Channel::PublishedMessage>
+PublisherImpl::ActivateSlotAndGetAnother(
     MessageSlot *slot, bool reliable, bool is_activation, int owner,
     bool omit_prefix, bool use_prefix_slot_id, bool for_tunnel,
     bool acquire_next, bool use_prefix_vchan_id) {
@@ -873,18 +880,22 @@ Channel::PublishedMessage PublisherImpl::ActivateSlotAndGetAnother(
   }
 
   if (!acquire_next) {
-    return {nullptr, published_ordinal, published_timestamp};
+    ASYNC_RETURN Channel::PublishedMessage{nullptr, published_ordinal,
+                                           published_timestamp};
   }
 
   // A reliable publisher doesn't allocate a slot until it is asked for.
   if (reliable) {
-    CheckReload();
-    return {nullptr, 0, 0};
+    if (BuffersChanged()) {
+      ASYNC_AWAIT(CheckReload());
+    }
+    ASYNC_RETURN Channel::PublishedMessage{nullptr, 0, 0};
   }
   // Find a new slot.x
-  MessageSlot *new_slot = FindFreeSlotUnreliable(owner);
+  MessageSlot *new_slot = ASYNC_AWAIT(FindFreeSlotUnreliable(owner));
 
-  return {new_slot, published_ordinal, published_timestamp};
+  ASYNC_RETURN Channel::PublishedMessage{new_slot, published_ordinal,
+                                         published_timestamp};
 }
 
 } // namespace details

@@ -10,6 +10,7 @@
 #include "absl/status/statusor.h"
 #include "client/options.h"
 #include "common/async/context.h"
+#include "common/async/runtime.h"
 #include "common/async/byte_stream.h"
 #include "common/async/socket.h"
 #include "proto/tunnel_config.pb.h"
@@ -30,6 +31,7 @@
 namespace subspace {
 
 class Client;
+class Subscriber;
 class Server;
 
 // Tunnel-compatible discovery and bridging.  Each configured peer is sent a
@@ -129,32 +131,38 @@ private:
     int32_t wire_prefix_size = 0;
   };
 
-  void ListenerCoroutine(async::Context ctx);
-  void HandshakeCoroutine(async::Context ctx,
+  async::Task<void> ListenerCoroutine(async::Context ctx);
+  async::Task<void> HandshakeCoroutine(async::Context ctx,
                           std::shared_ptr<async::ByteStream> socket,
                           std::string peer);
-  void IngressCoroutine(async::Context ctx,
+  async::Task<void> IngressCoroutine(async::Context ctx,
                         std::shared_ptr<async::ByteStream> socket,
                         IngressPlan plan);
-  void EgressCoroutine(async::Context ctx, EgressRoute route);
-  absl::Status ForwardChannel(async::Context ctx, Client &client,
+  async::Task<void> EgressCoroutine(async::Context ctx, EgressRoute route);
+  async::Task<absl::Status> ForwardChannel(async::Context ctx, Client &client,
                               async::ByteStream &socket,
                               const EgressRoute &route);
-  void ScannerCoroutine(async::Context ctx);
-  void DiscoverySenderCoroutine(async::Context ctx, Peer *peer);
+  // Sends the subscriber's messages over the tunnel until the connection or the
+  // channel fails.  The caller owns `sub` and must close it.
+  async::Task<absl::Status> ForwardSubscriber(async::Context ctx,
+                                              Subscriber *sub,
+                                              async::ByteStream &socket,
+                                              const EgressRoute &route);
+  async::Task<void> ScannerCoroutine(async::Context ctx);
+  async::Task<void> DiscoverySenderCoroutine(async::Context ctx, Peer *peer);
   // Waits out the reconnect interval, ending early when there is something
   // new to tell the peer.
-  void WaitToReconnect(async::Context ctx, Peer &peer);
-  absl::Status RunDiscoveryConnection(async::Context ctx,
+  async::Task<void> WaitToReconnect(async::Context ctx, Peer &peer);
+  async::Task<absl::Status> RunDiscoveryConnection(async::Context ctx,
                                       async::ByteStream &socket, Peer &peer);
-  absl::Status SendDiscovery(async::Context ctx, async::ByteStream &socket,
+  async::Task<absl::Status> SendDiscovery(async::Context ctx, async::ByteStream &socket,
                              const Peer &peer, uint64_t seq);
-  void DiscoveryReceiverLoop(async::Context ctx, async::ByteStream &socket,
+  async::Task<void> DiscoveryReceiverLoop(async::Context ctx, async::ByteStream &socket,
                              const tunnel::Handshake &handshake,
                              const std::string &peer);
   // Reads and discards a connection for an internal channel until the peer
   // closes it.  Closing it instead would make the peer reconnect forever.
-  void DiscardConnection(async::Context ctx, async::ByteStream &socket,
+  async::Task<void> DiscardConnection(async::Context ctx, async::ByteStream &socket,
                          const std::string &topic, const std::string &peer);
 
   IngressPlan PlanIngress(const tunnel::Handshake &handshake,
@@ -173,8 +181,8 @@ private:
   // Logs a connection failure at info level, or at debug level when it
   // repeats the previous one.
   void LogFailure(std::string &last_failure, std::string failure);
-  void SpawnOnStrand(std::function<void(async::Context)> fn, std::string name);
-  void SpawnOnNewStrand(std::function<void(async::Context)> fn,
+  void SpawnOnStrand(async::CoroutineFunction fn, std::string name);
+  void SpawnOnNewStrand(async::CoroutineFunction fn,
                         std::string name);
 
   Server *server_;

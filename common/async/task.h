@@ -40,8 +40,72 @@ namespace subspace::async {
 
 template <typename T> using Task = co20::ValueTask<T>;
 
-#define ASYNC_AWAIT(expr) (co_await (expr))
+namespace detail {
+
+// Runs `task` inline inside await_suspend when it finishes without parking on
+// the scheduler, returning `false` so the caller resumes in place instead of
+// via symmetric transfer.  GCC at -O0 and under AddressSanitizer does not
+// tail-call symmetric transfers (GCC bug 100897), so a coroutine loop whose
+// awaits finish without parking would otherwise grow the C stack on every
+// iteration and overflow.  When `task` does park on the scheduler, `done()` is
+// false, `continuation_` is wired to `caller`, and returning `true` unwinds
+// the C stack back to `Scheduler::Run`.
+template <typename T> struct [[nodiscard]] FastValueTaskAwaiter {
+  co20::ValueTask<T> task_;
+
+  bool await_ready() const noexcept { return false; }
+
+  bool await_suspend(std::coroutine_handle<> caller) noexcept {
+    task_.handle_.resume();
+    if (task_.handle_.done()) {
+      return false;
+    }
+    task_.handle_.promise().continuation_ = caller;
+    return true;
+  }
+
+  T await_resume() { return task_.await_resume(); }
+};
+
+template <typename T> struct [[nodiscard]] FastValueTaskRefAwaiter {
+  co20::ValueTask<T> &task_;
+
+  bool await_ready() const noexcept { return false; }
+
+  bool await_suspend(std::coroutine_handle<> caller) noexcept {
+    task_.handle_.resume();
+    if (task_.handle_.done()) {
+      return false;
+    }
+    task_.handle_.promise().continuation_ = caller;
+    return true;
+  }
+
+  T await_resume() { return task_.await_resume(); }
+};
+
+template <typename A> A FastAwait(A &&a) { return std::forward<A>(a); }
+
+template <typename T>
+FastValueTaskAwaiter<T> FastAwait(co20::ValueTask<T> &&task) {
+  return FastValueTaskAwaiter<T>{std::move(task)};
+}
+
+template <typename T>
+FastValueTaskRefAwaiter<T> FastAwait(co20::ValueTask<T> &task) {
+  return FastValueTaskRefAwaiter<T>{task};
+}
+
+}  // namespace detail
+
+// Variadic so an expression with an unparenthesised comma, such as a call to
+// a template with several arguments, works.
+#define ASYNC_AWAIT(...)                                                       \
+  (co_await ::subspace::async::detail::FastAwait(__VA_ARGS__))
 #define ASYNC_RETURN co_return
+// Runs a task to completion from code that isn't a coroutine, blocking the
+// thread instead of suspending.  See SyncWait.
+#define ASYNC_BLOCK(...) (::subspace::async::SyncWait(__VA_ARGS__))
 
 // Runs `task` to completion from code that is not a coroutine.  Every wait in
 // the task must use a Context that doesn't suspend, so the task never
@@ -74,8 +138,9 @@ namespace subspace::async {
 
 template <typename T> using Task = T;
 
-#define ASYNC_AWAIT(expr) (expr)
+#define ASYNC_AWAIT(...) (__VA_ARGS__)
 #define ASYNC_RETURN return
+#define ASYNC_BLOCK(...) (__VA_ARGS__)
 
 template <typename T> T SyncWait(T value) { return value; }
 

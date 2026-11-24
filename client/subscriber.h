@@ -60,8 +60,8 @@ public:
                  int subscriber_queue_size, int channel_id, int subscriber_id,
                  int vchan_id, uint64_t session_id, std::string type,
                  const SubscriberOptions &options,
-                 std::function<bool(Channel *)> reload, int user_id,
-                 int group_id)
+                 std::function<async::Task<bool>(Channel *)> reload,
+                 int user_id, int group_id)
       : ClientChannel(name, num_slots, default_subscriber_queue_size,
                       subscriber_queue_arena_size, channel_id, vchan_id,
                       std::move(session_id), std::move(type), std::move(reload),
@@ -185,8 +185,10 @@ public:
   // Can return nullptr if there is no slot.
   // If reliable is true, the reliable_ref_count in the MessageSlot will
   // be manipulated.  The owner is the subscriber ID.
-  MessageSlot *NextSlot(MessageSlot *slot, bool reliable, int owner);
-  MessageSlot *LastSlot(MessageSlot *slot, bool reliable, int owner);
+  async::Task<MessageSlot *> NextSlot(MessageSlot *slot, bool reliable,
+                                      int owner);
+  async::Task<MessageSlot *> LastSlot(MessageSlot *slot, bool reliable,
+                                      int owner);
 
   std::shared_ptr<ActiveMessage> GetActiveMessage() { return active_message_; }
 
@@ -300,7 +302,7 @@ public:
   // buffer, but this function will modify it.  This is to avoid memory
   // allocation for every search or buffer allocation for every subscriber when
   // searches are rare.
-  MessageSlot *FindActiveSlotByTimestamp(MessageSlot *old_slot,
+  async::Task<MessageSlot *> FindActiveSlotByTimestamp(MessageSlot *old_slot,
                                          uint64_t timestamp, bool reliable,
                                          int owner,
                                          std::vector<ActiveSlot> &buffer);
@@ -405,12 +407,14 @@ private:
   }
   int GetSubscriberId() const { return subscriber_id_; }
 
-  MessageSlot *NextSlot() {
-    return NextSlot(CurrentSlot(), IsReliable(), subscriber_id_);
+  async::Task<MessageSlot *> NextSlot() {
+    ASYNC_RETURN ASYNC_AWAIT(
+        NextSlot(CurrentSlot(), IsReliable(), subscriber_id_));
   }
 
-  MessageSlot *LastSlot() {
-    return LastSlot(CurrentSlot(), IsReliable(), subscriber_id_);
+  async::Task<MessageSlot *> LastSlot() {
+    ASYNC_RETURN ASYNC_AWAIT(
+        LastSlot(CurrentSlot(), IsReliable(), subscriber_id_));
   }
 
   toolbelt::FileDescriptor &GetPollFd() {
@@ -430,14 +434,14 @@ private:
   void ClearPollFd() { trigger_.Clear(); }
   bool PollDrainPending() const { return poll_drain_pending_; }
 
-  MessageSlot *FindMessage(uint64_t timestamp) {
-    MessageSlot *slot =
+  async::Task<MessageSlot *> FindMessage(uint64_t timestamp) {
+    MessageSlot *slot = ASYNC_AWAIT(
         FindActiveSlotByTimestamp(CurrentSlot(), timestamp, IsReliable(),
-                                  GetSubscriberId(), search_buffer_);
+                                  GetSubscriberId(), search_buffer_));
     if (slot != nullptr) {
       SetSlot(slot);
     }
-    return slot;
+    ASYNC_RETURN slot;
   }
 
   OrdinalTracker &GetOrdinalTracker(int vchan_id);

@@ -17,6 +17,12 @@ cc_library(
 
 cc_test(
     name = "client_test",
+    # Co-only: these use the stackful co API directly (or, for alloc_test, assert
+    # zero allocations on the hot path, which co20 coroutine frames violate).
+    target_compatible_with = select({
+        "//:coro_backend_co20": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
     size = "small",
     srcs = ["client_test.cc"],
     data = [

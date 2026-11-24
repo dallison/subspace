@@ -147,8 +147,8 @@ static absl::Status FindIPAddresses(const std::string &interface,
   return absl::OkStatus();
 }
 
-#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO
-Server::Server(co::CoroutineScheduler &scheduler,
+#if SUBSPACE_CORO_BACKEND != SUBSPACE_CORO_BACKEND_ASIO
+Server::Server(async::RuntimeEngine &scheduler,
                const std::string &socket_name, const std::string &interface,
                int disc_port, int peer_port, bool local, int notify_fd,
                int initial_ordinal, bool wait_for_clients,
@@ -162,7 +162,7 @@ Server::Server(co::CoroutineScheduler &scheduler,
   CreateShutdownTrigger();
 }
 
-Server::Server(co::CoroutineScheduler &scheduler,
+Server::Server(async::RuntimeEngine &scheduler,
                const std::string &socket_name, const std::string &interface,
                const toolbelt::InetAddress &peer, int disc_port, int peer_port,
                bool local, int notify_fd, int initial_ordinal,
@@ -237,10 +237,23 @@ void Server::Stop(bool force) {
   shutdown_trigger_fd_.Trigger();
   runtime_.StopGracefully();
 #else
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
+  // A suspended co20 coroutine is destroyed with its scheduler, which runs its
+  // locals' destructors.  A Publisher or Subscriber destructor makes a round
+  // trip to this server, so stopping the scheduler with coroutines still
+  // suspended can hang.  Shut down through the drain instead: the interrupt
+  // fds wake every coroutine, and Run returns once the listener is the last
+  // one left.  Only a forced stop abandons them.
+  if (force) {
+    runtime_.Stop();
+    return;
+  }
+#else
   if (force || !wait_for_clients_) {
     runtime_.Stop();
     return;
   }
+#endif
   shutting_down_ = true;
   for (auto &plugin : plugins_) {
     plugin->interface->OnShutdown();
@@ -273,7 +286,7 @@ void Server::CloseHandler(ClientHandler *handler) {
 // This coroutine listens for incoming client connections on the given
 // UDS and spawns a handler coroutine to handle the communication with
 // the client.
-void Server::ListenerCoroutine(async::Context ctx,
+async::Task<void> Server::ListenerCoroutine(async::Context ctx,
                                async::UnixSocket &listen_socket) {
   for (;;) {
     if (shutting_down_) {
@@ -287,20 +300,24 @@ void Server::ListenerCoroutine(async::Context ctx,
       if (strings.size() == 1) {
         break;
       }
-#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
-      // Shutdown was signalled (our Accept was cancelled by StopGracefully).
-      // Stop accepting new connections and instead poll the drain count,
-      // yielding the strand via a short sleep so the remaining coroutines
-      // (notably the client handlers that service the orderly disconnect of
-      // the in-process clients) can run and finish.  Asio cancellation is
-      // one-shot, so we cannot simply re-block in Accept and expect to wake
-      // again; this poll plays the role the persistently-readable interrupt fd
-      // plays on the co backend.
-      async::Sleep(ctx, std::chrono::milliseconds(5));
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
+      // Yield rather than Sleep: this coroutine's interrupt fd is already
+      // readable during shutdown, so Sleep would wake immediately on epoll
+      // while allocating a timerfd on every turn.
+      co_await ctx.Coroutine()->Yield();
+      continue;
+#elif SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+      // Shutdown was signalled.  Stop accepting new connections and instead
+      // poll the drain count, yielding via a short sleep so the remaining
+      // coroutines (notably the client handlers that service the orderly
+      // disconnect of the in-process clients) can run and finish.  On Asio the
+      // cancellation is one-shot, so re-running Accept would hang without ever
+      // letting the other coroutines run.
+      ASYNC_AWAIT(async::Sleep(ctx, std::chrono::milliseconds(5)));
       continue;
 #endif
     }
-    absl::Status status = HandleIncomingConnection(ctx, listen_socket);
+    absl::Status status = ASYNC_AWAIT(HandleIncomingConnection(ctx, listen_socket));
     if (!status.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Unable to make incoming connection: %s",
@@ -466,7 +483,9 @@ absl::Status Server::Run(int num_asio_threads) {
   // Notify listener that the server is ready.  Do this in a coroutine so that
   // it executes when we start running.
   if (notify_fd_.Valid()) {
-    runtime_.Spawn([this](async::Context) { NotifyViaFd(kServerReady); });
+    runtime_.Spawn([this](async::Context) -> async::Task<void> { NotifyViaFd(kServerReady);
+  ASYNC_RETURN;
+ });
   }
   OnReady();
 
@@ -708,8 +727,8 @@ absl::Status Server::Run(int num_asio_threads) {
   // serialized with the client handlers it spawns (they all share the
   // client_handlers_ vector and the server's channel state).
   runtime_.SpawnOnStrand(
-      [this, &listen_socket](async::Context ctx) {
-        ListenerCoroutine(ctx, listen_socket);
+      [this, &listen_socket](async::Context ctx) -> async::Task<void> {
+        ASYNC_AWAIT(ListenerCoroutine(ctx, listen_socket));
       },
       {.name = "Listener UDS",
        .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
@@ -727,13 +746,13 @@ absl::Status Server::Run(int num_asio_threads) {
   if (publish_server_channels_) {
     // Start the channel directory coroutine.
     runtime_.SpawnOnStrand(
-        [this](async::Context ctx) { ChannelDirectoryCoroutine(ctx); },
+        [this](async::Context ctx) -> async::Task<void> { ASYNC_AWAIT(ChannelDirectoryCoroutine(ctx)); },
         {.name = "Channel directory",
          .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
 
     // Start the channel stats coroutine.
     runtime_.SpawnOnStrand(
-        [this](async::Context ctx) { StatisticsCoroutine(ctx); },
+        [this](async::Context ctx) -> async::Task<void> { ASYNC_AWAIT(StatisticsCoroutine(ctx)); },
         {.name = "Channel stats",
          .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
   }
@@ -744,19 +763,19 @@ absl::Status Server::Run(int num_asio_threads) {
       // listen for an incoming discovery connection.
       if (peer_address_.Valid()) {
         runtime_.SpawnOnStrand(
-            [this](async::Context ctx) { DiscoveryConnectorCoroutine(ctx); },
+            [this](async::Context ctx) -> async::Task<void> { ASYNC_AWAIT(DiscoveryConnectorCoroutine(ctx)); },
             {.name = "Discovery connector",
              .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
       } else {
         runtime_.SpawnOnStrand(
-            [this](async::Context ctx) { DiscoveryListenerCoroutine(ctx); },
+            [this](async::Context ctx) -> async::Task<void> { ASYNC_AWAIT(DiscoveryListenerCoroutine(ctx)); },
             {.name = "Discovery listener",
              .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
       }
     } else {
       // Start the discovery receiver coroutine.
       runtime_.SpawnOnStrand(
-          [this](async::Context ctx) { DiscoveryReceiverCoroutine(ctx); },
+          [this](async::Context ctx) -> async::Task<void> { ASYNC_AWAIT(DiscoveryReceiverCoroutine(ctx)); },
           {.name = "Discovery receiver",
            .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
     }
@@ -764,7 +783,7 @@ absl::Status Server::Run(int num_asio_threads) {
     // Start the gratuitous Advertiser coroutine.  This sends Advertise messages
     // every 5 seconds.
     runtime_.SpawnOnStrand(
-        [this](async::Context ctx) { GratuitousAdvertiseCoroutine(ctx); },
+        [this](async::Context ctx) -> async::Task<void> { ASYNC_AWAIT(GratuitousAdvertiseCoroutine(ctx)); },
         {.name = "Gratuitous advertiser",
          .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
 
@@ -793,12 +812,12 @@ absl::Status Server::Run(int num_asio_threads) {
   return absl::OkStatus();
 }
 
-absl::Status
+async::Task<absl::Status>
 Server::HandleIncomingConnection(async::Context ctx,
                                  async::UnixSocket &listen_socket) {
-  absl::StatusOr<async::UnixSocket> s = listen_socket.Accept(ctx);
+  absl::StatusOr<async::UnixSocket> s = ASYNC_AWAIT(listen_socket.Accept(ctx));
   if (!s.ok()) {
-    return s.status();
+    ASYNC_RETURN s.status();
   }
   client_handlers_.push_back(
       std::make_unique<ClientHandler>(this, std::move(*s)));
@@ -809,13 +828,17 @@ Server::HandleIncomingConnection(async::Context ctx,
   // invariant for all client-handler logic and the shared server state they
   // touch, without any mutexes, even when the io_context runs on many threads.
   runtime_.SpawnOnStrand(
-      [this, handler_ptr](async::Context handler_ctx) {
-        handler_ptr->Run(handler_ctx);
+      [this, handler_ptr](async::Context handler_ctx) -> async::Task<void> {
+        ASYNC_AWAIT(handler_ptr->Run(handler_ctx));
         CloseHandler(handler_ptr);
       },
       {.name = "Client handler",
        .interrupt_fd =
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
+           shutdown_trigger_fd_.GetPollFd().Fd(),
+#else
            wait_for_clients_ ? shutdown_trigger_fd_.GetPollFd().Fd() : -1,
+#endif
        // On Asio, do not force-cancel client handlers at shutdown: they must
        // stay alive to service the orderly disconnect of the server's
        // in-process clients (statistics / channel directory).  They exit on
@@ -823,7 +846,7 @@ Server::HandleIncomingConnection(async::Context ctx,
        // for them via the drain count before stopping.
        .cancellable = false});
 
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
 void Server::SetTunnelConfig(const TunnelConfig &config) {
@@ -837,19 +860,19 @@ void Server::SetMtlsCredentials(std::string cert_file, std::string key_file,
   mtls_ca_ = std::move(ca_file);
 }
 
-absl::Status Server::SecureConnection(async::Context ctx,
+async::Task<absl::Status> Server::SecureConnection(async::Context ctx,
                                       async::ByteStream &stream,
                                       bool server_role) {
   if (mtls_ == nullptr) {
-    return absl::OkStatus();
+    ASYNC_RETURN absl::OkStatus();
   }
-  absl::Status status = stream.HandshakeTls(mtls_, server_role, ctx,
-                                             std::chrono::seconds(5));
+  absl::Status status = ASYNC_AWAIT(stream.HandshakeTls(mtls_, server_role, ctx,
+                                             std::chrono::seconds(5)));
   if (!status.ok()) {
     logger_.Log(toolbelt::LogLevel::kWarning, "mTLS handshake failed: %s",
                 status.ToString().c_str());
   }
-  return status;
+  ASYNC_RETURN status;
 }
 
 } // namespace subspace

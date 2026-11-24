@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### C++20 Coroutine Backend (co20)
+- The server and client internals can run on C++20 stackless coroutines
+  instead of the stackful `co` library. Build with `--config=cpp20` (Bazel) or
+  `-DCMAKE_CXX_STANDARD=20` (CMake, where `SUBSPACE_CORO_BACKEND=auto` selects
+  it). The blocking client API and the wire protocol do not change. See
+  `docs/cpp20-coroutines.md`.
+- Every client method that can wait on the server has an `...Async` form that
+  returns `async::Task<T>` (for example `CreatePublisherAsync`,
+  `PublishMessageAsync`, `ReadMessageAsync`, `CloseAsync`). Code that runs on
+  the server's scheduler thread must use it, because a blocking client call
+  from a server coroutine deadlocks.
+- The reload callback type changed to `std::function<async::Task<bool>(Channel *)>`
+  and `Channel::CheckReload` is awaitable. Plugins and code that install reload
+  callbacks must match this under co20. The default build is unchanged.
+- `//client:alloc_test`, `//c_client:client_test`, `//rpc/client:client_test`,
+  `//rpc/server:server_test`, `//rpc/test:rpc_test` and `//shadow:shadow_test`
+  are skipped under `--config=cpp20`. They depend on the stackful `co` API or on
+  zero-allocation hot paths.
+
 ### Subscriber Queues Keep Per-Publisher Order
 - A subscriber with an explicit queue size could read a message that had
   overflowed its queue after newer messages from the same publisher. The

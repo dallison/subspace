@@ -23,7 +23,8 @@ public:
                 int publisher_id, int vchan_id, uint64_t session_id,
                 std::string type,
                 const PublisherOptions &options,
-                std::function<bool(Channel *)> reload, int user_id, int group_id)
+                std::function<async::Task<bool>(Channel *)> reload,
+                int user_id, int group_id)
       : ClientChannel(name, num_slots, subscriber_queue_size,
                       subscriber_queue_arena_size, channel_id, vchan_id,
                       std::move(session_id), std::move(type),
@@ -58,8 +59,8 @@ public:
   // triggerfd.
   void TriggerReliable() { trigger_.Trigger(); }
 
-  MessageSlot *FindFreeSlotUnreliable(int owner);
-  MessageSlot *FindFreeSlotReliable(int owner);
+  async::Task<MessageSlot *> FindFreeSlotUnreliable(int owner);
+  async::Task<MessageSlot *> FindFreeSlotReliable(int owner);
 
   // Picks the retired slot to recycle next, or -1 if the retired pool holds
   // no usable slot.  Takes the lowest-index slot unless oldest_first, which
@@ -68,7 +69,7 @@ public:
 
   void SetSlotToBiggestBuffer(MessageSlot *slot);
 
-  absl::Status CreateOrAttachBuffers(uint64_t slot_size);
+  async::Task<absl::Status> CreateOrAttachBuffers(uint64_t slot_size);
 
   void SetRetirementFd(toolbelt::FileDescriptor fd) {
     retirement_fd_ = std::move(fd);
@@ -161,22 +162,22 @@ private:
   // notify: set to true if we should notify the subscribers.
   //
   // Locks the CCB.
-  Channel::PublishedMessage
+  async::Task<Channel::PublishedMessage>
   ActivateSlotAndGetAnother(MessageSlot *slot, bool reliable,
                             bool is_activation, int owner, bool omit_prefix,
                             bool use_prefix_slot_id, bool for_tunnel = false,
                             bool acquire_next = true,
                             bool use_prefix_vchan_id = true);
 
-  Channel::PublishedMessage
+  async::Task<Channel::PublishedMessage>
   ActivateSlotAndGetAnother(bool reliable, bool is_activation,
                             bool omit_prefix, bool use_prefix_slot_id,
                             bool for_tunnel = false,
                             bool use_prefix_vchan_id = true) {
-    return ActivateSlotAndGetAnother(
+    ASYNC_RETURN ASYNC_AWAIT(ActivateSlotAndGetAnother(
         slot_, reliable, is_activation, publisher_id_, omit_prefix,
         use_prefix_slot_id, for_tunnel, /*acquire_next=*/true,
-        use_prefix_vchan_id);
+        use_prefix_vchan_id));
   }
 
   void ClearSubscribers() { subscribers_.clear(); }

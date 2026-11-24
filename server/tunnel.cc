@@ -93,66 +93,66 @@ void SetNoDelay(const async::StreamSocket &socket) {
 using Deadline = std::chrono::steady_clock::time_point;
 
 // Reads exactly `length` bytes, by `deadline` if there is one.
-absl::Status ReadFully(async::ByteStream &socket, void *buffer, size_t length,
+async::Task<absl::Status> ReadFully(async::ByteStream &socket, void *buffer, size_t length,
                        async::Context ctx,
                        std::optional<Deadline> deadline = std::nullopt) {
-  return socket.ReadFully(buffer, length, ctx, deadline);
+  ASYNC_RETURN ASYNC_AWAIT(socket.ReadFully(buffer, length, ctx, deadline));
 }
 
-absl::Status Skip(async::ByteStream &socket, size_t length,
+async::Task<absl::Status> Skip(async::ByteStream &socket, size_t length,
                   async::Context ctx,
                   std::optional<Deadline> deadline = std::nullopt) {
   std::vector<char> scratch(std::min<size_t>(length, 64 * 1024));
   while (length > 0) {
     size_t chunk = std::min(length, scratch.size());
     if (absl::Status s =
-            ReadFully(socket, scratch.data(), chunk, ctx, deadline);
+            ASYNC_AWAIT(ReadFully(socket, scratch.data(), chunk, ctx, deadline));
         !s.ok()) {
-      return s;
+      ASYNC_RETURN s;
     }
     length -= chunk;
   }
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
-absl::StatusOr<PacketHeader>
+async::Task<absl::StatusOr<PacketHeader>>
 ReadHeader(async::ByteStream &socket, async::Context ctx,
            std::optional<Deadline> deadline = std::nullopt) {
   std::array<std::byte, tunnel::kPacketHeaderSize> buffer{};
   if (absl::Status s =
-          ReadFully(socket, buffer.data(), buffer.size(), ctx, deadline);
+          ASYNC_AWAIT(ReadFully(socket, buffer.data(), buffer.size(), ctx, deadline));
       !s.ok()) {
-    return s;
+    ASYNC_RETURN s;
   }
-  return tunnel::DecodePacketHeader(buffer);
+  ASYNC_RETURN tunnel::DecodePacketHeader(buffer);
 }
 
-absl::Status SendAll(async::ByteStream &socket, const void *data, size_t length,
+async::Task<absl::Status> SendAll(async::ByteStream &socket, const void *data, size_t length,
                      async::Context ctx) {
-  return socket.SendAll(data, length, ctx);
+  ASYNC_RETURN ASYNC_AWAIT(socket.SendAll(data, length, ctx));
 }
 
-absl::Status SendPacket(async::ByteStream &socket, PacketType type,
+async::Task<absl::Status> SendPacket(async::ByteStream &socket, PacketType type,
                         uint64_t seq, const void *body, size_t body_size,
                         async::Context ctx) {
   absl::StatusOr<PacketHeader> header =
       tunnel::MakePacketHeader(type, body_size, seq, tunnel::RealtimeNowNs());
   if (!header.ok()) {
-    return header.status();
+    ASYNC_RETURN header.status();
   }
   std::vector<std::byte> packet(tunnel::kPacketHeaderSize + body_size);
   tunnel::EncodePacketHeader(*header, packet.data());
   if (body_size > 0) {
     memcpy(packet.data() + tunnel::kPacketHeaderSize, body, body_size);
   }
-  return SendAll(socket, packet.data(), packet.size(), ctx);
+  ASYNC_RETURN ASYNC_AWAIT(SendAll(socket, packet.data(), packet.size(), ctx));
 }
 
-absl::Status SendHandshake(async::ByteStream &socket,
+async::Task<absl::Status> SendHandshake(async::ByteStream &socket,
                            const Handshake &handshake, async::Context ctx) {
   std::string body = handshake.SerializeAsString();
-  return SendPacket(socket, PacketType::kHandshake, 0, body.data(),
-                    body.size(), ctx);
+  ASYNC_RETURN ASYNC_AWAIT(SendPacket(socket, PacketType::kHandshake, 0, body.data(),
+                    body.size(), ctx));
 }
 
 Handshake DiscoveryHandshake() {
@@ -275,9 +275,9 @@ int TunnelManager::ListenPort() const {
 }
 
 void TunnelManager::Spawn() {
-  SpawnOnStrand([this](async::Context ctx) { ListenerCoroutine(ctx); },
+  SpawnOnStrand([this](async::Context ctx) -> async::Task<void> { ASYNC_AWAIT(ListenerCoroutine(ctx)); },
                 "Tunnel listener");
-  SpawnOnStrand([this](async::Context ctx) { ScannerCoroutine(ctx); },
+  SpawnOnStrand([this](async::Context ctx) -> async::Task<void> { ASYNC_AWAIT(ScannerCoroutine(ctx)); },
                 "Tunnel scanner");
   for (const std::unique_ptr<Peer> &peer : peers_) {
     if (!peer->discovery) {
@@ -285,14 +285,14 @@ void TunnelManager::Spawn() {
     }
     Peer *p = peer.get();
     SpawnOnStrand(
-        [this, p](async::Context ctx) { DiscoverySenderCoroutine(ctx, p); },
+        [this, p](async::Context ctx) -> async::Task<void> { ASYNC_AWAIT(DiscoverySenderCoroutine(ctx, p)); },
         absl::StrFormat("Tunnel discovery to %s", p->config.name()));
   }
 }
 
 void TunnelManager::ChannelsChanged() { rescan_trigger_.Trigger(); }
 
-void TunnelManager::SpawnOnStrand(std::function<void(async::Context)> fn,
+void TunnelManager::SpawnOnStrand(async::CoroutineFunction fn,
                                   std::string name) {
   server_->runtime_.SpawnOnStrand(
       std::move(fn),
@@ -300,7 +300,7 @@ void TunnelManager::SpawnOnStrand(std::function<void(async::Context)> fn,
        .interrupt_fd = server_->shutdown_trigger_fd_.GetPollFd().Fd()});
 }
 
-void TunnelManager::SpawnOnNewStrand(std::function<void(async::Context)> fn,
+void TunnelManager::SpawnOnNewStrand(async::CoroutineFunction fn,
                                      std::string name) {
   server_->runtime_.SpawnOnNewStrand(
       std::move(fn),
@@ -308,9 +308,9 @@ void TunnelManager::SpawnOnNewStrand(std::function<void(async::Context)> fn,
        .interrupt_fd = server_->shutdown_trigger_fd_.GetPollFd().Fd()});
 }
 
-void TunnelManager::ListenerCoroutine(async::Context ctx) {
+async::Task<void> TunnelManager::ListenerCoroutine(async::Context ctx) {
   while (!server_->shutting_down_) {
-    absl::StatusOr<async::StreamSocket> socket = listener_.Accept(ctx);
+    absl::StatusOr<async::StreamSocket> socket = ASYNC_AWAIT(listener_.Accept(ctx));
     if (server_->shutting_down_) {
       break;
     }
@@ -318,7 +318,7 @@ void TunnelManager::ListenerCoroutine(async::Context ctx) {
       server_->logger_.Log(toolbelt::LogLevel::kError,
                            "Tunnel can't accept a connection: %s",
                            socket.status().ToString().c_str());
-      async::Sleep(ctx, std::chrono::seconds(1));
+      ASYNC_AWAIT(async::Sleep(ctx, std::chrono::seconds(1)));
       continue;
     }
     auto connection = std::make_shared<async::ByteStream>(std::move(*socket));
@@ -331,40 +331,40 @@ void TunnelManager::ListenerCoroutine(async::Context ctx) {
     SetNoDelay(connection->Socket());
     std::string peer = PeerAddress(connection->Socket());
     SpawnOnStrand(
-        [this, connection, peer](async::Context handshake_ctx) {
-          HandshakeCoroutine(handshake_ctx, connection, peer);
+        [this, connection, peer](async::Context handshake_ctx) -> async::Task<void> {
+          ASYNC_AWAIT(HandshakeCoroutine(handshake_ctx, connection, peer));
         },
         "Tunnel handshake from " + peer);
   }
   listener_.Close();
 }
 
-void TunnelManager::HandshakeCoroutine(
+async::Task<void> TunnelManager::HandshakeCoroutine(
     async::Context ctx, std::shared_ptr<async::ByteStream> socket,
     std::string peer) {
   if (server_->shutting_down_) {
-    return;
+    ASYNC_RETURN;
   }
   if (absl::Status s =
-          server_->SecureConnection(ctx, *socket, /*server_role=*/true);
+          ASYNC_AWAIT(server_->SecureConnection(ctx, *socket, /*server_role=*/true));
       !s.ok()) {
     server_->logger_.Log(toolbelt::LogLevel::kWarning,
                          "Tunnel mTLS handshake from %s failed: %s",
                          peer.c_str(), s.ToString().c_str());
-    return;
+    ASYNC_RETURN;
   }
   const Deadline deadline =
       std::chrono::steady_clock::now() + kHandshakeTimeout;
   absl::Status status;
   for (;;) {
-    absl::StatusOr<PacketHeader> header = ReadHeader(*socket, ctx, deadline);
+    absl::StatusOr<PacketHeader> header = ASYNC_AWAIT(ReadHeader(*socket, ctx, deadline));
     if (!header.ok()) {
       status = header.status();
       break;
     }
     if (header->type != PacketType::kHandshake) {
       // Nothing can be published before the handshake says where.
-      status = Skip(*socket, header->BodySize(), ctx, deadline);
+      status = ASYNC_AWAIT(Skip(*socket, header->BodySize(), ctx, deadline));
       if (!status.ok()) {
         break;
       }
@@ -377,7 +377,7 @@ void TunnelManager::HandshakeCoroutine(
       break;
     }
     std::string body(header->BodySize(), '\0');
-    status = ReadFully(*socket, body.data(), body.size(), ctx, deadline);
+    status = ASYNC_AWAIT(ReadFully(*socket, body.data(), body.size(), ctx, deadline));
     if (!status.ok()) {
       break;
     }
@@ -391,25 +391,25 @@ void TunnelManager::HandshakeCoroutine(
       break;
     }
     if (server_->shutting_down_) {
-      return;
+      ASYNC_RETURN;
     }
     if (handshake.topic_name() == tunnel::kDiscoveryChannelName &&
         !config_.disable_discovery()) {
-      DiscoveryReceiverLoop(ctx, *socket, handshake, peer);
-      return;
+      ASYNC_AWAIT(DiscoveryReceiverLoop(ctx, *socket, handshake, peer));
+      ASYNC_RETURN;
     }
     if (tunnel::IsInternalChannel(handshake.topic_name())) {
-      DiscardConnection(ctx, *socket, handshake.topic_name(), peer);
-      return;
+      ASYNC_AWAIT(DiscardConnection(ctx, *socket, handshake.topic_name(), peer));
+      ASYNC_RETURN;
     }
     IngressPlan plan = PlanIngress(handshake, peer);
     std::string name = "Tunnel ingress " + plan.topic + " from " + peer;
     SpawnOnNewStrand(
-        [this, socket, plan = std::move(plan)](async::Context ingress_ctx) {
-          IngressCoroutine(ingress_ctx, socket, plan);
+        [this, socket, plan = std::move(plan)](async::Context ingress_ctx) -> async::Task<void> {
+          ASYNC_AWAIT(IngressCoroutine(ingress_ctx, socket, plan));
         },
         std::move(name));
-    return;
+    ASYNC_RETURN;
   }
   socket->Close();
   if (absl::IsDeadlineExceeded(status)) {
@@ -505,28 +505,31 @@ TunnelManager::PlanIngress(const Handshake &handshake,
   return plan;
 }
 
-void TunnelManager::IngressCoroutine(
+async::Task<void> TunnelManager::IngressCoroutine(
     async::Context ctx, std::shared_ptr<async::ByteStream> socket,
     IngressPlan plan) {
   if (server_->shutting_down_) {
-    return;
+    ASYNC_RETURN;
   }
   const std::string &topic = plan.topic;
   Client client(ctx);
-  if (absl::Status s =
-          client.Init(server_->socket_name_, "tunnel ingress " + topic);
+  if (absl::Status s = SERVER_CLIENT_CALL(
+          (client.Init(server_->socket_name_, "tunnel ingress " + topic)),
+          client.InitAsync(server_->socket_name_, "tunnel ingress " + topic));
       !s.ok()) {
     server_->logger_.Log(toolbelt::LogLevel::kError,
                          "Tunnel can't connect to the server for %s: %s",
                          topic.c_str(), s.ToString().c_str());
-    return;
+    ASYNC_RETURN;
   }
-  absl::StatusOr<Publisher> pub = client.CreatePublisher(topic, plan.options);
+  absl::StatusOr<Publisher> pub = SERVER_CLIENT_CALL(
+      (client.CreatePublisher(topic, plan.options)),
+      client.CreatePublisherAsync(topic, plan.options));
   if (!pub.ok()) {
     server_->logger_.Log(toolbelt::LogLevel::kError,
                          "Tunnel can't publish %s for %s: %s", topic.c_str(),
                          plan.peer.c_str(), pub.status().ToString().c_str());
-    return;
+    ASYNC_RETURN;
   }
   if (pub->PrefixSize() != plan.wire_prefix_size) {
     server_->logger_.Log(toolbelt::LogLevel::kError,
@@ -534,7 +537,8 @@ void TunnelManager::IngressCoroutine(
                          "but the peer's is %d",
                          topic.c_str(), plan.peer.c_str(), pub->PrefixSize(),
                          plan.wire_prefix_size);
-    return;
+    SERVER_CLIENT_CLOSE(*pub);
+    ASYNC_RETURN;
   }
   server_->logger_.Log(toolbelt::LogLevel::kInfo,
                        "Tunnel receiving %s from %s", topic.c_str(),
@@ -543,7 +547,7 @@ void TunnelManager::IngressCoroutine(
   const size_t prefix_size = static_cast<size_t>(plan.wire_prefix_size);
   absl::Status status;
   while (!server_->shutting_down_) {
-    absl::StatusOr<PacketHeader> header = ReadHeader(*socket, ctx);
+    absl::StatusOr<PacketHeader> header = ASYNC_AWAIT(ReadHeader(*socket, ctx));
     if (!header.ok()) {
       status = header.status();
       break;
@@ -557,7 +561,7 @@ void TunnelManager::IngressCoroutine(
       if (header->type == PacketType::kData) {
         stats_.malformed_received++;
       }
-      status = Skip(*socket, body_size, ctx);
+      status = ASYNC_AWAIT(Skip(*socket, body_size, ctx));
       if (!status.ok()) {
         break;
       }
@@ -579,7 +583,7 @@ void TunnelManager::IngressCoroutine(
                              "too large for the channel",
                              payload_size, topic.c_str(), plan.peer.c_str());
       }
-      status = Skip(*socket, body_size, ctx);
+      status = ASYNC_AWAIT(Skip(*socket, body_size, ctx));
       if (!status.ok()) {
         break;
       }
@@ -588,12 +592,19 @@ void TunnelManager::IngressCoroutine(
 
     absl::StatusOr<void *> buffer;
     for (;;) {
-      buffer = pub->GetMessageBuffer(static_cast<SlotSizeType>(payload_size));
+      buffer = SERVER_CLIENT_CALL(
+          (pub->GetMessageBuffer(static_cast<SlotSizeType>(payload_size))),
+          pub->GetMessageBufferAsync(static_cast<SlotSizeType>(payload_size)));
       if (!buffer.ok() || *buffer != nullptr || server_->shutting_down_) {
         break;
       }
       // A reliable publisher has to wait for its subscribers to free a slot.
-      if (absl::Status s = pub->Wait(ctx); !s.ok()) {
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
+      absl::Status s = ASYNC_AWAIT(pub->WaitAsync());
+#else
+      absl::Status s = pub->Wait(ctx);
+#endif
+      if (!s.ok()) {
         buffer = s;
         break;
       }
@@ -609,9 +620,9 @@ void TunnelManager::IngressCoroutine(
       break;
     }
     std::byte *prefix_bytes = reinterpret_cast<std::byte *>(pub->Prefix());
-    status = ReadFully(*socket, prefix_bytes, prefix_size, ctx);
+    status = ASYNC_AWAIT(ReadFully(*socket, prefix_bytes, prefix_size, ctx));
     if (status.ok()) {
-      status = ReadFully(*socket, *buffer, payload_size, ctx);
+      status = ASYNC_AWAIT(ReadFully(*socket, *buffer, payload_size, ctx));
     }
     if (!status.ok()) {
       pub->CancelPublish();
@@ -652,16 +663,21 @@ void TunnelManager::IngressCoroutine(
     // channel ID stays in the prefix, where the checksum does cover it, and
     // the message goes to this publisher's virtual channel.
     prefix->SetIsBridged();
-    absl::StatusOr<const Message> published =
-        pub->PublishMessageWithPrefix(static_cast<int64_t>(published_size),
-                                      /*use_slot_id_from_prefix=*/false,
-                                      /*use_vchan_id_from_prefix=*/false);
+    absl::StatusOr<const Message> published = SERVER_CLIENT_CALL(
+        (pub->PublishMessageWithPrefix(static_cast<int64_t>(published_size),
+                                       /*use_slot_id_from_prefix=*/false,
+                                       /*use_vchan_id_from_prefix=*/false)),
+        pub->PublishMessageWithPrefixAsync(
+            static_cast<int64_t>(published_size),
+            /*use_slot_id_from_prefix=*/false,
+            /*use_vchan_id_from_prefix=*/false));
     if (!published.ok()) {
       status = published.status();
       break;
     }
     stats_.messages_received++;
   }
+  SERVER_CLIENT_CLOSE(*pub);
   if (!server_->shutting_down_ && !IsPeerClosed(status)) {
     server_->logger_.Log(toolbelt::LogLevel::kWarning,
                          "Tunnel stopped receiving %s from %s: %s",
@@ -674,20 +690,21 @@ void TunnelManager::IngressCoroutine(
   }
 }
 
-void TunnelManager::EgressCoroutine(async::Context ctx, EgressRoute route) {
+async::Task<void> TunnelManager::EgressCoroutine(async::Context ctx, EgressRoute route) {
   if (server_->shutting_down_) {
-    return;
+    ASYNC_RETURN;
   }
   const std::string &topic = route.topic;
   const std::string &peer_name = route.peer.name();
   Client client(ctx);
-  if (absl::Status s =
-          client.Init(server_->socket_name_, "tunnel egress " + topic);
+  if (absl::Status s = SERVER_CLIENT_CALL(
+          (client.Init(server_->socket_name_, "tunnel egress " + topic)),
+          client.InitAsync(server_->socket_name_, "tunnel egress " + topic));
       !s.ok()) {
     server_->logger_.Log(toolbelt::LogLevel::kError,
                          "Tunnel can't connect to the server for %s: %s",
                          topic.c_str(), s.ToString().c_str());
-    return;
+    ASYNC_RETURN;
   }
   std::string last_failure;
   while (!server_->shutting_down_) {
@@ -698,13 +715,13 @@ void TunnelManager::EgressCoroutine(async::Context ctx, EgressRoute route) {
         LogFailure(last_failure,
                    absl::StrFormat("Tunnel can't send %s to %s: %s", topic,
                                    peer_name, address.status().ToString()));
-        async::Sleep(ctx, kReconnectInterval);
+        ASYNC_AWAIT(async::Sleep(ctx, kReconnectInterval));
         continue;
       }
       route.address = *address;
     }
     absl::StatusOr<async::StreamSocket> socket =
-        async::ConnectStream(route.address, kConnectTimeout, ctx);
+        ASYNC_AWAIT(async::ConnectStream(route.address, kConnectTimeout, ctx));
     if (server_->shutting_down_) {
       break;
     }
@@ -712,21 +729,21 @@ void TunnelManager::EgressCoroutine(async::Context ctx, EgressRoute route) {
       LogFailure(last_failure,
                  absl::StrFormat("Tunnel can't connect to %s for %s: %s",
                                  peer_name, topic, socket.status().ToString()));
-      async::Sleep(ctx, kReconnectInterval);
+      ASYNC_AWAIT(async::Sleep(ctx, kReconnectInterval));
       continue;
     }
     async::ByteStream stream(std::move(*socket));
     SetNoDelay(stream.Socket());
     if (absl::Status secure =
-            server_->SecureConnection(ctx, stream, /*server_role=*/false);
+            ASYNC_AWAIT(server_->SecureConnection(ctx, stream, /*server_role=*/false));
         !secure.ok()) {
       LogFailure(last_failure,
                  absl::StrFormat("Tunnel mTLS handshake to %s for %s failed: %s",
                                  peer_name, topic, secure.ToString()));
-      async::Sleep(ctx, kReconnectInterval);
+      ASYNC_AWAIT(async::Sleep(ctx, kReconnectInterval));
       continue;
     }
-    absl::Status status = ForwardChannel(ctx, client, stream, route);
+    absl::Status status = ASYNC_AWAIT(ForwardChannel(ctx, client, stream, route));
     stream.Close();
     if (server_->shutting_down_) {
       break;
@@ -734,7 +751,7 @@ void TunnelManager::EgressCoroutine(async::Context ctx, EgressRoute route) {
     LogFailure(last_failure,
                absl::StrFormat("Tunnel stopped sending %s to %s: %s", topic,
                                peer_name, status.ToString()));
-    async::Sleep(ctx, kReconnectInterval);
+    ASYNC_AWAIT(async::Sleep(ctx, kReconnectInterval));
   }
 }
 
@@ -746,7 +763,7 @@ void TunnelManager::LogFailure(std::string &last_failure,
   last_failure = std::move(failure);
 }
 
-absl::Status TunnelManager::ForwardChannel(async::Context ctx, Client &client,
+async::Task<absl::Status> TunnelManager::ForwardChannel(async::Context ctx, Client &client,
                                            async::ByteStream &socket,
                                            const EgressRoute &route) {
   const LocalPublication &publication = route.publication;
@@ -755,11 +772,22 @@ absl::Status TunnelManager::ForwardChannel(async::Context ctx, Client &client,
   if (!publication.mux.empty()) {
     options.SetMux(publication.mux).SetVchanId(publication.vchan_id);
   }
-  absl::StatusOr<Subscriber> sub = client.CreateSubscriber(route.topic, options);
+  absl::StatusOr<Subscriber> sub = SERVER_CLIENT_CALL(
+      (client.CreateSubscriber(route.topic, options)),
+      client.CreateSubscriberAsync(route.topic, options));
   if (!sub.ok()) {
-    return sub.status();
+    ASYNC_RETURN sub.status();
   }
+  absl::Status status =
+      ASYNC_AWAIT(ForwardSubscriber(ctx, &*sub, socket, route));
+  SERVER_CLIENT_CLOSE(*sub);
+  ASYNC_RETURN status;
+}
 
+async::Task<absl::Status> TunnelManager::ForwardSubscriber(
+    async::Context ctx, Subscriber *sub, async::ByteStream &socket,
+    const EgressRoute &route) {
+  const LocalPublication &publication = route.publication;
   Handshake handshake;
   handshake.set_topic_name(route.topic);
   handshake.set_channel_type(sub->Type());
@@ -774,8 +802,8 @@ absl::Status TunnelManager::ForwardChannel(async::Context ctx, Client &client,
   transport->set_vchan_id(publication.mux.empty() ? -1 : publication.vchan_id);
   transport->set_checksum_size(sub->ChecksumSize());
   transport->set_metadata_size(sub->MetadataSize());
-  if (absl::Status s = SendHandshake(socket, handshake, ctx); !s.ok()) {
-    return s;
+  if (absl::Status s = ASYNC_AWAIT(SendHandshake(socket, handshake, ctx)); !s.ok()) {
+    ASYNC_RETURN s;
   }
   server_->logger_.Log(toolbelt::LogLevel::kInfo, "Tunnel sending %s to %s",
                        route.topic.c_str(), route.peer.name().c_str());
@@ -785,29 +813,34 @@ absl::Status TunnelManager::ForwardChannel(async::Context ctx, Client &client,
   uint64_t seq = 0;
   std::vector<std::byte> packet;
   for (;;) {
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
+    absl::StatusOr<int> fd = ASYNC_AWAIT(sub->WaitAsync(socket_fd));
+#else
     absl::StatusOr<int> fd = sub->Wait(socket_fd, ctx);
+#endif
     if (server_->shutting_down_) {
-      return absl::OkStatus();
+      ASYNC_RETURN absl::OkStatus();
     }
     if (!fd.ok()) {
-      return fd.status();
+      ASYNC_RETURN fd.status();
     }
     if (*fd == socket_fd.Fd()) {
       // Peers never send on this connection, so this is a close.
       char byte;
-      absl::StatusOr<ssize_t> n = socket.Receive(&byte, 1, ctx);
+      absl::StatusOr<ssize_t> n = ASYNC_AWAIT(socket.Receive(&byte, 1, ctx));
       if (!n.ok()) {
-        return n.status();
+        ASYNC_RETURN n.status();
       }
       if (*n <= 0) {
-        return PeerClosed();
+        ASYNC_RETURN PeerClosed();
       }
       continue;
     }
     for (;;) {
-      absl::StatusOr<Message> msg = sub->ReadMessage();
+      absl::StatusOr<Message> msg = SERVER_CLIENT_CALL(
+          (sub->ReadMessage()), sub->ReadMessageAsync());
       if (!msg.ok()) {
-        return msg.status();
+        ASYNC_RETURN msg.status();
       }
       if (msg->length == 0) {
         break;
@@ -820,7 +853,7 @@ absl::Status TunnelManager::ForwardChannel(async::Context ctx, Client &client,
         continue;
       }
       if (sub->PrefixSize() != prefix_size) {
-        return absl::FailedPreconditionError("the channel's prefix changed");
+        ASYNC_RETURN absl::FailedPreconditionError("the channel's prefix changed");
       }
       Server::EgressPluginResult egress = server_->ApplyEgressPlugins(
           route.topic, msg->buffer, static_cast<size_t>(msg->length));
@@ -870,14 +903,14 @@ absl::Status TunnelManager::ForwardChannel(async::Context ctx, Client &client,
       if (coalesce) {
         memcpy(packet_prefix + prefix_size, payload, payload_length);
       }
-      if (absl::Status s = SendAll(socket, packet.data(), packet.size(), ctx);
+      if (absl::Status s = ASYNC_AWAIT(SendAll(socket, packet.data(), packet.size(), ctx));
           !s.ok()) {
-        return s;
+        ASYNC_RETURN s;
       }
       if (!coalesce) {
-        if (absl::Status s = SendAll(socket, payload, payload_length, ctx);
+        if (absl::Status s = ASYNC_AWAIT(SendAll(socket, payload, payload_length, ctx));
             !s.ok()) {
-          return s;
+          ASYNC_RETURN s;
         }
       }
       seq++;
@@ -886,11 +919,11 @@ absl::Status TunnelManager::ForwardChannel(async::Context ctx, Client &client,
   }
 }
 
-void TunnelManager::ScannerCoroutine(async::Context ctx) {
+async::Task<void> TunnelManager::ScannerCoroutine(async::Context ctx) {
   Rescan();
   while (!server_->shutting_down_) {
     absl::Status status =
-        async::WaitReadable(ctx, rescan_trigger_.GetPollFd().Fd());
+        ASYNC_AWAIT(async::WaitReadable(ctx, rescan_trigger_.GetPollFd().Fd()));
     if (server_->shutting_down_) {
       break;
     }
@@ -898,7 +931,7 @@ void TunnelManager::ScannerCoroutine(async::Context ctx) {
       server_->logger_.Log(toolbelt::LogLevel::kError,
                            "Tunnel channel scanner: %s",
                            status.ToString().c_str());
-      async::Sleep(ctx, std::chrono::seconds(1));
+      ASYNC_AWAIT(async::Sleep(ctx, std::chrono::seconds(1)));
       continue;
     }
     rescan_trigger_.Clear();
@@ -1006,8 +1039,8 @@ void TunnelManager::EnsureRoute(const std::string &topic, Peer &peer) {
                     .address = peer.address};
   std::string name = "Tunnel egress " + topic + " to " + peer.config.name();
   SpawnOnNewStrand(
-      [this, route = std::move(route)](async::Context ctx) {
-        EgressCoroutine(ctx, route);
+      [this, route = std::move(route)](async::Context ctx) -> async::Task<void> {
+        ASYNC_AWAIT(EgressCoroutine(ctx, route));
       },
       std::move(name));
 }
@@ -1040,15 +1073,15 @@ TunnelManager::BuildDiscoveryMessage(const Peer &peer) const {
   return msg;
 }
 
-void TunnelManager::WaitToReconnect(async::Context ctx, Peer &peer) {
-  if (async::WaitReadable(ctx, peer.discovery_trigger.GetPollFd().Fd(),
-                          kReconnectInterval)
+async::Task<void> TunnelManager::WaitToReconnect(async::Context ctx, Peer &peer) {
+  if (ASYNC_AWAIT(async::WaitReadable(ctx, peer.discovery_trigger.GetPollFd().Fd(),
+                          kReconnectInterval))
           .ok()) {
     peer.discovery_trigger.Clear();
   }
 }
 
-void TunnelManager::DiscoverySenderCoroutine(async::Context ctx, Peer *peer) {
+async::Task<void> TunnelManager::DiscoverySenderCoroutine(async::Context ctx, Peer *peer) {
   const std::string &name = peer->config.name();
   std::string last_failure;
   while (!server_->shutting_down_) {
@@ -1059,13 +1092,13 @@ void TunnelManager::DiscoverySenderCoroutine(async::Context ctx, Peer *peer) {
         LogFailure(last_failure,
                    absl::StrFormat("Tunnel can't reach peer %s: %s", name,
                                    address.status().ToString()));
-        WaitToReconnect(ctx, *peer);
+        ASYNC_AWAIT(WaitToReconnect(ctx, *peer));
         continue;
       }
       peer->address = *address;
     }
     absl::StatusOr<async::StreamSocket> socket =
-        async::ConnectStream(peer->address, kConnectTimeout, ctx);
+        ASYNC_AWAIT(async::ConnectStream(peer->address, kConnectTimeout, ctx));
     if (server_->shutting_down_) {
       break;
     }
@@ -1073,21 +1106,21 @@ void TunnelManager::DiscoverySenderCoroutine(async::Context ctx, Peer *peer) {
       LogFailure(last_failure,
                  absl::StrFormat("Tunnel can't reach peer %s: %s", name,
                                  socket.status().ToString()));
-      WaitToReconnect(ctx, *peer);
+      ASYNC_AWAIT(WaitToReconnect(ctx, *peer));
       continue;
     }
     async::ByteStream stream(std::move(*socket));
     SetNoDelay(stream.Socket());
     if (absl::Status secure =
-            server_->SecureConnection(ctx, stream, /*server_role=*/false);
+            ASYNC_AWAIT(server_->SecureConnection(ctx, stream, /*server_role=*/false));
         !secure.ok()) {
       LogFailure(last_failure,
                  absl::StrFormat("Tunnel mTLS handshake to %s failed: %s", name,
                                  secure.ToString()));
-      WaitToReconnect(ctx, *peer);
+      ASYNC_AWAIT(WaitToReconnect(ctx, *peer));
       continue;
     }
-    absl::Status status = RunDiscoveryConnection(ctx, stream, *peer);
+    absl::Status status = ASYNC_AWAIT(RunDiscoveryConnection(ctx, stream, *peer));
     stream.Close();
     if (server_->shutting_down_) {
       break;
@@ -1095,16 +1128,16 @@ void TunnelManager::DiscoverySenderCoroutine(async::Context ctx, Peer *peer) {
     LogFailure(last_failure,
                absl::StrFormat("Tunnel discovery connection to %s closed: %s",
                                name, status.ToString()));
-    WaitToReconnect(ctx, *peer);
+    ASYNC_AWAIT(WaitToReconnect(ctx, *peer));
   }
 }
 
-absl::Status TunnelManager::RunDiscoveryConnection(async::Context ctx,
+async::Task<absl::Status> TunnelManager::RunDiscoveryConnection(async::Context ctx,
                                                    async::ByteStream &socket,
                                                    Peer &peer) {
-  if (absl::Status s = SendHandshake(socket, DiscoveryHandshake(), ctx);
+  if (absl::Status s = ASYNC_AWAIT(SendHandshake(socket, DiscoveryHandshake(), ctx));
       !s.ok()) {
-    return s;
+    ASYNC_RETURN s;
   }
   server_->logger_.Log(toolbelt::LogLevel::kInfo,
                        "Tunnel discovery connected to %s",
@@ -1119,8 +1152,8 @@ absl::Status TunnelManager::RunDiscoveryConnection(async::Context ctx,
       // Clear first: a change made while sending triggers another send.
       peer.discovery_trigger.Clear();
       peer.sent_generation = discovery_generation_;
-      if (absl::Status s = SendDiscovery(ctx, socket, peer, ++seq); !s.ok()) {
-        return s;
+      if (absl::Status s = ASYNC_AWAIT(SendDiscovery(ctx, socket, peer, ++seq)); !s.ok()) {
+        ASYNC_RETURN s;
       }
       next_refresh = std::chrono::steady_clock::now() + refresh_interval_;
       send = false;
@@ -1131,17 +1164,17 @@ absl::Status TunnelManager::RunDiscoveryConnection(async::Context ctx,
           next_refresh - std::chrono::steady_clock::now(),
           std::chrono::milliseconds(1));
     }
-    absl::StatusOr<int> fd = async::WaitEither(ctx, trigger_fd, socket_fd,
-                                               timeout);
+    absl::StatusOr<int> fd = ASYNC_AWAIT(async::WaitEither(ctx, trigger_fd, socket_fd,
+                                               timeout));
     if (server_->shutting_down_) {
-      return absl::OkStatus();
+      ASYNC_RETURN absl::OkStatus();
     }
     if (absl::IsDeadlineExceeded(fd.status())) {
       send = true;
       continue;
     }
     if (!fd.ok()) {
-      return fd.status();
+      ASYNC_RETURN fd.status();
     }
     if (*fd == trigger_fd) {
       peer.discovery_trigger.Clear();
@@ -1150,17 +1183,17 @@ absl::Status TunnelManager::RunDiscoveryConnection(async::Context ctx,
     }
     // Peers never send on this connection, so this is a close.
     char byte;
-    absl::StatusOr<ssize_t> n = socket.Receive(&byte, 1, ctx);
+    absl::StatusOr<ssize_t> n = ASYNC_AWAIT(socket.Receive(&byte, 1, ctx));
     if (!n.ok()) {
-      return n.status();
+      ASYNC_RETURN n.status();
     }
     if (*n <= 0) {
-      return PeerClosed();
+      ASYNC_RETURN PeerClosed();
     }
   }
 }
 
-absl::Status TunnelManager::SendDiscovery(async::Context ctx,
+async::Task<absl::Status> TunnelManager::SendDiscovery(async::Context ctx,
                                           async::ByteStream &socket,
                                           const Peer &peer, uint64_t seq) {
   // Never empty, because the device name is required.
@@ -1176,16 +1209,16 @@ absl::Status TunnelManager::SendDiscovery(async::Context ctx,
   std::vector<std::byte> body(prefix_size + payload.size());
   memcpy(body.data(), &prefix, sizeof(prefix));
   memcpy(body.data() + prefix_size, payload.data(), payload.size());
-  if (absl::Status s = SendPacket(socket, PacketType::kData, seq, body.data(),
-                                  body.size(), ctx);
+  if (absl::Status s = ASYNC_AWAIT(SendPacket(socket, PacketType::kData, seq, body.data(),
+                                  body.size(), ctx));
       !s.ok()) {
-    return s;
+    ASYNC_RETURN s;
   }
   stats_.discovery_sent++;
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
-void TunnelManager::DiscoveryReceiverLoop(async::Context ctx,
+async::Task<void> TunnelManager::DiscoveryReceiverLoop(async::Context ctx,
                                           async::ByteStream &socket,
                                           const Handshake &handshake,
                                           const std::string &peer) {
@@ -1193,14 +1226,14 @@ void TunnelManager::DiscoveryReceiverLoop(async::Context ctx,
       static_cast<size_t>(tunnel::WirePrefixSize(handshake.subspace()));
   absl::Status status;
   while (!server_->shutting_down_) {
-    absl::StatusOr<PacketHeader> header = ReadHeader(socket, ctx);
+    absl::StatusOr<PacketHeader> header = ASYNC_AWAIT(ReadHeader(socket, ctx));
     if (!header.ok()) {
       status = header.status();
       break;
     }
     const size_t body_size = header->BodySize();
     if (header->type != PacketType::kData || body_size <= prefix_size) {
-      if (status = Skip(socket, body_size, ctx); !status.ok()) {
+      if (status = ASYNC_AWAIT(Skip(socket, body_size, ctx)); !status.ok()) {
         break;
       }
       continue;
@@ -1211,7 +1244,7 @@ void TunnelManager::DiscoveryReceiverLoop(async::Context ctx,
       break;
     }
     std::vector<std::byte> body(body_size);
-    if (status = ReadFully(socket, body.data(), body.size(), ctx);
+    if (status = ASYNC_AWAIT(ReadFully(socket, body.data(), body.size(), ctx));
         !status.ok()) {
       break;
     }
@@ -1239,7 +1272,7 @@ void TunnelManager::DiscoveryReceiverLoop(async::Context ctx,
   }
 }
 
-void TunnelManager::DiscardConnection(async::Context ctx,
+async::Task<void> TunnelManager::DiscardConnection(async::Context ctx,
                                       async::ByteStream &socket,
                                       const std::string &topic,
                                       const std::string &peer) {
@@ -1249,9 +1282,9 @@ void TunnelManager::DiscardConnection(async::Context ctx,
   std::vector<char> scratch(64 * 1024);
   while (!server_->shutting_down_) {
     absl::StatusOr<ssize_t> n =
-        socket.Receive(scratch.data(), scratch.size(), ctx);
+        ASYNC_AWAIT(socket.Receive(scratch.data(), scratch.size(), ctx));
     if (!n.ok() || *n <= 0) {
-      return;
+      ASYNC_RETURN;
     }
   }
 }

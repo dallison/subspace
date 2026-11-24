@@ -16,6 +16,7 @@
 #include "co/coroutine.h"
 #include "common/async/context.h"
 #include "common/async/runtime.h"
+#include "common/async/task.h"
 #include "common/async/byte_stream.h"
 #include "common/async/socket.h"
 #include "common/async/wait.h"
@@ -34,6 +35,21 @@
 #include <cstdio>
 #include <memory>
 #include <vector>
+
+// The server's in-process clients run on the server's own scheduler, so a
+// blocking client call from a server coroutine would stop the server from
+// answering it.  Under co20 these calls suspend the coroutine through the
+// client's Async API instead.  The blocking form is kept for the other
+// backends, and is the first argument so its commas don't split the macro.
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
+#define SERVER_CLIENT_CALL(blocking, ...) ASYNC_AWAIT(__VA_ARGS__)
+// A publisher or subscriber destructor blocks on the server, so it must be
+// closed with its Async API first.  Other backends close in the destructor.
+#define SERVER_CLIENT_CLOSE(handle) ((void)ASYNC_AWAIT((handle).CloseAsync()))
+#else
+#define SERVER_CLIENT_CALL(blocking, ...) (blocking)
+#define SERVER_CLIENT_CLOSE(handle) ((void)0)
+#endif
 
 namespace subspace {
 
@@ -66,15 +82,17 @@ public:
   // it is shutting down.  It will write 8 bytes to it so it can be
   // either a pipe or an eventfd.  If notify_fd is -1 then it won't be used.
   // The values are written in host byte order.
-  Server(co::CoroutineScheduler &scheduler, const std::string &socket_name,
+#if SUBSPACE_CORO_BACKEND != SUBSPACE_CORO_BACKEND_ASIO
+  Server(async::RuntimeEngine &scheduler, const std::string &socket_name,
          const std::string &interface, int disc_port, int peer_port, bool local,
          int notify_fd = -1, int initial_ordinal = 1,
          bool wait_for_clients = false, bool publish_server_channels = true);
   // This constructor can be used when you have a single peer server to talk to.
-  Server(co::CoroutineScheduler &scheduler, const std::string &socket_name,
+  Server(async::RuntimeEngine &scheduler, const std::string &socket_name,
          const std::string &interface, const toolbelt::InetAddress &peer,
          int disc_port, int peer_port, bool local, int notify_fd = -1,
          int initial_ordinal = 1, bool wait_for_clients = false, bool publish_server_channels = true);
+#endif
 
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
   // Asio-backed server.  These mirror the co::CoroutineScheduler constructors
@@ -217,15 +235,15 @@ public:
     checksum_callback_ = std::move(callback);
   }
 
-#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO
-  virtual co::CoroutineScheduler &GetScheduler() { return runtime_.scheduler(); }
+#if SUBSPACE_CORO_BACKEND != SUBSPACE_CORO_BACKEND_ASIO
+  virtual async::RuntimeEngine &GetScheduler() { return runtime_.scheduler(); }
 #endif
 
   // Backend-agnostic way for plugins (and internal code) to spawn a coroutine
   // on the server's runtime.  The spawned function receives the active
   // async::Context (a co::Coroutine* under the co backend, a yield_context
   // under Asio) which it threads into client/socket/wait calls.
-  void SpawnCoroutine(std::function<void(async::Context)> fn,
+  void SpawnCoroutine(async::CoroutineFunction fn,
                       async::SpawnOptions opts = {}) {
     runtime_.Spawn(std::move(fn), std::move(opts));
   }
@@ -243,7 +261,7 @@ public:
 
   size_t GetNumChannels() const { return channels_.size(); }
 
-  absl::Status HandleIncomingConnection(async::Context ctx,
+  async::Task<absl::Status> HandleIncomingConnection(async::Context ctx,
                                         async::UnixSocket &listen_socket);
 
   // Create a channel in both process and shared memory.  For a placeholder
@@ -349,11 +367,11 @@ private:
   // Restarts coroutines whose subscribers were recovered from the shadow.
   void StartRecoveredTelemetryCoroutines();
   // Owns the internal publisher and emits at most one batch per second.
-  void TelemetryCoroutine(async::Context ctx, std::string target_name,
+  async::Task<void> TelemetryCoroutine(async::Context ctx, std::string target_name,
                           std::shared_ptr<TelemetryState> state);
-  void PublishTelemetryBatch(const std::string &target_name,
-                             const std::shared_ptr<TelemetryState> &state,
-                             Publisher &publisher);
+  async::Task<void> PublishTelemetryBatch(
+      const std::string &target_name,
+      const std::shared_ptr<TelemetryState> &state, Publisher &publisher);
   void ReconcileTelemetryParticipants(const std::string &target_name,
                                       TelemetryState &state);
   void QueueTelemetrySnapshot(const std::string &target_name,
@@ -364,14 +382,14 @@ private:
   void CloseHandler(ClientHandler *handler);
   void NotifyViaFd(int64_t val);
   void CreateShutdownTrigger();
-  void ListenerCoroutine(async::Context ctx, async::UnixSocket &listen_socket);
-  void ChannelDirectoryCoroutine(async::Context ctx);
+  async::Task<void> ListenerCoroutine(async::Context ctx, async::UnixSocket &listen_socket);
+  async::Task<void> ChannelDirectoryCoroutine(async::Context ctx);
   void SendChannelDirectory();
-  void StatisticsCoroutine(async::Context ctx);
-  void DiscoveryReceiverCoroutine(async::Context ctx);
-  void DiscoveryListenerCoroutine(async::Context ctx);
-  void DiscoveryConnectorCoroutine(async::Context ctx);
-  void DiscoveryConnectionReaderLoop(async::Context ctx,
+  async::Task<void> StatisticsCoroutine(async::Context ctx);
+  async::Task<void> DiscoveryReceiverCoroutine(async::Context ctx);
+  async::Task<void> DiscoveryListenerCoroutine(async::Context ctx);
+  async::Task<void> DiscoveryConnectorCoroutine(async::Context ctx);
+  async::Task<void> DiscoveryConnectionReaderLoop(async::Context ctx,
                                      std::shared_ptr<DiscoveryConnection> conn);
   void AddDiscoveryConnection(std::shared_ptr<DiscoveryConnection> conn);
   void
@@ -383,13 +401,13 @@ private:
   // coroutines can't interleave on a connection (the Context is ignored).  On
   // the Asio backend the single-threaded io_context can't block, so the Context
   // drives cooperative non-blocking sends.
-  absl::Status TransmitDiscovery(const Discovery &disc,
+  async::Task<absl::Status> TransmitDiscovery(const Discovery &disc,
                                  const toolbelt::InetAddress &udp_dest,
                                  async::Context ctx);
   // The address bridge listeners bind to: the any-address when a bridge
   // advertise address is configured, otherwise the local interface address.
   toolbelt::SocketAddress BridgeBindBase() const;
-  void PublisherCoroutine(async::Context ctx);
+  async::Task<void> PublisherCoroutine(async::Context ctx);
   void SendQuery(const std::string &channel_name);
   void SendAdvertise(const std::string &channel_name, bool reliable);
   // Immutable snapshot of the channel state a bridge transmitter needs.  It is
@@ -407,28 +425,28 @@ private:
     bool split_buffers_over_bridge = false;
   };
   struct BridgeRetirementState;
-  void BridgeTransmitterCoroutine(async::Context ctx, BridgeChannelInfo info,
+  async::Task<void> BridgeTransmitterCoroutine(async::Context ctx, BridgeChannelInfo info,
                                   bool pub_reliable, bool sub_reliable,
                                   toolbelt::SocketAddress subscriber,
                                   toolbelt::InetAddress sender,
                                   bool notify_retirement);
-  void BridgeReceiverCoroutine(async::Context ctx, std::string channel_name,
+  async::Task<void> BridgeReceiverCoroutine(async::Context ctx, std::string channel_name,
                                bool sub_reliable,
                                bool split_buffers_over_bridge,
                                toolbelt::InetAddress publisher,
                                bool local_has_split_options,
                                bool local_use_split_buffers);
-  void RetirementCoroutine(
+  async::Task<void> RetirementCoroutine(
       async::Context ctx, const std::string &channel_name,
       toolbelt::FileDescriptor &&retirement_fd,
       std::shared_ptr<async::ByteStream> retirement_transmitter);
 
   // No-op unless SetMtlsCredentials was loaded.  `server_role` is true on
   // the side that accepted the connection.
-  absl::Status SecureConnection(async::Context ctx, async::ByteStream &stream,
+  async::Task<absl::Status> SecureConnection(async::Context ctx, async::ByteStream &stream,
                                 bool server_role);
 
-  void RetirementReceiverCoroutine(
+  async::Task<void> RetirementReceiverCoroutine(
       async::Context ctx,
       std::shared_ptr<async::StreamSocket> retirement_listener,
       std::shared_ptr<BridgeRetirementState> retirement_state);
@@ -444,11 +462,11 @@ private:
   void IncomingSubscribe(const Discovery::Subscribe &subscribe,
                          const toolbelt::InetAddress &sender,
                          const std::string &server_id);
-  void GratuitousAdvertiseCoroutine(async::Context ctx);
+  async::Task<void> GratuitousAdvertiseCoroutine(async::Context ctx);
   absl::Status BindBridgeListener(async::StreamSocket &listener);
   absl::Status RegisterPlugin(const std::string &name, void *handle,
                               std::unique_ptr<PluginInterface> interface);
-  absl::Status SendSubscribeMessage(const std::string &channel_name,
+  async::Task<absl::Status> SendSubscribeMessage(const std::string &channel_name,
                                     bool reliable,
                                     toolbelt::InetAddress publisher,
                                     async::StreamSocket &receiver_listener,

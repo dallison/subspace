@@ -232,8 +232,8 @@ void Server::StartTelemetryCoroutine(
   }
   state->coroutine_running = true;
   runtime_.SpawnOnStrand(
-      [this, target_name, state](async::Context ctx) {
-        TelemetryCoroutine(ctx, target_name, state);
+      [this, target_name, state](async::Context ctx) -> async::Task<void> {
+        ASYNC_AWAIT(TelemetryCoroutine(ctx, target_name, state));
       },
       {.name = absl::StrFormat("Channel telemetry for %s", target_name),
        .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
@@ -248,25 +248,26 @@ void Server::StartRecoveredTelemetryCoroutines() {
   }
 }
 
-void Server::TelemetryCoroutine(async::Context ctx, std::string target_name,
+async::Task<void> Server::TelemetryCoroutine(async::Context ctx, std::string target_name,
                                 std::shared_ptr<TelemetryState> state) {
   Client client(ctx);
-  absl::Status status =
-      client.Init(socket_name_, "subspace-telemetry-internal");
+  absl::Status status = SERVER_CLIENT_CALL(
+      (client.Init(socket_name_, "subspace-telemetry-internal")),
+      client.InitAsync(socket_name_, "subspace-telemetry-internal"));
   if (!status.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to initialize telemetry client for %s: %s",
                 target_name.c_str(), status.ToString().c_str());
     state->coroutine_running = false;
-    return;
+    ASYNC_RETURN;
   }
 
   // Keeping the publisher local ties its lifetime to this target's coroutine.
   std::optional<Publisher> publisher;
   while (!shutting_down_) {
     // Triggers handle lifecycle changes; timeout is the batching period.
-    absl::Status wait_status = async::WaitReadable(
-        ctx, state->trigger.GetPollFd().Fd(), std::chrono::seconds(1));
+    absl::Status wait_status = ASYNC_AWAIT(async::WaitReadable(
+        ctx, state->trigger.GetPollFd().Fd(), std::chrono::seconds(1)));
     const bool publish_batch = absl::IsDeadlineExceeded(wait_status);
     if (wait_status.ok()) {
       state->trigger.Clear();
@@ -281,8 +282,11 @@ void Server::TelemetryCoroutine(async::Context ctx, std::string target_name,
     }
 
     if (state->subscriber_count == 0) {
-      // Publisher destruction can yield, so recheck the shared state afterward
-      // in case another subscriber arrived while it was being removed.
+      // Closing the publisher can suspend, so recheck the shared state
+      // afterward in case another subscriber arrived while it was removed.
+      if (publisher.has_value()) {
+        SERVER_CLIENT_CLOSE(*publisher);
+      }
       publisher.reset();
       current = telemetry_states_.find(target_name);
       if (current == telemetry_states_.end() || current->second != state) {
@@ -299,11 +303,17 @@ void Server::TelemetryCoroutine(async::Context ctx, std::string target_name,
     }
 
     if (!publisher.has_value()) {
-      absl::StatusOr<Publisher> created = client.CreatePublisher(
-          state->hidden_channel_name, kTelemetrySlotSize, kTelemetryNumSlots,
-          PublisherOptions()
-              .SetType("subspace.Telemetry")
-              .SetUseSplitBuffers(false));
+      absl::StatusOr<Publisher> created = SERVER_CLIENT_CALL(
+          (client.CreatePublisher(state->hidden_channel_name,
+                                  kTelemetrySlotSize, kTelemetryNumSlots,
+                                  PublisherOptions()
+                                      .SetType("subspace.Telemetry")
+                                      .SetUseSplitBuffers(false))),
+          client.CreatePublisherAsync(state->hidden_channel_name,
+                                      kTelemetrySlotSize, kTelemetryNumSlots,
+                                      PublisherOptions()
+                                          .SetType("subspace.Telemetry")
+                                          .SetUseSplitBuffers(false)));
       if (!created.ok()) {
         logger_.Log(toolbelt::LogLevel::kError,
                     "Failed to create telemetry publisher for %s: %s",
@@ -325,9 +335,12 @@ void Server::TelemetryCoroutine(async::Context ctx, std::string target_name,
       continue;
     }
 
-    PublishTelemetryBatch(target_name, state, *publisher);
+    ASYNC_AWAIT(PublishTelemetryBatch(target_name, state, *publisher));
   }
 
+  if (publisher.has_value()) {
+    SERVER_CLIENT_CLOSE(*publisher);
+  }
   publisher.reset();
   auto current = telemetry_states_.find(target_name);
   if (current != telemetry_states_.end() && current->second == state) {
@@ -335,9 +348,9 @@ void Server::TelemetryCoroutine(async::Context ctx, std::string target_name,
   }
 }
 
-void Server::PublishTelemetryBatch(const std::string &target_name,
-                                   const std::shared_ptr<TelemetryState> &state,
-                                   Publisher &publisher) {
+async::Task<void> Server::PublishTelemetryBatch(
+    const std::string &target_name,
+    const std::shared_ptr<TelemetryState> &state, Publisher &publisher) {
   if (state->snapshot_requested) {
     // A new watcher receives the current participants before later deltas.
     QueueTelemetrySnapshot(target_name, *state);
@@ -396,7 +409,7 @@ void Server::PublishTelemetryBatch(const std::string &target_name,
       telemetry.drops().empty() && telemetry.resizes().empty()) {
     state->last_total_drops = current_drops;
     state->resize_count = current_resize_count;
-    return;
+    ASYNC_RETURN;
   }
 
   // Publishing yields. Commit only the entries present before that yield;
@@ -404,26 +417,29 @@ void Server::PublishTelemetryBatch(const std::string &target_name,
   const std::string hidden_channel_name = state->hidden_channel_name;
   const size_t pending_participant_count = state->pending_participants.size();
   int64_t length = telemetry.ByteSizeLong();
-  absl::StatusOr<void *> buffer = publisher.GetMessageBuffer(int32_t(length));
+  absl::StatusOr<void *> buffer = SERVER_CLIENT_CALL(
+      (publisher.GetMessageBuffer(int32_t(length))),
+      publisher.GetMessageBufferAsync(int32_t(length)));
   if (!buffer.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to get telemetry buffer for %s: %s",
                 target_name.c_str(), buffer.status().ToString().c_str());
-    return;
+    ASYNC_RETURN;
   }
   if (!telemetry.SerializeToArray(*buffer, int(length))) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to serialize telemetry for %s", target_name.c_str());
     publisher.CancelPublish();
-    return;
+    ASYNC_RETURN;
   }
-  absl::StatusOr<const Message> published =
-      publisher.PublishMessage(int32_t(length));
+  absl::StatusOr<const Message> published = SERVER_CLIENT_CALL(
+      (publisher.PublishMessage(int32_t(length))),
+      publisher.PublishMessageAsync(int32_t(length)));
   if (!published.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to publish telemetry for %s: %s", target_name.c_str(),
                 published.status().ToString().c_str());
-    return;
+    ASYNC_RETURN;
   }
 
   auto current = telemetry_states_.find(target_name);

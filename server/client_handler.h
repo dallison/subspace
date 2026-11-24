@@ -29,7 +29,7 @@ public:
   // Run the client handler receiver in a coroutine.  Terminates
   // when the connection to the client is closed.  The Context drives the
   // cooperative socket I/O for the active backend.
-  void Run(async::Context ctx);
+  async::Task<void> Run(async::Context ctx);
   const std::string &ClientName() const { return client_name_; }
 
 private:
