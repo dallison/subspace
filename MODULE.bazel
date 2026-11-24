@@ -31,9 +31,15 @@ bazel_dep(name = "coroutines", version = "3.4.1")
 # co20_rpc on macOS (dallison/co#77).  c2cbd0f also keeps TSan from corrupting
 # the shadow stack on a coroutine stack switch with GCC 15 (dallison/co c2cbd0f).
 # Not released yet.
+#
+# The patch adds a multi-fd Wait to the C++20 scheduler, frees coroutines when
+# they finish, and keeps the poll fallback from resuming a coroutine twice.
+# The co20 backend needs all three.  Drop it once it is upstream.
 git_override(
     module_name = "coroutines",
     commit = "c2cbd0f75b1e834090762d584b812a485b8b8ca8",
+    patch_strip = 1,
+    patches = ["//patches:co_cpp20_wait_any_and_reap.patch"],
     remote = "https://github.com/dallison/co.git",
 )
 

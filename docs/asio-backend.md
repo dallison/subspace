@@ -32,7 +32,8 @@ bazelisk test //client:bridge_test --//:coro_backend=asio
 ```
 
 The flag is declared in the root `BUILD.bazel` as `//:coro_backend` with values
-`co` and `asio`.
+`co`, `asio` and `co20`.  `co20` (C++20 stackless coroutines) needs C++20, so
+select it with `--config=cpp20`, which sets both.
 
 ### CMake
 
@@ -47,8 +48,9 @@ When `asio` is selected, CMake fetches Boost (asio/coroutine/context) via
 
 ### Client code is unchanged
 
-The client public API still takes `const co::Coroutine *` where it always did,
-so existing applications compile and run unmodified. Most clients are not
+The client public API takes a `const toolbelt::AsyncWaiter *` where it used to
+take a `const co::Coroutine *`.  A `co::Coroutine` is an `AsyncWaiter`, so
+existing applications compile and run unmodified. Most clients are not
 coroutine-driven at all; under the asio backend such a client simply runs in
 **blocking mode** (its socket is left blocking, so it never needs a
 `yield_context`). No code change is required to use an asio-backed client.

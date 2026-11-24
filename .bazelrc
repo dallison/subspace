@@ -77,6 +77,13 @@ build:macos_x86_64 --extra_execution_platforms=//platform/host:darwin_x86_64
 
 # For all builds, use C++17
 build --cxxopt="-std=c++17"
+
+# C++20 build: the server and the async layer use C++20 stackless coroutines
+# (co20) instead of the stackful co library.  The backend has to match the
+# language mode, so this config sets both.
+build:cpp20 --cxxopt="-std=c++20"
+build:cpp20 --//:coro_backend=co20
+
 build --java_runtime_version=remotejdk_17
 
 # Statically link C++ deps into Rust binaries (avoids RPATH issues)

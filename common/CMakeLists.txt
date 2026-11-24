@@ -47,6 +47,7 @@ add_library(subspace_async STATIC
     async/byte_stream.cc
     async/socket.h
     async/socket.cc
+    async/task.h
     async/wait.h
     async/wait.cc
 )
@@ -64,8 +65,10 @@ if(SUBSPACE_ENABLE_MTLS)
 else()
     target_compile_definitions(subspace_async PUBLIC SUBSPACE_ENABLE_MTLS=0)
 endif()
-if(SUBSPACE_CORO_BACKEND STREQUAL "asio")
+if(SUBSPACE_CORO_BACKEND_RESOLVED STREQUAL "asio")
     target_link_libraries(subspace_async PUBLIC Boost::asio Boost::coroutine)
+elseif(SUBSPACE_CORO_BACKEND_RESOLVED STREQUAL "co20")
+    target_link_libraries(subspace_async PUBLIC co_cpp20)
 endif()
 
 add_executable(async_test async/async_test.cc)

@@ -7,6 +7,7 @@
 #define _COMMON_ASYNC_RUNTIME_H
 
 #include "common/async/context.h"
+#include "common/async/task.h"
 #include "common/coroutine_stack.h"
 #include <functional>
 #include <string>
@@ -28,19 +29,29 @@
 #include <list>
 #include <memory>
 #include <thread>
+#elif SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
+#include <list>
+#include <memory>
 #endif
 
 namespace subspace::async {
 
 // The execution engine an embedder provides to a Server (and to AsyncRuntime).
 // Under the co backend this is a co::CoroutineScheduler; under Asio it is a
-// boost::asio::io_context.  Exposed so callers (and tests) can declare an
-// engine variable in a backend-agnostic way and pass it to the Server.
+// boost::asio::io_context; under co20 it is a co20::Scheduler.  Exposed so
+// callers (and tests) can declare an engine variable in a backend-agnostic way
+// and pass it to the Server.
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
 using RuntimeEngine = boost::asio::io_context;
+#elif SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
+using RuntimeEngine = co20::Scheduler;
 #else
 using RuntimeEngine = co::CoroutineScheduler;
 #endif
+
+// The function a coroutine runs.  Under co20 it is itself a coroutine
+// returning a task (see task.h).
+using CoroutineFunction = std::function<Task<void>(Context)>;
 
 // Options that mirror the subset of co::CoroutineOptions the server uses when
 // spawning coroutines.  Under Asio `interrupt_fd` and `name` are advisory (Asio
@@ -305,6 +316,77 @@ private:
   bool stopping_ = false;
   // Drives the periodic re-emit of cancellations during graceful shutdown.
   std::unique_ptr<boost::asio::steady_timer> reemit_timer_;
+
+#elif SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
+  explicit AsyncRuntime(co20::Scheduler &scheduler)
+      : scheduler_(scheduler),
+        live_(std::make_shared<std::list<std::string>>()) {}
+
+  co20::Scheduler &scheduler() { return scheduler_; }
+
+  // Spawn a C++20 coroutine running `fn(ctx)`.  Like the co backend, a wait
+  // in it ends with CancelledError once `opts.interrupt_fd` is readable.
+  void Spawn(CoroutineFunction fn, SpawnOptions opts = {}) {
+    auto it = live_->emplace(live_->end(), opts.name);
+    // The scheduler keeps this callable, and so `fn`, alive until the
+    // coroutine is freed.  The list is shared so a coroutine that outlives
+    // the runtime can still remove itself.
+    scheduler_.Spawn(
+        [fn = std::move(fn), live = live_,
+         it](co20::Coroutine &c) -> co20::Task {
+          // Lives in the coroutine frame, so the name is also removed if the
+          // frame is destroyed before `fn` finishes.
+          LiveEntry entry(live, it);
+          co_await fn(Context(&c));
+        },
+        opts.name, opts.interrupt_fd);
+  }
+
+  // The co20 scheduler is single-threaded, so there are no strands: these
+  // behave like the co backend's.
+  void SpawnOnStrand(CoroutineFunction fn, SpawnOptions opts = {}) {
+    Spawn(std::move(fn), std::move(opts));
+  }
+  void RunOnStrand(std::function<void()> fn) { fn(); }
+  void SpawnOnNewStrand(CoroutineFunction fn, SpawnOptions opts = {}) {
+    Spawn(std::move(fn), std::move(opts));
+  }
+  void SpawnOnCurrentStrand(Context /*ctx*/, CoroutineFunction fn,
+                            SpawnOptions opts = {}) {
+    Spawn(std::move(fn), std::move(opts));
+  }
+
+  // The co20 scheduler is single-threaded; num_threads is ignored.
+  void Run(int /*num_threads*/ = 1) { scheduler_.Run(); }
+  void Stop() { scheduler_.Stop(); }
+  // Graceful shutdown goes through per-coroutine interrupt fds, as with co.
+  void StopGracefully() { scheduler_.Stop(); }
+  // co20 has no aborts.
+  void EnableAborts(bool) {}
+  // The names of the live coroutines spawned through this runtime.
+  std::vector<std::string> AllCoroutineStrings() const {
+    return std::vector<std::string>(live_->begin(), live_->end());
+  }
+
+private:
+  using LiveList = std::list<std::string>;
+
+  // Removes a coroutine's name from the live list when destroyed.
+  class LiveEntry {
+  public:
+    LiveEntry(std::shared_ptr<LiveList> list, LiveList::iterator it)
+        : list_(std::move(list)), it_(it) {}
+    LiveEntry(const LiveEntry &) = delete;
+    LiveEntry &operator=(const LiveEntry &) = delete;
+    ~LiveEntry() { list_->erase(it_); }
+
+  private:
+    std::shared_ptr<LiveList> list_;
+    LiveList::iterator it_;
+  };
+
+  co20::Scheduler &scheduler_;
+  std::shared_ptr<LiveList> live_;
 
 #else  // SUBSPACE_CORO_BACKEND_CO
   explicit AsyncRuntime(co::CoroutineScheduler &scheduler)

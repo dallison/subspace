@@ -601,8 +601,8 @@
     },
     "@@rules_rust+//crate_universe:extensions.bzl%crate": {
       "general": {
-        "bzlTransitiveDigest": "ebJjXa+P6PCjLNy5r9Y6usOlasRE1po9acRzqmcTvxw=",
-        "usagesDigest": "elCpzqBbH4Uze4bFcJkhufozV4OiThsWRv8J+c9fLvo=",
+        "bzlTransitiveDigest": "/zNsa7ILQZw4ggprbQZ7KsHdx0WiuK5EEslC/bxQUJw=",
+        "usagesDigest": "AkSzlYDag/ptRiPH/inccjoRKY8ur3ttcbzIxnSHNwo=",
         "recordedInputs": [
           "ENV:CARGO_BAZEL_DEBUG \\0",
           "ENV:CARGO_BAZEL_GENERATOR_SHA256 \\0",

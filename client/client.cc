@@ -1081,7 +1081,7 @@ void ClientImpl::CancelPublish(PublisherImpl * /*publisher*/) {
 absl::Status
 ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
                                      std::chrono::nanoseconds timeout,
-                                     const co::Coroutine *c) {
+                                     const toolbelt::AsyncWaiter *c) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -1139,7 +1139,7 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
                                      const toolbelt::FileDescriptor &fd,
                                      std::chrono::nanoseconds timeout,
 
-                                     const co::Coroutine *c) {
+                                     const toolbelt::AsyncWaiter *c) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -1202,7 +1202,7 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
 
 absl::Status ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
                                            std::chrono::nanoseconds timeout,
-                                           const co::Coroutine *c) {
+                                           const toolbelt::AsyncWaiter *c) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -1250,7 +1250,7 @@ absl::Status ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
 
 absl::StatusOr<int> ClientImpl::WaitForSubscriber(
     SubscriberImpl *subscriber, const toolbelt::FileDescriptor &fd,
-    std::chrono::nanoseconds timeout, const co::Coroutine *c) {
+    std::chrono::nanoseconds timeout, const toolbelt::AsyncWaiter *c) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
     return status;
   }
@@ -1307,7 +1307,7 @@ absl::StatusOr<int> ClientImpl::WaitForSubscriber(
 
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
 // Asio overloads taking an async::Context (yield_context) directly.  Unlike the
-// co::Coroutine* overloads above, which fall back to the client's stored
+// AsyncWaiter overloads above, which fall back to the client's stored
 // context (SocketContext()), these wait cooperatively on the caller-supplied
 // context.  This lets an Asio caller wait from within an arbitrary coroutine,
 // mirroring how the co backend accepts a co::Coroutine*.

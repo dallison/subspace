@@ -4,15 +4,19 @@ load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "string_flag")
 
 # Build-time selection of the coroutine/networking backend for the server (and
 # the client paths it relies on).  See common/async/context.h.  `co` is the
-# default; `asio` compiles the server against Boost.Asio.
+# default; `asio` compiles the server against Boost.Asio; `co20` uses C++20
+# stackless coroutines and needs -std=c++20, so select it with --config=cpp20
+# (see .bazelrc), which sets both.
 #
 #   bazelisk build --//:coro_backend=asio //server
+#   bazelisk build --config=cpp20 //server
 string_flag(
     name = "coro_backend",
     build_setting_default = "co",
     values = [
         "co",
         "asio",
+        "co20",
     ],
 )
 
@@ -24,6 +28,11 @@ config_setting(
 config_setting(
     name = "coro_backend_asio",
     flag_values = {":coro_backend": "asio"},
+)
+
+config_setting(
+    name = "coro_backend_co20",
+    flag_values = {":coro_backend": "co20"},
 )
 
 # Mutual TLS for native bridge connections and the tunnel.  Off by default,
