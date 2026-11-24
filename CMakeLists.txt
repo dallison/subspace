@@ -203,12 +203,11 @@ endif()
 message(STATUS "Trigger mechanism: ${SUBSPACE_TRIGGER_MECHANISM}")
 
 # --- External Dependency: co (using FetchContent for native CMake) ---
-# Same commit as the Bazel git_override in MODULE.bazel (co 3.5.2 on the
-# co20-subspace-support branch in ~/co).  Local file remote until it is pushed.
+# Same commit as the Bazel git_override in MODULE.bazel (co 3.5.2, #82).
 FetchContent_Declare(
     co
-    GIT_REPOSITORY file:///Users/FZDSZZ/co
-    GIT_TAG fe00d446d24fd4047414be4f946dd59320d48bb7
+    GIT_REPOSITORY https://github.com/dallison/co.git
+    GIT_TAG db9ecf4c6a7396bcd409addfffac3be6f00c2b59
     CMAKE_ARGS
         -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
 )

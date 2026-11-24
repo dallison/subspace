@@ -26,15 +26,14 @@ bazel_dep(name = "rules_android_ndk", version = "0.1.5")
 bazel_dep(name = "zlib", version = "1.3.1.bcr.5")
 bazel_dep(name = "coroutines", version = "3.5.2")
 
-# The co20 backend needs the C++20 scheduler fixes on dallison/co
-# co20-subspace-support (3.5.2): multi-fd Wait, the poll fallback event mask,
-# TSan across stack switches, and non-aggregate ValueTask promises for GCC.
-# The branch is local to ~/co and not pushed yet, so this pin only resolves on
-# this machine.  Point it at the GitHub remote once the branch is pushed.
+# The co20 backend needs the C++20 scheduler changes in co 3.5.2 (dallison/co
+# #82): multi-fd Wait, the poll fallback event mask, TSan across stack
+# switches, non-aggregate ValueTask promises for GCC and an atomic Stop.
+# Not in the BCR yet.
 git_override(
     module_name = "coroutines",
-    commit = "fe00d446d24fd4047414be4f946dd59320d48bb7",
-    remote = "file:///Users/FZDSZZ/co",
+    commit = "db9ecf4c6a7396bcd409addfffac3be6f00c2b59",
+    remote = "https://github.com/dallison/co.git",
 )
 
 bazel_dep(name = "cpp_toolbelt", version = "2.1.6")
