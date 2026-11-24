@@ -57,8 +57,12 @@ template <typename T> T SyncWait(Task<T> task) {
                          "not hold a coroutine\n");
     std::abort();
   }
+  auto &promise = task.handle_.promise();
+  if (promise.exception_) {
+    std::rethrow_exception(promise.exception_);
+  }
   if constexpr (!std::is_void_v<T>) {
-    return std::move(task.handle_.promise().value_);
+    return std::move(*promise.value_);
   }
 }
 

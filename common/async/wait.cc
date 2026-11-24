@@ -480,6 +480,7 @@ void Sleep(Context ctx, std::chrono::nanoseconds duration) {
 #include <cerrno>
 #include <climits>
 #include <ctime>
+#include <fcntl.h>
 #include <vector>
 
 namespace subspace::async {
@@ -495,10 +496,10 @@ uint64_t ToNanos(std::chrono::nanoseconds d) {
 }
 
 // Classifies the value a co20 wait resumed with.  It resumes with the fd that
-// became ready, the coroutine's interrupt fd, or the fd of its timeout timer.
-// -1 means the scheduler could not watch the fd.
+// became ready, the coroutine's interrupt fd, or -1 on timeout or when the
+// scheduler could not watch a closed fd.
 WaitResult FromCo20(const co20::Coroutine &c, const std::vector<int> &fds,
-                    int r, int *ready_fd) {
+                    bool has_timeout, int r, int *ready_fd) {
   for (int fd : fds) {
     if (r == fd) {
       *ready_fd = fd;
@@ -506,7 +507,14 @@ WaitResult FromCo20(const co20::Coroutine &c, const std::vector<int> &fds,
     }
   }
   if (r == -1) {
-    return WaitResult::kError;
+    // -1 is a timeout, or a closed fd that the scheduler could not watch.
+    // Only the closed fd is an error.
+    for (int fd : fds) {
+      if (::fcntl(fd, F_GETFD) == -1 && errno == EBADF) {
+        return WaitResult::kError;
+      }
+    }
+    return has_timeout ? WaitResult::kTimedOut : WaitResult::kError;
   }
   if (c.GetInterruptFd() != -1 && r == c.GetInterruptFd()) {
     return WaitResult::kInterrupted;
@@ -587,7 +595,7 @@ Task<WaitResult> WaitFds(Context ctx, std::vector<int> fds, short events,
     } else {
       r = co_await c->Wait(fds, events, ToNanos(timeout));
     }
-    co_return FromCo20(*c, fds, r, ready_fd);
+    co_return FromCo20(*c, fds, timeout.count() > 0, r, ready_fd);
   }
   if (const toolbelt::AsyncWaiter *w = ctx.Waiter()) {
     int r = fds.size() == 1 ? w->Wait(fds[0], events, ToNanos(timeout))
