@@ -112,20 +112,12 @@ Clang and GCC lower coroutine frames and symmetric transfer differently.
 ### Step 8: Native CMake C++20 Build
 ```bash
 cmake -S . -B build-co20 -DCMAKE_CXX_STANDARD=20 -DSUBSPACE_CORO_BACKEND=co20
-cmake --build build-co20 --target subspace_server client_test server_test co20_rpc_test -j
-ctest --test-dir build-co20 --output-on-failure -R "^(client_test|server_test|co20_rpc.*)$"
+cmake --build build-co20 -j
+ctest --test-dir build-co20 --output-on-failure
 ```
-> **Known CMake gap to check/fix if needed**: In Bazel, `c_client_test`,
-> `shadow_test`, `rpc_client_test`, `rpc_server_test`, and `rpc_test` are gated
-> off under `//:coro_backend_co20` because those test `.cc` files construct
-> `subspace::Server` with a `co::CoroutineScheduler` directly. In CMake
-> (`c_client/CMakeLists.txt`, `shadow/CMakeLists.txt`, `rpc/CMakeLists.txt`),
-> those test executables are not yet wrapped in
-> `if(NOT SUBSPACE_CORO_BACKEND_RESOLVED STREQUAL "co20")`, so a bare
-> `cmake --build build-co20` (all targets) will try to compile them against a
-> `co20` `libserver`. Keep `subspace_rpc_plugin` in `rpc/CMakeLists.txt`
-> enabled if you gate the `rpc_*_test` targets, because `co20_rpc` uses that
-> host plugin to generate its stubs.
+> The `c_client_test`, `shadow_test`, `rpc_*_test` CMake targets are now gated
+> off under `co20` (matching Bazel), and `subspace_common` links
+> `subspace_async` under `co20` so `common_test` / `split_buffer_test` link.
 
 ---
 
@@ -260,3 +252,25 @@ If a test fails only with `--config=cpp20 --config=linux_memfd`:
   scheduler is busy.
 - Check fd ownership (`toolbelt::FileDescriptor`) across `ASYNC_AWAIT` in
   `RegisterClientBuffer` / `GetClientBuffers`.
+
+---
+
+## 5. Linux Verification Results (Ubuntu 22.04, GCC 11, 32 cores)
+
+| Step | Result |
+|------|--------|
+| 1. `--config=cpp20 //...` | Pass (36 run, 7 skipped) |
+| 2. default `//...` | Pass (43/43) |
+| 3. `cpp20` + `asan` | Pass, including `--runs_per_test=5` stress. `//client/python:client_test` (ASan runtime not first in library list) and `//coro_rpc/{client,test}` (leaks in the old `coro_rpc` code) fail identically on the default backend, so they are not `co20` regressions. |
+| 4. `cpp20` + `tsan` | Pass except `//client:client_test` `PluginTest`: `nop_plugin` logs from `Server::Stop()` on the stopping thread while the server thread logs through the same `toolbelt::Logger` buffer. The same race occurs on the default backend. TSan needs `--run_under="setarch x86_64 -R"` on kernels with `vm.mmap_rnd_bits=32`; skip Rust targets (their protoc build step is TSan-instrumented and crashes). |
+| 5. `cpp20` + `linux_memfd` | Fixed (see below), then pass. `//rust_client:client_test` cross-language tests fail identically on the default backend (Rust client has no memfd support on Linux). |
+| 6. `mtls`, `slot_size_64` | Pass |
+| 7. Clang | Not run (clang not installed) |
+| 8. CMake `co20` | Fixed (see below), 21/21 ctest pass |
+
+### Finding D: memfd `OpenBuffer` was not async
+`ClientChannel::OpenBuffer` called `GetRegisteredClientBuffer` (an
+`async::Task`) synchronously, which only compiled in `SUBSPACE_SHMEM_MODE_MEMFD`
+under `co20`. `OpenBuffer` and `AttachShmBuffers` now return `async::Task<>`, and
+callers in `client_channel.cc` / `publisher.cc` await them. The memfd-only test
+`AndroidBufferRegistrationTest` was updated for the `Task`-returning callbacks.

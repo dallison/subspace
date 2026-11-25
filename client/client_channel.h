@@ -386,9 +386,10 @@ protected:
 
   absl::StatusOr<toolbelt::FileDescriptor> CreateBuffer(int buffer_index,
                                                         size_t size);
-  absl::Status AttachShmBuffers(int num_buffers);
+  async::Task<absl::Status> AttachShmBuffers(int num_buffers);
   async::Task<absl::Status> AttachSplitBuffers(int num_buffers);
-  absl::StatusOr<toolbelt::FileDescriptor> OpenBuffer(int buffer_index);
+  async::Task<absl::StatusOr<toolbelt::FileDescriptor>>
+  OpenBuffer(int buffer_index);
   absl::StatusOr<size_t> GetBufferSize(toolbelt::FileDescriptor &shm_fd,
                                        int buffer_index) const;
   absl::StatusOr<char *> MapBuffer(toolbelt::FileDescriptor &shm_fd,

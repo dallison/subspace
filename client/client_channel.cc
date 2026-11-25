@@ -395,15 +395,15 @@ async::Task<absl::Status> ClientChannel::AttachBuffers() {
   if (UseSplitBuffers()) {
     ASYNC_RETURN ASYNC_AWAIT(AttachSplitBuffers(num_buffers));
   }
-  ASYNC_RETURN AttachShmBuffers(num_buffers);
+  ASYNC_RETURN ASYNC_AWAIT(AttachShmBuffers(num_buffers));
 }
 
-absl::Status ClientChannel::AttachShmBuffers(int num_buffers) {
+async::Task<absl::Status> ClientChannel::AttachShmBuffers(int num_buffers) {
   BufferMapMode mode = MapMode();
   while (buffers_.size() < size_t(num_buffers)) {
     // We need to open the next buffer in the list.  The buffer index is
     size_t buffer_index = buffers_.size();
-    auto shm_fd = OpenBuffer(buffer_index);
+    auto shm_fd = ASYNC_AWAIT(OpenBuffer(buffer_index));
     if (!shm_fd.ok()) {
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
       if (buffers_.size() + 1 < size_t(num_buffers)) {
@@ -414,11 +414,11 @@ absl::Status ClientChannel::AttachShmBuffers(int num_buffers) {
         continue;
       }
 #endif
-      return shm_fd.status();
+      ASYNC_RETURN shm_fd.status();
     }
     auto size = GetBufferSize(*shm_fd, buffer_index);
     if (!size.ok()) {
-      return size.status();
+      ASYNC_RETURN size.status();
     }
     if (*size == 0) {
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
@@ -438,7 +438,7 @@ absl::Status ClientChannel::AttachShmBuffers(int num_buffers) {
       // Map the shared memory buffer.
       addr = MapBuffer(*shm_fd, *size, mode);
       if (!addr.ok()) {
-        return addr.status();
+        ASYNC_RETURN addr.status();
       }
     } else {
       addr = nullptr;
@@ -447,7 +447,7 @@ absl::Status ClientChannel::AttachShmBuffers(int num_buffers) {
     buffer_set->fd = std::move(*shm_fd);
     buffers_.push_back(std::move(buffer_set));
   }
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
 async::Task<absl::Status> ClientChannel::AttachSplitBuffers(int num_buffers) {
@@ -1119,26 +1119,26 @@ ClientChannel::OpenSplitBufferSet(size_t buffer_index, size_t full_size,
   ASYNC_RETURN buffer;
 }
 
-absl::StatusOr<toolbelt::FileDescriptor>
+async::Task<absl::StatusOr<toolbelt::FileDescriptor>>
 ClientChannel::OpenBuffer(int buffer_index) {
   std::string filename = BufferSharedMemoryName(buffer_index);
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
   absl::StatusOr<RegisteredClientBuffer> buffer =
-      GetRegisteredClientBuffer(static_cast<uint32_t>(buffer_index),
-                                /*is_prefix=*/false, /*slot_id=*/0);
+      ASYNC_AWAIT(GetRegisteredClientBuffer(static_cast<uint32_t>(buffer_index),
+                                            /*is_prefix=*/false, /*slot_id=*/0));
   if (!buffer.ok()) {
-    return buffer.status();
+    ASYNC_RETURN buffer.status();
   }
-  return std::move(buffer->fd);
+  ASYNC_RETURN std::move(buffer->fd);
 #elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
   // Open the shared memory file.
-  return OpenSharedMemoryFile(filename, O_RDWR);
+  ASYNC_RETURN OpenSharedMemoryFile(filename, O_RDWR);
 #else
   auto shm_name = PosixSharedMemoryName(filename);
   if (!shm_name.ok()) {
-    return shm_name.status();
+    ASYNC_RETURN shm_name.status();
   }
-  return OpenSharedMemoryFile(*shm_name, O_RDWR);
+  ASYNC_RETURN OpenSharedMemoryFile(*shm_name, O_RDWR);
 #endif
 }
 

@@ -475,7 +475,10 @@ TEST(AndroidBufferRegistrationTest, FailedRegistrationRollsBackNumBuffers) {
       /*subscriber_queue_size=*/0, /*subscriber_queue_arena_size=*/0,
       /*channel_id=*/0,
       /*publisher_id=*/0, /*vchan_id=*/-1, /*session_id=*/123, "",
-      options, [](subspace::Channel *) { return false; },
+      options,
+      [](subspace::Channel *) -> subspace::async::Task<bool> {
+        ASYNC_RETURN false;
+      },
       /*user_id=*/0, /*group_id=*/0);
   ASSERT_OK(publisher.Map(
       subspace::SharedMemoryFds(std::move(*ccb_fd), std::move(*bcb_fd)),
@@ -484,15 +487,17 @@ TEST(AndroidBufferRegistrationTest, FailedRegistrationRollsBackNumBuffers) {
   int failed_registration_attempts = 0;
   publisher.SetClientBufferRegistrationCallback(
       [&](const subspace::ClientBufferHandleMetadata &metadata,
-          const toolbelt::FileDescriptor *fd) {
+          const toolbelt::FileDescriptor *fd)
+          -> subspace::async::Task<absl::Status> {
         failed_registration_attempts++;
         EXPECT_EQ(0u, metadata.buffer_index);
         EXPECT_NE(nullptr, fd);
         EXPECT_TRUE(fd->Valid());
-        return absl::InternalError("injected registration failure");
+        ASYNC_RETURN absl::InternalError("injected registration failure");
       });
 
-  absl::Status status = publisher.CreateOrAttachBuffers(/*slot_size=*/128);
+  absl::Status status =
+      ASYNC_BLOCK(publisher.CreateOrAttachBuffers(/*slot_size=*/128));
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(1, failed_registration_attempts);
   EXPECT_EQ(0, publisher.GetCcb()->num_buffers.load(std::memory_order_relaxed));
@@ -501,14 +506,17 @@ TEST(AndroidBufferRegistrationTest, FailedRegistrationRollsBackNumBuffers) {
   std::vector<uint32_t> registered_indices;
   publisher.SetClientBufferRegistrationCallback(
       [&](const subspace::ClientBufferHandleMetadata &metadata,
-          const toolbelt::FileDescriptor *fd) {
+          const toolbelt::FileDescriptor *fd)
+          -> subspace::async::Task<absl::Status> {
         EXPECT_NE(nullptr, fd);
         EXPECT_TRUE(fd->Valid());
         registered_indices.push_back(metadata.buffer_index);
-        return absl::OkStatus();
+        ASYNC_RETURN absl::OkStatus();
       });
 
-  ASSERT_OK(publisher.CreateOrAttachBuffers(/*slot_size=*/128));
+  absl::Status status2 =
+      ASYNC_BLOCK(publisher.CreateOrAttachBuffers(/*slot_size=*/128));
+  ASSERT_OK(status2);
   ASSERT_EQ(1u, registered_indices.size());
   EXPECT_EQ(0u, registered_indices[0]);
   EXPECT_EQ(1, publisher.GetCcb()->num_buffers.load(std::memory_order_relaxed));

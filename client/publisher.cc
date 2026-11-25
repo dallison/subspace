@@ -55,9 +55,12 @@ async::Task<absl::Status> PublisherImpl::CreateOrAttachBuffers(uint64_t final_sl
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
       bool opened_existing_buffer = buffer_index < size_t(num_buffers);
       absl::StatusOr<toolbelt::FileDescriptor> shm_fd =
-          opened_existing_buffer
-              ? OpenBuffer(buffer_index)
-              : CreateBuffer(buffer_index, final_buffer_size);
+          absl::InternalError("unset");
+      if (opened_existing_buffer) {
+        shm_fd = ASYNC_AWAIT(OpenBuffer(buffer_index));
+      } else {
+        shm_fd = CreateBuffer(buffer_index, final_buffer_size);
+      }
 #else
       bool opened_existing_buffer = false;
       auto shm_fd = CreateBuffer(buffer_index, final_buffer_size);
@@ -69,7 +72,7 @@ async::Task<absl::Status> PublisherImpl::CreateOrAttachBuffers(uint64_t final_sl
         // The named shared memory already exists so we attach to it instead of
         // creating it.
         opened_existing_buffer = true;
-        shm_fd = OpenBuffer(buffer_index);
+        shm_fd = ASYNC_AWAIT(OpenBuffer(buffer_index));
         if (!shm_fd.ok()) {
           ASYNC_RETURN shm_fd.status();
         }

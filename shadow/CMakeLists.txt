@@ -34,6 +34,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
     target_link_libraries(subspace_shadow PRIVATE rt)
 endif()
 
+# These tests construct subspace::Server with a co::CoroutineScheduler, which the
+# co20 backend doesn't provide (mirrors target_compatible_with in Bazel).
+if(NOT SUBSPACE_CORO_BACKEND_RESOLVED STREQUAL "co20")
 add_executable(shadow_test shadow_test.cc)
 add_test(NAME shadow_test COMMAND shadow_test)
 target_link_libraries(shadow_test PUBLIC
@@ -49,4 +52,5 @@ target_link_libraries(shadow_test PUBLIC
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
     target_link_libraries(shadow_test PRIVATE rt dl)
+endif()
 endif()
