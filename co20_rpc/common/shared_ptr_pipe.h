@@ -8,6 +8,9 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "co/coroutine_cpp20.h"
+// Installs the frame pool for co20::ValueTask coroutines such as Read().  Every
+// definition of a ValueTask coroutine must see it to agree on the promise type.
+#include "common/async/task.h"
 #include "rpc/common/shared_ptr_pipe_base.h"
 
 #include <memory>

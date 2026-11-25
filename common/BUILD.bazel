@@ -59,6 +59,7 @@ cc_library(
         ":max_channels_setting",
         ":max_buffers_setting",
         ":max_slot_owners_setting",
+        "//common/async:async",
         "//proto:subspace_cc_proto",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/status",

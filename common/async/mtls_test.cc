@@ -5,6 +5,7 @@
 #include "common/async/byte_stream.h"
 #include "common/async/runtime.h"
 #include "common/async/socket.h"
+#include "common/async/task.h"
 
 #include "absl/status/status.h"
 #include "absl/status/status_matchers.h"
@@ -33,6 +34,12 @@ struct RuntimeFixture {
   AsyncRuntime runtime{ioc};
   void Run() { ioc.run(); }
 };
+#elif SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
+struct RuntimeFixture {
+  co20::Scheduler scheduler;
+  AsyncRuntime runtime{scheduler};
+  void Run() { scheduler.Run(); }
+};
 #else
 struct RuntimeFixture {
   co::CoroutineScheduler scheduler;
@@ -46,41 +53,42 @@ TEST(ByteStream, CleartextBytesArriveIntact) {
   std::string received;
   absl::Status status = absl::OkStatus();
 
-  fx.runtime.Spawn([&](Context ctx) {
+  fx.runtime.Spawn([&](Context ctx) -> Task<void> {
     absl::StatusOr<StreamSocket> listener =
         ListenStream(InetAddress("127.0.0.1", 0));
     if (!listener.ok()) {
       status = listener.status();
-      return;
+      ASYNC_RETURN;
     }
     const int port = listener->BoundAddress().Port();
-    fx.runtime.Spawn([&, port](Context client_ctx) {
-      absl::StatusOr<StreamSocket> connected = ConnectStream(
-          InetAddress("127.0.0.1", port), std::chrono::seconds(2), client_ctx);
+    fx.runtime.Spawn([&, port](Context client_ctx) -> Task<void> {
+      absl::StatusOr<StreamSocket> connected = ASYNC_AWAIT(ConnectStream(
+          InetAddress("127.0.0.1", port), std::chrono::seconds(2), client_ctx));
       if (!connected.ok()) {
         status = connected.status();
-        return;
+        ASYNC_RETURN;
       }
       ByteStream client(std::move(*connected));
       const std::string payload(100000, 'q');
-      if (absl::Status s = client.SendAll(payload.data(), payload.size(),
-                                          client_ctx);
+      if (absl::Status s = ASYNC_AWAIT(
+              client.SendAll(payload.data(), payload.size(), client_ctx));
           !s.ok()) {
         status = s;
       }
     });
-    absl::StatusOr<StreamSocket> accepted = listener->Accept(ctx);
+    absl::StatusOr<StreamSocket> accepted = ASYNC_AWAIT(listener->Accept(ctx));
     if (!accepted.ok()) {
       status = accepted.status();
-      return;
+      ASYNC_RETURN;
     }
     ByteStream server(std::move(*accepted));
     if (absl::Status s = server.SetNonBlocking(); !s.ok()) {
       status = s;
-      return;
+      ASYNC_RETURN;
     }
     received.resize(100000);
-    status = server.ReadFully(received.data(), received.size(), ctx);
+    status = ASYNC_AWAIT(
+        server.ReadFully(received.data(), received.size(), ctx));
   });
 
   fx.Run();
@@ -106,67 +114,69 @@ TEST(ByteStream, MutualTlsExchangesBothWays) {
   std::string from_server;
   absl::Status status = absl::OkStatus();
 
-  fx.runtime.Spawn([&](Context ctx) {
+  fx.runtime.Spawn([&](Context ctx) -> Task<void> {
     absl::StatusOr<StreamSocket> listener =
         ListenStream(InetAddress("127.0.0.1", 0));
     if (!listener.ok()) {
       status = listener.status();
-      return;
+      ASYNC_RETURN;
     }
     const int port = listener->BoundAddress().Port();
-    fx.runtime.Spawn([&, port](Context client_ctx) {
-      absl::StatusOr<StreamSocket> connected = ConnectStream(
-          InetAddress("127.0.0.1", port), std::chrono::seconds(2), client_ctx);
+    fx.runtime.Spawn([&, port](Context client_ctx) -> Task<void> {
+      absl::StatusOr<StreamSocket> connected = ASYNC_AWAIT(ConnectStream(
+          InetAddress("127.0.0.1", port), std::chrono::seconds(2), client_ctx));
       if (!connected.ok()) {
         status = connected.status();
-        return;
+        ASYNC_RETURN;
       }
       ByteStream client(std::move(*connected));
-      if (absl::Status s = client.HandshakeTls(*alpha, /*server_role=*/false,
-                                               client_ctx,
-                                               std::chrono::seconds(2));
+      if (absl::Status s = ASYNC_AWAIT(
+              client.HandshakeTls(*alpha, /*server_role=*/false, client_ctx,
+                                  std::chrono::seconds(2)));
           !s.ok()) {
         status = s;
-        return;
+        ASYNC_RETURN;
       }
       char storage[64] = {};
       const std::string payload = "client-to-server";
       memcpy(storage + sizeof(int32_t), payload.data(), payload.size());
-      if (absl::StatusOr<ssize_t> n = client.SendMessage(
-              storage + sizeof(int32_t), payload.size(), client_ctx);
+      if (absl::StatusOr<ssize_t> n = ASYNC_AWAIT(client.SendMessage(
+              storage + sizeof(int32_t), payload.size(), client_ctx));
           !n.ok()) {
         status = n.status();
-        return;
+        ASYNC_RETURN;
       }
       char reply[32];
       if (absl::Status s =
-              client.ReadFully(reply, 12, client_ctx); !s.ok()) {
+              ASYNC_AWAIT(client.ReadFully(reply, 12, client_ctx));
+          !s.ok()) {
         status = s;
-        return;
+        ASYNC_RETURN;
       }
       from_server.assign(reply, 12);
     });
 
-    absl::StatusOr<StreamSocket> accepted = listener->Accept(ctx);
+    absl::StatusOr<StreamSocket> accepted = ASYNC_AWAIT(listener->Accept(ctx));
     if (!accepted.ok()) {
       status = accepted.status();
-      return;
+      ASYNC_RETURN;
     }
     ByteStream server(std::move(*accepted));
-    if (absl::Status s = server.HandshakeTls(*beta, /*server_role=*/true, ctx,
-                                             std::chrono::seconds(2));
+    if (absl::Status s = ASYNC_AWAIT(server.HandshakeTls(
+            *beta, /*server_role=*/true, ctx, std::chrono::seconds(2)));
         !s.ok()) {
       status = s;
-      return;
+      ASYNC_RETURN;
     }
     char buffer[64];
-    absl::StatusOr<ssize_t> n = server.ReceiveMessage(buffer, sizeof(buffer), ctx);
+    absl::StatusOr<ssize_t> n =
+        ASYNC_AWAIT(server.ReceiveMessage(buffer, sizeof(buffer), ctx));
     if (!n.ok()) {
       status = n.status();
-      return;
+      ASYNC_RETURN;
     }
     from_client.assign(buffer, static_cast<size_t>(*n));
-    status = server.SendAll("server-reply", 12, ctx);
+    status = ASYNC_AWAIT(server.SendAll("server-reply", 12, ctx));
   });
 
   fx.Run();
@@ -189,33 +199,34 @@ TEST(ByteStream, RejectsACertificateFromAnotherCa) {
   absl::Status client_status = absl::OkStatus();
   absl::Status server_status = absl::OkStatus();
 
-  fx.runtime.Spawn([&](Context ctx) {
+  fx.runtime.Spawn([&](Context ctx) -> Task<void> {
     absl::StatusOr<StreamSocket> listener =
         ListenStream(InetAddress("127.0.0.1", 0));
     if (!listener.ok()) {
       server_status = listener.status();
-      return;
+      ASYNC_RETURN;
     }
     const int port = listener->BoundAddress().Port();
-    fx.runtime.Spawn([&, port](Context client_ctx) {
-      absl::StatusOr<StreamSocket> connected = ConnectStream(
-          InetAddress("127.0.0.1", port), std::chrono::seconds(2), client_ctx);
+    fx.runtime.Spawn([&, port](Context client_ctx) -> Task<void> {
+      absl::StatusOr<StreamSocket> connected = ASYNC_AWAIT(ConnectStream(
+          InetAddress("127.0.0.1", port), std::chrono::seconds(2), client_ctx));
       if (!connected.ok()) {
         client_status = connected.status();
-        return;
+        ASYNC_RETURN;
       }
       ByteStream client(std::move(*connected));
-      client_status = client.HandshakeTls(*stranger, /*server_role=*/false,
-                                          client_ctx, std::chrono::seconds(2));
+      client_status = ASYNC_AWAIT(client.HandshakeTls(
+          *stranger, /*server_role=*/false, client_ctx,
+          std::chrono::seconds(2)));
     });
-    absl::StatusOr<StreamSocket> accepted = listener->Accept(ctx);
+    absl::StatusOr<StreamSocket> accepted = ASYNC_AWAIT(listener->Accept(ctx));
     if (!accepted.ok()) {
       server_status = accepted.status();
-      return;
+      ASYNC_RETURN;
     }
     ByteStream server(std::move(*accepted));
-    server_status = server.HandshakeTls(*trusted, /*server_role=*/true, ctx,
-                                        std::chrono::seconds(2));
+    server_status = ASYNC_AWAIT(server.HandshakeTls(
+        *trusted, /*server_role=*/true, ctx, std::chrono::seconds(2)));
   });
 
   fx.Run();

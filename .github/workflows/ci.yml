@@ -139,6 +139,40 @@ jobs:
             --test_output=errors \
             ${{ matrix.bazel_flags }}
 
+  # Builds and tests the whole tree with the C++20 coroutine backend (co20,
+  # --config=cpp20).  Targets that depend on the stackful co API or on
+  # zero-allocation hot paths are gated off under co20 and are skipped.  See
+  # docs/cpp20-coroutines.md.
+  cpp20:
+    name: cpp20 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            bazel_flags:
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Bazel
+        uses: bazel-contrib/setup-bazel@0.18.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-${{ matrix.os }}-cpp20
+          repository-cache: true
+
+      - name: Build and test all targets with co20
+        run: |
+          bazelisk test \
+            --config=cpp20 \
+            --test_output=errors \
+            ${{ matrix.bazel_flags }} \
+            //...
+
   # Exercises the anonymous memfd_create shared-memory backend on Linux
   # (--config=linux_memfd, i.e. SUBSPACE_SHMEM_MODE_MEMFD).  This is the same
   # mechanism Android always uses; running it on native Linux guards against

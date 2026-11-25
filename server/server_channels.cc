@@ -303,34 +303,41 @@ void Server::RemoveAllUsersFor(ClientHandler *handler) {
   }
 }
 
-void Server::ChannelDirectoryCoroutine(async::Context ctx) {
+async::Task<void> Server::ChannelDirectoryCoroutine(async::Context ctx) {
   // Coroutine aware client.
   Client client(ctx);
-  absl::Status status = client.Init(socket_name_);
+  absl::Status status = SERVER_CLIENT_CALL(
+      (client.Init(socket_name_)), client.InitAsync(socket_name_));
   if (!status.ok()) {
     logger_.Log(
         toolbelt::LogLevel::kError,
         "Failed to initialize Subspace client for channel directory: %s",
         status.ToString().c_str());
-    return;
+    ASYNC_RETURN;
   }
   constexpr int kDirectorySlotSize = 1024;
   constexpr int kDirectoryNumSlots = 32;
 
-  absl::StatusOr<Publisher> channel_directory = client.CreatePublisher(
-      "/subspace/ChannelDirectory", kDirectorySlotSize, kDirectoryNumSlots,
-      PublisherOptions()
-          .SetType("subspace.ChannelDirectory")
-          .SetUseSplitBuffers(false));
+  absl::StatusOr<Publisher> channel_directory = SERVER_CLIENT_CALL(
+      (client.CreatePublisher("/subspace/ChannelDirectory", kDirectorySlotSize,
+                              kDirectoryNumSlots,
+                              PublisherOptions()
+                                  .SetType("subspace.ChannelDirectory")
+                                  .SetUseSplitBuffers(false))),
+      client.CreatePublisherAsync(
+          "/subspace/ChannelDirectory", kDirectorySlotSize, kDirectoryNumSlots,
+          PublisherOptions()
+              .SetType("subspace.ChannelDirectory")
+              .SetUseSplitBuffers(false)));
   if (!channel_directory.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to create channel directory channel: %s",
                 channel_directory.status().ToString().c_str());
-    return;
+    ASYNC_RETURN;
   }
   while (!shutting_down_) {
-    (void)async::WaitReadable(ctx,
-                              channel_directory_trigger_fd_.GetPollFd().Fd());
+    (void)ASYNC_AWAIT(async::WaitReadable(ctx,
+                              channel_directory_trigger_fd_.GetPollFd().Fd()));
     channel_directory_trigger_fd_.Clear();
 
     ChannelDirectory directory;
@@ -343,13 +350,15 @@ void Server::ChannelDirectoryCoroutine(async::Context ctx) {
       channel.second->GetChannelInfo(info);
     }
     int64_t length = directory.ByteSizeLong();
-    absl::StatusOr<void *> buffer =
-        channel_directory->GetMessageBuffer(int32_t(length));
+    absl::StatusOr<void *> buffer = SERVER_CLIENT_CALL(
+        (channel_directory->GetMessageBuffer(int32_t(length))),
+        channel_directory->GetMessageBufferAsync(int32_t(length)));
     if (!buffer.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to get channel directory buffer: %s",
                   buffer.status().ToString().c_str());
-      return;
+      SERVER_CLIENT_CLOSE(*channel_directory);
+      ASYNC_RETURN;
     }
     bool ok = directory.SerializeToArray(*buffer, length);
     if (!ok) {
@@ -357,13 +366,16 @@ void Server::ChannelDirectoryCoroutine(async::Context ctx) {
                   "Failed to serialize channel directory");
       continue;
     }
-    absl::StatusOr<const Message> s = channel_directory->PublishMessage(length);
+    absl::StatusOr<const Message> s = SERVER_CLIENT_CALL(
+        (channel_directory->PublishMessage(length)),
+        channel_directory->PublishMessageAsync(length));
     if (!s.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to publish channel directory: %s",
                   s.status().ToString().c_str());
     }
   }
+  SERVER_CLIENT_CLOSE(*channel_directory);
 }
 
 void Server::SendChannelDirectory() {
@@ -373,28 +385,35 @@ void Server::SendChannelDirectory() {
   }
 }
 
-void Server::StatisticsCoroutine(async::Context ctx) {
+async::Task<void> Server::StatisticsCoroutine(async::Context ctx) {
   Client client(ctx);
-  absl::Status status = client.Init(socket_name_);
+  absl::Status status = SERVER_CLIENT_CALL(
+      (client.Init(socket_name_)), client.InitAsync(socket_name_));
   if (!status.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to initialize Subspace client for statistics: %s",
                 status.ToString().c_str());
-    return;
+    ASYNC_RETURN;
   }
   constexpr int kStatsSlotSize = 1024;
   constexpr int kStatsNumSlots = 32;
 
-  absl::StatusOr<Publisher> pub = client.CreatePublisher(
-      "/subspace/Statistics", kStatsSlotSize, kStatsNumSlots,
-      PublisherOptions()
-          .SetType("subspace.Statistics")
-          .SetUseSplitBuffers(false));
+  absl::StatusOr<Publisher> pub = SERVER_CLIENT_CALL(
+      (client.CreatePublisher("/subspace/Statistics", kStatsSlotSize,
+                              kStatsNumSlots,
+                              PublisherOptions()
+                                  .SetType("subspace.Statistics")
+                                  .SetUseSplitBuffers(false))),
+      client.CreatePublisherAsync("/subspace/Statistics", kStatsSlotSize,
+                                  kStatsNumSlots,
+                                  PublisherOptions()
+                                      .SetType("subspace.Statistics")
+                                      .SetUseSplitBuffers(false)));
   if (!pub.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to create statistics channel: %s",
                 pub.status().ToString().c_str());
-    return;
+    ASYNC_RETURN;
   }
 
   auto delivered_statistics_messages = [this]() -> uint64_t {
@@ -410,7 +429,7 @@ void Server::StatisticsCoroutine(async::Context ctx) {
   constexpr int kPeriodSecs = 2;
   uint64_t sequence = 0;
   while (!shutting_down_) {
-    async::Sleep(ctx, kPeriodSecs);
+    ASYNC_AWAIT(async::Sleep(ctx, kPeriodSecs));
     Statistics stats;
     stats.set_timestamp(toolbelt::Now());
     stats.set_server_id(server_id_);
@@ -447,12 +466,15 @@ void Server::StatisticsCoroutine(async::Context ctx) {
     }
     int64_t length = stats.ByteSizeLong();
 
-    absl::StatusOr<void *> buffer = pub->GetMessageBuffer(int32_t(length));
+    absl::StatusOr<void *> buffer = SERVER_CLIENT_CALL(
+        (pub->GetMessageBuffer(int32_t(length))),
+        pub->GetMessageBufferAsync(int32_t(length)));
     if (!buffer.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to get channel stats buffer: %s",
                   buffer.status().ToString().c_str());
-      return;
+      SERVER_CLIENT_CLOSE(*pub);
+      ASYNC_RETURN;
     }
     bool ok = stats.SerializeToArray(*buffer, length);
     if (!ok) {
@@ -461,7 +483,8 @@ void Server::StatisticsCoroutine(async::Context ctx) {
       continue;
     }
     const uint64_t delivered_before = delivered_statistics_messages();
-    absl::StatusOr<const Message> s = pub->PublishMessage(length);
+    absl::StatusOr<const Message> s = SERVER_CLIENT_CALL(
+        (pub->PublishMessage(length)), pub->PublishMessageAsync(length));
     if (!s.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to publish statistics: %s",
@@ -484,6 +507,7 @@ void Server::StatisticsCoroutine(async::Context ctx) {
     statistics_totals_ = std::move(totals);
     ++sequence;
   }
+  SERVER_CLIENT_CLOSE(*pub);
 }
 
 } // namespace subspace

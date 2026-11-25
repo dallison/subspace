@@ -7,8 +7,12 @@
 cmake_minimum_required(VERSION 3.15)
 project(Subspace LANGUAGES CXX ASM)
 
-# Set C++ standard and compiler flags
-set(CMAKE_CXX_STANDARD 17)
+# Set C++ standard and compiler flags.  Configure with
+# -DCMAKE_CXX_STANDARD=20 for the C++20 coroutine backend (see
+# SUBSPACE_CORO_BACKEND below).
+if(NOT DEFINED CMAKE_CXX_STANDARD)
+    set(CMAKE_CXX_STANDARD 17)
+endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF) # Prefer standard C++
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -199,11 +203,11 @@ endif()
 message(STATUS "Trigger mechanism: ${SUBSPACE_TRIGGER_MECHANISM}")
 
 # --- External Dependency: co (using FetchContent for native CMake) ---
+# Same commit as the Bazel git_override in MODULE.bazel (co 3.5.2, #82).
 FetchContent_Declare(
     co
     GIT_REPOSITORY https://github.com/dallison/co.git
-    # dallison/co#77 (poll event mask) plus TSan stack-switch fix (c2cbd0f).
-    GIT_TAG c2cbd0f75b1e834090762d584b812a485b8b8ca8
+    GIT_TAG db9ecf4c6a7396bcd409addfffac3be6f00c2b59
     CMAKE_ARGS
         -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
 )
@@ -234,22 +238,40 @@ FetchContent_MakeAvailable(protobuf)
 # These targets can be used directly without find_package
 
 # --- Option: coroutine/networking backend for the server ---
-# Mirrors the Bazel //:coro_backend flag.  "co" (default) builds against the co
-# coroutine library; "asio" builds the server against Boost.Asio.  The value is
+# Mirrors the Bazel //:coro_backend flag.  "co" builds against the co
+# coroutine library; "asio" builds the server against Boost.Asio; "co20" uses
+# C++20 stackless coroutines and needs CMAKE_CXX_STANDARD 20 or later.  "auto"
+# (default) picks co20 for C++20 and later, otherwise co.  The value is
 # translated into the SUBSPACE_CORO_BACKEND macro (see common/async/context.h)
 # and applied globally so every translation unit that includes the async
 # headers sees a consistent backend.
-set(SUBSPACE_CORO_BACKEND "co" CACHE STRING "Server coroutine backend: co or asio")
-set_property(CACHE SUBSPACE_CORO_BACKEND PROPERTY STRINGS "co" "asio")
+set(SUBSPACE_CORO_BACKEND "auto" CACHE STRING "Server coroutine backend: auto, co, co20 or asio")
+set_property(CACHE SUBSPACE_CORO_BACKEND PROPERTY STRINGS "auto" "co" "co20" "asio")
 
-if(SUBSPACE_CORO_BACKEND STREQUAL "asio")
+if(SUBSPACE_CORO_BACKEND STREQUAL "auto")
+    if(CMAKE_CXX_STANDARD GREATER_EQUAL 20)
+        set(SUBSPACE_CORO_BACKEND_RESOLVED "co20")
+    else()
+        set(SUBSPACE_CORO_BACKEND_RESOLVED "co")
+    endif()
+else()
+    set(SUBSPACE_CORO_BACKEND_RESOLVED "${SUBSPACE_CORO_BACKEND}")
+endif()
+
+if(SUBSPACE_CORO_BACKEND_RESOLVED STREQUAL "asio")
     add_compile_definitions(SUBSPACE_CORO_BACKEND=2)
     message(STATUS "Subspace coroutine backend: asio (Boost.Asio)")
-elseif(SUBSPACE_CORO_BACKEND STREQUAL "co")
-    # co backend leaves SUBSPACE_CORO_BACKEND unset; context.h defaults to _CO.
+elseif(SUBSPACE_CORO_BACKEND_RESOLVED STREQUAL "co20")
+    if(CMAKE_CXX_STANDARD LESS 20)
+        message(FATAL_ERROR "SUBSPACE_CORO_BACKEND=co20 needs CMAKE_CXX_STANDARD 20 or later")
+    endif()
+    add_compile_definitions(SUBSPACE_CORO_BACKEND=3)
+    message(STATUS "Subspace coroutine backend: co20 (C++20 coroutines)")
+elseif(SUBSPACE_CORO_BACKEND_RESOLVED STREQUAL "co")
+    add_compile_definitions(SUBSPACE_CORO_BACKEND=1)
     message(STATUS "Subspace coroutine backend: co")
 else()
-    message(FATAL_ERROR "SUBSPACE_CORO_BACKEND must be 'co' or 'asio'")
+    message(FATAL_ERROR "SUBSPACE_CORO_BACKEND must be 'auto', 'co', 'co20' or 'asio'")
 endif()
 
 # --- Option: asio_rpc backend (Boost.Asio RPC) ---
@@ -269,7 +291,7 @@ if(SUBSPACE_ASIO_RPC AND CMAKE_CROSSCOMPILING)
 endif()
 
 set(SUBSPACE_NEEDS_BOOST OFF)
-if(SUBSPACE_CORO_BACKEND STREQUAL "asio" OR SUBSPACE_ASIO_RPC)
+if(SUBSPACE_CORO_BACKEND_RESOLVED STREQUAL "asio" OR SUBSPACE_ASIO_RPC)
     set(SUBSPACE_NEEDS_BOOST ON)
 endif()
 

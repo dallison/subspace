@@ -41,7 +41,7 @@ void Server::SendQuery(const std::string &channel_name) {
   // it shares the discovery sockets/connections with the discovery coroutines
   // and is itself invoked from client handlers (also on the strand).
   runtime_.SpawnOnStrand(
-      [this, channel_name](async::Context ctx) {
+      [this, channel_name](async::Context ctx) -> async::Task<void> {
         logger_.Log(toolbelt::LogLevel::kDebug,
                     "Sending Query %s with discovery port %d",
                     channel_name.c_str(), discovery_port_);
@@ -51,11 +51,11 @@ void Server::SendQuery(const std::string &channel_name) {
         auto *query = disc.mutable_query();
         query->set_channel_name(channel_name);
 
-        if (absl::Status s = TransmitDiscovery(disc, discovery_addr_, ctx);
+        if (absl::Status s = ASYNC_AWAIT(TransmitDiscovery(disc, discovery_addr_, ctx));
             !s.ok()) {
           logger_.Log(toolbelt::LogLevel::kError, "Failed to send Query: %s",
                       s.ToString().c_str());
-          return;
+          ASYNC_RETURN;
         }
       },
       {.name = "Send discovery query",
@@ -71,7 +71,7 @@ void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
   // (shares the discovery sockets/connections with the discovery coroutines and
   // is invoked from client handlers).
   runtime_.SpawnOnStrand(
-      [this, channel_name, reliable](async::Context ctx) {
+      [this, channel_name, reliable](async::Context ctx) -> async::Task<void> {
         logger_.Log(toolbelt::LogLevel::kDebug,
                     "Sending Advertise %s with discovery port %d",
                     channel_name.c_str(), discovery_port_);
@@ -85,18 +85,18 @@ void Server::SendAdvertise(const std::string &channel_name, bool reliable) {
           advertise->set_split_buffers(
               ChannelUsesSplitBuffersOverBridge(it->second.get()));
         }
-        if (absl::Status s = TransmitDiscovery(disc, discovery_addr_, ctx);
+        if (absl::Status s = ASYNC_AWAIT(TransmitDiscovery(disc, discovery_addr_, ctx));
             !s.ok()) {
           logger_.Log(toolbelt::LogLevel::kError,
                       "Failed to send Advertise: %s", s.ToString().c_str());
-          return;
+          ASYNC_RETURN;
         }
       },
       {.name = "Send discovery advertise",
        .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
 }
 
-absl::Status Server::TransmitDiscovery(const Discovery &disc,
+async::Task<absl::Status> Server::TransmitDiscovery(const Discovery &disc,
                                        const toolbelt::InetAddress &udp_dest,
                                        [[maybe_unused]] async::Context ctx) {
   if (tcp_discovery_) {
@@ -106,7 +106,7 @@ absl::Status Server::TransmitDiscovery(const Discovery &disc,
     std::vector<char> buffer(sizeof(int32_t) + length);
     if (!disc.SerializeToArray(buffer.data() + sizeof(int32_t),
                                static_cast<int>(length))) {
-      return absl::InternalError("Failed to serialize discovery message");
+      ASYNC_RETURN absl::InternalError("Failed to serialize discovery message");
     }
     // Copy the connection list so a send that drops a connection can't
     // invalidate the iterator.  Writes are blocking (no coroutine yield) so
@@ -114,11 +114,12 @@ absl::Status Server::TransmitDiscovery(const Discovery &disc,
     auto connections = discovery_connections_;
     for (const auto &conn : connections) {
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
-      absl::StatusOr<ssize_t> n = conn->socket->SendMessage(
-          buffer.data() + sizeof(int32_t), length, ctx);
+      absl::StatusOr<ssize_t> n = ASYNC_AWAIT(conn->socket->SendMessage(
+          buffer.data() + sizeof(int32_t), length, ctx));
 #else
       absl::StatusOr<ssize_t> n =
-          conn->socket->SendMessage(buffer.data() + sizeof(int32_t), length);
+          ASYNC_AWAIT(conn->socket->SendMessage(buffer.data() + sizeof(int32_t), length,
+                                                   async::NullContext()));
 #endif
       if (!n.ok()) {
         logger_.Log(toolbelt::LogLevel::kError,
@@ -126,18 +127,19 @@ absl::Status Server::TransmitDiscovery(const Discovery &disc,
                     conn->remote.ToString().c_str(), n.status().ToString().c_str());
       }
     }
-    return absl::OkStatus();
+    ASYNC_RETURN absl::OkStatus();
   }
 
   char buffer[kDiscoveryBufferSize];
   if (!disc.SerializeToArray(buffer, sizeof(buffer))) {
-    return absl::InternalError("Failed to serialize discovery message");
+    ASYNC_RETURN absl::InternalError("Failed to serialize discovery message");
   }
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
-  return discovery_transmitter_.SendTo(udp_dest, buffer, disc.ByteSizeLong(),
-                                       ctx);
+  ASYNC_RETURN ASYNC_AWAIT(discovery_transmitter_.SendTo(udp_dest, buffer, disc.ByteSizeLong(),
+                                       ctx));
 #else
-  return discovery_transmitter_.SendTo(udp_dest, buffer, disc.ByteSizeLong());
+  ASYNC_RETURN ASYNC_AWAIT(discovery_transmitter_.SendTo(
+      udp_dest, buffer, disc.ByteSizeLong(), async::NullContext()));
 #endif
 }
 
@@ -161,23 +163,23 @@ void Server::AdvertiseAllChannels() {
 // Reads length-delimited Discovery protobufs from a single TCP discovery
 // connection and dispatches them to the same handlers used by UDP discovery.
 // Returns when the connection is closed or fails.
-void Server::DiscoveryConnectionReaderLoop(
+async::Task<void> Server::DiscoveryConnectionReaderLoop(
     async::Context ctx, std::shared_ptr<DiscoveryConnection> conn) {
   char buffer[kDiscoveryBufferSize];
   for (;;) {
     absl::StatusOr<ssize_t> n =
-        conn->socket->ReceiveMessage(buffer, sizeof(buffer), ctx);
+        ASYNC_AWAIT(conn->socket->ReceiveMessage(buffer, sizeof(buffer), ctx));
     if (!n.ok()) {
       logger_.Log(toolbelt::LogLevel::kDebug,
                   "Discovery connection to %s closed: %s",
                   conn->remote.ToString().c_str(), n.status().ToString().c_str());
-      return;
+      ASYNC_RETURN;
     }
     if (*n == 0) {
       logger_.Log(toolbelt::LogLevel::kDebug,
                   "Discovery connection to %s closed by peer",
                   conn->remote.ToString().c_str());
-      return;
+      ASYNC_RETURN;
     }
     Discovery disc;
     if (!disc.ParseFromArray(buffer, static_cast<int>(*n))) {
@@ -212,7 +214,7 @@ void Server::DiscoveryConnectionReaderLoop(
 
 // Listens for an incoming TCP discovery connection and serves each one with a
 // reader coroutine.  Used by the server that does not have a peer address.
-void Server::DiscoveryListenerCoroutine(async::Context ctx) {
+async::Task<void> Server::DiscoveryListenerCoroutine(async::Context ctx) {
   async::StreamSocket listener;
   if (absl::Status s = listener.Bind(
           toolbelt::InetAddress::AnyAddress(discovery_port_), true);
@@ -220,16 +222,16 @@ void Server::DiscoveryListenerCoroutine(async::Context ctx) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to bind TCP discovery listener on port %d: %s",
                 discovery_port_, s.ToString().c_str());
-    return;
+    ASYNC_RETURN;
   }
   logger_.Log(toolbelt::LogLevel::kInfo,
               "Listening for TCP discovery connections on port %d",
               discovery_port_);
   for (;;) {
-    absl::StatusOr<async::StreamSocket> incoming = listener.Accept(ctx);
+    absl::StatusOr<async::StreamSocket> incoming = ASYNC_AWAIT(listener.Accept(ctx));
     if (!incoming.ok()) {
       if (shutting_down_) {
-        return;
+        ASYNC_RETURN;
       }
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to accept discovery connection: %s",
@@ -254,8 +256,8 @@ void Server::DiscoveryListenerCoroutine(async::Context ctx) {
     // Runs on the client strand: the reader handles incoming
     // Advertise/Subscribe messages which mutate channels_ and channel_ids_.
     runtime_.SpawnOnStrand(
-        [this, conn](async::Context reader_ctx) {
-          DiscoveryConnectionReaderLoop(reader_ctx, conn);
+        [this, conn](async::Context reader_ctx) -> async::Task<void> {
+          ASYNC_AWAIT(DiscoveryConnectionReaderLoop(reader_ctx, conn));
           RemoveDiscoveryConnection(conn);
         },
         {.name = "Discovery reader",
@@ -265,18 +267,18 @@ void Server::DiscoveryListenerCoroutine(async::Context ctx) {
 
 // Dials the configured peer for TCP discovery, retrying on failure, and serves
 // the connection inline.  Used by the server that has a peer address.
-void Server::DiscoveryConnectorCoroutine(async::Context ctx) {
+async::Task<void> Server::DiscoveryConnectorCoroutine(async::Context ctx) {
   constexpr int kRetrySecs = 1;
   for (;;) {
     if (shutting_down_) {
-      return;
+      ASYNC_RETURN;
     }
     auto socket = std::make_shared<async::StreamSocket>();
     if (absl::Status s = socket->Connect(peer_address_); !s.ok()) {
       logger_.Log(toolbelt::LogLevel::kDebug,
                   "TCP discovery connect to %s failed: %s; retrying",
                   peer_address_.ToString().c_str(), s.ToString().c_str());
-      async::Sleep(ctx, kRetrySecs);
+      ASYNC_AWAIT(async::Sleep(ctx, kRetrySecs));
       continue;
     }
     auto conn = std::make_shared<DiscoveryConnection>();
@@ -287,26 +289,26 @@ void Server::DiscoveryConnectorCoroutine(async::Context ctx) {
                 peer_address_.ToString().c_str());
     AddDiscoveryConnection(conn);
     AdvertiseAllChannels();
-    DiscoveryConnectionReaderLoop(ctx, conn);
+    ASYNC_AWAIT(DiscoveryConnectionReaderLoop(ctx, conn));
     RemoveDiscoveryConnection(conn);
     if (shutting_down_) {
-      return;
+      ASYNC_RETURN;
     }
-    async::Sleep(ctx, kRetrySecs);
+    ASYNC_AWAIT(async::Sleep(ctx, kRetrySecs));
   }
 }
 
 // This coroutine receives discovery messages over UDP.
-void Server::DiscoveryReceiverCoroutine(async::Context ctx) {
+async::Task<void> Server::DiscoveryReceiverCoroutine(async::Context ctx) {
   char buffer[kDiscoveryBufferSize];
 
   for (;;) {
     toolbelt::InetAddress sender;
-    absl::StatusOr<ssize_t> n = discovery_receiver_.ReceiveFrom(
-        sender, buffer, sizeof(buffer), ctx);
+    absl::StatusOr<ssize_t> n = ASYNC_AWAIT(discovery_receiver_.ReceiveFrom(
+        sender, buffer, sizeof(buffer), ctx));
     if (!n.ok()) {
       if (shutting_down_) {
-        return;
+        ASYNC_RETURN;
       }
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to read discovery message: %s",
@@ -320,7 +322,7 @@ void Server::DiscoveryReceiverCoroutine(async::Context ctx) {
       continue;
     }
     if (disc.server_id() == server_id_) {
-      return;
+      ASYNC_RETURN;
     }
     sender.SetPort(disc.port());
     logger_.Log(toolbelt::LogLevel::kDebug, "Discovery message from %s\n%s",
@@ -355,11 +357,11 @@ void Server::SubscribeOverBridge(ServerChannel *channel, bool reliable,
   std::string channel_name = channel->Name();
   runtime_.SpawnOnNewStrand(
       [this, channel_name, reliable, split_buffers_over_bridge, publisher,
-       local_has_split_options, local_use_split_buffers](async::Context ctx) {
-        BridgeReceiverCoroutine(ctx, channel_name, reliable,
+       local_has_split_options, local_use_split_buffers](async::Context ctx) -> async::Task<void> {
+        ASYNC_AWAIT(BridgeReceiverCoroutine(ctx, channel_name, reliable,
                                 split_buffers_over_bridge, publisher,
                                 local_has_split_options,
-                                local_use_split_buffers);
+                                local_use_split_buffers));
       },
       {.name = absl::StrFormat("Bridge receiver for %s", channel_name),
        .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
@@ -467,10 +469,10 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
     runtime_.SpawnOnNewStrand(
         [this, info = std::move(info), pub_reliable, sub_reliable,
          subscriber_addr = std::move(*subscriber_addr), sender,
-         notify_retirement](async::Context ctx) mutable {
-          BridgeTransmitterCoroutine(ctx, std::move(info), pub_reliable,
+         notify_retirement](async::Context ctx) mutable -> async::Task<void> {
+          ASYNC_AWAIT(BridgeTransmitterCoroutine(ctx, std::move(info), pub_reliable,
                                      sub_reliable, std::move(subscriber_addr),
-                                     sender, notify_retirement);
+                                     sender, notify_retirement));
         },
         {.name = absl::StrFormat("Bridge transmitter for %s", channel->first)
                      .c_str(),
@@ -482,10 +484,10 @@ void Server::IncomingSubscribe(const Discovery::Subscribe &subscribe,
   }
 }
 
-void Server::GratuitousAdvertiseCoroutine(async::Context ctx) {
+async::Task<void> Server::GratuitousAdvertiseCoroutine(async::Context ctx) {
   constexpr int kPeriodSecs = 5;
   while (!shutting_down_) {
-    async::Sleep(ctx, kPeriodSecs);
+    ASYNC_AWAIT(async::Sleep(ctx, kPeriodSecs));
     if (shutting_down_) {
       break;
     }

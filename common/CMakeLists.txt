@@ -30,6 +30,11 @@ target_link_libraries(subspace_common PUBLIC
     protobuf::libprotobuf
 )
 
+# Headers in common/ include async/context.h, which references a backend
+# link-check symbol (and, for co20, co20 types).  subspace_async defines that
+# symbol and brings in the backend's coroutine library.
+target_link_libraries(subspace_common PUBLIC subspace_async)
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
     target_link_libraries(subspace_common PUBLIC rt)
 elseif(ANDROID)
@@ -45,8 +50,11 @@ add_library(subspace_async STATIC
     async/mtls.h
     async/byte_stream.h
     async/byte_stream.cc
+    async/frame_pool.h
+    async/frame_pool.cc
     async/socket.h
     async/socket.cc
+    async/task.h
     async/wait.h
     async/wait.cc
 )
@@ -64,8 +72,10 @@ if(SUBSPACE_ENABLE_MTLS)
 else()
     target_compile_definitions(subspace_async PUBLIC SUBSPACE_ENABLE_MTLS=0)
 endif()
-if(SUBSPACE_CORO_BACKEND STREQUAL "asio")
+if(SUBSPACE_CORO_BACKEND_RESOLVED STREQUAL "asio")
     target_link_libraries(subspace_async PUBLIC Boost::asio Boost::coroutine)
+elseif(SUBSPACE_CORO_BACKEND_RESOLVED STREQUAL "co20")
+    target_link_libraries(subspace_async PUBLIC co_cpp20)
 endif()
 
 add_executable(async_test async/async_test.cc)

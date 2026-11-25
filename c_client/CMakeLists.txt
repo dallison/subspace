@@ -19,7 +19,11 @@ target_link_libraries(subspace_c_client PUBLIC
     subspace_client
 )
 
+# These tests construct subspace::Server with a co::CoroutineScheduler, which the
+# co20 backend doesn't provide (mirrors target_compatible_with in Bazel).
+if(NOT SUBSPACE_CORO_BACKEND_RESOLVED STREQUAL "co20")
 add_executable(c_client_test client_test.cc)
 add_test(NAME c_client_test COMMAND c_client_test)
 add_test(NAME c_client_split_buffer_test COMMAND c_client_test --use_split_buffers)
 target_link_libraries(c_client_test PUBLIC subspace_c_client libserver gtest absl::flags_parse)
+endif()

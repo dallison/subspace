@@ -226,14 +226,15 @@ absl::Status ClientImpl::CheckConnected() const {
   return absl::OkStatus();
 }
 
-absl::Status ClientImpl::Init(const std::string &server_socket,
+async::Task<absl::Status>
+ClientImpl::Init(const std::string &server_socket,
                               const std::string &client_name) {
 #if defined(__QNX__) || defined(__QNXNTO__)
   ConfigureQnxClockPeriod();
 #endif
   ClientLockGuard guard(this);
   if (socket_.Connected()) {
-    return absl::InternalError("Client is already connected to the server; "
+    ASYNC_RETURN absl::InternalError("Client is already connected to the server; "
                                "Init() called twice perhaps?");
   }
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
@@ -243,7 +244,7 @@ absl::Status ClientImpl::Init(const std::string &server_socket,
 #endif
   absl::Status status = socket_.Connect(server_socket);
   if (!status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
 
   name_ = client_name;
@@ -253,24 +254,24 @@ absl::Status ClientImpl::Init(const std::string &server_socket,
   Response resp;
   std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
-  status = SendRequestReceiveResponse(req, resp, fds);
+  status = ASYNC_AWAIT(SendRequestReceiveResponse(req, resp, fds));
   if (!status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
   if (!resp.init().error().empty()) {
-    return absl::InternalError(resp.init().error());
+    ASYNC_RETURN absl::InternalError(resp.init().error());
   }
   if (absl::Status fd_status = CheckFdIndex(fds, resp.init().scb_fd_index(),
                                             "scb_fd", "InitResponse");
       !fd_status.ok()) {
-    return fd_status;
+    ASYNC_RETURN fd_status;
   }
   scb_fd_ = std::move(fds[resp.init().scb_fd_index()]);
   session_id_ = resp.init().session_id();
   server_user_id_ = resp.init().user_id();
   server_group_id_ = resp.init().group_id();
   was_connected_ = true;
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
 absl::Status ClientImpl::RegisterDroppedMessageCallback(
@@ -380,14 +381,15 @@ absl::Status ClientImpl::UnregisterResizeCallback(PublisherImpl *publisher) {
   return absl::OkStatus();
 }
 
-absl::Status ClientImpl::ProcessAllMessages(details::SubscriberImpl *subscriber,
+async::Task<absl::Status>
+ClientImpl::ProcessAllMessages(details::SubscriberImpl *subscriber,
                                             ReadMode mode) {
   std::function<void(details::SubscriberImpl *, Message)> callback;
   {
     ClientLockGuard guard(this);
     auto it = message_callbacks_.find(subscriber);
     if (it == message_callbacks_.end()) {
-      return absl::InternalError(absl::StrFormat(
+      ASYNC_RETURN absl::InternalError(absl::StrFormat(
           "No message callback has been registered for channel %s\n",
           subscriber->Name()));
     }
@@ -395,25 +397,25 @@ absl::Status ClientImpl::ProcessAllMessages(details::SubscriberImpl *subscriber,
   }
 
   for (;;) {
-    absl::StatusOr<Message> msg = ReadMessage(subscriber, mode);
+    absl::StatusOr<Message> msg = ASYNC_AWAIT(ReadMessage(subscriber, mode));
     if (!msg.ok()) {
-      return msg.status();
+      ASYNC_RETURN msg.status();
     }
     if (msg->length == 0) {
       break;
     }
     callback(subscriber, std::move(*msg));
   }
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
-absl::StatusOr<std::vector<Message>>
+async::Task<absl::StatusOr<std::vector<Message>>>
 ClientImpl::GetAllMessages(details::SubscriberImpl *subscriber, ReadMode mode) {
   std::vector<Message> r;
   for (;;) {
-    absl::StatusOr<Message> msg = ReadMessage(subscriber, mode);
+    absl::StatusOr<Message> msg = ASYNC_AWAIT(ReadMessage(subscriber, mode));
     if (!msg.ok()) {
-      return msg.status();
+      ASYNC_RETURN msg.status();
     }
     if (msg->length == 0) {
       break;
@@ -426,33 +428,50 @@ ClientImpl::GetAllMessages(details::SubscriberImpl *subscriber, ReadMode mode) {
     // std::cerr << "read {} messages, untriggering subscriber\n"_format(
     //         subscriber->numActiveMessages());
     subscriber->Untrigger();
-    return r;
+    ASYNC_RETURN r;
   }
 
   if (!r.empty()) {
     subscriber->Trigger();
   }
-  return r;
+  ASYNC_RETURN r;
 }
 
-absl::StatusOr<Publisher>
+// Tells the server to drop a publisher it created for us when the client
+// can't finish setting it up.  Best effort: the original failure is what the
+// caller needs to see.
+async::Task<void> ClientImpl::RemoveServerPublisher(
+    const std::string &channel_name, int32_t publisher_id) {
+  Request remove_req;
+  auto *cmd = remove_req.mutable_remove_publisher();
+  cmd->set_channel_name(channel_name);
+  cmd->set_publisher_id(publisher_id);
+
+  Response remove_resp;
+  std::vector<toolbelt::FileDescriptor> remove_fds;
+  (void)ASYNC_AWAIT(
+      SendRequestReceiveResponse(remove_req, remove_resp, remove_fds));
+  ASYNC_RETURN;
+}
+
+async::Task<absl::StatusOr<Publisher>>
 ClientImpl::CreatePublisher(const std::string &channel_name,
                             const PublisherOptions &opts) {
   ClientLockGuard guard(this);
   if (absl::Status status = CheckConnected(); !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
   if (opts.MaxOutstandingSlotLeases() < 1 ||
       opts.MaxOutstandingSlotLeases() > opts.NumSlots()) {
-    return absl::InvalidArgumentError(
+    ASYNC_RETURN absl::InvalidArgumentError(
         "MaxOutstandingSlotLeases must be between 1 and NumSlots");
   }
   if (opts.max_slot_size < 0) {
-    return absl::InvalidArgumentError(absl::StrFormat(
+    ASYNC_RETURN absl::InvalidArgumentError(absl::StrFormat(
         "MaxSlotSize must be non-negative, not %d", opts.max_slot_size));
   }
   if (opts.max_slot_size > 0 && opts.slot_size > opts.max_slot_size) {
-    return absl::InvalidArgumentError(absl::StrFormat(
+    ASYNC_RETURN absl::InvalidArgumentError(absl::StrFormat(
         "Slot size %d for channel %s exceeds its maximum slot size of %d bytes",
         opts.slot_size, channel_name, opts.max_slot_size));
   }
@@ -464,25 +483,14 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
   Response resp;
   std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
-  if (absl::Status status = SendRequestReceiveResponse(req, resp, fds);
+  if (absl::Status status = ASYNC_AWAIT(SendRequestReceiveResponse(req, resp, fds));
       !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
   auto &pub_resp = resp.create_publisher();
   if (!pub_resp.error().empty()) {
-    return absl::InternalError(pub_resp.error());
+    ASYNC_RETURN absl::InternalError(pub_resp.error());
   }
-  auto remove_server_publisher = [&]() {
-    Request remove_req;
-    auto *cmd = remove_req.mutable_remove_publisher();
-    cmd->set_channel_name(channel_name);
-    cmd->set_publisher_id(pub_resp.publisher_id());
-
-    Response remove_resp;
-    std::vector<toolbelt::FileDescriptor> remove_fds;
-    (void)SendRequestReceiveResponse(remove_req, remove_resp, remove_fds);
-  };
-
   // A publisher may join an existing channel with fewer slots than it has.
   // The CCB layout is sized by the channel's slot count, so map with that and
   // keep it in the options so that reregistration asks for the same count.
@@ -496,24 +504,29 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
       pub_resp.subscriber_queue_arena_size(), pub_resp.channel_id(),
       pub_resp.publisher_id(), pub_resp.vchan_id(), session_id_,
       pub_resp.type(), channel_opts,
-      [this](Channel *c) {
-        return CheckReload(static_cast<ClientChannel *>(c));
+      [this](Channel *c) -> async::Task<bool> {
+        ASYNC_RETURN ASYNC_AWAIT(CheckReload(static_cast<ClientChannel *>(c)));
       },
       server_user_id_, server_group_id_);
+  // The channel awaits these, so they run on the caller's coroutine.
   channel->SetClientBufferRegistrationCallback(
       [this](const ClientBufferHandleMetadata &metadata,
-             const toolbelt::FileDescriptor *fd) {
-        return RegisterClientBuffer(metadata, fd);
+             const toolbelt::FileDescriptor *fd)
+          -> async::Task<absl::Status> {
+        ASYNC_RETURN ASYNC_AWAIT(RegisterClientBuffer(metadata, fd));
       });
-  channel->SetClientBufferLookupCallback([this](const std::string &channel_name,
-                                                uint64_t session_id,
-                                                uint32_t buffer_index) {
-    return GetClientBuffers(channel_name, session_id, buffer_index);
-  });
+  channel->SetClientBufferLookupCallback(
+      [this](const std::string &channel_name, uint64_t session_id,
+             uint32_t buffer_index)
+          -> async::Task<absl::StatusOr<std::vector<RegisteredClientBuffer>>> {
+        ASYNC_RETURN ASYNC_AWAIT(
+            GetClientBuffers(channel_name, session_id, buffer_index));
+      });
   channel->SetClientBufferUnregistrationCallback(
       [this](const std::string &channel_name, uint64_t session_id,
-             uint32_t buffer_index) {
-        return UnregisterClientBuffer(channel_name, session_id, buffer_index);
+             uint32_t buffer_index) -> async::Task<absl::Status> {
+        ASYNC_RETURN ASYNC_AWAIT(
+            UnregisterClientBuffer(channel_name, session_id, buffer_index));
       });
   int32_t cs = opts.ChecksumSize() > 0 ? opts.ChecksumSize() : 4;
   int32_t ms = opts.MetadataSize() > 0 ? opts.MetadataSize() : 0;
@@ -524,89 +537,89 @@ ClientImpl::CreatePublisher(const std::string &channel_name,
   if (absl::Status fd_status = CheckFdIndex(
           fds, pub_resp.ccb_fd_index(), "ccb_fd", "CreatePublisherResponse");
       !fd_status.ok()) {
-    remove_server_publisher();
-    return fd_status;
+    ASYNC_AWAIT(RemoveServerPublisher(channel_name, pub_resp.publisher_id()));
+    ASYNC_RETURN fd_status;
   }
   if (absl::Status fd_status = CheckFdIndex(
           fds, pub_resp.bcb_fd_index(), "bcb_fd", "CreatePublisherResponse");
       !fd_status.ok()) {
-    remove_server_publisher();
-    return fd_status;
+    ASYNC_AWAIT(RemoveServerPublisher(channel_name, pub_resp.publisher_id()));
+    ASYNC_RETURN fd_status;
   }
   SharedMemoryFds channel_fds(std::move(fds[pub_resp.ccb_fd_index()]),
                               std::move(fds[pub_resp.bcb_fd_index()]));
   if (absl::Status status = channel->Map(std::move(channel_fds), scb_fd_);
       !status.ok()) {
-    remove_server_publisher();
-    return status;
+    ASYNC_AWAIT(RemoveServerPublisher(channel_name, pub_resp.publisher_id()));
+    ASYNC_RETURN status;
   }
 
   if (absl::Status status =
-          channel->CreateOrAttachBuffers(Aligned(opts.slot_size));
+          ASYNC_AWAIT(channel->CreateOrAttachBuffers(Aligned(opts.slot_size)));
       !status.ok()) {
-    remove_server_publisher();
-    return status;
+    ASYNC_AWAIT(RemoveServerPublisher(channel_name, pub_resp.publisher_id()));
+    ASYNC_RETURN status;
   }
 
   ApplyPublisherResponseFds(channel.get(), pub_resp, fds);
 
   if (!opts.IsReliable()) {
     MessageSlot *slot =
-        channel->FindFreeSlotUnreliable(channel->GetPublisherId());
+        ASYNC_AWAIT(channel->FindFreeSlotUnreliable(channel->GetPublisherId()));
     if (slot == nullptr) {
-      remove_server_publisher();
-      return absl::InternalError("No slot available for publisher");
+      ASYNC_AWAIT(RemoveServerPublisher(channel_name, pub_resp.publisher_id()));
+      ASYNC_RETURN absl::InternalError("No slot available for publisher");
     }
     channel->SetSlot(slot);
     if (!opts.IsBridge() && opts.Activate()) {
-      if (absl::Status status = ActivateChannel(channel.get()); !status.ok()) {
-        remove_server_publisher();
-        return status;
+      if (absl::Status status = ASYNC_AWAIT(ActivateChannel(channel.get())); !status.ok()) {
+        ASYNC_AWAIT(RemoveServerPublisher(channel_name, pub_resp.publisher_id()));
+        ASYNC_RETURN status;
       }
     }
   } else if (!opts.IsBridge() && !opts.ForTunnel()) {
     // Send a single activation message to the channel.  Don't activate if
     // this is a tunnel publisher because there will already be an existing
     // reliable publisher that has been activated.
-    absl::Status status = ActivateReliableChannel(channel.get());
+    absl::Status status = ASYNC_AWAIT(ActivateReliableChannel(channel.get()));
     if (!status.ok()) {
-      remove_server_publisher();
-      return status;
+      ASYNC_AWAIT(RemoveServerPublisher(channel_name, pub_resp.publisher_id()));
+      ASYNC_RETURN status;
     }
   }
 
   channel->TriggerSubscribers();
-  if (absl::Status status = channel->UnmapUnusedBuffers(); !status.ok()) {
-    remove_server_publisher();
-    return status;
+  if (absl::Status status = ASYNC_AWAIT(channel->UnmapUnusedBuffers()); !status.ok()) {
+    ASYNC_AWAIT(RemoveServerPublisher(channel_name, pub_resp.publisher_id()));
+    ASYNC_RETURN status;
   }
   channels_.insert(channel);
-  return Publisher(shared_from_this(), channel);
+  ASYNC_RETURN Publisher(shared_from_this(), channel);
 }
 
-absl::StatusOr<Publisher>
+async::Task<absl::StatusOr<Publisher>>
 ClientImpl::CreatePublisher(const std::string &channel_name, int64_t slot_size,
                             int num_slots, const PublisherOptions &opts) {
   PublisherOptions options = opts;
   options.slot_size = slot_size;
   options.num_slots = num_slots;
-  return CreatePublisher(channel_name, options);
+  ASYNC_RETURN ASYNC_AWAIT(CreatePublisher(channel_name, options));
 }
 
-absl::StatusOr<Subscriber>
+async::Task<absl::StatusOr<Subscriber>>
 ClientImpl::CreateSubscriber(const std::string &channel_name,
                              const SubscriberOptions &opts) {
   ClientLockGuard guard(this);
   if (absl::Status status = CheckConnected(); !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
   if (opts.MaxActiveMessages() < 1) {
-    return absl::InvalidArgumentError(
+    ASYNC_RETURN absl::InvalidArgumentError(
         "MaxActiveMessages must be at least 1 for a subscriber");
   }
   if (!std::isfinite(opts.StuckWarningGracePeriod()) ||
       opts.StuckWarningGracePeriod() < 0) {
-    return absl::InvalidArgumentError(absl::StrFormat(
+    ASYNC_RETURN absl::InvalidArgumentError(absl::StrFormat(
         "StuckWarningGracePeriod must be a finite number of seconds that is "
         "at least 0, not %g",
         opts.StuckWarningGracePeriod()));
@@ -619,14 +632,14 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
   Response resp;
   std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
-  if (absl::Status status = SendRequestReceiveResponse(req, resp, fds);
+  if (absl::Status status = ASYNC_AWAIT(SendRequestReceiveResponse(req, resp, fds));
       !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
 
   auto &sub_resp = resp.create_subscriber();
   if (!sub_resp.error().empty()) {
-    return absl::InternalError(sub_resp.error());
+    ASYNC_RETURN absl::InternalError(sub_resp.error());
   }
 
   SubscriberOptions subscriber_options = opts;
@@ -645,16 +658,18 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
       sub_resp.subscriber_queue_size(), sub_resp.channel_id(),
       sub_resp.subscriber_id(), sub_resp.vchan_id(), session_id_, sub_resp.type(),
       subscriber_options,
-      [this](Channel *c) {
-        return CheckReload(static_cast<ClientChannel *>(c));
+      [this](Channel *c) -> async::Task<bool> {
+        ASYNC_RETURN ASYNC_AWAIT(CheckReload(static_cast<ClientChannel *>(c)));
       },
       server_user_id_, server_group_id_);
   channel->SetRequestName(channel_name);
-  channel->SetClientBufferLookupCallback([this](const std::string &channel_name,
-                                                uint64_t session_id,
-                                                uint32_t buffer_index) {
-    return GetClientBuffers(channel_name, session_id, buffer_index);
-  });
+  channel->SetClientBufferLookupCallback(
+      [this](const std::string &channel_name, uint64_t session_id,
+             uint32_t buffer_index)
+          -> async::Task<absl::StatusOr<std::vector<RegisteredClientBuffer>>> {
+        ASYNC_RETURN ASYNC_AWAIT(
+            GetClientBuffers(channel_name, session_id, buffer_index));
+      });
 
   channel->SetNumSlots(sub_resp.num_slots());
   channel->SetEffectiveSubscriberQueueSize(sub_resp.subscriber_queue_size());
@@ -670,24 +685,24 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
   if (absl::Status fd_status = CheckFdIndex(
           fds, sub_resp.ccb_fd_index(), "ccb_fd", "CreateSubscriberResponse");
       !fd_status.ok()) {
-    return fd_status;
+    ASYNC_RETURN fd_status;
   }
   if (absl::Status fd_status = CheckFdIndex(
           fds, sub_resp.bcb_fd_index(), "bcb_fd", "CreateSubscriberResponse");
       !fd_status.ok()) {
-    return fd_status;
+    ASYNC_RETURN fd_status;
   }
   SharedMemoryFds channel_fds(std::move(fds[sub_resp.ccb_fd_index()]),
                               std::move(fds[sub_resp.bcb_fd_index()]));
   if (absl::Status status = channel->Map(std::move(channel_fds), scb_fd_);
       !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
 
   channel->InitActiveMessages();
 
-  if (absl::Status status = channel->AttachBuffers(); !status.ok()) {
-    return status;
+  if (absl::Status status = ASYNC_AWAIT(channel->AttachBuffers()); !status.ok()) {
+    ASYNC_RETURN status;
   }
   channel->RememberPublishedOrdinals();
 
@@ -696,7 +711,7 @@ ClientImpl::CreateSubscriber(const std::string &channel_name,
   channel->Trigger();
 
   channels_.insert(channel);
-  return Subscriber(shared_from_this(), channel);
+  ASYNC_RETURN Subscriber(shared_from_this(), channel);
 }
 
 static uint64_t ExpandSlotSize(uint64_t slotSize) {
@@ -720,20 +735,7 @@ static uint64_t ExpandSlotSize(uint64_t slotSize) {
   return Aligned(uint64_t(double(slotSize) * multipliers[i]));
 }
 
-absl::StatusOr<void *> ClientImpl::GetMessageBuffer(PublisherImpl *publisher,
-                                                    int64_t max_size,
-                                                    bool lock) {
-  auto span_or_status = GetMessageBufferSpan(publisher, max_size, lock);
-  if (!span_or_status.ok()) {
-    return span_or_status.status();
-  }
-  if (absl::Span<std::byte> span = span_or_status.value(); !span.empty()) {
-    return span.data();
-  }
-  return nullptr;
-}
-
-absl::StatusOr<absl::Span<std::byte>>
+async::Task<absl::StatusOr<absl::Span<std::byte>>>
 ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int64_t max_size,
                                  bool lock) {
   // If the current thread is calling this while it already owns the mutex we
@@ -750,7 +752,7 @@ ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int64_t max_size,
   if (max_size != -1 && max_size > slot_size) {
     const int64_t max_slot_size = publisher->MaxSlotSize();
     if (max_slot_size != 0 && max_size > max_slot_size) {
-      return absl::InvalidArgumentError(absl::StrFormat(
+      ASYNC_RETURN absl::InvalidArgumentError(absl::StrFormat(
           "Requested buffer of %d bytes on channel %s exceeds its maximum slot "
           "size of %d bytes",
           max_size, publisher->Name(), max_slot_size));
@@ -768,16 +770,19 @@ ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int64_t max_size,
     }
     span_size = size_t(new_slot_size);
 
-    if (absl::Status status = ResizeChannel(publisher, new_slot_size);
+    if (absl::Status status = ASYNC_AWAIT(ResizeChannel(publisher, new_slot_size));
         !status.ok()) {
-      return status;
+      ASYNC_RETURN status;
     }
     publisher->SetSlotToBiggestBuffer(publisher->CurrentSlot());
   }
 
-  if (absl::Status status = ReloadSubscribersIfNecessary(publisher);
-      !status.ok()) {
-    return status;
+  if (SubscribersChanged(publisher)) {
+    if (absl::Status status =
+            ASYNC_AWAIT(ReloadSubscribersIfNecessary(publisher));
+        !status.ok()) {
+      ASYNC_RETURN status;
+    }
   }
 
   if (publisher->IsReliable() && publisher->CurrentSlot() == nullptr) {
@@ -791,19 +796,19 @@ ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int64_t max_size,
     // to stop the publisher taking all the slots.  An incoming subscriber
     // would miss all those messages and that's not reliable.
     if (publisher->NumSubscribers(publisher->VirtualChannelId()) == 0) {
-      return absl::Span<std::byte>();
+      ASYNC_RETURN absl::Span<std::byte>();
     }
     MessageSlot *slot =
-        publisher->FindFreeSlotReliable(publisher->GetPublisherId());
+        ASYNC_AWAIT(publisher->FindFreeSlotReliable(publisher->GetPublisherId()));
     if (slot == nullptr) {
-      return absl::Span<std::byte>();
+      ASYNC_RETURN absl::Span<std::byte>();
     }
     publisher->SetSlot(slot);
   }
 
   void *buffer = publisher->GetCurrentBufferAddress();
   if (buffer == nullptr) {
-    return absl::InternalError(
+    ASYNC_RETURN absl::InternalError(
         absl::StrFormat("Channel %s has no buffer.  This should never happen.",
                         publisher->Name()));
   }
@@ -812,19 +817,22 @@ ClientImpl::GetMessageBufferSpan(PublisherImpl *publisher, int64_t max_size,
   if (span_size > 0) {
     guard.CommitLock();
   }
-  return absl::Span<std::byte>(reinterpret_cast<std::byte *>(buffer),
+  ASYNC_RETURN absl::Span<std::byte>(reinterpret_cast<std::byte *>(buffer),
                                span_size);
 }
 
-absl::StatusOr<PublisherBufferLease>
+async::Task<absl::StatusOr<PublisherBufferLease>>
 ClientImpl::AcquirePublisherBuffer(PublisherImpl *publisher) {
   ClientLockGuard guard(this);
   if (publisher->NumLeases() >= size_t(publisher->MaxOutstandingSlotLeases())) {
-    return PublisherBufferLease{};
+    ASYNC_RETURN PublisherBufferLease{};
   }
-  if (absl::Status status = ReloadSubscribersIfNecessary(publisher);
-      !status.ok()) {
-    return status;
+  if (SubscribersChanged(publisher)) {
+    if (absl::Status status =
+            ASYNC_AWAIT(ReloadSubscribersIfNecessary(publisher));
+        !status.ok()) {
+      ASYNC_RETURN status;
+    }
   }
 
   MessageSlot *slot = publisher->CurrentSlot();
@@ -833,17 +841,17 @@ ClientImpl::AcquirePublisherBuffer(PublisherImpl *publisher) {
   } else {
     if (publisher->IsReliable() &&
         publisher->NumSubscribers(publisher->VirtualChannelId()) == 0) {
-      return PublisherBufferLease{};
+      ASYNC_RETURN PublisherBufferLease{};
     }
     slot = publisher->IsReliable()
-               ? publisher->FindFreeSlotReliable(publisher->GetPublisherId())
-               : publisher->FindFreeSlotUnreliable(publisher->GetPublisherId());
+               ? ASYNC_AWAIT(publisher->FindFreeSlotReliable(publisher->GetPublisherId()))
+               : ASYNC_AWAIT(publisher->FindFreeSlotUnreliable(publisher->GetPublisherId()));
   }
   if (slot == nullptr) {
-    return PublisherBufferLease{};
+    ASYNC_RETURN PublisherBufferLease{};
   }
   uint64_t lease_id = publisher->RegisterLease(slot);
-  return PublisherBufferLease{
+  ASYNC_RETURN PublisherBufferLease{
       .buffer = publisher->GetBufferAddress(slot),
       .buffer_size = size_t(publisher->SlotSize(slot)),
       .slot_id = slot->id,
@@ -851,22 +859,25 @@ ClientImpl::AcquirePublisherBuffer(PublisherImpl *publisher) {
   };
 }
 
-absl::StatusOr<PublisherBufferLease>
+async::Task<absl::StatusOr<PublisherBufferLease>>
 ClientImpl::ReclaimPublisherBuffer(PublisherImpl *publisher, int32_t slot_id) {
   ClientLockGuard guard(this);
   if (publisher->NumLeases() >= size_t(publisher->MaxOutstandingSlotLeases())) {
-    return PublisherBufferLease{};
+    ASYNC_RETURN PublisherBufferLease{};
   }
-  if (absl::Status status = ReloadSubscribersIfNecessary(publisher);
-      !status.ok()) {
-    return status;
+  if (SubscribersChanged(publisher)) {
+    if (absl::Status status =
+            ASYNC_AWAIT(ReloadSubscribersIfNecessary(publisher));
+        !status.ok()) {
+      ASYNC_RETURN status;
+    }
   }
   MessageSlot *slot = publisher->ClaimRetiredSlot(slot_id);
   if (slot == nullptr) {
-    return PublisherBufferLease{};
+    ASYNC_RETURN PublisherBufferLease{};
   }
   uint64_t lease_id = publisher->RegisterLease(slot);
-  return PublisherBufferLease{
+  ASYNC_RETURN PublisherBufferLease{
       .buffer = publisher->GetBufferAddress(slot),
       .buffer_size = size_t(publisher->SlotSize(slot)),
       .slot_id = slot->id,
@@ -874,23 +885,26 @@ ClientImpl::ReclaimPublisherBuffer(PublisherImpl *publisher, int32_t slot_id) {
   };
 }
 
-absl::StatusOr<PublisherBufferLease>
+async::Task<absl::StatusOr<PublisherBufferLease>>
 ClientImpl::ReclaimAnyPublisherBuffer(PublisherImpl *publisher) {
   ClientLockGuard guard(this);
   if (publisher->NumLeases() >=
       size_t(publisher->MaxOutstandingSlotLeases())) {
-    return PublisherBufferLease{};
+    ASYNC_RETURN PublisherBufferLease{};
   }
-  if (absl::Status status = ReloadSubscribersIfNecessary(publisher);
-      !status.ok()) {
-    return status;
+  if (SubscribersChanged(publisher)) {
+    if (absl::Status status =
+            ASYNC_AWAIT(ReloadSubscribersIfNecessary(publisher));
+        !status.ok()) {
+      ASYNC_RETURN status;
+    }
   }
   MessageSlot *slot = publisher->ClaimAnyRetiredSlot();
   if (slot == nullptr) {
-    return PublisherBufferLease{};
+    ASYNC_RETURN PublisherBufferLease{};
   }
   uint64_t lease_id = publisher->RegisterLease(slot);
-  return PublisherBufferLease{
+  ASYNC_RETURN PublisherBufferLease{
       .buffer = publisher->GetBufferAddress(slot),
       .buffer_size = size_t(publisher->SlotSize(slot)),
       .slot_id = slot->id,
@@ -898,40 +912,44 @@ ClientImpl::ReclaimAnyPublisherBuffer(PublisherImpl *publisher) {
   };
 }
 
-absl::StatusOr<const Message>
+async::Task<absl::StatusOr<const Message>>
 ClientImpl::PublishPublisherBuffer(PublisherImpl *publisher,
                                    const PublisherBufferLease &lease,
                                    int64_t message_size) {
   ClientLockGuard guard(this);
-  return PublishPublisherBufferInternal(publisher, lease, message_size,
-                                        /*payload=*/nullptr);
+  ASYNC_RETURN ASYNC_AWAIT(PublishPublisherBufferInternal(publisher, lease, message_size,
+                                        /*payload=*/nullptr));
 }
 
-absl::StatusOr<const Message>
+async::Task<absl::StatusOr<const Message>>
 ClientImpl::PublishPublisherBufferCopy(PublisherImpl *publisher,
                                        const PublisherBufferLease &lease,
                                        absl::Span<const std::byte> payload) {
   ClientLockGuard guard(this);
-  return PublishPublisherBufferInternal(
-      publisher, lease, static_cast<int64_t>(payload.size()), payload.data());
+  ASYNC_RETURN ASYNC_AWAIT(PublishPublisherBufferInternal(
+      publisher, lease, static_cast<int64_t>(payload.size()), payload.data()));
 }
 
-absl::StatusOr<const Message> ClientImpl::PublishPublisherBufferInternal(
+async::Task<absl::StatusOr<const Message>>
+ClientImpl::PublishPublisherBufferInternal(
     PublisherImpl *publisher, const PublisherBufferLease &lease,
     int64_t message_size, const std::byte *payload) {
   if (message_size <= 0) {
-    return absl::InvalidArgumentError("Message size must be greater than 0");
+    ASYNC_RETURN absl::InvalidArgumentError("Message size must be greater than 0");
   }
   MessageSlot *slot = publisher->FindLease(lease.slot_id, lease.lease_id);
   if (slot == nullptr) {
-    return absl::FailedPreconditionError("Invalid or stale publisher lease");
+    ASYNC_RETURN absl::FailedPreconditionError("Invalid or stale publisher lease");
   }
   if (message_size > publisher->SlotSize(slot)) {
-    return absl::InvalidArgumentError("Message size exceeds leased slot size");
+    ASYNC_RETURN absl::InvalidArgumentError("Message size exceeds leased slot size");
   }
-  if (absl::Status status = ReloadSubscribersIfNecessary(publisher);
-      !status.ok()) {
-    return status;
+  if (SubscribersChanged(publisher)) {
+    if (absl::Status status =
+            ASYNC_AWAIT(ReloadSubscribersIfNecessary(publisher));
+        !status.ok()) {
+      ASYNC_RETURN status;
+    }
   }
   if (payload != nullptr) {
     std::memmove(publisher->GetBufferAddress(slot), payload,
@@ -941,25 +959,25 @@ absl::StatusOr<const Message> ClientImpl::PublishPublisherBufferInternal(
     absl::StatusOr<int64_t> status_or_size = publisher->on_send_callback_(
         publisher->GetBufferAddress(slot), message_size);
     if (!status_or_size.ok()) {
-      return status_or_size.status();
+      ASYNC_RETURN status_or_size.status();
     }
     message_size = status_or_size.value();
   }
   slot->message_size = message_size;
-  Channel::PublishedMessage msg = publisher->ActivateSlotAndGetAnother(
+  Channel::PublishedMessage msg = ASYNC_AWAIT(publisher->ActivateSlotAndGetAnother(
       slot, publisher->IsReliable(), /*is_activation=*/false,
       publisher->GetPublisherId(), /*omit_prefix=*/false,
       /*use_prefix_slot_id=*/false, publisher->ForTunnel(),
-      /*acquire_next=*/false);
+      /*acquire_next=*/false));
   publisher->RemoveLease(lease.slot_id);
   publisher->TriggerSubscribers();
   if (publisher->NumSubscribers(publisher->VirtualChannelId()) == 0) {
     publisher->RetirePublishedSlotImmediately(slot);
   }
-  if (absl::Status status = publisher->UnmapUnusedBuffers(); !status.ok()) {
-    return status;
+  if (absl::Status status = ASYNC_AWAIT(publisher->UnmapUnusedBuffers()); !status.ok()) {
+    ASYNC_RETURN status;
   }
-  return Message(message_size, nullptr, msg.ordinal, msg.timestamp,
+  ASYNC_RETURN Message(message_size, nullptr, msg.ordinal, msg.timestamp,
                  publisher->VirtualChannelId(), false, lease.slot_id, false);
 }
 
@@ -986,7 +1004,7 @@ ClientImpl::GetPublisherBufferMetadata(PublisherImpl *publisher,
   return publisher->GetMetadata(slot);
 }
 
-absl::StatusOr<const Message>
+async::Task<absl::StatusOr<const Message>>
 ClientImpl::PublishMessage(PublisherImpl *publisher, int64_t message_size,
                            bool notify_subscribers) {
   return PublishMessageInternal(publisher, message_size, /*omit_prefix=*/false,
@@ -999,7 +1017,7 @@ void ClientImpl::NotifySubscribers(PublisherImpl *publisher) {
   publisher->TriggerSubscribers();
 }
 
-absl::StatusOr<const Message>
+async::Task<absl::StatusOr<const Message>>
 ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
                                    int64_t message_size, bool omit_prefix,
                                    bool use_prefix_slot_id,
@@ -1010,13 +1028,16 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
   ClientLockGuard guard(this, LockMode::kMaybeLocked);
 
   // Check if there are any new subscribers and if so, load their trigger fds.
-  if (absl::Status status = ReloadSubscribersIfNecessary(publisher);
-      !status.ok()) {
-    return status;
+  if (SubscribersChanged(publisher)) {
+    if (absl::Status status =
+            ASYNC_AWAIT(ReloadSubscribersIfNecessary(publisher));
+        !status.ok()) {
+      ASYNC_RETURN status;
+    }
   }
 
   if (message_size == 0) {
-    return absl::InternalError("Message size must be greater than 0");
+    ASYNC_RETURN absl::InternalError("Message size must be greater than 0");
   }
 
   int32_t old_slot_id = publisher->CurrentSlotId();
@@ -1025,7 +1046,7 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
     absl::StatusOr<int64_t> status_or_size = publisher->on_send_callback_(
         publisher->GetCurrentBufferAddress(), message_size);
     if (!status_or_size.ok()) {
-      return status_or_size.status();
+      ASYNC_RETURN status_or_size.status();
     }
     message_size = status_or_size.value();
   }
@@ -1038,9 +1059,9 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
     }
   }
 
-  Channel::PublishedMessage msg = publisher->ActivateSlotAndGetAnother(
+  Channel::PublishedMessage msg = ASYNC_AWAIT(publisher->ActivateSlotAndGetAnother(
       publisher->IsReliable(), /*is_activation=*/false, omit_prefix,
-      use_prefix_slot_id, publisher->ForTunnel(), use_prefix_vchan_id);
+      use_prefix_slot_id, publisher->ForTunnel(), use_prefix_vchan_id));
 
   // Prevent use of old_slot.
   old_slot = nullptr;
@@ -1050,17 +1071,17 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
   if (notify_subscribers) {
     publisher->TriggerSubscribers();
   }
-  if (absl::Status status = publisher->UnmapUnusedBuffers(); !status.ok()) {
-    return status;
+  if (absl::Status status = ASYNC_AWAIT(publisher->UnmapUnusedBuffers()); !status.ok()) {
+    ASYNC_RETURN status;
   }
 
   if (msg.new_slot == nullptr) {
     if (publisher->IsReliable()) {
       // Reliable publishers don't get a slot until it's asked for.
-      return Message(message_size, nullptr, msg.ordinal, msg.timestamp,
+      ASYNC_RETURN Message(message_size, nullptr, msg.ordinal, msg.timestamp,
                      publisher->VirtualChannelId(), false, -1, false);
     }
-    return absl::InternalError(
+    ASYNC_RETURN absl::InternalError(
         absl::StrFormat("Out of slots for channel %s", publisher->Name()));
   }
 
@@ -1069,7 +1090,7 @@ ClientImpl::PublishMessageInternal(PublisherImpl *publisher,
            msg.new_slot->ordinal.load(std::memory_order_relaxed));
   }
 
-  return Message(message_size, nullptr, msg.ordinal, msg.timestamp,
+  ASYNC_RETURN Message(message_size, nullptr, msg.ordinal, msg.timestamp,
                  publisher->VirtualChannelId(), false, old_slot_id, false);
 }
 
@@ -1078,20 +1099,23 @@ void ClientImpl::CancelPublish(PublisherImpl * /*publisher*/) {
   ClientLockGuard guard(this, LockMode::kMaybeLocked);
 }
 
-absl::Status
+async::Task<absl::Status>
 ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
                                      std::chrono::nanoseconds timeout,
-                                     const co::Coroutine *c) {
+                                     const toolbelt::AsyncWaiter *c) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
   if (!publisher->IsReliable()) {
-    return absl::InternalError("Unreliable publishers can't wait");
+    ASYNC_RETURN absl::InternalError("Unreliable publishers can't wait");
   }
   // Check if there are any new subscribers and if so, load their trigger fds.
-  if (absl::Status status = ReloadSubscribersIfNecessary(publisher);
-      !status.ok()) {
-    return status;
+  if (SubscribersChanged(publisher)) {
+    if (absl::Status status =
+            ASYNC_AWAIT(ReloadSubscribersIfNecessary(publisher));
+        !status.ok()) {
+      ASYNC_RETURN status;
+    }
   }
   uint64_t timeout_ns = timeout.count();
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
@@ -1100,9 +1124,21 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
         async::WaitReadable(SocketContext(), publisher->GetPollFd().Fd(),
                             std::chrono::nanoseconds(timeout_ns));
     if (absl::IsDeadlineExceeded(s)) {
-      return absl::InternalError("Timeout waiting for reliable publisher");
+      ASYNC_RETURN absl::InternalError("Timeout waiting for reliable publisher");
     }
-    return s;
+    ASYNC_RETURN s;
+  }
+#endif
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
+  // Called from an Async API: suspend this coroutine rather than blocking.
+  if (c == nullptr && SocketContext().Suspends()) {
+    absl::Status s = ASYNC_AWAIT(
+        async::WaitReadable(SocketContext(), publisher->GetPollFd().Fd(),
+                            std::chrono::nanoseconds(timeout_ns)));
+    if (absl::IsDeadlineExceeded(s)) {
+      ASYNC_RETURN absl::InternalError("Timeout waiting for reliable publisher");
+    }
+    ASYNC_RETURN s;
   }
 #endif
   int result = -1;
@@ -1121,7 +1157,7 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
     if (timeout_ns != 0 && e == 0) {
       result = -1;
     } else if (e != 1) {
-      return absl::InternalError(
+      ASYNC_RETURN absl::InternalError(
           absl::StrFormat("Error from poll waiting for reliable publisher: %s",
                           strerror(errno)));
     } else {
@@ -1129,27 +1165,30 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
     }
   }
   if (result == -1) {
-    return absl::InternalError("Timeout waiting for reliable publisher");
+    ASYNC_RETURN absl::InternalError("Timeout waiting for reliable publisher");
   }
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
-absl::StatusOr<int>
+async::Task<absl::StatusOr<int>>
 ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
                                      const toolbelt::FileDescriptor &fd,
                                      std::chrono::nanoseconds timeout,
 
-                                     const co::Coroutine *c) {
+                                     const toolbelt::AsyncWaiter *c) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
   if (!publisher->IsReliable()) {
-    return absl::InternalError("Unreliable publishers can't wait");
+    ASYNC_RETURN absl::InternalError("Unreliable publishers can't wait");
   }
   // Check if there are any new subscribers and if so, load their trigger fds.
-  if (absl::Status status = ReloadSubscribersIfNecessary(publisher);
-      !status.ok()) {
-    return status;
+  if (SubscribersChanged(publisher)) {
+    if (absl::Status status =
+            ASYNC_AWAIT(ReloadSubscribersIfNecessary(publisher));
+        !status.ok()) {
+      ASYNC_RETURN status;
+    }
   }
   int result = -1;
   uint64_t timeout_ns = timeout.count();
@@ -1158,12 +1197,26 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
     absl::StatusOr<int> r = async::WaitEither(
         SocketContext(), publisher->GetPollFd().Fd(), fd.Fd(), timeout);
     if (absl::IsDeadlineExceeded(r.status())) {
-      return absl::InternalError("Timeout waiting for reliable publisher");
+      ASYNC_RETURN absl::InternalError("Timeout waiting for reliable publisher");
     }
     if (!r.ok()) {
-      return r.status();
+      ASYNC_RETURN r.status();
     }
-    return *r;
+    ASYNC_RETURN *r;
+  }
+#endif
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
+  // Called from an Async API: suspend this coroutine rather than blocking.
+  if (c == nullptr && SocketContext().Suspends()) {
+    absl::StatusOr<int> r = ASYNC_AWAIT(async::WaitEither(
+        SocketContext(), publisher->GetPollFd().Fd(), fd.Fd(), timeout));
+    if (absl::IsDeadlineExceeded(r.status())) {
+      ASYNC_RETURN absl::InternalError("Timeout waiting for reliable publisher");
+    }
+    if (!r.ok()) {
+      ASYNC_RETURN r.status();
+    }
+    ASYNC_RETURN *r;
   }
 #endif
   if (c != nullptr) {
@@ -1180,10 +1233,10 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
     int e = GetSyscallShim().poll_fn(
         fds, 2, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
     if (timeout_ns != 0 && e == 0) {
-      return absl::InternalError("Timeout waiting for reliable publisher");
+      ASYNC_RETURN absl::InternalError("Timeout waiting for reliable publisher");
     }
     if (e < 0) {
-      return absl::InternalError(
+      ASYNC_RETURN absl::InternalError(
           absl::StrFormat("Error from poll waiting for reliable publisher: %s",
                           strerror(errno)));
     }
@@ -1192,19 +1245,20 @@ ClientImpl::WaitForReliablePublisher(PublisherImpl *publisher,
     } else if (fds[1].revents & (POLLIN | POLLHUP)) {
       result = fds[1].fd; // The passed in fd triggered.
     } else {
-      return absl::InternalError(
+      ASYNC_RETURN absl::InternalError(
           "Unexpected poll result, neither publisher nor passed in fd "
           "triggered");
     }
   }
-  return result;
+  ASYNC_RETURN result;
 }
 
-absl::Status ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
+async::Task<absl::Status>
+ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
                                            std::chrono::nanoseconds timeout,
-                                           const co::Coroutine *c) {
+                                           const toolbelt::AsyncWaiter *c) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
 
   uint64_t timeout_ns = timeout.count();
@@ -1214,9 +1268,21 @@ absl::Status ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
         async::WaitReadable(SocketContext(), subscriber->GetPollFd().Fd(),
                             std::chrono::nanoseconds(timeout_ns));
     if (absl::IsDeadlineExceeded(s)) {
-      return absl::InternalError("Timeout waiting for subscriber");
+      ASYNC_RETURN absl::InternalError("Timeout waiting for subscriber");
     }
-    return s;
+    ASYNC_RETURN s;
+  }
+#endif
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
+  // Called from an Async API: suspend this coroutine rather than blocking.
+  if (c == nullptr && SocketContext().Suspends()) {
+    absl::Status s = ASYNC_AWAIT(
+        async::WaitReadable(SocketContext(), subscriber->GetPollFd().Fd(),
+                            std::chrono::nanoseconds(timeout_ns)));
+    if (absl::IsDeadlineExceeded(s)) {
+      ASYNC_RETURN absl::InternalError("Timeout waiting for subscriber");
+    }
+    ASYNC_RETURN s;
   }
 #endif
   int result = -1;
@@ -1236,23 +1302,24 @@ absl::Status ClientImpl::WaitForSubscriber(SubscriberImpl *subscriber,
     if (timeout_ns != 0 && e == 0) {
       result = -1;
     } else if (e != 1) {
-      return absl::InternalError(absl::StrFormat(
+      ASYNC_RETURN absl::InternalError(absl::StrFormat(
           "Error from poll waiting for subscriber: %s", strerror(errno)));
     } else {
       result = fd.fd;
     }
   }
   if (result == -1) {
-    return absl::InternalError("Timeout waiting for subscriber");
+    ASYNC_RETURN absl::InternalError("Timeout waiting for subscriber");
   }
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
-absl::StatusOr<int> ClientImpl::WaitForSubscriber(
+async::Task<absl::StatusOr<int>>
+ClientImpl::WaitForSubscriber(
     SubscriberImpl *subscriber, const toolbelt::FileDescriptor &fd,
-    std::chrono::nanoseconds timeout, const co::Coroutine *c) {
+    std::chrono::nanoseconds timeout, const toolbelt::AsyncWaiter *c) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
   int result = -1;
   uint64_t timeout_ns = timeout.count();
@@ -1261,12 +1328,26 @@ absl::StatusOr<int> ClientImpl::WaitForSubscriber(
     absl::StatusOr<int> r = async::WaitEither(
         SocketContext(), subscriber->GetPollFd().Fd(), fd.Fd(), timeout);
     if (absl::IsDeadlineExceeded(r.status())) {
-      return absl::InternalError("Timeout waiting for subscriber");
+      ASYNC_RETURN absl::InternalError("Timeout waiting for subscriber");
     }
     if (!r.ok()) {
-      return r.status();
+      ASYNC_RETURN r.status();
     }
-    return *r;
+    ASYNC_RETURN *r;
+  }
+#endif
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
+  // Called from an Async API: suspend this coroutine rather than blocking.
+  if (c == nullptr && SocketContext().Suspends()) {
+    absl::StatusOr<int> r = ASYNC_AWAIT(async::WaitEither(
+        SocketContext(), subscriber->GetPollFd().Fd(), fd.Fd(), timeout));
+    if (absl::IsDeadlineExceeded(r.status())) {
+      ASYNC_RETURN absl::InternalError("Timeout waiting for subscriber");
+    }
+    if (!r.ok()) {
+      ASYNC_RETURN r.status();
+    }
+    ASYNC_RETURN *r;
   }
 #endif
   if (c != nullptr) {
@@ -1284,30 +1365,30 @@ absl::StatusOr<int> ClientImpl::WaitForSubscriber(
     int e = GetSyscallShim().poll_fn(
         fds, 2, timeout_ns == 0 ? -1 : timeout_ns / 1000000);
     if (timeout_ns != 0 && e == 0) {
-      return absl::InternalError("Timeout waiting for subscriber");
+      ASYNC_RETURN absl::InternalError("Timeout waiting for subscriber");
     }
     if (e < 0) {
-      return absl::InternalError(absl::StrFormat(
+      ASYNC_RETURN absl::InternalError(absl::StrFormat(
           "Error from poll waiting for subscriber: %s", strerror(errno)));
     }
     if (fds[0].revents & (POLLIN | POLLHUP)) {
       // The subscriber's poll fd triggered.
-      return fds[0].fd;
+      ASYNC_RETURN fds[0].fd;
     } else if (fds[1].revents & (POLLIN | POLLHUP)) {
       // The passed in fd triggered.
-      return fds[1].fd;
+      ASYNC_RETURN fds[1].fd;
     } else {
-      return absl::InternalError(
+      ASYNC_RETURN absl::InternalError(
           "Unexpected poll result, neither subscriber nor passed in fd "
           "triggered");
     }
   }
-  return result;
+  ASYNC_RETURN result;
 }
 
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
 // Asio overloads taking an async::Context (yield_context) directly.  Unlike the
-// co::Coroutine* overloads above, which fall back to the client's stored
+// AsyncWaiter overloads above, which fall back to the client's stored
 // context (SocketContext()), these wait cooperatively on the caller-supplied
 // context.  This lets an Asio caller wait from within an arbitrary coroutine,
 // mirroring how the co backend accepts a co::Coroutine*.
@@ -1385,7 +1466,7 @@ absl::StatusOr<int> ClientImpl::WaitForSubscriber(
 }
 #endif
 
-absl::StatusOr<Message>
+async::Task<absl::StatusOr<Message>>
 ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
                                 bool pass_activation, bool clear_trigger) {
   if (clear_trigger) {
@@ -1402,10 +1483,10 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
 
   switch (mode) {
   case ReadMode::kReadNext:
-    new_slot = subscriber->NextSlot();
+    new_slot = ASYNC_AWAIT(subscriber->NextSlot());
     break;
   case ReadMode::kReadNewest:
-    new_slot = subscriber->LastSlot();
+    new_slot = ASYNC_AWAIT(subscriber->LastSlot());
     break;
   }
 
@@ -1418,10 +1499,10 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     // I'm out of messages to read, trigger the publishers to give me
     // some more.  This is only for reliable publishers.
     subscriber->TriggerReliablePublishers();
-    if (absl::Status status = subscriber->UnmapUnusedBuffers(); !status.ok()) {
-      return status;
+    if (absl::Status status = ASYNC_AWAIT(subscriber->UnmapUnusedBuffers()); !status.ok()) {
+      ASYNC_RETURN status;
     }
-    return Message();
+    ASYNC_RETURN Message();
   }
   subscriber->SetSlot(new_slot);
   int64_t delivered_message_size =
@@ -1455,9 +1536,9 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
         if (subscriber->IsReliable()) {
           subscriber->TriggerReliablePublishers();
         }
-        return ReadMessageInternal(subscriber, mode,
+        ASYNC_RETURN ASYNC_AWAIT(ReadMessageInternal(subscriber, mode,
                                    /* pass_activation=*/false,
-                                   /* clear_trigger=*/false);
+                                   /* clear_trigger=*/false));
       }
     }
   }
@@ -1468,14 +1549,14 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     if (!status_or_size.ok()) {
       subscriber->UnreadSlot(new_slot);
       subscriber->SetSlot(nullptr);
-      return status_or_size.status();
+      ASYNC_RETURN status_or_size.status();
     }
     delivered_message_size = status_or_size.value();
   }
   if (delivered_message_size <= 0) {
     subscriber->UnreadSlot(new_slot);
     subscriber->SetSlot(nullptr);
-    return Message();
+    ASYNC_RETURN Message();
   }
   // A FindMessage may already hold this slot.  Share that hold instead of
   // counting the message twice; the read takes over releasing its delivery
@@ -1489,7 +1570,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     // read picks the message up.
     subscriber->UnreadSlot(new_slot);
     subscriber->SetSlot(nullptr);
-    return Message();
+    ASYNC_RETURN Message();
   }
   if (shared) {
     subscriber->RetainActiveMessage(msg);
@@ -1514,7 +1595,7 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
       // would keep an extra reference after the ActiveMessage becomes valid
       // and prevent its active-message count from being released.
       ReportIfSubscriberStuck(subscriber);
-      return Message();
+      ASYNC_RETURN Message();
     }
   }
   subscriber->NoteUnstuck();
@@ -1567,14 +1648,15 @@ ClientImpl::ReadMessageInternal(SubscriberImpl *subscriber, ReadMode mode,
     subscriber->ClearActiveMessage();
   }
   if (checksum_error && !subscriber->PassChecksumErrors()) {
-    return absl::InternalError("Checksum verification failed");
+    ASYNC_RETURN absl::InternalError("Checksum verification failed");
   }
   // A checksum error that is ignored results in a valid message with the
   // checksum_error flag set.
-  return ret_msg;
+  ASYNC_RETURN ret_msg;
 }
 
-absl::StatusOr<Message> ClientImpl::ReadMessage(SubscriberImpl *subscriber,
+async::Task<absl::StatusOr<Message>>
+ClientImpl::ReadMessage(SubscriberImpl *subscriber,
                                                 ReadMode mode,
                                                 ClearTrigger clear_trigger) {
 
@@ -1594,26 +1676,29 @@ absl::StatusOr<Message> ClientImpl::ReadMessage(SubscriberImpl *subscriber,
     if (should_clear_trigger) {
       subscriber->ClearPollFd();
     }
-    absl::Status status = ReloadSubscriber(subscriber);
+    absl::Status status = ASYNC_AWAIT(ReloadSubscriber(subscriber));
     if (placeholder_check_hook_ != nullptr) {
       placeholder_check_hook_();
     }
     if (!status.ok() || subscriber->IsPlaceholder()) {
-      return Message();
+      ASYNC_RETURN Message();
     }
     subscriber->TriggerReliablePublishers();
   }
 
   // Check if there are any new reliable publishers and if so, load their
   // trigger fds.
-  absl::Status status = ReloadReliablePublishersIfNecessary(subscriber);
-  if (!status.ok()) {
-    return status;
+  if (PublishersChanged(subscriber)) {
+    if (absl::Status status =
+            ASYNC_AWAIT(ReloadReliablePublishersIfNecessary(subscriber));
+        !status.ok()) {
+      ASYNC_RETURN status;
+    }
   }
 
-  return ReadMessageInternal(subscriber, mode,
+  ASYNC_RETURN ASYNC_AWAIT(ReadMessageInternal(subscriber, mode,
                              subscriber->options_.pass_activation,
-                             should_clear_trigger);
+                             should_clear_trigger));
 }
 
 absl::StatusOr<std::shared_ptr<Telemetry>>
@@ -1662,21 +1747,21 @@ void ClientImpl::ReportIfSubscriberStuck(SubscriberImpl *subscriber) {
                         : "");
 }
 
-absl::StatusOr<Message>
+async::Task<absl::StatusOr<Message>>
 ClientImpl::ReadMessageFromBatch(SubscriberImpl *subscriber, ReadMode mode) {
   ClientLockGuard guard(this);
-  return ReadMessageInternal(subscriber, mode,
+  ASYNC_RETURN ASYNC_AWAIT(ReadMessageInternal(subscriber, mode,
                              subscriber->options_.pass_activation,
-                             /*clear_trigger=*/false);
+                             /*clear_trigger=*/false));
 }
 
-absl::StatusOr<Message>
+async::Task<absl::StatusOr<Message>>
 ClientImpl::FindMessageInternal(SubscriberImpl *subscriber,
                                 uint64_t timestamp) {
-  MessageSlot *new_slot = subscriber->FindMessage(timestamp);
+  MessageSlot *new_slot = ASYNC_AWAIT(subscriber->FindMessage(timestamp));
   if (new_slot == nullptr) {
     // Not found.
-    return Message();
+    ASYNC_RETURN Message();
   }
   // FindMessage pinned the slot.  The returned Message owns that pin and
   // releases it when dropped, without consuming the delivery obligation, so a
@@ -1686,23 +1771,24 @@ ClientImpl::FindMessageInternal(SubscriberImpl *subscriber,
                                                   &rejected)) {
     Message msg(held);
     held->DecRef();
-    return msg;
+    ASYNC_RETURN msg;
   }
   if (rejected) {
     subscriber->DropLookupPin(new_slot);
     subscriber->SetSlot(nullptr);
-    return Message();
+    ASYNC_RETURN Message();
   }
   auto msg = subscriber->ActivateLookup(new_slot);
   if (msg == nullptr) {
     ReportIfSubscriberStuck(subscriber);
-    return Message();
+    ASYNC_RETURN Message();
   }
   subscriber->NoteUnstuck();
-  return Message(msg);
+  ASYNC_RETURN Message(msg);
 }
 
-absl::StatusOr<Message> ClientImpl::FindMessage(SubscriberImpl *subscriber,
+async::Task<absl::StatusOr<Message>>
+ClientImpl::FindMessage(SubscriberImpl *subscriber,
                                                 uint64_t timestamp) {
 
   ClientLockGuard guard(this);
@@ -1715,23 +1801,26 @@ absl::StatusOr<Message> ClientImpl::FindMessage(SubscriberImpl *subscriber,
     // As in ReadMessage, clear before the check so a publisher arriving after
     // it leaves the poll fd triggered.
     subscriber->ClearPollFd();
-    absl::Status status = ReloadSubscriber(subscriber);
+    absl::Status status = ASYNC_AWAIT(ReloadSubscriber(subscriber));
     if (placeholder_check_hook_ != nullptr) {
       placeholder_check_hook_();
     }
     if (!status.ok() || subscriber->IsPlaceholder()) {
-      return Message();
+      ASYNC_RETURN Message();
     }
   }
 
   // Check if there are any new reliable publishers and if so, load their
   // trigger fds.
-  absl::Status status = ReloadReliablePublishersIfNecessary(subscriber);
-  if (!status.ok()) {
-    return status;
+  if (PublishersChanged(subscriber)) {
+    if (absl::Status status =
+            ASYNC_AWAIT(ReloadReliablePublishersIfNecessary(subscriber));
+        !status.ok()) {
+      ASYNC_RETURN status;
+    }
   }
 
-  return FindMessageInternal(subscriber, timestamp);
+  ASYNC_RETURN ASYNC_AWAIT(FindMessageInternal(subscriber, timestamp));
 }
 
 struct pollfd ClientImpl::GetPollFd(SubscriberImpl *subscriber) const {
@@ -1770,39 +1859,40 @@ int64_t ClientImpl::GetCurrentOrdinal(SubscriberImpl *sub) {
   return slot->ordinal.load(std::memory_order_relaxed);
 }
 
-bool ClientImpl::CheckReload(ClientChannel *channel) {
-  auto reloaded = ReloadBuffersIfNecessary(channel);
+async::Task<bool> ClientImpl::CheckReload(ClientChannel *channel) {
+  auto reloaded = ASYNC_AWAIT(ReloadBuffersIfNecessary(channel));
   if (!reloaded.ok()) {
-    return false;
+    ASYNC_RETURN false;
   }
-  return *reloaded;
+  ASYNC_RETURN *reloaded;
 }
 
-absl::StatusOr<bool>
+async::Task<absl::StatusOr<bool>>
 ClientImpl::ReloadBuffersIfNecessary(ClientChannel *channel) {
   if (!channel->BuffersChanged()) {
-    return false;
+    ASYNC_RETURN false;
   }
   if (absl::Status status = CheckConnected(); !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
-  if (absl::Status status = channel->AttachBuffers(); !status.ok()) {
-    return status;
+  if (absl::Status status = ASYNC_AWAIT(channel->AttachBuffers()); !status.ok()) {
+    ASYNC_RETURN status;
   }
-  return true;
+  ASYNC_RETURN true;
 }
 
-absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
+async::Task<absl::Status>
+ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
   // Check if there are any updates to the publishers
   // since that last time we checked.
   SystemControlBlock *scb = subscriber->GetScb();
   int updates = scb->counters[subscriber->GetChannelId()].num_pub_updates;
 
   if (subscriber->NumUpdates() == updates) {
-    return absl::OkStatus();
+    ASYNC_RETURN absl::OkStatus();
   }
   if (absl::Status status = CheckConnected(); !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
   Request req;
   FillCreateSubscriberRequest(req.mutable_create_subscriber(),
@@ -1813,14 +1903,14 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
   Response resp;
   std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
-  if (absl::Status status = SendRequestReceiveResponse(req, resp, fds);
+  if (absl::Status status = ASYNC_AWAIT(SendRequestReceiveResponse(req, resp, fds));
       !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
 
   auto &sub_resp = resp.create_subscriber();
   if (!sub_resp.error().empty()) {
-    return absl::InternalError(sub_resp.error());
+    ASYNC_RETURN absl::InternalError(sub_resp.error());
   }
 
   // A subscriber-created placeholder is the only case where the server
@@ -1831,7 +1921,7 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
     subscriber->ResetDeliveryState();
     // Leave the system control block mapped. Its counters are read from
     // other threads, and every channel in this client shares the mapping.
-    subscriber->UnmapForReload();
+    ASYNC_AWAIT(subscriber->UnmapForReload());
   }
 
   if (!sub_resp.type().empty()) {
@@ -1859,13 +1949,13 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
                                 std::move(fds[sub_resp.bcb_fd_index()]));
     if (absl::Status status = subscriber->Map(std::move(channel_fds), scb_fd_);
         !status.ok()) {
-      return status;
+      ASYNC_RETURN status;
     }
     subscriber->InitActiveMessages();
   }
 
-  if (absl::Status status = subscriber->AttachBuffers(); !status.ok()) {
-    return status;
+  if (absl::Status status = ASYNC_AWAIT(subscriber->AttachBuffers()); !status.ok()) {
+    ASYNC_RETURN status;
   }
   subscriber->SetTriggerFd(fds[sub_resp.trigger_fd_index()]);
   subscriber->SetPollFd(fds[sub_resp.poll_fd_index()]);
@@ -1884,19 +1974,19 @@ absl::Status ClientImpl::ReloadSubscriber(SubscriberImpl *subscriber) {
 
   subscriber->SetNumUpdates(updates);
   // subscriber->Dump();
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
-absl::Status
+async::Task<absl::Status>
 ClientImpl::ReloadSubscribersIfNecessary(PublisherImpl *publisher) {
   SystemControlBlock *scb = publisher->GetScb();
   int updates = scb->counters[publisher->GetChannelId()].num_sub_updates;
   if (publisher->NumUpdates() == updates) {
-    return absl::OkStatus();
+    ASYNC_RETURN absl::OkStatus();
   }
   publisher->SetNumUpdates(updates);
   if (absl::Status status = CheckConnected(); !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
 
   // We do have updates, get a new list of subscriber for
@@ -1909,9 +1999,9 @@ ClientImpl::ReloadSubscribersIfNecessary(PublisherImpl *publisher) {
   Response resp;
   std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
-  if (absl::Status status = SendRequestReceiveResponse(req, resp, fds);
+  if (absl::Status status = ASYNC_AWAIT(SendRequestReceiveResponse(req, resp, fds));
       !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
 
   auto &sub_resp = resp.get_triggers();
@@ -1925,22 +2015,22 @@ ClientImpl::ReloadSubscribersIfNecessary(PublisherImpl *publisher) {
   for (auto index : sub_resp.retirement_fd_indexes()) {
     publisher->AddRetirementTrigger(fds[size_t(index)]);
   }
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
-absl::Status
+async::Task<absl::Status>
 ClientImpl::ReloadReliablePublishersIfNecessary(SubscriberImpl *subscriber) {
   // Check if there are any updates to the publishers
   // since that last time we checked.
   SystemControlBlock *scb = subscriber->GetScb();
   int updates = scb->counters[subscriber->GetChannelId()].num_pub_updates;
   if (subscriber->NumUpdates() == updates) {
-    return absl::OkStatus();
+    ASYNC_RETURN absl::OkStatus();
   }
   subscriber->SetNumUpdates(updates);
 
   if (absl::Status status = CheckConnected(); !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
   // We do have updates, get a new list of subscriber for
   // the channel.
@@ -1952,9 +2042,9 @@ ClientImpl::ReloadReliablePublishersIfNecessary(SubscriberImpl *subscriber) {
   Response resp;
   std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
-  if (absl::Status status = SendRequestReceiveResponse(req, resp, fds);
+  if (absl::Status status = ASYNC_AWAIT(SendRequestReceiveResponse(req, resp, fds));
       !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
 
   auto &sub_resp = resp.get_triggers();
@@ -1969,59 +2059,59 @@ ClientImpl::ReloadReliablePublishersIfNecessary(SubscriberImpl *subscriber) {
     subscriber->AddRetirementTrigger(fds[size_t(index)]);
   }
 
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
 // A reliable publisher always sends a single activation message when it
 // is created.  This is to ensure that the reliable subscribers see
 // on message and thus keep a reference to it.
-absl::Status ClientImpl::ActivateReliableChannel(PublisherImpl *publisher) {
+async::Task<absl::Status> ClientImpl::ActivateReliableChannel(PublisherImpl *publisher) {
   MessageSlot *slot =
-      publisher->FindFreeSlotReliable(publisher->GetPublisherId());
+      ASYNC_AWAIT(publisher->FindFreeSlotReliable(publisher->GetPublisherId()));
   if (slot == nullptr) {
-    return absl::InternalError(
+    ASYNC_RETURN absl::InternalError(
         absl::StrFormat("Channel %s has no free slots", publisher->Name()));
   }
   publisher->SetSlot(slot);
 
   void *buffer = publisher->GetCurrentBufferAddress();
   if (buffer == nullptr) {
-    return absl::InternalError(
+    ASYNC_RETURN absl::InternalError(
         absl::StrFormat("Channel %s has no buffer", publisher->Name()));
   }
   slot->message_size.store(1, std::memory_order_relaxed);
 
-  publisher->ActivateSlotAndGetAnother(
+  ASYNC_AWAIT(publisher->ActivateSlotAndGetAnother(
       /*reliable=*/true,
       /*is_activation=*/true,
-      /*omit_prefix=*/false, /*use_prefix_slot_id=*/false);
+      /*omit_prefix=*/false, /*use_prefix_slot_id=*/false));
   publisher->SetSlot(nullptr);
   publisher->TriggerSubscribers();
 
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
-absl::Status ClientImpl::ActivateChannel(PublisherImpl *publisher) {
+async::Task<absl::Status> ClientImpl::ActivateChannel(PublisherImpl *publisher) {
   if (publisher->IsActivated(publisher->VirtualChannelId())) {
-    return absl::OkStatus();
+    ASYNC_RETURN absl::OkStatus();
   }
 
   void *buffer = publisher->GetCurrentBufferAddress();
   if (buffer == nullptr) {
-    return absl::InternalError(
+    ASYNC_RETURN absl::InternalError(
         absl::StrFormat("3 Channel %s has no buffer", publisher->Name()));
   }
   MessageSlot *slot = publisher->CurrentSlot();
   slot->message_size.store(1, std::memory_order_relaxed);
 
-  Channel::PublishedMessage msg = publisher->ActivateSlotAndGetAnother(
+  Channel::PublishedMessage msg = ASYNC_AWAIT(publisher->ActivateSlotAndGetAnother(
       /*reliable=*/false,
       /*is_activation=*/true,
-      /*omit_prefix=*/false, /*use_prefix_slot_id=*/false);
+      /*omit_prefix=*/false, /*use_prefix_slot_id=*/false));
   publisher->SetSlot(msg.new_slot);
   publisher->TriggerSubscribers();
 
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
 absl::Status ClientImpl::RemoveChannel(ClientChannel *channel) {
@@ -2033,10 +2123,11 @@ absl::Status ClientImpl::RemoveChannel(ClientChannel *channel) {
   return absl::OkStatus();
 }
 
-absl::Status ClientImpl::RemovePublisher(PublisherImpl *publisher) {
+async::Task<absl::Status>
+ClientImpl::RemovePublisher(PublisherImpl *publisher) {
   ClientLockGuard guard(this);
   if (!socket_.Connected()) {
-    return RemoveChannel(publisher);
+    ASYNC_RETURN RemoveChannel(publisher);
   }
   Request req;
   auto *cmd = req.mutable_remove_publisher();
@@ -2047,22 +2138,23 @@ absl::Status ClientImpl::RemovePublisher(PublisherImpl *publisher) {
   Response response;
   std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
-  if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
+  if (absl::Status status = ASYNC_AWAIT(SendRequestReceiveResponse(req, response, fds));
       !status.ok()) {
-    return RemoveChannel(publisher);
+    ASYNC_RETURN RemoveChannel(publisher);
   }
 
   auto &resp = response.remove_publisher();
   if (!resp.error().empty()) {
-    return absl::InternalError(resp.error());
+    ASYNC_RETURN absl::InternalError(resp.error());
   }
-  return RemoveChannel(publisher);
+  ASYNC_RETURN RemoveChannel(publisher);
 }
 
-absl::Status ClientImpl::RemoveSubscriber(SubscriberImpl *subscriber) {
+async::Task<absl::Status>
+ClientImpl::RemoveSubscriber(SubscriberImpl *subscriber) {
   ClientLockGuard guard(this);
   if (!socket_.Connected()) {
-    return RemoveChannel(subscriber);
+    ASYNC_RETURN RemoveChannel(subscriber);
   }
   Request req;
   auto *cmd = req.mutable_remove_subscriber();
@@ -2074,16 +2166,16 @@ absl::Status ClientImpl::RemoveSubscriber(SubscriberImpl *subscriber) {
   Response response;
   std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
-  if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
+  if (absl::Status status = ASYNC_AWAIT(SendRequestReceiveResponse(req, response, fds));
       !status.ok()) {
-    return RemoveChannel(subscriber);
+    ASYNC_RETURN RemoveChannel(subscriber);
   }
 
   auto &resp = response.remove_subscriber();
   if (!resp.error().empty()) {
-    return absl::InternalError(resp.error());
+    ASYNC_RETURN absl::InternalError(resp.error());
   }
-  return RemoveChannel(subscriber);
+  ASYNC_RETURN RemoveChannel(subscriber);
 }
 
 absl::StatusOr<const ChannelCounters>
@@ -2102,10 +2194,10 @@ const ChannelCounters &ClientImpl::GetChannelCounters(ClientChannel *channel) {
   return channel->GetCounters();
 }
 
-absl::StatusOr<const ChannelInfo>
+async::Task<absl::StatusOr<const ChannelInfo>>
 ClientImpl::GetChannelInfo(const std::string &channel) {
   if (absl::Status status = CheckConnected(); !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
   Request req;
   auto *cmd = req.mutable_get_channel_info();
@@ -2114,18 +2206,18 @@ ClientImpl::GetChannelInfo(const std::string &channel) {
   // Send request to server and wait for response.
   Response response;
   std::vector<toolbelt::FileDescriptor> fds;
-  if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
+  if (absl::Status status = ASYNC_AWAIT(SendRequestReceiveResponse(req, response, fds));
       !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
 
   auto &resp = response.get_channel_info();
   if (!resp.error().empty()) {
-    return absl::InternalError(resp.error());
+    ASYNC_RETURN absl::InternalError(resp.error());
   }
   // There will be one channel information in the response.
   if (resp.channels_size() != 1) {
-    return absl::InternalError("Invalid response for getChannelInfo");
+    ASYNC_RETURN absl::InternalError("Invalid response for getChannelInfo");
   }
   ChannelInfo result;
   const ChannelInfoProto &info = resp.channels()[0];
@@ -2144,13 +2236,14 @@ ClientImpl::GetChannelInfo(const std::string &channel) {
   result.subscriber_queue_arena_size =
       info.subscriber_queue_arena_size();
   result.is_local = info.is_local();
-  return result;
+  ASYNC_RETURN result;
 }
 
-absl::StatusOr<const std::vector<ChannelInfo>> ClientImpl::GetChannelInfo() {
+async::Task<absl::StatusOr<const std::vector<ChannelInfo>>>
+ClientImpl::GetChannelInfo() {
   ClientLockGuard guard(this);
   if (absl::Status status = CheckConnected(); !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
   Request req;
   [[maybe_unused]] auto cmd = req.mutable_get_channel_info();
@@ -2158,13 +2251,13 @@ absl::StatusOr<const std::vector<ChannelInfo>> ClientImpl::GetChannelInfo() {
   // Send request to server and wait for response.
   Response response;
   std::vector<toolbelt::FileDescriptor> fds;
-  if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
+  if (absl::Status status = ASYNC_AWAIT(SendRequestReceiveResponse(req, response, fds));
       !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
   auto &resp = response.get_channel_info();
   if (!resp.error().empty()) {
-    return absl::InternalError(resp.error());
+    ASYNC_RETURN absl::InternalError(resp.error());
   }
   std::vector<ChannelInfo> r;
   for (auto &info : resp.channels()) {
@@ -2186,23 +2279,24 @@ absl::StatusOr<const std::vector<ChannelInfo>> ClientImpl::GetChannelInfo() {
     result.is_local = info.is_local();
     r.push_back(result);
   }
-  return r;
+  ASYNC_RETURN r;
 }
 
-absl::StatusOr<bool> ClientImpl::ChannelExists(const std::string &channelName) {
+async::Task<absl::StatusOr<bool>>
+ClientImpl::ChannelExists(const std::string &channelName) {
   ClientLockGuard guard(this);
   if (absl::Status status = CheckConnected(); !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
-  absl::StatusOr<const ChannelInfo> info = GetChannelInfo(channelName);
-  return info.ok();
+  absl::StatusOr<const ChannelInfo> info = ASYNC_AWAIT(GetChannelInfo(channelName));
+  ASYNC_RETURN info.ok();
 }
 
-absl::StatusOr<const ChannelStats>
+async::Task<absl::StatusOr<const ChannelStats>>
 ClientImpl::GetChannelStats(const std::string &channel) {
   ClientLockGuard guard(this);
   if (absl::Status status = CheckConnected(); !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
   Request req;
   auto *cmd = req.mutable_get_channel_stats();
@@ -2211,17 +2305,17 @@ ClientImpl::GetChannelStats(const std::string &channel) {
   // Send request to server and wait for response.
   Response response;
   std::vector<toolbelt::FileDescriptor> fds;
-  if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
+  if (absl::Status status = ASYNC_AWAIT(SendRequestReceiveResponse(req, response, fds));
       !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
   auto &resp = response.get_channel_stats();
   if (!resp.error().empty()) {
-    return absl::InternalError(resp.error());
+    ASYNC_RETURN absl::InternalError(resp.error());
   }
   // There will be one channel information in the response.
   if (resp.channels_size() != 1) {
-    return absl::InternalError("Invalid response for getChannelStats");
+    ASYNC_RETURN absl::InternalError("Invalid response for getChannelStats");
   }
   ChannelStats result;
   const ChannelStatsProto &stats = resp.channels()[0];
@@ -2230,13 +2324,14 @@ ClientImpl::GetChannelStats(const std::string &channel) {
   result.total_messages = stats.total_messages();
   result.max_message_size = stats.max_message_size();
   result.is_local = stats.is_local();
-  return result;
+  ASYNC_RETURN result;
 }
 
-absl::StatusOr<const std::vector<ChannelStats>> ClientImpl::GetChannelStats() {
+async::Task<absl::StatusOr<const std::vector<ChannelStats>>>
+ClientImpl::GetChannelStats() {
   ClientLockGuard guard(this);
   if (absl::Status status = CheckConnected(); !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
 
   Request req;
@@ -2245,13 +2340,13 @@ absl::StatusOr<const std::vector<ChannelStats>> ClientImpl::GetChannelStats() {
   // Send request to server and wait for response.
   Response response;
   std::vector<toolbelt::FileDescriptor> fds;
-  if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
+  if (absl::Status status = ASYNC_AWAIT(SendRequestReceiveResponse(req, response, fds));
       !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
   auto &resp = response.get_channel_stats();
   if (!resp.error().empty()) {
-    return absl::InternalError(resp.error());
+    ASYNC_RETURN absl::InternalError(resp.error());
   }
   std::vector<ChannelStats> r;
   for (auto &stats : resp.channels()) {
@@ -2263,19 +2358,20 @@ absl::StatusOr<const std::vector<ChannelStats>> ClientImpl::GetChannelStats() {
     result.is_local = stats.is_local();
     r.push_back(result);
   }
-  return r;
+  ASYNC_RETURN r;
 }
 
-absl::Status ClientImpl::ResizeChannel(PublisherImpl *publisher,
+async::Task<absl::Status>
+ClientImpl::ResizeChannel(PublisherImpl *publisher,
                                        int64_t new_slot_size) {
   if (publisher->IsFixedSize()) {
-    return absl::InternalError(absl::StrFormat(
+    ASYNC_RETURN absl::InternalError(absl::StrFormat(
         "Channel %s is fixed size at %d bytes; can't increase it to %d bytes",
         publisher->Name(), publisher->SlotSize(), new_slot_size));
   }
   if (int64_t max_slot_size = publisher->MaxSlotSize();
       max_slot_size != 0 && new_slot_size > max_slot_size) {
-    return absl::InvalidArgumentError(absl::StrFormat(
+    ASYNC_RETURN absl::InvalidArgumentError(absl::StrFormat(
         "Channel %s has a maximum slot size of %d bytes; can't increase it to "
         "%d bytes",
         publisher->Name(), max_slot_size, new_slot_size));
@@ -2288,11 +2384,11 @@ absl::Status ClientImpl::ResizeChannel(PublisherImpl *publisher,
     if (absl::Status s =
             it->second(publisher, publisher->SlotSize(), new_slot_size);
         !s.ok()) {
-      return s;
+      ASYNC_RETURN s;
     }
   }
 
-  return publisher->CreateOrAttachBuffers(Aligned(new_slot_size));
+  ASYNC_RETURN ASYNC_AWAIT(publisher->CreateOrAttachBuffers(Aligned(new_slot_size)));
 }
 
 void ClientImpl::FillCreatePublisherRequest(CreatePublisherRequest *cmd,
@@ -2389,7 +2485,8 @@ void ClientImpl::ApplySubscriberResponseFds(
   subscriber->SetNumUpdates(resp.num_pub_updates());
 }
 
-absl::Status ClientImpl::Reconnect() {
+async::Task<absl::Status>
+ClientImpl::Reconnect() {
   reconnecting_ = true;
   auto cleanup = [this]() { reconnecting_ = false; };
 
@@ -2402,7 +2499,7 @@ absl::Status ClientImpl::Reconnect() {
   absl::Status status = socket_.Connect(socket_name_);
   if (!status.ok()) {
     cleanup();
-    return status;
+    ASYNC_RETURN status;
   }
 
   Request init_req;
@@ -2410,14 +2507,14 @@ absl::Status ClientImpl::Reconnect() {
   Response init_resp;
   std::vector<toolbelt::FileDescriptor> init_fds;
   init_fds.reserve(100);
-  status = SendRequestReceiveResponse(init_req, init_resp, init_fds);
+  status = ASYNC_AWAIT(SendRequestReceiveResponse(init_req, init_resp, init_fds));
   if (!status.ok()) {
     cleanup();
-    return status;
+    ASYNC_RETURN status;
   }
   if (!init_resp.init().error().empty()) {
     cleanup();
-    return absl::InternalError(init_resp.init().error());
+    ASYNC_RETURN absl::InternalError(init_resp.init().error());
   }
   scb_fd_ = std::move(init_fds[init_resp.init().scb_fd_index()]);
   session_id_ = init_resp.init().session_id();
@@ -2426,22 +2523,22 @@ absl::Status ClientImpl::Reconnect() {
 
   for (auto &channel : channels_) {
     if (auto *pub = dynamic_cast<PublisherImpl *>(channel.get())) {
-      status = ReregisterPublisher(pub);
+      status = ASYNC_AWAIT(ReregisterPublisher(pub));
       if (!status.ok()) {
         cleanup();
-        return status;
+        ASYNC_RETURN status;
       }
     } else if (auto *sub = dynamic_cast<SubscriberImpl *>(channel.get())) {
-      status = ReregisterSubscriber(sub);
+      status = ASYNC_AWAIT(ReregisterSubscriber(sub));
       if (!status.ok()) {
         cleanup();
-        return status;
+        ASYNC_RETURN status;
       }
     }
   }
 
   cleanup();
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
 bool ClientImpl::ShouldReconnect(const absl::Status &failure) const {
@@ -2449,10 +2546,31 @@ bool ClientImpl::ShouldReconnect(const absl::Status &failure) const {
   // stopped, not that the server has gone.  Reconnecting then can block in
   // connect() for good if the server has stopped accepting connections, as it
   // does while it shuts down.
-  return was_connected_ && !reconnecting_ && !absl::IsCancelled(failure);
+  if (!was_connected_ || reconnecting_ || absl::IsCancelled(failure)) {
+    return false;
+  }
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
+  // send()/recv() can fail synchronously (for example EPIPE when the server's
+  // client handler exited on shutdown first) without reaching a wait that sees
+  // the coroutine's interrupt fd.  Check the interrupt fd directly too.
+  if (co20::Coroutine *co = SocketContext().Coroutine(); co != nullptr) {
+    if (co->IsAborted()) {
+      return false;
+    }
+    if (int ifd = co->GetInterruptFd(); ifd != -1) {
+      struct pollfd pfd = {.fd = ifd, .events = POLLIN, .revents = 0};
+      if (GetSyscallShim().poll_fn(&pfd, 1, 0) > 0 &&
+          (pfd.revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
+        return false;
+      }
+    }
+  }
+#endif
+  return true;
 }
 
-absl::Status ClientImpl::ReregisterPublisher(PublisherImpl *publisher) {
+async::Task<absl::Status>
+ClientImpl::ReregisterPublisher(PublisherImpl *publisher) {
   Request req;
   FillCreatePublisherRequest(req.mutable_create_publisher(), publisher->Name(),
                              publisher->options_,
@@ -2463,20 +2581,21 @@ absl::Status ClientImpl::ReregisterPublisher(PublisherImpl *publisher) {
   Response resp;
   std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
-  if (absl::Status status = SendRequestReceiveResponse(req, resp, fds);
+  if (absl::Status status = ASYNC_AWAIT(SendRequestReceiveResponse(req, resp, fds));
       !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
   auto &pub_resp = resp.create_publisher();
   if (!pub_resp.error().empty()) {
-    return absl::InternalError(pub_resp.error());
+    ASYNC_RETURN absl::InternalError(pub_resp.error());
   }
 
   ApplyPublisherResponseFds(publisher, pub_resp, fds);
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
-absl::Status ClientImpl::ReregisterSubscriber(SubscriberImpl *subscriber) {
+async::Task<absl::Status>
+ClientImpl::ReregisterSubscriber(SubscriberImpl *subscriber) {
   Request req;
   FillCreateSubscriberRequest(req.mutable_create_subscriber(),
                               subscriber->Name(), subscriber->options_,
@@ -2485,20 +2604,21 @@ absl::Status ClientImpl::ReregisterSubscriber(SubscriberImpl *subscriber) {
   Response resp;
   std::vector<toolbelt::FileDescriptor> fds;
   fds.reserve(100);
-  if (absl::Status status = SendRequestReceiveResponse(req, resp, fds);
+  if (absl::Status status = ASYNC_AWAIT(SendRequestReceiveResponse(req, resp, fds));
       !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
   auto &sub_resp = resp.create_subscriber();
   if (!sub_resp.error().empty()) {
-    return absl::InternalError(sub_resp.error());
+    ASYNC_RETURN absl::InternalError(sub_resp.error());
   }
 
   ApplySubscriberResponseFds(subscriber, sub_resp, fds);
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
-absl::Status ClientImpl::SendRequestReceiveResponse(
+async::Task<absl::Status>
+ClientImpl::SendRequestReceiveResponse(
     const Request &req, Response &response,
     std::vector<toolbelt::FileDescriptor> &fds,
     const std::vector<toolbelt::FileDescriptor> &send_fds) {
@@ -2509,92 +2629,94 @@ absl::Status ClientImpl::SendRequestReceiveResponse(
     char *sendbuf = send_msg.data() + sizeof(int32_t);
 
     if (!req.SerializeToArray(sendbuf, msg_len)) {
-      return absl::InternalError("Failed to serialize request");
+      ASYNC_RETURN absl::InternalError("Failed to serialize request");
     }
 
     absl::StatusOr<ssize_t> n =
-        socket_.SendMessage(sendbuf, msg_len, SocketContext());
+        ASYNC_AWAIT(socket_.SendMessage(sendbuf, msg_len, SocketContext()));
     if (!n.ok()) {
       socket_.Close();
       if (ShouldReconnect(n.status())) {
-        if (absl::Status rs = Reconnect(); rs.ok()) {
-          return SendRequestReceiveResponse(req, response, fds, send_fds);
+        if (absl::Status rs = ASYNC_AWAIT(Reconnect()); rs.ok()) {
+          ASYNC_RETURN ASYNC_AWAIT(SendRequestReceiveResponse(req, response, fds, send_fds));
         } else {
-          return rs;
+          ASYNC_RETURN rs;
         }
       }
-      return n.status();
+      ASYNC_RETURN n.status();
     }
     if (!send_fds.empty()) {
-      absl::Status status = socket_.SendFds(send_fds, SocketContext());
+      absl::Status status =
+          ASYNC_AWAIT(socket_.SendFds(send_fds, SocketContext()));
       if (!status.ok()) {
         socket_.Close();
-        return status;
+        ASYNC_RETURN status;
       }
     }
   }
 
   absl::StatusOr<std::vector<char>> recv_msg =
-      socket_.ReceiveVariableLengthMessage(SocketContext());
+      ASYNC_AWAIT(socket_.ReceiveVariableLengthMessage(SocketContext()));
   if (!recv_msg.ok()) {
     socket_.Close();
     if (ShouldReconnect(recv_msg.status())) {
-      if (absl::Status rs = Reconnect(); rs.ok()) {
-        return SendRequestReceiveResponse(req, response, fds, send_fds);
+      if (absl::Status rs = ASYNC_AWAIT(Reconnect()); rs.ok()) {
+        ASYNC_RETURN ASYNC_AWAIT(SendRequestReceiveResponse(req, response, fds, send_fds));
       } else {
-        return rs;
+        ASYNC_RETURN rs;
       }
     }
-    return recv_msg.status();
+    ASYNC_RETURN recv_msg.status();
   }
   if (!response.ParseFromArray(recv_msg->data(),
                                static_cast<int>(recv_msg->size()))) {
     socket_.Close();
-    return absl::InternalError("Failed to parse response");
+    ASYNC_RETURN absl::InternalError("Failed to parse response");
   }
 
-  absl::Status s = socket_.ReceiveFds(fds, SocketContext());
+  absl::Status s = ASYNC_AWAIT(socket_.ReceiveFds(fds, SocketContext()));
   if (!s.ok()) {
     socket_.Close();
   }
 
-  return s;
+  ASYNC_RETURN s;
 }
 
-absl::Status ClientImpl::SendOneWayRequest(
+async::Task<absl::Status>
+ClientImpl::SendOneWayRequest(
     const Request &req, const std::vector<toolbelt::FileDescriptor> &fds) {
   size_t msg_len = req.ByteSizeLong();
   std::vector<char> send_msg(sizeof(int32_t) + msg_len);
   char *sendbuf = send_msg.data() + sizeof(int32_t);
 
   if (!req.SerializeToArray(sendbuf, msg_len)) {
-    return absl::InternalError("Failed to serialize one-way request");
+    ASYNC_RETURN absl::InternalError("Failed to serialize one-way request");
   }
 
   absl::StatusOr<ssize_t> n =
-      socket_.SendMessage(sendbuf, msg_len, SocketContext());
+      ASYNC_AWAIT(socket_.SendMessage(sendbuf, msg_len, SocketContext()));
   if (!n.ok()) {
     socket_.Close();
     if (ShouldReconnect(n.status())) {
-      if (absl::Status rs = Reconnect(); rs.ok()) {
-        return SendOneWayRequest(req, fds);
+      if (absl::Status rs = ASYNC_AWAIT(Reconnect()); rs.ok()) {
+        ASYNC_RETURN ASYNC_AWAIT(SendOneWayRequest(req, fds));
       } else {
-        return rs;
+        ASYNC_RETURN rs;
       }
     }
-    return n.status();
+    ASYNC_RETURN n.status();
   }
   if (!fds.empty()) {
-    absl::Status status = socket_.SendFds(fds, SocketContext());
+    absl::Status status = ASYNC_AWAIT(socket_.SendFds(fds, SocketContext()));
     if (!status.ok()) {
       socket_.Close();
-      return status;
+      ASYNC_RETURN status;
     }
   }
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
-absl::Status
+async::Task<absl::Status>
 ClientImpl::RegisterClientBuffer(const ClientBufferHandleMetadata &metadata,
                                  const toolbelt::FileDescriptor *fd) {
   Request req;
@@ -2609,17 +2731,17 @@ ClientImpl::RegisterClientBuffer(const ClientBufferHandleMetadata &metadata,
   Response response;
   std::vector<toolbelt::FileDescriptor> response_fds;
   if (absl::Status status =
-          SendRequestReceiveResponse(req, response, response_fds, fds);
+          ASYNC_AWAIT(SendRequestReceiveResponse(req, response, response_fds, fds));
       !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
   if (!response.register_client_buffer().error().empty()) {
-    return absl::InternalError(response.register_client_buffer().error());
+    ASYNC_RETURN absl::InternalError(response.register_client_buffer().error());
   }
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
-absl::StatusOr<std::vector<RegisteredClientBuffer>>
+async::Task<absl::StatusOr<std::vector<RegisteredClientBuffer>>>
 ClientImpl::GetClientBuffers(const std::string &channel_name,
                              uint64_t session_id, uint32_t buffer_index) {
   Request req;
@@ -2630,16 +2752,16 @@ ClientImpl::GetClientBuffers(const std::string &channel_name,
 
   Response response;
   std::vector<toolbelt::FileDescriptor> fds;
-  if (absl::Status status = SendRequestReceiveResponse(req, response, fds);
+  if (absl::Status status = ASYNC_AWAIT(SendRequestReceiveResponse(req, response, fds));
       !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
   const auto &get_resp = response.get_client_buffers();
   if (!get_resp.error().empty()) {
-    return absl::InternalError(get_resp.error());
+    ASYNC_RETURN absl::InternalError(get_resp.error());
   }
   if (get_resp.metadata_size() != get_resp.fd_indexes_size()) {
-    return absl::InternalError("Malformed client buffer response");
+    ASYNC_RETURN absl::InternalError("Malformed client buffer response");
   }
   std::vector<RegisteredClientBuffer> result;
   result.reserve(get_resp.metadata_size());
@@ -2653,10 +2775,11 @@ ClientImpl::GetClientBuffers(const std::string &channel_name,
     }
     result.push_back(std::move(buffer));
   }
-  return result;
+  ASYNC_RETURN result;
 }
 
-absl::Status ClientImpl::UnregisterClientBuffer(const std::string &channel_name,
+async::Task<absl::Status>
+ClientImpl::UnregisterClientBuffer(const std::string &channel_name,
                                                 uint64_t session_id,
                                                 uint32_t buffer_index) {
   Request req;
@@ -2664,7 +2787,7 @@ absl::Status ClientImpl::UnregisterClientBuffer(const std::string &channel_name,
   unregister->set_channel_name(channel_name);
   unregister->set_session_id(session_id);
   unregister->set_buffer_index(buffer_index);
-  return SendOneWayRequest(req);
+  ASYNC_RETURN ASYNC_AWAIT(SendOneWayRequest(req));
 }
 
 } // namespace subspace

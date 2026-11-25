@@ -27,10 +27,12 @@
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
 #include <boost/asio/io_context.hpp>
 #else
-static co::CoroutineScheduler *g_scheduler;
+static subspace::async::RuntimeEngine *g_scheduler;
 void Signal(int sig) {
   printf("\nAll coroutines:\n");
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO
   g_scheduler->Show();
+#endif
   signal(sig, SIG_DFL);
   raise(sig);
 }
@@ -187,7 +189,7 @@ int main(int argc, char **argv) {
   boost::asio::io_context engine;
   signal(SIGPIPE, SIG_IGN);
 #else
-  co::CoroutineScheduler engine;
+  subspace::async::RuntimeEngine engine;
   g_scheduler = &engine; // For signal handler.
   signal(SIGPIPE, SIG_IGN);
   signal(SIGQUIT, Signal);

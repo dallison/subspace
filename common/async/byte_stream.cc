@@ -195,8 +195,9 @@ ByteStream::DeadlineFrom(std::chrono::nanoseconds timeout) const {
   return std::chrono::steady_clock::now() + timeout;
 }
 
-absl::Status ByteStream::SendRaw(Context ctx, const char *data, size_t length,
-                                 std::optional<Deadline> deadline) {
+Task<absl::Status> ByteStream::SendRaw(Context ctx, const char *data,
+                                       size_t length,
+                                       std::optional<Deadline> deadline) {
   const int fd = Fd();
   while (length > 0) {
     ssize_t n = ::send(fd, data, length, kSendFlags);
@@ -211,60 +212,63 @@ absl::Status ByteStream::SendRaw(Context ctx, const char *data, size_t length,
     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
       std::optional<std::chrono::nanoseconds> remaining = Remaining(deadline);
       if (deadline.has_value() && !remaining.has_value()) {
-        return absl::DeadlineExceededError("timed out sending mTLS records");
+        ASYNC_RETURN absl::DeadlineExceededError(
+            "timed out sending mTLS records");
       }
-      if (absl::Status s = WaitWritable(ctx, fd, remaining.value_or(
-                                                     std::chrono::nanoseconds(0)));
+      if (absl::Status s = ASYNC_AWAIT(WaitWritable(
+              ctx, fd, remaining.value_or(std::chrono::nanoseconds(0))));
           !s.ok()) {
-        return s;
+        ASYNC_RETURN s;
       }
       continue;
     }
-    return absl::InternalError(
+    ASYNC_RETURN absl::InternalError(
         absl::StrFormat("send failed: %s", strerror(errno)));
   }
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
-absl::StatusOr<ssize_t> ByteStream::RecvRaw(Context ctx, char *buffer,
-                                            size_t length,
-                                            std::optional<Deadline> deadline) {
+Task<absl::StatusOr<ssize_t>>
+ByteStream::RecvRaw(Context ctx, char *buffer, size_t length,
+                    std::optional<Deadline> deadline) {
   const int fd = Fd();
   for (;;) {
     ssize_t n = ::recv(fd, buffer, length, 0);
     if (n > 0) {
-      return n;
+      ASYNC_RETURN n;
     }
     if (n == 0) {
-      return static_cast<ssize_t>(0);
+      ASYNC_RETURN static_cast<ssize_t>(0);
     }
     if (errno == EINTR) {
       continue;
     }
     if (errno != EAGAIN && errno != EWOULDBLOCK) {
-      return absl::InternalError(
+      ASYNC_RETURN absl::InternalError(
           absl::StrFormat("recv failed: %s", strerror(errno)));
     }
     std::optional<std::chrono::nanoseconds> remaining = Remaining(deadline);
     if (deadline.has_value() && !remaining.has_value()) {
-      return absl::DeadlineExceededError("timed out reading mTLS records");
+      ASYNC_RETURN absl::DeadlineExceededError(
+          "timed out reading mTLS records");
     }
-    if (absl::Status s =
-            WaitReadable(ctx, fd, remaining.value_or(std::chrono::nanoseconds(0)));
+    if (absl::Status s = ASYNC_AWAIT(WaitReadable(
+            ctx, fd, remaining.value_or(std::chrono::nanoseconds(0))));
         !s.ok()) {
-      return s;
+      ASYNC_RETURN s;
     }
   }
 }
 
-absl::Status ByteStream::FlushTls(Context ctx, std::optional<Deadline> deadline) {
+Task<absl::Status> ByteStream::FlushTls(Context ctx,
+                                        std::optional<Deadline> deadline) {
 #if !SUBSPACE_ENABLE_MTLS
   (void)ctx;
   (void)deadline;
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 #else
   if (tls_ == nullptr || tls_->write_bio == nullptr) {
-    return absl::OkStatus();
+    ASYNC_RETURN absl::OkStatus();
   }
   char buf[kTlsRecordBuf];
   while (BIO_pending(tls_->write_bio) > 0) {
@@ -272,57 +276,66 @@ absl::Status ByteStream::FlushTls(Context ctx, std::optional<Deadline> deadline)
     if (n <= 0) {
       break;
     }
-    if (absl::Status s = SendRaw(ctx, buf, static_cast<size_t>(n), deadline);
+    if (absl::Status s = ASYNC_AWAIT(
+            SendRaw(ctx, buf, static_cast<size_t>(n), deadline));
         !s.ok()) {
-      return s;
+      ASYNC_RETURN s;
     }
   }
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 #endif
 }
 
-absl::Status ByteStream::FillTls(Context ctx, std::optional<Deadline> deadline) {
+Task<absl::Status> ByteStream::FillTls(Context ctx,
+                                       std::optional<Deadline> deadline) {
 #if !SUBSPACE_ENABLE_MTLS
   (void)ctx;
   (void)deadline;
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 #else
   char buf[kTlsRecordBuf];
-  absl::StatusOr<ssize_t> n = RecvRaw(ctx, buf, sizeof(buf), deadline);
+  absl::StatusOr<ssize_t> n =
+      ASYNC_AWAIT(RecvRaw(ctx, buf, sizeof(buf), deadline));
   if (!n.ok()) {
-    return n.status();
+    ASYNC_RETURN n.status();
   }
   if (*n == 0) {
-    return PeerClosed();
+    ASYNC_RETURN PeerClosed();
+  }
+  // Close() can drop the session while the read waits.
+  if (tls_ == nullptr) {
+    ASYNC_RETURN absl::FailedPreconditionError("mTLS session closed");
   }
   int wrote = BIO_write(tls_->read_bio, buf, static_cast<int>(*n));
   if (wrote != static_cast<int>(*n)) {
-    return absl::InternalError(SslErrors("failed to buffer an mTLS record"));
+    ASYNC_RETURN absl::InternalError(
+        SslErrors("failed to buffer an mTLS record"));
   }
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 #endif
 }
 
-absl::Status ByteStream::HandshakeTls(const std::shared_ptr<MtlsContext> &mtls,
-                                      bool server_role, Context ctx,
-                                      std::chrono::nanoseconds timeout) {
+Task<absl::Status> ByteStream::HandshakeTls(std::shared_ptr<MtlsContext> mtls,
+                                            bool server_role, Context ctx,
+                                            std::chrono::nanoseconds timeout) {
 #if !SUBSPACE_ENABLE_MTLS
   (void)mtls;
   (void)server_role;
   (void)ctx;
   (void)timeout;
-  return absl::UnimplementedError(
+  ASYNC_RETURN absl::UnimplementedError(
       "mTLS is not enabled in this build; rebuild with --//:mtls "
       "(Bazel) or -DSUBSPACE_ENABLE_MTLS=ON (CMake)");
 #else
   if (mtls == nullptr || mtls->state_ == nullptr || mtls->state_->ctx == nullptr) {
-    return absl::InvalidArgumentError("mTLS handshake without credentials");
+    ASYNC_RETURN absl::InvalidArgumentError(
+        "mTLS handshake without credentials");
   }
   if (tls_ != nullptr) {
-    return absl::OkStatus();
+    ASYNC_RETURN absl::OkStatus();
   }
   if (absl::Status s = socket_.SetNonBlocking(); !s.ok()) {
-    return s;
+    ASYNC_RETURN s;
   }
   SSL *ssl = SSL_new(mtls->state_->ctx);
   BIO *read_bio = BIO_new(BIO_s_mem());
@@ -334,7 +347,8 @@ absl::Status ByteStream::HandshakeTls(const std::shared_ptr<MtlsContext> &mtls,
     BIO_free(read_bio);
     BIO_free(write_bio);
     broken_ = true;
-    return absl::InternalError(SslErrors("failed to create an mTLS session"));
+    ASYNC_RETURN absl::InternalError(
+        SslErrors("failed to create an mTLS session"));
   }
   // An empty read bio must look like EAGAIN, not a close, so the handshake
   // waits for the next record.  SSL_set_bio takes ownership of both bios.
@@ -359,28 +373,28 @@ absl::Status ByteStream::HandshakeTls(const std::shared_ptr<MtlsContext> &mtls,
   for (;;) {
     ERR_clear_error();
     int rc = SSL_do_handshake(tls_->ssl);
-    if (absl::Status s = FlushTls(ctx, deadline); !s.ok()) {
+    if (absl::Status s = ASYNC_AWAIT(FlushTls(ctx, deadline)); !s.ok()) {
       broken_ = true;
       tls_.reset();
-      return s;
+      ASYNC_RETURN s;
     }
     if (rc == 1) {
       long verify = SSL_get_verify_result(tls_->ssl);
       if (verify != X509_V_OK) {
         broken_ = true;
         tls_.reset();
-        return absl::UnauthenticatedError(absl::StrFormat(
+        ASYNC_RETURN absl::UnauthenticatedError(absl::StrFormat(
             "mTLS peer certificate rejected: %s",
             X509_verify_cert_error_string(verify)));
       }
-      return absl::OkStatus();
+      ASYNC_RETURN absl::OkStatus();
     }
     int err = SSL_get_error(tls_->ssl, rc);
     if (err == SSL_ERROR_WANT_READ) {
-      if (absl::Status s = FillTls(ctx, deadline); !s.ok()) {
+      if (absl::Status s = ASYNC_AWAIT(FillTls(ctx, deadline)); !s.ok()) {
         broken_ = true;
         tls_.reset();
-        return s;
+        ASYNC_RETURN s;
       }
       continue;
     }
@@ -390,15 +404,15 @@ absl::Status ByteStream::HandshakeTls(const std::shared_ptr<MtlsContext> &mtls,
     std::string message = SslErrors("mTLS handshake failed");
     broken_ = true;
     tls_.reset();
-    return absl::UnauthenticatedError(message);
+    ASYNC_RETURN absl::UnauthenticatedError(message);
   }
 #endif
 }
 
-absl::StatusOr<ssize_t> ByteStream::Send(const char *buffer, size_t length,
-                                         Context ctx) {
+Task<absl::StatusOr<ssize_t>> ByteStream::Send(const char *buffer,
+                                               size_t length, Context ctx) {
   if (broken_) {
-    return absl::FailedPreconditionError("mTLS handshake failed");
+    ASYNC_RETURN absl::FailedPreconditionError("mTLS handshake failed");
   }
 #if SUBSPACE_ENABLE_MTLS
   if (tls_ != nullptr) {
@@ -409,8 +423,8 @@ absl::StatusOr<ssize_t> ByteStream::Send(const char *buffer, size_t length,
                         static_cast<int>(std::min(
                             length - off,
                             static_cast<size_t>(std::numeric_limits<int>::max()))));
-      if (absl::Status s = FlushTls(ctx, std::nullopt); !s.ok()) {
-        return s;
+      if (absl::Status s = ASYNC_AWAIT(FlushTls(ctx, std::nullopt)); !s.ok()) {
+        ASYNC_RETURN s;
       }
       if (n > 0) {
         off += static_cast<size_t>(n);
@@ -418,8 +432,9 @@ absl::StatusOr<ssize_t> ByteStream::Send(const char *buffer, size_t length,
       }
       int err = SSL_get_error(tls_->ssl, n);
       if (err == SSL_ERROR_WANT_READ) {
-        if (absl::Status s = FillTls(ctx, std::nullopt); !s.ok()) {
-          return s;
+        if (absl::Status s = ASYNC_AWAIT(FillTls(ctx, std::nullopt));
+            !s.ok()) {
+          ASYNC_RETURN s;
         }
         continue;
       }
@@ -427,41 +442,42 @@ absl::StatusOr<ssize_t> ByteStream::Send(const char *buffer, size_t length,
         continue;
       }
       if (err == SSL_ERROR_ZERO_RETURN) {
-        return PeerClosed();
+        ASYNC_RETURN PeerClosed();
       }
-      return absl::UnavailableError(SslErrors("mTLS send failed"));
+      ASYNC_RETURN absl::UnavailableError(SslErrors("mTLS send failed"));
     }
-    return static_cast<ssize_t>(length);
+    ASYNC_RETURN static_cast<ssize_t>(length);
   }
 #endif
-  return socket_.Send(buffer, length, ctx);
+  ASYNC_RETURN ASYNC_AWAIT(socket_.Send(buffer, length, ctx));
 }
 
-absl::StatusOr<ssize_t> ByteStream::Receive(char *buffer, size_t buflen,
-                                            Context ctx) {
+Task<absl::StatusOr<ssize_t>> ByteStream::Receive(char *buffer, size_t buflen,
+                                                  Context ctx) {
   if (broken_) {
-    return absl::FailedPreconditionError("mTLS handshake failed");
+    ASYNC_RETURN absl::FailedPreconditionError("mTLS handshake failed");
   }
 #if SUBSPACE_ENABLE_MTLS
   if (tls_ != nullptr) {
     if (buflen == 0) {
-      return static_cast<ssize_t>(0);
+      ASYNC_RETURN static_cast<ssize_t>(0);
     }
     for (;;) {
       ERR_clear_error();
       int n = SSL_read(tls_->ssl, buffer,
                        static_cast<int>(std::min(
                            buflen, static_cast<size_t>(std::numeric_limits<int>::max()))));
-      if (absl::Status s = FlushTls(ctx, std::nullopt); !s.ok()) {
-        return s;
+      if (absl::Status s = ASYNC_AWAIT(FlushTls(ctx, std::nullopt)); !s.ok()) {
+        ASYNC_RETURN s;
       }
       if (n > 0) {
-        return static_cast<ssize_t>(n);
+        ASYNC_RETURN static_cast<ssize_t>(n);
       }
       int err = SSL_get_error(tls_->ssl, n);
       if (err == SSL_ERROR_WANT_READ) {
-        if (absl::Status s = FillTls(ctx, std::nullopt); !s.ok()) {
-          return s;
+        if (absl::Status s = ASYNC_AWAIT(FillTls(ctx, std::nullopt));
+            !s.ok()) {
+          ASYNC_RETURN s;
         }
         continue;
       }
@@ -469,35 +485,37 @@ absl::StatusOr<ssize_t> ByteStream::Receive(char *buffer, size_t buflen,
         continue;
       }
       if (err == SSL_ERROR_ZERO_RETURN) {
-        return static_cast<ssize_t>(0);
+        ASYNC_RETURN static_cast<ssize_t>(0);
       }
-      return absl::UnavailableError(SslErrors("mTLS receive failed"));
+      ASYNC_RETURN absl::UnavailableError(SslErrors("mTLS receive failed"));
     }
   }
 #endif
-  return socket_.Receive(buffer, buflen, ctx);
+  ASYNC_RETURN ASYNC_AWAIT(socket_.Receive(buffer, buflen, ctx));
 }
 
-absl::Status ByteStream::SendAll(const void *data, size_t length, Context ctx) {
+Task<absl::Status> ByteStream::SendAll(const void *data, size_t length,
+                                       Context ctx) {
   const char *p = static_cast<const char *>(data);
   while (length > 0) {
-    absl::StatusOr<ssize_t> n = Send(p, length, ctx);
+    absl::StatusOr<ssize_t> n = ASYNC_AWAIT(Send(p, length, ctx));
     if (!n.ok()) {
-      return n.status();
+      ASYNC_RETURN n.status();
     }
     if (*n <= 0) {
-      return absl::UnavailableError("connection closed while sending");
+      ASYNC_RETURN absl::UnavailableError("connection closed while sending");
     }
     p += *n;
     length -= static_cast<size_t>(*n);
   }
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
-absl::Status ByteStream::ReadFully(void *buffer, size_t length, Context ctx,
-                                   std::optional<Deadline> deadline) {
+Task<absl::Status> ByteStream::ReadFully(void *buffer, size_t length,
+                                         Context ctx,
+                                         std::optional<Deadline> deadline) {
   if (broken_) {
-    return absl::FailedPreconditionError("mTLS handshake failed");
+    ASYNC_RETURN absl::FailedPreconditionError("mTLS handshake failed");
   }
   char *p = static_cast<char *>(buffer);
 #if SUBSPACE_ENABLE_MTLS
@@ -507,12 +525,12 @@ absl::Status ByteStream::ReadFully(void *buffer, size_t length, Context ctx,
       // Receive waits without a deadline.  A deadline has to bound the
       // ciphertext read inside FillTls, so that path calls SSL_read itself.
       if (!deadline.has_value()) {
-        absl::StatusOr<ssize_t> got = Receive(p, chunk, ctx);
+        absl::StatusOr<ssize_t> got = ASYNC_AWAIT(Receive(p, chunk, ctx));
         if (!got.ok()) {
-          return got.status();
+          ASYNC_RETURN got.status();
         }
         if (*got <= 0) {
-          return PeerClosed();
+          ASYNC_RETURN PeerClosed();
         }
         p += *got;
         length -= static_cast<size_t>(*got);
@@ -520,8 +538,8 @@ absl::Status ByteStream::ReadFully(void *buffer, size_t length, Context ctx,
       }
       ERR_clear_error();
       int got = SSL_read(tls_->ssl, p, static_cast<int>(chunk));
-      if (absl::Status s = FlushTls(ctx, deadline); !s.ok()) {
-        return s;
+      if (absl::Status s = ASYNC_AWAIT(FlushTls(ctx, deadline)); !s.ok()) {
+        ASYNC_RETURN s;
       }
       if (got > 0) {
         p += got;
@@ -530,8 +548,8 @@ absl::Status ByteStream::ReadFully(void *buffer, size_t length, Context ctx,
       }
       int err = SSL_get_error(tls_->ssl, got);
       if (err == SSL_ERROR_WANT_READ) {
-        if (absl::Status s = FillTls(ctx, deadline); !s.ok()) {
-          return s;
+        if (absl::Status s = ASYNC_AWAIT(FillTls(ctx, deadline)); !s.ok()) {
+          ASYNC_RETURN s;
         }
         continue;
       }
@@ -539,11 +557,11 @@ absl::Status ByteStream::ReadFully(void *buffer, size_t length, Context ctx,
         continue;
       }
       if (err == SSL_ERROR_ZERO_RETURN) {
-        return PeerClosed();
+        ASYNC_RETURN PeerClosed();
       }
-      return absl::UnavailableError(SslErrors("mTLS receive failed"));
+      ASYNC_RETURN absl::UnavailableError(SslErrors("mTLS receive failed"));
     }
-    return absl::OkStatus();
+    ASYNC_RETURN absl::OkStatus();
   }
 #endif
   if (deadline.has_value()) {
@@ -556,85 +574,91 @@ absl::Status ByteStream::ReadFully(void *buffer, size_t length, Context ctx,
         continue;
       }
       if (n == 0) {
-        return PeerClosed();
+        ASYNC_RETURN PeerClosed();
       }
       if (errno == EINTR) {
         continue;
       }
       if (errno != EAGAIN && errno != EWOULDBLOCK) {
-        return absl::InternalError(
+        ASYNC_RETURN absl::InternalError(
             absl::StrFormat("recv failed: %s", strerror(errno)));
       }
       std::optional<std::chrono::nanoseconds> remaining = Remaining(deadline);
       if (!remaining.has_value()) {
-        return absl::DeadlineExceededError("timed out");
+        ASYNC_RETURN absl::DeadlineExceededError("timed out");
       }
-      if (absl::Status s = WaitReadable(ctx, fd, *remaining); !s.ok()) {
-        return s;
+      if (absl::Status s = ASYNC_AWAIT(WaitReadable(ctx, fd, *remaining));
+          !s.ok()) {
+        ASYNC_RETURN s;
       }
     }
-    return absl::OkStatus();
+    ASYNC_RETURN absl::OkStatus();
   }
   while (length > 0) {
     size_t chunk = std::min(length, kMaxReceiveChunk);
-    absl::StatusOr<ssize_t> n = socket_.Receive(p, chunk, ctx);
+    absl::StatusOr<ssize_t> n = ASYNC_AWAIT(socket_.Receive(p, chunk, ctx));
     if (!n.ok()) {
-      return n.status();
+      ASYNC_RETURN n.status();
     }
     if (*n <= 0) {
-      return PeerClosed();
+      ASYNC_RETURN PeerClosed();
     }
     p += *n;
     length -= static_cast<size_t>(*n);
   }
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
-absl::StatusOr<ssize_t> ByteStream::SendMessage(char *buffer, size_t length,
-                                                Context ctx) {
+Task<absl::StatusOr<ssize_t>> ByteStream::SendMessage(char *buffer,
+                                                      size_t length,
+                                                      Context ctx) {
 #if SUBSPACE_ENABLE_MTLS
   if (tls_ != nullptr) {
     char *start = buffer - sizeof(int32_t);
     uint32_t net_len = htonl(static_cast<uint32_t>(length));
     memcpy(start, &net_len, sizeof(net_len));
-    if (absl::Status s = SendAll(start, length + sizeof(int32_t), ctx); !s.ok()) {
-      return s;
+    if (absl::Status s =
+            ASYNC_AWAIT(SendAll(start, length + sizeof(int32_t), ctx));
+        !s.ok()) {
+      ASYNC_RETURN s;
     }
-    return static_cast<ssize_t>(length);
+    ASYNC_RETURN static_cast<ssize_t>(length);
   }
 #endif
-  return socket_.SendMessage(buffer, length, ctx);
+  ASYNC_RETURN ASYNC_AWAIT(socket_.SendMessage(buffer, length, ctx));
 }
 
-absl::StatusOr<ssize_t> ByteStream::ReceiveMessage(char *buffer, size_t buflen,
-                                                   Context ctx) {
+Task<absl::StatusOr<ssize_t>> ByteStream::ReceiveMessage(char *buffer,
+                                                         size_t buflen,
+                                                         Context ctx) {
 #if SUBSPACE_ENABLE_MTLS
   if (tls_ != nullptr) {
     char lenbuf[sizeof(int32_t)];
-    absl::Status got = ReadFully(lenbuf, sizeof(lenbuf), ctx);
+    absl::Status got = ASYNC_AWAIT(ReadFully(lenbuf, sizeof(lenbuf), ctx));
     if (!got.ok()) {
       if (absl::IsAborted(got)) {
-        return static_cast<ssize_t>(0);
+        ASYNC_RETURN static_cast<ssize_t>(0);
       }
-      return got;
+      ASYNC_RETURN got;
     }
     uint32_t net_len = 0;
     memcpy(&net_len, lenbuf, sizeof(net_len));
     size_t length = ntohl(net_len);
     if (length > buflen) {
-      return absl::InternalError(absl::StrFormat(
+      ASYNC_RETURN absl::InternalError(absl::StrFormat(
           "message length %zu exceeds buffer size %zu", length, buflen));
     }
     if (length == 0) {
-      return static_cast<ssize_t>(0);
+      ASYNC_RETURN static_cast<ssize_t>(0);
     }
-    if (absl::Status payload = ReadFully(buffer, length, ctx); !payload.ok()) {
-      return payload;
+    if (absl::Status payload = ASYNC_AWAIT(ReadFully(buffer, length, ctx));
+        !payload.ok()) {
+      ASYNC_RETURN payload;
     }
-    return static_cast<ssize_t>(length);
+    ASYNC_RETURN static_cast<ssize_t>(length);
   }
 #endif
-  return socket_.ReceiveMessage(buffer, buflen, ctx);
+  ASYNC_RETURN ASYNC_AWAIT(socket_.ReceiveMessage(buffer, buflen, ctx));
 }
 
 } // namespace subspace::async

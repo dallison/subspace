@@ -6,9 +6,11 @@
 
 #include "common/async/socket.h"
 
-#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO ||                     \
+    SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
 
 #include "absl/strings/str_format.h"
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
 #include <boost/asio/bind_cancellation_slot.hpp>
 #include <boost/asio/bind_executor.hpp>
 #include <boost/asio/cancellation_signal.hpp>
@@ -16,6 +18,9 @@
 #include <boost/asio/post.hpp>
 #include <boost/asio/posix/stream_descriptor.hpp>
 #include <boost/asio/steady_timer.hpp>
+#else
+#include "common/async/wait.h"
+#endif
 
 #include <algorithm>
 #include <cerrno>
@@ -34,6 +39,8 @@ namespace subspace::async {
 namespace {
 
 constexpr bool kSocketDebugEnabled = false;
+
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
 
 boost::asio::io_context &IocFromYield(Context yield) {
   return static_cast<boost::asio::io_context &>(
@@ -163,6 +170,18 @@ absl::Status WaitFdWritable(Context yield, int fd) {
                      "wait_write");
 }
 
+#else  // SUBSPACE_CORO_BACKEND_CO20
+
+Task<absl::Status> WaitFdReadable(Context ctx, int fd) {
+  return WaitReadable(ctx, fd);
+}
+
+Task<absl::Status> WaitFdWritable(Context ctx, int fd) {
+  return WaitWritable(ctx, fd);
+}
+
+#endif
+
 // Fill a sockaddr_storage from a SocketAddress.  Returns the length.
 absl::StatusOr<socklen_t> AddrToSockaddr(const SocketAddress &addr,
                                          sockaddr_storage *out, int *family) {
@@ -289,28 +308,31 @@ absl::Status StreamSocket::Connect(const SocketAddress &addr) {
   return absl::OkStatus();
 }
 
-absl::StatusOr<StreamSocket> StreamSocket::Accept(Context ctx) {
-  if (impl_ == nullptr || impl_->fd < 0) {
-    return absl::FailedPreconditionError("Accept on unbound socket");
+Task<absl::StatusOr<StreamSocket>> StreamSocket::Accept(Context ctx) {
+  // Held across waits so a concurrent Close() can't free the fd under us.
+  std::shared_ptr<Impl> impl = impl_;
+  if (impl == nullptr || impl->fd < 0) {
+    ASYNC_RETURN absl::FailedPreconditionError("Accept on unbound socket");
   }
   for (;;) {
     sockaddr_storage ss;
     socklen_t slen = sizeof(ss);
-    int newfd = ::accept(impl_->fd, reinterpret_cast<sockaddr *>(&ss), &slen);
+    int newfd = ::accept(impl->fd, reinterpret_cast<sockaddr *>(&ss), &slen);
     if (newfd >= 0) {
       SetFdNonBlocking(newfd);
       auto new_impl = std::make_shared<Impl>();
       new_impl->fd = newfd;
       new_impl->nonblocking = true;
-      return MakeConnectedStreamSocket(std::move(new_impl));
+      ASYNC_RETURN MakeConnectedStreamSocket(std::move(new_impl));
     }
     if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-      if (absl::Status s = WaitFdReadable(ctx, impl_->fd); !s.ok()) {
-        return s;
+      if (absl::Status s = ASYNC_AWAIT(WaitFdReadable(ctx, impl->fd));
+          !s.ok()) {
+        ASYNC_RETURN s;
       }
       continue;
     }
-    return absl::InternalError(
+    ASYNC_RETURN absl::InternalError(
         absl::StrFormat("accept() failed: %s", strerror(errno)));
   }
 }
@@ -328,14 +350,15 @@ absl::Status StreamSocket::SetNonBlocking() {
   return absl::OkStatus();
 }
 
-absl::StatusOr<ssize_t> StreamSocket::Send(const char *buffer, size_t length,
-                                           Context ctx) {
-  if (impl_ == nullptr || impl_->fd < 0) {
-    return absl::FailedPreconditionError("Send on closed socket");
+Task<absl::StatusOr<ssize_t>> StreamSocket::Send(const char *buffer,
+                                                 size_t length, Context ctx) {
+  std::shared_ptr<Impl> impl = impl_;
+  if (impl == nullptr || impl->fd < 0) {
+    ASYNC_RETURN absl::FailedPreconditionError("Send on closed socket");
   }
   size_t sent = 0;
   while (sent < length) {
-    ssize_t n = ::send(impl_->fd, buffer + sent, length - sent, MSG_NOSIGNAL);
+    ssize_t n = ::send(impl->fd, buffer + sent, length - sent, MSG_NOSIGNAL);
     if (n > 0) {
       sent += static_cast<size_t>(n);
       continue;
@@ -344,42 +367,45 @@ absl::StatusOr<ssize_t> StreamSocket::Send(const char *buffer, size_t length,
       break;
     }
     if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-      if (absl::Status s = WaitFdWritable(ctx, impl_->fd); !s.ok()) {
-        return s;
+      if (absl::Status s = ASYNC_AWAIT(WaitFdWritable(ctx, impl->fd));
+          !s.ok()) {
+        ASYNC_RETURN s;
       }
       continue;
     }
-    return absl::InternalError(
+    ASYNC_RETURN absl::InternalError(
         absl::StrFormat("send() failed: %s", strerror(errno)));
   }
-  return static_cast<ssize_t>(sent);
+  ASYNC_RETURN static_cast<ssize_t>(sent);
 }
 
-absl::StatusOr<ssize_t> StreamSocket::Receive(char *buffer, size_t buflen,
-                                              Context ctx) {
-  if (impl_ == nullptr || impl_->fd < 0) {
-    return absl::FailedPreconditionError("Receive on closed socket");
+Task<absl::StatusOr<ssize_t>> StreamSocket::Receive(char *buffer, size_t buflen,
+                                                    Context ctx) {
+  std::shared_ptr<Impl> impl = impl_;
+  if (impl == nullptr || impl->fd < 0) {
+    ASYNC_RETURN absl::FailedPreconditionError("Receive on closed socket");
   }
   for (;;) {
-    ssize_t n = ::recv(impl_->fd, buffer, buflen, 0);
+    ssize_t n = ::recv(impl->fd, buffer, buflen, 0);
     if (n >= 0) {
-      return n;
+      ASYNC_RETURN n;
     }
     if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-      if (absl::Status s = WaitFdReadable(ctx, impl_->fd); !s.ok()) {
-        return s;
+      if (absl::Status s = ASYNC_AWAIT(WaitFdReadable(ctx, impl->fd));
+          !s.ok()) {
+        ASYNC_RETURN s;
       }
       continue;
     }
-    return absl::InternalError(
+    ASYNC_RETURN absl::InternalError(
         absl::StrFormat("recv() failed: %s", strerror(errno)));
   }
 }
 
 // Read exactly `n` bytes (yielding as needed).  Returns the number read, which
 // is < n only on EOF.
-static absl::StatusOr<size_t> ReadExactly(int fd, Context ctx, char *buffer,
-                                          size_t n) {
+static Task<absl::StatusOr<size_t>> ReadExactly(int fd, Context ctx,
+                                                char *buffer, size_t n) {
   size_t got = 0;
   while (got < n) {
     ssize_t r = ::recv(fd, buffer + got, n - got, 0);
@@ -388,65 +414,70 @@ static absl::StatusOr<size_t> ReadExactly(int fd, Context ctx, char *buffer,
       continue;
     }
     if (r == 0) {
-      return got;  // EOF
+      ASYNC_RETURN got;  // EOF
     }
     if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-      if (absl::Status s = WaitFdReadable(ctx, fd); !s.ok()) {
-        return s;
+      if (absl::Status s = ASYNC_AWAIT(WaitFdReadable(ctx, fd)); !s.ok()) {
+        ASYNC_RETURN s;
       }
       continue;
     }
-    return absl::InternalError(
+    ASYNC_RETURN absl::InternalError(
         absl::StrFormat("recv() failed: %s", strerror(errno)));
   }
-  return got;
+  ASYNC_RETURN got;
 }
 
-absl::StatusOr<ssize_t> StreamSocket::SendMessage(char *buffer, size_t length,
-                                                  Context ctx) {
+Task<absl::StatusOr<ssize_t>>
+StreamSocket::SendMessage(char *buffer, size_t length, Context ctx) {
   // toolbelt convention: write the 4-byte big-endian length immediately before
   // `buffer` and send length+4 bytes from buffer-4 in one logical message.
   char *start = buffer - sizeof(int32_t);
   uint32_t net_len = htonl(static_cast<uint32_t>(length));
   std::memcpy(start, &net_len, sizeof(net_len));
-  absl::StatusOr<ssize_t> n = Send(start, length + sizeof(int32_t), ctx);
+  absl::StatusOr<ssize_t> n =
+      ASYNC_AWAIT(Send(start, length + sizeof(int32_t), ctx));
   if (!n.ok()) {
-    return n.status();
+    ASYNC_RETURN n.status();
   }
-  return static_cast<ssize_t>(length);
+  ASYNC_RETURN static_cast<ssize_t>(length);
 }
 
-absl::StatusOr<ssize_t> StreamSocket::ReceiveMessage(char *buffer, size_t buflen,
-                                                     Context ctx) {
-  if (impl_ == nullptr || impl_->fd < 0) {
-    return absl::FailedPreconditionError("ReceiveMessage on closed socket");
+Task<absl::StatusOr<ssize_t>>
+StreamSocket::ReceiveMessage(char *buffer, size_t buflen, Context ctx) {
+  std::shared_ptr<Impl> impl = impl_;
+  if (impl == nullptr || impl->fd < 0) {
+    ASYNC_RETURN absl::FailedPreconditionError(
+        "ReceiveMessage on closed socket");
   }
   char lenbuf[sizeof(int32_t)];
-  absl::StatusOr<size_t> got = ReadExactly(impl_->fd, ctx, lenbuf, sizeof(lenbuf));
+  absl::StatusOr<size_t> got =
+      ASYNC_AWAIT(ReadExactly(impl->fd, ctx, lenbuf, sizeof(lenbuf)));
   if (!got.ok()) {
-    return got.status();
+    ASYNC_RETURN got.status();
   }
   if (*got == 0) {
-    return static_cast<ssize_t>(0);  // clean EOF
+    ASYNC_RETURN static_cast<ssize_t>(0);  // clean EOF
   }
   if (*got < sizeof(lenbuf)) {
-    return absl::InternalError("short read on message length");
+    ASYNC_RETURN absl::InternalError("short read on message length");
   }
   uint32_t net_len;
   std::memcpy(&net_len, lenbuf, sizeof(net_len));
   size_t length = ntohl(net_len);
   if (length > buflen) {
-    return absl::InternalError(absl::StrFormat(
+    ASYNC_RETURN absl::InternalError(absl::StrFormat(
         "message length %zu exceeds buffer size %zu", length, buflen));
   }
-  absl::StatusOr<size_t> payload = ReadExactly(impl_->fd, ctx, buffer, length);
+  absl::StatusOr<size_t> payload =
+      ASYNC_AWAIT(ReadExactly(impl->fd, ctx, buffer, length));
   if (!payload.ok()) {
-    return payload.status();
+    ASYNC_RETURN payload.status();
   }
   if (*payload < length) {
-    return absl::InternalError("EOF in the middle of a message");
+    ASYNC_RETURN absl::InternalError("EOF in the middle of a message");
   }
-  return static_cast<ssize_t>(length);
+  ASYNC_RETURN static_cast<ssize_t>(length);
 }
 
 absl::StatusOr<SocketAddress> StreamSocket::GetPeerName() const {
@@ -536,50 +567,58 @@ absl::Status UDPSocket::SetBroadcast() {
   return absl::OkStatus();
 }
 
-absl::Status UDPSocket::SendTo(const InetAddress &addr, const void *buffer,
-                               size_t length, Context ctx) {
-  if (impl_ == nullptr || impl_->fd < 0) {
-    return absl::FailedPreconditionError("SendTo on closed socket");
+Task<absl::Status> UDPSocket::SendTo(const InetAddress &addr,
+                                     const void *buffer, size_t length,
+                                     Context ctx) {
+  std::shared_ptr<Impl> impl = impl_;
+  if (impl == nullptr || impl->fd < 0) {
+    ASYNC_RETURN absl::FailedPreconditionError("SendTo on closed socket");
   }
-  const sockaddr_in &sa = addr.GetAddress();
+  // Copied because the caller's address need not outlive a suspension.
+  const sockaddr_in sa = addr.GetAddress();
   for (;;) {
-    ssize_t n = ::sendto(impl_->fd, buffer, length, 0,
+    ssize_t n = ::sendto(impl->fd, buffer, length, 0,
                          reinterpret_cast<const sockaddr *>(&sa), sizeof(sa));
     if (n >= 0) {
-      return absl::OkStatus();
+      ASYNC_RETURN absl::OkStatus();
     }
     if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-      if (absl::Status s = WaitFdWritable(ctx, impl_->fd); !s.ok()) {
-        return s;
+      if (absl::Status s = ASYNC_AWAIT(WaitFdWritable(ctx, impl->fd));
+          !s.ok()) {
+        ASYNC_RETURN s;
       }
       continue;
     }
-    return absl::InternalError(
+    ASYNC_RETURN absl::InternalError(
         absl::StrFormat("sendto() failed: %s", strerror(errno)));
   }
 }
 
-absl::StatusOr<ssize_t> UDPSocket::ReceiveFrom(InetAddress &sender, void *buffer,
-                                               size_t buflen, Context ctx) {
-  if (impl_ == nullptr || impl_->fd < 0) {
-    return absl::FailedPreconditionError("ReceiveFrom on closed socket");
+Task<absl::StatusOr<ssize_t>> UDPSocket::ReceiveFrom(InetAddress &sender,
+                                                     void *buffer,
+                                                     size_t buflen,
+                                                     Context ctx) {
+  std::shared_ptr<Impl> impl = impl_;
+  if (impl == nullptr || impl->fd < 0) {
+    ASYNC_RETURN absl::FailedPreconditionError("ReceiveFrom on closed socket");
   }
   for (;;) {
     sockaddr_in from;
     socklen_t flen = sizeof(from);
-    ssize_t n = ::recvfrom(impl_->fd, buffer, buflen, 0,
-                          reinterpret_cast<sockaddr *>(&from), &flen);
+    ssize_t n = ::recvfrom(impl->fd, buffer, buflen, 0,
+                           reinterpret_cast<sockaddr *>(&from), &flen);
     if (n >= 0) {
       sender = InetAddress(from);
-      return n;
+      ASYNC_RETURN n;
     }
     if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-      if (absl::Status s = WaitFdReadable(ctx, impl_->fd); !s.ok()) {
-        return s;
+      if (absl::Status s = ASYNC_AWAIT(WaitFdReadable(ctx, impl->fd));
+          !s.ok()) {
+        ASYNC_RETURN s;
       }
       continue;
     }
-    return absl::InternalError(
+    ASYNC_RETURN absl::InternalError(
         absl::StrFormat("recvfrom() failed: %s", strerror(errno)));
   }
 }
@@ -609,8 +648,8 @@ struct sockaddr_un BuildUnixSocketName(const std::string &pathname) {
 }
 
 // Send `length` bytes from `buffer`, yielding the coroutine on EAGAIN.
-absl::StatusOr<ssize_t> SendAll(int fd, Context ctx, const char *buffer,
-                                size_t length) {
+Task<absl::StatusOr<ssize_t>> SendAll(int fd, Context ctx, const char *buffer,
+                                      size_t length) {
   size_t sent = 0;
   while (sent < length) {
     ssize_t n = ::send(fd, buffer + sent, length - sent, MSG_NOSIGNAL);
@@ -622,15 +661,15 @@ absl::StatusOr<ssize_t> SendAll(int fd, Context ctx, const char *buffer,
       break;
     }
     if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-      if (absl::Status s = WaitFdWritable(ctx, fd); !s.ok()) {
-        return s;
+      if (absl::Status s = ASYNC_AWAIT(WaitFdWritable(ctx, fd)); !s.ok()) {
+        ASYNC_RETURN s;
       }
       continue;
     }
-    return absl::InternalError(
+    ASYNC_RETURN absl::InternalError(
         absl::StrFormat("send() failed: %s", strerror(errno)));
   }
-  return static_cast<ssize_t>(sent);
+  ASYNC_RETURN static_cast<ssize_t>(sent);
 }
 
 }  // namespace
@@ -708,121 +747,134 @@ absl::Status UnixSocket::Connect(const std::string &pathname) {
   return absl::OkStatus();
 }
 
-absl::StatusOr<UnixSocket> UnixSocket::Accept(Context ctx) const {
-  if (impl_ == nullptr || impl_->fd < 0) {
-    return absl::FailedPreconditionError("Accept on invalid unix socket");
+Task<absl::StatusOr<UnixSocket>> UnixSocket::Accept(Context ctx) const {
+  std::shared_ptr<Impl> impl = impl_;
+  if (impl == nullptr || impl->fd < 0) {
+    ASYNC_RETURN absl::FailedPreconditionError(
+        "Accept on invalid unix socket");
   }
   for (;;) {
     struct sockaddr_un sender;
     socklen_t slen = sizeof(sender);
     int newfd =
-        ::accept(impl_->fd, reinterpret_cast<sockaddr *>(&sender), &slen);
+        ::accept(impl->fd, reinterpret_cast<sockaddr *>(&sender), &slen);
     if (newfd >= 0) {
-      return UnixSocket(newfd, /*connected=*/true);
+      ASYNC_RETURN UnixSocket(newfd, /*connected=*/true);
     }
     if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-      if (absl::Status s = WaitFdReadable(ctx, impl_->fd); !s.ok()) {
-        return s;
+      if (absl::Status s = ASYNC_AWAIT(WaitFdReadable(ctx, impl->fd));
+          !s.ok()) {
+        ASYNC_RETURN s;
       }
       continue;
     }
-    return absl::InternalError(
+    ASYNC_RETURN absl::InternalError(
         absl::StrFormat("accept() failed: %s", strerror(errno)));
   }
 }
 
-absl::StatusOr<ssize_t> UnixSocket::Send(const char *buffer, size_t length,
-                                         Context ctx) {
-  if (impl_ == nullptr || impl_->fd < 0) {
-    return absl::FailedPreconditionError("Send on closed socket");
+Task<absl::StatusOr<ssize_t>> UnixSocket::Send(const char *buffer,
+                                               size_t length, Context ctx) {
+  std::shared_ptr<Impl> impl = impl_;
+  if (impl == nullptr || impl->fd < 0) {
+    ASYNC_RETURN absl::FailedPreconditionError("Send on closed socket");
   }
-  return SendAll(impl_->fd, ctx, buffer, length);
+  ASYNC_RETURN ASYNC_AWAIT(SendAll(impl->fd, ctx, buffer, length));
 }
 
-absl::StatusOr<ssize_t> UnixSocket::Receive(char *buffer, size_t buflen,
-                                            Context ctx) {
-  if (impl_ == nullptr || impl_->fd < 0) {
-    return absl::FailedPreconditionError("Receive on closed socket");
+Task<absl::StatusOr<ssize_t>> UnixSocket::Receive(char *buffer, size_t buflen,
+                                                  Context ctx) {
+  std::shared_ptr<Impl> impl = impl_;
+  if (impl == nullptr || impl->fd < 0) {
+    ASYNC_RETURN absl::FailedPreconditionError("Receive on closed socket");
   }
   for (;;) {
-    ssize_t n = ::recv(impl_->fd, buffer, buflen, 0);
+    ssize_t n = ::recv(impl->fd, buffer, buflen, 0);
     if (n >= 0) {
-      return n;
+      ASYNC_RETURN n;
     }
     if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-      if (absl::Status s = WaitFdReadable(ctx, impl_->fd); !s.ok()) {
-        return s;
+      if (absl::Status s = ASYNC_AWAIT(WaitFdReadable(ctx, impl->fd));
+          !s.ok()) {
+        ASYNC_RETURN s;
       }
       continue;
     }
-    return absl::InternalError(
+    ASYNC_RETURN absl::InternalError(
         absl::StrFormat("recv() failed: %s", strerror(errno)));
   }
 }
 
-absl::StatusOr<ssize_t> UnixSocket::SendMessage(char *buffer, size_t length,
-                                                Context ctx) {
-  if (impl_ == nullptr || impl_->fd < 0) {
-    return absl::FailedPreconditionError("SendMessage on closed socket");
+Task<absl::StatusOr<ssize_t>> UnixSocket::SendMessage(char *buffer,
+                                                      size_t length,
+                                                      Context ctx) {
+  std::shared_ptr<Impl> impl = impl_;
+  if (impl == nullptr || impl->fd < 0) {
+    ASYNC_RETURN absl::FailedPreconditionError("SendMessage on closed socket");
   }
   char *start = buffer - sizeof(int32_t);
   uint32_t net_len = htonl(static_cast<uint32_t>(length));
   std::memcpy(start, &net_len, sizeof(net_len));
-  absl::StatusOr<ssize_t> n = SendAll(impl_->fd, ctx, start,
-                                      length + sizeof(int32_t));
+  absl::StatusOr<ssize_t> n = ASYNC_AWAIT(
+      SendAll(impl->fd, ctx, start, length + sizeof(int32_t)));
   if (!n.ok()) {
-    return n.status();
+    ASYNC_RETURN n.status();
   }
-  return static_cast<ssize_t>(length);
+  ASYNC_RETURN static_cast<ssize_t>(length);
 }
 
-absl::StatusOr<ssize_t> UnixSocket::ReceiveMessage(char *buffer, size_t buflen,
-                                                   Context ctx) {
-  if (impl_ == nullptr || impl_->fd < 0) {
-    return absl::FailedPreconditionError("ReceiveMessage on closed socket");
+Task<absl::StatusOr<ssize_t>> UnixSocket::ReceiveMessage(char *buffer,
+                                                         size_t buflen,
+                                                         Context ctx) {
+  std::shared_ptr<Impl> impl = impl_;
+  if (impl == nullptr || impl->fd < 0) {
+    ASYNC_RETURN absl::FailedPreconditionError(
+        "ReceiveMessage on closed socket");
   }
   char lenbuf[sizeof(int32_t)];
   absl::StatusOr<size_t> got =
-      ReadExactly(impl_->fd, ctx, lenbuf, sizeof(lenbuf));
+      ASYNC_AWAIT(ReadExactly(impl->fd, ctx, lenbuf, sizeof(lenbuf)));
   if (!got.ok()) {
-    return got.status();
+    ASYNC_RETURN got.status();
   }
   if (*got == 0) {
-    return static_cast<ssize_t>(0);
+    ASYNC_RETURN static_cast<ssize_t>(0);
   }
   if (*got < sizeof(lenbuf)) {
-    return absl::InternalError("short read on message length");
+    ASYNC_RETURN absl::InternalError("short read on message length");
   }
   uint32_t net_len;
   std::memcpy(&net_len, lenbuf, sizeof(net_len));
   size_t length = ntohl(net_len);
   if (length > buflen) {
-    return absl::InternalError(absl::StrFormat(
+    ASYNC_RETURN absl::InternalError(absl::StrFormat(
         "message length %zu exceeds buffer size %zu", length, buflen));
   }
-  absl::StatusOr<size_t> payload = ReadExactly(impl_->fd, ctx, buffer, length);
+  absl::StatusOr<size_t> payload =
+      ASYNC_AWAIT(ReadExactly(impl->fd, ctx, buffer, length));
   if (!payload.ok()) {
-    return payload.status();
+    ASYNC_RETURN payload.status();
   }
   if (*payload < length) {
-    return absl::InternalError("EOF in the middle of a message");
+    ASYNC_RETURN absl::InternalError("EOF in the middle of a message");
   }
-  return static_cast<ssize_t>(length);
+  ASYNC_RETURN static_cast<ssize_t>(length);
 }
 
-absl::StatusOr<std::vector<char>>
+Task<absl::StatusOr<std::vector<char>>>
 UnixSocket::ReceiveVariableLengthMessage(Context ctx) {
-  if (impl_ == nullptr || impl_->fd < 0) {
-    return absl::FailedPreconditionError("Receive on closed socket");
+  std::shared_ptr<Impl> impl = impl_;
+  if (impl == nullptr || impl->fd < 0) {
+    ASYNC_RETURN absl::FailedPreconditionError("Receive on closed socket");
   }
   char lenbuf[sizeof(int32_t)];
   absl::StatusOr<size_t> got =
-      ReadExactly(impl_->fd, ctx, lenbuf, sizeof(lenbuf));
+      ASYNC_AWAIT(ReadExactly(impl->fd, ctx, lenbuf, sizeof(lenbuf)));
   if (!got.ok()) {
-    return got.status();
+    ASYNC_RETURN got.status();
   }
   if (*got < sizeof(lenbuf)) {
-    return absl::InternalError(
+    ASYNC_RETURN absl::InternalError(
         absl::StrFormat("Failed to read length from socket: socket closed"));
   }
   uint32_t net_len;
@@ -830,21 +882,22 @@ UnixSocket::ReceiveVariableLengthMessage(Context ctx) {
   size_t length = ntohl(net_len);
   std::vector<char> buffer(length);
   absl::StatusOr<size_t> payload =
-      ReadExactly(impl_->fd, ctx, buffer.data(), buffer.size());
+      ASYNC_AWAIT(ReadExactly(impl->fd, ctx, buffer.data(), buffer.size()));
   if (!payload.ok()) {
-    return payload.status();
+    ASYNC_RETURN payload.status();
   }
   if (*payload < length) {
-    return absl::InternalError("EOF in the middle of a message");
+    ASYNC_RETURN absl::InternalError("EOF in the middle of a message");
   }
-  return buffer;
+  ASYNC_RETURN std::move(buffer);
 }
 
-absl::Status
+Task<absl::Status>
 UnixSocket::SendFds(const std::vector<toolbelt::FileDescriptor> &fds,
                     Context ctx) {
-  if (impl_ == nullptr || impl_->fd < 0) {
-    return absl::FailedPreconditionError("SendFds on closed socket");
+  std::shared_ptr<Impl> impl = impl_;
+  if (impl == nullptr || impl->fd < 0) {
+    ASYNC_RETURN absl::FailedPreconditionError("SendFds on closed socket");
   }
   constexpr size_t kMaxFds = 252;
   std::vector<char> control_buf(CMSG_SPACE(kMaxFds * sizeof(int)));
@@ -863,7 +916,7 @@ UnixSocket::SendFds(const std::vector<toolbelt::FileDescriptor> &fds,
       fprintf(stderr,
               "SUBSPACE_SHM_DEBUG: SendFds socket=%d total=%zu first=%zu "
               "count=%zu values=",
-              impl_->fd, fds.size(), first_fd, fds_to_send);
+              impl->fd, fds.size(), first_fd, fds_to_send);
       for (size_t i = first_fd; i < first_fd + fds_to_send; i++) {
         fprintf(stderr, "%s%d", i == first_fd ? "" : ",", fds[i].Fd());
       }
@@ -883,29 +936,32 @@ UnixSocket::SendFds(const std::vector<toolbelt::FileDescriptor> &fds,
       *fdptr++ = fds[i].Fd();
     }
     for (;;) {
-      ssize_t e = ::sendmsg(impl_->fd, &msg, MSG_NOSIGNAL);
+      ssize_t e = ::sendmsg(impl->fd, &msg, MSG_NOSIGNAL);
       if (e >= 0) {
         break;
       }
       if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-        if (absl::Status s = WaitFdWritable(ctx, impl_->fd); !s.ok()) {
-          return s;
+        if (absl::Status s = ASYNC_AWAIT(WaitFdWritable(ctx, impl->fd));
+            !s.ok()) {
+          ASYNC_RETURN s;
         }
         continue;
       }
-      return absl::InternalError(absl::StrFormat(
+      ASYNC_RETURN absl::InternalError(absl::StrFormat(
           "Failed to write fds to unix socket: %s", strerror(errno)));
     }
     remaining_fds -= fds_to_send;
     first_fd += fds_to_send;
   } while (remaining_fds > 0);
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
-absl::Status UnixSocket::ReceiveFds(std::vector<toolbelt::FileDescriptor> &fds,
-                                    Context ctx) {
-  if (impl_ == nullptr || impl_->fd < 0) {
-    return absl::FailedPreconditionError("ReceiveFds on closed socket");
+Task<absl::Status>
+UnixSocket::ReceiveFds(std::vector<toolbelt::FileDescriptor> &fds,
+                       Context ctx) {
+  std::shared_ptr<Impl> impl = impl_;
+  if (impl == nullptr || impl->fd < 0) {
+    ASYNC_RETURN absl::FailedPreconditionError("ReceiveFds on closed socket");
   }
   constexpr size_t kMaxFds = 252;
   std::vector<char> control_buf(CMSG_SPACE(kMaxFds * sizeof(int)));
@@ -924,31 +980,32 @@ absl::Status UnixSocket::ReceiveFds(std::vector<toolbelt::FileDescriptor> &fds,
 
     ssize_t n;
     for (;;) {
-      n = ::recvmsg(impl_->fd, &msg, 0);
+      n = ::recvmsg(impl->fd, &msg, 0);
       if (n >= 0) {
         break;
       }
       if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-        if (absl::Status s = WaitFdReadable(ctx, impl_->fd); !s.ok()) {
-          return s;
+        if (absl::Status s = ASYNC_AWAIT(WaitFdReadable(ctx, impl->fd));
+            !s.ok()) {
+          ASYNC_RETURN s;
         }
         continue;
       }
-      return absl::InternalError(absl::StrFormat(
+      ASYNC_RETURN absl::InternalError(absl::StrFormat(
           "Failed to read fds from unix socket: %s", strerror(errno)));
     }
     if (n == 0) {
-      return absl::InternalError("EOF from socket while reading fds");
+      ASYNC_RETURN absl::InternalError("EOF from socket while reading fds");
     }
     if constexpr (kSocketDebugEnabled) {
       fprintf(stderr,
               "SUBSPACE_SHM_DEBUG: ReceiveFds socket=%d n=%zd total_fds=%d "
               "msg_flags=0x%x msg_controllen=%zu\n",
-              impl_->fd, n, total_fds, msg.msg_flags,
+              impl->fd, n, total_fds, msg.msg_flags,
               static_cast<size_t>(msg.msg_controllen));
     }
     if ((msg.msg_flags & MSG_CTRUNC) != 0) {
-      return absl::InternalError(
+      ASYNC_RETURN absl::InternalError(
           "Control data was truncated while reading fds from unix socket");
     }
 
@@ -967,7 +1024,7 @@ absl::Status UnixSocket::ReceiveFds(std::vector<toolbelt::FileDescriptor> &fds,
       }
       saw_rights = true;
       if (cmsg->cmsg_len < CMSG_LEN(0)) {
-        return absl::InternalError(absl::StrFormat(
+        ASYNC_RETURN absl::InternalError(absl::StrFormat(
             "Invalid SCM_RIGHTS control length %zu while reading fds",
             static_cast<size_t>(cmsg->cmsg_len)));
       }
@@ -979,7 +1036,7 @@ absl::Status UnixSocket::ReceiveFds(std::vector<toolbelt::FileDescriptor> &fds,
                 static_cast<size_t>(cmsg->cmsg_len), data_len);
       }
       if (data_len % sizeof(int) != 0) {
-        return absl::InternalError(absl::StrFormat(
+        ASYNC_RETURN absl::InternalError(absl::StrFormat(
             "Misaligned SCM_RIGHTS control length %zu while reading fds",
             static_cast<size_t>(cmsg->cmsg_len)));
       }
@@ -995,7 +1052,7 @@ absl::Status UnixSocket::ReceiveFds(std::vector<toolbelt::FileDescriptor> &fds,
       num_fds_received += num_fds;
     }
     if (!saw_rights && total_fds > 0) {
-      return absl::InternalError(absl::StrFormat(
+      ASYNC_RETURN absl::InternalError(absl::StrFormat(
           "Expected %d fds from unix socket but received no SCM_RIGHTS message",
           total_fds));
     }
@@ -1003,7 +1060,7 @@ absl::Status UnixSocket::ReceiveFds(std::vector<toolbelt::FileDescriptor> &fds,
       break;
     }
   }
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
 absl::Status UnixSocket::SetNonBlocking() {
@@ -1046,7 +1103,7 @@ void UnixSocket::Close() {
 
 }  // namespace subspace::async
 
-#endif  // SUBSPACE_CORO_BACKEND_ASIO
+#endif  // SUBSPACE_CORO_BACKEND_ASIO || SUBSPACE_CORO_BACKEND_CO20
 
 #include "absl/strings/str_format.h"
 #include "common/async/wait.h"
@@ -1092,32 +1149,34 @@ absl::Status SetFdFlags(int fd, bool nonblocking) {
   return absl::OkStatus();
 }
 
-absl::StatusOr<int> ConnectTcpFd(const InetAddress &addr,
-                                 std::chrono::nanoseconds timeout,
-                                 Context ctx) {
+// Takes `addr` by value because it is used after the wait.
+Task<absl::StatusOr<int>> ConnectTcpFd(InetAddress addr,
+                                       std::chrono::nanoseconds timeout,
+                                       Context ctx) {
   FdCloser fd{::socket(AF_INET, SOCK_STREAM, 0)};
   if (fd.fd < 0) {
-    return absl::InternalError(
+    ASYNC_RETURN absl::InternalError(
         absl::StrFormat("socket() failed: %s", strerror(errno)));
   }
   if (absl::Status s = SetFdFlags(fd.fd, /*nonblocking=*/true); !s.ok()) {
-    return s;
+    ASYNC_RETURN s;
   }
   const sockaddr_in &sa = addr.GetAddress();
   if (::connect(fd.fd, reinterpret_cast<const sockaddr *>(&sa), sizeof(sa)) ==
       0) {
-    return fd.Release();
+    ASYNC_RETURN fd.Release();
   }
   if (errno != EINPROGRESS && errno != EINTR) {
-    return absl::UnavailableError(absl::StrFormat(
+    ASYNC_RETURN absl::UnavailableError(absl::StrFormat(
         "connect to %s failed: %s", addr.ToString(), strerror(errno)));
   }
-  if (absl::Status s = WaitWritable(ctx, fd.fd, timeout); !s.ok()) {
+  if (absl::Status s = ASYNC_AWAIT(WaitWritable(ctx, fd.fd, timeout));
+      !s.ok()) {
     if (absl::IsDeadlineExceeded(s)) {
-      return absl::DeadlineExceededError(
+      ASYNC_RETURN absl::DeadlineExceededError(
           absl::StrFormat("timed out connecting to %s", addr.ToString()));
     }
-    return s;
+    ASYNC_RETURN s;
   }
   int err = 0;
   socklen_t len = sizeof(err);
@@ -1125,24 +1184,25 @@ absl::StatusOr<int> ConnectTcpFd(const InetAddress &addr,
     err = errno;
   }
   if (err != 0) {
-    return absl::UnavailableError(absl::StrFormat(
+    ASYNC_RETURN absl::UnavailableError(absl::StrFormat(
         "connect to %s failed: %s", addr.ToString(), strerror(err)));
   }
-  return fd.Release();
+  ASYNC_RETURN fd.Release();
 }
 
 }  // namespace
 
-#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO ||                     \
+    SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
 
-absl::StatusOr<StreamSocket> ConnectStream(const InetAddress &addr,
-                                           std::chrono::nanoseconds timeout,
-                                           Context ctx) {
-  absl::StatusOr<int> fd = ConnectTcpFd(addr, timeout, ctx);
+Task<absl::StatusOr<StreamSocket>>
+ConnectStream(const InetAddress &addr, std::chrono::nanoseconds timeout,
+              Context ctx) {
+  absl::StatusOr<int> fd = ASYNC_AWAIT(ConnectTcpFd(addr, timeout, ctx));
   if (!fd.ok()) {
-    return fd.status();
+    ASYNC_RETURN fd.status();
   }
-  return StreamSocket::Adopt(*fd);
+  ASYNC_RETURN StreamSocket::Adopt(*fd);
 }
 
 absl::StatusOr<StreamSocket> ListenStream(const InetAddress &addr) {

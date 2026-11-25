@@ -3,6 +3,7 @@
 // See LICENSE file for licensing information.
 
 #include "client/client_channel.h"
+#include "common/async/wait.h"
 #include "common/syscall_shim.h"
 #include "common/system_info.h"
 #include <sys/mman.h>
@@ -275,13 +276,13 @@ absl::Status ClientChannel::Map(SharedMemoryFds fds,
   return absl::OkStatus();
 }
 
-absl::Status ClientChannel::UnmapUnusedBuffers() {
+async::Task<absl::Status> ClientChannel::UnmapUnusedBuffers() {
   for (size_t i = 0; i + 1 < buffers_.size(); i++) {
     if (bcb_->refs[i] == 0) {
-      UnmapBufferSet(i, *buffers_[i], /*destroy_owned_buffers=*/false);
+      ASYNC_AWAIT(UnmapBufferSet(i, *buffers_[i], /*destroy_owned_buffers=*/false));
     }
   }
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
 void ClientChannel::UnmapShmBufferSet(BufferSet &buffer) {
@@ -294,11 +295,11 @@ void ClientChannel::UnmapShmBufferSet(BufferSet &buffer) {
   buffer.slot_size = 0;
 }
 
-void ClientChannel::UnmapBufferSet(size_t buffer_index, BufferSet &buffer,
+async::Task<void> ClientChannel::UnmapBufferSet(size_t buffer_index, BufferSet &buffer,
                                    bool destroy_owned_buffers) {
   if (buffer.IsSplitBuffers()) {
-    UnmapSplitBufferSet(buffer_index, buffer, destroy_owned_buffers);
-    return;
+    ASYNC_AWAIT(UnmapSplitBufferSet(buffer_index, buffer, destroy_owned_buffers));
+    ASYNC_RETURN;
   }
   (void)buffer_index;
   (void)destroy_owned_buffers;
@@ -308,7 +309,7 @@ void ClientChannel::UnmapBufferSet(size_t buffer_index, BufferSet &buffer,
   UnmapShmBufferSet(buffer);
 }
 
-void ClientChannel::UnmapSplitBufferSet(size_t buffer_index,
+async::Task<void> ClientChannel::UnmapSplitBufferSet(size_t buffer_index,
                                         BufferSet &buffer,
                                         bool destroy_owned_buffers) {
   (void)buffer_index;
@@ -352,58 +353,57 @@ void ClientChannel::UnmapSplitBufferSet(size_t buffer_index,
   if (destroy_owned_buffers && buffer.uses_split_callbacks &&
       buffer.owns_split_buffers &&
       client_buffer_unregistration_callback_) {
-    (void)client_buffer_unregistration_callback_(
-        ResolvedName(), session_id_, static_cast<uint32_t>(buffer_index));
+    (void)ASYNC_AWAIT(client_buffer_unregistration_callback_(
+        ResolvedName(), session_id_, static_cast<uint32_t>(buffer_index)));
   }
 
   buffer.full_size = 0;
   buffer.slot_size = 0;
 }
 
-bool ClientChannel::ValidateSlotBuffer(MessageSlot *slot) {
+async::Task<bool> ClientChannel::ValidateSlotBuffer(MessageSlot *slot) {
   const int buffer_index =
       slot->buffer_index.load(std::memory_order_relaxed);
   if (buffer_index < 0) {
-    return true;
+    ASYNC_RETURN true;
   }
 
   if (static_cast<size_t>(buffer_index) < buffers_.size() &&
       buffers_[buffer_index]->IsSplitBuffers()) {
-    return slot->id >= 0 &&
-           static_cast<size_t>(slot->id) <
-               buffers_[buffer_index]->split_slot_buffers.size() &&
-           buffers_[buffer_index]->split_slot_buffers[slot->id] !=
-               nullptr;
+    ASYNC_RETURN slot->id >= 0 &&
+        static_cast<size_t>(slot->id) <
+            buffers_[buffer_index]->split_slot_buffers.size() &&
+        buffers_[buffer_index]->split_slot_buffers[slot->id] != nullptr;
   }
 
   char *buf = Buffer(slot->id, false);
   int retries = 1000;
   while (retries-- > 0 && buf == nullptr) {
-    CheckReload();
+    ASYNC_AWAIT(CheckReload());
     buf = Buffer(slot->id, false);
   }
   if (buf == nullptr) {
-    return false;
+    ASYNC_RETURN false;
   }
-  return true;
+  ASYNC_RETURN true;
 }
 
-absl::Status ClientChannel::AttachBuffers() {
+async::Task<absl::Status> ClientChannel::AttachBuffers() {
   // NOTE: the num_buffers variable in the CCB is atomic and could change while
   // we are in or after we are done with this loop.
   int num_buffers = ccb_->num_buffers;
   if (UseSplitBuffers()) {
-    return AttachSplitBuffers(num_buffers);
+    ASYNC_RETURN ASYNC_AWAIT(AttachSplitBuffers(num_buffers));
   }
-  return AttachShmBuffers(num_buffers);
+  ASYNC_RETURN ASYNC_AWAIT(AttachShmBuffers(num_buffers));
 }
 
-absl::Status ClientChannel::AttachShmBuffers(int num_buffers) {
+async::Task<absl::Status> ClientChannel::AttachShmBuffers(int num_buffers) {
   BufferMapMode mode = MapMode();
   while (buffers_.size() < size_t(num_buffers)) {
     // We need to open the next buffer in the list.  The buffer index is
     size_t buffer_index = buffers_.size();
-    auto shm_fd = OpenBuffer(buffer_index);
+    auto shm_fd = ASYNC_AWAIT(OpenBuffer(buffer_index));
     if (!shm_fd.ok()) {
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_POSIX
       if (buffers_.size() + 1 < size_t(num_buffers)) {
@@ -414,11 +414,11 @@ absl::Status ClientChannel::AttachShmBuffers(int num_buffers) {
         continue;
       }
 #endif
-      return shm_fd.status();
+      ASYNC_RETURN shm_fd.status();
     }
     auto size = GetBufferSize(*shm_fd, buffer_index);
     if (!size.ok()) {
-      return size.status();
+      ASYNC_RETURN size.status();
     }
     if (*size == 0) {
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
@@ -438,7 +438,7 @@ absl::Status ClientChannel::AttachShmBuffers(int num_buffers) {
       // Map the shared memory buffer.
       addr = MapBuffer(*shm_fd, *size, mode);
       if (!addr.ok()) {
-        return addr.status();
+        ASYNC_RETURN addr.status();
       }
     } else {
       addr = nullptr;
@@ -447,37 +447,37 @@ absl::Status ClientChannel::AttachShmBuffers(int num_buffers) {
     buffer_set->fd = std::move(*shm_fd);
     buffers_.push_back(std::move(buffer_set));
   }
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
-absl::Status ClientChannel::AttachSplitBuffers(int num_buffers) {
+async::Task<absl::Status> ClientChannel::AttachSplitBuffers(int num_buffers) {
   while (buffers_.size() < size_t(num_buffers)) {
     size_t buffer_index = buffers_.size();
     uint64_t full_size = bcb_->sizes[buffer_index];
     uint64_t slot_size = BufferSizeToSlotSize(full_size);
-    auto split_buffer = OpenSplitBufferSet(buffer_index, full_size, slot_size);
+    auto split_buffer = ASYNC_AWAIT(OpenSplitBufferSet(buffer_index, full_size, slot_size));
     if (!split_buffer.ok()) {
-      return split_buffer.status();
+      ASYNC_RETURN split_buffer.status();
     }
     buffers_.push_back(std::move(*split_buffer));
   }
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
-void ClientChannel::UnmapForReload() {
+async::Task<void> ClientChannel::UnmapForReload() {
   UnmapChannelMemory();
   for (size_t i = 0; i < buffers_.size(); i++) {
-    UnmapBufferSet(i, *buffers_[i], /*destroy_owned_buffers=*/true);
+    ASYNC_AWAIT(UnmapBufferSet(i, *buffers_[i], /*destroy_owned_buffers=*/true));
   }
   buffers_.clear();
 }
 
-void ClientChannel::Unmap() {
+async::Task<void> ClientChannel::UnmapAsync() {
   if (scb_ == nullptr) {
     // Not yet mapped.
-    return;
+    ASYNC_RETURN;
   }
-  UnmapForReload();
+  ASYNC_AWAIT(UnmapForReload());
   auto *scb = scb_;
   scb_ = nullptr;
   UnmapMemory(scb, sizeof(SystemControlBlock), "SCB");
@@ -591,11 +591,11 @@ ClientChannel::CreateMemfdBuffer(const std::string &filename, size_t size) {
 }
 #endif
 
-absl::StatusOr<RegisteredClientBuffer>
+async::Task<absl::StatusOr<RegisteredClientBuffer>>
 ClientChannel::GetRegisteredClientBuffer(uint32_t buffer_index, bool is_prefix,
                                          uint32_t slot_id) {
   if (!client_buffer_lookup_callback_) {
-    return absl::InternalError("No client buffer lookup callback registered");
+    ASYNC_RETURN absl::InternalError("No client buffer lookup callback registered");
   }
   absl::Status status;
   // The CCB/BCB can make a buffer generation visible before the server has
@@ -603,10 +603,10 @@ ClientChannel::GetRegisteredClientBuffer(uint32_t buffer_index, bool is_prefix,
   // for the registration to catch up before treating it as missing.
   for (int attempt = 0; attempt < 100; attempt++) {
     absl::StatusOr<std::vector<RegisteredClientBuffer>> buffers =
-        client_buffer_lookup_callback_(ResolvedName(), session_id_,
-                                       buffer_index);
+        ASYNC_AWAIT(client_buffer_lookup_callback_(ResolvedName(), session_id_,
+                                       buffer_index));
     if (!buffers.ok()) {
-      return buffers.status();
+      ASYNC_RETURN buffers.status();
     }
     for (RegisteredClientBuffer &buffer : *buffers) {
       if (buffer.metadata.is_prefix == is_prefix &&
@@ -614,19 +614,26 @@ ClientChannel::GetRegisteredClientBuffer(uint32_t buffer_index, bool is_prefix,
         if (!buffer.fd.Valid() &&
             buffer.metadata.allocator !=
                 ClientBufferAllocatorKind::kSplitCallback) {
-          return absl::InternalError(absl::StrFormat(
+          ASYNC_RETURN absl::InternalError(absl::StrFormat(
               "Registered client buffer %s/%u/%u missing FD", ResolvedName(),
               buffer_index, slot_id));
         }
-        return std::move(buffer);
+        ASYNC_RETURN std::move(buffer);
       }
     }
     status = absl::NotFoundError(absl::StrFormat(
         "No registered client buffer for %s buffer %u slot %u prefix %d",
         ResolvedName(), buffer_index, slot_id, is_prefix));
+    // Wait for the registration to catch up.  This must not block the thread:
+    // under co20 the caller may be a coroutine on the scheduler thread.
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
+    ASYNC_AWAIT(async::Sleep(async::Context(co20::self),
+                             std::chrono::milliseconds(1)));
+#else
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
+#endif
   }
-  return status;
+  ASYNC_RETURN status;
 }
 
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
@@ -733,7 +740,7 @@ ClientChannel::CreatePosixBuffer(const std::string &filename, size_t size) {
 }
 #endif
 
-absl::StatusOr<std::unique_ptr<BufferSet>>
+async::Task<absl::StatusOr<std::unique_ptr<BufferSet>>>
 ClientChannel::CreateSplitBufferSet(size_t buffer_index, size_t full_size,
                                     uint64_t slot_size) {
   auto buffer = std::make_unique<BufferSet>(full_size, slot_size, nullptr);
@@ -768,26 +775,26 @@ ClientChannel::CreateSplitBufferSet(size_t buffer_index, size_t full_size,
     auto created = CreateAnonymousSharedMemory(prefix_metadata.object_name,
                                                prefix_metadata.allocation_size);
     if (!created.ok()) {
-      return created.status();
+      ASYNC_RETURN created.status();
     }
     prefix_metadata.handle = static_cast<uintptr_t>(created->Fd());
     if (client_buffer_registration_callback_) {
-      if (absl::Status status = client_buffer_registration_callback_(
+      if (absl::Status status = ASYNC_AWAIT(client_buffer_registration_callback_(
               ClientBufferFromSplitMetadata(
                   prefix_metadata, ClientBufferAllocatorKind::kSplitShm),
-              &*created);
+              &*created));
           !status.ok()) {
-        return status;
+        ASYNC_RETURN status;
       }
     }
     // `created` is closed here; if we won the race the server holds a dup, and
     // if we lost it the unused memfd is released.
   }
   auto prefix_registered =
-      GetRegisteredClientBuffer(static_cast<uint32_t>(buffer_index),
-                                /*is_prefix=*/true, /*slot_id=*/0);
+      ASYNC_AWAIT(GetRegisteredClientBuffer(static_cast<uint32_t>(buffer_index),
+                                /*is_prefix=*/true, /*slot_id=*/0));
   if (!prefix_registered.ok()) {
-    return prefix_registered.status();
+    ASYNC_RETURN prefix_registered.status();
   }
   prefix_metadata.allocation_size = prefix_registered->metadata.allocation_size;
   prefix_metadata.handle = static_cast<uintptr_t>(prefix_registered->fd.Fd());
@@ -795,7 +802,7 @@ ClientChannel::CreateSplitBufferSet(size_t buffer_index, size_t full_size,
       MapBuffer(prefix_registered->fd, prefix_metadata.allocation_size,
                 BufferMapMode::kReadWrite);
   if (!prefix_addr.ok()) {
-    return prefix_addr.status();
+    ASYNC_RETURN prefix_addr.status();
   }
   buffer->split_prefix_fd = std::move(prefix_registered->fd);
   buffer->split_prefix_buffer = *prefix_addr;
@@ -804,30 +811,30 @@ ClientChannel::CreateSplitBufferSet(size_t buffer_index, size_t full_size,
 #else
   auto prefix_fd = CreateSplitSharedMemoryBuffer(prefix_metadata);
   if (!prefix_fd.ok()) {
-    return prefix_fd.status();
+    ASYNC_RETURN prefix_fd.status();
   }
   if (!prefix_fd->Valid()) {
-    return OpenSplitBufferSet(buffer_index, full_size, slot_size);
+    ASYNC_RETURN ASYNC_AWAIT(OpenSplitBufferSet(buffer_index, full_size, slot_size));
   }
   auto prefix_addr =
       MapBuffer(*prefix_fd, prefix_metadata.allocation_size,
                 BufferMapMode::kReadWrite);
   if (!prefix_addr.ok()) {
-    return prefix_addr.status();
+    ASYNC_RETURN prefix_addr.status();
   }
   prefix_metadata.handle = static_cast<uintptr_t>(prefix_fd->Fd());
   if (absl::Status status = WriteSplitBufferMetadataFile(prefix_metadata);
       !status.ok()) {
-    return status;
+    ASYNC_RETURN status;
   }
   if (client_buffer_registration_callback_) {
-    if (absl::Status status = client_buffer_registration_callback_(
+    if (absl::Status status = ASYNC_AWAIT(client_buffer_registration_callback_(
             ClientBufferFromSplitMetadata(
                 prefix_metadata, ClientBufferAllocatorKind::kSplitShm),
-            &*prefix_fd);
+            &*prefix_fd));
         !status.ok()) {
       (void)DestroySplitSharedMemoryBuffer(prefix_metadata);
-      return status;
+      ASYNC_RETURN status;
     }
   }
   buffer->split_prefix_fd = std::move(*prefix_fd);
@@ -865,10 +872,10 @@ ClientChannel::CreateSplitBufferSet(size_t buffer_index, size_t full_size,
     if (SplitBuffersCallbacks().allocate) {
       auto mapping = SplitBuffersCallbacks().allocate(metadata);
       if (!mapping.ok()) {
-        return mapping.status();
+        ASYNC_RETURN mapping.status();
       }
       if (mapping->address == nullptr) {
-        return absl::InternalError(
+        ASYNC_RETURN absl::InternalError(
             "Split buffer allocation callback returned an empty mapping");
       }
       slot_addr = static_cast<char *>(mapping->address);
@@ -891,32 +898,32 @@ ClientChannel::CreateSplitBufferSet(size_t buffer_index, size_t full_size,
         auto created_fd = CreateAnonymousSharedMemory(metadata.object_name,
                                                       metadata.allocation_size);
         if (!created_fd.ok()) {
-          return created_fd.status();
+          ASYNC_RETURN created_fd.status();
         }
         metadata.handle = static_cast<uintptr_t>(created_fd->Fd());
         if (client_buffer_registration_callback_) {
-          if (absl::Status status = client_buffer_registration_callback_(
+          if (absl::Status status = ASYNC_AWAIT(client_buffer_registration_callback_(
                   ClientBufferFromSplitMetadata(
                       metadata, ClientBufferAllocatorKind::kSplitShm),
-                  &*created_fd);
+                  &*created_fd));
               !status.ok()) {
-            return status;
+            ASYNC_RETURN status;
           }
         }
         // `created_fd` is closed here; if we won the race the server holds a
         // dup, otherwise the unused memfd is released.
       }
       auto registered =
-          GetRegisteredClientBuffer(static_cast<uint32_t>(buffer_index),
+          ASYNC_AWAIT(GetRegisteredClientBuffer(static_cast<uint32_t>(buffer_index),
                                     /*is_prefix=*/false,
-                                    static_cast<uint32_t>(slot));
+                                    static_cast<uint32_t>(slot)));
       if (!registered.ok()) {
-        return registered.status();
+        ASYNC_RETURN registered.status();
       }
       metadata.allocation_size = registered->metadata.allocation_size;
       auto addr = MapBuffer(registered->fd, payload_size, MapMode());
       if (!addr.ok()) {
-        return addr.status();
+        ASYNC_RETURN addr.status();
       }
       slot_addr = *addr;
       slot_handle = static_cast<uintptr_t>(registered->fd.Fd());
@@ -926,16 +933,16 @@ ClientChannel::CreateSplitBufferSet(size_t buffer_index, size_t full_size,
 #else
       auto created_fd = CreateSplitSharedMemoryBuffer(metadata);
       if (!created_fd.ok()) {
-        return created_fd.status();
+        ASYNC_RETURN created_fd.status();
       }
       if (!created_fd->Valid()) {
-        return absl::InternalError(absl::StrFormat(
+        ASYNC_RETURN absl::InternalError(absl::StrFormat(
             "Split buffer slot already exists for channel %s slot %d",
             ResolvedName(), slot));
       }
       auto addr = MapBuffer(*created_fd, payload_size, MapMode());
       if (!addr.ok()) {
-        return addr.status();
+        ASYNC_RETURN addr.status();
       }
       slot_addr = *addr;
       slot_handle = static_cast<uintptr_t>(created_fd->Fd());
@@ -946,19 +953,19 @@ ClientChannel::CreateSplitBufferSet(size_t buffer_index, size_t full_size,
 #if SUBSPACE_SHMEM_MODE != SUBSPACE_SHMEM_MODE_MEMFD
     if (absl::Status status = WriteSplitBufferMetadataFile(metadata);
         !status.ok()) {
-      return status;
+      ASYNC_RETURN status;
     }
 #endif
     if (client_buffer_registration_callback_ && !registered_via_memfd) {
-      if (absl::Status status = client_buffer_registration_callback_(
+      if (absl::Status status = ASYNC_AWAIT(client_buffer_registration_callback_(
               ClientBufferFromSplitMetadata(
                   metadata,
                   buffer->uses_split_callbacks
                       ? ClientBufferAllocatorKind::kSplitCallback
                       : ClientBufferAllocatorKind::kSplitShm),
-              slot_fd.has_value() ? &*slot_fd : nullptr);
+              slot_fd.has_value() ? &*slot_fd : nullptr));
           !status.ok()) {
-        return status;
+        ASYNC_RETURN status;
       }
     }
     buffer->split_handles[slot] = slot_handle;
@@ -970,10 +977,10 @@ ClientChannel::CreateSplitBufferSet(size_t buffer_index, size_t full_size,
     }
     buffer->split_metadata.push_back(std::move(metadata));
   }
-  return buffer;
+  ASYNC_RETURN buffer;
 }
 
-absl::StatusOr<std::unique_ptr<BufferSet>>
+async::Task<absl::StatusOr<std::unique_ptr<BufferSet>>>
 ClientChannel::OpenSplitBufferSet(size_t buffer_index, size_t full_size,
                                   uint64_t slot_size) {
   auto buffer = std::make_unique<BufferSet>(full_size, slot_size, nullptr);
@@ -984,16 +991,16 @@ ClientChannel::OpenSplitBufferSet(size_t buffer_index, size_t full_size,
   std::string prefix_name = metadata_base + "_prefix";
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
   absl::StatusOr<RegisteredClientBuffer> prefix_registered =
-      GetRegisteredClientBuffer(static_cast<uint32_t>(buffer_index),
-                                /*is_prefix=*/true, /*slot_id=*/0);
+      ASYNC_AWAIT(GetRegisteredClientBuffer(static_cast<uint32_t>(buffer_index),
+                                /*is_prefix=*/true, /*slot_id=*/0));
   if (!prefix_registered.ok()) {
-    return prefix_registered.status();
+    ASYNC_RETURN prefix_registered.status();
   }
   auto prefix_addr =
       MapBuffer(prefix_registered->fd, prefix_registered->metadata.allocation_size,
                 BufferMapMode::kReadWrite);
   if (!prefix_addr.ok()) {
-    return prefix_addr.status();
+    ASYNC_RETURN prefix_addr.status();
   }
   buffer->split_prefix_fd = std::move(prefix_registered->fd);
   buffer->split_prefix_buffer = *prefix_addr;
@@ -1004,17 +1011,17 @@ ClientChannel::OpenSplitBufferSet(size_t buffer_index, size_t full_size,
 #else
   auto prefix_metadata = ReadSplitBufferMetadataFileWithRetry(prefix_name);
   if (!prefix_metadata.ok()) {
-    return prefix_metadata.status();
+    ASYNC_RETURN prefix_metadata.status();
   }
   auto prefix_fd = OpenSplitSharedMemoryBuffer(*prefix_metadata, O_RDWR);
   if (!prefix_fd.ok()) {
-    return prefix_fd.status();
+    ASYNC_RETURN prefix_fd.status();
   }
   auto prefix_addr =
       MapBuffer(*prefix_fd, prefix_metadata->allocation_size,
                 BufferMapMode::kReadWrite);
   if (!prefix_addr.ok()) {
-    return prefix_addr.status();
+    ASYNC_RETURN prefix_addr.status();
   }
   buffer->split_prefix_fd = std::move(*prefix_fd);
   buffer->split_prefix_buffer = *prefix_addr;
@@ -1031,11 +1038,11 @@ ClientChannel::OpenSplitBufferSet(size_t buffer_index, size_t full_size,
   for (int slot = 0; slot < NumSlots(); slot++) {
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
     absl::StatusOr<RegisteredClientBuffer> registered =
-        GetRegisteredClientBuffer(static_cast<uint32_t>(buffer_index),
+        ASYNC_AWAIT(GetRegisteredClientBuffer(static_cast<uint32_t>(buffer_index),
                                   /*is_prefix=*/false,
-                                  static_cast<uint32_t>(slot));
+                                  static_cast<uint32_t>(slot)));
     if (!registered.ok()) {
-      return registered.status();
+      ASYNC_RETURN registered.status();
     }
     SplitBufferMetadata metadata =
         SplitMetadataFromClientBuffer(registered->metadata);
@@ -1044,7 +1051,7 @@ ClientChannel::OpenSplitBufferSet(size_t buffer_index, size_t full_size,
     std::string shadow_file = absl::StrFormat("%s_slot_%d", metadata_base, slot);
     auto metadata_or = ReadSplitBufferMetadataFileWithRetry(shadow_file);
     if (!metadata_or.ok()) {
-      return metadata_or.status();
+      ASYNC_RETURN metadata_or.status();
     }
     SplitBufferMetadata metadata = std::move(*metadata_or);
 #endif
@@ -1056,11 +1063,11 @@ ClientChannel::OpenSplitBufferSet(size_t buffer_index, size_t full_size,
     if (SplitBuffersCallbacks().map) {
 #if SUBSPACE_SHMEM_MODE != SUBSPACE_SHMEM_MODE_MEMFD
       absl::StatusOr<RegisteredClientBuffer> registered =
-          GetRegisteredClientBuffer(static_cast<uint32_t>(buffer_index),
+          ASYNC_AWAIT(GetRegisteredClientBuffer(static_cast<uint32_t>(buffer_index),
                                     /*is_prefix=*/false,
-                                    static_cast<uint32_t>(slot));
+                                    static_cast<uint32_t>(slot)));
       if (!registered.ok()) {
-        return registered.status();
+        ASYNC_RETURN registered.status();
       }
       metadata = SplitMetadataFromClientBuffer(registered->metadata);
       registered_fd.emplace(std::move(registered->fd));
@@ -1070,10 +1077,10 @@ ClientChannel::OpenSplitBufferSet(size_t buffer_index, size_t full_size,
       }
       auto mapping = SplitBuffersCallbacks().map(metadata);
       if (!mapping.ok()) {
-        return mapping.status();
+        ASYNC_RETURN mapping.status();
       }
       if (mapping->address == nullptr) {
-        return absl::InternalError(
+        ASYNC_RETURN absl::InternalError(
             "Split buffer map callback returned an empty mapping");
       }
       slot_addr = static_cast<char *>(mapping->address);
@@ -1088,13 +1095,13 @@ ClientChannel::OpenSplitBufferSet(size_t buffer_index, size_t full_size,
 #else
       auto slot_fd_or = OpenSplitSharedMemoryBuffer(metadata, O_RDWR);
       if (!slot_fd_or.ok()) {
-        return slot_fd_or.status();
+        ASYNC_RETURN slot_fd_or.status();
       }
       toolbelt::FileDescriptor slot_fd = std::move(*slot_fd_or);
 #endif
       auto addr = MapBuffer(slot_fd, payload_size, MapMode());
       if (!addr.ok()) {
-        return addr.status();
+        ASYNC_RETURN addr.status();
       }
       slot_addr = *addr;
       slot_handle = static_cast<uintptr_t>(slot_fd.Fd());
@@ -1109,29 +1116,29 @@ ClientChannel::OpenSplitBufferSet(size_t buffer_index, size_t full_size,
     buffer->split_private_data[slot] = slot_private_data;
     buffer->split_metadata.push_back(std::move(metadata));
   }
-  return buffer;
+  ASYNC_RETURN buffer;
 }
 
-absl::StatusOr<toolbelt::FileDescriptor>
+async::Task<absl::StatusOr<toolbelt::FileDescriptor>>
 ClientChannel::OpenBuffer(int buffer_index) {
   std::string filename = BufferSharedMemoryName(buffer_index);
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
   absl::StatusOr<RegisteredClientBuffer> buffer =
-      GetRegisteredClientBuffer(static_cast<uint32_t>(buffer_index),
-                                /*is_prefix=*/false, /*slot_id=*/0);
+      ASYNC_AWAIT(GetRegisteredClientBuffer(static_cast<uint32_t>(buffer_index),
+                                            /*is_prefix=*/false, /*slot_id=*/0));
   if (!buffer.ok()) {
-    return buffer.status();
+    ASYNC_RETURN buffer.status();
   }
-  return std::move(buffer->fd);
+  ASYNC_RETURN std::move(buffer->fd);
 #elif SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
   // Open the shared memory file.
-  return OpenSharedMemoryFile(filename, O_RDWR);
+  ASYNC_RETURN OpenSharedMemoryFile(filename, O_RDWR);
 #else
   auto shm_name = PosixSharedMemoryName(filename);
   if (!shm_name.ok()) {
-    return shm_name.status();
+    ASYNC_RETURN shm_name.status();
   }
-  return OpenSharedMemoryFile(*shm_name, O_RDWR);
+  ASYNC_RETURN OpenSharedMemoryFile(*shm_name, O_RDWR);
 #endif
 }
 

@@ -3,30 +3,36 @@ package(default_visibility = ["//visibility:public"])
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 # The async abstraction layer.  One macro (SUBSPACE_CORO_BACKEND) selects
-# between the `co` coroutine backend (default) and the Boost.Asio backend.
-# The macro is propagated to dependents via `defines` because the headers
-# (context.h / socket.h) are included by the server and client translation
-# units and must see the same backend selection.
+# between the `co` coroutine backend (default), the Boost.Asio backend and the
+# C++20 coroutine backend (co20).  The macro is propagated to dependents via
+# `defines` because the headers (context.h / socket.h) are included by the
+# server and client translation units and must see the same backend
+# selection.  It is always set, even for co, because some dependents
+# (co20_rpc) compile as C++20 in a C++17 build and context.h would otherwise
+# choose co20 for them.
 cc_library(
     name = "async",
     srcs = [
         "byte_stream.cc",
+        "frame_pool.cc",
         "socket.cc",
         "wait.cc",
     ],
     hdrs = [
         "byte_stream.h",
         "context.h",
+        "frame_pool.h",
         "mtls.h",
         "runtime.h",
         "socket.h",
+        "task.h",
         "wait.h",
     ],
     defines = select({
-        # SUBSPACE_CORO_BACKEND_ASIO == 2 (see context.h).
+        # Values from context.h.
         "//:coro_backend_asio": ["SUBSPACE_CORO_BACKEND=2"],
-        # co backend leaves the macro unset; context.h defaults to _CO.
-        "//conditions:default": [],
+        "//:coro_backend_co20": ["SUBSPACE_CORO_BACKEND=3"],
+        "//conditions:default": ["SUBSPACE_CORO_BACKEND=1"],
     }) + select({
         "//:mtls_enabled": ["SUBSPACE_ENABLE_MTLS=1"],
         "//conditions:default": ["SUBSPACE_ENABLE_MTLS=0"],
@@ -44,6 +50,7 @@ cc_library(
             "@boost.context//:boost.context",
             "@boost.coroutine//:boost.coroutine",
         ],
+        "//:coro_backend_co20": ["@coroutines//co:co_cpp20"],
         "//conditions:default": [],
     }) + select({
         "//:mtls_enabled": [

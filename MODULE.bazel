@@ -24,16 +24,15 @@ bazel_dep(name = "rules_java", version = "9.1.0")
 bazel_dep(name = "rules_pkg", version = "1.0.1")
 bazel_dep(name = "rules_android_ndk", version = "0.1.5")
 bazel_dep(name = "zlib", version = "1.3.1.bcr.5")
-bazel_dep(name = "coroutines", version = "3.4.1")
+bazel_dep(name = "coroutines", version = "3.5.2")
 
-# The cpp20 poll fallback must resume a waiter only for events it asked for.
-# A socketpair is always writable, so waking every waiter on POLLOUT hangs
-# co20_rpc on macOS (dallison/co#77).  c2cbd0f also keeps TSan from corrupting
-# the shadow stack on a coroutine stack switch with GCC 15 (dallison/co c2cbd0f).
-# Not released yet.
+# The co20 backend needs the C++20 scheduler changes in co 3.5.2 (dallison/co
+# #82): multi-fd Wait, the poll fallback event mask, TSan across stack
+# switches, non-aggregate ValueTask promises for GCC and an atomic Stop.
+# Not in the BCR yet.
 git_override(
     module_name = "coroutines",
-    commit = "c2cbd0f75b1e834090762d584b812a485b8b8ca8",
+    commit = "db9ecf4c6a7396bcd409addfffac3be6f00c2b59",
     remote = "https://github.com/dallison/co.git",
 )
 

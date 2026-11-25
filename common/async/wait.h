@@ -10,47 +10,51 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "common/async/context.h"
+#include "common/async/task.h"
 #include <chrono>
 
 namespace subspace::async {
 
 // FD-readiness and sleep primitives, expressed against the active backend's
 // Context.  These replace the implicit co::self / co::Wait / co::Sleep calls so
-// that the same source compiles under either backend.
+// that the same source compiles under any backend.  Under co20 they return
+// tasks that must be awaited (see task.h).
 //
 // Under Asio only one coroutine at a time can wait on a given fd.  With epoll
 // (Linux and Android), another coroutine's wait on it fails at once with an
 // InternalError.  With kqueue (macOS), the other wait takes over the fd and
-// the first may never return.  The co backend has no such limit.  Under Asio a wait that is cancelled, as a graceful
-// shutdown does, returns CancelledError.
+// the first may never return.  The co and co20 backends have no such limit.
+// Under Asio a wait that is cancelled, as a graceful shutdown does, returns
+// CancelledError.  Under co20 a wait woken by the coroutine's interrupt fd
+// does the same.
 
 // Wait until `fd` is readable.  A non-zero timeout returns
 // DeadlineExceededError if the fd is not ready in time; a zero timeout waits
 // forever.
-absl::Status WaitReadable(Context ctx, int fd,
-                          std::chrono::nanoseconds timeout =
-                              std::chrono::nanoseconds(0));
+Task<absl::Status> WaitReadable(Context ctx, int fd,
+                                std::chrono::nanoseconds timeout =
+                                    std::chrono::nanoseconds(0));
 
 // Wait until `fd` is writable or has an error pending.  A non-zero timeout
 // returns DeadlineExceededError if the fd is not ready in time; a zero timeout
 // waits forever.  Returns an error if the wait is interrupted or cancelled.
-absl::Status WaitWritable(Context ctx, int fd,
-                          std::chrono::nanoseconds timeout =
-                              std::chrono::nanoseconds(0));
+Task<absl::Status> WaitWritable(Context ctx, int fd,
+                                std::chrono::nanoseconds timeout =
+                                    std::chrono::nanoseconds(0));
 
 // Wait until either `fd1` or `fd2` becomes readable.  Returns the raw fd that
 // became ready.  A non-zero timeout returns DeadlineExceededError if neither fd
 // is ready in time; a zero timeout waits forever.
-absl::StatusOr<int> WaitEither(Context ctx, int fd1, int fd2,
-                               std::chrono::nanoseconds timeout =
-                                   std::chrono::nanoseconds(0));
+Task<absl::StatusOr<int>> WaitEither(Context ctx, int fd1, int fd2,
+                                     std::chrono::nanoseconds timeout =
+                                         std::chrono::nanoseconds(0));
 
 // Suspend the current coroutine for `duration`.
-void Sleep(Context ctx, std::chrono::nanoseconds duration);
+Task<void> Sleep(Context ctx, std::chrono::nanoseconds duration);
 
 // Convenience overload taking whole seconds.
-inline void Sleep(Context ctx, int seconds) {
-  Sleep(ctx, std::chrono::seconds(seconds));
+inline Task<void> Sleep(Context ctx, int seconds) {
+  return Sleep(ctx, std::chrono::seconds(seconds));
 }
 
 }  // namespace subspace::async

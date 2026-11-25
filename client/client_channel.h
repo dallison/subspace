@@ -85,7 +85,8 @@ public:
                 int subscriber_queue_size,
                 uint64_t subscriber_queue_arena_size, int channel_id,
                 int vchan_id, uint64_t session_id, std::string type,
-                std::function<bool(Channel *)> reload, int user_id, int group_id)
+                std::function<async::Task<bool>(Channel *)> reload, int user_id,
+                int group_id)
       : Channel(name, num_slots, channel_id, subscriber_queue_size,
                 subscriber_queue_arena_size, std::move(type),
                 std::move(reload)),
@@ -100,13 +101,16 @@ public:
     return GetScb()->counters[GetChannelId()];
   }
 
-  void Unmap() override;
+  // Unmaps everything.  Blocks for the server to unregister the buffers, so it
+  // must not run inside a coroutine on the scheduler thread; use UnmapAsync.
+  void Unmap() override { ASYNC_BLOCK(UnmapAsync()); }
+  async::Task<void> UnmapAsync();
 
   // Unmaps the channel control block, buffer control block, and message
   // buffers before they are mapped again. The system control block stays
   // mapped because every channel in the client shares it, and other threads
   // read publisher and subscriber counts from it while a subscriber reloads.
-  void UnmapForReload();
+  async::Task<void> UnmapForReload();
 
   void Dump(std::ostream &os) const override;
 
@@ -119,7 +123,7 @@ public:
   absl::Status Map(SharedMemoryFds fds, const toolbelt::FileDescriptor &scb_fd);
 
   absl::Status MapNewBuffers(std::vector<SlotBuffer> buffers);
-  absl::Status UnmapUnusedBuffers();
+  async::Task<absl::Status> UnmapUnusedBuffers();
 
   int VirtualChannelId() const { return vchan_id_; }
 
@@ -234,9 +238,16 @@ public:
       if (index >= 0 && static_cast<size_t>(index) < buffers_.size()) {
         return buffers_.empty() ? nullptr : (buffers_[index]->buffer);
       }
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
+      // Reloading needs a round trip that must be awaited, and this function
+      // is sync.  Callers await CheckReload() before they get here
+      // (ValidateSlotBuffer does), so there is nothing to retry.
+      break;
+#else
       CheckReload();
       retries++;
       std::this_thread::yield();
+#endif
     }
     if (abort_on_range) {
       // If the index is out of range, we have a problem.
@@ -308,7 +319,7 @@ public:
     return true;
   }
 
-  absl::Status AttachBuffers();
+  async::Task<absl::Status> AttachBuffers();
 
   void ClearRetirementTriggers() {
     std::unique_lock<std::mutex> lock(retirement_lock_);
@@ -327,18 +338,19 @@ public:
   }
 
   void SetClientBufferRegistrationCallback(
-      std::function<absl::Status(const ClientBufferHandleMetadata &,
-                                 const toolbelt::FileDescriptor *)>
+      std::function<async::Task<absl::Status>(
+          const ClientBufferHandleMetadata &, const toolbelt::FileDescriptor *)>
           callback) {
     client_buffer_registration_callback_ = std::move(callback);
   }
   void SetClientBufferLookupCallback(
-      std::function<absl::StatusOr<std::vector<RegisteredClientBuffer>>(
+      std::function<async::Task<absl::StatusOr<std::vector<RegisteredClientBuffer>>>(
           const std::string &, uint64_t, uint32_t)> callback) {
     client_buffer_lookup_callback_ = std::move(callback);
   }
   void SetClientBufferUnregistrationCallback(
-      std::function<absl::Status(const std::string &, uint64_t, uint32_t)>
+      std::function<async::Task<absl::Status>(const std::string &, uint64_t,
+                                              uint32_t)>
           callback) {
     client_buffer_unregistration_callback_ = std::move(callback);
   }
@@ -363,7 +375,7 @@ protected:
   void *GetCurrentBufferAddress() {
     return GetBufferAddress(slot_);
   }
-  bool ValidateSlotBuffer(MessageSlot *slot);
+  async::Task<bool> ValidateSlotBuffer(MessageSlot *slot);
 
   void SetMessageSize(int64_t message_size) {
     slot_->message_size.store(message_size, std::memory_order_relaxed);
@@ -374,23 +386,24 @@ protected:
 
   absl::StatusOr<toolbelt::FileDescriptor> CreateBuffer(int buffer_index,
                                                         size_t size);
-  absl::Status AttachShmBuffers(int num_buffers);
-  absl::Status AttachSplitBuffers(int num_buffers);
-  absl::StatusOr<toolbelt::FileDescriptor> OpenBuffer(int buffer_index);
+  async::Task<absl::Status> AttachShmBuffers(int num_buffers);
+  async::Task<absl::Status> AttachSplitBuffers(int num_buffers);
+  async::Task<absl::StatusOr<toolbelt::FileDescriptor>>
+  OpenBuffer(int buffer_index);
   absl::StatusOr<size_t> GetBufferSize(toolbelt::FileDescriptor &shm_fd,
                                        int buffer_index) const;
   absl::StatusOr<char *> MapBuffer(toolbelt::FileDescriptor &shm_fd,
                                    size_t size, BufferMapMode mode);
   void UnmapShmBufferSet(BufferSet &buffer);
-  void UnmapSplitBufferSet(size_t buffer_index, BufferSet &buffer,
+  async::Task<void> UnmapSplitBufferSet(size_t buffer_index, BufferSet &buffer,
                            bool destroy_owned_buffers);
-  void UnmapBufferSet(size_t buffer_index, BufferSet &buffer,
+  async::Task<void> UnmapBufferSet(size_t buffer_index, BufferSet &buffer,
                       bool destroy_owned_buffers);
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_MEMFD
   absl::StatusOr<toolbelt::FileDescriptor>
   CreateMemfdBuffer(const std::string &filename, size_t size);
 #endif
-  absl::StatusOr<RegisteredClientBuffer>
+  async::Task<absl::StatusOr<RegisteredClientBuffer>>
   GetRegisteredClientBuffer(uint32_t buffer_index, bool is_prefix,
                             uint32_t slot_id);
 #if SUBSPACE_SHMEM_MODE == SUBSPACE_SHMEM_MODE_LINUX
@@ -400,10 +413,10 @@ protected:
   absl::StatusOr<toolbelt::FileDescriptor>
   CreatePosixBuffer(const std::string &filename, size_t size);
 #endif
-  absl::StatusOr<std::unique_ptr<BufferSet>>
+  async::Task<absl::StatusOr<std::unique_ptr<BufferSet>>>
   CreateSplitBufferSet(size_t buffer_index, size_t full_size,
                        uint64_t slot_size);
-  absl::StatusOr<std::unique_ptr<BufferSet>>
+  async::Task<absl::StatusOr<std::unique_ptr<BufferSet>>>
   OpenSplitBufferSet(size_t buffer_index, size_t full_size,
                      uint64_t slot_size);
 
@@ -415,13 +428,14 @@ protected:
   MessageSlot *slot_ = nullptr; // Current slot.
   int vchan_id_ = -1;           // Virtual channel ID.
   uint64_t session_id_;
-  std::function<absl::Status(const ClientBufferHandleMetadata &,
-                             const toolbelt::FileDescriptor *)>
+  std::function<async::Task<absl::Status>(const ClientBufferHandleMetadata &,
+                                          const toolbelt::FileDescriptor *)>
       client_buffer_registration_callback_ = nullptr;
-  std::function<absl::StatusOr<std::vector<RegisteredClientBuffer>>(
+  std::function<async::Task<absl::StatusOr<std::vector<RegisteredClientBuffer>>>(
       const std::string &, uint64_t, uint32_t)>
       client_buffer_lookup_callback_ = nullptr;
-  std::function<absl::Status(const std::string &, uint64_t, uint32_t)>
+  std::function<async::Task<absl::Status>(const std::string &, uint64_t,
+                                          uint32_t)>
       client_buffer_unregistration_callback_ = nullptr;
   std::vector<std::unique_ptr<BufferSet>> buffers_ = {};
   int user_id_ = -1;

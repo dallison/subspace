@@ -144,7 +144,7 @@ void UnmapMemory(void *p, size_t size,
 Channel::Channel(const std::string &name, int num_slots, int channel_id,
                  int subscriber_queue_size,
                  uint64_t subscriber_queue_arena_size, std::string type,
-                 std::function<bool(Channel *)> reload)
+                 std::function<async::Task<bool>(Channel *)> reload)
     : name_(name), num_slots_(num_slots),
       subscriber_queue_size_(
           ResolveSubscriberQueueSize(num_slots, subscriber_queue_size)),

@@ -28,60 +28,60 @@ struct BridgeReceivedMessage {
   size_t payload_length = 0;
 };
 
-static absl::StatusOr<size_t>
+static async::Task<absl::StatusOr<size_t>>
 ReceiveSplitBridgeMessage(async::Context ctx, async::ByteStream &bridge,
                           const Subscribed &subscribed,
                           const BridgeReceiveTarget &target) {
-  absl::StatusOr<ssize_t> prefix = bridge.ReceiveMessage(
-      target.prefix_without_padding, target.prefix_length, ctx);
+  absl::StatusOr<ssize_t> prefix = ASYNC_AWAIT(bridge.ReceiveMessage(
+      target.prefix_without_padding, target.prefix_length, ctx));
   if (!prefix.ok()) {
-    return absl::InternalError(absl::StrFormat(
+    ASYNC_RETURN absl::InternalError(absl::StrFormat(
         "failed to read bridge prefix: %s", prefix.status().ToString()));
   }
   if (static_cast<size_t>(*prefix) != target.prefix_length) {
-    return absl::InternalError(
+    ASYNC_RETURN absl::InternalError(
         absl::StrFormat("bridge prefix has invalid length %zd, expected %zu",
                         *prefix, target.prefix_length));
   }
   if (target.prefix->message_size >
       static_cast<uint64_t>(subscribed.slot_size())) {
-    return absl::InternalError(absl::StrFormat(
+    ASYNC_RETURN absl::InternalError(absl::StrFormat(
         "bridge payload is too large: %llu > %d",
         static_cast<unsigned long long>(target.prefix->message_size),
         subscribed.slot_size()));
   }
 
   absl::StatusOr<ssize_t> payload =
-      bridge.ReceiveMessage(static_cast<char *>(target.payload),
+      ASYNC_AWAIT(bridge.ReceiveMessage(static_cast<char *>(target.payload),
                             static_cast<size_t>(target.prefix->message_size),
-                            ctx);
+                            ctx));
   if (!payload.ok()) {
-    return absl::InternalError(absl::StrFormat(
+    ASYNC_RETURN absl::InternalError(absl::StrFormat(
         "failed to read bridge payload: %s", payload.status().ToString()));
   }
   size_t payload_length = static_cast<size_t>(*payload);
   if (payload_length != static_cast<size_t>(target.prefix->message_size)) {
-    return absl::InternalError(absl::StrFormat(
+    ASYNC_RETURN absl::InternalError(absl::StrFormat(
         "bridge payload has invalid length %zu, expected %llu", payload_length,
         static_cast<unsigned long long>(target.prefix->message_size)));
   }
-  return payload_length;
+  ASYNC_RETURN payload_length;
 }
 
-static absl::StatusOr<size_t>
+static async::Task<absl::StatusOr<size_t>>
 ReceiveCombinedBridgeMessageForSplitPublisher(async::Context ctx,
                                               async::ByteStream &bridge,
                                               const Subscribed &subscribed,
                                               const BridgeReceiveTarget &target) {
   std::vector<char> combined(subscribed.slot_size() + target.prefix_length);
   absl::StatusOr<ssize_t> n =
-      bridge.ReceiveMessage(combined.data(), combined.size(), ctx);
+      ASYNC_AWAIT(bridge.ReceiveMessage(combined.data(), combined.size(), ctx));
   if (!n.ok()) {
-    return absl::InternalError(absl::StrFormat(
+    ASYNC_RETURN absl::InternalError(absl::StrFormat(
         "failed to read bridge message: %s", n.status().ToString()));
   }
   if (static_cast<size_t>(*n) < target.prefix_length) {
-    return absl::InternalError(
+    ASYNC_RETURN absl::InternalError(
         absl::StrFormat("bridge message is too short: %zd < %zu", *n,
                         target.prefix_length));
   }
@@ -89,28 +89,28 @@ ReceiveCombinedBridgeMessageForSplitPublisher(async::Context ctx,
   size_t payload_length = static_cast<size_t>(*n) - target.prefix_length;
   memcpy(target.payload, combined.data() + target.prefix_length,
          payload_length);
-  return payload_length;
+  ASYNC_RETURN payload_length;
 }
 
-static absl::StatusOr<size_t>
+static async::Task<absl::StatusOr<size_t>>
 ReceiveCombinedBridgeMessage(async::Context ctx, async::ByteStream &bridge,
                              const Subscribed &subscribed,
                              const BridgeReceiveTarget &target) {
-  absl::StatusOr<ssize_t> n = bridge.ReceiveMessage(
+  absl::StatusOr<ssize_t> n = ASYNC_AWAIT(bridge.ReceiveMessage(
       target.prefix_without_padding,
-      subscribed.slot_size() + target.prefix_length, ctx);
+      subscribed.slot_size() + target.prefix_length, ctx));
   if (!n.ok()) {
-    return absl::InternalError(absl::StrFormat(
+    ASYNC_RETURN absl::InternalError(absl::StrFormat(
         "failed to read bridge message: %s", n.status().ToString()));
   }
   if (static_cast<size_t>(*n) < target.prefix_length) {
-    return absl::InternalError(absl::StrFormat(
+    ASYNC_RETURN absl::InternalError(absl::StrFormat(
         "bridge message is too short: %zd < %zu", *n, target.prefix_length));
   }
-  return static_cast<size_t>(*n) - target.prefix_length;
+  ASYNC_RETURN static_cast<size_t>(*n) - target.prefix_length;
 }
 
-static absl::StatusOr<BridgeReceivedMessage>
+static async::Task<absl::StatusOr<BridgeReceivedMessage>>
 ReceiveBridgeMessage(async::Context ctx, async::ByteStream &bridge,
                      Publisher &pub, const Subscribed &subscribed,
                      void *payload_buffer) {
@@ -124,41 +124,41 @@ ReceiveBridgeMessage(async::Context ctx, async::ByteStream &bridge,
       .payload = payload_buffer,
   };
   if (target.prefix == nullptr) {
-    return absl::InternalError("failed to find message prefix");
+    ASYNC_RETURN absl::InternalError("failed to find message prefix");
   }
   char *prefix_addr = reinterpret_cast<char *>(target.prefix);
   target.prefix_without_padding = prefix_addr + sizeof(int32_t);
 
   if (subscribed.split_buffers()) {
     absl::StatusOr<size_t> payload_length =
-        ReceiveSplitBridgeMessage(ctx, bridge, subscribed, target);
+        ASYNC_AWAIT(ReceiveSplitBridgeMessage(ctx, bridge, subscribed, target));
     if (!payload_length.ok()) {
-      return payload_length.status();
+      ASYNC_RETURN payload_length.status();
     }
-    return BridgeReceivedMessage{.prefix = target.prefix,
+    ASYNC_RETURN BridgeReceivedMessage{.prefix = target.prefix,
                                  .payload_length = *payload_length};
   }
   if (pub.UsesSplitBuffers()) {
     absl::StatusOr<size_t> payload_length =
-        ReceiveCombinedBridgeMessageForSplitPublisher(ctx, bridge, subscribed,
-                                                      target);
+        ASYNC_AWAIT(ReceiveCombinedBridgeMessageForSplitPublisher(ctx, bridge, subscribed,
+                                                      target));
     if (!payload_length.ok()) {
-      return payload_length.status();
+      ASYNC_RETURN payload_length.status();
     }
-    return BridgeReceivedMessage{.prefix = target.prefix,
+    ASYNC_RETURN BridgeReceivedMessage{.prefix = target.prefix,
                                  .payload_length = *payload_length};
   }
   absl::StatusOr<size_t> payload_length =
-      ReceiveCombinedBridgeMessage(ctx, bridge, subscribed, target);
+      ASYNC_AWAIT(ReceiveCombinedBridgeMessage(ctx, bridge, subscribed, target));
   if (!payload_length.ok()) {
-    return payload_length.status();
+    ASYNC_RETURN payload_length.status();
   }
-  return BridgeReceivedMessage{.prefix = target.prefix,
+  ASYNC_RETURN BridgeReceivedMessage{.prefix = target.prefix,
                                .payload_length = *payload_length};
 }
 
 // Send a Subscribe message over UDP.
-absl::Status
+async::Task<absl::Status>
 Server::SendSubscribeMessage(const std::string &channel_name, bool reliable,
                              toolbelt::InetAddress publisher,
                              async::StreamSocket &receiver_listener,
@@ -196,7 +196,7 @@ Server::SendSubscribeMessage(const std::string &channel_name, bool reliable,
     break;
   }
   default:
-    return absl::InternalError(
+    ASYNC_RETURN absl::InternalError(
         absl::StrFormat("Unsupported address type for subscribe: %s",
                         receiver_addr.ToString().c_str()));
   }
@@ -206,12 +206,12 @@ Server::SendSubscribeMessage(const std::string &channel_name, bool reliable,
   (void)buffer_size;
   logger_.Log(toolbelt::LogLevel::kDebug, "Sending subscribe to %s: %s",
               publisher.ToString().c_str(), disc.DebugString().c_str());
-  absl::Status s = TransmitDiscovery(disc, publisher, ctx);
+  absl::Status s = ASYNC_AWAIT(TransmitDiscovery(disc, publisher, ctx));
   if (!s.ok()) {
-    return absl::InternalError(
+    ASYNC_RETURN absl::InternalError(
         absl::StrFormat("Failed to send subscribe: %s", s.ToString()));
   }
-  return absl::OkStatus();
+  ASYNC_RETURN absl::OkStatus();
 }
 
 // This coroutine receives messages on a TCP socket and publishes
@@ -219,7 +219,7 @@ Server::SendSubscribeMessage(const std::string &channel_name, bool reliable,
 // is sent intact to the channel.  It first receives a 'Subscribed' message
 // with the channel details, then enters a loop reading message from the
 // bridge and publishing them to the local channel.
-void Server::BridgeReceiverCoroutine(async::Context ctx,
+async::Task<void> Server::BridgeReceiverCoroutine(async::Context ctx,
                                      std::string channel_name,
                                      bool sub_reliable,
                                      bool split_buffers_over_bridge,
@@ -258,56 +258,56 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
     logger_.Log(toolbelt::LogLevel::kError,
                 "Unable to bind socket for bridge receiver for %s: %s",
                 channel_name.c_str(), s.ToString().c_str());
-    return;
+    ASYNC_RETURN;
   }
   const toolbelt::SocketAddress &receiver_addr =
       receiver_listener.BoundAddress();
   logger_.Log(toolbelt::LogLevel::kDebug, "Bridge receiver socket: %s",
               receiver_addr.ToString().c_str());
 
-  s = SendSubscribeMessage(channel_name, sub_reliable, publisher,
-                           receiver_listener, buffer, sizeof(buffer), ctx);
+  s = ASYNC_AWAIT(SendSubscribeMessage(channel_name, sub_reliable, publisher,
+                           receiver_listener, buffer, sizeof(buffer), ctx));
   if (!s.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to send Subscribe message for channel %s: %s",
                 channel_name.c_str(), s.ToString().c_str());
-    return;
+    ASYNC_RETURN;
   }
 
   // Accept connection on listen socket.
-  absl::StatusOr<async::StreamSocket> accepted = receiver_listener.Accept(ctx);
+  absl::StatusOr<async::StreamSocket> accepted = ASYNC_AWAIT(receiver_listener.Accept(ctx));
   if (!accepted.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to accept incoming bridge connection: %s",
                 accepted.status().ToString().c_str());
-    return;
+    ASYNC_RETURN;
   }
   async::ByteStream bridge(std::move(*accepted));
   if (absl::Status handshake =
-          SecureConnection(ctx, bridge, /*server_role=*/true);
+          ASYNC_AWAIT(SecureConnection(ctx, bridge, /*server_role=*/true));
       !handshake.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "mTLS handshake on bridge connection failed: %s",
                 handshake.ToString().c_str());
-    return;
+    ASYNC_RETURN;
   }
 
   // Wait for the Subscribed message from the server.
   Subscribed subscribed;
   // Recieve it into offset 3 in buffer so that we can write the length for
   // sending it out again to the bridge notification pipe.
-  absl::StatusOr<ssize_t> n_recv = bridge.ReceiveMessage(
-      buffer + sizeof(int32_t), sizeof(buffer) - sizeof(int32_t), ctx);
+  absl::StatusOr<ssize_t> n_recv = ASYNC_AWAIT(bridge.ReceiveMessage(
+      buffer + sizeof(int32_t), sizeof(buffer) - sizeof(int32_t), ctx));
   if (!n_recv.ok()) {
     logger_.Log(toolbelt::LogLevel::kError, "Failed to receive Subscribed: %s",
                 n_recv.status().ToString().c_str());
-    return;
+    ASYNC_RETURN;
   }
   if (!subscribed.ParseFromArray(buffer + sizeof(int32_t),
                                  static_cast<int>(*n_recv))) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to parse Subscribed message");
-    return;
+    ASYNC_RETURN;
   }
   bool bridge_publisher_split_buffers =
       split_buffers_over_bridge || subscribed.split_buffers_over_bridge();
@@ -321,12 +321,13 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
 
   // Build a publisher to publish incoming bridge messages to the channel.
   Client client(ctx);
-  s = client.Init(socket_name_);
+  s = SERVER_CLIENT_CALL((client.Init(socket_name_)),
+                         client.InitAsync(socket_name_));
   if (!s.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to connect to Subspace server: %s",
                 s.ToString().c_str());
-    return;
+    ASYNC_RETURN;
   }
 
   std::shared_ptr<async::ByteStream> retirement_transmitter;
@@ -349,7 +350,7 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
       logger_.Log(toolbelt::LogLevel::kError,
                   "Invalid retirement socket for %s: %s", channel_name.c_str(),
                   retirement_addr.status().ToString().c_str());
-      return;
+      ASYNC_RETURN;
     }
 
     s = retirement_transmitter->Socket().Connect(*retirement_addr);
@@ -357,15 +358,15 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to connect to retirement socket for %s: %s",
                   channel_name.c_str(), s.ToString().c_str());
-      return;
+      ASYNC_RETURN;
     }
-    if (absl::Status handshake = SecureConnection(
-            ctx, *retirement_transmitter, /*server_role=*/false);
+    if (absl::Status handshake = ASYNC_AWAIT(SecureConnection(
+            ctx, *retirement_transmitter, /*server_role=*/false));
         !handshake.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "mTLS handshake to retirement socket for %s failed: %s",
                   channel_name.c_str(), handshake.ToString().c_str());
-      return;
+      ASYNC_RETURN;
     }
   }
   // For a reliable publisher, this will send an activation message
@@ -378,22 +379,34 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
   if (bridge_ms < 0) {
     bridge_ms = 0;
   }
-  absl::StatusOr<Publisher> pub = client.CreatePublisher(
-      channel_name, subscribed.slot_size(), subscribed.num_slots(),
-      PublisherOptions()
-          .SetSubscriberQueueArenaSize(
-              subscribed.subscriber_queue_arena_size())
-          .SetReliable(subscribed.reliable())
-          .SetBridge(true)
-          .SetNotifyRetirement(subscribed.notify_retirement())
-          .SetChecksumSize(bridge_cs)
-          .SetMetadataSize(bridge_ms)
-          .SetUseSplitBuffers(bridge_publisher_split_buffers));
+  absl::StatusOr<Publisher> pub = SERVER_CLIENT_CALL(
+      (client.CreatePublisher(
+          channel_name, subscribed.slot_size(), subscribed.num_slots(),
+          PublisherOptions()
+              .SetSubscriberQueueArenaSize(
+                  subscribed.subscriber_queue_arena_size())
+              .SetReliable(subscribed.reliable())
+              .SetBridge(true)
+              .SetNotifyRetirement(subscribed.notify_retirement())
+              .SetChecksumSize(bridge_cs)
+              .SetMetadataSize(bridge_ms)
+              .SetUseSplitBuffers(bridge_publisher_split_buffers))),
+      client.CreatePublisherAsync(
+          channel_name, subscribed.slot_size(), subscribed.num_slots(),
+          PublisherOptions()
+              .SetSubscriberQueueArenaSize(
+                  subscribed.subscriber_queue_arena_size())
+              .SetReliable(subscribed.reliable())
+              .SetBridge(true)
+              .SetNotifyRetirement(subscribed.notify_retirement())
+              .SetChecksumSize(bridge_cs)
+              .SetMetadataSize(bridge_ms)
+              .SetUseSplitBuffers(bridge_publisher_split_buffers)));
   if (!pub.ok()) {
     logger_.Log(toolbelt::LogLevel::kError,
                 "Failed to create bridge publisher for %s: %s",
                 channel_name.c_str(), pub.status().ToString().c_str());
-    return;
+    ASYNC_RETURN;
   }
 
   toolbelt::FileDescriptor retirement_fd;
@@ -404,7 +417,8 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
     if (!retirement_fd.Valid()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to get retirement fd for %s", channel_name.c_str());
-      return;
+      SERVER_CLIENT_CLOSE(*pub);
+      ASYNC_RETURN;
     }
 
     // Add a coroutine to listen for retirement notifications and send them to
@@ -412,9 +426,9 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
     runtime_.SpawnOnNewStrand(
         [this, retirement_fd = std::move(retirement_fd),
          retirement_transmitter,
-         channel_name](async::Context ret_ctx) mutable {
-          RetirementCoroutine(ret_ctx, channel_name, std::move(retirement_fd),
-                              retirement_transmitter);
+         channel_name](async::Context ret_ctx) mutable -> async::Task<void> {
+          ASYNC_AWAIT(RetirementCoroutine(ret_ctx, channel_name, std::move(retirement_fd),
+                              retirement_transmitter));
         },
         {.name = absl::StrFormat("Retirement notifier for %s", channel_name),
          .interrupt_fd = shutdown_trigger_fd_.GetPollFd().Fd()});
@@ -445,7 +459,8 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
   // Now we receive messages from the bridge and send to the
   // publisher.
   for (;;) {
-    absl::StatusOr<void *> buf = pub->GetMessageBuffer();
+    absl::StatusOr<void *> buf = SERVER_CLIENT_CALL(
+        (pub->GetMessageBuffer()), pub->GetMessageBufferAsync());
     if (!buf.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to get buffer for bridge subscriber %s: %s",
@@ -467,7 +482,9 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
       // buffers fill up, it will stop sending until we can read the
       // message.  The backpressure is thus propagated up the
       // chain.
-      if (absl::Status status = pub->Wait(); !status.ok()) {
+      if (absl::Status status = SERVER_CLIENT_CALL(
+              (pub->Wait()), pub->WaitAsync());
+          !status.ok()) {
         logger_.Log(toolbelt::LogLevel::kError,
                     "Failed to wait for reliable publisher: %s",
                     status.ToString().c_str());
@@ -477,7 +494,7 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
     }
 
     absl::StatusOr<BridgeReceivedMessage> bridge_msg =
-        ReceiveBridgeMessage(ctx, bridge, *pub, subscribed, *buf);
+        ASYNC_AWAIT(ReceiveBridgeMessage(ctx, bridge, *pub, subscribed, *buf));
     if (!bridge_msg.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to read bridge message for %s: %s",
@@ -514,9 +531,10 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
     }
     prefix->flags |= kMessageBridged;
 
-    absl::StatusOr<const Message> pub_msg = pub->PublishMessageInternal(
-        payload_length, /*omit_prefix=*/true,
-        /*omit_prefix_slot_id=*/true);
+    absl::StatusOr<const Message> pub_msg = SERVER_CLIENT_CALL(
+        (pub->PublishMessageInternal(payload_length, /*omit_prefix=*/true,
+                                     /*omit_prefix_slot_id=*/true)),
+        pub->PublishMessageWithPrefixAsync(payload_length, true, true));
     if (!pub_msg.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to publish bridge message for %s: %s",
@@ -524,6 +542,7 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
     }
   }
 
+  SERVER_CLIENT_CLOSE(*pub);
   logger_.Log(toolbelt::LogLevel::kDebug,
               "Bridge receiver coroutine terminating");
 }
@@ -533,13 +552,13 @@ void Server::BridgeReceiverCoroutine(async::Context ctx,
 // message.  The slot ID sent back to the original server is the slot of the
 // original message, not this side's slot.  That is held in the MessagePrefix
 // which is kept intact.
-void Server::RetirementCoroutine(
+async::Task<void> Server::RetirementCoroutine(
     async::Context ctx, const std::string &channel_name,
     toolbelt::FileDescriptor &&retirement_fd,
     std::shared_ptr<async::ByteStream> retirement_transmitter) {
   logger_.Log(toolbelt::LogLevel::kDebug, "Retirement coroutine for %s running",
               channel_name.c_str());
-#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+#if SUBSPACE_CORO_BACKEND != SUBSPACE_CORO_BACKEND_CO
   // The retirement fd is read on the io_context thread, so the read must never
   // block it.  WaitReadable can report readiness that this reader cannot then
   // satisfy with a blocking read - e.g. a spurious epoll edge, or a second
@@ -555,7 +574,7 @@ void Server::RetirementCoroutine(
 #endif
   for (;;) {
     int32_t slot_id;
-#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+#if SUBSPACE_CORO_BACKEND != SUBSPACE_CORO_BACKEND_CO
     absl::StatusOr<ssize_t> n;
     for (;;) {
       ssize_t r = ::read(retirement_fd.Fd(), &slot_id, sizeof(slot_id));
@@ -564,24 +583,24 @@ void Server::RetirementCoroutine(
         break;
       }
       if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-        if (absl::Status w = async::WaitReadable(ctx, retirement_fd.Fd());
+        if (absl::Status w = ASYNC_AWAIT(async::WaitReadable(ctx, retirement_fd.Fd()));
             !w.ok()) {
-          return; // Cancelled (graceful shutdown) or wait failed.
+          ASYNC_RETURN; // Cancelled (graceful shutdown) or wait failed.
         }
         continue;
       }
-      return; // Read error, we're done.
+      ASYNC_RETURN; // Read error, we're done.
     }
 #else
     absl::StatusOr<ssize_t> n =
         retirement_fd.Read(&slot_id, sizeof(slot_id), ctx);
     if (!n.ok()) {
       // Failed to read the slot ID, we're done.
-      return;
+      ASYNC_RETURN;
     }
 #endif
     if (*n == 0) {
-      return; // EOF, we're done.
+      ASYNC_RETURN; // EOF, we're done.
     }
 
     // We received a retirement notification, send the fd.
@@ -603,15 +622,15 @@ void Server::RetirementCoroutine(
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to serialize retirement notification for %s",
                   channel_name.c_str());
-      return;
+      ASYNC_RETURN;
     }
-    absl::StatusOr<ssize_t> nsent = retirement_transmitter->SendMessage(
-        buffer + sizeof(int32_t), msg.ByteSizeLong(), ctx);
+    absl::StatusOr<ssize_t> nsent = ASYNC_AWAIT(retirement_transmitter->SendMessage(
+        buffer + sizeof(int32_t), msg.ByteSizeLong(), ctx));
     if (!nsent.ok()) {
       logger_.Log(toolbelt::LogLevel::kError,
                   "Failed to send retirement fd for %s: %s",
                   channel_name.c_str(), nsent.status().ToString().c_str());
-      return;
+      ASYNC_RETURN;
     }
   }
 }

@@ -1,7 +1,7 @@
 
 #include "server/server.h"
 
-#include "co/coroutine.h"
+#include "common/async/runtime.h"
 #include "pybind11/pybind11.h"
 #include <stdexcept>
 #include <thread>
@@ -93,7 +93,7 @@ private:
 
   std::string socket_name_;
   bool local_;
-  co::CoroutineScheduler scheduler_;
+  subspace::async::RuntimeEngine scheduler_;
   std::unique_ptr<Server> server_;
   std::thread server_thread_;
   int notify_read_fd_ = -1;

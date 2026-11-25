@@ -186,6 +186,9 @@ target_link_libraries(rpc_test_subspace_rpc_server PUBLIC rpc_test_cc_proto rpc_
 # These start the subspace server in-process (linking libserver), matching the
 # other CMake tests in this project.
 
+# These tests construct subspace::Server with a co::CoroutineScheduler, which the
+# co20 backend doesn't provide (mirrors target_compatible_with in Bazel).
+if(NOT SUBSPACE_CORO_BACKEND_RESOLVED STREQUAL "co20")
 add_executable(rpc_client_test client/client_test.cc)
 add_test(NAME rpc_client_test COMMAND rpc_client_test)
 set_tests_properties(rpc_client_test PROPERTIES WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
@@ -225,6 +228,7 @@ target_link_libraries(rpc_test PUBLIC
     gmock
     absl::flags_parse
 )
+endif()
 
 # --- Example binaries (built but not registered as tests, matching the
 # "manual" tag in Bazel) ---

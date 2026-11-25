@@ -3,13 +3,13 @@
 // See LICENSE file for licensing information.
 
 #include "server/server_ffi.h"
-#include "co/coroutine.h"
+#include "common/async/runtime.h"
 #include "server/server.h"
 #include <memory>
 #include <string>
 
 struct SubspaceServerHandle {
-  co::CoroutineScheduler scheduler;
+  subspace::async::RuntimeEngine scheduler;
   std::unique_ptr<subspace::Server> server;
   std::string socket_name;
 };

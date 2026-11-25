@@ -11,6 +11,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
+#include "common/async/task.h"
 #include "common/atomic_bitset.h"
 #include "toolbelt/bitset.h"
 #include "toolbelt/fd.h"
@@ -1109,7 +1110,7 @@ public:
   Channel(const std::string &name, int num_slots, int channel_id,
           int subscriber_queue_size, uint64_t subscriber_queue_arena_size,
           std::string type,
-          std::function<bool(Channel *)> reload = nullptr);
+          std::function<async::Task<bool>(Channel *)> reload = nullptr);
   virtual ~Channel() { Unmap(); }
 
   virtual void Unmap();
@@ -1479,15 +1480,20 @@ protected:
   void DecrementBufferRefs(int buffer_index);
   void IncrementBufferRefs(int buffer_index);
 
-  void CheckReload() {
+  // Runs the reload callback until it reports that there is nothing more to
+  // reload.  The callback may need a round trip to the server, so this is a
+  // task: under co20 a caller that is inside a coroutine must await it, since
+  // blocking the scheduler thread would deadlock.
+  async::Task<void> CheckReload() {
     if (reload_callback_ == nullptr) {
-      return;
+      ASYNC_RETURN;
     }
     for (;;) {
-      if (!reload_callback_(this)) {
+      if (!ASYNC_AWAIT(reload_callback_(this))) {
         break;
       }
     }
+    ASYNC_RETURN;
   }
 
   std::string name_;
@@ -1507,7 +1513,7 @@ protected:
   ChannelControlBlock *ccb_ = nullptr;
   BufferControlBlock *bcb_ = nullptr;
   bool debug_ = false;
-  std::function<bool(Channel *)> reload_callback_;
+  std::function<async::Task<bool>(Channel *)> reload_callback_;
 };
 
 } // namespace subspace

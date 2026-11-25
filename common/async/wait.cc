@@ -8,6 +8,9 @@
 
 #include <sys/poll.h>
 
+// See context.h.
+extern "C" const int SUBSPACE_CORO_BACKEND_LINK_SYMBOL = SUBSPACE_CORO_BACKEND;
+
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
 
 #include "absl/strings/str_format.h"
@@ -465,6 +468,198 @@ void Sleep(Context ctx, std::chrono::nanoseconds duration) {
                                           ctx[ec]));
   if (cancel_slot.is_connected()) {
     cancel_slot.clear();
+  }
+}
+
+}  // namespace subspace::async
+
+#elif SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
+
+#include "absl/strings/str_format.h"
+#include <algorithm>
+#include <cerrno>
+#include <climits>
+#include <ctime>
+#include <fcntl.h>
+#include <vector>
+
+namespace subspace::async {
+
+namespace {
+
+using Clock = std::chrono::steady_clock;
+
+enum class WaitResult { kReady, kTimedOut, kInterrupted, kError };
+
+uint64_t ToNanos(std::chrono::nanoseconds d) {
+  return d.count() <= 0 ? 0 : static_cast<uint64_t>(d.count());
+}
+
+// Classifies the value a co20 wait resumed with.  It resumes with the fd that
+// became ready, the coroutine's interrupt fd, or -1 on timeout or when the
+// scheduler could not watch a closed fd.
+WaitResult FromCo20(const co20::Coroutine &c, const std::vector<int> &fds,
+                    bool has_timeout, int r, int *ready_fd) {
+  for (int fd : fds) {
+    if (r == fd) {
+      *ready_fd = fd;
+      return WaitResult::kReady;
+    }
+  }
+  if (r == -1) {
+    // -1 is a timeout, or a closed fd that the scheduler could not watch.
+    // Only the closed fd is an error.
+    for (int fd : fds) {
+      if (::fcntl(fd, F_GETFD) == -1 && errno == EBADF) {
+        return WaitResult::kError;
+      }
+    }
+    return has_timeout ? WaitResult::kTimedOut : WaitResult::kError;
+  }
+  if (c.GetInterruptFd() != -1 && r == c.GetInterruptFd()) {
+    return WaitResult::kInterrupted;
+  }
+  return WaitResult::kTimedOut;
+}
+
+// Classifies the value an AsyncWaiter wait returned: an fd that became ready,
+// -1 on timeout, -2 on a poll error, or the interrupt fd of a co::Coroutine.
+WaitResult FromWaiter(const std::vector<int> &fds, int r, bool has_timeout,
+                      int *ready_fd) {
+  for (int fd : fds) {
+    if (r == fd) {
+      *ready_fd = fd;
+      return WaitResult::kReady;
+    }
+  }
+  if (r == -1 && has_timeout) {
+    return WaitResult::kTimedOut;
+  }
+  if (r == -2) {
+    return WaitResult::kError;
+  }
+  return WaitResult::kInterrupted;
+}
+
+// Blocks the thread in poll() until one of `fds` is ready for `events`.  An
+// error or hangup counts as ready, so the caller's next read or write reports
+// it.
+WaitResult PollBlocking(const std::vector<int> &fds, short events,
+                        std::chrono::nanoseconds timeout, int *ready_fd) {
+  const bool has_timeout = timeout.count() > 0;
+  const Clock::time_point deadline =
+      has_timeout ? Clock::now() + timeout : Clock::time_point::max();
+  std::vector<struct pollfd> pfds;
+  pfds.reserve(fds.size());
+  for (int fd : fds) {
+    pfds.push_back({.fd = fd, .events = events, .revents = 0});
+  }
+  for (;;) {
+    int timeout_ms = -1;
+    if (has_timeout) {
+      auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+          deadline - Clock::now());
+      // Round up so a sub-millisecond remainder doesn't spin.
+      timeout_ms = static_cast<int>(
+          std::clamp<int64_t>(left.count() + 1, 0, INT_MAX));
+    }
+    int n = ::poll(pfds.data(), static_cast<nfds_t>(pfds.size()), timeout_ms);
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return WaitResult::kError;
+    }
+    for (const struct pollfd &pfd : pfds) {
+      if ((pfd.revents & POLLNVAL) != 0) {
+        return WaitResult::kError;
+      }
+      if ((pfd.revents & (events | POLLERR | POLLHUP)) != 0) {
+        *ready_fd = pfd.fd;
+        return WaitResult::kReady;
+      }
+    }
+    if (has_timeout && Clock::now() >= deadline) {
+      return WaitResult::kTimedOut;
+    }
+  }
+}
+
+// Waits for one of `fds` to be ready for `events`, by the means `ctx` says.
+Task<WaitResult> WaitFds(Context ctx, std::vector<int> fds, short events,
+                         std::chrono::nanoseconds timeout, int *ready_fd) {
+  if (co20::Coroutine *c = ctx.Coroutine()) {
+    int r = -1;
+    if (fds.size() == 1) {
+      r = co_await c->Wait(fds[0], events, ToNanos(timeout));
+    } else {
+      r = co_await c->Wait(fds, events, ToNanos(timeout));
+    }
+    co_return FromCo20(*c, fds, timeout.count() > 0, r, ready_fd);
+  }
+  if (const toolbelt::AsyncWaiter *w = ctx.Waiter()) {
+    int r = fds.size() == 1 ? w->Wait(fds[0], events, ToNanos(timeout))
+                            : w->Wait(fds, events, ToNanos(timeout));
+    co_return FromWaiter(fds, r, timeout.count() > 0, ready_fd);
+  }
+  co_return PollBlocking(fds, events, timeout, ready_fd);
+}
+
+absl::Status ToStatus(WaitResult result, const char *what) {
+  switch (result) {
+  case WaitResult::kReady:
+    return absl::OkStatus();
+  case WaitResult::kTimedOut:
+    return absl::DeadlineExceededError("Timeout waiting for fd");
+  case WaitResult::kInterrupted:
+    return absl::CancelledError(absl::StrFormat("%s: interrupted", what));
+  case WaitResult::kError:
+    break;
+  }
+  return absl::InternalError(absl::StrFormat("%s: unable to wait for fd", what));
+}
+
+}  // namespace
+
+Task<absl::Status> WaitReadable(Context ctx, int fd,
+                                std::chrono::nanoseconds timeout) {
+  int ready_fd = -1;
+  WaitResult r = co_await WaitFds(ctx, {fd}, POLLIN, timeout, &ready_fd);
+  co_return ToStatus(r, "WaitReadable");
+}
+
+Task<absl::Status> WaitWritable(Context ctx, int fd,
+                                std::chrono::nanoseconds timeout) {
+  int ready_fd = -1;
+  WaitResult r = co_await WaitFds(ctx, {fd}, POLLOUT, timeout, &ready_fd);
+  co_return ToStatus(r, "WaitWritable");
+}
+
+Task<absl::StatusOr<int>> WaitEither(Context ctx, int fd1, int fd2,
+                                     std::chrono::nanoseconds timeout) {
+  int ready_fd = -1;
+  WaitResult r = co_await WaitFds(ctx, {fd1, fd2}, POLLIN, timeout, &ready_fd);
+  if (r != WaitResult::kReady) {
+    co_return ToStatus(r, "WaitEither");
+  }
+  co_return ready_fd;
+}
+
+Task<void> Sleep(Context ctx, std::chrono::nanoseconds duration) {
+  if (co20::Coroutine *c = ctx.Coroutine()) {
+    co_await c->Sleep(ToNanos(duration));
+    co_return;
+  }
+  if (const toolbelt::AsyncWaiter *w = ctx.Waiter()) {
+    w->Nanosleep(ToNanos(duration));
+    co_return;
+  }
+  if (duration.count() > 0) {
+    struct timespec ts = {
+        .tv_sec = static_cast<time_t>(duration.count() / 1000000000),
+        .tv_nsec = static_cast<long>(duration.count() % 1000000000)};
+    while (::nanosleep(&ts, &ts) != 0 && errno == EINTR) {
+    }
   }
 }
 

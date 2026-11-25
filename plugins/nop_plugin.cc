@@ -11,28 +11,34 @@ constexpr int kHeartbeatSlotSize = 256;
 constexpr int kHeartbeatNumSlots = 16;
 constexpr uint64_t kHeartbeatPeriodNs = 1000000000ULL; // 1 second
 
-void HeartbeatCoroutine(subspace::Server &server, subspace::PluginContext *ctx,
-                        subspace::async::Context coro_ctx) {
+subspace::async::Task<void>
+HeartbeatCoroutine(subspace::Server &server, subspace::PluginContext *ctx,
+                   subspace::async::Context coro_ctx) {
   if (server.ShuttingDown()) {
-    return;
+    ASYNC_RETURN;
   }
 
   subspace::Client client(coro_ctx);
-  absl::Status status = client.Init(server.GetSocketName());
+  absl::Status status = SERVER_CLIENT_CALL(
+      (client.Init(server.GetSocketName())),
+      client.InitAsync(server.GetSocketName()));
   if (!status.ok()) {
     ctx->logger.Log(toolbelt::LogLevel::kError,
                     "NOP plugin: failed to init client for heartbeat: %s",
                     status.ToString().c_str());
-    return;
+    ASYNC_RETURN;
   }
 
-  absl::StatusOr<subspace::Publisher> pub = client.CreatePublisher(
-      "/nop/Heartbeat", kHeartbeatSlotSize, kHeartbeatNumSlots);
+  absl::StatusOr<subspace::Publisher> pub = SERVER_CLIENT_CALL(
+      (client.CreatePublisher("/nop/Heartbeat", kHeartbeatSlotSize,
+                              kHeartbeatNumSlots)),
+      client.CreatePublisherAsync("/nop/Heartbeat", kHeartbeatSlotSize,
+                                  kHeartbeatNumSlots));
   if (!pub.ok()) {
     ctx->logger.Log(toolbelt::LogLevel::kError,
                     "NOP plugin: failed to create heartbeat publisher: %s",
                     pub.status().ToString().c_str());
-    return;
+    ASYNC_RETURN;
   }
 
   uint64_t seq = 0;
@@ -40,14 +46,15 @@ void HeartbeatCoroutine(subspace::Server &server, subspace::PluginContext *ctx,
     // Wait up to one period for the shutdown fd.  Ok() means it became
     // readable (shutting down); DeadlineExceeded means it is time to emit a
     // heartbeat.
-    absl::Status wait_status = subspace::async::WaitReadable(
+    absl::Status wait_status = ASYNC_AWAIT(subspace::async::WaitReadable(
         coro_ctx, server.GetShutdownTriggerFd(),
-        std::chrono::nanoseconds(kHeartbeatPeriodNs));
+        std::chrono::nanoseconds(kHeartbeatPeriodNs)));
     if (wait_status.ok()) {
       break;
     }
 
-    absl::StatusOr<void *> buffer = pub->GetMessageBuffer();
+    absl::StatusOr<void *> buffer = SERVER_CLIENT_CALL(
+        (pub->GetMessageBuffer()), pub->GetMessageBufferAsync());
     if (!buffer.ok()) {
       ctx->logger.Log(toolbelt::LogLevel::kError,
                       "NOP plugin: failed to get heartbeat buffer: %s",
@@ -55,8 +62,9 @@ void HeartbeatCoroutine(subspace::Server &server, subspace::PluginContext *ctx,
       continue;
     }
     memcpy(*buffer, &seq, sizeof(seq));
-    absl::StatusOr<const subspace::Message> msg =
-        pub->PublishMessage(sizeof(seq));
+    absl::StatusOr<const subspace::Message> msg = SERVER_CLIENT_CALL(
+        (pub->PublishMessage(sizeof(seq))),
+        pub->PublishMessageAsync(sizeof(seq)));
     if (!msg.ok()) {
       ctx->logger.Log(toolbelt::LogLevel::kError,
                       "NOP plugin: failed to publish heartbeat: %s",
@@ -64,6 +72,7 @@ void HeartbeatCoroutine(subspace::Server &server, subspace::PluginContext *ctx,
     }
     seq++;
   }
+  SERVER_CLIENT_CLOSE(*pub);
 }
 
 absl::Status OnStartup(subspace::Server & /*s*/, const std::string &name,
@@ -76,8 +85,9 @@ void OnReady(subspace::Server &s, subspace::PluginContext *ctx) {
   ctx->logger.Log(toolbelt::LogLevel::kInfo, "NOP plugin ready\n");
 
   s.SpawnCoroutine(
-      [&s, ctx](subspace::async::Context coro_ctx) {
-        HeartbeatCoroutine(s, ctx, coro_ctx);
+      [&s, ctx](subspace::async::Context coro_ctx)
+          -> subspace::async::Task<void> {
+        ASYNC_AWAIT(HeartbeatCoroutine(s, ctx, coro_ctx));
       },
       {.name = "NOP heartbeat", .interrupt_fd = s.GetShutdownTriggerFd()});
 }

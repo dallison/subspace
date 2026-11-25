@@ -88,7 +88,7 @@ FromPublisherSplitBufferRequest(const CreatePublisherRequest &req) {
 
 ClientHandler::~ClientHandler() { server_->RemoveAllUsersFor(this); }
 
-void ClientHandler::Run(async::Context ctx) {
+async::Task<void> ClientHandler::Run(async::Context ctx) {
   // The data is placed 4 bytes into the buffer.  The first 4
   // bytes of the buffer are used by SendMessage and ReceiveMessage
   // for the length of the data.
@@ -97,19 +97,19 @@ void ClientHandler::Run(async::Context ctx) {
 
     {
       absl::StatusOr<std::vector<char>> receive_buffer =
-          socket_.ReceiveVariableLengthMessage(ctx);
+          ASYNC_AWAIT(socket_.ReceiveVariableLengthMessage(ctx));
       if (!receive_buffer.ok()) {
-        return;
+        ASYNC_RETURN;
       }
       if (receive_buffer->empty()) {
         // Connection closed.
-        return;
+        ASYNC_RETURN;
       }
       if (!request.ParseFromArray(receive_buffer->data(),
                                   int(receive_buffer->size()))) {
         server_->logger_.Log(toolbelt::LogLevel::kError,
                              "Failed to parse request\n");
-        return;
+        ASYNC_RETURN;
       }
     }
 
@@ -118,11 +118,11 @@ void ClientHandler::Run(async::Context ctx) {
     if (request.request_case() == subspace::Request::kRegisterClientBuffer) {
       std::vector<toolbelt::FileDescriptor> register_fds;
       if (request.register_client_buffer().has_fd()) {
-        if (absl::Status s = socket_.ReceiveFds(register_fds, ctx);
+        if (absl::Status s = ASYNC_AWAIT(socket_.ReceiveFds(register_fds, ctx));
             !s.ok()) {
           server_->logger_.Log(toolbelt::LogLevel::kError, "%s\n",
                                s.ToString().c_str());
-          return;
+          ASYNC_RETURN;
         }
       }
       if (absl::Status s =
@@ -149,7 +149,7 @@ void ClientHandler::Run(async::Context ctx) {
       if (absl::Status s = HandleMessage(request, response, fds); !s.ok()) {
         server_->logger_.Log(toolbelt::LogLevel::kError, "%s\n",
                              s.ToString().c_str());
-        return;
+        ASYNC_RETURN;
       }
     }
 
@@ -159,18 +159,18 @@ void ClientHandler::Run(async::Context ctx) {
                                    msglen)) {
       server_->logger_.Log(toolbelt::LogLevel::kError,
                            "Failed to serialize response\n");
-      return;
+      ASYNC_RETURN;
     }
 
-    absl::StatusOr<ssize_t> n_sent = socket_.SendMessage(
-        send_buffer.data() + sizeof(int32_t), msglen, ctx);
+    absl::StatusOr<ssize_t> n_sent = ASYNC_AWAIT(socket_.SendMessage(
+        send_buffer.data() + sizeof(int32_t), msglen, ctx));
     if (!n_sent.ok()) {
-      return;
+      ASYNC_RETURN;
     }
-    if (absl::Status status = socket_.SendFds(fds, ctx); !status.ok()) {
+    if (absl::Status status = ASYNC_AWAIT(socket_.SendFds(fds, ctx)); !status.ok()) {
       server_->logger_.Log(toolbelt::LogLevel::kError, "%s\n",
                            status.ToString().c_str());
-      return;
+      ASYNC_RETURN;
     }
   }
 }

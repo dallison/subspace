@@ -633,7 +633,8 @@ MessageSlot *SubscriberImpl::FindNextVisibleSlot(InPlaceAtomicBitset &bits,
   return best_slot;
 }
 
-MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
+async::Task<MessageSlot *>
+SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
                                       int owner) {
 
   embargoed_slots_.ClearAll();
@@ -647,7 +648,9 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
 #else
     const bool print_errors = false;
 #endif
-    CheckReload();
+    if (BuffersChanged()) {
+      ASYNC_AWAIT(CheckReload());
+    }
     InPlaceAtomicBitset &bits = GetAvailableSlots(owner);
     const bool stable_poll_drain = PollDrainPending();
     if (stable_poll_drain && poll_drain_exhausted_) {
@@ -657,7 +660,7 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
         queue_drain_tail_valid_ = false;
         next_slot_cache_valid_ = false;
       } else {
-        return nullptr;
+        ASYNC_RETURN nullptr;
       }
     }
     if (slot == nullptr) {
@@ -739,7 +742,7 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
         }
         const int buffer_index =
             new_slot->buffer_index.load(std::memory_order_relaxed);
-        if (!ValidateSlotBuffer(new_slot) || buffer_index == -1) {
+        if (!ASYNC_AWAIT(ValidateSlotBuffer(new_slot)) || buffer_index == -1) {
           if (print_errors) {
             std::cerr << "Subscriber for " << Name()
                       << " detected buffer failure on slot: " << new_slot->id
@@ -758,7 +761,7 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
         // dies before ClientImpl can allocate and claim the ActiveMessage, the
         // server must still be able to identify and release this reference.
         new_slot->sub_owners.Set(subscriber_id_);
-        return new_slot;
+        ASYNC_RETURN new_slot;
       }
       // Push() may fail after a peer dies or loses a bounded CAS race. The
       // publisher always records the slot in the bitset, so continue below and
@@ -859,7 +862,7 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
               next_slot_cached_total_) {
         Trigger();
       }
-      return nullptr;
+      ASYNC_RETURN nullptr;
     }
     if (print_errors) {
       std::cerr << "Warning: subscriber for " << Name()
@@ -883,7 +886,7 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
       }
       const int buffer_index =
           new_slot->slot->buffer_index.load(std::memory_order_relaxed);
-      if (!ValidateSlotBuffer(new_slot->slot) || buffer_index == -1) {
+      if (!ASYNC_AWAIT(ValidateSlotBuffer(new_slot->slot)) || buffer_index == -1) {
         if (print_errors) {
           std::cerr << "Subscriber for " << Name()
                     << " detected buffer failure on slot: "
@@ -911,7 +914,7 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
       // Record ownership before returning the pinned slot. This closes the
       // crash window between AtomicIncRefCount and ClaimSlot.
       new_slot->slot->sub_owners.Set(subscriber_id_);
-      return new_slot->slot;
+      ASYNC_RETURN new_slot->slot;
     }
     // CAS failed: another subscriber raced us, or the slot was retired and
     // overwritten with a new ordinal. Drop the cache and re-snapshot.
@@ -921,15 +924,18 @@ MessageSlot *SubscriberImpl::NextSlot(MessageSlot *slot, bool reliable,
       next_slot_cache_valid_ = false;
     }
   }
-  return nullptr;
+  ASYNC_RETURN nullptr;
 }
 
-MessageSlot *SubscriberImpl::LastSlot(MessageSlot *slot, bool reliable,
+async::Task<MessageSlot *>
+SubscriberImpl::LastSlot(MessageSlot *slot, bool reliable,
                                       int owner) {
 
   embargoed_slots_.ClearAll();
   for (;;) {
-    CheckReload();
+    if (BuffersChanged()) {
+      ASYNC_AWAIT(CheckReload());
+    }
     InPlaceAtomicBitset &bits = GetAvailableSlots(owner);
     if (!reliable && SubscriberQueueSize() > 0) {
       if (InPlaceSlotQueue *queue =
@@ -967,7 +973,7 @@ MessageSlot *SubscriberImpl::LastSlot(MessageSlot *slot, bool reliable,
     }
     if (new_slot == nullptr) {
       newest_snapshot_.clear();
-      return nullptr;
+      ASYNC_RETURN nullptr;
     }
 
     // Increment the ref count.
@@ -975,7 +981,7 @@ MessageSlot *SubscriberImpl::LastSlot(MessageSlot *slot, bool reliable,
                           new_slot->vchan_id, false)) {
       const int buffer_index =
           new_slot->slot->buffer_index.load(std::memory_order_relaxed);
-      if (!ValidateSlotBuffer(new_slot->slot) || buffer_index == -1) {
+      if (!ASYNC_AWAIT(ValidateSlotBuffer(new_slot->slot)) || buffer_index == -1) {
         // Failed to get a buffer for the slot.  Embargo the slot so we don't
         // see it again this loop and try again.
         embargoed_slots_.Set(new_slot->slot->id);
@@ -986,18 +992,21 @@ MessageSlot *SubscriberImpl::LastSlot(MessageSlot *slot, bool reliable,
       // ReadNewest also returns a pinned slot through ClientImpl before
       // ClaimSlot runs, so make that transient reference server-visible.
       new_slot->slot->sub_owners.Set(subscriber_id_);
-      return new_slot->slot;
+      ASYNC_RETURN new_slot->slot;
     }
     newest_snapshot_.clear();
   }
 }
 
-MessageSlot *SubscriberImpl::FindActiveSlotByTimestamp(
+async::Task<MessageSlot *>
+SubscriberImpl::FindActiveSlotByTimestamp(
     [[maybe_unused]] MessageSlot *old_slot, uint64_t timestamp, bool reliable, int owner,
     std::vector<ActiveSlot> &buffer) {
   embargoed_slots_.ClearAll();
   for (;;) {
-    CheckReload();
+    if (BuffersChanged()) {
+      ASYNC_AWAIT(CheckReload());
+    }
     buffer.clear();
     buffer.reserve(NumSlots());
 
@@ -1021,7 +1030,7 @@ MessageSlot *SubscriberImpl::FindActiveSlotByTimestamp(
     // Apparently, lower_bound will return the first in the range if
     // the value is less than the whole range.  That's unexpected.
     if (buffer.empty() || timestamp < buffer.front().timestamp) {
-      return nullptr;
+      ASYNC_RETURN nullptr;
     }
 
     // Binary search the search buffer.
@@ -1030,16 +1039,16 @@ MessageSlot *SubscriberImpl::FindActiveSlotByTimestamp(
         [](ActiveSlot &s, uint64_t t) { return s.timestamp < t; });
     if (it == buffer.end()) {
       // Not found, nothing changes.
-      return nullptr;
+      ASYNC_RETURN nullptr;
     }
     if (it->timestamp != timestamp) {
-      return nullptr;
+      ASYNC_RETURN nullptr;
     }
 
     // Try to increment the ref count.
     if (AtomicIncRefCount(it->slot, reliable, 1, it->ordinal, it->vchan_id,
                           false)) {
-      if (!ValidateSlotBuffer(it->slot) ||
+      if (!ASYNC_AWAIT(ValidateSlotBuffer(it->slot)) ||
           it->slot->buffer_index.load(std::memory_order_relaxed) == -1) {
         // Failed to get a buffer for the slot.  Embargo the slot so we don't
         // see it again this loop and try again.
@@ -1054,7 +1063,7 @@ MessageSlot *SubscriberImpl::FindActiveSlotByTimestamp(
                                  std::memory_order_relaxed);
       }
       it->slot->sub_owners.Set(owner);
-      return it->slot;
+      ASYNC_RETURN it->slot;
     }
     // Publisher got there first, try again.
   }

@@ -10,12 +10,13 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "common/async/context.h"
+#include "common/async/task.h"
 #include "toolbelt/sockets.h"
 #include <chrono>
 
 // Networking facade used by the server's discovery and bridging paths.  The
 // address types (InetAddress / VirtualAddress / SocketAddress) are pure value
-// holders and are shared by both backends, so they are re-exported from
+// holders and are shared by all backends, so they are re-exported from
 // toolbelt unchanged.  The socket types differ:
 //
 //   co   backend: StreamSocket/UDPSocket/UnixSocket are thin aliases over the
@@ -24,12 +25,14 @@
 //                 call sites pass the Context straight through and behavior is
 //                 identical to the pre-existing code.
 //
-//   asio backend: StreamSocket/UDPSocket are real wrappers over Boost.Asio.
-//                 TCP and vsock share a single code path via
-//                 boost::asio::generic::stream_protocol with a sockaddr_vm
-//                 endpoint for vsock (Asio has no native vsock type).  The
-//                 length-delimited framing of SendMessage/ReceiveMessage
-//                 matches toolbelt exactly so the wire format is unchanged.
+//   asio and co20 backends: StreamSocket/UDPSocket/UnixSocket are wrappers
+//                 over non-blocking raw fds that wait through the backend
+//                 when an operation would block.  TCP and vsock share a
+//                 single code path.  The length-delimited framing of
+//                 SendMessage/ReceiveMessage and the fd protocol of
+//                 SendFds/ReceiveFds match toolbelt exactly, so the wire
+//                 format is unchanged.  Under co20 the methods that wait
+//                 return tasks (see task.h); a null Context blocks the thread.
 
 namespace subspace::async {
 
@@ -39,21 +42,25 @@ using SocketAddress = toolbelt::SocketAddress;
 
 }  // namespace subspace::async
 
-#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO ||                     \
+    SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
 
 #include "toolbelt/fd.h"
-#include <boost/asio/generic/datagram_protocol.hpp>
-#include <boost/asio/generic/stream_protocol.hpp>
-#include <boost/asio/io_context.hpp>
-#include <boost/asio/spawn.hpp>
 #include <memory>
 #include <string>
 #include <vector>
 
+#if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_ASIO
+#include <boost/asio/generic/datagram_protocol.hpp>
+#include <boost/asio/generic/stream_protocol.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/spawn.hpp>
+#endif
+
 namespace subspace::async {
 
-// A stream socket (TCP, vsock or Unix-stream) over Boost.Asio.  Mirrors the
-// subset of toolbelt::StreamSocket the server uses.
+// A stream socket (TCP or vsock) over a raw fd.  Mirrors the subset of
+// toolbelt::StreamSocket the server uses.
 class StreamSocket {
 public:
   StreamSocket() = default;
@@ -69,22 +76,25 @@ public:
   absl::Status Connect(const SocketAddress &addr);
 
   // Accept an incoming connection, yielding the coroutine until one arrives.
-  absl::StatusOr<StreamSocket> Accept(Context ctx);
+  Task<absl::StatusOr<StreamSocket>> Accept(Context ctx);
 
   absl::Status SetNonBlocking();
 
   // Raw send/receive.
-  absl::StatusOr<ssize_t> Send(const char *buffer, size_t length, Context ctx);
-  absl::StatusOr<ssize_t> Receive(char *buffer, size_t buflen, Context ctx);
+  Task<absl::StatusOr<ssize_t>> Send(const char *buffer, size_t length,
+                                     Context ctx);
+  Task<absl::StatusOr<ssize_t>> Receive(char *buffer, size_t buflen,
+                                        Context ctx);
 
   // Length-delimited message framing identical to toolbelt: SendMessage writes
   // a 4-byte big-endian length immediately before `buffer` (so `buffer` must
   // point 4 bytes into a length+4 region), then the payload.  ReceiveMessage
   // reads the 4-byte length then that many payload bytes and returns the
   // payload length (0 on clean EOF).
-  absl::StatusOr<ssize_t> SendMessage(char *buffer, size_t length, Context ctx);
-  absl::StatusOr<ssize_t> ReceiveMessage(char *buffer, size_t buflen,
-                                         Context ctx);
+  Task<absl::StatusOr<ssize_t>> SendMessage(char *buffer, size_t length,
+                                            Context ctx);
+  Task<absl::StatusOr<ssize_t>> ReceiveMessage(char *buffer, size_t buflen,
+                                               Context ctx);
 
   SocketAddress BoundAddress() const { return bound_address_; }
   absl::StatusOr<SocketAddress> GetPeerName() const;
@@ -107,8 +117,7 @@ private:
       std::shared_ptr<Impl> impl);
 };
 
-// A UDP socket over Boost.Asio (generic datagram protocol so it can support
-// IPv4 today and other families later).
+// An IPv4 UDP socket over a raw fd.
 class UDPSocket {
 public:
   UDPSocket() = default;
@@ -119,10 +128,10 @@ public:
 
   absl::Status Bind(const InetAddress &addr);
   absl::Status SetBroadcast();
-  absl::Status SendTo(const InetAddress &addr, const void *buffer,
-                      size_t length, Context ctx);
-  absl::StatusOr<ssize_t> ReceiveFrom(InetAddress &sender, void *buffer,
-                                      size_t buflen, Context ctx);
+  Task<absl::Status> SendTo(const InetAddress &addr, const void *buffer,
+                            size_t length, Context ctx);
+  Task<absl::StatusOr<ssize_t>> ReceiveFrom(InetAddress &sender, void *buffer,
+                                            size_t buflen, Context ctx);
 
   const InetAddress &BoundAddress() const { return bound_address_; }
 
@@ -132,11 +141,11 @@ private:
   InetAddress bound_address_;
 };
 
-// A Unix-domain stream socket over Boost.Asio with SCM_RIGHTS fd passing.
-// Mirrors the subset of toolbelt::UnixSocket the client RPC and the server's
-// client handler use, and replicates toolbelt's wire framing exactly (4-byte
-// big-endian length prefix for messages; the fd protocol of SendFds/ReceiveFds)
-// so an Asio client and a co server (or vice versa) interoperate.
+// A Unix-domain stream socket with SCM_RIGHTS fd passing.  Mirrors the subset
+// of toolbelt::UnixSocket the client RPC and the server's client handler use,
+// and replicates toolbelt's wire framing exactly (4-byte big-endian length
+// prefix for messages; the fd protocol of SendFds/ReceiveFds) so a client and
+// server built with different backends interoperate.
 class UnixSocket {
 public:
   // Like toolbelt::UnixSocket, the default constructor creates the underlying
@@ -150,7 +159,7 @@ public:
 
   absl::Status Bind(const std::string &pathname, bool listen);
   absl::Status Connect(const std::string &pathname);
-  absl::StatusOr<UnixSocket> Accept(Context ctx) const;
+  Task<absl::StatusOr<UnixSocket>> Accept(Context ctx) const;
 
   // Put the socket in blocking mode.  In blocking mode the underlying fd is
   // left blocking so socket calls never return EAGAIN and therefore never
@@ -160,17 +169,21 @@ public:
   // called before Connect()/Bind().
   void SetBlocking(bool blocking);
 
-  absl::StatusOr<ssize_t> Send(const char *buffer, size_t length, Context ctx);
-  absl::StatusOr<ssize_t> Receive(char *buffer, size_t buflen, Context ctx);
-  absl::StatusOr<ssize_t> SendMessage(char *buffer, size_t length, Context ctx);
-  absl::StatusOr<ssize_t> ReceiveMessage(char *buffer, size_t buflen,
-                                         Context ctx);
-  absl::StatusOr<std::vector<char>> ReceiveVariableLengthMessage(Context ctx);
+  Task<absl::StatusOr<ssize_t>> Send(const char *buffer, size_t length,
+                                     Context ctx);
+  Task<absl::StatusOr<ssize_t>> Receive(char *buffer, size_t buflen,
+                                        Context ctx);
+  Task<absl::StatusOr<ssize_t>> SendMessage(char *buffer, size_t length,
+                                            Context ctx);
+  Task<absl::StatusOr<ssize_t>> ReceiveMessage(char *buffer, size_t buflen,
+                                               Context ctx);
+  Task<absl::StatusOr<std::vector<char>>>
+  ReceiveVariableLengthMessage(Context ctx);
 
-  absl::Status SendFds(const std::vector<toolbelt::FileDescriptor> &fds,
-                       Context ctx);
-  absl::Status ReceiveFds(std::vector<toolbelt::FileDescriptor> &fds,
-                          Context ctx);
+  Task<absl::Status> SendFds(const std::vector<toolbelt::FileDescriptor> &fds,
+                             Context ctx);
+  Task<absl::Status> ReceiveFds(std::vector<toolbelt::FileDescriptor> &fds,
+                                Context ctx);
 
   absl::Status SetNonBlocking();
   absl::Status SetCloseOnExec();
@@ -207,9 +220,9 @@ namespace subspace::async {
 // Connects a TCP socket to `addr` without blocking the runtime.  A non-zero
 // timeout returns DeadlineExceededError if the connection isn't made in time;
 // a zero timeout leaves it to the kernel.  The socket is non-blocking.
-absl::StatusOr<StreamSocket> ConnectStream(const InetAddress &addr,
-                                           std::chrono::nanoseconds timeout,
-                                           Context ctx);
+Task<absl::StatusOr<StreamSocket>>
+ConnectStream(const InetAddress &addr, std::chrono::nanoseconds timeout,
+              Context ctx);
 
 // Binds a listening TCP socket to `addr` with SO_REUSEADDR set, so a
 // restarted server can rebind a fixed port while connections from its

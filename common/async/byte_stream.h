@@ -7,6 +7,7 @@
 
 #include "common/async/mtls.h"
 #include "common/async/socket.h"
+#include "common/async/task.h"
 #include <chrono>
 #include <memory>
 #include <optional>
@@ -15,7 +16,8 @@ namespace subspace::async {
 
 // A connected stream.  Without an mTLS handshake it is the socket itself.
 // After HandshakeTls, Send and Receive carry plaintext and BoringSSL (or
-// OpenSSL, in the CMake build) carries the records on the socket.
+// OpenSSL, in the CMake build) carries the records on the socket.  Under
+// co20 the methods that wait return tasks (see task.h).
 class ByteStream {
 public:
   ByteStream();
@@ -35,38 +37,42 @@ public:
 
   // Client when this side connected, server when this side accepted.
   // `timeout` of zero waits until the handshake finishes or the peer closes.
-  absl::Status HandshakeTls(const std::shared_ptr<MtlsContext> &mtls,
-                            bool server_role, Context ctx,
-                            std::chrono::nanoseconds timeout);
+  Task<absl::Status> HandshakeTls(std::shared_ptr<MtlsContext> mtls,
+                                  bool server_role, Context ctx,
+                                  std::chrono::nanoseconds timeout);
 
-  absl::StatusOr<ssize_t> Send(const char *buffer, size_t length, Context ctx);
-  absl::StatusOr<ssize_t> Receive(char *buffer, size_t buflen, Context ctx);
-  absl::Status SendAll(const void *data, size_t length, Context ctx);
+  Task<absl::StatusOr<ssize_t>> Send(const char *buffer, size_t length,
+                                     Context ctx);
+  Task<absl::StatusOr<ssize_t>> Receive(char *buffer, size_t buflen,
+                                        Context ctx);
+  Task<absl::Status> SendAll(const void *data, size_t length, Context ctx);
   // Reads exactly `length` bytes.  A deadline uses the non-blocking
   // descriptor directly, because the co backend's Receive waits until its
   // whole buffer is full.
-  absl::Status ReadFully(
+  Task<absl::Status> ReadFully(
       void *buffer, size_t length, Context ctx,
       std::optional<std::chrono::steady_clock::time_point> deadline =
           std::nullopt);
 
   // Length-delimited framing identical to StreamSocket::SendMessage.
   // `buffer` must have 4 bytes of writable padding immediately before it.
-  absl::StatusOr<ssize_t> SendMessage(char *buffer, size_t length, Context ctx);
+  Task<absl::StatusOr<ssize_t>> SendMessage(char *buffer, size_t length,
+                                            Context ctx);
   // Returns 0 on a clean close.
-  absl::StatusOr<ssize_t> ReceiveMessage(char *buffer, size_t buflen,
-                                         Context ctx);
+  Task<absl::StatusOr<ssize_t>> ReceiveMessage(char *buffer, size_t buflen,
+                                               Context ctx);
 
 private:
   struct Tls;
   using Deadline = std::chrono::steady_clock::time_point;
 
-  absl::Status SendRaw(Context ctx, const char *data, size_t length,
-                       std::optional<Deadline> deadline);
-  absl::StatusOr<ssize_t> RecvRaw(Context ctx, char *buffer, size_t length,
-                                  std::optional<Deadline> deadline);
-  absl::Status FlushTls(Context ctx, std::optional<Deadline> deadline);
-  absl::Status FillTls(Context ctx, std::optional<Deadline> deadline);
+  Task<absl::Status> SendRaw(Context ctx, const char *data, size_t length,
+                             std::optional<Deadline> deadline);
+  Task<absl::StatusOr<ssize_t>> RecvRaw(Context ctx, char *buffer,
+                                        size_t length,
+                                        std::optional<Deadline> deadline);
+  Task<absl::Status> FlushTls(Context ctx, std::optional<Deadline> deadline);
+  Task<absl::Status> FillTls(Context ctx, std::optional<Deadline> deadline);
   std::optional<Deadline> DeadlineFrom(std::chrono::nanoseconds timeout) const;
 
   StreamSocket socket_;
