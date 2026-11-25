@@ -30,12 +30,10 @@ target_link_libraries(subspace_common PUBLIC
     protobuf::libprotobuf
 )
 
-# channel.h refers to co20 types and the backend link-check symbol (defined by
-# subspace_async, which also brings in co_cpp20) when the C++20 coroutine
-# backend is selected.
-if(SUBSPACE_CORO_BACKEND_RESOLVED STREQUAL "co20")
-    target_link_libraries(subspace_common PUBLIC subspace_async)
-endif()
+# Headers in common/ include async/context.h, which references a backend
+# link-check symbol (and, for co20, co20 types).  subspace_async defines that
+# symbol and brings in the backend's coroutine library.
+target_link_libraries(subspace_common PUBLIC subspace_async)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
     target_link_libraries(subspace_common PUBLIC rt)
