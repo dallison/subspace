@@ -4,6 +4,7 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
+#include "common/async/frame_pool.h"
 #include "common/async/runtime.h"
 #include "common/async/socket.h"
 #include "common/async/task.h"
@@ -11,6 +12,8 @@
 #include "common/coroutine_stack.h"
 
 #include <cstring>
+#include <stdexcept>
+#include <thread>
 #include <fcntl.h>
 #include <gtest/gtest.h>
 #include <netinet/in.h>
@@ -544,6 +547,62 @@ TEST(AsyncTest, AllCoroutineStringsDropsDestroyedCoroutines) {
   EXPECT_TRUE(runtime.AllCoroutineStrings().empty());
   ::close(fds[0]);
   ::close(fds[1]);
+}
+
+Task<int> AddOneTask(int x) { ASYNC_RETURN x + 1; }
+
+Task<int> AddTwoTask(int x) {
+  int y = ASYNC_AWAIT(AddOneTask(x));
+  ASYNC_RETURN ASYNC_AWAIT(AddOneTask(y));
+}
+
+Task<void> NothingTask() { ASYNC_RETURN; }
+
+Task<int> ThrowingTask() {
+  throw std::runtime_error("boom");
+  ASYNC_RETURN 0;
+}
+
+// Tasks made from the pooled promise still produce their results, including
+// for void and for an exception.
+TEST(AsyncTest, PooledTasksProduceResults) {
+  EXPECT_EQ(3, SyncWait(AddTwoTask(1)));
+  SyncWait(NothingTask());
+  EXPECT_THROW(SyncWait(ThrowingTask()), std::runtime_error);
+}
+
+// Once a thread has run a task of each size, running them again takes every
+// frame from the pool.
+TEST(AsyncTest, FramePoolReusesFrames) {
+  if (!kFramePoolEnabled) {
+    GTEST_SKIP() << "frame pool is disabled in this build";
+  }
+  for (int i = 0; i < 4; i++) {
+    EXPECT_EQ(i + 2, SyncWait(AddTwoTask(i)));
+  }
+  const size_t before = FramePoolHeapAllocations();
+  for (int i = 0; i < 1000; i++) {
+    EXPECT_EQ(i + 2, SyncWait(AddTwoTask(i)));
+    SyncWait(NothingTask());
+  }
+  EXPECT_EQ(before, FramePoolHeapAllocations());
+}
+
+// A frame can be released by a thread other than the one that allocated it,
+// and a thread that exits with frames in its pool gives them back.
+TEST(AsyncTest, FramePoolAcrossThreads) {
+  for (int round = 0; round < 20; round++) {
+    // The frame is created here and finished and freed on the other thread.
+    Task<int> task = AddTwoTask(round);
+    int result = -1;
+    std::thread t([&] { result = SyncWait(std::move(task)); });
+    t.join();
+    EXPECT_EQ(round + 2, result);
+
+    // A thread whose pool holds frames when it exits.
+    std::thread u([&] { EXPECT_EQ(5, SyncWait(AddTwoTask(3))); });
+    u.join();
+  }
 }
 
 // Outside a coroutine, a task whose Context doesn't suspend runs to the end

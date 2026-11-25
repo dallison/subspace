@@ -122,10 +122,21 @@ scheduler instead of blocking it.
   trip, which blocks when it runs inside a coroutine. Call `CloseAsync()` first
   in that case. `CloseAsync()` does not unmap the buffers itself, because a
   live `Message` may still reference them.
-- **Coroutine frames on hot paths.** A co20 coroutine allocates its frame on
-  each call. Code that asserts zero allocations on a hot path does not hold
-  under co20. `//client:alloc_test` is gated for this reason and runs under the
-  default backend.
+- **Coroutine frames.** A co20 coroutine needs a frame for every call to a
+  function returning `async::Task<T>`, and the publish and read paths are made
+  of several such calls. The global allocator would make each message cost
+  several heap allocations, so `common/async/task.h` gives every
+  `co20::ValueTask` a promise type that takes its frames from a per-thread
+  recycling pool (`common/async/frame_pool.h`). Once a thread has run a path
+  once, the path allocates nothing, and `//client:alloc_test` checks this under
+  co20 as it does under the default backend. The first message on a thread (or
+  the first time it needs a larger frame) still allocates. Frames over 4 KB, and
+  frames beyond 256 cached per size class, use the global allocator. The pool
+  is off under AddressSanitizer and ThreadSanitizer so they can see frame
+  lifetimes; `-DSUBSPACE_ASYNC_FRAME_POOL=0` turns it off everywhere. Any code
+  that defines a `co20::ValueTask` coroutine must include
+  `common/async/task.h` so that every definition of the coroutine uses the same
+  promise type.
 - **Client thread-safe mode.** Thread-safe mode is not compatible with the
   Async API.
 - **Destruction order.** `co20` `Scheduler::~Scheduler` destroys suspended
@@ -134,12 +145,10 @@ scheduler instead of blocking it.
 
 ## Gated Targets
 
-These targets depend on the `co` stackful API, or on the zero-allocation
-property above. They are marked `target_compatible_with` the incompatible
-platform under `--config=cpp20`, so `bazelisk test --config=cpp20 //...`
-skips them:
+These targets depend on the `co` stackful API. They are marked
+`target_compatible_with` the incompatible platform under `--config=cpp20`, so
+`bazelisk test --config=cpp20 //...` skips them:
 
-- `//client:alloc_test`
 - `//c_client:client_test`
 - `//rpc/client:client_test`
 - `//rpc/server:server_test`

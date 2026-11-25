@@ -50,6 +50,8 @@ add_library(subspace_async STATIC
     async/mtls.h
     async/byte_stream.h
     async/byte_stream.cc
+    async/frame_pool.h
+    async/frame_pool.cc
     async/socket.h
     async/socket.cc
     async/task.h

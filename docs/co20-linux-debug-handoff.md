@@ -27,7 +27,7 @@ For the general architecture and API rules of the `co20` backend, read
     `SERVER_CLIENT_CALL` and `SERVER_CLIENT_CLOSE` for in-process clients on
     the server's scheduler thread.
   - Gated targets (`target_compatible_with` skipped under `//:coro_backend_co20`):
-    `//client:alloc_test`, `//c_client:client_test`, `//rpc/client:client_test`,
+    `//c_client:client_test`, `//rpc/client:client_test`,
     `//rpc/server:server_test`, `//rpc/test:rpc_test`, and `//shadow:shadow_test`.
 
 ### Already Verified Before Handoff

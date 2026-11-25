@@ -14,12 +14,14 @@ cc_library(
     name = "async",
     srcs = [
         "byte_stream.cc",
+        "frame_pool.cc",
         "socket.cc",
         "wait.cc",
     ],
     hdrs = [
         "byte_stream.h",
         "context.h",
+        "frame_pool.h",
         "mtls.h",
         "runtime.h",
         "socket.h",

@@ -31,14 +31,74 @@
 
 #if SUBSPACE_CORO_BACKEND == SUBSPACE_CORO_BACKEND_CO20
 
+#include <coroutine>
 #include <cstdio>
 #include <cstdlib>
 #include <type_traits>
 #include <utility>
 
+#include "common/async/frame_pool.h"
+
 namespace subspace::async {
 
 template <typename T> using Task = co20::ValueTask<T>;
+
+namespace detail {
+
+// co20::ValueTask's promise with its coroutine frames taken from the frame
+// pool (see frame_pool.h) instead of the global allocator.  Without this each
+// call to a Task function is a heap allocation, and the publish and read
+// paths make several.
+//
+// This adds no data, only the allocation functions, so it has the layout of
+// the promise that ValueTask, its awaiters and ValueTaskFinalAwaiter expect.
+// They only ever see it through the base class.
+template <typename Promise> struct PooledPromise : Promise {
+  // Not an aggregate.  GCC would otherwise try to build the promise from the
+  // coroutine's arguments.  See the comment on ValueTask::promise_type.
+  PooledPromise() {}
+
+  // As co20::internal::ValueTaskFinalAwaiter, which is written for the base
+  // class's coroutine_handle and so doesn't accept this one: resume whoever
+  // awaited the task.
+  struct FinalAwaiter {
+    bool await_ready() const noexcept { return false; }
+    std::coroutine_handle<>
+    await_suspend(std::coroutine_handle<PooledPromise> handle) const noexcept {
+      if (std::coroutine_handle<> continuation =
+              handle.promise().continuation_) {
+        return continuation;
+      }
+      return std::noop_coroutine();
+    }
+    void await_resume() const noexcept {}
+  };
+  FinalAwaiter final_suspend() noexcept { return {}; }
+
+  static void *operator new(std::size_t size) { return AllocateFrame(size); }
+  static void operator delete(void *frame) noexcept { DeallocateFrame(frame); }
+};
+
+}  // namespace detail
+
+}  // namespace subspace::async
+
+// Every coroutine that returns a co20::ValueTask uses the pooled promise.
+// This has to be visible wherever such a coroutine is defined, which it is
+// because they all return async::Task and so include this header.
+namespace std {
+template <typename T, typename... Args>
+struct coroutine_traits<co20::ValueTask<T>, Args...> {
+  using promise_type = subspace::async::detail::PooledPromise<
+      typename co20::ValueTask<T>::promise_type>;
+  static_assert(sizeof(promise_type) ==
+                    sizeof(typename co20::ValueTask<T>::promise_type) &&
+                alignof(promise_type) ==
+                    alignof(typename co20::ValueTask<T>::promise_type));
+};
+}  // namespace std
+
+namespace subspace::async {
 
 namespace detail {
 
